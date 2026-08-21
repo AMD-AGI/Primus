@@ -39,75 +39,56 @@ The resulting data root must contain:
 See the [MLPerf FLUX preprocessing instructions](https://github.com/mlcommons/training/tree/master/text_to_image#preprocessing)
 for details.
 
-## Run on one node
+## Select a configuration
 
-`OUTPUT_ROOT` must be writable from the compute node. A full `dtcp_full`
-checkpoint is approximately 93 GB, so use shared storage with enough space.
+The `config_*.sh` files contain the reproducible batch and optimizer settings:
+
+| `FLUX_CONFIG` | Nodes | MBS | GA | GBS |
+|---|---:|---:|---:|---:|
+| `config_1n_gbs512.sh` | 1 | 64 | 1 | 512 |
+| `config_1n_gbs1024.sh` | 1 | 32 | 4 | 1024 |
+| `config_4n_gbs1024.sh` (default) | 4 | 32 | 1 | 1024 |
+
+Inside an allocation, select a configuration and use the same launcher:
 
 ```bash
-DATA_ROOT=/path/to/data \
-OUTPUT_ROOT=/path/to/output \
-bash examples/mlperf/flux1/run_with_docker.sh
+FLUX_CONFIG=config_1n_gbs512.sh \
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-Inside a one-node Slurm/Spur allocation, use the scheduler wrapper instead:
+Use `config_1n_gbs1024.sh` for single-node MBS32 kernel development. The
+4-node MLPerf target is the default, so it needs no `FLUX_CONFIG` override:
 
 ```bash
 DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-For a short training smoke test without saving a checkpoint:
+For a short smoke test, append `MAX_STEPS=1 SAVE_STRATEGY=none` before `bash`.
 
-```bash
-DATA_ROOT=/path/to/data \
-OUTPUT_ROOT=/path/to/output \
-MAX_STEPS=1 \
-SAVE_STRATEGY=none \
-COMPILE_TRANSFORMER_BLOCKS=false \
-bash examples/mlperf/flux1/run_with_docker.sh
-```
-
-## Run on four Slurm or Spur nodes
-
-Submit one four-node allocation; the script uses one `srun` task per node and
-starts eight training processes in each container. Set `NODELIST_ARG` to
-`--nodelist=node1,node2,node3,node4` only when specific idle nodes are needed.
+## Submit the default four-node target
 
 ```bash
 REPO=/shared_nfs/zirui/code/primus-compile
 DATA_ROOT=/shared_nfs/zirui/data
 OUTPUT_ROOT=/shared_nfs/zirui/runs/flux-fp8-4n
-NODELIST_ARG=
 
 sbatch -A amd-spur -p amd-spur --qos=amd-spur-qos \
   -N4 --ntasks-per-node=1 --exclusive --gpus-per-node=8 -t 04:00:00 \
-  $NODELIST_ARG \
   --output="$OUTPUT_ROOT-%j.slurm.log" \
   --wrap="cd '$REPO' && DATA_ROOT='$DATA_ROOT' \
     OUTPUT_ROOT='$OUTPUT_ROOT'-\$SLURM_JOB_ID \
     bash examples/mlperf/flux1/run_with_docker_slurm.sh"
 ```
 
-This gives 32 GPUs, HSDP `dp_replicate=4`, `dp_shard=8`, MBS 32, GA 1, and
-GBS 1024. Verify that the selected account and QOS are allowed before
-submitting. For nodes split across independent allocations, follow
-[`luanch-multi-nodes.md`](luanch-multi-nodes.md).
+Add `--nodelist=node1,node2,node3,node4` only when specific idle nodes are
+required. For a holder allocation entered externally with `spur run --jobid`,
+follow [`luanch-multi-nodes.md`](luanch-multi-nodes.md); nested `srun` does not
+fan out.
 
-The launcher selects the validated 4-node MBS32/GBS1024 defaults automatically.
-From the original batch or interactive shell of an existing allocation, run:
-
-```bash
-DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
-bash examples/mlperf/flux1/run_with_docker_slurm.sh
-```
-
-When attaching to a holder allocation externally with `spur run --jobid`, use
-the cross-allocation procedure instead; a nested `srun` does not fan out.
-
-Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `SEED`, `MASTER_PORT`,
-`SAVE_STRATEGY`, `SAVE_STEPS`, `RESUME_FROM_CHECKPOINT`, and
-`MLPERF_CLEAR_CACHES=false`.
+Common overrides include `MAX_STEPS`, `SEED`, `MASTER_PORT`, `SAVE_STRATEGY`,
+`SAVE_STEPS`, `RESUME_FROM_CHECKPOINT`, and `MLPERF_CLEAR_CACHES=false`.
 
 ## Files
 
@@ -115,6 +96,9 @@ Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `SEED`, `MASTER_PORT`,
 examples/mlperf/flux1/
 ├── Dockerfile
 ├── README.md
+├── config_1n_gbs512.sh
+├── config_1n_gbs1024.sh
+├── config_4n_gbs1024.sh
 ├── flux.1_schnell_t2i-pretrain.yaml
 ├── luanch-multi-nodes.md
 ├── requirements.txt
