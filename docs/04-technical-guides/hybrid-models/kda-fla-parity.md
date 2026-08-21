@@ -77,8 +77,9 @@ python tools/hybrid/convert_fla_kda_init_to_megatron.py
 # 2. Launch training (8 GPUs by default). The Megatron-LM behavioral
 #    patches (same set as GDN) are applied automatically at startup via
 #    Primus's patch system -- no separate apply step needed.
-EXP=examples/megatron/configs/MI300X/kda_300M_pure-pretrain.yaml \
-  bash examples/run_pretrain.sh 2>&1 | tee primus_kda.log
+./primus-cli direct --log_file primus_kda.log \
+  -- train pretrain \
+  --config examples/megatron/configs/MI300X/kda_300M_pure-pretrain.yaml
 ```
 
 ### Recommended toggle profile (YAML or env var)
