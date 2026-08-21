@@ -23,13 +23,13 @@ so `fla_layer_idx` maps to `gdn_idx = 2*i` and `mlp_idx = 2*i+1`.
 Usage
 -----
     python3 tools/hybrid/convert_kda_to_fla_hf.py \\
-        --checkpoint-path output/amd/root/kda_300M-precision-pretrain/checkpoints/iter_0004768 \\
-        --output-dir output/kda_pure_300M_fla_hf \\
+        --checkpoint-path output/amd/root/kda_300M_BF16-pretrain/checkpoints/iter_0004768 \\
+        --output-dir output/kda_300M_fla_hf \\
         --config /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M.json
 
 Then evaluate with lm-eval:
     lm_eval --model hf \\
-        --model_args pretrained=output/kda_pure_300M_fla_hf,trust_remote_code=True,dtype=bfloat16 \\
+        --model_args pretrained=output/kda_300M_fla_hf,trust_remote_code=True,dtype=bfloat16 \\
         --tasks hellaswag,winogrande,piqa,arc_easy,arc_challenge \\
         --batch_size 16
 """
@@ -279,8 +279,8 @@ def main():
         type=Path,
         default=None,
         help="Path to FLA KDA config JSON. Defaults to kda_300M.json "
-        "(fallback: kda_300M_pure.json) when '300m' appears in --checkpoint-path, "
-        "else kda_1B.json (fallback: kda_1B_pure.json).",
+        "(fallback: kda_300M.json) when '300m' appears in --checkpoint-path, "
+        "else kda_1B.json (fallback: kda_1B.json).",
     )
     p.add_argument(
         "--tokenizer-src", type=Path, default=None, help="Optional tokenizer dir to copy into --output-dir."

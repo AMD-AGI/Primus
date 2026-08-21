@@ -38,7 +38,7 @@ FLA_HF_DIR=${FLA_HF_DIR:-$HOME/checkpoints/mamba2_hybrid_300M_10B/checkpoint-476
 RESULTS_DIR=${RESULTS_DIR:-output/mamba_hybrid_300M_eval_results}
 TASKS=${TASKS:-arc_easy,arc_challenge,hellaswag,openbookqa,piqa,winogrande,mmlu,race}
 BATCH_SIZE=${BATCH_SIZE:-auto}
-TOKENIZER=${TOKENIZER:-$HOME/checkpoints/gdn_pure_300M_10B}
+TOKENIZER=${TOKENIZER:-$HOME/checkpoints/gdn_300M_10B}
 
 echo "==========[run_mamba_hybrid_eval.sh]=========="
 echo "PRIMUS_CKPT     = ${PRIMUS_CKPT}"

@@ -7,8 +7,8 @@ GDN/MLP sublayers. FLA uses separate projections and combined layers.
 
 Usage:
     python tools/hybrid/convert_gdn_to_fla_hf.py \
-        --checkpoint-path output/amd/root/gdn_1B-precision-pretrain/checkpoints/iter_0076294 \
-        --output-dir output/gdn_pure_1B_fla_hf \
+        --checkpoint-path output/amd/root/gdn_1B_BF16-pretrain/checkpoints/iter_0076294 \
+        --output-dir output/gdn_1B_fla_hf \
         --config /path/to/gated_deltanet_1B.json
 """
 

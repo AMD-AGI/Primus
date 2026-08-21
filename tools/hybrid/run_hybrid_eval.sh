@@ -24,7 +24,7 @@ FLA_CONFIG=${FLA_CONFIG:-$HOME/flash-linear-attention/legacy/training/configs/ga
 RESULTS_DIR=${RESULTS_DIR:-output/gdn_hybrid_300M_eval_results}
 TASKS=${TASKS:-arc_easy,arc_challenge,hellaswag,openbookqa,piqa,winogrande,mmlu,race}
 BATCH_SIZE=${BATCH_SIZE:-auto}
-TOKENIZER=${TOKENIZER:-$HOME/checkpoints/gdn_pure_300M_10B}
+TOKENIZER=${TOKENIZER:-$HOME/checkpoints/gdn_300M_10B}
 
 echo "==========[run_hybrid_eval.sh]=========="
 echo "PRIMUS_CKPT     = ${PRIMUS_CKPT}"

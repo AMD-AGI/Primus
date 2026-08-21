@@ -5,7 +5,7 @@ for arg in "${args[@]}"; do
     eval "$arg"
 done
 
-echo "model_path:   ${model_path:=output/kda_1B_pure_hf}"
+echo "model_path:   ${model_path:=output/kda_1B_hf}"
 echo "tokenizer:    ${tokenizer:=meta-llama/Llama-3.2-1B}"
 echo "batch_size:   ${batch_size:=auto}"
 echo "num_fewshot:  ${num_fewshot:=0}"

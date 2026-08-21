@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import pytest
@@ -7,7 +6,6 @@ from primus.core.config.preset_loader import PresetLoader
 from primus.core.config.yaml_loader import parse_yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-MODEL_DIR = REPO_ROOT / "primus" / "configs" / "models" / "megatron"
 CONFIG_ROOT = REPO_ROOT / "examples" / "megatron" / "configs"
 
 HYBRID_MODELS = [
@@ -27,26 +25,25 @@ PURE_MODELS = [
     "gdn_300M",
 ]
 
-PRETRAIN_CONFIGS = [
+HYBRID_PRETRAIN_CONFIGS = [
     "MI300X/zebra_llama_mamba_1B_BF16-pretrain.yaml",
     "MI300X/zebra_llama_kda_1B_BF16-pretrain.yaml",
     "MI300X/zebra_llama_gdn_1B_BF16-pretrain.yaml",
-    "MI300X/kda_1B-precision-pretrain.yaml",
-    "MI300X/gdn_1B-precision-pretrain.yaml",
-    "MI300X/kda_300M-precision-pretrain.yaml",
+    "MI300X/zebra_llama_mamba_300M_BF16-pretrain.yaml",
+    "MI300X/zebra_llama_gdn_300M_BF16-pretrain.yaml",
+    "MI300X/zebra_llama_mamba_3B_BF16-pretrain.yaml",
+    "MI300X/zebra_llama_mamba_8B_BF16-pretrain.yaml",
+    "MI325X/zebra_llama_mamba_1B_BF16-pretrain.yaml",
     "MI355X/zebra_llama_mamba_1B_BF16-pretrain.yaml",
-    "MI355X/kda_1B-precision-pretrain.yaml",
+    "MI355X/zebra_llama_kda_1B_BF16-pretrain.yaml",
+    "MI355X/zebra_llama_gdn_1B_BF16-pretrain.yaml",
 ]
 
-DEPRECATED_SYMLINKS = [
-    "examples/megatron/configs/MI300X/zebra_llama_1B-pretrain.yaml",
-    "examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml",
-    "examples/megatron/configs/MI300X/zebra_kda_1B_hybrid-pretrain.yaml",
-    "examples/megatron/configs/MI300X/kda_1B_pure-pretrain.yaml",
-    "examples/megatron/configs/MI300X/zebra_llama_1B_kda_pure-pretrain.yaml",
-    "primus/configs/models/megatron/zebra_llama_1B.yaml",
-    "primus/configs/models/megatron/zebra_llama_1B_kda_pure.yaml",
-    "primus/configs/models/megatron/kda_1B_pure.yaml",
+PURE_PRETRAIN_CONFIGS = [
+    "MI300X/kda_1B_BF16-pretrain.yaml",
+    "MI300X/gdn_1B_BF16-pretrain.yaml",
+    "MI300X/kda_300M_BF16-pretrain.yaml",
+    "MI355X/kda_1B_BF16-pretrain.yaml",
 ]
 
 
@@ -73,7 +70,7 @@ def test_pure_models_have_no_mla(model_name):
     assert cfg.get("multi_latent_attention") is False
 
 
-@pytest.mark.parametrize("rel_path", PRETRAIN_CONFIGS)
+@pytest.mark.parametrize("rel_path", HYBRID_PRETRAIN_CONFIGS + PURE_PRETRAIN_CONFIGS)
 def test_pretrain_configs_reference_existing_models(rel_path):
     cfg_path = CONFIG_ROOT / rel_path
     assert cfg_path.exists(), f"missing pretrain config: {rel_path}"
@@ -82,15 +79,6 @@ def test_pretrain_configs_reference_existing_models(rel_path):
     model_stem = model_yaml.removesuffix(".yaml")
     preset = PresetLoader.load(model_stem, "megatron", config_type="models")
     assert preset["model_type"] == "mamba"
-
-
-@pytest.mark.parametrize("rel_path", DEPRECATED_SYMLINKS)
-def test_deprecated_symlinks_resolve(rel_path):
-    path = REPO_ROOT / rel_path
-    assert path.exists(), f"missing deprecated symlink: {rel_path}"
-    assert (
-        path.resolve().exists()
-    ), f"broken symlink: {rel_path} -> {os.readlink(path) if path.is_symlink() else path}"
 
 
 def test_kda_1B_inherits_mamba_base_defaults():

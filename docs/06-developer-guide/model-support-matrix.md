@@ -93,6 +93,14 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `zebra_mamba_1B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_1B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
 | `zebra_mamba_3B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_3B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
 | `zebra_mamba_8B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_8B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
+| `zebra_mamba_300M_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_300M_hybrid.yaml` | Model preset | MI300X | Set in experiment overrides |
+| `zebra_kda_1B_hybrid.yaml` | `primus/configs/models/megatron/zebra_kda_1B_hybrid.yaml` | Model preset | MI300X, MI355X | Set in experiment overrides |
+| `zebra_gdn_1B_hybrid.yaml` | `primus/configs/models/megatron/zebra_gdn_1B_hybrid.yaml` | Model preset | MI300X, MI355X | Set in experiment overrides |
+| `zebra_gdn_300M_hybrid.yaml` | `primus/configs/models/megatron/zebra_gdn_300M_hybrid.yaml` | Model preset | MI300X | Set in experiment overrides |
+| `kda_1B.yaml` | `primus/configs/models/megatron/kda_1B.yaml` | Pure KDA preset | MI300X, MI355X | `kda_1B_BF16-pretrain.yaml` |
+| `kda_300M.yaml` | `primus/configs/models/megatron/kda_300M.yaml` | Pure KDA preset | MI300X | `kda_300M_BF16-pretrain.yaml` |
+| `gdn_1B.yaml` | `primus/configs/models/megatron/gdn_1B.yaml` | Pure GDN preset | MI300X, MI355X | `gdn_1B_BF16-pretrain.yaml` |
+| `gdn_300M.yaml` | `primus/configs/models/megatron/gdn_300M.yaml` | Pure GDN preset | MI300X | `gdn_300M_BF16-pretrain.yaml` |
 
 **Parallelism:** Tensor, pipeline, and expert parallel sizes are **not** fixed in model presets; they are set in experiment `overrides` (for example `tensor_model_parallel_size`, `pipeline_model_parallel_size`, `expert_model_parallel_size`). MoE presets such as `qwen3_235B_A22B.yaml` typically require non-default expert parallelism in real runs—see the matching experiment YAML.
 

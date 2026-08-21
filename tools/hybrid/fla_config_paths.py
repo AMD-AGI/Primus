@@ -1,4 +1,4 @@
-"""Resolve FLA legacy training config JSON paths with Primus canonical names."""
+"""Resolve FLA legacy training config JSON paths."""
 
 from __future__ import annotations
 
@@ -22,36 +22,14 @@ def fla_training_configs_dir() -> Path:
     return primary if primary.exists() else alt
 
 
-def resolve_fla_training_config(configs_dir: Path, *names: str) -> Path:
-    """Return the first existing config under configs_dir; else the canonical (first) name."""
-    for name in names:
-        path = configs_dir / name
-        if path.exists():
-            return path
-    return configs_dir / names[0]
-
-
 def kda_fla_config(configs_dir: Path, *, size: str) -> Path:
-    if size == "300M":
-        return resolve_fla_training_config(configs_dir, "kda_300M.json", "kda_300M_pure.json")
-    return resolve_fla_training_config(configs_dir, "kda_1B.json", "kda_1B_pure.json")
+    name = "kda_300M.json" if size == "300M" else "kda_1B.json"
+    return configs_dir / name
 
 
 def gdn_fla_config(configs_dir: Path, *, size: str, hundred_b: bool = False) -> Path:
     if hundred_b:
-        return resolve_fla_training_config(
-            configs_dir,
-            "gated_deltanet_1B_100B.json",
-            "gated_deltanet_1B_pure_100B.json",
-        )
+        return configs_dir / "gated_deltanet_1B_100B.json"
     if size == "300M":
-        return resolve_fla_training_config(
-            configs_dir,
-            "gated_deltanet_300M.json",
-            "gated_deltanet_300M_pure.json",
-        )
-    return resolve_fla_training_config(
-        configs_dir,
-        "gated_deltanet_1B.json",
-        "gated_deltanet_1B_pure.json",
-    )
+        return configs_dir / "gated_deltanet_300M.json"
+    return configs_dir / "gated_deltanet_1B.json"

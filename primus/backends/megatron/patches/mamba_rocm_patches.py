@@ -19,7 +19,7 @@ from primus.core.utils.module_utils import log_rank_0
 
 # Megatron-Bridge configs carry no ``model_type``, they name models by recipe.
 # Zebra hybrid models (Mamba+MLA) use MCoreMambaModel.
-_BRIDGE_MAMBA_RECIPES = ("mamba", "zebra", "zebra_llama")  # zebra_llama: deprecated alias
+_BRIDGE_MAMBA_RECIPES = ("mamba", "zebra")
 
 
 def _is_rocm_mamba_run(ctx: PatchContext) -> bool:

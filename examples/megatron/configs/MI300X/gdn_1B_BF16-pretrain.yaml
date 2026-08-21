@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:gdn_1B-precision-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:gdn_1B_BF16-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -78,7 +78,7 @@ modules:
       finetune: false
       auto_continue_train: true
       load: null
-      save: ./output/gdn_1B-precision-pretrain
+      save: ./output/gdn_1B_BF16-pretrain
       save_interval: 2048
       disable_last_saving: false
       ckpt_format: torch

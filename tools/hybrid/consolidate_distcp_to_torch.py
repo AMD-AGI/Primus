@@ -34,8 +34,8 @@ This script reverses both transforms and writes a single
 Usage
 -----
     python3 tools/hybrid/consolidate_distcp_to_torch.py \
-        --distcp-dir output/amd/root/gdn_1B-precision-100B-pretrain/checkpoints/iter_0095368 \
-        --output-dir output/amd/root/gdn_1B-precision-100B-pretrain/checkpoints_consolidated/iter_0095368
+        --distcp-dir output/amd/root/gdn_1B_BF16-100B-pretrain/checkpoints/iter_0095368 \
+        --output-dir output/amd/root/gdn_1B_BF16-100B-pretrain/checkpoints_consolidated/iter_0095368
 
 The output dir gets a ``mp_rank_00/model_optim_rng.pt`` file ready for the
 HF converters. Memory: ~14 GB peak (full 1B model in fp32/bf16 on CPU).
@@ -245,7 +245,7 @@ def main() -> int:
     print()
     print(f"    python3 tools/hybrid/convert_gdn_to_fla_hf.py \\")
     print(f"        --checkpoint-path {args.output_dir} \\")
-    print(f"        --output-dir output/gdn_pure_1B_fla_hf \\")
+    print(f"        --output-dir output/gdn_1B_fla_hf \\")
     print(
         f"        --config /home/<user>/flash-linear-attention/legacy/training/configs/gated_deltanet_1B_100B.json"
     )

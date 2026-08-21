@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:kda_300M-precision-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:kda_300M_BF16-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -148,7 +148,7 @@ modules:
       # Checkpoints
       finetune: false
       auto_continue_train: false
-      save: ./output/kda_300M-precision-pretrain
+      save: ./output/kda_300M_BF16-pretrain
       save_interval: 1024
       disable_last_saving: false
       ckpt_format: torch
