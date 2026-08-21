@@ -141,7 +141,7 @@ def precompute_cu_seqlens_enabled() -> bool:
     return os.getenv("PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS", "1") in _TRUTHY
 
 
-_VALID_IMPLS = ("ck", "triton")
+_VALID_IMPLS = ("ck", "triton", "asm")
 
 
 def varlen_attn_impl() -> str:
@@ -180,6 +180,30 @@ def resolve_varlen_impl() -> str:
     compiled graph -- exactly what this file's COMPILE section exists to avoid.
     """
     impl = varlen_attn_impl()
+
+    if impl == "asm":
+        # Hand-written CDNA4 assembly for the backward, CK for the forward. It is built
+        # for gfx950 at head_dim 256 specifically -- the kernels bake the token stride in
+        # as an immediate and the tile sizes were tuned on this shape -- and it lives
+        # outside the Primus tree, so anything missing degrades to the shipped default
+        # rather than failing the run.
+        try:
+            from primus.backends.nemo_automodel.models.ideogram4.asm_varlen_attn_shim import (
+                asm_available,
+            )
+
+            ok, why = asm_available()
+        except Exception as exc:  # pragma: no cover - import-time environment issue
+            ok, why = False, f"{type(exc).__name__}: {exc}"
+        if not ok:
+            _warn_once(
+                "unavailable_asm",
+                f"[PrimusIdeogramVarlen] varlen_attn_impl=asm is unavailable ({why}). "
+                "Falling back to impl=triton.",
+            )
+            return "triton"
+        return impl
+
     if impl != "triton":
         return impl
 
@@ -316,6 +340,13 @@ def varlen_flash_attention(
         )
 
         return triton_varlen_flash_attention(q, k, v, cu_seqlens, max_seqlen)
+
+    if impl == "asm":
+        from primus.backends.nemo_automodel.models.ideogram4.asm_varlen_attn_shim import (
+            asm_varlen_flash_attention,
+        )
+
+        return asm_varlen_flash_attention(q, k, v, cu_seqlens, max_seqlen)
 
     import aiter
 
