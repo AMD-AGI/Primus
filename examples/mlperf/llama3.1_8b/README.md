@@ -46,6 +46,9 @@ export CONT=rocm/primus:v26.5
 export DGXSYSTEM=MI355X_1x8x1
 export NEXP=1
 
+# Optional host runtime tunables before each trial (cpupower, THP, drop_caches; see runtime_tunables.sh):
+# export RUN_RUNTIME_TUNABLES=1
+
 bash examples/mlperf/llama3.1_8b/run_with_docker.sh
 ```
 
@@ -87,3 +90,4 @@ bash run_and_time.sh
 ## Notes
 
 - `log_interval: 99999999` suppresses regular Primus logs
+- `RUN_RUNTIME_TUNABLES` defaults to `0`; set `RUN_RUNTIME_TUNABLES=1` to run `runtime_tunables.sh` on the host before each trial (some steps require `sudo`).

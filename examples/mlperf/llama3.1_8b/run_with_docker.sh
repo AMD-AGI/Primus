@@ -27,6 +27,9 @@
 #
 # Quiet MLPerf submission logging (:::MLLOG + timing only):
 #   SUBMISSION_QUIET=1 bash examples/mlperf/llama3.1_8b/run_with_docker.sh
+#
+# Host runtime tunables before each trial (cpupower, THP, drop_caches; see runtime_tunables.sh):
+#   RUN_RUNTIME_TUNABLES=1 bash examples/mlperf/llama3.1_8b/run_with_docker.sh
 
 set -euo pipefail
 
@@ -47,11 +50,14 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${DATESTAMP:=$(date +'%y%m%d%H%M%S')}"
 : "${INTERACTIVE:=0}"
 : "${SUBMISSION_QUIET:=0}"
+: "${RUN_RUNTIME_TUNABLES:=0}"
 
 # Map DGXSYSTEM (e.g. MI355X_1x8x1) -> PRIMUS_GPU_MODEL for primus-env when rocm-smi is unavailable in Docker.
 if [[ -z "${PRIMUS_GPU_MODEL:-}" && "${DGXSYSTEM}" =~ ^(MI[0-9]+[A-Z]*) ]]; then
     export PRIMUS_GPU_MODEL="${BASH_REMATCH[1]}"
 fi
+
+readonly _runtime_tunables="${SCRIPT_DIR}/runtime_tunables.sh"
 
 prompt_if_interactive() {
     local var_name="$1"
@@ -253,6 +259,10 @@ for _experiment_index in $(seq 1 "${NEXP}"); do
     echo "============================================"
     echo "Beginning trial ${_experiment_index} of ${NEXP}"
     echo "============================================"
+
+    if [[ "${RUN_RUNTIME_TUNABLES}" == "1" && -x "${_runtime_tunables}" ]]; then
+        bash "${_runtime_tunables}"
+    fi
 
     if [[ "${CLEAR_CACHES}" == "1" ]]; then
         echo "[INFO] Clearing host page cache before trial ${_experiment_index}..."
