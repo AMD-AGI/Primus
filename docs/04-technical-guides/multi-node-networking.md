@@ -13,7 +13,7 @@ This guide summarizes how Primus configures networking, how **InfiniBand**, **Ro
 | Socket / interface detection | `runner/helpers/envs/get_ip_interface.sh` |
 | AINIC hook (container/CLI integration) | `runner/helpers/hooks/03_enable_ainic.sh` |
 | AINIC CLI defaults | `runner/use_ainic.yaml` |
-| ANP / `NCCL_NET_PLUGIN` example | `examples/run_pretrain.sh` |
+| ANP / `NCCL_NET_PLUGIN` selection | `runner/helpers/hooks/03_enable_ainic.sh` |
 
 ---
 
@@ -91,7 +91,7 @@ Adjust **`NCCL_IB_GID_INDEX`** and **`container.options.image`** to match your c
 
 ### RCCL network plugin (ANP)
 
-For ANP-based networking, clusters often set **`NCCL_NET_PLUGIN`** to **`librccl-anp.so`** when that library is present under `ANP_HOME_DIR`, falling back to `librccl-net.so` otherwise—see the logic in `examples/run_pretrain.sh`. This complements the library paths from `03_enable_ainic.sh`.
+For ANP-based networking, `NCCL_NET_PLUGIN` is set to **`librccl-anp.so`** when that library is present under `ANP_HOME_DIR`, falling back to `librccl-net.so` otherwise. This selection and the matching library paths both live in `runner/helpers/hooks/03_enable_ainic.sh`, so they apply to every launcher mode.
 
 ### Variables commonly set for AINIC
 
