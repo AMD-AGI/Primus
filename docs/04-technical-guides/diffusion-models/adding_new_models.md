@@ -501,7 +501,7 @@ if __name__ == "__main__":
 
 ### Step 9: Add example scripts
 
-**File**: Use `examples/run_pretrain.sh` with appropriate config
+**File**: Launch with `primus-cli` and the appropriate config
 
 ```python
 #!/usr/bin/env python3
@@ -520,7 +520,7 @@ from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
 
 
 def main():
-    # Use examples/run_pretrain.sh with config from examples/megatron/configs/MI300X/diffusion/
+    # Launch via primus-cli with a config from examples/megatron/configs/MI300X/diffusion/
     # MegatronDataloaderWrapper wraps an existing iterable (from dataset provider):
     #   dataloader = MegatronDataloaderWrapper(energon_loader_or_pytorch_loader)
     # ...
@@ -541,7 +541,7 @@ See the complete example in the step-by-step guide above.
 2. `core/models/diffusion/dit/model.py` - DiT model
 3. `configs/models/megatron/diffusion/dit_xl_2.yaml` - Config file
 4. `tests/unit_tests/backends/megatron/diffusion/test_dit_model.py` - Tests
-5. `examples/run_pretrain.sh` - Use with config from `examples/megatron/configs/MI300X/diffusion/`
+5. `primus-cli` - Launch with a config from `examples/megatron/configs/MI300X/diffusion/`
 
 ---
 
@@ -565,7 +565,8 @@ Test with actual data:
 
 ```bash
 # Small dataset test
-./examples/run_pretrain.sh --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml
+./primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml
 ```
 
 ### Validation

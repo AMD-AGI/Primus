@@ -23,13 +23,11 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      # Training schedule — matched to FLA (4 GPUs):
-      #   batch=16, update=1, gpus=4, context=2048
-      #   global_batch = 16 * 4 = 64, tokens/step = 64 * 2048 = 131,072
-      #   total tokens ~= 76294 * 131072 ≈ 10B
+      # Training schedule — FLA reference (4 GPUs): batch=16 → GBS=64
+      # MI300X max batch (8 GPUs): GBS=256, 679.6 TFLOP/s, 97.6% mem (BS=320 OOM)
       train_iters: 50
-      micro_batch_size: 16
-      global_batch_size: 128
+      micro_batch_size: 32
+      global_batch_size: 256
 
       seq_length: 2048
       max_position_embeddings: 2048
