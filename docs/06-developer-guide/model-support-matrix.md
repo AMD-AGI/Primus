@@ -90,9 +90,9 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `qwen3_30B_A3B.yaml` | `primus/configs/models/megatron/qwen3_30B_A3B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen3_5_35B_A3B.yaml` | `primus/configs/models/megatron/qwen3_5_35B_A3B.yaml` | MoE model preset | MI300X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
-| `zebra_llama_1B.yaml` | `primus/configs/models/megatron/zebra_llama_1B.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
-| `zebra_llama_3B.yaml` | `primus/configs/models/megatron/zebra_llama_3B.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
-| `zebra_llama_8B.yaml` | `primus/configs/models/megatron/zebra_llama_8B.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
+| `zebra_mamba_1B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_1B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
+| `zebra_mamba_3B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_3B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
+| `zebra_mamba_8B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_8B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
 
 **Parallelism:** Tensor, pipeline, and expert parallel sizes are **not** fixed in model presets; they are set in experiment `overrides` (for example `tensor_model_parallel_size`, `pipeline_model_parallel_size`, `expert_model_parallel_size`). MoE presets such as `qwen3_235B_A22B.yaml` typically require non-default expert parallelism in real runs—see the matching experiment YAML.
 
@@ -170,7 +170,7 @@ Presets: `primus/configs/models/megatron_bridge/`. Examples: `examples/megatron_
 | `qwen3_8b.yaml` | `primus/configs/models/megatron_bridge/qwen3_8b.yaml` | `qwen.qwen3` / `qwen3_8b_finetune_config` | MI300X pretrain, MI355X posttrain |
 | `qwen3_32b.yaml` | `primus/configs/models/megatron_bridge/qwen3_32b.yaml` | `qwen.qwen3` / `qwen3_32b_finetune_config` | MI300X, MI355X |
 | `llama31_70b.yaml` | `primus/configs/models/megatron_bridge/llama31_70b.yaml` | `llama.llama3` / `llama31_70b_finetune_config` | MI355X |
-| `zebra_llama_1B.yaml`, `zebra_llama_3B.yaml`, `zebra_llama_8B.yaml` | `primus/configs/models/megatron_bridge/` | Zebra LLaMA presets | MI300X posttrain |
+| `zebra_mamba_1B_hybrid.yaml`, `zebra_mamba_3B_hybrid.yaml`, `zebra_mamba_8B_hybrid.yaml` | `primus/configs/models/megatron_bridge/` | Zebra LLaMA presets | MI300X posttrain |
 | `mamba_370M.yaml` | `primus/configs/models/megatron_bridge/mamba_370M.yaml` | Mamba preset | MI300X posttrain |
 
 Example filenames include `*_pretrain.yaml`, `*_sft_posttrain.yaml`, and `*_lora_posttrain.yaml`; precision such as `bf16_mixed` is set in experiment `overrides`.

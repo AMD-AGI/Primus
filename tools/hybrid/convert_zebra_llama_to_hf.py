@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Convert Megatron Zebra-Llama checkpoint to HuggingFace format.
+Convert Megatron Zebra hybrid checkpoint to HuggingFace format.
 
-This script converts a trained Zebra-Llama model (Hybrid Mamba+MLA) from
+This script converts a trained Zebra hybrid model (Hybrid Mamba+MLA) from
 Megatron-LM format to a HuggingFace-compatible format for evaluation.
 """
 
@@ -77,7 +77,7 @@ def convert_to_hf_format(model_state, config):
     hf_state = OrderedDict()
 
     # This is a template - you'll need to customize based on your model architecture
-    # The key mapping depends on how your Zebra-Llama model is structured
+    # The key mapping depends on how your Zebra hybrid model is structured
 
     print("\nConverting to HuggingFace format...")
 
@@ -168,7 +168,7 @@ def save_hf_checkpoint(hf_state, config, output_dir):
     readme_path = output_dir / "README.md"
     with open(readme_path, "w") as f:
         f.write(
-            f"""# Zebra-Llama {config.get('hidden_size', '?')}
+            f"""# Zebra hybrid {config.get('hidden_size', '?')}
 
 Converted from Megatron-LM checkpoint.
 
@@ -246,14 +246,14 @@ def create_config_from_checkpoint(checkpoint, args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert Megatron Zebra-Llama checkpoint to HuggingFace format"
+        description="Convert Megatron Zebra hybrid checkpoint to HuggingFace format"
     )
 
     parser.add_argument(
         "--checkpoint-path",
         type=str,
         required=True,
-        help="Path to Megatron checkpoint directory (e.g., output/zebra_llama_1B-pretrain/iter_0001000)",
+        help="Path to Megatron checkpoint directory (e.g., output/zebra_mamba_1B_hybrid-pretrain/iter_0001000)",
     )
     parser.add_argument(
         "--output-dir", type=str, required=True, help="Output directory for HuggingFace checkpoint"
@@ -361,7 +361,7 @@ def main():
     print("Next steps:")
     print("=" * 70)
     print("1. Review the converted checkpoint")
-    print("2. Create a custom modeling file for Zebra-Llama if needed")
+    print("2. Create a custom modeling file for Zebra hybrid if needed")
     print("3. Run evaluation with lm-eval-harness")
     print("=" * 70)
 

@@ -4,4 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Zebra Llama (hybrid Mamba+MLA) recipe extensions for Megatron-Bridge."""
+"""Deprecated: use primus.backends.megatron_bridge.recipes.zebra instead."""
+
+from primus.backends.megatron_bridge.recipes.zebra.zebra import *  # noqa: F403

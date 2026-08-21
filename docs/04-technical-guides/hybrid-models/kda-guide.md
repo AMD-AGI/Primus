@@ -6,7 +6,7 @@ against the [Flash Linear Attention (FLA)](https://github.com/fla-org/flash-line
 reference implementation. It covers every step from raw dataset →
 tokenization → training → checkpoint conversion → lm-eval benchmark.
 
-The same recipe scales up to the 1B pure-KDA config (`zebra_llama_1B_kda_pure-pretrain.yaml`).
+The same recipe scales up to the 1B pure-KDA config (`kda_1B_pure-pretrain.yaml`).
 
 It mirrors [`gdn-guide.md`](gdn-guide.md) and reuses the same Megatron-LM
 patches, dataset shim, FLA-init flow, and lm-eval wrapper pattern.
@@ -172,7 +172,7 @@ train_data_path: >
 ```
 
 (adjust the user prefix in
-`examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml`
+`examples/megatron/configs/MI300X/kda_300M_pure-pretrain.yaml`
 to match your home directory).
 
 ---
@@ -224,7 +224,7 @@ own random init — final loss is identical, only iter-1 drifts by `~5e-3`.
 ### 5.1 Inspect the config
 
 The training config lives at
-[`examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml`](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml).
+[`examples/megatron/configs/MI300X/kda_300M_pure-pretrain.yaml`](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/kda_300M_pure-pretrain.yaml).
 Key parameters (matched to FLA):
 
 ```yaml
@@ -257,13 +257,13 @@ no_load_rng: true
 ```
 
 The architecture-only YAML it extends from is
-[`primus/configs/models/megatron/zebra_llama_300M_kda_pure.yaml`](https://github.com/AMD-AGI/Primus/blob/main/primus/configs/models/megatron/zebra_llama_300M_kda_pure.yaml).
+[`primus/configs/models/megatron/kda_300M_pure.yaml`](https://github.com/AMD-AGI/Primus/blob/main/primus/configs/models/megatron/kda_300M_pure.yaml).
 
 ### 5.2 Launch
 
 ```bash
 # inside the container, in /home/<user>/Primus
-EXP=examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml \
+EXP=examples/megatron/configs/MI300X/kda_300M_pure-pretrain.yaml \
   bash examples/run_pretrain.sh 2>&1 | tee primus_kda.log
 ```
 
@@ -308,7 +308,7 @@ breakdown.
 Checkpoints land under Primus's `work_group/user_name/exp_name` template:
 
 ```
-output/amd/root/zebra_llama_300M_kda_pure-pretrain/
+output/amd/root/kda_300M_pure-pretrain/
 ├── checkpoints/
 │   ├── iter_0001024/
 │   ├── iter_0002048/
@@ -368,7 +368,7 @@ to translate the Megatron checkpoint into FLA's native
 
 ```bash
 python tools/hybrid/convert_kda_to_fla_hf.py \
-    --checkpoint-path output/amd/root/zebra_llama_300M_kda_pure-pretrain/checkpoints/iter_0004768 \
+    --checkpoint-path output/amd/root/kda_300M_pure-pretrain/checkpoints/iter_0004768 \
     --output-dir      output/kda_pure_300M_fla_hf \
     --config          /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M_pure.json \
     --tokenizer-src   /home/<user>/checkpoints/kda_pure_300M_10B
@@ -537,9 +537,9 @@ docs/04-technical-guides/hybrid-models/
 ├── kda-guide.md                                  ← this file
 └── kda-fla-parity.md                              ← deep-dive on every change
 examples/megatron/configs/MI300X/
-└── zebra_llama_300M_kda_pure-pretrain.yaml        ← training config
+└── kda_300M_pure-pretrain.yaml        ← training config
 primus/configs/models/megatron/
-└── zebra_llama_300M_kda_pure.yaml                 ← architecture-only config
+└── kda_300M_pure.yaml                 ← architecture-only config
 primus/backends/megatron/core/models/hybrid/
 ├── kimi_delta_attention.py                        ← FLA-aligned mixer (fused in_proj, FLA Triton paths)
 ├── kimi_delta_attention_layer.py                  ← eps propagation, optional pre-norm
@@ -637,7 +637,7 @@ meaningfully affects RACE.
 
 ## See also
 
-- [`docs/04-technical-guides/hybrid-models/README.md`](README.md) — full Zebra-Llama family
+- [`docs/04-technical-guides/hybrid-models/README.md`](README.md) — full Zebra hybrid family
   overview (1 B / 3 B / 8 B Mamba+MLA, KDA variants)
 - [`docs/04-technical-guides/hybrid-models/gdn-guide.md`](gdn-guide.md) — the GDN companion
   recipe (shares Megatron patches and dataset shim with this one)

@@ -1,5 +1,5 @@
 """
-Zebra-Llama: Hybrid Mamba + Multi-Latent Attention (MLA) Model (HuggingFace).
+Zebra hybrid: Hybrid Mamba + Multi-Latent Attention (MLA) Model (HuggingFace).
 
 This is a pragmatic HF implementation intended for:
 - loading converted Megatron checkpoints

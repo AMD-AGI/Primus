@@ -1,6 +1,6 @@
-# Zebra-Llama: Hybrid Recurrent-Attention Models on AMD GPUs
+# Zebra: Hybrid Recurrent-Attention Models on AMD GPUs
 
-Zebra-Llama is a family of hybrid models that combine **recurrent layers** (Mamba SSM, KDA, or GDN) with **Multi-Latent Attention (MLA)** and **SwiGLU MLP** layers. These models are designed to achieve competitive quality with sub-quadratic inference cost.
+Zebra is the Primus family of **hybrid** models that combine recurrent layers (Mamba, KDA, or GDN) with **Multi-Latent Attention (MLA)** and SwiGLU MLP. Pure recurrent models (KDA/GDN/Mamba without MLA) use FLA-aligned names (`kda_*_pure`, `gdn_*_pure`, `mamba_*`) and are documented separately in the pure KDA/GDN guides.
 
 This guide covers the complete workflow: environment setup, data preparation, pretraining, checkpoint conversion, and evaluation.
 
@@ -45,7 +45,7 @@ This guide covers the complete workflow: environment setup, data preparation, pr
 
 ## Architecture Overview
 
-Zebra-Llama interleaves three types of layers in a repeating pattern:
+Zebra hybrid interleaves three types of layers in a repeating pattern:
 
 ```
 [Attention] [MLP] [Recurrent] [MLP] [Recurrent] [MLP] ... [Attention] [MLP] ...
@@ -65,31 +65,31 @@ The `hybrid_attention_ratio` parameter controls what fraction of recurrent+atten
 
 | Config | Model | Recurrent Type | Seq Length | Params | Tokenizer |
 |--------|-------|---------------|------------|--------|-----------|
-| `zebra_llama_1B-pretrain.yaml` | 1B (Mamba+MLA) | Mamba SSM | 2048 | ~1B | `meta-llama/Llama-3.2-1B` |
-| `zebra_llama_1B_kda-pretrain.yaml` | 1B (KDA+MLA) | Kimi Delta Attention | 8192 | ~1B | `meta-llama/Llama-3.2-1B` |
-| `zebra_llama_1B_kda_pure-pretrain.yaml` | 1B (pure KDA) | Kimi Delta Attention | 2048 | ~1.2B | `meta-llama/Llama-3.2-1B` |
-| `zebra_llama_1B_gdn-pretrain.yaml` | 1B (GDN only) | Gated Delta Net | 8192 | ~1B | `fla-hub/gla-1.3B-100B` |
-| `zebra_llama_1B_gdn_pure-pretrain.yaml` | 1B (pure GDN) | Gated Delta Net | 2048 | ~1.2B | `meta-llama/Llama-3.2-1B` |
-| `zebra_llama_3B-pretrain.yaml` | 3B (Mamba+MLA) | Mamba SSM | 8192 | ~3B | `meta-llama/Llama-3.2-3B` |
-| `zebra_llama_8B-pretrain.yaml` | 8B (Mamba+MLA) | Mamba SSM | 8192 | ~8B | `meta-llama/Llama-3.1-8B` |
+| `zebra_mamba_1B_hybrid-pretrain.yaml` | 1B (Mamba+MLA) | Mamba SSM | 2048 | ~1B | `meta-llama/Llama-3.2-1B` |
+| `zebra_kda_1B_hybrid-pretrain.yaml` | 1B (KDA+MLA) | Kimi Delta Attention | 8192 | ~1B | `meta-llama/Llama-3.2-1B` |
+| `kda_1B_pure-pretrain.yaml` | 1B (pure KDA) | Kimi Delta Attention | 2048 | ~1.2B | `meta-llama/Llama-3.2-1B` |
+| `zebra_gdn_1B_hybrid-pretrain.yaml` | 1B (GDN only) | Gated Delta Net | 8192 | ~1B | `fla-hub/gla-1.3B-100B` |
+| `gdn_1B_pure-pretrain.yaml` | 1B (pure GDN) | Gated Delta Net | 2048 | ~1.2B | `meta-llama/Llama-3.2-1B` |
+| `zebra_mamba_3B_hybrid-pretrain.yaml` | 3B (Mamba+MLA) | Mamba SSM | 8192 | ~3B | `meta-llama/Llama-3.2-3B` |
+| `zebra_mamba_8B_hybrid-pretrain.yaml` | 8B (Mamba+MLA) | Mamba SSM | 8192 | ~8B | `meta-llama/Llama-3.1-8B` |
 
 ### Model Configs (`primus/configs/models/megatron/`)
 
 | Config | Layers | Hidden | FFN | Attention Ratio | Attention Type |
 |--------|--------|--------|-----|----------------|----------------|
-| `zebra_llama_1B.yaml` | 32 | 2048 | 8192 | 0.25 | MLA |
-| `zebra_llama_1B_kda_pure.yaml` | 32 | 2048 | 8192 | 0.0 (pure KDA) | None |
-| `zebra_llama_1B_gdn.yaml` | 32 | 2048 | 8192 | 0.0 (pure GDN) | None |
-| `zebra_llama_1B_gdn_pure.yaml` | 32 (16 GDN+16 MLP) | 2048 | 8192 | 0.0 (pure GDN) | None |
-| `zebra_llama_3B.yaml` | 56 | 3072 | 8192 | 0.25 | MLA |
-| `zebra_llama_8B.yaml` | 64 | 4096 | 14436 | 0.25 | MLA |
+| `zebra_mamba_1B_hybrid.yaml` | 32 | 2048 | 8192 | 0.25 | MLA |
+| `kda_1B_pure.yaml` | 32 | 2048 | 8192 | 0.0 (pure KDA) | None |
+| `zebra_gdn_1B_hybrid.yaml` | 32 | 2048 | 8192 | 0.0 (pure GDN) | None |
+| `gdn_1B_pure.yaml` | 32 (16 GDN+16 MLP) | 2048 | 8192 | 0.0 (pure GDN) | None |
+| `zebra_mamba_3B_hybrid.yaml` | 56 | 3072 | 8192 | 0.25 | MLA |
+| `zebra_mamba_8B_hybrid.yaml` | 64 | 4096 | 14436 | 0.25 | MLA |
 
-> **Note on pure KDA**: The `zebra_llama_1B_kda_pure` config matches FLA's `kda_1B_pure.json`
+> **Note on pure KDA**: The `kda_1B_pure` config matches FLA's `kda_1B_pure.json`
 > architecture (16 KDA layers, `head_dim=32` for keys, `head_dim=64` for values, tied
 > embeddings, `norm_eps=1e-6`). It uses the FLA Triton kernel (`use_fla_triton_kda: true`)
 > for fused forward+backward during training.
 
-> **Note on pure GDN**: The `zebra_llama_1B_gdn_pure` config matches FLA's
+> **Note on pure GDN**: The `gdn_1B_pure` config matches FLA's
 > `gated_deltanet_1B_pure.json` architecture (16 GDN + 16 MLP layers, `num_heads=8`,
 > `num_v_heads=16`, short convolution with kernel size 4, tied embeddings). This config
 > has been validated end-to-end against FLA on MI300X — the training loss curves match
@@ -167,7 +167,7 @@ pip install lm-eval
 
 ## Step 2: Dataset Preparation
 
-Zebra-Llama uses the [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) dataset, preprocessed into Megatron binary format.
+Zebra hybrid uses the [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) dataset, preprocessed into Megatron binary format.
 
 ### 2.1 Set Up Environment
 
@@ -271,8 +271,8 @@ mock_data: false
 Launch training inside a Docker container on a single node:
 
 ```bash
-# Zebra-Llama 1B with KDA (Kimi Delta Attention)
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml \
+# Zebra hybrid 1B with KDA (Kimi Delta Attention)
+EXP=examples/megatron/configs/MI300X/zebra_kda_1B_hybrid-pretrain.yaml \
 DATA_PATH=./data \
 GPUS_PER_NODE=8 \
 HF_TOKEN=$HF_TOKEN \
@@ -282,29 +282,29 @@ bash examples/run_local_pretrain.sh
 Other model variants:
 
 ```bash
-# Zebra-Llama 1B with Mamba SSM
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B-pretrain.yaml \
+# Zebra hybrid 1B with Mamba SSM
+EXP=examples/megatron/configs/MI300X/zebra_mamba_1B_hybrid-pretrain.yaml \
 bash examples/run_local_pretrain.sh
 
-# Zebra-Llama 1B with pure KDA (no attention layers)
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_kda_pure-pretrain.yaml \
+# Zebra hybrid 1B with pure KDA (no attention layers)
+EXP=examples/megatron/configs/MI300X/kda_1B_pure-pretrain.yaml \
 bash examples/run_local_pretrain.sh
 
-# Zebra-Llama 1B with GDN (pure recurrent, no attention)
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_gdn-pretrain.yaml \
+# Zebra hybrid 1B with GDN (pure recurrent, no attention)
+EXP=examples/megatron/configs/MI300X/zebra_gdn_1B_hybrid-pretrain.yaml \
 bash examples/run_local_pretrain.sh
 
-# Zebra-Llama 1B pure GDN (FLA-validated, 4-GPU)
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_gdn_pure-pretrain.yaml \
+# Zebra hybrid 1B pure GDN (FLA-validated, 4-GPU)
+EXP=examples/megatron/configs/MI300X/gdn_1B_pure-pretrain.yaml \
 GPUS_PER_NODE=4 \
 bash examples/run_local_pretrain.sh
 
-# Zebra-Llama 3B
-EXP=examples/megatron/configs/MI300X/zebra_llama_3B-pretrain.yaml \
+# Zebra hybrid 3B
+EXP=examples/megatron/configs/MI300X/zebra_mamba_3B_hybrid-pretrain.yaml \
 bash examples/run_local_pretrain.sh
 
-# Zebra-Llama 8B
-EXP=examples/megatron/configs/MI300X/zebra_llama_8B-pretrain.yaml \
+# Zebra hybrid 8B
+EXP=examples/megatron/configs/MI300X/zebra_mamba_8B_hybrid-pretrain.yaml \
 bash examples/run_local_pretrain.sh
 ```
 
@@ -313,7 +313,7 @@ bash examples/run_local_pretrain.sh
 For multi-node training on a Slurm cluster:
 
 ```bash
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml \
+EXP=examples/megatron/configs/MI300X/zebra_kda_1B_hybrid-pretrain.yaml \
 DATA_PATH=/shared/data \
 NNODES=2 \
 bash examples/run_slurm_pretrain.sh
@@ -326,7 +326,7 @@ Ensure the `global_batch_size` in your config is divisible by `micro_batch_size 
 If you are already inside a Docker container or on a bare-metal node with the environment set up:
 
 ```bash
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml \
+EXP=examples/megatron/configs/MI300X/zebra_kda_1B_hybrid-pretrain.yaml \
 bash examples/run_pretrain.sh
 ```
 
@@ -335,7 +335,7 @@ bash examples/run_pretrain.sh
 To quickly verify the model runs without real data, the 3B and 8B configs come with `mock_data: true` by default. For the 1B configs, you can override:
 
 ```bash
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml \
+EXP=examples/megatron/configs/MI300X/zebra_kda_1B_hybrid-pretrain.yaml \
 bash examples/run_local_pretrain.sh \
   --mock_data true --train_iters 10
 ```
@@ -367,7 +367,7 @@ Pure GDN models use a dedicated converter that maps Primus's fused projections t
 
 ```bash
 python tools/hybrid/convert_gdn_to_fla_hf.py \
-    --checkpoint-path output/amd/root/zebra_llama_1B_gdn_pure-pretrain/checkpoints/iter_0076294 \
+    --checkpoint-path output/amd/root/gdn_1B_pure-pretrain/checkpoints/iter_0076294 \
     --output-dir output/gdn_pure_1B_fla_hf \
     --config /path/to/gated_deltanet_1B_pure.json
 ```
@@ -394,13 +394,13 @@ The general converter auto-detects architecture from the checkpoint's saved argu
 ```bash
 # KDA+MLA hybrid model
 python tools/hybrid/convert_zebra_llama_to_hf.py \
-    --checkpoint-path output/zebra_llama_1B_kda-pretrain/iter_0028000 \
-    --output-dir output/zebra_llama_1B_kda_hf_iter_0028000
+    --checkpoint-path output/zebra_kda_1B_hybrid-pretrain/iter_0028000 \
+    --output-dir output/zebra_kda_1B_hybrid_hf_iter_0028000
 
 # Pure KDA model
 python tools/hybrid/convert_zebra_llama_to_hf.py \
-    --checkpoint-path output/zebra_llama_1B_kda_pure-pretrain/iter_0038000 \
-    --output-dir output/zebra_llama_1B_kda_pure_hf
+    --checkpoint-path output/kda_1B_pure-pretrain/iter_0038000 \
+    --output-dir output/kda_1B_pure_hf
 ```
 
 The converter will:
@@ -447,13 +447,13 @@ python tools/hybrid/eval_gdn_lm_eval.py \
 
 > **Note**: Do not use `lm_eval --model hf` directly — it will fail because `AutoConfig` does not recognize `gated_deltanet` without FLA being imported first. The wrapper handles this. The `tokenizer=meta-llama/Llama-3.2-1B` argument is required since the converted model directory does not contain tokenizer files.
 
-### 5.2 KDA / Hybrid Models (Zebra-Llama format)
+### 5.2 KDA / Hybrid Models (Zebra hybrid format)
 
 KDA and hybrid models use the custom `ZebraLlamaForCausalLM` architecture, which requires a dedicated lm-eval wrapper:
 
 ```bash
 python3 tools/hybrid/lm_harness_eval.py --model zebra_llama \
-    --model_args pretrained=output/zebra_llama_1B_kda_pure_hf,dtype=bfloat16 \
+    --model_args pretrained=output/kda_1B_pure_hf,dtype=bfloat16 \
     --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \
     --batch_size auto
 ```
@@ -462,11 +462,11 @@ python3 tools/hybrid/lm_harness_eval.py --model zebra_llama \
 
 ```bash
 bash tools/hybrid/eval_zebra_llama_lm_eval.sh \
-    --checkpoint output/zebra_llama_1B_kda_pure_hf \
+    --checkpoint output/kda_1B_pure_hf \
     --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \
     --batch-size auto \
     --dtype bfloat16 \
-    --output eval_results/zebra_llama_1B_kda_pure
+    --output eval_results/kda_1B_pure
 ```
 
 > **Important**: The eval script internally invokes `python3 tools/hybrid/lm_harness_eval.py --model zebra_llama` (not `lm_eval --model hf`). This ensures the custom model architecture is properly registered.
@@ -579,23 +579,23 @@ On MI300X, intermittent RCCL hangs can occur (typically during checkpoint saves)
 Primus/
 ├── examples/megatron/
 │   ├── configs/MI300X/
-│   │   ├── zebra_llama_1B-pretrain.yaml        # 1B Mamba+MLA
-│   │   ├── zebra_llama_1B_kda-pretrain.yaml     # 1B KDA+MLA hybrid
-│   │   ├── zebra_llama_1B_kda_pure-pretrain.yaml # 1B pure KDA
-│   │   ├── zebra_llama_1B_gdn-pretrain.yaml     # 1B GDN
-│   │   ├── zebra_llama_1B_gdn_pure-pretrain.yaml # 1B pure GDN (FLA-validated)
-│   │   ├── zebra_llama_3B-pretrain.yaml         # 3B Mamba+MLA
-│   │   └── zebra_llama_8B-pretrain.yaml         # 8B Mamba+MLA
+│   │   ├── zebra_mamba_1B_hybrid-pretrain.yaml        # 1B Mamba+MLA
+│   │   ├── zebra_kda_1B_hybrid-pretrain.yaml     # 1B KDA+MLA hybrid
+│   │   ├── kda_1B_pure-pretrain.yaml # 1B pure KDA
+│   │   ├── zebra_gdn_1B_hybrid-pretrain.yaml     # 1B GDN
+│   │   ├── gdn_1B_pure-pretrain.yaml # 1B pure GDN (FLA-validated)
+│   │   ├── zebra_mamba_3B_hybrid-pretrain.yaml         # 3B Mamba+MLA
+│   │   └── zebra_mamba_8B_hybrid-pretrain.yaml         # 8B Mamba+MLA
 │   ├── prepare_fineweb_edu.py                   # Data preparation script
 │   ├── prepare_fineweb_edu.sh                   # Data prep shell wrapper
 │   └── preprocess_data.py                       # Megatron tokenizer
 ├── primus/configs/models/megatron/
-│   ├── zebra_llama_1B.yaml                      # 1B model architecture
-│   ├── zebra_llama_1B_kda_pure.yaml             # 1B pure KDA architecture
-│   ├── zebra_llama_1B_gdn.yaml                  # 1B GDN architecture
-│   ├── zebra_llama_1B_gdn_pure.yaml             # 1B pure GDN (FLA-validated)
-│   ├── zebra_llama_3B.yaml                      # 3B model architecture
-│   └── zebra_llama_8B.yaml                      # 8B model architecture
+│   ├── zebra_mamba_1B_hybrid.yaml                      # 1B model architecture
+│   ├── kda_1B_pure.yaml             # 1B pure KDA architecture
+│   ├── zebra_gdn_1B_hybrid.yaml                  # 1B GDN architecture
+│   ├── gdn_1B_pure.yaml             # 1B pure GDN (FLA-validated)
+│   ├── zebra_mamba_3B_hybrid.yaml                      # 3B model architecture
+│   └── zebra_mamba_8B_hybrid.yaml                      # 8B model architecture
 ├── tools/
 │   ├── hybrid/
 │   │   ├── convert_zebra_llama_to_hf.py         # Megatron → HF converter (KDA/hybrid)

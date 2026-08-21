@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Simple interactive chat for Zebra-Llama (HF-converted checkpoint).
+Simple interactive chat for Zebra hybrid (HF-converted checkpoint).
 
 Loads:
   - model code from: tools/hybrid/modeling_zebra_llama.py
-  - weights from:    output/zebra_llama_1B_hf_iter_0150000
+  - weights from:    output/zebra_mamba_1B_hybrid_hf_iter_0150000
 
 Notes:
   - KV cache is disabled in the model implementation, so generation is slower.
@@ -40,11 +40,11 @@ def build_prompt(history: List[Tuple[str, str]]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Chat with Zebra-Llama (converted HF checkpoint)")
+    parser = argparse.ArgumentParser(description="Chat with Zebra hybrid (converted HF checkpoint)")
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="output/zebra_llama_1B_hf_iter_0200000",
+        default="output/zebra_mamba_1B_hybrid_hf_iter_0200000",
         help="Path to converted HF checkpoint directory",
     )
     parser.add_argument(
@@ -120,7 +120,7 @@ def main() -> None:
 
     history: List[Tuple[str, str]] = []
 
-    print("\n=== Zebra-Llama chat ===")
+    print("\n=== Zebra hybrid chat ===")
     print("Type your message and press enter.")
     print("Commands: /reset, /exit\n")
 

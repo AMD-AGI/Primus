@@ -524,7 +524,7 @@ jobs:
           pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py "${TIER_ARGS[@]}" \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_130M_bridge_pretrain \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_370M \
-            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_zebra_llama_1B_hybrid \
+            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_zebra_mamba_1B_hybrid \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/megatron-e2e.xml"
           IN
       - name: Run Primus Model Tests -- TorchTitan

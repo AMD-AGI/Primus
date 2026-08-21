@@ -38,7 +38,7 @@ def main():
     )
 
     print("=" * 72)
-    print("Zebra-Llama lm-eval")
+    print("Zebra hybrid lm-eval")
     print("=" * 72)
     print(f"  Model path:  {args.model_path}")
     print(f"  Tokenizer:   {tokenizer_path}")

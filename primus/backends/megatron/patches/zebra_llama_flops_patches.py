@@ -5,7 +5,7 @@
 ###############################################################################
 
 """
-Zebra-Llama FLOPs Patch
+Zebra hybrid FLOPs Patch
 
 Monkey-patches megatron.training.training.num_floating_point_operations so that
 hybrid models using Multi-Latent Attention (MLA) get an accurate FLOPs estimate
@@ -157,7 +157,7 @@ def zebra_llama_flops(args, batch_size):
     "megatron.training.zebra_llama_flops",
     backend="megatron",
     phase="before_train",
-    description="Use MLA-aware FLOPs estimate for hybrid (Zebra-Llama) models.",
+    description="Use MLA-aware FLOPs estimate for hybrid (Zebra hybrid) models.",
     condition=lambda ctx: (
         getattr(get_args(ctx), "is_hybrid_model", False)
         and getattr(get_args(ctx), "multi_latent_attention", False)

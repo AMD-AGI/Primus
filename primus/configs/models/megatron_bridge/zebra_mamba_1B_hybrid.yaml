@@ -1,4 +1,4 @@
-recipe: zebra_llama.zebra_llama
+recipe: zebra.zebra
 flavor: zebra_llama_1b_finetune_config
 
 dataset:

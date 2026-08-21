@@ -34,8 +34,8 @@ This script reverses both transforms and writes a single
 Usage
 -----
     python3 tools/hybrid/consolidate_distcp_to_torch.py \
-        --distcp-dir output/amd/root/zebra_llama_1B_gdn_pure_100B-pretrain/checkpoints/iter_0095368 \
-        --output-dir output/amd/root/zebra_llama_1B_gdn_pure_100B-pretrain/checkpoints_consolidated/iter_0095368
+        --distcp-dir output/amd/root/gdn_1B_pure_100B-pretrain/checkpoints/iter_0095368 \
+        --output-dir output/amd/root/gdn_1B_pure_100B-pretrain/checkpoints_consolidated/iter_0095368
 
 The output dir gets a ``mp_rank_00/model_optim_rng.pt`` file ready for the
 HF converters. Memory: ~14 GB peak (full 1B model in fp32/bf16 on CPU).

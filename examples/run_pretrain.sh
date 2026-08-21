@@ -126,12 +126,12 @@ if [ ! -f "${EXP}" ]; then
 fi
 
 # -------------------- Hybrid model (GDN/KDA/Mamba) FLA Triton patch --------------------
-# The zebra_llama_* hybrid configs under examples/megatron/configs/MI300X (added in
-# PR #676) depend on flash-linear-attention (FLA) Triton kernels that hang during
+# Zebra hybrid configs and pure KDA/GDN configs under examples/megatron/configs/
+# depend on flash-linear-attention (FLA) Triton kernels that hang during
 # autotuning with num_stages >= 3 on MI300X/ROCm. Auto-apply the workaround whenever
 # one of those configs is used. See tools/hybrid/patch_fla_triton_autotune_hang.sh for details.
 EXP_BASENAME=$(basename "${EXP}")
-if [[ "${EXP_BASENAME}" == zebra_llama_* ]]; then
+if [[ "${EXP_BASENAME}" == zebra_* || "${EXP_BASENAME}" == kda_* || "${EXP_BASENAME}" == gdn_* || "${EXP_BASENAME}" == zebra_llama_* ]]; then
     LOG_INFO_RANK0 "Detected hybrid model config (${EXP_BASENAME}); applying FLA Triton autotune-hang patch ..."
     if ! bash "${PRIMUS_PATH}/tools/hybrid/patch_fla_triton_autotune_hang.sh"; then
         LOG_ERROR "FLA Triton autotune-hang patch failed; continuing, but training may hang during autotuning."

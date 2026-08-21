@@ -1,5 +1,5 @@
 """
-Run a single forward pass with a Megatron (mcore) Zebra-Llama checkpoint.
+Run a single forward pass with a Megatron (mcore) Zebra hybrid checkpoint.
 
 This is intended for *numerical parity* checks against the HF implementation in
 `tools/hybrid/modeling_zebra_llama.py`:
@@ -11,7 +11,7 @@ Usage (1 GPU):
   export PYTHONPATH="$(pwd):$(pwd)/third_party/Megatron-LM:${PYTHONPATH}"
 
   torchrun --nproc_per_node=1 tools/hybrid/megatron_forward_zebra_llama.py \
-    --load output/zebra_llama_1B-pretrain/iter_0150000 \
+    --load output/zebra_mamba_1B_hybrid-pretrain/iter_0150000 \
     --prompt "The capital of France is" \
     --topk 10
 
@@ -132,7 +132,7 @@ def _apply_zebra_defaults_if_needed(args) -> None:
         return
 
     # ------------------------------------------------------------------
-    # Zebra-Llama 1B config parity knobs (from primus/configs/models/megatron/zebra_llama_1B.yaml)
+    # Zebra hybrid 1B config parity knobs (from primus/configs/models/megatron/zebra_mamba_1B_hybrid.yaml)
     # Ensure these are set before model construction.
     # ------------------------------------------------------------------
     # Model size
@@ -173,7 +173,7 @@ def _apply_zebra_defaults_if_needed(args) -> None:
     args.add_bias_linear = False
     args.mamba_hidden_act = "silu"
 
-    # Extra Mamba knobs (not in zebra_llama_1B.yaml but required by spec)
+    # Extra Mamba knobs (not in zebra_mamba_1B_hybrid.yaml but required by spec)
     if getattr(args, "mamba_expand", None) is None:
         args.mamba_expand = 1
     if getattr(args, "mamba_d_conv", None) is None:
@@ -215,7 +215,7 @@ def _add_script_args(parser: ArgumentParser) -> ArgumentParser:
         "--hf-dir",
         type=str,
         default=None,
-        help="If set, also run the HuggingFace Zebra-Llama forward pass from this converted HF checkpoint dir "
+        help="If set, also run the HuggingFace Zebra hybrid forward pass from this converted HF checkpoint dir "
         "(must contain config.json + pytorch_model.bin) and compare logits.",
     )
     group.add_argument(
@@ -388,7 +388,7 @@ def main() -> None:
         "exit_on_missing_checkpoint": True,
         # Primus training default: skip compile_dependencies (avoids CUDA-only nvcc fused kernels)
         "disable_compile_dependencies": True,
-        # zebra_llama_1B defaults (can be overridden from CLI)
+        # zebra_mamba_1B_hybrid defaults (can be overridden from CLI)
         "tensor_model_parallel_size": 1,
         "pipeline_model_parallel_size": 1,
         "num_layers": 32,

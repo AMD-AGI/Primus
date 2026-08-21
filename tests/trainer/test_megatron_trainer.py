@@ -674,14 +674,14 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    def test_zebra_llama_1B_hybrid(self):
+    def test_zebra_mamba_1B_hybrid(self):
         # Hybrid Mamba+MLA (HybridStack) path. num_layers=8 is the minimum that
         # keeps the default hybrid_attention_ratio=0.25 from allocating zero
         # attention layers (division by zero).
         run_script(
             self.__class__.__name__,
-            "zebra_llama_1B_hybrid",
-            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/zebra_llama_1B-pretrain.yaml",
+            "zebra_mamba_1B_hybrid",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/zebra_mamba_1B_hybrid-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",

@@ -18,8 +18,8 @@ from primus.core.patches import PatchContext, get_param, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 # Megatron-Bridge configs carry no ``model_type``, they name models by recipe.
-# Both of these end up in MCoreMambaModel (zebra_llama is a Mamba+MLA hybrid).
-_BRIDGE_MAMBA_RECIPES = ("mamba", "zebra_llama")
+# Zebra hybrid models (Mamba+MLA) use MCoreMambaModel.
+_BRIDGE_MAMBA_RECIPES = ("mamba", "zebra", "zebra_llama")  # zebra_llama: deprecated alias
 
 
 def _is_rocm_mamba_run(ctx: PatchContext) -> bool:
