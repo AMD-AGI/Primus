@@ -33,10 +33,14 @@ import os
 from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.simulation_backends.base import resolve_hbm_bytes_per_ms
 
 # Random-access sparse gather sustains only a fraction of peak HBM bandwidth.
 _GATHER_HBM_FRACTION = 0.30
-_PEAK_HBM_BYTES_PER_MS = 4.0e9  # ~4 TB/s (MI300-class), bytes/ms
+# Fallback peak HBM bandwidth when no arch profile is available (MI300-class,
+# ~4 TB/s).  The real value is resolved from the GEMM backend's arch profile so
+# HBM4 parts (MI450 ~22 TB/s) are not mis-priced at MI300 bandwidth.
+_FALLBACK_HBM_GBPS = 4000.0
 # Host link (DDR/UVM streaming of non-resident tables), bytes/ms.
 _HOST_LINK_BYTES_PER_MS = 6.0e7  # ~60 GB/s effective PCIe/xGMI host transfer
 
@@ -153,7 +157,11 @@ class SparseEmbeddingProfiler(BaseModuleProfiler):
         hbm_bytes = gather_bytes * hbm_frac + output_bytes
         ddr_bytes = gather_bytes * (1.0 - hbm_frac)
 
-        fwd = hbm_bytes / (_PEAK_HBM_BYTES_PER_MS * _GATHER_HBM_FRACTION)
+        peak_hbm_bytes_per_ms = resolve_hbm_bytes_per_ms(
+            gemm_backend=getattr(self, "_gemm_backend", None),
+            fallback_gbps=_FALLBACK_HBM_GBPS,
+        )
+        fwd = hbm_bytes / (peak_hbm_bytes_per_ms * _GATHER_HBM_FRACTION)
         if ddr_bytes > 0:
             fwd += ddr_bytes / _HOST_LINK_BYTES_PER_MS
         fwd = max(0.01, fwd)

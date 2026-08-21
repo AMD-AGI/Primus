@@ -345,6 +345,25 @@ class SDPASimulator(SDPASimulationBackend):
         return self._tile_gemm is not None and self._tile_gemm.is_available()
 
     # ------------------------------------------------------------------
+    # Hardware-spec accessors (used by memory-bound / MFU projections)
+    # ------------------------------------------------------------------
+    @property
+    def hbm_bandwidth_gbps(self) -> float:
+        return self._hw.hbm_bandwidth_gbps
+
+    @property
+    def peak_tflops_bf16(self) -> float:
+        return self._hw.peak_tflops_bf16
+
+    @property
+    def peak_tflops_fp16(self) -> float:
+        return self._hw.peak_tflops_fp16
+
+    @property
+    def peak_tflops_fp8(self) -> float:
+        return self._hw.peak_tflops_fp8
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 

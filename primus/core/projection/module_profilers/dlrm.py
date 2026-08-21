@@ -28,7 +28,24 @@ from primus.core.projection.module_profilers.sparse_embedding import (
     SparseEmbeddingProfiler,
 )
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
+from primus.core.projection.simulation_backends.base import resolve_peak_tflops
 from primus.core.projection.training_config import gemm_dtype_from_config
+
+
+# Extra fp32 optimizer-state words carried *per embedding row* (not per element).
+_EMB_OPTIMIZER_ROW_WORDS = {
+    "rowwise_adagrad": 1,
+    "row_wise_adagrad": 1,
+    "exact_row_wise_adagrad": 1,
+    "rowwise": 1,
+}
+# Extra fp32 optimizer-state words carried *per embedding element*.
+_EMB_OPTIMIZER_ELEM_WORDS = {
+    "adagrad": 1,
+    "sgd": 0,
+    "adam": 2,
+    "adamw": 2,
+}
 
 
 def _as_list(val) -> List[int]:
@@ -136,7 +153,18 @@ class DLRMProfiler(BaseModuleProfiler):
             + self._mlp_params(self._bottom_mlp_layers())
             + self._mlp_params(self._over_mlp_layers()),
         )
-        emb_bpp = float(int(mc.embedding_param_bytes or 4)) + 4.0  # param + 1 fp32 moment
+        # Embedding optimizer state.  A *row-wise* optimizer (the sparse-table
+        # default, e.g. RowWiseAdagrad) keeps one fp32 scalar per row, i.e.
+        # 4/dim bytes per parameter -- negligible -- not a full fp32 moment per
+        # element.  Charging a full moment doubles the dominant memory term and
+        # produces false OOM verdicts.
+        opt = str(getattr(mc, "embedding_optimizer", "rowwise_adagrad") or "rowwise_adagrad").lower()
+        dim = max(1, int(mc.embedding_dim or mc.hidden_size or 1))
+        if opt in _EMB_OPTIMIZER_ROW_WORDS:
+            opt_bytes = _EMB_OPTIMIZER_ROW_WORDS[opt] * 4.0 / dim  # per-row fp32 / dim
+        else:
+            opt_bytes = _EMB_OPTIMIZER_ELEM_WORDS.get(opt, 1) * 4.0  # per-element fp32
+        emb_bpp = float(int(mc.embedding_param_bytes or 4)) + opt_bytes
         dense_bpp = 4.0 + 10.0  # bf16 param+grad + fp32 Adam (2+4+4)
         total = emb_params + dense_params
         if total <= 0:
@@ -152,8 +180,15 @@ class DLRMProfiler(BaseModuleProfiler):
             bwd += g.backward_time_ms or (2.0 * g.forward_time_ms)
         return fwd, bwd
 
-    def _embedding_a2a_ms(self, batch: int) -> float:
-        """Embedding all-to-all: exchange pooled outputs across the sharded world."""
+    def _embedding_a2a_ms(self, batch: int, seq_len: int) -> float:
+        """Embedding all-to-all: exchange looked-up rows across the sharded world.
+
+        A generative ranker is **not pooled** -- ``item_id``/``artist_id``/
+        ``album_id`` are sequence features looked up once per valid position, so
+        the payload scales with sequence length, not a single pooled vector per
+        table.  We size it from the pooling-factor list (lookups per sample,
+        summed over tables) that the embedding profiler already consumes.
+        """
         mc = self.config.model_config
         n_tables = int(mc.num_embedding_tables or 0)
         dim = int(mc.embedding_dim or mc.hidden_size or 0)
@@ -166,20 +201,63 @@ class DLRMProfiler(BaseModuleProfiler):
                 collective_model,
             )
 
+            emb = self.sub_profilers.get("sparse_embedding") if self.sub_profilers else None
+            rows_per_sample = 0
+            if emb is not None and hasattr(emb, "_tables"):
+                _, _, pooling = emb._tables()
+                rows_per_sample = int(sum(pooling))
+            if rows_per_sample <= 0:
+                rows_per_sample = n_tables  # fall back to pooled (1/table)
             gpn = int(os.getenv("GPUS_PER_NODE", "8"))
             nnodes = max(1, world // gpn)
             cargs = collective_args.get_default_args(num_nodes=nnodes, gpus_per_node=gpn)
-            msg_bytes = batch * n_tables * dim * 2  # pooled bf16 payload per rank
+            # Per-token payload: looked-up rows per sample x local batch x D,
+            # exchanged as fp16 (qcomm a2a compresses to fp16/bf16).
+            msg_bytes = batch * rows_per_sample * dim * 2
             us = collective_model.alltoall(cargs, msg_bytes, world, groups=["dp"])
             return float(us) / 1000.0  # us -> ms
         except Exception:
             return 0.0
 
+    def _dense_flops_per_rank(self, local_bs: int, slen: int) -> float:
+        """Per-rank dense forward FLOPs (HSTU GEMMs + attention core + MLPs).
+
+        Used to emit MFU.  Excludes sparse-embedding gather (memory-bound, not a
+        FLOP metric).  The attention core scales as E[L^2]; the GEMMs scale as
+        E[L] tokens.
+        """
+        mc = self.config.model_config
+        D = int(mc.hidden_size or mc.embedding_dim or 0)
+        H = int(mc.hstu_num_heads or mc.num_attention_heads or 1)
+        d_qk = int(mc.hstu_qk_dim or mc.kv_channels or (D // max(1, H)))
+        d_v = int(mc.hstu_v_dim or d_qk)
+        tp = max(1, int(self.config.model_parallel_config.tensor_model_parallel_size or 1))
+        heads_pr = max(1, H // tp)
+
+        mean = min(1.0, max(0.01, float(getattr(mc, "hstu_fill_factor", 1.0) or 1.0)))
+        std = max(0.0, float(getattr(mc, "hstu_fill_factor_std", 0.0) or 0.0))
+        mean_seq = max(1, int(round(slen * mean)))
+        attn_seq = max(1, int(round(slen * min(1.0, (mean * mean + std * std) ** 0.5))))
+        tokens = local_bs * mean_seq
+
+        uvqk_n = heads_pr * (2 * d_qk + 2 * d_v)
+        uvqk = 2.0 * tokens * uvqk_n * D
+        out = 2.0 * tokens * D * (heads_pr * d_v)
+        # Attention: QK^T + (softmax.V), causal ~= 0.5 of the dense triangle.
+        attn = 0.5 * 2.0 * (2.0 * local_bs * heads_pr * attn_seq * attn_seq * (d_qk + d_v))
+        hstu_fwd = self._num_layers() * (uvqk + out + attn)
+
+        mlp_fwd = 0.0
+        for in_dim, out_dim in self._bottom_mlp_layers() + self._over_mlp_layers():
+            mlp_fwd += 2.0 * local_bs * in_dim * out_dim
+        return hstu_fwd + mlp_fwd
+
     def project_step(self, batch_size: Optional[int] = None, seq_len: Optional[int] = None) -> dict:
         """First-cut per-step timing + throughput for a DLRM-v4 training step.
 
-        Returns a dict with forward/backward/comm ms, step ms, and samples/s.
-        Requires simulation backends (call ``set_simulation_backends`` first).
+        Returns a dict with forward/backward/comm ms, step ms, samples/s, and
+        MFU/HFU.  Requires simulation backends (call ``set_simulation_backends``
+        first).
         """
         if self._gemm_backend is None or self._sdpa_backend is None:
             raise RuntimeError("DLRMProfiler.project_step requires simulation backends.")
@@ -205,17 +283,34 @@ class DLRMProfiler(BaseModuleProfiler):
         fwd += bmf + omf
         bwd += bmb + omb
 
-        comm = self._embedding_a2a_ms(local_bs)
-        step_ms = fwd + bwd + comm
+        # Embedding all-to-all: only the *exposed* (non-overlapped) fraction is
+        # on the critical path.
+        comm_raw = self._embedding_a2a_ms(local_bs, slen)
+        exposed = min(1.0, max(0.0, float(getattr(mc, "dlrm_comm_exposed_fraction", 1.0) or 1.0)))
+        comm = comm_raw * exposed
+
+        # Optional host->device input copy (data path).
+        h2d = max(0.0, float(getattr(mc, "dlrm_h2d_ms", 0.0) or 0.0))
+
+        step_ms = fwd + bwd + comm + h2d
 
         world = int(os.getenv("NNODES", "1")) * int(os.getenv("GPUS_PER_NODE", "8"))
         global_bs = int(rc.global_batch_size or (local_bs * world))
         samples_per_s = (global_bs / (step_ms / 1000.0)) if step_ms > 0 else 0.0
 
+        # MFU/HFU: dense fwd+bwd FLOPs (bwd ~= 2x fwd) over the achieved step.
+        peak_tflops = resolve_peak_tflops(self._gemm_backend, self._sdpa_backend, dtype="bf16")
+        dense_fwd_flops = self._dense_flops_per_rank(local_bs, slen)
+        dense_step_flops = 3.0 * dense_fwd_flops  # fwd + 2x bwd
+        achieved_tflops = (dense_step_flops / (step_ms / 1000.0)) / 1e12 if step_ms > 0 else 0.0
+        mfu = (achieved_tflops / peak_tflops) if peak_tflops else None
+
         return {
             "forward_ms": fwd,
             "backward_ms": bwd,
             "comm_ms": comm,
+            "comm_ms_unoverlapped": comm_raw,
+            "h2d_ms": h2d,
             "step_ms": step_ms,
             "hstu_layer_fwd_ms": layer_fwd,
             "hstu_layer_bwd_ms": layer_bwd,
@@ -225,6 +320,11 @@ class DLRMProfiler(BaseModuleProfiler):
             "world_size": world,
             "samples_per_s": samples_per_s,
             "samples_per_s_per_gpu": samples_per_s / max(1, world),
+            "achieved_tflops_per_gpu": achieved_tflops,
+            "peak_tflops_per_gpu": peak_tflops,
+            # No activation recompute is modelled, so HFU == MFU here.
+            "mfu": mfu,
+            "hfu": mfu,
         }
 
     # -- perf-path compatibility (unused by memory path) -----------------------

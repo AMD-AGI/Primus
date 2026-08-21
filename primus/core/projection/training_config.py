@@ -148,6 +148,17 @@ class ModelConfig:
     # Memory tiering: fraction of embedding parameters resident in HBM; the
     # remainder lives on DDR/UVM (host) and is streamed over the host link.
     embedding_hbm_fraction: float = 1.0
+    # Optimizer state carried per embedding parameter.  Sparse tables usually
+    # use a *row-wise* optimizer (one fp32 scalar per row, ~4/dim bytes/param),
+    # not a full per-element moment -- charging a full fp32 moment doubles the
+    # dominant memory term (see get_num_bytes_per_param).
+    #   rowwise_adagrad -> 1 fp32 / row     (default; Yambda uses this)
+    #   adagrad         -> 1 fp32 / element
+    #   adam            -> 2 fp32 / element
+    embedding_optimizer: str = "rowwise_adagrad"
+    # Per-GPU HBM capacity (GB) available to embedding tables.  0 = unknown
+    # (embedding_hbm_fraction must then be supplied directly).
+    embedding_hbm_capacity_gb: int = 0
 
     # HSTU (Hierarchical Sequential Transduction Unit) attention block.
     hstu_num_heads: int = 0
@@ -157,10 +168,31 @@ class ModelConfig:
     # Jagged-sequence fill factor: mean valid tokens / padded max_seq_len
     # (HSTU sequences are variable length; ~0.4 is typical for Yambda-5B).
     hstu_fill_factor: float = 1.0
+    # Std-dev of the fill factor across the batch.  Attention cost goes as
+    # E[L^2] = mean^2 + std^2, which is > (mean)^2, so squaring the mean fill
+    # systematically under-counts.  0 = use the mean only (backward compatible).
+    hstu_fill_factor_std: float = 0.0
+    # Efficiency of the ragged-HSTU attention kernel relative to the FAv3
+    # roofline the SDPA backend prices.  ragged_hstu fuses gating and handles
+    # jagged sequences, so it sustains a lower fraction of peak than FAv3;
+    # <1.0 derates the attention-core time.  1.0 = price as FAv3 (default).
+    hstu_attn_efficiency: float = 1.0
+    # Number of read+write elementwise passes over the block activation
+    # footprint (input/linear dropout w/ masks, layer norms, SiLU gate, jagged
+    # pack/unpack).  The naive model charges a single pass and under-counts.
+    hstu_elementwise_passes: float = 6.0
     # DLRM dense (bottom) and interaction (top/over) MLP layer widths.
     dlrm_bottom_mlp: object = None  # list[int] | None
     dlrm_over_mlp: object = None  # list[int] | None
     dense_input_dim: int = 0  # width of the dense (continuous) feature vector
+    # Fraction of the embedding all-to-all that is *exposed* (not overlapped
+    # behind compute).  Traces show a large share hidden; 1.0 = fully exposed
+    # (conservative default).
+    dlrm_comm_exposed_fraction: float = 1.0
+    # Optional host->device (H2D) input-copy time per step (ms).  Not derivable
+    # first-principles without the input pipeline; inject a measured value here
+    # to include it in the projected step (0 = omit).
+    dlrm_h2d_ms: float = 0.0
 
 
 @dataclass

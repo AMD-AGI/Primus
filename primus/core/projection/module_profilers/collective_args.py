@@ -9,8 +9,41 @@ Default configuration for collective communication modeling.
 Hardware parameters can be customized via config file.
 """
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+# Per-architecture fabric bandwidths (GB/s, bidirectional).  ``node_bw`` is the
+# intra-node scale-up bandwidth per GPU (xGMI); ``pod_bw`` is the inter-node
+# scale-out bandwidth per NIC.  Values are picked up as *defaults* (a
+# hardware_config dict still overrides them) so a multi-node MI450 projection is
+# not silently priced on previous-generation fabric.
+_ARCH_FABRIC: Dict[str, Dict[str, float]] = {
+    # MI300-class (xGMI3, 400G scale-out) -- matches the historical defaults.
+    "mi300x": {"node_bw": 1024.0, "pod_bw": 50.0},
+    "mi325x": {"node_bw": 1024.0, "pod_bw": 50.0},
+    "mi300a": {"node_bw": 1024.0, "pod_bw": 50.0},
+    # MI350-class (gfx950).
+    "mi350x": {"node_bw": 1024.0, "pod_bw": 50.0},
+    "mi355x": {"node_bw": 1024.0, "pod_bw": 50.0},
+    # MI450-class (next-gen scale-up + 800G scale-out NICs).
+    "mi400x": {"node_bw": 2048.0, "pod_bw": 100.0},
+    "mi450x": {"node_bw": 2048.0, "pod_bw": 100.0},
+    "mi455x": {"node_bw": 2048.0, "pod_bw": 100.0},
+}
+
+
+def _arch_fabric(gpu_arch: Optional[str]) -> Optional[Dict[str, float]]:
+    arch = (gpu_arch or os.getenv("PRIMUS_GPU_ARCH") or "").lower().strip()
+    if not arch:
+        return None
+    if arch in _ARCH_FABRIC:
+        return _ARCH_FABRIC[arch]
+    # Prefix match (e.g. "mi455x_2500w_nps" -> "mi455x").
+    for key, val in _ARCH_FABRIC.items():
+        if arch.startswith(key):
+            return val
+    return None
 
 
 @dataclass
@@ -122,6 +155,7 @@ def get_default_args(
     ep: int = 1,
     cp: int = 1,
     hardware_config: Optional[Dict[str, Any]] = None,
+    gpu_arch: Optional[str] = None,
 ) -> CollectiveArgs:
     """
     Get CollectiveArgs with customizable hardware configuration.
@@ -194,6 +228,13 @@ def get_default_args(
         cp=cp,
         ep=ep,
     )
+
+    # Resolve fabric bandwidths from the target architecture (defaults only;
+    # an explicit hardware_config entry still wins below).
+    fabric = _arch_fabric(gpu_arch)
+    if fabric:
+        for key, value in fabric.items():
+            setattr(args, key, value)
 
     # Override with hardware_config if provided
     if hardware_config:
