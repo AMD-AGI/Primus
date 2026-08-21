@@ -25,7 +25,7 @@ Run a **short** training job so shapes are collected during real forward/backwar
 ```bash
 export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=1
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
@@ -40,7 +40,7 @@ Runs offline tuning from dumped shapes (often 10–30 minutes depending on model
 ```bash
 export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=2
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
@@ -56,7 +56,7 @@ Point the runtime at the tuned override file:
 export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=3
 export HIPBLASLT_TUNING_OVERRIDE_FILE=/path/to/tune_hipblas_gemm_results.txt
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 

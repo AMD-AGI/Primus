@@ -36,7 +36,7 @@ Additionally, **HipBLASLt autotuning is disabled** in deterministic mode: tuning
 
 ```bash
 export PRIMUS_DETERMINISTIC=1
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 

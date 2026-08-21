@@ -36,7 +36,7 @@ user_name: ${PRIMUS_USER:root}
 #     export PYTORCH_ALLOC_CONF=expandable_segments:True
 #     export GLOO_SOCKET_IFNAME=lo
 #     export NCCL_SOCKET_IFNAME=lo
-#     bash ./runner/primus-cli direct -- train pretrain \
+#     ./primus-cli direct -- train pretrain \
 #       --config examples/megatron/configs/MI355X/llama2_70B-BF16-sft-packed-mlperf_aligned.yaml
 #   '
 #

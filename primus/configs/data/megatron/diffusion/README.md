@@ -384,7 +384,7 @@ primus-cli direct -- data diffusion-encoded \
 #   dataset_path: /workspace/Primus/data/encoded_pokemon
 
 # Step 3: Train
-bash ./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml
 ```
 
@@ -407,7 +407,7 @@ primus-cli direct -- data diffusion-raw \
 #     clip: { model_path: black-forest-labs/FLUX.1-dev, ... }
 
 # Step 3: Train
-bash ./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml
 ```
 
@@ -429,7 +429,7 @@ primus-cli direct -- data diffusion-ingest \
 # data_path (or the PRIMUS_DIFFUSION_DATA_PATH env var) to /workspace/Primus/data/mlperf_flux1.
 
 # Step 3: Train (MLPerf benchmark reproduction)
-bash ./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI355X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_fp8_mlperf.yaml
 ```
 

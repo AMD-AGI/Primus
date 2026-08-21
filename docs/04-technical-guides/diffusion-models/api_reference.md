@@ -1022,7 +1022,7 @@ config = FluxConfig()
 model = Flux(config)
 ```
 
-For more advanced examples, see the launcher usage in `runner/primus-cli --help`.
+For more advanced examples, see the launcher usage in `primus-cli --help`.
 
 ---
 

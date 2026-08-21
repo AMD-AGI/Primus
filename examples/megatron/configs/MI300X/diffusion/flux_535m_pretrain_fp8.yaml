@@ -14,7 +14,7 @@
 # Requires: Transformer Engine 2.1.0+ with ROCm backend
 #
 # Usage:
-#   GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
+#   GPUS_PER_NODE=1 ./primus-cli direct -- train pretrain \
 #     --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain_fp8.yaml
 
 work_group: ${PRIMUS_TEAM:amd}

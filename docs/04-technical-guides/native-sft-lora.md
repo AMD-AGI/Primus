@@ -84,7 +84,7 @@ docker exec \
   -e PYTORCH_HIP_ALLOC_CONF=expandable_segments:True \
   -e EXP=examples/megatron/configs/MI355X/llama2_70B-BF16-sft-packed-mlperf_aligned.yaml \
   sft_primus_0507_native \
-  bash -c 'cd /workspace/Primus && bash ./runner/primus-cli direct -- train pretrain --config "$EXP"' \
+  bash -c 'cd /workspace/Primus && ./primus-cli direct -- train pretrain --config "$EXP"' \
   2>&1 | tee /home/botahu/llama2_70b_500iter_runs/${EXP_NAME}.log
 ```
 
@@ -203,7 +203,7 @@ user_name: ${PRIMUS_USER:root}
 #
 # Recommended invocation:
 #   export PRIMUS_EXP_NAME=native_llama2_70b_fp4_perf_$(date +%Y%m%d_%H%M%S)
-#   bash ./runner/primus-cli direct -- train pretrain \
+#   ./primus-cli direct -- train pretrain \
 #     --config examples/megatron/configs/MI355X/llama2_70B-FP4-sft-packed-perf.yaml
 # =============================================================================
 
@@ -363,7 +363,7 @@ docker exec \
   -e PYTORCH_HIP_ALLOC_CONF=expandable_segments:True \
   -e EXP=examples/megatron/configs/MI355X/llama2_70B-FP4-sft-packed-perf.yaml \
   sft_primus_0507_native \
-  bash -c 'cd /workspace/Primus && bash ./runner/primus-cli direct -- train pretrain --config "$EXP"' \
+  bash -c 'cd /workspace/Primus && ./primus-cli direct -- train pretrain --config "$EXP"' \
   2>&1 | tee /home/botahu/llama2_70b_500iter_runs/${EXP_NAME}.log
 ```
 

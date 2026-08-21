@@ -256,7 +256,7 @@ The architecture-only YAML it extends from is `[primus/configs/models/megatron/z
 
 ```bash
 # inside the container, in /home/<user>/Primus
-bash ./runner/primus-cli direct --log_file primus_gdn.log \
+./primus-cli direct --log_file primus_gdn.log \
   -- train pretrain \
   --config examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml
 ```

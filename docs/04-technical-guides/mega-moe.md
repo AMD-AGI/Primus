@@ -161,7 +161,7 @@ export PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b
 export GPU_ARCHS=gfx950
 
 # Parallelism (EP-only) + fused MegaMoE
-bash ./runner/primus-cli direct -- train pretrain --config "$EXP" \
+./primus-cli direct -- train pretrain --config "$EXP" \
   --num_layers 4 \
   --micro_batch_size 2 \
   --global_batch_size 1024 \
@@ -198,7 +198,7 @@ export REBUILD_PRIMUS_TURBO=1
 export PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b
 export GPU_ARCHS=gfx950
 
-bash ./runner/primus-cli direct -- train pretrain --config "$EXP" \
+./primus-cli direct -- train pretrain --config "$EXP" \
   --num_layers 4 \
   --micro_batch_size 2 \
   --global_batch_size 1024 \
@@ -240,7 +240,7 @@ export EXP=examples/megatron/configs/MI355X/deepseek_v3-BF16-pretrain.yaml
 # USING_AINIC / REBUILD_PRIMUS_TURBO / GPU_ARCHS are forwarded into the container
 # by the default env whitelist in runner/.primus.yaml, and PRIMUS_TURBO_REF by the
 # automatic PRIMUS_* passthrough, so none of them need an explicit --env.
-bash ./runner/primus-cli slurm srun -N "$NNODES" -- container \
+./primus-cli slurm srun -N "$NNODES" -- container \
   -- train pretrain --config "$EXP" \
   --train_iters 15 \
   --micro_batch_size 2 \

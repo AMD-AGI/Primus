@@ -3,7 +3,7 @@ user_name: ${PRIMUS_USER:root}
 # Recommended invocation (each run gets its own output directory):
 #
 #   export PRIMUS_EXP_NAME=qwen3_30B_A3B_native_bridge_aligned_$(date +%Y%m%d_%H%M%S)
-#   bash ./runner/primus-cli direct -- train pretrain \
+#   ./primus-cli direct -- train pretrain \
 #     --config examples/megatron/configs/MI355X/qwen3_30B_A3B-BF16-sft-packed-bridge_aligned.yaml
 exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-sft-packed-bridge_aligned}
 workspace: ${PRIMUS_WORKSPACE:./output}

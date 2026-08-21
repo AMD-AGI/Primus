@@ -23,7 +23,7 @@ user_name: ${PRIMUS_USER:root}
 #
 #   # (a) Native-shape FP8 perf run (seq=4096 GBS=16 squad)
 #   export PRIMUS_EXP_NAME=native_llama2_70b_fp8_perf_$(date +%Y%m%d_%H%M%S)
-#   bash ./runner/primus-cli direct -- train pretrain \
+#   ./primus-cli direct -- train pretrain \
 #     --config examples/megatron/configs/MI355X/llama2_70B-FP8-sft-packed-perf.yaml
 #
 #   # (b) mlperf-shape FP8 perf run (seq=8192 GBS=8) -- for like-for-like compare
@@ -34,7 +34,7 @@ user_name: ${PRIMUS_USER:root}
 #   export PRIMUS_LR=4.0e-4
 #   export PRIMUS_TRAIN_ITERS=200
 #   export PRIMUS_EXP_NAME=native_llama2_70b_fp8_perf_mlperfshape_$(date +%Y%m%d_%H%M%S)
-#   bash ./runner/primus-cli direct -- train pretrain \
+#   ./primus-cli direct -- train pretrain \
 #     --config examples/megatron/configs/MI355X/llama2_70B-FP8-sft-packed-perf.yaml
 #
 # IMPORTANT: also export the FP8 NVTE_* env vars before launching so

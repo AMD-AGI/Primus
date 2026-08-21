@@ -52,7 +52,7 @@ export PRIMUS_TURBO_GEMM_BACKEND=FP4:AITER
 export AITER_CONFIG_GEMM_A4W4=$TUNED_GEMM_DIR/mi355x/flux_12b.csv
 export AITER_LOG_TUNED_CONFIG=1   # recommended: confirms each shape hits the CSV
 
-bash ./runner/primus-cli direct -- train pretrain --config "$EXP"
+./primus-cli direct -- train pretrain --config "$EXP"
 ```
 
 The pre-tuned CSV is distributed via an internal tuned-config source (`tuned_gemm_configs/mi355x/flux_12b.csv`). If you do not have access, omit `AITER_CONFIG_GEMM_A4W4` and AITER will fall back to its bundled `a4w4_blockscale_tuned_gemm.csv` (slower for Flux 12B shapes).

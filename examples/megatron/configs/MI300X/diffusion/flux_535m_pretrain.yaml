@@ -7,7 +7,7 @@
 # Pre-encoded mode is faster and recommended for production training.
 #
 # Usage:
-#   bash ./runner/primus-cli direct -- train pretrain \
+#   ./primus-cli direct -- train pretrain \
 #     --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml
 
 work_group: ${PRIMUS_TEAM:amd}
@@ -161,10 +161,10 @@ modules:
 #   - examples/megatron/diffusion/README.md
 #
 # Single-node training (8 GPUs):
-#   GPUS_PER_NODE=8 bash ./runner/primus-cli direct -- train pretrain \
+#   GPUS_PER_NODE=8 ./primus-cli direct -- train pretrain \
 #     --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml
 #
 # Multi-node training (4 nodes, 8 GPUs each):
-#   bash ./runner/primus-cli slurm srun -N 4 -- container -- train pretrain \
+#   ./primus-cli slurm srun -N 4 -- container -- train pretrain \
 #     --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml
 #

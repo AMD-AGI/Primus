@@ -56,7 +56,7 @@ Verify your environment has:
 # See primus/configs/data/megatron/diffusion/README.md
 
 # 2. Train Flux 535M with FP8
-GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
+GPUS_PER_NODE=1 ./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain_fp8.yaml
 ```
 
@@ -64,11 +64,11 @@ GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
 
 ```bash
 # After validating with 535M, scale to 12B (TransformerEngine FP8)
-GPUS_PER_NODE=8 bash ./runner/primus-cli slurm srun -N 4 -- container -- train pretrain \
+GPUS_PER_NODE=8 ./primus-cli slurm srun -N 4 -- container -- train pretrain \
   --config examples/megatron/configs/MI300X/diffusion/flux_12b_ddp_energon_schnell_resample_te_spec_fp8.yaml
 
 # Or local-spec FP8 (no TransformerEngine dependency)
-GPUS_PER_NODE=8 bash ./runner/primus-cli slurm srun -N 4 -- container -- train pretrain \
+GPUS_PER_NODE=8 ./primus-cli slurm srun -N 4 -- container -- train pretrain \
   --config examples/megatron/configs/MI300X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_fp8.yaml
 ```
 
@@ -381,7 +381,7 @@ The local-spec FP8 kernels benefit from the Primus-Turbo autotuner, which picks 
 unset PRIMUS_TURBO_GEMM_BACKEND          # or scope it so it does not cover FP8
 export PRIMUS_TURBO_AUTO_TUNE=1
 
-bash ./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI355X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_fp8.yaml
 ```
 
@@ -443,7 +443,7 @@ export HSA_ENABLE_SDMA=0  # Disable SDMA for stability
 
 ```bash
 # Quick 100-step validation run
-GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
+GPUS_PER_NODE=1 ./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain_fp8.yaml
 ```
 

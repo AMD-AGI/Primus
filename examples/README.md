@@ -80,14 +80,14 @@ pre-commit install
 
 ### Run Pretraining
 
-`./runner/primus-cli` is the single entry point for all training. Pick a mode based on
+`./primus-cli` is the single entry point for all training. Pick a mode based on
 where you want the process to run, then pass the Primus command after `--`:
 
 | Mode | When to use | Command |
 | ---- | ----------- | ------- |
-| `container` | Single node, launch from the host; the CLI starts the Docker/Podman container for you | `./runner/primus-cli container -- train pretrain --config <exp.yaml>` |
-| `slurm` | Multi-node via SLURM (`srun` or `sbatch`) | `./runner/primus-cli slurm srun -N <N> -- container -- train pretrain --config <exp.yaml>` |
-| `direct` | You are already inside a container (or on a prepared bare-metal host) | `./runner/primus-cli direct -- train pretrain --config <exp.yaml>` |
+| `container` | Single node, launch from the host; the CLI starts the Docker/Podman container for you | `./primus-cli container -- train pretrain --config <exp.yaml>` |
+| `slurm` | Multi-node via SLURM (`srun` or `sbatch`) | `./primus-cli slurm srun -N <N> -- container -- train pretrain --config <exp.yaml>` |
+| `direct` | You are already inside a container (or on a prepared bare-metal host) | `./primus-cli direct -- train pretrain --config <exp.yaml>` |
 
 Notes on the argument shape:
 
@@ -108,15 +108,15 @@ You do not need to enter the Docker container. Just set the config and run.
 ```bash
 # Example for megatron llama3.1_8B
 export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-bash ./runner/primus-cli container -- train pretrain --config "$EXP"
+./primus-cli container -- train pretrain --config "$EXP"
 
 # Custom leaf config (SFT, mlperf, bridge_aligned, etc.)
 export EXP=examples/megatron/configs/MI355X/llama3_8B-BF16-sft.yaml
-bash ./runner/primus-cli container -- train posttrain --config "$EXP"
+./primus-cli container -- train posttrain --config "$EXP"
 
 # examples for torchtitan llama3.1_8B
 export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
-bash ./runner/primus-cli container -- train pretrain --config "$EXP"
+./primus-cli container -- train pretrain --config "$EXP"
 ```
 
 ---
@@ -138,11 +138,11 @@ cd Primus && pip install -r requirements.txt
 
 # Example for megatron llama3.1_8B
 export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-bash ./runner/primus-cli direct -- train pretrain --config "$EXP"
+./primus-cli direct -- train pretrain --config "$EXP"
 
 # examples for torchtitan llama3.1_8B
 export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
-bash ./runner/primus-cli direct -- train pretrain --config "$EXP"
+./primus-cli direct -- train pretrain --config "$EXP"
 
 ```
 
@@ -159,11 +159,11 @@ export NNODES=8
 
 # Example for megatron llama3.1_8B
 export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-bash ./runner/primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
+./primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
 
 # examples for torchtitan llama3.1_8b
 export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
-bash ./runner/primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
+./primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
 ```
 
 ## 🔧 HipblasLT Auto Tuning
@@ -192,7 +192,7 @@ It is recommended to reduce `train_iters` for faster shape generation.
 
 export PRIMUS_HIPBLASLT_TUNING_STAGE=1
 export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-bash ./runner/primus-cli slurm srun -N 1 -- container -- train pretrain --config "$EXP"
+./primus-cli slurm srun -N 1 -- container -- train pretrain --config "$EXP"
 ```
 
 ---
@@ -209,7 +209,7 @@ It typically takes 10–30 minutes depending on model size and shape complexity.
 
 export PRIMUS_HIPBLASLT_TUNING_STAGE=2
 export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-bash ./runner/primus-cli slurm srun -N 1 -- container -- train pretrain --config "$EXP"
+./primus-cli slurm srun -N 1 -- container -- train pretrain --config "$EXP"
 ```
 
 ---
@@ -221,7 +221,7 @@ In this final stage, the tuned kernel is loaded for efficient training:
 ```bash
 export PRIMUS_HIPBLASLT_TUNING_STAGE=3
 export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-bash ./runner/primus-cli slurm srun -N 1 -- container -- train pretrain --config "$EXP"
+./primus-cli slurm srun -N 1 -- container -- train pretrain --config "$EXP"
 ```
 
 ## ✅ Supported Models
@@ -258,17 +258,17 @@ Use the following command pattern to start training with a selected model config
 
 ```bash
 export EXP=examples/megatron/configs/MI300X/<model_config>
-bash ./runner/primus-cli container -- train pretrain --config "$EXP"
+./primus-cli container -- train pretrain --config "$EXP"
 ```
 
 For example, to run the llama3.1_8B model quickly:
 
 ```bash
 export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-bash ./runner/primus-cli container -- train pretrain --config "$EXP"
+./primus-cli container -- train pretrain --config "$EXP"
 
 export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
-bash ./runner/primus-cli container -- train pretrain --config "$EXP"
+./primus-cli container -- train pretrain --config "$EXP"
 ```
 
 
@@ -279,11 +279,11 @@ export NNODES=8
 
 # run megatron
 export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-bash ./runner/primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
+./primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
 
 # run torchtitan
 export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
-bash ./runner/primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
+./primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
 ```
 
 ## ☸️ Kubernetes Training Management (`run_k8s_pretrain.sh`)
