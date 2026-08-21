@@ -390,10 +390,6 @@ class PrimusRuntime:
         assert self.ctx is not None, "TrainContext must be initialized before backend adapter."
         backend_path = getattr(self.args, "backend_path", None)
 
-        # CRITICAL: Set up backend path BEFORE importing backend module
-        # This ensures megatron is importable when patches are loaded
-        self._setup_backend_path_early(backend=self.ctx.framework, backend_path=backend_path)
-
         adapter = BackendRegistry.get_adapter(backend=self.ctx.framework, backend_path=backend_path)
 
         assert (
@@ -404,49 +400,6 @@ class PrimusRuntime:
         adapter.setup_backend_path(backend_path=backend_path)
 
         self.ctx.adapter = adapter
-
-    def _setup_backend_path_early(self, backend: str, backend_path=None) -> None:
-        """Set up backend path before backend module is imported."""
-        import os
-        import sys
-        from pathlib import Path
-
-        # For Megatron backend, set up the path early
-        if backend == "megatron":
-            megatron_paths = []
-
-            # Method 1: From backend_path argument
-            if backend_path:
-                megatron_path = Path(backend_path)
-                if megatron_path.exists():
-                    megatron_paths.append(str(megatron_path))
-
-            # Method 2: From PRIMUS_PATH environment variable
-            primus_path = os.getenv("PRIMUS_PATH")
-            if primus_path:
-                megatron_path = Path(primus_path) / "third_party" / "Megatron-LM"
-                if megatron_path.exists():
-                    megatron_paths.append(str(megatron_path))
-
-            # Method 3: From current working directory
-            try:
-                cwd = Path.cwd()
-                if "Primus" in str(cwd):
-                    primus_root = cwd
-                    while primus_root.name != "Primus" and primus_root != primus_root.parent:
-                        primus_root = primus_root.parent
-                    if primus_root.name == "Primus":
-                        megatron_path = primus_root / "third_party" / "Megatron-LM"
-                        if megatron_path.exists():
-                            megatron_paths.append(str(megatron_path))
-            except Exception:
-                pass
-
-            # Add paths to sys.path if not already present
-            for path in megatron_paths:
-                if path not in sys.path:
-                    sys.path.insert(0, path)
-                    log_rank_0(f"[Primus:Runtime] Early setup: Added Megatron-LM to sys.path: {path}")
 
     def _initialize_trainer(self) -> None:
         assert (

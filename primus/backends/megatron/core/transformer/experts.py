@@ -133,6 +133,17 @@ class PrimusGroupedMLP(TEGroupedMLP):
                 tokens_per_experts is not None
             ), "tokens_per_experts is required when `use_turbo_fused_act_with_probs` is True."
 
+            # TODO(ruibin)： The turbo kernel takes no clamp / offset / fp8-input-store arguments
+            assert (
+                self.config.activation_func_clamp_value is None
+            ), "`use_turbo_fused_act_with_probs` does not support activation_func_clamp_value."
+            assert (
+                self.config.glu_linear_offset == 0.0
+            ), "`use_turbo_fused_act_with_probs` does not support a non-zero glu_linear_offset."
+            assert (
+                not self.config.activation_func_fp8_input_store
+            ), "`use_turbo_fused_act_with_probs` does not support activation_func_fp8_input_store."
+
             if self.activation_func == F.silu and self.config.gated_linear_unit:
                 activation = "silu"
             elif self.activation_func == F.gelu and self.config.gated_linear_unit:
@@ -225,7 +236,6 @@ class PrimusGroupedMLP(TEGroupedMLP):
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
-                # NOTE: use the bias_act_func_with_mask instead of the bias_act_func to reduce the extra compute when stage of `sync_free_moe` is 3.
                 bias_act_output = self.activation_checkpoint.checkpoint(
                     self.bias_act_func_with_mask, fc1_output, bias_parallel, permuted_probs, tokens_per_expert
                 )

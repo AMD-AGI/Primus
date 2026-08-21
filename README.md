@@ -111,9 +111,9 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
 
     ```bash
     # For Megatron-LM and TorchTitan backends
-    docker pull rocm/primus:v26.4
+    docker pull rocm/primus:v26.5
     # For MaxText backend
-    docker pull rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0
+    docker pull rocm/jax-training:maxtext-v26.5
     ```
 
 2. **Clone the repository**
@@ -122,7 +122,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
     cd Primus
     # checkout the branch for the specific release
-    git checkout release/v26.4
+    git checkout release/v26.5
     git submodule update --init --recursive
     ```
 
@@ -133,7 +133,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     # NOTE: If your config downloads weights/tokenizer from Hugging Face Hub,
     #       you typically need to pass HF_TOKEN into the container.
     # Run in the Primus repository root directory
-    ./primus-cli container --image rocm/primus:v26.4 \
+    ./primus-cli container --image rocm/primus:v26.5 \
       --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
       -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
     ```
@@ -151,7 +151,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/02-user-gu
     python -m venv primus-env
     source primus-env/bin/activate
     # Install Primus
-    pip install "primus==26.4.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
+    pip install "primus==26.5.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
 
     ```
 
@@ -162,7 +162,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/02-user-gu
 2. **Run training in container using pip-installed Primus**
 
     ```bash
-    primus-cli container --image rocm/primus:v26.4 \
+    primus-cli container --image rocm/primus:v26.5 \
     --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
     --volume /path/to/your/data:/data  -- --log_file /data/run.log \
     -- train pretrain --config /data/your/config.yaml
