@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:zebra_llama_1B_kda-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:zebra_llama_1B_gdn-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -9,10 +9,10 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: zebra_llama_1B.yaml
+    model: zebra_llama_1B_gdn.yaml
     overrides:
       # log
-      wandb_project: "Primus_Zebra_Llama_1B_KDA_Pretrain"
+      wandb_project: "Primus_Zebra_Llama_1B_GDN_Pretrain"
       stderr_sink_level: DEBUG
 
       eval_iters: 0
@@ -26,9 +26,9 @@ modules:
       log_avg_reset_interval: 50
 
       train_iters: 50
-      # MI300X max batch (8 GPUs): GBS=64, 172.5 TFLOP/s, 84.6% mem (BS=72 OOM)
-      micro_batch_size: 6
-      global_batch_size: 48 # micro_batch_size * num_gpus
+      # MI355X max batch (8 GPUs): MBS=21, GBS=168, 96.1% mem (↑ from MBS=4)
+      micro_batch_size: 21
+      global_batch_size: 168
 
       seq_length: 8192
       max_position_embeddings: 8192
@@ -44,13 +44,12 @@ modules:
       adam_beta2: 0.95
       eod_mask_loss: true
 
-      # Use KDA (Kimi Delta Attention) hybrid spec
-      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'kda_hybrid_stack_spec']
-      use_fla_triton_kda: true
+      # Pure GDN hybrid spec
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'gdn_hybrid_stack_spec']
 
       # Tokenizer
       tokenizer_type: HuggingFaceTokenizer
-      tokenizer_model: meta-llama/Llama-3.2-1B
+      tokenizer_model: fla-hub/gla-1.3B-100B
 
       # parallel
       tensor_model_parallel_size: 1
@@ -70,9 +69,9 @@ modules:
 
       # ckpt
       finetune: false
-      auto_continue_train: true
+      auto_continue_train: false
       load: null
-      save: ./output/zebra_llama_1B_kda-pretrain
+      save: ./output/zebra_llama_1B_gdn-pretrain
       save_interval: 1000
       disable_last_saving: false
       ckpt_format: torch
