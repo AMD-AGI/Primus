@@ -6,9 +6,7 @@ loss threshold of `0.586`.
 
 ## Docker image
 
-The launch scripts use `zirui3/primus-v26.3-flux:v0.4` by default. This image
-contains the selective FlyDSL and natural-backward optimizations from the
-[`Dockerfile`](Dockerfile) in this directory.
+The launch scripts use `zirui3/primus-v26.3-flux:v0.4` by default. 
 
 ```bash
 docker pull zirui3/primus-v26.3-flux:v0.4
@@ -88,9 +86,7 @@ sbatch -A amd-spur -p amd-spur --qos=amd-spur-qos \
 ```
 
 Add `--nodelist=node1,node2,node3,node4` only when specific idle nodes are
-required. For a holder allocation entered externally with `spur run --jobid`,
-follow [`luanch-multi-nodes.md`](luanch-multi-nodes.md); nested `srun` does not
-fan out.
+required. 
 
 Common overrides include `MAX_STEPS`, `SEED`, `MASTER_PORT`, `SAVE_STRATEGY`,
 `SAVE_STEPS`, `RESUME_FROM_CHECKPOINT`, and `MLPERF_CLEAR_CACHES=false`.
