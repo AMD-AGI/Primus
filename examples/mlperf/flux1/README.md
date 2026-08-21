@@ -50,6 +50,13 @@ OUTPUT_ROOT=/path/to/output \
 bash examples/mlperf/flux1/run_with_docker.sh
 ```
 
+Inside a one-node Slurm/Spur allocation, use the scheduler wrapper instead:
+
+```bash
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
+```
+
 For a short training smoke test without saving a checkpoint:
 
 ```bash

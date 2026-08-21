@@ -10,7 +10,9 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 export NNODES=${NNODES:-$SLURM_NNODES}
 if [[ -z "${MASTER_ADDR:-}" ]]; then
-    if command -v scontrol >/dev/null; then
+    if [[ "$NNODES" == "1" ]]; then
+        MASTER_ADDR=${SLURMD_NODENAME:-$SLURM_JOB_NODELIST}
+    elif command -v scontrol >/dev/null; then
         MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
     else
         MASTER_ADDR=${SPUR_PEER_NODES:?Set MASTER_ADDR}
@@ -23,4 +25,19 @@ export MASTER_ADDR MASTER_PORT=${MASTER_PORT:-29500}
 srun_args=(--nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1)
 command -v spur >/dev/null && srun_args+=(--jobid="$SLURM_JOB_ID" --overlap)
 
-exec srun "${srun_args[@]}" bash "$SCRIPT_DIR/run_with_docker.sh"
+forward_vars=(
+    DOCKER_IMAGE CONFIG PRIMUS_WORKSPACE GPUS_PER_NODE DP_REPLICATE
+    DATASET_PATH EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR MLLOG_OUTPUT_FILE
+    FLUX_FLOAT8_RECIPE FLUX_FP8_GEMM_BACKEND ATTENTION_BACKEND LOCAL_BATCH_SIZE
+    GRADIENT_ACCUMULATION_STEPS MAX_STEPS LR WARMUP_STEPS GRADIENT_CHECKPOINTING_RATIO
+    COMPILE_TRANSFORMER_BLOCKS COMPILE_STRATEGY COMPILE_BACKEND COMPILE_FULLGRAPH
+    COMPILE_DYNAMIC FSDP2_RESHARD_AFTER_FORWARD FSDP2_REDUCE_DTYPE FLUX_PERFORMANCE_MODE
+    SAVE_STEPS SAVE_STRATEGY CHECKPOINT_KEEP_LATEST RESUME_FROM_CHECKPOINT
+    MLPERF_ENABLE MLPERF_CLEAR_CACHES TARGET_ACCURACY VAL_CHECK_INTERVAL SEED
+)
+env_args=(DATA_ROOT="$DATA_ROOT" OUTPUT_ROOT="$OUTPUT_ROOT" NNODES="$NNODES" MASTER_ADDR="$MASTER_ADDR" MASTER_PORT="$MASTER_PORT")
+for name in "${forward_vars[@]}"; do
+    [[ -v "$name" ]] && env_args+=("$name=${!name}")
+done
+
+exec srun "${srun_args[@]}" env "${env_args[@]}" bash "$SCRIPT_DIR/run_with_docker.sh"
