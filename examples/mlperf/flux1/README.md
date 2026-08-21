@@ -119,7 +119,6 @@ examples/mlperf/flux1/
 ├── config_1n_gbs1024.sh
 ├── config_4n_gbs1024.sh
 ├── flux.1_schnell_t2i-pretrain.yaml
-├── luanch-multi-nodes.md
 ├── requirements.txt
 ├── run_with_docker.sh
 └── run_with_docker_slurm.sh
