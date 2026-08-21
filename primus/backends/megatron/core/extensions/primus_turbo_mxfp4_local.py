@@ -34,7 +34,10 @@ from primus_turbo.pytorch.core.low_precision import (
 from primus_turbo.pytorch.kernels.gemm.gemm_fp4_impl import gemm_fp4_impl
 from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
 
-from .primus_turbo_float8_local import _quantize_fp8_tw
+from .primus_turbo_float8_local import (
+    OpaqueFP8LinearTensorwiseFunction,
+    _quantize_fp8_tw,
+)
 
 # The AITER MXFP4 preshuffle fast path used to be implemented here as a
 # monkey patch on GEMMFP4AITERBackend.execute. It now lives in Primus-Turbo
@@ -471,6 +474,72 @@ class MXFP4LinearFunction(torch.autograd.Function):
 
 
 # ---------------------------------------------------------------------------
+# MXFP4 -> FP8 runtime precision switch
+#
+# Neither precision stores a quantized weight -- both inherit a plain BF16
+# nn.Parameter from Megatron and quantize inside forward -- so switching is
+# purely a change of which autograd Function _forward_impl dispatches to. No
+# weight conversion, no parameter re-identification, and therefore nothing for
+# DDP's bucket groups or the optimizer's identity-keyed state to notice.
+#
+# FlyDSL is the FP8 backend. It handles NT/NN/TN natively for tensorwise, so
+# force_nt is False: normalizing to NT exists only to steer hipBLASLt onto its
+# fast TN kernel, and it costs a pre-transposed copy of both operands.
+#
+# Resolved leniently. A Primus-Turbo without FLYDSL must still build pure-MXFP4
+# models, so a missing backend degrades to 0 ("let the dispatcher choose") here
+# and is rejected by the switch patch, which is the only caller that knows the
+# run actually intends to switch.
+# ---------------------------------------------------------------------------
+
+_SWITCH_FP8_BACKEND = getattr(BackendType, "FLYDSL", None)
+
+
+def _init_fp8_switch_state(module) -> None:
+    """Initialise the FP8 arm of an MXFP4 linear, left dormant at ``_fp8_mode=False``.
+
+    The attribute names are deliberately distinct from the ``_fp8_bwd_dtype`` /
+    ``_fp8_gran_value`` / ``_fp8_backend_value`` triple that backs
+    ``mxfp4_backward_precision='fp8'``. That triple is passed into
+    MXFP4LinearFunction on every call including the pure-MXFP4 path, where it is
+    ``None``/``0``/``0``; reusing it would change traced constants for a path this
+    switch must leave bit-identical.
+    """
+    from primus_turbo.pytorch.core.low_precision import float8_e4m3, float8_e5m2
+
+    module._fp8_mode = False
+    module._switch_fp8_fwd_dtype = float8_e4m3
+    module._switch_fp8_bwd_dtype = float8_e5m2
+    module._switch_fp8_gran_value = ScalingGranularity.TENSORWISE.value
+    module._switch_fp8_backend_value = 0 if _SWITCH_FP8_BACKEND is None else _SWITCH_FP8_BACKEND.value
+    module._switch_force_nt = False
+
+
+def _fp8_forward(module, input, weight):
+    """Dynamic tensorwise FP8 linear, landing on the same Function the FP8 spec uses.
+
+    ``_quantize_fp8_tw`` is called directly rather than via ``_extract_fp8_weight``:
+    the latter only exists to unwrap an ``FP8UnshardedWeightTensor`` produced by an
+    FSDP2 all-gather, and MXFP4 requires DDP, so that subclass cannot appear. This
+    keeps an isinstance check and a function-local import out of the traced region.
+    """
+    weight_fp8, weight_scale_inv = _quantize_fp8_tw(weight, module._switch_fp8_fwd_dtype)
+
+    result = OpaqueFP8LinearTensorwiseFunction.apply(
+        input,
+        weight,
+        weight_fp8,
+        weight_scale_inv,
+        module._switch_fp8_fwd_dtype,
+        module._switch_fp8_bwd_dtype,
+        module._switch_fp8_gran_value,
+        module._switch_fp8_backend_value,
+        module._switch_force_nt,
+    )
+    return result[0]
+
+
+# ---------------------------------------------------------------------------
 # MXFP4-aware parallel linear layers
 # ---------------------------------------------------------------------------
 
@@ -515,20 +584,25 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
             self._fp8_gran_value = 0
             self._fp8_backend_value = 0
 
+        _init_fp8_switch_state(self)
+
     def _forward_impl(self, input, weight, *args, **kwargs):
         bias = kwargs.get("bias", None)
 
-        result = MXFP4LinearFunction.apply(
-            input,
-            weight,
-            self._preshuffle,
-            self._backward_is_fp8,
-            self._fp8_bwd_dtype,
-            self._fp8_gran_value,
-            self._fp8_backend_value,
-            self._use_gradient_sr,
-        )
-        output = result[0]
+        if self._fp8_mode:
+            output = _fp8_forward(self, input, weight)
+        else:
+            result = MXFP4LinearFunction.apply(
+                input,
+                weight,
+                self._preshuffle,
+                self._backward_is_fp8,
+                self._fp8_bwd_dtype,
+                self._fp8_gran_value,
+                self._fp8_backend_value,
+                self._use_gradient_sr,
+            )
+            output = result[0]
 
         if bias is not None:
             output = output + bias
@@ -575,20 +649,25 @@ class MXFP4RowParallelLinear(RowParallelLinear):
             self._fp8_gran_value = 0
             self._fp8_backend_value = 0
 
+        _init_fp8_switch_state(self)
+
     def _forward_impl(self, input, weight, *args, **kwargs):
         bias = kwargs.get("bias", None)
 
-        result = MXFP4LinearFunction.apply(
-            input,
-            weight,
-            self._preshuffle,
-            self._backward_is_fp8,
-            self._fp8_bwd_dtype,
-            self._fp8_gran_value,
-            self._fp8_backend_value,
-            self._use_gradient_sr,
-        )
-        output = result[0]
+        if self._fp8_mode:
+            output = _fp8_forward(self, input, weight)
+        else:
+            result = MXFP4LinearFunction.apply(
+                input,
+                weight,
+                self._preshuffle,
+                self._backward_is_fp8,
+                self._fp8_bwd_dtype,
+                self._fp8_gran_value,
+                self._fp8_backend_value,
+                self._use_gradient_sr,
+            )
+            output = result[0]
 
         if bias is not None:
             output = output + bias
