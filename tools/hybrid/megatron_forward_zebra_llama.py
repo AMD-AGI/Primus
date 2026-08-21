@@ -11,7 +11,7 @@ Usage (1 GPU):
   export PYTHONPATH="$(pwd):$(pwd)/third_party/Megatron-LM:${PYTHONPATH}"
 
   torchrun --nproc_per_node=1 tools/hybrid/megatron_forward_zebra_llama.py \
-    --load output/zebra_mamba_1B_hybrid-pretrain/iter_0150000 \
+    --load output/zebra_llama_mamba_1B_BF16-pretrain/iter_0150000 \
     --prompt "The capital of France is" \
     --topk 10
 

@@ -253,7 +253,7 @@ def main():
         "--checkpoint-path",
         type=str,
         required=True,
-        help="Path to Megatron checkpoint directory (e.g., output/zebra_mamba_1B_hybrid-pretrain/iter_0001000)",
+        help="Path to Megatron checkpoint directory (e.g., output/zebra_llama_mamba_1B_BF16-pretrain/iter_0001000)",
     )
     parser.add_argument(
         "--output-dir", type=str, required=True, help="Output directory for HuggingFace checkpoint"

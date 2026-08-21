@@ -17,7 +17,7 @@
 ###############################################################################
 set -euo pipefail
 
-PRIMUS_CKPT=${PRIMUS_CKPT:-output/amd/root/zebra_gdn_300M_hybrid-pretrain/checkpoints/iter_0004768}
+PRIMUS_CKPT=${PRIMUS_CKPT:-output/amd/root/zebra_llama_gdn_300M_BF16-pretrain/checkpoints/iter_0004768}
 PRIMUS_HF_DIR=${PRIMUS_HF_DIR:-output/gdn_hybrid_300M_fla_hf}
 FLA_HF_DIR=${FLA_HF_DIR:-$HOME/checkpoints/gdn_hybrid_300M_10B/checkpoint-4768}
 FLA_CONFIG=${FLA_CONFIG:-$HOME/flash-linear-attention/legacy/training/configs/gated_deltanet_300M_hybrid.json}

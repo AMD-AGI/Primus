@@ -30,7 +30,7 @@ and `kv_proj.1` RMSNorm weights would be missing and the FLA model would NaN.
 Usage (inside the container):
 
     python tools/hybrid/convert_gdn_hybrid_to_fla_hf.py \
-        --checkpoint-path output/amd/root/zebra_gdn_300M_hybrid-pretrain/checkpoints/iter_0004768 \
+        --checkpoint-path output/amd/root/zebra_llama_gdn_300M_BF16-pretrain/checkpoints/iter_0004768 \
         --output-dir output/gdn_hybrid_300M_fla_hf \
         --config /home/<user>/flash-linear-attention/legacy/training/configs/gated_deltanet_300M_hybrid.json
 """

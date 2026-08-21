@@ -28,21 +28,22 @@ PURE_MODELS = [
 ]
 
 PRETRAIN_CONFIGS = [
-    "MI300X/zebra_mamba_1B_hybrid-pretrain.yaml",
-    "MI300X/zebra_kda_1B_hybrid-pretrain.yaml",
-    "MI300X/zebra_gdn_1B_hybrid-pretrain.yaml",
+    "MI300X/zebra_llama_mamba_1B_BF16-pretrain.yaml",
+    "MI300X/zebra_llama_kda_1B_BF16-pretrain.yaml",
+    "MI300X/zebra_llama_gdn_1B_BF16-pretrain.yaml",
     "MI300X/kda_1B-precision-pretrain.yaml",
     "MI300X/gdn_1B-precision-pretrain.yaml",
     "MI300X/kda_300M-precision-pretrain.yaml",
-    "MI355X/zebra_mamba_1B_hybrid-pretrain.yaml",
+    "MI355X/zebra_llama_mamba_1B_BF16-pretrain.yaml",
     "MI355X/kda_1B-precision-pretrain.yaml",
 ]
 
 DEPRECATED_SYMLINKS = [
     "examples/megatron/configs/MI300X/zebra_llama_1B-pretrain.yaml",
-    "examples/megatron/configs/MI300X/zebra_llama_1B_kda_pure-pretrain.yaml",
     "examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml",
+    "examples/megatron/configs/MI300X/zebra_kda_1B_hybrid-pretrain.yaml",
     "examples/megatron/configs/MI300X/kda_1B_pure-pretrain.yaml",
+    "examples/megatron/configs/MI300X/zebra_llama_1B_kda_pure-pretrain.yaml",
     "primus/configs/models/megatron/zebra_llama_1B.yaml",
     "primus/configs/models/megatron/zebra_llama_1B_kda_pure.yaml",
     "primus/configs/models/megatron/kda_1B_pure.yaml",
@@ -100,7 +101,7 @@ def test_kda_1B_inherits_mamba_base_defaults():
 
 
 def test_mi300x_kda_hybrid_batch_size():
-    cfg_path = CONFIG_ROOT / "MI300X/zebra_kda_1B_hybrid-pretrain.yaml"
+    cfg_path = CONFIG_ROOT / "MI300X/zebra_llama_kda_1B_BF16-pretrain.yaml"
     overrides = parse_yaml(str(cfg_path))["modules"]["pre_trainer"]["overrides"]
     assert overrides["micro_batch_size"] == 8
     assert overrides["global_batch_size"] == 64

@@ -681,7 +681,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "zebra_mamba_1B_hybrid",
-            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/zebra_mamba_1B_hybrid-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/zebra_llama_mamba_1B_BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",

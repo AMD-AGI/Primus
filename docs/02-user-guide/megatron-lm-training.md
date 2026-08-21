@@ -329,7 +329,7 @@ Examples for MoE models with expert parallelism enabled (that is, `expert_model_
 PRIMUS_TRAIN_RUNTIME=legacy ./runner/primus-cli container \
   --log_file /tmp/primus_zebra_mamba_1B_hybrid.log \
   -- train pretrain \
-  --config examples/megatron/configs/MI300X/zebra_mamba_1B_hybrid-pretrain.yaml
+  --config examples/megatron/configs/MI300X/zebra_llama_mamba_1B_BF16-pretrain.yaml
 ```
 
 - **Qwen3-32B BF16 LoRA:**
@@ -529,7 +529,7 @@ NVTE_USE_CAST_TRANSPOSE_TRITON=0 ./runner/primus-cli container \
 PRIMUS_TRAIN_RUNTIME=legacy ./runner/primus-cli container \
   --log_file /tmp/primus_zebra_mamba_1B_hybrid.log \
   -- train pretrain \
-  --config examples/megatron/configs/MI355X/zebra_mamba_1B_hybrid-pretrain.yaml
+  --config examples/megatron/configs/MI355X/zebra_llama_mamba_1B_BF16-pretrain.yaml
 ```
 
 - **Qwen3-32B BF16 LoRA:**
