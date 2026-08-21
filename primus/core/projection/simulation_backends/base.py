@@ -354,3 +354,55 @@ def get_gemm_backend_factory(name: str) -> Optional[GEMMBackendFactory]:
 def available_gemm_backends() -> Tuple[str, ...]:
     """Return the sorted names of all currently registered GEMM backends."""
     return tuple(sorted(_GEMM_BACKEND_REGISTRY))
+
+
+def resolve_hbm_bytes_per_ms(
+    gemm_backend: Any = None,
+    sdpa_backend: Any = None,
+    fallback_gbps: float = 4000.0,
+) -> float:
+    """Peak HBM bandwidth in **bytes/ms**, resolved from a backend's arch profile.
+
+    Memory-bound terms (sparse gather, HSTU elementwise) must be priced at the
+    target part's real HBM bandwidth -- HBM4 on MI450 is ~2.76x MI355X, far more
+    than the 2.01x on bf16 peak -- rather than a hardcoded MI300-class 4 TB/s.
+    Prefers the GEMM backend's ``hbm_bandwidth_gbps`` (arch-resolved), then the
+    SDPA backend's, and only falls back to *fallback_gbps* when neither knows.
+    """
+    for backend in (gemm_backend, sdpa_backend):
+        if backend is None:
+            continue
+        try:
+            gbps = getattr(backend, "hbm_bandwidth_gbps", None)
+        except Exception:
+            gbps = None
+        if gbps:
+            return float(gbps) * 1.0e6  # GB/s -> bytes/ms  (1e9 bytes/s / 1e3 ms)
+    return float(fallback_gbps) * 1.0e6
+
+
+def resolve_peak_tflops(
+    gemm_backend: Any = None,
+    sdpa_backend: Any = None,
+    dtype: str = "bf16",
+) -> Optional[float]:
+    """Peak compute throughput (TFLOPS) for the target arch, or *None* if unknown.
+
+    Used to emit MFU/HFU.  The SDPA backend carries a full ``GPUHardwareSpec``
+    (peak_tflops_*), so it is preferred; the GEMM backend is a fallback.
+    """
+    attr = {
+        "bf16": "peak_tflops_bf16",
+        "fp16": "peak_tflops_fp16",
+        "fp8": "peak_tflops_fp8",
+    }.get(dtype, "peak_tflops_bf16")
+    for backend in (sdpa_backend, gemm_backend):
+        if backend is None:
+            continue
+        try:
+            val = getattr(backend, attr, None)
+        except Exception:
+            val = None
+        if val:
+            return float(val)
+    return None

@@ -32,9 +32,13 @@ Norms / SiLU gating are memory-bound and added as a small HBM term.
 from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.simulation_backends.base import resolve_hbm_bytes_per_ms
 from primus.core.projection.training_config import gemm_dtype_from_config
 
-_PEAK_HBM_BYTES_PER_MS = 4.0e9  # ~4 TB/s (MI300-class), bytes/ms
+# Fallback peak HBM bandwidth (MI300-class, ~4 TB/s) when no arch profile is
+# reachable; the real value is resolved from the simulation backends so HBM4
+# parts are not mis-priced.
+_FALLBACK_HBM_GBPS = 4000.0
 _ELEMENTWISE_HBM_FRACTION = 0.60  # SiLU/norm streaming efficiency
 
 
@@ -98,17 +102,36 @@ class HSTULayerProfiler(BaseModuleProfiler):
         return int(batch_size * seq_len * (D + uvqk_width) * 2)  # bf16
 
     # -- compute ---------------------------------------------------------------
-    def _effective_seq(self, seq_len: int) -> int:
-        fill = float(getattr(self.config.model_config, "hstu_fill_factor", 1.0) or 1.0)
-        fill = min(1.0, max(0.01, fill))
-        return max(1, int(round(seq_len * fill)))
+    def _fill(self) -> tuple[float, float]:
+        mc = self.config.model_config
+        mean = min(1.0, max(0.01, float(getattr(mc, "hstu_fill_factor", 1.0) or 1.0)))
+        std = max(0.0, float(getattr(mc, "hstu_fill_factor_std", 0.0) or 0.0))
+        return mean, std
+
+    def _mean_seq(self, seq_len: int) -> int:
+        """Expected valid tokens E[L] -- drives the (linear) GEMM/elementwise work."""
+        mean, _ = self._fill()
+        return max(1, int(round(seq_len * mean)))
+
+    def _attn_seq(self, seq_len: int) -> int:
+        """Effective sequence for the attention core, which scales as E[L^2].
+
+        E[L^2] = mean^2 + std^2 >= mean^2, so pricing the quadratic term with an
+        rms-fill sequence corrects the systematic under-count from squaring the
+        mean fill.  With std=0 this reduces to the mean (backward compatible).
+        """
+        mean, std = self._fill()
+        rms = min(1.0, (mean * mean + std * std) ** 0.5)
+        return max(1, int(round(seq_len * rms)))
 
     def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+        mc = self.config.model_config
         D, H, d_qk, d_v = self._geom()
         tp = self._tp()
-        dtype = gemm_dtype_from_config(self.config.model_config)
-        eff_seq = self._effective_seq(seq_len)
-        tokens = batch_size * eff_seq  # jagged: only valid positions do work
+        dtype = gemm_dtype_from_config(mc)
+        mean_seq = self._mean_seq(seq_len)
+        attn_seq = self._attn_seq(seq_len)
+        tokens = batch_size * mean_seq  # jagged: only valid positions do work
         heads_per_rank = max(1, H // tp)
 
         fwd = 0.0
@@ -120,28 +143,41 @@ class HSTULayerProfiler(BaseModuleProfiler):
         fwd += g.forward_time_ms
         bwd += g.backward_time_ms or (2.0 * g.forward_time_ms)
 
-        # 2. Attention core (gated dot-product) over the effective sequence.
+        # 2. Attention core (gated dot-product).  The quadratic term is priced
+        #    with the rms-fill sequence; the ragged_hstu kernel is less efficient
+        #    than the FAv3 roofline the SDPA backend models, so derate by the
+        #    configured efficiency.
         s = self._sdpa_backend.simulate_sdpa(
             batch_size=batch_size,
             num_heads=heads_per_rank,
-            seq_len=eff_seq,
+            seq_len=attn_seq,
             head_dim=d_qk,
             causal=True,
             dtype="bf16",
             head_dim_v=d_v,
         )
-        fwd += s.forward_time_ms
-        bwd += s.backward_time_ms or (2.0 * s.forward_time_ms)
+        eff = min(1.0, max(0.05, float(getattr(mc, "hstu_attn_efficiency", 1.0) or 1.0)))
+        attn_fwd = s.forward_time_ms / eff
+        attn_bwd = (s.backward_time_ms or (2.0 * s.forward_time_ms)) / eff
+        fwd += attn_fwd
+        bwd += attn_bwd
 
         # 3. Output projection GEMM: [T, H*d_v]/tp x [H*d_v, D]
         o = self._gemm_backend.simulate_gemm(tokens, D, heads_per_rank * d_v, dtype=dtype)
         fwd += o.forward_time_ms
         bwd += o.backward_time_ms or (2.0 * o.forward_time_ms)
 
-        # 4. SiLU gating (U) + norms: memory-bound elementwise over the UVQK + D
-        #    activation footprint.
-        elem_bytes = tokens * (uvqk_n + D) * 2  # bf16 read+op
-        elem_ms = elem_bytes / (_PEAK_HBM_BYTES_PER_MS * _ELEMENTWISE_HBM_FRACTION)
+        # 4. SiLU gating (U) + norms + dropout (input/linear w/ masks) + jagged
+        #    pack/unpack: memory-bound elementwise passes over the UVQK + D
+        #    activation footprint.  Each logical pass is a read plus a write.
+        peak_hbm_bytes_per_ms = resolve_hbm_bytes_per_ms(
+            gemm_backend=self._gemm_backend,
+            sdpa_backend=self._sdpa_backend,
+            fallback_gbps=_FALLBACK_HBM_GBPS,
+        )
+        passes = max(1.0, float(getattr(mc, "hstu_elementwise_passes", 6.0) or 6.0))
+        elem_bytes = tokens * (uvqk_n + D) * 2 * passes  # bf16, read+write per pass
+        elem_ms = elem_bytes / (peak_hbm_bytes_per_ms * _ELEMENTWISE_HBM_FRACTION)
         fwd += elem_ms
         bwd += elem_ms
 
