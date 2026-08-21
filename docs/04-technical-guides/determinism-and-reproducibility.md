@@ -1,6 +1,6 @@
 # Determinism and reproducibility
 
-Reproducibility—getting bit-identical (or run-to-run stable) results—matters for debugging divergence, validating optimizations, and regression testing. This guide covers Primus's deterministic mode, the environment variables it sets, the per-backend seed/determinism knobs, and the performance trade-offs. Parameters and behavior are grounded in `examples/run_pretrain.sh`, `primus/configs/modules/megatron/trainer_base.yaml`, and `primus/configs/modules/torchtitan/pre_trainer.yaml`.
+Reproducibility—getting bit-identical (or run-to-run stable) results—matters for debugging divergence, validating optimizations, and regression testing. This guide covers Primus's deterministic mode, the environment variables it sets, the per-backend seed/determinism knobs, and the performance trade-offs. Parameters and behavior are grounded in `runner/helpers/envs/base_env.sh`, `runner/helpers/hooks/05_deterministic.sh`, `primus/configs/modules/megatron/trainer_base.yaml`, and `primus/configs/modules/torchtitan/pre_trainer.yaml`.
 
 ---
 
@@ -17,7 +17,7 @@ Full determinism also generally requires the **same world size, parallelism layo
 
 ## 2. Primus deterministic mode (`PRIMUS_DETERMINISTIC`)
 
-Setting `PRIMUS_DETERMINISTIC=1` configures the GPU/communication stack for deterministic behavior. The CLI/runner path applies this through the hook `runner/helpers/hooks/05_deterministic.sh`; the `examples/run_pretrain.sh` script applies an equivalent inline block. The exported variables are:
+Setting `PRIMUS_DETERMINISTIC=1` configures the GPU/communication stack for deterministic behavior. Every launcher mode (`direct`, `container`, `slurm`) applies this through the same hook, `runner/helpers/hooks/05_deterministic.sh`, which runs before training starts. The exported variables are:
 
 ```bash
 # when PRIMUS_DETERMINISTIC=1 (runner/helpers/hooks/05_deterministic.sh)
@@ -28,15 +28,15 @@ export TORCH_COMPILE_DISABLE=1             # avoid torch.compile/Triton race con
 export PRIMUS_TURBO_AUTO_TUNE=0            # disable Primus-Turbo autotuning (stable kernel choice)
 ```
 
-> `PRIMUS_TURBO_AUTO_TUNE` also defaults to `0` in `runner/helpers/envs/base_env.sh`. The inline block in `examples/run_pretrain.sh` sets the first four variables and relies on that default for the fifth.
+> `PRIMUS_TURBO_AUTO_TUNE` also defaults to `0` in `runner/helpers/envs/base_env.sh`, which the hook relies on rather than re-exporting.
 
-Additionally, **HipBLASLt autotuning is disabled** in deterministic mode: tuning only runs when `PRIMUS_DETERMINISTIC != 1` *and* `PRIMUS_HIPBLASLT_TUNING=1` (`examples/run_pretrain.sh`). This prevents run-to-run kernel-selection differences. See [Performance tuning](./performance-tuning.md).
+Additionally, **HipBLASLt autotuning is disabled** in deterministic mode: tuning only runs when `PRIMUS_DETERMINISTIC != 1` *and* `PRIMUS_HIPBLASLT_TUNING=1` (`runner/helpers/hooks/train/pretrain/prepare_experiment.sh`). This prevents run-to-run kernel-selection differences. See [Performance tuning](./performance-tuning.md).
 
 `PRIMUS_DETERMINISTIC` is on the container passthrough allowlist (`runner/.primus.yaml`), so it reaches the training container. See [Environment variables](../03-configuration-reference/environment-variables.md).
 
 ```bash
 export PRIMUS_DETERMINISTIC=1
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 

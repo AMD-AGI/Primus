@@ -23,11 +23,10 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      # Training schedule — FLA reference (4 GPUs): batch=16 → GBS=64
-      # MI300X max batch (8 GPUs): GBS=256, 679.6 TFLOP/s, 97.6% mem (BS=320 OOM)
+      # MI355X max batch (8 GPUs): MBS=2, GBS=16 — HIPBLASLT kernel limit
       train_iters: 50
-      micro_batch_size: 32
-      global_batch_size: 256
+      micro_batch_size: 2
+      global_batch_size: 16
 
       seq_length: 2048
       max_position_embeddings: 2048
@@ -37,9 +36,6 @@ modules:
       #   lr=2e-4, cosine (min_lr_rate=0.1 → min_lr=2e-5)
       #   AdamW, beta1=0.9, beta2=0.95, weight_decay=0.01
       #   max_grad_norm=1.0, warmup_steps=200
-      # Both DeepSpeed ZeRO-2 and Megatron clip on ||avg_grad||.
-      # DeepSpeed pre-divides by dp_size before reduce_scatter(SUM),
-      # so its grad norm is on averaged gradients. Match FLA's 1.0 directly.
       clip_grad: 1.0
       lr: 2.0e-4
       min_lr: 2.0e-5

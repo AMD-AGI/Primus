@@ -21,6 +21,7 @@ modules:
       log_avg_reset_interval: 50
 
       train_iters: 100
+      # MI355X max batch (8 GPUs): MBS=12, GBS=96, 97.2% mem (↑ from MBS=8)
       micro_batch_size: 12
       global_batch_size: 96
 
