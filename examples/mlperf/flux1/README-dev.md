@@ -1,10 +1,10 @@
-# FLUX.1 多节点开发启动手册（内部）
+# FLUX.1 Multi-Node Development Launch Guide (Internal)
 
-本文件供本仓库开发者和 coding agent 启动、排查多节点训练使用，不作为对外文档。配方、数据和配置说明见 [README.md](README.md)。
+This document is for repository developers and coding agents launching or debugging multi-node training. It is not intended as external documentation. See [README.md](README.md) for recipe, dataset, and configuration details.
 
-## 启动入口
+## Launch entry point
 
-统一从仓库根目录启动：
+Start from the repository root:
 
 ```bash
 REPO=/shared_nfs/zirui/code/primus-flux-slim
@@ -13,39 +13,39 @@ OUTPUT_ROOT=/shared_nfs/zirui/runs/flux-$(date -u +%Y%m%dT%H%M%SZ)
 cd "$REPO"
 ```
 
-默认使用 `config_4n_gbs1024.sh`，要求 4 个节点、每节点 8 张 GPU。短 smoke test 可增加：
+The default `config_4n_gbs1024.sh` requires four nodes with eight GPUs per node. For a short smoke test, add:
 
 ```bash
 MAX_STEPS=1 SAVE_STRATEGY=none MLPERF_CLEAR_CACHES=false
 ```
 
-启动模式：
+Launch modes:
 
-| `LAUNCH_MODE` | 容器内实际入口 | 用途 |
+| `LAUNCH_MODE` | Actual entry point inside the container | Use case |
 |---|---|---|
-| `native`（默认） | `torchrun ... examples/diffusion/train_native.py` | 日常开发和性能测试，路径最短 |
-| `primus` | `./primus-cli direct -- train pretrain ...` | Primus CLI 集成验证；CLI 内部仍使用 `torchrun` |
+| `native` (default) | `torchrun ... examples/diffusion/train_native.py` | Normal development and performance testing; shortest execution path |
+| `primus` | `./primus-cli direct -- train pretrain ...` | Primus CLI integration validation; the CLI still uses `torchrun` internally |
 
-两个模式都通过 `run_with_docker.sh` 获得相同的容器挂载、RCCL/AINIC 配置和分布式环境。不要在每张 GPU 上启动一个 Slurm task：每个节点只启动一个 `run_with_docker.sh`，由节点内的 `torchrun` 创建 8 个 worker。
+Both modes use `run_with_docker.sh` and therefore share the same container mounts, RCCL/AINIC settings, and distributed environment. Do not start one Slurm task per GPU. Start one `run_with_docker.sh` task per node and let the node-local `torchrun` create eight workers.
 
-## 场景一：一个 multi-node allocation
+## Scenario 1: One multi-node allocation
 
-这是首选方式。一个 allocation 必须同时拥有全部节点；在该 allocation 的 shell 中执行：
+This is the preferred approach. One allocation must own all participating nodes. Run the following from a shell inside that allocation:
 
 ```bash
 export DATA_ROOT OUTPUT_ROOT
-export LAUNCH_MODE=native                 # 或 primus
+export LAUNCH_MODE=native                 # or primus
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-`run_with_docker_slurm.sh` 会：
+`run_with_docker_slurm.sh` will:
 
-1. 检查 allocation 节点数与 `FLUX_CONFIG` 中的 `NNODES` 一致；
-2. 从 allocation nodelist 选择 rank 0 节点作为 `MASTER_ADDR`；
-3. 用 `srun`/`spur run` 在每个节点启动一个 `run_with_docker.sh`；
-4. 用 `SLURM_NODEID` 设置各节点的 `NODE_RANK`。
+1. Verify that the allocation node count matches `NNODES` from `FLUX_CONFIG`.
+2. Select the rank 0 node from the allocation nodelist as `MASTER_ADDR`.
+3. Use `srun`/`spur run` to start one `run_with_docker.sh` process per node.
+4. Use `SLURM_NODEID` as each node's `NODE_RANK`.
 
-指定配置或启动参数时，在命令前导出或传入：
+To select a configuration or override launch settings, export or prefix them before the command:
 
 ```bash
 LAUNCH_MODE=primus \
@@ -55,7 +55,7 @@ DATA_ROOT="$DATA_ROOT" OUTPUT_ROOT="$OUTPUT_ROOT" \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-如果 `alloc` 只返回了 group job ID、当前仍在 login node，可直接在整个 group 上启动一步。这里仍然只为每个节点创建一个 task，`SLURM_NODEID` 会成为 `NODE_RANK`：
+If `alloc` returned only a group job ID and the current shell is still on the login node, launch one step across the complete group. This still creates only one task per node, and `SLURM_NODEID` becomes `NODE_RANK`:
 
 ```bash
 JOB_ID=<multi-node-job-id>
@@ -74,7 +74,7 @@ nohup spur run --jobid="$JOB_ID" --overlap \
   >"$OUTPUT_ROOT/group.launch.log" 2>&1 </dev/null &
 ```
 
-如果还没有 allocation，可直接提交：
+If no allocation exists yet, submit one directly:
 
 ```bash
 mkdir -p "$OUTPUT_ROOT"
@@ -85,27 +85,27 @@ sbatch -A amd-spur -p amd-spur --qos=amd-spur-qos \
     LAUNCH_MODE=native bash examples/mlperf/flux1/run_with_docker_slurm.sh"
 ```
 
-## 场景二：多个 single-node allocations
+## Scenario 2: Multiple single-node allocations
 
-只有多个独立的 single-node allocation 时，不能用一个 `srun` 跨越多个 job ID。需要通过每个 allocation 各启动一个节点本地进程，并让它们连接到同一个 torchrun rendezvous。
+A single `srun` cannot span multiple job IDs. When only separate single-node allocations are available, start one node-local process through each allocation and point every process at the same torchrun rendezvous.
 
-要求：
+Requirements:
 
-- 所有节点可见同一份仓库、数据和输出目录；
-- 每个节点有 8 张空闲 GPU，并可访问相同 Docker image；
-- rank 必须是连续的 `0..NNODES-1`；
-- 所有节点使用完全相同的 `NNODES`、`MASTER_ADDR` 和 `MASTER_PORT`；
-- `MASTER_ADDR` 是 rank 0 节点可被其他训练节点访问的 hostname 或 IP；
-- 每条 `spur run` 使用拥有对应节点的 job ID。
+- Every node can access the same repository, datasets, and output directory.
+- Each node has eight available GPUs and access to the same Docker image.
+- Ranks are contiguous from `0` through `NNODES-1`.
+- Every node uses exactly the same `NNODES`, `MASTER_ADDR`, and `MASTER_PORT`.
+- `MASTER_ADDR` is a hostname or IP for the rank 0 node that all training nodes can reach.
+- Each `spur run` uses the job ID that owns its selected node.
 
-先准备节点 launcher：
+First, create the per-node launcher:
 
 ```bash
 NNODES=4
 MASTER_NODE=<rank-0-node>
 MASTER_ADDR=$(getent ahostsv4 "$MASTER_NODE" | awk 'NR == 1 {print $1}')
 MASTER_PORT=29601
-LAUNCH_MODE=native                       # 或 primus
+LAUNCH_MODE=native                       # or primus
 
 mkdir -p "$OUTPUT_ROOT"
 cat >"$OUTPUT_ROOT/launch_node.sh" <<'EOF'
@@ -125,7 +125,7 @@ chmod +x "$OUTPUT_ROOT/launch_node.sh"
 export REPO DATA_ROOT OUTPUT_ROOT NNODES MASTER_ADDR MASTER_PORT LAUNCH_MODE
 ```
 
-填写 `JOB_ID NODE RANK`。所有命令应尽快一起启动，避免部分 rank 长时间等待 rendezvous：
+Fill in each `JOB_ID NODE RANK` entry. Start all commands close together so that some ranks do not wait too long at the rendezvous:
 
 ```bash
 launches=(
@@ -149,16 +149,16 @@ for entry in "${launches[@]}"; do
 done
 ```
 
-若需要实验环境变量，在上面的 `spur run ... env` 参数中显式加入，确保每个节点一致。例如将以下两项放在 `LAUNCH_MODE=...` 旁边：
+Add experimental environment variables explicitly to the `spur run ... env` arguments above so that every node receives identical values. For example, place these next to `LAUNCH_MODE=...`:
 
 ```bash
 FSDP2_HSDP_FP8_ALL_REDUCE=e4m3 \
 FSDP2_HSDP_FP8_BLOCK_SIZE=1024 \
 ```
 
-## torchrun 与 primus-cli 的对应关系
+## How torchrun and primus-cli relate
 
-`run_with_docker.sh` 是两种模式的共同入口。
+`run_with_docker.sh` is the common entry point for both modes.
 
 ### Native torchrun
 
@@ -166,7 +166,7 @@ FSDP2_HSDP_FP8_BLOCK_SIZE=1024 \
 LAUNCH_MODE=native bash examples/mlperf/flux1/run_with_docker.sh
 ```
 
-容器内等价于：
+This is equivalent to the following command inside the container:
 
 ```bash
 torchrun \
@@ -185,16 +185,16 @@ torchrun \
 LAUNCH_MODE=primus bash examples/mlperf/flux1/run_with_docker.sh
 ```
 
-容器内等价于：
+This is equivalent to the following command inside the container:
 
 ```bash
 ./primus-cli direct -- train pretrain \
   --config examples/mlperf/flux1/flux.1_schnell_t2i-pretrain.yaml
 ```
 
-`primus-cli direct` 读取相同的 `NNODES`、`NODE_RANK`、`MASTER_ADDR`、`MASTER_PORT` 和 `GPUS_PER_NODE`，再构造 torchrun。切换模式时不要改 rank 或 rendezvous 设置。
+`primus-cli direct` reads the same `NNODES`, `NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT`, and `GPUS_PER_NODE` values and then constructs the torchrun command. Do not change rank or rendezvous settings when switching launch modes.
 
-## 监控和停止
+## Monitoring and cleanup
 
 ```bash
 while IFS=$'\t' read -r node job_id rank pid; do
@@ -205,19 +205,19 @@ done <"$OUTPUT_ROOT/launches.tsv"
 tail -f "$OUTPUT_ROOT"/*.launch.log
 ```
 
-优先检查 rank 0 日志中的配置摘要、32-rank DeviceMesh、首个训练 step，以及 `Traceback`、`RuntimeError`、`NCCL`、`GPU Hang` 或 OOM。
+Check the rank 0 log first for the configuration summary, the 32-rank DeviceMesh, and the first training step. Also search for `Traceback`, `RuntimeError`, `NCCL`, `GPU Hang`, and OOM errors.
 
-停止拆分 allocation 的运行时，只清理本次运行的命名容器或对应 step；共享 allocation 未经确认不要直接 `scancel`。例如在每个所属 allocation 上执行：
+To stop a run launched across separate allocations, remove only this run's named containers or steps. Do not directly `scancel` a shared allocation without confirmation. For example, run the following through each owning allocation:
 
 ```bash
 spur run --jobid=<job-id> --overlap -N1 -n1 --nodelist=<node> \
   docker rm -f flux-multinode-<rank>
 ```
 
-## 常见错误
+## Common failures
 
-- `Invalid config ... expected GBS`：`NNODES` 与所选 `FLUX_CONFIG` 不一致。
-- rendezvous timeout：检查 rank 是否完整且唯一、端口是否被占用、其他节点是否能访问 `MASTER_ADDR:MASTER_PORT`。
-- `ABI-4 libionic or /dev/infiniband is unavailable`：节点容器启动前的 RDMA 设备或 libionic 路径不满足要求。
-- Docker name conflict：为每次运行设置唯一的 `CONTAINER_NAME`，或清理上次残留容器。
-- 只有 rank 0 启动：不要把不同 job ID 的节点交给单个 `srun`；使用上面的 per-node `spur run` 方法。
+- `Invalid config ... expected GBS`: `NNODES` does not match the selected `FLUX_CONFIG`.
+- Rendezvous timeout: verify that every rank is present and unique, the port is unused, and every node can reach `MASTER_ADDR:MASTER_PORT`.
+- `ABI-4 libionic or /dev/infiniband is unavailable`: the node is missing the required RDMA device or libionic path before container startup.
+- Docker name conflict: choose a unique `CONTAINER_NAME` for each run or remove the stale container from the previous run.
+- Only rank 0 starts: do not pass nodes owned by different job IDs to one `srun`; use the per-node `spur run` procedure above.
