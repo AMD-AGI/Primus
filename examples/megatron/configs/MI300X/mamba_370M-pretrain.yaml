@@ -23,7 +23,7 @@ modules:
       log_avg_reset_interval: 50
 
       train_iters: 50
-      # MI300X max batch (8 GPUs): GBS=416, 258.6 TFLOP/s, 98.5% mem (BS=448 OOM)
+      # MI300X max batch (8 GPUs): GBS=416, 260.7 TFLOP/s, 98.5% mem (BS=448 OOM)
       micro_batch_size: 52
       global_batch_size: 416
 
