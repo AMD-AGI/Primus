@@ -23,11 +23,17 @@ WHAT (NO Automodel/diffusers fork):
   with NO edit to the submodule loop body. Each rank exports its own trace so the
   multi-rank collective report can correlate collectives across ranks.
 
-  Env-gated by ``PRIMUS_IDEOGRAM_PROFILE=1`` (default off). Installed via the
-  trainer's optional-hooks list. Idempotent; a default run is unaffected.
+  Env-gated (default off). Installed via the trainer's optional-hooks list.
+  Idempotent; a default run is unaffected.
+
+  Nothing here is Ideogram-specific -- ``TrainDiffusionRecipe`` is the shared
+  diffusion recipe -- so the wrapper also serves FLUX via the model-agnostic gate
+  below. It lives in this package only because Ideogram-4 needed it first.
 
 Activation / knobs (env):
-    PRIMUS_IDEOGRAM_PROFILE=1        enable the profiler wrapper
+    PRIMUS_DIFFUSION_PROFILE=1       enable the profiler wrapper (model-agnostic)
+    PRIMUS_IDEOGRAM_PROFILE=1        the same, under the name the published
+                                     Ideogram-4 sweep and runbook use
     PRIMUS_PROFILE_DIR=<dir>         per-rank trace output dir (default
                                      ./output/ideogram_profile/comms)
     PRIMUS_PROFILE_TAG=<tag>         subdir/prefix for this point (e.g. 1024_m32)
@@ -58,7 +64,20 @@ _TRUTHY = {"1", "true", "True", "yes", "on"}
 
 
 def is_profile_enabled() -> bool:
-    return os.getenv("PRIMUS_IDEOGRAM_PROFILE", "0") in _TRUTHY
+    """Whether to install the profiler wrapper.
+
+    Two gates, either of which is sufficient. What this module patches is
+    ``TrainDiffusionRecipe.run_train_validation_loop`` -- the SHARED diffusion recipe
+    loop -- and it finds the per-step boundary through the recipe's optimizer, so
+    nothing in it is specific to Ideogram-4. ``PRIMUS_DIFFUSION_PROFILE`` is the
+    model-agnostic name, used by the FLUX ladder. ``PRIMUS_IDEOGRAM_PROFILE`` is kept
+    because the published Ideogram-4 sweep was driven by it and its runbook still
+    names it.
+    """
+    return (
+        os.getenv("PRIMUS_DIFFUSION_PROFILE", "0") in _TRUTHY
+        or os.getenv("PRIMUS_IDEOGRAM_PROFILE", "0") in _TRUTHY
+    )
 
 
 def _flag(name: str, default: str = "0") -> bool:

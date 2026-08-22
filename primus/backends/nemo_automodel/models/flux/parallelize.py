@@ -20,11 +20,21 @@ WHAT this does (NO diffusers / Automodel fork):
   Registers a FLUX-specific parallelization strategy for the ``FluxTransformer2DModel``
   class via the submodule's own ``register_parallel_strategy`` entry point. The
   strategy wraps each dual-stream ``transformer_blocks`` block and each
-  single-stream ``single_transformer_blocks`` block in a NON-REENTRANT
-  ``checkpoint_wrapper`` (recompute on backward) BEFORE FSDP2 sharding, then shards
-  exactly like the in-tree Wan/Hunyuan diffusion strategies. Checkpointing only
-  happens when the recipe passes ``activation_checkpointing=True`` (i.e. the config
-  flag), so an AC-off run is unaffected.
+  single-stream ``single_transformer_blocks`` block (19 + 38 = 57) BEFORE FSDP2
+  sharding, then shards exactly like the in-tree Wan/Hunyuan diffusion strategies.
+  Checkpointing only happens when the recipe passes a truthy
+  ``activation_checkpointing``, so an AC-off run is unaffected.
+
+  ``activation_checkpointing`` accepts three settings, matching the Ideogram-4
+  strategy so the AC axis means the same thing in both:
+    ``true`` / ``full``  whole-block NON-REENTRANT recompute on backward (max
+                         memory saved, pays a full recompute tax)
+    ``selective``        op-level partial AC via the shared Automodel machinery:
+                         keep attention and half the matmuls, recompute the cheap
+                         ops (much less recompute, moderate extra memory)
+    ``false`` / ``off``  no checkpointing
+  False-like STRINGS are normalized, because a raw ``"false"`` arriving from the
+  CLI is otherwise truthy and would silently checkpoint an AC-off run.
 
   Env-gated by ``PRIMUS_FLUX_REAL_AC=1`` (default off). Off = current behavior
   (FLUX AC remains a no-op), which keeps the flag an explicit, reversible A/B lever.
@@ -122,19 +132,67 @@ def install() -> bool:
             # activations are recomputed on backward. Must happen BEFORE FSDP2
             # sharding so the module structure is stable when fully_shard indexes
             # params. NO_REENTRANT is required for torch.compile compatibility.
-            if activation_checkpointing:
-                wrapped = 0
-                for attr in _FLUX_BLOCK_ATTRS:
-                    blocks = getattr(model, attr, None)
-                    if blocks is None:
-                        continue
-                    for idx in range(len(blocks)):
-                        blocks[idx] = P.checkpoint_wrapper(
-                            blocks[idx],
-                            checkpoint_impl=P.CheckpointImpl.NO_REENTRANT,
-                        )
-                        wrapped += 1
-                logger.info("[PrimusFluxAC] wrapped %d FLUX blocks with activation checkpointing", wrapped)
+            # Normalize false-like strings: some CLI/config paths forward the flag as a
+            # raw string, and a non-empty "false" would otherwise be truthy and wrongly
+            # enable AC on a run whose whole purpose is to measure AC off.
+            # "true"/"full"/"selective" keep their meaning (see below).
+            ac_value = activation_checkpointing
+            if isinstance(ac_value, str) and ac_value.strip().lower() in {"false", "0", "off", "no", "none", ""}:
+                ac_value = False
+
+            if ac_value:
+                # FLUX keeps its dual-stream and single-stream blocks in two separate
+                # ModuleLists, so both are collected before wrapping. Order is stable
+                # (dual then single) to keep the logged count meaningful: 19 + 38 = 57.
+                blocks = [
+                    (attr, getattr(model, attr))
+                    for attr in _FLUX_BLOCK_ATTRS
+                    if getattr(model, attr, None) is not None
+                ]
+                if not blocks:
+                    logger.warning(
+                        "[PrimusFluxAC] activation_checkpointing requested but model has none of "
+                        "the block lists %s; nothing checkpointed.",
+                        ", ".join(_FLUX_BLOCK_ATTRS),
+                    )
+                elif P.is_selective_activation_checkpointing(ac_value):
+                    # PARTIAL / selective (TorchTitan-style, op-level) AC: save attention +
+                    # half the matmuls + comm collectives, recompute only the cheap ops -> far
+                    # less backward recompute than full AC at moderate extra memory. This is the
+                    # SHARED Automodel selective-AC machinery, the same lever Ideogram-4 uses,
+                    # which is what makes the AC axis comparable between the two studies.
+                    # The wrapper is tagged with SELECTIVE_AC_WRAPPER_FLAG so per-layer compile
+                    # compiles it OUTER (SAC INNER) and the partitioner honors the recompute
+                    # tags. has_kv_sharing=False: FLUX is a diffusion MMDiT with no KV cache.
+                    # The helper replaces each block by identity, so passing blocks from two
+                    # different ModuleLists in one call is safe.
+                    layers = [blk for _, lst in blocks for blk in lst]
+                    P.apply_selective_checkpointing_to_layers(
+                        model,
+                        layers,
+                        False,
+                        enable_compile=bool(kwargs.get("enable_compile", False)),
+                    )
+                    logger.info(
+                        "[PrimusFluxAC] wrapped %d FLUX blocks with SELECTIVE (partial) "
+                        "activation checkpointing",
+                        len(layers),
+                    )
+                else:
+                    # FULL AC: recompute the whole block on backward (max memory saved, at the
+                    # cost of a recompute tax). Default for activation_checkpointing True / "full".
+                    wrapped = 0
+                    for _, block_list in blocks:
+                        for idx in range(len(block_list)):
+                            block_list[idx] = P.checkpoint_wrapper(
+                                block_list[idx],
+                                checkpoint_impl=P.CheckpointImpl.NO_REENTRANT,
+                            )
+                            wrapped += 1
+                    logger.info(
+                        "[PrimusFluxAC] wrapped %d FLUX blocks with FULL activation checkpointing",
+                        wrapped,
+                    )
 
             if not mp_policy:
                 mp_policy = P.MixedPrecisionPolicy(
