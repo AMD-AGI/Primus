@@ -57,6 +57,13 @@ runtime:
   compile_dynamic: ${COMPILE_DYNAMIC}
   compile_output_head: ${COMPILE_OUTPUT_HEAD}
   fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD}
+  profile: ${PROFILE}
+  profile_rank: ${PROFILE_RANK}
+  profile_wait_steps: ${PROFILE_WAIT_STEPS}
+  profile_warmup_steps: ${PROFILE_WARMUP_STEPS}
+  profile_active_steps: ${PROFILE_ACTIVE_STEPS}
+  profile_output_dir: ${PROFILE_OUTPUT_DIR}
+  profile_with_stack: ${PROFILE_WITH_STACK}
 
 mlperf:
   enable: ${MLPERF_ENABLE}
