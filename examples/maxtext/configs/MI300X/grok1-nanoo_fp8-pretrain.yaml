@@ -45,7 +45,7 @@ modules:
 
       logits_dot_in_fp32: false
       dtype: "bfloat16"
-      quantization: "fp8" #"nanoo_fp8"
+      quantization: "nanoo_fp8"
       quantize_kvcache: false
       kv_quant_axis: "heads_and_dkv"
       kv_quant_dtype: "int8"
