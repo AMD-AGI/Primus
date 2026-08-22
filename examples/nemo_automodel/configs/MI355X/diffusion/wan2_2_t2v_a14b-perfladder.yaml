@@ -1,0 +1,19 @@
+# Wan 2.2 T2V A14B perf-ladder — synthetic throughput path (512×512×81).
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:wan2_2_t2v_a14b-perfladder}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: wan_perfladder_pre_trainer.yaml
+    model: wan2_2_t2v_a14b.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 24
+        local_batch_size: 1
+        global_batch_size: 8
+      checkpoint:
+        enabled: false

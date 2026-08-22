@@ -1,0 +1,22 @@
+# Wan 2.2 T2V A14B perf-ladder — real PusaV1 cache (S0/S6).
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:wan2_2_t2v_a14b-perfladder-real}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: wan_perfladder_real_pre_trainer.yaml
+    model: wan2_2_t2v_a14b.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 100
+        local_batch_size: 1
+        global_batch_size: 8
+      data:
+        dataloader:
+          cache_dir: /dataset/pusa_wan_512sq_81f
+      checkpoint:
+        enabled: false
