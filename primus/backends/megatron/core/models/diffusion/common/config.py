@@ -142,9 +142,7 @@ class BaseDiffusionConfig(TransformerConfig):
         # module -- so Megatron's "fp4 and fp8 cannot coexist" check never sees it, and
         # this is the only place the fp4 cross-check can happen.
         if self.mxfp4_to_fp8_switch_iter < 0:
-            raise ValueError(
-                f"mxfp4_to_fp8_switch_iter must be >= 0, got {self.mxfp4_to_fp8_switch_iter}."
-            )
+            raise ValueError(f"mxfp4_to_fp8_switch_iter must be >= 0, got {self.mxfp4_to_fp8_switch_iter}.")
         if self.mxfp4_to_fp8_switch_iter > 0 and not getattr(self, "fp4", None):
             raise ValueError(
                 f"mxfp4_to_fp8_switch_iter={self.mxfp4_to_fp8_switch_iter} requires fp4 to be "

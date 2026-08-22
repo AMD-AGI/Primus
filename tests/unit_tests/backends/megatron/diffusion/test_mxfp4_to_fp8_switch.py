@@ -497,9 +497,7 @@ class TestFp8ArmEquivalence:
         out_mx.backward(grad)
         out_fp8.backward(grad.clone())
         torch.testing.assert_close(x_mx.grad, x_fp8.grad, rtol=0, atol=0)
-        torch.testing.assert_close(
-            mxfp4_linear.weight.grad, fp8_linear.weight.grad, rtol=0, atol=0
-        )
+        torch.testing.assert_close(mxfp4_linear.weight.grad, fp8_linear.weight.grad, rtol=0, atol=0)
 
     @requires_mxfp4
     def test_flipping_the_flag_changes_the_result(self):
@@ -524,10 +522,9 @@ class TestFp8ArmEquivalence:
         linear._fp8_mode = True
         fp8_out = linear(x)[0]
 
-        assert not torch.equal(mxfp4_out, fp8_out), (
-            "MXFP4 and FP8 produced identical bits, which means the flag did not "
-            "change the dispatch"
-        )
+        assert not torch.equal(
+            mxfp4_out, fp8_out
+        ), "MXFP4 and FP8 produced identical bits, which means the flag did not change the dispatch"
 
 
 class TestNoGraphBreaks:

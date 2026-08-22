@@ -265,10 +265,7 @@ def prewarm_fp8_graphs(
 def _report_switch(args, iteration: Optional[int], converted: int, total: int) -> None:
     """Log the conversion. Peak memory is reported, never fed back into the decision."""
     peak_gib = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
-    _log(
-        f"iteration={iteration}: {converted}/{total} layers now FP8; "
-        f"peak allocated {peak_gib:.2f} GiB"
-    )
+    _log(f"iteration={iteration}: {converted}/{total} layers now FP8; peak allocated {peak_gib:.2f} GiB")
 
     # The MLPerf logger only exists when mlperf_mode is set, and the MXFP4 configs
     # this derives from do not set it. An unguarded emission would crash the run at
