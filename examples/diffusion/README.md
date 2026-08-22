@@ -1,6 +1,17 @@
 # Diffusion Examples
 
 This directory contains launch examples for the in-tree `diffusion` backend.
+The same model, data, and trainer code supports both Primus and native PyTorch
+launches. Primus examples below use `primus-cli`; the MLPerf launcher uses:
+
+```bash
+torchrun --standalone --nproc_per_node=8 \
+  examples/diffusion/train_native.py \
+  --config examples/mlperf/flux1/flux.1_schnell_t2i-native.yaml
+```
+
+The native YAML supports standard `$VAR` and `${VAR}` environment expansion
+and is normalized by the same `DiffusionArgBuilder` used by Primus.
 
 ## Common Launch Env
 

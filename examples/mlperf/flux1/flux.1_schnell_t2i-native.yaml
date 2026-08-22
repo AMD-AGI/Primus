@@ -1,0 +1,68 @@
+model:
+  name: flux.1-schnell
+  config:
+    config:
+      trainable_modules: dit
+      float8_recipe: ${FLUX_FLOAT8_RECIPE}
+      float8_gemm_backend: ${FLUX_FP8_GEMM_BACKEND}
+      guidance: 1.0
+      autoencoder_scale_factor: 0.3611
+      autoencoder_shift_factor: 0.1159
+
+metrics:
+  log_freq: ${LOG_FREQ}
+  enable_wandb: ${ENABLE_WANDB_LOGGER}
+
+training:
+  local_batch_size: ${LOCAL_BATCH_SIZE}
+  steps: ${MAX_STEPS}
+  num_train_epochs: 1000
+  gradient_accumulation_steps: ${GRADIENT_ACCUMULATION_STEPS}
+  output_dir: ${OUTPUT_DIR}
+  save_steps: ${SAVE_STEPS}
+  save_strategy: ${SAVE_STRATEGY}
+  save_total_limit: ${CHECKPOINT_KEEP_LATEST}
+  resume_from_checkpoint: ${RESUME_FROM_CHECKPOINT}
+  run_name: flux.1_schnell_t2i-native
+
+data:
+  dataset_path: ${DATASET_PATH}
+  eval_dataset_path: ${EVAL_DATASET_PATH}
+  empty_encodings_path: ${EMPTY_ENCODINGS_PATH}
+  prompt_dropout_prob: 0.1
+  img_size: 256
+
+parallelism:
+  sp_size: 1
+  dp_replicate: ${DP_REPLICATE}
+
+optimizer:
+  lr: ${LR}
+  weight_decay: 0.1
+  adam_beta2: 0.95
+
+lr_scheduler:
+  lr_scheduler_type: constant_with_warmup
+  warmup_steps: ${WARMUP_STEPS}
+
+runtime:
+  seed: ${SEED}
+  attention_backend: ${ATTENTION_BACKEND}
+  gradient_checkpointing: ${GRADIENT_CHECKPOINTING}
+  gradient_checkpointing_ratio: ${GRADIENT_CHECKPOINTING_RATIO}
+  compile_transformer_blocks: ${COMPILE_TRANSFORMER_BLOCKS}
+  compile_strategy: ${COMPILE_STRATEGY}
+  compile_backend: ${COMPILE_BACKEND}
+  compile_fullgraph: ${COMPILE_FULLGRAPH}
+  compile_dynamic: ${COMPILE_DYNAMIC}
+  compile_output_head: ${COMPILE_OUTPUT_HEAD}
+  fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD}
+
+mlperf:
+  enable: ${MLPERF_ENABLE}
+  performance_mode: ${FLUX_PERFORMANCE_MODE}
+  warmup_train_steps: ${MLPERF_WARMUP_TRAIN_STEPS}
+  warmup_validation_steps: ${MLPERF_WARMUP_VALIDATION_STEPS}
+  target_eval_loss: ${TARGET_ACCURACY}
+  eval_samples: ${VAL_CHECK_INTERVAL}
+  output_file: ${MLLOG_OUTPUT_FILE}

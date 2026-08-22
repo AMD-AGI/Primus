@@ -17,7 +17,15 @@ export NNODES=${NNODES:-1}
 export NODE_RANK=${NODE_RANK:-${SLURM_NODEID:-0}}
 export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 export MASTER_PORT=${MASTER_PORT:-29500}
-export CONFIG=${CONFIG:-examples/mlperf/flux1/flux.1_schnell_t2i-pretrain.yaml}
+export LAUNCH_MODE=${LAUNCH_MODE:-native}
+if [[ -z "${CONFIG:-}" ]]; then
+    if [[ "$LAUNCH_MODE" == "native" ]]; then
+        CONFIG=examples/mlperf/flux1/flux.1_schnell_t2i-native.yaml
+    else
+        CONFIG=examples/mlperf/flux1/flux.1_schnell_t2i-pretrain.yaml
+    fi
+fi
+export CONFIG
 export PRIMUS_WORKSPACE=${PRIMUS_WORKSPACE:-/output/primus_workspace}
 export DATASET_PATH=${DATASET_PATH:-/data/cc12m_preprocessed}
 export EVAL_DATASET_PATH=${EVAL_DATASET_PATH:-/data/coco_preprocessed}
@@ -61,7 +69,7 @@ if (( NNODES > 1 )) && [[ "${NCCL_IB_DISABLE:-0}" != "1" ]]; then
 fi
 
 env_names=(
-    FLUX_CONFIG NNODES NODE_RANK MASTER_ADDR MASTER_PORT GPUS_PER_NODE DP_REPLICATE CONFIG
+    FLUX_CONFIG LAUNCH_MODE NNODES NODE_RANK MASTER_ADDR MASTER_PORT GPUS_PER_NODE DP_REPLICATE CONFIG
     PRIMUS_WORKSPACE DATASET_PATH EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR
     MLLOG_OUTPUT_FILE FLUX_FLOAT8_RECIPE FLUX_FP8_GEMM_BACKEND ATTENTION_BACKEND
     LOCAL_BATCH_SIZE GRADIENT_ACCUMULATION_STEPS GLOBAL_BATCH_SIZE MAX_STEPS LR WARMUP_STEPS
@@ -111,5 +119,18 @@ exec docker run --rm --init --privileged \
             sync
             echo 3 > /proc/sys/vm/drop_caches
         fi
-        ./primus-cli direct -- train pretrain --config "$CONFIG"
+        if [[ "$LAUNCH_MODE" == "native" ]]; then
+            torchrun \
+              --nnodes="$NNODES" \
+              --node_rank="$NODE_RANK" \
+              --nproc_per_node="$GPUS_PER_NODE" \
+              --master_addr="$MASTER_ADDR" \
+              --master_port="$MASTER_PORT" \
+              examples/diffusion/train_native.py --config "$CONFIG"
+        elif [[ "$LAUNCH_MODE" == "primus" ]]; then
+            ./primus-cli direct -- train pretrain --config "$CONFIG"
+        else
+            echo "Unknown LAUNCH_MODE: $LAUNCH_MODE" >&2
+            exit 2
+        fi
     '

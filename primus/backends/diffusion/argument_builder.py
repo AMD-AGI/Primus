@@ -10,7 +10,15 @@ import copy
 from types import SimpleNamespace
 from typing import Any
 
-from primus.core.utils.yaml_utils import nested_namespace_to_dict
+
+def _namespace_to_dict(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _namespace_to_dict(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_namespace_to_dict(item) for item in value)
+    if isinstance(value, SimpleNamespace):
+        return {key: _namespace_to_dict(item) for key, item in vars(value).items()}
+    return value
 
 
 class DiffusionArgBuilder:
@@ -167,7 +175,7 @@ class DiffusionArgBuilder:
 
     def update(self, params: Any) -> None:
         if isinstance(params, SimpleNamespace):
-            self._params = nested_namespace_to_dict(params)
+            self._params = _namespace_to_dict(params)
         elif isinstance(params, dict):
             self._params = copy.deepcopy(params)
         else:

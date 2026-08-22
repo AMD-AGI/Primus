@@ -6,7 +6,7 @@ loss threshold of `0.586`.
 
 ## Docker image
 
-The launch scripts use `zirui3/primus-v26.3-flux:v0.4` by default. 
+The launch scripts use `zirui3/primus-v26.3-flux:v0.4` by default.
 
 ```bash
 docker pull zirui3/primus-v26.3-flux:v0.4
@@ -52,7 +52,10 @@ The MBS64 profile retains checkpoint ratio `0.25`. Both MBS32 profiles use
 ratio `0`, forward-input FP8 reuse, the qualified natural-layout wgrads, and
 MBS32 Inductor fusion benchmarking.
 
-Inside an allocation, select a configuration and use the same launcher:
+Inside an allocation, select a configuration and use the same launcher. The
+launcher invokes the diffusion backend directly with `torchrun`; it does not
+use the Primus CLI or runtime. Set `LAUNCH_MODE=primus` to run the same profile
+through `primus-cli` for integration validation.
 
 ```bash
 FLUX_CONFIG=config_1n_gbs512.sh \
@@ -73,7 +76,7 @@ For a short smoke test, append `MAX_STEPS=1 SAVE_STRATEGY=none` before `bash`.
 ## Submit the default four-node target
 
 ```bash
-REPO=/shared_nfs/zirui/code/primus-compile
+REPO=/shared_nfs/zirui/code/primus-flux-slim
 DATA_ROOT=/shared_nfs/zirui/data
 OUTPUT_ROOT=/shared_nfs/zirui/runs/flux-fp8-4n
 
@@ -86,27 +89,10 @@ sbatch -A amd-spur -p amd-spur --qos=amd-spur-qos \
 ```
 
 Add `--nodelist=node1,node2,node3,node4` only when specific idle nodes are
-required. 
+required.
 
 Common overrides include `MAX_STEPS`, `SEED`, `MASTER_PORT`, `SAVE_STRATEGY`,
 `SAVE_STEPS`, `RESUME_FROM_CHECKPOINT`, and `MLPERF_CLEAR_CACHES=false`.
-
-### Experimental FP8 gradient AllReduce
-
-The HSDP replica AllReduce can be compressed independently of the intra-node
-BF16 ReduceScatter:
-
-```bash
-FSDP2_HSDP_FP8_ALL_REDUCE=e4m3 \
-FSDP2_HSDP_FP8_BLOCK_SIZE=1024 \
-DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
-bash examples/mlperf/flux1/run_with_docker_slurm.sh
-```
-
-Omit the block-size variable for tensor-wise scaling. This remains opt-in:
-four-node qualification improved steady step time by at most 2.8%, but both
-modes needed one extra validation interval and did not improve MLPerf TTQ. See
-[`FP8_ALLREDUCE_RESULTS.md`](../../../FP8_ALLREDUCE_RESULTS.md).
 
 ## Files
 
@@ -118,7 +104,8 @@ examples/mlperf/flux1/
 ├── config_1n_gbs512.sh
 ├── config_1n_gbs1024.sh
 ├── config_4n_gbs1024.sh
-├── flux.1_schnell_t2i-pretrain.yaml
+├── flux.1_schnell_t2i-native.yaml
+├── flux.1_schnell_t2i-pretrain.yaml  # Primus CLI alternative
 ├── requirements.txt
 ├── run_with_docker.sh
 └── run_with_docker_slurm.sh
