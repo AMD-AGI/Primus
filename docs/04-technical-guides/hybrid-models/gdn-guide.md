@@ -256,8 +256,9 @@ The architecture-only YAML it extends from is `[primus/configs/models/megatron/z
 
 ```bash
 # inside the container, in /home/<user>/Primus
-EXP=examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml \
-  bash examples/run_pretrain.sh 2>&1 | tee primus_gdn.log
+./primus-cli direct --log_file primus_gdn.log \
+  -- train pretrain \
+  --config examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml
 ```
 
 This brings up `torchrun` with 8 ranks on the local node. Expected wall time on a healthy MI300X box: **~1h 54m** for the full 4768 iters.

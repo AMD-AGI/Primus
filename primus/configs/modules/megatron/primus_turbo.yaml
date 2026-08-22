@@ -6,25 +6,22 @@ enable_primus_turbo: false
 # enable turbo auto-tuning
 use_turbo_autotune: false
 
+# ===== Primus-Turbo Backend Selection =====
+# Format:
+#   1. Use default backend: turbo_gemm_backend=default
+#   2. All precisions use the same backend: turbo_gemm_backend=triton
+#   3. Each precision uses a different backend: turbo_gemm_backend=fp4:aiter,fp8:triton,other:hipblaslt
+
+# backend for turbo gemm.
+turbo_gemm_backend: default
+# backend for turbo grouped gemm.
+turbo_grouped_gemm_backend: default
+
 # ===== MXFP4 =====
 # Use stochastic rounding when quantizing MXFP4 gradients. This is disabled by
 # default and requires a Primus-Turbo grouped GEMM implementation with matching
 # activation and gradient layouts.
 mxfp4_gradient_stochastic_rounding: false
-
-# ===== MXFP4 Weight De-oscillation =====
-# Snap weight elements whose MXFP4-quantized value oscillates while the fp32
-# master barely moves (improves MXFP4 training convergence). Requires
-# fp4 + use_turbo_fp4_autocast + use_distributed_optimizer.
-weight_deosc: false
-# optimizer steps per observe/reset window
-weight_deosc_period: 200
-# DistRatio threshold (dist_w_qdq / dist_w) above which an element is snapped
-weight_deosc_ratio: 4.0
-# global optimizer step at which de-oscillation tracking starts
-weight_deosc_start_step: 0
-# log a summary every N periods (0 disables logging)
-weight_deosc_log_freq: 0
 
 # ===== Attention =====
 # operator switch

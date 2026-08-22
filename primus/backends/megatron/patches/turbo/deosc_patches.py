@@ -23,9 +23,8 @@ from primus.core.utils.module_utils import log_rank_0
 def _is_weight_deosc_can_patch(ctx: PatchContext) -> bool:
     args = get_args(ctx)
     fp4 = bool(getattr(args, "fp4", False))
-    use_turbo_fp4 = bool(getattr(args, "use_turbo_fp4_autocast", False))
     deosc = bool(getattr(args, "weight_deosc", False))
-    return fp4 and use_turbo_fp4 and deosc and is_primus_turbo_can_patch(ctx)
+    return fp4 and deosc and is_primus_turbo_can_patch(ctx)
 
 
 @register_patch(
