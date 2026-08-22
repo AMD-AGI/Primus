@@ -23,20 +23,19 @@ so `fla_layer_idx` maps to `gdn_idx = 2*i` and `mlp_idx = 2*i+1`.
 Usage
 -----
     python3 tools/hybrid/convert_kda_to_fla_hf.py \\
-        --checkpoint-path output/amd/root/zebra_llama_300M_kda_pure-pretrain/checkpoints/iter_0004768 \\
-        --output-dir output/kda_pure_300M_fla_hf \\
-        --config /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M_pure.json
+        --checkpoint-path output/amd/root/kda_300M_BF16-pretrain/checkpoints/iter_0004768 \\
+        --output-dir output/kda_300M_fla_hf \\
+        --config /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M.json
 
 Then evaluate with lm-eval:
     lm_eval --model hf \\
-        --model_args pretrained=output/kda_pure_300M_fla_hf,trust_remote_code=True,dtype=bfloat16 \\
+        --model_args pretrained=output/kda_300M_fla_hf,trust_remote_code=True,dtype=bfloat16 \\
         --tasks hellaswag,winogrande,piqa,arc_easy,arc_challenge \\
         --batch_size 16
 """
 
 import argparse
 import json
-import os
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -48,6 +47,10 @@ import torch
 _megatron_path = str(Path(__file__).resolve().parents[2] / "third_party" / "Megatron-LM")
 if _megatron_path not in sys.path:
     sys.path.insert(0, _megatron_path)
+_hybrid_tools = Path(__file__).resolve().parent
+if str(_hybrid_tools) not in sys.path:
+    sys.path.insert(0, str(_hybrid_tools))
+from fla_config_paths import fla_training_configs_dir, kda_fla_config
 
 
 def load_megatron_checkpoint(checkpoint_path: Path) -> dict:
@@ -275,8 +278,9 @@ def main():
         "--config",
         type=Path,
         default=None,
-        help="Path to FLA KDA config JSON. Defaults to kda_300M_pure.json "
-        "when '300m' appears in --checkpoint-path, else kda_1B_pure.json.",
+        help="Path to FLA KDA config JSON. Defaults to kda_300M.json "
+        "(fallback: kda_300M.json) when '300m' appears in --checkpoint-path, "
+        "else kda_1B.json (fallback: kda_1B.json).",
     )
     p.add_argument(
         "--tokenizer-src", type=Path, default=None, help="Optional tokenizer dir to copy into --output-dir."
@@ -284,12 +288,9 @@ def main():
     args = p.parse_args()
 
     if args.config is None:
-        fla_root = os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention"))
-        configs_dir = Path(fla_root) / "legacy" / "training" / "configs"
-        if "300m" in str(args.checkpoint_path).lower():
-            args.config = configs_dir / "kda_300M_pure.json"
-        else:
-            args.config = configs_dir / "kda_1B_pure.json"
+        configs_dir = fla_training_configs_dir()
+        size = "300M" if "300m" in str(args.checkpoint_path).lower() else "1B"
+        args.config = kda_fla_config(configs_dir, size=size)
         print(f"[auto] --config defaulted to {args.config}")
 
     print("=" * 78)
