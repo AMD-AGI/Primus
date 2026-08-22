@@ -201,7 +201,7 @@ modules:
       #
       # Profile of iter 15-16 (captured 2026-05-25) showed:
       #
-      #   GPU busy:                   ~43 %  (TFLOP/s = 261, peak 1300)
+      #   GPU busy:                   ~43 %
       #   aten::empty                 1500 calls × 2.3 ms = 3390 ms / iter
       #   aten::empty_like            1206 calls × 2.6 ms = 3114 ms / iter
       #   aten::empty_strided         1100 calls × 2.3 ms = 2575 ms / iter
@@ -211,7 +211,7 @@ modules:
       # because the PyTorch HIP allocator is constantly hitting hipMalloc/
       # hipFree at 81 % VRAM (156 GB / 192 GB). For comparison the 300M
       # run runs at 30 % VRAM, the allocator cache stays warm, every
-      # aten::empty is sub-µs, and it achieves 643 TFLOP/s (49 % of peak).
+      # aten::empty is sub-µs.
       #
       # Megatron's own FSDP docs explicitly call out this exact failure
       # mode (third_party/Megatron-LM/docs/user-guide/features/
@@ -376,8 +376,8 @@ modules:
       #
       # Measured impact (50-iter diag at empty_cache_interval=32,
       # 2026-05-26):
-      #   before fix:  7.65 s/iter  ( 262 TFLOP/s/GPU,  20% of peak)
-      #   after fix:   2.79 s/iter  ( 727 TFLOP/s/GPU,  56% of peak)
+      #   before fix:  7.65 s/iter
+      #   after fix:   2.79 s/iter
       #   speedup:     2.74×
       #   loss curve:  iter-1 bit-identical to baseline (no math impact)
       #   100B wall:   was 8.4 days → now 3.08 days  (~5.3 days saved)

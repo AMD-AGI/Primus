@@ -24,7 +24,7 @@ modules:
       log_avg_reset_interval: 50
 
       # Training schedule — FLA reference (4 GPUs): batch=16 → GBS=64
-      # MI300X max batch (8 GPUs): GBS=448, ~646 TFLOP/s, 94.5% mem (BS=512 OOM)
+      # MI300X max batch (8 GPUs): GBS=448, 94.5% mem (BS=512 OOM)
       train_iters: 50
       micro_batch_size: 56
       global_batch_size: 448
