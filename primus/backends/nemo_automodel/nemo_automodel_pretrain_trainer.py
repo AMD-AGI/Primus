@@ -77,6 +77,8 @@ class NemoAutomodelPretrainTrainer(BaseTrainer):
             (f"{_PKG}.distributed.fsdp2_reshard", "FSDP2 reshard_after_forward repair"),
             # FLUX
             (f"{_PKG}.models.flux.parallelize", "FLUX real activation checkpointing"),
+            # Wan 2.2
+            (f"{_PKG}.models.wan.parallelize", "Wan selective AC + reshard_after_forward repair"),
             # Ideogram-4
             (f"{_PKG}.models.ideogram4.attention", "Ideogram-4 var-len flash attention"),
             (f"{_PKG}.models.ideogram4.adapter", "Ideogram-4 flow-matching adapter"),
