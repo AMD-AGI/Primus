@@ -327,6 +327,36 @@ def patch_mlperf_warmup(ctx: PatchContext):
             )
         _log(f"Completed {warmup_steps} warmup steps")
 
+        # ---- 4b. Pre-warm the FP8 graph for the MXFP4 -> FP8 switch ----
+        # Hosted here because this is the only place that runs a real grad-enabled
+        # step at the production micro_batch_size. automatic_dynamic_shapes is on,
+        # so pre-warming anywhere else (a small dummy batch) would guard on
+        # different shapes, mark dims dynamic, and change the graph for everyone.
+        # The optimizer is already neutered and parameters are restored below, so
+        # the extra step cannot perturb the measured run.
+        if int(getattr(primus_args, "mxfp4_to_fp8_switch_iter", 0) or 0) > 0 and getattr(
+            primus_args, "mxfp4_to_fp8_prewarm", True
+        ):
+            from primus.backends.megatron.patches.mxfp4_to_fp8_switch_patches import (
+                prewarm_fp8_graphs,
+            )
+
+            _log("Pre-warming the FP8 graph for the MXFP4 -> FP8 switch")
+            prewarm_fp8_graphs(
+                models,
+                lambda: _wrapped_chain(
+                    forward_step_func,
+                    synthetic_iter,
+                    model,
+                    optimizer,
+                    opt_param_scheduler,
+                    config,
+                    forward_backward_func,
+                    iteration=iteration,
+                ),
+                order=getattr(primus_args, "mxfp4_to_fp8_order", "deep_to_shallow"),
+            )
+
         # ---- 5. Restore optimizer ----
         _restore_optimizer(optimizer, saved_opt)
         _reset_optimizer_state(optimizer)
