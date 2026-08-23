@@ -547,6 +547,16 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             }
         )
 
+        # FP6/MXFP6 settings. No recipe field to validate: E2M3 with per-1x32 block
+        # scales along the contraction axis is the only MXFP6 configuration the A6W6
+        # kernels implement, so there is nothing for the YAML to choose between.
+        config_params.update(
+            {
+                "fp6": getattr(params, "fp6", None),
+                "mxfp6_backward_precision": getattr(params, "mxfp6_backward_precision", "mxfp6"),
+            }
+        )
+
         # Sensitive layer configuration
         config_params.update(
             {
@@ -742,6 +752,8 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "fp4_recipe",
                 "mxfp4_backward_precision",
                 "mxfp4_gradient_stochastic_rounding",
+                "fp6",
+                "mxfp6_backward_precision",
                 "sensitive_layers_enabled",
                 "sensitive_layers_start",
                 "sensitive_layers_end",
