@@ -17,9 +17,18 @@ model:
   mode: pretrain
   # Explicit model family (used by the recipe for PEFT and cache validation).
   model_type: flux
-  # FLUX joint attention. `flash` is the dense, backend-stable choice on gfx950
-  # and is what the nondeterministic-bf16 attention hook re-binds
-  # (PRIMUS_ATTN_NONDETERMINISTIC=1) for the throughput A/B. Falls back cleanly.
+  # FLUX joint attention. `flash` is the dense, backend-stable choice on gfx950,
+  # and is deliberately kept here rather than switched to `aiter`:
+  #
+  #   - With PRIMUS_ATTN_NONDETERMINISTIC=1 (what the example launch lines set,
+  #     and the recommended way to run this model) the hook rebinds the FLASH
+  #     backend onto aiter's non-deterministic kernel, so `flash` and `aiter`
+  #     execute the same thing and the name here makes no difference.
+  #   - Without that variable, `flash` gives a working deterministic backward via
+  #     Composable Kernel, whereas `aiter` inherits aiter's deterministic=True
+  #     default and OOMs on the split-K dQ accumulator at ordinary shapes.
+  #
+  # So `flash` is the only value that is correct in both cases. Falls back cleanly.
   attention_backend: flash
   # fp32 master + bf16 compute (canonical pretraining precision, GB300-comparable).
   torch_dtype: float32

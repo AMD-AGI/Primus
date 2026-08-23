@@ -13,12 +13,30 @@
 #
 # Launch (inside the Primus container, 8 GPUs free):
 #   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   PRIMUS_ATTN_NONDETERMINISTIC=1 \
 #   GPUS_PER_NODE=8 \
 #   EXP=examples/nemo_automodel/configs/MI355X/diffusion/flux_1_dev-pretrain.yaml \
 #   bash examples/run_pretrain.sh
 #
-# Attention A/B: add PRIMUS_ATTN_NONDETERMINISTIC=1 to the launch env to enable the
-# nondeterministic bf16 flash-attention backward (numerically equivalent, faster).
+# On PRIMUS_ATTN_NONDETERMINISTIC=1, which the launch line above now sets:
+# it swaps the attention backward for aiter's atomics-based one. This is the
+# faster path by a margin that grows with sequence length, since it scales with
+# attention's share of the step -- small at 256x256, large at 2048x2048.
+#
+# The name is accurate and the trade is real: the backward is NOT bitwise
+# reproducible run to run, because the dQ/dK/dV reduction order is not fixed.
+# It is unbiased, and it is what the Wan 2.2 preset already ships with. Drop the
+# variable to get a deterministic backward via the `flash` backend, at the cost
+# of the throughput above.
+#
+# Note that `deterministic` here is not the same axis as the attention backend.
+# Setting model.attention_backend to `aiter` WITHOUT this variable is not a
+# faster middle ground and is in fact unusable: aiter's flash_attn_func defaults
+# to deterministic=True and diffusers' aiter backend does not override it, so the
+# backward asks for a split-K dQ accumulator that runs to hundreds of GiB and
+# OOMs at ordinary training shapes. Leave the backend at `flash` and use this
+# variable, which rebinds the flash backend onto the aiter kernel anyway.
+#
 # Remove step_scheduler.max_steps to train full epochs instead of a benchmark cap.
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
