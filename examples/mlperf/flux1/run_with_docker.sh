@@ -82,6 +82,7 @@ env_names=(
     LOCAL_BATCH_SIZE GRADIENT_ACCUMULATION_STEPS GLOBAL_BATCH_SIZE MAX_STEPS LR WARMUP_STEPS
     GRADIENT_CHECKPOINTING GRADIENT_CHECKPOINTING_RATIO COMPILE_TRANSFORMER_BLOCKS COMPILE_STRATEGY
     COMPILE_BACKEND COMPILE_FULLGRAPH COMPILE_DYNAMIC COMPILE_OUTPUT_HEAD TORCH_COMPILE_MODE
+    TORCHINDUCTOR_CACHE_DIR TORCHINDUCTOR_CACHE_SEED TORCHINDUCTOR_CACHE_EXPORT
     FSDP2_RESHARD_AFTER_FORWARD FSDP2_REDUCE_DTYPE
     PROFILE PROFILE_RANK PROFILE_WAIT_STEPS PROFILE_WARMUP_STEPS PROFILE_ACTIVE_STEPS
     PROFILE_OUTPUT_DIR PROFILE_WITH_STACK FSDP2_HSDP_FP8_ALL_REDUCE FSDP2_HSDP_FP8_BLOCK_SIZE PIN_FLUX_T5_STACK
@@ -123,6 +124,20 @@ exec docker run --rm --init --privileged \
     "$DOCKER_IMAGE" bash -lc '
         set -euo pipefail
         mkdir -p "$OUTPUT_DIR"
+        if [[ -n "${TORCHINDUCTOR_CACHE_SEED:-}" ]]; then
+            export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor-cache
+            rm -rf "$TORCHINDUCTOR_CACHE_DIR"
+            mkdir -p "$TORCHINDUCTOR_CACHE_DIR"
+            if [[ -d "$TORCHINDUCTOR_CACHE_SEED" ]]; then
+                cp -a "$TORCHINDUCTOR_CACHE_SEED/." "$TORCHINDUCTOR_CACHE_DIR/"
+            elif [[ -f "$TORCHINDUCTOR_CACHE_SEED" ]]; then
+                tar --zstd -xf "$TORCHINDUCTOR_CACHE_SEED" -C "$TORCHINDUCTOR_CACHE_DIR"
+            else
+                echo "Missing Inductor cache seed: $TORCHINDUCTOR_CACHE_SEED" >&2
+                exit 1
+            fi
+            echo "[flux1] loaded Inductor cache seed into $TORCHINDUCTOR_CACHE_DIR"
+        fi
         if [[ "$MLPERF_CLEAR_CACHES" == "true" ]]; then
             sync
             echo 3 > /proc/sys/vm/drop_caches
@@ -140,5 +155,16 @@ exec docker run --rm --init --privileged \
         else
             echo "Unknown LAUNCH_MODE: $LAUNCH_MODE" >&2
             exit 2
+        fi
+        if [[ -n "${TORCHINDUCTOR_CACHE_EXPORT:-}" && "$NODE_RANK" == "0" ]]; then
+            [[ -n "${TORCHINDUCTOR_CACHE_DIR:-}" ]] || {
+                echo "TORCHINDUCTOR_CACHE_EXPORT requires a cache directory or seed" >&2
+                exit 1
+            }
+            tmp_export="$TORCHINDUCTOR_CACHE_EXPORT.tmp.$$"
+            rm -f "$tmp_export"
+            tar --exclude=./triton --zstd -cf "$tmp_export" -C "$TORCHINDUCTOR_CACHE_DIR" .
+            mv "$tmp_export" "$TORCHINDUCTOR_CACHE_EXPORT"
+            echo "[flux1] exported Inductor cache to $TORCHINDUCTOR_CACHE_EXPORT"
         fi
     '
