@@ -256,6 +256,27 @@ class PrimusTurboMXFP4LocalSpecProvider(LocalSpecProvider):
         return PrimusTurboLocalAttention
 
 
+class PrimusTurboMXFP6LocalSpecProvider(LocalSpecProvider):
+    """
+    Compile-friendly MXFP6 (E2M3) spec: Primus Turbo attention + MXFP6 linear layers.
+    NO TransformerEngine. NO global FP6 state in forward path.
+    Requires tensor_model_parallel_size=1, and M/N/K all multiples of 256.
+    """
+
+    def column_parallel_linear(self) -> type:
+        from .primus_turbo_mxfp6_local import MXFP6ColumnParallelLinear
+
+        return MXFP6ColumnParallelLinear
+
+    def row_parallel_linear(self) -> type:
+        from .primus_turbo_mxfp6_local import MXFP6RowParallelLinear
+
+        return MXFP6RowParallelLinear
+
+    def core_attention(self) -> type:
+        return PrimusTurboLocalAttention
+
+
 class PrimusTurboFloat8LocalSpecProvider(LocalSpecProvider):
     """
     Compile-friendly FP8 spec: Primus Turbo attention + FP8 linear layers.

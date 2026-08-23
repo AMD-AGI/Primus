@@ -81,6 +81,15 @@ try:
 except ImportError:
     PrimusTurboMXFP4LocalSpecProvider = None
 
+# MXFP6 in its own guard for the same reason, and additionally because it needs an
+# aiter carrying the A6W6 kernels (PR #4859), which is newer than the pinned release.
+try:
+    from primus.backends.megatron.core.extensions.primus_turbo_local_spec import (
+        PrimusTurboMXFP6LocalSpecProvider,
+    )
+except ImportError:
+    PrimusTurboMXFP6LocalSpecProvider = None
+
 
 class MMDiTLayer(TransformerLayer):
     """
@@ -536,6 +545,25 @@ def get_flux_layer_spec(
                 backend = PrimusTurboMXFP4LocalSpecProvider()
 
                 # Resolve sensitive layer backend
+                sensitive_precision = getattr(config, "sensitive_layer_precision", "bf16")
+                if sensitive_precision == "tw_fp8":
+                    sensitive_backend = PrimusTurboFloat8LocalSpecProvider()
+                elif sensitive_precision == "bf16":
+                    sensitive_backend = PrimusTurboLocalSpecProvider()
+            elif getattr(config, "fp6", None) is not None:
+                # Unlike fp4, an unavailable MXFP6 provider is fatal rather than a
+                # silent fall-through to bf16: fp6 is Primus-owned and set explicitly,
+                # so quietly training in a different precision than asked for would be
+                # worse than failing. The usual cause is an aiter without A6W6.
+                if PrimusTurboMXFP6LocalSpecProvider is None:
+                    raise RuntimeError(
+                        f"config.fp6={config.fp6!r} was requested but "
+                        "PrimusTurboMXFP6LocalSpecProvider could not be imported. MXFP6 "
+                        "needs Primus-Turbo with gemm_fp6 and an aiter carrying the A6W6 "
+                        "kernels from https://github.com/ROCm/aiter/pull/4859."
+                    )
+                backend = PrimusTurboMXFP6LocalSpecProvider()
+
                 sensitive_precision = getattr(config, "sensitive_layer_precision", "bf16")
                 if sensitive_precision == "tw_fp8":
                     sensitive_backend = PrimusTurboFloat8LocalSpecProvider()
