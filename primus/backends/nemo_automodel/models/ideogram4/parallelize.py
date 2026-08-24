@@ -30,6 +30,9 @@ WHAT (NO diffusers / Automodel fork):
 
 Activation (env, no config schema change):
     PRIMUS_IDEOGRAM_REAL_AC=1   register the real-AC Ideogram parallelization strategy
+    PRIMUS_IDEOGRAM_AC_EVERY=n  with full AC, checkpoint only every nth block, trading
+                                memory against recompute linearly instead of all-or-
+                                nothing (see ``ideogram_ac_stride``)
 """
 from __future__ import annotations
 
@@ -46,6 +49,38 @@ _IDEOGRAM_BLOCK_ATTR = "layers"
 
 def is_ideogram_real_ac_enabled() -> bool:
     return os.getenv("PRIMUS_IDEOGRAM_REAL_AC", "0") in _TRUTHY
+
+
+def ideogram_ac_stride() -> int:
+    """Blocks between checkpoints for partial AC, or 0 to checkpoint every block.
+
+    ``activation_checkpointing`` is off / selective / full, and at long sequence lengths
+    none of those is the right size. At 2048 with a batch of 2 the AC-off configuration
+    runs at 90.5% of HBM, so it needs to give back roughly 38 GB to reach a safe
+    occupancy; full AC gives back 205 GB and selective still gives back 115 GB. Both buy
+    far more memory than that and charge recompute for all of it.
+
+    The axis that IS the right size is which blocks get wrapped. Peak activation memory
+    is reached at the end of forward with every block's activations simultaneously live,
+    so checkpointing k of the N blocks sheds k/N of them and costs k/N of the recompute.
+    Measured on the 34-block Ideogram-4 DiT at 2048 / mbs 2: a flat 6.3 GB and 0.76% of
+    step time per block, linear from 0 to 12 blocks, which places the configuration
+    anywhere between 66% and 91% of HBM at a price that can be read off a line.
+
+    Expressed as a stride rather than a count so it does not depend on the block count:
+    ``PRIMUS_IDEOGRAM_AC_EVERY=n`` wraps indices 0, n, 2n, ... 1 (or unset) means every
+    block, which is plain full AC.
+    """
+    raw = os.getenv("PRIMUS_IDEOGRAM_AC_EVERY", "").strip()
+    if not raw:
+        return 0
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"PRIMUS_IDEOGRAM_AC_EVERY must be an integer, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"PRIMUS_IDEOGRAM_AC_EVERY must be >= 1, got {value}")
+    return 0 if value == 1 else value
 
 
 def install() -> bool:
@@ -149,17 +184,31 @@ def install() -> bool:
                 else:
                     # FULL AC: recompute the whole block on backward (max memory saved, at the
                     # cost of a recompute tax). Default for activation_checkpointing True / "full".
+                    # A stride wraps only every nth block, trading the two linearly rather than
+                    # all-or-nothing -- see ideogram_ac_stride() for why that axis exists.
+                    stride = ideogram_ac_stride()
                     wrapped = 0
                     for idx in range(len(blocks)):
+                        if stride and idx % stride:
+                            continue
                         blocks[idx] = P.checkpoint_wrapper(
                             blocks[idx],
                             checkpoint_impl=P.CheckpointImpl.NO_REENTRANT,
                         )
                         wrapped += 1
-                    logger.info(
-                        "[PrimusIdeogramAC] wrapped %d Ideogram blocks with FULL activation checkpointing",
-                        wrapped,
-                    )
+                    if stride:
+                        logger.info(
+                            "[PrimusIdeogramAC] wrapped %d of %d Ideogram blocks with FULL "
+                            "activation checkpointing (every %d)",
+                            wrapped,
+                            len(blocks),
+                            stride,
+                        )
+                    else:
+                        logger.info(
+                            "[PrimusIdeogramAC] wrapped %d Ideogram blocks with FULL activation checkpointing",
+                            wrapped,
+                        )
 
             if not mp_policy:
                 mp_policy = P.MixedPrecisionPolicy(
