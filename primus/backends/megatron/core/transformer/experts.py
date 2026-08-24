@@ -46,10 +46,11 @@ class PrimusGroupedMLP(TEGroupedMLP):
         # NOTE: use_turbo_fused_act_with_probs is prioritized over use_te_activation_func and bias_activation_fusion
         self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
         self.moe_router_padding_for_quantization = args.moe_router_padding_for_quantization
-        self.turbo_grouped_gemm_without_padding = getattr(args, "turbo_grouped_gemm_without_padding", False)
         # PrimusTurbo grouped GEMMs consume the original GPU tokens_per_expert
         # tensor for every supported quantization recipe. Keep TE's explicit
         # zero-padding fallback only when the no-padding path is not enabled.
+        self.turbo_grouped_gemm_without_padding = getattr(args, "turbo_grouped_gemm_without_padding", False)
+        self.turbo_fused_grouped_gemm = getattr(args, "turbo_fused_grouped_gemm", False)
 
     def _use_explicit_quantization_padding(self) -> bool:
         """Whether this forward must pad expert groups before quantization."""
@@ -150,7 +151,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
                 activation = "gelu"
             else:
                 raise ValueError(
-                    "Only support fusion of swiglu and gelu in PrimusGroupedMLP when `use_turbo_fused_act_with_probs` is True."
+                    "Only support fusion of silu and gelu in PrimusGroupedMLP when `use_turbo_fused_act_with_probs` is True."
                 )
 
             # `forward()` unsqueeze(-1)'s `permuted_probs` to [tokens, 1] so the non-fused
@@ -193,6 +194,45 @@ class PrimusGroupedMLP(TEGroupedMLP):
         Return:
             output (torch.Tensor): The output of the local experts.
         """
+
+        if self.turbo_fused_grouped_gemm:
+            assert (
+                tokens_per_expert.device == permuted_local_hidden_states.device
+            ), "tokens_per_expert and permuted_local_hidden_states must be on the same device"
+
+            if self.activation_func == F.silu and self.config.gated_linear_unit:
+                activation = "silu"
+            else:
+                raise ValueError(
+                    "Only support fusion of silu and gelu in PrimusGroupedMLP when `use_turbo_fused_act_with_probs` is True."
+                )
+
+            from primus_turbo.pytorch.ops.grouped_mlp_fp8 import grouped_mlp_fp8
+
+            from primus.backends.megatron.core.extensions.primus_turbo import (
+                PrimusTurboLowPrecisionGlobalStateManager,
+            )
+
+            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+            assert (
+                quant_config.current_scaling()
+            ), "turbo_fused_grouped_gemm only supports current scaling currently"
+
+            output = grouped_mlp_fp8(
+                permuted_local_hidden_states,
+                self.linear_fc1.weights,
+                self.linear_fc2.weights,
+                tokens_per_expert,
+                probs=permuted_probs,
+                trans_w1=True,
+                trans_w2=True,
+                config=quant_config.data(),
+                activation=activation,
+                fuse_wgrad_accum_pattern="megatron",
+            )
+
+            return output, None
+
         use_explicit_quantization_padding = self._use_explicit_quantization_padding()
         if use_explicit_quantization_padding:
             # NOTE: When moe_router_padding_for_quantization is true the token is padded. So we can skip the padding here to reduce cpu sync.
