@@ -49,8 +49,8 @@ modules:
       # profile
       profile: ${PRIMUS_PROFILE:False}
       use_pytorch_profiler: ${PRIMUS_PROFILE:False}
-      profile_step_end: ${PRIMUS_PROFILE_STEP_END:32}
-      profile_step_start: ${PRIMUS_PROFILE_STEP_START:16}
+      profile_step_start: ${PRIMUS_PROFILE_STEP_START:10}
+      profile_step_end: ${PRIMUS_PROFILE_STEP_END:11}
       profile_ranks: [0]
 
       # enable fp8 training
@@ -192,6 +192,7 @@ modules:
       # hipBLASLt, which is where each backend is faster on these shapes.
       use_turbo_norm_te_linear: ${USE_TURBO_NORM_TE_LINEAR:true}
       use_turbo_fused_act_with_probs : true
+      turbo_fused_grouped_gemm: true
 
       # deepep
       use_turbo_deepep: false
