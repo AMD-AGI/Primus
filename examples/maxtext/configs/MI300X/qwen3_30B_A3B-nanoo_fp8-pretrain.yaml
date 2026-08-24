@@ -35,7 +35,7 @@ modules:
 
       # training
       max_target_length: 4096
-      per_device_batch_size: 2
+      per_device_batch_size: 4
       remat_policy: "minimal"
       sparse_matmul: false
       megablox: false

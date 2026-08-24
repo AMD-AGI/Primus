@@ -3,12 +3,6 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:gemma4_26B-fp8-pretrain}
 workspace: ./output
 
-# STATUS (MI300X / gfx942): DOES NOT RUN — blocked upstream.
-# MoE fp8 path hits UnexpectedTracerError: RoutedMoE.dense_matmul creates fp8
-# einsum variables inside a traced call, leaking amax-history tensors.
-# Specific to gemma4 (its internal layer scan adds another transform).
-# Other MoE fp8 configs (mixtral, qwen3) train fine. bf16 works; use that.
-# Potential fix: try scan_layers: false, or wait for upstream maxtext fix.
 
 modules:
   pre_trainer:
@@ -43,8 +37,7 @@ modules:
       # training
       attention: "cudnn_flash_te"
       max_target_length: 4096
-      # MI300X has less HBM (192GB) than MI355X; conservative default, untuned on gfx942.
-      per_device_batch_size: 1
+      per_device_batch_size: 16
       remat_policy: "full"
       sparse_matmul: false
       megablox: false
