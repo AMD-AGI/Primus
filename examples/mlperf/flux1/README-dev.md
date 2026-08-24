@@ -210,6 +210,54 @@ Crusoe nodes may still warn that `iommu=pt` is missing; DMA-BUF registration
 has been validated without that kernel option. Override `NCCL_DMABUF_ENABLE=0`
 to compare against the host-staged path.
 
+## Prewarming the max-autotune cache
+
+Do not let all 32 ranks start `max-autotune-no-cudagraphs` from an empty cache;
+rank progress skew can time out collectives. Build a seed on one idle MI355X GPU:
+
+```bash
+CACHE_DIR=/shared_nfs/zirui/runs/flux-inductor-seed
+rm -rf "$CACHE_DIR"
+mkdir -p "$CACHE_DIR"
+
+docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
+  --ipc=host --shm-size=20G \
+  -e HIP_VISIBLE_DEVICES=0 \
+  -e PYTHONPATH=/workspace/Primus \
+  -e TORCHINDUCTOR_CACHE_DIR="$CACHE_DIR" \
+  -e TORCHINDUCTOR_BENCHMARK_FUSION=1 \
+  -e PRIMUS_FLUX_REUSE_FP8_INPUT=1 \
+  -e PRIMUS_FLUX_AITER_ATOMIC_FP32=0 \
+  -v "$REPO:/workspace/Primus" -v /shared_nfs:/shared_nfs \
+  -w /workspace/Primus zirui3/primus-v26.3-flux:v0.4 \
+  python examples/mlperf/flux1/prewarm_inductor_cache.py
+```
+
+Use the seed for a one-step four-node bootstrap and export the exact distributed
+graph cache as one archive:
+
+```bash
+TORCHINDUCTOR_CACHE_SEED="$CACHE_DIR" \
+TORCHINDUCTOR_CACHE_EXPORT="$CACHE_DIR-exact.tar.zst" \
+MAX_STEPS=1 MLPERF_ENABLE=false SAVE_STRATEGY=none \
+DATA_ROOT="$DATA_ROOT" OUTPUT_ROOT="$OUTPUT_ROOT" \
+LAUNCH_MODE=native bash examples/mlperf/flux1/run_with_docker_slurm.sh
+```
+
+Use the exact archive for performance or E2E runs:
+
+```bash
+TORCHINDUCTOR_CACHE_SEED="$CACHE_DIR-exact.tar.zst" \
+DATA_ROOT="$DATA_ROOT" OUTPUT_ROOT="$OUTPUT_ROOT" \
+LAUNCH_MODE=native bash examples/mlperf/flux1/run_with_docker_slurm.sh
+```
+
+The launcher extracts the seed into container-local `/tmp` before `torchrun`.
+Do not point 32 ranks directly at one writable NFS cache; concurrent Triton
+metadata updates can produce stale file handles or corrupt JSON. Rebuild the
+cache when the image, PyTorch/Triton/FlyDSL versions, model graph, MBS, or
+compile settings change.
+
 ## Monitoring and cleanup
 
 ```bash
