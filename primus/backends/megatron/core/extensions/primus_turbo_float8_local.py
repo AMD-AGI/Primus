@@ -29,6 +29,8 @@ import triton
 import triton.language as tl
 from megatron.core.enums import Fp8Recipe
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
+
+from primus.backends.megatron.core.extensions import fp8_amax_watch
 from primus_turbo.pytorch.core.backend import BackendType
 from primus_turbo.pytorch.core.low_precision import (
     Float8QuantConfig,
@@ -1473,6 +1475,10 @@ def _stage_and_launch_async_allreduce(registry):
     r.staged_amaxes_3n[1].copy_(torch.stack([m.staged_weight_amax for m in r.modules]))
     r.staged_amaxes_3n[2].copy_(torch.stack([m.staged_grad_amax for m in r.modules]))
 
+    # Taken before the all-reduce writes over them, so the record can say
+    # whether a spike started on this rank or arrived from another one.
+    fp8_amax_watch.note_local_amaxes(r.staged_amaxes_3n)
+
     if r.reduce_amax and r.amax_reduce_group is not None:
         handle = torch.distributed.all_reduce(
             r.staged_amaxes_3n,
@@ -1497,6 +1503,9 @@ def _wait_and_compute_scales(registry, handle):
     if handle is not None:
         handle.wait()
 
+    watching = fp8_amax_watch.enabled()
+    scales_before = r.scales_3n.detach().clone() if watching else None
+
     if r.algo == "most_recent" and r.history_len == 1:
         staged_input = r.staged_amaxes_3n[0]
         staged_weight = r.staged_amaxes_3n[1]
@@ -1514,6 +1523,15 @@ def _wait_and_compute_scales(registry, handle):
             m.scale_input.fill_(new_input[i].item())
             m.scale_weight.fill_(new_weight[i].item())
             m.scale_grad.fill_(new_grad[i].item())
+
+        if watching:
+            fp8_amax_watch.observe(
+                r,
+                r.staged_amaxes_3n,
+                scales_before,
+                torch.stack([new_input, new_weight, new_grad]),
+                "batch_compute_scales",
+            )
     else:
         N = r.n
         H = r.history_len
@@ -1537,6 +1555,13 @@ def _wait_and_compute_scales(registry, handle):
             m.scale_input.fill_(r.scales_3n[0, i].item())
             m.scale_weight.fill_(r.scales_3n[1, i].item())
             m.scale_grad.fill_(r.scales_3n[2, i].item())
+
+        if watching:
+            # Called before the history index advances, so history_nonfinite
+            # counts the ring the scale was actually taken from.
+            fp8_amax_watch.observe(
+                r, r.staged_amaxes_3n, scales_before, r.scales_3n, "fused_kernel"
+            )
 
         r._history_idx = (r._history_idx + 1) % H
         for m in r.modules:

@@ -29,7 +29,9 @@ Patch 2 -- Grad-zero stream overlap + data HtoD prefetch:
 """
 
 import torch
+from primus_turbo.pytorch.core import fp8_nan_watch as turbo_nan_watch
 
+from primus.backends.megatron.core.extensions import fp8_amax_watch
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -154,6 +156,12 @@ def patch_delayed_fp8_update(ctx: PatchContext):
         iteration=None,
     ):
         nonlocal _registry
+        # Stamp both watches with the training step. Without this their records
+        # carry a call index, which cannot be lined up against a training log,
+        # and the first question anyone asks of a NaN is which step it began on.
+        if iteration is not None:
+            fp8_amax_watch.set_step(iteration)
+            turbo_nan_watch.set_step(iteration)
         if not _cached_delayed_modules:
             _cached_delayed_modules.extend(
                 m
