@@ -194,6 +194,22 @@ This is equivalent to the following command inside the container:
 
 `primus-cli direct` reads the same `NNODES`, `NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT`, and `GPUS_PER_NODE` values and then constructs the torchrun command. Do not change rank or rendezvous settings when switching launch modes.
 
+## Ionic GDR configuration
+
+The four-node configuration enables the validated Pollara DMA-BUF path by default:
+
+```bash
+NCCL_DMABUF_ENABLE=1
+NCCL_NET_GDR_LEVEL=SYS
+NCCL_NET_GDR_READ=1
+```
+
+The ABI-4 libionic mount is still required. With `NCCL_DEBUG=INFO`, verify that
+channels use `NET/RCCL-ANP/.../GDRDMA` and rings report `GDR 1`. The current
+Crusoe nodes may still warn that `iommu=pt` is missing; DMA-BUF registration
+has been validated without that kernel option. Override `NCCL_DMABUF_ENABLE=0`
+to compare against the host-staged path.
+
 ## Monitoring and cleanup
 
 ```bash

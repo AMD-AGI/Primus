@@ -15,3 +15,9 @@ export FLUX_FP8_GEMM_BACKEND=selective_flydsl
 export TORCHINDUCTOR_BENCHMARK_FUSION=1
 export PRIMUS_FLUX_AITER_ATOMIC_FP32=0
 export PRIMUS_FLUX_REUSE_FP8_INPUT=1
+
+# Pollara GDR uses DMA-BUF registration; the legacy ibv_reg_mr path fails on
+# these hosts even though the ABI-4 Ionic provider is installed.
+export NCCL_DMABUF_ENABLE=${NCCL_DMABUF_ENABLE:-1}
+export NCCL_NET_GDR_LEVEL=${NCCL_NET_GDR_LEVEL:-SYS}
+export NCCL_NET_GDR_READ=${NCCL_NET_GDR_READ:-1}
