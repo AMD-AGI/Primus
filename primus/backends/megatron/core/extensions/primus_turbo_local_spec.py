@@ -91,6 +91,10 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.global_vars import get_args
 from torch import Tensor
 
+from primus.backends.megatron.core.extensions.turbo_flex_attention import (
+    build_turbo_flex_attention,
+)
+
 
 class PrimusTurboLocalAttention(MegatronModule):
     """
@@ -145,7 +149,12 @@ class PrimusTurboLocalAttention(MegatronModule):
 
         # Select Primus Turbo flash attention variant
         args = get_args()
-        if args.enable_turbo_attention_float8:
+        if getattr(args, "use_turbo_flex_attention", False):
+            # Same swap as PrimusTurboAttention: the compat layer mirrors
+            # flash_attn_func's call signature, so forward() is unchanged. Wired here
+            # too so the switch is never silently ignored under the local specs.
+            self.attn_func = build_turbo_flex_attention(args=args, config=config)
+        elif args.enable_turbo_attention_float8:
             self.attn_func = (
                 pt.ops.flash_attn_fp8_usp_func
                 if config.context_parallel_size > 1

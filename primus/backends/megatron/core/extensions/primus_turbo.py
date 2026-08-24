@@ -99,6 +99,9 @@ except (ImportError, ModuleNotFoundError):
 from primus.backends.megatron.core.extensions._triton.inplace_add import (
     inplace_add_triton_,
 )
+from primus.backends.megatron.core.extensions.turbo_flex_attention import (
+    build_turbo_flex_attention,
+)
 from primus.core.utils.module_utils import warning_rank_0
 
 _dummy_wgrads = {}
@@ -810,7 +813,13 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         self._num_heads_for_sinks = self.config.num_attention_heads
 
         self.offload = args.offload and "attn" in args.offload_ops
-        if args.enable_turbo_attention_float8:
+        if getattr(args, "use_turbo_flex_attention", False):
+            # Route through the flex_attention compat layer. It presents the same call
+            # signature as flash_attn_func and dispatches onto the same Turbo kernels,
+            # so forward() below needs no changes. Unsupported combinations raise here,
+            # at model-build time, rather than silently reverting to the direct call.
+            self.attn = build_turbo_flex_attention(args=args, config=self.config)
+        elif args.enable_turbo_attention_float8:
             self.attn = (
                 primus_turbo_torch.ops.flash_attn_fp8_usp_func
                 if self.config.context_parallel_size > 1

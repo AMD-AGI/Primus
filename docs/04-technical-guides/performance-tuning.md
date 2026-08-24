@@ -93,6 +93,7 @@ Defaults in `primus/configs/modules/megatron/primus_turbo.yaml` are mostly `fals
 | Flag | Purpose |
 |------|---------|
 | `use_turbo_attention` | Optimized attention kernels. |
+| `use_turbo_flex_attention` | Route `use_turbo_attention` through the Primus-Turbo `flex_attention` compat layer (see below). |
 | `use_turbo_parallel_linear` | Optimized tensor-parallel linear layers. |
 | `use_turbo_grouped_gemm` | Optimized grouped GEMM for MoE. |
 | `use_turbo_grouped_mlp` | Removed—use `use_turbo_grouped_gemm` (passing this key now raises an error). |
@@ -102,6 +103,32 @@ Defaults in `primus/configs/modules/megatron/primus_turbo.yaml` are mostly `fals
 | `turbo_deepep_num_cu` | Compute units for DeepEP (patch notes suggest practices such as 64 or 80 for EP8, 32 for EP16–64). |
 | `turbo_sync_free_moe_stage` | Sync-free MoE stages (`0`–`3`; `0` disables, stage `2` recommended for performance per patch notes). See [MoE training deep-dive](./moe-training.md). |
 | `use_turbo_fused_act_with_probs` | Fused activation with probabilities to reduce redundant work. |
+
+#### Flex attention routing
+
+`use_turbo_flex_attention: true` (default `false`, requires `use_turbo_attention: true`)
+makes the Turbo attention module call the `flex_attention` compat layer instead of
+`flash_attn_func` directly. The compat layer takes a torch-FlexAttention
+`block_mask` / `score_mod`, classifies it, and dispatches the recognized patterns onto
+the same Turbo kernels -- so with the default causal configuration the result is
+numerically identical to the direct call and the kernel is the same. What it adds is
+the ability to express masks and score modifications that `flash_attn_func` has no
+argument for:
+
+```yaml
+primus_turbo:
+  enable_primus_turbo: true
+  use_turbo_attention: true
+  use_turbo_flex_attention: true
+  # optional, "package.module:attribute" paths to your own callables
+  turbo_flex_attention_mask_mod: null    # (b, h, q_idx, kv_idx) -> bool
+  turbo_flex_attention_score_mod: null   # (score, b, h, q_idx, kv_idx) -> score
+```
+
+Unsupported combinations raise at model-build time rather than silently reverting to
+the direct call: `context_parallel_size > 1`, `enable_turbo_attention_float8: true`,
+`deterministic_mode: true`, packed (THD) sequences, and a sliding window without a
+causal mask.
 
 ### Feature flags (TorchTitan)
 
