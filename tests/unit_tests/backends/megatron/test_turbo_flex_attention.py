@@ -44,6 +44,32 @@ class _Recorder:
         return self.calls[-1]
 
 
+class _VarlenRecorder:
+    """Stands in for ``flex_attention_varlen``; records positional + keyword args."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, q, k, v, cu_q, cu_k, max_q, max_k, **kwargs):
+        self.calls.append(
+            {
+                "q": q,
+                "k": k,
+                "v": v,
+                "cu_seqlens_q": cu_q,
+                "cu_seqlens_k": cu_k,
+                "max_seqlen_q": max_q,
+                "max_seqlen_k": max_k,
+                **kwargs,
+            }
+        )
+        return torch.zeros_like(q)
+
+    @property
+    def last(self):
+        return self.calls[-1]
+
+
 @pytest.fixture
 def stub_backend(monkeypatch):
     """Install a recording compat-layer entry + a cheap BlockMask factory."""
@@ -55,12 +81,14 @@ def stub_backend(monkeypatch):
         made.append(obj)
         return obj
 
+    varlen = _VarlenRecorder()
     monkeypatch.setattr(tfa, "turbo_flex_attention", recorder)
     monkeypatch.setattr(tfa, "turbo_flex_attention_bshd", recorder)
+    monkeypatch.setattr(tfa, "turbo_flex_attention_varlen", varlen)
     monkeypatch.setattr(tfa, "turbo_create_block_mask", fake_create_block_mask)
     monkeypatch.setattr(tfa, "_FLEX_IMPORT_ERROR", None)
     tfa.clear_turbo_flex_block_mask_cache()
-    yield SimpleNamespace(recorder=recorder, made=made)
+    yield SimpleNamespace(recorder=recorder, made=made, varlen=varlen)
     tfa.clear_turbo_flex_block_mask_cache()
 
 
@@ -301,10 +329,19 @@ class TestDispatch:
 
 
 class TestRejections:
-    def test_thd_input_rejected(self, stub_backend):
+    def test_thd_without_boundaries_rejected(self, stub_backend):
+        """THD is supported now (see TestPackedTHD), but only with cu_seqlens. Bare 3D
+        input has no recoverable document structure, so it must still be refused rather
+        than treated as one long sequence."""
         attn = tfa.TurboFlexAttention()
         t = torch.randn(32, 4, 8)
-        with pytest.raises(NotImplementedError, match="bshd"):
+        with pytest.raises(NotImplementedError, match="cu_seqlens"):
+            attn(t, t, t, causal=True)
+
+    def test_2d_input_rejected(self, stub_backend):
+        attn = tfa.TurboFlexAttention()
+        t = torch.randn(32, 8)
+        with pytest.raises(NotImplementedError, match="THD"):
             attn(t, t, t, causal=True)
 
     def test_return_attn_probs_rejected(self, stub_backend):
@@ -365,6 +402,133 @@ class TestBuild:
 
 # =============================================================================
 # the config key itself
+# =============================================================================
+# packed sequences (THD) -> flex_attention_varlen
+# =============================================================================
+
+
+def _thd(total=24, h=4, d=8, lens=(8, 10, 6)):
+    q = torch.randn(total, h, d)
+    k = torch.randn(total, h, d)
+    v = torch.randn(total, h, d)
+    cu = torch.tensor([0] + list(torch.tensor(lens).cumsum(0)), dtype=torch.int32)
+    return q, k, v, cu, lens
+
+
+class TestPackedTHD:
+    """THD input must reach flex_attention_varlen with the boundaries intact.
+
+    Before this path existed, packed sequences either hit a NotImplementedError or --
+    on the direct flash_attn_func binding -- silently lost cu_seqlens and let tokens
+    attend across documents. Both are covered here.
+    """
+
+    def test_thd_routes_to_varlen(self, stub_backend):
+        attn = tfa.build_turbo_flex_attention(args=_args(), config=_config())
+        q, k, v, cu, lens = _thd()
+        out = attn(q, k, v, causal=True, cu_seqlens_q=cu, max_seqlen_q=max(lens), max_seqlen_kv=max(lens))
+        assert out.shape == q.shape
+        assert len(stub_backend.varlen.calls) == 1
+        assert len(stub_backend.recorder.calls) == 0, "must not go through the dense entry"
+
+    def test_boundaries_are_forwarded_verbatim(self, stub_backend):
+        attn = tfa.build_turbo_flex_attention(args=_args(), config=_config())
+        q, k, v, cu, lens = _thd()
+        attn(q, k, v, causal=True, cu_seqlens_q=cu, max_seqlen_q=max(lens), max_seqlen_kv=max(lens))
+        call = stub_backend.varlen.last
+        assert torch.equal(call["cu_seqlens_q"], cu)
+        assert torch.equal(call["cu_seqlens_k"], cu), "kv defaults to q when omitted"
+        assert call["max_seqlen_q"] == max(lens)
+        assert call["causal"] is True
+
+    def test_max_seqlen_derived_when_missing(self, stub_backend):
+        attn = tfa.build_turbo_flex_attention(args=_args(), config=_config())
+        q, k, v, cu, lens = _thd()
+        attn(q, k, v, causal=True, cu_seqlens_q=cu)
+        call = stub_backend.varlen.last
+        assert call["max_seqlen_q"] == max(lens)
+        assert call["max_seqlen_k"] == max(lens)
+
+    def test_separate_kv_boundaries(self, stub_backend):
+        attn = tfa.build_turbo_flex_attention(args=_args(), config=_config())
+        q, k, v, cu, lens = _thd()
+        cu_kv = cu.clone()
+        attn(
+            q,
+            k,
+            v,
+            causal=False,
+            cu_seqlens_q=cu,
+            cu_seqlens_kv=cu_kv,
+            max_seqlen_q=max(lens),
+            max_seqlen_kv=max(lens),
+        )
+        assert stub_backend.varlen.last["cu_seqlens_k"] is cu_kv
+
+    def test_no_block_mask_is_built(self, stub_backend):
+        """Packing carries its boundaries explicitly -- nothing to probe or classify,
+        so the BlockMask cache must stay empty (this is why THD does not thrash it)."""
+        attn = tfa.build_turbo_flex_attention(args=_args(), config=_config())
+        q, k, v, cu, lens = _thd()
+        attn(q, k, v, causal=True, cu_seqlens_q=cu)
+        assert stub_backend.made == []
+        assert len(tfa._BLOCK_MASK_CACHE) == 0
+
+    def test_sink_is_cast_on_the_packed_path_too(self, stub_backend):
+        attn = tfa.build_turbo_flex_attention(args=_args(), config=_config())
+        q, k, v, cu, lens = _thd()
+        sink = torch.zeros(4, dtype=torch.bfloat16)
+        attn(q, k, v, causal=True, cu_seqlens_q=cu, sink=sink)
+        assert stub_backend.varlen.last["sink"].dtype == torch.float32
+
+    def test_3d_without_cu_seqlens_is_refused(self, stub_backend):
+        attn = tfa.build_turbo_flex_attention(args=_args(), config=_config())
+        q, k, v, cu, lens = _thd()
+        with pytest.raises(NotImplementedError, match="cu_seqlens"):
+            attn(q, k, v, causal=True)
+
+    def test_cu_seqlens_with_4d_is_refused(self, stub_backend):
+        attn = tfa.build_turbo_flex_attention(args=_args(), config=_config())
+        q, k, v = _qkv()
+        cu = torch.tensor([0, 8, 16], dtype=torch.int32)
+        with pytest.raises(NotImplementedError, match="THD expects"):
+            attn(q, k, v, causal=True, cu_seqlens_q=cu)
+
+    def test_user_mask_mod_is_refused_on_packed(self, stub_backend):
+        attn = tfa.build_turbo_flex_attention(
+            args=_args(
+                turbo_flex_attention_mask_mod=(
+                    "tests.unit_tests.backends.megatron." "test_turbo_flex_attention:_dummy_mask_mod"
+                )
+            ),
+            config=_config(),
+        )
+        q, k, v, cu, lens = _thd()
+        with pytest.raises(NotImplementedError, match="mask_mod"):
+            attn(q, k, v, causal=True, cu_seqlens_q=cu)
+
+    def test_bias_is_refused_on_packed(self, stub_backend):
+        attn = tfa.build_turbo_flex_attention(args=_args(), config=_config())
+        q, k, v, cu, lens = _thd()
+        with pytest.raises(NotImplementedError, match="bias"):
+            attn(q, k, v, causal=True, cu_seqlens_q=cu, bias=torch.zeros(1))
+
+    def test_missing_varlen_entry_reports_clearly(self, stub_backend, monkeypatch):
+        monkeypatch.setattr(tfa, "turbo_flex_attention_varlen", None)
+        attn = tfa.build_turbo_flex_attention(args=_args(), config=_config())
+        q, k, v, cu, lens = _thd()
+        with pytest.raises(RuntimeError, match="flex_attention_varlen"):
+            attn(q, k, v, causal=True, cu_seqlens_q=cu)
+
+    def test_dense_path_is_unaffected(self, stub_backend):
+        """The packed branch must not perturb the ordinary bshd call."""
+        attn = tfa.build_turbo_flex_attention(args=_args(), config=_config())
+        q, k, v = _qkv()
+        attn(q, k, v, causal=True)
+        assert len(stub_backend.recorder.calls) == 1
+        assert len(stub_backend.varlen.calls) == 0
+
+
 # =============================================================================
 
 

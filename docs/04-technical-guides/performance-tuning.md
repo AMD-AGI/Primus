@@ -127,14 +127,29 @@ primus_turbo:
 
 Unsupported combinations raise at model-build time rather than silently reverting to
 the direct call: `context_parallel_size > 1`, `enable_turbo_attention_float8: true`,
-`deterministic_mode: true`, `reset_attention_mask: true`, and packed (THD) sequences.
-A sliding window without a causal mask is rejected on the call itself. Nothing degrades
-quietly -- a rejected run fails at startup instead of training on the old code path.
+`deterministic_mode: true`, and `reset_attention_mask: true`. A sliding window without a
+causal mask is rejected on the call itself. Nothing degrades quietly -- a rejected run
+fails at startup instead of training on the old code path.
 
-`reset_attention_mask: true` is refused because the Turbo attention path receives only
-the `causal` flag, so per-document boundaries inside a packed sample would be dropped
-and tokens would attend across documents. The compat layer can express that pattern
-(`flex_attention_varlen`), but it is not routed from Megatron yet.
+#### Packed sequences (`qkv_format: thd`)
+
+This switch is currently the **only** way to run packed sequences on the Turbo attention
+path. `PrimusTurboAttention` forwards `packed_seq_params.cu_seqlens_q/cu_seqlens_kv` to
+`flex_attention_varlen`, which applies document-internal causal masking (block-diagonal
+plus within-segment causal). The direct `flash_attn_func` binding has no `cu_seqlens`
+argument, so with `use_turbo_flex_attention: false` a `thd` batch now raises instead of
+attending across document boundaries with nothing reported.
+
+The packed path takes no `BlockMask`: Megatron already knows where the boundaries are, so
+there is nothing to probe or classify, and the cache described below is not touched at
+all. `turbo_flex_attention_mask_mod`, `turbo_flex_attention_score_mod` and an attention
+bias are all refused on this path -- `flex_attention_varlen` takes `cu_seqlens` and
+explicit `alibi_slopes`, not a programmable mask, and dropping a supplied callable
+silently is exactly the failure mode this layer exists to prevent.
+
+`reset_attention_mask: true` is a different mechanism and is still refused: it encodes
+per-document boundaries inside a *dense* sample's attention mask, and the Turbo call
+signature has no argument to carry them. Use `qkv_format: thd` packing instead.
 
 Sequence-length variety costs more here than on the direct path: each distinct
 `(mask pattern, q_len, kv_len, device)` builds a `BlockMask` and re-runs the compat

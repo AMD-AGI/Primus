@@ -813,12 +813,18 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         self._num_heads_for_sinks = self.config.num_attention_heads
 
         self.offload = args.offload and "attn" in args.offload_ops
+        self._attn_accepts_packed_seq = False
         if getattr(args, "use_turbo_flex_attention", False):
             # Route through the flex_attention compat layer. It presents the same call
             # signature as flash_attn_func and dispatches onto the same Turbo kernels,
             # so forward() below needs no changes. Unsupported combinations raise here,
             # at model-build time, rather than silently reverting to the direct call.
             self.attn = build_turbo_flex_attention(args=args, config=self.config)
+            # Only the flex path knows what to do with packed (THD) sequences: it can
+            # forward cu_seqlens to flex_attention_varlen. The direct flash_attn_func
+            # binding below takes no cu_seqlens argument, so the extra kwargs are gated
+            # on this flag and the non-flex path is left byte-for-byte unchanged.
+            self._attn_accepts_packed_seq = True
         elif args.enable_turbo_attention_float8:
             self.attn = (
                 primus_turbo_torch.ops.flash_attn_fp8_usp_func
@@ -970,6 +976,34 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             key = key.permute(0, 2, 1, 3)
             value = value.permute(0, 2, 1, 3)
 
+        # Packed sequences: q/k/v are already THD [total_tokens, H, D] (no permute
+        # applies) and the document boundaries live in packed_seq_params. Only the flex
+        # path can consume them -- it forwards them to flex_attention_varlen. Without
+        # this, "thd" reached the attention call with the boundaries dropped, so tokens
+        # attended across documents with no error raised anywhere.
+        packed_attn_kwargs = {}
+        if qkv_format == "thd":
+            if not self._attn_accepts_packed_seq:
+                raise NotImplementedError(
+                    "PrimusTurboAttention: qkv_format='thd' (packed sequences) is not "
+                    "supported on this attention path -- the document boundaries in "
+                    "packed_seq_params cannot be forwarded to flash_attn_func, so tokens "
+                    "would attend across documents. Set use_turbo_flex_attention=true "
+                    "(which routes packing through flex_attention_varlen) or disable "
+                    "sequence packing."
+                )
+            if packed_seq_params is None:
+                raise ValueError(
+                    "PrimusTurboAttention: qkv_format='thd' requires packed_seq_params "
+                    "carrying cu_seqlens_q / cu_seqlens_kv."
+                )
+            packed_attn_kwargs = {
+                "cu_seqlens_q": getattr(packed_seq_params, "cu_seqlens_q", None),
+                "cu_seqlens_kv": getattr(packed_seq_params, "cu_seqlens_kv", None),
+                "max_seqlen_q": getattr(packed_seq_params, "max_seqlen_q", None),
+                "max_seqlen_kv": getattr(packed_seq_params, "max_seqlen_kv", None),
+            }
+
         o = self.attn(
             query,
             key,
@@ -984,6 +1018,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             return_lse=False,
             return_attn_probs=False,
             sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
+            **packed_attn_kwargs,
             **self.attn_kwargs,
         )
 
@@ -991,6 +1026,13 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             o = o.permute(1, 0, 2, 3)
         elif qkv_format == "bhsd":
             o = o.permute(0, 2, 1, 3)
+
+        if qkv_format == "thd":
+            # THD output is [total_tokens, H, D]; the caller expects the heads folded
+            # into one feature dim, i.e. [total_tokens, H * D]. The generic 3-arg view
+            # below is a no-op on a 3D tensor, which would silently hand back the wrong
+            # rank, so the packed case gets its own reshape.
+            return o.reshape(o.shape[0], -1)
 
         o = o.view(o.shape[0], o.shape[1], -1)
 

@@ -69,6 +69,18 @@ try:
 except (ImportError, ModuleNotFoundError, AttributeError):  # pragma: no cover
     turbo_flex_attention_bshd = None
 
+# ``flex_attention_varlen`` is the packed-sequence (THD) entry: q/k/v are
+# ``[total_tokens, H, D]`` with the document boundaries carried out-of-band in
+# ``cu_seqlens``. This is what makes ``qkv_format="thd"`` reachable -- the dense
+# entries cannot express per-document masking, and the compat layer's probe-based
+# classifier is not asked to: the boundaries are given, not inferred.
+try:
+    from primus_turbo.pytorch.ops.attention import (
+        flex_attention_varlen as turbo_flex_attention_varlen,
+    )
+except (ImportError, ModuleNotFoundError, AttributeError):  # pragma: no cover
+    turbo_flex_attention_varlen = None
+
 
 # =============================================================================
 # mask_mod builders + BlockMask cache
@@ -267,6 +279,107 @@ class TurboFlexAttention:
             )
         return None  # no_mask -> full attention
 
+    # -- packed sequences (THD) ---------------------------------------------
+    def _call_varlen(
+        self,
+        query,
+        key,
+        value,
+        *,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size,
+        bias,
+        alibi_slopes,
+        return_lse,
+        sink,
+    ):
+        """Dispatch packed THD input through ``flex_attention_varlen``.
+
+        The dense entries take a ``BlockMask`` that the compat layer has to *classify*
+        by probing ``mask_mod`` on a grid. Packing is different in kind: Megatron
+        already knows exactly where the document boundaries are and hands them over as
+        ``cu_seqlens``, so there is nothing to infer. That is why this path bypasses
+        the BlockMask cache entirely -- no probing, no classification, no per-shape
+        cache entry, which also means the variable-length workloads that would thrash
+        that cache do not touch it at all.
+
+        ``causal=True`` here means *document-internal* causal (block-diagonal plus
+        within-segment causal), which is exactly Megatron's intent for a packed batch
+        and the thing the dense path could not express.
+        """
+        if turbo_flex_attention_varlen is None:
+            raise RuntimeError(
+                "Primus-Turbo flex attention: packed (THD) sequences need "
+                "primus_turbo.pytorch.ops.attention.flex_attention_varlen, which this "
+                "Primus-Turbo build does not provide. Upgrade Primus-Turbo or set "
+                "use_turbo_flex_attention=false for packed-sequence runs."
+            )
+        if query.dim() != 3:
+            raise NotImplementedError(
+                "Primus-Turbo flex attention: cu_seqlens was supplied, so the packed (THD) "
+                f"path was selected, but query is {query.dim()}D; THD expects "
+                "[total_tokens, H, D]."
+            )
+        if cu_seqlens_q is None:
+            raise NotImplementedError(
+                "Primus-Turbo flex attention: packed (THD) input without cu_seqlens_q. The "
+                "document boundaries are not recoverable from the tensor shape, and guessing "
+                "them would let tokens attend across documents."
+            )
+        if self.mask_mod is not None:
+            # A user mask_mod is a *dense* [q_idx, kv_idx] predicate; composing it with
+            # packing would need the product mask, which the varlen backend cannot take.
+            raise NotImplementedError(
+                "Primus-Turbo flex attention: turbo_flex_attention_mask_mod cannot be combined "
+                "with packed (THD) sequences; the varlen backend takes cu_seqlens, not a "
+                "BlockMask. Use dense batches, or fold the pattern into the packing itself."
+            )
+        if self.score_mod is not None:
+            # flex_attention_varlen takes explicit alibi_slopes/softcap rather than probing
+            # a score_mod, so silently dropping the callable is the one thing we must not do.
+            raise NotImplementedError(
+                "Primus-Turbo flex attention: turbo_flex_attention_score_mod is not supported on "
+                "the packed (THD) path; flex_attention_varlen takes explicit alibi_slopes "
+                "instead of probing a score_mod."
+            )
+        if bias is not None:
+            raise NotImplementedError(
+                "Primus-Turbo flex attention: an attention bias is not supported on the packed "
+                "(THD) path (flex_attention_varlen has no bias parameter)."
+            )
+        if cu_seqlens_kv is None:
+            cu_seqlens_kv = cu_seqlens_q
+        if max_seqlen_q is None or max_seqlen_kv is None:
+            # Derivable from the prefix sums; one small D2H copy, and only on the first
+            # call of a shape in practice because Megatron caches PackedSeqParams.
+            diffs_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item()
+            diffs_kv = (cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]).max().item()
+            max_seqlen_q = int(max_seqlen_q or diffs_q)
+            max_seqlen_kv = int(max_seqlen_kv or diffs_kv)
+
+        return turbo_flex_attention_varlen(
+            query,
+            key,
+            value,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            int(max_seqlen_q),
+            int(max_seqlen_kv),
+            causal=causal,
+            window_size=window_size if window_size is not None else (-1, -1),
+            scale=softmax_scale,
+            alibi_slopes=alibi_slopes,
+            dropout_p=dropout_p,
+            sink=_coerce_sink(sink),
+            return_lse=return_lse,
+        )
+
     # -- the call itself ----------------------------------------------------
     def __call__(
         self,
@@ -283,15 +396,12 @@ class TurboFlexAttention:
         return_lse: bool = False,
         return_attn_probs: bool = False,
         sink: Optional[torch.Tensor] = None,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_kv: Optional[int] = None,
         **extra: Any,
     ):
-        if query.dim() != 4:
-            raise NotImplementedError(
-                "Primus-Turbo flex attention: only the bshd [B,S,H,D] path is wired up; got "
-                f"{query.dim()}D input (THD packed sequences reach the compat layer through "
-                "flex_attention_varlen, which is not routed from Megatron yet). Set "
-                "use_turbo_flex_attention=false for packed-sequence runs."
-            )
         if return_attn_probs:
             raise NotImplementedError(
                 "Primus-Turbo flex attention: return_attn_probs is not supported (the compat "
@@ -308,6 +418,30 @@ class TurboFlexAttention:
             raise NotImplementedError(
                 "Primus-Turbo flex attention: unsupported backend arguments "
                 f"{sorted(extra)} (context parallelism has no compat-layer path yet)."
+            )
+
+        if query.dim() == 3 or cu_seqlens_q is not None:
+            return self._call_varlen(
+                query,
+                key,
+                value,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                bias=bias,
+                alibi_slopes=alibi_slopes,
+                return_lse=return_lse,
+                sink=sink,
+            )
+        if query.dim() != 4:
+            raise NotImplementedError(
+                "Primus-Turbo flex attention: expected bshd [B,S,H,D] or packed THD "
+                f"[total_tokens,H,D] input, got {query.dim()}D."
             )
 
         left_window = int(window_size[0]) if window_size is not None else -1
@@ -384,16 +518,21 @@ def build_turbo_flex_attention(*, args, config) -> TurboFlexAttention:
         )
     if getattr(args, "reset_attention_mask", False):
         # reset_attention_mask asks Megatron for per-document causal masking inside a
-        # packed sample. The Turbo attention path takes only `causal`, so the document
-        # boundaries are dropped and tokens attend across documents. Refusing is louder
-        # than inheriting that silently: the compat layer *can* express the pattern
-        # (flex_attention_varlen), it just is not routed from Megatron yet.
+        # *dense* sample: the boundaries are baked into an attention_mask tensor that the
+        # Turbo call signature has no argument for, so they would be dropped and tokens
+        # would attend across documents with nothing raised anywhere.
+        #
+        # Note this is a different mechanism from qkv_format="thd", which IS supported:
+        # there Megatron hands over cu_seqlens explicitly and the adapter forwards them
+        # to flex_attention_varlen. Packing via THD is the supported way to get
+        # per-document masking on this path.
         raise NotImplementedError(
             "use_turbo_flex_attention=true is not supported with reset_attention_mask=true. "
-            "The flex dispatch receives only the causal flag, so per-document boundaries "
-            "would be dropped and tokens would attend across documents. Routing packed "
-            "sequences through flex_attention_varlen is not wired up yet; set "
-            "reset_attention_mask=false or use_turbo_flex_attention=false."
+            "The dense flex dispatch receives only the causal flag, so the per-document "
+            "boundaries encoded in the attention mask would be dropped and tokens would "
+            "attend across documents. Use packed sequences (qkv_format='thd', which routes "
+            "through flex_attention_varlen and IS supported) instead, or set "
+            "reset_attention_mask=false / use_turbo_flex_attention=false."
         )
 
     mask_mod_path = getattr(args, "turbo_flex_attention_mask_mod", None)
