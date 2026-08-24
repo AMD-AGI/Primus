@@ -52,5 +52,3 @@ modules:
 
       # nanoo_fp8 for AMD MI300X/MI325X (uses e4m3fnuz/e5m2fnuz types)
       quantization: "nanoo_fp8"
-      # fp8 MoE requires bridged decoder (see docs)
-      pure_nnx_decoder: false
