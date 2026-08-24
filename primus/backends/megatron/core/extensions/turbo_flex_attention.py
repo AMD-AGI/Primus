@@ -35,7 +35,9 @@ notice in a training log.
 """
 
 import importlib
-from typing import Any, Callable, Dict, Optional, Tuple
+import warnings
+from collections import OrderedDict
+from typing import Any, Callable, Optional, Tuple
 
 import torch
 
@@ -44,8 +46,12 @@ import torch
 # only if the switch is actually turned on).
 _FLEX_IMPORT_ERROR: Optional[BaseException] = None
 try:
-    from primus_turbo.pytorch.ops.attention import create_block_mask as turbo_create_block_mask
-    from primus_turbo.pytorch.ops.attention import flex_attention as turbo_flex_attention
+    from primus_turbo.pytorch.ops.attention import (
+        create_block_mask as turbo_create_block_mask,
+    )
+    from primus_turbo.pytorch.ops.attention import (
+        flex_attention as turbo_flex_attention,
+    )
 except (ImportError, ModuleNotFoundError, AttributeError) as exc:  # pragma: no cover
     turbo_create_block_mask = None
     turbo_flex_attention = None
@@ -84,7 +90,15 @@ def _make_window_causal_mask_mod(window: int) -> Callable:
 # classification by *object identity* -- so building one mask per (pattern, shape) and
 # reusing it across layers and steps is what keeps the per-call cost at zero. Keyed by
 # device string rather than the device object so replicas share entries.
-_BLOCK_MASK_CACHE: Dict[Tuple, Any] = {}
+_BLOCK_MASK_CACHE: "OrderedDict[Tuple, Any]" = OrderedDict()
+
+# Pretraining sees one or two shapes for the whole run, so the cache holds a couple of
+# entries forever. Variable-length workloads (SFT with per-batch bucketing, evaluation
+# sweeps) hand us a new ``(q_len, kv_len)`` almost every step, and an unbounded dict
+# would then grow one BlockMask per distinct length for the lifetime of the process.
+# Bounded + LRU: the hot shapes stay resident, the long tail is evicted.
+_BLOCK_MASK_CACHE_MAX = 64
+_EVICTION_WARNED = False
 
 
 def _get_block_mask(
@@ -95,24 +109,47 @@ def _get_block_mask(
     kv_len: int,
     device: torch.device,
 ):
+    global _EVICTION_WARNED
+
     key = (cache_key, q_len, kv_len, str(device))
     cached = _BLOCK_MASK_CACHE.get(key)
-    if cached is None:
-        cached = turbo_create_block_mask(
-            mask_mod,
-            B=None,
-            H=None,
-            Q_LEN=q_len,
-            KV_LEN=kv_len,
-            device=device,
-        )
-        _BLOCK_MASK_CACHE[key] = cached
+    if cached is not None:
+        _BLOCK_MASK_CACHE.move_to_end(key)
+        return cached
+
+    cached = turbo_create_block_mask(
+        mask_mod,
+        B=None,
+        H=None,
+        Q_LEN=q_len,
+        KV_LEN=kv_len,
+        device=device,
+    )
+    _BLOCK_MASK_CACHE[key] = cached
+    if len(_BLOCK_MASK_CACHE) > _BLOCK_MASK_CACHE_MAX:
+        _BLOCK_MASK_CACHE.popitem(last=False)
+        if not _EVICTION_WARNED:
+            _EVICTION_WARNED = True
+            warnings.warn(
+                "Primus-Turbo flex attention: the BlockMask cache passed "
+                f"{_BLOCK_MASK_CACHE_MAX} distinct (pattern, q_len, kv_len, device) keys and "
+                "started evicting. Every miss rebuilds a BlockMask and re-runs the compat "
+                "layer's pattern classification, which is orders of magnitude more expensive "
+                "than the attention call itself. Bucket sequence lengths, or raise "
+                "turbo_flex_attention._BLOCK_MASK_CACHE_MAX if the working set is genuinely "
+                "this wide.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     return cached
 
 
 def clear_turbo_flex_block_mask_cache() -> None:
     """Drop every cached ``BlockMask`` (tests / benchmarks wanting a cold measurement)."""
+    global _EVICTION_WARNED
+
     _BLOCK_MASK_CACHE.clear()
+    _EVICTION_WARNED = False
 
 
 # =============================================================================
@@ -138,8 +175,7 @@ def resolve_dotted_callable(path: str, *, what: str) -> Callable:
         obj = getattr(module, attr)
     except AttributeError as exc:
         raise AttributeError(
-            f"Primus-Turbo flex attention: module '{module_name}' has no attribute '{attr}' "
-            f"for {what}."
+            f"Primus-Turbo flex attention: module '{module_name}' has no attribute '{attr}' " f"for {what}."
         ) from exc
     if not callable(obj):
         raise TypeError(f"Primus-Turbo flex attention: {what} '{path}' is not callable.")
@@ -149,6 +185,25 @@ def resolve_dotted_callable(path: str, *, what: str) -> Callable:
 # =============================================================================
 # The drop-in replacement for flash_attn_func
 # =============================================================================
+
+
+def _coerce_sink(sink: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """Present Megatron's sink parameter in the dtype the compat layer requires.
+
+    ``PrimusTurboAttention`` allocates ``self.sinks`` as a **bfloat16** Parameter (it
+    mirrors gpt-oss, and ``flash_attn_func`` takes it as-is), while the compat layer
+    validates ``sink.dtype == torch.float32`` and rejects anything else. Handing the
+    Parameter straight through therefore turns on ``use_sink_attention`` +
+    ``use_turbo_flex_attention`` into a hard ValueError on the first forward.
+
+    ``.float()`` is a differentiable cast: autograd casts the fp32 grad back to bf16 on
+    the way out, so the Parameter still trains. Doing it here rather than loosening the
+    compat layer keeps the dtype contract explicit and confines the Megatron-specific
+    convention to the Megatron-side adapter.
+    """
+    if sink is None or sink.dtype == torch.float32:
+        return sink
+    return sink.float()
 
 
 class TurboFlexAttention:
@@ -272,15 +327,13 @@ class TurboFlexAttention:
             return_lse=return_lse,
             alibi_slopes=alibi_slopes,
             dropout_p=dropout_p,
-            sink=sink,
+            sink=_coerce_sink(sink),
             bias=bias,
         )
         if self._entry_is_bshd:
             return self._entry(query, key, value, **kwargs)
         # Older Turbo build: the bhsd entry needs the layout round-trip.
-        out = self._entry(
-            query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), **kwargs
-        )
+        out = self._entry(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), **kwargs)
         if return_lse:
             out, lse = out
             return out.transpose(1, 2), lse
@@ -316,6 +369,31 @@ def build_turbo_flex_attention(*, args, config) -> TurboFlexAttention:
         raise NotImplementedError(
             "use_turbo_flex_attention=true cannot be combined with "
             "enable_turbo_attention_float8=true; the compat layer supports fp16/bf16 only."
+        )
+    if getattr(args, "deterministic_mode", False):
+        # PrimusTurboAttention.forward passes deterministic=self.deterministic_mode on
+        # every call, so this would otherwise surface as a NotImplementedError from the
+        # first forward -- after model init, data loading and (on a large job) minutes of
+        # startup. Reject it here instead, next to the other build-time rejections.
+        raise NotImplementedError(
+            "use_turbo_flex_attention=true is not supported with deterministic_mode=true "
+            "(the compat layer always dispatches deterministic=False). Note that the aiter "
+            "backward accumulates dQ with fp32 atomics regardless, so bit-reproducible "
+            "attention gradients are not available on this backend either way. Set "
+            "deterministic_mode=false or use_turbo_flex_attention=false."
+        )
+    if getattr(args, "reset_attention_mask", False):
+        # reset_attention_mask asks Megatron for per-document causal masking inside a
+        # packed sample. The Turbo attention path takes only `causal`, so the document
+        # boundaries are dropped and tokens attend across documents. Refusing is louder
+        # than inheriting that silently: the compat layer *can* express the pattern
+        # (flex_attention_varlen), it just is not routed from Megatron yet.
+        raise NotImplementedError(
+            "use_turbo_flex_attention=true is not supported with reset_attention_mask=true. "
+            "The flex dispatch receives only the causal flag, so per-document boundaries "
+            "would be dropped and tokens would attend across documents. Routing packed "
+            "sequences through flex_attention_varlen is not wired up yet; set "
+            "reset_attention_mask=false or use_turbo_flex_attention=false."
         )
 
     mask_mod_path = getattr(args, "turbo_flex_attention_mask_mod", None)

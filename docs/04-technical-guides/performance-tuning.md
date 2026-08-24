@@ -127,8 +127,20 @@ primus_turbo:
 
 Unsupported combinations raise at model-build time rather than silently reverting to
 the direct call: `context_parallel_size > 1`, `enable_turbo_attention_float8: true`,
-`deterministic_mode: true`, packed (THD) sequences, and a sliding window without a
-causal mask.
+`deterministic_mode: true`, `reset_attention_mask: true`, and packed (THD) sequences.
+A sliding window without a causal mask is rejected on the call itself. Nothing degrades
+quietly -- a rejected run fails at startup instead of training on the old code path.
+
+`reset_attention_mask: true` is refused because the Turbo attention path receives only
+the `causal` flag, so per-document boundaries inside a packed sample would be dropped
+and tokens would attend across documents. The compat layer can express that pattern
+(`flex_attention_varlen`), but it is not routed from Megatron yet.
+
+Sequence-length variety costs more here than on the direct path: each distinct
+`(mask pattern, q_len, kv_len, device)` builds a `BlockMask` and re-runs the compat
+layer's classification once, then is cached (bounded LRU, 64 entries). Fixed-length
+pretraining pays this once per run; a workload that hands attention a new length every
+step will warn once and then rebuild on every miss. Bucket the lengths.
 
 ### Feature flags (TorchTitan)
 

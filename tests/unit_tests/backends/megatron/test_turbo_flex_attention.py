@@ -12,6 +12,7 @@ the Primus-side wiring -- config validation, mask selection, the BlockMask cache
 argument passthrough, and the explicit rejections.
 """
 
+import warnings
 from types import SimpleNamespace
 
 import pytest
@@ -78,6 +79,8 @@ def _args(**overrides):
         enable_turbo_attention_float8=False,
         turbo_flex_attention_mask_mod=None,
         turbo_flex_attention_score_mod=None,
+        deterministic_mode=False,
+        reset_attention_mask=False,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -351,15 +354,11 @@ class TestBuild:
 
     def test_float8_rejected(self, stub_backend):
         with pytest.raises(NotImplementedError, match="float8"):
-            tfa.build_turbo_flex_attention(
-                args=_args(enable_turbo_attention_float8=True), config=_config()
-            )
+            tfa.build_turbo_flex_attention(args=_args(enable_turbo_attention_float8=True), config=_config())
 
     def test_missing_turbo_build_reports_clearly(self, monkeypatch, stub_backend):
         monkeypatch.setattr(tfa, "turbo_flex_attention", None)
-        monkeypatch.setattr(
-            tfa, "_FLEX_IMPORT_ERROR", ModuleNotFoundError("No module named 'primus_turbo'")
-        )
+        monkeypatch.setattr(tfa, "_FLEX_IMPORT_ERROR", ModuleNotFoundError("No module named 'primus_turbo'"))
         with pytest.raises(RuntimeError, match="does not provide"):
             tfa.build_turbo_flex_attention(args=_args(), config=_config())
 
@@ -369,6 +368,91 @@ class TestBuild:
 # =============================================================================
 
 
+class TestSinkDtype:
+    """Megatron allocates ``self.sinks`` in bfloat16; the compat layer demands fp32."""
+
+    def test_bf16_sink_is_cast_to_fp32(self, stub_backend):
+        attn = tfa.TurboFlexAttention()
+        q, k, v = _qkv(h=4)
+        sink = torch.zeros(4, dtype=torch.bfloat16)
+        attn(q, k, v, causal=True, sink=sink)
+        assert stub_backend.recorder.last["sink"].dtype == torch.float32
+
+    def test_fp32_sink_is_passed_through_untouched(self, stub_backend):
+        attn = tfa.TurboFlexAttention()
+        q, k, v = _qkv(h=4)
+        sink = torch.zeros(4, dtype=torch.float32)
+        attn(q, k, v, causal=True, sink=sink)
+        assert stub_backend.recorder.last["sink"] is sink
+
+    def test_none_sink_stays_none(self, stub_backend):
+        attn = tfa.TurboFlexAttention()
+        q, k, v = _qkv()
+        attn(q, k, v, causal=True, sink=None)
+        assert stub_backend.recorder.last["sink"] is None
+
+    def test_cast_keeps_the_parameter_trainable(self, stub_backend):
+        """The cast must be differentiable, or the sink Parameter stops learning."""
+        sink = torch.nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))
+        cast = tfa._coerce_sink(sink)
+        assert cast.dtype == torch.float32
+        cast.sum().backward()
+        assert sink.grad is not None
+        assert sink.grad.dtype == torch.bfloat16
+
+
+class TestBoundedCache:
+    def test_cache_is_bounded_and_evicts(self, stub_backend, monkeypatch):
+        monkeypatch.setattr(tfa, "_BLOCK_MASK_CACHE_MAX", 4)
+        attn = tfa.TurboFlexAttention()
+        for s_len in range(8, 8 + 10):
+            q, k, v = _qkv(s=s_len)
+            attn(q, k, v, causal=True)
+        assert len(tfa._BLOCK_MASK_CACHE) <= 4
+
+    def test_eviction_warns_once(self, stub_backend, monkeypatch):
+        monkeypatch.setattr(tfa, "_BLOCK_MASK_CACHE_MAX", 2)
+        attn = tfa.TurboFlexAttention()
+        with pytest.warns(RuntimeWarning, match="BlockMask cache"):
+            for s_len in range(8, 14):
+                q, k, v = _qkv(s=s_len)
+                attn(q, k, v, causal=True)
+        # A second burst must stay quiet -- one warning per process, not per miss.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            for s_len in range(20, 26):
+                q, k, v = _qkv(s=s_len)
+                attn(q, k, v, causal=True)
+
+    def test_hot_shape_survives_a_cold_tail(self, stub_backend, monkeypatch):
+        """LRU, not FIFO: the shape used every step must not be evicted by the tail."""
+        monkeypatch.setattr(tfa, "_BLOCK_MASK_CACHE_MAX", 4)
+        attn = tfa.TurboFlexAttention()
+        hot = _qkv(s=64)
+        attn(*hot, causal=True)
+        first = stub_backend.recorder.last["block_mask"]
+        for s_len in range(8, 20):
+            attn(*_qkv(s=s_len), causal=True)
+            attn(*hot, causal=True)  # touched every step, so it stays hot
+        attn(*hot, causal=True)
+        assert stub_backend.recorder.last["block_mask"] is first
+
+
+class TestBuildTimeRejections:
+    """These combinations must fail at model build, not on the first forward."""
+
+    def test_deterministic_mode_rejected_at_build(self, stub_backend):
+        with pytest.raises(NotImplementedError, match="deterministic_mode"):
+            tfa.build_turbo_flex_attention(args=_args(deterministic_mode=True), config=_config())
+
+    def test_reset_attention_mask_rejected_at_build(self, stub_backend):
+        with pytest.raises(NotImplementedError, match="reset_attention_mask"):
+            tfa.build_turbo_flex_attention(args=_args(reset_attention_mask=True), config=_config())
+
+    def test_defaults_still_build(self, stub_backend):
+        assert tfa.build_turbo_flex_attention(args=_args(), config=_config()) is not None
+
+
 class TestConfigSchema:
     def test_registered_and_defaults_to_false(self):
         import pathlib
@@ -376,9 +460,7 @@ class TestConfigSchema:
         import yaml
 
         root = pathlib.Path(__file__).resolve().parents[4]
-        cfg = yaml.safe_load(
-            (root / "primus/configs/modules/megatron/primus_turbo.yaml").read_text()
-        )
+        cfg = yaml.safe_load((root / "primus/configs/modules/megatron/primus_turbo.yaml").read_text())
         assert cfg["use_turbo_flex_attention"] is False
         assert cfg["turbo_flex_attention_mask_mod"] is None
         assert cfg["turbo_flex_attention_score_mod"] is None
