@@ -205,6 +205,13 @@ def main():
     log_info("Exposing run mode via env.RUN_MODE=single")
     print("env.RUN_MODE=single")
 
+    # Clear LD_LIBRARY_PATH to prevent the dynamic linker from loading a second
+    # copy of libamd_comgr.so (from _rocm_sdk_devel/lib) alongside JAX's own copy
+    # (from _rocm_sdk_core/lib). Each brings separate LLVM libraries that crash
+    # with "spirv-expand-step registered more than once".
+    log_info("Clearing LD_LIBRARY_PATH to prevent duplicate ROCm LLVM loading")
+    print("env.LD_LIBRARY_PATH=")
+
     # TransformerEngine must be told it is running under JAX before it is imported.
     emit_env_if_unset("NVTE_FRAMEWORK", "jax")
 
