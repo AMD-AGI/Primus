@@ -126,11 +126,16 @@ def convert(checkpoint: dict, fla_config_path: Path) -> OrderedDict:
 
         # ── fused in_proj split: [q | k | v | f_a | g_a | beta] ───────
         in_proj_w = state[f"decoder.layers.{kda_i}.mixer.in_proj.weight"]
-        assert in_proj_w.shape == (fused_in_proj_dim, hidden_size), (
-            f"in_proj shape {tuple(in_proj_w.shape)} != "
+        assert in_proj_w.shape[1] == hidden_size and in_proj_w.shape[0] >= fused_in_proj_dim, (
+            f"in_proj shape {tuple(in_proj_w.shape)} is not compatible with "
             f"expected ({fused_in_proj_dim}, {hidden_size}) for layer {kda_i}. "
             "Did you train with the post-fusion KDA code?"
         )
+        if in_proj_w.shape[0] != fused_in_proj_dim:
+            # Trailing hipBLASLt dead-zone pad rows (kimi_delta_attention.py).
+            # The model slices them off in forward, so they never trained; drop
+            # them here rather than failing an exact-shape check.
+            in_proj_w = in_proj_w[:fused_in_proj_dim]
         o = 0
         q_w = in_proj_w[o : o + qk_dim]
         o += qk_dim

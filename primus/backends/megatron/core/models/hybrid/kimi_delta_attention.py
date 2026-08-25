@@ -31,6 +31,10 @@ from megatron.core.utils import (
 )
 from torch import Tensor
 
+# Output widths (GEMM N) for which hipBLASLt has no bf16 solution on gfx950 once
+# M exceeds one micro-batch; see the in_proj padding in KimiDeltaAttention.
+_HIPBLASLT_BF16_DEAD_ZONE = (2176, 2304)
+
 try:
     from fla.ops.kda import chunk_kda
     from fla.ops.kda.gate import fused_kda_gate
@@ -308,10 +312,59 @@ class KimiDeltaAttention(MegatronModule):
             + self.head_dim  # g_a output (bottleneck dim, = head_v_dim)
             + self.num_heads  # beta (per value-head scalar)
         )
+        # --- hipBLASLt dead-zone workaround (MI355X / gfx950) ---
+        # TE's ROCm GEMM (rocm_gemm.hip -> hipblaslt_gemm) has NO solution for
+        # certain output widths: for K=hidden_size in bf16, N in the band
+        # ~[17*128, 18*128] (i.e. 2176..2304) raises "HIPBLASLT Error: 6" as
+        # soon as M(tokens) exceeds a single micro-batch — which caps pure KDA
+        # at micro_batch_size=2 on MI355X. The fused in_proj width for the 1B
+        # config is qk*2 + v + 2*head_v + num_heads = 2192, landing squarely in
+        # that dead zone (empirically 2192/2304 FAIL; 2048/2432/2560 OK for all
+        # M). Pad the GEMM's N up to the next multiple of `pad_multiple`
+        # (default 512 -> 2560, verified to have a hipBLASLt solution at every
+        # batch size); the extra columns are produced by the projection and
+        # then sliced off/discarded in forward(). Set kda_in_proj_pad_multiple
+        # to 0 or 1 to disable. GDN is unaffected — its projection widths are
+        # already powers of two.
+        #
+        # Only widths that actually land in the band are padded. Rounding every
+        # width up would in fact be slightly faster — measured on the 300M
+        # config (1160 -> 1536, mbs 128, 500 steps, same node and session)
+        # padding runs 701.2 ms/iter against 710.1 native, 1.3% quicker, since
+        # 1536 is a clean multiple of 512 while 1160 (8*145) tiles poorly. It is
+        # still not worth doing outside the band, because it changes in_proj's
+        # parameter shape: that costs 2.2 GB of peak memory, adds ~4.6M dead
+        # columns carrying optimizer state, and makes checkpoints trained
+        # without the padding fail to load. Inside the band the GEMM has no
+        # solution at all, so there the shape change is unavoidable.
+        #
+        # The gate keys off the projection width alone, deliberately, even
+        # though the underlying limitation is specific to bf16 on gfx950. A
+        # parameter's shape has to be a function of the model config and
+        # nothing else: the same checkpoint is written in bf16 on gfx950 and
+        # then read back on CPU by tools/hybrid/convert_kda_to_fla_hf.py, or in
+        # another dtype for eval, and a width that moved with the runtime would
+        # break exactly the checkpoint compatibility this gate exists to keep.
+        # A config on another platform whose width lands in the band therefore
+        # pays a few unused columns; kda_in_proj_pad_multiple: 0 opts out.
+        pad_multiple = getattr(self.config, "kda_in_proj_pad_multiple", 512)
+        lo, hi = _HIPBLASLT_BF16_DEAD_ZONE
+        if pad_multiple and pad_multiple > 1 and lo <= self.in_proj_dim <= hi:
+            padded = ((self.in_proj_dim + pad_multiple - 1) // pad_multiple) * pad_multiple
+        else:
+            padded = self.in_proj_dim
+        self.in_proj_pad = padded - self.in_proj_dim
+        self.in_proj_dim_padded = padded
+        if self.in_proj_pad:
+            logger.warning(
+                f"[KDA layer {layer_number}] padding fused in_proj N "
+                f"{self.in_proj_dim} -> {self.in_proj_dim_padded} "
+                f"(+{self.in_proj_pad}) to avoid the hipBLASLt bf16 dead zone."
+            )
         self.in_proj = build_module(
             submodules.in_proj,
             self.hidden_size,
-            self.in_proj_dim,
+            self.in_proj_dim_padded,
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
@@ -563,15 +616,19 @@ class KimiDeltaAttention(MegatronModule):
         # s b d -> b s d  (output is full seq_len from column-parallel)
         fused = fused.transpose(0, 1)
 
-        # Split into [qkv | f_a_out | g_a_out | beta_raw]. The slice sizes are
-        # the per-TP local dims; sum equals self.in_proj_dim // tp_size.
+        # Split into [qkv | f_a_out | g_a_out | beta_raw], plus the discarded
+        # dead-zone pad columns when they are present. The slice sizes are the
+        # per-TP local dims and sum to self.in_proj_dim_padded // tp_size, which
+        # equals self.in_proj_dim // tp_size whenever no padding was applied.
         qkv_local = self.qk_dim_local_tp * 2 + self.v_dim_local_tp
         head_dim_local_tp = self.head_dim // self.tp_size
-        qkv, f_a_out, g_a_out, beta_raw = torch.split(
-            fused,
-            [qkv_local, head_dim_local_tp, head_dim_local_tp, self.num_heads_local_tp],
-            dim=-1,
-        )
+        split_sizes = [qkv_local, head_dim_local_tp, head_dim_local_tp, self.num_heads_local_tp]
+        if self.in_proj_pad:
+            # Trailing pad columns added to dodge the hipBLASLt dead zone; drop them.
+            split_sizes.append(self.in_proj_pad // self.tp_size)
+            qkv, f_a_out, g_a_out, beta_raw, _pad = torch.split(fused, split_sizes, dim=-1)
+        else:
+            qkv, f_a_out, g_a_out, beta_raw = torch.split(fused, split_sizes, dim=-1)
 
         # --- Causal conv1d on combined QKV ---
         # Three backends, chosen at runtime:
@@ -806,26 +863,37 @@ class KimiDeltaAttention(MegatronModule):
         # Split the combined in_proj into named chunks for checkpoint compatibility.
         # in_proj output layout (after GDN-style fusion):
         #   [ query | key | value | f_a | g_a | beta ]
-        # First three are TP-sharded along output dim (qk/v split per rank),
-        # f_a/g_a have dim 64 (head_v_dim, NOT TP-sharded since head_v_dim < tp_size
-        # in some configs — we still split per-rank as standard column-parallel),
-        # beta has num_heads dim which is TP-sharded the same way.
-        in_proj_dim_local_tp = self.in_proj_dim // self.tp_size
+        # __init__ hard-asserts tp_size == 1 for the fused in_proj, so every
+        # section below is its full width and the `// self.tp_size` divisions are
+        # no-ops today. They are spelled out anyway so the layout stays right if
+        # the TP>1 recipe described in __init__ is ever implemented: q/k/v and
+        # beta shard along the output dim, while f_a/g_a are head_v_dim
+        # bottlenecks that have to stay replicated.
+        in_proj_dim_local_tp = self.in_proj_dim_padded // self.tp_size
         assert sharded_state_dict[f"{prefix}in_proj.weight"].data.size(0) == in_proj_dim_local_tp, (
             in_proj_dim_local_tp,
             sharded_state_dict[f"{prefix}in_proj.weight"],
         )
+        in_proj_split_sections = [
+            self.qk_dim // self.tp_size,
+            self.qk_dim // self.tp_size,
+            self.v_dim // self.tp_size,
+            self.head_dim,  # f_a (bottleneck dim, not sharded)
+            self.head_dim,  # g_a (bottleneck dim, not sharded)
+            self.num_heads // self.tp_size,  # beta
+        ]
+        in_proj_split_names = ["query", "key", "value", "f_a", "g_a", "beta"]
+        if self.in_proj_pad:
+            # hipBLASLt dead-zone pad columns (see __init__). Saved as a named
+            # chunk so the checkpoint round-trips as-is. They carry no signal —
+            # forward slices them off, so their gradient is identically zero —
+            # and convert_kda_to_fla_hf.py drops them when exporting to FLA.
+            in_proj_split_sections.append(self.in_proj_pad // self.tp_size)
+            in_proj_split_names.append("pad")
         sharded_state_dict[f"{prefix}in_proj.weight"] = _split_tensor_factory(
             sharded_state_dict[f"{prefix}in_proj.weight"],
-            [
-                self.qk_dim // self.tp_size,
-                self.qk_dim // self.tp_size,
-                self.v_dim // self.tp_size,
-                self.head_dim,  # f_a (bottleneck dim, not sharded)
-                self.head_dim,  # g_a (bottleneck dim, not sharded)
-                self.num_heads // self.tp_size,  # beta
-            ],
-            ["query", "key", "value", "f_a", "g_a", "beta"],
+            in_proj_split_sections,
+            in_proj_split_names,
             0,
         )
 
