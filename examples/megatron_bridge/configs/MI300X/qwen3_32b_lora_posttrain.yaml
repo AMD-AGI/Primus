@@ -31,10 +31,10 @@ modules:
       # Training configuration
       train_iters: 200
       global_batch_size: 32
-      micro_batch_size: 1
+      micro_batch_size: 2
       seq_length: 8192
       eval_interval: 30
-      save_interval: 50
+      skip_save: true
 
       # Optimizer configuration
       finetune_lr: 1.0e-4
