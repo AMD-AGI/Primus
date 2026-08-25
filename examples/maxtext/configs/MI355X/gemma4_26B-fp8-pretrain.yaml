@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:llama3.3_70B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:gemma4_26B-fp8-pretrain}
 workspace: ./output
 
 modules:
@@ -9,9 +9,9 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: llama3.3_70B.yaml
+    model: gemma4_26B.yaml
     overrides:
-      run_name: "llama3.3_70b_training"
+      run_name: "gemma4_26b_training"
       base_output_directory: "./output"
       steps: 50
       profiler: ""
@@ -27,17 +27,18 @@ modules:
       # inter-node parallelism strategy
       dcn_data_parallelism: -1
       dcn_fsdp_parallelism: 1
-      dcn_pipeline_parallelism: 1
-      dcn_tensor_parallelism: 1
-      dcn_sequence_parallelism: 1
 
-      # intra-node parallelism strategy
-      ici_fsdp_parallelism: 8
+      # intra-node parallelism strategy (MoE: shard experts)
+      ici_fsdp_parallelism: 1
       ici_data_parallelism: 1
-      ici_sequence_parallelism: 1
-      ici_tensor_parallelism: 1
-      ici_pipeline_parallelism: 1
+      ici_expert_parallelism: -1
 
+      attention: "cudnn_flash_te"
+      max_target_length: 4096
+      per_device_batch_size: 20
       remat_policy: "full"
-      max_target_length: 8192
-      per_device_batch_size: 7
+      sparse_matmul: false
+      megablox: false
+      capacity_factor: 1
+
+      quantization: "fp8"

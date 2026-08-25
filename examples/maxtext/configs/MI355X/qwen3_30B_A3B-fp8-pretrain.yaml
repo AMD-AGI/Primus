@@ -1,6 +1,10 @@
+# STATUS (MI355X / gfx950): May produce NaN around step ~9. FP8 dynamic range
+# overflow in MoE expert layers (many small experts + random init).
+# Use bf16 variant if NaN occurs.
+
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:mixtral_8x7B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-fp8-pretrain}
 workspace: ./output
 
 modules:
@@ -9,9 +13,9 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: mixtral_8x7B.yaml
+    model: qwen3_30B_A3B.yaml
     overrides:
-      run_name: "mixtral_8x7b_training"
+      run_name: "qwen3_30b_a3b_training"
       base_output_directory: "./output"
       steps: 50
       profiler: ""
@@ -33,10 +37,13 @@ modules:
       ici_data_parallelism: 1
       ici_expert_parallelism: -1
 
+      # training
+      max_target_length: 4096
+      per_device_batch_size: 4
+      remat_policy: "minimal"
       sparse_matmul: false
       megablox: false
       capacity_factor: 1
-      max_target_length: 4096
-      per_device_batch_size: 12
-      remat_policy: "save_dot_with_context_except_mlp"
-      moe_dispatch_no_expert_sharding: true
+
+      # quantization (fp8)
+      quantization: "fp8"

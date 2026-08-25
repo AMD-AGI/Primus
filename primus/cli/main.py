@@ -35,6 +35,7 @@ except ModuleNotFoundError:
 import argparse
 import importlib
 import logging
+import os
 import pkgutil
 import traceback
 from typing import Callable, Dict, Iterable, Optional, Set
@@ -160,7 +161,7 @@ def main():
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable verbose error output (stack traces).",
+        help="Enable DEBUG-level console output (sets PRIMUS_LOG_LEVEL=DEBUG).",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -180,6 +181,13 @@ def main():
         _register_subcommand(subparsers, available_subcommands[command])
 
     args, unknown_args = parser.parse_known_args()
+
+    # Publish --debug as PRIMUS_LOG_LEVEL so the runtime logger picks it up. The
+    # launchers already export this when given --debug; setting it here as well
+    # keeps the flag meaningful when main.py is invoked directly. Assigned rather
+    # than defaulted so an explicit --debug beats an inherited PRIMUS_LOG_LEVEL.
+    if getattr(args, "debug", False):
+        os.environ["PRIMUS_LOG_LEVEL"] = "DEBUG"
 
     if hasattr(args, "func"):
         try:

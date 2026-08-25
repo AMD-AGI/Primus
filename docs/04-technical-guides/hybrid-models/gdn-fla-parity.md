@@ -36,8 +36,9 @@ Inside the `rocm/primus:v26.2` container with the repo mounted at
 # Launch training (8 GPUs by default). The Megatron-LM behavioral patches
 # below are applied automatically at startup via Primus's patch system --
 # no separate apply step needed.
-EXP=examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml \
-  bash examples/run_pretrain.sh 2>&1 | tee primus_gdn.log
+./primus-cli direct --log_file primus_gdn.log \
+  -- train pretrain \
+  --config examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml
 ```
 
 Optional toggles (all default off unless noted).  Each is exposed at
