@@ -273,6 +273,17 @@ class PrimusTurboMXFP6LocalSpecProvider(LocalSpecProvider):
 
         return MXFP6RowParallelLinear
 
+    def mlp_module(self) -> type:
+        """MLP that folds its bias-add + GELU into the MXFP6 packer.
+
+        Not part of ``BackendSpecProvider``; specs that can use it look for this method and
+        fall back to Megatron's ``MLP``. The subclass itself falls back per-module for any
+        configuration it cannot reproduce, so returning it unconditionally is safe.
+        """
+        from .primus_turbo_mxfp6_local import MXFP6FusedMLP
+
+        return MXFP6FusedMLP
+
     def core_attention(self) -> type:
         return PrimusTurboLocalAttention
 

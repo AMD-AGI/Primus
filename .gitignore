@@ -38,3 +38,11 @@ pp_simulation_result
 .triton_cache_shared/
 .jax_cache/
 .cursor/
+
+# Throwaway run recipes. Configs worth keeping get a real name; an underscore
+# prefix marks a copy made to pin one experiment's knobs, which carries that
+# run's exp_name, dataset path and profiler window and is stale immediately.
+examples/megatron/configs/**/_*.yaml
+
+# Unit-test output directory.
+ut_out/
