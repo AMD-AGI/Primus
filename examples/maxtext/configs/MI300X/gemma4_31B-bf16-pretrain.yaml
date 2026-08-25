@@ -36,5 +36,4 @@ modules:
       remat_policy: "full"
       attention: "cudnn_flash_te"
       max_target_length: 8192
-      # MI300X has less HBM (192GB) than MI355X; conservative default, untuned on gfx942.
-      per_device_batch_size: 1
+      per_device_batch_size: 6

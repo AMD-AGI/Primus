@@ -3,10 +3,6 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:gemma4_31B-fp8-pretrain}
 workspace: ./output
 
-# STATUS (MI300X / gfx942): DOES NOT RUN.
-# Compiles ~10 min, then aborts with kAllGather rendezvous timeout (40s default).
-# Fix: raise first_collective_call timeouts in XLA_FLAGS (see flux_dev MI300X config).
-# bf16 gemma4_31B trains normally.
 
 modules:
   pre_trainer:
@@ -41,8 +37,7 @@ modules:
       remat_policy: "full"
       attention: "cudnn_flash_te"
       max_target_length: 8192
-      # MI300X has less HBM (192GB) than MI355X; conservative default, untuned on gfx942.
-      per_device_batch_size: 1
+      per_device_batch_size: 4
 
       # nanoo_fp8 for AMD MI300X/MI325X (uses e4m3fnuz/e5m2fnuz types)
       quantization: "nanoo_fp8"
