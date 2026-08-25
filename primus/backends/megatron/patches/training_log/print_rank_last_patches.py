@@ -197,6 +197,53 @@ def _should_forward_training_log_to_rank_0() -> bool:
         return False
 
 
+def _emit_training_log_to_console(
+    message: str, rank: Optional[int] = None, world_size: Optional[int] = None
+) -> None:
+    """
+    Put exactly one copy of the (already enriched) progress line on the console.
+
+    This cannot go through ``print``. Primus rebinds ``builtins.print`` to a
+    DEBUG-level logger call (``primus/core/runtime/logging.py``,
+    ``primus/core/base_module.py``) so that noisy third-party prints do not
+    flood the console -- but Megatron emits its per-iteration progress line via
+    ``print_rank_last`` -> ``print``, so that line is demoted to DEBUG too, and
+    the console sink defaults to ``stderr_sink_level: INFO``. The result is that
+    the one line this whole module exists to enrich -- lm loss, TFLOP/s/GPU,
+    tokens/s/GPU, memory -- never reaches a terminal. It is only recoverable
+    afterwards from ``logs/<module>/rank-N/debug.log``.
+
+    Logging it here at INFO restores that visibility. ``console_only=True`` is
+    what keeps it from being duplicated into the file sinks: the caller still
+    invokes Megatron's ``print_rank_last`` afterwards, which writes the DEBUG
+    file record as before, so the on-disk logs are unchanged by this.
+    """
+    sink_logger = getattr(primus_logger, "_logger", None)
+    if sink_logger is None:
+        return
+    bindings = {"console_only": True}
+    if rank is not None:
+        bindings["rank"] = rank
+    if world_size is not None:
+        bindings["world_size"] = world_size
+    try:
+        sink_logger.bind(**bindings).info(message)
+    except Exception:
+        # Console visibility must never be able to break training.
+        pass
+
+
+def _is_last_rank() -> bool:
+    """Whether this process is the one Megatron's ``print_rank_last`` prints on."""
+    dist = getattr(torch, "distributed", None)
+    if dist is None or not hasattr(dist, "is_initialized") or not dist.is_initialized():
+        return True
+    try:
+        return dist.get_rank() == dist.get_world_size() - 1
+    except Exception:
+        return True
+
+
 def _forward_single_node_training_log(message: str) -> None:
     """
     Broadcast the last-rank training log line to rank 0 on single-node runs so
@@ -204,6 +251,7 @@ def _forward_single_node_training_log(message: str) -> None:
     """
     dist = getattr(torch, "distributed", None)
     if dist is None or not hasattr(dist, "is_initialized") or not dist.is_initialized():
+        _emit_training_log_to_console(message)
         return
 
     try:
@@ -215,6 +263,11 @@ def _forward_single_node_training_log(message: str) -> None:
         return
 
     if world_size <= 1:
+        # Nothing to broadcast: this process is both rank 0 and the last rank,
+        # so it is the one that has to put the line on the console. Returning
+        # here (the previous behaviour) is why a single-process run showed no
+        # loss at all.
+        _emit_training_log_to_console(message, rank=rank, world_size=world_size)
         return
 
     last_rank = world_size - 1
@@ -226,10 +279,7 @@ def _forward_single_node_training_log(message: str) -> None:
         return
 
     if rank == 0 and payload[0]:
-        sink_logger = getattr(primus_logger, "_logger", None)
-        if sink_logger is None:
-            return
-        sink_logger.bind(rank=last_rank, world_size=world_size, console_only=True).debug(payload[0])
+        _emit_training_log_to_console(payload[0], rank=last_rank, world_size=world_size)
 
 
 class MemoryStatsExtension:
@@ -803,10 +853,11 @@ def patch_training_log_unified(ctx: PatchContext):
         # single-node run; it is independent of ROCm/throughput stat injection.
         should_forward_to_rank_0 = _should_forward_training_log_to_rank_0()
 
-        if not enable_rocm_stats and not should_forward_to_rank_0:
-            # Nothing to do; leave Megatron's training_log and print_rank_last untouched.
-            return
-
+        # Note: we wrap unconditionally. ``enable_rocm_stats`` still gates the
+        # metric *injection* below, but the wrapper is also what puts the line on
+        # the console at INFO (see ``_emit_training_log_to_console``), and that has
+        # to happen whether or not ROCm/throughput stats were requested -- otherwise
+        # a run with ``log_throughput: false`` shows no per-iteration loss at all.
         original_training_log = megatron_training.training_log
 
         # Avoid double-wrapping training_log.
@@ -885,6 +936,11 @@ def patch_training_log_unified(ctx: PatchContext):
             # while still letting the real last rank emit its original log.
             if should_forward_to_rank_0:
                 _forward_single_node_training_log(f"{source_prefix}{updated}")
+            elif _is_last_rank():
+                # Multi-node: no broadcast, so the rank that Megatron would have
+                # printed on is the one that carries the line to the console.
+                # Exactly one process emits, matching Megatron's own behaviour.
+                _emit_training_log_to_console(updated)
 
             original_print_rank_last(updated)
 

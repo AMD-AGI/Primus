@@ -38,8 +38,15 @@ def _install_fake_megatron_training(monkeypatch: pytest.MonkeyPatch):
     def fake_get_model(*args, **kwargs):
         return None
 
+    # The real ``megatron.training.training`` re-exports ``print_rank_last``; the
+    # unified patch temporarily overrides it for the duration of a training_log
+    # call, so the fake module has to carry it too.
+    def fake_print_rank_last(message, flush=True):
+        return None
+
     training_mod.training_log = fake_training_log
     training_mod.get_model = fake_get_model
+    training_mod.print_rank_last = fake_print_rank_last
 
     # Wire the package hierarchy: megatron.training.training
     training_pkg.training = training_mod
@@ -85,21 +92,28 @@ def _make_ctx(args=None, config=None, module_config=None):
     return SimpleNamespace(extra=extra)
 
 
-def test_patch_training_log_skips_when_no_extensions(monkeypatch: pytest.MonkeyPatch):
+def test_patch_training_log_wraps_even_without_extensions(monkeypatch: pytest.MonkeyPatch):
+    """Wrapping is unconditional, because the wrapper also carries console visibility.
+
+    This used to assert the opposite -- that with no stat injection and no
+    forwarding the patch is a no-op. That contract was written when Megatron's
+    ``print`` still reached the console. It no longer does: Primus rebinds
+    ``builtins.print`` to a DEBUG-level logger call, and the console sink defaults
+    to INFO, so an unwrapped ``training_log`` produces no visible per-iteration
+    line at all. "No-op" therefore stopped meaning "unchanged behaviour" and
+    started meaning "silently hide the training log", which is why the wrapper is
+    now always installed. Stat *injection* is still gated on ``log_throughput``.
+    """
     training_mod, original_fn = _install_fake_megatron_training(monkeypatch)
 
-    # Disable ROCm stats via args/config so no extensions are created.
     args = SimpleNamespace(log_throughput=False)
     config = {}
     ctx = _make_ctx(args=args, config=config)
 
-    # Patch log_rank_0 to avoid real logging.
     monkeypatch.setattr(
         "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_0",
         lambda *a, **k: None,
     )
-    # No injection and no forwarding -> patch must be a no-op. Pin forwarding to
-    # False so this test does not depend on the runner's env vars.
     monkeypatch.setattr(
         "primus.backends.megatron.patches.training_log.print_rank_last_patches._should_forward_training_log_to_rank_0",
         lambda: False,
@@ -107,9 +121,145 @@ def test_patch_training_log_skips_when_no_extensions(monkeypatch: pytest.MonkeyP
 
     tl_patches.patch_training_log_unified(ctx)
 
-    # training_log should remain the original function and not be wrapped.
-    assert training_mod.training_log is original_fn
-    assert not getattr(training_mod.training_log, "_primus_training_log_wrapper", False)
+    assert training_mod.training_log is not original_fn
+    assert getattr(training_mod.training_log, "_primus_training_log_print_rank_wrapper", False)
+
+    # Applying it twice must still be idempotent.
+    wrapped = training_mod.training_log
+    tl_patches.patch_training_log_unified(ctx)
+    assert training_mod.training_log is wrapped
+
+
+class _RecordingSink:
+    """Stand-in for ``primus_logger._logger``: records level and bindings."""
+
+    def __init__(self, bindings=None):
+        self.bindings = dict(bindings or {})
+        self.records = []
+
+    def bind(self, **kw):
+        child = _RecordingSink({**self.bindings, **kw})
+        child.records = self.records  # share the sink
+        return child
+
+    def info(self, message):
+        self.records.append(("info", message, dict(self.bindings)))
+
+    def debug(self, message):
+        self.records.append(("debug", message, dict(self.bindings)))
+
+
+def _use_recording_sink(monkeypatch: pytest.MonkeyPatch):
+    sink = _RecordingSink()
+    monkeypatch.setattr(prl_patches.primus_logger, "_logger", sink, raising=False)
+    return sink
+
+
+def _fake_dist(monkeypatch: pytest.MonkeyPatch, *, initialized, rank=0, world_size=1):
+    dist = SimpleNamespace(
+        is_initialized=lambda: initialized,
+        get_backend=lambda: "nccl",
+        get_rank=lambda: rank,
+        get_world_size=lambda: world_size,
+        # Mirror the real collective: every rank ends up holding src's object.
+        broadcast_object_list=lambda payload, src=0: payload.__setitem__(0, LINE),
+    )
+    monkeypatch.setattr(prl_patches.torch, "distributed", dist, raising=False)
+    return dist
+
+
+LINE = "iteration 3/20 | lm loss: 1.119060E+01 | compute per GPU (TFLOP/s/GPU): 168.3"
+
+
+def test_training_log_line_is_emitted_at_info_not_debug(monkeypatch: pytest.MonkeyPatch):
+    """The console sink defaults to INFO, so a DEBUG record never reaches a terminal.
+
+    This is the regression that made a real pretrain run show no loss at all: the
+    forwarding introduced to *restore* console visibility emitted at DEBUG, so it
+    could not achieve what it was added for.
+    """
+    sink = _use_recording_sink(monkeypatch)
+    _fake_dist(monkeypatch, initialized=True, rank=0, world_size=8)
+
+    prl_patches._forward_single_node_training_log(LINE)
+
+    assert sink.records, "nothing was emitted at all"
+    levels = {level for level, _, _ in sink.records}
+    assert levels == {"info"}, f"expected INFO only, got {levels}"
+
+
+def test_training_log_line_emitted_for_single_process_run(monkeypatch: pytest.MonkeyPatch):
+    """world_size == 1 used to return without emitting anything.
+
+    There is no one to broadcast to, but this process is both rank 0 and the last
+    rank, so it is precisely the process that has to put the line on the console.
+    Returning early meant a single-process run printed no per-iteration loss.
+    """
+    sink = _use_recording_sink(monkeypatch)
+    _fake_dist(monkeypatch, initialized=True, rank=0, world_size=1)
+
+    prl_patches._forward_single_node_training_log(LINE)
+
+    assert [(lvl, msg) for lvl, msg, _ in sink.records] == [("info", LINE)]
+
+
+def test_training_log_line_emitted_before_distributed_init(monkeypatch: pytest.MonkeyPatch):
+    sink = _use_recording_sink(monkeypatch)
+    _fake_dist(monkeypatch, initialized=False)
+
+    prl_patches._forward_single_node_training_log(LINE)
+
+    assert [(lvl, msg) for lvl, msg, _ in sink.records] == [("info", LINE)]
+
+
+def test_console_emit_is_console_only(monkeypatch: pytest.MonkeyPatch):
+    """``console_only`` keeps the file sinks from getting a second copy: Megatron's
+    own ``print`` still writes the DEBUG file record right after this."""
+    sink = _use_recording_sink(monkeypatch)
+
+    prl_patches._emit_training_log_to_console(LINE, rank=7, world_size=8)
+
+    assert len(sink.records) == 1
+    level, message, bindings = sink.records[0]
+    assert level == "info"
+    assert message == LINE
+    assert bindings.get("console_only") is True
+    assert bindings.get("rank") == 7
+    assert bindings.get("world_size") == 8
+
+
+def test_console_emit_never_raises(monkeypatch: pytest.MonkeyPatch):
+    """Console visibility must not be able to take down a training run."""
+
+    class Exploding:
+        def bind(self, **kw):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(prl_patches.primus_logger, "_logger", Exploding(), raising=False)
+    prl_patches._emit_training_log_to_console(LINE)  # must not raise
+
+    monkeypatch.setattr(prl_patches.primus_logger, "_logger", None, raising=False)
+    prl_patches._emit_training_log_to_console(LINE)  # must not raise
+
+
+def test_is_last_rank(monkeypatch: pytest.MonkeyPatch):
+    _fake_dist(monkeypatch, initialized=False)
+    assert prl_patches._is_last_rank() is True
+
+    _fake_dist(monkeypatch, initialized=True, rank=7, world_size=8)
+    assert prl_patches._is_last_rank() is True
+
+    _fake_dist(monkeypatch, initialized=True, rank=3, world_size=8)
+    assert prl_patches._is_last_rank() is False
+
+
+def test_only_rank_zero_emits_when_forwarding(monkeypatch: pytest.MonkeyPatch):
+    """Exactly one console line per iteration, no matter how many ranks there are."""
+    for rank in range(1, 8):
+        sink = _use_recording_sink(monkeypatch)
+        _fake_dist(monkeypatch, initialized=True, rank=rank, world_size=8)
+        prl_patches._forward_single_node_training_log(LINE)
+        assert sink.records == [], f"rank {rank} should stay silent, got {sink.records}"
 
 
 def test_patch_training_log_wraps_and_stacks_extensions(monkeypatch: pytest.MonkeyPatch):
