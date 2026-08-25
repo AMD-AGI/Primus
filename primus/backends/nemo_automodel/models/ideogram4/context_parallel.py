@@ -132,7 +132,9 @@ def _assert_varlen_not_installed() -> None:
             "diffusers' dispatch_attention_fn, which is where the Ulysses all-to-all happens, "
             "so each rank would attend only within its own sequence shard and training would "
             "produce wrong gradients WITHOUT raising. Unset PRIMUS_IDEOGRAM_VARLEN_ATTN to run "
-            "CP on the stock SDPA path, or set cp_size=1 to keep the var-len path."
+            "CP on the stock SDPA path, or set cp_size=1 to keep the var-len path. Note this "
+            "also rules out CP + multi-sample packing (pack_size > 1), which depends on the "
+            "var-len path to isolate the samples sharing a row."
         )
 
 
@@ -152,13 +154,22 @@ def _timestep_pre_hook(module, args, kwargs):
 
 
 def _assert_timestep_is_per_sample(timestep) -> None:
-    """The plan leaves ``timestep`` unsplit, which is only correct while it is ``(B,)``."""
+    """The plan leaves ``timestep`` unsplit, which is only correct while it is ``(B,)``.
+
+    This is also what catches CP + multi-sample packing: a packed row holds samples at
+    different flow-matching times, so the adapter necessarily switches ``timestep`` to the
+    per-token ``(B, S)`` form, and that arrives here.
+    """
     if timestep is not None and hasattr(timestep, "dim") and timestep.dim() != 1:
         raise ValueError(
             f"Context parallelism expects a per-sample timestep of shape (B,), got "
             f"{tuple(timestep.shape)}. A per-token timestep is broadcast against the "
             "sequence axis and would need splitting in the CP plan (as Wan does); it is "
-            "left unsplit here because the Ideogram adapter passes t = 1 - sigma per sample."
+            "left unsplit here because the Ideogram adapter passes t = 1 - sigma per sample. "
+            "If this came from pack_size > 1: multi-sample packing and context parallelism "
+            "are not usable together yet. Packing gives each sample in a row its own "
+            "timestep, which this plan cannot split, and it needs the var-len processor that "
+            "CP already refuses. Set pack_size=1 to run CP, or cp_size=1 to run packing."
         )
 
 

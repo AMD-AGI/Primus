@@ -234,29 +234,57 @@ class TestResolvePacking:
     def test_reads_the_buffer_off_the_module(self):
         model = _FakeModel()
         published = publish_packing(model, _packing(), max_seqlen=32)
-        cu, bound = resolve_packing(model.attentions[0])
+        cu, bound, segments = resolve_packing(model.attentions[0])
         assert cu is published and bound == 32
+        assert segments == 2, "an unpacked publish must still describe the 2-segment row"
 
     def test_explicit_argument_wins(self):
         """Keeps a future kwargs route (patching the block forward) able to override."""
         model = _FakeModel()
         publish_packing(model, _packing(offset=2), max_seqlen=32)
         override = _packing(offset=6)
-        cu, bound = resolve_packing(model.attentions[0], override, 99)
+        cu, bound, _ = resolve_packing(model.attentions[0], override, 99)
         assert cu is override and bound == 99
 
     def test_no_buffer_means_no_packing(self):
         """The processor must then fall through to its mask-derived legacy path."""
         model = _FakeModel()
-        cu, bound = resolve_packing(model.attentions[0])
+        cu, bound, _ = resolve_packing(model.attentions[0])
         assert cu is None and bound is None
 
     def test_clear_packing_restores_the_legacy_path(self):
         model = _FakeModel(layers=3)
         publish_packing(model, _packing())
         assert clear_packing(model) == 3
-        cu, _ = resolve_packing(model.attentions[0])
+        cu, _, _ = resolve_packing(model.attentions[0])
         assert cu is None
+
+    def test_segments_per_row_round_trips(self):
+        """The processor's staleness check is only as good as this number reaching it.
+
+        Published as ``pack_size + 1``. If it did not arrive the check would compare against
+        the 2-segment layout, reject every packed batch, and the failure would look like a
+        stale-packing bug rather than a transport one.
+        """
+        model = _FakeModel(layers=3)
+        publish_packing(model, _packing(), max_seqlen=32, segments_per_row=5)
+        for attn in model.attentions:
+            _, _, segments = resolve_packing(attn)
+            assert segments == 5
+
+    def test_segments_per_row_is_republished_when_pack_size_changes(self):
+        model = _FakeModel()
+        publish_packing(model, _packing(), segments_per_row=5)
+        publish_packing(model, _packing(offset=2), segments_per_row=3)
+        _, _, segments = resolve_packing(model.attentions[0])
+        assert segments == 3, "a stale segment count would reject the batch in front of it"
+
+    def test_clear_packing_drops_segments_per_row(self):
+        model = _FakeModel()
+        publish_packing(model, _packing(), segments_per_row=5)
+        clear_packing(model)
+        _, _, segments = resolve_packing(model.attentions[0])
+        assert segments == 2, "after a clear the module must describe no packing at all"
 
 
 class TestStalePackingGuard:
@@ -335,9 +363,9 @@ class TestKernelNeverSeesTheSharedBuffer:
 
         shape = (3, 8, 2, 4)
         for attn in model.attentions:
-            cu, bound = resolve_packing(attn)
+            cu, bound, segments = resolve_packing(attn)
             attn.processor._attention(
-                torch.zeros(shape), torch.zeros(shape), torch.zeros(shape), None, cu, bound
+                torch.zeros(shape), torch.zeros(shape), torch.zeros(shape), None, cu, bound, segments
             )
 
         assert len(seen) == 3
@@ -387,7 +415,7 @@ class TestWrappersAreNotCountedTwice:
         # real module, which is the object that holds the buffer.
         shared = publish_packing(model, _packing())
         for block in model.layers:
-            cu, _ = resolve_packing(block.attention._checkpoint_wrapped_module)
+            cu, _, _ = resolve_packing(block.attention._checkpoint_wrapped_module)
             assert cu is shared
 
 

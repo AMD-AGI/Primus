@@ -41,12 +41,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from functools import partial
 from typing import Dict, List
 
 import torch
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from nemo_automodel.components.datasets.diffusion.loader import DiffusionDataloaderBuild
+
+from primus.backends.nemo_automodel.models.ideogram4.data.packed_sampler import (
+    Ideogram4PackedBatchSampler,
+)
+from primus.backends.nemo_automodel.models.ideogram4.packing import derive_text_budget
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +98,16 @@ class SyntheticIdeogram4Dataset(Dataset):
     def __len__(self) -> int:
         return self.num_samples
 
+    def text_length(self, idx: int) -> int:
+        """Deterministic per-sample real-text length in ``[min_text, max_text]``.
+
+        Exposed separately from ``__getitem__`` because the packed batch sampler needs every
+        sample's length up front to decide which ones share a row, and generating the samples
+        to find out would cost a full pass over the (deliberately large) feature tensors.
+        """
+        span = self.max_text_tokens - self.min_text_tokens + 1
+        return self.min_text_tokens + (int(idx) % span)
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Perf mode: generate each sample once and reuse (so throughput runs measure
         # the model step, not per-__getitem__ randn of the big 53248-dim features).
@@ -123,9 +139,7 @@ class SyntheticIdeogram4Dataset(Dataset):
             llm_features = self.feature_scale * torch.randn(
                 self.max_text_tokens, self.llm_features_dim, dtype=torch.float32, generator=gen
             )
-        # Deterministic per-sample real-text length in [min_text, max_text].
-        span = self.max_text_tokens - self.min_text_tokens + 1
-        text_len = self.min_text_tokens + (int(idx) % span)
+        text_len = self.text_length(idx)
 
         sample = {
             "image_latents": image_latents,
@@ -137,13 +151,22 @@ class SyntheticIdeogram4Dataset(Dataset):
         return sample
 
 
-def _collate_synthetic_ideogram4(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, object]:
-    """Stack per-sample tensors into the FlowMatchingPipeline batch format."""
+def _collate_synthetic_ideogram4(
+    batch: List[Dict[str, torch.Tensor]], pack_size: int = 1, text_budget: int = 0
+) -> Dict[str, object]:
+    """Stack per-sample tensors into the FlowMatchingPipeline batch format.
+
+    ``pack_size`` / ``text_budget`` ride along on the batch for the adapter: the batch sampler
+    has already grouped the samples into rows, so the collate only has to say what grouping to
+    assume.
+    """
     return {
         "image_latents": torch.stack([b["image_latents"] for b in batch], dim=0),
         "llm_features": torch.stack([b["llm_features"] for b in batch], dim=0),
         "text_lengths": torch.stack([b["text_lengths"] for b in batch], dim=0),
         "data_type": "image",
+        "pack_size": pack_size,
+        "text_budget": text_budget,
     }
 
 
@@ -189,6 +212,14 @@ class SyntheticIdeogram4DataloaderConfig:
     # than the training step costs GPU. Leave false for the overfit smoke, where the
     # samples must be distinct for the loss-decrease signal to mean anything.
     share_text_features: bool = False
+    # Samples packed into ONE transformer row; 1 is the unpacked layout. Semantics are
+    # identical to `Ideogram4CacheDataloaderConfig.pack_size`; the synthetic loader supports it
+    # so the packed path can be smoke-tested without building a real cache. local_batch_size
+    # keeps counting SAMPLES and must be a multiple of pack_size.
+    pack_size: int = 1
+    # Caption slots a packed row reserves, slack included. 0 derives it from the synthetic
+    # length distribution.
+    text_budget: int = 0
 
     def build(self, *, dp_rank: int, dp_world_size: int, batch_size: int) -> DiffusionDataloaderBuild:
         """Build the synthetic dataset, per-rank sampler, and dataloader."""
@@ -207,8 +238,34 @@ class SyntheticIdeogram4DataloaderConfig:
             share_text_features=self.share_text_features,
         )
 
+        pack_size = int(self.pack_size)
+        if pack_size < 1:
+            raise ValueError(f"pack_size must be >= 1, got {pack_size}")
+
+        text_lengths = [dataset.text_length(i) for i in range(len(dataset))]
+        text_budget = int(self.text_budget)
+        if text_budget <= 0:
+            text_budget = derive_text_budget(
+                pack_size=pack_size,
+                max_text_length=self.max_text_tokens,
+                mean_text_length=sum(text_lengths) / len(text_lengths),
+            )
+
         sampler = None
-        if dp_world_size > 1:
+        batch_sampler = None
+        if pack_size > 1:
+            batch_sampler = Ideogram4PackedBatchSampler(
+                text_lengths=text_lengths,
+                samples_per_batch=batch_size,
+                pack_size=pack_size,
+                text_budget=text_budget,
+                num_replicas=dp_world_size,
+                rank=dp_rank,
+                shuffle=self.shuffle,
+                seed=self.seed,
+                drop_last=self.drop_last,
+            )
+        elif dp_world_size > 1:
             sampler = DistributedSampler(
                 dataset,
                 num_replicas=dp_world_size,
@@ -217,28 +274,42 @@ class SyntheticIdeogram4DataloaderConfig:
                 drop_last=self.drop_last,
             )
 
-        dataloader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=(sampler is None and self.shuffle),
-            sampler=sampler,
-            num_workers=self.num_workers,
-            collate_fn=_collate_synthetic_ideogram4,
-            pin_memory=self.pin_memory,
-            drop_last=self.drop_last,
-        )
+        collate = partial(_collate_synthetic_ideogram4, pack_size=pack_size, text_budget=text_budget)
+        if batch_sampler is not None:
+            dataloader = DataLoader(
+                dataset,
+                batch_sampler=batch_sampler,
+                num_workers=self.num_workers,
+                collate_fn=collate,
+                pin_memory=self.pin_memory,
+            )
+        else:
+            dataloader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=(sampler is None and self.shuffle),
+                sampler=sampler,
+                num_workers=self.num_workers,
+                collate_fn=collate,
+                pin_memory=self.pin_memory,
+                drop_last=self.drop_last,
+            )
         logger.info(
             "[SyntheticIdeogram4] %d samples, in_ch=%d grid=%dx%d max_text=%d feat_dim=%d "
-            "(dp_rank=%d/%d, batch_size=%d, %d batches/rank)",
+            "pack_size=%d text_budget=%d (dp_rank=%d/%d, batch_size=%d samples = %d row(s), "
+            "%d batches/rank)",
             len(dataset),
             self.in_channels,
             self.grid_h,
             self.grid_w,
             self.max_text_tokens,
             self.llm_features_dim,
+            pack_size,
+            text_budget,
             dp_rank,
             dp_world_size,
             batch_size,
+            batch_size // pack_size,
             len(dataloader),
         )
-        return DiffusionDataloaderBuild(dataloader=dataloader, sampler=sampler)
+        return DiffusionDataloaderBuild(dataloader=dataloader, sampler=batch_sampler or sampler)

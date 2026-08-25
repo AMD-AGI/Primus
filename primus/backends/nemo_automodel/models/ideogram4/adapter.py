@@ -24,26 +24,45 @@ WHAT the adapter does:
   flow-matching convention (noise ``x_t=(1-sigma)x0+sigma eps``; target
   ``v=eps-x0`` in the 128-dim packed-latent space) onto that packed contract:
 
-  - ``prepare_inputs`` packs image latents ``[B,128,H_p,W_p] -> [B,n_img,128]``,
-    prepends a zeroed text region for ``hidden_states [B,S,128]``, builds
-    ``encoder_hidden_states [B,S,53248]`` (Qwen3-VL features over text, zeros over
-    image), and the ``position_ids/segment_ids/indicator`` for the
-    ``[pad][text][image]`` layout. Ideogram model time is ``t = 1 - sigma``.
-    It ALSO builds the var-len ``cu_seqlens`` packing here on the host (see
-    :func:`build_cu_seqlens`), so the processor never derives it from the mask inside the
+  - ``prepare_inputs`` folds the micro-batch's ``N`` samples into ``B = N // pack_size``
+    packed rows. It packs image latents ``[N,128,H_p,W_p] -> [N,n_img,128]``, scatters them
+    and the left-padded text features into ``hidden_states [B,S,128]`` /
+    ``encoder_hidden_states [B,S,53248]``, and takes the
+    ``position_ids/segment_ids/indicator`` from :func:`build_packed_layout`. Ideogram model
+    time is ``t = 1 - sigma``. It ALSO builds the var-len ``cu_seqlens`` packing on the host
+    (see ``packing.py``), so the processor never derives it from the mask inside the
     compiled region -- that derivation is data-dependent, host-syncing, and under FSDP2
     its graph break desyncs the per-layer collectives. Disable with
     ``PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS=0``.
   - ``forward`` publishes that packing into the attention modules' shared buffer
     (``ideogram4_packing_buffer``, which documents why that route and not diffusers'
-    ``attention_kwargs``), runs the DiT, slices the image-token velocity, unpacks to
-    ``[B,128,H_p,W_p]`` and NEGATES it: the DiT predicts ``x0 - eps`` (inference
-    feeds ``-v`` to the scheduler) while AutoModel's target is ``eps - x0``.
+    ``attention_kwargs``), runs the DiT, GATHERS each sample's image-token velocity out of
+    its row, unpacks to ``[N,128,H_p,W_p]`` and NEGATES it: the DiT predicts ``x0 - eps``
+    (inference feeds ``-v`` to the scheduler) while AutoModel's target is ``eps - x0``.
+
+MULTI-SAMPLE PACKING (``pack_size`` > 1):
+  ``N`` stays the leading dimension on BOTH sides of the adapter, so ``FlowMatchingPipeline``
+  never learns that packing happened: its ``sigma``, target, loss and loss weighting are all
+  still per-sample and need no change. Only the transformer sees rows. Two consequences worth
+  knowing:
+
+    * ``timestep`` becomes per-TOKEN ``(B,S)`` once a row holds samples at different
+      flow-matching times. At ``pack_size == 1`` it stays per-sample ``(B,)``, both because
+      the model then does the adaln projection once instead of ``S`` times and because the
+      context-parallel plan asserts that shape.
+    * ``PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE`` is refused outright for a packed batch. Dense
+      attention over a packed row lets neighbouring SAMPLES attend to each other, which is
+      the archetypal packing corruption: no error, descending loss, ruined model.
+
+  ``pack_size`` and ``text_budget`` are read off the BATCH, not from adapter kwargs -- see
+  :meth:`_resolve_packing` for why that is the only arrangement in which the loader and the
+  adapter cannot disagree.
 
   Batch keys consumed (from the Ideogram-4 preprocessor / cache):
-    - ``image_latents``: ``[B,128,H_p,W_p]`` patchified + BN-normalized latents.
-    - ``llm_features``: ``[B,max_text,53248]`` left-padded Qwen3-VL 13-layer feats.
-    - ``text_lengths``: ``[B]`` int, real (non-pad) text token count per sample.
+    - ``image_latents``: ``[N,128,H_p,W_p]`` patchified + BN-normalized latents.
+    - ``llm_features``: ``[N,text_capacity,53248]`` left-padded Qwen3-VL 13-layer feats.
+    - ``text_lengths``: ``[N]`` int, real (non-pad) text token count per sample.
+    - ``pack_size`` / ``text_budget``: optional ints; absent means the unpacked layout.
 
   ``install()`` is additive and safe: it only adds the ``ideogram4`` route, so a
   FLUX/Wan run is unaffected. Idempotent.
@@ -62,90 +81,30 @@ from primus.backends.nemo_automodel.models.ideogram4.attention import (
     precompute_cu_seqlens_active,
 )
 
+# The layout constants and both packing builders live in ``packing.py`` now that a row can
+# hold more than one sample. Re-exported here because they are part of this module's public
+# surface (tests and the runbook import them from the adapter).
+from primus.backends.nemo_automodel.models.ideogram4.packing import (  # noqa: F401
+    IMAGE_POSITION_OFFSET,
+    LLM_TOKEN_INDICATOR,
+    OUTPUT_IMAGE_INDICATOR,
+    SEQUENCE_PADDING_INDICATOR,
+    PackedLayout,
+    build_cu_seqlens,
+    build_packed_layout,
+    derive_text_budget,
+)
+
 logger = logging.getLogger(__name__)
 
-# Per-token role / layout constants live with the diffusers transformer definition.
-try:
-    from diffusers.models.transformers.transformer_ideogram4 import (
-        IMAGE_POSITION_OFFSET,
-        LLM_TOKEN_INDICATOR,
-        OUTPUT_IMAGE_INDICATOR,
-        SEQUENCE_PADDING_INDICATOR,
-    )
-except Exception:  # pragma: no cover - keep the module importable without diffusers (tests, lint)
-    # Values as of diffusers 0.39.0, read out of the installed package rather than guessed.
-    # They are the layout contract with the model, so a stale literal here silently mislabels
-    # every token: the warning below is the only signal that the real ones were not used.
-    IMAGE_POSITION_OFFSET = 65536
-    LLM_TOKEN_INDICATOR = 3
-    OUTPUT_IMAGE_INDICATOR = 2
-    SEQUENCE_PADDING_INDICATOR = -1
-    logger.warning(
-        "[PrimusIdeogram4] Could not import the Ideogram-4 layout constants from diffusers; "
-        "falling back to the diffusers 0.39.0 values (pad=%d, llm=%d, image=%d, offset=%d). "
-        "Fine for import-only use, but if a real run reaches this the constants may have been "
-        "renamed upstream and the token layout will be wrong with no further error.",
-        SEQUENCE_PADDING_INDICATOR,
-        LLM_TOKEN_INDICATOR,
-        OUTPUT_IMAGE_INDICATOR,
-        IMAGE_POSITION_OFFSET,
-    )
+_logged: set = set()
 
 
-def build_cu_seqlens(
-    text_lengths: List[int],
-    max_text_tokens: int,
-    num_image_tokens: int,
-    device: torch.device = None,
-) -> torch.Tensor:
-    """Var-len packing for the ``[left-pad][text][image]`` layout, built on the HOST.
-
-    Each row ``b`` of the flattened ``(B*S)`` sequence (``S = max_text_tokens +
-    num_image_tokens``) contributes exactly TWO segments, matching what the model's
-    ``(seg_i == seg_j)`` mask encodes:
-
-      * ``[b*S, b*S+offset)``      the left-pad block (attends only to itself; discarded)
-      * ``[b*S+offset, (b+1)*S)``  the text+image block (Ideogram attends these jointly)
-
-    with ``offset = max_text_tokens - text_lengths[b]``.
-
-    Because the count is always ``2*B``, the returned tensor's length is always ``2*B+1``
-    -- independent of the captions in the batch. That is what keeps the compiled graph
-    reusable: a segment count that varied with the data would change this tensor's shape
-    and force a recompile per distinct length pattern.
-
-    Args:
-        text_lengths: per-sample real (non-pad) text token counts, as Python ints.
-        max_text_tokens: padded width of the text region, INCLUDING the reserved pad
-            column, so that ``offset >= 1`` on every row.
-        num_image_tokens: ``grid_h * grid_w``.
-        device: destination device. Building here costs one host->device copy; the thing
-            being avoided is device->host reads inside the compiled region.
-
-    Returns:
-        ``int32`` ``(2*len(text_lengths)+1,)`` cumulative segment starts, beginning at 0
-        and ending at ``B*S`` -- the ``flash_attn_varlen_func`` contract.
-
-    Raises:
-        ValueError: if any row would produce an empty pad segment (``offset == 0``).
-            Zero-length segments are not representable for var-len flash, and the
-            reserved pad column exists precisely to make this unreachable.
-    """
-    seq_len = max_text_tokens + num_image_tokens
-    starts: List[int] = []
-    for b, num_text in enumerate(text_lengths):
-        offset = max_text_tokens - int(num_text)
-        if offset < 1:
-            raise ValueError(
-                f"row {b} has text_length={int(num_text)} with max_text_tokens={max_text_tokens}, "
-                "leaving no padding. Every row needs >=1 pad token so the segment count (and "
-                "therefore cu_seqlens' shape) is the same for every batch."
-            )
-        base = b * seq_len
-        starts.append(base)
-        starts.append(base + offset)
-    starts.append(len(text_lengths) * seq_len)
-    return torch.tensor(starts, dtype=torch.int32, device=device)
+def _log_once(key: str, level: int, msg: str, *args) -> None:
+    """Log once per process. Called from the per-step path, so it must not repeat."""
+    if key not in _logged:
+        _logged.add(key)
+        logger.log(level, msg, *args)
 
 
 def _base_adapter_cls():
@@ -213,6 +172,47 @@ def _build_ideogram4_adapter_class():
             b, _, c = tokens.shape
             return tokens.permute(0, 2, 1).contiguous().reshape(b, c, h, w)
 
+        def _resolve_packing(self, batch, text_capacity: int, num_samples: int):
+            """Decide ``(pack_size, text_budget)`` for this micro-batch.
+
+            The BATCH is authoritative, not adapter kwargs. ``pack_size`` determines which
+            samples end up adjacent in a row, which is a decision only the batch sampler can
+            make (it is the one component that sees enough of the dataset to keep every row
+            inside the budget). Reading it back off the batch makes it impossible for the
+            loader and the adapter to disagree -- a disagreement would not raise, it would
+            just mislabel every token.
+
+            A batch without these keys is the unpacked layout: one sample per row and a
+            budget of ``text_capacity + 1``, the reserved-slack convention that the
+            one-sample path already uses. So every existing dataloader config keeps working
+            untouched.
+            """
+            pack_size = int(batch.get("pack_size", 1) or 1)
+            text_budget = int(batch.get("text_budget", 0) or 0)
+            if text_budget <= 0:
+                # +1 is the reserved slack slot: a caption filling the full width must still
+                # leave one, or the row collapses to K segments instead of K+1 and cu_seqlens
+                # changes shape.
+                text_budget = pack_size * text_capacity + 1
+                if pack_size > 1:
+                    _log_once(
+                        "derived_budget",
+                        logging.WARNING,
+                        "[PrimusIdeogram4] pack_size=%d but the batch carries no text_budget, so "
+                        "it defaults to pack_size*text_capacity+1=%d. That is always feasible but "
+                        "saves nothing -- it is K copies of the unpacked row. Set text_budget on "
+                        "the dataloader config to actually reclaim the caption padding.",
+                        pack_size,
+                        text_budget,
+                    )
+            if num_samples % pack_size:
+                raise ValueError(
+                    f"pack_size={pack_size} does not divide the micro-batch size {num_samples}. "
+                    "The row count would then vary between steps and recompile the graph; make "
+                    "local_batch_size a multiple of pack_size and keep drop_last=true."
+                )
+            return pack_size, text_budget
+
         def prepare_inputs(self, context) -> Dict[str, Any]:
             batch = context.batch
             device = context.device
@@ -223,100 +223,124 @@ def _build_ideogram4_adapter_class():
                 raise ValueError(
                     f"Ideogram4Adapter expects 4D patchified latents [B, C, H_p, W_p], got {noisy.ndim}D"
                 )
-            B, C, H_p, W_p = noisy.shape
+            num_samples, C, H_p, W_p = noisy.shape
             if C != self.in_channels:
                 raise ValueError(f"Expected {self.in_channels} packed channels, got {C}")
-            num_image_tokens = H_p * W_p
 
-            img_tokens = self._pack_image_latents(noisy)  # [B, n_img, 128]
+            img_tokens = self._pack_image_latents(noisy)  # [N, n_img, 128]
 
             llm_features = batch["llm_features"].to(device, dtype=dtype, non_blocking=True)
             if llm_features.ndim == 2:
                 llm_features = llm_features.unsqueeze(0)
-            # Text capacity as produced by the dataloader, before the reserved pad column.
+            # Text capacity as produced by the dataloader: the width of the left-padded text
+            # axis, NOT the row's text budget.
             text_capacity = llm_features.shape[1]
-
-            # Reserve one always-pad column so offset >= 1 on every row. Without it a
-            # caption filling the full width yields a single-segment row, so the segment
-            # count -- and thus cu_seqlens' shape -- would vary per batch and recompile the
-            # graph. Costs one token position out of S; capping captions instead would mean
-            # dropping a real token to satisfy the compiler.
-            precompute_cu_seqlens = precompute_cu_seqlens_active()
-            if precompute_cu_seqlens:
-                pad_col = torch.zeros(B, 1, llm_features.shape[-1], device=device, dtype=dtype)
-                llm_features = torch.cat([pad_col, llm_features], dim=1)
-            max_text = llm_features.shape[1]
-
-            if context.cfg_dropout_prob > 0.0:
-                drop = torch.rand(B, 1, 1, device=device) < context.cfg_dropout_prob
-                llm_features = llm_features.masked_fill(drop, 0.0)
+            feature_dim = llm_features.shape[-1]
 
             text_lengths = batch.get("text_lengths")
             if text_lengths is None:
-                text_lengths = [text_capacity] * B
+                text_lengths = [text_capacity] * num_samples
             elif torch.is_tensor(text_lengths):
                 text_lengths = text_lengths.tolist()
             text_lengths = [int(t) for t in text_lengths]
-            if max(text_lengths) > text_capacity:
-                raise ValueError(
-                    f"text_lengths max {max(text_lengths)} exceeds the llm_features text width "
-                    f"{text_capacity}; the dataloader must left-pad to at least the longest caption."
-                )
 
-            # ASSUME_DENSE tells the attention processor to skip the block-diagonal
-            # analysis and run dense flash over the whole row. That is exact only when no
-            # row has padding; on a ragged batch it lets pad tokens attend and leaks
-            # attention across segments, corrupting training with no error. The lengths are
-            # already on the host here, so refusing costs nothing.
-            distinct = sorted(set(text_lengths))
-            if assume_dense_enabled() and len(distinct) > 1:
-                raise ValueError(
-                    "PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE=1 requires every sample in the batch to have "
-                    f"the same text length, but this batch has lengths {distinct}. Dense flash would "
-                    "let padding tokens attend and silently corrupt training. Unset the flag to use "
-                    "the exact var-len path, or pin min_text_tokens == max_text_tokens."
-                )
+            pack_size, text_budget = self._resolve_packing(batch, text_capacity, num_samples)
 
-            text_z = torch.zeros(B, max_text, C, device=device, dtype=dtype)
-            hidden_states = torch.cat([text_z, img_tokens], dim=1)  # [B, S, 128]
+            # ASSUME_DENSE tells the attention processor to skip the block-diagonal analysis
+            # and run dense flash over the whole row. That is exact only when a row is a
+            # single segment. Two ways it is not: a ragged batch (padding would attend), and
+            # ANY packed row, where dense flash would let neighbouring SAMPLES attend to each
+            # other -- the archetypal packing corruption, silent and loss-descending. The
+            # lengths are already on the host here, so refusing costs nothing.
+            if assume_dense_enabled():
+                if pack_size > 1:
+                    raise ValueError(
+                        "PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE=1 cannot be combined with pack_size="
+                        f"{pack_size}. A packed row holds {pack_size} independent samples; dense "
+                        "flash ignores the segment boundaries and would let them attend to each "
+                        "other, mixing unrelated images into every prediction with no error "
+                        "raised. Unset the flag, or set pack_size=1."
+                    )
+                distinct = sorted(set(text_lengths))
+                if len(distinct) > 1:
+                    raise ValueError(
+                        "PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE=1 requires every sample in the batch to "
+                        f"have the same text length, but this batch has lengths {distinct}. Dense "
+                        "flash would let padding tokens attend and silently corrupt training. Unset "
+                        "the flag to use the exact var-len path, or pin "
+                        "min_text_tokens == max_text_tokens."
+                    )
 
-            img_feat_pad = torch.zeros(B, num_image_tokens, llm_features.shape[-1], device=device, dtype=dtype)
-            encoder_hidden_states = torch.cat([llm_features, img_feat_pad], dim=1)  # [B, S, 53248]
+            # One host-side pass produces every boundary tensor and the three index tensors
+            # that fold N samples into B rows. Pure integer arithmetic -- no tensor value is
+            # read -- which is what keeps all of this a graph INPUT.
+            layout = build_packed_layout(
+                text_lengths,
+                pack_size=pack_size,
+                text_budget=text_budget,
+                grid_h=H_p,
+                grid_w=W_p,
+                text_capacity=text_capacity,
+                device=device,
+            )
+            rows, seq_len = layout.num_rows, layout.seq_len
 
-            position_ids, segment_ids, indicator = self._prepare_ids(text_lengths, H_p, W_p, max_text, device)
+            if context.cfg_dropout_prob > 0.0:
+                # Per SAMPLE, not per row: with pack_size > 1 a row holds several independent
+                # samples and dropping a whole row would correlate their conditioning.
+                drop = torch.rand(num_samples, 1, 1, device=device) < context.cfg_dropout_prob
+                llm_features = llm_features.masked_fill(drop, 0.0)
 
-            # Built once here and shared by all layers, so the packing is a graph INPUT
-            # instead of something the processor recovers from the mask 34 times per step.
-            # Left on the HOST: ``forward`` publishes it into the attention modules' shared
-            # buffer, and that single copy_ is then the only host->device transfer.
-            # max_seqlen is the static upper bound S, not the true per-batch maximum:
-            # Dynamo guards Python ints by value, so a data-derived one would recompile
-            # almost every batch.
-            cu_seqlens = None
-            max_seqlen = None
-            if precompute_cu_seqlens:
-                cu_seqlens = build_cu_seqlens(text_lengths, max_text, num_image_tokens)
-                max_seqlen = max_text + num_image_tokens
+            # Scatter the image latents to their slots. ``image_dst`` is a bijection onto the
+            # image positions (every image token is real), so no dustbin row is needed here.
+            hidden_states = torch.zeros(rows * seq_len, C, device=device, dtype=dtype)
+            hidden_states.index_add_(0, layout.image_dst, img_tokens.reshape(-1, C))
+            hidden_states = hidden_states.view(rows, seq_len, C)
+
+            # Same for the text features, except the incoming tensor is LEFT-PADDED, so its
+            # pad slots have no destination. They are aimed at one extra dustbin row which is
+            # then sliced off. ``index_add_`` rather than ``index_copy_`` because several pad
+            # slots share that dustbin index, and index_copy_ with duplicate indices is
+            # undefined; accumulating zeros into a row we discard is well defined and free.
+            encoder = torch.zeros(rows * seq_len + 1, feature_dim, device=device, dtype=dtype)
+            encoder.index_add_(0, layout.text_dst, llm_features.reshape(-1, feature_dim))
+            encoder_hidden_states = encoder[: rows * seq_len].view(rows, seq_len, feature_dim)
 
             # Ideogram model time: 0=noise, 1=data => t = 1 - sigma.
-            timestep = (1.0 - context.sigma).to(dtype)
+            sample_time = (1.0 - context.sigma).to(dtype)
+            if pack_size == 1:
+                # Per-SAMPLE (B,), which the model unsqueezes to (B,1,...) so the adaln
+                # projections run on one position instead of S identical copies. Keeping this
+                # shape at pack_size=1 is not just cosmetic: the per-token form below makes
+                # adaln_proj do S times the work for the same numbers, and it is what the
+                # context-parallel plan's unsplit-timestep assumption is checked against.
+                timestep = sample_time
+            else:
+                # Per-TOKEN (B,S). A packed row holds samples at DIFFERENT flow-matching
+                # times, so a per-row timestep cannot express it. The transformer supports
+                # this shape natively (it only unsqueezes when timestep.dim() == 1); slack
+                # tokens get 0 and are masked out of every segment anyway.
+                padded_time = torch.cat([sample_time, sample_time.new_zeros(1)])
+                timestep = padded_time[layout.token_sample].view(rows, seq_len)
 
             return {
                 "hidden_states": hidden_states,
                 "timestep": timestep,
                 "encoder_hidden_states": encoder_hidden_states,
-                "position_ids": position_ids,
-                "segment_ids": segment_ids,
-                "indicator": indicator,
-                "_max_text": max_text,
+                "position_ids": layout.position_ids,
+                "segment_ids": layout.segment_ids,
+                "indicator": layout.indicator,
+                "_layout": layout,
                 "_h_p": H_p,
                 "_w_p": W_p,
-                "_cu_seqlens": cu_seqlens,
-                "_max_seqlen": max_seqlen,
+                # Built on the HOST and published by ``forward`` into the attention modules'
+                # shared buffer, so that single copy_ is the only host->device transfer.
+                "_cu_seqlens": layout.cu_seqlens if precompute_cu_seqlens_active() else None,
+                "_max_seqlen": layout.max_seqlen,
             }
 
         def forward(self, model: nn.Module, inputs: Dict[str, Any]) -> torch.Tensor:
-            max_text = inputs.pop("_max_text")
+            layout: PackedLayout = inputs.pop("_layout")
             h_p = inputs.pop("_h_p")
             w_p = inputs.pop("_w_p")
             cu_seqlens = inputs.pop("_cu_seqlens", None)
@@ -335,6 +359,9 @@ def _build_ideogram4_adapter_class():
                     cu_seqlens,
                     max_seqlen,
                     device=inputs["hidden_states"].device,
+                    # Segments per row is K+1, so the processor can tell a stale packing from
+                    # a current one by shape alone -- a static comparison, no host sync.
+                    segments_per_row=layout.segments_per_row,
                     # Having built a packing, a model that cannot read it is a misconfiguration,
                     # not a fallback: every layer would derive its own from the mask, and on a
                     # subset of ranks that quietly averages two attention paths into one
@@ -354,8 +381,15 @@ def _build_ideogram4_adapter_class():
             )
             pred = self.post_process_prediction(out)  # [B, S, 128]
 
-            img_pred = pred[:, max_text:]  # [B, n_img, 128]
-            unpacked = self._unpack_image_latents(img_pred, h_p, w_p)  # [B, 128, H_p, W_p]
+            # Gather each sample's image tokens back out of its row. With one sample per row
+            # this is the old ``pred[:, max_text:]`` slice; with several it is the only way to
+            # collect them, since each sample's image block starts at a different offset. The
+            # result restores the leading dim to N, which is what makes the flow-matching
+            # pipeline's target, sigma, and loss weighting line up with no change on its side.
+            channels = pred.shape[-1]
+            img_pred = pred.reshape(-1, channels).index_select(0, layout.image_dst)
+            img_pred = img_pred.view(layout.num_samples, layout.num_image_tokens, channels)
+            unpacked = self._unpack_image_latents(img_pred, h_p, w_p)  # [N, 128, H_p, W_p]
 
             # DiT predicts x0 - eps; AutoModel target is eps - x0.
             return -unpacked if self.predict_negative_velocity else unpacked

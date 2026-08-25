@@ -28,6 +28,19 @@ the per-batch maximum makes ``S`` jump whenever a batch's longest caption differ
 recompiles the graph and blocks compile on real data no matter how ``cu_seqlens`` is
 built. Configure via ``max_text_tokens`` (0 = derive, -1 = legacy per-batch).
 
+MULTI-SAMPLE PACKING (``pack_size`` > 1):
+  Even with ``Tmax`` fixed, a row still carries ``Tmax - n`` pad slots for a caption of length
+  ``n``. Attention skips them -- they are their own segment -- but the projections and the FFN
+  do not: a pad slot is a full-width token through all 34 blocks. Setting ``pack_size = K``
+  puts ``K`` samples in one row over a shared ``text_budget``, so that padding is amortized
+  across the row instead of paid per sample. ``local_batch_size`` keeps counting SAMPLES and is
+  split into ``local_batch_size / K`` rows, which is what makes a ``pack_size`` A/B comparable:
+  same optimizer step, same global batch size, same loss definition.
+
+  This replaces the ``DistributedSampler`` with
+  :class:`~primus.backends.nemo_automodel.models.ideogram4.data.packed_sampler.Ideogram4PackedBatchSampler`,
+  which decides WHICH samples share a row -- a decision no per-sample sampler can express.
+
 Cache layout (``cache_dir``):
   - ``metadata.json``: ``{"grid_h","grid_w","llm_features_dim","in_channels",
     "samples":[{"cache_file","text_length","prompt"}, ...]}``
@@ -47,6 +60,11 @@ import torch
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from nemo_automodel.components.datasets.diffusion.loader import DiffusionDataloaderBuild
+
+from primus.backends.nemo_automodel.models.ideogram4.data.packed_sampler import (
+    Ideogram4PackedBatchSampler,
+)
+from primus.backends.nemo_automodel.models.ideogram4.packing import derive_text_budget
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +91,12 @@ class Ideogram4CacheDataset(Dataset):
         # Longest caption in the WHOLE cache, from metadata alone (no sample loads). Every
         # rank reads the same metadata.json, so this is identical across ranks -- which
         # matters, because a per-rank text width would desync the sharded shapes.
-        self.max_text_length = max(int(s["text_length"]) for s in self.samples)
+        # Full length list too, not just the maximum: the packed batch sampler needs every
+        # caption's length up front to decide which samples share a row, and reading the
+        # samples to find out would defeat the point of a metadata-only pass.
+        self.text_lengths = [int(s["text_length"]) for s in self.samples]
+        self.max_text_length = max(self.text_lengths)
+        self.mean_text_length = sum(self.text_lengths) / len(self.text_lengths)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -95,7 +118,10 @@ class Ideogram4CacheDataset(Dataset):
 
 
 def _collate_ideogram4_cache(
-    batch: List[Dict[str, torch.Tensor]], text_width: int = 0
+    batch: List[Dict[str, torch.Tensor]],
+    text_width: int = 0,
+    pack_size: int = 1,
+    text_budget: int = 0,
 ) -> Dict[str, object]:
     """Stack latents; LEFT-pad variable-length ``llm_features`` to a fixed width.
 
@@ -112,6 +138,13 @@ def _collate_ideogram4_cache(
     Captions longer than ``text_width`` are truncated to their FIRST ``text_width`` tokens
     and warned about once -- reaching that branch means the width was set too small by hand,
     since the derived default cannot be exceeded.
+
+    ``pack_size`` and ``text_budget`` are passed straight through onto the batch rather than
+    acted on here. The batch sampler has already grouped the samples into rows (consecutive
+    runs of ``pack_size``), so all the collate has to do is tell the adapter what grouping to
+    assume. Putting them on the batch is what makes it impossible for the loader and the
+    adapter to disagree about the row layout -- a disagreement that would mislabel every token
+    without raising anything.
     """
     image_latents = torch.stack([b["image_latents"] for b in batch], dim=0)  # [B,128,gh,gw]
 
@@ -143,6 +176,8 @@ def _collate_ideogram4_cache(
         "llm_features": padded,
         "text_lengths": text_lengths,
         "data_type": "image",
+        "pack_size": pack_size,
+        "text_budget": text_budget,
     }
 
 
@@ -172,6 +207,19 @@ class Ideogram4CacheDataloaderConfig:
     # the packed sequence length S constant across steps, which is what torch.compile needs;
     # -1 restores the old per-batch padding (variable S, recompiles).
     max_text_tokens: int = 0
+    # Samples packed into ONE transformer row. 1 (default) is the unpacked layout this loader
+    # has always produced. Above 1, `local_batch_size` still counts SAMPLES -- it is split into
+    # `local_batch_size / pack_size` rows -- so the optimizer step, the global batch size, and
+    # the loss definition are unchanged and a pack_size A/B is apples-to-apples. Must divide
+    # local_batch_size.
+    pack_size: int = 1
+    # Caption slots a packed row reserves, slack included. 0 derives it from the cache's length
+    # distribution (see `derive_text_budget`): room for one worst-case caption plus
+    # `pack_size - 1` average ones. Raise it if packing reports an infeasible batch;
+    # `pack_size * max_text_tokens + 1` is always feasible but reclaims no padding.
+    text_budget: int = 0
+    # Base seed for the packed batch sampler's per-epoch shuffle. Unused when pack_size == 1.
+    seed: int = 0
 
     def build(self, *, dp_rank: int, dp_world_size: int, batch_size: int) -> DiffusionDataloaderBuild:
         dataset = Ideogram4CacheDataset(self.cache_dir)
@@ -183,8 +231,45 @@ class Ideogram4CacheDataloaderConfig:
         else:
             text_width = int(self.max_text_tokens)
 
+        pack_size = int(self.pack_size)
+        if pack_size < 1:
+            raise ValueError(f"pack_size must be >= 1, got {pack_size}")
+
+        text_budget = int(self.text_budget)
+        if text_budget <= 0:
+            # The text region a ROW gets, which is not the per-sample text width: at
+            # pack_size=1 this is text_width + 1 (the reserved slack slot), and it grows
+            # sub-linearly in pack_size, which is where the saving comes from.
+            text_budget = derive_text_budget(
+                pack_size=pack_size,
+                max_text_length=text_width or dataset.max_text_length,
+                mean_text_length=dataset.mean_text_length,
+            )
+
         sampler = None
-        if dp_world_size > 1:
+        batch_sampler = None
+        if pack_size > 1:
+            # A batch_sampler replaces both `sampler` and `batch_size`: it has to choose which
+            # samples share a row, which no per-sample sampler can express.
+            if text_width == 0:
+                raise ValueError(
+                    "pack_size > 1 needs a fixed text width, but max_text_tokens=-1 selects "
+                    "per-batch padding. The row width S is text_budget + pack_size*n_img and "
+                    "must not move between steps. Set max_text_tokens to 0 (derive from the "
+                    "cache) or to a fixed value."
+                )
+            batch_sampler = Ideogram4PackedBatchSampler(
+                text_lengths=dataset.text_lengths,
+                samples_per_batch=batch_size,
+                pack_size=pack_size,
+                text_budget=text_budget,
+                num_replicas=dp_world_size,
+                rank=dp_rank,
+                shuffle=self.shuffle,
+                seed=self.seed,
+                drop_last=self.drop_last,
+            )
+        elif dp_world_size > 1:
             sampler = DistributedSampler(
                 dataset,
                 num_replicas=dp_world_size,
@@ -193,29 +278,61 @@ class Ideogram4CacheDataloaderConfig:
                 drop_last=self.drop_last,
             )
 
-        dataloader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=(sampler is None and self.shuffle),
-            sampler=sampler,
-            # partial (not a lambda/closure) so the collate stays picklable for the worker
-            # processes when num_workers > 0.
-            collate_fn=partial(_collate_ideogram4_cache, text_width=text_width),
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-            drop_last=self.drop_last,
+        # partial (not a lambda/closure) so the collate stays picklable for the worker
+        # processes when num_workers > 0.
+        collate = partial(
+            _collate_ideogram4_cache,
+            text_width=text_width,
+            pack_size=pack_size,
+            text_budget=text_budget,
         )
+        if batch_sampler is not None:
+            dataloader = DataLoader(
+                dataset,
+                batch_sampler=batch_sampler,
+                collate_fn=collate,
+                num_workers=self.num_workers,
+                pin_memory=self.pin_memory,
+            )
+        else:
+            dataloader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=(sampler is None and self.shuffle),
+                sampler=sampler,
+                collate_fn=collate,
+                num_workers=self.num_workers,
+                pin_memory=self.pin_memory,
+                drop_last=self.drop_last,
+            )
         logger.info(
-            "[Ideogram4Cache] %d samples from %s (grid=%dx%d, text_width=%s, dp_rank=%d/%d, "
-            "bs=%d, %d batches/rank)",
+            "[Ideogram4Cache] %d samples from %s (grid=%dx%d, text_width=%s, pack_size=%d, "
+            "text_budget=%d, dp_rank=%d/%d, bs=%d samples = %d row(s), %d batches/rank)",
             len(dataset),
             self.cache_dir,
             dataset.grid_h,
             dataset.grid_w,
             text_width if text_width else "per-batch",
+            pack_size,
+            text_budget,
             dp_rank,
             dp_world_size,
             batch_size,
+            batch_size // pack_size,
             len(dataloader),
         )
-        return DiffusionDataloaderBuild(dataloader=dataloader, sampler=sampler)
+        if pack_size > 1:
+            unpacked_width = pack_size * (text_width + 1)
+            logger.info(
+                "[Ideogram4Cache] packing %d samples per row reclaims %d of the %d caption "
+                "slots %d unpacked rows would carry (row text region %d vs %d).",
+                pack_size,
+                max(unpacked_width - text_budget, 0),
+                unpacked_width,
+                pack_size,
+                text_budget,
+                unpacked_width,
+            )
+        # The batch sampler goes out as `sampler` so the recipe's epoch loop finds its
+        # set_epoch -- it looks for that attribute on whatever this field holds.
+        return DiffusionDataloaderBuild(dataloader=dataloader, sampler=batch_sampler or sampler)

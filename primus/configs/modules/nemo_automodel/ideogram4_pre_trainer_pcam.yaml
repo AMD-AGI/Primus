@@ -41,6 +41,16 @@ data:
     # change between steps (per-batch padding recompiles the graph). 0 derives it from the
     # cache's longest caption, so nothing is truncated; -1 restores per-batch padding.
     max_text_tokens: 0
+    # Samples packed into ONE transformer row. 1 keeps the unpacked layout (one sample per
+    # row) that this preset has always used. Raising it amortizes the caption padding across
+    # the row: at K samples per row the text region is `text_budget` instead of
+    # K*max_text_tokens, and the reclaimed slots are tokens the projections and FFN no longer
+    # process. `local_batch_size` keeps counting SAMPLES and must be a multiple of this, so a
+    # pack_size A/B keeps the same optimizer step and global batch size.
+    pack_size: 1
+    # Caption slots a packed row reserves, slack included. 0 derives it from the cache's
+    # length distribution. Ignored when pack_size == 1.
+    text_budget: 0
     num_workers: 2
     pin_memory: true
 

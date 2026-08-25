@@ -67,6 +67,7 @@ logger = logging.getLogger(__name__)
 # (``l_self_modules_attention_buffers_primus_cu_seqlens_``), so keep it greppable.
 PACKING_ATTR = "_primus_cu_seqlens"
 BOUND_ATTR = "_primus_max_seqlen"
+SEGMENTS_ATTR = "_primus_segments_per_row"
 _CONSUMERS_ATTR = "_primus_packing_consumers"
 
 _logged: set = set()
@@ -198,6 +199,7 @@ def publish_packing(
     max_seqlen: Optional[int] = None,
     device: Optional[torch.device] = None,
     required: bool = False,
+    segments_per_row: Optional[int] = None,
 ) -> Optional[torch.Tensor]:
     """Make ``cu_seqlens`` visible to every attention module for the forward that follows.
 
@@ -219,6 +221,12 @@ def publish_packing(
             under data parallelism its gradients then come from a different attention path than
             its peers' and are averaged in regardless. Nothing in the logs would say so --
             Primus quiets non-zero ranks once training starts.
+        segments_per_row: how many segments each batch row contributes -- ``2`` for the
+            one-sample ``[slack][text][image]`` layout, ``pack_size + 1`` when several samples
+            share a row. The processor multiplies this by its own batch size to decide whether
+            the packing it is reading belongs to the batch in front of it. Left ``None`` the
+            processor falls back to assuming ``2``, which is what every caller predating
+            multi-sample packing means.
 
     Returns:
         The shared buffer, or None when nothing in ``model`` consumes it and ``required`` is
@@ -252,6 +260,8 @@ def publish_packing(
     for module in modules:
         if getattr(module, BOUND_ATTR, None) != max_seqlen:
             setattr(module, BOUND_ATTR, max_seqlen)
+        if getattr(module, SEGMENTS_ATTR, None) != segments_per_row:
+            setattr(module, SEGMENTS_ATTR, segments_per_row)
     return shared
 
 
@@ -259,19 +269,29 @@ def resolve_packing(
     attn: nn.Module,
     cu_seqlens: Optional[torch.Tensor] = None,
     max_seqlen: Optional[int] = None,
-) -> Tuple[Optional[torch.Tensor], Optional[int]]:
+) -> Tuple[Optional[torch.Tensor], Optional[int], int]:
     """Pick the packing for this attention call: explicit argument first, then module state.
 
     An explicit argument wins so that a future kwargs route (patching the diffusers block
-    forward) can override this without touching the processor. The ``getattr`` fallback is a
-    constant attribute lookup that Dynamo lifts as a graph input -- not a data-dependent read,
-    and not a graph break.
+    forward) can override this without touching the processor. The ``getattr`` fallbacks are
+    constant attribute lookups that Dynamo lifts as graph inputs -- not data-dependent reads,
+    and not graph breaks.
+
+    Returns:
+        ``(cu_seqlens, max_seqlen, segments_per_row)``. ``segments_per_row`` defaults to 2,
+        the one-sample ``[slack][text][image]`` layout, so a caller that predates multi-sample
+        packing keeps the staleness check it had.
     """
+    segments_per_row = 2
     if cu_seqlens is None:
         cu_seqlens = getattr(attn, PACKING_ATTR, None)
-        if cu_seqlens is not None and max_seqlen is None:
-            max_seqlen = getattr(attn, BOUND_ATTR, None)
-    return cu_seqlens, max_seqlen
+        if cu_seqlens is not None:
+            if max_seqlen is None:
+                max_seqlen = getattr(attn, BOUND_ATTR, None)
+            published = getattr(attn, SEGMENTS_ATTR, None)
+            if published is not None:
+                segments_per_row = published
+    return cu_seqlens, max_seqlen, segments_per_row
 
 
 def clear_packing(model: nn.Module) -> int:
@@ -282,6 +302,8 @@ def clear_packing(model: nn.Module) -> int:
             removed += 1
         if hasattr(module, BOUND_ATTR):
             delattr(module, BOUND_ATTR)
+        if hasattr(module, SEGMENTS_ATTR):
+            delattr(module, SEGMENTS_ATTR)
     if hasattr(model, _CONSUMERS_ATTR):
         delattr(model, _CONSUMERS_ATTR)
     return removed

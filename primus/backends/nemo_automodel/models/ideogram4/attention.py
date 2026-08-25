@@ -403,7 +403,7 @@ class Ideogram4VarlenAttnProcessor:
         # ``inspect.signature(self.processor.__call__).parameters``, so declaring them by name
         # is what would let a kwargs route work at all -- a ``**kwargs``-only processor would
         # silently receive nothing. An explicit argument wins over the buffer.
-        cu_seqlens, max_seqlen = resolve_packing(attn, cu_seqlens, max_seqlen)
+        cu_seqlens, max_seqlen, segments_per_row = resolve_packing(attn, cu_seqlens, max_seqlen)
 
         query = attn.to_q(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
         key = attn.to_k(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
@@ -418,7 +418,7 @@ class Ideogram4VarlenAttnProcessor:
         query = (query * cos) + (_rotate_half(query) * sin)
         key = (key * cos) + (_rotate_half(key) * sin)
 
-        out = self._attention(query, key, value, attention_mask, cu_seqlens, max_seqlen)
+        out = self._attention(query, key, value, attention_mask, cu_seqlens, max_seqlen, segments_per_row)
         out = out.flatten(2, 3)
         return attn.to_out[0](out)
 
@@ -430,6 +430,7 @@ class Ideogram4VarlenAttnProcessor:
         attention_mask: Optional[Tensor],
         cu_seqlens: Optional[Tensor] = None,
         max_seqlen: Optional[int] = None,
+        segments_per_row: int = 2,
     ) -> Tensor:
         B, L, H, D = query.shape
 
@@ -474,18 +475,21 @@ class Ideogram4VarlenAttnProcessor:
             # caller that bypasses the adapter (a sampling pass, an eval loop with a different
             # batch size) could otherwise attend on a stale one and corrupt silently. This
             # compares only static SHAPE metadata -- no values are read, so it costs a guard
-            # and no host sync. ``2B+1`` is the layout contract: one pad segment plus one
-            # text+image segment per row. Packing several samples per row would change that
-            # count, and this check with it.
-            expected = 2 * B + 1
+            # and no host sync. ``segments_per_row`` is the layout contract, published
+            # alongside the packing: 2 for the one-sample ``[slack][text][image]`` row, and
+            # ``pack_size + 1`` when several samples share a row (one slack segment plus one
+            # per sample).
+            expected = segments_per_row * B + 1
             if cu_seqlens.numel() != expected:
                 raise ValueError(
                     f"cu_seqlens has {cu_seqlens.numel()} entries but this batch needs "
-                    f"{expected} (2*B+1 for B={B}). Either the packing was published for a "
-                    "different batch size and is stale -- call "
+                    f"{expected} ({segments_per_row}*B+1 for B={B}, segments_per_row="
+                    f"{segments_per_row}). Either the packing was published for a different "
+                    "batch size or pack_size and is stale -- call "
                     "ideogram4_packing_buffer.clear_packing(model) before running the model "
-                    "outside the adapter -- or the sequence layout no longer has exactly two "
-                    "segments per row, in which case update this check."
+                    "outside the adapter -- or the row layout no longer has "
+                    f"{segments_per_row} segments per row, in which case the publisher and "
+                    "this check have diverged."
                 )
             # Hand the kernel a PRIVATE COPY, never the shared buffer. aiter's var-len op
             # treats cu_seqlens as a mutable argument: it saves the tensor for its backward
