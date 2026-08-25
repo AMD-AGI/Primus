@@ -758,8 +758,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
     Primus-Turbo API (flash_attn_interface.py):
         flash_attn_func(..., sink: Optional[torch.Tensor] = None)
         - sink: learned sink parameters, shape (num_attention_heads,)
-        - When sink is provided, the Triton backend is automatically used
-          (C++ backend does not support sink attention)
+        - FlyDSL sink attention requires an FP32 parameter.
 
     Reference: gpt-oss/gpt_oss/triton/attention.py
     """
@@ -894,7 +893,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         # This matches gpt-oss model: self.sinks = torch.nn.Parameter(torch.empty(num_attention_heads))
         self.use_sink_attention = self._init_sink_attention
         if self.use_sink_attention:
-            self.sinks = torch.nn.Parameter(torch.zeros(self._num_heads_for_sinks, dtype=torch.bfloat16))
+            self.sinks = torch.nn.Parameter(torch.zeros(self._num_heads_for_sinks, dtype=torch.float32))
         else:
             self.sinks = None
         # Clean up temporary attributes
@@ -934,7 +933,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         # Primus-Turbo API (flash_attn_interface.py line 316-348):
         #   flash_attn_func(..., sink: Optional[torch.Tensor] = None)
         #   - sink: learned sink parameters, shape (num_attention_heads,)
-        #   - When sink is provided, Triton backend is automatically used
+        #   - FlyDSL requires sink to remain FP32
         #
         # Reference: gpt-oss/gpt_oss/triton/attention.py
         sink_tensor = None
@@ -943,7 +942,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         use_sink_attn = self.use_sink_attention and self.sinks is not None
 
         if use_sink_attn:
-            sink_tensor = self.sinks
+            # Module-wide BF16 conversion may cast the Parameter after init;
+            # FlyDSL requires an FP32 sink and autograd propagates through this cast.
+            sink_tensor = self.sinks.float()
 
             # Apply sliding window based on layer pattern (gpt-oss: even layers only)
             # gpt-oss pattern: self.sliding_window = config.sliding_window if layer_idx % 2 == 0 else 0
@@ -962,10 +963,11 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
 
         # NOTE: query, key, value maybe a view of the original tensor, call contiguous to copy a new tensor
         # and let torch allocator can release the original tensor.
-        if torch.is_grad_enabled():
-            query = query.contiguous() if query.requires_grad else query
-            key = key.contiguous() if key.requires_grad else key
-            value = value.contiguous() if value.requires_grad else value
+        # This must also run under no-grad evaluation: the unified FlyDSL
+        # dispatcher relies on the subsequent BSHD view retaining SBHD storage.
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
 
         if qkv_format == "sbhd":
             query = query.permute(1, 0, 2, 3)

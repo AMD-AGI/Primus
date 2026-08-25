@@ -463,43 +463,43 @@ jobs:
           GLOO_SOCKET_IFNAME: "eth0"
         run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/deepseek_v2_16B.log" \
-          -- train pretrain --config examples/maxtext/configs/MI300X/deepseek_v2_16B-pretrain.yaml
+          -- train pretrain --config examples/maxtext/configs/MI300X/deepseek_v2_16B-bf16-pretrain.yaml
       - name: "[2/7][MaxText] llama2_70B"
         timeout-minutes: 120
         continue-on-error: true
         run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/llama2_70B.log" \
-          -- train pretrain --config examples/maxtext/configs/MI300X/llama2_70B-pretrain.yaml
+          -- train pretrain --config examples/maxtext/configs/MI300X/llama2_70B-bf16-pretrain.yaml
       - name: "[3/7][MaxText] llama2_7B"
         timeout-minutes: 120
         continue-on-error: true
         run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/llama2_7B.log" \
-          -- train pretrain --config examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml
+          -- train pretrain --config examples/maxtext/configs/MI300X/llama2_7B-bf16-pretrain.yaml
       - name: "[4/7][MaxText] llama3.3_70B"
         timeout-minutes: 120
         continue-on-error: true
         run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/llama3.3_70B.log" \
-          -- train pretrain --config examples/maxtext/configs/MI300X/llama3.3_70B-pretrain.yaml
+          -- train pretrain --config examples/maxtext/configs/MI300X/llama3.3_70B-bf16-pretrain.yaml
       - name: "[5/7][MaxText] llama3_70B"
         timeout-minutes: 120
         continue-on-error: true
         run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/llama3_70B.log" \
-          -- train pretrain --config examples/maxtext/configs/MI300X/llama3_70B-pretrain.yaml
+          -- train pretrain --config examples/maxtext/configs/MI300X/llama3_70B-bf16-pretrain.yaml
       - name: "[6/7][MaxText] llama3_8B"
         timeout-minutes: 120
         continue-on-error: true
         run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/llama3_8B.log" \
-          -- train pretrain --config examples/maxtext/configs/MI300X/llama3_8B-pretrain.yaml
+          -- train pretrain --config examples/maxtext/configs/MI300X/llama3_8B-bf16-pretrain.yaml
       - name: "[7/7][MaxText] mixtral_8x7B"
         timeout-minutes: 120
         continue-on-error: true
         run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/mixtral_8x7B.log" \
-          -- train pretrain --config examples/maxtext/configs/MI300X/mixtral_8x7B-pretrain.yaml
+          -- train pretrain --config examples/maxtext/configs/MI300X/mixtral_8x7B-bf16-pretrain.yaml
       - name: Generate Summary Report
         run: |
           echo "Generate Summary Report"

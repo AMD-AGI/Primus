@@ -67,8 +67,8 @@ RUN cd ${WORKDIR} && \
 # Build rccl
 # ---------------------------------------------------------------------------
 RUN cd ${WORKDIR} && \
-    git clone https://github.com/ROCm/rccl.git && \
-    cd rccl && git checkout rocm-7.1.0 && \
+    git clone --branch rocm-7.1.0 --single-branch --depth 1 https://github.com/ROCm/rccl.git && \
+    cd rccl && \
     ./install.sh -l --prefix build/ --disable-msccl-kernel \
         --amdgpu_targets="gfx950" 2>&1 | tee log_rccl_install.txt
 
@@ -80,8 +80,8 @@ ENV RCCL_HOME=${WORKDIR}/rccl
 
 # RUN apt-get install -y --allow-unauthenticated libionic-dev && \
 RUN cd ${WORKDIR} && \
-    git clone https://github.com/rocm/amd-anp.git && \
-    cd amd-anp && git checkout tags/v1.3.0 && \
+    git clone --branch v1.3.0 --single-branch --depth 1 https://github.com/rocm/amd-anp.git && \
+    cd amd-anp && \
     make -j 16 RCCL_HOME=${RCCL_HOME} \
                 MPI_INCLUDE=${MPI_PATH}/include/ \
                 MPI_LIB_PATH=${MPI_PATH}/lib/ \
