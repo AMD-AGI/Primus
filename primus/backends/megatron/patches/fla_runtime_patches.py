@@ -81,6 +81,7 @@ from primus.core.utils.module_utils import log_rank_0
 
 _FLA_RUNTIME_KNOBS: tuple = (
     ("use_fla_fused_swiglu", "PRIMUS_FLA_SWIGLU", True),
+    ("use_fla_fused_swiglu_linear", "PRIMUS_FLA_SWIGLU_LINEAR", False),
     ("use_fla_fused_rmsnorm", "PRIMUS_FLA_NORM", False),
     ("use_fla_fused_gated_norm", "PRIMUS_FLA_NORM", False),
     ("use_fla_short_conv", "PRIMUS_FLA_CONV", False),
