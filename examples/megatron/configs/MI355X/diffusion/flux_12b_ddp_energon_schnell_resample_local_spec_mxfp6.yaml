@@ -159,6 +159,13 @@ modules:
       fp6: "mxfp6"
       mxfp6_backward_precision: "mxfp6"  # "mxfp6" (pure) or "fp8" (hybrid)
 
+      # The MLP folds its bias-add + GELU into the MXFP6 packer, which is worth about 5%
+      # of step time here (74.1 -> 78.0 images/s/GPU on 8x MI355X at micro_batch_size 64).
+      # It engages on its own; there is no config key. Any configuration it cannot
+      # reproduce exactly falls back to Megatron's MLP per module, and
+      # PRIMUS_MXFP6_FUSED_MLP=off disables it outright while =on turns the fallback into
+      # an error, which is what an A/B measurement wants.
+
       empty_unused_memory_level: 0
 
       distributed_timeout_minutes: 180

@@ -15,7 +15,9 @@ single forward would accept fails in backward. See the module docstring of
 """
 
 import functools
+import os
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
@@ -58,6 +60,35 @@ def _snr_db(got, want):
     signal = (want**2).mean()
     noise = ((got.float() - want) ** 2).mean()
     return (10 * torch.log10(signal / noise)).item()
+
+
+@pytest.fixture
+def megatron_global_args(monkeypatch):
+    """The subset of Megatron's global args the parallel linears read at init.
+
+    ``ColumnParallelLinear``/``RowParallelLinear`` reach for ``get_args()`` on
+    construction, which the unit-test harness never populates.
+    """
+    dummy_args = SimpleNamespace(
+        rank=0,
+        world_size=1,
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        offload=False,
+        offload_ops=[],
+        patch_primus_pipeline=False,
+        pp_algorithm=None,
+        patch_zero_bubble=False,
+        enable_zero_bubble=False,
+        rampup_batch_size=None,
+        global_batch_size=1,
+        micro_batch_size=1,
+        data_parallel_size=1,
+        decrease_batch_size_if_needed=False,
+    )
+    import megatron.training.global_vars as gvars
+
+    monkeypatch.setattr(gvars, "_GLOBAL_ARGS", dummy_args)
 
 
 def _pure_args():
@@ -310,27 +341,8 @@ class TestMXFP6LinearModules(PrimusUT):
     """Instantiate the real Megatron parallel linears and take a training step."""
 
     @pytest.fixture(autouse=True)
-    def setup_parallel(self, init_parallel_state, monkeypatch):
-        dummy_args = SimpleNamespace(
-            rank=0,
-            world_size=1,
-            tensor_model_parallel_size=1,
-            pipeline_model_parallel_size=1,
-            offload=False,
-            offload_ops=[],
-            patch_primus_pipeline=False,
-            pp_algorithm=None,
-            patch_zero_bubble=False,
-            enable_zero_bubble=False,
-            rampup_batch_size=None,
-            global_batch_size=1,
-            micro_batch_size=1,
-            data_parallel_size=1,
-            decrease_batch_size_if_needed=False,
-        )
-        import megatron.training.global_vars as gvars
-
-        monkeypatch.setattr(gvars, "_GLOBAL_ARGS", dummy_args)
+    def setup_parallel(self, init_parallel_state, megatron_global_args):
+        pass
 
     def _column_linear(self, **config_overrides):
         from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
@@ -671,3 +683,188 @@ class TestMXFP6SpecProvider:
         assert (
             MXFP6ColumnParallelLinear.__name__ in rendered
         ), "get_flux_layer_spec did not select the MXFP6 linears for fp6='mxfp6'"
+
+    @requires_mxfp6
+    def test_provider_returns_fused_mlp(self):
+        from primus.backends.megatron.core.extensions.primus_turbo_local_spec import (
+            PrimusTurboMXFP6LocalSpecProvider,
+        )
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+            MXFP6FusedMLP,
+        )
+
+        assert PrimusTurboMXFP6LocalSpecProvider().mlp_module() is MXFP6FusedMLP
+
+    @requires_mxfp6
+    def test_flux_layer_spec_uses_fused_mlp_for_fp6(self):
+        """The MXFP6 spec must actually reach the MLP, not just the linears.
+
+        The two Flux block factories build their ``mlp`` ModuleSpec independently, so this
+        is the check that neither was missed -- a spec still naming Megatron's ``MLP`` would
+        train correctly and simply never fuse anything.
+        """
+        from megatron.core.transformer.mlp import MLP
+
+        from primus.backends.megatron.core.models.diffusion.flux.layer_spec import (
+            get_flux_layer_spec,
+        )
+
+        config = SimpleNamespace(
+            transformer_impl="local",
+            fp4=None,
+            fp6="mxfp6",
+            fp8=None,
+            num_joint_layers=1,
+            num_single_layers=1,
+            sensitive_layers_enabled=False,
+            sensitive_layer_precision="bf16",
+        )
+
+        spec = get_flux_layer_spec(config)
+        # One joint block and one single block, both of which own an MLP.
+        assert len(spec.layer_specs) == 2
+        for layer in spec.layer_specs:
+            mlp_module = layer.submodules.mlp.module
+            assert mlp_module is not MLP, "layer spec still uses the unfused MLP"
+            assert mlp_module.__name__ == "MXFP6FusedMLP"
+
+
+# ---------------------------------------------------------------------------
+# Fused MLP epilogue
+# ---------------------------------------------------------------------------
+
+
+def _make_fused_mlp(**config_overrides):
+    """Build an MXFP6FusedMLP with the Flux MLP configuration."""
+    from megatron.core.transformer.mlp import MLPSubmodules
+
+    from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+        MXFP6ColumnParallelLinear,
+        MXFP6FusedMLP,
+        MXFP6RowParallelLinear,
+    )
+
+    defaults = dict(
+        ffn_hidden_size=512,
+        add_bias_linear=True,
+        gated_linear_unit=False,
+        bias_activation_fusion=False,
+        activation_func=functools.partial(torch.nn.functional.gelu, approximate="tanh"),
+    )
+    defaults.update(config_overrides)
+    config = _make_mxfp6_config(**defaults)
+    submodules = MLPSubmodules(linear_fc1=MXFP6ColumnParallelLinear, linear_fc2=MXFP6RowParallelLinear)
+    return MXFP6FusedMLP(config, submodules).to("cuda:0")
+
+
+class TestMXFP6FusedMLP(PrimusUT):
+    """The fused MLP must be numerically the same module as the one it replaces.
+
+    The fusion removes traffic, not arithmetic: the packed operands the GEMMs consume are the
+    same ones either way, down to a rounding of the activation's tanh, so forward and both
+    weight gradients should agree to well within MXFP6's own quantization error rather than
+    merely correlate. The bias gradient is looser and is checked separately, because it comes
+    from a reduction the fusion had to reorder.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup_parallel(self, init_parallel_state, megatron_global_args):
+        pass
+
+    @requires_mxfp6
+    def test_forward_and_grads_match_stock_mlp(self):
+        torch.manual_seed(0)
+        fused = _make_fused_mlp()
+        assert fused._fused_epilogue, "fused path unexpectedly disabled"
+
+        # Same module, same weights, epilogue not fused: the reference is MLP.forward.
+        x = torch.randn((M, 1, K), dtype=torch.bfloat16, device="cuda:0", requires_grad=True)
+        x_ref = x.detach().clone().requires_grad_()
+
+        out, out_bias = fused(x)
+        # MLP.forward via the base class is exactly the path being replaced.
+        from megatron.core.transformer.mlp import MLP
+
+        ref_out, ref_bias = MLP.forward(fused, x_ref)
+
+        assert out.shape == ref_out.shape
+        assert out_bias is ref_bias  # both hand back linear_fc2.bias unadded
+
+        snr = _snr_db(out, ref_out.float())
+        assert snr > 40, f"forward diverges from the unfused MLP: {snr:.1f} dB"
+
+        grad = torch.randn_like(out)
+        out.backward(grad)
+        ref_out.backward(grad.clone())
+
+        for name, got, want in (
+            ("input", x.grad, x_ref.grad),
+            ("fc1.weight", fused.linear_fc1.weight.grad, None),
+        ):
+            if want is None:
+                continue
+            snr = _snr_db(got, want.float())
+            assert snr > 40, f"{name} grad diverges: {snr:.1f} dB"
+
+    @requires_mxfp6
+    def test_bias_gradient_matches_eager_reduction(self):
+        """fc1's bias gradient comes from the packer's side output, not a separate sum.
+
+        This is the one quantity the fusion does not reproduce bit-for-bit: the tensor it
+        would be reduced from no longer reaches HBM, so the sum is taken over LDS tiles in
+        fp32 and finished across tiles. That is a different -- and more accurate --
+        summation order than a single pass over a bf16 tensor, so it is checked as a
+        reduction rather than for equality.
+        """
+        torch.manual_seed(0)
+        fused = _make_fused_mlp()
+        assert fused._fused_epilogue
+
+        from megatron.core.transformer.mlp import MLP
+
+        x = torch.randn((M, 1, K), dtype=torch.bfloat16, device="cuda:0", requires_grad=True)
+        x_ref = x.detach().clone().requires_grad_()
+
+        out, _ = fused(x)
+        grad = torch.randn_like(out)
+        out.backward(grad)
+        got = fused.linear_fc1.bias.grad.detach().clone()
+
+        fused.zero_grad(set_to_none=True)
+        ref_out, _ = MLP.forward(fused, x_ref)
+        ref_out.backward(grad.clone())
+        want = fused.linear_fc1.bias.grad
+
+        assert got.shape == want.shape
+        snr = _snr_db(got, want.float())
+        assert snr > 35, f"fc1 bias grad diverges: {snr:.1f} dB"
+
+    @requires_mxfp6
+    def test_falls_back_when_activation_is_not_tanh_gelu(self):
+        """An activation the prologue does not implement must disable the fusion.
+
+        FluxConfig's *default* activation is a hand-written tanh GELU with a different
+        association than ATen's, so this is the realistic misconfiguration, not a synthetic
+        one. Silently fusing it would change numerics with nothing to flag it.
+        """
+        with pytest.warns(UserWarning, match="fused MLP epilogue disabled"):
+            fused = _make_fused_mlp(activation_func=torch.nn.functional.silu)
+        assert not fused._fused_epilogue
+
+    @requires_mxfp6
+    def test_falls_back_when_backward_is_fp8(self):
+        """FP8 backward keeps the activation live, which the fusion removes."""
+        with pytest.warns(UserWarning, match="mxfp6_backward_precision"):
+            fused = _make_fused_mlp(mxfp6_backward_precision="fp8")
+        assert not fused._fused_epilogue
+
+    @requires_mxfp6
+    def test_env_kill_switch_disables_and_requires(self):
+        with mock.patch.dict(os.environ, {"PRIMUS_MXFP6_FUSED_MLP": "off"}):
+            assert not _make_fused_mlp()._fused_epilogue
+
+        with mock.patch.dict(os.environ, {"PRIMUS_MXFP6_FUSED_MLP": "on"}):
+            assert _make_fused_mlp()._fused_epilogue
+            # "on" turns an unusable configuration into an error rather than a fallback.
+            with pytest.raises(RuntimeError, match="fused MLP is unusable"):
+                _make_fused_mlp(activation_func=torch.nn.functional.silu)

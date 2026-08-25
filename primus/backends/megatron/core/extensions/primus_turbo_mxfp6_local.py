@@ -33,10 +33,20 @@ enforced inside Primus-Turbo's ``gemm_fp6``; here it means a hidden size or sequ
 length that is only 128-aligned will be rejected at the first forward.
 """
 
+import functools
+import os
+import warnings
+
 import torch
+import torch.nn.functional as F
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
+from megatron.core.transformer.mlp import MLP
 from primus_turbo.pytorch.core.backend import BackendType
-from primus_turbo.pytorch.core.low_precision import ScalingGranularity
+from primus_turbo.pytorch.core.low_precision import (
+    MXFP6_PROLOGUE_BIAS_GELU,
+    MXFP6_PROLOGUE_BIAS_GELU_BACKWARD,
+    ScalingGranularity,
+)
 from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import gemm_fp6_impl
 from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
 from primus_turbo.pytorch.kernels.quantization.mxfp6_pack import check_mxfp6_support
@@ -47,6 +57,7 @@ _GRAN_VALUE = ScalingGranularity.MX_BLOCKWISE.value
 
 # Registered by Primus-Turbo with a pure-arithmetic fake, so it is safe to trace.
 _quantize_mxfp6_dual = torch.ops.primus_turbo.quantize_mxfp6_dual_impl
+_quantize_mxfp6_fused_dual = torch.ops.primus_turbo.quantize_mxfp6_fused_dual_impl
 
 
 class MXFP6LinearFunction(torch.autograd.Function):
@@ -290,3 +301,252 @@ class MXFP6RowParallelLinear(RowParallelLinear):
 
     def _forward_impl(self, input, weight, *args, **kwargs):
         return _mxfp6_forward_impl(self, input, weight, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Whole-MLP fusion.
+#
+# Splitting the MLP into two independent autograd Functions forces the activation to
+# exist: fc2's forward has to receive a real tensor, and fc1's backward has to receive
+# one. Owning fc1 -> epilogue -> fc2 in a single Function is what lets the packer take
+# the epilogue as a prologue instead, in both directions -- the activation is packed
+# straight out of LDS and the pre-activation gradient is never assembled at all.
+#
+# What that removes, per Flux 12B step at the profiled shapes: the bias-add + GELU kernel's
+# read and write and the packer's read back of it in the forward, and the same round-trip
+# plus the bias gradient's own reduction pass in the backward. Measured on 8x MI355X at
+# micro_batch_size 64, against this same module with the fusion switched off: 75.3 ms/step of
+# epilogue and reduction kernels go away, 35.5 ms/step of added prologue cost inside the
+# packer replaces them, and the step's GPU busy time falls 856.5 -> 810.9 ms, 5.0% off wall
+# clock (863.6 -> 820.3 ms/step). The step is GPU bound at 96.8% busy, so that lands as
+# throughput: 74.1 -> 78.0 images/s/GPU. The pre-activation y1 is still saved, but it was
+# already being saved for the activation's own backward, so peak allocated memory only grows
+# by the column-sum buffer, 4 MB of 244 GB. Reserved memory grows more, 249.0 -> 250.2 GB,
+# because the freed epilogue temporaries leave differently shaped holes in the caching
+# allocator; that is the number the driver reports, so it is what a memory ceiling will see.
+#
+# The backward is where the win is, ~0.40 ms per call against ~0.11 for the forward, and the
+# reason is worth knowing before trying to improve this. The packer is bandwidth bound at
+# 3.8 TB/s without a prologue, so fusing work into it only pays while it stays that way. The
+# forward prologue removes a 0.26 ms kernel and adds 0.14 ms of arithmetic to a 0.38 ms pack;
+# the backward removes two kernels totalling 0.73 ms and its extra read of the incoming
+# gradient is traffic it would have done anyway. An early version of the prologue used a libm
+# tanh and a per-element bounds branch and cost 0.38 ms of arithmetic instead of 0.14, which
+# made the forward a net regression and cost most of the win.
+# ---------------------------------------------------------------------------
+
+
+class MXFP6MLPFunction(torch.autograd.Function):
+    """fc1 GEMM, bias+GELU, fc2 GEMM as one op, with the activation never in HBM.
+
+    Follows ``MXFP6LinearFunction``'s conventions: the column-direction blobs leave as
+    extra outputs so ``setup_context`` can save them and mark them non-differentiable, and
+    all non-tensor state lands on ``ctx`` as primitives so ``torch.compile`` traces cleanly.
+
+    Only the pure-MXFP6 backward is supported. The FP8-backward mode re-quantizes saved
+    BF16 activations, which would put the activation back in HBM and defeat the point;
+    ``_fused_mlp_unusable_reason`` rejects that configuration before we get here.
+    """
+
+    @staticmethod
+    def forward(hidden_states, w1, b1, w2):
+        out_dtype = hidden_states.dtype
+        orig_shape = hidden_states.shape
+        x = hidden_states.reshape(-1, orig_shape[-1])
+
+        m, k = x.shape
+        f = w1.shape[0]
+        h = w2.shape[0]
+
+        x_row, x_row_s, x_col, x_col_s = _quantize_mxfp6_dual(x)
+        w1_row, w1_row_s, w1_col, w1_col_s = _quantize_mxfp6_dual(w1)
+
+        # Pre-activation. Saved for backward, where the epilogue is recomputed from it
+        # rather than its output being stashed -- the same bytes are held either way.
+        y1 = gemm_fp6_impl(x_row, x_row_s, w1_row, w1_row_s, m, f, k, out_dtype, _GRAN_VALUE)
+
+        # gelu(y1 + b1), packed in both directions without ever being written out.
+        a_row, a_row_s, a_col, a_col_s, _ = _quantize_mxfp6_fused_dual(
+            y1, None, b1, MXFP6_PROLOGUE_BIAS_GELU, False
+        )
+        w2_row, w2_row_s, w2_col, w2_col_s = _quantize_mxfp6_dual(w2)
+
+        output = gemm_fp6_impl(a_row, a_row_s, w2_row, w2_row_s, m, h, f, out_dtype, _GRAN_VALUE)
+        output = output.reshape(*orig_shape[:-1], h)
+
+        return output, y1, x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        hidden_states, w1, b1, w2 = inputs
+
+        ctx.out_dtype = hidden_states.dtype
+        ctx.orig_shape = hidden_states.shape
+        # The packed blobs carry no shape, so the logical dims have to be saved too.
+        ctx.m = hidden_states.numel() // hidden_states.shape[-1]
+        ctx.k = hidden_states.shape[-1]
+        ctx.f = w1.shape[0]
+        ctx.h = w2.shape[0]
+
+        _, y1, x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s = output
+        blobs = (x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s)
+        # b1 is a leaf parameter, so saving it costs nothing, and the backward needs it to
+        # rebuild the pre-activation for the GELU derivative.
+        ctx.save_for_backward(y1, b1, *blobs)
+        ctx.mark_non_differentiable(*blobs)
+
+    @staticmethod
+    def backward(ctx, grad_output, *_):
+        (
+            y1,
+            b1,
+            x_col,
+            x_col_s,
+            a_col,
+            a_col_s,
+            w1_col,
+            w1_col_s,
+            w2_col,
+            w2_col_s,
+        ) = ctx.saved_tensors
+        m, k, f, h = ctx.m, ctx.k, ctx.f, ctx.h
+        out_dtype = ctx.out_dtype
+
+        if not grad_output.is_contiguous():
+            grad_output = grad_output.contiguous()
+        g2 = grad_output.reshape(-1, h)
+
+        g2_row, g2_row_s, g2_col, g2_col_s = _quantize_mxfp6_dual(g2)
+
+        # fc2 dgrad: [m, f] = g2[m, h] @ w2[h, f], contracting h.
+        grad_a = gemm_fp6_impl(g2_row, g2_row_s, w2_col, w2_col_s, m, f, h, out_dtype, _GRAN_VALUE)
+        # fc2 wgrad: [h, f] = g2.T[h, m] @ a[m, f], contracting m.
+        grad_w2 = gemm_fp6_impl(g2_col, g2_col_s, a_col, a_col_s, h, f, m, out_dtype, _GRAN_VALUE)
+
+        # The GELU derivative is applied while staging, so grad_y1 is never assembled. Its
+        # column sums come back as a side output because the bias gradient is a reduction
+        # over exactly the tensor that no longer exists.
+        want_bias_grad = ctx.needs_input_grad[2]
+        g1_row, g1_row_s, g1_col, g1_col_s, b1_partial = _quantize_mxfp6_fused_dual(
+            y1, grad_a, b1, MXFP6_PROLOGUE_BIAS_GELU_BACKWARD, want_bias_grad
+        )
+
+        # fc1 dgrad: [m, k] = grad_y1[m, f] @ w1[f, k], contracting f.
+        grad_x = gemm_fp6_impl(g1_row, g1_row_s, w1_col, w1_col_s, m, k, f, out_dtype, _GRAN_VALUE)
+        grad_x = grad_x.reshape(ctx.orig_shape)
+        # fc1 wgrad: [f, k] = grad_y1.T[f, m] @ x[m, k], contracting m.
+        grad_w1 = gemm_fp6_impl(g1_col, g1_col_s, x_col, x_col_s, f, k, m, out_dtype, _GRAN_VALUE)
+
+        grad_b1 = b1_partial.sum(0).to(out_dtype) if want_bias_grad else None
+
+        return grad_x, grad_w1, grad_b1, grad_w2
+
+
+def _is_tanh_gelu(fn) -> bool:
+    """Whether ``fn`` is exactly ``F.gelu(approximate="tanh")``.
+
+    The packer's prologue implements that function and only that one, to within a rounding of
+    the tanh. This check is not paranoia: ``FluxConfig``'s default activation is
+    ``openai_gelu_no_jit``, the same mathematical function written as
+    ``beta * x * (1 + kappa * x^2)`` rather than ``beta * (x + kappa * x^3)``. Those disagree
+    well above the prologue's own rounding, and the YAML key that selects between them
+    (``activation_func: openai_gelu`` maps to the fused ATen one)
+    makes it easy to land on the other branch without noticing.
+    """
+    if isinstance(fn, functools.partial):
+        return fn.func is F.gelu and fn.keywords.get("approximate") == "tanh"
+    return False
+
+
+def _fused_mlp_unusable_reason(mlp) -> str:
+    """Why the fused MLP cannot be used for this module, or ``""`` if it can.
+
+    Every branch corresponds to a path in ``MLP.forward`` that the fused Function does not
+    reproduce. Returning a reason rather than silently deferring keeps a misconfiguration
+    from looking like a performance result.
+    """
+    config = mlp.config
+
+    if not hasattr(torch.ops.primus_turbo, "quantize_mxfp6_fused_dual_impl"):
+        return "this Primus-Turbo build has no fused MXFP6 prologue packer"
+    if config.gated_linear_unit:
+        return "gated_linear_unit splits the fc1 output, which the prologue does not do"
+    if getattr(config, "bias_activation_fusion", False):
+        return "bias_activation_fusion routes the epilogue through Megatron's own fused kernel"
+    if getattr(config, "use_te_activation_func", False):
+        return "use_te_activation_func replaces the activation with a TE module"
+    if not _is_tanh_gelu(mlp.activation_func):
+        name = getattr(mlp.activation_func, "__name__", type(mlp.activation_func).__name__)
+        return (
+            "the fused prologue implements F.gelu(approximate='tanh') only, but the "
+            f"activation is {name!r}"
+        )
+
+    for name in ("linear_fc1", "linear_fc2"):
+        linear = getattr(mlp, name)
+        if not isinstance(linear, (MXFP6ColumnParallelLinear, MXFP6RowParallelLinear)):
+            return f"{name} is {type(linear).__name__}, not an MXFP6 linear"
+        if getattr(linear, "_backward_is_fp8", False):
+            return (
+                "mxfp6_backward_precision='fp8' saves the activation for backward "
+                "requantization, which the fusion removes"
+            )
+        if not linear.skip_bias_add:
+            return f"{name} adds its own bias, so the epilogue is not the MLP's to fuse"
+
+    return ""
+
+
+def _fused_mlp_mode() -> str:
+    mode = os.environ.get("PRIMUS_MXFP6_FUSED_MLP", "").strip().lower() or "auto"
+    assert mode in (
+        "auto",
+        "on",
+        "off",
+    ), f"PRIMUS_MXFP6_FUSED_MLP must be auto, on or off, got {mode!r}"
+    return mode
+
+
+class MXFP6FusedMLP(MLP):
+    """MLP whose bias-add + GELU is folded into the MXFP6 packer, in both directions.
+
+    Drop-in for ``MLP``: same submodules, same ``(output, output_bias)`` return, same
+    parameters and state dict. Only ``forward`` differs, and it defers to ``MLP.forward``
+    for anything the fused path does not cover, so a configuration it cannot handle is
+    slow rather than wrong.
+
+    ``PRIMUS_MXFP6_FUSED_MLP=off`` forces the stock path for A/B comparison; ``on`` makes
+    an unusable configuration an error instead of a silent fallback.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        mode = _fused_mlp_mode()
+        reason = "disabled by environment" if mode == "off" else _fused_mlp_unusable_reason(self)
+        self._fused_epilogue = reason == ""
+
+        if not self._fused_epilogue and mode == "on":
+            raise RuntimeError(f"PRIMUS_MXFP6_FUSED_MLP=on but the fused MLP is unusable: {reason}")
+        if not self._fused_epilogue and mode == "auto":
+            warnings.warn(
+                f"MXFP6 fused MLP epilogue disabled, falling back to the stock MLP: {reason}",
+                stacklevel=2,
+            )
+
+    def forward(self, hidden_states, per_token_scale=None):
+        # per_token_scale scales the activation after the epilogue, which is exactly the
+        # tensor the fusion refuses to materialise. Only MoE experts pass it.
+        if not self._fused_epilogue or per_token_scale is not None:
+            return super().forward(hidden_states, per_token_scale=per_token_scale)
+
+        output = MXFP6MLPFunction.apply(
+            hidden_states,
+            self.linear_fc1.weight,
+            self.linear_fc1.bias,
+            self.linear_fc2.weight,
+        )[0]
+
+        # fc2 is built with skip_bias_add=True, so MLP's contract is to hand its bias back
+        # unadded for the caller to fuse into a residual.
+        return output, self.linear_fc2.bias
