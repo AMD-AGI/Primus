@@ -33,7 +33,7 @@ actual_gbs=$((NNODES * GPUS_PER_NODE * LOCAL_BATCH_SIZE * GRADIENT_ACCUMULATION_
 echo "[flux1] config=$FLUX_CONFIG nnodes=$NNODES mbs=$LOCAL_BATCH_SIZE ga=$GRADIENT_ACCUMULATION_STEPS gbs=$actual_gbs"
 
 if (( NNODES > 1 )) && [[ "${NCCL_IB_DISABLE:-0}" != "1" ]]; then
-    LIBIONIC_ABI4_PATH=${LIBIONIC_ABI4_PATH:-/usr/lib/x86_64-linux-gnu/libionic.so.1.0.54.0-149.g3304be71}
+    LIBIONIC_ABI4_PATH=${LIBIONIC_ABI4_PATH:-/usr/lib/x86_64-linux-gnu/libionic.so}
     [[ -f "$LIBIONIC_ABI4_PATH" && -e /dev/infiniband ]] || {
         echo "ABI-4 libionic or /dev/infiniband is unavailable" >&2
         exit 1

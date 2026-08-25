@@ -46,9 +46,10 @@ shape-specific settings:
 |---|---:|---:|---:|---:|---|---|
 | `config_1n_gbs512.sh` | 1 | 64 | 1 | 512 | TorchAO/Inductor | `max-autotune-no-cudagraphs` |
 | `config_1n_gbs1024.sh` | 1 | 32 | 4 | 1024 | selective FlyDSL | default |
+| `config_2n_gbs1024.sh` | 2 | 32 | 2 | 1024 | selective FlyDSL | default |
 | `config_4n_gbs1024.sh` (default) | 4 | 32 | 1 | 1024 | selective FlyDSL | default |
 
-The MBS64 profile retains checkpoint ratio `0.25`. Both MBS32 profiles use
+The MBS64 profile retains checkpoint ratio `0.25`. All MBS32 profiles use
 ratio `0`, forward-input FP8 reuse, the qualified natural-layout wgrads, and
 MBS32 Inductor fusion benchmarking.
 
@@ -90,6 +91,12 @@ required.
 
 Common overrides include `MAX_STEPS`, `SEED`, `MASTER_PORT`, `SAVE_STRATEGY`,
 `SAVE_STEPS`, `RESUME_FROM_CHECKPOINT`, and `MLPERF_CLEAR_CACHES=false`.
+The same launcher supports Crusoe and DCCS; only the Slurm submission options
+and host network settings differ. On DCCS, use
+`NCCL_SOCKET_IFNAME=fenic GLOO_SOCKET_IFNAME=fenic`. The launcher uses the
+host's generic `/usr/lib/x86_64-linux-gnu/libionic.so` symlink by default; set
+`LIBIONIC_ABI4_PATH` only when libionic is installed elsewhere, or set
+`NCCL_IB_DISABLE=1` when the selected nodes do not have AINIC routes.
 
 ## Files
 
@@ -100,6 +107,7 @@ examples/mlperf/flux1/
 ├── config_common.sh
 ├── config_1n_gbs512.sh
 ├── config_1n_gbs1024.sh
+├── config_2n_gbs1024.sh
 ├── config_4n_gbs1024.sh
 ├── flux.1_schnell_t2i-pretrain.yaml
 ├── luanch-multi-nodes.md
