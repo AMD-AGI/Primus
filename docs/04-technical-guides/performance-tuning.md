@@ -1,0 +1,296 @@
+# Performance tuning guide
+
+This guide covers AMD-focused performance work in Primus: HipBLASLt autotuning for GEMMs, **Primus-Turbo** optional kernels, mixed precision, activation recomputation, communication overlap, memory settings, and MoE-specific flags. It references Primus examples and Megatron module YAMLs.
+
+---
+
+## 1. HipBLASLt autotuning
+
+Transformer Engine and GEMM-heavy training benefit from HipBLASLt kernel selection. Primus integrates a **three-stage** workflow controlled by `PRIMUS_HIPBLASLT_TUNING_STAGE` (see `examples/README.md` and `runner/helpers/hooks/train/pretrain/prepare_experiment.sh`).
+
+> **Activate tuning first.** The stage variable is only honored when the master switch `PRIMUS_HIPBLASLT_TUNING=1` is set (and `PRIMUS_DETERMINISTIC` is not `1`). Without `PRIMUS_HIPBLASLT_TUNING=1`, the CLI hook `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` skips tuning entirely and forces `TE_HIPBLASLT_TUNING_RUN_COUNT=0` / `TE_HIPBLASLT_TUNING_ALGO_COUNT=0`. Export `PRIMUS_HIPBLASLT_TUNING=1` alongside the stage in every command below.
+
+### Stage 0 (default)
+
+No tuning:
+
+```bash
+export PRIMUS_HIPBLASLT_TUNING_STAGE=0  # default
+```
+
+### Stage 1: Dump GEMM shapes
+
+Run a **short** training job so shapes are collected during real forward/backward passes. Reduce `train_iters` (or equivalent) for faster shape collection.
+
+```bash
+export PRIMUS_HIPBLASLT_TUNING=1
+export PRIMUS_HIPBLASLT_TUNING_STAGE=1
+./primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
+```
+
+Output layout (from `examples/README.md`):
+
+- `./output/tune_hipblaslt/${PRIMUS_MODEL}/gemm_shape`
+
+### Stage 2: Offline tuning
+
+Runs offline tuning from dumped shapes (often 10–30 minutes depending on model and shapes):
+
+```bash
+export PRIMUS_HIPBLASLT_TUNING=1
+export PRIMUS_HIPBLASLT_TUNING_STAGE=2
+./primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
+```
+
+Expected output:
+
+- `./output/tune_hipblaslt/${PRIMUS_MODEL}/gemm_tune/tune_hipblas_gemm_results.txt`
+
+### Stage 3: Train with tuned kernels
+
+Point the runtime at the tuned override file:
+
+```bash
+export PRIMUS_HIPBLASLT_TUNING=1
+export PRIMUS_HIPBLASLT_TUNING_STAGE=3
+export HIPBLASLT_TUNING_OVERRIDE_FILE=/path/to/tune_hipblas_gemm_results.txt
+./primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
+```
+
+### Related environment variables
+
+| Variable | Role |
+|----------|------|
+| `TE_HIPBLASLT_TUNING_ALGO_COUNT` | Breadth of algorithm search for TE HipBLASLt tuning (see the defaults in `runner/helpers/hooks/train/pretrain/prepare_experiment.sh`). |
+| `TE_HIPBLASLT_TUNING_RUN_COUNT` | Number of benchmark runs per shape during TE tuning. |
+| `TE_HIPBLASLT_TUNING_ALGO_FILE` | Optional algorithm file for TE tuning flows. |
+| `TE_HIPBLASLT_TUNING` | When set, interacts with deterministic mode; avoid conflicting settings with shape dump (see the comments in `runner/helpers/hooks/train/pretrain/prepare_experiment.sh`). |
+| `HIPBLASLT_TUNING_OVERRIDE_FILE` | Override file for stage 3 training. |
+
+### Standalone offline tool
+
+For manual HipBLASLt bench workflows, see `examples/offline_tune/offline_tune_gemm.py` and `examples/offline_tune/README.md` (hipblaslt-bench integration and `HIPBLASLT_TUNING_OVERRIDE_FILE` usage).
+
+---
+
+## 2. Primus-Turbo optimization
+
+**Primus-Turbo** is a separate package of optimized AMD GPU kernels used by Primus Megatron and TorchTitan integrations. It is controlled by the master flag `enable_primus_turbo` in Megatron configs (`primus/configs/modules/megatron/primus_turbo.yaml` extends into trainer/model as needed). **You must install the external `primus_turbo` package** for these paths to be available.
+
+### Master flag (Megatron)
+
+```yaml
+enable_primus_turbo: true
+```
+
+### Feature flags (Megatron)
+
+Defaults in `primus/configs/modules/megatron/primus_turbo.yaml` are mostly `false` until enabled.
+
+| Flag | Purpose |
+|------|---------|
+| `use_turbo_attention` | Optimized attention kernels. |
+| `use_turbo_flex_attention` | Route `use_turbo_attention` through the Primus-Turbo `flex_attention` compat layer (see below). |
+| `use_turbo_parallel_linear` | Optimized tensor-parallel linear layers. |
+| `use_turbo_grouped_gemm` | Optimized grouped GEMM for MoE. |
+| `use_turbo_grouped_mlp` | Removed—use `use_turbo_grouped_gemm` (passing this key now raises an error). |
+| `use_turbo_rms_norm` | Optimized RMSNorm. |
+| `moe_use_fused_router_with_aux_score` | Fused MoE router (requires Primus-Turbo backend; see [Backend Patch Notes](../06-developer-guide/backend-patch-notes.md)). |
+| `use_turbo_deepep` | DeepEP token dispatcher; set with `enable_primus_turbo: true`. |
+| `turbo_deepep_num_cu` | Compute units for DeepEP (patch notes suggest practices such as 64 or 80 for EP8, 32 for EP16–64). |
+| `turbo_sync_free_moe_stage` | Sync-free MoE stages (`0`–`3`; `0` disables, stage `2` recommended for performance per patch notes). See [MoE training deep-dive](./moe-training.md). |
+| `use_turbo_fused_act_with_probs` | Fused activation with probabilities to reduce redundant work. |
+
+#### Flex attention routing
+
+`use_turbo_flex_attention: true` (default `false`, requires `use_turbo_attention: true`)
+makes the Turbo attention module call the `flex_attention` compat layer instead of
+`flash_attn_func` directly. The compat layer takes a torch-FlexAttention
+`block_mask` / `score_mod`, classifies it, and dispatches the recognized patterns onto
+the same Turbo kernels -- so with the default causal configuration the result is
+numerically identical to the direct call and the kernel is the same. What it adds is
+the ability to express masks and score modifications that `flash_attn_func` has no
+argument for:
+
+```yaml
+primus_turbo:
+  enable_primus_turbo: true
+  use_turbo_attention: true
+  use_turbo_flex_attention: true
+  # optional, "package.module:attribute" paths to your own callables
+  turbo_flex_attention_mask_mod: null    # (b, h, q_idx, kv_idx) -> bool
+  turbo_flex_attention_score_mod: null   # (score, b, h, q_idx, kv_idx) -> score
+```
+
+Unsupported combinations raise at model-build time rather than silently reverting to
+the direct call: `context_parallel_size > 1`, `enable_turbo_attention_float8: true`,
+`deterministic_mode: true`, and `reset_attention_mask: true`. A sliding window without a
+causal mask is rejected on the call itself. Nothing degrades quietly -- a rejected run
+fails at startup instead of training on the old code path.
+
+#### Packed sequences (`qkv_format: thd`)
+
+This switch is currently the **only** way to run packed sequences on the Turbo attention
+path. `PrimusTurboAttention` forwards `packed_seq_params.cu_seqlens_q/cu_seqlens_kv` to
+`flex_attention_varlen`, which applies document-internal causal masking (block-diagonal
+plus within-segment causal). The direct `flash_attn_func` binding has no `cu_seqlens`
+argument, so with `use_turbo_flex_attention: false` a `thd` batch now raises instead of
+attending across document boundaries with nothing reported.
+
+The packed path takes no `BlockMask`: Megatron already knows where the boundaries are, so
+there is nothing to probe or classify, and the cache described below is not touched at
+all. `turbo_flex_attention_mask_mod`, `turbo_flex_attention_score_mod` and an attention
+bias are all refused on this path -- `flex_attention_varlen` takes `cu_seqlens` and
+explicit `alibi_slopes`, not a programmable mask, and dropping a supplied callable
+silently is exactly the failure mode this layer exists to prevent.
+
+`reset_attention_mask: true` is a different mechanism and is still refused: it encodes
+per-document boundaries inside a *dense* sample's attention mask, and the Turbo call
+signature has no argument to carry them. Use `qkv_format: thd` packing instead.
+
+Sequence-length variety costs more here than on the direct path: each distinct
+`(mask pattern, q_len, kv_len, device)` builds a `BlockMask` and re-runs the compat
+layer's classification once, then is cached (bounded LRU, 64 entries). Fixed-length
+pretraining pays this once per run; a workload that hands attention a new length every
+step will warn once and then rebuild on every miss. Bucket the lengths.
+
+### Feature flags (TorchTitan)
+
+TorchTitan presets include `primus_turbo` in `primus/configs/modules/torchtitan/pre_trainer.yaml`
+
+Example keys:
+
+```yaml
+primus_turbo:
+  enable_primus_turbo: true
+  use_turbo_attention: true
+  use_turbo_async_tp: true
+  use_turbo_float8_linear: true
+  use_turbo_grouped_mm: false
+```
+
+### Documentation
+
+Extended Megatron arguments and Turbo-related behavior are summarized in [Backend Patch Notes](../06-developer-guide/backend-patch-notes.md).
+
+---
+
+## 3. Mixed precision training
+
+### Megatron (`trainer_base.yaml` patterns)
+
+| Setting | Description |
+|---------|-------------|
+| `bf16: true` | BFloat16 training (default `true` in `trainer_base.yaml`). |
+| `fp16: false` | FP16 training (optional). |
+| `fp8` | FP8 recipe control (`null` / recipes such as delayed scaling in upstream Megatron). |
+| `fp8_recipe`, `fp8_margin`, `fp8_interval` | FP8 scaling behavior. |
+| `fp4`, `fp4_recipe` | Experimental FP4 paths. |
+| `first_last_layers_bf16: true` | Keep first/last layers in BF16 for stability (`num_layers_at_start_in_bf16`, `num_layers_at_end_in_bf16` fine-tune). |
+
+### TorchTitan
+
+| Setting | Location |
+|---------|----------|
+| `training.mixed_precision_param: bfloat16` | `pre_trainer.yaml` default |
+| `training.mixed_precision_reduce: float32` | Reduce precision |
+| FP8 / quantization | `quantize.linear.float8.*` in `primus/configs/modules/torchtitan/quantize.yaml` |
+
+### Loss fusion (Megatron model)
+
+From `primus/configs/models/megatron/language_model.yaml`:
+
+- Default: `cross_entropy_loss_fusion: false` with `cross_entropy_fusion_impl: "native"`.
+- To use Transformer Engine fused cross entropy where supported, enable the fusion explicitly and set `cross_entropy_fusion_impl: "te"`.
+
+---
+
+## 4. Activation recomputation
+
+### Megatron
+
+| Parameter | Typical values | Notes |
+|-----------|----------------|-------|
+| `recompute_granularity` | `full`, `selective` | `full` recomputes more; max memory savings. |
+| `recompute_method` | `uniform`, `block` | How recomputation is distributed. |
+| `recompute_num_layers` | integer | Layers to recompute when using selective or uniform strategies. |
+| `recompute_layer_ids` | list or null | Primus extension: **global** layer indices (the patch resolves block-local indices to global ids via `layer_offset`). Decoder layers are `0` to `num_layers - 1`; the MTP depths continue the numbering, so depth *d* is `num_layers + d`. Use with `recompute_granularity: full` and `recompute_method: null`. |
+
+### TorchTitan
+
+| Parameter | Location |
+|-----------|----------|
+| `activation_checkpoint.mode` | `none` in default `pre_trainer.yaml` |
+| `activation_checkpoint.selective_ac_option` | Selective AC options |
+
+---
+
+## 5. Communication overlap
+
+### Megatron
+
+From `trainer_base.yaml` and model settings:
+
+| Setting | Purpose |
+|---------|---------|
+| `overlap_grad_reduce` | Overlap gradient reduction with backward. |
+| `overlap_param_gather` | Overlap parameter gather with forward. |
+| `overlap_p2p_comm` | Pipeline P2P overlap. |
+| `async_tensor_model_parallel_allreduce` | Async TP all-reduce (model config). |
+
+### TorchTitan
+
+| Setting | Purpose |
+|---------|---------|
+| `parallelism.enable_async_tensor_parallel: true` | Async tensor parallelism. |
+
+### Environment
+
+`CUDA_DEVICE_MAX_CONNECTIONS=1` is commonly required for **correct** overlap behavior in TP/PP stacks (see `docs/03-configuration-reference/environment-variables.md` and Megatron tests). Primus launch scripts or your cluster setup might set this.
+
+---
+
+## 6. Memory optimization
+
+### Megatron
+
+| Parameter | Purpose |
+|-----------|---------|
+| `optimizer_cpu_offload: true` | Offload optimizer state to CPU. |
+| `optimizer_offload_fraction` | Fraction to offload (`1.0` in `trainer_base.yaml`). |
+| `use_distributed_optimizer: true` | Shards optimizer state across DP ranks (when enabled). |
+| `empty_unused_memory_level` | Aggressive emptying of unused memory (`0` default). |
+| `global_batch_size` + `micro_batch_size` | Increase global batch via **gradient accumulation** without increasing per-step activation memory. |
+
+### TorchTitan
+
+| Parameter | Purpose |
+|-----------|---------|
+| `training.enable_cpu_offload` | CPU offload path in `pre_trainer.yaml` |
+
+---
+
+## 7. MoE-specific optimization
+
+### Megatron (model + turbo)
+
+| Setting | Purpose |
+|---------|---------|
+| `moe_permute_fusion: true` | Fuse permutation / unpermutation (`patch-notes.md`). |
+| `moe_use_fused_router_with_aux_score: true` | Fused router + aux loss (Primus-Turbo). |
+| `use_turbo_deepep: true` | DeepEP dispatcher (`enable_primus_turbo` must be true). |
+| `turbo_sync_free_moe_stage: 2` | Recommended stage for sync-free MoE (per patch notes). |
+| `overlap_moe_expert_parallel_comm: true` | Overlap expert parallel communication (`trainer_base.yaml`). |
+
+---
+
+## Quick checklist
+
+1. **GEMMs:** run HipBLASLt stages 1–3 or use `offline_tune_gemm.py` for custom workflows.
+2. **Kernels:** enable `primus_turbo` after installing `primus_turbo`; turn on attention/MoE flags as needed.
+3. **Precision:** BF16 by default; add FP8/FP4 only with recipe testing.
+4. **Memory:** recomputation + distributed optimizer + CPU offload + accumulation before buying more GPUs.
+5. **MoE:** fusion + DeepEP + sync-free stages + EP comm overlap when supported.
