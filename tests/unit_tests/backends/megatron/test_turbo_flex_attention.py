@@ -250,8 +250,11 @@ class TestDispatch:
         assert torch.equal(bm.mask_mod(0, 0, q, kv), expected)
 
     def test_user_mask_mod_overrides_causal(self, stub_backend):
+        # No window here on purpose: this asserts mask_mod beats the built-in *causal*
+        # mask. mask_mod combined with a window is now a rejected conflict, covered by
+        # TestRejections.test_user_mask_mod_plus_window_rejected.
         attn = tfa.TurboFlexAttention(mask_mod=_dummy_mask_mod, mask_mod_key="dummy")
-        attn(*_qkv(), causal=True, window_size=(4, 0))
+        attn(*_qkv(), causal=True)
         assert stub_backend.recorder.last["block_mask"].mask_mod is _dummy_mask_mod
 
     def test_score_mod_is_forwarded(self, stub_backend):
@@ -363,6 +366,48 @@ class TestRejections:
         attn = tfa.TurboFlexAttention()
         with pytest.raises(NotImplementedError, match="sliding window"):
             attn(*_qkv(), causal=False, window_size=(4, 0))
+
+    def test_forward_looking_window_rejected(self, stub_backend):
+        """window_size[1] > 0 asks each query to see tokens ahead of it. Every mask_mod
+        the dense path can build is causal, so the right bound cannot be honoured -- and
+        it used to be dropped on the floor while the left bound was applied, which
+        silently trains a different model than the config asked for."""
+        attn = tfa.TurboFlexAttention()
+        with pytest.raises(NotImplementedError, match=r"window_size\[1\]"):
+            attn(*_qkv(s=16), causal=True, window_size=(4, 4))
+
+    def test_symmetric_window_is_not_silently_truncated(self, stub_backend):
+        """The specific regression: (4, 4) must not be treated as (4, 0)."""
+        attn = tfa.TurboFlexAttention()
+        with pytest.raises(NotImplementedError):
+            attn(*_qkv(s=16), causal=True, window_size=(4, 4))
+        assert stub_backend.recorder.calls == [], "the backend was reached despite the rejection"
+
+    def test_unbounded_right_window_still_accepted(self, stub_backend):
+        """(-1) and 0 both mean 'no forward bound' and must keep working."""
+        attn = tfa.TurboFlexAttention()
+        attn(*_qkv(s=16), causal=True, window_size=(4, 0))
+        attn(*_qkv(s=16), causal=True, window_size=(4, -1))
+        assert len(stub_backend.recorder.calls) == 2
+
+    def test_mask_mod_plus_sink_window_rejected_at_build(self, stub_backend):
+        """The same conflict, but reachable from a plain config file -- so it has to be
+        caught when the model is built, not on the first forward pass."""
+        with pytest.raises(NotImplementedError, match="sink_sliding_window"):
+            tfa.build_turbo_flex_attention(
+                args=_args(
+                    turbo_flex_attention_mask_mod="mod:fn",
+                    sink_sliding_window=512,
+                ),
+                config=_config(),
+            )
+
+    def test_user_mask_mod_plus_window_rejected(self, stub_backend):
+        """A user mask_mod replaces the window rather than composing with it. Resolving
+        that silently would drop whichever one lost, so the conflict is an error."""
+        attn = tfa.TurboFlexAttention(mask_mod=lambda b, h, q, kv: q >= kv)
+        with pytest.raises(NotImplementedError, match="mask_mod"):
+            attn(*_qkv(s=16), causal=True, window_size=(4, 0))
 
 
 # =============================================================================

@@ -244,10 +244,18 @@ class TurboFlexAttention:
     def _block_mask_for(self, *, causal: bool, window: int, q_len: int, kv_len: int, device):
         """Pick the BlockMask for this call, or ``None`` for unmasked (full) attention.
 
-        Precedence: an explicit user ``mask_mod`` wins; otherwise the Megatron mask type
-        (``causal`` / ``no_mask``) and ``window_size`` decide.
+        An explicit user ``mask_mod`` replaces the built-in choice; combining it with a
+        window is rejected rather than silently resolved. Otherwise the Megatron mask
+        type (``causal`` / ``no_mask``) and ``window_size`` decide.
         """
         if self.mask_mod is not None:
+            if window > 0:
+                raise NotImplementedError(
+                    "Primus-Turbo flex attention: turbo_flex_attention_mask_mod and a sliding "
+                    f"window (window={window}) were both requested. A user mask_mod replaces "
+                    "the window rather than composing with it, so honouring either one would "
+                    "silently drop the other. Fold the window into the mask_mod itself."
+                )
             return _get_block_mask(
                 mask_mod=self.mask_mod,
                 cache_key=("user", self.mask_mod_key),
@@ -445,6 +453,19 @@ class TurboFlexAttention:
             )
 
         left_window = int(window_size[0]) if window_size is not None else -1
+        right_window = int(window_size[1]) if window_size is not None else -1
+        if right_window > 0:
+            # The dense path expresses a window as a mask_mod, and every mask_mod the
+            # compat layer can build is causal (q_idx >= kv_idx). A positive right bound
+            # means attending forward, which none of them can represent -- and honouring
+            # the left bound while quietly discarding the right one is exactly the silent
+            # wrongness this layer exists to prevent. (The packed path forwards
+            # window_size to the varlen backend verbatim, so it is not restricted here.)
+            raise NotImplementedError(
+                "Primus-Turbo flex attention: only causal windows are supported on the dense "
+                "path, so window_size[1] must be 0 or -1; got "
+                f"window_size={tuple(window_size)}."
+            )
         block_mask = self._block_mask_for(
             causal=causal,
             window=max(left_window, 0),
@@ -536,6 +557,16 @@ def build_turbo_flex_attention(*, args, config) -> TurboFlexAttention:
         )
 
     mask_mod_path = getattr(args, "turbo_flex_attention_mask_mod", None)
+    if mask_mod_path and getattr(args, "sink_sliding_window", 0) > 0:
+        # Both describe the mask, and a user mask_mod replaces the window instead of
+        # composing with it (see _block_mask_for). That conflict is reachable from a
+        # plain config, so catch it here rather than at the first forward.
+        raise NotImplementedError(
+            f"turbo_flex_attention_mask_mod={mask_mod_path!r} and sink_sliding_window="
+            f"{args.sink_sliding_window} both describe the attention mask, and the mask_mod "
+            "replaces the window rather than composing with it. Fold the window into the "
+            "mask_mod, or set sink_sliding_window=0."
+        )
     score_mod_path = getattr(args, "turbo_flex_attention_score_mod", None)
     mask_mod = (
         resolve_dotted_callable(mask_mod_path, what="turbo_flex_attention_mask_mod")

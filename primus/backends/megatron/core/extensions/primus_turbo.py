@@ -813,7 +813,8 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
 
         self.offload = args.offload and "attn" in args.offload_ops
         self._attn_accepts_packed_seq = False
-        if getattr(args, "use_turbo_flex_attention", False):
+        self._attn_is_flex = bool(getattr(args, "use_turbo_flex_attention", False))
+        if self._attn_is_flex:
             # Route through the flex_attention compat layer. It presents the same call
             # signature as flash_attn_func and dispatches onto the same Turbo kernels,
             # so forward() below needs no changes. Unsupported combinations raise here,
@@ -859,7 +860,32 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             # enable ring attention
             self.attn_kwargs["ring_group"] = dist.new_group(ranks=[dist.get_rank()])
 
-        assert config.window_size is None, "primus_turbo does not support sliding window attention"
+        # Sliding-window attention. The direct flash_attn_func binding takes no window
+        # argument, so config-level SWA stays rejected there. The flex path expresses a
+        # window as a mask_mod and drives the same aiter kernel the sink path already
+        # uses, so it can honour config.window_size.
+        self._config_window_size = None
+        if config.window_size is not None:
+            if not self._attn_is_flex:
+                raise NotImplementedError(
+                    "primus_turbo does not support sliding window attention on the direct "
+                    f"attention path (config.window_size={tuple(config.window_size)}). Set "
+                    "use_turbo_flex_attention=true to route it through the flex compat layer."
+                )
+            left, right = config.window_size
+            if int(right) > 0:
+                raise NotImplementedError(
+                    "primus_turbo flex attention supports causal windows only, so "
+                    f"window_size[1] must be 0 or -1; got {tuple(config.window_size)}."
+                )
+            if self._init_sink_attention and self.sink_sliding_window > 0:
+                raise NotImplementedError(
+                    "primus_turbo: config.window_size and sink_sliding_window both request a "
+                    f"sliding window ({tuple(config.window_size)} vs {self.sink_sliding_window}). "
+                    "The sink window is applied per layer, so combining the two would make the "
+                    "effective window depend on the layer index. Set only one of them."
+                )
+            self._config_window_size = (int(left), 0)
         # Check version
 
         kv_channels = (
@@ -911,6 +937,16 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         packed_seq_params: PackedSeqParams = None,
     ):
         """Forward."""
+        if attention_bias is not None:
+            # Neither flash_attn_func nor the flex compat layer is wired to an attention
+            # bias here (the kernel call below passes alibi_slopes=None unconditionally),
+            # so accepting the tensor and ignoring it would train a different model than
+            # the config asks for, with no diagnostic. Fail instead.
+            raise NotImplementedError(
+                "primus_turbo attention does not support attention_bias; the tensor would be "
+                "silently dropped. This also covers ALiBi, which Megatron delivers as an "
+                "attention bias -- use a position embedding the Turbo path implements."
+            )
         packed_seq_kwargs = (
             {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
             if packed_seq_params is not None
@@ -937,7 +973,10 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         #
         # Reference: gpt-oss/gpt_oss/triton/attention.py
         sink_tensor = None
-        window_size = (-1, -1)
+        # config.window_size, when set, applies to every layer. The sink pattern below
+        # is the other source of a window and __init__ rejects having both, so whichever
+        # one is configured is the only writer of this variable.
+        window_size = self._config_window_size or (-1, -1)
 
         use_sink_attn = self.use_sink_attention and self.sinks is not None
 
