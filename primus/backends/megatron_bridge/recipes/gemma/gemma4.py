@@ -22,6 +22,7 @@ Architecture highlights:
 """
 
 import os
+from contextlib import contextmanager
 from typing import List, Optional, Union
 
 import torch
@@ -45,6 +46,28 @@ from megatron.bridge.training.config import (
     TrainingConfig,
 )
 from megatron.bridge.training.mixed_precision import MixedPrecisionConfig, bf16_mixed, get_mixed_precision_config
+
+
+@contextmanager
+def _gemma4_text_conversion_mode():
+    """Force AutoBridge onto the text-only Gemma 4 path.
+
+    The published Gemma 4 checkpoints are ``Gemma4ForConditionalGeneration``
+    (vision + audio towers alongside the language model), so AutoBridge's
+    default "auto" dispatch selects Gemma4VLBridge and builds a Gemma4VLModel.
+    These recipes train the language model only, so the mode is pinned to
+    "text" to get Gemma4DenseProvider / Gemma4ModelProvider instead.  Mirrors
+    megatron.bridge.recipes.gemma.h100.gemma4.
+    """
+    previous_mode = os.environ.get("GEMMA4_CONVERSION_MODE")
+    os.environ["GEMMA4_CONVERSION_MODE"] = "text"
+    try:
+        yield
+    finally:
+        if previous_mode is None:
+            os.environ.pop("GEMMA4_CONVERSION_MODE", None)
+        else:
+            os.environ["GEMMA4_CONVERSION_MODE"] = previous_mode
 
 
 class Gemma4CommonKwargs(TypedDict, total=False):
@@ -250,8 +273,9 @@ def _gemma4_common(
         data_paths, data_args_path, train_data_path, valid_data_path, test_data_path, per_split_data_args_path, mock
     )
 
-    bridge = AutoBridge.from_hf_pretrained(hf_path)
-    model_cfg = bridge.to_megatron_provider(load_weights=False)
+    with _gemma4_text_conversion_mode():
+        bridge = AutoBridge.from_hf_pretrained(hf_path)
+        model_cfg = bridge.to_megatron_provider(load_weights=False)
     model_cfg.tensor_model_parallel_size = tensor_model_parallel_size
     model_cfg.expert_model_parallel_size = expert_model_parallel_size
     model_cfg.pipeline_model_parallel_size = pipeline_model_parallel_size
@@ -368,8 +392,9 @@ def _gemma4_finetune_common(
     checkpoint_dir = os.path.join(run_output_dir, "checkpoints")
     tensorboard_dir = os.path.join(run_output_dir, "tb_logs")
 
-    bridge = AutoBridge.from_hf_pretrained(hf_path)
-    model_cfg = bridge.to_megatron_provider(load_weights=False)
+    with _gemma4_text_conversion_mode():
+        bridge = AutoBridge.from_hf_pretrained(hf_path)
+        model_cfg = bridge.to_megatron_provider(load_weights=False)
     model_cfg.tensor_model_parallel_size = tensor_model_parallel_size
     model_cfg.expert_model_parallel_size = expert_model_parallel_size
     model_cfg.pipeline_model_parallel_size = pipeline_model_parallel_size
