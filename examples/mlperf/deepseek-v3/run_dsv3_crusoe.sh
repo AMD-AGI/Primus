@@ -59,10 +59,14 @@
 #   SLURM_EXCLUDE=node-a,node-b bash examples/mlperf/deepseek-v3/run_dsv3_crusoe.sh
 #   FOLLOW=0 bash examples/mlperf/deepseek-v3/run_dsv3_crusoe.sh   # submit only
 #   LOG_FILTER=0 bash examples/mlperf/deepseek-v3/run_dsv3_crusoe.sh  # keep noise
+#   LOG_FILTER=2 bash examples/mlperf/deepseek-v3/run_dsv3_crusoe.sh  # also hide
+#                                                       Megatron's argument dump
 #
-# Logs are stripped of the repeated hipBLASLt Stream-K message by default; it is
-# 92.5% of the lines and carries no information. A FOLLOW=0 run can be cleaned
-# afterwards with:
+# LOG_FILTER=1 (the default) drops the repeated hipBLASLt Stream-K message, which
+# is 92.5% of the lines and carries no information. LOG_FILTER=2 additionally
+# hides Megatron's ~840-line argument dump *from the terminal only* -- it stays
+# in the files under RUN_DIR, where it is useful for checking what a run actually
+# received. A FOLLOW=0 run can be cleaned afterwards with:
 #
 #   bash examples/mlperf/deepseek-v3/run_dsv3_crusoe.sh --clean-logs <run-dir>
 #
@@ -87,6 +91,9 @@ RECIPE=examples/moe_package/run_deepseek_v3_pretrain_mi355x.sh
 # --- log noise -------------------------------------------------------------
 LOG_NOISE_SED='s/\r//g; s/Warning: Stream-K Data Parallel does not support GSU > 1,?[[:space:]]*//g; s/setting GSU to 1\.//g'
 LOG_BLANK_RE='^[[:space:]]*$'
+# Megatron and the ROCm validator each dump every argument at startup, ~840 lines
+# that scroll the useful output away. Terminal-only: never stripped from the files.
+LOG_VERBOSE_RE='(arguments|rocm_arg_validation)\.py:[0-9]+\]'
 LOG_FILTER="${LOG_FILTER:-1}"
 
 _strip_noise() {
@@ -259,8 +266,15 @@ for _ in $(seq 1 60); do
 done
 
 if [ -n "$(ls "$RUN_DIR"/train_*.log 2>/dev/null || true)" ]; then
-    if [ "$LOG_FILTER" = "1" ]; then
-        tail -F -n +1 "$RUN_DIR"/train_*.log \
+    # -q drops the "==> file <==" banner tail prints on every switch between
+    # the 32 files; the node name is already inside the log lines.
+    if [ "$LOG_FILTER" = "2" ]; then
+        tail -qF -n +1 "$RUN_DIR"/train_*.log \
+            | sed -u -E "$LOG_NOISE_SED" \
+            | grep --line-buffered -vE "$LOG_BLANK_RE" \
+            | grep --line-buffered -vE "$LOG_VERBOSE_RE" &
+    elif [ "$LOG_FILTER" = "1" ]; then
+        tail -qF -n +1 "$RUN_DIR"/train_*.log \
             | sed -u -E "$LOG_NOISE_SED" \
             | grep --line-buffered -vE "$LOG_BLANK_RE" &
     else
@@ -281,7 +295,7 @@ last_iter=$(grep -hoE 'iteration +[0-9]+/ *[0-9]+.*TFLOP/s/GPU\): *[0-9.]+' "$RU
 [ -n "$last_iter" ] && echo "[dsv3-crusoe] $last_iter"
 failures=$(grep -hoiE 'out of memory|found NaN|Traceback|srun: error' "$RUN_DIR"/train_*.log "$RUN_DIR"/train_*.err 2>/dev/null | sort -u | tr '\n' ' ' || true)
 [ -n "$failures" ] && echo "[dsv3-crusoe] look into: $failures" >&2
-if [ "$LOG_FILTER" = "1" ]; then
+if [ "$LOG_FILTER" != "0" ]; then
     _strip_noise "$RUN_DIR"
 fi
 echo "[dsv3-crusoe] logs kept in $RUN_DIR"

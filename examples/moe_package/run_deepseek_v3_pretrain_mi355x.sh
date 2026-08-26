@@ -27,7 +27,7 @@ export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ens9np0}
 export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-1}
 
 export MBS=${MBS:-2}
-export GBS=$((128 * NNODES))
+export GBS=${GBS:-$((128 * NNODES))}
 export PRIMUS_TOTAL_LAYERS=${PRIMUS_TOTAL_LAYERS:-61}
 export PRIMUS_MOE_LAYER_FREQ=1
 export PRIMUS_EP=${PRIMUS_EP:-8}
@@ -35,7 +35,13 @@ export PRIMUS_PP=${PRIMUS_PP:-16}
 export PRIMUS_VPP=${PRIMUS_VPP:-2}
 export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-2}
 
-export PROFILE=False
+# Mock data and the GC cadence this recipe was tuned with; override to train on
+# real data or to collect fewer GC pauses.
+export MOCK_DATA=${MOCK_DATA:-True}
+export MANUAL_GC=${MANUAL_GC:-True}
+export MANUAL_GC_INTERVAL=${MANUAL_GC_INTERVAL:-1}
+
+export PROFILE=${PROFILE:-False}
 export TURBO_ATTENTION=${TURBO_ATTENTION:-False}
 export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
 export LEGACY_GG=${LEGACY_GG:-True}
@@ -195,9 +201,9 @@ fi
   "${DUMP_PP_ARGS[@]}" \
   --disable_last_saving True \
   --moe_layer_freq "$PRIMUS_MOE_LAYER_FREQ" \
-  --mock_data True \
-  --manual_gc True \
-  --manual_gc_interval 1 \
+  --mock_data "$MOCK_DATA" \
+  --manual_gc "$MANUAL_GC" \
+  --manual_gc_interval "$MANUAL_GC_INTERVAL" \
   --pp_warmup True  \
   --mtp_num_layers 0 \
   --profile "$PROFILE" \
