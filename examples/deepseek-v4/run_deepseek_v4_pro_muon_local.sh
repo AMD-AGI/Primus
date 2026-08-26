@@ -2,7 +2,7 @@
 ###############################################################################
 # DeepSeek-V4 *Pro* + Muon single-GPU bring-up on mi455 / gfx1250 (1 GPU).
 #
-# Single-GPU sibling of run_deepseek_v4_flash_proxy_1gpu.sh, for the Pro model.
+# Local-docker sibling of run_deepseek_v4_pro_muon.sh (which goes through primus-cli).
 # The upstream run_deepseek_v4_pro_muon.sh uses `primus-cli direct`, which
 # assumes it is ALREADY inside the 8x288GB MI355X container at EP=8. This host
 # is one gfx1250 box with no SLURM and one GPU, so this script instead wraps
@@ -61,11 +61,11 @@
 # rccl_avg_workaround/sitecustomize.py.
 #
 # Usage:
-#   ./run_deepseek_v4_pro_muon_1gpu.sh                                  # 10-iter smoke
-#   OPTIMIZER=adam ./run_deepseek_v4_pro_muon_1gpu.sh                   # A/B vs AdamW
-#   PRIMUS_TOTAL_LAYERS=6 ./run_deepseek_v4_pro_muon_1gpu.sh            # deeper slice (watch HBM)
-#   PRIMUS_NUM_EXPERTS=8 PRIMUS_MOE_TOPK=2 ./run_deepseek_v4_pro_muon_1gpu.sh  # tiny MoE
-#   HIP_VISIBLE_DEVICES=3 ./run_deepseek_v4_pro_muon_1gpu.sh            # pin a card
+#   ./run_deepseek_v4_pro_muon_local.sh                                  # 10-iter smoke
+#   OPTIMIZER=adam ./run_deepseek_v4_pro_muon_local.sh                   # A/B vs AdamW
+#   PRIMUS_TOTAL_LAYERS=6 ./run_deepseek_v4_pro_muon_local.sh            # deeper slice (watch HBM)
+#   PRIMUS_NUM_EXPERTS=8 PRIMUS_MOE_TOPK=2 ./run_deepseek_v4_pro_muon_local.sh  # tiny MoE
+#   HIP_VISIBLE_DEVICES=3 ./run_deepseek_v4_pro_muon_local.sh            # pin a card
 ###############################################################################
 set -eo pipefail
 
@@ -124,12 +124,12 @@ fi
 # copies are slower but don't use the flaky SDMA queues. This may ALSO be the
 # true cause of the run-1 "permute autotune wedge" (same stuck-queue
 # signature; permute fusion possibly innocent).
-export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-0}
+export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-1}
 
 # ---------- Distributed / NCCL: single GPU, loopback only -------------------
 export HSA_NO_SCRATCH_RECLAIM=1
 export NCCL_IB_DISABLE=1
-export NCCL_P2P_DISABLE=1
+export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
 export NCCL_IB_HCA=
 export NCCL_SOCKET_IFNAME=lo
 export GLOO_SOCKET_IFNAME=lo
@@ -137,19 +137,13 @@ export RCCL_DISABLE_AMDSMI=1
 export NCCL_AMDSMI_DISABLE=1
 export USING_AINIC=0
 
-export GPUS_PER_NODE=1
-export NNODES=1
+export GPUS_PER_NODE=${GPUS_PER_NODE:-1}
+export NNODES=${NNODES:-1}
 export PYTHONUNBUFFERED=1
 
-# REQUIRED gfx1250 workaround for V4-Pro (default ON). The Pro model build
-# (hidden_size 7168, NOT a multiple of 4096) leaves a memory layout that wedges
-# the process's first high-priority MES queue creation at iter-1 get_batch
-# -> deadlock -> node reboot (debugged 2026-06-11; root cause = MES queue
-# creation vs non-4096-aligned allocation layout). AMD_SERIALIZE_COPY=3 alone
-# prevents it (kernels stay async; small iter-time cost on the eager
-# proxy). Bisected: KERNEL serialize + LAUNCH_BLOCKING are NOT needed, so they
-# default off. Set AMD_SERIALIZE_COPY=0 only to re-demonstrate the hang.
-export AMD_SERIALIZE_COPY=${AMD_SERIALIZE_COPY:-3}
+# 3 worked around an iter-1 MES queue wedge (hidden_size 7168 is not 4096-aligned,
+# debugged 2026-06-11). It no longer reproduces and costs 38%; set it back if it returns.
+export AMD_SERIALIZE_COPY=${AMD_SERIALIZE_COPY:-0}
 export AMD_SERIALIZE_KERNEL=${AMD_SERIALIZE_KERNEL:-0}
 export HIP_LAUNCH_BLOCKING=${HIP_LAUNCH_BLOCKING:-0}
 
@@ -271,7 +265,7 @@ export PROFILE_STEP_START=${PROFILE_STEP_START:-6}
 export PROFILE_STEP_END=${PROFILE_STEP_END:-7}
 export PRIMUS_TEAM=${PRIMUS_TEAM:-amd}
 export PRIMUS_USER=${PRIMUS_USER:-gfx1250-1gpu}
-export PRIMUS_EXP_NAME=${PRIMUS_EXP_NAME:-deepseek_v4_pro_muon_1gpu_L${PRIMUS_TOTAL_LAYERS}_E${PRIMUS_NUM_EXPERTS}_seq${PRIMUS_SEQ_LENGTH}}
+export PRIMUS_EXP_NAME=${PRIMUS_EXP_NAME:-deepseek_v4_pro_muon_local_L${PRIMUS_TOTAL_LAYERS}_E${PRIMUS_NUM_EXPERTS}_seq${PRIMUS_SEQ_LENGTH}}
 
 PRIMUS_PATH="$SCRIPT_DIR"
 DATA_PATH="${PRIMUS_PATH}/data"
@@ -449,6 +443,15 @@ VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH")
 [[ -n "${TURBO_WHEEL_DIR:-}" && -d "$TURBO_WHEEL_DIR" ]] && VOLUME_ARGS+=(-v "$TURBO_WHEEL_DIR":"$TURBO_WHEEL_DIR")
 [[ -n "${FLYDSL_PKG_DIR:-}" && -d "$FLYDSL_PKG_DIR/flydsl" ]] && VOLUME_ARGS+=(-v "$FLYDSL_PKG_DIR":"$FLYDSL_PKG_DIR")
 [[ -n "${TRITON_CACHE_DIR:-}" ]] && VOLUME_ARGS+=(-v "$TRITON_CACHE_DIR":"$TRITON_CACHE_DIR")
+
+# Private RCCL build (the image's bundled librccl has an empty NOBITS fatbin and
+# page-faults on any multi-GPU collective). Set RCCL_LIB_DIR to the install prefix.
+RCCL_ENV_PREFIX=""
+if [[ -n "${RCCL_LIB_DIR:-}" && -f "${RCCL_LIB_DIR}/lib/librccl.so.1" ]]; then
+    VOLUME_ARGS+=(-v "$RCCL_LIB_DIR":/rccl-private:ro)
+    RCCL_ENV_PREFIX="export LD_LIBRARY_PATH=/rccl-private/lib:\$LD_LIBRARY_PATH && \
+        echo \"[rccl] using private build\" && "
+fi
 # Opt-in tuned hipBLASLt: mount the built library at the same path and pass the
 # loader env into the container (only when enabled, to keep stock runs untouched).
 if [ "$PRIMUS_TUNED_HIPBLASLT" = "1" ]; then
@@ -489,9 +492,11 @@ docker run --rm \
     "${VOLUME_ARGS[@]}" \
     "$DOCKER_IMAGE" /bin/bash -c "\
         set -e && cd $PRIMUS_PATH && \
+        git config --global --add safe.directory '*' && \
+        ${RCCL_ENV_PREFIX}\
         ${HBL_PRELOAD_PREFIX}\
         ${TE_INSTALL_PREFIX}\
         echo '==================== V4-PRO + MUON 1-GPU PROXY (gfx1250, BF16, eager, no profiler) ====================' && \
-        EXP=$EXP PRIMUS_MODEL=$PRIMUS_MODEL GPUS_PER_NODE=1 NNODES=1 bash examples/run_pretrain.sh \
+        EXP=$EXP PRIMUS_MODEL=$PRIMUS_MODEL GPUS_PER_NODE=$GPUS_PER_NODE NNODES=$NNODES bash examples/run_pretrain.sh \
             ${PROXY_OVERRIDES} ${EXTRA_CLI:-}" \
     2>&1 | tee "$LOG"
