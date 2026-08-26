@@ -6,9 +6,9 @@ This guide covers AMD-focused performance work in Primus: HipBLASLt autotuning f
 
 ## 1. HipBLASLt autotuning
 
-Transformer Engine and GEMM-heavy training benefit from HipBLASLt kernel selection. Primus integrates a **three-stage** workflow controlled by `PRIMUS_HIPBLASLT_TUNING_STAGE` (see `examples/README.md` and `examples/run_pretrain.sh`).
+Transformer Engine and GEMM-heavy training benefit from HipBLASLt kernel selection. Primus integrates a **three-stage** workflow controlled by `PRIMUS_HIPBLASLT_TUNING_STAGE` (see `examples/README.md` and `runner/helpers/hooks/train/pretrain/prepare_experiment.sh`).
 
-> **Activate tuning first.** The stage variable is only honored when the master switch `PRIMUS_HIPBLASLT_TUNING=1` is set (and `PRIMUS_DETERMINISTIC` is not `1`). Without `PRIMUS_HIPBLASLT_TUNING=1`, both `run_pretrain.sh` and the CLI hook `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` skip tuning entirely and force `TE_HIPBLASLT_TUNING_RUN_COUNT=0` / `TE_HIPBLASLT_TUNING_ALGO_COUNT=0`. Export `PRIMUS_HIPBLASLT_TUNING=1` alongside the stage in every command below.
+> **Activate tuning first.** The stage variable is only honored when the master switch `PRIMUS_HIPBLASLT_TUNING=1` is set (and `PRIMUS_DETERMINISTIC` is not `1`). Without `PRIMUS_HIPBLASLT_TUNING=1`, the CLI hook `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` skips tuning entirely and forces `TE_HIPBLASLT_TUNING_RUN_COUNT=0` / `TE_HIPBLASLT_TUNING_ALGO_COUNT=0`. Export `PRIMUS_HIPBLASLT_TUNING=1` alongside the stage in every command below.
 
 ### Stage 0 (default)
 
@@ -25,7 +25,7 @@ Run a **short** training job so shapes are collected during real forward/backwar
 ```bash
 export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=1
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
@@ -40,7 +40,7 @@ Runs offline tuning from dumped shapes (often 10–30 minutes depending on model
 ```bash
 export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=2
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
@@ -56,7 +56,7 @@ Point the runtime at the tuned override file:
 export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=3
 export HIPBLASLT_TUNING_OVERRIDE_FILE=/path/to/tune_hipblas_gemm_results.txt
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
@@ -64,10 +64,10 @@ export HIPBLASLT_TUNING_OVERRIDE_FILE=/path/to/tune_hipblas_gemm_results.txt
 
 | Variable | Role |
 |----------|------|
-| `TE_HIPBLASLT_TUNING_ALGO_COUNT` | Breadth of algorithm search for TE HipBLASLt tuning (see `examples/run_pretrain.sh` defaults). |
+| `TE_HIPBLASLT_TUNING_ALGO_COUNT` | Breadth of algorithm search for TE HipBLASLt tuning (see the defaults in `runner/helpers/hooks/train/pretrain/prepare_experiment.sh`). |
 | `TE_HIPBLASLT_TUNING_RUN_COUNT` | Number of benchmark runs per shape during TE tuning. |
 | `TE_HIPBLASLT_TUNING_ALGO_FILE` | Optional algorithm file for TE tuning flows. |
-| `TE_HIPBLASLT_TUNING` | When set, interacts with deterministic mode; avoid conflicting settings with shape dump (see script comments in `examples/run_pretrain.sh`). |
+| `TE_HIPBLASLT_TUNING` | When set, interacts with deterministic mode; avoid conflicting settings with shape dump (see the comments in `runner/helpers/hooks/train/pretrain/prepare_experiment.sh`). |
 | `HIPBLASLT_TUNING_OVERRIDE_FILE` | Override file for stage 3 training. |
 
 ### Standalone offline tool

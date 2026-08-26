@@ -108,6 +108,53 @@ def test_1f1b_forward_backward_balance():
         assert bw == MICRO_BATCHES
 
 
+def test_1f1b_clamps_warmup_when_microbatches_are_fewer_than_pipeline_stages():
+    """A short batch must not create unmatched forward or backward nodes."""
+    table = _make("1f1b", 1, pp=4, mb=2).generate_schedule_table()
+
+    for rank_nodes in table:
+        compute_nodes = [n for n in rank_nodes if n.func_type in (FuncType.F, FuncType.BW)]
+        assert len([n for n in compute_nodes if n.func_type == FuncType.F]) == 2
+        assert len([n for n in compute_nodes if n.func_type == FuncType.BW]) == 2
+        assert all(0 <= n.mini_batch < 2 for n in compute_nodes)
+
+
+def test_interleaved_clamps_warmup_when_microbatches_are_fewer_than_pipeline_stages():
+    """Interleaved warmup must not emit more work than the batch contains."""
+    table = _make("1f1b-interleaved", 2, pp=4, mb=2).generate_schedule_table()
+
+    for rank_nodes in table:
+        compute_nodes = [n for n in rank_nodes if n.func_type in (FuncType.F, FuncType.BW)]
+        assert len([n for n in compute_nodes if n.func_type == FuncType.F]) == 4
+        assert len([n for n in compute_nodes if n.func_type == FuncType.BW]) == 4
+        assert all(0 <= n.mini_batch < 4 for n in compute_nodes)
+
+
+@pytest.mark.parametrize("algo,vpp,mb", [("1f1b", 1, 2)])
+def test_short_batch_communication_nodes_are_paired(algo, vpp, mb):
+    """Every inter-rank send must have exactly one matching receive."""
+    table = _make(algo, vpp, pp=4, mb=mb).generate_schedule_table()
+    recv_type = {FuncType.SF: FuncType.RF, FuncType.SB: FuncType.RB}
+
+    for src_rank, rank_nodes in enumerate(table):
+        for send in rank_nodes:
+            if send.func_type not in recv_type:
+                continue
+
+            dst_rank = send.args["to_pp_rank"]
+            expected_recv = recv_type[send.func_type]
+            matches = [
+                recv
+                for recv in table[dst_rank]
+                if recv.func_type == expected_recv
+                and recv.mini_batch == send.mini_batch
+                and recv.args["from_pp_rank"] == src_rank
+                and recv.args["recv_from_chunk"] == send.chunk
+                and recv.chunk == send.args["send_to_chunk"]
+            ]
+            assert len(matches) == 1, (src_rank, dst_rank, send, matches)
+
+
 def test_zero_bubble_splits_backward_into_b_and_w():
     """Zero-bubble splits backward into B (compute) and W (weight grad)."""
     table = _make("zero-bubble", 1).generate_schedule_table()

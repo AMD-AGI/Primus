@@ -120,6 +120,48 @@ class ModelConfig:
     # Loss fusion – fuses cross-entropy with output layer avoiding full logits materialisation
     cross_entropy_loss_fusion: bool = False
 
+    # ------------------------------------------------------------------
+    # Sparse-embedding + HSTU (DLRM-v4 / TorchRec ranker) fields.
+    #
+    # These are additive and default to the inert values used by the
+    # language-model path (num_embedding_tables=0 -> no sparse arch), so an
+    # LLM config is unaffected.  A DLRM workload populates them and the
+    # ``torchrec_dlrm`` workload spec assembles the sparse-embedding + HSTU
+    # profilers from them.
+    # ------------------------------------------------------------------
+    # Sparse embeddings (TorchRec/DMP EmbeddingBagCollection).
+    num_embedding_tables: int = 0
+    # Per-table row (cardinality) counts; if unset, ``embedding_total_rows`` is
+    # split evenly across ``num_embedding_tables``.
+    embedding_table_rows: object = None  # list[int] | "[...]" | None
+    embedding_total_rows: int = 0
+    embedding_dim: int = 0  # per-table embedding width (D); defaults to hidden_size
+    # Average number of lookups per sample per table (pooling factor); a scalar
+    # or a per-table list.  Drives the sparse gather byte-traffic and the
+    # embedding all-to-all message size.
+    embedding_pooling_factor: object = None  # int | list[int] | None
+    embedding_default_pooling_factor: int = 1
+    # Sharding of the embedding tables across the model-parallel mesh.
+    embedding_sharding: str = "row"  # row | column | table | data
+    # Stored precision of the embedding parameters (fp32 tables are common).
+    embedding_param_bytes: int = 4
+    # Memory tiering: fraction of embedding parameters resident in HBM; the
+    # remainder lives on DDR/UVM (host) and is streamed over the host link.
+    embedding_hbm_fraction: float = 1.0
+
+    # HSTU (Hierarchical Sequential Transduction Unit) attention block.
+    hstu_num_heads: int = 0
+    hstu_qk_dim: int = 0  # per-head query/key dim (d_qk)
+    hstu_v_dim: int = 0  # per-head value dim (d_v)
+    hstu_max_seq_len: int = 0
+    # Jagged-sequence fill factor: mean valid tokens / padded max_seq_len
+    # (HSTU sequences are variable length; ~0.4 is typical for Yambda-5B).
+    hstu_fill_factor: float = 1.0
+    # DLRM dense (bottom) and interaction (top/over) MLP layer widths.
+    dlrm_bottom_mlp: object = None  # list[int] | None
+    dlrm_over_mlp: object = None  # list[int] | None
+    dense_input_dim: int = 0  # width of the dense (continuous) feature vector
+
 
 @dataclass
 class TrainingConfig:
@@ -130,6 +172,10 @@ class TrainingConfig:
     model_config: ModelConfig
     runtime_config: RuntimeConfig
     model_parallel_config: ModelParallelConfig
+    # Workload framework this config describes.  Read by the workload registry
+    # (``resolve_top_level_spec``) to pick the top-level profiler tree.  Defaults
+    # to ``megatron`` so the language-model path is unchanged.
+    framework: str = "megatron"
 
 
 def gemm_dtype_from_config(config) -> str:
@@ -232,11 +278,53 @@ def megatron_derive_default_args(args):
     return args
 
 
+# Frameworks whose profiler tree is a sparse-embedding + HSTU recommender
+# (DLRM-v4).  They share the ``dlrm`` config-derivation path and are resolved to
+# the ``torchrec_dlrm`` workload spec by the workload registry.
+_DLRM_FRAMEWORKS = ("torchrec_dlrm", "torchrec", "dlrm", "dlrm_v4")
+
+
+def dlrm_derive_default_args(args):
+    """Fill in derived defaults for a DLRM-v4 (TorchRec/HSTU) config.
+
+    Kept intentionally light: it only normalises the naming differences the
+    dataclass copy (``update_config_from_args``) relies on and derives the data
+    parallel size the same way the Megatron path does.  Everything else is
+    copied straight from the workload args by field name.
+    """
+    world_size = int(os.getenv("NNODES", "1")) * int(os.getenv("GPUS_PER_NODE", "8"))
+
+    # HSTU sequence length maps onto the generic ``sequence_length`` slot so the
+    # activation/attention machinery sees it without special-casing.
+    if getattr(args, "sequence_length", None) in (None, 0) and getattr(args, "hstu_max_seq_len", 0):
+        args.sequence_length = args.hstu_max_seq_len
+
+    # DLRM sparse embeddings dominate params; hidden_size defaults to the
+    # embedding width when the ranker doesn't carry a separate hidden dim.
+    if getattr(args, "hidden_size", 0) in (None, 0) and getattr(args, "embedding_dim", 0):
+        args.hidden_size = args.embedding_dim
+    if getattr(args, "embedding_dim", 0) in (None, 0) and getattr(args, "hidden_size", 0):
+        args.embedding_dim = args.hidden_size
+
+    tp = getattr(args, "tensor_model_parallel_size", 1) or 1
+    pp = getattr(args, "pipeline_model_parallel_size", 1) or 1
+    cp = getattr(args, "context_parallel_size", 1) or 1
+    if not getattr(args, "data_parallel_size", None):
+        args.data_parallel_size = max(1, world_size // (tp * pp * cp))
+    if getattr(args, "context_parallel_size", None) is not None:
+        args.context_model_parallel_size = args.context_parallel_size
+
+    return args
+
+
 def convert_primus_config_to_projection_config(primus_config) -> TrainingConfig:
     args = primus_config.get_module_config("pre_trainer")
-    framework = getattr(args, "framework", "")
-    if framework == "megatron":
+    framework = getattr(args, "framework", "") or ""
+    fw = framework.lower().strip()
+    if fw == "megatron":
         args = megatron_derive_default_args(args)
+    elif fw in _DLRM_FRAMEWORKS:
+        args = dlrm_derive_default_args(args)
     else:
         raise NotImplementedError(f"Unsupported framework: {framework}")
 
@@ -248,6 +336,7 @@ def convert_primus_config_to_projection_config(primus_config) -> TrainingConfig:
         model_config=model_config,
         runtime_config=runtime_config,
         model_parallel_config=model_parallel_config,
+        framework=fw or "megatron",
     )
 
     return training_config
