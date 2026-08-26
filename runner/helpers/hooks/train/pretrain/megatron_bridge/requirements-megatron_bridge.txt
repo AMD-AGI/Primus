@@ -3,7 +3,11 @@
 # Extracted from third_party/Megatron-Bridge/pyproject.toml
 
 # Transformers (pinned version for compatibility)
-transformers==4.57.6
+# Megatron-Bridge v0.6.0 requires transformers>=5.8,<=5.12.1. Gemma 4 does not
+# exist on the 4.x line at all -- transformers gained models/gemma4 only around
+# 5.6 -- and AutoBridge dispatches on the HF architecture class, so the 5.x
+# floor is a hard requirement for Gemma4ForConditionalGeneration.
+transformers==5.12.1
 
 # Core dependencies from [project.dependencies]
 qwen-vl-utils
