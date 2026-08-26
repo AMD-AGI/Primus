@@ -58,6 +58,13 @@
 #   NNODES=16 TRAIN_ITERS=50 bash examples/mlperf/deepseek-v3/run_dsv3_crusoe.sh
 #   SLURM_EXCLUDE=node-a,node-b bash examples/mlperf/deepseek-v3/run_dsv3_crusoe.sh
 #   FOLLOW=0 bash examples/mlperf/deepseek-v3/run_dsv3_crusoe.sh   # submit only
+#   LOG_FILTER=0 bash examples/mlperf/deepseek-v3/run_dsv3_crusoe.sh  # keep noise
+#
+# Logs are stripped of the repeated hipBLASLt Stream-K message by default; it is
+# 92.5% of the lines and carries no information. A FOLLOW=0 run can be cleaned
+# afterwards with:
+#
+#   bash examples/mlperf/deepseek-v3/run_dsv3_crusoe.sh --clean-logs <run-dir>
 #
 # Notes on this cluster, in case a job never starts:
 #   * Reason=QOSGrpNodeLimit is the whole QOS group's node quota, shared with
@@ -76,6 +83,36 @@ cd "$PRIMUS_ROOT"
 
 RECIPE=examples/moe_package/run_deepseek_v3_pretrain_mi355x.sh
 [ -f "$RECIPE" ] || { echo "[dsv3-crusoe] recipe not found: $PRIMUS_ROOT/$RECIPE" >&2; exit 1; }
+
+# --- log noise -------------------------------------------------------------
+LOG_NOISE_SED='s/\r//g; s/Warning: Stream-K Data Parallel does not support GSU > 1,?[[:space:]]*//g; s/setting GSU to 1\.//g'
+LOG_BLANK_RE='^[[:space:]]*$'
+LOG_FILTER="${LOG_FILTER:-1}"
+
+_strip_noise() {
+    local dir="$1" f before after
+    [ -d "$dir" ] || { echo "[dsv3-crusoe] no such directory: $dir" >&2; return 1; }
+    [ -n "$(ls "$dir"/train_*.log 2>/dev/null || true)" ] || return 0
+    before=$(du -sk "$dir" | cut -f1)
+    for f in "$dir"/train_*.log; do
+        [ -f "$f" ] || continue
+        # grep exits 1 when a file is nothing but noise, which set -e would take
+        # for a failure.
+        sed -E "$LOG_NOISE_SED" "$f" | grep -vE "$LOG_BLANK_RE" > "$f.stripped" || true
+        mv "$f.stripped" "$f"
+    done
+    after=$(du -sk "$dir" | cut -f1)
+    echo "[dsv3-crusoe] stripped Stream-K noise from $dir: ${before} KB -> ${after} KB"
+}
+
+# FOLLOW=0 execs into the recipe and never reaches the summary below, so those
+# runs need a way to clean up afterwards:
+#   bash examples/mlperf/deepseek-v3/run_dsv3_crusoe.sh --clean-logs <run-dir>
+if [ "${1:-}" = "--clean-logs" ]; then
+    [ -n "${2:-}" ] || { echo "[dsv3-crusoe] usage: $0 --clean-logs <run-dir>" >&2; exit 1; }
+    _strip_noise "$2"
+    exit 0
+fi
 
 # A non-interactive shell (`ssh host bash this.sh`) never reads
 # /etc/profile.d/spur.sh, and then sbatch/squeue fail with "failed to connect to
@@ -222,7 +259,13 @@ for _ in $(seq 1 60); do
 done
 
 if [ -n "$(ls "$RUN_DIR"/train_*.log 2>/dev/null || true)" ]; then
-    tail -F -n +1 "$RUN_DIR"/train_*.log &
+    if [ "$LOG_FILTER" = "1" ]; then
+        tail -F -n +1 "$RUN_DIR"/train_*.log \
+            | sed -u -E "$LOG_NOISE_SED" \
+            | grep --line-buffered -vE "$LOG_BLANK_RE" &
+    else
+        tail -F -n +1 "$RUN_DIR"/train_*.log &
+    fi
     TAIL_PID=$!
 else
     echo "[dsv3-crusoe] no log file appeared under $RUN_DIR" >&2
@@ -238,4 +281,7 @@ last_iter=$(grep -hoE 'iteration +[0-9]+/ *[0-9]+.*TFLOP/s/GPU\): *[0-9.]+' "$RU
 [ -n "$last_iter" ] && echo "[dsv3-crusoe] $last_iter"
 failures=$(grep -hoiE 'out of memory|found NaN|Traceback|srun: error' "$RUN_DIR"/train_*.log "$RUN_DIR"/train_*.err 2>/dev/null | sort -u | tr '\n' ' ' || true)
 [ -n "$failures" ] && echo "[dsv3-crusoe] look into: $failures" >&2
+if [ "$LOG_FILTER" = "1" ]; then
+    _strip_noise "$RUN_DIR"
+fi
 echo "[dsv3-crusoe] logs kept in $RUN_DIR"
