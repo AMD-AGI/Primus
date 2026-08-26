@@ -673,3 +673,43 @@ class TestConfigSchema:
         assert cfg["use_turbo_flex_attention"] is False
         assert cfg["turbo_flex_attention_mask_mod"] is None
         assert cfg["turbo_flex_attention_score_mod"] is None
+
+
+class TestRejectResetAttentionMask:
+    """The direct-path guard for the mask tensor ``forward()`` never reads.
+
+    Before this guard, ``PrimusTurboAttention.forward`` accepted ``attention_mask`` and
+    never looked at it. With ``reset_attention_mask=true`` that silently trained a
+    different model than the config asked for: the per-document boundaries were dropped
+    and tokens attended across documents, with no error and no warning anywhere.
+    """
+
+    def test_off_is_a_noop(self):
+        tfa.reject_reset_attention_mask(_args(reset_attention_mask=False), is_flex=False, where="X")
+
+    def test_missing_attribute_is_a_noop(self):
+        # Older arg namespaces predate the flag; absence must not raise.
+        tfa.reject_reset_attention_mask(SimpleNamespace(), is_flex=False, where="X")
+
+    def test_on_and_direct_path_raises(self):
+        with pytest.raises(NotImplementedError, match="reset_attention_mask"):
+            tfa.reject_reset_attention_mask(_args(reset_attention_mask=True), is_flex=False, where="X")
+
+    def test_error_names_the_caller_and_the_supported_alternative(self):
+        with pytest.raises(NotImplementedError) as excinfo:
+            tfa.reject_reset_attention_mask(
+                _args(reset_attention_mask=True), is_flex=False, where="MyAttention"
+            )
+        msg = str(excinfo.value)
+        assert "MyAttention" in msg
+        assert "thd" in msg
+
+    def test_flex_path_defers_to_its_own_message(self):
+        # build_turbo_flex_attention raises for itself with a message that names the THD
+        # alternative in flex terms; this helper must not pre-empt it.
+        tfa.reject_reset_attention_mask(_args(reset_attention_mask=True), is_flex=True, where="X")
+
+    def test_flex_build_still_rejects_it(self, stub_backend):
+        # The deferral above is only sound while the flex side actually raises.
+        with pytest.raises(NotImplementedError, match="reset_attention_mask"):
+            tfa.build_turbo_flex_attention(args=_args(reset_attention_mask=True), config=_config())

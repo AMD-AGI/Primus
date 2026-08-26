@@ -101,6 +101,7 @@ from primus.backends.megatron.core.extensions._triton.inplace_add import (
 )
 from primus.backends.megatron.core.extensions.turbo_flex_attention import (
     build_turbo_flex_attention,
+    reject_reset_attention_mask,
 )
 from primus.core.utils.module_utils import warning_rank_0
 
@@ -860,6 +861,12 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             # enable ring attention
             self.attn_kwargs["ring_group"] = dist.new_group(ranks=[dist.get_rank()])
 
+        # reset_attention_mask has nowhere to go on this path -- forward() below reads
+        # no mask tensor and none of the bound kernels take one. Reject it rather than
+        # let tokens attend across documents silently. See the helper for the full
+        # reasoning, including why the *default* causal mask is safe to drop.
+        reject_reset_attention_mask(args, is_flex=self._attn_is_flex, where="primus_turbo attention")
+
         # Sliding-window attention. The direct flash_attn_func binding takes no window
         # argument, so config-level SWA stays rejected there. The flex path expresses a
         # window as a mask_mod and drives the same aiter kernel the sink path already
@@ -936,7 +943,19 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams = None,
     ):
-        """Forward."""
+        """Forward.
+
+        ``attention_mask`` is deliberately unread. Every attention entry point bound in
+        ``__init__`` (flash_attn_func / its usp + fp8 variants / the flex compat layer)
+        takes the mask as a ``causal`` flag rather than a tensor, so there is nothing to
+        forward it to. That is only sound because the sole configuration in which the
+        tensor carries information the ``causal`` flag does not -- reset_attention_mask,
+        which zeroes the cross-document blocks -- is rejected at build time in
+        ``__init__``. With it off, Megatron's mask is exactly ``torch.tril(...)``, which
+        ``causal=True`` already expresses. Per-document masking is available through
+        packed sequences (``qkv_format="thd"``), where the boundaries arrive as
+        cu_seqlens and *are* forwarded.
+        """
         if attention_bias is not None:
             # Neither flash_attn_func nor the flex compat layer is wired to an attention
             # bias here (the kernel call below passes alibi_slopes=None unconditionally),

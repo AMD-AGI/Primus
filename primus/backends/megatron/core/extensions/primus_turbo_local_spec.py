@@ -93,6 +93,7 @@ from torch import Tensor
 
 from primus.backends.megatron.core.extensions.turbo_flex_attention import (
     build_turbo_flex_attention,
+    reject_reset_attention_mask,
 )
 
 
@@ -183,6 +184,15 @@ class PrimusTurboLocalAttention(MegatronModule):
         if config.window_size is not None:
             raise ValueError("PrimusTurboLocalAttention does not support sliding window attention")
 
+        # reset_attention_mask has nowhere to go here either: forward() reads no mask
+        # tensor and none of the bound kernels take one. See the helper for why the
+        # *default* causal mask is safe to drop but this one is not.
+        reject_reset_attention_mask(
+            args,
+            is_flex=bool(getattr(args, "use_turbo_flex_attention", False)),
+            where="PrimusTurboLocalAttention",
+        )
+
     def forward(
         self,
         query: Tensor,
@@ -200,7 +210,11 @@ class PrimusTurboLocalAttention(MegatronModule):
             query: Query tensor [seq_len, batch, num_heads, head_dim] (sbhd)
             key: Key tensor [seq_len, batch, num_heads, head_dim] (sbhd)
             value: Value tensor [seq_len, batch, num_heads, head_dim] (sbhd)
-            attention_mask: Attention mask (not used by flash attention)
+            attention_mask: unread. The bound kernels take the mask as a ``causal``
+                flag, not a tensor. Sound only because reset_attention_mask -- the
+                one setting under which Megatron's mask says more than ``causal``
+                does -- is rejected in ``__init__``; otherwise the tensor is exactly
+                ``torch.tril(...)``.
             attn_mask_type: Type of attention mask (causal, no_mask, etc.)
             attention_bias: Attention bias (not used in this implementation)
             packed_seq_params: Packed sequence parameters (optional)

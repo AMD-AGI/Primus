@@ -169,6 +169,50 @@ def clear_turbo_flex_block_mask_cache() -> None:
 
 
 # =============================================================================
+# Shared build-time rejections
+# =============================================================================
+
+
+def reject_reset_attention_mask(args, *, is_flex: bool, where: str) -> None:
+    """Reject ``reset_attention_mask`` on any path that cannot honour it.
+
+    ``reset_attention_mask`` asks Megatron for per-document causal masking *inside a
+    dense sample*: the document boundaries are baked into the ``attention_mask`` tensor
+    as cross-document zeros. No Primus-Turbo attention entry point takes a mask tensor
+    -- they take a ``causal`` flag -- so the boundaries have nowhere to go and would be
+    dropped, letting tokens attend across documents with nothing raised anywhere.
+
+    The default mask is *not* the problem. ``create_attention_mask_in_dataloader``
+    defaults to true, so an ordinary causal run also hands the module a tensor; that one
+    is exactly ``torch.tril(...)``, which the ``causal`` flag already expresses, so
+    dropping it changes nothing. Only ``reset_attention_mask`` adds information the flag
+    cannot carry (see ``megatron/core/datasets/gpt_dataset.py``,
+    ``_get_ltor_masks_and_position_ids``).
+
+    ``qkv_format="thd"`` is a different, supported mechanism: there the boundaries
+    arrive out-of-band as ``cu_seqlens`` in ``packed_seq_params`` and are forwarded
+    explicitly to ``flex_attention_varlen``.
+
+    Args:
+        args: the Megatron global args namespace.
+        is_flex: whether the caller routes through the flex compat layer, which raises
+            for itself in :func:`build_turbo_flex_attention` with a message naming the
+            THD alternative. Passing True here makes this a no-op so that the more
+            specific message wins.
+        where: class name to name in the error message.
+    """
+    if not getattr(args, "reset_attention_mask", False) or is_flex:
+        return
+    raise NotImplementedError(
+        f"{where} does not support reset_attention_mask=true. The per-document "
+        "boundaries are carried in the attention_mask tensor, which flash_attn_func has "
+        "no argument for, so they would be silently dropped and tokens would attend "
+        "across documents. Use packed sequences (qkv_format='thd'), or set "
+        "reset_attention_mask=false."
+    )
+
+
+# =============================================================================
 # "package.module:attribute" resolution for the optional user hooks
 # =============================================================================
 
