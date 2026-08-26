@@ -3,10 +3,6 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:gemma4_26B-fp8-pretrain}
 workspace: ./output
 
-# STATUS (MI355X / gfx950): DOES NOT RUN — blocked upstream.
-# Flax Fp8Einsum.setup() creates variables inside jax.lax.scan (gemma4's scanned
-# local layers), causing UnexpectedTracerError. Use gemma4_26B-bf16 instead.
-
 modules:
   pre_trainer:
     framework: maxtext
@@ -39,14 +35,10 @@ modules:
 
       attention: "cudnn_flash_te"
       max_target_length: 4096
-      per_device_batch_size: 2
+      per_device_batch_size: 20
       remat_policy: "full"
       sparse_matmul: false
       megablox: false
       capacity_factor: 1
 
       quantization: "fp8"
-
-      # Fp8Einsum needs a Linen scope, which v26.6's pure-NNX decoder does not provide.
-      # Still fails on gemma4: the scanned layers leak a tracer (upstream flax bug).
-      pure_nnx_decoder: false

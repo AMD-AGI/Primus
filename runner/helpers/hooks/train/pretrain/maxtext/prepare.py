@@ -271,6 +271,14 @@ def main():
             env=None,
         )
 
+    # JAX/XLA manage ROCm library loading via RPATH; a non-empty LD_LIBRARY_PATH
+    # causes the dynamic linker to load a second libamd_comgr.so (from
+    # _rocm_sdk_devel/lib) alongside JAX's copy (from _rocm_sdk_core/lib),
+    # each bringing a separate libLLVM — crashing with "spirv-expand-step
+    # registered more than once". Clear it so the linker only sees JAX's copy.
+    log_info("Clearing LD_LIBRARY_PATH to prevent duplicate ROCm LLVM loading")
+    print("env.LD_LIBRARY_PATH=")
+
     # Expose resolved backend path to the caller (e.g., primus-cli direct)
     # via a generic extra.* line on stdout, which will be converted to:
     #   --backend_path <maxtext_path>

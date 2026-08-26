@@ -8,13 +8,15 @@
 # Install + patch the MaxDiffusion (JAX) runtime from the vendored submodule.
 #
 # When is this needed?
+#   - Python deps (requirements-maxdiffusion.txt) are ALWAYS installed to ensure
+#     Primus core deps like loguru are present before the runtime starts.
 #   - If the container ALREADY ships maxdiffusion (e.g. the MAD primus_maxdiffusion
-#     image or the unified docker), this script is a NO-OP: it detects the installed
-#     package and exits immediately. Setting PRIMUS_SKIP_PIP=1 skips calling it entirely.
+#     image or the unified docker), the script installs deps then exits early.
+#     Setting PRIMUS_SKIP_PIP=1 skips calling it entirely.
 #   - If the container does NOT have maxdiffusion (e.g. a bare rocm/jax-training
 #     maxtext image), this script installs everything from the Primus checkout:
-#     torch (ROCm wheels), requirements-maxdiffusion.txt, editable submodule install,
-#     and 4 site-package patches. Requires `third_party/maxdiffusion` to be initialized
+#     torch (ROCm wheels), editable submodule install, and 4 site-package patches.
+#     Requires `third_party/maxdiffusion` to be initialized
 #     (git submodule update --init).
 #
 # Invoked by examples/run_pretrain.sh when BACKEND=maxdiffusion (unless
@@ -25,12 +27,17 @@ PRIMUS_PATH="${PRIMUS_PATH:-$(realpath "$(dirname "$0")/../..")}"
 MAXDIFFUSION_PATH="${MAXDIFFUSION_PATH:-$PRIMUS_PATH/third_party/maxdiffusion}"
 log() { echo "[setup-maxdiffusion] $*"; }
 
-# Images that bake the stack (maxdiffusion installed, patches applied) need none
-# of this, and on those there may be no submodule to install from at all -- so
-# detect that first, before the source check below can fail on its absence.
-# PRIMUS_SKIP_SETUP_CHECK=1 forces the install path even when it looks present.
-if [ "${PRIMUS_SKIP_SETUP_CHECK:-0}" != "1" ] && python -c "import maxdiffusion" 2>/dev/null; then
-  log "maxdiffusion already installed ($(python -c 'import maxdiffusion,os; print(os.path.dirname(maxdiffusion.__file__))' 2>/dev/null)): nothing to install"
+# Always ensure Python deps are present (loguru, transformers, etc.) even when
+# maxdiffusion is already importable -- the Primus runtime needs these at startup
+# before any backend hooks run.
+log "installing requirements-maxdiffusion.txt"
+pip install -r "$PRIMUS_PATH/requirements-maxdiffusion.txt" --quiet
+
+# Images that bake the stack (maxdiffusion installed, patches applied) only needed
+# the deps above. On those there may be no submodule source to install from, so
+# exit before the source check below can fail on its absence.
+if python -c "import maxdiffusion" 2>/dev/null; then
+  log "maxdiffusion already installed ($(python -c 'import maxdiffusion,os; print(os.path.dirname(maxdiffusion.__file__))' 2>/dev/null)): skipping submodule install + patches"
   exit 0
 fi
 
@@ -54,15 +61,11 @@ else
     --no-index --quiet
 fi
 
-# 2) remaining pure-python deps (transformers pin + video/logging).
-log "installing requirements-maxdiffusion.txt"
-pip install -r "$PRIMUS_PATH/requirements-maxdiffusion.txt" --quiet
-
-# 3) editable install of the vendored MaxDiffusion submodule (deps handled above).
+# 2) editable install of the vendored MaxDiffusion submodule (deps handled above).
 log "pip install -e maxdiffusion (--no-deps)"
 pip install -e "$MAXDIFFUSION_PATH" --no-deps --quiet
 
-# 4) Patches (idempotent). These were previously baked into
+# 3) Patches (idempotent). These were previously baked into
 #    docker/primus_maxdiffusion.ubuntu.amd.Dockerfile; here they target the
 #    vendored submodule + the venv site-packages.
 SP="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
