@@ -58,10 +58,14 @@ except (ImportError, ModuleNotFoundError, AttributeError) as exc:  # pragma: no 
     _FLEX_IMPORT_ERROR = exc
 
 # ``flex_attention_bshd`` is the layout-native entry (bshd in, bshd out). Megatron has
-# already permuted q/k/v to bshd by the time we are called, so this entry avoids the
-# 4 transpose+contiguous copies per forward (and their backward mirrors) that the
-# torch-layout ``flex_attention`` entry needs. Older Turbo builds do not have it; we
-# transparently fall back to the bhsd entry there (correct, just with the copies).
+# already permuted q/k/v to bshd by the time we are called, so this entry needs no
+# transposes at all. Older Turbo builds do not have it; we transparently fall back to
+# the torch-layout ``flex_attention`` entry there, handing it a ``transpose(1, 2)``
+# view. What that fallback costs depends on the Turbo build:
+#   * Turbo with the bhsd passthrough: nothing. The view is non-contiguous, so the
+#     compat layer restores the caller's own buffer and forwards it unchanged.
+#   * Older Turbo: 3 input + 1 output copies per forward, plus the backward mirrors.
+# Either way the result is correct, so no version probing is needed here.
 try:
     from primus_turbo.pytorch.ops.attention import (
         flex_attention_bshd as turbo_flex_attention_bshd,
@@ -487,7 +491,8 @@ class TurboFlexAttention:
         )
         if self._entry_is_bshd:
             return self._entry(query, key, value, **kwargs)
-        # Older Turbo build: the bhsd entry needs the layout round-trip.
+        # Older Turbo build: go through the torch-layout entry (see the import block
+        # above for what the round-trip costs on each Turbo version).
         out = self._entry(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), **kwargs)
         if return_lse:
             out, lse = out
