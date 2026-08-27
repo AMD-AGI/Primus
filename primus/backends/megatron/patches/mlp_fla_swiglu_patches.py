@@ -98,7 +98,7 @@ def _plain_swiglu_reject(config) -> str:
     """Why FLA's swiglu kernel cannot stand in for this MLP's activation, if so."""
     if not config.gated_linear_unit:
         return "gated_linear_unit is off"
-    if config.activation_func is not F.silu:
+    if config.activation_func != F.silu:
         return "activation_func is not F.silu"
     if getattr(config, "use_te_activation_func", False):
         return "activation_func comes from the TE module slot (may be clamped)"
