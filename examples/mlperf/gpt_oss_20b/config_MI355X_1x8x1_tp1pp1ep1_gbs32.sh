@@ -247,5 +247,5 @@ export PRIMUS_FUSED_RESIDUAL_NORM=1
 export PRIMUS_MOE_SWIGLU_NOCAT=1
 export MLLOG_BLOCK_TPUT_LOG=0
 
-export PRIMUS_TURBO_GEMM_BACKEND=hipblaslt
-export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=flydsl
+export PRIMUS_TURBO_GEMM_BACKEND=fp4:aiter,fp8:hipblaslt,other:hipblaslt
+export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=fp4:flydsl,fp8:flydsl,bf16:triton

@@ -207,31 +207,56 @@ class PrimusGroupedMLP(TEGroupedMLP):
                     "Only support fusion of silu and gelu in PrimusGroupedMLP when `use_turbo_fused_act_with_probs` is True."
                 )
 
-            from primus_turbo.pytorch.ops.grouped_mlp_fp8 import grouped_mlp_fp8
-
             from primus.backends.megatron.core.extensions.primus_turbo import (
                 PrimusTurboLowPrecisionGlobalStateManager,
             )
 
-            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            assert (
-                quant_config.current_scaling()
-            ), "turbo_fused_grouped_gemm only supports current scaling currently"
+            fallback_to_original_mlp = False
+            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+                from primus_turbo.pytorch.ops.grouped_mlp_fp8 import grouped_mlp_fp8
 
-            output = grouped_mlp_fp8(
-                permuted_local_hidden_states,
-                self.linear_fc1.weights,
-                self.linear_fc2.weights,
-                tokens_per_expert,
-                probs=permuted_probs,
-                trans_w1=True,
-                trans_w2=True,
-                config=quant_config.data(),
-                activation=activation,
-                fuse_wgrad_accum_pattern="megatron",
-            )
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                assert (
+                    quant_config.current_scaling()
+                ), "turbo_fused_grouped_gemm only supports current scaling currently"
 
-            return output, None
+                output = grouped_mlp_fp8(
+                    permuted_local_hidden_states,
+                    self.linear_fc1.weights,
+                    self.linear_fc2.weights,
+                    tokens_per_expert,
+                    probs=permuted_probs,
+                    trans_w1=True,
+                    trans_w2=True,
+                    config=quant_config.data(),
+                    activation=activation,
+                    fuse_wgrad_accum_pattern="megatron",
+                )
+            elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+                from primus_turbo.pytorch.ops.grouped_mlp_fp4 import grouped_mlp_fp4
+
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                assert (
+                    quant_config.mxfp4_scaling()
+                ), "turbo_fused_grouped_gemm only supports mxfp4 scaling currently"
+
+                output = grouped_mlp_fp4(
+                    permuted_local_hidden_states,
+                    self.linear_fc1.weights,
+                    self.linear_fc2.weights,
+                    tokens_per_expert,
+                    probs=permuted_probs,
+                    trans_w1=True,
+                    trans_w2=True,
+                    config=quant_config.data(),
+                    activation=activation,
+                    fuse_wgrad_accum_pattern="megatron",
+                )
+            else:
+                fallback_to_original_mlp = True
+
+            if not fallback_to_original_mlp:
+                return output, None
 
         use_explicit_quantization_padding = self._use_explicit_quantization_padding()
         if use_explicit_quantization_padding:
