@@ -12,6 +12,7 @@ survive as a true sample count so an under-read can be detected instead of
 being papered over with the count the configuration intended.
 """
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -21,10 +22,12 @@ import torch
 from primus.backends.megatron.training.evaluator import (
     VAL_LOSS_KEY,
     _record_consumed_valid_samples,
+    _report_eval,
     reduce_eval_losses,
 )
 
 GROUP = object()
+EVALUATOR = "primus.backends.megatron.training.evaluator"
 
 
 class FakeAllReduce:
@@ -229,3 +232,73 @@ class TestConsumedValidSamples:
         self._record(args, observed=None, eval_iters=1, eval_batch_size=7)
 
         assert args.consumed_valid_samples == 7
+
+
+class TestEvalReporting:
+    """Which stream the evaluation's own reporting goes to.
+
+    MLPerf mode reports the loss itself, as an mllog event and as its own line,
+    and silences Megatron's reporting to keep the run to one voice; repeating it
+    at info level there is noise. What must not follow is a coverage shortfall
+    going quiet along with it.
+    """
+
+    @staticmethod
+    def _args(mlperf_mode=False):
+        return SimpleNamespace(consumed_valid_samples=0, mlperf_mode=mlperf_mode)
+
+    @staticmethod
+    @contextmanager
+    def _streams(cp_size=1):
+        """Capture the info and debug streams the evaluator reports through."""
+        with patch(
+            f"{EVALUATOR}.parallel_state.get_context_parallel_world_size",
+            return_value=cp_size,
+        ), patch(f"{EVALUATOR}.log_rank_0") as info, patch(f"{EVALUATOR}.debug_rank_0") as debug:
+            yield info, debug
+
+    def test_reports_at_info_by_default(self):
+        with self._streams() as (info, debug):
+            _report_eval(self._args(), "[eval] loss=1.665372")
+
+        assert info.call_args[0][0] == "[eval] loss=1.665372"
+        assert debug.call_count == 0
+
+    def test_mlperf_mode_reports_at_debug_instead(self):
+        with self._streams() as (info, debug):
+            _report_eval(self._args(mlperf_mode=True), "[eval] loss=1.665372")
+
+        assert debug.call_args[0][0] == "[eval] loss=1.665372"
+        assert info.call_count == 0
+
+    def test_an_absent_flag_reads_as_off(self):
+        """args is built before MLPerf mode is a settled attribute on it."""
+        with self._streams() as (info, debug):
+            _report_eval(SimpleNamespace(), "[eval] loss=1.665372")
+
+        assert info.call_count == 1
+        assert debug.call_count == 0
+
+    def test_mlperf_mode_moves_the_coverage_line_too(self):
+        args = self._args(mlperf_mode=True)
+        with self._streams() as (info, debug):
+            _record_consumed_valid_samples(args, 29696, 58, 512)
+
+        assert "covered 29696 samples" in debug.call_args[0][0]
+        assert info.call_count == 0
+
+    def test_mlperf_mode_does_not_quieten_an_under_read(self):
+        """The whole point of the coverage check survives the quietening."""
+        args = self._args(mlperf_mode=True)
+        with self._streams():
+            with pytest.raises(RuntimeError, match="read 27776 samples"):
+                _record_consumed_valid_samples(args, 27776, 58, 512)
+
+    def test_mlperf_mode_still_reports_a_context_parallel_mismatch(self):
+        """A mismatch CP can explain is a diagnostic, not a confirmation."""
+        args = self._args(mlperf_mode=True)
+        with self._streams(cp_size=2) as (info, debug):
+            _record_consumed_valid_samples(args, 2 * 29696, 58, 512)
+
+        assert "context_parallel_size=2" in info.call_args[0][0]
+        assert debug.call_count == 0
