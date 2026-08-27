@@ -165,7 +165,14 @@ class _AllGatherPool(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out):
+        # all_reduce is IN PLACE, and `.contiguous()` returns the SAME tensor when its
+        # input is already contiguous -- so reducing straight into it would rewrite
+        # autograd's own grad_output. That buffer does not belong to us: it can be shared
+        # with another consumer of this output, and the corruption shows up as a wrong
+        # gradient somewhere else entirely. Copy only when we would otherwise alias.
         grad = grad_out.contiguous()
+        if grad is grad_out:
+            grad = grad.clone()
         dist.all_reduce(grad, group=ctx.cp_group)
         lo = ctx.cp_rank * ctx.p_local
         return grad[:, lo : lo + ctx.p_local].contiguous(), None
