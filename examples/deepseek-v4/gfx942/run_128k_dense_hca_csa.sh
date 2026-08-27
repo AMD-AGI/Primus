@@ -29,7 +29,14 @@ REPO="$(cd "${HERE}/../../.." && pwd)"
 cd "${REPO}"
 
 # ---- prerequisites -----------------------------------------------------------------
-V4_TOKENIZER="${V4_TOKENIZER:-/apps/DeepSeek-V4-Flash}"
+# The tokenizer directory has been renamed at least once, so probe the known locations
+# rather than hard-coding one; the error below lists them if none is present.
+if [ -z "${V4_TOKENIZER:-}" ]; then
+  for _c in /apps/DeepSeek-V4-Flash /apps/DeepSeek-V4-Flash-FP8; do
+    [ -f "${_c}/tokenizer.json" ] && { V4_TOKENIZER="${_c}"; break; }
+  done
+  V4_TOKENIZER="${V4_TOKENIZER:-/apps/DeepSeek-V4-Flash}"
+fi
 DATA_DIR="${DATA_DIR:-${REPO}/data/sft}"
 BACKEND_PATH="${BACKEND_PATH:-${REPO}/third_party/Megatron-LM}"
 

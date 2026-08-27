@@ -727,6 +727,7 @@ class DeepseekV4HybridLayer(TransformerLayer):
         *,
         position_ids: Optional[torch.Tensor] = None,
         token_ids: Optional[torch.Tensor] = None,
+        packed_seq_params=None,
         **kwargs,
     ):
         """Run one V4 layer.
@@ -740,6 +741,9 @@ class DeepseekV4HybridLayer(TransformerLayer):
                 inside :class:`DeepseekV4Attention`. Accepted for
                 upstream :class:`TransformerLayer` API compatibility.
             position_ids: ``[B, S]`` or ``[S]``. Forwarded to attention.
+            packed_seq_params: THD (packed-sequence) descriptor, forwarded to
+                attention. ``None`` for the ordinary BSHD path, in which case
+                every code path below is byte-identical to before.
             token_ids: ``[B, S]`` integer tensor; required when this is
                 a hash-routed MoE layer
                 (``layer_idx < num_hash_layers``). Ignored for non-MoE /
@@ -770,7 +774,9 @@ class DeepseekV4HybridLayer(TransformerLayer):
         # Attention sub-block. The collapse passes a [B, S, D] hidden, then
         # the attention runs and returns [B, S, D]; HC expand writes back.
         def _attn_sub(collapsed: torch.Tensor) -> torch.Tensor:
-            return self.self_attention(self.input_layernorm(collapsed), position_ids)
+            return self.self_attention(
+                self.input_layernorm(collapsed), position_ids, packed_seq_params=packed_seq_params
+            )
 
         x = self._hc_apply(self.attn_hc, hidden_states, _attn_sub)
 
@@ -1064,7 +1070,9 @@ class DeepseekV4TransformerBlock(TransformerBlock):
 
         return fp8_utils.get_fp8_context(self.config, global_idx)
 
-    def _forward_layer_checkpointed(self, layer, x, position_ids, token_ids, global_idx):
+    def _forward_layer_checkpointed(
+        self, layer, x, position_ids, token_ids, global_idx, packed_seq_params=None
+    ):
         """Run one V4 layer under activation checkpointing.
 
         Only the hidden-state tensor ``x`` is passed as the checkpointed
@@ -1081,7 +1089,12 @@ class DeepseekV4TransformerBlock(TransformerBlock):
 
         def _run(hidden):
             with self._layer_fp8_context(global_idx):
-                out, _ = layer(hidden, position_ids=position_ids, token_ids=token_ids)
+                out, _ = layer(
+                    hidden,
+                    position_ids=position_ids,
+                    token_ids=token_ids,
+                    packed_seq_params=packed_seq_params,
+                )
             return out
 
         return tensor_parallel.checkpoint(
@@ -1140,13 +1153,17 @@ class DeepseekV4TransformerBlock(TransformerBlock):
         ``decoder._v4_token_ids`` attribute stash has been removed; the
         model forwards ``input_ids`` here directly.
         """
+        # `packed_seq_params` is deliberately NOT dropped: under THD (packed) training it
+        # carries the cu_seqlens that tell attention where one packed sequence ends and the
+        # next begins. Everything else here really is unused by V4 -- RoPE is applied inside
+        # the layer from `position_ids`, and the causal/sliding-window structure lives in
+        # the index matrix the sparse-MLA adapter builds rather than in an attention_mask.
         del (
             inference_context,
             rotary_pos_emb,
             rotary_pos_cos,
             rotary_pos_sin,
             rotary_pos_cos_sin,
-            packed_seq_params,
             sequence_len_offset,
             attention_mask,
             kwargs,
@@ -1184,7 +1201,9 @@ class DeepseekV4TransformerBlock(TransformerBlock):
         for local_idx, layer in enumerate(self.layers):
             global_idx = self.global_layer_indices[local_idx]
             if recompute_local is not None and local_idx in recompute_local:
-                x = self._forward_layer_checkpointed(layer, x, position_ids, token_ids, global_idx)
+                x = self._forward_layer_checkpointed(
+                    layer, x, position_ids, token_ids, global_idx, packed_seq_params
+                )
             else:
                 # ``self.offload_context`` comes from TransformerBlock.__init__ (TE's
                 # get_cpu_offload_context). This loop replaces the parent's, so it has to
@@ -1199,6 +1218,7 @@ class DeepseekV4TransformerBlock(TransformerBlock):
                         x,
                         position_ids=position_ids,
                         token_ids=token_ids,
+                        packed_seq_params=packed_seq_params,
                     )
                 if (
                     torch.is_grad_enabled()

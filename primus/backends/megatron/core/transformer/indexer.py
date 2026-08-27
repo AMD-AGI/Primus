@@ -383,6 +383,46 @@ class Indexer(nn.Module):
         g = get_cp_group()
         return 0 if g is None else g.rank() * int(s_local)
 
+    def _thd_causal_mask(self, S: int, P: int, cu_seqlens, device, dtype, p_slice=None) -> torch.Tensor:
+        """``[S, P]`` selection mask for packed input.
+
+        ``p_slice=(lo, hi)`` returns just those pool columns, ``[S, hi - lo]``. The mask
+        is a pure function of each column's ``(seq_id, comp_id)``, so restricting it to a
+        chunk is exactly slicing that identity -- which is what lets the packed path
+        stream its top-K instead of materialising ``[S, P]`` (1.07 GiB at 128k / CP=8).
+
+        Same two conditions as the attention-side pool mask: the pool column must belong
+        to the query's own packed sequence, and within that sequence it must already be
+        complete (``(k+1)*ratio - 1 <= u`` for local query position ``u``). The indexer's
+        top-K addresses the attention pool, so any disagreement between the two masks
+        shows up as the selection naming a column the attention then treats as invisible.
+        """
+        # Shared with the attention on purpose -- see _thd_pool_visibility. The indexer's
+        # top-K addresses exactly the slots the attention will then read, so the two masks
+        # must be the same function of the same inputs, not two copies that can drift.
+        from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
+            _thd_pool_visibility,
+        )
+        from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
+            get_cp_group,
+        )
+
+        cp_group = get_cp_group()
+        cp_size = 1 if cp_group is None else cp_group.size()
+        cu = cu_seqlens.to(device=device, dtype=torch.int64)
+        l_local = int(cu[-1].item()) // cp_size
+        seqs, comps = [], []
+        for r in range(cp_size):
+            _, comp_ids, seq_ids = self.indexer_compressor.thd_compact_plan(cu, r * l_local, l_local)
+            comps.append(comp_ids.to(device))
+            seqs.append(seq_ids.to(device))
+        identity = (torch.cat(seqs), torch.cat(comps))
+        if p_slice is not None:
+            lo, hi = p_slice
+            identity = (identity[0][lo:hi], identity[1][lo:hi])
+            P = hi - lo
+        return _thd_pool_visibility(S, P, cu, self.compress_ratio, identity, cp_group, device, dtype)
+
     def _causal_mask(
         self,
         n_queries: int,
@@ -470,6 +510,7 @@ class Indexer(nn.Module):
         self,
         hidden: torch.Tensor,
         position_ids: Optional[torch.Tensor] = None,
+        cu_seqlens=None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Select top-k compressed positions for each query.
 
@@ -486,9 +527,13 @@ class Indexer(nn.Module):
               (``-inf`` for masked positions).
         """
         B, S, D = hidden.shape
-        assert S % self.compress_ratio == 0, (
-            f"Indexer: sequence length {S} not divisible by compress_ratio " f"{self.compress_ratio}"
-        )
+        # Under packing each sequence is pooled on its own, so the PACK length has no
+        # divisibility requirement -- only the per-sequence floor rule applies, and that
+        # is handled inside Compressor.thd_window_plan.
+        if cu_seqlens is None:
+            assert S % self.compress_ratio == 0, (
+                f"Indexer: sequence length {S} not divisible by compress_ratio " f"{self.compress_ratio}"
+            )
         K = self.index_topk
         H = self.index_n_heads
         Hd = self.index_head_dim
@@ -507,7 +552,43 @@ class Indexer(nn.Module):
         )
 
         cp_group = get_cp_group()
-        if cp_group is None:
+        if cu_seqlens is not None:
+            # Per-sequence key pool, matching the attention-side pool exactly -- the
+            # top-K indices produced here address THAT pool, so the two must be laid out
+            # identically or the selection names the wrong columns. Under CP both are
+            # all-gathered to global with the same alignment precondition (checked in
+            # DeepseekV4Attention._build_compressed_pool).
+            gstart, boundary = 0, None
+            if cp_group is not None:
+                # Same boundary rows the attention-side compressor takes -- both build
+                # their pool with the identical window plan, so both need the identical
+                # inputs or the top-K would index a differently-populated pool.
+                from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
+                    compressor_boundary_rows,
+                    exchange_boundary_hidden,
+                )
+
+                gstart = cp_group.rank() * S
+                boundary = exchange_boundary_hidden(
+                    hidden,
+                    compressor_boundary_rows(self.compress_ratio, bool(self.indexer_compressor.overlap)),
+                    cp_group,
+                )
+            k_local = self.indexer_compressor(
+                hidden,
+                cu_seqlens=cu_seqlens,
+                global_start=gstart,
+                boundary_hidden=boundary,
+            )
+            if cp_group is None:
+                k_icomp = k_local
+            else:
+                from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
+                    build_global_pool,
+                )
+
+                k_icomp = build_global_pool(k_local, cp_group)
+        elif cp_group is None:
             k_icomp = self.indexer_compressor(hidden)  # [B, P, Hd]
         else:
             from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
@@ -519,7 +600,13 @@ class Indexer(nn.Module):
             nb = compressor_boundary_rows(self.compress_ratio, bool(self.indexer_compressor.overlap))
             if nb > 0:
                 bnd = exchange_boundary_kv(hidden.reshape(B, S, 1, D), nb, cp_group).reshape(B, nb, D)
-                k_local = self.indexer_compressor(torch.cat([bnd, hidden], dim=1))[:, 1:]
+                # Prepending nb rows produces nb // ratio extra leading windows, so that
+                # is how many must be dropped -- NOT one. They coincide only while
+                # nb == ratio; overlap now asks for 2 * ratio, and dropping a single row
+                # would leave a duplicate of the neighbour's last window in the pool.
+                k_local = self.indexer_compressor(torch.cat([bnd, hidden], dim=1))[
+                    :, nb // self.compress_ratio :
+                ]
             else:
                 k_local = self.indexer_compressor(hidden)
             k_icomp = build_global_pool(k_local, cp_group)
@@ -616,7 +703,13 @@ class Indexer(nn.Module):
         # Chunking over P keeps a running top-K and never materialises the full row:
         # peak drops to [B, S, chunk] + [B, S, K].
         chunk = _indexer_topk_chunk()
-        if chunk > 0 and P > chunk:
+        # `cu_seqlens is None` is load-bearing, not defensive: this block bakes in the
+        # CONTIGUOUS causal mask (a scalar origin plus the q_offset shift), so on packed
+        # input it would score every query against the whole pack's pool instead of its
+        # own sequence's slice. The shapes line up either way, so the only symptom would
+        # be a model quietly conditioning on other samples. The packed branch below does
+        # its own streaming with the per-sequence mask.
+        if cu_seqlens is None and chunk > 0 and P > chunk:
             if _indexer_tail_triton_enabled() and not _indexer_triton_full_enabled():
                 raise NotImplementedError(
                     "Streaming indexer top-K does not support the tail-fused path "
@@ -648,7 +741,60 @@ class Indexer(nn.Module):
             topk_eff = topk_scores.shape[-1]
             return self._finalize_topk(topk_idxs, topk_scores, topk_eff, K, B, S)
 
-        if _indexer_fp4_enabled():
+        if cu_seqlens is not None:
+            # Packed: the fused scorers bake a SCALAR causal origin into the kernel, so
+            # under packing they would score each query against the whole pack's pool
+            # rather than its own sequence's slice -- silently, since the shapes line up.
+            # So the scoring is eager here, but it MUST be chunked over P: the plain
+            # einsum materialises [B, S, H, P], which at 128k with CP=8 is
+            # 16384 x 64 x 32768 x 2 B = 64 GiB. Chunking keeps the 4-D intermediate at
+            # [B, S, H, chunk] and reduces to [B, S, chunk] immediately -- the same
+            # structure as the streaming top-K path below, and mathematically identical
+            # to scoring the whole row at once.
+            # Chunking the einsum alone was not enough: keeping every chunk in `parts` and
+            # concatenating still rebuilt the full [B, S, P] row (2.15 GiB in fp32 at
+            # 128k / CP=8), and the [S, P] mask added another 1.07 GiB. Both scale with
+            # the GLOBAL pool, so they grow with the packed segment count and were what
+            # capped packing at 256 segments per 128k window -- i.e. at ~10.7% supervised
+            # tokens, which defeats the point of packing. Carry a running top-K instead,
+            # exactly as the contiguous streaming path above does: peak becomes
+            # [B, S, chunk] + [B, S, K], independent of P.
+            # Default 512, not the 2048 the contiguous path uses. The transient that
+            # actually sizes this is the 4-D `dot_c` = [B, S, H, chunk] BEFORE the head
+            # axis is reduced away: at 128k with CP=8 and 64 heads that is
+            # 16384 * 64 * chunk * 2 B = 4.0 GiB at chunk=2048, which took the step to
+            # 99.90% of the card -- it completed, then the identical config OOM'd on the
+            # next run. At 512 it is 1.0 GiB and the peak drops to 62%, with the loss
+            # unchanged to five significant figures and no measurable step-time cost
+            # (the GEMMs are already large enough to saturate).
+            thd_chunk = _indexer_topk_chunk() or 512
+            run_v = run_i = None
+            for lo in range(0, P, thd_chunk):
+                hi = min(lo + thd_chunk, P)
+                dot_c = torch.einsum("bshd,bpd->bshp", q_i, k_icomp_2d[:, lo:hi])
+                sc = (F.relu(dot_c) * w_i.unsqueeze(-1)).sum(dim=2)  # [B, S, hi-lo]
+                del dot_c
+                sc = sc + self._thd_causal_mask(
+                    S, P, cu_seqlens, q_i.device, hidden.dtype, p_slice=(lo, hi)
+                ).unsqueeze(0)
+                # P14: reduce partial head sums BEFORE selecting, per chunk -- the
+                # selection must see the full-head score. -inf survives the sum.
+                if self.tp_size > 1:
+                    import torch.distributed as _dist
+
+                    _dist.all_reduce(sc, group=self.tp_group)
+                v, i = sc.topk(min(K, hi - lo), dim=-1)
+                del sc
+                i = i + lo  # chunk-local column -> GLOBAL pool column
+                if run_v is None:
+                    run_v, run_i = v, i
+                else:
+                    cv = torch.cat([run_v, v], dim=-1)
+                    ci = torch.cat([run_i, i], dim=-1)
+                    run_v, sel = cv.topk(min(K, cv.shape[-1]), dim=-1)
+                    run_i = torch.gather(ci, -1, sel)
+            return self._finalize_topk(run_i, run_v, run_v.shape[-1], K, B, S)
+        elif _indexer_fp4_enabled():
             dot = _fp4_qk_gemm(q_i, k_icomp_2d)  # [B, S, H, P], real FP4 matmul
             relu = F.relu(dot)
             scores = (relu * w_i.unsqueeze(-1)).sum(dim=2)  # [B, S, P]

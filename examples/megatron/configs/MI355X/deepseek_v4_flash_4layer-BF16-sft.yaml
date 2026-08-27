@@ -82,8 +82,21 @@ modules:
       trust_remote_code: true
       sft_dataset_name: ${SFT_JSONL:./data/sft/sft_4096.jsonl}
       sft_conversation_format: alpaca
-      enable_packed_sequences: false
-      use_packed_attention: false   # TE thd varlen path hangs/SIGABRTs on ROCm
+      # Sequence packing (THD). Off by default; the packed recipe turns all three on.
+      # NOTE on use_packed_attention: it is disabled by default because TE's thd varlen
+      # kernel hangs on ROCm -- but V4 does NOT use that kernel. Its attention is
+      # index-driven (the causal/window structure lives in the index matrix the sparse-MLA
+      # adapter builds), so cu_seqlens reaches it through packed_seq_params and the TE
+      # limitation does not apply.
+      enable_packed_sequences: ${PRIMUS_PACKED:false}
+      use_packed_attention: ${PRIMUS_PACKED_ATTN:false}
+      # Leave at 1. This used to have to equal the largest compress_ratio, because a
+      # pooling window straddling a CP shard boundary had nowhere to read its earlier
+      # rows from. That is now handled by a real left-boundary exchange, so alignment is
+      # no longer required -- and it was expensive: padding every segment up to 128 on
+      # alpaca left only 34.2% of tokens supervised, against 56.1%
+      # unaligned. Raise it only to reproduce the old aligned baseline.
+      sft_packing_segment_align: ${PRIMUS_PACK_ALIGN:1}
       num_workers: 4
       dataloader_type: cyclic
       create_attention_mask_in_dataloader: false   # would be an [S,S] bool tensor
