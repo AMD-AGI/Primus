@@ -140,7 +140,12 @@ class StreamingIngestPipeline(DatasetPipeline):
             Dict with 'files_processed', 'samples_written', 'shards_created',
             'shards_skipped', 'files_failed'.
         """
-        base_url, entries = fetch_manifest(self.manifest_url)
+        # Drop the manifest's metadata files (dataset_info.json, state.json)
+        # before anything counts or indexes the entries. They are not Arrow, so
+        # conversion fails on them and reports the run as having failed files;
+        # they would also consume max_files slots and, if one ever sorted ahead
+        # of a data file, shift every shard index after it.
+        base_url, entries = fetch_manifest(self.manifest_url, suffix_filter=".arrow")
 
         if self.max_files is not None:
             entries = entries[: self.max_files]
