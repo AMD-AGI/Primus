@@ -11,6 +11,8 @@ modules:
     # model to run
     model: llama3.1_8B.yaml
     overrides:
+      # Use /model when mounted (MLPerf local tokenizer); otherwise fall back to HF hub id.
+      tokenizer_model: ${PRIMUS_TOKENIZER_MODEL:meta-llama/Llama-3.1-8B}
       # --- Logging Config ---
       stage: mlperf_pretrain
       disable_wandb: true

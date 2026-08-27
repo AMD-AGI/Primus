@@ -3,8 +3,8 @@ user_name: ${PRIMUS_USER:root}
 # Recommended invocation::
 #
 #   export PRIMUS_EXP_NAME=deepseek_v2_lite_native_aligned_$(date +%Y%m%d_%H%M%S)
-#   EXP=examples/megatron/configs/MI355X/deepseek_v2_lite-BF16-sft-packed-bridge_aligned.yaml \
-#       bash examples/run_pretrain.sh
+#   ./primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI355X/deepseek_v2_lite-BF16-sft-packed-bridge_aligned.yaml
 exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_lite-sft-packed-bridge_aligned-force_lb}
 workspace: ${PRIMUS_WORKSPACE:./output}
 

@@ -16,7 +16,7 @@
       "name": "maxtext",
       "path": "third_party/maxtext",
       "url": "https://github.com/ROCm/maxtext.git",
-      "commit": "a7c6c7e5377cce39be51cbe2a48fe0f86fbab8dc"
+      "commit": "b47d74bf4ef860c6cbd0fe5e4705c362ba360dbe"
     },
     {
       "name": "Emerging-Optimizers",
@@ -41,6 +41,12 @@
       "path": "third_party/HummingbirdXT",
       "url": "https://github.com/AMD-AGI/HummingbirdXT.git",
       "commit": "ed7b7bd0dd03ed084f645c5dda1bc7b333f326f0"
+    },
+    {
+      "name": "maxdiffusion",
+      "path": "third_party/maxdiffusion",
+      "url": "https://github.com/AI-Hypercomputer/maxdiffusion.git",
+      "commit": "68e069659f0af80694559e29939a17f879fe7f6a"
     },
     {
       "name": "Automodel",
