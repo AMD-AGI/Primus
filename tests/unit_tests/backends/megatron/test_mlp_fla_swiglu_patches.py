@@ -28,7 +28,9 @@ from megatron.core.transformer.mlp import MLP
 
 import primus.backends.megatron.patches.mlp_fla_swiglu_patches as patch_mod
 from primus.backends.megatron.patches._patch_guard import is_patched
-from primus.backends.megatron.patches._source_patch_utils import patch_method_source_multi
+from primus.backends.megatron.patches._source_patch_utils import (
+    patch_method_source_multi,
+)
 
 
 def _config(**overrides):
