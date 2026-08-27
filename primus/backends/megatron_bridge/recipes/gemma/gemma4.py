@@ -26,8 +26,6 @@ from contextlib import contextmanager
 from typing import List, Optional, Union
 
 import torch
-from typing_extensions import TypedDict, Unpack
-
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.base import PEFT
 from megatron.bridge.recipes.utils.dataset_utils import (
@@ -35,8 +33,12 @@ from megatron.bridge.recipes.utils.dataset_utils import (
     default_squad_config,
     get_blend_fields_from_data_paths,
 )
-from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
-from megatron.bridge.recipes.utils.tokenizer_utils import DEFAULT_NULL_TOKENIZER_VOCAB_SIZE
+from megatron.bridge.recipes.utils.optimizer_utils import (
+    distributed_fused_adam_with_cosine_annealing,
+)
+from megatron.bridge.recipes.utils.tokenizer_utils import (
+    DEFAULT_NULL_TOKENIZER_VOCAB_SIZE,
+)
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import (
     CheckpointConfig,
@@ -48,7 +50,12 @@ from megatron.bridge.training.config import (
     TokenizerConfig,
     TrainingConfig,
 )
-from megatron.bridge.training.mixed_precision import MixedPrecisionConfig, bf16_mixed, get_mixed_precision_config
+from megatron.bridge.training.mixed_precision import (
+    MixedPrecisionConfig,
+    bf16_mixed,
+    get_mixed_precision_config,
+)
+from typing_extensions import TypedDict, Unpack
 
 
 @contextmanager
@@ -273,7 +280,13 @@ def _gemma4_common(
     tensorboard_dir = os.path.join(run_output_dir, "tb_logs")
 
     blend, blend_per_split, split = get_blend_fields_from_data_paths(
-        data_paths, data_args_path, train_data_path, valid_data_path, test_data_path, per_split_data_args_path, mock
+        data_paths,
+        data_args_path,
+        train_data_path,
+        valid_data_path,
+        test_data_path,
+        per_split_data_args_path,
+        mock,
     )
 
     with _gemma4_text_conversion_mode():
@@ -347,7 +360,11 @@ def _gemma4_common(
         ),
         rng=RNGConfig(seed=1234),
         comm_overlap=comm_overlap_config,
-        mixed_precision=get_mixed_precision_config(precision_config) if isinstance(precision_config, str) else precision_config,
+        mixed_precision=(
+            get_mixed_precision_config(precision_config)
+            if isinstance(precision_config, str)
+            else precision_config
+        ),
     )
 
     return cfg
@@ -472,7 +489,11 @@ def _gemma4_finetune_common(
         ),
         rng=RNGConfig(seed=1234),
         peft=peft_config,
-        mixed_precision=get_mixed_precision_config(precision_config) if isinstance(precision_config, str) else precision_config,
+        mixed_precision=(
+            get_mixed_precision_config(precision_config)
+            if isinstance(precision_config, str)
+            else precision_config
+        ),
     )
 
     return cfg
