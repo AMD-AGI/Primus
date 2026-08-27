@@ -38,13 +38,15 @@ entire measured activation gap vs FLA).
 It is a trade, not a free win, which is why it stays off by default: recomputing
 the activation costs time, and the cost grows with the micro-batch. Measured on
 MI355X, 300M, seq 2048, 30 iters, median of three A/B repeats -- loss matched to
-four decimals in every pair, and peak memory was bit-identical across repeats:
+four decimals in every pair, and peak memory was bit-identical across repeats.
+Both columns are deltas against the unfused path, so a positive iteration time
+means the fused path is *slower* and a negative memory figure means it saves:
 
-    model  mbs   speed    peak memory
-    GDN      2    ~0%      -0.3 GB
-    GDN     32   +4.4%     -5.3 GB
-    KDA      2   +2.2%     -0.6 GB
-    KDA     32   +5.1%     -5.8 GB
+    model  mbs   iteration time   peak memory
+    GDN      2       ~0%            -0.3 GB
+    GDN     32     +4.4% slower     -5.3 GB
+    KDA      2     +2.2% slower     -0.6 GB
+    KDA     32     +5.1% slower     -5.8 GB
 
 The saving tracks ~0.18 GiB per unit micro-batch, as predicted by the size of
 the tensor that is no longer stashed for the fc2 weight gradient.
@@ -165,7 +167,11 @@ def _resolve_fla_swiglu(config, is_expert: bool):
 
             swiglu_fn = swiglu
         except ImportError:
-            pass
+            # use_fla_fused_swiglu defaults to on, so a missing FLA install is a
+            # normal configuration rather than an error: leave swiglu_fn as None
+            # and let Megatron's own activation run. The opt-in fc2 path below
+            # does report its ImportError, since that one was asked for.
+            swiglu_fn = None
 
     swiglu_linear_fn = None
     if getattr(args, "use_fla_fused_swiglu_linear", False):
