@@ -18,17 +18,27 @@ Design goals:
     list, not scattered across shell launchers and prepare hooks.
   - **Layered precedence** (highest wins)::
 
-        per-config ``env:``  >  outer/shell env  >  these backend defaults  >  image-baked
+        XLA_FLAGS_APPEND  >  per-config ``env:``  >  these backend defaults  >  inherited
 
-    Achieved with ``os.environ.setdefault`` for ordinary vars so we NEVER clobber
-    something the user/shell/YAML already set.
+    "Inherited" is whatever the process started with: an image-baked ``ENV`` or an
+    outer ``export`` / ``--env``. Those two are indistinguishable from inside the
+    process, so they necessarily share one layer.
+
+    Ordinary vars use ``os.environ.setdefault``, so anything already set wins.
   - **Architecture awareness.** An entry may be gated to a specific GPU arch
     (e.g. ``gfx950`` only, ``gfx942`` only). Non-matching entries are skipped.
-  - **XLA_FLAGS merge.** ``XLA_FLAGS`` is special: Docker images bake it (often
-    with a value we must override, e.g. ``--xla_gpu_autotune_level=0``), so plain
-    ``setdefault`` would be a no-op. Entries with ``mode="xla_merge"`` are merged
-    into any existing ``XLA_FLAGS`` at the individual ``--flag`` granularity, with
-    the managed knobs winning while unrelated baked flags are preserved.
+  - **XLA_FLAGS append.** ``XLA_FLAGS`` packs many settings into one string, so
+    ``setdefault`` cannot express "override one of them": images bake a value we
+    must correct (notably ``--xla_gpu_autotune_level=0``, which NaNs fp8 MoE runs),
+    and ``setdefault`` against a baked value is a no-op that would leave *every*
+    managed knob unapplied. XLA honours the LAST occurrence of a repeated flag, so
+    ``mode="xla_append"`` entries are appended rather than parsed and merged.
+
+    A config whose ``env:`` block sets ``XLA_FLAGS`` owns the variable outright:
+    the managed defaults are skipped instead of being appended after it, so the
+    precedence above actually holds. To override individual flags while keeping the
+    managed defaults, use ``XLA_FLAGS_APPEND`` — it is applied last, from either the
+    shell or an ``env:`` block.
 
 Backends with no special env (Megatron, TorchTitan, ...) simply return ``[]``
 from ``env_defaults()`` and this module is a no-op for them.
@@ -39,7 +49,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Iterable, List, Optional
 
@@ -51,7 +60,26 @@ ARCH_GFX942 = "gfx942"  # MI300X / MI325X
 
 # Application modes.
 MODE_SETDEFAULT = "setdefault"  # os.environ.setdefault (respect anything already set)
-MODE_XLA_MERGE = "xla_merge"  # per-flag merge into XLA_FLAGS, managed knobs win
+MODE_XLA_APPEND = "xla_append"  # append to XLA_FLAGS; XLA honours the last occurrence
+
+# Highest-priority XLA flags, appended after everything else. Settable from the
+# shell or from a config ``env:`` block.
+XLA_FLAGS_APPEND = "XLA_FLAGS_APPEND"
+
+# Env vars supplied by the experiment YAML's top-level ``env:`` block. Tracked so
+# append-mode entries can step aside instead of overriding an explicit user value
+# (see module docstring). TrainRuntime populates this via :func:`mark_config_owned`.
+_CONFIG_OWNED: set = set()
+
+
+def mark_config_owned(*names: str) -> None:
+    """Record env vars that came from the experiment YAML's ``env:`` block."""
+    _CONFIG_OWNED.update(names)
+
+
+def clear_config_owned() -> None:
+    """Forget config ownership. A process trains one config, so this is a test hook."""
+    _CONFIG_OWNED.clear()
 
 
 @dataclass(frozen=True)
@@ -62,7 +90,7 @@ class EnvVar:
         name: Environment variable name.
         value: Desired value (string).
         arch: Arch gate — ``"all"`` (default), ``"gfx950"``, or ``"gfx942"``.
-        mode: ``"setdefault"`` (default) or ``"xla_merge"`` (for ``XLA_FLAGS``).
+        mode: ``"setdefault"`` (default) or ``"xla_append"`` (for ``XLA_FLAGS``).
         note: Optional human-readable rationale (for logs / maintainers).
     """
 
@@ -101,30 +129,15 @@ def detect_gpu_arch() -> str:
     return arch
 
 
-def _parse_xla_flags(flags: str) -> "OrderedDict[str, str]":
-    """Parse an ``XLA_FLAGS`` string into an ordered ``flag-key -> full-token`` map.
+def append_xla_flags(existing: str, addition: str) -> str:
+    """Append ``addition`` after ``existing``, dropping empty operands.
 
-    Tokens look like ``--name=value``, ``--name=''`` or bare ``--name``; none of
-    the values contain spaces, so a whitespace split is sufficient. The key is the
-    portion before ``=`` so we can override on a per-flag basis.
+    XLA honours the last occurrence of a repeated flag, so appending overrides
+    whatever came before without parsing it. That also means flags we do not manage
+    survive untouched, and values may contain anything (the old per-flag merge had
+    to assume no value ever contained a space).
     """
-    parsed: "OrderedDict[str, str]" = OrderedDict()
-    for tok in flags.split():
-        key = tok.split("=", 1)[0] if "=" in tok else tok
-        parsed[key] = tok
-    return parsed
-
-
-def merge_xla_flags(existing: str, managed: str) -> str:
-    """Merge ``managed`` XLA flags over ``existing`` at ``--flag`` granularity.
-
-    Managed knobs win; flags present only in ``existing`` (e.g. image-baked flags
-    we don't manage) are preserved in their original position.
-    """
-    merged = _parse_xla_flags(existing)
-    for key, tok in _parse_xla_flags(managed).items():
-        merged[key] = tok
-    return " ".join(merged.values())
+    return " ".join(part for part in (existing.strip(), addition.strip()) if part)
 
 
 def apply_env_defaults(
@@ -137,7 +150,11 @@ def apply_env_defaults(
     - Arch-gated entries are skipped unless the detected arch matches (rocminfo is
       only queried if at least one arch-gated entry is present).
     - ``setdefault`` entries never override an already-set value.
-    - ``xla_merge`` entries merge into ``XLA_FLAGS`` (managed knobs win).
+    - ``xla_append`` entries append to ``XLA_FLAGS`` (last occurrence wins), unless
+      the config's ``env:`` block owns the variable, in which case they step aside.
+
+    Does NOT apply ``XLA_FLAGS_APPEND``; that is :func:`apply_xla_flags_append`,
+    which must run for every backend including those declaring no defaults here.
 
     Returns the list of variable names that were actually applied (useful for
     diagnostics / parity checks).
@@ -156,13 +173,20 @@ def apply_env_defaults(
         if e.arch != ARCH_ALL and e.arch != arch:
             continue
 
-        if e.mode == MODE_XLA_MERGE:
+        if e.mode == MODE_XLA_APPEND:
+            if e.name in _CONFIG_OWNED:
+                log(
+                    f"[Primus:{framework}] {e.name} comes from the config `env:` block; "
+                    f"managed defaults skipped. Set {XLA_FLAGS_APPEND} instead to override "
+                    f"individual flags on top of them."
+                )
+                continue
             before = os.environ.get(e.name, "")
-            after = merge_xla_flags(before, e.value)
-            os.environ[e.name] = after
+            after = append_xla_flags(before, e.value)
             if after != before:
+                os.environ[e.name] = after
                 applied.append(e.name)
-                log(f"[Primus:{framework}] {e.name} merged (managed XLA knobs win)")
+                log(f"[Primus:{framework}] {e.name} appended (managed defaults override inherited)")
         else:
             # setdefault semantics: only set (and count) when currently unset, so
             # outer/shell/YAML `env:` values always take precedence.
@@ -173,3 +197,25 @@ def apply_env_defaults(
                 log(f"[Primus:{framework}] {e.name}={e.value} (default){suffix}")
 
     return applied
+
+
+def apply_xla_flags_append(logger: Optional[Callable[[str], None]] = None) -> bool:
+    """Append ``XLA_FLAGS_APPEND`` onto ``XLA_FLAGS`` as the final, winning layer.
+
+    This is the supported way to override an individual managed flag (or add one)
+    without taking ownership of the whole ``XLA_FLAGS`` string, and it works
+    identically from the shell and from a config ``env:`` block.
+
+    Runs for every backend — including those that declare no ``env_defaults()`` —
+    so it is deliberately separate from :func:`apply_env_defaults`. The source
+    variable is consumed, making repeat calls no-ops.
+
+    Returns whether anything was appended.
+    """
+    addition = os.environ.pop(XLA_FLAGS_APPEND, "").strip()
+    if not addition:
+        return False
+
+    os.environ["XLA_FLAGS"] = append_xla_flags(os.environ.get("XLA_FLAGS", ""), addition)
+    (logger or (lambda _msg: None))(f"[Primus] {XLA_FLAGS_APPEND} appended (wins): {addition}")
+    return True

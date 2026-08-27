@@ -26,10 +26,10 @@ exceptions, which are the only arch-gated entries below:
 Everything else — including all ``XLA_FLAGS`` knobs and the NVTE/HIP/HSA tunables —
 is architecture-agnostic (``arch="all"``).
 
-Precedence (see env_registry): per-config ``env:`` > outer/shell env > these
-defaults > image-baked. ``XLA_FLAGS`` is merged per-flag so the managed knobs win
-over an image-baked ``XLA_FLAGS`` (which may carry ``--xla_gpu_autotune_level=0``)
-while preserving any unrelated baked flags.
+Precedence (see env_registry): ``XLA_FLAGS_APPEND`` > per-config ``env:`` > these
+defaults > inherited (image-baked or outer shell). ``XLA_FLAGS`` is *appended* to
+whatever was inherited, so the managed knobs override an image-baked
+``--xla_gpu_autotune_level=0`` while unrelated baked flags survive.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from typing import List
 from primus.core.backend.env_registry import (
     ARCH_GFX942,
     ARCH_GFX950,
-    MODE_XLA_MERGE,
+    MODE_XLA_APPEND,
     EnvVar,
 )
 
@@ -84,7 +84,7 @@ def maxtext_env_defaults() -> List[EnvVar]:
         EnvVar(
             "XLA_FLAGS",
             _build_xla_flags(),
-            mode=MODE_XLA_MERGE,
+            mode=MODE_XLA_APPEND,
             note="managed XLA knobs incl. autotune (fp8 MoE NaN fix)",
         ),
         EnvVar("XLA_PYTHON_CLIENT_MEM_FRACTION", ".97", note="avoid HSA OOM during multi-node"),
