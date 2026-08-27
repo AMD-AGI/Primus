@@ -1,0 +1,69 @@
+# MLPerf Flux1 validation-split-only ingest configuration
+#
+# Same COCO val split as mlperf_flux1.yaml, without the 1.1 TB CC12M train
+# split. Exists because the val split has to be re-ingested on its own: the
+# MLCommons val Arrow files carry a per-sample int32 `timestep` column that
+# earlier ingests dropped, and evaluation against a split missing that column
+# fails under `eval_timestep_source: dataset`. Re-fetching only the ~60 GB val
+# split is the cheap way to repair an existing dataset.
+#
+# ============================================================================
+# Usage
+# ============================================================================
+#
+#   primus data diffusion-ingest \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/mlperf_flux1_val.yaml \
+#     --output-dir /your/path/mlperf_flux1_val
+#
+# The resulting directory is a self-contained Energon dataset with an empty
+# train split, so it can be used directly as `data_path` for an
+# evaluation-only run. To repair a combined train+val dataset instead, ingest
+# here first, then move `val/` into place and re-run `energon prepare` over
+# the combined directory so the shared index covers the new shards.
+#
+# ============================================================================
+# Datasets
+# ============================================================================
+
+datasets:
+  - name: coco
+    manifest_url: https://training.mlcommons-storage.org/metadata/flux-1-coco-preprocessed.uri
+    split_name: val
+
+# ============================================================================
+# Empty Encodings
+# ============================================================================
+# Only used for CFG dropout, which validation suppresses. Fetched anyway (a
+# couple of MB) so the directory stands alone as a `data_path`: the Flux
+# trainer loads these at startup whenever cfg_dropout_prob > 0, before it
+# knows the run will only evaluate.
+
+empty_encodings:
+  manifest_url: https://training.mlcommons-storage.org/metadata/flux-1-empty-encodings.uri
+  output_subdir: empty_encodings
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+
+output:
+  output_dir: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/mlperf_flux1_val
+
+# ============================================================================
+# Pipeline Configuration
+# ============================================================================
+
+pipeline:
+  max_workers: 4       # concurrent download threads
+  prefetch_depth: 6    # max Arrow files buffered on disk (~1.2 GB)
+  max_files: null      # null = all 129 val Arrow files
+
+# ============================================================================
+# Required Training-Time Settings (not consumed by ingest, for reference)
+# ============================================================================
+# Evaluating against this split requires:
+#   eval_timestep_source: dataset   # the column this config exists to restore
+#   eval_samples: 29696
+#   vae_latent_mode: resample
+#   vae_scale: 0.3611
+#   vae_shift: 0.1159

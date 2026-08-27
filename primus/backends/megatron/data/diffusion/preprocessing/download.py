@@ -139,18 +139,28 @@ def parse_md5_manifest(
     return entries
 
 
-def fetch_manifest(manifest_url: str) -> Tuple[str, List[Tuple[str, str]]]:
+def fetch_manifest(
+    manifest_url: str,
+    suffix_filter: Optional[str] = None,
+) -> Tuple[str, List[Tuple[str, str]]]:
     """Fetch .uri and .md5 manifests, return (base_url, [(md5, filename)]).
 
     The manifest_url should end with '.uri' or '.md5'. The function derives
     the complementary URL by replacing the suffix.
+
+    Args:
+        manifest_url: URL of either manifest.
+        suffix_filter: Keep only files with this suffix (e.g. ".arrow").
+            MLCommons manifests list dataset metadata alongside the data, and
+            a caller that consumes one kind of file wants the other kind gone
+            before anything counts, indexes or numbers the entries.
     """
     uri_url = manifest_url.replace(".md5", ".uri")
     md5_url = manifest_url.replace(".uri", ".md5")
 
     base_url = fetch_url_text(uri_url).strip()
     md5_text = fetch_url_text(md5_url)
-    entries = parse_md5_manifest(md5_text)
+    entries = parse_md5_manifest(md5_text, suffix_filter=suffix_filter)
 
     logger.info(f"Manifest: {len(entries)} files, base URL: {base_url}")
     return base_url, entries

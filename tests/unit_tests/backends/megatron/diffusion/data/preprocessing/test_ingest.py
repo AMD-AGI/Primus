@@ -177,6 +177,38 @@ class TestStreamingIngestPipeline:
     @patch(f"{_INGEST_MODULE}._arrow_to_tar")
     @patch(f"{_INGEST_MODULE}.download_with_backoff")
     @patch(f"{_INGEST_MODULE}.fetch_manifest")
+    def test_manifest_is_filtered_to_arrow_files(self, mock_manifest, mock_download, mock_convert):
+        """The pipeline asks the manifest for Arrow files only.
+
+        MLCommons manifests list dataset_info.json and state.json alongside the
+        data. Converting one of those fails and reports the whole run as having
+        failed files; each would also consume a max_files slot, and one sorting
+        ahead of a data file would shift every shard index after it.
+        """
+        mock_manifest.return_value = ("https://base.url", [("md5_0", "data-00000.arrow")])
+        mock_convert.return_value = 100
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline = StreamingIngestPipeline(
+                manifest_url="http://manifest.uri",
+                input_dir=f"{tmp}/arrows",
+                output_dir=f"{tmp}/output",
+                split_name="val",
+            )
+
+            def fake_download(url, dest, **kwargs):
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(b"fake")
+
+            mock_download.side_effect = fake_download
+
+            pipeline.run()
+
+        assert mock_manifest.call_args.kwargs["suffix_filter"] == ".arrow"
+
+    @patch(f"{_INGEST_MODULE}._arrow_to_tar")
+    @patch(f"{_INGEST_MODULE}.download_with_backoff")
+    @patch(f"{_INGEST_MODULE}.fetch_manifest")
     def test_max_files_limits_processing(self, mock_manifest, mock_download, mock_convert):
         """max_files parameter limits how many files are processed."""
         entries = [(f"md5_{i}", f"data-{i:05d}.arrow") for i in range(10)]
