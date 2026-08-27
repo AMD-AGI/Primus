@@ -194,7 +194,9 @@ run_checkpoint_conversion() {
 
     LOG_INFO_RANK0 "Checkpoint conversion rendezvous: ${MASTER_ADDR}:${MASTER_PORT} (training will use port ${training_port_label})"
 
-    python3 third_party/Megatron-Bridge/examples/conversion/convert_checkpoints.py import \
+    # Run conversion in one Python process so convert-phase patches (e.g.
+    # transformers 5.x rope_theta shim) stay active for the bridge import.
+    PYTHONPATH="${PRIMUS_ROOT}:${PYTHONPATH:-}" python3 "${PRIMUS_ROOT}/primus/backends/megatron_bridge/run_convert_checkpoints.py" import \
       --hf-model "${HF_PATH}" \
       --megatron-path "${MEGATRON_PATH}"
 

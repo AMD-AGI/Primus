@@ -5,6 +5,7 @@
 ###############################################################################
 
 import inspect
+import sys
 from types import SimpleNamespace
 from typing import Any, Dict, Union
 
@@ -98,10 +99,24 @@ def debug_rank_all(*args, **kwargs):
         return
     sep = kwargs.pop("sep", " ")
     kwargs.pop("end", None)
-    kwargs.pop("file", None)
+    stream = kwargs.pop("file", None)
     kwargs.pop("flush", None)
     msg = sep.join(str(a) for a in args)
-    log_func = logger.debug_with_caller
+    # `builtins.print` is bound to this function, so every print in the process
+    # arrives here. Previously the destination was dropped and everything logged
+    # at DEBUG, which meant a crashing run exited silently: `traceback.print_exc()`
+    # emits via `print(..., file=sys.stderr)`, so the fatal stack ended up at DEBUG
+    # in debug.log while the console (INFO) and error.log showed nothing.
+    #
+    # Promote to ERROR only for stderr writes made *while an exception is being
+    # handled*. That is precisely the traceback case, and it deliberately excludes
+    # backends that use stderr for ordinary chatter outside any handler (e.g.
+    # fused_residual_rmsnorm logs "disabled (set PRIMUS_FUSED_RESIDUAL_NORM=1 ...)"
+    # on every Megatron run) -- promoting those would put a spurious ERROR on the
+    # console of healthy runs.
+    to_stderr = stream is sys.stderr or stream is sys.__stderr__
+    handling_exception = sys.exc_info()[0] is not None
+    log_func = logger.error_with_caller if (to_stderr and handling_exception) else logger.debug_with_caller
 
     caller = inspect.stack()[1]
     caller_frame = caller.frame

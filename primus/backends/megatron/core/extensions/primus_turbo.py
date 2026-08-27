@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 import gc
+import os
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from typing import Callable, Iterable, List, Optional, Tuple, Union
@@ -65,6 +66,7 @@ try:
 except (ImportError, ModuleNotFoundError):
     create_quantized_weight = None
 
+from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -97,8 +99,27 @@ except (ImportError, ModuleNotFoundError):
 from primus.backends.megatron.core.extensions._triton.inplace_add import (
     inplace_add_triton_,
 )
+from primus.core.utils.module_utils import warning_rank_0
 
 _dummy_wgrads = {}
+
+
+@lru_cache(maxsize=1)
+def _apply_turbo_gemm_backend_env() -> None:
+    """Publish ``turbo_gemm_backend`` into the env var Primus-Turbo dispatches on."""
+    backend = getattr(get_args(), "turbo_gemm_backend", "default")
+    if backend != "default":
+        os.environ[ENV_GEMM_BACKEND] = backend
+        warning_rank_0(f"Primus-Turbo gemm backend is set to {backend}")
+
+
+@lru_cache(maxsize=1)
+def _apply_turbo_grouped_gemm_backend_env() -> None:
+    """Publish ``turbo_grouped_gemm_backend``; see :func:`_apply_turbo_gemm_backend_env`."""
+    backend = getattr(get_args(), "turbo_grouped_gemm_backend", "default")
+    if backend != "default":
+        os.environ[ENV_GROUPED_GEMM_BACKEND] = backend
+        warning_rank_0(f"Primus-Turbo grouped gemm backend is set to {backend}")
 
 
 @lru_cache(maxsize=1)
@@ -182,7 +203,16 @@ def _bridge_weight_grad(
                 # The gemm accumulated into main_grad already; grad_quantized_weight is
                 # the dummy it returns in that case and must not be added on top.
                 weight.grad_added_to_main_grad = True
-            elif not weight.grad_added_to_main_grad:
+            else:
+                # Unconditional: this backward runs once per microbatch, while
+                # grad_added_to_main_grad is a per-iteration flag that DDP resets in
+                # zero_grad_buffer() before the microbatch loop. The flag means "main_grad
+                # already owns this gradient, so the AccumulateGrad hook must not add
+                # param.grad on top" -- not "an add already happened". Gating the add on it
+                # lands only the first microbatch and silently drops every later one, and
+                # the dummy wgrad returned below means they are not recoverable from
+                # param.grad either. The fused path above is immune because its beta=1
+                # epilogue accumulates on every microbatch regardless of the flag.
                 if _is_gfx1250():
                     inplace_add_triton_(weight.main_grad, grad_quantized_weight)
                 else:
@@ -734,8 +764,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
     Primus-Turbo API (flash_attn_interface.py):
         flash_attn_func(..., sink: Optional[torch.Tensor] = None)
         - sink: learned sink parameters, shape (num_attention_heads,)
-        - When sink is provided, the Triton backend is automatically used
-          (C++ backend does not support sink attention)
+        - FlyDSL sink attention requires an FP32 parameter.
 
     Reference: gpt-oss/gpt_oss/triton/attention.py
     """
@@ -858,7 +887,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         # This matches gpt-oss model: self.sinks = torch.nn.Parameter(torch.empty(num_attention_heads))
         self.use_sink_attention = self._init_sink_attention
         if self.use_sink_attention:
-            self.sinks = torch.nn.Parameter(torch.zeros(self._num_heads_for_sinks, dtype=torch.bfloat16))
+            self.sinks = torch.nn.Parameter(torch.zeros(self._num_heads_for_sinks, dtype=torch.float32))
         else:
             self.sinks = None
         # Clean up temporary attributes
@@ -898,7 +927,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         # Primus-Turbo API (flash_attn_interface.py line 316-348):
         #   flash_attn_func(..., sink: Optional[torch.Tensor] = None)
         #   - sink: learned sink parameters, shape (num_attention_heads,)
-        #   - When sink is provided, Triton backend is automatically used
+        #   - FlyDSL requires sink to remain FP32
         #
         # Reference: gpt-oss/gpt_oss/triton/attention.py
         sink_tensor = None
@@ -907,7 +936,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         use_sink_attn = self.use_sink_attention and self.sinks is not None
 
         if use_sink_attn:
-            sink_tensor = self.sinks
+            # Module-wide BF16 conversion may cast the Parameter after init;
+            # FlyDSL requires an FP32 sink and autograd propagates through this cast.
+            sink_tensor = self.sinks.float()
 
             # Apply sliding window based on layer pattern (gpt-oss: even layers only)
             # gpt-oss pattern: self.sliding_window = config.sliding_window if layer_idx % 2 == 0 else 0
@@ -926,10 +957,11 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
 
         # NOTE: query, key, value maybe a view of the original tensor, call contiguous to copy a new tensor
         # and let torch allocator can release the original tensor.
-        if torch.is_grad_enabled():
-            query = query.contiguous() if query.requires_grad else query
-            key = key.contiguous() if key.requires_grad else key
-            value = value.contiguous() if value.requires_grad else value
+        # This must also run under no-grad evaluation: the unified FlyDSL
+        # dispatcher relies on the subsequent BSHD view retaining SBHD storage.
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
 
         if qkv_format == "sbhd":
             query = query.permute(1, 0, 2, 3)
@@ -988,6 +1020,8 @@ class PrimusTurboLinear(TELinear):
         symmetric_ar_type: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
+        _apply_turbo_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1194,6 +1228,8 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
         if not input_is_parallel:
             raise ValueError(f"{__class__.__name__} layers do not support input_is_parallel = False")
 
+        _apply_turbo_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "row_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1397,6 +1433,8 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
     ):
+        _apply_turbo_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1604,6 +1642,8 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,
     ):
+        _apply_turbo_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1969,6 +2009,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
+        _apply_turbo_grouped_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
