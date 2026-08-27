@@ -30,8 +30,11 @@ from typing_extensions import TypedDict, Unpack
 
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.base import PEFT
-from megatron.bridge.recipes.utils.dataset_utils import get_blend_fields_from_data_paths
-from megatron.bridge.recipes.utils.finetune_utils import default_peft_config, default_squad_config
+from megatron.bridge.recipes.utils.dataset_utils import (
+    default_peft_config,
+    default_squad_config,
+    get_blend_fields_from_data_paths,
+)
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
 from megatron.bridge.recipes.utils.tokenizer_utils import DEFAULT_NULL_TOKENIZER_VOCAB_SIZE
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
