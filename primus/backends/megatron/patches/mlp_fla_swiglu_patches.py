@@ -244,14 +244,23 @@ def _install_mlp_fla_swiglu_patch() -> None:
         log_rank_0(f"[Patch:{_PATCH_KEY}] MLP already patched; skipping.")
         return
 
-    patch_method_source(MLP, "__init__", _INIT_ORI, _INIT_NEW)
-    # Both forward rewrites must go in one pass: a method can only be
-    # source-patched once (inspect.getsource cannot re-read an exec'd function).
-    patch_method_source_multi(
-        MLP,
-        "forward",
-        [(_FWD_FUSED_ORI, _FWD_FUSED_NEW), (_FORWARD_ORI, _FORWARD_NEW)],
-    )
+    # Apply both rewrites or neither. If an anchor drifts on a Megatron bump the
+    # second call raises, and a half-patched MLP is worse than an unpatched one:
+    # __init__ would set the _use_fla_* flags that only the patched forward
+    # reads, and a retry cannot re-read the source of an already-exec'd method.
+    original_init, original_forward = MLP.__init__, MLP.forward
+    try:
+        patch_method_source(MLP, "__init__", _INIT_ORI, _INIT_NEW)
+        # Both forward rewrites must go in one pass: a method can only be
+        # source-patched once (inspect.getsource cannot re-read an exec'd function).
+        patch_method_source_multi(
+            MLP,
+            "forward",
+            [(_FWD_FUSED_ORI, _FWD_FUSED_NEW), (_FORWARD_ORI, _FORWARD_NEW)],
+        )
+    except Exception:
+        MLP.__init__, MLP.forward = original_init, original_forward
+        raise
 
     mark_patched(MLP, _PATCH_KEY)
     log_rank_0(

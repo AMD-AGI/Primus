@@ -109,6 +109,24 @@ def test_install_patch_rewrites_both_methods(pristine_mlp, monkeypatch):
     assert MLP.forward is not original_forward
 
 
+def test_install_patch_rolls_back_when_forward_rewrite_fails(pristine_mlp, monkeypatch):
+    """A drifted forward anchor must not leave __init__ patched on its own."""
+    monkeypatch.setattr(patch_mod, "log_rank_0", lambda *a, **k: None)
+    original_init, original_forward = MLP.__init__, MLP.forward
+
+    def boom(*args, **kwargs):
+        raise ValueError("anchor drift")
+
+    monkeypatch.setattr(patch_mod, "patch_method_source_multi", boom)
+
+    with pytest.raises(ValueError, match="anchor drift"):
+        patch_mod._install_mlp_fla_swiglu_patch()
+
+    assert MLP.__init__ is original_init
+    assert MLP.forward is original_forward
+    assert not is_patched(MLP, patch_mod._PATCH_KEY)
+
+
 def test_install_patch_is_idempotent(pristine_mlp, monkeypatch):
     monkeypatch.setattr(patch_mod, "log_rank_0", lambda *a, **k: None)
 
