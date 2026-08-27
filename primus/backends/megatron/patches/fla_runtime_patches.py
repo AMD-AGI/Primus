@@ -32,6 +32,10 @@ knob.
 
     # --- FLA Triton kernel toggles -------------------------------------------
     use_fla_fused_swiglu: true          # default true
+    use_fla_fused_swiglu_linear: false  # default false. Fuses swiglu *into*
+                                        #   linear_fc2, trading throughput for
+                                        #   one fewer ffn-wide saved tensor per
+                                        #   layer; see mlp_fla_swiglu_patches.
     use_fla_fused_rmsnorm: false        # default false
     use_fla_fused_gated_norm: false     # default false  (same semantic scope
                                         #   as use_fla_fused_rmsnorm but kept

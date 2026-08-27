@@ -28,6 +28,7 @@ from megatron.core.transformer.mlp import MLP
 
 import primus.backends.megatron.patches.mlp_fla_swiglu_patches as patch_mod
 from primus.backends.megatron.patches._patch_guard import is_patched
+from primus.backends.megatron.patches._source_patch_utils import patch_method_source_multi
 
 
 def _config(**overrides):
@@ -107,6 +108,41 @@ def test_install_patch_rewrites_both_methods(pristine_mlp, monkeypatch):
     assert is_patched(MLP, patch_mod._PATCH_KEY)
     assert MLP.__init__ is not original_init
     assert MLP.forward is not original_forward
+
+
+def test_anchors_are_unique_in_upstream_source():
+    """An anchor matching twice would inject the patch somewhere unintended."""
+    assert inspect.getsource(MLP.__init__).count(patch_mod._INIT_ORI) == 1
+    forward_source = inspect.getsource(MLP.forward)
+    assert forward_source.count(patch_mod._FWD_FUSED_ORI) == 1
+    assert forward_source.count(patch_mod._FORWARD_ORI) == 1
+
+
+class _AnchorTwice:
+    """Anchor ``x = 1`` appears twice; rewriting both would be silent corruption."""
+
+    def run(self):
+        x = 1
+        x = 1
+        return x
+
+
+class _AnchorMissing:
+    """Anchor ``x = 1`` never appears, standing in for upstream drift."""
+
+    def run(self):
+        return 0
+
+
+@pytest.mark.parametrize("victim", [_AnchorMissing, _AnchorTwice])
+def test_multi_rewrite_rejects_ambiguous_anchor(victim):
+    """patch_method_source_multi must demand exactly one match, not at least one."""
+    original = victim.run
+
+    with pytest.raises(RuntimeError, match="expected exactly 1"):
+        patch_method_source_multi(victim, "run", [("x = 1", "x = 2")])
+
+    assert victim.run is original, "a rejected rewrite must not mutate the class"
 
 
 def test_install_patch_rolls_back_when_forward_rewrite_fails(pristine_mlp, monkeypatch):

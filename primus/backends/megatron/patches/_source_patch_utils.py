@@ -97,11 +97,18 @@ def patch_method_source_multi(
     original = getattr(cls, method_name)
     source = inspect.getsource(original)
     for ori_code, new_code in replacements:
-        assert ori_code in source, (
-            f"[SourcePatch] Anchor not found in {cls.__name__}.{method_name}; "
-            f"upstream source may have changed. Anchor: {ori_code!r}"
-        )
-        source = source.replace(ori_code, new_code)
+        # Require exactly one match. A missing anchor means upstream moved, and
+        # an ambiguous one would rewrite every occurrence and inject the patch
+        # somewhere it was never meant to go. Raise rather than assert so the
+        # check survives `python -O`.
+        found = source.count(ori_code)
+        if found != 1:
+            raise RuntimeError(
+                f"[SourcePatch] Anchor matched {found} times in "
+                f"{cls.__name__}.{method_name}, expected exactly 1; upstream "
+                f"source may have changed. Anchor: {ori_code!r}"
+            )
+        source = source.replace(ori_code, new_code, 1)
     modified_source = textwrap.dedent(source)
 
     wrapper_source = "class _PrimusPatchWrapper:\n" + textwrap.indent(modified_source, "    ")
