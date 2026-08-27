@@ -37,7 +37,12 @@ modules:
       lr_decay_iters: null
 
       # Parallelism - Dense model with TP and sequence parallelism
-      tensor_model_parallel_size: 2  # Needed for 31B memory
+      # TP=8 is the smallest degree that fits on a single 8xMI300X node;
+      # TP=4 leaves almost no headroom and TP=2 runs out of memory.
+      # Setting PRIMUS_GEMMA4_DENSE_ATTENTION_BACKEND=te moves core attention
+      # onto Transformer Engine, which frees enough activation memory to raise
+      # micro_batch_size (see primus/backends/megatron_bridge/patches/gemma4).
+      tensor_model_parallel_size: 8
       expert_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       context_parallel_size: 1
