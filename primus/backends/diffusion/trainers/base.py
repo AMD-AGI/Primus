@@ -291,6 +291,12 @@ class BaseWanTrainer:
         )
         self.eval_dataloader = None
         if self.eval_dataset is not None:
+            eval_num_workers = int(
+                self.args.get("eval_dataloader_num_workers", num_workers) or 0
+            )
+            eval_prefetch_factor = int(
+                self.args.get("eval_dataloader_prefetch_factor", 2) or 2
+            )
             if mlperf_mode:
                 self.eval_sampler = ContiguousDistributedSampler(
                     self.eval_dataset,
@@ -308,12 +314,17 @@ class BaseWanTrainer:
                 self.eval_dataset,
                 batch_size=self.per_device_eval_batch_size,
                 sampler=self.eval_sampler,
-                num_workers=num_workers,
+                num_workers=eval_num_workers,
                 collate_fn=self.eval_dataset.get_collator(),
                 pin_memory=True,
-                persistent_workers=num_workers > 0,
-                prefetch_factor=2 if num_workers > 0 else None,
+                persistent_workers=eval_num_workers > 0,
+                prefetch_factor=eval_prefetch_factor if eval_num_workers > 0 else None,
             )
+            if self.rank == 0:
+                logger.info(
+                    f"Eval DataLoader: batch_size={self.per_device_eval_batch_size} "
+                    f"workers={eval_num_workers} prefetch_factor={eval_prefetch_factor}"
+                )
 
         self.mlperf_enabled = mlperf_mode
         self.mlperf_warmup_train_steps = int(
@@ -836,6 +847,7 @@ class BaseWanTrainer:
 
         was_training = self.model.training
         self.model.eval()
+        validation_start = time.perf_counter()
         loss_sum = torch.zeros((), device=self.device, dtype=torch.float32)
         count_sum = torch.zeros((), device=self.device, dtype=torch.float32)
         max_steps = int(self.args.get("mlperf_eval_steps", -1))
@@ -865,13 +877,19 @@ class BaseWanTrainer:
             self.model.train()
         if count_sum.item() <= 0:
             raise RuntimeError("Validation did not consume any samples.")
+        actual_samples = int(count_sum.item())
         if self.mlperf_enabled:
             expected_samples = int(self.args.get("mlperf_eval_total_samples", 29696))
-            actual_samples = int(count_sum.item())
             if actual_samples != expected_samples:
                 raise RuntimeError(
                     f"MLPerf FLUX validation consumed {actual_samples} samples; expected {expected_samples}."
                 )
+        if self.rank == 0:
+            elapsed = time.perf_counter() - validation_start
+            logger.info(
+                f"Validation completed: samples={actual_samples} elapsed={elapsed:.3f}s "
+                f"throughput={actual_samples / elapsed:.2f} samples/s"
+            )
         return (loss_sum / count_sum).item()
 
     def _infer_batch_size_from_tensors(self, value) -> int | None:
