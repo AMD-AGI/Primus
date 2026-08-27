@@ -1115,6 +1115,21 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                 use_direct_varlen = True
 
         if use_direct_varlen:
+            if self.attn_kwargs:
+                # self.attn_kwargs carries the context-parallel process groups
+                # (ulysses_group / ring_group) and is only populated when cp_size > 1,
+                # while self.attn_varlen is only bound when cp_size == 1 -- so today the
+                # two are mutually exclusive and this branch never drops anything. That
+                # is an invariant of two separate conditions in __init__, not something
+                # the call site can see. Assert it here so that relaxing either gate
+                # later fails loudly instead of silently running context parallelism
+                # without its groups, which would compute attention over the local shard
+                # only and quietly train a different model.
+                raise NotImplementedError(
+                    "PrimusTurboAttention: the varlen (THD) entry does not take "
+                    f"{sorted(self.attn_kwargs)}; packed sequences under context "
+                    "parallelism are not wired up yet."
+                )
             if cu_seqlens_q is None:
                 raise ValueError(
                     "PrimusTurboAttention: qkv_format='thd' requires cu_seqlens_q; the "
