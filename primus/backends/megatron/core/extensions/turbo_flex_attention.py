@@ -35,6 +35,7 @@ notice in a training log.
 """
 
 import importlib
+import inspect
 import warnings
 from collections import OrderedDict
 from typing import Any, Callable, Optional, Tuple
@@ -84,6 +85,30 @@ try:
     )
 except (ImportError, ModuleNotFoundError, AttributeError):  # pragma: no cover
     turbo_flex_attention_varlen = None
+
+
+def _entry_accepts(fn: Optional[Callable], name: str) -> bool:
+    """Whether ``fn`` has a parameter called ``name``.
+
+    The compat-layer entries gained arguments over time (``deterministic`` is the
+    latest), and this module has to keep importing against an older Primus-Turbo. The
+    alternative -- passing the argument unconditionally -- would raise ``TypeError``
+    deep inside the call on an old build; the alternative to *that* -- dropping it
+    silently -- is the exact failure this layer exists to prevent. So we probe, and the
+    caller decides: forward it when it is accepted, raise when the user asked for a
+    non-default value the entry cannot take.
+    """
+    if fn is None:
+        return False
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins / C callables
+        return False
+    if name in params:
+        return True
+    # A ``**kwargs`` catch-all accepts any keyword by definition (this is also what
+    # the test doubles look like).
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 # =============================================================================
@@ -287,6 +312,10 @@ class TurboFlexAttention:
         self.mask_mod_key = mask_mod_key
         self._entry = turbo_flex_attention_bshd or turbo_flex_attention
         self._entry_is_bshd = turbo_flex_attention_bshd is not None
+        # ``deterministic`` reached the compat layer later than the rest of the
+        # signature; probe once here rather than per call.
+        self._entry_accepts_deterministic = _entry_accepts(self._entry, "deterministic")
+        self._varlen_accepts_deterministic = _entry_accepts(turbo_flex_attention_varlen, "deterministic")
 
     # -- mask selection -----------------------------------------------------
     def _block_mask_for(self, *, causal: bool, window: int, q_len: int, kv_len: int, device):
@@ -354,6 +383,7 @@ class TurboFlexAttention:
         alibi_slopes,
         return_lse,
         sink,
+        deterministic=False,
     ):
         """Dispatch packed THD input through ``flex_attention_varlen``.
 
@@ -419,6 +449,19 @@ class TurboFlexAttention:
             max_seqlen_q = int(max_seqlen_q or diffs_q)
             max_seqlen_kv = int(max_seqlen_kv or diffs_kv)
 
+        varlen_kwargs = {}
+        if self._varlen_accepts_deterministic:
+            varlen_kwargs["deterministic"] = deterministic
+        elif deterministic:
+            raise NotImplementedError(
+                "Primus-Turbo flex attention: deterministic=True was requested on the packed "
+                "(THD) path, but this Primus-Turbo build's flex_attention_varlen has no "
+                "'deterministic' parameter, so the flag cannot reach the kernel. Dropping it "
+                "would run a non-deterministic backward while the config asks for a "
+                "deterministic one, so this raises instead. Upgrade Primus-Turbo, or set "
+                "deterministic_mode=false."
+            )
+
         return turbo_flex_attention_varlen(
             query,
             key,
@@ -434,6 +477,7 @@ class TurboFlexAttention:
             dropout_p=dropout_p,
             sink=_coerce_sink(sink),
             return_lse=return_lse,
+            **varlen_kwargs,
         )
 
     # -- the call itself ----------------------------------------------------
@@ -463,11 +507,16 @@ class TurboFlexAttention:
                 "Primus-Turbo flex attention: return_attn_probs is not supported (the compat "
                 "layer never materialises the attention probabilities)."
             )
-        if deterministic:
+        if deterministic and not (self._entry_accepts_deterministic and self._varlen_accepts_deterministic):
+            # The compat layer used to hard-code deterministic=False, so honouring the
+            # request was impossible and dropping it silently was unacceptable. It now
+            # threads the flag through; only an older Primus-Turbo still cannot, and
+            # that is what this guard is left for.
             raise NotImplementedError(
-                "Primus-Turbo flex attention: deterministic mode is not supported (the compat "
-                "layer always dispatches deterministic=False). Set deterministic_mode=false or "
-                "use_turbo_flex_attention=false."
+                "Primus-Turbo flex attention: deterministic=True was requested, but this "
+                "Primus-Turbo build's flex entry points have no 'deterministic' parameter, so "
+                "the flag cannot reach the kernel. Upgrade Primus-Turbo, or set "
+                "deterministic_mode=false / use_turbo_flex_attention=false."
             )
         if extra:
             # ulysses_group / ring_group arrive here when context parallelism is on.
@@ -493,6 +542,7 @@ class TurboFlexAttention:
                 alibi_slopes=alibi_slopes,
                 return_lse=return_lse,
                 sink=sink,
+                deterministic=deterministic,
             )
         if query.dim() != 4:
             raise NotImplementedError(
@@ -533,6 +583,8 @@ class TurboFlexAttention:
             sink=_coerce_sink(sink),
             bias=bias,
         )
+        if self._entry_accepts_deterministic:
+            kwargs["deterministic"] = deterministic
         if self._entry_is_bshd:
             return self._entry(query, key, value, **kwargs)
         # Older Turbo build: go through the torch-layout entry (see the import block
@@ -574,17 +626,24 @@ def build_turbo_flex_attention(*, args, config) -> TurboFlexAttention:
             "use_turbo_flex_attention=true cannot be combined with "
             "enable_turbo_attention_float8=true; the compat layer supports fp16/bf16 only."
         )
-    if getattr(args, "deterministic_mode", False):
-        # PrimusTurboAttention.forward passes deterministic=self.deterministic_mode on
-        # every call, so this would otherwise surface as a NotImplementedError from the
-        # first forward -- after model init, data loading and (on a large job) minutes of
+    if getattr(args, "deterministic_mode", False) and not (
+        _entry_accepts(turbo_flex_attention_bshd or turbo_flex_attention, "deterministic")
+        and _entry_accepts(turbo_flex_attention_varlen, "deterministic")
+    ):
+        # The flag is threaded through now, so this is only reachable on an older
+        # Primus-Turbo whose flex entries predate the parameter. PrimusTurboAttention
+        # .forward passes deterministic=self.deterministic_mode on every call, so
+        # without this it would surface as a NotImplementedError from the first
+        # forward -- after model init, data loading and (on a large job) minutes of
         # startup. Reject it here instead, next to the other build-time rejections.
         raise NotImplementedError(
-            "use_turbo_flex_attention=true is not supported with deterministic_mode=true "
-            "(the compat layer always dispatches deterministic=False). Note that the aiter "
-            "backward accumulates dQ with fp32 atomics regardless, so bit-reproducible "
-            "attention gradients are not available on this backend either way. Set "
-            "deterministic_mode=false or use_turbo_flex_attention=false."
+            "use_turbo_flex_attention=true is not supported with deterministic_mode=true on "
+            "this Primus-Turbo build: its flex entry points have no 'deterministic' "
+            "parameter, so the flag cannot reach the kernel. Upgrade Primus-Turbo, or set "
+            "deterministic_mode=false / use_turbo_flex_attention=false. Note that the aiter "
+            "backward accumulates dQ with fp32 atomics regardless, so the flag buys "
+            "whatever the backend gives it -- it is not an independent guarantee of "
+            "bit-reproducible attention gradients."
         )
     if getattr(args, "reset_attention_mask", False):
         # reset_attention_mask asks Megatron for per-document causal masking inside a

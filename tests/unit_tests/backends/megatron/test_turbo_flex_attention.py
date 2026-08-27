@@ -292,6 +292,21 @@ class TestDispatch:
         assert call["sink"] is sink
         assert call["alibi_slopes"] is alibi
         assert call["bias"] is bias
+        assert call["deterministic"] is False
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_deterministic_is_forwarded(self, stub_backend, flag):
+        attn = tfa.TurboFlexAttention()
+        attn(*_qkv(), causal=True, deterministic=flag)
+        assert stub_backend.recorder.last["deterministic"] is flag
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_deterministic_is_forwarded_on_the_packed_path(self, stub_backend, flag):
+        attn = tfa.TurboFlexAttention()
+        q = torch.randn(24, 4, 8)
+        cu = torch.tensor([0, 8, 16, 24], dtype=torch.int32)
+        attn(q, q.clone(), q.clone(), causal=True, cu_seqlens_q=cu, deterministic=flag)
+        assert stub_backend.varlen.last["deterministic"] is flag
 
     def test_bshd_entry_receives_tensors_uncopied(self, stub_backend):
         attn = tfa.TurboFlexAttention()
@@ -352,10 +367,33 @@ class TestRejections:
         with pytest.raises(NotImplementedError, match="return_attn_probs"):
             attn(*_qkv(), causal=True, return_attn_probs=True)
 
-    def test_deterministic_rejected(self, stub_backend):
+    def test_deterministic_rejected_on_an_older_turbo(self, stub_backend, monkeypatch):
+        # The flag is threaded through now; it is only refused when the installed
+        # compat layer has no parameter to put it in. A stub with an explicit
+        # signature (no ``**kwargs``) stands in for that older build.
+        def old_entry(
+            q,
+            k,
+            v,
+            score_mod=None,
+            block_mask=None,
+            scale=None,
+            enable_gqa=False,
+            return_lse=False,
+            alibi_slopes=None,
+            dropout_p=0.0,
+            sink=None,
+            bias=None,
+        ):
+            return torch.zeros_like(q)
+
+        monkeypatch.setattr(tfa, "turbo_flex_attention_bshd", old_entry)
+        monkeypatch.setattr(tfa, "turbo_flex_attention", old_entry)
         attn = tfa.TurboFlexAttention()
         with pytest.raises(NotImplementedError, match="deterministic"):
             attn(*_qkv(), causal=True, deterministic=True)
+        # ...and it is a *conditional* refusal: the default still runs.
+        assert attn(*_qkv(), causal=True, deterministic=False) is not None
 
     def test_context_parallel_groups_rejected(self, stub_backend):
         attn = tfa.TurboFlexAttention()
@@ -433,6 +471,35 @@ class TestBuild:
     def test_context_parallel_rejected(self, stub_backend):
         with pytest.raises(NotImplementedError, match="context parallel"):
             tfa.build_turbo_flex_attention(args=_args(), config=_config(context_parallel_size=2))
+
+    def test_deterministic_mode_accepted_on_a_current_turbo(self, stub_backend):
+        # The compat layer threads ``deterministic`` now, so deterministic_mode=true is
+        # no longer a build-time rejection -- it is simply forwarded.
+        attn = tfa.build_turbo_flex_attention(args=_args(deterministic_mode=True), config=_config())
+        attn(*_qkv(), causal=True, deterministic=True)
+        assert stub_backend.recorder.last["deterministic"] is True
+
+    def test_deterministic_mode_rejected_at_build_on_an_older_turbo(self, stub_backend, monkeypatch):
+        def old_entry(
+            q,
+            k,
+            v,
+            score_mod=None,
+            block_mask=None,
+            scale=None,
+            enable_gqa=False,
+            return_lse=False,
+            alibi_slopes=None,
+            dropout_p=0.0,
+            sink=None,
+            bias=None,
+        ):
+            return torch.zeros_like(q)
+
+        monkeypatch.setattr(tfa, "turbo_flex_attention_bshd", old_entry)
+        monkeypatch.setattr(tfa, "turbo_flex_attention", old_entry)
+        with pytest.raises(NotImplementedError, match="deterministic"):
+            tfa.build_turbo_flex_attention(args=_args(deterministic_mode=True), config=_config())
 
     def test_float8_rejected(self, stub_backend):
         with pytest.raises(NotImplementedError, match="float8"):

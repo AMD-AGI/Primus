@@ -814,6 +814,10 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
 
         self.offload = args.offload and "attn" in args.offload_ops
         self._attn_accepts_packed_seq = False
+        # The packed (THD) entry bound alongside the dense one. ``None`` means this
+        # configuration has no varlen kernel and qkv_format="thd" must be rejected.
+        self.attn_varlen = None
+        self._attn_is_fp8 = bool(getattr(args, "enable_turbo_attention_float8", False))
         self._attn_is_flex = bool(getattr(args, "use_turbo_flex_attention", False))
         if self._attn_is_flex:
             # Route through the flex_attention compat layer. It presents the same call
@@ -838,6 +842,20 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                 if self.config.context_parallel_size > 1
                 else primus_turbo_torch.ops.flash_attn_func
             )
+            # Packed sequences on the direct path. flash_attn_varlen_func takes the
+            # document boundaries as cu_seqlens and honours them in the kernel, so THD
+            # no longer has to route through the flex compat layer to be correct.
+            #
+            # Deliberately bound for CP == 1 only. flash_attn_varlen_usp_func exists,
+            # but it wants the GLOBAL cu_seqlens/max_seqlen describing the full
+            # unsharded sequence while each rank holds a local token shard, and what
+            # Megatron puts in PackedSeqParams under context parallelism is not
+            # something this adapter can verify locally. Guessing there would attend
+            # across documents silently -- the exact failure this binding exists to
+            # remove -- so CP > 1 keeps raising below.
+            if self.config.context_parallel_size == 1:
+                self.attn_varlen = primus_turbo_torch.ops.flash_attn_varlen_func
+                self._attn_accepts_packed_seq = True
         if pg_collection is None:
             # For backward compatibility, remove in v0.14 and raise error
             # raise ValueError("TEDotProductAttention was called without ProcessGroupCollection")
@@ -867,23 +885,38 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         # reasoning, including why the *default* causal mask is safe to drop.
         reject_reset_attention_mask(args, is_flex=self._attn_is_flex, where="primus_turbo attention")
 
-        # Sliding-window attention. The direct flash_attn_func binding takes no window
-        # argument, so config-level SWA stays rejected there. The flex path expresses a
-        # window as a mask_mod and drives the same aiter kernel the sink path already
-        # uses, so it can honour config.window_size.
+        # Sliding-window attention.
+        #
+        # forward() already threads a `window_size` tuple into every attention call --
+        # that is how the sink pattern applies its per-layer window -- and the bound
+        # entries honour it: flash_attn_func / flash_attn_varlen_func pass it to the
+        # aiter kernel, flash_attn_usp_func saves it on ctx and applies it in the
+        # backward too. So config-level SWA needs no new plumbing on the direct path;
+        # it only ever needed the gate opening. The flex path expresses the same window
+        # as a mask_mod and drives the same kernel.
+        #
+        # fp8 is the one exception: flash_attn_fp8_func routes to the Triton kernel,
+        # whose forward asserts window_size == (-1, -1). Rejecting it here turns that
+        # assert into an explanation at build time.
         self._config_window_size = None
         if config.window_size is not None:
-            if not self._attn_is_flex:
+            if self._attn_is_fp8:
                 raise NotImplementedError(
-                    "primus_turbo does not support sliding window attention on the direct "
-                    f"attention path (config.window_size={tuple(config.window_size)}). Set "
-                    "use_turbo_flex_attention=true to route it through the flex compat layer."
+                    "primus_turbo does not support sliding window attention on the fp8 "
+                    f"attention path (config.window_size={tuple(config.window_size)}); the "
+                    "Triton fp8 kernel takes full attention only. Set "
+                    "enable_turbo_attention_float8=false, or window_size=None."
                 )
             left, right = config.window_size
             if int(right) > 0:
+                # A positive right bound means attending forward. The flex path builds
+                # its window out of causal mask_mods and cannot express it at all; the
+                # direct path could pass it to the kernel, but honouring it on one path
+                # and not the other would make the same config mean two different
+                # models. Reject it on both.
                 raise NotImplementedError(
-                    "primus_turbo flex attention supports causal windows only, so "
-                    f"window_size[1] must be 0 or -1; got {tuple(config.window_size)}."
+                    "primus_turbo supports causal windows only, so window_size[1] must be 0 "
+                    f"or -1; got {tuple(config.window_size)}."
                 )
             if self._init_sink_attention and self.sink_sliding_window > 0:
                 raise NotImplementedError(
@@ -1037,50 +1070,101 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             value = value.permute(0, 2, 1, 3)
 
         # Packed sequences: q/k/v are already THD [total_tokens, H, D] (no permute
-        # applies) and the document boundaries live in packed_seq_params. Only the flex
-        # path can consume them -- it forwards them to flex_attention_varlen. Without
-        # this, "thd" reached the attention call with the boundaries dropped, so tokens
-        # attended across documents with no error raised anywhere.
+        # applies) and the document boundaries live in packed_seq_params. They reach the
+        # kernel two different ways:
+        #   * flex  -> forwarded as keyword args to the compat layer, which calls
+        #              flex_attention_varlen itself;
+        #   * direct-> dispatched to the flash_attn_varlen_func bound in __init__, whose
+        #              signature takes cu_seqlens positionally.
+        # Either way the boundaries reach the kernel. Without this, "thd" used to reach
+        # a dense attention call with the boundaries dropped, so tokens attended across
+        # documents with no error raised anywhere.
         packed_attn_kwargs = {}
+        use_direct_varlen = False
+        cu_seqlens_q = cu_seqlens_kv = None
+        max_seqlen_q = max_seqlen_kv = None
         if qkv_format == "thd":
             if not self._attn_accepts_packed_seq:
                 raise NotImplementedError(
                     "PrimusTurboAttention: qkv_format='thd' (packed sequences) is not "
-                    "supported on this attention path -- the document boundaries in "
-                    "packed_seq_params cannot be forwarded to flash_attn_func, so tokens "
-                    "would attend across documents. Set use_turbo_flex_attention=true "
-                    "(which routes packing through flex_attention_varlen) or disable "
-                    "sequence packing."
+                    "supported on this attention path -- there is no varlen kernel bound "
+                    "for it, so the document boundaries in packed_seq_params could not be "
+                    "forwarded and tokens would attend across documents. Packing is "
+                    "available on the plain bf16/fp16 path (context_parallel_size=1) and "
+                    "through use_turbo_flex_attention=true; it is not available with "
+                    "enable_turbo_attention_float8=true (no fp8 varlen entry) or with "
+                    "context parallelism. Disable sequence packing, or change the path."
                 )
             if packed_seq_params is None:
                 raise ValueError(
                     "PrimusTurboAttention: qkv_format='thd' requires packed_seq_params "
                     "carrying cu_seqlens_q / cu_seqlens_kv."
                 )
-            packed_attn_kwargs = {
-                "cu_seqlens_q": getattr(packed_seq_params, "cu_seqlens_q", None),
-                "cu_seqlens_kv": getattr(packed_seq_params, "cu_seqlens_kv", None),
-                "max_seqlen_q": getattr(packed_seq_params, "max_seqlen_q", None),
-                "max_seqlen_kv": getattr(packed_seq_params, "max_seqlen_kv", None),
-            }
+            cu_seqlens_q = getattr(packed_seq_params, "cu_seqlens_q", None)
+            cu_seqlens_kv = getattr(packed_seq_params, "cu_seqlens_kv", None)
+            max_seqlen_q = getattr(packed_seq_params, "max_seqlen_q", None)
+            max_seqlen_kv = getattr(packed_seq_params, "max_seqlen_kv", None)
+            if self._attn_is_flex:
+                packed_attn_kwargs = {
+                    "cu_seqlens_q": cu_seqlens_q,
+                    "cu_seqlens_kv": cu_seqlens_kv,
+                    "max_seqlen_q": max_seqlen_q,
+                    "max_seqlen_kv": max_seqlen_kv,
+                }
+            else:
+                use_direct_varlen = True
 
-        o = self.attn(
-            query,
-            key,
-            value,
-            dropout_p=0.0,
-            softmax_scale=self.softmax_scale,
-            causal=causal,
-            window_size=window_size,
-            bias=None,
-            alibi_slopes=None,
-            deterministic=self.deterministic_mode,
-            return_lse=False,
-            return_attn_probs=False,
-            sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
-            **packed_attn_kwargs,
-            **self.attn_kwargs,
-        )
+        if use_direct_varlen:
+            if cu_seqlens_q is None:
+                raise ValueError(
+                    "PrimusTurboAttention: qkv_format='thd' requires cu_seqlens_q; the "
+                    "document boundaries are not recoverable from the packed tensor shape, "
+                    "and guessing them would let tokens attend across documents."
+                )
+            if cu_seqlens_kv is None:
+                cu_seqlens_kv = cu_seqlens_q
+            if max_seqlen_q is None or max_seqlen_kv is None:
+                # Derivable from the prefix sums; one small D2H copy, and in practice only
+                # on the first call of a shape because Megatron caches PackedSeqParams.
+                max_seqlen_q = int(max_seqlen_q or (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
+                max_seqlen_kv = int(max_seqlen_kv or (cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]).max().item())
+            o = self.attn_varlen(
+                query,
+                key,
+                value,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                int(max_seqlen_q),
+                int(max_seqlen_kv),
+                dropout_p=0.0,
+                softmax_scale=self.softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                bias=None,
+                alibi_slopes=None,
+                deterministic=self.deterministic_mode,
+                return_lse=False,
+                return_attn_probs=False,
+                sink=sink_tensor,
+            )
+        else:
+            o = self.attn(
+                query,
+                key,
+                value,
+                dropout_p=0.0,
+                softmax_scale=self.softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                bias=None,
+                alibi_slopes=None,
+                deterministic=self.deterministic_mode,
+                return_lse=False,
+                return_attn_probs=False,
+                sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
+                **packed_attn_kwargs,
+                **self.attn_kwargs,
+            )
 
         if qkv_format == "sbhd":
             o = o.permute(1, 0, 2, 3)
