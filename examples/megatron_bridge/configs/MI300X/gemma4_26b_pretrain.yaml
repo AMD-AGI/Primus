@@ -36,12 +36,15 @@ modules:
       lr_warmup_iters: 2
       lr_decay_iters: null
 
-      # Parallelism - MoE with expert parallelism
-      tensor_model_parallel_size: 1
-      expert_model_parallel_size: 8  # Critical for 26B MoE
+      # Parallelism - MoE with expert parallelism.
+      # TP=1/EP=8 runs out of memory at this sequence length because the
+      # non-expert weights are replicated on every rank; TP=2/EP=4 fits.
+      # TP=1/EP=8 is still usable at shorter sequence lengths.
+      tensor_model_parallel_size: 2
+      expert_model_parallel_size: 4  # Critical for 26B MoE
       pipeline_model_parallel_size: 1
       context_parallel_size: 1
-      sequence_parallel: false
+      sequence_parallel: true
       use_megatron_fsdp: false
       enable_primus_turbo: false
 
