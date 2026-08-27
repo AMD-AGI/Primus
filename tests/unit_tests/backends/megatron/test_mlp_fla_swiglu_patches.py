@@ -121,16 +121,17 @@ def test_anchors_are_unique_in_upstream_source():
 
 
 class _AnchorTwice:
-    """Anchor ``x = 1`` appears twice; rewriting both would be silent corruption."""
+    """Anchor ``total += 1`` appears twice; rewriting both would be silent corruption."""
 
     def run(self):
-        x = 1
-        x = 1
-        return x
+        total = 0
+        total += 1
+        total += 1
+        return total
 
 
 class _AnchorMissing:
-    """Anchor ``x = 1`` never appears, standing in for upstream drift."""
+    """Anchor ``total += 1`` never appears, standing in for upstream drift."""
 
     def run(self):
         return 0
@@ -142,7 +143,7 @@ def test_multi_rewrite_rejects_ambiguous_anchor(victim):
     original = victim.run
 
     with pytest.raises(RuntimeError, match="expected exactly 1"):
-        patch_method_source_multi(victim, "run", [("x = 1", "x = 2")])
+        patch_method_source_multi(victim, "run", [("total += 1", "total += 2")])
 
     assert victim.run is original, "a rejected rewrite must not mutate the class"
 
