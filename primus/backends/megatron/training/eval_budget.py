@@ -25,6 +25,7 @@ evaluation reports the count it intended rather than the count it achieved.
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +33,7 @@ __all__ = [
     "DEFAULT_VAL_NUM_WORKERS",
     "EvalCoverageError",
     "assert_val_worker_divisibility",
+    "get_data_parallel_size",
     "get_eval_num_microbatches",
     "get_val_num_workers",
     "read_energon_split_sample_count",
@@ -53,13 +55,53 @@ class EvalCoverageError(ValueError):
     """Raised when an evaluation would not read the samples it claims to."""
 
 
+def get_data_parallel_size(args) -> int:
+    """Data-parallel width, usable before Megatron has computed it.
+
+    Megatron only sets ``data_parallel_size`` while initialising process
+    groups, but the evaluation budget has to be resolved earlier than that --
+    in the ``build_args`` phase, so the Energon provider and the evaluator
+    both see the corrected ``eval_iters``. Reading the attribute directly
+    there raises ``AttributeError``, which the patch runner logs and swallows,
+    leaving ``eval_iters`` at 0; the job then runs to completion having
+    evaluated nothing. So derive the value the same way Megatron does instead.
+    """
+    dp_size = getattr(args, "data_parallel_size", None)
+    if dp_size:
+        return dp_size
+
+    world_size = getattr(args, "world_size", None) or int(os.environ.get("WORLD_SIZE", 0))
+    if not world_size:
+        raise EvalCoverageError(
+            "Cannot size the evaluation: data_parallel_size is not set yet and "
+            "neither args.world_size nor the WORLD_SIZE environment variable is "
+            "available to derive it from."
+        )
+
+    divisor = 1
+    for name in (
+        "tensor_model_parallel_size",
+        "pipeline_model_parallel_size",
+        "context_parallel_size",
+    ):
+        divisor *= getattr(args, name, 1) or 1
+
+    if world_size % divisor != 0:
+        raise EvalCoverageError(
+            f"world_size ({world_size}) is not divisible by "
+            f"tensor x pipeline x context parallel size ({divisor}), so "
+            f"data_parallel_size cannot be derived."
+        )
+    return world_size // divisor
+
+
 def get_eval_num_microbatches(args) -> int:
     """Microbatches per evaluation iteration.
 
     Uses the same global batch as training so that ``eval_iters`` counts in
     global batches, matching Megatron's convention.
     """
-    dp_size = args.data_parallel_size
+    dp_size = get_data_parallel_size(args)
     micro_batch_size = args.micro_batch_size
     global_batch_size = args.global_batch_size
 
@@ -114,7 +156,7 @@ def assert_val_worker_divisibility(args, eval_samples: int) -> None:
     The ``max(1, ...)`` mirrors Energon's own clamping, and is also what keeps
     this from dividing by zero at the default worker count of 0.
     """
-    dp_size = args.data_parallel_size
+    dp_size = get_data_parallel_size(args)
     micro_batch_size = args.micro_batch_size
     val_num_workers = get_val_num_workers(args)
 

@@ -18,12 +18,32 @@ from megatron.training.utils import is_last_rank
 from primus.backends.megatron.training.eval_budget import get_eval_num_microbatches
 from primus.backends.megatron.training.global_vars import get_train_start_time
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
-from primus.core.utils.module_utils import log_rank_0
+from primus.core.utils.module_utils import debug_rank_0, log_rank_0
 
 # The key under which the diffusion validation path reports
 # (summed per-sample loss, sample count). Its denominator is the only one that
 # is a sample count rather than a microbatch count.
 VAL_LOSS_KEY = "loss"
+
+
+def _report_eval(args, message):
+    """Report evaluation progress or a result on rank 0, at debug under MLPerf mode.
+
+    MLPerf mode keeps the run's output to a single voice: it stubs out
+    Megatron's print_rank_last and the tensorboard and wandb writers, and
+    reports the loss itself, both as an mllog eval_accuracy event and as its own
+    [MLPerf] line. Repeating any of that alongside a submission log is noise, so
+    under MLPerf mode it drops to debug and stays in debug.log for a post-mortem.
+
+    Only progress and results that confirm things went as configured come
+    through here. A coverage shortfall raises, and the one mismatch that does
+    not raise still reports at info, so nothing this quietens can turn a bad run
+    into a silent one.
+    """
+    if getattr(args, "mlperf_mode", False):
+        debug_rank_0(message)
+    else:
+        log_rank_0(message)
 
 
 def _record_consumed_valid_samples(args, observed_samples, eval_iters, eval_batch_size):
@@ -45,6 +65,14 @@ def _record_consumed_valid_samples(args, observed_samples, eval_iters, eval_batc
         return
 
     args.consumed_valid_samples += observed_samples
+
+    if observed_samples == expected:
+        _report_eval(
+            args,
+            f"[eval] covered {observed_samples} samples "
+            f"({eval_iters} iterations x {eval_batch_size} per iteration)",
+        )
+        return
 
     if observed_samples != expected:
         # Context parallelism duplicates the per-sample loss across CP ranks,
@@ -177,11 +205,15 @@ def primus_evaluate(
     with torch.no_grad():
         iteration = 0
         if verbose:
-            log_rank_0(f"Evaluating on {eval_iters * eval_batch_size} samples")
+            _report_eval(args, f"Evaluating on {eval_iters * eval_batch_size} samples")
         while iteration < eval_iters:
             iteration += 1
             if verbose:
-                log_rank_0(f"Evaluating iter {iteration}/{eval_iters}")
+                # One line per iteration, so 58 per evaluation at the MLPerf
+                # shape and 580 over a ten-evaluation run. Progress is worth
+                # watching on an ordinary run and worth nothing in a submission
+                # log, which reports its own eval_start and eval_stop.
+                _report_eval(args, f"Evaluating iter {iteration}/{eval_iters}")
 
             # Don't care about timing during evaluation
             config.timers = None
@@ -255,6 +287,16 @@ def primus_evaluate(
             )
 
         _record_consumed_valid_samples(args, observed_samples, eval_iters, eval_batch_size)
+
+        # Megatron reports the losses with print_rank_last, and torchrun does
+        # not forward the last rank's stdout, so on a multi-GPU job the number
+        # the evaluation exists to produce never reaches the console. Repeat it
+        # through the Primus logger, which does.
+        if total_loss_dict:
+            summary = ", ".join(
+                f"{key}={value.item():.6f}" for key, value in sorted(total_loss_dict.items())
+            )
+            _report_eval(args, f"[eval] {summary}")
 
         collected_non_loss_data = None
         if non_loss_data_func is not None:

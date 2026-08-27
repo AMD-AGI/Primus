@@ -32,6 +32,7 @@ from megatron.energon import (
 from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
 from primus.backends.megatron.data.dataset_provider import DatasetProvider
 from primus.backends.megatron.training.eval_budget import (
+    EvalCoverageError,
     assert_val_worker_divisibility,
     get_eval_num_microbatches,
     get_val_num_workers,
@@ -106,27 +107,48 @@ class EnergonDatasetProvider(DatasetProvider):
         # Get data path
         data_path = self._get_data_path(args)
 
-        # Create training dataset using Energon
-        log_rank_0(f"Creating training dataset from: {data_path}")
-        train_dataset = get_train_dataset(
-            data_path,
-            batch_size=args.micro_batch_size,
-            task_encoder=task_encoder,
-            worker_config=worker_config,
-            virtual_epoch_length=getattr(args, "virtual_epoch_length", 1_000_000_000),
-            max_samples_per_sequence=getattr(args, "max_samples_per_sequence", 100),
-            shuffle_buffer_size=getattr(args, "shuffle_buffer_size", None),
-            handler=lambda *args: None,  # Error handler (print errors but continue)
-        )
-
-        # Wrap in savable loader for checkpointing support
         prefetch_factor = getattr(args, "prefetch_factor", 2)
         log_rank_0(f"Dataloader prefetch_factor: {prefetch_factor}")
-        train_dataloader = get_savable_loader(
-            train_dataset, worker_config=worker_config, prefetch_factor=prefetch_factor
-        )
-        train_dataloader = MegatronDataloaderWrapper(train_dataloader)
-        log_rank_0("Created training dataloader")
+
+        # Megatron drops the train iterator entirely under --skip-train, so
+        # building one is wasted work. It is also fatal for a dataset that
+        # holds only a validation split, which is a legitimate shape for an
+        # evaluation-only run.
+        if getattr(args, "skip_train", False):
+            train_dataloader = None
+            log_rank_0("skip_train is set: not creating a training dataset")
+        else:
+            log_rank_0(f"Creating training dataset from: {data_path}")
+            train_dataset = get_train_dataset(
+                data_path,
+                batch_size=args.micro_batch_size,
+                task_encoder=task_encoder,
+                worker_config=worker_config,
+                virtual_epoch_length=getattr(args, "virtual_epoch_length", 1_000_000_000),
+                max_samples_per_sequence=getattr(args, "max_samples_per_sequence", 100),
+                shuffle_buffer_size=getattr(args, "shuffle_buffer_size", None),
+                handler=lambda *args: None,  # Error handler (print errors but continue)
+            )
+
+            # Wrap in savable loader for checkpointing support
+            train_dataloader = get_savable_loader(
+                train_dataset, worker_config=worker_config, prefetch_factor=prefetch_factor
+            )
+            train_dataloader = MegatronDataloaderWrapper(train_dataloader)
+            log_rank_0("Created training dataloader")
+
+        # The patch that turns eval_samples into eval_iters runs in build_args,
+        # where a failure is logged and swallowed rather than raised. If it did
+        # not take effect, eval_iters is still 0 and the job would run to
+        # completion, exit 0, and report no validation at all -- while the
+        # recipe plainly asked for a specific number of samples. Refuse that.
+        if getattr(args, "eval_samples", None) and not args.eval_iters:
+            raise EvalCoverageError(
+                f"eval_samples={args.eval_samples} is configured but eval_iters is 0, "
+                f"so no evaluation would run. The megatron.args.eval_samples patch "
+                f"that derives one from the other did not take effect; look for its "
+                f"failure in the build_args phase of the log."
+            )
 
         # Create validation dataloaders if evaluation is enabled
         valid_dataloaders = None
