@@ -8,7 +8,7 @@ Loads the converted model and verifies:
 3. Top predictions are sensible English tokens
 
 Usage:
-    python tools/hybrid/verify_gdn_conversion.py --model-path output/gdn_pure_1B_fla_hf
+    python tools/hybrid/verify_gdn_conversion.py --model-path output/gdn_1B_fla_hf
 """
 
 import argparse

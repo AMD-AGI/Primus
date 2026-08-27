@@ -11,10 +11,10 @@ Usage (same CLI as lm_eval, just swap the command):
 
     python tools/hybrid/eval_gdn_lm_eval.py \
         --model hf \
-        --model_args pretrained=output/gdn_pure_1B_fla_hf,dtype=bfloat16,trust_remote_code=True \
+        --model_args pretrained=output/gdn_1B_fla_hf,dtype=bfloat16,trust_remote_code=True \
         --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \
         --batch_size auto \
-        --output_path eval_results/gdn_pure_1B
+        --output_path eval_results/gdn_1B
 """
 import fla  # noqa: F401  — registers GatedDeltaNet with AutoConfig/AutoModel
 
