@@ -23,9 +23,13 @@ modules:
 
       training:
         local_batch_size: ${LOCAL_BATCH_SIZE:1}
+        eval_batch_size: ${EVAL_BATCH_SIZE:1}
         steps: ${MAX_STEPS:50}
         num_train_epochs: 1000
         gradient_accumulation_steps: ${GRADIENT_ACCUMULATION_STEPS:1}
+        dataloader_num_workers: ${DATALOADER_NUM_WORKERS:4}
+        eval_dataloader_num_workers: ${EVAL_DATALOADER_NUM_WORKERS:4}
+        eval_dataloader_prefetch_factor: ${EVAL_DATALOADER_PREFETCH_FACTOR:4}
         output_dir: ${OUTPUT_DIR:./output/flux.1_schnell_t2i-pretrain}
         save_steps: ${SAVE_STEPS:100}
         save_strategy: ${SAVE_STRATEGY:dtcp_full}

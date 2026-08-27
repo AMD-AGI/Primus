@@ -487,9 +487,16 @@ def test_flux_eval_dataset_preserves_integer_timestep(tmp_path):
     assert sample["timestep"].dtype == torch.int64
     assert sample["timestep"].item() == 7
 
+    collated = dataset.get_collator()([sample, sample])
+    assert collated["t5_encodings"].shape == (2, 3, 8)
+    assert collated["timestep"].tolist() == [7, 7]
+
     processor = FluxPrecomputedProcessor({})
-    batch = processor.prepare_batch(batch=[sample], device=torch.device("cpu"), dtype=torch.bfloat16)
+    batch = processor.prepare_batch(
+        batch=collated, device=torch.device("cpu"), dtype=torch.bfloat16
+    )
     assert batch["timestep"].dtype == torch.int64
+    assert batch["timestep"].tolist() == [7, 7]
 
 
 def test_flux_eval_uses_fixed_mlperf_timesteps():

@@ -15,9 +15,13 @@ metrics:
 
 training:
   local_batch_size: ${LOCAL_BATCH_SIZE}
+  eval_batch_size: ${EVAL_BATCH_SIZE}
   steps: ${MAX_STEPS}
   num_train_epochs: 1000
   gradient_accumulation_steps: ${GRADIENT_ACCUMULATION_STEPS}
+  dataloader_num_workers: ${DATALOADER_NUM_WORKERS}
+  eval_dataloader_num_workers: ${EVAL_DATALOADER_NUM_WORKERS}
+  eval_dataloader_prefetch_factor: ${EVAL_DATALOADER_PREFETCH_FACTOR}
   output_dir: ${OUTPUT_DIR}
   save_steps: ${SAVE_STEPS}
   save_strategy: ${SAVE_STRATEGY}

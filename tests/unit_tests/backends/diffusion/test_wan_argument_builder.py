@@ -52,6 +52,7 @@ def test_maps_primus_style_sections_to_wan_runtime_config():
         "training": {
             "steps": 7,
             "local_batch_size": 2,
+            "eval_batch_size": 8,
             "global_batch_size": 16,
             "gradient_accumulation_steps": 4,
             "output_dir": "/tmp/wan-out",
@@ -59,6 +60,8 @@ def test_maps_primus_style_sections_to_wan_runtime_config():
             "run_name": "wan-test",
             "num_train_epochs": 9,
             "dataloader_num_workers": 0,
+            "eval_dataloader_num_workers": 16,
+            "eval_dataloader_prefetch_factor": 4,
             "resume_from_checkpoint": "/tmp/resume",
         },
         "data": {
@@ -115,6 +118,7 @@ def test_maps_primus_style_sections_to_wan_runtime_config():
 
     assert trainer_args["max_steps"] == 7
     assert trainer_args["per_device_train_batch_size"] == 2
+    assert trainer_args["per_device_eval_batch_size"] == 8
     assert trainer_args["global_batch_size"] == 16
     assert trainer_args["gradient_accumulation_steps"] == 4
     assert trainer_args["output_dir"] == "/tmp/wan-out"
@@ -122,6 +126,8 @@ def test_maps_primus_style_sections_to_wan_runtime_config():
     assert trainer_args["run_name"] == "wan-test"
     assert trainer_args["num_train_epochs"] == 9
     assert trainer_args["dataloader_num_workers"] == 0
+    assert trainer_args["eval_dataloader_num_workers"] == 16
+    assert trainer_args["eval_dataloader_prefetch_factor"] == 4
     assert trainer_args["resume_from_checkpoint"] == "/tmp/resume"
 
     assert trainer_args["sp_size"] == 4

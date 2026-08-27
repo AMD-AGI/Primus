@@ -293,6 +293,8 @@ class DiffusionArgBuilder:
             ("run_name",): ("run_name",),
             ("num_train_epochs",): ("num_train_epochs",),
             ("dataloader_num_workers",): ("dataloader_num_workers",),
+            ("eval_dataloader_num_workers",): ("eval_dataloader_num_workers",),
+            ("eval_dataloader_prefetch_factor",): ("eval_dataloader_prefetch_factor",),
             ("resume_from_checkpoint",): ("resume_from_checkpoint",),
         }
         for source_path, target_path in training_map.items():

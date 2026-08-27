@@ -94,6 +94,11 @@ required.
 
 Common overrides include `MAX_STEPS`, `SEED`, `MASTER_PORT`, `SAVE_STRATEGY`,
 `SAVE_STEPS`, `RESUME_FROM_CHECKPOINT`, and `MLPERF_CLEAR_CACHES=false`.
+Evaluation throughput can be tuned independently with `EVAL_BATCH_SIZE`,
+`EVAL_DATALOADER_NUM_WORKERS`, and `EVAL_DATALOADER_PREFETCH_FACTOR`; their
+defaults are the training local batch size, the training worker count (`4`),
+and `4`. These knobs do not change the required full 29,696-sample evaluation
+or its 262,144-training-sample cadence.
 The same launcher supports Crusoe and DCCS; only the Slurm submission options
 and host network settings differ. On DCCS, use
 `NCCL_SOCKET_IFNAME=fenic GLOO_SOCKET_IFNAME=fenic`. The launcher uses the

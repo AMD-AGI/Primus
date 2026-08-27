@@ -18,7 +18,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 from PIL import Image, ImageFile
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate
 
 from primus.backends.diffusion.data.collator import RawBatchCollator
 
@@ -89,7 +89,8 @@ class FluxPrecomputedDataset(Dataset):
         return result
 
     def get_collator(self):
-        return RawBatchCollator()
+        # Stack in DataLoader workers so pin_memory applies to complete batches.
+        return default_collate
 
 
 class FluxRawImageTextDataset(Dataset):
