@@ -15,9 +15,115 @@ from megatron.core.rerun_state_machine import RerunMode, get_rerun_state_machine
 from megatron.training import ft_integration, get_args, get_timers
 from megatron.training.utils import is_last_rank
 
+from primus.backends.megatron.training.eval_budget import get_eval_num_microbatches
 from primus.backends.megatron.training.global_vars import get_train_start_time
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
 from primus.core.utils.module_utils import log_rank_0
+
+# The key under which the diffusion validation path reports
+# (summed per-sample loss, sample count). Its denominator is the only one that
+# is a sample count rather than a microbatch count.
+VAL_LOSS_KEY = "loss"
+
+
+def _record_consumed_valid_samples(args, observed_samples, eval_iters, eval_batch_size):
+    """Account for the samples the evaluation actually read, and say so.
+
+    The previous behaviour added ``eval_batch_size`` per iteration regardless
+    of how wide the batches really were, so a short final batch on any worker
+    was counted as a full one and the logged sample count could exceed the
+    count evaluated. Reporting the intended number is worse than reporting
+    nothing, because it is indistinguishable from a correct run.
+    """
+    expected = eval_iters * eval_batch_size
+
+    if observed_samples is None:
+        # No loss-bearing stage on this rank, or a metric shape that carries
+        # microbatch counts rather than sample counts. Fall back to the
+        # configured budget rather than skipping the accounting entirely.
+        args.consumed_valid_samples += expected
+        return
+
+    args.consumed_valid_samples += observed_samples
+
+    if observed_samples != expected:
+        # Context parallelism duplicates the per-sample loss across CP ranks,
+        # which inflates the reduced denominator; only assert when it cannot.
+        cp_size = parallel_state.get_context_parallel_world_size()
+        detail = (
+            f"Evaluation read {observed_samples} samples but the configuration "
+            f"implies {expected} ({eval_iters} iterations x {eval_batch_size}). "
+            f"Difference: {expected - observed_samples}."
+        )
+        if cp_size == 1:
+            raise RuntimeError(
+                f"{detail}\nThis is the silent under-read described in eval_budget: "
+                f"Energon workers whose batch quota is short leave the tail of their "
+                f"slice unread. Check val_num_workers against eval_samples."
+            )
+        log_rank_0(f"[eval] {detail} (context_parallel_size={cp_size}, not asserting)")
+
+
+def _reduction_device(numerators):
+    """Where to build the packed buffer: wherever the accumulators already live.
+
+    Packing onto the accumulators' own device avoids a transfer and keeps the
+    buffer on the device the process group can reduce over.
+    """
+    for value in numerators.values():
+        if isinstance(value, torch.Tensor):
+            return value.device
+    return torch.device("cuda")
+
+
+def reduce_eval_losses(numerators, denominators, dp_group):
+    """Reduce every accumulated (numerator, denominator) pair across data parallelism.
+
+    One reduction, one group, one host sync.
+
+    Every numerator and denominator across every key is packed into a single
+    fp64 buffer and reduced once. The reduction must produce a value identical
+    on every rank: the target-eval-loss early stop compares it against a
+    threshold, and if ranks disagree near the target one can exit train() alone
+    while the others keep training, desyncing collectives (grad-norm
+    all-reduce) into an NCCL hang.
+
+    The previous implementation reduced num/den over DP-with-CP and then
+    reduced the result again over DP-without-CP. That left both sides
+    multiplied by data_parallel_size, so the ratio was right but the
+    denominator could not be read as a sample count.
+
+    Returns:
+        ``(total_loss_dict, observed_samples)``, where ``observed_samples`` is
+        the globally reduced ``VAL_LOSS_KEY`` denominator -- a true sample
+        count -- or None when no such key was reported.
+    """
+    keys = sorted(numerators.keys())
+    packed = torch.tensor(
+        [float(value) for key in keys for value in (numerators[key], denominators[key])],
+        dtype=torch.float64,
+        device=_reduction_device(numerators),
+    )
+    torch.distributed.all_reduce(packed, op=torch.distributed.ReduceOp.SUM, group=dp_group)
+
+    # Single host sync for every key at once.
+    reduced = packed.tolist()
+    total_loss_dict = {}
+    observed_samples = None
+    for index, key in enumerate(keys):
+        numerator, denominator = reduced[2 * index], reduced[2 * index + 1]
+        # Keep the result as a 0-dim tensor: downstream Megatron code
+        # (evaluate_and_print_results) and mlperf logging call .item().
+        if denominator > 0:
+            total_loss_dict[key] = torch.tensor(
+                numerator / denominator, dtype=torch.float32, device=packed.device
+            )
+        else:
+            total_loss_dict[key] = torch.zeros((), dtype=torch.float32, device=packed.device)
+        if key == VAL_LOSS_KEY:
+            observed_samples = int(round(denominator))
+
+    return total_loss_dict, observed_samples
 
 
 def primus_evaluate(
@@ -56,7 +162,9 @@ def primus_evaluate(
 
     # make validation batch size independent from training batch size
     eval_batch_size = args.global_batch_size
-    eval_num_microbatches = eval_batch_size // (args.micro_batch_size * args.data_parallel_size)
+    # Shared with the dataloader provider so the loop and the dataset it reads
+    # from cannot disagree about how large an evaluation is.
+    eval_num_microbatches = get_eval_num_microbatches(args)
     forward_backward_func = get_forward_backward_func()
     if args.enable_cuda_graph and args.cuda_graph_scope == "full_iteration":
         forward_backward_func = FullCudaGraphWrapper(
@@ -123,8 +231,6 @@ def primus_evaluate(
                     total_loss_numerators[key] += numerator
                     total_loss_denominators[key] += denominator
 
-            args.consumed_valid_samples += eval_batch_size
-
             if args.exit_duration_in_mins:
                 train_time = (time.time() - get_train_start_time()) / 60.0
                 done_cuda = torch.tensor(
@@ -137,48 +243,18 @@ def primus_evaluate(
                     log_rank_0("Exiting during evaluation, timelimit reached")
                     return None, None, True
 
-        # DP all-reduce for tuple-path (validation) metrics so that every
-        # rank sees the same globally-averaged loss.  Scalar/legacy metrics
-        # are NOT all-reduced, matching upstream Megatron's evaluate().
         total_loss_dict = {}
+        observed_samples = None
         if is_pipeline_stage_containing_loss():
             from megatron.core import mpu
 
-            dp_group = mpu.get_data_parallel_group(with_context_parallel=True)
-            for key in total_loss_numerators.keys():
-                num = total_loss_numerators[key]
-                den = total_loss_denominators[key]
-                if isinstance(num, torch.Tensor) and isinstance(den, torch.Tensor):
-                    torch.distributed.all_reduce(num, group=dp_group)
-                    torch.distributed.all_reduce(den, group=dp_group)
+            total_loss_dict, observed_samples = reduce_eval_losses(
+                total_loss_numerators,
+                total_loss_denominators,
+                mpu.get_data_parallel_group(with_context_parallel=True),
+            )
 
-            for key in total_loss_numerators.keys():
-                # Reduce numerator/denominator across data-parallel ranks so the
-                # validation loss is a TRUE global average, identical on every rank.
-                # Without this, args._eval_val_loss stays a per-rank local value, and
-                # the target-eval-loss early stop (mlperf_pretrain_trainer.py) is then
-                # evaluated inconsistently: near the target one rank's local loss can
-                # dip <= target and exit train() alone while the others keep training,
-                # desyncing collectives (grad-norm all-reduce) -> NCCL hang at ~172k.
-                reduced = torch.tensor(
-                    [float(total_loss_numerators[key]), float(total_loss_denominators[key])],
-                    dtype=torch.float64,
-                    device="cuda",
-                )
-                torch.distributed.all_reduce(
-                    reduced,
-                    op=torch.distributed.ReduceOp.SUM,
-                    group=parallel_state.get_data_parallel_group(),
-                )
-                # Keep the result as a 0-dim tensor: downstream Megatron code
-                # (evaluate_and_print_results) and mlperf logging call .item() on it.
-                if reduced[1].item() > 0:
-                    total_loss_dict[key] = (reduced[0] / reduced[1]).to(torch.float32)
-                else:
-                    total_loss_dict[key] = torch.zeros((), dtype=torch.float32, device="cuda")
-            if "lm loss" in total_loss_dict:
-                val = total_loss_dict["lm loss"]
-                args._eval_val_loss = val.item() if hasattr(val, "item") else float(val)
+        _record_consumed_valid_samples(args, observed_samples, eval_iters, eval_batch_size)
 
         collected_non_loss_data = None
         if non_loss_data_func is not None:

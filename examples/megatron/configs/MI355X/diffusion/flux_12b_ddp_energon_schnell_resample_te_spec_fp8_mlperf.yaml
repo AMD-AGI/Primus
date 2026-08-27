@@ -88,7 +88,17 @@ modules:
 
       train_iters: 5000
       eval_interval: 512
-      eval_iters: 10
+      # Cover the whole MLPerf validation set. eval_iters is derived from this
+      # (29696 / 512 = 58); setting both is rejected. The previous eval_iters of
+      # 10 read 5120 samples, and even at 58 the training num_workers of 8 would
+      # have left 768 of them unread, so val_num_workers is pinned to 0.
+      eval_samples: 29696
+      val_num_workers: 0
+      # MLPerf assigns each val image one fixed timestep, carried in the Arrow
+      # 'timestep' column. Requires a val split ingested with that column; shards
+      # ingested earlier carry {"key": ...} only and will now fail loudly rather
+      # than silently fall back to injecting t = index % 8.
+      eval_timestep_source: dataset
       log_interval: 10
       save_interval: 10000
 

@@ -10,6 +10,7 @@ RawDiffusionTaskEncoder (raw images and text).
 
 
 import pytest
+import torch
 
 from primus.backends.megatron.data.diffusion.task_encoders import (
     DiffusionSample,
@@ -166,6 +167,84 @@ class TestEncodedDiffusionTaskEncoder:
         assert batch["latents"].shape[0] == 2
         assert batch["prompt_embeds"].shape[0] == 2
         assert batch["pooled_prompt_embeds"].shape[0] == 2
+
+
+class TestValidationTimestepCollation:
+    """Tests for per-sample timestep validation during batching.
+
+    MLPerf validation is defined per-sample at t in {0..7}; a batch that
+    silently loses the field falls back to a positional assignment in
+    forward_step, so these are error paths rather than conveniences.
+    """
+
+    @staticmethod
+    def _sample(key, timestep, latents, prompt_embeds, pooled):
+        return DiffusionSample(
+            __key__=key,
+            __restore_key__=lambda: key,
+            __subflavors__={"encoding": "preencoded"},
+            latents=latents.squeeze(0),
+            prompt_embeds=prompt_embeds.squeeze(0),
+            pooled_prompt_embeds=pooled.squeeze(0),
+            timestep=None if timestep is None else torch.tensor(timestep),
+        )
+
+    def _batch(self, timesteps, sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds):
+        encoder = EncodedDiffusionTaskEncoder(worker_config=None)
+        samples = [
+            self._sample(f"s{i}", t, sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds)
+            for i, t in enumerate(timesteps)
+        ]
+        return encoder.batch(samples)
+
+    def test_timesteps_are_collated(self, sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds):
+        batch = self._batch([0, 4, 7], sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds)
+
+        assert "timestep" in batch
+        assert batch["timestep"].tolist() == [0, 4, 7]
+
+    def test_absent_timesteps_leave_key_out(
+        self, sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds
+    ):
+        """The training split has no timestep; batching must not invent one."""
+        batch = self._batch([None, None], sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds)
+
+        assert "timestep" not in batch
+
+    def test_partially_missing_timestep_raises_with_keys(
+        self, sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds
+    ):
+        """Checking samples[0] alone would let this through or crash opaquely."""
+        with pytest.raises(ValueError, match="lack a 'timestep' field") as excinfo:
+            self._batch([3, None, 5], sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds)
+
+        assert "s1" in str(excinfo.value)
+
+    def test_missing_timestep_on_first_sample_is_still_caught(
+        self, sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds
+    ):
+        """The inverse ordering: samples[0] absent but later ones present."""
+        with pytest.raises(ValueError, match="lack a 'timestep' field"):
+            self._batch([None, 2, 6], sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds)
+
+    def test_out_of_range_timestep_raises(
+        self, sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds
+    ):
+        with pytest.raises(ValueError, match=r"must be in \[0, 7\]") as excinfo:
+            self._batch([0, 9, 3], sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds)
+
+        assert "s1" in str(excinfo.value)
+
+    def test_negative_timestep_raises(
+        self, sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds
+    ):
+        with pytest.raises(ValueError, match=r"must be in \[0, 7\]"):
+            self._batch([-1, 3], sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds)
+
+    def test_float_timestep_raises(self, sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds):
+        """sigma = t / 8 expects an integer index, not a pre-divided float."""
+        with pytest.raises(ValueError, match="must be an integer type"):
+            self._batch([0.5, 0.25], sample_latents, sample_prompt_embeds, sample_pooled_prompt_embeds)
 
 
 class TestRawDiffusionTaskEncoder:

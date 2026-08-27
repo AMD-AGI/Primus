@@ -37,6 +37,95 @@ from primus.backends.megatron.training.diffusion.timestep_sampling import (
 
 logger = logging.getLogger(__name__)
 
+# Validation seeds are offset past the training stream so the two can never
+# alias. Training seeds are (seed + 100 * dp_rank) * 10000 + step_count, which
+# stays below 2**31 for any plausible seed, world size and step count, so 2**40
+# leaves a wide margin while keeping the eval stream's own per-rank and
+# per-microbatch structure intact.
+EVAL_RNG_OFFSET = 1 << 40
+
+# Microbatch index stride within one evaluation. Must exceed the number of
+# microbatches any single evaluation runs so that consecutive evaluations
+# cannot collide; asserted where the index is built.
+EVAL_RNG_ITERATION_STRIDE = 1 << 20
+
+# Where validation timesteps come from. See the block above the injection site
+# for why inferring this from a missing data field is not good enough.
+DATASET_TIMESTEPS = "dataset"
+EQUIDISTANT_TIMESTEPS = "equidistant"
+EVAL_TIMESTEP_SOURCES = (DATASET_TIMESTEPS, EQUIDISTANT_TIMESTEPS)
+
+# MLPerf evaluates at t in {0/8, ..., 7/8}.
+NUM_VALIDATION_TIMESTEPS = 8
+
+# Warn once per process rather than once per microbatch.
+_warned_uncovered_equidistant = False
+
+
+def _warn_if_equidistant_undercovers(batch_size: int) -> None:
+    """Flag equidistant injection that cannot reach all eight timesteps.
+
+    ``arange(batch_size) % 8`` covers every timestep only when the width is a
+    multiple of 8; at width 2 it evaluates t=0 and t=1/8 alone. This is a
+    warning rather than an assertion because the shipped flux_535m recipes run
+    validation at micro_batch_size 2 against the mock dataset, where the
+    timestep is supplied per sample and this branch is never reached.
+    """
+    global _warned_uncovered_equidistant
+    if batch_size % NUM_VALIDATION_TIMESTEPS == 0 or _warned_uncovered_equidistant:
+        return
+    _warned_uncovered_equidistant = True
+    logger.warning(
+        "eval_timestep_source='equidistant' with validation batch width %d, which is "
+        "not a multiple of %d: this evaluates only timesteps 0..%d and never sees the "
+        "rest, so val_loss is not comparable to the MLPerf reference. Raise the "
+        "validation micro_batch_size to a multiple of %d, or use a dataset carrying "
+        "per-sample timesteps with eval_timestep_source='dataset'.",
+        batch_size,
+        NUM_VALIDATION_TIMESTEPS,
+        min(batch_size, NUM_VALIDATION_TIMESTEPS) - 1,
+        NUM_VALIDATION_TIMESTEPS,
+    )
+
+
+def resolve_validation_timesteps(batch, eval_timestep_source, batch_size, device, compute_dtype):
+    """Populate ``batch['timestep']`` and ``batch['timesteps']`` for validation.
+
+    ``timestep`` is the integer index in ``[0, 7]``; ``timesteps`` is that index
+    divided by 8, which is the sigma the scheduler consumes. Mutates ``batch``
+    in place and returns the sigma tensor.
+
+    Raises:
+        ValueError: on an unknown source, or when ``dataset`` is requested and
+            the batch carries no timestep field.
+    """
+    if eval_timestep_source not in EVAL_TIMESTEP_SOURCES:
+        raise ValueError(
+            f"eval_timestep_source must be one of {list(EVAL_TIMESTEP_SOURCES)}, "
+            f"got {eval_timestep_source!r}."
+        )
+
+    if "timestep" in batch:
+        val_timesteps = batch["timestep"].float() / NUM_VALIDATION_TIMESTEPS
+    elif eval_timestep_source == DATASET_TIMESTEPS:
+        raise ValueError(
+            "eval_timestep_source='dataset' but the validation batch carries no "
+            "'timestep' field. The MLCommons val Arrow files provide a per-sample "
+            "int32 'timestep' column; shards ingested before that column was carried "
+            "through have sidecars of {'key': ...} only, so every eval against them "
+            "silently used injected timesteps instead. Re-ingest the val split, or "
+            "set eval_timestep_source='equidistant' to inject t = index % 8 (which "
+            "does not reproduce the dataset's image-to-timestep pairing)."
+        )
+    else:
+        _warn_if_equidistant_undercovers(batch_size)
+        val_idx = torch.arange(batch_size, device=device) % NUM_VALIDATION_TIMESTEPS
+        batch["timestep"] = val_idx
+        val_timesteps = val_idx.to(dtype=compute_dtype) / NUM_VALIDATION_TIMESTEPS
+
+    batch["timesteps"] = val_timesteps
+    return val_timesteps
+
 
 def prepare_flux_latents(
     latents: torch.Tensor,
@@ -170,6 +259,8 @@ def flux_forward_step_func(
     vae_latent_mode="presampled",
     per_step_rng_reseed=False,
     step_count=0,
+    eval_step_index=None,
+    eval_timestep_source=EQUIDISTANT_TIMESTEPS,
 ):
     """
     Forward step function for Flux training with distributed data loading.
@@ -231,13 +322,23 @@ def flux_forward_step_func(
     # (noise, timesteps, CFG dropout) from model forward RNG consumption.
     # Required because TE fused attention advances the default generator even
     # with dropout=0 when the DPA prologue patch is active.
+    #
+    # Validation uses its own stream. The training counter is deliberately
+    # frozen during eval (see diffusion_trainer) so that eval passes do not
+    # shift the training seed sequence, but reusing the frozen value reseeds
+    # every validation microbatch identically, which repeats both the VAE
+    # reparameterization epsilon and the flow-matching noise across the whole
+    # evaluation. Both references draw both afresh per batch.
     if per_step_rng_reseed:
         from megatron.core import parallel_state as _ps
         from megatron.training import get_args as _get_args
 
         _seed = _get_args().seed
         _per_rank_seed = _seed + 100 * _ps.get_data_parallel_rank()
-        _step_seed = (_per_rank_seed * 10000 + step_count) % (2**63)
+        if eval_step_index is None:
+            _step_seed = (_per_rank_seed * 10000 + step_count) % (2**63)
+        else:
+            _step_seed = (EVAL_RNG_OFFSET + _per_rank_seed * 10000 + eval_step_index) % (2**63)
         torch.cuda.manual_seed(_step_seed)
 
     from megatron.core import tensor_parallel
@@ -411,24 +512,33 @@ def flux_forward_step_func(
     #   - val_loss = mean over per-timestep means (equivalent to flat mean given
     #     equal counts).
     #
-    # NeMo's official to_webdataset preserves a `timestep` integer per sample
-    # from the MLCommons Arrow source. Our `primus-cli data diffusion-ingest`
-    # path (pipelines/ingest.py:33 `ARROW_COLUMNS`) ingests only the 4 tensor
-    # columns and writes `{"key": ...}` to the json sidecar — so our val shards
-    # are MISSING the timestep field, which used to make this branch fall
-    # through to the training path with uniform-random timesteps via the
-    # `timestep_sampler`. That produced a *different* val_loss estimator than
-    # the spec's: E_t~U[0,1][MSE] (Monte Carlo over [0,1]) vs the spec's
+    # The MLCommons Arrow source carries a `timestep` int32 per val sample, and
+    # `primus-cli data diffusion-ingest` copies it into the json sidecar.
+    # Datasets ingested before that fix have sidecars of `{"key": ...}` only.
+    #
+    # `eval_timestep_source` decides what to do about that, because inferring
+    # "this is MLPerf validation" from a *missing* data field cannot tell a
+    # broken ingest apart from a config that never had timesteps to begin with:
+    #
+    #   "dataset"     — the batch must carry `timestep`; a missing field is an
+    #                   error naming the likely cause. MLPerf recipes use this.
+    #   "equidistant" — inject t = index % 8 within the batch. Deliberate for
+    #                   configs with no per-sample timestep (e.g. flux_535m).
+    #
+    # Equidistant injection keeps the *marginal* timestep histogram uniform for
+    # any batch width that is a multiple of 8, but it does NOT reproduce the
+    # dataset's own image-to-timestep pairing: the real column assigns each
+    # image one fixed timestep, and the published val set is ordered so a
+    # contiguous batch spans only two distinct timesteps, not all eight. At
+    # widths below 8 it is worse than imprecise — micro_batch_size 2 evaluates
+    # only t=0 and t=1/8 and never sees the other six.
+    #
+    # Falling all the way through to the training path would be worse still:
+    # uniform-random timesteps via the `timestep_sampler` estimate
+    # E_t~U[0,1][MSE] (Monte Carlo over [0,1]) rather than the spec's
     # left-Riemann sum over t∈{0/8..7/8}. The two estimators are not
     # comparable, so a uniform-random val path can make val_loss converge
     # spuriously fast relative to the reference convergence point.
-    #
-    # Fix: when batch is in eval mode (model.training=False, set by
-    # the evaluation harness via `model_module.eval()`) and lacks a `timestep`
-    # field, inject equidistant timesteps deterministically by within-batch
-    # index. With MBS=64, each micro-batch covers each t∈{0..7} exactly 8
-    # times. Across 58 micro-batches × 8 DP ranks = 464 micro-batches → exactly
-    # 3 712 samples per timestep, matching the MLPerf v5.1 spec count.
     #
     # CFG dropout during val: SUPPRESSED.
     #
@@ -443,18 +553,19 @@ def flux_forward_step_func(
     # ~0.015-0.030 (the 10% unconditional samples pay a ~0.15-0.30 MSE
     # penalty), which is enough to materially shift the convergence-crossing
     # step, so we keep it off to match the submission configuration.
-    is_validation = False
-    if batch is not None and "timestep" in batch:
-        is_validation = True
-        val_timesteps = batch["timestep"].float() / 8.0
-        batch["timesteps"] = val_timesteps
-    elif batch is not None and not model.training:
-        is_validation = True
-        batch_size_val = pooled_prompt_embeds.shape[0]
-        val_idx = torch.arange(batch_size_val, device="cuda") % 8
-        batch["timestep"] = val_idx
-        val_timesteps = val_idx.to(dtype=compute_dtype) / 8.0
-        batch["timesteps"] = val_timesteps
+    # Derived from eval mode alone, independent of where timesteps come from,
+    # so CFG suppression is identical under both sources. The evaluation
+    # harness sets this via model_module.eval().
+    is_validation = batch is not None and not model.training
+
+    if is_validation:
+        resolve_validation_timesteps(
+            batch,
+            eval_timestep_source,
+            batch_size=pooled_prompt_embeds.shape[0],
+            device=pooled_prompt_embeds.device,
+            compute_dtype=compute_dtype,
+        )
 
     # Matches NeMo's forward_step which wraps prepare_image_latent_like_reference
     # in torch.no_grad() — no gradients needed for position IDs, noise sampling,

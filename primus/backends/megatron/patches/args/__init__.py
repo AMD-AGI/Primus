@@ -19,6 +19,7 @@ registration but is provided for convenience.
 from . import (  # noqa: F401
     checkpoint_path_patches,
     data_path_split_patches,
+    eval_samples_patches,
     hsdp_args_patches,
     iterations_to_skip_default_patches,
     logging_level_patches,
@@ -36,6 +37,7 @@ __all__ = [
     "wandb_config_patches",
     "logging_level_patches",
     "data_path_split_patches",
+    "eval_samples_patches",
     "hsdp_args_patches",
     "mock_data_patches",
     "sequence_parallel_tp1_patches",

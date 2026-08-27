@@ -236,6 +236,27 @@ overlap_moe_expert_parallel_comm: false
 
 train_iters: null
 eval_iters: 32
+# Size the evaluation by samples rather than iterations. When set, eval_iters is
+# derived as eval_samples // global_batch_size, so the budget stays correct when
+# the batch size changes. Leave null to keep using eval_iters directly.
+eval_samples: null
+# Dataloader workers for validation only. Defaults to 0 because Energon splits
+# validation data across dp_size x num_workers but splits the batch quota across
+# num_workers alone; the two only agree when each worker's slice is a whole
+# number of batches, and a mismatch silently leaves the tail of each short
+# worker's slice unread. See backends/megatron/training/eval_budget.py.
+val_num_workers: 0
+# Run gc.collect() and empty_cache() after every evaluation. Off by default: it
+# costs a GC pause and an allocator flush inside the measured window.
+eval_purge_memory: false
+# Where per-sample validation timesteps come from.
+#   dataset     - the batch must carry a 'timestep' field; missing is an error.
+#                 Required for MLPerf, whose val set ships one timestep per image.
+#   equidistant - inject t = index % 8 within each validation batch. Only correct
+#                 for datasets that have no per-sample timestep, and only covers
+#                 all eight when the validation batch width is a multiple of 8.
+# Defaults to equidistant so configs that never had timesteps keep working.
+eval_timestep_source: equidistant
 full_validation: false
 multiple_validation_sets: false
 eval_interval: 2000

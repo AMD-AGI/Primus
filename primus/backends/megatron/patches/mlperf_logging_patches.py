@@ -148,9 +148,22 @@ class FluxMLPerfLogger:
             key=self._constants.TRAIN_SAMPLES,
             value=getattr(args, "train_samples", 1099776),
         )
+        # EVAL_SAMPLES is emitted before any evaluation has run, so it can only
+        # ever state the configured budget. The check that the budget was
+        # actually read lives in the evaluation loop
+        # (evaluator._record_consumed_valid_samples), which raises rather than
+        # letting this number stand in for an unverified one.
+        eval_iters = getattr(args, "eval_iters", 0) or 0
         self._event(
             key=self._constants.EVAL_SAMPLES,
-            value=getattr(args, "eval_samples", 29696),
+            value=getattr(args, "eval_samples", None) or eval_iters * self.gbs,
+        )
+        # How often evaluation runs, in samples. Required by the MLPerf logging
+        # rules and previously absent; the constant name differs across
+        # mlperf_logging releases, so fall back to the literal key.
+        self._event(
+            key=getattr(self._constants, "EVAL_FREQUENCY", "eval_frequency"),
+            value=getattr(args, "eval_interval", 0) * self.gbs,
         )
         gas = max(self.gbs // self.mbs, 1)
         self._event(key=self._constants.GRADIENT_ACCUMULATION_STEPS, value=gas)
@@ -323,6 +336,7 @@ def patch_mlperf_logging(ctx: PatchContext):
     mbs = getattr(args, "micro_batch_size", 64)
     target_val_loss = getattr(args, "target_val_loss", 0.586)
     log_interval = getattr(args, "log_interval", 10)
+    eval_purge_memory = getattr(args, "eval_purge_memory", False)
 
     mlperf_logger = FluxMLPerfLogger(
         global_batch_size=gbs,
@@ -404,47 +418,32 @@ def patch_mlperf_logging(ctx: PatchContext):
 
         megatron_training.evaluate = _capture_wrapper
         try:
-            import gc
-
             result = _orig_eval(*eval_args, **eval_kwargs)
-            gc.collect()
         finally:
             megatron_training.evaluate = _current_eval
 
-        try:
+        # Reclaiming memory after every eval costs a full GC pause plus an
+        # allocator flush inside the measured window, and the allocator has to
+        # re-grow its pools on the next training step. Off by default; set
+        # eval_purge_memory to re-enable if a run proves it needs the headroom.
+        if eval_purge_memory:
+            import gc
+
             import torch
 
+            gc.collect()
             torch.cuda.empty_cache()
-        except Exception:
-            pass
 
         val_loss = _extract_val_loss(_loss_capture)
         if val_loss is not None:
-            # Megatron's `evaluate()` (training.py:3178-3180) divides the
-            # per-rank accumulated loss locally and does NOT all-reduce
-            # across the data-parallel group — the result is intended for
-            # `print_rank_last` / TensorBoard which only read on a single
-            # rank.  We must reduce here so every rank evaluates the same
-            # global validation loss against `target_val_loss`; otherwise
-            # ranks can disagree on the early-stop branch and the
-            # divergent `args.train_iters` mutation below desyncs
-            # collective ordering at the next training step, producing a
-            # NCCL watchdog deadlock (observed on FLUX 12B MLPerf at
-            # step 2560 when val_loss landed near target).
-            import torch
-            import torch.distributed as dist
-
-            if dist.is_initialized():
-                try:
-                    from megatron.core import parallel_state as mpu
-
-                    dp_group = mpu.get_data_parallel_group()
-                except Exception:
-                    dp_group = None
-                _vl = torch.tensor(val_loss, dtype=torch.float64, device="cuda")
-                dist.all_reduce(_vl, op=dist.ReduceOp.AVG, group=dp_group)
-                val_loss = _vl.item()
-
+            # primus_evaluate already reduces over the data-parallel group and
+            # returns a value identical on every rank, which is what the
+            # early-stop comparison below requires: if ranks disagree near the
+            # target, one can exit train() alone while the others keep training,
+            # desyncing collectives into an NCCL watchdog deadlock (observed on
+            # FLUX 12B MLPerf at step 2560). A further ReduceOp.AVG here would
+            # average identical values -- a no-op costing one collective and one
+            # host sync -- so it is deliberately absent.
             mlperf_logger.on_validation_end(iteration, val_loss)
             log_rank_0(
                 f"[MLPerf] Validation loss at step {iteration}: {val_loss:.6f} "

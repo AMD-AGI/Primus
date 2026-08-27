@@ -157,7 +157,8 @@ class TestFluxForwardStepE2E:
         )
 
     def test_validation_with_timestep_key(self, model, scheduler):
-        """Batch with 'timestep' key triggers validation mode."""
+        """In eval mode, a 'timestep' key is used verbatim as the sigma source."""
+        model.eval()
         batch = self._make_presampled_batch()
         batch["timestep"] = torch.arange(2)
         data_iterator = iter([batch])
@@ -180,6 +181,35 @@ class TestFluxForwardStepE2E:
             batch["timesteps"].float().cpu(),
             torch.arange(2).float() / 8.0,
         )
+
+    def test_timestep_key_alone_does_not_make_a_training_step_validation(self, model, scheduler):
+        """Validation is decided by eval mode, never by the batch contents.
+
+        This previously went the other way: a 'timestep' key set is_validation
+        regardless of model mode, which silently suppressed CFG dropout for any
+        training batch that happened to carry the field. Eval mode is the only
+        signal now, and primus_evaluate sets it via model_module.eval().
+        """
+        assert model.training, "fixture should hand back a model in training mode"
+        batch = self._make_presampled_batch()
+        batch["timestep"] = torch.arange(2)
+        data_iterator = iter([batch])
+
+        with contextlib.ExitStack() as stack:
+            for p in _patch_parallel_state():
+                stack.enter_context(p)
+            result = flux_forward_step_func(
+                data_iterator,
+                model,
+                scheduler=scheduler,
+                step_count=1,
+            )
+
+        _, _, _, _, _, is_validation = result
+        assert is_validation is False
+        # The training path samples its own timesteps and must not have been
+        # overridden by the stray field.
+        assert "timesteps" not in batch
 
     def test_validation_equidistant_injection(self, model, scheduler):
         """model.eval() without timestep key injects equidistant timesteps."""
