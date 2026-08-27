@@ -98,7 +98,7 @@ env:
   XLA_FLAGS_APPEND: "--xla_gpu_autotune_level=5"
 ```
 
-Quote the values, and keep the block at the top level: an `env:` nested under a module is treated as a training parameter and forwarded to the backend as a CLI argument. See [Environment and XLA flags](environment-and-xla-flags.md) for the precedence rules, which matter for `XLA_FLAGS` in particular.
+Quote the values, and keep the block at the top level: an `env:` nested under a module silently becomes a training parameter on that module instead of being exported. See [Environment and XLA flags](environment-and-xla-flags.md) for the precedence rules, which matter for `XLA_FLAGS` in particular.
 
 ---
 

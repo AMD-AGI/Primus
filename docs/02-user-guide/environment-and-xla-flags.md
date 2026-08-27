@@ -49,7 +49,7 @@ The runtime applies it before distributed init and before `import jax`, so JAX, 
 
 Three rules:
 
-- **Top level only.** An `env:` block nested inside a module is treated as a training parameter and forwarded to the backend as a CLI argument, which is almost certainly not what you want.
+- **Top level only.** An `env:` block nested under a module silently becomes a *training parameter* on that module instead: nothing is exported, no warning is printed, and your variables have no effect.
 - **Quote the values.** Write `"0.96"` and `"1"`, not `0.96` and `1`, so YAML does not hand the backend a float or an int where a string is expected.
 - **Only `$VAR` and `${VAR}` expand, and only if already set.** There is no default syntax here: `${VAR:default}` and bash's `${VAR:-default}` are both passed through **literally**, and an unset `${VAR}` stays literal too.
 
