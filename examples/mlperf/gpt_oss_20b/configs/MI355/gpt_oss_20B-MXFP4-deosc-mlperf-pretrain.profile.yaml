@@ -40,6 +40,8 @@ modules:
       wandb_project: "Primus_GPT_OSS_20B"
       stderr_sink_level: DEBUG
       log_interval: 1
+      log_avg_skip_iterations: 5
+      log_avg_reset_interval: 50
 
       # profile
       profile: ${PRIMUS_PROFILE:False}
