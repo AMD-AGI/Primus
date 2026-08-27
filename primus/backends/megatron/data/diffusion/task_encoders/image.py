@@ -32,6 +32,10 @@ from megatron.energon import (
 
 logger = logging.getLogger(__name__)
 
+# MLPerf Flux validation evaluates each sample at a fixed timestep drawn from
+# {0/8, ..., 7/8}; forward_step turns the stored integer into sigma = t / 8.
+NUM_VALIDATION_TIMESTEPS = 8
+
 
 # ============================================================================
 # Sample Definition (with proper Sample inheritance)
@@ -66,6 +70,48 @@ class DiffusionSample(Sample):
     logvar: Optional[torch.Tensor] = None
     caption: str = ""
     timestep: Optional[torch.Tensor] = None
+
+
+def _collate_timesteps(samples) -> Optional[torch.Tensor]:
+    """Stack per-sample validation timesteps, validating every sample.
+
+    Checking only ``samples[0]`` would let a partially-ingested shard drop the
+    field for a whole batch, silently downgrading evaluation to the positional
+    fallback in forward_step, or crash inside ``torch.stack`` with no
+    indication of which sample was at fault.
+
+    Returns None when no sample carries a timestep (the training split).
+    """
+    present = [s.timestep is not None for s in samples]
+    if not any(present):
+        return None
+
+    if not all(present):
+        missing = [s.__key__ for s, ok in zip(samples, present) if not ok]
+        raise ValueError(
+            f"{len(missing)} of {len(samples)} samples lack a 'timestep' field: "
+            f"{missing[:8]}{' ...' if len(missing) > 8 else ''}. The batch mixes "
+            f"samples from shards ingested with and without the timestep column; "
+            f"re-ingest the validation split so every sidecar carries it."
+        )
+
+    stacked = torch.stack([s.timestep for s in samples])
+
+    if stacked.dtype.is_floating_point or stacked.dtype.is_complex:
+        raise ValueError(f"'timestep' must be an integer type, got {stacked.dtype}.")
+
+    out_of_range = (stacked < 0) | (stacked >= NUM_VALIDATION_TIMESTEPS)
+    if bool(out_of_range.any()):
+        offenders = [
+            (s.__key__, int(t)) for s, bad, t in zip(samples, out_of_range.tolist(), stacked.tolist()) if bad
+        ]
+        raise ValueError(
+            f"'timestep' must be in [0, {NUM_VALIDATION_TIMESTEPS - 1}]; "
+            f"{len(offenders)} sample(s) out of range: {offenders[:8]}"
+            f"{' ...' if len(offenders) > 8 else ''}."
+        )
+
+    return stacked
 
 
 # ============================================================================
@@ -328,8 +374,9 @@ class EncodedDiffusionTaskEncoder(DefaultTaskEncoder[DiffusionSample, DiffusionS
             batch["mean"] = torch.stack([s.mean for s in samples])
             batch["logvar"] = torch.stack([s.logvar for s in samples])
 
-        if samples[0].timestep is not None:
-            batch["timestep"] = torch.stack([s.timestep for s in samples])
+        timesteps = _collate_timesteps(samples)
+        if timesteps is not None:
+            batch["timestep"] = timesteps
 
         return batch
 

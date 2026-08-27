@@ -50,6 +50,8 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
         self._compiled_loss_fn = None
         self._forward_step_count = 0
         self._forward_step_count_initialized = False
+        self._eval_rng_iteration = None
+        self._eval_microbatch_index = 0
 
         # Composition pattern: avoids recreating the provider on each call
         use_mock_data = getattr(self.backend_args, "mock_data", False)
@@ -225,6 +227,7 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
             Tuple of (noise_pred, loss_func_callable)
         """
         from primus.backends.megatron.training.diffusion.forward_step import (
+            EQUIDISTANT_TIMESTEPS,
             flux_forward_step_func,
         )
 
@@ -232,10 +235,21 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
         # validation steps would shift the next training step's per-step seed
         # by eval_iters * num_microbatches per --eval-interval window,
         # defeating the goal of isolating training RNG from unrelated forward
-        # passes. Eval forward passes reuse the most recent training counter
-        # value, so the per-step CUDA reseed is a no-op replay during eval.
+        # passes.
+        #
+        # Validation instead gets its own advancing index, because reusing the
+        # frozen training counter reseeds every eval microbatch identically and
+        # so repeats one draw of VAE epsilon and flow noise across the whole
+        # evaluation.
+        per_step_rng_reseed = getattr(self, "per_step_rng_reseed", False)
+        eval_step_index = None
         if model.training:
             self._forward_step_count += 1
+        elif per_step_rng_reseed:
+            # Only derived when reseeding will consume it; without reseeding the
+            # ambient generator already advances per batch, which is the
+            # behaviour both references have.
+            eval_step_index = self._next_eval_step_index()
 
         # Megatron's pattern: forward_step returns model output, loss_func computes loss
         noise_pred, clean_latents, noise, loss_mask, metrics, is_validation = flux_forward_step_func(
@@ -251,8 +265,10 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
             vae_scale=getattr(self, "vae_scale", None),
             vae_shift=getattr(self, "vae_shift", None),
             vae_latent_mode=getattr(self, "vae_latent_mode", "presampled"),
-            per_step_rng_reseed=getattr(self, "per_step_rng_reseed", False),
+            per_step_rng_reseed=per_step_rng_reseed,
             step_count=self._forward_step_count,
+            eval_step_index=eval_step_index,
+            eval_timestep_source=getattr(self, "eval_timestep_source", EQUIDISTANT_TIMESTEPS),
         )
 
         # Store values needed for loss computation (will be used by loss function)
@@ -295,6 +311,38 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
             return loss, reporting_metrics
 
         return noise_pred, diffusion_loss_func
+
+    def _next_eval_step_index(self) -> int:
+        """Index identifying this validation microbatch within the run.
+
+        Built from ``(iteration, microbatch index within this evaluation)``
+        rather than from a free-running counter, so it is reproducible after a
+        checkpoint resume without having to checkpoint the counter itself: the
+        iteration comes from the checkpoint and the index restarts at zero for
+        each evaluation.
+        """
+        from megatron.training import get_args
+
+        from primus.backends.megatron.training.diffusion.forward_step import (
+            EVAL_RNG_ITERATION_STRIDE,
+        )
+
+        iteration = getattr(get_args(), "iteration", 0)
+        if iteration != self._eval_rng_iteration:
+            self._eval_rng_iteration = iteration
+            self._eval_microbatch_index = 0
+
+        index = self._eval_microbatch_index
+        self._eval_microbatch_index += 1
+
+        if index >= EVAL_RNG_ITERATION_STRIDE:
+            raise RuntimeError(
+                f"Evaluation ran {index + 1} microbatches, at or beyond the "
+                f"per-iteration stride {EVAL_RNG_ITERATION_STRIDE} that keeps "
+                f"consecutive evaluations' RNG streams disjoint."
+            )
+
+        return iteration * EVAL_RNG_ITERATION_STRIDE + index
 
     def get_forward_step(self):
         """

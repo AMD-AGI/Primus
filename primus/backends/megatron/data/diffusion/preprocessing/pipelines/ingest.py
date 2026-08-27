@@ -48,6 +48,11 @@ def _arrow_to_tar(
     ``__key__`` column from the Arrow file when available, otherwise
     generates sequential keys.
 
+    The val split additionally carries a ``timestep`` column, which MLPerf
+    validation is defined in terms of (sigma = t / 8). It is copied into the
+    JSON sidecar rather than ``ARROW_COLUMNS`` because it is scalar metadata,
+    not a tensor entry. The train split has no such column and is unaffected.
+
     Returns the number of samples written.
     """
     reader = pyarrow.ipc.open_stream(str(arrow_path))
@@ -55,6 +60,7 @@ def _arrow_to_tar(
     num_rows = table.num_rows
 
     has_key_col = "__key__" in table.schema.names
+    timestep_col = table.column("timestep") if "timestep" in table.schema.names else None
 
     tar_path.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(str(tar_path), "w") as tar:
@@ -76,7 +82,13 @@ def _arrow_to_tar(
                 info.size = len(data)
                 tar.addfile(info, io.BytesIO(data))
 
-            meta = json.dumps({"key": base_name}).encode("utf-8")
+            metadata = {"key": base_name}
+            if timestep_col is not None:
+                timestep = timestep_col[row_idx].as_py()
+                if timestep is not None:
+                    metadata["timestep"] = timestep
+
+            meta = json.dumps(metadata).encode("utf-8")
             meta_info = tarfile.TarInfo(name=f"{base_name}.json")
             meta_info.size = len(meta)
             tar.addfile(meta_info, io.BytesIO(meta))
