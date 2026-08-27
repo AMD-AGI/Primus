@@ -147,16 +147,19 @@ def convert(checkpoint: dict, fla_config_path: Path, in_proj_pad_multiple: int =
         in_proj_w = state[f"decoder.layers.{kda_i}.mixer.in_proj.weight"]
         # A checkpoint is either native width or padded past the hipBLASLt dead
         # zone (kimi_delta_attention.py). Accept exactly those two widths so a
-        # genuinely mismatched architecture still fails loudly.
-        assert in_proj_w.shape == (fused_in_proj_dim, hidden_size) or in_proj_w.shape == (
-            padded_in_proj_dim,
-            hidden_size,
-        ), (
-            f"in_proj shape {tuple(in_proj_w.shape)} for layer {kda_i} is neither the "
-            f"native ({fused_in_proj_dim}, {hidden_size}) nor the dead-zone-padded "
-            f"({padded_in_proj_dim}, {hidden_size}). Did you train with the post-fusion "
-            f"KDA code, or a different --in-proj-pad-multiple than {in_proj_pad_multiple}?"
-        )
+        # genuinely mismatched architecture still fails loudly. This is the check
+        # that stops a corrupted export, so it raises rather than asserting:
+        # `python -O` strips asserts.
+        if in_proj_w.shape not in {
+            (fused_in_proj_dim, hidden_size),
+            (padded_in_proj_dim, hidden_size),
+        }:
+            raise ValueError(
+                f"in_proj shape {tuple(in_proj_w.shape)} for layer {kda_i} is neither the "
+                f"native ({fused_in_proj_dim}, {hidden_size}) nor the dead-zone-padded "
+                f"({padded_in_proj_dim}, {hidden_size}). Did you train with the post-fusion "
+                f"KDA code, or a different --in-proj-pad-multiple than {in_proj_pad_multiple}?"
+            )
         if in_proj_w.shape[0] != fused_in_proj_dim:
             # The mixer slices the pad rows off in forward, so they never
             # trained; drop them instead of exporting dead weights.
