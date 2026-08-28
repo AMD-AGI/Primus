@@ -74,22 +74,21 @@ def _record_consumed_valid_samples(args, observed_samples, eval_iters, eval_batc
         )
         return
 
-    if observed_samples != expected:
-        # Context parallelism duplicates the per-sample loss across CP ranks,
-        # which inflates the reduced denominator; only assert when it cannot.
-        cp_size = parallel_state.get_context_parallel_world_size()
-        detail = (
-            f"Evaluation read {observed_samples} samples but the configuration "
-            f"implies {expected} ({eval_iters} iterations x {eval_batch_size}). "
-            f"Difference: {expected - observed_samples}."
+    # Context parallelism duplicates the per-sample loss across CP ranks, which
+    # inflates the reduced denominator; only assert when it cannot.
+    cp_size = parallel_state.get_context_parallel_world_size()
+    detail = (
+        f"Evaluation read {observed_samples} samples but the configuration "
+        f"implies {expected} ({eval_iters} iterations x {eval_batch_size}). "
+        f"Difference: {expected - observed_samples}."
+    )
+    if cp_size == 1:
+        raise RuntimeError(
+            f"{detail}\nThis is the silent under-read described in eval_budget: "
+            f"Energon workers whose batch quota is short leave the tail of their "
+            f"slice unread. Check val_num_workers against eval_samples."
         )
-        if cp_size == 1:
-            raise RuntimeError(
-                f"{detail}\nThis is the silent under-read described in eval_budget: "
-                f"Energon workers whose batch quota is short leave the tail of their "
-                f"slice unread. Check val_num_workers against eval_samples."
-            )
-        log_rank_0(f"[eval] {detail} (context_parallel_size={cp_size}, not asserting)")
+    log_rank_0(f"[eval] {detail} (context_parallel_size={cp_size}, not asserting)")
 
 
 def _reduction_device(numerators):
