@@ -715,11 +715,14 @@ class TestBoundedCache:
 
 
 class TestBuildTimeRejections:
-    """These combinations must fail at model build, not on the first forward."""
+    """These combinations must fail at model build, not on the first forward.
 
-    def test_deterministic_mode_rejected_at_build(self, stub_backend):
-        with pytest.raises(NotImplementedError, match="deterministic_mode"):
-            tfa.build_turbo_flex_attention(args=_args(deterministic_mode=True), config=_config())
+    ``deterministic_mode`` used to be one of them and no longer is: the compat layer
+    threads ``deterministic`` through, so the build only rejects it on a Turbo whose
+    entries predate the parameter. Both halves of that narrower contract live in
+    ``TestBuild`` -- ``test_deterministic_mode_accepted_on_a_current_turbo`` and
+    ``test_deterministic_mode_rejected_at_build_on_an_older_turbo``.
+    """
 
     def test_reset_attention_mask_rejected_at_build(self, stub_backend):
         with pytest.raises(NotImplementedError, match="reset_attention_mask"):
