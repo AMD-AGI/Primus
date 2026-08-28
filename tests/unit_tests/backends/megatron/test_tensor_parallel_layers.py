@@ -15,6 +15,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+
+if not torch.distributed.is_available():
+    pytest.skip("torch.distributed is not available in this build", allow_module_level=True)
+
 import torch.distributed as dist
 from torch.testing._internal.common_distributed import MultiProcessTestCase
 from torch.testing._internal.common_utils import run_tests
@@ -60,9 +64,17 @@ class TestLinearWithGradAccumulationAndAsyncCommunicationForward(MultiProcessTes
         dist.init_process_group(backend="gloo", world_size=self.world_size, rank=self.rank, store=store)
 
     def _install_cpu_parallel_stubs(self):
+        self._orig_tp_world_size = tp_layers.get_tensor_model_parallel_world_size
+        self._orig_gmb = tp_layers.get_global_memory_buffer
+        self._orig_gather = tp_layers.dist_all_gather_func
         tp_layers.get_tensor_model_parallel_world_size = lambda: dist.get_world_size()
-        buffer = _CpuMemoryBuffer()
-        tp_layers.get_global_memory_buffer = lambda: buffer
+        tp_layers.get_global_memory_buffer = lambda: _CpuMemoryBuffer()
+        self.addCleanup(self._restore_cpu_parallel_stubs)
+
+    def _restore_cpu_parallel_stubs(self):
+        tp_layers.get_tensor_model_parallel_world_size = self._orig_tp_world_size
+        tp_layers.get_global_memory_buffer = self._orig_gmb
+        tp_layers.dist_all_gather_func = self._orig_gather
 
     def _shared_weight_and_bias(self, use_bias):
         torch.manual_seed(0)
