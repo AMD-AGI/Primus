@@ -556,8 +556,27 @@ fi
 # global HOOK_EXTRA_PRIMUS_ARGS array and exports env.* entries.
 # shellcheck disable=SC1091
 source "${RUNNER_DIR}/helpers/execute_hooks.sh"
+
+# Hooks are dispatched on the first two Primus args (e.g. `train pretrain`), and
+# hooks such as prepare_experiment.sh re-read that same pair as $1/$2 before
+# shifting past it. STEP 4 prepends `--debug` in debug mode, which shifted the
+# whole window by one: the group became `--debug`, resolving to a non-existent
+# `hooks/--debug/train` directory and silently skipping every command-specific
+# hook -- including the framework prepare hooks that pick the launcher via
+# RUN_MODE. Drop leading flags so the `<group> <name> <rest>` contract holds. No
+# hook reads `--debug`; verbosity reaches them through the exported
+# PRIMUS_LOG_LEVEL instead.
+hook_args=()
+for _tok in "$@"; do
+    if [[ ${#hook_args[@]} -eq 0 && "$_tok" == -* ]]; then
+        continue
+    fi
+    hook_args+=("$_tok")
+done
+LOG_DEBUG_RANK0 "[direct] Hook target: group='${hook_args[0]:-}' name='${hook_args[1]:-}'"
+
 HOOK_EXTRA_PRIMUS_ARGS=()
-if ! execute_hooks "${1:-}" "${2:-}" "$@"; then
+if ! execute_hooks "${hook_args[0]:-}" "${hook_args[1]:-}" "${hook_args[@]}"; then
     LOG_ERROR "[direct] Hooks execution failed"
     exit 1
 fi
@@ -777,13 +796,16 @@ set +e
 "${CMD[@]}" 2>&1 | tee "${direct_config[log_file]}"
 exit_code=${PIPESTATUS[0]}
 set -e
-# Print result based on exit code
+# Report against the launcher that actually ran (torchrun or python3 in single
+# mode), so the message does not send readers hunting for a torchrun failure in
+# a run that never used it.
+launcher="${CMD[0]}"
 if [[ $exit_code -ge 128 ]]; then
-    LOG_ERROR "[direct] torchrun crashed due to signal $((exit_code - 128))"
+    LOG_ERROR "[direct] ${launcher} crashed due to signal $((exit_code - 128))"
 elif [[ $exit_code -ne 0 ]]; then
-    LOG_ERROR "[direct] torchrun exited with code $exit_code"
+    LOG_ERROR "[direct] ${launcher} exited with code $exit_code"
 else
-    LOG_INFO "[direct] torchrun finished successfully (code 0)"
+    LOG_INFO "[direct] ${launcher} finished successfully (code 0)"
 fi
 
 exit "$exit_code"

@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 import gc
+import os
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from typing import Callable, Iterable, List, Optional, Tuple, Union
@@ -65,6 +66,7 @@ try:
 except (ImportError, ModuleNotFoundError):
     create_quantized_weight = None
 
+from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -97,8 +99,27 @@ except (ImportError, ModuleNotFoundError):
 from primus.backends.megatron.core.extensions._triton.inplace_add import (
     inplace_add_triton_,
 )
+from primus.core.utils.module_utils import warning_rank_0
 
 _dummy_wgrads = {}
+
+
+@lru_cache(maxsize=1)
+def _apply_turbo_gemm_backend_env() -> None:
+    """Publish ``turbo_gemm_backend`` into the env var Primus-Turbo dispatches on."""
+    backend = getattr(get_args(), "turbo_gemm_backend", "default")
+    if backend != "default":
+        os.environ[ENV_GEMM_BACKEND] = backend
+        warning_rank_0(f"Primus-Turbo gemm backend is set to {backend}")
+
+
+@lru_cache(maxsize=1)
+def _apply_turbo_grouped_gemm_backend_env() -> None:
+    """Publish ``turbo_grouped_gemm_backend``; see :func:`_apply_turbo_gemm_backend_env`."""
+    backend = getattr(get_args(), "turbo_grouped_gemm_backend", "default")
+    if backend != "default":
+        os.environ[ENV_GROUPED_GEMM_BACKEND] = backend
+        warning_rank_0(f"Primus-Turbo grouped gemm backend is set to {backend}")
 
 
 @lru_cache(maxsize=1)
@@ -140,7 +161,10 @@ def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tenso
 
 
 def _bridge_weight_grad(
-    x: torch.Tensor, weight: torch.nn.Parameter, weight_buffer: PrimusTurboQuantizedTensorPair
+    x: torch.Tensor,
+    weight: torch.nn.Parameter,
+    weight_buffer: PrimusTurboQuantizedTensorPair,
+    fuse_wgrad_accum: bool = False,
 ):
     """Bridge quantized weight gradient to the original weight's ``main_grad``.
 
@@ -151,6 +175,13 @@ def _bridge_weight_grad(
     AccumulateGrad / DDP ``register_grad_ready`` hook fires in the correct
     order.
 
+    With ``fuse_wgrad_accum`` the gemm's own beta=1 epilogue accumulates into
+    ``weight.main_grad`` instead, so the add here is skipped and only the flag and the
+    dummy wgrad remain. The gemm resolves that target off the quantized buffer it is
+    handed, so the parameter's accumulation attributes are forwarded onto it below;
+    the flag the gemm sets lives on that buffer and does not propagate back to
+    ``weight``, which is why the two paths are selected by this argument rather than
+    by reading ``grad_added_to_main_grad``.
     """
 
     class _WeightGradBridge(torch.autograd.Function):
@@ -168,11 +199,25 @@ def _bridge_weight_grad(
                 weight, "grad_added_to_main_grad"
             ), "weight.grad_added_to_main_grad don't have grad_added_to_main_grad attribute."
 
-            if _is_gfx1250():
-                inplace_add_triton_(weight.main_grad, grad_quantized_weight)
+            if fuse_wgrad_accum:
+                # The gemm accumulated into main_grad already; grad_quantized_weight is
+                # the dummy it returns in that case and must not be added on top.
+                weight.grad_added_to_main_grad = True
             else:
-                weight.main_grad.add_(grad_quantized_weight)
-            weight.grad_added_to_main_grad = True
+                # Unconditional: this backward runs once per microbatch, while
+                # grad_added_to_main_grad is a per-iteration flag that DDP resets in
+                # zero_grad_buffer() before the microbatch loop. The flag means "main_grad
+                # already owns this gradient, so the AccumulateGrad hook must not add
+                # param.grad on top" -- not "an add already happened". Gating the add on it
+                # lands only the first microbatch and silently drops every later one, and
+                # the dummy wgrad returned below means they are not recoverable from
+                # param.grad either. The fused path above is immune because its beta=1
+                # epilogue accumulates on every microbatch regardless of the flag.
+                if _is_gfx1250():
+                    inplace_add_triton_(weight.main_grad, grad_quantized_weight)
+                else:
+                    weight.main_grad.add_(grad_quantized_weight)
+                weight.grad_added_to_main_grad = True
 
             return grad_x, _get_dummy_wgrad(list(weight.shape), weight.dtype), None, None
 
@@ -185,8 +230,58 @@ def _bridge_weight_grad(
         x, weight, weight_buffer.data, weight_buffer.data_t
     )
 
+    if fuse_wgrad_accum:
+        # Give the gemm its accumulation target: it resolves main_grad off the pair's
+        # `data`, not off the parameter. The transpose cache is only ever a forward
+        # operand, so it needs nothing.
+        #
+        # This cannot move inside _WeightGradBridge.forward. apply() hands back aliases
+        # of the tensors forward returned (`out is not q`), so attributes attached
+        # either to the inputs or inside forward do not survive onto what the caller --
+        # and therefore the gemm -- actually sees.
+        quantized_weight.main_grad = weight.main_grad
+        quantized_weight.grad_added_to_main_grad = weight.grad_added_to_main_grad
+
     # wrapper quantized_weight and quantized_weight_trans into PrimusTurboQuantizedTensorPair
     return x, PrimusTurboQuantizedTensorPair(data=quantized_weight, data_t=quantized_weight_trans)
+
+
+def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
+    """Resolve the fused weight-gradient accumulation pattern for ``weight``.
+
+    Fusion has the wgrad GEMM accumulate straight into ``weight.main_grad`` through a
+    beta=1 epilogue, replacing the separate elementwise add the framework would run
+    over the whole gradient buffer. It is driven by ``gradient_accumulation_fusion``.
+
+    Only the BF16/FP16 GEMMs and the FP8 current-scaling (tensorwise) ones carry that
+    epilogue. FP8 block / MXFP8 scaling and every FP4 recipe keep the framework's
+    separate add instead, so the pattern stays off there.
+
+    ``weight`` must be the real parameter, not a quantized buffer: the buffer carries
+    no ``main_grad``. On the multi-microbatch path the parameter's attributes are
+    forwarded onto the buffer by :func:`_bridge_weight_grad`, which also stands its own
+    accumulation down so the two never both write ``main_grad``.
+    """
+    if not getattr(config, "gradient_accumulation_fusion", False):
+        return None
+
+    if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+        return None
+    if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+        quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+        if quant_config is None or not quant_config.current_scaling():
+            return None
+    elif weight.dtype not in (torch.bfloat16, torch.float16):
+        return None
+
+    assert hasattr(weight, "main_grad") and hasattr(weight, "grad_added_to_main_grad"), (
+        "gradient_accumulation_fusion is enabled but the weight carries neither "
+        "main_grad nor grad_added_to_main_grad. Those are set up by Megatron's "
+        "distributed data parallel wrapper, so this usually means the module ran "
+        "before the model was wrapped, or that a quantized buffer was passed here "
+        "instead of the parameter."
+    )
+    return "megatron"
 
 
 def _maybe_create_quantized_weight_buffers(
@@ -669,8 +764,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
     Primus-Turbo API (flash_attn_interface.py):
         flash_attn_func(..., sink: Optional[torch.Tensor] = None)
         - sink: learned sink parameters, shape (num_attention_heads,)
-        - When sink is provided, the Triton backend is automatically used
-          (C++ backend does not support sink attention)
+        - FlyDSL sink attention requires an FP32 parameter.
 
     Reference: gpt-oss/gpt_oss/triton/attention.py
     """
@@ -793,7 +887,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         # This matches gpt-oss model: self.sinks = torch.nn.Parameter(torch.empty(num_attention_heads))
         self.use_sink_attention = self._init_sink_attention
         if self.use_sink_attention:
-            self.sinks = torch.nn.Parameter(torch.zeros(self._num_heads_for_sinks, dtype=torch.bfloat16))
+            self.sinks = torch.nn.Parameter(torch.zeros(self._num_heads_for_sinks, dtype=torch.float32))
         else:
             self.sinks = None
         # Clean up temporary attributes
@@ -833,7 +927,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         # Primus-Turbo API (flash_attn_interface.py line 316-348):
         #   flash_attn_func(..., sink: Optional[torch.Tensor] = None)
         #   - sink: learned sink parameters, shape (num_attention_heads,)
-        #   - When sink is provided, Triton backend is automatically used
+        #   - FlyDSL requires sink to remain FP32
         #
         # Reference: gpt-oss/gpt_oss/triton/attention.py
         sink_tensor = None
@@ -842,7 +936,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         use_sink_attn = self.use_sink_attention and self.sinks is not None
 
         if use_sink_attn:
-            sink_tensor = self.sinks
+            # Module-wide BF16 conversion may cast the Parameter after init;
+            # FlyDSL requires an FP32 sink and autograd propagates through this cast.
+            sink_tensor = self.sinks.float()
 
             # Apply sliding window based on layer pattern (gpt-oss: even layers only)
             # gpt-oss pattern: self.sliding_window = config.sliding_window if layer_idx % 2 == 0 else 0
@@ -861,10 +957,11 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
 
         # NOTE: query, key, value maybe a view of the original tensor, call contiguous to copy a new tensor
         # and let torch allocator can release the original tensor.
-        if torch.is_grad_enabled():
-            query = query.contiguous() if query.requires_grad else query
-            key = key.contiguous() if key.requires_grad else key
-            value = value.contiguous() if value.requires_grad else value
+        # This must also run under no-grad evaluation: the unified FlyDSL
+        # dispatcher relies on the subsequent BSHD view retaining SBHD storage.
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
 
         if qkv_format == "sbhd":
             query = query.permute(1, 0, 2, 3)
@@ -923,6 +1020,8 @@ class PrimusTurboLinear(TELinear):
         symmetric_ar_type: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
+        _apply_turbo_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1009,6 +1108,7 @@ class PrimusTurboLinear(TELinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
                     )
                 else:
                     if is_first_microbatch:
@@ -1023,12 +1123,14 @@ class PrimusTurboLinear(TELinear):
                             or quant_config.current_scaling(),
                         )
 
+                    fuse_pattern = _fuse_wgrad_accum_pattern(self.config, weight)
                     x, quantized_weight = _bridge_weight_grad(
                         x,
                         weight,
                         PrimusTurboQuantizedTensorPair(
                             data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                         ),
+                        fuse_wgrad_accum=fuse_pattern is not None,
                     )
                     out = primus_turbo_torch.ops.gemm_fp8(
                         x,
@@ -1037,6 +1139,7 @@ class PrimusTurboLinear(TELinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -1052,6 +1155,7 @@ class PrimusTurboLinear(TELinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
                     )
                 else:
                     if is_first_microbatch:
@@ -1065,12 +1169,14 @@ class PrimusTurboLinear(TELinear):
                             disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
                         )
 
+                    fuse_pattern = _fuse_wgrad_accum_pattern(self.config, weight)
                     x, quantized_weight = _bridge_weight_grad(
                         x,
                         weight,
                         PrimusTurboQuantizedTensorPair(
                             data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                         ),
+                        fuse_wgrad_accum=fuse_pattern is not None,
                     )
                     out = primus_turbo_torch.ops.gemm_fp4(
                         x,
@@ -1079,9 +1185,17 @@ class PrimusTurboLinear(TELinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             else:
-                out = primus_turbo_torch.ops.gemm(x, weight, trans_a=False, trans_b=True, out_dtype=None)
+                out = primus_turbo_torch.ops.gemm(
+                    x,
+                    weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
+                )
 
         out = out.view(original_shape[0], original_shape[1], -1)
 
@@ -1113,6 +1227,8 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
     ):
         if not input_is_parallel:
             raise ValueError(f"{__class__.__name__} layers do not support input_is_parallel = False")
+
+        _apply_turbo_gemm_backend_env()
 
         args = get_args()
         self.offload = args.offload and "row_parallel_gemm" in args.offload_ops
@@ -1203,6 +1319,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
                     )
                 else:
                     if is_first_microbatch:
@@ -1217,12 +1334,14 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                             or quant_config.current_scaling(),
                         )
 
+                    fuse_pattern = _fuse_wgrad_accum_pattern(self.config, weight)
                     x, quantized_weight = _bridge_weight_grad(
                         x,
                         weight,
                         PrimusTurboQuantizedTensorPair(
                             data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                         ),
+                        fuse_wgrad_accum=fuse_pattern is not None,
                     )
                     out = primus_turbo_torch.ops.gemm_fp8(
                         x,
@@ -1231,6 +1350,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -1246,6 +1366,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
                     )
                 else:
                     if is_first_microbatch:
@@ -1259,12 +1380,14 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                             disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
                         )
 
+                    fuse_pattern = _fuse_wgrad_accum_pattern(self.config, weight)
                     x, quantized_weight = _bridge_weight_grad(
                         x,
                         weight,
                         PrimusTurboQuantizedTensorPair(
                             data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                         ),
+                        fuse_wgrad_accum=fuse_pattern is not None,
                     )
                     out = primus_turbo_torch.ops.gemm_fp4(
                         x,
@@ -1273,9 +1396,17 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             else:
-                out = primus_turbo_torch.ops.gemm(x, weight, trans_a=False, trans_b=True, out_dtype=None)
+                out = primus_turbo_torch.ops.gemm(
+                    x,
+                    weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
+                )
 
         out = out.view(original_shape[0], original_shape[1], -1)
 
@@ -1302,6 +1433,8 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
     ):
+        _apply_turbo_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1390,6 +1523,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
                     )
                 else:
                     if is_first_microbatch:
@@ -1404,12 +1538,14 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                             or quant_config.current_scaling(),
                         )
 
+                    fuse_pattern = _fuse_wgrad_accum_pattern(self.config, weight)
                     x, quantized_weight = _bridge_weight_grad(
                         x,
                         weight,
                         PrimusTurboQuantizedTensorPair(
                             data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                         ),
+                        fuse_wgrad_accum=fuse_pattern is not None,
                     )
                     out = primus_turbo_torch.ops.gemm_fp8(
                         x,
@@ -1418,6 +1554,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -1433,6 +1570,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
                     )
                 else:
                     if is_first_microbatch:
@@ -1446,12 +1584,14 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                             disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
                         )
 
+                    fuse_pattern = _fuse_wgrad_accum_pattern(self.config, weight)
                     x, quantized_weight = _bridge_weight_grad(
                         x,
                         weight,
                         PrimusTurboQuantizedTensorPair(
                             data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                         ),
+                        fuse_wgrad_accum=fuse_pattern is not None,
                     )
                     out = primus_turbo_torch.ops.gemm_fp4(
                         x,
@@ -1460,9 +1600,17 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             else:
-                out = primus_turbo_torch.ops.gemm(x, weight, trans_a=False, trans_b=True, out_dtype=None)
+                out = primus_turbo_torch.ops.gemm(
+                    x,
+                    weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
+                )
 
         out = out.view(original_shape[0], original_shape[1], -1)
 
@@ -1494,6 +1642,8 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,
     ):
+        _apply_turbo_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1590,6 +1740,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
                     )
                 else:
                     if is_first_microbatch:
@@ -1604,12 +1755,14 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                             or quant_config.current_scaling(),
                         )
 
+                    fuse_pattern = _fuse_wgrad_accum_pattern(self.config, weight)
                     inp, quantized_weight = _bridge_weight_grad(
                         inp,
                         weight,
                         PrimusTurboQuantizedTensorPair(
                             data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                         ),
+                        fuse_wgrad_accum=fuse_pattern is not None,
                     )
                     out = primus_turbo_torch.ops.gemm_fp8(
                         inp,
@@ -1618,6 +1771,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -1633,6 +1787,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
                     )
                 else:
                     if is_first_microbatch:
@@ -1646,12 +1801,14 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                             disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
                         )
 
+                    fuse_pattern = _fuse_wgrad_accum_pattern(self.config, weight)
                     inp, quantized_weight = _bridge_weight_grad(
                         inp,
                         weight,
                         PrimusTurboQuantizedTensorPair(
                             data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                         ),
+                        fuse_wgrad_accum=fuse_pattern is not None,
                     )
                     out = primus_turbo_torch.ops.gemm_fp4(
                         inp,
@@ -1660,9 +1817,17 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         trans_b=True,
                         out_dtype=None,
                         config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             else:
-                out = primus_turbo_torch.ops.gemm(inp, weight, trans_a=False, trans_b=True, out_dtype=None)
+                out = primus_turbo_torch.ops.gemm(
+                    inp,
+                    weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
+                )
 
         out = out.view(original_shape[0], original_shape[1], -1)
 
@@ -1844,6 +2009,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
+        _apply_turbo_grouped_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1967,6 +2134,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                     m_splits,
                     trans_b=True,
                     config=quant_config.data(),
+                    fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weights),
                 )
             else:
                 if is_first_microbatch:
@@ -1981,12 +2149,14 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                         or quant_config.current_scaling(),
                     )
 
+                fuse_pattern = _fuse_wgrad_accum_pattern(self.config, weights)
                 x, quantized_weights = _bridge_weight_grad(
                     x,
                     weights,
                     PrimusTurboQuantizedTensorPair(
                         data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                     ),
+                    fuse_wgrad_accum=fuse_pattern is not None,
                 )
 
                 out = primus_turbo_torch.ops.grouped_gemm_fp8(
@@ -1995,6 +2165,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                     m_splits,
                     trans_b=True,
                     config=quant_config.data(),
+                    fuse_bgrad_accum_pattern=fuse_pattern,
                 )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -2012,6 +2183,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                     m_splits,
                     trans_b=True,
                     config=quant_config.data(),
+                    fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weights),
                 )
             else:
                 if is_first_microbatch:
@@ -2025,12 +2197,14 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                         disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
                     )
 
+                fuse_pattern = _fuse_wgrad_accum_pattern(self.config, weights)
                 x, quantized_weights = _bridge_weight_grad(
                     x,
                     weights,
                     PrimusTurboQuantizedTensorPair(
                         data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                     ),
+                    fuse_wgrad_accum=fuse_pattern is not None,
                 )
 
                 out = primus_turbo_torch.ops.grouped_gemm_fp4(
@@ -2039,9 +2213,16 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                     m_splits,
                     trans_b=True,
                     config=quant_config.data(),
+                    fuse_bgrad_accum_pattern=fuse_pattern,
                 )
         else:
-            out = primus_turbo_torch.ops.grouped_gemm(x, weights, m_splits, trans_b=True)
+            out = primus_turbo_torch.ops.grouped_gemm(
+                x,
+                weights,
+                m_splits,
+                trans_b=True,
+                fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weights),
+            )
 
         return out, None
 

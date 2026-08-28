@@ -7,7 +7,7 @@ ensuring both frameworks start from identical weights for loss-curve comparison.
 
 Usage:
     python tools/hybrid/convert_fla_gdn_init_to_megatron.py \
-        --fla-config /path/to/gated_deltanet_300M_pure.json \
+        --fla-config /path/to/gated_deltanet_300M.json \
         --output-dir output/fla_init_ckpt_300M \
         --seed 42 \
         --no-te   # use no-TE key names (WrappedTorchNorm, ColumnParallelLinear)

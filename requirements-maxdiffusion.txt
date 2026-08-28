@@ -1,0 +1,13 @@
+# MaxDiffusion (JAX) runtime deps for running the `maxdiffusion` backend from a
+# bare Primus checkout on the MaxText JAX base image. Kept SEPARATE from
+# requirements-jax.txt (MaxText) on purpose: the maxdiffusion stack pins
+# transformers/torch versions that we do not want to force onto MaxText runs.
+#
+# torch/torchvision are installed separately (ROCm wheel index) by
+# examples/maxdiffusion/setup_maxdiffusion_env.sh, because they need
+# --find-links/--no-index which cannot be mixed with a PyPI resolve here.
+transformers==5.5.0
+scikit-image
+imageio-ffmpeg
+loguru
+wandb

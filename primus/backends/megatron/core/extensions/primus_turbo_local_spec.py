@@ -29,9 +29,9 @@ from typing import Optional
 
 import primus_turbo.pytorch as pt
 import torch
-from primus_turbo.pytorch.ops.attention.flash_attn_interface import AiterFlashAttnFunc
+from primus_turbo.pytorch.ops.attention.flash_attn_interface import FlashAttnFunc
 
-torch._dynamo.allow_in_graph(AiterFlashAttnFunc)
+torch._dynamo.allow_in_graph(FlashAttnFunc)
 
 
 @torch._dynamo.disable
