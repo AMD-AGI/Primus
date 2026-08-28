@@ -25,13 +25,15 @@ def fused_softcap_kernel(
     # Load values
     x = tl.load(full_logits_ptr + offsets, mask=mask)
 
-    # Perform operations in-place
+    # tanh saturates well before |x|~9. Clamping 2x keeps tl.exp finite in FP32
+    # (a logit of 2000 with softcapping 30 used to overflow exp(2x) to inf and
+    # store NaN instead of a value near +30). Compute in FP32 so BF16 inputs
+    # follow the same saturation contract.
+    x = x.to(tl.float32)
     x = x / softcapping_value
-
-    # Manual tanh implementation using exp
-    exp2x = tl.exp(2 * x)
-    x = (exp2x - 1) / (exp2x + 1)
-
+    x = tl.minimum(tl.maximum(x, -9.0), 9.0)
+    exp2x = tl.exp(2.0 * x)
+    x = (exp2x - 1.0) / (exp2x + 1.0)
     x = x * softcapping_value
 
     # Store result
