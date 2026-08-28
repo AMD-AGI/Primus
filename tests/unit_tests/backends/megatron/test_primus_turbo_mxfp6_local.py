@@ -771,6 +771,18 @@ class TestMXFP6FusedMLP(PrimusUT):
     def setup_parallel(self, init_parallel_state, megatron_global_args):
         pass
 
+    @pytest.fixture(autouse=True)
+    def default_fused_mlp_mode(self):
+        """Pin the mode to the default instead of inheriting it from the shell.
+
+        The submission container exports PRIMUS_MXFP6_FUSED_MLP=on, which is what makes a
+        fallback an error there -- so the two fallback tests below would fail inside the
+        very container the fused MLP is meant to run in.
+        """
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PRIMUS_MXFP6_FUSED_MLP", None)
+            yield
+
     @requires_mxfp6
     def test_forward_and_grads_match_stock_mlp(self):
         torch.manual_seed(0)
