@@ -3,15 +3,14 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""Bridge from Primus's var-len dispatch to the hand-written CDNA4 ASM backward.
+"""Bridge from Primus's var-len dispatch to the hand-written CDNA4 ASM attention.
 
 WHAT IT IS:
-  ``varlen_attn_impl=asm`` keeps aiter's CK-tile kernel for the forward and replaces the
-  BACKWARD -- 2.5x the forward's FLOPs, and the larger half of the attention step -- with
-  three hand-written gfx950 kernels: a delta preprocess, a fused dK/dV pass and a fused dQ
-  pass. On the Ideogram-4 production packing (40968 tokens, 18 heads, head_dim 256, 16
-  ragged segments) the backward measures 13.77 ms against Triton's 14.54 ms, and the
-  gradients match CK's own error against an fp32 reference to three significant figures.
+  ``varlen_attn_impl=asm`` replaces BOTH halves of var-len attention with hand-written
+  gfx950 kernels: a fused forward, and a backward made of a delta preprocess, a fused
+  dK/dV pass and a fused dQ pass. The gradients match the CK path's own error against an
+  fp32 reference. An earlier revision of this shim swapped only the backward and left the
+  forward on CK; that is no longer what the ``asm`` arm does.
 
 WHY IT IS A SHIM:
   The kernels are assembled by PyISA, which is not a Primus dependency and is not present
@@ -26,9 +25,11 @@ WHY IT IS A SHIM:
   already importable.
 
 CONSTRAINTS (checked by :func:`asm_available`, not assumed):
-  gfx950, head_dim 256, and a ROCm new enough to assemble the kernels. The kernels bake
-  the packed-layout token stride in as an immediate, so they are also built per head
-  count -- that happens once, into an on-disk cache, on first use.
+  gfx950 and head_dim 256, which is what the tile sizes were tuned for. The kernels take
+  the packed-layout token stride in the parameter block rather than baking it in, so ONE
+  build serves every head count -- the code objects are a pure function of (arch, head
+  dim) and can therefore ship prebuilt. PyISA is needed to produce them, not to run them;
+  an image carrying a prebuilt cache needs no assembler.
 """
 from __future__ import annotations
 
@@ -96,7 +97,7 @@ def asm_varlen_flash_attention(
     *,
     softmax_scale: Optional[float] = None,
 ) -> Tensor:
-    """Var-len bf16 flash attention with the ASM backward.
+    """Var-len bf16 flash attention on the ASM forward and backward.
 
     Signature-compatible with :func:`..attention.varlen_flash_attention`: q/k/v are packed
     ``(total_tokens, H, D)``, ``cu_seqlens`` is the ``int32`` ``(num_segments + 1,)``

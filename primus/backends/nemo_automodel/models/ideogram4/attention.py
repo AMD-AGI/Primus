@@ -182,11 +182,10 @@ def resolve_varlen_impl() -> str:
     impl = varlen_attn_impl()
 
     if impl == "asm":
-        # Hand-written CDNA4 assembly for the backward, CK for the forward. It is built
-        # for gfx950 at head_dim 256 specifically -- the kernels bake the token stride in
-        # as an immediate and the tile sizes were tuned on this shape -- and it lives
-        # outside the Primus tree, so anything missing degrades to the shipped default
-        # rather than failing the run.
+        # Hand-written CDNA4 assembly for the forward AND the backward. It is built for
+        # gfx950 at head_dim 256 specifically -- the tile sizes were tuned on that shape --
+        # and it lives outside the Primus tree, so anything missing degrades to the shipped
+        # default rather than failing the run.
         try:
             from primus.backends.nemo_automodel.models.ideogram4.asm_varlen_attn_shim import (
                 asm_available,
