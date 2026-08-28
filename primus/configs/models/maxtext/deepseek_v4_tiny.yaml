@@ -1,0 +1,16 @@
+extends:
+  - model_base.yaml
+
+# Single-node smoke test for the V4 decoder, compressed attention, hash routing and
+# MoE, without needing a 4-node allocation. Geometry comes from MaxText's
+# deepseek4-tiny.yml, which upstream resized from a 7-layer/4096-wide cut to a
+# 43-layer/64-wide CPU-test model, so treat this as a "does it run" check: at the
+# default learning rate that narrow model barely moves the loss.
+model_name: "deepseek4-tiny"
+tokenizer_path: "deepseek-ai/DeepSeek-V4-Flash"
+tokenizer_type: "huggingface"
+
+# CompressedAttention cannot use model_base's cudnn_flash_te kernel. Older MaxText
+# pinned this inside deepseek4-tiny.yml, but that pin was dropped upstream once flash
+# gained a tokamax-splash path, so set it here to stay correct on both.
+attention: "dot_product"

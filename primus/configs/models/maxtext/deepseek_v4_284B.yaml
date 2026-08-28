@@ -1,0 +1,11 @@
+extends:
+  - model_base.yaml
+
+model_name: "deepseek4-284b"
+tokenizer_path: "deepseek-ai/DeepSeek-V4-Flash"
+tokenizer_type: "huggingface"
+
+# V4 replaces MLA with CompressedAttention, which has no fused TE kernel. MaxText's
+# deepseek4-284b.yml leaves `attention` unset, so model_base's cudnn_flash_te would
+# otherwise survive the merge and pick a kernel this attention class cannot use.
+attention: "dot_product"

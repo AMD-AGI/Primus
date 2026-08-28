@@ -1,0 +1,73 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v4_284B-pretrain}
+workspace: ./output
+
+# 284B needs more HBM than the base image default (.9 = 173 GB): weights plus optimizer
+# state alone are ~58 GB/GPU, and the dense MoE dispatch scratch is most of the rest.
+env:
+  XLA_PYTHON_CLIENT_MEM_FRACTION: ".95"
+  # Compiling this many modules in parallel makes the ROCm LLVM backend race on its
+  # object-file stream ("LLVM Fatal Error ... IO failure on output stream: Bad file
+  # descriptor" on jit_clip, reproducibly on one of the four nodes). Serialising
+  # codegen trades compile time for a compile that finishes. The managed XLA knobs
+  # from primus/backends/maxtext/env_spec.py still merge in on top of this.
+  XLA_FLAGS: "--xla_gpu_force_compilation_parallelism=1"
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    # model to run
+    model: deepseek_v4_284B.yaml
+    overrides:
+      run_name: "deepseek_v4_284b_training"
+      base_output_directory: "./output"
+      steps: 50
+      profiler: ""
+
+      # data
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+
+      # checkpoint
+      enable_checkpointing: false
+      async_checkpointing: false
+
+      # inter-node parallelism strategy
+      # 284B bf16 weights (~568GB) plus grads and optimizer state do not fit in one
+      # node's 8x192GB, so nodes shard the model with FSDP instead of replicating it
+      # as the smaller Primus MoE configs do with dcn_data_parallelism.
+      dcn_data_parallelism: 1
+      dcn_fsdp_parallelism: -1
+      dcn_pipeline_parallelism: 1
+      dcn_tensor_parallelism: 1
+      dcn_sequence_parallelism: 1
+
+      # intra-node parallelism strategy
+      # 256 experts over 8 GPUs is 32 experts each, and the dispatch all-to-all stays
+      # on XGMI within the node.
+      ici_fsdp_parallelism: 1
+      ici_data_parallelism: 1
+      ici_expert_parallelism: -1
+      ici_sequence_parallelism: 1
+      ici_tensor_parallelism: 1
+      ici_pipeline_parallelism: 1
+
+      # sparse_matmul would route tokens with ragged_all_to_all, which this ROCm XLA
+      # build does not implement ("Device communicator is not implementing" at train
+      # step), so use the dense one-hot path every shipping Primus ROCm MoE config
+      # uses. It costs O(num_experts) per token rather than O(num_experts_per_tok),
+      # which is the main perf cost of running V4 on this stack today.
+      # megablox stays off regardless because its Pallas kernel is TPU-only.
+      # Expert capacity drives the dispatch/combine scratch, which is what pushed the
+      # first attempt to 116 GiB and over the limit; 1.0 keeps it in budget.
+      sparse_matmul: false
+      megablox: false
+      capacity_factor: 1.0
+
+      sharding_tolerance: 0.05
+      max_target_length: 2048
+      per_device_batch_size: 1
+      remat_policy: "full"
