@@ -780,3 +780,68 @@ class TestRejectResetAttentionMask:
         # The deferral above is only sound while the flex side actually raises.
         with pytest.raises(NotImplementedError, match="reset_attention_mask"):
             tfa.build_turbo_flex_attention(args=_args(reset_attention_mask=True), config=_config())
+
+
+class TestSinkKwargsFor:
+    """The three-way answer to "can this entry take a sink?".
+
+    Primus bound one of several attention entries and then passed ``sink=`` to all of
+    them. Only ``flash_attn_func`` has the parameter: the context-parallel, fp8 and
+    packed-varlen entries do not. So every ``context_parallel_size > 1`` run died on a
+    bare ``TypeError: flash_attn_usp_func() got an unexpected keyword argument 'sink'``
+    -- even with no sink configured, and with nothing in the message to say why
+    (measured on 2x MI355, TASK_PROGRESS EXP21 case B; the entry inventory is EXP22).
+    """
+
+    @staticmethod
+    def _takes_sink(q, k, v, sink=None):
+        return None
+
+    @staticmethod
+    def _no_sink(q, k, v):
+        return None
+
+    @staticmethod
+    def _kwargs_catch_all(q, k, v, **kw):
+        return None
+
+    def test_forwards_when_the_entry_takes_one(self):
+        sink = torch.zeros(4)
+        got = tfa.sink_kwargs_for(self._takes_sink, sink, where="X")
+        assert list(got) == ["sink"]
+        assert got["sink"] is sink
+
+    def test_forwards_none_when_the_entry_takes_one(self):
+        # None is the parameter's own default; passing it explicitly is harmless and
+        # keeps the forwarding branch free of a second special case.
+        assert tfa.sink_kwargs_for(self._takes_sink, None, where="X") == {"sink": None}
+
+    def test_omits_when_the_entry_cannot_take_one_and_there_is_nothing_to_lose(self):
+        # The bug this fixes: no sink configured, yet the call still died on the kwarg.
+        assert tfa.sink_kwargs_for(self._no_sink, None, where="X") == {}
+
+    def test_raises_when_a_sink_would_be_dropped(self):
+        # Omitting it here would change the softmax denominator of every query and
+        # train a different model in silence -- so this must be loud, not lenient.
+        with pytest.raises(NotImplementedError, match="attention sink"):
+            tfa.sink_kwargs_for(self._no_sink, torch.zeros(4), where="X")
+
+    def test_error_names_the_entry_and_the_configuration(self):
+        with pytest.raises(NotImplementedError) as excinfo:
+            tfa.sink_kwargs_for(self._no_sink, torch.zeros(4), where="context_parallel_size=2")
+        msg = str(excinfo.value)
+        assert "_no_sink" in msg
+        assert "context_parallel_size=2" in msg
+
+    def test_unbound_entry_with_a_sink_raises_rather_than_calling_none(self):
+        # attn_varlen is None when no varlen entry was bound; a sink plus that
+        # combination is a configuration error, not an AttributeError later on.
+        with pytest.raises(NotImplementedError):
+            tfa.sink_kwargs_for(None, torch.zeros(4), where="X")
+
+    def test_kwargs_catch_all_is_treated_as_accepting(self):
+        # A **kwargs entry can genuinely take a sink, and refusing it would ground
+        # wrappers that forward everything. The cost is that a permissive test double
+        # also passes -- acceptable, since a real entry that ignores **kwargs is a bug
+        # on its own side.
+        assert tfa.sink_kwargs_for(self._kwargs_catch_all, None, where="X") == {"sink": None}

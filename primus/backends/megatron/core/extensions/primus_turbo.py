@@ -102,6 +102,7 @@ from primus.backends.megatron.core.extensions._triton.inplace_add import (
 from primus.backends.megatron.core.extensions.turbo_flex_attention import (
     build_turbo_flex_attention,
     reject_reset_attention_mask,
+    sink_kwargs_for,
 )
 from primus.core.utils.module_utils import warning_rank_0
 
@@ -846,13 +847,18 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             # document boundaries as cu_seqlens and honours them in the kernel, so THD
             # no longer has to route through the flex compat layer to be correct.
             #
-            # Deliberately bound for CP == 1 only. flash_attn_varlen_usp_func exists,
-            # but it wants the GLOBAL cu_seqlens/max_seqlen describing the full
-            # unsharded sequence while each rank holds a local token shard, and what
-            # Megatron puts in PackedSeqParams under context parallelism is not
-            # something this adapter can verify locally. Guessing there would attend
-            # across documents silently -- the exact failure this binding exists to
-            # remove -- so CP > 1 keeps raising below.
+            # Deliberately bound for CP == 1 only. flash_attn_varlen_usp_func exists and
+            # its side of the contract is not in doubt: measured on 2x MI355 it is
+            # bit-identical to the single-card varlen kernel when given a local token
+            # shard plus the GLOBAL cu_seqlens/max_seqlen, including when a document
+            # straddles the shard boundary (TASK_PROGRESS EXP21 case C).
+            #
+            # What is unverifiable here is the other side: whether what Megatron puts in
+            # PackedSeqParams under context parallelism is those global boundaries or
+            # already-sharded local ones. The adapter cannot tell the two apart from the
+            # tensor it receives -- both are a plausible cu_seqlens -- and guessing wrong
+            # attends across documents silently, the exact failure this binding exists to
+            # remove. So CP > 1 keeps raising below until that contract is pinned down.
             if self.config.context_parallel_size == 1:
                 self.attn_varlen = primus_turbo_torch.ops.flash_attn_varlen_func
                 self._attn_accepts_packed_seq = True
@@ -1143,6 +1149,11 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                 # on the first call of a shape because Megatron caches PackedSeqParams.
                 max_seqlen_q = int(max_seqlen_q or (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
                 max_seqlen_kv = int(max_seqlen_kv or (cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]).max().item())
+            # Not every bound entry takes a sink; see sink_kwargs_for for the three cases.
+            varlen_sink_kwargs = sink_kwargs_for(
+                self.attn_varlen, sink_tensor, where="packed sequences, qkv_format='thd'"
+            )
+
             o = self.attn_varlen(
                 query,
                 key,
@@ -1160,9 +1171,16 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                 deterministic=self.deterministic_mode,
                 return_lse=False,
                 return_attn_probs=False,
-                sink=sink_tensor,
+                **varlen_sink_kwargs,
             )
         else:
+            # PR 208 passes the sink tensor to Primus-Turbo -- but only the entries that
+            # have somewhere to put it. flash_attn_usp_func / flash_attn_fp8_*_func do
+            # not, and passing it to them raised a bare TypeError on every CP run.
+            sink_kwargs = sink_kwargs_for(
+                self.attn, sink_tensor, where=f"context_parallel_size={self.config.context_parallel_size}"
+            )
+
             o = self.attn(
                 query,
                 key,
@@ -1176,7 +1194,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                 deterministic=self.deterministic_mode,
                 return_lse=False,
                 return_attn_probs=False,
-                sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
+                **sink_kwargs,
                 **packed_attn_kwargs,
                 **self.attn_kwargs,
             )

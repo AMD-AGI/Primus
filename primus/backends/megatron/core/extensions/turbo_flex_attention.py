@@ -111,6 +111,45 @@ def _entry_accepts(fn: Optional[Callable], name: str) -> bool:
     return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
+def sink_kwargs_for(entry: Optional[Callable], sink: Optional[torch.Tensor], *, where: str) -> dict:
+    """Decide how to hand ``sink`` to ``entry``: forward it, omit it, or refuse.
+
+    The attention entries Primus binds do not agree about sinks. On current
+    Primus-Turbo ``flash_attn_func`` takes one; ``flash_attn_usp_func``,
+    ``flash_attn_fp8_usp_func``, ``flash_attn_fp8_func`` and
+    ``flash_attn_varlen_func`` do not. The call site used to pass ``sink=`` to all
+    of them unconditionally, so every context-parallel run died on a bare
+    ``TypeError: ... unexpected keyword argument 'sink'`` -- whether or not a sink
+    was configured, and with nothing to say why.
+
+    Three cases, and the middle one is the point:
+
+    * the entry takes it       -> forward it (``None`` included; that is its default).
+    * the entry does not take it, and there is no sink -> omit the argument. Nothing
+      is lost: there was nothing to pass.
+    * the entry does not take it, and a sink IS configured -> raise. Omitting it here
+      would change the softmax denominator of every query, and the run would train a
+      different model without a word of complaint.
+
+    ``where`` names the path for the error message, since the caller knows which
+    binding it is holding and this helper does not.
+    """
+    if _entry_accepts(entry, "sink"):
+        return {"sink": sink}
+    if sink is None:
+        return {}
+    name = getattr(entry, "__name__", repr(entry))
+    raise NotImplementedError(
+        f"PrimusTurboAttention: an attention sink is configured, but the attention entry "
+        f"bound for this configuration ({name}, {where}) has no 'sink' parameter, so the "
+        f"sink logits cannot reach the kernel. Dropping them would change the softmax "
+        f"denominator for every query and silently train a different model. The "
+        f"context-parallel, fp8 and packed-varlen entries are the ones that lack it: run "
+        f"sink attention on the unpacked bf16/fp16 path with context_parallel_size=1, or "
+        f"upgrade Primus-Turbo to a build whose entry forwards a sink."
+    )
+
+
 # =============================================================================
 # mask_mod builders + BlockMask cache
 # =============================================================================
