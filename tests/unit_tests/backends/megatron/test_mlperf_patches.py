@@ -17,6 +17,16 @@ import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _explicit_precision_environment(monkeypatch):
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR", "mxfp6")
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN", "bfloat16")
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM", "bfloat16")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -139,6 +149,38 @@ def _make_ctx(
         backend="megatron",
         phase="before_train",
     )
+
+
+def test_precision_disclosures_are_explicit(monkeypatch):
+    from primus.backends.megatron.patches.mlperf_logging_patches import (
+        _precision_disclosures_from_env,
+    )
+
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR", "mxfp6")
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN", "bfloat16")
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM", "bfloat16")
+
+    assert _precision_disclosures_from_env() == {
+        "lowest_numerical_precision_in_linear": "mxfp6",
+        "lowest_numerical_precision_in_attn": "bfloat16",
+        "lowest_numerical_precision_in_comm": "bfloat16",
+    }
+
+
+def test_missing_precision_disclosure_fails_mlperf_startup(monkeypatch):
+    from primus.backends.megatron.patches.mlperf_logging_patches import (
+        _precision_disclosures_from_env,
+    )
+
+    for name in (
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR",
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN",
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(RuntimeError, match="explicit precision disclosures"):
+        _precision_disclosures_from_env()
 
 
 # ============================================================================

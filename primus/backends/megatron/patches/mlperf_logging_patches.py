@@ -25,6 +25,26 @@ from primus.core.utils.module_utils import log_rank_0
 
 logger = logging.getLogger(__name__)
 
+_PRECISION_DISCLOSURE_ENV = {
+    "lowest_numerical_precision_in_linear": "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR",
+    "lowest_numerical_precision_in_attn": "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN",
+    "lowest_numerical_precision_in_comm": "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM",
+}
+
+
+def _precision_disclosures_from_env() -> dict[str, str]:
+    """Return mandatory v6.1 precision disclosures without guessing policy names."""
+    values = {
+        key: os.environ.get(environment_name, "").strip()
+        for key, environment_name in _PRECISION_DISCLOSURE_ENV.items()
+    }
+    missing = [_PRECISION_DISCLOSURE_ENV[key] for key, value in values.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "MLPerf mode requires explicit precision disclosures; missing " + ", ".join(missing)
+        )
+    return values
+
 
 def _mlperf_logging_enabled(ctx: PatchContext) -> bool:
     args = get_args(ctx)
@@ -94,6 +114,7 @@ class FluxMLPerfLogger:
         self.log_every_n_steps = log_every_n_steps
         self.timer = ThroughputTimer(global_batch_size)
         self._converged = False
+        self._run_started = False
 
         self.profiler = os.getenv("PROFILER", "")
         self.profiler_warmup_steps = int(os.getenv("PROF_WARMUP_STEPS", "0"))
@@ -122,6 +143,8 @@ class FluxMLPerfLogger:
 
     def log_init(self, seed: int):
         if int(os.environ.get("RANK", "0")) == 0:
+            clear_caches = os.environ.get("MLPERF_CLEAR_CACHES", "false").lower() == "true"
+            self._event(key="cache_clear", value=clear_caches)
             self._start(key=self._constants.INIT_START)
             self._event(key=self._constants.SUBMISSION_BENCHMARK, value="flux1")
             self._event(
@@ -144,9 +167,20 @@ class FluxMLPerfLogger:
         if int(os.environ.get("RANK", "0")) != 0:
             return
         self._event(key=self._constants.GLOBAL_BATCH_SIZE, value=self.gbs)
+        for key, value in _precision_disclosures_from_env().items():
+            self._event(key=key, value=value)
+        for key, value in (
+            ("tensor_parallelism", getattr(args, "tensor_model_parallel_size", 1)),
+            ("pipeline_parallelism", getattr(args, "pipeline_model_parallel_size", 1)),
+            ("context_parallelism", getattr(args, "context_parallel_size", 1)),
+            ("expert_parallelism", getattr(args, "expert_model_parallel_size", 1)),
+            ("micro_batch_size", self.mbs),
+            ("config_filename", os.environ.get("EXP", "unknown")),
+        ):
+            self._event(key=key, value=value)
         self._event(
             key=self._constants.TRAIN_SAMPLES,
-            value=getattr(args, "train_samples", 1099776),
+            value=getattr(args, "train_samples", None) or 1099776,
         )
         # EVAL_SAMPLES is emitted before any evaluation has run, so it can only
         # ever state the configured budget. The check that the budget was
@@ -162,10 +196,11 @@ class FluxMLPerfLogger:
         # rules and previously absent; the constant name differs across
         # mlperf_logging releases, so fall back to the literal key.
         self._event(
-            key=getattr(self._constants, "EVAL_FREQUENCY", "eval_frequency"),
+            key="evaluation_frequency",
             value=getattr(args, "eval_interval", 0) * self.gbs,
         )
-        gas = max(self.gbs // self.mbs, 1)
+        data_parallel_size = getattr(args, "data_parallel_size", 1) or 1
+        gas = max(self.gbs // (self.mbs * data_parallel_size), 1)
         self._event(key=self._constants.GRADIENT_ACCUMULATION_STEPS, value=gas)
         self._event(key=self._constants.OPT_NAME, value="adamw")
         self._event(
@@ -188,13 +223,22 @@ class FluxMLPerfLogger:
             key="opt_adamw_weight_decay",
             value=getattr(args, "weight_decay", 0.1),
         )
+        self._event(
+            key="opt_learning_rate_warmup_steps",
+            value=getattr(args, "lr_warmup_iters", 0),
+        )
+        self._event(
+            key="opt_gradient_clip_norm",
+            value=getattr(args, "clip_grad", 1.0),
+        )
 
     def log_init_stop_run_start(self):
-        if int(os.environ.get("RANK", "0")) == 0:
+        if int(os.environ.get("RANK", "0")) == 0 and not self._run_started:
             self._end(key=self._constants.INIT_STOP)
             self._start(key=self._constants.RUN_START)
             self._start(key=self._constants.EPOCH_START, metadata={"epoch_num": 0})
-            self._start(key=self._constants.BLOCK_START, metadata={"first_epoch_num": 0})
+            self._start(key=self._constants.BLOCK_START, metadata={"samples_count": 0})
+            self._run_started = True
 
     def on_train_batch_end(self, global_step: int, loss: float, lr: float):
         self.timer.mark_training_start()
@@ -216,6 +260,7 @@ class FluxMLPerfLogger:
             )
 
     def on_validation_start(self, global_step: int):
+        self.log_init_stop_run_start()
         self.timer.update_samples(global_step)
         self.timer.pause_for_eval()
 
@@ -232,9 +277,12 @@ class FluxMLPerfLogger:
                 )
             self._end(
                 key=self._constants.BLOCK_STOP,
-                metadata={"first_epoch_num": 0},
+                metadata={"samples_count": global_step * self.gbs},
             )
-            self._start(key=self._constants.EVAL_START, metadata={"epoch_num": 0})
+            self._start(
+                key=self._constants.EVAL_START,
+                metadata={"samples_count": global_step * self.gbs},
+            )
 
     def on_validation_end(self, global_step: int, val_loss: float):
         self.timer.resume_after_eval()
@@ -466,7 +514,7 @@ def patch_mlperf_logging(ctx: PatchContext):
                 if int(os.environ.get("RANK", "0")) == 0:
                     mlperf_logger._start(
                         key=mlperf_logger._constants.BLOCK_START,
-                        metadata={"first_epoch_num": 0},
+                        metadata={"samples_count": iteration * gbs},
                     )
         else:
             logger.warning("Could not extract validation loss from evaluate result")
