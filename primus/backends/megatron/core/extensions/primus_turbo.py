@@ -1005,13 +1005,25 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                 "silently dropped. This also covers ALiBi, which Megatron delivers as an "
                 "attention bias -- use a position embedding the Turbo path implements."
             )
-        packed_seq_kwargs = (
-            {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
-            if packed_seq_params is not None
-            else {}
-        )
-
-        qkv_format = packed_seq_kwargs.get("qkv_format", self.qkv_format)
+        # Read qkv_format straight off the dataclass.
+        #
+        # This used to be a dict comprehension over ``self.kept_packed_seq_params`` --
+        # copied from Megatron's TEDotProductAttention, which defines that attribute in
+        # its own __init__. This class does not inherit from it: it extends
+        # te.pytorch.DotProductAttention (checked: TE 2.15 does not define the attribute
+        # either). So every call carrying packed_seq_params raised
+        #
+        #     AttributeError: 'PrimusTurboAttention' object has no attribute
+        #                     'kept_packed_seq_params'
+        #
+        # before reaching any of the packing logic below, and the error said nothing
+        # about packing. Verified on MI355 (TASK_PROGRESS EXP23 case C).
+        #
+        # The dict was only ever read for one key, so there is nothing to reconstruct.
+        # A qkv_format of None falls back to the module default rather than propagating:
+        # None matches neither "sbhd" nor "thd" below, so it used to skip the layout
+        # permute entirely and hand the kernel a transposed tensor.
+        qkv_format = getattr(packed_seq_params, "qkv_format", None) or self.qkv_format
         mask_type = attn_mask_type.name
         if mask_type == AttnMaskType.causal.name:
             causal = True
@@ -1142,6 +1154,33 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                     "document boundaries are not recoverable from the packed tensor shape, "
                     "and guessing them would let tokens attend across documents."
                 )
+            # Padding-aware boundaries, if Megatron supplied them, describe a different
+            # packing than cu_seqlens_q does: cu_seqlens_* are the real token counts
+            # while cu_seqlens_*_padded include the per-sequence padding. TE takes both
+            # and honours the distinction; the varlen entry bound here takes one pair
+            # and would apply the unpadded boundaries to a padded tensor, attending over
+            # padding and misplacing every document after the first. Refuse instead.
+            for _name, _padded, _plain in (
+                (
+                    "cu_seqlens_q_padded",
+                    getattr(packed_seq_params, "cu_seqlens_q_padded", None),
+                    cu_seqlens_q,
+                ),
+                (
+                    "cu_seqlens_kv_padded",
+                    getattr(packed_seq_params, "cu_seqlens_kv_padded", None),
+                    cu_seqlens_kv if cu_seqlens_kv is not None else cu_seqlens_q,
+                ),
+            ):
+                if _padded is not None and not torch.equal(_padded, _plain):
+                    raise NotImplementedError(
+                        f"PrimusTurboAttention: packed_seq_params carries {_name}, which differs "
+                        "from the unpadded boundaries, but the varlen entry bound here takes a "
+                        "single cu_seqlens pair. Using the unpadded boundaries on a padded tensor "
+                        "would attend over the padding and misplace every document after the "
+                        "first. Disable THD padding (cu_seqlens_*_padded == cu_seqlens_*), or use "
+                        "a backend that takes both."
+                    )
             if cu_seqlens_kv is None:
                 cu_seqlens_kv = cu_seqlens_q
             if max_seqlen_q is None or max_seqlen_kv is None:
