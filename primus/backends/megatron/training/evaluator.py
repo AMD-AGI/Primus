@@ -293,9 +293,7 @@ def primus_evaluate(
         # the evaluation exists to produce never reaches the console. Repeat it
         # through the Primus logger, which does.
         if total_loss_dict:
-            summary = ", ".join(
-                f"{key}={value.item():.6f}" for key, value in sorted(total_loss_dict.items())
-            )
+            summary = ", ".join(f"{key}={value.item():.6f}" for key, value in sorted(total_loss_dict.items()))
             _report_eval(args, f"[eval] {summary}")
 
         collected_non_loss_data = None
