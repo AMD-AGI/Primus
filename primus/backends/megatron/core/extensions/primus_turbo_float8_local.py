@@ -62,12 +62,24 @@ from primus.backends.megatron.core.fp8_utils import (
 
 _custom_op = torch.library.custom_op
 
+# ``quantize_fp8_tensorwise`` padding alignment: 1 == no padding, the shape-preserving
+# cast this module has always assumed.
+_QUANT_PAD_ALIGN_K = 1
+_QUANT_PAD_ALIGN_N = 1
+
 
 @_custom_op("primus::quantize_fp8_tensorwise", mutates_args=(), device_types="cuda")
 def _quantize_fp8_tensorwise_op(
     x: torch.Tensor, out_dtype: torch.dtype, scale: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.primus_turbo_cpp_extension.quantize_fp8_tensorwise(x, out_dtype, scale)
+    # padding_align_size=1 keeps the cast shape-preserving.  The cpp op defaults it to 128
+    # (zero-padding the last dim up to a multiple of 128 for the pad-aware grouped-GEMM
+    # path), which breaks two things here: the empty_like() fake below no longer matches
+    # the real output, and in a dgrad-style ``trans_b=False`` GEMM the padded K becomes the
+    # output's N.  Callers that want a K-aligned operand should ask for it explicitly.
+    return torch.ops.primus_turbo_cpp_extension.quantize_fp8_tensorwise(
+        x, out_dtype, scale, _QUANT_PAD_ALIGN_K, _QUANT_PAD_ALIGN_N
+    )
 
 
 @_quantize_fp8_tensorwise_op.register_fake
