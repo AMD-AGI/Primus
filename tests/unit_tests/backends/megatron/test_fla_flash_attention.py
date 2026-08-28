@@ -217,11 +217,13 @@ def test_forward_rocm_parity_against_causal_sdpa_reference(silence_banner, monke
 
     module = _make_module(softmax_scale=_SOFTMAX_SCALE)
     got = module.forward(query, key, value)
-    ref = _causal_sdpa_reference(query, key, value, _SOFTMAX_SCALE).to(dtype=got.dtype)
+    # Keep the independent causal SDPA reference in FP32; comparing against a
+    # BF16-rounded copy would only check flash-attn vs its own rounded baseline.
+    ref = _causal_sdpa_reference(query, key, value, _SOFTMAX_SCALE)
 
     assert got.shape == (_GPU_SEQ, _GPU_BATCH, _GPU_HEADS * _GPU_DIM)
     assert got.dtype == torch.bfloat16
-    torch.testing.assert_close(got.float(), ref.float(), atol=_GPU_ATOL, rtol=_GPU_RTOL)
+    torch.testing.assert_close(got.float(), ref, atol=_GPU_ATOL, rtol=_GPU_RTOL)
 
     assert len(recorded) == 1
     rec = recorded[0]
