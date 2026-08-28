@@ -15,6 +15,9 @@ Unlike MXFP4 there is also no backend pinning fixture, because MXFP6 has a singl
 backend (AITER A6W6) and no preshuffle contract to satisfy.
 """
 
+import os
+from unittest import mock
+
 import pytest
 import torch
 
@@ -56,6 +59,18 @@ class TestFluxMXFP6LocalSpec(PrimusUT):
     @pytest.fixture(autouse=True)
     def setup_parallel(self, init_parallel_state):
         pass
+
+    @pytest.fixture(autouse=True)
+    def default_fused_mlp_mode(self):
+        """Pin the mode to the default instead of inheriting it from the shell.
+
+        FluxConfig's default activation is not the one the fused prologue implements, so
+        these models are built on the fallback path. The submission container exports
+        PRIMUS_MXFP6_FUSED_MLP=on, which makes that fallback an error.
+        """
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PRIMUS_MXFP6_FUSED_MLP", None)
+            yield
 
     def _make_mxfp6_config(self, **overrides):
         defaults = dict(transformer_impl="local", fp6="mxfp6")
