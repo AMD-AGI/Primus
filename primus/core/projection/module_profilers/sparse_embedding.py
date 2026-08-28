@@ -165,8 +165,22 @@ class SparseEmbeddingProfiler(BaseModuleProfiler):
         if ddr_bytes > 0:
             fwd += ddr_bytes / _HOST_LINK_BYTES_PER_MS
         fwd = max(0.01, fwd)
-        # Backward is the scatter-add of the same gathered rows (read-modify-write).
-        bwd = 2.0 * fwd
+
+        # Backward is a gradient scatter-add over the same rows, but it is an
+        # fp32 atomic read-modify-write into randomly addressed table rows
+        # (at::indexFuncLargeIndex), not a coalesced bf16 gather.  fp32 atomics
+        # with address contention sustain only a few percent of peak HBM, which
+        # makes this the single largest embedding kernel in DLRM-v4 traces --
+        # far more than a naive 2x-the-forward estimate.  Price it explicitly.
+        scatter_frac = float(
+            getattr(self.config.model_config, "embedding_grad_scatter_efficiency", 0.06) or 0.06
+        )
+        scatter_frac = min(1.0, max(0.005, scatter_frac))
+        grad_bytes = rows_gathered * dim * 4  # fp32 gradient, read + accumulate write
+        bwd = 2.0 * grad_bytes / (peak_hbm_bytes_per_ms * scatter_frac)
+        if ddr_bytes > 0:
+            bwd += ddr_bytes / _HOST_LINK_BYTES_PER_MS
+        bwd = max(0.01, bwd)
         return (fwd, bwd, self.estimated_activation_memory(batch_size, seq_len))
 
     def _results(self, batch_size: int, seq_len: int):

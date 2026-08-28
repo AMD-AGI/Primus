@@ -49,6 +49,7 @@ class HSTULayerProfiler(BaseModuleProfiler):
         self._sdpa_backend = None
         self._cached = None
         self._cache_key = None
+        self._components = {}
 
     # -- backend wiring (mirrors DenseTransformerLayerProfiler) ----------------
     def set_simulation_backends(self, gemm_backend=None, sdpa_backend=None):
@@ -113,6 +114,21 @@ class HSTULayerProfiler(BaseModuleProfiler):
         mean, _ = self._fill()
         return max(1, int(round(seq_len * mean)))
 
+    def _peak_flops_per_ms(self) -> float:
+        """Realizable bf16 matmul peak (flops/ms), probed from the GEMM backend.
+
+        A large square GEMM runs at ~peak, so 2*n^3 / fwd_ms is the backend's
+        achievable peak -- backend-agnostic and consistent with how the GEMMs in
+        this same projection are priced.  Cached across calls.
+        """
+        if getattr(self, "_peak_fpm", None):
+            return self._peak_fpm
+        n = 8192
+        g = self._gemm_backend.simulate_gemm(n, n, n, dtype="bf16")
+        t = g.forward_time_ms or 0.0
+        self._peak_fpm = (2.0 * n * n * n / t) if t > 0 else 1.0e12
+        return self._peak_fpm
+
     def _attn_seq(self, seq_len: int) -> int:
         """Effective sequence for the attention core, which scales as E[L^2].
 
@@ -134,38 +150,57 @@ class HSTULayerProfiler(BaseModuleProfiler):
         tokens = batch_size * mean_seq  # jagged: only valid positions do work
         heads_per_rank = max(1, H // tp)
 
-        fwd = 0.0
-        bwd = 0.0
-
         # 1. Fused UVQK projection GEMM: [T, D] x [D, H*(2 d_qk + 2 d_v)]/tp
         uvqk_n = self._uvqk_out(heads_per_rank, d_qk, d_v)
         g = self._gemm_backend.simulate_gemm(tokens, uvqk_n, D, dtype=dtype)
-        fwd += g.forward_time_ms
-        bwd += g.backward_time_ms or (2.0 * g.forward_time_ms)
+        uvqk_fwd = g.forward_time_ms
+        uvqk_bwd = g.backward_time_ms or (2.0 * g.forward_time_ms)
 
-        # 2. Attention core (gated dot-product).  The quadratic term is priced
-        #    with the rms-fill sequence; the ragged_hstu kernel is less efficient
-        #    than the FAv3 roofline the SDPA backend models, so derate by the
-        #    configured efficiency.
-        s = self._sdpa_backend.simulate_sdpa(
-            batch_size=batch_size,
-            num_heads=heads_per_rank,
-            seq_len=attn_seq,
-            head_dim=d_qk,
-            causal=True,
-            dtype="bf16",
-            head_dim_v=d_v,
-        )
-        eff = min(1.0, max(0.05, float(getattr(mc, "hstu_attn_efficiency", 1.0) or 1.0)))
-        attn_fwd = s.forward_time_ms / eff
-        attn_bwd = (s.backward_time_ms or (2.0 * s.forward_time_ms)) / eff
-        fwd += attn_fwd
-        bwd += attn_bwd
+        # 2. Attention core (gated dot-product).  HSTU attention is a *gated
+        #    jagged* attention (SiLU gate + relative bias, not softmax); the FAv3
+        #    SDPA roofline does not model it (it under-predicts by >30x and does
+        #    not scale as L^2).  When hstu_attn_flop_efficiency is set we price it
+        #    directly from its causal FLOPs at the measured achieved fraction of
+        #    realizable matmul peak; otherwise we fall back to the SDPA roofline.
+        flop_eff = float(getattr(mc, "hstu_attn_flop_efficiency", 0.0) or 0.0)
+        if flop_eff > 0:
+            flop_eff = min(1.0, max(0.001, flop_eff))
+            # Causal QK^T + A.V: B * heads * L^2 * (d_qk + d_v) flops per layer
+            # (the causal 1/2 and the 2-matmul/2-MAC factors cancel to 1).
+            attn_flops = batch_size * heads_per_rank * (attn_seq * attn_seq) * (d_qk + d_v)
+            peak_fpm = self._peak_flops_per_ms()
+            attn_fwd = attn_flops / (peak_fpm * flop_eff)
+            bwd_ratio = float(getattr(mc, "hstu_attn_bwd_ratio", 2.0) or 2.0)
+            attn_bwd = attn_fwd * max(1.0, bwd_ratio)
+        else:
+            s = self._sdpa_backend.simulate_sdpa(
+                batch_size=batch_size,
+                num_heads=heads_per_rank,
+                seq_len=attn_seq,
+                head_dim=d_qk,
+                causal=True,
+                dtype="bf16",
+                head_dim_v=d_v,
+            )
+            eff = min(1.0, max(0.01, float(getattr(mc, "hstu_attn_efficiency", 1.0) or 1.0)))
+            bwd_eff = float(getattr(mc, "hstu_attn_bwd_efficiency", 0.0) or 0.0)
+            bwd_eff = min(1.0, max(0.01, bwd_eff)) if bwd_eff > 0 else eff
+            attn_fwd = s.forward_time_ms / eff
+            attn_bwd = (s.backward_time_ms or (2.0 * s.forward_time_ms)) / bwd_eff
 
-        # 3. Output projection GEMM: [T, H*d_v]/tp x [H*d_v, D]
-        o = self._gemm_backend.simulate_gemm(tokens, D, heads_per_rank * d_v, dtype=dtype)
-        fwd += o.forward_time_ms
-        bwd += o.backward_time_ms or (2.0 * o.forward_time_ms)
+        # 3. Output projection GEMM: [T, out_in]/tp x [out_in, D].  The gated
+        #    attention output is concatenated with residual/gate streams, so the
+        #    measured input width is 3*D (1536), not H*d_v -- configurable.
+        out_in = int(getattr(mc, "hstu_output_input_dim", 0) or 0) or (heads_per_rank * d_v)
+        o = self._gemm_backend.simulate_gemm(tokens, D, out_in, dtype=dtype)
+        out_fwd = o.forward_time_ms
+        out_bwd = o.backward_time_ms or (2.0 * o.forward_time_ms)
+
+        # Selective activation recomputation: the UVQK projection is recomputed
+        # in the backward to regenerate Q/K/V for the attention-backward, so its
+        # forward GEMM cost is charged again on the backward path.
+        if bool(getattr(mc, "hstu_recompute_attn", False)):
+            uvqk_bwd += uvqk_fwd
 
         # 4. SiLU gating (U) + norms + dropout (input/linear w/ masks) + jagged
         #    pack/unpack: memory-bound elementwise passes over the UVQK + D
@@ -178,9 +213,19 @@ class HSTULayerProfiler(BaseModuleProfiler):
         passes = max(1.0, float(getattr(mc, "hstu_elementwise_passes", 6.0) or 6.0))
         elem_bytes = tokens * (uvqk_n + D) * 2 * passes  # bf16, read+write per pass
         elem_ms = elem_bytes / (peak_hbm_bytes_per_ms * _ELEMENTWISE_HBM_FRACTION)
-        fwd += elem_ms
-        bwd += elem_ms
 
+        # Per-role split (mirrors the Kineto trace buckets) so a projection can
+        # be calibrated against measured kernel time role-by-role.
+        self._components = {
+            "gemm_fwd": uvqk_fwd + out_fwd,
+            "gemm_bwd": uvqk_bwd + out_bwd,
+            "attn_fwd": attn_fwd,
+            "attn_bwd": attn_bwd,
+            "elem_fwd": elem_ms,
+            "elem_bwd": elem_ms,
+        }
+        fwd = uvqk_fwd + attn_fwd + out_fwd + elem_ms
+        bwd = uvqk_bwd + attn_bwd + out_bwd + elem_ms
         return (fwd, bwd, self.estimated_activation_memory(batch_size, seq_len))
 
     def _results(self, batch_size: int, seq_len: int):
@@ -203,3 +248,8 @@ class HSTULayerProfiler(BaseModuleProfiler):
 
     def measured_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return self._results(batch_size, seq_len)[2]
+
+    def measured_component_times(self, batch_size: int, seq_len: int) -> dict:
+        """Per-role fwd/bwd ms for one layer (gemm / attn / elem)."""
+        self._results(batch_size, seq_len)  # ensure computed + cached
+        return dict(self._components)

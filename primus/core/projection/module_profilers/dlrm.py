@@ -28,7 +28,10 @@ from primus.core.projection.module_profilers.sparse_embedding import (
     SparseEmbeddingProfiler,
 )
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
-from primus.core.projection.simulation_backends.base import resolve_peak_tflops
+from primus.core.projection.simulation_backends.base import (
+    resolve_hbm_bytes_per_ms,
+    resolve_peak_tflops,
+)
 from primus.core.projection.training_config import gemm_dtype_from_config
 
 
@@ -112,6 +115,42 @@ class DLRMProfiler(BaseModuleProfiler):
         inter_dim = (n_tables + 1) * dim if dim else 0
         return _mlp_layers(inter_dim, _as_list(mc.dlrm_over_mlp))
 
+    def _preprocessor_layers(self) -> List[Tuple[int, int]]:
+        """Per-token input-preprocessor GEMM shapes (fuses contextual features).
+
+        An explicit ``dlrm_preprocessor_gemms`` list of ``[in, out]`` pairs (one
+        per branch/linear) takes precedence and prices the real multi-branch
+        ContextualPreprocessor at its true FLOPs; otherwise a collapsed
+        ``dlrm_preprocessor_mlp`` chain is used.
+        """
+        mc = self.config.model_config
+        explicit = getattr(mc, "dlrm_preprocessor_gemms", None)
+        if explicit:
+            if isinstance(explicit, str):
+                try:
+                    explicit = eval(explicit)
+                except Exception:
+                    explicit = None
+            if explicit:
+                return [(int(a), int(b)) for a, b in explicit if int(a) > 0 and int(b) > 0]
+        widths = _as_list(mc.dlrm_preprocessor_mlp)
+        if not widths:
+            return []
+        dim = int(mc.embedding_dim or mc.hidden_size or 0)
+        in_dim = int(mc.dlrm_preprocessor_input_dim or 0)
+        if in_dim <= 0:  # default: (contextual features + 1 content) x D
+            n_ctx = max(0, int(mc.num_embedding_tables or 0) - 3)  # 3 sequence tables
+            in_dim = (n_ctx + 1) * dim
+        return _mlp_layers(in_dim, widths)
+
+    def _head_layers(self) -> List[Tuple[int, int]]:
+        """Per-sample multitask prediction-head GEMM shapes (one tower)."""
+        mc = self.config.model_config
+        widths = _as_list(mc.dlrm_prediction_head_mlp)
+        if not widths:
+            return []
+        return _mlp_layers(int(mc.embedding_dim or mc.hidden_size or 0), widths)
+
     def _mlp_params(self, layers: List[Tuple[int, int]]) -> int:
         return int(sum(i * o for i, o in layers))
 
@@ -124,6 +163,9 @@ class DLRMProfiler(BaseModuleProfiler):
         total += self._num_layers() * hstu.estimated_num_params(rank)
         total += self._mlp_params(self._bottom_mlp_layers())
         total += self._mlp_params(self._over_mlp_layers())
+        total += self._mlp_params(self._preprocessor_layers())
+        n_tasks = max(1, int(getattr(self.config.model_config, "dlrm_num_tasks", 1) or 1))
+        total += n_tasks * self._mlp_params(self._head_layers())
         return int(total)
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
@@ -242,7 +284,8 @@ class DLRMProfiler(BaseModuleProfiler):
 
         uvqk_n = heads_pr * (2 * d_qk + 2 * d_v)
         uvqk = 2.0 * tokens * uvqk_n * D
-        out = 2.0 * tokens * D * (heads_pr * d_v)
+        out_in = int(getattr(mc, "hstu_output_input_dim", 0) or 0) or (heads_pr * d_v)
+        out = 2.0 * tokens * D * out_in
         # Attention: QK^T + (softmax.V), causal ~= 0.5 of the dense triangle.
         attn = 0.5 * 2.0 * (2.0 * local_bs * heads_pr * attn_seq * attn_seq * (d_qk + d_v))
         hstu_fwd = self._num_layers() * (uvqk + out + attn)
@@ -250,6 +293,13 @@ class DLRMProfiler(BaseModuleProfiler):
         mlp_fwd = 0.0
         for in_dim, out_dim in self._bottom_mlp_layers() + self._over_mlp_layers():
             mlp_fwd += 2.0 * local_bs * in_dim * out_dim
+        # Prediction-head towers run per sample and are replicated per task.
+        n_tasks = max(1, int(getattr(mc, "dlrm_num_tasks", 1) or 1))
+        for in_dim, out_dim in self._head_layers():
+            mlp_fwd += 2.0 * n_tasks * local_bs * in_dim * out_dim
+        # Preprocessor runs per valid token.
+        for in_dim, out_dim in self._preprocessor_layers():
+            mlp_fwd += 2.0 * tokens * in_dim * out_dim
         return hstu_fwd + mlp_fwd
 
     def project_step(self, batch_size: Optional[int] = None, seq_len: Optional[int] = None) -> dict:
@@ -278,21 +328,64 @@ class DLRMProfiler(BaseModuleProfiler):
         fwd += self._num_layers() * layer_fwd
         bwd += self._num_layers() * layer_bwd
 
+        # Bottom / over / prediction-head MLPs run per SAMPLE; the input
+        # preprocessor runs per valid TOKEN (its M is the token count).
+        mean = min(1.0, max(0.01, float(getattr(mc, "hstu_fill_factor", 1.0) or 1.0)))
+        tokens = local_bs * max(1, int(round(slen * mean)))
+        n_tasks = max(1, int(getattr(mc, "dlrm_num_tasks", 1) or 1))
+
         bmf, bmb = self._mlp_step_ms(self._bottom_mlp_layers(), local_bs, dtype)
         omf, omb = self._mlp_step_ms(self._over_mlp_layers(), local_bs, dtype)
-        fwd += bmf + omf
-        bwd += bmb + omb
+        pmf, pmb = self._mlp_step_ms(self._preprocessor_layers(), tokens, dtype)
+        hmf, hmb = self._mlp_step_ms(self._head_layers(), local_bs, dtype)
+        hmf, hmb = n_tasks * hmf, n_tasks * hmb
+        dense_mlp_fwd = bmf + omf + pmf + hmf
+        dense_mlp_bwd = bmb + omb + pmb + hmb
+        fwd += dense_mlp_fwd
+        bwd += dense_mlp_bwd
+
+        # Per-role breakdown (mirrors the Kineto trace buckets) for calibration.
+        nL = self._num_layers()
+        hc = hstu.measured_component_times(local_bs, slen)
+        role_gemm = nL * (hc["gemm_fwd"] + hc["gemm_bwd"]) + (dense_mlp_fwd + dense_mlp_bwd)
+        role_attn = nL * (hc["attn_fwd"] + hc["attn_bwd"])
+        role_elem = nL * (hc["elem_fwd"] + hc["elem_bwd"])
+        role_embed = emb.measured_forward_time(local_bs, slen) + emb.measured_backward_time(local_bs, slen)
 
         # Embedding all-to-all: only the *exposed* (non-overlapped) fraction is
         # on the critical path.
         comm_raw = self._embedding_a2a_ms(local_bs, slen)
-        exposed = min(1.0, max(0.0, float(getattr(mc, "dlrm_comm_exposed_fraction", 1.0) or 1.0)))
-        comm = comm_raw * exposed
+        # NB: a bare ``or 1.0`` would turn a deliberate 0.0 (fully overlapped)
+        # back into 1.0, so read the value explicitly before clamping.
+        _exp = getattr(mc, "dlrm_comm_exposed_fraction", 1.0)
+        exposed = min(1.0, max(0.0, 1.0 if _exp is None else float(_exp)))
+        # The bandwidth term is a fair estimate of wire time, but traces show the
+        # sparse collectives are dominated by peer-wait (barrier) cost that no
+        # byte model produces; add it as a measured synchronization term.
+        sync = max(0.0, float(getattr(mc, "dlrm_collective_sync_ms", 0.0) or 0.0))
+        comm = comm_raw * exposed + sync
 
-        # Optional host->device input copy (data path).
+        # Optional data-path glue (measured inputs): H2D input copy, device
+        # memcpy (jagged pack/unpack + a2a staging), and local reduce kernels.
         h2d = max(0.0, float(getattr(mc, "dlrm_h2d_ms", 0.0) or 0.0))
+        memcpy = max(0.0, float(getattr(mc, "dlrm_memcpy_ms", 0.0) or 0.0))
+        reduce = max(0.0, float(getattr(mc, "dlrm_reduce_ms", 0.0) or 0.0))
 
-        step_ms = fwd + bwd + comm + h2d
+        # Framework glue: jagged pack/unpack + bf16<->fp32 casts/copies + bias/
+        # norm reductions.  Memory-bound streaming whose per-token byte traffic
+        # is a structural property of the implementation; scales with tokens.
+        bpt = max(0.0, float(getattr(mc, "dlrm_glue_bytes_per_token", 0.0) or 0.0))
+        glue = 0.0
+        if bpt > 0:
+            gfrac = min(1.0, max(0.05, float(getattr(mc, "dlrm_glue_hbm_fraction", 0.6) or 0.6)))
+            peak_hbm_bytes_per_ms = resolve_hbm_bytes_per_ms(
+                gemm_backend=self._gemm_backend,
+                sdpa_backend=self._sdpa_backend,
+                fallback_gbps=4000.0,
+            )
+            glue = tokens * bpt / (peak_hbm_bytes_per_ms * gfrac)
+
+        step_ms = fwd + bwd + comm + h2d + memcpy + reduce + glue
 
         world = int(os.getenv("NNODES", "1")) * int(os.getenv("GPUS_PER_NODE", "8"))
         global_bs = int(rc.global_batch_size or (local_bs * world))
@@ -310,7 +403,9 @@ class DLRMProfiler(BaseModuleProfiler):
             "backward_ms": bwd,
             "comm_ms": comm,
             "comm_ms_unoverlapped": comm_raw,
+            "comm_sync_ms": sync,
             "h2d_ms": h2d,
+            "glue_ms": glue,
             "step_ms": step_ms,
             "hstu_layer_fwd_ms": layer_fwd,
             "hstu_layer_bwd_ms": layer_bwd,
@@ -325,6 +420,17 @@ class DLRMProfiler(BaseModuleProfiler):
             # No activation recompute is modelled, so HFU == MFU here.
             "mfu": mfu,
             "hfu": mfu,
+            # Per-role breakdown for calibration against measured kernel time.
+            "roles": {
+                "attention": role_attn,
+                "dense_gemm": role_gemm,
+                "collectives": comm,
+                "embedding": role_embed,
+                "elementwise": role_elem,
+                "memcpy": memcpy,
+                "reduce": reduce,
+                "glue": glue,
+            },
         }
 
     # -- perf-path compatibility (unused by memory path) -----------------------
