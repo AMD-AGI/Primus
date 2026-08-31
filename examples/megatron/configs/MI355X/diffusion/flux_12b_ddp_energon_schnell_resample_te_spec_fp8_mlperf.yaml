@@ -86,7 +86,16 @@ modules:
       num_workers: 8
       max_samples_per_sequence: null
 
-      train_iters: 5000
+      # This is a safety cap, not a target: the run stops at the quality
+      # threshold, and reaching it is the result. The reference convergence
+      # points for flux1 at GBS 512 (mlperf_logging rcp_checker
+      # training_6.0.0/rcps_flux1.json, 20 NVIDIA BF16 runs) span 7077888 to
+      # 7602176 samples, i.e. 13824 to 14848 steps. The previous 5000 steps
+      # was 2560000 samples -- roughly a third of the way -- so every run
+      # exhausted its budget below target and no run could ever have counted.
+      # 16000 steps (8192000 samples) clears the slowest reference run with
+      # margin for a run that converges later than the reference spread.
+      train_iters: 16000
       eval_interval: 512
       # Cover the whole MLPerf validation set. eval_iters is derived from this
       # (29696 / 512 = 58); setting both is rejected. The previous eval_iters of
@@ -130,7 +139,9 @@ modules:
       clip_grad: 1.0
 
       lr_warmup_iters: 1600
-      lr_decay_iters: 4000
+      # Inert while lr_decay_style is constant; kept equal to the budget so
+      # it cannot be misread as a decay that ends a quarter of the way in.
+      lr_decay_iters: 16000
       lr_decay_style: constant
 
       # ==========================================
@@ -193,7 +204,9 @@ modules:
       enable_primus_turbo: false
       use_turbo_attention: false
 
-      seed: 2025
+      # Each run in a submission campaign needs its own seed, supplied from
+      # outside so the value in the log is the value the launcher chose.
+      seed: ${PRIMUS_SEED:2025}
       te_rng_tracker: true
       # MLPerf-aligned per-step CUDA RNG reseed (defaults off elsewhere; MLPerf
       # reproduction must opt in for run-to-run determinism).
