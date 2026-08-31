@@ -200,66 +200,274 @@ def _reset_optimizer_state(optimizer):
     _log("Reset optimizer step counters")
 
 
-@register_patch(
-    "megatron.training.mlperf_warmup",
-    backend="megatron",
-    phase="before_train",
-    description="MLPerf warmup: synthetic data steps before measured training",
-    condition=_warmup_enabled,
-    priority=95,
-)
-def patch_mlperf_warmup(ctx: PatchContext):
-    """Install warmup hook on train_step at priority 95 (outermost wrapper)."""
+def _build_synthetic_iterator(primus_args):
+    """Build the mock Flux dataloader the warmup steps consume."""
+    from torch.utils.data import DataLoader
+
+    from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
+    from primus.backends.megatron.data.synthetic.mock_datasets import (
+        PreGeneratedMockFluxSchnellDataset,
+    )
+
+    image_size = getattr(primus_args, "image_size", 256)
+    vae_latent_mode = getattr(primus_args, "vae_latent_mode", "resample")
+    mbs = getattr(primus_args, "micro_batch_size", 64)
+
+    mock_dataset = PreGeneratedMockFluxSchnellDataset(
+        num_samples=max(mbs * 4, 256),
+        image_size=image_size,
+        vae_latent_mode=vae_latent_mode,
+    )
+    mock_loader = DataLoader(mock_dataset, batch_size=mbs, shuffle=False, drop_last=True)
+    return MegatronDataloaderWrapper(mock_loader)
+
+
+def _run_warmup_and_restore(
+    *,
+    warmup_steps,
+    train_step_fn,
+    forward_step_func,
+    synthetic_iter,
+    model,
+    optimizer,
+    opt_param_scheduler,
+    config,
+    forward_backward_func,
+    iteration=None,
+):
+    """Run synthetic steps, then undo every effect they had on training state.
+
+    The caller supplies ``train_step_fn`` so this works both from inside the
+    train_step chain and from the pre-data boundary, where the chain has to be
+    read at call time.
+    """
     import megatron.training.training as mt
+    from megatron.training import get_args as megatron_get_args
 
-    if hasattr(mt.train_step, "_primus_warmup_hook"):
-        return
+    megatron_args = megatron_get_args()
+    models = model if isinstance(model, (list, tuple)) else [model]
+    transformer_impl = getattr(megatron_args, "transformer_impl", "local")
+    use_fsdp2_fp8 = getattr(megatron_args, "use_fsdp2_fp8_all_gather", False)
 
-    primus_args = get_args(ctx)
-    warmup_steps = getattr(primus_args, "warmup_train_steps", 2)
+    # ---- 1. Snapshot model parameters to CPU ----
+    _log("Saving model parameters to CPU before warmup")
+    saved_params = {}
+    for m in models:
+        for name, p in m.named_parameters():
+            saved_params[name] = p.data.to("cpu", non_blocking=True)
+    torch.cuda.synchronize()
+    _log(f"Saved {len(saved_params)} parameter tensors")
 
-    _lazy_state = {
-        "initialized": False,
-        "synthetic_iter": None,
-        "use_fsdp2_fp8": False,
-        "transformer_impl": "local",
-    }
+    # ---- 2. Neuter optimizer ----
+    saved_opt = _neuter_optimizer(optimizer)
 
+    # ---- 3. Suppress training_log and eval during warmup ----
+    saved_training_log = mt.training_log
+    saved_eval = mt.evaluate_and_print_results
+    mt.training_log = lambda *a, **k: None
+    mt.evaluate_and_print_results = lambda *a, **k: None
+
+    # ---- 3b. Save LR scheduler state (NeMo never steps the scheduler during warmup) ----
+    saved_lr_num_steps = opt_param_scheduler.num_steps
+
+    # ---- 4. Run warmup steps with synthetic data ----
+    for step_idx in range(warmup_steps):
+        _log(f"Warmup step {step_idx + 1}/{warmup_steps}")
+        train_step_fn(
+            forward_step_func,
+            synthetic_iter,
+            model,
+            optimizer,
+            opt_param_scheduler,
+            config,
+            forward_backward_func,
+            iteration=iteration,
+        )
+    _log(f"Completed {warmup_steps} warmup steps")
+
+    # ---- 5. Restore optimizer ----
+    _restore_optimizer(optimizer, saved_opt)
+    _reset_optimizer_state(optimizer)
+
+    # ---- 6. Restore model parameters from CPU ----
+    restored = 0
+    for m in models:
+        for name, p in m.named_parameters():
+            if name in saved_params:
+                p.data.copy_(saved_params[name])
+                restored += 1
+    del saved_params
+    _log(f"Restored {restored} parameter tensors from CPU snapshot")
+
+    # ---- 7. FP8 reset (spec-aware) ----
+    if transformer_impl == "transformer_engine":
+        te_count = _reset_fp8_te_spec(models)
+        amax_count = _seed_fp8_amax(models)
+        _log(f"FP8 TE reset: {te_count} modules, " f"seeded {amax_count} amax tensors")
+    else:
+        local_count = _reset_fp8_local_spec(models)
+        _log(f"FP8 local spec reset: {local_count} modules")
+
+    # ---- 8. FSDP2 FP8 all-gather recompute ----
+    if use_fsdp2_fp8:
+        try:
+            from primus.backends.megatron.core.distributed.fsdp2_fp8_all_gather import (
+                precompute_fp8_scales_for_fsdp,
+            )
+
+            cache_data = getattr(megatron_args, "fp8_precompute_data_cache", True)
+            use_cpp = getattr(megatron_args, "use_cpp_fp8_quantize", False)
+            sr = getattr(megatron_args, "fp8_all_gather_stochastic_rounding", False)
+            precompute_fp8_scales_for_fsdp(
+                models[0],
+                cache_data=cache_data,
+                use_cpp_quantize=use_cpp,
+                stochastic_rounding=sr,
+            )
+            _log("Recomputed FSDP2 FP8 all-gather scales")
+        except Exception as e:
+            _log(f"FSDP2 FP8 recompute failed (non-fatal): {e}")
+
+    # ---- 9. Reload model params in optimizer (FSDP2 BF16 master weight) ----
+    if hasattr(optimizer, "reload_model_params"):
+        optimizer.reload_model_params()
+        _log("Called optimizer.reload_model_params()")
+
+    # ---- 10. Post-restore NaN check ----
+    nan_params = 0
+    for m in models:
+        for name, p in m.named_parameters():
+            if p.data.is_floating_point() and torch.isnan(p.data).any():
+                nan_params += 1
+    _log(f"Post-restore parameter check: nan_params={nan_params}")
+
+    # ---- 11. Zero gradients ----
+    try:
+        optimizer.zero_grad(set_to_none=True)
+    except TypeError:
+        optimizer.zero_grad()
+
+    # ---- 12. Reset counters ----
+    megatron_args.consumed_train_samples = 0
+    megatron_args.skipped_train_samples = 0
+    opt_param_scheduler.num_steps = saved_lr_num_steps
+    _log(
+        f"Reset consumed_train_samples=0, skipped_train_samples=0, "
+        f"lr_scheduler.num_steps={saved_lr_num_steps}"
+    )
+
+    # ---- 13. Restore training_log and eval ----
+    mt.training_log = saved_training_log
+    mt.evaluate_and_print_results = saved_eval
+
+    # ---- 13b. Invalidate the CudaPrefetchIterator that was built around
+    # the SYNTHETIC iterator during warmup step 1.
+    #
+    # ``patch_grad_zero_and_data_prefetch`` builds a ``CudaPrefetchIterator``
+    # the first time its ``_patched_train_step`` runs and caches it in a
+    # closure-local ``_prefetch_state["iter"]``.  Because warmup step 1
+    # is the first call into that train_step, the prefetch iterator gets
+    # bound to ``synthetic_iter``.  ``MegatronDataloaderWrapper`` is
+    # cyclic (never raises ``StopIteration``), so subsequent real
+    # training steps would silently keep reading from the cycling
+    # synthetic dataset instead of the actual training dataset -- model
+    # overfits the mock samples and val_loss on real data stays stuck
+    # at ~1.38 forever.
+    #
+    # Dropping the cached entry forces the next train_step to rebuild
+    # the prefetch wrapper around its incoming ``data_iterator`` arg
+    # (the real iterator).
+    try:
+        from primus.backends.megatron.patches.delayed_fp8_scaling_patches import (
+            reset_prefetch_state,
+        )
+
+        evicted = reset_prefetch_state()
+        if evicted is None:
+            _log("  Prefetch reset: no cached iterator to evict")
+        else:
+            _log(
+                f"  Prefetch reset: evicted cached {type(evicted).__name__} "
+                f"(wrapped synthetic warmup iterator) -- next train_step "
+                f"will rebuild it around the real data_iterator"
+            )
+    except Exception as _e:
+        _log(f"  Prefetch reset failed (non-fatal): {_e}")
+
+    # ---- 14. Synchronize ----
+    torch.cuda.synchronize()
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+
+def _install_boundary_warmup(primus_args, warmup_steps):
+    """Run warmup at the pre-data boundary, inside the initialization window.
+
+    Used in MLPerf mode, where warmup must finish before ``run_start`` and
+    therefore before the data iterators exist. Everything the warmup needs is
+    captured on the way there by :mod:`mlperf_boundary`.
+    """
+    from primus.backends.megatron.patches import mlperf_boundary
+
+    def _warmup_hook():
+        import megatron.training.training as mt
+
+        captured = mlperf_boundary.captured()
+        model = captured.get("model")
+        optimizer = captured.get("optimizer")
+        opt_param_scheduler = captured.get("opt_param_scheduler")
+        forward_step_func = captured.get("forward_step_func")
+        missing = [
+            name
+            for name, value in (
+                ("model", model),
+                ("optimizer", optimizer),
+                ("opt_param_scheduler", opt_param_scheduler),
+                ("forward_step_func", forward_step_func),
+            )
+            if value is None
+        ]
+        if missing:
+            raise RuntimeError(
+                "MLPerf warmup runs before the data iterators are built and needs "
+                "objects captured from Megatron, but these were never captured: "
+                + ", ".join(missing)
+                + ". The capture wrappers in mlperf_boundary did not run."
+            )
+
+        models = model if isinstance(model, (list, tuple)) else [model]
+        # Read train_step now, not at install time: every other before_train
+        # patch has wrapped it by the time the boundary fires.
+        _run_warmup_and_restore(
+            warmup_steps=warmup_steps,
+            train_step_fn=mt.train_step,
+            forward_step_func=forward_step_func,
+            synthetic_iter=_build_synthetic_iterator(primus_args),
+            model=model,
+            optimizer=optimizer,
+            opt_param_scheduler=opt_param_scheduler,
+            config=mt.get_model_config(models[0]),
+            forward_backward_func=mt.get_forward_backward_func(),
+            iteration=0,
+        )
+
+    mlperf_boundary.register_pre_run_hook("mlperf_warmup", _warmup_hook, order=10)
+    mlperf_boundary.install()
+    log_rank_0(
+        f"[Patch:mlperf_warmup] Warmup registered at the pre-data boundary " f"(warmup_steps={warmup_steps})"
+    )
+
+
+def _install_train_step_warmup(mt, primus_args, warmup_steps):
+    """Run warmup inside the first train_step, then execute the first real step.
+
+    The non-MLPerf path. Warmup lands after the data iterators exist, which is
+    fine when no clock is running, and it keeps development recipes on the
+    behavior they were tuned against.
+    """
     _wrapped_chain = mt.train_step
     _warmup_done = [False]
-
-    def _lazy_init():
-        """One-time initialization on first train_step call, when Megatron args exist."""
-        if _lazy_state["initialized"]:
-            return
-
-        from megatron.training import get_args as megatron_get_args
-
-        megatron_args = megatron_get_args()
-
-        from torch.utils.data import DataLoader
-
-        from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
-        from primus.backends.megatron.data.synthetic.mock_datasets import (
-            PreGeneratedMockFluxSchnellDataset,
-        )
-
-        image_size = getattr(primus_args, "image_size", 256)
-        vae_latent_mode = getattr(primus_args, "vae_latent_mode", "resample")
-        mbs = getattr(primus_args, "micro_batch_size", 64)
-
-        mock_dataset = PreGeneratedMockFluxSchnellDataset(
-            num_samples=max(mbs * 4, 256),
-            image_size=image_size,
-            vae_latent_mode=vae_latent_mode,
-        )
-        mock_loader = DataLoader(mock_dataset, batch_size=mbs, shuffle=False, drop_last=True)
-        _lazy_state["synthetic_iter"] = MegatronDataloaderWrapper(mock_loader)
-
-        _lazy_state["use_fsdp2_fp8"] = getattr(megatron_args, "use_fsdp2_fp8_all_gather", False)
-        _lazy_state["transformer_impl"] = getattr(megatron_args, "transformer_impl", "local")
-        _lazy_state["initialized"] = True
-        _log(f"Lazy init complete (warmup_steps={warmup_steps})")
+    _synthetic_iter = [None]
 
     def _hooked_train_step(
         forward_step_func,
@@ -283,165 +491,22 @@ def patch_mlperf_warmup(ctx: PatchContext):
                 iteration=iteration,
             )
 
-        _lazy_init()
+        if _synthetic_iter[0] is None:
+            _synthetic_iter[0] = _build_synthetic_iterator(primus_args)
 
-        from megatron.training import get_args as megatron_get_args
-
-        megatron_args = megatron_get_args()
-        models = model if isinstance(model, (list, tuple)) else [model]
-        synthetic_iter = _lazy_state["synthetic_iter"]
-
-        # ---- 1. Snapshot model parameters to CPU ----
-        _log("Saving model parameters to CPU before warmup")
-        saved_params = {}
-        for m in models:
-            for name, p in m.named_parameters():
-                saved_params[name] = p.data.to("cpu", non_blocking=True)
-        torch.cuda.synchronize()
-        _log(f"Saved {len(saved_params)} parameter tensors")
-
-        # ---- 2. Neuter optimizer ----
-        saved_opt = _neuter_optimizer(optimizer)
-
-        # ---- 3. Suppress training_log and eval during warmup ----
-        saved_training_log = mt.training_log
-        saved_eval = mt.evaluate_and_print_results
-        mt.training_log = lambda *a, **k: None
-        mt.evaluate_and_print_results = lambda *a, **k: None
-
-        # ---- 3b. Save LR scheduler state (NeMo never steps the scheduler during warmup) ----
-        saved_lr_num_steps = opt_param_scheduler.num_steps
-
-        # ---- 4. Run warmup steps with synthetic data ----
-        for step_idx in range(warmup_steps):
-            _log(f"Warmup step {step_idx + 1}/{warmup_steps}")
-            _wrapped_chain(
-                forward_step_func,
-                synthetic_iter,
-                model,
-                optimizer,
-                opt_param_scheduler,
-                config,
-                forward_backward_func,
-                iteration=iteration,
-            )
-        _log(f"Completed {warmup_steps} warmup steps")
-
-        # ---- 5. Restore optimizer ----
-        _restore_optimizer(optimizer, saved_opt)
-        _reset_optimizer_state(optimizer)
-
-        # ---- 6. Restore model parameters from CPU ----
-        restored = 0
-        for m in models:
-            for name, p in m.named_parameters():
-                if name in saved_params:
-                    p.data.copy_(saved_params[name])
-                    restored += 1
-        del saved_params
-        _log(f"Restored {restored} parameter tensors from CPU snapshot")
-
-        # ---- 7. FP8 reset (spec-aware) ----
-        if _lazy_state["transformer_impl"] == "transformer_engine":
-            te_count = _reset_fp8_te_spec(models)
-            amax_count = _seed_fp8_amax(models)
-            _log(f"FP8 TE reset: {te_count} modules, " f"seeded {amax_count} amax tensors")
-        else:
-            local_count = _reset_fp8_local_spec(models)
-            _log(f"FP8 local spec reset: {local_count} modules")
-
-        # ---- 8. FSDP2 FP8 all-gather recompute ----
-        if _lazy_state["use_fsdp2_fp8"]:
-            try:
-                from primus.backends.megatron.core.distributed.fsdp2_fp8_all_gather import (
-                    precompute_fp8_scales_for_fsdp,
-                )
-
-                cache_data = getattr(megatron_args, "fp8_precompute_data_cache", True)
-                use_cpp = getattr(megatron_args, "use_cpp_fp8_quantize", False)
-                sr = getattr(megatron_args, "fp8_all_gather_stochastic_rounding", False)
-                precompute_fp8_scales_for_fsdp(
-                    models[0],
-                    cache_data=cache_data,
-                    use_cpp_quantize=use_cpp,
-                    stochastic_rounding=sr,
-                )
-                _log("Recomputed FSDP2 FP8 all-gather scales")
-            except Exception as e:
-                _log(f"FSDP2 FP8 recompute failed (non-fatal): {e}")
-
-        # ---- 9. Reload model params in optimizer (FSDP2 BF16 master weight) ----
-        if hasattr(optimizer, "reload_model_params"):
-            optimizer.reload_model_params()
-            _log("Called optimizer.reload_model_params()")
-
-        # ---- 10. Post-restore NaN check ----
-        nan_params = 0
-        for m in models:
-            for name, p in m.named_parameters():
-                if p.data.is_floating_point() and torch.isnan(p.data).any():
-                    nan_params += 1
-        _log(f"Post-restore parameter check: nan_params={nan_params}")
-
-        # ---- 11. Zero gradients ----
-        try:
-            optimizer.zero_grad(set_to_none=True)
-        except TypeError:
-            optimizer.zero_grad()
-
-        # ---- 12. Reset counters ----
-        megatron_args.consumed_train_samples = 0
-        megatron_args.skipped_train_samples = 0
-        opt_param_scheduler.num_steps = saved_lr_num_steps
-        _log(
-            f"Reset consumed_train_samples=0, skipped_train_samples=0, "
-            f"lr_scheduler.num_steps={saved_lr_num_steps}"
+        _run_warmup_and_restore(
+            warmup_steps=warmup_steps,
+            train_step_fn=_wrapped_chain,
+            forward_step_func=forward_step_func,
+            synthetic_iter=_synthetic_iter[0],
+            model=model,
+            optimizer=optimizer,
+            opt_param_scheduler=opt_param_scheduler,
+            config=config,
+            forward_backward_func=forward_backward_func,
+            iteration=iteration,
         )
 
-        # ---- 13. Restore training_log and eval ----
-        mt.training_log = saved_training_log
-        mt.evaluate_and_print_results = saved_eval
-
-        # ---- 13b. Invalidate the CudaPrefetchIterator that was built around
-        # the SYNTHETIC iterator during warmup step 1.
-        #
-        # ``patch_grad_zero_and_data_prefetch`` builds a ``CudaPrefetchIterator``
-        # the first time its ``_patched_train_step`` runs and caches it in a
-        # closure-local ``_prefetch_state["iter"]``.  Because warmup step 1
-        # is the first call into that train_step, the prefetch iterator gets
-        # bound to ``synthetic_iter``.  ``MegatronDataloaderWrapper`` is
-        # cyclic (never raises ``StopIteration``), so subsequent real
-        # training steps would silently keep reading from the cycling
-        # synthetic dataset instead of the actual training dataset -- model
-        # overfits the mock samples and val_loss on real data stays stuck
-        # at ~1.38 forever.
-        #
-        # Dropping the cached entry forces the next train_step to rebuild
-        # the prefetch wrapper around its incoming ``data_iterator`` arg
-        # (the real iterator).
-        try:
-            from primus.backends.megatron.patches.delayed_fp8_scaling_patches import (
-                reset_prefetch_state,
-            )
-
-            evicted = reset_prefetch_state()
-            if evicted is None:
-                _log("  Prefetch reset: no cached iterator to evict")
-            else:
-                _log(
-                    f"  Prefetch reset: evicted cached {type(evicted).__name__} "
-                    f"(wrapped synthetic warmup iterator) -- next train_step "
-                    f"will rebuild it around the real data_iterator"
-                )
-        except Exception as _e:
-            _log(f"  Prefetch reset failed (non-fatal): {_e}")
-
-        # ---- 14. Synchronize ----
-        torch.cuda.synchronize()
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
-
-        # ---- 15. Execute first real step ----
         _log("Executing first real train_step with training data")
         result = _wrapped_chain(
             forward_step_func,
@@ -454,7 +519,6 @@ def patch_mlperf_warmup(ctx: PatchContext):
             iteration=iteration,
         )
 
-        # ---- 16. Self-remove ----
         _warmup_done[0] = True
         mt.train_step = _wrapped_chain
         _log("Self-removed warmup hook, train_step = inner wrapped chain")
@@ -464,8 +528,28 @@ def patch_mlperf_warmup(ctx: PatchContext):
     _hooked_train_step._primus_warmup_hook = True
     mt.train_step = _hooked_train_step
 
-    _log(
-        f"Installed MLPerf warmup hook (warmup_steps={warmup_steps}, "
-        f"deferred init until first train_step)"
-    )
     log_rank_0(f"[Patch:mlperf_warmup] Installed warmup hook " f"(warmup_steps={warmup_steps}, priority=95)")
+
+
+@register_patch(
+    "megatron.training.mlperf_warmup",
+    backend="megatron",
+    phase="before_train",
+    description="MLPerf warmup: synthetic data steps before measured training",
+    condition=_warmup_enabled,
+    priority=95,
+)
+def patch_mlperf_warmup(ctx: PatchContext):
+    """Install warmup at priority 95, so it is the outermost wrapper."""
+    import megatron.training.training as mt
+
+    if hasattr(mt.train_step, "_primus_warmup_hook"):
+        return
+
+    primus_args = get_args(ctx)
+    warmup_steps = getattr(primus_args, "warmup_train_steps", 2)
+
+    if getattr(primus_args, "mlperf_mode", False):
+        _install_boundary_warmup(primus_args, warmup_steps)
+    else:
+        _install_train_step_warmup(mt, primus_args, warmup_steps)
