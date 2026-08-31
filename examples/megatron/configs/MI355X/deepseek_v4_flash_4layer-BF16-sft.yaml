@@ -191,7 +191,11 @@ modules:
       enable_primus_turbo: true
       use_turbo_attention: false          # must stay off so the dense (cr=0)
                                           # path uses the V4 sparse-MLA backend
-      use_turbo_grouped_gemm: true
+      # Parameterised because main's grad-accum fusion (PR #995) calls
+      # primus_turbo's grouped_gemm with `fuse_bgrad_accum_pattern`, which older
+      # primus_turbo builds -- including the one in rocm/primus:v26.5 -- do not accept.
+      # Set PRIMUS_USE_TURBO_GROUPED_GEMM=false to run this recipe on such an image.
+      use_turbo_grouped_gemm: ${PRIMUS_USE_TURBO_GROUPED_GEMM:true}
       use_turbo_rms_norm: true
       use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:false}   # default CU count is 80
                                                            # == 100% of MI308X's CUs

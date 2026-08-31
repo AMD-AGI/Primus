@@ -41,7 +41,7 @@ def _run(indexer, hidden, cu, chunk):
     try:
         torch.manual_seed(0)
         with torch.no_grad():
-            return indexer(hidden, cu)  # (topk_idxs, topk_scores)
+            return indexer(hidden, cu_seqlens=cu)  # (topk_idxs, topk_scores)
     finally:
         if prev is None:
             os.environ.pop("PRIMUS_INDEXER_TOPK_CHUNK", None)

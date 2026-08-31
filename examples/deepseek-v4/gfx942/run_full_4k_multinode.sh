@@ -50,6 +50,13 @@ if [ -z "${NODE_RANK:-}" ]; then
 fi
 
 # ---- prerequisites -----------------------------------------------------------------
+# Probe the known locations rather than assuming one: the directory has been renamed at
+# least once, and the check below aborts the whole run before anything else happens.
+if [ -z "${V4_TOKENIZER:-}" ]; then
+  for _c in /apps/DeepSeek-V4-Flash /apps/DeepSeek-V4-Flash-FP8; do
+    [ -f "${_c}/tokenizer.json" ] && { V4_TOKENIZER="${_c}"; break; }
+  done
+fi
 V4_TOKENIZER="${V4_TOKENIZER:-/apps/DeepSeek-V4-Flash}"
 DATA_DIR="${DATA_DIR:-${REPO}/data/sft}"
 BACKEND_PATH="${BACKEND_PATH:-${REPO}/third_party/Megatron-LM}"
@@ -82,6 +89,27 @@ fi
 
 # ---- launcher / rendezvous ---------------------------------------------------------
 export PRIMUS_LAUNCHER=direct
+# run_deepseek_v4.sh hard-requires DOCKER_IMAGE via `${DOCKER_IMAGE:?...}` even though
+# PRIMUS_LAUNCHER=direct never launches a container -- we are already inside one. Without
+# this the script depends on an ambient variable that happens to be set in some shells,
+# which is how it "worked" before while not being self-contained.
+export DOCKER_IMAGE="${DOCKER_IMAGE:-in-container/direct-launcher}"
+
+# ---- primus_turbo compatibility -------------------------------------------------------
+# Two independent version mismatches against the primus_turbo in rocm/primus:v26.5:
+#   * main's grad-accum fusion passes `fuse_bgrad_accum_pattern` to grouped_gemm, which
+#     that build does not accept;
+#   * main's MegaMoE imports primus_turbo.pytorch.ops.moe.fused_mega_moe, which that build
+#     calls mega_moe_fused (renamed upstream).
+# Both default off here so the recipe runs on the documented image; set them back on a
+# newer one.
+# The effective switch is TURBO_USE_GROUPED_MLP, not the yaml key: run_deepseek_v4.sh
+# passes `--use_turbo_grouped_gemm "$TURBO_USE_GROUPED_MLP"` on the command line, which
+# overrides whatever the yaml says. It defaults to EP>1, i.e. True for this recipe.
+export TURBO_USE_GROUPED_MLP="${TURBO_USE_GROUPED_MLP:-False}"
+export YAML_TURBO_GROUPED_GEMM="${YAML_TURBO_GROUPED_GEMM:-false}"
+export PRIMUS_USE_TURBO_GROUPED_GEMM="${PRIMUS_USE_TURBO_GROUPED_GEMM:-false}"
+export PRIMUS_OPT_MEGA_MOE="${PRIMUS_OPT_MEGA_MOE:-0}"
 unset SLURM_JOB_ID SLURM_JOBID SLURM_NODELIST 2>/dev/null || true
 export NNODES="${NNODES:-3}"
 export NODE_RANK MASTER_ADDR

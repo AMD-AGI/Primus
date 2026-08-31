@@ -510,6 +510,7 @@ class Indexer(nn.Module):
         self,
         hidden: torch.Tensor,
         position_ids: Optional[torch.Tensor] = None,
+        *,
         cu_seqlens=None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Select top-k compressed positions for each query.

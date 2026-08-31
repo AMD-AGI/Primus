@@ -1748,7 +1748,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # the same way), and when the indexer is frozen it also stops autograd
         # from building a subgraph whose output is discarded.
         topk_idxs, topk_scores = self.indexer(
-            hidden.detach(), position_ids, cu_seqlens
+            hidden.detach(), position_ids, cu_seqlens=cu_seqlens
         )  # [B, S, K]
 
         # 2b) Indexer distillation. argTopK is not differentiable and the
