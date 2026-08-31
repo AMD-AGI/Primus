@@ -34,8 +34,6 @@ This variable is a no-op on MI300X (gfx942).
 
 ### Known issues
 
-**Mixtral-8x7B performance regression.** Mixtral-8x7B is slower in v26.6 than in the previous release. This is being tracked and will be addressed in a future release.
-
 **Loss curve discrepancy with `packing=false`.** With `packing=false` the loss converges at a slightly higher value than in previous images. To reproduce the earlier convergence, set `NVTE_CK_USES_FWD_V3=0`, which uses Flash Attention v2 for the forward pass instead of v3. This is being tracked and will be addressed in a future release.
 
 ---
