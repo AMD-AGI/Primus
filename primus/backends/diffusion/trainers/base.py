@@ -447,7 +447,8 @@ class BaseWanTrainer:
         except ImportError as exc:
             raise ImportError(
                 "Diffusion MLPerf mode requires `mlperf_logging`. "
-                "Install Primus MLPerf dependencies before enabling `mlperf.enable`."
+                "Install Primus MLPerf dependencies (`pip install primus[mlperf]` "
+                "or `pip install -r requirements.txt`) before enabling `mlperf.enable`."
             ) from exc
 
         self.mlperf_logger = mllog.get_mllogger()
