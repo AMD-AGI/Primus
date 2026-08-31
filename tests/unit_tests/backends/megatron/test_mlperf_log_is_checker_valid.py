@@ -191,6 +191,17 @@ def _drive_a_run(mt, eval_losses):
         )
 
 
+def _values(log_path, key):
+    """Every value logged under ``key``, in emission order."""
+    import json
+
+    return [
+        json.loads(line[line.index("{") :])["value"]
+        for line in log_path.read_text().splitlines()
+        if f'"key": "{key}"' in line
+    ]
+
+
 def _check(log_path):
     from mlperf_logging.compliance_checker import mlp_compliance
 
@@ -213,6 +224,45 @@ def test_a_converged_run_passes_the_compliance_checker(monkeypatch, _run_environ
 
     assert log_path.exists(), "rank zero did not write the result file"
     assert _check(log_path), log_path.read_text()
+
+
+def test_a_post_convergence_evaluation_cannot_pollute_the_log(monkeypatch, _run_environment):
+    """The reported symptom, end to end, against the real checker.
+
+    pretrain validates once more after the training loop exits. That evaluation
+    draws fresh VAE and flow-matching noise, so it reports a different loss and
+    can land above the target the run just met, leaving the log ending on a
+    result that contradicts the one that stopped the run.
+
+    Two things prevent it. do_valid is cleared on convergence, so pretrain
+    skips the evaluation entirely; and the wrapper records nothing once
+    run_stop has fired, for any caller that evaluates regardless. This asserts
+    the first and then exercises the second, since the first alone would leave
+    nothing to test.
+    """
+    log_path = _run_environment
+    mt, megatron_args = _install_fake_megatron(monkeypatch)
+    mt.evaluate_and_print_results = lambda *a, **k: mt.evaluate(*a, **k)
+
+    _drive_a_run(mt, eval_losses=[0.9, 0.7, 0.5])
+
+    assert megatron_args.do_valid is False, "pretrain would still run its post-training eval"
+
+    # Evaluate anyway, at the loss the re-evaluation was observed to produce.
+    mt.evaluate = lambda *a, **k: ({"loss": 0.91},)
+    mt.evaluate_and_print_results(
+        "iteration 1536 on validation set",
+        lambda: None,
+        None,
+        [MagicMock()],
+        1536,
+        None,
+        MagicMock(),
+    )
+
+    assert _check(log_path), log_path.read_text()
+    assert _values(log_path, "eval_accuracy") == [0.9, 0.7, 0.5]
+    assert _values(log_path, "run_stop") == ["success"]
 
 
 def test_an_exhausted_run_fails_only_on_quality(monkeypatch, caplog, _run_environment):
