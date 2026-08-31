@@ -14,15 +14,17 @@ being papered over with the count the configuration intended.
 
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
+import primus.backends.megatron.training.eval_session as eval_session
 from primus.backends.megatron.training.evaluator import (
     VAL_LOSS_KEY,
     _record_consumed_valid_samples,
     _report_eval,
+    primus_evaluate,
     reduce_eval_losses,
 )
 
@@ -302,3 +304,94 @@ class TestEvalReporting:
 
         assert "context_parallel_size=2" in info.call_args[0][0]
         assert debug.call_count == 0
+
+
+class TestEvaluationSessions:
+    """Every evaluation must announce itself before it reads anything.
+
+    The diffusion trainer derives its validation RNG index from this signal, so
+    that two evaluations at the same training step -- the in-loop one that ends
+    a run and the one pretrain runs afterwards -- reproduce each other rather
+    than drawing fresh noise. That only holds if the evaluator opens a session,
+    and the trainer cannot tell that it failed to.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_eval_session(self):
+        """Driving primus_evaluate advances process-wide state."""
+        saved = eval_session._eval_session
+        yield
+        eval_session._eval_session = saved
+
+    @staticmethod
+    def _args():
+        return SimpleNamespace(
+            vision_pretraining=False,
+            vision_pretraining_type=None,
+            global_batch_size=512,
+            micro_batch_size=64,
+            seq_length=256,
+            decoder_seq_length=None,
+            enable_cuda_graph=False,
+            cuda_graph_scope=None,
+            eval_iters=2,
+            empty_unused_memory_level=0,
+            exit_duration_in_mins=None,
+            consumed_valid_samples=0,
+            mlperf_mode=False,
+        )
+
+    @contextmanager
+    def _evaluator(self, sessions_seen):
+        """primus_evaluate with everything below the session signal stubbed out."""
+
+        def forward_backward_func(**kwargs):
+            sessions_seen.append(eval_session.current_eval_session())
+            return [{}]
+
+        with patch(f"{EVALUATOR}.get_args", return_value=self._args()), patch(
+            f"{EVALUATOR}.get_timers"
+        ), patch(f"{EVALUATOR}.get_rerun_state_machine"), patch(f"{EVALUATOR}.ft_integration"), patch(
+            f"{EVALUATOR}.get_eval_num_microbatches", return_value=1
+        ), patch(
+            f"{EVALUATOR}.get_forward_backward_func", return_value=forward_backward_func
+        ), patch(
+            f"{EVALUATOR}.is_pipeline_stage_containing_loss", return_value=False
+        ), patch(
+            f"{EVALUATOR}._report_eval"
+        ):
+            yield
+
+    def _evaluate(self, sessions_seen):
+        with self._evaluator(sessions_seen):
+            primus_evaluate(
+                forward_step_func=lambda *a, **k: None,
+                data_iterator=None,
+                model=[MagicMock()],
+                process_non_loss_data_func=None,
+                config=SimpleNamespace(timers=None),
+            )
+
+    def test_a_session_is_open_before_the_first_forward_step(self):
+        before = eval_session.current_eval_session()
+        seen = []
+
+        self._evaluate(seen)
+
+        assert seen, "the evaluation ran no forward steps"
+        assert all(session > before for session in seen)
+
+    def test_every_forward_step_of_one_evaluation_sees_the_same_session(self):
+        seen = []
+
+        self._evaluate(seen)
+
+        assert len(set(seen)) == 1
+
+    def test_consecutive_evaluations_open_different_sessions(self):
+        first, second = [], []
+
+        self._evaluate(first)
+        self._evaluate(second)
+
+        assert set(first).isdisjoint(second)

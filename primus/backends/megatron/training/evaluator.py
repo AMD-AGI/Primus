@@ -16,6 +16,7 @@ from megatron.training import ft_integration, get_args, get_timers
 from megatron.training.utils import is_last_rank
 
 from primus.backends.megatron.training.eval_budget import get_eval_num_microbatches
+from primus.backends.megatron.training.eval_session import begin_eval_session
 from primus.backends.megatron.training.global_vars import get_train_start_time
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
 from primus.core.utils.module_utils import debug_rank_0, log_rank_0
@@ -166,6 +167,10 @@ def primus_evaluate(
     """Evaluation."""
     args = get_args()
     timers = get_timers()
+
+    # Before any forward step, so consumers deriving per-microbatch state can
+    # tell this evaluation apart from the previous one even at the same step.
+    begin_eval_session()
 
     timers("evaluate", log_level=0).start(barrier=True)
 
