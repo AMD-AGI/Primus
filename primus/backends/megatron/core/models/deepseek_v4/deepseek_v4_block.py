@@ -60,6 +60,15 @@ from __future__ import annotations
 import ast
 import logging
 from contextlib import nullcontext
+
+# CPU activation offloading helper, re-exported by Megatron's transformer_block when
+# TransformerEngine is present. None when TE is unavailable.
+try:
+    from megatron.core.transformer.transformer_block import (
+        get_cpu_offload_context as _get_cpu_offload_context,
+    )
+except ImportError:  # pragma: no cover
+    _get_cpu_offload_context = None
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Union
 
@@ -838,6 +847,30 @@ class DeepseekV4TransformerBlock(TransformerBlock):
         self.pg_collection = pg_collection
         # Required by pipeline schedules (same contract as TransformerBlock).
         self.input_tensor = None
+
+        # CPU activation offloading. The parent __init__ is bypassed (see the class
+        # docstring), so this has to be set up here or `self.offload_context` simply does
+        # not exist and enabling --cpu-offloading-num-layers dies with an AttributeError.
+        # TE's context installs saved_tensors_hooks, which intercept every tensor saved
+        # for backward inside it -- including V4's custom autograd Functions, since
+        # offloading is opt-out (`mark_not_offload`) rather than opt-in.
+        self.offload_context, self.group_prefetch_offload_commit_async = nullcontext(), None
+        if _get_cpu_offload_context is not None:
+            self.offload_context, self.group_prefetch_offload_commit_async = _get_cpu_offload_context(
+                config.cpu_offloading,
+                config.cpu_offloading_num_layers,
+                config.num_layers,
+                config.cpu_offloading_activations,
+                config.cpu_offloading_weights,
+                config.cpu_offloading_double_buffering,
+            )
+            config._cpu_offloading_context = self.offload_context if config.cpu_offloading else None
+        elif getattr(config, "cpu_offloading", False):
+            raise RuntimeError(
+                "cpu_offloading requires TransformerEngine's get_cpu_offload_context, "
+                "which is unavailable in this build."
+            )
+
         logger.info(
             "[DeepSeek-V4] decoder block initialized (pre_process=%s post_process=%s).",
             pre_process,
@@ -1153,12 +1186,26 @@ class DeepseekV4TransformerBlock(TransformerBlock):
             if recompute_local is not None and local_idx in recompute_local:
                 x = self._forward_layer_checkpointed(layer, x, position_ids, token_ids, global_idx)
             else:
-                with self._layer_fp8_context(global_idx):
+                # ``self.offload_context`` comes from TransformerBlock.__init__ (TE's
+                # get_cpu_offload_context). This loop replaces the parent's, so it has to
+                # re-enter that context itself -- without this the context object exists
+                # but is never active and --cpu-offloading-num-layers is a silent no-op.
+                # TE v2 installs saved_tensors_hooks, which intercept EVERY tensor saved
+                # for backward inside the region (offload is opt-out via
+                # `mark_not_offload`), so V4's custom autograd Functions are covered too.
+                # Mirrors TransformerBlock.forward (transformer_block.py:828-850).
+                with self.offload_context, self._layer_fp8_context(global_idx):
                     x, _ = layer(
                         x,
                         position_ids=position_ids,
                         token_ids=token_ids,
                     )
+                if (
+                    torch.is_grad_enabled()
+                    and self.config.cpu_offloading
+                    and self.group_prefetch_offload_commit_async is not None
+                ):
+                    x = self.group_prefetch_offload_commit_async(x)
 
         # Final HC collapse on post_process stage; non-final stages
         # forward the multi-stream form through PP P2P.
