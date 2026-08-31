@@ -216,12 +216,39 @@ class PrimusTurboLocalAttention(MegatronModule):
                 does -- is rejected in ``__init__``; otherwise the tensor is exactly
                 ``torch.tril(...)``.
             attn_mask_type: Type of attention mask (causal, no_mask, etc.)
-            attention_bias: Attention bias (not used in this implementation)
-            packed_seq_params: Packed sequence parameters (optional)
+            attention_bias: rejected. Nothing below forwards it -- see the guard.
+            packed_seq_params: rejected. Nothing below forwards it -- see the guard.
 
         Returns:
             Attention output [seq_len, batch, num_heads * head_dim] (merged heads)
         """
+        if attention_bias is not None:
+            # The kernel call below passes bias=None and alibi_slopes=None
+            # unconditionally, and nothing between here and there reads this tensor.
+            # Accepting it would train a model with no bias while the config says
+            # there is one, and say nothing about it. Same refusal, same reason, as
+            # PrimusTurboAttention.forward in primus_turbo.py.
+            raise NotImplementedError(
+                "PrimusTurboLocalAttention does not support attention_bias; the tensor "
+                "would be silently dropped. This also covers ALiBi, which Megatron "
+                "delivers as an attention bias -- use a position embedding this path "
+                "implements."
+            )
+
+        if packed_seq_params is not None:
+            # Unlike PrimusTurboAttention, this class has no thd branch at all: it
+            # always calls the dense kernel with no cu_seqlens. A packed batch would
+            # therefore be attended to as ONE long sequence, letting every document
+            # see every earlier document -- wrong numbers, wrong gradients, clean log.
+            # Refuse rather than approximate.
+            raise NotImplementedError(
+                "PrimusTurboLocalAttention does not support packed sequences; the "
+                "document boundaries in packed_seq_params would be silently dropped and "
+                "the batch attended to as one contiguous sequence. Use the "
+                "TransformerEngine-based PrimusTurboAttention spec, which implements "
+                "qkv_format='thd'."
+            )
+
         query, key, value = [x.transpose(0, 1) for x in (query, key, value)]
 
         # gfx942: avoid aiter's broken strided-sbhd backward (see __init__).
