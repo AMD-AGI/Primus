@@ -577,46 +577,69 @@ class TestMeasuredTimeBoundary:
 # ============================================================================
 
 
+def _patch_with_eval_loss(monkeypatch, loss):
+    mt, megatron_args = _install_fake_megatron(monkeypatch)
+    _silence_log_rank_0(monkeypatch)
+    _, events = _install_mock_mllog(monkeypatch)
+
+    mt.evaluate = lambda *a, **k: ({"loss": loss},)
+    mt.evaluate_and_print_results = lambda *a, **k: mt.evaluate(*a, **k)
+
+    from primus.backends.megatron.patches.mlperf_logging_patches import (
+        patch_mlperf_logging,
+    )
+
+    megatron_args.train_iters = 5000
+    patch_mlperf_logging(_make_ctx(mlperf_mode=True, target_val_loss=0.586))
+    mt.build_train_valid_test_data_iterators(None)
+    events.clear()
+    return mt, megatron_args, events
+
+
+def _run_eval(mt, iteration):
+    mt.evaluate_and_print_results(
+        f"iteration {iteration}",
+        lambda: None,
+        None,
+        [MagicMock()],
+        iteration,
+        None,
+        MagicMock(),
+    )
+
+
 class TestConvergenceDetection:
     """Verify convergence detection in evaluate_and_print_results wrapper."""
 
-    def _patch_with_eval_loss(self, monkeypatch, loss):
-        mt, megatron_args = _install_fake_megatron(monkeypatch)
-        _silence_log_rank_0(monkeypatch)
-        _, events = _install_mock_mllog(monkeypatch)
-
-        mt.evaluate = lambda *a, **k: ({"loss": loss},)
-        mt.evaluate_and_print_results = lambda *a, **k: mt.evaluate(*a, **k)
-
-        from primus.backends.megatron.patches.mlperf_logging_patches import (
-            patch_mlperf_logging,
-        )
-
-        megatron_args.train_iters = 5000
-        patch_mlperf_logging(_make_ctx(mlperf_mode=True, target_val_loss=0.586))
-        mt.build_train_valid_test_data_iterators(None)
-        events.clear()
-        return mt, megatron_args, events
-
-    def _run_eval(self, mt, iteration):
-        mt.evaluate_and_print_results(
-            f"iteration {iteration}",
-            lambda: None,
-            None,
-            [MagicMock()],
-            iteration,
-            None,
-            MagicMock(),
-        )
-
     def test_convergence_sets_train_iters(self, monkeypatch):
-        mt, megatron_args, _ = self._patch_with_eval_loss(monkeypatch, 0.500)
-        self._run_eval(mt, 512)
+        mt, megatron_args, _ = _patch_with_eval_loss(monkeypatch, 0.500)
+        _run_eval(mt, 512)
         assert megatron_args.train_iters == 512
 
+    def test_convergence_clears_do_valid(self, monkeypatch):
+        """Breaking the loop returns into pretrain, which validates once more.
+
+        That evaluation is past run_stop and draws fresh noise, so it reports a
+        different loss and can land above the target the run just met. do_valid
+        is the flag pretrain branches on, so clearing it is what stops it.
+        """
+        mt, megatron_args, _ = _patch_with_eval_loss(monkeypatch, 0.500)
+        assert megatron_args.do_valid is True
+
+        _run_eval(mt, 512)
+
+        assert megatron_args.do_valid is False
+
+    def test_a_missed_target_leaves_do_valid_alone(self, monkeypatch):
+        """A run still in progress must keep evaluating."""
+        mt, megatron_args, _ = _patch_with_eval_loss(monkeypatch, 0.900)
+        _run_eval(mt, 512)
+
+        assert megatron_args.do_valid is True
+
     def test_convergence_emits_a_successful_run_stop(self, monkeypatch):
-        mt, _, events = self._patch_with_eval_loss(monkeypatch, 0.500)
-        self._run_eval(mt, 512)
+        mt, _, events = _patch_with_eval_loss(monkeypatch, 0.500)
+        _run_eval(mt, 512)
 
         stops = [entry for entry in events if entry[1] == "run_stop"]
         assert len(stops) == 1
@@ -625,8 +648,8 @@ class TestConvergenceDetection:
 
     def test_a_missed_target_reopens_the_block(self, monkeypatch):
         """block_stop fires on entry to eval; training resuming needs a new block."""
-        mt, _, events = self._patch_with_eval_loss(monkeypatch, 0.900)
-        self._run_eval(mt, 512)
+        mt, _, events = _patch_with_eval_loss(monkeypatch, 0.900)
+        _run_eval(mt, 512)
 
         keys = _keys(events)
         assert keys.index("block_stop") < keys.index("eval_start")
@@ -634,13 +657,65 @@ class TestConvergenceDetection:
         assert "run_stop" not in keys
 
     def test_an_unreadable_loss_still_reopens_the_block(self, monkeypatch):
-        mt, _, events = self._patch_with_eval_loss(monkeypatch, 0.900)
+        mt, _, events = _patch_with_eval_loss(monkeypatch, 0.900)
         mt.evaluate = lambda *a, **k: ({},)
         events.clear()
 
-        self._run_eval(mt, 512)
+        _run_eval(mt, 512)
 
         assert "block_start" in _keys(events)
+
+
+class TestNothingIsLoggedAfterRunStop:
+    """The submission log ends at run_stop, whoever evaluates afterwards.
+
+    Clearing do_valid on convergence means pretrain's post-training validation
+    never runs, so in practice nothing reaches the wrapper past run_stop. This
+    guard is what makes that a property of the wrapper rather than of the order
+    the callers happen to run in, which is why every test here calls the
+    wrapper directly.
+    """
+
+    def test_an_evaluation_after_run_stop_emits_no_records(self, monkeypatch):
+        mt, _, events = _patch_with_eval_loss(monkeypatch, 0.500)
+        _run_eval(mt, 512)
+        assert "run_stop" in _keys(events)
+        events.clear()
+
+        _run_eval(mt, 512)
+
+        assert _keys(events) == []
+
+    def test_a_second_run_stop_is_never_emitted(self, monkeypatch):
+        """run_stop is EXACTLY_ONE, and the repeat evaluation also converges."""
+        mt, _, events = _patch_with_eval_loss(monkeypatch, 0.500)
+        _run_eval(mt, 512)
+
+        _run_eval(mt, 512)
+
+        assert _keys(events).count("run_stop") == 1
+
+    def test_the_evaluation_itself_still_runs(self, monkeypatch):
+        """The guard suppresses records, not the caller's evaluation."""
+        mt, _, _ = _patch_with_eval_loss(monkeypatch, 0.500)
+        _run_eval(mt, 512)
+
+        calls = []
+        mt.evaluate = lambda *a, **k: (calls.append(1), {"loss": 0.500})[1]
+
+        _run_eval(mt, 512)
+
+        assert calls == [1]
+
+    def test_an_aborted_run_also_closes_the_log(self, monkeypatch):
+        """converged would miss this; the guard keys on run_stop having fired."""
+        mt, _, events = _patch_with_eval_loss(monkeypatch, 0.900)
+        mt._primus_mlperf_logger.log_run_stop(success=False, global_step=5000)
+        events.clear()
+
+        _run_eval(mt, 5000)
+
+        assert _keys(events) == []
 
 
 class TestTerminalRunStop:

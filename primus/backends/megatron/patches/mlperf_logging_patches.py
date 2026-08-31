@@ -415,6 +415,15 @@ class FluxMLPerfLogger:
     def converged(self):
         return self._converged
 
+    @property
+    def run_stopped(self):
+        """Whether run_stop has been emitted, however the run ended.
+
+        Distinct from ``converged``, which is only the success path. Anything
+        guarding against records past the end of the run wants this one.
+        """
+        return self._run_stopped
+
     def log_run_stop(self, success: bool, global_step: int):
         # run_stop is EXACTLY_ONE in the ruleset: a converged run that also hits
         # the end-of-training path must not emit a second, contradictory record.
@@ -556,6 +565,14 @@ def patch_mlperf_logging(ctx: PatchContext):
         # evaluate_and_print_results(prefix, fwd, data, model, iteration[4], ...)
         iteration = eval_kwargs.get("iteration", eval_args[4] if len(eval_args) > 4 else 0)
 
+        # The run is over and run_stop is EXACTLY_ONE, so an evaluation reaching
+        # here is outside the measured region and contributes nothing to the
+        # submission. Clearing do_valid on convergence means nothing should get
+        # this far; this makes "the log ends at run_stop" hold structurally
+        # rather than by call ordering, for whatever call site comes next.
+        if mlperf_logger.run_stopped:
+            return _orig_eval(*eval_args, **eval_kwargs)
+
         mlperf_logger.on_validation_start(iteration)
 
         # Temporarily wrap whatever `evaluate` is at call time (e.g.
@@ -616,9 +633,17 @@ def patch_mlperf_logging(ctx: PatchContext):
                 try:
                     from megatron.training import get_args as megatron_get_args
 
-                    megatron_get_args().train_iters = iteration
+                    megatron_args = megatron_get_args()
+                    megatron_args.train_iters = iteration
+                    # Breaking the loop returns into pretrain(), which runs one
+                    # more validation whenever do_valid is set. That evaluation
+                    # is past run_stop, and it draws fresh VAE epsilon and
+                    # flow-matching noise, so it reports a different loss and
+                    # can land above target -- contradicting the evaluation
+                    # that just ended the run.
+                    megatron_args.do_valid = False
                 except Exception:
-                    logger.warning("Could not set args.train_iters for early stop")
+                    logger.warning("Could not set args.train_iters/do_valid for early stop")
         else:
             converged = False
             logger.warning("Could not extract validation loss from evaluate result")
