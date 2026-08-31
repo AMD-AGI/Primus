@@ -20,6 +20,10 @@ import torch
 import torch.nn as nn
 
 from primus.backends.megatron.diffusion_trainer import DiffusionPretrainTrainer
+from primus.backends.megatron.training.diffusion.forward_step import (
+    EQUIDISTANT_TIMESTEPS,
+    EVAL_TIMESTEP_SOURCES,
+)
 from primus.backends.megatron.training.diffusion.schedulers import (
     FlowMatchEulerDiscreteScheduler,
 )
@@ -150,6 +154,16 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             log_rank_0(f"VAE latent mode: resample (reparameterization from mean+logvar each step)")
         else:
             log_rank_0(f"VAE latent mode: presampled (stored latents used directly)")
+
+        # Validated here rather than at the first forward so a typo fails at
+        # startup instead of after the first eval_interval steps.
+        self.eval_timestep_source = getattr(params, "eval_timestep_source", EQUIDISTANT_TIMESTEPS)
+        if self.eval_timestep_source not in EVAL_TIMESTEP_SOURCES:
+            raise ValueError(
+                f"eval_timestep_source must be one of {list(EVAL_TIMESTEP_SOURCES)}, "
+                f"got '{self.eval_timestep_source}'"
+            )
+        log_rank_0(f"Validation timestep source: {self.eval_timestep_source}")
 
         log_rank_0(f"Guidance embedding: {self.use_guidance_embed}")
         log_rank_0(f"Scheduler shift: {self.scheduler_shift}")

@@ -17,6 +17,64 @@ import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
+_MLLOG_CONSTANT_NAMES = {
+    "INIT_START": "init_start",
+    "INIT_STOP": "init_stop",
+    "RUN_START": "run_start",
+    "RUN_STOP": "run_stop",
+    "SUBMISSION_BENCHMARK": "submission_benchmark",
+    "SUBMISSION_ORG": "submission_org",
+    "SUBMISSION_DIVISION": "submission_division",
+    "SUBMISSION_PLATFORM": "submission_platform",
+    "SUBMISSION_STATUS": "submission_status",
+    "SEED": "seed",
+    "GLOBAL_BATCH_SIZE": "global_batch_size",
+    "TRAIN_SAMPLES": "train_samples",
+    "EVAL_SAMPLES": "eval_samples",
+    "GRADIENT_ACCUMULATION_STEPS": "gradient_accumulation_steps",
+    "OPT_NAME": "opt_name",
+    "OPT_BASE_LR": "opt_base_learning_rate",
+    "EVAL_ACCURACY": "eval_accuracy",
+    "EVAL_START": "eval_start",
+    "EVAL_STOP": "eval_stop",
+    "EPOCH_START": "epoch_start",
+    "EPOCH_STOP": "epoch_stop",
+    "BLOCK_START": "block_start",
+    "BLOCK_STOP": "block_stop",
+}
+
+
+@pytest.fixture(autouse=True)
+def _mlperf_submission_environment(monkeypatch, tmp_path):
+    """Everything the logger now refuses to guess.
+
+    The patch fails closed on each of these, so without them every test in
+    this module would fail on identity rather than on what it is testing.
+    """
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("MLLOG_OUTPUT_FILE", str(tmp_path / "result_0.txt"))
+    monkeypatch.setenv("MLPERF_CLEAR_CACHES", "true")
+    monkeypatch.setenv("MLLOG_SUBMISSION_ORG", "AMD")
+    monkeypatch.setenv("MLLOG_SUBMISSION_DIVISION", "closed")
+    monkeypatch.setenv("MLLOG_SUBMISSION_PLATFORM", "MI355X")
+    monkeypatch.setenv("EXP", "examples/megatron/configs/MI355X/diffusion/test.yaml")
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR", "fp8")
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN", "bfloat16")
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM", "bfloat16")
+
+
+@pytest.fixture(autouse=True)
+def _clean_boundary():
+    """The boundary keeps module-level state, so tests must not inherit it."""
+    from primus.backends.megatron.patches import mlperf_boundary
+
+    mlperf_boundary.reset_for_tests()
+    yield
+    mlperf_boundary.reset_for_tests()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -60,6 +118,14 @@ def _install_fake_megatron(monkeypatch):
     training_mod.get_tensorboard_writer = fake_get_tb_writer
     training_mod.get_wandb_writer = fake_get_wandb_writer
 
+    # The three entry points the MLPerf boundary wraps, plus the two helpers
+    # the relocated warmup reads off the training module.
+    training_mod.setup_model_and_optimizer = lambda *a, **k: ("model", "optimizer", "scheduler")
+    training_mod.build_train_valid_test_data_iterators = lambda *a, **k: ("train", "valid", "test")
+    training_mod.get_model_config = lambda model: SimpleNamespace()
+    training_mod.get_forward_backward_func = lambda: (lambda *a, **k: None)
+    training_pkg.pretrain = lambda *a, **k: None
+
     training_pkg.training = training_mod
     megatron_mod.training = training_pkg
 
@@ -85,6 +151,45 @@ def _install_fake_megatron(monkeypatch):
     monkeypatch.setitem(sys.modules, "megatron.training.global_vars", global_vars_mod)
 
     return training_mod, _megatron_args
+
+
+def _install_mock_mllog(monkeypatch, events=None):
+    """Install a fake mlperf_logging.mllog and return (module, events).
+
+    ``events`` accumulates ``(kind, key, value, metadata)`` in emission order,
+    which is what most of the assertions below are about.
+    """
+    import sys
+
+    if events is None:
+        events = []
+
+    def _record(kind):
+        def _emit(key, value=None, metadata=None):
+            events.append((kind, key, value, metadata))
+
+        return _emit
+
+    mock_mllogger = MagicMock()
+    mock_mllogger.start = _record("start")
+    mock_mllogger.end = _record("end")
+    mock_mllogger.event = _record("event")
+
+    mock_mllog_module = MagicMock()
+    mock_mllog_module.get_mllogger.return_value = mock_mllogger
+    mock_mllog_module.constants = SimpleNamespace(**_MLLOG_CONSTANT_NAMES)
+
+    mock_mlperf_pkg = MagicMock()
+    mock_mlperf_pkg.mllog = mock_mllog_module
+
+    monkeypatch.setitem(sys.modules, "mlperf_logging", mock_mlperf_pkg)
+    monkeypatch.setitem(sys.modules, "mlperf_logging.mllog", mock_mllog_module)
+
+    return mock_mllog_module, events
+
+
+def _keys(events):
+    return [entry[1] for entry in events]
 
 
 def _make_ctx(
@@ -141,8 +246,99 @@ def _make_ctx(
     )
 
 
+def _silence_log_rank_0(monkeypatch):
+    for module in (
+        "primus.backends.megatron.patches.mlperf_logging_patches",
+        "primus.backends.megatron.patches.mlperf_warmup_patches",
+    ):
+        monkeypatch.setattr(f"{module}.log_rank_0", lambda *a, **k: None)
+
+
 # ============================================================================
-# Level 1: Patch registration and conditions
+# Submission identity and precision disclosure
+# ============================================================================
+
+
+def test_precision_disclosures_are_explicit(monkeypatch):
+    from primus.backends.megatron.patches.mlperf_logging_patches import (
+        _precision_disclosures_from_env,
+    )
+
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR", "mxfp6")
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN", "bfloat16")
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM", "bfloat16")
+
+    assert _precision_disclosures_from_env() == {
+        "lowest_numerical_precision_in_linear": "mxfp6",
+        "lowest_numerical_precision_in_attn": "bfloat16",
+        "lowest_numerical_precision_in_comm": "bfloat16",
+    }
+
+
+def test_missing_precision_disclosure_fails_mlperf_startup(monkeypatch):
+    from primus.backends.megatron.patches.mlperf_logging_patches import (
+        _precision_disclosures_from_env,
+    )
+
+    for name in (
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR",
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN",
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(RuntimeError, match="explicit precision disclosures"):
+        _precision_disclosures_from_env()
+
+
+def test_precision_value_outside_the_checker_enum_warns(monkeypatch, caplog):
+    """mxfp6 is not yet an accepted disclosure, and a run must say so.
+
+    The value is still emitted -- describing an MXFP6 run as fp8 would be
+    worse than a log the checker rejects -- but it cannot pass silently.
+    """
+    from primus.backends.megatron.patches.mlperf_logging_patches import (
+        _precision_disclosures_from_env,
+    )
+
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR", "mxfp6")
+
+    with caplog.at_level("WARNING"):
+        values = _precision_disclosures_from_env()
+
+    assert values["lowest_numerical_precision_in_linear"] == "mxfp6"
+    assert "mxfp6" in caplog.text
+    assert "compliance checker" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["MLLOG_SUBMISSION_ORG", "MLLOG_SUBMISSION_DIVISION", "MLLOG_SUBMISSION_PLATFORM"],
+)
+def test_submission_identity_never_defaults(monkeypatch, variable):
+    from primus.backends.megatron.patches.mlperf_logging_patches import (
+        _submission_identity_from_env,
+    )
+
+    monkeypatch.delenv(variable, raising=False)
+
+    with pytest.raises(RuntimeError, match=variable):
+        _submission_identity_from_env()
+
+
+def test_submission_division_must_be_a_real_division(monkeypatch):
+    from primus.backends.megatron.patches.mlperf_logging_patches import (
+        _submission_identity_from_env,
+    )
+
+    monkeypatch.setenv("MLLOG_SUBMISSION_DIVISION", "network")
+
+    with pytest.raises(RuntimeError, match="closed"):
+        _submission_identity_from_env()
+
+
+# ============================================================================
+# Patch registration
 # ============================================================================
 
 
@@ -151,42 +347,8 @@ class TestLoggingPatchMonkeyPatching:
 
     def test_installs_wrappers(self, monkeypatch):
         mt, _ = _install_fake_megatron(monkeypatch)
-
-        monkeypatch.setattr(
-            "primus.backends.megatron.patches.mlperf_logging_patches.log_rank_0",
-            lambda *a, **k: None,
-        )
-
-        mock_mllog = MagicMock()
-        mock_mllog.get_mllogger.return_value = MagicMock()
-        mock_mllog.constants = SimpleNamespace(
-            INIT_START="init_start",
-            INIT_STOP="init_stop",
-            RUN_START="run_start",
-            RUN_STOP="run_stop",
-            SUBMISSION_BENCHMARK="submission_benchmark",
-            SUBMISSION_ORG="submission_org",
-            SUBMISSION_DIVISION="submission_division",
-            SUBMISSION_PLATFORM="submission_platform",
-            SUBMISSION_STATUS="submission_status",
-            SEED="seed",
-            GLOBAL_BATCH_SIZE="global_batch_size",
-            TRAIN_SAMPLES="train_samples",
-            EVAL_SAMPLES="eval_samples",
-            GRADIENT_ACCUMULATION_STEPS="gradient_accumulation_steps",
-            OPT_NAME="opt_name",
-            OPT_BASE_LR="opt_base_lr",
-            EVAL_ACCURACY="eval_accuracy",
-            EVAL_START="eval_start",
-            EVAL_STOP="eval_stop",
-            EPOCH_START="epoch_start",
-            BLOCK_START="block_start",
-            BLOCK_STOP="block_stop",
-        )
-        mock_mlperf_pkg = MagicMock()
-        mock_mlperf_pkg.mllog = mock_mllog
-        monkeypatch.setitem(__import__("sys").modules, "mlperf_logging", mock_mlperf_pkg)
-        monkeypatch.setitem(__import__("sys").modules, "mlperf_logging.mllog", mock_mllog)
+        _silence_log_rank_0(monkeypatch)
+        _install_mock_mllog(monkeypatch)
 
         from primus.backends.megatron.patches.mlperf_logging_patches import (
             patch_mlperf_logging,
@@ -196,8 +358,7 @@ class TestLoggingPatchMonkeyPatching:
         original_eval = mt.evaluate_and_print_results
         original_prl = mt.print_rank_last
 
-        ctx = _make_ctx(mlperf_mode=True)
-        patch_mlperf_logging(ctx)
+        patch_mlperf_logging(_make_ctx(mlperf_mode=True))
 
         assert mt.training_log is not original_tl
         assert mt.evaluate_and_print_results is not original_eval
@@ -206,42 +367,8 @@ class TestLoggingPatchMonkeyPatching:
 
     def test_idempotent(self, monkeypatch):
         mt, _ = _install_fake_megatron(monkeypatch)
-
-        monkeypatch.setattr(
-            "primus.backends.megatron.patches.mlperf_logging_patches.log_rank_0",
-            lambda *a, **k: None,
-        )
-
-        mock_mllog = MagicMock()
-        mock_mllog.get_mllogger.return_value = MagicMock()
-        mock_mllog.constants = SimpleNamespace(
-            INIT_START="init_start",
-            INIT_STOP="init_stop",
-            RUN_START="run_start",
-            RUN_STOP="run_stop",
-            SUBMISSION_BENCHMARK="submission_benchmark",
-            SUBMISSION_ORG="submission_org",
-            SUBMISSION_DIVISION="submission_division",
-            SUBMISSION_PLATFORM="submission_platform",
-            SUBMISSION_STATUS="submission_status",
-            SEED="seed",
-            GLOBAL_BATCH_SIZE="global_batch_size",
-            TRAIN_SAMPLES="train_samples",
-            EVAL_SAMPLES="eval_samples",
-            GRADIENT_ACCUMULATION_STEPS="gradient_accumulation_steps",
-            OPT_NAME="opt_name",
-            OPT_BASE_LR="opt_base_lr",
-            EVAL_ACCURACY="eval_accuracy",
-            EVAL_START="eval_start",
-            EVAL_STOP="eval_stop",
-            EPOCH_START="epoch_start",
-            BLOCK_START="block_start",
-            BLOCK_STOP="block_stop",
-        )
-        mock_mlperf_pkg = MagicMock()
-        mock_mlperf_pkg.mllog = mock_mllog
-        monkeypatch.setitem(__import__("sys").modules, "mlperf_logging", mock_mlperf_pkg)
-        monkeypatch.setitem(__import__("sys").modules, "mlperf_logging.mllog", mock_mllog)
+        _silence_log_rank_0(monkeypatch)
+        _install_mock_mllog(monkeypatch)
 
         from primus.backends.megatron.patches.mlperf_logging_patches import (
             patch_mlperf_logging,
@@ -258,194 +385,357 @@ class TestLoggingPatchMonkeyPatching:
         assert mt.training_log is first_tl
         assert mt.evaluate_and_print_results is first_eval
 
+    def test_rank_zero_writes_the_log_to_a_file(self, monkeypatch, tmp_path):
+        """The submitted artifact is a file, not whatever landed on stdout."""
+        _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        mock_mllog, _ = _install_mock_mllog(monkeypatch)
 
-class TestTrainingLogFirstCall:
-    """Verify INIT_STOP + RUN_START fire on first post-warmup training_log."""
-
-    def test_first_call_emits_init_stop_run_start(self, monkeypatch):
-        mt, args = _install_fake_megatron(monkeypatch)
-
-        monkeypatch.setattr(
-            "primus.backends.megatron.patches.mlperf_logging_patches.log_rank_0",
-            lambda *a, **k: None,
-        )
-
-        emitted_events = []
-
-        mock_mllogger = MagicMock()
-        mock_constants = SimpleNamespace(
-            INIT_START="init_start",
-            INIT_STOP="init_stop",
-            RUN_START="run_start",
-            RUN_STOP="run_stop",
-            SUBMISSION_BENCHMARK="submission_benchmark",
-            SUBMISSION_ORG="submission_org",
-            SUBMISSION_DIVISION="submission_division",
-            SUBMISSION_PLATFORM="submission_platform",
-            SUBMISSION_STATUS="submission_status",
-            SEED="seed",
-            GLOBAL_BATCH_SIZE="global_batch_size",
-            TRAIN_SAMPLES="train_samples",
-            EVAL_SAMPLES="eval_samples",
-            GRADIENT_ACCUMULATION_STEPS="gradient_accumulation_steps",
-            OPT_NAME="opt_name",
-            OPT_BASE_LR="opt_base_lr",
-            EVAL_ACCURACY="eval_accuracy",
-            EVAL_START="eval_start",
-            EVAL_STOP="eval_stop",
-            EPOCH_START="epoch_start",
-            BLOCK_START="block_start",
-            BLOCK_STOP="block_stop",
-        )
-
-        def track_start(key, value=None, metadata=None):
-            emitted_events.append(("start", key))
-
-        def track_end(key, value=None, metadata=None):
-            emitted_events.append(("end", key))
-
-        def track_event(key, value=None, metadata=None):
-            emitted_events.append(("event", key))
-
-        mock_mllogger.start = track_start
-        mock_mllogger.end = track_end
-        mock_mllogger.event = track_event
-
-        mock_mllog_module = MagicMock()
-        mock_mllog_module.get_mllogger.return_value = mock_mllogger
-        mock_mllog_module.constants = mock_constants
-
-        # Wire the top-level mlperf_logging mock so that
-        # `from mlperf_logging import mllog` resolves correctly
-        mock_mlperf_pkg = MagicMock()
-        mock_mlperf_pkg.mllog = mock_mllog_module
-
-        import sys as _sys
-
-        monkeypatch.setitem(_sys.modules, "mlperf_logging", mock_mlperf_pkg)
-        monkeypatch.setitem(_sys.modules, "mlperf_logging.mllog", mock_mllog_module)
-        monkeypatch.setenv("RANK", "0")
+        output = tmp_path / "result_3.txt"
+        monkeypatch.setenv("MLLOG_OUTPUT_FILE", str(output))
 
         from primus.backends.megatron.patches.mlperf_logging_patches import (
             patch_mlperf_logging,
         )
 
-        ctx = _make_ctx(mlperf_mode=True, log_interval=1)
-        patch_mlperf_logging(ctx)
+        patch_mlperf_logging(_make_ctx(mlperf_mode=True))
 
-        emitted_events.clear()
+        mock_mllog.config.assert_called_once()
+        assert mock_mllog.config.call_args.kwargs["filename"] == str(output)
 
-        # First call should emit INIT_STOP + RUN_START
-        mt.training_log({"loss": 0.5}, {}, 1e-4, 1, 1.0, False, False, 0.0, None, 0, None)
+    def test_missing_output_file_fails_startup(self, monkeypatch):
+        _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        _install_mock_mllog(monkeypatch)
+        monkeypatch.delenv("MLLOG_OUTPUT_FILE", raising=False)
 
-        event_keys = [e[1] for e in emitted_events]
-        assert "init_stop" in event_keys, f"INIT_STOP not emitted. Events: {emitted_events}"
-        assert "run_start" in event_keys, f"RUN_START not emitted. Events: {emitted_events}"
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_logging,
+        )
 
-        init_stop_idx = event_keys.index("init_stop")
-        run_start_idx = event_keys.index("run_start")
-        assert init_stop_idx < run_start_idx
-
-        # Second call should NOT emit INIT_STOP/RUN_START again
-        emitted_events.clear()
-        mt.training_log({"loss": 0.4}, {}, 1e-4, 2, 1.0, False, False, 0.0, None, 0, None)
-
-        event_keys_2 = [e[1] for e in emitted_events]
-        assert "init_stop" not in event_keys_2
-        assert "run_start" not in event_keys_2
+        with pytest.raises(RuntimeError, match="MLLOG_OUTPUT_FILE"):
+            patch_mlperf_logging(_make_ctx(mlperf_mode=True))
 
 
 # ============================================================================
-# Level 3: Component tests
+# The measured-time boundary
+# ============================================================================
+
+
+class TestMeasuredTimeBoundary:
+    """run_start must precede every read of the real dataset."""
+
+    def test_transition_fires_before_the_data_iterators_are_built(self, monkeypatch):
+        mt, _ = _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        _, events = _install_mock_mllog(monkeypatch)
+
+        order = []
+        original_build = mt.build_train_valid_test_data_iterators
+        mt.build_train_valid_test_data_iterators = lambda *a, **k: (
+            order.append("build_data_iterators"),
+            original_build(*a, **k),
+        )[1]
+
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_logging,
+        )
+
+        patch_mlperf_logging(_make_ctx(mlperf_mode=True))
+        events.clear()
+
+        mt.build_train_valid_test_data_iterators(None)
+
+        keys = _keys(events)
+        assert "init_stop" in keys and "run_start" in keys
+        assert keys.index("init_stop") < keys.index("run_start")
+        # The wrapper records nothing itself, so the only way the dataset call
+        # can be ordered against the log is that it has not happened yet.
+        assert order == ["build_data_iterators"]
+
+    def test_transition_fires_once(self, monkeypatch):
+        """Virtual pipelining builds iterators per stage; the clock starts once."""
+        mt, _ = _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        _, events = _install_mock_mllog(monkeypatch)
+
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_logging,
+        )
+
+        patch_mlperf_logging(_make_ctx(mlperf_mode=True))
+        events.clear()
+
+        mt.build_train_valid_test_data_iterators(None)
+        mt.build_train_valid_test_data_iterators(None)
+
+        assert _keys(events).count("run_start") == 1
+
+    def test_pre_run_hooks_finish_before_the_clock_starts(self, monkeypatch):
+        """Warmup is initialization, so it belongs on the init side of run_start."""
+        mt, _ = _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        _, events = _install_mock_mllog(monkeypatch)
+
+        from primus.backends.megatron.patches import mlperf_boundary
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_logging,
+        )
+
+        patch_mlperf_logging(_make_ctx(mlperf_mode=True))
+        events.clear()
+
+        mlperf_boundary.register_pre_run_hook(
+            "fake_warmup", lambda: events.append(("hook", "warmup", None, None)), order=10
+        )
+
+        mt.build_train_valid_test_data_iterators(None)
+
+        keys = _keys(events)
+        assert keys.index("warmup") < keys.index("run_start")
+
+    def test_model_optimizer_and_forward_step_are_captured(self, monkeypatch):
+        """Warmup needs these, and nothing hands them to a before_train patch."""
+        mt, _ = _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        _install_mock_mllog(monkeypatch)
+
+        from primus.backends.megatron.patches import mlperf_boundary
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_logging,
+        )
+
+        patch_mlperf_logging(_make_ctx(mlperf_mode=True))
+
+        import megatron.training as megatron_training_pkg
+
+        def forward_step_func(*a, **k):
+            return None
+
+        megatron_training_pkg.pretrain(None, None, None, forward_step_func)
+        mt.setup_model_and_optimizer(None, None)
+
+        captured = mlperf_boundary.captured()
+        assert captured["forward_step_func"] is forward_step_func
+        assert captured["model"] == "model"
+        assert captured["optimizer"] == "optimizer"
+        assert captured["opt_param_scheduler"] == "scheduler"
+
+    def test_training_log_backstop_does_not_restart_the_clock(self, monkeypatch):
+        """The old first-training_log trigger stays, but must now be inert."""
+        mt, _ = _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        _, events = _install_mock_mllog(monkeypatch)
+
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_logging,
+        )
+
+        patch_mlperf_logging(_make_ctx(mlperf_mode=True, log_interval=1))
+        mt.build_train_valid_test_data_iterators(None)
+        events.clear()
+
+        mt.training_log({"loss": 0.5}, {}, 1e-4, 1, 1.0, False, False, 0.0, None, 0, None)
+
+        keys = _keys(events)
+        assert "init_stop" not in keys
+        assert "run_start" not in keys
+
+    def test_warmup_registers_at_the_boundary_in_mlperf_mode(self, monkeypatch):
+        mt, _ = _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+
+        from primus.backends.megatron.patches import mlperf_boundary
+        from primus.backends.megatron.patches.mlperf_warmup_patches import (
+            patch_mlperf_warmup,
+        )
+
+        original_train_step = mt.train_step
+        patch_mlperf_warmup(_make_ctx(mlperf_mode=True, warmup_train_steps=2))
+
+        assert mt.train_step is original_train_step, "warmup must not wrap train_step in MLPerf mode"
+        assert [name for _order, name, _fn in mlperf_boundary._HOOKS] == ["mlperf_warmup"]
+
+    def test_warmup_stays_on_train_step_outside_mlperf_mode(self, monkeypatch):
+        """Development recipes keep the behavior they were tuned against."""
+        mt, _ = _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+
+        from primus.backends.megatron.patches import mlperf_boundary
+        from primus.backends.megatron.patches.mlperf_warmup_patches import (
+            patch_mlperf_warmup,
+        )
+
+        patch_mlperf_warmup(_make_ctx(mlperf_mode=False, warmup_train_steps=2))
+
+        assert getattr(mt.train_step, "_primus_warmup_hook", False) is True
+        assert mlperf_boundary._HOOKS == []
+
+
+# ============================================================================
+# Run lifecycle
 # ============================================================================
 
 
 class TestConvergenceDetection:
     """Verify convergence detection in evaluate_and_print_results wrapper."""
 
-    def test_convergence_sets_train_iters(self, monkeypatch):
+    def _patch_with_eval_loss(self, monkeypatch, loss):
         mt, megatron_args = _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        _, events = _install_mock_mllog(monkeypatch)
 
-        monkeypatch.setattr(
-            "primus.backends.megatron.patches.mlperf_logging_patches.log_rank_0",
-            lambda *a, **k: None,
-        )
-
-        # Mock mlperf_logging — wire .mllog attribute on the top-level package
-        mock_mllogger = MagicMock()
-        mock_constants = SimpleNamespace(
-            INIT_START="init_start",
-            INIT_STOP="init_stop",
-            RUN_START="run_start",
-            RUN_STOP="run_stop",
-            SUBMISSION_BENCHMARK="submission_benchmark",
-            SUBMISSION_ORG="submission_org",
-            SUBMISSION_DIVISION="submission_division",
-            SUBMISSION_PLATFORM="submission_platform",
-            SUBMISSION_STATUS="submission_status",
-            SEED="seed",
-            GLOBAL_BATCH_SIZE="global_batch_size",
-            TRAIN_SAMPLES="train_samples",
-            EVAL_SAMPLES="eval_samples",
-            GRADIENT_ACCUMULATION_STEPS="gradient_accumulation_steps",
-            OPT_NAME="opt_name",
-            OPT_BASE_LR="opt_base_lr",
-            EVAL_ACCURACY="eval_accuracy",
-            EVAL_START="eval_start",
-            EVAL_STOP="eval_stop",
-            EPOCH_START="epoch_start",
-            BLOCK_START="block_start",
-            BLOCK_STOP="block_stop",
-        )
-        mock_mllogger.start = MagicMock()
-        mock_mllogger.end = MagicMock()
-        mock_mllogger.event = MagicMock()
-
-        mock_mllog_module = MagicMock()
-        mock_mllog_module.get_mllogger.return_value = mock_mllogger
-        mock_mllog_module.constants = mock_constants
-
-        mock_mlperf_pkg = MagicMock()
-        mock_mlperf_pkg.mllog = mock_mllog_module
-
-        import sys as _sys
-
-        monkeypatch.setitem(_sys.modules, "mlperf_logging", mock_mlperf_pkg)
-        monkeypatch.setitem(_sys.modules, "mlperf_logging.mllog", mock_mllog_module)
-        monkeypatch.setenv("RANK", "0")
-
-        # Set evaluate to return a loss below target BEFORE patching.
-        # Also make evaluate_and_print_results call evaluate() internally,
-        # mirroring real Megatron behavior so _captured_loss gets populated.
-        mt.evaluate = lambda *a, **k: ({"loss": 0.500},)
-
-        def fake_eval_and_print(*a, **k):
-            mt.evaluate(*a, **k)
-
-        mt.evaluate_and_print_results = fake_eval_and_print
+        mt.evaluate = lambda *a, **k: ({"loss": loss},)
+        mt.evaluate_and_print_results = lambda *a, **k: mt.evaluate(*a, **k)
 
         from primus.backends.megatron.patches.mlperf_logging_patches import (
             patch_mlperf_logging,
         )
 
-        target_val_loss = 0.586
         megatron_args.train_iters = 5000
+        patch_mlperf_logging(_make_ctx(mlperf_mode=True, target_val_loss=0.586))
+        mt.build_train_valid_test_data_iterators(None)
+        events.clear()
+        return mt, megatron_args, events
 
-        ctx = _make_ctx(mlperf_mode=True, target_val_loss=target_val_loss)
-        patch_mlperf_logging(ctx)
-
-        # Call eval at iteration 512
+    def _run_eval(self, mt, iteration):
         mt.evaluate_and_print_results(
-            "iteration 512",
+            f"iteration {iteration}",
             lambda: None,
             None,
             [MagicMock()],
-            512,
+            iteration,
             None,
             MagicMock(),
         )
 
+    def test_convergence_sets_train_iters(self, monkeypatch):
+        mt, megatron_args, _ = self._patch_with_eval_loss(monkeypatch, 0.500)
+        self._run_eval(mt, 512)
         assert megatron_args.train_iters == 512
+
+    def test_convergence_emits_a_successful_run_stop(self, monkeypatch):
+        mt, _, events = self._patch_with_eval_loss(monkeypatch, 0.500)
+        self._run_eval(mt, 512)
+
+        stops = [entry for entry in events if entry[1] == "run_stop"]
+        assert len(stops) == 1
+        assert stops[0][2] == "success"
+        assert stops[0][3]["status"] == "success"
+
+    def test_a_missed_target_reopens_the_block(self, monkeypatch):
+        """block_stop fires on entry to eval; training resuming needs a new block."""
+        mt, _, events = self._patch_with_eval_loss(monkeypatch, 0.900)
+        self._run_eval(mt, 512)
+
+        keys = _keys(events)
+        assert keys.index("block_stop") < keys.index("eval_start")
+        assert keys.index("eval_stop") < keys.index("block_start")
+        assert "run_stop" not in keys
+
+    def test_an_unreadable_loss_still_reopens_the_block(self, monkeypatch):
+        mt, _, events = self._patch_with_eval_loss(monkeypatch, 0.900)
+        mt.evaluate = lambda *a, **k: ({},)
+        events.clear()
+
+        self._run_eval(mt, 512)
+
+        assert "block_start" in _keys(events)
+
+
+class TestTerminalRunStop:
+    """A run that never converges still has to produce a parseable log."""
+
+    def _patch(self, monkeypatch):
+        mt, megatron_args = _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        _, events = _install_mock_mllog(monkeypatch)
+
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_logging,
+        )
+
+        patch_mlperf_logging(_make_ctx(mlperf_mode=True))
+        mt.build_train_valid_test_data_iterators(None)
+        events.clear()
+        return mt, megatron_args, events
+
+    def test_exhausted_run_emits_an_aborted_run_stop(self, monkeypatch):
+        mt, megatron_args, events = self._patch(monkeypatch)
+        megatron_args.curr_iteration = 5000
+
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_terminal_run_stop,
+        )
+
+        patch_mlperf_terminal_run_stop(_make_ctx(mlperf_mode=True))
+
+        stops = [entry for entry in events if entry[1] == "run_stop"]
+        assert len(stops) == 1
+        assert stops[0][2] == "aborted"
+        assert stops[0][3]["status"] == "aborted"
+        assert stops[0][3]["samples_count"] == 5000 * 512
+
+    def test_a_converged_run_is_not_stopped_twice(self, monkeypatch):
+        """run_stop is EXACTLY_ONE in the ruleset."""
+        mt, megatron_args, events = self._patch(monkeypatch)
+
+        mlperf_logger = mt._primus_mlperf_logger
+        mlperf_logger.log_run_stop(success=True, global_step=512)
+
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_terminal_run_stop,
+        )
+
+        patch_mlperf_terminal_run_stop(_make_ctx(mlperf_mode=True))
+
+        assert _keys(events).count("run_stop") == 1
+
+
+class TestHyperparameterRecords:
+    """The values the closed_flux1 ruleset pins exactly."""
+
+    def test_evaluation_frequency_is_reported_in_samples(self, monkeypatch):
+        """closed_flux1.yaml requires evaluation_frequency == 262144."""
+        _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        _, events = _install_mock_mllog(monkeypatch)
+
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_logging,
+        )
+
+        patch_mlperf_logging(_make_ctx(mlperf_mode=True, global_batch_size=512, eval_interval=512))
+
+        frequency = [entry for entry in events if entry[1] == "evaluation_frequency"]
+        assert len(frequency) == 1
+        assert frequency[0][2] == 262144
+
+    def test_config_filename_names_a_real_recipe(self, monkeypatch):
+        _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        _install_mock_mllog(monkeypatch)
+        monkeypatch.delenv("EXP", raising=False)
+
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_logging,
+        )
+
+        with pytest.raises(RuntimeError, match="EXP"):
+            patch_mlperf_logging(_make_ctx(mlperf_mode=True))
+
+    def test_cache_clear_is_reported_not_assumed(self, monkeypatch):
+        _install_fake_megatron(monkeypatch)
+        _silence_log_rank_0(monkeypatch)
+        _install_mock_mllog(monkeypatch)
+        monkeypatch.delenv("MLPERF_CLEAR_CACHES", raising=False)
+
+        from primus.backends.megatron.patches.mlperf_logging_patches import (
+            patch_mlperf_logging,
+        )
+
+        with pytest.raises(RuntimeError, match="MLPERF_CLEAR_CACHES"):
+            patch_mlperf_logging(_make_ctx(mlperf_mode=True))
 
 
 # ============================================================================

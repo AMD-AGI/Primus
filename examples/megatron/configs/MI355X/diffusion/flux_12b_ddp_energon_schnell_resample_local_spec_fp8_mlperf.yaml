@@ -73,9 +73,29 @@ modules:
       max_samples_per_sequence: null
 
       # Training iterations
-      train_iters: 5000
+      #
+      # This is a safety cap, not a target: the run stops at the quality
+      # threshold, and reaching it is the result. The reference convergence
+      # points for flux1 at GBS 512 (mlperf_logging rcp_checker
+      # training_6.0.0/rcps_flux1.json, 20 NVIDIA BF16 runs) span 7077888 to
+      # 7602176 samples, i.e. 13824 to 14848 steps. The previous 5000 steps
+      # was 2560000 samples -- roughly a third of the way -- so every run
+      # exhausted its budget below target and no run could ever have counted.
+      # 16000 steps (8192000 samples) clears the slowest reference run with
+      # margin for a run that converges later than the reference spread.
+      train_iters: 16000
       eval_interval: 512
-      eval_iters: 10
+      # Cover the whole MLPerf validation set. eval_iters is derived from this
+      # (29696 / 512 = 58); setting both is rejected. The previous eval_iters of
+      # 10 read 5120 samples, and even at 58 the training num_workers of 16
+      # would have left 1920 of them unread, so val_num_workers is pinned to 0.
+      eval_samples: 29696
+      val_num_workers: 0
+      # MLPerf assigns each val image one fixed timestep, carried in the Arrow
+      # 'timestep' column. Requires a val split ingested with that column; shards
+      # ingested earlier carry {"key": ...} only and will now fail loudly rather
+      # than silently fall back to injecting t = index % 8.
+      eval_timestep_source: dataset
       log_interval: 10
       save_interval: 10000
 
@@ -104,7 +124,9 @@ modules:
 
       # Learning rate scheduler (warmup-hold, no decay)
       lr_warmup_iters: 1600
-      lr_decay_iters: 4000
+      # Inert while lr_decay_style is constant; kept equal to the budget so
+      # it cannot be misread as a decay that ends a quarter of the way in.
+      lr_decay_iters: 16000
       lr_decay_style: constant
 
       # ==========================================
@@ -185,7 +207,9 @@ modules:
       use_turbo_attention: true
       use_dual_fp8_output_projection: false
 
-      seed: 42
+      # Each run in a submission campaign needs its own seed, supplied from
+      # outside so the value in the log is the value the launcher chose.
+      seed: ${PRIMUS_SEED:42}
       # MLPerf-aligned per-step CUDA RNG reseed (defaults off elsewhere; MLPerf
       # reproduction must opt in for run-to-run determinism).
       per_step_rng_reseed: true

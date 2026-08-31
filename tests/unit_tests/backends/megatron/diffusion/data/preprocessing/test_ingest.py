@@ -11,18 +11,127 @@ Covers:
 - Sample offset accumulation
 - Arrow file cleanup after conversion
 - Skip-and-log for failed downloads and conversions
+- _arrow_to_tar: sidecar metadata and tensor byte fidelity
 """
 
 import json
+import tarfile
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pyarrow as pa
+
 from primus.backends.megatron.data.diffusion.preprocessing.pipelines.ingest import (
     StreamingIngestPipeline,
+    _arrow_to_tar,
 )
 
 _INGEST_MODULE = "primus.backends.megatron.data.diffusion.preprocessing.pipelines.ingest"
+
+# Tensor columns as declared by both published MLPerf Flux splits. The val
+# split (flux-1-coco-preprocessed) adds a scalar int32 "timestep"; the train
+# split (flux-1-cc12m-preprocessed) does not. Both shapes are covered below so
+# the val-only field cannot regress the 4,762-shard train ingest.
+_TENSOR_FEATURES = ("t5_encodings", "clip_encodings", "mean", "logvar")
+
+
+def _write_arrow(path, keys=None, timesteps=None, num_rows=None):
+    """Write a minimal Arrow IPC stream file in the upstream val/train schema.
+
+    Tensor payloads are short unique byte strings rather than real bf16 buffers:
+    _arrow_to_tar passes them through opaquely, so their content only needs to
+    be distinguishable enough to detect mis-ordering. Pass keys=None to emit a
+    table with no __key__ column.
+    """
+    num_rows = len(keys) if keys is not None else num_rows
+    labels = keys if keys is not None else [str(i) for i in range(num_rows)]
+
+    columns = {}
+    if keys is not None:
+        columns["__key__"] = pa.array(keys, pa.string())
+    for col in _TENSOR_FEATURES:
+        columns[col] = pa.array([f"{col}:{label}".encode() for label in labels], pa.binary())
+    if timesteps is not None:
+        columns["timestep"] = pa.array(timesteps, pa.int32())
+
+    table = pa.table(columns)
+    with pa.ipc.new_stream(str(path), table.schema) as writer:
+        writer.write_table(table)
+    return table
+
+
+def _read_tar(tar_path):
+    """Return {member_name: bytes} for every entry in a tar."""
+    with tarfile.open(str(tar_path), "r") as tar:
+        return {m.name: tar.extractfile(m).read() for m in tar.getmembers()}
+
+
+class TestArrowToTarTimestep:
+    """Direct tests of _arrow_to_tar, which the pipeline tests above mock out.
+
+    The val split carries a per-sample timestep that MLPerf validation is
+    defined in terms of (sigma = t / 8). Dropping it silently downgrades
+    evaluation to a positional fallback, so these assert it survives ingest.
+    """
+
+    def test_val_schema_carries_timestep_into_sidecar(self, tmp_path):
+        keys = ["227049", "172952", "183786", "502163"]
+        # Deliberately non-monotonic and with a repeat, so an arange-style or
+        # row-index-derived value cannot satisfy this assertion by coincidence.
+        timesteps = [3, 0, 7, 3]
+        _write_arrow(tmp_path / "in.arrow", keys, timesteps)
+
+        num_rows = _arrow_to_tar(tmp_path / "in.arrow", tmp_path / "out.tar", 0)
+
+        assert num_rows == len(keys)
+        members = _read_tar(tmp_path / "out.tar")
+        for key, expected_t in zip(keys, timesteps):
+            sidecar = json.loads(members[f"{key}.json"])
+            assert sidecar == {"key": key, "timestep": expected_t}
+
+    def test_timestep_is_a_plain_int(self, tmp_path):
+        """int32 must land as a JSON number, not a nested pyarrow scalar repr."""
+        _write_arrow(tmp_path / "in.arrow", ["a"], [5])
+
+        _arrow_to_tar(tmp_path / "in.arrow", tmp_path / "out.tar", 0)
+
+        sidecar = json.loads(_read_tar(tmp_path / "out.tar")["a.json"])
+        assert isinstance(sidecar["timestep"], int)
+        assert not isinstance(sidecar["timestep"], bool)
+
+    def test_train_schema_without_timestep_is_unaffected(self, tmp_path):
+        """The train split has no timestep column; ingest must not invent one."""
+        keys = ["k0", "k1"]
+        _write_arrow(tmp_path / "in.arrow", keys, timesteps=None)
+
+        _arrow_to_tar(tmp_path / "in.arrow", tmp_path / "out.tar", 0)
+
+        members = _read_tar(tmp_path / "out.tar")
+        for key in keys:
+            assert json.loads(members[f"{key}.json"]) == {"key": key}
+
+    def test_tensor_bytes_pass_through_unchanged(self, tmp_path):
+        """Payloads must survive byte-for-byte and stay matched to their key."""
+        keys = ["227049", "172952"]
+        table = _write_arrow(tmp_path / "in.arrow", keys, [1, 6])
+
+        _arrow_to_tar(tmp_path / "in.arrow", tmp_path / "out.tar", 0)
+
+        members = _read_tar(tmp_path / "out.tar")
+        for row, key in enumerate(keys):
+            for col, ext in zip(_TENSOR_FEATURES, ("t5.bytes", "clip.bytes", "mean.bytes", "logvar.bytes")):
+                assert members[f"{key}.{ext}"] == table.column(col)[row].as_py()
+
+    def test_missing_key_column_falls_back_to_offset_naming(self, tmp_path):
+        """Without __key__, names are global-offset based and still get timesteps."""
+        _write_arrow(tmp_path / "in.arrow", keys=None, timesteps=[2, 4], num_rows=2)
+
+        _arrow_to_tar(tmp_path / "in.arrow", tmp_path / "out.tar", 100)
+
+        members = _read_tar(tmp_path / "out.tar")
+        assert json.loads(members["00000100.json"]) == {"key": "00000100", "timestep": 2}
+        assert json.loads(members["00000101.json"]) == {"key": "00000101", "timestep": 4}
 
 
 class TestStreamingIngestPipeline:
@@ -64,6 +173,38 @@ class TestStreamingIngestPipeline:
         assert results["shards_created"] == 3
         assert mock_download.call_count == 3
         assert mock_convert.call_count == 3
+
+    @patch(f"{_INGEST_MODULE}._arrow_to_tar")
+    @patch(f"{_INGEST_MODULE}.download_with_backoff")
+    @patch(f"{_INGEST_MODULE}.fetch_manifest")
+    def test_manifest_is_filtered_to_arrow_files(self, mock_manifest, mock_download, mock_convert):
+        """The pipeline asks the manifest for Arrow files only.
+
+        MLCommons manifests list dataset_info.json and state.json alongside the
+        data. Converting one of those fails and reports the whole run as having
+        failed files; each would also consume a max_files slot, and one sorting
+        ahead of a data file would shift every shard index after it.
+        """
+        mock_manifest.return_value = ("https://base.url", [("md5_0", "data-00000.arrow")])
+        mock_convert.return_value = 100
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline = StreamingIngestPipeline(
+                manifest_url="http://manifest.uri",
+                input_dir=f"{tmp}/arrows",
+                output_dir=f"{tmp}/output",
+                split_name="val",
+            )
+
+            def fake_download(url, dest, **kwargs):
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(b"fake")
+
+            mock_download.side_effect = fake_download
+
+            pipeline.run()
+
+        assert mock_manifest.call_args.kwargs["suffix_filter"] == ".arrow"
 
     @patch(f"{_INGEST_MODULE}._arrow_to_tar")
     @patch(f"{_INGEST_MODULE}.download_with_backoff")

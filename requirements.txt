@@ -16,7 +16,7 @@ pyrsmi
 plotext
 pulp
 hip-python
-mlperf-logging @ git+https://github.com/mlcommons/logging.git@6.0.0-rc5
+mlperf-logging @ git+https://github.com/mlcommons/logging.git@6.0.0-rc6
 mlperf-common @ git+https://github.com/NVIDIA/mlperf-common.git@b86d175a05849d650a8ff69c1e2c37b9f4e61d51
 megatron-energon==7.3.2
 webdataset==1.0.2

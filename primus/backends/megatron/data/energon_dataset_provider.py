@@ -14,7 +14,6 @@ Reference:
 from typing import Any, Callable, List, Optional, Tuple
 
 from megatron.core import parallel_state
-from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.parallel_state import (
     get_pipeline_model_parallel_rank,
     get_pipeline_model_parallel_world_size,
@@ -32,6 +31,12 @@ from megatron.energon import (
 
 from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
 from primus.backends.megatron.data.dataset_provider import DatasetProvider
+from primus.backends.megatron.training.eval_budget import (
+    EvalCoverageError,
+    assert_val_worker_divisibility,
+    get_eval_num_microbatches,
+    get_val_num_workers,
+)
 from primus.core.utils.module_utils import log_rank_0
 
 
@@ -93,53 +98,93 @@ class EnergonDatasetProvider(DatasetProvider):
         task_encoder = self.task_encoder_factory()
         log_rank_0(f"Created task encoder: {type(task_encoder).__name__}")
 
-        # Create worker config for distributed loading
+        # Create worker config for distributed loading. Validation gets its own,
+        # because the worker count decides how many samples an eval actually
+        # reads (see eval_budget) and the training value is rarely a safe one.
         worker_config = self._create_worker_config(args)
+        val_worker_config = self._create_worker_config(args, num_workers=get_val_num_workers(args))
 
         # Get data path
         data_path = self._get_data_path(args)
 
-        # Create training dataset using Energon
-        log_rank_0(f"Creating training dataset from: {data_path}")
-        train_dataset = get_train_dataset(
-            data_path,
-            batch_size=args.micro_batch_size,
-            task_encoder=task_encoder,
-            worker_config=worker_config,
-            virtual_epoch_length=getattr(args, "virtual_epoch_length", 1_000_000_000),
-            max_samples_per_sequence=getattr(args, "max_samples_per_sequence", 100),
-            shuffle_buffer_size=getattr(args, "shuffle_buffer_size", None),
-            handler=lambda *args: None,  # Error handler (print errors but continue)
-        )
-
-        # Wrap in savable loader for checkpointing support
         prefetch_factor = getattr(args, "prefetch_factor", 2)
         log_rank_0(f"Dataloader prefetch_factor: {prefetch_factor}")
-        train_dataloader = get_savable_loader(
-            train_dataset, worker_config=worker_config, prefetch_factor=prefetch_factor
-        )
-        train_dataloader = MegatronDataloaderWrapper(train_dataloader)
-        log_rank_0("Created training dataloader")
+
+        # Megatron drops the train iterator entirely under --skip-train, so
+        # building one is wasted work. It is also fatal for a dataset that
+        # holds only a validation split, which is a legitimate shape for an
+        # evaluation-only run.
+        if getattr(args, "skip_train", False):
+            train_dataloader = None
+            log_rank_0("skip_train is set: not creating a training dataset")
+        else:
+            log_rank_0(f"Creating training dataset from: {data_path}")
+            train_dataset = get_train_dataset(
+                data_path,
+                batch_size=args.micro_batch_size,
+                task_encoder=task_encoder,
+                worker_config=worker_config,
+                virtual_epoch_length=getattr(args, "virtual_epoch_length", 1_000_000_000),
+                max_samples_per_sequence=getattr(args, "max_samples_per_sequence", 100),
+                shuffle_buffer_size=getattr(args, "shuffle_buffer_size", None),
+                handler=lambda *args: None,  # Error handler (print errors but continue)
+            )
+
+            # Wrap in savable loader for checkpointing support
+            train_dataloader = get_savable_loader(
+                train_dataset, worker_config=worker_config, prefetch_factor=prefetch_factor
+            )
+            train_dataloader = MegatronDataloaderWrapper(train_dataloader)
+            log_rank_0("Created training dataloader")
+
+        # The patch that turns eval_samples into eval_iters runs in build_args,
+        # where a failure is logged and swallowed rather than raised. If it did
+        # not take effect, eval_iters is still 0 and the job would run to
+        # completion, exit 0, and report no validation at all -- while the
+        # recipe plainly asked for a specific number of samples. Refuse that.
+        if getattr(args, "eval_samples", None) and not args.eval_iters:
+            raise EvalCoverageError(
+                f"eval_samples={args.eval_samples} is configured but eval_iters is 0, "
+                f"so no evaluation would run. The megatron.args.eval_samples patch "
+                f"that derives one from the other did not take effect; look for its "
+                f"failure in the build_args phase of the log."
+            )
 
         # Create validation dataloaders if evaluation is enabled
         valid_dataloaders = None
         if args.eval_iters > 0:
+            # Assert before construction: a shape that cannot read every sample
+            # should fail here rather than silently report a short evaluation.
+            eval_num_microbatches = get_eval_num_microbatches(args)
+            eval_samples = (
+                args.eval_iters
+                * eval_num_microbatches
+                * args.micro_batch_size
+                * (parallel_state.get_data_parallel_world_size())
+            )
+            assert_val_worker_divisibility(args, eval_samples)
+            log_rank_0(
+                f"Validation budget: {args.eval_iters} iterations x "
+                f"{eval_num_microbatches} microbatches x {args.micro_batch_size} "
+                f"= {eval_samples} samples, val_num_workers={get_val_num_workers(args)}"
+            )
+
             try:
                 log_rank_0("Creating validation dataloaders...")
                 val_datasets = get_val_datasets(
                     data_path,
                     batch_size=args.micro_batch_size,
                     task_encoder=task_encoder,
-                    worker_config=worker_config,
+                    worker_config=val_worker_config,
                     handler=lambda *args: None,
                 )
 
                 # Limit validation datasets to eval_iters * num_microbatches
                 val_datasets_limited = [
                     LimitDataset(
-                        RepeatDataset(val_ds, worker_config=worker_config),
-                        length=args.eval_iters * get_num_microbatches(),
-                        worker_config=worker_config,
+                        RepeatDataset(val_ds, worker_config=val_worker_config),
+                        length=args.eval_iters * eval_num_microbatches,
+                        worker_config=val_worker_config,
                         reset_after_epoch=True,
                     )
                     for val_ds, _src_ds in val_datasets
@@ -147,7 +192,7 @@ class EnergonDatasetProvider(DatasetProvider):
 
                 valid_dataloaders = [
                     MegatronDataloaderWrapper(
-                        get_loader(valid_ds, worker_config=worker_config, prefetch_factor=prefetch_factor)
+                        get_loader(valid_ds, worker_config=val_worker_config, prefetch_factor=prefetch_factor)
                     )
                     for valid_ds in val_datasets_limited
                 ]
@@ -209,20 +254,28 @@ class EnergonDatasetProvider(DatasetProvider):
 
         return is_first_tp_rank and is_valid_pp_stage
 
-    def _create_worker_config(self, args) -> WorkerConfig:
+    def _create_worker_config(self, args, num_workers: Optional[int] = None) -> WorkerConfig:
         """
         Create Energon WorkerConfig for distributed loading.
 
         WorkerConfig tells Energon how to shard data across workers.
+
+        Args:
+            num_workers: Override the worker count. Validation passes its own so
+                it does not inherit the training value, which controls how many
+                samples an evaluation reads (see eval_budget).
         """
         rank = parallel_state.get_data_parallel_rank()
         world_size = parallel_state.get_data_parallel_world_size()
         data_parallel_group = parallel_state.get_data_parallel_group()
 
+        if num_workers is None:
+            num_workers = getattr(args, "num_workers", 4)
+
         return WorkerConfig(
             rank=rank,
             world_size=world_size,
-            num_workers=getattr(args, "num_workers", 4),
+            num_workers=num_workers,
             data_parallel_group=data_parallel_group,
         )
 

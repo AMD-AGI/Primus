@@ -25,6 +25,88 @@ from primus.core.utils.module_utils import log_rank_0
 
 logger = logging.getLogger(__name__)
 
+_PRECISION_DISCLOSURE_ENV = {
+    "lowest_numerical_precision_in_linear": "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR",
+    "lowest_numerical_precision_in_attn": "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN",
+    "lowest_numerical_precision_in_comm": "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM",
+}
+
+# The compliance checker rejects any lowest_numerical_precision_* value outside
+# this set (training_6.0.0/common.yaml). mxfp6 is deliberately absent: adding it
+# is the Training WG request tracked separately, and until it lands a run that
+# discloses mxfp6 produces a structurally valid log that the checker refuses.
+# Emitting anything else would misdescribe the run, so the value is passed
+# through and the mismatch is surfaced loudly rather than silently corrected.
+_CHECKER_PRECISION_VALUES = frozenset(
+    {
+        "fp64",
+        "fp32",
+        "tf32",
+        "fp16",
+        "fp8",
+        "nvfp4",
+        "mxfp4",
+        "bfloat16",
+        "Graphcore FLOAT 16.16",
+        "int8",
+        "uint8",
+        "int4",
+        "uint4",
+    }
+)
+
+# Identity records that decide which division the log is judged in. None may
+# fall back to a built-in guess.
+_SUBMISSION_IDENTITY_ENV = {
+    "submission_org": "MLLOG_SUBMISSION_ORG",
+    "submission_division": "MLLOG_SUBMISSION_DIVISION",
+    "submission_platform": "MLLOG_SUBMISSION_PLATFORM",
+}
+
+
+def _is_rank_zero() -> bool:
+    return int(os.environ.get("RANK", "0")) == 0
+
+
+def _require_env(name: str, purpose: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"MLPerf mode requires {name} to be set explicitly ({purpose}).")
+    return value
+
+
+def _precision_disclosures_from_env() -> dict[str, str]:
+    """Return the mandatory precision disclosures without guessing policy names."""
+    values = {
+        key: os.environ.get(environment_name, "").strip()
+        for key, environment_name in _PRECISION_DISCLOSURE_ENV.items()
+    }
+    missing = [_PRECISION_DISCLOSURE_ENV[key] for key, value in values.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "MLPerf mode requires explicit precision disclosures; missing " + ", ".join(missing)
+        )
+    unaccepted = sorted({value for value in values.values() if value not in _CHECKER_PRECISION_VALUES})
+    if unaccepted:
+        logger.warning(
+            "Precision disclosure(s) %s are not in the compliance checker's accepted set; "
+            "the resulting log will be rejected until the format is approved upstream.",
+            ", ".join(unaccepted),
+        )
+    return values
+
+
+def _submission_identity_from_env() -> dict[str, str]:
+    """Return org/division/platform, refusing to default any of them."""
+    values = {
+        key: _require_env(environment_name, f"MLLOG {key}")
+        for key, environment_name in _SUBMISSION_IDENTITY_ENV.items()
+    }
+    division = values["submission_division"]
+    if division not in ("closed", "open"):
+        raise RuntimeError(f"MLLOG_SUBMISSION_DIVISION must be 'closed' or 'open', got {division!r}.")
+    return values
+
 
 def _mlperf_logging_enabled(ctx: PatchContext) -> bool:
     args = get_args(ctx)
@@ -94,6 +176,21 @@ class FluxMLPerfLogger:
         self.log_every_n_steps = log_every_n_steps
         self.timer = ThroughputTimer(global_batch_size)
         self._converged = False
+        self._run_started = False
+        self._run_stopped = False
+
+        # A submission result is a file, not console scrollback: stdout is
+        # interleaved with every other rank's output and with framework noise
+        # that the parser then has to be trusted to ignore. Rank zero writes the
+        # log itself so the artifact the checker reads is the artifact produced.
+        if _is_rank_zero():
+            mllog.config(
+                filename=_require_env("MLLOG_OUTPUT_FILE", "the path this run's result_*.txt is written to"),
+                # Frames from mllogger.event() back to the FluxMLPerfLogger
+                # method that called it, so every record reports a stable
+                # origin line. The seed checker compares those across runs.
+                default_stack_offset=int(os.environ.get("MLLOG_STACK_OFFSET", "3")),
+            )
 
         self.profiler = os.getenv("PROFILER", "")
         self.profiler_warmup_steps = int(os.getenv("PROF_WARMUP_STEPS", "0"))
@@ -121,38 +218,69 @@ class FluxMLPerfLogger:
         self._mllogger.end(key=key, value=value, metadata=metadata)
 
     def log_init(self, seed: int):
-        if int(os.environ.get("RANK", "0")) == 0:
-            self._start(key=self._constants.INIT_START)
-            self._event(key=self._constants.SUBMISSION_BENCHMARK, value="flux1")
-            self._event(
-                key=self._constants.SUBMISSION_ORG,
-                value=os.environ.get("MLLOG_SUBMISSION_ORG", "AMD"),
-            )
-            self._event(
-                key=self._constants.SUBMISSION_DIVISION,
-                value=os.environ.get("MLLOG_SUBMISSION_DIVISION", "closed"),
-            )
-            self._event(
-                key=self._constants.SUBMISSION_PLATFORM,
-                value=os.environ.get("MLLOG_SUBMISSION_PLATFORM", "MI355X"),
-            )
-            self._event(key=self._constants.SUBMISSION_STATUS, value="onprem")
-            self._event(key="target_accuracy", value=self.target_val_loss)
-            self._event(key=self._constants.SEED, value=seed)
+        if not _is_rank_zero():
+            return
+        identity = _submission_identity_from_env()
+        # The launcher clears the page cache before it starts the container and
+        # reports what it did; defaulting this to false would let a run that
+        # never cleared claim a cold start.
+        clear_caches = (
+            _require_env("MLPERF_CLEAR_CACHES", "whether the launcher dropped caches before this run").lower()
+            == "true"
+        )
+        self._event(key="cache_clear", value=clear_caches)
+        self._start(key=self._constants.INIT_START)
+        self._event(key=self._constants.SUBMISSION_BENCHMARK, value="flux1")
+        self._event(key=self._constants.SUBMISSION_ORG, value=identity["submission_org"])
+        self._event(key=self._constants.SUBMISSION_DIVISION, value=identity["submission_division"])
+        self._event(key=self._constants.SUBMISSION_PLATFORM, value=identity["submission_platform"])
+        self._event(
+            key=self._constants.SUBMISSION_STATUS,
+            value=os.environ.get("MLLOG_SUBMISSION_STATUS", "onprem"),
+        )
+        self._event(key="target_accuracy", value=self.target_val_loss)
+        self._event(key=self._constants.SEED, value=seed)
 
     def log_hyperparams(self, args):
-        if int(os.environ.get("RANK", "0")) != 0:
+        if not _is_rank_zero():
             return
         self._event(key=self._constants.GLOBAL_BATCH_SIZE, value=self.gbs)
+        for key, value in _precision_disclosures_from_env().items():
+            self._event(key=key, value=value)
+        for key, value in (
+            ("tensor_parallelism", getattr(args, "tensor_model_parallel_size", 1)),
+            ("pipeline_parallelism", getattr(args, "pipeline_model_parallel_size", 1)),
+            ("context_parallelism", getattr(args, "context_parallel_size", 1)),
+            ("expert_parallelism", getattr(args, "expert_model_parallel_size", 1)),
+            ("micro_batch_size", self.mbs),
+            # Names the recipe a reviewer has to be able to find in the
+            # submission's code/ directory, so "unknown" is not an answer.
+            ("config_filename", _require_env("EXP", "the recipe this run was launched from")),
+        ):
+            self._event(key=key, value=value)
         self._event(
             key=self._constants.TRAIN_SAMPLES,
-            value=getattr(args, "train_samples", 1099776),
+            value=getattr(args, "train_samples", None) or 1099776,
         )
+        # EVAL_SAMPLES is emitted before any evaluation has run, so it can only
+        # ever state the configured budget. The check that the budget was
+        # actually read lives in the evaluation loop
+        # (evaluator._record_consumed_valid_samples), which raises rather than
+        # letting this number stand in for an unverified one.
+        eval_iters = getattr(args, "eval_iters", 0) or 0
         self._event(
             key=self._constants.EVAL_SAMPLES,
-            value=getattr(args, "eval_samples", 29696),
+            value=getattr(args, "eval_samples", None) or eval_iters * self.gbs,
         )
-        gas = max(self.gbs // self.mbs, 1)
+        # How often evaluation runs, in samples. Required by the MLPerf logging
+        # rules and previously absent; the constant name differs across
+        # mlperf_logging releases, so fall back to the literal key.
+        self._event(
+            key="evaluation_frequency",
+            value=getattr(args, "eval_interval", 0) * self.gbs,
+        )
+        data_parallel_size = getattr(args, "data_parallel_size", 1) or 1
+        gas = max(self.gbs // (self.mbs * data_parallel_size), 1)
         self._event(key=self._constants.GRADIENT_ACCUMULATION_STEPS, value=gas)
         self._event(key=self._constants.OPT_NAME, value="adamw")
         self._event(
@@ -175,13 +303,31 @@ class FluxMLPerfLogger:
             key="opt_adamw_weight_decay",
             value=getattr(args, "weight_decay", 0.1),
         )
+        self._event(
+            key="opt_learning_rate_warmup_steps",
+            value=getattr(args, "lr_warmup_iters", 0),
+        )
+        self._event(
+            key="opt_gradient_clip_norm",
+            value=getattr(args, "clip_grad", 1.0),
+        )
 
     def log_init_stop_run_start(self):
-        if int(os.environ.get("RANK", "0")) == 0:
+        if self._run_started:
+            return
+        self._run_started = True
+        if _is_rank_zero():
             self._end(key=self._constants.INIT_STOP)
             self._start(key=self._constants.RUN_START)
             self._start(key=self._constants.EPOCH_START, metadata={"epoch_num": 0})
-            self._start(key=self._constants.BLOCK_START, metadata={"first_epoch_num": 0})
+            self.log_block_start(0)
+
+    def log_block_start(self, global_step: int):
+        if _is_rank_zero():
+            self._start(
+                key=self._constants.BLOCK_START,
+                metadata={"samples_count": global_step * self.gbs},
+            )
 
     def on_train_batch_end(self, global_step: int, loss: float, lr: float):
         self.timer.mark_training_start()
@@ -189,7 +335,7 @@ class FluxMLPerfLogger:
 
         self._handle_profiler(global_step)
 
-        if int(os.environ.get("RANK", "0")) != 0:
+        if not _is_rank_zero():
             return
         if global_step % self.log_every_n_steps == 0:
             self._event(
@@ -203,10 +349,11 @@ class FluxMLPerfLogger:
             )
 
     def on_validation_start(self, global_step: int):
+        self.log_init_stop_run_start()
         self.timer.update_samples(global_step)
         self.timer.pause_for_eval()
 
-        if int(os.environ.get("RANK", "0")) == 0:
+        if _is_rank_zero():
             if global_step > 0:
                 throughput = self.timer.compute_throughput()
                 self._event(
@@ -219,14 +366,17 @@ class FluxMLPerfLogger:
                 )
             self._end(
                 key=self._constants.BLOCK_STOP,
-                metadata={"first_epoch_num": 0},
+                metadata={"samples_count": global_step * self.gbs},
             )
-            self._start(key=self._constants.EVAL_START, metadata={"epoch_num": 0})
+            self._start(
+                key=self._constants.EVAL_START,
+                metadata={"samples_count": global_step * self.gbs},
+            )
 
     def on_validation_end(self, global_step: int, val_loss: float):
         self.timer.resume_after_eval()
 
-        if int(os.environ.get("RANK", "0")) == 0:
+        if _is_rank_zero():
             self._event(
                 key=self._constants.EVAL_ACCURACY,
                 value=val_loss,
@@ -266,9 +416,14 @@ class FluxMLPerfLogger:
         return self._converged
 
     def log_run_stop(self, success: bool, global_step: int):
+        # run_stop is EXACTLY_ONE in the ruleset: a converged run that also hits
+        # the end-of-training path must not emit a second, contradictory record.
+        if self._run_stopped:
+            return
         if success:
             self._converged = True
-        if int(os.environ.get("RANK", "0")) == 0:
+        self._run_stopped = True
+        if _is_rank_zero():
             status = "success" if success else "aborted"
             self._end(
                 key=self._constants.RUN_STOP,
@@ -323,6 +478,7 @@ def patch_mlperf_logging(ctx: PatchContext):
     mbs = getattr(args, "micro_batch_size", 64)
     target_val_loss = getattr(args, "target_val_loss", 0.586)
     log_interval = getattr(args, "log_interval", 10)
+    eval_purge_memory = getattr(args, "eval_purge_memory", False)
 
     mlperf_logger = FluxMLPerfLogger(
         global_batch_size=gbs,
@@ -333,6 +489,20 @@ def patch_mlperf_logging(ctx: PatchContext):
 
     mlperf_logger.log_init(seed=seed)
     mlperf_logger.log_hyperparams(args)
+
+    # The clock has to start before Megatron opens the dataset, which happens
+    # inside pretrain() after this phase has already run. mlperf_boundary
+    # creates that seam; the call below is what it fires there. The
+    # first-training_log path further down stays as a backstop and turns into a
+    # no-op once this has run.
+    from primus.backends.megatron.patches import mlperf_boundary
+
+    mlperf_boundary.set_transition(mlperf_logger.log_init_stop_run_start)
+    mlperf_boundary.install()
+
+    # Reachable from the after_train phase, which closes out runs that finish
+    # their step budget without converging.
+    megatron_training._primus_mlperf_logger = mlperf_logger
 
     # --- Suppress Megatron's built-in logging ---
     megatron_training.print_rank_last = lambda *a, **k: None
@@ -404,54 +574,40 @@ def patch_mlperf_logging(ctx: PatchContext):
 
         megatron_training.evaluate = _capture_wrapper
         try:
-            import gc
-
             result = _orig_eval(*eval_args, **eval_kwargs)
-            gc.collect()
         finally:
             megatron_training.evaluate = _current_eval
 
-        try:
+        # Reclaiming memory after every eval costs a full GC pause plus an
+        # allocator flush inside the measured window, and the allocator has to
+        # re-grow its pools on the next training step. Off by default; set
+        # eval_purge_memory to re-enable if a run proves it needs the headroom.
+        if eval_purge_memory:
+            import gc
+
             import torch
 
+            gc.collect()
             torch.cuda.empty_cache()
-        except Exception:
-            pass
 
         val_loss = _extract_val_loss(_loss_capture)
         if val_loss is not None:
-            # Megatron's `evaluate()` (training.py:3178-3180) divides the
-            # per-rank accumulated loss locally and does NOT all-reduce
-            # across the data-parallel group — the result is intended for
-            # `print_rank_last` / TensorBoard which only read on a single
-            # rank.  We must reduce here so every rank evaluates the same
-            # global validation loss against `target_val_loss`; otherwise
-            # ranks can disagree on the early-stop branch and the
-            # divergent `args.train_iters` mutation below desyncs
-            # collective ordering at the next training step, producing a
-            # NCCL watchdog deadlock (observed on FLUX 12B MLPerf at
-            # step 2560 when val_loss landed near target).
-            import torch
-            import torch.distributed as dist
-
-            if dist.is_initialized():
-                try:
-                    from megatron.core import parallel_state as mpu
-
-                    dp_group = mpu.get_data_parallel_group()
-                except Exception:
-                    dp_group = None
-                _vl = torch.tensor(val_loss, dtype=torch.float64, device="cuda")
-                dist.all_reduce(_vl, op=dist.ReduceOp.AVG, group=dp_group)
-                val_loss = _vl.item()
-
+            # primus_evaluate already reduces over the data-parallel group and
+            # returns a value identical on every rank, which is what the
+            # early-stop comparison below requires: if ranks disagree near the
+            # target, one can exit train() alone while the others keep training,
+            # desyncing collectives into an NCCL watchdog deadlock (observed on
+            # FLUX 12B MLPerf at step 2560). A further ReduceOp.AVG here would
+            # average identical values -- a no-op costing one collective and one
+            # host sync -- so it is deliberately absent.
             mlperf_logger.on_validation_end(iteration, val_loss)
             log_rank_0(
                 f"[MLPerf] Validation loss at step {iteration}: {val_loss:.6f} "
                 f"(target: {target_val_loss:.6f})"
             )
 
-            if val_loss <= target_val_loss:
+            converged = val_loss <= target_val_loss
+            if converged:
                 log_rank_0(
                     f"[MLPerf] Convergence reached! val_loss={val_loss:.6f} "
                     f"<= target={target_val_loss:.6f}"
@@ -463,14 +619,15 @@ def patch_mlperf_logging(ctx: PatchContext):
                     megatron_get_args().train_iters = iteration
                 except Exception:
                     logger.warning("Could not set args.train_iters for early stop")
-            else:
-                if int(os.environ.get("RANK", "0")) == 0:
-                    mlperf_logger._start(
-                        key=mlperf_logger._constants.BLOCK_START,
-                        metadata={"first_epoch_num": 0},
-                    )
         else:
+            converged = False
             logger.warning("Could not extract validation loss from evaluate result")
+
+        # Training resumes unless this eval ended the run, so the block that
+        # on_validation_start closed has to be reopened -- including on the
+        # path where the loss could not be read and training carries on.
+        if not converged:
+            mlperf_logger.log_block_start(iteration)
 
         return result
 
@@ -483,3 +640,39 @@ def patch_mlperf_logging(ctx: PatchContext):
         f"[Patch:mlperf_logging] Installed MLPerf logging (gbs={gbs}, "
         f"target_val_loss={target_val_loss}, log_interval={log_interval})"
     )
+
+
+@register_patch(
+    "megatron.training.mlperf_run_stop",
+    backend="megatron",
+    phase="after_train",
+    description="Close out a run that ended without reaching the quality target",
+    condition=_mlperf_logging_enabled,
+    priority=15,
+)
+def patch_mlperf_terminal_run_stop(ctx: PatchContext):
+    """Emit run_stop for a run that exhausted its step budget.
+
+    Only convergence emitted run_stop before, so a run that never hit the
+    target produced a log with run_start and no run_stop. The ruleset requires
+    exactly one, and a non-converging run is still evidence -- it belongs in
+    the RCP comparison as a run that did not make it, not as an unparseable
+    file. log_run_stop is idempotent, so converged runs fall through here.
+    """
+    import megatron.training.training as megatron_training
+
+    mlperf_logger = getattr(megatron_training, "_primus_mlperf_logger", None)
+    if mlperf_logger is None or mlperf_logger.converged:
+        return
+
+    iteration = 0
+    try:
+        from megatron.training import get_args as megatron_get_args
+
+        megatron_args = megatron_get_args()
+        iteration = getattr(megatron_args, "curr_iteration", 0) or getattr(megatron_args, "train_iters", 0)
+    except Exception:
+        logger.warning("Could not read the final iteration for the terminal run_stop")
+
+    mlperf_logger.log_run_stop(success=False, global_step=iteration)
+    log_rank_0(f"[Patch:mlperf_run_stop] Run ended without converging at iteration {iteration}")

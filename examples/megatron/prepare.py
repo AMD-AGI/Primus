@@ -176,6 +176,18 @@ def prepare_dataset_if_needed(
         )
         return
 
+    # An external dataloader means the trainer supplies its own data pipeline
+    # -- Energon, for the diffusion recipes -- reading from data_path rather
+    # than from a tokenised corpus. Tokenising bookcorpus for one of those
+    # builds a dataset it will never open, and demands HF_TOKEN for a
+    # tokenizer it never loads.
+    if getattr(pre_trainer_cfg, "dataloader_type", None) == "external":
+        log_info(
+            "dataloader_type=external detected, skipping bookcorpus tokenisation "
+            "(the trainer supplies its own dataloader)."
+        )
+        return
+
     tokenizer_type = pre_trainer_cfg.tokenizer_type
     if (
         pre_trainer_cfg.full_validation or pre_trainer_cfg.eval_iters > 0
