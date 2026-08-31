@@ -50,7 +50,9 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
         self._compiled_loss_fn = None
         self._forward_step_count = 0
         self._forward_step_count_initialized = False
-        self._eval_rng_iteration = None
+        # None rather than 0: the session counter also starts at 0, and a run
+        # that never opens a session must still reset on its first evaluation.
+        self._eval_session = None
         self._eval_microbatch_index = 0
 
         # Composition pattern: avoids recreating the provider on each call
@@ -315,21 +317,43 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
     def _next_eval_step_index(self) -> int:
         """Index identifying this validation microbatch within the run.
 
-        Built from ``(iteration, microbatch index within this evaluation)``
-        rather than from a free-running counter, so it is reproducible after a
-        checkpoint resume without having to checkpoint the counter itself: the
-        iteration comes from the checkpoint and the index restarts at zero for
-        each evaluation.
+        Built from ``(training step under evaluation, microbatch index within
+        this evaluation)``, so it is a pure function of where the run is and
+        reproduces after a checkpoint resume without checkpointing a counter.
+
+        The step is ``args.curr_iteration``, not ``args.iteration``.
+        ``args.iteration`` is the resume point: Megatron assigns it at setup
+        and at checkpoint load and never inside the training loop, so keying on
+        it made the index depend on where the run *started*. An evaluation at
+        step k then drew one set of noise when reached continuously and a
+        different set when reached after a resume.
+
+        ``curr_iteration`` is the last step the loop completed, so it is one
+        below the step the evaluation reports. The offset is constant, and
+        constant is all reproducibility needs, but it does mean this index
+        cannot be lined up directly against the step in an MLLOG record.
         """
         from megatron.training import get_args
 
         from primus.backends.megatron.training.diffusion.forward_step import (
             EVAL_RNG_ITERATION_STRIDE,
         )
+        from primus.backends.megatron.training.eval_session import current_eval_session
 
-        iteration = getattr(get_args(), "iteration", 0)
-        if iteration != self._eval_rng_iteration:
-            self._eval_rng_iteration = iteration
+        args = get_args()
+        # Unset until the loop runs its first step, so an evaluation that
+        # precedes training (--skip-train) keys on the checkpoint step, which
+        # is the step under evaluation in that case.
+        step = getattr(args, "curr_iteration", None)
+        if step is None:
+            step = getattr(args, "iteration", 0)
+
+        # Reset per evaluation rather than per step: the in-loop evaluation
+        # that ends a run and pretrain's post-training one share a step, and
+        # the second has to reproduce the first rather than continue it.
+        session = current_eval_session()
+        if session != self._eval_session:
+            self._eval_session = session
             self._eval_microbatch_index = 0
 
         index = self._eval_microbatch_index
@@ -338,11 +362,11 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
         if index >= EVAL_RNG_ITERATION_STRIDE:
             raise RuntimeError(
                 f"Evaluation ran {index + 1} microbatches, at or beyond the "
-                f"per-iteration stride {EVAL_RNG_ITERATION_STRIDE} that keeps "
-                f"consecutive evaluations' RNG streams disjoint."
+                f"stride {EVAL_RNG_ITERATION_STRIDE} that keeps consecutive "
+                f"training steps' evaluation RNG streams disjoint."
             )
 
-        return iteration * EVAL_RNG_ITERATION_STRIDE + index
+        return step * EVAL_RNG_ITERATION_STRIDE + index
 
     def get_forward_step(self):
         """
