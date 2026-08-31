@@ -59,6 +59,20 @@ result.
 `evaluation_frequency` at exactly 262,144 samples (`eval_interval: 512` at
 GBS 512). Changing any of them in the recipe makes the log fail the checker.
 
+## Running MXFP6
+
+```bash
+EXP=examples/megatron/configs/MI355X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_mxfp6_mlperf.yaml \
+MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR=mxfp6 \
+PRIMUS_MXFP6_FUSED_MLP=on \
+RESULTS_DIR=/results bash examples/mlperf/flux1/megatron/run_campaign.sh
+```
+
+`PRIMUS_MXFP6_FUSED_MLP=on` turns a configuration the fused MLP cannot
+reproduce exactly into an error rather than a silent per-module fallback to
+Megatron's MLP, so the throughput being measured and the implementation being
+disclosed cannot drift apart.
+
 ## MXFP6 and the disclosure vocabulary
 
 `training_6.0.0/common.yaml` accepts a fixed set of values for
