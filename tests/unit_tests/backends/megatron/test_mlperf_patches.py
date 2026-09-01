@@ -153,6 +153,51 @@ def _install_fake_megatron(monkeypatch):
     return training_mod, _megatron_args
 
 
+def _install_fake_grad_finalize(monkeypatch):
+    """Point megatron.core.distributed.finalize_model_grads at a sentinel.
+
+    Call this *before* ``_install_fake_megatron``: the warmup imports the
+    callback lazily, and once ``megatron`` is a stub the real package can no
+    longer be reached to swap the attribute on.
+    """
+    import importlib
+    import sys
+
+    def finalize_model_grads(*args, **kwargs):
+        return None
+
+    try:
+        real = importlib.import_module("megatron.core.distributed")
+    except ImportError:
+        core_mod = types.ModuleType("megatron.core")
+        core_mod.__path__ = []
+        distributed_mod = types.ModuleType("megatron.core.distributed")
+        distributed_mod.finalize_model_grads = finalize_model_grads
+        core_mod.distributed = distributed_mod
+        monkeypatch.setitem(sys.modules, "megatron.core", core_mod)
+        monkeypatch.setitem(sys.modules, "megatron.core.distributed", distributed_mod)
+    else:
+        monkeypatch.setattr(real, "finalize_model_grads", finalize_model_grads)
+
+    return finalize_model_grads
+
+
+def _warmup_actors(monkeypatch):
+    """A model / optimizer / scheduler trio small enough to warm up on CPU."""
+    import torch
+
+    # The warmup brackets itself with device syncs; there is no device here.
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *a, **k: None)
+
+    model = torch.nn.Linear(2, 2)
+    optimizer = SimpleNamespace(
+        param_groups=[{"betas": (0.9, 0.95), "weight_decay": 0.1, "step": 0}],
+        state={},
+        zero_grad=lambda set_to_none=True: None,
+    )
+    return [model], optimizer, SimpleNamespace(num_steps=0)
+
+
 def _install_mock_mllog(monkeypatch, events=None):
     """Install a fake mlperf_logging.mllog and return (module, events).
 
@@ -570,6 +615,84 @@ class TestMeasuredTimeBoundary:
 
         assert getattr(mt.train_step, "_primus_warmup_hook", False) is True
         assert mlperf_boundary._HOOKS == []
+
+    def test_warmup_steps_run_with_a_grad_finalize_callback(self, monkeypatch):
+        """Every warmup backward must have something that waits on its grad sync.
+
+        The boundary warmup runs before Megatron's ``train()``, which is where
+        ``config.finalize_model_grads_func`` is assigned. That callback is the
+        only caller of ``finish_grad_sync()``, so if it is missing a warmup
+        backward dispatches the data-parallel reduce-scatter and nothing ever
+        waits on it. The first real step then asserts "Should not have multiple
+        communication calls outstanding at once" and training never starts.
+        """
+        sentinel = _install_fake_grad_finalize(monkeypatch)
+        _, megatron_args = _install_fake_megatron(monkeypatch)
+        # The local-spec FP8 reset pulls in real Megatron enums, which the fake
+        # megatron above does not provide and this test is not about.
+        megatron_args.transformer_impl = "transformer_engine"
+        _silence_log_rank_0(monkeypatch)
+        model, optimizer, scheduler = _warmup_actors(monkeypatch)
+        config = SimpleNamespace(finalize_model_grads_func=None)
+
+        seen = []
+
+        def _train_step(fwd, data_iter, mdl, opt, sched, cfg, fwdbwd, iteration=None):
+            seen.append(cfg.finalize_model_grads_func)
+
+        from primus.backends.megatron.patches.mlperf_warmup_patches import (
+            _run_warmup_and_restore,
+        )
+
+        _run_warmup_and_restore(
+            warmup_steps=2,
+            train_step_fn=_train_step,
+            forward_step_func=lambda *a, **k: None,
+            synthetic_iter=iter(()),
+            model=model,
+            optimizer=optimizer,
+            opt_param_scheduler=scheduler,
+            config=config,
+            forward_backward_func=lambda *a, **k: None,
+            iteration=0,
+        )
+
+        assert seen == [sentinel, sentinel]
+        assert config.finalize_model_grads_func is None, "warmup must leave the config as it found it"
+
+    def test_warmup_keeps_a_finalize_callback_the_caller_already_set(self, monkeypatch):
+        _install_fake_grad_finalize(monkeypatch)
+        _, megatron_args = _install_fake_megatron(monkeypatch)
+        megatron_args.transformer_impl = "transformer_engine"
+        _silence_log_rank_0(monkeypatch)
+        model, optimizer, scheduler = _warmup_actors(monkeypatch)
+        preexisting = lambda *a, **k: None  # noqa: E731
+        config = SimpleNamespace(finalize_model_grads_func=preexisting)
+
+        seen = []
+
+        def _train_step(fwd, data_iter, mdl, opt, sched, cfg, fwdbwd, iteration=None):
+            seen.append(cfg.finalize_model_grads_func)
+
+        from primus.backends.megatron.patches.mlperf_warmup_patches import (
+            _run_warmup_and_restore,
+        )
+
+        _run_warmup_and_restore(
+            warmup_steps=1,
+            train_step_fn=_train_step,
+            forward_step_func=lambda *a, **k: None,
+            synthetic_iter=iter(()),
+            model=model,
+            optimizer=optimizer,
+            opt_param_scheduler=scheduler,
+            config=config,
+            forward_backward_func=lambda *a, **k: None,
+            iteration=0,
+        )
+
+        assert seen == [preexisting]
+        assert config.finalize_model_grads_func is preexisting
 
 
 # ============================================================================
