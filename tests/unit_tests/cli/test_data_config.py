@@ -18,6 +18,10 @@ import pytest
 from primus.backends.megatron.data.diffusion.preprocessing.auth import (
     setup_hf_authentication,
 )
+from primus.backends.megatron.data.diffusion.preprocessing.commands import (
+    _load_config_with_cli_overrides,
+    _validate_preprocessing_config,
+)
 from primus.backends.megatron.data.diffusion.preprocessing.config import (
     CONFIG_PATH_BY_DEST as _CONFIG_PATH_BY_DEST,
 )
@@ -30,11 +34,7 @@ from primus.backends.megatron.data.diffusion.preprocessing.config import (
 from primus.backends.megatron.data.diffusion.preprocessing.config import (
     get_encoded_config_defaults as _get_encoded_parser_defaults,
 )
-from primus.cli.subcommands.data import (
-    _load_config_with_cli_overrides,
-    _validate_preprocessing_config,
-    register_subcommand,
-)
+from primus.cli.subcommands.data import register_subcommand
 from tests.utils import PrimusUT
 
 
