@@ -36,6 +36,14 @@ export PRIMUS_TURBO_GEMM_BACKEND="${PRIMUS_TURBO_GEMM_BACKEND:-fp4:AITER}"
 # it searches once per new conv shape, so only the first iteration pays.
 export MIOPEN_FIND_MODE="${MIOPEN_FIND_MODE:-5}"
 
+# TE pins its hipBLASLt workspace at 64 MiB, which is not enough for the
+# 1536 -> 1536 wgrad GEMM once WAN's token count passes ~70k (micro_batch_size
+# 7+): hipBLASLt picks split-K, the splits outgrow the workspace, and the call
+# fails with "HIPBLASLT Error: 6" instead of falling back. 128 MiB clears every
+# WAN shape. Read by primus/backends/megatron/patches/te_patches/
+# hipblaslt_workspace_patches.py; unset it and TE's own default applies.
+export PRIMUS_TE_GEMM_WORKSPACE_MIB="${PRIMUS_TE_GEMM_WORKSPACE_MIB:-128}"
+
 # Set HF_HOME and PRIMUS_DIFFUSION_DATA_PATH in the environment to point at the
 # HuggingFace cache holding the VAE / UMT5 weights and at the prepared Energon
 # dataset; the configs read the latter with a placeholder default.
