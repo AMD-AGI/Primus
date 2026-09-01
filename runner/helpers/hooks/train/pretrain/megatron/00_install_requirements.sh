@@ -10,13 +10,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_PRIMUS_ROOT="$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)"
 PRIMUS_ROOT="${PRIMUS_PATH:-${DEFAULT_PRIMUS_ROOT}}"
 
-# Standard pip-skip switch, matching the posttrain Megatron and MaxDiffusion
-# hooks. An image that already ships the stack has nothing to gain here, and on
-# a ROCm image it can actively lose: these requirements are the Qwen3.5
-# gated-delta-net deps, the version causal-conv1d~=1.5 resolves to ships no
-# wheel, and its isolated source build resolves a fresh torch against the
-# image's pinned ROCm build. That conflict is unresolvable, so the run dies
-# before training starts over packages the model under test never imports.
+# Standard pip-skip switch, matching the posttrain Megatron hook's condition.
+# An image that already ships these deps has nothing to gain here, and a caller
+# whose environment cannot resolve them needs a way out that is not "edit the
+# requirements file".
+#
+# The concrete case this came from: these are the Qwen3.5 gated-delta-net deps,
+# which the model under test never imports. `causal-conv1d~=1.5` also admits
+# 1.7.0, so pip can reach past a satisfying build the image already ships and
+# try to build the newer sdist. If the caller exports a PIP_CONSTRAINT pinning
+# torch to a local version label (as a ROCm image's constraints file may), the
+# isolated build environment cannot resolve torch from any index and the run
+# dies before training starts. Skipping is the blunt fix; constraining
+# causal-conv1d to the shipped version is the narrower one.
 if [[ -n "${PRIMUS_SKIP_PIP:-}" && "${PRIMUS_SKIP_PIP}" != "0" && "${PRIMUS_SKIP_PIP,,}" != "false" ]]; then
   echo "[00_install_requirements] PRIMUS_SKIP_PIP=${PRIMUS_SKIP_PIP} -> skipping Megatron pretrain dependency install"
   exit 0
