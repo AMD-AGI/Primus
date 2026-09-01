@@ -270,19 +270,37 @@ def _run_warmup_and_restore(
     # ---- 3b. Save LR scheduler state (NeMo never steps the scheduler during warmup) ----
     saved_lr_num_steps = opt_param_scheduler.num_steps
 
+    # ---- 3c. Install Megatron's grad-finalize callback for the warmup steps ----
+    # At the pre-data boundary `train()` has not run yet, so it has not assigned
+    # config.finalize_model_grads_func. That callback is the only caller of
+    # finish_grad_sync(), so without it a warmup backward dispatches the
+    # data-parallel reduce-scatter and nothing ever waits on it. The handle is
+    # still outstanding when the first real step dispatches its own, and
+    # Megatron asserts "Should not have multiple communication calls
+    # outstanding at once" before a single iteration completes.
+    saved_finalize = config.finalize_model_grads_func
+    if saved_finalize is None:
+        from megatron.core.distributed import finalize_model_grads
+
+        config.finalize_model_grads_func = finalize_model_grads
+        _log("Installed finalize_model_grads_func for warmup (unset at this boundary)")
+
     # ---- 4. Run warmup steps with synthetic data ----
-    for step_idx in range(warmup_steps):
-        _log(f"Warmup step {step_idx + 1}/{warmup_steps}")
-        train_step_fn(
-            forward_step_func,
-            synthetic_iter,
-            model,
-            optimizer,
-            opt_param_scheduler,
-            config,
-            forward_backward_func,
-            iteration=iteration,
-        )
+    try:
+        for step_idx in range(warmup_steps):
+            _log(f"Warmup step {step_idx + 1}/{warmup_steps}")
+            train_step_fn(
+                forward_step_func,
+                synthetic_iter,
+                model,
+                optimizer,
+                opt_param_scheduler,
+                config,
+                forward_backward_func,
+                iteration=iteration,
+            )
+    finally:
+        config.finalize_model_grads_func = saved_finalize
     _log(f"Completed {warmup_steps} warmup steps")
 
     # ---- 5. Restore optimizer ----
