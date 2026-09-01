@@ -222,6 +222,53 @@ def _build_synthetic_iterator(primus_args):
     return MegatronDataloaderWrapper(mock_loader)
 
 
+def _reset_ddp_grad_ready_calibration(models):
+    """Undo the DDP grad-ready calibration that the warmup steps consumed.
+
+    Megatron's gradient buffers calibrate on their first batch: ``_ParamAndGradBucketGroup.reset``
+    records how many times each parameter registered a ready gradient as
+    ``golden_per_param_grad_ready_counts``, and from the second batch on ``register_grad_ready``
+    issues the reduce-scatter only once that count is reached again. Warmup steps are batches like
+    any other, so they consume the calibration -- the golden counts end up describing a synthetic
+    step, and the first real step is measured against them.
+
+    Under gradient accumulation the two do not agree, and the bucket then never dispatches at all.
+    Every parameter reports in and the collective is still missing, which surfaces at
+    ``finish_grad_sync`` as "Communication call has not been issued for this bucket (21/21 params
+    have grad available)" -- the full 21/21 being what distinguishes a count mismatch from a
+    parameter that never arrived. Restoring ``is_first_batch`` and clearing both dicts makes the
+    first real step calibrate, which is what would have happened had warmup not run.
+
+    The outstanding-handle drain is a guard rather than part of the fix. Since #1069 installs
+    ``finalize_model_grads_func`` around the warmup steps their reduce-scatters are awaited, so it
+    is expected to report 0; before #1069 it reported 43 of 43 bucket groups on Flux 12B. Draining
+    is still correct here because the handle would belong to a synthetic step whose gradients are
+    about to be discarded.
+    """
+    drained = groups_reset = 0
+    for m in models:
+        groups = list(getattr(m, "bucket_groups", [])) + list(
+            getattr(m, "expert_parallel_bucket_groups", [])
+        )
+        for group in groups:
+            if not hasattr(group, "is_first_batch"):
+                continue
+            handle = getattr(group, "grad_reduce_handle", None)
+            if handle is not None:
+                handle.wait()
+                group.grad_reduce_handle = None
+                drained += 1
+            group.is_first_batch = True
+            group.golden_per_param_grad_ready_counts = {}
+            group.per_param_grad_ready_counts = {}
+            groups_reset += 1
+    _log(
+        f"Reset DDP grad-ready calibration on {groups_reset} bucket groups "
+        f"({drained} outstanding collectives drained)"
+    )
+    return groups_reset
+
+
 def _run_warmup_and_restore(
     *,
     warmup_steps,
@@ -364,6 +411,9 @@ def _run_warmup_and_restore(
         optimizer.zero_grad(set_to_none=True)
     except TypeError:
         optimizer.zero_grad()
+
+    # ---- 11b. Undo the DDP grad-ready calibration the warmup steps consumed ----
+    _reset_ddp_grad_ready_calibration(models)
 
     # ---- 12. Reset counters ----
     megatron_args.consumed_train_samples = 0
