@@ -18,6 +18,7 @@ import pytest
 from primus.backends.megatron.training.eval_budget import (
     DEFAULT_VAL_NUM_WORKERS,
     EvalCoverageError,
+    assert_mlperf_timestep_source,
     assert_val_worker_divisibility,
     get_eval_num_microbatches,
     get_val_num_workers,
@@ -96,6 +97,44 @@ class TestWorkerDivisibility:
     def test_default_worker_count_does_not_divide_by_zero(self):
         """max(1, val_num_workers) is what keeps the default of 0 usable."""
         assert_val_worker_divisibility(_args(val_num_workers=0), MLPERF_EVAL_SAMPLES)
+
+
+class TestMlperfTimestepSource:
+    """The one combination that reports a plausible number instead of failing.
+
+    Injected timesteps are correct-looking whatever fraction of the split was
+    read, so under mlperf_mode the setting is refused rather than trusted to
+    the recipe. trainer_base.yaml still defaults to equidistant, which the
+    non-MLPerf diffusion recipes depend on.
+    """
+
+    def test_mlperf_run_on_dataset_timesteps_is_accepted(self):
+        assert_mlperf_timestep_source(_args(mlperf_mode=True, eval_timestep_source="dataset"))
+
+    @pytest.mark.parametrize("source", ["equidistant", "dataset", None])
+    def test_a_non_mlperf_run_is_left_alone(self, source):
+        assert_mlperf_timestep_source(_args(mlperf_mode=False, eval_timestep_source=source))
+
+    def test_the_trainer_base_default_still_works_outside_mlperf_mode(self):
+        """Recipes with no annotated split must keep running unchanged."""
+        assert_mlperf_timestep_source(_args())
+
+    def test_mlperf_run_on_injected_timesteps_is_refused(self):
+        args = _args(mlperf_mode=True, eval_timestep_source="equidistant")
+        with pytest.raises(EvalCoverageError, match="eval_timestep_source is 'equidistant'") as excinfo:
+            assert_mlperf_timestep_source(args)
+
+        message = str(excinfo.value)
+        # Refusing is only half of it: the message has to name the setting to
+        # change and the config that produces shards the setting can be met on.
+        assert "eval_timestep_source='dataset'" in message
+        assert "mlperf_flux1_val.yaml" in message
+
+    def test_an_absent_setting_fails_closed(self):
+        """An MLPerf recipe that inherits nothing must not be read as 'dataset'."""
+        args = _args(mlperf_mode=True)
+        with pytest.raises(EvalCoverageError, match="eval_timestep_source is None"):
+            assert_mlperf_timestep_source(args)
 
 
 class TestResolveEvalIters:

@@ -33,6 +33,7 @@ from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
 from primus.backends.megatron.data.dataset_provider import DatasetProvider
 from primus.backends.megatron.training.eval_budget import (
     EvalCoverageError,
+    assert_mlperf_timestep_source,
     assert_val_worker_divisibility,
     get_eval_num_microbatches,
     get_val_num_workers,
@@ -163,6 +164,9 @@ class EnergonDatasetProvider(DatasetProvider):
                 * (parallel_state.get_data_parallel_world_size())
             )
             assert_val_worker_divisibility(args, eval_samples)
+            # Reading every sample is not enough if they are read at timesteps
+            # the split never paired them with.
+            assert_mlperf_timestep_source(args)
             log_rank_0(
                 f"Validation budget: {args.eval_iters} iterations x "
                 f"{eval_num_microbatches} microbatches x {args.micro_batch_size} "
