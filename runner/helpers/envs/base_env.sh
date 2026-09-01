@@ -156,7 +156,9 @@ export NCCL_IB_HCA="${NCCL_IB_HCA:-}"
 
 # Dynamically get network interface IP address for socket communication if not set
 if [ -z "${IP_INTERFACE:-}" ]; then
-    IP_INTERFACE=$(bash "${SCRIPT_DIR}/get_ip_interface.sh" 2>/dev/null || hostname -I | awk '{print $1}')
+    # No fallback to an IP: this value feeds *_SOCKET_IFNAME, which must name an
+    # interface. Leaving it empty lets NCCL and Gloo pick one themselves.
+    IP_INTERFACE=$(bash "${SCRIPT_DIR}/get_ip_interface.sh" 2>/dev/null || true)
 fi
 export IP_INTERFACE="${IP_INTERFACE:-}"
 

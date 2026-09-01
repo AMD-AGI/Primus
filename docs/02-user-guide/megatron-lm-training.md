@@ -100,7 +100,7 @@ The following models are pre-optimized for performance on the AMD Instinct MI300
 - Mixtral 8x7B
 - Mixtral 8x22B
 - Qwen 2.5 7B/72B
-- Zebra-Llama 1B/3B/8B
+- Hylo hybrid 1B/3B/8B
 - Qwen3-30B-A3B
 - Qwen3-235B-A22B
 - Qwen3 32B (SFT / LoRA)
@@ -323,13 +323,13 @@ Examples for MoE models with expert parallelism enabled (that is, `expert_model_
   --config examples/megatron/configs/MI300X/qwen2.5_72B-BF16-pretrain.yaml
 ```
 
-- **Zebra-Llama-1B BF16:**
+- **Hylo hybrid-1B BF16:**
 
 ```bash
 PRIMUS_TRAIN_RUNTIME=legacy ./runner/primus-cli container \
-  --log_file /tmp/primus_zebra_llama_1B.log \
+  --log_file /tmp/primus_hylo_mamba_1B_hybrid.log \
   -- train pretrain \
-  --config examples/megatron/configs/MI300X/zebra_llama_1B-pretrain.yaml
+  --config examples/megatron/configs/MI300X/hylo_llama_mamba_1B_BF16-pretrain.yaml
 ```
 
 - **Qwen3-32B BF16 LoRA:**
@@ -523,13 +523,13 @@ NVTE_USE_CAST_TRANSPOSE_TRITON=0 ./runner/primus-cli container \
   --config examples/megatron/configs/MI355X/qwen2.5_72B-BF16-pretrain.yaml
 ```
 
-- **Zebra-Llama-1B BF16:**
+- **Hylo hybrid-1B BF16:**
 
 ```bash
 PRIMUS_TRAIN_RUNTIME=legacy ./runner/primus-cli container \
-  --log_file /tmp/primus_zebra_llama_1B.log \
+  --log_file /tmp/primus_hylo_mamba_1B_hybrid.log \
   -- train pretrain \
-  --config examples/megatron/configs/MI355X/zebra_llama_1B-pretrain.yaml
+  --config examples/megatron/configs/MI355X/hylo_llama_mamba_1B_BF16-pretrain.yaml
 ```
 
 - **Qwen3-32B BF16 LoRA:**

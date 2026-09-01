@@ -208,7 +208,16 @@ def _bridge_weight_grad(
                 # The gemm accumulated into main_grad already; grad_quantized_weight is
                 # the dummy it returns in that case and must not be added on top.
                 weight.grad_added_to_main_grad = True
-            elif not weight.grad_added_to_main_grad:
+            else:
+                # Unconditional: this backward runs once per microbatch, while
+                # grad_added_to_main_grad is a per-iteration flag that DDP resets in
+                # zero_grad_buffer() before the microbatch loop. The flag means "main_grad
+                # already owns this gradient, so the AccumulateGrad hook must not add
+                # param.grad on top" -- not "an add already happened". Gating the add on it
+                # lands only the first microbatch and silently drops every later one, and
+                # the dummy wgrad returned below means they are not recoverable from
+                # param.grad either. The fused path above is immune because its beta=1
+                # epilogue accumulates on every microbatch regardless of the flag.
                 if _is_gfx1250():
                     inplace_add_triton_(weight.main_grad, grad_quantized_weight)
                 else:

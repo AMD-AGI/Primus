@@ -1,0 +1,199 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v4_flash_4layer-sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# DeepSeek-V4 Flash, cut to 4 layers, native (Bridge-free) SFT, for long-context
+# smoke runs on 8x MI308X (gfx942, 192 GiB/GPU).
+#
+# Derived from deepseek_v4_flash-BF16-pretrain.yaml. Deltas vs that file:
+#   * config: sft_trainer.yaml (carries `stage: sft` -> MegatronSFTTrainer)
+#   * real local tokenizer + local jsonl dataset (mock_data is FATAL under sft:
+#     the mock_data patch force-sets NullTokenizer, whose text_to_ids does
+#     int(x) on whitespace-split text and dies on natural language)
+#   * 4 layers, MTP off, compress_ratios truncated to 4 entries
+#   * gfx942-safe kernels (turbo sparse-MLA is gfx950-only)
+#   * random init: no DeepSeek-V4 Megatron checkpoint exists, and
+#     Megatron-Bridge has no V4 importer. Same precedent as the in-tree
+#     qwen3_235B_A22B_4layer-BF16-sft.yaml smoke config.
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    model: ${PRIMUS_MODEL:deepseek_v4_flash}.yaml
+    overrides:
+      # ---------- log ----------
+      wandb_project: "Primus_DeepSeek_V4_SFT"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      log_interval: 1
+      disable_wandb: true
+      disable_tensorboard: true
+
+      # ---------- hyper parameters ----------
+      train_iters: ${TRAIN_ITERS:10}
+      micro_batch_size: ${MBS:1}
+      global_batch_size: ${GBS:8}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: ${PRIMUS_LR:1.0e-5}
+      min_lr: 0.0
+      lr_warmup_iters: 0
+      lr_decay_iters: ${TRAIN_ITERS:10}
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # ---------- parallel ----------
+      # V4 attention does NOT shard heads across TP
+      # (deepseek_v4_attention.py:547 sets num_attention_heads_per_partition =
+      # num_heads, no divide()), so TP only shards weights and the vocab-parallel
+      # output layer. TP=1 is the only config the V4 kernels are gate-tested on.
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      expert_tensor_parallel_size: ${PRIMUS_ETP:1}
+      # Context parallel. Supported for the DENSE branch only (compress_ratio 0):
+      # deepseek_v4_cp.py exchanges the left boundary KV and the sparse-MLA adapter
+      # validates the window against global positions. HCA (128) and CSA (4) layers have
+      # no CP path yet, so compress_ratios must be all-zero when this is > 1 -- the
+      # attention module raises if it is not. seq_length must divide by cp_size.
+      context_parallel_size: ${PRIMUS_CP:1}
+      overlap_grad_reduce: ${PRIMUS_OVERLAP_GRAD_REDUCE:true}
+      overlap_param_gather: ${PRIMUS_OVERLAP_PARAM_GATHER:true}
+      gradient_accumulation_fusion: true
+
+      # ---------- data (SFT: real tokenizer + real local jsonl) ----------
+      mock_data: false
+      # Non-null purely to make the pretrain data-prep hook early-return
+      # (runner/helpers/hooks/train/pretrain/megatron/prepare.py:108); it would
+      # otherwise try to download+tokenize bookcorpus and demand HF_TOKEN.
+      # The SFT dataset provider never reads this — it reads sft_dataset_name.
+      train_data_path: ["unused_placeholder"]
+      valid_data_path: null
+      test_data_path: null
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: ${V4_TOKENIZER:/apps/DeepSeek-V4-Flash}
+      trust_remote_code: true
+      sft_dataset_name: ${SFT_JSONL:./data/sft/sft_4096.jsonl}
+      sft_conversation_format: alpaca
+      enable_packed_sequences: false
+      use_packed_attention: false   # TE thd varlen path hangs/SIGABRTs on ROCm
+      num_workers: 4
+      dataloader_type: cyclic
+      create_attention_mask_in_dataloader: false   # would be an [S,S] bool tensor
+                                                   # = 16 GiB at 128k, 1 TiB at 1M
+
+      # ---------- 4-layer cut ----------
+      num_layers: ${PRIMUS_TOTAL_LAYERS:4}
+      compress_ratios: ${PRIMUS_COMPRESS_RATIOS:"[0, 0, 128, 128]"}
+      mtp_num_layers: ${MTP_NUM_LAYERS:0}
+      num_experts: ${PRIMUS_NUM_EXPERTS:256}
+      index_topk: ${PRIMUS_INDEX_TOPK:512}
+      moe_router_topk: ${PRIMUS_MOE_TOPK:6}
+      moe_ffn_hidden_size: ${PRIMUS_MOE_FFN:2048}
+      q_lora_rank: ${PRIMUS_Q_LORA:1024}
+      o_lora_rank: ${PRIMUS_O_LORA:1024}
+
+      # ---------- DeepSeek-V4 specific ----------
+      # P14: shard attention + indexer heads across TP (not just weights).
+      # At TP=8 this puts the indexer at 8 local heads, which is inside the fused
+      # Triton scoring kernel's _SUPPORTED_H -- so CSA gets the fused path for free.
+      v4_shard_attention_heads: ${PRIMUS_SHARD_HEADS:false}
+
+      hybrid_attention_enabled: true
+      attn_sink: true
+      hc_use_sinkhorn: true
+      hc_mult: ${PRIMUS_HC_MULT:4}
+      # NARROWING KNOB (default = stock V4-Flash width, 64).
+      # V4 attention does not shard heads across TP, so the query tensor
+      # [B, S, H, 512] is materialized at FULL width on every rank: 64 KiB/token
+      # at H=64. Three such tensors are live inside one layer, so at S=1M that is
+      # 192 GiB = the entire card. Reducing H is the only lever that shrinks it.
+      # Any run with H != 64 is NOT DeepSeek-V4-Flash and must be labelled so.
+      num_attention_heads: ${PRIMUS_NUM_HEADS:64}
+      kv_channels: ${PRIMUS_HEAD_DIM:512}   # MLA latent head_dim; 512 = stock V4-Flash
+      mtp_use_separate_hc_head: true
+      moe_router_score_function: sqrtsoftplus
+      # deepseek_v4_base.yaml enables expert bias (noaux_tc), but Megatron
+      # asserts expert bias requires moe_router_score_function=sigmoid, which
+      # conflicts with V4's sqrtsoftplus. run_deepseek_v4.sh defaults
+      # PRIMUS_MOE_ENABLE_EXPERT_BIAS=False for exactly this reason.
+      moe_router_enable_expert_bias: false
+      swiglu_limit: 10.0
+
+      # ---------- optimizer ----------
+      # The pretrain yaml uses bf16 for grads + both Adam moments. That is fine at
+      # seq 4k, but bf16 has an 8-bit mantissa and the grad accumulation runs over
+      # seq_length tokens -- at 128k it produces NaN in the grad norm on iteration 2
+      # (measured: iter1 loss 11.92 / grad-norm 16.45, iter2 NaN, reproducible with
+      # both HCA and all-dense compress_ratios, at 68% memory so not an OOM).
+      # fp32 grads + fp32 exp_avg_sq fix it.
+      use_precision_aware_optimizer: true
+      main_grads_dtype: ${PRIMUS_MAIN_GRADS_DTYPE:fp32}
+      main_params_dtype: ${PRIMUS_MAIN_PARAMS_DTYPE:fp32}
+      exp_avg_dtype: ${PRIMUS_EXP_AVG_DTYPE:bf16}
+      exp_avg_sq_dtype: ${PRIMUS_EXP_AVG_SQ_DTYPE:fp32}
+      use_distributed_optimizer: true
+
+      enable_experimental: true
+      apply_rope_fusion: false
+      # deepseek_v4_base.yaml sets rope_type: yarn, but the common-attention path
+      # asserts rope_type == "rope" ("Common attention only support
+      # rope_type=\"rope\", but got yarn"). run_deepseek_v4.sh passes
+      # `--rope_type rope` for exactly this reason; the V4 compressed branches
+      # apply their own YaRN internally via compress_rope_theta.
+      rope_type: rope
+
+      # ---------- recompute (mandatory at long context) ----------
+      recompute_granularity: ${PRIMUS_RECOMPUTE_GRANULARITY:full}
+      recompute_method: ${PRIMUS_RECOMPUTE_METHOD:block}
+      recompute_num_layers: ${PRIMUS_RECOMPUTE_LAYERS:4}
+
+      # ---------- ckpt: random init, save nothing ----------
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      no_save_optim: true
+      no_save_rng: true
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+      eval_interval: 1000000
+
+      # ---------- LoRA off: full-parameter SFT ----------
+      sft_sanitize_nan_grads: ${PRIMUS_SANITIZE_NAN:false}
+
+      lora:
+        enabled: false
+
+      # ---------- kernels: gfx942-safe ----------
+      # turbo / gluon sparse-MLA backends are gfx950/CDNA4-only.
+      enable_primus_turbo: true
+      use_turbo_attention: false          # must stay off so the dense (cr=0)
+                                          # path uses the V4 sparse-MLA backend
+      use_turbo_grouped_gemm: true
+      use_turbo_rms_norm: true
+      use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:false}   # default CU count is 80
+                                                           # == 100% of MI308X's CUs
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      turbo_sync_free_moe_stage: 1
+
+      use_v4_attention_backend: ${PRIMUS_USE_V4_ATTENTION_BACKEND:triton_v2}
+      use_v4_csa_attention_backend: ${PRIMUS_USE_V4_CSA_ATTENTION_BACKEND:triton_v2}
+      use_v4_fp8_indexer: false
+      use_v4_compiled_sinkhorn: false
+
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+
+      # ---------- cross entropy ----------
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
