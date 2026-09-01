@@ -116,6 +116,91 @@ class CLIPLConfig(TextEncoderConfig):
 
 
 @dataclass
+class WanVAEConfig(EncoderConfig):
+    """Configuration for the Wan video VAE (AutoencoderKLWan).
+
+    Wan VAE is a 3D video VAE: inputs are pixel videos of shape
+    (B, C, T, H, W); latents are (B, latent_channels, T', H', W')
+    with spatial downsampling 8x and temporal downsampling 4x (Wan 2.1)
+    or 4x temporal + 4x spatial (Wan 2.2 TI2V-5B). Use this config for
+    both generations; model_path / subfolder select the variant.
+    """
+
+    type: str = "autoencoder_kl_wan"  # Wan VAE type identifier
+    scale_factor: float = 1.0  # Wan VAE has no extra scale/shift (uses per-channel mean/std)
+    shift_factor: float = 0.0
+    in_channels: int = 3  # Input video channels
+    out_channels: int = 16  # Wan VAE latent channels
+    latent_downsample_factor: int = 8  # Spatial downsampling factor (H/8, W/8)
+    temporal_downsample_factor: int = 4  # Temporal downsampling factor (T/4)
+
+    def __post_init__(self):
+        """Set encoder type and validate."""
+        if self.encoder_type is None:
+            self.encoder_type = EncoderType.IMAGE  # Video VAE belongs to the image family
+        super().__post_init__()
+
+
+@dataclass
+class UMT5Config(TextEncoderConfig):
+    """Configuration for the UMT5 text encoder used by Wan.
+
+    Wan uses a multilingual UMT5-XXL encoder (variant of T5) whose output is
+    fed directly into WanTransformer3DModel via encoder_hidden_states.
+    """
+
+    type: str = "umt5"  # UMT5 type identifier
+    max_length: int = 512  # Wan default text sequence length
+    embedding_dim: int = 4096  # UMT5-XXL hidden size
+    return_pooled: bool = False  # Wan consumes sequence features only
+
+    def __post_init__(self):
+        """Validate configuration."""
+        super().__post_init__()
+
+
+@dataclass
+class WanEncoderConfig:
+    """Configuration for all Wan encoders (Wan VAE + UMT5)."""
+
+    vae: WanVAEConfig
+    umt5: UMT5Config
+    use_preencoded: bool = True  # Whether to use pre-encoded data
+
+    @classmethod
+    def from_pretrained_wan(
+        cls,
+        vae_model_path: str = "Wan-AI/Wan2.1-T2V-14B-Diffusers",
+        umt5_model_path: str = "Wan-AI/Wan2.1-T2V-14B-Diffusers",
+        precision: str = "bf16",
+        device: str = "cuda",
+        use_preencoded: bool = True,
+        cache_dir: Optional[str] = None,
+    ):
+        """Create WanEncoderConfig from pretrained Wan model paths."""
+        return cls(
+            vae=WanVAEConfig(
+                type="autoencoder_kl_wan",
+                model_path=vae_model_path,
+                subfolder="vae",
+                precision=precision,
+                device=device,
+                cache_dir=cache_dir,
+            ),
+            umt5=UMT5Config(
+                type="umt5",
+                model_path=umt5_model_path,
+                subfolder="text_encoder",
+                tokenizer_subfolder="tokenizer",
+                precision=precision,
+                device=device,
+                cache_dir=cache_dir,
+            ),
+            use_preencoded=use_preencoded,
+        )
+
+
+@dataclass
 class FluxEncoderConfig:
     """Configuration for all Flux encoders (VAE + T5-XXL + CLIP-L)."""
 
