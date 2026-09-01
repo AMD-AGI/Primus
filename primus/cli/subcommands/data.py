@@ -22,17 +22,11 @@ Supports torch.distributed for multi-GPU processing:
 import argparse
 import logging
 
-from primus.backends.megatron.data.diffusion.preprocessing.auth import (
-    HFAuthError,
-    setup_hf_authentication,
+from primus.backends.megatron.data.diffusion.preprocessing.config import (
+    CONFIG_PATH_BY_DEST,
+    get_encoded_config_defaults,
+    resolve_encoded_preprocessing_config,
 )
-from primus.backends.megatron.data.diffusion.preprocessing.pipelines.encoded import (
-    EncodedDatasetPipeline,
-)
-from primus.backends.megatron.data.diffusion.preprocessing.pipelines.raw import (
-    RawDatasetPipeline,
-)
-from primus.tools.utils import finalize_distributed, init_distributed
 
 logger = logging.getLogger(__name__)
 
@@ -46,38 +40,52 @@ def _add_common_args(parser, defaults_from_config: bool = False):
     actually typed. That is what lets ``_load_config_with_cli_overrides`` tell an
     explicit ``--batch-size 8`` apart from an untouched ``--batch-size``, even
     though 8 is also the default. Defaults for those options then come from
-    ``_get_encoded_parser_defaults()``.
+    ``get_encoded_config_defaults()``.
     """
 
-    def dflt(value):
-        return argparse.SUPPRESS if defaults_from_config else value
+    defaults = get_encoded_config_defaults()
+
+    def dflt(dest):
+        return argparse.SUPPRESS if defaults_from_config else defaults[dest]
 
     # Source configuration
     source_group = parser.add_argument_group("Source Configuration")
     source_group.add_argument(
         "--source-type",
         required=False,
-        default=dflt(None),
+        default=dflt("source_type"),
         choices=["directory", "huggingface", "webdataset"],
         help="Type of input data source (required, can be set via --config)",
     )
     source_group.add_argument(
-        "--input-dir", type=str, default=dflt(None), help="Input directory (for directory source)"
+        "--input-dir",
+        type=str,
+        default=dflt("input_dir"),
+        help="Input directory (for directory source)",
     )
     source_group.add_argument(
-        "--hf-dataset", type=str, default=dflt(None), help="HuggingFace dataset name (for HF source)"
+        "--hf-dataset",
+        type=str,
+        default=dflt("hf_dataset"),
+        help="HuggingFace dataset name (for HF source)",
     )
     source_group.add_argument(
-        "--hf-split", type=str, default=dflt("train"), help="HuggingFace dataset split (default: train)"
+        "--hf-split",
+        type=str,
+        default=dflt("hf_split"),
+        help="HuggingFace dataset split (default: train)",
     )
     source_group.add_argument(
         "--hf-data-files",
         type=str,
-        default=dflt(None),
+        default=dflt("hf_data_files"),
         help='Specific files/paths within HF dataset (e.g., "data_1024_10K/*.tar")',
     )
     source_group.add_argument(
-        "--input-path", type=str, default=dflt(None), help="WebDataset path/glob (for webdataset source)"
+        "--input-path",
+        type=str,
+        default=dflt("input_path"),
+        help="WebDataset path/glob (for webdataset source)",
     )
 
     # Output configuration (Energon format)
@@ -85,17 +93,26 @@ def _add_common_args(parser, defaults_from_config: bool = False):
     output_group.add_argument(
         "--output-dir",
         required=False,
-        default=dflt(None),
+        default=dflt("output_dir"),
         help="Output directory for Energon WebDataset (required, can be set via --config)",
     )
     output_group.add_argument(
-        "--shard-size", type=int, default=dflt(1000), help="Samples per shard (default: 1000)"
+        "--shard-size",
+        type=int,
+        default=dflt("shard_size"),
+        help="Samples per shard (default: 1000)",
     )
     output_group.add_argument(
-        "--max-samples", type=int, default=dflt(None), help="Maximum samples to process (default: all)"
+        "--max-samples",
+        type=int,
+        default=dflt("max_samples"),
+        help="Maximum samples to process (default: all)",
     )
     output_group.add_argument(
-        "--compress", action="store_true", default=dflt(False), help="Compress tar files with gzip"
+        "--compress",
+        action="store_true",
+        default=dflt("compress"),
+        help="Compress tar files with gzip",
     )
 
     # Image preprocessing
@@ -103,25 +120,25 @@ def _add_common_args(parser, defaults_from_config: bool = False):
     image_group.add_argument(
         "--variable-size",
         action="store_true",
-        default=dflt(False),
+        default=dflt("variable_size"),
         help="Resize images to the nearest multiple of 16 instead of fixed size",
     )
     image_group.add_argument(
         "--image-size",
         type=int,
-        default=dflt(1024),
+        default=dflt("image_size"),
         help="Resize images to this size (default: 1024) when variable_size is disabled",
     )
     image_group.add_argument(
         "--center-crop",
         action="store_false",
-        default=dflt(True),
+        default=dflt("center_crop"),
         help="Disable center cropping of images before resize",
     )
     image_group.add_argument(
         "--max-size",
         type=int,
-        default=dflt(1024),
+        default=dflt("max_size"),
         help="Maximum image dimension for variable size mode (default: 1024)",
     )
 
@@ -130,7 +147,7 @@ def _add_common_args(parser, defaults_from_config: bool = False):
     auth_group.add_argument(
         "--hf-token-file",
         type=str,
-        default=dflt(None),
+        default=dflt("hf_token_file"),
         help=(
             "Path to file containing HuggingFace token. "
             "File must have secure permissions (600 or 400). "
@@ -154,6 +171,15 @@ def _validate_source_args(args):
 
 def _prepare_raw(args):
     """Prepare raw Energon WebDataset for on-the-fly encoding during training."""
+    from primus.backends.megatron.data.diffusion.preprocessing.auth import (
+        HFAuthError,
+        setup_hf_authentication,
+    )
+    from primus.backends.megatron.data.diffusion.preprocessing.pipelines.raw import (
+        RawDatasetPipeline,
+    )
+    from primus.tools.utils import finalize_distributed, init_distributed
+
     # Initialize torch.distributed if launched with torchrun
     init_distributed()
 
@@ -250,126 +276,6 @@ def _prepare_raw(args):
         finalize_distributed()
 
 
-def _flatten_preprocessing_config(config_dict: dict) -> dict:
-    """
-    Flatten nested YAML config to match CLI argument structure.
-
-    Transforms hierarchical YAML structure into flat dict matching argparse namespace.
-
-    Args:
-        config_dict: Nested config from YAML file
-
-    Returns:
-        Flattened dict with CLI argument names as keys
-
-    Example:
-        >>> config = {
-        ...     'source': {'type': 'huggingface', 'hf_dataset': 'pokemon'},
-        ...     'model': {'batch_size': 8}
-        ... }
-        >>> flat = _flatten_preprocessing_config(config)
-        >>> flat['source_type'], flat['batch_size']
-        ('huggingface', 8)
-    """
-    flat = {}
-
-    # Source configuration
-    if "source" in config_dict:
-        source = config_dict["source"]
-        flat["source_type"] = source.get("type")
-        flat["hf_dataset"] = source.get("hf_dataset")
-        flat["hf_split"] = source.get("hf_split", "train")
-        flat["hf_data_files"] = source.get("hf_data_files")
-        flat["input_dir"] = source.get("input_dir")
-        flat["input_path"] = source.get("input_path")
-
-    # Data format configuration (field mappings for image/caption extraction)
-    if "data_format" in config_dict:
-        data_format = config_dict["data_format"]
-        flat["image_key"] = data_format.get("image_key")
-        flat["caption_key"] = data_format.get("caption_key")
-        flat["image_keys"] = data_format.get("image_keys")
-        flat["caption_keys"] = data_format.get("caption_keys")
-
-    # Output configuration
-    if "output" in config_dict:
-        output = config_dict["output"]
-        flat["output_dir"] = output.get("output_dir")
-        flat["shard_size"] = output.get("shard_size", 1000)
-        flat["max_samples"] = output.get("max_samples")
-        flat["compress"] = output.get("compress", False)
-
-    # Model configuration
-    if "model" in config_dict:
-        model = config_dict["model"]
-        flat["model_path"] = model.get("model_path", "black-forest-labs/FLUX.1-dev")
-        flat["vae_path"] = model.get("vae_path")
-        flat["t5_path"] = model.get("t5_path")
-        flat["clip_path"] = model.get("clip_path")
-        flat["precision"] = model.get("precision", "bf16")
-        flat["device"] = model.get("device", "cuda")
-        flat["batch_size"] = model.get("batch_size", 8)
-        flat["t5_max_length"] = model.get("t5_max_length", 512)
-        flat["vae_latent_mode"] = model.get("vae_latent_mode", "presampled")
-
-    # Image preprocessing
-    if "image" in config_dict:
-        image = config_dict["image"]
-        flat["image_size"] = image.get("image_size", 1024)
-        flat["variable_size"] = image.get("variable_size", False)
-        flat["center_crop"] = image.get("center_crop", True)
-        flat["max_size"] = image.get("max_size", 1024)
-
-    # Authentication
-    if "auth" in config_dict:
-        auth = config_dict["auth"]
-        flat["hf_token_file"] = auth.get("hf_token_file")
-
-    return flat
-
-
-def _get_encoded_parser_defaults() -> dict:
-    """
-    Default values for every option the encoded parser can take from --config.
-
-    The encoded parser registers these options with ``argparse.SUPPRESS`` (see
-    ``_add_common_args``), so this table is the sole source of their defaults and
-    the lowest layer of the merge in ``_load_config_with_cli_overrides``. Every
-    key listed here is therefore guaranteed to exist on the merged namespace.
-    """
-    return {
-        "config": None,
-        "source_type": None,
-        "hf_dataset": None,
-        "hf_split": "train",
-        "hf_data_files": None,
-        "input_dir": None,
-        "input_path": None,
-        "image_key": None,
-        "caption_key": None,
-        "image_keys": None,
-        "caption_keys": None,
-        "output_dir": None,
-        "shard_size": 1000,
-        "max_samples": None,
-        "compress": False,
-        "model_path": "black-forest-labs/FLUX.1-dev",
-        "vae_path": None,
-        "t5_path": None,
-        "clip_path": None,
-        "precision": "bf16",
-        "device": "cuda",
-        "batch_size": 8,
-        "t5_max_length": 512,
-        "image_size": 1024,
-        "variable_size": False,
-        "center_crop": True,
-        "max_size": 1024,
-        "hf_token_file": None,
-        "vae_latent_mode": "presampled",
-    }
-
-
 def _load_config_with_cli_overrides(args: "argparse.Namespace") -> "argparse.Namespace":
     """
     Load YAML config and merge with CLI arguments.
@@ -379,11 +285,10 @@ def _load_config_with_cli_overrides(args: "argparse.Namespace") -> "argparse.Nam
     2. YAML config values
     3. CLI default values
 
-    The encoded parser suppresses defaults, so ``vars(args)`` contains exactly
-    the options the user typed and nothing else. Layering the three sources in
-    order therefore honours an explicit flag even when its value happens to
-    equal the default, and guarantees every configurable key is present on the
-    result whether or not the YAML file mentions it.
+    Configurable options use ``argparse.SUPPRESS``, so their presence in the
+    namespace means that the user explicitly provided them. The nested config
+    layers are resolved through Primus' shared ``deep_merge`` implementation,
+    then flattened for the existing preprocessing pipeline.
 
     Args:
         args: Parsed CLI arguments
@@ -396,27 +301,20 @@ def _load_config_with_cli_overrides(args: "argparse.Namespace") -> "argparse.Nam
         >>> # And CLI arg --batch-size 16
         >>> # Result: batch_size = 16 (CLI wins)
     """
-    defaults = _get_encoded_parser_defaults()
-    explicit_cli = vars(args)
+    cli_args = vars(args)
+    config_path = cli_args.get("config")
+    if config_path:
+        logger.info(f"Loading config from: {config_path}")
 
-    # If no config file, defaults still have to be applied.
-    if not getattr(args, "config", None):
-        return argparse.Namespace(**{**defaults, **explicit_cli})
-
-    from primus.core.utils import yaml_utils
-
-    logger.info(f"Loading config from: {args.config}")
-
-    # Load and flatten YAML config
-    config_dict = yaml_utils.parse_yaml(args.config)
-    flat_config = _flatten_preprocessing_config(config_dict)
-
-    overridden = sorted(key for key in explicit_cli if key in flat_config)
+    flat_config, overridden = resolve_encoded_preprocessing_config(config_path, cli_args)
     if overridden:
         logger.debug(f"CLI overrides: {overridden}")
 
-    logger.info("Configuration merged (CLI args override YAML)")
-    return argparse.Namespace(**{**defaults, **flat_config, **explicit_cli})
+    if config_path:
+        logger.info("Configuration merged (CLI args override YAML)")
+
+    passthrough_args = {key: value for key, value in cli_args.items() if key not in CONFIG_PATH_BY_DEST}
+    return argparse.Namespace(**{**passthrough_args, **flat_config})
 
 
 def _validate_preprocessing_config(args: "argparse.Namespace") -> None:
@@ -473,6 +371,15 @@ def _validate_preprocessing_config(args: "argparse.Namespace") -> None:
 
 def _prepare_encoded(args):
     """Prepare pre-encoded Energon WebDataset with VAE/T5/CLIP for fast training."""
+    from primus.backends.megatron.data.diffusion.preprocessing.auth import (
+        HFAuthError,
+        setup_hf_authentication,
+    )
+    from primus.backends.megatron.data.diffusion.preprocessing.pipelines.encoded import (
+        EncodedDatasetPipeline,
+    )
+    from primus.tools.utils import finalize_distributed, init_distributed
+
     # Load and merge config if provided
     args = _load_config_with_cli_overrides(args)
 
@@ -719,12 +626,7 @@ def _prepare_ingest(args):
 
 
 def register_subcommand(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
-    """
-    Register 'primus data' subcommand for Megatron diffusion dataset preparation.
-
-    Provides dataset preparation utilities specifically for diffusion models
-    using the Megatron backend, outputting Energon WebDataset format.
-    """
+    """Register ``primus data`` for Megatron diffusion dataset preparation."""
     parser = subparsers.add_parser(
         "data",
         help="Dataset preparation tools (Megatron diffusion, Energon format)",
@@ -741,8 +643,11 @@ def register_subcommand(subparsers: argparse._SubParsersAction) -> argparse.Argu
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-
-    data_subparsers = parser.add_subparsers(dest="data_command", required=True, help="Data preparation mode")
+    data_subparsers = parser.add_subparsers(
+        dest="data_command",
+        required=True,
+        help="Data preparation mode",
+    )
 
     # ===== primus data diffusion-raw =====
     raw_parser = data_subparsers.add_parser(
@@ -836,7 +741,7 @@ def register_subcommand(subparsers: argparse._SubParsersAction) -> argparse.Argu
     )
 
     # Defaults are suppressed here so --config can be merged correctly; they
-    # live in _get_encoded_parser_defaults() instead.
+    # live in the backend-owned preprocessing configuration schema instead.
     _add_common_args(encoded_parser, defaults_from_config=True)
 
     # Encoded-specific arguments
@@ -977,7 +882,7 @@ def register_subcommand(subparsers: argparse._SubParsersAction) -> argparse.Argu
 
     ingest_parser.set_defaults(func=lambda args, unknown: _prepare_ingest(args))
 
-    # Set default for parent parser (required by CLI framework, but never called due to required=True on subparsers)
+    # Required by the CLI dispatch contract. The nested subparser always
+    # replaces this with the selected command handler.
     parser.set_defaults(func=lambda args, unknown: None)
-
     return parser
