@@ -10,6 +10,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_PRIMUS_ROOT="$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)"
 PRIMUS_ROOT="${PRIMUS_PATH:-${DEFAULT_PRIMUS_ROOT}}"
 
+# Standard pip-skip switch, matching the posttrain Megatron and MaxDiffusion
+# hooks. An image that already ships the stack has nothing to gain here, and on
+# a ROCm image it can actively lose: these requirements are the Qwen3.5
+# gated-delta-net deps, and causal-conv1d ships no wheel, so pip builds it from
+# source and the build environment resolves a fresh `torch` against the image's
+# pinned ROCm build. That conflict is unresolvable and aborts the run before
+# training starts, for packages the model under test never imports.
+if [[ -n "${PRIMUS_SKIP_PIP:-}" && "${PRIMUS_SKIP_PIP}" != "0" && "${PRIMUS_SKIP_PIP,,}" != "false" ]]; then
+  echo "[00_install_requirements] PRIMUS_SKIP_PIP=${PRIMUS_SKIP_PIP} -> skipping Megatron pretrain dependency install"
+  exit 0
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --data_path)
