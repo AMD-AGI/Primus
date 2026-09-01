@@ -666,7 +666,10 @@ class TestMeasuredTimeBoundary:
         megatron_args.transformer_impl = "transformer_engine"
         _silence_log_rank_0(monkeypatch)
         model, optimizer, scheduler = _warmup_actors(monkeypatch)
-        preexisting = lambda *a, **k: None  # noqa: E731
+
+        def preexisting(*args, **kwargs):
+            return None
+
         config = SimpleNamespace(finalize_model_grads_func=preexisting)
 
         seen = []
