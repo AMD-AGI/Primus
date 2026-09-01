@@ -54,6 +54,7 @@ mkdir -p "${RESULTS_DIR}"
 # The MLLOG logger opens this append-only, so a relaunch under the same
 # RUN_INDEX concatenates two runs into one file and the compliance checker
 # reports every once-per-run key twice. One file is one run.
+mkdir -p "$(dirname "${MLLOG_OUTPUT_FILE}")"
 : > "${MLLOG_OUTPUT_FILE}"
 
 # --- Cold start -------------------------------------------------------------
