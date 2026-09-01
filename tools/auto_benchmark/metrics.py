@@ -152,6 +152,8 @@ TORCHTITAN_FILENAME_REGEX = re.compile(r"(?P<model>.+?)_torchtitan_(?P<device>MI
 
 MLPERF_FILENAME_REGEX = re.compile(r"(?P<model>.+?)_mlperf_(?P<device>MI\d+X?)", re.IGNORECASE)
 MLPERF_MLLOG_PREFIX = ":::MLLOG"
+MLPERF_SFT_SOURCE = "mlperf_sft.py"
+MLPERF_PRETRAIN_SOURCE = "mlperf_pretrain_trainer.py"
 
 PRECISION_REGEX = re.compile(r"(BF16|FP8)", re.IGNORECASE)
 
@@ -699,10 +701,31 @@ def mlperf_parse_mllog_line(line):
         return None
 
 
-def mlperf_parse_log_file(path):
-    run_duration = None
-    throughput = None
-    samples = None
+def mlperf_event_source(event):
+    metadata = event.get("metadata") or {}
+    file_path = metadata.get("file") or ""
+    if MLPERF_SFT_SOURCE in file_path:
+        return "sft"
+    if MLPERF_PRETRAIN_SOURCE in file_path:
+        return "pretrain"
+    return None
+
+
+def mlperf_model_metric_profile(model):
+    model_name = (model or "").lower()
+    if "llama2" in model_name:
+        return "sft"
+    if "llama3" in model_name:
+        return "pretrain"
+    return None
+
+
+def mlperf_parse_log_file(path, model=None):
+    profile = mlperf_model_metric_profile(model)
+    buckets = {
+        "sft": {"run_duration": None, "throughput": None, "samples": None},
+        "pretrain": {"run_duration": None, "throughput": None, "samples": None},
+    }
 
     with open(path, "r", errors="ignore") as f:
         for line in f:
@@ -711,25 +734,46 @@ def mlperf_parse_log_file(path):
             if not event:
                 continue
 
+            source = mlperf_event_source(event)
+            if source not in buckets:
+                continue
+
+            bucket = buckets[source]
             key = event.get("key")
             value = event.get("value")
             metadata = event.get("metadata") or {}
 
             if key == "run_duration":
-                run_duration = value
-            elif key in ("overall_throughput", "throughput"):
-                throughput = value
+                bucket["run_duration"] = value
+            elif key == "throughput" and source == "sft":
+                bucket["throughput"] = value
+            elif key == "overall_throughput" and source == "pretrain":
+                bucket["throughput"] = value
 
-            if metadata.get("samples") is not None:
-                samples = metadata.get("samples")
+            if key in ("throughput", "overall_throughput", "run_duration"):
+                if metadata.get("samples") is not None:
+                    bucket["samples"] = metadata.get("samples")
 
-    if run_duration is None and throughput is None and samples is None:
+    if profile == "sft":
+        chosen = buckets["sft"]
+    elif profile == "pretrain":
+        chosen = buckets["pretrain"]
+    elif buckets["sft"]["throughput"] is not None:
+        chosen = buckets["sft"]
+    else:
+        chosen = buckets["pretrain"]
+
+    if (
+        chosen["run_duration"] is None
+        and chosen["throughput"] is None
+        and chosen["samples"] is None
+    ):
         return None
 
     return {
-        "run_duration": run_duration if run_duration is not None else "-",
-        "throughput": throughput if throughput is not None else "-",
-        "samples": samples if samples is not None else "-",
+        "run_duration": chosen["run_duration"] if chosen["run_duration"] is not None else "-",
+        "throughput": chosen["throughput"] if chosen["throughput"] is not None else "-",
+        "samples": chosen["samples"] if chosen["samples"] is not None else "-",
     }
 
 
@@ -749,7 +793,7 @@ def mlperf_collect_rows():
             continue
 
         path = os.path.join(log_dir, fname)
-        stats = mlperf_parse_log_file(path)
+        stats = mlperf_parse_log_file(path, model=meta["model"])
 
         if not stats:
             values = [ERROR_STATUS, "mlperf", meta["device"], "-", "-", "-"]
