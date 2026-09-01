@@ -41,8 +41,9 @@ cross-rank boundary tile rows are zero-filled. Interior 32x32 tiles therefore
 match the forward quantizer exactly; only boundary tiles use an approximation.
 
 The local fp32 master is cast to the model dtype (normally bf16) before QDQ so
-the quantizer sees the same input precision as the forward GEMM. Tracking and
-snapping still operate on the local fp32-master shard.
+the quantizer sees the same input precision as the forward GEMM. Snapshots of
+the master and of Q(w) are kept in BF16; DistRatio window sums and the snap
+write-back into the fp32 master stay FP32.
 """
 
 from __future__ import annotations
@@ -89,6 +90,16 @@ try:
     from primus.backends.megatron.core.fp4_utils import MXFP4_SCALING_BLOCK_SIZE
 except (ImportError, ModuleNotFoundError):
     MXFP4_SCALING_BLOCK_SIZE = 32
+
+# prev / prev_q (and the per-step w, q views used to update them) live in BF16.
+# dist_w / dist_w_qdq and the snap write-back into the fp32 master stay FP32.
+_SNAP_DTYPE = torch.bfloat16
+
+
+def _as_snap(t: torch.Tensor) -> torch.Tensor:
+    """Detach ``t`` as a BF16 snapshot view/copy without an extra fp32 clone."""
+    x = t.detach()
+    return x if x.dtype == _SNAP_DTYPE else x.to(dtype=_SNAP_DTYPE)
 
 
 @dataclass
@@ -257,10 +268,10 @@ class _ParamDeOscState:
     __slots__ = ("prev", "prev_q", "dist_w", "dist_w_qdq", "step")
 
     def __init__(self, w_local: torch.Tensor, q_local: torch.Tensor):
-        self.prev = w_local.detach().clone().float()
-        self.prev_q = q_local.detach().clone().float()
-        self.dist_w = torch.zeros_like(self.prev)
-        self.dist_w_qdq = torch.zeros_like(self.prev)
+        self.prev = _as_snap(w_local).contiguous()
+        self.prev_q = _as_snap(q_local).contiguous()
+        self.dist_w = torch.zeros(self.prev.shape, device=self.prev.device, dtype=torch.float32)
+        self.dist_w_qdq = torch.zeros_like(self.dist_w)
         self.step = 0
 
     def to_serializable(self) -> dict:
@@ -283,8 +294,8 @@ class _ParamDeOscState:
         if tuple(blob["prev"].shape) != tuple(like.shape):
             return None
         obj = cls.__new__(cls)
-        obj.prev = blob["prev"].to(device=device, dtype=torch.float32)
-        obj.prev_q = blob["prev_q"].to(device=device, dtype=torch.float32)
+        obj.prev = blob["prev"].to(device=device, dtype=_SNAP_DTYPE)
+        obj.prev_q = blob["prev_q"].to(device=device, dtype=_SNAP_DTYPE)
         obj.dist_w = blob["dist_w"].to(device=device, dtype=torch.float32)
         obj.dist_w_qdq = blob["dist_w_qdq"].to(device=device, dtype=torch.float32)
         obj.step = int(blob["step"])
@@ -307,7 +318,7 @@ class WeightDeOscRunner:
         self._period_index = 0
         # Keyed by a stable structural key ("<param_name>|<start>:<end>") so the
         # state round-trips across checkpoint save/load under the same parallel
-        # layout. The fp32 local shard is the per-rank tensor we track and snap.
+        # layout. Snapshots are BF16; DistRatio sums and the snap target stay FP32.
         self._state: Dict[str, _ParamDeOscState] = {}
         # id(model_param) -> stable param name, cached.
         self._param_name_cache: Dict[int, str] = {}
@@ -462,30 +473,31 @@ class WeightDeOscRunner:
         q_local: torch.Tensor,
     ) -> Tuple[int, int, bool]:
         state = self._state.get(key)
-
-        w_local_f = w_local.float()
-        q_local_f = q_local.float()
+        w_snap = _as_snap(w_local)
+        q_snap = _as_snap(q_local)
+        n_elem = w_snap.numel()
 
         if state is None:
             # Restore from a loaded checkpoint if the shard matches, else seed.
             loaded = self._loaded_params.pop(key, None)
             if loaded is not None:
-                state = _ParamDeOscState.from_serializable(loaded, w_local_f.device, w_local_f)
+                state = _ParamDeOscState.from_serializable(loaded, w_snap.device, w_snap)
             if state is None:
                 # First observation: seed snapshots, do not track this step.
-                self._state[key] = _ParamDeOscState(w_local_f, q_local_f)
-                return 0, w_local_f.numel(), False
+                self._state[key] = _ParamDeOscState(w_snap, q_snap)
+                return 0, n_elem, False
             self._state[key] = state
             # fall through to track this step using the restored snapshots
 
-        state.dist_w += (w_local_f - state.prev).abs()
-        state.dist_w_qdq += (q_local_f - state.prev_q).abs()
-        state.prev.copy_(w_local_f)
-        state.prev_q.copy_(q_local_f)
+        # Promote only the BF16 delta into the FP32 window accumulators.
+        state.dist_w += (w_snap - state.prev).abs()
+        state.dist_w_qdq += (q_snap - state.prev_q).abs()
+        state.prev.copy_(w_snap)
+        state.prev_q.copy_(q_snap)
         state.step += 1
 
         if state.step < self.config.period:
-            return 0, w_local_f.numel(), False
+            return 0, n_elem, False
 
         # End of period: snap oscillating elements to the current bin center.
         ratio = state.dist_w_qdq / state.dist_w.clamp(min=self._EPS)
@@ -494,17 +506,22 @@ class WeightDeOscRunner:
         reset_count = 0
         if reset_mask.any():
             reset_count = int(reset_mask.sum().item())
-            shard_main_param.data.view(-1)[reset_mask] = q_local_f[reset_mask].to(shard_main_param.dtype)
+            q_flat = q_snap.reshape(-1)
+            # Snap target is the dequantized bin center, written back in FP32.
+            shard_main_param.data.view(-1)[reset_mask] = q_flat[reset_mask].to(
+                dtype=shard_main_param.dtype
+            )
             # Refresh master snapshot so the snap is not counted as a large
             # movement on the next period's first step. prev_q already equals
             # Q(snapped) because the snapped values are dequantized bin centers
             # (QDQ is idempotent on them).
-            state.prev.copy_(shard_main_param.detach().float().view(-1))
+            state.prev.copy_(w_snap)
+            state.prev.view(-1)[reset_mask] = q_flat[reset_mask]
 
         state.dist_w.zero_()
         state.dist_w_qdq.zero_()
         state.step = 0
-        return reset_count, w_local_f.numel(), True
+        return reset_count, n_elem, True
 
     # ------------------------------------------------------------------
     # Checkpoint persistence (per-rank; correct for same parallel layout)

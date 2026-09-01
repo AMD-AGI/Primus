@@ -1,0 +1,23 @@
+# Transformer Engine per-module precision recipe for GPT-OSS-20B MXFP4.
+# Loaded via Megatron --te-precision-config-file / yaml te_precision_config_file.
+# Empty training_recipe disables FP4/FP8 autocast for the matched modules (BF16).
+# Grouped expert GEMMs are not matched, so they keep the experiment MXFP4 recipe.
+#
+# This file is not a Primus experiment recipe.
+
+configs:
+  bf16:
+    transformer_engine_config_type: "TEQuantizationParams"
+    training_recipe: {}
+
+matchers:
+  self_attn_qkv_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.self_attention.linear_qkv"
+    enabled: true
+  self_attn_proj_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.self_attention.linear_proj"
+    enabled: true
