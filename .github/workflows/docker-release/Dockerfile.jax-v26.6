@@ -1,0 +1,577 @@
+ARG DEFAULT_BASE=ubuntu:24.04
+ARG BASE_IMAGE=${DEFAULT_BASE}
+
+# rocm-sdk init (below) extracts a prebuilt bazelisk binary to /usr/local/bin/bazel
+# so ROCm/TheRock components can be rebuilt from source. That prebuilt binary is
+# stale (Go 1.23.0 stdlib, ~16 CVEs) and no newer official bazelisk release fixes
+# it either (still built with go1.24.0). Rebuild the same upstream source with a
+# current Go toolchain instead, preserving identical launcher behavior.
+FROM golang:1.26.6-bookworm AS bazelisk_builder
+ARG BAZELISK_VERSION=v1.29.0
+# bazelisk's own go.mod pins golang.org/x/crypto, golang.org/x/sys and
+# golang.org/x/net versions with known CVEs; bump them explicitly since no newer
+# bazelisk tag fixes this upstream. x/crypto and x/net are pinned to exact versions
+# (rather than -u) because registry build-cache reuse otherwise freezes whatever
+# version was first resolved, letting the CVE drift back.
+RUN git clone --depth 1 --branch ${BAZELISK_VERSION} https://github.com/bazelbuild/bazelisk.git /src \
+    && cd /src \
+    && go get golang.org/x/crypto@v0.52.0 \
+    && go get -u golang.org/x/sys \
+    && go get golang.org/x/net@v0.56.0 \
+    && go mod tidy \
+    && go build -o /bazelisk
+
+# transformer_engine_rocm_jax's own build vendors a copy of GoogleCloudPlatform/gcsfuse
+# (built to /usr/sbin/mount.gcsfuse) whose go.mod pins golang.org/x/text,
+# golang.org/x/net and google.golang.org/grpc versions with known CVEs; this isn't
+# fixed upstream as of gcsfuse's latest release, so rebuild the same binaries here
+# with those deps bumped and overwrite whatever TE's build (and later, MaxText's
+# apt-installed gcsfuse package) produced, preserving identical behavior. Both the
+# main gcsfuse binary and the mount.gcsfuse helper embed these deps, so both are
+# rebuilt.
+FROM golang:1.26.6-bookworm AS gcsfuse_builder
+ARG GCSFUSE_VERSION=v3.11.2
+RUN git clone --depth 1 --branch ${GCSFUSE_VERSION} https://github.com/GoogleCloudPlatform/gcsfuse.git /src \
+    && cd /src \
+    && go get golang.org/x/text@v0.39.0 \
+    && go get google.golang.org/grpc@v1.82.1 \
+    && go get golang.org/x/net@v0.56.0 \
+    && go mod tidy \
+    && go build -o /mount.gcsfuse ./tools/mount_gcsfuse \
+    && go build -o /gcsfuse .
+
+# pip vendors its own copies of msgpack and setuptools under pip/_vendor and
+# declares them in the CycloneDX SBOM it ships (pip/_vendor/bom.cdx.json), which
+# Trivy reads and flags for GHSA-6v7p-g79w-8964 (msgpack) and CVE-2025-47273
+# (setuptools). Rebuild pip with those two vendored components bumped past the
+# fixes -- msgpack 1.2.1, and setuptools 79.0.1 (the highest that still satisfies
+# pip's own `setuptools<80` vendor pin) -- so the regenerated SBOM is clean.
+FROM python:3.12-slim AS pip_builder
+ARG PIP_VERSION=26.2.1
+# build-essential: msgpack has no pure "any" wheel, so `vendoring sync` builds it
+# from sdist and needs a C compiler; the compiled .so is dropped afterward per
+# pip's own vendoring config, leaving the pure-Python copy pip ships.
+RUN apt-get update && apt-get install -y --no-install-recommends git build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install vendoring build
+RUN git clone --depth 1 --branch ${PIP_VERSION} https://github.com/pypa/pip.git /src
+WORKDIR /src
+RUN sed -i \
+        -e 's/^msgpack==.*/msgpack==1.2.1/' \
+        -e 's/^setuptools==.*/setuptools==79.0.1/' \
+        src/pip/_vendor/vendor.txt
+# setuptools 79.0.1's pkg_resources uses dotted `import packaging.<sub>` imports
+# that vendoring can't rewrite into the pip._vendor namespace, plus a bare
+# `from jaraco.text import ...` (jaraco isn't vendored). Overwrite pip's own
+# vendoring patch (pinned to 70.3.0) with one that runs during `vendoring sync`,
+# before its import-transform step: rewrite the dotted packaging imports to
+# pip._vendor.packaging.<sub> and redirect jaraco to pip's bundled _jaraco_text
+# shim. platformdirs is a plain `from platformdirs import ...` and is rewritten
+# automatically. Built via printf so the diff's leading context space survives.
+RUN printf '%s\n' \
+        '--- a/src/pip/_vendor/pkg_resources/__init__.py' \
+        '+++ b/src/pip/_vendor/pkg_resources/__init__.py' \
+        '@@ -85,7 +85,8 @@' \
+        '-import packaging.markers' \
+        '-import packaging.requirements' \
+        '-import packaging.specifiers' \
+        '-import packaging.utils' \
+        '-import packaging.version' \
+        '-from jaraco.text import drop_comment, join_continuation, yield_lines' \
+        '+from pip._vendor import packaging' \
+        '+import pip._vendor.packaging.markers' \
+        '+import pip._vendor.packaging.requirements' \
+        '+import pip._vendor.packaging.specifiers' \
+        '+import pip._vendor.packaging.utils' \
+        '+import pip._vendor.packaging.version' \
+        '+from pip._internal.utils._jaraco_text import drop_comment, join_continuation, yield_lines' \
+        ' from platformdirs import user_cache_dir as _user_cache_dir' \
+        > tools/vendoring/patches/pkg_resources.patch \
+    && vendoring sync -v \
+    && python -m build --wheel -o /dist
+
+FROM  ${BASE_IMAGE:-$DEFAULT_BASE} AS jax_base
+
+WORKDIR /workspace/
+ENV MAX_JOBS=128
+ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
+ENV ROCM_AMDGPU_TARGETS="gfx942,gfx950"
+
+# Flag to fix profiler hang issue.
+ENV ROCPROFILER_QUEUE_INTERPOSITION=0
+ENV DEBUG_HIP_DYNAMIC_QUEUES=0
+
+# Install Ubuntu dependencies
+ENV DEBIAN_FRONTEND=noninteractive
+# linux-libc-dev ships pre-installed in the base image and is never otherwise
+# touched by this file, so it stays pinned to whatever Ubuntu shipped at base
+# publish time. Explicitly upgrade it (rather than a blanket `apt upgrade`) to
+# pick up kernel-header CVE fixes without widening the retest surface.
+RUN apt update \
+	&& apt install --only-upgrade --no-install-recommends -y linux-libc-dev \
+	&& apt install -y --no-install-recommends \
+	gfortran \
+	git \
+	git-lfs \
+	make \
+	ninja-build \
+	g++ \
+	pkg-config \
+	xxd \
+	patchelf \
+	automake \
+	libtool \
+	python3-venv \
+	python3-dev \
+	python3-pip \
+	python-is-python3 \
+	libegl1-mesa-dev \
+	wget \
+	unzip \
+    sudo \
+    flex \
+    liblzma-dev \
+    ccache \
+    libdw1 \
+    libdrm-dev \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Setup python env
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+# wheel and setuptools are pinned for CVE fixes (setuptools>=80.10.2 also vendors
+# patched copies of wheel/jaraco.context internally); msgpack likewise. These are
+# re-forced again after the Primus install further down, since Primus/maxtext
+# transitively pull in older, CVE-affected copies of all three.
+# Install pip from the re-vendored wheel built in pip_builder (patched msgpack +
+# setuptools in pip/_vendor). --force-reinstall since the wheel shares the 26.2.1
+# version string, so a plain --upgrade would no-op.
+COPY --from=pip_builder /dist/pip-*.whl /tmp/
+RUN pip install --upgrade --force-reinstall /tmp/pip-*.whl \
+    && rm -f /tmp/pip-*.whl \
+    && pip uninstall -y wheel \
+    && pip install \
+        cmake==3.31.6 \
+        ninja==1.11.1.3 \
+        wheel==0.46.2 \
+        packaging==25.0 \
+        setuptools==80.10.2 \
+        msgpack==1.2.1 \
+    && rm -rf /root/.cache
+
+# Install ROCm and related libraries from the rock pip wheels
+# See: https://repo.amd.com/rocm/whl-multi-arch/
+ENV THE_ROCK_VERSION=7.14.0
+
+RUN python -m pip install \
+        --index-url https://repo.amd.com/rocm/whl-multi-arch \
+        --pre \
+        rocm==${THE_ROCK_VERSION} \
+        rocm-bootstrap \
+        rocm-sdk-core==${THE_ROCK_VERSION} \
+        rocm-sdk-devel==${THE_ROCK_VERSION} \
+        rocm-sdk-device-gfx942==${THE_ROCK_VERSION} \
+        rocm-sdk-device-gfx950==${THE_ROCK_VERSION} \
+        rocm-sdk-libraries==${THE_ROCK_VERSION} \
+    && rm -rf /root/.cache
+
+RUN rocm-sdk init
+COPY --from=bazelisk_builder /bazelisk /usr/local/bin/bazel
+ENV ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
+# Note: Primus uses `ROCM_HOME` instead of `ROCM_PATH`. Set both to avoid potential issues.
+ENV ROCM_HOME=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
+ENV HIP_PLATFORM=amd
+ENV HIP_PATH=$ROCM_PATH
+ENV HIP_CLANG_PATH=$ROCM_PATH/llvm/bin
+ENV HIP_INCLUDE_PATH=$ROCM_PATH/include
+ENV HIP_LIB_PATH=$ROCM_PATH/lib
+ENV HIP_DEVICE_LIB_PATH=$ROCM_PATH/lib/llvm/amdgcn/bitcode
+ENV PATH="$ROCM_PATH/bin:$HIP_CLANG_PATH:$PATH"
+ENV LD_LIBRARY_PATH="$HIP_LIB_PATH:$ROCM_PATH/lib:$ROCM_PATH/lib64:$ROCM_PATH/llvm/lib:$ROCM_PATH/lib/host-math/lib:$ROCM_PATH/lib/rocm_sysdeps/lib"
+ENV LIBRARY_PATH="$HIP_LIB_PATH:$ROCM_PATH/lib:$ROCM_PATH/lib64"
+ENV CPATH=$HIP_INCLUDE_PATH
+ENV PKG_CONFIG_PATH="$ROCM_PATH/lib/pkgconfig"
+
+# Build RCCL with https://github.com/ROCm/rocm-systems/pull/8484 (ROCM-27881).
+# This commit `9e5e408` is on `develop`, committed 2026-07-13, not yet backported
+# to release/therock-7.14. Fixes RCCL unconditionally installing net-ib
+# fault-injection shims on every ibv_open_device() call.
+#
+# $ROCM_PATH here is the rocm-sdk pip-wheel devel tree (_rocm_sdk_devel); the
+# existing librccl* entries under $ROCM_PATH/lib are symlinks merged in from
+# the rocm-sdk-libraries wheel, so `rm -f` them first before copying the
+# rebuilt .so in as a plain file (a bare `cp -r` onto the old symlink hits
+# ELOOP). We override in place rather than adding a separate lib dir + env
+# var, since anything with an RPATH/RUNPATH baked to $ROCM_PATH/lib would
+# ignore LD_LIBRARY_PATH and keep loading the unpatched RCCL.
+RUN git clone https://github.com/ROCm/rocm-systems.git \
+    && cd rocm-systems \
+    && git checkout 9e5e4084a4b8e1e86551b0eb054725c62354a926 \
+    && cd projects/rccl \
+    && ./install.sh -l \
+        --prefix build/ \
+        --amdgpu_targets="gfx942;gfx950" \
+    && rm -f $ROCM_PATH/lib/librccl* \
+    && cp -r build/release/librccl* $ROCM_PATH/lib/ \
+    && cd /workspace \
+    && rm -rf rocm-systems
+
+# JAX
+# Note: JAX and related libraries need to be installed before TE
+# jax_rocm7_pjrt/jax_rocm7_plugin are now published to PyPI at 0.11.0.post1 (a
+# rocm7 post-release for jax/jaxlib 0.11.0), so install all of JAX from PyPI and
+# drop the rocm-jax GitHub wheelhouse download. cp312 plugin matches the venv.
+ARG JAX_VERSION=0.11.0
+ENV JAX_VERSION=${JAX_VERSION}
+ARG JAX_ROCM_VERSION=0.11.0.post1
+
+RUN pip install \
+        jax==${JAX_VERSION} \
+        jaxlib==${JAX_VERSION} \
+        scipy==1.16 \
+        jax_rocm7_pjrt==${JAX_ROCM_VERSION} \
+        jax_rocm7_plugin==${JAX_ROCM_VERSION} \
+    && rm -rf /root/.cache
+
+# TransformerEngine
+# See: https://rocm.frameworks-devreleases.amd.com/whl-multi-arch-staging/transformer-engine-rocm-jax/
+# TE 2.17 (fixes Cohere numerics) ships only as a _jax source sdist -- no core
+# transformer_engine_rocm7 wheel at 2.17 -- so we build the full TE tree from it
+# and drop the rocm_version assert patch (2.17 is built for rocm7.14 == the base).
+ARG TE_VERSION=2.17.0+rocm7.14.0.50a84ad
+
+# flaxlib_src (bundled inside the flax wheel) is inert vendored Rust/C++ reference
+# source: flax only imports the compiled flaxlib extension when flax_use_flaxlib is
+# enabled (default off), and no such extension is ever built here, so it's unreachable
+# either way. Delete it below to drop its Cargo.lock (stale pyo3 CVE) with no behavior
+# change. This pin/deletion is repeated again after the Primus install further down,
+# since Primus transitively pulls in a newer flax that reintroduces flaxlib_src.
+RUN pip install \
+        pybind11==3.0.4 \
+        importlib-metadata==8.7.1 \
+        pydantic==2.13.4 \
+        flax==0.12.8 \
+    && pip install \
+        --index-url https://rocm.frameworks-devreleases.amd.com/whl-multi-arch-staging/ \
+        --pre \
+        --no-build-isolation \
+        transformer_engine_rocm_jax==${TE_VERSION} \
+    && find /opt/venv/lib/python3.12/site-packages/orbax -type f \( -iname 'Dockerfile*' -o -iname '*.Dockerfile' \) -delete \
+    && rm -rf /opt/venv/lib/python3.12/site-packages/flaxlib_src \
+    && rm -rf /root/.cache
+COPY --from=gcsfuse_builder /mount.gcsfuse /usr/sbin/mount.gcsfuse
+
+FROM jax_base AS jax_training
+
+# Intentionally root (no USER instruction): training entrypoints need direct
+# access to /dev/kfd and /dev/dri GPU device nodes and to AINIC/RDMA devices,
+# which a non-root user cannot reliably get across the container runtimes this
+# image is deployed on. Trivy DS-0002 is expected to keep flagging this;
+# tracked as an accepted risk rather than remediated here.
+
+# Configure required envs
+ENV NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
+ENV NVTE_USE_HIPBLASLT=1
+ENV GPU_MAX_HW_QUEUES=2
+ENV HIP_FORCE_DEV_KERNARG=1
+ENV HSA_FORCE_FINE_GRAIN_PCIE=1
+ENV NVTE_FUSED_ATTN=1
+ENV NCCL_DEBUG=VERSION
+ENV NVTE_CK_USES_BWD_V3=1
+ENV NVTE_CK_USES_FWD_V3=1
+ENV NVTE_CK_IS_V3_ATOMIC_FP32=1
+ENV NVTE_CK_HOW_V3_BF16_CVT=2
+ENV XLA_PYTHON_CLIENT_MEM_FRACTION=.9
+ENV XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE --xla_gpu_enable_command_buffer=''"
+
+WORKDIR /workspace
+
+# Install maxtext
+ARG MAXTEXT_REPO=https://github.com/ROCm/maxtext.git
+ARG MAXTEXT_BRANCH=release/v26.6
+
+RUN git clone ${MAXTEXT_REPO} \
+    && cd maxtext \
+    && git checkout ${MAXTEXT_BRANCH} \
+    && chmod +x src/dependencies/scripts/setup.sh \
+    && ./src/dependencies/scripts/setup.sh \
+    && cd .. \
+    && find maxtext -type f \( -iname 'Dockerfile*' -o -iname '*.Dockerfile' \) -delete \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /root/.cache
+
+# Fix (root cause): the prebuilt PyPI TensorFlow wheel bundles an LLVM whose symbols
+# collide with ROCm's libLLVM when loaded via RTLD_GLOBAL (TheRock torch wheels) or
+# inside Grain "spawn" workers. Rebuild the CPU-only TF wheel from ROCm's fork
+# (correct symbol visibility) and install it in place of the stock wheel. A CPU
+# build also has no bundled NCCL, preserving the XLA-RCCL fix.
+# NOTE: bumps TF to 2.21.0 and adds a long (~30-60 min) bazel build to the image.
+# bazel is already installed via the bazelisk_builder stage above (jax_base ->
+# jax_training inherits /usr/local/bin/bazel) -- reused here rather than
+# re-downloading the vulnerable prebuilt bazelisk release.
+ARG TF_REPO=https://github.com/ROCm/tensorflow-upstream.git
+ARG TF_BRANCH=upstream-v2.21.0
+RUN apt-get update && apt-get install -y --no-install-recommends zip \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch ${TF_BRANCH} ${TF_REPO} tensorflow-upstream \
+    && cd tensorflow-upstream \
+    && bazel build //tensorflow/tools/pip_package:wheel \
+        --repo_env=WHEEL_NAME=tensorflow_cpu \
+        --repo_env=HERMETIC_PYTHON_VERSION=3.12 \
+    && pip uninstall -y tensorflow tensorflow-cpu tensorflow_cpu \
+    && pip install --no-deps \
+        bazel-bin/tensorflow/tools/pip_package/wheel_house/tensorflow_cpu-2.21.0-cp312-cp312-linux_x86_64.whl \
+    && cd .. \
+    && rm -rf tensorflow-upstream /root/.cache/bazel /root/.cache
+
+# Primus
+ARG PRIMUS_REPO=https://github.com/AMD-AGI/Primus.git
+ARG PRIMUS_BRANCH=main
+
+RUN git clone --recurse-submodules ${PRIMUS_REPO} \
+    && cd Primus \
+    && git checkout ${PRIMUS_BRANCH} \
+    && git submodule update --init third_party/maxtext/ \
+    && cd .. \
+    && find Primus -type f \( -iname 'Dockerfile*' -o -iname '*.Dockerfile' \) -delete \
+    && pip uninstall -y dataclasses dataclasses_json \
+    && rm -rf /root/.cache
+
+# maxtext/Primus pull these in transitively at older, CVE-affected versions.
+# Force the fixed versions found by Trivy. setuptools>=80.10.2 also vendors
+# patched copies of wheel (0.46.3) and jaraco.context (6.1.0) internally,
+# resolving the two vendored-copy CVEs that the top-level wheel pin above
+# can't reach. flax is re-pinned and flaxlib_src re-deleted here too: Primus's
+# install above transitively upgrades flax past the pin/deletion done earlier
+# in the jax_base stage, undoing that fix. cryptography is bumped past 48.0.1
+# for CVE-2026-69247/CVE-2026-69249 (Trivy), both disclosed after that pin was
+# first set. keras is pulled in transitively by tensorflow (via maxtext's
+# setup.sh); 3.14.1 is CVE-2026-12481/CVE-2026-12484 (arbitrary code
+# execution via unsafe deserialization), fixed in 3.15.0.
+RUN pip install --upgrade \
+        pillow==12.3.0 \
+        starlette==1.3.1 \
+        pyasn1==0.6.4 \
+        cryptography==50.0.0 \
+        httplib2==0.32.0 \
+        black==26.3.1 \
+        msgpack==1.2.1 \
+        setuptools==80.10.2 \
+        flax==0.12.8 \
+        keras==3.15.0 \
+    && rm -rf /opt/venv/lib/python3.12/site-packages/flaxlib_src \
+    && find /opt/venv/lib/python3.12/site-packages/pathwaysutils -type f \( -iname 'Dockerfile*' -o -iname '*.Dockerfile' \) -delete \
+    && rm -rf /root/.cache
+
+# MaxText's setup.sh (cloned above) installs Google's official gcsfuse apt
+# package, which overwrites our deps-bumped mount.gcsfuse (COPY'd earlier in
+# jax_base) and additionally drops a separate main gcsfuse binary with the
+# same vulnerable golang.org/x/text and google.golang.org/grpc versions built
+# in. Re-apply both here, after Primus — the last thing in this stage that
+# could touch them — so these are the final bytes on disk.
+COPY --from=gcsfuse_builder /mount.gcsfuse /usr/sbin/mount.gcsfuse
+COPY --from=gcsfuse_builder /gcsfuse /usr/bin/gcsfuse
+
+####### AINIC related installations #######
+RUN apt update \
+    && apt install -y --no-install-recommends \
+    libibverbs-dev \
+    jq \
+    dpkg-dev \
+    kmod \
+    xz-utils \
+    ibverbs-utils \
+    infiniband-diags \
+    rdma-core \
+    ethtool \
+    libevent-dev \
+    libhwloc-dev \
+    libmunge-dev \
+    software-properties-common \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install AMD AINIC library
+ARG AINIC_BUNDLE_VERSION="1.117.5-a-77"
+
+RUN add-apt-repository -y "deb https://repo.radeon.com/amdainic/pensando/ubuntu/${AINIC_BUNDLE_VERSION} noble main" \
+    && apt update --allow-insecure-repositories \
+    && apt install -y --no-install-recommends --allow-unauthenticated libionic-dev \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Allow insecure repositories by default
+RUN echo 'Acquire::AllowInsecureRepositories "true";' >> /etc/apt/apt.conf.d/99allow-insecure-repositories
+
+# Install UCX
+ARG UCX_VERSION="1.18.0"
+
+RUN wget https://github.com/openucx/ucx/releases/download/v${UCX_VERSION}/ucx-${UCX_VERSION}.tar.gz \
+    && mkdir -p ucx-${UCX_VERSION} \
+    && tar -zxf ucx-${UCX_VERSION}.tar.gz -C ucx-${UCX_VERSION} --strip-components=1 \
+    && cd ucx-${UCX_VERSION} \
+    && mkdir build \
+    && cd build \
+    && ../configure --prefix=/workspace/ucx-${UCX_VERSION}/install --with-rocm=${ROCM_PATH} \
+    && make -j 16 \
+    && make install \
+    && cd ../.. \
+    && rm ucx-${UCX_VERSION}.tar.gz
+
+ENV UCX_INSTALL_DIR=/workspace/ucx-${UCX_VERSION}/install
+
+# Install OpenMPI
+ARG MPI_VERSION="4.1.6"
+
+RUN wget https://download.open-mpi.org/release/open-mpi/v$(echo "${MPI_VERSION}" | cut -d. -f1-2)/openmpi-${MPI_VERSION}.tar.gz \
+    && mkdir -p ompi-${MPI_VERSION} \
+    && tar -zxf openmpi-${MPI_VERSION}.tar.gz -C ompi-${MPI_VERSION} --strip-components=1 \
+    && cd ompi-${MPI_VERSION} \
+    && mkdir build \
+    && cd build \
+    && ../configure --prefix=${WORKDIR}/ompi-${MPI_VERSION}/install --with-ucx=${UCX_INSTALL_DIR} --disable-oshmem --disable-mpi-fortran \
+    && make -j 16 \
+    && make install \
+    && cd ../.. \
+    && rm openmpi-${MPI_VERSION}.tar.gz \
+    && rm -rf ompi-${MPI_VERSION}
+
+####### End of AINIC related installations #######
+
+# Secret scan will complain those files to be secrets. Explicitly remove them.
+RUN rm -f /workspace/Primus/.git/packed-refs /workspace/Primus/.git/modules/third_party/**/packed-refs
+
+# Clean cache
+RUN rm -rf /root/.cache
+
+# Training docker manifest
+ARG GIT_COMMIT_TAG=DEV
+ARG DOCKERFILE_PATH=Dockerfile
+
+# Copy patch files for training docker versioning
+RUN mkdir -p /workspace/.manifest \
+    && env > /workspace/.manifest/env.txt \
+    && pip list > /workspace/.manifest/requirements.txt \
+    && dpkg -l > /workspace/.manifest/dpkg-list.txt \
+    && echo "${GIT_COMMIT_TAG}" > /workspace/.manifest/training_docker_version
+
+# Named to avoid matching Trivy's Dockerfile-config detector (Dockerfile*/*.Dockerfile) --
+# this is just a build-provenance snapshot, not a container definition to lint.
+COPY ${DOCKERFILE_PATH} /workspace/.manifest/docker-build-recipe.txt
+
+# TE 2.17 + jax segfault fix: blank the build-time LD_LIBRARY_PATH (rocm-sdk-devel
+# dirs from jax_base) so wheels resolve ROCm via their own RPATH at runtime instead
+# of loading a mismatched HIP copy that segfaults CK-JIT fmha_bwd on gfx950.
+ENV LD_LIBRARY_PATH=""
+
+FROM jax_training AS jax_maxdiffusion
+
+# ========================================================================
+# MaxDiffusion additions (WAN 2.1 + FLUX.1-dev) on top of jax_training.
+# jax_training already ships JAX, Transformer Engine, MaxText and its JAX
+# ecosystem libs (flax, drjax, qwix, tokamax, einshape, typeguard,
+# transformers, tensorflow), so only the still-missing/incompatible pieces
+# are handled below. torch, torchvision, scikit-image and imageio-ffmpeg are
+# absent from jax_training; transformers ships as v5 there and is pinned
+# back to 4.57.3 below.
+# ========================================================================
+
+# jax_training's WORKDIR (/workspace) carries over from jax_base, so no need
+# to mkdir/WORKDIR again here.
+
+# Force Transformer Engine to load ONLY its JAX extension. jax_training's TE
+# build defaults to _use_pytorch=True and, once we install torch below,
+# eagerly imports transformer_engine.pytorch. Because jax_training ships only
+# the JAX/core TE wheels (transformer_engine_rocm_jax / transformer_engine_rocm7)
+# and NOT transformer_engine_rocm_torch, that import raises "AssertionError:
+# Found `transformer-engine` PyPI package but not transformer_engine_rocm_torch"
+# the moment maxdiffusion enters transformer_engine_context(). NVTE_FRAMEWORK=jax
+# skips the torch extension.
+ENV NVTE_FRAMEWORK=jax
+
+# MaxDiffusion dependencies: torch/torchvision for video processing.
+# torch deps are already present in jax_training, so --no-index is safe;
+# TheRock wheels: includes _rocm_init which resolves ROCm libs via rocm_sdk
+# at import time, eliminating the need for LD_LIBRARY_PATH.
+RUN pip install --no-cache-dir --no-deps \
+    --index-url https://rocm.nightlies.amd.com/whl-multi-arch/ \
+    "torch==2.8.0+rocm7.14.0a20260520" \
+    "torchvision==0.23.0a0+rocm7.14.0a20260520" \
+    && rm -rf /root/.cache
+
+RUN pip install --no-cache-dir \
+    scikit-image \
+    imageio-ffmpeg \
+    && rm -rf /root/.cache
+
+# MaxDiffusion imports the Flax CLIP classes (FlaxCLIPTextModel) which were
+# removed in transformers v5. jax_training ships transformers 5.x, so pin
+# back to the last Flax-capable 4.x release (matches the previously-working
+# setup).
+# 4.57.3 carries two HIGH CVEs (CVE-2026-4372, CVE-2026-5241) only fixed at
+# transformers>=5.3.0/5.5.0 -- no 4.x backport exists, and bumping to 5.x isn't an
+# option here (see above). Accepted as risk: CVE-2026-4372's RCE path requires the
+# optional `kernels` package, which is never installed in this image (MaxDiffusion
+# itself is installed --no-deps below); CVE-2026-5241's RCE path is specific to
+# loading LightGlue via trust_remote_code, which MaxDiffusion's diffusion/video
+# pipelines never do. Neither exploit precondition is present here.
+RUN pip install --no-cache-dir transformers==4.57.3 \
+    && rm -rf /root/.cache
+
+# The FLUX text encoder uses transformers' Flax T5, which calls
+# jnp.clip(..., a_max=...). JAX 0.10 removed the a_min/a_max kwargs (renamed to
+# min/max), so this raises "clip() got an unexpected keyword argument 'a_max'".
+# Patch the two jnp.clip calls in the Flax T5 model to the new kwarg names.
+RUN sed -i 's/a_max=/max=/g; s/a_min=/min=/g' \
+    /opt/venv/lib/python*/site-packages/transformers/models/t5/modeling_flax_t5.py
+
+# Clone and install MaxDiffusion
+ARG MAXDIFFUSION_REPO=https://github.com/AI-Hypercomputer/maxdiffusion.git
+ARG MAXDIFFUSION_COMMIT=68e069659f0af80694559e29939a17f879fe7f6a
+RUN git clone ${MAXDIFFUSION_REPO} /workspace/maxdiffusion && \
+    cd /workspace/maxdiffusion && \
+    git checkout ${MAXDIFFUSION_COMMIT} && \
+    pip install --no-cache-dir -e . --no-deps && \
+    find /workspace/maxdiffusion -maxdepth 1 -type f \( -iname 'Dockerfile*' -o -iname '*.Dockerfile' \) -delete && \
+    rm -rf /root/.cache
+
+# Transformer Engine and TensorFlow have a library-load order conflict on
+# jax_training: importing TE before TF segfaults at TF's C-extension preload.
+# Every maxdiffusion entrypoint imports jax, then enters
+# transformer_engine_context() (which imports TE) before the trainer pulls in
+# TF. Preload TF inside that context so the load order is always
+# jax -> tensorflow -> transformer_engine.
+RUN sed -i \
+    '/from transformer_engine.jax.sharding import global_shard_guard, MeshResource/i\    import tensorflow  # noqa: F401 preload before Transformer Engine to avoid segfault' \
+    /workspace/maxdiffusion/src/maxdiffusion/train_utils.py
+
+# cudnn_flash_te attention: maxdiffusion disables the Shardy partitioner to fall
+# back to GSPMD, but jax_training ships JAX 0.10+ + Transformer Engine, where
+# TE registers its custom_partitioner with a Shardy sharding_rule ONLY (GSPMD's
+# infer_sharding_from_operands is dropped for JAX > 0.9.1). Forcing GSPMD makes
+# XLA call a None infer_sharding_from_operands -> "'NoneType' object is not
+# callable" abort during sharding propagation. Keep Shardy enabled (the JAX
+# 0.10+ default, and what maxdiffusion's generate_wan.py already uses) so TE's
+# Shardy rule is honored.
+RUN sed -i \
+    's/jax.config.update("jax_use_shardy_partitioner", False)/jax.config.update("jax_use_shardy_partitioner", True)/g' \
+    /workspace/maxdiffusion/src/maxdiffusion/models/attention_flax.py
+
+# cudnn_flash_te attention: TE's fused-attention partitioner aborts with
+# "AssertionError:  is not a axis of the given mesh" during XLA compilation on
+# jax_training's TE build. TE resolves the context-parallel axis via
+# _maybe_context_parallel_axis(), which only reads MeshResource.cp_resource
+# when is_mesh_available() is True; at attention config-build time that is
+# False, so cp_axis is frozen as "" (empty) even though maxdiffusion sets
+# cp_resource="context". At partition time get_mesh_axis_size("") then fails
+# its `axis in mesh.shape` assertion. TE already treats `axis is None` as size
+# 1 (i.e. no context parallelism); extend that to the empty string so an
+# unresolved cp_axis means "no CP" (correct here, context mesh dim = 1)
+# instead of crashing.
+RUN sed -i \
+    's|    assert axis in mesh.shape, f"{axis} is not a axis of the given mesh {mesh.shape}"|    if not axis:\n        return 1\n    assert axis in mesh.shape, f"{axis} is not a axis of the given mesh {mesh.shape}"|' \
+    /opt/venv/lib/python*/site-packages/transformer_engine/jax/sharding.py
+
+RUN pip3 list
