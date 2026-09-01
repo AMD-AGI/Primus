@@ -198,6 +198,18 @@ class ModelConfig:
     # achieved fraction of matmul peak for the ragged-HSTU kernel (~0.25 fwd on
     # MI350X).  0 = keep the SDPA-roofline path (backward compatible).
     hstu_attn_flop_efficiency: float = 0.0
+    # Attention-core cost model selector.  "" / "flop" (see above) or SDPA
+    # roofline (default legacy paths), or "fav3_hstu" for the tile-level FAv3
+    # simulator specialised for HSTU: it prices QKᵀ/A·V (and the 5 backward
+    # sub-GEMMs) per-tile on 1 CU via origami, then adds the HSTU pointwise
+    # epilogue (SiLU gate + relative bias + U gate) as a physical throughput.
+    # This replaces the single opaque efficiency with a shape/arch-portable model.
+    hstu_attn_model: str = ""
+    # Fused-epilogue throughput (Gelem/s, chip-wide) for the "fav3_hstu" model:
+    # score-matrix elements the SiLU-gate/relative-bias/U-gate epilogue processes
+    # per second.  0 = use the calibrated defaults in the HSTU simulator.
+    hstu_attn_epilogue_gelem_fwd: float = 0.0
+    hstu_attn_epilogue_gelem_bwd: float = 0.0
     # Attention backward / forward wall-time ratio, used with the FLOP model.
     # The bwd_dkdv kernel measures ~2.0x the forward on MI350X.
     hstu_attn_bwd_ratio: float = 2.0

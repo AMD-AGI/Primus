@@ -34,7 +34,6 @@ from primus.core.projection.simulation_backends.base import (
 )
 from primus.core.projection.training_config import gemm_dtype_from_config
 
-
 # Extra fp32 optimizer-state words carried *per embedding row* (not per element).
 _EMB_OPTIMIZER_ROW_WORDS = {
     "rowwise_adagrad": 1,

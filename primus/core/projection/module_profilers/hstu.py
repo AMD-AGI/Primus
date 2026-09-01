@@ -47,6 +47,7 @@ class HSTULayerProfiler(BaseModuleProfiler):
         super().__init__(config, sub_profilers)
         self._gemm_backend = None
         self._sdpa_backend = None
+        self._hstu_attn_sim = None
         self._cached = None
         self._cache_key = None
         self._components = {}
@@ -55,6 +56,7 @@ class HSTULayerProfiler(BaseModuleProfiler):
     def set_simulation_backends(self, gemm_backend=None, sdpa_backend=None):
         self._gemm_backend = gemm_backend
         self._sdpa_backend = sdpa_backend
+        self._hstu_attn_sim = None
         self._cached = None
         self._cache_key = None
 
@@ -140,6 +142,35 @@ class HSTULayerProfiler(BaseModuleProfiler):
         rms = min(1.0, (mean * mean + std * std) ** 0.5)
         return max(1, int(round(seq_len * rms)))
 
+    def _hstu_attn_backend(self):
+        """Lazily build/cache the HSTU FAv3 attention simulator.
+
+        Reuses the arch/clock of the SDPA backend already wired in, and pulls
+        the fused-epilogue throughputs from the model config so the pointwise
+        gate/bias cost is a physical rate rather than an opaque efficiency.
+        """
+        sim = getattr(self, "_hstu_attn_sim", None)
+        if sim is not None:
+            return sim
+        from primus.core.projection.simulation_backends.hstu_attention_simulator import (
+            _DEFAULT_EPILOGUE_GELEM_BWD,
+            _DEFAULT_EPILOGUE_GELEM_FWD,
+            HSTUAttentionSimulator,
+        )
+
+        mc = self.config.model_config
+        g_fwd = float(getattr(mc, "hstu_attn_epilogue_gelem_fwd", 0.0) or 0.0) or _DEFAULT_EPILOGUE_GELEM_FWD
+        g_bwd = float(getattr(mc, "hstu_attn_epilogue_gelem_bwd", 0.0) or 0.0) or _DEFAULT_EPILOGUE_GELEM_BWD
+        sdpa = self._sdpa_backend
+        sim = HSTUAttentionSimulator(
+            gpu_arch=getattr(sdpa, "_gpu_arch", None),
+            gpu_clock_mhz=getattr(sdpa, "_gpu_clock_mhz", None),
+            epilogue_gelem_fwd=g_fwd,
+            epilogue_gelem_bwd=g_bwd,
+        )
+        self._hstu_attn_sim = sim
+        return sim
+
     def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         mc = self.config.model_config
         D, H, d_qk, d_v = self._geom()
@@ -162,8 +193,25 @@ class HSTULayerProfiler(BaseModuleProfiler):
         #    not scale as L^2).  When hstu_attn_flop_efficiency is set we price it
         #    directly from its causal FLOPs at the measured achieved fraction of
         #    realizable matmul peak; otherwise we fall back to the SDPA roofline.
+        attn_model = str(getattr(mc, "hstu_attn_model", "") or "").lower().strip()
         flop_eff = float(getattr(mc, "hstu_attn_flop_efficiency", 0.0) or 0.0)
-        if flop_eff > 0:
+        if attn_model == "fav3_hstu":
+            # FAv3 tile-level matmuls (origami 1-CU) + HSTU pointwise epilogue.
+            # The epilogue (SiLU gate + relative bias + U gate) is priced by a
+            # physical score-throughput, not a lumped efficiency constant.
+            sim = self._hstu_attn_backend()
+            s = sim.simulate_sdpa(
+                batch_size=batch_size,
+                num_heads=heads_per_rank,
+                seq_len=attn_seq,
+                head_dim=d_qk,
+                causal=True,
+                dtype="bf16",
+                head_dim_v=d_v,
+            )
+            attn_fwd = s.forward_time_ms
+            attn_bwd = s.backward_time_ms or (2.0 * s.forward_time_ms)
+        elif flop_eff > 0:
             flop_eff = min(1.0, max(0.001, flop_eff))
             # Causal QK^T + A.V: B * heads * L^2 * (d_qk + d_v) flops per layer
             # (the causal 1/2 and the 2-matmul/2-MAC factors cancel to 1).

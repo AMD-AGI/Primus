@@ -75,7 +75,10 @@ def build_yambda_config(args) -> TrainingConfig:
         hstu_fill_factor_std=args.fill_factor_std,
         hstu_attn_efficiency=args.attn_efficiency,
         hstu_attn_bwd_efficiency=args.attn_bwd_efficiency,
-        hstu_attn_flop_efficiency=args.attn_flop_efficiency,
+        hstu_attn_flop_efficiency=(0.0 if args.attn_model == "fav3_hstu" else args.attn_flop_efficiency),
+        hstu_attn_model=args.attn_model,
+        hstu_attn_epilogue_gelem_fwd=args.attn_epilogue_gelem_fwd,
+        hstu_attn_epilogue_gelem_bwd=args.attn_epilogue_gelem_bwd,
         hstu_attn_bwd_ratio=args.attn_bwd_ratio,
         hstu_recompute_attn=args.recompute_attn,
         hstu_output_input_dim=args.output_input_dim,
@@ -129,7 +132,7 @@ def main():
     # Measured from the MI350X step-52 (flydsl) trace: max_seq_len=3650, total
     # valid tokens T=2,229,337 over 1024 local sequences -> mean fill ~0.596.
     p.add_argument("--max-seq-len", type=int, default=3650)
-    p.add_argument("--fill-factor", type=float, default=0.596)
+    p.add_argument("--fill-factor", type=float, default=0.6)
     p.add_argument(
         "--fill-factor-std",
         type=float,
@@ -162,6 +165,26 @@ def main():
         type=float,
         default=2.025,  # measured bwd_dkdv (87.55 ms) / attn_fwd (43.23 ms)
         help="attention backward/forward wall-time ratio (FLOP model)",
+    )
+    p.add_argument(
+        "--attn-model",
+        type=str,
+        default="flop",
+        choices=["flop", "fav3_hstu"],
+        help="attention cost model: 'flop' (direct-FLOP roofline, default) or "
+        "'fav3_hstu' (FAv3 tile-level matmuls via origami 1-CU + HSTU pointwise epilogue)",
+    )
+    p.add_argument(
+        "--attn-epilogue-gelem-fwd",
+        type=float,
+        default=0.0,
+        help="fav3_hstu fused-epilogue fwd throughput (Gelem/s); 0 = calibrated default",
+    )
+    p.add_argument(
+        "--attn-epilogue-gelem-bwd",
+        type=float,
+        default=0.0,
+        help="fav3_hstu fused-epilogue bwd throughput (Gelem/s); 0 = calibrated default",
     )
     p.add_argument(
         "--recompute-attn",
