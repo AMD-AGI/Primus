@@ -51,6 +51,11 @@ export RESULTS_DIR RUN_INDEX PRIMUS_SEED MLLOG_OUTPUT_FILE
 
 mkdir -p "${RESULTS_DIR}"
 
+# The MLLOG logger opens this append-only, so a relaunch under the same
+# RUN_INDEX concatenates two runs into one file and the compliance checker
+# reports every once-per-run key twice. One file is one run.
+: > "${MLLOG_OUTPUT_FILE}"
+
 # --- Cold start -------------------------------------------------------------
 # cache_clear is a claim about the machine, so drop the caches here and report
 # what actually happened rather than what was requested. Dropping caches needs
