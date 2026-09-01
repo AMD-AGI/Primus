@@ -59,6 +59,7 @@ def _sparse_mla_fwd_tr_kernel(
     stride_topk_t,
     scale,
     num_heads,
+    num_kv,
     TOPK: tl.constexpr,
     BLOCK_H: tl.constexpr,
     TILE_K: tl.constexpr,
@@ -88,7 +89,9 @@ def _sparse_mla_fwd_tr_kernel(
     for kt in range(0, TOPK, TILE_K):
         offs_k = kt + tl.arange(0, TILE_K)
         idx = tl.load(TopK_ptr + topk_base + offs_k, mask=offs_k < TOPK, other=-1)
-        valid = idx >= 0
+        # Bound on BOTH sides: an index >= num_kv would otherwise be masked in
+        # as valid and read past the end of KV_ptr ([num_kv, 1, D_QK]).
+        valid = (idx >= 0) & (idx < num_kv)
         safe = tl.where(valid, idx, 0).to(tl.int64)
 
         kv_base = safe[:, None] * stride_kv_t
@@ -197,6 +200,7 @@ def sparse_mla_fwd_v4_triton(q, kv, topk_indices, attn_sink=None, kv_lora_rank=5
             stride_topk_t=topk_indices.stride(0),
             scale=scale,
             num_heads=num_heads,
+            num_kv=kv.shape[0],
             TOPK=topk,
             D_V=kv_lora_rank,
             D_ROPE=rope_rank,

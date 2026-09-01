@@ -32,6 +32,10 @@ knob.
 
     # --- FLA Triton kernel toggles -------------------------------------------
     use_fla_fused_swiglu: true          # default true
+    use_fla_fused_swiglu_linear: false  # default false. Fuses swiglu *into*
+                                        #   linear_fc2, trading throughput for
+                                        #   one fewer ffn-wide saved tensor per
+                                        #   layer; see mlp_fla_swiglu_patches.
     use_fla_fused_rmsnorm: false        # default false
     use_fla_fused_gated_norm: false     # default false  (same semantic scope
                                         #   as use_fla_fused_rmsnorm but kept
@@ -81,6 +85,7 @@ from primus.core.utils.module_utils import log_rank_0
 
 _FLA_RUNTIME_KNOBS: tuple = (
     ("use_fla_fused_swiglu", "PRIMUS_FLA_SWIGLU", True),
+    ("use_fla_fused_swiglu_linear", "PRIMUS_FLA_SWIGLU_LINEAR", False),
     ("use_fla_fused_rmsnorm", "PRIMUS_FLA_NORM", False),
     ("use_fla_fused_gated_norm", "PRIMUS_FLA_NORM", False),
     ("use_fla_short_conv", "PRIMUS_FLA_CONV", False),
