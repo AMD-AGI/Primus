@@ -12,10 +12,10 @@ The following aligns with the backend overview and the configs present in this t
 
 | Backend | Model families (documentation / stack scope) |
 | ------- | ---------------------------------------------- |
-| **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite), DeepSeek-V3, and DeepSeek-V4 (flash / pro), Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM, Kimi K2, LFM2, MiniMax, Zebra LLaMA (including GDN and KDA linear-attention variants), Mamba, and generic `language_model.yaml` bases. |
+| **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite), DeepSeek-V3, and DeepSeek-V4 (flash / pro), Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM, Kimi K2, LFM2, MiniMax, Hylo LLaMA (including GDN and KDA linear-attention variants), Mamba, and generic `language_model.yaml` bases. |
 | **TorchTitan** | LLaMA3 family (including 3.1), LLaMA4 examples, DeepSeek-V3 examples, and Qwen3 examples including 0.6B, 1.7B, 4B, 8B, 14B, and 32B variants where present. Additional presets exist under `primus/configs/models/torchtitan/` without being exhaustively listed here. |
 | **MaxText (JAX)** | LLaMA2 / LLaMA3 / LLaMA3.3, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, Qwen3 14B / 30B-A3B (per presets and examples). Broader coverage may exist in upstream MaxText; see [MaxText](https://github.com/AI-Hypercomputer/maxtext). |
-| **Megatron Bridge** | Qwen3 pretraining and post-training examples, plus post-training examples for Zebra LLaMA and Mamba where present. LLaMA 3.1 70B Bridge examples appear under MI355X. |
+| **Megatron Bridge** | Qwen3 pretraining and post-training examples, plus post-training examples for Hylo LLaMA and Mamba where present. LLaMA 3.1 70B Bridge examples appear under MI355X. |
 | **Diffusion** | Flux.1 (`schnell` / `dev`) text-to-image and Wan 2.1 / 2.2 text- and image-to-video presets under `primus/configs/models/diffusion/`, with examples under `examples/diffusion/configs/` and `examples/megatron/configs/*/diffusion/`. See [Diffusion models](../04-technical-guides/diffusion-models/README.md). |
 | **HummingbirdXT** | Registered backend with a post-training trainer and one checked-in example; user-facing support level still needs maintainer confirmation. |
 
@@ -90,9 +90,17 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `qwen3_30B_A3B.yaml` | `primus/configs/models/megatron/qwen3_30B_A3B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen3_5_35B_A3B.yaml` | `primus/configs/models/megatron/qwen3_5_35B_A3B.yaml` | MoE model preset | MI300X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
-| `zebra_llama_1B.yaml` | `primus/configs/models/megatron/zebra_llama_1B.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
-| `zebra_llama_3B.yaml` | `primus/configs/models/megatron/zebra_llama_3B.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
-| `zebra_llama_8B.yaml` | `primus/configs/models/megatron/zebra_llama_8B.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
+| `hylo_mamba_1B_hybrid.yaml` | `primus/configs/models/megatron/hylo_mamba_1B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
+| `hylo_mamba_3B_hybrid.yaml` | `primus/configs/models/megatron/hylo_mamba_3B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
+| `hylo_mamba_8B_hybrid.yaml` | `primus/configs/models/megatron/hylo_mamba_8B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
+| `hylo_mamba_300M_hybrid.yaml` | `primus/configs/models/megatron/hylo_mamba_300M_hybrid.yaml` | Model preset | MI300X | Set in experiment overrides |
+| `hylo_kda_1B_hybrid.yaml` | `primus/configs/models/megatron/hylo_kda_1B_hybrid.yaml` | Model preset | MI300X, MI355X | Set in experiment overrides |
+| `hylo_gdn_1B_hybrid.yaml` | `primus/configs/models/megatron/hylo_gdn_1B_hybrid.yaml` | Model preset | MI300X, MI355X | Set in experiment overrides |
+| `hylo_gdn_300M_hybrid.yaml` | `primus/configs/models/megatron/hylo_gdn_300M_hybrid.yaml` | Model preset | MI300X | Set in experiment overrides |
+| `kda_1B.yaml` | `primus/configs/models/megatron/kda_1B.yaml` | Pure KDA preset | MI300X, MI355X | `kda_1B_BF16-pretrain.yaml` |
+| `kda_300M.yaml` | `primus/configs/models/megatron/kda_300M.yaml` | Pure KDA preset | MI300X | `kda_300M_BF16-pretrain.yaml` |
+| `gdn_1B.yaml` | `primus/configs/models/megatron/gdn_1B.yaml` | Pure GDN preset | MI300X, MI355X | `gdn_1B_BF16-pretrain.yaml` |
+| `gdn_300M.yaml` | `primus/configs/models/megatron/gdn_300M.yaml` | Pure GDN preset | MI300X | `gdn_300M_BF16-pretrain.yaml` |
 
 **Parallelism:** Tensor, pipeline, and expert parallel sizes are **not** fixed in model presets; they are set in experiment `overrides` (for example `tensor_model_parallel_size`, `pipeline_model_parallel_size`, `expert_model_parallel_size`). MoE presets such as `qwen3_235B_A22B.yaml` typically require non-default expert parallelism in real runs—see the matching experiment YAML.
 
@@ -170,7 +178,7 @@ Presets: `primus/configs/models/megatron_bridge/`. Examples: `examples/megatron_
 | `qwen3_8b.yaml` | `primus/configs/models/megatron_bridge/qwen3_8b.yaml` | `qwen.qwen3` / `qwen3_8b_finetune_config` | MI300X pretrain, MI355X posttrain |
 | `qwen3_32b.yaml` | `primus/configs/models/megatron_bridge/qwen3_32b.yaml` | `qwen.qwen3` / `qwen3_32b_finetune_config` | MI300X, MI355X |
 | `llama31_70b.yaml` | `primus/configs/models/megatron_bridge/llama31_70b.yaml` | `llama.llama3` / `llama31_70b_finetune_config` | MI355X |
-| `zebra_llama_1B.yaml`, `zebra_llama_3B.yaml`, `zebra_llama_8B.yaml` | `primus/configs/models/megatron_bridge/` | Zebra LLaMA presets | MI300X posttrain |
+| `hylo_mamba_1B_hybrid.yaml`, `hylo_mamba_3B_hybrid.yaml`, `hylo_mamba_8B_hybrid.yaml` | `primus/configs/models/megatron_bridge/` | Hylo LLaMA presets | MI300X posttrain |
 | `mamba_370M.yaml` | `primus/configs/models/megatron_bridge/mamba_370M.yaml` | Mamba preset | MI300X posttrain |
 
 Example filenames include `*_pretrain.yaml`, `*_sft_posttrain.yaml`, and `*_lora_posttrain.yaml`; precision such as `bf16_mixed` is set in experiment `overrides`.
@@ -187,7 +195,7 @@ Curated example layouts under `examples/` use GPU SKU subdirectories. As of this
 | **MI355X** | Yes | Yes | Yes | Yes |
 | **MI325X** | Yes | Yes | No | No |
 
-Megatron and TorchTitan ship MI325X example directories in addition to MI300X and MI355X examples. MaxText includes MI300X and MI355X examples, including MI355X-only entries such as `llama3.1_405B-pretrain.yaml`. Megatron Bridge MI300X examples include Qwen3 8B and 32B pretraining plus Qwen3 32B, Zebra LLaMA, and Mamba post-training examples; LLaMA 3.1 70B Bridge examples appear under MI355X.
+Megatron and TorchTitan ship MI325X example directories in addition to MI300X and MI355X examples. MaxText includes MI300X and MI355X examples, including MI355X-only entries such as `llama3.1_405B-pretrain.yaml`. Megatron Bridge MI300X examples include Qwen3 8B and 32B pretraining plus Qwen3 32B, Hylo LLaMA, and Mamba post-training examples; LLaMA 3.1 70B Bridge examples appear under MI355X.
 
 Absence of a SKU directory for a given backend does **not** imply the backend cannot run there; it means this tree does not currently provide a checked-in example path to copy from.
 
