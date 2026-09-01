@@ -37,64 +37,91 @@ from primus.tools.utils import finalize_distributed, init_distributed
 logger = logging.getLogger(__name__)
 
 
-def _add_common_args(parser):
-    """Add arguments common to all data preparation commands."""
+def _add_common_args(parser, defaults_from_config: bool = False):
+    """
+    Add arguments common to all data preparation commands.
+
+    When ``defaults_from_config`` is set, options are registered with
+    ``argparse.SUPPRESS`` so the parsed namespace holds only the flags the user
+    actually typed. That is what lets ``_load_config_with_cli_overrides`` tell an
+    explicit ``--batch-size 8`` apart from an untouched ``--batch-size``, even
+    though 8 is also the default. Defaults for those options then come from
+    ``_get_encoded_parser_defaults()``.
+    """
+
+    def dflt(value):
+        return argparse.SUPPRESS if defaults_from_config else value
+
     # Source configuration
     source_group = parser.add_argument_group("Source Configuration")
     source_group.add_argument(
         "--source-type",
         required=False,
+        default=dflt(None),
         choices=["directory", "huggingface", "webdataset"],
         help="Type of input data source (required, can be set via --config)",
     )
-    source_group.add_argument("--input-dir", type=str, help="Input directory (for directory source)")
-    source_group.add_argument("--hf-dataset", type=str, help="HuggingFace dataset name (for HF source)")
     source_group.add_argument(
-        "--hf-split", type=str, default="train", help="HuggingFace dataset split (default: train)"
+        "--input-dir", type=str, default=dflt(None), help="Input directory (for directory source)"
+    )
+    source_group.add_argument(
+        "--hf-dataset", type=str, default=dflt(None), help="HuggingFace dataset name (for HF source)"
+    )
+    source_group.add_argument(
+        "--hf-split", type=str, default=dflt("train"), help="HuggingFace dataset split (default: train)"
     )
     source_group.add_argument(
         "--hf-data-files",
         type=str,
-        default=None,
+        default=dflt(None),
         help='Specific files/paths within HF dataset (e.g., "data_1024_10K/*.tar")',
     )
-    source_group.add_argument("--input-path", type=str, help="WebDataset path/glob (for webdataset source)")
+    source_group.add_argument(
+        "--input-path", type=str, default=dflt(None), help="WebDataset path/glob (for webdataset source)"
+    )
 
     # Output configuration (Energon format)
     output_group = parser.add_argument_group("Output Configuration (Energon WebDataset)")
     output_group.add_argument(
         "--output-dir",
         required=False,
+        default=dflt(None),
         help="Output directory for Energon WebDataset (required, can be set via --config)",
     )
     output_group.add_argument(
-        "--shard-size", type=int, default=1000, help="Samples per shard (default: 1000)"
+        "--shard-size", type=int, default=dflt(1000), help="Samples per shard (default: 1000)"
     )
     output_group.add_argument(
-        "--max-samples", type=int, default=None, help="Maximum samples to process (default: all)"
+        "--max-samples", type=int, default=dflt(None), help="Maximum samples to process (default: all)"
     )
-    output_group.add_argument("--compress", action="store_true", help="Compress tar files with gzip")
+    output_group.add_argument(
+        "--compress", action="store_true", default=dflt(False), help="Compress tar files with gzip"
+    )
 
     # Image preprocessing
     image_group = parser.add_argument_group("Image Preprocessing")
     image_group.add_argument(
         "--variable-size",
         action="store_true",
+        default=dflt(False),
         help="Resize images to the nearest multiple of 16 instead of fixed size",
     )
     image_group.add_argument(
         "--image-size",
         type=int,
-        default=1024,
+        default=dflt(1024),
         help="Resize images to this size (default: 1024) when variable_size is disabled",
     )
     image_group.add_argument(
-        "--center-crop", action="store_false", help="Disable center cropping of images before resize"
+        "--center-crop",
+        action="store_false",
+        default=dflt(True),
+        help="Disable center cropping of images before resize",
     )
     image_group.add_argument(
         "--max-size",
         type=int,
-        default=1024,
+        default=dflt(1024),
         help="Maximum image dimension for variable size mode (default: 1024)",
     )
 
@@ -103,7 +130,7 @@ def _add_common_args(parser):
     auth_group.add_argument(
         "--hf-token-file",
         type=str,
-        default=None,
+        default=dflt(None),
         help=(
             "Path to file containing HuggingFace token. "
             "File must have secure permissions (600 or 400). "
@@ -303,10 +330,12 @@ def _flatten_preprocessing_config(config_dict: dict) -> dict:
 
 def _get_encoded_parser_defaults() -> dict:
     """
-    Get default values from encoded parser for override detection.
+    Default values for every option the encoded parser can take from --config.
 
-    Returns dict of argument name -> default value to detect which CLI
-    arguments were explicitly set vs using defaults.
+    The encoded parser registers these options with ``argparse.SUPPRESS`` (see
+    ``_add_common_args``), so this table is the sole source of their defaults and
+    the lowest layer of the merge in ``_load_config_with_cli_overrides``. Every
+    key listed here is therefore guaranteed to exist on the merged namespace.
     """
     return {
         "config": None,
@@ -350,6 +379,12 @@ def _load_config_with_cli_overrides(args: "argparse.Namespace") -> "argparse.Nam
     2. YAML config values
     3. CLI default values
 
+    The encoded parser suppresses defaults, so ``vars(args)`` contains exactly
+    the options the user typed and nothing else. Layering the three sources in
+    order therefore honours an explicit flag even when its value happens to
+    equal the default, and guarantees every configurable key is present on the
+    result whether or not the YAML file mentions it.
+
     Args:
         args: Parsed CLI arguments
 
@@ -361,11 +396,12 @@ def _load_config_with_cli_overrides(args: "argparse.Namespace") -> "argparse.Nam
         >>> # And CLI arg --batch-size 16
         >>> # Result: batch_size = 16 (CLI wins)
     """
-    import argparse
+    defaults = _get_encoded_parser_defaults()
+    explicit_cli = vars(args)
 
-    # If no config file, return args as-is
+    # If no config file, defaults still have to be applied.
     if not getattr(args, "config", None):
-        return args
+        return argparse.Namespace(**{**defaults, **explicit_cli})
 
     from primus.core.utils import yaml_utils
 
@@ -375,27 +411,12 @@ def _load_config_with_cli_overrides(args: "argparse.Namespace") -> "argparse.Nam
     config_dict = yaml_utils.parse_yaml(args.config)
     flat_config = _flatten_preprocessing_config(config_dict)
 
-    # Start with config values
-    merged_dict = flat_config.copy()
-
-    # Override with explicitly provided CLI arguments
-    parser_defaults = _get_encoded_parser_defaults()
-    cli_args = vars(args)
-
-    for key, cli_value in cli_args.items():
-        if key == "config":
-            # Keep config path for reference
-            merged_dict["config"] = cli_value
-            continue
-
-        # If CLI value differs from default, it was explicitly set
-        default_value = parser_defaults.get(key)
-        if cli_value != default_value:
-            merged_dict[key] = cli_value
-            logger.debug(f"CLI override: {key} = {cli_value}")
+    overridden = sorted(key for key in explicit_cli if key in flat_config)
+    if overridden:
+        logger.debug(f"CLI overrides: {overridden}")
 
     logger.info("Configuration merged (CLI args override YAML)")
-    return argparse.Namespace(**merged_dict)
+    return argparse.Namespace(**{**defaults, **flat_config, **explicit_cli})
 
 
 def _validate_preprocessing_config(args: "argparse.Namespace") -> None:
@@ -814,37 +835,49 @@ def register_subcommand(subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Path to YAML config file (optional, CLI args override config values)",
     )
 
-    _add_common_args(encoded_parser)
+    # Defaults are suppressed here so --config can be merged correctly; they
+    # live in _get_encoded_parser_defaults() instead.
+    _add_common_args(encoded_parser, defaults_from_config=True)
 
     # Encoded-specific arguments
     model_group = encoded_parser.add_argument_group("Model Configuration")
     model_group.add_argument(
         "--model-path",
-        default="black-forest-labs/FLUX.1-dev",
+        default=argparse.SUPPRESS,
         help="Pretrained model path (HF or local). Default: black-forest-labs/FLUX.1-dev "
         "(requires HF authentication -- see --hf-token-file)",
     )
-    model_group.add_argument("--vae-path", default=None, help="Custom VAE path (overrides --model-path)")
-    model_group.add_argument("--t5-path", default=None, help="Custom T5 path (overrides --model-path)")
-    model_group.add_argument("--clip-path", default=None, help="Custom CLIP path (overrides --model-path)")
+    model_group.add_argument(
+        "--vae-path", default=argparse.SUPPRESS, help="Custom VAE path (overrides --model-path)"
+    )
+    model_group.add_argument(
+        "--t5-path", default=argparse.SUPPRESS, help="Custom T5 path (overrides --model-path)"
+    )
+    model_group.add_argument(
+        "--clip-path", default=argparse.SUPPRESS, help="Custom CLIP path (overrides --model-path)"
+    )
     model_group.add_argument(
         "--precision",
         choices=["bf16", "fp16", "fp32"],
-        default="bf16",
+        default=argparse.SUPPRESS,
         help="Model precision (default: bf16)",
     )
-    model_group.add_argument("--device", default="cuda", help="Device for encoding (default: cuda)")
-    model_group.add_argument("--batch-size", type=int, default=8, help="Encoding batch size (default: 8)")
+    model_group.add_argument(
+        "--device", default=argparse.SUPPRESS, help="Device for encoding (default: cuda)"
+    )
+    model_group.add_argument(
+        "--batch-size", type=int, default=argparse.SUPPRESS, help="Encoding batch size (default: 8)"
+    )
     model_group.add_argument(
         "--t5-max-length",
         type=int,
-        default=512,
+        default=argparse.SUPPRESS,
         help="T5 max sequence length (default: 512, use 256 for FLUX.1-schnell)",
     )
     model_group.add_argument(
         "--vae-latent-mode",
         choices=["presampled", "resample"],
-        default="presampled",
+        default=argparse.SUPPRESS,
         help=(
             "VAE latent storage mode (default: presampled). "
             "'presampled' stores a single sampled latent per image. "
