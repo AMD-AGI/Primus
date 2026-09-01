@@ -32,6 +32,7 @@ from typing import Optional
 __all__ = [
     "DEFAULT_VAL_NUM_WORKERS",
     "EvalCoverageError",
+    "assert_mlperf_timestep_source",
     "assert_val_worker_divisibility",
     "get_data_parallel_size",
     "get_eval_num_microbatches",
@@ -52,7 +53,12 @@ DEFAULT_VAL_NUM_WORKERS = 0
 
 
 class EvalCoverageError(ValueError):
-    """Raised when an evaluation would not read the samples it claims to."""
+    """Raised when an evaluation would not measure what it reports.
+
+    Covers both reading fewer samples than the configuration claims and
+    evaluating the samples it does read at timesteps the dataset did not pair
+    them with.
+    """
 
 
 def get_data_parallel_size(args) -> int:
@@ -184,6 +190,58 @@ def assert_val_worker_divisibility(args, eval_samples: int) -> None:
         f"whose batch quota is short leave the tail of their slice unread, so the "
         f"reported sample count would exceed the count actually evaluated.\n"
         f"Valid val_num_workers for this shape: {suggestions}"
+    )
+
+
+def assert_mlperf_timestep_source(args) -> None:
+    """Refuse injected validation timesteps in an MLPerf run.
+
+    ``resolve_validation_timesteps`` takes the dataset's ``timestep`` column
+    whenever the batch carries one, so a split ingested with that column is
+    evaluated correctly under either source setting. One combination is left
+    unsafe: shards ingested before the column was carried through, read under
+    ``eval_timestep_source='equidistant'``. There the positional fallback
+    injects ``t = index % 8``, which does not reproduce the pairing of image
+    to timestep the published split defines, and the run reports a val_loss
+    indistinguishable in the logs from a correct one.
+
+    The MLPerf recipes set ``dataset`` and close that cell for themselves, but
+    ``trainer_base.yaml`` defaults to ``equidistant`` for the diffusion
+    recipes that have no annotated split, so the protection would otherwise
+    rest on every future submission recipe remembering to override it. A
+    submission has no legitimate use for injected timesteps, so make the
+    combination unreachable rather than merely avoidable.
+
+    Belongs at validation-dataloader-build time and not in the ``build_args``
+    patch that sizes the eval budget: a failure raised there is logged and
+    swallowed by the patch runner, which is how ``eval_iters`` silently stayed
+    at 0. ``eval_timestep_source`` is also a Primus-only key, and those are
+    merged onto ``args`` only after the ``build_args`` phase has run.
+    """
+    if not getattr(args, "mlperf_mode", False):
+        return
+
+    # Imported here rather than at module scope to keep this module free of
+    # the diffusion forward step, which pulls in torch and the Flux model
+    # utilities; the eval budget is also resolved from a build_args patch.
+    from primus.backends.megatron.training.diffusion.forward_step import (
+        DATASET_TIMESTEPS,
+    )
+
+    source = getattr(args, "eval_timestep_source", None)
+    if source == DATASET_TIMESTEPS:
+        return
+
+    raise EvalCoverageError(
+        f"mlperf_mode is set but eval_timestep_source is {source!r}, which lets "
+        f"validation fall back to injecting t = index % 8 when the shards carry "
+        f"no per-sample 'timestep' column. That reproduces neither the timesteps "
+        f"nor the image-to-timestep pairing of the published val split, and it "
+        f"fails silently: the loss it reports looks exactly like a correct one. "
+        f"Set eval_timestep_source='{DATASET_TIMESTEPS}' in the recipe, and point "
+        f"the run at a val split ingested with the timestep column "
+        f"(primus/configs/data/megatron/diffusion/preprocessing/mlperf_flux1_val.yaml) "
+        f"so the requirement is met rather than merely asserted."
     )
 
 

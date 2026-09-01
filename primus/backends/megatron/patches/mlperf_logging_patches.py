@@ -272,9 +272,11 @@ class FluxMLPerfLogger:
             key=self._constants.EVAL_SAMPLES,
             value=getattr(args, "eval_samples", None) or eval_iters * self.gbs,
         )
-        # How often evaluation runs, in samples. Required by the MLPerf logging
-        # rules and previously absent; the constant name differs across
-        # mlperf_logging releases, so fall back to the literal key.
+        # How often evaluation runs, in samples. EXACTLY_ONE in
+        # closed_flux1.yaml, and spelled as a literal because no
+        # mlperf_logging release defines a constant for it: the name appears
+        # only in the checker's own rulesets. A getattr against the constants
+        # module would therefore always take its fallback.
         self._event(
             key="evaluation_frequency",
             value=getattr(args, "eval_interval", 0) * self.gbs,
