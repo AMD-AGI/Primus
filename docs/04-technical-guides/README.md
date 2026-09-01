@@ -5,6 +5,7 @@ Deep technical topics for advanced users.
 - [Parallelism strategies](parallelism-strategies.md): DP, TP, PP, SP, CP, EP, FSDP explained
 - [Parallelism configuration](parallelism-configuration.md): per-backend parallelism setup and batch size relationships
 - [Collective operations](collective-operations.md): NCCL/RCCL operations and their role in each parallelism strategy
+- [SDMA and MORI AllGather for FSDP](sdma-allgather.md): RCCL symmetric-memory SDMA and MORI hierarchical FSDP2 communication paths
 - [Performance tuning](performance-tuning.md): HipBLASLt, Primus-Turbo, FP8, MoE optimization
 - [MoE training deep-dive](moe-training.md): bottlenecks and Primus-Turbo optimizations for Mixture-of-Experts models
 - [MegaMoE fused MoE layer](mega-moe.md): FlyDSL-based fused MoE layer for EP-only bf16 training, setup and reproduction

@@ -415,14 +415,20 @@ def run_preflight(args):
 
     Mode precedence (single rule):
 
-      1. Any of --perf-test / --tests / --quick is set -> perf-only mode.
+      1. --mori is set -> exclusive MORI runtime preflight mode.
+      2. Any of --perf-test / --tests / --quick is set -> perf-only mode.
          If info selectors (--host/--gpu/--network) are also present, they
          are dropped with a WARN.
-      2. Otherwise, any of --host/--gpu/--network is set -> info-only mode.
+      3. Otherwise, any of --host/--gpu/--network is set -> info-only mode.
          Perf tuning knobs (e.g. --comm-sizes-mb), if set, are inert and a
          WARN is emitted.
-      3. Otherwise (no flags) -> default: info AND all perf tests.
+      4. Otherwise (no flags) -> default: info AND all perf tests.
     """
+    if getattr(args, "mori", False):
+        from primus.tools.preflight.mori_preflight import run_mori_preflight
+
+        return run_mori_preflight(args)
+
     # R4: canonical normalization point for the report file name. Done here
     # before any downstream code reads args.report_file_name, so every code
     # path (info-only, perf-only, info+perf, dist-init failure) sees the same

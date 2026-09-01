@@ -14,18 +14,19 @@ What this patches:
     immediately after construction.
 
 Activation:
-    Export ``SDMA_ALL_GATHER=1`` in the shell before launching any
+    Export ``FSDP_ALL_GATHER_BACKEND=rccl_sdma`` before launching any
     torchtitan pretrain (e.g. ``primus-cli direct -- train pretrain
     --config <existing YAML>``). The patch is a no-op otherwise.
 
     The companion hook
     ``runner/helpers/hooks/06_enable_sdma_all_gather.sh`` runs at
-    ``primus-cli`` startup and, when ``SDMA_ALL_GATHER=1``, exports
+    ``primus-cli`` startup and, when the backend is ``rccl_sdma``, exports
     the standard zero-CTA env (``NCCL_CTA_POLICY=2``,
     ``NCCL_CUMEM_ENABLE=1``, ...) and the LD_PRELOAD interposer so no
     YAML or script changes are required to opt in.
 
-    ``SDMA_ALL_GATHER`` is the only knob; there are no sub-options.
+    ``FSDP_ALL_GATHER_BACKEND`` is the only selector; there are no
+    backend-specific sub-options.
 
 Requirements:
     - PyTorch >= 2.12 (introduces ``SymmMemAllGather``).
@@ -43,8 +44,8 @@ from primus.core.utils.module_utils import log_rank_0
 
 
 def _sdma_all_gather_enabled(ctx: PatchContext) -> bool:
-    """Single env-driven gate. Triggered only by ``SDMA_ALL_GATHER=1``."""
-    return os.environ.get("SDMA_ALL_GATHER", "0") == "1"
+    """Gate on the RCCL symmetric-memory SDMA backend."""
+    return os.environ.get("FSDP_ALL_GATHER_BACKEND", "") == "rccl_sdma"
 
 
 @register_patch(
@@ -54,7 +55,7 @@ def _sdma_all_gather_enabled(ctx: PatchContext) -> bool:
     description=(
         "Auto-attach SymmMemAllGather to every fully_shard'd module "
         "so FSDP's all-gather uses the SDMA (copy-engine) dispatch "
-        "path. Gated on SDMA_ALL_GATHER=1."
+        "path. Gated on FSDP_ALL_GATHER_BACKEND=rccl_sdma."
     ),
     condition=_sdma_all_gather_enabled,
 )
@@ -73,7 +74,7 @@ def patch_torchtitan_fsdp_sdma_symm_mem(ctx: PatchContext) -> None:
     from torch.distributed.fsdp._fully_shard import _fully_shard as _ffs_mod
     from torch.distributed.fsdp._fully_shard._fsdp_collectives import SymmMemAllGather
 
-    # Hardcoded sensible defaults. SDMA_ALL_GATHER is the only knob.
+    # Hardcoded sensible defaults. FSDP_ALL_GATHER_BACKEND is the only selector.
     backend = "NCCL"
     log_all = False
 

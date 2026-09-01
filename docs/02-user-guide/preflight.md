@@ -21,17 +21,19 @@ Preflight has two report types, controlled by a single precedence rule:
 
 | Mode | Triggered by | What it does |
 |---|---|---|
+| **MORI runtime preflight** | `--mori` | Runs on every selected node, prints NIC/RDMA details, pulls the base image, builds pinned MORI with live NIC detection, runs an 8-GPU correctness smoke per node, verifies matching fingerprints, and optionally runs one `8 × N`-rank all-gather. Exclusive with the standard selectors below. |
 | **Info-only** | `--host`, `--gpu`, `--network` (in any combination) | Lightweight host / GPU / network introspection. Emits a per-node report **without requiring a rendezvous**; multi-node aggregation then uses a **timeout-bounded** rendezvous (`--dist-timeout-sec`), so it never hangs indefinitely on network misconfig. |
 | **Perf-only** | `--perf-test`, `--tests ...`, or `--quick` | Runs the configured perf tests under a global rendezvous. **Implied** by `--tests` and `--quick`. |
 | **Default (info + perf)** | No flags at all | Runs the info report first, then every perf test. |
 
 ### Mode precedence
 
-1. **Any of `--perf-test` / `--tests` / `--quick` is set → perf-only mode.**
+1. **`--mori` is set → MORI runtime mode.**
+2. **Any of `--perf-test` / `--tests` / `--quick` is set → perf-only mode.**
    If info selectors (`--host`/`--gpu`/`--network`) are also present, they are dropped and a `WARN` is emitted (also written as a `> Note:` at the top of the perf report). To get both reports, run two invocations.
-2. **Otherwise, any of `--host`/`--gpu`/`--network` is set → info-only mode.**
+3. **Otherwise, any of `--host`/`--gpu`/`--network` is set → info-only mode.**
    Perf-only tuning knobs (e.g. `--comm-sizes-mb`) are inert in this mode and trigger a single `WARN` listing them.
-3. **Otherwise (no flags) → default**: info report **first** (no rendezvous), then perf tests.
+4. **Otherwise (no flags) → default**: info report **first** (no rendezvous), then perf tests.
 
 The default order ensures you always get a report even if `torch.distributed` initialization later hangs.
 
@@ -62,6 +64,51 @@ primus-cli direct -- preflight --perf-test
 ```bash
 primus-cli direct -- preflight --quick
 ```
+
+### MORI runtime build and local correctness smoke
+
+```bash
+primus-cli direct -- preflight --mori
+```
+
+MORI mode must use the host/direct launcher because it starts its own
+privileged temporary container. Under Slurm, include the explicit `direct`
+entry:
+
+```bash
+primus-cli slurm srun -N 1 --ntasks-per-node=1 \
+    -- direct -- preflight --mori
+```
+
+General multi-node preflight builds/tests every listed node, verifies that their
+NIC-stack fingerprints match, then runs one all-gather across all GPUs:
+
+```bash
+primus-cli direct -- preflight --mori \
+    --mori-nodes node1,node2,node3,node4 \
+    --mori-socket-ifname fenic \
+    --mori-gid-index 1
+```
+
+Detailed phase behavior, timing, and validated MI355X commands are documented
+in [`docs/04-technical-guides/sdma-allgather.md`](../04-technical-guides/sdma-allgather.md#mori-for-primus-fsdp).
+
+MORI mode options:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--mori-base-image` | ROCm 7.15 Primus nightly | Base image pulled on every run. |
+| `--mori-repo` | `https://github.com/ROCm/mori.git` | MORI source repository. |
+| `--mori-ref` | pinned validated commit | Revision built by preflight. |
+| `--mori-max-jobs` | `32` | Parallel source-build jobs. |
+| `--mori-smoke-numel` | `67108864` | BF16 elements/rank in local and N-node smokes (128 MiB/rank). |
+| `--mori-keep-container` | off | Keep the temporary build container for debugging. |
+| `--mori-log-dir DIR` | under `--dump-path` | Override timed phase-log directory. |
+| `--mori-nodes NODES` | current node | Comma-separated hosts, Slurm hostlist, or `@file`. Each node runs full local preflight before the N-node smoke. |
+| `--mori-master-addr IP` | auto | Override master bootstrap address. |
+| `--mori-master-port PORT` | `29610` | N-node torchrun port. |
+| `--mori-socket-ifname IFACE` | auto | Override bootstrap interface. |
+| `--mori-gid-index N` | auto | Override RoCEv2 GID index. |
 
 Equivalent on SLURM via `primus-cli slurm`:
 
@@ -313,6 +360,11 @@ sudo sysctl --system
 | `--dump-path DIR` | `output/preflight` | Output directory for reports + plots. |
 | `--report-file-name NAME` | auto-generated `preflight-${NNODES}N-YYYYMMDD-HHMMSS` | Base name for report files. Omit to let preflight auto-generate a unique timestamped name (prevents stale leftovers from prior runs being mistaken for fresh output). Pass an explicit value when you want a stable / well-known filename. |
 | `--disable-pdf` | enabled | Skip PDF generation (Markdown only). Useful when `weasyprint`/`markdown2` aren't installed. |
+
+MORI mode writes timed phase logs and container diagnostics under
+`<dump-path>/mori-preflight-<host>-<timestamp>/`, or the directory supplied by
+`--mori-log-dir`. It does not generate the standard Markdown/PDF performance
+report.
 
 Output files:
 
