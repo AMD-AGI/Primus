@@ -2,7 +2,7 @@
 
 This document is a runnable walkthrough for the **300M pure Gated DeltaNet (GDN)** pretraining recipe in Primus, validated on 8× AMD MI300X against the [Flash Linear Attention (FLA)](https://github.com/fla-org/flash-linear-attention) reference implementation. It covers every step from raw dataset → tokenization → training → checkpoint conversion → lm-eval benchmark.
 
-The same recipe scales up to the 1B pure-GDN config (`zebra_llama_1B_gdn_pure-pretrain.yaml`) — just swap the config file at training time and the FLA config JSON at conversion time.
+The same recipe scales up to the 1B pure-GDN config (`gdn_1B_BF16-pretrain.yaml`) — just swap the config file at training time and the FLA config JSON at conversion time.
 
 ---
 
@@ -56,11 +56,11 @@ The 300M pure-GDN model has:
 - Tokenizer: `meta-llama/Llama-3.2-1B` (128k vocab)
 - Total parameters: **0.308B**
 
-Training schedule (matched to FLA's `gated_deltanet_300M_pure.json`):
+Training schedule (matched to FLA's `gated_deltanet_300M.json`):
 
 - 4768 iterations × 1024 global batch × 2048 seq len = **10.0 B tokens**
 - AdamW (β1=0.9, β2=0.95, wd=0.01), peak LR `2e-4`, cosine decay, 200-step warmup
-- bf16 mixed-precision, no dropout, gradient clip 1.0
+- BF16 training, no dropout, gradient clip 1.0
 
 ---
 
@@ -174,7 +174,7 @@ train_data_path: >
   /home/<user>/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
 ```
 
-(adjust the user prefix in `examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml` to match your home directory).
+(adjust the user prefix in `examples/megatron/configs/MI300X/gdn_300M_BF16-pretrain.yaml` to match your home directory).
 
 ---
 
@@ -226,7 +226,7 @@ The Primus repo includes `tools/hybrid/convert_fla_gdn_init_to_megatron.py` (the
 
 ### 5.1 Inspect the config
 
-The training config lives at `[examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml)`. Key parameters (matched to FLA):
+The training config lives at `[examples/megatron/configs/MI300X/gdn_300M_BF16-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/gdn_300M_BF16-pretrain.yaml)`. Key parameters (matched to FLA):
 
 ```yaml
 train_iters: 4768                 # ≈ 10B tokens at global_batch=1024, seq=2048
@@ -250,7 +250,7 @@ spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs
 use_distributed_optimizer: false  # 300M fits — ZeRO-1 adds allreduce overhead
 ```
 
-The architecture-only YAML it extends from is `[primus/configs/models/megatron/zebra_llama_300M_gdn_pure.yaml](https://github.com/AMD-AGI/Primus/blob/main/primus/configs/models/megatron/zebra_llama_300M_gdn_pure.yaml)`.
+The architecture-only YAML it extends from is `[primus/configs/models/megatron/gdn_300M.yaml](https://github.com/AMD-AGI/Primus/blob/main/primus/configs/models/megatron/gdn_300M.yaml)`.
 
 ### 5.2 Launch
 
@@ -258,7 +258,7 @@ The architecture-only YAML it extends from is `[primus/configs/models/megatron/z
 # inside the container, in /home/<user>/Primus
 ./primus-cli direct --log_file primus_gdn.log \
   -- train pretrain \
-  --config examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml
+  --config examples/megatron/configs/MI300X/gdn_300M_BF16-pretrain.yaml
 ```
 
 This brings up `torchrun` with 8 ranks on the local node. Expected wall time on a healthy MI300X box: **~1h 54m** for the full 4768 iters.
@@ -303,7 +303,7 @@ These add roughly +1.2 % per-iter overhead vs the all-defaults run, but they pin
 Checkpoints land under Primus's `work_group/user_name/exp_name` template:
 
 ```
-output/amd/root/zebra_llama_300M_gdn_pure-pretrain/
+output/amd/root/gdn_300M_BF16-pretrain/
 ├── checkpoints/
 │   ├── iter_0001024/
 │   ├── iter_0002048/
@@ -357,11 +357,11 @@ Use `[tools/hybrid/convert_gdn_to_fla_hf.py](https://github.com/AMD-AGI/Primus/b
 
 ```bash
 python tools/hybrid/convert_gdn_to_fla_hf.py \
-    --checkpoint-path output/amd/root/zebra_llama_300M_gdn_pure-pretrain/checkpoints/iter_0004768 \
-    --output-dir      output/gdn_pure_300M_fla_hf_final
+    --checkpoint-path output/amd/root/gdn_300M_BF16-pretrain/checkpoints/iter_0004768 \
+    --output-dir      output/gdn_300M_fla_hf_final
 ```
 
-The converter auto-detects 300M from the path and uses `gated_deltanet_300M_pure.json`. What it does:
+The converter auto-detects 300M from the path and uses `gated_deltanet_300M.json`. What it does:
 
 - Reads `mp_rank_00/model_optim_rng.pt` and pulls the `model` state dict
 - For each of the 12 FLA layers, pairs the alternating Megatron sublayers:
@@ -379,13 +379,13 @@ The converter auto-detects 300M from the path and uses `gated_deltanet_300M_pure
 Output:
 
 ```
-output/gdn_pure_300M_fla_hf_final/
+output/gdn_300M_fla_hf_final/
 ├── config.json              # GatedDeltaNetConfig, architectures=["GatedDeltaNetForCausalLM"]
 ├── model.safetensors        # ~870 MB
 └── tokenizer_config.json    # placeholder — point to meta-llama/Llama-3.2-1B at load time
 ```
 
-For the 1B pure-GDN model, same command but use the 1B checkpoint path — the converter auto-selects `gated_deltanet_1B_pure.json`.
+For the 1B pure-GDN model, same command but use the 1B checkpoint path — the converter auto-selects `gated_deltanet_1B.json`.
 
 ---
 
@@ -395,7 +395,7 @@ Run the sanity check at `[tools/hybrid/verify_gdn_conversion.py](https://github.
 
 ```bash
 python tools/hybrid/verify_gdn_conversion.py \
-    --model-path output/gdn_pure_300M_fla_hf_final
+    --model-path output/gdn_300M_fla_hf_final
 ```
 
 It loads the converted model in bf16 on GPU, runs three test prompts, and reports per-prompt loss, top-5 next-token IDs, and a 40-token greedy continuation. **Expected output** for a healthy 300M-on-10B model:
@@ -421,9 +421,9 @@ from fla.models.gated_deltanet import GatedDeltaNetForCausalLM
 
 ids = torch.tensor([[1, 791, 6864, 315, 9822, 374]])  # "The capital of France is"
 
-hf  = GatedDeltaNetForCausalLM.from_pretrained("output/gdn_pure_300M_fla_hf_final",
+hf  = GatedDeltaNetForCausalLM.from_pretrained("output/gdn_300M_fla_hf_final",
                                                torch_dtype=torch.bfloat16).cuda().eval()
-ref = GatedDeltaNetForCausalLM.from_pretrained("/path/to/fla/checkpoints/gdn_pure_300M_10BT",
+ref = GatedDeltaNetForCausalLM.from_pretrained("/path/to/fla/checkpoints/gdn_300M_10BT",
                                                torch_dtype=torch.bfloat16).cuda().eval()
 
 with torch.no_grad():
@@ -462,10 +462,10 @@ Use `[tools/hybrid/eval_gdn_lm_eval.py](https://github.com/AMD-AGI/Primus/blob/m
 ```bash
 python tools/hybrid/eval_gdn_lm_eval.py \
     --model hf \
-    --model_args pretrained=output/gdn_pure_300M_fla_hf_final,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
+    --model_args pretrained=output/gdn_300M_fla_hf_final,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
     --tasks arc_easy,arc_challenge,hellaswag,openbookqa,piqa,winogrande,mmlu,race \
     --batch_size auto \
-    --output_path output/gdn_pure_300M_eval_results_final
+    --output_path output/gdn_300M_eval_results_final
 ```
 
 ### 9.2 Full FLA-paper suite (adds MMLU + RACE, ~1–2 h)
@@ -473,22 +473,22 @@ python tools/hybrid/eval_gdn_lm_eval.py \
 ```bash
 python tools/hybrid/eval_gdn_lm_eval.py \
     --model hf \
-    --model_args pretrained=output/gdn_pure_300M_fla_hf_final,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
+    --model_args pretrained=output/gdn_300M_fla_hf_final,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
     --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \
     --batch_size auto \
-    --output_path output/gdn_pure_300M_eval_results_final
+    --output_path output/gdn_300M_eval_results_final
 ```
 
 ### 9.3 Diff against the FLA reference run
 
-If you also evaluated FLA's own checkpoint (`output/gdn_pure_300M_fla_eval_results/`), compare the JSONs:
+If you also evaluated FLA's own checkpoint (`output/gdn_300M_fla_eval_results/`), compare the JSONs:
 
 ```bash
 python - <<'PY'
 import json, glob
 def load_latest(d): return json.load(open(sorted(glob.glob(f"{d}/**/results_*.json", recursive=True))[-1]))
-fla    = load_latest("output/gdn_pure_300M_fla_eval_results")
-primus = load_latest("output/gdn_pure_300M_eval_results_final")
+fla    = load_latest("output/gdn_300M_fla_eval_results")
+primus = load_latest("output/gdn_300M_eval_results_final")
 print(f"{'task':<18} {'FLA':>8} {'Primus':>8} {'Δ':>+8}")
 for task in sorted(set(fla['results']) & set(primus['results'])):
     for k in ('acc,none', 'acc_norm,none'):
@@ -517,9 +517,9 @@ primus/backends/megatron/patches/
 ├── fla_runtime_patches.py                             ← resolves PRIMUS_FLA_* knobs onto args
 └── mamba_fla_data_patches.py                          ← FLA-order dataset shim wiring
 examples/megatron/configs/MI300X/
-└── zebra_llama_300M_gdn_pure-pretrain.yaml            ← training config
+└── gdn_300M_BF16-pretrain.yaml            ← training config
 primus/configs/models/megatron/
-└── zebra_llama_300M_gdn_pure.yaml                     ← architecture-only config
+└── gdn_300M.yaml                     ← architecture-only config
 primus/backends/megatron/core/models/hybrid/
 ├── gated_delta_net.py                                 ← FLA-aligned mixer (FLA Triton paths)
 ├── gated_delta_net_layer.py                           ← eps propagation, pre-norm fusion
@@ -548,7 +548,7 @@ LR warmup misconfigured. Confirm `lr_warmup_iters: 200` matches your `train_iter
 
 ### Iter 1 loss ~12.1 instead of ~11.97
 
-The `layernorm_epsilon: 1.0e-6` override is being silently overwritten by the TransformerConfig default of `1e-5`. Confirm it's in the *training* YAML's `overrides:` block (not just the model YAML) — see `[zebra_llama_300M_gdn_pure-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml)` for the canonical placement.
+The `layernorm_epsilon: 1.0e-6` override is being silently overwritten by the TransformerConfig default of `1e-5`. Confirm it's in the *training* YAML's `overrides:` block (not just the model YAML) — see `[gdn_300M_BF16-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/gdn_300M_BF16-pretrain.yaml)` for the canonical placement.
 
 ### Iter 1 loss not bit-matching FLA but converges fine
 
@@ -574,6 +574,6 @@ Expected with all four `PRIMUS_FLA_`* env vars set. The biggest single cost is `
 
 ## See also
 
-- `[docs/04-technical-guides/hybrid-models/README.md](README.md)` — full Zebra-Llama family overview (1B / 3B / 8B Mamba+MLA, KDA variants)
+- `[docs/04-technical-guides/hybrid-models/README.md](README.md)` — full Hylo hybrid family overview (1B / 3B / 8B Mamba+MLA, KDA variants)
 - `[gdn-fla-parity.md](gdn-fla-parity.md)` — exhaustive list of code/config/runtime changes that made parity possible
 - FLA upstream: [https://github.com/fla-org/flash-linear-attention](https://github.com/fla-org/flash-linear-attention)

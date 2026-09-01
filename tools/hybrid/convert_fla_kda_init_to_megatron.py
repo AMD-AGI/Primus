@@ -9,7 +9,7 @@ loss-curve gap for GDN, and the same is expected to apply to KDA:
 
   1. Re-seed PyTorch with FLA's training seed (default 42).
   2. Instantiate FLA's `KDAForCausalLM` from the same JSON config FLA used
-     for the 4768-iter training run (`kda_300M_pure.json`).  FLA's
+     for the 4768-iter training run (`kda_300M.json`).  FLA's
      `_init_weights` is called automatically by `PreTrainedModel.__init__`,
      reproducing the exact initial weights FLA saw at iter 0.
   3. Re-map the resulting state_dict into Primus's Megatron layout:
@@ -46,7 +46,7 @@ Usage
 -----
     PYTHONPATH=/home/<user>/flash-linear-attention \\
       python3 tools/hybrid/convert_fla_kda_init_to_megatron.py \\
-        --fla-config /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M_pure.json \\
+        --fla-config /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M.json \\
         --output-dir output/fla_init_kda_300M \\
         --seed 42
 
@@ -68,6 +68,11 @@ from collections import OrderedDict
 from pathlib import Path
 
 import torch
+
+_hybrid_tools = Path(__file__).resolve().parent
+if str(_hybrid_tools) not in sys.path:
+    sys.path.insert(0, str(_hybrid_tools))
+from fla_config_paths import fla_training_configs_dir, kda_fla_config
 
 
 def _expected_megatron_keys(num_layers: int) -> set[str]:
@@ -306,11 +311,11 @@ def write_megatron_checkpoint(mg_sd: OrderedDict, output_dir: Path) -> None:
 
 def main():
     p = argparse.ArgumentParser()
-    fla_root = os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention"))
+    os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention"))
     p.add_argument(
         "--fla-config",
         type=Path,
-        default=Path(fla_root) / "legacy" / "training" / "configs" / "kda_300M_pure.json",
+        default=None,
     )
     p.add_argument(
         "--output-dir",
@@ -319,6 +324,9 @@ def main():
     )
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
+
+    if args.fla_config is None:
+        args.fla_config = kda_fla_config(fla_training_configs_dir(), size="300M")
 
     print("=" * 78)
     print("  FLA  KDA-300M  ─→  Primus Megatron sharded checkpoint")

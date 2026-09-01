@@ -12,7 +12,7 @@ the generic Primus patch system so that MoE grouped_mm integration with
 Primus-Turbo can be managed declaratively.
 
 Behavior:
-    - Enabled when ``primus_turbo.use_turbo_grouped_mm`` is True in the
+    - Enabled when ``primus_turbo.use_turbo_grouped_gemm`` is True in the
       TorchTitan job config.
     - Uses ``primus_turbo.use_moe_fp8`` to control FP8 MoE behavior.
     - Monkey patches ``torchtitan.models.moe.moe._run_experts_grouped_mm`` to
@@ -34,7 +34,7 @@ _ALREADY_PATCHED_SENTINEL = "_run_experts_grouped_mm_dynamic"
     description="Use Primus-Turbo grouped_mm for TorchTitan MoE experts",
     condition=lambda ctx: (
         get_param(ctx, "primus_turbo.enable_primus_turbo", False)
-        and get_param(ctx, "primus_turbo.use_turbo_grouped_mm", False)
+        and get_param(ctx, "primus_turbo.use_turbo_grouped_gemm", False)
     ),
 )
 def patch_torchtitan_moe(ctx: PatchContext) -> None:

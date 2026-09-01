@@ -210,7 +210,7 @@ class TestTorchTitanTrainer(PrimusUT):
         )
 
     # Llama 4 had no E2E in either backend. Distinct from the llama3 flavor above:
-    # MoE with a shared expert, and the recipe's use_turbo_grouped_mm path.
+    # MoE with a shared expert, and the recipe's use_turbo_grouped_gemm path.
     @pytest.mark.weekly
     def test_llama4_17Bx16E(self):
         run_script(
