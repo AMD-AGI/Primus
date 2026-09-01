@@ -33,6 +33,9 @@
 #
 # The throughput after each command is what a 4-node MI355X run measured at
 # 10 iterations with router load balancing forced to uniform (TFLOP/s per GPU).
+# Those numbers were taken with the indexer distillation loss off, so add
+# PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF=0 to reproduce them; with the loss on the
+# curve keeps its shape and its per-rung gains, a few percent lower throughout.
 #
 # step 0 -- baseline, every optimization off
 #   PRIMUS_OPT_FUSION=0 PRIMUS_OPT_ATTENTION=0 PRIMUS_OPT_DEEPEP=0 \
@@ -262,6 +265,16 @@ export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS
 # identical token count and flatters the unfused grouped-GEMM path.
 export MOE_FORCE_LB_TYPE=${MOE_FORCE_LB_TYPE:-uniform}
 
+# Indexer distillation loss -- part of the recipe, not an optimization. `topk`
+# is not differentiable, so without this the CSA lightning indexer never gets a
+# gradient and a from-scratch run selects compressed entries at random. Setting
+# the coefficient to 0 disables the loss and freezes the indexer.
+export PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF=${PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF:-1e-2}
+# Diagnostic: 0 renormalises each head over the compressed entries alone rather
+# than dividing by the layer's joint softmax denominator. That is the pre-fix
+# behaviour, kept only so the two can be compared.
+export PRIMUS_V4_DISTILL_NONCOMP_LSE=${PRIMUS_V4_DISTILL_NONCOMP_LSE:-1}
+
 # =============================================================================
 # (1) Small kernel fusions
 # =============================================================================
@@ -295,6 +308,16 @@ export PRIMUS_V4_CSA_BWD_SEGREDUCE=${PRIMUS_V4_CSA_BWD_SEGREDUCE:-$_F}
 export PRIMUS_INDEXER_TRITON_FULL=${PRIMUS_INDEXER_TRITON_FULL:-0}
 # torch.compile path for Sinkhorn, an alternative to the Triton kernel above.
 export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-$_FB}
+# The indexer distillation loss's own kernels: the KL target (which otherwise
+# gathers the selected pool rows into HBM), the KL tail, and the sliding-window
+# log mass the target's denominator needs. Each falls back to an eager body on
+# shapes it does not cover.
+export PRIMUS_V4_DISTILL_TARGET_TRITON=${PRIMUS_V4_DISTILL_TARGET_TRITON:-$_F}
+export PRIMUS_V4_DISTILL_KL_TRITON=${PRIMUS_V4_DISTILL_KL_TRITON:-$_F}
+export PRIMUS_V4_DISTILL_WINDOW_TRITON=${PRIMUS_V4_DISTILL_WINDOW_TRITON:-$_F}
+# torch.compile for the indexer: most of what training it costs is the autograd
+# engine walking its forward, not arithmetic.
+export PRIMUS_V4_INDEXER_COMPILE=${PRIMUS_V4_INDEXER_COMPILE:-$_F}
 
 # Fusions that live in the experiment yaml (see the derivation at the end).
 # use_turbo_rms_norm additionally needs the primus_turbo master gate, which only
@@ -468,6 +491,7 @@ else
     _RECOMPUTE_DESC="$PRIMUS_RECOMPUTE_LAYERS"
 fi
 echo "[flash] layout=${PRIMUS_PP_LAYOUT:-<even split>} recompute=$_RECOMPUTE_DESC"
+echo "[flash] indexer_distill_coeff=$PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF fused_target=$PRIMUS_V4_DISTILL_TARGET_TRITON fused_kl=$PRIMUS_V4_DISTILL_KL_TRITON fused_window=$PRIMUS_V4_DISTILL_WINDOW_TRITON compile=$PRIMUS_V4_INDEXER_COMPILE joint_denom=$PRIMUS_V4_DISTILL_NONCOMP_LSE"
 echo "[flash] nodes=$NNODES tp=$PRIMUS_TP pp=$PRIMUS_PP ep=$PRIMUS_EP gbs=$GBS seq=$PRIMUS_SEQ_LENGTH iters=$TRAIN_ITERS"
 echo "[flash] exp=$EXP"
 
