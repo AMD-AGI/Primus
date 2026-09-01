@@ -508,9 +508,7 @@ class WeightDeOscRunner:
             reset_count = int(reset_mask.sum().item())
             q_flat = q_snap.reshape(-1)
             # Snap target is the dequantized bin center, written back in FP32.
-            shard_main_param.data.view(-1)[reset_mask] = q_flat[reset_mask].to(
-                dtype=shard_main_param.dtype
-            )
+            shard_main_param.data.view(-1)[reset_mask] = q_flat[reset_mask].to(dtype=shard_main_param.dtype)
             # Refresh master snapshot so the snap is not counted as a large
             # movement on the next period's first step. prev_q already equals
             # Q(snapped) because the snapped values are dequantized bin centers
