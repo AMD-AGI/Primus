@@ -1,0 +1,33 @@
+# Primus EXP config — Wan 2.2 T2V A14B on synthetic data, NeMo AutoModel backend.
+#
+# Needs no dataset on disk: the dataloader generates deterministic random latents
+# of the right shape. Useful for bring-up, for exercising the model and sharding
+# path on a new machine, and for changes where the data pipeline is not the thing
+# under test.
+#
+# To honor `fsdp.reshard_after_forward` and `activation_checkpointing: selective`,
+# enable the Wan strategy repair:
+#   PRIMUS_WAN_PARALLELIZE_FIX=1
+#
+# Launch (inside the Primus container, 8 GPUs):
+#   GPUS_PER_NODE=8 \
+#   EXP=examples/nemo_automodel/configs/MI355X/diffusion/wan2_2_t2v_a14b-synthetic.yaml \
+#   bash examples/run_pretrain.sh
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:wan2_2_t2v_a14b-synthetic}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: wan_synthetic_pre_trainer.yaml
+    model: wan2_2_t2v_a14b.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 24
+        local_batch_size: 1
+        global_batch_size: 8
+      checkpoint:
+        enabled: false
