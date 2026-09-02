@@ -4,20 +4,23 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Compatibility entry point for the existing Megatron data commands."""
+"""Compatibility entry point for the backend data commands."""
 
 import argparse
 
 from primus.backends.megatron.data.cli import register_data_subcommands
+from primus.backends.nemo_automodel.data.cli import (
+    register_data_subcommands as register_automodel_data_subcommands,
+)
 
 
 def register_subcommand(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Register ``primus data`` and delegate to the Megatron implementation."""
     parser = subparsers.add_parser(
         "data",
-        help="Dataset preparation tools (Megatron diffusion)",
+        help="Dataset preparation tools (diffusion)",
         description=(
-            "Data preparation utilities for Megatron diffusion models.\n"
+            "Data preparation utilities for diffusion models.\n"
             "The public command names are retained for compatibility."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -29,6 +32,7 @@ def register_subcommand(subparsers: argparse._SubParsersAction) -> argparse.Argu
     )
 
     register_data_subcommands(data_subparsers)
+    register_automodel_data_subcommands(data_subparsers)
 
     # Required by the CLI dispatch contract. The nested subparser always
     # replaces this with the selected Megatron command handler.
