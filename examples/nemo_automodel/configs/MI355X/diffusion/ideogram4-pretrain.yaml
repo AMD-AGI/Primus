@@ -1,0 +1,61 @@
+# Primus experiment — Ideogram-4 text-to-image pretrain, from scratch.
+# =============================================================================
+# Runs through the same Primus nemo_automodel path as the Wan 2.2 and FLUX
+# experiments. Everything Ideogram-specific is a Primus patch, installed by the
+# trainer, so no upstream source is modified:
+#   - flow_matching.adapter_type: ideogram4 -> the Ideogram-4 adapter
+#     (primus/backends/nemo_automodel/models/ideogram4/adapter.py)
+#   - data.dataloader -> the synthetic loader
+#     (primus/backends/nemo_automodel/models/ideogram4/data/synthetic.py)
+#   - fsdp.activation_checkpointing with PRIMUS_IDEOGRAM_REAL_AC=1 -> real
+#     checkpointing (primus/backends/nemo_automodel/models/ideogram4/parallelize.py)
+#
+# ONE-TIME SETUP. The transformer is randomly initialised from a local config
+# directory and needs no weights, gated or otherwise. Write one with:
+#
+#   python tools/nemo_automodel/make_ideogram4_config_dir.py --out <dir>
+#
+# and point model.pretrained_model_name_or_path at it, either in the overrides
+# below or on the command line.
+#
+# LAUNCH (8 GPUs):
+#   PRIMUS_IDEOGRAM_REAL_AC=1 \
+#   torchrun --nproc_per_node=8 --nnodes=1 \
+#     primus/cli/main.py train pretrain \
+#     --config examples/nemo_automodel/configs/MI355X/diffusion/ideogram4-pretrain.yaml
+#
+# WHAT THIS IS. A small overfit run on a fixed synthetic set: the goal is a
+# clearly decreasing loss, which exercises the adapter, the packing and real
+# activation checkpointing end to end. It is not a convergence run. For that,
+# remove step_scheduler.max_steps and switch to the real cache experiment,
+# ideogram4-pretrain-cache.yaml.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:ideogram4-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: ideogram4_pre_trainer.yaml
+    model: ideogram4.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 60            # overfit cap; remove for a real pretrain run
+        local_batch_size: 2
+        global_batch_size: 16    # 2 x 8 ranks, so no gradient accumulation
+        log_remote_every_steps: 1
+      optimizer:
+        lr: 1.0e-4
+      fsdp:
+        activation_checkpointing: true
+        enable_compile: false
+      data:
+        dataloader:
+          num_samples: 64
+          grid_h: 16
+          grid_w: 16
+          max_text_tokens: 32
+      checkpoint:
+        enabled: false           # set true + checkpoint_dir for a real run

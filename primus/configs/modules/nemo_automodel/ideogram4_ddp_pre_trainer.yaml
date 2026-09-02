@@ -1,0 +1,127 @@
+# NeMo AutoModel pre_trainer module config — Ideogram-4 pretrain on the DDP path,
+# with ZeRO-1 (Primus backend: nemo_automodel).
+#
+# Identical to `ideogram4_pre_trainer.yaml` EXCEPT that the `fsdp:` block is
+# replaced by a `ddp:` block, so the recipe takes the DistributedDataParallel path:
+# parameters and gradients are REPLICATED and there is no per-layer all-gather.
+#
+# Pair it with PRIMUS_IDEOGRAM_ZERO1=1, which does two things:
+#   - shards the AdamW optimizer state across the data-parallel ranks, recovering
+#     the memory pure DDP spends on replicating it, and
+#   - whole-block checkpoint-wraps the transformer layers. This is not optional:
+#     the DDP manager's own activation checkpointing looks for submodule names an
+#     Ideogram-4 block does not have, so it silently does nothing, and without real
+#     checkpointing the model does not fit at any useful batch size.
+#
+# For the pure-DDP baseline that the ZeRO-1 saving is measured against, use
+# PRIMUS_IDEOGRAM_DDP=1 instead, which applies the checkpointing without sharding
+# the optimizer.
+#
+# WHEN TO USE THIS. Per-layer torch.compile is wired only into the FSDP2 path, so
+# this path gives it up. On a single node, where the exposed FSDP communication is
+# a small part of the step, it therefore trails FSDP2 with compile and cannot make
+# that back from the collectives it saved. It is the multi-node lever, where
+# all-gather crosses the slower interconnect, and a reference point. To shard less
+# on a single node while KEEPING compile, raise `fsdp.dp_replicate_size` in the
+# FSDP preset instead.
+#
+# Context parallelism is FSDP2-only upstream, so it is unavailable here.
+#
+# NOTE: do not declare a `model:` block here — it comes from the model preset.
+extends:
+  - ../module_base.yaml
+
+seed: 42
+
+wandb:
+  enable: false
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 2
+  ckpt_every_steps: 1000
+  num_epochs: 1000
+  log_remote_every_steps: 1
+  save_checkpoint_every_epoch: false
+
+data:
+  dataloader:
+    _target_: primus.backends.nemo_automodel.models.ideogram4.data.synthetic.SyntheticIdeogram4DataloaderConfig
+    num_samples: 64
+    in_channels: 128
+    grid_h: 16
+    grid_w: 16
+    max_text_tokens: 32
+    min_text_tokens: 28
+    llm_features_dim: 53248
+    feature_scale: 0.1
+    latent_scale: 1.0
+    seed: 1234
+    shuffle: true
+    # Keep the batch size constant. The packing has 2*B+1 entries, so a short final
+    # batch changes its shape along with the hidden states' and recompiles the graph.
+    drop_last: true
+    num_workers: 0
+    pin_memory: true
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  # fused AdamW is fine under ZeRO-1: each rank's local optimizer runs over its own
+  # shard of ordinary tensors.
+  foreach: false
+  fused: true
+
+performance:
+  check_loss: false
+  grad_clip_foreach: true
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 0
+  min_lr: 1e-6
+
+flow_matching:
+  adapter_type: ideogram4
+  adapter_kwargs:
+    in_channels: 128
+    predict_negative_velocity: true
+  timestep_sampling: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  flow_shift: 3.0
+  mix_uniform_ratio: 0.1
+  cfg_dropout_prob: 0.0
+  sigma_min: 0.0
+  sigma_max: 1.0
+  num_train_timesteps: 1000
+  i2v_prob: 0.0
+  use_loss_weighting: false
+  log_interval: 100
+  summary_log_interval: 10
+
+# The DDP path, replacing the `fsdp:` block. activation_checkpointing here does
+# nothing unless PRIMUS_IDEOGRAM_DDP=1 or PRIMUS_IDEOGRAM_ZERO1=1 is set; see the
+# header. PRIMUS_IDEOGRAM_AC_EVERY applies on this path too.
+ddp:
+  activation_checkpointing: true
+  gradient_as_bucket_view: true
+  broadcast_buffers: false
+  find_unused_parameters: false
+  static_graph: false
+
+checkpoint:
+  enabled: false
+  # Not optional even with `enabled: false`: the recipe's setup() calls
+  # os.makedirs() on this before it consults `enabled`, so "" aborts the run.
+  checkpoint_dir: /checkpoints/ideogram4_ddp_pretrain
+  model_save_format: safetensors
+  save_consolidated: final
+  diffusers_compatible: true
+  restore_from: null

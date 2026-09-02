@@ -1,0 +1,42 @@
+# NeMo AutoModel model preset — Ideogram-4, a single-stream rectified-flow
+# text-to-image diffusion transformer (Primus backend: nemo_automodel).
+#
+# Merged as the `model:` block into one of the Ideogram-4 module presets by the
+# Primus launcher. `mode: pretrain` builds ONE randomly initialised transformer
+# from a local diffusers `transformer/config.json`, loading no weights — the same
+# from-scratch path the Wan 2.2 and FLUX presets use.
+#
+# NO gated weights are needed, because that path reads only the CONFIG. Write a
+# weightless config directory once:
+#
+#   python tools/nemo_automodel/make_ideogram4_config_dir.py --out <dir>
+#
+# then point `pretrained_model_name_or_path` at it. That tool builds the model on
+# the meta device, so it costs no parameter allocation and needs no credentials.
+#
+# The VAE and the text encoder are NOT loaded at train time. The dataloader
+# supplies pre-encoded image latents and pre-encoded text features, so only the
+# transformer occupies the device. See the module presets for the two loaders.
+model:
+  # PLACEHOLDER: a local weightless Ideogram-4 config directory, written by the
+  # tool named above. Override per run.
+  pretrained_model_name_or_path: /path/to/ideogram4_config
+  mode: pretrain
+  # Read by the recipe only for PEFT and cache paths, neither of which is used here.
+  model_type: ideogram4
+  # attention_backend is deliberately unset. Leaving it out makes the recipe skip
+  # set_attention_backend, so the model keeps its default dispatch (torch SDPA),
+  # which honours the block-diagonal segment mask this model builds. Set a backend
+  # here only once that mask is known to survive it.
+  #
+  # To route attention through variable-length flash attention instead, set
+  # PRIMUS_IDEOGRAM_VARLEN_ATTN=1, which replaces the processor rather than the
+  # backend and consumes the segment structure directly.
+  #
+  # float32 master weights with bf16 compute: the canonical pretraining precision.
+  torch_dtype: float32
+  compute_dtype: bfloat16
+  pipeline_spec:
+    transformer_cls: Ideogram4Transformer2DModel
+    subfolder: transformer
+    load_full_pipeline: false
