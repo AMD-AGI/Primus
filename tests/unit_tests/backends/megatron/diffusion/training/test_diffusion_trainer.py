@@ -342,9 +342,7 @@ class TestDiffusionPretrainTrainer:
         # Should return output_tensor directly
         assert result is output
 
-    def test_validation_report_survives_megatrons_in_place_rescale(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_validation_report_survives_megatrons_in_place_rescale(self, monkeypatch: pytest.MonkeyPatch):
         """The reported validation loss must not move when Megatron rescales the
         tensor it backpropagates.
 
