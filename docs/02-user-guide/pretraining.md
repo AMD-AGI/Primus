@@ -108,9 +108,9 @@ The following files ship in the repository (sorted by name). Parallelism columns
 | `qwen3_5_35B_A3B-FP8-pretrain.yaml` | `${PRIMUS_TP:1}` | `${PRIMUS_PP:1}` | `${PRIMUS_EP:8}` |
 | `qwen3_8B-BF16-pretrain.yaml` | `1` | `1` | `1` |
 | `qwen3_8B-FP8-pretrain.yaml` | `1` | `1` | `1` |
-| `zebra_llama_1B-pretrain.yaml` | `1` | `1` | `1` |
-| `zebra_llama_3B-pretrain.yaml` | `1` | `1` | `1` |
-| `zebra_llama_8B-pretrain.yaml` | `1` | `1` | `1` |
+| `hylo_llama_mamba_1B_BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `hylo_llama_mamba_3B_BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `hylo_llama_mamba_8B_BF16-pretrain.yaml` | `1` | `1` | `1` |
 
 ### Sample YAML file (`llama2_7B-BF16-pretrain.yaml`) explained
 

@@ -6,7 +6,7 @@
 # torch/torchvision are installed separately (ROCm wheel index) by
 # examples/maxdiffusion/setup_maxdiffusion_env.sh, because they need
 # --find-links/--no-index which cannot be mixed with a PyPI resolve here.
-transformers==4.57.3
+transformers==5.10.1
 scikit-image
 imageio-ffmpeg
 loguru

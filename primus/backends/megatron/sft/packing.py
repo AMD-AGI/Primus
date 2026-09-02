@@ -102,6 +102,29 @@ PACK_FORMAT_VERSION = "v6_bridge_parity_squad_template_drop_overlength"
 # legacy layout.
 MAX_SEGMENTS_PER_PACK = 256
 
+# ...but 256 is only "generous" relative to an 8K window. The cap is what bounds how many
+# samples a pack may hold, so at a long context it silently becomes the binding constraint
+# instead of max_seq_length: a 128K pack of Alpaca samples (runtime median 84 tokens)
+# holds ~1300 segments on average, and stopping at 256 fills only ~19% of the window with
+# real tokens (10.7% supervised) while reporting a full pack. That looks like packing
+# working and is really packing giving up.
+#
+# So scale it with the window, keeping the historical 256 for anything up to 8K. (The
+# digest below includes the cap, so adding it forces one rebuild of any existing cache.) The
+# divisor is deliberately below the shortest realistic sample: cu_seqlens stays trivially
+# small either way (4096 entries = 32 KB per pack).
+_MIN_TOKENS_PER_SEGMENT = int(os.environ.get("PRIMUS_PACK_MIN_TOKENS_PER_SEGMENT", "32"))
+
+
+def max_segments_per_pack(max_seq_length: int) -> int:
+    """Segment cap for a given window; never below the historical 256.
+
+    ``PRIMUS_PACK_MIN_TOKENS_PER_SEGMENT`` raises the divisor to lower the cap, which is
+    the knob for trading supervised-token density against whatever downstream cost scales
+    with the segment count.
+    """
+    return max(MAX_SEGMENTS_PER_PACK, int(max_seq_length) // _MIN_TOKENS_PER_SEGMENT)
+
 
 def _tokenize_no_pad(
     formatted_sample: FormattedSFTSample,
@@ -197,6 +220,7 @@ def _first_fit_pack(
     samples: List[Dict[str, np.ndarray]],
     max_seq_length: int,
     order: List[int],
+    segment_align: int = 1,
 ) -> List[List[int]]:
     """Greedy first-fit bin packing in ``order``.
 
@@ -205,12 +229,16 @@ def _first_fit_pack(
     order is supplied by the caller; see ``_first_fit_decreasing_pack`` and
     ``_first_fit_shuffle_pack`` for the two policies we currently expose.
     """
-    raw_sample_cap = MAX_SEGMENTS_PER_PACK - 1
+    raw_sample_cap = max_segments_per_pack(max_seq_length) - 1
     bins: List[Dict[str, Any]] = []  # each: {"indices": [...], "used": int}
     for idx in order:
         length = samples[idx]["length"]
         if length == 0:
             continue
+        if segment_align > 1:
+            # Charge each sample its ALIGNED footprint, or the bin overflows once
+            # _build_packed_sequence rounds the boundaries up.
+            length = ((length + segment_align - 1) // segment_align) * segment_align
         placed = False
         for b in bins:
             if b["used"] + length <= max_seq_length and len(b["indices"]) < raw_sample_cap:
@@ -226,6 +254,7 @@ def _first_fit_pack(
 def _first_fit_decreasing_pack(
     samples: List[Dict[str, np.ndarray]],
     max_seq_length: int,
+    segment_align: int = 1,
 ) -> List[List[int]]:
     """Native default packer.
 
@@ -241,13 +270,14 @@ def _first_fit_decreasing_pack(
     # only so this change is strictly tighter than legacy bins and never
     # increases per-pack segment count.
     order = sorted(range(len(samples)), key=lambda i: -samples[i]["length"])
-    return _first_fit_pack(samples, max_seq_length, order)
+    return _first_fit_pack(samples, max_seq_length, order, segment_align)
 
 
 def _first_fit_shuffle_pack(
     samples: List[Dict[str, np.ndarray]],
     max_seq_length: int,
     seed: int = 0,
+    segment_align: int = 1,
 ) -> List[List[int]]:
     """Bridge-parity packer.
 
@@ -261,7 +291,7 @@ def _first_fit_shuffle_pack(
     rng = np.random.default_rng(seed)
     order = list(range(len(samples)))
     rng.shuffle(order)
-    return _first_fit_pack(samples, max_seq_length, order)
+    return _first_fit_pack(samples, max_seq_length, order, segment_align)
 
 
 def _build_packed_sequence(
@@ -269,6 +299,7 @@ def _build_packed_sequence(
     samples: List[Dict[str, np.ndarray]],
     max_seq_length: int,
     pad_id: int,
+    segment_align: int = 1,
 ) -> Dict[str, torch.Tensor]:
     """Concatenate the chosen samples into one max_seq_length sequence.
 
@@ -331,6 +362,18 @@ def _build_packed_sequence(
         position_ids[offset : offset + length] = np.arange(length, dtype=np.int64)
 
         offset += length
+        if segment_align > 1:
+            # Round each segment boundary up to a multiple of `segment_align`. Required
+            # by DeepSeek-V4's compressed branches under context parallelism: the
+            # compressor anchors its pooling windows at each sequence's start, so unless
+            # every start is a multiple of the compress ratio, a window's rows land on two
+            # CP ranks and no index remap can repair it. The gap keeps pad_id / loss_mask
+            # 0 / sequential position_ids, exactly like the trailing pad region below.
+            aligned = ((offset + segment_align - 1) // segment_align) * segment_align
+            aligned = min(aligned, max_seq_length)
+            if aligned > offset:
+                position_ids[offset:aligned] = np.arange(aligned - offset, dtype=np.int64)
+                offset = aligned
         cu_seqlens.append(offset)
 
     real_tokens = offset  # number of REAL (non-pad) tokens
@@ -355,9 +398,10 @@ def _build_packed_sequence(
             num_real_segments = 1
 
     num_segments = len(cu_seqlens) - 1  # bridge-aligned: == num_real_segments
-    assert num_segments <= MAX_SEGMENTS_PER_PACK, (
-        f"Pack contains {num_segments} segments which exceeds "
-        f"MAX_SEGMENTS_PER_PACK={MAX_SEGMENTS_PER_PACK}; raise the cap."
+    _cap = max_segments_per_pack(max_seq_length)
+    assert num_segments <= _cap, (
+        f"Pack contains {num_segments} segments which exceeds the cap {_cap} for "
+        f"max_seq_length={max_seq_length}; raise _MIN_TOKENS_PER_SEGMENT's divisor."
     )
     assert (
         cu_seqlens[-1] == max_seq_length
@@ -366,7 +410,7 @@ def _build_packed_sequence(
     # Pad cu_seqlens to fixed size by repeating ``max_seq_length`` (zero-length
     # dummy entries accepted by TE; repeating the final offset would produce
     # nonzero-but-invalid segments).
-    while len(cu_seqlens) < MAX_SEGMENTS_PER_PACK + 1:
+    while len(cu_seqlens) < _cap + 1:
         cu_seqlens.append(max_seq_length)
 
     # Compute max real sub-segment length for this packed sequence (for FlashAttn).
@@ -449,11 +493,21 @@ def _build_pack_cache_key(
     pad_id: int,
     tokenizer_id: str,
     bridge_compat_inline_bos: bool = False,
+    segment_align: int = 1,
 ) -> str:
-    """Return a 16-char hex digest that uniquely identifies a pack output."""
+    """Return a 16-char hex digest that uniquely identifies a pack output.
+
+    Every input that changes the pack CONTENT has to appear here. ``segment_align`` does
+    -- it rounds each segment up inside both ``_first_fit_pack`` and
+    ``_build_packed_sequence``, changing how many samples fit and where the boundaries
+    land -- and it was missing, so flipping ``PRIMUS_PACK_ALIGN`` silently reloaded the
+    other setting's packs from cache. That fails in the worst possible direction: an
+    aligned-vs-unaligned A/B on a warm cache compares identical data and reports no
+    difference, which looks like a finding.
+    """
     pieces = [
         f"version={PACK_FORMAT_VERSION}",
-        f"max_segments={MAX_SEGMENTS_PER_PACK}",
+        f"max_segments={max_segments_per_pack(max_seq_length)}",
         f"dataset={dataset_name}",
         f"split={split}",
         f"formatter={formatter}",
@@ -461,6 +515,7 @@ def _build_pack_cache_key(
         f"pad_id={pad_id}",
         f"tokenizer={tokenizer_id}",
         f"bridge_compat_inline_bos={int(bool(bridge_compat_inline_bos))}",
+        f"segment_align={int(segment_align)}",
     ]
     blob = "|".join(pieces).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
@@ -483,11 +538,20 @@ class PackedSFTDataset(Dataset):
         formatter: str = "alpaca",
         seed: int = 1234,
         bridge_compat_inline_bos: bool = False,
+        segment_align: int = 1,
         **kwargs,
     ):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
+        # Round every packed segment up to this many tokens. 1 = off (default). See
+        # _build_packed_sequence for why DeepSeek-V4 + CP needs it.
+        self.segment_align = int(segment_align)
+        if self.segment_align > 1 and max_seq_length % self.segment_align != 0:
+            raise ValueError(
+                f"segment_align={self.segment_align} must divide max_seq_length="
+                f"{max_seq_length}, otherwise the final segment cannot be aligned."
+            )
         self.formatter_name = formatter
         self.formatter = create_formatter(formatter)
         self.pad_id = _resolve_pad_token_id(tokenizer)
@@ -523,6 +587,7 @@ class PackedSFTDataset(Dataset):
             pad_id=self.pad_id,
             tokenizer_id=_tokenizer_identity(tokenizer),
             bridge_compat_inline_bos=self.bridge_compat_inline_bos,
+            segment_align=self.segment_align,
         )
         cache_dir = _resolve_pack_cache_dir()
         cache_file = cache_dir / f"sft_pack_{cache_key}.pt"
@@ -672,19 +737,22 @@ class PackedSFTDataset(Dataset):
                 f"first_fit_shuffle (Bridge-parity, seed={seed}); "
                 f"max_seq_length={max_seq_length}..."
             )
-            bins = _first_fit_shuffle_pack(tokenized, max_seq_length, seed=seed)
+            bins = _first_fit_shuffle_pack(
+                tokenized, max_seq_length, seed=seed, segment_align=self.segment_align
+            )
         else:
             log_rank_0(
                 f"[Pack] Bin-packing {len(tokenized)} samples with "
                 f"first_fit_decreasing (Native default); "
                 f"max_seq_length={max_seq_length}..."
             )
-            bins = _first_fit_decreasing_pack(tokenized, max_seq_length)
+            bins = _first_fit_decreasing_pack(tokenized, max_seq_length, segment_align=self.segment_align)
 
         # Materialize each pack now so __getitem__ is just a list index.
         # Memory cost is small (packed_samples * max_seq_length * 4 bytes).
         packed: List[Dict[str, torch.Tensor]] = [
-            _build_packed_sequence(b, tokenized, max_seq_length, self.pad_id) for b in bins
+            _build_packed_sequence(b, tokenized, max_seq_length, self.pad_id, self.segment_align)
+            for b in bins
         ]
 
         avg_per_pack = sum(int(t["num_real_segments"].item()) for t in packed) / max(len(packed), 1)

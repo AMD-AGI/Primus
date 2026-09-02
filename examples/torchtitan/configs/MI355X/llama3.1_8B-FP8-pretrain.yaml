@@ -28,6 +28,11 @@ modules:
         mock_data: true
         steps: 50
         gc_freq: 100
+        dataloader:
+          num_workers: 1
+          prefetch_factor: 4
+          persistent_workers: true
+          pin_memory: true
 
       activation_checkpoint:
         mode: "none"  # ["none", "selective", "full"]
