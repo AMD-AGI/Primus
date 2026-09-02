@@ -1,0 +1,44 @@
+# Primus EXP — FLUX.1-dev T2I pretrain on SYNTHETIC data, NeMo AutoModel backend.
+#
+# Needs no dataset on disk: the dataloader generates deterministic latents and
+# conditioning of the right shape and dtype. Useful for bring-up, for exercising
+# the model and sharding path on a new machine, and for any change where the data
+# pipeline is not the thing under test.
+#
+# Enable the real-AC strategy, or fsdp.activation_checkpointing is a silent no-op
+# for FLUX:
+#   PRIMUS_FLUX_REAL_AC=1
+#
+# Launch (inside the Primus container, 8 GPUs):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   PRIMUS_FLUX_REAL_AC=1 GPUS_PER_NODE=8 \
+#   EXP=examples/nemo_automodel/configs/MI355X/diffusion/flux_1_dev-synthetic.yaml \
+#   bash examples/run_pretrain.sh
+#
+# Resolution is set by latent_h/latent_w, which are res/8 (the VAE latent) and NOT
+# the res/16 token grid. 32 / 64 / 128 / 256 give 256** / 512** / 1024** / 2048**:
+#   ... bash examples/run_pretrain.sh \
+#       data.dataloader.latent_h=64 data.dataloader.latent_w=64
+#
+# For FLUX.1-schnell, swap the model preset and turn guidance embeds off, since
+# schnell's transformer has no guidance layer:
+#   ... bash examples/run_pretrain.sh \
+#       flow_matching.adapter_kwargs.use_guidance_embeds=false
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_1_dev-synthetic}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: flux_synth_pre_trainer.yaml
+    model: flux_1_dev.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 25
+        local_batch_size: 4
+        global_batch_size: 32
+      checkpoint:
+        enabled: false

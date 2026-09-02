@@ -1,0 +1,53 @@
+# Primus EXP — FLUX.1-dev T2I pretrain (from scratch) via the NeMo AutoModel
+# backend on MI355X.
+#
+# One-time setup, like any other Primus backend:
+#   git submodule update --init third_party/Automodel
+#   # (skipped automatically if the image already ships nemo_automodel)
+#
+# Data: a pre-encoded latent/embedding cache, built once with the stock AutoModel
+# preprocessor. Point --output_dir at whatever you set as cache_dir below:
+#   python -m tools.diffusion.preprocessing_multiprocess image \
+#     --image_dir /path/to/images --output_dir /path/to/flux_cache \
+#     --processor flux --model_name /models/FLUX.1-dev --resolution 512
+#
+# For a run with no dataset at all, use flux_1_dev-synthetic.yaml instead.
+#
+# Activation checkpointing is a SILENT NO-OP for FLUX unless the real-AC strategy
+# is enabled, because FluxTransformer2DModel is not in AutoModel's strategy
+# registry and the default strategy looks for submodules a FLUX block lacks:
+#   PRIMUS_FLUX_REAL_AC=1
+#
+# Launch (inside the Primus container, 8 GPUs):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   PRIMUS_FLUX_REAL_AC=1 GPUS_PER_NODE=8 \
+#   EXP=examples/nemo_automodel/configs/MI355X/diffusion/flux_1_dev-pretrain.yaml \
+#   bash examples/run_pretrain.sh
+#
+# Other resolutions are CLI overrides rather than separate files; the cache must
+# have been built at the matching resolution:
+#   ... bash examples/run_pretrain.sh \
+#       data.dataloader.base_resolution=[1024,1024] \
+#       data.dataloader.cache_dir=/path/to/flux_cache_1024
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_1_dev-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: flux_pre_trainer.yaml
+    model: flux_1_dev.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 25
+        local_batch_size: 4
+        global_batch_size: 32
+      data:
+        dataloader:
+          cache_dir: /path/to/flux_cache
+          base_resolution: [512, 512]
+      checkpoint:
+        enabled: false
