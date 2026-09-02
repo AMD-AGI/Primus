@@ -91,9 +91,9 @@ def megatron_global_args(monkeypatch):
     monkeypatch.setattr(gvars, "_GLOBAL_ARGS", dummy_args)
 
 
-def _pure_args():
+def _pure_args(fuse_wgrad_accum=False):
     """Trailing MXFP6LinearFunction args for the pure-MXFP6 path."""
-    return (False, None, 0, 0)
+    return (False, None, 0, 0, fuse_wgrad_accum)
 
 
 def _hybrid_args():
@@ -101,7 +101,13 @@ def _hybrid_args():
     from primus_turbo.pytorch.core.backend import BackendType
     from primus_turbo.pytorch.core.low_precision import ScalingGranularity, float8_e5m2
 
-    return (True, float8_e5m2, ScalingGranularity.TENSORWISE.value, BackendType.HIPBLASLT.value)
+    return (
+        True,
+        float8_e5m2,
+        ScalingGranularity.TENSORWISE.value,
+        BackendType.HIPBLASLT.value,
+        False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +317,7 @@ class TestMXFP6Compile(PrimusUT):
     def test_no_graph_break_hybrid(self):
         self._assert_no_graph_break(_hybrid_args())
 
+
     @requires_mxfp6
     def test_compiled_forward_matches_eager(self):
         from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
@@ -497,8 +504,87 @@ class TestMXFP6LinearModules(PrimusUT):
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
     def test_rejects_gradient_accumulation_fusion(self):
-        with pytest.raises(ValueError, match="gradient_accumulation_fusion=False"):
+        """Megatron's knob stays rejected: it would also move the plain linears."""
+        with pytest.raises(ValueError, match="mxfp6_fused_wgrad_accum=True instead"):
             self._column_linear(gradient_accumulation_fusion=True)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+    def test_fused_wgrad_accum_is_opt_in(self):
+        assert self._column_linear()._fuse_wgrad_accum is False
+        assert self._column_linear(mxfp6_fused_wgrad_accum=True)._fuse_wgrad_accum is True
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+    def test_fused_wgrad_accum_rejects_fp8_backward(self):
+        """The FP8 backward forms its wgrad with a GEMM that has no out-variant."""
+        with pytest.raises(ValueError, match="mxfp6_backward_precision"):
+            self._column_linear(
+                mxfp6_fused_wgrad_accum=True, mxfp6_backward_precision="fp8"
+            )
+
+    @requires_mxfp6
+    def test_fused_wgrad_lands_in_main_grad(self):
+        """The fused wgrad must equal the unfused one and bypass the DDP hook's add.
+
+        Megatron's hook keys off ``grad_added_to_main_grad`` to skip its ``add_``, so a
+        wgrad that landed in ``main_grad`` without setting the flag would be counted
+        twice, and one that set the flag without landing would be dropped.
+        """
+        torch.manual_seed(42)
+        layer = self._column_linear(mxfp6_fused_wgrad_accum=True).cuda()
+        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+
+        # Stand in for what Megatron DDP attaches: a bf16 buffer pre-filled with garbage
+        # a beta=0 store has to obliterate.
+        layer.weight.main_grad = torch.full_like(layer.weight, 7.0)
+        layer(x)[0].sum().backward()
+
+        reference = self._column_linear().cuda()
+        with torch.no_grad():
+            reference.weight.copy_(layer.weight)
+        reference(x)[0].sum().backward()
+
+        assert layer.weight.grad_added_to_main_grad is True
+        assert torch.equal(layer.weight.main_grad, reference.weight.grad)
+
+    @requires_mxfp6
+    def test_fused_wgrad_does_not_break_the_compiled_region(self):
+        """The fusion must not cost the compiled region, which is what actually pays here.
+
+        Traced through the module with a real ``main_grad`` rather than through
+        ``MXFP6LinearFunction.apply`` on a bare tensor: dynamo decides whether to inline an
+        autograd Function by tracing its backward too, and the backward's ``main_grad``
+        lookup is only there to trace when the attribute exists. Getting this wrong is not
+        a small loss. Breaking the region splits one compiled block into hundreds of
+        fragments, and on the MBS=32 Flux 12B arm that cost 42.7 ms of eager elementwise
+        work per 512 images against the ~16 ms of ``add_`` the fusion removes.
+        """
+        torch._dynamo.reset()
+        layer = self._column_linear(mxfp6_fused_wgrad_accum=True).cuda()
+        layer.weight.main_grad = torch.zeros_like(layer.weight)
+        # requires_grad is load-bearing: with no autograd graph to build, dynamo never
+        # traces the Function's backward and reports zero breaks whatever is in there.
+        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+
+        explanation = torch._dynamo.explain(lambda inp: layer(inp)[0])(x)
+
+        assert explanation.graph_break_count == 0, (
+            f"Expected 0 graph breaks, got {explanation.graph_break_count}. "
+            f"Reasons: {explanation.break_reasons}"
+        )
+
+    @requires_mxfp6
+    def test_fused_wgrad_needs_a_bf16_main_grad(self):
+        layer = self._column_linear(mxfp6_fused_wgrad_accum=True).cuda()
+        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+
+        # Matched on message rather than type: the autograd engine is free to rewrap an
+        # exception raised inside a Function's backward.
+        with pytest.raises((RuntimeError, TypeError), match="weight.main_grad"):
+            layer(x)[0].sum().backward()
+
+        layer.weight.main_grad = torch.zeros_like(layer.weight, dtype=torch.float32)
+        with pytest.raises((RuntimeError, TypeError), match="main_grads_dtype"):
+            layer(x)[0].sum().backward()
 
     @requires_mxfp6
     def test_rejects_unaligned_k(self):
@@ -629,8 +715,12 @@ class TestMXFP6RecipeConfig:
         # fp6 is mutually exclusive with both of these.
         assert getattr(params, "fp4", None) is None
         assert getattr(params, "fp8", None) is None
-        # The A6W6 entry point has no accumulate epilogue.
+        # Megatron's knob would also move the plain linears; the MXFP6 linears reject it.
         assert getattr(params, "gradient_accumulation_fusion", True) is False
+        # The MXFP6-only fused wgrad store has no beta=1 epilogue, so it is correct at one
+        # microbatch per step only. This is the general recipe, whose global batch a user
+        # is free to raise, so it stays off here.
+        assert getattr(params, "mxfp6_fused_wgrad_accum", False) is False
         assert getattr(params, "transformer_impl", None) == "local"
 
 
@@ -817,6 +907,44 @@ class TestMXFP6FusedMLP(PrimusUT):
                 continue
             snr = _snr_db(got, want.float())
             assert snr > 40, f"{name} grad diverges: {snr:.1f} dB"
+
+    @requires_mxfp6
+    def test_fused_wgrad_lands_in_both_main_grads(self):
+        """The fused MLP owns two weights, so both have to reach the right main_grad.
+
+        Worth its own test rather than trusting the linear's: the two wgrads are formed
+        from different operands in the same backward, so swapping them produces gradients
+        that are individually plausible and jointly wrong.
+        """
+        torch.manual_seed(0)
+        fused = _make_fused_mlp(mxfp6_fused_wgrad_accum=True)
+        assert fused._fused_epilogue
+
+        reference = _make_fused_mlp()
+        with torch.no_grad():
+            for name, param in fused.named_parameters():
+                reference.get_parameter(name).copy_(param)
+
+        # Stand in for what Megatron DDP attaches, pre-filled with garbage a beta=0
+        # store has to obliterate.
+        for linear in (fused.linear_fc1, fused.linear_fc2):
+            linear.weight.main_grad = torch.full_like(linear.weight, 7.0)
+
+        x = torch.randn((M, 1, K), dtype=torch.bfloat16, device="cuda:0", requires_grad=True)
+        x_ref = x.detach().clone().requires_grad_()
+
+        out, _ = fused(x)
+        grad = torch.randn_like(out)
+        out.backward(grad)
+
+        ref_out, _ = reference(x_ref)
+        ref_out.backward(grad.clone())
+
+        for name in ("linear_fc1", "linear_fc2"):
+            got = getattr(fused, name).weight
+            want = getattr(reference, name).weight
+            assert got.grad_added_to_main_grad is True, f"{name} did not claim main_grad"
+            assert torch.equal(got.main_grad, want.grad), f"{name} wgrad differs"
 
     @requires_mxfp6
     def test_bias_gradient_matches_eager_reduction(self):
