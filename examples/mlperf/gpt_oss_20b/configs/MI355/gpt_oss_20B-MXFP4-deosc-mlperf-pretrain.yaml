@@ -183,7 +183,10 @@ modules:
       use_turbo_attention: true
       enable_turbo_attention_float8: false
       # TE Linear (hipBLASLt) for QKVO; Turbo grouped GEMM for MXFP4 experts.
+      # Dense Turbo GEMM is off (QKVO stays TE). The string is the recipe default
+      # if use_turbo_gemm is later enabled: FlyDSL MXFP4, AITER elsewhere.
       use_turbo_gemm: false
+      turbo_gemm_backend: ${PRIMUS_TURBO_GEMM_BACKEND:fp4:flydsl,other:aiter}
       use_turbo_norm_te_linear: true
       weight_deosc: true
       weight_deosc_start_step: 1000
@@ -191,7 +194,9 @@ modules:
       weight_deosc_ratio: 3.0
       weight_deosc_log_freq: 1
       use_turbo_grouped_gemm: true
-      turbo_grouped_gemm_backend: flydsl
+      # FlyDSL is registered for MXFP4 grouped GEMM, not BF16 or AITER.
+      # First/last layers stay BF16, so they must not inherit a global FlyDSL choice.
+      turbo_grouped_gemm_backend: ${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:fp4:flydsl,other:hipblaslt}
       turbo_grouped_gemm_without_padding: ${TURBO_GROUPED_GEMM_WITHOUT_PADDING:true}
       use_turbo_rms_norm: true
       use_turbo_fused_act_with_probs: true

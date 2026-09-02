@@ -16,6 +16,13 @@ matchers:
     type: "glob"
     pattern: "*.self_attention.linear_qkv"
     enabled: true
+  # use_turbo_norm_te_linear splits QKV into wrapper.linear; finish_init
+  # walks the inner TEColumnParallelLinear whose path ends in .linear.
+  self_attn_qkv_te_linear_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.self_attention.linear_qkv.linear"
+    enabled: true
   self_attn_proj_bf16:
     config: "bf16"
     type: "glob"

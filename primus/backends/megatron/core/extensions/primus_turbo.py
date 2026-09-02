@@ -1904,6 +1904,18 @@ def _make_primus_turbo_norm_te_column_parallel_linear():
                 tp_group=tp_group,
             )
 
+        def finish_init(self, quantization_config):
+            """Forward TE per-module precision onto the inner linear.
+
+            gpt_model walks named_modules and only calls finish_init on
+            modules that define it. This wrapper sits at linear_qkv; the TE
+            recipe glob is written for that name. Without this forward, the
+            matcher never reaches self.linear (path linear_qkv.linear) and
+            QKV stays on the experiment-wide MXFP4 autocast.
+            """
+            if hasattr(self.linear, "finish_init"):
+                self.linear.finish_init(quantization_config)
+
         # Callers reach for these names on the fused TE module directly
         # (te_op_fuser, modelopt state-dict hooks, checkpoint conversion), so
         # expose them rather than forcing every caller to know the layout.

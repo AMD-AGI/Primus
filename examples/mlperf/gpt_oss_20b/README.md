@@ -107,5 +107,5 @@ bash run_and_time.sh
 ## Notes
 
 - `log_interval: 999999` suppresses regular Primus logs
-- Grouped GEMM backend is set in the yaml (`turbo_grouped_gemm_backend: flydsl`), not in the config shell
+- Grouped GEMM backend is set in the yaml (`turbo_grouped_gemm_backend: fp4:flydsl,other:hipblaslt`), not in the config shell
 - `RUN_RUNTIME_TUNABLES` defaults to `0`; set `RUN_RUNTIME_TUNABLES=1` to run `runtime_tunables.sh` on the host before each trial (some steps require `sudo`)
