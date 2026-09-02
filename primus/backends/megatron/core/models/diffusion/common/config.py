@@ -43,6 +43,7 @@ class BaseDiffusionConfig(TransformerConfig):
         mxfp4_gradient_stochastic_rounding: Stochastic rounding on gradients (default: False)
         fp6: Set to 'mxfp6' to run linears in MXFP6 (E2M3). None disables (default: None)
         mxfp6_backward_precision: MXFP6 backward precision, 'mxfp6' or 'fp8' (default: 'mxfp6')
+        mxfp6_fused_wgrad_accum: MXFP6 wgrad writes weight.main_grad in place (default: False)
         sensitive_layers_enabled: Enable sensitive layer configuration (default: False)
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
         sensitive_layers_end: Number of sensitive layers at end (default: 0)
@@ -95,6 +96,20 @@ class BaseDiffusionConfig(TransformerConfig):
     # MXFP6 backward precision: "mxfp6" (pure) or "fp8" (hybrid), mirroring
     # mxfp4_backward_precision.
     mxfp6_backward_precision: str = "mxfp6"
+
+    # Have the MXFP6 wgrad GEMM write weight.main_grad itself, replacing the elementwise
+    # add Megatron's DDP hook would otherwise run over every gradient.
+    #
+    # Deliberately not Megatron's `gradient_accumulation_fusion`: that flag is read by
+    # every plain linear too, and switching it on routes Flux's 76 AdaLN projections
+    # through `wgrad_gemm_accum_fp16`, which at their M=32 shapes is slower than the
+    # separate add it replaces -- measured at +11% step time on 8x MI355X, swamping the
+    # saving on the MXFP6 linears. This field moves only the MXFP6 ones.
+    #
+    # The A6W6 store has no beta=1 accumulate epilogue, so it overwrites main_grad and is
+    # only valid at one microbatch per optimizer step. Enforced per module, not here,
+    # because the microbatch count is not known at config time.
+    mxfp6_fused_wgrad_accum: bool = False
 
     # Sensitive layer configuration (clean naming, maps to Megatron internals)
     sensitive_layers_enabled: bool = False
@@ -177,6 +192,11 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError(
                 f"mxfp6_backward_precision='{self.mxfp6_backward_precision}' requires fp6 "
                 "to be set (e.g. fp6: mxfp6); with no MXFP6 linears it has no effect."
+            )
+        if self.mxfp6_fused_wgrad_accum and self.fp6 is None:
+            raise ValueError(
+                "mxfp6_fused_wgrad_accum=True requires fp6 to be set (e.g. fp6: mxfp6); "
+                "with no MXFP6 linears it has no effect."
             )
 
         if self.sensitive_layers_enabled and self.sensitive_layer_precision == "tw_fp8":

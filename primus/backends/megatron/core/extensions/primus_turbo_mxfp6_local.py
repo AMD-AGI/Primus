@@ -47,7 +47,7 @@ from primus_turbo.pytorch.core.low_precision import (
     MXFP6_PROLOGUE_BIAS_GELU_BACKWARD,
     ScalingGranularity,
 )
-from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import gemm_fp6_impl
+from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import gemm_fp6_impl, gemm_fp6_out_impl
 from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
 from primus_turbo.pytorch.kernels.quantization.mxfp6_pack import check_mxfp6_support
 
@@ -58,6 +58,69 @@ _GRAN_VALUE = ScalingGranularity.MX_BLOCKWISE.value
 # Registered by Primus-Turbo with a pure-arithmetic fake, so it is safe to trace.
 _quantize_mxfp6_dual = torch.ops.primus_turbo.quantize_mxfp6_dual_impl
 _quantize_mxfp6_fused_dual = torch.ops.primus_turbo.quantize_mxfp6_fused_dual_impl
+
+
+def _wgrad_into_main_grad(weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m):
+    """Store the weight gradient directly into ``weight.main_grad``.
+
+    Saves the round trip the unfused path forces: a freshly allocated wgrad, handed to
+    autograd as ``weight.grad``, which Megatron's DDP backward hook then adds into
+    ``main_grad`` and frees. Here the A6W6 asm writes ``main_grad`` itself and the hook
+    has nothing left to do.
+
+    Correct only because the store has beta=0 and there is exactly one microbatch per
+    optimizer step; ``_init_mxfp6_linear`` enforces that.
+
+    ``grad_added_to_main_grad`` is *not* set here -- see ``_claim_main_grad``, which has to
+    do it from the forward instead.
+
+    Returns the placeholder that has to go back to autograd as the weight gradient. It is
+    never read: with ``grad_added_to_main_grad`` set, the hook skips its ``add_`` and
+    immediately drops ``param.grad``. It exists only because the hook asserts
+    ``param.grad is not None`` whenever ``overlap_grad_reduce`` is on. This mirrors what
+    Megatron's own ``gradient_accumulation_fusion`` path returns. Note for plan item 0.2b:
+    this allocation sits inside what a full-iteration CUDA graph would capture.
+    """
+    main_grad = getattr(weight, "main_grad", None)
+    if main_grad is None:
+        raise RuntimeError(
+            "MXFP6 wgrad fusion needs weight.main_grad, which Megatron DDP allocates. "
+            "Either wrap the model in DistributedDataParallel or set "
+            "mxfp6_fused_wgrad_accum=False."
+        )
+    if main_grad.dtype != torch.bfloat16:
+        raise TypeError(
+            f"MXFP6 wgrad fusion writes bf16 only, but main_grad is {main_grad.dtype}. "
+            "Set main_grads_dtype=bf16 or mxfp6_fused_wgrad_accum=False."
+        )
+
+    gemm_fp6_out_impl(g_col, g_col_scale, a_col, a_col_scale, main_grad, n, k, m, _GRAN_VALUE)
+    return torch.empty_like(weight)
+
+
+def _claim_main_grad(*weights) -> None:
+    """Tell Megatron's DDP hook that these weights' gradients are already in main_grad.
+
+    Called from the forward, which reads oddly, because the natural place -- right after
+    the backward's store -- is not available: dynamo refuses to trace a mutation of state
+    owned outside an autograd.Function ("HOP: Unsafe side effect"), and rather than fail it
+    breaks the graph around every MXFP6 linear. On the MBS=32 Flux 12B arm that fragmented
+    one compiled block into hundreds and cost 42.7 ms of eager elementwise work per 512
+    images, against the ~16 ms of ``add_`` the fusion removes -- a net regression. From the
+    forward the same assignment is ordinary traced code, which dynamo records as a side
+    effect and replays.
+
+    Setting it before the store rather than after is safe in one direction only, and this
+    is that direction: the flag is read by the DDP backward hook, which cannot run until
+    the backward has stored, and ``zero_grad_buffer`` clears it at the top of every step.
+    A forward with no backward (eval, ``no_grad``) leaves it set with no hook to read it.
+
+    Megatron does the same thing for its own reason -- ``zero_grad_buffer`` skips the reset
+    under TE CUDA graphs precisely because the capture "no longer has the opportunity to
+    set it back to True".
+    """
+    for weight in weights:
+        weight.grad_added_to_main_grad = True
 
 
 class MXFP6LinearFunction(torch.autograd.Function):
@@ -82,6 +145,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
         fp8_bwd_dtype,
         fp8_gran_value,
         fp8_backend_value,
+        fuse_wgrad_accum,
     ):
         out_dtype = input.dtype
         orig_shape = input.shape
@@ -119,9 +183,11 @@ class MXFP6LinearFunction(torch.autograd.Function):
             fp8_bwd_dtype,
             fp8_gran_value,
             fp8_backend_value,
+            fuse_wgrad_accum,
         ) = inputs
 
         ctx.backward_is_fp8 = backward_is_fp8
+        ctx.fuse_wgrad_accum = fuse_wgrad_accum
         ctx.out_dtype = input.dtype
         ctx.orig_shape = input.shape
         # The packed blobs carry no shape, so the logical dims have to be saved too.
@@ -137,7 +203,12 @@ class MXFP6LinearFunction(torch.autograd.Function):
             ctx.fp8_backend_value = fp8_backend_value
         else:
             _, a_col, a_col_scale, b_col, b_col_scale = output
-            ctx.save_for_backward(a_col, a_col_scale, b_col, b_col_scale)
+            # The weight rides along only when the backward has to reach through it to
+            # weight.main_grad; save_for_backward hands back the same Parameter object.
+            if fuse_wgrad_accum:
+                ctx.save_for_backward(a_col, a_col_scale, b_col, b_col_scale, weight)
+            else:
+                ctx.save_for_backward(a_col, a_col_scale, b_col, b_col_scale)
             ctx.mark_non_differentiable(a_col, a_col_scale, b_col, b_col_scale)
 
     @staticmethod
@@ -182,7 +253,10 @@ class MXFP6LinearFunction(torch.autograd.Function):
                 default_backend=ctx.fp8_backend_value,
             )
         else:
-            a_col, a_col_scale, b_col, b_col_scale = ctx.saved_tensors
+            if ctx.fuse_wgrad_accum:
+                a_col, a_col_scale, b_col, b_col_scale, weight = ctx.saved_tensors
+            else:
+                a_col, a_col_scale, b_col, b_col_scale = ctx.saved_tensors
             g_row, g_row_scale, g_col, g_col_scale = _quantize_mxfp6_dual(grad_2d)
 
             # grad_input[M, K] = grad[M, N] @ weight[N, K], contracting N. b_col is the
@@ -201,19 +275,71 @@ class MXFP6LinearFunction(torch.autograd.Function):
             grad_input = grad_input.reshape(ctx.orig_shape)
 
             # grad_weight[N, K] = grad.T[N, M] @ input[M, K], contracting M.
-            grad_weight = gemm_fp6_impl(
-                g_col,
-                g_col_scale,
-                a_col,
-                a_col_scale,
-                n,
-                k,
-                m,
-                ctx.out_dtype,
-                _GRAN_VALUE,
-            )
+            if ctx.fuse_wgrad_accum:
+                grad_weight = _wgrad_into_main_grad(
+                    weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m
+                )
+            else:
+                grad_weight = gemm_fp6_impl(
+                    g_col,
+                    g_col_scale,
+                    a_col,
+                    a_col_scale,
+                    n,
+                    k,
+                    m,
+                    ctx.out_dtype,
+                    _GRAN_VALUE,
+                )
 
-        return grad_input, grad_weight, None, None, None, None
+        return grad_input, grad_weight, None, None, None, None, None
+
+
+def _resolve_wgrad_fusion(module, name: str) -> bool:
+    """Whether this linear may write its wgrad straight into ``main_grad``.
+
+    Gated on the Primus-owned ``mxfp6_fused_wgrad_accum`` rather than Megatron's
+    ``gradient_accumulation_fusion``, because the latter also moves every plain linear --
+    see the field's own comment for what that costs Flux's AdaLN projections.
+
+    Two hard requirements, both raised rather than silently downgraded so that a
+    misconfiguration does not read as a performance result:
+
+    - One microbatch per optimizer step. The A6W6 asm stores with beta=0, so a second
+      microbatch would overwrite the first one's gradient instead of adding to it.
+      Megatron's own fused path uses a beta=1 accumulate kernel and has no such limit.
+    - The pure-MXFP6 backward. The FP8-backward mode forms its wgrad with
+      ``gemm_fp8_impl``, which has no caller-provided-output variant.
+    """
+    if not getattr(module.config, "mxfp6_fused_wgrad_accum", False):
+        return False
+
+    if module._backward_is_fp8:
+        raise ValueError(
+            f"{name} cannot combine mxfp6_fused_wgrad_accum=True with "
+            "mxfp6_backward_precision='fp8': the FP8 backward has no out-variant GEMM to "
+            "write main_grad with. Use mxfp6_backward_precision='mxfp6' or turn the "
+            "fusion off."
+        )
+
+    try:
+        from megatron.core.num_microbatches_calculator import get_num_microbatches
+
+        num_microbatches = get_num_microbatches()
+    except (ImportError, AttributeError):
+        # Calculator not up yet (unit tests build these modules standalone). The config
+        # is the only authority available, and the store stays correct as long as the
+        # caller honours the one-microbatch rule.
+        num_microbatches = None
+
+    if num_microbatches is not None and num_microbatches > 1:
+        raise ValueError(
+            f"{name} requires mxfp6_fused_wgrad_accum=False when there is more than one "
+            f"microbatch per step (got {num_microbatches}). The A6W6 store has no beta=1 "
+            "accumulate epilogue, so it would overwrite earlier microbatches."
+        )
+
+    return True
 
 
 def _init_mxfp6_linear(module) -> None:
@@ -230,9 +356,13 @@ def _init_mxfp6_linear(module) -> None:
             f"Got {module.config.tensor_model_parallel_size}."
         )
     if module.gradient_accumulation_fusion:
-        # The A6W6 entry point has no beta=1 accumulate epilogue, so wgrad cannot write
-        # main_grad in place.
-        raise ValueError(f"{name} requires gradient_accumulation_fusion=False.")
+        # Megatron's fused path needs a beta=1 accumulate epilogue, which the A6W6 entry
+        # point has not got. The MXFP6 equivalent is mxfp6_fused_wgrad_accum, which does
+        # not disturb the plain linears.
+        raise ValueError(
+            f"{name} requires gradient_accumulation_fusion=False. To fuse the MXFP6 "
+            "weight gradient into main_grad, set mxfp6_fused_wgrad_accum=True instead."
+        )
     if module.sequence_parallel:
         raise ValueError(f"{name} requires sequence_parallel=False.")
 
@@ -241,6 +371,7 @@ def _init_mxfp6_linear(module) -> None:
         raise RuntimeError(f"MXFP6 not supported on this device: {reason}")
 
     module._backward_is_fp8 = getattr(module.config, "mxfp6_backward_precision", "mxfp6") == "fp8"
+    module._fuse_wgrad_accum = _resolve_wgrad_fusion(module, name)
 
     if module._backward_is_fp8:
         from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -257,6 +388,9 @@ def _init_mxfp6_linear(module) -> None:
 def _mxfp6_forward_impl(module, input, weight, **kwargs):
     bias = kwargs.get("bias", None)
 
+    if module._fuse_wgrad_accum:
+        _claim_main_grad(weight)
+
     result = MXFP6LinearFunction.apply(
         input,
         weight,
@@ -264,6 +398,7 @@ def _mxfp6_forward_impl(module, input, weight, **kwargs):
         module._fp8_bwd_dtype,
         module._fp8_gran_value,
         module._fp8_backend_value,
+        module._fuse_wgrad_accum,
     )
     output = result[0]
 
@@ -277,7 +412,8 @@ class MXFP6ColumnParallelLinear(ColumnParallelLinear):
     """ColumnParallelLinear with per-module MXFP6. torch.compile friendly.
 
     Requires: tensor_model_parallel_size=1, gradient_accumulation_fusion=False,
-    sequence_parallel=False.
+    sequence_parallel=False. ``mxfp6_fused_wgrad_accum=True`` is supported at one
+    microbatch per step; see ``_resolve_wgrad_fusion``.
     """
 
     def __init__(self, *args, **kwargs):
@@ -292,7 +428,8 @@ class MXFP6RowParallelLinear(RowParallelLinear):
     """RowParallelLinear with per-module MXFP6. torch.compile friendly.
 
     Requires: tensor_model_parallel_size=1, gradient_accumulation_fusion=False,
-    sequence_parallel=False.
+    sequence_parallel=False. ``mxfp6_fused_wgrad_accum=True`` is supported at one
+    microbatch per step; see ``_resolve_wgrad_fusion``.
     """
 
     def __init__(self, *args, **kwargs):
@@ -349,7 +486,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(hidden_states, w1, b1, w2):
+    def forward(hidden_states, w1, b1, w2, fuse_wgrad_accum):
         out_dtype = hidden_states.dtype
         orig_shape = hidden_states.shape
         x = hidden_states.reshape(-1, orig_shape[-1])
@@ -378,8 +515,9 @@ class MXFP6MLPFunction(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        hidden_states, w1, b1, w2 = inputs
+        hidden_states, w1, b1, w2, fuse_wgrad_accum = inputs
 
+        ctx.fuse_wgrad_accum = fuse_wgrad_accum
         ctx.out_dtype = hidden_states.dtype
         ctx.orig_shape = hidden_states.shape
         # The packed blobs carry no shape, so the logical dims have to be saved too.
@@ -391,8 +529,10 @@ class MXFP6MLPFunction(torch.autograd.Function):
         _, y1, x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s = output
         blobs = (x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s)
         # b1 is a leaf parameter, so saving it costs nothing, and the backward needs it to
-        # rebuild the pre-activation for the GELU derivative.
-        ctx.save_for_backward(y1, b1, *blobs)
+        # rebuild the pre-activation for the GELU derivative. w1 and w2 ride along only
+        # when the backward has to reach through them to their main_grad buffers.
+        extra = (w1, w2) if fuse_wgrad_accum else ()
+        ctx.save_for_backward(y1, b1, *blobs, *extra)
         ctx.mark_non_differentiable(*blobs)
 
     @staticmethod
@@ -408,6 +548,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
             w1_col_s,
             w2_col,
             w2_col_s,
+            *fused_weights,
         ) = ctx.saved_tensors
         m, k, f, h = ctx.m, ctx.k, ctx.f, ctx.h
         out_dtype = ctx.out_dtype
@@ -421,7 +562,12 @@ class MXFP6MLPFunction(torch.autograd.Function):
         # fc2 dgrad: [m, f] = g2[m, h] @ w2[h, f], contracting h.
         grad_a = gemm_fp6_impl(g2_row, g2_row_s, w2_col, w2_col_s, m, f, h, out_dtype, _GRAN_VALUE)
         # fc2 wgrad: [h, f] = g2.T[h, m] @ a[m, f], contracting m.
-        grad_w2 = gemm_fp6_impl(g2_col, g2_col_s, a_col, a_col_s, h, f, m, out_dtype, _GRAN_VALUE)
+        if ctx.fuse_wgrad_accum:
+            grad_w2 = _wgrad_into_main_grad(
+                fused_weights[1], g2_col, g2_col_s, a_col, a_col_s, h, f, m
+            )
+        else:
+            grad_w2 = gemm_fp6_impl(g2_col, g2_col_s, a_col, a_col_s, h, f, m, out_dtype, _GRAN_VALUE)
 
         # The GELU derivative is applied while staging, so grad_y1 is never assembled. Its
         # column sums come back as a side output because the bias gradient is a reduction
@@ -435,11 +581,16 @@ class MXFP6MLPFunction(torch.autograd.Function):
         grad_x = gemm_fp6_impl(g1_row, g1_row_s, w1_col, w1_col_s, m, k, f, out_dtype, _GRAN_VALUE)
         grad_x = grad_x.reshape(ctx.orig_shape)
         # fc1 wgrad: [f, k] = grad_y1.T[f, m] @ x[m, k], contracting m.
-        grad_w1 = gemm_fp6_impl(g1_col, g1_col_s, x_col, x_col_s, f, k, m, out_dtype, _GRAN_VALUE)
+        if ctx.fuse_wgrad_accum:
+            grad_w1 = _wgrad_into_main_grad(
+                fused_weights[0], g1_col, g1_col_s, x_col, x_col_s, f, k, m
+            )
+        else:
+            grad_w1 = gemm_fp6_impl(g1_col, g1_col_s, x_col, x_col_s, f, k, m, out_dtype, _GRAN_VALUE)
 
         grad_b1 = b1_partial.sum(0).to(out_dtype) if want_bias_grad else None
 
-        return grad_x, grad_w1, grad_b1, grad_w2
+        return grad_x, grad_w1, grad_b1, grad_w2, None
 
 
 def _is_tanh_gelu(fn) -> bool:
@@ -540,11 +691,18 @@ class MXFP6FusedMLP(MLP):
         if not self._fused_epilogue or per_token_scale is not None:
             return super().forward(hidden_states, per_token_scale=per_token_scale)
 
+        # Both linears resolve the flag from the same config field, so fc1's answer covers
+        # fc2's weight too.
+        fuse_wgrad_accum = self.linear_fc1._fuse_wgrad_accum
+        if fuse_wgrad_accum:
+            _claim_main_grad(self.linear_fc1.weight, self.linear_fc2.weight)
+
         output = MXFP6MLPFunction.apply(
             hidden_states,
             self.linear_fc1.weight,
             self.linear_fc1.bias,
             self.linear_fc2.weight,
+            fuse_wgrad_accum,
         )[0]
 
         # fc2 is built with skip_bias_add=True, so MLP's contract is to hand its bias back
