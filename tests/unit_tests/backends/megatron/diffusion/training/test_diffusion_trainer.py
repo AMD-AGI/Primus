@@ -341,3 +341,58 @@ class TestDiffusionPretrainTrainer:
 
         # Should return output_tensor directly
         assert result is output
+
+    def test_validation_report_survives_megatrons_in_place_rescale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The reported validation loss must not move when Megatron rescales the
+        tensor it backpropagates.
+
+        megatron.core.pipeline_parallel.schedules.forward_step takes the first
+        element of the pair the loss function returns and rescales it in place --
+        ``output_tensor *= cp_group_size``, then ``output_tensor /=
+        num_microbatches`` -- and only then stores the reported dict. While that
+        dict held a detached *view* of the same tensor, the report was rescaled
+        along with it, so the reported validation loss was the true loss divided
+        by the microbatch count: right at one microbatch per rank per step, half
+        the true value at two. Under mlperf_mode that halves the number the
+        convergence gate is compared against, so a run claimed to converge at
+        about half the samples it really needed.
+        """
+        import torch
+
+        trainer = _build_diffusion_trainer(monkeypatch)
+        trainer._scheduler = Mock()
+        trainer.runtime_state = Mock()
+        trainer.runtime_state.update_metrics = Mock()
+
+        # Four samples, so a summed loss and a per-sample mean cannot be confused.
+        noise_pred = torch.full((4, 1), 3.0)
+        clean_latents = torch.zeros(4, 1)
+        noise = torch.ones(4, 1)
+
+        monkeypatch.setattr(
+            "primus.backends.megatron.training.diffusion.forward_step.flux_forward_step_func",
+            lambda *args, **kwargs: (noise_pred, clean_latents, noise, None, {}, True),
+        )
+
+        model = Mock()
+        model.training = False
+        _, val_loss_func = trainer.forward_step(Mock(), model)
+
+        loss_sum, reported = val_loss_func(noise_pred)
+
+        # target = noise - clean_latents = 1, so each element contributes
+        # (3 - 1) ** 2 = 4, and the sum over four samples is 16.
+        assert reported["loss"][0].item() == pytest.approx(16.0)
+        assert reported["loss"][1].item() == pytest.approx(4.0)
+
+        # Exactly what forward_step does to the tensor it backpropagates.
+        loss_sum *= 1  # cp_group_size, 1 without context parallelism
+        loss_sum /= 2  # num_microbatches, 2 at micro batch 32 and GBS 1024 on 16 ranks
+
+        # The rescale has to have happened, or this asserts nothing.
+        assert loss_sum.item() == pytest.approx(8.0)
+
+        assert reported["loss"][0].item() == pytest.approx(16.0)
+        assert reported["loss"][1].item() == pytest.approx(4.0)
