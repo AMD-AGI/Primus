@@ -11,6 +11,7 @@ Deep technical topics for advanced users.
 - [Data preparation](data-preparation.md): tokenization, data formats, mock data
 - [Checkpoint management](checkpoint-management.md): formats, save/load, distributed checkpointing
 - [Multi-node networking](multi-node-networking.md): InfiniBand, RoCE, AINIC configuration
+- [AINIC bundle versions](ainic-bundle-versions.md): rebuilding a training image against a different AINIC bundle
 - [Profiling and observability](profiling-and-observability.md): Torch profiler, TraceLens, memory snapshots, projection, pp_vis
 - [Logging and experiment tracking](logging-and-experiment-tracking.md): TensorBoard, WandB, MLflow setup per backend
 - [Fault tolerance and elastic training](fault-tolerance-and-elastic-training.md): graceful exit, auto-resume, in-process restart, torchft
