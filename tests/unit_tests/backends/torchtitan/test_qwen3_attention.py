@@ -65,6 +65,7 @@ class TestQwen3AttentionForward:
     def test_output_shape(self):
         args = _make_args()
         attn = Attention(args)
+        attn.inner_attention = _CapturingInnerAttention(args.head_dim)
         bs, seqlen = 2, 5
         x = torch.randn(bs, seqlen, args.dim)
         rope_cache = _rope_cache(args.head_dim, args.max_seq_len)
