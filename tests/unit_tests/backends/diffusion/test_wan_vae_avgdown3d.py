@@ -41,7 +41,9 @@ def test_forward_downsamples_spatial_and_channel_dims():
     # group_size channel averaging (group_size = in_channels*factor // out_channels).
     factor_t, factor_s = 1, 2
     in_channels, out_channels = 2, 4
-    module = AvgDown3D(in_channels=in_channels, out_channels=out_channels, factor_t=factor_t, factor_s=factor_s)
+    module = AvgDown3D(
+        in_channels=in_channels, out_channels=out_channels, factor_t=factor_t, factor_s=factor_s
+    )
 
     b, t, h, w = 1, 2, 4, 4
     # Every element has a distinct value, so an incorrect permute order or
