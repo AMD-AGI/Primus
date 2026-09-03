@@ -1,1 +1,108 @@
-IyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMKIyBDb3B5cmlnaHQgKGMpIDIwMjUsIEFkdmFuY2VkIE1pY3JvIERldmljZXMsIEluYy4KIwojIFNlZSBMSUNFTlNFIGZvciBsaWNlbnNlIGluZm9ybWF0aW9uLgojIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMKCmltcG9ydCB0b3JjaAoKZnJvbSBwcmltdXMuYmFja2VuZHMuZGlmZnVzaW9uLm1vZGVscy53YW4udmFlMl8yIGltcG9ydCBEZWNvZGVyM2QsIGNvdW50X2NvbnYzZAoKCmRlZiBfbWFrZV9kZWNvZGVyKCk6CiAgICAjIEEgdGlueSBkZWNvZGVyIHdpdGggYSBzaW5nbGUgdGVtcG9yYWwtdXBzYW1wbGUgc3RhZ2U6IGVub3VnaCB0byBleGVyY2lzZQogICAgIyBjYWNoZSBpbmRleGluZywgdGhlICJSZXAiIHNlbnRpbmVsLCBhbmQgZmlyc3RfY2h1bmsgcHJvcGFnYXRpb24gd2l0aG91dAogICAgIyBhIGNoYW5uZWwtY2hhbmdpbmcgcmVzaWR1YWwgc2hvcnRjdXQgKHdoaWNoIHZhZTJfMidzIFJlc2lkdWFsQmxvY2sgZG9lcwogICAgIyBub3Qgcm91dGUgdGhyb3VnaCB0aGUgZmVhdF9jYWNoZSwgYW5kIHdvdWxkIGRlc3luYyBmZWF0X2lkeCBmcm9tCiAgICAjIGNvdW50X2NvbnYzZChkZWNvZGVyKSkuCiAgICB0b3JjaC5tYW51YWxfc2VlZCgwKQogICAgZGVjb2RlciA9IERlY29kZXIzZCgKICAgICAgICBkaW09OCwKICAgICAgICB6X2RpbT00LAogICAgICAgIGRpbV9tdWx0PVsxLCAxXSwKICAgICAgICBudW1fcmVzX2Jsb2Nrcz0xLAogICAgICAgIGF0dG5fc2NhbGVzPVtdLAogICAgICAgIHRlbXBlcmFsX3Vwc2FtcGxlPVtUcnVlXSwKICAgICAgICBkcm9wb3V0PTAuMCwKICAgICkKICAgIGRlY29kZXIuZXZhbCgpCiAgICByZXR1cm4gZGVjb2RlcgoKCmRlZiBfZGVjb2RlX3N0cmVhbWluZyhkZWNvZGVyLCB4LCBjb252X251bSk6CiAgICAiIiJSZXBsYXkgV2FuVkFFXy5kZWNvZGUncyBwZXItZnJhbWUgY2h1bmtlZC1kZWNvZGUgcHJvdG9jb2w6IG9uZSBsYXRlbnQKICAgIGZyYW1lIHBlciBjYWxsLCBhIHNpbmdsZSBmZWF0X2NhY2hlIGxpc3QgcmV1c2VkIGFjcm9zcyBjYWxscywgZmVhdF9pZHgKICAgIHJlc2V0IHRvIFswXSBmb3IgZXZlcnkgZnJhbWUsIGFuZCBmaXJzdF9jaHVuaz1UcnVlIG9ubHkgb24gdGhlIGZpcnN0CiAgICBjYWxsLiIiIgogICAgZmVhdF9tYXAgPSBbTm9uZV0gKiBjb252X251bQogICAgb3V0cHV0cyA9IFtdCiAgICBmb3IgaSBpbiByYW5nZSh4LnNoYXBlWzJdKToKICAgICAgICBmZWF0X2lkeCA9IFswXQogICAgICAgIGZyYW1lX291dCA9IGRlY29kZXIoCiAgICAgICAgICAgIHhbOiwgOiwgaSA6IGkgKyAxLCA6LCA6XSwKICAgICAgICAgICAgZmVhdF9jYWNoZT1mZWF0X21hcCwKICAgICAgICAgICAgZmVhdF9pZHg9ZmVhdF9pZHgsCiAgICAgICAgICAgIGZpcnN0X2NodW5rPShpID09IDApLAogICAgICAgICkKICAgICAgICAjIEV2ZXJ5IENhdXNhbENvbnYzZCBvbiB0aGUgY2FjaGVkIHBhdGggY29uc3VtZXMgZXhhY3RseSBvbmUgc2xvdC4KICAgICAgICBhc3NlcnQgZmVhdF9pZHhbMF0gPT0gY29udl9udW0KICAgICAgICBvdXRwdXRzLmFwcGVuZChmcmFtZV9vdXQpCiAgICByZXR1cm4gb3V0cHV0cywgZmVhdF9tYXAKCgpkZWYgdGVzdF9mb3J3YXJkX3N0cmVhbWluZ19kZWNvZGVfbWF0Y2hlc193YW4yMl9jaHVua2VkX3Byb3RvY29sKCk6CiAgICAjIERpcmVjdCBEZWNvZGVyM2Qgb3V0cHV0IGlzIDEyIGNoYW5uZWxzIChwYXRjaGlmaWVkIGxhdGVudCBzcGFjZSk7IHRoZQogICAgIyBjb252ZXJzaW9uIHRvIDMgUkdCIGNoYW5uZWxzIGhhcHBlbnMgbGF0ZXIsIGluIHVucGF0Y2hpZnkuCiAgICBkZWNvZGVyID0gX21ha2VfZGVjb2RlcigpCiAgICBjb252X251bSA9IGNvdW50X2NvbnYzZChkZWNvZGVyKQogICAgeCA9IHRvcmNoLnJhbmRuKDEsIDQsIDMsIDQsIDQpCiAgICBmZWF0X21hcCA9IFtOb25lXSAqIGNvbnZfbnVtCgogICAgb3V0cHV0cyA9IFtdCiAgICB3aXRoIHRvcmNoLm5vX2dyYWQoKToKICAgICAgICBmb3IgaSBpbiByYW5nZSh4LnNoYXBlWzJdKToKICAgICAgICAgICAgZmVhdF9pZHggPSBbMF0KICAgICAgICAgICAgZnJhbWVfb3V0ID0gZGVjb2RlcigKICAgICAgICAgICAgICAgIHhbOiwgOiwgaSA6IGkgKyAxLCA6LCA6XSwKICAgICAgICAgICAgICAgIGZlYXRfY2FjaGU9ZmVhdF9tYXAsCiAgICAgICAgICAgICAgICBmZWF0X2lkeD1mZWF0X2lkeCwKICAgICAgICAgICAgICAgIGZpcnN0X2NodW5rPShpID09IDApLAogICAgICAgICAgICApCiAgICAgICAgICAgICMgRXZlcnkgQ2F1c2FsQ29udjNkIG9uIHRoZSBjYWNoZWQgcGF0aCBjb25zdW1lcyBleGFjdGx5IG9uZSBzbG90LgogICAgICAgICAgICBhc3NlcnQgZmVhdF9pZHhbMF0gPT0gY29udl9udW0KCiAgICAgICAgICAgIGlmIGkgPT0gMDoKICAgICAgICAgICAgICAgICMgQWZ0ZXIgdGhlIGZpcnN0IGNodW5rIGV2ZXJ5IGNhY2hlIHNsb3QgaXMgcG9wdWxhdGVkOyB0aGUKICAgICAgICAgICAgICAgICMgdGVtcG9yYWwtdXBzYW1wbGUgc3RhZ2UncyBzbG90IGhvbGRzIHRoZSAiUmVwIiBzZW50aW5lbAogICAgICAgICAgICAgICAgIyB1bnRpbCBhIHNlY29uZCBjaHVuayBnaXZlcyBpdCByZWFsIGhpc3RvcnkgdG8gd29yayB3aXRoLgogICAgICAgICAgICAgICAgYXNzZXJ0IGFsbChzbG90IGlzIG5vdCBOb25lIGZvciBzbG90IGluIGZlYXRfbWFwKQogICAgICAgICAgICAgICAgYXNzZXJ0IGFueShzbG90ID09ICJSZXAiIGZvciBzbG90IGluIGZlYXRfbWFwKQogICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgIyBPbmNlIHJlYWwgaGlzdG9yeSBpcyBhdmFpbGFibGUsICJSZXAiIG11c3QgaGF2ZSBiZWVuCiAgICAgICAgICAgICAgICAjIHJlcGxhY2VkIGJ5IGFuIGFjdHVhbCBjYWNoZWQgdGVuc29yLgogICAgICAgICAgICAgICAgYXNzZXJ0IG5vdCBhbnkoc2xvdCA9PSAiUmVwIiBmb3Igc2xvdCBpbiBmZWF0X21hcCkKCiAgICAgICAgICAgIG91dHB1dHMuYXBwZW5kKGZyYW1lX291dCkKCiAgICAjIEZpcnN0IGNodW5rIGhhcyBubyBjYWNoZWQgaGlzdG9yeSB5ZXQsIHNvIGl0cyB1cHNhbXBsZTNkIHN0YWdlIGNhbiBvbmx5CiAgICAjIGVtaXQgaXRzIG93biBmcmFtZTsgbGF0ZXIgY2h1bmtzIGhhdmUgaGlzdG9yeSBhbmQgZG91YmxlIHRoZWlyCiAgICAjIHRlbXBvcmFsIGNvbnRyaWJ1dGlvbi4KICAgIGFzc2VydCBvdXRwdXRzWzBdLnNoYXBlID09ICgxLCAxMiwgMSwgOCwgOCkKICAgIGFzc2VydCBvdXRwdXRzWzFdLnNoYXBlID09ICgxLCAxMiwgMiwgOCwgOCkKICAgIGFzc2VydCBvdXRwdXRzWzJdLnNoYXBlID09ICgxLCAxMiwgMiwgOCwgOCkKCiAgICBvdXQgPSB0b3JjaC5jYXQob3V0cHV0cywgZGltPTIpCiAgICBhc3NlcnQgb3V0LnNoYXBlID09ICgxLCAxMiwgNSwgOCwgOCkKICAgIGFzc2VydCB0b3JjaC5pc2Zpbml0ZShvdXQpLmFsbCgpCgoKZGVmIHRlc3RfZm9yd2FyZF9zdHJlYW1pbmdfZGVjb2RlX2lzX2RldGVybWluaXN0aWNfYWZ0ZXJfY2FjaGVfcmVzZXQoKToKICAgIGRlY29kZXIgPSBfbWFrZV9kZWNvZGVyKCkKICAgIGNvbnZfbnVtID0gY291bnRfY29udjNkKGRlY29kZXIpCiAgICB4ID0gdG9yY2gucmFuZG4oMSwgNCwgMywgNCwgNCkKCiAgICB3aXRoIHRvcmNoLm5vX2dyYWQoKToKICAgICAgICBvdXRwdXRzXzEsIF8gPSBfZGVjb2RlX3N0cmVhbWluZyhkZWNvZGVyLCB4LCBjb252X251bSkKICAgICAgICBvdXRwdXRzXzIsIF8gPSBfZGVjb2RlX3N0cmVhbWluZyhkZWNvZGVyLCB4LCBjb252X251bSkKCiAgICBhc3NlcnQgdG9yY2guZXF1YWwodG9yY2guY2F0KG91dHB1dHNfMSwgZGltPTIpLCB0b3JjaC5jYXQob3V0cHV0c18yLCBkaW09MikpCg==
+##########################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###########################################################################
+
+import torch
+
+from primus.backends.diffusion.models.wan.vae2_2 import Decoder3d, count_conv3d
+
+
+def _make_decoder():
+    # A tiny decoder with a single temporal-upsample stage: enough to exercise
+    # cache indexing, the "Rep" sentinel, and first_chunk propagation without
+    # a channel-changing residual shortcut (which vae2_2's ResidualBlock does
+    # not route through the feat_cache, and would desync feat_idx from
+    # count_conv3d(decoder)).
+    torch.manual_seed(0)
+    decoder = Decoder3d(
+        dim=8,
+        z_dim=4,
+        dim_mult=[1, 1],
+        num_res_blocks=1,
+        attn_scales=[],
+        temperal_upsample=[True],
+        dropout=0.0,
+    )
+    decoder.eval()
+    return decoder
+
+
+def _decode_streaming(decoder, x, conv_num):
+    """Replay WanVAE_.decode's per-frame chunked-decode protocol: one latent
+    frame per call, a single feat_cache list reused across calls, feat_idx
+    reset to [0] for every frame, and first_chunk=True only on the first
+    call."""
+    feat_map = [None] * conv_num
+    outputs = []
+    for i in range(x.shape[2]):
+        feat_idx = [0]
+        frame_out = decoder(
+            x[:, :, i : i + 1, :, :],
+            feat_cache=feat_map,
+            feat_idx=feat_idx,
+            first_chunk=(i == 0),
+        )
+        # Every CausalConv3d on the cached path consumes exactly one slot.
+        assert feat_idx[0] == conv_num
+        outputs.append(frame_out)
+    return outputs, feat_map
+
+
+def test_forward_streaming_decode_matches_wan22_chunked_protocol():
+    # Direct Decoder3d output is 12 channels (patchified latent space); the
+    # conversion to 3 RGB channels happens later, in unpatchify.
+    decoder = _make_decoder()
+    conv_num = count_conv3d(decoder)
+    x = torch.randn(1, 4, 3, 4, 4)
+    feat_map = [None] * conv_num
+
+    outputs = []
+    with torch.no_grad():
+        for i in range(x.shape[2]):
+            feat_idx = [0]
+            frame_out = decoder(
+                x[:, :, i : i + 1, :, :],
+                feat_cache=feat_map,
+                feat_idx=feat_idx,
+                first_chunk=(i == 0),
+            )
+            # Every CausalConv3d on the cached path consumes exactly one slot.
+            assert feat_idx[0] == conv_num
+
+            if i == 0:
+                # After the first chunk every cache slot is populated; the
+                # temporal-upsample stage's slot holds the "Rep" sentinel
+                # until a second chunk gives it real history to work with.
+                assert all(slot is not None for slot in feat_map)
+                assert any(slot == "Rep" for slot in feat_map)
+            else:
+                # Once real history is available, "Rep" must have been
+                # replaced by an actual cached tensor.
+                assert not any(slot == "Rep" for slot in feat_map)
+
+            outputs.append(frame_out)
+
+    # First chunk has no cached history yet, so its upsample3d stage can only
+    # emit its own frame; later chunks have history and double their
+    # temporal contribution.
+    assert outputs[0].shape == (1, 12, 1, 8, 8)
+    assert outputs[1].shape == (1, 12, 2, 8, 8)
+    assert outputs[2].shape == (1, 12, 2, 8, 8)
+
+    out = torch.cat(outputs, dim=2)
+    assert out.shape == (1, 12, 5, 8, 8)
+    assert torch.isfinite(out).all()
+
+
+def test_forward_streaming_decode_is_deterministic_after_cache_reset():
+    decoder = _make_decoder()
+    conv_num = count_conv3d(decoder)
+    x = torch.randn(1, 4, 3, 4, 4)
+
+    with torch.no_grad():
+        outputs_1, _ = _decode_streaming(decoder, x, conv_num)
+        outputs_2, _ = _decode_streaming(decoder, x, conv_num)
+
+    assert torch.equal(torch.cat(outputs_1, dim=2), torch.cat(outputs_2, dim=2))
