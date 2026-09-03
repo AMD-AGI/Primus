@@ -822,12 +822,19 @@ class BaseWanTrainer:
     def compute_loss(self, batch, processor=None):
         """Prepare batch and compute training loss."""
         batch = self._prepare_batch(batch, processor or self.processing_class)
-        # Use explicit training entry point if available (GenAIModel interface)
-        forward_train = getattr(self.model, "forward_train", None)
-        if callable(forward_train):
-            outputs = forward_train(batch, scheduler=self.scheduler)
-        else:
-            outputs = self.model(batch, self.scheduler)
+        # Single-rank FSDP2 skips wrapping, so its mixed-precision policy is not applied.
+        compute_dtype = self._resolve_dtype()
+        with torch.autocast(
+            device_type=self.device.type,
+            dtype=compute_dtype,
+            enabled=self.world_size == 1 and compute_dtype != torch.float32,
+        ):
+            # Use explicit training entry point if available (GenAIModel interface)
+            forward_train = getattr(self.model, "forward_train", None)
+            if callable(forward_train):
+                outputs = forward_train(batch, scheduler=self.scheduler)
+            else:
+                outputs = self.model(batch, self.scheduler)
         return outputs["loss"]
 
     def validate_loss(self) -> float:
@@ -1079,6 +1086,10 @@ class BaseWanTrainer:
                             "First training forward completed; entering backward pass"
                         )
                     detached_loss = raw_loss.detach().float()
+                    if self.world_size == 1 and not torch.isfinite(detached_loss):
+                        raise FloatingPointError(
+                            f"Non-finite loss at step {self.global_step}, batch {batch_idx}"
+                        )
                     update_loss_sum = (
                         detached_loss
                         if update_loss_sum is None
@@ -1095,6 +1106,10 @@ class BaseWanTrainer:
                     update_loss_sum = None
                     update_loss_count = 0
                     grad_norm = self._clip_grad_norm()
+                    if self.world_size == 1 and not math.isfinite(float(grad_norm)):
+                        raise FloatingPointError(
+                            f"Non-finite gradient norm at step {self.global_step}"
+                        )
 
                     self.optimizer.step()
                     self.lr_scheduler.step()

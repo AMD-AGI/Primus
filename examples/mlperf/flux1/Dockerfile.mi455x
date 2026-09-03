@@ -1,0 +1,14 @@
+ARG BASE_IMAGE=docker.io/zirui3/flux-mi455x:rocm7.14-gfx1250
+FROM ${BASE_IMAGE}
+
+COPY runner/helpers/hooks/train/pretrain/diffusion/requirements-diffusion.txt /tmp/
+RUN python -m pip install --no-cache-dir \
+    -r /tmp/requirements-diffusion.txt && \
+    rm /tmp/requirements-diffusion.txt
+
+COPY . /workspace/Primus
+WORKDIR /workspace/Primus
+
+RUN python -m py_compile primus/backends/diffusion/trainers/base.py
+
+CMD ["/bin/bash"]
