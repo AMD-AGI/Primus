@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Dedicated Compressor.forward behavioral tests (overlap vs non-overlap windows).
+"""Dedicated Compressor.forward behavioral tests (PRPUNDIT-25).
 
 ``test_v4_keep_in_fp32.py`` only checks ape dtype / finiteness, and
 ``test_compressor_pool.py`` compares the fused Triton kernel against eager
@@ -12,7 +12,8 @@ softmax-pool on tensors that are *already* windowed. Neither independently
 checks that ``_reshape_into_windows`` + ``_overlap_transform`` stitch the
 correct source positions. This file is the missing oracle: CSA overlap
 (ratio=4) and HCA non-overlap (ratio=128) against a hand-derived windowing
-reference that does not call those helpers.
+reference that does not call those helpers, plus fused vs unfused
+projections and the sequence-length guard.
 """
 
 from __future__ import annotations
@@ -166,6 +167,29 @@ def test_overlap_window_zero_ignores_later_tokens():
 
     torch.testing.assert_close(pooled[:, 0], baseline[:, 0])
     assert not torch.allclose(pooled[:, 1], baseline[:, 1])
+
+
+@pytest.mark.parametrize(
+    "ratio,overlap",
+    [
+        (4, True),
+        (128, False),
+    ],
+)
+def test_fused_and_unfused_projections_agree(ratio: int, overlap: bool, monkeypatch):
+    """PRIMUS_COMPRESS_FUSE_PROJ only changes how the KV/gate GEMM is launched."""
+    torch.manual_seed(0)
+    monkeypatch.setenv("PRIMUS_COMPRESS_FUSE_PROJ", "0")
+    unfused = Compressor(hidden_size=32, head_dim=16, ratio=ratio, overlap=overlap)
+    monkeypatch.setenv("PRIMUS_COMPRESS_FUSE_PROJ", "1")
+    fused = Compressor(hidden_size=32, head_dim=16, ratio=ratio, overlap=overlap)
+    with torch.no_grad():
+        fused.wkv_gate.weight.copy_(torch.cat([unfused.wkv.weight, unfused.wgate.weight], dim=0))
+        fused.ape.copy_(unfused.ape)
+        fused.kv_norm.weight.copy_(unfused.kv_norm.weight)
+
+    hidden = torch.randn(2, ratio * 2, 32, dtype=torch.float32)
+    torch.testing.assert_close(fused(hidden), unfused(hidden), rtol=1e-5, atol=1e-5)
 
 
 def test_forward_rejects_sequence_not_divisible_by_ratio():
