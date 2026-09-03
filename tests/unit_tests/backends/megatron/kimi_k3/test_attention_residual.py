@@ -31,7 +31,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-mcore_module = pytest.importorskip(
+pytest.importorskip(
     "megatron.core.transformer.module",
     reason="megatron.core is not importable in this environment",
 )
