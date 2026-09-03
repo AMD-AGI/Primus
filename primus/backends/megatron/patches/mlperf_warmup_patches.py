@@ -222,6 +222,46 @@ def _build_synthetic_iterator(primus_args):
     return MegatronDataloaderWrapper(mock_loader)
 
 
+def _reset_ddp_grad_ready_calibration(models):
+    """Put each DDP bucket group back into the uncalibrated state warmup found it in.
+
+    Megatron's gradient buffers learn, on their first batch, how many times each
+    parameter registers a ready gradient; from the second batch on they issue the
+    reduce-scatter only when that golden count is reached again. Warmup steps are
+    batches like any other, so they consume the calibration: the golden counts end up
+    describing a synthetic step rather than the first real one. When the real steps
+    then register a different number of times -- a different microbatch count is
+    enough -- the bucket either fires early, and the next registration finds a
+    collective already in flight, or never reaches the golden count at all.
+
+    Any outstanding collective is drained first: the handle belongs to a synthetic step
+    whose gradients are about to be discarded, and leaving it in flight would hand the
+    first real step a bucket that is busy for reasons it cannot see.
+    """
+    drained = groups_reset = 0
+    for m in models:
+        groups = list(getattr(m, "bucket_groups", [])) + list(
+            getattr(m, "expert_parallel_bucket_groups", [])
+        )
+        for group in groups:
+            if not hasattr(group, "is_first_batch"):
+                continue
+            handle = getattr(group, "grad_reduce_handle", None)
+            if handle is not None:
+                handle.wait()
+                group.grad_reduce_handle = None
+                drained += 1
+            group.is_first_batch = True
+            group.golden_per_param_grad_ready_counts = {}
+            group.per_param_grad_ready_counts = {}
+            groups_reset += 1
+    _log(
+        f"Reset DDP grad-ready calibration on {groups_reset} bucket groups "
+        f"({drained} outstanding collectives drained)"
+    )
+    return groups_reset
+
+
 def _run_warmup_and_restore(
     *,
     warmup_steps,
@@ -364,6 +404,9 @@ def _run_warmup_and_restore(
         optimizer.zero_grad(set_to_none=True)
     except TypeError:
         optimizer.zero_grad()
+
+    # ---- 11b. Undo the DDP grad-ready calibration the warmup steps consumed ----
+    _reset_ddp_grad_ready_calibration(models)
 
     # ---- 12. Reset counters ----
     megatron_args.consumed_train_samples = 0
