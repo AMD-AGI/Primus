@@ -174,7 +174,7 @@ class TestAdaLNContinuous(PrimusUT):
         )
         cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX, device="cuda", requires_grad=True)
 
-        adaln(x, cond).sum().backward()
+        adaln(x, cond).pow(2).sum().backward()
 
         assert x.grad is not None and torch.isfinite(x.grad).all() and x.grad.abs().sum() > 0
         assert cond.grad is not None and torch.isfinite(cond.grad).all() and cond.grad.abs().sum() > 0
@@ -255,7 +255,7 @@ class TestAdaLNContinuousForwardPlainOps(PrimusUT):
         x = torch.randn(ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX, requires_grad=True)
         cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX, requires_grad=True)
 
-        adaln(x, cond).sum().backward()
+        adaln(x, cond).pow(2).sum().backward()
 
         assert x.grad is not None and torch.isfinite(x.grad).all() and x.grad.abs().sum() > 0
         assert cond.grad is not None and torch.isfinite(cond.grad).all() and cond.grad.abs().sum() > 0
