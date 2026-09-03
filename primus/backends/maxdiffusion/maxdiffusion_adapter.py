@@ -52,7 +52,7 @@ class MaxDiffusionAdapter(BackendAdapter):
         this adapter no longer overrides ``prepare_backend`` itself.
 
         Effective precedence (highest wins):
-            per-config ``env:``  >  outer/shell env  >  these defaults  >  image-baked
+            XLA_FLAGS_APPEND  >  per-config ``env:``  >  these defaults  >  inherited
         """
         return maxdiffusion_env_defaults()
 
