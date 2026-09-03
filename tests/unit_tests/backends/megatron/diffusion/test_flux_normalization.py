@@ -151,6 +151,8 @@ class TestAdaLNContinuous(PrimusUT):
         )
         torch.manual_seed(0)
         adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX).cuda()
+        # Guard against silently falling back to the plain-ops branch (see forward()).
+        assert adaln.use_fused_ln_modulate, "expected fused CUDA dispatch (adaln_plain_ops=False)"
         x = torch.randn(ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX).cuda()
         cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX).cuda()
 
@@ -169,6 +171,8 @@ class TestAdaLNContinuous(PrimusUT):
             num_layers=1,
         )
         adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX).cuda()
+        # Guard against silently falling back to the plain-ops branch (see forward()).
+        assert adaln.use_fused_ln_modulate, "expected fused CUDA dispatch (adaln_plain_ops=False)"
         x = torch.randn(
             ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX, device="cuda", requires_grad=True
         )
