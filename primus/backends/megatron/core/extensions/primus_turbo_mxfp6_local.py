@@ -45,6 +45,7 @@ from primus_turbo.pytorch.core.backend import BackendType
 from primus_turbo.pytorch.core.low_precision import (
     MXFP6_PROLOGUE_BIAS_GELU,
     MXFP6_PROLOGUE_BIAS_GELU_BACKWARD,
+    MXFP6_PROLOGUE_IDENTITY,
     ScalingGranularity,
 )
 from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import gemm_fp6_impl, gemm_fp6_out_impl
@@ -135,12 +136,20 @@ class MXFP6LinearFunction(torch.autograd.Function):
     ``setup_context`` can save them; they are already uint8, so unlike MXFP4 there is no
     dtype-view juggling needed to keep the autograd engine from trying to allocate zero
     gradients in an unsupported dtype.
+
+    The bias is an input rather than something the caller adds afterwards, so that the
+    backward owns the bias gradient and can take it from the packer's column sums instead
+    of paying for a separate reduction over ``grad_output``. This costs nothing in the
+    forward: the biased tensor is a saved activation for the QK-norm and RoPE backward, so
+    it is materialized either way, and Inductor was already doing the add as a standalone
+    in-place pass over the GEMM output rather than fusing it into anything.
     """
 
     @staticmethod
     def forward(
         input,
         weight,
+        bias,
         backward_is_fp8,
         fp8_bwd_dtype,
         fp8_gran_value,
@@ -168,6 +177,11 @@ class MXFP6LinearFunction(torch.autograd.Function):
             out_dtype,
             _GRAN_VALUE,
         )
+        # The A6W6 entry point has no bias epilogue, so the add is still its own pass over
+        # the output. It costs nothing extra to do it here rather than in the caller: the
+        # biased tensor is a saved activation either way. See plan item 2d.
+        if bias is not None:
+            output = output + bias
         output = output.reshape(*orig_shape[:-1], output.shape[-1])
 
         if backward_is_fp8:
@@ -179,6 +193,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
         (
             input,
             weight,
+            bias,
             backward_is_fp8,
             fp8_bwd_dtype,
             fp8_gran_value,
@@ -218,6 +233,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
 
         grad_2d = grad_output.reshape(-1, grad_output.shape[-1])
         m, n, k = ctx.m, ctx.n, ctx.k
+        want_bias_grad = ctx.needs_input_grad[2]
 
         if ctx.backward_is_fp8:
             input_2d, weight = ctx.saved_tensors
@@ -252,12 +268,21 @@ class MXFP6LinearFunction(torch.autograd.Function):
                 granularity=ctx.fp8_gran_value,
                 default_backend=ctx.fp8_backend_value,
             )
+            # No packer runs on this path, so the bias gradient pays for its own reduction.
+            grad_bias = grad_2d.sum(0).to(ctx.out_dtype) if want_bias_grad else None
         else:
             if ctx.fuse_wgrad_accum:
                 a_col, a_col_scale, b_col, b_col_scale, weight = ctx.saved_tensors
             else:
                 a_col, a_col_scale, b_col, b_col_scale = ctx.saved_tensors
-            g_row, g_row_scale, g_col, g_col_scale = _quantize_mxfp6_dual(grad_2d)
+
+            # The bias gradient is a reduction over exactly the tensor the packer is
+            # already streaming, so it rides along as a side output. Identity because
+            # there is no activation to undo here, unlike the MLP's fc1.
+            g_row, g_row_scale, g_col, g_col_scale, b_partial = _quantize_mxfp6_fused_dual(
+                grad_2d, None, None, MXFP6_PROLOGUE_IDENTITY, want_bias_grad
+            )
+            grad_bias = b_partial.sum(0).to(ctx.out_dtype) if want_bias_grad else None
 
             # grad_input[M, K] = grad[M, N] @ weight[N, K], contracting N. b_col is the
             # weight packed along N, i.e. logically [K, N] contracting N.
@@ -292,7 +317,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
                     _GRAN_VALUE,
                 )
 
-        return grad_input, grad_weight, None, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None
 
 
 def _resolve_wgrad_fusion(module, name: str) -> bool:
@@ -391,21 +416,20 @@ def _mxfp6_forward_impl(module, input, weight, **kwargs):
     if module._fuse_wgrad_accum:
         _claim_main_grad(weight)
 
+    # The bias goes through the Function rather than being added here, so that the
+    # backward can lift the bias gradient out of the packer's column sums. See
+    # MXFP6LinearFunction's docstring for why this is free in the forward.
     result = MXFP6LinearFunction.apply(
         input,
         weight,
+        bias,
         module._backward_is_fp8,
         module._fp8_bwd_dtype,
         module._fp8_gran_value,
         module._fp8_backend_value,
         module._fuse_wgrad_accum,
     )
-    output = result[0]
-
-    # Bias is added outside the GEMM: the A6W6 entry point has no bias epilogue.
-    if bias is not None:
-        output = output + bias
-    return output
+    return result[0]
 
 
 class MXFP6ColumnParallelLinear(ColumnParallelLinear):
