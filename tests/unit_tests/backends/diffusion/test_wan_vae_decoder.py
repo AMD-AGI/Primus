@@ -30,14 +30,14 @@ def _make_decoder():
         )
     decoder.eval()
     return decoder
+
+
+def _decode_streaming(decoder, x, conv_num):
     """Replay WanVAE_.decode's per-frame chunked-decode protocol: one latent
     frame per call, a single feat_cache list reused across calls, feat_idx
     reset to [0] for every frame, and first_chunk=True only on the first
     call."""
     feat_map = [None] * conv_num
-    outputs = []
-    for i in range(x.shape[2]):
-        feat_idx = [0]
         frame_out = decoder(
             x[:, :, i : i + 1, :, :],
             feat_cache=feat_map,
