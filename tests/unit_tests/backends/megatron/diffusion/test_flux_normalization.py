@@ -160,6 +160,25 @@ class TestAdaLNContinuous(PrimusUT):
         expected = adaln.norm(x) * (1 + scale) + shift
         assert torch.allclose(output, expected, atol=1e-5, rtol=1e-5)
 
+    def test_fused_forward_backward_reaches_input_and_conditioning(self):
+        """Gradients must flow to both x and cond through the fused CUDA custom op
+        (primus::fused_ln_modulate), not just the CPU plain-ops branch."""
+        config = TransformerConfig(
+            hidden_size=HIDDEN_DIM_FLUX,
+            num_attention_heads=NUM_ATTENTION_HEADS_FLUX,
+            num_layers=1,
+        )
+        adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX).cuda()
+        x = torch.randn(
+            ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX, device="cuda", requires_grad=True
+        )
+        cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX, device="cuda", requires_grad=True)
+
+        adaln(x, cond).sum().backward()
+
+        assert x.grad is not None and torch.isfinite(x.grad).all() and x.grad.abs().sum() > 0
+        assert cond.grad is not None and torch.isfinite(cond.grad).all() and cond.grad.abs().sum() > 0
+
 
 class TestAdaLNContinuousForwardPlainOps(PrimusUT):
     """CPU-only tests for AdaLNContinuous.forward numerics.
