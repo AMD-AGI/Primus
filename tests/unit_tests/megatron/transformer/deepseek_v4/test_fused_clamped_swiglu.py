@@ -26,8 +26,14 @@ cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="clamped SwiGLU 
 def _fp8_cast_works() -> bool:
     if not hasattr(torch, "float8_e4m3fn"):
         return False
+    # This suite only ever runs its parametrized cases on CUDA/HIP (the
+    # module is skipped entirely otherwise via the `cuda` mark below), so
+    # probe the cast on the device the kernels actually execute on. A
+    # CPU-only probe can incorrectly skip fp8_input_store=True on builds
+    # where FP8 casting is CUDA-only.
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
-        torch.zeros(4).to(torch.float8_e4m3fn).to(torch.float32)
+        torch.zeros(4, device=device).to(torch.float8_e4m3fn).to(torch.float32)
         return True
     except (RuntimeError, TypeError):
         return False
