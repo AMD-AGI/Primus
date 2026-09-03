@@ -23,6 +23,11 @@ turbo_grouped_gemm_backend: default
 # activation and gradient layouts.
 mxfp4_gradient_stochastic_rounding: false
 
+# Per-module Transformer Engine precision override (Megatron
+# --te-precision-config-file). Used to keep QKVO projections in BF16 while
+# grouped GEMM stays on MXFP4. See TransformerEngineMixedPrecision.md.
+te_precision_config_file: null
+
 # ===== Attention =====
 # operator switch
 use_turbo_attention: false
