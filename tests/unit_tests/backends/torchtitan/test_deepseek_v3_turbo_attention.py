@@ -8,8 +8,9 @@
 Unit tests for the Primus-Turbo DeepSeek-V3 (MLA) ``Attention.forward``.
 
 ``primus.backends.torchtitan.models.deepseek_v3.model.model.Attention`` is
-swapped in for upstream's MLA attention when
-``primus_turbo.use_turbo_attention`` is enabled (see
+swapped in for upstream's MLA attention when both
+``primus_turbo.enable_primus_turbo`` and ``primus_turbo.use_turbo_attention``
+are enabled (see
 ``primus/backends/torchtitan/patches/turbo/attention_patches.py``). Its
 ``forward`` differs from upstream's in exactly one way: it does *not*
 transpose q/k/v to ``(bsz, n_heads, seqlen, head_dim)`` before calling
