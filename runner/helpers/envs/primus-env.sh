@@ -59,6 +59,14 @@ detect_gpu_model() {
     # Extract model identifier (MI300, MI355, etc.)
     if [[ "$product_name" =~ MI([0-9]+)([A-Z]*) ]]; then
         gpu_model="MI${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+    else
+        # Some parts report a generic marketing name ("AMD Radeon Graphics")
+        # with no MI number; fall back to the ISA, which is always specific.
+        local arch
+        arch=$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9]+')
+        case "$arch" in
+            gfx1250) gpu_model="MI455X" ;;
+        esac
     fi
 
     echo "$gpu_model"

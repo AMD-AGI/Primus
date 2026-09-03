@@ -33,6 +33,9 @@
 #
 # The throughput after each command is what a 4-node MI355X run measured at
 # 10 iterations with router load balancing forced to uniform (TFLOP/s per GPU).
+# Those numbers were taken with the indexer distillation loss off, so add
+# PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF=0 to reproduce them; with the loss on the
+# curve keeps its shape and its per-rung gains, a few percent lower throughout.
 #
 # step 0 -- baseline, every optimization off
 #   PRIMUS_OPT_FUSION=0 PRIMUS_OPT_ATTENTION=0 PRIMUS_OPT_DEEPEP=0 \
@@ -179,6 +182,73 @@ export PRIMUS_INDEX_TOPK=${PRIMUS_INDEX_TOPK:-512}
 export PRIMUS_COMPRESS_RATIOS=${PRIMUS_COMPRESS_RATIOS:-'[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]'}
 export MTP_NUM_LAYERS=${MTP_NUM_LAYERS:-1}
 export NNODES=${NNODES:-4}
+
+if [ "$NNODES" -ge 8 ]; then
+    export PRIMUS_TP=${PRIMUS_TP:-1}
+    export PRIMUS_PP=${PRIMUS_PP:-8}
+    export PRIMUS_EP=${PRIMUS_EP:-8}
+    export PRIMUS_RECOMPUTE_LAYERS=0
+    if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+      export PRIMUS_PP_LAYOUT='Et*4|t*5|(t*6|)*5,t*4mL'
+    else
+      export PRIMUS_PP_LAYOUT='Et*4|t*5|(t*6|)*5,t*4L'
+    fi
+elif [ "$NNODES" -eq 4 ]; then
+    export PRIMUS_TP=${PRIMUS_TP:-1}
+    export PRIMUS_PP=${PRIMUS_PP:-4}
+    export PRIMUS_EP=${PRIMUS_EP:-8}
+    export PRIMUS_RECOMPUTE_LAYERS=3
+    if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+      export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11mL'
+    else
+      export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11L'
+    fi
+elif [ "$NNODES" -eq 3 ]; then
+    # 3 nodes = 24 GPUs. PP=3/EP=8: experts sharded EP*PP=24 ways -> 12B experts/card,
+    # optimizer 171 GB/card (too big for GPU) -> offload to host (CPU side ~1.7 TB/node,
+    # comfortably under 3 TB, unlike 2-node's 2.6 TB which OOM'd). 43 decoder layers + MTP
+    # across 3 PP stages.
+    export PRIMUS_TP=${PRIMUS_TP:-1}
+    export PRIMUS_PP=${PRIMUS_PP:-3}
+    export PRIMUS_EP=${PRIMUS_EP:-8}
+    export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-43}
+    if [ -z "${PRIMUS_PP_LAYOUT:-}" ]; then
+      if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+        export PRIMUS_PP_LAYOUT='Et*14|t*14|t*15mL'
+      else
+        export PRIMUS_PP_LAYOUT='Et*14|t*14|t*15L'
+      fi
+    fi
+elif [ "$NNODES" -eq 2 ]; then
+    # Single-pair 2-node (16 GPUs). Params (42.8B/card at EP=8/PP=1, measured) do not fit
+    # on one card, and CP does not shard params -- only PP (layers) and EP (experts) do.
+    # PP=2 halves per-card params to ~21B; EP=8 shards the 256 experts. Full recompute
+    # keeps activations small. 43 decoder layers + 1 MTP split across 2 PP stages.
+    export PRIMUS_TP=${PRIMUS_TP:-1}
+    export PRIMUS_PP=${PRIMUS_PP:-2}
+    export PRIMUS_EP=${PRIMUS_EP:-8}
+    export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-43}
+    # Layout follows PRIMUS_PP: PP=4 on 16 GPUs shards experts 32-way (EP*PP), same as the
+    # 4-node config, so the full model fits in bf16. Honor a caller-provided layout.
+    if [ -z "${PRIMUS_PP_LAYOUT:-}" ]; then
+      if [ "${PRIMUS_PP}" -eq 4 ]; then
+        if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+          export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11mL'
+        else
+          export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11L'
+        fi
+      else
+        if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+          export PRIMUS_PP_LAYOUT='Et*21|t*22mL'
+        else
+          export PRIMUS_PP_LAYOUT='Et*21|t*22L'
+        fi
+      fi
+    fi
+fi
+
+# Fallback for node counts the branches above do not cover (single node). The
+# branches assign with `${VAR:-N}` and export, so these are no-ops once one fired.
 export PRIMUS_TP=${PRIMUS_TP:-1}
 export PRIMUS_PP=${PRIMUS_PP:-4}
 export PRIMUS_EP=${PRIMUS_EP:-8}
@@ -194,6 +264,16 @@ export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS
 # `uniform` is closer to real routing than `even`, which hands every expert an
 # identical token count and flatters the unfused grouped-GEMM path.
 export MOE_FORCE_LB_TYPE=${MOE_FORCE_LB_TYPE:-uniform}
+
+# Indexer distillation loss -- part of the recipe, not an optimization. `topk`
+# is not differentiable, so without this the CSA lightning indexer never gets a
+# gradient and a from-scratch run selects compressed entries at random. Setting
+# the coefficient to 0 disables the loss and freezes the indexer.
+export PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF=${PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF:-1e-2}
+# Diagnostic: 0 renormalises each head over the compressed entries alone rather
+# than dividing by the layer's joint softmax denominator. That is the pre-fix
+# behaviour, kept only so the two can be compared.
+export PRIMUS_V4_DISTILL_NONCOMP_LSE=${PRIMUS_V4_DISTILL_NONCOMP_LSE:-1}
 
 # =============================================================================
 # (1) Small kernel fusions
@@ -228,6 +308,16 @@ export PRIMUS_V4_CSA_BWD_SEGREDUCE=${PRIMUS_V4_CSA_BWD_SEGREDUCE:-$_F}
 export PRIMUS_INDEXER_TRITON_FULL=${PRIMUS_INDEXER_TRITON_FULL:-0}
 # torch.compile path for Sinkhorn, an alternative to the Triton kernel above.
 export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-$_FB}
+# The indexer distillation loss's own kernels: the KL target (which otherwise
+# gathers the selected pool rows into HBM), the KL tail, and the sliding-window
+# log mass the target's denominator needs. Each falls back to an eager body on
+# shapes it does not cover.
+export PRIMUS_V4_DISTILL_TARGET_TRITON=${PRIMUS_V4_DISTILL_TARGET_TRITON:-$_F}
+export PRIMUS_V4_DISTILL_KL_TRITON=${PRIMUS_V4_DISTILL_KL_TRITON:-$_F}
+export PRIMUS_V4_DISTILL_WINDOW_TRITON=${PRIMUS_V4_DISTILL_WINDOW_TRITON:-$_F}
+# torch.compile for the indexer: most of what training it costs is the autograd
+# engine walking its forward, not arithmetic.
+export PRIMUS_V4_INDEXER_COMPILE=${PRIMUS_V4_INDEXER_COMPILE:-$_F}
 
 # Fusions that live in the experiment yaml (see the derivation at the end).
 # use_turbo_rms_norm additionally needs the primus_turbo master gate, which only
@@ -401,6 +491,7 @@ else
     _RECOMPUTE_DESC="$PRIMUS_RECOMPUTE_LAYERS"
 fi
 echo "[flash] layout=${PRIMUS_PP_LAYOUT:-<even split>} recompute=$_RECOMPUTE_DESC"
+echo "[flash] indexer_distill_coeff=$PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF fused_target=$PRIMUS_V4_DISTILL_TARGET_TRITON fused_kl=$PRIMUS_V4_DISTILL_KL_TRITON fused_window=$PRIMUS_V4_DISTILL_WINDOW_TRITON compile=$PRIMUS_V4_INDEXER_COMPILE joint_denom=$PRIMUS_V4_DISTILL_NONCOMP_LSE"
 echo "[flash] nodes=$NNODES tp=$PRIMUS_TP pp=$PRIMUS_PP ep=$PRIMUS_EP gbs=$GBS seq=$PRIMUS_SEQ_LENGTH iters=$TRAIN_ITERS"
 echo "[flash] exp=$EXP"
 

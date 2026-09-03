@@ -60,6 +60,15 @@ from __future__ import annotations
 import ast
 import logging
 from contextlib import nullcontext
+
+# CPU activation offloading helper, re-exported by Megatron's transformer_block when
+# TransformerEngine is present. None when TE is unavailable.
+try:
+    from megatron.core.transformer.transformer_block import (
+        get_cpu_offload_context as _get_cpu_offload_context,
+    )
+except ImportError:  # pragma: no cover
+    _get_cpu_offload_context = None
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Union
 
@@ -439,6 +448,7 @@ def _build_attention(
     compress_ratio: int,
     rope: DualRoPE,
     config: Optional[DeepSeekV4TransformerConfig] = None,
+    layer_number: Optional[int] = None,
 ):
     """No-spec fallback used when the layer is built without an
     ``attention`` :class:`ModuleSpec`.
@@ -455,6 +465,7 @@ def _build_attention(
         config=config,
         rope=rope,
         compress_ratio=int(compress_ratio),
+        layer_number=layer_number,
     )
 
 
@@ -574,17 +585,23 @@ class DeepseekV4HybridLayer(TransformerLayer):
         else:
             self.input_layernorm = LocalRMSNorm(hidden_size, eps=norm_eps)
 
+        # ``layer_number`` has to reach the attention module: it indexes the
+        # aux-loss tracker, and the 0 it defaults to is the sentinel
+        # ``log_indexer_distill_loss`` rejects -- so without it the indexer
+        # distillation loss is computed every step and never reported.
         if use_spec_submodules and submodules.self_attention is not None:
             self.self_attention = build_module(
                 submodules.self_attention,
                 config=config,
                 rope=rope,
+                layer_number=self.layer_number,
             )
         else:
             self.self_attention = _build_attention(
                 compress_ratio=self.compress_ratio,
                 rope=rope,
                 config=config,
+                layer_number=self.layer_number,
             )
 
         if use_spec_submodules and submodules.pre_mlp_layernorm is not None:
@@ -718,6 +735,7 @@ class DeepseekV4HybridLayer(TransformerLayer):
         *,
         position_ids: Optional[torch.Tensor] = None,
         token_ids: Optional[torch.Tensor] = None,
+        packed_seq_params=None,
         **kwargs,
     ):
         """Run one V4 layer.
@@ -731,6 +749,9 @@ class DeepseekV4HybridLayer(TransformerLayer):
                 inside :class:`DeepseekV4Attention`. Accepted for
                 upstream :class:`TransformerLayer` API compatibility.
             position_ids: ``[B, S]`` or ``[S]``. Forwarded to attention.
+            packed_seq_params: THD (packed-sequence) descriptor, forwarded to
+                attention. ``None`` for the ordinary BSHD path, in which case
+                every code path below is byte-identical to before.
             token_ids: ``[B, S]`` integer tensor; required when this is
                 a hash-routed MoE layer
                 (``layer_idx < num_hash_layers``). Ignored for non-MoE /
@@ -761,7 +782,9 @@ class DeepseekV4HybridLayer(TransformerLayer):
         # Attention sub-block. The collapse passes a [B, S, D] hidden, then
         # the attention runs and returns [B, S, D]; HC expand writes back.
         def _attn_sub(collapsed: torch.Tensor) -> torch.Tensor:
-            return self.self_attention(self.input_layernorm(collapsed), position_ids)
+            return self.self_attention(
+                self.input_layernorm(collapsed), position_ids, packed_seq_params=packed_seq_params
+            )
 
         x = self._hc_apply(self.attn_hc, hidden_states, _attn_sub)
 
@@ -838,6 +861,30 @@ class DeepseekV4TransformerBlock(TransformerBlock):
         self.pg_collection = pg_collection
         # Required by pipeline schedules (same contract as TransformerBlock).
         self.input_tensor = None
+
+        # CPU activation offloading. The parent __init__ is bypassed (see the class
+        # docstring), so this has to be set up here or `self.offload_context` simply does
+        # not exist and enabling --cpu-offloading-num-layers dies with an AttributeError.
+        # TE's context installs saved_tensors_hooks, which intercept every tensor saved
+        # for backward inside it -- including V4's custom autograd Functions, since
+        # offloading is opt-out (`mark_not_offload`) rather than opt-in.
+        self.offload_context, self.group_prefetch_offload_commit_async = nullcontext(), None
+        if _get_cpu_offload_context is not None:
+            self.offload_context, self.group_prefetch_offload_commit_async = _get_cpu_offload_context(
+                config.cpu_offloading,
+                config.cpu_offloading_num_layers,
+                config.num_layers,
+                config.cpu_offloading_activations,
+                config.cpu_offloading_weights,
+                config.cpu_offloading_double_buffering,
+            )
+            config._cpu_offloading_context = self.offload_context if config.cpu_offloading else None
+        elif getattr(config, "cpu_offloading", False):
+            raise RuntimeError(
+                "cpu_offloading requires TransformerEngine's get_cpu_offload_context, "
+                "which is unavailable in this build."
+            )
+
         logger.info(
             "[DeepSeek-V4] decoder block initialized (pre_process=%s post_process=%s).",
             pre_process,
@@ -1031,7 +1078,9 @@ class DeepseekV4TransformerBlock(TransformerBlock):
 
         return fp8_utils.get_fp8_context(self.config, global_idx)
 
-    def _forward_layer_checkpointed(self, layer, x, position_ids, token_ids, global_idx):
+    def _forward_layer_checkpointed(
+        self, layer, x, position_ids, token_ids, global_idx, packed_seq_params=None
+    ):
         """Run one V4 layer under activation checkpointing.
 
         Only the hidden-state tensor ``x`` is passed as the checkpointed
@@ -1048,7 +1097,12 @@ class DeepseekV4TransformerBlock(TransformerBlock):
 
         def _run(hidden):
             with self._layer_fp8_context(global_idx):
-                out, _ = layer(hidden, position_ids=position_ids, token_ids=token_ids)
+                out, _ = layer(
+                    hidden,
+                    position_ids=position_ids,
+                    token_ids=token_ids,
+                    packed_seq_params=packed_seq_params,
+                )
             return out
 
         return tensor_parallel.checkpoint(
@@ -1107,13 +1161,17 @@ class DeepseekV4TransformerBlock(TransformerBlock):
         ``decoder._v4_token_ids`` attribute stash has been removed; the
         model forwards ``input_ids`` here directly.
         """
+        # `packed_seq_params` is deliberately NOT dropped: under THD (packed) training it
+        # carries the cu_seqlens that tell attention where one packed sequence ends and the
+        # next begins. Everything else here really is unused by V4 -- RoPE is applied inside
+        # the layer from `position_ids`, and the causal/sliding-window structure lives in
+        # the index matrix the sparse-MLA adapter builds rather than in an attention_mask.
         del (
             inference_context,
             rotary_pos_emb,
             rotary_pos_cos,
             rotary_pos_sin,
             rotary_pos_cos_sin,
-            packed_seq_params,
             sequence_len_offset,
             attention_mask,
             kwargs,
@@ -1151,14 +1209,31 @@ class DeepseekV4TransformerBlock(TransformerBlock):
         for local_idx, layer in enumerate(self.layers):
             global_idx = self.global_layer_indices[local_idx]
             if recompute_local is not None and local_idx in recompute_local:
-                x = self._forward_layer_checkpointed(layer, x, position_ids, token_ids, global_idx)
+                x = self._forward_layer_checkpointed(
+                    layer, x, position_ids, token_ids, global_idx, packed_seq_params
+                )
             else:
-                with self._layer_fp8_context(global_idx):
+                # ``self.offload_context`` comes from TransformerBlock.__init__ (TE's
+                # get_cpu_offload_context). This loop replaces the parent's, so it has to
+                # re-enter that context itself -- without this the context object exists
+                # but is never active and --cpu-offloading-num-layers is a silent no-op.
+                # TE v2 installs saved_tensors_hooks, which intercept EVERY tensor saved
+                # for backward inside the region (offload is opt-out via
+                # `mark_not_offload`), so V4's custom autograd Functions are covered too.
+                # Mirrors TransformerBlock.forward (transformer_block.py:828-850).
+                with self.offload_context, self._layer_fp8_context(global_idx):
                     x, _ = layer(
                         x,
                         position_ids=position_ids,
                         token_ids=token_ids,
+                        packed_seq_params=packed_seq_params,
                     )
+                if (
+                    torch.is_grad_enabled()
+                    and self.config.cpu_offloading
+                    and self.group_prefetch_offload_commit_async is not None
+                ):
+                    x = self.group_prefetch_offload_commit_async(x)
 
         # Final HC collapse on post_process stage; non-final stages
         # forward the multi-stream form through PP P2P.
