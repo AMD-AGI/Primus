@@ -110,3 +110,4 @@ def test_forward_streaming_decode_is_deterministic_after_cache_reset():
         torch.cat(outputs_2, dim=2),
         rtol=0,
         atol=1e-6,
+    )
