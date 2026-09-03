@@ -76,11 +76,15 @@ def test_forward_streaming_decode_matches_wan22_chunked_protocol():
                 # temporal-upsample stage's slot holds the "Rep" sentinel
                 # until a second chunk gives it real history to work with.
                 assert all(slot is not None for slot in feat_map)
-                assert any(slot == "Rep" for slot in feat_map)
+                assert any(
+                    isinstance(slot, str) and slot == "Rep" for slot in feat_map
+                )
             else:
                 # Once real history is available, "Rep" must have been
                 # replaced by an actual cached tensor.
-                assert not any(slot == "Rep" for slot in feat_map)
+                assert not any(
+                    isinstance(slot, str) and slot == "Rep" for slot in feat_map
+                )
 
             outputs.append(frame_out)
 
