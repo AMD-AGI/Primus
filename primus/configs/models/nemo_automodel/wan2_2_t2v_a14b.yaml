@@ -12,8 +12,20 @@ model:
   # REQUIRED in pretrain mode (the from_config pipeline carries no config to
   # infer it from). Wan 2.2-A14B ships boundary_ratio = 0.875.
   boundary_ratio: 0.875
-  # AITER attention backend (gfx950). Falls back to "flash" if needed.
-  attention_backend: aiter
+  # Wan 3D attention. `flash` gives a working deterministic backward through Composable
+  # Kernel, whereas `aiter` inherits AITER's deterministic=True default and can exhaust
+  # memory on the split-K dQ accumulator at ordinary shapes -- the same reason the FLUX
+  # preset chose `flash`. This preset's own default shape is one of those shapes: a
+  # (16, 21, 64, 64) latent patchifies to ~21.5k tokens, at which the backward asks the
+  # allocator for 551.25 GiB of dQ accumulator and the step dies on a 288 GB card. An OOM
+  # is not a condition the backend selection falls back from, so `aiter` here is not a
+  # preference that degrades gracefully -- it is a preset that cannot complete a backward.
+  #
+  # `aiter` remains usable at this shape with PRIMUS_ATTN_NONDETERMINISTIC=1, which takes
+  # the non-deterministic accumulator and allocates normally. That is the faster arm and
+  # the right choice when bitwise reproducibility is not required; it is left as an opt-in
+  # because a default should not trade determinism away silently.
+  attention_backend: flash
   # fp32 master + bf16 compute (canonical pretraining precision, GB300-comparable).
   torch_dtype: float32
   compute_dtype: bfloat16
