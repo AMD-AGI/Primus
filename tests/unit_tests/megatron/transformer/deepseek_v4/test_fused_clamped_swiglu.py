@@ -23,6 +23,30 @@ import torch.nn.functional as F
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="clamped SwiGLU Triton kernels need CUDA/HIP")
 
 
+def _fp8_cast_works() -> bool:
+    if not hasattr(torch, "float8_e4m3fn"):
+        return False
+    try:
+        torch.zeros(4).to(torch.float8_e4m3fn).to(torch.float32)
+        return True
+    except (RuntimeError, TypeError):
+        return False
+
+
+# fp8_input_store=True needs a working float8_e4m3fn cast; gate just that
+# parameter (mirrors test_v4_fp8_indexer.py) so fp8_input_store=False still
+# runs on GPUs/torch builds without FP8 support instead of hard-failing.
+_fp8_input_store_cases = [
+    False,
+    pytest.param(
+        True,
+        marks=pytest.mark.skipif(
+            not _fp8_cast_works(), reason="torch.float8_e4m3fn cast unsupported on this build/device"
+        ),
+    ),
+]
+
+
 def _eager_clamped_swiglu(y: torch.Tensor, alpha: float) -> torch.Tensor:
     half = y.shape[-1] // 2
     gate, up = y[..., :half], y[..., half:]
@@ -46,7 +70,7 @@ class TestClampedSwiGLUFunction:
         self.swiglu_impl = swiglu_impl
 
     @pytest.mark.parametrize("alpha", [7.0, 1.0, 0.5])
-    @pytest.mark.parametrize("fp8_input_store", [False, True])
+    @pytest.mark.parametrize("fp8_input_store", _fp8_input_store_cases)
     def test_forward_matches_eager_reference(self, alpha: float, fp8_input_store: bool):
         torch.manual_seed(2024)
         y = (torch.randn(17, 64, device="cuda", dtype=torch.float32) * 5.0).requires_grad_(True)
@@ -85,7 +109,7 @@ class TestClampedWeightedSwiGLUFunction:
         self.impl = weighted_bias_swiglu_impl
 
     @pytest.mark.parametrize("alpha", [7.0, 1.0])
-    @pytest.mark.parametrize("fp8_input_store", [False, True])
+    @pytest.mark.parametrize("fp8_input_store", _fp8_input_store_cases)
     def test_forward_matches_eager_reference(self, alpha: float, fp8_input_store: bool):
         torch.manual_seed(2024)
         M, half = 5, 16
