@@ -15,21 +15,21 @@ def _make_decoder():
     # a channel-changing residual shortcut (which vae2_2's ResidualBlock does
     # not route through the feat_cache, and would desync feat_idx from
     # count_conv3d(decoder)).
-    torch.manual_seed(0)
-    decoder = Decoder3d(
-        dim=8,
-        z_dim=4,
-        dim_mult=[1, 1],
-        num_res_blocks=1,
-        attn_scales=[],
-        temperal_upsample=[True],
-        dropout=0.0,
-    )
+    # Seed only within a forked RNG scope so this doesn't mutate global RNG
+    # state and leak into other tests run later in the same process.
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        decoder = Decoder3d(
+            dim=8,
+            z_dim=4,
+            dim_mult=[1, 1],
+            num_res_blocks=1,
+            attn_scales=[],
+            temperal_upsample=[True],
+            dropout=0.0,
+        )
     decoder.eval()
     return decoder
-
-
-def _decode_streaming(decoder, x, conv_num):
     """Replay WanVAE_.decode's per-frame chunked-decode protocol: one latent
     frame per call, a single feat_cache list reused across calls, feat_idx
     reset to [0] for every frame, and first_chunk=True only on the first
