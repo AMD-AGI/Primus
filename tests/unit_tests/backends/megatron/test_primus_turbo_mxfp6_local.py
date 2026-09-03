@@ -458,11 +458,12 @@ class TestMXFP6LinearModules(PrimusUT):
         assert self._column_linear()._backward_is_fp8 is False
 
     @requires_mxfp6
-    def test_bias_is_applied_inside_the_function(self):
-        """A6W6 has no bias epilogue, so bias is still a separate add; check it lands.
+    def test_bias_is_applied_in_the_gemm_epilogue(self):
+        """Bias now rides in the A6W6 store epilogue rather than a separate pass; check it lands.
 
-        It has moved inside ``MXFP6LinearFunction`` so the backward can own its gradient,
-        which is what 2c needs; the forward arithmetic is unchanged.
+        The epilogue reads the bias out of the kernarg slot the fp6 kernel used to ignore, so
+        a bias that fails to reach the kernel shows up as no shift at all rather than as an
+        error. That is what this pins down.
         """
         from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
             MXFP6ColumnParallelLinear,
@@ -491,11 +492,51 @@ class TestMXFP6LinearModules(PrimusUT):
 
         # Both outputs are BF16, whose spacing around these magnitudes (|out| up to ~5)
         # is about 0.03, so the difference of the two roundings cannot recover 1.0
-        # exactly. The tolerance is that spacing, not an accuracy claim about MXFP6.
+        # exactly. The tolerance is that spacing, not an accuracy claim about MXFP6. It is
+        # if anything looser than needed now: the epilogue rounds once where the separate
+        # add rounded twice.
         delta = (with_bias.float() - without_bias.float()).abs()
         assert torch.allclose(
             delta, torch.ones_like(delta), atol=0.05
         ), f"bias shift deviates from 1.0 by up to {(delta - 1).abs().max().item():.4f}"
+
+    @requires_mxfp6
+    def test_epilogue_bias_matches_adding_it_afterwards(self):
+        """The epilogue must agree with the separate add it replaced, to within one rounding.
+
+        These cannot be compared bitwise, and the reason is worth stating because a naive
+        equality check here fails loudly on ~2% of elements. The separate add rounded the GEMM
+        result to bf16 and then added, rounding twice; the epilogue adds to the fp32 accumulator
+        and rounds once. Where bias nearly cancels the accumulator, the amount the old path
+        discarded is many ulps *of the result*, so the bound has to be one ulp of the pre-add
+        magnitude rather than of the answer. The epilogue is the more accurate of the two.
+        """
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+            MXFP6LinearFunction,
+        )
+
+        torch.manual_seed(7)
+        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+        w = torch.randn(N, K, dtype=torch.bfloat16, device="cuda")
+        b = torch.randn(N, dtype=torch.bfloat16, device="cuda")
+
+        fused = MXFP6LinearFunction.apply(x, w, *_pure_args(bias=b))[0]
+        unbiased = MXFP6LinearFunction.apply(x, w, *_pure_args())[0]
+        separate = unbiased + b
+
+        # The bias has to actually arrive: a dropped pointer looks like no shift, not an error.
+        assert not torch.equal(fused, unbiased), "the epilogue bias never reached the kernel"
+
+        def ulp(t):
+            return torch.exp2(torch.floor(torch.log2(t.float().abs().clamp_min(1e-30))) - 7.0)
+
+        diff = (fused.float() - separate.float()).abs()
+        bound = ulp(unbiased) + ulp(separate)
+        over = int((diff > bound).sum())
+        assert over == 0, (
+            f"{over} of {diff.numel()} elements exceed the double-rounding bound, "
+            f"worst {diff.max().item():.3e}"
+        )
 
     @requires_mxfp6
     def test_bias_gradient_comes_from_the_packer_column_sums(self):
