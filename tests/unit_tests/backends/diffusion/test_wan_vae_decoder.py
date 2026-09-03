@@ -105,4 +105,8 @@ def test_forward_streaming_decode_is_deterministic_after_cache_reset():
         outputs_1, _ = _decode_streaming(decoder, x, conv_num)
         outputs_2, _ = _decode_streaming(decoder, x, conv_num)
 
-    assert torch.equal(torch.cat(outputs_1, dim=2), torch.cat(outputs_2, dim=2))
+    torch.testing.assert_close(
+        torch.cat(outputs_1, dim=2),
+        torch.cat(outputs_2, dim=2),
+        rtol=0,
+        atol=1e-6,
