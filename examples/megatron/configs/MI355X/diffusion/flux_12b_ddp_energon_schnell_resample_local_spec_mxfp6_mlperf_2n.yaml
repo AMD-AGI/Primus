@@ -1,0 +1,279 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 12B Schnell — DDP + Local Spec + MXFP6, MLPerf mode, TWO NODES (16 ranks)
+#
+# The two-node counterpart of
+# flux_12b_ddp_energon_schnell_resample_local_spec_mxfp6_mlperf.yaml. Nine seeds
+# converged under this configuration (20131, 21139, 22147, 23155, 24163, 25171,
+# 26179, 27187, 28195), every one of them reaching val_loss <= 0.586, at a mean
+# of 7,718,684 samples and roughly 2.4 h per seed on 2x8 MI355X.
+#
+# THE BATCH SHAPE ASSUMES EXACTLY 16 RANKS. micro_batch_size 32 at
+# global_batch_size 512 is one microbatch per rank on two nodes of eight. On one
+# node it becomes two, and on four it does not divide. Changing node count means
+# changing the batch configuration, and the learning rate and warmup below go
+# with it -- see the reference-point note further down.
+#
+# WHY GBS 512 RATHER THAN 1024. Each batch size carries its own MLPerf reference
+# convergence points, and flux_ref_512's olympic mean is 7,223,524 samples
+# against 8,490,554 at GBS 1024 -- the smaller batch is 15% cheaper in samples
+# for the same quality target. Wall clock per seed is close to a wash, because
+# gradient accumulation drops to 1 and communication exposure per sample
+# doubles: measured 565.0 ms/step with evaluation here against 999.9 at GBS 1024.
+#
+# LEARNING RATE AND WARMUP BELONG TO THE BATCH SIZE. lr 2.0e-4 and
+# lr_warmup_iters 1600 are the flux_ref_512 values; at GBS 1024 they are 2.5e-4
+# and 800. The warmup field counts in samples as iters x GBS, so 1600 x 512 and
+# 800 x 1024 are the same 819,200-sample ramp rather than a longer one. Neither
+# field is constrained by the ruleset, so a GBS 512 run carrying the GBS 1024
+# hyperparameters passes every compliance check and quietly forfeits the
+# reference points it is being scored against. There is no log line for this.
+#
+# Hardware: gfx950 (MI350/MI355) only. The A6W6 kernels are gfx950 assembly, so
+# unlike MXFP4 there is no fallback path on older parts, and startup fails
+# loudly on an aiter that lacks them rather than quietly training in bf16.
+#
+# Before this produces a submittable log: the compliance checker accepts a fixed
+# vocabulary for lowest_numerical_precision_in_linear and mxfp6 is not in it. A
+# run under this recipe is a valid run whose log the checker rejects on that key
+# alone, until the format is accepted upstream.
+#
+# LAUNCHING THIS NEEDS MORE THAN THE RECIPE. Inter-node bandwidth, the eight
+# rails, the MLLOG disclosure variables and the pinned container are all outside
+# this file, and a run missing any of them either dies at startup or produces a
+# result that is not comparable to the nine above. The full procedure is in
+# tiger-training-internal docs/mlperf/flux_mxfp6_twonode_reproduce.md.
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_12b_ddp_local_mxfp6_mlperf_2n}
+
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: diffusion/flux_12b.yaml
+
+    trainer_class: FluxPretrainTrainer
+
+    overrides:
+      model_type: flux_schnell
+
+      # ==========================================
+      # MLPerf Mode
+      # ==========================================
+      mlperf_mode: true
+      target_val_loss: 0.586
+      warmup_train_steps: 2
+      nemo_aligned_lr_warmup: true
+
+      # ==========================================
+      # MLPerf Training v6.1 Alignment
+      # ==========================================
+      timestep_sampling_strategy: "direct_uniform"
+      activation_func: "openai_gelu"
+      cfg_dropout_prob: 0.1
+
+      # VAE latent normalization (required for resample mode)
+      vae_scale: 0.3611
+      vae_shift: 0.1159
+      vae_latent_mode: resample
+
+      # RoPE: must be interleaved to match Flux's EmbedND doubled-frequency layout
+      rotary_interleaved: true
+
+      # ==========================================
+      # PrimusTurboFloat8LocalSpecProvider
+      # ==========================================
+      transformer_impl: "local"
+
+      # ==========================================
+      # DATA — real Energon data, train and val in one dataset
+      # ==========================================
+      # The default is the combined set, which is the data every converged seed
+      # here was trained on. The original mlperf_flux1 has no val split carrying
+      # the fixed-timestep column that eval_timestep_source below requires.
+      data_path: ${PRIMUS_DIFFUSION_DATA_PATH:/data/mlperf_flux1_combined_20260828}
+      train_data_path: []
+      mock_data: false
+      dataloader_type: external
+      num_workers: 8
+      max_samples_per_sequence: null
+
+      # A safety cap, not a target: the run stops at the quality threshold and
+      # reaching it is the result. The slowest of the nine converged seeds took
+      # 15,360 steps, so 20000 clears the observed spread by 30%.
+      train_iters: 20000
+
+      eval_interval: 512
+      # Megatron gates evaluation on `args.eval_interval and iteration %
+      # eval_interval == 0 and args.do_valid`. do_valid is normally set inside
+      # build_train_valid_test_data_loaders, which the flux path never calls
+      # because it builds Energon dataloaders itself, so it stays at its False
+      # default and evaluation never fires. A two-node run reached step 710 and
+      # logged zero validation lines. Set it explicitly.
+      do_valid: true
+      # eval_samples, NOT eval_iters. The megatron.args.eval_samples patch
+      # derives eval_iters from this and asserts coverage is exact: 29696 / 512
+      # = 58 here. Setting eval_iters directly bypasses that patch, and a run
+      # doing so evaluated zero times in 400 steps. val_num_workers is pinned to
+      # 0 because a nonzero training num_workers leaves part of the set unread.
+      eval_samples: 29696
+      val_num_workers: 0
+      # MLPerf assigns each validation image one fixed timestep, carried in the
+      # Arrow 'timestep' column. Requires a val split ingested with that column;
+      # shards ingested earlier carry {"key": ...} only and fail loudly rather
+      # than silently falling back to injecting t = index % 8. Without this the
+      # run logs "Validation timestep source: equidistant" and is not on the
+      # evaluation path the nine converged seeds were measured with.
+      eval_timestep_source: dataset
+
+      log_interval: 10
+
+      # ==========================================
+      # Batch configuration — 16 ranks, one microbatch per rank
+      # ==========================================
+      micro_batch_size: 32
+      global_batch_size: 512
+      seq_length: 512
+
+      # ==========================================
+      # BF16 + MXFP6 precision
+      # ==========================================
+      bf16: true
+      fp16: false
+      params_dtype: bfloat16
+      grad_reduce_in_bf16: true
+
+      # Optimizer settings (MLPerf-pinned; must not be tuned)
+      optimizer: adam
+      lr: 2.0e-4
+      min_lr: 2.0e-4
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_eps: 1.0e-8
+      clip_grad: 1.0
+
+      # Learning rate scheduler (warmup-hold, no decay)
+      lr_warmup_iters: 1600
+      # Inert while lr_decay_style is constant. Left at the value every recorded
+      # run carried rather than tidied to train_iters, so a log from this recipe
+      # and the runs it reproduces agree field for field.
+      lr_decay_iters: 4000
+      lr_decay_style: constant
+
+      # ==========================================
+      # Megatron DDP + Distributed Optimizer
+      # ==========================================
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+
+      use_torch_fsdp2: false
+      use_megatron_fsdp: false
+
+      use_distributed_optimizer: true
+      # Both overlaps are what keeps the inter-node reduce-scatter and param
+      # all-gather off the critical path. overlap_param_gather_with_optimizer_step
+      # is unavailable here: it asserts interleaved virtual pipelining, which
+      # does not exist at TP=PP=1.
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      overlap_param_gather_with_optimizer_step: false
+
+      use_precision_aware_optimizer: true
+      main_params_dtype: fp32
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      ddp_bucket_size: 256000000
+      use_fsdp2_fp32_param_optimizer: false
+      # Required: the A6W6 entry point has no beta=1 accumulate epilogue, so
+      # wgrad cannot write main_grad in place.
+      gradient_accumulation_fusion: false
+      check_for_nan_in_loss_and_grad: true
+
+      use_flash_attn: true
+
+      # ==========================================
+      # MXFP6 — block-scaled (E2M3 + E8M0 over 32) via Primus Turbo + AITER A6W6
+      # ==========================================
+      # Primus-owned field: Megatron has no notion of a 6-bit format, so fp6 must
+      # not be combined with fp4 or fp8 (rejected in
+      # BaseDiffusionConfig.__post_init__).
+      fp6: "mxfp6"
+      mxfp6_backward_precision: "mxfp6"  # "mxfp6" (pure) or "fp8" (hybrid)
+
+      # The MLP folds its bias-add + GELU into the MXFP6 packer, worth about 5%
+      # of step time. It engages on its own; there is no config key. Launch with
+      # PRIMUS_MXFP6_FUSED_MLP=on so that a configuration the fusion cannot
+      # reproduce exactly becomes an error rather than a silent per-module
+      # fallback to Megatron's MLP -- otherwise measured throughput and the
+      # disclosed implementation can quietly diverge.
+
+      empty_unused_memory_level: 0
+      # Two nodes rendezvous over c10d and the first collective follows dataset
+      # startup, so the default 10 minutes is not enough headroom on a cold
+      # page cache.
+      distributed_timeout_minutes: 180
+      distributed_backend: nccl
+
+      # ==========================================
+      # Checkpointing — off
+      # ==========================================
+      # Every recorded run has save: null. A run that cannot finish inside its
+      # allocation therefore produces nothing, which is a deliberate trade
+      # against paying checkpoint I/O on a time-to-train measurement.
+      ckpt_format: torch_dist
+      save: null
+      save_interval: 100000
+      disable_last_saving: true
+      load: null
+      finetune: false
+      use_checkpoint_args: false
+      auto_continue_train: false
+
+      # ==========================================
+      # Logging
+      # ==========================================
+      tensorboard_dir: ${PRIMUS_TB_DIR:output/tensorboard/flux_12b_ddp_local_mxfp6_mlperf_2n}
+      wandb_project: null
+      log_throughput: true
+      wall_clock_step_timer: true
+      log_timers_to_tensorboard: true
+      log_batch_size_to_tensorboard: true
+      log_learning_rate_to_tensorboard: true
+      log_memory_to_tensorboard: true
+
+      profile: false
+      use_pytorch_profiler: false
+
+      enable_primus_turbo: true
+      use_turbo_attention: true
+
+      # ==========================================
+      # Seed
+      # ==========================================
+      # Each run in a submission campaign needs its own seed. The stack is
+      # bit-deterministic, so repeating a seed reproduces its validation curve
+      # exactly and adds no convergence evidence.
+      seed: ${PRIMUS_SEED:20131}
+      # MLPerf-aligned per-step CUDA RNG reseed (defaults off elsewhere).
+      per_step_rng_reseed: true
+      nemo_chimera_init: false
+
+      torch_compile:
+        enable: true
+        strategy: "per_block"
+        backend: "inductor"
+        mode: "default"
+        fullgraph: false
+        compile_optimizer: false
+        emulate_precision_casts: false
+        fused_ln_modulate: true
