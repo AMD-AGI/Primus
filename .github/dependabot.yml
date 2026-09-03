@@ -22,3 +22,23 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+
+  # Version updates stay disabled here (open-pull-requests-limit: 0) to keep the
+  # GitHub-Actions-only policy above; this entry exists so the ignore rule below
+  # also applies to security updates, which are enabled repo-wide and would
+  # otherwise bypass this file. Note that `ignore.update-types` does NOT apply to
+  # security updates, but `ignore.versions` does.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 0
+    ignore:
+      # requirements-maxdiffusion.txt is the only root manifest pinning
+      # transformers, and MaxDiffusion is Flax-based: transformers 5.0 removed all
+      # Flax classes, so a 5.x bump breaks `import maxdiffusion` at module load.
+      # Trade-off: a CVE fixed only in 5.x will not raise a PR here, so a
+      # transformers advisory has to be handled by hand until MaxDiffusion moves
+      # off Flax.
+      - dependency-name: "transformers"
+        versions: [">=5.0.0"]
