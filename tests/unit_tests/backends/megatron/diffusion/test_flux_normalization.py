@@ -149,8 +149,8 @@ class TestAdaLNContinuous(PrimusUT):
             num_attention_heads=NUM_ATTENTION_HEADS_FLUX,
             num_layers=1,
         )
-        adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX).cuda()
         torch.manual_seed(0)
+        adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX).cuda()
         x = torch.randn(ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX).cuda()
         cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX).cuda()
 
@@ -204,10 +204,10 @@ class TestAdaLNContinuousForwardPlainOps(PrimusUT):
     def test_forward_matches_manual_layernorm_and_modulate(self):
         """forward() should equal norm(x) * (1 + scale) + shift for the given conditioning."""
         config = self._make_config()
-        adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX, modulation_bias=False)
-
         torch.manual_seed(0)
+        adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX, modulation_bias=False)
         x = torch.randn(ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX)
+        cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX)
         cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX)
 
         output = adaln(x, cond)
