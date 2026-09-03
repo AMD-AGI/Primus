@@ -142,6 +142,106 @@ class TestAdaLNContinuous(PrimusUT):
         with pytest.raises(ValueError, match="Unknown normalization type"):
             AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX, norm_type="invalid")
 
+    def test_fused_forward_matches_plain_ops_formula(self):
+        """Default fused path must still equal norm(x)*(1+scale)+shift (NeMo chunk order)."""
+        config = TransformerConfig(
+            hidden_size=HIDDEN_DIM_FLUX,
+            num_attention_heads=NUM_ATTENTION_HEADS_FLUX,
+            num_layers=1,
+        )
+        adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX).cuda()
+        torch.manual_seed(0)
+        x = torch.randn(ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX).cuda()
+        cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX).cuda()
+
+        output = adaln(x, cond)
+        emb = adaln.adaLN_modulation(cond)
+        scale, shift = torch.chunk(emb, 2, dim=1)
+        expected = adaln.norm(x) * (1 + scale) + shift
+        assert torch.allclose(output, expected, atol=1e-5, rtol=1e-5)
+
+
+class TestAdaLNContinuousForwardPlainOps(PrimusUT):
+    """CPU-only tests for AdaLNContinuous.forward numerics.
+
+    These construct AdaLNContinuous with config.adaln_plain_ops=True, which
+    routes forward() through the plain `self.norm(x) * (1 + scale) + shift`
+    branch instead of the primus::fused_ln_modulate custom op (registered
+    only for device_types="cuda"). AdaLNContinuous itself only uses
+    nn.Linear/nn.LayerNorm (no tensor-parallel layers), so no CUDA or
+    Megatron parallel state is required for this path.
+    """
+
+    @staticmethod
+    def _make_config():
+        config = TransformerConfig(
+            hidden_size=HIDDEN_DIM_FLUX,
+            num_attention_heads=NUM_ATTENTION_HEADS_FLUX,
+            num_layers=1,
+        )
+        config.adaln_plain_ops = True
+        return config
+
+    def test_forward_matches_manual_layernorm_and_modulate(self):
+        """forward() should equal norm(x) * (1 + scale) + shift for the given conditioning."""
+        config = self._make_config()
+        adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX, modulation_bias=False)
+
+        torch.manual_seed(0)
+        x = torch.randn(ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX)
+        cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX)
+
+        output = adaln(x, cond)
+
+        emb = adaln.adaLN_modulation(cond)
+        scale, shift = torch.chunk(emb, 2, dim=1)
+        expected = adaln.norm(x) * (1 + scale) + shift
+
+        assert output.shape == x.shape
+        assert torch.allclose(output, expected, atol=1e-6)
+
+    def test_forward_zero_modulation_weight_is_pure_layernorm(self):
+        """Zeroed modulation weight/no bias => scale=shift=0, so forward reduces to plain LayerNorm."""
+        config = self._make_config()
+        adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX, modulation_bias=False)
+        nn.init.zeros_(adaln.adaLN_modulation[-1].weight)
+
+        x = torch.randn(ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX)
+        cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX)
+
+        output = adaln(x, cond)
+        expected = torch.nn.functional.layer_norm(x, [HIDDEN_DIM_FLUX], eps=1e-6)
+        assert torch.allclose(output, expected, atol=1e-6)
+
+    def test_forward_scale_shift_chunk_order(self):
+        """First half of the modulation output is scale, second half is shift (NeMo convention)."""
+        config = self._make_config()
+        adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX, modulation_bias=True)
+
+        with torch.no_grad():
+            adaln.adaLN_modulation[-1].weight.zero_()
+            bias = adaln.adaLN_modulation[-1].bias
+            bias[:HIDDEN_DIM_FLUX] = 1.0  # scale half -> scale=1 everywhere
+            bias[HIDDEN_DIM_FLUX:] = 5.0  # shift half -> shift=5 everywhere
+
+        x = torch.randn(ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX)
+        cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX)
+
+        output = adaln(x, cond)
+        expected = adaln.norm(x) * 2.0 + 5.0
+        assert torch.allclose(output, expected, atol=1e-5)
+
+    def test_forward_backward_reaches_input_and_modulation(self):
+        config = self._make_config()
+        adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX, modulation_bias=False)
+        x = torch.randn(ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX, requires_grad=True)
+        cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX, requires_grad=True)
+
+        adaln(x, cond).sum().backward()
+
+        assert x.grad is not None and torch.isfinite(x.grad).all() and x.grad.abs().sum() > 0
+        assert cond.grad is not None and torch.isfinite(cond.grad).all() and cond.grad.abs().sum() > 0
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
