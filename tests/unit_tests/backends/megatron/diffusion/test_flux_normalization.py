@@ -210,8 +210,6 @@ class TestAdaLNContinuousForwardPlainOps(PrimusUT):
         cond = torch.randn(BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX)
 
         output = adaln(x, cond)
-213
-        output = adaln(x, cond)
 
         emb = adaln.adaLN_modulation(cond)
         scale, shift = torch.chunk(emb, 2, dim=1)
