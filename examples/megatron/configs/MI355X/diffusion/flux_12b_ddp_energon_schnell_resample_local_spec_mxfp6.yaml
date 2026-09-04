@@ -137,7 +137,12 @@ modules:
       exp_avg_dtype: bf16
       exp_avg_sq_dtype: bf16
 
-      ddp_bucket_size: 256000000
+      # Swept, not inherited -- see the MLPerf MXFP6 recipe for the reasoning. The
+      # Megatron default of 256000000 elements leaves collective time exposed that a
+      # larger bucket hides: -17.4 ms per 512 images at this MBS=64/GBS=512, -27.9 ms
+      # at MBS=32/GBS=256, with peak memory unchanged. Both ends of the sweep lose, so
+      # 1024000000 is a measured optimum rather than a "bigger is better" guess.
+      ddp_bucket_size: 1024000000
       use_fsdp2_fp32_param_optimizer: false
 
       ckpt_format: torch_dist
