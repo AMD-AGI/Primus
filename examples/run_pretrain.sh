@@ -265,11 +265,42 @@ if [ "$USING_AINIC" == "1" ]; then
         unset _gpu_devid _d _f
     fi
 
-    # GPU-Direct RDMA registration fails on this fabric -- every ibv_reg_mr_iova2 returns
-    # EINVAL -- and the topology file above is the first configuration that makes RCCL attempt
-    # it, so the two must be set together or all ranks die during connection setup. The 2.56x
-    # comes from the wider plan and does not depend on GDR.
-    if [ "${PRIMUS_RCCL_TOPO_DISABLE:-0}" != "1" ]; then
+    # GPU-Direct RDMA is one switch because the four settings below only work together, and
+    # the failure mode of getting it partly right is that every rank dies during connection
+    # setup rather than falling back.
+    #
+    # dmabuf is the only registration path available here: the peerdirect client is absent
+    # from ib_core, and RCCL's own dmabuf gate reads a kernel config file this image does not
+    # ship, hence the force flag. Registration also has to come off the VMM allocator. With
+    # the default allocator the buffers are not dmabuf-exportable, RCCL falls back to
+    # ibv_reg_mr_iova2, and that returns EINVAL for every buffer on this fabric. That EINVAL
+    # was previously read as the fabric refusing GDR outright, and the level was pinned to LOC
+    # because of it -- but it is the allocator, not the fabric. NCCL_CUMEM_ENABLE=1 removes it.
+    #
+    # Two same-pod nodes at MBS=32/GBS=512, 2026-09-04: 537.0 -> 502.8 ms/step, a 34 ms
+    # saving against a 3.3 ms spread between repeats, final loss identical. Needs the
+    # topology file above, which is what makes RCCL attempt GDR at all; the separate 2.56x
+    # from the wider channel plan does not depend on GDR.
+    #
+    # Off by default because it is only safe once the dataloader can avoid fork: a process
+    # holding dmabuf-registered GPU memory segfaults inside os.fork(). That needs Energon
+    # carrying dev/patches/energon-7.3.2-no-fork.patch and ENERGON_MP_CONTEXT set away from
+    # fork, so refuse rather than hand back a segfault with no explanation.
+    if [ "${PRIMUS_RCCL_GDR:-0}" = "1" ]; then
+        if [ "${ENERGON_MP_CONTEXT:-fork}" = "fork" ]; then
+            LOG_ERROR "PRIMUS_RCCL_GDR=1 requires ENERGON_MP_CONTEXT=forkserver (or spawn)."
+            LOG_ERROR "Under fork the dataloader forks with GPU memory registered for GDR and"
+            LOG_ERROR "its workers segfault immediately. See dev/patches/README.md."
+            exit 1
+        fi
+        # Set outright, not with :-, because NCCL_DMABUF_ENABLE has already been defaulted to
+        # 0 above and a :- default would silently keep that 0 and break registration.
+        export NCCL_NET_GDR_LEVEL="${PRIMUS_RCCL_GDR_LEVEL:-SYS}"
+        export NCCL_DMABUF_ENABLE=1
+        export RCCL_FORCE_ENABLE_DMABUF=1
+        export NCCL_CUMEM_ENABLE=1
+        LOG_INFO_RANK0 "RCCL GDR: enabled, level $NCCL_NET_GDR_LEVEL (dmabuf via cumem)"
+    elif [ "${PRIMUS_RCCL_TOPO_DISABLE:-0}" != "1" ]; then
         export NCCL_NET_GDR_LEVEL=${NCCL_NET_GDR_LEVEL:-LOC}
     fi
     path_append_unique LD_LIBRARY_PATH \
