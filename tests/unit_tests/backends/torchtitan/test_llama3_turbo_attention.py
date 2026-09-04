@@ -118,7 +118,11 @@ class TestLlama3TurboAttentionForward:
 
         attn.forward(x, freqs_cis, attention_masks=None, positions=positions)
 
-        assert captured["positions"] is positions
+        # Value-equivalence (not object identity): `Attention.forward` is only
+        # contracted to forward the same position values to RoPE, not the same
+        # tensor object (a harmless `.to(device)`/clone shouldn't break this).
+        assert captured["positions"] is not None
+        assert torch.equal(captured["positions"], positions)
 
     def test_forward_defaults_positions_to_none(self, llama3_args):
         from primus.backends.torchtitan.models.llama3.model.model import Attention
