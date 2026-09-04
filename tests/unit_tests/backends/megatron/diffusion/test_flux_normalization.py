@@ -253,7 +253,7 @@ class TestAdaLNContinuousForwardPlainOps(PrimusUT):
         expected = adaln.norm(x) * 2.0 + 5.0
         assert torch.allclose(output, expected, atol=1e-5)
 
-    def test_forward_backward_reaches_input_and_modulation(self):
+    def test_forward_backward_reaches_input_and_conditioning(self):
         config = self._make_config()
         adaln = AdaLNContinuous(config, conditioning_embedding_dim=HIDDEN_DIM_FLUX, modulation_bias=False)
         x = torch.randn(ATTENTION_SEQ_LEN, BATCH_SIZE_QUAD, HIDDEN_DIM_FLUX, requires_grad=True)
