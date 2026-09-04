@@ -33,6 +33,7 @@ from megatron.energon import (
 from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
 from primus.backends.megatron.data.dataset_provider import DatasetProvider
 from primus.backends.megatron.training.eval_budget import (
+    get_eval_micro_batch_size,
     EvalCoverageError,
     assert_mlperf_timestep_source,
     assert_val_worker_divisibility,
@@ -177,7 +178,7 @@ class EnergonDatasetProvider(DatasetProvider):
                 log_rank_0("Creating validation dataloaders...")
                 val_datasets = get_val_datasets(
                     data_path,
-                    batch_size=args.micro_batch_size,
+                    batch_size=get_eval_micro_batch_size(args),
                     task_encoder=task_encoder,
                     worker_config=val_worker_config,
                 )

@@ -35,6 +35,8 @@ __all__ = [
     "assert_mlperf_timestep_source",
     "assert_val_worker_divisibility",
     "get_data_parallel_size",
+    "get_eval_global_batch_size",
+    "get_eval_micro_batch_size",
     "get_eval_num_microbatches",
     "get_val_num_workers",
     "read_energon_split_sample_count",
@@ -101,15 +103,41 @@ def get_data_parallel_size(args) -> int:
     return world_size // divisor
 
 
+def get_eval_micro_batch_size(args) -> int:
+    """Microbatch width to evaluate at, defaulting to the training width.
+
+    Narrowing this is metric-neutral for a sample-weighted loss: the batches an
+    evaluation is cut into change, the per-sample timestep pairing does not.
+    Keep it a multiple of ``NUM_VALIDATION_TIMESTEPS`` if the run injects
+    equidistant timesteps rather than reading them from the dataset, or the
+    evaluation will never see the higher timesteps.
+    """
+    return getattr(args, "eval_micro_batch_size", None) or args.micro_batch_size
+
+
+def get_eval_global_batch_size(args) -> int:
+    """Samples per evaluation iteration, defaulting to the training global batch.
+
+    Exists because the training global batch cannot always cover a validation
+    split in whole iterations, and is not free to change: it has a floor of
+    ``data_parallel_size * micro_batch_size``, since every rank must run at
+    least one microbatch. Four nodes at MBS=64 sit exactly on that floor at
+    2048, and 2048 does not divide the 29696-sample MLPerf Flux split
+    (2^10 * 29), so no training-side batch size can read it exactly. Setting
+    the evaluation's own batch decouples the two.
+    """
+    return getattr(args, "eval_global_batch_size", None) or args.global_batch_size
+
+
 def get_eval_num_microbatches(args) -> int:
     """Microbatches per evaluation iteration.
 
-    Uses the same global batch as training so that ``eval_iters`` counts in
-    global batches, matching Megatron's convention.
+    Counts in evaluation global batches, which equal the training global batch
+    unless the recipe overrides them.
     """
     dp_size = get_data_parallel_size(args)
-    micro_batch_size = args.micro_batch_size
-    global_batch_size = args.global_batch_size
+    micro_batch_size = get_eval_micro_batch_size(args)
+    global_batch_size = get_eval_global_batch_size(args)
 
     samples_per_microbatch = micro_batch_size * dp_size
     if samples_per_microbatch <= 0:
@@ -163,7 +191,7 @@ def assert_val_worker_divisibility(args, eval_samples: int) -> None:
     this from dividing by zero at the default worker count of 0.
     """
     dp_size = get_data_parallel_size(args)
-    micro_batch_size = args.micro_batch_size
+    micro_batch_size = get_eval_micro_batch_size(args)
     val_num_workers = get_val_num_workers(args)
 
     divisor = dp_size * max(1, val_num_workers) * micro_batch_size
@@ -288,7 +316,7 @@ def resolve_eval_iters(args) -> Optional[int]:
     if eval_samples <= 0:
         raise EvalCoverageError(f"eval_samples must be positive, got {eval_samples}.")
 
-    global_batch_size = args.global_batch_size
+    global_batch_size = get_eval_global_batch_size(args)
     if eval_samples % global_batch_size != 0:
         raise EvalCoverageError(
             f"eval_samples ({eval_samples}) is not divisible by global_batch_size "

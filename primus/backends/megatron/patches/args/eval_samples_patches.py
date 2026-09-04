@@ -17,6 +17,7 @@ corrected ``eval_iters``.
 """
 
 from primus.backends.megatron.training.eval_budget import (
+    get_eval_global_batch_size,
     assert_val_worker_divisibility,
     get_val_num_workers,
     read_energon_split_sample_count,
@@ -31,7 +32,12 @@ from primus.core.utils.module_utils import log_kv_rank_0
 # *after* the build_args phase. So this patch cannot read them off args yet and
 # must take them from the module config, or it would see every one as unset and
 # quietly leave eval_iters alone.
-PRIMUS_ONLY_EVAL_KEYS = ("eval_samples", "val_num_workers")
+PRIMUS_ONLY_EVAL_KEYS = (
+    "eval_samples",
+    "val_num_workers",
+    "eval_global_batch_size",
+    "eval_micro_batch_size",
+)
 
 
 def _hydrate_primus_only_keys(args, module_config):
@@ -82,10 +88,16 @@ def patch_eval_samples(ctx: PatchContext):
         # for every module, so this almost always overrides something, and a
         # silent override is how the budget drifted from the intent before.
         replaced = "" if previous in (None, derived) else f", was {previous}"
+        eval_batch_size = get_eval_global_batch_size(args)
+        batch = (
+            f"global_batch_size={eval_batch_size}"
+            if eval_batch_size == args.global_batch_size
+            else f"eval_global_batch_size={eval_batch_size} "
+            f"(training global_batch_size={args.global_batch_size})"
+        )
         log_kv_rank_0(
             "[Patch:megatron.args.eval_samples] -eval_iters",
-            f"{derived} (from eval_samples={args.eval_samples}, "
-            f"global_batch_size={args.global_batch_size}{replaced})",
+            f"{derived} (from eval_samples={args.eval_samples}, {batch}{replaced})",
         )
         return
 
@@ -94,9 +106,9 @@ def patch_eval_samples(ctx: PatchContext):
     # opt into eval_samples get the coverage guarantee.
     eval_iters = getattr(args, "eval_iters", 0) or 0
     if eval_iters > 0:
-        assert_val_worker_divisibility(args, eval_iters * args.global_batch_size)
+        eval_samples = eval_iters * get_eval_global_batch_size(args)
+        assert_val_worker_divisibility(args, eval_samples)
         log_kv_rank_0(
             "[Patch:megatron.args.eval_samples] -val_num_workers",
-            f"{get_val_num_workers(args)} (coverage verified for "
-            f"{eval_iters * args.global_batch_size} samples)",
+            f"{get_val_num_workers(args)} (coverage verified for {eval_samples} samples)",
         )
