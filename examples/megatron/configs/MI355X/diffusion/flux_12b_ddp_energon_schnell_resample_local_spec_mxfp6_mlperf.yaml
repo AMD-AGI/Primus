@@ -159,24 +159,21 @@ modules:
       overlap_param_gather_with_optimizer_step: false
       # FP32 optimizer states (m, v), matching the FP8 MLPerf recipe rather than
       # the BF16 states the MXFP6 development recipe uses. Time to train is what
-      # is being measured, and this removes a source of convergence difference
-      # from the FP8 comparison.
+      # is being measured, and FP32 states cost almost nothing in throughput here
+      # while removing a source of convergence difference from the FP8 comparison.
       #
-      # This block used to claim FP32 states "cost nothing in throughput here".
-      # That is wrong and was never measured. Two arms differing in nothing but
-      # these five lines, at MBS=64/GBS=512 with ddp_bucket_size 256000000, give
-      # 1110.2 ms per 512 images against 812.4 for the development recipe's BF16
-      # m/v with use_precision_aware_optimizer true -- +36.7%, and +21 GB of peak
-      # memory. Keep the setting, because convergence comparability against FP8
-      # is the point of this recipe and time to train is not throughput, but size
-      # it honestly: it is the most expensive single line in this file, and by a
-      # wide margin.
+      # Now measured rather than asserted, since the bucket sweep produced the
+      # matched arms for free. Against the development recipe's BF16 m/v with
+      # use_precision_aware_optimizer true, at MBS=64/GBS=512 and equal bucket
+      # size: +6.9 ms per 512 images, +0.85%, at both 256000000 and 1024000000.
+      # The throughput claim holds. What it does cost is memory, +16.2 GB of peak
+      # (267.0 against 250.8 GB), which is the number to watch if this recipe ever
+      # moves to a larger micro-batch, because 267 of 288 GB is most of the card.
       #
-      # The cost is optimizer-side, not communication. main_grads_dtype belongs to
-      # the precision-aware optimizer and is inert when that is false; the gradients
-      # DDP reduces are bf16 in both recipes (grad_reduce_in_fp32=False), and both
-      # build the same 43 buckets. So this line buys FP32 m/v and the standard
-      # optimizer path, and pays for them in the step, not in the collectives.
+      # Note that main_grads_dtype below is inert: it belongs to the precision-aware
+      # optimizer and is ignored when that flag is false. The gradients DDP reduces
+      # are bf16 in this recipe exactly as in the development one, which is why the
+      # bucket sweep above transfers between them.
       use_precision_aware_optimizer: false
       main_params_dtype: fp32
       main_grads_dtype: fp32
@@ -185,16 +182,15 @@ modules:
 
       # Swept in this recipe's own optimizer regime rather than inherited from the
       # development one. The Megatron default of 256000000 elements is the worst of
-      # the four sizes measured here: 1024000000 gives 1086.8 ms per 512 images
-      # against 1110.2, worth -23.4 ms, with peak memory unchanged (266.0 GB against
+      # the four sizes measured here: 1024000000 gives 801.9 ms per 512 images
+      # against 819.3, worth -17.4 ms, with peak memory unchanged (266.0 GB against
       # 267.0). 512000000, the value the MLPerf v6.0 reference moved to, is an
-      # improvement but not the best one at 1092.2.
+      # improvement but not the best one at 806.4.
       #
       # The collective path is identical to the development recipe's -- both reduce
       # bf16 gradients (grad_reduce_in_fp32=False) and both build 43 buckets with the
       # same element counts at this bucket size -- so the same 1024000000 optimum was
-      # expected here, and it is. What differs is the optimizer above it, which is
-      # 36.7% of step time, so the arms were run anyway rather than assumed.
+      # expected here, and the win is the same -17.4 ms to the decimal.
       #
       # Do not push this further in one direction. Both ends lose: small buckets pay
       # per-call overhead and get thin per-call bandwidth, and buckets spanning most
