@@ -4,6 +4,7 @@ FROM ${BASE_IMAGE}
 COPY runner/helpers/hooks/train/pretrain/diffusion/requirements-diffusion.txt /tmp/
 RUN python -m pip install --no-cache-dir \
     -r /tmp/requirements-diffusion.txt && \
+    python -m pip install --no-cache-dir --no-deps torchao==0.18.0 && \
     rm /tmp/requirements-diffusion.txt
 
 COPY . /workspace/Primus
