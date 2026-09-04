@@ -17,7 +17,7 @@ def _make_decoder():
     # count_conv3d(decoder)).
     # Seed only within a forked RNG scope so this doesn't mutate global RNG
     # state and leak into other tests run later in the same process.
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         decoder = Decoder3d(
             dim=8,
