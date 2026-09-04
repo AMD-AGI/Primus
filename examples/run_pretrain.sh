@@ -224,8 +224,54 @@ if [ "$USING_AINIC" == "1" ]; then
     export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/workspace/rccl"}
     export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi"}
     export NCCL_MAX_P2P_CHANNELS=56
-    export NCCL_DMABUF_ENABLE=0
+    export NCCL_DMABUF_ENABLE=${NCCL_DMABUF_ENABLE:-0}
     export NCCL_IB_QPS_PER_CONNECTION=1
+
+    # Without a topology file RCCL discovers the fabric itself and plans 2 channels inter-node,
+    # which is 46 GB/s; the Crusoe XML declares which rail is local to which GPU and the plan
+    # widens to 8, which is 118. See docs/mlperf/rccl_gdr_escalation.md, 2026-08-31.
+    #
+    # Resolved by GPU PCI device id, never by filename. The mi350x and mi355x files differ only
+    # there (0x75a0 against 0x75a3) and a mismatched file still parses, so RCCL applies it and
+    # silently loses the affinity the file exists to declare -- a wrong filename is worse than
+    # no file, because it looks configured. Read from sysfs rather than lspci, which is a
+    # package and not present in every image. /etc/crusoe is not mounted in every container, so
+    # a staged copy is accepted as a fallback.
+    # PRIMUS_RCCL_TOPO_DISABLE=1 restores the pre-2026-08-31 behaviour exactly: no topology
+    # file and no GDR level of our choosing. It exists so the A/B stays measurable from outside
+    # the launcher, and as an escape hatch if a future node ships a file that plans worse than
+    # RCCL's own discovery.
+    if [ "${PRIMUS_RCCL_TOPO_DISABLE:-0}" = "1" ]; then
+        LOG_INFO_RANK0 "RCCL topology: disabled by PRIMUS_RCCL_TOPO_DISABLE=1"
+    elif [ -z "${NCCL_TOPO_FILE:-}" ]; then
+        _gpu_devid=""
+        for _d in /sys/bus/pci/devices/*; do
+            [ "$(cat "$_d/vendor" 2>/dev/null)" = "0x1002" ] || continue
+            _gpu_devid="$(cat "$_d/device" 2>/dev/null)"
+            [ -n "$_gpu_devid" ] && break
+        done
+        for _f in /etc/crusoe/rccl_topo/*.xml /opt/rccl_topo_node.xml; do
+            [ -f "$_f" ] || continue
+            if [ -n "$_gpu_devid" ] && grep -q "device=\"${_gpu_devid}\"" "$_f"; then
+                export NCCL_TOPO_FILE="$_f"
+                break
+            fi
+        done
+        if [ -n "${NCCL_TOPO_FILE:-}" ]; then
+            LOG_INFO_RANK0 "RCCL topology: $NCCL_TOPO_FILE (matches GPU $_gpu_devid)"
+        else
+            LOG_INFO_RANK0 "RCCL topology: none matches GPU ${_gpu_devid:-unknown}; inter-node will plan 2 channels"
+        fi
+        unset _gpu_devid _d _f
+    fi
+
+    # GPU-Direct RDMA registration fails on this fabric -- every ibv_reg_mr_iova2 returns
+    # EINVAL -- and the topology file above is the first configuration that makes RCCL attempt
+    # it, so the two must be set together or all ranks die during connection setup. The 2.56x
+    # comes from the wider plan and does not depend on GDR.
+    if [ "${PRIMUS_RCCL_TOPO_DISABLE:-0}" != "1" ]; then
+        export NCCL_NET_GDR_LEVEL=${NCCL_NET_GDR_LEVEL:-LOC}
+    fi
     path_append_unique LD_LIBRARY_PATH \
         /usr/lib/x86_64-linux-gnu \
         /usr/lib/x86_64-linux-gnu/libibverbs \
