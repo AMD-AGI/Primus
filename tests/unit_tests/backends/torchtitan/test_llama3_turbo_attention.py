@@ -139,9 +139,9 @@ class TestLlama3TurboAttentionForward:
         # Sanity check that the mirror still routes through the base
         # `Attention.wo` output projection rather than returning the raw
         # inner_attention output.
-        from primus.backends.torchtitan.models.llama3.model.model import Attention
+        import primus.backends.torchtitan.models.llama3.model.model as llama3_mirror
 
-        attn = Attention(llama3_args)
+        attn = llama3_mirror.Attention(llama3_args)
         attn.inner_attention = _IdentityInnerAttention()
 
         bs, seqlen = 1, 4
@@ -152,7 +152,10 @@ class TestLlama3TurboAttentionForward:
         out = attn.forward(x, freqs_cis, attention_masks=None)
 
         xq = attn.wq(x).view(bs, seqlen, -1, head_dim)
+        xk = attn.wk(x).view(bs, seqlen, -1, head_dim)
+        # Build `expected` via the same `apply_rotary_emb` call `Attention.forward`
+        # makes, rather than assuming freqs_cis=1 makes RoPE an exact no-op (an
+        # implementation detail of `apply_rotary_emb` this test shouldn't rely on).
+        xq, _ = llama3_mirror.apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, positions=None)
         expected = attn.wo(xq.contiguous().view(bs, seqlen, -1))
-        # RoPE is a no-op here since freqs_cis is all-ones (zero phase), so the
-        # identity inner_attention path reduces to wo(view(wq(x))).
         assert torch.allclose(out, expected, atol=1e-5)
