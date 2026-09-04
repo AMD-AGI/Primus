@@ -27,11 +27,13 @@ from megatron.energon import (
     get_savable_loader,
     get_train_dataset,
     get_val_datasets,
+    log_exception,
 )
 
 from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
 from primus.backends.megatron.data.dataset_provider import DatasetProvider
 from primus.backends.megatron.training.eval_budget import (
+    get_eval_micro_batch_size,
     EvalCoverageError,
     assert_mlperf_timestep_source,
     assert_val_worker_divisibility,
@@ -128,7 +130,6 @@ class EnergonDatasetProvider(DatasetProvider):
                 virtual_epoch_length=getattr(args, "virtual_epoch_length", 1_000_000_000),
                 max_samples_per_sequence=getattr(args, "max_samples_per_sequence", 100),
                 shuffle_buffer_size=getattr(args, "shuffle_buffer_size", None),
-                handler=lambda *args: None,  # Error handler (print errors but continue)
             )
 
             # Wrap in savable loader for checkpointing support
@@ -177,10 +178,9 @@ class EnergonDatasetProvider(DatasetProvider):
                 log_rank_0("Creating validation dataloaders...")
                 val_datasets = get_val_datasets(
                     data_path,
-                    batch_size=args.micro_batch_size,
+                    batch_size=get_eval_micro_batch_size(args),
                     task_encoder=task_encoder,
                     worker_config=val_worker_config,
-                    handler=lambda *args: None,
                 )
 
                 # Limit validation datasets to eval_iters * num_microbatches
@@ -276,11 +276,21 @@ class EnergonDatasetProvider(DatasetProvider):
         if num_workers is None:
             num_workers = getattr(args, "num_workers", 4)
 
+        # Error handling belongs here, not on get_train_dataset/get_val_datasets: those
+        # pop a handler kwarg and warn that they are ignoring it. log_exception prints the
+        # traceback, the shard provenance and the offending sample, then continues, so one
+        # bad sample cannot end a run. It is also the current default, so pinning it
+        # changes nothing today and only guards against the default being changed.
+        #
+        # Whatever goes here must be picklable by name: WorkerConfig is sent to the
+        # dataloader workers, which run under forkserver rather than fork, so a lambda
+        # would fail at loader construction.
         return WorkerConfig(
             rank=rank,
             world_size=world_size,
             num_workers=num_workers,
             data_parallel_group=data_parallel_group,
+            global_error_handler=log_exception,
         )
 
     def _get_data_path(self, args) -> str:

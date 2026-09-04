@@ -256,6 +256,38 @@ class PrimusTurboMXFP4LocalSpecProvider(LocalSpecProvider):
         return PrimusTurboLocalAttention
 
 
+class PrimusTurboMXFP6LocalSpecProvider(LocalSpecProvider):
+    """
+    Compile-friendly MXFP6 (E2M3) spec: Primus Turbo attention + MXFP6 linear layers.
+    NO TransformerEngine. NO global FP6 state in forward path.
+    Requires tensor_model_parallel_size=1, and M/N/K all multiples of 256.
+    """
+
+    def column_parallel_linear(self) -> type:
+        from .primus_turbo_mxfp6_local import MXFP6ColumnParallelLinear
+
+        return MXFP6ColumnParallelLinear
+
+    def row_parallel_linear(self) -> type:
+        from .primus_turbo_mxfp6_local import MXFP6RowParallelLinear
+
+        return MXFP6RowParallelLinear
+
+    def mlp_module(self) -> type:
+        """MLP that folds its bias-add + GELU into the MXFP6 packer.
+
+        Not part of ``BackendSpecProvider``; specs that can use it look for this method and
+        fall back to Megatron's ``MLP``. The subclass itself falls back per-module for any
+        configuration it cannot reproduce, so returning it unconditionally is safe.
+        """
+        from .primus_turbo_mxfp6_local import MXFP6FusedMLP
+
+        return MXFP6FusedMLP
+
+    def core_attention(self) -> type:
+        return PrimusTurboLocalAttention
+
+
 class PrimusTurboFloat8LocalSpecProvider(LocalSpecProvider):
     """
     Compile-friendly FP8 spec: Primus Turbo attention + FP8 linear layers.

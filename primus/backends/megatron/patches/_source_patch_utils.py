@@ -20,7 +20,7 @@ not grow feature-specific behavior.
 
 import inspect
 import textwrap
-from typing import Any, Callable
+from typing import Any, Callable, List, Tuple
 
 
 def patch_method_source(
@@ -45,6 +45,35 @@ def patch_method_source(
         AssertionError: If ``ori_code`` is not found in the method's source
             (e.g. upstream Megatron-LM changed the function unexpectedly).
     """
+    return patch_method_source_multi(cls, method_name, [(ori_code, new_code)])
+
+
+def patch_method_source_multi(
+    cls: Any,
+    method_name: str,
+    replacements: List[Tuple[str, str]],
+) -> Callable:
+    """Rewrite several fragments of ``cls.<method_name>``'s source in one pass.
+
+    Calling :func:`patch_method_source` twice on the same method does not work:
+    the function it leaves behind was produced by ``exec``, so its code object
+    has no source file and ``inspect.getsource`` raises on the second call. A
+    method needing more than one edit therefore has to make all of them before
+    the single recompile, which is what this does.
+
+    Args:
+        cls: The class owning the method.
+        method_name: Name of the method to rewrite.
+        replacements: ``(anchor, replacement)`` pairs, applied in order. Each
+            anchor must appear in the source, so a pair that upstream has
+            already made itself is an error rather than a silent no-op.
+
+    Returns:
+        The newly compiled function that was set on ``cls``.
+
+    Raises:
+        AssertionError: If any anchor is not found (e.g. upstream changed).
+    """
     # IMPORTANT: replace on the *raw* (non-dedented) source -- ori_code/new_code
     # are written using the upstream file's absolute column indentation (i.e.
     # what you see reading the file directly). Dedent must happen AFTER the
@@ -53,11 +82,13 @@ def patch_method_source(
     # post-dedent indentation is a common source of IndentationError.
     original = getattr(cls, method_name)
     source = inspect.getsource(original)
-    assert ori_code in source, (
-        f"[SourcePatch] Anchor not found in {cls.__name__}.{method_name}; "
-        f"upstream source may have changed. Anchor: {ori_code!r}"
-    )
-    modified_source = textwrap.dedent(source.replace(ori_code, new_code))
+    for ori_code, new_code in replacements:
+        assert ori_code in source, (
+            f"[SourcePatch] Anchor not found in {cls.__name__}.{method_name}; "
+            f"upstream source may have changed. Anchor: {ori_code!r}"
+        )
+        source = source.replace(ori_code, new_code)
+    modified_source = textwrap.dedent(source)
 
     # IMPORTANT: exec'ing `modified_source` as a bare top-level `def` (not
     # nested in a class body) silently loses the implicit `__class__` closure

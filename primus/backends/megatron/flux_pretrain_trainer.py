@@ -204,6 +204,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 f"CFG dropout: loaded real empty encodings from {encodings_dir}, "
                 f"t5={self.empty_t5_encodings.shape}, clip={self.empty_clip_encodings.shape}"
             )
+            self._make_empty_encodings_resident(params)
         elif getattr(params, "mock_data", False):
             image_size = getattr(getattr(params, "mock_dataset", None), "params", None)
             image_size = getattr(image_size, "image_size", 256) if image_size is not None else 256
@@ -214,6 +215,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             self.empty_t5_encodings = torch.randn(t5_seq_len, 1, context_dim)
             self.empty_clip_encodings = torch.randn(vec_in_dim)
             log_rank_0("CFG dropout: using torch.randn() empty encodings (mock_data mode)")
+            self._make_empty_encodings_resident(params)
         else:
             data_path = getattr(params, "data_path", "<not set>")
             if isinstance(data_path, list):
@@ -231,6 +233,32 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             )
 
         log_rank_0(f"CFG dropout prob: {self.cfg_dropout_prob}")
+
+    def _make_empty_encodings_resident(self, params):
+        """Move the empty encodings onto the device in their final dtype.
+
+        These are plain trainer attributes rather than registered buffers, so nothing
+        else ever moves them, and the CFG dropout branch in forward_step would
+        otherwise copy them host-to-device on every step. Under CUDA graph capture that
+        copy is fatal: an unpinned host-to-device copy inside the captured region
+        raises "Cannot copy between CPU and CUDA tensors during CUDA graph capture".
+        Landing them here in the compute dtype makes the `.to(...)` in forward_step an
+        identity.
+        """
+        if getattr(params, "bf16", False):
+            dtype = torch.bfloat16
+        elif getattr(params, "fp16", False):
+            dtype = torch.float16
+        else:
+            dtype = None
+
+        device = torch.cuda.current_device()
+        self.empty_t5_encodings = self.empty_t5_encodings.to(device=device, dtype=dtype)
+        self.empty_clip_encodings = self.empty_clip_encodings.to(device=device, dtype=dtype)
+        log_rank_0(
+            f"CFG dropout: empty encodings resident on {self.empty_t5_encodings.device} "
+            f"as {self.empty_t5_encodings.dtype}"
+        )
 
     @staticmethod
     def _discover_empty_encodings(params) -> "str | None":
@@ -547,6 +575,17 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             }
         )
 
+        # FP6/MXFP6 settings. No recipe field to validate: E2M3 with per-1x32 block
+        # scales along the contraction axis is the only MXFP6 configuration the A6W6
+        # kernels implement, so there is nothing for the YAML to choose between.
+        config_params.update(
+            {
+                "fp6": getattr(params, "fp6", None),
+                "mxfp6_backward_precision": getattr(params, "mxfp6_backward_precision", "mxfp6"),
+                "mxfp6_fused_wgrad_accum": getattr(params, "mxfp6_fused_wgrad_accum", False),
+            }
+        )
+
         # Sensitive layer configuration
         config_params.update(
             {
@@ -742,6 +781,9 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "fp4_recipe",
                 "mxfp4_backward_precision",
                 "mxfp4_gradient_stochastic_rounding",
+                "fp6",
+                "mxfp6_backward_precision",
+                "mxfp6_fused_wgrad_accum",
                 "sensitive_layers_enabled",
                 "sensitive_layers_start",
                 "sensitive_layers_end",
