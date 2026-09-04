@@ -13,12 +13,17 @@ here; the correct bundle for your cluster is often an older one.
 > **Scope.** This guide covers **making the change** to `libionic` inside the
 > container, and verifying it took effect. **Deciding which bundle you need is
 > your responsibility** — `libionic` in the container has to be compatible with
-> the `ionic` driver on the host, and only your cluster's operators know what
-> that is. See [section 3](#3-choosing-a-bundle).
+> the `ionic` driver on the host. See [section 3](#3-choosing-a-bundle), which
+> includes host commands that often answer the question directly.
 >
 > This guide does not change the host driver, and does not change how AINIC is
 > *enabled* at runtime — for that, see
 > [Multi-node networking](./multi-node-networking.md#4-ainic-amd-ai-nic).
+>
+> Sections 1–6 assume a **published** bundle, which is the normal case.
+> Unpublished bundles — internal or pre-release builds delivered as a tarball —
+> are packaged differently in several respects and need
+> [section 7](#7-installing-from-local-deb-files).
 
 ---
 
@@ -36,17 +41,22 @@ FROM ${BASE_IMAGE}
 ARG AINIC_BUNDLE_VERSION
 
 RUN set -eux; \
+    codename="$(. /etc/os-release; echo "$VERSION_CODENAME")"; \
     rm -f /etc/apt/sources.list.d/*amdainic*; \
-    add-apt-repository -y "deb https://repo.radeon.com/amdainic/pensando/ubuntu/${AINIC_BUNDLE_VERSION} noble main"; \
+    add-apt-repository -y "deb https://repo.radeon.com/amdainic/pensando/ubuntu/${AINIC_BUNDLE_VERSION} $codename main"; \
     apt update --allow-insecure-repositories; \
-    ver="$(apt-cache madison libionic1 | awk -F'|' 'NR==1{gsub(/ /,"",$2); print $2}')"; \
+    ver="$(apt-cache madison libionic1 \
+            | awk -F'|' -v b="/${AINIC_BUNDLE_VERSION} " 'index($3,b){gsub(/ /,"",$2); print $2; exit}')"; \
     test -n "$ver"; \
     echo "installing libionic $ver from ${AINIC_BUNDLE_VERSION}"; \
     apt install -y --allow-unauthenticated --allow-downgrades \
         "libionic-dev=$ver" "libionic1=$ver"; \
+    test "$(dpkg-query -W -f='${Version}' libionic1)" = "$ver"; \
+    test "$(dpkg-query -W -f='${Version}' libionic-dev)" = "$ver"; \
     rm -rf /var/lib/apt/lists/*
 
-# Fail the build rather than ship an image whose libionic silently did not move.
+# Structural check: the package is installed consistently and the provider
+# symlink the fabric actually loads points at the installed object.
 RUN set -eux; \
     dpkg-query -W -f='${Package} ${Version}\n' libionic1 libionic-dev; \
     dpkg -C; \
@@ -66,6 +76,10 @@ docker build --network host \
   -t ${BASE##*/}-ainic-$BUNDLE .
 ```
 
+`--network host` is needed when the daemon's default bridge network cannot
+resolve `repo.radeon.com`; it is harmless otherwise, so it is included by
+default.
+
 Neither build argument has a default, so omitting one fails the build rather than
 silently producing an unintended image. Tagging the image after the bundle is
 worth the small effort: the bundle is otherwise invisible without running
@@ -73,8 +87,8 @@ worth the small effort: the bundle is otherwise invisible without running
 
 **A clean build does not mean the image works on your host.** It means the
 version you asked for was installed. See [section 6](#6-verify) before trusting
-it, and [section 5](#5-how-the-rebuild-works) for why the two apparently
-boilerplate lines are load-bearing.
+it, and [section 5](#5-how-the-rebuild-works) for why the apparently boilerplate
+lines are load-bearing.
 
 ---
 
@@ -107,6 +121,13 @@ bundle.
 | `1.117.5-a-56` | `54.0-184` |
 | `1.117.1-a-63` | `54.0-149.g3304be71` |
 
+Every **published** bundle uses this `54.0-NNN` scheme and ships one `libionic`
+version for all distributions. **Unpublished bundles do not** — they use a dated
+scheme and ship one variant per distribution. If you are working from a tarball
+rather than the repository, read [section 7](#7-installing-from-local-deb-files)
+first; the difference changes both the install command and the version you should
+expect to see.
+
 ## 2. Check what you have
 
 ```bash
@@ -133,10 +154,24 @@ ls /sys/class/infiniband/          # expect ionic_* entries
 
 ## 3. Choosing a bundle
 
-**Which bundle you need is determined by your cluster, not by this guide.**
 `libionic` in the container must be compatible with the `ionic` driver on the
-host, so the version to install is whatever your cluster's operators tell you it
-is. Bring them the output of the host commands in section 2, along with:
+host. Start by asking the host, which frequently answers the question outright:
+
+```bash
+# Often reports the AINIC bundle version directly, e.g. 1.117.5-a-77
+cat /sys/class/infiniband/*/fw_ver
+
+# Same information from the network device side
+ethtool -i <ionic_netdev> | grep -i firmware
+
+# The host driver build, which tracks the bundle's linux-ionic component
+modinfo ionic | grep '^version'
+```
+
+If `fw_ver` reports a bundle version, that is the bundle the host is running and
+the natural target for the container. Where it does not, or where the host is
+managed by someone else, bring your cluster's operators the output above together
+with:
 
 ```bash
 cat /sys/class/infiniband_verbs/uverbs*/abi_version
@@ -145,23 +180,33 @@ cat /sys/class/infiniband_verbs/uverbs*/abi_version
 This is the kernel side of the uverbs ABI, the interface `libionic` has to speak.
 There is no matching number you can read out of the container to compare it
 against — a provider library declares the ABI range it supports internally, not
-as a queryable version — so this value is an input to the conversation with your
-operators, not a check you can run yourself. The authoritative test is the
-runtime one in [section 6](#6-verify).
+as a queryable version. Note also that this value is **coarse**: hosts running
+different bundles can report the same ABI, so it will not distinguish two
+candidate bundles from each other. Treat it as an input to the conversation with
+your operators, not as a selection test. The authoritative test is the runtime one
+in [section 6](#6-verify).
 
 One thing worth knowing before you pick: **newer is not automatically better.**
 Compatibility is not monotonic in the bundle version, so the correct target may
 well be older than what the image already ships.
 
 If you install a bundle the host cannot work with, the build still succeeds and
-every package-level check in section 6 still passes — the mismatch only shows up
-as an unreachable fabric at runtime.
+every package-level check in section 6 still passes. Package-level checks cannot
+see a host/container skew at all, which is why section 6 ends with a runtime
+check. Note that the converse also holds: a skewed pair is **not** guaranteed to
+fail visibly — userspace/firmware compatibility spans a range of versions rather
+than requiring an exact match, so a mismatched pair may enumerate devices and
+reach the fabric normally. Matching the bundle to the host remains the supported
+configuration, and the runtime check tells you which situation you are in.
 
 ## 4. List published bundles
 
 ```bash
-curl -s https://repo.radeon.com/amdainic/pensando/ubuntu/ | grep -oE 'href="[^"]+/"'
+curl -s https://repo.radeon.com/amdainic/pensando/ubuntu/ | grep -oE 'href="[0-9][^"]+/"'
 ```
+
+The `[0-9]` anchor keeps the page header and parent-directory links out of the
+result, so every line is a bundle.
 
 To see the exact package versions a bundle ships before committing to it:
 
@@ -176,18 +221,38 @@ and `db/`, with no `dists/` or `pool/`, and `apt` cannot install from them. The
 `Packages` query above returns nothing for these, which is the quickest way to
 spot one before a build fails.
 
+Check for this even if you are deliberately picking the newest bundle: **the
+newest entries in the listing are currently placeholders**, so choosing the
+highest version is exactly the case that hits it. A build against a placeholder
+fails at `apt update` with `404 Not Found` on the `Packages` file, before the
+bundle version is ever evaluated.
+
+This query also only works for published bundles. To read the version out of a
+local `.deb` instead, see [section 7](#7-installing-from-local-deb-files).
+
 ## 5. How the rebuild works
 
-Both of the lines in the quickstart Dockerfile that look like boilerplate are
-load-bearing, and **both failure modes are silent** — apt reports success and the
-build produces an image with the wrong library:
+Four lines in the quickstart Dockerfile look like boilerplate and are not.
 
-1. **`rm -f /etc/apt/sources.list.d/*amdainic*`** — without this, the bundle
-   already configured in the base image stays enabled, apt picks the highest
-   version across all of them, and `AINIC_BUNDLE_VERSION` becomes advisory rather
-   than binding.
+1. **Deriving `$codename` from `/etc/os-release`** — the repository path is
+   per-distribution. Hardcoding `noble` works only for a noble base image and
+   silently produces a `404` on any other, so it is read from the base image
+   instead.
 
-2. **Pinning `libionic-dev=$ver libionic1=$ver`** — an unpinned `apt install` is a
+2. **`rm -f /etc/apt/sources.list.d/*amdainic*`** — the base image already has one
+   or more AINIC repositories enabled. This matters less for the build itself than
+   for what happens afterwards: **any later `apt install` or `apt upgrade` in a
+   downstream layer can pull `libionic` back to whichever bundle offers the
+   highest version**, silently undoing the rebuild. Removing the repositories
+   makes the change durable.
+
+3. **Selecting `$ver` from the requested bundle specifically** — the
+   `index($3, "/${AINIC_BUNDLE_VERSION} ")` filter takes the version offered by
+   *that* repository rather than the highest across all of them. Without the
+   filter, a stale repository offering a higher version turns the pin into a
+   request for the version you already have.
+
+4. **Pinning `libionic-dev=$ver libionic1=$ver`** — an unpinned `apt install` is a
    no-op when the requested bundle is *older* than what the base image carries;
    apt reports `already the newest version` and exits 0. `--allow-downgrades` only
    *permits* a downgrade, it does not request one.
@@ -198,8 +263,20 @@ refuses to nominate a downgrade as the candidate at any pin priority, so for an
 older bundle it reports the *installed* version and the pin silently becomes a
 no-op again.
 
-Because of the verification stanza at the end of the Dockerfile, a build that hits
-either of these now fails instead of shipping.
+### The version assertion is what makes a silent failure loud
+
+```dockerfile
+    test "$(dpkg-query -W -f='${Version}' libionic1)" = "$ver"; \
+    test "$(dpkg-query -W -f='${Version}' libionic-dev)" = "$ver";
+```
+
+These two lines are the only thing in the Dockerfile that compares what was
+*installed* against what was *requested*. The structural checks in the second
+`RUN` — `dpkg -C`, the provider symlink, `readlink` — all pass happily on an image
+whose `libionic` never moved, because that image is perfectly self-consistent; it
+is just built against the wrong bundle. Without the assertion, an unpinned install
+that apt reported as `already the newest version` produces a successful build and
+a wrong image.
 
 ### No uninstall is required
 
@@ -210,7 +287,8 @@ This is worth stating explicitly because the library filename embeds its version
 (`libionic.so.1.1.54.0-187`), which normally suggests old files would accumulate.
 They do not: `dpkg` removes the previous versioned object and repoints both
 `libionic.so.1` and the `libibverbs` provider symlink `libionic-rdmav34.so` at the
-new one.
+new one. This holds across repeated changes, including moving out to another
+bundle and back again.
 
 ## 6. Verify
 
@@ -228,12 +306,16 @@ docker run --rm --privileged --network host --cap-add=IPC_LOCK \
 Check that the package version and the provider symlink agree, and that
 `ibv_devices` lists `ionic` devices.
 
-Two traps when automating this check:
+Three traps when automating this check:
 
 - **Treat "no `ionic` devices" as a failure, not a warning.** An image whose
   `libionic` cannot attach to the fabric passes every package-level check above.
   If the node does have AINIC hardware, an empty enumeration means the library is
   incompatible — see section 3.
+- **A successful enumeration does not mean the bundle matches the host.** A
+  container whose `libionic` comes from a different bundle than the host firmware
+  will still enumerate every device normally. Enumeration detects an absent or
+  grossly incompatible provider; it has no power to detect a version skew.
 - **Do not compare versions by parsing the `.so` filename.** The soname scheme is
   not stable across bundles, so a literal prefix match rejects images that are in
   fact correct. Check package ownership instead, which is what you actually want
@@ -248,47 +330,158 @@ Two traps when automating this check:
 
 The checks above prove the *library you asked for is installed*. They cannot prove
 it works with your host. Do not skip this step on the grounds that the build was
-clean and training runs — when the two halves are incompatible, RCCL falls back to
-TCP and the job completes normally. In one measured 2-node, 16-GPU MaxText
-comparison the fallback cost **3.2x throughput (245.6 vs 791.7 TFLOP/s/device)**
-while completing every step and converging to an identical loss. Nothing in the
-training output distinguished the two runs.
+clean and training runs — when RCCL cannot use the NIC it falls back to TCP, and
+the job still completes every step and converges to the same loss. The throughput
+cost of that fallback is severe, but nothing else in the training output
+distinguishes the two runs, so the transport has to be checked directly.
+
+Run the job with RCCL logging enabled:
 
 ```bash
-export NCCL_NET_PLUGIN=librccl-anp.so
 export NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,NET
 ```
 
-In the resulting log, confirm the ANP plugin was selected and an `ionic` device
-was chosen. A fallback to `NET/Socket` will still complete the job and report
-plausible numbers while never touching the NIC. See
+Then confirm in the log that an `ionic` device was selected and that the transport
+is not `NET/Socket`:
+
+```bash
+grep -oE 'NET/IB|NET/Socket' rank0.log | sort | uniq -c
+grep -oiE 'using network [A-Za-z-]+' rank0.log | sort -u
+grep -oE 'ionic_[0-9]+' rank0.log | sort -u
+```
+
+**Any `NET/Socket` in the selected path is a failure**, regardless of whether the
+job completes.
+
+`NCCL_NET_PLUGIN` is set for you and the expected success signature depends on
+which value is in effect, so check the one that applies:
+
+| `NCCL_NET_PLUGIN` | Expected log line | Notes |
+|---|---|---|
+| `none` | `Using network IB` | RCCL's built-in verbs path. Also emits a `NET/Plugin: Could not find: none librccl-net-none.so.` line, which is **expected and harmless**. |
+| `librccl-anp.so` | `Using network RCCL` | The external ANP plugin. May emit `Failed to find ncclCollNetPlugin_vN symbol` warnings, which are benign — the library provides a net plugin, not a collnet plugin. |
+
+Primus selects between these in
+`runner/helpers/hooks/03_enable_ainic.sh`, which sets `NCCL_NET_PLUGIN=none` on
+ROCm builds where ANP is compiled into RCCL. **Let the hook decide** — an
+explicitly exported `NCCL_NET_PLUGIN` always wins and will override it. See
 [Multi-node networking](./multi-node-networking.md#rccl-network-plugin-anp) for
-how Primus sets `NCCL_NET_PLUGIN` through `runner/helpers/hooks/03_enable_ainic.sh`.
+the full picture.
 
 ## 7. Installing from local `.deb` files
 
-For a bundle that is not published — an internal or pre-release build — place the
-two `.deb` files next to the Dockerfile and replace the install step:
+For a bundle that is not published — an internal or pre-release build — you will
+have a tarball rather than a repository. **Unpublished bundles are packaged
+differently from published ones**, and every difference below has consequences for
+the install:
 
-```dockerfile
-COPY libionic1_*.deb libionic-dev_*.deb /tmp/
-RUN dpkg -i /tmp/libionic1_*.deb /tmp/libionic-dev_*.deb && rm /tmp/*.deb
+| | Published bundle | Unpublished / pre-release build |
+|---|---|---|
+| `libionic` version scheme | `54.0-NNN` | dated, e.g. `50.0.26.08.28.001-1~ubu24.04` |
+| Variants shipped | one, for all distributions | **one per distribution** |
+| `libionic-dev` → `libionic1` | `Depends` | **`Pre-Depends`** |
+| Owner of `libionic.so` | `libionic1` | **`libionic-dev`** |
+| Inner archive naming | `rdma-core-debs.tar.xz`, real xz | `libionic-debs.tar.xz`, **gzip despite the name** |
+
+### Getting to the two `.deb` files
+
+A bundle tarball does not contain loose `.deb` files. Extract in three stages, and
+use `tar -xf` rather than `tar -xJf` throughout — the inner archives are sometimes
+gzip regardless of their `.tar.xz` name, and `-xf` detects the format either way:
+
+```bash
+tar -xf ainic_bundle_<version>.tar*                       # or .tar.gz
+tar -xf host_sw_pkg.tar*
+tar -xf host_sw_pkg/ionic_driver/deb/libionic-debs.tar.xz  # rdma-core-debs.tar.xz in older bundles
 ```
 
-`dpkg -i` applies the given version in either direction with no extra flags, so
-neither pitfall in section 5 applies.
+The result is one directory per distribution codename. **Copy only the two files
+matching your base image**, and name them explicitly — a wildcard `COPY` would
+pick up every distribution's variant and hand `dpkg` several conflicting versions:
+
+```bash
+codename=$(docker run --rm <base-image> sh -c '. /etc/os-release; echo $VERSION_CODENAME')
+cp "$codename"/libionic1_*.deb "$codename"/libionic-dev_*.deb .
+```
+
+To read the version out of the files, since the `Packages` query in section 4 does
+not apply:
+
+```bash
+dpkg-deb -f libionic1_*.deb Package Version
+```
+
+Also check the package's own prerequisites against your base image before
+building, because `dpkg -i` resolves nothing and will simply fail if they are not
+already satisfied:
+
+```bash
+dpkg-deb -f libionic1_*.deb Pre-Depends Depends
+```
+
+Pre-release builds have been seen to pin a narrow `ibverbs-providers` range, which
+a base image with a newer `rdma-core` will not satisfy.
+
+### The install step
+
+Replace **only** the first `RUN` of the quickstart Dockerfile. Keep the structural
+verification `RUN` unchanged; it applies however the packages got in. The version
+assertion from section 5 does not carry over — there is no `$ver` from a
+repository — so substitute the expected version explicitly:
+
+```dockerfile
+COPY libionic1_<version>_amd64.deb libionic-dev_<version>_amd64.deb /tmp/
+RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/*amdainic*; \
+    dpkg -i --force-overwrite /tmp/libionic1_*.deb; \
+    dpkg -i --force-overwrite /tmp/libionic-dev_*.deb; \
+    test "$(dpkg-query -W -f='${Version}' libionic1)" = "<version>"; \
+    rm /tmp/*.deb
+```
+
+Three things differ from a naive `dpkg -i` of both files at once, and all three
+are required:
+
+1. **Two separate invocations, `libionic1` first.** Pre-release builds make
+   `libionic-dev` **`Pre-Depend`** on the exact `libionic1` version. A
+   pre-dependency must be satisfied by an already-*configured* package, which a
+   single `dpkg -i` processing both files in one pass cannot do — it fails with
+   `pre-dependency problem - not installing libionic-dev`, after having already
+   replaced `libionic1`, leaving the layer half-converted.
+
+2. **`--force-overwrite`.** The bare `libionic.so` symlink belongs to `libionic1`
+   in published bundles and to `libionic-dev` in pre-release builds, and neither
+   declares a `Replaces` for the other. Changing between the two packaging styles
+   therefore fails with
+   `trying to overwrite '/usr/lib/x86_64-linux-gnu/libionic.so', which is also in package ...`.
+   The flag is only strictly needed in one direction, but it is harmless in both.
+
+3. **`rm -f /etc/apt/sources.list.d/*amdainic*`.** More important here than on the
+   apt path. An unpublished bundle exists in no repository, and its dated version
+   sorts *below* the published `54.0-NNN` scheme, so apt regards the base image's
+   bundle as an upgrade. Any later `apt install` or `apt upgrade` in a downstream
+   layer will quietly replace your bundle, and `dpkg -C` will still report a
+   consistent system afterwards. There is no diagnostic signal at all.
+
+If the bundle you want **is** published, prefer the apt path in section 5. It
+handles either direction without extra flags and needs none of the above.
 
 ## 8. Troubleshooting
 
 | Symptom | Cause |
 |---------|-------|
 | `apt install` reports `already the newest version` and nothing changes | Target bundle is older than the installed `libionic` and the version was not pinned. See section 5. |
-| Built image still has the old `libionic`, build reported success | Old bundle repositories left enabled in the base image. See section 5. |
+| Build fails on `test "$(dpkg-query ...)" = "$ver"` | Working as intended — the install did not move `libionic` to the requested version. Check the pin and the repository filter. See section 5. |
+| Built image still has the old `libionic`, build reported success | Version assertion missing from the install step. See section 5. |
+| `libionic` reverts to another version after a later `apt` command | Old bundle repositories left enabled. See section 5, and section 7 for why this is worse for unpublished bundles. |
 | `E: Packages were downgraded and -y was used without --allow-downgrades` | Expected for a downgrade; add `--allow-downgrades`. |
-| `apt update` cannot find the repository | Bundle directory is an empty placeholder, or the name is wrong. See section 4. |
+| `apt update` fails with `404 Not Found` on `Packages` | Bundle directory is an empty placeholder, the name is wrong, or the distribution codename in the repository line does not match the base image. See sections 4 and 5. |
+| `xz: (stdin): File format not recognized` while extracting a bundle | Inner archive is gzip despite its `.tar.xz` name. Use `tar -xf`. See section 7. |
+| `dpkg: pre-dependency problem - not installing libionic-dev` | Both `.deb` files given to one `dpkg -i`. Install `libionic1` first, in its own invocation. See section 7. |
+| `dpkg: trying to overwrite '.../libionic.so', which is also in package ...` | Moving between published and pre-release packaging. Add `--force-overwrite`. See section 7. |
 | `ibv_devices` lists no `ionic` device | Not AINIC hardware; the host `ionic` driver is not loaded; or `libionic` is ABI-incompatible with the host driver. See sections 2 and 3. |
 | Training runs fine but throughput is far below expectation | RCCL fell back to `NET/Socket`. The job still completes and converges normally, so check the transport rather than the loss. See section 6. |
-| The requested `libionic` is installed but the fabric is unreachable | The installed bundle is not compatible with the host. Bundle selection is a cluster question — confirm the required version with your operators, and note that it may be older than what the image shipped. See section 3. |
+| The requested `libionic` is installed but the fabric is unreachable | The installed bundle is not compatible with the host. Bundle selection is a cluster question — check `fw_ver` on the host, and note that the required version may be older than what the image shipped. See section 3. |
 
 ---
 
