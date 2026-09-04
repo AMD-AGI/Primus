@@ -82,15 +82,25 @@ class TestClampedSwiGLUFunction:
         y = (torch.randn(17, 64, device="cuda", dtype=torch.float32) * 5.0).requires_grad_(True)
         out = self.Fn.apply(y, fp8_input_store, alpha)
         torch.testing.assert_close(out, _eager_clamped_swiglu(y, alpha), atol=1e-5, rtol=1e-5)
+        (saved_input,) = out.grad_fn.saved_tensors
+        assert saved_input.dtype == (torch.float8_e4m3fn if fp8_input_store else y.dtype)
 
-    def test_backward_matches_eager_autograd(self):
+    @pytest.mark.parametrize("fp8_input_store", _fp8_input_store_cases)
+    def test_backward_matches_eager_autograd(self, fp8_input_store: bool):
         torch.manual_seed(6)
         alpha = 7.0
         y_fn = (torch.randn(5, 20, device="cuda", dtype=torch.float32) * 5.0).requires_grad_(True)
-        y_eager = y_fn.detach().clone().requires_grad_(True)
+        y_eager = y_fn.detach().clone()
+        if fp8_input_store:
+            # Backward recomputes through the FP8-quantized value forward saved
+            # for the input, not the full-precision input; mirror that lossy
+            # round trip here so the reference exercises the same path instead
+            # of silently comparing against full precision.
+            y_eager = y_eager.to(torch.float8_e4m3fn).to(torch.float32)
+        y_eager = y_eager.requires_grad_(True)
         grad_out = torch.randn(5, 10, device="cuda", dtype=torch.float32)
 
-        self.Fn.apply(y_fn, False, alpha).backward(grad_out)
+        self.Fn.apply(y_fn, fp8_input_store, alpha).backward(grad_out)
         _eager_clamped_swiglu(y_eager, alpha).backward(grad_out)
         torch.testing.assert_close(y_fn.grad, y_eager.grad, atol=1e-5, rtol=1e-5)
 
@@ -129,16 +139,22 @@ class TestClampedWeightedSwiGLUFunction:
         assert saved_input.dtype == (torch.float8_e4m3fn if fp8_input_store else y.dtype)
         assert saved_weights.dtype == weights.dtype
 
-    def test_backward_matches_eager_autograd(self):
+    @pytest.mark.parametrize("fp8_input_store", _fp8_input_store_cases)
+    def test_backward_matches_eager_autograd(self, fp8_input_store: bool):
         torch.manual_seed(8)
         alpha = 7.0
         y_fn = (torch.randn(6, 16, device="cuda", dtype=torch.float32) * 4.0).requires_grad_(True)
         w_fn = (torch.rand(6, device="cuda", dtype=torch.float32) + 0.1).requires_grad_(True)
-        y_e = y_fn.detach().clone().requires_grad_(True)
+        y_e = y_fn.detach().clone()
+        if fp8_input_store:
+            # Same fp8 round trip as the unweighted backward test above: mirror
+            # what ClampedWeightedSwiGLUFunction actually recomputes through.
+            y_e = y_e.to(torch.float8_e4m3fn).to(torch.float32)
+        y_e = y_e.requires_grad_(True)
         w_e = w_fn.detach().clone().requires_grad_(True)
         grad_out = torch.randn(6, 8, device="cuda", dtype=torch.float32)
 
-        self.Fn.apply(y_fn, w_fn, False, alpha).backward(grad_out)
+        self.Fn.apply(y_fn, w_fn, fp8_input_store, alpha).backward(grad_out)
         _eager_clamped_weighted_swiglu(y_e, w_e, alpha).backward(grad_out)
         torch.testing.assert_close(y_fn.grad, y_e.grad, atol=1e-5, rtol=1e-5)
         torch.testing.assert_close(w_fn.grad, w_e.grad, atol=1e-5, rtol=1e-5)
