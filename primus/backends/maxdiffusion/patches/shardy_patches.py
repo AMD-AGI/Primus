@@ -27,14 +27,14 @@ Every WAN and FLUX config Primus ships sets ``attention: cudnn_flash_te``, so
 this is on the path of every MaxDiffusion run.
 
 This was previously repaired by a ``sed`` in
-``examples/maxdiffusion/setup_maxdiffusion_env.sh`` (step 4c) that rewrote both
-call sites in the vendored submodule. That fix only survives while the submodule
-working tree keeps the edit -- a ``git restore``, ``git checkout`` or
-``submodule update`` in ``third_party/maxdiffusion`` reverts it -- and the script
-cannot re-apply it, because it exits early whenever MaxDiffusion is already
-importable, which it is once installed editable. Guarding the config setter here
-keeps the behavior in tracked, reviewable code and independent of the submodule's
-working-tree state.
+``examples/maxdiffusion/setup_maxdiffusion_env.sh`` that rewrote both call sites
+in the vendored submodule. That fix only survived while the submodule working
+tree kept the edit -- a ``git restore``, ``git checkout`` or ``submodule update``
+in ``third_party/maxdiffusion`` reverted it -- and the script could not re-apply
+it, because it exits early whenever MaxDiffusion is already importable (true on
+the MaxText image, which ships its own copy at ``/workspace/maxdiffusion``).
+Guarding the config setter here keeps the behavior in tracked, reviewable code
+and independent of the submodule's working-tree state.
 """
 
 from primus.core.patches import PatchContext, register_patch
