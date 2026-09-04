@@ -14,7 +14,17 @@ handles, ...). Workers forked in that state typically SIGSEGV.
 
 This patch monkey-patches ``DataLoader.__init__`` during the ``setup``
 phase and injects ``multiprocessing_context=<value>`` when the caller has
-``num_workers > 0`` and did not pass a context of its own.
+``num_workers > 0`` and either did not pass a context of its own or asked
+for ``fork``.
+
+Overriding an explicit ``fork`` matters because the callers that most need
+this do not leave the choice open: Megatron-Energon hardcodes
+``multiprocessing_context = "fork"`` in both of its dataloader classes, so
+only injecting into callers that passed nothing would skip exactly the
+dataloader that segfaults. A caller that deliberately asked for ``spawn``
+or ``forkserver`` is left alone, and so is one that passed the context
+positionally, where replacing it would collide with the positional
+argument.
 
 Config (YAML module param, mirrors PyTorch's DataLoader argument):
     multiprocessing_context: "forkserver" | "spawn" | "fork" | null
@@ -55,6 +65,26 @@ def _preload_forkserver_torch() -> None:
         pass
 
 
+def _caller_context_is_fork(value) -> bool:
+    """True when the caller's ``multiprocessing_context`` resolves to fork.
+
+    ``None`` counts: it asks for the default, and the default on Linux is fork,
+    which is the case this patch exists to fix.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value == "fork"
+    get_start_method = getattr(value, "get_start_method", None)
+    if callable(get_start_method):
+        try:
+            return get_start_method() == "fork"
+        except Exception:
+            return False
+    # Some other context object we cannot interpret; assume it was deliberate.
+    return False
+
+
 def _install_dataloader_monkeypatch(mp_context) -> None:
     """Patch ``DataLoader.__init__`` to inject ``multiprocessing_context``
     when the caller has ``num_workers > 0`` and did not set one."""
@@ -72,12 +102,19 @@ def _install_dataloader_monkeypatch(mp_context) -> None:
     def patched_init(self, *args, **kwargs):
         # Resolve args against the real signature to stay version-agnostic.
         bound = sig.bind_partial(self, *args, **kwargs)
-        if (
-            int(bound.arguments.get("num_workers", 0)) > 0
-            and "multiprocessing_context" not in bound.arguments
-        ):
-            kwargs["multiprocessing_context"] = mp_context
-            log_rank_0(f"Setting DataLoader multiprocessing_context='{mp_context}'.")
+        if int(bound.arguments.get("num_workers", 0)) > 0:
+            if "multiprocessing_context" not in bound.arguments:
+                kwargs["multiprocessing_context"] = mp_context
+                log_rank_0(f"Setting DataLoader multiprocessing_context='{mp_context}'.")
+            elif "multiprocessing_context" in kwargs and _caller_context_is_fork(
+                kwargs["multiprocessing_context"]
+            ):
+                requested = kwargs["multiprocessing_context"]
+                kwargs["multiprocessing_context"] = mp_context
+                log_rank_0(
+                    f"Overriding DataLoader multiprocessing_context={requested!r} "
+                    f"with '{mp_context}'."
+                )
         return original_init(self, *args, **kwargs)
 
     setattr(patched_init, _PATCHED_ATTR, True)
@@ -92,7 +129,8 @@ def _install_dataloader_monkeypatch(mp_context) -> None:
     description=(
         "Set DataLoader.multiprocessing_context from the "
         "'multiprocessing_context' module param to avoid SIGSEGV caused by "
-        "fork()-hostile native state (RDMA MRs, HIP runtime, IPC handles)."
+        "fork()-hostile native state (RDMA MRs, HIP runtime, IPC handles). "
+        "Also overrides callers that hardcode fork, such as Energon."
     ),
     condition=_enabled,
 )
