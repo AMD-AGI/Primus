@@ -11,6 +11,7 @@ TransformerConfig to include diffusion-specific parameters.
 from dataclasses import dataclass
 from typing import Optional
 
+import torch
 from megatron.core.enums import Fp8Recipe
 from megatron.core.transformer.transformer_config import TransformerConfig
 
@@ -38,6 +39,12 @@ class BaseDiffusionConfig(TransformerConfig):
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
         sensitive_layers_end: Number of sensitive layers at end (default: 0)
         sensitive_layer_precision: Precision for sensitive layers (default: 'bf16')
+        outer_sensitive_layers_start: Number of outermost starting layers that
+            override the sensitive-layer precision (default: 0)
+        outer_sensitive_layers_end: Number of outermost ending layers that
+            override the sensitive-layer precision (default: 0)
+        outer_sensitive_layer_precision: Precision for the outer override
+            (default: 'bf16')
 
     Inherited from TransformerConfig:
         hidden_size: Hidden dimension size
@@ -82,6 +89,9 @@ class BaseDiffusionConfig(TransformerConfig):
     sensitive_layers_start: int = 0
     sensitive_layers_end: int = 0
     sensitive_layer_precision: str = "bf16"  # "bf16", "tw_fp8", or "mxfp8" (future)
+    outer_sensitive_layers_start: int = 0
+    outer_sensitive_layers_end: int = 0
+    outer_sensitive_layer_precision: str = "bf16"
 
     def __post_init__(self):
         """Post-initialization processing."""
@@ -97,6 +107,25 @@ class BaseDiffusionConfig(TransformerConfig):
                 "Set pipeline_model_parallel_size=1."
             )
 
+        layer_count_fields = (
+            "sensitive_layers_start",
+            "sensitive_layers_end",
+            "outer_sensitive_layers_start",
+            "outer_sensitive_layers_end",
+        )
+        for field_name in layer_count_fields:
+            value = getattr(self, field_name)
+            if type(value) is not int:
+                raise ValueError(f"{field_name} must be an integer, got {value!r}")
+            if value < 0:
+                raise ValueError(f"{field_name} must be non-negative, got {value}")
+
+        sensitive_count = self.sensitive_layers_start + self.sensitive_layers_end
+        outer_sensitive_count = self.outer_sensitive_layers_start + self.outer_sensitive_layers_end
+        if (sensitive_count or outer_sensitive_count) and not self.sensitive_layers_enabled:
+            raise ValueError("sensitive layer counts require sensitive_layers_enabled=True")
+
+        active_precisions = set()
         if self.sensitive_layers_enabled:
             if self.num_layers <= 1:
                 raise ValueError(
@@ -112,17 +141,106 @@ class BaseDiffusionConfig(TransformerConfig):
                     f"sensitive_layers_end ({self.sensitive_layers_end}) exceeds "
                     f"num_layers ({self.num_layers})"
                 )
+            if self.outer_sensitive_layers_start > self.sensitive_layers_start:
+                raise ValueError(
+                    "outer_sensitive_layers_start "
+                    f"({self.outer_sensitive_layers_start}) exceeds "
+                    f"sensitive_layers_start ({self.sensitive_layers_start})"
+                )
+            if self.outer_sensitive_layers_end > self.sensitive_layers_end:
+                raise ValueError(
+                    "outer_sensitive_layers_end "
+                    f"({self.outer_sensitive_layers_end}) exceeds "
+                    f"sensitive_layers_end ({self.sensitive_layers_end})"
+                )
+
+            if self.transformer_impl != "local":
+                raise ValueError(
+                    "sensitive layer routing requires transformer_impl='local'; "
+                    f"got {self.transformer_impl!r}"
+                )
+            if self.fp4 != "mxfp4" or self.fp4_recipe != "mxfp4":
+                raise ValueError(
+                    "sensitive layer routing requires fp4='mxfp4' and "
+                    f"fp4_recipe='mxfp4'; got fp4={self.fp4!r}, "
+                    f"fp4_recipe={self.fp4_recipe!r}"
+                )
+
+            inner_sensitive_count = (
+                self.sensitive_layers_start + self.sensitive_layers_end - outer_sensitive_count
+            )
+            if inner_sensitive_count > 0:
+                active_precisions.add(self.sensitive_layer_precision)
+            if outer_sensitive_count > 0:
+                active_precisions.add(self.outer_sensitive_layer_precision)
+            unsupported_precisions = active_precisions - {"bf16", "tw_fp8"}
+            if unsupported_precisions:
+                raise ValueError(
+                    "sensitive layer precision must be 'bf16' or 'tw_fp8'; "
+                    f"got {sorted(unsupported_precisions)!r}"
+                )
+
+            if outer_sensitive_count > 0:
+                collapsed_start = (
+                    self.outer_sensitive_layers_start > 0
+                    and self.outer_sensitive_layers_start == self.sensitive_layers_start
+                )
+                collapsed_end = (
+                    self.outer_sensitive_layers_end > 0
+                    and self.outer_sensitive_layers_end == self.sensitive_layers_end
+                )
+                if collapsed_start or collapsed_end:
+                    raise ValueError(
+                        "each graduated outer boundary requires at least one "
+                        "inner sensitive layer on the same side"
+                    )
+                if (
+                    self.sensitive_layer_precision != "tw_fp8"
+                    or self.outer_sensitive_layer_precision != "bf16"
+                ):
+                    raise ValueError(
+                        "graduated sensitive routing requires inner precision "
+                        "'tw_fp8' and outer precision 'bf16'"
+                    )
+
+            if "tw_fp8" in active_precisions:
+                if self.fp8 not in (None, "e4m3"):
+                    raise ValueError(
+                        "tw_fp8 sensitive layers require fp8=None or fp8='e4m3'; " f"got {self.fp8!r}"
+                    )
+                if self.fp8_recipe not in (
+                    None,
+                    Fp8Recipe.delayed,
+                    Fp8Recipe.tensorwise,
+                ):
+                    raise ValueError(
+                        "tw_fp8 sensitive layers require fp8_recipe='tensorwise' "
+                        f"or the deferred 'delayed' default; got {self.fp8_recipe!r}"
+                    )
+            if "bf16" in active_precisions and (
+                not self.bf16 or self.fp16 or self.params_dtype != torch.bfloat16
+            ):
+                raise ValueError(
+                    "bf16 sensitive layers require bf16=True, fp16=False, "
+                    f"and params_dtype=torch.bfloat16; got bf16={self.bf16!r}, "
+                    f"fp16={self.fp16!r}, params_dtype={self.params_dtype!r}"
+                )
+
+            # The FP4 context uses these legacy fields to exclude the complete
+            # heterogeneous boundary from MXFP4. The Flux layer spec chooses
+            # BF16 versus FP8 within that excluded boundary.
             self.first_last_layers_bf16 = True
             self.num_layers_at_start_in_bf16 = self.sensitive_layers_start
             self.num_layers_at_end_in_bf16 = self.sensitive_layers_end
 
-        if self.sensitive_layers_enabled and self.sensitive_layer_precision == "tw_fp8":
-            _deferred_fp8 = "e4m3" if self.fp8 is None else None
-            _deferred_fp8_recipe = (
-                Fp8Recipe.tensorwise
-                if self.fp8_recipe is None or self.fp8_recipe == Fp8Recipe.delayed
-                else None
-            )
+        uses_tw_fp8 = self.sensitive_layers_enabled and "tw_fp8" in active_precisions
+        if uses_tw_fp8:
+            # Megatron rejects global FP4+FP8 before it knows these formats are
+            # assigned to disjoint layers. Hide validated FP8 settings during
+            # parent validation, then restore the canonical local FP8 state.
+            _deferred_fp8 = "e4m3"
+            _deferred_fp8_recipe = Fp8Recipe.tensorwise
+            self.fp8 = None
         else:
             _deferred_fp8 = None
             _deferred_fp8_recipe = None
