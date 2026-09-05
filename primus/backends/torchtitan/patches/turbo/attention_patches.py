@@ -15,8 +15,22 @@ The original logic lives inside ``TorchTitanPretrainTrainer``. It is now also
 expressed as a backend patch so it can be managed via the Primus patch system.
 """
 
-from primus.core.patches import PatchContext, get_param, register_patch
+from primus.backends.torchtitan.patches.turbo.attention_safety import (
+    requires_ck_mla_backward,
+    should_use_turbo_attention,
+)
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+
+def _can_patch_turbo_attention(ctx: PatchContext) -> bool:
+    args = get_args(ctx)
+    if requires_ck_mla_backward(ctx.model_name, args.primus_turbo):
+        log_rank_0(
+            "[Patch:torchtitan.primus_turbo.turbo_attention] "
+            "Using Turbo attention with CK MLA backward on gfx942."
+        )
+    return should_use_turbo_attention(ctx.model_name, args.primus_turbo)
 
 
 @register_patch(
@@ -24,10 +38,7 @@ from primus.core.utils.module_utils import log_rank_0
     backend="torchtitan",
     phase="setup",
     description="Use Primus-Turbo Attention kernels for supported models",
-    condition=lambda ctx: (
-        get_param(ctx, "primus_turbo.enable_primus_turbo", False)
-        and get_param(ctx, "primus_turbo.use_turbo_attention", False)
-    ),
+    condition=_can_patch_turbo_attention,
 )
 def patch_turbo_attention(ctx: PatchContext) -> None:
     """

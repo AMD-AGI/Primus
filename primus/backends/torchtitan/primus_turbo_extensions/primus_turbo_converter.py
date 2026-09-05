@@ -16,6 +16,10 @@ from torchtitan.protocols.model_converter import (
     register_model_converter,
 )
 
+from primus.backends.torchtitan.patches.turbo.attention_safety import (
+    should_use_turbo_attention,
+)
+
 
 def replace_turbo_attention_modules(model: torch.nn.Module, fp8_config):
     from primus_turbo.pytorch.modules import TurboAttention  # TODO: import Check
@@ -33,13 +37,20 @@ def replace_turbo_attention_modules(model: torch.nn.Module, fp8_config):
 
 class PrimusTubroConverter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
+        self.primus_turbo_config = job_config.primus_turbo
+        self.enabled = should_use_turbo_attention(
+            job_config.model,
+            self.primus_turbo_config,
+        )
+        self.fp8_config = None
+        if not self.enabled:
+            return
+
         from primus_turbo.pytorch.core.low_precision import (
             Float8QuantConfig,
             ScalingGranularity,
         )
 
-        self.enabled = True
-        self.primus_turbo_config = job_config.primus_turbo
         self.fp8_config = (
             Float8QuantConfig(
                 granularity=ScalingGranularity.BLOCKWISE,
