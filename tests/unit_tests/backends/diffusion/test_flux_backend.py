@@ -407,6 +407,21 @@ def test_flux_precomputed_processor_pins_t5_by_default(monkeypatch):
     t5.pin_memory.assert_called_once_with()
 
 
+def test_flux_precomputed_processor_builds_mlperf_synthetic_batches():
+    train = FluxPrecomputedProcessor.make_synthetic_batch(2)
+    evaluation = FluxPrecomputedProcessor.make_synthetic_batch(
+        3, include_timestep=True
+    )
+
+    assert train["t5_encodings"].shape == (2, 256, 4096)
+    assert train["clip_encodings"].shape == (2, 768)
+    assert train["mean"].shape == (2, 16, 32, 32)
+    assert train["logvar"].shape == (2, 16, 32, 32)
+    assert "timestep" not in train
+    assert evaluation["timestep"].shape == (3,)
+    assert evaluation["timestep"].dtype == torch.int64
+
+
 def test_flux_precomputed_processor_stacks_and_drops_empty_encodings(tmp_path):
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()

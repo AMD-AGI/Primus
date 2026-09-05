@@ -280,6 +280,20 @@ class FluxPrecomputedProcessor:
             collated[key] = torch.stack([_to_tensor(sample[key]) for sample in batch], dim=0)
         return collated
 
+    @staticmethod
+    def make_synthetic_batch(
+        batch_size: int, *, include_timestep: bool = False
+    ) -> dict[str, torch.Tensor]:
+        batch = {
+            "t5_encodings": torch.zeros(batch_size, 256, 4096, dtype=torch.bfloat16),
+            "clip_encodings": torch.zeros(batch_size, 768, dtype=torch.bfloat16),
+            "mean": torch.zeros(batch_size, 16, 32, 32, dtype=torch.bfloat16),
+            "logvar": torch.zeros(batch_size, 16, 32, 32, dtype=torch.bfloat16),
+        }
+        if include_timestep:
+            batch["timestep"] = torch.zeros(batch_size, dtype=torch.int64)
+        return batch
+
     def prepare_batch(
         self, *, batch: Any, device: torch.device, dtype: torch.dtype
     ) -> dict[str, torch.Tensor]:

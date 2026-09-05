@@ -95,7 +95,17 @@ Evaluation throughput can be tuned independently with `EVAL_BATCH_SIZE`,
 `EVAL_DATALOADER_NUM_WORKERS`, and `EVAL_DATALOADER_PREFETCH_FACTOR`; their
 defaults are the training local batch size, the training worker count (`4`),
 and `4`. These knobs do not change the required full 29,696-sample evaluation
-or its 262,144-training-sample cadence.
+or its 262,144-training-sample cadence. MLPerf graph warmup uses synthetic
+fixed-shape tensors, so no training or evaluation sample is read before
+`RUN_START`.
+
+For cached max-autotune runs, first run `prewarm_inductor_cache.py`, then export
+one exact cache archive per launcher node with
+`TORCHINDUCTOR_CACHE_EXPORT=/output/cache-node%r.tar.zst`. Reuse those archives
+with `TORCHINDUCTOR_CACHE_SEED=/output/cache-node%r.tar.zst`; `%r` resolves to
+`NODE_RANK`. Rebuild them whenever the image, compiler stack, model graph, batch
+shapes, or compile options change.
+
 The same launcher supports Crusoe and DCCS; only the Slurm submission options
 and host network settings differ. On DCCS, use
 `NCCL_SOCKET_IFNAME=fenic GLOO_SOCKET_IFNAME=fenic`. The launcher uses the
@@ -115,6 +125,7 @@ examples/mlperf/flux1/
 ├── config_2n_gbs1024.sh
 ├── config_4n_gbs1024.sh
 ├── flux.1_schnell_t2i-pretrain.yaml
+├── prewarm_inductor_cache.py
 ├── luanch-multi-nodes.md
 ├── requirements.txt
 ├── run_with_docker.sh

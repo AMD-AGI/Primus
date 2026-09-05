@@ -71,6 +71,7 @@ env_names=(
     DATALOADER_NUM_WORKERS EVAL_DATALOADER_NUM_WORKERS EVAL_DATALOADER_PREFETCH_FACTOR
     GRADIENT_CHECKPOINTING GRADIENT_CHECKPOINTING_RATIO COMPILE_TRANSFORMER_BLOCKS COMPILE_STRATEGY
     COMPILE_BACKEND COMPILE_FULLGRAPH COMPILE_DYNAMIC COMPILE_OUTPUT_HEAD TORCH_COMPILE_MODE
+    TORCHINDUCTOR_CACHE_DIR TORCHINDUCTOR_CACHE_SEED TORCHINDUCTOR_CACHE_EXPORT
     FSDP2_RESHARD_AFTER_FORWARD FSDP2_REDUCE_DTYPE
     PIN_FLUX_T5_STACK
     FLUX_PERFORMANCE_MODE SAVE_STEPS SAVE_STRATEGY CHECKPOINT_KEEP_LATEST
@@ -111,9 +112,36 @@ exec docker run --rm --init --privileged \
     "$DOCKER_IMAGE" bash -lc '
         set -euo pipefail
         mkdir -p "$OUTPUT_DIR"
+        if [[ -n "${TORCHINDUCTOR_CACHE_SEED:-}" ]]; then
+            export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor-cache
+            cache_seed=${TORCHINDUCTOR_CACHE_SEED//%r/$NODE_RANK}
+            rm -rf "$TORCHINDUCTOR_CACHE_DIR"
+            mkdir -p "$TORCHINDUCTOR_CACHE_DIR"
+            if [[ -d "$cache_seed" ]]; then
+                cp -a "$cache_seed/." "$TORCHINDUCTOR_CACHE_DIR/"
+            elif [[ -f "$cache_seed" ]]; then
+                tar --zstd -xf "$cache_seed" -C "$TORCHINDUCTOR_CACHE_DIR"
+            else
+                echo "Missing Inductor cache seed: $cache_seed" >&2
+                exit 1
+            fi
+            echo "[flux1] loaded Inductor cache seed $cache_seed into $TORCHINDUCTOR_CACHE_DIR"
+        fi
         if [[ "$MLPERF_CLEAR_CACHES" == "true" ]]; then
             sync
             echo 3 > /proc/sys/vm/drop_caches
         fi
         ./primus-cli direct -- train pretrain --config "$CONFIG"
+        if [[ -n "${TORCHINDUCTOR_CACHE_EXPORT:-}" && ( "$NODE_RANK" == "0" || "$TORCHINDUCTOR_CACHE_EXPORT" == *%r* ) ]]; then
+            [[ -n "${TORCHINDUCTOR_CACHE_DIR:-}" ]] || {
+                echo "TORCHINDUCTOR_CACHE_EXPORT requires a cache directory or seed" >&2
+                exit 1
+            }
+            cache_export=${TORCHINDUCTOR_CACHE_EXPORT//%r/$NODE_RANK}
+            tmp_export="$cache_export.tmp.$$"
+            rm -f "$tmp_export"
+            tar --zstd -cf "$tmp_export" -C "$TORCHINDUCTOR_CACHE_DIR" .
+            mv "$tmp_export" "$cache_export"
+            echo "[flux1] exported Inductor cache to $cache_export"
+        fi
     '
