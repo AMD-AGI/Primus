@@ -19,6 +19,7 @@ Reference:
     - Flux Paper: "Flux: A Scalable Diffusion Model"
 """
 
+import os
 from typing import Tuple
 
 import torch
@@ -43,6 +44,11 @@ from torch.library import triton_op, wrap_triton
 # ---------------------------------------------------------------------------
 
 _custom_op = torch.library.custom_op
+
+# Run the LN-modulate backward as one pass over the activations instead of two. See the
+# block above _fused_ln_modulate_bwd_single_pass_kernel. Off by default until the
+# end-to-end number is confirmed; it is numerically equivalent, not an approximation.
+_LN_MOD_SINGLE_PASS_BWD = os.environ.get("MXFP6_FUSED_LN_MOD_BWD", "0") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +568,177 @@ def _fused_ln_modulate_bwd_dx_kernel(
     tl.store(DX_ptr + x_off, d_x.to(OUT_DTYPE), mask=mask)
 
 
+# ---------------------------------------------------------------------------
+# Single-pass backward.
+#
+# The two kernels above both stream grad_output[S,B,H] and x[S,B,H] out of HBM, and in
+# the MXFP6 trace that traffic costs far more than the output it produces. They were
+# split because their reductions are orthogonal -- dscale/dshift reduce
+# over S, dx reduces over H -- but a program that owns one batch element, a slice of S,
+# and the *whole* of H can do both: the H reduction inside its loop, the S reduction
+# across it. That reads each activation once.
+#
+# Holding all of H is the constraint, and it is why the grid splits S rather than H. One
+# program per batch element would be the simple version and cannot win: B is 64, which
+# leaves most of the machine idle. Splitting S NS ways brings it to B*NS programs and
+# leaves a per-slice partial for the reduction below, the same shape as the weight
+# gradient in the fused QK norm+RoPE backward.
+#
+# Measured against the two-kernel path at both production shapes, the single pass is
+# substantially faster and lands much closer to the bandwidth roof.
+# ---------------------------------------------------------------------------
+
+# S is split this many ways. 8 was the best of {4, 8, 16, 32} at both production shapes;
+# 4 leaves the machine short of programs and 16 shortens each program's run below the
+# point where the strided-S loop keeps its loads in flight.
+_LN_MOD_BWD_NS = 8
+
+# Two fp32 accumulators of BLOCK_H live in registers for the whole kernel, so the tile
+# cannot grow the way the two-kernel path's could. 4096 covers Flux's H=3072; anything
+# wider falls back rather than spilling.
+_LN_MOD_BWD_MAX_BLOCK_H = 4096
+
+
+@triton.jit
+def _fused_ln_modulate_bwd_single_pass_kernel(
+    Grad_ptr,
+    X_ptr,
+    Mean_ptr,
+    Rstd_ptr,
+    Scale_ptr,
+    DX_ptr,
+    DScaleP_ptr,
+    DShiftP_ptr,
+    S,
+    B,
+    H,
+    stride_g_sb,
+    stride_x_sb,
+    stride_sc_b,
+    BLOCK_H: tl.constexpr,
+    NS: tl.constexpr,
+    OUT_DTYPE: tl.constexpr,
+):
+    b_idx = tl.program_id(0)
+    s_blk = tl.program_id(1)
+
+    offs_h = tl.arange(0, BLOCK_H)
+    mask = offs_h < H
+    inv_H = 1.0 / H
+
+    scale_val = tl.load(Scale_ptr + b_idx * stride_sc_b + offs_h, mask=mask).to(tl.float32)
+    one_plus_scale = 1.0 + scale_val
+    acc_dscale = tl.zeros([BLOCK_H], dtype=tl.float32)
+    acc_dshift = tl.zeros([BLOCK_H], dtype=tl.float32)
+
+    # Strided rather than blocked over S, so that programs running at the same time are
+    # reading neighbouring rows.
+    for s_idx in tl.range(s_blk, S, NS):
+        sb_idx = s_idx * B + b_idx
+        g_off = sb_idx * stride_g_sb + offs_h
+        x_off = sb_idx * stride_x_sb + offs_h
+
+        g = tl.load(Grad_ptr + g_off, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(X_ptr + x_off, mask=mask, other=0.0).to(tl.float32)
+        mean = tl.load(Mean_ptr + sb_idx)
+        rstd = tl.load(Rstd_ptr + sb_idx)
+
+        x_hat = tl.where(mask, (x - mean) * rstd, 0.0)
+        d_x_hat = tl.where(mask, g * one_plus_scale, 0.0)
+        c1 = tl.sum(x_hat * d_x_hat, axis=0) * inv_H
+        c2 = tl.sum(d_x_hat, axis=0) * inv_H
+        d_x = rstd * (d_x_hat - c2 - x_hat * c1)
+        tl.store(DX_ptr + x_off, d_x.to(OUT_DTYPE), mask=mask)
+
+        acc_dscale += g * x_hat
+        acc_dshift += tl.where(mask, g, 0.0)
+
+    p_off = (b_idx * NS + s_blk) * H + offs_h
+    tl.store(DScaleP_ptr + p_off, acc_dscale, mask=mask)
+    tl.store(DShiftP_ptr + p_off, acc_dshift, mask=mask)
+
+
+@triton.jit
+def _fused_ln_modulate_bwd_reduce_partials_kernel(
+    DScaleP_ptr,
+    DShiftP_ptr,
+    DScale_ptr,
+    DShift_ptr,
+    H,
+    NS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    OUT_DTYPE: tl.constexpr,
+):
+    b_idx = tl.program_id(0)
+    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < H
+    acc_scale = tl.zeros([BLOCK], dtype=tl.float32)
+    acc_shift = tl.zeros([BLOCK], dtype=tl.float32)
+    # Fixed trip count in a fixed order, so the sum is as reproducible as the sequential
+    # loop the two-kernel path used.
+    for i in tl.static_range(NS):
+        base = (b_idx * NS + i) * H + offs
+        acc_scale += tl.load(DScaleP_ptr + base, mask=mask, other=0.0)
+        acc_shift += tl.load(DShiftP_ptr + base, mask=mask, other=0.0)
+    tl.store(DScale_ptr + b_idx * H + offs, acc_scale.to(OUT_DTYPE), mask=mask)
+    tl.store(DShift_ptr + b_idx * H + offs, acc_shift.to(OUT_DTYPE), mask=mask)
+
+
+def _ln_modulate_bwd_single_pass(
+    single_pass_kernel, reduce_kernel, grad_output, x, mean, rstd, scale, out_dtype
+):
+    """Launch the pair. Kernels are passed in so both the opaque and the triton_op
+    registration can share this, one handing over the raw kernels and the other the
+    wrap_triton ones."""
+    S, B, H = x.shape
+    dx = torch.empty_like(x)
+    dscale = torch.empty_like(scale)
+    dshift = torch.empty_like(scale)
+    ns = _LN_MOD_BWD_NS
+    # One allocation for both partials; they are consumed together.
+    partials = torch.empty(2, B * ns * H, device=x.device, dtype=torch.float32)
+    single_pass_kernel[(B, ns)](
+        grad_output,
+        x,
+        mean,
+        rstd,
+        scale,
+        dx,
+        partials[0],
+        partials[1],
+        S,
+        B,
+        H,
+        grad_output.stride(1),
+        x.stride(1),
+        scale.stride(0),
+        BLOCK_H=triton.next_power_of_2(H),
+        NS=ns,
+        OUT_DTYPE=out_dtype,
+        num_warps=4,
+    )
+    reduce_kernel[(B, triton.cdiv(H, 1024))](
+        partials[0],
+        partials[1],
+        dscale,
+        dshift,
+        H,
+        NS=ns,
+        BLOCK=1024,
+        OUT_DTYPE=out_dtype,
+    )
+    return dx, dscale, dshift
+
+
+def _ln_modulate_bwd_can_single_pass(x, scale) -> bool:
+    return (
+        _LN_MOD_SINGLE_PASS_BWD
+        and x.dim() == 3
+        and scale.dim() == 2
+        and triton.next_power_of_2(x.shape[-1]) <= _LN_MOD_BWD_MAX_BLOCK_H
+    )
+
+
 @_custom_op("primus::fused_ln_modulate", mutates_args=(), device_types="cuda")
 def _opaque_fused_ln_modulate(
     x: torch.Tensor,
@@ -648,6 +825,17 @@ def _opaque_fused_ln_modulate_backward_op(
     dshift = torch.empty_like(scale)
     BLOCK_H = triton.next_power_of_2(H)
     out_dtype = _TORCH_TO_TRITON_DTYPE[x.dtype]
+    if _ln_modulate_bwd_can_single_pass(x, scale):
+        return _ln_modulate_bwd_single_pass(
+            _fused_ln_modulate_bwd_single_pass_kernel,
+            _fused_ln_modulate_bwd_reduce_partials_kernel,
+            grad_output,
+            x,
+            mean,
+            rstd,
+            scale,
+            out_dtype,
+        )
     XBLOCK, RBLOCK = 256, 8
     _fused_ln_modulate_bwd_dscale_dshift_kernel[(triton.cdiv(B * H, XBLOCK),)](
         grad_output,
@@ -807,6 +995,17 @@ def _triton_fused_ln_modulate_backward_op(
     dshift = torch.empty_like(scale)
     BLOCK_H = triton.next_power_of_2(H)
     out_dtype = _TORCH_TO_TRITON_DTYPE[x.dtype]
+    if _ln_modulate_bwd_can_single_pass(x, scale):
+        return _ln_modulate_bwd_single_pass(
+            wrap_triton(_fused_ln_modulate_bwd_single_pass_kernel),
+            wrap_triton(_fused_ln_modulate_bwd_reduce_partials_kernel),
+            grad_output,
+            x,
+            mean,
+            rstd,
+            scale,
+            out_dtype,
+        )
     XBLOCK, RBLOCK = 256, 8
     wrap_triton(_fused_ln_modulate_bwd_dscale_dshift_kernel)[(triton.cdiv(B * H, XBLOCK),)](
         grad_output,
