@@ -48,7 +48,10 @@ from primus_turbo.pytorch.core.low_precision import (
     MXFP6_PROLOGUE_IDENTITY,
     ScalingGranularity,
 )
-from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import gemm_fp6_impl, gemm_fp6_out_impl
+from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import (
+    gemm_fp6_impl,
+    gemm_fp6_out_impl,
+)
 from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
 from primus_turbo.pytorch.kernels.quantization.mxfp6_pack import check_mxfp6_support
 
@@ -59,6 +62,9 @@ _GRAN_VALUE = ScalingGranularity.MX_BLOCKWISE.value
 # Registered by Primus-Turbo with a pure-arithmetic fake, so it is safe to trace.
 _quantize_mxfp6_dual = torch.ops.primus_turbo.quantize_mxfp6_dual_impl
 _quantize_mxfp6_fused_dual = torch.ops.primus_turbo.quantize_mxfp6_fused_dual_impl
+# Row-only packing, for forward passes that will never have a backward. axis=1 packs along
+# the last dimension, matching the row half of the dual packer.
+_quantize_mxfp6_row = torch.ops.primus_turbo.quantize_mxfp6_impl
 
 
 def _wgrad_into_main_grad(weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m):
@@ -155,6 +161,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
         fp8_gran_value,
         fp8_backend_value,
         fuse_wgrad_accum,
+        grad_enabled,
     ):
         out_dtype = input.dtype
         orig_shape = input.shape
@@ -163,8 +170,23 @@ class MXFP6LinearFunction(torch.autograd.Function):
         m, k = input_2d.shape
         n = weight.shape[0]
 
-        a_row, a_row_scale, a_col, a_col_scale = _quantize_mxfp6_dual(input_2d)
-        b_row, b_row_scale, b_col, b_col_scale = _quantize_mxfp6_dual(weight)
+        # The column blobs are backward's operands and nothing else reads them, so a forward
+        # with no backward behind it should not pay for them. Eval is entirely such a region,
+        # and it is where packing hurts most, because one pack no longer amortizes across
+        # fwd/dgrad/wgrad. Row-only packing is measurably cheaper than dual across the
+        # Flux shapes.
+        #
+        # `grad_enabled` has to be sampled by the caller. Inside forward, PyTorch has already
+        # cleared grad mode, so torch.is_grad_enabled() reads False even in training, and
+        # ctx.needs_input_grad reads True even under no_grad; neither distinguishes the two.
+        # Getting this wrong fails loudly in backward on a None operand rather than silently.
+        if grad_enabled:
+            a_row, a_row_scale, a_col, a_col_scale = _quantize_mxfp6_dual(input_2d)
+            b_row, b_row_scale, b_col, b_col_scale = _quantize_mxfp6_dual(weight)
+        else:
+            a_row, a_row_scale = _quantize_mxfp6_row(input_2d, 1)
+            b_row, b_row_scale = _quantize_mxfp6_row(weight, 1)
+            a_col = a_col_scale = b_col = b_col_scale = None
 
         # Bias goes into the GEMM's store epilogue, where it is free: the epilogue is bound by
         # its scatter store rather than by VALU, so the add hides completely. Handing it to the
@@ -203,7 +225,13 @@ class MXFP6LinearFunction(torch.autograd.Function):
             fp8_gran_value,
             fp8_backend_value,
             fuse_wgrad_accum,
+            grad_enabled,
         ) = inputs
+
+        # setup_context still runs under no_grad, so this guard is load-bearing: the column
+        # blobs are None there, and there is no backward to save them for anyway.
+        if not grad_enabled:
+            return
 
         ctx.backward_is_fp8 = backward_is_fp8
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
@@ -305,9 +333,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
 
             # grad_weight[N, K] = grad.T[N, M] @ input[M, K], contracting M.
             if ctx.fuse_wgrad_accum:
-                grad_weight = _wgrad_into_main_grad(
-                    weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m
-                )
+                grad_weight = _wgrad_into_main_grad(weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m)
             else:
                 grad_weight = gemm_fp6_impl(
                     g_col,
@@ -321,7 +347,9 @@ class MXFP6LinearFunction(torch.autograd.Function):
                     _GRAN_VALUE,
                 )
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None
+        # Trailing Nones cover backward_is_fp8, fp8_bwd_dtype, fp8_gran_value,
+        # fp8_backend_value, fuse_wgrad_accum, grad_enabled.
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None
 
 
 def _resolve_wgrad_fusion(module, name: str) -> bool:
@@ -432,6 +460,7 @@ def _mxfp6_forward_impl(module, input, weight, **kwargs):
         module._fp8_gran_value,
         module._fp8_backend_value,
         module._fuse_wgrad_accum,
+        torch.is_grad_enabled(),
     )
     return result[0]
 
@@ -514,7 +543,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(hidden_states, w1, b1, w2, fuse_wgrad_accum):
+    def forward(hidden_states, w1, b1, w2, fuse_wgrad_accum, grad_enabled):
         out_dtype = hidden_states.dtype
         orig_shape = hidden_states.shape
         x = hidden_states.reshape(-1, orig_shape[-1])
@@ -523,18 +552,35 @@ class MXFP6MLPFunction(torch.autograd.Function):
         f = w1.shape[0]
         h = w2.shape[0]
 
-        x_row, x_row_s, x_col, x_col_s = _quantize_mxfp6_dual(x)
-        w1_row, w1_row_s, w1_col, w1_col_s = _quantize_mxfp6_dual(w1)
+        # Same reasoning as MXFP6LinearFunction: the column blobs are backward's operands,
+        # so a no-grad forward should not pay for them. See the note there on why
+        # grad_enabled has to be sampled by the caller rather than read here.
+        if grad_enabled:
+            x_row, x_row_s, x_col, x_col_s = _quantize_mxfp6_dual(x)
+            w1_row, w1_row_s, w1_col, w1_col_s = _quantize_mxfp6_dual(w1)
+        else:
+            x_row, x_row_s = _quantize_mxfp6_row(x, 1)
+            w1_row, w1_row_s = _quantize_mxfp6_row(w1, 1)
+            x_col = x_col_s = w1_col = w1_col_s = None
 
         # Pre-activation. Saved for backward, where the epilogue is recomputed from it
         # rather than its output being stashed -- the same bytes are held either way.
         y1 = gemm_fp6_impl(x_row, x_row_s, w1_row, w1_row_s, m, f, k, out_dtype, _GRAN_VALUE)
 
         # gelu(y1 + b1), packed in both directions without ever being written out.
-        a_row, a_row_s, a_col, a_col_s, _ = _quantize_mxfp6_fused_dual(
-            y1, None, b1, MXFP6_PROLOGUE_BIAS_GELU, False
-        )
-        w2_row, w2_row_s, w2_col, w2_col_s = _quantize_mxfp6_dual(w2)
+        if grad_enabled:
+            a_row, a_row_s, a_col, a_col_s, _ = _quantize_mxfp6_fused_dual(
+                y1, None, b1, MXFP6_PROLOGUE_BIAS_GELU, False
+            )
+            w2_row, w2_row_s, w2_col, w2_col_s = _quantize_mxfp6_dual(w2)
+        else:
+            # The fused packer has no row-only mode, so the activation still costs a dual
+            # pass; only its GELU epilogue matters here and that is shared.
+            a_row, a_row_s, a_col, a_col_s, _ = _quantize_mxfp6_fused_dual(
+                y1, None, b1, MXFP6_PROLOGUE_BIAS_GELU, False
+            )
+            w2_row, w2_row_s = _quantize_mxfp6_row(w2, 1)
+            w2_col = w2_col_s = None
 
         output = gemm_fp6_impl(a_row, a_row_s, w2_row, w2_row_s, m, h, f, out_dtype, _GRAN_VALUE)
         output = output.reshape(*orig_shape[:-1], h)
@@ -543,7 +589,11 @@ class MXFP6MLPFunction(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        hidden_states, w1, b1, w2, fuse_wgrad_accum = inputs
+        hidden_states, w1, b1, w2, fuse_wgrad_accum, grad_enabled = inputs
+
+        # setup_context still runs under no_grad, where the column blobs are None.
+        if not grad_enabled:
+            return
 
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
         ctx.out_dtype = hidden_states.dtype
@@ -591,9 +641,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
         grad_a = gemm_fp6_impl(g2_row, g2_row_s, w2_col, w2_col_s, m, f, h, out_dtype, _GRAN_VALUE)
         # fc2 wgrad: [h, f] = g2.T[h, m] @ a[m, f], contracting m.
         if ctx.fuse_wgrad_accum:
-            grad_w2 = _wgrad_into_main_grad(
-                fused_weights[1], g2_col, g2_col_s, a_col, a_col_s, h, f, m
-            )
+            grad_w2 = _wgrad_into_main_grad(fused_weights[1], g2_col, g2_col_s, a_col, a_col_s, h, f, m)
         else:
             grad_w2 = gemm_fp6_impl(g2_col, g2_col_s, a_col, a_col_s, h, f, m, out_dtype, _GRAN_VALUE)
 
@@ -610,15 +658,14 @@ class MXFP6MLPFunction(torch.autograd.Function):
         grad_x = grad_x.reshape(ctx.orig_shape)
         # fc1 wgrad: [f, k] = grad_y1.T[f, m] @ x[m, k], contracting m.
         if ctx.fuse_wgrad_accum:
-            grad_w1 = _wgrad_into_main_grad(
-                fused_weights[0], g1_col, g1_col_s, x_col, x_col_s, f, k, m
-            )
+            grad_w1 = _wgrad_into_main_grad(fused_weights[0], g1_col, g1_col_s, x_col, x_col_s, f, k, m)
         else:
             grad_w1 = gemm_fp6_impl(g1_col, g1_col_s, x_col, x_col_s, f, k, m, out_dtype, _GRAN_VALUE)
 
         grad_b1 = b1_partial.sum(0).to(out_dtype) if want_bias_grad else None
 
-        return grad_x, grad_w1, grad_b1, grad_w2, None
+        # Trailing Nones cover fuse_wgrad_accum and grad_enabled.
+        return grad_x, grad_w1, grad_b1, grad_w2, None, None
 
 
 def _is_tanh_gelu(fn) -> bool:
@@ -731,6 +778,7 @@ class MXFP6FusedMLP(MLP):
             self.linear_fc1.bias,
             self.linear_fc2.weight,
             fuse_wgrad_accum,
+            torch.is_grad_enabled(),
         )[0]
 
         # fc2 is built with skip_bias_add=True, so MLP's contract is to hand its bias back
