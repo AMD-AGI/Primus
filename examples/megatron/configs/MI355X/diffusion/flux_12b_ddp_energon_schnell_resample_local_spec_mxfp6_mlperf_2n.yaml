@@ -119,10 +119,19 @@ modules:
       # eval_samples, NOT eval_iters. The megatron.args.eval_samples patch
       # derives eval_iters from this and asserts coverage is exact: 29696 / 512
       # = 58 here. Setting eval_iters directly bypasses that patch, and a run
-      # doing so evaluated zero times in 400 steps. val_num_workers is pinned to
-      # 0 because a nonzero training num_workers leaves part of the set unread.
+      # doing so evaluated zero times in 400 steps.
       eval_samples: 29696
-      val_num_workers: 0
+      # 1, not the training num_workers and not 0. A large worker count does leave
+      # part of the set unread -- Energon splits the data across
+      # dp_size * num_workers but the batch quota across num_workers alone -- but 1
+      # is the one nonzero value that cannot: Energon clamps the data split to
+      # max(1, num_workers), so 1 shards exactly as 0 does and covers the split
+      # identically, while 0 additionally forgoes prefetch by reading in the main
+      # process. Measured on one node over three replicates each, 1 evaluates the
+      # whole split faster than 0 with the val_loss bit-identical. 2 and 4 were no
+      # faster than 1 and did shift the loss, by resharding the data across more
+      # workers than the split has shards.
+      val_num_workers: 1
       # MLPerf assigns each validation image one fixed timestep, carried in the
       # Arrow 'timestep' column. Requires a val split ingested with that column;
       # shards ingested earlier carry {"key": ...} only and fail loudly rather
