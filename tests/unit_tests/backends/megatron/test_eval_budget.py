@@ -20,6 +20,8 @@ from primus.backends.megatron.training.eval_budget import (
     EvalCoverageError,
     assert_mlperf_timestep_source,
     assert_val_worker_divisibility,
+    get_data_parallel_size,
+    get_eval_micro_batch_size,
     get_eval_num_microbatches,
     get_val_num_workers,
     read_energon_split_sample_count,
@@ -246,3 +248,59 @@ class TestReadEnergonSplitSampleCount:
     def test_absent_split_returns_none(self, tmp_path):
         path = self._dataset(tmp_path, {"train/shard_000000.tar": 231})
         assert read_energon_split_sample_count(path, "val") is None
+
+
+class TestBudgetReconstruction:
+    """The sample count the dataloader reconstructs must be the one asked for.
+
+    energon_dataset_provider reports a validation budget, and asserts coverage on
+    it, by multiplying the resolved eval_iters back out into samples. That product
+    has to use the evaluation microbatch size: a recipe overriding it evaluates at
+    that width, so reaching for the training micro_batch_size understates the budget
+    by the ratio between the two and then hands the wrong number to a divisibility
+    check built from the eval width.
+    """
+
+    @staticmethod
+    def _reconstruct(args) -> int:
+        """The provider's arithmetic, in the terms eval_budget defines it."""
+        eval_iters = resolve_eval_iters(args)
+        return (
+            eval_iters
+            * get_eval_num_microbatches(args)
+            * get_eval_micro_batch_size(args)
+            * get_data_parallel_size(args)
+        )
+
+    @pytest.mark.parametrize(
+        "eval_micro_batch_size, eval_global_batch_size",
+        [(32, 256), (64, 512), (128, 1024)],
+    )
+    def test_reconstruction_is_exact(self, eval_micro_batch_size, eval_global_batch_size):
+        args = _args(
+            micro_batch_size=32,
+            global_batch_size=256,
+            eval_samples=MLPERF_EVAL_SAMPLES,
+            eval_micro_batch_size=eval_micro_batch_size,
+            eval_global_batch_size=eval_global_batch_size,
+        )
+
+        assert self._reconstruct(args) == MLPERF_EVAL_SAMPLES
+
+    def test_wider_eval_width_is_not_rejected(self):
+        """128 covers the split exactly; only the understated count made it fail.
+
+        29696 / (8 x 1 x 128) is 29 whole microbatches per rank. Reconstructing the
+        budget from a training micro_batch_size of 32 instead gave 7424, which leaves
+        a remainder of 256 against that same divisor and raised EvalCoverageError on
+        a shape that reads every sample.
+        """
+        args = _args(
+            micro_batch_size=32,
+            global_batch_size=256,
+            eval_samples=MLPERF_EVAL_SAMPLES,
+            eval_micro_batch_size=128,
+            eval_global_batch_size=1024,
+        )
+
+        assert_val_worker_divisibility(args, self._reconstruct(args))
