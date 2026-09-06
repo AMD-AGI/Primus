@@ -70,7 +70,7 @@ class BackendAdapter(ABC):
                         # Logger may not be initialized yet; sys.path is already updated.
                         pass
                 return norm_path
-            assert False, error_msg
+            raise FileNotFoundError(error_msg)
 
         # 1) CLI argument: if provided, it must exist. No fallback.
         if backend_path:
@@ -105,7 +105,7 @@ class BackendAdapter(ABC):
         for candidate in candidates:
             if os.path.exists(candidate):
                 return _use_path(str(candidate), "")
-        assert False, (
+        raise FileNotFoundError(
             f"No valid backend path for '{self.framework}'.\n"
             f"Tried: {[str(c) for c in candidates]}\n"
             f"Hint: run `primus-cli deps sync`, install backend to third_party/{dir_name}, "
