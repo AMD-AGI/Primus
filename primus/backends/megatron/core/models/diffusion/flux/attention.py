@@ -36,11 +36,6 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from torch import Tensor
 
-# Timing-probe switch for the RoPE family. See the guard at its use site: this changes
-# numerics and is only ever valid for measuring how much wall clock the RoPE kernels
-# are actually worth.
-_MXFP6_ABLATE_ROPE = os.environ.get("MXFP6_ABLATE_ROPE", "0") == "1"
-
 # Fuse the QK RMS norm into the RoPE kernel, one kernel per direction instead of one
 # forward and three backward. Unlike the ablation above this is numerically real: it is
 # no less accurate than the path it replaces and better on dx. Off by default until the
@@ -124,11 +119,10 @@ def _apply_qk_norm_rope(attn, query, key, q_norm, k_norm, out_dtype, rotary_pos_
     cu_q = packed_seq_params.cu_seqlens_q if packed_seq_params is not None else None
     cu_kv = packed_seq_params.cu_seqlens_kv if packed_seq_params is not None else None
 
-    # The kernel rotates the whole head_dim and has no t_pass tail, no packed-sequence
-    # indexing, and no ablation mode. Anything else takes the unfused path.
+    # The kernel rotates the whole head_dim and has no t_pass tail and no packed-sequence
+    # indexing. Anything else takes the unfused path.
     fusable = (
-        not _MXFP6_ABLATE_ROPE
-        and q_pos_emb is not None
+        q_pos_emb is not None
         and cu_q is None
         and cu_kv is None
         and query.dim() == 4
@@ -149,7 +143,7 @@ def _apply_qk_norm_rope(attn, query, key, q_norm, k_norm, out_dtype, rotary_pos_
 
     query = q_norm(query).to(out_dtype)
     key = k_norm(key).to(out_dtype)
-    if q_pos_emb is not None and not _MXFP6_ABLATE_ROPE:
+    if q_pos_emb is not None:
         query = apply_rotary_pos_emb(query, q_pos_emb, config=attn.config, cu_seqlens=cu_q)
         key = apply_rotary_pos_emb(key, k_pos_emb, config=attn.config, cu_seqlens=cu_kv)
     return query, key
@@ -171,7 +165,6 @@ def _apply_qkv_norm_rope(attn, mixed_qkv, split_arg_list, q_norm, k_norm, rotary
 
     fusable = (
         fused_qkv_norm_rope is not None
-        and not _MXFP6_ABLATE_ROPE
         and q_pos_emb is not None
         and cu_q is None
         and cu_kv is None
@@ -635,12 +628,8 @@ class JointSelfAttention(Attention):
             cu_seqlens_q = packed_seq_params.cu_seqlens_q if packed_seq_params is not None else None
             cu_seqlens_kv = packed_seq_params.cu_seqlens_kv if packed_seq_params is not None else None
 
-            # MXFP6_ABLATE_ROPE is a timing probe, not an option. It produces wrong numerics
-            # and exists only to measure the ceiling on removing the RoPE family before
-            # anyone pays to rewrite it. Never set it in a run whose loss is being read.
-            if not _MXFP6_ABLATE_ROPE:
-                query = apply_rotary_pos_emb(query, q_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q)
-                key = apply_rotary_pos_emb(key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv)
+            query = apply_rotary_pos_emb(query, q_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q)
+            key = apply_rotary_pos_emb(key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv)
 
         # Core attention computation
         if self.checkpoint_core_attention and self.training:
@@ -866,12 +855,8 @@ class FluxSingleAttention(SelfAttention):
             cu_seqlens_q = packed_seq_params.cu_seqlens_q if packed_seq_params is not None else None
             cu_seqlens_kv = packed_seq_params.cu_seqlens_kv if packed_seq_params is not None else None
 
-            # MXFP6_ABLATE_ROPE is a timing probe, not an option. It produces wrong numerics
-            # and exists only to measure the ceiling on removing the RoPE family before
-            # anyone pays to rewrite it. Never set it in a run whose loss is being read.
-            if not _MXFP6_ABLATE_ROPE:
-                query = apply_rotary_pos_emb(query, q_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q)
-                key = apply_rotary_pos_emb(key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv)
+            query = apply_rotary_pos_emb(query, q_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q)
+            key = apply_rotary_pos_emb(key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv)
 
         # Core attention computation
         if self.checkpoint_core_attention and self.training:
