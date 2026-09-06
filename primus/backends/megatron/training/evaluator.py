@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import os
 import time
 
 import torch
@@ -29,6 +30,42 @@ from primus.core.utils.module_utils import debug_rank_0, log_rank_0
 # (summed per-sample loss, sample count). Its denominator is the only one that
 # is a sample count rather than a microbatch count.
 VAL_LOSS_KEY = "loss"
+
+
+def _make_eval_profiler():
+    """Trace the evaluation loop, off unless MXFP6_EVAL_PROFILE=<iterations>.
+
+    PROBE ONLY. Megatron builds its profiler inside training.train(), which
+    skip_train bypasses, so an evaluation-only arm cannot be traced through the
+    ordinary profile / profile_step_start path -- those keys are read but nothing
+    ever creates the profiler. That left the eval loop the one part of the step
+    budget never profiled, which is what this exists to fix.
+
+    Profiles rank 0 only, for the first MXFP6_EVAL_PROFILE iterations after one
+    wait and one warmup, and writes a chrome trace to MXFP6_EVAL_PROFILE_DIR
+    (default /tmp). Stacks are deliberately not collected: this campaign already
+    established they add phantom overhead of the same order as the eval anomaly
+    being chased.
+    """
+    active = int(os.environ.get("MXFP6_EVAL_PROFILE", "0"))
+    if active <= 0 or torch.distributed.get_rank() != 0:
+        return None
+
+    out_dir = os.environ.get("MXFP6_EVAL_PROFILE_DIR", "/tmp")
+    os.makedirs(out_dir, exist_ok=True)
+
+    def _export(prof):
+        path = os.path.join(out_dir, "eval_profile.pt.trace.json")
+        prof.export_chrome_trace(path)
+        log_rank_0(f"[MXFP6_EVAL_PROFILE] wrote {path}")
+
+    return torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        schedule=torch.profiler.schedule(wait=1, warmup=1, active=active, repeat=1),
+        record_shapes=True,
+        with_stack=False,
+        on_trace_ready=_export,
+    )
 
 
 def _report_eval(args, message):
@@ -214,6 +251,10 @@ def primus_evaluate(
     if eval_iters is None:
         eval_iters = args.eval_iters
 
+    eval_prof = _make_eval_profiler()
+    if eval_prof is not None:
+        eval_prof.start()
+
     with torch.no_grad():
         iteration = 0
         if verbose:
@@ -286,6 +327,12 @@ def primus_evaluate(
                     rerun_state_machine.set_mode(rerun_mode)
                     log_rank_0("Exiting during evaluation, timelimit reached")
                     return None, None, True
+
+            if eval_prof is not None:
+                eval_prof.step()
+
+        if eval_prof is not None:
+            eval_prof.stop()
 
         total_loss_dict = {}
         observed_samples = None
