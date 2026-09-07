@@ -13,7 +13,6 @@ to register all patches in this subpackage.
 """
 
 from primus.backends.torchtitan.patches.turbo import (  # noqa: F401
-    aiter_mla_capability_patches,
     async_tp_patches,
     attention_patches,
     deepseek_v3_classic_attention_patches,
