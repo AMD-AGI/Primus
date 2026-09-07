@@ -75,6 +75,7 @@ GID selection (`NCCL_IB_GID_INDEX`) and traffic classes (`NCCL_IB_TC`, `NCCL_IB_
 
 - Set **`USING_AINIC=1`**. The hook `runner/helpers/hooks/03_enable_ainic.sh` runs when this is set and exports AINIC-related variables back to the caller (`env.VAR=VALUE` lines).
 - Use container images built for AINIC when required by your site. Examples in this repository use tags such as `docker.io/tasimage/primus:<version>-ainic` (see `examples/customer_package/` and `.github/workflows/ci.yaml`). Match the image to your ROCm and ANP bundle.
+- If the AINIC bundle in a published image does not match your host driver, see [AINIC bundle versions](./ainic-bundle-versions.md) for how to rebuild the image against a different bundle. Note that the bundle named in an image's build arguments is **not** always the one installed; verify with `dpkg-query -W libionic1`.
 
 ### `runner/use_ainic.yaml`
 
