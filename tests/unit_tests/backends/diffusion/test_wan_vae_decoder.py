@@ -9,6 +9,16 @@ import torch
 from primus.backends.diffusion.models.wan.vae2_2 import Decoder3d, count_conv3d
 
 
+def _fork_rng_devices():
+    # torch.manual_seed() also seeds CUDA/ROCm RNG state when a GPU runtime
+    # is available, so on GPU-capable runners we must fork (and thus
+    # restore) that CUDA RNG state too, or the seed call leaks into other
+    # tests. On CPU-only runners we deliberately fork no devices, since
+    # torch.cuda.is_available() is False there and passing any CUDA device
+    # index would force CUDA runtime initialization in a CPU-only test.
+    return list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+
+
 def _make_decoder():
     # A tiny decoder with a single temporal-upsample stage: enough to exercise
     # cache indexing, the "Rep" sentinel, and first_chunk propagation without
@@ -17,7 +27,7 @@ def _make_decoder():
     # count_conv3d(decoder)).
     # Seed only within a forked RNG scope so this doesn't mutate global RNG
     # state and leak into other tests run later in the same process.
-    with torch.random.fork_rng(devices=[]):
+    with torch.random.fork_rng(devices=_fork_rng_devices()):
         torch.manual_seed(0)
         decoder = Decoder3d(
             dim=8,
@@ -36,7 +46,7 @@ def _make_input():
     # Same rationale as _make_decoder: keep the random draw inside a forked,
     # seeded RNG scope so it is reproducible and never leaks into the global
     # RNG state that other tests may depend on.
-    with torch.random.fork_rng(devices=[]):
+    with torch.random.fork_rng(devices=_fork_rng_devices()):
         torch.manual_seed(1)
         return torch.randn(1, 4, 3, 4, 4)
 
