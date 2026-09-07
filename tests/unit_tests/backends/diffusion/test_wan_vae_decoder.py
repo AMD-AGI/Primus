@@ -32,6 +32,15 @@ def _make_decoder():
     return decoder
 
 
+def _make_input():
+    # Same rationale as _make_decoder: keep the random draw inside a forked,
+    # seeded RNG scope so it is reproducible and never leaks into the global
+    # RNG state that other tests may depend on.
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(1)
+        return torch.randn(1, 4, 3, 4, 4)
+
+
 def _decode_streaming(decoder, x, conv_num):
     """Replay WanVAE_.decode's per-frame chunked-decode protocol: one latent
     frame per call, a single feat_cache list reused across calls, feat_idx
@@ -58,7 +67,7 @@ def test_forward_streaming_decode_matches_wan22_chunked_protocol():
     # conversion to 3 RGB channels happens later, in unpatchify.
     decoder = _make_decoder()
     conv_num = count_conv3d(decoder)
-    x = torch.randn(1, 4, 3, 4, 4)
+    x = _make_input()
     feat_map = [None] * conv_num
 
     outputs = []
@@ -102,7 +111,7 @@ def test_forward_streaming_decode_matches_wan22_chunked_protocol():
 def test_forward_streaming_decode_is_deterministic_after_cache_reset():
     decoder = _make_decoder()
     conv_num = count_conv3d(decoder)
-    x = torch.randn(1, 4, 3, 4, 4)
+    x = _make_input()
 
     with torch.no_grad():
         outputs_1, _ = _decode_streaming(decoder, x, conv_num)
