@@ -296,7 +296,30 @@ def _row_strided(t: torch.Tensor):
     return t, s
 
 
-def _launch_fwd(x, w, cos, sin, eps, interleaved):
+def _launchable(kernel, traceable):
+    """``kernel``, wrapped for tracing only when the caller can actually be traced.
+
+    ``wrap_triton`` exists so Inductor can see through a ``@triton_op`` into the kernel it
+    launches. Inside a ``@custom_op`` there is nothing to see through -- the op is opaque by
+    construction -- and the wrapper is not free: it routes every launch through the
+    higher-order-op dispatch path, which measures **0.359 ms of host time against 0.031 ms
+    for the same launch made directly**, a 12.7x overhead on a kernel whose GPU work is a
+    fraction of that.
+
+    Repeated across every QKV call a step makes, two launches each, that wrapper alone was
+    enough to make the whole-QKV backward host-bound rather than GPU-bound: the enqueue loop
+    measured 0.8555 ms/call against a batched wall time of 0.8593, i.e. the GPU was idle
+    waiting for Python. It is also why the cost barely moved
+    with sequence length, which is the symptom that gave it away -- seq 256 measured 0.845 ms
+    against seq 512's 0.864, when the work halves.
+
+    So the per-tensor ``@triton_op`` entry points pass ``traceable=True`` and keep the
+    wrapper they need; the whole-QKV ``@custom_op`` ones pass ``False``.
+    """
+    return wrap_triton(kernel) if traceable else kernel
+
+
+def _launch_fwd(x, w, cos, sin, eps, interleaved, traceable=True):
     S, B, H, D = x.shape
     M = S * B * H
     x, sx = _row_strided(x)
@@ -305,7 +328,7 @@ def _launch_fwd(x, w, cos, sin, eps, interleaved):
     out = torch.empty_like(x, memory_format=torch.contiguous_format)
     rstd = torch.empty(M, device=x.device, dtype=torch.float32)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)
-    wrap_triton(_fwd_kernel)[grid](
+    _launchable(_fwd_kernel, traceable)[grid](
         x,
         w,
         cos,
@@ -324,11 +347,14 @@ def _launch_fwd(x, w, cos, sin, eps, interleaved):
     return out, rstd
 
 
-def _launch_bwd(g, x, w, cos, sin, rstd, dx, interleaved):
+def _launch_bwd(g, x, w, cos, sin, rstd, dx, interleaved, traceable=True):
     """Backward into a caller-supplied dx, which need only be evenly strided.
 
     dx is a separate argument rather than an allocation because the QKV entry point
     below points it at a column of d(mixed_qkv); see the note there.
+
+    ``traceable`` selects whether the launch goes through ``wrap_triton``; see
+    ``_launchable``, which is where the cost of getting that wrong is recorded.
     """
     S, B, H, D = x.shape
     M = S * B * H
@@ -338,7 +364,7 @@ def _launch_bwd(g, x, w, cos, sin, rstd, dx, interleaved):
     assert sdx is not None, "dx must be addressable at a uniform row stride"
     # Every row is written by exactly one program, so empty() is safe.
     dwp = torch.empty(NPROG, D, device=x.device, dtype=torch.float32)
-    wrap_triton(_bwd_kernel)[(NPROG,)](
+    _launchable(_bwd_kernel, traceable)[(NPROG,)](
         g,
         x,
         w,
@@ -451,8 +477,8 @@ def _qkv_fwd(
     interleaved: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     D = qkv.shape[-1] // 3
-    q, q_rstd = _launch_fwd(qkv[..., :D], wq, cos, sin, eps, interleaved)
-    k, k_rstd = _launch_fwd(qkv[..., D : 2 * D], wk, cos, sin, eps, interleaved)
+    q, q_rstd = _launch_fwd(qkv[..., :D], wq, cos, sin, eps, interleaved, traceable=False)
+    k, k_rstd = _launch_fwd(qkv[..., D : 2 * D], wk, cos, sin, eps, interleaved, traceable=False)
     # V is not merely forwarded: a custom op may not return an alias of its input, and
     # FMHA wants it packed regardless, so this replaces the copy the caller was making.
     v = qkv[..., 2 * D :].contiguous()
@@ -484,8 +510,10 @@ def _qkv_bwd(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     D = qkv.shape[-1] // 3
     d_qkv = torch.empty_like(qkv, memory_format=torch.contiguous_format)
-    dwqp = _launch_bwd(dq, qkv[..., :D], wq, cos, sin, q_rstd, d_qkv[..., :D], interleaved)
-    dwkp = _launch_bwd(dk, qkv[..., D : 2 * D], wk, cos, sin, k_rstd, d_qkv[..., D : 2 * D], interleaved)
+    dwqp = _launch_bwd(dq, qkv[..., :D], wq, cos, sin, q_rstd, d_qkv[..., :D], interleaved,
+                       traceable=False)
+    dwkp = _launch_bwd(dk, qkv[..., D : 2 * D], wk, cos, sin, k_rstd, d_qkv[..., D : 2 * D],
+                       interleaved, traceable=False)
     d_qkv[..., 2 * D :].copy_(dv)
     return d_qkv, dwqp, dwkp
 
