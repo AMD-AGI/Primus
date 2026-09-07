@@ -25,7 +25,19 @@ pytest.importorskip("torchtitan")
 import torch
 import torch.nn as nn
 
-from primus.backends.torchtitan.models.qwen3.model.model import Attention
+
+@pytest.fixture
+def attention_cls():
+    # Imported lazily (per-test, not at module collection time): this pulls in
+    # torchtitan.models.qwen3.model.model, and other tests in this directory
+    # temporarily replace/delete sys.modules["torchtitan"] around themselves
+    # (see test_torchtitan_argument_builder.py / test_config_utils.py). Doing
+    # this import at module scope would cache torchtitan submodules before
+    # those mocks run, leaving stale/detached submodule state behind for
+    # later tests (e.g. test_moe_grouped_mm_patch.py).
+    from primus.backends.torchtitan.models.qwen3.model.model import Attention
+
+    return Attention
 
 
 def _make_args(qk_norm=True):
@@ -62,9 +74,9 @@ class _CapturingInnerAttention(nn.Module):
 
 
 class TestQwen3AttentionForward:
-    def test_output_shape(self):
+    def test_output_shape(self, attention_cls):
         args = _make_args()
-        attn = Attention(args)
+        attn = attention_cls(args)
         attn.inner_attention = _CapturingInnerAttention(args.head_dim)
         bs, seqlen = 2, 5
         x = torch.randn(bs, seqlen, args.dim)
@@ -74,13 +86,13 @@ class TestQwen3AttentionForward:
 
         assert out.shape == (bs, seqlen, args.dim)
 
-    def test_inner_attention_receives_untransposed_bs_seqlen_layout(self):
+    def test_inner_attention_receives_untransposed_bs_seqlen_layout(self, attention_cls):
         # Upstream torchtitan's Qwen3 Attention.forward transposes xq/xk/xv to
         # (bs, n_heads, seqlen, head_dim) before calling inner_attention. The
         # Primus-Turbo override must skip that transpose, since TurboAttention
         # expects (bs, seqlen, n_heads, head_dim).
         args = _make_args()
-        attn = Attention(args)
+        attn = attention_cls(args)
         stub = _CapturingInnerAttention(args.head_dim)
         attn.inner_attention = stub
 
@@ -100,13 +112,13 @@ class TestQwen3AttentionForward:
         # handles GQA and causal masking internally.
         assert call_kwargs == {}
 
-    def test_attention_masks_are_ignored(self):
+    def test_attention_masks_are_ignored(self, attention_cls):
         # Upstream forward asserts on attention_masks depending on attn_type
         # (e.g. `assert attention_masks is None` for sdpa). The Primus-Turbo
         # override must accept (and ignore) any value here, including a
         # non-None sentinel that would fail the upstream assertion.
         args = _make_args()
-        attn = Attention(args)
+        attn = attention_cls(args)
         attn.inner_attention = _CapturingInnerAttention(args.head_dim)
 
         bs, seqlen = 1, 3
@@ -117,9 +129,9 @@ class TestQwen3AttentionForward:
 
         assert out.shape == (bs, seqlen, args.dim)
 
-    def test_qk_norm_applied_when_enabled(self):
+    def test_qk_norm_applied_when_enabled(self, attention_cls):
         args = _make_args(qk_norm=True)
-        attn = Attention(args)
+        attn = attention_cls(args)
         assert attn.q_norm is not None
         assert attn.k_norm is not None
 
@@ -144,9 +156,9 @@ class TestQwen3AttentionForward:
 
         assert calls == {"q": 1, "k": 1}
 
-    def test_qk_norm_skipped_when_disabled(self):
+    def test_qk_norm_skipped_when_disabled(self, attention_cls):
         args = _make_args(qk_norm=False)
-        attn = Attention(args)
+        attn = attention_cls(args)
         assert attn.q_norm is None
         assert attn.k_norm is None
 
@@ -156,7 +168,7 @@ class TestQwen3AttentionForward:
         out = attn(x, rope_cache, attention_masks=None)
         assert out.shape == (1, 3, args.dim)
 
-    def test_positions_forwarded_to_rotary_embedding(self):
+    def test_positions_forwarded_to_rotary_embedding(self, attention_cls):
         # Inspect what reaches inner_attention directly (rather than the final
         # wo-projected output) so this only pins the rotary embedding's use of
         # `positions`, independent of how any particular inner_attention
@@ -165,7 +177,7 @@ class TestQwen3AttentionForward:
         # the random input feed into the non-equality assertion below.
         torch.manual_seed(0)
         args = _make_args()
-        attn = Attention(args)
+        attn = attention_cls(args)
         stub = _CapturingInnerAttention(args.head_dim)
         attn.inner_attention = stub
 
