@@ -1,0 +1,5 @@
+recipe: hylo.hylo
+flavor: hylo_llama_3b_finetune_config
+
+dataset:
+    mock: true

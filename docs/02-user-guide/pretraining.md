@@ -15,6 +15,7 @@ The following table describes the four backend types supported by Primus and the
 | Megatron-LM | `framework: megatron` | Large-scale transformer pretraining with Megatron-style parallelism (TP/PP/EP). |
 | TorchTitan | `framework: torchtitan` | PyTorch-native scaled training (FSDP / tensor / pipeline / expert parallelism per config). |
 | MaxText (JAX) | `framework: maxtext` | JAX/MaxText single- and multi-node runs; parallelism via MaxText `ici_*` / `dcn_*` settings. |
+| MaxDiffusion (JAX) | `framework: maxdiffusion` | JAX/MaxDiffusion diffusion pretraining (WAN 2.1, FLUX.1-dev). Source is vendored as the `third_party/maxdiffusion` submodule; deps/patches installed by `examples/maxdiffusion/setup_maxdiffusion_env.sh`. |
 | Megatron Bridge | `framework: megatron_bridge` | Bridge-oriented workflows (configure like other backends; see parameter reference). |
 
 > Several setup steps apply to **all** backends (mock vs. real data, Hugging Face tokens, scaling to multiple nodes, and HipBLASLt autotuning). After you read the backend section that applies to you, see [Common patterns](#common-patterns) below.
@@ -107,9 +108,9 @@ The following files ship in the repository (sorted by name). Parallelism columns
 | `qwen3_5_35B_A3B-FP8-pretrain.yaml` | `${PRIMUS_TP:1}` | `${PRIMUS_PP:1}` | `${PRIMUS_EP:8}` |
 | `qwen3_8B-BF16-pretrain.yaml` | `1` | `1` | `1` |
 | `qwen3_8B-FP8-pretrain.yaml` | `1` | `1` | `1` |
-| `zebra_llama_1B-pretrain.yaml` | `1` | `1` | `1` |
-| `zebra_llama_3B-pretrain.yaml` | `1` | `1` | `1` |
-| `zebra_llama_8B-pretrain.yaml` | `1` | `1` | `1` |
+| `hylo_llama_mamba_1B_BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `hylo_llama_mamba_3B_BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `hylo_llama_mamba_8B_BF16-pretrain.yaml` | `1` | `1` | `1` |
 
 ### Sample YAML file (`llama2_7B-BF16-pretrain.yaml`) explained
 
@@ -197,7 +198,7 @@ Some configurations omit an explicit `parallelism:` block; in that case the defa
 
 ```bash
 ./runner/primus-cli container -- train pretrain \
-  --config examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml
+  --config examples/maxtext/configs/MI300X/llama2_7B-bf16-pretrain.yaml
 ```
 
 ### JAX-specific requirements
@@ -212,18 +213,87 @@ pip install -r requirements-jax.txt
 
 | File | Key parallelism (`ici_*` intra-node, `dcn_*` inter-node) |
 | --- | --- |
-| `deepseek_v2_16B-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `grok1-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `llama2_70B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `llama2_7B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `llama3.3_70B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `llama3_70B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `llama3_8B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `mixtral_8x7B-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `qwen3_14B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `qwen3_30B_A3B-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `deepseek_v2_16B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `grok1-nanoo_fp8-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `llama2_70B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `llama2_7B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `llama3.3_70B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `llama3_70B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `llama3_8B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `mixtral_8x7B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `qwen3_14B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `qwen3_30B_A3B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
 
-The `llama2_7B-pretrain.yaml` example also sets `dataset_type: "synthetic"` and `hf_access_token: ${HF_TOKEN:""}` for gated Hugging Face assets when you switch to real data.
+The `llama2_7B-bf16-pretrain.yaml` example also sets `dataset_type: "synthetic"` and `hf_access_token: ${HF_TOKEN:""}` for gated Hugging Face assets when you switch to real data.
+
+> **fp8 MoE (v26.6):** fp8 Mixture-of-Experts configs must set `pure_nnx_decoder: false` in their overrides; otherwise they crash at step 1 under the v26.6 pure-NNX decoder default. See [MaxText parameters → Precision and quantization](../03-configuration-reference/maxtext-parameters.md#7-precision-and-quantization). Dense fp8 and bf16 configs are unaffected.
+
+---
+
+## MaxDiffusion (JAX) pretraining
+
+The MaxDiffusion backend runs JAX diffusion pretraining (WAN 2.1, FLUX.1-dev). Environment setup depends on your image:
+
+| Image has `maxdiffusion` installed? | What happens |
+| --- | --- |
+| **Yes** (e.g. MAD `primus_maxdiffusion` image, unified docker) | `setup_maxdiffusion_env.sh` detects it and is a **no-op**. Set `PRIMUS_SKIP_PIP=1` to skip calling it entirely. |
+| **No** (e.g. bare `rocm/jax-training:maxtext-*` image) | The script installs everything from the Primus checkout: torch (ROCm wheels), deps, editable submodule, and patches. Requires `third_party/maxdiffusion` submodule to be initialized. |
+
+The relevant pieces:
+
+- **Source** is vendored as the `third_party/maxdiffusion` submodule.
+- **Dependencies** live in `requirements-maxdiffusion.txt` (kept separate from `requirements-jax.txt` so the MaxDiffusion pins never affect MaxText runs).
+- **Install + patches** are applied by `examples/maxdiffusion/setup_maxdiffusion_env.sh` (idempotent): torch/torchvision (ROCm wheels), the requirements above, an editable install of the vendored submodule, and four source patches (Flax-T5 clip rename, TensorFlow-preload-before-TransformerEngine, Shardy-on, and the TransformerEngine empty context-parallel-axis fix).
+
+### Prerequisites
+
+Initialize the vendored submodule (a plain clone will not populate it):
+
+```bash
+git submodule update --init third_party/maxdiffusion
+```
+
+Run on a JAX base image (for example `rocm/jax-training`) or a bare-metal JAX environment, and export `HF_TOKEN` for gated Hugging Face assets.
+
+### Quick start (run from a bare Primus checkout)
+
+Use `run_pretrain.sh` with `BACKEND=MaxDiffusion`. When `PRIMUS_SKIP_PIP` is unset, the launcher runs `setup_maxdiffusion_env.sh` for you (installs the stack + applies the patches), sets `NVTE_FRAMEWORK=jax` and `MAXDIFFUSION_PATH`, then launches:
+
+```bash
+BACKEND=MaxDiffusion \
+EXP=examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml \
+  bash ./examples/run_pretrain.sh
+```
+
+To run the environment setup once by itself (e.g. to warm an image or a shared venv), invoke the script directly, then launch with `PRIMUS_SKIP_PIP=1`:
+
+```bash
+bash examples/maxdiffusion/setup_maxdiffusion_env.sh
+PRIMUS_SKIP_PIP=1 BACKEND=MaxDiffusion \
+EXP=examples/maxdiffusion/configs/MI355X/flux_dev-pretrain.yaml \
+  bash ./examples/run_pretrain.sh
+```
+
+### Quick start (container mode)
+
+`primus-cli` bootstraps the same environment: the `train/pretrain/maxdiffusion` prepare hooks run `setup_maxdiffusion_env.sh` before training and select the plain-python launcher (JAX drives every GPU from one process, so `torchrun` is never used).
+
+```bash
+./primus-cli container -- train pretrain \
+  --config examples/maxdiffusion/configs/MI300X/wan2.1_1.3b-pretrain.yaml --max_train_steps 10
+```
+
+> Container launches start from a clean image each time, so the setup runs on every launch. Wheels are cached under `$DATA_PATH/pip_cache` inside the mounted checkout, so only the first run pays for downloads. Set `PRIMUS_SKIP_PIP=1` to skip the step entirely on images that already ship the stack.
+
+> Step counts use `--max_train_steps` (the MaxDiffusion field name). `--steps` belongs to MaxText and is silently ignored here.
+
+### Example configurations under `examples/maxdiffusion/configs/MI355X/`
+
+| File | Model | Status on MI355X (gfx950) |
+| --- | --- | --- |
+| `flux_dev-pretrain.yaml` | FLUX.1-dev | ✅ validated |
+| `wan2.1_1.3b-pretrain.yaml` | WAN 2.1 1.3B | ✅ validated |
+| `wan2.1_14b-pretrain.yaml` | WAN 2.1 14B | ✅ validated (requires `RCCL_WARP_SPEED_AUTO=0`, set in config) |
 
 ---
 

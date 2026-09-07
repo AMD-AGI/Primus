@@ -38,18 +38,18 @@ ENV HCC_AMDGPU_TARGET="gfx942,gfx950"
 
 RUN pip3 uninstall aiter amd-aiter -y || true && \
     cd /opt && \
-    git clone https://github.com/ROCm/aiter.git && \
+    git clone --filter=blob:none https://github.com/ROCm/aiter.git && \
     cd aiter && \
     git checkout -f ${PRIMUS_TURBO_AITER_COMMIT} && \
     git submodule sync && \
-    git submodule update --init --recursive && \
+    git submodule update --init --recursive --depth 1 --filter=blob:none && \
     PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .
 
 RUN cd /opt && \
-    git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
+    git clone --filter=blob:none https://github.com/AMD-AGI/Primus-Turbo.git && \
     cd Primus-Turbo && \
     git checkout ${PRIMUS_TURBO_COMMIT} && \
-    git submodule update --init --recursive && \
+    git submodule update --init --recursive --depth 1 --filter=blob:none && \
     pip3 install -r requirements.txt && \
     pip3 install --no-build-isolation . -v
 
@@ -72,7 +72,7 @@ RUN pip3 uninstall -y quack-kernels nvidia-cutlass-dsl \
 # Install Triton
 # ---------------------------------------------------------------------------
 RUN cd /opt && \
-    git clone https://github.com/triton-lang/triton.git && \
+    git clone --filter=blob:none https://github.com/triton-lang/triton.git && \
     cd triton && \
     git checkout ${TRITON_COMMIT} && \
     pip3 install -r python/requirements.txt && \
@@ -92,7 +92,7 @@ RUN TORCH_META=$(python3 -c "import importlib.metadata as m; print(m.distributio
 # ---------------------------------------------------------------------------
 RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     cd /opt && \
-    git clone https://github.com/uccl-project/uccl.git && \
+    git clone --filter=blob:none https://github.com/uccl-project/uccl.git && \
     cd uccl && \
     git checkout ${UCCL_COMMIT} && \
     cd ep && TORCH_CUDA_ARCH_LIST="gfx942,gfx950" python3 setup.py build && cd .. && \

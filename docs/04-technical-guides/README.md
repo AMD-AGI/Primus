@@ -11,12 +11,13 @@ Deep technical topics for advanced users.
 - [Data preparation](data-preparation.md): tokenization, data formats, mock data
 - [Checkpoint management](checkpoint-management.md): formats, save/load, distributed checkpointing
 - [Multi-node networking](multi-node-networking.md): InfiniBand, RoCE, AINIC configuration
+- [AINIC bundle versions](ainic-bundle-versions.md): rebuilding a training image against a different AINIC bundle
 - [Profiling and observability](profiling-and-observability.md): Torch profiler, TraceLens, memory snapshots, projection, pp_vis
 - [Logging and experiment tracking](logging-and-experiment-tracking.md): TensorBoard, WandB, MLflow setup per backend
 - [Fault tolerance and elastic training](fault-tolerance-and-elastic-training.md): graceful exit, auto-resume, in-process restart, torchft
 - [Determinism and reproducibility](determinism-and-reproducibility.md): deterministic mode, seeds, trade-offs
 - [Diffusion models](diffusion-models/README.md): Flux diffusion architecture, data pipeline, and FP8 / MXFP4 training
-- [Hybrid models](hybrid-models/README.md): Zebra-Llama hybrid recurrent-attention (Mamba/KDA/GDN + MLA) models, FLA-parity recipes, and checkpoint conversion
+- [Hybrid models](hybrid-models/README.md): Hylo hybrid hybrid recurrent-attention (Mamba/KDA/GDN + MLA) models, FLA-parity recipes, and checkpoint conversion
 - [Native SFT and LoRA](native-sft-lora.md): Megatron-native SFT/LoRA runbook (BF16 / FP8 / FP4), no Megatron-Bridge dependency
 
 ---

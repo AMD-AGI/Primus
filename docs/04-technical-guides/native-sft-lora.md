@@ -62,7 +62,7 @@ export HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxx"           # required for gated models
 export EXP_NAME="llama2_70b_native_$(date +%Y%m%d_%H%M%S)"
 ```
 
-Set automatically inside the container by `examples/run_pretrain.sh` (you don't need to touch these):
+Set automatically inside the container by `runner/helpers/envs/base_env.sh`, which every `primus-cli` mode sources (you don't need to touch these):
 - `TRITON_CACHE_DIR`, `MIOPEN_USER_DB_PATH`, `PRIMUS_CACHE_ROOT`—persistent JIT cache
 - `NCCL_*` / `RCCL_*`—communication tuning
 - `HSA_*` / `GPU_MAX_HW_QUEUES`—AMD GPU performance tuning
@@ -84,7 +84,7 @@ docker exec \
   -e PYTORCH_HIP_ALLOC_CONF=expandable_segments:True \
   -e EXP=examples/megatron/configs/MI355X/llama2_70B-BF16-sft-packed-mlperf_aligned.yaml \
   sft_primus_0507_native \
-  bash -c 'cd /workspace/Primus && bash examples/run_pretrain.sh' \
+  bash -c 'cd /workspace/Primus && ./primus-cli direct -- train pretrain --config "$EXP"' \
   2>&1 | tee /home/botahu/llama2_70b_500iter_runs/${EXP_NAME}.log
 ```
 
@@ -203,8 +203,8 @@ user_name: ${PRIMUS_USER:root}
 #
 # Recommended invocation:
 #   export PRIMUS_EXP_NAME=native_llama2_70b_fp4_perf_$(date +%Y%m%d_%H%M%S)
-#   EXP=examples/megatron/configs/MI355X/llama2_70B-FP4-sft-packed-perf.yaml \
-#       bash examples/run_pretrain.sh
+#   ./primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI355X/llama2_70B-FP4-sft-packed-perf.yaml
 # =============================================================================
 
 exp_name: ${PRIMUS_EXP_NAME:llama2_70B-FP4-sft-packed-perf}
@@ -363,7 +363,7 @@ docker exec \
   -e PYTORCH_HIP_ALLOC_CONF=expandable_segments:True \
   -e EXP=examples/megatron/configs/MI355X/llama2_70B-FP4-sft-packed-perf.yaml \
   sft_primus_0507_native \
-  bash -c 'cd /workspace/Primus && bash examples/run_pretrain.sh' \
+  bash -c 'cd /workspace/Primus && ./primus-cli direct -- train pretrain --config "$EXP"' \
   2>&1 | tee /home/botahu/llama2_70b_500iter_runs/${EXP_NAME}.log
 ```
 

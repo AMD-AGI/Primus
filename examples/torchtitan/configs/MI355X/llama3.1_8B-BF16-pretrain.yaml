@@ -26,9 +26,14 @@ modules:
       training:
         local_batch_size: 6
         seq_len: 8192
-        mock_data: false
+        mock_data: true
         steps: 50
         gc_freq: 100
+        dataloader:
+          num_workers: 1
+          prefetch_factor: 4
+          persistent_workers: true
+          pin_memory: true
 
       activation_checkpoint:
         mode: "none"  # ["none", "selective", "full"]

@@ -41,6 +41,25 @@ class MaxTextAdapter(BackendAdapter):
         super().__init__(framework)
         self.third_party_dir_name = "maxtext"
 
+    def env_defaults(self) -> list:
+        """
+        Declarative MaxText/JAX performance + architecture environment.
+
+        This is the single source of truth for all MaxText env that Primus owns
+        (XLA_FLAGS incl. the fp8 MoE autotune fix, NVTE/HIP/HSA tunables, and the
+        two arch-gated exceptions RCCL_WARP_SPEED_AUTO/HSA_NO_SCRATCH_RECLAIM).
+
+        The base adapter applies these via ``os.environ`` (arch-gated,
+        ``setdefault`` semantics; ``XLA_FLAGS`` merged per-flag) in
+        :meth:`prepare_backend`, i.e. before JAX/XLA is imported by the trainer.
+
+        Effective precedence (highest wins):
+            per-config ``env:``  >  outer/shell env  >  these defaults  >  image-baked
+        """
+        from primus.backends.maxtext.env_spec import maxtext_env_defaults
+
+        return maxtext_env_defaults()
+
     def setup_backend_path(self, backend_path=None) -> str:
         """
         Set up MaxText backend path.

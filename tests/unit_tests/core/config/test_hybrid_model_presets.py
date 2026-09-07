@@ -1,0 +1,95 @@
+from pathlib import Path
+
+import pytest
+
+from primus.core.config.preset_loader import PresetLoader
+from primus.core.config.yaml_loader import parse_yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+CONFIG_ROOT = REPO_ROOT / "examples" / "megatron" / "configs"
+
+HYBRID_MODELS = [
+    "hylo_mamba_1B_hybrid",
+    "hylo_mamba_3B_hybrid",
+    "hylo_mamba_8B_hybrid",
+    "hylo_kda_1B_hybrid",
+    "hylo_gdn_1B_hybrid",
+    "hylo_mamba_300M_hybrid",
+    "hylo_gdn_300M_hybrid",
+]
+
+PURE_MODELS = [
+    "kda_1B",
+    "gdn_1B",
+    "kda_300M",
+    "gdn_300M",
+]
+
+HYBRID_PRETRAIN_CONFIGS = [
+    "MI300X/hylo_llama_mamba_1B_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_kda_1B_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_gdn_1B_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_mamba_300M_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_gdn_300M_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_mamba_3B_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_mamba_8B_BF16-pretrain.yaml",
+    "MI325X/hylo_llama_mamba_1B_BF16-pretrain.yaml",
+    "MI355X/hylo_llama_mamba_1B_BF16-pretrain.yaml",
+    "MI355X/hylo_llama_kda_1B_BF16-pretrain.yaml",
+    "MI355X/hylo_llama_gdn_1B_BF16-pretrain.yaml",
+]
+
+PURE_PRETRAIN_CONFIGS = [
+    "MI300X/kda_1B_BF16-pretrain.yaml",
+    "MI300X/gdn_1B_BF16-pretrain.yaml",
+    "MI300X/kda_300M_BF16-pretrain.yaml",
+    "MI355X/kda_1B_BF16-pretrain.yaml",
+]
+
+
+@pytest.mark.parametrize("model_name", HYBRID_MODELS + PURE_MODELS)
+def test_hybrid_and_pure_model_presets_load(model_name):
+    cfg = PresetLoader.load(model_name, "megatron", config_type="models")
+    assert cfg["model_type"] == "mamba"
+    assert cfg["num_layers"] > 0
+    assert cfg["hidden_size"] > 0
+
+
+@pytest.mark.parametrize("model_name", HYBRID_MODELS)
+def test_hybrid_models_use_mla_or_recurrent_stack(model_name):
+    cfg = PresetLoader.load(model_name, "megatron", config_type="models")
+    assert cfg.get("is_hybrid_model") is True
+    if cfg.get("multi_latent_attention"):
+        assert cfg.get("hybrid_attention_ratio", 0) > 0
+
+
+@pytest.mark.parametrize("model_name", PURE_MODELS)
+def test_pure_models_have_no_mla(model_name):
+    cfg = PresetLoader.load(model_name, "megatron", config_type="models")
+    assert cfg.get("hybrid_attention_ratio") == 0.0
+    assert cfg.get("multi_latent_attention") is False
+
+
+@pytest.mark.parametrize("rel_path", HYBRID_PRETRAIN_CONFIGS + PURE_PRETRAIN_CONFIGS)
+def test_pretrain_configs_reference_existing_models(rel_path):
+    cfg_path = CONFIG_ROOT / rel_path
+    assert cfg_path.exists(), f"missing pretrain config: {rel_path}"
+    data = parse_yaml(str(cfg_path))
+    model_yaml = data["modules"]["pre_trainer"]["model"]
+    model_stem = model_yaml.removesuffix(".yaml")
+    preset = PresetLoader.load(model_stem, "megatron", config_type="models")
+    assert preset["model_type"] == "mamba"
+
+
+def test_kda_1B_inherits_mamba_base_defaults():
+    cfg = PresetLoader.load("kda_1B", "megatron", config_type="models")
+    base = PresetLoader.load("mamba_base", "megatron", config_type="models")
+    assert cfg["use_legacy_models"] == base["use_legacy_models"]
+    assert cfg["attention_dropout"] == base["attention_dropout"]
+
+
+def test_mi300x_kda_hybrid_batch_size():
+    cfg_path = CONFIG_ROOT / "MI300X/hylo_llama_kda_1B_BF16-pretrain.yaml"
+    overrides = parse_yaml(str(cfg_path))["modules"]["pre_trainer"]["overrides"]
+    assert overrides["micro_batch_size"] == 8
+    assert overrides["global_batch_size"] == 64

@@ -8,7 +8,7 @@
 [submodule "third_party/maxtext"]
 	path = third_party/maxtext
 	url = https://github.com/ROCm/maxtext.git
-	branch = release/v26.5
+	branch = release/v26.6
 [submodule "third_party/Emerging-Optimizers"]
 	path = third_party/Emerging-Optimizers
 	url = https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git
@@ -23,6 +23,9 @@
 [submodule "third_party/HummingbirdXT"]
 	path = third_party/HummingbirdXT
 	url = https://github.com/AMD-AGI/HummingbirdXT.git
+[submodule "third_party/maxdiffusion"]
+	path = third_party/maxdiffusion
+	url = https://github.com/AI-Hypercomputer/maxdiffusion.git
 [submodule "third_party/Automodel"]
 	path = third_party/Automodel
 	url = https://github.com/NVIDIA-NeMo/Automodel.git

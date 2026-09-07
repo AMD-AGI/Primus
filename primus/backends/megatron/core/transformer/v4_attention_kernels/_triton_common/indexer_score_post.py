@@ -64,7 +64,9 @@ import triton.language as tl
 
 # H is small and known per call site -- V4-Flash uses H=8.  Same
 # supported set as P38.
-_SUPPORTED_H = (1, 2, 4, 8, 16)
+# See indexer_score.py: the real DeepSeek-V4 index_n_heads is 64, not the 8 this
+# kernel was written against, so 32 / 64 are needed for the path to be reachable.
+_SUPPORTED_H = (1, 2, 4, 8, 16, 32, 64)
 
 
 # ---------------------------------------------------------------------------

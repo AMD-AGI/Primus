@@ -53,5 +53,5 @@ modules:
         use_turbo_float8_linear: false
         use_turbo_mx_linear: false
         use_moe_fp8: false
-        use_turbo_grouped_mm: false
+        use_turbo_grouped_gemm: false
         use_classic_attention: false

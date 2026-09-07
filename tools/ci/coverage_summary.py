@@ -99,7 +99,7 @@ NOTES = {
     "core": "\U0001F511 Primus core;<br>imported by every run",
     "backends/megatron": (
         "100+ patches gated by fp8 / MoE /<br>zero-bubble-pp / fsdp2 flags;<br>"
-        "CI E2E runs only 1-2 configs"
+        "CI E2E now runs 15+ model configs/PR<br>(weekly tier adds ~10 more)"
     ),
     "backends/transformer_engine": "fp8 GEMM / attn-overlap kernels;<br>only hit when an E2E enables fp8",
     "backends/diffusion": "no E2E trainer suite yet<br>(unit-tested only)",
@@ -190,7 +190,8 @@ def render(primary: dict, title: str, secondaries: list = None) -> str:
             % (_pct(tc, tn), _pct(te, tn), format(tn, ","), excl)
         )
         out.append(
-            "_Including all modules (nothing excluded): Unit %.1f%% -> Unit+E2E %.1f%%._\n" % (p_all, s_all)
+            "_Including all modules (nothing excluded; Unit also counts "
+            "branches, E2E is lines only): Unit %.1f%% -> Unit+E2E %.1f%%._\n" % (p_all, s_all)
         )
         out.append(_LEGEND)
         out += ["| Module | Stmts | Unit | Unit+E2E | Notes |", "|---|--:|--:|--:|---|"]

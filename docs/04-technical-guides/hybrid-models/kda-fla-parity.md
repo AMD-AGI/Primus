@@ -77,8 +77,9 @@ python tools/hybrid/convert_fla_kda_init_to_megatron.py
 # 2. Launch training (8 GPUs by default). The Megatron-LM behavioral
 #    patches (same set as GDN) are applied automatically at startup via
 #    Primus's patch system -- no separate apply step needed.
-EXP=examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml \
-  bash examples/run_pretrain.sh 2>&1 | tee primus_kda.log
+./primus-cli direct --log_file primus_kda.log \
+  -- train pretrain \
+  --config examples/megatron/configs/MI300X/kda_300M_BF16-pretrain.yaml
 ```
 
 ### Recommended toggle profile (YAML or env var)
@@ -136,9 +137,9 @@ for the patch-by-patch breakdown. Nothing needs to be run by hand.
 
 ### C. YAML configuration changes
 
-#### `primus/configs/models/megatron/zebra_llama_300M_kda_pure.yaml` (new)
+#### `primus/configs/models/megatron/kda_300M.yaml` (new)
 
-300M architecture-only YAML matched to FLA's `kda_300M_pure.json`:
+300M architecture-only YAML matched to FLA's `kda_300M.json`:
 
 ```yaml
 extends: [mamba_base.yaml]
@@ -166,7 +167,7 @@ norm_epsilon: 1.0e-6
 position_embedding_type: none
 ```
 
-#### `examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml` (new)
+#### `examples/megatron/configs/MI300X/kda_300M_BF16-pretrain.yaml` (new)
 
 The training-side config sets:
 
@@ -214,7 +215,7 @@ load: /home/<user>/Primus/output/fla_init_kda_300M
 
 The full per-iteration log lives at `primus_kda.log` once training
 finishes. Compare against FLA's `trainer_state.json` log_history
-(`/home/<user>/checkpoints/kda_pure_300M_10B/trainer_state.json`).
+(`/home/<user>/checkpoints/kda_300M_10B/trainer_state.json`).
 
 Notable comparison points (FLA loss is divided by 8 to undo the
 DeepSpeed sum-across-ranks):
@@ -257,9 +258,9 @@ primus/backends/megatron/patches/                  # 6 patches (same as GDN), Pr
   fla_runtime_patches.py                           # resolves PRIMUS_FLA_* knobs onto args
   mamba_fla_data_patches.py                        # FLA-order dataset shim wiring
 primus/configs/models/megatron/
-  zebra_llama_300M_kda_pure.yaml                   # architecture-only
+  kda_300M.yaml                   # architecture-only
 examples/megatron/configs/MI300X/
-  zebra_llama_300M_kda_pure-pretrain.yaml          # training config
+  kda_300M_BF16-pretrain.yaml          # training config
 tools/hybrid/
   convert_fla_to_megatron.py                       # FLA Arrow → Megatron .bin/.idx (shared)
   fla_order_dataset.py                             # FLA-order dataset shim (shared)

@@ -107,7 +107,10 @@ class ScheduleInterleaved1F1B(PipelineScheduleAlgo):
             # Build schedule for each chunk with timing information
             rank_schedule = schedule_table[rank]
 
-            num_of_warmup_phases = (self.pp_size - 1 - rank) * 2 + (self.vpp_size - 1) * self.pp_size
+            num_of_warmup_phases = min(
+                (self.pp_size - 1 - rank) * 2 + (self.vpp_size - 1) * self.pp_size,
+                self.micro_batches * self.vpp_size,
+            )
 
             fwd_chunk = 0
             bwd_chunk = self.vpp_size - 1

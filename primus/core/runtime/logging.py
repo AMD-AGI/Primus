@@ -29,6 +29,7 @@ Workflow example:
 """
 
 import builtins
+import os
 from typing import Any
 
 from primus.core.utils import logger
@@ -36,6 +37,56 @@ from primus.core.utils.env import get_torchrun_env
 from primus.core.utils.module_utils import debug_rank_all, set_logging_rank
 
 # from primus.core.utils.distributed_logging import debug_rank_all, set_logging_rank
+
+# PRIMUS_LOG_LEVEL follows shell conventions; loguru spells some levels differently.
+_ENV_LEVEL_ALIASES = {"WARN": "WARNING", "FATAL": "CRITICAL"}
+_LOGURU_LEVELS = frozenset({"TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"})
+
+
+_LEVEL_SEVERITY = {
+    "TRACE": 5,
+    "DEBUG": 10,
+    "INFO": 20,
+    "SUCCESS": 25,
+    "WARNING": 30,
+    "ERROR": 40,
+    "CRITICAL": 50,
+}
+
+
+def console_level_from_env() -> Any:
+    """Console log level requested via ``PRIMUS_LOG_LEVEL``, or None if unset/invalid.
+
+    Unrecognised values are ignored rather than raising: loguru rejects unknown
+    level names, and a typo in an env var must not abort training.
+    """
+    raw = os.environ.get("PRIMUS_LOG_LEVEL", "").strip().upper()
+    if not raw:
+        return None
+    level = _ENV_LEVEL_ALIASES.get(raw, raw)
+    return level if level in _LOGURU_LEVELS else None
+
+
+def resolve_console_level(config_level: str) -> str:
+    """Console level: the more verbose of ``config_level`` and ``PRIMUS_LOG_LEVEL``.
+
+    ``PRIMUS_LOG_LEVEL`` raises verbosity but never lowers it. It cannot act as a
+    plain override because ``runner/lib/common.sh`` exports it unconditionally as
+    ``${PRIMUS_LOG_LEVEL:-INFO}``, so it is *always* set in a launcher-driven run;
+    treating that always-present default as an override would silently disable the
+    ``stderr_sink_level`` / ``sink_level`` config knobs for every such run.
+
+    As a floor it is purely additive: ``--debug`` and a manual
+    ``PRIMUS_LOG_LEVEL=DEBUG`` now reach the console (previously the flag was parsed
+    and discarded), while a config asking for more detail is still honoured. The
+    trade-off is that PRIMUS_LOG_LEVEL=WARN/ERROR does not quieten the Python
+    console -- use ``stderr_sink_level`` in the module config for that.
+    """
+    env_level = console_level_from_env()
+    if env_level is None:
+        return config_level
+    config_severity = _LEVEL_SEVERITY.get(str(config_level).upper(), _LEVEL_SEVERITY["INFO"])
+    return env_level if _LEVEL_SEVERITY[env_level] < config_severity else config_level
 
 
 def init_worker_logger(primus_config: Any, module_name: str = "primus", module_config=None) -> None:
@@ -71,6 +122,11 @@ def init_worker_logger(primus_config: Any, module_name: str = "primus", module_c
             # Otherwise, use individual levels if specified
             file_sink_level = getattr(module_config.params, "file_sink_level", "DEBUG")
             stderr_sink_level = getattr(module_config.params, "stderr_sink_level", "INFO")
+
+    # `--debug` / PRIMUS_LOG_LEVEL can only raise console verbosity, never lower it.
+    # Only the console level moves; the file sinks keep their own level so debug.log
+    # stays complete regardless of console verbosity.
+    stderr_sink_level = resolve_console_level(stderr_sink_level)
 
     dist_env = get_torchrun_env()
 
@@ -164,6 +220,10 @@ def update_module_name(new_module_name: str, new_module_config=None) -> None:
                 file_sink_level = new_module_config.params.get("file_sink_level")
             if new_module_config.params.get("stderr_sink_level") is not None:
                 stderr_sink_level = new_module_config.params.get("stderr_sink_level")
+
+    # Keep the env/`--debug` floor in force across a module switch, same as
+    # init_worker_logger, so verbosity does not silently reset at a stage boundary.
+    stderr_sink_level = resolve_console_level(stderr_sink_level)
 
     # Create new logger config with updated module_name
     new_logger_cfg = logger.LoggerConfig(

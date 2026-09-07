@@ -29,10 +29,12 @@ classifiers = [
 
 # Runtime dependencies for the published wheel.
 #
-# NOTE: keep these in sync with `requirements.txt`. The pure dev/test tooling
-# (e.g. pre-commit, expecttest, pytest) intentionally lives under the optional
-# `dev` extra instead of being forced onto every install. `torch` is provided
-# by the base ROCm image and is deliberately NOT pinned here.
+# Keep this list to indexable (PEP 440) constraints. Hatchling refuses PEP 508
+# direct references (`name @ git+...`) in `project.dependencies`, which broke
+# `python -m build` on the v26.6.0 release job. VCS-pinned MLPerf packages live
+# in the `mlperf` extra (and in `requirements.txt` / the training images).
+# `torch` is provided by the base ROCm image and is deliberately NOT pinned here.
+# The remaining names should stay aligned with `requirements.txt`.
 dependencies = [
     "loguru",
     "wandb",
@@ -48,12 +50,16 @@ dependencies = [
     "mlflow==3.11.1",
     "pyrsmi",
     "plotext",
-    "mlperf-logging @ git+https://github.com/mlcommons/logging.git@6.0.0-rc5",
-    "mlperf-common @ git+https://github.com/NVIDIA/mlperf-common.git@b86d175a05849d650a8ff69c1e2c37b9f4e61d51",
 ]
 
 [project.optional-dependencies]
 dev = ["pre-commit", "expecttest", "pytest"]
+# Not default wheel deps: installing these clones GitHub. Images and
+# `pip install -r requirements.txt` already pull the same pins.
+mlperf = [
+    "mlperf-logging @ git+https://github.com/mlcommons/logging.git@6.0.0-rc5",
+    "mlperf-common @ git+https://github.com/NVIDIA/mlperf-common.git@b86d175a05849d650a8ff69c1e2c37b9f4e61d51",
+]
 
 [project.scripts]
 # Unified bash launcher (slurm / container / direct). Implemented in runner/.
@@ -91,6 +97,12 @@ known_first_party = ["odc"]
 [tool.hatch.version]
 # Read __version__ statically from primus/__init__.py (no import side effects).
 path = "primus/__init__.py"
+
+# Required because the `mlperf` extra uses PEP 508 direct references. Without
+# this, hatchling 1.32+ aborts `build_sdist` even though those pins are not
+# default Requires-Dist. See https://hatch.pypa.io/dev/config/metadata/
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["primus"]

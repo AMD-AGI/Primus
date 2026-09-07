@@ -25,10 +25,10 @@
 
 ## ✅ Supported Models (high level)
 
-- **Megatron-LM**: LLaMA2 / LLaMA3.x / LLaMA4 families, DeepSeek-V2 / V3 / V4, Qwen2.5 and Qwen3 (dense and MoE), Mixtral, Grok, GPT-OSS 20B/120B, GLM, Kimi K2, MiniMax, LFM2, plus hybrid and linear-attention stacks (Mamba, Zebra-LLaMA with GDN / KDA)
+- **Megatron-LM**: LLaMA2 / LLaMA3.x / LLaMA4 families, DeepSeek-V2 / V3 / V4, Qwen2.5 and Qwen3 (dense and MoE), Mixtral, Grok, GPT-OSS 20B/120B, GLM, Kimi K2, MiniMax, LFM2, plus hybrid and linear-attention stacks (Mamba, Hylo-LLaMA with GDN / KDA)
 - **TorchTitan**: LLaMA3.x / LLaMA4, DeepSeek-V3 (16B to 671B), and Qwen3 0.6B to 32B
 - **MaxText (JAX)**: LLaMA2 / LLaMA3.x, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, and Qwen3 14B / 30B-A3B (subset; see MaxText docs for details)
-- **Megatron-Bridge**: SFT and LoRA post-training for Qwen3 8B/32B, LLaMA3.1 70B, Zebra-LLaMA, and Mamba
+- **Megatron-Bridge**: SFT and LoRA post-training for Qwen3 8B/32B, LLaMA3.1 70B, Hylo-LLaMA, and Mamba
 - **Diffusion**: Flux.1 (schnell / dev) text-to-image and Wan 2.1 / 2.2 text- and image-to-video
 
 For the full and up-to-date model matrix, see [Supported Models](./docs/06-developer-guide/model-support-matrix.md).
