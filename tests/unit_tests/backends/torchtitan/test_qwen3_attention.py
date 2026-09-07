@@ -20,8 +20,6 @@ call. These tests pin that contract with a stub standing in for
 
 import pytest
 
-pytest.importorskip("torchtitan")
-
 import torch
 import torch.nn as nn
 
@@ -35,6 +33,7 @@ def attention_cls():
     # this import at module scope would cache torchtitan submodules before
     # those mocks run, leaving stale/detached submodule state behind for
     # later tests (e.g. test_moe_grouped_mm_patch.py).
+    pytest.importorskip("torchtitan")
     from primus.backends.torchtitan.models.qwen3.model.model import Attention
 
     return Attention
