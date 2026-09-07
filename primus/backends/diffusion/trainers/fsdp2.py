@@ -115,6 +115,9 @@ class FSDP2Trainer(BaseWanTrainer):
             raise ValueError(f"Unsupported FSDP2_REDUCE_DTYPE={reduce_dtype_name!r}")
         reduce_dtype = torch.float32 if reduce_dtype_name == "fp32" else torch.bfloat16
 
+        if os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1" and self.rank == 0:
+            logger.info("FSDP2: FP8 AllGather uses native one-byte transport")
+
         # Keep FP32 parameter/optimizer storage while allowing an explicit
         # reduction-dtype experiment around the FP32-qualified default.
         if mp_dtype != torch.float32:

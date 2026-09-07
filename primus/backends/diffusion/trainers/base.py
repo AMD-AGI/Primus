@@ -1043,6 +1043,13 @@ class BaseWanTrainer:
         if hasattr(core, "freeze_except"):
             core.freeze_except()
 
+        precompute_fp8_scales = None
+        if os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1":
+            from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
+
+            precompute_fp8_scales = precompute_float8_dynamic_scale_for_fsdp
+            precompute_fp8_scales(self.model)
+
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         torch.cuda.reset_peak_memory_stats()
@@ -1119,6 +1126,8 @@ class BaseWanTrainer:
                     grad_norm = self._clip_grad_norm()
 
                     self.optimizer.step()
+                    if precompute_fp8_scales is not None:
+                        precompute_fp8_scales(self.model)
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1

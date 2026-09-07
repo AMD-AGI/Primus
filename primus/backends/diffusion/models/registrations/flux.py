@@ -326,6 +326,7 @@ def build_flux_model(model_config: dict[str, Any]):
             float8_ops.addmm_float8_unwrapped = selective_flydsl_addmm
             logger.info(f"Using FlyDSL FP8 GEMM for shapes {sorted(_FP8_SELECTIVE_GEMM_SHAPES)}")
 
+        fp8_all_gather = os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1"
         full_wgrad_fqns: list[str] = []
         high_precision_wgrad_fqns: list[str] = []
 
@@ -365,7 +366,7 @@ def build_flux_model(model_config: dict[str, Any]):
             module_filter_fn=full_wgrad_filter,
             config=Float8LinearConfig(
                 pad_inner_dim=False,
-                enable_fsdp_float8_all_gather=False,
+                enable_fsdp_float8_all_gather=fp8_all_gather,
             ),
         )
         dit = convert_to_float8_training(
@@ -375,7 +376,7 @@ def build_flux_model(model_config: dict[str, Any]):
                 cast_config_input_for_grad_weight=CastConfig(scaling_type=ScalingType.DISABLED),
                 cast_config_grad_output_for_grad_weight=CastConfig(scaling_type=ScalingType.DISABLED),
                 pad_inner_dim=False,
-                enable_fsdp_float8_all_gather=False,
+                enable_fsdp_float8_all_gather=fp8_all_gather,
             ),
         )
         expected_full_count = len(dit.double_blocks) * 6 + len(dit.single_blocks) * 2
