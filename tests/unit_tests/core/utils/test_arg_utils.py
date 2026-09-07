@@ -30,6 +30,16 @@ class TestCoerceCliValueModern(unittest.TestCase):
         self.assertEqual(_coerce_cli_value_modern("0.001"), 0.001)
         self.assertEqual(_coerce_cli_value_modern("-1.5"), -1.5)
 
+    def test_scientific_notation_float(self):
+        # Regression: `--lr 1e-5` used to stay the string "1e-5" because the
+        # float branch only ran when the token contained ".".
+        self.assertEqual(_coerce_cli_value_modern("1e-5"), 1e-5)
+        self.assertEqual(_coerce_cli_value_modern("2e-4"), 2e-4)
+        self.assertEqual(_coerce_cli_value_modern("1E3"), 1000.0)
+        self.assertEqual(_coerce_cli_value_modern("-3.5e-2"), -3.5e-2)
+        for token in ("1e-5", "2e-4", "1E3"):
+            self.assertIsInstance(_coerce_cli_value_modern(token), float)
+
     def test_string_fallback(self):
         self.assertEqual(_coerce_cli_value_modern("hello"), "hello")
         self.assertEqual(_coerce_cli_value_modern("v1.2.3"), "v1.2.3")
@@ -89,6 +99,11 @@ class TestParseCliOverrides(unittest.TestCase):
                 "train_iters": 10,
             },
         )
+
+    def test_scientific_notation_override(self):
+        result = parse_cli_overrides(["--lr", "1e-5", "--min_lr", "1e-6"])
+        self.assertEqual(result, {"lr": 1e-5, "min_lr": 1e-6})
+        self.assertIsInstance(result["lr"], float)
 
     def test_legacy_mode_unchanged(self):
         # Sanity: legacy eval-based path still works for list literals.
