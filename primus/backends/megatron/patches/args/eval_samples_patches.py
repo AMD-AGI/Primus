@@ -17,8 +17,8 @@ corrected ``eval_iters``.
 """
 
 from primus.backends.megatron.training.eval_budget import (
-    get_eval_global_batch_size,
     assert_val_worker_divisibility,
+    get_eval_global_batch_size,
     get_val_num_workers,
     read_energon_split_sample_count,
     resolve_eval_iters,
