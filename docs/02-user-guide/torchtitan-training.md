@@ -6,21 +6,21 @@ Training performance validation with the AMD PyTorch Docker image on AMD Instinc
 
 PyTorch is an open-source machine learning framework that is widely used for model training, with GPU-optimized components for transformer-based models.
 
-The ROCm PyTorch training Docker image `rocm/primus:v26.5`, available through [AMD Infinity Hub](https://www.amd.com/en/developer/resources/infinity-hub.html), provides a prebuilt, optimized environment for fine-tuning and pre-training a model on the AMD Instinct™ MI300X and MI325X accelerators.
+The ROCm PyTorch training Docker image `rocm/primus:v26.6`, available through [AMD Infinity Hub](https://www.amd.com/en/developer/resources/infinity-hub.html), provides a prebuilt, optimized environment for fine-tuning and pre-training a model on the AMD Instinct™ MI300X and MI325X accelerators.
 
-For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.5`](../01-getting-started/release-notes.md#rocmprimusv265). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.4`](../01-getting-started/release-notes.md#rocmprimusv264).
+For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.6`](../01-getting-started/release-notes.md#rocmprimusv266). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.5`](../01-getting-started/release-notes.md#rocmprimusv265).
 
 Training is launched with `primus-cli`, the unified Primus CLI that covers direct, container, and Slurm execution from the same YAML configuration. See the [CLI reference](./cli-reference.md).
 
 ---
 
-## Important notes for v26.5
+## Important notes for v26.6
 
 Read this section before starting a training run. It collects the settings this release requires, the architecture-specific tuning, and the known issues. The contents change from release to release, so re-read it when you move to a new image tag.
 
 ### Required settings
 
-**Use the `release/v26.5` branch.** It is the Primus branch matching the `rocm/primus:v26.5` image. The `/workspace/Primus` checkout baked into the image is built from commit `b511d1b6` and the branch has moved on since — see [Release notes → Primus source for v26.5](../01-getting-started/release-notes.md#primus-source-for-v265). [Environment setup](#get-the-primus-source) has the clone command.
+**Use the `release/v26.6` branch.** It is the Primus branch matching the `rocm/primus:v26.6` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image — see [Release notes → Primus source for v26.6](../01-getting-started/release-notes.md#primus-source-for-v266). [Environment setup](#get-the-primus-source) has the clone command.
 
 ### Architecture-specific settings
 
@@ -33,7 +33,7 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Known issues
 
-No TorchTitan backend issues are currently tracked for v26.5.
+No TorchTitan backend issues are currently tracked for v26.6.
 
 ### Registry change
 
@@ -102,11 +102,11 @@ Clone the branch matching the image. Do this on the host — every command in th
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.5
+git checkout release/v26.6
 git submodule update --init --recursive
 ```
 
-That is all the setup required. The training commands below use `primus-cli container`, which starts `rocm/primus:v26.5` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used — see [Release notes → Primus source for v26.5](../01-getting-started/release-notes.md#primus-source-for-v265).
+That is all the setup required. The training commands below use `primus-cli container`, which starts `rocm/primus:v26.6` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used — see [Release notes → Primus source for v26.6](../01-getting-started/release-notes.md#primus-source-for-v266).
 
 Container mode also forwards environment variables you export on the host, including `HF_TOKEN`, the gfx942 tuning variables, and the `NCCL_*` networking variables. The forwarded list is `container.options.env` in `runner/.primus.yaml`.
 
@@ -118,11 +118,11 @@ Container mode also forwards environment variables you export on the host, inclu
 If you want an interactive shell — for debugging, or to run `primus-cli direct` yourself — start the container manually and bind your Primus checkout:
 
 ```bash
-docker pull rocm/primus:v26.5
+docker pull rocm/primus:v26.6
 docker run -it --device /dev/dri --device /dev/kfd --network host --ipc host \
     --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined --privileged \
     -v $PWD:$PWD -w $PWD -v $HOME/.ssh:/root/.ssh \
-    --shm-size 64G --name training_env rocm/primus:v26.5
+    --shm-size 64G --name training_env rocm/primus:v26.6
 ```
 
 Re-enter it later with `docker start training_env && docker exec -it training_env bash`. Inside the container, replace `primus-cli container` with `primus-cli direct` in every command below. Remember to re-export `HF_TOKEN` and any architecture or `NCCL_*` variables, since a manual `docker run` does not forward them.
@@ -146,7 +146,7 @@ export HF_TOKEN=$your_personal_hf_token
 
 For detailed usage of `primus-cli`, see the [CLI reference](./cli-reference.md).
 
-Run these from your `release/v26.5` checkout **on the host**. Container mode starts the image and runs the training inside it for you. If you already have a shell inside the container, swap `container` for `direct`.
+Run these from your `release/v26.6` checkout **on the host**. Container mode starts the image and runs the training inside it for you. If you already have a shell inside the container, swap `container` for `direct`.
 
 ### Benchmarking examples
 
