@@ -23,6 +23,15 @@ here; the correct bundle for your cluster is often an older one.
 > This guide assumes a **published** bundle throughout. If you have been given a
 > bundle as a tarball rather than a repository, see
 > [section 7](#7-installing-from-local-deb-files).
+>
+> **What this was tested on.** The MaxText JAX training images —
+> `rocm/jax-training:maxtext-v26.3.2`, `-v26.4`, and `-v26.6`. The rebuild was
+> exercised on all three; the runtime check in [section 6](#6-verify) on
+> `v26.3.2`. It has **not** been tested on Primus's own `rocm/primus:*` images.
+> Nothing here is specific to MaxText — it operates on `libionic` and the apt
+> configuration, not on the framework — but a different image may enable
+> different bundle repositories or ship a different `libionic` to begin with, so
+> confirm with section 6 rather than assuming the versions quoted here.
 
 ---
 
