@@ -29,12 +29,25 @@
 # surrounding split and dtype casts here are exactly that kind of region.
 ###############################################################################
 
+import os
 from typing import Tuple
 
 import torch
 import triton
 import triton.language as tl
 from torch.library import custom_op, triton_op, wrap_triton
+
+# The autotune key below is ["M", "D"], so every distinct M pays a full sweep: ~5 s for
+# the 40 forward configs, ~21 s for the 84 backward ones. That is charged per block, so
+# routing the whole-QKV path through all 57 of them spent ~25 minutes before iteration 1.
+# The sweep does not earn it. Measured at both production M values, the best eight of the
+# forward configs sit within 2.8% of one another, and the winner is not even stable
+# between runs -- M=786432 chose BLOCK_M=2/w1/s1 once and BLOCK_M=8/w4/s2 the next time,
+# two configs 0.4% apart. Left on, the tuner moves the step time an A/B is measuring.
+# Setting PRIMUS_NORM_ROPE_PIN=1 collapses each space to the measured best compromise
+# (worst case 1.001x forward, 1.002x backward across both shapes), and triton skips
+# benchmarking entirely when handed a single config.
+_PIN_CONFIGS = os.environ.get("PRIMUS_NORM_ROPE_PIN", "0").lower() in ("1", "true", "on")
 
 
 @triton.jit
@@ -98,6 +111,8 @@ def _pair_w(W, D: tl.constexpr, INTERLEAVED: tl.constexpr):
 
 
 def _fwd_configs():
+    if _PIN_CONFIGS:
+        return [triton.Config({"BLOCK_M": 8}, num_warps=4, num_stages=2)]
     return [
         triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
         for bm in (1, 2, 4, 8, 16)
@@ -164,6 +179,8 @@ NPROG = 4096
 
 
 def _bwd_configs():
+    if _PIN_CONFIGS:
+        return [triton.Config({"BLOCK_M": 64}, num_warps=8, num_stages=2)]
     return [
         triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
         for bm in (1, 2, 4, 8, 16, 32, 64)
