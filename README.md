@@ -37,6 +37,7 @@ For the full and up-to-date model matrix, see [Supported Models](./docs/06-devel
 
 ## 🆕 What's New
 
+- **[2026/09/07]** Primus **v26.6** training images: `rocm/primus:v26.6` and `rocm/jax-training:maxtext-v26.6` (JAX 0.11.0, Transformer Engine 2.17)
 - **[2026/07/29]** ⚡ **MegaMoE** - FlyDSL-based fused MoE layer that folds expert all-to-all into the grouped GEMMs, plus FP4 grouped GEMM support ([MegaMoE guide](./docs/04-technical-guides/mega-moe.md))
 - **[2026/07/29]** Hybrid linear-attention models: Gated Delta Net (GDN) and Kimi Delta Attention (KDA) on Megatron-LM ([Hybrid models](./docs/04-technical-guides/hybrid-models/README.md))
 - **[2026/07/22]** Backend upgrades: TorchTitan v0.2.2 (PyTorch 2.12) with GPT-OSS, and MaxText v26.5
@@ -111,9 +112,9 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
 
     ```bash
     # For Megatron-LM and TorchTitan backends
-    docker pull rocm/primus:v26.5
+    docker pull rocm/primus:v26.6
     # For MaxText backend
-    docker pull rocm/jax-training:maxtext-v26.5
+    docker pull rocm/jax-training:maxtext-v26.6
     ```
 
 2. **Clone the repository**
@@ -122,7 +123,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
     cd Primus
     # checkout the branch for the specific release
-    git checkout release/v26.5
+    git checkout release/v26.6
     git submodule update --init --recursive
     ```
 
@@ -133,7 +134,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     # NOTE: If your config downloads weights/tokenizer from Hugging Face Hub,
     #       you typically need to pass HF_TOKEN into the container.
     # Run in the Primus repository root directory
-    ./primus-cli container --image rocm/primus:v26.5 \
+    ./primus-cli container --image rocm/primus:v26.6 \
       --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
       -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
     ```
@@ -151,7 +152,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/02-user-gu
     python -m venv primus-env
     source primus-env/bin/activate
     # Install Primus
-    pip install "primus==26.5.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
+    pip install "primus==26.6.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
 
     ```
 
@@ -162,7 +163,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/02-user-gu
 2. **Run training in container using pip-installed Primus**
 
     ```bash
-    primus-cli container --image rocm/primus:v26.5 \
+    primus-cli container --image rocm/primus:v26.6 \
     --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
     --volume /path/to/your/data:/data  -- --log_file /data/run.log \
     -- train pretrain --config /data/your/config.yaml

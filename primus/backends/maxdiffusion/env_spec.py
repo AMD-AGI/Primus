@@ -26,7 +26,9 @@ never sets it, and forcing it here diverged from that baseline (contributing to
 an RCCL init hang on gfx950). Any arch-specific diffusion knob belongs in the
 per-config ``env:`` block alongside the rest of the tuning.
 
-Precedence (see env_registry): per-config ``env:`` > outer/shell env > image-baked.
+Precedence (see env_registry): ``XLA_FLAGS_APPEND`` > per-config ``env:`` >
+inherited (image-baked or outer shell). Because this backend contributes no
+defaults, a config's ``XLA_FLAGS`` block is used verbatim, exactly as before.
 """
 
 from __future__ import annotations

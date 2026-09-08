@@ -324,6 +324,10 @@ class PrimusRuntime:
         Semantics:
           - Values are stringified and ``os.environ[k] = str(v)`` unconditionally,
             so a per-config ``env:`` WINS over values baked into the image.
+          - Keys are registered with ``env_registry.mark_config_owned`` so a backend's
+            append-mode defaults (``XLA_FLAGS``) do not override them. Setting
+            ``XLA_FLAGS`` here therefore replaces the managed defaults outright; use
+            ``XLA_FLAGS_APPEND`` to override individual flags on top of them.
           - ``$VAR`` / ``${VAR}`` references are expanded via ``os.path.expandvars``
             (bash ``${VAR:-default}`` syntax is NOT expanded).
           - Best-effort: a malformed or missing ``env:`` never aborts the run.
@@ -350,10 +354,15 @@ class PrimusRuntime:
                     f"(type={type(env_block).__name__})"
                 )
                 return
+            from primus.core.backend.env_registry import mark_config_owned
+
             for key, value in env_block.items():
                 resolved = os.path.expandvars(str(value))
                 os.environ[str(key)] = resolved
                 print(f"[Primus:Runtime] env override: {key}={resolved}")
+            # Let append-mode backend defaults (XLA_FLAGS) see that these came from
+            # the config and step aside instead of overriding them.
+            mark_config_owned(*(str(k) for k in env_block))
         except Exception as exc:  # noqa: BLE001 - env overrides must never abort a run
             print(f"[Primus:Runtime] WARNING: could not apply top-level `env:` from config: {exc}")
 
