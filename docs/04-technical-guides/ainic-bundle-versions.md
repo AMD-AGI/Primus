@@ -20,9 +20,8 @@ here; the correct bundle for your cluster is often an older one.
 > *enabled* at runtime — for that, see
 > [Multi-node networking](./multi-node-networking.md#4-ainic-amd-ai-nic).
 >
-> Sections 1–6 assume a **published** bundle, which is the normal case.
-> Unpublished bundles — internal or pre-release builds delivered as a tarball —
-> are packaged differently in several respects and need
+> This guide assumes a **published** bundle throughout. If you have been given a
+> bundle as a tarball rather than a repository, see
 > [section 7](#7-installing-from-local-deb-files).
 
 ---
@@ -121,12 +120,10 @@ bundle.
 | `1.117.5-a-56` | `54.0-184` |
 | `1.117.1-a-63` | `54.0-149.g3304be71` |
 
-Every **published** bundle uses this `54.0-NNN` scheme and ships one `libionic`
-version for all distributions. **Unpublished bundles do not** — they use a dated
-scheme and ship one variant per distribution. If you are working from a tarball
-rather than the repository, read [section 7](#7-installing-from-local-deb-files)
-first; the difference changes both the install command and the version you should
-expect to see.
+Every published bundle uses this `54.0-NNN` scheme and ships one `libionic`
+version for all distributions. A bundle delivered as a tarball may not — read the
+version out of the `.deb` itself rather than assuming the scheme
+([section 7](#7-installing-from-local-deb-files)).
 
 ## 2. Check what you have
 
@@ -370,34 +367,39 @@ the full picture.
 
 ## 7. Installing from local `.deb` files
 
-For a bundle that is not published — an internal or pre-release build — you will
-have a tarball rather than a repository. **Unpublished bundles are packaged
-differently from published ones**, and every difference below has consequences for
-the install:
+Occasionally a bundle is delivered as a tarball rather than published to
+`repo.radeon.com`. **Prefer the apt path in [section 5](#5-how-the-rebuild-works)
+whenever the bundle you need is published** — it handles either direction with no
+extra flags and none of the care below.
 
-| | Published bundle | Unpublished / pre-release build |
-|---|---|---|
-| `libionic` version scheme | `54.0-NNN` | dated, e.g. `50.0.26.08.28.001-1~ubu24.04` |
-| Variants shipped | one, for all distributions | **one per distribution** |
-| `libionic-dev` → `libionic1` | `Depends` | **`Pre-Depends`** |
-| Owner of `libionic.so` | `libionic1` | **`libionic-dev`** |
-| Inner archive naming | `rdma-core-debs.tar.xz`, real xz | `libionic-debs.tar.xz`, **gzip despite the name** |
+Tarball-delivered bundles have been seen to differ from published ones in how
+their packages are built, so the steps here are deliberately written to work
+either way rather than assuming a particular layout. Read the version and the
+dependency fields out of the files themselves instead of assuming them.
 
 ### Getting to the two `.deb` files
 
 A bundle tarball does not contain loose `.deb` files. Extract in three stages, and
-use `tar -xf` rather than `tar -xJf` throughout — the inner archives are sometimes
-gzip regardless of their `.tar.xz` name, and `-xf` detects the format either way:
+use `tar -xf` rather than `tar -xJf` throughout — an inner archive is sometimes
+gzip regardless of its `.tar.xz` name, and `-xf` detects the format either way:
 
 ```bash
-tar -xf ainic_bundle_<version>.tar*                       # or .tar.gz
+tar -xf ainic_bundle_<version>.tar*    # or .tar.gz
 tar -xf host_sw_pkg.tar*
-tar -xf host_sw_pkg/ionic_driver/deb/libionic-debs.tar.xz  # rdma-core-debs.tar.xz in older bundles
+ls host_sw_pkg/ionic_driver/deb/       # find the archive carrying libionic
+tar -xf host_sw_pkg/ionic_driver/deb/<name>-debs.tar.xz
 ```
 
-The result is one directory per distribution codename. **Copy only the two files
-matching your base image**, and name them explicitly — a wildcard `COPY` would
-pick up every distribution's variant and hand `dpkg` several conflicting versions:
+**List that directory rather than guessing the filename.** It also holds
+`linux-debs.tar.xz` and `perftest-debs.tar.xz`, which are the driver and
+benchmark packages and belong on the host, not in the container. The archive
+carrying `libionic` has been seen named both `rdma-core-debs.tar.xz` and
+`libionic-debs.tar.xz`.
+
+The result may be one directory per distribution codename. **Copy only the two
+files matching your base image**, and name them explicitly — where several
+variants are present, a wildcard `COPY` picks up all of them and hands `dpkg`
+conflicting versions:
 
 ```bash
 codename=$(docker run --rm <base-image> sh -c '. /etc/os-release; echo $VERSION_CODENAME')
@@ -419,8 +421,8 @@ already satisfied:
 dpkg-deb -f libionic1_*.deb Pre-Depends Depends
 ```
 
-Pre-release builds have been seen to pin a narrow `ibverbs-providers` range, which
-a base image with a newer `rdma-core` will not satisfy.
+Some builds pin a narrow `ibverbs-providers` range, which a base image with a
+newer `rdma-core` will not satisfy.
 
 ### The install step
 
@@ -442,29 +444,30 @@ RUN set -eux; \
 Three things differ from a naive `dpkg -i` of both files at once, and all three
 are required:
 
-1. **Two separate invocations, `libionic1` first.** Pre-release builds make
-   `libionic-dev` **`Pre-Depend`** on the exact `libionic1` version. A
-   pre-dependency must be satisfied by an already-*configured* package, which a
-   single `dpkg -i` processing both files in one pass cannot do — it fails with
-   `pre-dependency problem - not installing libionic-dev`, after having already
-   replaced `libionic1`, leaving the layer half-converted.
+1. **Two separate invocations, `libionic1` first.** Where `libionic-dev`
+   **`Pre-Depends`** on an exact `libionic1` version, a single `dpkg -i` given
+   both files cannot satisfy it: a pre-dependency must be met by an
+   already-*configured* package, which one pass over both archives cannot
+   arrange. It fails with `pre-dependency problem - not installing libionic-dev`
+   *after* having already replaced `libionic1`, leaving the layer half-converted.
+   Check with `dpkg-deb -f libionic-dev_*.deb Pre-Depends`; installing in two
+   steps costs nothing when there is no pre-dependency.
 
-2. **`--force-overwrite`.** The bare `libionic.so` symlink belongs to `libionic1`
-   in published bundles and to `libionic-dev` in pre-release builds, and neither
-   declares a `Replaces` for the other. Changing between the two packaging styles
-   therefore fails with
+2. **`--force-overwrite`.** The bare `libionic.so` symlink is not always owned by
+   the same package — it has been seen shipped by `libionic1` and by
+   `libionic-dev` — and the packages declare no `Replaces` for each other. Where
+   the owning package changes, the install fails with
    `trying to overwrite '/usr/lib/x86_64-linux-gnu/libionic.so', which is also in package ...`.
-   The flag is only strictly needed in one direction, but it is harmless in both.
+   The flag is harmless when ownership does not change.
 
 3. **`rm -f /etc/apt/sources.list.d/*amdainic*`.** More important here than on the
-   apt path. An unpublished bundle exists in no repository, and its dated version
-   sorts *below* the published `54.0-NNN` scheme, so apt regards the base image's
-   bundle as an upgrade. Any later `apt install` or `apt upgrade` in a downstream
-   layer will quietly replace your bundle, and `dpkg -C` will still report a
-   consistent system afterwards. There is no diagnostic signal at all.
-
-If the bundle you want **is** published, prefer the apt path in section 5. It
-handles either direction without extra flags and needs none of the above.
+   apt path. A bundle installed from local files exists in no repository, and its
+   version may well sort *below* what the base image's repositories offer, in
+   which case apt regards the bundle you just replaced as an upgrade. Any later
+   `apt install` or `apt upgrade` in a downstream layer then quietly reverts your
+   bundle, and `dpkg -C` still reports a consistent system afterwards. There is no
+   diagnostic signal at all. Removing the repositories is the only thing that
+   makes a local install durable.
 
 ## 8. Troubleshooting
 
@@ -473,12 +476,12 @@ handles either direction without extra flags and needs none of the above.
 | `apt install` reports `already the newest version` and nothing changes | Target bundle is older than the installed `libionic` and the version was not pinned. See section 5. |
 | Build fails on `test "$(dpkg-query ...)" = "$ver"` | Working as intended — the install did not move `libionic` to the requested version. Check the pin and the repository filter. See section 5. |
 | Built image still has the old `libionic`, build reported success | Version assertion missing from the install step. See section 5. |
-| `libionic` reverts to another version after a later `apt` command | Old bundle repositories left enabled. See section 5, and section 7 for why this is worse for unpublished bundles. |
+| `libionic` reverts to another version after a later `apt` command | Old bundle repositories left enabled. See section 5, and section 7 for why this is worse after a local `.deb` install. |
 | `E: Packages were downgraded and -y was used without --allow-downgrades` | Expected for a downgrade; add `--allow-downgrades`. |
 | `apt update` fails with `404 Not Found` on `Packages` | Bundle directory is an empty placeholder, the name is wrong, or the distribution codename in the repository line does not match the base image. See sections 4 and 5. |
 | `xz: (stdin): File format not recognized` while extracting a bundle | Inner archive is gzip despite its `.tar.xz` name. Use `tar -xf`. See section 7. |
 | `dpkg: pre-dependency problem - not installing libionic-dev` | Both `.deb` files given to one `dpkg -i`. Install `libionic1` first, in its own invocation. See section 7. |
-| `dpkg: trying to overwrite '.../libionic.so', which is also in package ...` | Moving between published and pre-release packaging. Add `--force-overwrite`. See section 7. |
+| `dpkg: trying to overwrite '.../libionic.so', which is also in package ...` | The two bundles disagree about which package owns that symlink. Add `--force-overwrite`. See section 7. |
 | `ibv_devices` lists no `ionic` device | Not AINIC hardware; the host `ionic` driver is not loaded; or `libionic` is ABI-incompatible with the host driver. See sections 2 and 3. |
 | Training runs fine but throughput is far below expectation | RCCL fell back to `NET/Socket`. The job still completes and converges normally, so check the transport rather than the loss. See section 6. |
 | The requested `libionic` is installed but the fabric is unreachable | The installed bundle is not compatible with the host. Bundle selection is a cluster question — check `fw_ver` on the host, and note that the required version may be older than what the image shipped. See section 3. |
