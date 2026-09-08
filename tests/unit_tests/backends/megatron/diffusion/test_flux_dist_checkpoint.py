@@ -3,6 +3,9 @@
 
 """Distributed-checkpoint regression tests for Flux's heterogeneous layers."""
 
+import tempfile
+from pathlib import Path
+
 import pytest
 import torch
 from megatron.core.dist_checkpointing import load, save
@@ -60,7 +63,7 @@ class TestFluxDistCheckpoint(PrimusUT):
         assert double_weight.global_shape == (6 * model.hidden_size, model.hidden_size)
         assert single_weight.global_shape == (3 * model.hidden_size, model.hidden_size)
 
-    def test_torch_dist_save_load_round_trip(self, tmp_path):
+    def test_torch_dist_save_load_round_trip(self):
         """Save and restore both adaLN shapes through the real torch_dist backend."""
         source = Flux(_tiny_flux_config()).to(_runtime_device())
         double_weight = source.transformer.layers[0].adaln.adaLN_modulation[-1].weight
@@ -69,19 +72,20 @@ class TestFluxDistCheckpoint(PrimusUT):
             double_weight.fill_(1.25)
             single_weight.fill_(-2.5)
 
-        checkpoint_dir = tmp_path / "flux_torch_dist"
-        checkpoint_dir.mkdir()
-        save({"model": source.sharded_state_dict()}, checkpoint_dir)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            checkpoint_dir = Path(tmp_dir) / "flux_torch_dist"
+            checkpoint_dir.mkdir()
+            save({"model": source.sharded_state_dict()}, checkpoint_dir)
 
-        target = Flux(_tiny_flux_config()).to(_runtime_device())
-        loaded = load({"model": target.sharded_state_dict()}, checkpoint_dir)
-        target.load_state_dict(loaded["model"])
+            target = Flux(_tiny_flux_config()).to(_runtime_device())
+            loaded = load({"model": target.sharded_state_dict()}, checkpoint_dir)
+            target.load_state_dict(loaded["model"])
 
-        torch.testing.assert_close(
-            target.transformer.layers[0].adaln.adaLN_modulation[-1].weight,
-            double_weight,
-        )
-        torch.testing.assert_close(
-            target.transformer.layers[1].adaln.adaLN_modulation[-1].weight,
-            single_weight,
-        )
+            torch.testing.assert_close(
+                target.transformer.layers[0].adaln.adaLN_modulation[-1].weight,
+                double_weight,
+            )
+            torch.testing.assert_close(
+                target.transformer.layers[1].adaln.adaLN_modulation[-1].weight,
+                single_weight,
+            )
