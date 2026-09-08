@@ -65,6 +65,12 @@ _quantize_mxfp6_fused_dual = torch.ops.primus_turbo.quantize_mxfp6_fused_dual_im
 # Row-only packing, for forward passes that will never have a backward. axis=1 packs along
 # the last dimension, matching the row half of the dual packer.
 _quantize_mxfp6_row = torch.ops.primus_turbo.quantize_mxfp6_impl
+# The QKV projection's dgrad with the QK-norm and RoPE backward folded into the prologue.
+# Guarded rather than aliased unconditionally: an older Primus-Turbo has no such op, and
+# MXFP6QKVNormRopeFunction is only reachable when this is present.
+_quantize_mxfp6_qk_norm_rope_bwd = getattr(
+    torch.ops.primus_turbo, "quantize_mxfp6_qk_norm_rope_bwd_impl", None
+)
 
 
 def _wgrad_into_main_grad(weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m):
@@ -666,6 +672,203 @@ class MXFP6MLPFunction(torch.autograd.Function):
 
         # Trailing Nones cover fuse_wgrad_accum and grad_enabled.
         return grad_x, grad_w1, grad_b1, grad_w2, None, None
+
+
+# ---------------------------------------------------------------------------
+# Whole-QKV fusion: linear_qkv -> QK-norm -> RoPE.
+#
+# The same argument as the MLP above, one region over. Splitting the projection from the
+# norm+RoPE forces d(mixed_qkv) to exist: the norm's backward has to write a real tensor and
+# the projection's backward has to read one. Today that write is a Triton kernel's output in
+# bf16 and the read is the packer picking it straight back up. Owning
+# linear_qkv -> norm -> rope in one Function lets the packer compute the gradient itself while
+# staging the tile it is about to pack, from the nine operands the norm and rotation already
+# saved.
+#
+# Unlike the MLP fusion this is *not* an elementwise prologue. It computes
+#   dx = rstd * (dn * w - u_hat * mean_d(dn * w * u_hat))
+# where dn is the rotation's backward, and that mean is a reduction over head_dim -- which is
+# why the packer runs at a tile width of head_dim for this prologue, and why num_heads has to
+# be even and head_dim exactly 128. It also emits the two norm weights' gradients as side
+# outputs, for the same reason the MLP's bias gradient comes back as column sums: the tensor
+# they would be reduced from no longer exists.
+#
+# Priced on the shapes it runs at rather than modelled: the prologue costs roughly half of
+# the kernel time it removes, and most of that difference survives into wall clock. The
+# measured account -- the figures, a probe that predicted a lower cost, and why production
+# disagrees with it -- is in the campaign's packer/RESULTS_qkr_kernel.md.
+#
+# Correctness is gated two ways. packer/qkr_exact_test.cu proves the packed blobs are
+# byte-identical to packing a host-computed dx; packer/qkr_triton_gate.py proves that dx is
+# the function Flux's Triton backward computes, to 3.2e-4 on d(mixed_qkv) (bf16's own
+# resolution) and 2e-7 on the weight gradients. Packing the fused output against packing
+# Triton's materialised d_qkv differs in 5 bytes of 10.6 million with every scale identical.
+# ---------------------------------------------------------------------------
+
+
+class MXFP6QKVNormRopeFunction(torch.autograd.Function):
+    """QKV projection, QK-norm and RoPE as one op, with d(mixed_qkv) never in HBM.
+
+    Follows ``MXFP6MLPFunction``'s conventions: the column-direction blobs and the norm's
+    saved state leave as extra outputs so ``setup_context`` can save them and mark them
+    non-differentiable, and all non-tensor state lands on ``ctx`` as primitives so
+    ``torch.compile`` traces cleanly.
+
+    ``mixed_qkv`` is still saved, but it was already a saved activation for the norm and
+    rotation's own backward, so this holds no more bytes than the unfused path -- the same
+    trade the MLP makes with its pre-activation.
+
+    The rotary embedding **must be interleaved**. Nothing in the signature makes that visible
+    and no check will catch a half-split caller; ``_fused_qkv_unusable_reason`` tests the
+    config field, which is the only place it is knowable.
+    """
+
+    @staticmethod
+    def forward(
+        hidden_states,
+        w_qkv,
+        b_qkv,
+        wq,
+        wk,
+        cos,
+        sin,
+        eps,
+        interleaved,
+        fuse_wgrad_accum,
+        grad_enabled,
+    ):
+        from primus.backends.megatron.core.models.diffusion.common.fused_norm_rope import (
+            _qkv_fwd,
+        )
+
+        out_dtype = hidden_states.dtype
+        orig_shape = hidden_states.shape
+        x = hidden_states.reshape(-1, orig_shape[-1])
+
+        m, k = x.shape
+        n = w_qkv.shape[0]  # num_heads * 3 * head_dim
+        d = wq.shape[0]
+        h = n // (3 * d)
+
+        # Same reasoning as MXFP6LinearFunction: the column blobs are backward's operands, so
+        # a no-grad forward should not pay for them.
+        if grad_enabled:
+            x_row, x_row_s, x_col, x_col_s = _quantize_mxfp6_dual(x)
+            w_row, w_row_s, w_col, w_col_s = _quantize_mxfp6_dual(w_qkv)
+        else:
+            x_row, x_row_s = _quantize_mxfp6_row(x, 1)
+            w_row, w_row_s = _quantize_mxfp6_row(w_qkv, 1)
+            x_col = x_col_s = w_col = w_col_s = None
+
+        # The bias is folded into the GEMM's epilogue, so mixed_qkv is the biased projection
+        # -- which is what the norm consumes and what the prologue re-reads in the backward.
+        mixed_qkv = gemm_fp6_impl(
+            x_row, x_row_s, w_row, w_row_s, m, n, k, out_dtype, _GRAN_VALUE, b_qkv
+        )
+
+        # The norm and rotation, unchanged. This is the production Triton op, on the
+        # [..., num_heads, 3 * head_dim] view it expects; only its *backward* is replaced.
+        qkv = mixed_qkv.reshape(*orig_shape[:-1], h, 3 * d)
+        q, k_out, v, q_rstd, k_rstd = _qkv_fwd(qkv, wq, wk, cos, sin, eps, interleaved)
+
+        return q, k_out, v, mixed_qkv, q_rstd, k_rstd, x_col, x_col_s, w_col, w_col_s
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        (
+            hidden_states,
+            w_qkv,
+            b_qkv,
+            wq,
+            wk,
+            cos,
+            sin,
+            eps,
+            interleaved,
+            fuse_wgrad_accum,
+            grad_enabled,
+        ) = inputs
+
+        # setup_context still runs under no_grad, where the column blobs are None.
+        if not grad_enabled:
+            return
+
+        ctx.fuse_wgrad_accum = fuse_wgrad_accum
+        ctx.out_dtype = hidden_states.dtype
+        ctx.orig_shape = hidden_states.shape
+        # The packed blobs carry no shape, so the logical dims have to be saved too.
+        ctx.m = hidden_states.numel() // hidden_states.shape[-1]
+        ctx.k = hidden_states.shape[-1]
+        ctx.n = w_qkv.shape[0]
+        ctx.d = wq.shape[0]
+        ctx.h = ctx.n // (3 * ctx.d)
+
+        _, _, _, mixed_qkv, q_rstd, k_rstd, x_col, x_col_s, w_col, w_col_s = output
+        blobs = (x_col, x_col_s, w_col, w_col_s)
+        # wq/wk are leaf parameters and cos/sin are built once per step, so saving them costs
+        # nothing; the prologue needs all four, plus the rstd the forward just computed.
+        extra = (w_qkv,) if fuse_wgrad_accum else ()
+        ctx.save_for_backward(
+            mixed_qkv, wq, wk, cos, sin, q_rstd, k_rstd, *blobs, *extra
+        )
+        ctx.mark_non_differentiable(mixed_qkv, q_rstd, k_rstd, *blobs)
+
+    @staticmethod
+    def backward(ctx, dq, dk, dv, *_):
+        (
+            mixed_qkv,
+            wq,
+            wk,
+            cos,
+            sin,
+            q_rstd,
+            k_rstd,
+            x_col,
+            x_col_s,
+            w_col,
+            w_col_s,
+            *fused_weights,
+        ) = ctx.saved_tensors
+        m, k, n, h, d = ctx.m, ctx.k, ctx.n, ctx.h, ctx.d
+        out_dtype = ctx.out_dtype
+
+        # The prologue reads all three slices as [m, num_heads * head_dim]. dv is included
+        # because v is still packed -- plainly, but packed -- and that read is the
+        # d_qkv[..., 2D:].copy_(dv) the fusion absorbs.
+        grads = tuple(g.contiguous().reshape(m, h * d) for g in (dq, dk, dv))
+
+        want_bias_grad = ctx.needs_input_grad[2]
+        (
+            g_row,
+            g_row_s,
+            g_col,
+            g_col_s,
+            b_partial,
+            dwq_partial,
+            dwk_partial,
+        ) = _quantize_mxfp6_qk_norm_rope_bwd(
+            mixed_qkv, *grads, cos, sin, wq, wk, q_rstd, k_rstd, want_bias_grad
+        )
+
+        # dgrad: [m, k] = d(mixed_qkv)[m, n] @ w_qkv[n, k], contracting n.
+        grad_x = gemm_fp6_impl(g_row, g_row_s, w_col, w_col_s, m, k, n, out_dtype, _GRAN_VALUE)
+        grad_x = grad_x.reshape(ctx.orig_shape)
+        # wgrad: [n, k] = d(mixed_qkv).T[n, m] @ x[m, k], contracting m.
+        if ctx.fuse_wgrad_accum:
+            grad_w = _wgrad_into_main_grad(
+                fused_weights[0], g_col, g_col_s, x_col, x_col_s, n, k, m
+            )
+        else:
+            grad_w = gemm_fp6_impl(g_col, g_col_s, x_col, x_col_s, n, k, m, out_dtype, _GRAN_VALUE)
+
+        grad_b = b_partial.sum(0).to(out_dtype) if want_bias_grad else None
+        # dw reduces over rows *and* heads: the norm weight is [head_dim] and shared across
+        # heads, and a packer block owns one head, so the partial buffer carries both axes.
+        grad_wq = dwq_partial.sum((0, 1)).to(wq.dtype)
+        grad_wk = dwk_partial.sum((0, 1)).to(wk.dtype)
+
+        # Trailing Nones cover cos, sin, eps, interleaved, fuse_wgrad_accum and grad_enabled.
+        return grad_x, grad_w, grad_b, grad_wq, grad_wk, None, None, None, None, None, None
 
 
 def _is_tanh_gelu(fn) -> bool:
