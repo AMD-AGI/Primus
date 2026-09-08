@@ -604,8 +604,8 @@ class Flux(DiffusionModule):
         indexed sharded keys (``transformer.layers.<i>.*``) are required here:
         the homogeneous layer-stacked path would leave unclaimed slots for the
         params absent in single blocks and raise a CheckpointingException at
-        save time. TransformerBlock.sharded_state_dict provides this
-        automatically, so no config toggle is needed.
+        save time. ``FluxConfig.hetereogenous_dist_checkpoint`` enables
+        TransformerBlock's supported per-layer checkpoint namespace.
 
         Args:
             prefix: Prefix for state dict keys (e.g., 'module.')
@@ -617,8 +617,8 @@ class Flux(DiffusionModule):
         """
         sharded_state_dict = {}
 
-        # Delegate transformer layers to TransformerBlock
-        # Handles heterogeneous layers automatically
+        # Delegate transformer layers to TransformerBlock. FluxConfig requires
+        # its heterogeneous per-layer checkpoint namespace.
         sharded_state_dict.update(
             self.transformer.sharded_state_dict(f"{prefix}transformer.", sharded_offsets, metadata)
         )

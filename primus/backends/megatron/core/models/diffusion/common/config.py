@@ -14,6 +14,13 @@ from typing import Optional
 from megatron.core.enums import Fp8Recipe
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+# Accepted values for `fp6`. Only one 6-bit format exists on gfx950 (E2M3, via AITER's
+# A6W6 kernels), but keeping this a tuple mirrors how `fp4` names its format.
+MXFP6_FORMATS = ("mxfp6",)
+
+# Accepted values for `mxfp6_backward_precision`.
+MXFP6_BACKWARD_PRECISIONS = ("mxfp6", "fp8")
+
 
 @dataclass
 class BaseDiffusionConfig(TransformerConfig):
@@ -34,6 +41,9 @@ class BaseDiffusionConfig(TransformerConfig):
         fp8_reduce_amax: Whether to allreduce amax across ranks (default: False)
         mxfp4_backward_precision: MXFP4 backward precision, 'mxfp4' or 'fp8' (default: 'mxfp4')
         mxfp4_gradient_stochastic_rounding: Stochastic rounding on gradients (default: False)
+        fp6: Set to 'mxfp6' to run linears in MXFP6 (E2M3). None disables (default: None)
+        mxfp6_backward_precision: MXFP6 backward precision, 'mxfp6' or 'fp8' (default: 'mxfp6')
+        mxfp6_fused_wgrad_accum: MXFP6 wgrad writes weight.main_grad in place (default: False)
         sensitive_layers_enabled: Enable sensitive layer configuration (default: False)
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
         sensitive_layers_end: Number of sensitive layers at end (default: 0)
@@ -77,6 +87,30 @@ class BaseDiffusionConfig(TransformerConfig):
     # Stochastic rounding on MXFP4 gradients (paper Section 4.4)
     mxfp4_gradient_stochastic_rounding: bool = False
 
+    # MXFP6 (E2M3). Declared here rather than on TransformerConfig because Megatron has
+    # no notion of a 6-bit format, so unlike `fp4` this is Primus-owned -- which also
+    # means Megatron's "fp4 and fp8 cannot coexist" validation never sees it and the
+    # cross-checks below are the only place those combinations can be rejected.
+    fp6: Optional[str] = None
+
+    # MXFP6 backward precision: "mxfp6" (pure) or "fp8" (hybrid), mirroring
+    # mxfp4_backward_precision.
+    mxfp6_backward_precision: str = "mxfp6"
+
+    # Have the MXFP6 wgrad GEMM write weight.main_grad itself, replacing the elementwise
+    # add Megatron's DDP hook would otherwise run over every gradient.
+    #
+    # Deliberately not Megatron's `gradient_accumulation_fusion`: that flag is read by
+    # every plain linear too, and switching it on routes Flux's 76 AdaLN projections
+    # through `wgrad_gemm_accum_fp16`, which at their M=32 shapes is slower than the
+    # separate add it replaces -- measured at +11% step time on 8x MI355X, swamping the
+    # saving on the MXFP6 linears. This field moves only the MXFP6 ones.
+    #
+    # The A6W6 store has no beta=1 accumulate epilogue, so it overwrites main_grad and is
+    # only valid at one microbatch per optimizer step. Enforced per module, not here,
+    # because the microbatch count is not known at config time.
+    mxfp6_fused_wgrad_accum: bool = False
+
     # Sensitive layer configuration (clean naming, maps to Megatron internals)
     sensitive_layers_enabled: bool = False
     sensitive_layers_start: int = 0
@@ -115,6 +149,55 @@ class BaseDiffusionConfig(TransformerConfig):
             self.first_last_layers_bf16 = True
             self.num_layers_at_start_in_bf16 = self.sensitive_layers_start
             self.num_layers_at_end_in_bf16 = self.sensitive_layers_end
+
+        # MXFP6 cross-checks. Since `fp6` is Primus-owned, nothing downstream would
+        # notice a nonsense combination -- the layer spec would just pick one provider
+        # and silently ignore the other request.
+        if self.fp6 is not None:
+            if self.fp6 not in MXFP6_FORMATS:
+                raise ValueError(f"Unknown fp6 '{self.fp6}'. Choose from: {list(MXFP6_FORMATS)}.")
+            if getattr(self, "fp4", None) is not None:
+                raise ValueError(
+                    f"fp4 ('{self.fp4}') and fp6 ('{self.fp6}') cannot both be set: the "
+                    "layer spec selects one linear implementation per model."
+                )
+            if self.fp8 is not None:
+                raise ValueError(
+                    f"fp6 ('{self.fp6}') and fp8 ('{self.fp8}') cannot both be set, "
+                    "mirroring Megatron's fp4/fp8 exclusion. For an MXFP6 forward with "
+                    "an FP8 backward use mxfp6_backward_precision='fp8' instead."
+                )
+            # Read through getattr because the MXFP4 -> FP8 switch is a separate change
+            # that may not be present; the check has to hold once both are, without
+            # making this branch depend on it.
+            switch_iter = int(getattr(self, "mxfp4_to_fp8_switch_iter", 0) or 0)
+            if switch_iter > 0:
+                # The switch patch walks the model for MXFP4ColumnParallelLinear /
+                # MXFP4RowParallelLinear and *skips* anything else, so with fp6 it would
+                # build a plan over zero layers and quietly never switch. Reject the
+                # combination rather than extend the patch: its prewarm and ramp logic
+                # are written around MXFP4 and there is no verified MXFP6 equivalent.
+                raise ValueError(
+                    f"fp6 ('{self.fp6}') cannot be combined with mxfp4_to_fp8_switch_iter="
+                    f"{switch_iter}. The switch only converts MXFP4 "
+                    "linears, of which an MXFP6 model has none. Use "
+                    "mxfp6_backward_precision='fp8' for a hybrid MXFP6 run."
+                )
+        if self.mxfp6_backward_precision not in MXFP6_BACKWARD_PRECISIONS:
+            raise ValueError(
+                f"Unknown mxfp6_backward_precision '{self.mxfp6_backward_precision}'. "
+                f"Choose from: {list(MXFP6_BACKWARD_PRECISIONS)}."
+            )
+        if self.mxfp6_backward_precision != "mxfp6" and self.fp6 is None:
+            raise ValueError(
+                f"mxfp6_backward_precision='{self.mxfp6_backward_precision}' requires fp6 "
+                "to be set (e.g. fp6: mxfp6); with no MXFP6 linears it has no effect."
+            )
+        if self.mxfp6_fused_wgrad_accum and self.fp6 is None:
+            raise ValueError(
+                "mxfp6_fused_wgrad_accum=True requires fp6 to be set (e.g. fp6: mxfp6); "
+                "with no MXFP6 linears it has no effect."
+            )
 
         if self.sensitive_layers_enabled and self.sensitive_layer_precision == "tw_fp8":
             _deferred_fp8 = "e4m3" if self.fp8 is None else None

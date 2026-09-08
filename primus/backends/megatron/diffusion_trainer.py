@@ -296,7 +296,17 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
                 sample_count = torch.tensor(
                     loss_per_sample.numel(), dtype=loss_sum.dtype, device=loss_sum.device
                 )
-                return loss_sum, {"loss": (loss_sum.detach(), sample_count.detach())}
+                # CLONE, NOT JUST DETACH. Megatron's forward_step treats the first
+                # element of this pair as the tensor to backpropagate and rescales it
+                # IN PLACE before storing the dict below -- `output_tensor *=
+                # cp_group_size`, then `output_tensor /= num_microbatches`. A detached
+                # view shares that storage, so the reported loss gets rescaled with it
+                # and what reaches the caller is the true loss divided by the number of
+                # microbatches. That is invisible at one microbatch per rank per step
+                # and halves the reported validation loss at two, which under
+                # mlperf_mode trips the convergence gate at roughly half the samples it
+                # should. The training path below clones for the same reason.
+                return loss_sum, {"loss": (loss_sum.detach().clone(), sample_count.detach())}
 
             return noise_pred, val_loss_func
 

@@ -1,0 +1,274 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 12B Schnell Training — DDP + Local Spec + MXFP6 (MLPerf Mode, MI355X)
+#
+# The submission recipe for MXFP6. It is the FP8 MLPerf config with the
+# precision block swapped, so that a comparison between the two is a comparison
+# of numerics and nothing else; everything the ruleset pins -- AdamW
+# 0.9/0.95/1e-8, weight decay 0.1, gradient clip 1.0, eval every 512 steps --
+# is identical on purpose and must not be tuned. For MXFP6 development work
+# without the MLPerf machinery, use
+# flux_12b_ddp_energon_schnell_resample_local_spec_mxfp6.yaml.
+#
+# Hardware: gfx950 (MI350/MI355) only. The A6W6 kernels are gfx950 assembly, so
+# unlike MXFP4 there is no fallback path on older parts, and startup fails
+# loudly on an aiter that lacks them rather than quietly training in bf16.
+#
+# Shape constraint: every MXFP6 GEMM needs M, N and K to be multiples of 256.
+# Flux 12B satisfies this at every replaced linear, and M = micro_batch_size *
+# tokens stays aligned at the batch sizes here.
+#
+# Before this produces a submittable log: the compliance checker accepts a
+# fixed vocabulary for lowest_numerical_precision_in_linear and mxfp6 is not in
+# it. A run under this recipe is a valid run whose log the checker rejects on
+# that key alone, until the format is accepted upstream.
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_12b_ddp_local_mxfp6_mlperf}
+
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: diffusion/flux_12b.yaml
+
+    trainer_class: FluxPretrainTrainer
+
+    overrides:
+      model_type: flux_schnell
+
+      # ==========================================
+      # MLPerf Mode
+      # ==========================================
+      mlperf_mode: true
+      warmup_train_steps: 2
+      target_val_loss: 0.586
+
+      # Left explicit because the FP8 MLPerf recipe and the MXFP6 development
+      # recipe disagree on it, and the difference is a different LR trajectory
+      # through warmup rather than a stylistic one. This matches the FP8 MLPerf
+      # recipe, which is the configuration the convergence evidence so far was
+      # collected under; flipping it is a convergence experiment, not a cleanup.
+      nemo_aligned_lr_warmup: false
+
+      # ==========================================
+      # MLPerf Training v5.1 Alignment
+      # ==========================================
+      timestep_sampling_strategy: "direct_uniform"
+      activation_func: "openai_gelu"
+      cfg_dropout_prob: 0.1
+
+      # VAE latent normalization (required for resample mode)
+      vae_scale: 0.3611
+      vae_shift: 0.1159
+      vae_latent_mode: resample
+
+      # RoPE: must be interleaved to match Flux's EmbedND doubled-frequency layout
+      rotary_interleaved: true
+
+      # ==========================================
+      # PrimusTurboFloat8LocalSpecProvider
+      # ==========================================
+      transformer_impl: "local"
+
+      # ==========================================
+      # DATA — Real Energon data (not mock)
+      # ==========================================
+      mock_data: false
+      dataloader_type: external
+      data_path: ${PRIMUS_DIFFUSION_DATA_PATH:/path/to/energon/dataset}
+      num_workers: 16
+      prefetch_factor: 4
+      max_samples_per_sequence: null
+
+      # Training iterations
+      #
+      # This is a safety cap, not a target: the run stops at the quality
+      # threshold, and reaching it is the result. The reference convergence
+      # points for flux1 at GBS 512 (mlperf_logging rcp_checker
+      # training_6.0.0/rcps_flux1.json, 20 NVIDIA BF16 runs) span 7077888 to
+      # 7602176 samples, i.e. 13824 to 14848 steps. The previous 5000 steps
+      # was 2560000 samples -- roughly a third of the way -- so every run
+      # exhausted its budget below target and no run could ever have counted.
+      # 16000 steps (8192000 samples) clears the slowest reference run with
+      # margin for a run that converges later than the reference spread.
+      train_iters: 16000
+      eval_interval: 512
+      # Cover the whole MLPerf validation set. eval_iters is derived from this
+      # (29696 / 512 = 58); setting both is rejected. The previous eval_iters of
+      # 10 read 5120 samples, and even at 58 the training num_workers of 16
+      # would have left 1920 of them unread, so val_num_workers is pinned to 0.
+      eval_samples: 29696
+      val_num_workers: 0
+      # MLPerf assigns each val image one fixed timestep, carried in the Arrow
+      # 'timestep' column. Requires a val split ingested with that column; shards
+      # ingested earlier carry {"key": ...} only and will now fail loudly rather
+      # than silently fall back to injecting t = index % 8.
+      eval_timestep_source: dataset
+      log_interval: 10
+      save_interval: 10000
+
+      # Batch configuration
+      micro_batch_size: 64
+      global_batch_size: 512
+      seq_length: 512
+
+      # ==========================================
+      # BF16 + FP8 Precision
+      # ==========================================
+      bf16: true
+      fp16: false
+      params_dtype: bfloat16
+      grad_reduce_in_bf16: true
+
+      # Optimizer settings (MLPerf v5.1)
+      optimizer: adam
+      lr: 2.0e-4
+      min_lr: 2.0e-4
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_eps: 1.0e-8
+      clip_grad: 1.0
+
+      # Learning rate scheduler (warmup-hold, no decay)
+      lr_warmup_iters: 1600
+      # Inert while lr_decay_style is constant; kept equal to the budget so
+      # it cannot be misread as a decay that ends a quarter of the way in.
+      lr_decay_iters: 16000
+      lr_decay_style: constant
+
+      # ==========================================
+      # Megatron DDP + Distributed Optimizer
+      # ==========================================
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+
+      use_torch_fsdp2: false
+      use_megatron_fsdp: false
+
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      overlap_param_gather_with_optimizer_step: false
+      # FP32 optimizer states (m, v), matching the FP8 MLPerf recipe rather than
+      # the BF16 states the MXFP6 development recipe uses. Time to train is what
+      # is being measured, and FP32 states cost almost nothing in throughput here
+      # while removing a source of convergence difference from the FP8 comparison.
+      #
+      # Now measured rather than asserted, since the bucket sweep produced the
+      # matched arms for free. Against the development recipe's BF16 m/v with
+      # use_precision_aware_optimizer true, at MBS=64/GBS=512 and equal bucket
+      # size: +6.9 ms per 512 images, +0.85%, at both 256000000 and 1024000000.
+      # The throughput claim holds. What it does cost is memory, +16.2 GB of peak
+      # (267.0 against 250.8 GB), which is the number to watch if this recipe ever
+      # moves to a larger micro-batch, because 267 of 288 GB is most of the card.
+      #
+      # Note that main_grads_dtype below is inert: it belongs to the precision-aware
+      # optimizer and is ignored when that flag is false. The gradients DDP reduces
+      # are bf16 in this recipe exactly as in the development one, which is why the
+      # bucket sweep above transfers between them.
+      use_precision_aware_optimizer: false
+      main_params_dtype: fp32
+      main_grads_dtype: fp32
+      exp_avg_dtype: fp32
+      exp_avg_sq_dtype: fp32
+
+      # Swept in this recipe's own optimizer regime rather than inherited from the
+      # development one. The Megatron default of 256000000 elements is the worst of
+      # the four sizes measured here: 1024000000 gives 801.9 ms per 512 images
+      # against 819.3, worth -17.4 ms, with peak memory unchanged (266.0 GB against
+      # 267.0). 512000000, the value the MLPerf v6.0 reference moved to, is an
+      # improvement but not the best one at 806.4.
+      #
+      # The collective path is identical to the development recipe's -- both reduce
+      # bf16 gradients (grad_reduce_in_fp32=False) and both build 43 buckets with the
+      # same element counts at this bucket size -- so the same 1024000000 optimum was
+      # expected here, and the win is the same -17.4 ms to the decimal.
+      #
+      # Do not push this further in one direction. Both ends lose: small buckets pay
+      # per-call overhead and get thin per-call bandwidth, and buckets spanning most
+      # of the model cannot start their reduce-scatter until far into backward, which
+      # re-exposes the tail. See mbs32_e2e/README.md in tiger-training-internal.
+      ddp_bucket_size: 1024000000
+      use_fsdp2_fp32_param_optimizer: false
+
+      ckpt_format: torch_dist
+
+      gradient_accumulation_fusion: false
+      check_for_nan_in_loss_and_grad: false
+
+      # ==========================================
+      # MXFP6 — Block-scaled (E2M3 + E8M0 over 32) via Primus Turbo + AITER
+      # ==========================================
+      use_flash_attn: true
+
+      # Primus-owned field: Megatron has no notion of a 6-bit format, so fp6 must
+      # not be combined with fp4 or fp8 (rejected in
+      # BaseDiffusionConfig.__post_init__).
+      fp6: "mxfp6"
+      mxfp6_backward_precision: "mxfp6"  # "mxfp6" (pure) or "fp8" (hybrid)
+
+      # The MLP folds its bias-add + GELU into the MXFP6 packer, worth about 5% of
+      # step time (74.1 -> 78.0 images/s/GPU on 8x MI355X at micro_batch_size 64).
+      # It engages on its own; there is no config key. A submission run should be
+      # launched with PRIMUS_MXFP6_FUSED_MLP=on so that a configuration the fusion
+      # cannot reproduce exactly becomes an error rather than a silent per-module
+      # fallback to Megatron's MLP -- otherwise the measured throughput and the
+      # disclosed implementation can quietly diverge.
+
+      empty_unused_memory_level: 0
+
+      distributed_timeout_minutes: 60
+      distributed_backend: nccl
+
+      # Checkpointing (disabled for MLPerf)
+      finetune: false
+      save: null
+      load: null
+      no_save_optim: true
+      no_save_rng: true
+      auto_continue_train: false
+      disable_last_saving: true
+
+      # Logging — suppressed by mlperf_mode
+      tensorboard_dir: null
+      wandb_project: null
+      log_throughput: false
+      wall_clock_step_timer: true
+      log_timers_to_tensorboard: false
+      log_batch_size_to_tensorboard: false
+      log_learning_rate_to_tensorboard: false
+      log_memory_to_tensorboard: false
+
+      # Profiler — disabled for MLPerf
+      profile: false
+
+      # Primus Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_dual_fp8_output_projection: false
+
+      # Each run in a submission campaign needs its own seed, supplied from
+      # outside so the value in the log is the value the launcher chose.
+      seed: ${PRIMUS_SEED:2025}
+      # MLPerf-aligned per-step CUDA RNG reseed (defaults off elsewhere; MLPerf
+      # reproduction must opt in for run-to-run determinism).
+      per_step_rng_reseed: true
+
+      # Torch Compile — per_block: compile each transformer layer individually
+      torch_compile:
+        enable: true
+        strategy: "per_block"
+        backend: "inductor"
+        mode: "default"
+        fullgraph: false
+        compile_optimizer: false
+        emulate_precision_casts: false
+        fused_ln_modulate: true
