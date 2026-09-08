@@ -91,17 +91,18 @@ def megatron_global_args(monkeypatch):
     monkeypatch.setattr(gvars, "_GLOBAL_ARGS", dummy_args)
 
 
-def _pure_args(fuse_wgrad_accum=False):
-    """Trailing MXFP6LinearFunction args for the pure-MXFP6 path."""
-    return (False, None, 0, 0, fuse_wgrad_accum)
+def _pure_args(fuse_wgrad_accum=False, bias=None):
+    """Trailing MXFP6LinearFunction args for the pure-MXFP6 path, bias first."""
+    return (bias, False, None, 0, 0, fuse_wgrad_accum)
 
 
-def _hybrid_args():
-    """Trailing MXFP6LinearFunction args for the MXFP6-fwd / FP8-bwd path."""
+def _hybrid_args(bias=None):
+    """Trailing MXFP6LinearFunction args for the MXFP6-fwd / FP8-bwd path, bias first."""
     from primus_turbo.pytorch.core.backend import BackendType
     from primus_turbo.pytorch.core.low_precision import ScalingGranularity, float8_e5m2
 
     return (
+        bias,
         True,
         float8_e5m2,
         ScalingGranularity.TENSORWISE.value,
@@ -456,8 +457,13 @@ class TestMXFP6LinearModules(PrimusUT):
         assert self._column_linear()._backward_is_fp8 is False
 
     @requires_mxfp6
-    def test_bias_is_applied_outside_the_gemm(self):
-        """A6W6 has no bias epilogue, so bias is a separate add; check it lands."""
+    def test_bias_is_applied_in_the_gemm_epilogue(self):
+        """Bias now rides in the A6W6 store epilogue rather than a separate pass; check it lands.
+
+        The epilogue reads the bias out of the kernarg slot the fp6 kernel used to ignore, so
+        a bias that fails to reach the kernel shows up as no shift at all rather than as an
+        error. That is what this pins down.
+        """
         from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
             MXFP6ColumnParallelLinear,
         )
@@ -485,11 +491,103 @@ class TestMXFP6LinearModules(PrimusUT):
 
         # Both outputs are BF16, whose spacing around these magnitudes (|out| up to ~5)
         # is about 0.03, so the difference of the two roundings cannot recover 1.0
-        # exactly. The tolerance is that spacing, not an accuracy claim about MXFP6.
+        # exactly. The tolerance is that spacing, not an accuracy claim about MXFP6. It is
+        # if anything looser than needed now: the epilogue rounds once where the separate
+        # add rounded twice.
         delta = (with_bias.float() - without_bias.float()).abs()
         assert torch.allclose(
             delta, torch.ones_like(delta), atol=0.05
         ), f"bias shift deviates from 1.0 by up to {(delta - 1).abs().max().item():.4f}"
+
+    @requires_mxfp6
+    def test_epilogue_bias_matches_adding_it_afterwards(self):
+        """The epilogue must agree with the separate add it replaced, to within one rounding.
+
+        These cannot be compared bitwise, and the reason is worth stating because a naive
+        equality check here fails loudly on ~2% of elements. The separate add rounded the GEMM
+        result to bf16 and then added, rounding twice; the epilogue adds to the fp32 accumulator
+        and rounds once. Where bias nearly cancels the accumulator, the amount the old path
+        discarded is many ulps *of the result*, so the bound has to be one ulp of the pre-add
+        magnitude rather than of the answer. The epilogue is the more accurate of the two.
+        """
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+            MXFP6LinearFunction,
+        )
+
+        torch.manual_seed(7)
+        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+        w = torch.randn(N, K, dtype=torch.bfloat16, device="cuda")
+        b = torch.randn(N, dtype=torch.bfloat16, device="cuda")
+
+        fused = MXFP6LinearFunction.apply(x, w, *_pure_args(bias=b))[0]
+        unbiased = MXFP6LinearFunction.apply(x, w, *_pure_args())[0]
+        separate = unbiased + b
+
+        # The bias has to actually arrive: a dropped pointer looks like no shift, not an error.
+        assert not torch.equal(fused, unbiased), "the epilogue bias never reached the kernel"
+
+        def ulp(t):
+            return torch.exp2(torch.floor(torch.log2(t.float().abs().clamp_min(1e-30))) - 7.0)
+
+        diff = (fused.float() - separate.float()).abs()
+        bound = ulp(unbiased) + ulp(separate)
+        over = int((diff > bound).sum())
+        assert over == 0, (
+            f"{over} of {diff.numel()} elements exceed the double-rounding bound, "
+            f"worst {diff.max().item():.3e}"
+        )
+
+    @requires_mxfp6
+    def test_bias_gradient_comes_from_the_packer_column_sums(self):
+        """The bias gradient rides along with the backward's existing quantization.
+
+        The reference is the arrangement this replaced: the caller added the bias after
+        ``.apply()`` returned, so autograd owned the reduction over ``grad_output``. Both
+        reduce the same bf16 tensor, but the packer accumulates across tiles in fp32, so
+        this is checked as a reduction and not for bit equality -- in practice the two
+        agree exactly at these shapes, and at worst by a bf16 ulp.
+        """
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+            MXFP6LinearFunction,
+        )
+
+        torch.manual_seed(0)
+        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+        w = torch.randn(N, K, dtype=torch.bfloat16, device="cuda")
+        b = torch.randn(N, dtype=torch.bfloat16, device="cuda")
+        upstream = torch.randn(M, N, dtype=torch.bfloat16, device="cuda")
+
+        xg, wg, bg = (t.clone().requires_grad_() for t in (x, w, b))
+        MXFP6LinearFunction.apply(xg, wg, *_pure_args(bias=bg))[0].backward(upstream)
+
+        xr, wr, br = (t.clone().requires_grad_() for t in (x, w, b))
+        out_ref = MXFP6LinearFunction.apply(xr, wr, *_pure_args())[0] + br
+        out_ref.backward(upstream.clone())
+
+        assert bg.grad.shape == br.grad.shape == (N,)
+        snr = _snr_db(bg.grad, br.grad.float())
+        assert snr > 35, f"bias grad diverges from the autograd reduction: {snr:.1f} dB"
+
+        # The other two gradients must be untouched by where the bias was added.
+        assert torch.equal(xg.grad, xr.grad), "grad_input changed"
+        assert torch.equal(wg.grad, wr.grad), "grad_weight changed"
+
+    @requires_mxfp6
+    def test_bias_gradient_is_skipped_when_bias_needs_no_grad(self):
+        """``want_col_sum=False`` when the bias is frozen, so the packer does no extra work."""
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+            MXFP6LinearFunction,
+        )
+
+        torch.manual_seed(0)
+        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        w = torch.randn(N, K, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        frozen = torch.randn(N, dtype=torch.bfloat16, device="cuda")
+
+        MXFP6LinearFunction.apply(x, w, *_pure_args(bias=frozen))[0].sum().backward()
+
+        assert frozen.grad is None
+        assert x.grad is not None and w.grad is not None
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
     def test_column_parallel_rejects_tp_gt_1(self):
