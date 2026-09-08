@@ -68,7 +68,7 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Choosing the Docker image
 
-For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.5`, set in `runner/.primus.yaml`. JAX MaxText has its own separate image family, `rocm/jax-training:maxtext-…`, which is **not** the default — pass it explicitly in container and Slurm modes.
+For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.6`, set in `runner/.primus.yaml`. JAX MaxText has its own separate image family, `rocm/jax-training:maxtext-…`, which is **not** the default — pass it explicitly in container and Slurm modes.
 
 The image is picked in priority order: `DOCKER_IMAGE` environment variable > `--image` CLI argument > config file. See [Selecting the container image](../01-getting-started/quickstart.md#selecting-the-container-image) for a full explanation, and [Configuration system](configuration-system.md) for configuration loading.
 
@@ -85,19 +85,19 @@ Clone the branch matching your image, on the host. Every command on this page ru
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.5
+git checkout release/v26.6
 git submodule update --init --recursive
 ```
 
-Container mode mounts this checkout into the container, so this is the code that runs — you do not need the `/workspace/Primus` copy baked into the image, which lags the release branch. See [Release notes → Primus source for v26.5](../01-getting-started/release-notes.md#primus-source-for-v265).
+Container mode mounts this checkout into the container, so this is the code that runs — you do not need the `/workspace/Primus` copy baked into the image, which lags the release branch. See [Release notes → Primus source for v26.6](../01-getting-started/release-notes.md#primus-source-for-v266).
 
 ### Pull the image (optional)
 
 `primus-cli container` pulls the image on first use, so this is only needed if you want to warm the cache:
 
 ```bash
-docker pull rocm/primus:v26.5                  # Megatron-LM, TorchTitan, Megatron Bridge
-docker pull rocm/jax-training:maxtext-v26.5    # JAX MaxText
+docker pull rocm/primus:v26.6                  # Megatron-LM, TorchTitan, Megatron Bridge
+docker pull rocm/jax-training:maxtext-v26.6    # JAX MaxText
 ```
 
 <details>
@@ -113,7 +113,7 @@ docker run -it \
     --security-opt seccomp=unconfined --privileged \
     -v $PWD:$PWD -w $PWD --shm-size 128G \
     --name primus_training_env \
-    rocm/primus:v26.5
+    rocm/primus:v26.6
 ```
 
 Re-enter it later with `docker start primus_training_env && docker exec -it primus_training_env bash`. Inside, use `primus-cli direct`. Remember to re-export `HF_TOKEN` and any architecture or `NCCL_*` variables, since a manual `docker run` does not forward them.
@@ -240,13 +240,13 @@ Available models include Llama 3.1 (8B/70B/405B), Llama 4 (17Bx16E/17Bx128E), De
 
 MaxText uses a different Docker image than the PyTorch backends and it is **not** the default in `runner/.primus.yaml`, so pass it explicitly with `--image` in container and Slurm modes.
 
-> On MI355X, export `RCCL_WARP_SPEED_AUTO=0` before launching or training can produce NaN losses. It is a no-op on MI300X. See [Important notes](jax-maxtext-training.md#important-notes-for-v265).
+> On MI355X, export `RCCL_WARP_SPEED_AUTO=0` before launching or training can produce NaN losses. It is a no-op on MI300X. See [Important notes](jax-maxtext-training.md#important-notes-for-v266).
 
 Pretrain Llama 3 8B on **MI355X**, from your Primus checkout on the host:
 
 ```bash
 export RCCL_WARP_SPEED_AUTO=0
-./runner/primus-cli container --image rocm/jax-training:maxtext-v26.5 \
+./runner/primus-cli container --image rocm/jax-training:maxtext-v26.6 \
   -- train pretrain \
   --config examples/maxtext/configs/MI355X/llama3_8B-pretrain.yaml
 ```
