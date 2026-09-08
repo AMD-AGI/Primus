@@ -317,7 +317,6 @@ class TestMXFP6Compile(PrimusUT):
     def test_no_graph_break_hybrid(self):
         self._assert_no_graph_break(_hybrid_args())
 
-
     @requires_mxfp6
     def test_compiled_forward_matches_eager(self):
         from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
@@ -517,9 +516,7 @@ class TestMXFP6LinearModules(PrimusUT):
     def test_fused_wgrad_accum_rejects_fp8_backward(self):
         """The FP8 backward forms its wgrad with a GEMM that has no out-variant."""
         with pytest.raises(ValueError, match="mxfp6_backward_precision"):
-            self._column_linear(
-                mxfp6_fused_wgrad_accum=True, mxfp6_backward_precision="fp8"
-            )
+            self._column_linear(mxfp6_fused_wgrad_accum=True, mxfp6_backward_precision="fp8")
 
     @requires_mxfp6
     def test_fused_wgrad_lands_in_main_grad(self):

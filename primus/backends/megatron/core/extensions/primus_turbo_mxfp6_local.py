@@ -47,7 +47,10 @@ from primus_turbo.pytorch.core.low_precision import (
     MXFP6_PROLOGUE_BIAS_GELU_BACKWARD,
     ScalingGranularity,
 )
-from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import gemm_fp6_impl, gemm_fp6_out_impl
+from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import (
+    gemm_fp6_impl,
+    gemm_fp6_out_impl,
+)
 from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
 from primus_turbo.pytorch.kernels.quantization.mxfp6_pack import check_mxfp6_support
 
@@ -276,9 +279,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
 
             # grad_weight[N, K] = grad.T[N, M] @ input[M, K], contracting M.
             if ctx.fuse_wgrad_accum:
-                grad_weight = _wgrad_into_main_grad(
-                    weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m
-                )
+                grad_weight = _wgrad_into_main_grad(weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m)
             else:
                 grad_weight = gemm_fp6_impl(
                     g_col,
@@ -563,9 +564,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
         grad_a = gemm_fp6_impl(g2_row, g2_row_s, w2_col, w2_col_s, m, f, h, out_dtype, _GRAN_VALUE)
         # fc2 wgrad: [h, f] = g2.T[h, m] @ a[m, f], contracting m.
         if ctx.fuse_wgrad_accum:
-            grad_w2 = _wgrad_into_main_grad(
-                fused_weights[1], g2_col, g2_col_s, a_col, a_col_s, h, f, m
-            )
+            grad_w2 = _wgrad_into_main_grad(fused_weights[1], g2_col, g2_col_s, a_col, a_col_s, h, f, m)
         else:
             grad_w2 = gemm_fp6_impl(g2_col, g2_col_s, a_col, a_col_s, h, f, m, out_dtype, _GRAN_VALUE)
 
@@ -582,9 +581,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
         grad_x = grad_x.reshape(ctx.orig_shape)
         # fc1 wgrad: [f, k] = grad_y1.T[f, m] @ x[m, k], contracting m.
         if ctx.fuse_wgrad_accum:
-            grad_w1 = _wgrad_into_main_grad(
-                fused_weights[0], g1_col, g1_col_s, x_col, x_col_s, f, k, m
-            )
+            grad_w1 = _wgrad_into_main_grad(fused_weights[0], g1_col, g1_col_s, x_col, x_col_s, f, k, m)
         else:
             grad_w1 = gemm_fp6_impl(g1_col, g1_col_s, x_col, x_col_s, f, k, m, out_dtype, _GRAN_VALUE)
 
