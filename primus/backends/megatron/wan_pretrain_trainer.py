@@ -29,48 +29,79 @@ from primus.backends.megatron.diffusion_trainer import DiffusionPretrainTrainer
 from primus.backends.megatron.training.diffusion.schedulers import WanFlowMatchScheduler
 from primus.core.utils.module_utils import log_rank_0
 
-# Primus-Turbo picks the flash-attention backward variant from this variable,
-# re-reading it on every call. Its own default is "1"; Primus' launchers override
-# that to "0" (``examples/run_pretrain.sh`` and ``runner/helpers/envs/
-# base_env.sh``, both as a conservative accuracy default).
-ATTN_ATOMIC_FP32_ENV = "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32"
+# Both attention backends re-read the flash-attention backward variant on every
+# call, and each keeps its own copy of the choice: Primus-Turbo (local spec)
+# reads the first variable, TransformerEngine's ROCm CK backend (te_spec) the
+# second. A run uses one spec or the other, so set both rather than have the
+# trainer work out which one is live.
+#
+# Neither default is right here. Primus' launchers override Primus-Turbo's own
+# default of "1" to "0" (``examples/run_pretrain.sh`` and
+# ``runner/helpers/envs/base_env.sh``), and the release Dockerfile pins
+# ``NVTE_CK_IS_V3_ATOMIC_FP32=0``, which is the gfx950 value; on gfx942 the CK
+# v3 backward needs fp32 atomics, as ``tools/installation/env.sh`` already spells
+# out for the bare-metal path.
+ATTN_ATOMIC_FP32_ENVS = (
+    "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32",
+    "NVTE_CK_IS_V3_ATOMIC_FP32",
+)
+
+# TE only reaches a v3 backward with this on. It is already "1" everywhere in
+# Primus; setting it stops a launcher that disabled v3 from quietly undoing the
+# atomics above.
+TE_CK_BWD_V3_ENV = "NVTE_CK_USES_BWD_V3"
 
 
-def _apply_turbo_atomic_fp32_backward(enabled: bool) -> None:
-    """Let WAN reach aiter's fp32-atomic attention backward.
+def _apply_atomic_fp32_backward(enabled: bool) -> None:
+    """Let WAN's attention backward reach the fp32-atomic ASM kernels.
 
-    With the atomic accumulator off, WAN's shapes cannot reach any aiter ASM
-    backward at all: the sequence length is not divisible by 64, so the
-    non-padded kernel family is out, and the ``psskddv`` family that would
-    otherwise serve these shapes requires the atomic. Dispatch then falls
-    through to ck_tile without saying so.
+    WAN's sequence length is not divisible by 64, which is what puts both
+    backends in the same corner: the kernel families that serve non-padded
+    shapes accumulate dQ through atomics, so with the atomic accumulator off
+    there is no ASM backward to dispatch to and both fall through to ck_tile
+    without saying so.
 
-    Turning it on replaces ck_tile's backward with
+    On the local spec that leaves Primus-Turbo on ck_tile's backward instead of
     ``aiter::fmha_bwd_hd128_bf16_a32_rtna_psskddv`` over the same call count.
-    The accumulation order is non-deterministic, so this is not free in
-    principle; over a 20-step run the loss stayed within bf16 reduction noise
-    rather than showing a behaviour change.
 
-    The opt-out is the YAML key rather than the environment variable, because
-    the launchers export the variable unconditionally (``${VAR:-0}``) and so
-    every WAN run arrives here with it already set to "0". Reading it back could
-    not tell a deliberate choice apart from that blanket default, which is the
-    bug this works around. Set ``attn_atomic_fp32: false`` to get the
-    deterministic split-dQ path back.
+    On te_spec the same thing happens one layer down. TE asks for its v3
+    backward (``NVTE_CK_USES_BWD_V3`` is "1" everywhere in Primus) but the
+    release Dockerfile pins ``NVTE_CK_IS_V3_ATOMIC_FP32=0``, the value that suits
+    gfx950, so on gfx942 v3 is unreachable and CK serves the backward from
+    ck_tile. Setting the atomics gets
+    ``aiter::fmha_bwd_hd128_bf16_a32_rtz_pssk_group`` instead over the same call
+    count, which is the pairing ``tools/installation/env.sh`` already prescribes
+    for gfx942.
+
+    So the atomic path is what reaches the ASM kernels on both specs. The
+    accumulation order is non-deterministic, so this is not free in principle;
+    over a 20-step run the loss stayed within bf16 reduction noise rather than
+    showing a behaviour change.
+
+    The opt-out is the YAML key rather than the environment variables, because
+    the launchers and the image export those unconditionally and so every WAN run
+    arrives here with them already set to "0". Reading them back could not tell a
+    deliberate choice apart from that blanket default, which is the bug this
+    works around. Set ``attn_atomic_fp32: false`` to get the deterministic
+    split-dQ path back.
     """
     value = "1" if enabled else "0"
-    previous = os.environ.get(ATTN_ATOMIC_FP32_ENV)
-    os.environ[ATTN_ATOMIC_FP32_ENV] = value
+    previous = {name: os.environ.get(name) for name in ATTN_ATOMIC_FP32_ENVS}
+    for name in ATTN_ATOMIC_FP32_ENVS:
+        os.environ[name] = value
+    if enabled:
+        os.environ[TE_CK_BWD_V3_ENV] = "1"
 
+    settings = ", ".join(f"{name}={value} (was {previous[name]!r})" for name in ATTN_ATOMIC_FP32_ENVS)
     if enabled:
         log_rank_0(
-            f"WAN trainer: {ATTN_ATOMIC_FP32_ENV}={value} (was {previous!r}) so the "
-            f"attention backward reaches aiter's fp32-atomic kernels instead of ck_tile"
+            f"WAN trainer: {settings} so the attention backward reaches the "
+            f"fp32-atomic ASM kernels instead of ck_tile"
         )
     else:
         log_rank_0(
-            f"WAN trainer: {ATTN_ATOMIC_FP32_ENV}={value} by request "
-            f"(attn_atomic_fp32: false); the attention backward will use ck_tile"
+            f"WAN trainer: {settings} by request (attn_atomic_fp32: false); "
+            f"the attention backward will use ck_tile"
         )
 
 
@@ -92,7 +123,8 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
         - ``backbone_pretrained``, ``backbone_subfolder``,
           ``backbone_subfolder_2``.
         - ``attn_atomic_fp32`` (default true): let the attention backward use
-          aiter's fp32-atomic kernels. Set false for a deterministic backward.
+          the fp32-atomic ASM kernels, on both the local spec (Primus-Turbo) and
+          te_spec (TE / CK v3). Set false for a deterministic backward.
     """
 
     def __init__(self, *args, **kwargs):
@@ -107,10 +139,10 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
 
         self.loss_weighting = getattr(params, "loss_weighting", "diffsynth")
 
-        # Before the first forward, and read per call by Primus-Turbo, so the
-        # trainer constructor is early enough.
+        # Before the first forward, and re-read per call by both backends, so
+        # the trainer constructor is early enough.
         self.attn_atomic_fp32 = bool(getattr(params, "attn_atomic_fp32", True))
-        _apply_turbo_atomic_fp32_backward(self.attn_atomic_fp32)
+        _apply_atomic_fp32_backward(self.attn_atomic_fp32)
 
         # The model config resolves stage -> window, so read the window back off
         # it rather than recomputing here and risking a disagreement.
