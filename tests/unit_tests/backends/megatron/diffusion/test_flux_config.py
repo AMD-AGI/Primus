@@ -9,10 +9,6 @@ Tests FluxConfig and BaseDiffusionConfig validation, preset configurations.
 
 import pytest
 
-from tests.utils import skip_if_no_cuda
-
-skip_if_no_cuda()
-
 from primus.backends.megatron.core.models.diffusion.common import BaseDiffusionConfig
 from primus.backends.megatron.core.models.diffusion.flux.config import FluxConfig
 from tests.utils import PrimusUT
@@ -39,6 +35,19 @@ class TestBaseDiffusionConfig(PrimusUT):
 
 class TestFluxConfig(PrimusUT):
     """Tests for FluxConfig class."""
+
+    def test_distributed_checkpoint_is_non_homogeneous(self):
+        """Flux must use per-layer checkpoint keys for its two block families."""
+        config = FluxConfig.flux_535m()
+        self.assertTrue(config.hetereogenous_dist_checkpoint)
+
+    def test_homogeneous_distributed_checkpoint_is_rejected(self):
+        """A homogeneous layer stack cannot represent Flux's parameter schemas."""
+        with self.assertRaisesRegex(
+            ValueError,
+            "Flux requires hetereogenous_dist_checkpoint=True",
+        ):
+            FluxConfig.flux_535m(hetereogenous_dist_checkpoint=False)
 
     def test_validation_positive_joint_layers(self):
         """Test validation fails for non-positive num_joint_layers."""
