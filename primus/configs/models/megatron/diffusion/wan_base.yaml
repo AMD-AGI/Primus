@@ -54,11 +54,12 @@ loss_weighting: diffsynth
 # Attention backward kernel
 # ==============================================================================
 
-# Let the attention backward use aiter's fp32-atomic accumulation. WAN's
-# sequence length is not divisible by 64, so with this off no aiter ASM backward
-# is reachable and dispatch falls silently through to the slower ck_tile path.
-# Set false for a deterministic backward; accumulation order is
-# non-deterministic when this is on.
+# Let the attention backward use fp32-atomic accumulation. WAN's sequence length
+# is not divisible by 64, so with this off no ASM backward is reachable on either
+# spec and dispatch falls silently through to the slower ck_tile path, and on
+# te_spec the CK v3 backward is unreachable because the image pins the gfx950
+# value of NVTE_CK_IS_V3_ATOMIC_FP32. Set false for a deterministic backward;
+# accumulation order is non-deterministic when this is on.
 attn_atomic_fp32: true
 
 # ==============================================================================
