@@ -104,7 +104,13 @@ def _slice_rope(rotary_pos_emb, lo: int, hi):
     if rotary_pos_emb is None:
         return None
     q, k = rotary_pos_emb
-    return (q[lo:hi], k[lo:hi])
+    q_slice = q[lo:hi]
+    # Slicing the same tensor twice yields two objects, and the whole-QKV fusion tests
+    # ``k_pos_emb is q_pos_emb`` to decide whether one frequency table serves both -- so
+    # slicing naively here is what decided it, and it decided wrong. Self-attention passes
+    # the same freqs for q and k, so preserving that identity is what lets the joint blocks
+    # reach the same fused path the single blocks already take.
+    return (q_slice, q_slice if k is q else k[lo:hi])
 
 
 def _apply_qk_norm_rope(attn, query, key, q_norm, k_norm, out_dtype, rotary_pos_emb, packed_seq_params):
