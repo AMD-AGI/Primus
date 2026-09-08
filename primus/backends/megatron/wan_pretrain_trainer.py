@@ -20,12 +20,58 @@ WAN runs at ``tensor_model_parallel_size=1`` and
 ``pipeline_model_parallel_size=1``; ``WanConfig.validate()`` enforces both.
 """
 
+import os
+
 import torch
 import torch.nn as nn
 
 from primus.backends.megatron.diffusion_trainer import DiffusionPretrainTrainer
 from primus.backends.megatron.training.diffusion.schedulers import WanFlowMatchScheduler
 from primus.core.utils.module_utils import log_rank_0
+
+# Primus-Turbo picks the flash-attention backward variant from this variable,
+# re-reading it on every call. Its own default is "1"; Primus' launchers override
+# that to "0" (``examples/run_pretrain.sh`` and ``runner/helpers/envs/
+# base_env.sh``, both as a conservative accuracy default).
+ATTN_ATOMIC_FP32_ENV = "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32"
+
+
+def _apply_turbo_atomic_fp32_backward(enabled: bool) -> None:
+    """Let WAN reach aiter's fp32-atomic attention backward.
+
+    With the atomic accumulator off, WAN's shapes cannot reach any aiter ASM
+    backward at all: the sequence length is not divisible by 64, so the
+    non-padded kernel family is out, and the ``psskddv`` family that would
+    otherwise serve these shapes requires the atomic. Dispatch then falls
+    through to ck_tile without saying so.
+
+    Turning it on replaces ck_tile's backward with
+    ``aiter::fmha_bwd_hd128_bf16_a32_rtna_psskddv`` over the same call count.
+    The accumulation order is non-deterministic, so this is not free in
+    principle; over a 20-step run the loss stayed within bf16 reduction noise
+    rather than showing a behaviour change.
+
+    The opt-out is the YAML key rather than the environment variable, because
+    the launchers export the variable unconditionally (``${VAR:-0}``) and so
+    every WAN run arrives here with it already set to "0". Reading it back could
+    not tell a deliberate choice apart from that blanket default, which is the
+    bug this works around. Set ``attn_atomic_fp32: false`` to get the
+    deterministic split-dQ path back.
+    """
+    value = "1" if enabled else "0"
+    previous = os.environ.get(ATTN_ATOMIC_FP32_ENV)
+    os.environ[ATTN_ATOMIC_FP32_ENV] = value
+
+    if enabled:
+        log_rank_0(
+            f"WAN trainer: {ATTN_ATOMIC_FP32_ENV}={value} (was {previous!r}) so the "
+            f"attention backward reaches aiter's fp32-atomic kernels instead of ck_tile"
+        )
+    else:
+        log_rank_0(
+            f"WAN trainer: {ATTN_ATOMIC_FP32_ENV}={value} by request "
+            f"(attn_atomic_fp32: false); the attention backward will use ck_tile"
+        )
 
 
 class WanPretrainTrainer(DiffusionPretrainTrainer):
@@ -45,6 +91,8 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
           ``out_channels``, ``freq_dim``).
         - ``backbone_pretrained``, ``backbone_subfolder``,
           ``backbone_subfolder_2``.
+        - ``attn_atomic_fp32`` (default true): let the attention backward use
+          aiter's fp32-atomic kernels. Set false for a deterministic backward.
     """
 
     def __init__(self, *args, **kwargs):
@@ -58,6 +106,11 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
         self.scheduler_sigma_max = getattr(params, "scheduler_sigma_max", 1.0)
 
         self.loss_weighting = getattr(params, "loss_weighting", "diffsynth")
+
+        # Before the first forward, and read per call by Primus-Turbo, so the
+        # trainer constructor is early enough.
+        self.attn_atomic_fp32 = bool(getattr(params, "attn_atomic_fp32", True))
+        _apply_turbo_atomic_fp32_backward(self.attn_atomic_fp32)
 
         # The model config resolves stage -> window, so read the window back off
         # it rather than recomputing here and risking a disagreement.
