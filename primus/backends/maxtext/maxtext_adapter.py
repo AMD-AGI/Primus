@@ -54,7 +54,7 @@ class MaxTextAdapter(BackendAdapter):
         :meth:`prepare_backend`, i.e. before JAX/XLA is imported by the trainer.
 
         Effective precedence (highest wins):
-            per-config ``env:``  >  outer/shell env  >  these defaults  >  image-baked
+            XLA_FLAGS_APPEND  >  per-config ``env:``  >  these defaults  >  inherited
         """
         from primus.backends.maxtext.env_spec import maxtext_env_defaults
 

@@ -35,6 +35,7 @@ Core workflows and day-to-day usage.
 
 - [CLI reference](./02-user-guide/cli-reference.md): `primus-cli` modes, flags, and subcommands
 - [Configuration system](./02-user-guide/configuration-system.md): YAML configuration model, presets, overrides, inheritance
+- [Environment and XLA flags](./02-user-guide/environment-and-xla-flags.md): where to set env vars, how to override `XLA_FLAGS` safely, how to verify what took effect
 - [Pretraining](./02-user-guide/pretraining.md): pretraining **concepts**: backends, YAML structure, parallelism, configuration inventory
 - [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
 - [Megatron-LM training performance validation](./02-user-guide/megatron-lm-training.md): reproduce the published Megatron backend benchmarks on the `rocm/primus` image
