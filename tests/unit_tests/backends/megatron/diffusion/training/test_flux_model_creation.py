@@ -160,6 +160,7 @@ class TestFluxModelCreation:
         assert config.fp16 is False
         assert config.params_dtype == torch.bfloat16
         assert config.transformer_impl == "local"
+        assert config.hetereogenous_dist_checkpoint is True
 
     def test_build_flux_config_from_yaml_torch_compile_settings(self, monkeypatch: pytest.MonkeyPatch):
         """Test that torch_compile settings are extracted from backend_args."""

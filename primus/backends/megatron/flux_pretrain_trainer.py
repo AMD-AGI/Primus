@@ -484,6 +484,8 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             # Xavier uniform matches NeMo's CustomFluxConfig (MLPerf v5.1).
             "init_method": nn.init.xavier_uniform_,
             "output_layer_init_method": nn.init.xavier_uniform_,
+            # Flux combines joint and single blocks with different parameter shapes.
+            "hetereogenous_dist_checkpoint": True,
         }
 
         # Activation: YAML "openai_gelu" maps to fused F.gelu(approximate="tanh"); default in

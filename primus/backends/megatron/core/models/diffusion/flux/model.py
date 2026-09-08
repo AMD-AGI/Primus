@@ -602,10 +602,19 @@ class Flux(DiffusionModule):
         single DiT blocks intentionally omit (FluxSingleAttention rebuilds
         ``linear_proj`` with ``bias=False``). Megatron's heterogeneous, per-layer
         indexed sharded keys (``transformer.layers.<i>.*``) are required here:
-        the homogeneous layer-stacked path would leave unclaimed slots for the
-        params absent in single blocks and raise a CheckpointingException at
-        save time. TransformerBlock.sharded_state_dict provides this
-        automatically, so no config toggle is needed.
+        the homogeneous layer-stacked path gives every layer one shard of a
+        single key, so the joint blocks' 6-chunk AdaLN and the single blocks'
+        3-chunk AdaLN collide on
+        ``transformer.layers.adaln.adaLN_modulation.1.weight`` with conflicting
+        global shapes ((57, 18432, 3072) against (57, 9216, 3072) at
+        hidden_size 3072), and the save aborts. ``added_linear_qkv._extra_state``
+        fails the same way, as 38 unclaimed shards out of 57.
+
+        ``TransformerBlock.sharded_state_dict`` emits the indexed keys only when
+        ``config.hetereogenous_dist_checkpoint`` is set, and that defaults to
+        False, so this override alone is not sufficient.
+        ``FluxPretrainTrainer`` sets the flag for precisely this reason; do not
+        drop it.
 
         Args:
             prefix: Prefix for state dict keys (e.g., 'module.')
