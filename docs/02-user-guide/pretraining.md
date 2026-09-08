@@ -257,21 +257,19 @@ Run on a JAX base image (for example `rocm/jax-training`) or a bare-metal JAX en
 
 ### Quick start (run from a bare Primus checkout)
 
-Use `run_pretrain.sh` with `BACKEND=MaxDiffusion`. When `PRIMUS_SKIP_PIP` is unset, the launcher runs `setup_maxdiffusion_env.sh` for you (installs the stack + applies the patches), sets `NVTE_FRAMEWORK=jax` and `MAXDIFFUSION_PATH`, then launches:
+Use `primus-cli direct` with `BACKEND=MaxDiffusion`. When `PRIMUS_SKIP_PIP` is unset, the prepare hooks run `setup_maxdiffusion_env.sh` for you (installs the stack + applies the patches), set `NVTE_FRAMEWORK=jax` and `MAXDIFFUSION_PATH`, then launch:
 
 ```bash
-BACKEND=MaxDiffusion \
-EXP=examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml \
-  bash ./examples/run_pretrain.sh
+BACKEND=MaxDiffusion ./primus-cli direct -- train pretrain \
+  --config examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml
 ```
 
 To run the environment setup once by itself (e.g. to warm an image or a shared venv), invoke the script directly, then launch with `PRIMUS_SKIP_PIP=1`:
 
 ```bash
 bash examples/maxdiffusion/setup_maxdiffusion_env.sh
-PRIMUS_SKIP_PIP=1 BACKEND=MaxDiffusion \
-EXP=examples/maxdiffusion/configs/MI355X/flux_dev-pretrain.yaml \
-  bash ./examples/run_pretrain.sh
+PRIMUS_SKIP_PIP=1 BACKEND=MaxDiffusion ./primus-cli direct -- train pretrain \
+  --config examples/maxdiffusion/configs/MI355X/flux_dev-pretrain.yaml
 ```
 
 ### Quick start (container mode)

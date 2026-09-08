@@ -147,9 +147,10 @@ export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
 
 # MaxDiffusion (JAX) directly from Primus (on a JAX base image, e.g. rocm/jax-training).
 # Requires the vendored submodule: git submodule update --init third_party/maxdiffusion
-# run_pretrain.sh runs examples/maxdiffusion/setup_maxdiffusion_env.sh to install deps + patches,
-# then launches. See docs/02-user-guide/pretraining.md ("MaxDiffusion (JAX) pretraining").
-BACKEND=MaxDiffusion EXP=examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml bash ./examples/run_pretrain.sh
+# The prepare hooks run examples/maxdiffusion/setup_maxdiffusion_env.sh to install deps + patches.
+# See docs/02-user-guide/pretraining.md ("MaxDiffusion (JAX) pretraining").
+BACKEND=MaxDiffusion ./primus-cli direct -- train pretrain \
+  --config examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml
 
 ```
 
