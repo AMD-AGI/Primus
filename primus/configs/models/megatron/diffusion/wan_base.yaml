@@ -51,6 +51,17 @@ num_train_timesteps: 1000
 loss_weighting: diffsynth
 
 # ==============================================================================
+# Attention backward kernel
+# ==============================================================================
+
+# Let the attention backward use aiter's fp32-atomic accumulation. WAN's
+# sequence length is not divisible by 64, so with this off no aiter ASM backward
+# is reachable and dispatch falls silently through to the slower ck_tile path.
+# Set false for a deterministic backward; accumulation order is
+# non-deterministic when this is on.
+attn_atomic_fp32: true
+
+# ==============================================================================
 # WAN 2.2 dual-expert routing (single-transformer by default)
 # ==============================================================================
 
