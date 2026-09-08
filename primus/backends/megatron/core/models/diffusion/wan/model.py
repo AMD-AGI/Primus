@@ -33,6 +33,7 @@ import torch.utils.checkpoint
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.spec_utils import build_module
+from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.transformer.utils import sharded_state_dict_default
 from safetensors.torch import load_file as load_safetensors
 from torch import Tensor
@@ -56,6 +57,10 @@ class WanTransformerBlock(nn.Module):
         super().__init__()
         dim = config.hidden_size
         eps = config.layernorm_epsilon
+
+        # Carried so the block satisfies the one TransformerLayer attribute
+        # Megatron reads off an FSDP unit (see the registration below).
+        self.layer_number = layer_number
 
         self.norm1 = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
         self.attn1 = build_module(
@@ -115,6 +120,44 @@ class WanTransformerBlock(nn.Module):
         if ff_bias is not None:
             ff_out = ff_out + ff_bias
         return hidden_states + c_gate_msa * ff_out
+
+
+# Make the block a Megatron-FSDP sharding unit.
+#
+# Megatron-FSDP gathers and releases parameters at the granularity of its "FSDP
+# unit modules". When the caller passes none -- and ``megatron/training/
+# training.py`` never does, it builds the wrapper with no ``fsdp_unit_modules``
+# argument and ``DistributedDataParallelConfig`` has no field for one -- the
+# adapter falls back to ``[TransformerLayer]`` for the ``optim_grads_params``
+# strategy WAN runs under. ``WanTransformerBlock`` deliberately is not a
+# Megatron ``TransformerLayer`` (see ``layer_spec.py`` on why WAN does not build
+# on ``TransformerBlock``), so that default matched zero modules and left the
+# unit list empty.
+#
+# An empty unit list costs more than coarse sharding. The hook-registration loop
+# skips modules that live inside a registered unit; with nothing registered that
+# skip never fires, so every norm, linear and attention in all 30 blocks takes a
+# pre-forward unshard hook plus an fp8-transpose-cache post-hook that a bf16 run
+# has no use for. Any hook forces ``nn.Module._call_impl`` off its no-hook fast
+# path, so the Dynamo graph breaks at every submodule boundary inside a block
+# instead of only at the block boundary.
+#
+# Registering as a virtual subclass makes Megatron's own default match the
+# block. The alternatives were worse: Megatron-LM is an upstream submodule so
+# the argument cannot be plumbed through ``training.py``, and real inheritance
+# from ``TransformerLayer`` would change the checkpoint key layout.
+#
+# Eager trades a little step time for peak memory, because the per-block
+# all-gathers cost more collective time than one whole-model gather. Compiled
+# improves on both, as the de-fragmented graph lets Inductor drop casts it
+# previously could not elide across a break. Loss is unchanged.
+#
+# ``register`` only affects ``isinstance``. The other Megatron sites that test
+# for ``TransformerLayer`` are either unreachable for WAN (CUDA graphs, Mamba
+# and hybrid blocks, GPT callables) or keyed on ``layers.N`` parameter names,
+# and WAN's are ``blocks.N``; ``layer_number`` is set above for the one
+# attribute the FSDP-DTensor checkpoint path would read.
+TransformerLayer.register(WanTransformerBlock)
 
 
 class WanTransformer3D(nn.Module):
