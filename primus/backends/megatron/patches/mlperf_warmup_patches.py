@@ -240,9 +240,7 @@ def _reset_ddp_grad_ready_calibration(models):
     """
     drained = groups_reset = 0
     for m in models:
-        groups = list(getattr(m, "bucket_groups", [])) + list(
-            getattr(m, "expert_parallel_bucket_groups", [])
-        )
+        groups = list(getattr(m, "bucket_groups", [])) + list(getattr(m, "expert_parallel_bucket_groups", []))
         for group in groups:
             if not hasattr(group, "is_first_batch"):
                 continue
