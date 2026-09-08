@@ -285,11 +285,18 @@ class EnergonDatasetProvider(DatasetProvider):
         # Whatever goes here must be picklable by name: WorkerConfig is sent to the
         # dataloader workers, which run under forkserver rather than fork, so a lambda
         # would fail at loader construction.
+        #
+        # seed_offset seeds Energon's WorkerRng, which selects shard slices and so
+        # determines which samples are grouped into each block. Energon defaults it to 0
+        # and nothing here set it before, so every run of this stack consumed the same
+        # samples in the same order regardless of the run seed. Left at 0 that remains
+        # true; exposing it makes block composition an independent variable.
         return WorkerConfig(
             rank=rank,
             world_size=world_size,
             num_workers=num_workers,
             data_parallel_group=data_parallel_group,
+            seed_offset=getattr(args, "energon_seed_offset", 0),
             global_error_handler=log_exception,
         )
 
