@@ -112,8 +112,7 @@ def _install_dataloader_monkeypatch(mp_context) -> None:
                 requested = kwargs["multiprocessing_context"]
                 kwargs["multiprocessing_context"] = mp_context
                 log_rank_0(
-                    f"Overriding DataLoader multiprocessing_context={requested!r} "
-                    f"with '{mp_context}'."
+                    f"Overriding DataLoader multiprocessing_context={requested!r} " f"with '{mp_context}'."
                 )
         return original_init(self, *args, **kwargs)
 
