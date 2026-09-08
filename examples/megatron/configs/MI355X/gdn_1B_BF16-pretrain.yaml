@@ -22,7 +22,7 @@ modules:
       use_pytorch_profiler: false
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
-      log_interval: 10
+      log_interval: 1
       tensorboard_log_interval: 10
 
       # --- Optimal MI355X fusion recipe (see zebra_parity README §8) ---
@@ -45,13 +45,16 @@ modules:
       check_for_nan_in_loss_and_grad: false
       barrier_with_L1_time: false
 
-      # GBS=16 is the FLA loss-parity recipe (small global batch), which pins
-      # MBS=2 on 8 GPUs. Unlike KDA, GDN has no hipBLASLt shape limit — raise
-      # MBS+GBS together for throughput (verified MBS=32/GBS=256 -> ~77k
-      # tok/s/GPU at 39% VRAM).
+      # Throughput recipe (8 GPUs, no grad-accum: GBS = MBS * 8).
+      # MI300X maxed occupancy the same way: MBS=56 / GBS=448 at 97.1% of
+      # 192 GB (BS=512 OOM). GDN has no hipBLASLt shape limit, so batch scales
+      # freely here.
+      #
+      # Measured on MI355X (288 GB): MBS=64 / GBS=512 sits at 94% VRAM.
+      # MBS=56 / GBS=448 was 83%. Drop to MBS=2 / GBS=16 for FLA parity.
       train_iters: 50
-      micro_batch_size: 2
-      global_batch_size: 16
+      micro_batch_size: 64
+      global_batch_size: 512
 
       seq_length: 2048
       max_position_embeddings: 2048

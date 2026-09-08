@@ -82,6 +82,8 @@ subtrees:
         title: Parallelism configuration
       - file: 04-technical-guides/multi-node-networking.md
         title: Multi-node networking
+      - file: 04-technical-guides/ainic-bundle-versions.md
+        title: AINIC bundle versions
       - file: 04-technical-guides/collective-operations.md
         title: Collective operations (NCCL/RCCL)
       - file: 04-technical-guides/data-preparation.md

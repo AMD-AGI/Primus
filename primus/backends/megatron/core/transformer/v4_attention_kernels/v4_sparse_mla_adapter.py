@@ -76,6 +76,37 @@ def _rope_pad_kv(kv512: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def _window_indices(S, W, base, cp_dwindow, cp_global_start, seq_starts, idx_dtype, neg1, device):
+    """Sliding-window column indices ``[1, S, W]``, ``-1`` where the slot is invalid.
+
+    The window is validated against a per-query ORIGIN and indexed in local buffer
+    coordinates. Without packing the origin is the scalar ``cp_global_start`` (this
+    rank's first global row), so "position >= 0" means "not before the sequence start".
+    Under packing (``seq_starts`` given, an ``[S]`` tensor) each row has its own origin --
+    the first row of its packed sequence -- so the same test additionally stops a query
+    from reaching back into the previous sample.
+
+    The kernel is purely index-driven and treats ``-1`` as "this column does not exist"
+    (it clamps the pointer, zeroes the value and forces the score to -inf, in both the
+    forward and the backward), so masking cross-sequence columns this way is exact.
+    """
+    q = torch.arange(S, device=device, dtype=idx_dtype).view(S, 1)
+    off = torch.arange(W, device=device, dtype=idx_dtype).view(1, W)
+    if seq_starts is None:
+        gpos = q + int(cp_global_start) - W + 1 + off
+        win_valid = gpos >= 0
+        win_pos = gpos - int(cp_global_start) + int(cp_dwindow)
+    else:
+        # Local coordinates throughout: positions are row indices in this rank's buffer,
+        # and the origin is the row where this query's own sequence starts.
+        starts = seq_starts.to(device=device, dtype=idx_dtype).view(S, 1)
+        pos = q - W + 1 + off  # [S, W] candidate rows
+        win_valid = pos >= starts
+        win_pos = pos + int(cp_dwindow)
+    win_idx = base + win_pos.view(1, S, W)
+    return torch.where(win_valid.view(1, S, W), win_idx, neg1)
+
+
 def _pad_topk_64(topk: torch.Tensor) -> torch.Tensor:
     """Pad the topk width to a multiple of 64 with -1 so a backend whose dKV
     tiling is 64-wide (e.g. gluon) stays valid (HCA 128+32=160 -> 192)."""
@@ -96,6 +127,7 @@ def _build_csa_topk(
     W: int,
     cp_dwindow: int = 0,
     cp_global_start: int = 0,
+    seq_starts=None,
 ) -> torch.Tensor:
     """Flat topk [B*S, W+K] over the per-batch [raw ++ pool] buffer.
 
@@ -118,17 +150,7 @@ def _build_csa_topk(
     neg1 = torch.tensor(-1, device=device, dtype=idx_dtype)
     base = (torch.arange(B, device=device, dtype=idx_dtype) * (Skv + P)).view(B, 1, 1)
 
-    gpos = (
-        torch.arange(S, device=device, dtype=idx_dtype).view(S, 1)
-        + int(cp_global_start)
-        - W
-        + 1
-        + torch.arange(W, device=device, dtype=idx_dtype).view(1, W)
-    )
-    win_valid = gpos >= 0
-    win_pos = gpos - int(cp_global_start) + int(cp_dwindow)
-    win_idx = base + win_pos.view(1, S, W)
-    win_idx = torch.where(win_valid.view(1, S, W), win_idx, neg1)
+    win_idx = _window_indices(S, W, base, cp_dwindow, cp_global_start, seq_starts, idx_dtype, neg1, device)
 
     pool_valid = topk_idxs >= 0
     pool_idx = torch.where(pool_valid, base + Skv + topk_idxs.to(idx_dtype), neg1)
@@ -153,6 +175,7 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         cp_dwindow: int,
         cp_global_start: int,
         k_is_latent: bool,
+        seq_starts,  # [S] per-row sequence origin under THD packing, else None
         fwd_fn: Callable,
         bwd_fn: Callable,
     ) -> torch.Tensor:
@@ -175,7 +198,9 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         q_g = _rope_pad_q(q_bh)
         kv_g = _rope_pad_kv(torch.cat([latent, pool], dim=1).reshape(B * (Skv + P), 1, D))
 
-        topk_g = _pad_topk_64(_build_csa_topk(topk_idxs, S, Skv, P, W, int(cp_dwindow), int(cp_global_start)))
+        topk_g = _pad_topk_64(
+            _build_csa_topk(topk_idxs, S, Skv, P, W, int(cp_dwindow), int(cp_global_start), seq_starts)
+        )
 
         sink_arg = sink.float().contiguous() if sink is not None else None
         o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
@@ -232,7 +257,7 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
             dsink_out = dsink.to(sink_saved.dtype)
 
         # forward args: (q, k_local, v_local, pool, topk_idxs, sink, swa_window, scale,
-        #                cp_dwindow, cp_global_start, k_is_latent, fwd_fn, bwd_fn)
+        #                cp_dwindow, cp_global_start, k_is_latent, seq_starts, fwd_fn, bwd_fn)
         return (
             dq_bh,
             dk_local,
@@ -244,6 +269,7 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
             None,
             None,
             None,
+            None,  # seq_starts
             None,
             None,
             None,
@@ -267,6 +293,7 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         cp_dwindow: int,
         cp_global_start: int,
         k_is_latent: bool,
+        seq_starts,  # [S] per-row sequence origin under THD packing, else None
         fwd_fn: Callable,
         bwd_fn: Callable,
     ) -> torch.Tensor:
@@ -296,17 +323,9 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         # left neighbour. So the window is validated against GLOBAL positions (a token must
         # not attend before the sequence start) but indexed in LOCAL buffer coordinates.
         # With cp_dwindow == cp_global_start == 0 this is byte-identical to the non-CP form.
-        gpos = (
-            torch.arange(S, device=device, dtype=idx_dtype).view(S, 1)
-            + int(cp_global_start)
-            - W
-            + 1
-            + torch.arange(W, device=device, dtype=idx_dtype).view(1, W)
+        win_idx = _window_indices(
+            S, W, base, cp_dwindow, cp_global_start, seq_starts, idx_dtype, neg1, device
         )
-        win_valid = gpos >= 0
-        win_pos = gpos - int(cp_global_start) + int(cp_dwindow)
-        win_idx = base + win_pos.view(1, S, W)
-        win_idx = torch.where(win_valid.view(1, S, W), win_idx, neg1)
 
         if hca_local_seqlen > 0 and additive_mask is not None:
             P = Skv - int(hca_local_seqlen)
@@ -372,7 +391,7 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
             dsink_out = dsink.to(sink_saved.dtype)
 
         # forward args: (q, k, v, sink, swa_window, additive_mask, scale, hca_local_seqlen,
-        #                cp_dwindow, cp_global_start, k_is_latent, fwd_fn, bwd_fn)
+        #                cp_dwindow, cp_global_start, k_is_latent, seq_starts, fwd_fn, bwd_fn)
         return (
             dq_bh,
             dk_bh,
@@ -386,6 +405,7 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
             None,
             None,
             None,
+            None,  # seq_starts
             None,
         )
 
@@ -408,6 +428,7 @@ def make_csa_from_pool(fwd_fn: Callable, bwd_fn: Callable) -> Callable:
         cp_dwindow=0,
         cp_global_start=0,
         k_is_latent=False,
+        seq_starts=None,
     ):
         if attn_dropout > 0.0 and training:
             raise NotImplementedError(
@@ -426,6 +447,7 @@ def make_csa_from_pool(fwd_fn: Callable, bwd_fn: Callable) -> Callable:
             int(cp_dwindow),
             int(cp_global_start),
             bool(k_is_latent),
+            seq_starts,
             fwd_fn,
             bwd_fn,
         )
@@ -451,6 +473,7 @@ def make_attention(fwd_fn: Callable, bwd_fn: Callable) -> Callable:
         cp_dwindow=0,
         cp_global_start=0,
         k_is_latent=False,
+        seq_starts=None,
     ):
         if attn_dropout > 0.0 and training:
             raise NotImplementedError(
@@ -469,6 +492,7 @@ def make_attention(fwd_fn: Callable, bwd_fn: Callable) -> Callable:
             int(cp_dwindow),
             int(cp_global_start),
             bool(k_is_latent),
+            seq_starts,
             fwd_fn,
             bwd_fn,
         )

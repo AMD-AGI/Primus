@@ -183,15 +183,40 @@ def build_global_pool(pool_local: torch.Tensor, cp_group) -> torch.Tensor:
     return _AllGatherPool.apply(pool_local, cp_group)
 
 
+def exchange_boundary_hidden(hidden: torch.Tensor, d_window: int, cp_group) -> torch.Tensor:
+    """Left neighbour's trailing ``d_window`` hidden rows, for ``[B, S, D]`` input.
+
+    Packed (THD) pooling needs this because a window belongs to the rank holding its LAST
+    row, so its leading rows can sit on the previous rank. Rank 0 gets zeros; no window it
+    owns reaches before the pack, so those rows are never read.
+
+    Gradients flow back to the rank that produced the rows -- :class:`LeftBoundaryExchange`
+    sends them around the ring in its backward. Without that the neighbour's tokens would
+    contribute to this rank's compressed keys in the forward but receive no gradient for
+    it, which trains a silently different model rather than failing.
+    """
+    B, S, D = hidden.shape
+    if B != 1:
+        raise RuntimeError(f"DeepSeek-V4 packed CP assumes micro_batch_size=1, got B={B}.")
+    boundary = LeftBoundaryExchange.apply(hidden.reshape(S, D), int(d_window), cp_group)
+    return boundary.reshape(1, int(d_window), D)
+
+
 def compressor_boundary_rows(compress_ratio: int, overlap: bool) -> int:
     """Hidden rows this rank must receive from its left neighbour before compressing.
 
-    The compressor pools each window independently EXCEPT in overlap mode (V4 uses it for
-    ratio 4 / CSA), where window i is stitched with the previous window's second channel
-    half. At a CP boundary that previous window lives on the left neighbour, so `ratio`
-    hidden rows have to come across. Non-overlap (ratio 128 / HCA) is purely local.
+    Once packed sequences are NOT padded to a multiple of the compress ratio, a shard
+    boundary is no longer a window boundary, so this is nonzero for BOTH modes -- the
+    earlier "non-overlap is purely local" rule only held because alignment guaranteed
+    whole windows per shard.
+
+    A window belongs to the rank holding its last row, so it reaches at most ``ratio``
+    rows back. Overlap mode (ratio 4 / CSA) stitches window i with window i-1, so the
+    predecessor's rows must be present too: ``2 * ratio``. Both were established by
+    exhaustive search over random ragged layouts -- at ratio=4 a lookahead of 6 fails
+    131/500 layouts and 4 fails 856/500, while 7 (= 2*ratio-1) and 8 both pass.
     """
-    return int(compress_ratio) if overlap else 0
+    return 2 * int(compress_ratio) if overlap else int(compress_ratio)
 
 
 def compressed_causal_mask(
