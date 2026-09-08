@@ -377,6 +377,11 @@ their packages are built, so the steps here are deliberately written to work
 either way rather than assuming a particular layout. Read the version and the
 dependency fields out of the files themselves instead of assuming them.
 
+If the packaging of the bundle you were given does differ, the specific
+differences observed in one internal build — and the error each produces — are
+recorded in [Appendix A](#appendix-a-packaging-differences-observed-in-an-internal-build).
+You should not need it to follow this section, only to recognise a symptom.
+
 ### Getting to the two `.deb` files
 
 A bundle tarball does not contain loose `.deb` files. Extract in three stages, and
@@ -485,6 +490,75 @@ are required:
 | `ibv_devices` lists no `ionic` device | Not AINIC hardware; the host `ionic` driver is not loaded; or `libionic` is ABI-incompatible with the host driver. See sections 2 and 3. |
 | Training runs fine but throughput is far below expectation | RCCL fell back to `NET/Socket`. The job still completes and converges normally, so check the transport rather than the loss. See section 6. |
 | The requested `libionic` is installed but the fabric is unreachable | The installed bundle is not compatible with the host. Bundle selection is a cluster question — check `fw_ver` on the host, and note that the required version may be older than what the image shipped. See section 3. |
+
+---
+
+## Appendix A: packaging differences observed in an internal build
+
+**Not required reading.** Section 7's commands already handle everything here, and
+they are written so that none of it has to be known in advance. This appendix
+exists so that if you hit one of these errors, you can recognise it rather than
+debug it from scratch.
+
+**Sample size is one.** These are observations from a single internal build,
+compared against the published bundles available at the time of writing. They are
+**not** a specification of how internal builds are packaged, and there is no reason
+to assume the next one will look the same. Verify against your own files with
+`dpkg-deb -f` and `dpkg-deb -c`.
+
+| | Published bundles (all inspected) | The internal build inspected |
+|---|---|---|
+| `libionic` version scheme | `54.0-NNN` | dated, `<maj>.<min>.YY.MM.DD.<build>-1~<distro>` |
+| Variants shipped | one, for all distributions | one per distribution |
+| `libionic-dev` → `libionic1` | `Depends` | `Pre-Depends` |
+| `libionic1` `Replaces:` | none | `ibverbs-providers, libibverbs1` |
+| Owner of bare `libionic.so` | `libionic1` | `libionic-dev` |
+| Archive carrying `libionic` | `rdma-core-debs.tar.xz`, real xz | `libionic-debs.tar.xz`, gzip despite the name |
+
+### What each one does to you
+
+- **Dated version scheme.** The consequence is not cosmetic: a dated version sorts
+  *below* the `54.0-NNN` scheme, so apt regards whatever the base image's
+  repositories offer as an **upgrade**. This is the mechanism behind the silent
+  revert described in section 7 — and it is why removing the repositories matters
+  more for a local install than for an apt one. Do not expect the version to
+  resemble the bundle name; read it with `dpkg-deb -f`.
+- **One variant per distribution.** Extracting the archive gives several
+  directories, so a wildcard `COPY libionic1_*.deb` collects all of them. Most will
+  also fail the base image's `ibverbs-providers` constraint. Copy the two files
+  from the directory matching your base image's codename, by name.
+- **`Pre-Depends` rather than `Depends`.** Produces
+  `dpkg: error processing archive ... pre-dependency problem - not installing libionic-dev`
+  from a single `dpkg -i` given both files, *after* `libionic1` has already been
+  replaced. Fixed by the two-invocation form in section 7.
+- **`libionic.so` owned by a different package.** Produces
+  `dpkg: trying to overwrite '/usr/lib/x86_64-linux-gnu/libionic.so', which is also in package libionic-dev`.
+  Neither package declares a `Replaces` for the other, so `dpkg` is right to
+  refuse. Fixed by `--force-overwrite` in section 7.
+- **Archive misnamed `.tar.xz` while being gzip.** `tar -xJf` fails with
+  `xz: (stdin): File format not recognized`. Use `tar -xf`, which detects either.
+
+### One hint that the dated scheme is a build-pipeline artifact
+
+The dated scheme is visible in the published repositories too, but only on a
+debug-symbol package rather than a shipped one:
+
+```bash
+curl -s "https://repo.radeon.com/amdainic/pensando/ubuntu/1.117.5-a-147/dists/noble/main/binary-amd64/Packages" \
+  | awk '/^Package: /{p=$2} /^Version: /{print p"="$2}' | grep libionic
+```
+
+```
+libionic-dev=54.0-197-1
+libionic1=54.0-197-1
+libionic1-dbgsym=22.1.26.07.10.001-1~deb10
+```
+
+The deliverables carry release versions; the `dbgsym` carries a dated one of the
+same shape. So the dated form appears to be what the build pipeline emits before
+release versioning is applied, which is consistent with seeing it on a build that
+was never published — and is a reason to treat it as a signal that you are holding
+a pre-release artifact rather than a released bundle.
 
 ---
 
