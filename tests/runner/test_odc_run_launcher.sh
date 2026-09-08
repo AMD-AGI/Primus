@@ -10,8 +10,8 @@
 #
 # These are CPU-only / no-GPU tests: they exercise run_odc.sh's argument parsing
 # and environment / PYTHONPATH wiring WITHOUT actually launching training. The
-# real examples/run_pretrain.sh is stubbed by pointing PRIMUS_ROOT at a fake
-# tree whose examples/run_pretrain.sh just dumps the environment run_odc.sh
+# real runner/primus-cli is stubbed by pointing PRIMUS_ROOT at a fake tree
+# whose runner/primus-cli just dumps the environment run_odc.sh
 # exported, so we can assert on it deterministically.
 #
 # What is asserted (real ODC launch/config wiring, not trivial always-true):
@@ -117,18 +117,18 @@ cap_value() {
 }
 
 # ---------------------------------------------------------------------------
-# Fixture: a fake PRIMUS_ROOT whose examples/run_pretrain.sh dumps the env that
+# Fixture: a fake PRIMUS_ROOT whose runner/primus-cli dumps the env that
 # run_odc.sh exported, instead of launching real training.
 # ---------------------------------------------------------------------------
 setup_fake_root() {
     FAKE_ROOT="$(mktemp -d)"
     # Export CAPTURE once here (not inside the run subshell) so the stubbed
-    # run_pretrain.sh inherits it, while shellcheck does not flag a subshell-local
+    # primus-cli inherits it, while shellcheck does not flag a subshell-local
     # modification (SC2030/SC2031).
     export CAPTURE="$FAKE_ROOT/capture.env"
     STDOUT_LOG="$FAKE_ROOT/stdout.log"
-    mkdir -p "$FAKE_ROOT/examples"
-    cat > "$FAKE_ROOT/examples/run_pretrain.sh" << 'STUB'
+    mkdir -p "$FAKE_ROOT/runner"
+    cat > "$FAKE_ROOT/runner/primus-cli" << 'STUB'
 #!/bin/bash
 # Stub standing in for the real trainer launch. Dump the env run_odc.sh set so
 # the test can assert on it, then attempt `import odc` to prove PYTHONPATH wiring.
