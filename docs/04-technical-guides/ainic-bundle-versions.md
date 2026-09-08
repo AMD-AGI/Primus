@@ -509,7 +509,7 @@ to assume the next one will look the same. Verify against your own files with
 | | Published bundles (all inspected) | The internal build inspected |
 |---|---|---|
 | `libionic` version scheme | `54.0-NNN` | dated, `<maj>.<min>.YY.MM.DD.<build>-1~<distro>` |
-| Variants shipped | one, for all distributions | one per distribution |
+| Per-distro directories | yes — `bookworm`, `buster`, `jammy`, `noble`, all shipping the *same* version | yes — six, each shipping a *different* version string |
 | `libionic-dev` → `libionic1` | `Depends` | `Pre-Depends` |
 | `libionic1` `Replaces:` | none | `ibverbs-providers, libibverbs1` |
 | Owner of bare `libionic.so` | `libionic1` | `libionic-dev` |
@@ -523,10 +523,15 @@ to assume the next one will look the same. Verify against your own files with
   revert described in section 7 — and it is why removing the repositories matters
   more for a local install than for an apt one. Do not expect the version to
   resemble the bundle name; read it with `dpkg-deb -f`.
-- **One variant per distribution.** Extracting the archive gives several
-  directories, so a wildcard `COPY libionic1_*.deb` collects all of them. Most will
-  also fail the base image's `ibverbs-providers` constraint. Copy the two files
-  from the directory matching your base image's codename, by name.
+- **A different version per distribution.** Both kinds of bundle extract to one
+  directory per codename, so that layout alone is unremarkable — but where the
+  published bundle puts the *same* version in every directory, this one puts a
+  different version string in each (`50.0.…-1~ubu24.04` under `noble`,
+  `39.0.…-1~ubu22.04` under `jammy`, and so on). A wildcard `COPY libionic1_*.deb`
+  therefore hands `dpkg` genuinely conflicting versions rather than duplicates, and
+  all but one will fail the base image's `ibverbs-providers` constraint — `noble`'s
+  pins `ibverbs-providers (>= 50.0), (<< 51)`. Copy the two files from the
+  directory matching your base image's codename, by name.
 - **`Pre-Depends` rather than `Depends`.** Produces
   `dpkg: error processing archive ... pre-dependency problem - not installing libionic-dev`
   from a single `dpkg -i` given both files, *after* `libionic1` has already been
