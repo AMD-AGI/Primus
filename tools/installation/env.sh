@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # env.sh — Primus venv environment (Python 3.12, ROCm via pip rocm-sdk-devel)
-# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.5
+# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.6
 #
 # Source this both during the build (setup.sh does it) and every time you
 # want to USE the environment:   source env.sh
@@ -44,7 +44,7 @@ export MAX_JOBS="${MAX_JOBS:-128}"
 
 # ---- Python version ----
 # 3.12 is REQUIRED, not a preference. The pinned torch nightly
-# (2.12.0+rocm7.15.0a20260720) published a cp312 Linux wheel and nothing else,
+# (2.12.0+rocm7.15.0a20260727) published a cp312 Linux wheel and nothing else,
 # so this holds even where TransformerEngine is built from source. In wheel mode
 # TE reinforces it: its prebuilt core library `transformer_engine_rocm7` is also
 # cp312-only, with no sdist and no other cp3xx build. See README.md.
@@ -109,7 +109,7 @@ export HCC_AMDGPU_TARGET="${HCC_AMDGPU_TARGET:-$_ARCH_CSV}"
 export HIP_ARCHITECTURES="${HIP_ARCHITECTURES:-$_ARCH_CSV}"
 
 # GPU_ARCHS is deliberately `native` here, matching the `ENV GPU_ARCHS=native`
-# that v26.5 sets after the last build stage: aiter's JIT has to compile for the
+# that v26.6 sets after the last build stage: aiter's JIT has to compile for the
 # GPU it actually runs on. setup.sh overrides it to the full arch list for the
 # individual build stages that cross-compile.
 export GPU_ARCHS="${GPU_ARCHS:-native}"
@@ -171,10 +171,10 @@ if [ -n "${_ROCM_SDK:-}" ]; then
 fi
 
 # ---- TransformerEngine tuning ----
-# Only the runtime performance knobs v26.5 keeps. The NVTE_USE_ROCM /
-# NVTE_FRAMEWORK / NVTE_ROCM_ARCH / NVTE_USE_HIPBLASLT vars that v26.4 exported
-# are build-time switches, which is why v26.5 dropped them and why they are not
-# exported here; stage_te_source sets them inline for the duration of its build.
+# Only the runtime performance knobs v26.6 keeps. The NVTE_USE_ROCM /
+# NVTE_FRAMEWORK / NVTE_ROCM_ARCH / NVTE_USE_HIPBLASLT vars that earlier images
+# exported are build-time switches, which is why they are not exported here;
+# stage_te_source sets them inline for the duration of its build.
 export NVTE_USE_CAST_TRANSPOSE_TRITON="${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}"
 export NVTE_CK_USES_FWD_V3="${NVTE_CK_USES_FWD_V3:-1}"
 export NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
@@ -197,12 +197,13 @@ export NVTE_CK_IS_V3_ATOMIC_FP32="${NVTE_CK_IS_V3_ATOMIC_FP32:-$_PRIMUS_CK_ATOMI
 # Required post-v26.2 to resolve Primus attention backend issues
 export NVTE_FLASH_ATTN=0
 export NVTE_FUSED_ATTN=1
+export PRIMUS_FLA_MLA_ATTN="${PRIMUS_FLA_MLA_ATTN:-1}"
 
 # ---- causal-conv1d / mamba ----
 export CAUSAL_CONV1D_FORCE_BUILD=TRUE
 export MAMBA_FORCE_BUILD=TRUE
 
-# libz3.so safety net. v26.5 uninstalls tilelang (the mamba_ssm dep that needs
+# libz3.so safety net. v26.6 uninstalls tilelang (the mamba_ssm dep that needs
 # z3) at the end of the build, so this is normally unused; it stays because the
 # Dockerfile still ships apt libz3-dev and re-installing tilelang by hand should
 # not leave a broken environment behind. pip `z3-solver` supplies the library.
