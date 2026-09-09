@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# env.sh — Primus JAX/MaxText venv environment (v26.5).
+# env.sh — Primus JAX/MaxText venv environment (v26.6).
 # Source this both during the build (setup.sh does it) and every time you
 # want to USE the environment:   source env.sh
 #
-# This mirrors the v26.5 JAX training Dockerfile, adapted for a no-docker /
-# no-sudo bare-metal install. In v26.5 ROCm is delivered as a RELEASE TARBALL
-# (TheRock dist) extracted to a user-writable dir ($ROCM_DIR) — NOT the pip
-# `rocm-sdk-devel` wheels used by the v26.4 recipe. No system ROCm is required.
+# This mirrors the v26.6 JAX training Dockerfile, adapted for a no-docker /
+# no-sudo bare-metal install. In v26.6 ROCm is delivered as pip TheRock wheels
+# (`rocm-sdk-devel` 7.14.0), same as the image — not the v26.5 release tarball.
+# No system ROCm is required.
 #
 # NOTE: PRIMUS_JAX_BASE is REQUIRED (no default) — export it to a big-disk dir
 #       before sourcing this file. MaxText requires Python >= 3.12; see
@@ -14,7 +14,7 @@
 
 # ---- Install location (persistent) + transient build sources ----
 # PRIMUS_JAX_BASE is REQUIRED (there is intentionally no default): it is where
-# the venv, the extracted ROCm tarball, and the kept checkouts live. Point it at
+# Everything lives under PRIMUS_JAX_BASE (venv, kept checkouts). Point it at
 # a directory you can write to with tens of GB free, then (re-)source this file:
 #     export PRIMUS_JAX_BASE=/big/disk/primus-jax-env
 if [ -z "${PRIMUS_JAX_BASE:-}" ]; then
@@ -32,9 +32,6 @@ export WORKSPACE_DIR="${WORKSPACE_DIR:-$PRIMUS_JAX_BASE/workspace}"  # kept chec
 # Transient build sources: put on fast LOCAL /tmp (NFS is slow for compile I/O;
 # these dirs are deleted after each build anyway).
 export SRC_DIR="${SRC_DIR:-/tmp/primus-jax-build}"
-# ROCm release tarball (TheRock dist) is extracted here. This replaces the
-# Dockerfile's /opt/rocm and keeps the whole install no-sudo / user-writable.
-export ROCM_DIR="${ROCM_DIR:-$PRIMUS_JAX_BASE/rocm}"
 
 # MaxText clone (deps + editable install live here). Primus resolves the
 # MaxText backend from MAXTEXT_PATH (else its own third_party/maxtext), so we
@@ -74,7 +71,7 @@ export MAX_JOBS="${MAX_JOBS:-128}"
 #     export PYTORCH_ROCM_ARCH="gfx942;gfx950"
 # Otherwise it is auto-detected from the GPUs on this host. Detection needs no
 # sudo and no system ROCm: it uses `rocminfo` when available (e.g. after the
-# ROCm tarball is extracted) and otherwise falls back to the kernel KFD sysfs
+# pip ROCm SDK is installed) and otherwise falls back to the kernel KFD sysfs
 # topology, so it works even on a fresh machine before any install.
 
 # Decode a KFD gfx_target_version integer (e.g. 90402) into a gfx name (gfx942).
@@ -135,7 +132,34 @@ if [ -f "$VENV_DIR/bin/activate" ]; then
     source "$VENV_DIR/bin/activate"
 fi
 
-# NOTE: the two HSA_* vars below are NOT in the v26.5 Dockerfile — they are a
+# Every VENV_DIR/WORKSPACE_DIR/MAXTEXT_* export above honours a pre-existing
+# value, so sourcing this file in a shell that already has another Primus env
+# (e.g. tools/installation/env.sh, or a different PRIMUS_JAX_BASE) silently
+# keeps the OLD paths. The failure then shows up much later as a confusing
+# "Backend path not found for 'maxtext'" or as pip installing into the wrong
+# venv, so say something now. Start from a fresh shell to clear these.
+_primus_warn_outside_base() {
+    local name="$1" val="$2"
+    case "$val" in
+        "$PRIMUS_JAX_BASE"/*) ;;
+        *) echo "[env] WARNING: $name=$val is outside PRIMUS_JAX_BASE=$PRIMUS_JAX_BASE" >&2 ;;
+    esac
+}
+_primus_warn_outside_base VENV_DIR "$VENV_DIR"
+_primus_warn_outside_base WORKSPACE_DIR "$WORKSPACE_DIR"
+_primus_warn_outside_base MAXTEXT_PATH "$MAXTEXT_PATH"
+unset -f _primus_warn_outside_base
+if [ "${VIRTUAL_ENV:-}" != "$VENV_DIR" ]; then
+    echo "[env] WARNING: venv not active: expected $VENV_DIR, got ${VIRTUAL_ENV:-<none>}" >&2
+    echo "[env]          (before the 'venv' stage of setup.sh this is expected)" >&2
+fi
+if [ ! -d "$MAXTEXT_PATH" ]; then
+    echo "[env] WARNING: MAXTEXT_PATH does not exist: $MAXTEXT_PATH" >&2
+    echo "[env]          Primus will fail with \"Backend path not found for 'maxtext'\"." >&2
+    echo "[env]          (before the 'maxtext' stage of setup.sh this is expected)" >&2
+fi
+
+# NOTE: the two HSA_* vars below are NOT in the v26.6 Dockerfile — they are a
 # carryover workaround for HSA_STATUS_ERROR_OUT_OF_RESOURCES. Harmless, but
 # remove them if you want an exact match to the image.
 export HSA_ENABLE_SCRATCH_ASYNC_RECLAIM=0
@@ -145,25 +169,42 @@ export HSA_NO_SCRATCH_RECLAIM=1
 export ROCPROFILER_QUEUE_INTERPOSITION=0
 export DEBUG_HIP_DYNAMIC_QUEUES=0
 
-# ---- ROCm path: from the extracted TheRock release tarball (v26.5) ----
-# setup.sh's `rocm` stage downloads therock-dist-*.tar.gz and extracts it into
-# $ROCM_DIR. Once present, wire the HIP/ROCm env at it (mirrors the Dockerfile's
-# /opt/rocm layout, whose LD path is lib + lib/rocm_sysdeps/lib).
-if [ -d "$ROCM_DIR/lib" ] || [ -x "$ROCM_DIR/bin/hipcc" ]; then
-    export ROCM_PATH="$ROCM_DIR"
-    export ROCM_HOME="$ROCM_DIR"   # Primus uses ROCM_HOME; set both
+# ---- ROCm path: from the pip-installed _rocm_sdk_devel package (v26.6) ----
+# Computed dynamically so it works for any Python minor version.
+if command -v python >/dev/null 2>&1; then
+    _ROCM_SDK="$(python - <<'PY' 2>/dev/null
+try:
+    import _rocm_sdk_devel, os
+    print(os.path.dirname(_rocm_sdk_devel.__file__))
+except Exception:
+    pass
+PY
+)"
+fi
+
+if [ -n "${_ROCM_SDK:-}" ]; then
+    export ROCM_PATH="$_ROCM_SDK"
+    export ROCM_HOME="$_ROCM_SDK"   # Primus uses ROCM_HOME; set both
     export HIP_PLATFORM=amd
     export HIP_PATH="$ROCM_PATH"
     export HIP_CLANG_PATH="$ROCM_PATH/llvm/bin"
     export HIP_INCLUDE_PATH="$ROCM_PATH/include"
     export HIP_LIB_PATH="$ROCM_PATH/lib"
     export HIP_DEVICE_LIB_PATH="$ROCM_PATH/lib/llvm/amdgcn/bitcode"
-    # PATH: the Dockerfile puts /opt/rocm/lib on PATH too; mirror that.
-    export PATH="$ROCM_PATH/lib:$ROCM_PATH/bin:$HIP_CLANG_PATH:$PATH"
-    export LD_LIBRARY_PATH="$ROCM_PATH/lib:$ROCM_PATH/lib/rocm_sysdeps/lib:$ROCM_PATH/lib64:$ROCM_PATH/llvm/lib:${LD_LIBRARY_PATH:-}"
-    export LIBRARY_PATH="$ROCM_PATH/lib:$ROCM_PATH/lib64"
+    export PATH="$ROCM_PATH/bin:$HIP_CLANG_PATH:$PATH"
+    export LIBRARY_PATH="$HIP_LIB_PATH:$ROCM_PATH/lib:$ROCM_PATH/lib64"
     export CPATH="$HIP_INCLUDE_PATH"
     export PKG_CONFIG_PATH="$ROCM_PATH/lib/pkgconfig"
+    # v26.6 blanks LD_LIBRARY_PATH at runtime so TE 2.17 + JAX resolve ROCm via
+    # RPATH instead of loading a mismatched HIP copy from rocm-sdk-devel
+    # (CK-JIT fmha_bwd segfault on gfx950). Source builds that need the devel
+    # tree can export PRIMUS_JAX_KEEP_ROCM_LD=1.
+    _ROCM_LD="$HIP_LIB_PATH:$ROCM_PATH/lib:$ROCM_PATH/lib64:$ROCM_PATH/llvm/lib:$ROCM_PATH/lib/host-math/lib:$ROCM_PATH/lib/rocm_sysdeps/lib"
+    if [ "${PRIMUS_JAX_KEEP_ROCM_LD:-0}" = "1" ]; then
+        export LD_LIBRARY_PATH="${_ROCM_LD}:${LD_LIBRARY_PATH:-}"
+    else
+        export LD_LIBRARY_PATH=""
+    fi
 fi
 
 # ---- TransformerEngine (ROCm) runtime settings for JAX ----
@@ -193,7 +234,7 @@ export NCCL_DEBUG=VERSION
 # NCCL_NET_PLUGIN=none makes RCCL ignore that host plugin, matching the image.
 export NCCL_NET_PLUGIN=none
 
-# NOT in the v26.5 Dockerfile: avoids a NaN-loss issue when training on gfx950
+# NOT in the v26.6 Dockerfile: avoids a NaN-loss issue when training on gfx950
 # (no-op on gfx942). Keep it if you train on MI350/MI355; drop for exact parity.
 export RCCL_WARP_SPEED_AUTO=0
 
