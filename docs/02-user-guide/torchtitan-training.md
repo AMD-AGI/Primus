@@ -6,7 +6,7 @@ Training performance validation with the AMD PyTorch Docker image on AMD Instinc
 
 PyTorch is an open-source machine learning framework that is widely used for model training, with GPU-optimized components for transformer-based models.
 
-The ROCm PyTorch training Docker image `rocm/primus:v26.6`, available through [AMD Infinity Hub](https://www.amd.com/en/developer/resources/infinity-hub.html), provides a prebuilt, optimized environment for fine-tuning and pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
+The ROCm PyTorch training Docker image `rocm/primus:v26.6`, available through [Docker hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for fine-tuning and pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
 
 For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.6`](../01-getting-started/release-notes.md#rocmprimusv266). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.5`](../01-getting-started/release-notes.md#rocmprimusv265).
 
