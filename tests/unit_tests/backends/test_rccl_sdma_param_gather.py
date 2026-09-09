@@ -6,6 +6,7 @@
 
 import os
 import subprocess
+import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -535,7 +536,7 @@ def test_dedicated_group_gets_zero_cta_without_mutating_original(monkeypatch):
     assert original_group.policy == "unchanged"
 
 
-def _run_sdma_hook(extra_env):
+def _run_sdma_hook(extra_env, kernel_release="6.8.0"):
     hook = Path(__file__).resolve().parents[3] / "runner/helpers/hooks/06_enable_sdma_all_gather.sh"
     env = os.environ.copy()
     for name in (
@@ -549,13 +550,37 @@ def _run_sdma_hook(extra_env):
     ):
         env.pop(name, None)
     env.update(extra_env)
-    return subprocess.run(
-        ["bash", str(hook)],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    with tempfile.TemporaryDirectory() as bin_dir:
+        uname = Path(bin_dir) / "uname"
+        uname.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' '{kernel_release}'\n",
+            encoding="utf-8",
+        )
+        uname.chmod(0o755)
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        return subprocess.run(
+            ["bash", str(hook)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        {"FSDP_ALL_GATHER_BACKEND": "rccl_sdma"},
+        {"MEGATRON_PARAM_GATHER_BACKEND": "rccl_sdma"},
+    ],
+)
+def test_hook_rejects_kernel_older_than_6_8(backend):
+    result = _run_sdma_hook(backend, kernel_release="6.7.12")
+
+    assert result.returncode == 2
+    assert "requires Linux kernel 6.8 or newer" in result.stderr
+    assert "found 6.7.12" in result.stderr
 
 
 def test_megatron_hook_enables_cumem_without_global_cta_policy():

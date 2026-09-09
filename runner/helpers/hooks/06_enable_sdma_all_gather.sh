@@ -50,6 +50,20 @@ if [[ "${fsdp_backend}" == "rccl_sdma" && "${megatron_backend}" == "rccl_sdma" ]
     exit 2
 fi
 
+# RCCL's cuMem path requires Linux 6.8 or newer.
+kernel_release="$(uname -r)"
+if [[ ! "${kernel_release}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+    echo "[ERROR] RCCL-SDMA could not parse Linux kernel version: ${kernel_release}" >&2
+    exit 2
+fi
+kernel_major="${BASH_REMATCH[1]}"
+kernel_minor="${BASH_REMATCH[2]}"
+if (( kernel_major < 6 || (kernel_major == 6 && kernel_minor < 8) )); then
+    echo "[ERROR] RCCL-SDMA requires Linux kernel 6.8 or newer for cuMem; " \
+         "found ${kernel_release}." >&2
+    exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 1) Common cuMem and allocator prerequisites for the RCCL copy-engine path.
