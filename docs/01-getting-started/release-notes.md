@@ -11,11 +11,139 @@ The two families share a version number but are **not** built in lockstep — th
 
 **This page is the single source of truth for image contents.** Other pages link here instead of repeating version tables, so there is exactly one place to update per release. If you add a page that names an image tag, link to the relevant section below rather than restating the stack.
 
-Every version below was read out of the published image itself. For v26.4 and v26.5 the values were additionally cross-checked against the release Dockerfiles in [`.github/workflows/docker-release/`](https://github.com/AMD-AGI/Primus/tree/main/.github/workflows/docker-release); earlier releases predate those files and are image-derived only. See [Verifying the stack in an image](#verifying-the-stack-in-an-image) to reproduce any table.
+Every version below was read out of the published image itself. For v26.4 through v26.6 the values were additionally cross-checked against the release Dockerfiles in [`.github/workflows/docker-release/`](https://github.com/AMD-AGI/Primus/tree/main/.github/workflows/docker-release); earlier releases predate those files and are image-derived only. See [Verifying the stack in an image](#verifying-the-stack-in-an-image) to reproduce any table.
 
 ---
 
-## v26.5 (current)
+## v26.6 (current)
+
+### `rocm/primus:v26.6`
+
+Megatron-LM, TorchTitan, and Megatron Bridge backends.
+
+| | |
+| --- | --- |
+| Image ID | `4fcb3f210dc6` |
+| Built | 2026-08-25 |
+| Size | 54.0 GB |
+| Manifest | `f756f2279d8ab57b6549bcbd50d249755b69a407` |
+| Dockerfile | [`Dockerfile.primus-v26.6`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.6) |
+
+| Software component | Version |
+| ------------------ | ------- |
+| ROCm | 7.15.0 (`rocm-sdk` 7.15.0a20260727) |
+| Python | 3.12.3 |
+| PyTorch | 2.12.0+rocm7.15.0a20260727 |
+| Transformer Engine | 2.17.0+rocm7.15.0a20260727.e028a6c |
+| Flash Attention | 2.8.1 |
+| hipBLASLt | 1.4.1-bbb68174 |
+| Triton | 3.8.0+git4cff872c.rocm7.15.0a20260727 |
+| RCCL | 2.30.4 |
+| torchvision | 0.27.0+rocm7.15.0a20260727 |
+| torchaudio | 2.11.0+rocm7.15.0a20260728 |
+| APEX | 1.15.0a0+rocm10.1.0a20260822 |
+| AITER | 0.1.14.post1 |
+| Primus-Turbo | 0.4.1.dev26 |
+| torchao | 0.15.0+gite9c7bead9 |
+| FBGEMM | 2026.8.25 |
+| mamba-ssm / causal-conv1d / grouped_gemm | 2.3.1 / 1.5.0.post8 / 1.1.4 |
+| transformers / datasets | 5.5.0 / 3.6.0 |
+| NumPy | 2.5.2 |
+
+### `rocm/jax-training:maxtext-v26.6`
+
+MaxText (JAX) backend. The published tag is the MaxDiffusion-combined image (`/workspace/maxdiffusion` at `68e06965`); MaxText remains at `/workspace/maxtext`.
+
+| | |
+| --- | --- |
+| Image ID | `a71d8dbb045e` |
+| Built | 2026-08-28 |
+| Size | 42.6 GB |
+| Manifest | `31a3a21d0a37cbd0b5de0342535f65d557ff77ba` |
+| Dockerfile | [`Dockerfile.jax-v26.6`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.jax-v26.6) |
+
+| Software component | Version |
+| ------------------ | ------- |
+| ROCm | 7.14.0 |
+| Python | 3.12.3 |
+| JAX / jaxlib | 0.11.0 |
+| jax-rocm7-pjrt / jax-rocm7-plugin | 0.11.0.post1 |
+| Transformer Engine | 2.17.0+rocm7.14.0.50a84ad |
+| hipBLASLt | 1.4.1-cd957402 |
+| RCCL | 2.30.4 (built from rocm-systems `9e5e4084`) |
+| Flax | 0.12.8 |
+| TensorFlow | 2.21.0 (CPU-only, rebuilt from the ROCm fork) |
+| Optax / Orbax / Grain / tensorstore | 0.2.8 / 0.12.4 / 0.2.18 / 0.1.85 |
+| MaxText | `b47d74bf` (`release/v26.6`) |
+| transformers / datasets | 4.57.3 / 4.8.5 |
+| NumPy | 2.5.2 |
+
+> **Note:** `transformers` is 4.57.3 because the published image includes the MaxDiffusion stage, which pins transformers back to 4.x (Flax CLIP / T5). That is a step down from v26.5 (`5.9.0`). Transformer Engine is tagged `rocm7.14.0` and matches the image ROCm, unlike v26.5 where the TE wheel was a `rocm7.15` build on ROCm 7.14.0.
+
+### Primus source for v26.6
+
+Use the **`release/v26.6`** branch for both images:
+
+```bash
+git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
+cd Primus
+git checkout release/v26.6
+git submodule update --init --recursive
+```
+
+| | |
+| --- | --- |
+| Branch tip | `2aa05ead` (2026-08-25) |
+| Megatron-LM | `d3528a21` |
+| TorchTitan | `73a0e697` |
+| Megatron Bridge | `9577b128` |
+| MaxText | `b47d74bf` |
+| Emerging-Optimizers | `93d9eb3a` |
+| HummingbirdXT | `ed7b7bd0` |
+
+> **Prefer a `release/v26.6` checkout over the Primus copy baked into the images.**
+>
+> - `rocm/primus:v26.6` was built from `2aa05ead` (2026-08-25), which is the current `release/v26.6` tip, so the in-image `/workspace/Primus` currently matches. Cloning the branch still keeps you current if later commits land on it.
+> - `rocm/jax-training:maxtext-v26.6` was built from `main` at `4d2f7a74` (2026-08-28), because its Dockerfile pins `PRIMUS_BRANCH=main` rather than a commit. Unlike v26.5, its bundled `third_party/maxtext` **does** match `/workspace/maxtext` (`b47d74bf`). Use `release/v26.6` for MaxText training so you get the Primus recipes validated against this image rather than whatever `main` was on the build day.
+
+### Changes since v26.5
+
+`rocm/primus`:
+
+| Component | v26.5 | v26.6 |
+| --------- | ----- | ----- |
+| ROCm nightly | 7.15.0a20260720 | 7.15.0a20260727 |
+| PyTorch | 2.12.0+rocm7.15.0a20260720 | 2.12.0+rocm7.15.0a20260727 |
+| Transformer Engine | 2.15.0.dev0+rocm7.15.0a20260716.a07e607 | 2.17.0+rocm7.15.0a20260727.e028a6c |
+| Flash Attention | 2.8.3 | 2.8.1 |
+| Triton | 3.7.1+git0263a6a6 | 3.8.0+git4cff872c |
+| hipBLASLt | 1.4.1-1aa46415 | 1.4.1-bbb68174 |
+| Primus-Turbo | 0.3.2.dev48 | 0.4.1.dev26 |
+| APEX | 1.14.0a0+rocm7.15.0a20260721 | 1.15.0a0+rocm10.1.0a20260822 |
+| transformers | 4.55.0 | 5.5.0 |
+| FBGEMM | 2026.7.22 | 2026.8.25 |
+| NumPy | 2.5.1 | 2.5.2 |
+| Image size | 54.7 GB | 54.0 GB |
+
+`rocm/jax-training:maxtext`:
+
+| Component | v26.5 | v26.6 |
+| --------- | ----- | ----- |
+| JAX / jaxlib | 0.10.0 | 0.11.0 |
+| jax-rocm7-pjrt / jax-rocm7-plugin | 0.10.0+rocm7.14.0 | 0.11.0.post1 |
+| Transformer Engine | 2.15.0.dev0+rocm7.15.0a20260707.72d01a0 | 2.17.0+rocm7.14.0.50a84ad |
+| Flax | 0.12.2 | 0.12.8 |
+| Orbax / Grain / tensorstore | 0.11.39 / 0.2.16 / 0.1.82 | 0.12.4 / 0.2.18 / 0.1.85 |
+| MaxText | `a7c6c7e5` | `b47d74bf` |
+| transformers | 5.9.0 | 4.57.3 |
+| NumPy | 2.0.2 | 2.5.2 |
+| Image size | 45.7 GB | 42.6 GB |
+
+> **JAX 0.11.0 still requires Shardy.** Set `shardy=True` during the training run on v26.6. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html).
+
+---
+
+## v26.5
 
 ### `rocm/primus:v26.5`
 
@@ -248,16 +376,16 @@ Images from v26.3 onward ship a manifest at `/workspace/.manifest/` recording ex
 | `dpkg-list.txt` | full `dpkg -l` |
 | `env.txt` | every environment variable baked into the image |
 | `training_docker_version` | the build's commit tag |
-| `Dockerfile` | the Dockerfile the image was built from |
+| `Dockerfile` | the Dockerfile the image was built from (`docker-build-recipe.txt` in `rocm/jax-training:maxtext-v26.6`) |
 
 ```bash
-docker run --rm --entrypoint bash rocm/primus:v26.5 -c 'cat /workspace/.manifest/requirements.txt'
+docker run --rm --entrypoint bash rocm/primus:v26.6 -c 'cat /workspace/.manifest/requirements.txt'
 ```
 
 Native library versions are not pip packages; read them from the ROCm headers:
 
 ```bash
-docker run --rm --entrypoint bash rocm/primus:v26.5 -c '
+docker run --rm --entrypoint bash rocm/primus:v26.6 -c '
   grep -E "HIPBLASLT_VERSION_(MAJOR|MINOR|PATCH|TWEAK)" $(find $ROCM_PATH /opt/rocm -name hipblaslt-version.h 2>/dev/null | head -1)
   grep -E "define NCCL_(MAJOR|MINOR|PATCH)"              $(find $ROCM_PATH /opt/rocm -name rccl.h            2>/dev/null | head -1)'
 ```
