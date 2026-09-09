@@ -10,7 +10,7 @@ export MASTER_PORT=29501
 
 export PRIMUS_PATH=/workspace/Primus
 export PRIMUS_MLPERF=1
-export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-LM:${PYTHONPATH}"
+export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-LM:${PYTHONPATH:-}"
 export EXP=${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml
 export DATA_PATH=/data
 
@@ -39,9 +39,10 @@ export PRIMUS_GRAD_REDUCE_IN_BF16=true
 export USE_TURBO_RMS_NORM=true
 export USE_TURBO_NORM_TE_LINEAR=true
 
-# 0=RTE (default), 1=RZ, 2=stochastic. Consumed by Turbo MXFP4 HIP/FlyDSL quant
-# on gpt-oss-mxfp4 branches; ignored by Turbo builds that do not read it.
-export PRIMUS_TURBO_MXFP4_SCALE_ROUNDING="${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING:-0}"
+# 0=RTE, 1=RZ, 2=stochastic. Consumed by Turbo MXFP4 HIP/FlyDSL quant on
+# gpt-oss-mxfp4 branches; ignored by Turbo builds that do not read it. The
+# MXFP4 recipe is validated with stochastic scale rounding.
+export PRIMUS_TURBO_MXFP4_SCALE_ROUNDING="${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING:-2}"
 
 export HSA_ENABLE_INTERRUPT=0
 export HSA_NO_SCRATCH_RECLAIM=1

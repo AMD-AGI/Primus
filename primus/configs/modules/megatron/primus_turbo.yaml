@@ -49,6 +49,10 @@ use_turbo_gemm: false
 # ===== Grouped MLP =====
 # use turbo grouped gemm
 use_turbo_grouped_gemm: false
+# Fuse the grouped MLP chain (fc1 + GLU + fc2, including WGRAD) into Primus-Turbo's
+# fused grouped MLP op. The Primus-side wiring for this is not merged yet, so the
+# flag is inert; it exists so recipes can already carry the switch.
+turbo_fused_grouped_gemm: false
 # let Turbo grouped GEMMs consume non-aligned expert token counts directly,
 # without TE Fp8Padding/Fp8Unpadding
 turbo_grouped_gemm_without_padding: false
