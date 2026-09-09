@@ -914,6 +914,89 @@ class TestMXFP6SpecProvider:
             assert mlp_module.__name__ == "MXFP6FusedMLP"
 
 
+class TestMXFP6SensitiveLayerRouting:
+    """Retaining trailing blocks in BF16 must route exactly those blocks.
+
+    The existing spec tests all run with ``sensitive_layers_enabled=False``, so
+    nothing covered the enabled path. An off-by-one here is silent: the model
+    builds, trains, and converges while a different set of blocks than the one
+    disclosed is running in BF16. These use Flux 12B's real 19 + 38 shape
+    because the boundary is what is being tested.
+    """
+
+    NUM_JOINT = 19
+    NUM_SINGLE = 38
+    TOTAL = NUM_JOINT + NUM_SINGLE  # 57, and the model config's num_layers
+
+    def _spec(self, **overrides):
+        from primus.backends.megatron.core.models.diffusion.flux.layer_spec import (
+            get_flux_layer_spec,
+        )
+
+        config = SimpleNamespace(
+            transformer_impl="local",
+            fp4=None,
+            fp6="mxfp6",
+            fp8=None,
+            num_joint_layers=self.NUM_JOINT,
+            num_single_layers=self.NUM_SINGLE,
+            sensitive_layers_enabled=True,
+            sensitive_layers_start=0,
+            sensitive_layers_end=0,
+            sensitive_layer_precision="bf16",
+        )
+        for key, value in overrides.items():
+            setattr(config, key, value)
+        return get_flux_layer_spec(config)
+
+    def _is_mxfp6(self, layer_spec):
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+            MXFP6ColumnParallelLinear,
+        )
+
+        return MXFP6ColumnParallelLinear.__name__ in str(layer_spec.submodules)
+
+    @requires_mxfp6
+    @pytest.mark.parametrize("num_end", [4, 8])
+    def test_trailing_blocks_are_bf16(self, num_end):
+        """Exactly the last ``num_end`` blocks leave the MXFP6 backend."""
+        specs = self._spec(sensitive_layers_end=num_end).layer_specs
+        assert len(specs) == self.TOTAL
+
+        expected = list(range(self.TOTAL - num_end, self.TOTAL))
+        retained = [i for i, s in enumerate(specs) if not self._is_mxfp6(s)]
+        assert retained == expected, f"expected BF16 at {expected}, got {retained}"
+
+    @requires_mxfp6
+    def test_leading_blocks_are_bf16(self):
+        """The start counter is independent of the end counter."""
+        specs = self._spec(sensitive_layers_start=2, sensitive_layers_end=4).layer_specs
+        retained = [i for i, s in enumerate(specs) if not self._is_mxfp6(s)]
+        assert retained == [0, 1, self.TOTAL - 4, self.TOTAL - 3, self.TOTAL - 2, self.TOTAL - 1]
+
+    @requires_mxfp6
+    def test_disabled_leaves_every_block_mxfp6(self):
+        """The guard the other spec tests rely on, at the real layer count."""
+        specs = self._spec(sensitive_layers_enabled=False, sensitive_layers_end=8).layer_specs
+        assert all(self._is_mxfp6(s) for s in specs)
+
+    @requires_mxfp6
+    def test_retained_blocks_are_not_a_different_low_precision(self):
+        """BF16 retention must reach a BF16 backend, not merely a non-MXFP6 one.
+
+        ``sensitive_layer_precision`` also accepts ``tw_fp8``, so asserting only
+        "not MXFP6" would pass on a config that quietly retained blocks in FP8.
+        """
+        from primus.backends.megatron.core.extensions.primus_turbo_local_spec import (
+            PrimusTurboLocalSpecProvider,
+        )
+
+        expected = PrimusTurboLocalSpecProvider().column_parallel_linear().__name__
+        specs = self._spec(sensitive_layers_end=4).layer_specs
+        for layer in specs[-4:]:
+            assert expected in str(layer.submodules)
+
+
 # ---------------------------------------------------------------------------
 # Fused MLP epilogue
 # ---------------------------------------------------------------------------
