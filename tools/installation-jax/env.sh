@@ -138,14 +138,17 @@ fi
 # keeps the OLD paths. The failure then shows up much later as a confusing
 # "Backend path not found for 'maxtext'" or as pip installing into the wrong
 # venv, so say something now. Start from a fresh shell to clear these.
-for _v in VENV_DIR WORKSPACE_DIR MAXTEXT_PATH; do
-    eval "_val=\${$_v}"
-    case "$_val" in
+_primus_warn_outside_base() {
+    local name="$1" val="$2"
+    case "$val" in
         "$PRIMUS_JAX_BASE"/*) ;;
-        *) echo "[env] WARNING: $_v=$_val is outside PRIMUS_JAX_BASE=$PRIMUS_JAX_BASE" >&2 ;;
+        *) echo "[env] WARNING: $name=$val is outside PRIMUS_JAX_BASE=$PRIMUS_JAX_BASE" >&2 ;;
     esac
-done
-unset _v _val
+}
+_primus_warn_outside_base VENV_DIR "$VENV_DIR"
+_primus_warn_outside_base WORKSPACE_DIR "$WORKSPACE_DIR"
+_primus_warn_outside_base MAXTEXT_PATH "$MAXTEXT_PATH"
+unset -f _primus_warn_outside_base
 if [ "${VIRTUAL_ENV:-}" != "$VENV_DIR" ]; then
     echo "[env] WARNING: venv not active: expected $VENV_DIR, got ${VIRTUAL_ENV:-<none>}" >&2
     echo "[env]          (before the 'venv' stage of setup.sh this is expected)" >&2
