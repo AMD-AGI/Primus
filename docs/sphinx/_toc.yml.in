@@ -169,6 +169,11 @@ subtrees:
       - file: 06-developer-guide/backend-patch-notes.md
         title: Backend patch notes
 
+  - caption: Technical blogs
+    entries:
+      - file: 07-technical-blogs/README.md
+        title: Blog index
+
   - caption: About
     entries:
       - file: license.md

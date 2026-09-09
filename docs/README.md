@@ -100,6 +100,12 @@ For contributors and maintainers.
 - [Backend patch notes](./06-developer-guide/backend-patch-notes.md): Primus-specific backend arguments and the files they patch
 - [Tooling](./06-developer-guide/tooling.md): auxiliary analysis, benchmarking, visualization, and diagnostics tools
 
+### [Technical blogs](./07-technical-blogs/)
+
+Long-form articles on the reasoning behind Primus features, most of them published on ROCm Blogs.
+
+- [Blog index](./07-technical-blogs/README.md): every Primus article, published and in progress, with the documentation each one maps to
+
 ---
 
 ## Common use cases
@@ -136,11 +142,14 @@ For contributors and maintainers.
 | Contribute to Primus | [Contributing](./06-developer-guide/contributing.md) |
 | Understand the code architecture | [Architecture](./06-developer-guide/architecture.md) |
 | Add a new training backend | [Extending backends](./06-developer-guide/extending-backends.md) |
+| Read the technical blogs behind a feature | [Blog index](./07-technical-blogs/README.md) |
+| Cite Primus in a paper | [Citation](https://github.com/AMD-AGI/Primus#-citation) |
 
 ---
 
 ## External resources
 
+- [ROCm Blogs](https://rocm.blogs.amd.com/): where the Primus technical articles are published
 - [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo): high-performance operators and kernels
 - [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE): external stability/platform layer; this repository does not include a production integration guide
 - [AMD ROCm documentation](https://rocm.docs.amd.com/)
