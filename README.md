@@ -197,9 +197,9 @@ Deep-dives from the AMD Brain-TIO (Training and Inference Optimization) team. Mo
 
 - **[2026/09/03]** [Enabling DeepSeek-V4-Flash Training on AMD Instinct MI355X GPUs with Primus](https://rocm.blogs.amd.com/software-tools-optimization/primus-deepseek-v4/README.html)
 - **[2026/08/12]** [Using ODC to Accelerate AMD SFT Training](https://rocm.blogs.amd.com/software-tools-optimization/odc-accelerate-training/README.html)
-- **[2026/07/24]** [Introducing Instella-MoE: A State-of-the-Art Fully Open Mixture-of-Experts Language Model](https://rocm.blogs.amd.com/artificial-intelligence/instella-moe/README.html)
 - **[2026/07/06]** [Primus Tuning Agent: Closing the Configuration-Search Loop](https://rocm.blogs.amd.com/software-tools-optimization/primus-tuning-agent/README.html)
 - **[2026/06/10]** [Dropless MoE Training in JAX with Primus-Turbo](https://rocm.blogs.amd.com/software-tools-optimization/maxtext-dropless-moe/README.html)
+- **[2026/04/24]** [Primus Projection: Estimate Memory and Performance Before You Train](https://rocm.blogs.amd.com/software-tools-optimization/primus-projection/README.html)
 
 For every article, what each one covers, and the documentation it maps to, see the [technical blog index](./docs/07-technical-blogs/README.md).
 
