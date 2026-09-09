@@ -1,14 +1,15 @@
 ---
 name: spur-cluster-status
-description: Inspect the current Spur (AMD SLURM-compatible) cluster node-allocation state and produce a Markdown report covering the caller's account/QoS permissions, partitions and per-state node counts, per-QoS node caps vs live usage, per-QoS and per-account node usage, reservations, queue pressure, GPU capacity, and the caller's own jobs. Use when the user asks about Spur/SLURM cluster status, node allocation, which QoS/account/partition holds how many nodes, what a QoS's node limit is or how close it is to that limit, why jobs are stuck pending, how many idle nodes are available, or wants a cluster snapshot report.
+description: Inspect the current Spur (AMD SLURM-compatible) cluster node-allocation state and produce a Markdown report (optionally rendered to a standalone HTML page) covering the caller's account/QoS permissions, partitions and per-state node counts, per-QoS node caps vs live usage, per-QoS and per-account node usage, reservations, queue pressure, GPU capacity, and the caller's own jobs. Use when the user asks about Spur/SLURM cluster status, node allocation, which QoS/account/partition holds how many nodes, what a QoS's node limit is or how close it is to that limit, why jobs are stuck pending, how many idle nodes are available, wants a cluster snapshot report, or wants an HTML/browser-viewable/shareable version of one.
 ---
 
 # Spur Cluster Status Report
 
 Generate a read-only snapshot of the Spur cluster's node-allocation state plus the
 caller's account/QoS permissions, and emit a single Markdown report (with an
-appendix of common commands). Spur is AMD's SLURM-compatible scheduler exposed via
-`sinfo` / `squeue` / `scontrol` / `spur accounts`.
+appendix of common commands), optionally rendered to a standalone HTML page. Spur
+is AMD's SLURM-compatible scheduler exposed via `sinfo` / `squeue` / `scontrol` /
+`spur accounts`.
 
 ## Workflow
 
@@ -37,7 +38,29 @@ python3 .claude/skills/spur-cluster-status/scripts/spur_status.py \
    long, so summarize it (count + a short sample) unless the user wants the full list.
 3. Print the saved file path.
 
-### Step 3: Add insights (optional)
+### Step 3: Render an HTML version (optional)
+
+Do this when the user asks for HTML, a browser-viewable page, something to share
+with people who will not open a `.md`, or a PDF (print the HTML from the browser).
+
+```bash
+python3 .claude/skills/spur-cluster-status/scripts/md_to_html.py \
+  "output/skills/spur-cluster-status-<stamp>.md"
+```
+
+- Writes the `.html` next to the `.md` by default; override with `-o <path>`.
+- Output is a **single self-contained file** (CSS and JS inlined, no network
+  fetches), because the login nodes have neither `markdown` nor `pandoc` installed
+  and the report is usually copied around as one file.
+- The page reuses the palette of the dashboard in `tools/backend_gap_report`, adds
+  a sticky table-of-contents that tracks the current section, right-aligns numeric
+  columns, flags QoS at >=100% of their node cap in red and >=80% in amber, and
+  carries a print stylesheet so browser "Save as PDF" drops the nav and avoids
+  splitting sections across pages.
+- Verify before presenting: section count, table count, and tag balance should
+  match the Markdown source (see *Extending* for the check).
+
+### Step 4: Add insights (optional)
 
 After the tables, add a short analysis when relevant, e.g.:
 - Whether enough idle nodes exist for the user's target job size.
@@ -134,3 +157,26 @@ To add a metric, add a parser + a section in `build_report()` in
 so the report's command list stays in sync. Candidate additions: top users by node
 count, largest contiguous idle block for N-node jobs, `spur report cluster` historical
 utilization, and per-node `CPUAlloc` from `scontrol show node`.
+
+`scripts/md_to_html.py` is a deliberately small line-based renderer covering only
+the Markdown this report emits: `#`/`##`/`###` headings, GFM pipe tables, bullet
+lists, blockquotes, fenced code blocks, and inline bold/italic/code/links. Each
+`##` becomes a `<section>` plus a TOC entry, and the bullet list directly under the
+`#` title is lifted into the page header as metadata chips — so keep that structure
+if you restyle the report. Code spans are extracted before the emphasis pass, so
+`**` inside backticks stays literal. If a new section needs different treatment,
+extend `convert()` (block dispatch) or `cell_classes()` (per-cell numeric and
+saturation styling).
+
+After changing either script, re-render and sanity-check that nothing was dropped:
+
+The body is emitted as one long line, so count with `grep -o | wc -l`, not `grep -c`:
+
+```bash
+python3 .claude/skills/spur-cluster-status/scripts/md_to_html.py REPORT.md
+count() { grep -o "$1" "$2" | wc -l; }
+echo "sections=$(count '<section id=' REPORT.html) tables=$(count '<table>' REPORT.html)"
+grep -c '^|---' REPORT.md                          # should equal the table count
+grep -oE '\*\*[^*]*\*\*' REPORT.html               # unconverted bold: expect none
+test "$(count '<section' REPORT.html)" = "$(count '</section>' REPORT.html)" && echo balanced
+```
