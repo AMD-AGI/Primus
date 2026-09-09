@@ -663,7 +663,14 @@ def primus_turbo_fp4_autocast(
 
 
 def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
-    if FP8GlobalStateManager.is_fp8_enabled():
+    # Decide from the same state the Turbo forward will consult. The Turbo GEMM
+    # branch is chosen from the Turbo fp8/fp4 flags, and those stay on in places
+    # where TE's own flag no longer is: inside an MXFP4 layer, once the QKV
+    # site's BF16 override has exited, the site sees turbo_fp4 on with te_fp8
+    # off. Reading TE's flag alone then treats the context as non-quantized and
+    # drops the override, which sent a BF16-pinned O projection to the MXFP4
+    # GEMM and lost the loss to NaN from the first step.
+    if FP8GlobalStateManager.is_fp8_enabled() or _is_fp4_or_fp8_enabled():
         if not qrecipe.override_quantized_autocast:
             return nullcontext()
     else:
