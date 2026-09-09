@@ -48,9 +48,9 @@ For the full and up-to-date model matrix, see [Supported Models](./docs/06-devel
 - **[2026/06/08]** Primus is published as a pip wheel with a bundled `primus-cli` ([install](#install-as-a-python-package-pip))
 - **[2026/01/22]** Post-training via Megatron-Bridge - SFT and LoRA workflows ([Post-training](./docs/02-user-guide/posttraining.md))
 - **[2026/01/06]** MXFP4 low-precision training in the Megatron-LM backend, with MXFP8 recipes following in June
-- **[2025/12/17]** MoE Training Best Practices on AMD GPUs - [MoE Package Blog](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html)
 - **[2025/11/14]** 🎉 **Primus CLI 1.0 Released** - Unified command-line interface with comprehensive documentation
-- **[2025/08/22]** Primus introduction [blog](https://rocm.blogs.amd.com/software-tools-optimization/primus/README.html)
+
+> Looking for the technical articles behind these releases? See [Technical Blogs](#-technical-blogs).
 
 <details>
 <summary>Earlier updates</summary>
@@ -191,6 +191,20 @@ Comprehensive documentation is available in the [`docs/`](./docs/) directory:
 
 ---
 
+## 📖 Technical Blogs
+
+Deep-dives from the AMD Brain-TIO (Training and Inference Optimization) team. Most recent first:
+
+- **[2026/09/03]** [Enabling DeepSeek-V4-Flash Training on AMD Instinct MI355X GPUs with Primus](https://rocm.blogs.amd.com/software-tools-optimization/primus-deepseek-v4/README.html)
+- **[2026/08/12]** [Using ODC to Accelerate AMD SFT Training](https://rocm.blogs.amd.com/software-tools-optimization/odc-accelerate-training/README.html)
+- **[2026/07/24]** [Introducing Instella-MoE: A State-of-the-Art Fully Open Mixture-of-Experts Language Model](https://rocm.blogs.amd.com/artificial-intelligence/instella-moe/README.html)
+- **[2026/07/06]** [Primus Tuning Agent: Closing the Configuration-Search Loop](https://rocm.blogs.amd.com/software-tools-optimization/primus-tuning-agent/README.html)
+- **[2026/06/10]** [Dropless MoE Training in JAX with Primus-Turbo](https://rocm.blogs.amd.com/software-tools-optimization/maxtext-dropless-moe/README.html)
+
+For every article, what each one covers, and the documentation it maps to, see the [technical blog index](./docs/07-technical-blogs/README.md).
+
+---
+
 ## 🌐 Primus Ecosystem
 
 Primus-LM is part of a comprehensive ecosystem designed to provide end-to-end solutions for large model training on AMD GPUs:
@@ -260,10 +274,23 @@ If you rely on Primus, please consider starring or contributing to these project
 
 We welcome contributions! Please see our [Contributing Guide](./CONTRIBUTING.md) for details.
 
+## 📌 Citation
+
+If you use Primus in your research, please cite the repository - GitHub renders [`CITATION.cff`](./CITATION.cff) as a **Cite this repository** button in the sidebar:
+
+```bibtex
+@software{primus,
+  title  = {Primus: A Unified Training Framework for Large Models on AMD GPUs},
+  author = {{AMD Brain-TIO (Training and Inference Optimization) Team}},
+  url    = {https://github.com/AMD-AGI/Primus},
+  year   = {2025}
+}
+```
+
 ## 📄 License
 
 Primus is released under the [Apache 2.0 License](./LICENSE).
 
 ---
 
-**Built with ❤️ by AMD AI Brain - Training at Scale (TAS) Team**
+**Built with ❤️ by AMD Brain-TIO (Training and Inference Optimization) Team**
