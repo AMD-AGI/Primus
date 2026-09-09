@@ -1,8 +1,8 @@
 # Primus environment in a venv (no docker, no sudo)
 
-Reproduces the Primus **v26.5** training image in a Python virtual environment on
+Reproduces the Primus **v26.6** training image in a Python virtual environment on
 a bare-metal host. Derived from
-[`.github/workflows/docker-release/Dockerfile.primus-v26.5`](../../.github/workflows/docker-release/Dockerfile.primus-v26.5),
+[`.github/workflows/docker-release/Dockerfile.primus-v26.6`](../../.github/workflows/docker-release/Dockerfile.primus-v26.6),
 using the same package pins and commits, adapted for the constraints of a machine
 where we have no root.
 
@@ -14,8 +14,8 @@ failure it avoids — worth reading before "correcting" any of them back.
 ## Python 3.12 is required
 
 This is a hard requirement from upstream packaging, not a preference. The pinned
-torch nightly `2.12.0+rocm7.15.0a20260720` ships a **cp312 Linux wheel only** —
-that nightly date published no cp310 Linux build — and the v26.5
+torch nightly `2.12.0+rocm7.15.0a20260727` ships a **cp312 Linux wheel only** —
+that nightly date published no cp310 Linux build — and the v26.6
 TransformerEngine wheels are cp312-only as well.
 
 Ubuntu 22.04 hosts only have `python3.10`, so `setup.sh` provisions a standalone
@@ -35,15 +35,15 @@ python3 -m pip install --user uv     # ~/.local/bin, one of the paths setup.sh s
 If you cannot install it at all, supply your own interpreter instead and it is never
 used: `PRIMUS_PYTHON=/path/to/python3.12 bash setup.sh`.
 
-> **Migrating from the v26.4-based scripts:** a Python 3.10 venv cannot be
+> **Migrating from an older venv:** a Python 3.10 venv cannot be
 > upgraded in place. `setup.sh` detects the mismatch and stops with instructions;
 > remove the old venv and rebuild:
 > `rm -rf "$PRIMUS_BASE/venv" && bash setup.sh`
 
 ## TransformerEngine: wheel on glibc ≥ 2.38, otherwise built from source
 
-v26.5 installs TransformerEngine from the ROCm staging index instead of building
-it. Those wheels are produced on Ubuntu 24.04, and `libtransformer_engine.so`
+v26.6 installs TransformerEngine from the ROCm multi-arch staging index instead of
+building it. Those wheels are produced on Ubuntu 24.04, and `libtransformer_engine.so`
 requires **glibc ≥ 2.38** plus `GLIBCXX_3.4.32`. Ubuntu 22.04 has glibc 2.35, and
 unlike libstdc++, glibc cannot be side-loaded through `LD_LIBRARY_PATH` — so on a
 22.04 host the v26.5 wheels install fine but fail at import with:
@@ -56,8 +56,8 @@ OSError: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found
 
 | Host glibc | Path | What happens |
 |---|---|---|
-| ≥ 2.38 (e.g. Ubuntu 24.04) | wheel | exactly what v26.5 does |
-| < 2.38 (e.g. Ubuntu 22.04) | source | clones `ROCm/TransformerEngine` and builds commit `a07e607f14a…`, the same commit the `TE_VERSION` label refers to |
+| ≥ 2.38 (e.g. Ubuntu 24.04) | wheel | exactly what v26.6 does |
+| < 2.38 (e.g. Ubuntu 22.04) | source | clones `ROCm/TransformerEngine` and builds commit `e028a6c…`, the same commit the `TE_VERSION` label refers to |
 
 Either way you get the same TE version; the source build just links against the
 host toolchain. It takes considerably longer than the wheel install. Override the
@@ -74,7 +74,7 @@ than letting the problem surface later during training.
 | GPU arch | gfx942 + gfx950 | **auto-detected** from the host (`rocminfo`/KFD sysfs); builds only what's present → faster builds |
 | Build dir | container FS | venv under **`$PRIMUS_BASE`** (persistent, you choose it); build sources on local `/tmp` |
 | System deps | `apt install ...` | **skipped** (no sudo); pip provides what's needed |
-| torchaudio / torchvision / apex | floating (`torchvision==0.27`) | pinned to the exact `a20260720` nightly builds — see below |
+| torchaudio / torchvision / apex | floating (`torchvision==0.27`) | pinned to the exact `a20260727` nightly builds — see below |
 
 The key reason no sudo is required: the `rocm-sdk-devel` pip wheel ships a full
 ROCm toolchain inside the venv, so we don't depend on system ROCm or apt.
@@ -86,7 +86,7 @@ resolves torchvision as `==0.27`. That set no longer resolves at all: newer
 `rocm10.x` nightlies now publish matching version numbers, so a floating
 torchvision selects a build for a different ROCm line, conflicts with the pinned
 torch, and pip dies after a long backtracking storm. `setup.sh` pins each
-companion wheel to the version the `a20260720` nightly published, i.e. exactly
+companion wheel to the version the `a20260727` nightly published, i.e. exactly
 what the Dockerfile picked up on the day it was built.
 
 ## Run it
@@ -102,10 +102,10 @@ export PRIMUS_BASE="$HOME/envs/primus-env"   # required, pick your own location
 bash setup.sh                                # all default stages
 ```
 
-The build compiles aiter, Primus-Turbo, flash-attention and TransformerEngine
-from source, so budget hours rather than minutes — on glibc < 2.38 that means all
-of TE, not just its torch glue layer. Running it detached avoids losing it to a
-dropped connection:
+The build compiles aiter, Primus-Turbo and (on older glibc) TransformerEngine
+from source, so budget hours rather than minutes. `flash-attn` is a pip package
+in v26.6 (`flash-attn==2.8.1`) rather than the ROCm git fork. Running it detached
+avoids losing it to a dropped connection:
 
 ```bash
 nohup bash setup.sh > ~/primus-setup.log 2>&1 &
@@ -149,46 +149,29 @@ Optional: `torchrec` (DLRM/recommendation stack).
 
 The order matters for `te`: see the note on the staging index below.
 
-## What changed from the v26.4-based scripts
+## What changed from the v26.5-based scripts
 
-- **TransformerEngine now comes from the ROCm staging index where it can.**
-  `stage_te` installs `transformer_engine_rocm_torch==2.15.0.dev0+rocm7.15.0a20260716.a07e607`
-  from `rocm.frameworks-nightlies.amd.com/whl-staging/device-all/`, which pulls a
-  prebuilt core library and compiles only the thin torch glue layer. On hosts
+- **TransformerEngine 2.17 from the multi-arch staging index.** `stage_te`
+  installs `transformer_engine_rocm_torch==2.17.0+rocm7.15.0a20260727.e028a6c`
+  from `rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/`. On hosts
   whose glibc is too old for those wheels it builds the same commit from source
   instead — see the section above.
-- **`stage_te` must run after `stage_flash_attn`.** That staging index serves
-  *only* the transformer-engine packages, so while `--index-url` points at it pip
-  cannot reach PyPI for anything else. Every TE dependency has to be installed
-  beforehand. The Dockerfile gets `einops` transitively from flash-attention and
-  `onnx` from `onnxscript`; `stage_te` installs both explicitly rather than
-  relying on another package's transitive deps.
-- **`ck_jit_compile.sh` is patched** the same way v26.5 patches it inside the
-  image: concurrent CK JIT compiles race to publish the same `.so`, and without
-  the patch the loser aborts the run. The script locates the file through
-  `sysconfig` (rather than a hardcoded `/opt/venv/lib/python3.12` path) and the
-  patch is idempotent.
-- **New `cleanup` stage** uninstalls `tilelang`, mirroring v26.5. `mamba-ssm`
-  pulls it in as a hard dependency and v26.5 removes it again once everything is
-  built.
-- **`apache-tvm-ffi` now follows the Dockerfile pin (0.1.11).** The old scripts
-  held it at 0.1.6 to dodge a `tilelang` import failure; with `tilelang`
-  uninstalled at the end, that workaround is obsolete.
-- **`GPU_ARCHS` is `native` at runtime.** v26.5 sets `ENV GPU_ARCHS=native` after
-  the last build stage so aiter's JIT compiles for the GPU actually in the box.
-  `env.sh` therefore defaults it to `native`, and `setup.sh` overrides it to the
-  full arch list for the individual stages that cross-compile.
-- **Build-only NVTE vars dropped from the runtime environment.** `NVTE_USE_ROCM`,
-  `NVTE_FRAMEWORK`, `NVTE_ROCM_ARCH` and `NVTE_USE_HIPBLASLT` configure the
-  from-source TE build and are gone from v26.5, so `env.sh` no longer exports
-  them; `stage_te_source` still sets them inline for the duration of its build.
-  The runtime performance knobs (`NVTE_CK_*`,
-  `NVTE_USE_CAST_TRANSPOSE_TRITON`, `NVTE_FLASH_ATTN=0`, `NVTE_FUSED_ATTN=1`)
-  stay.
-- **Updated pins:** torch `2.12.0+rocm7.15.0a20260720`, Primus
-  `b511d1b66b0068715308ea9bfe8ba147ea1a3860` (`release/v26.5`), Primus-Turbo
-  `edc8d2ccb0be4888e80ee7c6e765fd3956026a32`. flash-attention, torchtune,
-  torchao, grouped_gemm, causal-conv1d, mamba and aiter are unchanged in v26.5.
+- **Flash Attention is `pip install flash-attn==2.8.1`**, not the
+  `ROCm/flash-attention` git fork used through v26.5.
+- **Full TheRock ROCm wheel set** (`rocm`, `rocm-bootstrap`, `rocm-sdk-core`,
+  `rocm-sdk-devel`, `rocm-sdk-libraries`, plus per-arch device wheels), matching
+  the image. `stage_torch` also applies the `libamd_comgr.so.3` symlink
+  workaround (AIMA-248).
+- **`PRIMUS_FLA_MLA_ATTN=1`** is exported at runtime (MLA `core_attention` uses
+  `flash_attn_func` directly).
+- **mamba** applies the v26.6 `uninitialized_copy.cuh` CUDA-namespace patches
+  and installs `nvidia-cuda-nvdisasm==13.3.73`.
+- **Updated pins:** torch `2.12.0+rocm7.15.0a20260727`, TE 2.17, transformers
+  `5.5.0`, wandb `0.28.2`, Primus `2aa05ead…` (`release/v26.6`), Primus-Turbo
+  `a6a16cdc…`. CVE pins: `cryptography==50.0.0`, `mlflow==3.15.1` (`--no-deps`).
+- **`ck_jit_compile.sh` is still patched** the same way the image patches it.
+- **`GPU_ARCHS` remains `native` at runtime.** `setup.sh` still overrides it to
+  the full arch list for stages that cross-compile.
 
 ## What is SKIPPED (needs sudo / apt — not reproducible here)
 
@@ -203,7 +186,7 @@ The order matters for `te`: see the note on the staging index below.
   install (it has rocshmem headers and device bitcode, but no host
   `librocshmem.a`) and the link then fails. Intranode DeepEP is unaffected.
   Export a real `ROCSHMEM_HOME` to opt back in.
-- **MLPerf `primus_mllog`**: v26.5 installs it from `training_results_v6.0`. Not
+- **MLPerf `primus_mllog` / `mlperf-common`**: the image installs it; it is not
   part of the core training path, so it is not installed here.
 - **DLRM / FBGEMM / Flux**: not part of the default Primus training path.
   `torchrec` is provided as an optional stage; FBGEMM additionally needs apt
@@ -232,7 +215,7 @@ scripts:
   LLVM's static initialisers — taking down `torch._dynamo`, `aiter`, `torchao` and
   `mamba_ssm` with it. `stage_turbo` therefore installs Primus-Turbo without deps
   and supplies its real runtime requirements (`scipy`, `flydsl`) explicitly. This
-  is a deliberate, tested deviation from v26.5.
+  is a deliberate, tested deviation from the image.
 - **mamba built with pip, not `python setup.py install`.** The legacy
   `easy_install` path ignores pip-installed packages and re-fetches the *latest*
   of every unpinned dep as `.egg`s — it clobbered `transformers` (→5.x), removed
@@ -267,8 +250,8 @@ scripts:
   after which aiter prints `ROCm/HIP JIT runtime not available … CK and HIP ops
   are disabled. Triton ops remain available.` and quietly runs Triton-only. 0.2.4
   is the newest release that satisfies Turbo and keeps aiter whole, and is what
-  the Dockerfile itself resolved to, since 0.3.0 was published after v26.5 was
-  built. `stage_turbo` asserts the symbol is importable afterwards. This is about
+  the Dockerfile itself resolved to historically. `stage_turbo` asserts the
+  symbol is importable afterwards. This is about
   capability parity with the image, not speed: on llama3.1_8B BF16 an A/B of 0.2.4
   against 0.3.0 measured 535.9 vs 534.5 TFLOP/s/GPU, i.e. no difference. Other
   workloads that lean on aiter's CK/HIP kernels are the ones that would notice.
@@ -278,8 +261,8 @@ scripts:
   that quack 0.3.1 imports, so the unpinned resolution ends in
   `AttributeError: module 'cutlass.cute.core' has no attribute 'ThrCopy'`. 4.5.3 is
   the newest release quack 0.3.1 still works with, and pip cannot choose it
-  unaided because 4.5.3 was published *after* 4.6.0 yet sorts lower. v26.5 does
-  not pin this, so the released image is affected by the same break.
+  unaided because 4.5.3 was published *after* 4.6.0 yet sorts lower. The image
+  does not pin this either.
 - **`patchelf` from pip**, since the apt one is unavailable.
 - **`libz3.so` from pip** (`z3-solver`, added to `LD_LIBRARY_PATH` by `env.sh`).
   With `tilelang` now uninstalled this is only a safety net, kept so that
