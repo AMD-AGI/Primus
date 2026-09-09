@@ -169,6 +169,13 @@ def _move_to_runtime_device(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def _sft_get_cp_group():
+    """CP process group, or None when context parallelism is off."""
+    from primus.backends.megatron.core.transformer.deepseek_v4_cp import get_cp_group
+
+    return get_cp_group()
+
+
 def _empty_loss_result(device: torch.device | None = None) -> Tuple[torch.Tensor, torch.Tensor, dict]:
     """Build a no-op loss tuple with the expected Megatron shape."""
     if device is None:
@@ -336,6 +343,26 @@ def create_sft_forward_step() -> Callable:
             position_ids = torch.arange(seq_len, dtype=torch.long, device=tokens.device)
             position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
 
+        # ---- context parallel: contiguous sequence sharding -------------------
+        # V4's dense branch consumes a CONTIGUOUS shard plus a boundary window (see
+        # deepseek_v4_cp.py), not Megatron's load-balanced 2-chunk ring layout, so we slice
+        # directly instead of calling get_batch_on_this_cp_rank. position_ids stay GLOBAL --
+        # slicing the 0..seq_len-1 stream is exactly what RoPE and the window-validity mask
+        # need on this rank.
+        cp_group = _sft_get_cp_group()
+        if cp_group is not None:
+            cp_size, cp_rank = cp_group.size(), cp_group.rank()
+            if seq_len % cp_size != 0:
+                raise RuntimeError(
+                    f"seq_length={seq_len} must be divisible by context_parallel_size={cp_size}."
+                )
+            l_local = seq_len // cp_size
+            sl = slice(cp_rank * l_local, (cp_rank + 1) * l_local)
+            tokens = tokens[:, sl].contiguous()
+            labels = labels[:, sl].contiguous()
+            loss_mask = loss_mask[:, sl].contiguous()
+            position_ids = position_ids[:, sl].contiguous()
+
         # attention_mask: None for causal mask (standard GPT autoregressive)
         attention_mask = None
 
@@ -374,14 +401,30 @@ def create_sft_forward_step() -> Callable:
             # This is crucial for proper loss averaging across micro-batches
             num_tokens = loss_mask.sum().clone().detach().to(torch.int)
 
+            # Context parallel: each rank saw only its shard. Sum both the loss and the
+            # token count across the CP group so every rank reports the FULL sequence's
+            # numbers -- otherwise the logged loss is a per-shard partial and the
+            # normalisation by num_tokens is wrong. The gradient is unaffected by this
+            # reduction: it is applied to detached copies for reporting, while `loss`
+            # itself is scaled by cp_size to cancel the averaging that Megatron's DDP
+            # performs over the data-parallel-with-context-parallel group.
+            cp_group_loss = _sft_get_cp_group()
+            if cp_group_loss is not None:
+                summed = torch.stack([loss.detach().float(), num_tokens.float()])
+                torch.distributed.all_reduce(summed, group=cp_group_loss)
+                loss_report, tokens_report = summed[0], summed[1].to(torch.int)
+                loss = loss * cp_group_loss.size()
+            else:
+                loss_report, tokens_report = loss.clone().detach(), num_tokens
+
             # Create reporting loss for logging
             # Format: [loss_value, num_tokens] concatenated
             # This allows Megatron to compute proper weighted average across DP ranks
-            reporting_loss = torch.cat([loss.clone().detach().view(1), num_tokens.view(1)])
+            reporting_loss = torch.cat([loss_report.view(1), tokens_report.view(1)])
 
             # Return standard Megatron loss function signature
             # (loss, num_tokens, metrics_dict)
-            return (loss, num_tokens, {"lm loss": reporting_loss})
+            return (loss, tokens_report, {"lm loss": reporting_loss})
 
         _pre_forward_canary(model)
 

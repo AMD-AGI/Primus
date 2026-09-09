@@ -3,7 +3,7 @@
 This guide explains how to build the **full Primus training software stack directly on a host machine**, without using the AMD published training Docker image. It is intended for users who, for policy or operational reasons, cannot run containers and need to reproduce the same environment on bare metal.
 
 It is derived from the official training Dockerfile — currently
-[`Dockerfile.primus-v26.5`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.5) — and installs the same components and versions. Wherever possible, everything is installed **inside a Python virtual environment and without `sudo`**. The only steps that require root are a small set of OS-level system libraries (installed with `apt`), and a couple of optional networking packages used for multi-node training.
+[`Dockerfile.primus-v26.6`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.6) — and installs the same components and versions. Wherever possible, everything is installed **inside a Python virtual environment and without `sudo`**. The only steps that require root are a small set of OS-level system libraries (installed with `apt`), and a couple of optional networking packages used for multi-node training.
 
 > **Important**: This is a long, build-heavy process. A full from-source build (Flash Attention, aiter, Primus-Turbo, and on older hosts TransformerEngine) can take **several hours** and needs a machine with many CPU cores, plenty of RAM, and tens of GB of free disk. The Docker image remains the recommended and best-supported path. Use this guide only when containers are not an option.
 
@@ -110,7 +110,7 @@ Use `primus-cli direct` (not `container`), since you are running on bare metal w
 - **System (`apt`) packages** ([Section 3](#3-system-packages-need-root-one-time)): skipped — they need root.
 - **Multi-node networking** ([Section 5](#5-multi-node-communication-stack-ucx-and-openmpi)): UCX, OpenMPI and AMD AINIC are not built. Single-node training works without them.
 - **FBGEMM / Flux / DLRM benchmarks**: not built (`torchrec` is an optional stage; FBGEMM additionally needs apt `libtbb-dev`).
-- **MLPerf `primus_mllog`**: v26.5 installs it from `training_results_v6.0`; it is not part of the core training path and is not installed.
+- **MLPerf `primus_mllog`**: the image installs `mlperf-common`; it is not part of the core training path and is not installed.
 
 ### 1.6 Where the scripts deliberately differ from the Dockerfile
 
@@ -250,8 +250,8 @@ export HSA_NO_SCRATCH_RECLAIM=1
 pip install --upgrade pip
 pip install \
     pybind11 typeguard \
-    wheel==0.45.1 cmake==3.31.6 ninja==1.11.1.3 \
-    packaging==25.0 setuptools==75.1.0
+    wheel==0.46.2 cmake==3.31.6 ninja==1.11.1.3 \
+    packaging==25.0 setuptools==80.10.2
 ```
 
 ### 4.3 Install ROCm + PyTorch from the TheRock multi-arch wheels
@@ -265,17 +265,21 @@ pip install \
 
 # One coherent nightly. The Dockerfile pins only `torch` and lets the companions
 # float, which no longer resolves; pin them all to the same date.
-NIGHTLY="rocm7.15.0a20260720"
+NIGHTLY="rocm7.15.0a20260727"
 
 python -m pip uninstall -y torch
 python -m pip install \
     --index-url https://rocm.nightlies.amd.com/whl-multi-arch --pre \
+    rocm==7.15.0a20260727 \
+    rocm-bootstrap \
+    rocm-sdk-core==7.15.0a20260727 \
+    rocm-sdk-devel==7.15.0a20260727 \
+    rocm-sdk-libraries==7.15.0a20260727 \
     torch==2.12.0+${NIGHTLY} \
     amd-torch-device-gfx942==2.12.0+${NIGHTLY} \
     amd-torch-device-gfx950==2.12.0+${NIGHTLY} \
-    rocm-sdk-devel==7.15.0a20260720 \
-    rocm-sdk-device-gfx942==7.15.0a20260720 \
-    rocm-sdk-device-gfx950==7.15.0a20260720 \
+    rocm-sdk-device-gfx942==7.15.0a20260727 \
+    rocm-sdk-device-gfx950==7.15.0a20260727 \
     torchaudio==2.11.0+${NIGHTLY} \
     torchvision==0.27.0+${NIGHTLY} \
     amd-torchvision-device-gfx942==0.27.0+${NIGHTLY} \
@@ -329,22 +333,22 @@ mkdir -p ~/primus-build && cd ~/primus-build
 
 | Component | Repository | Pin | Install command | Notes |
 |---|---|---|---|---|
-| Flash Attention | `ROCm/flash-attention` | `6387433156558135a998d5568a9d74c1778666d8` | `python setup.py install` | clone `--recursive` |
+| Flash Attention | PyPI `flash-attn` | `2.8.1` | `pip install --no-build-isolation flash-attn==2.8.1` | v26.6 dropped the ROCm git fork |
 | grouped_gemm | `caaatch22/grouped_gemm` | branch `rocm` | `pip install --no-build-isolation .` | MoE models |
 | causal-conv1d | `Dao-AILab/causal-conv1d` | `e940ead2fd962c56854455017541384909ca669f` | `pip install --no-build-isolation .` | needs `CAUSAL_CONV1D_FORCE_BUILD=TRUE`, `HIP_ARCHITECTURES=gfx942,gfx950` |
 | mamba | `AndreasKaratzas/mamba` | branch `enable-primus-hybrid-models` | `pip install --no-build-isolation .` | see note below |
 | aiter | `ROCm/aiter` | `0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e` | `PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .` | clone `--recursive`; `pip uninstall aiter amd-aiter` first |
-| Primus-Turbo | `AMD-AGI/Primus-Turbo` | `edc8d2ccb0be4888e80ee7c6e765fd3956026a32` | `pip install -r requirements.txt` then `pip install --no-build-isolation . -v` | needs `HCC_AMDGPU_TARGET="gfx942,gfx950"`; see note below |
+| Primus-Turbo | `AMD-AGI/Primus-Turbo` | `a6a16cdce46bd2235a248b41f501fb363c215b9b` | `pip install -r requirements.txt` then `pip install --no-build-isolation . -v` | needs `HCC_AMDGPU_TARGET="gfx942,gfx950"`; see note below |
 | torchtune | `pytorch/torchtune` | `b4c98ac2a37f0397d64c22579aed415ce7264db6` | `pip install .` | patch first: `sed -i 's/use_grouped_mm = True/use_grouped_mm = False/g' torchtune/modules/moe/utils.py` |
 | torchao | `pytorch/ao` | `e9c7bead90b840b280f97374308255957108ce47` | `pip install --no-build-isolation .` | two patches: `pad_inner_dim` → `True` in `torchao/float8/config.py`, and `if defined(HIPBLASLT_VEC_EXT)` → `if false` in `torchao/csrc/rocm/swizzle/swizzle.cpp` |
 
-**mamba.** Install with `pip`, **not** `python setup.py install`: the legacy `easy_install` path ignores pip-installed packages and re-fetches the latest of every unpinned dependency as `.egg`s, which clobbers the pins. Pin `apache-tvm-ffi==0.1.11` beforehand, and `nvidia-cutlass-dsl==4.5.3` — newer CUTLASS DSL releases removed a symbol that `mamba_ssm`'s `quack-kernels` dependency imports, breaking `import mamba_ssm`. `mamba_ssm` pulls in `tilelang`, which v26.5 uninstalls again once everything is built.
+**mamba.** Install with `pip`, **not** `python setup.py install`: the legacy `easy_install` path ignores pip-installed packages and re-fetches the latest of every unpinned dependency as `.egg`s, which clobbers the pins. Pin `apache-tvm-ffi==0.1.11` beforehand, and `nvidia-cutlass-dsl==4.5.3` — newer CUTLASS DSL releases removed a symbol that `mamba_ssm`'s `quack-kernels` dependency imports, breaking `import mamba_ssm`. `mamba_ssm` pulls in `tilelang`, which v26.6 uninstalls again once everything is built.
 
 **Primus-Turbo.** Its `setup.py` hard-pins upstream `triton==3.7.0`, which conflicts with the ROCm `triton` that `torch` requires; installing it replaces the ROCm build and then segfaults on import, because ROCm's HIP runtime already loads its own LLVM. Install with `--no-deps` and supply `scipy` and `flydsl==0.2.4` yourself. Primus-Turbo also probes for rocSHMEM and mistakes the pip ROCm SDK for one; set `ROCSHMEM_HOME` to a non-existent path to make the probe fail cleanly and disable internode DeepEP.
 
 ### 4.6 TransformerEngine
 
-v26.5 changed this: TE is no longer built from source but installed from the ROCm staging index.
+v26.6 installs TE from the ROCm multi-arch staging index (TE 2.17).
 
 ```bash
 # Runtime tuning flags (see Section 6 for the full set)
@@ -353,12 +357,12 @@ export NVTE_USE_CAST_TRANSPOSE_TRITON=1
 # TE's own dependencies must be present first: the staging index serves only the
 # transformer-engine packages, so pip cannot fetch anything else while it is selected.
 pip install pybind11==3.0.4 importlib-metadata==8.7.1 onnxscript==0.7.0 \
-            pydantic==2.13.4 nvdlfw_inspect==0.2.2 einops onnx
+            pydantic==2.13.4 nvdlfw_inspect==0.2.2 einops==0.9.0.dev0 onnx
 
 pip install \
-    --index-url https://rocm.frameworks-nightlies.amd.com/whl-staging/device-all/ \
+    --index-url https://rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/ \
     --pre --no-build-isolation \
-    transformer_engine_rocm_torch==2.15.0.dev0+rocm7.15.0a20260716.a07e607
+    transformer_engine_rocm_torch==2.17.0+rocm7.15.0a20260727.e028a6c
 ```
 
 > **Those wheels need glibc ≥ 2.38.** They are built on Ubuntu 24.04, and `libtransformer_engine.so` requires `GLIBC_2.38` plus `GLIBCXX_3.4.32`. Ubuntu 22.04 has glibc 2.35, and glibc cannot be side-loaded via `LD_LIBRARY_PATH`, so on 22.04 the wheels install fine but fail at import with `version 'GLIBC_2.38' not found`.
@@ -368,7 +372,7 @@ pip install \
 > ```bash
 > git clone --recursive https://github.com/ROCm/TransformerEngine.git
 > cd TransformerEngine
-> git checkout a07e607f14a5330807ffdafeeb6224f2d7dffacc
+> git checkout e028a6c
 > git submodule update --init --recursive
 > pip install psutil
 > MAX_JOBS=${MAX_JOBS} NVTE_FRAMEWORK=pytorch NVTE_USE_ROCM=1 \
@@ -378,7 +382,7 @@ pip install \
 >
 > `setup.sh` picks between the two automatically from the host's glibc; override with `PRIMUS_TE_MODE=wheel|source`.
 
-Either way, apply the same fix v26.5 applies inside the image: concurrent CK JIT compiles race to publish the same `.so`, and without this the loser aborts the run.
+Either way, apply the same fix the image applies: concurrent CK JIT compiles race to publish the same `.so`, and without this the loser aborts the run.
 
 ```bash
 CK_JIT=$(python -c 'import os, sysconfig; print(os.path.join(sysconfig.get_paths()["purelib"], "transformer_engine/lib/ck_jit/ck_jit_compile.sh"))')
@@ -389,17 +393,19 @@ sed -i 's|    mv -n "$_TMP_SO" "$OUTPUT"$|    mv -n "$_TMP_SO" "$OUTPUT" 2>/dev/
 
 ```bash
 pip install \
-    datasets==3.6.0 av==16.0.1 transformers==4.55.0 optree==0.18.0 sympy \
+    datasets==3.6.0 av==16.0.1 transformers==5.5.0 optree==0.18.0 sympy \
     accelerate==1.9.0 trl==0.21.0 tensorboard==2.20.0 peft scipy einops \
     flask-restful nltk pytest pytest-cov pytest_mock pytest-csv \
     pytest-random-order sentencepiece wrapt \
-    zarr==2.18.7 numcodecs==0.12.1 xarray wandb tensorstore==0.1.45 \
+    zarr==2.18.7 numcodecs==0.12.1 xarray wandb==0.28.2 tensorstore==0.1.45 \
     pybind11 tiktoken pynvml "huggingface_hub[cli]"
 
 python3 -m nltk.downloader punkt_tab
 
 # AWS SDK (used by some data pipelines)
 pip install boto3==1.35.42 botocore==1.35.99
+pip install cryptography==50.0.0
+pip install --no-deps mlflow==3.15.1
 ```
 
 ### 4.8 Install Primus and its submodules
@@ -409,10 +415,11 @@ cd ~/primus-build
 # Required to resolve a post-v26.2 attention backend issue
 export NVTE_FLASH_ATTN=0
 export NVTE_FUSED_ATTN=1
+export PRIMUS_FLA_MLA_ATTN=1
 
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout b511d1b66b0068715308ea9bfe8ba147ea1a3860   # release/v26.5
+git checkout 2aa05ead3401708cf1a1e2958c1def18d7aecf92   # release/v26.6
 git submodule update --init --recursive
 pip install -r requirements.txt
 
@@ -435,7 +442,7 @@ pip install tensordict iopath torchmetrics==1.0.3 \
     --extra-index-url https://rocm.nightlies.amd.com/whl-multi-arch
 
 # FBGEMM (GPU) — needs apt libtbb-dev
-export BUILD_ROCM_VERSION='7.14'
+export BUILD_ROCM_VERSION='7.15'
 
 git clone https://github.com/pytorch/FBGEMM.git
 cd FBGEMM
@@ -443,7 +450,7 @@ git checkout 80bd3c077dc41b55cd16ed4dcad15cf7c1c1d76a
 cd fbgemm_gpu
 git clean -dfx && git submodule sync && git submodule update --init --recursive
 pip install -r requirements.txt
-pip install setuptools==75.1.0
+pip install setuptools==80.10.2
 python setup.py install \
     --build-variant=rocm \
     --build-target=default \
@@ -534,6 +541,7 @@ export PKG_CONFIG_PATH="$ROCM_PATH/lib/pkgconfig"
 # TransformerEngine: attention backend selection used by Primus
 export NVTE_FLASH_ATTN=0
 export NVTE_FUSED_ATTN=1
+export PRIMUS_FLA_MLA_ATTN=1
 
 # TransformerEngine: CK performance knobs
 export NVTE_USE_CAST_TRANSPOSE_TRITON=1

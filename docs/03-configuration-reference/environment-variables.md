@@ -228,12 +228,20 @@ Forwarded keys:
 
 ## 14. JAX / XLA (MaxText)
 
-Primus MaxText hooks print recommended values in `runner/helpers/hooks/train/pretrain/maxtext/prepare.py`; MaxText and JAX read them directly.
+Primus owns these defaults in one place per backend: `primus/backends/<backend>/env_spec.py`. They are applied by the backend adapter before `import jax`. For how to override them from a config, see [Environment and XLA flags](../02-user-guide/environment-and-xla-flags.md).
 
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
-| `XLA_PYTHON_CLIENT_MEM_FRACTION` | e.g. `.97` in prepare hook | User / hook output | JAX / XLA allocator | Fraction of GPU memory pre-allocated for JAX. |
-| `DUMP_HLO_DIR` | `${PRIMUS_PATH}/output/xla_dump_hlo` (example) | User | XLA via `XLA_FLAGS` composition | Directory for HLO dumps when enabled. |
-| `DUMP_HLO` | `0` | User | Prepare hook → XLA flags | Gate HLO dumping (`1` enables in hook samples). |
+| `XLA_FLAGS` | managed string (see below) | `primus/backends/maxtext/env_spec.py`; may also be image-baked | JAX / XLA compiler | Space-separated XLA compiler flags. Primus **appends** its managed flags to whatever was inherited, so its values win (XLA honors the last occurrence). Setting this in a config `env:` block takes full ownership and skips the managed defaults. |
+| `XLA_FLAGS_APPEND` | (unset) | User (config `env:` or CLI `--env`) | `apply_xla_flags_append` in `primus/core/backend/env_registry.py` | Appended onto `XLA_FLAGS` as the final layer, so it overrides any single managed flag without replacing the rest. Consumed on use. **Preferred override mechanism.** |
+| `XLA_GPU_AUTOTUNE_LEVEL` | `4` | User | `primus/backends/maxtext/env_spec.py` | Parameterizes `--xla_gpu_autotune_level` in the managed string. Must be `>= 1`: at `0` XLA picks a default fp8 GEMM kernel that overflows on fine-grained MoE expert einsums, giving NaN loss on fp8 runs. |
+| `XLA_PYTHON_CLIENT_MEM_FRACTION` | `.97` | `env_spec.py` (setdefault) | JAX / XLA allocator | Fraction of GPU memory pre-allocated for JAX. Raised from the JAX default to avoid HSA OOM during multi-node runs. |
+| `TF_CPP_MIN_LOG_LEVEL` | `2` | `env_spec.py` (setdefault) | JAX / TF logging | Suppresses benign JAX/MaxText shutdown errors. |
+| `DUMP_HLO` | `0` | User | `env_spec.py` → `--xla_dump_to` | `1` enables HLO dumping. Prefer this over adding `--xla_dump_to` by hand. |
+| `DUMP_HLO_DIR` | `output/xla_dump_hlo` | User | `env_spec.py` → `--xla_dump_to` | Destination directory when `DUMP_HLO=1`. |
+| `JAX_COORDINATOR_IP` | `MASTER_ADDR` | `env_spec.py` when `NNODES > 1` | `jax.distributed.initialize` | Coordinator host. Left unset on single-node runs so MaxText uses the local single-controller path. |
+| `JAX_COORDINATOR_PORT` | `MASTER_PORT` (`1234`) | `env_spec.py` when `NNODES > 1` | `jax.distributed.initialize` | Coordinator port. |
 
-**Note:** MaxText also propagates many knobs through `XLA_FLAGS` and `LIBTPU_INIT_ARGS` upstream; see MaxText sources for the full list.
+**Managed `XLA_FLAGS` for MaxText** (see `_build_xla_flags` for the authoritative string): `--xla_gpu_memory_limit_slop_factor=95`, `--xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592`, `--xla_gpu_all_gather_combine_threshold_bytes=8589934592`, `--xla_gpu_enable_command_buffer=''`, `--xla_gpu_enable_latency_hiding_scheduler=true`, `--xla_gpu_enable_triton_gemm=false`, `--xla_gpu_enable_cublaslt=true`, `--xla_gpu_autotune_level=4`, `--xla_gpu_enable_all_gather_combine_by_dim=false`.
+
+**Note:** The MaxDiffusion backend declares no XLA defaults; its example configs set `XLA_FLAGS` themselves and are used verbatim. MaxText and JAX also read many additional knobs upstream that Primus does not wrap; see the MaxText sources for those.

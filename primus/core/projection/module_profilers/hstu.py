@@ -32,9 +32,13 @@ Norms / SiLU gating are memory-bound and added as a small HBM term.
 from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.simulation_backends.base import resolve_hbm_bytes_per_ms
 from primus.core.projection.training_config import gemm_dtype_from_config
 
-_PEAK_HBM_BYTES_PER_MS = 4.0e9  # ~4 TB/s (MI300-class), bytes/ms
+# Fallback peak HBM bandwidth (MI300-class, ~4 TB/s) when no arch profile is
+# reachable; the real value is resolved from the simulation backends so HBM4
+# parts are not mis-priced.
+_FALLBACK_HBM_GBPS = 4000.0
 _ELEMENTWISE_HBM_FRACTION = 0.60  # SiLU/norm streaming efficiency
 
 
@@ -43,13 +47,16 @@ class HSTULayerProfiler(BaseModuleProfiler):
         super().__init__(config, sub_profilers)
         self._gemm_backend = None
         self._sdpa_backend = None
+        self._hstu_attn_sim = None
         self._cached = None
         self._cache_key = None
+        self._components = {}
 
     # -- backend wiring (mirrors DenseTransformerLayerProfiler) ----------------
     def set_simulation_backends(self, gemm_backend=None, sdpa_backend=None):
         self._gemm_backend = gemm_backend
         self._sdpa_backend = sdpa_backend
+        self._hstu_attn_sim = None
         self._cached = None
         self._cache_key = None
 
@@ -98,53 +105,175 @@ class HSTULayerProfiler(BaseModuleProfiler):
         return int(batch_size * seq_len * (D + uvqk_width) * 2)  # bf16
 
     # -- compute ---------------------------------------------------------------
-    def _effective_seq(self, seq_len: int) -> int:
-        fill = float(getattr(self.config.model_config, "hstu_fill_factor", 1.0) or 1.0)
-        fill = min(1.0, max(0.01, fill))
-        return max(1, int(round(seq_len * fill)))
+    def _fill(self) -> tuple[float, float]:
+        mc = self.config.model_config
+        mean = min(1.0, max(0.01, float(getattr(mc, "hstu_fill_factor", 1.0) or 1.0)))
+        std = max(0.0, float(getattr(mc, "hstu_fill_factor_std", 0.0) or 0.0))
+        return mean, std
+
+    def _mean_seq(self, seq_len: int) -> int:
+        """Expected valid tokens E[L] -- drives the (linear) GEMM/elementwise work."""
+        mean, _ = self._fill()
+        return max(1, int(round(seq_len * mean)))
+
+    def _peak_flops_per_ms(self) -> float:
+        """Realizable bf16 matmul peak (flops/ms), probed from the GEMM backend.
+
+        A large square GEMM runs at ~peak, so 2*n^3 / fwd_ms is the backend's
+        achievable peak -- backend-agnostic and consistent with how the GEMMs in
+        this same projection are priced.  Cached across calls.
+        """
+        if getattr(self, "_peak_fpm", None):
+            return self._peak_fpm
+        n = 8192
+        g = self._gemm_backend.simulate_gemm(n, n, n, dtype="bf16")
+        t = g.forward_time_ms or 0.0
+        self._peak_fpm = (2.0 * n * n * n / t) if t > 0 else 1.0e12
+        return self._peak_fpm
+
+    def _attn_seq(self, seq_len: int) -> int:
+        """Effective sequence for the attention core, which scales as E[L^2].
+
+        E[L^2] = mean^2 + std^2 >= mean^2, so pricing the quadratic term with an
+        rms-fill sequence corrects the systematic under-count from squaring the
+        mean fill.  With std=0 this reduces to the mean (backward compatible).
+        """
+        mean, std = self._fill()
+        rms = min(1.0, (mean * mean + std * std) ** 0.5)
+        return max(1, int(round(seq_len * rms)))
+
+    def _hstu_attn_backend(self):
+        """Lazily build/cache the HSTU FAv3 attention simulator.
+
+        Reuses the arch/clock of the SDPA backend already wired in, and pulls
+        the fused-epilogue throughputs from the model config so the pointwise
+        gate/bias cost is a physical rate rather than an opaque efficiency.
+        """
+        sim = getattr(self, "_hstu_attn_sim", None)
+        if sim is not None:
+            return sim
+        from primus.core.projection.simulation_backends.hstu_attention_simulator import (
+            _DEFAULT_EPILOGUE_GELEM_BWD,
+            _DEFAULT_EPILOGUE_GELEM_FWD,
+            HSTUAttentionSimulator,
+        )
+
+        mc = self.config.model_config
+        g_fwd = float(getattr(mc, "hstu_attn_epilogue_gelem_fwd", 0.0) or 0.0) or _DEFAULT_EPILOGUE_GELEM_FWD
+        g_bwd = float(getattr(mc, "hstu_attn_epilogue_gelem_bwd", 0.0) or 0.0) or _DEFAULT_EPILOGUE_GELEM_BWD
+        sdpa = self._sdpa_backend
+        sim = HSTUAttentionSimulator(
+            gpu_arch=getattr(sdpa, "_gpu_arch", None),
+            gpu_clock_mhz=getattr(sdpa, "_gpu_clock_mhz", None),
+            epilogue_gelem_fwd=g_fwd,
+            epilogue_gelem_bwd=g_bwd,
+        )
+        self._hstu_attn_sim = sim
+        return sim
 
     def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+        mc = self.config.model_config
         D, H, d_qk, d_v = self._geom()
         tp = self._tp()
-        dtype = gemm_dtype_from_config(self.config.model_config)
-        eff_seq = self._effective_seq(seq_len)
-        tokens = batch_size * eff_seq  # jagged: only valid positions do work
+        dtype = gemm_dtype_from_config(mc)
+        mean_seq = self._mean_seq(seq_len)
+        attn_seq = self._attn_seq(seq_len)
+        tokens = batch_size * mean_seq  # jagged: only valid positions do work
         heads_per_rank = max(1, H // tp)
-
-        fwd = 0.0
-        bwd = 0.0
 
         # 1. Fused UVQK projection GEMM: [T, D] x [D, H*(2 d_qk + 2 d_v)]/tp
         uvqk_n = self._uvqk_out(heads_per_rank, d_qk, d_v)
         g = self._gemm_backend.simulate_gemm(tokens, uvqk_n, D, dtype=dtype)
-        fwd += g.forward_time_ms
-        bwd += g.backward_time_ms or (2.0 * g.forward_time_ms)
+        uvqk_fwd = g.forward_time_ms
+        uvqk_bwd = g.backward_time_ms or (2.0 * g.forward_time_ms)
 
-        # 2. Attention core (gated dot-product) over the effective sequence.
-        s = self._sdpa_backend.simulate_sdpa(
-            batch_size=batch_size,
-            num_heads=heads_per_rank,
-            seq_len=eff_seq,
-            head_dim=d_qk,
-            causal=True,
-            dtype="bf16",
-            head_dim_v=d_v,
+        # 2. Attention core (gated dot-product).  HSTU attention is a *gated
+        #    jagged* attention (SiLU gate + relative bias, not softmax); the FAv3
+        #    SDPA roofline does not model it (it under-predicts by >30x and does
+        #    not scale as L^2).  When hstu_attn_flop_efficiency is set we price it
+        #    directly from its causal FLOPs at the measured achieved fraction of
+        #    realizable matmul peak; otherwise we fall back to the SDPA roofline.
+        attn_model = str(getattr(mc, "hstu_attn_model", "") or "").lower().strip()
+        flop_eff = float(getattr(mc, "hstu_attn_flop_efficiency", 0.0) or 0.0)
+        if attn_model == "fav3_hstu":
+            # FAv3 tile-level matmuls (origami 1-CU) + HSTU pointwise epilogue.
+            # The epilogue (SiLU gate + relative bias + U gate) is priced by a
+            # physical score-throughput, not a lumped efficiency constant.
+            sim = self._hstu_attn_backend()
+            s = sim.simulate_sdpa(
+                batch_size=batch_size,
+                num_heads=heads_per_rank,
+                seq_len=attn_seq,
+                head_dim=d_qk,
+                causal=True,
+                dtype="bf16",
+                head_dim_v=d_v,
+            )
+            attn_fwd = s.forward_time_ms
+            attn_bwd = s.backward_time_ms or (2.0 * s.forward_time_ms)
+        elif flop_eff > 0:
+            flop_eff = min(1.0, max(0.001, flop_eff))
+            # Causal QK^T + A.V: B * heads * L^2 * (d_qk + d_v) flops per layer
+            # (the causal 1/2 and the 2-matmul/2-MAC factors cancel to 1).
+            attn_flops = batch_size * heads_per_rank * (attn_seq * attn_seq) * (d_qk + d_v)
+            peak_fpm = self._peak_flops_per_ms()
+            attn_fwd = attn_flops / (peak_fpm * flop_eff)
+            bwd_ratio = float(getattr(mc, "hstu_attn_bwd_ratio", 2.0) or 2.0)
+            attn_bwd = attn_fwd * max(1.0, bwd_ratio)
+        else:
+            s = self._sdpa_backend.simulate_sdpa(
+                batch_size=batch_size,
+                num_heads=heads_per_rank,
+                seq_len=attn_seq,
+                head_dim=d_qk,
+                causal=True,
+                dtype="bf16",
+                head_dim_v=d_v,
+            )
+            eff = min(1.0, max(0.01, float(getattr(mc, "hstu_attn_efficiency", 1.0) or 1.0)))
+            bwd_eff = float(getattr(mc, "hstu_attn_bwd_efficiency", 0.0) or 0.0)
+            bwd_eff = min(1.0, max(0.01, bwd_eff)) if bwd_eff > 0 else eff
+            attn_fwd = s.forward_time_ms / eff
+            attn_bwd = (s.backward_time_ms or (2.0 * s.forward_time_ms)) / bwd_eff
+
+        # 3. Output projection GEMM: [T, out_in]/tp x [out_in, D].  The gated
+        #    attention output is concatenated with residual/gate streams, so the
+        #    measured input width is 3*D (1536), not H*d_v -- configurable.
+        out_in = int(getattr(mc, "hstu_output_input_dim", 0) or 0) or (heads_per_rank * d_v)
+        o = self._gemm_backend.simulate_gemm(tokens, D, out_in, dtype=dtype)
+        out_fwd = o.forward_time_ms
+        out_bwd = o.backward_time_ms or (2.0 * o.forward_time_ms)
+
+        # Selective activation recomputation: the UVQK projection is recomputed
+        # in the backward to regenerate Q/K/V for the attention-backward, so its
+        # forward GEMM cost is charged again on the backward path.
+        if bool(getattr(mc, "hstu_recompute_attn", False)):
+            uvqk_bwd += uvqk_fwd
+
+        # 4. SiLU gating (U) + norms + dropout (input/linear w/ masks) + jagged
+        #    pack/unpack: memory-bound elementwise passes over the UVQK + D
+        #    activation footprint.  Each logical pass is a read plus a write.
+        peak_hbm_bytes_per_ms = resolve_hbm_bytes_per_ms(
+            gemm_backend=self._gemm_backend,
+            sdpa_backend=self._sdpa_backend,
+            fallback_gbps=_FALLBACK_HBM_GBPS,
         )
-        fwd += s.forward_time_ms
-        bwd += s.backward_time_ms or (2.0 * s.forward_time_ms)
+        passes = max(1.0, float(getattr(mc, "hstu_elementwise_passes", 6.0) or 6.0))
+        elem_bytes = tokens * (uvqk_n + D) * 2 * passes  # bf16, read+write per pass
+        elem_ms = elem_bytes / (peak_hbm_bytes_per_ms * _ELEMENTWISE_HBM_FRACTION)
 
-        # 3. Output projection GEMM: [T, H*d_v]/tp x [H*d_v, D]
-        o = self._gemm_backend.simulate_gemm(tokens, D, heads_per_rank * d_v, dtype=dtype)
-        fwd += o.forward_time_ms
-        bwd += o.backward_time_ms or (2.0 * o.forward_time_ms)
-
-        # 4. SiLU gating (U) + norms: memory-bound elementwise over the UVQK + D
-        #    activation footprint.
-        elem_bytes = tokens * (uvqk_n + D) * 2  # bf16 read+op
-        elem_ms = elem_bytes / (_PEAK_HBM_BYTES_PER_MS * _ELEMENTWISE_HBM_FRACTION)
-        fwd += elem_ms
-        bwd += elem_ms
-
+        # Per-role split (mirrors the Kineto trace buckets) so a projection can
+        # be calibrated against measured kernel time role-by-role.
+        self._components = {
+            "gemm_fwd": uvqk_fwd + out_fwd,
+            "gemm_bwd": uvqk_bwd + out_bwd,
+            "attn_fwd": attn_fwd,
+            "attn_bwd": attn_bwd,
+            "elem_fwd": elem_ms,
+            "elem_bwd": elem_ms,
+        }
+        fwd = uvqk_fwd + attn_fwd + out_fwd + elem_ms
+        bwd = uvqk_bwd + attn_bwd + out_bwd + elem_ms
         return (fwd, bwd, self.estimated_activation_memory(batch_size, seq_len))
 
     def _results(self, batch_size: int, seq_len: int):
@@ -167,3 +296,8 @@ class HSTULayerProfiler(BaseModuleProfiler):
 
     def measured_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return self._results(batch_size, seq_len)[2]
+
+    def measured_component_times(self, batch_size: int, seq_len: int) -> dict:
+        """Per-role fwd/bwd ms for one layer (gemm / attn / elem)."""
+        self._results(batch_size, seq_len)  # ensure computed + cached
+        return dict(self._components)

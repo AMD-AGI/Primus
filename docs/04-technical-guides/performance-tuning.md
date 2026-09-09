@@ -115,7 +115,7 @@ primus_turbo:
   use_turbo_attention: true
   use_turbo_async_tp: true
   use_turbo_float8_linear: true
-  use_turbo_grouped_mm: false
+  use_turbo_grouped_gemm: false
 ```
 
 ### Documentation

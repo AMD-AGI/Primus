@@ -113,7 +113,11 @@ _KNOWN_PROFILES: Dict[str, _HardwareProfile] = {
     "gfx942": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 5300.0),
     # MI325X / gfx942 (same die as MI300X, HBM3E upgrade): ~6.0 TB/s
     "mi325x": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 6000.0),
-    # MI355X / gfx950: HBM3E ~8.0 TB/s
+    # MI350X / MI355X / gfx950: same CDNA4 die (256 CU), HBM3E ~8.0 TB/s.
+    # MI350X (air-cooled) and MI355X (liquid-cooled) share the compute profile;
+    # without the mi350x key origami falls back to local-device detection and
+    # ignores n_cu_override, which breaks the FAv3 1-CU tile model.
+    "mi350x": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
     "mi355x": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
     "gfx950": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
     # MI300A

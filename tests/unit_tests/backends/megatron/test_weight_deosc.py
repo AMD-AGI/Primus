@@ -179,6 +179,10 @@ def test_period_resets_after_snap(monkeypatch):
     assert state.step == 0  # period was reset
     assert torch.all(state.dist_w == 0)
     assert torch.all(state.dist_w_qdq == 0)
+    assert state.prev.dtype == torch.bfloat16
+    assert state.prev_q.dtype == torch.bfloat16
+    assert state.dist_w.dtype == torch.float32
+    assert state.dist_w_qdq.dtype == torch.float32
 
 
 def test_eligibility_excludes_non_fp4_modules(monkeypatch):
@@ -245,10 +249,32 @@ def test_state_dict_round_trip(monkeypatch):
     restored = _ParamDeOscState.from_serializable(blob, torch.device("cpu"), shard_main_param)
     assert restored is not None
     assert restored.step == 1  # one tracked step accumulated before save
+    assert restored.prev.dtype == torch.bfloat16
+    assert restored.prev_q.dtype == torch.bfloat16
+    assert restored.dist_w.dtype == torch.float32
 
     # Shape mismatch (resharding) is rejected -> caller re-seeds.
     mismatched = _ParamDeOscState.from_serializable(blob, torch.device("cpu"), torch.zeros(n + 1))
     assert mismatched is None
+
+
+def test_legacy_fp32_snapshot_blob_loads_as_bf16():
+    n = 4
+    blob = {
+        "prev": torch.linspace(0.1, 0.4, n, dtype=torch.float32),
+        "prev_q": torch.linspace(0.2, 0.5, n, dtype=torch.float32),
+        "dist_w": torch.ones(n, dtype=torch.float32),
+        "dist_w_qdq": torch.ones(n, dtype=torch.float32) * 2,
+        "step": 3,
+    }
+    restored = _ParamDeOscState.from_serializable(blob, torch.device("cpu"), torch.zeros(n))
+    assert restored is not None
+    assert restored.prev.dtype == torch.bfloat16
+    assert restored.prev_q.dtype == torch.bfloat16
+    assert restored.dist_w.dtype == torch.float32
+    assert restored.dist_w_qdq.dtype == torch.float32
+    assert restored.step == 3
+    assert torch.equal(restored.prev, blob["prev"].to(torch.bfloat16))
 
 
 def test_precision_aware_detected_by_config():

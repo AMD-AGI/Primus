@@ -123,6 +123,55 @@ _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
 logger = logging.getLogger(__name__)
 
 
+def _v4_get_cp_group():
+    from primus.backends.megatron.core.transformer.deepseek_v4_cp import get_cp_group
+
+    return get_cp_group()
+
+
+def _thd_pool_visibility(S, P, cu_seqlens, ratio, pool_identity, cp_group, device, dtype):
+    """``[S, P]`` additive mask: which compressed slots a packed query may attend to.
+
+    Three conditions, all necessary:
+      * the slot is used at all (``comp_id >= 0``; the compact layout pads to a fixed
+        capacity so the all-gather stays uniform across ranks),
+      * it belongs to the query's OWN packed sequence -- otherwise one sample conditions
+        on another, silently,
+      * it is already complete at the query's position: slot ``k`` of a sequence covers
+        that sequence's rows ``[k*ratio, (k+1)*ratio)``, so it needs
+        ``(k+1)*ratio - 1 <= u`` for local query position ``u``.
+
+    Shared by the attention and the indexer on purpose: the indexer's top-K addresses
+    exactly these slots, so any disagreement shows up as selected-but-invisible columns.
+    """
+    cu = cu_seqlens.to(device=device, dtype=torch.int64)
+    if P == 0:
+        return torch.zeros(S, 0, device=device, dtype=dtype)
+    seq_of_pool, comp_of_pool = pool_identity
+
+    # Queries are this rank's rows; the pool is global after the all-gather. Work in
+    # global row coordinates and map this rank's rows in with global_start.
+    global_start = 0 if cp_group is None else cp_group.rank() * S
+    n_rows = (cu[1:] - cu[:-1]).to(torch.int64)
+    seq_of_row = torch.repeat_interleave(torch.arange(n_rows.numel(), device=device), n_rows)[
+        global_start : global_start + S
+    ]
+    local_q = (torch.arange(S, device=device) + global_start) - cu[:-1][seq_of_row]
+
+    used = comp_of_pool.unsqueeze(0) >= 0
+    same = seq_of_row.unsqueeze(1) == seq_of_pool.unsqueeze(0)
+    causal = (comp_of_pool.unsqueeze(0) + 1) * ratio - 1 <= local_q.unsqueeze(1)
+    return torch.where(used & same & causal, 0.0, float("-inf")).to(dtype)
+
+
+def _v4_exchange_boundary_kv(kv, d_window, cp_group):
+    from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
+        exchange_boundary_kv,
+    )
+
+    return exchange_boundary_kv(kv, d_window, cp_group)
+
+
 def _require_gfx950() -> None:
     """Assert the current device is gfx950 / CDNA4 before using the gluon backend.
 
@@ -555,9 +604,24 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         self.pg_collection = pg_collection
 
         # ---- shape fields (read by helpers in this class) ----
+        # ---- P14: head sharding across TP ----------------------------------
+        # Default (v4_shard_attention_heads off): every rank materialises all
+        # `num_heads` heads, because linear_q_up_proj gathers its output back to full
+        # width. TP then shards weights only, and the [B, S, H, head_dim] query is
+        # replicated -- 64 KiB/token at V4-Flash width, which is what caps the usable
+        # sequence length. With P14 on, each rank owns num_heads/tp heads end to end.
+        from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_layer_specs import (
+            v4_shard_heads as _v4_shard_heads,
+        )
+
+        self.shard_heads = _v4_shard_heads(config)
+        self.tp_size = int(getattr(config, "tensor_model_parallel_size", 1) or 1) if self.shard_heads else 1
+        num_heads_local = num_heads // self.tp_size
+
         self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.num_attention_heads_per_partition = num_heads
+        self.num_heads = num_heads_local
+        self.num_heads_global = num_heads
+        self.num_attention_heads_per_partition = num_heads_local
         self.num_query_groups_per_partition = 1  # single-latent KV
         self.head_dim = head_dim
         self.rotary_dim = rotary_dim
@@ -662,7 +726,10 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # is therefore opt-in via ``PRIMUS_V4_KEEP_FP32`` -- see
         # ``keep_in_fp32`` for why holding a second parameter dtype is not free.
         if attn_sink_enabled:
-            self.attn_sink = nn.Parameter(torch.zeros(num_heads, dtype=torch.float32))
+            # One sink per head, so it shards with the heads under P14 -- hence
+            # num_heads_local, not num_heads. Kept in fp32 (and marked so the fp16
+            # module wrapper leaves it alone) as upstream does.
+            self.attn_sink = nn.Parameter(torch.zeros(num_heads_local, dtype=torch.float32))
             mark_keep_in_fp32(self.attn_sink)
         else:
             self.register_parameter("attn_sink", None)
@@ -688,11 +755,27 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 # overlap_grad_reduce / param_gather OFF and crippled cross-node
                 # DP scaling. So freeze unless the loss is actually enabled.
                 # PRIMUS_V4_INDEXER_TRAINABLE=1 still forces trainable.
-                if not self.indexer_distill_enabled and (
-                    os.environ.get("PRIMUS_V4_INDEXER_TRAINABLE", "0") != "1"
+                #
+                # PRIMUS_V4_DISTILL_FREEZE_INDEXER=1 additionally freezes the
+                # indexer *while still computing the loss*. That is not a
+                # training mode -- the indexer then learns nothing -- it exists
+                # to measure how much of the loss's cost is its backward, by
+                # A/B-ing against the same run without it.
+                _diag_freeze = os.environ.get("PRIMUS_V4_DISTILL_FREEZE_INDEXER", "0") == "1"
+                if _diag_freeze or (
+                    not self.indexer_distill_enabled
+                    and os.environ.get("PRIMUS_V4_INDEXER_TRAINABLE", "0") != "1"
                 ):
                     for _indexer_param in self.indexer.parameters():
                         _indexer_param.requires_grad_(False)
+
+                # Most of what training the indexer costs is the autograd engine
+                # walking the ~20 nodes its forward builds, per CSA layer, not
+                # arithmetic; torch.compile lets AOTAutograd emit one fused
+                # backward instead. `topk` is data-dependent and graph-breaks,
+                # which is fine -- everything before it is what costs.
+                if self.indexer_distill_enabled and os.environ.get("PRIMUS_V4_INDEXER_COMPILE", "0") == "1":
+                    self.indexer = torch.compile(self.indexer, dynamic=False)
 
         # ---- core attention (Turbo / TE flash) — dense layers only ----
         # Plan-3 P22: when the spec emits a ``core_attention`` submodule
@@ -952,6 +1035,10 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             index_topk=index_topk,
             compress_ratio=self.compress_ratio,
             use_fp8_qk=bool(getattr(self.config, "use_v4_fp8_indexer", False)),
+            # P14: hand the indexer the TP group so it can shard its heads and
+            # all-reduce the partial score sums. None (the default) keeps the
+            # replicated, unsharded behaviour.
+            tp_group=self._v4_tp_group() if self.shard_heads else None,
             # The indexer rotates its own Q / K with this layer's compressed
             # RoPE before scoring, so it needs the same cache the compressed
             # pool uses. Passed by reference; the Indexer does not register it.
@@ -965,6 +1052,21 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
     # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _v4_tp_group():
+        """Tensor-parallel process group, or None when TP is off / dist is not up."""
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized():
+            return None
+        from megatron.core import parallel_state
+
+        try:
+            g = parallel_state.get_tensor_model_parallel_group()
+        except (AssertionError, RuntimeError):
+            return None
+        return g if g is not None and g.size() > 1 else None
 
     @property
     def rope(self) -> DualRoPE:
@@ -1056,16 +1158,25 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         k = self.rope.apply_rope(k, position_ids=position_ids, compress_ratio=self.compress_ratio)
         return q, k
 
-    def _local_mask(self, S: int, *, device, dtype) -> torch.Tensor:
+    def _local_mask(self, S: int, *, device, dtype, seq_starts=None) -> torch.Tensor:
         """Mask for the local (SWA or full causal) branch.
 
         ``attn_sliding_window > 0`` enables sliding-window; ``0`` (the
         default for unit tests / configs without SWA) gives full causal.
+
+        ``seq_starts`` (``[S]``, from :meth:`_thd_seq_starts`) additionally blocks
+        attention across packed-sequence boundaries: a query may only see keys at or
+        after its OWN sequence's first row. Without it a packed batch is just one long
+        causal sequence and every sample is silently conditioned on its predecessors.
         """
         window = self.attn_sliding_window if self.attn_sliding_window > 0 else 0
-        if window > 0:
-            return sliding_window_causal_mask(S, window, device=device, dtype=dtype)
-        return sliding_window_causal_mask(S, S, device=device, dtype=dtype)
+        mask = sliding_window_causal_mask(S, window if window > 0 else S, device=device, dtype=dtype)
+        if seq_starts is not None:
+            starts = seq_starts.to(device=device, dtype=torch.long)
+            keys = torch.arange(S, device=device).unsqueeze(0)  # [1, Sk]
+            same_seq = keys >= starts.unsqueeze(1)  # [Sq, Sk]
+            mask = mask.masked_fill(~same_seq, float("-inf"))
+        return mask
 
     def _append_sink_softmax(self, logits: torch.Tensor) -> torch.Tensor:
         """Numerically-stable softmax with optional virtual-sink column.
@@ -1266,8 +1377,11 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         ``.weight`` after ``build_module``.)
         """
         B, S, H, Dh = attn.shape
-        G = self.o_groups
-        attn_g = attn.reshape(B, S, G, (H * Dh) // G)  # [B, S, G, H*Dh/G]
+        # Under P14 this rank owns o_groups/tp groups and H is already the local head
+        # count, so H*Dh/G_local is the same n_per_group as the unsharded path -- the
+        # group WIDTH is a property of o_groups, not of TP.
+        G = self.o_groups // self.tp_size
+        attn_g = attn.reshape(B, S, G, (H * Dh) // G)  # [B, S, G_local, H*Dh/G_local]
 
         wo_a = self.linear_o_a
         weight = wo_a.weight if hasattr(wo_a, "weight") else None
@@ -1277,7 +1391,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             o = _projection_forward(wo_a, attn_g.reshape(B, S, -1))
             o = o.view(B, S, G * self.o_lora_rank)
         else:
-            wo_a_w = weight.view(G, self.o_lora_rank, (H * Dh) // G)
+            wo_a_w = weight.view(G, self.o_lora_rank, (H * Dh) // G)  # G is local
             if _v4_o_a_fp8_enabled(self.config):
                 o = _fp8_grouped_o_a(attn_g, wo_a_w)  # per-group MXFP8
             else:
@@ -1344,13 +1458,106 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
     # compressed branches (HCA / CSA)
     # ------------------------------------------------------------------
 
-    def _build_compressed_pool(self, hidden: torch.Tensor) -> torch.Tensor:
+    def _build_compressed_pool(self, hidden: torch.Tensor, cu_seqlens=None) -> torch.Tensor:
         """Run the compressor + compress-base partial RoPE.
 
         Returns ``[B, P, head_dim]`` where ``P = S // compress_ratio``.
+
+        Under packing (``cu_seqlens`` given) the pool is the concatenation of each
+        sequence's own windows, and the compress-base RoPE position restarts at 0 for
+        every sequence -- pool slot k of sequence i must carry phase k, not phase
+        (global slot index), or every sequence after the first is rotated wrongly.
         """
         device = hidden.device
-        pooled = self.compressor(hidden)  # [B, P, head_dim]
+        cp_group = _v4_get_cp_group()
+        if cu_seqlens is not None:
+            # No alignment requirement: a window may straddle a shard boundary and the
+            # exchange below supplies the rows owned by the previous rank. Alignment
+            # used to stand in for that, at the cost of 51.5% of tokens being padding
+            # (34.2% supervised, against 56.1% unaligned -- measured over every pack).
+            # The compressor sees only this rank's rows, so it needs LOCAL boundaries;
+            # the RoPE phase below is per-sequence and therefore also local.
+            S_loc = hidden.shape[1]
+            gstart = 0 if cp_group is None else cp_group.rank() * S_loc
+            cu_seqlens if cp_group is None else self._thd_local_cu(cu_seqlens, gstart, S_loc)
+            boundary = None
+            if cp_group is not None:
+                from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
+                    compressor_boundary_rows,
+                    exchange_boundary_hidden,
+                )
+
+                d_win = compressor_boundary_rows(self.compress_ratio, bool(self.compressor.overlap))
+                boundary = exchange_boundary_hidden(hidden, d_win, cp_group)
+            pooled = self.compressor(
+                hidden,
+                cu_seqlens=cu_seqlens,
+                global_start=gstart,
+                boundary_hidden=boundary,
+            )
+            P = pooled.shape[1]
+            # The compress-base RoPE phase of a slot IS its index within its own sequence,
+            # which the compact plan already carries -- no need to re-derive it from a
+            # cumulative count, and unused slots (comp_id == -1) get phase 0 harmlessly
+            # since the masks exclude them.
+            _, comp_ids, _ = self.compressor.thd_compact_plan(cu_seqlens, gstart, S_loc)
+            pool_pos = comp_ids.clamp(min=0).to(device)
+            cos, sin = self.rope.compress_rope(pool_pos)
+            cos = cos[..., : self.rotary_dim // 2]
+            sin = sin[..., : self.rotary_dim // 2]
+            B = pooled.shape[0]
+            cos = cos.unsqueeze(0).expand(B, -1, -1)
+            sin = sin.unsqueeze(0).expand(B, -1, -1)
+            pool_kv = apply_interleaved_partial_rope(
+                pooled.unsqueeze(2), cos, sin, rotary_dim=self.rotary_dim
+            )
+            pool_kv = pool_kv.squeeze(2)
+            if cp_group is not None:
+                # Every query must be able to select compressed history owned by an
+                # earlier rank, and the masks index the pool by GLOBAL slot, so the pool
+                # has to come back to global here. Alignment guarantees each rank holds
+                # the same number of windows, so the plain all-gather is well-formed and
+                # its rank-major concatenation is already sequence order.
+                from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
+                    build_global_pool,
+                )
+
+                pool_kv = build_global_pool(pool_kv, cp_group)
+            return pool_kv
+        if cp_group is None:
+            pooled = self.compressor(hidden)  # [B, P, head_dim]
+        else:
+            # ---- context parallel ------------------------------------------------
+            # Each rank compresses only its own rows, then the pools are all-gathered
+            # so every query can see the whole sequence's compressed history. Rank
+            # order IS sequence order here (single BSHD sequence, S_local a multiple
+            # of ratio), so no seq-major/rank-major remap is needed.
+            from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
+                build_global_pool,
+                compressor_boundary_rows,
+                exchange_boundary_kv,
+            )
+
+            nb = compressor_boundary_rows(self.compress_ratio, bool(self.compressor.overlap))
+            if nb > 0:
+                # Overlap mode stitches window i with window i-1, which at a shard
+                # boundary lives on the left neighbour. Prepend those rows, compress,
+                # then drop the extra leading pool rows they produced -- nb // ratio of
+                # them, not one. The two agree only while nb == ratio; overlap now asks
+                # for 2 * ratio, and dropping a single row leaves a duplicate of the
+                # neighbour's last window in the all-gathered pool, which shifts every
+                # compressed RoPE phase and lets one key be attended to twice.
+                bnd = exchange_boundary_kv(
+                    hidden.reshape(hidden.shape[0], hidden.shape[1], 1, hidden.shape[2]),
+                    nb,
+                    cp_group,
+                ).reshape(hidden.shape[0], nb, hidden.shape[2])
+                pooled_local = self.compressor(torch.cat([bnd, hidden], dim=1))[
+                    :, nb // self.compress_ratio :
+                ]
+            else:
+                pooled_local = self.compressor(hidden)
+            pooled = build_global_pool(pooled_local, cp_group)
         B, P = pooled.shape[0], pooled.shape[1]
 
         # Compress-base partial RoPE. Compressed entry ``s`` stands for the
@@ -1374,13 +1581,17 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
     def _hca_extra_kv(
         self,
         hidden: torch.Tensor,
+        cu_seqlens=None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the HCA (compress_ratio == 128) compressed branch.
 
-        Returns ``(extra_k_bh, extra_v_bh, extra_mask)`` where the
+        Returns ``(extra_k_bh, extra_v_bh, pool, extra_mask)`` where the
         compressed pool is broadcast across H heads (single-latent
         compressor output) and the additive mask is shape ``[S, P]``
-        (broadcasts over B, H).
+        (broadcasts over B, H). ``pool`` is the pre-broadcast ``[B, P, head_dim]``
+        latent, which the caller concatenates onto the raw KV latent -- see
+        :meth:`_cp_prepend_boundary` for why the concat must not happen on the
+        broadcast views.
 
         Per the techblog: pool position ``s`` covers raw tokens
         ``[s*ratio, (s+1)*ratio)``; query at raw token ``t`` may attend
@@ -1388,7 +1599,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         """
         B, S, _ = hidden.shape
         device, dtype = hidden.device, hidden.dtype
-        pool = self._build_compressed_pool(hidden)  # [B, P, head_dim]
+        pool = self._build_compressed_pool(hidden, cu_seqlens)  # [B, P, head_dim]
         P = pool.shape[1]
 
         # Broadcast pool across all H query-heads: [B, P, head_dim] -> [B, P, H, head_dim].
@@ -1396,10 +1607,51 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # Move heads dim to dim=1: [B, H, P, head_dim].
         pool_bh = pool_h.transpose(1, 2)
 
-        extra_mask = self._hca_extra_mask_cached(S, P, device, dtype)
-        return pool_bh, pool_bh, extra_mask  # K = V = compressed pool
+        extra_mask = self._hca_extra_mask_cached(S, P, device, dtype, cu_seqlens)
+        return pool_bh, pool_bh, pool, extra_mask  # K = V = compressed pool
 
-    def _hca_extra_mask_cached(self, S: int, P: int, device, dtype):
+    def _thd_pool_mask(self, S: int, P: int, cu_seqlens, device, dtype):
+        """HCA pool visibility ``[S, P]`` for packed input.
+
+        Two conditions, both necessary: the pool slot must belong to the SAME packed
+        sequence as the query, and within that sequence it must be causally visible --
+        local slot ``k`` covers the sequence's rows ``[k*ratio, (k+1)*ratio)``, so it is
+        visible to local query position ``u`` iff ``(k+1)*ratio - 1 <= u``. Dropping the
+        same-sequence half leaks earlier samples in; dropping the causal half lets a
+        token see its own future.
+        """
+        return _thd_pool_visibility(
+            S,
+            P,
+            cu_seqlens,
+            self.compress_ratio,
+            self._thd_pool_identity(P, cu_seqlens, device),
+            _v4_get_cp_group(),
+            device,
+            dtype,
+        )
+
+    def _thd_pool_identity(self, P: int, cu_seqlens, device):
+        """``(seq_ids, comp_ids)`` for each of the P pool slots, ``-1`` where unused.
+
+        In the compact layout the plan already carries this, so it is read from there
+        rather than re-derived from a cumulative count: the masks and the pool must agree
+        on what slot j IS, and deriving it twice is how they drift apart.
+        """
+        cp_group = _v4_get_cp_group()
+        S_loc = P if cp_group is None else None  # unused; kept explicit below
+        del S_loc
+        parts_seq, parts_comp = [], []
+        cp_size = 1 if cp_group is None else cp_group.size()
+        # Every rank contributes the same c_cap slots, concatenated in rank order.
+        l_local = int(cu_seqlens[-1].item()) // cp_size
+        for r in range(cp_size):
+            _, comp_ids, seq_ids = self.compressor.thd_compact_plan(cu_seqlens, r * l_local, l_local)
+            parts_comp.append(comp_ids.to(device))
+            parts_seq.append(seq_ids.to(device))
+        return torch.cat(parts_seq), torch.cat(parts_comp)
+
+    def _hca_extra_mask_cached(self, S: int, P: int, device, dtype, cu_seqlens=None):
         """HCA additive causal mask ``[S, P]``, cached (data-independent).
 
         Pool slot ``s`` is visible to query ``t`` iff ``(s+1)*ratio - 1 <= t``;
@@ -1408,6 +1660,23 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         compressed-layer forward. Bit-identical. PRIMUS_COMPRESS_MASK_CACHE=0
         forces the eager rebuild.
         """
+        if cu_seqlens is not None:
+            # Packed: visibility is per (query sequence, pool sequence) and cannot be
+            # cached on (S, P) alone, since it depends on the pack's cu_seqlens.
+            return self._thd_pool_mask(S, P, cu_seqlens, device, dtype)
+        cp_group = _v4_get_cp_group()
+        if cp_group is not None:
+            # Under CP the pool is global but the queries are this rank's slice, so the
+            # visibility test must use global positions. Not cached: it depends on the
+            # rank, and rebuilding an [S, P] byte mask once per layer is cheap next to
+            # the attention itself.
+            from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
+                compressed_causal_mask,
+            )
+
+            return compressed_causal_mask(
+                S, P, cp_group.rank() * S, self.compress_ratio, device=device, dtype=dtype
+            )
         if os.environ.get("PRIMUS_COMPRESS_MASK_CACHE", "1") == "0":
             t = torch.arange(S, device=device).unsqueeze(1)
             s_end = (torch.arange(P, device=device).unsqueeze(0) + 1) * self.compress_ratio - 1
@@ -1432,6 +1701,9 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         v_local_bh: torch.Tensor,  # [B, H, S, head_dim]
         local_mask: torch.Tensor,  # [S, S] — built by caller; unused here, see below
         position_ids: Optional[torch.Tensor] = None,  # [B, S] or [S]; rotates the indexer Q
+        kv: Optional[torch.Tensor] = None,  # [B, S, 1, head_dim] post-RoPE latent; CP only
+        cu_seqlens=None,  # THD packed-sequence boundaries; None for BSHD
+        seq_starts=None,  # [S] per-row sequence origin derived from cu_seqlens
     ) -> torch.Tensor:
         """CSA (compress_ratio == 4) joint local-SWA + sparse-compressed attention.
 
@@ -1461,8 +1733,28 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         B, H, S, Dh = q_bh.shape
         dtype = hidden.dtype
 
+        # 0) Context parallel: like the dense and HCA branches, the raw-token sliding
+        #    window straddles the shard edge, so this rank needs the left neighbour's
+        #    trailing `d_window` post-RoPE KV rows. The pool half is already handled
+        #    (all-gathered to global + the indexer scores against global positions).
+        cp_dwindow = cp_global_start = 0
+        kv_latent = None
+        if _v4_get_cp_group() is not None:
+            if self._csa_backend != "triton_v2":
+                raise NotImplementedError(
+                    "DeepSeek-V4 CSA context parallelism is only wired through the "
+                    f"triton_v2 CSA backend; got '{self._csa_backend}'. The other CSA "
+                    "backends build the local window themselves and would silently drop "
+                    "the cross-shard part of it."
+                )
+            if kv is None:
+                raise RuntimeError("_csa_forward needs the single-latent kv under CP")
+            k_local_bh, v_local_bh, kv_latent, cp_dwindow, cp_global_start = self._cp_prepend_boundary(
+                kv, B, S
+            )
+
         # 1) Compressed pool with compress-base RoPE.
-        pool = self._build_compressed_pool(hidden)  # [B, P, head_dim]
+        pool = self._build_compressed_pool(hidden, cu_seqlens)  # [B, P, head_dim]
         P = pool.shape[1]
 
         # 2) Indexer top-K per query. The indexer is fed a *detached* hidden
@@ -1471,7 +1763,9 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # from leaking into the layers below (the open-source reference detaches
         # the same way), and when the indexer is frozen it also stops autograd
         # from building a subgraph whose output is discarded.
-        topk_idxs, topk_scores = self.indexer(hidden.detach(), position_ids)  # [B, S, K]
+        topk_idxs, topk_scores = self.indexer(
+            hidden.detach(), position_ids, cu_seqlens=cu_seqlens
+        )  # [B, S, K]
 
         # 2b) Indexer distillation. argTopK is not differentiable and the
         # scores are otherwise discarded, so this loss is the indexer's only
@@ -1480,6 +1774,10 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # kernel the layer dispatches to, without threading a second return
         # value through all of them.
         if self.indexer_distill_enabled and self.training and torch.is_grad_enabled():
+            # k_local / sink / swa_window let the target use the same joint
+            # denominator the attention below does: this layer runs one softmax
+            # over [window, sparse, sink], so the target for the sparse part is
+            # a conditional of that, not a softmax over the sparse part alone.
             indexer_loss = compute_indexer_distill_loss(
                 index_topk_scores=topk_scores,
                 topk_idxs=topk_idxs,
@@ -1488,6 +1786,9 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 softmax_scale=self._attention_scale(),
                 loss_coeff=self.indexer_distill_coeff,
                 head_reduce_group=self._indexer_loss_head_group(),
+                k_local=k_local_bh,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
             )
             self.last_indexer_distill_loss = indexer_loss.detach()
             pool = V4IndexerLossAutoScaler.apply(pool, indexer_loss)
@@ -1549,10 +1850,13 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 scale=self._attention_scale(),
             )
         if be == "triton_v2":
+            # Hand the kernel the un-broadcast latent when CP gave us one: it reads a
+            # single key row per position anyway, and the broadcast view's gradient would
+            # be an 8 GiB [B, H, Skv, D] buffer that is zero except at head 0.
             return v4_csa_attention_v2(
                 q_bh,
-                k_local_bh,
-                v_local_bh,
+                k_local_bh if kv_latent is None else kv_latent,
+                v_local_bh if kv_latent is None else None,
                 pool,
                 topk_idxs=topk_idxs,
                 sink=self.attn_sink,
@@ -1560,6 +1864,10 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 attn_dropout=self.attn_dropout,
                 training=self.training,
                 scale=self._attention_scale(),
+                cp_dwindow=cp_dwindow,
+                cp_global_start=cp_global_start,
+                k_is_latent=kv_latent is not None,
+                seq_starts=seq_starts,
             )
         if be == "flydsl_v1":
             return self._v4_csa_attention_flydsl(
@@ -1612,6 +1920,12 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 scale=self._attention_scale(),
                 use_flydsl=(be == "flydsl_v0"),
             )
+        thd_local = None
+        if cu_seqlens is not None:
+            keys = torch.arange(q_bh.shape[2], device=q_bh.device).unsqueeze(0)
+            thd_local = torch.where(
+                keys >= seq_starts.to(q_bh.device, torch.long).unsqueeze(1), 0.0, float("-inf")
+            ).to(q_bh.dtype)
         return eager_v4_csa_attention(
             q_bh,
             k_local_bh,
@@ -1623,14 +1937,35 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             attn_dropout=self.attn_dropout,
             training=self.training,
             scale=self._attention_scale(),
+            local_mask_extra=thd_local,
         )
 
     # ------------------------------------------------------------------
     # public forward
     # ------------------------------------------------------------------
 
-    def _attention_backend_forward(self, q_bh, k, v, *, additive_mask, hca_local_seqlen, S, device, dtype):
-        """Dense (cr=0) / HCA (cr=128) dispatch on ``use_v4_attention_backend``."""
+    def _attention_backend_forward(
+        self,
+        q_bh,
+        k,
+        v,
+        *,
+        additive_mask,
+        hca_local_seqlen,
+        S,
+        device,
+        dtype,
+        cp_dwindow=0,
+        cp_global_start=0,
+        k_latent=None,
+        seq_starts=None,
+    ):
+        """Dense (cr=0) / HCA (cr=128) dispatch on ``use_v4_attention_backend``.
+
+        ``seq_starts`` is the THD per-row sequence origin. Only the eager path honours it
+        today; the fused backends take a scalar origin and are rejected upstream in
+        :meth:`forward` rather than silently ignoring it.
+        """
         be = self._attn_backend
         if be == "gluon":
             return self._v4_attention_gluon(
@@ -1685,10 +2020,19 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 hca_local_seqlen=hca_local_seqlen,
             )
         if be == "triton_v2":
+            # This kernel reads one key row per position (single-latent MQA), so hand it
+            # the un-broadcast [B, Skv, 1, D] latent when we have it. The head-broadcast
+            # view is free forward, but its gradient would be a [B, H, Skv, D] buffer that
+            # is zero except at head 0 -- 8.5 GiB at 1M with CP=8. Only this backend takes
+            # the latent form; the others still get the broadcast views.
             return v4_attention_v2(
                 q_bh,
-                k,
-                v,
+                k if k_latent is None else k_latent,
+                v if k_latent is None else None,
+                cp_dwindow=cp_dwindow,
+                cp_global_start=cp_global_start,
+                k_is_latent=k_latent is not None,
+                seq_starts=seq_starts,
                 sink=self.attn_sink,
                 swa_window=int(self.attn_sliding_window),
                 additive_mask=additive_mask,
@@ -1720,14 +2064,131 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 hca_local_seqlen=hca_local_seqlen,
             )
         # eager
-        local_mask = self._local_mask(S, device=device, dtype=dtype)
+        local_mask = self._local_mask(S, device=device, dtype=dtype, seq_starts=seq_starts)
         mask = local_mask if additive_mask is None else torch.cat([local_mask, additive_mask], dim=-1)
         return self._attention_forward(q_bh, k, v, mask)
+
+    def _cp_prepend_boundary(self, kv, B, S):
+        """Prepend the left neighbour's trailing window rows to the local KV.
+
+        Every branch that runs a sliding window over RAW tokens needs this, not just
+        the dense one: a query near the shard start would otherwise lose the part of
+        its window that lives on the previous rank. Returns
+        ``(k_bh, v_bh, kv_latent, cp_dwindow, cp_global_start)``; with CP off it returns
+        the unmodified head-expanded views and ``(0, 0)``, which reproduces the non-CP
+        path exactly.
+
+        The concat happens on the SINGLE-LATENT ``[B, S, 1, D]`` tensor and the expand
+        after. Concatenating the head-expanded ``[B, H, S, D]`` view instead would
+        materialise a real H-fold tensor for both K and V -- 8.6 GB each at 128k rows
+        with H=64 -- where the expand is otherwise free. K and V are the same tensor in
+        V4's single-latent design, so one buffer serves both.
+
+        ``kv_latent`` is that pre-expand ``[B, Skv, 1, D]`` buffer. Callers that need to
+        concatenate anything else onto the key axis (HCA appends its compressed pool)
+        MUST concatenate onto this and expand afterwards, for exactly the reason above:
+        ``torch.cat`` on a stride-0 expanded view materialises the H-fold copy that the
+        expand was avoiding.
+        """
+        cp_group = _v4_get_cp_group()
+        if cp_group is None:
+            kv_bh = kv.expand(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+            return kv_bh, kv_bh, kv, 0, 0
+        if self._attn_backend != "triton_v2":
+            raise NotImplementedError(
+                "DeepSeek-V4 context parallelism is only wired through the triton_v2 "
+                f"backend (the others do not take cp_dwindow/cp_global_start); got "
+                f"'{self._attn_backend}'. Set USE_V4_ATTENTION_BACKEND=triton_v2."
+            )
+        cp_dwindow = int(self.attn_sliding_window)
+        cp_global_start = cp_group.rank() * S
+        boundary_kv = _v4_exchange_boundary_kv(kv, cp_dwindow, cp_group)
+        kv_full = torch.cat([boundary_kv, kv], dim=1)  # [B, d_window + S, 1, D]
+        kv_full_bh = kv_full.expand(B, cp_dwindow + S, self.num_heads, self.head_dim).transpose(1, 2)
+        return kv_full_bh, kv_full_bh, kv_full, cp_dwindow, cp_global_start
+
+    @staticmethod
+    def _thd_local_cu(cu, global_start: int, S: int):
+        """Global cu_seqlens -> this rank's own, in LOCAL row coordinates.
+
+        Two coordinate systems are unavoidable under THD + CP: the masks compare query
+        rows against POOL slots that were all-gathered back to global, so they need global
+        sequence identities; but the compressor only sees this rank's ``S`` rows, so its
+        window plan must be expressed locally. Feeding it the global cu_seqlens makes
+        ``thd_window_plan`` emit row indices for the whole pack, which then index a tensor
+        that only has ``S`` rows -- an out-of-bounds gather, which on ROCm surfaces as a
+        bare HSA queue abort rather than an index error.
+
+        A sequence straddling the shard edge is clipped, and the clipped part is a whole
+        number of windows because the packer aligns every boundary to the compress ratio.
+        """
+        lo, hi = global_start, global_start + S
+        inner = cu[(cu > lo) & (cu < hi)] - lo
+        return torch.cat(
+            [
+                torch.zeros(1, dtype=inner.dtype, device=inner.device),
+                inner,
+                torch.full((1,), S, dtype=inner.dtype, device=inner.device),
+            ]
+        )
+
+    def _thd_seq_starts(self, packed_seq_params, B: int, S: int, device):
+        """Per-row sequence start for THD (packed) input, or ``None`` for BSHD.
+
+        Returns an ``[S]`` int32 tensor whose element ``t`` is the first row index of the
+        packed sequence that row ``t`` belongs to. Every causal / sliding-window test in
+        this module is of the form "position >= 0", i.e. it compares against a SCALAR
+        origin -- the start of the one sequence in the batch. Under packing there are many
+        sequences in one flat row axis, so that origin becomes per-row, and this tensor is
+        what turns the scalar tests into per-row ones. A token must never see across its
+        own sequence's start, or the pack leaks one sample into another.
+
+        Packing requires ``B == 1``: the pack IS the batch, cu_seqlens indexes the flat
+        token axis, and a second batch dimension would need a second offset everywhere.
+        """
+        if packed_seq_params is None:
+            return None
+        cu = getattr(packed_seq_params, "cu_seqlens_q", None)
+        if cu is None:
+            return None
+        if B != 1:
+            raise RuntimeError(
+                f"DeepSeek-V4 packed (THD) attention requires micro_batch_size=1 -- the pack "
+                f"is the batch and cu_seqlens indexes a flat token axis; got B={B}."
+            )
+        cu = cu.to(device=device, dtype=torch.int64)
+        # cu_seqlens always describes the WHOLE pack, even under CP where this rank holds
+        # only S of its rows starting at `global_start`. Keeping it global (rather than
+        # re-slicing it per rank) is deliberate: the compressed pool is all-gathered back
+        # to global, so the pool-side masks need global sequence identities anyway, and
+        # having one authoritative cu_seqlens avoids the two coordinate systems drifting.
+        cp_group = _v4_get_cp_group()
+        global_start = 0 if cp_group is None else cp_group.rank() * S
+        total = S if cp_group is None else S * cp_group.size()
+        if int(cu[-1].item()) != total:
+            raise RuntimeError(
+                f"cu_seqlens must cover the whole packed row axis: cu_seqlens[-1]="
+                f"{int(cu[-1].item())} but the pack is {total} rows "
+                f"(S={S}, cp_size={1 if cp_group is None else cp_group.size()}). A short "
+                f"cu_seqlens silently leaves rows attending across sequence boundaries."
+            )
+        lengths = (cu[1:] - cu[:-1]).to(torch.int64)
+        starts_global = torch.repeat_interleave(cu[:-1], lengths)  # [total]
+        # This rank's rows, in LOCAL coordinates. A sequence that began before this shard
+        # keeps a NEGATIVE start, deliberately: the window-validity test is
+        # `candidate_row >= seq_start`, and those candidates are negative too -- they
+        # index the boundary buffer holding the previous rank's rows. Clamping to 0 would
+        # not leak (a straddling sequence occupies the shard's leading rows, so local
+        # [0, query] is all its own), it would TRUNCATE: the sequence would lose the part
+        # of its own history that lives on the neighbour.
+        local = starts_global[global_start : global_start + S] - global_start
+        return local.to(torch.int32)
 
     def forward(
         self,
         hidden: torch.Tensor,
         position_ids: torch.Tensor,
+        packed_seq_params=None,
     ) -> torch.Tensor:
         """``[B, S, D] -> [B, S, D]``.
 
@@ -1736,8 +2197,29 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         * ``0``   — dense / SWA over local KV (single key axis).
         * ``128`` — HCA: concat compressed pool to local KV, joint softmax.
         * ``4``   — CSA: per-query top-K from compressed pool, joint softmax.
+
+        ``packed_seq_params`` carries THD (packed-sequence) cu_seqlens. When it is
+        ``None`` -- the ordinary BSHD path -- every branch below behaves exactly as
+        before; ``_thd_seq_starts`` returns ``None`` and each index construction falls
+        back to its scalar-origin form.
         """
         B, S, _ = hidden.shape
+        seq_starts = self._thd_seq_starts(packed_seq_params, B, S, hidden.device)
+        # The compressed branches need the boundaries themselves, not just the per-row
+        # origin: pooling, pool RoPE phase and pool visibility are all per sequence.
+        cu_seqlens = (
+            None
+            if seq_starts is None
+            else packed_seq_params.cu_seqlens_q.to(device=hidden.device, dtype=torch.int64)
+        )
+        if seq_starts is not None and self._attn_backend not in ("eager", "triton_v2"):
+            raise NotImplementedError(
+                "DeepSeek-V4 packed (THD) attention is implemented for the eager and "
+                f"triton_v2 backends; got '{self._attn_backend}'. The others build their "
+                "index matrix from a SCALAR sequence origin, so running them under packing "
+                "would silently let each sample attend to its predecessors rather than "
+                "fail."
+            )
         device, dtype = hidden.device, hidden.dtype
 
         q = self._apply_q(hidden)  # [B, S, H, head_dim]
@@ -1767,6 +2249,13 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         v_local_bh = v_h.transpose(1, 2)
 
         if self.compress_ratio == 0:
+            # ---- context parallel (dense / SWA branch) ----------------------
+            # This branch is index-driven, so CP needs only the d_window post-RoPE KV rows
+            # left of this shard plus the shard's global offset; the kernel is unchanged.
+            # cp_dwindow == cp_global_start == 0 reproduces the non-CP path exactly.
+            k_local_bh, v_local_bh, kv_latent, cp_dwindow, cp_global_start = self._cp_prepend_boundary(
+                kv, B, S
+            )
             out_bh = self._attention_backend_forward(
                 q_bh,
                 k_local_bh,
@@ -1776,23 +2265,49 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 S=S,
                 device=device,
                 dtype=dtype,
+                cp_dwindow=cp_dwindow,
+                cp_global_start=cp_global_start,
+                k_latent=kv_latent,
+                seq_starts=seq_starts,
             )
         elif self.compress_ratio == 128:
             # HCA: the local SWA branch and the compressed-pool branch share ONE
             # softmax with ONE sink column; concatenate the pool to the local
             # keys and pass the pool-only additive mask.
-            extra_k_bh, extra_v_bh, extra_mask = self._hca_extra_kv(hidden)
-            k_full = torch.cat([k_local_bh, extra_k_bh], dim=2)  # along Sk
-            v_full = torch.cat([v_local_bh, extra_v_bh], dim=2)
+            #
+            # Under CP the LOCAL half needs the same left-boundary rows the dense branch
+            # takes: the pool being global is not enough, because the local SWA still runs
+            # over raw tokens that straddle the shard edge. The local segment then grows to
+            # `cp_dwindow + S`, which is what `hca_local_seqlen` has to report -- the adapter
+            # uses it as the base offset for the pool columns (`base + hca_local_seqlen + ps`),
+            # so the [S, P] pool mask stays valid unchanged.
+            _, _, kv_latent, cp_dwindow, cp_global_start = self._cp_prepend_boundary(kv, B, S)
+            _, _, pool, extra_mask = self._hca_extra_kv(hidden, cu_seqlens)
+            # Concatenate the compressed pool onto the raw KV on the SINGLE-LATENT axis,
+            # then expand across heads -- the expand is a stride-0 view and costs nothing.
+            # Doing it the other way round (cat on the already-broadcast [B, H, Sk, D]
+            # views) materialises the H-fold copy the broadcast exists to avoid: at 1M
+            # with CP=8 that is 8.51 GiB for K and another 8.51 GiB for V, per HCA layer,
+            # of which the consumer reads 136 MiB -- the sparse-MLA adapter takes only
+            # `k_bh[:, 0]`, and never reads `v_bh` at all (its backward returns dv=None,
+            # because V4 is single-latent and the V-side gradient is structurally zero).
+            # K and V are the same object here for the same reason.
+            Sk = kv_latent.shape[1] + pool.shape[1]
+            kv_cat = torch.cat([kv_latent, pool.unsqueeze(2)], dim=1)  # [B, Sk, 1, D]
+            k_full = v_full = kv_cat.expand(B, Sk, self.num_heads, self.head_dim).transpose(1, 2)
             out_bh = self._attention_backend_forward(
                 q_bh,
                 k_full,
                 v_full,
                 additive_mask=extra_mask,
-                hca_local_seqlen=S,
+                hca_local_seqlen=cp_dwindow + S,
                 S=S,
                 device=device,
                 dtype=dtype,
+                cp_dwindow=cp_dwindow,
+                cp_global_start=cp_global_start,
+                k_latent=kv_cat,
+                seq_starts=seq_starts,
             )
         elif self.compress_ratio == 4:
             # CSA cannot use ``core_attention``: the per-query top-K
@@ -1801,8 +2316,14 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             # attention — there is no flash-attn kernel that reads a
             # different per-query subset of keys from a pool.  Stays on
             # eager-Python under plan-3 (a custom kernel is required).
-            local_mask = self._local_mask(S, device=device, dtype=dtype)
-            out_bh = self._csa_forward(hidden, q_bh, k_local_bh, v_local_bh, local_mask, position_ids)
+            # `_csa_forward` documents `local_mask` as retained for back-compat and
+            # `del`s it on entry -- the reference op rebuilds the SWA mask from
+            # `swa_window` itself. Materialising it here costs a dense [S, S] byte
+            # tensor for nothing: 16 GiB at S=131072, which is what made CSA OOM at
+            # 128k. Pass None; the callee never reads it.
+            out_bh = self._csa_forward(
+                hidden, q_bh, k_local_bh, v_local_bh, None, position_ids, kv, cu_seqlens, seq_starts
+            )
         else:
             # Guarded by __init__; included for static-analysis completeness.
             raise ValueError(f"Unsupported compress_ratio {self.compress_ratio}")

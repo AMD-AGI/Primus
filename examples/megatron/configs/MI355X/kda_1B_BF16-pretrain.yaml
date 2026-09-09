@@ -22,7 +22,7 @@ modules:
       use_pytorch_profiler: false
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
-      log_interval: 10
+      log_interval: 1
       tensorboard_log_interval: 10
 
       # --- Optimal MI355X fusion recipe (see zebra_parity README §8) ---
@@ -45,18 +45,17 @@ modules:
       check_for_nan_in_loss_and_grad: false
       barrier_with_L1_time: false
 
-      # GBS=16 here is the FLA loss-parity recipe (FLA reference used global
-      # batch 16), which pins MBS=2 on 8 GPUs. The previous "HIPBLASLT kernel
-      # limit" that ALSO blocked raising the batch is now fixed: KDA's fused
-      # in_proj width (2192) fell in a hipBLASLt bf16 dead zone on gfx950 and
-      # is padded to 2560 in kimi_delta_attention.py, so MBS/GBS can now be
-      # scaled for throughput. With the optimal fusion recipe above, verified
-      # MBS=32/GBS=256 -> ~98k tok/s/GPU inst (~1505 TFLOP/s) at 48% VRAM,
-      # 0 hipBLASLt errors. Raise both together for throughput runs; keep
-      # GBS=16 for FLA parity.
+      # Throughput recipe (8 GPUs, no grad-accum: GBS = MBS * 8).
+      # MI300X maxed occupancy the same way: MBS=56 / GBS=448 at 94.5% of
+      # 192 GB (BS=512 OOM). The gfx950 hipBLASLt bf16 dead zone on fused
+      # in_proj width 2192 is padded to 2560 in kimi_delta_attention.py, so
+      # batch can scale.
+      #
+      # Measured on MI355X (288 GB): MBS=68 / GBS=544 sits at 93% VRAM.
+      # MBS=64 / GBS=512 was 88%. Drop to MBS=2 / GBS=16 for FLA parity.
       train_iters: 50
-      micro_batch_size: 2
-      global_batch_size: 16
+      micro_batch_size: 68
+      global_batch_size: 544
 
       seq_length: 2048
       max_position_embeddings: 2048

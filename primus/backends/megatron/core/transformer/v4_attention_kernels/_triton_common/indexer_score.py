@@ -66,10 +66,18 @@ import torch
 import triton
 import triton.language as tl
 
-# Indexer scoring runs at V4-Flash widths [B=1, S=4096, P=1024, H=8,
-# Hd=128].  H is small enough to be a compile-time constant in the
-# kernel; supported values are documented here.
-_SUPPORTED_H = (1, 2, 4, 8, 16)
+# H is a compile-time constant (the h loop is `tl.static_range`), so every value
+# here costs a separate compilation. The list originally stopped at 16 because the
+# kernel was written and benchmarked against a claimed "V4-Flash production" width of
+# H=8 -- but the released DeepSeek-V4-Flash config and Primus's own
+# deepseek_v4_base.yaml both set index_n_heads=64, so at the real width this kernel
+# was unreachable and the indexer silently fell back to the eager einsum. That
+# fallback materialises [B, S, H, P]: 0.5 GiB at S=4096, but 512 GiB at S=131072,
+# which is what made CSA impossible at long context.
+#
+# 32 and 64 are added so the real width is covered. They only unroll the h loop
+# further; the per-iteration tile shapes are unchanged.
+_SUPPORTED_H = (1, 2, 4, 8, 16, 32, 64)
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +96,7 @@ def _indexer_score_fwd_kernel(
     P,
     H: tl.constexpr,
     HD: tl.constexpr,
+    Q_OFFSET,
     COMPRESS_RATIO: tl.constexpr,
     BLOCK_S: tl.constexpr,
     BLOCK_P: tl.constexpr,
@@ -126,30 +135,41 @@ def _indexer_score_fwd_kernel(
     s_mask = s_offs < S
     p_mask = p_offs < P
 
+    # int64 offsets: `s_offs` comes from tl.arange (int32) and the row stride into
+    # SCORES/Q is P and H*HD. At V4-Flash CSA widths P = S/4, so S*P crosses 2**31 at
+    # S ~= 92682 -- measured: 64k clean, 96k produces NaN. In int32 the product wraps
+    # negative and the store lands out of bounds, silently. Promote the row index once;
+    # the column term stays int32 because it is bounded by P.
+    s_offs64 = s_offs.to(tl.int64)
+    p_offs64 = p_offs.to(tl.int64)
+
     hd_idx = tl.arange(0, HD)
 
     acc = tl.zeros((BLOCK_S, BLOCK_P), dtype=tl.float32)
 
     # Unroll over heads (H is small and constexpr).
+    # k does not depend on h, so load it once instead of once per unrolled head.
+    # At H=64 that is 63 redundant [BLOCK_P, HD] loads removed from the inner loop.
+    k_tile = tl.load(
+        K_PTR + pid_b.to(tl.int64) * P * HD + p_offs64[:, None] * HD + hd_idx[None, :],
+        mask=p_mask[:, None],
+        other=0.0,
+    ).to(tl.float32)
+    k_tile_t = tl.trans(k_tile)
+
     for h in tl.static_range(0, H):
         # q [BLOCK_S, HD]: q_i[pid_b, s_offs, h, :]
         q_tile = tl.load(
-            Q_PTR + pid_b * S * H * HD + s_offs[:, None] * H * HD + h * HD + hd_idx[None, :],
+            Q_PTR + pid_b.to(tl.int64) * S * H * HD + s_offs64[:, None] * H * HD + h * HD + hd_idx[None, :],
             mask=s_mask[:, None],
             other=0.0,
         ).to(tl.float32)
-        # k [BLOCK_P, HD]: k_icomp[pid_b, p_offs, :]
-        k_tile = tl.load(
-            K_PTR + pid_b * P * HD + p_offs[:, None] * HD + hd_idx[None, :],
-            mask=p_mask[:, None],
-            other=0.0,
-        ).to(tl.float32)
         # dot [BLOCK_S, BLOCK_P] = q @ k.T
-        dot = tl.dot(q_tile, tl.trans(k_tile), out_dtype=tl.float32)
+        dot = tl.dot(q_tile, k_tile_t, out_dtype=tl.float32)
         dot = tl.maximum(dot, 0.0)  # relu
         # w [BLOCK_S]: w_i[pid_b, s_offs, h]
         w_h = tl.load(
-            W_PTR + pid_b * S * H + s_offs * H + h,
+            W_PTR + pid_b.to(tl.int64) * S * H + s_offs64 * H + h,
             mask=s_mask,
             other=0.0,
         ).to(tl.float32)
@@ -157,14 +177,17 @@ def _indexer_score_fwd_kernel(
 
     # Apply causal mask inline.  Allowed iff `(p + 1) * cr - 1 <= s`,
     # i.e. the pool position's window end is no later than the query.
-    s_arr = s_offs[:, None]
+    # Under context parallel this rank holds a slice of the queries but the FULL pool,
+    # so visibility must be judged on the query's GLOBAL position. Q_OFFSET is 0 without
+    # CP, which reproduces the original expression exactly.
+    s_arr = s_offs[:, None] + Q_OFFSET
     p_arr = p_offs[None, :]
     allowed = (p_arr + 1) * COMPRESS_RATIO - 1 <= s_arr
     NEG_INF = -float("inf")
     acc = tl.where(allowed, acc, NEG_INF)
 
     tl.store(
-        SCORES_PTR + pid_b * S * P + s_offs[:, None] * P + p_offs[None, :],
+        SCORES_PTR + pid_b.to(tl.int64) * S * P + s_offs64[:, None] * P + p_offs64[None, :],
         acc.to(OUT_DTYPE),
         mask=s_mask[:, None] & p_mask[None, :],
     )
@@ -184,6 +207,7 @@ def _indexer_score_bwd_kernel(
     P,
     H: tl.constexpr,
     HD: tl.constexpr,
+    Q_OFFSET,
     COMPRESS_RATIO: tl.constexpr,
     BLOCK_S: tl.constexpr,
     BLOCK_P: tl.constexpr,
@@ -222,41 +246,52 @@ def _indexer_score_bwd_kernel(
     s_mask = s_offs < S
     p_mask = p_offs < P
 
+    # See the forward kernel: S*P crosses 2**31 at S ~= 92682 for CSA (P = S/4), so the
+    # int32 row-stride product wraps negative and every load/store lands out of bounds.
+    s_offs64 = s_offs.to(tl.int64)
+    p_offs64 = p_offs.to(tl.int64)
+
     hd_idx = tl.arange(0, HD)
 
     # Load dscores [BLOCK_S, BLOCK_P]
     dmasked = tl.load(
-        DSCORES_PTR + pid_b * S * P + s_offs[:, None] * P + p_offs[None, :],
+        DSCORES_PTR + pid_b.to(tl.int64) * S * P + s_offs64[:, None] * P + p_offs64[None, :],
         mask=s_mask[:, None] & p_mask[None, :],
         other=0.0,
     ).to(tl.float32)
     # Apply causal mask (zero out invalid positions).
-    s_arr = s_offs[:, None]
+    # Under context parallel this rank holds a slice of the queries but the FULL pool,
+    # so visibility must be judged on the query's GLOBAL position. Q_OFFSET is 0 without
+    # CP, which reproduces the original expression exactly.
+    s_arr = s_offs[:, None] + Q_OFFSET
     p_arr = p_offs[None, :]
     allowed = (p_arr + 1) * COMPRESS_RATIO - 1 <= s_arr
     d_acc = tl.where(allowed, dmasked, 0.0)
 
     # Unroll over heads.
+    # h-invariant; hoisted out of the unrolled loop (see the forward kernel).
+    k_tile = tl.load(
+        K_PTR + pid_b.to(tl.int64) * P * HD + p_offs64[:, None] * HD + hd_idx[None, :],
+        mask=p_mask[:, None],
+        other=0.0,
+    ).to(tl.float32)
+    k_tile_t = tl.trans(k_tile)
+
     for h in tl.static_range(0, H):
-        # Reload q, k for this head (FlashAttention-style recompute).
+        # Reload q for this head (FlashAttention-style recompute).
         q_tile = tl.load(
-            Q_PTR + pid_b * S * H * HD + s_offs[:, None] * H * HD + h * HD + hd_idx[None, :],
+            Q_PTR + pid_b.to(tl.int64) * S * H * HD + s_offs64[:, None] * H * HD + h * HD + hd_idx[None, :],
             mask=s_mask[:, None],
             other=0.0,
         ).to(tl.float32)
-        k_tile = tl.load(
-            K_PTR + pid_b * P * HD + p_offs[:, None] * HD + hd_idx[None, :],
-            mask=p_mask[:, None],
-            other=0.0,
-        ).to(tl.float32)
         w_h = tl.load(
-            W_PTR + pid_b * S * H + s_offs * H + h,
+            W_PTR + pid_b.to(tl.int64) * S * H + s_offs64 * H + h,
             mask=s_mask,
             other=0.0,
         ).to(tl.float32)
 
         # Recompute dot, relu, relu_dot.
-        dot = tl.dot(q_tile, tl.trans(k_tile), out_dtype=tl.float32)
+        dot = tl.dot(q_tile, k_tile_t, out_dtype=tl.float32)
         relu_dot = tl.maximum(dot, 0.0)  # [BLOCK_S, BLOCK_P]
         relu_mask = dot > 0.0
 
@@ -276,17 +311,17 @@ def _indexer_score_bwd_kernel(
         # Stores with atomic_add since multiple p_tiles/s_tiles touch
         # the same locations.
         tl.atomic_add(
-            DQ_PTR + pid_b * S * H * HD + s_offs[:, None] * H * HD + h * HD + hd_idx[None, :],
+            DQ_PTR + pid_b.to(tl.int64) * S * H * HD + s_offs64[:, None] * H * HD + h * HD + hd_idx[None, :],
             d_q,
             mask=s_mask[:, None],
         )
         tl.atomic_add(
-            DK_PTR + pid_b * P * HD + p_offs[:, None] * HD + hd_idx[None, :],
+            DK_PTR + pid_b.to(tl.int64) * P * HD + p_offs64[:, None] * HD + hd_idx[None, :],
             d_k,
             mask=p_mask[:, None],
         )
         tl.atomic_add(
-            DW_PTR + pid_b * S * H + s_offs * H + h,
+            DW_PTR + pid_b.to(tl.int64) * S * H + s_offs64 * H + h,
             dw_h,
             mask=s_mask,
         )
@@ -346,6 +381,7 @@ class IndexerScoreFn(torch.autograd.Function):
         w_i: torch.Tensor,
         compress_ratio: int,
         out_dtype: torch.dtype,
+        q_offset: int = 0,
     ):
         if q_i.dim() != 4:
             raise ValueError(f"q_i must be [B, S, H, Hd], got shape {tuple(q_i.shape)}")
@@ -389,6 +425,7 @@ class IndexerScoreFn(torch.autograd.Function):
             P,
             H=H,
             HD=HD,
+            Q_OFFSET=int(q_offset),
             COMPRESS_RATIO=int(compress_ratio),
             BLOCK_S=block_s,
             BLOCK_P=block_p,
@@ -402,6 +439,7 @@ class IndexerScoreFn(torch.autograd.Function):
 
         ctx.save_for_backward(q_c, k_c, w_c)
         ctx.compress_ratio = int(compress_ratio)
+        ctx.q_offset = int(q_offset)
         ctx.shape = (B, S, P, H, HD)
         ctx.in_dtypes = (q_i.dtype, k_icomp.dtype, w_i.dtype)
         return scores
@@ -411,6 +449,7 @@ class IndexerScoreFn(torch.autograd.Function):
         q_c, k_c, w_c = ctx.saved_tensors
         B, S, P, H, HD = ctx.shape
         compress_ratio = ctx.compress_ratio
+        q_offset = ctx.q_offset
         q_dtype, k_dtype, w_dtype = ctx.in_dtypes
 
         d_scores = d_scores.contiguous()
@@ -435,12 +474,13 @@ class IndexerScoreFn(torch.autograd.Function):
             P,
             H=H,
             HD=HD,
+            Q_OFFSET=int(q_offset),
             COMPRESS_RATIO=int(compress_ratio),
             BLOCK_S=block_s,
             BLOCK_P=block_p,
         )
 
-        return d_q_fp32.to(q_dtype), d_k_fp32.to(k_dtype), d_w_fp32.to(w_dtype), None, None
+        return d_q_fp32.to(q_dtype), d_k_fp32.to(k_dtype), d_w_fp32.to(w_dtype), None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -486,13 +526,14 @@ def indexer_score_triton(
     *,
     compress_ratio: int,
     out_dtype: torch.dtype,
+    q_offset: int = 0,
 ) -> torch.Tensor:
     """Compute Indexer scores via the fused Triton kernel.
 
     Returns ``scores [B, S, P]`` of dtype ``out_dtype``.  Masked
     positions hold ``-inf``.
     """
-    return IndexerScoreFn.apply(q_i, k_icomp, w_i, compress_ratio, out_dtype)
+    return IndexerScoreFn.apply(q_i, k_icomp, w_i, compress_ratio, out_dtype, q_offset)
 
 
 __all__ = [

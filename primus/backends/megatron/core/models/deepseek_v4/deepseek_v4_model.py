@@ -12,6 +12,7 @@ so DeepSeek-V4 no longer depends on GPT's internal TransformerBlock
 construction path.
 """
 
+import os
 from typing import Literal, Optional, Union
 
 from megatron.core import tensor_parallel
@@ -35,6 +36,11 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp_specs impo
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
     DeepSeekV4TransformerConfig,
 )
+
+
+def _v4_fused_ce_enabled() -> bool:
+    """Chunked linear+CE switch, shared spelling with the GPTModel patch."""
+    return os.environ.get("FUSED_LINEAR_CE", "0") == "1"
 
 
 class DeepseekV4Model(LanguageModule):
@@ -307,6 +313,42 @@ class DeepseekV4Model(LanguageModule):
                 packed_seq_params=packed_seq_params,
                 scale_logits_fn=self._scale_logits if getattr(self.config, "use_mup", False) else None,
             )
+
+        # Chunked linear + cross-entropy. The stock path below materialises the full
+        # [s, b, vocab] logits, which at long context is the single largest allocation in
+        # the whole step -- measured at 1M with CP=8: s_local=131072 x vocab=129280 x 2 B
+        # = 31.56 GiB, bigger than any attention tensor and bigger than the whole model.
+        # Primus already ships this as patches/fused_linear_ce_patches.py, but that patch
+        # hooks ``GPTModel._postprocess`` and DeepseekV4Model derives from LanguageModule,
+        # so it never applied here. Off by default; FUSED_LINEAR_CE=1 turns it on.
+        #
+        # Restricted to TP=1: the chunked path does a plain matmul against the full output
+        # weight, which is only equivalent to ``output_layer`` when the vocab is not
+        # sharded. Under vocab-parallel TP it would feed already-gathered logits into a
+        # vocab-parallel cross-entropy and double-count.
+        if labels is not None and _v4_fused_ce_enabled():
+            from megatron.core import parallel_state
+
+            if parallel_state.get_tensor_model_parallel_world_size() == 1:
+                from megatron.training import get_args
+
+                if getattr(get_args(), "overlap_param_gather", False):
+                    raise RuntimeError(
+                        "FUSED_LINEAR_CE=1 is incompatible with overlap_param_gather. The chunked "
+                        "backward issues one torch.autograd.grad per sequence chunk, which changes "
+                        "how many times each parameter's backward hook fires; the distributed "
+                        "optimizer's overlapped parameter all-gather then desyncs and fails in "
+                        "start_param_sync with an empty error message. Set "
+                        "overlap_param_gather: false (PRIMUS_OVERLAP_PARAM_GATHER=false)."
+                    )
+
+                from primus.backends.megatron.patches.fused_linear_ce_patches import (
+                    _chunk_size,
+                    _ChunkedLinearCE,
+                )
+
+                w = output_weight if output_weight is not None else self.output_layer.weight
+                return _ChunkedLinearCE.apply(hidden_states, w, labels, self, _chunk_size())
 
         logits, _ = self.output_layer(
             hidden_states,
