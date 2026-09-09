@@ -57,6 +57,7 @@ modules:
       num_layers_at_start_in_bf16: 1
       num_layers_at_end_in_bf16: 2
       mxfp4_gradient_stochastic_rounding: true
+      mxfp4_scale_rounding_mode: ${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING:2}
       te_precision_config_file: ${PRIMUS_PATH:/workspace/Primus}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-qkvo-bf16.yaml
       clip_grad: 1.0
       check_for_nan_in_loss_and_grad: false

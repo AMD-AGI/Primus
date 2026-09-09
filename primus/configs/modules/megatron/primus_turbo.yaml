@@ -22,6 +22,11 @@ turbo_grouped_gemm_backend: default
 # default and requires a Primus-Turbo grouped GEMM implementation with matching
 # activation and gradient layouts.
 mxfp4_gradient_stochastic_rounding: false
+# Rounding of the E8M0 block scale (Primus-Turbo "UoS" modes):
+# 0 = half ULP, 1 = one ULP, 2 = three-eighths ULP. Unrelated to gradient
+# stochastic rounding above. Turbo builds from before the UoS work read this
+# from PRIMUS_TURBO_MXFP4_SCALE_ROUNDING instead and ignore this option.
+mxfp4_scale_rounding_mode: 0
 
 # Per-module Transformer Engine precision override (Megatron
 # --te-precision-config-file). Used to keep QKVO projections in BF16 while

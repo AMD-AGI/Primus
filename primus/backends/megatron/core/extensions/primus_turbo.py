@@ -441,12 +441,13 @@ class PrimusTurboQuantConfig:
         scale_dtype: ScaleDtype = ScaleDtype.FP32,
         block_size: int = None,
         use_gradient_sr: bool = True,
+        scale_rounding_mode: int = 0,
     ):
         self._is_fp4 = False
         self._is_fp8 = False
         if format == Format.E2M1_X2:
             # FP4
-            self._quant_config = Float4QuantConfig(
+            fp4_kwargs = dict(
                 format=format,
                 granularity=granularity,
                 strategy=strategy,
@@ -454,6 +455,17 @@ class PrimusTurboQuantConfig:
                 block_size=block_size,
                 use_gradient_sr=use_gradient_sr,
             )
+            # scale_rounding_mode arrived with the Turbo MXFP4 UoS work. Older
+            # Turbo builds took the mode from an environment variable, so only
+            # pass it when the installed Float4QuantConfig declares it.
+            if "scale_rounding_mode" in getattr(Float4QuantConfig, "__dataclass_fields__", {}):
+                fp4_kwargs["scale_rounding_mode"] = scale_rounding_mode
+            elif scale_rounding_mode:
+                warning_rank_0(
+                    "Primus-Turbo Float4QuantConfig has no scale_rounding_mode; "
+                    f"mxfp4_scale_rounding_mode={scale_rounding_mode} is ignored."
+                )
+            self._quant_config = Float4QuantConfig(**fp4_kwargs)
             self._is_fp4 = True
         else:
             # FP8

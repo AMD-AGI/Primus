@@ -39,9 +39,11 @@ export PRIMUS_GRAD_REDUCE_IN_BF16=true
 export USE_TURBO_RMS_NORM=true
 export USE_TURBO_NORM_TE_LINEAR=true
 
-# 0=RTE, 1=RZ, 2=stochastic. Consumed by Turbo MXFP4 HIP/FlyDSL quant on
-# gpt-oss-mxfp4 branches; ignored by Turbo builds that do not read it. The
-# MXFP4 recipe is validated with stochastic scale rounding.
+# E8M0 block-scale rounding: 0=half ULP, 1=one ULP, 2=three-eighths ULP. This is
+# not gradient stochastic rounding, which mxfp4_gradient_stochastic_rounding
+# controls separately. The MXFP4 recipe is validated at 2. Read by the recipe as
+# mxfp4_scale_rounding_mode; Turbo builds from before the UoS work took it as an
+# environment variable of the same name instead.
 export PRIMUS_TURBO_MXFP4_SCALE_ROUNDING="${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING:-2}"
 
 export HSA_ENABLE_INTERRUPT=0
