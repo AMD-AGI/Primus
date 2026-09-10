@@ -192,9 +192,8 @@ execute_benchmark_run() {
     cd "$PRIMUS_ROOT" || return 1
 
     set +e
-    bash "$PRIMUS_CLI" direct -- train pretrain --config "$EXP" 2>&1 | tee "$log_file" || true
-    run_exit_code=$?
-    set +e
+    bash "$PRIMUS_CLI" direct -- train pretrain --config "$EXP" 2>&1 | tee "$log_file"
+    run_exit_code=${PIPESTATUS[0]}
 
     cd "$SCRIPT_DIR" || return 1
 

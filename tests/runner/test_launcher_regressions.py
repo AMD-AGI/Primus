@@ -13,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SLURM_ENTRY = ROOT / "runner" / "primus-cli-slurm-entry.sh"
 SHARED_LAUNCHER = ROOT / "runner" / "helpers" / "launch" / "slurm_pretrain.sh"
+AUTO_BENCHMARK_LAUNCHER = ROOT / "tools" / "auto_benchmark" / "run_primus_autobenchmark.sh"
 
 
 def run_slurm_entry(extra_env):
@@ -88,3 +89,9 @@ def test_shared_launcher_forwards_uep_and_maps_clean(tmp_path):
     assert "--env USING_UEP --env REBUILD_UEP" in command
     assert "-- --env DATA_PATH" not in command
     assert "--env TOKENIZED_TRAIN_DATA_PATH --env TOKENIZED_EVAL_DATA_PATH -- train pretrain" in command
+
+
+def test_auto_benchmark_preserves_primus_cli_exit_code():
+    source = AUTO_BENCHMARK_LAUNCHER.read_text(encoding="utf-8")
+    assert 'tee "$log_file" || true' not in source
+    assert "run_exit_code=${PIPESTATUS[0]}" in source
