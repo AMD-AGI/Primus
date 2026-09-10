@@ -1,0 +1,85 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:grok1-pretrain}
+workspace: ./output
+
+# STATUS (MI325X / gfx942, 1 node x 8 GPU, maxtext release/v26.6): DOES NOT FIT.
+# grok1 is a 316.489B-parameter MoE (8 experts, top-2). With ici_expert_parallelism=8
+# only the expert weights shard; the ~7B non-expert params and the optimizer state are
+# replicated, leaving ~46B params per GPU. Measured on 2026-09-05 at seq 4096 / pdbs 2:
+#
+#   state (params + Adam moments)  221.1 GB   <- 92.9% of the 238 GB budget
+#   temp (mostly the grad buffer)   94.3 GB   <- the allocation that fails
+#   budget @ MEM_FRACTION .97      248.3 GB
+#
+# Neither per_device_batch_size nor max_target_length closes this: halving the sequence
+# from 8192 to 4096 cut temp by only 15.3 GB (14%), because temp is dominated by the
+# ~92 GB bf16 gradient buffer for the local param shard, which is independent of both.
+#
+# optimizer_memory_host_offload: true does move the moments out (state drops to 73.7 GB,
+# needs XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB well above its 64 GB default), but temp then
+# grows to 217.7 GB because the moments have to be staged back into HBM for the update --
+# still 43 GB over budget. Both directions fail, for opposite reasons.
+#
+# 316B params with Adam wants ~2.5 TB; this node has ~2 TB of HBM. Run grok1 multi-node
+# (the dcn_* axes below are already set up for it) rather than tuning single-node.
+#
+# NOTE: shardy must stay true. The MI300X copy of this config sets shardy: false, which
+# aborts in ~50 s on this JAX 0.11 / TE stack: TransformerEngine's fused attention is
+# registered via custom_partitioning with Shardy rules only, so GSPMD lowering raises
+# "does not support GSPMD sharding propagation rules".
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    # model to run
+    model: grok1.yaml
+    overrides:
+      run_name: "grok1_training"
+      base_output_directory: "./output"
+      steps: 50
+
+      # data
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+
+      # checkpoint
+      enable_checkpointing: false
+      async_checkpointing: false
+
+      # inter-node parallelism strategy
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+
+      # intra-node parallelism strategy
+      ici_fsdp_parallelism: 1
+      ici_data_parallelism: 1
+      ici_expert_parallelism: 8
+
+      per_device_batch_size: 4
+
+      profiler: ""
+      upload_all_profiler_results: true
+      skip_first_n_steps_for_profiler: 3
+      profiler_steps: 1
+
+      remat_policy: "full"
+      use_iota_embed: true
+      scan_layers: true
+
+      logits_dot_in_fp32: false
+      dtype: "bfloat16"
+      quantization: "nanoo_fp8"
+      quantize_kvcache: false
+      kv_quant_axis: "heads_and_dkv"
+      kv_quant_dtype: "int8"
+      weight_dtype: "bfloat16"
+      checkpoint_is_quantized: false
+      shardy: true
+
+      sparse_matmul: false # ValueError("Sparse matmul doesn't support using expert and pipeline parallelism together.")
+      megablox: false
+      max_target_length: 8192           # Increased from 4096
+      capacity_factor: 1

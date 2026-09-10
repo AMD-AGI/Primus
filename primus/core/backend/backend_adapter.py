@@ -44,14 +44,17 @@ class BackendAdapter(ABC):
         overriding this method, and :meth:`apply_env_defaults` becomes a no-op for
         them (no arch detection, no env mutation).
 
-        Precedence (highest wins): per-config ``env:`` > outer/shell env >
-        these defaults > image-baked.
+        Precedence (highest wins): ``XLA_FLAGS_APPEND`` > per-config ``env:`` >
+        these defaults > inherited (image-baked or outer shell).
         """
         return []
 
     def apply_env_defaults(self) -> None:
         """Apply :meth:`env_defaults` into ``os.environ`` (see ``env_registry``)."""
-        from primus.core.backend.env_registry import apply_env_defaults
+        from primus.core.backend.env_registry import (
+            apply_env_defaults,
+            apply_xla_flags_append,
+        )
 
         def _safe_log(msg: str) -> None:
             # Env application must never abort a run on a logging issue (e.g. the
@@ -64,6 +67,8 @@ class BackendAdapter(ABC):
                 pass
 
         apply_env_defaults(self.env_defaults(), self.framework, _safe_log)
+        # Last layer, so it also reaches backends that declare no defaults above.
+        apply_xla_flags_append(_safe_log)
 
     def prepare_backend(self, config: Any):
         """

@@ -10,10 +10,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 HYBRID_GUIDE = ROOT / "docs" / "04-technical-guides" / "hybrid-models" / "README.md"
 
-# Directories that are either deprecated, vendored, or gitignored build output.
+# Directories that are either vendored or gitignored build output.
 SKIPPED_DIRS = {
     ".git",
-    "docs_deprecated",
     "logs",
     "node_modules",
     "output",
