@@ -31,9 +31,12 @@ SCRIPT_INVOCATION = re.compile(r"(?:^|[\s(&;|`])(?:bash|sh|source)\s+(?:-\w+\s+)
 
 # Repo-relative references that are knowingly unresolvable.
 ALLOWED_MISSING = {
+    # This command runs after `cd MAD`; it belongs to the external ROCm/MAD
+    # checkout, not this repository.
+    "tools/fetch_primus.sh",
     # Marked "(helper; not committed)" inline: a local calibration helper that
     # is intentionally kept out of the tree.
-    "examples/deepseek-v4/projection/script/_calibrate_flash.sh",
+    "examples/megatron/models/deepseek-v4/projection/script/_calibrate_flash.sh",
     # Forward reference to the ODC rocSHMEM example, which lands with the PR
     # that the same README says the ops are still waiting on.
     "examples/llm_training/run.sh",

@@ -41,7 +41,7 @@ For the full and up-to-date model matrix, see [Supported Models](./docs/06-devel
 - **[2026/07/29]** ⚡ **MegaMoE** - FlyDSL-based fused MoE layer that folds expert all-to-all into the grouped GEMMs, plus FP4 grouped GEMM support ([MegaMoE guide](./docs/04-technical-guides/mega-moe.md))
 - **[2026/07/29]** Hybrid linear-attention models: Gated Delta Net (GDN) and Kimi Delta Attention (KDA) on Megatron-LM ([Hybrid models](./docs/04-technical-guides/hybrid-models/README.md))
 - **[2026/07/22]** Backend upgrades: TorchTitan v0.2.2 (PyTorch 2.12) with GPT-OSS, and MaxText v26.5
-- **[2026/07/17]** 🚀 **DeepSeek-V4 training support** - model definition, fused attention/MoE kernels, Muon optimizer, FP8/FP4 recipes, and a projection toolkit ([examples](./examples/deepseek-v4))
+- **[2026/07/17]** 🚀 **DeepSeek-V4 training support** - model definition, fused attention/MoE kernels, Muon optimizer, FP8/FP4 recipes, and a projection toolkit ([examples](./examples/megatron/models/deepseek-v4))
 - **[2026/07/16]** 🎨 **Diffusion backend** - Flux.1 image and Wan video training with FP8/MXFP4, FSDP2, and Energon data pipelines ([Diffusion docs](./docs/04-technical-guides/diffusion-models/README.md))
 - **[2026/07/14]** MLPerf Training 6.0 examples on MI355X: Llama2-70B LoRA, Llama3.1-8B, and GPT-OSS-20B ([examples](./examples/mlperf))
 - **[2026/06/15]** [Tuning agent](./docs/02-user-guide/tuning-agent.md) with memory-aware benchmarking for automatic config search
