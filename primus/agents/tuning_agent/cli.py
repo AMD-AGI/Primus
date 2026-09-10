@@ -3,7 +3,7 @@
 Usage:
     python -m primus.agents.tuning_agent \
         --workload examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
-        --target-cluster examples/agents/tuning_agent/target_cluster.yaml \
+        --target-cluster examples/megatron/guides/tuning_agent/target_cluster_mi355x_4nodes.yaml \
         [--out-dir tuning_runs/mi355x-2nodes] \
         [--dry-run] [--seed-only] [--no-agent]
 

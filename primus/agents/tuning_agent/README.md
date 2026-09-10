@@ -76,21 +76,21 @@ agent:
 # synthesised metrics. Useful to verify the install on a CPU-only host.
 python -m primus.agents.tuning_agent \
     --workload examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
-    --target-cluster examples/agents/tuning_agent/target_cluster_mi355x_2nodes.yaml \
+    --target-cluster examples/megatron/guides/tuning_agent/target_cluster_mi355x_4nodes.yaml \
     --out-dir tuning_runs/dry-run \
     --dry-run --seed-only
 
 # Seed-only with the real projection tool (requires Origami if simulate path):
 python -m primus.agents.tuning_agent \
     --workload examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
-    --target-cluster examples/agents/tuning_agent/target_cluster_mi355x_2nodes.yaml \
+    --target-cluster examples/megatron/guides/tuning_agent/target_cluster_mi355x_4nodes.yaml \
     --out-dir tuning_runs/mixtral-22b-mi355x-seed \
     --seed-only
 
 # Full agent (planner + DSPy.RLM rounds):
 python -m primus.agents.tuning_agent \
     --workload examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
-    --target-cluster examples/agents/tuning_agent/target_cluster_mi355x_2nodes.yaml \
+    --target-cluster examples/megatron/guides/tuning_agent/target_cluster_mi355x_4nodes.yaml \
     --out-dir tuning_runs/mixtral-22b-mi355x-full
 ```
 

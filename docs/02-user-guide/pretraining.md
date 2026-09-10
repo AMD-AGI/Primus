@@ -326,7 +326,7 @@ Controlled with `PRIMUS_HIPBLASLT_TUNING_STAGE` (see `examples/README.md`):
 | Stage | Purpose |
 | --- | --- |
 | 1 | Dump GEMM shapes seen during training (reduce `train_iters` for faster collection). |
-| 2 | Tune kernels from dumped shapes (offline tooling under `examples/offline_tune`). |
+| 2 | Tune kernels from dumped shapes (offline tooling under `examples/megatron/guides/offline_tune`). |
 | 3 | Train using tuned kernel artifacts from `./output/tune_hipblaslt/...`. |
 
 Example (from in-repo docs):
