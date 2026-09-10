@@ -121,18 +121,19 @@ follow, because a higher bundle version does not imply a higher `libionic`
 version. See [section 4](#4-list-published-bundles) to list every published
 bundle.
 
-| Bundle | `libionic` version |
+| Bundle | `libionic` version (noble) |
 |--------|--------------------|
 | `1.125.0-a-187` | `54.0-192-1` |
+| `1.117.5-a-196` | `50.0.26.08.28.001-1~ubu24.04` |
 | `1.117.5-a-147` | `54.0-197-1` |
 | `1.117.5-a-77` | `54.0-187-1` |
 | `1.117.5-a-56` | `54.0-184` |
 | `1.117.1-a-63` | `54.0-149.g3304be71` |
 
-Every published bundle uses this `54.0-NNN` scheme and ships one `libionic`
-version for all distributions. A bundle delivered as a tarball may not — read the
-version out of the installed package (or the `.deb` itself) rather than assuming
-the scheme ([section 7](#7-installing-from-a-pre-downloaded-bundle)).
+Most published bundles use a `54.0-NNN` scheme and ship one `libionic` version
+for all distributions. That is not universal: `1.117.5-a-196` (and currently
+`1.117.5`) ship a dated, per-distro version instead. Always read the version
+out of the installed package rather than assuming the scheme.
 
 ## 2. Check what you have
 
@@ -377,15 +378,22 @@ the full picture.
 
 ## 7. Installing from a pre-downloaded bundle
 
-Occasionally a bundle is delivered as a tarball rather than published to
-`repo.radeon.com`. **Prefer the apt path in [section 5](#5-how-the-rebuild-works)
-whenever the bundle you need is published** — it handles either direction with no
-extra flags and none of the care below.
+If the bundle is on `repo.radeon.com`, use the apt path in
+[section 5](#5-how-the-rebuild-works). That is the supported way to rebuild
+against a published bundle: apt selects the packages that directory actually
+ships.
 
-Do not unpack the tarball on the host. Copy the bundle into the image and let
-the build unpack it: that picks the distribution-matching `.deb` files from
-inside the container, so you do not have to probe the base image's codename or
-copy individual packages into the build context.
+Use this section when you only have a tarball. The helpers install `libionic`
+from that file, but **tarball layout is not a stable contract.** Bundles handed
+around as `ainic_bundle_*.tar*` are often pre-release (or mixed) artifacts:
+inner archives may be misnamed, gzip despite a `.tar.xz` suffix, or include
+*both* a release-style `rdma-core-debs` archive and an extra dated
+`libionic-debs` copy that apt would not install. Expect sharp edges; if the
+same version is published, prefer apt.
+
+Do not unpack the tarball on the host. Copy it into the image and let the
+build unpack it: that picks the distribution-matching `.deb` files from
+inside the container.
 
 The helpers live in `tools/ainic-bundle-rebuild/` (`Dockerfile`, `build.sh`,
 `test.sh`). Those files are the source of truth; this page only reproduces the
@@ -401,11 +409,9 @@ root:
   jax-training:maxtext-v26.6-ainic-1.117.5-a-147
 ```
 
-If the packaging of the bundle you were given differs from a published one, the
-specific differences observed in one internal build — and the error each
-produces — are recorded in
-[Appendix A](#appendix-a-packaging-differences-observed-in-an-internal-build).
-You should not need it to follow this section, only to recognise a symptom.
+Symptoms of the sharp edges (wrong inner archive, `Pre-Depends`, gzip named
+`.xz`) are recorded in [Appendix A](#appendix-a-packaging-variants). You
+should not need it to follow this section, only to recognise a failure.
 
 ### Dockerfile
 
@@ -427,7 +433,7 @@ RUN set -ex; \
     cd */; \
     tar -xf host_sw_pkg.tar*; \
     cd host_sw_pkg/ionic_driver/deb; \
-    tar -xf libionic-debs.tar* 2>/dev/null || tar -xf rdma-core-debs.tar*; \
+    tar -xf rdma-core-debs.tar* 2>/dev/null || tar -xf libionic-debs.tar*; \
     REL_NAME="$(. /etc/os-release; echo "$VERSION_CODENAME")"; \
     dpkg -i --force-overwrite "$REL_NAME"/libionic1_*.deb; \
     dpkg -i --force-overwrite "$REL_NAME"/libionic-dev_*.deb; \
@@ -446,13 +452,17 @@ RUN set -eux; \
 The install `RUN` is doing four things that are easy to flatten incorrectly:
 
 1. **Unpack inside the image, then install from `$VERSION_CODENAME/`.** The
-   bundle extracts to one directory per distribution. Installing from the
+   tarball extracts to one directory per distribution. Installing from the
    codename that matches *this* image avoids handing `dpkg` conflicting
-   versions from `jammy/` and `noble/` at once. The inner archive carrying
-   `libionic` has been seen named both `libionic-debs.tar.xz` and
-   `rdma-core-debs.tar.xz`; `linux-debs.tar.xz` and `perftest-debs.tar.xz` in
-   the same directory are the host driver and benchmark packages and must not
-   be installed in the container.
+   versions from `jammy/` and `noble/` at once. The archive carrying
+   `libionic` is not named consistently: we have seen `rdma-core-debs.tar*`,
+   `libionic-debs.tar*`, or both. The Dockerfile prefers `rdma-core-debs` when
+   present so a mixed tarball does not silently install a leftover dated copy;
+   it falls back to `libionic-debs` if that is all there is. That is a
+   heuristic, not a guarantee that the next tarball will look the same.
+   `linux-debs.tar.xz` and `perftest-debs.tar.xz` in the same directory are
+   host driver and benchmark packages and must not be installed in the
+   container.
 
 2. **Two separate `dpkg -i` invocations, `libionic1` first.** Where
    `libionic-dev` **`Pre-Depends`** on an exact `libionic1` version, a single
@@ -486,8 +496,7 @@ to see why.
 
 There is no `$ver` from a repository on this path, so the version assertion from
 section 5 does not carry over. The structural `RUN` still applies: it prints
-whatever `libionic` was in the tarball. Trust that output, not the bundle
-filename.
+whatever `libionic` landed. Trust that output, not the tarball filename.
 
 ### Build and test helpers
 
@@ -509,7 +518,8 @@ the runtime `ibv_devices` / RCCL log check on a node with AINIC hardware;
 | `libionic` reverts to another version after a later `apt` command | Old bundle repositories left enabled. See section 5, and section 7 for why this is worse after a tarball install. |
 | `E: Packages were downgraded and -y was used without --allow-downgrades` | Expected for a downgrade; add `--allow-downgrades`. |
 | `apt update` fails with `404 Not Found` on `Packages` | Bundle directory is an empty placeholder, the name is wrong, or the distribution codename in the repository line does not match the base image. See sections 4 and 5. |
-| `xz: (stdin): File format not recognized` while extracting a bundle | Inner archive is gzip despite its `.tar.xz` name. Use `tar -xf`. See section 7. |
+| Inner `*.tar.xz` fails with `xz: File format not recognized` | Tarball inner archive is gzip despite its name. Use `tar -xf`. See section 7; tarballs can be pre-release and are not a stable layout. |
+| Installed `libionic` version does not match `Packages` on `repo.radeon.com` | Tarball contained more than one `libionic` archive, or is a pre-release that does not match the published repo. Prefer the apt path in section 5 when the bundle is published. See section 7. |
 | `dpkg: pre-dependency problem - not installing libionic-dev` | Both `.deb` files given to one `dpkg -i`. Install `libionic1` first, in its own invocation. See section 7. |
 | `dpkg: trying to overwrite '.../libionic.so', which is also in package ...` | The two bundles disagree about which package owns that symlink. Add `--force-overwrite`. See section 7. |
 | `ibv_devices` lists no `ionic` device | Not AINIC hardware; the host `ionic` driver is not loaded; or `libionic` is ABI-incompatible with the host driver. See sections 2 and 3. |
@@ -518,45 +528,50 @@ the runtime `ibv_devices` / RCCL log check on a node with AINIC hardware;
 
 ---
 
-## Appendix A: packaging differences observed in an internal build
+## Appendix A: packaging variants
 
-**Not required reading.** Section 7's commands already handle everything here, and
-they are written so that none of it has to be known in advance. This appendix
-exists so that if you hit one of these errors, you can recognise it rather than
-debug it from scratch.
+**Not required reading.** Section 7's helpers already paper over the cases
+below. This list is so you can recognise a failure; it is **not** a spec of
+how the next tarball will be packaged.
 
-**Sample size is one.** These are observations from a single internal build,
-compared against the published bundles available at the time of writing. They are
-**not** a specification of how internal builds are packaged, and there is no reason
-to assume the next one will look the same. Verify against your own files with
-`dpkg-deb -f` and `dpkg-deb -c`.
+Published apt repos are the consistent interface. Tarballs may be
+pre-release or mixed: they have shown more than one inner archive name, gzip
+files named `.tar.xz`, extra dated `.deb`s next to the packages apt would
+install, `Pre-Depends`, and per-distro version strings. Some of those same
+package traits also appear in published apt (for example `1.117.5-a-196`).
+The difference is that apt only offers one `libionic1` per bundle, while a
+tarball can contain leftovers. Verify with `dpkg-query` / `dpkg-deb -f`.
 
-| | Published bundles (all inspected) | The internal build inspected |
+| | `54.0-NNN` style (e.g. `1.117.5-a-77`, `1.117.5-a-147`) | Dated style (e.g. `1.117.5-a-196`) |
 |---|---|---|
-| `libionic` version scheme | `54.0-NNN` | dated, `<maj>.<min>.YY.MM.DD.<build>-1~<distro>` |
-| Per-distro directories | yes — `bookworm`, `buster`, `jammy`, `noble`, all shipping the *same* version | yes — six, each shipping a *different* version string |
-| `libionic-dev` → `libionic1` | `Depends` | `Pre-Depends` |
+| `libionic` version | `54.0-NNN`, same string for every distro | `<maj>.<min>.YY.MM.DD.<build>-1~<distro>` (noble `50.0.…`, jammy `39.0.…`, …) |
+| Apt pool path | `pool/main/r/rdma-core/` | `pool/main/libi/libionic/` |
+| Tarball archive | `rdma-core-debs.tar.xz` (real xz) | `libionic-debs.tar.xz` (often gzip despite the name) |
+| `libionic-dev` → `libionic1` | typically `Depends` | `Pre-Depends` |
 | `libionic1` `Replaces:` | none | `ibverbs-providers, libibverbs1` |
-| Owner of bare `libionic.so` | `libionic1` | `libionic-dev` |
-| Archive carrying `libionic` | `rdma-core-debs.tar.xz`, real xz | `libionic-debs.tar.xz`, gzip despite the name |
+
+A tarball can contain **both** archives. `1.117.5-a-147` does: `rdma-core-debs`
+matches the published `54.0-197-1` packages, while `libionic-debs` is a dated
+copy that apt does **not** install. Section 7 prefers `rdma-core-debs` when
+present so the leftover copy is not the one that lands. That heuristic can
+still be wrong on a tarball we have not seen.
 
 ### What each one does to you
 
-- **Dated version scheme.** The consequence is not cosmetic: a dated version sorts
-  *below* the `54.0-NNN` scheme, so apt regards whatever the base image's
-  repositories offer as an **upgrade**. This is the mechanism behind the silent
-  revert described in section 7 — and it is why removing the repositories matters
-  more for a local install than for an apt one. Do not expect the version to
-  resemble the bundle name; read it with `dpkg-deb -f`.
-- **A different version per distribution.** Both kinds of bundle extract to one
-  directory per codename, so that layout alone is unremarkable — but where the
-  published bundle puts the *same* version in every directory, this one puts a
-  different version string in each (`50.0.…-1~ubu24.04` under `noble`,
-  `39.0.…-1~ubu22.04` under `jammy`, and so on). Installing every `libionic1_*.deb`
-  therefore hands `dpkg` genuinely conflicting versions rather than duplicates, and
-  all but one will fail the base image's `ibverbs-providers` constraint — `noble`'s
-  pins `ibverbs-providers (>= 50.0), (<< 51)`. Section 7 installs from
-  `$VERSION_CODENAME/` inside the image so only the matching pair is used.
+- **Dated version scheme.** A dated version sorts *below* `54.0-NNN`, so apt
+  regards whatever the base image's repositories offer as an **upgrade**. This
+  is the mechanism behind the silent revert described in section 7 — and it
+  is why removing the repositories matters more for a local install than for
+  an apt one. Do not expect the version to resemble the bundle name; read it
+  with `dpkg-query` or `dpkg-deb -f`.
+- **A different version per distribution.** Both styles extract to one
+  directory per codename. The `54.0-NNN` style puts the *same* version in
+  every directory; the dated style does not. Installing every
+  `libionic1_*.deb` therefore hands `dpkg` genuinely conflicting versions, and
+  all but one will fail the base image's `ibverbs-providers` constraint —
+  noble's dated packages pin `ibverbs-providers (>= 50.0), (<< 51)`. Section
+  7 installs from `$VERSION_CODENAME/` inside the image so only the matching
+  pair is used.
 - **`Pre-Depends` rather than `Depends`.** Produces
   `dpkg: error processing archive ... pre-dependency problem - not installing libionic-dev`
   from a single `dpkg -i` given both files, *after* `libionic1` has already been
@@ -568,27 +583,10 @@ to assume the next one will look the same. Verify against your own files with
 - **Archive misnamed `.tar.xz` while being gzip.** `tar -xJf` fails with
   `xz: (stdin): File format not recognized`. Use `tar -xf`, which detects either.
 
-### One hint that the dated scheme is a build-pipeline artifact
-
-The dated scheme is visible in the published repositories too, but only on a
-debug-symbol package rather than a shipped one:
-
-```bash
-curl -s "https://repo.radeon.com/amdainic/pensando/ubuntu/1.117.5-a-147/dists/noble/main/binary-amd64/Packages" \
-  | awk '/^Package: /{p=$2} /^Version: /{print p"="$2}' | grep libionic
-```
-
-```
-libionic-dev=54.0-197-1
-libionic1=54.0-197-1
-libionic1-dbgsym=22.1.26.07.10.001-1~deb10
-```
-
-The deliverables carry release versions; the `dbgsym` carries a dated one of the
-same shape. So the dated form appears to be what the build pipeline emits before
-release versioning is applied, which is consistent with seeing it on a build that
-was never published — and is a reason to treat it as a signal that you are holding
-a pre-release artifact rather than a released bundle.
+The dated scheme also appears as a `dbgsym` next to `54.0-NNN` packages (for
+example on `1.117.5-a-147`). On `1.117.5-a-196` the dated form *is* the
+published `libionic1`. Treat the tarball filename as a hint, not as proof of
+which of those you installed.
 
 ---
 

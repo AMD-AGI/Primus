@@ -1,6 +1,8 @@
 # Rebuild a published training image against a pre-downloaded AINIC bundle.
 # Unpack the tarball inside the image and install libionic from the matching
-# distro directory. See docs/04-technical-guides/ainic-bundle-versions.md §7.
+# distro directory. Inner archive names are not a stable contract: prefer
+# rdma-core-debs when present, else libionic-debs. See
+# docs/04-technical-guides/ainic-bundle-versions.md §7.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
@@ -15,7 +17,7 @@ RUN set -ex; \
     cd */; \
     tar -xf host_sw_pkg.tar*; \
     cd host_sw_pkg/ionic_driver/deb; \
-    tar -xf libionic-debs.tar* 2>/dev/null || tar -xf rdma-core-debs.tar*; \
+    tar -xf rdma-core-debs.tar* 2>/dev/null || tar -xf libionic-debs.tar*; \
     REL_NAME="$(. /etc/os-release; echo "$VERSION_CODENAME")"; \
     dpkg -i --force-overwrite "$REL_NAME"/libionic1_*.deb; \
     dpkg -i --force-overwrite "$REL_NAME"/libionic-dev_*.deb; \
