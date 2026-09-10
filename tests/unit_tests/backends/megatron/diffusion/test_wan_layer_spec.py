@@ -78,6 +78,43 @@ def test_qk_norm_uses_backend_native_kernel(transformer_impl):
         assert origin.startswith("torch."), origin
 
 
+def test_block_is_a_virtual_transformer_layer():
+    """The block answers isinstance(TransformerLayer) without inheriting it.
+
+    Megatron-FSDP takes its unit granularity from a default list of
+    ``[TransformerLayer]`` and matches it with isinstance, and nothing plumbs
+    an explicit list through for Wan. The virtual registration is what makes
+    that default match, so an empty unit list does not silently hook all 600
+    submodules instead of the blocks.
+    """
+    from megatron.core.transformer.transformer_layer import TransformerLayer
+
+    from primus.backends.megatron.core.models.diffusion.wan.model import (
+        WanTransformerBlock,
+    )
+
+    assert issubclass(WanTransformerBlock, TransformerLayer)
+
+    # Virtual only: real inheritance would change the checkpoint key layout.
+    assert TransformerLayer not in WanTransformerBlock.__mro__
+
+    # This is the exact shape of the check Megatron-FSDP performs.
+    model, _ = _build_on_meta(WanConfig.wan2_1_t2v_1_3b, "local")
+    block = model.blocks[0]
+    assert isinstance(block, tuple([TransformerLayer]))
+
+
+def test_block_carries_layer_number():
+    """The FSDP-DTensor checkpoint path reads ``layer_number`` off the block.
+
+    Numbered from 1, following Megatron's own convention for the attribute.
+    """
+    model, _ = _build_on_meta(WanConfig.wan2_1_t2v_1_3b, "local")
+
+    for index, block in enumerate(model.blocks):
+        assert block.layer_number == index + 1
+
+
 @pytest.mark.parametrize("transformer_impl", BACKENDS)
 @pytest.mark.parametrize("variant_name,ctor", VARIANTS, ids=[v[0] for v in VARIANTS])
 def test_state_dict_matches_converter_key_table(variant_name, ctor, transformer_impl):
