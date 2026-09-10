@@ -338,3 +338,172 @@ class TestMXFP4LinearGuard(PrimusUT):
                 skip_bias_add=False,
                 is_expert=False,
             )
+
+
+# ---------------------------------------------------------------------------
+# Reduction-axis alignment
+# ---------------------------------------------------------------------------
+
+
+def _mxfp4_module():
+    """The extension module, skipped where Primus-Turbo's FP4 ops are absent."""
+    return pytest.importorskip(
+        "primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local",
+        reason="Requires the Primus-Turbo MXFP4 extension",
+    )
+
+
+class TestMXFP4ReductionAlignment:
+    """Integer-math tests for the FP4 reduction-axis padding rules.
+
+    A shuffled colwise scale buffer covers ``cdiv(cdiv(d, 32), 8) * 8`` E8M0
+    blocks while the packed FP4 data covers only ``cdiv(d, 128) * 128``. When
+    ``cdiv(d, 128)`` is odd, some blocks have no backing data and the wgrad
+    GEMM sums uninitialized memory -- finite, but a gradient norm that varies
+    run to run. Padding is what closes that, and it is conditional because a
+    full operand copy at every FP4 linear is not free, so both halves of the
+    rule need holding down: pad when either invariant fails, and pad nothing
+    when both already hold.
+    """
+
+    def test_padding_alignment_is_a_multiple_of_the_block_size(self):
+        module = _mxfp4_module()
+
+        assert module.MXFP4_REDUCTION_ALIGN % module.MXFP4_PADDING_ALIGN_SIZE == 0
+        assert module.MXFP4_REDUCTION_ALIGN % 16 == 0
+
+    @pytest.mark.parametrize("dim", [256, 512, 1536, 4608, 8960])
+    def test_already_conforming_axis_is_returned_untouched(self, dim):
+        """Wan 1.3B's hidden dims pay no copy: this is the common case."""
+        module = _mxfp4_module()
+
+        assert module._aligned(dim) == dim
+
+    @pytest.mark.parametrize(
+        "dim,expected",
+        [
+            (128, 256),  # 16-aligned, but cdiv(128, 128) == 1 is odd
+            (384, 512),  # cdiv(384, 128) == 3 is odd
+            (640, 768),  # cdiv(640, 128) == 5 is odd
+            (100, 256),  # not a multiple of 16 at all
+            (1, 256),
+        ],
+    )
+    def test_offending_axis_is_padded_up(self, dim, expected):
+        module = _mxfp4_module()
+
+        assert module._aligned(dim) == expected
+
+    def test_padded_axis_always_satisfies_both_invariants(self):
+        """Whatever comes out clears AITER's dispatcher and backs every block."""
+        module = _mxfp4_module()
+        block = module.MXFP4_PADDING_ALIGN_SIZE
+
+        for dim in range(1, 4097):
+            aligned = module._aligned(dim)
+
+            assert aligned >= dim, dim
+            assert aligned % 16 == 0, dim
+            assert module._cdiv(aligned, block) % 2 == 0, dim
+
+    def test_each_gemm_axis_is_aligned_independently(self):
+        """M, K and N are each the reduction axis of one of the three GEMMs."""
+        module = _mxfp4_module()
+
+        # M offends, K and N do not.
+        assert module._aligned_gemm_dims(128, 256, 512) == (256, 256, 512)
+        # Nothing offends.
+        assert module._aligned_gemm_dims(256, 1536, 8960) == (256, 1536, 8960)
+        # All three offend.
+        assert module._aligned_gemm_dims(128, 384, 100) == (256, 512, 256)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+    def test_pad2d_is_identity_at_the_requested_size(self):
+        """The usual case must not copy, so identity is returned by object."""
+        module = _mxfp4_module()
+
+        tensor = torch.randn(256, 512, dtype=torch.bfloat16, device="cuda")
+
+        assert module._pad2d(tensor, 256, 512) is tensor
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+    def test_pad2d_appends_zeros_and_preserves_the_original_block(self):
+        module = _mxfp4_module()
+
+        tensor = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+        padded = module._pad2d(tensor, 256, 256)
+
+        assert padded.shape == (256, 256)
+        assert torch.equal(padded[:128], tensor)
+        assert not padded[128:].any()
+
+
+class TestMXFP4UnpaddedShape(PrimusUT):
+    """Cross-validation at a shape that pads nothing.
+
+    Every other numeric test in this file runs at 128 rows, which the
+    alignment rule pads to 256, so without this the unpadded fast path is
+    never exercised against the reference at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup_parallel(self, init_parallel_state):
+        pass
+
+    @requires_mxfp4
+    def test_forward_matches_reference_without_padding(self):
+        from primus_turbo.pytorch.core.low_precision import Float4QuantConfig
+        from primus_turbo.pytorch.ops.gemm_fp4 import FP4GemmMXFunction
+
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+            MXFP4LinearFunction,
+            _aligned_gemm_dims,
+            _enable_preshuffle,
+        )
+
+        # Guard the premise: this shape must reach the GEMM unpadded.
+        assert _aligned_gemm_dims(256, 256, 512) == (256, 256, 512)
+
+        torch.manual_seed(42)
+        x = torch.randn(256, 256, dtype=torch.bfloat16, device="cuda")
+        w = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda")
+        preshuffle = _enable_preshuffle()
+
+        our_output = MXFP4LinearFunction.apply(x, w, preshuffle, False, None, 0, 0, False)[0]
+
+        config = Float4QuantConfig(use_preshuffle=preshuffle)
+        ref_output = FP4GemmMXFunction.apply(
+            x.clone(),
+            w.clone(),
+            None,
+            None,
+            False,
+            True,
+            x.dtype,
+            config,
+        )
+
+        assert torch.equal(our_output, ref_output), (
+            f"Forward outputs differ. Max abs diff: " f"{(our_output - ref_output).abs().max().item():.6e}"
+        )
+
+    @requires_mxfp4
+    def test_padded_shape_returns_unpadded_output(self):
+        """A padded M must be sliced back off before the result is returned."""
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+            MXFP4LinearFunction,
+            _aligned_gemm_dims,
+            _enable_preshuffle,
+        )
+
+        # Guard the premise: this shape must be padded on M.
+        assert _aligned_gemm_dims(128, 256, 512)[0] == 256
+
+        torch.manual_seed(42)
+        x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+        w = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda")
+
+        output = MXFP4LinearFunction.apply(x, w, _enable_preshuffle(), False, None, 0, 0, False)[0]
+
+        assert output.shape == (128, 512)
+        assert torch.isfinite(output.float()).all()

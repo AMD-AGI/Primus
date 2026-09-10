@@ -535,6 +535,180 @@ class PreGeneratedMockFluxDataset(MockFluxDataset):
         return self._samples[idx]
 
 
+# ============================================================================
+# WAN (Video Diffusion) Mock Datasets
+# ============================================================================
+
+
+class MockWanDataset(Dataset):
+    """
+    Mock dataset for WAN video diffusion models.
+
+    Produces samples matching EncodedWanTaskEncoder.batch():
+        - 'latents': (C, T, H, W) Wan VAE latents (16 channels by default)
+        - 'encoder_hidden_states': (S_txt, D_txt) UMT5-XXL features (512, 4096)
+
+    WAN does not reuse the MockDiffusionDataset preset system because that
+    system emits 4D image latents under the Flux key names ('prompt_embeds',
+    'pooled_prompt_embeds'), while wan_forward_step_func reads 5D latents and
+    'encoder_hidden_states'.
+
+    Pixel dimensions follow the Wan VAE spatial downsample (factor 8). The
+    num_frames argument is the LATENT frame count after the VAE temporal
+    compression (factor 4), so the default num_frames=21 corresponds to a
+    pixel video of about 81 frames.
+
+    This dataset is purely synthetic - it loads no video and no encoder
+    weights - so it is intended for smoke tests, perf benchmarks, and CI runs
+    that exercise the WAN training loop without pre-encoded shards.
+    """
+
+    def __init__(
+        self,
+        num_samples: int = 100,
+        image_size: int = 256,
+        num_frames: int = 21,
+        latent_channels: int = 16,
+        vae_downsample: int = 8,
+        text_seq_len: int = 512,
+        text_embed_dim: int = 4096,
+        seed: Optional[int] = None,
+        dtype: torch.dtype = torch.bfloat16,
+        device: str = "cpu",
+        is_validation: bool = False,
+        **kwargs,
+    ):
+        """
+        Initialize mock WAN dataset.
+
+        Args:
+            num_samples: Number of samples in dataset
+            image_size: Pixel image size (default 256)
+            num_frames: Latent frame count T (default 21, i.e. ~81 pixel frames)
+            latent_channels: Wan VAE latent channels
+            vae_downsample: Wan VAE spatial downsampling factor
+            text_seq_len: UMT5 sequence length
+            text_embed_dim: UMT5 hidden size
+            seed: Random seed for reproducibility
+            dtype: Data type for tensors (default: torch.bfloat16)
+            device: Device to create tensors on ('cpu' or 'cuda', default: 'cpu')
+            is_validation: Whether this is a validation dataset (adds fixed timesteps)
+        """
+        super().__init__()
+        self.num_samples = num_samples
+        self.image_size = image_size
+        self.num_frames = num_frames
+        self.latent_channels = latent_channels
+        self.vae_downsample = vae_downsample
+        self.latent_size = image_size // vae_downsample
+        self.text_seq_len = text_seq_len
+        self.text_embed_dim = text_embed_dim
+        self.seed = seed if seed is not None else 0
+        self.dtype = dtype
+        self.device = torch.device(device)
+        self.is_validation = is_validation
+
+        logger.info(
+            f"Initialized MockWanDataset: {num_samples} samples, "
+            f"latent shape=[{latent_channels}, {num_frames}, {self.latent_size}, {self.latent_size}], "
+            f"text shape=[{text_seq_len}, {text_embed_dim}]"
+        )
+
+    def __len__(self) -> int:
+        """Return number of samples in dataset."""
+        return self.num_samples
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Generate a synthetic WAN sample.
+
+        Args:
+            idx: Sample index (seeds the generator for reproducibility)
+
+        Returns:
+            Dict with 'latents' (C, T, H, W) and 'encoder_hidden_states' (S, D)
+        """
+        if idx >= self.num_samples or idx < 0:
+            raise IndexError(f"Index {idx} out of range for dataset with {self.num_samples} samples")
+
+        gen = torch.Generator(device=self.device)
+        gen.manual_seed(self.seed + idx)
+
+        latents = torch.randn(
+            self.latent_channels,
+            self.num_frames,
+            self.latent_size,
+            self.latent_size,
+            generator=gen,
+            dtype=self.dtype,
+            device=self.device,
+        )
+        encoder_hidden_states = torch.randn(
+            self.text_seq_len,
+            self.text_embed_dim,
+            generator=gen,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+        sample: Dict[str, torch.Tensor] = {
+            "latents": latents,
+            "encoder_hidden_states": encoder_hidden_states,
+        }
+
+        if self.is_validation:
+            sample["timestep"] = torch.tensor(idx % 8)
+
+        return sample
+
+
+class PreGeneratedMockWanDataset(MockWanDataset):
+    """
+    Pre-generated mock WAN dataset for maximum training throughput.
+
+    This dataset generates all samples once during initialization and caches
+    them in memory, so __getitem__ is a plain memory lookup. Use it when the
+    cost of generating the 5D latent tensor dominates step time.
+
+    Memory usage: per sample at default shapes with bf16:
+        - Latents: 16 * 21 * 32 * 32 * 2 bytes = ~688 KB
+        - Text embeddings: 512 * 4096 * 2 bytes = ~4 MB
+        - Total: ~4.7 MB per sample (a 512-sample dataset uses ~2.4 GB)
+    """
+
+    def __init__(self, *args, **kwargs):
+        """Initialize and pre-generate all samples."""
+        from primus.core.utils.module_utils import log_rank_0
+
+        super().__init__(*args, **kwargs)
+
+        log_rank_0(f"Pre-generating {self.num_samples} mock WAN samples...")
+        log_rank_0(
+            f"  Latent shape: [{self.latent_channels}, {self.num_frames}, "
+            f"{self.latent_size}, {self.latent_size}]"
+        )
+        log_rank_0(f"  Text shape: [{self.text_seq_len}, {self.text_embed_dim}]")
+
+        self._samples = [MockWanDataset.__getitem__(self, i) for i in range(self.num_samples)]
+
+        sample_size = sum(
+            tensor.element_size() * tensor.numel()
+            for tensor in self._samples[0].values()
+            if hasattr(tensor, "element_size")
+        )
+        total_mb = (sample_size * self.num_samples) / (1024 * 1024)
+
+        log_rank_0(f"Pre-generation complete!")
+        log_rank_0(f"  Memory usage: {total_mb:.1f} MB")
+        log_rank_0(f"  Data loading overhead: eliminated")
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """Return pre-generated sample (no computation)."""
+        if idx >= self.num_samples or idx < 0:
+            raise IndexError(f"Index {idx} out of range for dataset with {self.num_samples} samples")
+        return self._samples[idx]
+
+
 class MockFluxSchnellDataset(MockDiffusionDataset):
     """
     Mock dataset for FLUX.1-schnell (MLPerf Training v5.1 benchmark).
@@ -611,4 +785,6 @@ __all__ = [
     "PreGeneratedMockFluxDataset",
     "MockFluxSchnellDataset",
     "PreGeneratedMockFluxSchnellDataset",
+    "MockWanDataset",
+    "PreGeneratedMockWanDataset",
 ]

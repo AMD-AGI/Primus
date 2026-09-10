@@ -89,6 +89,71 @@ def compute_flow_matching_loss(
     return loss
 
 
+def compute_weighted_flow_matching_loss(
+    prediction: Tensor,
+    target: Tensor,
+    weight: Tensor,
+    loss_mask: Optional[Tensor] = None,
+) -> Tensor:
+    """
+    Compute flow matching loss with a per-timestep weight.
+
+    Video flow matching (Wan, MovieGen) scales the squared error by a
+    timestep-dependent weight, so that noise levels contribute unevenly to
+    the gradient. Two things differ from :func:`compute_flow_matching_loss`:
+
+    1. The target is supplied by the caller rather than derived as
+       ``noise - clean_latents``, so alternative parameterizations
+       (velocity, ``noise - sample``) can reuse this helper.
+    2. The squared error is multiplied by ``weight`` before reduction.
+
+    Formula: loss = mean(((target - prediction) ** 2) * weight)
+
+    Passing ``weight=1.0`` recovers the unweighted objective, which is how
+    the ``uniform`` loss weighting mode is expressed.
+
+    Args:
+        prediction: Model output [any shape]
+        target: Training target from the scheduler [same shape as prediction]
+        weight: Per-sample weight, broadcast-compatible with target.
+                Typically [batch_size] or [batch_size, 1, 1, ...].
+        loss_mask: Optional mask for variable-length sequences [batch_size]
+                   or broadcast-compatible shape. Default None (no masking).
+
+    Returns:
+        Scalar loss value (weighted mean squared error, optionally masked).
+
+    Reference:
+        DiffSynth-Studio ``FlowMatchSFTLoss``; maxdiffusion
+        ``wan_trainer.step_optimizer``.
+
+    Example:
+        >>> pred = torch.randn(2, 16, 8, 32, 32)  # Batch of 3D latents
+        >>> target = torch.randn(2, 16, 8, 32, 32)
+        >>> weight = torch.tensor([0.8, 1.2])  # Per-sample timestep weight
+        >>> loss = compute_weighted_flow_matching_loss(pred, target, weight)
+    """
+    diff_sq = (target.float() - prediction.float()) ** 2
+
+    if weight.dim() == 1 and diff_sq.dim() > 1:
+        weight_shape = [weight.shape[0]] + [1] * (diff_sq.dim() - 1)
+        weight = weight.view(*weight_shape)
+    weight = weight.to(dtype=diff_sq.dtype, device=diff_sq.device)
+
+    weighted = diff_sq * weight
+
+    if loss_mask is None:
+        return weighted.mean()
+
+    if loss_mask.dim() == 1 and weighted.dim() > 1:
+        mask_shape = [loss_mask.shape[0]] + [1] * (weighted.dim() - 1)
+        loss_mask = loss_mask.view(*mask_shape)
+    loss_mask = loss_mask.to(dtype=weighted.dtype, device=weighted.device)
+
+    return (weighted * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
+
+
 __all__ = [
     "compute_flow_matching_loss",
+    "compute_weighted_flow_matching_loss",
 ]

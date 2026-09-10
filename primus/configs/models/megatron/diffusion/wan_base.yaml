@@ -1,0 +1,98 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# WAN Base Configuration
+# Common parameters for all WAN variants (2.1 1.3B/14B, 2.2 TI2V-5B/A14B).
+# Size-specific variants override hidden_size / num_attention_heads /
+# num_dit_layers / ffn_hidden_size / num_transformers / boundary_ratio.
+
+extends:
+  - ../diffusion_model.yaml
+
+# ==============================================================================
+# Core Architecture (set by variant)
+# ==============================================================================
+
+hidden_size: null            # 1536 (1.3B), 3072 (TI2V-5B), 5120 (14B/A14B)
+num_attention_heads: null    # 12 (1.3B), 24 (TI2V-5B), 40 (14B/A14B)
+num_dit_layers: null         # 30 (1.3B, TI2V-5B), 40 (14B/A14B)
+ffn_hidden_size: null        # 8960 (1.3B), 14336 (TI2V-5B), 13824 (14B/A14B)
+
+# ==============================================================================
+# Latent video channels + 3D patchification
+# ==============================================================================
+
+in_channels: 16
+out_channels: 16
+patch_size_3d: [1, 2, 2]     # (temporal, height, width)
+
+# ==============================================================================
+# Text conditioning (UMT5)
+# ==============================================================================
+
+text_embed_dim: 4096
+text_seq_len: 512
+
+# ==============================================================================
+# Timestep embedding
+# ==============================================================================
+
+freq_dim: 256
+
+# ==============================================================================
+# Diffusion / scheduler
+# ==============================================================================
+
+num_train_timesteps: 1000
+
+# Per-timestep loss weighting:
+#   diffsynth - DiffSynth's bell curve, normalized to mean 1 over the schedule
+#   uniform   - unweighted MSE, identical to Flux's compute_flow_matching_loss
+loss_weighting: diffsynth
+
+# ==============================================================================
+# Attention backward kernel
+# ==============================================================================
+
+# Let the attention backward use fp32-atomic accumulation. WAN's sequence length
+# is not divisible by 64, so with this off no ASM backward is reachable on either
+# spec and dispatch falls silently through to the slower ck_tile path, and on
+# te_spec the CK v3 backward is unreachable because the image pins the gfx950
+# value of NVTE_CK_IS_V3_ATOMIC_FP32. Set false for a deterministic backward;
+# accumulation order is non-deterministic when this is on.
+attn_atomic_fp32: true
+
+# ==============================================================================
+# WAN 2.2 dual-expert routing (single-transformer by default)
+# ==============================================================================
+
+num_transformers: 1
+boundary_ratio: null         # set in (0, 1) for WAN 2.2 A14B dual-expert
+
+# Which expert this job trains: full | high_noise | low_noise. Anything other
+# than full derives the timestep window and the weight subfolder from
+# boundary_ratio, so setting an explicit window as well is an error.
+stage: full
+
+timestep_window_min: 0.0
+timestep_window_max: 1.0
+
+# ==============================================================================
+# Backbone weights
+# ==============================================================================
+
+# q/k RMSNorm across the full inner dim (heads * head_dim) rather than per head;
+# diffusers and Megatron-Bridge both do this, so it must stay true for
+# checkpoint parity.
+layernorm_across_heads: true
+backbone_pretrained: null
+backbone_subfolder: transformer
+backbone_subfolder_2: transformer_2
+
+# ==============================================================================
+# Transformer numerics
+# ==============================================================================
+
+layernorm_epsilon: 1.0e-6
+hidden_dropout: 0.0
+attention_dropout: 0.0

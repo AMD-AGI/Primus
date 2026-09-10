@@ -167,6 +167,13 @@ def prepare_dataset_if_needed(
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
     if pre_trainer_cfg.train_data_path is not None:
         return
+    # Diffusion runs read Energon/webdataset shards straight from data_path and
+    # have no tokenizer_model at all; the bookcorpus flow below is text-only.
+    model_type = str(getattr(pre_trainer_cfg, "model_type", "") or "")
+    if model_type.startswith("diffusion") or model_type in ("flux", "wan"):
+        log_info(f"model_type={model_type!r} is a diffusion model, skipping bookcorpus tokenisation.")
+        return
+
     # SFT runs build the dataset on-the-fly (HF datasets API) inside the
     # trainer; the bookcorpus tokenisation flow below is pretrain-only.
     if getattr(pre_trainer_cfg, "stage", None) == "sft":

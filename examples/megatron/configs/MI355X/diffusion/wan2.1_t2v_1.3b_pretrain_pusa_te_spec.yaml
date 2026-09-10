@@ -1,0 +1,175 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# WAN 2.1 T2V-1.3B pretraining (from scratch) on the pre-encoded PusaV1 480p
+# dataset, TransformerEngine spec + Megatron-FSDP.
+#
+# transformer_impl: "transformer_engine" builds WAN attention and FFN on the
+# Megatron-Core / TE stack (TEColumnParallelLinear / TERowParallelLinear /
+# TEDotProductAttention), the same knob Flux uses for its te_spec configs.
+#
+# This config and its local_spec / local_spec_mxfp4 siblings differ ONLY in the
+# implementation and precision knobs, so their losses are directly comparable.
+#
+# Usage:
+#   EXP=examples/megatron/configs/MI355X/diffusion/wan2.1_t2v_1.3b_pretrain_pusa_te_spec.yaml \
+#   bash examples/run_pretrain.sh
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: wan2.1_t2v_1.3b_pretrain_pusa_te_spec
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: diffusion/wan2.1_t2v_1.3b.yaml
+
+    trainer_class: WanPretrainTrainer
+
+    overrides:
+      model_type: diffusion_model
+
+      # ----------------------------------------------------------------------
+      # Real data (Energon pre-encoded WAN shards, 480p)
+      # ----------------------------------------------------------------------
+      mock_data: false
+      # Point PRIMUS_DIFFUSION_DATA_PATH at a prepared Energon dataset of
+      # pre-encoded WAN latents. The reference runs used PusaV1 at 480p.
+      data_path: ${PRIMUS_DIFFUSION_DATA_PATH:/path/to/energon/dataset}
+
+      # Deterministic sample order. All four knobs have to be off together, and
+      # parallel_shard_iters must be 1 once shard shuffling is disabled. This is
+      # what makes a cross-implementation loss comparison meaningful: with
+      # shuffling on, two runs draw different samples and the losses cannot be
+      # compared no matter how correct both implementations are.
+      max_samples_per_sequence: null
+      shuffle_buffer_size: null
+      shuffle_over_epochs_multiplier: null
+      parallel_shard_iters: 1
+
+      # ----------------------------------------------------------------------
+      # TransformerEngine spec
+      # ----------------------------------------------------------------------
+      transformer_impl: "transformer_engine"
+      layernorm_across_heads: true
+
+      # The container image pins NVTE_FLASH_ATTN=0, which the auto backend
+      # rejects; "fused" is the backend that matches that environment.
+      attention_backend: fused
+
+      # ----------------------------------------------------------------------
+      # WAN scheduler / routing
+      # ----------------------------------------------------------------------
+      num_train_timesteps: 1000
+      # shift=3.0 is the WAN convention for 480p data. Keep train and inference
+      # shift identical.
+      scheduler_shift: 3.0
+      num_transformers: 1
+      boundary_ratio: null
+      stage: full
+
+      # Unweighted MSE. The reference implementation these runs were checked
+      # against disables the per-timestep weight, so "uniform" is what makes
+      # the two comparable; "diffsynth" is the training default.
+      loss_weighting: uniform
+
+      # ----------------------------------------------------------------------
+      # Train from scratch (random init)
+      # ----------------------------------------------------------------------
+      backbone_pretrained: null
+      backbone_subfolder: transformer
+
+      # ----------------------------------------------------------------------
+      # Batch / sequence
+      # ----------------------------------------------------------------------
+      micro_batch_size: 10
+      global_batch_size: 80
+      num_workers: 4
+      dataloader_type: external
+
+      # ----------------------------------------------------------------------
+      # Training schedule
+      # ----------------------------------------------------------------------
+      train_iters: 20
+      eval_interval: 10000
+      eval_iters: 0
+
+      log_interval: 1
+      tensorboard_dir: output/tensorboard/wan2.1_t2v_1.3b_pusa_te_spec
+      log_throughput: true
+      log_timers_to_tensorboard: true
+      log_learning_rate_to_tensorboard: true
+
+      # ----------------------------------------------------------------------
+      # Checkpointing
+      # ----------------------------------------------------------------------
+      save_interval: 1000
+      save: output/checkpoints/wan2.1_t2v_1.3b_pusa_te_spec
+      load: null
+      finetune: false
+      auto_continue_train: false
+      ckpt_format: fsdp_dtensor  # required by Megatron-FSDP
+
+      # ----------------------------------------------------------------------
+      # Precision
+      # ----------------------------------------------------------------------
+      bf16: true
+      fp16: false
+
+      # ----------------------------------------------------------------------
+      # Activation recomputation
+      # The video sequence is long (latents [16, 21, 90, 160] -> ~75k tokens
+      # after (1,2,2) patchify), so activation memory dominates. uniform with
+      # num_layers=1 recomputes every layer.
+      # ----------------------------------------------------------------------
+      recompute_granularity: full
+      recompute_method: uniform
+      recompute_num_layers: 1
+
+      # ----------------------------------------------------------------------
+      # Optimizer
+      # ----------------------------------------------------------------------
+      optimizer: adam
+      lr: 1.0e-4
+      min_lr: 1.0e-5
+      # Flow-matching DiT recipes (maxdiffusion, DiffSynth) train without weight
+      # decay; 0.0 avoids over-regularizing a from-scratch run.
+      weight_decay: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+      clip_grad: 1.0
+
+      lr_decay_style: cosine
+      lr_warmup_iters: 100
+      lr_decay_iters: 15000
+
+      # ----------------------------------------------------------------------
+      # Parallelism (TP = PP = CP = 1, DP/FSDP only)
+      # ----------------------------------------------------------------------
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+
+      # Megatron-FSDP ZeRO-3: shard optimizer states, gradients and parameters
+      # across DP ranks.
+      use_torch_fsdp2: false
+      use_megatron_fsdp: true
+      data_parallel_sharding_strategy: optim_grads_params
+
+      overlap_grad_reduce: true
+      use_flash_attn: true
+      distributed_timeout_minutes: 60
+
+      # ----------------------------------------------------------------------
+      # Primus Turbo (off; the TE spec uses stock TE / flash-attn kernels)
+      # ----------------------------------------------------------------------
+      enable_primus_turbo: false
+      use_turbo_attention: false
+
+      seed: 42
+
+      wandb_project: wan-pretrain
+      wandb_exp_name: wan2.1_t2v_1.3b_pusa_te_spec
