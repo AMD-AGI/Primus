@@ -133,7 +133,11 @@ def wan_forward_step_func(
     if boundary_timestep is not None:
         boundary_tensor = torch.full_like(model_timesteps, fill_value=float(boundary_timestep))
 
-    with torch.amp.autocast("cuda", enabled=True, dtype=compute_dtype):
+    # Autocast has nothing to do when the run is already fp32, and asking CUDA
+    # to cast float32 to float32 is only a no-op by convention.
+    autocast_enabled = compute_dtype in (torch.bfloat16, torch.float16)
+
+    with torch.amp.autocast("cuda", enabled=autocast_enabled, dtype=compute_dtype):
         noise_pred = model(
             hidden_states=noisy_latents,
             timestep=model_timesteps,
