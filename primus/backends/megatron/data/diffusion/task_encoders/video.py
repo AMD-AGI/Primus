@@ -98,8 +98,10 @@ def decode_wan_caption(raw: Any) -> str:
         try:
             if path.exists():
                 return path.read_text().strip()
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as e:
+            # Shards carry captions either inline or as a sidecar path, so an
+            # unreadable path is a caption that happens to look like one.
+            logger.debug(f"Could not read caption from path {path}: {e}")
         return str(raw)
     return str(raw)
 
