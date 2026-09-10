@@ -387,8 +387,10 @@ the build unpack it: that picks the distribution-matching `.deb` files from
 inside the container, so you do not have to probe the base image's codename or
 copy individual packages into the build context.
 
-The same files live in `tools/ainic-bundle-rebuild/` if you would rather not
-copy them out. From the Primus repository root:
+The helpers live in `tools/ainic-bundle-rebuild/` (`Dockerfile`, `build.sh`,
+`test.sh`). Those files are the source of truth; this page only reproduces the
+Dockerfile so the install `RUN` can be explained. From the Primus repository
+root:
 
 ```bash
 ./tools/ainic-bundle-rebuild/build.sh \
@@ -407,10 +409,8 @@ You should not need it to follow this section, only to recognise a symptom.
 
 ### Dockerfile
 
-Save this as `Dockerfile` next to the bundle, or use the copy in
-`tools/ainic-bundle-rebuild/Dockerfile`. Use `tar -xf` rather than `tar -xJf`
-throughout: an inner archive is sometimes gzip regardless of its `.tar.xz` name,
-and `-xf` detects the format either way.
+Use `tar -xf` rather than `tar -xJf` throughout: an inner archive is sometimes
+gzip regardless of its `.tar.xz` name, and `-xf` detects the format either way.
 
 ```dockerfile
 ARG BASE_IMAGE
@@ -489,96 +489,15 @@ section 5 does not carry over. The structural `RUN` still applies: it prints
 whatever `libionic` was in the tarball. Trust that output, not the bundle
 filename.
 
-### Build script
+### Build and test helpers
 
 `AINIC_BUNDLE` is a path relative to the Docker build context, so the bundle
-file has to be visible to the daemon. The helper in
-`tools/ainic-bundle-rebuild/build.sh` creates a temporary context containing
-only that bundle. This avoids sending unrelated (and potentially unreadable)
-files from the bundle's directory to Docker, and means the tarball does not
-have to sit next to the Dockerfile:
-
-```bash
-#!/bin/bash
-set -euo pipefail
-
-if [ $# -lt 2 ]; then
-    echo "Syntax: $0 <base docker image> <ainic bundle file>" >&2
-    exit 1
-fi
-
-BASE=$1
-BUNDLE=$2
-if [ ! -f "$BUNDLE" ]; then
-    echo "error: bundle file not found: $BUNDLE" >&2
-    exit 1
-fi
-
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-BUNDLE_NAME=$(basename "$BUNDLE")
-BUNDLE_VER=$(echo "$BUNDLE_NAME" | sed -E \
-    's/^ainic_bundle_//; s/\.tar(\.(gz|xz|bz2|zst))?$//')
-
-# Send only the requested bundle to Docker. Using the bundle's parent directory
-# as the context can be both very large and unreadable because of unrelated
-# files. Prefer a hard link to avoid copying a large bundle when /tmp shares the
-# same filesystem, and fall back to a regular copy otherwise.
-CONTEXT=$(mktemp -d)
-trap 'rm -rf "$CONTEXT"' EXIT
-ln "$BUNDLE" "$CONTEXT/$BUNDLE_NAME" 2>/dev/null || \
-    cp --reflink=auto "$BUNDLE" "$CONTEXT/$BUNDLE_NAME"
-
-set -x
-docker build --network host \
-  -f "$SCRIPT_DIR/Dockerfile" \
-  --build-arg BASE_IMAGE="$BASE" \
-  --build-arg AINIC_BUNDLE="$BUNDLE_NAME" \
-  -t "${BASE##*/}-ainic-${BUNDLE_VER}" \
-  "$CONTEXT"
-```
-
-```bash
-./tools/ainic-bundle-rebuild/build.sh \
-  rocm/jax-training:maxtext-v26.6 \
-  ainic_bundle_1.117.5-a-147.tar.gz
-```
-
-### Test script
-
-This is a convenience wrapper around the package-level half of
-[section 6](#6-verify). It does **not** replace the runtime `ibv_devices` /
-RCCL log check on a node with AINIC hardware; `ibv_devices` here will be empty
-if you are not on such a node.
-
-```bash
-#!/bin/bash
-set -euo pipefail
-
-if [ $# -lt 1 ]; then
-    echo "Syntax: $0 <docker image>" >&2
-    exit 1
-fi
-
-IMAGE=$1
-MOUNTS=()
-if [ -d /dev/infiniband ]; then
-    MOUNTS+=(-v /dev/infiniband:/dev/infiniband)
-fi
-
-docker run --rm --privileged --network host --cap-add=IPC_LOCK \
-  "${MOUNTS[@]}" "$IMAGE" bash -c 'set -e
-    dpkg-query -W -f="libionic1 \${Version}\n" libionic1
-    readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1
-    readlink -f /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so
-    dpkg -C && echo "dpkg consistent"
-    ibv_devices
-  '
-```
-
-```bash
-./tools/ainic-bundle-rebuild/test.sh \
-  jax-training:maxtext-v26.6-ainic-1.117.5-a-147
-```
+file has to be visible to the daemon. `tools/ainic-bundle-rebuild/build.sh`
+creates a temporary context containing only that tarball, then tags the
+image from the bundle filename. `tools/ainic-bundle-rebuild/test.sh` wraps
+the package-level half of [section 6](#6-verify). It does **not** replace
+the runtime `ibv_devices` / RCCL log check on a node with AINIC hardware;
+`ibv_devices` will be empty if you are not on such a node.
 
 ## 8. Troubleshooting
 
