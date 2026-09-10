@@ -22,7 +22,7 @@ here; the correct bundle for your cluster is often an older one.
 >
 > This guide assumes a **published** bundle throughout. If you have been given a
 > bundle as a tarball rather than a repository, see
-> [section 7](#7-installing-from-local-deb-files).
+> [section 7](#7-installing-from-a-pre-downloaded-bundle).
 >
 > **What this was tested on.** The MaxText JAX training images —
 > `rocm/jax-training:maxtext-v26.3.2`, `-v26.4`, and `-v26.6`. The rebuild was
@@ -131,8 +131,8 @@ bundle.
 
 Every published bundle uses this `54.0-NNN` scheme and ships one `libionic`
 version for all distributions. A bundle delivered as a tarball may not — read the
-version out of the `.deb` itself rather than assuming the scheme
-([section 7](#7-installing-from-local-deb-files)).
+version out of the installed package (or the `.deb` itself) rather than assuming
+the scheme ([section 7](#7-installing-from-a-pre-downloaded-bundle)).
 
 ## 2. Check what you have
 
@@ -233,8 +233,9 @@ highest version is exactly the case that hits it. A build against a placeholder
 fails at `apt update` with `404 Not Found` on the `Packages` file, before the
 bundle version is ever evaluated.
 
-This query also only works for published bundles. To read the version out of a
-local `.deb` instead, see [section 7](#7-installing-from-local-deb-files).
+This query also only works for published bundles. To install from a
+pre-downloaded tarball instead, see
+[section 7](#7-installing-from-a-pre-downloaded-bundle).
 
 ## 5. How the rebuild works
 
@@ -374,107 +375,101 @@ explicitly exported `NCCL_NET_PLUGIN` always wins and will override it. See
 [Multi-node networking](./multi-node-networking.md#rccl-network-plugin-anp) for
 the full picture.
 
-## 7. Installing from local `.deb` files
+## 7. Installing from a pre-downloaded bundle
 
 Occasionally a bundle is delivered as a tarball rather than published to
 `repo.radeon.com`. **Prefer the apt path in [section 5](#5-how-the-rebuild-works)
 whenever the bundle you need is published** — it handles either direction with no
 extra flags and none of the care below.
 
-Tarball-delivered bundles have been seen to differ from published ones in how
-their packages are built, so the steps here are deliberately written to work
-either way rather than assuming a particular layout. Read the version and the
-dependency fields out of the files themselves instead of assuming them.
+Do not unpack the tarball on the host. Copy the bundle into the image and let
+the build unpack it: that picks the distribution-matching `.deb` files from
+inside the container, so you do not have to probe the base image's codename or
+copy individual packages into the build context.
 
-If the packaging of the bundle you were given does differ, the specific
-differences observed in one internal build — and the error each produces — are
-recorded in [Appendix A](#appendix-a-packaging-differences-observed-in-an-internal-build).
+The same files live in `tools/ainic-bundle-rebuild/` if you would rather not
+copy them out. From the Primus repository root:
+
+```bash
+./tools/ainic-bundle-rebuild/build.sh \
+  rocm/jax-training:maxtext-v26.6 \
+  ainic_bundle_1.117.5-a-147.tar.gz
+
+./tools/ainic-bundle-rebuild/test.sh \
+  jax-training:maxtext-v26.6-ainic-1.117.5-a-147
+```
+
+If the packaging of the bundle you were given differs from a published one, the
+specific differences observed in one internal build — and the error each
+produces — are recorded in
+[Appendix A](#appendix-a-packaging-differences-observed-in-an-internal-build).
 You should not need it to follow this section, only to recognise a symptom.
 
-### Getting to the two `.deb` files
+### Dockerfile
 
-A bundle tarball does not contain loose `.deb` files. Extract in three stages, and
-use `tar -xf` rather than `tar -xJf` throughout — an inner archive is sometimes
-gzip regardless of its `.tar.xz` name, and `-xf` detects the format either way:
-
-```bash
-tar -xf ainic_bundle_<version>.tar*    # or .tar.gz
-tar -xf host_sw_pkg.tar*
-ls host_sw_pkg/ionic_driver/deb/       # find the archive carrying libionic
-tar -xf host_sw_pkg/ionic_driver/deb/<name>-debs.tar.xz
-```
-
-**List that directory rather than guessing the filename.** It also holds
-`linux-debs.tar.xz` and `perftest-debs.tar.xz`, which are the driver and
-benchmark packages and belong on the host, not in the container. The archive
-carrying `libionic` has been seen named both `rdma-core-debs.tar.xz` and
-`libionic-debs.tar.xz`.
-
-The result may be one directory per distribution codename. **Copy only the two
-files matching your base image**, and name them explicitly — where several
-variants are present, a wildcard `COPY` picks up all of them and hands `dpkg`
-conflicting versions:
-
-```bash
-codename=$(docker run --rm <base-image> sh -c '. /etc/os-release; echo $VERSION_CODENAME')
-cp "$codename"/libionic1_*.deb "$codename"/libionic-dev_*.deb .
-```
-
-To read the version out of the files, since the `Packages` query in section 4 does
-not apply:
-
-```bash
-dpkg-deb -f libionic1_*.deb Package Version
-```
-
-Also check the package's own prerequisites against your base image before
-building, because `dpkg -i` resolves nothing and will simply fail if they are not
-already satisfied:
-
-```bash
-dpkg-deb -f libionic1_*.deb Pre-Depends Depends
-```
-
-Some builds pin a narrow `ibverbs-providers` range, which a base image with a
-newer `rdma-core` will not satisfy.
-
-### The install step
-
-Replace **only** the first `RUN` of the quickstart Dockerfile. Keep the structural
-verification `RUN` unchanged; it applies however the packages got in. The version
-assertion from section 5 does not carry over — there is no `$ver` from a
-repository — so substitute the expected version explicitly:
+Save this as `Dockerfile` next to the bundle, or use the copy in
+`tools/ainic-bundle-rebuild/Dockerfile`. Use `tar -xf` rather than `tar -xJf`
+throughout: an inner archive is sometimes gzip regardless of its `.tar.xz` name,
+and `-xf` detects the format either way.
 
 ```dockerfile
-COPY libionic1_<version>_amd64.deb libionic-dev_<version>_amd64.deb /tmp/
-RUN set -eux; \
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG AINIC_BUNDLE
+
+RUN mkdir /tmp/ainic
+COPY ${AINIC_BUNDLE} /tmp/ainic/bundle.tar.gz
+RUN set -ex; \
     rm -f /etc/apt/sources.list.d/*amdainic*; \
-    dpkg -i --force-overwrite /tmp/libionic1_*.deb; \
-    dpkg -i --force-overwrite /tmp/libionic-dev_*.deb; \
-    test "$(dpkg-query -W -f='${Version}' libionic1)" = "<version>"; \
-    rm /tmp/*.deb
+    cd /tmp/ainic; \
+    tar -xf bundle.tar.gz; \
+    cd */; \
+    tar -xf host_sw_pkg.tar*; \
+    cd host_sw_pkg/ionic_driver/deb; \
+    tar -xf libionic-debs.tar* 2>/dev/null || tar -xf rdma-core-debs.tar*; \
+    REL_NAME="$(. /etc/os-release; echo "$VERSION_CODENAME")"; \
+    dpkg -i --force-overwrite "$REL_NAME"/libionic1_*.deb; \
+    dpkg -i --force-overwrite "$REL_NAME"/libionic-dev_*.deb; \
+    cd /tmp; \
+    rm -rf /tmp/ainic
+
+# Structural check: the package is installed consistently and the provider
+# symlink the fabric actually loads points at the installed object.
+RUN set -eux; \
+    dpkg-query -W -f='${Package} ${Version}\n' libionic1 libionic-dev; \
+    dpkg -C; \
+    ls /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav*.so; \
+    readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1
 ```
 
-Three things differ from a naive `dpkg -i` of both files at once, and all three
-are required:
+The install `RUN` is doing four things that are easy to flatten incorrectly:
 
-1. **Two separate invocations, `libionic1` first.** Where `libionic-dev`
-   **`Pre-Depends`** on an exact `libionic1` version, a single `dpkg -i` given
-   both files cannot satisfy it: a pre-dependency must be met by an
-   already-*configured* package, which one pass over both archives cannot
+1. **Unpack inside the image, then install from `$VERSION_CODENAME/`.** The
+   bundle extracts to one directory per distribution. Installing from the
+   codename that matches *this* image avoids handing `dpkg` conflicting
+   versions from `jammy/` and `noble/` at once. The inner archive carrying
+   `libionic` has been seen named both `libionic-debs.tar.xz` and
+   `rdma-core-debs.tar.xz`; `linux-debs.tar.xz` and `perftest-debs.tar.xz` in
+   the same directory are the host driver and benchmark packages and must not
+   be installed in the container.
+
+2. **Two separate `dpkg -i` invocations, `libionic1` first.** Where
+   `libionic-dev` **`Pre-Depends`** on an exact `libionic1` version, a single
+   `dpkg -i` given both files cannot satisfy it: a pre-dependency must be met
+   by an already-*configured* package, which one pass over both archives cannot
    arrange. It fails with `pre-dependency problem - not installing libionic-dev`
    *after* having already replaced `libionic1`, leaving the layer half-converted.
-   Check with `dpkg-deb -f libionic-dev_*.deb Pre-Depends`; installing in two
-   steps costs nothing when there is no pre-dependency.
+   Installing in two steps costs nothing when there is no pre-dependency.
 
-2. **`--force-overwrite`.** The bare `libionic.so` symlink is not always owned by
+3. **`--force-overwrite`.** The bare `libionic.so` symlink is not always owned by
    the same package — it has been seen shipped by `libionic1` and by
    `libionic-dev` — and the packages declare no `Replaces` for each other. Where
    the owning package changes, the install fails with
    `trying to overwrite '/usr/lib/x86_64-linux-gnu/libionic.so', which is also in package ...`.
    The flag is harmless when ownership does not change.
 
-3. **`rm -f /etc/apt/sources.list.d/*amdainic*`.** More important here than on the
+4. **`rm -f /etc/apt/sources.list.d/*amdainic*`.** More important here than on the
    apt path. A bundle installed from local files exists in no repository, and its
    version may well sort *below* what the base image's repositories offer, in
    which case apt regards the bundle you just replaced as an upgrade. Any later
@@ -483,6 +478,97 @@ are required:
    diagnostic signal at all. Removing the repositories is the only thing that
    makes a local install durable.
 
+`dpkg -i` resolves nothing. If the `.deb` `Depends`/`Pre-Depends` are not already
+satisfied in the base image — some builds pin a narrow `ibverbs-providers` range
+against a newer `rdma-core` — the install fails rather than pulling
+dependencies. Inspect with `dpkg-deb -f` on the extracted packages if you need
+to see why.
+
+There is no `$ver` from a repository on this path, so the version assertion from
+section 5 does not carry over. The structural `RUN` still applies: it prints
+whatever `libionic` was in the tarball. Trust that output, not the bundle
+filename.
+
+### Build script
+
+`AINIC_BUNDLE` is a path relative to the Docker build context, so the bundle
+file has to be visible to the daemon. The helper in
+`tools/ainic-bundle-rebuild/build.sh` uses the bundle's directory as the
+context, so the tarball does not have to sit next to the Dockerfile:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+if [ $# -lt 2 ]; then
+    echo "Syntax: $0 <base docker image> <ainic bundle file>" >&2
+    exit 1
+fi
+
+BASE=$1
+BUNDLE=$2
+if [ ! -f "$BUNDLE" ]; then
+    echo "error: bundle file not found: $BUNDLE" >&2
+    exit 1
+fi
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+BUNDLE_NAME=$(basename "$BUNDLE")
+BUNDLE_VER=$(echo "$BUNDLE_NAME" | sed -E 's/ainic_bundle_(.*)\.tar\.gz/\1/')
+CONTEXT=$(cd "$(dirname "$BUNDLE")" && pwd)
+
+set -x
+docker build --network host \
+  -f "$SCRIPT_DIR/Dockerfile" \
+  --build-arg BASE_IMAGE="$BASE" \
+  --build-arg AINIC_BUNDLE="$BUNDLE_NAME" \
+  -t "${BASE##*/}-ainic-${BUNDLE_VER}" \
+  "$CONTEXT"
+```
+
+```bash
+./tools/ainic-bundle-rebuild/build.sh \
+  rocm/jax-training:maxtext-v26.6 \
+  ainic_bundle_1.117.5-a-147.tar.gz
+```
+
+### Test script
+
+This is a convenience wrapper around the package-level half of
+[section 6](#6-verify). It does **not** replace the runtime `ibv_devices` /
+RCCL log check on a node with AINIC hardware; `ibv_devices` here will be empty
+if you are not on such a node.
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+    echo "Syntax: $0 <docker image>" >&2
+    exit 1
+fi
+
+IMAGE=$1
+MOUNTS=()
+if [ -d /dev/infiniband ]; then
+    MOUNTS+=(-v /dev/infiniband:/dev/infiniband)
+fi
+
+docker run --rm --privileged --network host --cap-add=IPC_LOCK \
+  "${MOUNTS[@]}" "$IMAGE" bash -c '
+    dpkg-query -W -f="libionic1 \${Version}\n" libionic1
+    readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1
+    readlink -f /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so
+    dpkg -C && echo "dpkg consistent"
+    ibv_devices
+  '
+```
+
+```bash
+./tools/ainic-bundle-rebuild/test.sh \
+  jax-training:maxtext-v26.6-ainic-1.117.5-a-147
+```
+
 ## 8. Troubleshooting
 
 | Symptom | Cause |
@@ -490,7 +576,7 @@ are required:
 | `apt install` reports `already the newest version` and nothing changes | Target bundle is older than the installed `libionic` and the version was not pinned. See section 5. |
 | Build fails on `test "$(dpkg-query ...)" = "$ver"` | Working as intended — the install did not move `libionic` to the requested version. Check the pin and the repository filter. See section 5. |
 | Built image still has the old `libionic`, build reported success | Version assertion missing from the install step. See section 5. |
-| `libionic` reverts to another version after a later `apt` command | Old bundle repositories left enabled. See section 5, and section 7 for why this is worse after a local `.deb` install. |
+| `libionic` reverts to another version after a later `apt` command | Old bundle repositories left enabled. See section 5, and section 7 for why this is worse after a tarball install. |
 | `E: Packages were downgraded and -y was used without --allow-downgrades` | Expected for a downgrade; add `--allow-downgrades`. |
 | `apt update` fails with `404 Not Found` on `Packages` | Bundle directory is an empty placeholder, the name is wrong, or the distribution codename in the repository line does not match the base image. See sections 4 and 5. |
 | `xz: (stdin): File format not recognized` while extracting a bundle | Inner archive is gzip despite its `.tar.xz` name. Use `tar -xf`. See section 7. |
@@ -536,11 +622,11 @@ to assume the next one will look the same. Verify against your own files with
   directory per codename, so that layout alone is unremarkable — but where the
   published bundle puts the *same* version in every directory, this one puts a
   different version string in each (`50.0.…-1~ubu24.04` under `noble`,
-  `39.0.…-1~ubu22.04` under `jammy`, and so on). A wildcard `COPY libionic1_*.deb`
+  `39.0.…-1~ubu22.04` under `jammy`, and so on). Installing every `libionic1_*.deb`
   therefore hands `dpkg` genuinely conflicting versions rather than duplicates, and
   all but one will fail the base image's `ibverbs-providers` constraint — `noble`'s
-  pins `ibverbs-providers (>= 50.0), (<< 51)`. Copy the two files from the
-  directory matching your base image's codename, by name.
+  pins `ibverbs-providers (>= 50.0), (<< 51)`. Section 7 installs from
+  `$VERSION_CODENAME/` inside the image so only the matching pair is used.
 - **`Pre-Depends` rather than `Depends`.** Produces
   `dpkg: error processing archive ... pre-dependency problem - not installing libionic-dev`
   from a single `dpkg -i` given both files, *after* `libionic1` has already been
