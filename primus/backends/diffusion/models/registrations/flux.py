@@ -233,10 +233,11 @@ def build_flux_model(model_config: dict[str, Any]):
     if float8_recipe not in {"", "tensorwise"}:
         raise ValueError(f"Unsupported FLUX float8_recipe={float8_recipe!r}; expected null or 'tensorwise'")
     fp8_gemm_backend = str(cfg_dict.get("float8_gemm_backend") or "").strip().lower()
-    if fp8_gemm_backend not in {"", "selective_triton", "selective_flydsl"}:
+    if fp8_gemm_backend not in {"", "selective_triton", "selective_flydsl", "full_flydsl"}:
         raise ValueError(
             "Unsupported FLUX float8_gemm_backend="
-            f"{fp8_gemm_backend!r}; expected null, 'selective_triton', or 'selective_flydsl'"
+            f"{fp8_gemm_backend!r}; expected null, 'selective_triton', "
+            "'selective_flydsl', or 'full_flydsl'"
         )
     if fp8_gemm_backend and not float8_recipe:
         raise ValueError("FLUX float8_gemm_backend requires float8_recipe='tensorwise'")
@@ -284,7 +285,7 @@ def build_flux_model(model_config: dict[str, Any]):
                 raise RuntimeError("selective_triton requires the FLUX FP8 Inductor image patch")
             logger.info(f"Using Triton FP8 GEMM for shapes {sorted(_FP8_SELECTIVE_GEMM_SHAPES)}")
 
-        if fp8_gemm_backend == "selective_flydsl":
+        if fp8_gemm_backend in {"selective_flydsl", "full_flydsl"}:
             import torchao.float8.float8_ops as float8_ops
 
             original_addmm = float8_ops.addmm_float8_unwrapped
@@ -301,7 +302,7 @@ def build_flux_model(model_config: dict[str, Any]):
             ):
                 shape = (a_data.shape[0], b_data.shape[1], a_data.shape[1])
                 if (
-                    shape in _FP8_SELECTIVE_GEMM_SHAPES
+                    (fp8_gemm_backend == "full_flydsl" or shape in _FP8_SELECTIVE_GEMM_SHAPES)
                     and output_dtype == torch.bfloat16
                     and output_scale is None
                     and bias is None
@@ -324,7 +325,10 @@ def build_flux_model(model_config: dict[str, Any]):
                 )
 
             float8_ops.addmm_float8_unwrapped = selective_flydsl_addmm
-            logger.info(f"Using FlyDSL FP8 GEMM for shapes {sorted(_FP8_SELECTIVE_GEMM_SHAPES)}")
+            if fp8_gemm_backend == "full_flydsl":
+                logger.info("Using FlyDSL for all FLUX FP8 scaled GEMMs")
+            else:
+                logger.info(f"Using FlyDSL FP8 GEMM for shapes {sorted(_FP8_SELECTIVE_GEMM_SHAPES)}")
 
         fp8_all_gather = os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1"
         full_wgrad_fqns: list[str] = []
