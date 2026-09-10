@@ -325,7 +325,7 @@ Controlled with `PRIMUS_HIPBLASLT_TUNING_STAGE` (see `examples/README.md`):
 | Stage | Purpose |
 | --- | --- |
 | 1 | Dump GEMM shapes seen during training (reduce `train_iters` for faster collection). |
-| 2 | Tune kernels from dumped shapes (offline tooling under `examples/offline_tune`). |
+| 2 | Tune kernels from dumped shapes (offline tooling under `examples/megatron/guides/offline_tune`). |
 | 3 | Train using tuned kernel artifacts from `./output/tune_hipblaslt/...`. |
 
 Example (from in-repo docs):
@@ -349,7 +349,7 @@ The tables above in the Megatron, TorchTitan, and MaxText sections are curated M
 | TorchTitan | `examples/torchtitan/configs/MI300X/` | `parallelism.*` (e.g. `tensor_parallel_degree`, `pipeline_parallel_degree`, `expert_parallel_degree`, FSDP shard settings). |
 | MaxText | `examples/maxtext/configs/MI300X/` | `ici_fsdp_parallelism`, `ici_data_parallelism`, `dcn_fsdp_parallelism`, `dcn_data_parallelism`. |
 
-`./runner/primus-cli` is the only entry point. The packaged launchers under `examples/customer_package/` and `examples/moe_package/` reach it through the shared helper `runner/helpers/launch/slurm_pretrain.sh`, which translates their `EXP` / `NNODES` / `DATA_PATH` environment contract into a `primus-cli slurm` invocation; call the CLI directly as shown above.
+`./runner/primus-cli` is the only entry point. The packaged launchers under `examples/megatron/guides/customer_package/` and `examples/megatron/guides/moe_package/` reach it through the shared helper `runner/helpers/launch/slurm_pretrain.sh`, which translates their `EXP` / `NNODES` / `DATA_PATH` environment contract into a `primus-cli slurm` invocation; call the CLI directly as shown above.
 
 ---
 

@@ -152,7 +152,7 @@ Roughly 120 references across 30+ files, in classes that need different handling
 - `.github/workflows/docker-release/**` — records what published images were built
   from
 - `docs/01-getting-started/release-notes.md` — rotated, not substituted
-- `examples/mlperf/`, `examples/models/`, `benchmark/`, `tools/docker/` — pin the
+- `examples/mlperf/`, `examples/megatron/models/`, `benchmark/`, `tools/docker/` — pin the
   image a result was validated against. The v26.6 release left every one of these
   on v26.5; the golden replay enforces that the tooling does the same.
 - False positives that are not versions at all: `26.6GB` in a memory log,

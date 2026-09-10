@@ -246,21 +246,21 @@ environment takes precedence over the YAML for `LLM_MODEL`.
 #    synthesised metrics — verifies the install on a CPU-only host.
 python -m primus.agents.tuning_agent \
     --workload examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
-    --target-cluster examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml \
+    --target-cluster examples/megatron/guides/tuning_agent/target_cluster_mi355x_4nodes.yaml \
     --out-dir tuning_runs/dry-run \
     --dry-run --seed-only
 
 # 2) Seed-only with the real projection tool (Origami needed for simulate):
 python -m primus.agents.tuning_agent \
     --workload examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
-    --target-cluster examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml \
+    --target-cluster examples/megatron/guides/tuning_agent/target_cluster_mi355x_4nodes.yaml \
     --out-dir tuning_runs/mixtral-22b-seed \
     --seed-only
 
 # 3) Full agent (planner + DSPy.RLM rounds):
 python -m primus.agents.tuning_agent \
     --workload examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
-    --target-cluster examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml \
+    --target-cluster examples/megatron/guides/tuning_agent/target_cluster_mi355x_4nodes.yaml \
     --out-dir tuning_runs/mixtral-22b-full
 ```
 
@@ -330,7 +330,7 @@ are consumed by the analytical communication model (see
 [`projection.md` → Assumptions (performance projection)](./projection.md#assumptions-performance-projection)).
 
 A complete example ships at
-[`examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml`](https://github.com/AMD-AGI/Primus/blob/main/examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml):
+[`examples/megatron/guides/tuning_agent/target_cluster_mi355x_4nodes.yaml`](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/guides/tuning_agent/target_cluster_mi355x_4nodes.yaml):
 
 ```yaml
 target_cluster:
@@ -519,7 +519,7 @@ single idle 8-GPU node available for benchmarking:
 
 python -m primus.agents.tuning_agent \
     --workload examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
-    --target-cluster examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml \
+    --target-cluster examples/megatron/guides/tuning_agent/target_cluster_mi355x_4nodes.yaml \
     --out-dir tuning_runs/mixtral-22b-mi355x \
     --mode full --profiling-mode benchmark
 ```
