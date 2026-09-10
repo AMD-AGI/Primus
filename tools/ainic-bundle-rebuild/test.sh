@@ -21,7 +21,7 @@ if [ -d /dev/infiniband ]; then
 fi
 
 docker run --rm --privileged --network host --cap-add=IPC_LOCK \
-  "${MOUNTS[@]}" "$IMAGE" bash -c '
+  "${MOUNTS[@]}" "$IMAGE" bash -c 'set -e
     dpkg-query -W -f="libionic1 \${Version}\n" libionic1
     readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1
     readlink -f /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so

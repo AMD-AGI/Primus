@@ -493,8 +493,10 @@ filename.
 
 `AINIC_BUNDLE` is a path relative to the Docker build context, so the bundle
 file has to be visible to the daemon. The helper in
-`tools/ainic-bundle-rebuild/build.sh` uses the bundle's directory as the
-context, so the tarball does not have to sit next to the Dockerfile:
+`tools/ainic-bundle-rebuild/build.sh` creates a temporary context containing
+only that bundle. This avoids sending unrelated (and potentially unreadable)
+files from the bundle's directory to Docker, and means the tarball does not
+have to sit next to the Dockerfile:
 
 ```bash
 #!/bin/bash
@@ -514,8 +516,17 @@ fi
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 BUNDLE_NAME=$(basename "$BUNDLE")
-BUNDLE_VER=$(echo "$BUNDLE_NAME" | sed -E 's/ainic_bundle_(.*)\.tar\.gz/\1/')
-CONTEXT=$(cd "$(dirname "$BUNDLE")" && pwd)
+BUNDLE_VER=$(echo "$BUNDLE_NAME" | sed -E \
+    's/^ainic_bundle_//; s/\.tar(\.(gz|xz|bz2|zst))?$//')
+
+# Send only the requested bundle to Docker. Using the bundle's parent directory
+# as the context can be both very large and unreadable because of unrelated
+# files. Prefer a hard link to avoid copying a large bundle when /tmp shares the
+# same filesystem, and fall back to a regular copy otherwise.
+CONTEXT=$(mktemp -d)
+trap 'rm -rf "$CONTEXT"' EXIT
+ln "$BUNDLE" "$CONTEXT/$BUNDLE_NAME" 2>/dev/null || \
+    cp --reflink=auto "$BUNDLE" "$CONTEXT/$BUNDLE_NAME"
 
 set -x
 docker build --network host \
@@ -555,7 +566,7 @@ if [ -d /dev/infiniband ]; then
 fi
 
 docker run --rm --privileged --network host --cap-add=IPC_LOCK \
-  "${MOUNTS[@]}" "$IMAGE" bash -c '
+  "${MOUNTS[@]}" "$IMAGE" bash -c 'set -e
     dpkg-query -W -f="libionic1 \${Version}\n" libionic1
     readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1
     readlink -f /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so
