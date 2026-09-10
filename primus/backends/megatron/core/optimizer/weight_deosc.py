@@ -379,9 +379,7 @@ class WeightDeOscRunner:
         for chunk in model_chunks:
             modules = chunk.modules() if hasattr(chunk, "modules") else []
             for module in modules:
-                if not _is_mxfp4_quantized_weight_buffer(
-                    getattr(module, "quantized_weight_buffer", None)
-                ):
+                if not _is_mxfp4_quantized_weight_buffer(getattr(module, "quantized_weight_buffer", None)):
                     continue
                 weight = getattr(module, "_parameters", {}).get("weight", None)
                 if weight is None:
