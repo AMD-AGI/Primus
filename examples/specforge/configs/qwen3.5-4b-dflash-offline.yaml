@@ -1,13 +1,16 @@
 # Qwen3.5-4B DFlash draft training on pre-captured hidden states (offline).
 #
-#   export HIDDEN_STATES_PATH=/shared_nfs/.../hidden_states
-#   export OUTPUT_DIR=/shared_nfs/.../out
-#   primus-cli direct -- train pretrain \
+# Image: examples/specforge/docker/README.md
+# primus-cli sketch: examples/specforge/README.md
+#
+#   export HIDDEN_STATES_PATH=/path/to/hidden_states
+#   export OUTPUT_DIR=/path/to/out
+#   ./runner/primus-cli direct -- train pretrain \
 #     --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
 #
 # The specforge prepare hook emits RUN_MODE=single, so this runs as one plain
 # Python process that execs `specforge train`; SpecForge launches its own
-# workers. Defaults here are a 20-step smoke, not a convergence recipe.
+# workers. Defaults here are a 20-step smoke, not a full epoch.
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
@@ -29,7 +32,7 @@ modules:
         training.num_epochs: 1
         training.save_interval: ${MAX_STEPS:20}
         training.log_interval: 5
-        # Liger kernels are not built in the ROCm overlay image.
+        # Liger kernels are not built in this SpecForge ROCm image.
         model.use_liger_kernel: false
         data.hidden_states_path: ${HIDDEN_STATES_PATH}
         # AMD recipe defaults to 1. Set NPROC_PER_NODE to self-launch more ranks.

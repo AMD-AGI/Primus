@@ -1,11 +1,14 @@
 # Qwen3.5-4B DFlash offline hidden-state capture (Primus-owned).
 #
+# Image: examples/specforge/docker/README.md
+# primus-cli sketch: examples/specforge/README.md
+#
 # Still SpecForge's scripts/prepare_hidden_states.py under the hood. Primus
 # only owns paths, GPU count, AITER/radix-cache flags, and the DFlash filter.
 #
 #   export CAPTURE_DATA_PATH=/path/to/sharegpt.jsonl
 #   export OUTPUT_DIR=/path/to/run
-#   primus-cli direct -- train pretrain \
+#   ./runner/primus-cli direct -- train pretrain \
 #     --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
 #
 # Writes raw shards to $OUTPUT_DIR/hidden_states_raw and filtered shards to
