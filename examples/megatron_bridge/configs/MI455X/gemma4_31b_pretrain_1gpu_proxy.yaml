@@ -1,0 +1,112 @@
+# Gemma 4 31B (Dense) pre-training -- SINGLE-GPU MI455X throughput proxy.
+#
+# Why a proxy: the full 60-layer model needs far more memory for bf16 params +
+# fp32 master + Adam moments on a single rank than one card provides -- it does
+# not fit. num_layers is reduced; all other architectural dimensions are left as
+# published so per-layer cost stays representative.
+#
+# 6 layers preserves the published 5 sliding : 1 full attention ratio.
+#
+# Unlike the 26B MoE, this model has no measured depth curve. Every attempt to
+# grow it past the box below has wedged the driver
+# ("MES(N, 0) failed to respond to msg=REMOVE_QUEUE", host reboot required):
+# micro_batch_size 8, micro_batch_size 16, num_layers 12, and both attempts
+# under TE. Treat num_layers 6 / micro_batch_size 4 as a stability ceiling, not
+# a memory one -- peak memory here is well under what the card has.
+#
+# REQUIRED ENVIRONMENT on gfx1250:
+#
+#   HIPBLASLT_TENSILE_LIBPATH -- set automatically by base_env.sh, so nothing to
+#     do when launching through the runner. hipBLASLt ships its gfx1250 Tensile
+#     files one directory below where it looks for them, so every solution
+#     lookup fails and it returns HIPBLAS_STATUS_INVALID_VALUE for all shapes.
+#     Export it by hand only if you bypass the runner.
+#
+#   PRIMUS_GEMMA4_TORCH_OPTIM=1
+#     Only needed if you switch this config to TE layers. TE's FusedAdam does
+#     not return on this device. See gemma4_local_spec.
+#
+# Launch:
+#   export GEMMA4_CONVERSION_MODE=text
+#   GPUS_PER_NODE=1 ./runner/primus-cli direct -- train pretrain \
+#     --config examples/megatron_bridge/configs/MI455X/gemma4_31b_pretrain_1gpu_proxy.yaml
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:gemma4_31b_pretrain_1gpu_proxy}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron_bridge
+    config: pretrain_trainer.yaml
+
+    model: gemma4_31b.yaml
+
+    overrides:
+      stderr_sink_level: DEBUG
+
+      flavor: gemma4_31b_pretrain_config
+      dataset: null
+
+      train_iters: ${PRIMUS_TRAIN_ITERS:20}
+
+      # 4 is the largest micro-batch that has ever completed on this model;
+      # 8 and 16 both wedged the driver well below the memory limit.
+      global_batch_size: ${PRIMUS_GBS:4}
+      micro_batch_size: ${PRIMUS_MBS:4}
+      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
+
+      log_interval: 1
+      eval_interval: 100000
+      eval_iters: 0
+      skip_save: true
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+
+      # Single GPU: the MI300X recipe's TP=8 cannot work here.
+      tensor_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      use_megatron_fsdp: false
+      enable_primus_turbo: false
+
+      mock: true
+      data_paths: null
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      model:
+        num_layers: ${PRIMUS_NUM_LAYERS:6}
+
+        # Match upstream's E4B dense recipe, which the Primus recipe omits.
+        # Note that transformer_impl is only honoured because of the
+        # gemma4.local_spec patch -- Gemma4ModelProvider otherwise reads it
+        # after the layer spec has already been frozen to TE.
+        transformer_impl: local
+        attention_backend: null
+
+        # No gfx1250 build of scaled_masked_softmax_cuda. Without this the run
+        # dies with ModuleNotFoundError on the first forward.
+        masked_softmax_fusion: false
+
+        # No gfx1250 build of the fused GEMM+bias-grad path.
+        gradient_accumulation_fusion: false
+
+        # Memory is not the constraint on this model, so recompute is pure cost.
+        recompute_granularity: none
+
+      # Routing the dense linears through primus_turbo's FlyDSL backend is a
+      # large additional win on this model. That patch is not part of this
+      # change -- hipBLASLt has only tuned one of the four contraction layouts on
+      # gfx1250, so the dgrad and wgrad layouts run far below the tuned one.
+      #
+      # Do not quote the harness TFLOP/s number for a layer-reduced proxy: it
+      # derives FLOPs from the *configured* 60-layer model while only 6 are
+      # built, so it reads far too high. Quote ms/iter and tok/s.

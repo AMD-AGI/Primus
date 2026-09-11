@@ -1,0 +1,112 @@
+# Gemma 4 26B-A4B (MoE) pre-training -- SINGLE-GPU MI455X throughput proxy.
+#
+# Why a proxy: the full 30-layer model does not fit on one card with a full
+# optimizer state. Memory grows linearly in num_layers at a rate measured from
+# two clean depth points, and extrapolating that line puts full depth well past
+# the available HBM; the deepest configuration that fits is 24 layers.
+# num_layers is therefore reduced while every other architectural dimension
+# (hidden_size, 128 experts, top-k 8, head_dims, sliding window) is left exactly
+# as published, so per-layer cost stays representative.
+#
+# 6 layers preserves the published 5 sliding : 1 full attention ratio.
+#
+# REQUIRED ENVIRONMENT on gfx1250:
+#
+#   HIPBLASLT_TENSILE_LIBPATH -- set automatically by base_env.sh, so nothing to
+#     do when launching through the runner. It matters a great deal, though:
+#     hipBLASLt ships its gfx1250 Tensile files one directory below where it
+#     looks for them, so every solution lookup fails and it returns
+#     HIPBLAS_STATUS_INVALID_VALUE for all shapes. Pointing it at the real
+#     directory is what makes TE usable at all. If you run the trainer outside
+#     the runner, export it by hand to
+#     <site-packages>/_rocm_sdk_libraries_gfx1250/lib/hipblaslt/library/gfx1250
+#     and check the startup log shows it set.
+#
+#   PRIMUS_GEMMA4_TORCH_OPTIM=1
+#     TE's FusedAdam does not return on this device: optimizer.step() stays
+#     pinned at full GPU utilisation while the driver logs "MES(0, 0) ring
+#     buffer is full". This env var keeps the optimizer on torch. See
+#     gemma4_local_spec.
+#
+# NOTE: architecture fields must go under a nested `model:` block. A flat
+# `num_layers: 6` is silently dropped -- it is not a recipe kwarg and not a
+# top-level ConfigContainer field.
+#
+# Launch:
+#   export GEMMA4_CONVERSION_MODE=text
+#   GPUS_PER_NODE=1 ./runner/primus-cli direct -- train pretrain \
+#     --config examples/megatron_bridge/configs/MI455X/gemma4_26b_pretrain_1gpu_proxy.yaml
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:gemma4_26b_pretrain_1gpu_proxy}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron_bridge
+    config: pretrain_trainer.yaml
+
+    model: gemma4_26b.yaml
+
+    overrides:
+      stderr_sink_level: DEBUG
+
+      flavor: gemma4_26b_pretrain_config
+      dataset: null
+
+      # Enough iters to get past warmup and average a steady-state step time.
+      train_iters: ${PRIMUS_TRAIN_ITERS:20}
+
+      # micro_batch_size 16 is the measured optimum: the 1/2/4/8/16 ladder runs
+      # clean at every rung and throughput saturates here, with 16 barely ahead
+      # of 8. Doubling again does not fit in HBM.
+      global_batch_size: ${PRIMUS_GBS:16}
+      micro_batch_size: ${PRIMUS_MBS:16}
+      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
+
+      log_interval: 1
+      eval_interval: 100000
+      eval_iters: 0
+      skip_save: true
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+
+      # Single GPU: every parallel degree collapses to 1. The upstream MI300X
+      # recipe's TP=2/EP=4 would fail the world_size divisibility assert here.
+      tensor_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      use_megatron_fsdp: false
+      enable_primus_turbo: false
+
+      mock: true
+      data_paths: null
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # Layer-reduced proxy. Sweep PRIMUS_NUM_LAYERS over {6, 12} to recover the
+      # per-layer slope and cancel the fixed embedding/logit overhead.
+      model:
+        num_layers: ${PRIMUS_NUM_LAYERS:6}
+
+        # TE layers are the clearly faster path on the MoE model, once
+        # HIPBLASLT_TENSILE_LIBPATH is set. Left at the provider default, which
+        # is TE.
+
+        # There is headroom for activations at this micro-batch, so paying for
+        # recompute buys nothing here.
+        recompute_granularity: none
+
+        # No gfx1250 build of the fused GEMM+bias-grad path.
+        gradient_accumulation_fusion: false
+
+      # Do not quote the harness TFLOP/s number for a layer-reduced proxy: it
+      # derives FLOPs from the *configured* 30-layer model while only 6 are
+      # built, so it is wrong in both directions. Quote ms/iter and tok/s.
