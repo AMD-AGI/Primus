@@ -1,0 +1,49 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Kimi K3 official-width 8-layer preset: a shallow slice of the production model
+# that keeps EVERY per-tensor dimension at the released value and only compresses
+# the depth to 8 layers (1 dense + 7 MoE). It exercises both attention variants
+# (KDA + NoPE-MLA) and the full Stable-Latent-MoE / situ / sigmoid-router stack at
+# the real production widths, without the 93-layer depth.
+#
+# Inherits the production shape from kimi_k3.yaml verbatim (hidden 7168, 96 heads,
+# kv_channels 128, ffn 33792; MLA q_lora 1536 / kv_lora 512 / qk_head 128 /
+# qk_pos_emb 64 -> q_head 192 / v_head 128; KDA 96 heads x 128, conv kernel 4;
+# MoE 896 experts, top-16, moe_ffn 3072, 2 shared experts,
+# routed_expert_hidden_size 3584 = hidden/2, latent_moe_use_norm; attn_res_block
+# 12; vocab 163840; situ, NoPE, sigmoid + noaux_tc). Only the three depth-dependent
+# keys below change.
+#
+# PARAMETER COUNT (derived from the config, not measured):
+#   ~215 B total  -- routed experts dominate: 896 x 7 MoE layers x ~33 M/expert
+#     (each expert is a SwiGLU MLP in the 3584 LATENT: 2*3584*3072 + 3072*3584
+#     ~= 33 M) ~= 207 B; the rest (untied embed + head, KDA/MLA attention, shared
+#     experts, dense layer 0, latent projections) ~= 8 B.
+#   ~33 B params/GPU at EP=8 (TP=1/PP=1): the 896 experts shard across EP
+#     (207 B / 8 ~= 26 B) plus ~7 B replicated.
+#   ~10 B activated/token (top-16): 16 routed experts x 33 M x 7 ~= 3.7 B plus the
+#     always-on KDA/MLA attention, 2 shared experts, dense layer 0 and the LM head.
+#   NOTE: Megatron's theoretical_memory_usage.py prints ~421 B for this shape
+#   because it charges the routed experts at the FULL 7168 width and ignores the
+#   3584 latent bottleneck; the real parameter count is ~215 B.
+###############################################################################
+
+extends:
+  - kimi_k3.yaml
+
+# ---------- depth: the ONLY thing scaled ----------
+# Literal 8 (not env-overridable) so it cannot silently desync from the 8-entry
+# linear_attention_freq / moe_layer_freq below (both are length-checked against
+# num_layers at config build).
+num_layers: 8
+
+# 8 layers as 2 blocks of K K K F -> full attention (NoPE MLA) at 0-indexed 3 and
+# 7; KDA at 0,1,2,4,5,6. 6 KDA + 2 MLA, the release's 3:1 body ratio.
+linear_attention_freq: "([1]*3+[0])*2"
+
+# layer 0 dense-situ MLP, layers 1-7 Stable-Latent MoE (first_k_dense_replace = 1).
+moe_layer_freq: "([0]*1+[1]*7)"

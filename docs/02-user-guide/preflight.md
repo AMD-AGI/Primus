@@ -412,6 +412,6 @@ If you cannot (or prefer not to) use a container, see [`preflight-without-contai
 
 - [`preflight-without-container.md`](./preflight-without-container.md) — quick-start guide for `primus-cli direct -- preflight` (no container).
 - [`node-smoke-test-instruction.md`](./node-smoke-test-instruction.md) — full guide for the per-node smoke test (screen + exclude bad nodes).
-- [`runner/primus-cli-direct.sh`](../../runner/primus-cli-direct.sh) — non-container launcher (`primus-cli direct` dispatches here).
-- [`primus/tools/preflight/`](../../primus/tools/preflight/) — implementation.
-- [`primus/tools/preflight/preflight_args.py`](../../primus/tools/preflight/preflight_args.py) — canonical CLI definition (single source of truth for flags + defaults).
+- [`runner/primus-cli-direct.sh`](https://github.com/AMD-AGI/Primus/blob/main/runner/primus-cli-direct.sh) — non-container launcher (`primus-cli direct` dispatches here).
+- [`primus/tools/preflight/`](https://github.com/AMD-AGI/Primus/tree/main/primus/tools/preflight) — implementation.
+- [`primus/tools/preflight/preflight_args.py`](https://github.com/AMD-AGI/Primus/blob/main/primus/tools/preflight/preflight_args.py) — canonical CLI definition (single source of truth for flags + defaults).

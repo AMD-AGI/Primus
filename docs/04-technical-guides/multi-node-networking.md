@@ -13,7 +13,7 @@ This guide summarizes how Primus configures networking, how **InfiniBand**, **Ro
 | Socket / interface detection | `runner/helpers/envs/get_ip_interface.sh` |
 | AINIC hook (container/CLI integration) | `runner/helpers/hooks/03_enable_ainic.sh` |
 | AINIC CLI defaults | `runner/use_ainic.yaml` |
-| ANP / `NCCL_NET_PLUGIN` example | `examples/run_pretrain.sh` |
+| ANP / `NCCL_NET_PLUGIN` selection | `runner/helpers/hooks/03_enable_ainic.sh` |
 
 ---
 
@@ -75,6 +75,7 @@ GID selection (`NCCL_IB_GID_INDEX`) and traffic classes (`NCCL_IB_TC`, `NCCL_IB_
 
 - Set **`USING_AINIC=1`**. The hook `runner/helpers/hooks/03_enable_ainic.sh` runs when this is set and exports AINIC-related variables back to the caller (`env.VAR=VALUE` lines).
 - Use container images built for AINIC when required by your site. Examples in this repository use tags such as `docker.io/tasimage/primus:<version>-ainic` (see `examples/customer_package/` and `.github/workflows/ci.yaml`). Match the image to your ROCm and ANP bundle.
+- If the AINIC bundle in a published image does not match your host driver, see [AINIC bundle versions](./ainic-bundle-versions.md) for how to rebuild the image against a different bundle. Note that the bundle named in an image's build arguments is **not** always the one installed; verify with `dpkg-query -W libionic1`.
 
 ### `runner/use_ainic.yaml`
 
@@ -91,7 +92,7 @@ Adjust **`NCCL_IB_GID_INDEX`** and **`container.options.image`** to match your c
 
 ### RCCL network plugin (ANP)
 
-For ANP-based networking, clusters often set **`NCCL_NET_PLUGIN`** to **`librccl-anp.so`** when that library is present under `ANP_HOME_DIR`, falling back to `librccl-net.so` otherwise—see the logic in `examples/run_pretrain.sh`. This complements the library paths from `03_enable_ainic.sh`.
+For ANP-based networking, `NCCL_NET_PLUGIN` is set to **`librccl-anp.so`** when that library is present under `ANP_HOME_DIR`, falling back to `librccl-net.so` otherwise. This selection and the matching library paths both live in `runner/helpers/hooks/03_enable_ainic.sh`, so they apply to every launcher mode.
 
 ### Variables commonly set for AINIC
 
@@ -157,7 +158,7 @@ Set **`PRIMUS_EXPECT_IB=1`** when InfiniBand is **required** for validation; pre
 primus-cli slurm srun -N 4 -- benchmark rccl --op all_reduce --min-bytes 1M --max-bytes 128M
 ```
 
-This exercises collective bandwidth and latency across a message-size sweep. See `docs/02-user-guide/benchmarking.md` and `primus/tools/benchmark/rccl_bench_args.py` for options (dtypes, operations, output files).
+This exercises collective bandwidth and latency across a message-size sweep. See `docs/02-user-guide/micro-benchmarking.md` and `primus/tools/benchmark/rccl_bench_args.py` for options (dtypes, operations, output files).
 
 ### Verbose RCCL logs
 
@@ -198,6 +199,6 @@ For a consolidated list of `NCCL_*` / `RCCL_*` variables, see `docs/03-configura
 ## Related documentation
 
 - [Preflight diagnostics](../02-user-guide/preflight.md)
-- [Benchmark suite](../02-user-guide/benchmarking.md)
+- [Micro-benchmarking suite](../02-user-guide/micro-benchmarking.md)
 - [NCCL/RCCL collective operations](./collective-operations.md)
 - [Environment variables](../03-configuration-reference/environment-variables.md)

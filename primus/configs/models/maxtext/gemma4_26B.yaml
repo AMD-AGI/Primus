@@ -1,0 +1,14 @@
+extends:
+  - model_base.yaml
+
+# Gemma 4 26B (MoE, 128 experts / 8 active). Architecture from MaxText's
+# configs/models/gemma4-26b.yml. Requires maxtext release/v26.6+.
+# Attention: use cudnn_flash_te (passes sliding-window to kernel as window_size).
+# fp8 MoE is blocked upstream by a Flax tracer leak in RoutedMoE.dense_matmul.
+model_name: "gemma4-26b"
+
+# Gemma 4 is not published on HF; synthetic pretraining generates data from
+# vocab_size (262144) and does not load a tokenizer. Point at the bundled
+# Gemma 3 SentencePiece tokenizer (same vocab) for any non-data code paths.
+tokenizer_path: "src/maxtext/assets/tokenizers/tokenizer.gemma3"
+tokenizer_type: "sentencepiece"

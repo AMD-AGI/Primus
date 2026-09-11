@@ -41,6 +41,17 @@ _FLUX_PRESET_ALIASES = {
     "flux1-dev": "flux-dev",
 }
 
+_FP8_DOUBLE_ATTN_PROJ_SUFFIXES = {
+    "img_attn.proj",
+    "txt_attn.proj",
+}
+_FP8_DOUBLE_MLP_SUFFIXES = {
+    "img_mlp.0",
+    "img_mlp.2",
+    "txt_mlp.0",
+    "txt_mlp.2",
+}
+
 
 def _strip_known_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     prefixes = ("module.", "dit.", "model.")
@@ -132,14 +143,17 @@ def _build_flux_dit(params) -> Flux:
     local_rank = os.environ.get("LOCAL_RANK")
     use_cuda = local_rank is not None and torch.cuda.is_available()
     device = torch.device(f"cuda:{local_rank}") if use_cuda else torch.device("cpu")
-    old_dtype = torch.get_default_dtype()
-    try:
-        if use_cuda:
-            torch.set_default_dtype(torch.bfloat16)
-        with torch.device(device):
-            dit = Flux(params)
-    finally:
-        torch.set_default_dtype(old_dtype)
+    init_seed = torch.cuda.initial_seed() if use_cuda else torch.initial_seed()
+    with torch.device(device):
+        dit = Flux(params)
+    # Constructor defaults consume RNG even though explicit TorchTitan
+    # initialization overwrites them. Reset so init_weights starts at the
+    # configured common model seed, as it does with TorchTitan meta creation.
+    if use_cuda:
+        torch.cuda.manual_seed(init_seed)
+    else:
+        torch.manual_seed(init_seed)
+    dit.init_weights()
     return dit
 
 
@@ -151,6 +165,9 @@ def build_flux_model(model_config: dict[str, Any]):
     configs such as `flux.1-dev` and `flux.1-schnell`.
     """
     cfg_dict: dict[str, Any] = dict(model_config.get("config", {}) or {})
+    float8_recipe = str(cfg_dict.get("float8_recipe") or "").strip().lower()
+    if float8_recipe not in {"", "tensorwise"}:
+        raise ValueError(f"Unsupported FLUX float8_recipe={float8_recipe!r}; expected null or 'tensorwise'")
     preset_name = str(model_config.get("model_preset") or cfg_dict.get("model_preset") or "flux.1-schnell")
     preset = _FLUX_PRESET_ALIASES.get(preset_name.lower(), preset_name)
 
@@ -171,6 +188,88 @@ def build_flux_model(model_config: dict[str, Any]):
         logger.info(f"Loading FLUX DiT weights from {pretrained_path}")
         default_filename = "flux1-dev.safetensors" if preset == "flux-dev" else "flux1-schnell.safetensors"
         _load_flux_weights(dit, pretrained_path, default_filename=default_filename)
+
+    if float8_recipe:
+        try:
+            from torchao.float8 import (
+                CastConfig,
+                Float8LinearConfig,
+                ScalingType,
+                convert_to_float8_training,
+            )
+        except ImportError as exc:
+            raise ImportError("TorchAO is required for FLUX tensor-wise FP8 training") from exc
+
+        full_wgrad_fqns: list[str] = []
+        high_precision_wgrad_fqns: list[str] = []
+
+        def module_kind(module: torch.nn.Module, fqn: str) -> str | None:
+            if type(module) is not torch.nn.Linear:
+                return None
+            parts = fqn.split(".", 2)
+            if len(parts) != 3:
+                return None
+            if parts[0] == "double_blocks":
+                if parts[2] == "img_attn.qkv":
+                    return "qkv"
+                if parts[2] == "txt_attn.qkv":
+                    return "qkv"
+                if parts[2] in _FP8_DOUBLE_ATTN_PROJ_SUFFIXES:
+                    return "full"
+                if parts[2] in _FP8_DOUBLE_MLP_SUFFIXES:
+                    return "full"
+            if parts[0] == "single_blocks" and parts[2] in {"linear1", "linear2"}:
+                return "full"
+            return None
+
+        def full_wgrad_filter(module: torch.nn.Module, fqn: str) -> bool:
+            selected = module_kind(module, fqn) == "full"
+            if selected:
+                full_wgrad_fqns.append(fqn)
+            return selected
+
+        def high_precision_wgrad_filter(module: torch.nn.Module, fqn: str) -> bool:
+            selected = module_kind(module, fqn) == "qkv"
+            if selected:
+                high_precision_wgrad_fqns.append(fqn)
+            return selected
+
+        dit = convert_to_float8_training(
+            dit,
+            module_filter_fn=full_wgrad_filter,
+            config=Float8LinearConfig(
+                pad_inner_dim=False,
+                enable_fsdp_float8_all_gather=False,
+            ),
+        )
+        dit = convert_to_float8_training(
+            dit,
+            module_filter_fn=high_precision_wgrad_filter,
+            config=Float8LinearConfig(
+                cast_config_input_for_grad_weight=CastConfig(scaling_type=ScalingType.DISABLED),
+                cast_config_grad_output_for_grad_weight=CastConfig(scaling_type=ScalingType.DISABLED),
+                pad_inner_dim=False,
+                enable_fsdp_float8_all_gather=False,
+            ),
+        )
+        expected_full_count = len(dit.double_blocks) * 6 + len(dit.single_blocks) * 2
+        expected_high_precision_count = len(dit.double_blocks) * 2
+        if (
+            len(full_wgrad_fqns) != expected_full_count
+            or len(high_precision_wgrad_fqns) != expected_high_precision_count
+        ):
+            raise RuntimeError(
+                "FLUX FP8 converted "
+                f"{len(full_wgrad_fqns)} full-wgrad and "
+                f"{len(high_precision_wgrad_fqns)} high-precision-wgrad Linear modules; "
+                f"expected {expected_full_count} and {expected_high_precision_count}"
+            )
+        logger.info(
+            "Enabled TorchAO dynamic tensor-wise FP8 for "
+            f"{len(full_wgrad_fqns) + len(high_precision_wgrad_fqns)} FLUX block Linear modules; "
+            f"wgrad=FP8 for {len(full_wgrad_fqns)} and high precision for "
+            f"{len(high_precision_wgrad_fqns)} QKV modules"
+        )
 
     encoder_cfg = dict(model_config.get("encoder", {}) or cfg_dict.get("encoder", {}) or {})
     dtype = torch.bfloat16

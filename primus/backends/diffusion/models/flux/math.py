@@ -18,9 +18,9 @@ from primus.backends.diffusion.attention import attention as backend_attention
 def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor) -> Tensor:
     q, k = apply_rope(q, k, pe)
     x = backend_attention(
-        q=rearrange(q, "B H L D -> B L H D"),
-        k=rearrange(k, "B H L D -> B L H D"),
-        v=rearrange(v, "B H L D -> B L H D"),
+        q=q,
+        k=k,
+        v=v,
         dtype=q.dtype if q.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16,
     )
     return rearrange(x, "B L H D -> B L (H D)")

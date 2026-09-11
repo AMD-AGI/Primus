@@ -11,8 +11,8 @@
 # Only use this if you specifically need guidance embedding support.
 #
 # Usage:
-#   EXP=examples/megatron/configs/MI355X/diffusion/flux_535m_with_guidance_embed.yaml \
-#   bash examples/run_pretrain.sh
+#   ./primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI355X/diffusion/flux_535m_with_guidance_embed.yaml
 
 # Extend standard 535M config
 extends:

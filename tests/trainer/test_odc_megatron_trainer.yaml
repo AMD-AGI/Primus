@@ -1,0 +1,108 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: &exp_name ${EXP:exp-odc-pretrain}
+workspace: ./output
+
+# ODC (On-Demand Communication) integration test config.
+#
+# Modeled on tests/trainer/test_megatron_trainer.yaml but with the ODC feature
+# turned on: rocSHMEM/XGMI point-to-point gradient reduction on the torch-FSDP2
+# path (enable_odc) plus LB-Mini sequence-length load balancing
+# (enable_odc_lb_mini). A tiny model / few iters keeps a real GPU run cheap.
+#
+# NOTE: ODC needs ROCm GPUs + a Primus-Turbo build carrying the rocSHMEM ops, so
+# a full training run cannot happen in plain CPU CI (the E2E test that consumes
+# this fixture skips cleanly when CUDA / turbo are unavailable). ODC + LB-Mini
+# also require use_torch_fsdp2=true (asserted by the config test), which is why
+# the FSDP2 co-settings below (no distributed optimizer, no grad/param overlap)
+# mirror the shipped examples/megatron/configs/*/deepseek1.5B-odc-lbmini.yaml.
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: ${PRIMUS_MODEL:deepseek_v2_lite}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_test_ODC"
+      disable_wandb: true
+      stderr_sink_level: DEBUG
+
+      # debug: keep the model tiny for a cheap real-GPU run
+      num_layers: ${PRIMUS_NUM_LAYERS:2}
+      moe_layer_freq: ${PRIMUS_MOE_LAYER_FREQ:[0]*1+[1]*1}
+
+      # optimizer: adam
+      moe_router_force_load_balancing: true
+      moe_router_dtype: null
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 5
+
+      # hyper parameters
+      train_iters: 3
+      micro_batch_size: 1
+      global_batch_size: ${PRIMUS_GLOBAL_BATCH_SIZE:8}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # === ODC (On-Demand Communication) ===
+      # Master switch: route FSDP2 gradient reduce-scatter through ODC's
+      # rocSHMEM/XGMI point-to-point path. Requires use_torch_fsdp2=true.
+      enable_odc: true
+      # Full grad-routing wiring depth (hook train_step + optimizer.step).
+      odc_phase: 2
+      # rocSHMEM symmetric-memory backend (validated single-node host/XGMI-IPC).
+      odc_p2p_backend: rocshmem
+      # Guard against ODC async-reduce non-deterministic grad spikes.
+      odc_grad_spike_threshold: 1000.0
+      # LB-Mini sequence-length load balancing (orthogonal to enable_odc; with
+      # enable_odc=true it runs the DECOUPLED per-rank micro-batch mode).
+      enable_odc_lb_mini: true
+      lb_mini_cost_model: fit
+      lb_mini_max_token_len: 8192
+
+      # torch-FSDP2 path + ODC-compatible co-settings (mirror the shipped ODC
+      # example): ODC replaces the collective reduce-scatter, so distributed
+      # optimizer / grad+param overlap / grad-accum fusion are turned off.
+      use_torch_fsdp2: true
+      use_megatron_fsdp: false
+      use_distributed_optimizer: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:1}
+
+      # data
+      num_workers: 1
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # fusion
+      moe_permute_fusion: false
+      moe_use_legacy_grouped_gemm: true
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch

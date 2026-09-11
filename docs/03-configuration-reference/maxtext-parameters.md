@@ -111,6 +111,7 @@ These are Primus overlay defaults. MaxText also loads upstream `base.yml` at run
 | `checkpoint_is_quantized` | `false`           | Set `true` when loading an AQT-quantized checkpoint.                  |
 | `logits_dot_in_fp32`      | `false`           | Compute logits matmul in `float32` for numerical stability.           |
 
+**fp8 + MoE (v26.6):** MoE fp8 configs (e.g. `mixtral_8x7B-fp8`, `qwen3_30B_A3B-fp8`) must set `pure_nnx_decoder: false`. v26.6 defaults to `true`, which invokes the legacy Linen `Fp8Einsum` without a binding scope. See [Advanced](#9-advanced). Dense fp8 configs are unaffected.
 
 ---
 
@@ -123,7 +124,7 @@ From `model_base.yaml` and per-model files such as `llama3_8B.yaml`.
 | ----------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | `model_name`            | `"default"` in `model_base`; e.g. `"llama3-8b"` in `llama3_8B.yaml` | Selects MaxText’s bundled model YAML when present.                      |
 | `override_model_config` | `true`                                                              | When `true`, CLI / kwargs override values from the loaded model config. |
-| `attention`             | `"cudnn_flash_te"`                                                  | Attention implementation (Primus default favors TE flash on AMD GPUs).  |
+| `attention`             | `"autoselected"`                                                    | Attention implementation. **gemma4 requires `cudnn_flash_te`**: its local layers use sliding-window attention, and only `cudnn_flash_te` passes the window to the kernel (as `window_size`). `autoselected` resolves to a pallas kernel that builds a plain causal mask and silently drops the window. |
 | `use_iota_embed`        | `true`                                                              | Use iota-based embedding for performance on accelerator backends.       |
 | `tokenizer_path`        | e.g. `"meta-llama/Meta-Llama-3-8B"`                                 | Hugging Face tokenizer id or local path.                                |
 
@@ -133,9 +134,10 @@ From `model_base.yaml` and per-model files such as `llama3_8B.yaml`.
 ## 9. Advanced
 
 
-| Parameter | Default | Description                                                           |
-| --------- | ------- | --------------------------------------------------------------------- |
-| `shardy`  | `false` | Enable Shardy-related integration in MaxText when building shardings. |
+| Parameter           | Default | Description                                                                                                                                                                                                                            |
+| ------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `shardy`            | `false` | Enable Shardy-related integration in MaxText when building shardings.                                                                                                                                                                 |
+| `pure_nnx_decoder`  | `true`  | Run the decoder as pure Flax NNX. As of v26.6 the base config defaults this to `true`. **fp8 MoE configs must override this to `false`** — the legacy per-module Linen `Fp8Einsum` (used by the MoE sparse-matmul quant path) needs an active Linen binding scope, and the pure-NNX decoder invokes it unbound, crashing at the first step. See the note in [Precision and quantization](#7-precision-and-quantization). |
 
 
 ---

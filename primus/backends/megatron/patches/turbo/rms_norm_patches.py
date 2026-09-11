@@ -22,7 +22,6 @@ def _is_turbo_rms_norm_can_patch(ctx: PatchContext) -> bool:
 
     Requires:
       - primus_turbo package is installed
-      - tensor_model_parallel_size == 1
       - enable_primus_turbo == True
       - use_turbo_rms_norm == True
     """

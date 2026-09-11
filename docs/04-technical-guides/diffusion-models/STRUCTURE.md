@@ -97,7 +97,7 @@ Primus/
 │   │   └── ...
 │   └── prepare.py
 │
-├── examples/run_pretrain.sh                # Main training script
+├── runner/primus-cli                       # Main training launcher (direct/container/slurm)
 │
 ├── tests/
 │   ├── unit_tests/backends/megatron/diffusion/   # Unit test suite

@@ -12,6 +12,69 @@ from primus.backends.megatron.megatron_base_trainer import MegatronBaseTrainer
 from primus.core.utils.module_utils import log_rank_0
 
 
+def _resolve_legacy_ckpt_file(ckpt_dir: str, core_mpu) -> str:
+    """Resolve the torch(legacy)-format weight file for the current rank.
+
+    Native Megatron-LM ``tools/checkpoint/convert.py`` (and any ``--ckpt-format
+    torch`` save) writes::
+
+        <ckpt_dir>/iter_XXXXXXX/mp_rank_TT[_PPP]/model_optim_rng.pt
+
+    HF-converted checkpoints are always TP=1/PP=1 (a single ``mp_rank_00``), but
+    we still honour TP/PP ranks so the loader is correct for the general case.
+    """
+    import glob
+    import os
+
+    base = ckpt_dir.rstrip("/")
+
+    # ---- resolve which iteration subdir to read ----
+    iter_dirname = None
+    tracker = os.path.join(base, "latest_checkpointed_iteration.txt")
+    if os.path.isfile(tracker):
+        try:
+            with open(tracker) as f:
+                content = f.read().strip()
+        except Exception:
+            content = ""
+        if content == "release":
+            iter_dirname = "release"
+        elif content:
+            try:
+                iter_dirname = f"iter_{int(content):07d}"
+            except ValueError:
+                iter_dirname = None
+
+    if iter_dirname is not None:
+        iter_dir = os.path.join(base, iter_dirname)
+    elif os.path.basename(base).startswith(("iter_", "release")):
+        iter_dir = base  # ckpt_dir already points at the iteration dir
+    else:
+        cands = sorted(glob.glob(os.path.join(base, "iter_*")))
+        iter_dir = cands[-1] if cands else base
+
+    # ---- resolve the model-parallel rank subdir ----
+    try:
+        tp_rank = core_mpu.get_tensor_model_parallel_rank()
+    except Exception:
+        tp_rank = 0
+    try:
+        pp_size = core_mpu.get_pipeline_model_parallel_world_size()
+        pp_rank = core_mpu.get_pipeline_model_parallel_rank()
+    except Exception:
+        pp_size, pp_rank = 1, 0
+
+    if pp_size > 1:
+        rank_dir = os.path.join(iter_dir, f"mp_rank_{tp_rank:02d}_{pp_rank:03d}")
+    else:
+        rank_dir = os.path.join(iter_dir, f"mp_rank_{tp_rank:02d}")
+    if not os.path.isdir(rank_dir):
+        subs = sorted(glob.glob(os.path.join(iter_dir, "mp_rank_*")))
+        rank_dir = subs[0] if subs else iter_dir
+
+    return os.path.join(rank_dir, "model_optim_rng.pt")
+
+
 class MegatronSFTTrainer(MegatronBaseTrainer):
     """
     Trainer class for Megatron-LM based supervised fine-tuning.
@@ -178,6 +241,8 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
             """
             import os
 
+            import torch
+
             model = base_model_provider(*args, **kwargs)
 
             pretrained_path = getattr(backend_args, "pretrained_checkpoint", None)
@@ -302,49 +367,95 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                 before_canaries = _collect_canaries("BEFORE load")
 
                 # ----------------------------------------------------------
-                # Build sharded_state_dict from the unwrapped base model.
+                # Detect the on-disk checkpoint format.
+                #
+                # The native HF->Megatron converter
+                # (third_party/Megatron-LM/tools/checkpoint/convert.py, and any
+                # ``--ckpt-format torch`` save) emits a *torch* (legacy)
+                # checkpoint: iter_XXXXXXX/mp_rank_TT/model_optim_rng.pt. That is
+                # NOT a torch_dist distributed checkpoint, and
+                # ``dist_checkpointing.load()`` cannot read it (no .metadata /
+                # common.pt -> raises). Megatron-Bridge, by contrast, emits
+                # torch_dist. Branch on the format so BOTH bridge-produced
+                # (torch_dist) and natively-converted (torch) checkpoints load
+                # correctly into the UN-WRAPPED base model before the LoRA wrap.
                 # ----------------------------------------------------------
+                is_dist_ckpt = False
                 try:
-                    dp_cp_group = core_mpu.get_data_parallel_group(with_context_parallel=True)
-                except Exception:
-                    dp_cp_group = None
-
-                # Pull metadata that the ckpt was saved with (e.g.
-                # singleton_local_shards, chained_optim_avoid_prefix) so the
-                # sharded_state_dict we build matches the on-disk layout.
-                try:
-                    common_sd = dist_checkpointing.load_common_state_dict(ckpt_dir)
-                    sharded_sd_metadata = (
-                        dist_checkpointing.load_content_metadata(preloaded_state_dict=common_sd) or {}
-                    )
+                    is_dist_ckpt = bool(dist_checkpointing.check_is_distributed_checkpoint(ckpt_dir))
                 except Exception as e:
                     log_rank_0(
-                        f"[PEFT pre-wrap] load_content_metadata failed "
-                        f"({type(e).__name__}: {e}); proceeding with empty metadata"
+                        f"[PEFT pre-wrap] check_is_distributed_checkpoint failed "
+                        f"({type(e).__name__}: {e}); assuming torch(legacy) format"
                     )
-                    sharded_sd_metadata = {}
-                if dp_cp_group is not None:
-                    sharded_sd_metadata.setdefault("dp_cp_group", dp_cp_group)
+                    is_dist_ckpt = False
                 log_rank_0(
-                    f"[PEFT pre-wrap] sharded_sd_metadata from ckpt: "
-                    f"{ {k: v for k, v in sharded_sd_metadata.items() if k != 'dp_cp_group'} }"
+                    f"[PEFT pre-wrap] checkpoint format: "
+                    f"{'torch_dist' if is_dist_ckpt else 'torch(legacy)'}"
                 )
 
-                sharded_state_dict = {"model": model.sharded_state_dict(metadata=sharded_sd_metadata)}
+                if not is_dist_ckpt:
+                    # ------------------------------------------------------
+                    # torch (legacy) format: single model_optim_rng.pt per
+                    # model-parallel rank. Load it and apply the ``model``
+                    # sub-dict to the unwrapped base model. Keys produced by
+                    # ``--saver core`` are exactly the mcore GPTModel state_dict
+                    # keys (decoder.layers.N.self_attention.linear_qkv.weight,
+                    # ...), so a plain load_state_dict(strict=False) restores
+                    # every weight; the TE ``_extra_state`` placeholders are the
+                    # only non-weight entries and round-trip harmlessly.
+                    # ------------------------------------------------------
+                    legacy_file = _resolve_legacy_ckpt_file(ckpt_dir, core_mpu)
+                    log_rank_0(f"[PEFT pre-wrap] Loading torch(legacy) base weights from: {legacy_file}")
+                    legacy_sd = torch.load(legacy_file, map_location="cpu", mmap=True, weights_only=False)
+                    if isinstance(legacy_sd, dict) and "model" in legacy_sd:
+                        model_sd = legacy_sd["model"]
+                    else:
+                        model_sd = legacy_sd
+                    missing, unexpected = model.load_state_dict(model_sd, strict=False)
+                else:
+                    # ------------------------------------------------------
+                    # torch_dist format (Megatron-Bridge / dist_checkpointing).
+                    # ------------------------------------------------------
+                    # Build sharded_state_dict from the unwrapped base model.
+                    try:
+                        dp_cp_group = core_mpu.get_data_parallel_group(with_context_parallel=True)
+                    except Exception:
+                        dp_cp_group = None
 
-                # ----------------------------------------------------------
-                # Load directly via dist_checkpointing.load (Bridge fast path).
-                # strict="log_all" matches what the rest of the project uses.
-                # ----------------------------------------------------------
-                loaded = dist_checkpointing.load(sharded_state_dict, ckpt_dir, strict="log_all")
+                    # Pull metadata that the ckpt was saved with (e.g.
+                    # singleton_local_shards, chained_optim_avoid_prefix) so the
+                    # sharded_state_dict we build matches the on-disk layout.
+                    try:
+                        common_sd = dist_checkpointing.load_common_state_dict(ckpt_dir)
+                        sharded_sd_metadata = (
+                            dist_checkpointing.load_content_metadata(preloaded_state_dict=common_sd) or {}
+                        )
+                    except Exception as e:
+                        log_rank_0(
+                            f"[PEFT pre-wrap] load_content_metadata failed "
+                            f"({type(e).__name__}: {e}); proceeding with empty metadata"
+                        )
+                        sharded_sd_metadata = {}
+                    if dp_cp_group is not None:
+                        sharded_sd_metadata.setdefault("dp_cp_group", dp_cp_group)
+                    log_rank_0(
+                        f"[PEFT pre-wrap] sharded_sd_metadata from ckpt: "
+                        f"{ {k: v for k, v in sharded_sd_metadata.items() if k != 'dp_cp_group'} }"
+                    )
 
-                # ----------------------------------------------------------
-                # Apply to model. Use strict=False so adapter/extra keys
-                # that may live on TE modules don't blow up; capture and
-                # log IncompatibleKeys so we DON'T silently skip everything
-                # like Megatron-LM's helper did.
-                # ----------------------------------------------------------
-                missing, unexpected = model.load_state_dict(loaded["model"], strict=False)
+                    sharded_state_dict = {"model": model.sharded_state_dict(metadata=sharded_sd_metadata)}
+
+                    # Load directly via dist_checkpointing.load (Bridge fast path).
+                    # strict="log_all" matches what the rest of the project uses.
+                    loaded = dist_checkpointing.load(sharded_state_dict, ckpt_dir, strict="log_all")
+
+                    # Apply to model. Use strict=False so adapter/extra keys
+                    # that may live on TE modules don't blow up; capture and
+                    # log IncompatibleKeys so we DON'T silently skip everything
+                    # like Megatron-LM's helper did.
+                    missing, unexpected = model.load_state_dict(loaded["model"], strict=False)
+
                 n_missing = len(missing) if missing is not None else 0
                 n_unexpected = len(unexpected) if unexpected is not None else 0
                 log_rank_0(

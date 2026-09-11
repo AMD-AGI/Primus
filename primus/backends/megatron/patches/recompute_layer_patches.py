@@ -33,12 +33,35 @@ Design:
       pin the signature and source fingerprint of Megatron's
       ``_checkpointed_forward``.  Any upstream edit will fail the tests
       with a clear message, forcing the maintainer to re-validate.
+
+MTP:
+    ``MultiTokenPredictionLayer`` has its own ``_checkpointed_forward``, gated
+    on ``recompute_granularity == 'full'`` alone and dispatching on
+    ``recompute_method`` -- which ``recompute_layer_ids`` pins to ``None``.
+    Upstream has no ``None`` branch, so MTP + ``recompute_layer_ids`` used to
+    raise ``ValueError: Invalid activation recompute method.`` on the first
+    forward.  It is wrapped here too, and the id space is extended past the
+    decoder so MTP depth *d* is addressable as ``num_layers + d``.
 """
 
 from contextlib import nullcontext
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+
+def _mtp_num_layers(args) -> int:
+    """``args.mtp_num_layers`` as an int (0 when MTP is off)."""
+    return int(getattr(args, "mtp_num_layers", 0) or 0)
+
+
+def mtp_depth_to_layer_id(args, mtp_depth: int) -> int:
+    """Global ``recompute_layer_ids`` index for MTP depth ``mtp_depth`` (0-based).
+
+    Decoder layers own ``0 .. num_layers-1``; the MTP depths continue the same
+    numbering, so depth 0 is ``num_layers``, depth 1 is ``num_layers + 1``, ...
+    """
+    return int(args.num_layers) + int(mtp_depth)
 
 
 def validate_specified_recompute_layers(config, args):
@@ -56,9 +79,21 @@ def validate_specified_recompute_layers(config, args):
     config.recompute_layer_ids = sorted(set(config.recompute_layer_ids))
     if len(config.recompute_layer_ids) == 0:
         raise ValueError("recompute_layer_ids must not be empty.")
+    # The id space covers the decoder layers *and* the MTP depths appended
+    # after them, so an MTP module can be checkpointed just like any other
+    # layer (see ``mtp_depth_to_layer_id``).
+    max_layer_id = int(args.num_layers) + _mtp_num_layers(args) - 1
     for layer_id in config.recompute_layer_ids:
-        if layer_id < 0 or layer_id >= args.num_layers:
-            raise ValueError(f"recompute layer id must be between 0 and {args.num_layers - 1}")
+        if layer_id < 0 or layer_id > max_layer_id:
+            raise ValueError(
+                f"recompute layer id must be between 0 and {max_layer_id} "
+                f"(0..{args.num_layers - 1} are decoder layers"
+                + (
+                    f", {args.num_layers}..{max_layer_id} are the " f"{_mtp_num_layers(args)} MTP depths)"
+                    if _mtp_num_layers(args) > 0
+                    else ")"
+                )
+            )
 
     if args.recompute_granularity != "full":
         raise ValueError(
@@ -227,13 +262,74 @@ def _make_checkpointed_forward_wrapper(original_fn):
     return _checkpointed_forward
 
 
+def _make_mtp_checkpointed_forward_wrapper(original_fn, args):
+    """Build the wrapper for ``MultiTokenPredictionLayer._checkpointed_forward``.
+
+    Megatron gates MTP recompute on ``recompute_granularity == 'full'`` alone
+    and then dispatches on ``recompute_method``, which only knows ``'uniform'``
+    and ``'block'``.  ``recompute_layer_ids`` requires ``recompute_method`` to be
+    ``None``, so an MTP-enabled run would reach the dispatch's ``else`` branch
+    and die with ``ValueError: Invalid activation recompute method.`` before the
+    first step completes.
+
+    With ``recompute_layer_ids`` set this wrapper takes over: MTP depth *d* is
+    checkpointed iff ``num_layers + d`` is in the list, and skipped otherwise --
+    the same "exactly these layers, nothing more" contract the decoder block
+    already honors.
+    """
+    import torch
+    from megatron.core import parallel_state, tensor_parallel
+
+    def _checkpointed_forward(self, forward_func, *fwd_args, **fwd_kwargs):
+        recompute_layer_ids = getattr(self.config, "recompute_layer_ids", None)
+        if recompute_layer_ids is None:
+            return original_fn(self, forward_func, *fwd_args, **fwd_kwargs)
+
+        # ``layer_number`` is 1-based and already carries the pipeline layout's
+        # MTP offset, so ``layer_number - 1`` is the global MTP depth.
+        layer_id = mtp_depth_to_layer_id(args, int(getattr(self, "layer_number", 1)) - 1)
+        if layer_id not in set(recompute_layer_ids):
+            return forward_func(*fwd_args, **fwd_kwargs)
+
+        # Pass the tensors through ``checkpoint`` so their activations are
+        # dropped and recomputed, and close over everything else. Upstream
+        # instead forwards ``*kwargs.values()`` positionally, which both relies
+        # on the callee's parameter order matching dict insertion order and
+        # feeds non-tensors to autograd; keying by name avoids both.
+        tensor_keys = [k for k, v in fwd_kwargs.items() if torch.is_tensor(v)]
+        tensor_values = [fwd_kwargs[k] for k in tensor_keys]
+        static_kwargs = {k: v for k, v in fwd_kwargs.items() if not torch.is_tensor(v)}
+
+        def _run(*tensors):
+            merged = dict(zip(tensor_keys, tensors))
+            merged.update(static_kwargs)
+            return forward_func(*fwd_args, **merged)
+
+        if self.config.fp8:
+            from megatron.core.extensions.transformer_engine import te_checkpoint
+
+            return te_checkpoint(
+                _run,
+                self.config.distribute_saved_activations,
+                tensor_parallel.random.get_cuda_rng_tracker,
+                parallel_state.get_tensor_model_parallel_group(),
+                *tensor_values,
+            )
+        return tensor_parallel.checkpoint(_run, self.config.distribute_saved_activations, *tensor_values)
+
+    _checkpointed_forward._primus_patched = True
+    _checkpointed_forward._primus_original = original_fn
+    return _checkpointed_forward
+
+
 @register_patch(
     "megatron.transformer.custom_recompute_layer_ids",
     backend="megatron",
     phase="before_train",
     description=(
-        "Monkey patch TransformerConfig and TransformerBlock._checkpointed_forward "
-        "to support Primus-provided recompute_layer_ids."
+        "Monkey patch TransformerConfig, TransformerBlock._checkpointed_forward and "
+        "MultiTokenPredictionLayer._checkpointed_forward to support Primus-provided "
+        "recompute_layer_ids."
     ),
     condition=lambda ctx: getattr(get_args(ctx), "recompute_layer_ids", None) is not None,
 )
@@ -241,11 +337,13 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
     """Install ``recompute_layer_ids`` support. Idempotent."""
     args = get_args(ctx)
 
+    import megatron.core.transformer.multi_token_prediction as mtp_mod
     import megatron.core.transformer.transformer_block as transformer_block_mod
     import megatron.core.transformer.transformer_config as config_mod
 
     TransformerBlock = transformer_block_mod.TransformerBlock
     TransformerConfig = config_mod.TransformerConfig
+    MultiTokenPredictionLayer = mtp_mod.MultiTokenPredictionLayer
 
     TransformerConfig.recompute_layer_ids = args.recompute_layer_ids
 
@@ -272,4 +370,15 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
             "[Patch:megatron.transformer.recompute_layer_ids] wrapped "
             "TransformerBlock._checkpointed_forward (delegates to upstream "
             "unless recompute_layer_ids is set)."
+        )
+
+    if not getattr(MultiTokenPredictionLayer._checkpointed_forward, "_primus_patched", False):
+        mtp_original_fn = MultiTokenPredictionLayer._checkpointed_forward
+        MultiTokenPredictionLayer._checkpointed_forward = _make_mtp_checkpointed_forward_wrapper(
+            mtp_original_fn, args
+        )
+        log_rank_0(
+            "[Patch:megatron.transformer.recompute_layer_ids] wrapped "
+            "MultiTokenPredictionLayer._checkpointed_forward (MTP depth d maps to "
+            f"layer id {mtp_depth_to_layer_id(args, 0)}+d)."
         )

@@ -50,9 +50,9 @@ downstream lm-eval can score each on its own merits.
 Usage (inside the container):
 
     python tools/hybrid/convert_mamba_hybrid_to_fla_hf.py \
-        --checkpoint-path output/amd/root/zebra_llama_300M_mamba_hybrid-pretrain/checkpoints/iter_0004768 \
+        --checkpoint-path output/amd/root/hylo_llama_mamba_300M_BF16-pretrain/checkpoints/iter_0004768 \
         --output-dir output/mamba_hybrid_300M_fla_hf \
-        --tokenizer /home/<user>/checkpoints/gdn_pure_300M_10B
+        --tokenizer /home/<user>/checkpoints/gdn_300M_10B
 """
 import argparse
 import json
@@ -453,7 +453,7 @@ def main():
     )
     parser.add_argument(
         "--tokenizer",
-        default=os.path.expanduser("~/checkpoints/gdn_pure_300M_10B"),
+        default=os.path.expanduser("~/checkpoints/gdn_300M_10B"),
         help="Source dir to copy tokenizer.json / tokenizer_config.json from.",
     )
     args = parser.parse_args()

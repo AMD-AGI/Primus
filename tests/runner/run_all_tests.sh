@@ -40,6 +40,7 @@ TEST_SCRIPTS=(
     "$SCRIPT_DIR/test_primus_cli_slurm.sh"
     "$SCRIPT_DIR/test_primus_cli_container.sh"
     "$SCRIPT_DIR/test_primus_cli_direct.sh"
+    "$SCRIPT_DIR/test_odc_run_launcher.sh"
 )
 
 # Run each test suite

@@ -6,9 +6,9 @@ This guide covers AMD-focused performance work in Primus: HipBLASLt autotuning f
 
 ## 1. HipBLASLt autotuning
 
-Transformer Engine and GEMM-heavy training benefit from HipBLASLt kernel selection. Primus integrates a **three-stage** workflow controlled by `PRIMUS_HIPBLASLT_TUNING_STAGE` (see `examples/README.md` and `examples/run_pretrain.sh`).
+Transformer Engine and GEMM-heavy training benefit from HipBLASLt kernel selection. Primus integrates a **three-stage** workflow controlled by `PRIMUS_HIPBLASLT_TUNING_STAGE` (see `examples/README.md` and `runner/helpers/hooks/train/pretrain/prepare_experiment.sh`).
 
-> **Activate tuning first.** The stage variable is only honored when the master switch `PRIMUS_HIPBLASLT_TUNING=1` is set (and `PRIMUS_DETERMINISTIC` is not `1`). Without `PRIMUS_HIPBLASLT_TUNING=1`, both `run_pretrain.sh` and the CLI hook `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` skip tuning entirely and force `TE_HIPBLASLT_TUNING_RUN_COUNT=0` / `TE_HIPBLASLT_TUNING_ALGO_COUNT=0`. Export `PRIMUS_HIPBLASLT_TUNING=1` alongside the stage in every command below.
+> **Activate tuning first.** The stage variable is only honored when the master switch `PRIMUS_HIPBLASLT_TUNING=1` is set (and `PRIMUS_DETERMINISTIC` is not `1`). Without `PRIMUS_HIPBLASLT_TUNING=1`, the CLI hook `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` skips tuning entirely and forces `TE_HIPBLASLT_TUNING_RUN_COUNT=0` / `TE_HIPBLASLT_TUNING_ALGO_COUNT=0`. Export `PRIMUS_HIPBLASLT_TUNING=1` alongside the stage in every command below.
 
 ### Stage 0 (default)
 
@@ -25,7 +25,7 @@ Run a **short** training job so shapes are collected during real forward/backwar
 ```bash
 export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=1
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
@@ -40,7 +40,7 @@ Runs offline tuning from dumped shapes (often 10–30 minutes depending on model
 ```bash
 export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=2
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
@@ -56,7 +56,7 @@ Point the runtime at the tuned override file:
 export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=3
 export HIPBLASLT_TUNING_OVERRIDE_FILE=/path/to/tune_hipblas_gemm_results.txt
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
@@ -64,10 +64,10 @@ export HIPBLASLT_TUNING_OVERRIDE_FILE=/path/to/tune_hipblas_gemm_results.txt
 
 | Variable | Role |
 |----------|------|
-| `TE_HIPBLASLT_TUNING_ALGO_COUNT` | Breadth of algorithm search for TE HipBLASLt tuning (see `examples/run_pretrain.sh` defaults). |
+| `TE_HIPBLASLT_TUNING_ALGO_COUNT` | Breadth of algorithm search for TE HipBLASLt tuning (see the defaults in `runner/helpers/hooks/train/pretrain/prepare_experiment.sh`). |
 | `TE_HIPBLASLT_TUNING_RUN_COUNT` | Number of benchmark runs per shape during TE tuning. |
 | `TE_HIPBLASLT_TUNING_ALGO_FILE` | Optional algorithm file for TE tuning flows. |
-| `TE_HIPBLASLT_TUNING` | When set, interacts with deterministic mode; avoid conflicting settings with shape dump (see script comments in `examples/run_pretrain.sh`). |
+| `TE_HIPBLASLT_TUNING` | When set, interacts with deterministic mode; avoid conflicting settings with shape dump (see the comments in `runner/helpers/hooks/train/pretrain/prepare_experiment.sh`). |
 | `HIPBLASLT_TUNING_OVERRIDE_FILE` | Override file for stage 3 training. |
 
 ### Standalone offline tool
@@ -115,7 +115,7 @@ primus_turbo:
   use_turbo_attention: true
   use_turbo_async_tp: true
   use_turbo_float8_linear: true
-  use_turbo_grouped_mm: false
+  use_turbo_grouped_gemm: false
 ```
 
 ### Documentation
@@ -163,7 +163,7 @@ From `primus/configs/models/megatron/language_model.yaml`:
 | `recompute_granularity` | `full`, `selective` | `full` recomputes more; max memory savings. |
 | `recompute_method` | `uniform`, `block` | How recomputation is distributed. |
 | `recompute_num_layers` | integer | Layers to recompute when using selective or uniform strategies. |
-| `recompute_layer_ids` | list or null | Primus extension: **global** layer indices from `0` to `num_layers - 1` (the patch resolves block-local indices to global ids via `layer_offset`). Use with `recompute_granularity: full` and supported recompute methods. |
+| `recompute_layer_ids` | list or null | Primus extension: **global** layer indices (the patch resolves block-local indices to global ids via `layer_offset`). Decoder layers are `0` to `num_layers - 1`; the MTP depths continue the numbering, so depth *d* is `num_layers + d`. Use with `recompute_granularity: full` and `recompute_method: null`. |
 
 ### TorchTitan
 
@@ -230,6 +230,35 @@ From `trainer_base.yaml` and model settings:
 | `use_turbo_deepep: true` | DeepEP dispatcher (`enable_primus_turbo` must be true). |
 | `turbo_sync_free_moe_stage: 2` | Recommended stage for sync-free MoE (per patch notes). |
 | `overlap_moe_expert_parallel_comm: true` | Overlap expert parallel communication (`trainer_base.yaml`). |
+
+---
+
+## 8. Known ROCm correctness workarounds
+
+The AMD Triton backend can emit a `buffer_store_dwordx4` whose data registers are redefined by a
+later instruction with no `s_waitcnt vmcnt` in between, so the store writes whatever the
+clobbering instruction left behind. Nothing faults and nothing warns; a few percent of the
+kernel's output elements simply hold garbage. Inductor's SwiGLU backward fusion trips it and
+poisons the MLP weight gradients, which diverges TorchTitan training. Megatron is exposed to the
+same kernels, since its fused activations are inductor-generated as well (`megatron/core/jit.py`
+sets `jit_fuser = torch.compile` on torch 2.2+).
+
+`primus/core/patches/triton_bufops_war_patches.py` handles this automatically on ROCm: every
+kernel compiles normally, and only those whose emitted AMDGCN contains the hazard are recompiled
+with buffer ops disabled. It has no switch: the recompile is a correctness fix, and a kernel that
+does not need one is left alone anyway.
+
+Two things about the design are deliberate. It selects per kernel rather than setting
+`AMDGCN_USE_BUFFER_OPS=0` globally, because the hazardous kernels lose nothing without buffer
+addressing while the Primus-Turbo grouped-GEMM kernels spill without it and carry no hazard — the
+global switch costs ~18% on MoE recipes for kernels that never needed fixing. And it decides from
+the emitted machine code rather than from a list of affected architectures, so a newly shipped
+architecture cannot silently fall out of coverage.
+
+It also appends to `TORCH_COMPILE_CACHE_KEY_TAG`, because on an FX graph cache hit inductor never
+calls `triton.compile`; without that, a cache filled before the patch existed would keep serving
+hazardous binaries. Note that every Triton build tried so far still emits the pattern, so this is
+not something an image upgrade removes.
 
 ---
 

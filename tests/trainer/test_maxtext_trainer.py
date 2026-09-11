@@ -21,7 +21,7 @@ def run_script(
     env_override: dict = None,
     extra_args: list[str] = None,
 ):
-    shell_entry = "examples/run_pretrain.sh"
+    shell_entry = "runner/primus-cli"
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
@@ -32,7 +32,18 @@ def run_script(
     train_log_path = os.path.join(ut_log_path, f"log.test_maxtext_trainer-{tag}.txt")
     env["TRAIN_LOG"] = train_log_path
 
-    cmd = ["bash", shell_entry]
+    cmd = [
+        "bash",
+        shell_entry,
+        "direct",
+        "--log_file",
+        train_log_path,
+        "--",
+        "train",
+        "pretrain",
+        "--config",
+        exp_path,
+    ]
     if extra_args:
         cmd.extend(extra_args)
 
@@ -44,7 +55,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_8B-BF16",
-            exp_path="examples/maxtext/configs/MI300X/llama3_8B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/llama3_8B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -57,7 +68,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_8B-FP8",
-            exp_path="examples/maxtext/configs/MI300X/llama3_8B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/llama3_8B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -73,7 +84,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_70B-BF16",
-            exp_path="examples/maxtext/configs/MI300X/llama3_70B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/llama3_70B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -87,7 +98,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_70B-FP8",
-            exp_path="examples/maxtext/configs/MI300X/llama3_70B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/llama3_70B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -103,7 +114,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_3_70B-BF16",
-            exp_path="examples/maxtext/configs/MI300X/llama3.3_70B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/llama3.3_70B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -117,7 +128,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_3_70B-FP8",
-            exp_path="examples/maxtext/configs/MI300X/llama3.3_70B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/llama3.3_70B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -133,7 +144,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama2_7B-BF16",
-            exp_path="examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/llama2_7B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -147,7 +158,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama2_7B-FP8",
-            exp_path="examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/llama2_7B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -163,7 +174,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama2_70B-BF16",
-            exp_path="examples/maxtext/configs/MI300X/llama2_70B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/llama2_70B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -177,7 +188,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama2_70B-FP8",
-            exp_path="examples/maxtext/configs/MI300X/llama2_70B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/llama2_70B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -193,7 +204,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "mixtral_8x7B-BF16",
-            exp_path="examples/maxtext/configs/MI300X/mixtral_8x7B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/mixtral_8x7B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -207,7 +218,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "mixtral_8x7B-FP8",
-            exp_path="examples/maxtext/configs/MI300X/mixtral_8x7B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/mixtral_8x7B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -223,7 +234,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "grok1-BF16",
-            exp_path="examples/maxtext/configs/MI300X/grok1-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/grok1-nanoo_fp8-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -237,7 +248,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "grok1-FP8",
-            exp_path="examples/maxtext/configs/MI300X/grok1-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/grok1-nanoo_fp8-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -253,7 +264,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "dpsk_v2_16B-BF16",
-            exp_path="examples/maxtext/configs/MI300X/deepseek_v2_16B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/deepseek_v2_16B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",
@@ -267,7 +278,7 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "dpsk_v2_16B-FP8",
-            exp_path="examples/maxtext/configs/MI300X/deepseek_v2_16B-pretrain.yaml",
+            exp_path="examples/maxtext/configs/MI300X/deepseek_v2_16B-bf16-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",

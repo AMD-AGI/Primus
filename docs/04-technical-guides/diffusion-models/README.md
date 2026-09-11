@@ -2,9 +2,9 @@
 
 **Purpose:** Developer-focused documentation for understanding Primus diffusion architecture, design decisions, and implementation details.
 
-**For training/usage instructions, see:** [examples/megatron/diffusion/README.md](../../../examples/megatron/diffusion/README.md)
+**For training/usage instructions, see:** [examples/megatron/diffusion/README.md](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/diffusion/README.md)
 
-**For test documentation, see:** [tests/unit_tests/backends/megatron/diffusion/](../../../tests/unit_tests/backends/megatron/diffusion/)
+**For test documentation, see:** [tests/unit_tests/backends/megatron/diffusion/](https://github.com/AMD-AGI/Primus/tree/main/tests/unit_tests/backends/megatron/diffusion)
 
 ---
 
@@ -300,10 +300,10 @@ FP8 precision training on AMD MI300X: configuration, benchmarks, tuning recipes,
 
 ### Related documentation
 
-📖 **[Training Guide](../../../examples/megatron/diffusion/README.md)**
+📖 **[Training Guide](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/diffusion/README.md)**
 User-facing guide for training Flux models (quick start, configurations, troubleshooting).
 
-📖 **[Test Directory](../../../tests/unit_tests/backends/megatron/diffusion/)**
+📖 **[Test Directory](https://github.com/AMD-AGI/Primus/tree/main/tests/unit_tests/backends/megatron/diffusion)**
 Test suite for diffusion models.
 
 ---
@@ -318,7 +318,7 @@ Test suite for diffusion models.
 
 **Test Status**: ✅ 390 tests passing
 
-See [tests/unit_tests/backends/megatron/diffusion/](../../../tests/unit_tests/backends/megatron/diffusion/) for details.
+See [tests/unit_tests/backends/megatron/diffusion/](https://github.com/AMD-AGI/Primus/tree/main/tests/unit_tests/backends/megatron/diffusion) for details.
 
 ---
 

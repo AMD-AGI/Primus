@@ -22,13 +22,11 @@ from typing import Optional
 
 from primus.core.launcher.parser import load_primus_config
 from primus.core.projection.config_validation import assert_recompute_pipeline_compat
-from primus.core.projection.module_profilers.language_model import (
-    build_profiler,
-    get_language_model_profiler_spec,
-)
+from primus.core.projection.module_profilers.language_model import build_profiler
 from primus.core.projection.training_config import (
     convert_primus_config_to_projection_config,
 )
+from primus.core.projection.workload_registry import resolve_top_level_spec
 
 
 def print_profiler_hierarchy(profiler, batch_size, seq_len, rank=None, name="root", depth=0, visited=None):
@@ -106,7 +104,7 @@ def project_from_config(
         primus_config=primus_config,
         pipeline_schedule_algorithm=pipeline_schedule_algorithm,
     )
-    model_profiler_spec = get_language_model_profiler_spec(training_config)
+    model_profiler_spec = resolve_top_level_spec(training_config)
     model_profiler = build_profiler(model_profiler_spec)
 
     seq_len = training_config.runtime_config.sequence_length

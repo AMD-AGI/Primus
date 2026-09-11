@@ -1,0 +1,137 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# TEMPLATE - native (bridge-free) HuggingFace -> Megatron checkpoint conversion
+#            + LoRA SFT. Copy this file, replace every <...> placeholder, and run.
+#
+# WHAT IT DOES
+#   Converts HF weights into a Megatron torch(legacy) checkpoint WITHOUT
+#   Megatron-Bridge / modelopt (works on a stock ROCm image), then LoRA-SFT-trains
+#   on it. Conversion builds the mcore model and maps HF safetensors onto it
+#   in-process; a phase="convert" patch neutralizes the legacy CUDA fused_kernels
+#   build on ROCm. No third_party/Megatron-LM edits are required.
+#
+# REQUIREMENTS
+#   - An HF model directory containing: *.safetensors, config.json, tokenizer files.
+#   - Supported families: Qwen3 (dense + MoE), DeepSeek-V2/V3 (MLA + MoE),
+#     Llama 2/3/3.1. (Detected automatically from config.json "architectures".)
+#   - Parallelism MUST match the single-shard converted checkpoint: TP=1, PP=1, EP=1.
+#   - Do NOT hardcode machine-specific paths in a committed config. Replace every
+#     <...> below, and prefer ${ENV_VAR} / CLI overrides for real paths.
+#   - When launching, unset the TE attention-backend env vars so a ROCm image's
+#     baked value does not trip the backend assert:
+#       unset NVTE_FLASH_ATTN NVTE_FUSED_ATTN NVTE_UNFUSED_ATTN
+#
+# --- USAGE A (recommended): let the post-train hook convert automatically ---
+#   Just set `hf_path` below and launch via the POST-TRAIN entrypoint. Native
+#   conversion is the DEFAULT for supported families (Qwen3 / DeepSeek / Llama)
+#   -- no extra flag is needed:
+#       ./runner/primus-cli direct train posttrain --config <path/to/this/file>
+#   That entrypoint runs the post-train hooks (dispatch_framework.sh ->
+#   01_convert_checkpoints.py) which detect the family, convert in-process
+#   (bridge-free), and pass the produced checkpoint to training.
+#   NOTE: plain `bash examples/run_pretrain.sh` is the PRE-train path and does
+#   NOT run this post-train conversion hook (use Usage B or primus-cli instead).
+#   Success signals in the log:
+#       "[Patch] ... phase=convert"  and  "COMPLETE and EXACT (0 ... )"
+#
+# --- USAGE B: convert once, then point training at the result ---
+#   Step 1 - convert (run inside the training container):
+#       python - <<'PY'
+#       from primus.backends.megatron.checkpoint import native_convert_common as common
+#       common.ensure_megatron_on_path()
+#       # Apply the phase="convert" patches FIRST (ROCm fused-kernels no-op, etc.);
+#       # convert() assumes they are already active in this process.
+#       common.apply_convert_patches(module_name="checkpoint_convert")
+#       # pick the module for your family: native_loader_qwen3 | native_loader_deepseek | native_loader_llama
+#       from primus.backends.megatron.checkpoint import native_loader_qwen3 as conv
+#       conv.convert("<HF_MODEL_DIR>", "<OUT_DIR>", dtype="bf16",
+#                    tensor_parallel_size=1, pipeline_parallel_size=1, expert_parallel_size=1)
+#       PY
+#   Step 2 - set `pretrained_checkpoint: <OUT_DIR>` (and drop `native_ckpt_convert`
+#            / `hf_path`) below, then launch as in Usage A.
+#
+# SFT SUCCESS SIGNALS
+#   "[PEFT pre-wrap] ... missing=0, unexpected=0"  and  lm loss << ln(vocab_size).
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:native-hf-to-megatron-sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    # Model preset that matches the HF model you are converting, e.g.
+    # qwen3_30B_A3B.yaml / deepseek_v2_lite.yaml / llama3_8B.yaml
+    model: <YOUR_MODEL_YAML>
+
+    overrides:
+      stage: sft
+
+      # ---- Native bridge-free HF -> Megatron conversion (Usage A) ----------
+      # Native conversion is the DEFAULT for supported families (Qwen3/DeepSeek/
+      # Llama) -- just set hf_path below and launch. Optional overrides:
+      #   native_ckpt_convert: false   # force the legacy Megatron-Bridge path
+      #   native_ckpt_convert: true    # force native (error out if family unsupported)
+      hf_path: <HF_MODEL_DIR>            # dir with *.safetensors + config.json + tokenizer
+      tokenizer_model: <HF_MODEL_DIR>
+      # native_ckpt_out: <OUT_DIR>       # optional; default: ${DATA_PATH}/megatron_checkpoints/<name>_native
+      # native_ckpt_dtype: bf16          # optional; default inferred from config.json torch_dtype
+
+      # ---- Usage B alternative: comment out the three lines above and set: --
+      # pretrained_checkpoint: <OUT_DIR>
+
+      finetune: true                     # load weights only (fresh optimizer/scheduler)
+      ckpt_format: torch                 # native converter emits torch(legacy); triggers the torch loader
+      auto_detect_ckpt_format: false
+      load: null
+      save: null
+
+      # ---- Parallelism: MUST match the single-shard converted checkpoint ----
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1      # MoE families: keep EP=1 to match the single shard
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # ---- MoE families (Qwen3-MoE / DeepSeek): correctness-first smoke path -
+      # moe_grouped_gemm: false
+      # use_turbo_deepep: false
+      # moe_permute_fusion: false
+      # moe_shared_expert_overlap: false
+
+      # ---- LoRA: set target_modules to the modules the architecture has ------
+      #   dense (Qwen3 / Llama):  linear_qkv, linear_proj, linear_fc1, linear_fc2
+      #   MLA   (DeepSeek):       linear_q_proj (or linear_q_down_proj + linear_q_up_proj),
+      #                           linear_kv_down_proj, linear_kv_up_proj, linear_proj,
+      #                           linear_fc1, linear_fc2
+      lora:
+        enabled: true
+        dim: 32
+        alpha: 32
+        dropout: 0.0
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2
+
+      # ---- Data + a quick 10-iter smoke (raise train_iters for real runs) ----
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+      seq_length: 2048
+      max_position_embeddings: 2048
+      micro_batch_size: 1
+      global_batch_size: 16
+      train_iters: 10
+      lr: 1.0e-5
+      min_lr: 0.0
+      bf16: true
+      disable_last_saving: true
+      log_interval: 1

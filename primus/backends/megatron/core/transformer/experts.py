@@ -46,10 +46,10 @@ class PrimusGroupedMLP(TEGroupedMLP):
         # NOTE: use_turbo_fused_act_with_probs is prioritized over use_te_activation_func and bias_activation_fusion
         self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
         self.moe_router_padding_for_quantization = args.moe_router_padding_for_quantization
-        self.use_turbo_ragged_grouped_gemm = getattr(args, "use_turbo_ragged_grouped_gemm", False)
-        # PrimusTurbo's tensorwise FP8 grouped GEMM consumes the original GPU
-        # tokens_per_expert tensor, including non-aligned (ragged) group sizes.
-        # Keep TE's explicit zero-padding fallback for other recipes/backends.
+        self.turbo_grouped_gemm_without_padding = getattr(args, "turbo_grouped_gemm_without_padding", False)
+        # PrimusTurbo grouped GEMMs consume the original GPU tokens_per_expert
+        # tensor for every supported quantization recipe. Keep TE's explicit
+        # zero-padding fallback only when the no-padding path is not enabled.
 
     def _use_explicit_quantization_padding(self) -> bool:
         """Whether this forward must pad expert groups before quantization."""
@@ -57,25 +57,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
             return False
         if self.moe_router_padding_for_quantization:
             return False
-        if not self.use_turbo_ragged_grouped_gemm:
-            return True
-
-        # Check the active autocast state at forward time. The CLI recipe alone
-        # does not prove that this grouped linear is actually using Turbo FP8.
-        from primus.backends.megatron.core.extensions.primus_turbo import (
-            PrimusTurboLowPrecisionGlobalStateManager,
-        )
-
-        if not PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
-            raise RuntimeError(
-                "use_turbo_ragged_grouped_gemm=True requires an active PrimusTurbo FP8 autocast context."
-            )
-        quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-        if not quant_config.current_scaling():
-            raise RuntimeError(
-                "use_turbo_ragged_grouped_gemm=True currently requires tensorwise dynamic FP8 scaling."
-            )
-        return False
+        return not self.turbo_grouped_gemm_without_padding
 
     def bias_act_func(self, intermediate_parallel, bias_parallel, permuted_probs):
         """
@@ -150,6 +132,17 @@ class PrimusGroupedMLP(TEGroupedMLP):
             assert (
                 tokens_per_experts is not None
             ), "tokens_per_experts is required when `use_turbo_fused_act_with_probs` is True."
+
+            # TODO(ruibin)： The turbo kernel takes no clamp / offset / fp8-input-store arguments
+            assert (
+                self.config.activation_func_clamp_value is None
+            ), "`use_turbo_fused_act_with_probs` does not support activation_func_clamp_value."
+            assert (
+                self.config.glu_linear_offset == 0.0
+            ), "`use_turbo_fused_act_with_probs` does not support a non-zero glu_linear_offset."
+            assert (
+                not self.config.activation_func_fp8_input_store
+            ), "`use_turbo_fused_act_with_probs` does not support activation_func_fp8_input_store."
 
             if self.activation_func == F.silu and self.config.gated_linear_unit:
                 activation = "silu"
@@ -243,7 +236,6 @@ class PrimusGroupedMLP(TEGroupedMLP):
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
-                # NOTE: use the bias_act_func_with_mask instead of the bias_act_func to reduce the extra compute when stage of `sync_free_moe` is 3.
                 bias_act_output = self.activation_checkpoint.checkpoint(
                     self.bias_act_func_with_mask, fc1_output, bias_parallel, permuted_probs, tokens_per_expert
                 )

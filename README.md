@@ -25,10 +25,10 @@
 
 ## ✅ Supported Models (high level)
 
-- **Megatron-LM**: LLaMA2 / LLaMA3.x / LLaMA4 families, DeepSeek-V2 / V3 / V4, Qwen2.5 and Qwen3 (dense and MoE), Mixtral, Grok, GPT-OSS 20B/120B, GLM, Kimi K2, MiniMax, LFM2, plus hybrid and linear-attention stacks (Mamba, Zebra-LLaMA with GDN / KDA)
+- **Megatron-LM**: LLaMA2 / LLaMA3.x / LLaMA4 families, DeepSeek-V2 / V3 / V4, Qwen2.5 and Qwen3 (dense and MoE), Mixtral, Grok, GPT-OSS 20B/120B, GLM, Kimi K2, MiniMax, LFM2, plus hybrid and linear-attention stacks (Mamba, Hylo-LLaMA with GDN / KDA)
 - **TorchTitan**: LLaMA3.x / LLaMA4, DeepSeek-V3 (16B to 671B), and Qwen3 0.6B to 32B
 - **MaxText (JAX)**: LLaMA2 / LLaMA3.x, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, and Qwen3 14B / 30B-A3B (subset; see MaxText docs for details)
-- **Megatron-Bridge**: SFT and LoRA post-training for Qwen3 8B/32B, LLaMA3.1 70B, Zebra-LLaMA, and Mamba
+- **Megatron-Bridge**: SFT and LoRA post-training for Qwen3 8B/32B, LLaMA3.1 70B, Hylo-LLaMA, and Mamba
 - **Diffusion**: Flux.1 (schnell / dev) text-to-image and Wan 2.1 / 2.2 text- and image-to-video
 
 For the full and up-to-date model matrix, see [Supported Models](./docs/06-developer-guide/model-support-matrix.md).
@@ -37,6 +37,7 @@ For the full and up-to-date model matrix, see [Supported Models](./docs/06-devel
 
 ## 🆕 What's New
 
+- **[2026/09/07]** Primus **v26.6** training images: `rocm/primus:v26.6` and `rocm/jax-training:maxtext-v26.6` (JAX 0.11.0, Transformer Engine 2.17)
 - **[2026/07/29]** ⚡ **MegaMoE** - FlyDSL-based fused MoE layer that folds expert all-to-all into the grouped GEMMs, plus FP4 grouped GEMM support ([MegaMoE guide](./docs/04-technical-guides/mega-moe.md))
 - **[2026/07/29]** Hybrid linear-attention models: Gated Delta Net (GDN) and Kimi Delta Attention (KDA) on Megatron-LM ([Hybrid models](./docs/04-technical-guides/hybrid-models/README.md))
 - **[2026/07/22]** Backend upgrades: TorchTitan v0.2.2 (PyTorch 2.12) with GPT-OSS, and MaxText v26.5
@@ -47,9 +48,9 @@ For the full and up-to-date model matrix, see [Supported Models](./docs/06-devel
 - **[2026/06/08]** Primus is published as a pip wheel with a bundled `primus-cli` ([install](#install-as-a-python-package-pip))
 - **[2026/01/22]** Post-training via Megatron-Bridge - SFT and LoRA workflows ([Post-training](./docs/02-user-guide/posttraining.md))
 - **[2026/01/06]** MXFP4 low-precision training in the Megatron-LM backend, with MXFP8 recipes following in June
-- **[2025/12/17]** MoE Training Best Practices on AMD GPUs - [MoE Package Blog](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html)
 - **[2025/11/14]** 🎉 **Primus CLI 1.0 Released** - Unified command-line interface with comprehensive documentation
-- **[2025/08/22]** Primus introduction [blog](https://rocm.blogs.amd.com/software-tools-optimization/primus/README.html)
+
+> Looking for the technical articles behind these releases? See [Technical Blogs](#-technical-blogs).
 
 <details>
 <summary>Earlier updates</summary>
@@ -111,9 +112,9 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
 
     ```bash
     # For Megatron-LM and TorchTitan backends
-    docker pull rocm/primus:v26.4
+    docker pull rocm/primus:v26.6
     # For MaxText backend
-    docker pull rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0
+    docker pull rocm/jax-training:maxtext-v26.6
     ```
 
 2. **Clone the repository**
@@ -122,7 +123,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
     cd Primus
     # checkout the branch for the specific release
-    git checkout release/v26.4
+    git checkout release/v26.6
     git submodule update --init --recursive
     ```
 
@@ -133,7 +134,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     # NOTE: If your config downloads weights/tokenizer from Hugging Face Hub,
     #       you typically need to pass HF_TOKEN into the container.
     # Run in the Primus repository root directory
-    ./primus-cli container --image rocm/primus:v26.4 \
+    ./primus-cli container --image rocm/primus:v26.6 \
       --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
       -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
     ```
@@ -151,7 +152,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/02-user-gu
     python -m venv primus-env
     source primus-env/bin/activate
     # Install Primus
-    pip install "primus==26.4.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
+    pip install "primus==26.6.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
 
     ```
 
@@ -162,7 +163,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/02-user-gu
 2. **Run training in container using pip-installed Primus**
 
     ```bash
-    primus-cli container --image rocm/primus:v26.4 \
+    primus-cli container --image rocm/primus:v26.6 \
     --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
     --volume /path/to/your/data:/data  -- --log_file /data/run.log \
     -- train pretrain --config /data/your/config.yaml
@@ -187,6 +188,20 @@ Comprehensive documentation is available in the [`docs/`](./docs/) directory:
 - **[CLI Architecture](./docs/06-developer-guide/cli-architecture.md)** - Technical design and architecture
 - **[Backend Patch Notes](./docs/06-developer-guide/backend-patch-notes.md)** - Primus-specific backend arguments
 - **[Full Documentation Index](./docs/README.md)** - Browse all available documentation
+
+---
+
+## 📖 Technical Blogs
+
+Deep-dives from the AMD Brain-TIO (Training and Inference Optimization) team. Most recent first:
+
+- **[2026/09/03]** [Enabling DeepSeek-V4-Flash Training on AMD Instinct MI355X GPUs with Primus](https://rocm.blogs.amd.com/software-tools-optimization/primus-deepseek-v4/README.html)
+- **[2026/08/12]** [Using ODC to Accelerate AMD SFT Training](https://rocm.blogs.amd.com/software-tools-optimization/odc-accelerate-training/README.html)
+- **[2026/07/06]** [Primus Tuning Agent: Closing the Configuration-Search Loop](https://rocm.blogs.amd.com/software-tools-optimization/primus-tuning-agent/README.html)
+- **[2026/06/10]** [Dropless MoE Training in JAX with Primus-Turbo](https://rocm.blogs.amd.com/software-tools-optimization/maxtext-dropless-moe/README.html)
+- **[2026/04/24]** [Primus Projection: Estimate Memory and Performance Before You Train](https://rocm.blogs.amd.com/software-tools-optimization/primus-projection/README.html)
+
+For every article, what each one covers, and the documentation it maps to, see the [technical blog index](./docs/07-technical-blogs/README.md).
 
 ---
 
@@ -259,10 +274,23 @@ If you rely on Primus, please consider starring or contributing to these project
 
 We welcome contributions! Please see our [Contributing Guide](./CONTRIBUTING.md) for details.
 
+## 📌 Citation
+
+If you use Primus in your research, please cite the repository - GitHub renders [`CITATION.cff`](./CITATION.cff) as a **Cite this repository** button in the sidebar:
+
+```bibtex
+@software{primus,
+  title  = {Primus: A Unified Training Framework for Large Models on AMD GPUs},
+  author = {{AMD Brain-TIO (Training and Inference Optimization) Team}},
+  url    = {https://github.com/AMD-AGI/Primus},
+  year   = {2025}
+}
+```
+
 ## 📄 License
 
 Primus is released under the [Apache 2.0 License](./LICENSE).
 
 ---
 
-**Built with ❤️ by AMD AI Brain - Training at Scale (TAS) Team**
+**Built with ❤️ by AMD Brain-TIO (Training and Inference Optimization) Team**

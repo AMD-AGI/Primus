@@ -39,12 +39,27 @@ def get_model_provider(model_type="gpt"):
     Resolve model_provider across Megatron versions and model types.
 
     Args:
-        model_type (str): Type of model - 'gpt', 'mamba', or 'deepseek_v4'. Defaults to 'gpt'.
+        model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4' or
+            'kimi_k3'. Defaults to 'gpt'.
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
     - Old:   pretrain_gpt.model_provider / pretrain_mamba.model_provider
     """
+    # Primus-owned: Kimi K3 (text backbone / Kimi-Linear)
+    if model_type == "kimi_k3":
+        kimi_k3_module = importlib.import_module(
+            "primus.backends.megatron.core.models.kimi_k3.kimi_k3_builders"
+        )
+        log_rank_0(
+            "[Primus][MegatronCompat] Loaded Kimi-K3 model_provider + builder "
+            f"from {kimi_k3_module.__name__}"
+        )
+        return partial(
+            kimi_k3_module.model_provider,
+            kimi_k3_module.kimi_k3_builder,
+        )
+
     # Primus-owned: DeepSeek-V4 (Phase 2 stub; full V4 wiring lands in Phase 3+)
     if model_type == "deepseek_v4":
         deepseek_v4_module = importlib.import_module(

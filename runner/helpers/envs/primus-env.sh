@@ -42,9 +42,9 @@ detect_gpu_model() {
 
     # Check if rocm-smi is available
     if ! command -v rocm-smi &> /dev/null; then
-        echo "Error: rocm-smi not found. Is ROCm installed?" >&2
+        echo "Warning: rocm-smi not found; set PRIMUS_GPU_MODEL (e.g. MI355X) for GPU env overrides." >&2
         echo "unknown"
-        return 1
+        return 0
     fi
 
     # Get product name from rocm-smi
@@ -59,12 +59,23 @@ detect_gpu_model() {
     # Extract model identifier (MI300, MI355, etc.)
     if [[ "$product_name" =~ MI([0-9]+)([A-Z]*) ]]; then
         gpu_model="MI${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+    else
+        # Some parts report a generic marketing name ("AMD Radeon Graphics")
+        # with no MI number; fall back to the ISA, which is always specific.
+        local arch
+        arch=$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9]+')
+        case "$arch" in
+            gfx1250) gpu_model="MI455X" ;;
+        esac
     fi
 
     echo "$gpu_model"
 }
 
-GPU_MODEL=$(detect_gpu_model)
+GPU_MODEL="${PRIMUS_GPU_MODEL:-}"
+if [[ -z "${GPU_MODEL}" ]]; then
+    GPU_MODEL=$(detect_gpu_model)
+fi
 if [[ "$GPU_MODEL" == "unknown" ]]; then
     LOG_WARN "Unable to detect GPU model. Using default configuration."
 fi

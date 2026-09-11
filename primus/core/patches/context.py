@@ -27,6 +27,12 @@ PHASES = [
     "build_args",  # During backend argument construction
     "before_train",  # Right before training starts
     "after_train",  # Right after training completes
+    # Checkpoint-conversion phase. Applied in-process by the native
+    # (bridge-free) HF->Megatron converter entrypoint BEFORE it builds the
+    # mcore model / touches Megatron, so convert-time monkeypatches (e.g. the
+    # ROCm fused-kernels no-op) take effect. This is NOT part of the training
+    # lifecycle; nothing in the train/eval loops runs "convert" patches.
+    "convert",
     # Additional phases could be added in the future:
     # "before_eval",
     # "after_eval",

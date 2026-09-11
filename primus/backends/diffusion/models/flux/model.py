@@ -115,6 +115,22 @@ class Flux(nn.Module):
         )
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
 
+    def init_weights(self) -> None:
+        """Initialize exactly as the MLPerf TorchTitan FLUX reference."""
+        nn.init.xavier_uniform_(self.img_in.weight)
+        nn.init.constant_(self.img_in.bias, 0)
+        nn.init.xavier_uniform_(self.txt_in.weight)
+        nn.init.constant_(self.txt_in.bias, 0)
+        self.time_in.init_weights(init_std=0.02)
+        self.vector_in.init_weights(init_std=0.02)
+        if self.params.guidance_embed:
+            self.guidance_in.init_weights(init_std=0.02)
+        for block in self.single_blocks:
+            block.init_weights()
+        for block in self.double_blocks:
+            block.init_weights()
+        self.final_layer.init_weights()
+
     def _checkpoint_double(self, block: nn.Module, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor):
         import torch.utils.checkpoint as checkpoint_utils
 

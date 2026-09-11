@@ -135,12 +135,20 @@ class DeepseekV4MTPLayer(MultiTokenPredictionLayer):
 
     # ------------------------------------------------------------------
 
-    def _proj_and_transformer_layer(
+    def _proj_and_transformer_layer(  # pylint: disable=unused-argument
         self,
         hidden_states: torch.Tensor,
         decoder_input: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        **_kwargs,
+        context: Optional[torch.Tensor] = None,
+        context_mask: Optional[torch.Tensor] = None,
+        rotary_pos_emb: Optional[torch.Tensor] = None,
+        rotary_pos_cos: Optional[torch.Tensor] = None,
+        rotary_pos_sin: Optional[torch.Tensor] = None,
+        attention_bias: Optional[torch.Tensor] = None,
+        inference_params=None,
+        packed_seq_params=None,
+        sequence_len_offset: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """eh_proj -> (lift -> V4 hybrid layer -> per-depth HyperHead) -> norm.
 
@@ -149,6 +157,14 @@ class DeepseekV4MTPLayer(MultiTokenPredictionLayer):
         :class:`DeepseekV4HybridLayer` so the mHC math matches the main
         decoder block exactly (same ``_lift_streams_in`` / ``_lower_streams_out``
         helpers).
+
+        Every upstream keyword is spelled out even though V4 consumes none of
+        them past ``decoder_input``: upstream's ``_checkpointed_forward``
+        forwards its kwargs *positionally*
+        (``tensor_parallel.checkpoint(forward_func, ..., *kwargs.values())``),
+        so a ``**kwargs`` catch-all would raise ``TypeError: takes from 3 to 4
+        positional arguments but 13 were given`` under
+        ``recompute_granularity=full`` + ``recompute_method=uniform``.
         """
         if self.config.sequence_parallel:
             rng_context = tensor_parallel.get_cuda_rng_tracker().fork()
@@ -176,6 +192,13 @@ class DeepseekV4MTPLayer(MultiTokenPredictionLayer):
                     x,
                     position_ids=self._mtp_position_ids,
                     token_ids=None,
+                    # Without this the MTP depth runs dense-causal across the whole pack:
+                    # the inner layer accepts packed_seq_params, and when it is None
+                    # _thd_seq_starts returns None, which also switches off the packing
+                    # guard -- so sample B attends to every token of sample A with no
+                    # error, no NaN and a finite loss. Upstream's equivalent passes it on
+                    # both branches (multi_token_prediction.py).
+                    packed_seq_params=packed_seq_params,
                 )
                 # Per-depth collapse K streams -> single stream.
                 if self.hc_mult > 1 and self.mtp_hyper_head is not None:

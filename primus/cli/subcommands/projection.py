@@ -287,15 +287,26 @@ def _add_performance_args(parser):
             "  both       - Run both benchmark and simulation, report side-by-side\n"
         ),
     )
+    try:
+        from primus.core.projection.simulation_backends.factory import (
+            list_available_gemm_backends,
+        )
+
+        _gemm_backend_choices = list(list_available_gemm_backends())
+    except Exception:
+        _gemm_backend_choices = ["origami"]
     parser.add_argument(
         "--gemm-backend",
         type=str,
         required=False,
         default=None,
-        choices=["origami"],
+        choices=_gemm_backend_choices,
         help=(
             "GEMM simulation backend (only used when --profiling-mode is 'simulate' or 'both').\n"
             "  origami  - Open-source GEMM performance model (default)\n"
+            "Choices are discovered at runtime from registered backends "
+            "(built-in + 'primus.gemm_backends' entry points + "
+            "PRIMUS_GEMM_BACKEND_PLUGINS).\n"
         ),
     )
     parser.add_argument(

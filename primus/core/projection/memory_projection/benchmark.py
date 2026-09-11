@@ -34,13 +34,11 @@ from primus.core.projection.memory_projection.extrapolation import (
     extrapolate_per_rank_peak,
 )
 from primus.core.projection.memory_projection.reports import print_per_rank_breakdown
-from primus.core.projection.module_profilers.language_model import (
-    build_profiler,
-    get_language_model_profiler_spec,
-)
+from primus.core.projection.module_profilers.language_model import build_profiler
 from primus.core.projection.training_config import (
     convert_primus_config_to_projection_config,
 )
+from primus.core.projection.workload_registry import resolve_top_level_spec
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -300,8 +298,8 @@ def launch_projection_from_cli(args, overrides):
         if metadata.get("benchmark_num_experts") is not None:
             bench_training_config.model_config.num_experts = int(metadata["benchmark_num_experts"])
 
-    target_profiler = build_profiler(get_language_model_profiler_spec(target_training_config))
-    bench_profiler = build_profiler(get_language_model_profiler_spec(bench_training_config))
+    target_profiler = build_profiler(resolve_top_level_spec(target_training_config))
+    bench_profiler = build_profiler(resolve_top_level_spec(bench_training_config))
 
     # ── Extract bench measurement ──
     bm: BenchMeasurement = extract_bench_measurement(profiling_results)

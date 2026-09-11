@@ -32,11 +32,15 @@ from torch.testing._internal.common_utils import (
 if not torch.cuda.is_available() or torch.version.hip is None or torch.cuda.get_device_capability() != (9, 5):
     pytest.skip("MegaMoE only supports gfx950", allow_module_level=True)
 
-from primus.backends.megatron.core.extensions.mega_moe import PrimusTurboMegaMoELayer
+from primus.backends.megatron.core.extensions.mega_moe import (
+    MegaMoEFP8Experts,
+    PrimusTurboMegaMoELayer,
+)
 
 
-def _create_args():
+def _create_args(precision: str = "bf16"):
     args = SimpleNamespace()
+    args.turbo_mega_moe_precision = precision
     args.sequence_parallel = False
     args.context_parallel_size = 1
     args.micro_batch_size = 1
@@ -163,11 +167,11 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
     def device(self) -> torch.device:
         return torch.device("cuda", self.rank)
 
-    def _init_process(self):
+    def _init_process(self, precision: str = "bf16"):
         torch.cuda.set_device(self.device)
         store = dist.FileStore(self.file_name, self.world_size)
         dist.init_process_group(backend="nccl", world_size=self.world_size, rank=self.rank, store=store)
-        set_args(_create_args())
+        set_args(_create_args(precision))
         # standalone harness has no Primus logger; attach a plain one so any
         # log_rank_0 call in the code path doesn't crash
         import logging
@@ -192,18 +196,23 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
     @skip_if_lt_x_gpu(8)
     @parametrize("moe_router_topk", [8])
     @parametrize("num_ga", [4])
-    def test_forward_backward(self, moe_router_topk, num_ga):
+    @parametrize("precision", ["bf16", "mxfp8"])
+    def test_forward_backward(self, moe_router_topk, num_ga, precision):
         # DeepSeek-V3 EP8 shapes: 256 experts, top-8, hidden 7168.
         # Single MoE layer, num_ga gradient-accumulation microbatches: forward +
         # backward num_ga times without zeroing grads (mirrors real GA training).
         # One layer -> no cross-layer backward accumulation, so grads stay clean.
+        # precision="mxfp8" flips the experts while the reference stays bf16 Megatron, so its floor
+        # also absorbs the fp8 quantization error -- it is a functional check of the fp8 wiring
+        # (state threading, GA-safe weight-quant cache), not a precision measurement.
         num_moe_experts, hidden_size = 256, 7168
-        self._init_process()
+        self._init_process(precision=precision)
         self._setup_ep()
         try:
             config = _build_config(self.world_size, num_moe_experts, moe_router_topk)
             moe_layers, mega_layers = _build_layers(config, num_moe_experts, 1)
             moe_layer, mega_layer = moe_layers[0], mega_layers[0]
+            self.assertEqual(isinstance(mega_layer.experts, MegaMoEFP8Experts), precision == "mxfp8")
             moe_layer.train(True)
             mega_layer.train(True)
             experts = moe_layer.experts.local_experts
@@ -231,11 +240,12 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
                     f"max_abs_diff={(out.float()-ref.float()).abs().max().item():.3e}"
                 )
 
-            GRAD_FLOOR = 0.95
+            GRAD_FLOOR = 0.90 if precision == "mxfp8" else 0.95
             failures = []
 
             def check_accuracy(tag, cos):
-                if cos <= GRAD_FLOOR:
+                # negated compare so a NaN cosine fails instead of slipping through
+                if not cos > GRAD_FLOOR:
                     failures.append(f"{tag} cosine {cos:.6f} < {GRAD_FLOOR}")
 
             # forward + dx parity: every microbatch

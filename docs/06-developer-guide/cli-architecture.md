@@ -2,7 +2,7 @@
 
 > ⚠️ **NOTE**: This is a draft version and not the final release.
 >
-> **Author**: AMD AI Brain - Training at Scale (TAS) Team
+> **Author**: AMD Brain-TIO (Training and Inference Optimization) Team
 > **Published**: 2025-11-10
 > **Tags**: `#ROCm` `#LLM-Training` `#Primus` `#DevTools` `#AMD-GPU`
 

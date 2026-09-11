@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Tuple
 from primus.core.projection.simulation_backends.base import (
     GEMMSimulationBackend,
     SimulationResult,
+    register_gemm_backend,
 )
 
 # ---------------------------------------------------------------------------
@@ -60,6 +61,36 @@ def _try_import_origami():
     return _origami_available
 
 
+# Origami API-capability cache, populated lazily on first use.  Different
+# origami builds expose different signatures; we probe once and remember the
+# result so the public tree runs against either build without depending on a
+# newer origami.  Keys: ``"hw_arch_rf"`` -> whether ``get_hardware_for_arch``
+# accepts a register-file (``rf_capacity``) argument.
+_ORIGAMI_API_CAPS: Dict[str, bool] = {}
+
+
+def _get_hardware_for_arch(arch_enum, n_cu, lds_capacity, rf_capacity, l2_capacity, clock_khz):
+    """Call ``origami.get_hardware_for_arch`` tolerating builds without rf_capacity.
+
+    Newer origami builds accept a register-file capacity argument (inserted
+    between ``lds_capacity`` and ``L2_capacity``); older/public builds expose
+    only the 5-argument signature ``(arch, N_CU, lds_capacity, L2_capacity,
+    compute_clock_khz)``.
+    """
+    if _ORIGAMI_API_CAPS.get("hw_arch_rf", True):
+        try:
+            hw = _origami.get_hardware_for_arch(
+                arch_enum, n_cu, lds_capacity, rf_capacity, l2_capacity, clock_khz
+            )
+            _ORIGAMI_API_CAPS["hw_arch_rf"] = True
+            return hw
+        except TypeError:
+            if _ORIGAMI_API_CAPS.get("hw_arch_rf") is True:
+                raise
+            _ORIGAMI_API_CAPS["hw_arch_rf"] = False
+    return _origami.get_hardware_for_arch(arch_enum, n_cu, lds_capacity, l2_capacity, clock_khz)
+
+
 # ---------------------------------------------------------------------------
 # Known hardware profiles for GPU-less simulation via get_hardware_for_arch.
 # ---------------------------------------------------------------------------
@@ -73,6 +104,7 @@ class _HardwareProfile:
     l2_capacity: int  # bytes (per XCD)
     compute_clock_khz: int
     hbm_bandwidth_gbps: float = 5300.0  # peak HBM bandwidth (GB/s)
+    rf_capacity: int = 512 * 1024  # Register File (VGPR) capacity per CU in bytes
 
 
 _KNOWN_PROFILES: Dict[str, _HardwareProfile] = {
@@ -81,7 +113,11 @@ _KNOWN_PROFILES: Dict[str, _HardwareProfile] = {
     "gfx942": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 5300.0),
     # MI325X / gfx942 (same die as MI300X, HBM3E upgrade): ~6.0 TB/s
     "mi325x": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 6000.0),
-    # MI355X / gfx950: HBM3E ~8.0 TB/s
+    # MI350X / MI355X / gfx950: same CDNA4 die (256 CU), HBM3E ~8.0 TB/s.
+    # MI350X (air-cooled) and MI355X (liquid-cooled) share the compute profile;
+    # without the mi350x key origami falls back to local-device detection and
+    # ignores n_cu_override, which breaks the FAv3 1-CU tile model.
+    "mi350x": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
     "mi355x": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
     "gfx950": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
     # MI300A
@@ -97,6 +133,13 @@ _DTYPE_MAP: Dict[str, str] = {
     "fp16": "f16",
     "fp32": "f32",
     "fp8": "bf8_fnuz",
+    # Origami has no microscaled / sub-8-bit path; model them as fp8-class
+    # (bf8_fnuz) rather than silently falling back to bf16.
+    "mx8": "bf8_fnuz",
+    "mx6": "bf8_fnuz",
+    "mx4": "bf8_fnuz",
+    "fp6": "bf8_fnuz",
+    "fp4": "bf8_fnuz",
 }
 
 # ---------------------------------------------------------------------------
@@ -269,8 +312,14 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         problem.b_mx_block_size = 0
 
         # ----- Select best config & predict latency (in clock cycles) -----
+        # Newer origami builds take a ``model_t`` selector as a 4th argument;
+        # the public/CI build exposes only the 3-argument signature.  Dispatch
+        # on availability so the public tree runs against either build.
         try:
-            result = _origami.select_config(problem, self._hardware, self._configs)
+            if hasattr(_origami, "model_t"):
+                result = _origami.select_config(problem, self._hardware, self._configs, _origami.model_t.gemm)
+            else:
+                result = _origami.select_config(problem, self._hardware, self._configs)
         except Exception as e:
             raise RuntimeError(
                 f"Origami select_config failed for " f"(M={m}, N={n}, K={k}, dtype={dtype}): {e}"
@@ -395,10 +444,11 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 clock_khz = self._clock_override_mhz * 1000
             n_cu = self._n_cu_override if self._n_cu_override is not None else profile.n_cu
             arch_enum = getattr(_origami.architecture_t, profile.arch_enum_name)
-            hw = _origami.get_hardware_for_arch(
+            hw = _get_hardware_for_arch(
                 arch_enum,
                 n_cu,
                 profile.lds_capacity,
+                profile.rf_capacity,
                 profile.l2_capacity,
                 clock_khz,
             )
@@ -450,10 +500,11 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             clock_khz = self._clock_override_mhz * 1000
         n_cu = self._n_cu_override if self._n_cu_override is not None else profile.n_cu
         arch_enum = getattr(_origami.architecture_t, profile.arch_enum_name)
-        hw = _origami.get_hardware_for_arch(
+        hw = _get_hardware_for_arch(
             arch_enum,
             n_cu,
             profile.lds_capacity,
+            profile.rf_capacity,
             profile.l2_capacity,
             clock_khz,
         )
@@ -468,3 +519,23 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 f"clock={clock_khz / 1e6:.1f} GHz{override_tag}{cu_tag}"
             )
         return hw
+
+
+# ---------------------------------------------------------------------------
+# Self-registration.  Importing this module registers the built-in ``origami``
+# GEMM backend with the shared registry (see ``base.register_gemm_backend``).
+# ---------------------------------------------------------------------------
+def _make_origami_backend(
+    gpu_arch=None,
+    gpu_clock_mhz=None,
+    n_cu_override=None,
+    **_kwargs,
+) -> OrigamiGEMMBackend:
+    return OrigamiGEMMBackend(
+        gpu_arch=gpu_arch,
+        gpu_clock_mhz=gpu_clock_mhz,
+        n_cu_override=n_cu_override,
+    )
+
+
+register_gemm_backend("origami", _make_origami_backend)

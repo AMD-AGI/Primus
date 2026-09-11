@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -98,6 +99,9 @@ class PrimusRuntime:
         try:
             # 1) Initialize configuration (PrimusConfig + module_config + CLI overrides)
             self._initialize_configuration(module_name, overrides)
+            # 1.5) Apply per-config environment overrides (top-level `env:`) before
+            #      any backend / distributed / JAX initialization consumes them.
+            self._apply_config_env()
             # 2) Initialize runtime environment (paths, distributed, logging)
             self._initialize_runtime_environment()
             # 3) Initialize backend and execute trainer lifecycle
@@ -143,6 +147,8 @@ class PrimusRuntime:
 
         # 1) Configuration (optionally injected, so callers can pre-mutate it)
         self._initialize_configuration(module_name, overrides, primus_config=primus_config)
+        # 1.5) Apply per-config environment overrides (top-level `env:`).
+        self._apply_config_env()
         # 2) Runtime environment (paths, distributed, logging)
         self._initialize_runtime_environment()
         # 3) Backend adapter + trainer (convert config, build_args patches, instantiate)
@@ -298,6 +304,68 @@ class PrimusRuntime:
         merged_params_dict = deep_merge(base_params_dict, override_dict)
         module_cfg.params = dict_to_nested_namespace(merged_params_dict)
 
+    def _apply_config_env(self) -> None:
+        """Apply a top-level ``env:`` mapping from the experiment YAML into ``os.environ``.
+
+        This is the single, launcher-agnostic hook for per-config environment
+        overrides (e.g. ``XLA_FLAGS``, ``XLA_PYTHON_CLIENT_MEM_FRACTION``,
+        ``RCCL_WARP_SPEED_AUTO``). It runs after configuration is loaded but
+        BEFORE the runtime environment, distributed init, backend adapter, or any
+        ``import jax`` — so exported flags take effect for JAX/XLA and RCCL.
+
+        The block lives at the top level of the YAML (a sibling of ``modules:``),
+        NOT inside a module, so it is never swept into ``module_config.params``
+        and therefore never forwarded to the backend (MaxText/Megatron) args:
+
+            env:
+              XLA_PYTHON_CLIENT_MEM_FRACTION: "0.96"
+              RCCL_WARP_SPEED_AUTO: "0"
+
+        Semantics:
+          - Values are stringified and ``os.environ[k] = str(v)`` unconditionally,
+            so a per-config ``env:`` WINS over values baked into the image.
+          - Keys are registered with ``env_registry.mark_config_owned`` so a backend's
+            append-mode defaults (``XLA_FLAGS``) do not override them. Setting
+            ``XLA_FLAGS`` here therefore replaces the managed defaults outright; use
+            ``XLA_FLAGS_APPEND`` to override individual flags on top of them.
+          - ``$VAR`` / ``${VAR}`` references are expanded via ``os.path.expandvars``
+            (bash ``${VAR:-default}`` syntax is NOT expanded).
+          - Best-effort: a malformed or missing ``env:`` never aborts the run.
+        """
+        cfg_path = getattr(self.ctx, "config_path", None) if self.ctx is not None else None
+        if not cfg_path:
+            return
+        try:
+            import yaml
+
+            cfg_path = Path(cfg_path)
+            if not cfg_path.exists():
+                return
+            with open(cfg_path) as f:
+                raw = yaml.safe_load(f) or {}
+            env_block = raw.get("env") if isinstance(raw, dict) else None
+            if not env_block:
+                return
+            if not isinstance(env_block, dict):
+                # NOTE: logger is not initialized yet at this stage (see
+                # _initialize_runtime_environment), so use print() like _apply_overrides.
+                print(
+                    f"[Primus:Runtime] Ignoring non-mapping top-level `env:` in {cfg_path.name} "
+                    f"(type={type(env_block).__name__})"
+                )
+                return
+            from primus.core.backend.env_registry import mark_config_owned
+
+            for key, value in env_block.items():
+                resolved = os.path.expandvars(str(value))
+                os.environ[str(key)] = resolved
+                print(f"[Primus:Runtime] env override: {key}={resolved}")
+            # Let append-mode backend defaults (XLA_FLAGS) see that these came from
+            # the config and step aside instead of overriding them.
+            mark_config_owned(*(str(k) for k in env_block))
+        except Exception as exc:  # noqa: BLE001 - env overrides must never abort a run
+            print(f"[Primus:Runtime] WARNING: could not apply top-level `env:` from config: {exc}")
+
     def _initialize_distributed_context(self) -> None:
         assert self.ctx is not None, "TrainContext must be initialized before distributed init."
 
@@ -331,10 +399,6 @@ class PrimusRuntime:
         assert self.ctx is not None, "TrainContext must be initialized before backend adapter."
         backend_path = getattr(self.args, "backend_path", None)
 
-        # CRITICAL: Set up backend path BEFORE importing backend module
-        # This ensures megatron is importable when patches are loaded
-        self._setup_backend_path_early(backend=self.ctx.framework, backend_path=backend_path)
-
         adapter = BackendRegistry.get_adapter(backend=self.ctx.framework, backend_path=backend_path)
 
         assert (
@@ -345,49 +409,6 @@ class PrimusRuntime:
         adapter.setup_backend_path(backend_path=backend_path)
 
         self.ctx.adapter = adapter
-
-    def _setup_backend_path_early(self, backend: str, backend_path=None) -> None:
-        """Set up backend path before backend module is imported."""
-        import os
-        import sys
-        from pathlib import Path
-
-        # For Megatron backend, set up the path early
-        if backend == "megatron":
-            megatron_paths = []
-
-            # Method 1: From backend_path argument
-            if backend_path:
-                megatron_path = Path(backend_path)
-                if megatron_path.exists():
-                    megatron_paths.append(str(megatron_path))
-
-            # Method 2: From PRIMUS_PATH environment variable
-            primus_path = os.getenv("PRIMUS_PATH")
-            if primus_path:
-                megatron_path = Path(primus_path) / "third_party" / "Megatron-LM"
-                if megatron_path.exists():
-                    megatron_paths.append(str(megatron_path))
-
-            # Method 3: From current working directory
-            try:
-                cwd = Path.cwd()
-                if "Primus" in str(cwd):
-                    primus_root = cwd
-                    while primus_root.name != "Primus" and primus_root != primus_root.parent:
-                        primus_root = primus_root.parent
-                    if primus_root.name == "Primus":
-                        megatron_path = primus_root / "third_party" / "Megatron-LM"
-                        if megatron_path.exists():
-                            megatron_paths.append(str(megatron_path))
-            except Exception:
-                pass
-
-            # Add paths to sys.path if not already present
-            for path in megatron_paths:
-                if path not in sys.path:
-                    sys.path.insert(0, path)
-                    log_rank_0(f"[Primus:Runtime] Early setup: Added Megatron-LM to sys.path: {path}")
 
     def _initialize_trainer(self) -> None:
         assert (

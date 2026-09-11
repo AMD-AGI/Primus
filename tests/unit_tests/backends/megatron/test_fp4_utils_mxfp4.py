@@ -14,6 +14,30 @@ import pytest
 from tests.utils import PrimusUT
 
 
+class TestPrimusTurboFP4Selection:
+    """Verify TE FP4 is bypassed exactly when Primus-Turbo is enabled."""
+
+    @staticmethod
+    def _turbo_enabled_with(monkeypatch, have_turbo=True, **arg_fields):
+        import megatron.training.global_vars as global_vars
+
+        from primus.backends.megatron.core import fp4_utils
+
+        monkeypatch.setattr(fp4_utils, "HAVE_TURBO", have_turbo)
+        monkeypatch.setattr(global_vars, "get_args", lambda: SimpleNamespace(**arg_fields))
+
+        return fp4_utils._primus_turbo_enabled()
+
+    def test_enabled_when_primus_turbo_is_enabled(self, monkeypatch):
+        assert self._turbo_enabled_with(monkeypatch, enable_primus_turbo=True)
+
+    def test_disabled_when_primus_turbo_is_disabled(self, monkeypatch):
+        assert not self._turbo_enabled_with(monkeypatch, enable_primus_turbo=False)
+
+    def test_disabled_when_turbo_is_unavailable(self, monkeypatch):
+        assert not self._turbo_enabled_with(monkeypatch, have_turbo=False, enable_primus_turbo=True)
+
+
 class TestMXFP4GradientStochasticRounding:
     """Verify Megatron and diffusion configs resolve the SR option correctly."""
 

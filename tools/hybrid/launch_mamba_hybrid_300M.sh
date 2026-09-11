@@ -42,7 +42,7 @@ export PRIMUS_FLA_NORM=1
 export PRIMUS_FLA_DATA=1
 export PRIMUS_FLA_CACHE_DIR=${PRIMUS_FLA_CACHE_DIR:-$HOME/flash-linear-attention/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-10BT/train}
 
-EXP=${EXP:-examples/megatron/configs/MI300X/zebra_llama_300M_mamba_hybrid-pretrain.yaml}
+EXP=${EXP:-examples/megatron/configs/MI300X/hylo_llama_mamba_300M_BF16-pretrain.yaml}
 LOG=${LOG:-primus_mamba_hybrid_300M.log}
 
 echo "==========[launch_mamba_hybrid_300M.sh]=========="
@@ -62,4 +62,4 @@ if [ ! -d "${PRIMUS_FLA_CACHE_DIR}" ]; then
     echo "         shuffler, and the loss curve will diverge from FLA's after iter 1."
 fi
 
-EXP="${EXP}" bash examples/run_pretrain.sh 2>&1 | tee "${LOG}"
+bash ./runner/primus-cli direct -- train pretrain --config "${EXP}" 2>&1 | tee "${LOG}"

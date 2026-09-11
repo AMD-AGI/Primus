@@ -466,6 +466,30 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
         transformer_impl = getattr(params, "transformer_impl", "transformer_engine")
         config_params["transformer_impl"] = transformer_impl
 
+        # Convert attention_backend (string) to the AttnBackend enum. A YAML value
+        # like "fused" arrives as a plain string, but _set_attention_backend()
+        # compares it against AttnBackend enum members -- a raw string matches no
+        # branch, so the backend is silently left unset and falls back to
+        # FlashAttention. AttnBackend["fused"] returns AttnBackend.fused.
+        from megatron.core.transformer.enums import AttnBackend
+
+        # The getattr default only applies when the key is absent; an explicit
+        # `attention_backend: null` in YAML yields None, so coerce that (and an
+        # empty string) to auto rather than crashing on attn_backend.name below.
+        attn_backend = getattr(params, "attention_backend", AttnBackend.auto)
+        if attn_backend is None or (isinstance(attn_backend, str) and not attn_backend.strip()):
+            attn_backend = AttnBackend.auto
+        if isinstance(attn_backend, str):
+            try:
+                attn_backend = AttnBackend[attn_backend.strip()]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Unknown attention_backend '{attn_backend}'. Choose from: "
+                    f"{[b.name for b in AttnBackend]}."
+                ) from exc
+        config_params["attention_backend"] = attn_backend
+        log_rank_0(f"Attention backend: {attn_backend.name}")
+
         # Precision settings from params (not in model YAML)
         config_params.update(
             {
@@ -505,6 +529,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "fp4": fp4_enabled,
                 "fp4_recipe": fp4_recipe,
                 "mxfp4_backward_precision": getattr(params, "mxfp4_backward_precision", "mxfp4"),
+                "fp4_use_native_te_autocast": getattr(params, "fp4_use_native_te_autocast", False),
             }
         )
 

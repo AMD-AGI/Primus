@@ -29,19 +29,63 @@ class BackendAdapter(ABC):
     # Default Methods (May be overridden by subclasses)
     # ============================================================================
 
+    def env_defaults(self) -> list:
+        """
+        Declarative backend environment defaults (opt-in).
+
+        Return a list of :class:`primus.core.backend.env_registry.EnvVar`
+        entries describing the performance/architecture environment this backend
+        needs. The base :meth:`prepare_backend` applies them (arch-gated,
+        ``setdefault`` semantics) before the backend imports its GPU libraries, so
+        a backend never has to touch ``os.environ`` directly.
+
+        Default is an empty list: backends whose env is fully handled by the shell
+        launcher / torchrun (e.g. Megatron, TorchTitan) opt out simply by not
+        overriding this method, and :meth:`apply_env_defaults` becomes a no-op for
+        them (no arch detection, no env mutation).
+
+        Precedence (highest wins): ``XLA_FLAGS_APPEND`` > per-config ``env:`` >
+        these defaults > inherited (image-baked or outer shell).
+        """
+        return []
+
+    def apply_env_defaults(self) -> None:
+        """Apply :meth:`env_defaults` into ``os.environ`` (see ``env_registry``)."""
+        from primus.core.backend.env_registry import (
+            apply_env_defaults,
+            apply_xla_flags_append,
+        )
+
+        def _safe_log(msg: str) -> None:
+            # Env application must never abort a run on a logging issue (e.g. the
+            # Primus logger not yet initialized in a bare/standalone invocation).
+            try:
+                from primus.core.utils.module_utils import log_rank_0
+
+                log_rank_0(msg)
+            except Exception:  # noqa: BLE001
+                pass
+
+        apply_env_defaults(self.env_defaults(), self.framework, _safe_log)
+        # Last layer, so it also reaches backends that declare no defaults above.
+        apply_xla_flags_append(_safe_log)
+
     def prepare_backend(self, config: Any):
         """
         Prepare backend environment before building args / constructing trainer.
 
         Default behavior:
+          - Apply this backend's declarative env defaults (:meth:`env_defaults`).
           - Run backend-specific setup hooks registered in `BackendRegistry`.
 
         Backends can override this method if they need extra environment setup
-        beyond `BackendRegistry.run_setup(self.framework)`.
+        beyond the above. Most backends should instead just override
+        :meth:`env_defaults` and keep this default implementation.
         """
         from primus.core.backend.backend_registry import BackendRegistry
         from primus.core.utils.module_utils import log_rank_0
 
+        self.apply_env_defaults()
         BackendRegistry.run_setup(self.framework)
         log_rank_0(f"[Primus:{self.framework}] Backend prepared")
 
@@ -70,7 +114,7 @@ class BackendAdapter(ABC):
                         # Logger may not be initialized yet; sys.path is already updated.
                         pass
                 return norm_path
-            assert False, error_msg
+            raise FileNotFoundError(error_msg)
 
         # 1) CLI argument: if provided, it must exist. No fallback.
         if backend_path:
@@ -105,7 +149,7 @@ class BackendAdapter(ABC):
         for candidate in candidates:
             if os.path.exists(candidate):
                 return _use_path(str(candidate), "")
-        assert False, (
+        raise FileNotFoundError(
             f"No valid backend path for '{self.framework}'.\n"
             f"Tried: {[str(c) for c in candidates]}\n"
             f"Hint: run `primus-cli deps sync`, install backend to third_party/{dir_name}, "

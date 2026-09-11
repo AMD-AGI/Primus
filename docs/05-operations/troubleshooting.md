@@ -1,6 +1,6 @@
 # Troubleshooting guide
 
-This guide is the primary reference for diagnosing and resolving common failures when running Primus on AMD GPUs (ROCm, RCCL, Docker). It complements the [CLI reference](../02-user-guide/cli-reference.md), [Preflight](../02-user-guide/preflight.md), [Benchmarking](../02-user-guide/benchmarking.md), and [Configuration system](../02-user-guide/configuration-system.md) documentation.
+This guide is the primary reference for diagnosing and resolving common failures when running Primus on AMD GPUs (ROCm, RCCL, Docker). It complements the [CLI reference](../02-user-guide/cli-reference.md), [Preflight](../02-user-guide/preflight.md), [Micro-benchmarking](../02-user-guide/micro-benchmarking.md), and [Configuration system](../02-user-guide/configuration-system.md) documentation.
 
 ---
 

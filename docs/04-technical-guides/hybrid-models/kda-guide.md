@@ -6,7 +6,7 @@ against the [Flash Linear Attention (FLA)](https://github.com/fla-org/flash-line
 reference implementation. It covers every step from raw dataset →
 tokenization → training → checkpoint conversion → lm-eval benchmark.
 
-The same recipe scales up to the 1B pure-KDA config (`zebra_llama_1B_kda_pure-pretrain.yaml`).
+The same recipe scales up to the 1B pure-KDA config (`kda_1B_BF16-pretrain.yaml`).
 
 It mirrors [`gdn-guide.md`](gdn-guide.md) and reuses the same Megatron-LM
 patches, dataset shim, FLA-init flow, and lm-eval wrapper pattern.
@@ -96,11 +96,11 @@ The 300M pure-KDA model has:
 - Tokenizer: `meta-llama/Llama-3.2-1B` (128k vocab)
 - Total parameters: **0.302 B**
 
-Training schedule (matched to FLA's `kda_300M_pure.json`):
+Training schedule (matched to FLA's `kda_300M.json`):
 
 - 4768 iterations × 1024 global batch × 2048 seq len = **10.0 B tokens**
 - AdamW (β1=0.9, β2=0.95, wd=0.01), peak LR `2e-4`, cosine decay, 200-step warmup
-- bf16 mixed-precision, no dropout, gradient clip 1.0
+- BF16 training, no dropout, gradient clip 1.0
 
 ---
 
@@ -172,7 +172,7 @@ train_data_path: >
 ```
 
 (adjust the user prefix in
-`examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml`
+`examples/megatron/configs/MI300X/kda_300M_BF16-pretrain.yaml`
 to match your home directory).
 
 ---
@@ -182,7 +182,7 @@ to match your home directory).
 KDA uses the **same six patches** as GDN — no KDA-specific Megatron patch
 is required. They're implemented as runtime monkey-patches using Primus's
 own patch system (`primus/core/patches`), living under
-`[primus/backends/megatron/patches/](../../primus/backends/megatron/patches/)`.
+`[primus/backends/megatron/patches/](https://github.com/AMD-AGI/Primus/tree/main/primus/backends/megatron/patches)`.
 Each patch registers unconditionally but is gated behind a `condition=` on
 the relevant config flag, so nothing needs to be run by hand.
 
@@ -224,7 +224,7 @@ own random init — final loss is identical, only iter-1 drifts by `~5e-3`.
 ### 5.1 Inspect the config
 
 The training config lives at
-[`examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml`](../../examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml).
+[`examples/megatron/configs/MI300X/kda_300M_BF16-pretrain.yaml`](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/kda_300M_BF16-pretrain.yaml).
 Key parameters (matched to FLA):
 
 ```yaml
@@ -257,15 +257,35 @@ no_load_rng: true
 ```
 
 The architecture-only YAML it extends from is
-[`primus/configs/models/megatron/zebra_llama_300M_kda_pure.yaml`](../../primus/configs/models/megatron/zebra_llama_300M_kda_pure.yaml).
+[`primus/configs/models/megatron/kda_300M.yaml`](https://github.com/AMD-AGI/Primus/blob/main/primus/configs/models/megatron/kda_300M.yaml).
 
 ### 5.2 Launch
 
 ```bash
 # inside the container, in /home/<user>/Primus
-EXP=examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml \
-  bash examples/run_pretrain.sh 2>&1 | tee primus_kda.log
+./primus-cli direct --log_file primus_kda.log \
+  -- train pretrain \
+  --config examples/megatron/configs/MI300X/kda_300M_BF16-pretrain.yaml
 ```
+
+AMD Triton 3.6 cannot compile the `num_stages = 4` variants of FLA's KDA
+intra-chunk kernels — the MLIR pass pipeline aborts inside
+`tritonamdgpu-schedule-loops` — so the first autotune sweep fails. The training
+process removes those candidates from the autotune space itself, at startup,
+via the `megatron.fla.kda_safe_autotune` patch
+([`fla_kda_autotune_patches.py`](https://github.com/AMD-AGI/Primus/blob/main/primus/backends/megatron/patches/fla_kda_autotune_patches.py)) —
+nothing on disk is modified, so the installed `fla` package stays pristine. It
+fires on ROCm for any run that resolves to the FLA KDA backend, which this one
+does via `use_fla_triton_kda: true`, and the `num_warps` sweep is kept so the
+autotuner still picks the best remaining config. Look for this line in the log:
+
+```
+[Patch:megatron.fla.kda_safe_autotune] chunk_kda_bwd_kernel_intra: kept 4/12 autotune configs ...
+```
+
+On Triton 3.7 the full sweep compiles and the autotuner picks `num_stages = 2`
+for this model anyway, so the narrowing is free here; the patch stays until the
+supported toolchain floor reaches Triton 3.7.
 
 Expected wall time on a healthy MI300X box: **~1h 56m** for the full 4768
 iters (about 2 min faster than FLA's HF-Trainer reference run).
@@ -308,7 +328,7 @@ breakdown.
 Checkpoints land under Primus's `work_group/user_name/exp_name` template:
 
 ```
-output/amd/root/zebra_llama_300M_kda_pure-pretrain/
+output/amd/root/kda_300M_BF16-pretrain/
 ├── checkpoints/
 │   ├── iter_0001024/
 │   ├── iter_0002048/
@@ -338,7 +358,7 @@ iteration  4700/ 4768 | elapsed time per iteration (ms): 1467.8/1466.1 |
 ```
 
 To diff against FLA's reference log
-(`/home/<user>/checkpoints/kda_pure_300M_10B/trainer_state.json`), divide
+(`/home/<user>/checkpoints/kda_300M_10B/trainer_state.json`), divide
 the FLA `loss` field by 8 (DeepSpeed reports sum-across-ranks):
 
 | iter | FLA / 8 | Primus  | Δ %         | Notes                            |
@@ -362,16 +382,16 @@ Primus 126 s faster.
 
 ## Step 7: Convert checkpoint to HuggingFace format
 
-Use [`tools/hybrid/convert_kda_to_fla_hf.py`](../../tools/hybrid/convert_kda_to_fla_hf.py)
+Use [`tools/hybrid/convert_kda_to_fla_hf.py`](https://github.com/AMD-AGI/Primus/blob/main/tools/hybrid/convert_kda_to_fla_hf.py)
 to translate the Megatron checkpoint into FLA's native
 `KDAForCausalLM` HF format:
 
 ```bash
 python tools/hybrid/convert_kda_to_fla_hf.py \
-    --checkpoint-path output/amd/root/zebra_llama_300M_kda_pure-pretrain/checkpoints/iter_0004768 \
-    --output-dir      output/kda_pure_300M_fla_hf \
-    --config          /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M_pure.json \
-    --tokenizer-src   /home/<user>/checkpoints/kda_pure_300M_10B
+    --checkpoint-path output/amd/root/kda_300M_BF16-pretrain/checkpoints/iter_0004768 \
+    --output-dir      output/kda_300M_fla_hf \
+    --config          /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M.json \
+    --tokenizer-src   /home/<user>/checkpoints/kda_300M_10B
 ```
 
 What it does:
@@ -393,7 +413,7 @@ What it does:
 Output:
 
 ```
-output/kda_pure_300M_fla_hf/
+output/kda_300M_fla_hf/
 ├── config.json              # KDAConfig, architectures=["KDAForCausalLM"]
 ├── model.safetensors        # ~870 MB
 └── tokenizer{,_config}.json + special_tokens_map.json
@@ -413,7 +433,7 @@ import fla   # auto-registers "kda" with transformers.AutoConfig
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-ckpt = "output/kda_pure_300M_fla_hf"
+ckpt = "output/kda_300M_fla_hf"
 tok = AutoTokenizer.from_pretrained(ckpt)
 model = AutoModelForCausalLM.from_pretrained(
     ckpt, trust_remote_code=True, torch_dtype=torch.bfloat16
@@ -446,7 +466,7 @@ auto-registration in `fla/models/kda/__init__.py` fires on import.
 
 ## Step 9: Run lm-eval-harness benchmarks
 
-Use [`tools/hybrid/eval_kda_lm_eval.py`](../../tools/hybrid/eval_kda_lm_eval.py), which
+Use [`tools/hybrid/eval_kda_lm_eval.py`](https://github.com/AMD-AGI/Primus/blob/main/tools/hybrid/eval_kda_lm_eval.py), which
 imports `fla` first (so `AutoConfig` recognizes the `kda` model type) and
 patches `KDAForCausalLM.__init__` / `KDAModel.__init__` to accept the
 `dtype` kwarg that `transformers ≥ 4.55` passes internally.
@@ -457,35 +477,35 @@ will fail with `model type kda not recognized`.
 ### 9.1 Evaluate the Primus checkpoint (~15–30 min on one MI300X)
 
 ```bash
-mkdir -p output/kda_pure_300M_eval_results_primus
+mkdir -p output/kda_300M_eval_results_primus
 
 PYTHONPATH=/home/<user>/flash-linear-attention \
 HIP_VISIBLE_DEVICES=0 \
 TOKENIZERS_PARALLELISM=false \
 python tools/hybrid/eval_kda_lm_eval.py \
     --model hf \
-    --model_args pretrained=output/kda_pure_300M_fla_hf,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
+    --model_args pretrained=output/kda_300M_fla_hf,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
     --tasks arc_easy,arc_challenge,hellaswag,openbookqa,piqa,winogrande,mmlu,race \
     --batch_size auto \
-    --output_path output/kda_pure_300M_eval_results_primus \
-    2>&1 | tee output/kda_pure_300M_eval_results_primus/lm_eval.log
+    --output_path output/kda_300M_eval_results_primus \
+    2>&1 | tee output/kda_300M_eval_results_primus/lm_eval.log
 ```
 
 ### 9.2 Evaluate the FLA reference checkpoint (apples-to-apples)
 
 ```bash
-mkdir -p output/kda_pure_300M_eval_results_fla
+mkdir -p output/kda_300M_eval_results_fla
 
 PYTHONPATH=/home/<user>/flash-linear-attention \
 HIP_VISIBLE_DEVICES=1 \
 TOKENIZERS_PARALLELISM=false \
 python tools/hybrid/eval_kda_lm_eval.py \
     --model hf \
-    --model_args pretrained=/home/<user>/checkpoints/kda_pure_300M_10B,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
+    --model_args pretrained=/home/<user>/checkpoints/kda_300M_10B,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
     --tasks arc_easy,arc_challenge,hellaswag,openbookqa,piqa,winogrande,mmlu,race \
     --batch_size auto \
-    --output_path output/kda_pure_300M_eval_results_fla \
-    2>&1 | tee output/kda_pure_300M_eval_results_fla/lm_eval.log
+    --output_path output/kda_300M_eval_results_fla \
+    2>&1 | tee output/kda_300M_eval_results_fla/lm_eval.log
 ```
 
 ### 9.3 Diff the two result JSONs
@@ -495,8 +515,8 @@ python - <<'PY'
 import json, glob
 def load_latest(d):
     return json.load(open(sorted(glob.glob(f"{d}/**/results_*.json", recursive=True))[-1]))
-fla    = load_latest("output/kda_pure_300M_eval_results_fla")
-primus = load_latest("output/kda_pure_300M_eval_results_primus")
+fla    = load_latest("output/kda_300M_eval_results_fla")
+primus = load_latest("output/kda_300M_eval_results_primus")
 print(f"{'task':<18} {'FLA':>8} {'Primus':>8} {'Δ':>+8}")
 for task in sorted(set(fla['results']) & set(primus['results'])):
     for k in ('acc,none', 'acc_norm,none'):
@@ -537,9 +557,9 @@ docs/04-technical-guides/hybrid-models/
 ├── kda-guide.md                                  ← this file
 └── kda-fla-parity.md                              ← deep-dive on every change
 examples/megatron/configs/MI300X/
-└── zebra_llama_300M_kda_pure-pretrain.yaml        ← training config
+└── kda_300M_BF16-pretrain.yaml        ← training config
 primus/configs/models/megatron/
-└── zebra_llama_300M_kda_pure.yaml                 ← architecture-only config
+└── kda_300M.yaml                 ← architecture-only config
 primus/backends/megatron/core/models/hybrid/
 ├── kimi_delta_attention.py                        ← FLA-aligned mixer (fused in_proj, FLA Triton paths)
 ├── kimi_delta_attention_layer.py                  ← eps propagation, optional pre-norm
@@ -551,9 +571,9 @@ primus/backends/megatron/patches/                  ← same 6 patches as GDN (Pr
 ├── mlp_fla_swiglu_patches.py                      ← FLA Triton SwiGLU for MLP
 ├── torch_norm_fla_rmsnorm_patches.py              ← FLA RMSNorm for WrappedTorchNorm
 ├── fla_runtime_patches.py                         ← resolves PRIMUS_FLA_* knobs onto args
+├── fla_kda_autotune_patches.py                    ← narrows the KDA Triton autotune space on ROCm (auto-applied, in-process)
 └── mamba_fla_data_patches.py                      ← FLA-order dataset shim wiring
 tools/hybrid/
-├── patch_fla_triton_autotune_hang.sh              ← MI300X FLA Triton autotune-hang workaround
 ├── convert_fla_to_megatron.py                     ← FLA Arrow → Megatron .bin/.idx (shared)
 ├── fla_order_dataset.py                           ← FLA-order dataset shim (shared)
 ├── convert_fla_kda_init_to_megatron.py            ← FLA HF init → Megatron sharded ckpt
@@ -637,7 +657,7 @@ meaningfully affects RACE.
 
 ## See also
 
-- [`docs/04-technical-guides/hybrid-models/README.md`](README.md) — full Zebra-Llama family
+- [`docs/04-technical-guides/hybrid-models/README.md`](README.md) — full Hylo hybrid family
   overview (1 B / 3 B / 8 B Mamba+MLA, KDA variants)
 - [`docs/04-technical-guides/hybrid-models/gdn-guide.md`](gdn-guide.md) — the GDN companion
   recipe (shares Megatron patches and dataset shim with this one)

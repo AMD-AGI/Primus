@@ -26,6 +26,7 @@ Start here if you are new to Primus.
 - [Project overview](./01-getting-started/overview.md): what Primus does, who it is for, key capabilities
 - [Installation guide](./01-getting-started/installation.md): prerequisites, Docker/bare-metal/Slurm setup
 - [Quickstart](./01-getting-started/quickstart.md): first training run in 5 minutes
+- [Release notes](./01-getting-started/release-notes.md): published training image tags and their full software stacks (single source of truth)
 - [Glossary](./01-getting-started/glossary.md): terms, acronyms, and domain concepts
 
 ### [User guide](./02-user-guide/)
@@ -34,10 +35,14 @@ Core workflows and day-to-day usage.
 
 - [CLI reference](./02-user-guide/cli-reference.md): `primus-cli` modes, flags, and subcommands
 - [Configuration system](./02-user-guide/configuration-system.md): YAML configuration model, presets, overrides, inheritance
+- [Environment and XLA flags](./02-user-guide/environment-and-xla-flags.md): where to set env vars, how to override `XLA_FLAGS` safely, how to verify what took effect
 - [Pretraining](./02-user-guide/pretraining.md): pretraining **concepts**: backends, YAML structure, parallelism, configuration inventory
-- [Backend training recipes](./02-user-guide/training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
+- [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
+- [Megatron-LM training performance validation](./02-user-guide/megatron-lm-training.md): reproduce the published Megatron backend benchmarks on the `rocm/primus` image
+- [TorchTitan training performance validation](./02-user-guide/torchtitan-training.md): reproduce the published TorchTitan backend benchmarks on the `rocm/primus` image
+- [JAX MaxText training performance validation](./02-user-guide/jax-maxtext-training.md): reproduce the AMD-published MaxText benchmarks via Primus, MAD, or the standalone scripts
 - [Post-training](./02-user-guide/posttraining.md): SFT and LoRA fine-tuning via Megatron Bridge
-- [Benchmarking](./02-user-guide/benchmarking.md): GEMM, RCCL, and dense-GEMM benchmark suites
+- [Micro-benchmarking](./02-user-guide/micro-benchmarking.md): GEMM, RCCL, and dense-GEMM benchmark suites
 - [Preflight](./02-user-guide/preflight.md): cluster diagnostics and environment validation
 - [Projection](./02-user-guide/projection.md): memory and performance projection tools
 - [Tuning agent](./02-user-guide/tuning-agent.md): LLM-driven search for an optimal training configuration (uses projection as an oracle)
@@ -66,6 +71,7 @@ Deep technical topics for advanced users.
 - [Data preparation](./04-technical-guides/data-preparation.md): tokenization, data formats, mock data
 - [Checkpoint management](./04-technical-guides/checkpoint-management.md): formats, save/load, distributed checkpointing
 - [Multi-node networking](./04-technical-guides/multi-node-networking.md): InfiniBand, RoCE, AINIC configuration
+- [AINIC bundle versions](./04-technical-guides/ainic-bundle-versions.md): rebuilding a training image against a different AINIC bundle
 - [Profiling and observability](./04-technical-guides/profiling-and-observability.md): Torch profiler, TraceLens, memory snapshots, projection, pp_vis
 - [Logging and experiment tracking](./04-technical-guides/logging-and-experiment-tracking.md): TensorBoard, WandB, MLflow setup per backend
 - [Fault tolerance and elastic training](./04-technical-guides/fault-tolerance-and-elastic-training.md): graceful exit, auto-resume, in-process restart, torchft
@@ -96,6 +102,12 @@ For contributors and maintainers.
 - [Backend patch notes](./06-developer-guide/backend-patch-notes.md): Primus-specific backend arguments and the files they patch
 - [Tooling](./06-developer-guide/tooling.md): auxiliary analysis, benchmarking, visualization, and diagnostics tools
 
+### [Technical blogs](./07-technical-blogs/)
+
+Long-form articles on the reasoning behind Primus features, most of them published on ROCm Blogs.
+
+- [Blog index](./07-technical-blogs/README.md): every Primus article, published and in progress, with the documentation each one maps to
+
 ---
 
 ## Common use cases
@@ -108,7 +120,8 @@ For contributors and maintainers.
 | Browse all Primus tools | [Primus tools](./02-user-guide/primus-tools.md) |
 | Install Primus | [Installation](./01-getting-started/installation.md) |
 | Run my first training | [Quickstart](./01-getting-started/quickstart.md) |
-| Get an exact run command for my model/GPU | [Backend training recipes](./02-user-guide/training-recipes.md) |
+| Find out what is inside a training image | [Release notes](./01-getting-started/release-notes.md) |
+| Get an exact run command for my model/GPU | [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md) |
 | Write a training YAML configuration | [Configuration system](./02-user-guide/configuration-system.md) |
 | Look up a Megatron parameter | [Megatron parameters](./03-configuration-reference/megatron-parameters.md) |
 | Look up a TorchTitan parameter | [TorchTitan parameters](./03-configuration-reference/torchtitan-parameters.md) |
@@ -131,11 +144,14 @@ For contributors and maintainers.
 | Contribute to Primus | [Contributing](./06-developer-guide/contributing.md) |
 | Understand the code architecture | [Architecture](./06-developer-guide/architecture.md) |
 | Add a new training backend | [Extending backends](./06-developer-guide/extending-backends.md) |
+| Read the technical blogs behind a feature | [Blog index](./07-technical-blogs/README.md) |
+| Cite Primus in a paper | [Citation](https://github.com/AMD-AGI/Primus#-citation) |
 
 ---
 
 ## External resources
 
+- [ROCm Blogs](https://rocm.blogs.amd.com/): where the Primus technical articles are published
 - [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo): high-performance operators and kernels
 - [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE): external stability/platform layer; this repository does not include a production integration guide
 - [AMD ROCm documentation](https://rocm.docs.amd.com/)

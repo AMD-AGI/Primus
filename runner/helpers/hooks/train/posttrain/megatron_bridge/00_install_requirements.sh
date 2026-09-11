@@ -27,6 +27,8 @@ pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0"
 
 pip install --cache-dir="${PIP_CACHE_DIR}" -r "${SCRIPT_DIR}/requirements-megatron-bridge.txt"
 
+# mlperf-logging: use the Primus image / pip install -r requirements.txt (6.0.0-rc5); do not pip here.
+
 # datasets 5.x requires fsspec<=2026.4.0; megatron-bridge deps may upgrade it.
 pip install --cache-dir="${PIP_CACHE_DIR}" 'fsspec>=2023.1.0,<=2026.4.0'
 

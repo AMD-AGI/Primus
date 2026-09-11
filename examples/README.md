@@ -23,12 +23,6 @@ It supports both **single-node** and **multi-node** training, and includes optio
     - [Stage 3: Train with Tuned Kernel](#stage-3-train-with-tuned-kernel)
   - [✅ Supported Models](#-supported-models)
     - [🏃‍♂️ How to Run a Supported Model](#️-how-to-run-a-supported-model)
-  - [☸️ Kubernetes Training Management (`run_k8s_pretrain.sh`)](#️-kubernetes-training-management-run_k8s_pretrainsh)
-    - [Requirements](#requirements)
-    - [Usage](#usage)
-    - [⚙️ Commands](#️-commands)
-    - [⚙️ Create Command Options](#️-create-command-options)
-    - [Example](#example)
 
 ---
 
@@ -50,7 +44,7 @@ We recommend using the official [rocm/megatron-lm Docker image](https://hub.dock
 
 ```bash
 # Pull the latest Docker image
-docker pull docker.io/rocm/primus:v26.4
+docker pull docker.io/rocm/primus:v26.5
 
 ```
 
@@ -79,7 +73,33 @@ pre-commit install
 ---
 
 ### Run Pretraining
-Use the `run_pretrain.sh` script to start training.
+
+`./primus-cli` is the single entry point for all training. Pick a mode based on
+where you want the process to run, then pass the Primus command after `--`:
+
+| Mode | When to use | Command |
+| ---- | ----------- | ------- |
+| `container` | Single node, launch from the host; the CLI starts the Docker/Podman container for you | `./primus-cli container -- train pretrain --config <exp.yaml>` |
+| `slurm` | Multi-node via SLURM (`srun` or `sbatch`) | `./primus-cli slurm srun -N <N> -- container -- train pretrain --config <exp.yaml>` |
+| `direct` | You are already inside a container (or on a prepared bare-metal host) | `./primus-cli direct -- train pretrain --config <exp.yaml>` |
+
+Notes on the argument shape:
+
+- `--` separates launcher options from the Primus Python CLI. Everything after the last
+  `--` (e.g. `--num_layers 4`) is forwarded to Primus as a config override.
+- Use `train posttrain` instead of `train pretrain` for SFT / post-training leaf configs.
+- Environment defaults (NCCL/RCCL, ROCm, persistent JIT caches, `DATA_PATH`, `HF_HOME`)
+  come from `runner/helpers/envs/base_env.sh` plus the per-GPU file
+  `runner/helpers/envs/<GPU_MODEL>.sh`; setup steps such as dependency installs, AINIC
+  enablement and dataset preparation run as hooks under `runner/helpers/hooks/`.
+- `runner/.primus.yaml` holds the defaults for each mode (container image, devices, and
+  the list of environment variables forwarded into the container).
+
+The packaged launchers under `examples/customer_package/` and `examples/moe_package/` share
+`runner/helpers/launch/slurm_pretrain.sh`, which turns the `EXP` / `NNODES` / `DATA_PATH`
+environment contract into the `primus-cli slurm srun ... -- container -- train pretrain`
+command above. It is an internal helper, not an entry point: launch training with
+`primus-cli` directly.
 
 #### 🚀 Quick Start Mode
 
@@ -88,10 +108,16 @@ You do not need to enter the Docker container. Just set the config and run.
 
 ```bash
 # Example for megatron llama3.1_8B
-EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml bash ./examples/run_local_pretrain.sh
+export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+./primus-cli container -- train pretrain --config "$EXP"
+
+# Custom leaf config (SFT, mlperf, bridge_aligned, etc.)
+export EXP=examples/megatron/configs/MI355X/llama3_8B-BF16-sft.yaml
+./primus-cli container -- train posttrain --config "$EXP"
 
 # examples for torchtitan llama3.1_8B
-EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
+export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
+./primus-cli container -- train pretrain --config "$EXP"
 ```
 
 ---
@@ -112,10 +138,19 @@ docker exec -it dev_primus bash
 cd Primus && pip install -r requirements.txt
 
 # Example for megatron llama3.1_8B
-EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml bash ./examples/run_pretrain.sh
+export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+./primus-cli direct -- train pretrain --config "$EXP"
 
 # examples for torchtitan llama3.1_8B
-EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_pretrain.sh
+export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
+./primus-cli direct -- train pretrain --config "$EXP"
+
+# MaxDiffusion (JAX) directly from Primus (on a JAX base image, e.g. rocm/jax-training).
+# Requires the vendored submodule: git submodule update --init third_party/maxdiffusion
+# The prepare hooks run examples/maxdiffusion/setup_maxdiffusion_env.sh to install deps + patches.
+# See docs/02-user-guide/pretraining.md ("MaxDiffusion (JAX) pretraining").
+BACKEND=MaxDiffusion ./primus-cli direct -- train pretrain \
+  --config examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml
 
 ```
 
@@ -127,21 +162,28 @@ Multi-node training is launched via **SLURM**.
 Specify the number of nodes and the model config:
 
 ```bash
-export DOCKER_IMAGE="docker.io/rocm/primus:v26.4"
+export DOCKER_IMAGE="docker.io/rocm/primus:v26.5"
 export NNODES=8
 
 # Example for megatron llama3.1_8B
-EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
+export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+./primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
 
 # examples for torchtitan llama3.1_8b
-EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
+export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
+./primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
 ```
 
 ## 🔧 HipblasLT Auto Tuning
 
-HipblasLT tuning is divided into three stages and controlled via the environment variable `PRIMUS_HIPBLASLT_TUNING_STAGE`:
+HipblasLT tuning is divided into three stages, selected with `PRIMUS_HIPBLASLT_TUNING_STAGE`.
+The stage is only honored when the master switch `PRIMUS_HIPBLASLT_TUNING=1` is also set and
+deterministic mode is off (`PRIMUS_DETERMINISTIC != 1`); otherwise the
+`runner/helpers/hooks/train/pretrain/prepare_experiment.sh` hook skips tuning entirely.
 
 ```bash
+# master switch: tuning is off unless this is 1
+export PRIMUS_HIPBLASLT_TUNING=1
 # default 0 means no tuning
 export PRIMUS_HIPBLASLT_TUNING_STAGE=${PRIMUS_HIPBLASLT_TUNING_STAGE:-0}
 ```
@@ -158,7 +200,7 @@ It is recommended to reduce `train_iters` for faster shape generation.
 
 export PRIMUS_HIPBLASLT_TUNING_STAGE=1
 export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-NNODES=1 bash ./examples/run_slurm_pretrain.sh
+./primus-cli slurm srun -N 1 -- container -- train pretrain --config "$EXP"
 ```
 
 ---
@@ -175,7 +217,7 @@ It typically takes 10–30 minutes depending on model size and shape complexity.
 
 export PRIMUS_HIPBLASLT_TUNING_STAGE=2
 export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-NNODES=1 bash ./examples/run_slurm_pretrain.sh
+./primus-cli slurm srun -N 1 -- container -- train pretrain --config "$EXP"
 ```
 
 ---
@@ -187,7 +229,7 @@ In this final stage, the tuned kernel is loaded for efficient training:
 ```bash
 export PRIMUS_HIPBLASLT_TUNING_STAGE=3
 export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-NNODES=1 bash ./examples/run_slurm_pretrain.sh
+./primus-cli slurm srun -N 1 -- container -- train pretrain --config "$EXP"
 ```
 
 ## ✅ Supported Models
@@ -223,15 +265,18 @@ The following models are supported out of the box via provided configuration fil
 Use the following command pattern to start training with a selected model configuration:
 
 ```bash
-EXP=examples/megatron/configs/MI300X/<model_config> bash ./examples/run_local_pretrain.sh
+export EXP=examples/megatron/configs/MI300X/<model_config>
+./primus-cli container -- train pretrain --config "$EXP"
 ```
 
 For example, to run the llama3.1_8B model quickly:
 
 ```bash
-EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml bash ./examples/run_local_pretrain.sh
+export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+./primus-cli container -- train pretrain --config "$EXP"
 
-EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
+export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
+./primus-cli container -- train pretrain --config "$EXP"
 ```
 
 
@@ -240,105 +285,11 @@ For multi-node training via SLURM, use:
 ```bash
 export NNODES=8
 
-#run megatron
-EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
+# run megatron
+export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+./primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
 
 # run torchtitan
-EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
-```
-
-## ☸️ Kubernetes Training Management (`run_k8s_pretrain.sh`)
-
-The `run_k8s_pretrain.sh` script provides convenient CLI commands to manage training workloads on a Kubernetes cluster via a REST API. It supports creating, querying, deleting training jobs, and listing cluster nodes, facilitating flexible workload control for distributed training with Primus or similar frameworks.
-
-### Requirements
-
-- `jq` installed (for JSON processing)
-- Access to Kubernetes API endpoint URL
-
-### Usage
-
-```bash
-./run_k8s_pretrain.sh --url <api_base_url> <command> [options]
-
-```
-
-
-
-### ⚙️ Commands
-
-Primus provides several command-line interfaces to manage training workloads and cluster resources. Below are the commonly used commands:
-
-| Command | Description                    |
-| ------- | ------------------------------|
-| create  | Create a new training workload |
-| get     | Retrieve workload details      |
-| delete  | Delete an existing workload    |
-| list    | List all current workloads     |
-| nodes   | List all nodes in the cluster  |
-
-Use these commands to interact with Primus for workload scheduling and resource management.
-
-
----
-
-### ⚙️ Create Command Options
-
-When using the `create` command to start a new training workload, the following options are supported:
-
-| Option       | Description                                          | Default                                  |
-| ------------ | ---------------------------------------------------- | ---------------------------------------- |
-| `--replica`    | Number of replicas (instances)                       | 1                                        |
-| `--cpu`        | Number of CPUs                                       | 96                                       |
-| `--gpu`        | Number of GPUs                                       | 8                                        |
-| `--exp`        | Path to experiment (training config) file (required) | —                                        |
-| `--data_path`  | Path to training data                                | —                                        |
-| `--image`      | Docker image to use                                  | `docker.io/rocm/primus:v26.4` |
-| `--hf_token`   | HuggingFace token                                    | Read from env var `HF_TOKEN`             |
-| `--workspace`  | Workspace name                                       | `primus-safe-pretrain`                   |
-| `--nodelist`   | Comma-separated list of node hostnames to run on     | —                                        |
-
-### Example
-
-Create a training workload with 2 replicas and custom config:
-
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com create --replica 2 --cpu 96 --gpu 4 \
-  --exp examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml --data_path /mnt/data/train \
-  --image docker.io/custom/image:latest --hf_token myhf_token --workspace team-dev
-
-#result:
-{
-  "workloadId": "abc123"
-}
-
-```
-
-Get workload details:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com get --workload-id abc123
-
-```
-
-Delete a workload:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com delete --workload-id abc123
-
-```
-
-List all workloads:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com list
-
-```
-
-List all cluster nodes:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com nodes
-
+export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
+./primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
 ```

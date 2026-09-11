@@ -42,7 +42,7 @@ class Schedule1F1B(PipelineScheduleAlgo):
 
         for rank in range(self.pp_size):
             # warmup
-            warm_up_phases = self.pp_size - rank - 1
+            warm_up_phases = min(self.pp_size - rank - 1, self.micro_batches)
             for i in range(warm_up_phases):
                 recv_node, send_node = self.generate_send_recv_nodes(rank, i, 0, FuncType.F)
                 if recv_node is not None:

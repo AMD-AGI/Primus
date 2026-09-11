@@ -44,7 +44,7 @@ QUIET_LOGGER_NAMES = (
     "primus",
     "primus.cli",
     "primus.backends",
-    "primus.modules",
+    "primus.core",
 )
 
 

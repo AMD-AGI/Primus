@@ -7,6 +7,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from .runtime import get_zero_bubble_forward_backward_func
-
 __all__ = ["get_zero_bubble_forward_backward_func"]
+
+
+def get_zero_bubble_forward_backward_func(*args, **kwargs):
+    """Load the PuLP-backed zero-bubble runtime only when it is requested."""
+    from .runtime import (
+        get_zero_bubble_forward_backward_func as _get_zero_bubble_forward_backward_func,
+    )
+
+    return _get_zero_bubble_forward_backward_func(*args, **kwargs)

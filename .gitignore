@@ -36,4 +36,5 @@ pp_simulation_result
 /nohup.*
 /core.*.gpu
 .triton_cache_shared/
+.jax_cache/
 .cursor/

@@ -370,6 +370,12 @@ def info(__message: str, *args: Any, **kwargs: Any) -> None:
 def info_with_caller(__message: str, module_name: str, function_name: str, line: int) -> None:
     global _logger
     __message = f"{module_format(module_name, line)}: {__message}"
+    if _logger is None:
+        # Pre-setup / standalone context (e.g. the checkpoint-conversion hook,
+        # which runs run_patches before any setup_logger). Degrade to stdout
+        # instead of crashing on a None logger.
+        print(f"[INFO] {__message}", flush=True)
+        return
     _logger.info(__message)
 
 
@@ -389,6 +395,9 @@ def warning(__message: str, *args: Any, **kwargs: Any) -> None:
 def warning_with_caller(__message: str, module_name: str, function_name: str, line: int) -> None:
     global _logger
     __message = f"{module_format(module_name, line)}: {__message}"
+    if _logger is None:
+        print(f"[WARNING] {__message}", flush=True)
+        return
     _logger.warning(__message)
 
 
@@ -408,4 +417,7 @@ def error(__message: str, *args: Any, **kwargs: Any) -> None:
 def error_with_caller(__message: str, module_name: str, function_name: str, line: int) -> None:
     global _logger
     __message = f"{module_format(module_name, line)}: {__message}"
+    if _logger is None:
+        print(f"[ERROR] {__message}", flush=True)
+        return
     _logger.error(__message)
