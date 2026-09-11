@@ -1,5 +1,5 @@
-# SpecForge ROCm runtime: SGLang ROCm stack + SpecForge (editable, --no-deps)
-# + this Primus checkout (editable, --no-deps).
+# SpecForge ROCm runtime: SGLang ROCm stack + SpecForge's spec-capture.patch
+# + SpecForge (editable, --no-deps) + this Primus checkout (editable, --no-deps).
 # Do not install Primus's full dependency tree or run primus-cli deps sync.
 #
 # Build, ownership, and docker run: examples/specforge/docker/README.md

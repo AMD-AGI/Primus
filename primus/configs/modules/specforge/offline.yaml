@@ -24,7 +24,7 @@ specforge_root: null
 specforge_entrypoint: specforge
 
 # train (default) execs `specforge train`. capture runs
-# scripts/prepare_hidden_states.py via torchrun, then optional DFlash filter.
+# scripts/prepare_hidden_states.py via torchrun, then optional hidden-state filter.
 specforge_mode: train
 
 # Flags for prepare_hidden_states.py when specforge_mode=capture.

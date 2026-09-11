@@ -7,10 +7,10 @@
 """
 Stack-aware preflight for the SpecForge ROCm overlay.
 
-The Qwen3.5 DFlash recipe on MI355X is not a generic ``specforge train``. Capture
-and serving run a hybrid Mamba target under AITER; SGLang's Mamba radix-cache
-path asserts CUDA at init. A CUDA torch wheel in this image is a silent
-clobber. These checks are GPU-free (imports and env only).
+Capture and serving on this overlay use AITER. SGLang's Mamba radix-cache
+path asserts CUDA at init, and a CUDA torch wheel in this image is a silent
+clobber. These checks are GPU-free (imports and env only) and apply to every
+target model and drafter on the overlay, not a single recipe.
 
 Called from the pretrain hook (fail before launch) and from the trainer
 (fail before exec). The hook also emits the AITER / radix-cache env defaults
@@ -188,7 +188,7 @@ def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list
         if kind == "unknown":
             issues.append("Unexpected torch build; expected HIP metadata or the SGLang ROCm git build")
         if _env_flag(environ, "SGLANG_USE_AITER") is False:
-            issues.append("SGLANG_USE_AITER=0; Qwen3.5 Mamba capture/serve on this overlay needs AITER")
+            issues.append("SGLANG_USE_AITER=0; capture/serve on this overlay needs AITER")
         if _env_flag(environ, "SGLANG_DISABLE_RADIX_CACHE") is False:
             issues.append("SGLANG_DISABLE_RADIX_CACHE=0; SGLang Mamba radix-cache asserts CUDA on ROCm")
         if radix_override in FALSEY or radix_override == "false":

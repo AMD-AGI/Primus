@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Drop DFlash captures with too few anchorable loss-mask tokens."""
+"""Drop captures with too few anchorable loss-mask tokens."""
 
 from __future__ import annotations
 

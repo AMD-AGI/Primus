@@ -12,7 +12,7 @@ This page covers what is common to every backend — image, architecture folders
 | TorchTitan (PyTorch) | `rocm/primus` | `examples/torchtitan/configs/<ARCH>/` | [TorchTitan training](torchtitan-training.md) |
 | JAX MaxText | `rocm/jax-training:maxtext-…` | `examples/maxtext/configs/<ARCH>/` | [JAX MaxText training](jax-maxtext-training.md) |
 | Megatron Bridge (post-training) | `rocm/primus` | `examples/megatron_bridge/configs/<ARCH>/` | [Post-training](posttraining.md) |
-| SpecForge (offline DFlash) | `lmsysorg/sglang` + [`examples/specforge/docker`](../../examples/specforge/docker) | `examples/specforge/configs/` | [SpecForge on Primus](../../examples/specforge/README.md) |
+| SpecForge (offline) | `lmsysorg/sglang` + [`examples/specforge/docker`](../../examples/specforge/docker) | `examples/specforge/configs/` | [SpecForge on Primus](../../examples/specforge/README.md) |
 
 Each backend recipe page opens with an **Important notes** section listing the settings that release requires, the architecture-specific tuning, and any known issues. Read it before your first run on a new image tag.
 

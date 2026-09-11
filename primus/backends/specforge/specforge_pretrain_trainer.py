@@ -13,7 +13,7 @@ SpecForge CLI via ``os.execvp``, which keeps a single process tree and lets
 SpecForge's exit code propagate to the scheduler unchanged.
 
 Train uses ``os.execvp``, so ``cleanup()`` only runs on the error path.
-Capture uses ``subprocess.run`` so the trainer can filter DFlash shards after
+Capture uses ``subprocess.run`` so the trainer can filter hidden-state shards after
 ``prepare_hidden_states.py`` exits.
 """
 

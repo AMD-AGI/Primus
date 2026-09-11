@@ -17,7 +17,7 @@ The following table describes the backends supported by Primus and their typical
 | MaxText (JAX) | `framework: maxtext` | JAX/MaxText single- and multi-node runs; parallelism via MaxText `ici_*` / `dcn_*` settings. |
 | MaxDiffusion (JAX) | `framework: maxdiffusion` | JAX/MaxDiffusion diffusion pretraining (WAN 2.1, FLUX.1-dev). Source is vendored as the `third_party/maxdiffusion` submodule; deps/patches installed by `examples/maxdiffusion/setup_maxdiffusion_env.sh`. |
 | Megatron Bridge | `framework: megatron_bridge` | Bridge-oriented workflows (configure like other backends; see parameter reference). |
-| SpecForge | `framework: specforge` | Offline DFlash capture and draft training on a ROCm SGLang image. See [SpecForge on Primus](../../examples/specforge/README.md). |
+| SpecForge | `framework: specforge` | Offline hidden states capture and draft training on a ROCm SGLang Primus image. See [SpecForge on Primus](../../examples/specforge/README.md). |
 
 > Several setup steps apply to **all** backends (mock vs. real data, Hugging Face tokens, scaling to multiple nodes, and HipBLASLt autotuning). After you read the backend section that applies to you, see [Common patterns](#common-patterns) below.
 

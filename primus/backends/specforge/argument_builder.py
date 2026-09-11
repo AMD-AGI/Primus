@@ -105,7 +105,7 @@ def build_specforge_argv(params: Any, extra_overrides: Optional[list[str]] = Non
     if not specforge_config:
         raise ValueError(
             "[Primus:specforge] 'specforge_config' is required; point it at a SpecForge YAML "
-            "(e.g. configs/dflash/qwen3.5-4b.yaml)."
+            "(e.g. a SpecForge examples/configs YAML)."
         )
 
     overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
