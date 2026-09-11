@@ -13,6 +13,7 @@ from primus.backends.megatron_bridge.patches.gemma4 import (  # noqa: F401
     gemma4_config_overrides,
     gemma4_diagnostics,
     gemma4_fused_norms,
+    gemma4_local_spec,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "gemma4_config_overrides",
     "gemma4_diagnostics",
     "gemma4_fused_norms",
+    "gemma4_local_spec",
 ]
