@@ -180,10 +180,21 @@ def _use_torch_optimizer(container: Any) -> None:
     """
     import sys
 
+    # Two independent things happen here, and they must not be coupled. Flipping
+    # the module flag needs megatron.core.optimizer to be imported already;
+    # clearing the config field needs only the container. Gating both on the
+    # import would make the config change depend on patch-vs-import ordering,
+    # which is not something this patch controls -- and a half-applied switch
+    # (torch Adam requested, precision-aware still on) is worse than either
+    # outcome, because precision-aware optimisation relies on the FusedAdam
+    # master-weight path that is no longer there.
     module = sys.modules.get("megatron.core.optimizer")
     if module is None:
-        return
-    if getattr(module, "USING_PYTORCH_OPTIMIZER", None) is not True:
+        log_rank_0(
+            "[Patch:gemma4.local_spec] megatron.core.optimizer not imported yet; "
+            "its own import-time choice applies. Clearing the config field regardless."
+        )
+    elif getattr(module, "USING_PYTORCH_OPTIMIZER", None) is not True:
         module.USING_PYTORCH_OPTIMIZER = True
         log_rank_0(
             "[Patch:gemma4.local_spec] forced USING_PYTORCH_OPTIMIZER=True "
