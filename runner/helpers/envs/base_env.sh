@@ -199,8 +199,109 @@ export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-1}
 # Setting this to 0 prevents core dumps when using Mixture-of-Experts (MoE) models
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
+# ----------------- hipBLASLt Tensile library path -----------------
+# Some ROCm packages install hipBLASLt's Tensile files one directory below where
+# the library loads them. The kernels land in
+#     <prefix>/hipblaslt/library/gfx<arch>/TensileLibrary_lazy_gfx<arch>.dat
+# while hipBLASLt looks for
+#     <prefix>/hipblaslt/library/TensileLibrary_lazy_gfx<arch>.dat
+#
+# The failure is quiet and very expensive. The load fails with "rocblaslt error:
+# Cannot read ..." on stderr, no solution is ever found, and
+# hipblasLtMatmulAlgoGetHeuristic then returns HIPBLAS_STATUS_INVALID_VALUE for
+# *every* shape. hipBLASLt therefore looks completely broken rather than merely
+# untuned, which is misleading in a specific way: the natural reaction is to set
+# TORCH_BLAS_PREFER_HIPBLASLT=0 and move to the rocBLAS fallback, and that is a
+# large silent performance loss. On a gfx1250 wheel, pointing this variable at
+# the real directory takes a plain square bf16 GEMM from failing outright to
+# working, and speeds up single-GPU Gemma 4 training substantially with the loss
+# curve unchanged. It also un-blocked Transformer Engine, which had appeared
+# broken for the same reason.
+#
+# The guard requires the top-level file to be absent *and* a per-architecture
+# copy to be present, so this is a no-op wherever packaging is correct.
+detect_hipblaslt_tensile_libpath() {
+    local glob lib_dir arch_dir arch
+    local -a candidates=() arch_dirs=()
+
+    # Candidate order is deliberate, because a ROCm pip install can carry more
+    # than one copy of hipBLASLt whose Tensile trees are *not* identical -- an
+    # architecture-specific runtime wheel (_rocm_sdk_libraries_gfx<arch>) and a
+    # development tree (_rocm_sdk_devel), the latter with noticeably fewer code
+    # objects. Redirecting to the wrong one trades a missing library for an
+    # incomplete one, so the choice cannot be left to glob order.
+    #
+    # Neither of the two obvious selectors is trustworthy here:
+    #   * ROCM_HOME / ROCM_PATH can point at the development tree even when the
+    #     runtime wheel is what gets used.
+    #   * static linkage disagrees with reality -- ldd on libtorch_hip.so
+    #     resolves libhipblaslt.so.1 to the development tree, while
+    #     /proc/self/maps after importing torch shows the runtime wheel's copy
+    #     mapped instead, because that one is already loaded by the time the
+    #     dependency is resolved.
+    # Asking torch directly would settle it but costs a full interpreter import
+    # in the launcher, which is also the one operation that hangs outright on a
+    # GPU that has stopped responding. So prefer the architecture-specific
+    # runtime wheel, which is both the copy observed in use and the more
+    # complete one, and fall back to the broader trees only if it is absent.
+    for glob in \
+        "${VIRTUAL_ENV:-/nonexistent}/lib/python*/site-packages/_rocm_sdk_libraries_*/lib/hipblaslt/library" \
+        "${ROCM_HOME:-/opt/rocm}/lib/hipblaslt/library" \
+        "/opt/rocm-*/lib/hipblaslt/library" \
+        "${VIRTUAL_ENV:-/nonexistent}/lib/python*/site-packages/_rocm_sdk_*/lib/hipblaslt/library"
+    do
+        while IFS= read -r lib_dir; do
+            candidates+=("$lib_dir")
+        done < <(compgen -G "$glob" || true)
+    done
+
+    for lib_dir in "${candidates[@]}"; do
+        # Packaged correctly: the file is where hipBLASLt already looks for it.
+        if compgen -G "${lib_dir}/TensileLibrary_lazy_*.dat*" > /dev/null; then
+            continue
+        fi
+
+        arch_dirs=()
+        while IFS= read -r arch_dir; do
+            if compgen -G "${arch_dir}/TensileLibrary_lazy_*.dat*" > /dev/null; then
+                arch_dirs+=("$arch_dir")
+            fi
+        done < <(compgen -G "${lib_dir}/gfx*" || true)
+
+        if [[ ${#arch_dirs[@]} -eq 1 ]]; then
+            echo "${arch_dirs[0]}"
+            return 0
+        fi
+
+        # Several architectures shipped side by side: redirecting to the wrong
+        # one would be worse than leaving it alone, so only act on a match we
+        # can confirm against the device.
+        if [[ ${#arch_dirs[@]} -gt 1 ]]; then
+            arch=$(offload-arch 2> /dev/null | head -n1)
+            for arch_dir in "${arch_dirs[@]}"; do
+                if [[ -n "$arch" && "$(basename "$arch_dir")" == "$arch" ]]; then
+                    echo "$arch_dir"
+                    return 0
+                fi
+            done
+        fi
+    done
+
+    return 0
+}
+
+if [[ -z "${HIPBLASLT_TENSILE_LIBPATH:-}" ]]; then
+    __primus_tensile_libpath=$(detect_hipblaslt_tensile_libpath)
+    if [[ -n "$__primus_tensile_libpath" ]]; then
+        export HIPBLASLT_TENSILE_LIBPATH="$__primus_tensile_libpath"
+        LOG_WARN "hipBLASLt Tensile files are not in the directory hipBLASLt loads them from."
+        LOG_WARN "Setting HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH} to avoid the rocBLAS fallback."
+    fi
+    unset __primus_tensile_libpath
+fi
+
 log_exported_vars "AMD GPU Optimizations" \
-    HSA_ENABLE_SDMA HSA_NO_SCRATCH_RECLAIM
+    HSA_ENABLE_SDMA HSA_NO_SCRATCH_RECLAIM HIPBLASLT_TENSILE_LIBPATH
 
 # ----------------- General Performance Tuning -----------------
 # Limit GPU hardware queues to 2 for performance stability
