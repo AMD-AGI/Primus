@@ -441,12 +441,13 @@ class PrimusTurboQuantConfig:
         scale_dtype: ScaleDtype = ScaleDtype.FP32,
         block_size: int = None,
         use_gradient_sr: bool = True,
+        scale_rounding_mode: int = 0,
     ):
         self._is_fp4 = False
         self._is_fp8 = False
         if format == Format.E2M1_X2:
             # FP4
-            self._quant_config = Float4QuantConfig(
+            fp4_kwargs = dict(
                 format=format,
                 granularity=granularity,
                 strategy=strategy,
@@ -454,6 +455,17 @@ class PrimusTurboQuantConfig:
                 block_size=block_size,
                 use_gradient_sr=use_gradient_sr,
             )
+            # scale_rounding_mode arrived with the Turbo MXFP4 UoS work. Older
+            # Turbo builds took the mode from an environment variable, so only
+            # pass it when the installed Float4QuantConfig declares it.
+            if "scale_rounding_mode" in getattr(Float4QuantConfig, "__dataclass_fields__", {}):
+                fp4_kwargs["scale_rounding_mode"] = scale_rounding_mode
+            elif scale_rounding_mode:
+                warning_rank_0(
+                    "Primus-Turbo Float4QuantConfig has no scale_rounding_mode; "
+                    f"mxfp4_scale_rounding_mode={scale_rounding_mode} is ignored."
+                )
+            self._quant_config = Float4QuantConfig(**fp4_kwargs)
             self._is_fp4 = True
         else:
             # FP8
@@ -663,7 +675,14 @@ def primus_turbo_fp4_autocast(
 
 
 def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
-    if FP8GlobalStateManager.is_fp8_enabled():
+    # Decide from the same state the Turbo forward will consult. The Turbo GEMM
+    # branch is chosen from the Turbo fp8/fp4 flags, and those stay on in places
+    # where TE's own flag no longer is: inside an MXFP4 layer, once the QKV
+    # site's BF16 override has exited, the site sees turbo_fp4 on with te_fp8
+    # off. Reading TE's flag alone then treats the context as non-quantized and
+    # drops the override, which sent a BF16-pinned O projection to the MXFP4
+    # GEMM and lost the loss to NaN from the first step.
+    if FP8GlobalStateManager.is_fp8_enabled() or _is_fp4_or_fp8_enabled():
         if not qrecipe.override_quantized_autocast:
             return nullcontext()
     else:
@@ -1147,7 +1166,9 @@ class PrimusTurboLinear(TELinear):
 
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
-                        self.quantized_weight_buffer = torch.empty(0, device=weight.device, dtype=torch.uint8)
+                        self.quantized_weight_buffer = torch.empty(
+                            0, device=weight.device, dtype=float4_e2m1fn_x2
+                        )
                     out = primus_turbo_torch.ops.gemm_fp4(
                         x,
                         weight,
@@ -1358,7 +1379,9 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
 
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
-                        self.quantized_weight_buffer = torch.empty(0, device=weight.device, dtype=torch.uint8)
+                        self.quantized_weight_buffer = torch.empty(
+                            0, device=weight.device, dtype=float4_e2m1fn_x2
+                        )
                     out = primus_turbo_torch.ops.gemm_fp4(
                         x,
                         weight,
@@ -1562,7 +1585,9 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
 
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
-                        self.quantized_weight_buffer = torch.empty(0, device=weight.device, dtype=torch.uint8)
+                        self.quantized_weight_buffer = torch.empty(
+                            0, device=weight.device, dtype=float4_e2m1fn_x2
+                        )
                     out = primus_turbo_torch.ops.gemm_fp4(
                         x,
                         weight,
@@ -1779,7 +1804,9 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
 
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
-                        self.quantized_weight_buffer = torch.empty(0, device=weight.device, dtype=torch.uint8)
+                        self.quantized_weight_buffer = torch.empty(
+                            0, device=weight.device, dtype=float4_e2m1fn_x2
+                        )
                     out = primus_turbo_torch.ops.gemm_fp4(
                         inp,
                         weight,
@@ -2185,10 +2212,12 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
 
             if get_num_microbatches() == 1:
                 # This direct path quantizes the bf16 weight internally and has
-                # no persistent cache. Expose a lightweight runtime marker so
-                # weight de-oscillation can identify the grouped FP4 weight.
+                # no persistent cache. Mark with float4_e2m1fn_x2 so de-osc can
+                # tell MXFP4 weights from an FP8 quantized_weight_buffer.
                 if is_first_microbatch:
-                    self.quantized_weight_buffer = torch.empty(0, device=weights.device, dtype=torch.uint8)
+                    self.quantized_weight_buffer = torch.empty(
+                        0, device=weights.device, dtype=float4_e2m1fn_x2
+                    )
                 out = primus_turbo_torch.ops.grouped_gemm_fp4(
                     x,
                     weights,

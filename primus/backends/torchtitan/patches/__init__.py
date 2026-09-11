@@ -31,6 +31,7 @@ from primus.backends.torchtitan.patches import (  # noqa: F401
     embedding_amp_patches,
     flex_attention_patches,
     fsdp_weight_tying_patches,
+    inductor_precision_casts_patches,
     logger_patches,
     metrics_output_format,
     mock_dataset_patches,

@@ -1,0 +1,32 @@
+# Transformer Engine per-module precision recipe for GPT-OSS-20B MXFP4.
+# Loaded via Megatron --te-precision-config-file / yaml te_precision_config_file.
+# Dense QKVO runs tensorwise FP8; grouped expert GEMMs are not matched, so they
+# keep the experiment MXFP4 recipe.
+#
+# This file is not a Primus experiment recipe.
+
+configs:
+  fp8_tensorwise:
+    transformer_engine_config_type: "TEQuantizationParams"
+    training_recipe:
+      fp8_quantization_recipe: "tensorwise"
+      fp8_format: "e4m3"
+
+matchers:
+  self_attn_qkv_fp8:
+    config: "fp8_tensorwise"
+    type: "glob"
+    pattern: "*.self_attention.linear_qkv"
+    enabled: true
+  # use_turbo_norm_te_linear splits QKV into wrapper.linear; finish_init
+  # walks the inner TEColumnParallelLinear whose path ends in .linear.
+  self_attn_qkv_te_linear_fp8:
+    config: "fp8_tensorwise"
+    type: "glob"
+    pattern: "*.self_attention.linear_qkv.linear"
+    enabled: true
+  self_attn_proj_fp8:
+    config: "fp8_tensorwise"
+    type: "glob"
+    pattern: "*.self_attention.linear_proj"
+    enabled: true

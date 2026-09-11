@@ -7,7 +7,7 @@
 """
 Backend prepare entry for the NeMo AutoModel framework.
 
-Mirrors ``examples/torchtitan/prepare.py``: it resolves the backend checkout
+Mirrors the torchtitan hook next door: it resolves the backend checkout
 (the ``third_party/Automodel`` submodule by default) and installs it editable so
 the ``nemo_automodel`` package is importable for the training phase. Two
 AutoModel-specific differences from the torchtitan flow:
@@ -35,13 +35,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-from examples.scripts.utils import (
+from primus.core.launcher.parser import PrimusParser
+from runner.helpers.hooks.train.pretrain.utils import (
     get_env_case_insensitive,
     log_error_and_exit,
     log_info,
     write_patch_args,
 )
-from primus.core.launcher.parser import PrimusParser
 
 # Native ROCm packages to pin so the editable install never swaps them for CUDA
 # wheels.
@@ -81,7 +81,8 @@ def parse_args():
         default=None,
         help="Optional AutoModel checkout path; overrides AUTOMODEL_PATH/BACKEND_PATH and the default submodule.",
     )
-    return parser.parse_args()
+    args, _ = parser.parse_known_args()
+    return args
 
 
 def resolve_backend_path(cli_path, primus_path: Path) -> Path:

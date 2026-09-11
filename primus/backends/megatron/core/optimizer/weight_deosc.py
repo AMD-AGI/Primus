@@ -133,6 +133,24 @@ class WeightDeOscConfig:
             raise ValueError(f"weight_deosc_log_freq must be >= 0, got {self.log_freq}")
 
 
+def _is_mxfp4_quantized_weight_buffer(buf) -> bool:
+    """True iff ``buf`` was installed by a Primus-Turbo MXFP4 forward.
+
+    Dense FP8 and MXFP4 linears both stash a ``quantized_weight_buffer``. The
+    FP4 paths (including the 1-microbatch marker that used to be uint8) now
+    use ``float4_e2m1fn_x2`` so mixed FP8-linear + MXFP4-grouped recipes do
+    not snap FP8 weights onto the MXFP4 grid.
+    """
+    if buf is None:
+        return False
+    if _float4_e2m1fn_x2 is None:
+        return True
+    dtype = getattr(buf, "dtype", None)
+    if dtype is None:
+        return False
+    return dtype == _float4_e2m1fn_x2
+
+
 def deosc_dependencies_available() -> Tuple[bool, str]:
     """Return whether the Primus-Turbo MXFP4 QDQ primitives are importable."""
     if _PrimusTurboQuantizedTensor is None:
@@ -349,9 +367,8 @@ class WeightDeOscRunner:
         """Collect weights of modules whose FP4 forward actually quantized them.
 
         A Primus-Turbo linear registers a ``quantized_weight_buffer`` that stays
-        ``None`` unless its FP4 forward ran. This is a precise runtime signal of
-        "this weight is re-quantized in the forward GEMM", so de-osc snaps only
-        match weights the forward actually quantizes.
+        ``None`` unless a quantized forward ran. FP8 and MXFP4 both do this, so
+        eligibility also requires the buffer dtype to be ``float4_e2m1fn_x2``.
         """
         eligible: set = set()
         n_dense = 0
@@ -362,7 +379,7 @@ class WeightDeOscRunner:
         for chunk in model_chunks:
             modules = chunk.modules() if hasattr(chunk, "modules") else []
             for module in modules:
-                if getattr(module, "quantized_weight_buffer", None) is None:
+                if not _is_mxfp4_quantized_weight_buffer(getattr(module, "quantized_weight_buffer", None)):
                     continue
                 weight = getattr(module, "_parameters", {}).get("weight", None)
                 if weight is None:

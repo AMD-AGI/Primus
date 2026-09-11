@@ -62,4 +62,4 @@ if [ ! -d "${PRIMUS_FLA_CACHE_DIR}" ]; then
     echo "         shuffler, and the loss curve will diverge from FLA's after iter 1."
 fi
 
-EXP="${EXP}" bash examples/run_pretrain.sh 2>&1 | tee "${LOG}"
+bash ./runner/primus-cli direct -- train pretrain --config "${EXP}" 2>&1 | tee "${LOG}"

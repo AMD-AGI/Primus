@@ -579,7 +579,7 @@ PRIMUS_TRAIN_RUNTIME=legacy ./runner/primus-cli container \
 
 ### 3.2 Multi-node training
 
-To run training on multiple nodes, you can use `primus-cli` (recommended) or the [`run_slurm_pretrain.sh`](https://github.com/AMD-AGI/Primus/blob/main/examples/run_slurm_pretrain.sh) script to launch multi-node workloads. Below are the multi-node setup and examples to run multi-node tests.
+To run training on multiple nodes, you can use `primus-cli` (recommended) or the shared [`runner/helpers/launch/slurm_pretrain.sh`](../../runner/helpers/launch/slurm_pretrain.sh) helper, which turns the `EXP` / `NNODES` environment contract into the same `primus-cli slurm srun ... -- container -- train pretrain` invocation. Below are the multi-node setup and examples to run multi-node tests.
 
 **Multi-node setup**
 
@@ -619,62 +619,62 @@ Notes:
 
 ```bash
 # Adjust the training parameters. For example, `global_batch_size: 8 * #single_node_bs` for 8 nodes in this case
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml bash ./examples/run_slurm_pretrain.sh --global_batch_size 1024
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --global_batch_size 1024
 ```
 
 - **Llama2-7B FP8, 8 nodes:**
 
 ```bash
 # Adjust the training parameters. For example, `global_batch_size: 8 * #single_node_bs` for 8 nodes in this case
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_7B-FP8-pretrain.yaml bash ./examples/run_slurm_pretrain.sh --global_batch_size 2048
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_7B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --global_batch_size 2048
 ```
 
 - **Llama3.1-70B FP8, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 4 --global_batch_size 256 --recompute_num_layers 80
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 4 --global_batch_size 256 --recompute_num_layers 80
 ```
 
 - **Llama3.1-70B BF16, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --recompute_num_layers 12
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --recompute_num_layers 12
 ```
 
 - **Llama2-70B FP8, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_70B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 10 --global_batch_size 640 --recompute_num_layers 80
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_70B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 10 --global_batch_size 640 --recompute_num_layers 80
 ```
 
 - **Llama2-70B BF16, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_70B-BF16-pretrain.yaml bash ./examples/run_slurm_pretrain.sh --micro_batch_size 2 --global_batch_size 1536 --recompute_num_layers 12
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_70B-BF16-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 2 --global_batch_size 1536 --recompute_num_layers 12
 ```
 
 - **Llama3.3-70B FP8, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.3_70B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 4 --global_batch_size 256 --recompute_num_layers 80
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.3_70B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 4 --global_batch_size 256 --recompute_num_layers 80
 ```
 
 - **Llama3.3-70B BF16, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.3_70B-BF16-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --recompute_num_layers 12
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.3_70B-BF16-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --recompute_num_layers 12
 ```
 
 - **Mixtral 8x7B BF16, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 2 --global_batch_size 256
+NNODES=8 EXP=examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 2 --global_batch_size 256
 ```
 
 - **Qwen2.5-72B FP8, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/qwen2.5_72B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 8 --global_batch_size 512 --recompute_num_layers 80
+NNODES=8 EXP=examples/megatron/configs/MI300X/qwen2.5_72B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 8 --global_batch_size 512 --recompute_num_layers 80
 ```
 
 - **Mixtral-8x22B BF16, 4 nodes, MI355X**
@@ -686,10 +686,10 @@ Launch the training using `primus-cli` (recommended):
 ./runner/primus-cli slurm srun -N 4 -- train pretrain --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml --micro_batch_size 1 --global_batch_size 512 --num_virtual_stages_per_pipeline_rank 2 --pipeline_model_parallel_size 4 --expert_model_parallel_size 8 --recompute_num_layers 1 --moe_use_legacy_grouped_gemm True --gradient_accumulation_fusion True
 ```
 
-Launch the training using the legacy script:
+Or with the shared `EXP` / `NNODES` helper:
 
 ```bash
-NNODES=4 EXP=examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 512 --num_virtual_stages_per_pipeline_rank 2 --pipeline_model_parallel_size 4 --expert_model_parallel_size 8 --recompute_num_layers 1 --moe_use_legacy_grouped_gemm True --gradient_accumulation_fusion True
+NNODES=4 EXP=examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 512 --num_virtual_stages_per_pipeline_rank 2 --pipeline_model_parallel_size 4 --expert_model_parallel_size 8 --recompute_num_layers 1 --moe_use_legacy_grouped_gemm True --gradient_accumulation_fusion True
 ```
 
 - **Llama3.1-405B FP8, 8 nodes, MI325X**
@@ -703,10 +703,10 @@ Launch the training using `primus-cli` (recommended):
 
 We use TP=8 for the Llama 3.1 405B model on 8 nodes. Because it has 126 layers, which is not divisible by 8, you need to set `decoder_first_pipeline_num_layers` and `decoder_last_pipeline_num_layers`.
 
-Launch the training using the legacy script:
+Or with the shared `EXP` / `NNODES` helper:
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI325X/llama3.1_405B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --decoder_first_pipeline_num_layers 15 --decoder_last_pipeline_num_layers 15
+NNODES=8 EXP=examples/megatron/configs/MI325X/llama3.1_405B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --decoder_first_pipeline_num_layers 15 --decoder_last_pipeline_num_layers 15
 ```
 
 ---

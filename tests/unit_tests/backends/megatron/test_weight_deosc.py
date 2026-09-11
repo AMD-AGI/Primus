@@ -28,13 +28,33 @@ from primus.backends.megatron.core.optimizer.weight_deosc import (
     qdq_mxfp4_local_shard,
 )
 
+# CPU tests never import primus_turbo's float4 dtype. Pin a sentinel so the
+# eligibility filter can still tell an MXFP4 marker from an FP8 cache.
+_FP4_DTYPE = type("float4_e2m1fn_x2", (), {})()
+_FP8_DTYPE = type("float8_e4m3", (), {})()
+
+
+@pytest.fixture(autouse=True)
+def _fp4_marker_dtype(monkeypatch):
+    monkeypatch.setattr(weight_deosc, "_float4_e2m1fn_x2", _FP4_DTYPE)
+
+
+def _fp4_buffer():
+    return types.SimpleNamespace(dtype=_FP4_DTYPE)
+
+
+def _fp8_buffer():
+    return types.SimpleNamespace(dtype=_FP8_DTYPE)
+
 
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
 class _FakeModule:
-    def __init__(self, weight):
-        self.quantized_weight_buffer = object()  # signal: fp4 forward ran
+    def __init__(self, weight, quantized_weight_buffer=None):
+        self.quantized_weight_buffer = (
+            _fp4_buffer() if quantized_weight_buffer is None else quantized_weight_buffer
+        )
         self._parameters = {"weight": weight}
 
     def modules(self):
@@ -205,7 +225,7 @@ def test_eligibility_collects_dense_and_grouped_fp4_weights():
     grouped_weights = torch.zeros(2, 4, 4)
     dense_module = _FakeModule(dense_weight)
     grouped_module = types.SimpleNamespace(
-        quantized_weight_buffer=object(),
+        quantized_weight_buffer=_fp4_buffer(),
         _parameters={},
         weights=grouped_weights,
     )
@@ -219,6 +239,19 @@ def test_eligibility_collects_dense_and_grouped_fp4_weights():
     eligible_ids = runner._build_eligible_ids(opt)
 
     assert eligible_ids == {id(dense_weight), id(grouped_weights)}
+
+
+def test_eligibility_excludes_fp8_quantized_weights():
+    fp4_weight = torch.zeros(4, 4)
+    fp8_weight = torch.zeros(4, 4)
+    fp4_module = _FakeModule(fp4_weight)
+    fp8_module = _FakeModule(fp8_weight, quantized_weight_buffer=_fp8_buffer())
+    opt = types.SimpleNamespace(model_chunks=[_FakeMultiChunk(fp4_module, fp8_module)])
+
+    runner = WeightDeOscRunner(WeightDeOscConfig(enable=True))
+    eligible_ids = runner._build_eligible_ids(opt)
+
+    assert eligible_ids == {id(fp4_weight)}
 
 
 def test_state_dict_round_trip(monkeypatch):

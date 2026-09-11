@@ -179,12 +179,22 @@ modules:
       enable_primus_turbo: true
       use_turbo_attention: true
       enable_turbo_attention_float8: false
+      # Dense (QKVO) GEMM on Primus-Turbo. FlyDSL owns the tuned FP8 dense GEMM
+      # on gfx950. It is not registered for the BF16 dense GEMM, and an
+      # explicitly requested backend raises rather than falling back, so BF16
+      # has to name hipBLASLt here.
+      use_turbo_gemm: ${PRIMUS_USE_TURBO_GEMM:true}
+      turbo_gemm_backend: ${PRIMUS_TURBO_GEMM_BACKEND:fp8:flydsl,fp4:flydsl,other:hipblaslt}
       use_turbo_grouped_gemm: true
-      turbo_grouped_gemm_backend: flydsl
+      turbo_grouped_gemm_backend: ${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:flydsl}
+      # Placeholder for the fused grouped MLP (fc1+GLU+fc2+WGRAD). The Primus
+      # wiring is not merged yet, so this reads as a plain no-op today.
+      turbo_fused_grouped_gemm: ${PRIMUS_TURBO_FUSED_GROUPED_GEMM:false}
       turbo_grouped_gemm_without_padding: ${TURBO_GROUPED_GEMM_WITHOUT_PADDING:true}
       use_turbo_rms_norm: ${USE_TURBO_RMS_NORM:true}
-      # Keeps the fused layernorm+QKV site's norm on Turbo and its GEMM on
-      # hipBLASLt, which is where each backend is faster on these shapes.
+      # Only read when use_turbo_gemm is off: it splits the fused layernorm+QKV
+      # site so the norm runs on Turbo and the GEMM stays on TE. use_turbo_gemm
+      # takes the whole fused module to Turbo instead.
       use_turbo_norm_te_linear: ${USE_TURBO_NORM_TE_LINEAR:true}
       use_turbo_fused_act_with_probs : true
 
