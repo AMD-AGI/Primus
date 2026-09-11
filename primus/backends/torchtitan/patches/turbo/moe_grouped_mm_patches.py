@@ -41,7 +41,7 @@ def patch_torchtitan_moe(ctx: PatchContext) -> None:
     """
     Patch TorchTitan MoE to use Primus-Turbo grouped_mm implementation.
     """
-    import torchtitan.models.moe.moe
+    import torchtitan.models.moe.moe as moe_module
 
     from primus.backends.torchtitan.models.moe.moe import _run_experts_grouped_mm
 
@@ -64,7 +64,7 @@ def patch_torchtitan_moe(ctx: PatchContext) -> None:
     _run_experts_grouped_mm_dynamic.__qualname__ = _ALREADY_PATCHED_SENTINEL
     _run_experts_grouped_mm_dynamic.__name__ = _ALREADY_PATCHED_SENTINEL
 
-    torchtitan.models.moe.moe._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
+    moe_module._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
 
     log_rank_0(
         "[Patch:torchtitan.primus_turbo.moe_grouped_mm] "
