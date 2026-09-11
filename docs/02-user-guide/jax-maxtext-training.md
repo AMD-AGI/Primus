@@ -69,7 +69,7 @@ The following models are pre-optimized for performance on the AMD Instinct MI300
 
 ## System validation
 
-If you have already validated your system, skip this step. Otherwise, complete the [system validation and optimization steps](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/prerequisite-system-validation.html#train-a-model-system-validation) to set up your system before starting training.
+If you have already validated your system, skip this step. Otherwise, complete the [system validation and optimization steps](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/system-setup/prerequisite-system-validation.html#prerequisite-system-validation-before-running-ai-workloads) to set up your system before starting training.
 
 ---
 
