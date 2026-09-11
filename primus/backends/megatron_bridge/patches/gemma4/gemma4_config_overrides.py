@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import ast
 import os
+from enum import Enum
 from typing import Any, List, Tuple
 
 from primus.core.patches import PatchContext, register_patch
@@ -76,6 +77,33 @@ def _parse_spec(spec: str) -> List[Tuple[str, Any]]:
     return entries
 
 
+def _coerce_to_field(before: Any, value: Any, path: str) -> Any:
+    """Coerce a parsed string to the existing field's type where it matters.
+
+    Several of the fields worth overriding are enums, not strings -- notably
+    ``model.attention_backend``, which is an ``AttnBackend``. megatron-core
+    compares it by enum identity, so ``setattr``-ing the plain string
+    ``"unfused"`` does not raise, it silently fails to match and the run
+    proceeds on the default backend. That is the worst possible outcome for a
+    tuning hook: a config knob that reports success and changes nothing.
+    """
+    if isinstance(before, Enum) and not isinstance(value, Enum):
+        cls = type(before)
+        try:
+            return cls[str(value)]
+        except KeyError:
+            pass
+        try:
+            return cls(value)
+        except ValueError:
+            log_rank_0(
+                f"[Patch:gemma4.config.overrides] {path}: {value!r} is not a valid "
+                f"{cls.__name__} (valid: {[m.name for m in cls]}); leaving {before!r}"
+            )
+            return before
+    return value
+
+
 def _apply(container: Any, entries: List[Tuple[str, Any]]) -> None:
     for path, value in entries:
         parts = path.split(".")
@@ -92,6 +120,7 @@ def _apply(container: Any, entries: List[Tuple[str, Any]]) -> None:
             log_rank_0(f"[Patch:gemma4.config.overrides] Skipped {path}: field does not exist")
             continue
         before = getattr(target, leaf)
+        value = _coerce_to_field(before, value, path)
         setattr(target, leaf, value)
         log_rank_0(f"[Patch:gemma4.config.overrides] {path}: {before!r} -> {value!r}")
 
