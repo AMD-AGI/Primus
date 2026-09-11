@@ -153,9 +153,10 @@ def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list
                 draft_path = root / draft_path
             if not draft_path.is_file():
                 issues.append(f"draft model config is not a file: {draft_path}")
-        if capture.get("sglang_disable_radix_cache") in FALSEY or capture.get(
-            "sglang_disable_radix_cache"
-        ) == "false":
+        if (
+            capture.get("sglang_disable_radix_cache") in FALSEY
+            or capture.get("sglang_disable_radix_cache") == "false"
+        ):
             issues.append(
                 "capture sglang_disable_radix_cache is false; Mamba + AITER on ROCm "
                 "must disable the radix cache"
@@ -183,21 +184,13 @@ def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list
     kind = torch_kind()
     if enforce_rocm_stack(environ, kind=kind):
         if kind == "cuda":
-            issues.append(
-                "Detected a CUDA torch wheel; the ROCm overlay stack has been clobbered"
-            )
+            issues.append("Detected a CUDA torch wheel; the ROCm overlay stack has been clobbered")
         if kind == "unknown":
-            issues.append(
-                "Unexpected torch build; expected HIP metadata or the SGLang ROCm git build"
-            )
+            issues.append("Unexpected torch build; expected HIP metadata or the SGLang ROCm git build")
         if _env_flag(environ, "SGLANG_USE_AITER") is False:
-            issues.append(
-                "SGLANG_USE_AITER=0; Qwen3.5 Mamba capture/serve on this overlay needs AITER"
-            )
+            issues.append("SGLANG_USE_AITER=0; Qwen3.5 Mamba capture/serve on this overlay needs AITER")
         if _env_flag(environ, "SGLANG_DISABLE_RADIX_CACHE") is False:
-            issues.append(
-                "SGLANG_DISABLE_RADIX_CACHE=0; SGLang Mamba radix-cache asserts CUDA on ROCm"
-            )
+            issues.append("SGLANG_DISABLE_RADIX_CACHE=0; SGLang Mamba radix-cache asserts CUDA on ROCm")
         if radix_override in FALSEY or radix_override == "false":
             issues.append(
                 "model.sglang_disable_radix_cache=false; Mamba + AITER on ROCm must disable "
@@ -230,9 +223,7 @@ def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list
             try:
                 import aiter  # noqa: F401
             except ModuleNotFoundError:
-                issues.append(
-                    "aiter is not installed; AITER is required on this ROCm SpecForge stack"
-                )
+                issues.append("aiter is not installed; AITER is required on this ROCm SpecForge stack")
             except Exception:
                 # The wheel is present; JIT/GPU init can still fail in CPU-only pytest.
                 pass

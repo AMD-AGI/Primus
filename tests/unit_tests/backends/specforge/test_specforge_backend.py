@@ -292,7 +292,10 @@ class TestExampleExperiment:
         assert "--strategy" in argv
         assert argv[argv.index("--strategy") + 1] == "dflash"
         assert argv[argv.index("--data-path") + 1] == experiment_env["CAPTURE_DATA_PATH"]
-        assert Path(argv[argv.index("--output-path") + 1]) == Path(experiment_env["OUTPUT_DIR"]) / "hidden_states_raw"
+        assert (
+            Path(argv[argv.index("--output-path") + 1])
+            == Path(experiment_env["OUTPUT_DIR"]) / "hidden_states_raw"
+        )
         assert "--filter-output-path" not in argv
 
     def test_trainer_rejects_missing_entrypoint(self, experiment_env):

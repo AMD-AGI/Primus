@@ -1,3 +1,4 @@
+#!/bin/bash
 # Install only missing lightweight Python packages with --no-deps so pip cannot
 # replace the ROCm torch/sglang stack shipped in the base image.
 set -euo pipefail

@@ -24,12 +24,12 @@ import argparse
 import os
 from pathlib import Path
 
+from primus.backends.specforge.argument_builder import specforge_mode
 from primus.backends.specforge.stack_preflight import (
     apply_rocm_stack_env,
     collect_issues,
     enforce_rocm_stack,
 )
-from primus.backends.specforge.argument_builder import specforge_mode
 from primus.core.launcher.parser import load_primus_config
 from runner.helpers.hooks.train.pretrain.utils import log_error_and_exit, log_info
 

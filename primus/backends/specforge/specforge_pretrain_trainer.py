@@ -159,7 +159,9 @@ class SpecForgePretrainTrainer(BaseTrainer):
             filter_out = capture.get("filter_output_path")
             raw = capture.get("output_path")
             if filter_out and raw:
-                from primus.backends.specforge.filter_hidden_states import filter_dflash_dir
+                from primus.backends.specforge.filter_hidden_states import (
+                    filter_dflash_dir,
+                )
 
                 block = int(capture.get("filter_block_size") or 16)
                 kept, dropped = filter_dflash_dir(raw, filter_out, block_size=block)
