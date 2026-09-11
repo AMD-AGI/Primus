@@ -39,7 +39,14 @@ modules:
       # Parallelism - MoE with expert parallelism.
       # TP=1/EP=8 runs out of memory at this sequence length because the
       # non-expert weights are replicated on every rank; TP=2/EP=4 fits.
-      # TP=1/EP=8 is still usable at shorter sequence lengths.
+      # TP=1/EP=8 is still usable at shorter sequence lengths, and is the faster
+      # of the two: the expert all-to-all is latency-bound on small messages, so
+      # spreading the experts as wide as possible and pushing as many tokens as
+      # possible through each dispatch both help. Activation recompute is what
+      # buys the memory for the larger micro-batch:
+      #   PRIMUS_GEMMA4_SET="model.recompute_granularity=full;\
+      #     model.recompute_method=uniform;model.recompute_num_layers=1"
+      # At seq 4096 with TP=1/EP=8 that reaches micro_batch_size 6.
       tensor_model_parallel_size: 2
       expert_model_parallel_size: 4  # Critical for 26B MoE
       pipeline_model_parallel_size: 1
