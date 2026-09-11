@@ -59,10 +59,10 @@ def test_e2e_component_change_runs_all():
 
 
 def test_e2e_bare_examples_file_runs_all():
-    # A bare examples/<file> (no backend subdir) is shared launcher plumbing
-    # -- e.g. test_maxtext_trainer.py shells out to examples/run_pretrain.sh
-    # directly -- so it must not be silently ignored like a docs-only change.
-    assert set(e2e(["examples/run_pretrain.sh"])) == SUITES
+    # A bare examples/<file> (no backend subdir) is shared plumbing, so it
+    # expands to every suite -- e.g. test_maxtext_trainer.py shells out to
+    # runner/primus-cli and reads the shared examples/ layout.
+    assert set(e2e(["examples/__init__.py"])) == SUITES
     # examples/<backend>/... is unaffected: still maps to that one backend.
     assert e2e(["examples/maxtext/configs/x.yaml"]) == ["maxtext"]
 

@@ -42,7 +42,7 @@ source "$RUNNER_DIR/lib/config.sh" || {
 
 export NNODES="${SLURM_NNODES:-${SLURM_JOB_NUM_NODES:-${NNODES:-1}}}"
 export NODE_RANK="${SLURM_NODEID:-${SLURM_PROCID:-${NODE_RANK:-0}}}"
-export GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
+export GPUS_PER_NODE="${GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-8}}"
 export MASTER_ADDR
 export MASTER_PORT
 

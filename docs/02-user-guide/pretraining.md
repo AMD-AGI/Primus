@@ -257,21 +257,19 @@ Run on a JAX base image (for example `rocm/jax-training`) or a bare-metal JAX en
 
 ### Quick start (run from a bare Primus checkout)
 
-Use `run_pretrain.sh` with `BACKEND=MaxDiffusion`. When `PRIMUS_SKIP_PIP` is unset, the launcher runs `setup_maxdiffusion_env.sh` for you (installs the stack + applies the patches), sets `NVTE_FRAMEWORK=jax` and `MAXDIFFUSION_PATH`, then launches:
+Use `primus-cli direct` with `BACKEND=MaxDiffusion`. When `PRIMUS_SKIP_PIP` is unset, the prepare hooks run `setup_maxdiffusion_env.sh` for you (installs the stack + applies the patches), set `NVTE_FRAMEWORK=jax` and `MAXDIFFUSION_PATH`, then launch:
 
 ```bash
-BACKEND=MaxDiffusion \
-EXP=examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml \
-  bash ./examples/run_pretrain.sh
+BACKEND=MaxDiffusion ./primus-cli direct -- train pretrain \
+  --config examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml
 ```
 
 To run the environment setup once by itself (e.g. to warm an image or a shared venv), invoke the script directly, then launch with `PRIMUS_SKIP_PIP=1`:
 
 ```bash
 bash examples/maxdiffusion/setup_maxdiffusion_env.sh
-PRIMUS_SKIP_PIP=1 BACKEND=MaxDiffusion \
-EXP=examples/maxdiffusion/configs/MI355X/flux_dev-pretrain.yaml \
-  bash ./examples/run_pretrain.sh
+PRIMUS_SKIP_PIP=1 BACKEND=MaxDiffusion ./primus-cli direct -- train pretrain \
+  --config examples/maxdiffusion/configs/MI355X/flux_dev-pretrain.yaml
 ```
 
 ### Quick start (container mode)
@@ -350,7 +348,7 @@ The tables above in the Megatron, TorchTitan, and MaxText sections are curated M
 | TorchTitan | `examples/torchtitan/configs/MI300X/` | `parallelism.*` (e.g. `tensor_parallel_degree`, `pipeline_parallel_degree`, `expert_parallel_degree`, FSDP shard settings). |
 | MaxText | `examples/maxtext/configs/MI300X/` | `ici_fsdp_parallelism`, `ici_data_parallelism`, `dcn_fsdp_parallelism`, `dcn_data_parallelism`. |
 
-For scripting patterns that predate `primus-cli`, the repository still documents `examples/run_local_pretrain.sh` and `examples/run_slurm_pretrain.sh` in `examples/README.md`; equivalent launches are shown above using `./runner/primus-cli`.
+`./runner/primus-cli` is the only entry point. The packaged launchers under `examples/customer_package/` and `examples/moe_package/` reach it through the shared helper `runner/helpers/launch/slurm_pretrain.sh`, which translates their `EXP` / `NNODES` / `DATA_PATH` environment contract into a `primus-cli slurm` invocation; call the CLI directly as shown above.
 
 ---
 

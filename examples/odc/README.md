@@ -143,7 +143,7 @@ Unified entry point `run_odc.sh` (same script for single-node / dual-node, used 
 run_odc.sh <mori|rocshmem> <pad|nopad> <exp_yaml_relpath> <exp_name> [KEY=VAL ...]
 ```
 
-The 1st positional arg is only responsible for laying down the rocSHMEM runtime infra env (heap / bootstrap ifname / a fresh `TRITON_CACHE_DIR` per run); **the backend is actually selected by the yaml's `odc_p2p_backend`**; the 2nd positional arg `pad|nopad` is now a no-op (alignment/decoupling is now auto-derived from `enable_odc`); the remaining `KEY=VAL` only pass infrastructure env (ODC feature switches all go in the yaml). The script lays down `PYTHONPATH` (including the `odc_early` shim and `PRIMUS_TURBO_PATH`) and then calls `run_pretrain.sh`; it **does not pass through CLI overrides**, so change batch/switches in the yaml.
+The 1st positional arg is only responsible for laying down the rocSHMEM runtime infra env (heap / bootstrap ifname / a fresh `TRITON_CACHE_DIR` per run); **the backend is actually selected by the yaml's `odc_p2p_backend`**; the 2nd positional arg `pad|nopad` is now a no-op (alignment/decoupling is now auto-derived from `enable_odc`); the remaining `KEY=VAL` only pass infrastructure env (ODC feature switches all go in the yaml). The script lays down `PYTHONPATH` (including the `odc_early` shim and `PRIMUS_TURBO_PATH`) and then calls `runner/primus-cli direct -- train pretrain --config <exp_yaml>`; it **does not pass through CLI overrides**, so change batch/switches in the yaml.
 
 ## Single-node 1.5B `odc_nopad` (8 GPUs, host / XGMI-IPC)
 
@@ -183,7 +183,7 @@ Single-node goes over intra-node XGMI + HIP-IPC, and reduce-scatter-accumulate i
 
 ## Dual-node 14B `odc_nopad` (16 GPUs, rocSHMEM GDA)
 
-Dual-node **starts one rank group per node** (NODE_RANK 0/1, 8 GPUs each → 16 ranks total), and rocSHMEM uses **uid-over-socket** bootstrap (after PR #864 it no longer uses MPI, launching purely via torchrun). The **preferred, and end-to-end validated in this post** dual-node path is `primus-cli slurm srun`: one line fans out to the two nodes, each `docker run --rm` starts a fresh container and then drives `torchrun`, **with no persistent container and no `rank_node.sh`** (if the cluster hostname maps to loopback and this can't be used, see the `srun --overlap` fallback at the end). Because the feature switches are now config items, the `--env` list is reduced to **only genuine infrastructure variables**: import paths, the NCCL control plane, the rocSHMEM runtime (heap/ifname/HCA/GID), the HF offline cache, and the SFT-skip trio for bypassing primus-cli's built-in hook.
+Dual-node **starts one rank group per node** (NODE_RANK 0/1, 8 GPUs each → 16 ranks total), and rocSHMEM uses **uid-over-socket** bootstrap (after PR #864 it no longer uses MPI, launching purely via torchrun). The **preferred, and end-to-end validated in this post** dual-node path is `primus-cli slurm srun`: one line fans out to the two nodes, each `docker run --rm` starts a fresh container and then drives `torchrun`, **with no persistent container and no `rank_node.sh`** (if the cluster hostname maps to loopback and this can't be used, see the `srun --overlap` fallback at the end). Because the feature switches are now config items, the `--env` list is reduced to **only genuine infrastructure variables**: import paths, the NCCL control plane, the rocSHMEM runtime (heap/ifname/HCA/GID), and the HF offline cache.
 
 **① Config**: `qwen14B-odc-dn.yaml` is **ready out of the box** — it includes `enable_odc: true` / `odc_phase: 2` / `enable_odc_lb_mini: true` / **`odc_p2p_backend: rocshmem`** / **`odc_rocshmem_gda: true`**, with no changes needed (the `--odc_p2p_backend`/`--odc_rocshmem_gda` overrides in the command below are just redundant insurance). GDA's `warmup=strided` / `stride=65536` / `defer_reduce=auto` / `pipe=1` are all config defaults; `defer_reduce: auto` automatically defers the per-microbatch reduce-scatter to a single rendezvous at the end of the minibatch when `n_pes>local_world_size` (16>8), avoiding cross-node barrier deadlock for nopad variable-length microbatches.
 
@@ -196,9 +196,6 @@ PYDEPS=/path/to/pydeps                                   # flydsl, etc.
 SP=/opt/venv/lib/python3.12/site-packages
 HCA=mlx5_0,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9   # adjust per cluster NIC
 TS=$(date +%Y%m%d_%H%M%S)
-
-# primus-cli's built-in pretrain hook lacks the SFT skip; pre-place a .done flag so it skips prep (see pitfall ③)
-touch /home/botahu/primus_packed/pcli_notok_bookcorpus.done
 
 cd "$ROOT"
 ./primus-cli slurm srun --jobid="$JOB" --overlap -N2 --ntasks-per-node=1 \
@@ -230,9 +227,6 @@ cd "$ROOT"
      --env PRIMUS_PACK_CACHE_DIR=/home/botahu/primus_packed \
      --env PRIMUS_PACK_LOCK_DIR=/tmp/primus_lock \
      --env PRIMUS_CACHE_ROOT=/tmp/primus_cache_pcli_$TS --env PRIMUS_SKIP_PIP=1 \
-     `# --- bypass the built-in pretrain hook's SFT prep (see pitfall ③) ---` \
-     --env TOKENIZED_DATA_PATH=/home/botahu/primus_packed/pcli_notok_bookcorpus \
-     --env HF_TOKEN=hf_offline_dummy \
   -- -- train pretrain --config examples/megatron/configs/MI355X/qwen14B-odc-dn.yaml \
      --backend_path "$ROOT/third_party/Megatron-LM" \
      `# --- ODC feature switches: config items, passed directly as CLI overrides (no longer via --env) ---` \
@@ -257,7 +251,7 @@ The three `--` in `primus-cli slurm srun` separate, in order: **slurm/srun args*
 
 1. **`--volume` must be written as `src:dst`** (`--volume /home/botahu:/home/botahu`): writing a bare path lets docker create an anonymous empty volume that shadows it → the container can't see the code/cache.
 2. **`PYTHONPATH` must be injected in full**: the direct primus-cli path **skips `setup_pythonpath`**, so you must fill in repo + pydeps + **GDA Turbo** (`$TURBO`, placing it ahead of site-packages lets the GDA operators win, `has_gda=True`, without needing `.image_bak` in the ephemeral container) + `odc/odc_early` + `primus/core` + site-packages, otherwise `import odc`/`import primus_turbo` fails.
-3. **the built-in pretrain hook lacks the SFT skip**: the built-in runner hook (`train/pretrain/megatron/prepare.py`) has no `stage=='sft'` skip branch and will demand `HF_TOKEN` + download bookcorpus. Fix: pre-`touch` a `.done` flag and point `TOKENIZED_DATA_PATH` at it, give `HF_TOKEN` a placeholder value, so the hook skips prep (the `--train_data_path` it emits is harmless to the SFT provider).
+3. **`train pretrain` on an SFT yaml**: `get_module_config()` aliases `pre_trainer` to `post_trainer`, so an SFT config launched through `train pretrain` still reaches the pretrain hook (`train/pretrain/megatron/prepare.py`). The hook short-circuits on `stage: sft`, so no `HF_TOKEN` and no bookcorpus download are needed.
 
 > **A `slurm-entry` MASTER_ADDR caveat**: `slurm-entry` forces `MASTER_ADDR=`short-hostname. In the cluster validated for this post, the `127.0.1.1` line in `/etc/hosts` is commented out and the short hostname resolves to a routable IP, so it works directly; if the cluster maps the hostname to loopback (`127.0.1.1 <hostname>`), rendezvous binds to the loopback and cross-node connections fail, in which case use the `srun --overlap` fallback below.
 
