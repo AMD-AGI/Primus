@@ -1,0 +1,50 @@
+# Qwen3.5-4B DFlash offline hidden-state capture (Primus-owned).
+#
+# Image: examples/specforge/docker/README.md
+# primus-cli sketch: examples/specforge/README.md
+#
+# Still SpecForge's scripts/prepare_hidden_states.py under the hood. Primus
+# only owns paths, GPU count, AITER/radix-cache flags, and the DFlash filter.
+#
+#   export CAPTURE_DATA_PATH=/path/to/sharegpt.jsonl
+#   export OUTPUT_DIR=/path/to/run
+#   ./runner/primus-cli direct -- train pretrain \
+#     --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
+#
+# Writes raw shards to $OUTPUT_DIR/hidden_states_raw and filtered shards to
+# $OUTPUT_DIR/hidden_states.
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-offline-capture}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: specforge
+    config: offline.yaml
+    model: qwen3.5-4b-dflash.yaml
+    overrides:
+      specforge_mode: capture
+      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
+      output_dir: ${OUTPUT_DIR}
+
+      specforge_capture:
+        target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}
+        strategy: dflash
+        draft_model_config: configs/qwen3.5-4b-dflash.json
+        trust_remote_code: true
+        data_path: ${CAPTURE_DATA_PATH}
+        output_path: ${OUTPUT_DIR}/hidden_states_raw
+        filter_output_path: ${OUTPUT_DIR}/hidden_states
+        filter_block_size: ${BLOCK_SIZE:16}
+        cache_dir: ${OUTPUT_DIR}/sf-cache
+        chat_template: qwen3.5
+        max_length: 2048
+        tp_size: 1
+        batch_size: ${CAPTURE_BATCH_SIZE:8}
+        nproc_per_node: ${NPROC_PER_NODE:1}
+        sglang_attention_backend: aiter
+        sglang_disable_radix_cache: true
+        sglang_mem_fraction_static: 0.8
+        sglang_context_length: 2560

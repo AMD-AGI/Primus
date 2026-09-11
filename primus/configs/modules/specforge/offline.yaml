@@ -1,0 +1,41 @@
+###############################################################################
+# Primus SpecForge module config - offline (pre-captured hidden states)
+#
+# SpecForge owns its own config tree, so Primus deliberately does not mirror
+# it here. This module only carries the handful of fields needed to build the
+# `specforge train` command line; everything model- or optimizer-specific
+# belongs in the SpecForge YAML pointed to by `specforge_config`, or in
+# `specforge_overrides` (flattened to dotted Hydra `key=value` args).
+###############################################################################
+extends:
+  - ../module_base.yaml
+
+trainable: true
+
+# Path to the SpecForge YAML. Required; set it in the experiment config.
+specforge_config: null
+
+# SpecForge checkout to chdir into before exec. SpecForge resolves draft/model
+# config paths relative to its own root, so an arbitrary cwd breaks them.
+# Falls back to $SPECFORGE_ROOT, then to an ancestor of specforge_config.
+specforge_root: null
+
+# argv[0] for the SpecForge CLI; override to run a wrapper or a module form.
+specforge_entrypoint: specforge
+
+# train (default) execs `specforge train`. capture runs
+# scripts/prepare_hidden_states.py via torchrun, then optional hidden-state filter.
+specforge_mode: train
+
+# Flags for prepare_hidden_states.py when specforge_mode=capture.
+specforge_capture: {}
+
+# Convenience alias for specforge_overrides.output_dir.
+output_dir: null
+
+# Nested mapping flattened into dotted Hydra overrides, e.g.
+#   specforge_overrides:
+#     training:
+#       max_steps: 20
+# becomes `training.max_steps=20`.
+specforge_overrides: {}
