@@ -65,6 +65,30 @@ export HF_TOKEN=<your_huggingface_token>
 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
 ```
 
+### RCCL SDMA parameter gather
+
+Enable direct RCCL copy-engine parameter AllGather from the host:
+
+```bash
+export MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma
+bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
+```
+
+The first run attempts to allocate the symmetric parameter buffer after
+Megatron calculates its exact size. If that allocation fails, the error reports
+the rounded value to reserve before model construction. Rerun with the reported
+value, for example:
+
+```bash
+export MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma
+export MEGATRON_RCCL_SDMA_EAGER_PARAM_BYTES=<reported-recommended-eager-bytes>
+bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
+```
+
+The launcher raises Docker's `nofile` limit for RCCL's dedicated parameter
+AllGather communicator. Gradient ReduceScatter and other collectives continue
+to use their original process groups.
+
 ### MXFP4 recipe
 
 Override `EXP` to switch from the default FP8 Turbo-attention yaml:
