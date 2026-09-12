@@ -1256,7 +1256,8 @@ class _DelayedScalingRegistry:
         "filter_zeros",
     )
 
-    def __init__(self, modules):
+    def __init__(  # noqa: PLR0913
+        self, modules):
         self.n = len(modules)
         self.modules = modules
         m0 = modules[0]
@@ -1711,7 +1712,8 @@ class Float8ColumnParallelLinear(_Float8LinearMixin, ColumnParallelLinear):
     first so its ``_apply`` / ``_forward_impl`` overrides take effect.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(  # noqa: PLR0913
+        self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._init_fp8_state()
 
@@ -1723,6 +1725,7 @@ class Float8RowParallelLinear(_Float8LinearMixin, RowParallelLinear):
     first so its ``_apply`` / ``_forward_impl`` overrides take effect.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(  # noqa: PLR0913
+        self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._init_fp8_state()
