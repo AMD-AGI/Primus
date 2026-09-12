@@ -489,8 +489,12 @@ def _calculate_min_gpus(tp, pp, ep, cp):
     Note: DP is *not* affected by this folding — EP borrows from the DP
     dimension, so DP = world_size / (TP × PP × CP) in both cases.
     """
+    if any(v < 1 for v in (tp, pp, ep, cp)):
+        raise ValueError(f"Parallelism degrees must be >= 1, got tp={tp} pp={pp} ep={ep} cp={cp}")
     if ep > 1:
         # MoE: CP is folded into EP (MoE Parallel Folding)
+        if cp > ep or ep % cp != 0:
+            raise ValueError(f"MoE Parallel Folding requires CP <= EP and EP % CP == 0, got ep={ep} cp={cp}")
         return tp * pp * ep
     else:
         # Dense: CP is an independent axis
