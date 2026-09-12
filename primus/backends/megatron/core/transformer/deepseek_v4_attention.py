@@ -600,6 +600,8 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
 
         self.config = config
         self.compress_ratio = int(compress_ratio)
+        # Cache inverse for use in forward pass to avoid repeated division
+        self._inv_compress_ratio = 1.0 / self.compress_ratio
         self.layer_number = int(layer_number) if layer_number is not None else 0
         self.pg_collection = pg_collection
 
