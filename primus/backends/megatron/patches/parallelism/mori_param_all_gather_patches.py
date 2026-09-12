@@ -4,7 +4,26 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Opt-in MORI async SDMA parameter all-gather for Megatron ZeRO-1."""
+"""Opt-in MORI async SDMA parameter all-gather for Megatron ZeRO-1.
+
+Required environment when enabled:
+
+- ``ENABLE_MORI_ALLGATHER=1``
+- ``MORI_ENABLE_SDMA=1`` (must be set before ranks start)
+- ``MORI_SHMEM_HEAP_SIZE`` (bytes; must hold every ZeRO-1 param buffer plus
+  the MORI input transit allocation)
+
+Optional:
+
+- ``MEGATRON_MORI_MAX_INPUT_BYTES`` (default 288 MiB; must cover the padded
+  shard of the largest DDP bucket)
+- ``MEGATRON_MORI_STRICT=1`` (fail instead of falling back to RCCL)
+- ``MEGATRON_MORI_DEBUG=1``
+- ``MEGATRON_MORI_RCCL_FALLBACK_BUCKETS`` (default 0)
+
+Mutually exclusive with ``ENABLE_SDMA_ALLGATHER``. The path is single-node
+world-DP only; hierarchical / multi-node groups stay on RCCL.
+"""
 
 import os
 import warnings
