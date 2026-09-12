@@ -20,6 +20,7 @@ Self-removal restores the inner chain intact.
 """
 
 import logging
+import os
 
 import torch
 import torch.distributed
@@ -36,7 +37,12 @@ def _log(msg):
 
 def _warmup_enabled(ctx: PatchContext) -> bool:
     args = get_args(ctx)
-    return args is not None and getattr(args, "warmup_train_steps", 0) > 0
+    if args is None:
+        return False
+    # Either warmup alone is enough to install the patch. They target different graphs:
+    # the training warmup traces forward+backward under grad, the validation warmup
+    # traces forward-only under no_grad with model.eval(), and neither covers the other.
+    return getattr(args, "warmup_train_steps", 0) > 0 or getattr(args, "warmup_validation_steps", 0) > 0
 
 
 def _reset_fp8_te_spec(models):
@@ -200,8 +206,13 @@ def _reset_optimizer_state(optimizer):
     _log("Reset optimizer step counters")
 
 
-def _build_synthetic_iterator(primus_args):
-    """Build the mock Flux dataloader the warmup steps consume."""
+def _build_synthetic_iterator(primus_args, batch_size=None):
+    """Build the mock Flux dataloader the warmup steps consume.
+
+    ``batch_size`` overrides the training microbatch size, which the validation warmup
+    needs: Dynamo guards on shape, so an eval graph warmed at the training width is not
+    the graph the evaluation runs.
+    """
     from torch.utils.data import DataLoader
 
     from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
@@ -211,7 +222,7 @@ def _build_synthetic_iterator(primus_args):
 
     image_size = getattr(primus_args, "image_size", 256)
     vae_latent_mode = getattr(primus_args, "vae_latent_mode", "resample")
-    mbs = getattr(primus_args, "micro_batch_size", 64)
+    mbs = batch_size or getattr(primus_args, "micro_batch_size", 64)
 
     mock_dataset = PreGeneratedMockFluxSchnellDataset(
         num_samples=max(mbs * 4, 256),
@@ -220,6 +231,139 @@ def _build_synthetic_iterator(primus_args):
     )
     mock_loader = DataLoader(mock_dataset, batch_size=mbs, shuffle=False, drop_last=True)
     return MegatronDataloaderWrapper(mock_loader)
+
+
+class _TimestepInjectingIterator:
+    """Add the per-sample ``timestep`` column the validation forward step requires.
+
+    The mock Flux dataset was built for the training warmup, and the training forward
+    step samples its own timesteps. The validation branch does not: with
+    ``eval_timestep_source: dataset`` it reads ``batch['timestep']`` and raises if the
+    column is absent, because a val shard ingested before that column existed would
+    otherwise be scored against injected timesteps and silently disagree with the
+    reference implementation.
+
+    So the warmup supplies the same column the real val shards carry, with the same
+    dtype and the same ``index % 8`` pattern ``equidistant`` would inject. The values
+    do not matter -- Dynamo guards on shape and dtype, not on tensor contents -- but
+    the column's presence does, since without it the warmup never reaches the model
+    and warms nothing.
+    """
+
+    NUM_VALIDATION_TIMESTEPS = 8
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        batch = next(self._inner)
+        if isinstance(batch, dict) and "timestep" not in batch:
+            ref = next((v for v in batch.values() if isinstance(v, torch.Tensor)), None)
+            if ref is not None:
+                batch["timestep"] = (
+                    torch.arange(ref.shape[0], device=ref.device) % self.NUM_VALIDATION_TIMESTEPS
+                ).to(torch.int32)
+        return batch
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _run_validation_warmup(models, forward_step_func, forward_backward_func, warmup_steps):
+    """Compile and first-touch the evaluation graph before the clock starts.
+
+    Without this, the first evaluation iteration costs multiple seconds while every
+    iteration after it runs at the steady-state cost, putting a large one-off charge
+    inside the timed region. It is not the dataloader -- the same cost appears with
+    ``val_num_workers: 0``, where there are no workers to spawn -- and it is not a cold
+    Inductor cache, which was warm when it was measured. It is the eval-mode graph:
+    evaluation runs forward-only under ``no_grad`` with ``model.eval()``, which is a
+    different Dynamo guard state from anything the training warmup traced, so all 57
+    per-block graphs are retraced at the first eval.
+
+    This runs last, after every restore in ``_run_warmup_and_restore``, because it is
+    forward-only and therefore cannot perturb the state those restores just rebuilt: no
+    gradients are produced, so the DDP grad-ready calibration reset at 11b stands, and
+    no optimizer state is touched. It calls ``forward_backward_func`` directly rather
+    than ``train_step``, so it also cannot repopulate the prefetch cache 13b just
+    evicted.
+
+    The synthetic batch is built at ``get_eval_micro_batch_size`` and not at the
+    training microbatch size. Dynamo guards on shape, so warming at the wrong width
+    compiles graphs the evaluation will not use and leaves the real first eval paying
+    the full cost anyway -- a warmup that reads as successful and moves nothing.
+    """
+    from megatron.training import get_args as megatron_get_args
+
+    from primus.backends.megatron.training.eval_budget import get_eval_micro_batch_size
+
+    megatron_args = megatron_get_args()
+    eval_mbs = get_eval_micro_batch_size(megatron_args)
+    synthetic_iter = _TimestepInjectingIterator(
+        iter(_build_synthetic_iterator(megatron_args, batch_size=eval_mbs))
+    )
+
+    # Evaluation noise is drawn from the RNG, not carried by the val shards:
+    # `prepare_flux_latents` calls `torch.randn_like(latents)` whenever the batch does
+    # not supply noise, and the MLCommons val Arrow files supply a `timestep` column but
+    # no noise. So the RNG stream position at the start of an evaluation is part of what
+    # determines `val_loss`, and a warmup that draws from it shifts the number.
+    #
+    # Without this save/restore the warmed and unwarmed arms report different
+    # `val_loss`, reproducibly. The difference is numerically tiny and still an
+    # absolute gate failure: `val_loss` is what `run_stop` is gated on, so an eval
+    # change that moves it moves the convergence step for reasons unrelated to speed.
+    cpu_rng = torch.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state_all()
+    tracker_states = None
+    try:
+        from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
+
+        tracker_states = get_cuda_rng_tracker().get_states()
+    except Exception as exc:  # pragma: no cover - tracker is optional
+        _log(f"Validation warmup: no TP RNG tracker to snapshot ({exc})")
+
+    was_training = [m.training for m in models]
+    for m in models:
+        m.eval()
+    try:
+        with torch.no_grad():
+            for step_idx in range(warmup_steps):
+                _log(f"Validation warmup step {step_idx + 1}/{warmup_steps} (eval mbs {eval_mbs})")
+                forward_backward_func(
+                    forward_step_func=forward_step_func,
+                    data_iterator=synthetic_iter,
+                    model=models if len(models) > 1 else models[0],
+                    num_microbatches=1,
+                    seq_length=megatron_args.seq_length,
+                    micro_batch_size=eval_mbs,
+                    decoder_seq_length=megatron_args.decoder_seq_length,
+                    forward_only=True,
+                )
+    finally:
+        for m, training in zip(models, was_training):
+            m.train(training)
+        torch.set_rng_state(cpu_rng)
+        torch.cuda.set_rng_state_all(cuda_rng)
+        if tracker_states is not None:
+            from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
+
+            get_cuda_rng_tracker().set_states(tracker_states)
+    _log(f"Completed {warmup_steps} validation warmup steps, RNG state restored")
+
+    # Diagnostic, off by default, kept for the record: it tested whether a residual
+    # val_loss shift between warmed and unwarmed arms came from the compiled graph being
+    # specialized against the mock batch rather than the real one. If so, discarding the
+    # compilation would restore the unwarmed loss and give back the slow first iteration,
+    # the two being one artifact. It does not -- the loss is unchanged with the graphs
+    # thrown away -- so that hypothesis is ruled out. The shift is instead governed by
+    # per_step_rng_reseed, which the MLPerf recipe enables.
+    if os.environ.get("MXFP6_VALWARM_RESET_DYNAMO", "0") == "1":
+        torch._dynamo.reset()
+        _log("MXFP6_VALWARM_RESET_DYNAMO=1: discarded all compiled graphs after warmup")
 
 
 def _reset_ddp_grad_ready_calibration(models):
@@ -272,6 +416,7 @@ def _run_warmup_and_restore(
     config,
     forward_backward_func,
     iteration=None,
+    validation_steps=0,
 ):
     """Run synthetic steps, then undo every effect they had on training state.
 
@@ -453,6 +598,10 @@ def _run_warmup_and_restore(
     except Exception as _e:
         _log(f"  Prefetch reset failed (non-fatal): {_e}")
 
+    # ---- 13c. Warm the evaluation graph, which nothing above has touched ----
+    if validation_steps > 0:
+        _run_validation_warmup(models, forward_step_func, forward_backward_func, validation_steps)
+
     # ---- 14. Synchronize ----
     torch.cuda.synchronize()
     if torch.distributed.is_initialized():
@@ -476,16 +625,17 @@ def _install_boundary_warmup(primus_args, warmup_steps):
         optimizer = captured.get("optimizer")
         opt_param_scheduler = captured.get("opt_param_scheduler")
         forward_step_func = captured.get("forward_step_func")
-        missing = [
-            name
-            for name, value in (
-                ("model", model),
-                ("optimizer", optimizer),
-                ("opt_param_scheduler", opt_param_scheduler),
-                ("forward_step_func", forward_step_func),
-            )
-            if value is None
-        ]
+        validation_steps = getattr(primus_args, "warmup_validation_steps", 0)
+
+        # Each warmup needs a different set of captured objects, so the check is per
+        # path rather than a single list. A validation-only warmup is forward-only
+        # under no_grad and never touches the optimizer or the LR scheduler -- and
+        # under `skip_train` those are exactly the two Megatron never builds, so
+        # demanding them unconditionally makes the eval-only arm impossible to warm.
+        required = [("model", model), ("forward_step_func", forward_step_func)]
+        if warmup_steps > 0:
+            required += [("optimizer", optimizer), ("opt_param_scheduler", opt_param_scheduler)]
+        missing = [name for name, value in required if value is None]
         if missing:
             raise RuntimeError(
                 "MLPerf warmup runs before the data iterators are built and needs "
@@ -495,6 +645,16 @@ def _install_boundary_warmup(primus_args, warmup_steps):
             )
 
         models = model if isinstance(model, (list, tuple)) else [model]
+
+        # Validation warmup without training warmup is a supported combination, and it
+        # is the one an evaluation-only arm can use: `skip_train` means `train_step`
+        # never runs, so there is nothing for a training warmup to restore state around.
+        if warmup_steps == 0:
+            _run_validation_warmup(
+                models, forward_step_func, mt.get_forward_backward_func(), validation_steps
+            )
+            return
+
         # Read train_step now, not at install time: every other before_train
         # patch has wrapped it by the time the boundary fires.
         _run_warmup_and_restore(
@@ -508,6 +668,7 @@ def _install_boundary_warmup(primus_args, warmup_steps):
             config=mt.get_model_config(models[0]),
             forward_backward_func=mt.get_forward_backward_func(),
             iteration=0,
+            validation_steps=validation_steps,
         )
 
     mlperf_boundary.register_pre_run_hook("mlperf_warmup", _warmup_hook, order=10)
@@ -564,6 +725,7 @@ def _install_train_step_warmup(mt, primus_args, warmup_steps):
             config=config,
             forward_backward_func=forward_backward_func,
             iteration=iteration,
+            validation_steps=getattr(primus_args, "warmup_validation_steps", 0),
         )
 
         _log("Executing first real train_step with training data")

@@ -158,10 +158,19 @@ class EnergonDatasetProvider(DatasetProvider):
             # Assert before construction: a shape that cannot read every sample
             # should fail here rather than silently report a short evaluation.
             eval_num_microbatches = get_eval_num_microbatches(args)
+            # The evaluation microbatch size, not the training one. A recipe that
+            # overrides it evaluates at that width -- get_eval_num_microbatches and
+            # assert_val_worker_divisibility both already read it -- so reconstructing
+            # the sample count from args.micro_batch_size understates it by the ratio
+            # between the two. At eval_micro_batch_size 64 against a training 32 this
+            # budget read 14848 while the run went on to cover 29696, and at 128 the
+            # understated 7424 was no longer divisible by the divisor the assert builds
+            # from the eval width, failing a shape that covers the split exactly.
+            eval_micro_batch_size = get_eval_micro_batch_size(args)
             eval_samples = (
                 args.eval_iters
                 * eval_num_microbatches
-                * args.micro_batch_size
+                * eval_micro_batch_size
                 * (parallel_state.get_data_parallel_world_size())
             )
             assert_val_worker_divisibility(args, eval_samples)
@@ -170,7 +179,7 @@ class EnergonDatasetProvider(DatasetProvider):
             assert_mlperf_timestep_source(args)
             log_rank_0(
                 f"Validation budget: {args.eval_iters} iterations x "
-                f"{eval_num_microbatches} microbatches x {args.micro_batch_size} "
+                f"{eval_num_microbatches} microbatches x {eval_micro_batch_size} "
                 f"= {eval_samples} samples, val_num_workers={get_val_num_workers(args)}"
             )
 
