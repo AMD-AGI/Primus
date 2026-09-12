@@ -24,7 +24,7 @@ def _info_enabled() -> bool:
     Mirrors the level gating in runner/lib/common.sh so informational prints are
     silenced when the user sets PRIMUS_LOG_LEVEL=WARN/ERROR.
     """
-    return os.environ.get("PRIMUS_LOG_LEVEL", "INFO").upper() in ("DEBUG", "INFO")
+    return os.environ.get("PRIMUS_LOG_LEVEL", "INFO").upper() in ("DEBUG", "INFO", "VERBOSE")
 
 
 def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
