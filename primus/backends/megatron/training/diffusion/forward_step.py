@@ -18,6 +18,8 @@ Architecture follows functional composition for clarity and testability.
 """
 
 import logging
+import os
+import time
 from typing import Optional, Tuple
 
 import torch
@@ -42,6 +44,28 @@ logger = logging.getLogger(__name__)
 # stays below 2**31 for any plausible seed, world size and step count, so 2**40
 # leaves a wide margin while keeping the eval stream's own per-rank and
 # per-microbatch structure intact.
+_BATCH_FETCH_TIMING = os.environ.get("MXFP6_BATCH_FETCH_TIMING", "0") == "1"
+_batch_fetch_ms: list[float] = []
+
+
+def _record_batch_fetch(ms: float) -> None:
+    _batch_fetch_ms.append(ms)
+
+
+def take_batch_fetch_timings() -> list[float]:
+    """Drain the recorded `next(data_iterator)` durations, in ms.
+
+    The evaluator calls this at the end of each evaluation so the numbers are
+    attributed to one eval rather than accumulating across a run. Training steps
+    append here too when the flag is on; the evaluator's drain therefore mixes in
+    the training fetches that happened since the previous eval, which is why the
+    report labels the count rather than assuming it equals eval_iters.
+    """
+    out = list(_batch_fetch_ms)
+    _batch_fetch_ms.clear()
+    return out
+
+
 EVAL_RNG_OFFSET = 1 << 40
 
 # Microbatch index stride within one evaluation. Must exceed the number of
@@ -370,7 +394,18 @@ def flux_forward_step_func(
             raise RuntimeError(
                 "data_iterator is None with TP=1; dataset provider must set is_distributed=True"
             )
-        batch = next(data_iterator)
+        # The first iteration of *every* evaluation runs several times slower than the
+        # rest even warmed, and repeats on every evaluation of a multi-eval run.
+        # Whether that is the validation loader's first fetch or something else in the
+        # step cannot be read off the eval iteration probe, which brackets the whole
+        # forward_backward call and reports almost nothing outside it. So time the
+        # fetch alone. Off unless MXFP6_BATCH_FETCH_TIMING=1.
+        if _BATCH_FETCH_TIMING:
+            _t0 = time.perf_counter()
+            batch = next(data_iterator)
+            _record_batch_fetch((time.perf_counter() - _t0) * 1000.0)
+        else:
+            batch = next(data_iterator)
         if not isinstance(batch, dict):
             raise TypeError(
                 f"[ForwardStep] Expected batch to be dict, got {type(batch)}. Batch value: {batch}"
