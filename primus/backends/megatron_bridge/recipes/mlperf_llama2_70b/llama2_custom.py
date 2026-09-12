@@ -352,7 +352,7 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
         "pipeline_model_parallel_size": 1,
         "train_iters": 1000,
         "global_batch_size": 8,
-        "micro_batch_size": 1,
+        "micro_batch_size": 1,  # MLPerf submission default; increase for throughput
         "eval_interval": 48,
         "eval_iters": 22,
         "adam_beta1": 0.9,
