@@ -37,6 +37,14 @@ import torch
 # workspace is reused across calls, so it is sized for the largest expected
 # bucket. Overridable via env for A/B sizing.
 _SDMA_SYMM_MEM_MIN_BYTES = int(os.getenv("MEGATRON_SDMA_SYMM_MEM_MIN_BYTES", str(749887296)))
+_sdma_debug_messages: set[str] = set()
+
+
+def _debug_sdma_path(message: str) -> None:
+    """Emit each SDMA path decision once per rank when diagnostics are enabled."""
+    if os.getenv("MEGATRON_SDMA_DEBUG", "0") == "1" and message not in _sdma_debug_messages:
+        _sdma_debug_messages.add(message)
+        warnings.warn(f"SDMA param all-gather: {message}")
 
 
 class _WaitableHandle:
@@ -160,6 +168,7 @@ def all_gather_into_tensor_sdma(
         or output_tensor.device.index != torch.cuda.current_device()
         or not output_tensor.is_contiguous()
     ):
+        _debug_sdma_path("RCCL fallback: tensor/device/layout precondition failed")
         return _all_gather_into_tensor_waitable_fallback(
             output_tensor, input_tensor, group=group, async_op=async_op
         )
@@ -171,16 +180,19 @@ def all_gather_into_tensor_sdma(
         get_symm_mem_workspace = symm_mem_module.get_symm_mem_workspace
         hip_runtime = hip_runtime_module.get_hip_runtime_lib()
         memcpy_comm_kind = hip_runtime_module.hipMemcpyKindEnum.hipMemcpyDeviceToDeviceNoCU
-    except Exception:
+    except Exception as exc:
+        _debug_sdma_path(f"RCCL fallback: Primus-Turbo import/runtime unavailable ({exc!r})")
         return _all_gather_into_tensor_waitable_fallback(
             output_tensor, input_tensor, group=group, async_op=async_op
         )
 
     group_name = getattr(group, "group_name", None)
     if group_name is None:
+        _debug_sdma_path("RCCL fallback: process group has no group_name")
         return _all_gather_into_tensor_waitable_fallback(
             output_tensor, input_tensor, group=group, async_op=async_op
         )
+    _debug_sdma_path(f"using SDMA path for process group {group_name!r}")
 
     input_nbytes = input_tensor.nbytes
     output_flat = output_tensor.view(-1)
