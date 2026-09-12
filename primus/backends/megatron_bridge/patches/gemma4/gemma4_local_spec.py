@@ -204,6 +204,23 @@ def _use_torch_optimizer(container: Any) -> None:
     # Precision-aware optimizer is a FusedAdam feature (it relies on the fused
     # kernel's master-weight support), so it cannot come along for the ride. It
     # lives on the optimizer section, not the model section.
+    #
+    # Unless CPU offload is in play, in which case HybridDeviceOptimizer supplies
+    # the master weights itself and precision-aware is wanted -- clearing it there
+    # would push the fp32 copies back onto the GPU, which is the memory that
+    # offload exists to reclaim. Asking the environment rather than inspecting the
+    # config keeps this independent of which of the two patches runs first.
+    from primus.backends.megatron_bridge.patches.gemma4.gemma4_cpu_offload import (
+        offload_fraction,
+    )
+
+    if offload_fraction() is not None:
+        log_rank_0(
+            "[Patch:gemma4.local_spec] leaving use_precision_aware_optimizer alone; "
+            "CPU offload is requested and provides its own master weights"
+        )
+        return
+
     opt_cfg = getattr(container, "optimizer", None)
     if opt_cfg is not None and getattr(opt_cfg, "use_precision_aware_optimizer", False):
         opt_cfg.use_precision_aware_optimizer = False
