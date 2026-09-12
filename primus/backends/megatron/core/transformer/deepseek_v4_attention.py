@@ -599,7 +599,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             )
 
         self.config = config
-        self.compress_ratio = int(compress_ratio)
+        self.compress_ratio = max(1, int(compress_ratio))  # guard against zero
         self.layer_number = int(layer_number) if layer_number is not None else 0
         self.pg_collection = pg_collection
 
