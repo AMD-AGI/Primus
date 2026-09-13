@@ -31,6 +31,8 @@ passing one. `--warn-only` suppresses both.
 Misplaced model-scoped keys get their own table. Such a key is not unknown --
 some Primus config class does declare it -- but that class is built for one
 model only, so setting the key on any other model is the same silent no-op.
+This table never fails the check: fixing one moves training numerics for
+whichever model owns the key, so it needs that owner and a convergence run.
 """
 
 import argparse
@@ -137,7 +139,8 @@ def parse_args():
     parser.add_argument(
         "--warn-only",
         action="store_true",
-        help="Report findings but exit 0. A skipped backend still fails.",
+        help="Report unknown-key drift/errors/stale allowlist entries but exit 0. "
+        "A skipped backend still fails, and model-scoped findings never gate either way.",
     )
     parser.add_argument(
         "--show-allowlist", action="store_true", help="Also print the derived allowlist patterns."
@@ -315,7 +318,10 @@ def main():
     # gets none of the grace period `--warn-only` buys the findings.
     if skipped:
         return 1
-    return 1 if (rows or scoped or errors or stale) and not args.warn_only else 0
+    # `scoped` is deliberately out of the gate: fixing one moves training
+    # numerics for whichever model owns the key, so it needs that owner, not a
+    # CI gate blocking unrelated PRs. An unknown key costs nothing to remove.
+    return 1 if (rows or errors or stale) and not args.warn_only else 0
 
 
 if __name__ == "__main__":
