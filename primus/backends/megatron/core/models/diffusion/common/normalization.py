@@ -758,7 +758,8 @@ def _opaque_fused_ln_modulate(
         return out, mean.flatten(), rstd.flatten()
 
     x = x.contiguous()
-    scale, shift = scale.contiguous(), shift.contiguous()
+    if scale.stride(-1) != 1 or shift.stride(-1) != 1 or scale.stride(0) != shift.stride(0):
+        scale, shift = scale.contiguous(), shift.contiguous()
     S, B, H = x.shape
     out = torch.empty_like(x)
     M = S * B
@@ -818,7 +819,8 @@ def _opaque_fused_ln_modulate_backward_op(
 
     grad_output = grad_output.to(x.dtype).contiguous()
     x = x.contiguous()
-    scale = scale.contiguous()
+    if scale.stride(-1) != 1:
+        scale = scale.contiguous()
     S, B, H = x.shape
     dx = torch.empty_like(x)
     dscale = torch.empty_like(scale)

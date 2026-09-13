@@ -134,6 +134,7 @@ def _claim_main_grad(*weights) -> None:
     """
     for weight in weights:
         weight.grad_added_to_main_grad = True
+        weight.main_grad_initialized = True
 
 
 class MXFP6LinearFunction(torch.autograd.Function):
