@@ -93,6 +93,7 @@ Defaults in `primus/configs/modules/megatron/primus_turbo.yaml` are mostly `fals
 | Flag | Purpose |
 |------|---------|
 | `use_turbo_attention` | Optimized attention kernels. |
+| `use_turbo_flex_attention` | Route `use_turbo_attention` through the Primus-Turbo `flex_attention` compat layer (see below). |
 | `use_turbo_parallel_linear` | Optimized tensor-parallel linear layers. |
 | `use_turbo_grouped_gemm` | Optimized grouped GEMM for MoE. |
 | `use_turbo_grouped_mlp` | Removed—use `use_turbo_grouped_gemm` (passing this key now raises an error). |
@@ -102,6 +103,59 @@ Defaults in `primus/configs/modules/megatron/primus_turbo.yaml` are mostly `fals
 | `turbo_deepep_num_cu` | Compute units for DeepEP (patch notes suggest practices such as 64 or 80 for EP8, 32 for EP16–64). |
 | `turbo_sync_free_moe_stage` | Sync-free MoE stages (`0`–`3`; `0` disables, stage `2` recommended for performance per patch notes). See [MoE training deep-dive](./moe-training.md). |
 | `use_turbo_fused_act_with_probs` | Fused activation with probabilities to reduce redundant work. |
+
+#### Flex attention routing
+
+`use_turbo_flex_attention: true` (default `false`, requires `use_turbo_attention: true`)
+makes the Turbo attention module call the `flex_attention` compat layer instead of
+`flash_attn_func` directly. The compat layer takes a torch-FlexAttention
+`block_mask` / `score_mod`, classifies it, and dispatches the recognized patterns onto
+the same Turbo kernels -- so with the default causal configuration the result is
+numerically identical to the direct call and the kernel is the same. What it adds is
+the ability to express masks and score modifications that `flash_attn_func` has no
+argument for:
+
+```yaml
+primus_turbo:
+  enable_primus_turbo: true
+  use_turbo_attention: true
+  use_turbo_flex_attention: true
+  # optional, "package.module:attribute" paths to your own callables
+  turbo_flex_attention_mask_mod: null    # (b, h, q_idx, kv_idx) -> bool
+  turbo_flex_attention_score_mod: null   # (score, b, h, q_idx, kv_idx) -> score
+```
+
+Unsupported combinations raise at model-build time rather than silently reverting to
+the direct call: `context_parallel_size > 1`, `enable_turbo_attention_float8: true`,
+`deterministic_mode: true`, and `reset_attention_mask: true`. A sliding window without a
+causal mask is rejected on the call itself. Nothing degrades quietly -- a rejected run
+fails at startup instead of training on the old code path.
+
+#### Packed sequences (`qkv_format: thd`)
+
+This switch is currently the **only** way to run packed sequences on the Turbo attention
+path. `PrimusTurboAttention` forwards `packed_seq_params.cu_seqlens_q/cu_seqlens_kv` to
+`flex_attention_varlen`, which applies document-internal causal masking (block-diagonal
+plus within-segment causal). The direct `flash_attn_func` binding has no `cu_seqlens`
+argument, so with `use_turbo_flex_attention: false` a `thd` batch now raises instead of
+attending across document boundaries with nothing reported.
+
+The packed path takes no `BlockMask`: Megatron already knows where the boundaries are, so
+there is nothing to probe or classify, and the cache described below is not touched at
+all. `turbo_flex_attention_mask_mod`, `turbo_flex_attention_score_mod` and an attention
+bias are all refused on this path -- `flex_attention_varlen` takes `cu_seqlens` and
+explicit `alibi_slopes`, not a programmable mask, and dropping a supplied callable
+silently is exactly the failure mode this layer exists to prevent.
+
+`reset_attention_mask: true` is a different mechanism and is still refused: it encodes
+per-document boundaries inside a *dense* sample's attention mask, and the Turbo call
+signature has no argument to carry them. Use `qkv_format: thd` packing instead.
+
+Sequence-length variety costs more here than on the direct path: each distinct
+`(mask pattern, q_len, kv_len, device)` builds a `BlockMask` and re-runs the compat
+layer's classification once, then is cached (bounded LRU, 64 entries). Fixed-length
+pretraining pays this once per run; a workload that hands attention a new length every
+step will warn once and then rebuild on every miss. Bucket the lengths.
 
 ### Feature flags (TorchTitan)
 
