@@ -46,6 +46,12 @@ modules:
       # ==========================================
       mlperf_mode: true
       warmup_train_steps: 2
+      # Evaluation is forward-only under no_grad with model.eval(), a different Dynamo
+      # guard state from anything warmup_train_steps traces, so without this the 57
+      # per-block graphs compile at the first evaluation -- after run_start, and so
+      # inside the timed region. Bit-identical at per_step_rng_reseed: true (set
+      # below): warmed and unwarmed agree on every per-iteration loss.
+      warmup_validation_steps: 2
       target_val_loss: 0.586
 
       # Left explicit because the FP8 MLPerf recipe and the MXFP6 development
@@ -101,9 +107,16 @@ modules:
       # Cover the whole MLPerf validation set. eval_iters is derived from this
       # (29696 / 512 = 58); setting both is rejected. The previous eval_iters of
       # 10 read 5120 samples, and even at 58 the training num_workers of 16
-      # would have left 1920 of them unread, so val_num_workers is pinned to 0.
+      # would have left 1920 of them unread.
       eval_samples: 29696
-      val_num_workers: 0
+      # 1, not the training num_workers and not 0. Anything above 1 can under-read
+      # the split; 1 is the one nonzero value that cannot, because Energon clamps
+      # the data split to max(1, num_workers) (sharder.py:205), so 1 shards exactly
+      # as 0 does and covers the split identically, while 0 additionally forgoes
+      # prefetch by reading in the main process. val_loss is unchanged between the
+      # two. assert_val_worker_divisibility accepts 1 at the 4-node shape:
+      # 29696 % (32 * 1 * 32) == 0.
+      val_num_workers: 1
       # MLPerf assigns each val image one fixed timestep, carried in the Arrow
       # 'timestep' column. Requires a val split ingested with that column; shards
       # ingested earlier carry {"key": ...} only and will now fail loudly rather

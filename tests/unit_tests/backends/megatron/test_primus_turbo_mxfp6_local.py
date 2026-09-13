@@ -91,9 +91,13 @@ def megatron_global_args(monkeypatch):
     monkeypatch.setattr(gvars, "_GLOBAL_ARGS", dummy_args)
 
 
-def _pure_args(fuse_wgrad_accum=False, bias=None):
-    """Trailing MXFP6LinearFunction args for the pure-MXFP6 path, bias first."""
-    return (bias, False, None, 0, 0, fuse_wgrad_accum)
+def _pure_args(fuse_wgrad_accum=False, bias=None, grad_enabled=True):
+    """Trailing MXFP6LinearFunction args for the pure-MXFP6 path, bias first.
+
+    ``grad_enabled`` mirrors what the production wrapper samples with
+    torch.is_grad_enabled(); it cannot be read inside forward, so it travels as an argument.
+    """
+    return (bias, False, None, 0, 0, fuse_wgrad_accum, grad_enabled)
 
 
 def _hybrid_args(bias=None):
@@ -108,6 +112,7 @@ def _hybrid_args(bias=None):
         ScalingGranularity.TENSORWISE.value,
         BackendType.HIPBLASLT.value,
         False,
+        True,
     )
 
 
