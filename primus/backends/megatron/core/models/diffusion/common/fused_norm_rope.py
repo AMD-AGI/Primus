@@ -130,15 +130,19 @@ def _fwd_kernel(
     SIN,
     OUT,
     RSTD,
+    COPY_X,
+    COPY_OUT,
     M,
     D: tl.constexpr,
     BH,
     EPS,
     SX,
     SO,
+    SCOPY,
     SC,
     BLOCK_M: tl.constexpr,
     INTERLEAVED: tl.constexpr,
+    COPY_ROW: tl.constexpr,
 ):
     pid = tl.program_id(0)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -169,6 +173,10 @@ def _fwd_kernel(
         INTERLEAVED,
     )
     tl.store(RSTD + rows, tl.reshape(rstd, (BLOCK_M,)), mask=mask_m)
+    if COPY_ROW:
+        copy_off = rows[:, None] * SCOPY + tl.arange(0, D)[None, :]
+        copy = tl.load(COPY_X + copy_off, mask=mask, other=0.0)
+        tl.store(COPY_OUT + rows[:, None] * D + tl.arange(0, D)[None, :], copy, mask=mask)
 
 
 # Fixed rather than autotuned. The partial buffer has to be sized before launch, so
@@ -336,10 +344,17 @@ def _launchable(kernel, traceable):
     return wrap_triton(kernel) if traceable else kernel
 
 
-def _launch_fwd(x, w, cos, sin, eps, interleaved, traceable=True):
+def _launch_fwd(x, w, cos, sin, eps, interleaved, traceable=True, copy_x=None, copy_out=None):
     S, B, H, D = x.shape
     M = S * B * H
     x, sx = _row_strided(x)
+    copy_row = copy_x is not None
+    if copy_row:
+        assert copy_out is not None and copy_out.shape == copy_x.shape == x.shape
+        copy_x, scopy = _row_strided(copy_x)
+        assert copy_out.is_contiguous()
+    else:
+        copy_x, copy_out, scopy = x, x, sx
     # The output is packed even when the input is not: it feeds FMHA, which wants it
     # that way, and writing it packed costs nothing the strided read has not saved.
     out = torch.empty_like(x, memory_format=torch.contiguous_format)
@@ -352,14 +367,18 @@ def _launch_fwd(x, w, cos, sin, eps, interleaved, traceable=True):
         sin,
         out,
         rstd,
+        copy_x,
+        copy_out,
         M,
         D,
         _cs_div(M, cos),
         eps,
         sx,
         D,
+        scopy,
         cos.stride(0),
         INTERLEAVED=interleaved,
+        COPY_ROW=copy_row,
     )
     return out, rstd
 
@@ -494,11 +513,19 @@ def _qkv_fwd(
     interleaved: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     D = qkv.shape[-1] // 3
-    q, q_rstd = _launch_fwd(qkv[..., :D], wq, cos, sin, eps, interleaved, traceable=False)
+    v = torch.empty_like(qkv[..., 2 * D :], memory_format=torch.contiguous_format)
+    q, q_rstd = _launch_fwd(
+        qkv[..., :D],
+        wq,
+        cos,
+        sin,
+        eps,
+        interleaved,
+        traceable=False,
+        copy_x=qkv[..., 2 * D :],
+        copy_out=v,
+    )
     k, k_rstd = _launch_fwd(qkv[..., D : 2 * D], wk, cos, sin, eps, interleaved, traceable=False)
-    # V is not merely forwarded: a custom op may not return an alias of its input, and
-    # FMHA wants it packed regardless, so this replaces the copy the caller was making.
-    v = qkv[..., 2 * D :].contiguous()
     return q, k, v, q_rstd, k_rstd
 
 
