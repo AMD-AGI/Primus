@@ -14,6 +14,10 @@ from typing import Optional
 from megatron.core.enums import Fp8Recipe
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+# Order the MXFP4 -> FP8 ramp walks layers in. Only consulted by the ramp
+# fallback; the default single-boundary switch converts everything at once.
+MXFP4_TO_FP8_ORDERS = ("deep_to_shallow", "shallow_to_deep")
+
 
 @dataclass
 class BaseDiffusionConfig(TransformerConfig):
@@ -77,6 +81,23 @@ class BaseDiffusionConfig(TransformerConfig):
     # Stochastic rounding on MXFP4 gradients (paper Section 4.4)
     mxfp4_gradient_stochastic_rounding: bool = False
 
+    # Iteration at which MXFP4 linears flip to dynamic tensorwise FP8; 0 disables.
+    # These four are declared here for validation and for the startup config dump.
+    # The switch patch itself reads the Primus YAML params namespace, so treat this
+    # dataclass as a cross-check rather than the source of truth.
+    mxfp4_to_fp8_switch_iter: int = 0
+
+    # Trace the FP8 graph during warmup so the switch is a cache hit, not a recompile.
+    mxfp4_to_fp8_prewarm: bool = True
+
+    # Ramp fallback: layers converted per iteration. 0 converts every layer in one
+    # loop at the boundary, which is the default now that block instances share a
+    # compiled graph. Nonzero only helps if full FP8 does not fit in memory.
+    mxfp4_to_fp8_layers_per_iter: int = 0
+
+    # Ramp order; see MXFP4_TO_FP8_ORDERS. Irrelevant to the single-boundary switch.
+    mxfp4_to_fp8_order: str = "deep_to_shallow"
+
     # Sensitive layer configuration (clean naming, maps to Megatron internals)
     sensitive_layers_enabled: bool = False
     sensitive_layers_start: int = 0
@@ -115,6 +136,29 @@ class BaseDiffusionConfig(TransformerConfig):
             self.first_last_layers_bf16 = True
             self.num_layers_at_start_in_bf16 = self.sensitive_layers_start
             self.num_layers_at_end_in_bf16 = self.sensitive_layers_end
+
+        # Validated before super() so a misconfigured switch fails on its own terms.
+        # The switch never assigns self.fp8 -- it sets the FP8 dtypes straight onto the
+        # module -- so Megatron's "fp4 and fp8 cannot coexist" check never sees it, and
+        # this is the only place the fp4 cross-check can happen.
+        if self.mxfp4_to_fp8_switch_iter < 0:
+            raise ValueError(f"mxfp4_to_fp8_switch_iter must be >= 0, got {self.mxfp4_to_fp8_switch_iter}.")
+        if self.mxfp4_to_fp8_switch_iter > 0 and not getattr(self, "fp4", None):
+            raise ValueError(
+                f"mxfp4_to_fp8_switch_iter={self.mxfp4_to_fp8_switch_iter} requires fp4 to be "
+                "set (e.g. fp4: mxfp4). The switch flips MXFP4 linears to FP8, so with no "
+                "MXFP4 linears there is nothing to switch."
+            )
+        if self.mxfp4_to_fp8_layers_per_iter < 0:
+            raise ValueError(
+                "mxfp4_to_fp8_layers_per_iter must be >= 0 (0 = convert every layer at the "
+                f"boundary), got {self.mxfp4_to_fp8_layers_per_iter}."
+            )
+        if self.mxfp4_to_fp8_order not in MXFP4_TO_FP8_ORDERS:
+            raise ValueError(
+                f"Unknown mxfp4_to_fp8_order '{self.mxfp4_to_fp8_order}'. "
+                f"Choose from: {list(MXFP4_TO_FP8_ORDERS)}."
+            )
 
         if self.sensitive_layers_enabled and self.sensitive_layer_precision == "tw_fp8":
             _deferred_fp8 = "e4m3" if self.fp8 is None else None

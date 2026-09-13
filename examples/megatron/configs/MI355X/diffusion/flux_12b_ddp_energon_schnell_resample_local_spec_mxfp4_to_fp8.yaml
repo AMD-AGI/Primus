@@ -1,0 +1,267 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 12B Schnell Training — DDP + Local Spec + MXFP4 -> FP8 switch (MI355X)
+#
+# Starts in MXFP4 and flips every MXFP4 linear to dynamic tensorwise FP8 at
+# mxfp4_to_fp8_switch_iter, with no checkpoint, no weight conversion and no
+# optimizer state remap (neither precision stores a quantized weight: both keep a
+# BF16 nn.Parameter and quantize inside forward). Checkpoint-mediated transitions
+# are forbidden under MLPerf, which is why the switch is iteration-triggered.
+#
+# REQUIRED ENVIRONMENT — per-precision Primus-Turbo GEMM backends:
+#
+#     export PRIMUS_TURBO_GEMM_BACKEND=FP4:AITER,FP8:FLYDSL
+#     # leave PRIMUS_TURBO_AUTO_TUNE unset
+#
+# One process has to serve both precisions, and their usual recipes conflict:
+# MXFP4 needs FP4 pinned to AITER with autotune off (otherwise the linear refuses
+# to construct -- the AITER preshuffle fast path is the only one that understands
+# the shuffled layout), while the FP8 guide asks for autotune on and the backend
+# unset. PRIMUS_TURBO_GEMM_BACKEND is per-precision, so pinning each slot
+# satisfies both: FP8 gets an explicit fast backend and therefore never needs the
+# autotuner MXFP4 forbids.
+#
+# Getting this wrong fails in two very different ways. Dropping the FP4 pin raises
+# at model construction, which is loud and fine. Dropping the FP8 pin silently
+# runs post-switch GEMMs on whatever the dispatcher picks, which quietly
+# invalidates any step-time comparison against the FP8 baseline.
+#
+# CONSTRAINT: FlyDSL FP8 is gfx950-only (the kernel uses mfma_f32_16x16x128_f8f6f4),
+# so this config is MI355X-only. On gfx942/MI300X the FP8 pin is unusable.
+#
+# CONSTRAINT: a pinned backend is strict. When a pin is set the dispatcher raises
+# if can_handle is False rather than falling back, so every FP8 GEMM in the
+# process must satisfy FlyDSL's tensorwise constraints: K > 128 (its pipeline
+# needs two K tiles), scalar per-tensor scales, and any layout but TT. Flux clears
+# these everywhere -- forward K is hidden or ffn, and the weight-gradient K is the
+# token count -- but the margin is per-GEMM, not global, so a genuinely small FP8
+# matmul added anywhere in this process would hard-fail instead of degrading.
+# Measured on MI355X: the whole model's FP8 arm is one extra compiled graph, and
+# saved operands go from 0.53 B/element (packed FP4 plus E8M0 block scales) to
+# 1.0 B/element, so budget the recurring activation peak at ~1.9x its MXFP4 value.
+#
+# Note for local runs: exporting this pin also applies to the unit tests, where
+# some FP8 cases use small shapes that FlyDSL declines. Run the test suite without
+# it (tests pin backends in-code where they need to).
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_12b_ddp_local_mxfp4_to_fp8}
+
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: diffusion/flux_12b.yaml
+
+    trainer_class: FluxPretrainTrainer
+
+    overrides:
+      model_type: flux_schnell
+
+      # ==========================================
+      # Flux Schnell training recipe
+      # ==========================================
+      # Short LR warmup ramp over the first optimizer steps for stability.
+      nemo_aligned_lr_warmup: true
+      # Also hosts the FP8 graph pre-warm: the only place a real grad-enabled step
+      # runs at the production micro_batch_size, which is what the pre-warmed cache
+      # entry has to be guarded on.
+      warmup_train_steps: 2
+
+      timestep_sampling_strategy: "direct_uniform"
+      activation_func: "openai_gelu"
+      cfg_dropout_prob: 0.1
+
+      # VAE latent normalization (required for resample mode)
+      vae_scale: 0.3611
+      vae_shift: 0.1159
+
+      # Resample mode: re-draw latents from mean+logvar each step
+      vae_latent_mode: resample
+
+      # RoPE: must be interleaved to match Flux's EmbedND doubled-frequency layout
+      rotary_interleaved: true
+
+      # ==========================================
+      # PrimusTurboMXFP4LocalSpecProvider
+      # ==========================================
+      transformer_impl: "local"
+
+      # ==========================================
+      # DATASET CONFIGURATION
+      # ==========================================
+      data_path: ${PRIMUS_DIFFUSION_DATA_PATH:/path/to/energon/dataset}
+
+      # Training iterations (example value; increase for a full training run)
+      train_iters: 1000
+      eval_interval: 10000
+      eval_iters: 0
+      log_interval: 1
+      save_interval: 10000
+
+      # Batch configuration
+      micro_batch_size: 64
+      global_batch_size: 512
+      seq_length: 512  # 256 img tokens + 256 text tokens (schnell)
+
+      # ==========================================
+      # BF16 + MXFP4 Precision
+      # ==========================================
+      bf16: true
+      fp16: false
+      params_dtype: bfloat16
+      grad_reduce_in_bf16: true
+
+      # Optimizer settings
+      optimizer: adam
+      lr: 2.0e-4
+      min_lr: 2.0e-4
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_eps: 1.0e-8
+      clip_grad: 1.0
+
+      # Learning rate scheduler (warmup-hold, no decay)
+      lr_warmup_iters: 1600
+      lr_decay_iters: 4000
+      lr_decay_style: constant
+
+      # DataLoader settings
+      num_workers: 8
+      dataloader_type: external
+      max_samples_per_sequence: null
+
+      # ==========================================
+      # Megatron DDP + Distributed Optimizer
+      # ==========================================
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+
+      use_torch_fsdp2: false
+      use_megatron_fsdp: false
+
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      overlap_param_gather_with_optimizer_step: false
+      use_precision_aware_optimizer: true
+      main_params_dtype: fp32
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      ddp_bucket_size: 256000000
+      use_fsdp2_fp32_param_optimizer: false
+
+      ckpt_format: torch_dist
+
+      gradient_accumulation_fusion: false
+
+      check_for_nan_in_loss_and_grad: true
+
+      # ==========================================
+      # MXFP4 Configuration — Block-scaled via Primus Turbo + AITER
+      # ==========================================
+
+      use_flash_attn: true
+
+      fp4: "mxfp4"
+      fp4_recipe: "mxfp4"
+      mxfp4_backward_precision: "mxfp4"  # "mxfp4" (pure) or "fp8" (hybrid)
+
+      # ==========================================
+      # MXFP4 -> FP8 runtime switch
+      # ==========================================
+      # Fires between two iterations, after the optimizer step and before the next
+      # forward. The saved-activation pool is empty at that point (no pipelining,
+      # so backward has already consumed everything), so the two formats never
+      # coexist and there is nothing to discard or copy. What changes is the
+      # recurring steady-state peak: MXFP4 saves ~0.53 bytes/element, FP8
+      # tensorwise ~1.0, so the high-water mark roughly doubles from here on. That
+      # is inherent to any design whose end state is 100% FP8; the pre-warm below
+      # measures it before the measured run starts.
+      mxfp4_to_fp8_switch_iter: 600
+
+      # Trace the FP8 graph during warmup so the switch is a guard-driven cache hit
+      # rather than a recompile at the boundary. Also the startup check that the
+      # switch is not a silent no-op: if Dynamo does not guard _fp8_mode, no new
+      # graph is traced and the run fails here instead of quietly training on in
+      # MXFP4 while logging a successful switch.
+      mxfp4_to_fp8_prewarm: true
+
+      # 0 converts every layer in one loop at the boundary. The 19 MMDiT and 38
+      # single blocks share compiled graphs (Dynamo keys its cache on the code
+      # object), so the whole-model flip costs ~2 recompiles rather than 57 -- and
+      # pre-warming removes even those. Set nonzero only if the pre-warm shows full
+      # FP8 does not fit, in which case the end state is a partial mix.
+      mxfp4_to_fp8_layers_per_iter: 0
+      mxfp4_to_fp8_order: "deep_to_shallow"
+
+      empty_unused_memory_level: 0
+
+      distributed_timeout_minutes: 180
+      distributed_backend: nccl
+
+      # Checkpointing (disabled)
+      finetune: false
+      save: null
+      load: null
+      no_save_optim: true
+      no_save_rng: true
+      auto_continue_train: false
+      disable_last_saving: true
+
+      # Logging
+      tensorboard_dir: output/tensorboard/flux_12b_ddp_local_mxfp4_to_fp8
+      wandb_project: flux_12b_ddp_local_mxfp4_to_fp8
+      log_throughput: true
+      wall_clock_step_timer: true
+      log_timers_to_tensorboard: true
+      log_batch_size_to_tensorboard: true
+      log_learning_rate_to_tensorboard: true
+      log_memory_to_tensorboard: true
+
+      # PyTorch Profiler
+      profile: false
+      use_pytorch_profiler: true
+      profile_ranks: [0]
+      profile_step_start: 9
+      profile_step_end: 11
+      torch_profiler_record_shapes: true
+      torch_profiler_with_stack: true
+      torch_profiler_use_gzip: false
+      disable_profiler_activity_cpu: false
+
+      # Primus Turbo Configuration
+      enable_primus_turbo: true
+      use_turbo_attention: true
+
+      seed: 2025
+      per_step_rng_reseed: false
+      nemo_chimera_init: false
+
+      # Torch Compile — compatible with MXFP4 local spec (per-module FP4)
+      torch_compile:
+        enable: true
+        strategy: "per_block"
+        backend: "inductor"
+        mode: "default"
+        fullgraph: false
+        compile_optimizer: false
+        # true here, overriding the MXFP4 config's false, because this is a GLOBAL
+        # Inductor flag applied during tracing rather than at decoration time. The
+        # FP8 arm is traced during pre-warm and the MXFP4 arm at model build, so
+        # flipping it in between would give the two arms different BF16 cast
+        # semantics. Setting it true from the start keeps them consistent and makes
+        # post-switch numerics comparable to the FP8 MLPerf baseline, which also
+        # sets it true.
+        emulate_precision_casts: true
+        fused_ln_modulate: true

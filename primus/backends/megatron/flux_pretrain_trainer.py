@@ -530,6 +530,10 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "fp4_recipe": fp4_recipe,
                 "mxfp4_backward_precision": getattr(params, "mxfp4_backward_precision", "mxfp4"),
                 "fp4_use_native_te_autocast": getattr(params, "fp4_use_native_te_autocast", False),
+                "mxfp4_to_fp8_switch_iter": getattr(params, "mxfp4_to_fp8_switch_iter", 0),
+                "mxfp4_to_fp8_prewarm": getattr(params, "mxfp4_to_fp8_prewarm", True),
+                "mxfp4_to_fp8_layers_per_iter": getattr(params, "mxfp4_to_fp8_layers_per_iter", 0),
+                "mxfp4_to_fp8_order": getattr(params, "mxfp4_to_fp8_order", "deep_to_shallow"),
             }
         )
 
@@ -728,6 +732,10 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "fp4_recipe",
                 "mxfp4_backward_precision",
                 "mxfp4_gradient_stochastic_rounding",
+                "mxfp4_to_fp8_switch_iter",
+                "mxfp4_to_fp8_prewarm",
+                "mxfp4_to_fp8_layers_per_iter",
+                "mxfp4_to_fp8_order",
                 "sensitive_layers_enabled",
                 "sensitive_layers_start",
                 "sensitive_layers_end",
