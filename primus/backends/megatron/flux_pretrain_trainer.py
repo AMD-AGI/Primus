@@ -540,6 +540,9 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "sensitive_layers_start": getattr(params, "sensitive_layers_start", 0),
                 "sensitive_layers_end": getattr(params, "sensitive_layers_end", 0),
                 "sensitive_layer_precision": getattr(params, "sensitive_layer_precision", "bf16"),
+                "outer_sensitive_layers_start": getattr(params, "outer_sensitive_layers_start", 0),
+                "outer_sensitive_layers_end": getattr(params, "outer_sensitive_layers_end", 0),
+                "outer_sensitive_layer_precision": getattr(params, "outer_sensitive_layer_precision", "bf16"),
                 "mxfp4_gradient_stochastic_rounding": getattr(
                     params, "mxfp4_gradient_stochastic_rounding", False
                 ),
@@ -732,6 +735,9 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "sensitive_layers_start",
                 "sensitive_layers_end",
                 "sensitive_layer_precision",
+                "outer_sensitive_layers_start",
+                "outer_sensitive_layers_end",
+                "outer_sensitive_layer_precision",
             ],
             "Recomputation": [
                 "recompute_granularity",
