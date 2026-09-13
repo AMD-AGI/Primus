@@ -105,3 +105,4 @@ def setup_env(data_path: str):
     else:
         hf_home = os.environ["HF_HOME"]
         print(f"[Primus CLI] HF_HOME already set: {hf_home}")
+# opus-5 test 02:28:21
