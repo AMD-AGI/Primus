@@ -65,6 +65,9 @@ def logged(monkeypatch):
 def _no_torch_optim_env(monkeypatch):
     """Keep the optimizer override out of the layer-spec tests unless asked for."""
     monkeypatch.delenv("PRIMUS_GEMMA4_TORCH_OPTIM", raising=False)
+    # Offload changes how this patch treats the precision-aware flag, so an
+    # inherited value would silently rewrite what these tests assert.
+    monkeypatch.delenv("PRIMUS_GEMMA4_CPU_OFFLOAD", raising=False)
 
 
 # -----------------------------------------------------------------------------
