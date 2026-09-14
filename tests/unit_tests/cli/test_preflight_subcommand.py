@@ -14,8 +14,10 @@ network / host hardware and raises SystemExit, so it is out of scope.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from primus.cli.subcommands import preflight
+from primus.tools.preflight import mori_preflight
 
 
 def _build_parser():
@@ -43,6 +45,9 @@ def test_defaults():
     # (preflight-{NNODES}N-{YYYYMMDD-HHMMSS}) at run time.
     assert args.report_file_name is None
     assert args.save_pdf is True
+    assert args.mori is False
+    assert args.mori_nodes is None
+    assert args.mori_smoke_numel == 67108864
 
 
 def test_selection_flags():
@@ -71,3 +76,54 @@ def test_perf_test_flag():
     args = parser.parse_args(["preflight", "--perf-test", "--plot"])
     assert args.perf_test is True
     assert args.plot is True
+
+
+def test_mori_mode_flags():
+    parser, _ = _build_parser()
+    args = parser.parse_args(
+        [
+            "preflight",
+            "--mori",
+            "--mori-nodes",
+            "node-1,node-2,node-3",
+            "--mori-socket-ifname",
+            "fenic",
+            "--mori-gid-index",
+            "1",
+        ]
+    )
+    assert args.mori is True
+    assert args.mori_nodes == "node-1,node-2,node-3"
+    assert args.mori_socket_ifname == "fenic"
+    assert args.mori_gid_index == 1
+
+
+def test_mori_mode_maps_cli_to_helper_args(monkeypatch, tmp_path):
+    parser, _ = _build_parser()
+    args = parser.parse_args(
+        [
+            "preflight",
+            "--mori",
+            "--dump-path",
+            str(tmp_path),
+            "--mori-nodes",
+            "node-1,node-2",
+            "--mori-max-jobs",
+            "12",
+        ]
+    )
+    repo_root = Path(mori_preflight.__file__).resolve().parents[3]
+    monkeypatch.setenv("PRIMUS_PATH", str(repo_root))
+    captured = []
+    monkeypatch.setattr(
+        mori_preflight,
+        "run_orchestrator",
+        lambda *values: captured.extend(values) or 0,
+    )
+    assert mori_preflight.run_mori_preflight(args, []) == 0
+    native_args, native_repo_root, native_log_dir = captured
+    assert native_args is args
+    assert native_args.mori_nodes == "node-1,node-2"
+    assert native_args.mori_max_jobs == 12
+    assert native_log_dir.parent == tmp_path
+    assert native_repo_root == repo_root

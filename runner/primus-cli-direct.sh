@@ -100,6 +100,9 @@ Examples:
     # Run silently (back-pocket option; launcher errors and log file preserved)
       primus-cli direct --silent -- preflight --quick
 
+    # Runtime NIC inspection, MORI build, and local all-gather correctness smoke
+      primus-cli direct -- preflight --mori
+
 Notes:
     - If --single is specified, Primus skips torchrun and uses python3 directly.
     - run_mode auto-detection: when the primus subcommand is 'node_smoke', run_mode
@@ -415,6 +418,15 @@ if [[ -z "${direct_config[run_mode]:-}" ]]; then
             break
         fi
     done
+    if [[ "$_detected_subcmd" == "preflight" ]]; then
+        for _arg in "${primus_args[@]}"; do
+            if [[ "$_arg" == "--mori" ]]; then
+                _default_run_mode="single"
+                LOG_INFO_RANK0 "[direct] Auto-selected run_mode=single for 'preflight --mori'"
+                break
+            fi
+        done
+    fi
     direct_config[run_mode]="$_default_run_mode"
 fi
 

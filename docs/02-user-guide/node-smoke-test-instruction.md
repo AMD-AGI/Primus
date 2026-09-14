@@ -5,7 +5,7 @@ A lightweight, distributed-rendezvous-free preflight check that runs on every no
 Use it to **screen a cluster fast and exclude bad nodes before launching a real training job**. A bad GPU, NIC, wedged driver, or leaked process on any node surfaces as a node FAIL — without a single global rendezvous, so a stuck node can't wedge its peers.
 
 - **Recommended launcher**: `runner/primus-cli slurm srun -- direct -- node_smoke ...` (auto-resolves the distributed env, applies `slurm.*` config defaults, same pattern as `train` / `benchmark`). The shorter `runner/primus-cli direct -- node_smoke ...` (bare `srun` + `direct`) is equivalent and handy for ad-hoc runs.
-- **Companion tool**: [`preflight`](./preflight.md) — the heavier diagnostic with a global rendezvous and inter-node bandwidth tests. The recommended workflow is **node-smoke first, preflight second** (see [§10](#10-comparison-with-the-full-preflight)).
+- **Companion tool**: [`preflight`](./preflight.md) — the heavier diagnostic with a global rendezvous and inter-node bandwidth tests. `preflight --mori` mode additionally performs NIC configuration checking and MORI single/cross node test. The recommended workflow is **node-smoke first, preflight second** (see [§10](#10-comparison-with-the-full-preflight)).
 
 ---
 
