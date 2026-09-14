@@ -40,6 +40,10 @@ enable_turbo_attention_float8: false
 # operator switch
 # use turbo gemm
 use_turbo_gemm: false
+# Dense SwiGLU MLP through FlyDSL grouped G=1 GLU/dGLU epilogues (MXFP4).
+# Default off until the fused path matches unfused eval loss; Llama-3.1-8B
+# opts in from the experiment YAML.
+use_turbo_fused_dense_mlp: false
 
 # ===== Grouped MLP =====
 # use turbo grouped gemm
