@@ -421,7 +421,7 @@ primus-cli direct -- train pretrain --config deepseek_v2.yaml
 - 🏛 **System Architecture**: [architecture.md](./architecture.md)
 - 🔧 **Quick Start**: `primus-cli --help`
 - 💬 **Issue Reporting**: GitHub Issues
-- 🌐 **ROCm Ecosystem**: [rocm.github.io](https://rocm.github.io)
+- 🌐 **ROCm Ecosystem**: [github.com/ROCm](https://github.com/ROCm)
 
 ---
 
