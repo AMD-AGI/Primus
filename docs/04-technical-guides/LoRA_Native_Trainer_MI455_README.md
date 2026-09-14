@@ -11,7 +11,7 @@ Megatron-Bridge. See also [Native SFT and LoRA](native-sft-lora.md).
 by itself — `LOG_INFO_RANK0` is defined in `base_env.sh` and you will get
 `command not found`.
 
-Image: `amdprimus/amdprimus:gfx1250-20260831`.
+Image: `YOUR_DOCKER_IMAGE`.
 
 | config (`examples/megatron/configs/MI455X/`) | What it is | Weights |
 |---|---|---|
@@ -30,11 +30,11 @@ Proxy numbers are enablement signals, not model TFLOP/s. Loss staying near
 
 ---
 
-## 0. Host: login and pull the image
+## 0. Host: pull your image
 
 ```bash
-docker login -u amdprimus
-docker pull amdprimus/amdprimus:gfx1250-20260831
+export DOCKER_IMAGE=YOUR_DOCKER_IMAGE
+docker pull "$DOCKER_IMAGE"
 ```
 
 Confirm the checkout:
@@ -79,7 +79,7 @@ timeout 60 python -c 'import torch; x=torch.ones(1,device="cuda"); torch.cuda.sy
 Common env for every 1-GPU recipe:
 
 ```bash
-export DOCKER_IMAGE=amdprimus/amdprimus:gfx1250-20260831
+export DOCKER_IMAGE=YOUR_DOCKER_IMAGE
 export PRIMUS_GPU_MODEL=MI455X
 export HIP_VISIBLE_DEVICES=0
 export NNODES=1
@@ -100,7 +100,7 @@ From the Primus repo root on the host. The CLI mounts this tree and runs
 cd /path/to/Primus
 export HF_TOKEN=...          # gated meta-llama/Llama-3.2-1B
 
-./primus-cli container --image amdprimus/amdprimus:gfx1250-20260831 \
+./primus-cli container --image YOUR_DOCKER_IMAGE \
   --env HIP_VISIBLE_DEVICES=0 --env NNODES=1 --env GPUS_PER_NODE=1 \
   --env PRIMUS_GPU_MODEL=MI455X \
   --env PRIMUS_TURBO_ATTN_BACKEND=triton \
@@ -118,7 +118,7 @@ cd /path/to/Primus
 mkdir -p /tmp/primus-proxy-no-ckpt
 
 # Llama-2-70B, 4-layer proxy
-./primus-cli container --image amdprimus/amdprimus:gfx1250-20260831 \
+./primus-cli container --image YOUR_DOCKER_IMAGE \
   --env HIP_VISIBLE_DEVICES=0 --env NNODES=1 --env GPUS_PER_NODE=1 \
   --env PRIMUS_GPU_MODEL=MI455X \
   --env PRIMUS_TURBO_ATTN_BACKEND=triton \
@@ -126,7 +126,7 @@ mkdir -p /tmp/primus-proxy-no-ckpt
   --config examples/megatron/configs/MI455X/llama2_70B-BF16-lora-sft-1gpu-proxy.yaml
 
 # Qwen2.5-72B, 4-layer proxy
-./primus-cli container --image amdprimus/amdprimus:gfx1250-20260831 \
+./primus-cli container --image YOUR_DOCKER_IMAGE \
   --env HIP_VISIBLE_DEVICES=0 --env NNODES=1 --env GPUS_PER_NODE=1 \
   --env PRIMUS_GPU_MODEL=MI455X \
   --env PRIMUS_TURBO_ATTN_BACKEND=triton \
@@ -134,7 +134,7 @@ mkdir -p /tmp/primus-proxy-no-ckpt
   --config examples/megatron/configs/MI455X/qwen2.5_72B-BF16-lora-sft-1gpu-proxy.yaml
 
 # Qwen3-235B-A22B MoE, 4-layer proxy
-./primus-cli container --image amdprimus/amdprimus:gfx1250-20260831 \
+./primus-cli container --image YOUR_DOCKER_IMAGE \
   --env HIP_VISIBLE_DEVICES=0 --env NNODES=1 --env GPUS_PER_NODE=1 \
   --env PRIMUS_GPU_MODEL=MI455X \
   --env PRIMUS_TURBO_ATTN_BACKEND=triton \
@@ -164,7 +164,7 @@ docker run --rm -it \
   -e PRIMUS_GPU_MODEL=MI455X \
   -e PRIMUS_TURBO_ATTN_BACKEND=triton \
   -e HSA_ENABLE_SDMA=1 \
-  amdprimus/amdprimus:gfx1250-20260831 \
+  YOUR_DOCKER_IMAGE \
   bash
 ```
 
@@ -291,4 +291,4 @@ COMPLETE and EXACT (0 ...)
   `NotImplementedError`.
 - If Gloo dies with `Unable to find address for: <ip>`, the image is missing
   `iproute2` or you sourced `MI455X.sh` without `primus-env.sh`.
-)
+
