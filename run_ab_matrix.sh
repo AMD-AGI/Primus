@@ -14,6 +14,9 @@
 # cannot land entirely on one arm of a pair.
 set -uo pipefail
 
+# LOCAL=1: driver and container on the same host — docker exec only, no ssh.
+# Default LOCAL=0 keeps the old remote-driver layout (ssh to NODE, then docker exec).
+LOCAL=${LOCAL:-0}
 NODE=${NODE:-smci355-ccs-aus-n04-21}
 CONTAINER=${CONTAINER:-xiaoming-dev}
 LAYERS=${NUM_LAYERS:-4}
@@ -42,20 +45,42 @@ ARMS=(
 )
 [ -n "${ONLY:-}" ] && ARMS=("$ONLY")
 
+run_in_container() {
+    docker exec \
+        -e PRECISION="$1" \
+        -e USE_MEGA_MOE="$2" \
+        -e NUM_LAYERS="$LAYERS" \
+        -e TRAIN_ITERS="$ITERS" \
+        -e LOG="$3" \
+        -e EXTRA_ARGS="$4" \
+        "$CONTAINER" bash "$REPO/run.sh"
+}
+
 mkdir -p "$OUT"
 # The yamls are snapshotted, not just named: an edit between arms would silently make them
 # incomparable, and the diff is the only record that the FP8 config is not the committed one.
 cp "$REPO"/examples/megatron/configs/MI355X/deepseek_v3-{BF16,FP8}-pretrain.yaml "$OUT/"
 git -C "$REPO" diff -- examples/megatron/configs/MI355X/ >"$OUT/configs.diff"
+if [ "$LOCAL" = 1 ]; then
+    host_label="$(hostname -s) (local, $CONTAINER)"
+    image="$(docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>&1)"
+    turbo="$(docker exec "$CONTAINER" python -c \
+        'import primus_turbo,os;print(os.path.dirname(primus_turbo.__file__))' 2>&1)"
+else
+    host_label="$NODE ($CONTAINER)"
+    image="$(ssh -o BatchMode=yes "$NODE" "docker inspect -f '{{.Config.Image}}' $CONTAINER" 2>&1)"
+    turbo="$(ssh -o BatchMode=yes "$NODE" "docker exec $CONTAINER python -c \
+        'import primus_turbo,os;print(os.path.dirname(primus_turbo.__file__))'" 2>&1)"
+fi
 {
-    echo "node       : $NODE ($CONTAINER)"
+    echo "node       : $host_label"
+    echo "local      : $LOCAL"
     # The image is now a variable of the experiment, not a constant: it decides whether turbo comes
     # from the release build in site-packages or an editable install of a working tree.
-    echo "image      : $(ssh -o BatchMode=yes "$NODE" "docker inspect -f '{{.Config.Image}}' $CONTAINER" 2>&1)"
+    echo "image      : $image"
     echo "layers     : $LAYERS"
     echo "iterations : $ITERS"
-    echo "turbo      : $(ssh -o BatchMode=yes "$NODE" "docker exec $CONTAINER python -c \
-        'import primus_turbo,os;print(os.path.dirname(primus_turbo.__file__))'" 2>&1)"
+    echo "turbo      : $turbo"
     echo "megamoe git: $(git -C /perf_apps/xiaoming/MegaMoE rev-parse --short HEAD 2>&1)"
     echo "primus  git: $(git -C "$REPO" rev-parse --short HEAD 2>&1) (+$(wc -l <"$OUT/configs.diff") lines of config diff)"
     echo "started    : $(date -Is)"
@@ -67,17 +92,22 @@ for spec in "${ARMS[@]}"; do
     arm=mega
     [ "$mega" = True ] || arm=baseline
     name="$precision.$arm"
+    log="$OUT/$name.log"
     echo ""
-    echo "########## $name $extra -> $OUT/$name.log  $(date -Is)"
+    echo "########## $name $extra -> $log  $(date -Is)"
     start=$SECONDS
-    ssh -o BatchMode=yes "$NODE" "docker exec \
-        -e PRECISION=$precision \
-        -e USE_MEGA_MOE=$mega \
-        -e NUM_LAYERS=$LAYERS \
-        -e TRAIN_ITERS=$ITERS \
-        -e LOG=$OUT/$name.log \
-        -e EXTRA_ARGS='$extra' \
-        $CONTAINER bash $REPO/run.sh" >"$OUT/$name.outer.log" 2>&1
+    if [ "$LOCAL" = 1 ]; then
+        run_in_container "$precision" "$mega" "$log" "$extra" >"$OUT/$name.outer.log" 2>&1
+    else
+        ssh -o BatchMode=yes "$NODE" "docker exec \
+            -e PRECISION=$precision \
+            -e USE_MEGA_MOE=$mega \
+            -e NUM_LAYERS=$LAYERS \
+            -e TRAIN_ITERS=$ITERS \
+            -e LOG=$log \
+            -e EXTRA_ARGS='$extra' \
+            $CONTAINER bash $REPO/run.sh" >"$OUT/$name.outer.log" 2>&1
+    fi
     echo "########## $name done rc=$? in $((SECONDS - start))s  $(date -Is)"
 done
 

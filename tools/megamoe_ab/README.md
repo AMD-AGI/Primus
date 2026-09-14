@@ -19,7 +19,14 @@ Four arms on the same DeepSeek-V3 4-layer mock-data setup:
 
 ## Run the full 2×2 matrix
 
-From any host that can `ssh` + `docker exec` into the node:
+**On the training node itself** (local container, no ssh):
+
+```bash
+cd /perf_apps/xiaoming/Primus
+LOCAL=1 CONTAINER=xiaoming-dev ./run_ab_matrix.sh
+```
+
+From a remote driver host that can `ssh` + `docker exec`:
 
 ```bash
 cd /perf_apps/xiaoming/Primus
@@ -35,9 +42,9 @@ Outputs land under `ab_2x2/<MMDD-HHMMSS>/`:
 Useful overrides:
 
 ```bash
-TRAIN_ITERS=50 NUM_LAYERS=4 ./run_ab_matrix.sh          # defaults
-ONLY="mxfp8 False" ./run_ab_matrix.sh                   # single arm
-TRAIN_ITERS=3 ONLY="mxfp8 False" ./run_ab_matrix.sh     # smoke test
+LOCAL=1 CONTAINER=xiaoming-dev TRAIN_ITERS=50 ./run_ab_matrix.sh   # defaults
+LOCAL=1 ONLY="mxfp8 False" ./run_ab_matrix.sh                      # single arm
+LOCAL=1 TRAIN_ITERS=3 ONLY="mxfp8 False" ./run_ab_matrix.sh        # smoke test
 ```
 
 ### Performance mode (default)
@@ -48,7 +55,7 @@ DeepEP + sync-free stage 1 on — matches production-ish throughput. Loss gaps b
 
 ```bash
 COMMON_EXTRA="--turbo_sync_free_moe_stage 0 --use_turbo_deepep False" \
-  NODE=<node> ./run_ab_matrix.sh
+  LOCAL=1 CONTAINER=xiaoming-dev ./run_ab_matrix.sh
 ```
 
 MegaMoE ignores these flags internally but receives the same CLI for symmetry.
