@@ -66,20 +66,10 @@ modules:
   post_trainer:
     framework: megatron
     config: sft_trainer.yaml
-    model: llama2_70B.yaml
+    model: llama2_70B_4layer_proxy.yaml
 
     overrides:
       stage: sft
-
-      # Tokenizer only -- no weights. Llama2Tokenizer is mapped onto
-      # _HuggingFaceTokenizer by Primus's build_tokenizer patch, so a Hub id
-      # works here. NousResearch mirrors Llama-2 ungated.
-      tokenizer_type: HuggingFaceTokenizer
-      tokenizer_model: NousResearch/Llama-2-7b-hf
-
-      # Proxy depth: 4 of 80 layers. Per-layer shapes stay at the real 70B
-      # values, inherited from llama2_70B.yaml.
-      num_layers: 4
 
       sft_dataset_name: "tatsu-lab/alpaca"
       sft_conversation_format: "alpaca"

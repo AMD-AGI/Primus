@@ -56,18 +56,10 @@ modules:
   post_trainer:
     framework: megatron
     config: sft_trainer.yaml
-    model: qwen2.5_72B.yaml
+    model: qwen2.5_72B_4layer_proxy.yaml
 
     overrides:
       stage: sft
-
-      # Tokenizer only -- no weights. Same 151k vocab as Qwen2.5-72B, ungated.
-      tokenizer_type: HuggingFaceTokenizer
-      tokenizer_model: Qwen/Qwen2.5-0.5B
-
-      # Proxy depth: 4 of 80 layers. Per-layer shapes stay at the real 72B
-      # values, inherited from qwen2.5_72B.yaml.
-      num_layers: 4
 
       sft_dataset_name: "tatsu-lab/alpaca"
       sft_conversation_format: "alpaca"

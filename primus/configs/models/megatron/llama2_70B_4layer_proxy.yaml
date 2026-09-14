@@ -1,0 +1,8 @@
+extends:
+  - llama2_70B.yaml
+
+# One-GPU smoke-test variant. Keep the Llama-2-70B per-layer architecture,
+# reduce depth, and use an ungated repository that carries the same tokenizer.
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: NousResearch/Llama-2-7b-hf
+num_layers: 4

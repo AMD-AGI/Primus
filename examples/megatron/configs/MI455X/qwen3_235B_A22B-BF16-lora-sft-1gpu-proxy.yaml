@@ -38,18 +38,10 @@ modules:
   post_trainer:
     framework: megatron
     config: sft_trainer.yaml
-    model: qwen3_235B_A22B.yaml
+    model: qwen3_235B_A22B_4layer_proxy.yaml
 
     overrides:
       stage: sft
-
-      tokenizer_type: HuggingFaceTokenizer
-      tokenizer_model: Qwen/Qwen3-0.6B
-
-      num_layers: 4
-      moe_layer_freq: 1
-      num_experts: 128
-      moe_router_topk: 8
 
       sft_dataset_name: "tatsu-lab/alpaca"
       sft_conversation_format: "alpaca"
