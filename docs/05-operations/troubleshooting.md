@@ -128,7 +128,6 @@ Installation and container-oriented setup are covered in [Installation](../01-ge
 | Issue | Mitigation |
 |-------|------------|
 | Suspected Primus patch interaction | `export PRIMUS_PATCHES=none` and retry with vanilla Megatron behavior. |
-| Custom kernel compile failures | `disable_compile_dependencies: true` skips custom kernel compilation where applicable. |
 | Wrong third-party path | Set **`BACKEND_PATH`** to override third-party resolution. |
 
 ### TorchTitan

@@ -152,8 +152,6 @@ modules:
       wandb_project: flux_12b_ddp_te_bf16
       log_throughput: true
       log_timers_to_tensorboard: true
-      log_batch_size_to_tensorboard: true
-      log_learning_rate_to_tensorboard: true
       log_memory_to_tensorboard: true
 
       # PyTorch Profiler
