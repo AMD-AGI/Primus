@@ -1,0 +1,10 @@
+
+
+
+
+PRECISION=bf16 \
+USE_MEGA_MOE=False \
+TRAIN_ITERS=50 \
+GBS=512 \
+USE_TURBO_DEEPEEP=True \
+bash run.sh
