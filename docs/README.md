@@ -78,6 +78,7 @@ Deep technical topics for advanced users.
 - [Determinism and reproducibility](./04-technical-guides/determinism-and-reproducibility.md): deterministic mode, seeds, trade-offs
 - [Diffusion models](./04-technical-guides/diffusion-models/README.md): Flux diffusion architecture, data pipeline, and FP8 / MXFP4 training
 - [Native SFT and LoRA](./04-technical-guides/native-sft-lora.md): Megatron-native SFT/LoRA runbook (BF16 / FP8 / FP4), no Megatron-Bridge dependency
+- [Native SFT LoRA on MI455X](./04-technical-guides/LoRA_Native_Trainer_MI455_README.md): 1-GPU gfx1250 native LoRA recipes and launch notes
 
 ### [Operations](./05-operations/)
 
@@ -133,6 +134,7 @@ Long-form articles on the reasoning behind Primus features, most of them publish
 | Use the fused MegaMoE layer | [MegaMoE fused MoE layer](./04-technical-guides/mega-moe.md) |
 | Train a diffusion (Flux) model | [Diffusion models](./04-technical-guides/diffusion-models/README.md) |
 | Fine-tune with native SFT / LoRA | [Native SFT and LoRA](./04-technical-guides/native-sft-lora.md) |
+| Run native LoRA on MI455X (gfx1250) | [Native SFT LoRA on MI455X](./04-technical-guides/LoRA_Native_Trainer_MI455_README.md) |
 | Auto-tune my training configuration | [Tuning agent](./02-user-guide/tuning-agent.md) |
 | Profile a training run | [Profiling and observability](./04-technical-guides/profiling-and-observability.md) |
 | Track experiments (WandB/MLflow/TensorBoard) | [Logging and experiment tracking](./04-technical-guides/logging-and-experiment-tracking.md) |
