@@ -112,6 +112,7 @@ def _build_default_primus_args() -> SimpleNamespace:
         use_turbo_gemm=False,
         use_turbo_norm_te_linear=False,
         use_turbo_attention=False,
+        use_turbo_flex_attention=False,
         use_turbo_grouped_gemm=False,
         moe_use_legacy_grouped_gemm=False,
     )
@@ -222,6 +223,17 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
 
     def core_attention(self) -> type:
         """Which module to use for attention"""
+        use_flex = getattr(self.cfg, "use_turbo_flex_attention", False)
+        if use_flex and (self.fallback_to_eager_attn or not self.cfg.use_turbo_attention):
+            # The flex switch only redirects the callable *inside* PrimusTurboAttention.
+            # Without that module it is a no-op, and a silently ignored performance/
+            # feature switch is worse than a failed startup.
+            raise ValueError(
+                "use_turbo_flex_attention=true requires use_turbo_attention=true "
+                f"(currently use_turbo_attention={self.cfg.use_turbo_attention}, "
+                f"fallback_to_eager_attn={self.fallback_to_eager_attn}); the flex compat layer "
+                "is only reachable through the Primus-Turbo attention module."
+            )
         if self.fallback_to_eager_attn:
             return DotProductAttention
         return (
