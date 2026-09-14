@@ -53,6 +53,7 @@ CAPTURE_SKIP_KEYS = frozenset(
         "nproc_per_node",
         "filter_output_path",
         "filter_block_size",
+        "filter_min_kept",
         "torchrun",
         "script",
     }

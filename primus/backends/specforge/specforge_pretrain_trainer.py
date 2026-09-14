@@ -70,6 +70,21 @@ def align_visible_devices(env=None) -> Optional[tuple]:
     return hip, cuda
 
 
+def resolve_filter_min_kept(capture: Optional[dict] = None) -> int:
+    """Minimum shards that must survive the hidden-state filter.
+
+    Defaults to 1 so a 1-GPU smoke can keep a handful of records. Set
+    ``specforge_capture.filter_min_kept`` when a larger recipe needs more.
+    """
+
+    if not capture:
+        return 1
+    raw = capture.get("filter_min_kept")
+    if raw is None or str(raw).strip() == "":
+        return 1
+    return max(1, int(raw))
+
+
 def clear_partial_distributed_env(env=None) -> list:
     """Hand SpecForge either a complete torchrun environment or none at all.
 
@@ -164,10 +179,14 @@ class SpecForgePretrainTrainer(BaseTrainer):
                 )
 
                 block = int(capture.get("filter_block_size") or 16)
+                min_kept = resolve_filter_min_kept(capture)
                 kept, dropped = filter_dflash_dir(raw, filter_out, block_size=block)
                 log_rank_0(f"Filtered hidden states: kept {kept}, dropped {dropped} -> {filter_out}")
-                if kept < 8:
-                    raise SystemExit(f"too few kept samples ({kept}); need at least 8 for one train step")
+                if kept < min_kept:
+                    raise SystemExit(
+                        f"too few kept shards ({kept}); need at least {min_kept} "
+                        "(set specforge_capture.filter_min_kept)"
+                    )
             # Return so TrainRuntime finishes cleanup with exit 0. SystemExit(0)
             # is a BaseException and used to be wrapped as a training failure.
             return

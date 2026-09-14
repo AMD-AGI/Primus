@@ -28,6 +28,8 @@ specforge_entrypoint: specforge
 specforge_mode: train
 
 # Flags for prepare_hidden_states.py when specforge_mode=capture.
+# Primus-only keys (not forwarded to the script): filter_output_path,
+# filter_block_size, filter_min_kept (default 1).
 specforge_capture: {}
 
 # Convenience alias for specforge_overrides.output_dir.

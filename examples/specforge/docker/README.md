@@ -38,12 +38,12 @@ docker build -f examples/specforge/docker/Dockerfile \
   -t primus-specforge:v0.5.14-rocm700-mi35x .
 ```
 
-Pins (`BASE_IMAGE` digest, `SPECFORGE_REF`) are in
-[`pins.env`](pins.env) and as Dockerfile `ARG`s.
+Pins (`BASE_IMAGE` digest and `SPECFORGE_REF`) are Dockerfile `ARG`
+defaults. A plain `docker build` uses them; `--build-arg` overrides.
 
 The Dockerfile:
 
-1. Starts from `lmsysorg/sglang:v0.5.14-rocm700-mi35x`.
+1. Starts from the pinned `lmsysorg/sglang:v0.5.14-rocm700-mi35x` digest.
 2. Clones SpecForge at `SPECFORGE_REF` and applies
    `patches/sglang/v0.5.14/spec-capture.patch`.
 3. Installs SpecForge editable `--no-deps`.
@@ -63,6 +63,8 @@ docker build -f examples/specforge/docker/Dockerfile \
   --build-arg BASE_IMAGE=lmsysorg/sglang:v0.5.14-rocm700-mi30x \
   -t primus-specforge:v0.5.14-rocm700-mi30x .
 ```
+
+Prefer a digest on `BASE_IMAGE` if you have one, so the override is pinned too.
 
 ## Run
 

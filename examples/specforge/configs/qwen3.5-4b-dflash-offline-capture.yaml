@@ -38,6 +38,8 @@ modules:
         output_path: ${OUTPUT_DIR}/hidden_states_raw
         filter_output_path: ${OUTPUT_DIR}/hidden_states
         filter_block_size: ${BLOCK_SIZE:16}
+        # Fail capture if the filter keeps fewer shards than this (default 1).
+        filter_min_kept: ${FILTER_MIN_KEPT:1}
         cache_dir: ${OUTPUT_DIR}/sf-cache
         chat_template: qwen3.5
         max_length: 2048

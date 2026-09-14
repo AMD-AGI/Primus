@@ -33,6 +33,7 @@ from primus.backends.specforge.specforge_pretrain_trainer import (
     SpecForgePretrainTrainer,
     align_visible_devices,
     clear_partial_distributed_env,
+    resolve_filter_min_kept,
 )
 from primus.backends.specforge.stack_preflight import (
     apply_rocm_stack_env,
@@ -211,6 +212,7 @@ class TestArgvBuilder:
                 "sglang_attention_backend": "aiter",
                 "nproc_per_node": 1,
                 "filter_output_path": "/filtered",
+                "filter_min_kept": 1,
             },
         )
         argv = build_capture_argv(params)
@@ -225,6 +227,7 @@ class TestArgvBuilder:
         assert "--sglang-disable-radix-cache" in argv
         assert argv[argv.index("--sglang-attention-backend") + 1] == "aiter"
         assert "filter_output_path" not in " ".join(argv)
+        assert "--filter-min-kept" not in " ".join(argv)
         assert "--target-model-path" in argv
 
     def test_capture_omits_false_store_true_flags(self):
@@ -387,6 +390,52 @@ class TestCaptureExitCode:
             lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
         )
         assert trainer.train() is None
+
+
+class TestFilterMinKept:
+    """kept < 8 used to fail 1-GPU smokes that only kept a few shards."""
+
+    def test_default_is_one(self):
+        assert resolve_filter_min_kept(None) == 1
+        assert resolve_filter_min_kept({}) == 1
+        assert resolve_filter_min_kept({"filter_min_kept": ""}) == 1
+
+    def test_explicit_value(self):
+        assert resolve_filter_min_kept({"filter_min_kept": "8"}) == 8
+        assert resolve_filter_min_kept({"filter_min_kept": 4}) == 4
+        assert resolve_filter_min_kept({"filter_min_kept": 0}) == 1
+
+    def _trainer(self, capture):
+        trainer = SpecForgePretrainTrainer(
+            backend_args=SimpleNamespace(specforge_mode="capture", specforge_capture=capture)
+        )
+        trainer.argv = ["torchrun"]
+        return trainer
+
+    def _stub_filter(self, monkeypatch, kept, dropped):
+        fake = SimpleNamespace(filter_dflash_dir=lambda *_args, **_kwargs: (kept, dropped))
+        monkeypatch.setitem(sys.modules, "primus.backends.specforge.filter_hidden_states", fake)
+
+    def test_three_kept_shards_pass_default_min(self, monkeypatch):
+        monkeypatch.setattr(
+            "primus.backends.specforge.specforge_pretrain_trainer.subprocess.run",
+            lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+        )
+        self._stub_filter(monkeypatch, 3, 5)
+        trainer = self._trainer({"output_path": "/raw", "filter_output_path": "/filtered"})
+        assert trainer.train() is None
+
+    def test_three_kept_shards_fail_when_min_is_eight(self, monkeypatch):
+        monkeypatch.setattr(
+            "primus.backends.specforge.specforge_pretrain_trainer.subprocess.run",
+            lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+        )
+        self._stub_filter(monkeypatch, 3, 5)
+        trainer = self._trainer(
+            {"output_path": "/raw", "filter_output_path": "/filtered", "filter_min_kept": 8}
+        )
+        with pytest.raises(SystemExit, match="too few kept shards \\(3\\); need at least 8"):
+            trainer.train()
 
 
 class TestPrepareHook:
