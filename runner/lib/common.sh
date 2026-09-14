@@ -498,13 +498,18 @@ print_system_info() {
     PRINT_INFO_RANK0 "    Memory: $(get_memory_gb) GB"
     PRINT_INFO_RANK0 "    Container: $(is_container && echo 'Yes' || echo 'No')"
     PRINT_INFO_RANK0 "    Slurm Job: $(is_slurm_job && echo 'Yes' || echo 'No')"
-    if command -v rocm-smi &>/dev/null; then
+    if command -v amd-smi &>/dev/null; then
+        local gpu_count
+        gpu_count=$(amd-smi list 2>/dev/null | grep -c '^GPU:' || echo "0")
+        PRINT_INFO_RANK0 "    GPUs: $gpu_count"
+        PRINT_DEBUG "amd-smi available, GPU count: $gpu_count"
+    elif command -v rocm-smi &>/dev/null; then
         local gpu_count
         gpu_count=$(rocm-smi --showid | grep 'GUID' | sort -u | wc -l || echo "0")
         PRINT_INFO_RANK0 "    GPUs: $gpu_count"
         PRINT_DEBUG "ROCm SMI available, GPU count: $gpu_count"
     else
-        PRINT_DEBUG "ROCm SMI not available"
+        PRINT_DEBUG "Neither amd-smi nor rocm-smi available"
     fi
 }
 
