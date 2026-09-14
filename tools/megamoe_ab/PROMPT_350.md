@@ -10,14 +10,14 @@
 
 - **本机直接跑**，不用 SSH 到其他节点
 - 容器：**xiaoming-dev**（本地 docker，`LOCAL=1`）
-- 代码：`/perf_apps/xiaoming/Primus` 分支 `feat/megamoe-2x2-comparison`
-- MegaMoE：`/perf_apps/xiaoming/MegaMoE`（bind mount，`PRIMUS_MEGAMOE_SRC` 已在 run.sh 设好）
+- 代码：`/home/xiaompen/Primus` 分支 `feat/megamoe-2x2-comparison`
+- MegaMoE：`/home/xiaompen/MegaMoE`（bind mount，`PRIMUS_MEGAMOE_SRC` 已在 run.sh 设好）
 
 ## 先做环境检查
 
-1. `cd /perf_apps/xiaoming/Primus && git fetch origin && git checkout feat/megamoe-2x2-comparison && git pull`
+1. `cd /home/xiaompen/Primus && git fetch origin && git checkout feat/megamoe-2x2-comparison && git pull`
 2. `docker ps | grep xiaoming-dev` — 容器在跑
-3. bind mount 正常：`/perf_apps/xiaoming/Primus` 和 `/perf_apps/xiaoming/MegaMoE` 在容器内可见
+3. bind mount 正常：`/home/xiaompen/Primus` 和 `/home/xiaompen/MegaMoE` 在容器内可见
 4. wgrad fix：`primus/backends/megatron/core/extensions/primus_turbo.py` 里 non-fused wgrad 是 unconditional add（不是 `elif not weight.grad_added_to_main_grad`）
 5. FP8 yaml：`examples/megatron/configs/MI355X/deepseek_v3-FP8-pretrain.yaml` 含 `fp8_recipe: mxfp8`、`use_turbo_grouped_gemm: true`、`moe_use_legacy_grouped_gemm: false`
 
@@ -32,12 +32,12 @@
 
 ## 运行顺序
 
-所有命令在 **350 本机** `/perf_apps/xiaoming/Primus` 下执行，固定 `LOCAL=1 CONTAINER=xiaoming-dev`。
+所有命令在 **350 本机** `/home/xiaompen/Primus` 下执行，固定 `LOCAL=1 CONTAINER=xiaoming-dev`。
 
 ### Step 1 — smoke test（约 5 分钟）
 
 ```bash
-cd /perf_apps/xiaoming/Primus
+cd /home/xiaompen/Primus
 LOCAL=1 CONTAINER=xiaoming-dev \
   TRAIN_ITERS=3 ONLY="mxfp8 False" ./run_ab_matrix.sh
 ```

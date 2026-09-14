@@ -21,7 +21,8 @@ NODE=${NODE:-smci355-ccs-aus-n04-21}
 CONTAINER=${CONTAINER:-xiaoming-dev}
 LAYERS=${NUM_LAYERS:-4}
 ITERS=${TRAIN_ITERS:-50}
-REPO=${REPO:-/perf_apps/xiaoming/Primus}
+REPO=${REPO:-/home/xiaompen/Primus}
+MEGAMOE=${MEGAMOE:-/home/xiaompen/MegaMoE}
 # Appended to every arm, so a flag that changes the question rather than one arm stays symmetric.
 # For an accuracy comparison that means COMMON_EXTRA="--turbo_sync_free_moe_stage 0
 # --use_turbo_deepep False": the turbo DeepEP dispatcher is nondeterministic run to run (0.1 of loss
@@ -81,7 +82,7 @@ fi
     echo "layers     : $LAYERS"
     echo "iterations : $ITERS"
     echo "turbo      : $turbo"
-    echo "megamoe git: $(git -C /perf_apps/xiaoming/MegaMoE rev-parse --short HEAD 2>&1)"
+    echo "megamoe git: $(git -C "$MEGAMOE" rev-parse --short HEAD 2>&1)"
     echo "primus  git: $(git -C "$REPO" rev-parse --short HEAD 2>&1) (+$(wc -l <"$OUT/configs.diff") lines of config diff)"
     echo "started    : $(date -Is)"
 } | tee "$OUT/launch.txt"

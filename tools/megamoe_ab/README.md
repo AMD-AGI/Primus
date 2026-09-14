@@ -9,10 +9,10 @@ Four arms on the same DeepSeek-V3 4-layer mock-data setup:
 
 ## Prerequisites
 
-- Container with Primus + MegaMoE bind mounts (same layout as n04):
-  - `/perf_apps/xiaoming/Primus` → this repo
-  - `/perf_apps/xiaoming/MegaMoE` → MegaMoE working tree
-  - `PRIMUS_MEGAMOE_SRC=/perf_apps/xiaoming/MegaMoE` (set in `run.sh`)
+- Container with Primus + MegaMoE bind mounts:
+  - `/home/xiaompen/Primus` → this repo (override: `REPO=` / `PRIMUS_ROOT=`)
+  - `/home/xiaompen/MegaMoE` → MegaMoE working tree (override: `MEGAMOE=` / `PRIMUS_MEGAMOE_SRC=`)
+  - `PRIMUS_MEGAMOE_SRC` default is set in `run.sh`
 - SSH from the driver host to the training node (`BatchMode=yes`).
 - **wgrad fix**: mxfp8 baseline needs `primus_turbo.py` to accumulate wgrad on every microbatch (already on `main`; cherry-pick `fix/turbo-wgrad-accum-every-microbatch` if missing).
 - **FP8 yaml**: this branch sets `fp8: e4m3`, `fp8_recipe: mxfp8`, `use_turbo_grouped_gemm: true`, `moe_use_legacy_grouped_gemm: false` so the mxfp8 baseline is a same-precision turbo path, not hybrid/legacy bf16 experts.
@@ -22,14 +22,14 @@ Four arms on the same DeepSeek-V3 4-layer mock-data setup:
 **On the training node itself** (local container, no ssh):
 
 ```bash
-cd /perf_apps/xiaoming/Primus
+cd /home/xiaompen/Primus
 LOCAL=1 CONTAINER=xiaoming-dev ./run_ab_matrix.sh
 ```
 
 From a remote driver host that can `ssh` + `docker exec`:
 
 ```bash
-cd /perf_apps/xiaoming/Primus
+cd /home/xiaompen/Primus
 NODE=<mi355-node> CONTAINER=xiaoming-dev ./run_ab_matrix.sh
 ```
 

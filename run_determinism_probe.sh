@@ -20,7 +20,8 @@ CONTAINER=${CONTAINER:-xiaoming-dev}
 ITERS=${TRAIN_ITERS:-10}
 REPS=${REPS:-2}
 PRECISION=${PRECISION:-bf16}
-REPO=/perf_apps/xiaoming/Primus
+REPO=${REPO:-/home/xiaompen/Primus}
+MEGAMOE=${MEGAMOE:-/home/xiaompen/MegaMoE}
 OUT=${OUT:-$REPO/ab_2x2/$(date +%m%d-%H%M%S)-determinism}
 
 # "<name> [extra args]"
@@ -36,7 +37,7 @@ mkdir -p "$OUT"
     echo "precision : $PRECISION, baseline (stock) MoE"
     echo "iters/rep : $ITERS, reps: $REPS"
     echo "primus git: $(git -C $REPO rev-parse --short HEAD) (working tree, wgrad fix applied)"
-    echo "megamoe   : $(git -C /perf_apps/xiaoming/MegaMoE rev-parse --short HEAD)"
+    echo "megamoe   : $(git -C "$MEGAMOE" rev-parse --short HEAD)"
     echo "started   : $(date -Is)"
 } | tee "$OUT/launch.txt"
 

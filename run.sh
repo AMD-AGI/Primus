@@ -26,12 +26,13 @@ export EXP
 # export PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b
 # export GPU_ARCHS=gfx950
 
-# /workspace/Primus is the stale copy baked into the image (no MegaMoE); use the bind-mounted repo
-cd /perf_apps/xiaoming/Primus
+# /workspace/Primus is the stale copy baked into the image (no MegaMoE); use the bind-mounted repo.
+PRIMUS_ROOT=${PRIMUS_ROOT:-/home/xiaompen/Primus}
+cd "$PRIMUS_ROOT"
 
 # Use the MegaMoE working tree's python (flydsl / mega_moe) on top of the image's
 # turbo .so -- see runner/helpers/patches/12_overlay_megamoe_python.sh
-export PRIMUS_MEGAMOE_SRC=/perf_apps/xiaoming/MegaMoE
+export PRIMUS_MEGAMOE_SRC=${PRIMUS_MEGAMOE_SRC:-/home/xiaompen/MegaMoE}
 
 pkill -9 python
 pkill -9 python
@@ -65,8 +66,7 @@ GBS=${GBS:-512}
 EXTRA_ARGS=${EXTRA_ARGS:-}
 USE_TURBO_DEEPEEP=${USE_TURBO_DEEPEEP:-True}
 # Both the precision and the arm go in the log name: the four arms of a 2x2 would otherwise
-# overwrite each other, and /perf_apps is shared across nodes so nothing here is private to a
-# machine. A driver that wants its own layout passes LOG.
+# overwrite each other. A driver that wants its own layout passes LOG.
 ARM=mega
 [ "$USE_MEGA_MOE" = "True" ] || ARM=baseline
 if [ -z "${LOG:-}" ]; then
