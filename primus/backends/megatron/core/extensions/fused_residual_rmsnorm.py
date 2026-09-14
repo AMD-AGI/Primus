@@ -29,13 +29,22 @@ Activation
 ----------
 * V1: ``PRIMUS_FUSED_RESIDUAL_NORM=1`` (default 0).
 * V2: ``PRIMUS_FUSED_RESIDUAL_NORM_V2=1`` (default 0). Implies V1.
-* Requires ``use_turbo_rms_norm=true`` so the norms are ``PrimusTurboRMSNorm``
-  instances we can extend with a ``residual=`` arg.
+* Requires ``use_turbo_rms_norm=true`` so standalone norms are
+  ``PrimusTurboRMSNorm``. On the Llama TE fused LN+Linear spec,
+  ``pre_mlp_layernorm`` / ``input_layernorm`` are ``IdentityOp`` and the
+  RMSNorm lives on ``mlp.linear_fc1.layer_norm_weight`` /
+  ``self_attention.linear_qkv.layer_norm_weight``. V1/V2 then fuse into
+  those weights via ``rmsnorm_residual`` and skip the inner ``rmsnorm``.
 
 Falls back silently to the original ``TransformerLayer.forward`` whenever
 any precondition fails (recompute paths, fp32 residual, inference fused TP,
-non-zero hidden_dropout, cross-attention layers, non-PrimusTurboRMSNorm
-pre-norm).
+non-zero hidden_dropout, cross-attention layers, missing fused-LN gamma).
+
+Skip-``y`` (optional, ``patches/primus-te-ln-skip-y-ste.patch``)
+---------------------------------------------------------------
+This file is the legal skip-``y`` keep (QKV/MLP ``skip_y_store=True``,
+final LN ``False``). ``APPLY_SKIP_Y_STE=0`` reverse-applies that patch
+for a stored-``y`` A/B vs TTT 77.90. Do not ``mark_non_differentiable(y)``.
 
 Safety
 ------
@@ -54,8 +63,8 @@ from typing import Any
 
 
 def _enabled() -> bool:
-    """V1 gate (or implied by V2)."""
-    if _v2_enabled():
+    """V1 gate (or implied by V2 / R3)."""
+    if _v2_enabled() or _r3_enabled():
         return True
     v = os.environ.get("PRIMUS_FUSED_RESIDUAL_NORM", "0").strip().lower()
     return v in ("1", "true", "yes", "on")
@@ -66,6 +75,33 @@ def _v2_enabled() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _r3_enabled() -> bool:
+    v = os.environ.get("PRIMUS_FUSED_RMSNORM_MXFP4", "0").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _run_rmsnorm_residual(x, residual, gamma, eps, skip_y_store=True):
+    """V1/V2 residual RMSNorm; R3 also returns MXFP4 dual of y.
+
+    ``skip_y_store`` is for QKV/MLP consumers that pass ``a_prequant`` /
+    ``x_prequant``. Final LN feeds the vocab GEMM, which still quantizes
+    BF16 ``y`` — that call site passes ``False``.
+    """
+    if _r3_enabled():
+        from primus_turbo.pytorch.ops.normalization import rmsnorm_residual_mxfp4
+
+        y, xpr, row, rs, col, cs = rmsnorm_residual_mxfp4(
+            x, residual, gamma, eps, skip_y_store=skip_y_store
+        )
+        return y, xpr, (row.detach(), rs.detach(), col.detach(), cs.detach())
+    from primus_turbo.pytorch.ops.normalization import (
+        rmsnorm_residual as triton_rmsnorm_residual,
+    )
+
+    y, xpr = triton_rmsnorm_residual(x, residual, gamma, eps)
+    return y, xpr, None
+
+
 def _log(msg: str) -> None:
     rank = os.environ.get("RANK", "0")
     if rank == "0":
@@ -73,6 +109,46 @@ def _log(msg: str) -> None:
 
 
 _INSTALLED = False
+_LOGGED_FC1_PATH = False
+
+
+def _identity_op_type():
+    try:
+        from megatron.core.transformer.identity_op import IdentityOp
+
+        return IdentityOp
+    except ImportError:
+        return type(None)
+
+
+def _is_identity(mod: Any) -> bool:
+    if mod is None:
+        return True
+    return isinstance(mod, _identity_op_type())
+
+
+def _fc1_fused_ln_params(layer: Any):
+    """TE dense spec: pre-MLP RMSNorm is fused into ``mlp.linear_fc1``."""
+    mlp = getattr(layer, "mlp", None)
+    fc1 = getattr(mlp, "linear_fc1", None) if mlp is not None else None
+    ln_w = getattr(fc1, "layer_norm_weight", None) if fc1 is not None else None
+    if ln_w is None:
+        return None
+    cfg = getattr(layer, "config", None)
+    eps = getattr(fc1, "eps", None) or getattr(cfg, "layernorm_epsilon", 1e-5)
+    return fc1, ln_w, eps
+
+
+def _qkv_fused_ln_params(layer: Any):
+    """TE dense spec: pre-attn RMSNorm is fused into QKV ``LayerNormLinear``."""
+    attn = getattr(layer, "self_attention", None)
+    qkv = getattr(attn, "linear_qkv", None) if attn is not None else None
+    ln_w = getattr(qkv, "layer_norm_weight", None) if qkv is not None else None
+    if ln_w is None:
+        return None
+    cfg = getattr(layer, "config", None)
+    eps = getattr(qkv, "eps", None) or getattr(cfg, "layernorm_epsilon", 1e-5)
+    return qkv, ln_w, eps
 
 
 def install() -> bool:
@@ -124,14 +200,25 @@ def install() -> bool:
                 gamma = self.weight
                 if getattr(self, "zero_centered_gamma", False):
                     gamma = gamma + 1
-                norm_out, _xpr = triton_rmsnorm_residual(x_pending, r_pending, gamma, self.eps)
+                # Final LN / standalone RMSNorm: vocab GEMM (and any
+                # non-skip-quant consumer) still reads BF16 y.
+                norm_out, _xpr, preq = _run_rmsnorm_residual(
+                    x_pending, r_pending, gamma, self.eps, skip_y_store=False
+                )
+                if preq is not None:
+                    self._prequant_x = preq
                 return norm_out
             if residual is None:
                 return _orig_norm_forward(self, x)
             gamma = self.weight
             if getattr(self, "zero_centered_gamma", False):
                 gamma = gamma + 1
-            return triton_rmsnorm_residual(x, residual, gamma, self.eps)
+            y, xpr, preq = _run_rmsnorm_residual(
+                x, residual, gamma, self.eps, skip_y_store=False
+            )
+            if preq is not None:
+                self._prequant_x = preq
+            return y, xpr
 
         PrimusTurboRMSNorm.forward = _new_norm_forward
         PrimusTurboRMSNorm._fused_residual_patched = True
@@ -179,6 +266,8 @@ def install() -> bool:
             _log("patched TransformerLayer.forward (V1 ADD#1 + V2 cross-layer ADD#2 fusion active)")
         else:
             _log("patched TransformerLayer.forward (V1 in-layer ADD#1+norm fusion active)")
+        if _r3_enabled():
+            _log("R3 RMSNorm→MXFP4 enabled (PRIMUS_FUSED_RMSNORM_MXFP4)")
 
     _INSTALLED = True
     return True
@@ -265,25 +354,29 @@ def _can_fuse(layer: Any) -> bool:
     if getattr(layer, "offload_mlp_norm", False):
         return False
 
-    pre_mlp = getattr(layer, "pre_mlp_layernorm", None)
-    if pre_mlp is None:
-        return False
     try:
         from primus.backends.megatron.core.extensions.primus_turbo import (
             PrimusTurboRMSNorm,
         )
     except ImportError:
         return False
-    if not isinstance(pre_mlp, PrimusTurboRMSNorm):
-        return False
 
-    from megatron.core.transformer.identity_op import IdentityOp
-
+    IdentityOp = _identity_op_type()
     cross_attn = getattr(layer, "cross_attention", None)
     if cross_attn is not None and not isinstance(cross_attn, IdentityOp):
         return False
 
-    return True
+    pre_mlp = getattr(layer, "pre_mlp_layernorm", None)
+    if isinstance(pre_mlp, PrimusTurboRMSNorm):
+        return True
+    # Llama TE fused LN+Linear: IdentityOp pre_mlp, RMSNorm on fc1.
+    if _is_identity(pre_mlp) and _fc1_fused_ln_params(layer) is not None:
+        global _LOGGED_FC1_PATH
+        if not _LOGGED_FC1_PATH:
+            _log("V1 using mlp.linear_fc1.layer_norm_weight (IdentityOp pre_mlp)")
+            _LOGGED_FC1_PATH = True
+        return True
+    return False
 
 
 def _v2_next_can_consume_carry(layer: Any) -> bool:
@@ -308,7 +401,7 @@ def _v2_next_can_consume_carry(layer: Any) -> bool:
         if nxt is None:
             return False
         nxt_in_ln = getattr(nxt, "input_layernorm", None)
-        if not isinstance(nxt_in_ln, PrimusTurboRMSNorm):
+        if not isinstance(nxt_in_ln, PrimusTurboRMSNorm) and _qkv_fused_ln_params(nxt) is None:
             return False
         # If the next layer can't fuse for its own reasons, we shouldn't
         # leave a carry it has to drain — drain it ourselves via the
@@ -354,24 +447,35 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
     # ---- input_layernorm (with optional V2 carry consume) ----------------
     nvtx_range_push(suffix="input_layernorm")
     carry = getattr(layer, "_v2_carry", None) if v2_active else None
+    qkv_skip = None
     if carry is not None:
-        # Fused path: input_layernorm absorbs the previous layer's deferred
-        # mlp_bda add. The returned x_plus_r becomes our residual base.
+        # Fused path: absorb the previous layer's deferred mlp_bda add.
         layer._v2_carry = None
         prev_mlp_out, prev_residual = carry
-        # We bypass PrimusTurboRMSNorm.forward to access x_plus_r directly,
-        # which is needed as the residual for ADD#1.
-        from primus_turbo.pytorch.ops.normalization import (
-            rmsnorm_residual as triton_rmsnorm_residual,
-        )
 
-        in_ln = layer.input_layernorm
-        gamma = in_ln.weight
-        if getattr(in_ln, "zero_centered_gamma", False):
-            gamma = gamma + 1
-        input_layernorm_output, hidden_states = triton_rmsnorm_residual(
-            prev_mlp_out, prev_residual, gamma, in_ln.eps
-        )
+        qkv_params = _qkv_fused_ln_params(layer)
+        in_ln = getattr(layer, "input_layernorm", None)
+        if qkv_params is not None and _is_identity(in_ln):
+            qkv_skip, gamma, eps = qkv_params
+            if getattr(qkv_skip, "zero_centered_gamma", False):
+                gamma = gamma + 1
+            input_layernorm_output, hidden_states, preq = _run_rmsnorm_residual(
+                prev_mlp_out, prev_residual, gamma, eps
+            )
+            qkv_skip._skip_fused_norm = True
+            if preq is not None:
+                qkv_skip._prequant_x = preq
+        else:
+            # Standalone PrimusTurboRMSNorm input_layernorm.
+            in_ln = layer.input_layernorm
+            gamma = in_ln.weight
+            if getattr(in_ln, "zero_centered_gamma", False):
+                gamma = gamma + 1
+            input_layernorm_output, hidden_states, preq = _run_rmsnorm_residual(
+                prev_mlp_out, prev_residual, gamma, in_ln.eps
+            )
+            if preq is not None:
+                in_ln._prequant_x = preq
     else:
         input_layernorm_output = layer.input_layernorm(hidden_states)
     nvtx_range_pop(suffix="input_layernorm")
@@ -398,18 +502,43 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
     if attn_bias is not None:
         attn_out = attn_out + attn_bias.to(attn_out.dtype)
 
-    # ---- V1 fuse: bda(attn_out, residual) + pre_mlp_layernorm ------------
+    # ---- V1 fuse: bda(attn_out, residual) + pre_mlp RMSNorm --------------
     nvtx_range_push(suffix="fused_residual_pre_mlp_layernorm")
-    pre_mlp_layernorm_output, hidden_states = layer.pre_mlp_layernorm(attn_out, residual=residual)
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboRMSNorm,
+    )
+
+    pre_mlp = getattr(layer, "pre_mlp_layernorm", None)
+    fc1_skip = None
+    if isinstance(pre_mlp, PrimusTurboRMSNorm):
+        pre_mlp_layernorm_output, hidden_states = pre_mlp(attn_out, residual=residual)
+    else:
+        fc1_skip, gamma, eps = _fc1_fused_ln_params(layer)
+        if getattr(fc1_skip, "zero_centered_gamma", False):
+            gamma = gamma + 1
+        pre_mlp_layernorm_output, hidden_states, preq = _run_rmsnorm_residual(
+            attn_out, residual, gamma, eps
+        )
+        fc1_skip._skip_fused_norm = True
+        if preq is not None:
+            fc1_skip._prequant_x = preq
     nvtx_range_pop(suffix="fused_residual_pre_mlp_layernorm")
     # hidden_states now == attn_out + residual (= residual_post_attn).
 
     # ---- mlp -------------------------------------------------------------
     padding_mask = kwargs.get("padding_mask", None)
     try:
-        mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output, padding_mask=padding_mask)
-    except TypeError:
-        mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output)
+        try:
+            mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output, padding_mask=padding_mask)
+        except TypeError:
+            mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output)
+    finally:
+        if fc1_skip is not None:
+            fc1_skip._skip_fused_norm = False
+            fc1_skip._prequant_x = None
+        if qkv_skip is not None:
+            qkv_skip._skip_fused_norm = False
+            qkv_skip._prequant_x = None
 
     # ---- mlp_bda OR V2 carry stash ---------------------------------------
     if v2_active and _v2_next_can_consume_carry(layer):
