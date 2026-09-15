@@ -18,7 +18,8 @@
 # fit, so it is a stability limit and not a memory one.
 #
 # Measured best is micro_batch_size 8 (220.0 GB of 464), two clean runs, but
-# only with PRIMUS_GEMMA4_TURBO_LINEAR -- see the reference block at the end.
+# only under an out-of-tree GEMM routing patch that this repo does not carry --
+# see the reference block at the end.
 #
 # On the unpatched path this config ships, micro_batch_size 8 has wedged twice
 # out of two attempts, and one of those was minutes after two clean mbs 4 runs
@@ -64,11 +65,12 @@ modules:
       train_iters: ${PRIMUS_TRAIN_ITERS:20}
 
       # Do not raise this without re-measuring. 4 is clean twice on the config
-      # as it ships. 8 is clean twice *with* PRIMUS_GEMMA4_TURBO_LINEAR and 7%
-      # faster there, but on the unpatched path it has wedged the driver twice
+      # as it ships. On that same shipping path, 8 has wedged the driver twice
       # out of two attempts -- once on the same boot, minutes after two clean
       # mbs 4 runs, which is the one comparison here that controls for boot
-      # state. 16 has wedged twice on every path tried.
+      # state. 8 did run clean twice under an out-of-tree GEMM routing patch,
+      # which you cannot reach from this config. 16 has wedged twice on every
+      # path tried.
       global_batch_size: ${PRIMUS_GBS:4}
       micro_batch_size: ${PRIMUS_MBS:4}
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
@@ -128,15 +130,20 @@ modules:
       # reproduce exactly across repeats, which makes them the stricter test.
       # Absolute throughput for this part is deliberately not recorded here.
       #
-      # Routing the dense linears through Primus-Turbo FlyDSL at this same shape
-      # is worth 4.73x at identical peak memory, with the loss agreeing to four
-      # significant figures. That patch is not part of this repo, so these
-      # defaults do not reach it. The gap is GEMM layout, not the layer impl:
-      # hipBLASLt has tuned exactly one of the four bf16 contraction layouts on
-      # gfx1250, so the dgrad and wgrad layouts that carry two thirds of
-      # training FLOPs run roughly 15x slower than the tuned one. The effect
-      # grows with batch size -- 3.13x at mbs 1, 4.73x here -- as the step
-      # becomes more GEMM-bound.
+      # There is real headroom left on the dense linears, and it is GEMM layout
+      # rather than the layer impl: hipBLASLt has tuned exactly one of the four
+      # bf16 contraction layouts on gfx1250, so the dgrad and wgrad layouts
+      # that carry two thirds of training FLOPs run roughly 15x slower than the
+      # tuned one. Routing them to a Primus-Turbo FlyDSL kernel instead
+      # recovers a large multiple at identical peak memory, growing with batch
+      # size, with the loss agreeing to four significant figures.
+      #
+      # No ratio is quoted for it because that routing is not in this repo and
+      # our measurements of it predate a 119-commit rebase. PRIMUS_GEMMA4_TURBO_LINEAR
+      # is a silent no-op on this tree, not an error: the patch module is not
+      # registered, and mbs 4 with it set and unset measured within 2% of each
+      # other, which is this host's noise. The number will be published with
+      # the change that implements it.
       #
       # Exclude iteration 1 from any timing you do take: it is ~4.6x the
       # steady-state step because it includes Triton compilation.

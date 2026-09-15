@@ -167,10 +167,13 @@ in our runs. Both are inside Megatron-Bridge v0.6.1's `>=5.8,<=5.12.1` range.
 We checked the pin rather than assuming: on an image identical except for
 transformers downgraded to 5.10.1, the **31B reproduced both numbers exactly**
 (149.3 GB, loss 26.056). So the 31B fingerprint is version-independent across
-that range. The **26B is untested on 5.10.1** — the attempt lost the device to
-the wedge described below, after the model had built and entered the training
-loop, so nothing suggests 5.10.1 is at fault there; it simply has not been
-confirmed.
+that range. The **26B is unconfirmed on 5.10.1**, and not for lack of trying:
+both attempts lost the device to the wedge described below, on two different
+boots, each time after the model had built and entered the training loop. Two
+failures on one row is not proof that 5.10.1 is at fault — that row is also the
+heaviest config here at 301.6 GB, and this host wedges on roughly half of all
+attempts regardless of what is running — but it is the only row we could not
+land, so treat the 26B fingerprint as established on 5.12.1 only.
 
 **Absolute throughput for this part is deliberately not published here.** What
 this document is for is the ratios below, and unlike a tokens/s figure they
@@ -180,30 +183,46 @@ configuration measured 27% apart purely from an image version.
 | change | effect on step time | applies to |
 |---|---|---|
 | `HIPBLASLT_TENSILE_LIBPATH` pointed at the real directory | **2.93x** | both |
-| Primus-Turbo FlyDSL for the dense linears | **3.13x** at mbs 1, **4.73x** at mbs 4 | 31B only |
 | TransformerEngine instead of local layers | 1.69x | 26B only |
 | local layers instead of TransformerEngine | 1.27x, and 11 GB less | 31B only |
-| Primus-Turbo FlyDSL for the dense linears | 0.92x — an 8% *regression* | 26B only |
 | recompute off | 1.13x | 26B |
 | micro-batch 1 to 16 | 1.94x | 26B |
 
-Two of these need explaining. The FlyDSL figure is GEMM layout, not the layer
-impl: hipBLASLt has tuned exactly one of the four bf16 contraction layouts on
+Every row above is reproducible with what this PR ships, which is why the
+dense-GEMM routing described next has no row of its own.
+
+There is a known headroom item that is deliberately left unquantified here.
+hipBLASLt has tuned exactly one of the four bf16 contraction layouts on
 gfx1250, so the dgrad and wgrad layouts that carry two thirds of training FLOPs
-run roughly 15x slower than the tuned one. The effect grows with batch size as
-the step becomes more GEMM-bound. That routing is not yet in this repo, so the
-shipped configs do not get it. And it helps dense models *only* — on the 26B it
-is a regression, because a MoE model issues its expert FFNs through the grouped
-GEMM path, which never calls `torch.matmul`, so the wrapper pays dispatch cost
-on every matmul while seeing only the attention projections.
+run roughly 15x slower than the tuned one, and routing them to a Primus-Turbo
+FlyDSL kernel instead recovers a large multiple on the dense 31B. We are not
+printing that multiple, because **the routing is not in this PR** and a number
+you cannot reproduce from the tree in front of you is worse than no number: our
+measurements of it predate a 119-commit rebase, and the figure moves with batch
+size besides. It will be published alongside the change that implements it.
+
+If you went looking for it, note that `PRIMUS_GEMMA4_TURBO_LINEAR` does nothing
+on this tree — the patch module is not registered, so setting it is a silent
+no-op rather than an error. We verified that directly: mbs 4 with the variable
+set and unset came out within 2% of each other, which is this host's run-to-run
+noise.
+
+Two things about that routing are worth knowing before you invest in it. The
+effect grows with batch size, as the step becomes more GEMM-bound. And it helps
+dense models *only* — on the 26B it was a measurable regression, because a MoE
+model issues its expert FFNs through the grouped GEMM path, which never calls
+`torch.matmul`, so the wrapper pays dispatch cost on every matmul while seeing
+only the attention projections.
 
 Exclude the first iteration from any timing you do take: it is roughly 4.6x the
 steady-state step on the 31B, because it includes Triton compilation.
 
-**Do not raise the 31B micro-batch without re-measuring.** mbs 8 is clean twice
-*with* FlyDSL, but on the unpatched path it has wedged twice out of two attempts
-— once minutes after two clean mbs 4 runs on the same boot, which is the only
-comparison in this document where boot state is held fixed.
+**Do not raise the 31B micro-batch without re-measuring.** On the path this PR
+ships, mbs 8 has wedged the device twice out of two attempts — once minutes
+after two clean mbs 4 runs on the same boot, which is the only comparison in
+this document where boot state is held fixed. It did run clean twice under the
+out-of-tree GEMM routing described above, which is suggestive but not something
+you can act on from here.
 
 On the 26B, TransformerEngine is the fast path and is the default here, worth
 1.69x over the local layers. On the 31B, `local` is 27% faster than TE and uses
