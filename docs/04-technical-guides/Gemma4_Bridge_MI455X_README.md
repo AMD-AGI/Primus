@@ -144,10 +144,24 @@ sequence length 2048. Check your run against these two columns rather than
 against a step time: both are deterministic here, reproducing to 0.01 GB and to
 three decimals across repeats, which makes them a stricter check than timing.
 
-| config | mbs | layer impl | dense GEMM | peak VRAM | loss at iteration 8 |
-|---|---|---|---|---|---|
-| 26B MoE proxy | 16 | TransformerEngine | hipBLASLt | 301.6 GB | 15.049 |
-| 31B dense proxy | 4 | local | hipBLASLt | 149.3 GB | 26.056 |
+| config | mbs | layer impl | dense GEMM | peak VRAM | loss at iteration 8 | measured on |
+|---|---|---|---|---|---|---|
+| 26B MoE proxy | 16 | TransformerEngine | hipBLASLt | 301.6 GB | 15.049 | an earlier revision of this branch |
+| 31B dense proxy | 4 | local | hipBLASLt | 149.3 GB | 26.056 | this revision |
+
+The last column is not decoration. The 31B row was measured on the tree as it
+stands. The 26B row predates a rebase onto a much newer `main` and has not been
+re-measured since, so treat it as indicative rather than as a guarantee: the
+configuration itself did not change, but the code underneath it did. If you run
+the 26B and land somewhere else, trust your own number over this table and
+please report it.
+
+Both rows were measured with **transformers 5.12.1**, which is what the
+container image we used ships. Note that the pretrain hook's
+`requirements-megatron_bridge.txt` pins **5.10.1**. Both are inside
+Megatron-Bridge v0.6.1's `>=5.8,<=5.12.1` range, but `primus-cli direct`
+bypasses the hook that installs the pin, so if you go through the normal runner
+path you are on 5.10.1 and these numbers were not taken there.
 
 **Absolute throughput for this part is deliberately not published here.** What
 this document is for is the ratios below, and unlike a tokens/s figure they
