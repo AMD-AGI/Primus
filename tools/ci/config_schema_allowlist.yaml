@@ -37,6 +37,12 @@ common:
   - key: platform
     reason: Selects the platform preset and its overrides.
     consumer: primus/core/launcher/parser.py
+  - key: env
+    reason: >-
+      Primus experiment envelope applied to os.environ before backend
+      initialization; it is consumed by the runtime, not forwarded as a
+      backend argument.
+    consumer: primus/core/runtime/train_runtime.py
   - key: extends
     reason: Preset composition directive, consumed and stripped while loading.
     consumer: primus/core/config/yaml_loader.py
@@ -77,3 +83,16 @@ megatron:
     reason: >-
       Top-level section of a TE-precision quantization recipe (see `configs`).
     consumer: third_party/Megatron-LM/megatron/core/quantization/quant_config.py
+  - key: hf_path
+    reason: >-
+      Names the HuggingFace model the post-training hook converts to a Megatron
+      checkpoint before the job starts. Read straight out of the yaml by a
+      runner hook, so no `args` access exists for the checker to find.
+    consumer: runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py
+  - key: mamba_expand
+    reason: >-
+      Mamba block expansion factor. It does not build the model -- the layer
+      specs hardcode `expand` -- but Megatron writes it into the checkpoint
+      args, where the hybrid converter reads it back to size the FLA model.
+      That converter lives in tools/, not in a scanned backend package.
+    consumer: tools/hybrid/convert_mamba_hybrid_to_fla_hf.py

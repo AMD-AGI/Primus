@@ -130,7 +130,6 @@ modules:
       moe_deepep_num_sms: 20
       moe_enable_deepep: false
       moe_expert_capacity_factor: null
-      moe_extended_tp: false
       moe_ffn_hidden_size: 2880
       moe_flex_dispatcher_backend: deepep
       moe_grouped_gemm: true
@@ -186,11 +185,16 @@ modules:
       use_turbo_grouped_gemm: true
       use_turbo_rms_norm: ${USE_TURBO_RMS_NORM:true}
       use_turbo_fused_act_with_probs : true
-      # Pad tokens-per-expert so the fp8 grouped GEMM path skips the buggy
-      # quantization_padding branch in PrimusGroupedMLP.forward (experts.py:97-109),
-      # which yields NaN with recompute. Not auto-enabled here because
-      # turbo_sync_free_moe_stage=0 (it is only auto-set for sync-free stages 1-3).
-      use_turbo_permute_padding: true
+      # A `use_turbo_permute_padding: true` used to sit here. It asked the fp8
+      # grouped GEMM to skip PrimusGroupedMLP's own quantization_padding, which
+      # was writing the padded token counts to a variable it then overwrote and
+      # so produced NaN with recompute. Both the flag and the bug are gone: #828
+      # (cfaba778, 2026-06-30) fixed the padding and moved the switch to
+      # `moe_router_padding_for_quantization`, six days before this config was
+      # first committed (cf81c17a) out of a pre-fix mlperf tree. So `false`
+      # above already gives this run what it asked for -- correct padding, no
+      # NaN -- and turning it on would instead enable upstream's router-level
+      # padding, which nobody asked for.
 
       # deepep
       use_turbo_deepep: false
@@ -214,8 +218,6 @@ modules:
       tensorboard_log_interval: 1
       tensorboard_queue_size: 1000
       log_timers_to_tensorboard: true
-      log_batch_size_to_tensorboard: true
-      log_learning_rate_to_tensorboard: true
       log_validation_ppl_to_tensorboard: true
       log_memory_to_tensorboard: true
       log_world_size_to_tensorboard: true

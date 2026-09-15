@@ -187,9 +187,6 @@ modules:
       turbo_gemm_backend: ${PRIMUS_TURBO_GEMM_BACKEND:fp8:flydsl,fp4:flydsl,other:hipblaslt}
       use_turbo_grouped_gemm: true
       turbo_grouped_gemm_backend: ${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:flydsl}
-      # Placeholder for the fused grouped MLP (fc1+GLU+fc2+WGRAD). The Primus
-      # wiring is not merged yet, so this reads as a plain no-op today.
-      turbo_fused_grouped_gemm: ${PRIMUS_TURBO_FUSED_GROUPED_GEMM:false}
       turbo_grouped_gemm_without_padding: ${TURBO_GROUPED_GEMM_WITHOUT_PADDING:true}
       use_turbo_rms_norm: ${USE_TURBO_RMS_NORM:true}
       # Only read when use_turbo_gemm is off: it splits the fused layernorm+QKV
@@ -197,6 +194,17 @@ modules:
       # takes the whole fused module to Turbo instead.
       use_turbo_norm_te_linear: ${USE_TURBO_NORM_TE_LINEAR:true}
       use_turbo_fused_act_with_probs : true
+      # A `use_turbo_permute_padding: true` used to sit here. It asked the fp8
+      # grouped GEMM to skip PrimusGroupedMLP's own quantization_padding, which
+      # was writing the padded token counts to a variable it then overwrote and
+      # so produced NaN with recompute. Both the flag and the bug are gone: #828
+      # (cfaba778, 2026-06-30) fixed the padding and moved the switch to
+      # `moe_router_padding_for_quantization`, six days before this config was
+      # first committed (cf81c17a) out of a pre-fix mlperf tree. So `false`
+      # above already gives this run what it asked for -- correct padding, no
+      # NaN -- and turning it on would instead enable upstream's router-level
+      # padding, which nobody asked for. #923 later reworked this file's MoE
+      # path and dropped the dead flag on its own; the reasoning still holds.
 
       # deepep
       use_turbo_deepep: false

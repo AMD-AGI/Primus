@@ -1,5 +1,20 @@
-bases:
-  - language_model.yaml
+# `bases:` is not a directive the config loader understands -- only `extends`
+# is (primus/core/config/yaml_loader.py). This preset used to declare
+# `bases: [language_model.yaml]`, so language_model.yaml has never been merged in: the
+# file has always stood alone on top of the Megatron defaults, and that is
+# what every published number for it was measured with.
+#
+# Adopting the base is left for a separate change because it is not a
+# no-op. Measured against the Megatron defaults this file currently gets,
+# `extends: [language_model.yaml]` would add 98 keys and move 4 live
+# settings:
+#
+#   * sequence_parallel: false -> true
+#   * add_position_embedding: true -> false
+#   * use_rotary_position_embeddings: false -> null
+#   * mscale_all_dim: 0.0 -> 1.0
+#
+# The position-embedding switches alone change what the model is.
 
 # MiniMax-M2.5 Model (GQA + MoE)
 # 229B total params, ~10B active params
@@ -63,6 +78,4 @@ masked_softmax_fusion: false
 disable_primus_topk_router: false
 moe_router_force_load_balancing: false
 use_deprecated_20241209_moe_layer: false
-final_logit_softcapping: null
-attn_logit_softcapping: null
 router_logit_softcapping: null
