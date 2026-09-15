@@ -1645,6 +1645,92 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         return out, None
 
 
+class PrimusTurboBF16OutputColumnParallelLinear(PrimusTurboColumnParallelLinear):
+    """GPT output projection that always uses the dense BF16 Turbo GEMM.
+
+    The ordinary :class:`PrimusTurboColumnParallelLinear` follows the active
+    FP8/FP4 autocast state.  GPT-OSS deliberately keeps its shared embedding /
+    LM-head projection in BF16 even while the transformer projections use
+    MXFP4, so the output layer needs a narrow wrapper that bypasses the
+    low-precision autocast branch and calls ``ops.gemm`` directly.
+
+    ``GPTModel`` passes the two deferred-embedding-wgrad buffers accepted by
+    Megatron's native ``ColumnParallelLinear``.  This MLPerf configuration does
+    not defer that GEMM, but accepting the arguments keeps this class a drop-in
+    constructor replacement and fails loudly if deferral is enabled later.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        config: ModelParallelConfig,
+        init_method: Callable,
+        gather_output: bool,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool = False,
+        skip_weight_param_allocation: bool = False,
+        tp_comm_buffer_name: Optional[str] = None,
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        stride: int = 1,
+        embedding_activation_buffer=None,
+        grad_output_buffer=None,
+    ):
+        if embedding_activation_buffer is not None or grad_output_buffer is not None:
+            raise NotImplementedError(
+                "PrimusTurboBF16OutputColumnParallelLinear does not support "
+                "deferred embedding weight-gradient computation"
+            )
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            config=config,
+            init_method=init_method,
+            gather_output=gather_output,
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            skip_weight_param_allocation=skip_weight_param_allocation,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            tp_group=tp_group,
+            stride=stride,
+        )
+
+    def forward_internal(
+        self,
+        x: torch.Tensor,
+        is_first_microbatch: bool = False,
+    ):
+        del is_first_microbatch
+        weight = self._parameters["weight"]
+        if self.use_bias:
+            bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
+
+        original_shape = x.size()
+        if not x.is_contiguous():
+            x = x.contiguous()
+        x = x.view(-1, original_shape[-1])
+
+        # Intentionally ignore the surrounding MXFP4 autocast state.  The
+        # shared embedding / LM-head projection remains BF16 by recipe.
+        out = primus_turbo_torch.ops.gemm(
+            x,
+            weight,
+            trans_a=False,
+            trans_b=True,
+            out_dtype=x.dtype,
+            fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
+        )
+        out = out.view(original_shape[0], original_shape[1], -1)
+
+        if self.use_bias:
+            out = out + bias_tensor
+
+        return out, None
+
+
 class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
     """
     Wrapper for the Transformer-Engine's `LayerNormLinear` layer that combines
