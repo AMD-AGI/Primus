@@ -219,3 +219,79 @@ def test_coerce_accepts_an_enum_already():
     )
 
     assert _coerce_to_field(_Backend.flash, _Backend.local, "model.attention_backend") is _Backend.local
+
+
+# --- an override that does not land must stop the run ---------------------------
+#
+# Skipping used to be a log line at INFO and nothing else, so a mistyped field
+# name was discarded, the run succeeded, and it reported a clean number for a
+# configuration nobody asked for -- indistinguishable from a real result. These
+# pin the loud behaviour, and the escape hatch for deliberately shared override
+# strings.
+
+
+def _container_with(**fields):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(model=SimpleNamespace(**fields))
+
+
+def test_apply_raises_when_field_does_not_exist(logged):
+    from primus.backends.megatron_bridge.patches.gemma4 import (
+        gemma4_config_overrides as mod,
+    )
+
+    container = _container_with(num_layers=6)
+
+    with pytest.raises(ValueError, match="could not be applied"):
+        mod._apply(container, [("model.no_such_field", 1)])
+
+
+def test_apply_raises_when_section_does_not_exist(logged):
+    from primus.backends.megatron_bridge.patches.gemma4 import (
+        gemma4_config_overrides as mod,
+    )
+
+    container = _container_with(num_layers=6)
+
+    with pytest.raises(ValueError, match="no such config section"):
+        mod._apply(container, [("nosuchsection.field", 1)])
+
+
+def test_apply_names_every_offending_path(logged):
+    from primus.backends.megatron_bridge.patches.gemma4 import (
+        gemma4_config_overrides as mod,
+    )
+
+    container = _container_with(num_layers=6)
+
+    with pytest.raises(ValueError) as excinfo:
+        mod._apply(container, [("model.typo_one", 1), ("model.typo_two", 2)])
+
+    message = str(excinfo.value)
+    assert "model.typo_one" in message and "model.typo_two" in message
+
+
+def test_valid_overrides_still_apply_and_do_not_raise(logged):
+    from primus.backends.megatron_bridge.patches.gemma4 import (
+        gemma4_config_overrides as mod,
+    )
+
+    container = _container_with(num_layers=6)
+    mod._apply(container, [("model.num_layers", 24)])
+
+    assert container.model.num_layers == 24
+
+
+def test_lenient_env_downgrades_to_a_warning(monkeypatch, logged):
+    from primus.backends.megatron_bridge.patches.gemma4 import (
+        gemma4_config_overrides as mod,
+    )
+
+    monkeypatch.setenv("PRIMUS_GEMMA4_SET_LENIENT", "1")
+    container = _container_with(num_layers=6)
+
+    mod._apply(container, [("model.no_such_field", 1), ("model.num_layers", 12)])
+
+    assert container.model.num_layers == 12
+    assert any("LENIENT" in m for m in logged)

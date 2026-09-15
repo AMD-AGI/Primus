@@ -105,6 +105,8 @@ def _coerce_to_field(before: Any, value: Any, path: str) -> Any:
 
 
 def _apply(container: Any, entries: List[Tuple[str, Any]]) -> None:
+    unapplied: List[str] = []
+
     for path, value in entries:
         parts = path.split(".")
         target = container
@@ -115,14 +117,42 @@ def _apply(container: Any, entries: List[Tuple[str, Any]]) -> None:
         leaf = parts[-1]
         if target is None:
             log_rank_0(f"[Patch:gemma4.config.overrides] Skipped {path}: no such config section")
+            unapplied.append(f"{path} (no such config section)")
             continue
         if not hasattr(target, leaf):
             log_rank_0(f"[Patch:gemma4.config.overrides] Skipped {path}: field does not exist")
+            unapplied.append(f"{path} (field does not exist)")
             continue
         before = getattr(target, leaf)
         value = _coerce_to_field(before, value, path)
         setattr(target, leaf, value)
         log_rank_0(f"[Patch:gemma4.config.overrides] {path}: {before!r} -> {value!r}")
+
+    # Fail rather than continue on a key that did not land.
+    #
+    # Skipping used to be a log line at INFO and nothing more, which is the worst
+    # available outcome: a mistyped field name is discarded, the run succeeds, and
+    # it reports a clean number for a configuration nobody asked for. That is
+    # indistinguishable from a real result unless someone reads the right log
+    # line. An experiment is worthless if the knob under test may silently not
+    # have been set, so this refuses to start instead.
+    #
+    # Set PRIMUS_GEMMA4_SET_LENIENT=1 to downgrade it back to a warning -- useful
+    # when sharing one override string across configs whose field sets differ.
+    if unapplied:
+        detail = ", ".join(unapplied)
+        if os.environ.get(f"{_ENV}_LENIENT") == "1":
+            log_rank_0(
+                f"[Patch:gemma4.config.overrides] WARNING: {len(unapplied)} override(s) did not "
+                f"apply and {_ENV}_LENIENT=1 is set, continuing anyway: {detail}"
+            )
+        else:
+            raise ValueError(
+                f"{_ENV} requested {len(unapplied)} override(s) that could not be applied: "
+                f"{detail}. These were silently ignored, so the run would not be the "
+                f"configuration you asked for. Fix the path, or set {_ENV}_LENIENT=1 to "
+                f"continue regardless."
+            )
 
 
 @register_patch(
