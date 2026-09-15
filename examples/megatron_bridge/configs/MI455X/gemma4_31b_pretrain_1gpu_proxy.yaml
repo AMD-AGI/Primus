@@ -1,18 +1,26 @@
 # Gemma 4 31B (Dense) pre-training -- SINGLE-GPU MI455X throughput proxy.
 #
-# Why a proxy: the full 60-layer model needs far more memory for bf16 params +
-# fp32 master + Adam moments on a single rank than one card provides -- it does
-# not fit. num_layers is reduced; all other architectural dimensions are left as
-# published so per-layer cost stays representative.
+# Why a proxy: the full 60-layer model needs ~533 GB for bf16 params + fp32
+# master + Adam moments on a single rank, against 464 GB available -- it does
+# not fit. num_layers is reduced; all other architectural dimensions are left
+# as published so per-layer cost stays representative.
 #
 # 6 layers preserves the published 5 sliding : 1 full attention ratio.
 #
-# Unlike the 26B MoE, this model has no measured depth curve. Every attempt to
-# grow it past the box below has wedged the driver
-# ("MES(N, 0) failed to respond to msg=REMOVE_QUEUE", host reboot required):
-# micro_batch_size 8, micro_batch_size 16, num_layers 12, and both attempts
-# under TE. Treat num_layers 6 / micro_batch_size 4 as a stability ceiling, not
-# a memory one -- peak memory here is well under what the card has.
+# On the micro-batch and depth ceilings, and why they are lower than they look.
+# This device wedges intermittently ("MES(N, 0) failed to respond to
+# msg=REMOVE_QUEUE", host reboot required) on configurations that also succeed,
+# so a single wedge is evidence about the boot rather than about the config.
+# Re-probing on a healthy boot has now overturned four ceilings that each rested
+# on one wedge: micro_batch_size 8, num_layers 12 and 18, and TransformerEngine
+# on this model all run clean when retried. Only micro_batch_size 16 has failed
+# twice, both with hipErrorLaunchFailure at a projected ~360 GB that would have
+# fit, so it is a stability limit and not a memory one.
+#
+# Measured best is micro_batch_size 8 (220.0 GB of 464), two clean runs, but
+# only with PRIMUS_GEMMA4_TURBO_LINEAR -- see the reference block at the end.
+# The default below stays at 4 because this config ships without that patch and
+# no clean run exists for 8 on the unpatched path.
 #
 # REQUIRED ENVIRONMENT on gfx1250:
 #
@@ -20,7 +28,7 @@
 #     do when launching through the runner. hipBLASLt ships its gfx1250 Tensile
 #     files one directory below where it looks for them, so every solution
 #     lookup fails and it returns HIPBLAS_STATUS_INVALID_VALUE for all shapes.
-#     Export it by hand only if you bypass the runner.
+#     Worth 2.93x end-to-end. Export it by hand only if you bypass the runner.
 #
 #   PRIMUS_GEMMA4_TORCH_OPTIM=1
 #     Only needed if you switch this config to TE layers. TE's FusedAdam does
@@ -28,7 +36,7 @@
 #
 # Launch:
 #   export GEMMA4_CONVERSION_MODE=text
-#   GPUS_PER_NODE=1 ./runner/primus-cli direct -- train pretrain \
+#   GPUS_PER_NODE=1 ./primus-cli direct -- train pretrain \
 #     --config examples/megatron_bridge/configs/MI455X/gemma4_31b_pretrain_1gpu_proxy.yaml
 
 work_group: ${PRIMUS_TEAM:amd}
@@ -41,7 +49,7 @@ modules:
     framework: megatron_bridge
     config: pretrain_trainer.yaml
 
-    model: gemma4_31b.yaml
+    model: gemma4_31b_6layer_proxy.yaml
 
     overrides:
       stderr_sink_level: DEBUG
@@ -51,8 +59,9 @@ modules:
 
       train_iters: ${PRIMUS_TRAIN_ITERS:20}
 
-      # 4 is the largest micro-batch that has ever completed on this model;
-      # 8 and 16 both wedged the driver well below the memory limit.
+      # 4 and 8 are both clean (two runs each) with PRIMUS_GEMMA4_TURBO_LINEAR;
+      # 8 is 7% faster. 16 has wedged twice and is the real ceiling. Left at 4
+      # because 8 has no clean run on this config's unpatched GEMM path.
       global_batch_size: ${PRIMUS_GBS:4}
       micro_batch_size: ${PRIMUS_MBS:4}
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
@@ -83,7 +92,7 @@ modules:
       test_data_path: null
 
       model:
-        num_layers: ${PRIMUS_NUM_LAYERS:6}
+        # Depth comes from the gemma4_31b_6layer_proxy preset above.
 
         # Match upstream's E4B dense recipe, which the Primus recipe omits.
         # Note that transformer_impl is only honoured because of the
@@ -102,11 +111,23 @@ modules:
         # Memory is not the constraint on this model, so recompute is pure cost.
         recompute_granularity: none
 
-      # Routing the dense linears through primus_turbo's FlyDSL backend is a
-      # large additional win on this model. That patch is not part of this
-      # change -- hipBLASLt has only tuned one of the four contraction layouts on
-      # gfx1250, so the dgrad and wgrad layouts run far below the tuned one.
+      # Reference points, all with HIPBLASLT_TENSILE_LIBPATH set and two clean
+      # runs each. Note that none of them is this config's exact defaults, so
+      # treat them as bracketing rather than as an expected value.
+      #
+      #   6 layers, mbs 1, recompute full, no FlyDSL: (withheld),
+      #    (withheld), 85.5 GB  -- the unpatched path this config uses
+      #   6 layers, mbs 1, recompute full, FlyDSL:    (withheld),
+      #     85.5 GB  -- 3.13x, from PRIMUS_GEMMA4_TURBO_LINEAR alone
+      #   6 layers, mbs 8, recompute none, FlyDSL:   (withheld),
+      #    (withheld), 220.0 GB  -- best 31B result recorded
+      #
+      # The 3.13x is FlyDSL, not the layer impl: hipBLASLt has tuned exactly one
+      # of the four bf16 contraction layouts on gfx1250, so the dgrad and wgrad
+      # layouts that carry two thirds of training FLOPs run at (withheld)
+      # against (withheld) for the tuned one. That patch is not part of this
+      # change, so the defaults here do not reach the numbers above.
       #
       # Do not quote the harness TFLOP/s number for a layer-reduced proxy: it
       # derives FLOPs from the *configured* 60-layer model while only 6 are
-      # built, so it reads far too high. so it should be ignored.
+      # built, which reads 5.27x high here, so it should be ignored.

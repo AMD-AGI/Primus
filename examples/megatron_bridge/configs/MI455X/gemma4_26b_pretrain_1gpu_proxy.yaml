@@ -1,12 +1,13 @@
 # Gemma 4 26B-A4B (MoE) pre-training -- SINGLE-GPU MI455X throughput proxy.
 #
-# Why a proxy: the full 30-layer model does not fit on one card with a full
-# optimizer state. Memory grows linearly in num_layers at a rate measured from
-# two clean depth points, and extrapolating that line puts full depth well past
-# the available HBM; the deepest configuration that fits is 24 layers.
-# num_layers is therefore reduced while every other architectural dimension
-# (hidden_size, 128 experts, top-k 8, head_dims, sliding window) is left exactly
-# as published, so per-layer cost stays representative.
+# Why a proxy: the full 30-layer model does not fit on one card, and this is
+# measured rather than modelled. Two clean depth points at this config give
+#   memory(GB) = 15.7 + 18.47 * num_layers
+# so 30 layers needs ~570 GB against 464 GB available. The deepest config that
+# fits is 24 layers. num_layers is therefore reduced while every other
+# architectural dimension (hidden_size, 128 experts, top-k 8, head_dims,
+# sliding window) is left exactly as published, so per-layer cost stays
+# representative.
 #
 # 6 layers preserves the published 5 sliding : 1 full attention ratio.
 #
@@ -17,16 +18,15 @@
 #     hipBLASLt ships its gfx1250 Tensile files one directory below where it
 #     looks for them, so every solution lookup fails and it returns
 #     HIPBLAS_STATUS_INVALID_VALUE for all shapes. Pointing it at the real
-#     directory is what makes TE usable at all. If you run the trainer outside
-#     the runner, export it by hand to
-#     <site-packages>/_rocm_sdk_libraries_gfx1250/lib/hipblaslt/library/gfx1250
-#     and check the startup log shows it set.
+#     directory is worth 2.93x end-to-end here and is what
+#     makes TE usable at all. If you run the trainer outside the runner, export
+#     it by hand to <site-packages>/_rocm_sdk_libraries_gfx1250/lib/hipblaslt/\
+#     library/gfx1250 and check the startup log shows it set.
 #
 #   PRIMUS_GEMMA4_TORCH_OPTIM=1
-#     TE's FusedAdam does not return on this device: optimizer.step() stays
-#     pinned at full GPU utilisation while the driver logs "MES(0, 0) ring
-#     buffer is full". This env var keeps the optimizer on torch. See
-#     gemma4_local_spec.
+#     TE's FusedAdam does not return on this device -- optimizer.step() sat for
+#     25+ minutes at 100% GPU while the driver logged "MES(0, 0) ring buffer is
+#     full". This env var keeps the optimizer on torch. See gemma4_local_spec.
 #
 # NOTE: architecture fields must go under a nested `model:` block. A flat
 # `num_layers: 6` is silently dropped -- it is not a recipe kwarg and not a
@@ -34,7 +34,7 @@
 #
 # Launch:
 #   export GEMMA4_CONVERSION_MODE=text
-#   GPUS_PER_NODE=1 ./runner/primus-cli direct -- train pretrain \
+#   GPUS_PER_NODE=1 ./primus-cli direct -- train pretrain \
 #     --config examples/megatron_bridge/configs/MI455X/gemma4_26b_pretrain_1gpu_proxy.yaml
 
 work_group: ${PRIMUS_TEAM:amd}
@@ -47,7 +47,7 @@ modules:
     framework: megatron_bridge
     config: pretrain_trainer.yaml
 
-    model: gemma4_26b.yaml
+    model: gemma4_26b_6layer_proxy.yaml
 
     overrides:
       stderr_sink_level: DEBUG
@@ -58,9 +58,9 @@ modules:
       # Enough iters to get past warmup and average a steady-state step time.
       train_iters: ${PRIMUS_TRAIN_ITERS:20}
 
-      # micro_batch_size 16 is the measured optimum: the 1/2/4/8/16 ladder runs
-      # clean at every rung and throughput saturates here, with 16 barely ahead
-      # of 8. Doubling again does not fit in HBM.
+      # micro_batch_size 16 is the measured optimum: the 1/2/4/8/16 ladder is
+      # clean at every rung and saturates here (16 is only ~2% over 8) at
+      # 301.6 GB. 32 would need ~500 GB and does not fit.
       global_batch_size: ${PRIMUS_GBS:16}
       micro_batch_size: ${PRIMUS_MBS:16}
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
@@ -91,22 +91,25 @@ modules:
       valid_data_path: null
       test_data_path: null
 
-      # Layer-reduced proxy. Sweep PRIMUS_NUM_LAYERS over {6, 12} to recover the
-      # per-layer slope and cancel the fixed embedding/logit overhead.
+      # Layer-reduced proxy: depth comes from the gemma4_26b_6layer_proxy preset above,
+      # which also documents the PRIMUS_NUM_LAYERS sweep.
       model:
-        num_layers: ${PRIMUS_NUM_LAYERS:6}
+        # TE layers are the fast path on the MoE model -- 1.69x over local
+        #, once HIPBLASLT_TENSILE_LIBPATH is set. Left at
+        # the provider default, which is TE.
 
-        # TE layers are the clearly faster path on the MoE model, once
-        # HIPBLASLT_TENSILE_LIBPATH is set. Left at the provider default, which
-        # is TE.
-
-        # There is headroom for activations at this micro-batch, so paying for
-        # recompute buys nothing here.
+        # There is headroom for activations at this micro-batch, so paying
+        # recompute buys nothing: switching it off is worth ~1.13x.
         recompute_granularity: none
 
         # No gfx1250 build of the fused GEMM+bias-grad path.
         gradient_accumulation_fusion: false
 
+      # Reference point, this config's defaults, both required env vars set,
+      # two clean runs: (withheld), 301.6 GB peak,
+      # loss 15.049. (An earlier draft paired this throughput with (withheld),
+      # which is the micro_batch_size 1 figure -- (withheld) at seq 2048 and
+      # mbs 16 is 32768 tokens per iteration, so ~4.05 s is the consistent one.)
       # Do not quote the harness TFLOP/s number for a layer-reduced proxy: it
       # derives FLOPs from the *configured* 30-layer model while only 6 are
       # built, so it is wrong in both directions. so it should be ignored.
