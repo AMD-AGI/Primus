@@ -99,19 +99,40 @@ or its 262,144-training-sample cadence. MLPerf graph warmup uses synthetic
 fixed-shape tensors, so no training or evaluation sample is read before
 `RUN_START`.
 
-For cached max-autotune runs, first run `prewarm_inductor_cache.py`, then export
-one exact cache archive per launcher node with
-`TORCHINDUCTOR_CACHE_EXPORT=/output/cache-node%r.tar.zst`. Reuse those archives
-with `TORCHINDUCTOR_CACHE_SEED=/output/cache-node%r.tar.zst`; `%r` resolves to
-`NODE_RANK`. Rebuild them whenever the image, compiler stack, model graph, batch
-shapes, or compile options change.
+## Cached max-autotune
 
-The same launcher supports Crusoe and DCCS; only the Slurm submission options
-and host network settings differ. On DCCS, use
-`NCCL_SOCKET_IFNAME=fenic GLOO_SOCKET_IFNAME=fenic`. The launcher uses the
-host's generic `/usr/lib/x86_64-linux-gnu/libionic.so` symlink by default; set
-`LIBIONIC_ABI4_PATH` only when libionic is installed elsewhere, or set
-`NCCL_IB_DISABLE=1` when the selected nodes do not have AINIC routes.
+Generate one node-local cache per allocation node before training. The setup
+supports 1-node, 2-node, and 4-node allocations:
+
+```bash
+ALLOCATION_JOB_ID=<job-id> DATA_ROOT=/path/to/data \
+OUTPUT_ROOT=/shared/path/to/output \
+bash examples/mlperf/flux1/setup_max_autotune_cache.sh
+```
+
+Then reuse the same `OUTPUT_ROOT` for training:
+
+```bash
+FLUX_CONFIG=config_4n_gbs1024.sh \
+TORCHINDUCTOR_CACHE_SEED=/output/cache-node%r.tar.zst \
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/shared/path/to/output \
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
+```
+
+The launcher mounts host `OUTPUT_ROOT` at `/output` in the container, so
+`/output/cache-node%r.tar.zst` maps to `$OUTPUT_ROOT/cache-node%r.tar.zst`;
+`%r` is the node rank. Rebuild caches after changing the image, compiler, model
+graph, batch shapes, or compile options.
+
+The launcher supports both Crusoe and DCCS. The following overrides are for
+DCCS AINIC nodes only; do not copy them to Crusoe:
+
+```bash
+NCCL_SOCKET_IFNAME=fenic GLOO_SOCKET_IFNAME=fenic NCCL_IB_GID_INDEX=1
+```
+
+On DCCS, `LIBIONIC_ABI4_PATH` is only needed when libionic is not installed at
+its default path. On Crusoe, use the cluster-provided network defaults.
 
 ## Files
 
@@ -129,5 +150,6 @@ examples/mlperf/flux1/
 ├── luanch-multi-nodes.md
 ├── requirements.txt
 ├── run_with_docker.sh
-└── run_with_docker_slurm.sh
+├── run_with_docker_slurm.sh
+└── setup_max_autotune_cache.sh
 ```
