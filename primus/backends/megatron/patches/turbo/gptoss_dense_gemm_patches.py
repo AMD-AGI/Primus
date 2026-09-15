@@ -55,10 +55,22 @@ def patch_gptoss_dense_gemm(ctx: PatchContext) -> None:
     )
 
     # GPTModel bypasses the backend spec provider for its output projection.
-    # Replace the module-local constructor before the model is instantiated.
-    gpt_model.tensor_parallel.ColumnParallelLinear = (
-        PrimusTurboBF16OutputColumnParallelLinear
-    )
+    # Swap the constructor only while GPTModel.__init__ runs; assigning it
+    # permanently on the shared tensor_parallel module would affect unrelated
+    # native ColumnParallelLinear users in the same process.
+    original_gpt_init = gpt_model.GPTModel.__init__
+
+    def _gpt_init_with_turbo_output(self, *args, **kwargs):
+        original_column_parallel = gpt_model.tensor_parallel.ColumnParallelLinear
+        gpt_model.tensor_parallel.ColumnParallelLinear = (
+            PrimusTurboBF16OutputColumnParallelLinear
+        )
+        try:
+            return original_gpt_init(self, *args, **kwargs)
+        finally:
+            gpt_model.tensor_parallel.ColumnParallelLinear = original_column_parallel
+
+    gpt_model.GPTModel.__init__ = _gpt_init_with_turbo_output
 
     class _PrimusTurboRouterGatingLinearFunction(torch.autograd.Function):
         """Router GEMMs with BF16 MFMA inputs and FP32 accumulation/output."""
