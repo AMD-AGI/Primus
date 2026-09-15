@@ -106,12 +106,16 @@ modules:
         gradient_accumulation_fusion: false
 
       # Reference fingerprint, this config's defaults, both required env vars
-      # set, two clean runs with 0 nan and 0 skipped iterations:
+      # set, 0 nan and 0 skipped iterations:
       #
-      #   301.6 GB peak, loss 15.049
+      #   301.6 GB peak, loss 15.048 at iteration 8
       #
-      # Check a run against those rather than against a step time: both
-      # reproduce exactly across repeats, which makes them the stricter test.
+      # Check a run against those rather than against a step time, which moves
+      # with the container image. Peak memory is the reliable half: it has held
+      # to 0.01 GB across repeats and across a rebase onto a much newer main.
+      # The loss is good to about three decimals -- it read 15.049 before that
+      # rebase with this configuration untouched -- so a third-decimal
+      # difference means the code moved, not that your run is broken.
       # Absolute throughput for this part is deliberately not recorded here.
       # For what the levers are worth as ratios, see
       # docs/04-technical-guides/Gemma4_Bridge_MI455X_README.md.

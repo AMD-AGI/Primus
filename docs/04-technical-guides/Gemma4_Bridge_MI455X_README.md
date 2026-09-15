@@ -139,29 +139,38 @@ Useful overrides: `PRIMUS_MBS`, `PRIMUS_GBS`, `PRIMUS_NUM_LAYERS`,
   reached. This is the validity bar for any quotable number
 - loss descending smoothly and reproducibly
 
-Reference fingerprint for the shipped configs, two clean runs each, 6 layers at
-sequence length 2048. Check your run against these two columns rather than
-against a step time: both are deterministic here, reproducing to 0.01 GB and to
-three decimals across repeats, which makes them a stricter check than timing.
+Reference fingerprint for the shipped configs, 6 layers at sequence length 2048,
+both measured on this revision. Check your run against these two columns rather
+than against a step time, which varies with the container image.
 
-| config | mbs | layer impl | dense GEMM | peak VRAM | loss at iteration 8 | measured on |
-|---|---|---|---|---|---|---|
-| 26B MoE proxy | 16 | TransformerEngine | hipBLASLt | 301.6 GB | 15.049 | an earlier revision of this branch |
-| 31B dense proxy | 4 | local | hipBLASLt | 149.3 GB | 26.056 | this revision |
+| config | mbs | layer impl | dense GEMM | peak VRAM | loss at iteration 8 |
+|---|---|---|---|---|---|
+| 26B MoE proxy | 16 | TransformerEngine | hipBLASLt | 301.6 GB | 15.048 |
+| 31B dense proxy | 4 | local | hipBLASLt | 149.3 GB | 26.056 |
 
-The last column is not decoration. The 31B row was measured on the tree as it
-stands. The 26B row predates a rebase onto a much newer `main` and has not been
-re-measured since, so treat it as indicative rather than as a guarantee: the
-configuration itself did not change, but the code underneath it did. If you run
-the 26B and land somewhere else, trust your own number over this table and
-please report it.
+**Peak memory is the reliable half of this fingerprint; treat the loss as good
+to about three decimals, not exact.** Memory has reproduced to 0.01 GB through
+repeats, a rebase onto a much newer `main`, and a change of transformers
+version. Loss is stable across repeats of one revision, but the 26B moved from
+15.049 to 15.048 across that rebase with the configuration untouched, so a
+difference in the third decimal means the code moved underneath you, not that
+your run is wrong. A difference in the *first* decimal does mean something is
+wrong.
 
-Both rows were measured with **transformers 5.12.1**, which is what the
-container image we used ships. Note that the pretrain hook's
-`requirements-megatron_bridge.txt` pins **5.10.1**. Both are inside
-Megatron-Bridge v0.6.1's `>=5.8,<=5.12.1` range, but `primus-cli direct`
-bypasses the hook that installs the pin, so if you go through the normal runner
-path you are on 5.10.1 and these numbers were not taken there.
+The versions these came from are worth stating, because they are not the ones
+you will get by default. Both rows were measured with **transformers 5.12.1**,
+which is what our container image ships, while the pretrain hook's
+`requirements-megatron_bridge.txt` pins **5.10.1** — and `primus-cli direct`
+bypasses the hook that installs the pin, which is why the image's version wins
+in our runs. Both are inside Megatron-Bridge v0.6.1's `>=5.8,<=5.12.1` range.
+
+We checked the pin rather than assuming: on an image identical except for
+transformers downgraded to 5.10.1, the **31B reproduced both numbers exactly**
+(149.3 GB, loss 26.056). So the 31B fingerprint is version-independent across
+that range. The **26B is untested on 5.10.1** — the attempt lost the device to
+the wedge described below, after the model had built and entered the training
+loop, so nothing suggests 5.10.1 is at fault there; it simply has not been
+confirmed.
 
 **Absolute throughput for this part is deliberately not published here.** What
 this document is for is the ratios below, and unlike a tokens/s figure they
