@@ -1698,13 +1698,31 @@ class PrimusTurboBF16OutputColumnParallelLinear(PrimusTurboColumnParallelLinear)
             stride=stride,
         )
 
+    def forward(
+        self,
+        x: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
+        runtime_gather_output: Optional[bool] = None,
+    ):
+        # GPTModel supplies the shared embedding weight at call time when
+        # skip_weight_param_allocation=True.  TP=1 makes either gather setting
+        # equivalent, but accept the native Megatron argument for compatibility.
+        del runtime_gather_output
+        out = self.forward_internal(x, weight=weight)
+        self.is_first_microbatch = False
+        return out
+
     def forward_internal(
         self,
         x: torch.Tensor,
         is_first_microbatch: bool = False,
+        weight: Optional[torch.Tensor] = None,
     ):
         del is_first_microbatch
-        weight = self._parameters["weight"]
+        if weight is None:
+            weight = self._parameters["weight"]
+        if weight is None:
+            raise RuntimeError("GPT output weight was not supplied")
         if self.use_bias:
             bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
 
