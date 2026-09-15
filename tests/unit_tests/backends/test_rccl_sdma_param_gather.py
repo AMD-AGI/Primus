@@ -20,6 +20,7 @@ from primus.backends.megatron.patches.parallelism import (
     sdma_param_all_gather_patches,
 )
 
+
 def test_rccl_backend_disables_direct_hip_patch(monkeypatch):
     monkeypatch.setenv("ENABLE_SDMA_ALLGATHER", "1")
     monkeypatch.setenv("MEGATRON_PARAM_GATHER_BACKEND", "rccl_sdma")
@@ -34,6 +35,7 @@ def test_direct_hip_patch_remains_available_without_rccl_backend(monkeypatch):
 
     assert not rccl_sdma_param_all_gather_patches.rccl_sdma_param_gather_enabled()
     assert sdma_param_all_gather_patches._sdma_allgather_enabled(None)
+
 
 def test_direct_gather_uses_native_coalesced_work_handle(monkeypatch):
     monkeypatch.setenv("MEGATRON_PARAM_GATHER_BACKEND", "rccl_sdma")
@@ -181,10 +183,7 @@ def test_direct_buffer_marker_applies_to_views():
     ],
 )
 def test_recommended_eager_param_bytes(requested, recommended):
-    assert (
-        rccl_sdma_param_gather.recommended_eager_param_bytes(requested)
-        == recommended
-    )
+    assert rccl_sdma_param_gather.recommended_eager_param_bytes(requested) == recommended
 
 
 def test_missing_eager_buffer_reports_retry_value(monkeypatch, capsys):
@@ -405,9 +404,7 @@ def test_param_buffer_allocation_failure_reports_eager_retry(monkeypatch):
         )
         self.param_data = torch.zeros(8, dtype=param_dtype, device=device)
 
-    wrapped = rccl_sdma_param_all_gather_patches.make_param_and_grad_buffer_init(
-        original
-    )
+    wrapped = rccl_sdma_param_all_gather_patches.make_param_and_grad_buffer_init(original)
     with pytest.raises(
         RuntimeError,
         match=r"MEGATRON_RCCL_SDMA_EAGER_PARAM_BYTES=2097152",
@@ -553,8 +550,7 @@ def _run_sdma_hook(extra_env, kernel_release="6.8.0"):
     with tempfile.TemporaryDirectory() as bin_dir:
         uname = Path(bin_dir) / "uname"
         uname.write_text(
-            "#!/bin/sh\n"
-            f"printf '%s\\n' '{kernel_release}'\n",
+            "#!/bin/sh\n" f"printf '%s\\n' '{kernel_release}'\n",
             encoding="utf-8",
         )
         uname.chmod(0o755)
