@@ -5,19 +5,22 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Install the MaxDiffusion (JAX) runtime for primus-cli launches.
+# Install the MaxDiffusion (JAX) Python dependencies for primus-cli launches.
 #
-# The MaxText sibling hook pip-installs its requirements inline, but MaxDiffusion
-# additionally needs torch from the ROCm wheel index and four source patches, so
-# this delegates to examples/maxdiffusion/setup_maxdiffusion_env.sh -- the same
-# idempotent script examples/run_pretrain.sh uses. Both launch paths therefore
-# share one definition of the environment instead of drifting apart.
+# Same shape as the maxtext / megatron / torchtitan siblings: this hook only
+# installs packages. The other two concerns are split the same way they are for
+# every other backend:
+#   - backend path + launcher env (RUN_MODE, JAX coordinator, NVTE_FRAMEWORK)
+#     are emitted by this directory's prepare.py
+#   - runtime behavior (Shardy partitioner, TensorFlow preload) lives in
+#     primus/backends/maxdiffusion/patches/
+# so nothing here has to mutate the vendored third_party/maxdiffusion checkout.
 #
-# Container launches start from a clean image every time, so this runs on every
-# launch. Pointing pip at a cache under DATA_PATH (inside the bind-mounted Primus
-# checkout) keeps repeat runs off the network.
+# requirements-maxdiffusion.txt is deliberately separate from requirements-jax.txt
+# (which MaxText installs): it pins transformers 4.x for MaxDiffusion's Flax code,
+# and that pin must not be forced onto MaxText runs.
 #
-# PRIMUS_SKIP_PIP=1 skips the whole step, for images that already ship the stack.
+# PRIMUS_SKIP_PIP=1 skips this step, for images that already ship the stack.
 ###############################################################################
 set -euo pipefail
 
@@ -41,24 +44,36 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Load shared logging so output honors PRIMUS_LOG_LEVEL (DEBUG/INFO/WARN/ERROR).
+# When invoked through primus-cli the LOG_* functions are already exported, but
+# sourcing here keeps the hook usable standalone and under `set -u`.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/../../../../hook_common.sh"
+
 if [[ "${PRIMUS_SKIP_PIP:-0}" == "1" ]]; then
-  echo "[INFO] PRIMUS_SKIP_PIP=1: skipping MaxDiffusion env setup (deps from image)"
+  LOG_INFO "PRIMUS_SKIP_PIP=1: skipping MaxDiffusion dependency install (deps from image)"
   exit 0
 fi
 
 DATA_PATH="${DATA_PATH:-${PRIMUS_ROOT}/data}"
 PIP_CACHE_DIR="${PIP_CACHE_DIR:-${DATA_PATH}/pip_cache}"
-export PIP_CACHE_DIR
 
-echo "[INFO] Using pip cache: ${PIP_CACHE_DIR}"
+# Match pip verbosity to the active log level so WARN/ERROR runs stay quiet
+# (suppresses the "Requirement already satisfied" wall) while DEBUG/INFO keep it.
+PIP_FLAGS=()
+case "${PRIMUS_LOG_LEVEL:-INFO}" in
+  WARN|ERROR) PIP_FLAGS+=(-q -q) ;;
+esac
+
+LOG_INFO "Using pip cache: ${PIP_CACHE_DIR}"
 mkdir -p "${PIP_CACHE_DIR}"
 
-SETUP_SCRIPT="${PRIMUS_ROOT}/examples/maxdiffusion/setup_maxdiffusion_env.sh"
-if [[ ! -f "${SETUP_SCRIPT}" ]]; then
-  echo "[ERROR] Missing MaxDiffusion setup script: ${SETUP_SCRIPT}" >&2
+REQ_FILE="${PRIMUS_ROOT}/requirements-maxdiffusion.txt"
+if [[ ! -f "${REQ_FILE}" ]]; then
+  LOG_ERROR "Missing required MaxDiffusion requirements file: ${REQ_FILE}"
   exit 1
 fi
 
-echo "[+] Setting up MaxDiffusion environment (deps + source patches)..."
-PRIMUS_PATH="${PRIMUS_ROOT}" bash "${SETUP_SCRIPT}"
-echo "[OK] MaxDiffusion environment ready"
+LOG_INFO "Installing MaxDiffusion dependencies..."
+pip install "${PIP_FLAGS[@]}" --cache-dir="${PIP_CACHE_DIR}" -r "${REQ_FILE}"
+LOG_SUCCESS "MaxDiffusion dependencies installed"
