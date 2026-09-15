@@ -43,7 +43,12 @@ from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 
 def _sdma_allgather_enabled(_ctx: PatchContext) -> bool:
-    return os.environ.get("ENABLE_SDMA_ALLGATHER", "0") == "1"
+    direct_sdma_enabled = os.environ.get("ENABLE_SDMA_ALLGATHER", "0") == "1"
+    rccl_sdma_enabled = (
+        os.environ.get("MEGATRON_PARAM_GATHER_BACKEND", "").strip().lower()
+        == "rccl_sdma"
+    )
+    return direct_sdma_enabled and not rccl_sdma_enabled
 
 
 def _get_rccl_fallback_bucket_count() -> int:
