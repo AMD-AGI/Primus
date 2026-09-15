@@ -1,0 +1,147 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Llama-2-70B LoRA SFT -- 4-layer PROXY, 1x MI455X (gfx1250). SMOKE TEST ONLY.
+#
+# This is an enablement smoke test, not a model run. It keeps the real 70B
+# per-layer shapes (hidden 8192, ffn 28672, 64 heads / 8 KV groups) and cuts the
+# depth 80 -> 4 so one card holds it, exactly as the gfx1250 runbook proxies
+# DeepSeek-V3/V4. Any loss or throughput number from this config is meaningless
+# as a 70B number.
+#
+# NO PRETRAINED WEIGHTS ARE LOADED -- the base model is randomly initialised, so
+# iteration-1 loss sits near ln(padded_vocab) ~= 10.4 and never really descends.
+# That is the intended outcome: this exercises the SFT + LoRA + gfx1250 path,
+# not convergence. Two settings make that work, and both matter:
+#
+#   load: <empty dir>              Both posttrain hooks branch on
+#                                  "is a Megatron checkpoint already configured"
+#                                  (pretrained_checkpoint OR load). With it set,
+#                                  01_convert_checkpoints.py skips conversion --
+#                                  otherwise it falls back to hf_path :=
+#                                  tokenizer_model and tries to pull the full
+#                                  70B repo through Megatron-Bridge. It also
+#                                  stops 00_install_requirements.sh from
+#                                  pip-installing transformers==4.57.6 +
+#                                  nvidia-modelopt over this image's stack.
+#   exit_on_missing_checkpoint:     trainer_base.yaml defaults this to TRUE, so
+#     false                         Megatron would abort on the empty load dir
+#                                   instead of printing "will not load any
+#                                   checkpoints and will start from random".
+#
+# pretrained_checkpoint stays unset, which is what makes the trainer skip its
+# [PEFT pre-wrap] base-weight load; LoRA still wraps the randomly-init'd base.
+#
+# The tokenizer IS downloaded (tokenizer files only, a few MB): SFT needs to
+# tokenize Alpaca, and there is no mock-data path in the SFT trainer. The Llama-2
+# tokenizer is taken from the ungated 7B mirror -- identical 32000-token
+# SentencePiece vocab as 70B, and no HF_TOKEN needed.
+#
+# Launch (1 GPU, from the Primus repo root on the host):
+#
+#   ./primus-cli container --image amdprimus/amdprimus:gfx1250-20260831 \
+#     --env HIP_VISIBLE_DEVICES=0 --env NNODES=1 --env GPUS_PER_NODE=1 \
+#     --env PRIMUS_GPU_MODEL=MI455X \
+#     --env PRIMUS_TURBO_ATTN_BACKEND=triton \
+#     -- train posttrain \
+#     --config examples/megatron/configs/MI455X/llama2_70B-BF16-lora-sft-1gpu-proxy.yaml
+#
+# A pass looks like:
+#   Detected GPU model: MI455X / Loading MI455X (gfx1250) specific settings...
+#   [00_install_requirements] ... skipping Megatron-Bridge dependency install
+#   [INFO] Pretrained checkpoint already configured: ... skipping conversion
+#   WARNING: could not find the metadata file ... will start from random
+#   iteration 6/6 ... | number of nan iterations: 0
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama2_70B-BF16-lora-sft-1gpu-proxy}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    model: llama2_70B_4layer_proxy.yaml
+
+    overrides:
+      stage: sft
+
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+
+      disable_wandb: true
+      disable_tensorboard: true
+      stderr_sink_level: DEBUG
+      log_interval: 1
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      train_iters: 6
+      micro_batch_size: 1
+      global_batch_size: 8
+      num_workers: 2
+
+      seq_length: 2048
+      max_position_embeddings: 2048
+
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 1
+      lr_decay_iters: 6
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: false
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      # apex fused_weight_gradient_mlp_cuda is not in the gfx1250 image
+      gradient_accumulation_fusion: false
+
+      # Random init -- see the header. Empty dir on purpose.
+      load: ${PRIMUS_PROXY_LOAD_DIR:/tmp/primus-proxy-no-ckpt}
+      exit_on_missing_checkpoint: false
+      finetune: false
+      save: null
+      disable_last_saving: true
+      ckpt_format: torch
+      auto_detect_ckpt_format: false
+
+      # tatsu-lab/alpaca has only a "train" split.
+      eval_iters: 0
+
+      bf16: true
+
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+
+      # 4 layers at seq 2048 fit without recompute. If a wider proxy OOMs:
+      # recompute_granularity: full
+      # recompute_method: uniform
+      # recompute_num_layers: 1
+
+      lora:
+        enabled: true
+        dim: 16
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2
