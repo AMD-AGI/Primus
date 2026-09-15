@@ -19,8 +19,12 @@
 #
 # Measured best is micro_batch_size 8 (220.0 GB of 464), two clean runs, but
 # only with PRIMUS_GEMMA4_TURBO_LINEAR -- see the reference block at the end.
-# The default below stays at 4 because this config ships without that patch and
-# no clean run exists for 8 on the unpatched path.
+#
+# On the unpatched path this config ships, micro_batch_size 8 has wedged twice
+# out of two attempts, and one of those was minutes after two clean mbs 4 runs
+# on the same boot. That same-boot pairing is the only evidence here that
+# survives the caveat above, since it is the one case where boot state is held
+# fixed, so the default stays at 4 and 8 is not recommended without the patch.
 #
 # REQUIRED ENVIRONMENT on gfx1250:
 #
@@ -59,9 +63,12 @@ modules:
 
       train_iters: ${PRIMUS_TRAIN_ITERS:20}
 
-      # 4 and 8 are both clean (two runs each) with PRIMUS_GEMMA4_TURBO_LINEAR;
-      # 8 is 7% faster. 16 has wedged twice and is the real ceiling. Left at 4
-      # because 8 has no clean run on this config's unpatched GEMM path.
+      # Do not raise this without re-measuring. 4 is clean twice on the config
+      # as it ships. 8 is clean twice *with* PRIMUS_GEMMA4_TURBO_LINEAR and 7%
+      # faster there, but on the unpatched path it has wedged the driver twice
+      # out of two attempts -- once on the same boot, minutes after two clean
+      # mbs 4 runs, which is the one comparison here that controls for boot
+      # state. 16 has wedged twice on every path tried.
       global_batch_size: ${PRIMUS_GBS:4}
       micro_batch_size: ${PRIMUS_MBS:4}
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
@@ -111,22 +118,28 @@ modules:
         # Memory is not the constraint on this model, so recompute is pure cost.
         recompute_granularity: none
 
-      # Reference points, all with HIPBLASLT_TENSILE_LIBPATH set and two clean
-      # runs each. Note that none of them is this config's exact defaults, so
-      # treat them as bracketing rather than as an expected value.
+      # Reference fingerprint for THIS CONFIG AS IT SHIPS -- these defaults
+      # exactly, HIPBLASLT_TENSILE_LIBPATH set by base_env.sh, two clean runs
+      # with 0 nan and 0 skipped iterations:
       #
-      #   6 layers, mbs 1, recompute full, no FlyDSL: (withheld),
-      #    (withheld), 85.5 GB  -- the unpatched path this config uses
-      #   6 layers, mbs 1, recompute full, FlyDSL:    (withheld),
-      #     85.5 GB  -- 3.13x, from PRIMUS_GEMMA4_TURBO_LINEAR alone
-      #   6 layers, mbs 8, recompute none, FlyDSL:   (withheld),
-      #    (withheld), 220.0 GB  -- best 31B result recorded
+      #   149.3 GB peak, loss 26.265 at iteration 1 -> 26.056 at iteration 8
       #
-      # The 3.13x is FlyDSL, not the layer impl: hipBLASLt has tuned exactly one
-      # of the four bf16 contraction layouts on gfx1250, so the dgrad and wgrad
-      # layouts that carry two thirds of training FLOPs run at (withheld)
-      # against (withheld) for the tuned one. That patch is not part of this
-      # change, so the defaults here do not reach the numbers above.
+      # Check a run against those rather than against a step time: both
+      # reproduce exactly across repeats, which makes them the stricter test.
+      # Absolute throughput for this part is deliberately not recorded here.
+      #
+      # Routing the dense linears through Primus-Turbo FlyDSL at this same shape
+      # is worth 4.73x at identical peak memory, with the loss agreeing to four
+      # significant figures. That patch is not part of this repo, so these
+      # defaults do not reach it. The gap is GEMM layout, not the layer impl:
+      # hipBLASLt has tuned exactly one of the four bf16 contraction layouts on
+      # gfx1250, so the dgrad and wgrad layouts that carry two thirds of
+      # training FLOPs run roughly 15x slower than the tuned one. The effect
+      # grows with batch size -- 3.13x at mbs 1, 4.73x here -- as the step
+      # becomes more GEMM-bound.
+      #
+      # Exclude iteration 1 from any timing you do take: it is ~4.6x the
+      # steady-state step because it includes Triton compilation.
       #
       # Do not quote the harness TFLOP/s number for a layer-reduced proxy: it
       # derives FLOPs from the *configured* 60-layer model while only 6 are

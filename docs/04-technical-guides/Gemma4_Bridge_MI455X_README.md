@@ -139,21 +139,48 @@ Useful overrides: `PRIMUS_MBS`, `PRIMUS_GBS`, `PRIMUS_NUM_LAYERS`,
   reached. This is the validity bar for any quotable number
 - loss descending smoothly and reproducibly
 
-Reference points, two clean runs each, 6 layers at sequence length 2048:
+Reference fingerprint for the shipped configs, two clean runs each, 6 layers at
+sequence length 2048. Check your run against these two columns rather than
+against a step time: both are deterministic here, reproducing to 0.01 GB and to
+three decimals across repeats, which makes them a stricter check than timing.
 
-| model | mbs | layer impl | dense GEMM | ms/iter | tok/s/GPU | peak VRAM | loss |
-|---|---|---|---|---|---|---|---|
-| 26B MoE | 16 | TransformerEngine | hipBLASLt | | | 301.6 GB | 15.049 |
-| 31B dense | 1 | local | hipBLASLt | | | 85.5 GB | 26.187 |
-| 31B dense | 8 | local | Primus-Turbo FlyDSL | | | 220.0 GB | 26.004 |
+| config | mbs | layer impl | dense GEMM | peak VRAM | loss at iteration 8 |
+|---|---|---|---|---|---|
+| 26B MoE proxy | 16 | TransformerEngine | hipBLASLt | 301.6 GB | 15.049 |
+| 31B dense proxy | 4 | local | hipBLASLt | 149.3 GB | 26.056 |
 
-The 31B rows differ by 3.13x from the GEMM backend alone. On gfx1250 hipBLASLt
-has tuned exactly one of the four bf16 contraction layouts, so the dgrad and
-wgrad layouts — which carry two thirds of training FLOPs — run at (withheld)
-TFLOP/s against (withheld) for the tuned one. The FlyDSL routing that closes
-this is not yet part of the repo, so the shipped configs produce the middle row.
-It helps dense models only: on the 26B it costs 8%, because a MoE model issues
-its expert FFNs through the grouped GEMM path, which never calls `torch.matmul`.
+**Absolute throughput for this part is deliberately not published here.** What
+this document is for is the ratios below, and unlike a tokens/s figure they
+survive a change of container image or host — we have one case where the same
+configuration measured 27% apart purely from an image version.
+
+| change | effect on step time | applies to |
+|---|---|---|
+| `HIPBLASLT_TENSILE_LIBPATH` pointed at the real directory | **2.93x** | both |
+| Primus-Turbo FlyDSL for the dense linears | **3.13x** at mbs 1, **4.73x** at mbs 4 | 31B only |
+| TransformerEngine instead of local layers | 1.69x | 26B only |
+| local layers instead of TransformerEngine | 1.27x, and 11 GB less | 31B only |
+| Primus-Turbo FlyDSL for the dense linears | 0.92x — an 8% *regression* | 26B only |
+| recompute off | 1.13x | 26B |
+| micro-batch 1 to 16 | 1.94x | 26B |
+
+Two of these need explaining. The FlyDSL figure is GEMM layout, not the layer
+impl: hipBLASLt has tuned exactly one of the four bf16 contraction layouts on
+gfx1250, so the dgrad and wgrad layouts that carry two thirds of training FLOPs
+run roughly 15x slower than the tuned one. The effect grows with batch size as
+the step becomes more GEMM-bound. That routing is not yet in this repo, so the
+shipped configs do not get it. And it helps dense models *only* — on the 26B it
+is a regression, because a MoE model issues its expert FFNs through the grouped
+GEMM path, which never calls `torch.matmul`, so the wrapper pays dispatch cost
+on every matmul while seeing only the attention projections.
+
+Exclude the first iteration from any timing you do take: it is roughly 4.6x the
+steady-state step on the 31B, because it includes Triton compilation.
+
+**Do not raise the 31B micro-batch without re-measuring.** mbs 8 is clean twice
+*with* FlyDSL, but on the unpatched path it has wedged twice out of two attempts
+— once minutes after two clean mbs 4 runs on the same boot, which is the only
+comparison in this document where boot state is held fixed.
 
 On the 26B, TransformerEngine is the fast path and is the default here, worth
 1.69x over the local layers. On the 31B, `local` is 27% faster than TE and uses
@@ -161,10 +188,13 @@ On the 26B, TransformerEngine is the fast path and is the default here, worth
 
 ## Known issues
 
-**Do not quote the harness `TFLOP/s` column.** It derives FLOPs from the
-*configured* model depth while only 6 layers are built, which overstates the
-dense model by roughly 5.3x. For the MoE it errs the other way, since top-k 8 of
-128 experts leaves most parameters inactive. The column is meaningless here.
+**Ignore the harness `TFLOP/s` column.** It derives FLOPs from the *configured*
+model depth while only 6 layers are built, which overstates the dense model by
+roughly 5.3x — it reports a figure for the 31B that is not physically achievable
+on this part. For the MoE it errs the other way, since top-k 8 of 128 experts
+leaves most parameters inactive and counting `8N` over total parameters is the
+wrong yardstick. The column is meaningless for a layer-reduced proxy in both
+directions.
 
 **The GPU wedges intermittently**, on configurations that also succeed. The
 signature is `hipErrorLaunchFailure` or a hang, followed by
@@ -181,6 +211,27 @@ results here:
   healthy, with a single driver message at onset and silence afterwards, so
   message counts and escalation are unreliable as liveness signals.
 
+This is **not specific to Gemma 4 or to this backend.** The DeepSeek-V4 gfx1250
+bring-up in `examples/deepseek-v4/run_deepseek_v4_pro_muon_local.sh` carries
+workarounds for the same unrecoverable-MES failure from four unrelated triggers:
+a tuned hipBLASLt bundle deadlocking on a backward-FP8 split-K kernel, an SDMA
+host-to-device copy that never signals completion, a Triton MoE permute autotune,
+and an alignment-sensitive copy path. Worth reading if you hit this, for two
+reasons. Its SDMA case presented with a **completely clean `dmesg`**, which is
+further evidence that no driver-log signal is sufficient to detect the wedge. And
+having first blamed the permute fusion, that script now records the SDMA defect
+as the likely true cause with "permute fusion possibly innocent" — the same
+misattribution this guide warns about, reached independently.
+
+One untested lead from that work, if wedges are blocking you: `base_env.sh`
+defaults `HSA_ENABLE_SDMA=1`, and blit-kernel copies (`HSA_ENABLE_SDMA=0`) are
+slower but avoid the SDMA queues implicated above. We have not measured this on
+Gemma 4 either way.
+
+Do **not** set `AMD_SERIALIZE_COPY=3`. `MI455X.sh` sets it to 0 deliberately; the
+DeepSeek-V4 measurements put its cost at 38% throughput, and the iteration-1
+wedge it once worked around no longer reproduces.
+
 **Two missing gfx1250 builds need working around**, and both are already set in
 these configs. `scaled_masked_softmax_cuda` is not compiled in the image, so
 `masked_softmax_fusion: false` is mandatory on the dense model — without it the
@@ -195,3 +246,30 @@ with TE, 31B at 26.0). Both descend smoothly and reproducibly, and the four-way
 agreement across two layer impls and two GEMM backends is within 0.040 nats on
 the 31B, so throughput comparisons are sound. Absolute convergence quality is
 not established by these runs.
+
+## See also
+
+Other MI455X (gfx1250) work in this repository, all single-GPU:
+
+- [Native SFT LoRA on MI455X](LoRA_Native_Trainer_MI455_README.md) — LoRA/SFT on
+  the native Megatron trainer, with Llama-3.2-1B plus 70B/72B/235B layer-reduced
+  proxies. Uses the same MI455X environment detection and the same
+  `gradient_accumulation_fusion: false` workaround. It requires
+  `PRIMUS_TURBO_ATTN_BACKEND=triton` because its image has no aiter; the Bridge
+  path here does not, since these configs leave Turbo attention off. That guide
+  is deliberately free of throughput numbers, so do not look for a perf
+  comparison between the two.
+- `examples/deepseek-v4/run_deepseek_v4_pro_muon_local.sh` — DeepSeek-V4-Pro
+  bring-up. Documentation is in the script comments rather than under `docs/`.
+  Source of the wedge corroboration above, and of several gfx1250 environment
+  settings that `base_env.sh` and `MI455X.sh` now apply for you
+  (`HSA_NO_SCRATCH_RECLAIM=1`, single-GPU NCCL loopback, `AMD_SERIALIZE_COPY=0`).
+- `examples/deepseek-v4/projection/` — trace-driven projection from measured
+  MI355X runs to MI455X. Note its MI455X compute peak is an **estimate**
+  (~10 PFLOP/s bf16, unpublished), so treat its MI455X tab as scaling intuition
+  rather than measurement.
+
+Two gfx1250 facts from that work that generalise: Primus-Turbo's gluon and
+FlyDSL attention kernels are **gfx950-only**, and `torch.distributed.all_reduce`
+with `op=AVG` hangs on some gfx1250 builds even at world size 1, which matters
+for MoE auxiliary-loss reductions.

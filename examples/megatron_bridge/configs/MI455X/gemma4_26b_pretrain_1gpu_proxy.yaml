@@ -94,9 +94,9 @@ modules:
       # Layer-reduced proxy: depth comes from the gemma4_26b_6layer_proxy preset above,
       # which also documents the PRIMUS_NUM_LAYERS sweep.
       model:
-        # TE layers are the fast path on the MoE model -- 1.69x over local
-        #, once HIPBLASLT_TENSILE_LIBPATH is set. Left at
-        # the provider default, which is TE.
+        # TE layers are the fast path on the MoE model -- 1.69x over local,
+        # once HIPBLASLT_TENSILE_LIBPATH is set. Left at the provider default,
+        # which is TE.
 
         # There is headroom for activations at this micro-batch, so paying
         # recompute buys nothing: switching it off is worth ~1.13x.
@@ -105,11 +105,16 @@ modules:
         # No gfx1250 build of the fused GEMM+bias-grad path.
         gradient_accumulation_fusion: false
 
-      # Reference point, this config's defaults, both required env vars set,
-      # two clean runs: (withheld), 301.6 GB peak,
-      # loss 15.049. (An earlier draft paired this throughput with (withheld),
-      # which is the micro_batch_size 1 figure -- (withheld) at seq 2048 and
-      # mbs 16 is 32768 tokens per iteration, so ~4.05 s is the consistent one.)
+      # Reference fingerprint, this config's defaults, both required env vars
+      # set, two clean runs with 0 nan and 0 skipped iterations:
+      #
+      #   301.6 GB peak, loss 15.049
+      #
+      # Check a run against those rather than against a step time: both
+      # reproduce exactly across repeats, which makes them the stricter test.
+      # Absolute throughput for this part is deliberately not recorded here.
+      # For what the levers are worth as ratios, see
+      # docs/04-technical-guides/Gemma4_Bridge_MI455X_README.md.
       # Do not quote the harness TFLOP/s number for a layer-reduced proxy: it
       # derives FLOPs from the *configured* 30-layer model while only 6 are
-      # built, so it is wrong in both directions. so it should be ignored.
+      # built, so it is wrong in both directions and should be ignored.
