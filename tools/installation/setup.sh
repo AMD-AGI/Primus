@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # setup.sh — Reproduce the Primus training environment in a Python venv
 # (no sudo, no docker). Mirrors the pins of
-#   .github/workflows/docker-release/Dockerfile.primus-v26.5
+#   .github/workflows/docker-release/Dockerfile.primus-v26.6
 # adapted for:
 #   * Python 3.12, auto-provisioned with `uv` (the pinned torch nightly is
 #     cp312-only on Linux; see README.md)
@@ -31,7 +31,7 @@ OPTIONAL_STAGES=(torchrec)
 
 usage() {
     cat <<EOF
-setup.sh — build the Primus v26.5 training environment in a venv.
+setup.sh — build the Primus v26.6 training environment in a venv.
 
 PRIMUS_BASE must be exported first; it has no default because the right location
 is site-specific. Point it at a writable dir on a disk with tens of GB free:
@@ -64,33 +64,30 @@ die()  { echo -e "\033[1;31m[setup][ERROR] $*\033[0m" >&2; exit 1; }
 # shellcheck disable=SC1091
 reload_env() { source "$SCRIPT_DIR/env.sh"; }
 
-# ---- pinned versions / commits (from Dockerfile.primus-v26.5) ----
+# ---- pinned versions / commits (from Dockerfile.primus-v26.6) ----
 TORCH_INDEX="https://rocm.nightlies.amd.com/whl-multi-arch"
 # The Dockerfile pins only `torch` and lets torchaudio/apex float and
 # torchvision resolve as `==0.27`. That no longer resolves: newer rocm10.x
 # nightlies now publish matching version numbers, so a floating torchvision
 # drags in a build for a different ROCm line and the resolve dies on a
-# backtracking storm. These are the versions the a20260720 nightly published,
+# backtracking storm. These are the versions the a20260727 nightly published,
 # i.e. the exact set the Dockerfile picked up when it was built.
-PYTORCH_VERSION="2.12.0+rocm7.15.0a20260720"
-ROCM_SDK_VERSION="7.15.0a20260720"
-TORCHAUDIO_VERSION="2.11.0+rocm7.15.0a20260720"
-TORCHVISION_VERSION="0.27.0+rocm7.15.0a20260720"
-APEX_VERSION="1.12.0+rocm7.15.0a20260720"
-
-FA_REPO="https://github.com/ROCm/flash-attention.git"
-FA_BRANCH="6387433156558135a998d5568a9d74c1778666d8"
-# v26.5 stopped building TransformerEngine from source and installs it from the
-# ROCm staging index instead. Those wheels are built on Ubuntu 24.04 though, and
-# libtransformer_engine.so needs glibc >= 2.38, so they cannot load on a 22.04
-# host. stage_te falls back to building the same TE commit from source; see
-# PRIMUS_TE_MODE and the README.
-TE_INDEX="https://rocm.frameworks-nightlies.amd.com/whl-staging/device-all/"
-TE_VERSION="2.15.0.dev0+rocm7.15.0a20260716.a07e607"
+PYTORCH_VERSION="2.12.0+rocm7.15.0a20260727"
+ROCM_SDK_VERSION="7.15.0a20260727"
+TORCHAUDIO_VERSION="2.11.0+rocm7.15.0a20260727"
+TORCHVISION_VERSION="0.27.0+rocm7.15.0a20260727"
+APEX_VERSION="1.12.0+rocm7.15.0a20260727"
+FLASH_ATTN_VERSION="2.8.1"
+# v26.6 installs TransformerEngine from the ROCm multi-arch staging index.
+# Those wheels are built on Ubuntu 24.04 though, and libtransformer_engine.so
+# needs glibc >= 2.38, so they cannot load on a 22.04 host. stage_te falls back
+# to building the same TE commit from source; see PRIMUS_TE_MODE and the README.
+TE_INDEX="https://rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/"
+TE_VERSION="2.17.0+rocm7.15.0a20260727.e028a6c"
 TE_WHEEL_MIN_GLIBC="2.38"
 TE_REPO="https://github.com/ROCm/TransformerEngine.git"
-# The commit the TE_VERSION local label refers to (…a20260716.a07e607).
-TE_COMMIT="a07e607f14a5330807ffdafeeb6224f2d7dffacc"
+# The commit the TE_VERSION local label refers to (…a20260727.e028a6c).
+TE_COMMIT="e028a6c"
 TORCHTUNE_REPO="https://github.com/pytorch/torchtune.git"
 TORCHTUNE_BRANCH="b4c98ac2a37f0397d64c22579aed415ce7264db6"
 TORCHAO_REPO="https://github.com/pytorch/ao.git"
@@ -103,21 +100,21 @@ MAMBA_REPO="https://github.com/AndreasKaratzas/mamba.git"
 MAMBA_BRANCH="enable-primus-hybrid-models"
 TVM_FFI_VERSION="0.1.11"
 PRIMUS_REPO="https://github.com/AMD-AGI/Primus.git"
-# Latest commit on `release/v26.5` branch. Committed on 2026-07-22.
-PRIMUS_BRANCH="b511d1b66b0068715308ea9bfe8ba147ea1a3860"
+# Latest commit on `release/v26.6` branch. Committed on 2026-08-25.
+PRIMUS_BRANCH="2aa05ead3401708cf1a1e2958c1def18d7aecf92"
 AITER_REPO="https://github.com/ROCm/aiter.git"
 AITER_COMMIT="0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e"
 TURBO_REPO="https://github.com/AMD-AGI/Primus-Turbo.git"
-# Latest commit on `main` branch. Committed on 2026-07-20.
-TURBO_COMMIT="edc8d2ccb0be4888e80ee7c6e765fd3956026a32"
+# Latest commit on `main` branch. Committed on 2026-08-21.
+TURBO_COMMIT="a6a16cdce46bd2235a248b41f501fb363c215b9b"
 # aiter pins `flydsl==0.1.7` and Primus-Turbo wants `flydsl>=0.2.0`, so one of
 # them is always unsatisfied; Turbo installs last and wins. aiter only needs
 # `flydsl.expr.vector` at runtime, which survived until 0.3.0 removed it -- and
 # with it aiter's whole CK/HIP JIT path ("CK and HIP ops are disabled. Triton ops
 # remain available."). 0.2.4 is the newest release that satisfies Turbo and still
-# keeps aiter whole; it is also what the Dockerfile resolved to, since 0.3.0 was
-# published after v26.5 was built.
+# keeps aiter whole.
 FLYDSL_VERSION="0.2.4"
+NVDISASM_VERSION="13.3.73"
 
 PIP="python -m pip"
 
@@ -229,7 +226,7 @@ stage_venv() {
         local have
         have="$("$VENV_DIR/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
         [ "$have" = "$PRIMUS_PYTHON_VERSION" ] || die \
-"existing venv at $VENV_DIR is Python $have, but v26.5 requires $PRIMUS_PYTHON_VERSION.
+"existing venv at $VENV_DIR is Python $have, but v26.6 requires $PRIMUS_PYTHON_VERSION.
   The pinned torch nightly ships a cp312 Linux wheel only, so an older venv
   cannot be upgraded in place. Remove it and re-run:
       rm -rf '$VENV_DIR' && bash setup.sh"
@@ -242,11 +239,11 @@ stage_venv() {
     $PIP install \
         pybind11 \
         typeguard \
-        wheel==0.45.1 \
+        wheel==0.46.2 \
         cmake==3.31.6 \
         ninja==1.11.1.3 \
         packaging==25.0 \
-        setuptools==75.1.0 \
+        setuptools==80.10.2 \
         patchelf
 }
 
@@ -284,8 +281,12 @@ stage_torch() {
     $PIP install \
         --index-url "$TORCH_INDEX" \
         --pre \
-        "torch==${PYTORCH_VERSION}" \
+        "rocm==${ROCM_SDK_VERSION}" \
+        rocm-bootstrap \
+        "rocm-sdk-core==${ROCM_SDK_VERSION}" \
         "rocm-sdk-devel==${ROCM_SDK_VERSION}" \
+        "rocm-sdk-libraries==${ROCM_SDK_VERSION}" \
+        "torch==${PYTORCH_VERSION}" \
         "torchaudio==${TORCHAUDIO_VERSION}" \
         "torchvision==${TORCHVISION_VERSION}" \
         "apex==${APEX_VERSION}" \
@@ -293,6 +294,8 @@ stage_torch() {
 
     log "Running rocm-sdk init"
     rocm-sdk init
+    relink_comgr
+    patch_rocprofv3
     reload_env
     [ -n "${ROCM_PATH:-}" ] || die "ROCM_PATH not resolved after rocm-sdk init"
     log "ROCM_PATH=$ROCM_PATH"
@@ -300,16 +303,52 @@ stage_torch() {
     python -c "import torch; print('torch', torch.__version__, 'cuda avail', torch.cuda.is_available())"
 }
 
+# rocm-sdk-core and rocm-sdk-devel both ship libamd_comgr.so.3 as separate
+# inodes, causing duplicate LLVM static constructor registration (SIGABRT).
+# Same workaround as Dockerfile.primus-v26.6 (AIMA-248).
+relink_comgr() {
+    python - <<'PY' || true
+import os, pathlib
+try:
+    import _rocm_sdk_core, _rocm_sdk_devel
+except Exception as e:
+    print("comgr relink skipped:", e)
+    raise SystemExit(0)
+src = pathlib.Path(_rocm_sdk_devel.__file__).parent / "lib" / "libamd_comgr.so.3"
+dst = pathlib.Path(_rocm_sdk_core.__file__).parent / "lib" / "libamd_comgr.so.3"
+if src.exists() and dst.parent.exists():
+    if dst.is_symlink() or dst.exists():
+        dst.unlink()
+    os.symlink(src, dst)
+    print(f"linked {dst} -> {src}")
+PY
+}
+
+patch_rocprofv3() {
+    local f
+    f="$(python - <<'PY'
+import os
+try:
+    import _rocm_sdk_devel
+    p = os.path.join(os.path.dirname(_rocm_sdk_devel.__file__), "bin", "rocprofv3")
+    print(p if os.path.exists(p) else "")
+except Exception:
+    pass
+PY
+)"
+    [ -n "$f" ] || return 0
+    sed -i 's/update_env("ROCPROFILER_LIBRARY_CTOR", True)/update_env("ROCPROFILER_LIBRARY_CTOR", False)/' "$f" || true
+}
+
 stage_flash_attn() {
     reload_env
-    log "Building flash-attention @ $FA_BRANCH"
-    fresh_clone "$FA_REPO" flash-attention --recursive
-    # GPU_ARCHS defaults to `native` for runtime; cross-compile the full set here.
-    ( cd "$SRC_DIR/flash-attention" \
-        && git checkout "$FA_BRANCH" \
-        && git submodule update --init --recursive \
-        && GPU_ARCHS="$PYTORCH_ROCM_ARCH" python setup.py install ) || die "flash-attention build failed"
-    rm -rf "$SRC_DIR/flash-attention"
+    # v26.6 switched from the ROCm/flash-attention git fork to the pip package.
+    log "Installing flash-attn==${FLASH_ATTN_VERSION} (--no-build-isolation)"
+    MAX_JOBS="$MAX_JOBS" GPU_ARCHS="$PYTORCH_ROCM_ARCH" pipi \
+        --no-build-isolation "flash-attn==${FLASH_ATTN_VERSION}" \
+        || die "flash-attn install failed"
+    python -c "import flash_attn; print('flash_attn', flash_attn.__version__)" \
+        || die "flash_attn installed but cannot be imported"
 }
 
 # Concurrent CK JIT compiles race to publish the same .so; without this the
@@ -374,7 +413,7 @@ install_te_deps() {
         onnxscript==0.7.0 \
         pydantic==2.13.4 \
         nvdlfw_inspect==0.2.2 \
-        einops \
+        einops==0.9.0.dev0 \
         onnx
 }
 
@@ -393,7 +432,7 @@ stage_te_wheel() {
 }
 
 stage_te_source() {
-    log "Building TransformerEngine from source @ $TE_COMMIT (glibc $(host_glibc) < $TE_WHEEL_MIN_GLIBC, so the v26.5 wheels cannot load)"
+    log "Building TransformerEngine from source @ $TE_COMMIT (glibc $(host_glibc) < $TE_WHEEL_MIN_GLIBC, so the v26.6 wheels cannot load)"
     # Drop any previously wheel-installed TE, otherwise the unusable prebuilt
     # core library stays behind and keeps winning the import.
     $PIP uninstall -y transformer_engine_rocm_torch transformer_engine_rocm7 \
@@ -460,7 +499,7 @@ stage_pydeps() {
     pipi \
         datasets==3.6.0 \
         av==16.0.1 \
-        transformers==4.55.0 \
+        transformers==5.5.0 \
         optree==0.18.0 \
         sympy \
         accelerate==1.9.0 \
@@ -468,7 +507,7 @@ stage_pydeps() {
         tensorboard==2.20.0 \
         peft \
         scipy \
-        einops \
+        einops==0.9.0.dev0 \
         flask-restful \
         nltk \
         pytest \
@@ -481,7 +520,7 @@ stage_pydeps() {
         zarr==2.18.7 \
         numcodecs==0.12.1 \
         xarray \
-        wandb \
+        wandb==0.28.2 \
         tensorstore==0.1.45 \
         pybind11 \
         tiktoken \
@@ -548,6 +587,11 @@ stage_mamba() {
     # packages). pip respects already-installed versions.
     ( cd "$SRC_DIR/mamba" \
         && pipi "apache-tvm-ffi==${TVM_FFI_VERSION}" \
+           "nvidia-cuda-nvdisasm==${NVDISASM_VERSION}" \
+        && sed -i '/^\s*namespace std\s*=\s*::std\s*;/d' csrc/selective_scan/uninitialized_copy.cuh \
+        && sed -i '/namespace cuda {/,/^    }/{/namespace cuda {/d;/namespace std = ::std;/d;/^    }$/d;}' \
+               csrc/selective_scan/uninitialized_copy.cuh \
+        && sed -i 's/::cuda::std::/::std::/g' csrc/selective_scan/uninitialized_copy.cuh \
         && pipi --no-build-isolation . ) || die "mamba build failed"
     rm -rf "$SRC_DIR/mamba"
     # Ahead of the check below, which then doubles as proof mamba survives it.
@@ -666,8 +710,11 @@ stage_turbo() {
 
 stage_boto() {
     reload_env
-    log "Installing boto3/botocore"
+    log "Installing boto3/botocore and CVE-fix pins from the v26.6 image"
     pipi boto3==1.35.42 botocore==1.35.99
+    pipi cryptography==50.0.0 diffusers==0.38.0 "jaraco.context==6.1.0" pyarrow==23.0.1
+    # mlflow caps cryptography<50; --no-deps keeps the 50.0.0 pin above.
+    $PIP install --no-deps mlflow==3.15.1
 }
 
 stage_cleanup() {
@@ -685,7 +732,7 @@ stage_manifest() {
     env > "$WORKSPACE_DIR/.manifest/env.txt"
     $PIP list > "$WORKSPACE_DIR/.manifest/requirements.txt"
     python --version > "$WORKSPACE_DIR/.manifest/python_version"
-    echo "Dockerfile.primus-v26.5" > "$WORKSPACE_DIR/.manifest/derived_from"
+    echo "Dockerfile.primus-v26.6" > "$WORKSPACE_DIR/.manifest/derived_from"
     cp "$SCRIPT_DIR/env.sh" "$WORKSPACE_DIR/.manifest/env.sh"
     [ -f "$PRIMUS_PIP_CONSTRAINTS" ] && cp "$PRIMUS_PIP_CONSTRAINTS" "$WORKSPACE_DIR/.manifest/"
     log "Environment ready. torch: $(python -c 'import torch; print(torch.__version__)' 2>/dev/null || echo '??')"
