@@ -33,7 +33,10 @@
 #     do when launching through the runner. hipBLASLt ships its gfx1250 Tensile
 #     files one directory below where it looks for them, so every solution
 #     lookup fails and it returns HIPBLAS_STATUS_INVALID_VALUE for all shapes.
-#     Worth 2.93x end-to-end. Export it by hand only if you bypass the runner.
+#     Without it this config does not train: the run aborts on the first GEMM.
+#     Measured on this tree at mbs 4 -- the corrected path completed all 8
+#     iterations, the broken path failed twice out of two attempts with zero
+#     iterations. Export it by hand only if you bypass the runner.
 #
 #   PRIMUS_GEMMA4_TORCH_OPTIM=1
 #     Only needed if you switch this config to TE layers. TE's FusedAdam does

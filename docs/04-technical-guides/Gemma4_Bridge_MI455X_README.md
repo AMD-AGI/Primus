@@ -84,8 +84,9 @@ the misplaced Tensile directory and exports it. You should see:
 [WARN] Setting HIPBLASLT_TENSILE_LIBPATH=... to avoid the rocBLAS fallback.
 ```
 
-This matters more than anything else in this document: it is worth **2.93x**
-end-to-end. The ROCm SDK wheel installs the Tensile files in
+This matters more than anything else in this document: **without it these
+configs do not train at all**, they abort on the first GEMM. The ROCm SDK wheel
+installs the Tensile files in
 `hipblaslt/library/gfx<arch>/` while hipBLASLt loads them from
 `hipblaslt/library/`, so the solution index never loads and
 `hipblasLtMatmulAlgoGetHeuristic` returns `HIPBLAS_STATUS_INVALID_VALUE` for
@@ -180,16 +181,47 @@ this document is for is the ratios below, and unlike a tokens/s figure they
 survive a change of container image or host — we have one case where the same
 configuration measured 27% apart purely from an image version.
 
+The single most important environment fact here is not a ratio at all.
+**Without `HIPBLASLT_TENSILE_LIBPATH` pointed at the directory that actually
+holds the Tensile files, these configs do not train — they abort on the first
+GEMM** with:
+
+```
+RuntimeError: CUDA error: HIPBLAS_STATUS_INVALID_VALUE when calling
+`hipblasLtMatmulAlgoGetHeuristic(...)`
+```
+
+ROCm's wheel ships `TensileLibrary_lazy_gfx1250.dat` one directory deeper than
+hipBLASLt looks, so the solution index never loads and every shape fails the
+heuristic call. `runner/helpers/envs/base_env.sh` detects this and exports the
+corrected path for you, which is why the launch paths above just work. The
+detector only fills the variable in when it is unset, so if you set it
+yourself you are on your own.
+
+We measured both arms on this tree, at mbs 4 on the 31B, on one boot: the
+corrected path completed all 8 iterations and matched the four step times
+recorded earlier the same day to within 2%, while the broken path failed
+outright twice out of two attempts, with zero iterations completed. Earlier in
+this work the same misconfiguration was merely *slow* rather than fatal — it
+was worth 2.93x once the fallback absorbed it — so if you find that figure in
+our notes, this is what superseded it. Treat the corrected path as mandatory
+rather than an optimisation.
+
+The rest are genuine step-time ratios:
+
 | change | effect on step time | applies to |
 |---|---|---|
-| `HIPBLASLT_TENSILE_LIBPATH` pointed at the real directory | **2.93x** | both |
 | TransformerEngine instead of local layers | 1.69x | 26B only |
 | local layers instead of TransformerEngine | 1.27x, and 11 GB less | 31B only |
 | recompute off | 1.13x | 26B |
 | micro-batch 1 to 16 | 1.94x | 26B |
 
-Every row above is reproducible with what this PR ships, which is why the
-dense-GEMM routing described next has no row of its own.
+Each of those four is a same-session A/B — both arms measured back to back on
+one boot, which is what makes them worth quoting — but all four predate the
+rebase this branch has since had, and were taken at layer counts and window
+configurations that are not exactly the two shipped here. Their direction and
+rough magnitude are dependable; do not treat the second digit as current. The
+two fingerprints above, by contrast, were re-measured on this revision.
 
 There is a known headroom item that is deliberately left unquantified here.
 hipBLASLt has tuned exactly one of the four bf16 contraction layouts on

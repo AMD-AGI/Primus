@@ -18,8 +18,10 @@
 #     hipBLASLt ships its gfx1250 Tensile files one directory below where it
 #     looks for them, so every solution lookup fails and it returns
 #     HIPBLAS_STATUS_INVALID_VALUE for all shapes. Pointing it at the real
-#     directory is worth 2.93x end-to-end here and is what
-#     makes TE usable at all. If you run the trainer outside the runner, export
+#     directory is what makes this config train at all -- without it the run
+#     aborts on the first GEMM -- and is what makes TE usable at all. Measured
+#     on this tree: the broken path failed twice out of two attempts with zero
+#     iterations. If you run the trainer outside the runner, export
 #     it by hand to <site-packages>/_rocm_sdk_libraries_gfx1250/lib/hipblaslt/\
 #     library/gfx1250 and check the startup log shows it set.
 #
