@@ -48,12 +48,12 @@ def validate_global_cta_policy() -> None:
 def make_start_param_sync(original):
     """Build the RCCL CE replacement for Megatron's parameter gather."""
     from megatron.core.distributed.param_and_grad_buffer import shard_buffer
+    from torch.distributed.distributed_c10d import _coalescing_manager
 
     from primus.backends.megatron.core.distributed.rccl_sdma_param_gather import (
         get_sdma_process_group,
         is_direct_param_buffer,
     )
-    from torch.distributed.distributed_c10d import _coalescing_manager
 
     def start_param_sync(self, force_sync: bool = False):
         if not self.ddp_config.use_distributed_optimizer:
@@ -253,8 +253,7 @@ def patch_rccl_sdma_param_all_gather(ctx: PatchContext) -> None:
     eager_param_bytes = int(os.getenv("MEGATRON_RCCL_SDMA_EAGER_PARAM_BYTES", "0"))
     if int(os.getenv("RANK", "0")) == 0:
         print(
-            "[RCCL-SDMA:Megatron] eager direct configuration "
-            f"bytes={eager_param_bytes}",
+            "[RCCL-SDMA:Megatron] eager direct configuration " f"bytes={eager_param_bytes}",
             flush=True,
         )
     if eager_param_bytes:
@@ -335,8 +334,7 @@ def patch_rccl_sdma_param_all_gather(ctx: PatchContext) -> None:
                         return wrapped_deferred_initialize
                     if not eager_initialize_runtime():
                         raise RuntimeError(
-                            "torch.distributed is not initialized after "
-                            "Megatron initialization"
+                            "torch.distributed is not initialized after " "Megatron initialization"
                         )
                     return result
 
