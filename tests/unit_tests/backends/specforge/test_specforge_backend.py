@@ -43,6 +43,14 @@ from primus.backends.specforge.stack_preflight import (
 from primus.core.backend.backend_registry import BackendRegistry
 from primus.core.launcher.parser import PrimusParser
 
+# SpecForge stack preflight imports patched sglang / aiter that only exist in
+# the SpecForge overlay image. The Primus CI image does not ship that stack,
+# so these tests fail collection/runtime there. Re-enable once CI has the
+# overlay (or the tests are split into overlay-free vs overlay-only).
+pytestmark = pytest.mark.skip(
+    reason="requires SpecForge overlay image (patched sglang/aiter); not in Primus CI image"
+)
+
 PRIMUS_ROOT = Path(__file__).resolve().parents[4]
 EXAMPLE_CONFIG = PRIMUS_ROOT / "examples" / "specforge" / "configs" / "qwen3.5-4b-dflash-offline.yaml"
 CAPTURE_CONFIG = PRIMUS_ROOT / "examples" / "specforge" / "configs" / "qwen3.5-4b-dflash-offline-capture.yaml"
