@@ -36,24 +36,26 @@ LOG_INFO_RANK0 "=== Loading Primus Environment Configuration ==="
 # 2. Detect GPU model and load device-specific configuration
 
 # GPU detection function
+# Prefer amd-smi (new ROCm SDK, e.g. the pip _rocm_sdk_devel layout where rocm-smi
+# is no longer shipped); fall back to rocm-smi for older images. amd-smi reports
+# the model as "MARKET_NAME: AMD Instinct MI355X".
 detect_gpu_model() {
     local gpu_model
     gpu_model="unknown"
 
-    # Check if rocm-smi is available
-    if ! command -v rocm-smi &> /dev/null; then
-        echo "Warning: rocm-smi not found; set PRIMUS_GPU_MODEL (e.g. MI355X) for GPU env overrides." >&2
+    local product_name=""
+    if command -v amd-smi &> /dev/null; then
+        # e.g. "        MARKET_NAME: AMD Instinct MI355X"
+        product_name=$(amd-smi static --asic 2>/dev/null | grep -i "MARKET_NAME" | head -n1)
+    elif command -v rocm-smi &> /dev/null; then
+        product_name=$(rocm-smi --showproductname 2>/dev/null | grep -i "Card series" | head -n1 | awk '{print $NF}')
+        if [[ -z "$product_name" ]]; then
+            product_name=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'MI\d+[A-Z]*' | head -n1)
+        fi
+    else
+        echo "Error: neither amd-smi nor rocm-smi found. Is ROCm installed?" >&2
         echo "unknown"
         return 0
-    fi
-
-    # Get product name from rocm-smi
-    local product_name
-    product_name=$(rocm-smi --showproductname 2>/dev/null | grep -i "Card series" | head -n1 | awk '{print $NF}')
-
-    # If that doesn't work, try alternative method
-    if [[ -z "$product_name" ]]; then
-        product_name=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'MI\d+[A-Z]*' | head -n1)
     fi
 
     # Extract model identifier (MI300, MI355, etc.)

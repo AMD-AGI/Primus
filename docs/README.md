@@ -38,6 +38,7 @@ Core workflows and day-to-day usage.
 - [Environment and XLA flags](./02-user-guide/environment-and-xla-flags.md): where to set env vars, how to override `XLA_FLAGS` safely, how to verify what took effect
 - [Pretraining](./02-user-guide/pretraining.md): pretraining **concepts**: backends, YAML structure, parallelism, configuration inventory
 - [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
+- [SpecForge (offline)](../examples/specforge/README.md): `primus-cli` entrypoint for SpecForge hidden states capture and train
 - [Megatron-LM training performance validation](./02-user-guide/megatron-lm-training.md): reproduce the published Megatron backend benchmarks on the `rocm/primus` image
 - [TorchTitan training performance validation](./02-user-guide/torchtitan-training.md): reproduce the published TorchTitan backend benchmarks on the `rocm/primus` image
 - [JAX MaxText training performance validation](./02-user-guide/jax-maxtext-training.md): reproduce the AMD-published MaxText benchmarks via Primus, MAD, or the standalone scripts
@@ -78,6 +79,7 @@ Deep technical topics for advanced users.
 - [Determinism and reproducibility](./04-technical-guides/determinism-and-reproducibility.md): deterministic mode, seeds, trade-offs
 - [Diffusion models](./04-technical-guides/diffusion-models/README.md): Flux diffusion architecture, data pipeline, and FP8 / MXFP4 training
 - [Native SFT and LoRA](./04-technical-guides/native-sft-lora.md): Megatron-native SFT/LoRA runbook (BF16 / FP8 / FP4), no Megatron-Bridge dependency
+- [Native SFT LoRA on MI455X](./04-technical-guides/LoRA_Native_Trainer_MI455_README.md): 1-GPU gfx1250 native LoRA recipes and launch notes
 
 ### [Operations](./05-operations/)
 
@@ -122,6 +124,7 @@ Long-form articles on the reasoning behind Primus features, most of them publish
 | Run my first training | [Quickstart](./01-getting-started/quickstart.md) |
 | Find out what is inside a training image | [Release notes](./01-getting-started/release-notes.md) |
 | Get an exact run command for my model/GPU | [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md) |
+| Train a SpecForge drafter on ROCm | [SpecForge on Primus](../examples/specforge/README.md) |
 | Write a training YAML configuration | [Configuration system](./02-user-guide/configuration-system.md) |
 | Look up a Megatron parameter | [Megatron parameters](./03-configuration-reference/megatron-parameters.md) |
 | Look up a TorchTitan parameter | [TorchTitan parameters](./03-configuration-reference/torchtitan-parameters.md) |
@@ -133,6 +136,7 @@ Long-form articles on the reasoning behind Primus features, most of them publish
 | Use the fused MegaMoE layer | [MegaMoE fused MoE layer](./04-technical-guides/mega-moe.md) |
 | Train a diffusion (Flux) model | [Diffusion models](./04-technical-guides/diffusion-models/README.md) |
 | Fine-tune with native SFT / LoRA | [Native SFT and LoRA](./04-technical-guides/native-sft-lora.md) |
+| Run native LoRA on MI455X (gfx1250) | [Native SFT LoRA on MI455X](./04-technical-guides/LoRA_Native_Trainer_MI455_README.md) |
 | Auto-tune my training configuration | [Tuning agent](./02-user-guide/tuning-agent.md) |
 | Profile a training run | [Profiling and observability](./04-technical-guides/profiling-and-observability.md) |
 | Track experiments (WandB/MLflow/TensorBoard) | [Logging and experiment tracking](./04-technical-guides/logging-and-experiment-tracking.md) |

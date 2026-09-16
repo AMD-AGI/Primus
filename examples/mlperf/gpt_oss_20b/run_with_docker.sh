@@ -172,6 +172,16 @@ fi
 if [[ -n "${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING:-}" ]]; then
     _extra_env+=("--env=PRIMUS_TURBO_MXFP4_SCALE_ROUNDING=${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING}")
 fi
+for _sdma_env in \
+    MEGATRON_PARAM_GATHER_BACKEND \
+    MEGATRON_RCCL_SDMA_CTA_POLICY \
+    MEGATRON_RCCL_SDMA_EAGER_INIT \
+    MEGATRON_RCCL_SDMA_EAGER_PARAM_BYTES \
+    MEGATRON_RCCL_SDMA_LOG; do
+    if [[ -n "${!_sdma_env:-}" ]]; then
+        _extra_env+=("--env=${_sdma_env}=${!_sdma_env}")
+    fi
+done
 
 if [[ "${SUBMISSION_QUIET}" == "1" ]]; then
     _extra_env+=(
@@ -231,6 +241,7 @@ if [[ "${DGXSYSTEM}" == MI* ]]; then
         --privileged \
         --shm-size=128g \
         --ulimit=memlock=-1 \
+        --ulimit=nofile=1048576:1048576 \
         --ulimit=stack=67108864 \
         --name="${_cont_name}" "${_cont_mounts[@]}" \
         -e IMAGE_NAME="${CONT}" \

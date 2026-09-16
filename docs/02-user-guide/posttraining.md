@@ -211,6 +211,7 @@ Sample command for running the post-training:
 
 - [Megatron Bridge parameters](../03-configuration-reference/megatron-bridge-parameters.md)
 - [Native SFT / LoRA quick start](../04-technical-guides/native-sft-lora.md)
+- [Native SFT LoRA on MI455X](../04-technical-guides/LoRA_Native_Trainer_MI455_README.md)
 - [Micro-benchmarking suite](./micro-benchmarking.md)
 - [Preflight diagnostics](./preflight.md)
 - [Memory and performance projection](./projection.md)
