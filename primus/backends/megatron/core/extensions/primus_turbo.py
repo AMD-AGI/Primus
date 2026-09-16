@@ -67,6 +67,7 @@ except (ImportError, ModuleNotFoundError):
     create_quantized_weight = None
 
 from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
+from primus_turbo.pytorch.core.backend import BackendType
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -1740,6 +1741,7 @@ class PrimusTurboBF16OutputColumnParallelLinear(PrimusTurboColumnParallelLinear)
             trans_b=True,
             out_dtype=x.dtype,
             fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
+            backend=BackendType.FLYDSL,
         )
         out = out.view(original_shape[0], original_shape[1], -1)
 
