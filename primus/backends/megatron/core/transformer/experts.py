@@ -302,7 +302,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
         # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
         tokens_per_expert_cpu = tokens_per_expert.tolist()
 
-        return super()._apply_bias(
+        return TEGroupedMLP._apply_bias(
             intermediate_parallel, bias_parallel, tokens_per_expert_cpu, permuted_probs
         )
 
