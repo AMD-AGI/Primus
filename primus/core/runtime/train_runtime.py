@@ -110,6 +110,11 @@ class PrimusRuntime:
             log_rank_0("Interrupted by user (Ctrl+C)")
             self._safe_cleanup(error=e)
             raise
+        except SystemExit:
+            # Capture (and any other non-exec handoff) uses SystemExit(0) to mean
+            # success. Wrapping that as RuntimeError made primus-cli report
+            # "torchrun exited with code 1" after a finished job (101977).
+            raise
         except BaseException as e:
             # Best-effort cleanup; wrap into RuntimeError for caller.
             self._safe_cleanup(error=e)

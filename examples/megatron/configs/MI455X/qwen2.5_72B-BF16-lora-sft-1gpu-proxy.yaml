@@ -1,0 +1,139 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Qwen2.5-72B LoRA SFT -- 4-layer PROXY, 1x MI455X (gfx1250). SMOKE TEST ONLY.
+#
+# Sibling of llama2_70B-BF16-lora-sft-1gpu-proxy.yaml; read that header for the
+# full rationale behind the random-init / hook-skipping setup. Same idea here:
+# keep the real per-layer shapes (hidden 8192, ffn 29568, 64 heads / 8 KV
+# groups) and cut depth 80 -> 4 so one card holds it. No number from this
+# config means anything as a 72B number.
+#
+# NO PRETRAINED WEIGHTS ARE LOADED. Qwen2.5's vocab is large (151k), so a
+# randomly-initialised base starts near ln(padded_vocab) ~= 11.9.
+#
+# Differences from the Llama-2 proxy worth knowing:
+#   * Vocab 151936 vs 32000, so the embedding/output layers dominate parameter
+#     count (~1.2B each) and the logits tensor is ~6x larger. Still comfortable
+#     at seq 2048 / MBS 1; if a wider proxy OOMs in the loss, turn on
+#     enable_fused_linear_ce (see sft_trainer.yaml) before cutting the shape.
+#   * The Qwen2.5 tokenizer is shared across the whole family, so the ungated
+#     0.5B repo provides the same 151k vocab as the 72B -- tokenizer files only,
+#     a few MB, no HF_TOKEN.
+#   * qwen2.5_base.yaml carries MoE knobs (moe_grouped_gemm etc.), but
+#     num_experts is null for this model, so they are inert. Nothing to disable.
+#   * TP=1 here. The gfx1250 runbook runs the BF16 *pretrain* proxy of this
+#     model at TP=4 on four cards; on one card TP must be 1, and note that this
+#     config does NOT inherit the pretrain recipe's use_torch_fsdp2, which would
+#     otherwise collide with sft_trainer.yaml's use_distributed_optimizer.
+#
+# Launch (1 GPU, from the Primus repo root on the host):
+#
+#   ./primus-cli container --image amdprimus/amdprimus:gfx1250-20260831 \
+#     --env HIP_VISIBLE_DEVICES=0 --env NNODES=1 --env GPUS_PER_NODE=1 \
+#     --env PRIMUS_GPU_MODEL=MI455X \
+#     --env PRIMUS_TURBO_ATTN_BACKEND=triton \
+#     -- train posttrain \
+#     --config examples/megatron/configs/MI455X/qwen2.5_72B-BF16-lora-sft-1gpu-proxy.yaml
+#
+# A pass looks like:
+#   Detected GPU model: MI455X / Loading MI455X (gfx1250) specific settings...
+#   [00_install_requirements] ... skipping Megatron-Bridge dependency install
+#   [INFO] Pretrained checkpoint already configured: ... skipping conversion
+#   WARNING: could not find the metadata file ... will start from random
+#   iteration 6/6 ... | number of nan iterations: 0
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen2.5_72B-BF16-lora-sft-1gpu-proxy}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    model: qwen2.5_72B_4layer_proxy.yaml
+
+    overrides:
+      stage: sft
+
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+
+      disable_wandb: true
+      disable_tensorboard: true
+      stderr_sink_level: DEBUG
+      log_interval: 1
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      train_iters: 6
+      micro_batch_size: 1
+      global_batch_size: 8
+      num_workers: 2
+
+      # qwen2.5_base.yaml declares 131072 positions; 2048 keeps the rope tables
+      # and the proxy cheap.
+      seq_length: 2048
+      max_position_embeddings: 2048
+
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 1
+      lr_decay_iters: 6
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: false
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      # apex fused_weight_gradient_mlp_cuda is not in the gfx1250 image
+      gradient_accumulation_fusion: false
+
+      # Random init -- see the Llama-2 proxy header. Empty dir on purpose.
+      load: ${PRIMUS_PROXY_LOAD_DIR:/tmp/primus-proxy-no-ckpt}
+      exit_on_missing_checkpoint: false
+      finetune: false
+      save: null
+      disable_last_saving: true
+      ckpt_format: torch
+      auto_detect_ckpt_format: false
+
+      # tatsu-lab/alpaca has only a "train" split.
+      eval_iters: 0
+
+      bf16: true
+
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+
+      # 4 layers at seq 2048 fit without recompute. If a wider proxy OOMs:
+      # recompute_granularity: full
+      # recompute_method: uniform
+      # recompute_num_layers: 1
+
+      lora:
+        enabled: true
+        dim: 16
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

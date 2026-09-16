@@ -1,6 +1,6 @@
 # Pretraining workflows
 
-Primus is a YAML-driven training stack for AMD GPUs. You select a **backend** (Megatron-LM, TorchTitan, JAX MaxText, Megatron Bridge), point `train pretrain` at a **configuration YAML**, and launch Primus with the unified CLI (`runner/primus-cli`) in **direct**, **container**, or **Slurm** mode. See [CLI reference](cli-reference.md) and [Configuration system](configuration-system.md).
+Primus is a YAML-driven training stack for AMD GPUs. You select a **backend** (Megatron-LM, TorchTitan, JAX MaxText, Megatron Bridge, SpecForge), point `train pretrain` at a **configuration YAML**, and launch Primus with the unified CLI (`runner/primus-cli`) in **direct**, **container**, or **Slurm** mode. See [CLI reference](cli-reference.md) and [Configuration system](configuration-system.md).
 
 This section helps you understand concepts related to the Primus workflow: how backends work, YAML structure and inheritance, parallelism vocabulary, the full per-backend configuration inventory, and so on. If you already understand the concepts and just need the specific commands to run your training with Primus, see [End-to-end training recipes](end-to-end-training-recipes.md).
 
@@ -8,7 +8,7 @@ This section helps you understand concepts related to the Primus workflow: how b
 
 ## Overview
 
-The following table describes the four backend types supported by Primus and their typical uses.
+The following table describes the backends supported by Primus and their typical uses.
 
 | Backend | Framework | Typical use |
 | --- | --- | --- |
@@ -17,6 +17,7 @@ The following table describes the four backend types supported by Primus and the
 | MaxText (JAX) | `framework: maxtext` | JAX/MaxText single- and multi-node runs; parallelism via MaxText `ici_*` / `dcn_*` settings. |
 | MaxDiffusion (JAX) | `framework: maxdiffusion` | JAX/MaxDiffusion diffusion pretraining (WAN 2.1, FLUX.1-dev). Source is vendored as the `third_party/maxdiffusion` submodule; deps/patches installed by `examples/maxdiffusion/setup_maxdiffusion_env.sh`. |
 | Megatron Bridge | `framework: megatron_bridge` | Bridge-oriented workflows (configure like other backends; see parameter reference). |
+| SpecForge | `framework: specforge` | Offline hidden states capture and draft training on a ROCm SGLang Primus image. See [SpecForge on Primus](../../examples/specforge/README.md). |
 
 > Several setup steps apply to **all** backends (mock vs. real data, Hugging Face tokens, scaling to multiple nodes, and HipBLASLt autotuning). After you read the backend section that applies to you, see [Common patterns](#common-patterns) below.
 
