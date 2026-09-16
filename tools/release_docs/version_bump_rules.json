@@ -57,6 +57,12 @@
 
   "rules": [
     {
+      "name": "dated-changelog-entry",
+      "action": "hold",
+      "match": "^\\s*[-*]\\s*\\*\\*\\[\\d{4}/\\d{2}/\\d{2}\\]\\*\\*",
+      "why": "a dated announcement is history: the README 'What's New' list gains a new entry per release (v26.6 prepended one in #1114) and older entries keep the tags they shipped with, so rewriting them produces 'Primus v26.6 training images: rocm/primus:v26.7'"
+    },
+    {
       "name": "ci-base-image",
       "action": "hold",
       "match": "BASE_IMAGE",

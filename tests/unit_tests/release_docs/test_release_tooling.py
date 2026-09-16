@@ -94,6 +94,22 @@ def test_historical_statements_are_held():
         assert action == "hold", (line, name)
 
 
+def test_dated_changelog_entries_are_held():
+    # The README "What's New" list gains an entry per release and older ones keep
+    # the tags they shipped with. Rewriting one produced the self-contradictory
+    # 'Primus **v26.6** training images: `rocm/primus:v26.7`'.
+    line = (
+        "- **[2026/09/07]** Primus **v26.6** training images: `rocm/primus:v26.6` "
+        "and `rocm/jax-training:maxtext-v26.6` (JAX 0.11.0)"
+    )
+    assert _classify(line) == ("dated-changelog-entry", "hold")
+
+
+def test_an_undated_bullet_with_a_tag_is_still_rewritten():
+    # The hold must key on the date stamp, not on being a list item.
+    assert _classify("- pull `rocm/primus:v26.6` to get started") == ("docker-image-tag", "rewrite")
+
+
 def test_comparisons_naming_two_releases_are_held():
     assert _classify("Compared with v26.6 and v26.5, the stack moved to ROCm 10.")[1] == "hold"
 
