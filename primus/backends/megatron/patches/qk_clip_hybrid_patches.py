@@ -73,9 +73,17 @@ _QKCLIP_ORI = """\
 
 _QKCLIP_NEW = """\
                 # Hybrid models interleave attention layers with linear/Mamba/KDA
-                # layers that have no ``self_attention``; skip those.
+                # layers that have no ``self_attention``; skip those. Only MLA
+                # attention is patched here for sharded/hybrid qk_clip, so also
+                # skip standard SelfAttention (whose clip_qk mishandles the
+                # sharded master) and MLA variants without ``linear_kv_up_proj``
+                # (e.g. DeepseekV4) that this rescale cannot handle.
                 self_attn = getattr(transformer_layer, 'self_attention', None)
-                if self_attn is not None and hasattr(self_attn, 'clip_qk'):
+                if (
+                    self_attn is not None
+                    and hasattr(self_attn, 'clip_qk')
+                    and hasattr(self_attn, 'linear_kv_up_proj')
+                ):
                     if self_attn.core_attention.current_max_attn_logits is None:
                         continue
                     torch.distributed.all_reduce(
@@ -253,16 +261,26 @@ def _install_qk_clip_hybrid_patches() -> None:
     ),
 )
 def patch_qk_clip_hybrid(ctx: PatchContext) -> None:
-    # qk_clip rescales the fp32 master through ``model_param.main_param``. With
-    # ``use_precision_aware_optimizer`` that master is owned by FusedAdam and
-    # ``main_param`` is unset, so the clip would touch only the bf16 weight and
-    # get overwritten on the next optimizer step. Reject the combination rather
-    # than silently under-clip. (Log-only mode never rescales, so it is fine.)
-    args = get_args(ctx)
-    if getattr(args, "qk_clip", False) and getattr(args, "use_precision_aware_optimizer", False):
-        raise NotImplementedError(
-            "qk_clip is not supported together with use_precision_aware_optimizer: "
-            "the fp32 master is owned by the fused optimizer and cannot be rescaled "
-            "by this patch. Disable one of the two."
-        )
-    _install_qk_clip_hybrid_patches()
+    # ``run_patches`` swallows exceptions (stop_on_error=False) and continues
+    # with the upstream implementation. For qk_clip that silent fallback is
+    # unsafe: the hybrid ``self_attention`` access can then crash, or the master
+    # can be left unscaled -- reintroducing the divergence this patch prevents.
+    # So escalate any incompatibility or install failure to a hard abort;
+    # ``SystemExit`` is a ``BaseException`` and is not caught by ``run_patches``.
+    try:
+        args = get_args(ctx)
+        # qk_clip rescales the fp32 master through ``model_param.main_param``.
+        # With ``use_precision_aware_optimizer`` that master is owned by the
+        # fused optimizer (``main_param`` unset), so the clip would touch only
+        # the bf16 weight and get overwritten next step. Reject the combination
+        # rather than silently under-clip. (Log-only mode never rescales.)
+        if getattr(args, "qk_clip", False) and getattr(args, "use_precision_aware_optimizer", False):
+            raise RuntimeError(
+                "qk_clip is not supported together with use_precision_aware_optimizer: "
+                "the fp32 master is owned by the fused optimizer and cannot be rescaled "
+                "by this patch. Disable one of the two."
+            )
+        _install_qk_clip_hybrid_patches()
+    except Exception as exc:
+        log_rank_0(f"[Patch:{_PATCH_KEY}] FATAL: {exc}")
+        raise SystemExit(f"[{_PATCH_KEY}] qk_clip patch installation failed: {exc}") from exc
