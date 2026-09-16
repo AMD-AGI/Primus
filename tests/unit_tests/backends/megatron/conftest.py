@@ -60,6 +60,28 @@ requires_mxfp4 = pytest.mark.skipif(
 )
 
 
+def _is_mxfp6_supported():
+    if not torch.cuda.is_available():
+        return False
+    try:
+        from primus_turbo.pytorch.kernels.quantization.mxfp6_pack import (
+            check_mxfp6_support,
+        )
+
+        supported, _ = check_mxfp6_support()
+        return supported
+    except ImportError:
+        return False
+
+
+# Stricter than requires_mxfp4: as well as gfx950 this needs an aiter carrying the A6W6
+# kernels, which check_mxfp6_support() probes for by attribute rather than by version.
+requires_mxfp6 = pytest.mark.skipif(
+    not _is_mxfp6_supported(),
+    reason="Requires gfx950+ (MI355X) and an aiter with the A6W6 kernels",
+)
+
+
 @pytest.fixture(scope="function")
 def init_parallel_state():
     """

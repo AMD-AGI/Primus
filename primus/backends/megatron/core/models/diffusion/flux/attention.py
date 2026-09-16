@@ -292,12 +292,24 @@ class JointSelfAttention(Attention):
         # Split into Q, K, V
         query, key, value = self._split_qkv(mixed_qkv)
 
-        # Apply optional Q/K normalization
+        # Apply optional Q/K normalization.
+        #
+        # The `.to(value.dtype)` is required, not defensive. Under torch.compile with
+        # emulate_precision_casts off, inductor may leave the norm's output in its fp32
+        # accumulation dtype, and only Q and K go through a norm. V then still carries
+        # the intended dtype, so it is the reference. Without this, attention receives
+        # fp32 Q/K against bf16 V and Turbo -- whose dense flash-attention backends all
+        # require fp16/bf16 -- rejects the call as "No compatible backend found for
+        # FlashAttnDenseDispatcher", naming shapes but never mentioning dtype. Casting
+        # here rather than at the attention call keeps it inside the compiled region,
+        # where it fuses into the norm's epilogue instead of costing an extra pass over
+        # Q and K. This matches the reference implementation, whose QKNorm.forward in
+        # backends/diffusion/models/flux/layers.py likewise returns `q.to(v), k.to(v)`.
         if self.q_layernorm is not None:
-            query = self.q_layernorm(query)
+            query = self.q_layernorm(query).to(value.dtype)
 
         if self.k_layernorm is not None:
-            key = self.k_layernorm(key)
+            key = self.k_layernorm(key).to(value.dtype)
 
         return query, key, value
 
@@ -322,10 +334,10 @@ class JointSelfAttention(Attention):
 
         # Apply optional Q/K normalization
         if self.added_q_layernorm is not None:
-            query = self.added_q_layernorm(query)
+            query = self.added_q_layernorm(query).to(value.dtype)
 
         if self.added_k_layernorm is not None:
-            key = self.added_k_layernorm(key)
+            key = self.added_k_layernorm(key).to(value.dtype)
 
         return query, key, value
 
@@ -512,6 +524,24 @@ class FluxSingleAttention(SelfAttention):
             is_expert=False,
             tp_comm_buffer_name="proj",
         )
+
+    def get_query_key_value_tensors(self, *args, **kwargs):
+        """
+        Derive Q, K, V, realigning Q/K onto V's dtype.
+
+        Megatron's implementation returns the QK-norm's output as-is, which under
+        torch.compile can be its fp32 accumulation dtype. See the note in
+        JointSelfAttention.get_query_key_value_tensors for why that breaks
+        attention and why V is the reference. The joint blocks project QKV
+        themselves and cast inline; the single blocks reuse Megatron's projection,
+        so the cast goes here, still inside the compiled region.
+        """
+        out = super().get_query_key_value_tensors(*args, **kwargs)
+        if len(out) < 3:
+            # split_qkv=False: (mixed_qkv, split_arg_list), no norm applied yet.
+            return out
+        query, key, value, *rest = out
+        return (query.to(value.dtype), key.to(value.dtype), value, *rest)
 
     def forward(
         self,

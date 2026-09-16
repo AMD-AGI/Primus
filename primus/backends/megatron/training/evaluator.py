@@ -15,7 +15,11 @@ from megatron.core.rerun_state_machine import RerunMode, get_rerun_state_machine
 from megatron.training import ft_integration, get_args, get_timers
 from megatron.training.utils import is_last_rank
 
-from primus.backends.megatron.training.eval_budget import get_eval_num_microbatches
+from primus.backends.megatron.training.eval_budget import (
+    get_eval_global_batch_size,
+    get_eval_micro_batch_size,
+    get_eval_num_microbatches,
+)
 from primus.backends.megatron.training.eval_session import begin_eval_session
 from primus.backends.megatron.training.global_vars import get_train_start_time
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
@@ -192,8 +196,12 @@ def primus_evaluate(
     total_loss_numerators = {}
     total_loss_denominators = {}
 
-    # make validation batch size independent from training batch size
-    eval_batch_size = args.global_batch_size
+    # Validation batch size, independent of the training one where the recipe
+    # says so: the training global batch has a floor of dp_size x
+    # micro_batch_size and cannot always divide a validation split, and a split
+    # it cannot divide would otherwise be evaluated only in part.
+    eval_batch_size = get_eval_global_batch_size(args)
+    eval_micro_batch_size = get_eval_micro_batch_size(args)
     # Shared with the dataloader provider so the loop and the dataset it reads
     # from cannot disagree about how large an evaluation is.
     eval_num_microbatches = get_eval_num_microbatches(args)
@@ -228,7 +236,7 @@ def primus_evaluate(
                 model=model,
                 num_microbatches=eval_num_microbatches,
                 seq_length=args.seq_length,
-                micro_batch_size=args.micro_batch_size,
+                micro_batch_size=eval_micro_batch_size,
                 decoder_seq_length=args.decoder_seq_length,
                 forward_only=True,
             )
