@@ -63,8 +63,8 @@ Submodules are required for third-party backends and tools:
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-# checkout the branch for the specific release
-git checkout release/v26.6
+# the commit the v26.7 images were built from (release/v26.7 is not cut yet)
+git checkout 2631e68d
 git submodule update --init --recursive
 ```
 

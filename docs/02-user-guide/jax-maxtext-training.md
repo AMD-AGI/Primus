@@ -10,7 +10,7 @@ AMD provides a ready-to-use Docker image for AMD Instinct MI300X and MI355X GPUs
 
 For the full software stack of this image (ROCm, JAX, Transformer Engine, hipBLASLt, RCCL, TensorFlow, and the rest), see [Release notes → `rocm/jax-training:maxtext-v26.7`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v266). The release notes are the single source of truth for image contents.
 
-> **Primus source:** use the `release/v26.6` branch rather than the Primus checkout baked into the image — see [Release notes → Primus source for v26.6](../01-getting-started/release-notes.md#primus-source-for-v266) for why.
+> **Primus source:** check out commit `2631e68d` rather than using the Primus copy baked into the image — see [Release notes → Primus source for v26.7](../01-getting-started/release-notes.md#primus-source-for-v267) for why.
 
 ---
 
@@ -168,7 +168,7 @@ JAX MaxText is integrated into [Primus](https://github.com/AMD-AGI/Primus), whic
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.6
+git checkout 2631e68d   # the commit the v26.7 images were built from (release/v26.7 is not cut yet)
 git submodule update --init third_party/maxtext/
 ```
 

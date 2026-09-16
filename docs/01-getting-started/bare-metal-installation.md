@@ -263,33 +263,35 @@ pip install \
     cxxfilt==0.3.0 tqdm==4.67.3 pyyaml==6.0.3 pytest==9.0.3 \
     matplotlib==3.10.9 pandas==2.3.3 py-cpuinfo==9.0.0 build==1.5.0
 
-# One coherent nightly. The Dockerfile pins only `torch` and lets the companions
-# float, which no longer resolves; pin them all to the same date.
-NIGHTLY="rocm7.15.0a20260727"
+# One coherent ROCm build. The Dockerfile pins only `torch` and lets the
+# companions float, which no longer resolves; pin them all to the same build.
+# v26.7 serves ROCm core and the torch set from two separate indexes.
+ROCM_BUILD="rocm10.0.0"
 
 python -m pip uninstall -y torch
 python -m pip install \
-    --index-url https://rocm.nightlies.amd.com/whl-multi-arch --pre \
-    rocm==7.15.0a20260727 \
+    --index-url https://stable.repo.amd.com/rocm/core/whl-next/ \
+    --extra-index-url https://stable.repo.amd.com/rocm/pytorch/whl-next/ --pre \
+    rocm==10.0.0 \
     rocm-bootstrap \
-    rocm-sdk-core==7.15.0a20260727 \
-    rocm-sdk-devel==7.15.0a20260727 \
-    rocm-sdk-libraries==7.15.0a20260727 \
-    torch==2.12.0+${NIGHTLY} \
-    amd-torch-device-gfx942==2.12.0+${NIGHTLY} \
-    amd-torch-device-gfx950==2.12.0+${NIGHTLY} \
-    rocm-sdk-device-gfx942==7.15.0a20260727 \
-    rocm-sdk-device-gfx950==7.15.0a20260727 \
-    torchaudio==2.11.0+${NIGHTLY} \
-    torchvision==0.27.0+${NIGHTLY} \
-    amd-torchvision-device-gfx942==0.27.0+${NIGHTLY} \
-    amd-torchvision-device-gfx950==0.27.0+${NIGHTLY} \
-    apex==1.12.0+${NIGHTLY}
+    rocm-sdk-core==10.0.0 \
+    rocm-sdk-devel==10.0.0 \
+    rocm-sdk-libraries==10.0.0 \
+    torch==2.12.0+${ROCM_BUILD} \
+    amd-torch-device-gfx942==2.12.0+${ROCM_BUILD} \
+    amd-torch-device-gfx950==2.12.0+${ROCM_BUILD} \
+    rocm-sdk-device-gfx942==10.0.0 \
+    rocm-sdk-device-gfx950==10.0.0 \
+    torchaudio==2.11.0+${ROCM_BUILD} \
+    torchvision==0.27.0+${ROCM_BUILD} \
+    amd-torchvision-device-gfx942==0.27.0+${ROCM_BUILD} \
+    amd-torchvision-device-gfx950==0.27.0+${ROCM_BUILD} \
+    apex==1.13.0+${ROCM_BUILD}
 ```
 
 > Install only the `*-gfx942` **or** `*-gfx950` device packages matching your hardware for a smaller install.
 >
-> Nightly indexes are pruned. If this date has disappeared, pick a newer one that publishes a *complete* cp312 set — `torch`, `amd-torch-device-*`, `rocm-sdk-*`, `torchaudio`, `torchvision`, `amd-torchvision-device-*` and `apex` must all come from the same date.
+> These indexes are pruned over time. If this build has disappeared, pick a newer one that publishes a *complete* cp312 set — `torch`, `amd-torch-device-*`, `rocm-sdk-*`, `torchaudio`, `torchvision`, `amd-torchvision-device-*` and `apex` must all come from the same date.
 
 ### 4.4 Initialize the ROCm SDK and export ROCm paths
 
@@ -338,7 +340,7 @@ mkdir -p ~/primus-build && cd ~/primus-build
 | causal-conv1d | `Dao-AILab/causal-conv1d` | `e940ead2fd962c56854455017541384909ca669f` | `pip install --no-build-isolation .` | needs `CAUSAL_CONV1D_FORCE_BUILD=TRUE`, `HIP_ARCHITECTURES=gfx942,gfx950` |
 | mamba | `AndreasKaratzas/mamba` | branch `enable-primus-hybrid-models` | `pip install --no-build-isolation .` | see note below |
 | aiter | `ROCm/aiter` | `0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e` | `PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .` | clone `--recursive`; `pip uninstall aiter amd-aiter` first |
-| Primus-Turbo | `AMD-AGI/Primus-Turbo` | `a6a16cdce46bd2235a248b41f501fb363c215b9b` | `pip install -r requirements.txt` then `pip install --no-build-isolation . -v` | needs `HCC_AMDGPU_TARGET="gfx942,gfx950"`; see note below |
+| Primus-Turbo | `AMD-AGI/Primus-Turbo` | `6d5ff979e46bd2235a248b41f501fb363c215b9b` | `pip install -r requirements.txt` then `pip install --no-build-isolation . -v` | needs `HCC_AMDGPU_TARGET="gfx942,gfx950"`; see note below |
 | torchtune | `pytorch/torchtune` | `b4c98ac2a37f0397d64c22579aed415ce7264db6` | `pip install .` | patch first: `sed -i 's/use_grouped_mm = True/use_grouped_mm = False/g' torchtune/modules/moe/utils.py` |
 | torchao | `pytorch/ao` | `e9c7bead90b840b280f97374308255957108ce47` | `pip install --no-build-isolation .` | two patches: `pad_inner_dim` → `True` in `torchao/float8/config.py`, and `if defined(HIPBLASLT_VEC_EXT)` → `if false` in `torchao/csrc/rocm/swizzle/swizzle.cpp` |
 
@@ -360,9 +362,9 @@ pip install pybind11==3.0.4 importlib-metadata==8.7.1 onnxscript==0.7.0 \
             pydantic==2.13.4 nvdlfw_inspect==0.2.2 einops==0.9.0.dev0 onnx
 
 pip install \
-    --index-url https://rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/ \
+    --index-url https://rocm.frameworks-devreleases.amd.com/whl-multi-arch-staging/ \
     --pre --no-build-isolation \
-    transformer_engine_rocm_torch==2.17.0+rocm7.15.0a20260727.e028a6c
+    transformer_engine_rocm_torch==2.17.0+rocm10.0.0
 ```
 
 > **Those wheels need glibc ≥ 2.38.** They are built on Ubuntu 24.04, and `libtransformer_engine.so` requires `GLIBC_2.38` plus `GLIBCXX_3.4.32`. Ubuntu 22.04 has glibc 2.35, and glibc cannot be side-loaded via `LD_LIBRARY_PATH`, so on 22.04 the wheels install fine but fail at import with `version 'GLIBC_2.38' not found`.
@@ -393,7 +395,7 @@ sed -i 's|    mv -n "$_TMP_SO" "$OUTPUT"$|    mv -n "$_TMP_SO" "$OUTPUT" 2>/dev/
 
 ```bash
 pip install \
-    datasets==3.6.0 av==16.0.1 transformers==5.5.0 optree==0.18.0 sympy \
+    datasets==3.6.0 av==16.0.1 transformers==5.10.0 optree==0.18.0 sympy \
     accelerate==1.9.0 trl==0.21.0 tensorboard==2.20.0 peft scipy einops \
     flask-restful nltk pytest pytest-cov pytest_mock pytest-csv \
     pytest-random-order sentencepiece wrapt \
@@ -419,7 +421,7 @@ export PRIMUS_FLA_MLA_ATTN=1
 
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout 2aa05ead3401708cf1a1e2958c1def18d7aecf92   # release/v26.6
+git checkout 2631e68dd8b658ab1f991cbc671d538205a51fee   # the v26.7.0 tag commit
 git submodule update --init --recursive
 pip install -r requirements.txt
 
@@ -439,7 +441,7 @@ If you already have a local Primus checkout, run `pip install -r requirements.tx
 pip install --no-deps torchrec
 pip install tensordict iopath torchmetrics==1.0.3 \
     git+https://github.com/mlperf/logging.git \
-    --extra-index-url https://rocm.nightlies.amd.com/whl-multi-arch
+    --extra-index-url https://stable.repo.amd.com/rocm/pytorch/whl-next/
 
 # FBGEMM (GPU) — needs apt libtbb-dev
 export BUILD_ROCM_VERSION='7.15'

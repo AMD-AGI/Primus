@@ -31,7 +31,7 @@ OPTIONAL_STAGES=(torchrec)
 
 usage() {
     cat <<EOF
-setup.sh — build the Primus v26.6 training environment in a venv.
+setup.sh — build the Primus v26.7 training environment in a venv.
 
 PRIMUS_BASE must be exported first; it has no default because the right location
 is site-specific. Point it at a writable dir on a disk with tens of GB free:
@@ -65,7 +65,12 @@ die()  { echo -e "\033[1;31m[setup][ERROR] $*\033[0m" >&2; exit 1; }
 reload_env() { source "$SCRIPT_DIR/env.sh"; }
 
 # ---- pinned versions / commits (from Dockerfile.primus-v26.7) ----
-TORCH_INDEX="https://rocm.nightlies.amd.com/whl-multi-arch"
+# v26.7 splits the wheels across stable.repo.amd.com indexes; the single
+# rocm.nightlies.amd.com/whl-multi-arch index used up to v26.6 no longer carries
+# them. ROCm core and the torch set live on separate indexes, so stage_torch
+# passes one as --index-url and the other as --extra-index-url.
+ROCM_INDEX="https://stable.repo.amd.com/rocm/core/whl-next/"
+TORCH_INDEX="https://stable.repo.amd.com/rocm/pytorch/whl-next/"
 # The Dockerfile pins only `torch` and lets torchaudio/apex float and
 # torchvision resolve as `==0.27`. That no longer resolves: newer rocm10.x
 # nightlies now publish matching version numbers, so a floating torchvision
@@ -83,6 +88,10 @@ FLASH_ATTN_VERSION="2.8.1"
 # wheels are built on Ubuntu 24.04 though, and libtransformer_engine.so needs
 # glibc >= 2.38, so they cannot load on a 22.04 host. stage_te falls back to
 # building TE from source; see PRIMUS_TE_MODE and the README.
+# v26.7 installs three TE distributions (v26.6 had two): the `transformer_engine`
+# and `transformer_engine_rocm10` pair from the ROCm TE index, plus the torch
+# flavour from the multi-arch staging index.
+TE_CORE_INDEX="https://stable.repo.amd.com/rocm/transformer_engine/whl-next/"
 TE_INDEX="https://rocm.frameworks-devreleases.amd.com/whl-multi-arch-staging/"
 TE_VERSION="2.17.0+rocm10.0.0"
 TE_WHEEL_MIN_GLIBC="2.38"
@@ -231,7 +240,7 @@ stage_venv() {
         local have
         have="$("$VENV_DIR/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
         [ "$have" = "$PRIMUS_PYTHON_VERSION" ] || die \
-"existing venv at $VENV_DIR is Python $have, but v26.6 requires $PRIMUS_PYTHON_VERSION.
+"existing venv at $VENV_DIR is Python $have, but v26.7 requires $PRIMUS_PYTHON_VERSION.
   The pinned torch nightly ships a cp312 Linux wheel only, so an older venv
   cannot be upgraded in place. Remove it and re-run:
       rm -rf '$VENV_DIR' && bash setup.sh"
@@ -284,7 +293,8 @@ stage_torch() {
     log "Installing device wheels for: $PYTORCH_ROCM_ARCH"
 
     $PIP install \
-        --index-url "$TORCH_INDEX" \
+        --index-url "$ROCM_INDEX" \
+        --extra-index-url "$TORCH_INDEX" \
         --pre \
         "rocm==${ROCM_SDK_VERSION}" \
         rocm-bootstrap \
@@ -429,15 +439,22 @@ stage_te_wheel() {
     # compiled here against the installed torch (hence --no-build-isolation),
     # and it pulls the prebuilt transformer_engine_rocm7 core wheel.
     MAX_JOBS="$MAX_JOBS" GPU_ARCHS="$PYTORCH_ROCM_ARCH" pipi \
+        --index-url "$TE_CORE_INDEX" \
+        --pre \
+        --no-build-isolation \
+        "transformer_engine==${TE_VERSION}" \
+        "transformer_engine_rocm10==${TE_VERSION}" \
+        || die "TransformerEngine (core) install failed"
+    $PIP install \
         --index-url "$TE_INDEX" \
         --pre \
         --no-build-isolation \
         "transformer_engine_rocm_torch==${TE_VERSION}" \
-        || die "TransformerEngine install failed"
+        || die "TransformerEngine (torch flavour) install failed"
 }
 
 stage_te_source() {
-    log "Building TransformerEngine from source @ $TE_COMMIT (glibc $(host_glibc) < $TE_WHEEL_MIN_GLIBC, so the v26.6 wheels cannot load)"
+    log "Building TransformerEngine from source @ $TE_COMMIT (glibc $(host_glibc) < $TE_WHEEL_MIN_GLIBC, so the v26.7 wheels cannot load)"
     # Drop any previously wheel-installed TE, otherwise the unusable prebuilt
     # core library stays behind and keeps winning the import.
     $PIP uninstall -y transformer_engine_rocm_torch transformer_engine_rocm7 \
@@ -715,7 +732,7 @@ stage_turbo() {
 
 stage_boto() {
     reload_env
-    log "Installing boto3/botocore and CVE-fix pins from the v26.6 image"
+    log "Installing boto3/botocore and CVE-fix pins from the v26.7 image"
     pipi boto3==1.35.42 botocore==1.35.99
     pipi cryptography==50.0.0 diffusers==0.38.0 "jaraco.context==6.1.0" pyarrow==23.0.1
     # mlflow caps cryptography<50; --no-deps keeps the 50.0.0 pin above.

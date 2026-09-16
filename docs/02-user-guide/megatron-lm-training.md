@@ -20,7 +20,7 @@ Read this section before starting a training run. It collects the settings this 
 
 ### Required settings
 
-**Use the `release/v26.6` branch.** It is the Primus branch matching the `rocm/primus:v26.7` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image — see [Release notes → Primus source for v26.6](../01-getting-started/release-notes.md#primus-source-for-v266). [Environment setup](#1-environment-setup) has the clone command.
+**Check out commit `2631e68d`.** It is the Primus revision the `rocm/primus:v26.7` image was built from; a `release/v26.7` branch has not been cut yet. Prefer this checkout over the `/workspace/Primus` copy baked into the image — see [Release notes → Primus source for v26.7](../01-getting-started/release-notes.md#primus-source-for-v267). [Environment setup](#1-environment-setup) has the clone command.
 
 ### Architecture-specific settings
 
@@ -142,11 +142,11 @@ Use the following instructions to set up the environment, configure the script t
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.6
+git checkout 2631e68d   # the commit the v26.7 images were built from (release/v26.7 is not cut yet)
 git submodule update --init --recursive
 ```
 
-That is all the setup required. The training commands below use `primus-cli container`, which starts `rocm/primus:v26.7` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used — see [Release notes → Primus source for v26.6](../01-getting-started/release-notes.md#primus-source-for-v266).
+That is all the setup required. The training commands below use `primus-cli container`, which starts `rocm/primus:v26.7` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used — see [Release notes → Primus source for v26.7](../01-getting-started/release-notes.md#primus-source-for-v267).
 
 Container mode also forwards environment variables you export on the host, including `HF_TOKEN`, the gfx942 tuning variables, and the `NCCL_*` networking variables. The forwarded list is `container.options.env` in `runner/.primus.yaml`.
 
@@ -207,7 +207,7 @@ export HF_TOKEN=<your_hftoken>
 
 ### 3.1 Single-node training
 
-To run model training on a single node, run the commands below from your `release/v26.6` Primus checkout on the host (recommended). When using `./runner/primus-cli container`, no additional `pip install` step is required.
+To run model training on a single node, run the commands below from your `2631e68d` Primus checkout on the host (recommended). When using `./runner/primus-cli container`, no additional `pip install` step is required.
 
 #### MI300X performance configs
 
@@ -585,7 +585,7 @@ To run training on multiple nodes, you can use `primus-cli` (recommended) or the
 
 > **Verify NCCL / network env first.** The `primus-cli` launcher script sets sensible `NCCL_*` defaults via `base_env.sh`, but auto-detection can pick the wrong device on multi-NIC nodes. Always confirm `NCCL_IB_HCA`, `NCCL_IB_GID_INDEX`, `NCCL_SOCKET_IFNAME`, and `GLOO_SOCKET_IFNAME` (set to the same value as `NCCL_SOCKET_IFNAME`) are correct for your fabric. If necessary, you can `export` these environment variables before running.
 
-From your `release/v26.6` checkout (see [Environment setup](#1-environment-setup)), export the cluster settings:
+From your `2631e68d` checkout (see [Environment setup](#1-environment-setup)), export the cluster settings:
 
 ```bash
 export DOCKER_IMAGE=rocm/primus:v26.7
@@ -598,7 +598,7 @@ export NCCL_IB_GID_INDEX=3 # Set InfiniBand GID index for NCCL communication. De
 # On MI300X/MI325X also export the gfx942 tuning variables; see "Architecture-specific settings"
 ```
 
-> **Note:** `release/v26.6` is the branch matching the `rocm/primus:v26.7` image. If you are reproducing published v26.4 numbers instead, use `git checkout 236cfa9` with `rocm/primus:v26.4` — see [Release notes → Primus source for v26.4](../01-getting-started/release-notes.md#primus-source-for-v264).
+> **Note:** `2631e68d` is the commit matching the `rocm/primus:v26.7` image. If you are reproducing published v26.4 numbers instead, use `git checkout 236cfa9` with `rocm/primus:v26.4` — see [Release notes → Primus source for v26.4](../01-getting-started/release-notes.md#primus-source-for-v264).
 
 For clusters using AMD AINIC, set the following environment variables:
 

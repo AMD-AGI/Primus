@@ -20,7 +20,7 @@ Read this section before starting a training run. It collects the settings this 
 
 ### Required settings
 
-**Use the `release/v26.6` branch.** It is the Primus branch matching the `rocm/primus:v26.7` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image — see [Release notes → Primus source for v26.6](../01-getting-started/release-notes.md#primus-source-for-v266). [Environment setup](#get-the-primus-source) has the clone command.
+**Check out commit `2631e68d`.** It is the Primus revision the `rocm/primus:v26.7` image was built from; a `release/v26.7` branch has not been cut yet. Prefer this checkout over the `/workspace/Primus` copy baked into the image — see [Release notes → Primus source for v26.7](../01-getting-started/release-notes.md#primus-source-for-v267). [Environment setup](#get-the-primus-source) has the clone command.
 
 ### Architecture-specific settings
 
@@ -98,11 +98,11 @@ Clone the branch matching the image. Do this on the host — every command in th
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.6
+git checkout 2631e68d   # the commit the v26.7 images were built from (release/v26.7 is not cut yet)
 git submodule update --init --recursive
 ```
 
-That is all the setup required. The training commands below use `primus-cli container`, which starts `rocm/primus:v26.7` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used — see [Release notes → Primus source for v26.6](../01-getting-started/release-notes.md#primus-source-for-v266).
+That is all the setup required. The training commands below use `primus-cli container`, which starts `rocm/primus:v26.7` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used — see [Release notes → Primus source for v26.7](../01-getting-started/release-notes.md#primus-source-for-v267).
 
 Container mode also forwards environment variables you export on the host, including `HF_TOKEN`, the gfx942 tuning variables, and the `NCCL_*` networking variables. The forwarded list is `container.options.env` in `runner/.primus.yaml`.
 
@@ -142,7 +142,7 @@ export HF_TOKEN=$your_personal_hf_token
 
 For detailed usage of `primus-cli`, see the [CLI reference](./cli-reference.md).
 
-Run these from your `release/v26.6` checkout **on the host**. Container mode starts the image and runs the training inside it for you. If you already have a shell inside the container, swap `container` for `direct`.
+Run these from your `2631e68d` checkout **on the host**. Container mode starts the image and runs the training inside it for you. If you already have a shell inside the container, swap `container` for `direct`.
 
 ### Benchmarking examples
 

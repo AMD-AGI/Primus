@@ -1,6 +1,6 @@
 # Primus JAX / MaxText environment in a venv (no docker, no sudo) — v26.7
 
-Reproduces the Primus **v26.6 JAX training Dockerfile**
+Reproduces the Primus **v26.7 JAX training Dockerfile**
 ([`Dockerfile.jax-v26.7`](../../.github/workflows/docker-release/Dockerfile.jax-v26.7))
 in a Python virtual environment. Same package pins as the Dockerfile, adapted for
 a bare-metal host with no root and no containers.
@@ -13,7 +13,7 @@ training backend of Primus.
 
 | Constraint | Dockerfile | Here |
 |---|---|---|
-| ROCm | pip `rocm-sdk-*` 7.14.0 → `/opt/venv/.../_rocm_sdk_devel` | same wheels → in-venv `_rocm_sdk_devel` (**no sudo**) |
+| ROCm | pip `rocm-sdk-*` 10.0.0 → `/opt/venv/.../_rocm_sdk_devel` | same wheels → in-venv `_rocm_sdk_devel` (**no sudo**) |
 | GPU arch | gfx942 + gfx950 | **auto-detected** from the host (`rocminfo`/KFD sysfs) for source builds/TE |
 | Build dir | container FS | venv on **`$PRIMUS_JAX_BASE`** (persistent); transient sources on local `/tmp` |
 | System deps | `apt install ...` | **skipped** (no sudo); documented in the guide's Section 2 |
@@ -86,25 +86,32 @@ checkout we installed the dependencies for.
 ## Stages (default order, v26.7)
 
 `venv` → `rocm` → `maxtext` → `tf_source` → `jax` → `te` → `primus`
-→ `jaxreqs` → `rccl` → `manifest`
+→ `jaxreqs` → `manifest`
 
 - **venv** — create the venv (Python ≥ 3.12) and bootstrap `cmake`/`ninja`/`uv`.
-- **rocm** — pip-install TheRock `rocm-sdk-*` 7.14.0 (core/devel/libraries +
+- **rocm** — pip-install TheRock `rocm-sdk-*` 10.0.0 (core/devel/libraries +
   per-arch device wheels) and run `rocm-sdk init`.
-- **maxtext** — clone ROCm/MaxText (`release/v26.6`) and install its deps (the
+- **maxtext** — clone ROCm/MaxText (`release/v26.7`) and install its deps (the
   Python part of MaxText's `setup.sh`) + the editable MaxText package.
 - **tf_source** — build **tensorflow-cpu 2.21 from source** (bazel, ~30–60 min);
   fixes the ROCm-vs-TF LLVM symbol clash (SIGSEGV) and drops bundled NCCL.
-- **jax** — `jax`/`jaxlib` 0.11.0 + `jax_rocm7_pjrt` / `jax_rocm7_plugin`
-  `0.11.0.post1` from PyPI (installed after MaxText to override its stock jax).
-- **te** — prebuilt `transformer_engine_rocm_jax==2.17.0+rocm7.14.0.50a84ad`
+- **jax** — `jax`/`jaxlib` 0.11.0 + `jax_rocm10_pjrt` / `jax_rocm10_plugin`
+  `0.11.0+rocm10.0.0` from PyPI (installed after MaxText to override its stock jax).
+- **te** — prebuilt `transformer_engine_rocm_jax==2.17.0+rocm10.0.0`
   (+ `flax==0.12.8`, `pydantic`, ...); auto-falls-back to a from-source build
   (`te_source`) on glibc < 2.38 hosts.
 - **primus** — clone Primus, init the `third_party/maxtext` submodule, drop the
   stale `dataclasses` backports.
-- **jaxreqs** — install Primus' `requirements-jax.txt` and the v26.6 CVE-fix pins.
-- **rccl** — build **RCCL from source** and install it into `$ROCM_PATH/lib`.
+- **jaxreqs** — install Primus' `requirements-jax.txt` and the v26.7 CVE-fix pins.
 - **manifest** — dump `pip list` / `env` for reproducibility.
+
+Optional stages:
+
+- **rccl** — build **RCCL from source** into `$ROCM_PATH/lib`. Not part of the
+  default flow from v26.7: the ROCm 10.0.0 pip SDK ships RCCL 2.30.4 and the
+  published image no longer overrides it. Run this only to reproduce v26.6, or on
+  a host that needs the `rocm-systems` net-ib fix (ROCM-27881).
+- **te_source**, **tf_cpu_fix** — see `setup.sh --list`.
 
 Optional / alternative stages:
 
@@ -121,10 +128,10 @@ Optional / alternative stages:
 ```bash
 # Ubuntu 22.04 (glibc < 2.38): `bash setup.sh` already builds TE from source
 # automatically. To also skip the heavy tf_source bazel build, swap in tf_cpu_fix:
-bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs rccl manifest
+bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs manifest
 ```
 
-> **MaxText v26.6 and Primus.** Override `MAXTEXT_BRANCH` only if you deliberately
+> **MaxText v26.7 and Primus.** Override `MAXTEXT_BRANCH` only if you deliberately
 > need a different MaxText release.
 
 ## What is SKIPPED (needs sudo / apt — not reproducible here)
@@ -140,13 +147,13 @@ bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs rccl manifest
 
 ## Notes / gotchas vs. the Dockerfile
 
-- **Stage order matters (v26.6):** `maxtext` → `tf_source` → `jax` → `te`. MaxText's
+- **Stage order matters (v26.7):** `maxtext` → `tf_source` → `jax` → `te`. MaxText's
   `setup.sh` pulls in a stock `jax`/`tensorflow`; TF is then rebuilt from source and
   the ROCm JAX/plugin is installed after (overriding MaxText's), and TE must come
   after JAX or `jaxlib` gets clobbered. The stage order enforces this.
-- **TensorFlow + RCCL are built from source** in the default flow (matching the
-  v26.6 image). These are the two long builds; use `tf_cpu_fix` if you want to skip
-  the TF bazel build.
+- **TensorFlow is built from source** in the default flow, matching the v26.7
+  image. It is the one long build; use `tf_cpu_fix` to skip the bazel step. RCCL is
+  no longer built — v26.7 takes it from the ROCm 10.0.0 pip SDK.
 - **Runtime `LD_LIBRARY_PATH` is empty**, matching the image's TE 2.17 + JAX
   segfault fix. RCCL/TE source builds set `PRIMUS_JAX_KEEP_ROCM_LD=1`.
 - **TE from source always compiles gfx942+gfx950.** TE 2.17's HipKittens GEMM

@@ -88,11 +88,11 @@ Clone the branch matching your image, on the host. Every command on this page ru
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.6
+git checkout 2631e68d   # the commit the v26.7 images were built from (release/v26.7 is not cut yet)
 git submodule update --init --recursive
 ```
 
-Container mode mounts this checkout into the container, so this is the code that runs — you do not need the `/workspace/Primus` copy baked into the image, which lags the release branch. See [Release notes → Primus source for v26.6](../01-getting-started/release-notes.md#primus-source-for-v266).
+Container mode mounts this checkout into the container, so this is the code that runs — you do not need the `/workspace/Primus` copy baked into the image, which lags the release branch. See [Release notes → Primus source for v26.7](../01-getting-started/release-notes.md#primus-source-for-v267).
 
 ### Pull the image (optional)
 
