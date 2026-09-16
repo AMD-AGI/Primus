@@ -63,7 +63,15 @@ In `direct` mode inside a container, a plain `export PYTORCH_CUDA_ALLOC_CONF=exp
 
 ### Known issues
 
-No Megatron-LM backend issues are currently tracked for v26.6.
+<!-- NEEDS CONFIRMATION: no open Megatron-LM issue is derivable from the v26.6..v26.7
+     commit range, but absence of a commit is not evidence of absence of an issue.
+     Confirm before publishing. -->
+No Megatron-LM backend issues are currently tracked for v26.7.
+
+**If you are upgrading from v26.6, do upgrade.** On v26.6, Primus-Turbo's non-fused
+weight-gradient path accumulated the gradient only on the first microbatch, so any
+run using gradient accumulation on that path trained on partial gradients. Fixed in
+v26.7 by [#1046](https://github.com/AMD-AGI/Primus/pull/1046).
 
 ### Registry change
 
@@ -97,6 +105,7 @@ The following models are pre-optimized for performance on the AMD Instinct MI300
 - Llama 3/3.1/3.3 70B
 - DeepSeek-V2-lite
 - DeepSeek-V3
+- DeepSeek-V4 (BF16 SFT, and packed-sequence THD SFT at 4k/128k — see [`examples/deepseek-v4`](https://github.com/AMD-AGI/Primus/tree/main/examples/deepseek-v4); gfx942 recipes added in v26.7)
 - Mixtral 8x7B
 - Mixtral 8x22B
 - Qwen 2.5 7B/72B

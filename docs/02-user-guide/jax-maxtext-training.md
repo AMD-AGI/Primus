@@ -20,7 +20,7 @@ Read this section before starting a training run. It collects the settings this 
 
 ### Required settings
 
-**Enable Shardy.** Shardy is the partitioning system in JAX. The v26.6 image ships JAX 0.11.0, which requires it, so set `shardy=True` during the training run. You may see partitioning-related errors if it is not configured correctly. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html) for details.
+**Enable Shardy.** Shardy is the partitioning system in JAX. The v26.7 image ships JAX 0.11.0, which requires it, so set `shardy=True` during the training run. You may see partitioning-related errors if it is not configured correctly. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html) for details.
 
 ### Architecture-specific settings
 
@@ -34,7 +34,12 @@ This variable is a no-op on MI300X (gfx942).
 
 ### Known issues
 
+<!-- NEEDS CONFIRMATION: carried over from v26.6. Nothing in the v26.6..v26.7 range
+     addresses it, so it is assumed still open on the ROCm 10.0.0 stack — but it has
+     not been re-tested against v26.7. Confirm or drop before publishing. -->
 **Loss curve discrepancy with `packing=false`.** With `packing=false` the loss converges at a slightly higher value than in previous images. To reproduce the earlier convergence, set `NVTE_CK_USES_FWD_V3=0`, which uses Flash Attention v2 for the forward pass instead of v3. This is being tracked and will be addressed in a future release.
+
+**The ROCm 10.0.0 move is untested against these recipes.** v26.7 rebuilds the whole JAX stack on ROCm 10.0.0 and renames the plugin wheels; the per-model settings below were validated on the v26.6 (ROCm 7.14.0) stack. Re-check throughput and convergence on your own hardware before trusting a number here.
 
 ---
 

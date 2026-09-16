@@ -33,7 +33,11 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Known issues
 
-No TorchTitan backend issues are currently tracked for v26.6.
+<!-- NEEDS CONFIRMATION: no open TorchTitan issue is derivable from the v26.6..v26.7
+     commit range. Confirm before publishing. -->
+No TorchTitan backend issues are currently tracked for v26.7.
+
+**The Turbo grouped-GEMM config was renamed** in v26.7 ([#1041](https://github.com/AMD-AGI/Primus/pull/1041)). If you carry a local TorchTitan config that sets it, update the key.
 
 ### Registry change
 
