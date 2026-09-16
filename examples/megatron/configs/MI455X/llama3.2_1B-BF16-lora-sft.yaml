@@ -1,0 +1,126 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Llama-3.2-1B LoRA SFT on 1x MI455X (gfx1250).
+#
+# Native Megatron SFT trainer (sft_trainer.yaml), not Megatron-Bridge.
+# HF weights are converted in-process by the post-train hook, then wrapped
+# with LoRA. TP=PP=CP=EP=1 so the converted single-shard checkpoint matches.
+#
+# MI455X env: primus-cli loads runner/helpers/envs/primus-env.sh, which sources
+# runner/helpers/envs/MI455X.sh when the GPU is gfx1250 or PRIMUS_GPU_MODEL=MI455X.
+#
+# Launch (1 GPU, from the Primus repo root on the host):
+#
+#   export DOCKER_IMAGE=amdprimus/amdprimus:gfx1250-20260831
+#   ./primus-cli container --image "$DOCKER_IMAGE" \
+#     --env HIP_VISIBLE_DEVICES=0 --env NNODES=1 --env GPUS_PER_NODE=1 \
+#     --env PRIMUS_GPU_MODEL=MI455X \
+#     --env PRIMUS_TURBO_ATTN_BACKEND=triton \
+#     --env HF_TOKEN="${HF_TOKEN}" \
+#     -- train posttrain \
+#     --config examples/megatron/configs/MI455X/llama3.2_1B-BF16-lora-sft.yaml
+#
+# Already inside the container:
+#
+#   export PRIMUS_GPU_MODEL=MI455X NNODES=1 GPUS_PER_NODE=1 HIP_VISIBLE_DEVICES=0
+#   ./primus-cli direct -- train posttrain \
+#     --config examples/megatron/configs/MI455X/llama3.2_1B-BF16-lora-sft.yaml
+#
+# Llama-3.2-1B is gated. Set HF_TOKEN, or override:
+#   --hf_path <local-or-mirror> --tokenizer_model <same>
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3.2_1B-BF16-lora-sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    model: llama3.2_1B_hf.yaml
+
+    overrides:
+      stage: sft
+
+      hf_path: meta-llama/Llama-3.2-1B
+
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+
+      wandb_project: "Primus_Llama3.2_1B_LoRA_SFT"
+      disable_wandb: true
+      disable_tensorboard: true
+      stderr_sink_level: DEBUG
+      log_interval: 1
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      # 1 GPU smoke shape. Raise GBS / train_iters for a real fine-tune.
+      train_iters: 10
+      micro_batch_size: 1
+      global_batch_size: 8
+      num_workers: 2
+
+      seq_length: 2048
+      max_position_embeddings: 2048
+
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 2
+      lr_decay_iters: 10
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+
+      eod_mask_loss: false
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      # apex fused_weight_gradient_mlp_cuda is not in the gfx1250 image
+      gradient_accumulation_fusion: false
+
+      finetune: true
+      load: null
+      save: null
+      save_interval: 100
+      eval_interval: 50
+      eval_iters: 10
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      auto_detect_ckpt_format: false
+
+      bf16: true
+
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+
+      lora:
+        enabled: true
+        dim: 16
+        alpha: 32
+        dropout: 0.05
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

@@ -106,6 +106,8 @@ subtrees:
         title: Determinism and reproducibility
       - file: 04-technical-guides/native-sft-lora.md
         title: Native SFT LoRA
+      - file: 04-technical-guides/LoRA_Native_Trainer_MI455_README.md
+        title: Native SFT LoRA on MI455X
       - file: 04-technical-guides/hybrid-models/README.md
         title: Hybrid recurrent-attention models
         subtrees:
