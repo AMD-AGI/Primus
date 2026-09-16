@@ -243,7 +243,7 @@ Available models include Llama 3.1 (8B/70B/405B), Llama 4 (17Bx16E/17Bx128E), De
 
 MaxText uses a different Docker image than the PyTorch backends and it is **not** the default in `runner/.primus.yaml`, so pass it explicitly with `--image` in container and Slurm modes.
 
-> On MI355X, export `RCCL_WARP_SPEED_AUTO=0` before launching or training can produce NaN losses. It is a no-op on MI300X. See [Important notes](jax-maxtext-training.md#important-notes-for-v266).
+> On MI355X, export `RCCL_WARP_SPEED_AUTO=0` before launching or training can produce NaN losses. It is a no-op on MI300X. See [Important notes](jax-maxtext-training.md#important-notes-for-v267).
 
 Pretrain Llama 3 8B on **MI355X**, from your Primus checkout on the host:
 

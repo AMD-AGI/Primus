@@ -8,7 +8,7 @@ MaxText for ROCm is a specialized fork of upstream MaxText, designed to enable t
 
 AMD provides a ready-to-use Docker image for AMD Instinct MI300X and MI355X GPUs containing essential components, including JAX, XLA, ROCm libraries, and MaxText utilities.
 
-For the full software stack of this image (ROCm, JAX, Transformer Engine, hipBLASLt, RCCL, TensorFlow, and the rest), see [Release notes → `rocm/jax-training:maxtext-v26.7`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v266). The release notes are the single source of truth for image contents.
+For the full software stack of this image (ROCm, JAX, Transformer Engine, hipBLASLt, RCCL, TensorFlow, and the rest), see [Release notes → `rocm/jax-training:maxtext-v26.7`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v267). The release notes are the single source of truth for image contents.
 
 > **Primus source:** check out commit `2631e68d` rather than using the Primus copy baked into the image — see [Release notes → Primus source for v26.7](../01-getting-started/release-notes.md#primus-source-for-v267) for why.
 

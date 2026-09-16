@@ -8,7 +8,7 @@ The Primus framework with the Megatron backend is designed to enable efficient t
 
 The ROCm PyTorch training Docker image `rocm/primus:v26.7`, available through [Docker hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
 
-For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.7`](../01-getting-started/release-notes.md#rocmprimusv266). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.5`](../01-getting-started/release-notes.md#rocmprimusv265).
+For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.7`](../01-getting-started/release-notes.md#rocmprimusv267). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.6`](../01-getting-started/release-notes.md#rocmprimusv266).
 
 Training is launched with `primus-cli`, the unified Primus CLI that covers direct, container, and Slurm execution from the same YAML configuration. See the [CLI reference](./cli-reference.md).
 
@@ -598,7 +598,7 @@ export NCCL_IB_GID_INDEX=3 # Set InfiniBand GID index for NCCL communication. De
 # On MI300X/MI325X also export the gfx942 tuning variables; see "Architecture-specific settings"
 ```
 
-> **Note:** `2631e68d` is the commit matching the `rocm/primus:v26.7` image. If you are reproducing published v26.4 numbers instead, use `git checkout 236cfa9` with `rocm/primus:v26.4` — see [Release notes → Primus source for v26.4](../01-getting-started/release-notes.md#primus-source-for-v264).
+> **Note:** `2631e68d` is the commit matching the `rocm/primus:v26.7` image. If you are reproducing published v26.4 numbers instead, use `git checkout 236cfa9` with `rocm/primus:v26.4` — that release is now summarised under [Release notes → Earlier releases](../01-getting-started/release-notes.md#earlier-releases).
 
 For clusters using AMD AINIC, set the following environment variables:
 
