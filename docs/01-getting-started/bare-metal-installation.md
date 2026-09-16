@@ -3,7 +3,7 @@
 This guide explains how to build the **full Primus training software stack directly on a host machine**, without using the AMD published training Docker image. It is intended for users who, for policy or operational reasons, cannot run containers and need to reproduce the same environment on bare metal.
 
 It is derived from the official training Dockerfile — currently
-[`Dockerfile.primus-v26.6`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.6) — and installs the same components and versions. Wherever possible, everything is installed **inside a Python virtual environment and without `sudo`**. The only steps that require root are a small set of OS-level system libraries (installed with `apt`), and a couple of optional networking packages used for multi-node training.
+[`Dockerfile.primus-v26.7`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.7) — and installs the same components and versions. Wherever possible, everything is installed **inside a Python virtual environment and without `sudo`**. The only steps that require root are a small set of OS-level system libraries (installed with `apt`), and a couple of optional networking packages used for multi-node training.
 
 > **Important**: This is a long, build-heavy process. A full from-source build (Flash Attention, aiter, Primus-Turbo, and on older hosts TransformerEngine) can take **several hours** and needs a machine with many CPU cores, plenty of RAM, and tens of GB of free disk. The Docker image remains the recommended and best-supported path. Use this guide only when containers are not an option.
 
