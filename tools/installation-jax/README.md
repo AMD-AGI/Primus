@@ -1,7 +1,7 @@
-# Primus JAX / MaxText environment in a venv (no docker, no sudo) — v26.6
+# Primus JAX / MaxText environment in a venv (no docker, no sudo) — v26.7
 
 Reproduces the Primus **v26.6 JAX training Dockerfile**
-([`Dockerfile.jax-v26.6`](../../.github/workflows/docker-release/Dockerfile.jax-v26.6))
+([`Dockerfile.jax-v26.7`](../../.github/workflows/docker-release/Dockerfile.jax-v26.7))
 in a Python virtual environment. Same package pins as the Dockerfile, adapted for
 a bare-metal host with no root and no containers.
 
@@ -83,7 +83,7 @@ cd "$WORKSPACE_DIR/Primus"
 `env.sh` exports `MAXTEXT_PATH=$MAXTEXT_DIR`, so Primus runs the same MaxText
 checkout we installed the dependencies for.
 
-## Stages (default order, v26.6)
+## Stages (default order, v26.7)
 
 `venv` → `rocm` → `maxtext` → `tf_source` → `jax` → `te` → `primus`
 → `jaxreqs` → `rccl` → `manifest`

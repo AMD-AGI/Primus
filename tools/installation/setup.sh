@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # setup.sh — Reproduce the Primus training environment in a Python venv
 # (no sudo, no docker). Mirrors the pins of
-#   .github/workflows/docker-release/Dockerfile.primus-v26.6
+#   .github/workflows/docker-release/Dockerfile.primus-v26.7
 # adapted for:
 #   * Python 3.12, auto-provisioned with `uv` (the pinned torch nightly is
 #     cp312-only on Linux; see README.md)
@@ -64,29 +64,33 @@ die()  { echo -e "\033[1;31m[setup][ERROR] $*\033[0m" >&2; exit 1; }
 # shellcheck disable=SC1091
 reload_env() { source "$SCRIPT_DIR/env.sh"; }
 
-# ---- pinned versions / commits (from Dockerfile.primus-v26.6) ----
+# ---- pinned versions / commits (from Dockerfile.primus-v26.7) ----
 TORCH_INDEX="https://rocm.nightlies.amd.com/whl-multi-arch"
 # The Dockerfile pins only `torch` and lets torchaudio/apex float and
 # torchvision resolve as `==0.27`. That no longer resolves: newer rocm10.x
 # nightlies now publish matching version numbers, so a floating torchvision
 # drags in a build for a different ROCm line and the resolve dies on a
-# backtracking storm. These are the versions the a20260727 nightly published,
-# i.e. the exact set the Dockerfile picked up when it was built.
-PYTORCH_VERSION="2.12.0+rocm7.15.0a20260727"
-ROCM_SDK_VERSION="7.15.0a20260727"
-TORCHAUDIO_VERSION="2.11.0+rocm7.15.0a20260727"
-TORCHVISION_VERSION="0.27.0+rocm7.15.0a20260727"
-APEX_VERSION="1.12.0+rocm7.15.0a20260727"
+# backtracking storm. These are the versions read out of the published
+# rocm/primus:v26.7 image, i.e. the exact set the Dockerfile resolved to.
+PYTORCH_VERSION="2.12.0+rocm10.0.0"
+ROCM_SDK_VERSION="10.0.0"
+TORCHAUDIO_VERSION="2.11.0+rocm10.0.0"
+TORCHVISION_VERSION="0.27.0+rocm10.0.0"
+APEX_VERSION="1.13.0+rocm10.0.0"
 FLASH_ATTN_VERSION="2.8.1"
-# v26.6 installs TransformerEngine from the ROCm multi-arch staging index.
-# Those wheels are built on Ubuntu 24.04 though, and libtransformer_engine.so
-# needs glibc >= 2.38, so they cannot load on a 22.04 host. stage_te falls back
-# to building the same TE commit from source; see PRIMUS_TE_MODE and the README.
-TE_INDEX="https://rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/"
-TE_VERSION="2.17.0+rocm7.15.0a20260727.e028a6c"
+# v26.7 installs TransformerEngine from the ROCm multi-arch staging index, which
+# moved from frameworks-nightlies to frameworks-devreleases this release. Those
+# wheels are built on Ubuntu 24.04 though, and libtransformer_engine.so needs
+# glibc >= 2.38, so they cannot load on a 22.04 host. stage_te falls back to
+# building TE from source; see PRIMUS_TE_MODE and the README.
+TE_INDEX="https://rocm.frameworks-devreleases.amd.com/whl-multi-arch-staging/"
+TE_VERSION="2.17.0+rocm10.0.0"
 TE_WHEEL_MIN_GLIBC="2.38"
 TE_REPO="https://github.com/ROCm/TransformerEngine.git"
-# The commit the TE_VERSION local label refers to (…a20260727.e028a6c).
+# NEEDS CONFIRMATION for v26.7: the v26.6 wheel carried its source commit in the
+# local label (…a20260727.e028a6c), but 2.17.0+rocm10.0.0 does not, and the
+# Dockerfile no longer checks TE out, so the commit cannot be derived from either.
+# This is still the v26.6 commit and only affects the source-build fallback path.
 TE_COMMIT="e028a6c"
 TORCHTUNE_REPO="https://github.com/pytorch/torchtune.git"
 TORCHTUNE_BRANCH="b4c98ac2a37f0397d64c22579aed415ce7264db6"
@@ -100,13 +104,14 @@ MAMBA_REPO="https://github.com/AndreasKaratzas/mamba.git"
 MAMBA_BRANCH="enable-primus-hybrid-models"
 TVM_FFI_VERSION="0.1.11"
 PRIMUS_REPO="https://github.com/AMD-AGI/Primus.git"
-# Latest commit on `release/v26.6` branch. Committed on 2026-08-25.
-PRIMUS_BRANCH="2aa05ead3401708cf1a1e2958c1def18d7aecf92"
+# The v26.7.0 tag commit (2026-09-02), which is what Dockerfile.primus-v26.7
+# pins. `release/v26.7` does not exist yet, so there is no branch to track.
+PRIMUS_BRANCH="2631e68dd8b658ab1f991cbc671d538205a51fee"
 AITER_REPO="https://github.com/ROCm/aiter.git"
 AITER_COMMIT="0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e"
 TURBO_REPO="https://github.com/AMD-AGI/Primus-Turbo.git"
-# Latest commit on `main` branch. Committed on 2026-08-21.
-TURBO_COMMIT="a6a16cdce46bd2235a248b41f501fb363c215b9b"
+# The commit Dockerfile.primus-v26.7 pins; ships as primus-turbo 0.4.1.dev33.
+TURBO_COMMIT="6d5ff979eb019fbbcd91790ac812024cca05a882"
 # aiter pins `flydsl==0.1.7` and Primus-Turbo wants `flydsl>=0.2.0`, so one of
 # them is always unsatisfied; Turbo installs last and wins. aiter only needs
 # `flydsl.expr.vector` at runtime, which survived until 0.3.0 removed it -- and
@@ -305,7 +310,7 @@ stage_torch() {
 
 # rocm-sdk-core and rocm-sdk-devel both ship libamd_comgr.so.3 as separate
 # inodes, causing duplicate LLVM static constructor registration (SIGABRT).
-# Same workaround as Dockerfile.primus-v26.6 (AIMA-248).
+# Same workaround as Dockerfile.primus-v26.7 (AIMA-248).
 relink_comgr() {
     python - <<'PY' || true
 import os, pathlib
@@ -499,7 +504,7 @@ stage_pydeps() {
     pipi \
         datasets==3.6.0 \
         av==16.0.1 \
-        transformers==5.5.0 \
+        transformers==5.10.0 \
         optree==0.18.0 \
         sympy \
         accelerate==1.9.0 \
@@ -732,7 +737,7 @@ stage_manifest() {
     env > "$WORKSPACE_DIR/.manifest/env.txt"
     $PIP list > "$WORKSPACE_DIR/.manifest/requirements.txt"
     python --version > "$WORKSPACE_DIR/.manifest/python_version"
-    echo "Dockerfile.primus-v26.6" > "$WORKSPACE_DIR/.manifest/derived_from"
+    echo "Dockerfile.primus-v26.7" > "$WORKSPACE_DIR/.manifest/derived_from"
     cp "$SCRIPT_DIR/env.sh" "$WORKSPACE_DIR/.manifest/env.sh"
     [ -f "$PRIMUS_PIP_CONSTRAINTS" ] && cp "$PRIMUS_PIP_CONSTRAINTS" "$WORKSPACE_DIR/.manifest/"
     log "Environment ready. torch: $(python -c 'import torch; print(torch.__version__)' 2>/dev/null || echo '??')"

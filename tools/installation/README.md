@@ -2,7 +2,7 @@
 
 Reproduces the Primus **v26.6** training image in a Python virtual environment on
 a bare-metal host. Derived from
-[`.github/workflows/docker-release/Dockerfile.primus-v26.6`](../../.github/workflows/docker-release/Dockerfile.primus-v26.6),
+[`.github/workflows/docker-release/Dockerfile.primus-v26.7`](../../.github/workflows/docker-release/Dockerfile.primus-v26.7),
 using the same package pins and commits, adapted for the constraints of a machine
 where we have no root.
 

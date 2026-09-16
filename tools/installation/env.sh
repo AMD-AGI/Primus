@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # env.sh — Primus venv environment (Python 3.12, ROCm via pip rocm-sdk-devel)
-# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.6
+# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.7
 #
 # Source this both during the build (setup.sh does it) and every time you
 # want to USE the environment:   source env.sh
