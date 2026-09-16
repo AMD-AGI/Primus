@@ -697,6 +697,103 @@ class TestMeasuredTimeBoundary:
         assert seen == [preexisting]
         assert config.finalize_model_grads_func is preexisting
 
+    def test_warmup_restores_the_ddp_grad_ready_calibration(self, monkeypatch):
+        """Warmup must not leave its own calibration behind for the first real step.
+
+        Megatron's gradient buckets calibrate on their first batch, and from the second on issue
+        the reduce-scatter only once that golden count recurs. Warmup batches consume the
+        calibration, so the golden counts describe a synthetic step. Under gradient accumulation
+        they then never recur: every parameter reports in and the collective is still never
+        issued, which ``finish_grad_sync`` raises as "Communication call has not been issued for
+        this bucket". Installing the grad-finalize callback does not cover this -- it was
+        reproduced on 8x MI355X at accumulation 2 with that fix already applied.
+        """
+        _install_fake_grad_finalize(monkeypatch)
+        _, megatron_args = _install_fake_megatron(monkeypatch)
+        megatron_args.transformer_impl = "transformer_engine"
+        _silence_log_rank_0(monkeypatch)
+        model, optimizer, scheduler = _warmup_actors(monkeypatch)
+
+        param = next(model[0].parameters())
+        group = SimpleNamespace(
+            is_first_batch=False,
+            golden_per_param_grad_ready_counts={param: 1},
+            per_param_grad_ready_counts={param: 1},
+            grad_reduce_handle=None,
+        )
+        model[0].bucket_groups = [group]
+
+        from primus.backends.megatron.patches.mlperf_warmup_patches import (
+            _run_warmup_and_restore,
+        )
+
+        _run_warmup_and_restore(
+            warmup_steps=1,
+            train_step_fn=lambda *a, **k: None,
+            forward_step_func=lambda *a, **k: None,
+            synthetic_iter=iter(()),
+            model=model,
+            optimizer=optimizer,
+            opt_param_scheduler=scheduler,
+            config=SimpleNamespace(finalize_model_grads_func=None),
+            forward_backward_func=lambda *a, **k: None,
+            iteration=0,
+        )
+
+        assert group.is_first_batch is True, "the first real step must calibrate, not inherit"
+        assert group.golden_per_param_grad_ready_counts == {}
+        assert group.per_param_grad_ready_counts == {}
+
+    def test_warmup_drains_an_outstanding_grad_reduce_handle(self, monkeypatch):
+        """A collective left in flight by warmup must be awaited, not handed on.
+
+        Expected to be a no-op now that the grad-finalize callback is installed for the warmup
+        steps, so this pins the guard rather than a live failure: the handle would belong to a
+        synthetic step whose gradients are about to be discarded, and the first real step cannot
+        see why its bucket is busy.
+        """
+        _install_fake_grad_finalize(monkeypatch)
+        _, megatron_args = _install_fake_megatron(monkeypatch)
+        megatron_args.transformer_impl = "transformer_engine"
+        _silence_log_rank_0(monkeypatch)
+        model, optimizer, scheduler = _warmup_actors(monkeypatch)
+
+        class _Handle:
+            def __init__(self):
+                self.waited = False
+
+            def wait(self):
+                self.waited = True
+
+        handle = _Handle()
+        group = SimpleNamespace(
+            is_first_batch=False,
+            golden_per_param_grad_ready_counts={},
+            per_param_grad_ready_counts={},
+            grad_reduce_handle=handle,
+        )
+        model[0].bucket_groups = [group]
+
+        from primus.backends.megatron.patches.mlperf_warmup_patches import (
+            _run_warmup_and_restore,
+        )
+
+        _run_warmup_and_restore(
+            warmup_steps=1,
+            train_step_fn=lambda *a, **k: None,
+            forward_step_func=lambda *a, **k: None,
+            synthetic_iter=iter(()),
+            model=model,
+            optimizer=optimizer,
+            opt_param_scheduler=scheduler,
+            config=SimpleNamespace(finalize_model_grads_func=None),
+            forward_backward_func=lambda *a, **k: None,
+            iteration=0,
+        )
+
+        assert handle.waited is True
+        assert group.grad_reduce_handle is None
+
 
 # ============================================================================
 # Run lifecycle
