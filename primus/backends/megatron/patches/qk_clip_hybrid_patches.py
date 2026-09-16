@@ -73,17 +73,12 @@ _QKCLIP_ORI = """\
 
 _QKCLIP_NEW = """\
                 # Hybrid models interleave attention layers with linear/Mamba/KDA
-                # layers that have no ``self_attention``; skip those. Only MLA
-                # attention is patched here for sharded/hybrid qk_clip, so also
-                # skip standard SelfAttention (whose clip_qk mishandles the
-                # sharded master) and MLA variants without ``linear_kv_up_proj``
-                # (e.g. DeepseekV4) that this rescale cannot handle.
+                # layers that have no ``self_attention``; skip those. Layers that
+                # do have a ``clip_qk``-capable attention keep upstream dispatch
+                # (MLA routes to the offset-aware clip_qk patched below; standard
+                # attention keeps its own upstream clip_qk unchanged).
                 self_attn = getattr(transformer_layer, 'self_attention', None)
-                if (
-                    self_attn is not None
-                    and hasattr(self_attn, 'clip_qk')
-                    and hasattr(self_attn, 'linear_kv_up_proj')
-                ):
+                if self_attn is not None and hasattr(self_attn, 'clip_qk'):
                     if self_attn.core_attention.current_max_attn_logits is None:
                         continue
                     torch.distributed.all_reduce(
