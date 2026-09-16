@@ -24,7 +24,18 @@ export HF_TOKEN=hf_...                                    # required
 export DOCKER_IMAGE=unifiedtrainingdockers.azurecr.io/utd/ci:<tag>   # required
 export BACKEND=maxtext,maxdiffusion                        # required
 export RESULT_DIR=~/primus-bench/mi325x-v26.7
+
 # GPU is auto-detected from rocm-smi; set it to override.
+# GPU=MI325X
+
+# RCCL still needs a real NIC on a single node. 
+# NCCL_SOCKET_IFNAME and GLOO_SOCKET_IFNAME are auto-detected from get_ip_interface.sh,
+# which maps the first IPv4 from hostname -I to an interface.
+# On some nodes that address belongs to docker0.
+# So, the following may need to be set manually.
+
+# export NCCL_SOCKET_IFNAME=eno0                            # e.g. eno0 / ibp...
+# export GLOO_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME
 
 bash tools/perf/run_batch.sh                              # single node
 python3 tools/perf/extract_results.py "$RESULT_DIR"       # logs -> CSV
@@ -204,6 +215,7 @@ duplicate entries are reported before anything launches.
 | `NUM_REPS` | `1` | Repetitions per config. |
 | `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. |
 | `EXTRA_ENV` | — | Space-separated `KEY=VALUE` pairs forwarded into the container as `--env`. See below. |
+| `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` | auto (single node); `eno0` (multi-node) | RCCL/Gloo bootstrap NIC. Set even for 1-node 8-GPU; must not be `docker0`. See below. |
 | `NNODES`, `GPUS_PER_NODE` | `1`, `8` | Cluster topology. |
 | `PRIMUS_MODE` | `container` / `slurm srun` | Launcher mode. |
 
@@ -277,12 +289,48 @@ The alternative — adding a name to `container.options.env` in
 `runner/.primus.yaml` — is the right move when a variable should always be
 forwarded for everyone, rather than for one batch.
 
+### RCCL socket interface (single node included)
+
+RCCL still needs a usable bootstrap NIC on a **single node**. A job with
+`world_size=1` and eight local devices still creates communicators for
+intra-node collectives (including MaxText expert-parallel AllToAll). If
+bootstrap is pinned to `docker0`, training dies at the first collective with:
+
+```
+RCCL operation ncclGetUniqueId(&id) failed: invalid usage
+Last RCCL warning: 'Bootstrap : no socket interface found'
+```
+
+The launcher does not leave this unset. `base_env.sh` fills
+`NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` from
+[`get_ip_interface.sh`](../../runner/helpers/envs/get_ip_interface.sh), which
+maps the first IPv4 from `hostname -I` to an interface. On some nodes that
+address belongs to **docker0**.
+[`10_auto_nccl_net.sh`](../../runner/helpers/hooks/10_auto_nccl_net.sh) would
+skip `docker0` / `lo` / `veth*`, but it never runs once `base_env.sh` has
+already set the variables.
+
+Export a real NIC before `run_batch.sh`. `NCCL_*` and `GLOO_*` are
+prefix-forwarded into the container, so a plain export is enough:
+
+```bash
+export NCCL_SOCKET_IFNAME=eno0          # whatever `ip -br addr` shows, not docker0
+export GLOO_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME
+export NCCL_DEBUG=WARN                  # optional: confirm UniqueId / bootstrap
+```
+
+Check `hostname -I` and `ip -br addr` on the node you will run on. Do not
+unset these hoping RCCL will pick: Primus will fill them from `hostname -I`
+again, which is how `docker0` got selected in the first place.
+
 ### Multi-node extras
 
 Multi-node additionally honours `MAX_ATTEMPTS_PER_CONFIG`, `POLL_INTERVAL`,
-`MAX_RUN_SECONDS` and `FAIL_PATTERN` for its retry loop, and the `NCCL_*` /
-`GLOO_SOCKET_IFNAME` networking values — whose defaults are Fremont-cluster
-specific and should be overridden elsewhere.
+`MAX_RUN_SECONDS` and `FAIL_PATTERN` for its retry loop.
+`run_batch_multinode.sh` defaults `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`
+to `eno0` (Fremont); override them the same way on any other site. The
+single-node `docker0` failure above applies here too if the wrong NIC is
+pinned.
 
 ## What a batch writes
 
