@@ -17,8 +17,9 @@
 # so nothing here has to mutate the vendored third_party/maxdiffusion checkout.
 #
 # requirements-maxdiffusion.txt is deliberately separate from requirements-jax.txt
-# (which MaxText installs): it pins transformers 4.x for MaxDiffusion's Flax code,
-# and that pin must not be forced onto MaxText runs.
+# (which MaxText installs): it carries the transformers floor and the torchax pin
+# that MaxDiffusion's text encoders need, and those must not be forced onto
+# MaxText runs.
 #
 # PRIMUS_SKIP_PIP=1 skips this step, for images that already ship the stack.
 ###############################################################################

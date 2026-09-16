@@ -23,22 +23,11 @@ updates:
       - "dependencies"
       - "github-actions"
 
-  # Version updates stay disabled here (open-pull-requests-limit: 0) to keep the
-  # GitHub-Actions-only policy above; this entry exists so the ignore rule below
-  # also applies to security updates, which are enabled repo-wide and would
-  # otherwise bypass this file. Note that `ignore.update-types` does NOT apply to
-  # security updates, but `ignore.versions` does.
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "monthly"
-    open-pull-requests-limit: 0
-    ignore:
-      # requirements-maxdiffusion.txt is the only root manifest pinning
-      # transformers, and MaxDiffusion is Flax-based: transformers 5.0 removed all
-      # Flax classes, so a 5.x bump breaks `import maxdiffusion` at module load.
-      # Trade-off: a CVE fixed only in 5.x will not raise a PR here, so a
-      # transformers advisory has to be handled by hand until MaxDiffusion moves
-      # off Flax.
-      - dependency-name: "transformers"
-        versions: [">=5.0.0"]
+# There is deliberately no `pip` entry here. One used to exist solely to carry an
+# `ignore` rule holding transformers below 5.0.0, because MaxDiffusion imported
+# Flax classes that transformers 5 removed, and `ignore.versions` applies to
+# security updates as well as version updates. MaxDiffusion now runs FLUX's text
+# encoders as PyTorch models under Torchax, so that ceiling is gone -- and with it
+# the reason to suppress transformers advisories fixed only in 5.x. Without a pip
+# entry, Dependabot runs no pip version updates (those need an explicit entry) but
+# repo-wide security updates reach requirements-maxdiffusion.txt unfiltered.

@@ -18,6 +18,15 @@
 # constraint -- but only from a third_party/maxdiffusion pin that carries those
 # changes. Bump the submodule and this line together.
 transformers>=5.10.0
+# Runs FLUX's PyTorch CLIP-L and T5-XXL encoders under JAX. MaxDiffusion already
+# uses it for LTX2's Gemma3 and WAN's UMT5 encoders, but nothing here installed it
+# before, because those two paths are not exercised by the configs in this repo.
+# Pinned because it dispatches against private torch overloads: 0.0.13 imports
+# cleanly on torch 2.8.0, the version setup_maxdiffusion_env.sh installs, and on
+# 2.12.0, but fails on torch >= 2.14, which dropped the aten.prod Dimname overload
+# it names. It declares no unconditional dependencies, so it will not pull a second
+# torch or jax over the ROCm builds already present.
+torchax==0.0.13
 scikit-image
 imageio-ffmpeg
 loguru
