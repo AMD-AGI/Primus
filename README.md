@@ -37,6 +37,7 @@ For the full and up-to-date model matrix, see [Supported Models](./docs/06-devel
 
 ## 🆕 What's New
 
+- **[2026/09/16]** Primus **v26.7** training images: `rocm/primus:v26.7` and `rocm/jax-training:maxtext-v26.7` — **ROCm 10.0.0** across both families, plus DeepSeek-V4 on gfx942 with 128k context parallelism ([release notes](./docs/01-getting-started/release-notes.md#highlights-for-v267))
 - **[2026/09/07]** Primus **v26.6** training images: `rocm/primus:v26.6` and `rocm/jax-training:maxtext-v26.6` (JAX 0.11.0, Transformer Engine 2.17)
 - **[2026/07/29]** ⚡ **MegaMoE** - FlyDSL-based fused MoE layer that folds expert all-to-all into the grouped GEMMs, plus FP4 grouped GEMM support ([MegaMoE guide](./docs/04-technical-guides/mega-moe.md))
 - **[2026/07/29]** Hybrid linear-attention models: Gated Delta Net (GDN) and Kimi Delta Attention (KDA) on Megatron-LM ([Hybrid models](./docs/04-technical-guides/hybrid-models/README.md))

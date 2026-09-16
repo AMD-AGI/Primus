@@ -15,7 +15,7 @@ Every version below was read out of the published image itself. For v26.4 throug
 
 ---
 
-## Highlights — v26.7
+## Highlights for v26.7
 
 **ROCm 10.0.0.** Both image families move off the ROCm 7.x line. This is the defining change of the release and it reaches everything: PyTorch, Transformer Engine, Triton, torchvision/torchaudio and APEX are all rebuilt against it, and the JAX plugin pair is renamed `jax-rocm10-pjrt` / `jax-rocm10-plugin`. If you install bare metal, note that the wheel indexes moved too — see [Bare-metal installation](./bare-metal-installation.md).
 
