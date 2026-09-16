@@ -253,4 +253,16 @@ def _install_qk_clip_hybrid_patches() -> None:
     ),
 )
 def patch_qk_clip_hybrid(ctx: PatchContext) -> None:
+    # qk_clip rescales the fp32 master through ``model_param.main_param``. With
+    # ``use_precision_aware_optimizer`` that master is owned by FusedAdam and
+    # ``main_param`` is unset, so the clip would touch only the bf16 weight and
+    # get overwritten on the next optimizer step. Reject the combination rather
+    # than silently under-clip. (Log-only mode never rescales, so it is fine.)
+    args = get_args(ctx)
+    if getattr(args, "qk_clip", False) and getattr(args, "use_precision_aware_optimizer", False):
+        raise NotImplementedError(
+            "qk_clip is not supported together with use_precision_aware_optimizer: "
+            "the fp32 master is owned by the fused optimizer and cannot be rescaled "
+            "by this patch. Disable one of the two."
+        )
     _install_qk_clip_hybrid_patches()
