@@ -162,9 +162,12 @@ def hipblaslt_version(section):
             "HIPBLASLT_VERSION_TWEAK",
         ],
     )
-    if not macros:
+    parts = [macros.get(f"HIPBLASLT_VERSION_{name}") for name in ("MAJOR", "MINOR", "PATCH")]
+    # All three or nothing: a partial read would render as "1.4.?" and then be
+    # reported as a version mismatch rather than as the missing data it is.
+    if any(part is None for part in parts):
         return None
-    core = ".".join(macros.get(f"HIPBLASLT_VERSION_{part}", "?") for part in ("MAJOR", "MINOR", "PATCH"))
+    core = ".".join(parts)
     tweak = macros.get("HIPBLASLT_VERSION_TWEAK")
     return f"{core}-{tweak}" if tweak else core
 
@@ -192,8 +195,9 @@ def verify_dockerfile(family, version, in_image_text, in_image_name):
     image_lines = normalise(in_image_text)
     if repo_lines == image_lines:
         return {"path": rel, "status": "match", "in_image_name": in_image_name}
-    only_repo = len([line for line in repo_lines if line not in set(image_lines)])
-    only_image = len([line for line in image_lines if line not in set(repo_lines)])
+    repo_set, image_set = set(repo_lines), set(image_lines)
+    only_repo = len([line for line in repo_lines if line not in image_set])
+    only_image = len([line for line in image_lines if line not in repo_set])
     return {
         "path": rel,
         "status": "differs",

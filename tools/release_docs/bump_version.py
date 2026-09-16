@@ -57,6 +57,14 @@ BINARY_SUFFIXES = {
 }
 
 
+# A release token must not match a patch release that merely starts with it:
+# without this, bumping v26.5 rewrites `Dockerfile.primus-v26.5.1` to
+# `Dockerfile.primus-v26.6.1`, a file that does not exist. `\b` alone is not
+# enough because a '.' is a word boundary. Patch releases are real: v26.3.1,
+# v26.3.2 and v26.5.1 all shipped.
+NOT_A_PATCH_SUFFIX = r"(?!\.\d)"
+
+
 def version_tokens(version):
     """The forms a release is referenced in, as regexes.
 
@@ -68,19 +76,26 @@ def version_tokens(version):
     escaped = re.escape(version)
     escaped_bare = re.escape(bare)
     return [
-        rf"{escaped}\b",
+        rf"{escaped}{NOT_A_PATCH_SUFFIX}\b",
         rf"primus==\s*{escaped_bare}(\.\d+)?",
         rf"__version__\s*=\s*([\"']){escaped_bare}\1",
     ]
 
 
 def _substitute(template, old, new, escape):
-    """Fill {old}/{new}/{old_bare}/{new_bare} in a rule pattern or replacement."""
+    """Fill {old}/{new}/{old_bare}/{new_bare} in a rule pattern or replacement.
+
+    In patterns (escape=True) the old v-prefixed token carries the patch-release
+    guard, so a rule matching `Dockerfile.primus-{old}` cannot also consume
+    `Dockerfile.primus-v26.5.1`. `{old_bare}` deliberately does not, because the
+    pip-spec rule matches `primus==26.5.0` and needs the trailing `.0`.
+    """
     prepare = re.escape if escape else (lambda value: value)
+    old_token = prepare(old) + (NOT_A_PATCH_SUFFIX if escape else "")
     return (
         template.replace("{old_bare}", prepare(old.lstrip("v")))
         .replace("{new_bare}", prepare(new.lstrip("v")))
-        .replace("{old}", prepare(old))
+        .replace("{old}", old_token)
         .replace("{new}", prepare(new))
     )
 

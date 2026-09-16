@@ -136,11 +136,25 @@ def save_snapshot(snapshot):
     return path
 
 
+def read_snapshot_file(path):
+    """Load one snapshot, naming the file if it is unreadable.
+
+    These are consumed by a lint-job check, where a bare JSONDecodeError
+    traceback would say nothing about which snapshot needs regenerating.
+    """
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise SystemExit(
+            f"ERROR: {path} is not valid JSON ({error}). Re-run probe_image.py for that release."
+        ) from error
+
+
 def load_snapshot(version, family):
     path = snapshot_path(version, family)
     if not path.exists():
         return None
-    return json.loads(path.read_text())
+    return read_snapshot_file(path)
 
 
 def available_snapshots():
@@ -148,8 +162,10 @@ def available_snapshots():
     if not DATA_DIR.exists():
         return []
     found = []
-    for path in DATA_DIR.glob("*.json"):
-        data = json.loads(path.read_text())
+    for path in sorted(DATA_DIR.glob("*.json")):
+        data = read_snapshot_file(path)
+        if "version" not in data or "family" not in data:
+            raise SystemExit(f"ERROR: {path} is missing 'version'/'family'; re-run probe_image.py.")
         found.append((data["version"], data["family"], data))
     return sorted(found, key=lambda item: (version_key(item[0]), item[1]), reverse=True)
 

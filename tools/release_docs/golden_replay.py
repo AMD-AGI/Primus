@@ -55,14 +55,6 @@ BUMP_FIXTURE = {
     "why": "every v26.5 -> v26.6 transition across the release train (#1114, #1120, #1052)",
 }
 
-# Lines the tooling rewrites that the release did not, and which are acceptable
-# on inspection: usage examples outside the pages the release PRs touched. Listed
-# explicitly so the gate stays deterministic instead of relying on a threshold.
-EXPECTED_EXTRAS = {
-    "benchmark/kernel/rccl/run_slurm.sh",
-    "examples/run_k8s_pretrain.sh",
-}
-
 PARITY_FIXTURE = {
     "commit": "3aa6a458",
     "release": "v26.6",

@@ -20,7 +20,9 @@
   "excluded_paths": [
     "docs/01-getting-started/release-notes.md",
     ".github/workflows/docker-release/",
-    "tools/release_docs/data/",
+    "tools/release_docs/",
+    "skills/release-docs-update/",
+    "tests/unit_tests/release_docs/",
     "third_party/",
     "output/",
     "logs/",
@@ -47,7 +49,9 @@
   "_excluded_paths_why": {
     "release-notes.md": "owned by release_notes.py, which rotates sections instead of substituting",
     "docker-release/": "historical build recipes; rewriting them would falsify what an old image was built from",
-    "data/": "snapshots legitimately record old versions",
+    "tools/release_docs/": "this tooling's own source, snapshots and rule files name releases as data and worked examples; scanning them put 82 self-referential items in the review list, enough to bury a real decision",
+    "skills/release-docs-update/": "the skill's examples are illustrations, not release references",
+    "tests/unit_tests/release_docs/": "fixtures pin old versions on purpose",
     "third_party/": "vendored"
   },
 

@@ -237,6 +237,38 @@ def test_prose_annotation_is_preserved_in_the_cell():
     assert "7.15.0a20260727" in rocm
 
 
+def test_section_boundary_ignores_headings_inside_fenced_blocks():
+    # '## ' inside a bash fence is a comment, not a heading. Treating it as one
+    # would truncate the image block and silently stop verifying its later rows.
+    notes = """### `rocm/primus:v26.6`
+
+| Software component | Version |
+| ------------------ | ------- |
+| ROCm | 7.15.0 |
+
+```bash
+## not a heading, just a shell comment
+docker run --rm rocm/primus:v26.6 bash
+```
+
+| NumPy | 2.5.2 |
+
+### Primus source for v26.6
+
+| Branch tip | `2aa05ead` |
+"""
+    section = release_notes.parse_image_sections(notes)[0]
+    labels = [label for label, _ in section["components"]]
+    assert labels == ["ROCm", "NumPy"], labels
+    assert "Branch tip" not in labels
+
+
+def test_partial_native_header_reads_as_missing_not_as_a_bad_version():
+    # A truncated header must not render as "1.4.?", which would surface as a
+    # version mismatch instead of as missing data.
+    assert probe_image.hipblaslt_version("#define HIPBLASLT_VERSION_MAJOR 1") is None
+
+
 def test_strip_cell_unwraps_backticks_and_links():
     assert release_notes.strip_cell("`abc`") == "abc"
     assert release_notes.strip_cell("[`Dockerfile.jax-v26.6`](http://x)") == "Dockerfile.jax-v26.6"

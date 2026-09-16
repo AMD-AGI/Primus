@@ -197,6 +197,14 @@ def report(state):
         print(f"         {state['git_remote_error']}")
 
     blockers = []
+    # Without an image there is no release to document, and nothing downstream can
+    # resolve a build commit. Say so instead of reporting a tidy list of misses and
+    # exiting clean.
+    if not state["families_present"]:
+        blockers.append(
+            f"no image found for {state['version']}: pull "
+            + " or ".join(info["image"] for info in state["families"].values())
+        )
     for name, info in state["families"].items():
         if info["image_present"] and not info["build_commit"]:
             blockers.append(f"{name}: build commit unresolved (run probe_image.py)")

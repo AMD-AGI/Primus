@@ -77,6 +77,11 @@ parity is clean. Also update the `(from Dockerfile.<family>-vX.Y)` header and th
 If a divergence is deliberate, add it to `install_parity_rules.json` under
 `documented_divergences` **with a reason**. Never silence drift by deleting a pin.
 
+Expect `install_parity.py --check` to fail between Phase 2 and the end of Phase 3:
+Phase 2 moves the `(from Dockerfile.<family>-vX.Y)` header to the new release
+while the pins are still the old ones, which is exactly the drift it should
+report. It must be clean before Gate A.
+
 ### GATE A
 
 Present in one message: the parity table before and after, the bump diff summary,

@@ -63,6 +63,19 @@ def strip_cell(value):
     return value.replace("`", "").strip()
 
 
+def next_heading_offset(text):
+    """Character offset of the next markdown heading, ignoring fenced blocks."""
+    offset = 0
+    in_fence = False
+    for line in text.splitlines(keepends=True):
+        if re.match(r"\s*(```|~~~)", line):
+            in_fence = not in_fence
+        elif not in_fence and re.match(r"#{2,6} ", line):
+            return offset
+        offset += len(line)
+    return None
+
+
 def parse_image_sections(text):
     """Every '### `rocm/...`' block with its metadata and component rows."""
     sections = []
@@ -72,10 +85,12 @@ def parse_image_sections(text):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         # Stop at the next heading of any level. Without this the block runs on
         # into sibling '### Primus source for vX.Y' and '### Changes since vX.Y'
-        # sections, whose tables are not image contents.
-        next_heading = re.search(r"^#{2,6} ", text[start:end], re.MULTILINE)
-        if next_heading:
-            end = start + next_heading.start()
+        # sections, whose tables are not image contents. Fenced blocks are skipped
+        # while looking, because '## ' inside a bash fence is a comment, not a
+        # heading, and would truncate the section early.
+        offset = next_heading_offset(text[start:end])
+        if offset is not None:
+            end = start + offset
         body = text[start:end]
 
         meta = {}
@@ -117,6 +132,20 @@ def check(args):
     warnings = []
     skipped = []
     verified = 0
+
+    # An interrupted Phase 5 can leave two sections for the same image if the
+    # rotation is re-run and inserts rather than updates. Both would verify
+    # individually, so the duplicate has to be caught structurally.
+    seen = {}
+    for section in sections:
+        key = (section["family"], section["version"])
+        if key in seen:
+            failures.append(
+                f"{C.RELEASE_NOTES.name}:{section['line']} duplicate section for {section['image']} "
+                f"(already at line {seen[key]}) -- the rotation inserted instead of updating"
+            )
+        else:
+            seen[key] = section["line"]
 
     for section in sections:
         snapshot = C.load_snapshot(section["version"], section["family"])
@@ -164,7 +193,10 @@ def check(args):
             else:
                 verified += 1
 
-    print(f"release-notes check: {verified} values verified against image snapshots")
+    print(
+        f"release-notes check: {verified} values verified across "
+        f"{len(sections) - len(skipped)}/{len(sections)} documented images"
+    )
     for note in skipped:
         print(f"  SKIP  {note}")
     for note in warnings:
@@ -174,8 +206,11 @@ def check(args):
     if failures:
         print(f"\nFAILED: {len(failures)} stated value(s) do not match the images.")
         return 1
-    if warnings and args.strict:
-        print(f"\nFAILED (strict): {len(warnings)} warning(s).")
+    # A skip means a documented image was not checked at all. Reporting that as a
+    # pass would let coverage quietly fall to zero if snapshots went missing, so
+    # the count is always in the headline and --strict refuses to tolerate it.
+    if args.strict and (warnings or skipped):
+        print(f"\nFAILED (strict): {len(warnings)} warning(s), {len(skipped)} unchecked image(s).")
         return 1
     print("OK")
     return 0

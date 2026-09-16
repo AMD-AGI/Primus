@@ -177,13 +177,20 @@ def diff_names(from_commit, to_commit):
 
 
 def submodule_bumps(from_commit, to_commit):
+    """Gitlink moves under third_party/, read from `git diff --raw`.
+
+    --raw gives `:160000 160000 <old> <new> M<TAB><path>`, where 160000 is the
+    gitlink mode. Not `--submodule=short`, which emits an ordinary
+    `-Subproject commit ...` diff with no summary line: an earlier version of this
+    looked for `Submodule <path> a..b`, which that format never produces, so it
+    always reported no bumps and did so silently.
+    """
     bumps = {}
-    for line in git(
-        "diff", "--submodule=short", f"{from_commit}..{to_commit}", "--", "third_party/"
-    ).splitlines():
-        match = re.match(r"^Submodule (\S+) ([0-9a-f]+)\.\.\.?([0-9a-f]+)", line.strip())
-        if match:
-            bumps[match.group(1)] = {"from": match.group(2), "to": match.group(3)}
+    raw = git("diff", "--raw", f"{from_commit}..{to_commit}", "--", "third_party/")
+    for line in raw.splitlines():
+        match = re.match(r"^:(\d{6}) (\d{6}) ([0-9a-f]+) ([0-9a-f]+) (\w+)\t(.+)$", line)
+        if match and "160000" in (match.group(1), match.group(2)):
+            bumps[match.group(6)] = {"from": match.group(3)[:8], "to": match.group(4)[:8]}
     return bumps
 
 

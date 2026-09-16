@@ -46,10 +46,14 @@ def _classify(line, path_suffix=".md", branch_exists=False, in_fence=False):
     return rule["name"], action
 
 
-def _tokens_match(line):
+def _tokens_match_version(line, version):
     import re
 
-    return any(re.search(token, line) for token in bump_version.version_tokens("v26.6"))
+    return any(re.search(token, line) for token in bump_version.version_tokens(version))
+
+
+def _tokens_match(line):
+    return _tokens_match_version(line, "v26.6")
 
 
 def test_memory_size_is_not_a_version_reference():
@@ -137,6 +141,49 @@ def test_historical_artifacts_are_excluded_from_scanning():
     assert "docs/01-getting-started/release-notes.md" in excluded
 
 
+def test_patch_release_references_are_not_candidates():
+    # Regression: '\b' matches before a '.', so a v26.5 token used to match inside
+    # 'v26.5.1' and rewrote Dockerfile.primus-v26.5.1 to a file that never existed.
+    # v26.3.1, v26.3.2 and v26.5.1 all shipped, so this is not hypothetical.
+    assert not _tokens_match_version("Dockerfile.primus-v26.5.1", "v26.5")
+    assert not _tokens_match_version("see the v26.5.2 notes", "v26.5")
+    assert _tokens_match_version("rocm/primus:v26.5", "v26.5")
+    assert _tokens_match_version("on v26.5.", "v26.5")
+
+
+def test_a_patch_reference_survives_a_rewrite_on_the_same_line():
+    _, rules, _ = bump_version.load_rules("v26.5", "v26.6")
+    line = "both rocm/primus:v26.5 and rocm/primus:v26.5.1 exist"
+    rule = bump_version.classify(line, rules, ".md")
+    for pattern, replacement in rule["replace"]:
+        line = pattern.sub(replacement, line)
+    assert line == "both rocm/primus:v26.6 and rocm/primus:v26.5.1 exist"
+
+
+def test_pip_spec_still_bumps_its_patch_component():
+    # The guard must not be applied to the bare form, whose rule owns the '.0'.
+    _, rules, _ = bump_version.load_rules("v26.5", "v26.6")
+    line = 'pip install "primus==26.5.0"'
+    rule = bump_version.classify(line, rules, ".md")
+    for pattern, replacement in rule["replace"]:
+        line = pattern.sub(replacement, line)
+    assert line == 'pip install "primus==26.6.0"'
+
+
+def test_the_tooling_does_not_scan_its_own_source():
+    # This tooling, its skill and its fixtures name releases as data and worked
+    # examples. Scanning them added 82 self-referential entries to the review
+    # list -- noise that can bury a real decision.
+    excluded, _, _ = bump_version.load_rules("v26.6", "v26.7")
+    for path in (
+        "tools/release_docs/probe_image.py",
+        "tools/release_docs/version_bump_rules.json",
+        "skills/release-docs-update/SKILL.md",
+        "tests/unit_tests/release_docs/test_release_tooling.py",
+    ):
+        assert any(path.startswith(prefix) for prefix in excluded), path
+
+
 def test_pinned_reproduction_scripts_are_outside_the_rewrite_scope():
     # The v26.6 release left every examples/mlperf/, examples/models/ and
     # tools/docker/ image reference on v26.5: a benchmark submission records the
@@ -216,6 +263,21 @@ def test_areas_are_derived_from_touched_paths():
         ["primus/backends/megatron/x.py", "examples/maxtext/configs/y.yaml", "docs/z.md"]
     )
     assert "megatron" in areas and "maxtext" in areas and "docs" in areas
+
+
+def test_submodule_bumps_are_detected():
+    # Regression: this used to parse `--submodule=short` output for a
+    # "Submodule <path> a..b" summary line, which that format never emits, so it
+    # silently reported no bumps ever. dc3f4ba18a moves third_party/maxtext.
+    bumps = collect_changes.submodule_bumps("dc3f4ba18a^", "dc3f4ba18a")
+    assert "third_party/maxtext" in bumps
+    assert bumps["third_party/maxtext"]["from"].startswith("2ec83add")
+    assert bumps["third_party/maxtext"]["to"].startswith("b47d74bf")
+
+
+def test_no_submodule_bumps_reports_empty_rather_than_failing():
+    bumps = collect_changes.submodule_bumps("2aa05ead", "2631e68d")
+    assert bumps == {}
 
 
 # --- install_parity --------------------------------------------------------

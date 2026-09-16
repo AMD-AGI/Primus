@@ -203,6 +203,12 @@ def main():
     parser.add_argument("--baremetal-manifest", help="a bare-metal .manifest/requirements.txt to diff")
     args = parser.parse_args()
 
+    # A manifest belongs to one install, so without --family there is nothing to
+    # compare it against. Silently ignoring it would report a clean run that never
+    # looked at the manifest at all.
+    if args.baremetal_manifest and not args.family:
+        parser.error("--baremetal-manifest requires --family (a manifest describes one install)")
+
     rules = load_rules()
     families = [args.family] if args.family else sorted(SETUP_SCRIPTS)
     total_drift = 0
