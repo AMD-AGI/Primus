@@ -1,0 +1,60 @@
+# Qwen3.5-4B DFlash online, two Slurm nodes (capture+producer / consumer).
+#
+# Checked-in SpecForge YAML keeps 127.0.0.1. Primus rewrites Mooncake/SGLang
+# endpoints to a routable HEAD_IP after allocate. Producer is CPU-only.
+#
+#   export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+#   export RUN_ROOT=/shared_nfs/$USER/primus-specforge-online/$RUN_ID
+#   export CONSUMER_STATE_DIR=/mnt/m2m_nobackup/$USER/specforge/$RUN_ID/consumer-state
+#   export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
+#   export MAX_STEPS=20
+#   ./runner/primus-cli slurm srun -N 2 --account=amd-brain-models \
+#     --qos=amd-burst-qos --partition=amd-spur --gres=gpu:1 --requeue \
+#     -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+#     --volume /shared_nfs:/shared_nfs \
+#     -- train pretrain --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
+#
+# First smoke is 1 capture GPU + 1 trainer GPU. Raise SERVER_GPUS / TRAINER_GPUS
+# (and --gres) for 8+8.
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-online-2node}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: specforge
+    config: online.yaml
+    model: qwen3.5-4b-dflash.yaml
+    overrides:
+      specforge_mode: online
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-amd.yaml}
+      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
+      output_dir: ${OUTPUT_DIR}
+
+      specforge_online:
+        run_id: ${RUN_ID}
+        run_root: ${RUN_ROOT}
+        consumer_state_dir: ${CONSUMER_STATE_DIR}
+        server_count: ${SERVER_COUNT:1}
+        server_tp: ${SERVER_TP:1}
+        server_gpus: ${SERVER_GPUS:0}
+        trainer_gpus: ${TRAINER_GPUS:0}
+        trainer_nproc: ${NPROC_PER_NODE:1}
+        mooncake_protocol: ${MOONCAKE_PROTOCOL:tcp}
+        mooncake_lease_ttl_ms: ${MOONCAKE_LEASE_TTL_MS:500}
+        # Must match configs/qwen3.5-4b-dflash.json target_layer_ids.
+        capture_layer_ids: ${CAPTURE_LAYER_IDS:1 8 15 22 29}
+        target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}
+
+      specforge_overrides:
+        training.max_steps: ${MAX_STEPS:20}
+        training.num_epochs: 1
+        training.save_interval: ${MAX_STEPS:20}
+        training.log_interval: 5
+        # Liger kernels are not built in this SpecForge ROCm image.
+        model.use_liger_kernel: false
+        data.train_data_path: ${TRAIN_DATA_PATH}
+        deployment.trainer.nnodes: 1
+        deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}

@@ -19,8 +19,10 @@ Params consumed here:
     specforge_overrides   Nested mapping flattened to dotted Hydra overrides
     specforge_entrypoint  argv[0] for the SpecForge CLI (default ``specforge``)
     specforge_root        SpecForge checkout used as cwd (see resolve_specforge_root)
-    specforge_mode        ``train`` (default) or ``capture``
+    specforge_mode        ``train`` (default), ``capture``, or ``online``
+    specforge_role        ``producer`` / ``consumer`` (online only; omitted offline)
     specforge_capture     Nested mapping of ``prepare_hidden_states.py`` flags
+    specforge_online      Nested mapping for 2-node sidecars / GPU split / run root
     output_dir            Convenience alias for ``specforge_overrides.output_dir``
 """
 
@@ -65,6 +67,16 @@ def specforge_mode(params: Any) -> str:
     return str(raw).strip().lower()
 
 
+def specforge_role(params: Any) -> Optional[str]:
+    raw = getattr(params, "specforge_role", None)
+    if raw is None or str(raw).strip() == "":
+        return None
+    role = str(raw).strip().lower()
+    if role not in {"producer", "consumer", "both"}:
+        raise ValueError(f"[Primus:specforge] unknown specforge_role '{role}'")
+    return role
+
+
 def _as_override_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -99,7 +111,11 @@ def flatten_overrides(obj: Any, prefix: str = "") -> dict[str, str]:
     return flat
 
 
-def build_specforge_argv(params: Any, extra_overrides: Optional[list[str]] = None) -> list[str]:
+def build_specforge_argv(
+    params: Any,
+    extra_overrides: Optional[list[str]] = None,
+    role: Optional[str] = None,
+) -> list[str]:
     """Build the ``specforge train`` argv for a Primus pre_trainer module."""
 
     specforge_config = getattr(params, "specforge_config", None)
@@ -116,8 +132,11 @@ def build_specforge_argv(params: Any, extra_overrides: Optional[list[str]] = Non
         overrides["output_dir"] = str(output_dir)
 
     entrypoint = getattr(params, "specforge_entrypoint", None) or DEFAULT_ENTRYPOINT
+    chosen_role = role if role is not None else specforge_role(params)
 
     argv = [str(entrypoint), "train", "--config", str(specforge_config)]
+    if chosen_role:
+        argv.extend(["--role", str(chosen_role)])
     argv.extend(f"{key}={value}" for key, value in sorted(overrides.items()))
     if extra_overrides:
         argv.extend(extra_overrides)

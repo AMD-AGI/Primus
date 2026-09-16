@@ -8,13 +8,11 @@
 SpecForgePretrainTrainer: Primus wrapper for SpecForge draft-model training.
 
 SpecForge spawns and manages its own distributed workers, so this trainer does
-not run a training loop in-process. It replaces the Primus process with the
-SpecForge CLI via ``os.execvp``, which keeps a single process tree and lets
-SpecForge's exit code propagate to the scheduler unchanged.
+not run a training loop in-process.
 
-Train uses ``os.execvp``, so ``cleanup()`` only runs on the error path.
-Capture uses ``subprocess.run`` so the trainer can filter hidden-state shards after
-``prepare_hidden_states.py`` exits.
+Offline train uses ``os.execvp``. Capture and online return so Primus can run
+cleanup: capture filters shards after ``prepare_hidden_states.py``; online
+keeps Mooncake/SGLang alive on rank 0 until the consumer finishes.
 """
 
 from __future__ import annotations
@@ -127,18 +125,29 @@ class SpecForgePretrainTrainer(BaseTrainer):
         self.mode = specforge_mode(self.backend_args)
         if self.mode == "capture":
             self.argv = build_capture_argv(self.backend_args)
+        elif self.mode == "online":
+            # Rank 0 supervises sidecars; argv is built per-role in the supervisor.
+            self.argv = None
         else:
             self.argv = build_specforge_argv(self.backend_args)
         self.workdir = getattr(self.backend_args, "specforge_root", None)
 
-        if shutil.which(self.argv[0]) is None:
+        entry = (
+            self.argv[0]
+            if self.argv
+            else (getattr(self.backend_args, "specforge_entrypoint", None) or "specforge")
+        )
+        if shutil.which(entry) is None:
             raise RuntimeError(
-                f"[Primus:specforge] Entrypoint '{self.argv[0]}' not found on PATH. "
+                f"[Primus:specforge] Entrypoint '{entry}' not found on PATH. "
                 "Install SpecForge in the training image, or set "
                 "'specforge_entrypoint' in the pre_trainer module config."
             )
 
-        log_rank_0(f"SpecForge command: {' '.join(self.argv)}")
+        if self.argv:
+            log_rank_0(f"SpecForge command: {' '.join(self.argv)}")
+        else:
+            log_rank_0("SpecForge online mode: rank-aware Mooncake/SGLang supervisor")
         if self.workdir:
             log_rank_0(f"SpecForge cwd: {self.workdir}")
         else:
@@ -148,10 +157,19 @@ class SpecForgePretrainTrainer(BaseTrainer):
             )
 
     def train(self):
-        """Hand off to SpecForge. Train replaces this process; capture returns."""
+        """Hand off to SpecForge. Offline train replaces this process; capture and online return."""
 
-        if self.argv is None:
+        if self.argv is None and getattr(self, "mode", None) != "online":
             raise RuntimeError("SpecForgePretrainTrainer.init() must be called before train().")
+
+        if getattr(self, "mode", None) == "online":
+            if self.workdir:
+                os.chdir(self.workdir)
+            from primus.backends.specforge.online_supervisor import run_online
+
+            log_rank_0("Starting SpecForge online 2-node supervisor (no exec).")
+            run_online(self.backend_args)
+            return
 
         cleared = clear_partial_distributed_env()
         if cleared:

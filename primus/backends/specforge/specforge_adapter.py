@@ -64,7 +64,7 @@ class SpecForgeAdapter(BackendAdapter):
 
         specforge_mode_value = specforge_mode(params)
         specforge_config = getattr(params, "specforge_config", None)
-        if specforge_mode_value != "capture" and not specforge_config:
+        if specforge_mode_value not in {"capture"} and not specforge_config:
             raise ValueError(
                 "[Primus:specforge] modules.pre_trainer must set 'specforge_config' "
                 "(path to the SpecForge YAML)."
@@ -77,6 +77,7 @@ class SpecForgeAdapter(BackendAdapter):
 
         root = resolve_specforge_root(params)
         capture = flatten_overrides(getattr(params, "specforge_capture", None))
+        online = flatten_overrides(getattr(params, "specforge_online", None))
 
         backend_args = SimpleNamespace(
             specforge_mode=specforge_mode_value,
@@ -85,6 +86,9 @@ class SpecForgeAdapter(BackendAdapter):
             specforge_root=str(root) if root is not None else None,
             specforge_overrides=overrides,
             specforge_capture=capture,
+            specforge_online=online,
+            specforge_role=getattr(params, "specforge_role", None),
+            output_dir=str(output_dir) if output_dir else None,
         )
 
         log_rank_0(
