@@ -35,6 +35,7 @@ from primus_turbo.pytorch.core.low_precision import (  # noqa: E402
     ScalingGranularity,
     check_mxfp8_support,
 )
+from primus_turbo.pytorch.core.utils import is_gfx950  # noqa: E402
 
 import primus.backends.megatron.core.transformer.experts as experts_mod  # noqa: E402
 from primus.backends.megatron.core.extensions.primus_turbo import (  # noqa: E402
@@ -46,6 +47,14 @@ from primus.backends.megatron.core.extensions.primus_turbo import (  # noqa: E40
 from primus.backends.megatron.core.fp8_utils import (  # noqa: E402
     MXFP8_SCALING_BLOCK_SIZE,
     SCALING_BLOCK_SIZE,
+)
+
+# `grouped_mlp_fp8` routes both recipes through `grouped_gemm_fp8_glu_impl` /
+# `grouped_gemm_fp8_dglu_impl`, which assert `is_gfx950()`. On gfx942 the fused
+# path is unreachable, so there is nothing to compare against.
+pytestmark = pytest.mark.skipif(
+    not (torch.cuda.is_available() and is_gfx950()),
+    reason="turbo_fused_grouped_gemm requires gfx950 (MI350X/MI355X)",
 )
 
 PrimusGroupedMLP = experts_mod.PrimusGroupedMLP
