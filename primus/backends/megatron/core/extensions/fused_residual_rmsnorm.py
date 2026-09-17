@@ -29,6 +29,8 @@ Activation
 ----------
 * V1: ``PRIMUS_FUSED_RESIDUAL_NORM=1`` (default 0).
 * V2: ``PRIMUS_FUSED_RESIDUAL_NORM_V2=1`` (default 0). Implies V1.
+* QKV: ``PRIMUS_FUSED_RMSNORM_MXFP4_QKV=1`` (default 0). With V2, layer
+  input RMSNorm emits row/column MXFP4 buffers consumed by QKV directly.
 * Requires ``use_turbo_rms_norm=true`` so standalone norms are
   ``PrimusTurboRMSNorm``. On the Llama TE fused LN+Linear spec,
   ``pre_mlp_layernorm`` / ``input_layernorm`` are ``IdentityOp`` and the
@@ -80,6 +82,11 @@ def _r3_enabled() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _mxfp4_qkv_enabled() -> bool:
+    v = os.environ.get("PRIMUS_FUSED_RMSNORM_MXFP4_QKV", "0").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def _run_rmsnorm_residual(x, residual, gamma, eps, skip_y_store=True):
     """V1/V2 residual RMSNorm; R3 also returns MXFP4 dual of y.
 
@@ -100,6 +107,44 @@ def _run_rmsnorm_residual(x, residual, gamma, eps, skip_y_store=True):
     return y, xpr, None
 
 
+def _run_qkv_rmsnorm_mxfp4(x, residual, gamma, eps, linear_qkv):
+    """Run the GPT-OSS QKV-only fused producer when its consumer matches."""
+    if not _mxfp4_qkv_enabled():
+        return None
+
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        attach_fused_mxfp4_activation,
+        can_consume_fused_mxfp4_activation,
+    )
+
+    if not can_consume_fused_mxfp4_activation(linear_qkv):
+        return None
+
+    from primus_turbo.flydsl.quantization.rmsnorm_mxfp4_fusion import (
+        rmsnorm_residual_mxfp4_fused,
+    )
+    from primus_turbo.pytorch.core.low_precision import float4_e2m1fn_x2
+
+    y, xpr, row, row_scale, col, col_scale = rmsnorm_residual_mxfp4_fused(
+        x,
+        residual,
+        gamma,
+        eps,
+        float4_e2m1fn_x2,
+        skip_y_store=True,
+    )
+    attach_fused_mxfp4_activation(y, row, row_scale, col, col_scale)
+
+    global _LOGGED_MXFP4_QKV_PATH
+    if not _LOGGED_MXFP4_QKV_PATH:
+        _log(
+            "First fused residual+RMSNorm+MXFP4 QKV dispatch: "
+            f"shape={tuple(x.shape)} consumer={type(linear_qkv).__name__}"
+        )
+        _LOGGED_MXFP4_QKV_PATH = True
+    return y, xpr
+
+
 def _log(msg: str) -> None:
     rank = os.environ.get("RANK", "0")
     if rank == "0":
@@ -108,6 +153,7 @@ def _log(msg: str) -> None:
 
 _INSTALLED = False
 _LOGGED_FC1_PATH = False
+_LOGGED_MXFP4_QKV_PATH = False
 
 
 def _identity_op_type():
@@ -455,9 +501,16 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
             qkv_skip, gamma, eps = qkv_params
             if getattr(qkv_skip, "zero_centered_gamma", False):
                 gamma = gamma + 1
-            input_layernorm_output, hidden_states, preq = _run_rmsnorm_residual(
-                prev_mlp_out, prev_residual, gamma, eps
+            fused_qkv = _run_qkv_rmsnorm_mxfp4(
+                prev_mlp_out, prev_residual, gamma, eps, qkv_skip
             )
+            if fused_qkv is not None:
+                input_layernorm_output, hidden_states = fused_qkv
+                preq = None
+            else:
+                input_layernorm_output, hidden_states, preq = _run_rmsnorm_residual(
+                    prev_mlp_out, prev_residual, gamma, eps
+                )
             qkv_skip._skip_fused_norm = True
             if preq is not None:
                 qkv_skip._prequant_x = preq
@@ -467,9 +520,17 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
             gamma = in_ln.weight
             if getattr(in_ln, "zero_centered_gamma", False):
                 gamma = gamma + 1
-            input_layernorm_output, hidden_states, preq = _run_rmsnorm_residual(
-                prev_mlp_out, prev_residual, gamma, in_ln.eps
+            linear_qkv = getattr(layer.self_attention, "linear_qkv", None)
+            fused_qkv = _run_qkv_rmsnorm_mxfp4(
+                prev_mlp_out, prev_residual, gamma, in_ln.eps, linear_qkv
             )
+            if fused_qkv is not None:
+                input_layernorm_output, hidden_states = fused_qkv
+                preq = None
+            else:
+                input_layernorm_output, hidden_states, preq = _run_rmsnorm_residual(
+                    prev_mlp_out, prev_residual, gamma, in_ln.eps
+                )
             if preq is not None:
                 in_ln._prequant_x = preq
     else:
