@@ -63,10 +63,33 @@ In `direct` mode inside a container, a plain `export PYTORCH_CUDA_ALLOC_CONF=exp
 
 ### Known issues
 
-<!-- NEEDS CONFIRMATION: no open Megatron-LM issue is derivable from the v26.6..v26.7
-     commit range, but absence of a commit is not evidence of absence of an issue.
-     Confirm before publishing. -->
-No Megatron-LM backend issues are currently tracked for v26.7.
+**Mamba 370M on MI355X fails in the backward pass.** Training aborts with
+`HIPBLAS_STATUS_INTERNAL_ERROR (6)` from inside `hipblasLtMatmul`, on the weight
+gradient GEMM (`NT`, M=1024, N=4384, K=65536, bf16).
+
+Transformer Engine does not pick the kernel itself: it asks hipBLASLt for a ranked
+list of solutions and launches the first entry. On MI355X the default heuristic ranks
+solution `12103` best for this shape, and that solution then fails at launch.
+
+**Workaround — offset the pick by one.** `TE_HIPBLASLT_ALGO_SELECTION=1` makes TE take
+the second heuristic result (`12082`), which is valid for the same shape, layout and
+dtypes and completes the backward pass. Measured throughput with the workaround:
+87109.8 tokens/s/GPU.
+
+```bash
+export TE_HIPBLASLT_ALGO_SELECTION=1
+
+./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI355X/mamba_370M-pretrain.yaml
+
+# drop the override again when you move off this model
+unset TE_HIPBLASLT_ALGO_SELECTION
+```
+
+> In container mode, export alone is not enough: `TE_*` is not in the
+> `container.options.env` allowlist in `runner/.primus.yaml`, so pass it explicitly
+> with `--env TE_HIPBLASLT_ALGO_SELECTION=1` or add it to that list. See
+> [Environment variables](../03-configuration-reference/environment-variables.md).
 
 **If you are upgrading from v26.6, do upgrade.** On v26.6, Primus-Turbo's non-fused
 weight-gradient path accumulated the gradient only on the first microbatch, so any
