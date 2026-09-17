@@ -285,7 +285,12 @@ stage_torch() {
         matplotlib==3.10.9 \
         pandas==2.3.3 \
         py-cpuinfo==9.0.0 \
-        build==1.5.0
+        build==1.5.0 \
+        filelock==3.29.1 \
+        sympy==1.14.0 \
+        networkx==3.6.1 \
+        jinja2==3.1.6 \
+        fsspec==2025.3.0
 
     $PIP uninstall -y torch || true
 
@@ -751,7 +756,7 @@ stage_boto() {
     reload_env
     log "Installing boto3/botocore and CVE-fix pins from the v26.7 image"
     pipi boto3==1.35.42 botocore==1.35.99
-    pipi cryptography==50.0.0 diffusers==0.38.0 "jaraco.context==6.1.0" pyarrow==23.0.1
+    pipi cryptography==50.0.0 diffusers==0.38.0 "jaraco.context==6.1.0" pyarrow==23.0.1 hydra-core==1.3.4
     # mlflow caps cryptography<50; --no-deps keeps the 50.0.0 pin above.
     $PIP install --no-deps mlflow==3.15.1
 }

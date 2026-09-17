@@ -451,7 +451,8 @@ stage_jaxreqs() {
         msgpack==1.2.1 \
         setuptools==80.10.2 \
         flax==0.12.8 \
-        keras==3.15.0
+        keras==3.15.0 \
+        nltk==3.10.3
     python - <<'PY' || true
 import os, shutil, sysconfig
 for base in {sysconfig.get_paths()[k] for k in ("purelib", "platlib")}:
