@@ -169,11 +169,12 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
-| `PRIMUS_HIPBLASLT_TUNING` | `0` | User | `examples/run_pretrain.sh` | **Master switch** for the HipBLASLt tuning flow (`1` enables). Must be set before `PRIMUS_HIPBLASLT_TUNING_STAGE` takes effect, and is mutually exclusive with deterministic mode (`PRIMUS_DETERMINISTIC=1`). |
-| `PRIMUS_HIPBLASLT_TUNING_STAGE` | `0` | User | `examples/run_pretrain.sh` | Stages `0` off, `1` dump shapes, `2` offline tune, `3` apply tuned kernels. |
-| `HIPBLASLT_TUNING_OVERRIDE_FILE` | (unset) | User / tuning scripts | `examples/run_pretrain.sh` | Path to tuned-kernel override file for stage `3`. |
-| `TE_HIPBLASLT_TUNING_RUN_COUNT` | varies | User | `examples/run_pretrain.sh` | Number of benchmark runs per shape during TE hipBLASLt tuning. |
-| `TE_HIPBLASLT_TUNING_ALGO_COUNT` | varies | User | `examples/run_pretrain.sh` | Transformer Engine hipBLASLt search breadth. |
+| `PRIMUS_HIPBLASLT_TUNING` | `0` | User | `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` | **Master switch** for the HipBLASLt tuning flow (`1` enables). Must be set before `PRIMUS_HIPBLASLT_TUNING_STAGE` takes effect, and is mutually exclusive with deterministic mode (`PRIMUS_DETERMINISTIC=1`). |
+| `PRIMUS_HIPBLASLT_TUNING_STAGE` | `0` | User | `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` | Stages `0` off, `1` dump shapes, `2` offline tune, `3` apply tuned kernels. |
+| `HIPBLASLT_TUNING_OVERRIDE_FILE` | (unset) | User / tuning scripts | `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` | Path to tuned-kernel override file for stage `3`. |
+| `TE_HIPBLASLT_TUNING_RUN_COUNT` | varies | User | `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` | Number of benchmark runs per shape during TE hipBLASLt tuning. |
+| `TE_HIPBLASLT_TUNING_ALGO_COUNT` | varies | User | `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` | Transformer Engine hipBLASLt search breadth. |
+| `TE_HIPBLASLT_ALGO_SELECTION` | (unset; TE uses the first result) | User | Transformer Engine | Index into hipBLASLt's ranked solution list. TE launches the first entry by default; set `1` to take the second. Needed for Mamba 370M on MI355X, where the top-ranked solution fails at launch — see [Megatron-LM training → Known issues](../02-user-guide/megatron-lm-training.md#known-issues). Not auto-forwarded into containers (the allowlist covers `HIPBLASLT_*`, not `TE_*`), so pass it with `--env`. |
 | `TE_HIPBLASLT_TUNING_ALGO_FILE` | (unset) | User | TE + HipBLASLt | Algorithm file for TE tuning flows. |
 | `TE_HIPBLASLT_TUNING` | (unset) | User | `examples/run_pretrain.sh` | When set, interacts with deterministic mode and tuning stages (disable conflicting modes per script comments). |
 | `HIPBLASLT_LOG_LEVEL` | (unset) | User | HipBLASLt | Library log level. |

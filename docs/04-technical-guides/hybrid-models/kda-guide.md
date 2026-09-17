@@ -68,7 +68,7 @@ trillion-token training to lift above 25 %).
 - [Prerequisites](#prerequisites)
 - [Step 1: Environment](#step-1-environment)
 - [Step 2: Dataset preparation](#step-2-dataset-preparation)
-- [Step 3: Apply Megatron-LM patches](#step-3-apply-megatron-lm-patches)
+- [Step 3: Apply Megatron-LM patches](#step-3-megatron-lm-patches-automatic--no-action-needed)
 - [Step 4: (Optional) Initialize from FLA weights](#step-4-optional-initialize-from-fla-weights)
 - [Step 5: Train](#step-5-train)
 - [Step 6: Monitor and compare against FLA](#step-6-monitor-and-compare-against-fla)

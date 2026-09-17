@@ -1,8 +1,8 @@
 # Primus environment in a venv (no docker, no sudo)
 
-Reproduces the Primus **v26.6** training image in a Python virtual environment on
+Reproduces the Primus **v26.7** training image in a Python virtual environment on
 a bare-metal host. Derived from
-[`.github/workflows/docker-release/Dockerfile.primus-v26.6`](../../.github/workflows/docker-release/Dockerfile.primus-v26.6),
+[`.github/workflows/docker-release/Dockerfile.primus-v26.7`](../../.github/workflows/docker-release/Dockerfile.primus-v26.7),
 using the same package pins and commits, adapted for the constraints of a machine
 where we have no root.
 
@@ -14,9 +14,9 @@ failure it avoids — worth reading before "correcting" any of them back.
 ## Python 3.12 is required
 
 This is a hard requirement from upstream packaging, not a preference. The pinned
-torch nightly `2.12.0+rocm7.15.0a20260727` ships a **cp312 Linux wheel only** —
-that nightly date published no cp310 Linux build — and the v26.6
-TransformerEngine wheels are cp312-only as well.
+torch build `2.12.0+rocm10.0.0` ships a **cp312 Linux wheel only** — no cp310
+Linux build is published — and the v26.7 TransformerEngine wheels are cp312-only
+as well.
 
 Ubuntu 22.04 hosts only have `python3.10`, so `setup.sh` provisions a standalone
 CPython 3.12 with [`uv`](https://docs.astral.sh/uv/). No sudo, no apt. Interpreters
@@ -40,24 +40,33 @@ used: `PRIMUS_PYTHON=/path/to/python3.12 bash setup.sh`.
 > remove the old venv and rebuild:
 > `rm -rf "$PRIMUS_BASE/venv" && bash setup.sh`
 
-## TransformerEngine: wheel on glibc ≥ 2.38, otherwise built from source
+## TransformerEngine: wheel on glibc ≥ 2.28, otherwise built from source
 
-v26.6 installs TransformerEngine from the ROCm multi-arch staging index instead of
-building it. Those wheels are produced on Ubuntu 24.04, and `libtransformer_engine.so`
-requires **glibc ≥ 2.38** plus `GLIBCXX_3.4.32`. Ubuntu 22.04 has glibc 2.35, and
-unlike libstdc++, glibc cannot be side-loaded through `LD_LIBRARY_PATH` — so on a
-22.04 host the v26.5 wheels install fine but fail at import with:
+v26.7 installs TransformerEngine from the ROCm indexes instead of building it. It
+arrives as three distributions: `transformer_engine` and `transformer_engine_rocm10`
+from `stable.repo.amd.com/rocm/transformer_engine/whl-next`, plus the
+`transformer_engine_rocm_torch` flavour from the multi-arch staging index.
+
+**The glibc floor dropped in v26.7.** The native code now ships as
+`transformer_engine_rocm10`, a `manylinux_2_28` wheel whose `libtransformer_engine.so`
+references no symbol newer than `GLIBC_2.27`, and the torch flavour is a small sdist
+built locally. v26.6's wheels were Ubuntu 24.04 builds that genuinely needed
+**glibc ≥ 2.38** and failed at import on 22.04 with:
 
 ```
 OSError: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found
 ```
 
-`stage_te` therefore picks its install path from the host's glibc:
+That no longer applies. Verified on Ubuntu 22.04 / glibc 2.35: the wheels install
+and `import transformer_engine.pytorch` succeeds, and a TE `Linear` forward and
+backward runs on MI325X with finite gradients.
+
+`stage_te` picks its install path from the host's glibc:
 
 | Host glibc | Path | What happens |
 |---|---|---|
-| ≥ 2.38 (e.g. Ubuntu 24.04) | wheel | exactly what v26.6 does |
-| < 2.38 (e.g. Ubuntu 22.04) | source | clones `ROCm/TransformerEngine` and builds commit `e028a6c…`, the same commit the `TE_VERSION` label refers to |
+| ≥ 2.28 (Ubuntu 22.04, 24.04) | wheel | exactly what v26.7 does |
+| < 2.28 | source | clones `ROCm/TransformerEngine` and builds `TE_COMMIT`. Note that `2.17.0+rocm10.0.0` carries no commit in its version label, so `TE_COMMIT` is still the v26.6 commit — confirm it before relying on this path |
 
 Either way you get the same TE version; the source build just links against the
 host toolchain. It takes considerably longer than the wheel install. Override the
@@ -104,7 +113,7 @@ bash setup.sh                                # all default stages
 
 The build compiles aiter, Primus-Turbo and (on older glibc) TransformerEngine
 from source, so budget hours rather than minutes. `flash-attn` is a pip package
-in v26.6 (`flash-attn==2.8.1`) rather than the ROCm git fork. Running it detached
+in v26.7 (`flash-attn==2.8.1`) rather than the ROCm git fork. Running it detached
 avoids losing it to a dropped connection:
 
 ```bash
@@ -152,8 +161,8 @@ The order matters for `te`: see the note on the staging index below.
 ## What changed from the v26.5-based scripts
 
 - **TransformerEngine 2.17 from the multi-arch staging index.** `stage_te`
-  installs `transformer_engine_rocm_torch==2.17.0+rocm7.15.0a20260727.e028a6c`
-  from `rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/`. On hosts
+  installs `transformer_engine_rocm_torch==2.17.0+rocm10.0.0`
+  from `rocm.frameworks-devreleases.amd.com/whl-multi-arch-staging/`. On hosts
   whose glibc is too old for those wheels it builds the same commit from source
   instead — see the section above.
 - **Flash Attention is `pip install flash-attn==2.8.1`**, not the
@@ -164,12 +173,16 @@ The order matters for `te`: see the note on the staging index below.
   workaround (AIMA-248).
 - **`PRIMUS_FLA_MLA_ATTN=1`** is exported at runtime (MLA `core_attention` uses
   `flash_attn_func` directly).
-- **mamba** applies the v26.6 `uninitialized_copy.cuh` CUDA-namespace patches
+- **mamba** applies the v26.7 `uninitialized_copy.cuh` CUDA-namespace patches
   and installs `nvidia-cuda-nvdisasm==13.3.73`.
-- **Updated pins:** torch `2.12.0+rocm7.15.0a20260727`, TE 2.17, transformers
-  `5.5.0`, wandb `0.28.2`, Primus `2aa05ead…` (`release/v26.6`), Primus-Turbo
-  `a6a16cdc…`. CVE pins: `cryptography==50.0.0`, `mlflow==3.15.1` (`--no-deps`).
-- **`ck_jit_compile.sh` is still patched** the same way the image patches it.
+- **Updated pins:** torch `2.12.0+rocm10.0.0` (v26.7 moves to the ROCm 10.0.0 pip
+  SDK), TE `2.17.0+rocm10.0.0` from the devreleases index, transformers `5.10.0`,
+  wandb `0.28.2`, Primus `2631e68d…` (the `release/v26.7` tip, also the `v26.7.0`
+  tag), Primus-Turbo `6d5ff979…`.
+  CVE pins: `cryptography==50.0.0`, `mlflow==3.15.1` (`--no-deps`).
+- **`ck_jit_compile.sh` no longer needs patching.** TE 2.17 ships its own tolerance
+  for a lost `mv -n` race (`|| [ -f "$OUTPUT" ]`), which is why the v26.7 Dockerfile
+  dropped the `sed` that v26.6 applied. `setup.sh` detects either form and skips.
 - **`GPU_ARCHS` remains `native` at runtime.** `setup.sh` still overrides it to
   the full arch list for stages that cross-compile.
 
@@ -226,7 +239,7 @@ scripts:
   backward attention kernel emit Inf gradients on MI300X/MI325X, killing training at
   the first step. Primus's own tuning guide already prescribes fp32 atomics for these
   GPUs (the MI300X/MI325X block in
-  [docs/02-user-guide/training-recipes.md](../../docs/02-user-guide/training-recipes.md)),
+  [docs/02-user-guide/end-to-end-training-recipes.md](../../docs/02-user-guide/end-to-end-training-recipes.md)),
   so `env.sh` applies it from the detected architecture and leaves `0` for gfx950,
   which the Dockerfile value targets. `NVTE_CK_USES_BWD_V3` itself stays at the
   Dockerfile's `1` — it is worth roughly 15% throughput, and the atomic mode is what
