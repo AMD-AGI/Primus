@@ -123,7 +123,10 @@ def collapse_body(body, bucket):
 
 
 def parse_log(from_commit, to_commit, cherry_pick=True):
-    fmt = FIELD.join(["%H", "%h", "%ad", "%an", "%s", "%b"]) + FIELD
+    # %h is deliberately absent: it abbreviates to whatever the local object count
+    # warrants, which would make changelog.json differ between clones. The short
+    # form is sliced from %H below instead.
+    fmt = FIELD.join(["%H", "%ad", "%an", "%s", "%b"]) + FIELD
     args = ["log", f"--format={RECORD}{fmt}", "--name-only", "--date=short"]
     if cherry_pick:
         args += ["--cherry-pick", "--right-only", f"{from_commit}...{to_commit}"]
@@ -136,16 +139,16 @@ def parse_log(from_commit, to_commit, cherry_pick=True):
         if not chunk.strip():
             continue
         parts = chunk.split(FIELD)
-        if len(parts) < 7:
+        if len(parts) < 6:
             continue
-        sha, short, date, author, subject, body, tail = parts[:7]
+        sha, date, author, subject, body, tail = parts[:6]
         files = [line.strip() for line in tail.splitlines() if line.strip()]
         bucket = classify_bucket(subject, author)
         pr_match = PR_NUMBER.search(subject)
         commits.append(
             {
                 "sha": sha.strip(),
-                "short": short.strip(),
+                "short": sha.strip()[:8],
                 "date": date.strip(),
                 "author": author.strip(),
                 "subject": subject.strip(),
@@ -186,7 +189,10 @@ def submodule_bumps(from_commit, to_commit):
     always reported no bumps and did so silently.
     """
     bumps = {}
-    raw = git("diff", "--raw", f"{from_commit}..{to_commit}", "--", "third_party/")
+    # --abbrev=40 because git otherwise scales the abbreviation to the object
+    # count, so the same range yields 7 characters in a fresh CI clone and 8 in a
+    # long-lived one. Truncating below is only deterministic on a full SHA.
+    raw = git("diff", "--raw", "--abbrev=40", f"{from_commit}..{to_commit}", "--", "third_party/")
     for line in raw.splitlines():
         match = re.match(r"^:(\d{6}) (\d{6}) ([0-9a-f]+) ([0-9a-f]+) (\w+)\t(.+)$", line)
         if match and "160000" in (match.group(1), match.group(2)):

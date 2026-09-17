@@ -14,10 +14,30 @@ to ignore it. So the cases here are drawn from actual lines in the repository.
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
+
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[3]
 _TOOLS = _ROOT / "tools/release_docs"
+
+
+def _rev_present(rev):
+    """Whether this checkout can resolve `rev` at all.
+
+    A CI checkout only carries what its base branch reaches, so a commit that
+    lives on a release branch is simply absent and git rejects the whole range as
+    a bad revision. Tests that name a real commit have to tolerate that.
+    """
+    return (
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{rev}^{{commit}}"],
+            cwd=_ROOT,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
 
 
 def _load(name):
@@ -322,6 +342,8 @@ def test_submodule_bumps_are_detected():
     # Regression: this used to parse `--submodule=short` output for a
     # "Submodule <path> a..b" summary line, which that format never emits, so it
     # silently reported no bumps ever. dc3f4ba18a moves third_party/maxtext.
+    if not _rev_present("dc3f4ba18a"):
+        pytest.skip("dc3f4ba18a is not in this checkout")
     bumps = collect_changes.submodule_bumps("dc3f4ba18a^", "dc3f4ba18a")
     assert "third_party/maxtext" in bumps
     assert bumps["third_party/maxtext"]["from"].startswith("2ec83add")
@@ -329,8 +351,12 @@ def test_submodule_bumps_are_detected():
 
 
 def test_no_submodule_bumps_reports_empty_rather_than_failing():
-    bumps = collect_changes.submodule_bumps("2aa05ead", "2631e68d")
-    assert bumps == {}
+    # An empty third_party/ diff has to come back as {} rather than raising.
+    # Anchored on HEAD because the range this used to name, 2aa05ead..2631e68d,
+    # starts at the v26.6 build commit, which exists only on release/v26.6 -- so it
+    # resolved locally and failed in CI, where release branches are never fetched.
+    head = collect_changes.git("rev-parse", "HEAD").strip()
+    assert collect_changes.submodule_bumps(head, head) == {}
 
 
 # --- install_parity --------------------------------------------------------
