@@ -11,6 +11,7 @@ Reference:
     Megatron-LM examples/multimodal/dataloader_provider.py
 """
 
+import os
 from typing import Any, Callable, List, Optional, Tuple
 
 from megatron.core import parallel_state
@@ -104,8 +105,17 @@ class EnergonDatasetProvider(DatasetProvider):
         # Create worker config for distributed loading. Validation gets its own,
         # because the worker count decides how many samples an eval actually
         # reads (see eval_budget) and the training value is rarely a safe one.
-        worker_config = self._create_worker_config(args)
+        # args.seed does not reach the data pipeline. Energon derives each
+        # worker's shuffle RNG from sha1(f"{global_worker_id},{seed_offset}")
+        # (worker.py), and seed_offset was never set, so every run so far has
+        # consumed the same samples in the same order whatever PRIMUS_SEED said.
+        # Training only: validation must keep reading the same samples in the
+        # same order, or the metric moves with the arm and the comparison is
+        # confounded. Default 0 reproduces the previous behaviour exactly.
+        train_seed_offset = int(os.environ.get("PRIMUS_ENERGON_SEED_OFFSET", "0"))
+        worker_config = self._create_worker_config(args, seed_offset=train_seed_offset)
         val_worker_config = self._create_worker_config(args, num_workers=get_val_num_workers(args))
+        log_rank_0(f"Energon train seed_offset: {train_seed_offset} (val pinned to 0)")
 
         # Get data path
         data_path = self._get_data_path(args)
@@ -267,7 +277,9 @@ class EnergonDatasetProvider(DatasetProvider):
 
         return is_first_tp_rank and is_valid_pp_stage
 
-    def _create_worker_config(self, args, num_workers: Optional[int] = None) -> WorkerConfig:
+    def _create_worker_config(
+        self, args, num_workers: Optional[int] = None, seed_offset: int = 0
+    ) -> WorkerConfig:
         """
         Create Energon WorkerConfig for distributed loading.
 
@@ -277,6 +289,8 @@ class EnergonDatasetProvider(DatasetProvider):
             num_workers: Override the worker count. Validation passes its own so
                 it does not inherit the training value, which controls how many
                 samples an evaluation reads (see eval_budget).
+            seed_offset: Energon's data-order seed. Left at 0 for validation and
+                for any run that does not ask for a new order.
         """
         rank = parallel_state.get_data_parallel_rank()
         world_size = parallel_state.get_data_parallel_world_size()
@@ -299,6 +313,7 @@ class EnergonDatasetProvider(DatasetProvider):
             world_size=world_size,
             num_workers=num_workers,
             data_parallel_group=data_parallel_group,
+            seed_offset=seed_offset,
             global_error_handler=log_exception,
         )
 
