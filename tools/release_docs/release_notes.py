@@ -13,12 +13,15 @@
 
 `check` is the load-bearing half. The release notes carry ~25 version strings
 per image; a wrong hipBLASLt tweak hash is invisible in review but a customer
-hits it immediately. Running this in CI means the page cannot drift from the
-images it documents, and prose an editor adds to a cell (`7.15.0 (rocm-sdk
+hits it immediately. Run it after any edit to the page and the page cannot drift
+from the images it documents, and prose an editor adds to a cell (`7.15.0 (rocm-sdk
 7.15.0a20260727)`) is preserved because a cell only has to *contain* the
 extracted value, not equal it.
 
-Stdlib-only: this runs in the lint job.
+Nothing runs this automatically -- it is a Phase 5 gate in the release-docs skill,
+so a release that skips it ships unverified numbers.
+
+Stdlib-only, so it needs no virtualenv wherever it is run.
 
 Usage:
     python tools/release_docs/release_notes.py check

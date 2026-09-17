@@ -7,9 +7,9 @@
 """Shared helpers for the release-docs tooling: snapshot IO and the parsers for
 the artifacts a training image ships under `/workspace/.manifest/`.
 
-Stdlib-only, because `release_notes.py check` runs in the lint job, which
-installs nothing but pre-commit (same constraint as
-`tools/ci/check_version_consistency.py`).
+Stdlib-only, so the checks that import this run on a bare Python anywhere -- a
+release node, a fresh clone, or a CI job that installs nothing (the same
+constraint `tools/ci/check_version_consistency.py` keeps).
 """
 
 import json

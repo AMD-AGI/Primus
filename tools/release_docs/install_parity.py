@@ -13,15 +13,17 @@ a release, and drift is invisible until someone's bare-metal install behaves
 differently from the image.
 
 The comparison is self-anchoring: the release is read from the script's own
-`(from Dockerfile.primus-vX.Y)` header, so `--check` is meaningful in CI without
-being told which release is current.
+`(from Dockerfile.primus-vX.Y)` header, so `--check` is meaningful without being
+told which release is current.
 
 With --baremetal-manifest it additionally diffs an actual install against the
 image snapshot. `stage_manifest` writes a `pip list` in the same format the image
 ships, which turns "is bare metal aligned with the Dockerfile" into a diff of two
 package sets rather than a judgement call.
 
-Stdlib-only: this runs in the lint job.
+Nothing runs this automatically -- it is a Phase 3 gate in the release-docs skill.
+
+Stdlib-only, so it needs no virtualenv wherever it is run.
 
 Usage:
     python tools/release_docs/install_parity.py

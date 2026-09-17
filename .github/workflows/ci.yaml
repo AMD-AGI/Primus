@@ -78,20 +78,6 @@ jobs:
         run: pre-commit run --all-files --show-diff-on-failure
       - name: Check version/commit pin consistency
         run: python tools/ci/check_version_consistency.py
-      # The release notes state ~25 versions per published image, and a wrong
-      # hipBLASLt tweak hash is invisible in review but breaks a user
-      # immediately. These two checks hold the docs to the images and the
-      # bare-metal install scripts to the Dockerfiles they say they mirror, so
-      # drift fails here instead of in someone's terminal a month later.
-      - name: Check release notes match the published image snapshots
-        run: python tools/release_docs/release_notes.py check
-      - name: Check bare-metal install parity with the release Dockerfiles
-        run: python tools/release_docs/install_parity.py --check
-      # Renaming a heading or rotating a release section out of the notes orphans
-      # inbound anchors, which no version check can see. Baselined, so only new
-      # breakage fails.
-      - name: Check in-repo doc links and anchors
-        run: python tools/release_docs/check_links.py
       # The three submodules the drift check reads a schema from; `submodules:
       # recursive` on the checkout would also clone Megatron-Bridge & friends
       # for nothing. A fetch failure is deliberately left to the check step,

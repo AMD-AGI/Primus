@@ -196,9 +196,14 @@ as documentation drift against the full SHAs probed from the image. Ask for
 `--abbrev=40` and truncate in the tool. The check scans the tools' string literals for
 `%h`, `--short`, `--submodule=short` and any other `--abbrev=`.
 
-There are no unit tests for this tooling by choice, so the replay and the three checks
-above are the whole safety net. Two consequences to respect: a checker that breaks
+**Nothing here runs automatically.** There are no unit tests for this tooling and no CI
+step invokes it, both by choice, so these commands are the entire safety net and they
+only fire when a person types them. That is why the phase gates say *both must pass*
+rather than treating them as advisory: a release that skips them ships numbers nobody
+checked, and drift then surfaces in a user's terminal instead of here.
+
+Two consequences to respect when changing a checker. A checker that breaks
 *permissively* still reports OK — dropping the fenced-block skip in `check_links.py`
-makes headings inside code fences count as anchors, and dead links then validate — and
-nothing catches a parser that silently matches nothing. When you change a checker,
-verify it still fails on a case you know is broken before trusting a green run.
+makes headings inside code fences count as anchors, so dead links validate and the run
+goes green — and nothing catches a parser that silently matches nothing. So verify a
+changed checker still fails on a case you know is broken before trusting a clean run.

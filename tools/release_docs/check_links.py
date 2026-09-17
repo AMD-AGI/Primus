@@ -16,11 +16,13 @@ visible to a version-string check, and none of it fails a build.
 Only relative links are followed; external URLs are left alone deliberately, so
 this is fast and offline.
 
-Pre-existing breakage is recorded in a baseline so this can gate CI without
+Pre-existing breakage is recorded in a baseline so this can gate a release without
 demanding an unrelated docs cleanup first. New breakage fails; fixing a
 baselined entry prompts you to shrink the baseline.
 
-Stdlib-only: this runs in the lint job.
+Nothing runs this automatically -- it is a Phase 5 gate in the release-docs skill.
+
+Stdlib-only, so it needs no virtualenv wherever it is run.
 
 Usage:
     python tools/release_docs/check_links.py
