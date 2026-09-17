@@ -186,3 +186,22 @@ release and compares the outcome with what shipped. Its gate is asymmetric on
 purpose: **over-reach fails** (rewriting a reference the release deliberately kept
 is silent corruption), while under-reach passes provided the item is surfaced for
 review.
+
+### These tests run on every PR
+
+Once merged they gate the whole repo, so they must fail only for real breakage:
+
+- **Never read a SHA that git abbreviated for itself.** The length scales with the
+  local object count — 7 characters in a fresh clone, 8 in a long-lived one — so
+  slicing one makes the output depend on the machine. `submodule_bumps` shipped this
+  bug: `[:8]` of `git diff --raw` returned 7 characters in CI and read as
+  documentation drift against the SHAs probed from the image. Ask for `--abbrev=40`
+  and truncate here. `test_no_tool_reads_gits_variable_sha_abbreviation` enforces it
+  by scanning the tools' string literals.
+- **Do not name a commit that only a release branch reaches.** A CI checkout carries
+  only what its base branch reaches, so `2aa05ead` (the v26.6 build commit, which
+  lives on `release/v26.6`) resolved locally and failed CI as a bad revision. Anchor
+  on `HEAD`, or guard with `_rev_present` so a checkout that cannot see the commit
+  skips instead of failing someone else's PR.
+- **Assert version shapes, not the current version.** `startswith("v26.")` would
+  fail every PR from the first v27 release onwards.

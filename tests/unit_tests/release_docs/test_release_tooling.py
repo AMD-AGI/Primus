@@ -12,15 +12,36 @@ false statement, and a parity checker that cannot see real drift trains people
 to ignore it. So the cases here are drawn from actual lines in the repository.
 """
 
+import ast
 import importlib.util
 import json
+import re
 import subprocess
+import tokenize
 from pathlib import Path
 
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[3]
 _TOOLS = _ROOT / "tools/release_docs"
+
+
+def _string_literals(path):
+    """Every string literal in a module, so a check can look at real arguments.
+
+    Scanning the raw text instead would also hit prose in comments and docstrings,
+    which is exactly where the constructs below get explained.
+    """
+    with open(path, "rb") as handle:
+        for token in tokenize.tokenize(handle.readline):
+            if token.type != tokenize.STRING:
+                continue
+            try:
+                value = ast.literal_eval(token.string)
+            except (ValueError, SyntaxError):
+                continue
+            if isinstance(value, str):
+                yield value
 
 
 def _rev_present(rev):
@@ -350,6 +371,28 @@ def test_submodule_bumps_are_detected():
     assert bumps["third_party/maxtext"]["to"].startswith("b47d74bf")
 
 
+def test_no_tool_reads_gits_variable_sha_abbreviation():
+    """No tool may consume an abbreviated SHA that git chose for itself.
+
+    git scales the abbreviation to the local object count, so the same range gives
+    7 characters in a fresh clone and 8 in a long-lived one. Anything that slices
+    such a value produces output that depends on the machine that ran it, and this
+    shipped once: submodule_bumps took [:8] of `git diff --raw` output and returned
+    7 characters in CI, which then read as documentation drift against the full SHAs
+    probed from the image. Ask for the whole SHA and truncate here instead.
+
+    `--submodule=short` is banned for the older reason recorded in submodule_bumps:
+    it emits no summary line, so the parse silently matched nothing.
+    """
+    banned = {"%h", "--short", "--submodule=short"}
+    offenders = []
+    for path in sorted(_TOOLS.glob("*.py")):
+        for value in _string_literals(path):
+            if value in banned or (value.startswith("--abbrev=") and value != "--abbrev=40"):
+                offenders.append(f"{path.name}: {value!r}")
+    assert not offenders, "variable-abbreviation git output: " + ", ".join(offenders)
+
+
 def test_no_submodule_bumps_reports_empty_rather_than_failing():
     # An empty third_party/ diff has to come back as {} rather than raising.
     # Anchored on HEAD because the range this used to name, 2aa05ead..2631e68d,
@@ -368,9 +411,12 @@ def test_shell_default_expansion_resolves_to_its_default():
 
 
 def test_mirrored_release_is_read_from_the_script_itself():
-    # Self-anchoring is what makes --check meaningful in CI.
-    assert install_parity.mirrored_release("primus").startswith("v26.")
-    assert install_parity.mirrored_release("jax").startswith("v26.")
+    # Self-anchoring is what makes --check meaningful in CI. Asserted as a version
+    # shape rather than a v26 prefix, which would have failed every PR from the
+    # first v27 release onwards for no reason.
+    version = re.compile(r"v\d+\.\d+(\.\d+)?$")
+    assert version.match(install_parity.mirrored_release("primus"))
+    assert version.match(install_parity.mirrored_release("jax"))
 
 
 def test_parity_is_clean_against_the_dockerfile_the_script_mirrors():
