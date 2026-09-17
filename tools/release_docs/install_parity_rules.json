@@ -11,12 +11,12 @@
     "A parity checker that cannot tell deliberate divergence from drift is worse",
     "than none, because it trains people to ignore it."
   ],
-
   "aliases": {
-    "primus": { "THE_ROCK_VERSION": "ROCM_SDK_VERSION" },
+    "primus": {
+      "THE_ROCK_VERSION": "ROCM_SDK_VERSION"
+    },
     "jax": {}
   },
-
   "not_pins": [
     "DEFAULT_STAGES",
     "OPTIONAL_STAGES",
@@ -30,7 +30,6 @@
     "DEBIAN_FRONTEND",
     "PYTHONUNBUFFERED"
   ],
-
   "documented_divergences": {
     "primus": {
       "TORCHVISION_VERSION": "Dockerfile floats `torchvision==0.27`; the script pins the full nightly so a bare-metal install is reproducible.",
@@ -45,7 +44,6 @@
       "JAX_ROCM_VERSION": "Dockerfile derives the plugin version from JAX_VERSION; the script pins it so the pjrt/plugin pair cannot skew."
     }
   },
-
   "_dockerfile_only_packages_why": [
     "Packages the release Dockerfile pins that the bare-metal script legitimately",
     "never names. Anything not listed here is reported as drift, because a changed",
@@ -56,14 +54,15 @@
     "builds those names from PYTORCH_ROCM_ARCH at run time."
   ],
   "dockerfile_only_packages": {
-    "primus": {},
+    "primus": {
+      "msgpack": "a sed on pip's own vendored dependency list (src/pip/_vendor/vendor.txt) in the pip_builder stage, not a package installed into the training environment; bare metal uses stock pip"
+    },
     "jax": {
       "torch": "installed by the MaxDiffusion stage, which the bare-metal script skips",
       "torchvision": "same MaxDiffusion stage",
       "transformers": "pinned by the jax_training stage; bare metal takes it from Primus' requirements-jax.txt"
     }
   },
-
   "inline_pins": {
     "_comment": "Pins the Dockerfiles express inside RUN lines rather than as ARG. Only four exist in Dockerfile.primus-v26.6 against 66 ARG/ENV declarations, so an explicit list beats a general parser.",
     "primus": {
