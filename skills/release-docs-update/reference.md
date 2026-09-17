@@ -102,6 +102,29 @@ Rules:
 - Do not list every commit. Maintenance and dependency churn belong in one line
   or nowhere.
 
+Split the highlights per image family whenever the two stacks diverge, with a shared
+section for what reaches both. v26.7 needed this: the release was weighted towards the
+PyTorch family, and a single merged list implied MaxText gained capability it did not.
+
+### The management email
+
+`tools/release_docs/announcements/vX.Y.md`, 4-6 bullets per family, no PR links, written
+to be pasted into an inbox rather than read next to the docs. It restates the page
+highlights for a different reader, so it is a derived artifact and never the source of a
+version number — take those from `data/vX.Y-*.json` like everything else.
+
+Editorial rules, each one a mistake avoided in v26.7:
+
+- **"Upgraded to X" requires the version to have moved.** JAX 0.11.0 and TE 2.17.0 were
+  rebuilt on ROCm 10.0.0 without changing version, so the upgrade phrasing the v26.6 and
+  v26.4 emails used would have been false. Say "built against".
+- **Drop deltas that are true but misleading.** v26.7 APEX reads as a downgrade only
+  because v26.6 carried a ROCm 10.1 nightly on a 7.15 base.
+- **Nothing marked NEEDS CONFIRMATION goes in.** An unverified known issue is worse in an
+  exec summary than in a doc, where the marker is at least visible.
+- **Close with what was held back and why**, so the next release inherits the reasoning
+  rather than re-deriving it — including anything excluded for disclosure reasons.
+
 ## Version reference surface
 
 Roughly 120 references across 30+ files, in classes that need different handling.

@@ -39,7 +39,13 @@ import _common as C  # noqa: E402
 
 BASELINE = Path(__file__).resolve().parent / "link_baseline.json"
 
-SEARCH_ROOTS = ("docs", "tools/installation", "tools/installation-jax", "skills")
+SEARCH_ROOTS = (
+    "docs",
+    "tools/installation",
+    "tools/installation-jax",
+    "tools/release_docs/announcements",
+    "skills",
+)
 EXTRA_FILES = ("README.md",)
 
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
