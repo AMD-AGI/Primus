@@ -29,6 +29,8 @@ Activation
 ----------
 * V1: ``PRIMUS_FUSED_RESIDUAL_NORM=1`` (default 0).
 * V2: ``PRIMUS_FUSED_RESIDUAL_NORM_V2=1`` (default 0). Implies V1.
+* QKV: ``PRIMUS_FUSED_RMSNORM_MXFP4_QKV=1`` (default 0). With V2, layer
+  input RMSNorm emits the row/column MXFP4 buffers consumed by QKV directly.
 * Requires ``use_turbo_rms_norm=true`` so the norms are ``PrimusTurboRMSNorm``
   instances we can extend with a ``residual=`` arg.
 
@@ -63,6 +65,11 @@ def _enabled() -> bool:
 
 def _v2_enabled() -> bool:
     v = os.environ.get("PRIMUS_FUSED_RESIDUAL_NORM_V2", "0").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _mxfp4_qkv_enabled() -> bool:
+    v = os.environ.get("PRIMUS_FUSED_RMSNORM_MXFP4_QKV", "0").strip().lower()
     return v in ("1", "true", "yes", "on")
 
 
@@ -361,17 +368,52 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
         prev_mlp_out, prev_residual = carry
         # We bypass PrimusTurboRMSNorm.forward to access x_plus_r directly,
         # which is needed as the residual for ADD#1.
-        from primus_turbo.pytorch.ops.normalization import (
-            rmsnorm_residual as triton_rmsnorm_residual,
-        )
-
         in_ln = layer.input_layernorm
         gamma = in_ln.weight
         if getattr(in_ln, "zero_centered_gamma", False):
             gamma = gamma + 1
-        input_layernorm_output, hidden_states = triton_rmsnorm_residual(
-            prev_mlp_out, prev_residual, gamma, in_ln.eps
-        )
+        linear_qkv = getattr(layer.self_attention, "linear_qkv", None)
+        use_mxfp4_qkv_fusion = False
+        if _mxfp4_qkv_enabled():
+            from primus.backends.megatron.core.extensions.primus_turbo import (
+                attach_fused_mxfp4_activation,
+                can_consume_fused_mxfp4_activation,
+            )
+
+            use_mxfp4_qkv_fusion = can_consume_fused_mxfp4_activation(linear_qkv)
+
+        if use_mxfp4_qkv_fusion:
+            from primus_turbo.flydsl.quantization.rmsnorm_mxfp4_fusion import (
+                rmsnorm_residual_mxfp4_fused,
+            )
+            from primus_turbo.pytorch.core.low_precision import float4_e2m1fn_x2
+
+            (
+                input_layernorm_output,
+                hidden_states,
+                row,
+                row_scale,
+                col,
+                col_scale,
+            ) = rmsnorm_residual_mxfp4_fused(
+                prev_mlp_out,
+                prev_residual,
+                gamma,
+                in_ln.eps,
+                float4_e2m1fn_x2,
+                skip_y_store=True,
+            )
+            attach_fused_mxfp4_activation(
+                input_layernorm_output, row, row_scale, col, col_scale
+            )
+        else:
+            from primus_turbo.pytorch.ops.normalization import (
+                rmsnorm_residual as triton_rmsnorm_residual,
+            )
+
+            input_layernorm_output, hidden_states = triton_rmsnorm_residual(
+                prev_mlp_out, prev_residual, gamma, in_ln.eps
+            )
     else:
         input_layernorm_output = layer.input_layernorm(hidden_states)
     nvtx_range_pop(suffix="input_layernorm")
