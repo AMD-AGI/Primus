@@ -19,31 +19,49 @@ Every version below was read out of the published image itself. For v26.4 throug
 
 **ROCm 10.0.0.** Both image families move off the ROCm 7.x line. This is the defining change of the release and it reaches everything: PyTorch, Transformer Engine, Triton, torchvision/torchaudio and APEX are all rebuilt against it, and the JAX plugin pair is renamed `jax-rocm10-pjrt` / `jax-rocm10-plugin`. If you install bare metal, note that the wheel indexes moved too — see [Bare-metal installation](./bare-metal-installation.md).
 
-### New features
+Beyond that, the backend work in this release is weighted towards the PyTorch
+family; MaxText picks up the ROCm 10 stack plus config tuning rather than new
+capability.
+
+### Both families
+
+- **gfx1250 multi-GPU enablement.** Primus recognises gfx1250 by ISA rather than by MI number and ships an arch env file for it, so `primus-cli` applies real settings instead of falling through to `Detected GPU model: unknown` ([#1043](https://github.com/AMD-AGI/Primus/pull/1043)).
+- **`primus-cli` honours an explicit flag** whose value happens to equal the parser default ([#1002](https://github.com/AMD-AGI/Primus/pull/1002)).
+- **`*_SOCKET_IFNAME` no longer falls back to an IP address** ([#1063](https://github.com/AMD-AGI/Primus/pull/1063)).
+- **The `primus` wheel builds again.** The `mlperf-logging` / `mlperf-common` VCS pins moved to an optional `mlperf` extra, because Hatchling 1.32 rejects PEP 508 direct references in `project.dependencies` ([#1061](https://github.com/AMD-AGI/Primus/pull/1061)).
+
+### `rocm/primus` — Megatron-LM and TorchTitan
+
+#### New features
 
 - **DeepSeek-V4 on gfx942 at long context.** V4 upstream targeted gfx950 and in practice only ran at `seq_length=4096`; it now trains on MI308X/CDNA3 with context parallelism at 128k, full model ([#1047](https://github.com/AMD-AGI/Primus/pull/1047)).
 - **Packed-sequence (THD) SFT for DeepSeek-V4** — many samples per window delimited by `cu_seqlens`, with attention isolated so no query sees another sample; full model at 4k and 128k across three nodes ([#1062](https://github.com/AMD-AGI/Primus/pull/1062)).
-- **gfx1250 multi-GPU enablement.** Primus recognises gfx1250 by ISA rather than by MI number and ships an arch env file for it, so `primus-cli` applies real settings instead of falling through to `Detected GPU model: unknown` ([#1043](https://github.com/AMD-AGI/Primus/pull/1043)).
 - **DLRM-v4 (TorchRec/HSTU) projection workload** with first-principles MI350X calibration ([#1059](https://github.com/AMD-AGI/Primus/pull/1059)).
 - **MLPerf Llama 3.1 8B launcher** and refreshed MI355X benchmark configs ([#1012](https://github.com/AMD-AGI/Primus/pull/1012)).
 
-### Performance
+#### Performance
 
 - **Fused SwiGLU + fc2** (opt-in, via FLA `swiglu_linear`) removes one FFN-wide saved tensor per MLP layer by recomputing the activation in the backward pass ([#1051](https://github.com/AMD-AGI/Primus/pull/1051)).
 - **Fused cross-entropy no longer copies the full logits tensor** ([#1049](https://github.com/AMD-AGI/Primus/pull/1049)).
 - **DeepSeek-V4 indexer distillation loss** is fused and enabled ([#992](https://github.com/AMD-AGI/Primus/pull/992)).
-- **Tuned configs:** GDN/KDA 1B on MI355X for higher occupancy ([#1080](https://github.com/AMD-AGI/Primus/pull/1080)), MaxText MI300X batch sizes ([#1020](https://github.com/AMD-AGI/Primus/pull/1020)), `gemma4_26B-fp8` ([#1019](https://github.com/AMD-AGI/Primus/pull/1019)), and MI355X Llama 3.1 8B / GPT-OSS 20B defaults ([#1045](https://github.com/AMD-AGI/Primus/pull/1045)).
+- **Tuned configs:** GDN/KDA 1B on MI355X for higher occupancy ([#1080](https://github.com/AMD-AGI/Primus/pull/1080)), and MI355X Llama 3.1 8B / GPT-OSS 20B defaults ([#1045](https://github.com/AMD-AGI/Primus/pull/1045)).
 
-### Bug fixes
+#### Bug fixes
 
 - **Weight gradients were dropped after the first microbatch** on Turbo's non-fused `_bridge_weight_grad` path, which gated accumulation on `grad_added_to_main_grad`. Any run using gradient accumulation on that path was training on partial gradients ([#1046](https://github.com/AMD-AGI/Primus/pull/1046)).
 - **Out-of-bounds top-k index** in the V4 DSA forward kernel is now bounded ([#1044](https://github.com/AMD-AGI/Primus/pull/1044)).
 - **`fused_softcap` stays finite** on saturation-range logits ([#1057](https://github.com/AMD-AGI/Primus/pull/1057)).
 - **KDA fused `in_proj` is padded** past the hipBLASLt bf16 dead zone ([#1050](https://github.com/AMD-AGI/Primus/pull/1050)).
 - **Pipeline warmup is clamped** for short batches ([#1032](https://github.com/AMD-AGI/Primus/pull/1032)).
-- **`primus-cli` honours an explicit flag** whose value happens to equal the parser default ([#1002](https://github.com/AMD-AGI/Primus/pull/1002)).
-- **`*_SOCKET_IFNAME` no longer falls back to an IP address** ([#1063](https://github.com/AMD-AGI/Primus/pull/1063)).
-- **TorchTitan Turbo grouped-GEMM config renamed** ([#1041](https://github.com/AMD-AGI/Primus/pull/1041)); **VCS MLPerf pins kept out of the default wheel deps** ([#1061](https://github.com/AMD-AGI/Primus/pull/1061)).
+- **TorchTitan Turbo grouped-GEMM config renamed** ([#1041](https://github.com/AMD-AGI/Primus/pull/1041)). Update any local config that sets the old key.
+
+### `rocm/jax-training:maxtext` — MaxText
+
+No new MaxText capability this release; the change is the ROCm 10.0.0 stack itself,
+plus config tuning:
+
+- **MI300X batch-size tuning** across the MaxText recipes ([#1020](https://github.com/AMD-AGI/Primus/pull/1020)).
+- **`gemma4_26B-fp8` retuned** and the `pure_nnx_decoder` fp8 workaround dropped, now that it is no longer needed ([#1019](https://github.com/AMD-AGI/Primus/pull/1019)).
 
 ---
 
