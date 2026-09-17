@@ -119,7 +119,7 @@ A handful of places diverge on purpose, because copying the Dockerfile exactly p
 - **TransformerEngine** is installed from the wheel index only where glibc is new enough, otherwise built from the equivalent source commit ([Section 4.6](#46-transformerengine)).
 - **Companion wheels are pinned** (`torchaudio`, `torchvision`, `apex`) to the same nightly as `torch`, because the Dockerfile's floating versions no longer resolve.
 - **`nvidia-cutlass-dsl` is pinned to 4.5.3** and **`flydsl` to 0.2.4**, both to versions that the Dockerfile itself resolved to when it was built. Newer releases silently break `import mamba_ssm` and aiter's CK/HIP kernels respectively.
-- **`NVTE_CK_IS_V3_ATOMIC_FP32=1` on gfx942** instead of the Dockerfile's `0`: without fp32 atomics the CK v3 backward attention kernel produces `Inf` gradients on MI300X/MI325X at the first training step. This matches the MI300X/MI325X block in [training recipes](../02-user-guide/end-to-end-training-recipes.md); gfx950 keeps the Dockerfile value.
+- **`NVTE_CK_IS_V3_ATOMIC_FP32=1` on gfx942** instead of the Dockerfile's `0`: without fp32 atomics the CK v3 backward attention kernel produces `Inf` gradients on MI300X/MI325X at the first training step. This matches the MI300X/MI325X block in [training recipes](../02-user-guide/training-recipes.md); gfx950 keeps the Dockerfile value.
 - **pip is constrained** so no later install can replace the ROCm `torch`/`triton` with upstream CUDA builds.
 
 Each one is documented with the exact failure it avoids in
