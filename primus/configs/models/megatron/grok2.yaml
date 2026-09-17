@@ -16,10 +16,10 @@ moe_ffn_hidden_size: 16384
 num_attention_heads: 64
 init_method_std: 0.01
 
-final_logit_softcapping: 50.0
 router_logit_softcapping: 30.0
-# Not working yet
-# attn_logit_softcapping: 30.0
+# Megatron only implements router softcapping. Grok-2 also softcaps the final
+# logits at 50.0 and the attention logits at 30.0; neither has an upstream
+# argument, so neither can be expressed here.
 
 rotary_base: 1000000
 rotary_scaling_factor: 16

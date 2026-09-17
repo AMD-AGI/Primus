@@ -1,5 +1,26 @@
-bases:
-  - mamba_base.yaml
+# `bases:` is not a directive the config loader understands -- only `extends`
+# is (primus/core/config/yaml_loader.py). This preset used to declare
+# `bases: [mamba_base.yaml]`, so mamba_base.yaml has never been merged in: the
+# file has always stood alone on top of the Megatron defaults, and that is
+# what every published number for it was measured with.
+#
+# Adopting the base is left for a separate change because it is not a
+# no-op. Measured against the Megatron defaults this file currently gets,
+# `extends: [mamba_base.yaml]` would add 144 keys and move 8 live
+# settings:
+#
+#   * sequence_parallel: false -> true
+#   * hidden_dropout: 0.1 -> 0.0
+#   * attention_dropout: 0.1 -> 0.0
+#   * add_bias_linear: true -> false
+#   * position_embedding_type: learned_absolute -> rope
+#   * add_position_embedding: true -> false
+#   * num_query_groups: 1 -> null
+#   * mscale_all_dim: 0.0 -> 1.0
+#
+# That is a different model, not a config tidy-up: the position embedding
+# changes, the linear layers lose their biases, and the run stops training
+# with 10% dropout.
 
 # Mamba 370M configuration
 model_type: mamba  # CRITICAL: Mamba models must use mamba model type

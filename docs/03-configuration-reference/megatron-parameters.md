@@ -217,7 +217,6 @@ models:
 | `account_for_embedding_in_pipeline_split` | `false` | Account for embedding in PP partition. |
 | `account_for_loss_in_pipeline_split` | `false` | Account for loss partition in PP. |
 | `empty_unused_memory_level` | `0` | Aggressiveness of `torch.cuda.empty_cache`. |
-| `standalone_embedding_stage` | `false` | Dedicated PP stage for embeddings. |
 | `use_distributed_optimizer` | `false` (`true` in `pre_trainer.yaml`) | Shard optimizer state across data parallel. |
 | `use_sharp` | `false` | Use SHARP for collectives when available. |
 | `sharp_enabled_group` | `null` | Which group SHARP applies to (`dp`, `dp_replica`). |
@@ -227,7 +226,6 @@ models:
 | `data_parallel_sharding_strategy` | `no_shard` | FSDP / ZeRO style sharding (`no_shard`, `optim`, …). |
 | `gradient_reduce_div_fusion` | `true` | Fuse division into reduce-scatter. |
 | `suggested_communication_unit_size` | `400000000` | Suggested communication chunk size. |
-| `keep_fp8_transpose_cache_when_using_custom_fsdp` | `false` | Keep FP8 transpose cache with custom FSDP. |
 | `num_distributed_optimizer_instances` | `1` | Sharded optimizer instances per rank group. |
 | `use_torch_fsdp2` | `false` | Use PyTorch FSDP2 integration. |
 | `nccl_communicator_config_path` | `null` | JSON config for NCCL communicators. |
@@ -239,7 +237,6 @@ models:
 | `check_weight_hash_across_dp_replicas_interval` | `null` | Periodically hash weights across DP replicas for debugging. |
 | `overlap_moe_expert_parallel_comm` | `false` | Overlap MoE expert-parallel communication. |
 | `decoder_pipeline_manual_split_list` | `null` | *Primus:* manual PP split points for decoder (list of ints). |
-| `patch_moe_overlap` | `false` | *Primus:* patch MoE compute/comm overlap. |
 
 ### 5.2 Model parallelism (model preset)
 
@@ -354,7 +351,6 @@ models:
 | `seq_length` | `4096` (`1024` in `pre_trainer.yaml`) | Training sequence length. |
 | `encoder_seq_length` | `null` | Encoder sequence length (encoder–decoder). |
 | `decoder_seq_length` | `null` | Decoder sequence length. |
-| `retriever_seq_length` | `256` | Sequence length for retriever models. |
 | `sample_rate` | `1.0` | Sampling rate for dataset blending. |
 | `mask_prob` | `0.15` | MLM mask probability. |
 | `short_seq_prob` | `0.1` | Probability of shorter sequences in BERT-style data. |
@@ -405,8 +401,6 @@ models:
 | `tensorboard_log_interval` | `1` | Steps between TensorBoard scalars. |
 | `tensorboard_queue_size` | `1000` | TensorBoard event queue size. |
 | `log_timers_to_tensorboard` | `false` (`true` in `pre_trainer.yaml`) | Write timer stats to TensorBoard. |
-| `log_batch_size_to_tensorboard` | `false` (`true` in `pre_trainer.yaml`) | Log batch size. |
-| `log_learning_rate_to_tensorboard` | `true` | Log LR. |
 | `log_validation_ppl_to_tensorboard` | `false` | Log validation perplexity. |
 | `log_memory_to_tensorboard` | `false` | Log memory usage. |
 | `log_world_size_to_tensorboard` | `false` | Log distributed world size. |
@@ -612,13 +606,7 @@ models:
 
 ## 11. Primus extensions
 
-### 11.1 Build and compile
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `disable_compile_dependencies` | `true` | *Primus:* avoid compiling dependency stacks in the trainer wrapper. |
-
-### 11.2 Primus-Turbo (`primus_turbo.yaml`)
+### 11.1 Primus-Turbo (`primus_turbo.yaml`)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -640,7 +628,7 @@ models:
 | `use_turbo_fused_act_with_probs` | `false` | Fuse activation + probability tensors to remove redundant work. |
 | `use_turbo_rms_norm` | `false` | Turbo RMSNorm kernels. |
 
-### 11.3 Zero-bubble pipeline (`zero_bubble.yaml`)
+### 11.2 Zero-bubble pipeline (`zero_bubble.yaml`)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -668,7 +656,7 @@ models:
 | `num_seq_splits` | `1` | Splits along sequence dimension for ZB. |
 | `cpu_offload` | `false` | CPU offload of activations in ZB path. |
 
-### 11.4 Primus pipeline (`primus_pipeline.yaml`)
+### 11.3 Primus pipeline (`primus_pipeline.yaml`)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -707,19 +695,11 @@ models:
 | `grpo_kl_beta` | `0.001` | KL penalty weight toward reference policy. |
 | `grpo_entropy_term_weight` | `0.0` | Entropy bonus weight. |
 | `grpo_filter_groups_with_same_reward` | `false` | Drop groups with identical rewards. |
-| `grpo_default_temperature` | `1.0` | Default softmax temperature for rollouts. |
-| `grpo_default_top_p` | `0` | Top-p sampling (`0` often means disabled / greedy—see Megatron RL docs). |
-| `langrl_inference_server_type` | `inplace_megatron` | LangRL inference backend. |
-| `langrl_inference_server_conversation_template` | `null` | Conversation template path / name. |
 | `langrl_env_config` | `null` | Environment / task YAML for LangRL. |
 | `rl_offload_optimizer_during_inference` | `false` | Offload optimizer to CPU during rollout inference. |
-| `rl_offload_kv_cache_during_training` | `false` | Offload KV cache while training forward runs. |
-| `rl_remove_kv_cache_during_training` | `false` | Drop KV cache between RL phases to save memory. |
-| `rl_reset_cuda_graphs` | `false` | Reset CUDA graphs when switching RL phases. |
 | `rl_partial_rollouts` | `false` | Partial sequence rollouts. |
 | `rl_inference_logprobs_is_correction` | `false` | Interpret inference logprobs as IS correction term. |
 | `rl_importance_sampling_truncation_coef` | `null` | Truncate importance ratios at this value. |
-| `rl_calculate_intra_group_similarity` | `false` | Log similarity within GRPO groups. |
 
 ---
 
@@ -743,22 +723,7 @@ models:
 | `classes_fraction` | `1.0` | Fraction of classes used. |
 | `data_per_class_fraction` | `1.0` | Fraction of data per class. |
 
-### 13.2 RETRO
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `retro_project_dir` | `null` | RETRO project directory with indices. |
-| `retro_add_retriever` | `false` | Add frozen retriever tower. |
-| `retro_cyclic_train_iters` | `null` | Cyclic iterator length. |
-| `retro_encoder_layers` | `2` | Retriever encoder layers. |
-| `retro_encoder_hidden_dropout` | `0.1` | Retriever dropout. |
-| `retro_encoder_attention_dropout` | `0.1` | Retriever attention dropout. |
-| `retro_num_neighbors` | `2` | Neighbors per query chunk. |
-| `retro_num_retrieved_chunks` | `2` | Chunks concatenated per neighbor set. |
-| `retro_attention_gate` | `1` | Gating between retrieval and LM. |
-| `retro_verify_neighbor_count` | `true` | Assert neighbor counts for debugging. |
-
-### 13.3 DINO self-supervised
+### 13.2 DINO self-supervised
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -772,7 +737,7 @@ models:
 | `dino_teacher_temp` | `0.07` | Teacher temperature. |
 | `dino_warmup_teacher_temp_epochs` | `30` | Epochs to warm teacher temperature. |
 
-### 13.4 Biencoder / ICT / retriever utilities
+### 13.3 Biencoder / ICT / retriever utilities
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -792,7 +757,7 @@ models:
 | `indexer_batch_size` | `128` | Batch size when building ANN index. |
 | `indexer_log_interval` | `1000` | Indexer progress log interval. |
 
-### 13.5 Straggler detection
+### 13.4 Straggler detection
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -801,17 +766,13 @@ models:
 | `straggler_ctrlr_port` | `65535` | Controller port for straggler service. |
 | `straggler_minmax_count` | `1` | Min/max samples for straggler stats. |
 
-### 13.6 Inference-oriented options
+### 13.5 Inference-oriented options
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `inference_batch_times_seqlen_threshold` | `-1` | Heuristic threshold tying batch and sequence length. |
 | `inference_dynamic_batching` | `false` | Dynamic batching for inference server. |
 | `inference_dynamic_batching_buffer_size_gb` | `40.0` | GPU buffer budget (GB). |
-| `inference_dynamic_batching_buffer_guaranteed_fraction` | `0.2` | Minimum reserved fraction of buffer. |
-| `inference_dynamic_batching_buffer_overflow_factor` | `null` | Overflow growth factor. |
-| `inference_dynamic_batching_max_requests_override` | `null` | Hard cap on concurrent requests. |
-| `inference_dynamic_batching_max_tokens_override` | `null` | Hard cap on tokens in flight. |
 | `max_tokens_to_oom` | `12000` | Token limit guard before OOM abort. |
 | `output_bert_embeddings` | `false` | Return BERT pooled embeddings. |
 | `bert_embedder_type` | `megatron` | `megatron` or `huggingface` embedder. |
@@ -823,7 +784,7 @@ models:
 | `inference_max_requests` | `8` | Max concurrent requests. |
 | `inference_max_seq_length` | `2560` | Max prefill + decode tokens per request. |
 
-### 13.7 Fault tolerance package and tooling
+### 13.6 Fault tolerance package and tooling
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -831,7 +792,7 @@ models:
 | `calc_ft_timeouts` | `false` | Auto-calculate FT timeouts. |
 | `run_workload_inspector_server` | `false` | Run workload inspector sidecar. |
 
-### 13.8 Heterogeneous layers and process resilience
+### 13.7 Heterogeneous layers and process resilience
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -839,7 +800,7 @@ models:
 | `heterogeneous_layers_config_encoded_json` | `null` | Inline base64/JSON blob for heterogeneous layers. |
 | `inprocess_restart` | `false` | In-process restart for fault recovery experiments. |
 
-### 13.9 Experimental and rerun controls
+### 13.8 Experimental and rerun controls
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|

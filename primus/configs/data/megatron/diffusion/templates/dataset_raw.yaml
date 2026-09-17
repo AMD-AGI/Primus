@@ -108,5 +108,5 @@ subflavors:
 # For more information, see:
 #   - primus/configs/data/megatron/diffusion/README.md
 #   - examples/megatron/diffusion/README.md
-#   - primus/configs/models/megatron/diffusion/encoders.yaml
+#   - primus/backends/megatron/data/diffusion/encoders/config.py
 #

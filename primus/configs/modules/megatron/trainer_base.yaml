@@ -179,7 +179,6 @@ lazy_mpu_init: null
 account_for_embedding_in_pipeline_split: false
 account_for_loss_in_pipeline_split: false
 empty_unused_memory_level: 0
-standalone_embedding_stage: false
 use_distributed_optimizer: false
 use_sharp: false
 sharp_enabled_group: null  # options: [dp, dp_replica]
@@ -189,7 +188,6 @@ init_model_with_meta_device: false
 data_parallel_sharding_strategy: no_shard # 'no_shard', 'optim', 'optim_grads', 'optim_grads_params'
 gradient_reduce_div_fusion: true
 suggested_communication_unit_size: 400000000 # int
-keep_fp8_transpose_cache_when_using_custom_fsdp: false
 num_distributed_optimizer_instances: 1 # int
 data_parallel_replicate_degree: 1
 use_torch_fsdp2: false
@@ -287,7 +285,6 @@ merge_file: null
 seq_length: 4096
 encoder_seq_length: null
 decoder_seq_length: null
-retriever_seq_length: 256
 sample_rate: 1.0
 mask_prob: 0.15
 short_seq_prob: 0.1
@@ -324,8 +321,6 @@ timing_log_option: minmax
 tensorboard_log_interval: 1
 tensorboard_queue_size: 1000
 log_timers_to_tensorboard: false
-log_batch_size_to_tensorboard: false
-log_learning_rate_to_tensorboard: true
 log_validation_ppl_to_tensorboard: false
 log_memory_to_tensorboard: false
 log_world_size_to_tensorboard: false
@@ -387,16 +382,6 @@ classes_fraction: 1.0
 data_per_class_fraction: 1.0
 
 # others
-retro_project_dir: null
-retro_add_retriever: false
-retro_cyclic_train_iters: null
-retro_encoder_layers: 2
-retro_encoder_hidden_dropout: 0.1
-retro_encoder_attention_dropout: 0.1
-retro_num_neighbors: 2
-retro_num_retrieved_chunks: 2
-retro_attention_gate: 1
-retro_verify_neighbor_count: true
 dino_local_img_size: 96
 dino_local_crops_number: 10
 dino_head_hidden_size: 2048
@@ -418,10 +403,6 @@ straggler_minmax_count: 1
 inference_batch_times_seqlen_threshold: -1
 inference_dynamic_batching: false
 inference_dynamic_batching_buffer_size_gb: 40.0 # float
-inference_dynamic_batching_buffer_guaranteed_fraction: 0.2 # float
-inference_dynamic_batching_buffer_overflow_factor: null # float
-inference_dynamic_batching_max_requests_override: null # int
-inference_dynamic_batching_max_tokens_override: null # int
 max_tokens_to_oom: 12000
 output_bert_embeddings: false
 bert_embedder_type: megatron # "megatron", "huggingface"
@@ -470,16 +451,8 @@ grpo_clamp_eps_upper: 0.01
 grpo_kl_beta: 0.001
 grpo_entropy_term_weight: 0.0
 grpo_filter_groups_with_same_reward: false
-grpo_default_temperature: 1.0
-grpo_default_top_p: 0
-langrl_inference_server_type: inplace_megatron
-langrl_inference_server_conversation_template: null
 langrl_env_config: null
 rl_offload_optimizer_during_inference: false
-rl_offload_kv_cache_during_training: false
-rl_remove_kv_cache_during_training: false
-rl_reset_cuda_graphs: false
 rl_partial_rollouts: false
 rl_inference_logprobs_is_correction: false
 rl_importance_sampling_truncation_coef: null
-rl_calculate_intra_group_similarity: false
