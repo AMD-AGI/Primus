@@ -253,9 +253,9 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
     beta=1 epilogue, replacing the separate elementwise add the framework would run
     over the whole gradient buffer. It is driven by ``gradient_accumulation_fusion``.
 
-    Only the BF16/FP16 GEMMs and the FP8 current-scaling (tensorwise) ones carry that
-    epilogue. FP8 block / MXFP8 scaling and every FP4 recipe keep the framework's
-    separate add instead, so the pattern stays off there.
+    Only the BF16/FP16 GEMMs, the FP8 current-scaling (tensorwise) ones, and
+    non-preshuffled MXFP4 GEMMs carry that epilogue. FP8 block / MXFP8 scaling
+    and preshuffled or non-MX FP4 recipes keep the framework's separate add.
 
     ``weight`` must be the real parameter, not a quantized buffer: the buffer carries
     no ``main_grad``. On the multi-microbatch path the parameter's attributes are
@@ -265,9 +265,17 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
     if not getattr(config, "gradient_accumulation_fusion", False):
         return None
 
-    if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
-        return None
-    if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+    turbo_fp4_enabled = PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+    if turbo_fp4_enabled:
+        quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+        if quant_config is None or not quant_config.mxfp4_scaling():
+            return None
+        # The beta=1 epilogue consumes the raw FlyDSL/hipBLASLt layout. Treat a
+        # missing use_preshuffle capability as unsupported so older Turbo builds
+        # cannot accidentally enter the fused path.
+        if getattr(quant_config.data(), "use_preshuffle", True):
+            return None
+    elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
         quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
         if quant_config is None or not quant_config.current_scaling():
             return None
@@ -281,6 +289,16 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
         "before the model was wrapped, or that a quantized buffer was passed here "
         "instead of the parameter."
     )
+
+    if turbo_fp4_enabled and (
+        weight.dtype not in (torch.bfloat16, torch.float16)
+        or not isinstance(weight.main_grad, torch.Tensor)
+        or weight.main_grad.dtype != weight.dtype
+    ):
+        # FlyDSL's MXFP4 accumulation store is 16-bit. Fall back to framework
+        # accumulation unless the target buffer exactly matches the weight dtype.
+        return None
+
     return "megatron"
 
 
