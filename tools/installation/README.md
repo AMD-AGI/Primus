@@ -177,7 +177,8 @@ The order matters for `te`: see the note on the staging index below.
   and installs `nvidia-cuda-nvdisasm==13.3.73`.
 - **Updated pins:** torch `2.12.0+rocm10.0.0` (v26.7 moves to the ROCm 10.0.0 pip
   SDK), TE `2.17.0+rocm10.0.0` from the devreleases index, transformers `5.10.0`,
-  wandb `0.28.2`, Primus `2631e68d…` (the v26.7.0 tag), Primus-Turbo `6d5ff979…`.
+  wandb `0.28.2`, Primus `2631e68d…` (the `release/v26.7` tip, also the `v26.7.0`
+  tag), Primus-Turbo `6d5ff979…`.
   CVE pins: `cryptography==50.0.0`, `mlflow==3.15.1` (`--no-deps`).
 - **`ck_jit_compile.sh` no longer needs patching.** TE 2.17 ships its own tolerance
   for a lost `mv -n` race (`|| [ -f "$OUTPUT" ]`), which is why the v26.7 Dockerfile

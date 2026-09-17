@@ -140,18 +140,18 @@ MaxText (JAX) backend.
 
 ### Primus source for v26.7
 
-`release/v26.7` has **not been cut**. Use the commit the images were built from:
+Use the **`release/v26.7`** branch for both images:
 
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout 2631e68d
+git checkout release/v26.7
 git submodule update --init --recursive
 ```
 
 | | |
 | --- | --- |
-| Commit | `2631e68d` (2026-09-02), the `v26.7.0` tag |
+| Branch tip | `2631e68d` (2026-09-02), which is also the `v26.7.0` tag |
 | Megatron-LM | `d3528a21` |
 | TorchTitan | `73a0e697` |
 | Megatron Bridge | `9577b128` |
@@ -159,8 +159,10 @@ git submodule update --init --recursive
 | Emerging-Optimizers | `93d9eb3a` |
 | HummingbirdXT | `ed7b7bd0` |
 
-> - `rocm/primus:v26.7` was built from `2631e68d`, so the in-image `/workspace/Primus` matches this checkout exactly.
-> - `rocm/jax-training:maxtext-v26.7` was built from `main` at `e7968675` (2026-09-09), because its Dockerfile pins `PRIMUS_BRANCH=main` rather than a commit. Use `2631e68d` anyway, so you get the recipes the release was validated against rather than whatever `main` held on the build day. Its bundled `third_party/maxtext` matches `/workspace/maxtext` (`b3c53763`).
+> **Prefer a `release/v26.7` checkout over the Primus copy baked into the images.**
+>
+> - `rocm/primus:v26.7` was built from `2631e68d`, which is the current `release/v26.7` tip, so the in-image `/workspace/Primus` currently matches. Cloning the branch still keeps you current if later commits land on it.
+> - `rocm/jax-training:maxtext-v26.7` was built from `main` at `e7968675` (2026-09-09), because its Dockerfile pins `PRIMUS_BRANCH=main` rather than a commit. Use `release/v26.7` anyway, so you get the Primus recipes the release was validated against rather than whatever `main` held on the build day. Its bundled `third_party/maxtext` matches `/workspace/maxtext` (`b3c53763`).
 
 ### Changes since v26.6
 

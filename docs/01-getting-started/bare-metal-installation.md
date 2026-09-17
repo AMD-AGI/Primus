@@ -421,7 +421,7 @@ export PRIMUS_FLA_MLA_ATTN=1
 
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout 2631e68dd8b658ab1f991cbc671d538205a51fee   # the v26.7.0 tag commit
+git checkout 2631e68dd8b658ab1f991cbc671d538205a51fee   # release/v26.7
 git submodule update --init --recursive
 pip install -r requirements.txt
 

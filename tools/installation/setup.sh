@@ -119,7 +119,9 @@ MAMBA_BRANCH="enable-primus-hybrid-models"
 TVM_FFI_VERSION="0.1.11"
 PRIMUS_REPO="https://github.com/AMD-AGI/Primus.git"
 # The v26.7.0 tag commit (2026-09-02), which is what Dockerfile.primus-v26.7
-# pins. `release/v26.7` does not exist yet, so there is no branch to track.
+# pins. This is also the `release/v26.7` tip and the `v26.7.0` tag; the commit is
+# used rather than the branch so the install keeps matching the image even if later
+# commits land on the branch.
 PRIMUS_BRANCH="2631e68dd8b658ab1f991cbc671d538205a51fee"
 AITER_REPO="https://github.com/ROCm/aiter.git"
 AITER_COMMIT="0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e"

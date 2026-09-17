@@ -20,7 +20,7 @@ Read this section before starting a training run. It collects the settings this 
 
 ### Required settings
 
-**Check out commit `2631e68d`.** It is the Primus revision the `rocm/primus:v26.7` image was built from; a `release/v26.7` branch has not been cut yet. Prefer this checkout over the `/workspace/Primus` copy baked into the image — see [Release notes → Primus source for v26.7](../01-getting-started/release-notes.md#primus-source-for-v267). [Environment setup](#get-the-primus-source) has the clone command.
+**Use the `release/v26.7` branch.** It is the Primus branch matching the `rocm/primus:v26.7` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image — see [Release notes → Primus source for v26.7](../01-getting-started/release-notes.md#primus-source-for-v267). [Environment setup](#get-the-primus-source) has the clone command.
 
 ### Architecture-specific settings
 
@@ -102,7 +102,7 @@ Clone the branch matching the image. Do this on the host — every command in th
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout 2631e68d   # the commit the v26.7 images were built from (release/v26.7 is not cut yet)
+git checkout release/v26.7
 git submodule update --init --recursive
 ```
 
@@ -146,7 +146,7 @@ export HF_TOKEN=$your_personal_hf_token
 
 For detailed usage of `primus-cli`, see the [CLI reference](./cli-reference.md).
 
-Run these from your `2631e68d` checkout **on the host**. Container mode starts the image and runs the training inside it for you. If you already have a shell inside the container, swap `container` for `direct`.
+Run these from your `release/v26.7` checkout **on the host**. Container mode starts the image and runs the training inside it for you. If you already have a shell inside the container, swap `container` for `direct`.
 
 ### Benchmarking examples
 

@@ -88,7 +88,7 @@ Clone the branch matching your image, on the host. Every command on this page ru
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout 2631e68d   # the commit the v26.7 images were built from (release/v26.7 is not cut yet)
+git checkout release/v26.7
 git submodule update --init --recursive
 ```
 

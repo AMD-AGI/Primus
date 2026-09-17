@@ -123,8 +123,8 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     ```bash
     git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
     cd Primus
-    # the commit the v26.7 images were built from (release/v26.7 is not cut yet)
-    git checkout 2631e68d
+    # checkout the branch for the specific release
+    git checkout release/v26.7
     git submodule update --init --recursive
     ```
 
