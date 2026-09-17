@@ -1620,6 +1620,11 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         is_first_microbatch: bool = False,
     ):
         fused_mxfp4_payload = _take_fused_mxfp4_activation(x)
+        if fused_mxfp4_payload is not None:
+            assert x.is_contiguous(), "fused RMSNorm MXFP4 carrier must remain contiguous"
+            assert PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled(), (
+                "fused RMSNorm MXFP4 payload reached a non-FP4 linear context"
+            )
         weight = self._parameters["weight"]
         if self.use_bias:
             bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
