@@ -27,8 +27,10 @@ from primus.backends.specforge.argument_builder import (
     build_capture_argv,
     build_specforge_argv,
     flatten_overrides,
+    is_online_train,
     resolve_specforge_root,
     specforge_mode,
+    specforge_train_mode,
 )
 from primus.backends.specforge.online_launch import (
     build_online_overrides,
@@ -245,6 +247,50 @@ class TestArgvBuilder:
         params = SimpleNamespace(specforge_config="/sf/a.yaml")
         assert "--role" not in build_specforge_argv(params)
 
+
+class TestSpecForgeModes:
+    def test_mode_is_train_or_capture(self):
+        assert specforge_mode(SimpleNamespace(specforge_mode="train")) == "train"
+        assert specforge_mode(SimpleNamespace(specforge_mode="capture")) == "capture"
+        assert specforge_mode(SimpleNamespace()) == "train"
+
+    def test_online_offline_are_not_modes(self):
+        with pytest.raises(ValueError, match="specforge_train_mode: online"):
+            specforge_mode(SimpleNamespace(specforge_mode="online"))
+        with pytest.raises(ValueError, match="specforge_train_mode: offline"):
+            specforge_mode(SimpleNamespace(specforge_mode="offline"))
+
+    def test_train_mode_is_required_for_train(self):
+        with pytest.raises(ValueError, match="specforge_train_mode is required"):
+            specforge_train_mode(SimpleNamespace(specforge_mode="train"))
+        with pytest.raises(ValueError, match="specforge_train_mode is required"):
+            specforge_train_mode(SimpleNamespace())
+
+    def test_train_mode_online_or_offline(self):
+        assert (
+            specforge_train_mode(SimpleNamespace(specforge_mode="train", specforge_train_mode="offline"))
+            == "offline"
+        )
+        assert (
+            specforge_train_mode(SimpleNamespace(specforge_mode="train", specforge_train_mode="online"))
+            == "online"
+        )
+
+    def test_capture_ignores_train_mode(self):
+        assert specforge_train_mode(SimpleNamespace(specforge_mode="capture")) is None
+        assert (
+            specforge_train_mode(SimpleNamespace(specforge_mode="capture", specforge_train_mode="offline"))
+            is None
+        )
+
+    def test_is_online_train(self):
+        assert is_online_train(SimpleNamespace(specforge_mode="train", specforge_train_mode="online"))
+        assert not is_online_train(SimpleNamespace(specforge_mode="train", specforge_train_mode="offline"))
+        assert not is_online_train(SimpleNamespace(specforge_mode="capture"))
+        assert not is_online_train(SimpleNamespace(specforge_mode="online"))
+
+
+class TestCaptureArgv:
     def test_capture_argv_runs_prepare_hidden_states(self):
         params = SimpleNamespace(
             specforge_mode="capture",
@@ -326,12 +372,15 @@ class TestExampleExperiment:
         assert f"data.hidden_states_path={experiment_env['HIDDEN_STATES_PATH']}" in argv
         assert f"output_dir={experiment_env['OUTPUT_DIR']}" in argv
         assert backend_args.specforge_root == experiment_env["SPECFORGE_ROOT"]
+        assert backend_args.specforge_mode == "train"
+        assert backend_args.specforge_train_mode == "offline"
 
     def test_capture_yaml_converts_to_prepare_hidden_states_argv(self, experiment_env):
         module = load_pre_trainer_params(CAPTURE_CONFIG)
         adapter = SpecForgeAdapter()
         backend_args = adapter.convert_config(module.params)
         assert backend_args.specforge_mode == "capture"
+        assert backend_args.specforge_train_mode is None
         argv = build_capture_argv(backend_args)
         assert "scripts/prepare_hidden_states.py" in argv
         assert "--sglang-disable-radix-cache" in argv
@@ -347,6 +396,8 @@ class TestExampleExperiment:
 
     def test_trainer_rejects_missing_entrypoint(self, experiment_env):
         backend_args = SimpleNamespace(
+            specforge_mode="train",
+            specforge_train_mode="offline",
             specforge_config=experiment_env["SPECFORGE_CONFIG"],
             specforge_entrypoint="specforge-does-not-exist",
             specforge_root=experiment_env["SPECFORGE_ROOT"],
@@ -543,6 +594,8 @@ class TestPrepareHook:
 class TestStackPreflight:
     def _params(self, specforge_checkout, hidden_states, **overrides):
         return SimpleNamespace(
+            specforge_mode="train",
+            specforge_train_mode="offline",
             specforge_config=str(specforge_checkout / "configs" / "qwen3.5-4b-dflash.yaml"),
             specforge_root=str(specforge_checkout),
             specforge_overrides={"data.hidden_states_path": str(hidden_states), **overrides},
@@ -627,13 +680,26 @@ class TestStackPreflight:
         issues = collect_issues(params, env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0"})
         assert any("data_path" in item for item in issues)
 
+    def test_train_requires_train_mode(self, specforge_checkout, hidden_states):
+        params = self._params(specforge_checkout, hidden_states)
+        params.specforge_train_mode = None
+        issues = collect_issues(params, env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0"})
+        assert any("specforge_train_mode is required" in item for item in issues)
+
+    def test_online_as_mode_is_rejected(self, specforge_checkout, hidden_states):
+        params = self._params(specforge_checkout, hidden_states)
+        params.specforge_mode = "online"
+        issues = collect_issues(params, env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0"})
+        assert any("specforge_train_mode: online" in item for item in issues)
+
 
 class TestOnlineLaunch:
     def _params(self, specforge_checkout, tmp_path, **online):
         run_root = tmp_path / "run"
         consumer = tmp_path / "consumer-state"
         return SimpleNamespace(
-            specforge_mode="online",
+            specforge_mode="train",
+            specforge_train_mode="online",
             specforge_config=str(specforge_checkout / "configs" / "qwen3.5-4b-dflash.yaml"),
             specforge_root=str(specforge_checkout),
             specforge_overrides={"model.use_liger_kernel": False},
@@ -746,7 +812,8 @@ class TestOnlineLaunch:
 
     def test_online_yaml_has_no_cluster_ips(self):
         text = ONLINE_CONFIG.read_text(encoding="utf-8")
-        assert "specforge_mode: online" in text
+        assert "specforge_mode: train" in text
+        assert "specforge_train_mode: online" in text
         for line in text.splitlines():
             assert "127.0.0.1" not in line.split("#", 1)[0]
 
@@ -780,7 +847,8 @@ class TestOnlineLaunch:
         module = load_pre_trainer_params(ONLINE_CONFIG)
         adapter = SpecForgeAdapter()
         backend_args = adapter.convert_config(module.params)
-        assert backend_args.specforge_mode == "online"
+        assert backend_args.specforge_mode == "train"
+        assert backend_args.specforge_train_mode == "online"
         settings = online_settings(backend_args, env=experiment_env)
         overrides = build_online_overrides("10.1.2.3", settings)
         argv = build_role_argv(backend_args, "producer", overrides)
@@ -886,11 +954,6 @@ class TestOnlineLaunch:
         assert env["NODE_RANK"] == "1"
         assert env["NNODES"] == "2"
 
-    def test_offline_is_alias_of_train(self):
-        assert specforge_mode(SimpleNamespace(specforge_mode="offline")) == "train"
-        assert specforge_mode(SimpleNamespace(specforge_mode="train")) == "train"
-        assert specforge_mode(SimpleNamespace(specforge_mode="online")) == "online"
-
     def test_online_train_does_not_execvp(self, specforge_checkout, tmp_path, monkeypatch):
         called = []
         monkeypatch.setattr(
@@ -900,7 +963,6 @@ class TestOnlineLaunch:
         monkeypatch.setattr("os.execvp", lambda *a, **k: called.append("exec"))
         params = self._params(specforge_checkout, tmp_path)
         trainer = SpecForgePretrainTrainer(backend_args=params)
-        trainer.mode = "online"
         trainer.argv = None
         trainer.workdir = None
         trainer.train()

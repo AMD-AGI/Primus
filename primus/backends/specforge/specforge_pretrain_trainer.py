@@ -26,6 +26,7 @@ from primus.backends.specforge.argument_builder import (
     build_capture_argv,
     build_specforge_argv,
     flatten_overrides,
+    is_online_train,
     specforge_mode,
 )
 from primus.backends.specforge.stack_preflight import raise_if_issues
@@ -125,8 +126,8 @@ class SpecForgePretrainTrainer(BaseTrainer):
         self.mode = specforge_mode(self.backend_args)
         if self.mode == "capture":
             self.argv = build_capture_argv(self.backend_args)
-        elif self.mode == "online":
-            # Rank 0 supervises sidecars; argv is built per-role in the supervisor.
+        elif is_online_train(self.backend_args):
+            # Capture/trainer ranks supervise sidecars; argv is built per-role later.
             self.argv = None
         else:
             self.argv = build_specforge_argv(self.backend_args)
@@ -159,10 +160,10 @@ class SpecForgePretrainTrainer(BaseTrainer):
     def train(self):
         """Hand off to SpecForge. Offline train replaces this process; capture and online return."""
 
-        if self.argv is None and getattr(self, "mode", None) != "online":
+        if self.argv is None and not is_online_train(self.backend_args):
             raise RuntimeError("SpecForgePretrainTrainer.init() must be called before train().")
 
-        if getattr(self, "mode", None) == "online":
+        if is_online_train(self.backend_args):
             if self.workdir:
                 os.chdir(self.workdir)
             from primus.backends.specforge.online_supervisor import run_online

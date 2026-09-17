@@ -27,6 +27,7 @@ from primus.backends.specforge.argument_builder import (
     flatten_overrides,
     resolve_specforge_root,
     specforge_mode,
+    specforge_train_mode,
 )
 
 ROCM_STACK_ENV_DEFAULTS = (
@@ -151,7 +152,13 @@ def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list
 
     environ = os.environ if env is None else env
     issues: list[str] = []
-    mode = specforge_mode(params)
+    mode = None
+    train_mode = None
+    try:
+        mode = specforge_mode(params)
+        train_mode = specforge_train_mode(params)
+    except ValueError as exc:
+        issues.append(str(exc).replace("[Primus:specforge] ", ""))
     overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
     capture = flatten_overrides(getattr(params, "specforge_capture", None))
 
@@ -196,9 +203,9 @@ def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list
                 "capture sglang_disable_radix_cache is false; Mamba + AITER on ROCm "
                 "must disable the radix cache"
             )
-    elif mode == "online":
+    elif train_mode == "online":
         issues.extend(_online_preflight_issues(params, environ))
-    else:
+    elif mode == "train":
         hidden = _hidden_states_path(params, environ)
         if hidden:
             path = Path(str(hidden))

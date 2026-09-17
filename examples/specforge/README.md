@@ -1,10 +1,22 @@
 # SpecForge on Primus
 
-`primus-cli` is the entrypoint for SpecForge **offline capture** and **draft
-training**. SpecForge still owns data prep, draft configs, export, and SGLang
-serving — follow the
+`primus-cli` is the entrypoint for SpecForge **capture** and **draft training**.
+SpecForge still owns data prep, draft configs, export, and SGLang serving —
+follow the
 [SpecForge AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md)
 for those steps.
+
+Two knobs:
+
+| Knob | Values | Meaning |
+| --- | --- | --- |
+| `specforge_mode` | `train` \| `capture` | Which program Primus runs (`train` if omitted) |
+| `specforge_train_mode` | `online` \| `offline` | How train runs. **Required** when mode is `train` (no default). Ignored for capture. |
+
+`offline` train is `specforge train` on pre-captured hidden states. `online`
+train is live Mooncake + SGLang capture plus `--role producer` / `--role
+consumer`. Capture is SpecForge `scripts/prepare_hidden_states.py`, not a
+train mode.
 
 ## Runtime image
 
@@ -51,8 +63,9 @@ export NPROC_PER_NODE=8
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
 ```
 
-**Train** — `specforge_config` points at SpecForge’s YAML; Primus forwards
-overrides onto `specforge train`:
+**Train** — `specforge_mode: train` with `specforge_train_mode: offline`.
+`specforge_config` points at SpecForge’s YAML; Primus forwards overrides onto
+`specforge train`:
 
 ```yaml
 # examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
@@ -60,6 +73,8 @@ modules:
   pre_trainer:
     framework: specforge
     overrides:
+      specforge_mode: train
+      specforge_train_mode: offline
       specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-offline-amd.yaml}
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
       specforge_overrides:
@@ -83,9 +98,10 @@ Dotted CLI keys override YAML, for example
 
 ## Online (Mooncake + SGLang capture)
 
-`specforge_mode: online` is for live capture+train. SpecForge's own CLI will
-not start Mooncake/SGLang across nodes, so Primus does that and then launches
-`--role producer` / `--role consumer`.
+`specforge_mode: train` with `specforge_train_mode: online` is live
+capture+train. SpecForge's own CLI will not start Mooncake/SGLang across
+nodes, so Primus does that and then launches `--role producer` /
+`--role consumer`.
 
 One Slurm allocation, the same `primus-cli` command on every node. Shape is
 **C capture nodes + T trainer nodes** (`CAPTURE_NNODES` + `TRAINER_NNODES`,

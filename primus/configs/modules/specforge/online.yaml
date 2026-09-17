@@ -13,7 +13,9 @@ trainable: true
 specforge_config: null
 specforge_root: null
 specforge_entrypoint: specforge
-specforge_mode: online
+# Live capture+train. specforge_train_mode is required for train (no default).
+specforge_mode: train
+specforge_train_mode: online
 
 # Sidecar / node+GPU split. Rendered into SpecForge Hydra overrides plus
 # Mooncake/SGLang argv. Do not put cluster IPs here.

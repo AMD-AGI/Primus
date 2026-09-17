@@ -23,9 +23,11 @@ specforge_root: null
 # argv[0] for the SpecForge CLI; override to run a wrapper or a module form.
 specforge_entrypoint: specforge
 
-# train (default) execs `specforge train`. capture runs
-# scripts/prepare_hidden_states.py via torchrun, then optional hidden-state filter.
+# specforge_mode is train or capture. specforge_train_mode is required for train
+# (online or offline) and has no code default. This preset is offline train.
+# Capture recipes override specforge_mode and ignore specforge_train_mode.
 specforge_mode: train
+specforge_train_mode: offline
 
 # Flags for prepare_hidden_states.py when specforge_mode=capture.
 # Primus-only keys (not forwarded to the script): filter_output_path,

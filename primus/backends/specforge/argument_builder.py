@@ -19,8 +19,9 @@ Params consumed here:
     specforge_overrides   Nested mapping flattened to dotted Hydra overrides
     specforge_entrypoint  argv[0] for the SpecForge CLI (default ``specforge``)
     specforge_root        SpecForge checkout used as cwd (see resolve_specforge_root)
-    specforge_mode        ``train`` (default; ``offline`` is an alias), ``capture``, or ``online``
-    specforge_role        ``producer`` / ``consumer`` (online only; omitted offline)
+    specforge_mode        ``train`` or ``capture`` (``train`` if omitted)
+    specforge_train_mode  ``online`` or ``offline`` (required when mode is ``train``)
+    specforge_role        ``producer`` / ``consumer`` (online train only)
     specforge_capture     Nested mapping of ``prepare_hidden_states.py`` flags
     specforge_online      Nested mapping for sidecars / node+GPU split / run root
     output_dir            Convenience alias for ``specforge_overrides.output_dir``
@@ -62,12 +63,48 @@ CAPTURE_SKIP_KEYS = frozenset(
 )
 
 
+VALID_MODES = frozenset({"train", "capture"})
+VALID_TRAIN_MODES = frozenset({"online", "offline"})
+
+
 def specforge_mode(params: Any) -> str:
     raw = getattr(params, "specforge_mode", None) or "train"
     mode = str(raw).strip().lower()
-    if mode in {"offline", "offline_train"}:
-        return "train"
+    if mode in {"online", "offline"}:
+        raise ValueError(
+            "[Primus:specforge] specforge_mode is 'train' or 'capture'; "
+            f"got '{mode}'. Set specforge_train_mode: {mode} with specforge_mode: train"
+        )
+    if mode not in VALID_MODES:
+        raise ValueError(f"[Primus:specforge] unknown specforge_mode '{mode}'; use 'train' or 'capture'")
     return mode
+
+
+def specforge_train_mode(params: Any) -> Optional[str]:
+    """Required when ``specforge_mode`` is ``train``. Ignored for capture."""
+
+    mode = specforge_mode(params)
+    raw = getattr(params, "specforge_train_mode", None)
+    if mode == "capture":
+        return None
+    if raw is None or str(raw).strip() == "":
+        raise ValueError(
+            "[Primus:specforge] specforge_train_mode is required when specforge_mode is train "
+            "('online' or 'offline')"
+        )
+    train_mode = str(raw).strip().lower()
+    if train_mode not in VALID_TRAIN_MODES:
+        raise ValueError(
+            f"[Primus:specforge] unknown specforge_train_mode '{train_mode}'; use 'online' or 'offline'"
+        )
+    return train_mode
+
+
+def is_online_train(params: Any) -> bool:
+    try:
+        return specforge_mode(params) == "train" and specforge_train_mode(params) == "online"
+    except ValueError:
+        return False
 
 
 def specforge_role(params: Any) -> Optional[str]:
