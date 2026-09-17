@@ -75,7 +75,7 @@ RUN set -eux; \
 Then, from that same directory:
 
 ```bash
-BASE=rocm/jax-training:maxtext-v26.6
+BASE=rocm/jax-training:maxtext-v26.7
 BUNDLE=1.117.5-a-147
 
 docker build --network host \
@@ -402,11 +402,11 @@ root:
 
 ```bash
 ./tools/ainic-bundle-rebuild/build.sh \
-  rocm/jax-training:maxtext-v26.6 \
+  rocm/jax-training:maxtext-v26.7 \
   ainic_bundle_1.117.5-a-147.tar.gz
 
 ./tools/ainic-bundle-rebuild/test.sh \
-  jax-training:maxtext-v26.6-ainic-1.117.5-a-147
+  jax-training:maxtext-v26.7-ainic-1.117.5-a-147
 ```
 
 Symptoms of the sharp edges (wrong inner archive, `Pre-Depends`, gzip named

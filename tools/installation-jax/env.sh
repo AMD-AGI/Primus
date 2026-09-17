@@ -138,16 +138,36 @@ fi
 # keeps the OLD paths. The failure then shows up much later as a confusing
 # "Backend path not found for 'maxtext'" or as pip installing into the wrong
 # venv, so say something now. Start from a fresh shell to clear these.
-_primus_warn_outside_base() {
+#
+# This is fatal, not a warning. A warning is not enough: an inherited VENV_DIR
+# from tools/installation/env.sh sends the whole JAX stack -- jax, jaxlib, flax,
+# orbax, tensorflow-cpu, MaxText -- into the PyTorch venv, corrupting an
+# environment that took an hour to build, and the run otherwise looks healthy
+# while it happens. Set PRIMUS_ALLOW_FOREIGN_ENV=1 if you genuinely mean it.
+_primus_foreign_env=""
+_primus_check_inside_base() {
     local name="$1" val="$2"
     case "$val" in
         "$PRIMUS_JAX_BASE"/*) ;;
-        *) echo "[env] WARNING: $name=$val is outside PRIMUS_JAX_BASE=$PRIMUS_JAX_BASE" >&2 ;;
+        *) _primus_foreign_env="$_primus_foreign_env  $name=$val
+" ;;
     esac
 }
-_primus_warn_outside_base VENV_DIR "$VENV_DIR"
-_primus_warn_outside_base WORKSPACE_DIR "$WORKSPACE_DIR"
-_primus_warn_outside_base MAXTEXT_PATH "$MAXTEXT_PATH"
+_primus_check_inside_base VENV_DIR "$VENV_DIR"
+_primus_check_inside_base WORKSPACE_DIR "$WORKSPACE_DIR"
+_primus_check_inside_base MAXTEXT_PATH "$MAXTEXT_PATH"
+if [ -n "$_primus_foreign_env" ] && [ "${PRIMUS_ALLOW_FOREIGN_ENV:-0}" != "1" ]; then
+    echo "[env] ERROR: these point outside PRIMUS_JAX_BASE=$PRIMUS_JAX_BASE:" >&2
+    printf '%s' "$_primus_foreign_env" >&2
+    echo "[env]        They were inherited from the environment -- most often by sourcing" >&2
+    echo "[env]        tools/installation/env.sh (the PyTorch stack) in this shell first." >&2
+    echo "[env]        Continuing would install into that other environment." >&2
+    echo "[env]        Fix: start a fresh shell, or unset VENV_DIR WORKSPACE_DIR MAXTEXT_PATH." >&2
+    echo "[env]        Override with PRIMUS_ALLOW_FOREIGN_ENV=1 if this is deliberate." >&2
+    # This file is normally sourced; `exit` is the fallback when it is executed.
+    # shellcheck disable=SC2317
+    return 1 2>/dev/null || exit 1
+fi
 unset -f _primus_warn_outside_base
 if [ "${VIRTUAL_ENV:-}" != "$VENV_DIR" ]; then
     echo "[env] WARNING: venv not active: expected $VENV_DIR, got ${VIRTUAL_ENV:-<none>}" >&2
