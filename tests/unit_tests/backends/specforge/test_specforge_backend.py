@@ -664,8 +664,31 @@ class TestOnlineLaunch:
         assert consumer[4:6] == ["--role", "consumer"]
 
     def test_resolves_head_ip_override_not_hostname(self):
-        ip = resolve_routable_ip(env={"HEAD_IP": "10.9.8.7", "MASTER_ADDR": "crsuse2-m2m-001"})
+        ip = resolve_routable_ip(env={"HEAD_IP": "10.9.8.7", "MASTER_ADDR": "gpu-node-001.example"})
         assert ip == "10.9.8.7"
+
+    def test_head_ip_beats_interface_ip(self):
+        ip = resolve_routable_ip(
+            env={"HEAD_IP": "10.9.8.7", "PRIMUS_SPECFORGE_BIND_IFACE": "eth0"},
+            interface_ip="10.4.5.6",
+            hostname_ips=["127.0.0.1"],
+        )
+        assert ip == "10.9.8.7"
+
+    def test_hostname_ipv4_fallback_skips_loopback(self):
+        ip = resolve_routable_ip(env={}, hostname_ips=["127.0.0.1", "10.1.2.3"])
+        assert ip == "10.1.2.3"
+
+    def test_bind_interface_defaults_empty(self, specforge_checkout, tmp_path):
+        settings = online_settings(self._params(specforge_checkout, tmp_path), env={})
+        assert settings["bind_interface"] == ""
+
+    def test_bind_interface_from_env(self, specforge_checkout, tmp_path):
+        settings = online_settings(
+            self._params(specforge_checkout, tmp_path),
+            env={"PRIMUS_SPECFORGE_BIND_IFACE": "eth0"},
+        )
+        assert settings["bind_interface"] == "eth0"
 
     def test_rank_helpers(self):
         assert node_rank({"NODE_RANK": "1", "SLURM_NODEID": "0"}) == 1
@@ -694,9 +717,34 @@ class TestOnlineLaunch:
     def test_online_yaml_has_no_cluster_ips(self):
         text = ONLINE_CONFIG.read_text(encoding="utf-8")
         assert "specforge_mode: online" in text
-        assert "crsuse2" not in text
         for line in text.splitlines():
             assert "127.0.0.1" not in line.split("#", 1)[0]
+
+    def test_specforge_online_tree_has_no_site_cluster_names(self):
+        banned = (
+            "shared_nfs",
+            "amd-spur",
+            "amd-burst",
+            "crusoe",
+            "crsuse2",
+            "m2m_nobackup",
+            "ens3",
+        )
+        roots = [
+            PRIMUS_ROOT / "examples" / "specforge",
+            PRIMUS_ROOT / "primus" / "configs" / "modules" / "specforge",
+            PRIMUS_ROOT / "primus" / "backends" / "specforge",
+        ]
+        hits = []
+        for root in roots:
+            for path in root.rglob("*"):
+                if not path.is_file() or path.suffix.lower() in {".png", ".jpg", ".pyc"}:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore").lower()
+                for token in banned:
+                    if token in text:
+                        hits.append(f"{path.relative_to(PRIMUS_ROOT)}:{token}")
+        assert hits == []
 
     def test_online_yaml_converts_to_role_argv(self, experiment_env, specforge_checkout, tmp_path):
         module = load_pre_trainer_params(ONLINE_CONFIG)

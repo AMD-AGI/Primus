@@ -92,31 +92,33 @@ One Slurm allocation, the same `primus-cli` command on every node:
 | 1 | Wait for `inference.ready` → `--role consumer` |
 
 Checked-in SpecForge YAML keeps `127.0.0.1`. After allocate, Primus injects a
-routable `HEAD_IP` (`ens3` on Spur, override with `PRIMUS_SPECFORGE_HEAD_IP`).
-`control_dir` / `output_dir` must be on shared storage; `consumer_state_dir`
-must be trainer-local. Use a fresh `RUN_ID` every attempt.
+routable `HEAD_IP` (override with `PRIMUS_SPECFORGE_HEAD_IP`, or set
+`PRIMUS_SPECFORGE_BIND_IFACE` to pick a NIC). `control_dir` / `output_dir`
+must be on shared storage; `consumer_state_dir` must be trainer-local. Use a
+fresh `RUN_ID` every attempt. Account, QoS, partition, and site paths belong
+in a cluster runbook, not this tree.
 
 ```bash
 export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
-export RUN_ROOT=/shared_nfs/$USER/primus-specforge-online/$RUN_ID
+export RUN_ROOT=/path/to/shared/run/$RUN_ID
 export OUTPUT_DIR=$RUN_ROOT/output
-export CONSUMER_STATE_DIR=/mnt/m2m_nobackup/$USER/specforge/$RUN_ID/consumer-state
-export TRAIN_DATA_PATH=/data/sharegpt_train.jsonl
+export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
+export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
 export MAX_STEPS=20
 cd /opt/primus
 ./runner/primus-cli slurm srun -N 2 \
-  --account=amd-brain-models --qos=amd-burst-qos --partition=amd-spur \
-  --gres=gpu:1 --requeue \
+  --gres=gpu:1 \
   -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
-  --volume /shared_nfs:/shared_nfs \
+  --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
 ```
 
-First smoke is **1 capture GPU + 1 trainer GPU**. Overlay image on **both**
-nodes (Spur images are node-local). `GPUS_PER_NODE=1` from the prepare hook
-means one Primus process per node, not the device mask: producer has empty
-`CUDA_VISIBLE_DEVICES`; SGLang/consumer use `SERVER_GPUS` / `TRAINER_GPUS`.
+First smoke is **1 capture GPU + 1 trainer GPU**. Load the overlay image on
+**both** nodes if the scheduler's container store is node-local.
+`GPUS_PER_NODE=1` from the prepare hook means one Primus process per node, not
+the device mask: producer has empty `CUDA_VISIBLE_DEVICES`; SGLang/consumer
+use `SERVER_GPUS` / `TRAINER_GPUS`.
 
 Do not wrap this in `managed_local` or `--role both`. SpecForge `deployment.trainer.nnodes`
 stays 1 (one consumer node). Raise `SERVER_COUNT` / `TRAINER_GPUS` / `--gres`

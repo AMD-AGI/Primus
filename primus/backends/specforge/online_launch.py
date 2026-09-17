@@ -7,8 +7,8 @@
 """Pure helpers for 2-node online SpecForge (Mooncake + SGLang + roles).
 
 Cluster IPs stay out of git YAML. After Slurm allocates, Primus resolves a
-routable HEAD_IP (ens3 on Spur) and renders Hydra overrides. Rank dispatch
-and sidecar lifetime live in ``online_supervisor``.
+routable HEAD_IP and renders Hydra overrides. Rank dispatch and sidecar
+lifetime live in ``online_supervisor``.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ DEFAULT_SERVER_PORT = 30000
 DEFAULT_CAPTURE_LAYER_IDS = (1, 8, 15, 22, 29)
 DEFAULT_LEASE_TTL_MS = 500
 DEFAULT_PROTOCOL = "tcp"
-DEFAULT_INTERFACE = "ens3"
 LOOPBACK_PREFIXES = ("127.", "0.")
 
 
@@ -74,7 +73,7 @@ def parse_extra_args(value: Any) -> list[str]:
 
 
 def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
-    """Flatten ``specforge_online`` plus a few env aliases used on Spur."""
+    """Flatten ``specforge_online`` plus a few env aliases used at launch."""
 
     environ = os.environ if env is None else env
     raw = flatten_overrides(getattr(params, "specforge_online", None))
@@ -123,9 +122,7 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         "capture_layer_ids": parse_layer_ids(raw.get("capture_layer_ids")),
         "target_model_path": str(target),
         "sglang_extra_args": extra,
-        "bind_interface": str(
-            raw.get("bind_interface") or environ.get("PRIMUS_SPECFORGE_BIND_IFACE") or DEFAULT_INTERFACE
-        ),
+        "bind_interface": str(raw.get("bind_interface") or environ.get("PRIMUS_SPECFORGE_BIND_IFACE") or ""),
         "start_timeout_s": int(raw.get("start_timeout_s") or environ.get("START_TIMEOUT_S") or 1800),
         "peer_timeout_s": int(raw.get("peer_timeout_s") or environ.get("PEER_TIMEOUT_S") or 1800),
     }
@@ -174,6 +171,9 @@ def _first_non_loopback(candidates: Sequence[str]) -> Optional[str]:
 def interface_ipv4(name: str) -> Optional[str]:
     """IPv4 of a Linux netdev, or None if missing (Windows/unit tests)."""
 
+    if not name:
+        return None
+
     if not Path(f"/sys/class/net/{name}").is_dir():
         return None
     try:
@@ -204,7 +204,7 @@ def hostname_ipv4s() -> list[str]:
 def resolve_routable_ip(
     env: Optional[Mapping[str, str]] = None,
     *,
-    interface: str = DEFAULT_INTERFACE,
+    interface: str = "",
     interface_ip: Optional[str] = None,
     hostname_ips: Optional[Sequence[str]] = None,
 ) -> str:
@@ -215,8 +215,9 @@ def resolve_routable_ip(
         override = environ.get(key)
         if override and str(override).strip():
             return str(override).strip()
+    iface = interface or environ.get("PRIMUS_SPECFORGE_BIND_IFACE") or ""
     if interface_ip is None:
-        interface_ip = interface_ipv4(interface)
+        interface_ip = interface_ipv4(iface)
     if interface_ip:
         return interface_ip
     if hostname_ips is None:
@@ -225,8 +226,8 @@ def resolve_routable_ip(
     if picked:
         return picked
     raise RuntimeError(
-        f"[Primus:specforge] could not resolve a routable IPv4 on {interface}; "
-        "set PRIMUS_SPECFORGE_HEAD_IP or HEAD_IP"
+        "[Primus:specforge] could not resolve a routable IPv4; "
+        "set PRIMUS_SPECFORGE_HEAD_IP / HEAD_IP or PRIMUS_SPECFORGE_BIND_IFACE"
     )
 
 

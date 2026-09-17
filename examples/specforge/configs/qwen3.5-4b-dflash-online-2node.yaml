@@ -4,14 +4,13 @@
 # endpoints to a routable HEAD_IP after allocate. Producer is CPU-only.
 #
 #   export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
-#   export RUN_ROOT=/shared_nfs/$USER/primus-specforge-online/$RUN_ID
-#   export CONSUMER_STATE_DIR=/mnt/m2m_nobackup/$USER/specforge/$RUN_ID/consumer-state
+#   export RUN_ROOT=/path/to/shared/run/$RUN_ID
+#   export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
 #   export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
 #   export MAX_STEPS=20
-#   ./runner/primus-cli slurm srun -N 2 --account=amd-brain-models \
-#     --qos=amd-burst-qos --partition=amd-spur --gres=gpu:1 --requeue \
+#   ./runner/primus-cli slurm srun -N 2 --gres=gpu:1 \
 #     -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
-#     --volume /shared_nfs:/shared_nfs \
+#     --volume /shared:/shared \
 #     -- train pretrain --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
 #
 # First smoke is 1 capture GPU + 1 trainer GPU. Raise SERVER_GPUS / TRAINER_GPUS
