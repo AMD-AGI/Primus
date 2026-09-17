@@ -28,7 +28,7 @@ export RESULT_DIR=~/primus-bench/mi325x-v26.7
 # GPU is auto-detected from rocm-smi; set it to override.
 # GPU=MI325X
 
-# RCCL still needs a real NIC on a single node. 
+# RCCL still needs a real NIC on a single node.
 # NCCL_SOCKET_IFNAME and GLOO_SOCKET_IFNAME are auto-detected from get_ip_interface.sh,
 # which maps the first IPv4 from hostname -I to an interface.
 # On some nodes that address belongs to docker0.
