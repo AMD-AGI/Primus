@@ -17,31 +17,24 @@ training.
 > JAX **MaxText** counterpart. It is leaner than the PyTorch stack — no Flash
 > Attention / aiter / Primus-Turbo / FBGEMM / rocSHMEM builds — but v26.7 still
 > compiles **TensorFlow (CPU) from source** (and TransformerEngine from source on
-> hosts with glibc < 2.38), so it is not build-free.
+> hosts with glibc < 2.28), so it is not build-free.
 
 > **Python 3.12+ required.** MaxText requires Python ≥ 3.12 (the reference image
 > is built on Ubuntu 24.04). Unlike the PyTorch recipe, Python 3.10 is **not**
 > sufficient here.
 
-> **⚠️ Host OS: Ubuntu 24.04 / glibc ≥ 2.38 strongly recommended.** The prebuilt
-> `transformer_engine_rocm_jax` wheel (and other JAX training wheels) are built
-> against the Dockerfile's `ubuntu:24.04` base — they need **`glibc ≥ 2.38`** and
-> **`libstdc++` with `GLIBCXX_3.4.32`** (GCC 13/14). On an older host such as
-> **Ubuntu 22.04 (glibc 2.35)** the TransformerEngine shared library fails to
-> load with `version 'GLIBC_2.38' not found` (and this failure is *silently*
-> swallowed by the launcher — training just exits right after JAX initializes
-> the GPUs). `libstdc++` can be side-loaded via `LD_LIBRARY_PATH`, but **glibc
-> cannot**. For a **manual** install on Ubuntu 22.04 you must either (a) run on a
-> 24.04 host, or (b) build TransformerEngine **from source** against the host
-> toolchain — see
-> [Section 3.7](#37-install-transformerengine-jax-from-the-prebuilt-rocm-wheel).
-> Check your host with `ldd --version`.
+> **Host OS: Ubuntu 22.04 or 24.04.** v26.7 lowered the TransformerEngine glibc
+> floor. The native code now ships as `transformer_engine_rocm10`, a
+> `manylinux_2_28` wheel, so the prebuilt path works on **glibc ≥ 2.28** — Ubuntu
+> 22.04 (2.35) included. v26.6's wheels were built against the Dockerfile's
+> `ubuntu:24.04` base and needed **`glibc ≥ 2.38`**; on 22.04 the TE shared library
+> failed to load with `version 'GLIBC_2.38' not found`, and the launcher swallowed
+> it silently so training exited right after JAX initialised the GPUs. That is no
+> longer the case. Check your host with `ldd --version`.
 >
-> **The automated `setup.sh` does (b) for you:** its `te` stage detects the host
-> glibc and, when it is < 2.38, transparently builds TransformerEngine from
-> source instead of installing the prebuilt wheel — so `bash setup.sh` works on
-> both Ubuntu 22.04 and 24.04. Only the prebuilt TE wheel needs glibc ≥ 2.38; the
-> ROCm JAX/PJRT wheels load fine on glibc 2.35.
+> **`setup.sh` still guards this:** its `te` stage reads the host glibc and only
+> falls back to the from-source build below 2.28, so `bash setup.sh` works on both
+> 22.04 and 24.04.
 
 ---
 
@@ -140,12 +133,12 @@ Lighter/alternative stages:
 - `tf_cpu_fix` — pip `tensorflow-cpu` instead of the `tf_source` bazel build.
 - `te_source` — force the from-source TransformerEngine build regardless of
   glibc. You normally don't need to pass this: the default `te` stage
-  **auto-falls-back** to a from-source build on glibc < 2.38 hosts (e.g. Ubuntu
+  **auto-falls-back** to a from-source build on glibc < 2.28 hosts (not Ubuntu
   22.04), where the prebuilt wheel won't load (see the host-OS note above and
   Section 3.7). Heavy (~30–60 min).
 
 ```bash
-# Ubuntu 22.04 (glibc < 2.38): `bash setup.sh` already builds TE from source
+# Ubuntu 22.04 is covered by the prebuilt TE wheel from v26.7; `bash setup.sh`
 # automatically. If you also want to skip the heavy tf_source bazel build, swap
 # in the lighter tf_cpu_fix:
 bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs manifest
@@ -262,7 +255,7 @@ scripts use the same pins; change one and you may have to change the others.
 | ROCm (TheRock pip wheels)         | `rocm-sdk-*==10.0.0`                                                    | From `stable.repo.amd.com/rocm/core/whl-next`. |
 | JAX / jaxlib                      | `0.11.0`                                                                | Upstream PyPI. |
 | ROCm PJRT / plugin                | `jax_rocm10_pjrt` / `jax_rocm10_plugin` `0.11.0+rocm10.0.0`                     | From `stable.repo.amd.com/rocm/jax/whl-next`. |
-| TransformerEngine (JAX)           | `transformer_engine_rocm_jax 2.17.0+rocm10.0.0`                | Prebuilt wheel **needs glibc ≥ 2.38**; else build from source (`te_source`). |
+| TransformerEngine (JAX)           | `transformer_engine_rocm_jax 2.17.0+rocm10.0.0`                | Prebuilt wheel needs **glibc ≥ 2.28** (v26.7 lowered this from 2.38); else `te_source`. |
 | TensorFlow (CPU, from source)     | ROCm `tensorflow-upstream` branch `upstream-v2.21.0`                    | Built with bazelisk `v1.29.0`. Needs host `clang-18`/`lld-18`. |
 | RCCL (from source)                | `rocm-systems` @ `9e5e4084a4b8e1e86551b0eb054725c62354a926`            | Installed into `$ROCM_PATH/lib`. Needs host `clang-18`/`lld-18`. |
 | MaxText (ROCm fork)               | `release/v26.7`                                                         | ROCm MaxText fork matching the image. |

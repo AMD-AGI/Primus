@@ -367,9 +367,9 @@ pip install \
     transformer_engine_rocm_torch==2.17.0+rocm10.0.0
 ```
 
-> **Those wheels need glibc ≥ 2.38.** They are built on Ubuntu 24.04, and `libtransformer_engine.so` requires `GLIBC_2.38` plus `GLIBCXX_3.4.32`. Ubuntu 22.04 has glibc 2.35, and glibc cannot be side-loaded via `LD_LIBRARY_PATH`, so on 22.04 the wheels install fine but fail at import with `version 'GLIBC_2.38' not found`.
+> **These wheels need glibc ≥ 2.28, so Ubuntu 22.04 is fine.** In v26.7 the native code ships as `transformer_engine_rocm10`, a `manylinux_2_28` wheel whose `libtransformer_engine.so` references no symbol newer than `GLIBC_2.27`. Verified on Ubuntu 22.04 / glibc 2.35: installs and imports, and a TE `Linear` forward/backward runs on MI325X. v26.6's wheels were Ubuntu 24.04 builds that did need `GLIBC_2.38` and failed at import on 22.04.
 >
-> On such hosts, build the equivalent source commit instead — the same commit the version label refers to:
+> On genuinely older hosts (glibc < 2.28), build from source instead. Note that `2.17.0+rocm10.0.0` carries no commit in its version label, so pick the commit deliberately rather than assuming:
 >
 > ```bash
 > git clone --recursive https://github.com/ROCm/TransformerEngine.git

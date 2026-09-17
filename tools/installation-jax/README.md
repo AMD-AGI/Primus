@@ -37,15 +37,13 @@ ROCm toolchain inside the venv, so we don't depend on system ROCm or apt.
 > On Ubuntu 22.04, `apt install python3.12` fails (jammy has no such package) —
 > use the `uv` path above instead.
 
-> **Host OS: Ubuntu 24.04 / glibc ≥ 2.38 recommended, but 22.04 works.** The
-> prebuilt `transformer_engine_rocm_jax` wheel is built against the Dockerfile's
-> `ubuntu:24.04` base and needs `glibc ≥ 2.38` + `GLIBCXX_3.4.32` (GCC 13/14).
-> On Ubuntu 22.04 (glibc 2.35) the prebuilt TE wheel can't load
-> (`version 'GLIBC_2.38' not found`). **`setup.sh` handles this automatically:**
-> the `te` stage detects the host glibc and builds TransformerEngine from source
-> when it is < 2.38, so `bash setup.sh` works on both 22.04 and 24.04. (Only the
-> prebuilt TE wheel needs glibc ≥ 2.38; the ROCm JAX/PJRT wheels load on glibc
-> 2.35.) Check with `ldd --version`.
+> **Host OS: Ubuntu 22.04 or 24.04.** v26.7 lowered the TE glibc floor: the native
+> code ships as `transformer_engine_rocm10`, a `manylinux_2_28` wheel, so the
+> prebuilt path now works on **glibc ≥ 2.28** — Ubuntu 22.04 (2.35) included. v26.6's
+> wheels were `ubuntu:24.04` builds that needed `glibc ≥ 2.38` and failed to load on
+> 22.04 with `version 'GLIBC_2.38' not found`. **`setup.sh` still handles this
+> automatically:** the `te` stage checks the host glibc and only falls back to the
+> from-source build below 2.28. Check with `ldd --version`.
 
 ## Run it
 
@@ -99,7 +97,7 @@ checkout we installed the dependencies for.
   `0.11.0+rocm10.0.0` from PyPI (installed after MaxText to override its stock jax).
 - **te** — prebuilt `transformer_engine_rocm_jax==2.17.0+rocm10.0.0`
   (+ `flax==0.12.8`, `pydantic`, ...); auto-falls-back to a from-source build
-  (`te_source`) on glibc < 2.38 hosts.
+  (`te_source`) on glibc < 2.28 hosts.
 - **primus** — clone Primus, init the `third_party/maxtext` submodule, drop the
   stale `dataclasses` backports.
 - **jaxreqs** — install Primus' `requirements-jax.txt` and the v26.7 CVE-fix pins.
@@ -117,17 +115,15 @@ Optional / alternative stages:
 
 - **te_source** — force the from-source TransformerEngine build regardless of
   glibc. Normally unnecessary: the default `te` stage **auto-detects the host
-  glibc** and builds from source when it is < 2.38 (e.g. Ubuntu 22.04), where the
-  prebuilt wheel fails to load with `version 'GLIBC_2.38' not found`. Heavy build
-  (~30–60 min, compiles CK fused-attention kernels). Only the prebuilt TE wheel
-  needs glibc ≥ 2.38 — the ROCm JAX/PJRT wheels load fine on glibc 2.35.
+  glibc** and builds from source only when it is < 2.28. Heavy build (~30–60 min,
+  compiles CK fused-attention kernels). From v26.7 the prebuilt wheel covers Ubuntu
+  22.04 as well, so this fallback is rare.
 - **tf_cpu_fix** — lighter alternative to `tf_source`: `pip install tensorflow-cpu`
   instead of the bazel build (avoids the bundled-NCCL clash; may still hit the
   LLVM-symbol SIGSEGV on some ROCm 7.14 configs).
 
 ```bash
-# Ubuntu 22.04 (glibc < 2.38): `bash setup.sh` already builds TE from source
-# automatically. To also skip the heavy tf_source bazel build, swap in tf_cpu_fix:
+# To skip the heavy tf_source bazel build, swap in tf_cpu_fix:
 bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs manifest
 ```
 
@@ -168,8 +164,7 @@ bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs manifest
   prebuilt `te` — has been run end-to-end for single-node MaxText pretraining on
   **gfx942 / Ubuntu 22.04 (glibc 2.35) / Python 3.12**, and a **2-node** run has
   also been exercised (over the JAX distributed coordinator + RCCL, no
-  UCX/OpenMPI). On Ubuntu 24.04 (glibc ≥ 2.38) the prebuilt `te` wheel works
-  directly.
+  UCX/OpenMPI). From v26.7 the prebuilt `te` wheel works directly on 22.04 too.
 
 Treat the reference `Dockerfile` as the authoritative, tested version
 combination; if you bump one pin you may need to bump the others.

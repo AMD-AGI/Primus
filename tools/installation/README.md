@@ -40,24 +40,33 @@ used: `PRIMUS_PYTHON=/path/to/python3.12 bash setup.sh`.
 > remove the old venv and rebuild:
 > `rm -rf "$PRIMUS_BASE/venv" && bash setup.sh`
 
-## TransformerEngine: wheel on glibc ≥ 2.38, otherwise built from source
+## TransformerEngine: wheel on glibc ≥ 2.28, otherwise built from source
 
-v26.7 installs TransformerEngine from the ROCm multi-arch staging index instead of
-building it. Those wheels are produced on Ubuntu 24.04, and `libtransformer_engine.so`
-requires **glibc ≥ 2.38** plus `GLIBCXX_3.4.32`. Ubuntu 22.04 has glibc 2.35, and
-unlike libstdc++, glibc cannot be side-loaded through `LD_LIBRARY_PATH` — so on a
-22.04 host the v26.5 wheels install fine but fail at import with:
+v26.7 installs TransformerEngine from the ROCm indexes instead of building it. It
+arrives as three distributions: `transformer_engine` and `transformer_engine_rocm10`
+from `stable.repo.amd.com/rocm/transformer_engine/whl-next`, plus the
+`transformer_engine_rocm_torch` flavour from the multi-arch staging index.
+
+**The glibc floor dropped in v26.7.** The native code now ships as
+`transformer_engine_rocm10`, a `manylinux_2_28` wheel whose `libtransformer_engine.so`
+references no symbol newer than `GLIBC_2.27`, and the torch flavour is a small sdist
+built locally. v26.6's wheels were Ubuntu 24.04 builds that genuinely needed
+**glibc ≥ 2.38** and failed at import on 22.04 with:
 
 ```
 OSError: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found
 ```
 
-`stage_te` therefore picks its install path from the host's glibc:
+That no longer applies. Verified on Ubuntu 22.04 / glibc 2.35: the wheels install
+and `import transformer_engine.pytorch` succeeds, and a TE `Linear` forward and
+backward runs on MI325X with finite gradients.
+
+`stage_te` picks its install path from the host's glibc:
 
 | Host glibc | Path | What happens |
 |---|---|---|
-| ≥ 2.38 (e.g. Ubuntu 24.04) | wheel | exactly what v26.7 does |
-| < 2.38 (e.g. Ubuntu 22.04) | source | clones `ROCm/TransformerEngine` and builds commit `e028a6c…`, the same commit the `TE_VERSION` label refers to |
+| ≥ 2.28 (Ubuntu 22.04, 24.04) | wheel | exactly what v26.7 does |
+| < 2.28 | source | clones `ROCm/TransformerEngine` and builds `TE_COMMIT`. Note that `2.17.0+rocm10.0.0` carries no commit in its version label, so `TE_COMMIT` is still the v26.6 commit — confirm it before relying on this path |
 
 Either way you get the same TE version; the source build just links against the
 host toolchain. It takes considerably longer than the wheel install. Override the
@@ -170,7 +179,9 @@ The order matters for `te`: see the note on the staging index below.
   SDK), TE `2.17.0+rocm10.0.0` from the devreleases index, transformers `5.10.0`,
   wandb `0.28.2`, Primus `2631e68d…` (the v26.7.0 tag), Primus-Turbo `6d5ff979…`.
   CVE pins: `cryptography==50.0.0`, `mlflow==3.15.1` (`--no-deps`).
-- **`ck_jit_compile.sh` is still patched** the same way the image patches it.
+- **`ck_jit_compile.sh` no longer needs patching.** TE 2.17 ships its own tolerance
+  for a lost `mv -n` race (`|| [ -f "$OUTPUT" ]`), which is why the v26.7 Dockerfile
+  dropped the `sed` that v26.6 applied. `setup.sh` detects either form and skips.
 - **`GPU_ARCHS` remains `native` at runtime.** `setup.sh` still overrides it to
   the full arch list for stages that cross-compile.
 

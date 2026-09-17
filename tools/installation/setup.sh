@@ -94,7 +94,12 @@ FLASH_ATTN_VERSION="2.8.1"
 TE_CORE_INDEX="https://stable.repo.amd.com/rocm/transformer_engine/whl-next/"
 TE_INDEX="https://rocm.frameworks-devreleases.amd.com/whl-multi-arch-staging/"
 TE_VERSION="2.17.0+rocm10.0.0"
-TE_WHEEL_MIN_GLIBC="2.38"
+# v26.7 lowers this from 2.38. The native code now ships as
+# `transformer_engine_rocm10`, a manylinux_2_28 wheel whose libtransformer_engine.so
+# needs no symbol newer than GLIBC_2.27; the torch flavour is a small sdist built
+# locally. v26.6's wheels were Ubuntu 24.04 builds and genuinely needed 2.38.
+# Verified on Ubuntu 22.04 / glibc 2.35: installs and imports cleanly.
+TE_WHEEL_MIN_GLIBC="2.28"
 TE_REPO="https://github.com/ROCm/TransformerEngine.git"
 # NEEDS CONFIRMATION for v26.7: the v26.6 wheel carried its source commit in the
 # local label (…a20260727.e028a6c), but 2.17.0+rocm10.0.0 does not, and the
@@ -388,8 +393,14 @@ PY
         log "ck_jit_compile.sh not present, nothing to patch"
         return 0
     fi
-    if grep -qF 'mv -n "$_TMP_SO" "$OUTPUT" 2>/dev/null' "$f"; then
-        log "ck_jit_compile.sh already patched"
+    # The point of the patch is only that a lost `mv -n` race must not fail the
+    # build. Accept any form that already tolerates it: our own `2>/dev/null ||
+    # true`, or upstream's own fix. TE 2.17 (v26.7) ships
+    # `mv -n ... || [ -f "$OUTPUT" ]` and the v26.7 Dockerfile consequently
+    # dropped the sed that v26.6 applied, so on v26.7 there is nothing to do.
+    if grep -qE 'mv -n "\$_TMP_SO" "\$OUTPUT"[[:space:]]*($|\|\||2>)' "$f" \
+        && grep -qE 'mv -n "\$_TMP_SO" "\$OUTPUT"[[:space:]]+(2>/dev/null|\|\|)' "$f"; then
+        log "ck_jit_compile.sh already tolerates a lost mv race, nothing to patch"
         return 0
     fi
     sed -i 's|    mv -n "$_TMP_SO" "$OUTPUT"$|    mv -n "$_TMP_SO" "$OUTPUT" 2>/dev/null \|\| true|' "$f"

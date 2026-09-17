@@ -94,13 +94,23 @@ fresh_clone() {  # fresh_clone <url> <dir> [extra git clone args...]
     git clone "$@" "$url" "$SRC_DIR/$dir"
 }
 
-# Return 0 if the host glibc is >= 2.38 (what the prebuilt TE/JAX wheels need).
+# Return 0 if the host glibc is new enough for the prebuilt TE wheels.
+#
+# v26.7 lowers the bar from 2.38 to 2.28: the native code ships as
+# `transformer_engine_rocm10`, a manylinux_2_28 wheel, with the jax flavour a small
+# sdist built locally. v26.6's wheels were Ubuntu 24.04 builds and did need 2.38.
+# Confirmed on the torch side on Ubuntu 22.04 / glibc 2.35 (installs and imports);
+# the jax flavour shares the same binary package but was not executed there.
+#
 # On failure to parse (unknown libc) we conservatively return non-zero so the
 # caller falls back to the always-works from-source build.
-_glibc_ge_238() {
+TE_WHEEL_MIN_GLIBC_MINOR=28
+
+_glibc_ge_te_min() {
     local v; v="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
     [ -n "$v" ] || return 1
-    awk -v v="$v" 'BEGIN{split(v,a,"."); exit !(a[1]>2 || (a[1]==2 && a[2]>=38))}'
+    awk -v v="$v" -v min="$TE_WHEEL_MIN_GLIBC_MINOR" \
+        'BEGIN{split(v,a,"."); exit !(a[1]>2 || (a[1]==2 && a[2]>=min))}'
 }
 
 # ============================ STAGES ============================
@@ -204,12 +214,11 @@ stage_jax() {
 
 stage_te() {
     reload_env
-    # The prebuilt wheel targets the Dockerfile's ubuntu:24.04 base (glibc>=2.38).
-    # On older hosts (e.g. Ubuntu 22.04, glibc 2.35) it cannot load, so fall back
-    # transparently to the from-source build, which links against the host glibc.
-    # This keeps `bash setup.sh` (defaults) working on both 22.04 and 24.04.
-    if ! _glibc_ge_238; then
-        log "host glibc < 2.38 (prebuilt TE needs >= 2.38): building TransformerEngine from source instead (te_source)"
+    # v26.7's native TE package is a manylinux_2_28 wheel, so it loads on Ubuntu
+    # 22.04 (glibc 2.35) as well as 24.04. Only genuinely older hosts fall back to
+    # the from-source build, which links against the host glibc.
+    if ! _glibc_ge_te_min; then
+        log "host glibc < 2.$TE_WHEEL_MIN_GLIBC_MINOR (prebuilt TE needs >= 2.$TE_WHEEL_MIN_GLIBC_MINOR): building TransformerEngine from source instead (te_source)"
         stage_te_source
         return
     fi
