@@ -28,12 +28,14 @@ Usage:
 """
 
 import argparse
+import ast
 import json
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import tokenize
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -219,11 +221,54 @@ def replay_parity():
     return ok
 
 
+def check_sha_abbreviation():
+    """Refuse any tool that reads a SHA git abbreviated for itself.
+
+    git scales the width to the local object count -- 7 characters in a fresh clone,
+    8 in a long-lived one -- so slicing one makes the output depend on the machine
+    that produced it. `submodule_bumps` shipped exactly that: `[:8]` of
+    `git diff --raw` returned 7 characters in CI, where it read as documentation
+    drift against the full SHAs probed from the image. Ask for `--abbrev=40` and
+    truncate here instead.
+
+    `--submodule=short` is banned for the older reason recorded in `submodule_bumps`:
+    it emits no summary line, so the parse silently matched nothing and reported no
+    bumps forever.
+
+    Only string literals are inspected, because the comments that explain these
+    constructs necessarily contain them.
+    """
+    banned = {"%h", "--short", "--submodule=short"}
+    offenders = []
+    for path in sorted((C.ROOT / TOOLS_REL).glob("*.py")):
+        # This file names the banned forms as data; scanning it finds only itself.
+        if path.resolve() == Path(__file__).resolve():
+            continue
+        with open(path, "rb") as handle:
+            for token in tokenize.tokenize(handle.readline):
+                if token.type != tokenize.STRING:
+                    continue
+                try:
+                    value = ast.literal_eval(token.string)
+                except (ValueError, SyntaxError):
+                    continue
+                if not isinstance(value, str):
+                    continue
+                if value in banned or (value.startswith("--abbrev=") and value != "--abbrev=40"):
+                    offenders.append(f"{path.name}: {value!r}")
+
+    print("\n=== sha abbreviation: no tool may read git's variable-width SHAs")
+    for item in offenders:
+        print(f"    {item}")
+    print(f"    {len(offenders)} offender(s)")
+    return not offenders
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--only", choices=["bump", "parity"], help="run a single replay")
+    parser.add_argument("--only", choices=["bump", "parity", "abbrev"], help="run a single check")
     args = parser.parse_args()
 
     results = {}
@@ -231,6 +276,8 @@ def main():
         results["bump_version"] = replay_bump()
     if args.only in (None, "parity"):
         results["install_parity"] = replay_parity()
+    if args.only in (None, "abbrev"):
+        results["sha_abbreviation"] = check_sha_abbreviation()
 
     print("\n=== golden replay summary")
     for name, ok in results.items():
