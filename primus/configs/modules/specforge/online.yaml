@@ -15,7 +15,7 @@ specforge_root: null
 specforge_entrypoint: specforge
 specforge_mode: online
 
-# 2-node sidecar / GPU split. Rendered into SpecForge Hydra overrides plus
+# Sidecar / node+GPU split. Rendered into SpecForge Hydra overrides plus
 # Mooncake/SGLang argv. Do not put cluster IPs here.
 specforge_online: {}
 

@@ -28,6 +28,7 @@ from primus.backends.specforge.argument_builder import (
     build_specforge_argv,
     flatten_overrides,
     resolve_specforge_root,
+    specforge_mode,
 )
 from primus.backends.specforge.online_launch import (
     build_online_overrides,
@@ -76,7 +77,9 @@ def specforge_checkout(tmp_path):
     (root / "configs").mkdir(parents=True)
     (root / "pyproject.toml").write_text("[project]\nname = 'specforge'\n")
     (root / "configs" / "qwen3.5-4b-dflash.yaml").write_text("model: dummy\n")
-    (root / "configs" / "qwen3.5-4b-dflash.json").write_text("{}\n")
+    (root / "configs" / "qwen3.5-4b-dflash.json").write_text(
+        '{"dflash_config": {"target_layer_ids": [1, 8, 15, 22, 29]}}\n'
+    )
     (root / "scripts").mkdir()
     (root / "scripts" / "prepare_hidden_states.py").write_text("# stub\n")
     return root
@@ -662,6 +665,18 @@ class TestOnlineLaunch:
         assert argv[4:6] == ["--role", "producer"]
         consumer = build_role_argv(params, "consumer", overrides)
         assert consumer[4:6] == ["--role", "consumer"]
+        assert "--node-rank" not in consumer
+
+    def test_trainer_nnodes_emits_master_addr_and_node_rank(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path, trainer_nnodes=2)
+        settings = online_settings(params)
+        overrides = build_online_overrides(
+            "10.3.14.7", settings, trainer_master_addr="10.9.9.1", output_dir=str(tmp_path / "out")
+        )
+        assert "deployment.trainer.nnodes=2" in overrides
+        assert "deployment.trainer.master_addr=10.9.9.1" in overrides
+        argv = build_role_argv(params, "consumer", overrides, node_rank=1)
+        assert argv[argv.index("--node-rank") + 1] == "1"
 
     def test_resolves_head_ip_override_not_hostname(self):
         ip = resolve_routable_ip(env={"HEAD_IP": "10.9.8.7", "MASTER_ADDR": "gpu-node-001.example"})
@@ -698,7 +713,14 @@ class TestOnlineLaunch:
         params = self._params(specforge_checkout, tmp_path)
         settings = online_settings(params)
         issues = validate_online_identity(settings, rank=0, nodes=1)
-        assert any("NNODES=2" in item for item in issues)
+        assert any("capture_nnodes+trainer_nnodes=2" in item for item in issues)
+
+    def test_identity_accepts_capture_plus_trainer_counts(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path, capture_nnodes=1, trainer_nnodes=2)
+        settings = online_settings(params)
+        assert not validate_online_identity(settings, rank=2, nodes=3)
+        issues = validate_online_identity(settings, rank=0, nodes=2)
+        assert any("capture_nnodes+trainer_nnodes=3" in item for item in issues)
 
     def test_sglang_aux_layers_match_qwen35_draft(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path)
@@ -713,6 +735,14 @@ class TestOnlineLaunch:
         assert "--host" in argv and argv[argv.index("--host") + 1] == "0.0.0.0"
         assert "--disable-radix-cache" in argv
         assert "--attention-backend" in argv
+
+    def test_capture_layer_ids_env_overrides_draft_json(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        settings = online_settings(params, env={"CAPTURE_LAYER_IDS": "2 4"})
+        argv = sglang_server_argv(0, settings)
+        port_at = argv.index("--port")
+        layer_at = argv.index("--spec-capture-aux-layer-ids")
+        assert argv[layer_at + 1 : port_at] == ["2", "4"]
 
     def test_online_yaml_has_no_cluster_ips(self):
         text = ONLINE_CONFIG.read_text(encoding="utf-8")
@@ -787,7 +817,7 @@ class TestOnlineLaunch:
             params,
             env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0", "NNODES": "1", "NODE_RANK": "0"},
         )
-        assert any("NNODES=2" in item for item in issues)
+        assert any("capture_nnodes+trainer_nnodes=2" in item for item in issues)
 
     def test_rank0_and_rank1_dispatch(self, specforge_checkout, tmp_path, monkeypatch):
         from primus.backends.specforge import online_supervisor as supervisor
@@ -802,6 +832,31 @@ class TestOnlineLaunch:
         monkeypatch.setenv("NODE_RANK", "1")
         supervisor.run_online(params)
         assert calls == ["capture", "trainer"]
+
+    def test_dispatch_multi_trainer_and_capture_replica(self, specforge_checkout, tmp_path, monkeypatch):
+        from primus.backends.specforge import online_supervisor as supervisor
+
+        calls = []
+        monkeypatch.setattr(supervisor, "_run_capture_node", lambda *a, **k: calls.append("head"))
+        monkeypatch.setattr(
+            supervisor, "_run_capture_replica", lambda params, settings, rank: calls.append(("replica", rank))
+        )
+        monkeypatch.setattr(
+            supervisor,
+            "_run_trainer_node",
+            lambda params, settings, specforge_rank: calls.append(("trainer", specforge_rank)),
+        )
+        params = self._params(specforge_checkout, tmp_path, capture_nnodes=2, trainer_nnodes=2)
+        monkeypatch.setenv("NNODES", "4")
+        monkeypatch.setenv("NODE_RANK", "0")
+        supervisor.run_online(params)
+        monkeypatch.setenv("NODE_RANK", "1")
+        supervisor.run_online(params)
+        monkeypatch.setenv("NODE_RANK", "2")
+        supervisor.run_online(params)
+        monkeypatch.setenv("NODE_RANK", "3")
+        supervisor.run_online(params)
+        assert calls == ["head", ("replica", 1), ("trainer", 0), ("trainer", 1)]
 
     def test_mooncake_http_404_counts_as_up(self, monkeypatch):
         from primus.backends.specforge import online_supervisor as supervisor
@@ -826,6 +881,15 @@ class TestOnlineLaunch:
         assert "SLURM_NODEID" not in env
         assert "SLURM_NNODES" not in env
         assert env["CUDA_VISIBLE_DEVICES"] == "0"
+
+        env = supervisor._specforge_child_env({}, "0", specforge_node_rank=1, specforge_nnodes=2)
+        assert env["NODE_RANK"] == "1"
+        assert env["NNODES"] == "2"
+
+    def test_offline_is_alias_of_train(self):
+        assert specforge_mode(SimpleNamespace(specforge_mode="offline")) == "train"
+        assert specforge_mode(SimpleNamespace(specforge_mode="train")) == "train"
+        assert specforge_mode(SimpleNamespace(specforge_mode="online")) == "online"
 
     def test_online_train_does_not_execvp(self, specforge_checkout, tmp_path, monkeypatch):
         called = []

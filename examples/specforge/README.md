@@ -81,22 +81,34 @@ export MAX_STEPS=20
 Dotted CLI keys override YAML, for example
 `specforge_overrides.training.max_steps=1000`.
 
-## Online 2-node (Mooncake + SGLang capture)
+## Online (Mooncake + SGLang capture)
 
-`specforge_mode: online` is the path SpecForge will not launch across nodes.
-One Slurm allocation, the same `primus-cli` command on every node:
+`specforge_mode: online` is for live capture+train. SpecForge's own CLI will
+not start Mooncake/SGLang across nodes, so Primus does that and then launches
+`--role producer` / `--role consumer`.
+
+One Slurm allocation, the same `primus-cli` command on every node. Shape is
+**C capture nodes + T trainer nodes** (`CAPTURE_NNODES` + `TRAINER_NNODES`,
+default 1+1 so `-N 2`):
 
 | Slurm `NODE_RANK` | Role |
 | --- | --- |
-| 0 | Mooncake → patched SGLang → `--role producer` (CPU-only) |
-| 1 | Wait for `inference.ready` → `--role consumer` |
+| `0 .. C-1` | Capture: SGLang on GPU. Rank 0 also starts Mooncake and the SpecForge **producer** (CPU HTTP client to those servers). |
+| `C .. C+T-1` | Wait for `inference.ready` → `--role consumer` (`--node-rank` when `T>1`) |
 
 Checked-in SpecForge YAML keeps `127.0.0.1`. After allocate, Primus injects a
 routable `HEAD_IP` (override with `PRIMUS_SPECFORGE_HEAD_IP`, or set
 `PRIMUS_SPECFORGE_BIND_IFACE` to pick a NIC). `control_dir` / `output_dir`
-must be on shared storage; `consumer_state_dir` must be trainer-local. Use a
-fresh `RUN_ID` every attempt. Account, QoS, partition, and site paths belong
-in a cluster runbook, not this tree.
+must be on shared storage; `consumer_state_dir` must be trainer-local. SpecForge
+refuses a reused control/SQLite tree, so `RUN_ROOT` and `CONSUMER_STATE_DIR`
+must be empty (a new `RUN_ID` is the usual way to get that).
+
+`./runner/primus-cli slurm` runs **on the login node** from this checkout; it
+does not need a pip-installed Primus. The overlay image (or a bind-mount of
+this tree at `/opt/primus`) is what actually trains. `--gres=gpu:N` is Slurm's
+**per-node** GPU request — the same `N` on every allocated node. Set it to the
+GPUs that node uses (`SERVER_COUNT` on a capture node, `NPROC_PER_NODE` on a
+trainer node).
 
 ```bash
 export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
@@ -114,15 +126,16 @@ cd /opt/primus
   --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
 ```
 
-First smoke is **1 capture GPU + 1 trainer GPU**. Load the overlay image on
-**both** nodes if the scheduler's container store is node-local.
-`GPUS_PER_NODE=1` from the prepare hook means one Primus process per node, not
-the device mask: producer has empty `CUDA_VISIBLE_DEVICES`; SGLang/consumer
-use `SERVER_GPUS` / `TRAINER_GPUS`.
+The example above is **1 capture GPU + 1 trainer GPU** on 2 nodes. Load the
+overlay image on **every** node if the scheduler's container store is
+node-local. `GPUS_PER_NODE=1` from the prepare hook means one Primus process
+per node, not the device mask: the producer has empty `CUDA_VISIBLE_DEVICES`;
+SGLang/consumer use `SERVER_GPUS` / `TRAINER_GPUS`.
 
-Do not wrap this in `managed_local` or `--role both`. SpecForge `deployment.trainer.nnodes`
-stays 1 (one consumer node). Raise `SERVER_COUNT` / `TRAINER_GPUS` / `--gres`
-for a later 8+8 run on the same supervisor.
+Do not wrap this in `managed_local` or `--role both`. SpecForge
+`deployment.trainer.nnodes` is `TRAINER_NNODES` (consumer nodes only). Raise
+`SERVER_COUNT` / `TRAINER_GPUS` / `--gres` for 8 GPUs per role on 2 nodes, or
+raise `-N` with `CAPTURE_NNODES` / `TRAINER_NNODES`.
 
 ## Reference results on MI355X
 

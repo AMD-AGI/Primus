@@ -6,9 +6,9 @@
 
 """Rank-aware Mooncake / SGLang / SpecForge supervision for online mode.
 
-Rank 0 cannot ``execvp`` into ``specforge train``: it has to keep Mooncake and
-the capture server alive until the consumer finishes. Rank 1 waits for
-``inference.ready`` then runs ``--role consumer``.
+Capture ranks cannot ``execvp`` into ``specforge train``: they have to keep
+Mooncake and the capture servers alive until every consumer finishes. Trainer
+ranks wait for ``inference.ready`` then run ``--role consumer``.
 """
 
 from __future__ import annotations
@@ -27,24 +27,31 @@ from typing import Any, Optional
 from primus.backends.specforge.online_launch import (
     build_online_overrides,
     build_role_argv,
+    consumer_done_paths,
+    is_capture_rank,
     mooncake_env,
     mooncake_master_argv,
     nnodes,
     node_rank,
     online_settings,
+    read_lines,
     read_status,
     ready_paths,
     resolve_routable_ip,
     server_gpu_group,
+    server_urls,
     sglang_server_argv,
+    sglang_url_path,
+    trainer_node_rank,
     validate_online_identity,
+    write_lines,
     write_status,
 )
 from primus.core.utils.module_utils import log_rank_0
 
-# SpecForge producer/consumer are 1-node jobs. Primus NODE_RANK=1 on the
-# trainer host must not leak in, or SpecForge raises
-# ``node_rank=1 must be in [0, 1)``.
+# SpecForge producer is a 1-node job. Trainer NODE_RANK must be relative to
+# the consumer group (0..trainer_nnodes), not the Slurm allocation, or
+# SpecForge raises ``node_rank=N must be in [0, nnodes)``.
 _SPECFORGE_RANK_KEYS = (
     "NODE_RANK",
     "NNODES",
@@ -77,12 +84,18 @@ def _merge_env(extra: dict[str, str], visible_devices: Optional[str]) -> dict[st
     return env
 
 
-def _specforge_child_env(extra: dict[str, str], visible_devices: Optional[str]) -> dict[str, str]:
+def _specforge_child_env(
+    extra: dict[str, str],
+    visible_devices: Optional[str],
+    *,
+    specforge_node_rank: int = 0,
+    specforge_nnodes: int = 1,
+) -> dict[str, str]:
     env = _merge_env(extra, visible_devices)
     for key in _SPECFORGE_RANK_KEYS:
         env.pop(key, None)
-    env["NODE_RANK"] = "0"
-    env["NNODES"] = "1"
+    env["NODE_RANK"] = str(specforge_node_rank)
+    env["NNODES"] = str(specforge_nnodes)
     return env
 
 
@@ -174,9 +187,9 @@ def _wait_mooncake(head_ip: str, settings: dict[str, Any], proc: subprocess.Pope
 
 
 def _wait_sglang(
-    head_ip: str, index: int, settings: dict[str, Any], proc: subprocess.Popen, log_path: Path
+    advertise_ip: str, index: int, settings: dict[str, Any], proc: subprocess.Popen, log_path: Path
 ) -> None:
-    url = f"http://{head_ip}:{int(settings['server_port']) + index}/health"
+    url = f"http://{advertise_ip}:{int(settings['server_port']) + index}/health"
     started = time.time()
     while not _http_ok(url, timeout=2.0):
         if proc.poll() is not None:
@@ -184,6 +197,38 @@ def _wait_sglang(
         if time.time() - started >= settings["start_timeout_s"]:
             raise RuntimeError(f"[Primus:specforge] SGLang server {index} readiness timed out")
         time.sleep(5)
+
+
+def _start_local_sglang(
+    settings: dict[str, Any], head_ip: str, local_ip: str, log_root: Path, capture_rank: int
+) -> list[subprocess.Popen]:
+    servers: list[subprocess.Popen] = []
+    for index in range(int(settings["server_count"])):
+        gpus = server_gpu_group(settings["server_gpus"], index, int(settings["server_tp"]))
+        server_env = _merge_env(mooncake_env(head_ip, settings, local_ip), gpus)
+        log_path = log_root / f"sglang-server-{capture_rank}-{index}.log"
+        proc = _popen(sglang_server_argv(index, settings), server_env, log_path)
+        servers.append(proc)
+        _wait_sglang(local_ip, index, settings, proc, log_path)
+    write_lines(sglang_url_path(str(log_root), capture_rank), server_urls(local_ip, settings))
+    log_rank_0(f"SGLang capture server(s) healthy on rank {capture_rank}")
+    return servers
+
+
+def _failed_consumer_status(done_files: list[Path]) -> Optional[str]:
+    for path in done_files:
+        if path.exists() and read_status(path) != "0":
+            return read_status(path)
+    return None
+
+
+def _collect_server_urls(settings: dict[str, Any], timeout_s: int) -> list[str]:
+    urls: list[str] = []
+    for rank in range(int(settings["capture_nnodes"])):
+        path = sglang_url_path(settings["run_root"], rank)
+        _wait_for_file(path, timeout_s, description=f"SGLang URLs from capture rank {rank}")
+        urls.extend(read_lines(path))
+    return urls
 
 
 def run_online(params: Any) -> None:
@@ -208,24 +253,19 @@ def run_online(params: Any) -> None:
         old, new = realigned
         log_rank_0(f"Aligned HIP_VISIBLE_DEVICES with CUDA_VISIBLE_DEVICES: {old} -> {new}")
 
-    if rank == 0:
-        _run_capture_node(params, settings)
+    if is_capture_rank(rank, settings):
+        if rank == 0:
+            _run_capture_node(params, settings)
+        else:
+            _run_capture_replica(params, settings, rank)
         return
-    _run_trainer_node(params, settings)
+    _run_trainer_node(params, settings, trainer_node_rank(rank, settings))
 
 
 def _run_capture_node(params: Any, settings: dict[str, Any]) -> None:
     paths = ready_paths(settings["run_root"])
     head_ip = resolve_routable_ip(interface=settings["bind_interface"])
-    overrides = build_online_overrides(
-        head_ip,
-        settings,
-        output_dir=getattr(params, "output_dir", None) or None,
-    )
-    extra = list(overrides)
-    # Trainer-local output_dir on the shared run root wins over a leftover alias.
-    argv = build_role_argv(params, "producer", extra)
-    log_rank_0(f"SpecForge producer command: {' '.join(argv)}")
+    done_files = consumer_done_paths(settings["run_root"], int(settings["trainer_nnodes"]))
 
     if shutil.which("mooncake_master") is None:
         raise RuntimeError("[Primus:specforge] mooncake_master is not on PATH")
@@ -251,36 +291,35 @@ def _run_capture_node(params: Any, settings: dict[str, Any]) -> None:
         _wait_mooncake(head_ip, settings, master, paths["mooncake_log"])
         log_rank_0(f"Mooncake ready at {head_ip}:{settings['mooncake_rpc_port']}")
 
-        for index in range(int(settings["server_count"])):
-            gpus = server_gpu_group(settings["server_gpus"], index, int(settings["server_tp"]))
-            server_env = _merge_env(mooncake_env(head_ip, settings, head_ip), gpus)
-            log_path = paths["root"] / f"sglang-server-{index}.log"
-            proc = _popen(sglang_server_argv(index, settings), server_env, log_path)
-            servers.append(proc)
-            _wait_sglang(head_ip, index, settings, proc, log_path)
-        log_rank_0("SGLang capture server(s) healthy")
+        servers = _start_local_sglang(settings, head_ip, head_ip, paths["root"], capture_rank=0)
+        url_list = _collect_server_urls(settings, settings["start_timeout_s"])
+        write_lines(paths["server_urls"], url_list)
+        overrides = build_online_overrides(
+            head_ip,
+            settings,
+            output_dir=getattr(params, "output_dir", None) or None,
+            server_url_list=url_list,
+        )
+        argv = build_role_argv(params, "producer", overrides)
+        log_rank_0(f"SpecForge producer command: {' '.join(argv)}")
         write_status(paths["inference_ready"], head_ip)
 
         producer_env = _specforge_child_env(mooncake_env(head_ip, settings, head_ip), None)
         producer = _popen(argv, producer_env, paths["producer_log"])
         while producer.poll() is None:
-            if paths["consumer_done"].exists() and read_status(paths["consumer_done"]) != "0":
-                raise RuntimeError(
-                    f"[Primus:specforge] consumer failed with {read_status(paths['consumer_done'])}"
-                )
+            failed = _failed_consumer_status(done_files)
+            if failed is not None:
+                raise RuntimeError(f"[Primus:specforge] consumer failed with {failed}")
             time.sleep(2)
         if producer.returncode != 0:
             raise RuntimeError(f"[Primus:specforge] producer exited with status {producer.returncode}")
         producer = None
 
-        _wait_for_file(
-            paths["consumer_done"],
-            settings["peer_timeout_s"],
-            description="consumer completion",
-        )
-        consumer_result = read_status(paths["consumer_done"])
-        if consumer_result != "0":
-            raise RuntimeError(f"[Primus:specforge] consumer exited with status {consumer_result}")
+        for path in done_files:
+            _wait_for_file(path, settings["peer_timeout_s"], description="consumer completion")
+        failed = _failed_consumer_status(done_files)
+        if failed is not None:
+            raise RuntimeError(f"[Primus:specforge] consumer exited with status {failed}")
         result = 0
         log_rank_0("Online capture node finished; tearing down sidecars")
     finally:
@@ -291,8 +330,44 @@ def _run_capture_node(params: Any, settings: dict[str, Any]) -> None:
         write_status(paths["inference_done"], str(result))
 
 
-def _run_trainer_node(params: Any, settings: dict[str, Any]) -> None:
+def _run_capture_replica(_params: Any, settings: dict[str, Any], rank: int) -> None:
     paths = ready_paths(settings["run_root"])
+    _wait_for_file(
+        paths["head_ip"],
+        settings["peer_timeout_s"],
+        peer=paths["inference_done"],
+        description="Mooncake HEAD_IP",
+    )
+    head_ip = read_status(paths["head_ip"])
+    local_ip = resolve_routable_ip(interface=settings["bind_interface"])
+    servers: list[subprocess.Popen] = []
+    try:
+        servers = _start_local_sglang(settings, head_ip, local_ip, paths["root"], capture_rank=rank)
+        _wait_for_file(
+            paths["inference_done"],
+            settings["peer_timeout_s"],
+            description="capture head teardown",
+        )
+        if read_status(paths["inference_done"]) != "0":
+            raise RuntimeError(
+                f"[Primus:specforge] capture head failed with {read_status(paths['inference_done'])}"
+            )
+    finally:
+        for proc in servers:
+            _kill_group(proc)
+
+
+def _run_trainer_node(params: Any, settings: dict[str, Any], specforge_rank: int) -> None:
+    paths = ready_paths(settings["run_root"])
+    local_ip = resolve_routable_ip(interface=settings["bind_interface"])
+    trainer_nnodes = int(settings["trainer_nnodes"])
+    if specforge_rank == 0:
+        write_status(paths["trainer_ip"], local_ip)
+    trainer_master = local_ip
+    if trainer_nnodes > 1:
+        _wait_for_file(paths["trainer_ip"], settings["peer_timeout_s"], description="trainer master_addr")
+        trainer_master = read_status(paths["trainer_ip"])
+
     _wait_for_file(
         paths["inference_ready"],
         settings["peer_timeout_s"],
@@ -300,13 +375,16 @@ def _run_trainer_node(params: Any, settings: dict[str, Any]) -> None:
         description="inference readiness",
     )
     head_ip = read_status(paths["head_ip"] if paths["head_ip"].exists() else paths["inference_ready"])
-    local_ip = resolve_routable_ip(interface=settings["bind_interface"])
+    url_list = read_lines(paths["server_urls"]) if paths["server_urls"].exists() else None
     overrides = build_online_overrides(
         head_ip,
         settings,
         output_dir=getattr(params, "output_dir", None) or None,
+        server_url_list=url_list,
+        trainer_master_addr=trainer_master,
     )
-    argv = build_role_argv(params, "consumer", overrides)
+    consumer_rank = specforge_rank if trainer_nnodes > 1 else None
+    argv = build_role_argv(params, "consumer", overrides, node_rank=consumer_rank)
     log_rank_0(f"SpecForge consumer command: {' '.join(argv)}")
 
     consumer_dir = Path(settings["consumer_state_dir"])
@@ -320,9 +398,18 @@ def _run_trainer_node(params: Any, settings: dict[str, Any]) -> None:
 
     result = 1
     consumer = None
+    done_path = consumer_done_paths(settings["run_root"], trainer_nnodes)[specforge_rank]
+    log_path = paths["consumer_log"]
+    if trainer_nnodes > 1:
+        log_path = paths["root"] / f"consumer-{specforge_rank}.log"
     try:
-        env = _specforge_child_env(mooncake_env(head_ip, settings, local_ip), settings["trainer_gpus"])
-        consumer = _popen(argv, env, paths["consumer_log"])
+        env = _specforge_child_env(
+            mooncake_env(head_ip, settings, local_ip),
+            settings["trainer_gpus"],
+            specforge_node_rank=specforge_rank,
+            specforge_nnodes=trainer_nnodes,
+        )
+        consumer = _popen(argv, env, log_path)
         while consumer.poll() is None:
             if paths["inference_done"].exists() and read_status(paths["inference_done"]) != "0":
                 raise RuntimeError(
@@ -336,4 +423,4 @@ def _run_trainer_node(params: Any, settings: dict[str, Any]) -> None:
         log_rank_0("Online trainer node finished")
     finally:
         _kill_group(consumer)
-        write_status(paths["consumer_done"], str(result))
+        write_status(done_path, str(result))

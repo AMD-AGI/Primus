@@ -167,7 +167,7 @@ class SpecForgePretrainTrainer(BaseTrainer):
                 os.chdir(self.workdir)
             from primus.backends.specforge.online_supervisor import run_online
 
-            log_rank_0("Starting SpecForge online 2-node supervisor (no exec).")
+            log_rank_0("Starting SpecForge online supervisor (no exec).")
             run_online(self.backend_args)
             return
 

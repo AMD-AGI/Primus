@@ -1,8 +1,14 @@
-# Qwen3.5-4B DFlash online, two Slurm nodes (capture+producer / consumer).
+# Qwen3.5-4B DFlash online (Mooncake + SGLang capture + SpecForge train).
 #
 # Checked-in SpecForge YAML keeps 127.0.0.1. Primus rewrites Mooncake/SGLang
-# endpoints to a routable HEAD_IP after allocate. Producer is CPU-only.
+# endpoints to a routable HEAD_IP after allocate.
 #
+# Shape is C capture nodes + T trainer nodes (defaults 1+1). Each capture node
+# runs SERVER_COUNT SGLang servers (GPU). Rank 0 also runs Mooncake and the
+# SpecForge producer, which is a CPU HTTP client — not the capture server.
+# Each trainer node runs trainer_nproc consumer ranks.
+#
+#   # Host-side: primus-cli from this checkout. Training runs in the container.
 #   export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
 #   export RUN_ROOT=/path/to/shared/run/$RUN_ID
 #   export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
@@ -13,8 +19,11 @@
 #     --volume /shared:/shared \
 #     -- train pretrain --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
 #
-# First smoke is 1 capture GPU + 1 trainer GPU. Raise SERVER_GPUS / TRAINER_GPUS
-# (and --gres) for 8+8.
+# --gres=gpu:N is Slurm's per-node GPU request (same on every allocated node).
+# Match it to the GPUs that node uses: SERVER_COUNT*SERVER_TP on capture nodes,
+# trainer_nproc on trainer nodes. 1 GPU/role is the smallest smoke; raise
+# SERVER_COUNT / TRAINER_GPUS / --gres together (e.g. 8+8), or raise -N with
+# CAPTURE_NNODES / TRAINER_NNODES.
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
@@ -36,6 +45,8 @@ modules:
         run_id: ${RUN_ID}
         run_root: ${RUN_ROOT}
         consumer_state_dir: ${CONSUMER_STATE_DIR}
+        capture_nnodes: ${CAPTURE_NNODES:1}
+        trainer_nnodes: ${TRAINER_NNODES:1}
         server_count: ${SERVER_COUNT:1}
         server_tp: ${SERVER_TP:1}
         server_gpus: ${SERVER_GPUS:0}
@@ -43,8 +54,6 @@ modules:
         trainer_nproc: ${NPROC_PER_NODE:1}
         mooncake_protocol: ${MOONCAKE_PROTOCOL:tcp}
         mooncake_lease_ttl_ms: ${MOONCAKE_LEASE_TTL_MS:500}
-        # Must match configs/qwen3.5-4b-dflash.json target_layer_ids.
-        capture_layer_ids: ${CAPTURE_LAYER_IDS:1 8 15 22 29}
         target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}
 
       specforge_overrides:
@@ -55,5 +64,3 @@ modules:
         # Liger kernels are not built in this SpecForge ROCm image.
         model.use_liger_kernel: false
         data.train_data_path: ${TRAIN_DATA_PATH}
-        deployment.trainer.nnodes: 1
-        deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}

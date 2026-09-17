@@ -4,15 +4,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Pure helpers for 2-node online SpecForge (Mooncake + SGLang + roles).
+"""Pure helpers for online SpecForge (Mooncake + SGLang + roles).
 
 Cluster IPs stay out of git YAML. After Slurm allocates, Primus resolves a
 routable HEAD_IP and renders Hydra overrides. Rank dispatch and sidecar
-lifetime live in ``online_supervisor``.
+lifetime live in ``online_supervisor``. Capture nodes are
+``[0, capture_nnodes)``; trainer nodes follow.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import socket
@@ -23,6 +25,7 @@ from typing import Any, Mapping, Optional, Sequence
 from primus.backends.specforge.argument_builder import (
     build_specforge_argv,
     flatten_overrides,
+    resolve_specforge_root,
 )
 
 DEFAULT_MOONCAKE_RPC_PORT = 35551
@@ -72,6 +75,48 @@ def parse_extra_args(value: Any) -> list[str]:
     return str(value).split()
 
 
+def _positive_int(value: Any, default: int) -> int:
+    if value in (None, "", "null"):
+        return default
+    return int(value)
+
+
+def layer_ids_from_draft_json(path: Path) -> tuple[int, ...]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return ()
+    ids = (data.get("dflash_config") or {}).get("target_layer_ids") if isinstance(data, dict) else None
+    if not ids:
+        return ()
+    return tuple(int(v) for v in ids)
+
+
+def resolve_capture_layer_ids(
+    raw: Any, params: Any, env: Optional[Mapping[str, str]] = None
+) -> tuple[int, ...]:
+    """Explicit YAML/env wins; otherwise read SpecForge draft ``target_layer_ids``."""
+
+    if raw not in (None, "", "null"):
+        return parse_layer_ids(raw)
+    root = resolve_specforge_root(params, env=env)
+    if root is None:
+        return DEFAULT_CAPTURE_LAYER_IDS
+    configs = root / "configs"
+    if not configs.is_dir():
+        return DEFAULT_CAPTURE_LAYER_IDS
+    preferred = configs / "qwen3.5-4b-dflash.json"
+    candidates = []
+    if preferred.is_file():
+        candidates.append(preferred)
+    candidates.extend(path for path in sorted(configs.glob("*.json")) if path != preferred)
+    for path in candidates:
+        ids = layer_ids_from_draft_json(path)
+        if ids:
+            return ids
+    return DEFAULT_CAPTURE_LAYER_IDS
+
+
 def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
     """Flatten ``specforge_online`` plus a few env aliases used at launch."""
 
@@ -91,6 +136,8 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         raw.get("trainer_nproc") or raw.get("nproc_per_node") or environ.get("NPROC_PER_NODE") or 1
     )
     trainer_gpus = parse_csv_devices(raw.get("trainer_gpus"), default="0")
+    capture_nnodes = _positive_int(raw.get("capture_nnodes") or environ.get("CAPTURE_NNODES"), 1)
+    trainer_nnodes = _positive_int(raw.get("trainer_nnodes") or environ.get("TRAINER_NNODES"), 1)
     protocol = str(raw.get("mooncake_protocol") or environ.get("MOONCAKE_PROTOCOL") or DEFAULT_PROTOCOL)
     lease = raw.get("mooncake_lease_ttl_ms") or environ.get("MOONCAKE_DEFAULT_KV_LEASE_TTL")
     lease_ttl = int(lease) if lease not in (None, "", "null") else DEFAULT_LEASE_TTL_MS
@@ -114,12 +161,16 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         "server_mem_fraction": str(raw.get("server_mem_fraction") or "0.85"),
         "trainer_nproc": trainer_nproc,
         "trainer_gpus": trainer_gpus,
+        "capture_nnodes": capture_nnodes,
+        "trainer_nnodes": trainer_nnodes,
         "mooncake_protocol": protocol,
         "mooncake_rpc_port": int(raw.get("mooncake_rpc_port") or DEFAULT_MOONCAKE_RPC_PORT),
         "mooncake_http_port": int(raw.get("mooncake_http_port") or DEFAULT_MOONCAKE_HTTP_PORT),
         "mooncake_metrics_port": int(raw.get("mooncake_metrics_port") or DEFAULT_MOONCAKE_METRICS_PORT),
         "mooncake_lease_ttl_ms": lease_ttl,
-        "capture_layer_ids": parse_layer_ids(raw.get("capture_layer_ids")),
+        "capture_layer_ids": resolve_capture_layer_ids(
+            raw.get("capture_layer_ids") or environ.get("CAPTURE_LAYER_IDS"), params, environ
+        ),
         "target_model_path": str(target),
         "sglang_extra_args": extra,
         "bind_interface": str(raw.get("bind_interface") or environ.get("PRIMUS_SPECFORGE_BIND_IFACE") or ""),
@@ -128,12 +179,34 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
     }
 
 
+def expected_nnodes(settings: Mapping[str, Any]) -> int:
+    return int(settings["capture_nnodes"]) + int(settings["trainer_nnodes"])
+
+
+def is_capture_rank(rank: int, settings: Mapping[str, Any]) -> bool:
+    return 0 <= rank < int(settings["capture_nnodes"])
+
+
+def trainer_node_rank(rank: int, settings: Mapping[str, Any]) -> int:
+    return rank - int(settings["capture_nnodes"])
+
+
 def validate_online_identity(settings: Mapping[str, Any], *, rank: int, nodes: int) -> list[str]:
     issues: list[str] = []
-    if nodes != 2:
-        issues.append(f"online mode expects NNODES=2 (one capture, one trainer); got {nodes}")
-    if rank not in (0, 1):
-        issues.append(f"online mode expects NODE_RANK 0 or 1; got {rank}")
+    capture_nnodes = int(settings.get("capture_nnodes") or 0)
+    trainer_nnodes = int(settings.get("trainer_nnodes") or 0)
+    if capture_nnodes < 1:
+        issues.append("capture_nnodes must be >= 1")
+    if trainer_nnodes < 1:
+        issues.append("trainer_nnodes must be >= 1")
+    want = expected_nnodes(settings)
+    if capture_nnodes >= 1 and trainer_nnodes >= 1 and nodes != want:
+        issues.append(
+            f"online mode expects NNODES=capture_nnodes+trainer_nnodes={want} "
+            f"(capture_nnodes={capture_nnodes}, trainer_nnodes={trainer_nnodes}); got {nodes}"
+        )
+    if rank < 0 or (want > 0 and rank >= want):
+        issues.append(f"online mode expects NODE_RANK in [0, {want}); got {rank}")
     if not settings.get("run_id"):
         issues.append("set RUN_ID / specforge_online.run_id (letters, digits, '.', '_' or '-')")
     elif not re.fullmatch(r"[A-Za-z0-9._-]+", str(settings["run_id"])):
@@ -146,12 +219,14 @@ def validate_online_identity(settings: Mapping[str, Any], *, rank: int, nodes: i
     got_server = len([p for p in str(settings["server_gpus"]).split(",") if p])
     if got_server != expected_server:
         issues.append(
-            f"server_gpus must contain server_count*server_tp={expected_server} devices; got {got_server}"
+            f"server_gpus must contain server_count*server_tp={expected_server} devices per capture node; "
+            f"got {got_server}"
         )
     got_trainer = len([p for p in str(settings["trainer_gpus"]).split(",") if p])
     if got_trainer != settings["trainer_nproc"]:
         issues.append(
-            f"trainer_gpus must contain trainer_nproc={settings['trainer_nproc']} devices; got {got_trainer}"
+            f"trainer_gpus must contain trainer_nproc={settings['trainer_nproc']} devices per trainer node; "
+            f"got {got_trainer}"
         )
     return issues
 
@@ -236,13 +311,36 @@ def server_urls(head_ip: str, settings: Mapping[str, Any]) -> list[str]:
     return [f"http://{head_ip}:{port0 + i}" for i in range(int(settings["server_count"]))]
 
 
+def sglang_url_path(run_root: str, capture_rank: int) -> Path:
+    return Path(run_root) / f"sglang-urls.{capture_rank}"
+
+
+def consumer_done_paths(run_root: str, trainer_nnodes: int) -> list[Path]:
+    root = Path(run_root)
+    if int(trainer_nnodes) <= 1:
+        return [root / "consumer.done"]
+    return [root / f"consumer.done.{i}" for i in range(int(trainer_nnodes))]
+
+
+def write_lines(path: Path, values: Sequence[str]) -> None:
+    write_status(path, "\n".join(str(v).strip() for v in values if str(v).strip()))
+
+
+def read_lines(path: Path) -> list[str]:
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def hydra_quoted_list(values: Sequence[str]) -> str:
     inner = ",".join(f'"{v}"' for v in values)
     return f"[{inner}]"
 
 
 def build_online_overrides(
-    head_ip: str, settings: Mapping[str, Any], output_dir: Optional[str] = None
+    head_ip: str,
+    settings: Mapping[str, Any],
+    output_dir: Optional[str] = None,
+    server_url_list: Optional[Sequence[str]] = None,
+    trainer_master_addr: Optional[str] = None,
 ) -> list[str]:
     """Hydra overrides that rewrite loopback YAML to the allocated HEAD_IP."""
 
@@ -250,29 +348,39 @@ def build_online_overrides(
     out = output_dir or f"{run_root}/output"
     http_port = settings["mooncake_http_port"]
     rpc_port = settings["mooncake_rpc_port"]
-    return [
+    urls = list(server_url_list) if server_url_list is not None else server_urls(head_ip, settings)
+    overrides = [
         f"model.target_model_path={settings['target_model_path']}",
         f"run_id={settings['run_id']}",
         f"output_dir={out}",
-        "deployment.trainer.nnodes=1",
+        f"deployment.trainer.nnodes={settings['trainer_nnodes']}",
         f"deployment.trainer.nproc_per_node={settings['trainer_nproc']}",
         f"deployment.disaggregated.control_dir={run_root}/control",
         f"deployment.disaggregated.consumer_state_dir={settings['consumer_state_dir']}",
         f"deployment.disaggregated.store_id={settings['run_id']}",
-        f"deployment.disaggregated.server_urls={hydra_quoted_list(server_urls(head_ip, settings))}",
+        f"deployment.disaggregated.server_urls={hydra_quoted_list(urls)}",
         f"deployment.disaggregated.mooncake_metadata_server=http://{head_ip}:{http_port}/metadata",
         f"deployment.disaggregated.mooncake_master_server_addr={head_ip}:{rpc_port}",
         f"deployment.disaggregated.mooncake_protocol={settings['mooncake_protocol']}",
         f"deployment.disaggregated.idle_timeout_s={settings['peer_timeout_s']}",
         f"deployment.disaggregated.peer_wait_timeout_s={settings['peer_timeout_s']}",
     ]
+    master = trainer_master_addr or settings.get("trainer_master_addr")
+    if int(settings["trainer_nnodes"]) > 1 and master:
+        overrides.append(f"deployment.trainer.master_addr={master}")
+    return overrides
 
 
-def build_role_argv(params: Any, role: str, extra_overrides: Sequence[str]) -> list[str]:
+def build_role_argv(
+    params: Any,
+    role: str,
+    extra_overrides: Sequence[str],
+    *,
+    node_rank: Optional[int] = None,
+) -> list[str]:
     """``specforge train --config ... --role {{producer,consumer}}`` plus Hydra overrides."""
 
-    argv = build_specforge_argv(params, extra_overrides=list(extra_overrides), role=role)
-    return argv
+    return build_specforge_argv(params, extra_overrides=list(extra_overrides), role=role, node_rank=node_rank)
 
 
 def mooncake_master_argv(settings: Mapping[str, Any]) -> list[str]:
@@ -332,6 +440,8 @@ def ready_paths(run_root: str) -> dict[str, Path]:
     return {
         "root": root,
         "head_ip": root / "head.ip",
+        "trainer_ip": root / "trainer.ip",
+        "server_urls": root / "server.urls",
         "inference_ready": root / "inference.ready",
         "inference_done": root / "inference.done",
         "consumer_done": root / "consumer.done",

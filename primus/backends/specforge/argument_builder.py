@@ -19,10 +19,10 @@ Params consumed here:
     specforge_overrides   Nested mapping flattened to dotted Hydra overrides
     specforge_entrypoint  argv[0] for the SpecForge CLI (default ``specforge``)
     specforge_root        SpecForge checkout used as cwd (see resolve_specforge_root)
-    specforge_mode        ``train`` (default), ``capture``, or ``online``
+    specforge_mode        ``train`` (default; ``offline`` is an alias), ``capture``, or ``online``
     specforge_role        ``producer`` / ``consumer`` (online only; omitted offline)
     specforge_capture     Nested mapping of ``prepare_hidden_states.py`` flags
-    specforge_online      Nested mapping for 2-node sidecars / GPU split / run root
+    specforge_online      Nested mapping for sidecars / node+GPU split / run root
     output_dir            Convenience alias for ``specforge_overrides.output_dir``
 """
 
@@ -64,7 +64,10 @@ CAPTURE_SKIP_KEYS = frozenset(
 
 def specforge_mode(params: Any) -> str:
     raw = getattr(params, "specforge_mode", None) or "train"
-    return str(raw).strip().lower()
+    mode = str(raw).strip().lower()
+    if mode in {"offline", "offline_train"}:
+        return "train"
+    return mode
 
 
 def specforge_role(params: Any) -> Optional[str]:
@@ -115,6 +118,7 @@ def build_specforge_argv(
     params: Any,
     extra_overrides: Optional[list[str]] = None,
     role: Optional[str] = None,
+    node_rank: Optional[int] = None,
 ) -> list[str]:
     """Build the ``specforge train`` argv for a Primus pre_trainer module."""
 
@@ -137,6 +141,8 @@ def build_specforge_argv(
     argv = [str(entrypoint), "train", "--config", str(specforge_config)]
     if chosen_role:
         argv.extend(["--role", str(chosen_role)])
+    if node_rank is not None:
+        argv.extend(["--node-rank", str(int(node_rank))])
     argv.extend(f"{key}={value}" for key, value in sorted(overrides.items()))
     if extra_overrides:
         argv.extend(extra_overrides)
