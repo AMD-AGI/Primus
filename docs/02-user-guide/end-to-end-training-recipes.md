@@ -273,7 +273,7 @@ Slurm mode — supply the image (and any environment variables) via a config fil
 
 MaxText parallelism is set with `ici_*` (intra-node) and `dcn_*` (inter-node) fields — see the [MaxText config table](pretraining.md#maxtext-jax-pretraining) and [MaxText parameters](../03-configuration-reference/maxtext-parameters.md).
 
-> **Quantized MaxText runs.** The `examples/maxtext/configs/` YAMLs are BF16 only, so there is no FP8 config to select by path. The image does support FP8 (gfx950) and NANOO FP8 (gfx942) — reach them through the `-q fp8` / `-q nanoo_fp8` flags of the standalone benchmark scripts, described in [JAX MaxText → Standalone benchmarking](jax-maxtext-training.md#standalone-benchmarking).
+> **Quantized MaxText runs.** Select the precision by config path: `examples/maxtext/configs/` ships `-fp8` variants for MI355X (gfx950) and `-nanoo_fp8` variants for MI300X/MI325X (gfx942) alongside the `-bf16` ones. See the [MaxText model and precision matrix](jax-maxtext-training.md#supported-features-and-models) for what exists per device.
 
 ---
 
