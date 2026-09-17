@@ -12,9 +12,9 @@
     "a markdown heading in .md but a comment in .sh/.yaml/.toml, where the text",
     "is as likely to be history as a live claim.",
     "",
-    "JSON rather than YAML because these tools run in the lint job, which installs",
-    "only pre-commit; the package stays stdlib-only like",
-    "tools/ci/check_version_consistency.py."
+    "JSON rather than YAML because the package stays stdlib-only, so every tool here",
+    "runs on a bare Python with nothing installed -- the same constraint",
+    "tools/ci/check_version_consistency.py keeps."
   ],
 
   "excluded_paths": [

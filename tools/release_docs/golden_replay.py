@@ -227,9 +227,9 @@ def check_sha_abbreviation():
     git scales the width to the local object count -- 7 characters in a fresh clone,
     8 in a long-lived one -- so slicing one makes the output depend on the machine
     that produced it. `submodule_bumps` shipped exactly that: `[:8]` of
-    `git diff --raw` returned 7 characters in CI, where it read as documentation
-    drift against the full SHAs probed from the image. Ask for `--abbrev=40` and
-    truncate here instead.
+    `git diff --raw` returned 7 characters on a clean checkout, where it read as
+    documentation drift against the full SHAs probed from the image. Ask for
+    `--abbrev=40` and truncate here instead.
 
     `--submodule=short` is banned for the older reason recorded in `submodule_bumps`:
     it emits no summary line, so the parse silently matched nothing and reported no

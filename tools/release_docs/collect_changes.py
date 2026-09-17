@@ -190,7 +190,7 @@ def submodule_bumps(from_commit, to_commit):
     """
     bumps = {}
     # --abbrev=40 because git otherwise scales the abbreviation to the object
-    # count, so the same range yields 7 characters in a fresh CI clone and 8 in a
+    # count, so the same range yields 7 characters in a fresh clone and 8 in a
     # long-lived one. Truncating below is only deterministic on a full SHA.
     raw = git("diff", "--raw", "--abbrev=40", f"{from_commit}..{to_commit}", "--", "third_party/")
     for line in raw.splitlines():
