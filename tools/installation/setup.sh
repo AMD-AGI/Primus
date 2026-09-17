@@ -132,6 +132,11 @@ TURBO_COMMIT="6d5ff979eb019fbbcd91790ac812024cca05a882"
 # with it aiter's whole CK/HIP JIT path ("CK and HIP ops are disabled. Triton ops
 # remain available."). 0.2.4 is the newest release that satisfies Turbo and still
 # keeps aiter whole.
+# Primus-Turbo's requirements.txt drags setuptools down to 69.5.1, which then
+# stays in the venv. The Dockerfile hits the same downgrade via FBGEMM's
+# requirements and re-pins immediately afterwards; do the same so the venv ends
+# where the image does. Observed on a full bare-metal run: 69.5.1 vs 80.10.2.
+SETUPTOOLS_VERSION="80.10.2"
 FLYDSL_VERSION="0.2.4"
 NVDISASM_VERSION="13.3.73"
 
@@ -262,7 +267,7 @@ stage_venv() {
         cmake==3.31.6 \
         ninja==1.11.1.3 \
         packaging==25.0 \
-        setuptools==80.10.2 \
+        "setuptools==${SETUPTOOLS_VERSION}" \
         patchelf
 }
 
@@ -728,6 +733,7 @@ stage_turbo() {
         && git checkout "$TURBO_COMMIT" \
         && git submodule update --init --recursive \
         && pipi -r requirements.txt \
+        && pipi "setuptools==${SETUPTOOLS_VERSION}" \
         && pipi scipy "flydsl==${FLYDSL_VERSION}" \
         && GPU_ARCHS="$PYTORCH_ROCM_ARCH" \
            ROCSHMEM_HOME="$rocshmem_home" \
