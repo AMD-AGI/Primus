@@ -35,6 +35,24 @@ esac
 export PRIMUS_BASE
 export VENV_DIR="${VENV_DIR:-$PRIMUS_BASE/venv}"
 export WORKSPACE_DIR="${WORKSPACE_DIR:-$PRIMUS_BASE/workspace}"  # kept checkouts (Primus, etc.)
+
+# Both of the above honour a pre-existing value, so sourcing this file in a shell
+# that already has the JAX stack's env (tools/installation-jax/env.sh) silently
+# keeps ITS paths and installs PyTorch into the JAX venv. Refuse rather than warn:
+# the run looks healthy the whole time and only the wreckage shows up later. Set
+# PRIMUS_ALLOW_FOREIGN_ENV=1 if this is deliberate.
+_primus_foreign_env=""
+_primus_check_inside_base() {  # _primus_check_inside_base <name> <value>
+    case "$2" in
+        "$PRIMUS_BASE"/*) ;;
+        *) _primus_foreign_env="$_primus_foreign_env  $1=$2
+" ;;
+    esac
+}
+_primus_check_inside_base VENV_DIR "$VENV_DIR"
+_primus_check_inside_base WORKSPACE_DIR "$WORKSPACE_DIR"
+# UV_PYTHON_INSTALL_DIR and PRIMUS_PIP_CONSTRAINTS are set further down and get
+# checked there; the verdict is delivered once, at the end of this file.
 # Transient build sources: put on fast LOCAL /tmp (NFS is slow for compile I/O;
 # these dirs are deleted after each build anyway).
 export SRC_DIR="${SRC_DIR:-/tmp/primus-build}"
@@ -53,6 +71,7 @@ export PRIMUS_PYTHON_VERSION="${PRIMUS_PYTHON_VERSION:-3.12}"
 # than uv's default in ~/.local/share, so the whole environment stays in one
 # place and off whatever quota the home directory has.
 export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$PRIMUS_BASE/python}"
+_primus_check_inside_base UV_PYTHON_INSTALL_DIR "$UV_PYTHON_INSTALL_DIR"
 
 # ---- Target GPU architecture (auto-detected) ----
 # PYTORCH_ROCM_ARCH controls which gfx targets we build and install device
@@ -136,6 +155,7 @@ fi
 # libLLVM.so, so an upstream triton (which bundles a second, statically linked
 # LLVM) segfaults on import and takes torch._dynamo/aiter/torchao with it.
 export PRIMUS_PIP_CONSTRAINTS="${PRIMUS_PIP_CONSTRAINTS:-$PRIMUS_BASE/pip-constraints.txt}"
+_primus_check_inside_base PRIMUS_PIP_CONSTRAINTS "$PRIMUS_PIP_CONSTRAINTS"
 
 # Workaround for HSA_STATUS_ERROR_OUT_OF_RESOURCES
 export HSA_ENABLE_SCRATCH_ASYNC_RECLAIM=0
@@ -223,3 +243,21 @@ fi
 # file at the start of every stage, so a falsy test on the last line would abort
 # the build.
 :
+
+# Verdict on inherited paths (collected above). Fatal, not a warning: a stale
+# value from another PRIMUS_BASE -- or from the JAX stack's env.sh -- silently
+# redirects installs into the wrong tree, and the run looks healthy while it
+# happens. Seen in practice with both VENV_DIR and PRIMUS_PIP_CONSTRAINTS.
+if [ -n "$_primus_foreign_env" ] && [ "${PRIMUS_ALLOW_FOREIGN_ENV:-0}" != "1" ]; then
+    echo "[env] ERROR: these point outside PRIMUS_BASE=$PRIMUS_BASE:" >&2
+    printf '%s' "$_primus_foreign_env" >&2
+    echo "[env]        They were inherited from the environment -- most often by sourcing" >&2
+    echo "[env]        another Primus env.sh (a different PRIMUS_BASE, or the JAX stack)." >&2
+    echo "[env]        Continuing would install into that other environment." >&2
+    echo "[env]        Fix: start a fresh shell, or unset the variables listed above." >&2
+    echo "[env]        Override with PRIMUS_ALLOW_FOREIGN_ENV=1 if this is deliberate." >&2
+    # This file is normally sourced; `exit` is the fallback when it is executed.
+    # shellcheck disable=SC2317
+    return 1 2>/dev/null || exit 1
+fi
+unset _primus_foreign_env
