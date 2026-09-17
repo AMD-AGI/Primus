@@ -28,6 +28,7 @@ def _load(name):
 
 
 bump_version = _load("bump_version")
+check_links = _load("check_links")
 collect_changes = _load("collect_changes")
 install_parity = _load("install_parity")
 preflight = _load("preflight")
@@ -92,6 +93,42 @@ def test_historical_statements_are_held():
     ]:
         name, action = _classify(line)
         assert action == "hold", (line, name)
+
+
+def test_heading_anchors_are_bumped_too():
+    # A heading anchor collapses 'v26.6' to 'v266', so the plain token misses it.
+    # The v26.7 run shipped one dead anchor and three that labelled a link v26.7
+    # while still pointing at the v26.6 section.
+    for line in [
+        "see [notes](../01-getting-started/release-notes.md#rocmprimusv266).",
+        "see [Important notes](jax-maxtext-training.md#important-notes-for-v266).",
+        "see [source](release-notes.md#primus-source-for-v266).",
+    ]:
+        name, action = _classify(line)
+        assert (name, action) == ("release-notes-anchor", "rewrite"), line
+
+
+def test_anchor_and_label_move_together():
+    # Caught by the golden replay: rewriting only the anchor left the label reading
+    # "Primus source for v26.5" while pointing at the v26.6 section -- the inverse of
+    # the bug the rule exists to fix.
+    _, rules, _ = bump_version.load_rules("v26.5", "v26.6")
+    line = "See [Primus source for v26.5](../01-getting-started/release-notes.md#primus-source-for-v265)."
+    rule = bump_version.classify(line, rules, ".md")
+    for pattern, replacement in rule["replace"]:
+        line = pattern.sub(replacement, line)
+    assert (
+        line
+        == "See [Primus source for v26.6](../01-getting-started/release-notes.md#primus-source-for-v266)."
+    )
+
+
+def test_a_bare_slug_lookalike_is_not_a_version_reference():
+    assert not _tokens_match_version("the v266 register file is 256KB", "v26.6")
+
+
+def test_an_older_release_anchor_is_left_alone():
+    assert not _tokens_match_version("kept for history: #primus-source-for-v264", "v26.6")
 
 
 def test_dated_changelog_entries_are_held():
@@ -340,6 +377,49 @@ def test_documented_divergences_are_not_reported_as_drift():
     assert names.isdisjoint({name for name, _, _, _ in result["drift"]})
 
 
+def test_parity_flags_a_changed_package_set():
+    # Regression from the v26.7 run: TE went from two distributions to three and the
+    # JAX plugin pair was renamed. Neither moved a shared variable, so variable
+    # comparison reported clean and the release shipped scripts installing the wrong
+    # set. Comparing pinned package *names* is what catches it.
+    dockerfile = "RUN pip install transformer_engine==${TE_VERSION} transformer_engine_rocm10==${TE_VERSION}"
+    script = 'TE_VERSION="2.17.0"\n$PIP install "transformer_engine_rocm_torch==${TE_VERSION}"'
+    gap = install_parity.missing_packages(dockerfile, script, allowed=set())
+    assert "transformer-engine" in gap and "transformer-engine-rocm10" in gap
+
+
+def test_parity_ignores_arch_templated_wheels():
+    # The script builds these names from PYTORCH_ROCM_ARCH at run time.
+    dockerfile = "RUN pip install amd-torch-device-gfx942==${PYTORCH_VERSION}"
+    assert install_parity.missing_packages(dockerfile, "", allowed=set()) == []
+
+
+def test_parity_allows_declared_dockerfile_only_packages():
+    dockerfile = "RUN pip install torch==2.12.0"
+    assert install_parity.missing_packages(dockerfile, "", allowed={"torch"}) == []
+
+
+def test_parity_flags_a_stale_index_url():
+    # v26.7 moved every wheel index to stable.repo.amd.com; index URLs live inside
+    # RUN lines rather than ARG declarations, so they used to be informational only.
+    dockerfile = "RUN pip install --index-url https://stable.repo.amd.com/rocm/core/whl-next/ --pre rocm"
+    script = {"ROCM_INDEX": "https://repo.amd.com/rocm/whl-multi-arch"}
+    stale = install_parity.stale_indexes(dockerfile, script)
+    assert [name for name, _, _ in stale] == ["ROCM_INDEX"]
+
+
+def test_parity_accepts_a_current_index_url_despite_a_trailing_slash():
+    dockerfile = "RUN pip install --index-url https://stable.repo.amd.com/rocm/core/whl-next/ --pre rocm"
+    script = {"ROCM_INDEX": "https://stable.repo.amd.com/rocm/core/whl-next"}
+    assert install_parity.stale_indexes(dockerfile, script) == []
+
+
+def test_parity_tolerates_a_line_continuation_in_an_index_url():
+    # Dockerfiles wrap RUN lines, so a URL can arrive with the backslash attached.
+    urls = install_parity.index_urls("    --index-url https://x.example/whl-next/\\\n")
+    assert urls == {"https://x.example/whl-next"}
+
+
 def test_rules_files_are_valid_json_with_the_expected_shape():
     rules = json.loads((_TOOLS / "install_parity_rules.json").read_text())
     assert {"aliases", "not_pins", "documented_divergences", "inline_pins"} <= set(rules)
@@ -370,6 +450,46 @@ def test_release_shape_detects_a_patch_release():
     families = {name: {"image_present": True} for name in ("primus", "jax")}
     assert preflight.release_shape(families, "v26.5.1")[0] == "patch"
     assert preflight.release_shape(families, "v26.7")[0] == "full"
+
+
+def test_maxtext_branch_is_resolved_against_its_own_repository():
+    # It is a branch of ROCm/maxtext, not of Primus. Checking it against origin made
+    # the tool hold .gitmodules back even though release/v26.7 existed upstream at
+    # exactly the commit the published image ships.
+    import inspect
+
+    source = inspect.getsource(preflight.resolve_family)
+    assert "remote_branch_exists" in source
+    assert "MAXTEXT_REPO" in source
+
+
+# --- check_links -----------------------------------------------------------
+
+
+def test_slug_maps_each_space_to_a_hyphen():
+    # '## Highlights - v26.7' with the dash stripped leaves two spaces, so GitHub
+    # produces a double hyphen. Collapsing whitespace instead silently invents an
+    # anchor that does not exist.
+    assert check_links.slugify("Highlights — v26.7") == "highlights--v267"
+    assert check_links.slugify("Highlights for v26.7") == "highlights-for-v267"
+
+
+def test_slug_drops_emoji_and_punctuation_like_github():
+    assert check_links.slugify("🆕 What's New") == "-whats-new"
+    assert check_links.slugify("`rocm/primus:v26.7`") == "rocmprimusv267"
+
+
+def test_anchors_ignore_headings_inside_fenced_blocks():
+    text = "# Real\n\n```bash\n## not-a-heading\n```\n\n## Also Real\n"
+    assert check_links.headings_and_anchors(text) == {"real", "also-real"}
+
+
+def test_link_checker_finds_a_dead_anchor_and_a_missing_file(tmp_path):
+    (tmp_path / "a.md").write_text("## Present\n\n[ok](#present) [bad](#absent) [gone](./nope.md)\n")
+    problems = check_links.check([tmp_path / "a.md"])
+    assert any("dead anchor -> #absent" in p for p in problems)
+    assert any("missing file -> ./nope.md" in p for p in problems)
+    assert not any("#present" in p for p in problems)
 
 
 def test_release_shape_detects_a_single_family_release():

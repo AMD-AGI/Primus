@@ -87,6 +87,11 @@ jobs:
         run: python tools/release_docs/release_notes.py check
       - name: Check bare-metal install parity with the release Dockerfiles
         run: python tools/release_docs/install_parity.py --check
+      # Renaming a heading or rotating a release section out of the notes orphans
+      # inbound anchors, which no version check can see. Baselined, so only new
+      # breakage fails.
+      - name: Check in-repo doc links and anchors
+        run: python tools/release_docs/check_links.py
       # The three submodules the drift check reads a schema from; `submodules:
       # recursive` on the checkout would also clone Megatron-Bridge & friends
       # for nothing. A fetch failure is deliberately left to the check step,

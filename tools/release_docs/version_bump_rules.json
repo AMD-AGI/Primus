@@ -69,6 +69,13 @@
       "why": "the CI dev image, not a published release reference: bumping it changes what CI builds against, and tools/ci/check_version_consistency.py couples the two declarations"
     },
     {
+      "name": "release-notes-anchor",
+      "action": "rewrite",
+      "match": "#[a-z0-9-]*{old_slug}\\b",
+      "replace": [["{old_slug}", "{new_slug}"], ["{old}", "{new}"]],
+      "why": "a heading anchor collapses 'v26.6' to 'v266', so the plain token never matches it. Both halves move together: these lines read 'Primus source for v26.6' and link to '#primus-source-for-v266', and updating only one leaves a label pointing at the wrong section. The first run shipped one dead anchor and three mislabelled links"
+    },
+    {
       "name": "docker-image-tag",
       "action": "rewrite",
       "match": "rocm/primus:{old}|rocm/jax-training:maxtext-{old}|maxtext-{old}",

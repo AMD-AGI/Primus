@@ -98,19 +98,29 @@ diff the resulting `.manifest/requirements.txt` against the image snapshot with
 ### Phase 5 — Release notes
 
 ```bash
-python tools/release_docs/release_notes.py render --version v26.7 --previous v26.6
+python tools/release_docs/release_notes.py render --version v26.7 --previous v26.6 > /tmp/v26.7-body.md
+# add your callouts and the "Primus source for vX.Y" subsection to that file, then:
+python tools/release_docs/release_notes.py rotate --version v26.7 --body /tmp/v26.7-body.md
 ```
 
-Splice the rendered blocks into [docs/01-getting-started/release-notes.md](../../docs/01-getting-started/release-notes.md),
-rotate the sections, and write the `## Highlights` section from
-`output/release-docs/v26.7/changelog.json`. See `reference.md` for the rotation
-rules, the Highlights buckets, and the editorial voice.
+`rotate` owns the structural edit: it inserts the section, demotes the previous
+`(current)`, keeps three detailed releases and evicts the rest. **Do not splice by
+hand.** The first run did, and put the previous release's image blocks under the new
+heading; a stray search-and-replace also reached into the historical sections, which
+are deliberately frozen. `rotate` is idempotent, so re-running after an interruption
+is safe.
+
+Then write `## Highlights for vX.Y` from `output/release-docs/v26.7/changelog.json`,
+add the evicted release's headline row under `## Earlier releases`, and:
 
 ```bash
 python tools/release_docs/release_notes.py check
+python tools/release_docs/check_links.py
 ```
 
-**This must pass.** It verifies every stated value against the image snapshots.
+**Both must pass.** `check` verifies every stated value against the image
+snapshots; `check_links.py` catches the anchors that rotation orphans and the
+heading renames that break inbound links.
 
 ### Phase 6 — Recipe notes and new models
 
@@ -168,9 +178,36 @@ so the second image can be added weeks later without a rewrite.
 - The PR targets `main`. Docs land there first and are cherry-picked to the
   release branch afterwards.
 
+## Lessons from the first run (v26.7)
+
+Read these before Phase 3; they are the things that actually went wrong.
+
+- **A release can change the wheel indexes and the package set, not just versions.**
+  v26.7 moved every index to `stable.repo.amd.com/rocm/*/whl-next`, grew
+  Transformer Engine from two distributions to three, and renamed the JAX plugin
+  pair. `install_parity.py` now reports `missing packages` and `stale indexes` for
+  exactly this; treat both as blocking. Read the Dockerfile's `RUN` lines, not only
+  its `ARG`s.
+- **Validate the indexes before installing anything.** Fetching each pinned
+  package's index page takes under a minute and catches a wrong index or version
+  before a multi-hour build. Do this first in Phase 4.
+- **Launch installs with a clean environment.** `VENV_DIR`, `WORKSPACE_DIR`,
+  `UV_PYTHON_INSTALL_DIR` and `PRIMUS_PIP_CONSTRAINTS` are inherited, and sourcing
+  one stack's `env.sh` then installing the other silently redirects the install. The
+  scripts now refuse, but launch with `env -u VENV_DIR -u WORKSPACE_DIR
+  -u UV_PYTHON_INSTALL_DIR -u PRIMUS_PIP_CONSTRAINTS` regardless.
+- **Put `PRIMUS_BASE` on non-`/home` storage.** `/home` is commonly near quota;
+  check `df` for a large local filesystem first.
+- **Grep the install log for warnings, do not tail it.** A guard warned 24 times
+  while an install went into the wrong venv, and tailing missed every one.
+- **Verify a highlight's placement against the commit body.** The area
+  classification is a file-path heuristic: a packaging fix that happened to touch a
+  diffusion file was classified `maxdiffusion` and would have landed under MaxText.
+
 ## Never
 
 - Never hand-write a version into a release-notes table. Extract it.
+- Never splice or rotate the release notes by hand — use `release_notes.py rotate`.
 - Never rewrite `.github/workflows/docker-release/**` — those record what
   published images were built from.
 - Never bump image tags under `examples/mlperf/`, `examples/models/`,

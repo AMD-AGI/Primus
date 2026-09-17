@@ -1,0 +1,7 @@
+{
+  "known_problems": [
+    "docs/04-technical-guides/diffusion-models/adding_new_models.md: dead anchor -> #best-practices",
+    "docs/04-technical-guides/diffusion-models/adding_new_models.md: dead anchor -> #example-adding-dit",
+    "docs/04-technical-guides/diffusion-models/adding_new_models.md: dead anchor -> #testing-your-model"
+  ]
+}

@@ -75,15 +75,24 @@ def version_tokens(version):
     bare = version.lstrip("v")
     escaped = re.escape(version)
     escaped_bare = re.escape(bare)
+    # The anchor form is scoped to a '#...' fragment on purpose: 'v266' on its own
+    # is too generic to treat as a release reference.
+    escaped_slug = re.escape(slug_token(version))
     return [
         rf"{escaped}{NOT_A_PATCH_SUFFIX}\b",
         rf"primus==\s*{escaped_bare}(\.\d+)?",
         rf"__version__\s*=\s*([\"']){escaped_bare}\1",
+        rf"#[a-z0-9-]*{escaped_slug}\b",
     ]
 
 
+def slug_token(version):
+    """'v26.6' -> 'v266', the form a version takes inside a heading anchor."""
+    return version.replace(".", "")
+
+
 def _substitute(template, old, new, escape):
-    """Fill {old}/{new}/{old_bare}/{new_bare} in a rule pattern or replacement.
+    """Fill {old}/{new}/{old_bare}/{new_bare}/{old_slug}/{new_slug} in a pattern.
 
     In patterns (escape=True) the old v-prefixed token carries the patch-release
     guard, so a rule matching `Dockerfile.primus-{old}` cannot also consume
@@ -93,7 +102,9 @@ def _substitute(template, old, new, escape):
     prepare = re.escape if escape else (lambda value: value)
     old_token = prepare(old) + (NOT_A_PATCH_SUFFIX if escape else "")
     return (
-        template.replace("{old_bare}", prepare(old.lstrip("v")))
+        template.replace("{old_slug}", prepare(slug_token(old)))
+        .replace("{new_slug}", prepare(slug_token(new)) if escape else slug_token(new))
+        .replace("{old_bare}", prepare(old.lstrip("v")))
         .replace("{new_bare}", prepare(new.lstrip("v")))
         .replace("{old}", old_token)
         .replace("{new}", prepare(new))

@@ -226,7 +226,7 @@ scripts:
   backward attention kernel emit Inf gradients on MI300X/MI325X, killing training at
   the first step. Primus's own tuning guide already prescribes fp32 atomics for these
   GPUs (the MI300X/MI325X block in
-  [docs/02-user-guide/training-recipes.md](../../docs/02-user-guide/training-recipes.md)),
+  [docs/02-user-guide/end-to-end-training-recipes.md](../../docs/02-user-guide/end-to-end-training-recipes.md)),
   so `env.sh` applies it from the detected architecture and leaves `0` for gfx950,
   which the Dockerfile value targets. `NVTE_CK_USES_BWD_V3` itself stays at the
   Dockerfile's `1` — it is worth roughly 15% throughput, and the atomic mode is what

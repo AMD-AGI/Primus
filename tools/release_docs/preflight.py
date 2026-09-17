@@ -77,6 +77,20 @@ def ref_exists(ref):
     return git("rev-parse", "--verify", "--quiet", ref).returncode == 0
 
 
+def remote_branch_exists(url, branch):
+    """Whether a branch exists in another repository.
+
+    The MaxText branch lives in ROCm/maxtext, not in Primus, so checking it against
+    `origin` conflates two repositories. During the first release run that made the
+    tool hold `.gitmodules` back even though `release/v26.7` did exist upstream --
+    at exactly the commit the published image ships.
+    """
+    result = git("ls-remote", "--heads", url, f"refs/heads/{branch}")
+    if result.returncode != 0:
+        return None  # unknown: no network or no access
+    return bool(result.stdout.strip())
+
+
 def git_remote_readable():
     result = git("ls-remote", "--heads", "origin", "refs/heads/main")
     return result.returncode == 0, (result.stderr.strip().splitlines() or [""])[0]
@@ -99,13 +113,21 @@ def resolve_family(version, family, previous):
         build_commit, origin = None, "unresolved: probe the image first"
 
     previous_snapshot = C.load_snapshot(previous, family) if previous else None
+
+    # The MaxText branch is a branch of ROCm/maxtext; resolve it there.
+    maxtext_branch = args_maxtext = args.get("MAXTEXT_BRANCH")
+    maxtext_repo = args.get("MAXTEXT_REPO", "https://github.com/ROCm/maxtext.git")
+    maxtext_exists = remote_branch_exists(maxtext_repo, args_maxtext) if args_maxtext else None
+
     return {
         "image": image,
         "image_present": image_present(image),
         "dockerfile": dockerfile.relative_to(C.ROOT).as_posix(),
         "dockerfile_present": dockerfile.exists(),
         "dockerfile_verified": (snapshot or {}).get("dockerfile", {}).get("status"),
-        "maxtext_branch": args.get("MAXTEXT_BRANCH"),
+        "maxtext_branch": maxtext_branch,
+        "maxtext_repo": maxtext_repo,
+        "maxtext_branch_exists_upstream": maxtext_exists,
         "snapshot_present": snapshot is not None,
         "build_commit": build_commit,
         "build_commit_short": build_commit[:8] if build_commit else None,
@@ -186,7 +208,9 @@ def report(state):
         print(f"    {mark(bool(info['build_commit']))} build commit         {info['build_commit_short']}")
         print(f"         via                  {info['build_commit_source']}")
         if info["maxtext_branch"]:
-            print(f"         MAXTEXT_BRANCH       {info['maxtext_branch']}")
+            state = info["maxtext_branch_exists_upstream"]
+            verdict = {True: "exists upstream", False: "NOT in ROCm/maxtext", None: "unverified"}[state]
+            print(f"    {mark(state is True)} MAXTEXT_BRANCH       {info['maxtext_branch']} ({verdict})")
     print(f"  {mark(state['tag']['exists'])} tag                  {state['tag']['ref']}")
     print(
         f"  {mark(state['release_branch']['exists_on_origin'])} release branch       {state['release_branch']['ref']} (on origin)"

@@ -23,19 +23,24 @@ than restating version tables. Order:
 
 ### Rotation
 
-On a full release:
+`release_notes.py rotate --version vX.Y --body <file>` performs this. It is not a
+manual edit:
 
-- Insert the new `## vX.Y (current)` section; drop `(current)` from the previous.
-- Keep exactly **three** detailed sections. The fourth-oldest loses its detailed
-  section and gains a row in `## Earlier releases`.
-- Move the outgoing release's `## Highlights` down into its own section as a
-  `### Highlights` subsection, so the page keeps its history.
-- Never edit existing `## Earlier releases` rows. Those releases predate the
-  in-image manifest in some cases and are frozen history.
+- Inserts the new `## vX.Y (current)` section and drops `(current)` from the previous.
+- Keeps exactly **three** detailed sections, evicting the rest.
+- Is idempotent: a second run replaces the existing section rather than adding one.
 
-`release_notes.py render` produces the tables; the rotation is a structural edit
-you perform. Re-running must update an existing `## vX.Y` section in place, not
-insert a second one.
+Two things it deliberately leaves to you, and reports as NEXT steps:
+
+- Adding the evicted release's headline row under `## Earlier releases`. Never edit
+  the rows already there; those releases are frozen history and some predate the
+  in-image manifest.
+- Re-pointing any link that referenced the removed section's anchors. Run
+  `check_links.py` — rotating v26.4 out orphaned `#primus-source-for-v264` on the
+  first run.
+
+The outgoing release's `## Highlights` moves down into its own section as a
+`### Highlights` subsection, so the page keeps its history.
 
 ### What `check` verifies, and what it allows
 
@@ -149,6 +154,8 @@ it if the changelog supports it; otherwise ask.
 ```bash
 python -m pytest tests/unit_tests/release_docs/       # parsers and rules
 python tools/release_docs/golden_replay.py            # replay v26.5 -> v26.6
+python tools/release_docs/check_links.py              # anchors and relative links
+python tools/release_docs/install_parity.py --check   # pins, package set, indexes
 ```
 
 The golden replay runs today's tooling against the tree as it was before the v26.6

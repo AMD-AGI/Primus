@@ -307,6 +307,78 @@ def render(args):
     return 0
 
 
+DETAILED_SECTIONS = 3
+
+
+def release_section_bounds(text):
+    """(version, start, end) for every '## vX.Y' release section, in page order."""
+    heads = [
+        (match.group(1), match.start())
+        for match in re.finditer(r"^## (v[\d.]+)(?: \(current\))?\s*$", text, re.MULTILINE)
+    ]
+    bounds = []
+    for index, (version, start) in enumerate(heads):
+        if index + 1 < len(heads):
+            end = heads[index + 1][1]
+        else:
+            following = re.search(r"^## (?!v[\d.])", text[start + 1 :], re.MULTILINE)
+            end = start + 1 + following.start() if following else len(text)
+        bounds.append((version, start, end))
+    return bounds
+
+
+def rotate(args):
+    """Insert the new release, demote the previous one, evict the fourth-oldest.
+
+    Doing this by hand is where the first real run went wrong: a hand-rolled splice
+    left the previous release's image blocks under the new heading, and a stray
+    search-and-replace reached into the historical sections. The edit is purely
+    structural, so it belongs here rather than in an editor.
+
+    Idempotent: re-running replaces an existing section for the same version
+    instead of inserting a second one, which is the failure `check` guards against.
+    """
+    version = args.version
+    text = C.RELEASE_NOTES.read_text()
+    body = Path(args.body).read_text().rstrip() if args.body else ""
+    if not body:
+        raise SystemExit("ERROR: --body is required (the rendered section, from `render`)")
+
+    sections = release_section_bounds(text)
+    if not sections:
+        raise SystemExit("ERROR: found no '## vX.Y' release sections to rotate")
+    known = [entry[0] for entry in sections]
+    block = f"## {version} (current)\n\n{body}\n\n---\n\n"
+
+    if version in known:
+        _, start, end = next(entry for entry in sections if entry[0] == version)
+        text = text[:start] + block + text[end:]
+        print(f"replaced the existing {version} section in place")
+    else:
+        text = text[: sections[0][1]] + block + text[sections[0][1] :]
+        print(f"inserted {version} as the current release")
+
+    for other in known:
+        if other != version:
+            text = text.replace(f"## {other} (current)\n", f"## {other}\n", 1)
+
+    evicted = []
+    sections = release_section_bounds(text)
+    while len(sections) > DETAILED_SECTIONS:
+        old_version, start, end = sections[-1]
+        text = text[:start] + text[end:]
+        evicted.append(old_version)
+        sections = release_section_bounds(text)
+
+    C.RELEASE_NOTES.write_text(text)
+    print(f"  detailed sections now: {', '.join(entry[0] for entry in release_section_bounds(text))}")
+    if evicted:
+        print(f"  evicted: {', '.join(evicted)}")
+        print("  NEXT: add a headline row for each evicted release under '## Earlier releases',")
+        print("        then run check_links.py -- removing a section breaks inbound anchors.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -321,6 +393,15 @@ def main():
     render_parser.add_argument("--version", required=True)
     render_parser.add_argument("--previous", help="previous version for the delta table")
     render_parser.set_defaults(func=render)
+
+    rotate_parser = sub.add_parser(
+        "rotate", help="splice a release section in and evict the oldest detailed one"
+    )
+    rotate_parser.add_argument("--version", required=True)
+    rotate_parser.add_argument(
+        "--body", required=True, help="file holding the section body (render output plus your prose)"
+    )
+    rotate_parser.set_defaults(func=rotate)
 
     args = parser.parse_args()
     return args.func(args)

@@ -52,6 +52,17 @@ ARG_ENV = re.compile(r"^(?:ARG|ENV)\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)", re.MULTIL
 SH_ASSIGN = re.compile(r"^([A-Z][A-Z0-9_]*)=(.+)$", re.MULTILINE)
 SH_DEFAULT = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*:-(.*)\}$")
 
+# A package pinned with '==', whether the version is a literal or a variable.
+# Both sides are scanned for names only: what matters is whether the script
+# installs the same set of things, not how it spells the version.
+PINNED_PKG = re.compile(
+    r"""["']?([A-Za-z][A-Za-z0-9._-]{2,})==(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|[0-9][^\s\\"']*)"""
+)
+# Per-arch wheels are built from PYTORCH_ROCM_ARCH at run time, so the script
+# never spells them literally.
+ARCH_TEMPLATED = re.compile(r"-gfx\d+[a-z]*$")
+INDEX_URL = re.compile(r"--(?:extra-)?index-url[= ]\s*(\S+)")
+
 
 def load_rules():
     return json.loads(RULES_FILE.read_text())
@@ -95,12 +106,66 @@ def mirrored_release(family):
     return match.group(1) if match else None
 
 
+def pinned_package_names(text):
+    """Canonical names of everything pinned with '==', arch wheels excluded."""
+    names = set()
+    for raw in PINNED_PKG.findall(text):
+        name = C.canon(raw)
+        if not ARCH_TEMPLATED.search(name):
+            names.add(name)
+    return names
+
+
+def index_urls(text):
+    """Every --index-url / --extra-index-url, normalised to compare cleanly.
+
+    Dockerfiles wrap RUN lines, so a URL can arrive with the line-continuation
+    backslash attached.
+    """
+    return {url.strip().strip("\"'").rstrip("\\").rstrip("/") for url in INDEX_URL.findall(text)}
+
+
+def missing_packages(dockerfile, script, allowed):
+    """Packages the Dockerfile pins that the script never mentions.
+
+    This is the check that catches a changed *package set* rather than a changed
+    version -- the thing variable-name comparison structurally cannot see. In
+    v26.7 Transformer Engine went from two distributions to three
+    (transformer_engine, transformer_engine_rocm10) and the JAX plugin pair was
+    renamed jax_rocm10_*; none of that moved a shared variable, so the release
+    shipped scripts that silently installed the wrong set.
+    """
+    gap = pinned_package_names(dockerfile) - pinned_package_names(script)
+    return sorted(name for name in gap if name not in allowed)
+
+
+def stale_indexes(dockerfile, script):
+    """Index URLs the script uses that the Dockerfile no longer mentions.
+
+    Index URLs live inside RUN lines rather than ARG declarations, so they used to
+    land in the informational 'unmapped' bucket. v26.7 moved every wheel index to
+    stable.repo.amd.com and parity still reported clean.
+    """
+    docker_urls = index_urls(dockerfile)
+    if not docker_urls:
+        return []
+    stale = []
+    for name, value in sorted(script.items()):
+        if not re.search(r"INDEX", name) or not value.startswith("http"):
+            continue
+        if value.rstrip("/") not in docker_urls:
+            stale.append((name, value, sorted(docker_urls)))
+    return stale
+
+
 def compare(family, release, rules):
     dockerfile = C.dockerfile_for(family, release)
     script = SETUP_SCRIPTS[family]
     if not dockerfile.exists():
         return None, f"{dockerfile.relative_to(C.ROOT)} does not exist"
 
+    dockerfile_text = dockerfile.read_text()
+    script_text = script.read_text()
     docker = dockerfile_pins(dockerfile)
     docker.update(inline_pins(dockerfile, rules["inline_pins"].get(family, {})))
     shell = shell_pins(script)
@@ -131,6 +196,7 @@ def compare(family, release, rules):
         else:
             drift.append(entry)
 
+    allowed = set(rules.get("dockerfile_only_packages", {}).get(family, {}))
     return {
         "family": family,
         "release": release,
@@ -140,6 +206,8 @@ def compare(family, release, rules):
         "drift": drift,
         "documented_divergences": divergent,
         "unmapped": unmapped,
+        "missing_packages": missing_packages(dockerfile_text, script_text, allowed),
+        "stale_indexes": stale_indexes(dockerfile_text, shell),
     }, None
 
 
@@ -170,8 +238,23 @@ def report(result):
     print(f"  {result['dockerfile']}")
     print(f"  matched                {len(result['matched'])}")
     print(f"  drift                  {len(result['drift'])}")
+    print(f"  missing packages       {len(result['missing_packages'])}")
+    print(f"  stale indexes          {len(result['stale_indexes'])}")
     print(f"  documented divergence  {len(result['documented_divergences'])}")
     print(f"  unmapped               {len(result['unmapped'])}")
+
+    if result["missing_packages"]:
+        print("\n  MISSING PACKAGES (the Dockerfile pins these, the script never mentions them):")
+        for name in result["missing_packages"]:
+            print(f"    {name}")
+        print("    A changed package set does not move any shared variable, so nothing else")
+        print("    catches it. Install them, or add them to dockerfile_only_packages with a reason.")
+    if result["stale_indexes"]:
+        print("\n  STALE INDEXES (the script points at an index this release no longer uses):")
+        for name, value, docker_urls in result["stale_indexes"]:
+            print(f"    {name} = {value}")
+            for url in docker_urls:
+                print(f"      dockerfile uses: {url}")
 
     if result["drift"]:
         print("\n  DRIFT (the script does not match the Dockerfile it mirrors):")
@@ -223,7 +306,7 @@ def main():
             print(f"ERROR: {error}")
             return 1
         report(result)
-        total_drift += len(result["drift"])
+        total_drift += len(result["drift"]) + len(result["missing_packages"]) + len(result["stale_indexes"])
 
         if args.baremetal_manifest and args.family == family:
             diff, error = compare_manifest(family, release, args.baremetal_manifest)

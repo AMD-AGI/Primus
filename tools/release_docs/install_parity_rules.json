@@ -46,6 +46,24 @@
     }
   },
 
+  "_dockerfile_only_packages_why": [
+    "Packages the release Dockerfile pins that the bare-metal script legitimately",
+    "never names. Anything not listed here is reported as drift, because a changed",
+    "package set moves no shared variable and so nothing else catches it: v26.7 grew",
+    "Transformer Engine from two distributions to three and renamed the JAX plugin",
+    "pair, and the first release run shipped scripts missing both.",
+    "Per-arch wheels (*-gfx942, *-gfx950) are excluded automatically -- the script",
+    "builds those names from PYTORCH_ROCM_ARCH at run time."
+  ],
+  "dockerfile_only_packages": {
+    "primus": {},
+    "jax": {
+      "torch": "installed by the MaxDiffusion stage, which the bare-metal script skips",
+      "torchvision": "same MaxDiffusion stage",
+      "transformers": "pinned by the jax_training stage; bare metal takes it from Primus' requirements-jax.txt"
+    }
+  },
+
   "inline_pins": {
     "_comment": "Pins the Dockerfiles express inside RUN lines rather than as ARG. Only four exist in Dockerfile.primus-v26.6 against 66 ARG/ENV declarations, so an explicit list beats a general parser.",
     "primus": {
