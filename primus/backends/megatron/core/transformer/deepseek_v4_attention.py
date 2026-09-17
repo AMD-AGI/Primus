@@ -1323,8 +1323,10 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
 
         Plan-3 P22.  Avoids materialising the eager
         ``[B, H, S, S] fp32`` logits tensor — at full V4-Flash dims
-        (``H=64, S=4096, hc_mult=4``) that's 16 GiB / microbatch, and
-        the dominant activation cost.
+        (``B=1, H=64, S=4096``) that's 4 GiB / microbatch, and the
+        dominant activation cost.  ``hc_mult`` does not enter here: the
+        mHC streams are collapsed to one hidden per token before this
+        runs (``DeepseekV4HybridLayer._hc_apply``).
 
         Inputs use V4's local-frame layout (Q has all H heads, KV is
         single-latent with 1 head).  We forward as Turbo's required
