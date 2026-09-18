@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from contextlib import contextmanager
 from enum import Enum
 from types import ModuleType, SimpleNamespace
 
@@ -87,6 +88,9 @@ def test_patch_bypasses_only_te_recipe_lookup(monkeypatch):
                 "fp8_group": "group",
             }
 
+        def create_cudagraphs(self):
+            return "graphs"
+
     cuda_graphs = ModuleType("megatron.core.transformer.cuda_graphs")
     cuda_graphs.TECudaGraphHelper = FakeTECudaGraphHelper
     monkeypatch.setitem(__import__("sys").modules, "megatron.core.transformer.cuda_graphs", cuda_graphs)
@@ -121,6 +125,9 @@ def test_patch_uses_registration_decision_at_runtime(monkeypatch):
             observed.append(self.config.fp4)
             return "sample_args", {"fp8_enabled": True, "fp8_recipe": "mxfp4"}
 
+        def create_cudagraphs(self):
+            return "graphs"
+
     cuda_graphs = ModuleType("megatron.core.transformer.cuda_graphs")
     cuda_graphs.TECudaGraphHelper = FakeTECudaGraphHelper
     monkeypatch.setitem(__import__("sys").modules, "megatron.core.transformer.cuda_graphs", cuda_graphs)
@@ -132,3 +139,51 @@ def test_patch_uses_registration_decision_at_runtime(monkeypatch):
     assert observed == ["e2m1"]
     assert result == ("sample_args", {"fp8_enabled": False})
     assert config.fp4 == "e2m1"
+
+
+def test_patch_keeps_turbo_fp4_context_active_during_capture(monkeypatch):
+    context_events = []
+    capture_observed = []
+
+    fp4_utils = ModuleType("megatron.core.fp4_utils")
+    fp4_utils.get_fp4_recipe = lambda _config: "unused"
+    monkeypatch.setitem(__import__("sys").modules, "megatron.core.fp4_utils", fp4_utils)
+
+    primus_fp4_utils = ModuleType("primus.backends.megatron.core.fp4_utils")
+
+    @contextmanager
+    def get_fp4_context(config):
+        context_events.append(("enter", config.fp4))
+        try:
+            yield
+        finally:
+            context_events.append(("exit", config.fp4))
+
+    primus_fp4_utils.get_fp4_context = get_fp4_context
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "primus.backends.megatron.core.fp4_utils",
+        primus_fp4_utils,
+    )
+
+    class FakeTECudaGraphHelper:
+        def __init__(self, config):
+            self.config = config
+
+        def _get_cuda_graph_input_data(self):
+            return "sample_args", {"fp8_enabled": True, "fp8_recipe": "mxfp4"}
+
+        def create_cudagraphs(self):
+            capture_observed.append(list(context_events))
+            return "graphs"
+
+    cuda_graphs = ModuleType("megatron.core.transformer.cuda_graphs")
+    cuda_graphs.TECudaGraphHelper = FakeTECudaGraphHelper
+    monkeypatch.setitem(__import__("sys").modules, "megatron.core.transformer.cuda_graphs", cuda_graphs)
+
+    patch_mxfp4_attention_cudagraph(None)
+
+    config = SimpleNamespace(fp4="e2m1")
+    assert FakeTECudaGraphHelper(config).create_cudagraphs() == "graphs"
+    assert capture_observed == [[("enter", "e2m1")]]
+    assert context_events == [("enter", "e2m1"), ("exit", "e2m1")]

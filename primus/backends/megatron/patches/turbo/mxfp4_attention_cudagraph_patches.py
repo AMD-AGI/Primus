@@ -80,6 +80,7 @@ def patch_mxfp4_attention_cudagraph(ctx: PatchContext):
     from megatron.core.transformer.cuda_graphs import TECudaGraphHelper
 
     original_get_input_data = TECudaGraphHelper._get_cuda_graph_input_data
+    original_create_cudagraphs = TECudaGraphHelper.create_cudagraphs
 
     @wraps(original_get_input_data)
     def get_input_data_without_te_fp4(self):
@@ -107,7 +108,30 @@ def patch_mxfp4_attention_cudagraph(ctx: PatchContext):
         return sample_args, kwargs
 
     TECudaGraphHelper._get_cuda_graph_input_data = get_input_data_without_te_fp4
+
+    @wraps(original_create_cudagraphs)
+    def create_cudagraphs_with_turbo_fp4(self):
+        # make_graphed_callables(fp8_enabled=False) correctly prevents TE from
+        # interpreting MXFP4 as a TE-owned recipe, but its capture warmups then
+        # run without Megatron's outer per-layer FP4 context.  Turbo linears
+        # consult PrimusTurboLowPrecisionGlobalStateManager, not config.fp4,
+        # so that missing context silently sends attention QKV/O projections
+        # through their BF16 fallback during capture.  The fallback kernels are
+        # then permanently baked into the graphs.
+        #
+        # Recreate the same Primus FP4 context used by eager TransformerBlock
+        # execution around the whole TE capture.  TE may nest a disabled TE
+        # autocast internally, but it does not modify Turbo's separate FP4
+        # enable flag.  Expert computation remains outside the selected graph
+        # scopes and is unaffected.
+        from primus.backends.megatron.core.fp4_utils import get_fp4_context
+
+        with get_fp4_context(self.config):
+            return original_create_cudagraphs(self)
+
+    TECudaGraphHelper.create_cudagraphs = create_cudagraphs_with_turbo_fp4
     log_rank_0(
         "[Patch:megatron.turbo.mxfp4_attention_cudagraph] "
-        "Disabled TE FP4 metadata for non-expert Turbo CUDA graphs"
+        "Disabled TE FP4 metadata and preserved Turbo FP4 capture context "
+        "for non-expert CUDA graphs"
     )
