@@ -48,13 +48,14 @@ def test_guard_rejects_graph_that_includes_moe():
     assert cuda_config.fp4 == "e2m1"
 
 
-def test_runtime_guard_does_not_require_primus_only_flags():
+def test_runtime_config_cannot_reconstruct_registration_guard():
     config = _config()
+    del config.fp4_recipe
     del config.enable_primus_turbo
     del config.use_turbo_attention
     del config.use_turbo_gemm
 
-    assert _is_mxfp4_nonexpert_graph(config)
+    assert not _is_mxfp4_nonexpert_graph(config)
     assert not _is_turbo_mxfp4_nonexpert_graph(config)
 
 
@@ -76,6 +77,7 @@ def test_patch_hides_fp4_only_during_input_preparation(monkeypatch):
     patch_mxfp4_attention_cudagraph(None)
 
     config = _config()
+    del config.fp4_recipe
     del config.enable_primus_turbo
     del config.use_turbo_attention
     del config.use_turbo_gemm
@@ -85,7 +87,7 @@ def test_patch_hides_fp4_only_during_input_preparation(monkeypatch):
     assert config.fp4 == "e2m1"
 
 
-def test_patch_leaves_other_graph_scopes_unchanged(monkeypatch):
+def test_patch_uses_registration_decision_at_runtime(monkeypatch):
     observed = []
 
     class FakeTECudaGraphHelper:
@@ -101,7 +103,7 @@ def test_patch_leaves_other_graph_scopes_unchanged(monkeypatch):
 
     patch_mxfp4_attention_cudagraph(None)
 
-    config = _config(cuda_graph_scope=["attn", "moe"])
+    config = SimpleNamespace(fp4="e2m1")
     FakeTECudaGraphHelper(config)._get_cuda_graph_input_data()
-    assert observed == ["e2m1"]
+    assert observed == [None]
     assert config.fp4 == "e2m1"

@@ -83,12 +83,9 @@ def patch_mxfp4_attention_cudagraph(ctx: PatchContext):
 
     @wraps(original_get_input_data)
     def get_input_data_without_te_fp4(self):
-        # Primus-only Turbo flags are not propagated to TransformerConfig.
-        # The patch registration condition already established that this is a
-        # Turbo run; only recheck the graph fields available on self.config.
-        if not _is_mxfp4_nonexpert_graph(self.config):
-            return original_get_input_data(self)
-
+        # Primus-only Turbo flags and fp4_recipe are not all propagated to
+        # TransformerConfig. Patch registration already established the exact
+        # run configuration, so do not try to reconstruct that decision here.
         original_fp4 = self.config.fp4
         self.config.fp4 = None
         try:
