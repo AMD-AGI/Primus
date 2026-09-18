@@ -20,6 +20,7 @@ quantization kwargs after input preparation, before TE captures the graph.
 """
 
 from functools import wraps
+from importlib import import_module
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
@@ -86,7 +87,19 @@ def patch_mxfp4_attention_cudagraph(ctx: PatchContext):
         # runners. _CudaGraphRunner snapshots that flag and the Turbo dense
         # projections consult it during warmup/capture; clearing it here would
         # silently graph BF16 projections in an otherwise MXFP4 workload.
-        sample_args, kwargs = original_get_input_data(self)
+        # The helper imports get_fp4_recipe inside its nested kwargs builder.
+        # MXFP4 is owned by Primus-Turbo here, so suppress only that TE recipe
+        # lookup.  Keeping config.fp4 set is essential: sample argument setup
+        # constructs _CudaGraphRunner and snapshots the low-precision mode.
+        fp4_utils = import_module("megatron.core.fp4_utils")
+
+        original_get_fp4_recipe = fp4_utils.get_fp4_recipe
+        fp4_utils.get_fp4_recipe = lambda _config: None
+        try:
+            sample_args, kwargs = original_get_input_data(self)
+        finally:
+            fp4_utils.get_fp4_recipe = original_get_fp4_recipe
+
         kwargs["fp8_enabled"] = False
         kwargs.pop("fp8_recipe", None)
         kwargs.pop("fp8_weight_caching", None)

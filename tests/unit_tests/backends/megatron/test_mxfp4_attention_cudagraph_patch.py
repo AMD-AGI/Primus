@@ -59,8 +59,18 @@ def test_runtime_config_cannot_reconstruct_registration_guard():
     assert not _is_turbo_mxfp4_nonexpert_graph(config)
 
 
-def test_patch_hides_fp4_only_during_input_preparation(monkeypatch):
+def test_patch_bypasses_only_te_recipe_lookup(monkeypatch):
     observed = []
+    recipe_calls = []
+
+    fp4_utils = ModuleType("megatron.core.fp4_utils")
+
+    def reject_mxfp4(config):
+        recipe_calls.append(config.fp4)
+        raise ValueError("TE does not support MXFP4")
+
+    fp4_utils.get_fp4_recipe = reject_mxfp4
+    monkeypatch.setitem(__import__("sys").modules, "megatron.core.fp4_utils", fp4_utils)
 
     class FakeTECudaGraphHelper:
         def __init__(self, config):
@@ -68,9 +78,11 @@ def test_patch_hides_fp4_only_during_input_preparation(monkeypatch):
 
         def _get_cuda_graph_input_data(self):
             observed.append(self.config.fp4)
+            from megatron.core.fp4_utils import get_fp4_recipe
+
             return "sample_args", {
                 "fp8_enabled": bool(self.config.fp4),
-                "fp8_recipe": "mxfp4",
+                "fp8_recipe": get_fp4_recipe(self.config),
                 "fp8_weight_caching": True,
                 "fp8_group": "group",
             }
@@ -88,12 +100,18 @@ def test_patch_hides_fp4_only_during_input_preparation(monkeypatch):
     del config.use_turbo_gemm
     result = FakeTECudaGraphHelper(config)._get_cuda_graph_input_data()
     assert observed == ["e2m1"]
+    assert recipe_calls == []
     assert result == ("sample_args", {"fp8_enabled": False})
     assert config.fp4 == "e2m1"
+    assert fp4_utils.get_fp4_recipe is reject_mxfp4
 
 
 def test_patch_uses_registration_decision_at_runtime(monkeypatch):
     observed = []
+
+    fp4_utils = ModuleType("megatron.core.fp4_utils")
+    fp4_utils.get_fp4_recipe = lambda _config: "unused"
+    monkeypatch.setitem(__import__("sys").modules, "megatron.core.fp4_utils", fp4_utils)
 
     class FakeTECudaGraphHelper:
         def __init__(self, config):
