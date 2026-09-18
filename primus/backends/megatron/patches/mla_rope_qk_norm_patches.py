@@ -109,9 +109,7 @@ def _install_mla_rope_qk_norm_patch() -> None:
     # upstream base and prebuilt hybrid layers may be base instances, so patch the
     # class that actually defines the method (walk the MRO) rather than whatever
     # the attribute currently points at.
-    target = next(
-        c for c in MLASelfAttention.__mro__ if "get_query_key_value_tensors" in c.__dict__
-    )
+    target = next(c for c in MLASelfAttention.__mro__ if "get_query_key_value_tensors" in c.__dict__)
 
     if is_patched(target, _PATCH_KEY):
         log_rank_0(f"[Patch:{_PATCH_KEY}] already applied; skipping.")
@@ -130,9 +128,7 @@ def _enabled(ctx: PatchContext) -> bool:
     args = get_args(ctx)
     # Enable via the ``mla_rope_qk_norm`` config flag if present, or the
     # ``PRIMUS_MLA_ROPE_QK_NORM=1`` env var (works without a config-schema change).
-    if not getattr(args, "mla_rope_qk_norm", False) and os.environ.get(
-        "PRIMUS_MLA_ROPE_QK_NORM", "0"
-    ) != "1":
+    if not getattr(args, "mla_rope_qk_norm", False) and os.environ.get("PRIMUS_MLA_ROPE_QK_NORM", "0") != "1":
         return False
     # The fused RoPE kernel applies rotary internally; this source patch only
     # covers the explicit non-fused split path. Warn + no-op if fusion is on.

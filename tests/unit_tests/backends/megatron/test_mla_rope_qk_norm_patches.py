@@ -81,10 +81,10 @@ def _ctx(**args):
 @pytest.mark.parametrize(
     "env, flag, fusion, expected",
     [
-        ("1", False, False, True),   # env var enables
-        (None, True, False, True),   # config flag enables
+        ("1", False, False, True),  # env var enables
+        (None, True, False, True),  # config flag enables
         (None, False, False, False),  # off by default
-        ("1", False, True, False),   # fused RoPE -> skip (guarded)
+        ("1", False, True, False),  # fused RoPE -> skip (guarded)
     ],
 )
 def test_enabled_condition(env, flag, fusion, expected, monkeypatch):
