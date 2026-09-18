@@ -180,6 +180,26 @@ def install() -> bool:
         else:
             _log("patched TransformerLayer.forward (V1 in-layer ADD#1+norm fusion active)")
 
+    # ----- 4. Preserve V1 fusion in TE attention+router graphs -------------
+    # Megatron's TE capture calls _te_cuda_graph_capture directly, bypassing
+    # the forward replacement above. For partial MoE graphs, reproduce the
+    # same fused attention residual + pre-MLP RMSNorm and then enter the normal
+    # MoE router capture. The returned tensors intentionally keep Megatron's
+    # existing router replay contract: router/preprocess outputs followed by
+    # the post-attention residual. Cross-layer V2 remains eager because the
+    # expert section and final MLP residual add are outside this graph.
+    if not getattr(TransformerLayer, "_fused_residual_te_graph_patched", False):
+        _orig_te_capture = TransformerLayer._te_cuda_graph_capture
+
+        def _fused_te_capture(self, *args, **kwargs):
+            if not _can_fuse_te_attention_router(self):
+                return _orig_te_capture(self, *args, **kwargs)
+            return _do_fused_te_attention_router_capture(self, *args, **kwargs)
+
+        TransformerLayer._te_cuda_graph_capture = _fused_te_capture
+        TransformerLayer._fused_residual_te_graph_patched = True
+        _log("patched TransformerLayer._te_cuda_graph_capture (V1 attention+router fusion active)")
+
     _INSTALLED = True
     return True
 
@@ -286,6 +306,25 @@ def _can_fuse(layer: Any) -> bool:
     return True
 
 
+def _can_fuse_te_attention_router(layer: Any) -> bool:
+    """Return whether a TE partial MoE graph can use the fused V1 boundary."""
+    if not _can_fuse(layer) or not getattr(layer, "is_moe_layer", False):
+        return False
+    cfg = layer.config
+    if getattr(cfg, "cuda_graph_impl", None) != "transformer_engine":
+        return False
+    scope = getattr(cfg, "cuda_graph_scope", None) or ()
+    if isinstance(scope, str):
+        scope = (scope,)
+    scopes = {str(getattr(value, "value", value)).lower() for value in scope}
+    if not {"attn", "moe_router"}.issubset(scopes):
+        return False
+    # A carry can only be consumed by the eager V2 layer boundary. TE replay
+    # receives the already-combined output of the previous layer, so capturing
+    # a one-off pending carry would bake incorrect state into the graph.
+    return getattr(layer, "_v2_carry", None) is None
+
+
 def _v2_next_can_consume_carry(layer: Any) -> bool:
     """Return True when layer N can stash an unfused carry instead of
     running mlp_bda. Requires that the next consumer (next layer's
@@ -324,6 +363,60 @@ def _v2_next_can_consume_carry(layer: Any) -> bool:
 # ---------------------------------------------------------------------------
 # The fused forward
 # ---------------------------------------------------------------------------
+def _do_fused_te_attention_router_capture(layer: Any, hidden_states=None, *args, **kwargs):
+    """Capture fused attention+V1 norm while preserving MCore router outputs."""
+    from megatron.core.utils import deprecate_inference_params, nvtx_range_pop, nvtx_range_push
+
+    if hidden_states is None:
+        hidden_states = kwargs.pop("hidden_states")
+    else:
+        kwargs.pop("hidden_states", None)
+
+    inference_context = deprecate_inference_params(
+        kwargs.get("inference_context"), kwargs.get("inference_params")
+    )
+
+    nvtx_range_push(suffix="input_layernorm")
+    input_layernorm_output = layer.input_layernorm(hidden_states)
+    nvtx_range_pop(suffix="input_layernorm")
+    residual = hidden_states
+
+    nvtx_range_push(suffix="self_attention")
+    attention_output_with_bias = layer.self_attention(
+        input_layernorm_output,
+        attention_mask=kwargs.get("attention_mask"),
+        inference_context=inference_context,
+        rotary_pos_emb=kwargs.get("rotary_pos_emb"),
+        rotary_pos_cos=kwargs.get("rotary_pos_cos"),
+        rotary_pos_sin=kwargs.get("rotary_pos_sin"),
+        rotary_pos_cos_sin=kwargs.get("rotary_pos_cos_sin"),
+        attention_bias=kwargs.get("attention_bias"),
+        packed_seq_params=kwargs.get("packed_seq_params"),
+        sequence_len_offset=kwargs.get("sequence_len_offset"),
+    )
+    nvtx_range_pop(suffix="self_attention")
+
+    attn_out, attn_bias = attention_output_with_bias
+    if attn_bias is not None:
+        attn_out = attn_out + attn_bias.to(attn_out.dtype)
+
+    nvtx_range_push(suffix="fused_residual_pre_mlp_layernorm")
+    pre_mlp_layernorm_output, residual_post_attn = layer.pre_mlp_layernorm(
+        attn_out, residual=residual
+    )
+    nvtx_range_pop(suffix="fused_residual_pre_mlp_layernorm")
+
+    nvtx_range_push(suffix="mlp")
+    router_outputs = layer.mlp(
+        pre_mlp_layernorm_output, padding_mask=kwargs.get("padding_mask")
+    )
+    nvtx_range_pop(suffix="mlp")
+
+    # During TE partial capture MoELayer returns its router/preprocess tensors.
+    # Match TransformerLayer._forward_mlp's established graph-output contract.
+    return tuple(list(router_outputs) + [residual_post_attn])
+
+
 def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
     """Mirror of ``TransformerLayer.forward`` with V1 + V2 fusion paths.
 
