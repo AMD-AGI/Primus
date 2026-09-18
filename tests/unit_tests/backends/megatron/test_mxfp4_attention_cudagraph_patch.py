@@ -100,12 +100,12 @@ def test_static_attention_inputs_are_cached_per_layer_and_microbatch():
     _cache_static_replay_kwargs(helper, kwargs)
 
     assert layers[0]._primus_te_static_replay_kwargs == [
-        kwargs["sample_kwargs"][0],
-        kwargs["sample_kwargs"][2],
+        {"rotary_pos_emb": ropes[0]},
+        {"rotary_pos_emb": ropes[2]},
     ]
     assert layers[1]._primus_te_static_replay_kwargs == [
-        kwargs["sample_kwargs"][1],
-        kwargs["sample_kwargs"][3],
+        {"rotary_pos_emb": ropes[1]},
+        {"rotary_pos_emb": ropes[3]},
     ]
     assert _same_tensor_tree_signature(ropes[0], ropes[1])
     assert not _same_tensor_tree_signature(ropes[0], torch.zeros(3))
