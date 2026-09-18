@@ -37,15 +37,22 @@ def _scope_values(scope):
     return {str(_enum_value(value)).lower() for value in scope}
 
 
-def _is_turbo_mxfp4_attention_graph(config) -> bool:
-    """Return whether TE quantization metadata is irrelevant to this graph."""
-
+def _is_mxfp4_attention_graph(config) -> bool:
+    """Return whether this config describes an MXFP4 attention-only TE graph."""
     fp4_recipe = str(_enum_value(getattr(config, "fp4_recipe", ""))).lower()
     return (
         getattr(config, "cuda_graph_impl", "none") == "transformer_engine"
         and _scope_values(getattr(config, "cuda_graph_scope", None)) == {"attn"}
         and bool(getattr(config, "fp4", False))
         and fp4_recipe == "mxfp4"
+    )
+
+
+def _is_turbo_mxfp4_attention_graph(config) -> bool:
+    """Return whether TE quantization metadata is irrelevant to this graph."""
+
+    return (
+        _is_mxfp4_attention_graph(config)
         and bool(getattr(config, "enable_primus_turbo", False))
         and bool(getattr(config, "use_turbo_attention", False))
         and bool(getattr(config, "use_turbo_gemm", False))
@@ -70,7 +77,10 @@ def patch_mxfp4_attention_cudagraph(ctx: PatchContext):
 
     @wraps(original_get_input_data)
     def get_input_data_without_te_fp4(self):
-        if not _is_turbo_mxfp4_attention_graph(self.config):
+        # Primus-only Turbo flags are not propagated to TransformerConfig.
+        # The patch registration condition already established that this is a
+        # Turbo run; only recheck the graph fields available on self.config.
+        if not _is_mxfp4_attention_graph(self.config):
             return original_get_input_data(self)
 
         original_fp4 = self.config.fp4
