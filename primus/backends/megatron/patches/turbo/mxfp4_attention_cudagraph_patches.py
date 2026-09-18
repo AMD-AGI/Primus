@@ -79,8 +79,8 @@ def _cache_static_replay_kwargs(helper, make_graphed_callables_kwargs):
     tensor already has the capture tensor's data pointer. RoPE tensors are
     immutable for this fixed-sequence training workload, so replaying with the
     exact capture objects safely avoids one device copy per layer. Attention
-    masks are intentionally excluded: runtime ``None`` is materialized as a
-    zero mask, while the capture sample can contain a causal mask.
+    masks use a separate path below because runtime ``None`` is materialized as
+    a zero mask, while the capture sample can contain a causal mask.
     """
     sample_kwargs = make_graphed_callables_kwargs.get("sample_kwargs")
     if not sample_kwargs:
@@ -90,6 +90,7 @@ def _cache_static_replay_kwargs(helper, make_graphed_callables_kwargs):
     for layers in helper.callables_per_chunk:
         for layer_number, layer in enumerate(layers):
             per_graph_kwargs = []
+            per_graph_attention_masks = []
             for batch_number in range(helper.num_microbatches):
                 if helper.config.overlap_moe_expert_parallel_comm:
                     graph_idx = (
@@ -109,8 +110,40 @@ def _cache_static_replay_kwargs(helper, make_graphed_callables_kwargs):
                         if key in static_kwargs and static_kwargs[key] is not None
                     }
                 )
+                per_graph_attention_masks.append(static_kwargs.get("attention_mask"))
             layer._primus_te_static_replay_kwargs = per_graph_kwargs
+            layer._primus_te_static_attention_masks = per_graph_attention_masks
+            layer._primus_te_static_attention_masks_initialized = [False] * len(
+                per_graph_attention_masks
+            )
         num_layers_accumulated += len(layers)
+
+
+def _replace_none_attention_mask_with_static_zero(layer, kwargs):
+    """Reuse TE's mask input buffer after initializing runtime-None semantics.
+
+    MCore materializes a fresh zero mask whenever the runtime attention mask is
+    ``None`` because TE graph replay requires tensor inputs. TE's capture sample
+    mask is causal, so it cannot be reused as-is. Zero that captured input
+    buffer once, then pass the same pointer on every replay. A real runtime mask
+    is always left untouched.
+    """
+    static_masks = getattr(layer, "_primus_te_static_attention_masks", None)
+    initialized = getattr(layer, "_primus_te_static_attention_masks_initialized", None)
+    if not static_masks or initialized is None or kwargs.get("attention_mask") is not None:
+        return kwargs
+
+    graph_idx = getattr(layer, "current_microbatch", 0) % len(static_masks)
+    static_mask = static_masks[graph_idx]
+    if static_mask is None:
+        return kwargs
+    if not initialized[graph_idx]:
+        static_mask.zero_()
+        initialized[graph_idx] = True
+
+    replay_kwargs = kwargs.copy()
+    replay_kwargs["attention_mask"] = static_mask
+    return replay_kwargs
 
 
 def _is_mxfp4_nonexpert_graph(config) -> bool:
@@ -208,6 +241,7 @@ def patch_mxfp4_attention_cudagraph(ctx: PatchContext):
 
     @wraps(original_get_replay_args)
     def get_replay_args_with_static_attention_inputs(self, *args, **kwargs):
+        kwargs = _replace_none_attention_mask_with_static_zero(self, kwargs)
         cudagraph_args, cudagraph_kwargs = original_get_replay_args(self, *args, **kwargs)
         static_inputs = getattr(self, "_primus_te_static_replay_kwargs", None)
         if not static_inputs:
@@ -226,5 +260,6 @@ def patch_mxfp4_attention_cudagraph(ctx: PatchContext):
     log_rank_0(
         "[Patch:megatron.turbo.mxfp4_attention_cudagraph] "
         "Disabled TE FP4 metadata, preserved Turbo FP4 capture context, and "
-        "reused immutable RoPE inputs for non-expert CUDA graphs"
+        "reused immutable RoPE inputs and runtime-zero attention masks for "
+        "non-expert CUDA graphs"
     )
