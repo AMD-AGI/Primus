@@ -316,7 +316,13 @@ def _can_fuse_te_attention_router(layer: Any) -> bool:
     scope = getattr(cfg, "cuda_graph_scope", None) or ()
     if isinstance(scope, str):
         scope = (scope,)
-    scopes = {str(getattr(value, "value", value)).lower() for value in scope}
+    # MCore's CudaGraphScope is an integer-valued Enum (attn=2,
+    # moe_router=5). Prefer the Enum member name; string-valued test/config
+    # shims still fall back to their value.
+    scopes = {
+        str(getattr(value, "name", getattr(value, "value", value))).lower()
+        for value in scope
+    }
     if not {"attn", "moe_router"}.issubset(scopes):
         return False
     # A carry can only be consumed by the eager V2 layer boundary. TE replay

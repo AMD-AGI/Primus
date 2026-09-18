@@ -16,8 +16,9 @@ def test_te_attention_router_guard_is_narrow(monkeypatch):
     monkeypatch.setattr(fused, "_can_fuse", lambda _layer: True)
 
     class Scope(Enum):
-        attn = "attn"
-        moe_router = "moe_router"
+        # Match MCore's integer-valued CudaGraphScope.
+        attn = 2
+        moe_router = 5
 
     layer = SimpleNamespace(
         config=SimpleNamespace(
