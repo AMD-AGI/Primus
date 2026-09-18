@@ -75,7 +75,7 @@ RUN set -eux; \
 Then, from that same directory:
 
 ```bash
-BASE=rocm/jax-training:maxtext-v26.6
+BASE=rocm/jax-training:maxtext-v26.7
 BUNDLE=1.117.5-a-147
 
 docker build --network host \
