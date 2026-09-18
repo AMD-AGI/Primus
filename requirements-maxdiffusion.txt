@@ -7,11 +7,26 @@
 # examples/maxdiffusion/setup_maxdiffusion_env.sh, because they need
 # --find-links/--no-index which cannot be mixed with a PyPI resolve here.
 #
-# MUST stay on transformers 4.x: MaxDiffusion is a Flax codebase and imports
-# FlaxCLIPTextModel/FlaxT5EncoderModel at module load (src/maxdiffusion/max_utils.py).
-# transformers 5.0 removed every Flax and TensorFlow class, so any 5.x resolve
-# breaks `import maxdiffusion` outright. Upstream pins 4.48.1 for the same reason.
-transformers==4.57.3
+# transformers 4.57.3 and earlier carry CVE-2026-4372, CVE-2026-5241 and
+# CVE-2026-9856; 5.10.0 is the first release fixing all three.
+#
+# 4.x used to be mandatory here: transformers 5.0 removed every Flax and
+# TensorFlow class, and MaxDiffusion imported FlaxCLIPTextModel and
+# FlaxT5EncoderModel at module load, so any 5.x resolve broke `import
+# maxdiffusion` outright. MaxDiffusion now runs FLUX's text encoders as PyTorch
+# models under Torchax and guards its remaining Flax imports, which lifts that
+# constraint -- but only from a third_party/maxdiffusion pin that carries those
+# changes. Bump the submodule and this line together.
+transformers>=5.10.0
+# Runs FLUX's PyTorch CLIP-L and T5-XXL encoders under JAX. MaxDiffusion already
+# uses it for LTX2's Gemma3 and WAN's UMT5 encoders, but nothing here installed it
+# before, because those two paths are not exercised by the configs in this repo.
+# Pinned because it dispatches against private torch overloads: 0.0.13 imports
+# cleanly on torch 2.8.0, the version setup_maxdiffusion_env.sh installs, and on
+# 2.12.0, but fails on torch >= 2.14, which dropped the aten.prod Dimname overload
+# it names. It declares no unconditional dependencies, so it will not pull a second
+# torch or jax over the ROCm builds already present.
+torchax==0.0.13
 scikit-image
 imageio-ffmpeg
 loguru
