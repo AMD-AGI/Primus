@@ -9,8 +9,10 @@ from enum import Enum
 from types import ModuleType, SimpleNamespace
 
 from primus.backends.megatron.patches.turbo.mxfp4_attention_cudagraph_patches import (
+    _cache_static_replay_kwargs,
     _is_mxfp4_nonexpert_graph,
     _is_turbo_mxfp4_nonexpert_graph,
+    _same_tensor_tree_signature,
     patch_mxfp4_attention_cudagraph,
 )
 
@@ -27,6 +29,21 @@ def _config(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _install_fake_transformer_layer(monkeypatch):
+    class FakeTransformerLayer:
+        def _get_te_cuda_graph_replay_args(self, *args, **kwargs):
+            return args, kwargs.copy()
+
+    transformer_layer = ModuleType("megatron.core.transformer.transformer_layer")
+    transformer_layer.TransformerLayer = FakeTransformerLayer
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "megatron.core.transformer.transformer_layer",
+        transformer_layer,
+    )
+    return FakeTransformerLayer
 
 
 def test_guard_accepts_enum_attention_scope():
@@ -60,7 +77,42 @@ def test_runtime_config_cannot_reconstruct_registration_guard():
     assert not _is_turbo_mxfp4_nonexpert_graph(config)
 
 
+def test_static_attention_inputs_are_cached_per_layer_and_microbatch():
+    import torch
+
+    layers = [SimpleNamespace(), SimpleNamespace()]
+    masks = [torch.zeros(1, dtype=torch.bool) for _ in range(4)]
+    ropes = [torch.zeros(2) for _ in range(4)]
+    helper = SimpleNamespace(
+        callables_per_chunk=[layers],
+        config=SimpleNamespace(overlap_moe_expert_parallel_comm=False),
+        num_microbatches=2,
+    )
+    kwargs = {
+        "sample_kwargs": [
+            {"attention_mask": masks[0], "rotary_pos_emb": ropes[0]},
+            {"attention_mask": masks[1], "rotary_pos_emb": ropes[1]},
+            {"attention_mask": masks[2], "rotary_pos_emb": ropes[2]},
+            {"attention_mask": masks[3], "rotary_pos_emb": ropes[3]},
+        ]
+    }
+
+    _cache_static_replay_kwargs(helper, kwargs)
+
+    assert layers[0]._primus_te_static_replay_kwargs == [
+        kwargs["sample_kwargs"][0],
+        kwargs["sample_kwargs"][2],
+    ]
+    assert layers[1]._primus_te_static_replay_kwargs == [
+        kwargs["sample_kwargs"][1],
+        kwargs["sample_kwargs"][3],
+    ]
+    assert _same_tensor_tree_signature(ropes[0], ropes[1])
+    assert not _same_tensor_tree_signature(ropes[0], torch.zeros(3))
+
+
 def test_patch_bypasses_only_te_recipe_lookup(monkeypatch):
+    _install_fake_transformer_layer(monkeypatch)
     observed = []
     recipe_calls = []
 
@@ -111,6 +163,7 @@ def test_patch_bypasses_only_te_recipe_lookup(monkeypatch):
 
 
 def test_patch_uses_registration_decision_at_runtime(monkeypatch):
+    _install_fake_transformer_layer(monkeypatch)
     observed = []
 
     fp4_utils = ModuleType("megatron.core.fp4_utils")
@@ -142,6 +195,7 @@ def test_patch_uses_registration_decision_at_runtime(monkeypatch):
 
 
 def test_patch_keeps_turbo_fp4_context_active_during_capture(monkeypatch):
+    _install_fake_transformer_layer(monkeypatch)
     context_events = []
     capture_observed = []
 
