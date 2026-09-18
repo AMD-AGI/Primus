@@ -270,12 +270,11 @@ def _run_capture_node(params: Any, settings: dict[str, Any]) -> None:
     if shutil.which("mooncake_master") is None:
         raise RuntimeError("[Primus:specforge] mooncake_master is not on PATH")
 
-    try:
-        paths["root"].mkdir(parents=True, exist_ok=False)
-    except FileExistsError as exc:
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    if paths["head_ip"].exists():
         raise RuntimeError(
-            f"[Primus:specforge] run root already exists; choose a fresh RUN_ID: {paths['root']}"
-        ) from exc
+            f"[Primus:specforge] run root already has head.ip; choose a fresh RUN_ID: {paths['root']}"
+        )
 
     write_status(paths["head_ip"], head_ip)
     result = 1
@@ -294,11 +293,20 @@ def _run_capture_node(params: Any, settings: dict[str, Any]) -> None:
         servers = _start_local_sglang(settings, head_ip, head_ip, paths["root"], capture_rank=0)
         url_list = _collect_server_urls(settings, settings["start_timeout_s"])
         write_lines(paths["server_urls"], url_list)
+        trainer_master = None
+        if int(settings["trainer_nnodes"]) > 1:
+            _wait_for_file(
+                paths["trainer_ip"],
+                settings["peer_timeout_s"],
+                description="trainer master_addr",
+            )
+            trainer_master = read_status(paths["trainer_ip"])
         overrides = build_online_overrides(
             head_ip,
             settings,
             output_dir=getattr(params, "output_dir", None) or None,
             server_url_list=url_list,
+            trainer_master_addr=trainer_master,
         )
         argv = build_role_argv(params, "producer", overrides)
         log_rank_0(f"SpecForge producer command: {' '.join(argv)}")

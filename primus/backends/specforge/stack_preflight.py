@@ -106,6 +106,17 @@ def apply_rocm_stack_env(env: Optional[MutableMapping[str, str]] = None) -> list
     return applied
 
 
+# Trainer ranks may start before capture (faster image load) and write trainer.ip
+# into a still-fresh RUN_ROOT. That is in-progress, not a stale reuse.
+_ONLINE_RUN_ROOT_PRE_CAPTURE = frozenset({"trainer.ip"})
+
+
+def _stale_run_root_names(root: Path) -> list[str]:
+    if not root.exists():
+        return []
+    return sorted(p.name for p in root.iterdir() if p.name not in _ONLINE_RUN_ROOT_PRE_CAPTURE)
+
+
 def _hidden_states_path(params: Any, env: Mapping[str, str]) -> Optional[str]:
     overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
     hidden = overrides.get("data.hidden_states_path") or overrides.get("hidden_states_path")
@@ -132,9 +143,10 @@ def _online_preflight_issues(params: Any, env: Mapping[str, str]) -> list[str]:
     if train_data and not Path(str(train_data)).is_file():
         issues.append(f"online train data is not a file: {train_data}")
     run_root = settings.get("run_root")
-    if run_root:
+    if run_root and node_rank(env) == 0:
         root = Path(str(run_root))
-        if root.exists() and any(root.iterdir()):
+        leftover = _stale_run_root_names(root)
+        if leftover:
             issues.append(f"run_root is not empty; choose a fresh RUN_ID: {root}")
     consumer = settings.get("consumer_state_dir")
     if consumer:

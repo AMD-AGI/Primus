@@ -743,6 +743,8 @@ class TestOnlineLaunch:
         assert "deployment.trainer.master_addr=10.9.9.1" in overrides
         argv = build_role_argv(params, "consumer", overrides, node_rank=1)
         assert argv[argv.index("--node-rank") + 1] == "1"
+        producer = build_role_argv(params, "producer", overrides)
+        assert "deployment.trainer.master_addr=10.9.9.1" in producer
 
     def test_resolves_head_ip_override_not_hostname(self):
         ip = resolve_routable_ip(env={"HEAD_IP": "10.9.8.7", "MASTER_ADDR": "gpu-node-001.example"})
@@ -878,6 +880,29 @@ class TestOnlineLaunch:
             env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0", "NNODES": "2", "NODE_RANK": "0"},
         )
         assert any("run_root is not empty" in item for item in issues)
+
+    def test_online_preflight_allows_trainer_ip_only(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        run_root = tmp_path / "run"
+        run_root.mkdir()
+        (run_root / "trainer.ip").write_text("10.1.2.3\n")
+        issues = collect_issues(
+            params,
+            env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0", "NNODES": "2", "NODE_RANK": "0"},
+        )
+        assert not any("run_root is not empty" in item for item in issues)
+
+    def test_online_preflight_non_rank0_allows_in_progress_run_root(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        run_root = tmp_path / "run"
+        run_root.mkdir()
+        (run_root / "head.ip").write_text("10.1.2.3\n")
+        (run_root / "mooncake.log").write_text("x")
+        issues = collect_issues(
+            params,
+            env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0", "NNODES": "3", "NODE_RANK": "1"},
+        )
+        assert not any("run_root is not empty" in item for item in issues)
 
     def test_online_preflight_requires_two_nodes(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path)
