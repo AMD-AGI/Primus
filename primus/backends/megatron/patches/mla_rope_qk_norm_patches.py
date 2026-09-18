@@ -104,13 +104,22 @@ _NEW = """\
 def _install_mla_rope_qk_norm_patch() -> None:
     from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 
-    if is_patched(MLASelfAttention, _PATCH_KEY):
+    # Another patch may rebind this module attribute to a subclass
+    # (PrimusMLASelfAttention). ``get_query_key_value_tensors`` is defined on the
+    # upstream base and prebuilt hybrid layers may be base instances, so patch the
+    # class that actually defines the method (walk the MRO) rather than whatever
+    # the attribute currently points at.
+    target = next(
+        c for c in MLASelfAttention.__mro__ if "get_query_key_value_tensors" in c.__dict__
+    )
+
+    if is_patched(target, _PATCH_KEY):
         log_rank_0(f"[Patch:{_PATCH_KEY}] already applied; skipping.")
         return
 
-    patch_method_source(MLASelfAttention, "get_query_key_value_tensors", _ORI, _NEW)
+    patch_method_source(target, "get_query_key_value_tensors", _ORI, _NEW)
 
-    mark_patched(MLASelfAttention, _PATCH_KEY)
+    mark_patched(target, _PATCH_KEY)
     log_rank_0(
         f"[Patch:{_PATCH_KEY}] Applied parameter-free RMSNorm to the MLA "
         "decoupled-RoPE q/k components (non-fused path)."
