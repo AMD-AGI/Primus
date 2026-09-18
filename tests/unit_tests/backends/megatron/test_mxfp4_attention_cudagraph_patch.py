@@ -8,8 +8,8 @@ from enum import Enum
 from types import ModuleType, SimpleNamespace
 
 from primus.backends.megatron.patches.turbo.mxfp4_attention_cudagraph_patches import (
-    _is_mxfp4_attention_graph,
-    _is_turbo_mxfp4_attention_graph,
+    _is_mxfp4_nonexpert_graph,
+    _is_turbo_mxfp4_nonexpert_graph,
     patch_mxfp4_attention_cudagraph,
 )
 
@@ -32,11 +32,19 @@ def test_guard_accepts_enum_attention_scope():
     class Scope(Enum):
         attn = "attn"
 
-    assert _is_turbo_mxfp4_attention_graph(_config(cuda_graph_scope=[Scope.attn]))
+    assert _is_turbo_mxfp4_nonexpert_graph(_config(cuda_graph_scope=[Scope.attn]))
+
+
+def test_guard_accepts_attention_and_router_scopes():
+    assert _is_turbo_mxfp4_nonexpert_graph(
+        _config(cuda_graph_scope=["attn", "moe_router", "moe_preprocess"])
+    )
 
 
 def test_guard_rejects_graph_that_includes_moe():
-    assert not _is_turbo_mxfp4_attention_graph(cuda_config := _config(cuda_graph_scope=["attn", "moe"]))
+    assert not _is_turbo_mxfp4_nonexpert_graph(
+        cuda_config := _config(cuda_graph_scope=["attn", "moe"])
+    )
     assert cuda_config.fp4 == "e2m1"
 
 
@@ -46,8 +54,8 @@ def test_runtime_guard_does_not_require_primus_only_flags():
     del config.use_turbo_attention
     del config.use_turbo_gemm
 
-    assert _is_mxfp4_attention_graph(config)
-    assert not _is_turbo_mxfp4_attention_graph(config)
+    assert _is_mxfp4_nonexpert_graph(config)
+    assert not _is_turbo_mxfp4_nonexpert_graph(config)
 
 
 def test_patch_hides_fp4_only_during_input_preparation(monkeypatch):
