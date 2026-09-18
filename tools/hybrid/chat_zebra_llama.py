@@ -4,7 +4,8 @@ Simple interactive chat for Zebra hybrid (HF-converted checkpoint).
 
 Loads:
   - model code from: tools/hybrid/modeling_zebra_llama.py
-  - weights from:    output/zebra_mamba_1B_hybrid_hf_iter_0150000
+  - weights from:    output/zebra_mamba_1B_hybrid_hf_iter_0020000
+                     (the default output of tools/hybrid/convert_zebra_llama_to_hf.sh)
 
 Notes:
   - KV cache is disabled in the model implementation, so generation is slower.
@@ -44,7 +45,7 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="output/zebra_mamba_1B_hybrid_hf_iter_0200000",
+        default="output/zebra_mamba_1B_hybrid_hf_iter_0020000",
         help="Path to converted HF checkpoint directory",
     )
     parser.add_argument(

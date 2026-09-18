@@ -8,6 +8,7 @@ Megatron-LM format to a HuggingFace-compatible format for evaluation.
 
 import argparse
 import json
+import shutil
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -150,6 +151,19 @@ def save_hf_checkpoint(hf_state, config, output_dir):
     model_path = output_dir / "pytorch_model.bin"
     print(f"\nSaving model weights to: {model_path}")
     torch.save(hf_state, model_path)
+
+    # Ship the modeling code alongside the weights and point config.json at it,
+    # so the output directory loads with trust_remote_code=True on its own.
+    modeling_src = Path(__file__).resolve().parent / "modeling_zebra_llama.py"
+    print(f"Copying modeling code to: {output_dir / modeling_src.name}")
+    shutil.copy2(modeling_src, output_dir / modeling_src.name)
+
+    config = dict(config)
+    config["auto_map"] = {
+        "AutoConfig": "modeling_zebra_llama.ZebraLlamaConfig",
+        "AutoModel": "modeling_zebra_llama.ZebraLlamaModel",
+        "AutoModelForCausalLM": "modeling_zebra_llama.ZebraLlamaForCausalLM",
+    }
 
     # Save config
     config_path = output_dir / "config.json"

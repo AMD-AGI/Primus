@@ -5,13 +5,11 @@ from pathlib import Path
 
 import lm_eval
 from lm_eval.utils import make_table
-from transformers import AutoConfig, AutoModelForCausalLM
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from modeling_zebra_llama import ZebraLlamaConfig, ZebraLlamaForCausalLM
-
-AutoConfig.register("zebra_llama", ZebraLlamaConfig)
-AutoModelForCausalLM.register(ZebraLlamaConfig, ZebraLlamaForCausalLM)
+# Importing the module is what registers zebra_llama with the Auto* classes;
+# registering again here would raise a duplicate-registration ValueError.
+import modeling_zebra_llama  # noqa: F401
 
 
 def main():

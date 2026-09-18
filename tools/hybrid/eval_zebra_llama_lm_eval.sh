@@ -21,10 +21,9 @@ cd "${SCRIPT_DIR}/../.." || exit 1
 
 python -c "
 import sys; sys.path.insert(0, 'tools/hybrid')
-from modeling_zebra_llama import ZebraLlamaForCausalLM, ZebraLlamaConfig
-from transformers import AutoConfig, AutoModelForCausalLM
-AutoConfig.register('zebra_llama', ZebraLlamaConfig)
-AutoModelForCausalLM.register(ZebraLlamaConfig, ZebraLlamaForCausalLM)
+# The import registers zebra_llama with the Auto* classes; registering again
+# would raise a duplicate-registration ValueError.
+import modeling_zebra_llama  # noqa: F401
 import lm_eval
 results = lm_eval.simple_evaluate(
     model='hf',

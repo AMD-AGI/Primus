@@ -1,6 +1,6 @@
 # Zebra: Hybrid Recurrent-Attention Models on AMD GPUs
 
-Zebra is the Primus family of **hybrid** models that combine recurrent layers (Mamba, KDA, or GDN) with **Multi-Latent Attention (MLA)** and SwiGLU MLP. Hybrid pretrain configs follow Megatron naming (`zebra_llama_{arch}_{size}_BF16-pretrain.yaml`, like `llama3.2_1B-BF16-pretrain.yaml`). Pure recurrent models use architecture presets at `kda_*` / `gdn_*` / `mamba_*` with `{model}_BF16-pretrain.yaml` experiment configs. See the guides below.
+Zebra is the Primus family of **hybrid** models that combine recurrent layers (Mamba, KDA, or GDN) with **Multi-Latent Attention (MLA)** and SwiGLU MLP. Hybrid pretrain configs follow Megatron naming (`zebra_llama_{mixer}_{size}_BF16-pretrain.yaml`, where `{mixer}` is `mamba`, `kda`, or `gdn`). Pure recurrent models use architecture presets at `kda_*` / `gdn_*` / `mamba_*` with `{model}_BF16-pretrain.yaml` experiment configs. See the guides below.
 
 This guide covers the complete workflow: environment setup, data preparation, pretraining, checkpoint conversion, and evaluation.
 
@@ -63,7 +63,7 @@ The `hybrid_attention_ratio` parameter controls what fraction of recurrent+atten
 
 ### Hybrid models (Zebra)
 
-Recurrent mixer (Mamba2, KDA, or GDN) interleaved with MLA attention and SwiGLU MLP. Experiment configs use `zebra_llama_{arch}_{size}_BF16-pretrain.yaml`; architecture presets use `zebra_{arch}_{size}_hybrid.yaml`.
+Recurrent mixer (Mamba2, KDA, or GDN) interleaved with MLA attention and SwiGLU MLP. Experiment configs use `zebra_llama_{mixer}_{size}_BF16-pretrain.yaml`; architecture presets use `zebra_{mixer}_{size}_hybrid.yaml`. In both, `{mixer}` is `mamba`, `kda`, or `gdn`.
 
 | Architecture preset | Pretrain config (MI300X) | Also on MI325X / MI355X |
 |---------------------|--------------------------|-------------------------|
@@ -444,7 +444,8 @@ The converter will:
 - Auto-detect architecture parameters (`hybrid_attention_ratio`, `kda_num_heads`, `q_lora_rank`, etc.)
 - Remap parameter names from Megatron conventions to HuggingFace conventions
 - Save `pytorch_model.bin`, `config.json`, and a model card `README.md` in the output directory
-- Copy `modeling_zebra_llama.py` into the output directory for `trust_remote_code` loading
+- Copy `modeling_zebra_llama.py` into the output directory and record it under `auto_map` in `config.json`, so the directory loads with `trust_remote_code=True`
+- Not write tokenizer files: pass the base model to `--tokenizer` when evaluating or chatting
 
 ### 4.2 Verify Conversion
 
@@ -488,24 +489,29 @@ python tools/hybrid/eval_gdn_lm_eval.py \
 KDA and hybrid models use the custom `ZebraLlamaForCausalLM` architecture, which requires a dedicated lm-eval wrapper:
 
 ```bash
-python3 tools/hybrid/lm_harness_eval.py --model zebra_llama \
-    --model_args pretrained=output/kda_1B_hf,dtype=bfloat16 \
+python3 tools/hybrid/lm_harness_eval.py \
+    --model_path output/kda_1B_hf \
+    --tokenizer meta-llama/Llama-3.2-1B \
+    --dtype bfloat16 \
     --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \
     --batch_size auto
 ```
 
+Pass `--tokenizer` explicitly: the converter writes weights, config and modeling code, but no tokenizer files.
+
 ### 5.3 Using the Eval Shell Script (KDA/Hybrid)
+
+This wrapper takes `key=value` assignments rather than GNU-style flags, and any it is not given fall back to the defaults shown by the script:
 
 ```bash
 bash tools/hybrid/eval_zebra_llama_lm_eval.sh \
-    --checkpoint output/kda_1B_hf \
-    --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \
-    --batch-size auto \
-    --dtype bfloat16 \
-    --output eval_results/kda_1B
+    model_path=output/kda_1B_hf \
+    tokenizer=meta-llama/Llama-3.2-1B \
+    batch_size=auto \
+    output_path=eval_results/kda_1B
 ```
 
-> **Important**: The eval script internally invokes `python3 tools/hybrid/lm_harness_eval.py --model zebra_llama` (not `lm_eval --model hf`). This ensures the custom model architecture is properly registered.
+> **Important**: both entry points import `tools/hybrid/modeling_zebra_llama.py`, and that import is what registers the custom architecture with the `Auto*` classes before `lm_eval.simple_evaluate(model="hf", ...)` runs. Do not re-register it yourself; a second registration raises a duplicate-registration `ValueError`. The task list in this wrapper is fixed in `TASKS` inside the script.
 
 ### 5.4 Available Benchmarks
 
@@ -588,10 +594,10 @@ Ensure the `modeling_zebra_llama.py` model definition matches the architecture o
 
 ### `ValueError: model type 'zebra_llama' not recognized`
 
-This occurs when using `lm_eval --model hf` directly instead of the custom wrapper. Always use:
+This occurs when using `lm_eval --model hf` directly instead of the custom wrapper, so the `zebra_llama` architecture was never registered. Always use:
 
 ```bash
-python3 tools/hybrid/lm_harness_eval.py --model zebra_llama ...
+python3 tools/hybrid/lm_harness_eval.py --model_path <converted-checkpoint> --tokenizer <base-model> ...
 ```
 
 Or the eval shell script, which handles this automatically.

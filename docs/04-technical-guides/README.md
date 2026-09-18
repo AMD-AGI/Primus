@@ -17,7 +17,7 @@ Deep technical topics for advanced users.
 - [Fault tolerance and elastic training](fault-tolerance-and-elastic-training.md): graceful exit, auto-resume, in-process restart, torchft
 - [Determinism and reproducibility](determinism-and-reproducibility.md): deterministic mode, seeds, trade-offs
 - [Diffusion models](diffusion-models/README.md): Flux diffusion architecture, data pipeline, and FP8 / MXFP4 training
-- [Hybrid models](hybrid-models/README.md): Zebra hybrid hybrid recurrent-attention (Mamba/KDA/GDN + MLA) models, FLA-parity recipes, and checkpoint conversion
+- [Hybrid models](hybrid-models/README.md): Zebra-Llama hybrid recurrent-attention (Mamba/KDA/GDN + MLA) models, FLA-parity recipes, and checkpoint conversion
 - [Native SFT and LoRA](native-sft-lora.md): Megatron-native SFT/LoRA runbook (BF16 / FP8 / FP4), no Megatron-Bridge dependency
 - [Native SFT LoRA on MI455X](LoRA_Native_Trainer_MI455_README.md): 1-GPU gfx1250 recipes (Llama-3.2-1B + 70B/72B/235B proxies)
 
