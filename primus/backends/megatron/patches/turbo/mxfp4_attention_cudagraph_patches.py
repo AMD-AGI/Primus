@@ -14,10 +14,9 @@ MXFP4 before graph capture starts.
 
 For the narrowly gated Primus-Turbo configuration below, attention and router
 work are implemented outside TE while the uncaptured expert path owns MXFP4.
-Hide the global FP4 flag only while Megatron constructs the graph input
-metadata. This lets TE graph any combination of attention, router, and MoE
-preprocessing with quantization autocast disabled, then restores MXFP4 before
-capture and training continue.
+Keep the global FP4 flag intact while Megatron builds sample inputs and graph
+runners so Primus-Turbo MXFP4 linears remain enabled. Strip only the TE
+quantization kwargs after input preparation, before TE captures the graph.
 """
 
 from functools import wraps
@@ -83,15 +82,16 @@ def patch_mxfp4_attention_cudagraph(ctx: PatchContext):
 
     @wraps(original_get_input_data)
     def get_input_data_without_te_fp4(self):
-        # Primus-only Turbo flags and fp4_recipe are not all propagated to
-        # TransformerConfig. Patch registration already established the exact
-        # run configuration, so do not try to reconstruct that decision here.
-        original_fp4 = self.config.fp4
-        self.config.fp4 = None
-        try:
-            return original_get_input_data(self)
-        finally:
-            self.config.fp4 = original_fp4
+        # Do not clear config.fp4 while _get_sample_arguments creates graph
+        # runners. _CudaGraphRunner snapshots that flag and the Turbo dense
+        # projections consult it during warmup/capture; clearing it here would
+        # silently graph BF16 projections in an otherwise MXFP4 workload.
+        sample_args, kwargs = original_get_input_data(self)
+        kwargs["fp8_enabled"] = False
+        kwargs.pop("fp8_recipe", None)
+        kwargs.pop("fp8_weight_caching", None)
+        kwargs.pop("fp8_group", None)
+        return sample_args, kwargs
 
     TECudaGraphHelper._get_cuda_graph_input_data = get_input_data_without_te_fp4
     log_rank_0(

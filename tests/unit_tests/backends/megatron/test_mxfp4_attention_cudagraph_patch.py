@@ -68,7 +68,12 @@ def test_patch_hides_fp4_only_during_input_preparation(monkeypatch):
 
         def _get_cuda_graph_input_data(self):
             observed.append(self.config.fp4)
-            return "sample_args", {"fp8_enabled": bool(self.config.fp4)}
+            return "sample_args", {
+                "fp8_enabled": bool(self.config.fp4),
+                "fp8_recipe": "mxfp4",
+                "fp8_weight_caching": True,
+                "fp8_group": "group",
+            }
 
     cuda_graphs = ModuleType("megatron.core.transformer.cuda_graphs")
     cuda_graphs.TECudaGraphHelper = FakeTECudaGraphHelper
@@ -82,7 +87,7 @@ def test_patch_hides_fp4_only_during_input_preparation(monkeypatch):
     del config.use_turbo_attention
     del config.use_turbo_gemm
     result = FakeTECudaGraphHelper(config)._get_cuda_graph_input_data()
-    assert observed == [None]
+    assert observed == ["e2m1"]
     assert result == ("sample_args", {"fp8_enabled": False})
     assert config.fp4 == "e2m1"
 
@@ -96,6 +101,7 @@ def test_patch_uses_registration_decision_at_runtime(monkeypatch):
 
         def _get_cuda_graph_input_data(self):
             observed.append(self.config.fp4)
+            return "sample_args", {"fp8_enabled": True, "fp8_recipe": "mxfp4"}
 
     cuda_graphs = ModuleType("megatron.core.transformer.cuda_graphs")
     cuda_graphs.TECudaGraphHelper = FakeTECudaGraphHelper
@@ -104,6 +110,7 @@ def test_patch_uses_registration_decision_at_runtime(monkeypatch):
     patch_mxfp4_attention_cudagraph(None)
 
     config = SimpleNamespace(fp4="e2m1")
-    FakeTECudaGraphHelper(config)._get_cuda_graph_input_data()
-    assert observed == [None]
+    result = FakeTECudaGraphHelper(config)._get_cuda_graph_input_data()
+    assert observed == ["e2m1"]
+    assert result == ("sample_args", {"fp8_enabled": False})
     assert config.fp4 == "e2m1"
