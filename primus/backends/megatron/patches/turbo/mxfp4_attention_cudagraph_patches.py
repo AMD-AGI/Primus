@@ -40,7 +40,6 @@ def _scope_values(scope):
 
 _NON_EXPERT_GRAPH_SCOPES = {"attn", "moe_router", "moe_preprocess"}
 _STATIC_REPLAY_KWARGS = (
-    "attention_mask",
     "rotary_pos_emb",
     "rotary_pos_cos",
     "rotary_pos_sin",
@@ -77,10 +76,11 @@ def _cache_static_replay_kwargs(helper, make_graphed_callables_kwargs):
     """Attach TE's immutable capture inputs to each layer and graph index.
 
     TE copies every user input into its static graph buffers unless the replay
-    tensor already has the capture tensor's data pointer. Attention masks and
-    RoPE tensors are immutable for this fixed-sequence training workload, so
-    replaying with the exact capture objects safely avoids two device copies per
-    layer while retaining the normal copy for the changing hidden states.
+    tensor already has the capture tensor's data pointer. RoPE tensors are
+    immutable for this fixed-sequence training workload, so replaying with the
+    exact capture objects safely avoids one device copy per layer. Attention
+    masks are intentionally excluded: runtime ``None`` is materialized as a
+    zero mask, while the capture sample can contain a causal mask.
     """
     sample_kwargs = make_graphed_callables_kwargs.get("sample_kwargs")
     if not sample_kwargs:
@@ -226,5 +226,5 @@ def patch_mxfp4_attention_cudagraph(ctx: PatchContext):
     log_rank_0(
         "[Patch:megatron.turbo.mxfp4_attention_cudagraph] "
         "Disabled TE FP4 metadata, preserved Turbo FP4 capture context, and "
-        "reused immutable attention inputs for non-expert CUDA graphs"
+        "reused immutable RoPE inputs for non-expert CUDA graphs"
     )
