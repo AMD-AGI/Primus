@@ -12,6 +12,7 @@ from primus.backends.megatron.patches.turbo.mxfp4_attention_cudagraph_patches im
     _cache_static_replay_kwargs,
     _is_mxfp4_nonexpert_graph,
     _is_turbo_mxfp4_nonexpert_graph,
+    _replace_none_attention_mask_with_static_zero,
     _same_tensor_tree_signature,
     patch_mxfp4_attention_cudagraph,
 )
@@ -81,7 +82,7 @@ def test_static_attention_inputs_are_cached_per_layer_and_microbatch():
     import torch
 
     layers = [SimpleNamespace(), SimpleNamespace()]
-    masks = [torch.zeros(1, dtype=torch.bool) for _ in range(4)]
+    masks = [torch.ones(1, dtype=torch.bool) for _ in range(4)]
     ropes = [torch.zeros(2) for _ in range(4)]
     helper = SimpleNamespace(
         callables_per_chunk=[layers],
@@ -107,6 +108,22 @@ def test_static_attention_inputs_are_cached_per_layer_and_microbatch():
         {"rotary_pos_emb": ropes[1]},
         {"rotary_pos_emb": ropes[3]},
     ]
+    assert layers[0]._primus_te_static_attention_masks == [masks[0], masks[2]]
+    assert layers[0]._primus_te_static_attention_masks_initialized == [False, False]
+
+    layers[0].current_microbatch = 1
+    replay_kwargs = _replace_none_attention_mask_with_static_zero(
+        layers[0], {"attention_mask": None}
+    )
+    assert replay_kwargs["attention_mask"] is masks[2]
+    assert not masks[2].any()
+    assert layers[0]._primus_te_static_attention_masks_initialized == [False, True]
+
+    actual_mask = torch.ones(1, dtype=torch.bool)
+    replay_kwargs = _replace_none_attention_mask_with_static_zero(
+        layers[0], {"attention_mask": actual_mask}
+    )
+    assert replay_kwargs["attention_mask"] is actual_mask
     assert _same_tensor_tree_signature(ropes[0], ropes[1])
     assert not _same_tensor_tree_signature(ropes[0], torch.zeros(3))
 
