@@ -38,6 +38,133 @@ except ImportError:
     _grad_accum_fusion_available = False
 
 
+_GPTOSS_BF16_LM_HEAD_TOKENS = 32768
+_GPTOSS_BF16_LM_HEAD_HIDDEN = 2880
+_GPTOSS_BF16_LM_HEAD_VOCAB = 128256
+
+
+def _is_gptoss_bf16_lm_head_tensor(tensor, rows, columns):
+    """Match only the trace-locked GPT-OSS BF16 LM-head matrices."""
+    return (
+        tensor.is_cuda
+        and tensor.dtype == torch.bfloat16
+        and tensor.is_contiguous()
+        and tensor.shape[-1] == columns
+        and tensor.numel() == rows * columns
+    )
+
+
+def _is_gptoss_bf16_lm_head_forward(total_input, weight):
+    return (
+        _is_gptoss_bf16_lm_head_tensor(
+            total_input, _GPTOSS_BF16_LM_HEAD_TOKENS, _GPTOSS_BF16_LM_HEAD_HIDDEN
+        )
+        and weight.shape == (_GPTOSS_BF16_LM_HEAD_VOCAB, _GPTOSS_BF16_LM_HEAD_HIDDEN)
+        and weight.is_cuda
+        and weight.dtype == torch.bfloat16
+        and weight.is_contiguous()
+    )
+
+
+def _is_gptoss_bf16_lm_head_wgrad(total_input, grad_output, main_grad):
+    return _is_gptoss_bf16_lm_head_forward(
+        total_input, main_grad
+    ) and _is_gptoss_bf16_lm_head_tensor(
+        grad_output, _GPTOSS_BF16_LM_HEAD_TOKENS, _GPTOSS_BF16_LM_HEAD_VOCAB
+    )
+
+
+def _turbo_gemm(a, trans_a, b, trans_b, out_dtype, trans_c=False):
+    """Call Turbo lazily so non-Turbo Primus users keep their current import path."""
+    from primus_turbo.pytorch.core.backend import BackendType
+    from primus_turbo.pytorch.kernels.gemm.gemm_impl import gemm_impl
+
+    return gemm_impl(
+        a,
+        trans_a,
+        b,
+        trans_b,
+        out_dtype,
+        trans_c,
+        default_backend=BackendType.HIPBLASLT.value,
+    )
+
+
+def _turbo_gemm_accum(a, trans_a, b, trans_b, out_dtype, trans_c, out):
+    """Call Turbo's beta=1 dense GEMM entry point."""
+    from primus_turbo.pytorch.core.backend import BackendType
+    from primus_turbo.pytorch.kernels.gemm.gemm_impl import gemm_accum_impl
+
+    gemm_accum_impl(
+        a,
+        trans_a,
+        b,
+        trans_b,
+        out_dtype,
+        trans_c,
+        out=out,
+        default_backend=BackendType.HIPBLASLT.value,
+    )
+
+
+def _gptoss_bf16_lm_head_forward(total_input, weight):
+    if not _is_gptoss_bf16_lm_head_forward(total_input, weight):
+        return None
+    input_2d = total_input.reshape(-1, total_input.shape[-1])
+    output_2d = _turbo_gemm(input_2d, False, weight, True, total_input.dtype)
+    return output_2d.reshape(*total_input.shape[:-1], weight.shape[0])
+
+
+def _gptoss_bf16_lm_head_dgrad(grad_output, weight, input_shape):
+    if not (
+        _is_gptoss_bf16_lm_head_tensor(
+            grad_output, _GPTOSS_BF16_LM_HEAD_TOKENS, _GPTOSS_BF16_LM_HEAD_VOCAB
+        )
+        and weight.shape == (_GPTOSS_BF16_LM_HEAD_VOCAB, _GPTOSS_BF16_LM_HEAD_HIDDEN)
+        and weight.is_cuda
+        and weight.dtype == torch.bfloat16
+        and weight.is_contiguous()
+    ):
+        return None
+    grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])
+    grad_input_2d = _turbo_gemm(grad_output_2d, False, weight, False, grad_output.dtype)
+    return grad_input_2d.reshape(input_shape)
+
+
+def _gptoss_bf16_lm_head_wgrad_accum(total_input, grad_output, main_grad):
+    if not _is_gptoss_bf16_lm_head_wgrad(total_input, grad_output, main_grad):
+        return False
+    input_2d = total_input.reshape(-1, total_input.shape[-1])
+    grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])
+    # Match Megatron's fused extension exactly: main_grad += grad_output.T @ input.
+    # Turbo canonicalizes this transposed-output contract to the tuned TN kernel.
+    _turbo_gemm_accum(
+        input_2d,
+        True,
+        grad_output_2d,
+        False,
+        main_grad.dtype,
+        True,
+        main_grad,
+    )
+    return True
+
+
+def _wgrad_gemm_accum(total_input, grad_output, main_grad):
+    if _gptoss_bf16_lm_head_wgrad_accum(total_input, grad_output, main_grad):
+        return
+    if main_grad.dtype == torch.float32:
+        fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
+            total_input, grad_output, main_grad
+        )
+    elif main_grad.dtype in (torch.float16, torch.bfloat16):
+        fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
+            total_input, grad_output, main_grad
+        )
+    else:
+        raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
+
+
 class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
     """See linear_with_grad_accumulation_and_async_allreduce"""
 
@@ -75,7 +202,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         else:
             total_input = input
 
-        output = torch.matmul(total_input, weight.t())
+        output = _gptoss_bf16_lm_head_forward(total_input, weight)
+        if output is None:
+            output = torch.matmul(total_input, weight.t())
         if bias is not None:
             output = output + bias
         return output
@@ -142,7 +271,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
 
         if wgrad_compute:
             grad_output, total_input, handle = pre_process(grad_output, input, async_op=wgrad_compute)
-        grad_input = grad_output.matmul(weight)
+        grad_input = _gptoss_bf16_lm_head_dgrad(grad_output, weight, input.shape)
+        if grad_input is None:
+            grad_input = grad_output.matmul(weight)
 
         if wgrad_compute:
             grad_output, total_input = prepare_for_wgrad_compute(grad_output, total_input, handle)
@@ -170,31 +301,15 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
-                if weight.main_grad.dtype == torch.float32:
-                    fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
-                        total_input, grad_output, weight.main_grad
-                    )
-                elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
-                    fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
-                        total_input, grad_output, weight.main_grad
-                    )
-                else:
-                    raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
+                _wgrad_gemm_accum(total_input, grad_output, weight.main_grad)
             else:
-                wgrad_gemm_accum_func = None
-                if weight.main_grad.dtype == torch.float32:
-                    wgrad_gemm_accum_func = fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32
-                elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
-                    wgrad_gemm_accum_func = fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16
-                else:
-                    raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
                 insert_wgrad_func_into_cache(
                     weight,
                     functools.partial(pre_process, grad_output, input),
                     functools.partial(
                         process_wgrad,
                         weight,
-                        wgrad_gemm_accum_func=wgrad_gemm_accum_func,
+                        wgrad_gemm_accum_func=_wgrad_gemm_accum,
                     ),
                 )
 
