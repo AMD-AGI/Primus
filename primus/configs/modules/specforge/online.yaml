@@ -3,7 +3,7 @@
 #
 # Primus owns Mooncake / patched SGLang / --role producer|consumer. SpecForge
 # still owns the training YAML pointed to by specforge_config (keep loopback
-# 127.0.0.1 there; Primus rewrites it to a routable HEAD_IP after allocate).
+# 127.0.0.1 there; Primus rewrites it to the capture-rank-0 IP after allocate).
 ###############################################################################
 extends:
   - ../module_base.yaml

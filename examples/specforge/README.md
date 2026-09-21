@@ -111,10 +111,13 @@ Example:
 [`configs/qwen3.5-4b-dflash-online-2node.yaml`](configs/qwen3.5-4b-dflash-online-2node.yaml).
 Primus maps `specforge_online.run_root` / `consumer_state_dir` onto SpecForge
 `control_dir`, `output_dir`, and `consumer_state_dir`. After allocate it
-rewrites the SpecForge loopback endpoints to a routable `HEAD_IP` (override
-with `PRIMUS_SPECFORGE_HEAD_IP`, or `PRIMUS_SPECFORGE_BIND_IFACE` to pick a
-NIC). Shared vs local directories, empty control/SQLite trees, and the
-producer/consumer contract are SpecForge's — see
+rewrites the SpecForge loopback endpoints to a routable capture-rank-0 IP.
+`PRIMUS_SPECFORGE_HEAD_IP` / `HEAD_IP` apply **only on capture rank 0**
+(Mooncake + producer). Capture replicas and trainers advertise
+`PRIMUS_SPECFORGE_LOCAL_IP` if set, else the IPv4 on
+`PRIMUS_SPECFORGE_BIND_IFACE`, else hostname. A job-wide `HEAD_IP` must not be
+the per-node Mooncake hostname. Shared vs local directories, empty
+control/SQLite trees, and the producer/consumer contract are SpecForge's — see
 [online disaggregated training](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md#4-online-disaggregated-training).
 
 One Slurm allocation, the same `primus-cli` command on every node. Shape is
@@ -166,9 +169,12 @@ cd /opt/primus
 The example above is **1 capture GPU + 1 trainer GPU** on 2 nodes. Load the
 overlay image on **every** node if the scheduler's container store is
 node-local. Do not wrap this in `managed_local` or `--role both`. SpecForge
-`deployment.trainer.nnodes` is `TRAINER_NNODES` (consumer nodes only). Raise
-`SERVER_COUNT` / `TRAINER_GPUS` / `--gres` for 8 GPUs per role on 2 nodes, or
-raise `-N` with `CAPTURE_NNODES` / `TRAINER_NNODES`.
+`deployment.trainer.nnodes` is `TRAINER_NNODES` (consumer nodes only).
+`server_gpus` / `trainer_gpus` default to `0`; a single device id expands to
+`0..N-1` (`N = server_count * server_tp` or `trainer_nproc`), so 8+8 only
+needs `SERVER_COUNT=8` and `NPROC_PER_NODE=8`. Set an explicit CSV to pin
+non-contiguous devices. Raise `-N` with `CAPTURE_NNODES` / `TRAINER_NNODES`
+for more nodes.
 
 ## Reference results on MI355X
 
@@ -207,6 +213,7 @@ export MAX_STEPS=2510
 export NPROC_PER_NODE=8
 export SERVER_COUNT=8
 export SERVER_TP=1
+# SERVER_GPUS / TRAINER_GPUS default 0 → 0..7 when the counts above are 8.
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:8 \
   -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
   --volume /shared:/shared \

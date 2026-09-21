@@ -6,8 +6,9 @@
 
 """Pure helpers for online SpecForge (Mooncake + SGLang + roles).
 
-Cluster IPs stay out of git YAML. After Slurm allocates, Primus resolves a
-routable HEAD_IP and renders Hydra overrides. Rank dispatch and sidecar
+Cluster IPs stay out of git YAML. After Slurm allocates, Primus resolves the
+capture-rank-0 IP (``HEAD_IP`` only there) and each node's local Mooncake
+advertise IP, then renders Hydra overrides. Rank dispatch and sidecar
 lifetime live in ``online_supervisor``. Capture nodes are
 ``[0, capture_nnodes)``; trainer nodes follow.
 """
@@ -58,6 +59,19 @@ def parse_csv_devices(value: Any, default: str = "0") -> str:
     return text
 
 
+def expand_device_list(value: str, count: int) -> str:
+    """Expand a single device id to ``count`` consecutive ids (``0`` → ``0..N-1``)."""
+
+    devices = [p for p in str(value).split(",") if p]
+    if count <= 1 or len(devices) != 1:
+        return ",".join(devices) if devices else str(value)
+    try:
+        start = int(devices[0])
+    except ValueError:
+        return ",".join(devices)
+    return ",".join(str(start + i) for i in range(int(count)))
+
+
 def parse_layer_ids(value: Any) -> tuple[int, ...]:
     if value is None or str(value).strip() == "":
         return DEFAULT_CAPTURE_LAYER_IDS
@@ -106,12 +120,8 @@ def resolve_capture_layer_ids(
     if not configs.is_dir():
         return DEFAULT_CAPTURE_LAYER_IDS
     preferred = configs / "qwen3.5-4b-dflash.json"
-    candidates = []
     if preferred.is_file():
-        candidates.append(preferred)
-    candidates.extend(path for path in sorted(configs.glob("*.json")) if path != preferred)
-    for path in candidates:
-        ids = layer_ids_from_draft_json(path)
+        ids = layer_ids_from_draft_json(preferred)
         if ids:
             return ids
     return DEFAULT_CAPTURE_LAYER_IDS
@@ -136,6 +146,8 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         raw.get("trainer_nproc") or raw.get("nproc_per_node") or environ.get("NPROC_PER_NODE") or 1
     )
     trainer_gpus = parse_csv_devices(raw.get("trainer_gpus"), default="0")
+    server_gpus = expand_device_list(server_gpus, server_count * server_tp)
+    trainer_gpus = expand_device_list(trainer_gpus, trainer_nproc)
     capture_nnodes = _positive_int(raw.get("capture_nnodes") or environ.get("CAPTURE_NNODES"), 1)
     trainer_nnodes = _positive_int(raw.get("trainer_nnodes") or environ.get("TRAINER_NNODES"), 1)
     protocol = str(raw.get("mooncake_protocol") or environ.get("MOONCAKE_PROTOCOL") or DEFAULT_PROTOCOL)
@@ -276,20 +288,27 @@ def hostname_ipv4s() -> list[str]:
     return seen
 
 
-def resolve_routable_ip(
+def _override_ip(environ: Mapping[str, str], keys: Sequence[str]) -> Optional[str]:
+    for key in keys:
+        raw = environ.get(key)
+        if raw and str(raw).strip():
+            return str(raw).strip()
+    return None
+
+
+def resolve_local_ip(
     env: Optional[Mapping[str, str]] = None,
     *,
     interface: str = "",
     interface_ip: Optional[str] = None,
     hostname_ips: Optional[Sequence[str]] = None,
 ) -> str:
-    """Routable IPv4 for Mooncake/SGLang advertise. Never a hostname."""
+    """This node's Mooncake/SGLang advertise IP. Never a hostname or HEAD_IP."""
 
     environ = os.environ if env is None else env
-    for key in ("PRIMUS_SPECFORGE_HEAD_IP", "HEAD_IP"):
-        override = environ.get(key)
-        if override and str(override).strip():
-            return str(override).strip()
+    override = _override_ip(environ, ("PRIMUS_SPECFORGE_LOCAL_IP",))
+    if override:
+        return override
     iface = interface or environ.get("PRIMUS_SPECFORGE_BIND_IFACE") or ""
     if interface_ip is None:
         interface_ip = interface_ipv4(iface)
@@ -301,9 +320,39 @@ def resolve_routable_ip(
     if picked:
         return picked
     raise RuntimeError(
-        "[Primus:specforge] could not resolve a routable IPv4; "
-        "set PRIMUS_SPECFORGE_HEAD_IP / HEAD_IP or PRIMUS_SPECFORGE_BIND_IFACE"
+        "[Primus:specforge] could not resolve a local IPv4; "
+        "set PRIMUS_SPECFORGE_LOCAL_IP or PRIMUS_SPECFORGE_BIND_IFACE"
     )
+
+
+def resolve_head_ip(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    interface: str = "",
+    interface_ip: Optional[str] = None,
+    hostname_ips: Optional[Sequence[str]] = None,
+) -> str:
+    """Capture rank-0 Mooncake/SGLang address. ``HEAD_IP`` applies only here."""
+
+    environ = os.environ if env is None else env
+    override = _override_ip(environ, ("PRIMUS_SPECFORGE_HEAD_IP", "HEAD_IP"))
+    if override:
+        return override
+    return resolve_local_ip(
+        env=environ, interface=interface, interface_ip=interface_ip, hostname_ips=hostname_ips
+    )
+
+
+def resolve_routable_ip(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    interface: str = "",
+    interface_ip: Optional[str] = None,
+    hostname_ips: Optional[Sequence[str]] = None,
+) -> str:
+    """Backward-compatible alias of ``resolve_head_ip``."""
+
+    return resolve_head_ip(env=env, interface=interface, interface_ip=interface_ip, hostname_ips=hostname_ips)
 
 
 def server_urls(head_ip: str, settings: Mapping[str, Any]) -> list[str]:

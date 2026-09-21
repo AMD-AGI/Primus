@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from primus.backends.specforge.online_launch import (
     build_online_overrides,
@@ -37,7 +37,8 @@ from primus.backends.specforge.online_launch import (
     read_lines,
     read_status,
     ready_paths,
-    resolve_routable_ip,
+    resolve_head_ip,
+    resolve_local_ip,
     server_gpu_group,
     server_urls,
     sglang_server_argv,
@@ -215,6 +216,30 @@ def _start_local_sglang(
     return servers
 
 
+def _capture_stack_failed(
+    head_ip: str,
+    settings: dict[str, Any],
+    master: Optional[subprocess.Popen],
+    servers: list[subprocess.Popen],
+    url_list: Sequence[str],
+) -> Optional[str]:
+    """Return a reason if Mooncake or a capture server died after producer start."""
+
+    if master is not None and master.poll() is not None:
+        return "Mooncake exited"
+    for index, proc in enumerate(servers):
+        if proc.poll() is not None:
+            return f"SGLang server {index} exited"
+    metadata = f"http://{head_ip}:{settings['mooncake_http_port']}/metadata?key=specforge-health-check"
+    if not (_http_up(metadata) and _tcp_ok(head_ip, settings["mooncake_rpc_port"])):
+        return "Mooncake stopped answering"
+    for url in url_list:
+        health = str(url).rstrip("/") + "/health"
+        if not _http_ok(health, timeout=1.0):
+            return f"capture server unhealthy: {health}"
+    return None
+
+
 def _failed_consumer_status(done_files: list[Path]) -> Optional[str]:
     for path in done_files:
         if path.exists() and read_status(path) != "0":
@@ -264,7 +289,7 @@ def run_online(params: Any) -> None:
 
 def _run_capture_node(params: Any, settings: dict[str, Any]) -> None:
     paths = ready_paths(settings["run_root"])
-    head_ip = resolve_routable_ip(interface=settings["bind_interface"])
+    head_ip = resolve_head_ip(interface=settings["bind_interface"])
     done_files = consumer_done_paths(settings["run_root"], int(settings["trainer_nnodes"]))
 
     if shutil.which("mooncake_master") is None:
@@ -276,7 +301,6 @@ def _run_capture_node(params: Any, settings: dict[str, Any]) -> None:
             f"[Primus:specforge] run root already has head.ip; choose a fresh RUN_ID: {paths['root']}"
         )
 
-    write_status(paths["head_ip"], head_ip)
     result = 1
     master = None
     servers: list[subprocess.Popen] = []
@@ -288,6 +312,7 @@ def _run_capture_node(params: Any, settings: dict[str, Any]) -> None:
         mc_env.setdefault("MOONCAKE_LOCAL_BUFFER_SIZE", str(1 << 30))
         master = _popen(mooncake_master_argv(settings), mc_env, paths["mooncake_log"])
         _wait_mooncake(head_ip, settings, master, paths["mooncake_log"])
+        write_status(paths["head_ip"], head_ip)
         log_rank_0(f"Mooncake ready at {head_ip}:{settings['mooncake_rpc_port']}")
 
         servers = _start_local_sglang(settings, head_ip, head_ip, paths["root"], capture_rank=0)
@@ -318,6 +343,9 @@ def _run_capture_node(params: Any, settings: dict[str, Any]) -> None:
             failed = _failed_consumer_status(done_files)
             if failed is not None:
                 raise RuntimeError(f"[Primus:specforge] consumer failed with {failed}")
+            stack = _capture_stack_failed(head_ip, settings, master, servers, url_list)
+            if stack is not None:
+                raise RuntimeError(f"[Primus:specforge] {stack} after producer start")
             time.sleep(2)
         if producer.returncode != 0:
             raise RuntimeError(f"[Primus:specforge] producer exited with status {producer.returncode}")
@@ -344,10 +372,10 @@ def _run_capture_replica(_params: Any, settings: dict[str, Any], rank: int) -> N
         paths["head_ip"],
         settings["peer_timeout_s"],
         peer=paths["inference_done"],
-        description="Mooncake HEAD_IP",
+        description="Mooncake ready (head.ip)",
     )
     head_ip = read_status(paths["head_ip"])
-    local_ip = resolve_routable_ip(interface=settings["bind_interface"])
+    local_ip = resolve_local_ip(interface=settings["bind_interface"])
     servers: list[subprocess.Popen] = []
     try:
         servers = _start_local_sglang(settings, head_ip, local_ip, paths["root"], capture_rank=rank)
@@ -367,7 +395,7 @@ def _run_capture_replica(_params: Any, settings: dict[str, Any], rank: int) -> N
 
 def _run_trainer_node(params: Any, settings: dict[str, Any], specforge_rank: int) -> None:
     paths = ready_paths(settings["run_root"])
-    local_ip = resolve_routable_ip(interface=settings["bind_interface"])
+    local_ip = resolve_local_ip(interface=settings["bind_interface"])
     trainer_nnodes = int(settings["trainer_nnodes"])
     if specforge_rank == 0:
         write_status(paths["trainer_ip"], local_ip)

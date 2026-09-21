@@ -112,8 +112,13 @@ def specforge_role(params: Any) -> Optional[str]:
     if raw is None or str(raw).strip() == "":
         return None
     role = str(raw).strip().lower()
-    if role not in {"producer", "consumer", "both"}:
-        raise ValueError(f"[Primus:specforge] unknown specforge_role '{role}'")
+    if role == "both":
+        raise ValueError(
+            "[Primus:specforge] specforge_role 'both' is not supported; "
+            "online train assigns producer/consumer by node rank"
+        )
+    if role not in {"producer", "consumer"}:
+        raise ValueError(f"[Primus:specforge] unknown specforge_role '{role}'; use 'producer' or 'consumer'")
     return role
 
 
@@ -180,10 +185,20 @@ def build_specforge_argv(
         argv.extend(["--role", str(chosen_role)])
     if node_rank is not None:
         argv.extend(["--node-rank", str(int(node_rank))])
-    argv.extend(f"{key}={value}" for key, value in sorted(overrides.items()))
+    items = [f"{key}={value}" for key, value in sorted(overrides.items())]
     if extra_overrides:
-        argv.extend(extra_overrides)
+        items.extend(extra_overrides)
+    argv.extend(item for item in items if _keep_role_override(chosen_role, item))
     return argv
+
+
+def _keep_role_override(role: Optional[str], item: str) -> bool:
+    """SpecForge rejects trainer-only Hydra keys on the producer."""
+
+    if role != "producer":
+        return True
+    key = item.split("=", 1)[0].lstrip("-")
+    return key != "training.resume_from"
 
 
 def _capture_flag_name(key: str) -> str:

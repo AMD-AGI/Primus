@@ -1,7 +1,7 @@
 # Qwen3.5-4B DFlash online (Mooncake + SGLang capture + SpecForge train).
 #
 # Checked-in SpecForge YAML keeps 127.0.0.1. Primus rewrites Mooncake/SGLang
-# endpoints to a routable HEAD_IP after allocate.
+# endpoints to the capture-rank-0 IP after allocate (HEAD_IP is rank 0 only).
 #
 # Shape is C capture nodes + T trainer nodes (defaults 1+1). Each capture node
 # runs SERVER_COUNT SGLang servers (GPU). Rank 0 also runs Mooncake and the
@@ -21,9 +21,9 @@
 #
 # --gres=gpu:N is Slurm's per-node GPU request (same on every allocated node).
 # Match it to the GPUs that node uses: SERVER_COUNT*SERVER_TP on capture nodes,
-# trainer_nproc on trainer nodes. 1 GPU/role is the smallest smoke; raise
-# SERVER_COUNT / TRAINER_GPUS / --gres together (e.g. 8+8), or raise -N with
-# CAPTURE_NNODES / TRAINER_NNODES.
+# trainer_nproc on trainer nodes. 1 GPU/role is the smallest smoke. A single
+# SERVER_GPUS / TRAINER_GPUS id expands to 0..N-1 for that count (8+8:
+# SERVER_COUNT=8 NPROC_PER_NODE=8). Raise -N with CAPTURE_NNODES / TRAINER_NNODES.
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}

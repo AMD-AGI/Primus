@@ -30,14 +30,18 @@ from primus.backends.specforge.argument_builder import (
     is_online_train,
     resolve_specforge_root,
     specforge_mode,
+    specforge_role,
     specforge_train_mode,
 )
 from primus.backends.specforge.online_launch import (
     build_online_overrides,
     build_role_argv,
+    expand_device_list,
     nnodes,
     node_rank,
     online_settings,
+    resolve_head_ip,
+    resolve_local_ip,
     resolve_routable_ip,
     sglang_server_argv,
     validate_online_identity,
@@ -219,6 +223,19 @@ class TestArgvBuilder:
         argv = build_specforge_argv(params)
         assert "training.resume_from=/ckpt/step10" in argv
 
+    def test_producer_drops_resume_from(self):
+        params = SimpleNamespace(
+            specforge_config="/sf/a.yaml",
+            specforge_overrides={"training.resume_from": "/ckpt/step10", "training.max_steps": 2510},
+        )
+        producer = build_specforge_argv(params, role="producer")
+        consumer = build_specforge_argv(
+            params, extra_overrides=["training.resume_from=/ckpt/step10"], role="consumer"
+        )
+        assert "training.resume_from=/ckpt/step10" not in producer
+        assert "training.max_steps=2510" in producer
+        assert "training.resume_from=/ckpt/step10" in consumer
+
     def test_explicit_output_dir_override_wins(self):
         params = SimpleNamespace(
             specforge_config="/sf/a.yaml",
@@ -246,6 +263,12 @@ class TestArgvBuilder:
     def test_offline_argv_has_no_role(self):
         params = SimpleNamespace(specforge_config="/sf/a.yaml")
         assert "--role" not in build_specforge_argv(params)
+
+    def test_role_both_is_rejected(self):
+        with pytest.raises(ValueError, match="both"):
+            specforge_role(SimpleNamespace(specforge_role="both"))
+        with pytest.raises(ValueError, match="unknown specforge_role"):
+            specforge_role(SimpleNamespace(specforge_role="sidecar"))
 
 
 class TestSpecForgeModes:
@@ -762,6 +785,37 @@ class TestOnlineLaunch:
         ip = resolve_routable_ip(env={}, hostname_ips=["127.0.0.1", "10.1.2.3"])
         assert ip == "10.1.2.3"
 
+    def test_local_ip_ignores_job_wide_head_ip(self):
+        ip = resolve_local_ip(
+            env={"HEAD_IP": "10.9.8.7", "PRIMUS_SPECFORGE_BIND_IFACE": "eth0"},
+            interface_ip="10.4.5.6",
+            hostname_ips=["127.0.0.1"],
+        )
+        assert ip == "10.4.5.6"
+
+    def test_local_ip_override_beats_interface(self):
+        ip = resolve_local_ip(
+            env={"PRIMUS_SPECFORGE_LOCAL_IP": "10.2.2.2", "HEAD_IP": "10.9.8.7"},
+            interface_ip="10.4.5.6",
+        )
+        assert ip == "10.2.2.2"
+
+    def test_head_ip_still_honors_head_override(self):
+        assert resolve_head_ip(env={"HEAD_IP": "10.9.8.7"}, interface_ip="10.4.5.6") == "10.9.8.7"
+
+    def test_expand_single_device_id_to_count(self):
+        assert expand_device_list("0", 8) == "0,1,2,3,4,5,6,7"
+        assert expand_device_list("1", 4) == "1,2,3,4"
+        assert expand_device_list("0,2", 8) == "0,2"
+        assert expand_device_list("0", 1) == "0"
+
+    def test_eight_plus_eight_defaults_expand_gpu_lists(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path, server_count=8, trainer_nproc=8)
+        settings = online_settings(params)
+        assert settings["server_gpus"] == "0,1,2,3,4,5,6,7"
+        assert settings["trainer_gpus"] == "0,1,2,3,4,5,6,7"
+        assert not validate_online_identity(settings, rank=0, nodes=2)
+
     def test_bind_interface_defaults_empty(self, specforge_checkout, tmp_path):
         settings = online_settings(self._params(specforge_checkout, tmp_path), env={})
         assert settings["bind_interface"] == ""
@@ -811,6 +865,16 @@ class TestOnlineLaunch:
         port_at = argv.index("--port")
         layer_at = argv.index("--spec-capture-aux-layer-ids")
         assert argv[layer_at + 1 : port_at] == ["2", "4"]
+
+    def test_capture_layer_ids_ignore_other_draft_json(self, specforge_checkout, tmp_path):
+        other = specforge_checkout / "configs" / "other-draft.json"
+        other.write_text('{"dflash_config": {"target_layer_ids": [3, 9]}}\n')
+        params = self._params(specforge_checkout, tmp_path)
+        settings = online_settings(params)
+        assert settings["capture_layer_ids"] == (1, 8, 15, 22, 29)
+        (specforge_checkout / "configs" / "qwen3.5-4b-dflash.json").unlink()
+        settings = online_settings(params)
+        assert settings["capture_layer_ids"] == (1, 8, 15, 22, 29)
 
     def test_online_yaml_has_no_cluster_ips(self):
         text = ONLINE_CONFIG.read_text(encoding="utf-8")
@@ -960,6 +1024,20 @@ class TestOnlineLaunch:
         monkeypatch.setattr(supervisor.urllib.request, "urlopen", boom)
         assert supervisor._http_up("http://x/metadata") is True
         assert supervisor._http_ok("http://x/metadata") is False
+
+    def test_capture_stack_failed_detects_dead_sglang(self):
+        from primus.backends.specforge import online_supervisor as supervisor
+
+        class Dead:
+            def poll(self):
+                return 1
+
+        settings = {
+            "mooncake_http_port": 35880,
+            "mooncake_rpc_port": 35551,
+        }
+        reason = supervisor._capture_stack_failed("10.0.0.1", settings, None, [Dead()], [])
+        assert reason == "SGLang server 0 exited"
 
     def test_specforge_child_env_forces_single_node_rank(self, monkeypatch):
         from primus.backends.specforge import online_supervisor as supervisor
