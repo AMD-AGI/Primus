@@ -136,20 +136,56 @@ def test_gptoss_bf16_lm_head_patch_condition_is_workload_specific():
     )
 
 
-def test_gptoss_bf16_lm_head_patch_replaces_active_megatron_class(monkeypatch):
+def test_gptoss_bf16_lm_head_patch_wraps_only_exact_shape(monkeypatch):
     import megatron.core.tensor_parallel.layers as megatron_layers
 
-    sentinel = object()
+    calls = []
+
+    def original_linear(*args):
+        calls.append(("megatron", args[0].shape, args[1].shape))
+        return "megatron"
+
+    original_linear.warned = False
+
+    class FakePrimusLinear:
+        @staticmethod
+        def apply(*args):
+            calls.append(("primus", args[0].shape, args[1].shape))
+            return "primus"
+
     monkeypatch.setattr(
         megatron_layers,
-        "LinearWithGradAccumulationAndAsyncCommunication",
-        sentinel,
+        "linear_with_grad_accumulation_and_async_allreduce",
+        original_linear,
+    )
+    original_class = megatron_layers.LinearWithGradAccumulationAndAsyncCommunication
+    monkeypatch.setattr(
+        tp_layers, "LinearWithGradAccumulationAndAsyncCommunication", FakePrimusLinear
     )
     monkeypatch.setattr(gptoss_bf16_lm_head_patches, "log_rank_0", lambda *_: None)
 
     gptoss_bf16_lm_head_patches.patch_gptoss_bf16_lm_head(_patch_context())
 
+    linear = megatron_layers.linear_with_grad_accumulation_and_async_allreduce
+    fallback = linear(
+        torch.empty((2, 3)),
+        torch.empty((4, 3)),
+        None,
+        False,
+        False,
+        False,
+    )
+    with FakeTensorMode():
+        input_, _, weight = _lm_head_tensors()
+        routed = linear(input_, weight, None, True, False, False)
+
+    assert fallback == "megatron"
+    assert routed == "primus"
+    assert calls == [
+        ("megatron", (2, 3), (4, 3)),
+        ("primus", (8192, 4, 2880), (128256, 2880)),
+    ]
     assert (
         megatron_layers.LinearWithGradAccumulationAndAsyncCommunication
-        is tp_layers.LinearWithGradAccumulationAndAsyncCommunication
+        is original_class
     )
