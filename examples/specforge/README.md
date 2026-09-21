@@ -103,6 +103,20 @@ capture+train. SpecForge's own CLI will not start Mooncake/SGLang across
 nodes, so Primus does that and then launches `--role producer` /
 `--role consumer`.
 
+Run `./runner/primus-cli slurm` **outside** the image (login node, this
+checkout). Training runs **inside** the overlay, or a bind-mount of this tree
+at `/opt/primus`.
+
+Example:
+[`configs/qwen3.5-4b-dflash-online-2node.yaml`](configs/qwen3.5-4b-dflash-online-2node.yaml).
+Primus maps `specforge_online.run_root` / `consumer_state_dir` onto SpecForge
+`control_dir`, `output_dir`, and `consumer_state_dir`. After allocate it
+rewrites the SpecForge loopback endpoints to a routable `HEAD_IP` (override
+with `PRIMUS_SPECFORGE_HEAD_IP`, or `PRIMUS_SPECFORGE_BIND_IFACE` to pick a
+NIC). Shared vs local directories, empty control/SQLite trees, and the
+producer/consumer contract are SpecForge's — see
+[online disaggregated training](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md#4-online-disaggregated-training).
+
 One Slurm allocation, the same `primus-cli` command on every node. Shape is
 **C capture nodes + T trainer nodes** (`CAPTURE_NNODES` + `TRAINER_NNODES`,
 default 1+1 so `-N 2`):
@@ -112,19 +126,26 @@ default 1+1 so `-N 2`):
 | `0 .. C-1` | Capture: SGLang on GPU. Rank 0 also starts Mooncake and the SpecForge **producer** (CPU HTTP client to those servers). |
 | `C .. C+T-1` | Wait for `inference.ready` → `--role consumer` (`--node-rank` when `T>1`) |
 
-Checked-in SpecForge YAML keeps `127.0.0.1`. After allocate, Primus injects a
-routable `HEAD_IP` (override with `PRIMUS_SPECFORGE_HEAD_IP`, or set
-`PRIMUS_SPECFORGE_BIND_IFACE` to pick a NIC). `control_dir` / `output_dir`
-must be on shared storage; `consumer_state_dir` must be trainer-local. SpecForge
-refuses a reused control/SQLite tree, so `RUN_ROOT` and `CONSUMER_STATE_DIR`
-must be empty (a new `RUN_ID` is the usual way to get that).
-
-`./runner/primus-cli slurm` runs **on the login node** from this checkout; it
-does not need a pip-installed Primus. The overlay image (or a bind-mount of
-this tree at `/opt/primus`) is what actually trains. `--gres=gpu:N` is Slurm's
-**per-node** GPU request — the same `N` on every allocated node. Set it to the
-GPUs that node uses (`SERVER_COUNT` on a capture node, `NPROC_PER_NODE` on a
-trainer node).
+```yaml
+# examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
+modules:
+  pre_trainer:
+    framework: specforge
+    overrides:
+      specforge_mode: train
+      specforge_train_mode: online
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-amd.yaml}
+      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
+      specforge_online:
+        run_id: ${RUN_ID}
+        run_root: ${RUN_ROOT}
+        consumer_state_dir: ${CONSUMER_STATE_DIR}
+        capture_nnodes: ${CAPTURE_NNODES:1}
+        trainer_nnodes: ${TRAINER_NNODES:1}
+        server_count: ${SERVER_COUNT:1}
+        server_tp: ${SERVER_TP:1}
+        trainer_nproc: ${NPROC_PER_NODE:1}
+```
 
 ```bash
 export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
@@ -144,21 +165,19 @@ cd /opt/primus
 
 The example above is **1 capture GPU + 1 trainer GPU** on 2 nodes. Load the
 overlay image on **every** node if the scheduler's container store is
-node-local. `GPUS_PER_NODE=1` from the prepare hook means one Primus process
-per node, not the device mask: the producer has empty `CUDA_VISIBLE_DEVICES`;
-SGLang/consumer use `SERVER_GPUS` / `TRAINER_GPUS`.
-
-Do not wrap this in `managed_local` or `--role both`. SpecForge
+node-local. Do not wrap this in `managed_local` or `--role both`. SpecForge
 `deployment.trainer.nnodes` is `TRAINER_NNODES` (consumer nodes only). Raise
 `SERVER_COUNT` / `TRAINER_GPUS` / `--gres` for 8 GPUs per role on 2 nodes, or
 raise `-N` with `CAPTURE_NNODES` / `TRAINER_NNODES`.
 
 ## Reference results on MI355X
 
-Qwen3.5-4B DFlash, one epoch. ShareGPT prompts were leak-filtered (exact-row
-and first-user-turn) and **256 unique rows** were held out for eval. Train
-labels are the target’s own **greedy thinking** continuations
-(`temperature=0`, reasoning saved) — not original ShareGPT assistant text.
+Experiment setup and ShareGPT data prep follow the
+[SpecForge AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md).
+Qwen3.5-4B DFlash, one epoch. Prompts were leak-filtered (exact-row and
+first-user-turn) and **256 unique rows** were held out for eval. Train labels
+are the target’s own **greedy thinking** continuations (`temperature=0`,
+reasoning saved) — not original ShareGPT assistant text.
 
 Both runs used the example YAMLs above via `primus-cli`, 8 trainer GPUs,
 batch 2, accumulation 1, `log_interval=20`, `save_interval=240`,
