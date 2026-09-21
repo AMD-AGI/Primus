@@ -138,7 +138,6 @@ modules:
       tensorboard_dir: output/tensorboard/wan2.1_t2v_1.3b_pusa_local_spec_mxfp4_bwd
       log_throughput: true
       log_timers_to_tensorboard: true
-      log_learning_rate_to_tensorboard: true
 
       # ----------------------------------------------------------------------
       # Checkpointing

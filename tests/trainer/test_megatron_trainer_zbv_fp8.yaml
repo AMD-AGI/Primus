@@ -95,5 +95,3 @@ modules:
       # FP8
       fp8: ${PRIMUS_FP8:hybrid}
       fp8_recipe: ${PRIMUS_FP8_RECIPE:delayed}
-
-      debug: true

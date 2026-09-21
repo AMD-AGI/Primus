@@ -132,7 +132,6 @@ modules:
       moe_aux_loss_coeff: 0.0
       moe_enable_deepep: false
       moe_expert_capacity_factor: null
-      moe_extended_tp: false
       moe_ffn_hidden_size: 2880
       moe_flex_dispatcher_backend: deepep
       moe_grouped_gemm: true
@@ -240,8 +239,6 @@ modules:
       tensorboard_log_interval: 1
       tensorboard_queue_size: 1000
       log_timers_to_tensorboard: true
-      log_batch_size_to_tensorboard: true
-      log_learning_rate_to_tensorboard: true
       log_validation_ppl_to_tensorboard: true
       log_memory_to_tensorboard: true
       log_world_size_to_tensorboard: true
