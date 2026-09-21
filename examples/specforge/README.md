@@ -6,6 +6,8 @@ follow the
 [SpecForge AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md)
 for those steps.
 
+## Intro
+
 Two knobs:
 
 | Knob | Values | Meaning |
@@ -18,12 +20,8 @@ train is live Mooncake + SGLang capture plus `--role producer` / `--role
 consumer`. Capture is SpecForge `scripts/prepare_hidden_states.py`, not a
 train mode.
 
-## Runtime image
-
-Build and run: [`docker/README.md`](docker/README.md). Inside the container,
-Primus is `/opt/primus` and SpecForge is `/workspace/SpecForge`.
-
-## Launch with `primus-cli`
+Build and run the overlay: [`docker/README.md`](docker/README.md). Inside the
+container, Primus is `/opt/primus` and SpecForge is `/workspace/SpecForge`.
 
 From `/opt/primus`:
 
@@ -31,8 +29,13 @@ From `/opt/primus`:
 ./runner/primus-cli direct -- train pretrain --config <experiment.yaml>
 ```
 
-Same command for capture and train; only the YAML changes. Example pair for
-Qwen3.5-4B DFlash (20-step smoke defaults):
+Same command for capture and train; only the YAML changes. Dotted CLI keys
+override YAML, for example `specforge_overrides.training.max_steps=1000`.
+
+## Offline
+
+Capture, then train on disk hidden states. Example pair for Qwen3.5-4B DFlash
+(20-step smoke defaults).
 
 **Capture** — `specforge_mode: capture` runs SpecForge
 `scripts/prepare_hidden_states.py`:
@@ -93,10 +96,7 @@ export MAX_STEPS=20
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
 ```
 
-Dotted CLI keys override YAML, for example
-`specforge_overrides.training.max_steps=1000`.
-
-## Online (Mooncake + SGLang capture)
+## Online
 
 `specforge_mode: train` with `specforge_train_mode: online` is live
 capture+train. SpecForge's own CLI will not start Mooncake/SGLang across
@@ -155,20 +155,19 @@ raise `-N` with `CAPTURE_NNODES` / `TRAINER_NNODES`.
 
 ## Reference results on MI355X
 
-Qwen3.5-4B DFlash on 8× MI355X. ShareGPT was prepared as in the
-[SpecForge AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md).
-256 unique prompts were held out for eval and removed from train (exact-row
-and first-user-turn leak filter).
+Qwen3.5-4B DFlash, one epoch. ShareGPT prompts were leak-filtered (exact-row
+and first-user-turn) and **256 unique rows** were held out for eval. Train
+labels are the target’s own **greedy thinking** continuations
+(`temperature=0`, reasoning saved) — not original ShareGPT assistant text.
 
-Capture and train used the example YAMLs above via `primus-cli`, with
-`NPROC_PER_NODE=8`. Capture:
+Both runs used the example YAMLs above via `primus-cli`, 8 trainer GPUs,
+batch 2, accumulation 1, `log_interval=20`, `save_interval=240`,
+`MAX_STEPS=2510` (~40k refs). Offline captured hidden states to disk
+(`max_length=2048`) then trained. Online recaptured the same train prompts
+live (8 SGLang `TP=1` + 8 trainer GPUs). Curves are in the same band, not
+bit-identical.
 
-```bash
-./runner/primus-cli direct -- train pretrain \
-  --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
-```
-
-Train, one epoch (~40k shards, `MAX_STEPS=2510`):
+Offline train:
 
 ```bash
 export MAX_STEPS=2510
@@ -182,14 +181,42 @@ export NPROC_PER_NODE=8
   specforge_overrides.training.log_interval=20
 ```
 
-![train/loss and train/acc](assets/qwen35-4b-dflash-train-curves.png)
+Online train (8+8):
 
-Held-out SGLang eval on **1 GPU**: `--tp-size 1`, `--max-running-requests 1`,
-`--mem-fraction-static 0.75`, `--attention-backend aiter`,
-`--disable-radix-cache`, `--disable-cuda-graph`, `--reasoning-parser qwen3`.
-256 prompts, thinking on, EOS on, 64 new tokens, concurrency 1.
+```bash
+export MAX_STEPS=2510
+export NPROC_PER_NODE=8
+export SERVER_COUNT=8
+export SERVER_TP=1
+./runner/primus-cli slurm srun -N 2 --gres=gpu:8 \
+  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  --volume /shared:/shared \
+  -- train pretrain \
+  --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml \
+  specforge_overrides.training.num_epochs=1 \
+  specforge_overrides.training.batch_size=2 \
+  specforge_overrides.training.accumulation_steps=1 \
+  specforge_overrides.training.save_interval=240 \
+  specforge_overrides.training.log_interval=20 \
+  specforge_overrides.runtime.in_flight_high_watermark=64 \
+  specforge_overrides.runtime.in_flight_low_watermark=32 \
+  specforge_online.mooncake_lease_ttl_ms=8000
+```
 
-| | Target-only | DFLASH |
+![train/loss, offline vs online](assets/train-loss-online-vs-offline.png)
+
+![train/acc, offline vs online](assets/train-acc-online-vs-offline.png)
+
+Held-out SGLang eval on **1 GPU** after `specforge export --to hf` and
+normalizing the draft to `DFlashDraftModel` / `block_size=16`: `--tp-size 1`,
+`--max-running-requests 1`, `--mem-fraction-static 0.75`,
+`--attention-backend aiter`, `--disable-radix-cache`, `--disable-cuda-graph`,
+`--reasoning-parser qwen3`. 256 prompts, thinking on, EOS on, 64 new tokens,
+concurrency 1.
+
+| | Offline | Online |
 | --- | ---: | ---: |
-| tok/s | 52.14 | **151.76** |
-| MAL | — | **3.66** |
+| Target-only tok/s | 52.14 | 52.12 |
+| DFLASH tok/s | **151.76** | **156.45** |
+| MAL | **3.662** | **3.649** |
+| Speedup | 2.911x | 3.002x |
