@@ -81,7 +81,6 @@ modules:
       finetune: false
       no_save_optim: true
       no_save_rng: true
-      auto_continue_train: false
       disable_last_saving: true
 
       # Precision

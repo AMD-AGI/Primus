@@ -80,7 +80,6 @@ Defined in `primus/configs/modules/megatron/primus_megatron_module.yaml` and imp
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `auto_continue_train` | `false` | When `true`, **automatically resume** from the latest checkpoint under `save` (adjusts load/finetune and related flags). |
 | `disable_last_saving` | `false` | When `true`, **skip** the final checkpoint at shutdown (useful for benchmarking or when only periodic saves matter). |
 
 ---
@@ -149,10 +148,10 @@ See `docs/03-configuration-reference/maxtext-parameters.md` for the full MaxText
 - Set `load` (and optionally `pretrained_checkpoint` / `ckpt_step` as appropriate).
 - Set `finetune: true` so iteration counters reset while weights load.
 
-**Auto-resume (Primus Megatron extension)**
+**Auto-resume**
 
-- Set `auto_continue_train: true` in the Megatron module config.
-- Primus searches for the latest checkpoint under `save` and aligns load/optimizer flags; see `primus/backends/megatron/patches/checkpoint_patches.py` for behavior details.
+- Primus no longer ships one. The `auto_continue_train` extension lost its implementation when `primus/modules` was removed (#851), and the key was dropped from the configs.
+- Until it is restored, arrange resume at the launcher: point `load` at the same directory as `save` and leave `finetune: false` so the iteration counter continues.
 
 **Convert checkpoint format**
 
@@ -191,7 +190,7 @@ The tool reports save/load times, bandwidth, and configuration echoes (world siz
 - Enable **`async_save`** (Megatron) for large models when supported, to limit training stalls during checkpoint windows.
 - Set **`save_interval`** from **economic** criteria: frequent enough to limit lost work, infrequent enough to avoid storage and throughput bottlenecks (Megatron default in `trainer_base.yaml` is `20000`—override per job).
 - Use **`non_persistent_save_interval`** with fast **local SSD** for frequent snapshots and a slower interval to **NFS** or object storage for durability.
-- **Validate** resume and fine-tune paths on short runs before multi-week jobs; confirm `finetune` and `auto_continue_train` behave as intended.
+- **Validate** resume and fine-tune paths on short runs before multi-week jobs; confirm `finetune` and the `load` path behave as intended.
 - For TorchTitan, enable **`checkpoint.enable`** explicitly and set **`checkpoint.keep_latest_k`** to bound disk usage.
 
 ---
