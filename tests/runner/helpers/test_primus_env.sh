@@ -372,6 +372,26 @@ test_env_defaults() {
 }
 
 # ============================================================================
+# Test 11: MI350X GPU env file
+# ============================================================================
+test_mi350x_env_file() {
+    echo "Test 11: MI350X GPU env file"
+
+    result=$(bash -c "
+        export MASTER_ADDR=localhost MASTER_PORT=1234 NNODES=1 NODE_RANK=0 GPUS_PER_NODE=8
+        export PRIMUS_SKIP_VALIDATION=1
+        export PRIMUS_GPU_MODEL=MI350X
+        source '$PROJECT_ROOT/runner/helpers/envs/primus-env.sh' >/dev/null
+        [[ \"\$RCCL_WARP_SPEED_AUTO\" == 0 ]] && echo PASS || echo FAIL
+    " 2>/dev/null)
+    if echo "$result" | grep -q PASS; then
+        assert_pass "MI350X.sh disables RCCL WarpSpeed"
+    else
+        assert_fail "MI350X.sh disables RCCL WarpSpeed"
+    fi
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 echo "=========================================="
@@ -389,6 +409,7 @@ test_gpu_detection
 test_loading_order
 test_missing_base_env
 test_env_defaults
+test_mi350x_env_file
 
 echo ""
 echo "=========================================="
