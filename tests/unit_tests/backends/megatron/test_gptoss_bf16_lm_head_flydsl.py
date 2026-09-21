@@ -4,6 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from types import SimpleNamespace
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -12,6 +14,8 @@ pytest.importorskip("megatron.core")
 from torch._subclasses.fake_tensor import FakeTensorMode
 
 import primus.backends.megatron.core.tensor_parallel.layers as tp_layers
+from primus.backends.megatron.patches.turbo import gptoss_bf16_lm_head_patches
+from primus.core.patches import PatchContext
 
 
 def _lm_head_tensors():
@@ -97,3 +101,55 @@ def test_gptoss_bf16_lm_head_routes_all_three_roles(monkeypatch):
             (128256, 2880),
         ),
     ]
+
+
+def _patch_context(**overrides):
+    params = {
+        "use_turbo_gemm": True,
+        "bf16": True,
+        "hidden_size": 2880,
+        "seq_length": 8192,
+        "micro_batch_size": 4,
+        "tensor_model_parallel_size": 1,
+    }
+    params.update(overrides)
+    return PatchContext(
+        backend="megatron",
+        phase="before_train",
+        model_name="gpt_oss_20B.yaml",
+        extra={"module_config": SimpleNamespace(params=SimpleNamespace(**params))},
+    )
+
+
+def test_gptoss_bf16_lm_head_patch_condition_is_workload_specific():
+    assert gptoss_bf16_lm_head_patches._is_gptoss_bf16_lm_head_can_patch(
+        _patch_context()
+    )
+    assert not gptoss_bf16_lm_head_patches._is_gptoss_bf16_lm_head_can_patch(
+        _patch_context(use_turbo_gemm=False)
+    )
+
+    wrong_model = _patch_context()
+    wrong_model.model_name = "llama3_8B.yaml"
+    assert not gptoss_bf16_lm_head_patches._is_gptoss_bf16_lm_head_can_patch(
+        wrong_model
+    )
+
+
+def test_gptoss_bf16_lm_head_patch_replaces_active_megatron_class(monkeypatch):
+    import megatron.core.tensor_parallel.layers as megatron_layers
+
+    sentinel = object()
+    monkeypatch.setattr(
+        megatron_layers,
+        "LinearWithGradAccumulationAndAsyncCommunication",
+        sentinel,
+    )
+    monkeypatch.setattr(gptoss_bf16_lm_head_patches, "log_rank_0", lambda *_: None)
+
+    gptoss_bf16_lm_head_patches.patch_gptoss_bf16_lm_head(_patch_context())
+
+    assert (
+        megatron_layers.LinearWithGradAccumulationAndAsyncCommunication
+        is tp_layers.LinearWithGradAccumulationAndAsyncCommunication
+    )
