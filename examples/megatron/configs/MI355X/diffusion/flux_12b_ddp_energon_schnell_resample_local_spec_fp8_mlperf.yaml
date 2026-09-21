@@ -173,8 +173,6 @@ modules:
       log_throughput: false
       wall_clock_step_timer: true
       log_timers_to_tensorboard: false
-      log_batch_size_to_tensorboard: false
-      log_learning_rate_to_tensorboard: false
       log_memory_to_tensorboard: false
 
       # Profiler — disabled for MLPerf

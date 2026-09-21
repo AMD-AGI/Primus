@@ -110,7 +110,6 @@ modules:
 
       profile: false
       use_pytorch_profiler: true
-      use_nsys_profiler: false
       profile_step_start: 8
       profile_step_end: 9
       profile_ranks: [0]

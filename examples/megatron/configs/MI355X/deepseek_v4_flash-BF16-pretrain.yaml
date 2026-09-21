@@ -53,9 +53,7 @@ modules:
       test_data_path: null
 
       # ---------- DeepSeek-V4 specific ----------
-      hybrid_attention_enabled: true
       attn_sink: true
-      hc_use_sinkhorn: true
       mtp_use_separate_hc_head: true
       moe_router_score_function: sqrtsoftplus
       swiglu_limit: 10.0
