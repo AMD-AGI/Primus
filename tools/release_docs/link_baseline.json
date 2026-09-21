@@ -1,0 +1,11 @@
+{
+  "known_problems": [
+    "docs/01-getting-started/bare-metal-installation.md: missing file -> ../02-user-guide/training-recipes.md",
+    "docs/04-technical-guides/diffusion-models/adding_new_models.md: dead anchor -> #best-practices",
+    "docs/04-technical-guides/diffusion-models/adding_new_models.md: dead anchor -> #example-adding-dit",
+    "docs/04-technical-guides/diffusion-models/adding_new_models.md: dead anchor -> #testing-your-model",
+    "docs/04-technical-guides/hybrid-models/gdn-guide.md: dead anchor -> #step-3-apply-megatron-lm-patches",
+    "docs/04-technical-guides/hybrid-models/kda-guide.md: dead anchor -> #step-3-apply-megatron-lm-patches",
+    "tools/installation/README.md: missing file -> ../../docs/02-user-guide/training-recipes.md"
+  ]
+}
