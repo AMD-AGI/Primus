@@ -1,0 +1,142 @@
+{
+  "_comment": [
+    "Classification rules for bump_version.py. Ordered: the first rule whose",
+    "'match' hits the line decides the action. {old} and {new} are substituted",
+    "with the version tokens; 'match' receives regex-escaped forms.",
+    "",
+    "Each rewrite rule carries its own 'replace' pairs so only the construct the",
+    "rule is about is touched. Replacing every {old} on a matched line would",
+    "corrupt lines that mix a live reference with a historical statement.",
+    "",
+    "'paths' restricts a rule by suffix. The heading rule needs it because '#' is",
+    "a markdown heading in .md but a comment in .sh/.yaml/.toml, where the text",
+    "is as likely to be history as a live claim.",
+    "",
+    "JSON rather than YAML because the package stays stdlib-only, so every tool here",
+    "runs on a bare Python with nothing installed -- the same constraint",
+    "tools/ci/check_version_consistency.py keeps."
+  ],
+
+  "excluded_paths": [
+    "docs/01-getting-started/release-notes.md",
+    ".github/workflows/docker-release/",
+    "tools/release_docs/",
+    "skills/release-docs-update/",
+    "third_party/",
+    "output/",
+    "logs/",
+    "ut_out/"
+  ],
+
+  "rewrite_scope": [
+    "README.md",
+    "docs/",
+    "runner/",
+    "tools/installation/",
+    "tools/installation-jax/",
+    "primus/__init__.py",
+    "pyproject.toml"
+  ],
+  "_rewrite_scope_why": [
+    "The documentation surface this agent owns. Outside it, references are held",
+    "rather than rewritten, because they pin an image on purpose: examples/mlperf/",
+    "records the image a submission was validated against, and examples/models/",
+    "and tools/docker/ launchers pin what their author tested. Verified against the",
+    "v26.6 release, which left every one of those references on v26.5 while",
+    "updating the docs."
+  ],
+  "_excluded_paths_why": {
+    "release-notes.md": "owned by release_notes.py, which rotates sections instead of substituting",
+    "docker-release/": "historical build recipes; rewriting them would falsify what an old image was built from",
+    "tools/release_docs/": "this tooling's own source, snapshots and rule files name releases as data and worked examples; scanning them put 82 self-referential items in the review list, enough to bury a real decision",
+    "skills/release-docs-update/": "the skill's examples are illustrations, not release references",
+    "third_party/": "vendored"
+  },
+
+  "rules": [
+    {
+      "name": "dated-changelog-entry",
+      "action": "hold",
+      "match": "^\\s*[-*]\\s*\\*\\*\\[\\d{4}/\\d{2}/\\d{2}\\]\\*\\*",
+      "why": "a dated announcement is history: the README 'What's New' list gains a new entry per release (v26.6 prepended one in #1114) and older entries keep the tags they shipped with, so rewriting them produces 'Primus v26.6 training images: rocm/primus:v26.7'"
+    },
+    {
+      "name": "ci-base-image",
+      "action": "hold",
+      "match": "BASE_IMAGE",
+      "why": "the CI dev image, not a published release reference: bumping it changes what CI builds against, and tools/ci/check_version_consistency.py couples the two declarations"
+    },
+    {
+      "name": "release-notes-anchor",
+      "action": "rewrite",
+      "match": "#[a-z0-9-]*{old_slug}\\b",
+      "replace": [["{old_slug}", "{new_slug}"], ["{old}", "{new}"]],
+      "why": "a heading anchor collapses 'v26.6' to 'v266', so the plain token never matches it. Both halves move together: these lines read 'Primus source for v26.6' and link to '#primus-source-for-v266', and updating only one leaves a label pointing at the wrong section. The first run shipped one dead anchor and three mislabelled links"
+    },
+    {
+      "name": "docker-image-tag",
+      "action": "rewrite",
+      "match": "rocm/primus:{old}|rocm/jax-training:maxtext-{old}|maxtext-{old}",
+      "replace": [
+        ["rocm/primus:{old}", "rocm/primus:{new}"],
+        ["rocm/jax-training:maxtext-{old}", "rocm/jax-training:maxtext-{new}"],
+        ["maxtext-{old}", "maxtext-{new}"]
+      ],
+      "why": "published image tags always move to the new release"
+    },
+    {
+      "name": "dockerfile-filename",
+      "action": "rewrite",
+      "match": "Dockerfile\\.(primus|jax)-{old}",
+      "replace": [["Dockerfile\\.(primus|jax)-{old}", "Dockerfile.\\1-{new}"]],
+      "why": "references to the release Dockerfile track the release"
+    },
+    {
+      "name": "pip-version-spec",
+      "action": "rewrite",
+      "match": "primus==\\s*{old_bare}",
+      "replace": [["(primus==\\s*){old_bare}(\\.\\d+)?", "\\g<1>{new_bare}.0"]],
+      "why": "documented wheel version"
+    },
+    {
+      "name": "package-dunder-version",
+      "action": "rewrite",
+      "match": "__version__",
+      "replace": [["(__version__\\s*=\\s*[\"']){old_bare}([\"'])", "\\g<1>{new_bare}\\g<2>"]],
+      "why": "the package version itself"
+    },
+    {
+      "name": "release-branch",
+      "action": "conditional",
+      "match": "release/{old}",
+      "replace": [["release/{old}", "release/{new}"]],
+      "why": "branch form only if the branch exists; otherwise the v26.4-style commit form"
+    },
+    {
+      "name": "comparison-or-range",
+      "action": "hold",
+      "match": "{old}\\s*(->|→|and|vs\\.?|through|to)\\s*v?\\d|v?\\d+\\.\\d+\\s*(->|→|vs\\.?|through)\\s*{old}",
+      "why": "comparisons intentionally name older releases"
+    },
+    {
+      "name": "historical-statement",
+      "action": "hold",
+      "match": "\\b(since|as of|dropped|drops|step down|predate|previous|earlier|used to|no longer|was built|workaround|fix(ed|es)?|bug|issue)\\b",
+      "why": "may be history to preserve rather than a claim to update"
+    },
+    {
+      "name": "markdown-heading",
+      "action": "rewrite",
+      "match": "^\\s*#{1,6}\\s",
+      "paths": [".md"],
+      "replace": [["{old}", "{new}"]],
+      "why": "a markdown heading naming the current release moves with it"
+    },
+    {
+      "name": "default-prose",
+      "action": "hold",
+      "match": ".",
+      "why": "unclassified: needs a human decision"
+    }
+  ]
+}
