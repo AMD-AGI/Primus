@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 from primus.backends.specforge.online_launch import (
     build_online_overrides,
@@ -221,9 +221,12 @@ def _capture_stack_failed(
     settings: dict[str, Any],
     master: Optional[subprocess.Popen],
     servers: list[subprocess.Popen],
-    url_list: Sequence[str],
 ) -> Optional[str]:
-    """Return a reason if Mooncake or a capture server died after producer start."""
+    """Return a reason if Mooncake or a local capture server process died.
+
+    Do not probe SGLang ``/health`` here: once capture traffic starts the
+    endpoint can time out on a live server (2p1c job 164088).
+    """
 
     if master is not None and master.poll() is not None:
         return "Mooncake exited"
@@ -233,10 +236,6 @@ def _capture_stack_failed(
     metadata = f"http://{head_ip}:{settings['mooncake_http_port']}/metadata?key=specforge-health-check"
     if not (_http_up(metadata) and _tcp_ok(head_ip, settings["mooncake_rpc_port"])):
         return "Mooncake stopped answering"
-    for url in url_list:
-        health = str(url).rstrip("/") + "/health"
-        if not _http_ok(health, timeout=1.0):
-            return f"capture server unhealthy: {health}"
     return None
 
 
@@ -343,7 +342,7 @@ def _run_capture_node(params: Any, settings: dict[str, Any]) -> None:
             failed = _failed_consumer_status(done_files)
             if failed is not None:
                 raise RuntimeError(f"[Primus:specforge] consumer failed with {failed}")
-            stack = _capture_stack_failed(head_ip, settings, master, servers, url_list)
+            stack = _capture_stack_failed(head_ip, settings, master, servers)
             if stack is not None:
                 raise RuntimeError(f"[Primus:specforge] {stack} after producer start")
             time.sleep(2)

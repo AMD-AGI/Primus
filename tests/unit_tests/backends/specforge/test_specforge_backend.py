@@ -1036,7 +1036,7 @@ class TestOnlineLaunch:
             "mooncake_http_port": 35880,
             "mooncake_rpc_port": 35551,
         }
-        reason = supervisor._capture_stack_failed("10.0.0.1", settings, None, [Dead()], [])
+        reason = supervisor._capture_stack_failed("10.0.0.1", settings, None, [Dead()])
         assert reason == "SGLang server 0 exited"
 
     def test_specforge_child_env_forces_single_node_rank(self, monkeypatch):
