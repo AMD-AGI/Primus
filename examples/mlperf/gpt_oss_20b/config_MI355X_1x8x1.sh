@@ -67,6 +67,16 @@ export NCCL_NVLS_ENABLE=0
 export NCCL_CHECKS_DISABLE=1
 export TORCH_NCCL_HIGH_PRIORITY=1
 
+# Route distributed-optimizer parameter AllGather through the dedicated
+# zero-CTA RCCL communicator backed by symmetric memory. The eager allocation
+# size is the validated GPT-OSS-20B reservation for this 8x MI355X recipe.
+export MEGATRON_PARAM_GATHER_BACKEND="${MEGATRON_PARAM_GATHER_BACKEND:-rccl_sdma}"
+export MEGATRON_RCCL_SDMA_EAGER_PARAM_BYTES="${MEGATRON_RCCL_SDMA_EAGER_PARAM_BYTES:-40978350080}"
+
+# More than one synthetic warmup step can exceed memory headroom while the
+# approximately 41 GB symmetric parameter buffer is resident.
+export SYNTH_WARMUP_STEPS="${SYNTH_WARMUP_STEPS:-1}"
+
 export USE_HIPBLASLT=1
 export TORCH_BLAS_PREFER_HIPBLASLT=1
 if [ -z "${HIPBLASLT_TUNING_OVERRIDE_FILE:-}" ]; then
