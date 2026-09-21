@@ -1,0 +1,250 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Primus release performance suite.
+#
+# The curated set of models benchmarked for a release -- deliberately a small
+# subset of the ~470 runnable configs under examples/.
+#
+# Structure:  <GPU>:  ->  <backend>:  ->  list of config paths
+#
+#
+# ============================ EDITING THIS FILE ==============================
+#
+# YOU ONLY TOUCH THE SECTION FOR THE GPU AND BACKEND YOU ARE RUNNING.
+#
+# A run selects exactly one GPU and the backends you name, so every other
+# section in this file is ignored. Running MI325X/megatron never reads the
+# MI300X, MI355X, torchtitan, maxtext or maxdiffusion entries -- leave them
+# alone, even if they look wrong for your machine.
+#
+#   1. Find your GPU block, then your backend inside it.
+#   2. Entries are enabled by default, so that whole suite runs as-is. To run
+#      a subset, comment out the models you want to skip -- ideally with a
+#      reason, so the next person knows whether it is still true.
+#   3. To run a model that is not listed, add its examples/ path to that same
+#      backend list.
+#
+# For example, to run only 8B and 70B on MI325X/megatron plus one model that
+# is not in the suite:
+#
+#   MI325X:
+#     megatron:
+#       - examples/megatron/configs/MI325X/llama3.1_8B-BF16-pretrain.yaml
+#       - examples/megatron/configs/MI325X/llama3.1_70B-BF16-pretrain.yaml
+#       - examples/megatron/configs/MI325X/qwen3_32B-BF16-pretrain.yaml  # added
+#     # - examples/megatron/configs/MI325X/deepseek_v3-BF16-pretrain.yaml  # OOM
+#
+# Rules for anything you add:
+#   * paths are relative to the repo root;
+#   * the backend key must match the framework the config declares;
+#   * do NOT comment out a backend key such as `megatron:` -- that orphans its
+#     indented list items and breaks the YAML. Use BACKEND= to choose which
+#     backends run.
+#
+# Every path here is checked by tests/unit_tests/tools/test_perf_catalog.py,
+# so a typo, a misfiled entry, or a config renamed under examples/ fails a PR
+# rather than a benchmark night.
+#
+# Prefer not to touch the shared file? Copy it and point CONFIG_FILE at your
+# copy:
+#   cp tools/perf/configs.yaml "$RESULT_DIR/configs.yaml"
+#   CONFIG_FILE="$RESULT_DIR/configs.yaml" bash tools/perf/run_batch.sh
+#
+# =============================================================================
+#
+#
+# Usage:
+#   GPU=MI325X BACKEND=megatron bash tools/perf/run_batch.sh
+#
+#   GPU     picks the top-level key. Optional: when unset it is detected from
+#           the rocm-smi product name.
+#   BACKEND picks second-level keys, comma-separated. Required, because each
+#           training image carries only one framework stack:
+#             primus_the_rock_ci_* (PyTorch) -> megatron, torchtitan
+#             jax_the_rock_ci_*    (JAX)     -> maxtext, maxdiffusion
+#           Those are the two valid groupings; megatron,maxtext cannot work on
+#           either image, so there is no safe "run them all" default.
+#
+# The three GPUs carry the same model set. Two naming differences are
+# hardware, not oversight:
+#   * MaxText FP8 is `nanoo_fp8` on MI300X / MI325X (gfx942) and `fp8` on
+#     MI355X (gfx950).
+#   * MaxDiffusion has no MI325X directory upstream, so MI325X runs the
+#     MI300X configs; the copies in the v26.7 result directory are
+#     byte-identical to them.
+###############################################################################
+
+# ----------------------------------------------------------------------------
+# MI300X   (gfx942 -- MaxText FP8 is spelled `nanoo_fp8`)
+# ----------------------------------------------------------------------------
+MI300X:
+  megatron:
+    - examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/gpt_oss_20B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/gpt_oss_20B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI300X/llama3.3_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/llama3.3_70B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/qwen2.5_7B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/qwen2.5_7B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI300X/qwen2.5_72B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/qwen3_30B_A3B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/qwen3_30B_A3B-FP8-pretrain.yaml
+
+  torchtitan:
+    - examples/torchtitan/configs/MI300X/deepseek_v3_16b-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/torchtitan/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml
+
+  maxtext:
+    - examples/maxtext/configs/MI300X/deepseek_v2_16B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/deepseek_v2_16B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/gemma4_26B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/gemma4_26B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/gemma4_31B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/gemma4_31B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/llama2_7B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/llama2_7B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/llama2_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/llama2_70B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/llama3_8B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/llama3_8B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/llama3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/llama3.3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/mixtral_8x7B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/mixtral_8x7B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/mixtral_8x22B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/qwen3_14B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/qwen3_14B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/qwen3_30B_A3B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/qwen3_30B_A3B-nanoo_fp8-pretrain.yaml
+
+  maxdiffusion:
+    - examples/maxdiffusion/configs/MI300X/flux_dev-pretrain.yaml
+    - examples/maxdiffusion/configs/MI300X/wan2.1_1.3b-pretrain.yaml
+    - examples/maxdiffusion/configs/MI300X/wan2.1_14b-pretrain.yaml
+
+# ----------------------------------------------------------------------------
+# MI325X   (gfx942 -- MaxText FP8 is spelled `nanoo_fp8`)
+# ----------------------------------------------------------------------------
+MI325X:
+  megatron:
+    - examples/megatron/configs/MI325X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/gpt_oss_20B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/gpt_oss_20B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI325X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI325X/llama3.1_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/llama3.1_70B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI325X/llama3.3_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/llama3.3_70B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI325X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/qwen2.5_7B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/qwen2.5_7B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI325X/qwen2.5_72B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/qwen3_30B_A3B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/qwen3_30B_A3B-FP8-pretrain.yaml
+
+  torchtitan:
+    - examples/torchtitan/configs/MI325X/deepseek_v3_16b-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI325X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI325X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/torchtitan/configs/MI325X/llama3.1_70B-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI325X/llama3.1_70B-FP8-pretrain.yaml
+
+  maxtext:
+    - examples/maxtext/configs/MI325X/deepseek_v2_16B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/deepseek_v2_16B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI325X/gemma4_26B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/gemma4_26B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI325X/gemma4_31B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/gemma4_31B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI325X/llama2_7B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/llama2_7B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI325X/llama2_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/llama2_70B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI325X/llama3_8B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/llama3_8B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI325X/llama3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/llama3.3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/mixtral_8x7B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/mixtral_8x7B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI325X/mixtral_8x22B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/qwen3_14B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/qwen3_14B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI325X/qwen3_30B_A3B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/qwen3_30B_A3B-nanoo_fp8-pretrain.yaml
+
+  # No MI325X directory upstream; these MI300X configs are what runs on MI325X.
+  maxdiffusion:
+    - examples/maxdiffusion/configs/MI300X/flux_dev-pretrain.yaml
+    - examples/maxdiffusion/configs/MI300X/wan2.1_1.3b-pretrain.yaml
+    - examples/maxdiffusion/configs/MI300X/wan2.1_14b-pretrain.yaml
+
+# ----------------------------------------------------------------------------
+# MI355X   (gfx950 -- native FP8, so MaxText FP8 is spelled `fp8`)
+# ----------------------------------------------------------------------------
+MI355X:
+  megatron:
+    - examples/megatron/configs/MI355X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/gpt_oss_20B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.1_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.1_70B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.3_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.3_70B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/qwen2.5_7B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/qwen2.5_7B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/qwen2.5_72B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/qwen3_30B_A3B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/qwen3_30B_A3B-FP8-pretrain.yaml
+
+  torchtitan:
+    - examples/torchtitan/configs/MI355X/deepseek_v3_16b-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI355X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/torchtitan/configs/MI355X/llama3.1_70B-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI355X/llama3.1_70B-FP8-pretrain.yaml
+
+  # MI355X (gfx950) has native FP8, so the FP8 variants are named `fp8` here
+  # where MI300X / MI325X (gfx942) use `nanoo_fp8`.
+  maxtext:
+    - examples/maxtext/configs/MI355X/deepseek_v2_16B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/deepseek_v2_16B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI355X/gemma4_26B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/gemma4_26B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI355X/gemma4_31B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/gemma4_31B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama2_7B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama2_7B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama2_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama2_70B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama3_8B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama3_8B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama3.3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/mixtral_8x7B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/mixtral_8x7B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI355X/mixtral_8x22B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/qwen3_14B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/qwen3_14B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI355X/qwen3_30B_A3B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/qwen3_30B_A3B-fp8-pretrain.yaml
+
+  maxdiffusion:
+    - examples/maxdiffusion/configs/MI355X/flux_dev-pretrain.yaml
+    - examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml
+    - examples/maxdiffusion/configs/MI355X/wan2.1_14b-pretrain.yaml
