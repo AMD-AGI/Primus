@@ -273,16 +273,13 @@ modules:
       # =====================================================================
       profile: true
       use_pytorch_profiler: true
-      use_nsys_profiler: false
       profile_step_start: 10
       profile_step_end: 11
       profile_ranks: [0]
       pytorch_profiler_collect_shapes: true
       pytorch_profiler_collect_callstack: false
       pytorch_profiler_collect_chakra: false
-      record_shapes: false
       record_memory_history: false
-      nvtx_ranges: false
 
       eval_iters: 0
 

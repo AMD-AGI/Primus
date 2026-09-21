@@ -129,7 +129,6 @@ modules:
       moe_deepep_num_sms: 20
       moe_enable_deepep: false
       moe_expert_capacity_factor: null
-      moe_extended_tp: false
       moe_ffn_hidden_size: 2880
       moe_flex_dispatcher_backend: deepep
       moe_grouped_gemm: true
@@ -200,8 +199,8 @@ modules:
       # FlyDSL is registered for MXFP4 grouped GEMM. All expert layers are
       # MXFP4 (no first/last BF16), so fp4:flydsl covers the MoE path.
       turbo_grouped_gemm_backend: ${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:fp4:flydsl,other:hipblaslt}
-      # Placeholder for the fused grouped MLP (fc1+GLU+fc2+WGRAD). The Primus
-      # wiring is not merged yet, so this reads as a plain no-op today.
+      # Fuse fc1 + GLU + fc2 (including WGRAD) when the selected Turbo
+      # quantization recipe supports the grouped-MLP op.
       turbo_fused_grouped_gemm: ${PRIMUS_TURBO_FUSED_GROUPED_GEMM:false}
       turbo_grouped_gemm_without_padding: ${TURBO_GROUPED_GEMM_WITHOUT_PADDING:true}
       use_turbo_rms_norm: true
@@ -225,8 +224,6 @@ modules:
       tensorboard_log_interval: 1
       tensorboard_queue_size: 1000
       log_timers_to_tensorboard: true
-      log_batch_size_to_tensorboard: true
-      log_learning_rate_to_tensorboard: true
       log_validation_ppl_to_tensorboard: true
       log_memory_to_tensorboard: true
       log_world_size_to_tensorboard: true

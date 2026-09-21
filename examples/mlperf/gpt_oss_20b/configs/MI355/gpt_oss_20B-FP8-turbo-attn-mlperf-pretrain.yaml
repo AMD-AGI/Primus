@@ -189,8 +189,8 @@ modules:
       turbo_gemm_backend: ${PRIMUS_TURBO_GEMM_BACKEND:fp8:flydsl,fp4:flydsl,other:hipblaslt}
       use_turbo_grouped_gemm: true
       turbo_grouped_gemm_backend: ${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:flydsl}
-      # Placeholder for the fused grouped MLP (fc1+GLU+fc2+WGRAD). The Primus
-      # wiring is not merged yet, so this reads as a plain no-op today.
+      # Fuse fc1 + GLU + fc2 (including WGRAD) when the selected Turbo
+      # quantization recipe supports the grouped-MLP op.
       turbo_fused_grouped_gemm: ${PRIMUS_TURBO_FUSED_GROUPED_GEMM:false}
       turbo_grouped_gemm_without_padding: ${TURBO_GROUPED_GEMM_WITHOUT_PADDING:true}
       use_turbo_rms_norm: ${USE_TURBO_RMS_NORM:true}

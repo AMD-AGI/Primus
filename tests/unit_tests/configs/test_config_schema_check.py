@@ -580,6 +580,12 @@ def test_megatron_args_reads_are_derived_from_the_backend_package(megatron_repo:
     assert all(r.consumer.startswith("primus/backends/megatron/") for r in rules)
 
 
+def test_removed_megatron_arg_is_not_revived_by_compatibility_metadata():
+    patterns = {r.pattern for r in extract_args_read_rules(_REPO_ROOT, "megatron")}
+
+    assert "async_tensor_model_parallel_allreduce" not in patterns
+
+
 def test_megatron_config_extension_fields_are_schema(megatron_repo: Path):
     """A Primus TransformerConfig subclass widens the key set, transitively."""
     keys, source = extract_backend_config_extensions(megatron_repo, "megatron")

@@ -130,7 +130,6 @@ modules:
       moe_deepep_num_sms: 20
       moe_enable_deepep: false
       moe_expert_capacity_factor: null
-      moe_extended_tp: false
       moe_ffn_hidden_size: 2880
       moe_flex_dispatcher_backend: deepep
       moe_grouped_gemm: true
@@ -186,11 +185,9 @@ modules:
       use_turbo_grouped_gemm: true
       use_turbo_rms_norm: ${USE_TURBO_RMS_NORM:true}
       use_turbo_fused_act_with_probs : true
-      # Pad tokens-per-expert so the fp8 grouped GEMM path skips the buggy
-      # quantization_padding branch in PrimusGroupedMLP.forward (experts.py:97-109),
-      # which yields NaN with recompute. Not auto-enabled here because
-      # turbo_sync_free_moe_stage=0 (it is only auto-set for sync-free stages 1-3).
-      use_turbo_permute_padding: true
+      # `use_turbo_permute_padding` and its buggy padding path were retired by
+      # #828. `moe_router_padding_for_quantization: false` above preserves this
+      # config's original intent without reviving the removed switch.
 
       # deepep
       use_turbo_deepep: false
@@ -214,8 +211,6 @@ modules:
       tensorboard_log_interval: 1
       tensorboard_queue_size: 1000
       log_timers_to_tensorboard: true
-      log_batch_size_to_tensorboard: true
-      log_learning_rate_to_tensorboard: true
       log_validation_ppl_to_tensorboard: true
       log_memory_to_tensorboard: true
       log_world_size_to_tensorboard: true

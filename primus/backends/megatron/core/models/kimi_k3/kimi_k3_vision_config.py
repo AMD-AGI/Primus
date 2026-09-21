@@ -267,7 +267,6 @@ _INHERITED_ENV_FIELDS = (
     "use_cpu_initialization",
     "init_method_std",
     "gradient_accumulation_fusion",
-    "async_tensor_model_parallel_allreduce",
     "tp_comm_overlap",
     "deallocate_pipeline_outputs",
     "bias_activation_fusion",
