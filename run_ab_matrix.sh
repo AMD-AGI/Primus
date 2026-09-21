@@ -17,7 +17,7 @@ set -uo pipefail
 # LOCAL=1: driver and container on the same host — docker exec only, no ssh.
 # Default LOCAL=0 keeps the old remote-driver layout (ssh to NODE, then docker exec).
 LOCAL=${LOCAL:-0}
-NODE=${NODE:-smci355-ccs-aus-n04-21}
+NODE=${NODE:-smci355-ccs-aus-n02-21}
 CONTAINER=${CONTAINER:-xiaoming-dev}
 LAYERS=${NUM_LAYERS:-4}
 ITERS=${TRAIN_ITERS:-50}
@@ -44,7 +44,11 @@ ARMS=(
     "mxfp8 True"
     "bf16  False"
 )
-[ -n "${ONLY:-}" ] && ARMS=("$ONLY")
+# ONLY takes one arm per `;`-separated field, so a subset of the matrix (e.g. both MegaMoE arms
+# without their baselines) is selectable without editing this file.
+if [ -n "${ONLY:-}" ]; then
+    IFS=';' read -r -a ARMS <<<"$ONLY"
+fi
 
 run_in_container() {
     docker exec \
@@ -54,6 +58,7 @@ run_in_container() {
         -e TRAIN_ITERS="$ITERS" \
         -e LOG="$3" \
         -e EXTRA_ARGS="$4" \
+        -e ALL_RANKS="${ALL_RANKS:-0}" \
         "$CONTAINER" bash "$REPO/run.sh"
 }
 
@@ -107,6 +112,7 @@ for spec in "${ARMS[@]}"; do
             -e TRAIN_ITERS=$ITERS \
             -e LOG=$log \
             -e EXTRA_ARGS='$extra' \
+            -e ALL_RANKS=${ALL_RANKS:-0} \
             $CONTAINER bash $REPO/run.sh" >"$OUT/$name.outer.log" 2>&1
     fi
     echo "########## $name done rc=$? in $((SECONDS - start))s  $(date -Is)"

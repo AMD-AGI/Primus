@@ -65,6 +65,14 @@ GBS=${GBS:-512}
 # baseline the turbo grouped GEMM: EXTRA_ARGS="--use_turbo_grouped_gemm True".
 EXTRA_ARGS=${EXTRA_ARGS:-}
 USE_TURBO_DEEPEEP=${USE_TURBO_DEEPEEP:-True}
+# ALL_RANKS=1 logs every rank, not just rank 0. primus-cli-direct.sh computes its own
+# --local-ranks-filter, but LOCAL_RANKS is appended after it on the torchrun command line and
+# argparse takes the last occurrence, so this overrides it. Needed whenever a non-zero rank is the
+# one that dies: with the default filter its traceback never reaches the log and all that survives
+# is torchrun's "exitcode 1 (local_rank: N)".
+if [ "${ALL_RANKS:-0}" = 1 ]; then
+    export LOCAL_RANKS="--local-ranks-filter 0,1,2,3,4,5,6,7"
+fi
 # Both the precision and the arm go in the log name: the four arms of a 2x2 would otherwise
 # overwrite each other. A driver that wants its own layout passes LOG.
 ARM=mega
