@@ -102,11 +102,11 @@ fixed-shape tensors, so no training or evaluation sample is read before
 ## Cached max-autotune
 
 Generate one node-local cache per allocation node before training. The setup
-supports 1-node, 2-node, and 4-node allocations:
+uses only synthetic fixed-shape tensors and never opens the training or
+evaluation datasets. It supports 1-node, 2-node, and 4-node allocations:
 
 ```bash
-ALLOCATION_JOB_ID=<job-id> DATA_ROOT=/path/to/data \
-OUTPUT_ROOT=/shared/path/to/output \
+ALLOCATION_JOB_ID=<job-id> OUTPUT_ROOT=/shared/path/to/output \
 bash examples/mlperf/flux1/setup_max_autotune_cache.sh
 ```
 
