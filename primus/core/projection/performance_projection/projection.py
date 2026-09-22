@@ -22,6 +22,7 @@ from primus.core.projection.config_validation import (
     assert_recompute_pipeline_compat,
     recompute_is_enabled,
 )
+from primus.core.projection.frameworks import normalize_primus_config
 from primus.core.projection.memory_capture import MemoryBenchmarkRecorder, format_bytes
 from primus.core.projection.module_profilers import collective_model as cm
 from primus.core.projection.module_profilers.collective_args import get_default_args
@@ -4039,6 +4040,9 @@ def launch_projection_from_cli(args, overrides):
 
     # Load Primus configuration
     primus_config, unknown_overrides = load_primus_config(args, overrides)
+    # Translate the backend's own config spelling into the projection's before
+    # anything below reads or edits parallel degrees on the namespace.
+    normalize_primus_config(primus_config)
 
     # ── Apply projection-specific CLI overrides to the config ──
     # These args are registered in the projection CLI so they don't leak

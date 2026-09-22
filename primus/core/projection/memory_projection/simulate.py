@@ -22,6 +22,7 @@ from typing import Optional
 
 from primus.core.launcher.parser import load_primus_config
 from primus.core.projection.config_validation import assert_recompute_pipeline_compat
+from primus.core.projection.frameworks import normalize_primus_config
 from primus.core.projection.module_profilers.language_model import build_profiler
 from primus.core.projection.training_config import (
     convert_primus_config_to_projection_config,
@@ -163,6 +164,7 @@ def launch_projection_from_cli(args, overrides):
         raise FileNotFoundError(f"[Primus:Projection] Config file '{cfg_path}' not found.")
 
     primus_config, _unknown_overrides = load_primus_config(args, overrides or [])
+    normalize_primus_config(primus_config)
     return project_from_config(
         primus_config,
         verbose=True,

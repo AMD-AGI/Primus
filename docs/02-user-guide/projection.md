@@ -19,6 +19,35 @@ Related: [Micro-benchmarking suite](./micro-benchmarking.md), [Preflight diagnos
 
 ---
 
+## Training backends
+
+Projection reads the `framework` field of your experiment's `pre_trainer` module and adapts that backend's own configuration into the shapes and parallel degrees it models. A Llama 3 8B runs the same GEMMs over the same tensors whichever backend trains it, so all three share one profiler tree.
+
+| `framework` | Config it reads | Benchmark modes | Simulate mode |
+|-------------|-----------------|-----------------|---------------|
+| `megatron` | Megatron arguments directly | Yes | Yes |
+| `torchtitan` | `model.flavor`, `parallelism.*` degrees, `activation_checkpoint.mode`, model converters | No | Yes |
+| `maxtext` (or `jax`) | `model_name`, `ici_*` / `dcn_*` mesh axes, `per_device_batch_size`, `remat_policy`, `quantization` | No | Yes |
+| `torchrec_dlrm` | DLRM arguments | Yes | Yes |
+
+Benchmark-anchored projection runs the real trainer to measure layer time and memory, and Primus only has that harness for Megatron and DLRM. For TorchTitan and MaxText, pass `--memory-mode simulate` or `--profiling-mode simulate`; the CLI says so explicitly if you forget. Everything downstream of the measurement — pipeline scheduling, communication modeling, node-count scaling — is identical across backends.
+
+### Where the model architecture comes from
+
+TorchTitan keeps its architectures in a Python flavor table and MaxText keeps its in YAML, so neither is spelled out in the experiment file. Projection resolves them in this order:
+
+1. Architecture keys set directly in the experiment YAML.
+2. The installed backend — TorchTitan's flavor table, or MaxText's model configs under `third_party/maxtext` (or `PRIMUS_MAXTEXT_PATH`).
+3. A transcribed table in `primus/core/projection/frameworks/model_specs.py`, so sizing a cluster needs neither a GPU nor a training checkout.
+
+`tests/unit_tests/core/projection/test_projection_model_specs.py` re-checks the transcriptions against each backend whenever one is present, so a spec that drifts from upstream fails a test rather than quietly mis-sizing a cluster.
+
+### Adding another backend
+
+Backend selection is registry-driven. Out-of-tree code can add one by writing an adapter that rewrites its trainer namespace in the projection's field names and calling `primus.core.projection.frameworks.register_config_adapter(name, adapter)`. Adapters must normalize **in place** and be **idempotent**: the performance driver caps the layer stack, rescales EP onto the bench node and flattens PP on the normalized config, then converts it again.
+
+---
+
 ## Memory projection
 
 ### Quick start
@@ -162,7 +191,7 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 2. Always establish a **single-node** baseline before interpreting multi-node projections.
 3. **Data-parallel scaling** is bounded by batching: if you run out of microbatches (`global_batch_size` / `micro_batch_size`), adding nodes may not increase throughput.
 4. If the YAML **requires** multiple nodes (for example large PP), the performance path may automatically reduce parallelism for benchmarking and restore it analytically—read the console summary carefully.
-5. **No GPU available:** use `--profiling-mode simulate` for CPU-side analytical timing.
+5. **No GPU available:** use `--profiling-mode simulate` for CPU-side analytical timing. This is also the only mode available for TorchTitan and MaxText experiments.
 6. **Validate models:** use `--profiling-mode both` to compare GPU benchmark timing with simulation on the same config.
 7. For **MoE** models, activation memory from MoE layers often dominates; memory projection highlights when recomputation is worth considering.
 

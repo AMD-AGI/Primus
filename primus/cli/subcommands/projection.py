@@ -8,12 +8,47 @@ import argparse as _argparse
 import os
 import tempfile
 
+# Frameworks whose trainer the bench can actually run to measure layer time and
+# per-rank memory.  Every framework the projection can *read* (see
+# ``primus.core.projection.frameworks``) can still be simulated.
+_BENCHMARKABLE_FRAMEWORKS = frozenset({"megatron"})
+
+
+def _experiment_framework(args) -> str:
+    """Return the framework the experiment YAML names, defaulting to megatron."""
+    from primus.core.utils import yaml_utils
+
+    try:
+        exp = yaml_utils.parse_yaml_to_namespace(args.config)
+        modules = getattr(exp, "modules", None)
+        for module_name in ("pre_trainer", "post_trainer"):
+            module = getattr(modules, module_name, None)
+            framework = getattr(module, "framework", None) if module is not None else None
+            if framework:
+                return str(framework).lower().strip()
+    except Exception:
+        # The launchers parse the config properly a moment later and will report
+        # anything wrong with it; this read only picks the backend path.
+        pass
+    return "megatron"
+
+
+def _require_benchmarkable(framework: str, simulate_flag: str) -> None:
+    if framework in _BENCHMARKABLE_FRAMEWORKS:
+        return
+    raise NotImplementedError(
+        f"Benchmark-anchored projection runs the trainer to measure layer time and "
+        f"memory, and Primus has no bench harness for '{framework}' yet. Project it "
+        f"analytically instead with {simulate_flag}, or load a previously saved bench "
+        "artifact with --load-benchmark."
+    )
+
 
 def run(args, overrides):
     """
     Entry point for the 'projection' subcommand.
     """
-    framework = "megatron"
+    framework = _experiment_framework(args)
 
     if args.suite == "memory":
         # Benchmark / both modes need the backend on the import path
@@ -25,6 +60,8 @@ def run(args, overrides):
             # If only loading a previously saved artifact, no backend needed.
             load_path = getattr(args, "load_benchmark", None) or getattr(args, "compute_baseline", None)
             if not load_path:
+                _require_benchmarkable(framework, "--memory-mode simulate")
+
                 from primus.pretrain import setup_backend_path
 
                 setup_backend_path(framework=framework, verbose=True)
@@ -41,6 +78,8 @@ def run(args, overrides):
         needs_backend = profiling_mode != "simulate" and not load_benchmark_path
 
         if needs_backend:
+            _require_benchmarkable(framework, "--profiling-mode simulate")
+
             from primus.pretrain import setup_backend_path
 
             setup_backend_path(framework=framework, verbose=True)
@@ -53,6 +92,8 @@ def run(args, overrides):
     elif args.suite == "both":
         # Run the perf bench once, save the artifact, then run memory
         # projection from the loaded artifact (no second bench).
+        _require_benchmarkable(framework, "projection performance --profiling-mode simulate")
+
         from primus.core.projection.memory_projection.benchmark import (
             launch_projection_from_cli as memory_benchmark_launch,
         )
