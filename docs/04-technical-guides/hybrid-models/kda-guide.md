@@ -68,7 +68,7 @@ trillion-token training to lift above 25 %).
 - [Prerequisites](#prerequisites)
 - [Step 1: Environment](#step-1-environment)
 - [Step 2: Dataset preparation](#step-2-dataset-preparation)
-- [Step 3: Apply Megatron-LM patches](#step-3-apply-megatron-lm-patches)
+- [Step 3: Apply Megatron-LM patches](#step-3-megatron-lm-patches-automatic--no-action-needed)
 - [Step 4: (Optional) Initialize from FLA weights](#step-4-optional-initialize-from-fla-weights)
 - [Step 5: Train](#step-5-train)
 - [Step 6: Monitor and compare against FLA](#step-6-monitor-and-compare-against-fla)
@@ -657,7 +657,7 @@ meaningfully affects RACE.
 
 ## See also
 
-- [`docs/04-technical-guides/hybrid-models/README.md`](README.md) — full Hylo hybrid family
+- [`docs/04-technical-guides/hybrid-models/README.md`](README.md) — full Zebra hybrid family
   overview (1 B / 3 B / 8 B Mamba+MLA, KDA variants)
 - [`docs/04-technical-guides/hybrid-models/gdn-guide.md`](gdn-guide.md) — the GDN companion
   recipe (shares Megatron patches and dataset shim with this one)

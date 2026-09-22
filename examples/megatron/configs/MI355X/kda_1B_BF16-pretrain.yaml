@@ -10,7 +10,7 @@ modules:
 
     model: kda_1B.yaml
     overrides:
-      wandb_project: "Primus_Hylo_1B_KDA_Pure_Pretrain"
+      wandb_project: "Primus_Zebra_1B_KDA_Pure_Pretrain"
       stderr_sink_level: DEBUG
 
       eval_iters: 0
@@ -34,7 +34,7 @@ modules:
       fused_ce_chunks: 8
       use_fla_fused_swiglu: true
       # NOTE: use_fla_fused_rmsnorm is intentionally left OFF. On this build the
-      # hylo hybrid_block residual-fusion path (hybrid_block.py:369) unpacks
+      # zebra hybrid_block residual-fusion path (hybrid_block.py:369) unpacks
       # exactly 2 values from pre_mlp_layernorm; FLA's fused RMSNorm returns a
       # different arity -> "too many values to unpack". Keep the Megatron norm.
       use_fla_short_conv: true

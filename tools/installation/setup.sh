@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # setup.sh — Reproduce the Primus training environment in a Python venv
 # (no sudo, no docker). Mirrors the pins of
-#   .github/workflows/docker-release/Dockerfile.primus-v26.6
+#   .github/workflows/docker-release/Dockerfile.primus-v26.7
 # adapted for:
 #   * Python 3.12, auto-provisioned with `uv` (the pinned torch nightly is
 #     cp312-only on Linux; see README.md)
@@ -31,7 +31,7 @@ OPTIONAL_STAGES=(torchrec)
 
 usage() {
     cat <<EOF
-setup.sh — build the Primus v26.6 training environment in a venv.
+setup.sh — build the Primus v26.7 training environment in a venv.
 
 PRIMUS_BASE must be exported first; it has no default because the right location
 is site-specific. Point it at a writable dir on a disk with tens of GB free:
@@ -64,29 +64,47 @@ die()  { echo -e "\033[1;31m[setup][ERROR] $*\033[0m" >&2; exit 1; }
 # shellcheck disable=SC1091
 reload_env() { source "$SCRIPT_DIR/env.sh"; }
 
-# ---- pinned versions / commits (from Dockerfile.primus-v26.6) ----
-TORCH_INDEX="https://rocm.nightlies.amd.com/whl-multi-arch"
+# ---- pinned versions / commits (from Dockerfile.primus-v26.7) ----
+# v26.7 splits the wheels across stable.repo.amd.com indexes; the single
+# rocm.nightlies.amd.com/whl-multi-arch index used up to v26.6 no longer carries
+# them. ROCm core and the torch set live on separate indexes, so stage_torch
+# passes one as --index-url and the other as --extra-index-url.
+ROCM_INDEX="https://stable.repo.amd.com/rocm/core/whl-next/"
+TORCH_INDEX="https://stable.repo.amd.com/rocm/pytorch/whl-next/"
 # The Dockerfile pins only `torch` and lets torchaudio/apex float and
 # torchvision resolve as `==0.27`. That no longer resolves: newer rocm10.x
 # nightlies now publish matching version numbers, so a floating torchvision
 # drags in a build for a different ROCm line and the resolve dies on a
-# backtracking storm. These are the versions the a20260727 nightly published,
-# i.e. the exact set the Dockerfile picked up when it was built.
-PYTORCH_VERSION="2.12.0+rocm7.15.0a20260727"
-ROCM_SDK_VERSION="7.15.0a20260727"
-TORCHAUDIO_VERSION="2.11.0+rocm7.15.0a20260727"
-TORCHVISION_VERSION="0.27.0+rocm7.15.0a20260727"
-APEX_VERSION="1.12.0+rocm7.15.0a20260727"
+# backtracking storm. These are the versions read out of the published
+# rocm/primus:v26.7 image, i.e. the exact set the Dockerfile resolved to.
+PYTORCH_VERSION="2.12.0+rocm10.0.0"
+ROCM_SDK_VERSION="10.0.0"
+TORCHAUDIO_VERSION="2.11.0+rocm10.0.0"
+TORCHVISION_VERSION="0.27.0+rocm10.0.0"
+APEX_VERSION="1.13.0+rocm10.0.0"
 FLASH_ATTN_VERSION="2.8.1"
-# v26.6 installs TransformerEngine from the ROCm multi-arch staging index.
-# Those wheels are built on Ubuntu 24.04 though, and libtransformer_engine.so
-# needs glibc >= 2.38, so they cannot load on a 22.04 host. stage_te falls back
-# to building the same TE commit from source; see PRIMUS_TE_MODE and the README.
-TE_INDEX="https://rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/"
-TE_VERSION="2.17.0+rocm7.15.0a20260727.e028a6c"
-TE_WHEEL_MIN_GLIBC="2.38"
+# v26.7 installs TransformerEngine from the ROCm multi-arch staging index, which
+# moved from frameworks-nightlies to frameworks-devreleases this release. Those
+# wheels are built on Ubuntu 24.04 though, and libtransformer_engine.so needs
+# glibc >= 2.38, so they cannot load on a 22.04 host. stage_te falls back to
+# building TE from source; see PRIMUS_TE_MODE and the README.
+# v26.7 installs three TE distributions (v26.6 had two): the `transformer_engine`
+# and `transformer_engine_rocm10` pair from the ROCm TE index, plus the torch
+# flavour from the multi-arch staging index.
+TE_CORE_INDEX="https://stable.repo.amd.com/rocm/transformer_engine/whl-next/"
+TE_INDEX="https://rocm.frameworks-devreleases.amd.com/whl-multi-arch-staging/"
+TE_VERSION="2.17.0+rocm10.0.0"
+# v26.7 lowers this from 2.38. The native code now ships as
+# `transformer_engine_rocm10`, a manylinux_2_28 wheel whose libtransformer_engine.so
+# needs no symbol newer than GLIBC_2.27; the torch flavour is a small sdist built
+# locally. v26.6's wheels were Ubuntu 24.04 builds and genuinely needed 2.38.
+# Verified on Ubuntu 22.04 / glibc 2.35: installs and imports cleanly.
+TE_WHEEL_MIN_GLIBC="2.28"
 TE_REPO="https://github.com/ROCm/TransformerEngine.git"
-# The commit the TE_VERSION local label refers to (…a20260727.e028a6c).
+# NEEDS CONFIRMATION for v26.7: the v26.6 wheel carried its source commit in the
+# local label (…a20260727.e028a6c), but 2.17.0+rocm10.0.0 does not, and the
+# Dockerfile no longer checks TE out, so the commit cannot be derived from either.
+# This is still the v26.6 commit and only affects the source-build fallback path.
 TE_COMMIT="e028a6c"
 TORCHTUNE_REPO="https://github.com/pytorch/torchtune.git"
 TORCHTUNE_BRANCH="b4c98ac2a37f0397d64c22579aed415ce7264db6"
@@ -100,19 +118,27 @@ MAMBA_REPO="https://github.com/AndreasKaratzas/mamba.git"
 MAMBA_BRANCH="enable-primus-hybrid-models"
 TVM_FFI_VERSION="0.1.11"
 PRIMUS_REPO="https://github.com/AMD-AGI/Primus.git"
-# Latest commit on `release/v26.6` branch. Committed on 2026-08-25.
-PRIMUS_BRANCH="2aa05ead3401708cf1a1e2958c1def18d7aecf92"
+# The v26.7.0 tag commit (2026-09-02), which is what Dockerfile.primus-v26.7
+# pins. This is also the `release/v26.7` tip and the `v26.7.0` tag; the commit is
+# used rather than the branch so the install keeps matching the image even if later
+# commits land on the branch.
+PRIMUS_BRANCH="2631e68dd8b658ab1f991cbc671d538205a51fee"
 AITER_REPO="https://github.com/ROCm/aiter.git"
 AITER_COMMIT="0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e"
 TURBO_REPO="https://github.com/AMD-AGI/Primus-Turbo.git"
-# Latest commit on `main` branch. Committed on 2026-08-21.
-TURBO_COMMIT="a6a16cdce46bd2235a248b41f501fb363c215b9b"
+# The commit Dockerfile.primus-v26.7 pins; ships as primus-turbo 0.4.1.dev33.
+TURBO_COMMIT="6d5ff979eb019fbbcd91790ac812024cca05a882"
 # aiter pins `flydsl==0.1.7` and Primus-Turbo wants `flydsl>=0.2.0`, so one of
 # them is always unsatisfied; Turbo installs last and wins. aiter only needs
 # `flydsl.expr.vector` at runtime, which survived until 0.3.0 removed it -- and
 # with it aiter's whole CK/HIP JIT path ("CK and HIP ops are disabled. Triton ops
 # remain available."). 0.2.4 is the newest release that satisfies Turbo and still
 # keeps aiter whole.
+# Primus-Turbo's requirements.txt drags setuptools down to 69.5.1, which then
+# stays in the venv. The Dockerfile hits the same downgrade via FBGEMM's
+# requirements and re-pins immediately afterwards; do the same so the venv ends
+# where the image does. Observed on a full bare-metal run: 69.5.1 vs 80.10.2.
+SETUPTOOLS_VERSION="80.10.2"
 FLYDSL_VERSION="0.2.4"
 NVDISASM_VERSION="13.3.73"
 
@@ -226,7 +252,7 @@ stage_venv() {
         local have
         have="$("$VENV_DIR/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
         [ "$have" = "$PRIMUS_PYTHON_VERSION" ] || die \
-"existing venv at $VENV_DIR is Python $have, but v26.6 requires $PRIMUS_PYTHON_VERSION.
+"existing venv at $VENV_DIR is Python $have, but v26.7 requires $PRIMUS_PYTHON_VERSION.
   The pinned torch nightly ships a cp312 Linux wheel only, so an older venv
   cannot be upgraded in place. Remove it and re-run:
       rm -rf '$VENV_DIR' && bash setup.sh"
@@ -243,7 +269,7 @@ stage_venv() {
         cmake==3.31.6 \
         ninja==1.11.1.3 \
         packaging==25.0 \
-        setuptools==80.10.2 \
+        "setuptools==${SETUPTOOLS_VERSION}" \
         patchelf
 }
 
@@ -261,7 +287,12 @@ stage_torch() {
         matplotlib==3.10.9 \
         pandas==2.3.3 \
         py-cpuinfo==9.0.0 \
-        build==1.5.0
+        build==1.5.0 \
+        filelock==3.29.1 \
+        sympy==1.14.0 \
+        networkx==3.6.1 \
+        jinja2==3.1.6 \
+        fsspec==2025.3.0
 
     $PIP uninstall -y torch || true
 
@@ -279,7 +310,8 @@ stage_torch() {
     log "Installing device wheels for: $PYTORCH_ROCM_ARCH"
 
     $PIP install \
-        --index-url "$TORCH_INDEX" \
+        --index-url "$ROCM_INDEX" \
+        --extra-index-url "$TORCH_INDEX" \
         --pre \
         "rocm==${ROCM_SDK_VERSION}" \
         rocm-bootstrap \
@@ -305,7 +337,7 @@ stage_torch() {
 
 # rocm-sdk-core and rocm-sdk-devel both ship libamd_comgr.so.3 as separate
 # inodes, causing duplicate LLVM static constructor registration (SIGABRT).
-# Same workaround as Dockerfile.primus-v26.6 (AIMA-248).
+# Same workaround as Dockerfile.primus-v26.7 (AIMA-248).
 relink_comgr() {
     python - <<'PY' || true
 import os, pathlib
@@ -373,8 +405,14 @@ PY
         log "ck_jit_compile.sh not present, nothing to patch"
         return 0
     fi
-    if grep -qF 'mv -n "$_TMP_SO" "$OUTPUT" 2>/dev/null' "$f"; then
-        log "ck_jit_compile.sh already patched"
+    # The point of the patch is only that a lost `mv -n` race must not fail the
+    # build. Accept any form that already tolerates it: our own `2>/dev/null ||
+    # true`, or upstream's own fix. TE 2.17 (v26.7) ships
+    # `mv -n ... || [ -f "$OUTPUT" ]` and the v26.7 Dockerfile consequently
+    # dropped the sed that v26.6 applied, so on v26.7 there is nothing to do.
+    if grep -qE 'mv -n "\$_TMP_SO" "\$OUTPUT"[[:space:]]*($|\|\||2>)' "$f" \
+        && grep -qE 'mv -n "\$_TMP_SO" "\$OUTPUT"[[:space:]]+(2>/dev/null|\|\|)' "$f"; then
+        log "ck_jit_compile.sh already tolerates a lost mv race, nothing to patch"
         return 0
     fi
     sed -i 's|    mv -n "$_TMP_SO" "$OUTPUT"$|    mv -n "$_TMP_SO" "$OUTPUT" 2>/dev/null \|\| true|' "$f"
@@ -424,15 +462,22 @@ stage_te_wheel() {
     # compiled here against the installed torch (hence --no-build-isolation),
     # and it pulls the prebuilt transformer_engine_rocm7 core wheel.
     MAX_JOBS="$MAX_JOBS" GPU_ARCHS="$PYTORCH_ROCM_ARCH" pipi \
+        --index-url "$TE_CORE_INDEX" \
+        --pre \
+        --no-build-isolation \
+        "transformer_engine==${TE_VERSION}" \
+        "transformer_engine_rocm10==${TE_VERSION}" \
+        || die "TransformerEngine (core) install failed"
+    $PIP install \
         --index-url "$TE_INDEX" \
         --pre \
         --no-build-isolation \
         "transformer_engine_rocm_torch==${TE_VERSION}" \
-        || die "TransformerEngine install failed"
+        || die "TransformerEngine (torch flavour) install failed"
 }
 
 stage_te_source() {
-    log "Building TransformerEngine from source @ $TE_COMMIT (glibc $(host_glibc) < $TE_WHEEL_MIN_GLIBC, so the v26.6 wheels cannot load)"
+    log "Building TransformerEngine from source @ $TE_COMMIT (glibc $(host_glibc) < $TE_WHEEL_MIN_GLIBC, so the v26.7 wheels cannot load)"
     # Drop any previously wheel-installed TE, otherwise the unusable prebuilt
     # core library stays behind and keeps winning the import.
     $PIP uninstall -y transformer_engine_rocm_torch transformer_engine_rocm7 \
@@ -499,7 +544,7 @@ stage_pydeps() {
     pipi \
         datasets==3.6.0 \
         av==16.0.1 \
-        transformers==5.5.0 \
+        transformers==5.10.0 \
         optree==0.18.0 \
         sympy \
         accelerate==1.9.0 \
@@ -695,6 +740,7 @@ stage_turbo() {
         && git checkout "$TURBO_COMMIT" \
         && git submodule update --init --recursive \
         && pipi -r requirements.txt \
+        && pipi "setuptools==${SETUPTOOLS_VERSION}" \
         && pipi scipy "flydsl==${FLYDSL_VERSION}" \
         && GPU_ARCHS="$PYTORCH_ROCM_ARCH" \
            ROCSHMEM_HOME="$rocshmem_home" \
@@ -710,9 +756,9 @@ stage_turbo() {
 
 stage_boto() {
     reload_env
-    log "Installing boto3/botocore and CVE-fix pins from the v26.6 image"
+    log "Installing boto3/botocore and CVE-fix pins from the v26.7 image"
     pipi boto3==1.35.42 botocore==1.35.99
-    pipi cryptography==50.0.0 diffusers==0.38.0 "jaraco.context==6.1.0" pyarrow==23.0.1
+    pipi cryptography==50.0.0 diffusers==0.38.0 "jaraco.context==6.1.0" pyarrow==23.0.1 hydra-core==1.3.4
     # mlflow caps cryptography<50; --no-deps keeps the 50.0.0 pin above.
     $PIP install --no-deps mlflow==3.15.1
 }
@@ -732,7 +778,7 @@ stage_manifest() {
     env > "$WORKSPACE_DIR/.manifest/env.txt"
     $PIP list > "$WORKSPACE_DIR/.manifest/requirements.txt"
     python --version > "$WORKSPACE_DIR/.manifest/python_version"
-    echo "Dockerfile.primus-v26.6" > "$WORKSPACE_DIR/.manifest/derived_from"
+    echo "Dockerfile.primus-v26.7" > "$WORKSPACE_DIR/.manifest/derived_from"
     cp "$SCRIPT_DIR/env.sh" "$WORKSPACE_DIR/.manifest/env.sh"
     [ -f "$PRIMUS_PIP_CONSTRAINTS" ] && cp "$PRIMUS_PIP_CONSTRAINTS" "$WORKSPACE_DIR/.manifest/"
     log "Environment ready. torch: $(python -c 'import torch; print(torch.__version__)' 2>/dev/null || echo '??')"

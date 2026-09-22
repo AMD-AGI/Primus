@@ -34,7 +34,7 @@ From the root of the clone of the [Primus repository](https://github.com/AMD-AGI
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
-This uses the default image from `runner/.primus.yaml` (`rocm/primus:v26.6` unless overridden). The project tree is mounted into the container automatically by `runner/primus-cli-container.sh`.
+This uses the default image from `runner/.primus.yaml` (`rocm/primus:v26.7` unless overridden). The project tree is mounted into the container automatically by `runner/primus-cli-container.sh`.
 
 ### Example configurations under `examples/megatron/configs/MI300X/`
 
@@ -109,9 +109,9 @@ The following files ship in the repository (sorted by name). Parallelism columns
 | `qwen3_5_35B_A3B-FP8-pretrain.yaml` | `${PRIMUS_TP:1}` | `${PRIMUS_PP:1}` | `${PRIMUS_EP:8}` |
 | `qwen3_8B-BF16-pretrain.yaml` | `1` | `1` | `1` |
 | `qwen3_8B-FP8-pretrain.yaml` | `1` | `1` | `1` |
-| `hylo_llama_mamba_1B_BF16-pretrain.yaml` | `1` | `1` | `1` |
-| `hylo_llama_mamba_3B_BF16-pretrain.yaml` | `1` | `1` | `1` |
-| `hylo_llama_mamba_8B_BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `zebra_llama_mamba_1B_BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `zebra_llama_mamba_3B_BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `zebra_llama_mamba_8B_BF16-pretrain.yaml` | `1` | `1` | `1` |
 
 ### Sample YAML file (`llama2_7B-BF16-pretrain.yaml`) explained
 
