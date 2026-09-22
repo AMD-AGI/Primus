@@ -71,6 +71,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `mamba_370M.yaml` | `primus/configs/models/megatron/mamba_370M.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
 | `mamba_base.yaml` | `primus/configs/models/megatron/mamba_base.yaml` | Base fragment | — | — |
 | `minimax_m2.5.yaml` | `primus/configs/models/megatron/minimax_m2.5.yaml` | MoE model preset | MI355X | BF16, FP8 |
+| `minimax_m3.yaml` | `primus/configs/models/megatron/minimax_m3.yaml` | MoE model preset | No curated example in this repo | — |
 | `mixtral_8x7B_v0.1.yaml` | `primus/configs/models/megatron/mixtral_8x7B_v0.1.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `mixtral_8x22B_v0.1.yaml` | `primus/configs/models/megatron/mixtral_8x22B_v0.1.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `mixtral_base.yaml` | `primus/configs/models/megatron/mixtral_base.yaml` | Base fragment | — | — |
@@ -104,6 +105,8 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `kda_300M.yaml` | `primus/configs/models/megatron/kda_300M.yaml` | Pure KDA preset | MI300X | `kda_300M_BF16-pretrain.yaml` |
 | `gdn_1B.yaml` | `primus/configs/models/megatron/gdn_1B.yaml` | Pure GDN preset | MI300X, MI355X | `gdn_1B_BF16-pretrain.yaml` |
 | `gdn_300M.yaml` | `primus/configs/models/megatron/gdn_300M.yaml` | Pure GDN preset | MI300X | `gdn_300M_BF16-pretrain.yaml` |
+
+**MiniMax M3:** `minimax_m3.yaml` covers the text tower only and runs its attention dense. MiniMax Sparse Attention (MSA), the `swigluoai` activation, Gemma-style RMSNorm, MTP, and the vision tower have no implementation behind them yet; the preset records their upstream `config.json` values as comments so the mapping is available when they are added.
 
 **Parallelism:** Tensor, pipeline, and expert parallel sizes are **not** fixed in model presets; they are set in experiment `overrides` (for example `tensor_model_parallel_size`, `pipeline_model_parallel_size`, `expert_model_parallel_size`). MoE presets such as `qwen3_235B_A22B.yaml` typically require non-default expert parallelism in real runs—see the matching experiment YAML.
 

@@ -1,0 +1,125 @@
+###############################################################################
+# MiniMax-M3 text tower (GQA + MoE).
+#
+# ~428B total params, ~23B active, vocab 200064.
+# Sources:
+#   - https://huggingface.co/MiniMaxAI/MiniMax-M3 (config.json)
+#   - MiniMax Sparse Attention, arXiv:2606.13392
+#
+# Scope: the text tower only, with attention running dense. M3's two
+# architectural novelties (MSA block-sparse attention and the vision tower)
+# have no Megatron/Primus implementation yet, so they are recorded in the
+# "Unmapped" block at the bottom rather than as config keys that would parse
+# and then do nothing.
+###############################################################################
+
+extends:
+  - language_model.yaml
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: MiniMaxAI/MiniMax-M3
+
+# model architecture
+num_layers: 60
+hidden_size: 6144
+ffn_hidden_size: 12288          # dense layers only (layers 1-3)
+num_attention_heads: 64
+
+# GQA (64 Q heads, 4 KV heads, head_dim 128).
+# Megatron requires num_query_groups % TP == 0, so TP > 4 needs KV replication.
+group_query_attention: true
+num_query_groups: 4
+kv_channels: 128
+qk_layernorm: true              # use_qk_norm, qk_norm_type: per_head
+
+# partial rotary embedding (rotary_dim=64, head_dim=128 -> 50%)
+position_embedding_type: rope
+rotary_base: 5000000
+rotary_percent: 0.5
+
+# MoE - layers 1-3 dense, layers 4-60 MoE; 128 routed experts + 1 shared
+moe_layer_freq: "([0]*3+[1]*57)"
+num_experts: 128
+moe_router_topk: 4
+moe_ffn_hidden_size: 3072
+moe_shared_expert_intermediate_size: 3072   # n_shared_experts(1) * moe_ffn_hidden_size
+moe_router_score_function: sigmoid
+moe_router_pre_softmax: false
+moe_router_topk_scaling_factor: 2.0         # routed_scaling_factor
+moe_router_enable_expert_bias: true         # aux-loss-free (noaux_tc) balancing
+moe_router_bias_update_rate: 1.0e-3
+moe_router_load_balancing_type: seq_aux_loss
+moe_aux_loss_coeff: 0.001
+moe_token_dispatcher_type: alltoall
+
+# Unlike DeepSeek-V3, M3 has no group/node-limited routing: every token may
+# reach any of the 128 experts, so the all-to-all is unconstrained.
+moe_router_num_groups: null
+moe_router_group_topk: null
+
+# MoE optimization
+expert_model_parallel_size: 8
+moe_grouped_gemm: true
+moe_use_legacy_grouped_gemm: false
+moe_permute_fusion: true
+moe_shared_expert_overlap: true
+
+# context. The RoPE cache is materialised at this length, so training examples
+# are expected to override it down to the run's seq_length.
+max_position_embeddings: 1048576
+
+# MTP is left off: see the "Unmapped" block for why the module count does not
+# translate cleanly onto Megatron's MTP layers.
+mtp_num_layers: 0
+
+# other settings
+swiglu: true
+bias_swiglu_fusion: false
+add_bias_linear: false
+attention_softmax_in_fp32: true
+untie_embeddings_and_output_weights: true
+hidden_dropout: 0.0
+attention_dropout: 0.0
+normalization: RMSNorm
+# Upstream's dest for --norm-epsilon is `layernorm_epsilon`. The `norm_epsilon`
+# spelling the older presets here use only reaches DeepSeek-V4, and is a silent
+# no-op on a `model_type: gpt` model like this one.
+layernorm_epsilon: 1.0e-6
+init_method_std: 0.02
+apply_rope_fusion: false
+masked_softmax_fusion: false
+
+###############################################################################
+# Unmapped: parts of M3 this preset cannot express yet.
+#
+# MSA (MiniMax Sparse Attention), from config.json:
+#     use_sparse_attention: true    sparse_block_size: 128
+#     sparse_index_dim: 128         sparse_topk_blocks: 16
+#     sparse_num_index_heads: 4     sparse_score_type: max
+#     sparse_local_block: 1         sparse_attention_freq: off for layers 1-3
+#   An index branch scores 128-token KV blocks and selects a top-16 subset per
+#   GQA group; the main branch then runs exact block-sparse attention over only
+#   those blocks. The closest machinery already in the tree is the DeepSeek-V4
+#   CSA selector (core/transformer/indexer.py, v4_attention_kernels/), whose
+#   indexer distillation KL is what trains a non-differentiable top-k. Two gaps
+#   to bridge: M3 picks top-k per GQA group rather than globally, and reduces a
+#   block to one score with max rather than a weighted sum.
+#
+# Activation: M3 uses `swigluoai` (swiglu_alpha 1.702, swiglu_limit 7.0), not
+#   plain SwiGLU. Megatron spells that family `quick_geglu` + `glu_linear_offset`
+#   + `activation_func_clamp_value`, but the linear offset M3 expects is not
+#   documented, so this preset stays on SwiGLU -- the same choice the gpt_oss
+#   presets make for the same activation family.
+#
+# Normalization: M3 sets `use_gemma_norm: true` (RMSNorm weighted by 1 + w).
+#   Megatron has no equivalent flag; RMSNorm here is the plain form.
+#
+# MTP: config.json carries both `num_mtp_modules: 7` and
+#   `num_nextn_predict_layers: 1`. Seven extra MoE layers would add ~50B params,
+#   which the released 427B checkpoint does not account for, so the mapping onto
+#   Megatron's `mtp_num_layers` needs confirming before it is turned on.
+#
+# Vision tower: CLIP-style, 32 layers, hidden 1280, 16 heads, patch 14,
+#   image 2016, 3D RoPE, spatial merge 2 / temporal patch 2, projected to 6144.
+#   No Megatron encoder is wired up for it.
+###############################################################################
