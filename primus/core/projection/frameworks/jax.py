@@ -395,3 +395,69 @@ def maxtext_derive_default_args(args):
         _normalize(args)
         mark_normalized(args)
     return megatron_derive_default_args(args)
+
+
+# ---------------------------------------------------------------------------
+# Benchmark write-back: flat projection fields -> MaxText's own config
+# ---------------------------------------------------------------------------
+#
+# The performance driver shrinks the model onto the bench node by editing the
+# flat fields -- capping the stack at one or two layers, reducing expert
+# parallelism, flattening the pipeline.  MaxText builds from its own mesh and
+# architecture keys, so without the reverse translation a benchmark would
+# resolve the full-size model from ``model_name`` and try to build all of it.
+
+
+def _clear_axis_group(args, axes, exclude=()) -> None:
+    """Set every ICI and DCN axis in *axes* to 1, leaving *exclude* alone."""
+    for axis in axes:
+        if axis in exclude:
+            continue
+        for scope in ("ici", "dcn"):
+            setattr(args, f"{scope}_{axis}_parallelism", 1)
+
+
+def maxtext_apply_bench_overrides(args) -> None:
+    """Push the driver's flat bench edits back into MaxText's config.
+
+    Mutates *args* in place.  MaxText spreads one projection dimension across
+    several mesh axes -- tensor parallelism over ``tensor``,
+    ``tensor_transpose`` and ``tensor_sequence``, for instance -- and there is
+    no way to know which the user meant, so each group is collapsed onto a
+    single named axis carrying the whole degree and its siblings are set to 1.
+    That preserves the product the projection cares about, which is what decides
+    the shapes the benchmark measures.
+    """
+    num_layers = int(getattr(args, "num_layers", 0) or 0)
+    if num_layers:
+        args.base_num_decoder_layers = num_layers
+
+    num_experts = getattr(args, "num_experts", None)
+    if num_experts:
+        args.num_experts = int(num_experts)
+
+    # Intra-node (ICI) carries the whole degree; inter-node (DCN) goes to 1,
+    # because the bench runs inside one node by construction.
+    _clear_axis_group(args, _TENSOR_AXES)
+    args.ici_tensor_parallelism = int(getattr(args, "tensor_model_parallel_size", 1) or 1)
+
+    _clear_axis_group(args, _CONTEXT_AXES)
+    args.ici_context_parallelism = int(getattr(args, "context_model_parallel_size", 1) or 1)
+
+    _clear_axis_group(args, _EXPERT_AXES)
+    args.ici_expert_parallelism = int(getattr(args, "expert_model_parallel_size", 1) or 1)
+
+    _clear_axis_group(args, _PIPELINE_AXES)
+    args.ici_pipeline_parallelism = int(getattr(args, "pipeline_model_parallel_size", 1) or 1)
+
+    # Leave data parallelism unsharded rather than -1: the projection models
+    # data-parallel gradient reduction analytically when it scales up to the
+    # target cluster, and an auto-filled FSDP axis would shard the very
+    # parameters the layer benchmark needs whole.
+    _clear_axis_group(args, _DATA_AXES)
+
+    # MaxText sizes the batch per device, and the bench measures one microbatch.
+    args.per_device_batch_size = float(int(getattr(args, "micro_batch_size", 1) or 1))
+    seq_length = int(getattr(args, "seq_length", 0) or 0)
+    if seq_length:
+        args.max_target_length = seq_length

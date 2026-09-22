@@ -9,10 +9,7 @@ from typing import Optional, Tuple
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness.base import MLP
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
-from primus.core.projection.training_config import (
-    TrainingConfig,
-    gemm_dtype_from_config,
-)
+from primus.core.projection.training_config import TrainingConfig, gemm_dtype_from_config
 
 from .utils import benchmark_layer
 

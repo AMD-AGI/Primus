@@ -24,9 +24,7 @@ from primus.core.launcher.parser import load_primus_config
 from primus.core.projection.config_validation import assert_recompute_pipeline_compat
 from primus.core.projection.frameworks import normalize_primus_config
 from primus.core.projection.module_profilers.language_model import build_profiler
-from primus.core.projection.training_config import (
-    convert_primus_config_to_projection_config,
-)
+from primus.core.projection.training_config import convert_primus_config_to_projection_config
 from primus.core.projection.workload_registry import resolve_top_level_spec
 
 

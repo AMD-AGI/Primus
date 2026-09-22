@@ -112,9 +112,7 @@ class MaxTextAdapter(BackendAdapter):
         implementation (pretrain, sft, etc.).
         """
         if stage == "pretrain":
-            from primus.backends.maxtext.maxtext_pretrain_trainer import (
-                MaxTextPretrainTrainer,
-            )
+            from primus.backends.maxtext.maxtext_pretrain_trainer import MaxTextPretrainTrainer
 
             return MaxTextPretrainTrainer
         else:

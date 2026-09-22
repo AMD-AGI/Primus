@@ -115,12 +115,16 @@ def _ensure_builtins_registered() -> None:
     register_config_adapter("torchtitan", torchtitan_derive_default_args)
     register_bench_override("torchtitan", torchtitan_apply_bench_overrides)
 
-    from primus.core.projection.frameworks.jax import maxtext_derive_default_args
+    from primus.core.projection.frameworks.jax import (
+        maxtext_apply_bench_overrides,
+        maxtext_derive_default_args,
+    )
 
     # MaxText is the JAX pretraining backend Primus ships; ``jax`` is accepted as
     # the name users reach for when they mean "the JAX one".
     for alias in ("maxtext", "jax"):
         register_config_adapter(alias, maxtext_derive_default_args)
+        register_bench_override(alias, maxtext_apply_bench_overrides)
 
 
 def framework_of(args) -> str:

@@ -26,11 +26,17 @@ Projection reads the `framework` field of your experiment's `pre_trainer` module
 | `framework` | Config it reads | Benchmark modes | Simulate mode |
 |-------------|-----------------|-----------------|---------------|
 | `megatron` | Megatron arguments directly | Yes | Yes |
-| `torchtitan` | `model.flavor`, `parallelism.*` degrees, `activation_checkpoint.mode`, model converters | No | Yes |
-| `maxtext` (or `jax`) | `model_name`, `ici_*` / `dcn_*` mesh axes, `per_device_batch_size`, `remat_policy`, `quantization` | No | Yes |
+| `torchtitan` | `model.flavor`, `parallelism.*` degrees, `activation_checkpoint.mode`, model converters | Yes | Yes |
+| `maxtext` (or `jax`) | `model_name`, `ici_*` / `dcn_*` mesh axes, `per_device_batch_size`, `remat_policy`, `quantization` | Yes | Yes |
 | `torchrec_dlrm` | DLRM arguments | Yes | Yes |
 
-Benchmark-anchored projection runs the real trainer to measure layer time and memory, and Primus only has that harness for Megatron and DLRM. For TorchTitan and MaxText, pass `--memory-mode simulate` or `--profiling-mode simulate`; the CLI says so explicitly if you forget. Everything downstream of the measurement — pipeline scheduling, communication modeling, node-count scaling — is identical across backends.
+Benchmark-anchored projection runs the real trainer on one node to measure a representative layer, then scales that measurement analytically. Everything downstream of the measurement — pipeline scheduling, communication modeling, node-count scaling — is identical across backends, so the only thing a backend has to supply is the measurement itself.
+
+Megatron, TorchTitan and DLRM all share one harness, because they share torch: the projection builds the real model, walks to the layer it wants, and times it with CUDA events while reading the caching allocator. A backend joins that harness by saying where its layers live and what shape their forward wants — TorchTitan's blocks take `[batch, seq, hidden]` and a rope table where Megatron's take `[seq, batch, hidden]` and a mask, and that is most of the difference between them.
+
+MaxText measures itself instead. Its layers are Flax modules with no autograd to hook and no caching allocator to read, so it times a compiled `vjp` and takes activation sizes from XLA's own compile-time accounting. Two numbers come out differently as a result, and both are labelled in the saved artifact: the attention/MLP split within a layer is the measured layer total apportioned by the analytical model rather than two separate timings, because a MaxText layer is a single traced graph with no sub-module to time in isolation; and the output head and loss are left to the analytical model. Expert all-to-all is not timed on either non-Megatron backend — TorchTitan puts it in its parallelization plan and MaxText expresses it as sharding, so neither has a dispatch/combine pair to measure — and the projection restores it analytically when it scales to the target topology.
+
+If you have no GPU, or want to skip measurement on a backend that supports it, pass `--memory-mode simulate` or `--profiling-mode simulate`.
 
 ### Where the model architecture comes from
 
@@ -191,7 +197,7 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 2. Always establish a **single-node** baseline before interpreting multi-node projections.
 3. **Data-parallel scaling** is bounded by batching: if you run out of microbatches (`global_batch_size` / `micro_batch_size`), adding nodes may not increase throughput.
 4. If the YAML **requires** multiple nodes (for example large PP), the performance path may automatically reduce parallelism for benchmarking and restore it analytically—read the console summary carefully.
-5. **No GPU available:** use `--profiling-mode simulate` for CPU-side analytical timing. This is also the only mode available for TorchTitan and MaxText experiments.
+5. **No GPU available:** use `--profiling-mode simulate` for CPU-side analytical timing, on any backend.
 6. **Validate models:** use `--profiling-mode both` to compare GPU benchmark timing with simulation on the same config.
 7. For **MoE** models, activation memory from MoE layers often dominates; memory projection highlights when recomputation is worth considering.
 
