@@ -15,7 +15,7 @@ bakes pre-MLP RMSNorm into ``linear_fc1`` as ``layer_norm_weight``; that
 norm still runs here so DDP overlap hooks see it. QKV and O-proj stay on
 ``PrimusTurboLinear``. Opt-in:
 
-    YAML  use_turbo_fused_dense_mlp: true
+    YAML  turbo_fused_gemm: true
     env   PRIMUS_TURBO_FUSED_DENSE_MLP=1   (overrides YAML)
 
 Requires ``fp4`` + ``use_turbo_gemm``, SwiGLU, no linear bias, and no
@@ -41,9 +41,14 @@ def _env_flag(name: str) -> bool | None:
 
 def _fused_dense_mlp_requested(args) -> bool:
     env = _env_flag("PRIMUS_TURBO_FUSED_DENSE_MLP")
+    if env is None:
+        env = _env_flag("PRIMUS_TURBO_FUSED_GEMM")
     if env is not None:
         return env
-    return bool(getattr(args, "use_turbo_fused_dense_mlp", False))
+    return bool(
+        getattr(args, "turbo_fused_gemm", False)
+        or getattr(args, "use_turbo_fused_dense_mlp", False)
+    )
 
 
 def _should_enable(mlp, args) -> bool:
@@ -118,7 +123,7 @@ def _apply_fc1_fused_norm(fc1, hidden_states, config):
             eps,
         )
     raise RuntimeError(
-        f"use_turbo_fused_dense_mlp: unsupported normalization {config.normalization!r}"
+        f"turbo_fused_gemm: unsupported normalization {config.normalization!r}"
     )
 
 
@@ -166,7 +171,7 @@ def _forward_turbo_dense_mlp_fp4(mlp, hidden_states):
 
     quant = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
     assert quant is not None and quant.mxfp4_scaling(), (
-        "use_turbo_fused_dense_mlp requires MXFP4 Turbo autocast"
+        "turbo_fused_gemm requires MXFP4 Turbo autocast"
     )
     pre = getattr(mlp.linear_fc1, "_prequant_x", None)
     y = dense_mlp_fp4(
@@ -218,7 +223,7 @@ def _install_dense_mlp_fp4_patch() -> None:
     mark_patched(MLP, _PATCH_KEY)
     log_rank_0(
         f"[Patch:{_PATCH_KEY}] MLP.forward routes dense SwiGLU through "
-        "primus_turbo.ops.dense_mlp_fp4 when use_turbo_fused_dense_mlp is set."
+        "primus_turbo.ops.dense_mlp_fp4 when turbo_fused_gemm is set."
     )
 
 
@@ -233,7 +238,7 @@ def _patch_condition(ctx: PatchContext) -> bool:
     phase="before_train",
     description=(
         "Route dense MLP SwiGLU through FlyDSL dense MXFP4 kernel_gemm_4w + "
-        "StoreCSwiGLU when use_turbo_fused_dense_mlp is set."
+        "StoreCSwiGLU when turbo_fused_gemm is set."
     ),
     priority=60,
     condition=_patch_condition,
