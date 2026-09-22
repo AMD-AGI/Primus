@@ -1,0 +1,19 @@
+# Reconstructed from the published image history for
+# zirui3/primus-v26.3-flux@sha256:a8b5b14130155e478b935f0fafb61a05e67d5e8ce35c5982312b0506ac9eb1f5.
+FROM zirui3/primus-v26.3-flux:v0.4@sha256:f5f596f087151a425f7a9bfeac1ae5a67818d071d7c04c167523415073c35cfd
+
+ARG PRIMUS_TURBO_REVISION=d9809c28e0e573ded1516025ae4f76c7d37af5e0
+RUN git clone --filter=blob:none --no-checkout \
+        https://github.com/AMD-AGI/Primus-Turbo.git /tmp/Primus-Turbo \
+    && git -C /tmp/Primus-Turbo checkout "${PRIMUS_TURBO_REVISION}" \
+    && cp /tmp/Primus-Turbo/primus_turbo/flydsl/gemm/gemm_fp8_kernel.py \
+        /opt/venv/lib/python3.12/site-packages/primus_turbo/flydsl/gemm/ \
+    && cp /tmp/Primus-Turbo/primus_turbo/flydsl/utils/gemm_helper.py \
+        /tmp/Primus-Turbo/primus_turbo/flydsl/utils/prims.py \
+        /opt/venv/lib/python3.12/site-packages/primus_turbo/flydsl/utils/ \
+    && rm -rf /tmp/Primus-Turbo
+
+LABEL org.opencontainers.image.source="https://github.com/AMD-AGI/Primus-Turbo/pull/492" \
+      org.opencontainers.image.revision="${PRIMUS_TURBO_REVISION}"
+
+CMD ["/usr/bin/bash"]
