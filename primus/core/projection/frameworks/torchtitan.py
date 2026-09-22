@@ -369,6 +369,14 @@ def _normalize(args) -> None:
 
     deepep = str(_ns_get(args, "parallelism.expert_parallel_comm_backend", "") or "").lower()
     turbo_grouped_gemm = bool(_ns_get(args, "primus_turbo.use_turbo_grouped_gemm", False))
+
+    # Megatron fuses softmax+CE behind a flag; TorchTitan fuses it by compiling
+    # the loss, so the equivalent signal is whether "loss" is among the
+    # components it compiles.  Reading it matters because the projection prices
+    # the loss module differently under fusion, and a hard-coded False would
+    # over-predict every large-vocabulary TorchTitan recipe.
+    compiled = bool(_ns_get(args, "compile.enable", False))
+    compile_components = [str(c).lower() for c in (_ns_get(args, "compile.components", []) or [])]
     flat.update(
         {
             "use_flash_attn": True,
@@ -378,7 +386,7 @@ def _normalize(args) -> None:
             "use_turbo_grouped_mlp": turbo_grouped_gemm,
             "use_turbo_deepep": deepep == "deepep",
             "turbo_sync_free_moe_stage": 0,
-            "cross_entropy_loss_fusion": False,
+            "cross_entropy_loss_fusion": compiled and "loss" in compile_components,
             "num_layers_per_virtual_pipeline_stage": None,
             "decoder_first_pipeline_num_layers": None,
             "decoder_last_pipeline_num_layers": None,
@@ -459,11 +467,19 @@ def torchtitan_apply_bench_overrides(args) -> None:
     num_layers = int(getattr(args, "num_layers", 0) or 0)
     moe_layer_freq = getattr(args, "moe_layer_freq", None)
 
-    _ns_set(args, "parallelism.tensor_parallel_degree", int(getattr(args, "tensor_model_parallel_size", 1) or 1))
-    _ns_set(args, "parallelism.context_parallel_degree", int(getattr(args, "context_model_parallel_size", 1) or 1))
-    _ns_set(args, "parallelism.expert_parallel_degree", int(getattr(args, "expert_model_parallel_size", 1) or 1))
     _ns_set(
-        args, "parallelism.pipeline_parallel_degree", int(getattr(args, "pipeline_model_parallel_size", 1) or 1)
+        args, "parallelism.tensor_parallel_degree", int(getattr(args, "tensor_model_parallel_size", 1) or 1)
+    )
+    _ns_set(
+        args, "parallelism.context_parallel_degree", int(getattr(args, "context_model_parallel_size", 1) or 1)
+    )
+    _ns_set(
+        args, "parallelism.expert_parallel_degree", int(getattr(args, "expert_model_parallel_size", 1) or 1)
+    )
+    _ns_set(
+        args,
+        "parallelism.pipeline_parallel_degree",
+        int(getattr(args, "pipeline_model_parallel_size", 1) or 1),
     )
 
     # Build the bench model unsharded across data parallelism. FSDP2 and DDP

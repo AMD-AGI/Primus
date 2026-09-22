@@ -146,6 +146,33 @@ def test_torchtitan_resolves_the_llama3_8b_flavor():
     assert not args.num_experts
 
 
+def test_torchtitan_reads_cross_entropy_fusion_off_the_compiled_components():
+    """TorchTitan fuses softmax+CE by compiling the loss, not by a flag.
+
+    Every shipped TorchTitan config compiles it, so assuming otherwise
+    over-predicts the loss module on large-vocabulary models.
+    """
+    compile_cfg = SimpleNamespace(enable=True, components=["model", "loss"])
+    args = torchtitan_derive_default_args(_titan_args(compile=compile_cfg))
+    assert args.cross_entropy_loss_fusion is True
+
+
+def test_torchtitan_compiling_only_the_model_leaves_cross_entropy_unfused():
+    compile_cfg = SimpleNamespace(enable=True, components=["model"])
+    args = torchtitan_derive_default_args(_titan_args(compile=compile_cfg))
+    assert args.cross_entropy_loss_fusion is False
+
+
+def test_torchtitan_cross_entropy_is_unfused_when_compile_is_off():
+    compile_cfg = SimpleNamespace(enable=False, components=["model", "loss"])
+    args = torchtitan_derive_default_args(_titan_args(compile=compile_cfg))
+    assert args.cross_entropy_loss_fusion is False
+
+
+def test_torchtitan_cross_entropy_is_unfused_without_a_compile_section():
+    assert torchtitan_derive_default_args(_titan_args()).cross_entropy_loss_fusion is False
+
+
 def test_torchtitan_reads_the_job_batch_and_sequence():
     args = torchtitan_derive_default_args(_titan_args())
     assert args.seq_length == 8192
