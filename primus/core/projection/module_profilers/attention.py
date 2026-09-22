@@ -7,12 +7,11 @@
 import os
 from typing import Optional
 
-import torch
-
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.bench_harness.base import ATTENTION
 from primus.core.projection.training_config import gemm_dtype_from_config
 
-from .utils import benchmark_layer, v4_module_inputs
+from .utils import benchmark_layer
 
 
 class AttentionProfiler(BaseModuleProfiler):
@@ -858,32 +857,13 @@ class AttentionProfiler(BaseModuleProfiler):
                 self._cached_results = self._get_simulated_results(batch_size, seq_len)
             else:
                 # Use actual GPU benchmarking
-                # Context parallel / Sequence parallel adjustment
-                cp_size = self.config.model_parallel_config.context_model_parallel_size
-                # Effective sequence length per rank if CP is used
-                slen_per_cp = seq_len // cp_size
-
-                hidden = self.config.model_config.hidden_size
                 tcfg = getattr(self.module, "config", None)
-                hc_mult = getattr(tcfg, "hc_mult", 1)
-                # DeepSeek-V4 attention has a different signature
-                # (forward(hidden[B,S,D], position_ids[B,S])); feed V4-aware
-                # inputs so the real V4 attention path is exercised instead of
-                # crashing / falling back. Non-V4 modules use the stock inputs.
-                v4 = v4_module_inputs(self.module, batch_size, seq_len, hidden, hc_mult, "attention")
-                if v4 is not None:
-                    ishapes, fkwargs = v4
-                    self._cached_results = benchmark_layer(
-                        self.module, ishapes, transformer_config=tcfg, forward_kwargs=fkwargs
-                    )
-                else:
-                    self._cached_results = benchmark_layer(
-                        self.module,
-                        [
-                            (seq_len, batch_size, hidden),
-                            ((1, 1, slen_per_cp, seq_len), torch.bool),
-                        ],
-                    )
+                ishapes, fkwargs = self.require_bench_inputs(
+                    ATTENTION, self.module, batch_size, seq_len
+                )
+                self._cached_results = benchmark_layer(
+                    self.module, ishapes, transformer_config=tcfg, forward_kwargs=fkwargs
+                )
             self._cache_key = cache_key
         return self._cached_results
 

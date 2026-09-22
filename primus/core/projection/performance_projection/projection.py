@@ -22,7 +22,8 @@ from primus.core.projection.config_validation import (
     assert_recompute_pipeline_compat,
     recompute_is_enabled,
 )
-from primus.core.projection.frameworks import normalize_primus_config
+from primus.core.projection.bench_harness import resolve_model_adapter
+from primus.core.projection.frameworks import framework_of, normalize_primus_config
 from primus.core.projection.memory_capture import MemoryBenchmarkRecorder, format_bytes
 from primus.core.projection.module_profilers import collective_model as cm
 from primus.core.projection.module_profilers.collective_args import get_default_args
@@ -2708,6 +2709,13 @@ def _build_runtime_primus_config(legacy_primus_config, args, module_name="pre_tr
         _normalize_module_for_runtime,
         load_primus_config,
     )
+    from primus.core.projection.frameworks import apply_bench_overrides
+
+    # The driver's edits so far are written in the projection's flat vocabulary.
+    # For a backend that builds from its own namespaces (TorchTitan, MaxText),
+    # translate them back before the model is built, or the model will be the
+    # full-size one the YAML asked for rather than the bench-sized one.
+    apply_bench_overrides(legacy_primus_config, module_name)
 
     runtime_cfg = load_primus_config(Path(args.config), args)
     normalized = _normalize_module_for_runtime(
@@ -2848,9 +2856,11 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
     mem_recorder.snapshot("pre_trainer_init")
 
     print("[Primus:Performance Projection] Preparing benchmark model build...")
+    cfg = primus_config.get_module_config("pre_trainer")
+    framework = framework_of(cfg)
+
     # Disable overlap features and FSDP2 for profiling (they add complexity without benefiting isolated layer benchmarking)
     # FSDP2 uses DTensor which causes issues with benchmarking inputs
-    cfg = primus_config.get_module_config("pre_trainer")
     cfg.overlap_grad_reduce = False
     cfg.overlap_param_gather = False
     cfg.use_torch_fsdp2 = False
@@ -2904,7 +2914,7 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
 
     runtime_primus_config = _build_runtime_primus_config(primus_config, args, module_name="pre_trainer")
 
-    print("[Primus:Performance Projection] Initializing Megatron and building model...")
+    print(f"[Primus:Performance Projection] Initializing {framework} and building model...")
     runtime = PrimusRuntime(args=args)
     trainer = runtime.setup_model_only(
         module_name="pre_trainer",
@@ -2920,6 +2930,10 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
     print("[Primus:Performance Projection] Building model profiler...")
     model_profiler_spec = get_language_model_profiler_spec(training_config)
     model_profiler = build_profiler(model_profiler_spec)
+    # Teach the profiler tree where this backend keeps its layers and what their
+    # forward wants; the analytical tree above is backend-neutral, the modules
+    # it is about to call are not.
+    model_profiler.set_bench_adapter(resolve_model_adapter(framework))
 
     seq_len = training_config.runtime_config.sequence_length
     batch_size = training_config.runtime_config.micro_batch_size

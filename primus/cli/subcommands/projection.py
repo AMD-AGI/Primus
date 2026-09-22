@@ -8,10 +8,17 @@ import argparse as _argparse
 import os
 import tempfile
 
-# Frameworks whose trainer the bench can actually run to measure layer time and
-# per-rank memory.  Every framework the projection can *read* (see
-# ``primus.core.projection.frameworks``) can still be simulated.
-_BENCHMARKABLE_FRAMEWORKS = frozenset({"megatron"})
+def _benchmarkable_frameworks() -> frozenset:
+    """Frameworks whose trainer the bench can run to measure time and memory.
+
+    Read off the bench-adapter registry rather than listed here, so registering
+    a backend is the single step that makes it benchmarkable.  Every framework
+    the projection can *read* (see ``primus.core.projection.frameworks``) can
+    still be simulated, benchmarkable or not.
+    """
+    from primus.core.projection.bench_harness import available_bench_frameworks
+
+    return frozenset(available_bench_frameworks())
 
 
 def _experiment_framework(args) -> str:
@@ -34,11 +41,13 @@ def _experiment_framework(args) -> str:
 
 
 def _require_benchmarkable(framework: str, simulate_flag: str) -> None:
-    if framework in _BENCHMARKABLE_FRAMEWORKS:
+    benchmarkable = _benchmarkable_frameworks()
+    if framework in benchmarkable:
         return
     raise NotImplementedError(
         f"Benchmark-anchored projection runs the trainer to measure layer time and "
-        f"memory, and Primus has no bench harness for '{framework}' yet. Project it "
+        f"memory, and Primus has no bench harness for '{framework}' yet "
+        f"(benchmarkable: {', '.join(sorted(benchmarkable))}). Project it "
         f"analytically instead with {simulate_flag}, or load a previously saved bench "
         "artifact with --load-benchmark."
     )

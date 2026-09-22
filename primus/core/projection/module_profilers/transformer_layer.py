@@ -9,6 +9,7 @@ import os
 from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.bench_harness.base import LAYER
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
 
@@ -24,7 +25,6 @@ from .utils import (
     _install_balanced_routing_patches,
     _kernel_pad_enabled,
     benchmark_layer,
-    v4_module_inputs,
 )
 
 # ── Fallback HBM bandwidth for elementwise overhead estimation ──
@@ -309,8 +309,9 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
     def set_layer_module(self, layer_module):
         """Set the actual transformer layer module for benchmarking."""
         self.layer_module = layer_module
-        self.sub_profilers["self_attention"].set_module(layer_module.self_attention)
-        self.sub_profilers["mlp"].set_module(layer_module.mlp)
+        parts = self.bench_adapter().layer_submodules(layer_module)
+        self.sub_profilers["self_attention"].set_module(parts.attention)
+        self.sub_profilers["mlp"].set_module(parts.mlp)
 
         # Invalidate cache when layer changes
         self._cached_results = None
@@ -375,27 +376,15 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
             else:
                 # Get TransformerConfig from the layer module itself (has fp8 setting)
                 transformer_config = getattr(self.layer_module, "config", None)
-                hidden = self.config.model_config.hidden_size
-                hc_mult = getattr(transformer_config, "hc_mult", 1)
-                # DeepSeek-V4 hybrid layer needs K-stream input [B,S,K,D] and a
-                # keyword position_ids; feed V4-aware inputs so the real V4 layer
-                # (mHC + V4 attention) is benchmarked. Non-V4 layers use the stock
-                # [S,B,D] input.
-                v4 = v4_module_inputs(self.layer_module, batch_size, seq_len, hidden, hc_mult, "layer")
-                if v4 is not None:
-                    ishapes, fkwargs = v4
-                    self._cached_results = benchmark_layer(
-                        self.layer_module,
-                        ishapes,
-                        transformer_config=transformer_config,
-                        forward_kwargs=fkwargs,
-                    )
-                else:
-                    self._cached_results = benchmark_layer(
-                        self.layer_module,
-                        [(seq_len, batch_size, hidden)],
-                        transformer_config=transformer_config,
-                    )
+                ishapes, fkwargs = self.require_bench_inputs(
+                    LAYER, self.layer_module, batch_size, seq_len
+                )
+                self._cached_results = benchmark_layer(
+                    self.layer_module,
+                    ishapes,
+                    transformer_config=transformer_config,
+                    forward_kwargs=fkwargs,
+                )
             self._cache_key = cache_key
         return self._cached_results
 
@@ -446,8 +435,9 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
     def set_layer_module(self, layer_module):
         """Set the actual transformer layer module for benchmarking."""
         self.layer_module = layer_module
-        self.sub_profilers["self_attention"].set_module(layer_module.self_attention)
-        self.sub_profilers["mlp"].set_module(layer_module.mlp)
+        parts = self.bench_adapter().layer_submodules(layer_module)
+        self.sub_profilers["self_attention"].set_module(parts.attention)
+        self.sub_profilers["mlp"].set_module(parts.mlp)
 
         # Invalidate cache when layer changes
         self._cached_results = None
@@ -565,31 +555,19 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             ):
                 # Legacy whole-layer timing (often ~1.5-1.7x pessimistic on backward).
                 transformer_config = getattr(self.layer_module, "config", None)
-                hidden = self.config.model_config.hidden_size
-                hc_mult = getattr(transformer_config, "hc_mult", 1)
-                # DeepSeek-V4 hybrid layer needs K-stream input [B,S,K,D] and a
-                # keyword position_ids; feed V4-aware inputs so the real V4 layer
-                # (mHC + V4 attention) is benchmarked. Non-V4 layers use the stock
-                # [S,B,D] input.
-                v4 = v4_module_inputs(self.layer_module, batch_size, seq_len, hidden, hc_mult, "layer")
+                ishapes, fkwargs = self.require_bench_inputs(
+                    LAYER, self.layer_module, batch_size, seq_len
+                )
                 routing_restores = []
                 if _kernel_pad_enabled():
                     routing_restores, _ = _install_balanced_routing_patches(self.layer_module)
                 try:
-                    if v4 is not None:
-                        ishapes, fkwargs = v4
-                        self._cached_results = benchmark_layer(
-                            self.layer_module,
-                            ishapes,
-                            transformer_config=transformer_config,
-                            forward_kwargs=fkwargs,
-                        )
-                    else:
-                        self._cached_results = benchmark_layer(
-                            self.layer_module,
-                            [(seq_len, batch_size, hidden)],
-                            transformer_config=transformer_config,
-                        )
+                    self._cached_results = benchmark_layer(
+                        self.layer_module,
+                        ishapes,
+                        transformer_config=transformer_config,
+                        forward_kwargs=fkwargs,
+                    )
                 finally:
                     for restore in routing_restores:
                         try:

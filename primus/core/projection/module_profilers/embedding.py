@@ -6,9 +6,8 @@
 
 from typing import Optional
 
-import torch
-
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.bench_harness.base import EMBEDDING
 
 from .utils import benchmark_layer
 
@@ -71,16 +70,13 @@ class EmbeddingProfiler(BaseModuleProfiler):
             if self._simulation_mode:
                 self._cached_results = self._get_simulated_results(batch_size, seq_len)
             else:
-                # Context parallel / Sequence parallel adjustment
-                cp_size = self.config.model_parallel_config.context_model_parallel_size
-                # Effective sequence length per rank if CP is used
-                slen_per_cp = seq_len // cp_size
-
+                ishapes, fkwargs = self.require_bench_inputs(
+                    EMBEDDING, self.module, batch_size, seq_len
+                )
                 self._cached_results = benchmark_layer(
                     self.module,
-                    [
-                        ((batch_size, slen_per_cp), torch.int64),
-                    ],
+                    ishapes,
+                    forward_kwargs=fkwargs,
                 )
             self._cache_key = cache_key
         return self._cached_results

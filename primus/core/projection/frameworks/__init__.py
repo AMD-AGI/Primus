@@ -108,10 +108,12 @@ def _ensure_builtins_registered() -> None:
         register_config_adapter(alias, dlrm_derive_default_args)
 
     from primus.core.projection.frameworks.torchtitan import (
+        torchtitan_apply_bench_overrides,
         torchtitan_derive_default_args,
     )
 
     register_config_adapter("torchtitan", torchtitan_derive_default_args)
+    register_bench_override("torchtitan", torchtitan_apply_bench_overrides)
 
     from primus.core.projection.frameworks.jax import maxtext_derive_default_args
 
@@ -124,6 +126,33 @@ def _ensure_builtins_registered() -> None:
 def framework_of(args) -> str:
     """Return the training framework *args* describes, defaulting to Megatron."""
     return (getattr(args, "framework", "") or "").lower().strip() or "megatron"
+
+
+_BENCH_OVERRIDE_REGISTRY: "dict[str, ConfigAdapter]" = {}
+
+
+def register_bench_override(name: str, fn) -> None:
+    """Register the flat-to-native write-back for framework *name*.
+
+    Normalization translates a backend's config into the projection's flat
+    fields; the performance driver then edits those fields to shrink the model
+    onto the bench node.  A backend that will be *benchmarked* needs the reverse
+    translation too, so the model it builds is the one those edits describe.
+    Megatron needs no entry here -- the flat fields are its own.
+    """
+    _BENCH_OVERRIDE_REGISTRY[name.lower().strip()] = fn
+
+
+def apply_bench_overrides(primus_config, module_name: str = "pre_trainer") -> None:
+    """Write the driver's bench edits back into the backend's own config.
+
+    A no-op for backends whose config the projection already reads natively.
+    """
+    args = primus_config.get_module_config(module_name)
+    _ensure_builtins_registered()
+    writeback = _BENCH_OVERRIDE_REGISTRY.get(framework_of(args))
+    if writeback is not None:
+        writeback(args)
 
 
 def normalize_primus_config(primus_config, module_name: str = "pre_trainer") -> str:

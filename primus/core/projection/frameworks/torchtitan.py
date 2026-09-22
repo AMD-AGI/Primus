@@ -403,3 +403,103 @@ def torchtitan_derive_default_args(args):
         _normalize(args)
         mark_normalized(args)
     return megatron_derive_default_args(args)
+
+
+# ---------------------------------------------------------------------------
+# Benchmark write-back: flat projection fields -> TorchTitan's own config
+# ---------------------------------------------------------------------------
+#
+# Normalization runs one way -- TorchTitan's nested config in, flat
+# Megatron-spelled fields out -- and the performance driver then edits the flat
+# side: it caps the stack at one or two layers, shrinks expert parallelism onto
+# the bench node, and flattens the pipeline.  Simulation reads those flat fields
+# directly, so for simulate-only backends that is the end of it.
+#
+# A benchmark has to *build* the model those edits describe, and TorchTitan
+# builds from its own namespaces, so the edits have to be written back.  Whatever
+# is not written back is silently ignored: a run that believes it profiled two
+# layers at EP=1 would in fact have profiled all 61 at EP=8, which is the
+# difference between a benchmark that finishes and one that will not fit.
+
+
+def _ns_set(obj, path: str, value) -> None:
+    """Write a dotted path into a nested namespace, creating levels as needed."""
+    parts = path.split(".")
+    for part in parts[:-1]:
+        child = getattr(obj, part, None)
+        if child is None:
+            child = SimpleNamespace()
+            setattr(obj, part, child)
+        obj = child
+    setattr(obj, parts[-1], value)
+
+
+def _leading_dense_layers(moe_layer_freq) -> int:
+    """Count the dense layers the projection put at the front of the stack."""
+    if not isinstance(moe_layer_freq, (list, tuple)):
+        return 0
+    dense = 0
+    for flag in moe_layer_freq:
+        if flag:
+            break
+        dense += 1
+    return dense
+
+
+def torchtitan_apply_bench_overrides(args) -> None:
+    """Push the driver's flat bench edits back into TorchTitan's config.
+
+    Mutates *args* in place.  Parallelism degrees, batch shape and activation
+    checkpointing live in TorchTitan's own namespaces; the layer count and expert
+    count live on the flavor's ``ModelArgs``, which no config field reaches, so
+    those are staged under ``primus_projection.model_args_overrides`` for
+    :func:`primus.backends.torchtitan.model_builder.build_model_only` to apply
+    after ``update_from_config``.
+    """
+    num_layers = int(getattr(args, "num_layers", 0) or 0)
+    moe_layer_freq = getattr(args, "moe_layer_freq", None)
+
+    _ns_set(args, "parallelism.tensor_parallel_degree", int(getattr(args, "tensor_model_parallel_size", 1) or 1))
+    _ns_set(args, "parallelism.context_parallel_degree", int(getattr(args, "context_model_parallel_size", 1) or 1))
+    _ns_set(args, "parallelism.expert_parallel_degree", int(getattr(args, "expert_model_parallel_size", 1) or 1))
+    _ns_set(
+        args, "parallelism.pipeline_parallel_degree", int(getattr(args, "pipeline_model_parallel_size", 1) or 1)
+    )
+
+    # Build the bench model unsharded across data parallelism. FSDP2 and DDP
+    # both wrap parameters in DTensors, which the layer benchmark cannot feed
+    # plain tensors to, and the projection already models data-parallel gradient
+    # reduction analytically when it scales back up to the target cluster. This
+    # mirrors the Megatron path, which turns off use_torch_fsdp2 for the same
+    # reason.
+    _ns_set(args, "parallelism.data_parallel_shard_degree", 1)
+    _ns_set(args, "parallelism.data_parallel_replicate_degree", 1)
+
+    micro_batch_size = int(getattr(args, "micro_batch_size", 1) or 1)
+    _ns_set(args, "training.local_batch_size", micro_batch_size)
+    _ns_set(args, "training.seq_len", int(getattr(args, "seq_length", 0) or 0))
+    # One gradient accumulation step: the benchmark measures a single
+    # microbatch and the projection composes the rest.
+    _ns_set(args, "training.global_batch_size", micro_batch_size)
+
+    granularity = getattr(args, "recompute_granularity", None)
+    if granularity == "full":
+        _ns_set(args, "activation_checkpoint.mode", "full")
+    elif granularity == "selective":
+        _ns_set(args, "activation_checkpoint.mode", "selective")
+
+    model_args_overrides = {}
+    if num_layers:
+        model_args_overrides["n_layers"] = num_layers
+    num_experts = getattr(args, "num_experts", None)
+    if num_experts:
+        model_args_overrides["moe_args.num_experts"] = int(num_experts)
+    if moe_layer_freq is not None:
+        dense = _leading_dense_layers(moe_layer_freq)
+        # DeepSeek V3 counts dense layers from the front; Llama 4 interleaves on
+        # a stride. Both are set because only the resolved flavor's ModelArgs
+        # knows which one it has, and the builder drops the ones it does not.
+        model_args_overrides["n_dense_layers"] = dense
+        model_args_overrides["interleave_moe_layer_step"] = 1 if dense == 0 else 2
+
+    _ns_set(args, "primus_projection.model_args_overrides", model_args_overrides)

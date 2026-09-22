@@ -628,41 +628,13 @@ class LanguageModelProfiler(BaseModuleProfiler):
         all_layers = []
 
         if model is not None:
-
-            def unwrap_module(module):
-                """Recursively unwrap DistributedDataParallel / pipeline wrappers."""
-                return unwrap_module(module.module) if hasattr(module, "module") else module
-
-            model_chunks = model if isinstance(model, list) else [model]
-
-            for chunk in model_chunks:
-                unwrapped = unwrap_module(chunk)
-
-                language_model = getattr(unwrapped, "language_model", None)
-                if language_model is not None:
-                    if hasattr(language_model, "embedding"):
-                        embedding_module = language_model.embedding
-                    if hasattr(language_model, "output_layer"):
-                        output_module = language_model.output_layer
-
-                    if hasattr(language_model, "encoder") and hasattr(language_model.encoder, "layers"):
-                        all_layers.extend(language_model.encoder.layers)
-                    elif hasattr(language_model, "decoder") and hasattr(language_model.decoder, "layers"):
-                        all_layers.extend(language_model.decoder.layers)
-                    elif hasattr(language_model, "layers"):
-                        all_layers.extend(language_model.layers)
-                    continue
-
-                if hasattr(unwrapped, "decoder") and hasattr(unwrapped.decoder, "layers"):
-                    all_layers.extend(unwrapped.decoder.layers)
-                elif hasattr(unwrapped, "layers"):
-                    all_layers.extend(unwrapped.layers)
-                else:
-                    raise ValueError(f"Cannot find transformer layers in model chunk: {type(unwrapped)}")
-                if hasattr(unwrapped, "embedding"):
-                    embedding_module = unwrapped.embedding
-                if hasattr(unwrapped, "output_layer"):
-                    output_module = unwrapped.output_layer
+            # Where the layers, embedding and head live is the backend's
+            # business, not the profiler's; the adapter for this framework
+            # knows its own tree.
+            parts = self.bench_adapter().discover(model)
+            all_layers = list(parts.layers)
+            embedding_module = parts.embedding
+            output_module = parts.output_layer
         elif not is_simulation_mode:
             raise ValueError(
                 "model=None is only allowed when simulation backends are set "

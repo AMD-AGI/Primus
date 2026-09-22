@@ -559,84 +559,11 @@ def benchmark_moe_layer_decomposed(
 
     is_rank_0 = int(os.getenv("RANK", "0")) == 0
 
-    with fp8_context:
-        for _ in range(num_warmup):
-            outputs = moe_module(*inputs, **kwargs)
-            if not isinstance(outputs, (tuple, list)):
-                outputs = (outputs,)
-
-            if grad_outputs is None:
-                grad_outputs = []
-                for i, out in enumerate(outputs):
-                    if isinstance(out, torch.Tensor) and out.requires_grad:
-                        grad_outputs.append(torch.randn_like(out))
-                        output_indices.append(i)
-
-            valid_outputs = [outputs[i] for i in output_indices]
-            if valid_outputs:
-                torch.autograd.backward(valid_outputs, grad_outputs)
-
-            moe_module.zero_grad(set_to_none=True)
-            for inp in inputs:
-                if inp.requires_grad:
-                    inp.grad = None
-
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
-    # --- Measure activation memory (forward-only loop) ---
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats(device)
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    mem_before = torch.cuda.memory_allocated(device)
-
-    with fp8_context:
-        for _ in range(num_iterations):
-            outputs = moe_module(*inputs, **kwargs)
-
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    mem_after_forward = torch.cuda.max_memory_allocated(device)
-    activation_memory = (mem_after_forward - mem_before) // num_iterations
-
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats(device)
-    del outputs
-
-    # =========================================================================
-    # BENCHMARK with decomposed A2A timing
-    # =========================================================================
-    # Monkey-patch dispatch() and combine() to insert CUDA events.
-    # MoELayer.forward() calls self.dispatch(...) and self.combine(...)
-    # so instance-attribute patches are picked up by Python's MRO.
-    original_dispatch = moe_module.dispatch
-    original_combine = moe_module.combine
-
-    # Accumulate (start_event, end_event) pairs per iteration
-    _dispatch_events = []  # one (start, end) per iteration
-    _combine_events = []
-
-    def timed_dispatch(*args, **kwargs):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        result = original_dispatch(*args, **kwargs)
-        end.record()
-        _dispatch_events.append((start, end))
-        return result
-
-    def timed_combine(*args, **kwargs):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        result = original_combine(*args, **kwargs)
-        end.record()
-        _combine_events.append((start, end))
-        return result
-
-    moe_module.dispatch = timed_dispatch
-    moe_module.combine = timed_combine
+    # Pin the per-expert token count so the grouped GEMM's ``M`` tile is the
+    # same on every iteration (see the note above ``_kernel_pad_enabled``).
+    routing_restores = []
+    if _kernel_pad_enabled():
+        routing_restores, _ = _install_balanced_routing_patches(moe_module)
 
     forward_times = []
     backward_times = []
@@ -650,7 +577,7 @@ def benchmark_moe_layer_decomposed(
         num_warmup, num_iterations = _bench_iter_count(20, num_iterations)
 
         with fp8_context:
-            for _ in range(num_iterations):
+            for _ in range(num_warmup):
                 # --- Forward pass ---
                 forward_start = torch.cuda.Event(enable_timing=True)
                 forward_end = torch.cuda.Event(enable_timing=True)
@@ -699,7 +626,7 @@ def benchmark_moe_layer_decomposed(
 
         with fp8_context:
             for _ in range(num_iterations):
-                outputs = moe_module(*inputs)
+                outputs = moe_module(*inputs, **kwargs)
 
         if device.type == "cuda":
             torch.cuda.synchronize(device)
@@ -755,7 +682,7 @@ def benchmark_moe_layer_decomposed(
                     forward_end = torch.cuda.Event(enable_timing=True)
 
                     forward_start.record()
-                    outputs = moe_module(*inputs)
+                    outputs = moe_module(*inputs, **kwargs)
                     forward_end.record()
 
                     # --- Backward pass ---
