@@ -6,7 +6,7 @@ Parameter references for Primus presets, backend-facing keys, and commonly used 
 - [TorchTitan parameters](torchtitan-parameters.md): Primus TorchTitan preset keys and common JobConfig fields
 - [MaxText parameters](maxtext-parameters.md): Primus MaxText overlay defaults and common fields
 - [Megatron Bridge parameters](megatron-bridge-parameters.md): Megatron Bridge recipe, SFT, and pretraining fields surfaced through Primus
-- [SpecForge YAML, env, and CLI](../../examples/specforge/README.md#configuration-reference): Primus-owned SpecForge fields; SpecForge Hydra stays in SpecForge docs
+- [SpecForge YAML, env, and CLI](../../examples/specforge/CONFIGURATION.md): Primus-owned SpecForge fields; SpecForge Hydra stays in SpecForge docs
 - [Environment variables](environment-variables.md): practical reference for commonly encountered environment variables
 
 ---

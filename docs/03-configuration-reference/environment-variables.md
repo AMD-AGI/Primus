@@ -257,4 +257,4 @@ Primus owns these defaults in one place per backend: `primus/backends/<backend>/
 
 ## 15. SpecForge (ROCm overlay)
 
-SpecForge env, YAML, and CLI live in the [SpecForge on Primus configuration reference](../../examples/specforge/README.md#configuration-reference). That page lists Primus-owned names (`RUN_ID`, `CONSUMER_STATE_DIR`, `PRIMUS_SPECFORGE_*`, …) and points SpecForge Hydra keys at the SpecForge AMD ROCm tutorial.
+SpecForge env, YAML, and CLI live in the [SpecForge configuration reference](../../examples/specforge/CONFIGURATION.md). That page lists Primus-owned names (`RUN_ID`, `CONSUMER_STATE_DIR`, `PRIMUS_SPECFORGE_*`, …) and points SpecForge Hydra keys at the SpecForge AMD ROCm tutorial.
