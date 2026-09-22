@@ -13,9 +13,8 @@ on:
     tags:
       - "v*"
   pull_request:
-    # Re-list the implicit defaults (opened/synchronize/reopened) and add
-    # ready_for_review so flipping a Draft PR to Ready triggers its first run.
-    types: [opened, synchronize, reopened, ready_for_review]
+    # labeled: adding 'ci:gpu' starts GPU unit-test jobs.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   schedule:
     # Saturday 18:00 UTC (Sunday 02:00 UTC+8) — the weekend full run. Kept far
     # from Primus-Benchmark's daily 16:00 UTC cron; it also uses other runners.
@@ -113,8 +112,7 @@ jobs:
 
   build-docker:
     needs: [code-lint]
-    # Skip on Draft PRs (keep code-lint ungated); the event_name guard preserves
-    # push/tag and workflow_dispatch runs where github.event.pull_request is absent.
+    # Skip on Draft PRs (keep code-lint ungated).
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: build-docker
     # runs-on: build-docker-crusoe
@@ -277,7 +275,11 @@ jobs:
       # so their runtime installs are removed here.
       UT_CONTAINER: primus_ut_torch
     needs: [build-docker]
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    # PRs: ci:gpu label, not draft.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+       contains(github.event.pull_request.labels.*.name, 'ci:gpu'))
     # runs-on: [primus-lm-cicd-torch-j8knc]
     runs-on: [primus-lm-cicd-v26.3-tas8n-a16-40]
     # runs-on: [primus-lm-cicd-v26.3-crusoe-m2m-321]
@@ -532,7 +534,7 @@ jobs:
           pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py "${TIER_ARGS[@]}" \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_130M_bridge_pretrain \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_370M \
-            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_hylo_mamba_1B_hybrid \
+            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_zebra_mamba_1B_hybrid \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/megatron-e2e.xml"
           IN
       - name: Run Primus Model Tests -- TorchTitan
@@ -696,7 +698,11 @@ jobs:
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/jax
       PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_docker_jax_ci/actions-runner
     needs: [code-lint]
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    # PRs: ci:gpu label, not draft.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+       contains(github.event.pull_request.labels.*.name, 'ci:gpu'))
     runs-on: [primus-jax-tas-runner] # docker container primus_jax_github_runner on tas a16-31
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
@@ -874,7 +880,12 @@ jobs:
     # mapping is needed: torch (megatron/torchtitan) and jax (maxtext) E2E cover
     # near-disjoint modules and are merged per module by max covered lines.
     needs: [run-unittest-torch, run-unittest-jax]
-    if: always()
+    # Same ci:gpu gate as GPU UT.
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+       (!github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'ci:gpu')))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
