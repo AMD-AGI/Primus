@@ -302,6 +302,32 @@ def test_memory_payload_matches_the_torch_harness_shape():
     ]
 
 
+def test_artifact_is_readable_by_the_shared_extraction():
+    """The whole point of a separate runner is that nothing downstream knows.
+
+    MaxText measures itself, so the contract it has to keep is the artifact --
+    the same dict the torch harness produces, read by the same extraction.
+    """
+    from primus.core.projection.performance_projection.projection import (
+        _extract_layer_type_timings,
+    )
+
+    bench = MaxTextLayerBench()
+    results = {
+        0: bench._layer_entry(JaxMeasurement(12.0, 24.0, 5_000_000), "dense", None, 1, 4096),
+        1: bench._layer_entry(JaxMeasurement(30.0, 61.0, 9_000_000), "moe", None, 1, 4096),
+    }
+
+    timings = _extract_layer_type_timings(results)
+
+    assert timings["dense"]["forward"] == 12.0
+    assert timings["dense"]["backward"] == 24.0
+    assert timings["moe"]["forward"] == 30.0
+    assert timings["moe"]["backward"] == 61.0
+    # Activation is reported in GB by the extraction.
+    assert timings["moe"]["activation"] == pytest.approx(9_000_000 / 1024**3)
+
+
 def test_missing_config_is_an_error_not_a_silent_skip():
     with pytest.raises(RuntimeError, match="setup_model_only"):
         MaxTextLayerBench().run(
