@@ -133,17 +133,20 @@ def wan_forward_step_func(
     if boundary_timestep is not None:
         boundary_tensor = torch.full_like(model_timesteps, fill_value=float(boundary_timestep))
 
-    # Autocast has nothing to do when the run is already fp32, and asking CUDA
-    # to cast float32 to float32 is only a no-op by convention.
-    autocast_enabled = compute_dtype in (torch.bfloat16, torch.float16)
-
-    with torch.amp.autocast("cuda", enabled=autocast_enabled, dtype=compute_dtype):
-        noise_pred = model(
-            hidden_states=noisy_latents,
-            timestep=model_timesteps,
-            encoder_hidden_states=encoder_hidden_states,
-            boundary_timestep=boundary_tensor,
-        )
+    # Deliberately no autocast: the batch is cast to compute_dtype above and
+    # Float16Module holds the parameters at params_dtype, so autocast has no
+    # GEMM left to cast, but its fp32 policy still covers layer_norm and
+    # rms_norm, which is the whole of the block's norm path. That widens what
+    # the norms save for backward without widening any multiply, and with
+    # recompute on it computes the widened norms twice. They are no less
+    # accurate for running bf16: ATen accumulates their mean and variance in
+    # fp32 whatever the input dtype.
+    noise_pred = model(
+        hidden_states=noisy_latents,
+        timestep=model_timesteps,
+        encoder_hidden_states=encoder_hidden_states,
+        boundary_timestep=boundary_tensor,
+    )
 
     metrics = {
         "batch_size": latents.shape[0],
