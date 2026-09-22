@@ -31,8 +31,8 @@ From `/opt/primus`:
 
 Same command for capture and train; only the YAML changes. Dotted CLI keys
 override YAML, for example `specforge_overrides.training.max_steps=1000`.
-The [configuration reference](CONFIGURATION.md) lists every Primus YAML
-field, env var, and CLI option; SpecForge-owned knobs stay in the
+The [configuration reference](CONFIGURATION.md) is annotated experiment YAML
+plus the env/CLI you pass at launch. SpecForge-owned knobs stay in the
 [SpecForge AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md).
 
 ## Offline

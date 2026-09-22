@@ -1,231 +1,237 @@
 # Configuration reference
 
-YAML fields, env vars, and CLI options for [SpecForge on Primus](README.md).
+YAML, env, and CLI for [SpecForge on Primus](README.md). Copy a recipe under
+[`configs/`](configs/) and change the fields below. Draft architecture, data
+format, optimizer, export, and SGLang serving are SpecForge's — see the
+[AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md)
+(§4 for online disaggregated).
 
-Set a Primus-owned value in experiment YAML under
-`modules.pre_trainer.overrides`, or as a dotted CLI key after `--config`
-(`specforge_online.server_count=8`). CLI merges into the module and wins over
-YAML. Python env aliases are fallbacks only: they apply when the YAML/CLI
-field is unset (`run_id` ← `RUN_ID`).
+Set a value in the experiment YAML, or override it on the CLI with the same
+path (`specforge_online.server_count=8`). `${VAR:default}` is expanded when
+the experiment file loads. Export the variable, or put the literal in YAML.
 
-Example YAMLs also use Primus interpolation `${VAR:default}`. That expands
-when the experiment file is loaded. It is **not** Hydra, and it does **not**
-work in a top-level `env:` block — see
-[Environment and XLA flags](../../docs/02-user-guide/environment-and-xla-flags.md).
-A name that only appears inside `${…}` (for example `SERVER_COUNT`,
-`MOONCAKE_LEASE_TTL_MS`, `MAX_STEPS`) is a no-op unless the YAML field
-interpolates it.
+```yaml
+modules:
+  pre_trainer:
+    framework: specforge                 # required
+    config: offline.yaml                 # offline.yaml | online.yaml
+    model: qwen3.5-4b-dflash.yaml        # Primus model preset
+    overrides:
+      specforge_mode: train              # train | capture  (default train)
+      specforge_train_mode: online       # online | offline; required for train
+      specforge_config: ...              # SpecForge Hydra YAML; required for train
+      specforge_root: ...                # SpecForge checkout (overlay: /workspace/SpecForge)
+      output_dir: ...                    # checkpoints / logs
+      specforge_overrides: {}            # SpecForge Hydra key=value (train)
+      specforge_capture: {}              # capture only
+      specforge_online: {}               # online train only
+```
 
-Generic Primus envelope (`work_group`, `exp_name`, `workspace`,
-`modules.pre_trainer.config`, `model:`) is the same as other backends.
-Generic launcher flags are
-[CLI reference](../../docs/02-user-guide/cli-reference.md).
+Do not set `specforge_role`. Primus assigns producer/consumer from node rank.
+Do not pass `--role` on `primus-cli`.
 
-SpecForge-owned knobs — draft architecture, data format, optimizer,
-`training.*`, `runtime.in_flight_*`, `prepare_hidden_states.py` flags,
-`specforge export`, SGLang serving — stay in the
-[SpecForge AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md)
-(especially §4 for online disaggregated). Do not duplicate them here.
+## Capture
 
-## Primus module YAML
+[`configs/qwen3.5-4b-dflash-offline-capture.yaml`](configs/qwen3.5-4b-dflash-offline-capture.yaml)
 
-Under `modules.pre_trainer.overrides`. Module presets are
-`primus/configs/modules/specforge/offline.yaml` and `online.yaml`.
+```bash
+export CAPTURE_DATA_PATH=/data/sharegpt.jsonl
+export OUTPUT_DIR=/data/runs/capture
+export NPROC_PER_NODE=8
+./runner/primus-cli direct -- train pretrain \
+  --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
+```
 
-| Field | Required | Default | Meaning |
-| --- | --- | --- | --- |
-| `specforge_mode` | no | `train` | `train` or `capture` |
-| `specforge_train_mode` | **yes** when mode is `train` | none | `online` or `offline`. Ignored for capture |
-| `specforge_config` | train | none | Path to SpecForge Hydra YAML. Example YAMLs interpolate `SPECFORGE_CONFIG` |
-| `specforge_root` | no | `SPECFORGE_ROOT`, else ancestor of `specforge_config` | SpecForge checkout (cwd). Overlay default `/workspace/SpecForge`. Prepare hook: `--backend_path` then this field then `SPECFORGE_ROOT` |
-| `specforge_entrypoint` | no | `specforge` | argv[0] for `specforge train` |
-| `specforge_role` | no | omit | Rank split assigns producer/consumer. `both` is rejected. Do not pass `--role` on `primus-cli` |
-| `output_dir` | no | none | Checkpoints / logs. Example YAMLs interpolate `OUTPUT_DIR`. Online also injects this into SpecForge Hydra |
-| `specforge_overrides` | no | `{}` | Nested or dotted keys forwarded to `specforge train … key=value`. **SpecForge-owned** |
-| `specforge_capture` | capture | `{}` | Offline hidden-state capture. Primus-owned keys below; the rest are SpecForge script flags |
-| `specforge_online` | online train | `{}` | Mooncake / SGLang / rank split. Primus-owned |
+```yaml
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-offline-capture}
+workspace: ${PRIMUS_WORKSPACE:./output}
 
-`modules.pre_trainer.framework` must be `specforge`. `model:` points at a
-Primus model preset (`qwen3.5-4b-dflash.yaml`); draft architecture still
-lives in SpecForge.
+modules:
+  pre_trainer:
+    framework: specforge
+    config: offline.yaml
+    model: qwen3.5-4b-dflash.yaml
+    overrides:
+      specforge_mode: capture
+      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
+      output_dir: ${OUTPUT_DIR}
 
-## `specforge_online`
+      specforge_capture:
+        target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}
+        data_path: ${CAPTURE_DATA_PATH}          # ShareGPT-style JSONL
+        output_path: ${OUTPUT_DIR}/hidden_states_raw
+        nproc_per_node: ${NPROC_PER_NODE:1}      # GPUs for capture
+        filter_output_path: ${OUTPUT_DIR}/hidden_states
+        filter_block_size: ${BLOCK_SIZE:16}
+        filter_min_kept: ${FILTER_MIN_KEPT:1}    # fail if fewer shards survive
+        # Remaining keys are SpecForge prepare_hidden_states flags:
+        strategy: dflash
+        draft_model_config: configs/qwen3.5-4b-dflash.json
+        trust_remote_code: true
+        cache_dir: ${OUTPUT_DIR}/sf-cache
+        chat_template: qwen3.5
+        max_length: 2048
+        tp_size: 1
+        batch_size: ${CAPTURE_BATCH_SIZE:8}
+        sglang_attention_backend: aiter
+        sglang_disable_radix_cache: true         # required on this overlay
+        sglang_mem_fraction_static: 0.8
+        sglang_context_length: 2560
+```
 
-Read by `online_settings()`. YAML wins over the Python env alias. Names in
-the **Env** column are read in Python; names only in example YAML
-(`${SERVER_COUNT:1}`) are listed in [Interpolation-only names](#interpolation-only-names).
+Train later with `data.hidden_states_path` pointing at `filter_output_path`
+(the filtered shards), not `output_path`.
 
-| YAML key | Python env | Default | Meaning |
-| --- | --- | --- | --- |
-| `run_id` | `RUN_ID`, `DISAGG_STORE_ID` | **required** | Store / run identity |
-| `run_root` | `RUN_ROOT`, `DISAGG_RUN_ROOT` | **required** | Shared control dir (`head.ip`, `trainer.ip`, `inference.done`) |
-| `consumer_state_dir` | `CONSUMER_STATE_DIR`, `DISAGG_CONSUMER_STATE_DIR` | **required** | Trainer-local consumer state (node-local disk) |
-| `capture_nnodes` | `CAPTURE_NNODES` | `1` | Capture ranks: `[0, capture_nnodes)` |
-| `trainer_nnodes` | `TRAINER_NNODES` | `1` | Trainer ranks: the rest of `-N` |
-| `server_count` | — | `1` | SGLang servers per capture node |
-| `server_tp` | — | `1` | Tensor parallel size per server |
-| `server_gpus` | — | `0` | GPU list for SGLang. A single id expands to `0..(server_count×server_tp−1)` |
-| `trainer_gpus` | — | `0` | GPU list for FSDP. A single id expands to `0..(nproc−1)` |
-| `trainer_nproc` | `NPROC_PER_NODE` | `1` | Trainer processes per trainer node. YAML alias: `nproc_per_node` |
-| `target_model_path` | `TARGET_MODEL` | `Qwen/Qwen3.5-4B` | Also falls back to `specforge_overrides.model.target_model_path` |
-| `capture_layer_ids` | `CAPTURE_LAYER_IDS` | SpecForge `configs/qwen3.5-4b-dflash.json` `target_layer_ids`, else `1,8,15,22,29` | `--spec-capture-layer-ids` |
-| `server_port` | — | `30000` | First SGLang HTTP port; remaining servers use `port+i` |
-| `server_mem_fraction` | — | `0.85` | `--mem-fraction-static` |
-| `sglang_extra_args` | — | `--attention-backend aiter --disable-radix-cache` | Extra argv on every SGLang server |
-| `mooncake_protocol` | `MOONCAKE_PROTOCOL` | `tcp` | Injected as `deployment.disaggregated.mooncake_protocol` |
-| `mooncake_lease_ttl_ms` | `MOONCAKE_DEFAULT_KV_LEASE_TTL` | `500` | `--spec-capture-kv-lease-ttl-ms` |
-| `mooncake_rpc_port` | — | `35551` | Mooncake master RPC |
-| `mooncake_http_port` | — | `35880` | Mooncake HTTP metadata |
-| `mooncake_metrics_port` | — | `35903` | Mooncake metrics |
-| `bind_interface` | `PRIMUS_SPECFORGE_BIND_IFACE` | unset | NIC used to derive a bind IP |
-| `start_timeout_s` | `START_TIMEOUT_S` | `1800` | Sidecar start wait |
-| `peer_timeout_s` | `PEER_TIMEOUT_S` | `1800` | Injected as `idle_timeout_s` and `peer_wait_timeout_s` |
+## Offline train
 
-Online allocation: `NNODES = capture_nnodes + trainer_nnodes`. Rank 0 starts
-Mooncake and the SpecForge producer; other capture ranks start SGLang only;
-trainer ranks run `--role consumer`.
+[`configs/qwen3.5-4b-dflash-offline.yaml`](configs/qwen3.5-4b-dflash-offline.yaml)
 
-## `specforge_capture`
+```bash
+export HIDDEN_STATES_PATH=/data/runs/capture/hidden_states
+export OUTPUT_DIR=/data/runs/train
+export NPROC_PER_NODE=8
+export MAX_STEPS=20
+./runner/primus-cli direct -- train pretrain \
+  --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
+```
 
-Primus keys (not forwarded to SpecForge):
+```yaml
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-offline}
+workspace: ${PRIMUS_WORKSPACE:./output}
 
-| YAML key | Meaning |
-| --- | --- |
-| `nproc_per_node` | `torchrun --nproc_per_node` for capture |
-| `torchrun` / `script` | Override the launcher / `prepare_hidden_states.py` path |
-| `filter_output_path` | After capture, Primus filters shards here |
-| `filter_block_size` | Filter block size (example default `16`) |
-| `filter_min_kept` | Minimum shards that must survive the filter (code default `1`) |
+modules:
+  pre_trainer:
+    framework: specforge
+    config: offline.yaml
+    model: qwen3.5-4b-dflash.yaml
+    overrides:
+      specforge_mode: train
+      specforge_train_mode: offline
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-offline-amd.yaml}
+      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
+      output_dir: ${OUTPUT_DIR}
 
-Every other key is forwarded as `--kebab-case` to SpecForge
-`scripts/prepare_hidden_states.py`. Boolean flags use
-`argument_builder.CAPTURE_STORE_TRUE`. Flag meanings are SpecForge's; see
-the tutorial.
+      specforge_overrides:                       # SpecForge Hydra; see SpecForge docs
+        training.max_steps: ${MAX_STEPS:20}
+        training.num_epochs: 1
+        training.save_interval: ${MAX_STEPS:20}
+        training.log_interval: 5
+        model.use_liger_kernel: false            # not in this overlay
+        data.hidden_states_path: ${HIDDEN_STATES_PATH}
+        deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}
+```
 
-Preflight requires `data_path` (or `CAPTURE_DATA_PATH`), `output_path`, and
-a readable `draft_model_config`. `sglang_disable_radix_cache` must stay true
-on this overlay.
+## Online train
 
-## SpecForge Hydra (`specforge_overrides` and `specforge_config`)
+[`configs/qwen3.5-4b-dflash-online-2node.yaml`](configs/qwen3.5-4b-dflash-online-2node.yaml)
 
-Put training hyperparameters in SpecForge's YAML or in `specforge_overrides`.
-Primus **appends** the following Hydra keys after `specforge_overrides`, so
-they win on collision. Keep loopback placeholders in the git SpecForge YAML;
-do not put allocated IPs there.
+`-N` is capture nodes + trainer nodes. `--gres=gpu:N` is per node: SGLang GPUs
+on capture nodes (`server_count × server_tp`), trainer processes on trainer
+nodes (`trainer_nproc`). A single GPU id `0` expands to `0..N-1`. Rank 0
+starts Mooncake and the SpecForge producer; other capture ranks run SGLang
+only; trainer ranks train.
 
-| SpecForge key | Primus sets |
-| --- | --- |
-| `model.target_model_path` | `specforge_online.target_model_path` |
-| `run_id` | `run_id` |
-| `output_dir` | `output_dir` |
-| `deployment.trainer.nnodes` | `trainer_nnodes` |
-| `deployment.trainer.nproc_per_node` | `trainer_nproc` |
-| `deployment.trainer.master_addr` | first trainer IP when `trainer_nnodes > 1` |
-| `deployment.disaggregated.control_dir` | `{run_root}/control` |
-| `deployment.disaggregated.consumer_state_dir` | `consumer_state_dir` |
-| `deployment.disaggregated.store_id` | `run_id` |
-| `deployment.disaggregated.server_urls` | `http://<each-capture-ip>:<port+i>` for every capture node × `server_count` |
-| `deployment.disaggregated.mooncake_metadata_server` | `http://<rank-0-ip>:<http_port>/metadata` |
-| `deployment.disaggregated.mooncake_master_server_addr` | `<rank-0-ip>:<rpc_port>` |
-| `deployment.disaggregated.mooncake_protocol` | `mooncake_protocol` |
-| `deployment.disaggregated.idle_timeout_s` | `peer_timeout_s` |
-| `deployment.disaggregated.peer_wait_timeout_s` | `peer_timeout_s` |
+Leave `127.0.0.1` in the SpecForge YAML. Primus fills real SGLang and
+Mooncake addresses after allocate. Put `run_root` on shared storage and
+`consumer_state_dir` on node-local disk. Both must be empty for a new
+`RUN_ID`.
 
-Producer argv drops `training.resume_from` so capture does not load a trainer
-checkpoint.
+```bash
+export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+export RUN_ROOT=/path/to/shared/run/$RUN_ID
+export OUTPUT_DIR=$RUN_ROOT/output
+export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
+export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
+export MAX_STEPS=20
+./runner/primus-cli slurm srun -N 2 --gres=gpu:1 \
+  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  --volume /shared:/shared \
+  -- train pretrain \
+  --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
+```
 
-## Environment variables
+```yaml
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-online-2node}
+workspace: ${PRIMUS_WORKSPACE:./output}
 
-### Python-read (SpecForge backend)
+modules:
+  pre_trainer:
+    framework: specforge
+    config: online.yaml
+    model: qwen3.5-4b-dflash.yaml
+    overrides:
+      specforge_mode: train
+      specforge_train_mode: online
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-amd.yaml}
+      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
+      output_dir: ${OUTPUT_DIR}
 
-| Variable | Also | Used for |
-| --- | --- | --- |
-| `SPECFORGE_ROOT` | — | SpecForge checkout if `specforge_root` is unset |
-| `SPECFORGE_CONFIG` | — | Preflight fallback if the YAML field is unset (train still needs the YAML field) |
-| `RUN_ID` | `DISAGG_STORE_ID` | Online store id |
-| `RUN_ROOT` | `DISAGG_RUN_ROOT` | Online control dir |
-| `CONSUMER_STATE_DIR` | `DISAGG_CONSUMER_STATE_DIR` | Trainer-local state |
-| `CAPTURE_NNODES` / `TRAINER_NNODES` | — | Rank split if YAML omits them |
-| `NPROC_PER_NODE` | — | Trainer nproc if YAML omits `trainer_nproc` / `nproc_per_node` |
-| `TARGET_MODEL` | — | Online target if YAML omits `target_model_path` |
-| `CAPTURE_LAYER_IDS` | — | Capture layers if YAML omits them |
-| `MOONCAKE_PROTOCOL` | — | Mooncake transport if YAML omits it |
-| `MOONCAKE_DEFAULT_KV_LEASE_TTL` | — | Lease TTL if YAML omits `mooncake_lease_ttl_ms` |
-| `START_TIMEOUT_S` / `PEER_TIMEOUT_S` | — | Sidecar / peer waits |
-| `TRAIN_DATA_PATH` | — | Online preflight if `specforge_overrides.data.train_data_path` is unset |
-| `HIDDEN_STATES_PATH` | — | Offline-train preflight if `specforge_overrides.data.hidden_states_path` is unset |
-| `CAPTURE_DATA_PATH` | — | Capture preflight if `specforge_capture.data_path` is unset |
-| `BACKEND_PATH` | `--backend_path` | Adapter / prepare-hook SpecForge root |
+      specforge_online:
+        run_id: ${RUN_ID}                          # required; letters, digits, . _ -
+        run_root: ${RUN_ROOT}                      # required; shared
+        consumer_state_dir: ${CONSUMER_STATE_DIR}  # required; local NVMe
+        capture_nnodes: ${CAPTURE_NNODES:1}
+        trainer_nnodes: ${TRAINER_NNODES:1}
+        server_count: ${SERVER_COUNT:1}            # SGLang servers per capture node
+        server_tp: ${SERVER_TP:1}
+        server_gpus: ${SERVER_GPUS:0}              # CSV, or 0 → 0..count*tp-1
+        trainer_gpus: ${TRAINER_GPUS:0}            # CSV, or 0 → 0..nproc-1
+        trainer_nproc: ${NPROC_PER_NODE:1}
+        target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}
+        mooncake_protocol: ${MOONCAKE_PROTOCOL:tcp}
+        mooncake_lease_ttl_ms: ${MOONCAKE_LEASE_TTL_MS:500}
+        # Optional:
+        # capture_layer_ids: 1,8,15,22,29
+        # server_port: 30000
+        # server_mem_fraction: 0.85
+        # sglang_extra_args: --attention-backend aiter --disable-radix-cache
+        # mooncake_rpc_port: 35551
+        # mooncake_http_port: 35880
+        # mooncake_metrics_port: 35903
+        # bind_interface: ens3                     # if auto IP is wrong
+        # start_timeout_s: 1800
+        # peer_timeout_s: 1800
 
-### Interpolation-only names
+      specforge_overrides:                         # SpecForge Hydra; see SpecForge docs
+        training.max_steps: ${MAX_STEPS:20}
+        training.num_epochs: 1
+        training.save_interval: ${MAX_STEPS:20}
+        training.log_interval: 5
+        model.use_liger_kernel: false
+        data.train_data_path: ${TRAIN_DATA_PATH}
+        # runtime.in_flight_high_watermark: 64
+        # runtime.in_flight_low_watermark: 32
+```
 
-Read only because the example YAMLs expand them. Python does not look these
-up unless you pass the matching YAML key / CLI override.
+On Ethernet without IB, also pass `NCCL_IB_DISABLE=1` and
+`NCCL_SOCKET_IFNAME=<iface>`. To pin IPs instead of auto-detect:
 
-| Variable | Example YAML field |
-| --- | --- |
-| `OUTPUT_DIR` | `output_dir`, capture `output_path` / `filter_output_path` / `cache_dir` |
-| `SPECFORGE_CONFIG` | `specforge_config` |
-| `MAX_STEPS` | `specforge_overrides.training.max_steps` / `save_interval` |
-| `SERVER_COUNT` / `SERVER_TP` / `SERVER_GPUS` | `specforge_online.server_*` |
-| `TRAINER_GPUS` | `specforge_online.trainer_gpus` |
-| `MOONCAKE_LEASE_TTL_MS` | `specforge_online.mooncake_lease_ttl_ms` |
-| `BLOCK_SIZE` | `specforge_capture.filter_block_size` |
-| `FILTER_MIN_KEPT` | `specforge_capture.filter_min_kept` |
-| `CAPTURE_BATCH_SIZE` | `specforge_capture.batch_size` |
-| `PRIMUS_TEAM` / `PRIMUS_USER` / `PRIMUS_EXP_NAME` / `PRIMUS_WORKSPACE` | experiment envelope |
+```bash
+# capture rank 0 only
+export PRIMUS_SPECFORGE_HEAD_IP=10.0.0.1
+# every node, or use bind_interface / PRIMUS_SPECFORGE_BIND_IFACE
+export PRIMUS_SPECFORGE_LOCAL_IP=10.0.0.2
+```
 
-### IP bind
-
-Rank 0 uses the head resolver; every other rank uses the local resolver.
-
-| Variable | Who | Meaning |
-| --- | --- | --- |
-| `PRIMUS_SPECFORGE_HEAD_IP` | rank 0 | Capture-head IP in `head.ip` and Mooncake URLs |
-| `HEAD_IP` | rank 0 | Fallback for the head resolver only |
-| `PRIMUS_SPECFORGE_LOCAL_IP` | every rank | This node's advertise / bind IP |
-| `PRIMUS_SPECFORGE_BIND_IFACE` | every rank | NIC to derive an IP when the explicit vars are unset |
-
-Primus writes Mooncake sidecar env (`MOONCAKE_MASTER_SERVER_ADDR`,
-`MOONCAKE_METADATA_SERVER`, `MOONCAKE_LOCAL_HOSTNAME`, `MC_TCP_BIND_ADDRESS`).
-Do not set those in YAML.
-
-### ROCm / SGLang stack
-
-Preflight enforces these when torch is HIP, `HIP_VISIBLE_DEVICES` is set, or
-`PRIMUS_SPECFORGE_ENFORCE_ROCM=1`. `PRIMUS_SPECFORGE_ENFORCE_ROCM=0` disables
-the checks (unit tests). The prepare hook fills the AITER / radix defaults
-when unset; it does not override an explicit `0`.
-
-| Variable | Default intent |
-| --- | --- |
-| `PRIMUS_SPECFORGE_ENFORCE_ROCM` | Opt in (`1`) or out (`0`) of overlay checks |
-| `PRIMUS_SPECFORGE_PIN_SGLANG` | SGLang version prefix (default `0.5.14`); empty disables the pin |
-| `SGLANG_USE_AITER` | Must stay on |
-| `SGLANG_USE_AITER_UNIFIED_ATTN` | Overlay AITER path |
-| `AITER_FLYDSL_FORCE` | Overlay AITER path |
-| `SGLANG_DISABLE_RADIX_CACHE` | Must stay on (Mamba + AITER on ROCm) |
-
-Trainer launch aligns `HIP_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` to
-`trainer_gpus`. For multi-node FSDP over Ethernet, pass `NCCL_IB_DISABLE=1`
-and `NCCL_SOCKET_IFNAME=<iface>` via `--env` or top-level `env:`.
-
-Slurm entry injects `NNODES`, `NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT`,
-`GPUS_PER_NODE`. The prepare hook emits `RUN_MODE=single` and
-`GPUS_PER_NODE=1` so Primus does not wrap SpecForge in `torchrun` /
-`managed_local`. Hugging Face cache/token (`HF_HOME`, `HF_TOKEN`) are
-ordinary overlay env, not Primus fields.
+Keep `SGLANG_USE_AITER=1` and `SGLANG_DISABLE_RADIX_CACHE=1` (the overlay
+default). Hugging Face cache/token: `HF_HOME`, `HF_TOKEN`.
 
 ## CLI
 
-Inside the overlay (`/opt/primus`):
+Inside the overlay:
 
 ```bash
 ./runner/primus-cli direct -- train pretrain --config <experiment.yaml> \
   [dotted.overrides...]
 ```
 
-On Slurm, from the login node (image already loaded):
+On Slurm, from the login node, image already loaded:
 
 ```bash
 ./runner/primus-cli slurm srun -N <capture+trainer> --gres=gpu:<gpus-per-node> \
@@ -236,27 +242,12 @@ On Slurm, from the login node (image already loaded):
   [dotted.overrides...]
 ```
 
-| Option | Meaning |
-| --- | --- |
-| `direct -- train pretrain --config FILE` | In-container entry. Same command for capture and train. `--exp FILE` is an alias |
-| `slurm srun -N N --gres=gpu:G -- container --image TAG -- train pretrain --config FILE` | Multi-node. `-N` must equal `capture_nnodes + trainer_nnodes`. `--gres` is per node (SGLang GPUs on capture nodes, `trainer_nproc` on trainer nodes) |
-| `--volume HOST:CONTAINER` | Bind-mount data, run root, checkpoints (repeatable) |
-| `--env KEY=VALUE` | Set env for the run. Repeatable. A path without `=` is an env file |
-| `--shm-size SIZE` | Container shared memory |
-| `--data_path DIR` | Passed to the prepare hook (generic Primus; SpecForge paths still come from YAML/env above) |
-| `--backend_path DIR` | SpecForge checkout; wins over `specforge_root` / `SPECFORGE_ROOT` |
-| `--export_config FILE` | Dump the merged Primus config |
-| `specforge_overrides.<hydra.key>=value` | One-run SpecForge Hydra override |
-| `specforge_online.<key>=value` | One-run Primus online setting |
-| `specforge_capture.<key>=value` | One-run capture setting |
-| `specforge_mode=capture` | One-run mode switch (usually set in YAML) |
-| `specforge_train_mode=offline` | One-run train mode switch |
+Dotted keys match the YAML (`specforge_overrides.training.max_steps=1000`,
+`specforge_online.mooncake_lease_ttl_ms=8000`). `--exp` is an alias for
+`--config`. `--volume` and `--env` are repeatable. `--backend_path` points at
+a SpecForge checkout if it is not `/workspace/SpecForge`.
 
-Launcher globals (`--debug`, `--dry-run`, `--single`, …) and remaining Slurm
-flags (`-p`, `-t`, `-o`, `--exclude`, …) are in the
-[CLI reference](../../docs/02-user-guide/cli-reference.md). SpecForge already
-self-launches workers; the prepare hook forces single-process Primus, so do
-not add `--role` or wrap with `managed_local`.
-
-`specforge train`, `specforge export`, and data-prep scripts are SpecForge
-CLI — Primus builds that argv; use the tutorial for those flags.
+Slurm `-p`, `-t`, `-o`, `--exclude` and launcher `--debug` / `--dry-run` are
+in the [CLI reference](../../docs/02-user-guide/cli-reference.md). Do not wrap
+this in `managed_local`. `specforge export` and data-prep scripts stay on the
+SpecForge CLI.
