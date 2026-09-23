@@ -55,9 +55,11 @@ modules:
       # Reduced-layer proxy: 8 of M3's 60 layers, sized to run on one
       # 8-GPU MI355X node with EP=8 (~9B params/rank). Everything else is the
       # full model's shape -- 128 experts, hidden 6144, GQA 64/4.
-      # DP == world size (8), so gbs 64 / mbs 4 is 2 micro-batches per rank.
+      # DP == world size (8), so gbs 64 / mbs 1 is 8 micro-batches per rank.
+      # mbs stays at 1: the eager MSA backend materialises the full
+      # [b, h, sq, sk] score matrix, so activation memory scales with it.
       train_iters: 10
-      micro_batch_size: 4
+      micro_batch_size: 1
       global_batch_size: 64
 
       # depth, with the three per-layer patterns kept consistent
