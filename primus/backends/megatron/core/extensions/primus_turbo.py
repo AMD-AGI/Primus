@@ -2600,4 +2600,13 @@ class PrimusTurboRMSNorm(te.pytorch.RMSNorm):
     def forward(self, x):
         from primus_turbo.pytorch.ops.normalization import rmsnorm
 
-        return rmsnorm(x, self.weight, self.eps)
+        weight = self.weight
+        if self.zero_centered_gamma:
+            # TE stores gamma centered on zero and applies (1 + w) itself; the
+            # turbo kernel takes the scale verbatim, so the +1 has to happen
+            # here. Without it the weight's zero init makes every norm output
+            # zero, which silently freezes the whole model (loss pinned at the
+            # uniform value, gradients ~0). The fused-residual path does the
+            # same thing -- see fused_residual_rmsnorm.py.
+            weight = weight + 1
+        return rmsnorm(x, weight, self.eps)
