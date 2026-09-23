@@ -667,6 +667,8 @@ class BaseWanTrainer:
             outputs = forward_train(batch, scheduler=self.scheduler)
         else:
             outputs = self.model(batch, self.scheduler)
+        extra_metrics = outputs.get("log_metrics") if isinstance(outputs, dict) else None
+        self._last_log_metrics = extra_metrics if isinstance(extra_metrics, dict) else {}
         return outputs["loss"]
 
     def validate_loss(self) -> float:
@@ -819,6 +821,11 @@ class BaseWanTrainer:
                 "mem/reserved_gb": res,
                 "mem/max_alloc_gb": max_mem,
             }
+            extra_metrics = getattr(self, "_last_log_metrics", None) or {}
+            for key, value in extra_metrics.items():
+                if torch.is_tensor(value):
+                    value = value.detach().float().mean().item()
+                payload[str(key)] = value
             if step_time is not None:
                 payload["time/step_s"] = step_time
             if throughput_samples_per_gpu_s is not None:

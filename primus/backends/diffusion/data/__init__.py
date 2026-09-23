@@ -15,6 +15,7 @@ from .flux_precomputed import (
     FluxRawImageTextProcessor,
 )
 from .processor import WanVideoDataProcessor
+from .worldplay import WorldPlayLatentDataset, WorldPlayLatentProcessor
 
 __all__ = [
     "DatasetConfig",
@@ -24,4 +25,6 @@ __all__ = [
     "FluxRawImageTextProcessor",
     "WanVideoDataProcessor",
     "WanVideoDataset",
+    "WorldPlayLatentDataset",
+    "WorldPlayLatentProcessor",
 ]

@@ -1,0 +1,12 @@
+model:
+  name: worldplay
+  config:
+    # Tencent-licensed model implementation is maintained in-tree by Primus.
+    load_from_pretrained_path: ${HUNYUAN_TRANSFORMER:/data/models/HunyuanVideo-1.5/transformer/480p_i2v}
+    action_checkpoint: ${WORLDPLAY_ACTION_CHECKPOINT:/data/models/HY-WorldPlay/ar_model/diffusion_pytorch_model.safetensors}
+    local_attn_size: -1
+    sink_size: 0
+    recipe:
+      train_time_shift: 3.0
+      logit_mean: 0.0
+      logit_std: 1.0

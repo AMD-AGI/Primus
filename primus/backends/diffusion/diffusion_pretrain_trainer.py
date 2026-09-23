@@ -31,6 +31,7 @@ class DiffusionPretrainTrainer(BaseTrainer, BaseModule):
     def setup(self):
         trainer_cfg = self._as_dict(self.backend_args.trainer)
         dataset_cfg = self._as_dict(self.backend_args.dataset)
+        model_cfg = self._as_dict(self.backend_args.model)
         trainer_args = trainer_cfg.get("args", {})
         attention_backend = trainer_args.get("attention_backend")
 
@@ -60,6 +61,10 @@ class DiffusionPretrainTrainer(BaseTrainer, BaseModule):
                 and importlib.util.find_spec("webdataset") is None
             ):
                 missing.append("webdataset")
+        if model_cfg.get("name") == "worldplay":
+            for package in ("diffusers", "einops"):
+                if importlib.util.find_spec(package) is None:
+                    missing.append(package)
         if video_backend == "imageio" and importlib.util.find_spec("imageio") is None:
             missing.append("imageio")
         if video_backend == "decord" and importlib.util.find_spec("decord") is None:

@@ -95,6 +95,14 @@ class FSDP2Trainer(BaseWanTrainer):
 
         self.mesh = create_device_mesh(self.world_size, sp_size=sp_size, dp_replicate=dp_replicate)
         self.sp_group = self.mesh.get_group("ulysses") if (self.mesh is not None and sp_size > 1) else None
+        configure_distributed = getattr(self.model, "configure_distributed", None)
+        if callable(configure_distributed):
+            configure_distributed(
+                rank=self.rank,
+                world_size=self.world_size,
+                local_rank=self.local_rank,
+                sp_size=sp_size,
+            )
         self.model.to(self.device)
         if hasattr(self.model, "compute_dtype"):
             self.model.compute_dtype = self._resolve_dtype()

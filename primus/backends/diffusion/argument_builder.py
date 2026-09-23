@@ -155,6 +155,72 @@ class DiffusionArgBuilder:
             "mlperf_eval_samples": 262144,
         },
     }
+    DEFAULT_WORLDPLAY_DATASET: dict[str, Any] = {
+        "name": "worldplay",
+        "config": {
+            "dataset_type": "precomputed",
+            "dataset_format": "json",
+            "dataset_path": "/data/dataset/worldplay_dl3dv_100/train.json",
+            "shuffle": True,
+            "data_seed": 3208,
+            "window_frames": 24,
+            "memory_frames": 20,
+            "max_frames": 32,
+            "cfg_rate": 0.1,
+            "memory_sample_rate": 0.8,
+            "negative_prompt_path": "/data/dataset/worldplay_dl3dv_100/neg_prompts/hunyuan_neg_prompt.pt",
+            "negative_byt5_prompt_path": "/data/dataset/worldplay_dl3dv_100/neg_prompts/hunyuan_neg_byt5_prompt.pt",
+            "processor_config": {
+                "processor_name": "worldplay_precomputed",
+                "processor_type": "worldplay_precomputed",
+            },
+        },
+    }
+    DEFAULT_WORLDPLAY_TRAINER: dict[str, Any] = {
+        "name": "fsdp2",
+        "args": {
+            "output_dir": "./output/worldplay",
+            "per_device_train_batch_size": 1,
+            "per_device_eval_batch_size": 1,
+            "gradient_accumulation_steps": 1,
+            "gradient_checkpointing": True,
+            "attention_backend": None,
+            "learning_rate": 1.0e-5,
+            "lr_scheduler_type": "constant_with_warmup",
+            "warmup_steps": 1,
+            "weight_decay": 1.0e-4,
+            "num_train_epochs": 1000,
+            "max_steps": 30,
+            "logging_steps": 1,
+            "save_steps": 0,
+            "save_total_limit": 1,
+            "dataloader_num_workers": 1,
+            "report_to": "none",
+            "run_name": "worldplay-ar-8b-sft",
+            "bf16": True,
+            "seed": 3208,
+            "optim": "adamw_torch",
+            "adam_beta1": 0.9,
+            "adam_beta2": 0.999,
+            "adam_epsilon": 1.0e-8,
+            "max_grad_norm": 1.0,
+            "fsdp2_wrap_target": "dit",
+            "fsdp_transformer_layer_cls_to_wrap": (
+                "MMDoubleStreamBlock,MMSingleStreamBlock"
+            ),
+            "fsdp2_reshard_after_forward": True,
+            "compile_transformer_blocks": False,
+            "save_strategy": "none",
+            "sp_size": 1,
+            "dp_replicate": 1,
+            "flow_match_scheduler": {
+                "shift": 3,
+                "sigma_min": 0.0,
+                "extra_one_step": False,
+                "num_train_timesteps": 1000,
+            },
+        },
+    }
 
     def __init__(self) -> None:
         self._params: dict[str, Any] = {}
@@ -235,6 +301,8 @@ class DiffusionArgBuilder:
             return self.DEFAULT_DATASET, self.DEFAULT_WAN_TRAINER
         if model_name == "flux" or model_name.startswith("flux."):
             return self.DEFAULT_FLUX_DATASET, self.DEFAULT_FLUX_TRAINER
+        if model_name == "worldplay":
+            return self.DEFAULT_WORLDPLAY_DATASET, self.DEFAULT_WORLDPLAY_TRAINER
         raise ValueError(f"Unsupported diffusion model name: {model_name!r}")
 
     def _normalize_primus_style_sections(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -305,6 +373,13 @@ class DiffusionArgBuilder:
             ("prompt_dropout_prob",): ("processor_config", "prompt_dropout_prob"),
             ("img_size",): ("processor_config", "img_size"),
             ("skip_low_resolution",): ("processor_config", "skip_low_resolution"),
+            ("window_frames",): ("window_frames",),
+            ("memory_frames",): ("memory_frames",),
+            ("max_frames",): ("max_frames",),
+            ("cfg_rate",): ("cfg_rate",),
+            ("memory_sample_rate",): ("memory_sample_rate",),
+            ("negative_prompt_path",): ("negative_prompt_path",),
+            ("negative_byt5_prompt_path",): ("negative_byt5_prompt_path",),
         }
         for source_path, target_path in data_map.items():
             value = self._get_any(data, *source_path)
@@ -361,6 +436,8 @@ class DiffusionArgBuilder:
         runtime_map = {
             ("attention_backend",): ("attention_backend",),
             ("report_to",): ("report_to",),
+            ("wandb_project",): ("wandb_project",),
+            ("wandb_name",): ("wandb_name",),
             ("seed",): ("seed",),
             ("bf16",): ("bf16",),
             ("fp16",): ("fp16",),
@@ -391,6 +468,12 @@ class DiffusionArgBuilder:
             self._set_nested(trainer_args, ("report_to",), "none")
         elif enable_wandb is True and runtime.get("report_to") is None:
             self._set_nested(trainer_args, ("report_to",), "wandb")
+        wandb_project = metrics.get("wandb_project") or runtime.get("wandb_project")
+        if wandb_project is not None:
+            self._set_nested(trainer_args, ("wandb_project",), wandb_project)
+        wandb_name = metrics.get("wandb_name") or runtime.get("wandb_name")
+        if wandb_name is not None:
+            self._set_nested(trainer_args, ("wandb_name",), wandb_name)
 
         mlperf = params.get("mlperf") or {}
         mlperf_map = {

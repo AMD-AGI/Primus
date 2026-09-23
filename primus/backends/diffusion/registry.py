@@ -46,6 +46,22 @@ def _build_flux_dataset(dataset_config: dict):
     return build_flux_dataset(dataset_config)
 
 
+def _build_worldplay_model(model_config: dict):
+    from primus.backends.diffusion.models.registrations.worldplay import (
+        build_worldplay_model,
+    )
+
+    return build_worldplay_model(model_config)
+
+
+def _build_worldplay_dataset(dataset_config: dict):
+    from primus.backends.diffusion.data.registrations.worldplay import (
+        build_worldplay_dataset,
+    )
+
+    return build_worldplay_dataset(dataset_config)
+
+
 def _build_fsdp2_trainer(
     *, model, dataset, processor, trainer_args: dict, eval_dataset=None, eval_processor=None
 ):
@@ -66,10 +82,12 @@ MODEL_BUILDERS: Dict[str, Callable[[dict], Any]] = {
     "flux.1-dev": _build_flux_preset_model("flux.1-dev"),
     "flux.1-schnell": _build_flux_preset_model("flux.1-schnell"),
     "wan": _build_wan_model,
+    "worldplay": _build_worldplay_model,
 }
 DATASET_BUILDERS: Dict[str, Callable[[dict], Tuple[Any, Any]]] = {
     "flux": _build_flux_dataset,
     "wan": _build_wan_dataset,
+    "worldplay": _build_worldplay_dataset,
 }
 TRAINER_BUILDERS: Dict[str, Callable[..., Any]] = {
     "fsdp2": _build_fsdp2_trainer,

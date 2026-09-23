@@ -133,6 +133,28 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
         _require_path(model_cfg.get("load_from_pretrained_path"), "DiT initialization checkpoint")
         _require_path(encoder_cfg.get("t5_encoder"), "text encoder checkpoint", kind="file")
         _require_path(encoder_cfg.get("autoencoder"), "VAE checkpoint", kind="file")
+    elif model_name == "worldplay":
+        _require_path(dataset_cfg.get("dataset_path"), "WorldPlay latent index", kind="file")
+        _require_path(
+            dataset_cfg.get("negative_prompt_path"),
+            "WorldPlay negative prompt cache",
+            kind="file",
+        )
+        _require_path(
+            dataset_cfg.get("negative_byt5_prompt_path"),
+            "WorldPlay ByT5 negative prompt cache",
+            kind="file",
+        )
+        _require_path(
+            model_cfg.get("load_from_pretrained_path"),
+            "HunyuanVideo-1.5 480p I2V transformer",
+            kind="dir",
+        )
+        _require_path(
+            model_cfg.get("action_checkpoint"),
+            "HY-WorldPlay AR action checkpoint",
+            kind="file",
+        )
     elif str(model_name).startswith("flux"):
         dataset_type = str(dataset_cfg.get("dataset_type", "precomputed")).lower()
         if dataset_type == "raw":

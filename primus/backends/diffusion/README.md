@@ -7,7 +7,7 @@ training loop.
 
 ## Supported Scope
 
-- Models: `wan`, `flux.1-schnell`, and `flux.1-dev`.
+- Models: `wan`, `worldplay`, `flux.1-schnell`, and `flux.1-dev`.
 - Trainer: FSDP2.
 - Wan sequence parallelism: supported through `sp_size`.
 - FLUX sequence parallelism: not supported; keep `sp_size: 1`.
@@ -27,6 +27,7 @@ wan2.1_t2v_1.3b.yaml
 wan2.1_t2v_1.3b_sft.yaml
 wan2.2_ti2v_5b.yaml
 wan2.2_ti2v_5b_sft.yaml
+worldplay_ar_8b_sft.yaml
 flux.1_schnell_t2i.yaml
 flux.1_dev_t2i.yaml
 ```

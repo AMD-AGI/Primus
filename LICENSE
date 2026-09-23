@@ -45,6 +45,13 @@ Primus uses or references the following third-party projects:
    - License: MIT License (Sea AI Lab)
    - Repository: https://github.com/sail-sg/odc
 
+6. Tencent HY-WorldPlay
+   - License: Tencent HY-WorldPlay Community License Agreement
+   - Repository: https://github.com/Tencent-Hunyuan/HY-WorldPlay
+   - Notice: Primus includes modified training and preprocessing code. Use is
+     limited by the license territory and acceptable-use restrictions; see
+     primus/backends/diffusion/models/worldplay/LICENSE-HY-WORLDPLAY.txt.
+
 User must comply with the respective licenses of these third-party projects when using or distributing Primus.
 
 --------------------------------------------------------------------------------
