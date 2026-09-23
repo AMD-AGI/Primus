@@ -32,6 +32,7 @@ Do not pass `--role` on `primus-cli`.
 
 ## Capture
 
+Example config and usage:
 [`configs/qwen3.5-4b-dflash-offline-capture.yaml`](configs/qwen3.5-4b-dflash-offline-capture.yaml)
 
 ```bash
@@ -42,43 +43,45 @@ export NPROC_PER_NODE=8
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
 ```
 
+Full config reference. Extra `specforge_capture` keys are flags for SpecForge
+[`scripts/prepare_hidden_states.py`](https://github.com/sgl-project/SpecForge/blob/main/scripts/prepare_hidden_states.py).
+
 ```yaml
-work_group: ${PRIMUS_TEAM:amd}
-user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-offline-capture}
-workspace: ${PRIMUS_WORKSPACE:./output}
+work_group: ${PRIMUS_TEAM:amd}            # Primus experiment metadata
+user_name: ${PRIMUS_USER:root}            # Primus experiment metadata
+exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-offline-capture}  # run name
+workspace: ${PRIMUS_WORKSPACE:./output}  # Primus workspace
 
 modules:
   pre_trainer:
-    framework: specforge
-    config: offline.yaml
-    model: qwen3.5-4b-dflash.yaml
+    framework: specforge                 # required backend
+    config: offline.yaml                 # Primus module preset
+    model: qwen3.5-4b-dflash.yaml        # Primus model preset
     overrides:
-      specforge_mode: capture
-      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
-      output_dir: ${OUTPUT_DIR}
+      specforge_mode: capture            # train | capture
+      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}  # SpecForge checkout
+      output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
       specforge_capture:
-        target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}
-        data_path: ${CAPTURE_DATA_PATH}          # ShareGPT-style JSONL
-        output_path: ${OUTPUT_DIR}/hidden_states_raw
-        nproc_per_node: ${NPROC_PER_NODE:1}      # GPUs for capture
-        filter_output_path: ${OUTPUT_DIR}/hidden_states
-        filter_block_size: ${BLOCK_SIZE:16}
-        filter_min_kept: ${FILTER_MIN_KEPT:1}    # fail if fewer shards survive
-        # Remaining keys are SpecForge prepare_hidden_states flags:
-        strategy: dflash
-        draft_model_config: configs/qwen3.5-4b-dflash.json
-        trust_remote_code: true
-        cache_dir: ${OUTPUT_DIR}/sf-cache
-        chat_template: qwen3.5
-        max_length: 2048
-        tp_size: 1
-        batch_size: ${CAPTURE_BATCH_SIZE:8}
-        sglang_attention_backend: aiter
-        sglang_disable_radix_cache: true         # required on this overlay
-        sglang_mem_fraction_static: 0.8
-        sglang_context_length: 2560
+        target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}  # HF id or local path
+        data_path: ${CAPTURE_DATA_PATH}  # ShareGPT-style JSONL
+        output_path: ${OUTPUT_DIR}/hidden_states_raw  # raw shards
+        nproc_per_node: ${NPROC_PER_NODE:1}  # GPUs for capture
+        filter_output_path: ${OUTPUT_DIR}/hidden_states  # filtered shards (train on these)
+        filter_block_size: ${BLOCK_SIZE:16}  # DFlash block size
+        filter_min_kept: ${FILTER_MIN_KEPT:1}  # fail if fewer shards survive
+        strategy: dflash                 # SpecForge capture strategy
+        draft_model_config: configs/qwen3.5-4b-dflash.json  # relative to specforge_root
+        trust_remote_code: true          # allow custom HF code
+        cache_dir: ${OUTPUT_DIR}/sf-cache  # download / KV cache
+        chat_template: qwen3.5           # chat template name
+        max_length: 2048                 # prompt + completion tokens
+        tp_size: 1                       # SGLang tensor parallel
+        batch_size: ${CAPTURE_BATCH_SIZE:8}  # capture batch
+        sglang_attention_backend: aiter  # required on this overlay
+        sglang_disable_radix_cache: true  # required on this overlay
+        sglang_mem_fraction_static: 0.8  # SGLang GPU memory fraction
+        sglang_context_length: 2560      # SGLang context length
 ```
 
 Train later with `data.hidden_states_path` pointing at `filter_output_path`
@@ -86,6 +89,7 @@ Train later with `data.hidden_states_path` pointing at `filter_output_path`
 
 ## Offline train
 
+Example config and usage:
 [`configs/qwen3.5-4b-dflash-offline.yaml`](configs/qwen3.5-4b-dflash-offline.yaml)
 
 ```bash
@@ -97,36 +101,40 @@ export MAX_STEPS=20
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
 ```
 
+Full config reference. `specforge_overrides` keys are SpecForge Hydra — see
+the [AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md).
+
 ```yaml
-work_group: ${PRIMUS_TEAM:amd}
-user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-offline}
-workspace: ${PRIMUS_WORKSPACE:./output}
+work_group: ${PRIMUS_TEAM:amd}            # Primus experiment metadata
+user_name: ${PRIMUS_USER:root}            # Primus experiment metadata
+exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-offline}  # run name
+workspace: ${PRIMUS_WORKSPACE:./output}  # Primus workspace
 
 modules:
   pre_trainer:
-    framework: specforge
-    config: offline.yaml
-    model: qwen3.5-4b-dflash.yaml
+    framework: specforge                 # required backend
+    config: offline.yaml                 # Primus module preset
+    model: qwen3.5-4b-dflash.yaml        # Primus model preset
     overrides:
-      specforge_mode: train
-      specforge_train_mode: offline
-      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-offline-amd.yaml}
-      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
-      output_dir: ${OUTPUT_DIR}
+      specforge_mode: train              # train | capture
+      specforge_train_mode: offline      # online | offline
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-offline-amd.yaml}  # SpecForge Hydra YAML
+      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}  # SpecForge checkout
+      output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
-      specforge_overrides:                       # SpecForge Hydra; see SpecForge docs
-        training.max_steps: ${MAX_STEPS:20}
-        training.num_epochs: 1
-        training.save_interval: ${MAX_STEPS:20}
-        training.log_interval: 5
-        model.use_liger_kernel: false            # not in this overlay
-        data.hidden_states_path: ${HIDDEN_STATES_PATH}
-        deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}
+      specforge_overrides:
+        training.max_steps: ${MAX_STEPS:20}  # optimizer steps
+        training.num_epochs: 1           # epoch cap (max_steps usually wins first)
+        training.save_interval: ${MAX_STEPS:20}  # checkpoint every N steps
+        training.log_interval: 5         # log every N steps
+        model.use_liger_kernel: false    # not in this overlay
+        data.hidden_states_path: ${HIDDEN_STATES_PATH}  # filtered capture output
+        deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}  # trainer GPUs
 ```
 
 ## Online train
 
+Example config and usage:
 [`configs/qwen3.5-4b-dflash-online-2node.yaml`](configs/qwen3.5-4b-dflash-online-2node.yaml)
 
 `-N` is capture nodes + trainer nodes. `--gres=gpu:N` is per node: SGLang GPUs
@@ -154,58 +162,61 @@ export MAX_STEPS=20
   --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
 ```
 
+Full config reference. `specforge_overrides` keys are SpecForge Hydra — see
+the [AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md)
+(§4 online disaggregated).
+
 ```yaml
-work_group: ${PRIMUS_TEAM:amd}
-user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-online-2node}
-workspace: ${PRIMUS_WORKSPACE:./output}
+work_group: ${PRIMUS_TEAM:amd}            # Primus experiment metadata
+user_name: ${PRIMUS_USER:root}            # Primus experiment metadata
+exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-online-2node}  # run name
+workspace: ${PRIMUS_WORKSPACE:./output}  # Primus workspace
 
 modules:
   pre_trainer:
-    framework: specforge
-    config: online.yaml
-    model: qwen3.5-4b-dflash.yaml
+    framework: specforge                 # required backend
+    config: online.yaml                  # Primus module preset
+    model: qwen3.5-4b-dflash.yaml        # Primus model preset
     overrides:
-      specforge_mode: train
-      specforge_train_mode: online
-      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-amd.yaml}
-      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
-      output_dir: ${OUTPUT_DIR}
+      specforge_mode: train              # train | capture
+      specforge_train_mode: online       # online | offline
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-amd.yaml}  # SpecForge Hydra YAML
+      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}  # SpecForge checkout
+      output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
       specforge_online:
-        run_id: ${RUN_ID}                          # required; letters, digits, . _ -
-        run_root: ${RUN_ROOT}                      # required; shared
+        run_id: ${RUN_ID}                # required; letters, digits, . _ -
+        run_root: ${RUN_ROOT}            # required; shared control dir
         consumer_state_dir: ${CONSUMER_STATE_DIR}  # required; local NVMe
-        capture_nnodes: ${CAPTURE_NNODES:1}
-        trainer_nnodes: ${TRAINER_NNODES:1}
-        server_count: ${SERVER_COUNT:1}            # SGLang servers per capture node
-        server_tp: ${SERVER_TP:1}
-        server_gpus: ${SERVER_GPUS:0}              # CSV, or 0 → 0..count*tp-1
-        trainer_gpus: ${TRAINER_GPUS:0}            # CSV, or 0 → 0..nproc-1
-        trainer_nproc: ${NPROC_PER_NODE:1}
-        target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}
-        mooncake_protocol: ${MOONCAKE_PROTOCOL:tcp}
-        mooncake_lease_ttl_ms: ${MOONCAKE_LEASE_TTL_MS:500}
-        # Optional:
-        # capture_layer_ids: 1,8,15,22,29
-        # server_port: 30000
-        # server_mem_fraction: 0.85
+        capture_nnodes: ${CAPTURE_NNODES:1}  # capture ranks
+        trainer_nnodes: ${TRAINER_NNODES:1}  # trainer ranks; -N = capture + trainer
+        server_count: ${SERVER_COUNT:1}  # SGLang servers per capture node
+        server_tp: ${SERVER_TP:1}        # tensor parallel per SGLang server
+        server_gpus: ${SERVER_GPUS:0}    # CSV, or 0 → 0..count*tp-1
+        trainer_gpus: ${TRAINER_GPUS:0}  # CSV, or 0 → 0..nproc-1
+        trainer_nproc: ${NPROC_PER_NODE:1}  # trainer processes per trainer node
+        target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}  # HF id or local path
+        mooncake_protocol: ${MOONCAKE_PROTOCOL:tcp}  # Mooncake transport
+        mooncake_lease_ttl_ms: ${MOONCAKE_LEASE_TTL_MS:500}  # KV lease TTL
+        # capture_layer_ids: 1,8,15,22,29  # else from SpecForge draft json
+        # server_port: 30000             # first SGLang HTTP port
+        # server_mem_fraction: 0.85      # SGLang GPU memory fraction
         # sglang_extra_args: --attention-backend aiter --disable-radix-cache
         # mooncake_rpc_port: 35551
         # mooncake_http_port: 35880
         # mooncake_metrics_port: 35903
-        # bind_interface: ens3                     # if auto IP is wrong
-        # start_timeout_s: 1800
-        # peer_timeout_s: 1800
+        # bind_interface: ens3           # NIC if auto IP is wrong
+        # start_timeout_s: 1800          # sidecar start wait
+        # peer_timeout_s: 1800           # wait for the other ranks
 
-      specforge_overrides:                         # SpecForge Hydra; see SpecForge docs
-        training.max_steps: ${MAX_STEPS:20}
-        training.num_epochs: 1
-        training.save_interval: ${MAX_STEPS:20}
-        training.log_interval: 5
-        model.use_liger_kernel: false
-        data.train_data_path: ${TRAIN_DATA_PATH}
-        # runtime.in_flight_high_watermark: 64
+      specforge_overrides:
+        training.max_steps: ${MAX_STEPS:20}  # optimizer steps
+        training.num_epochs: 1           # epoch cap (max_steps usually wins first)
+        training.save_interval: ${MAX_STEPS:20}  # checkpoint every N steps
+        training.log_interval: 5         # log every N steps
+        model.use_liger_kernel: false    # not in this overlay
+        data.train_data_path: ${TRAIN_DATA_PATH}  # ShareGPT-style JSONL
+        # runtime.in_flight_high_watermark: 64  # SpecForge online queue
         # runtime.in_flight_low_watermark: 32
 ```
 
