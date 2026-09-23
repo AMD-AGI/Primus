@@ -1,4 +1,4 @@
-# FLUX v0.4 plus the PR #492 delta, rebuilt from the public Primus v26.3 image.
+# FLUX v0.4 changes relative to the public Primus v26.3 image.
 FROM rocm/primus:v26.3
 
 # Initial FLUX FP8 support.
@@ -202,21 +202,5 @@ assert "PRIMUS_FLUX_REUSE_FP8_INPUT" in float8_linear
 assert "((8192, 12288), (8192, 3072))" in float8_linear
 assert "PRIMUS_FLUX_AITER_ATOMIC_FP32" in Path("/workspace/aiter/aiter/ops/mha.py").read_text()
 PY
-
-# PR #492 updates the tuned FP8 GEMM and its utility primitives.
-ARG PRIMUS_TURBO_V041_REVISION=d9809c28e0e573ded1516025ae4f76c7d37af5e0
-RUN git clone --filter=blob:none --no-checkout https://github.com/AMD-AGI/Primus-Turbo.git /tmp/Primus-Turbo && \
-    git -C /tmp/Primus-Turbo checkout "${PRIMUS_TURBO_V041_REVISION}" && \
-    cp /tmp/Primus-Turbo/primus_turbo/flydsl/gemm/gemm_fp8_kernel.py \
-        /opt/venv/lib/python3.12/site-packages/primus_turbo/flydsl/gemm/ && \
-    cp /tmp/Primus-Turbo/primus_turbo/flydsl/utils/gemm_helper.py \
-        /tmp/Primus-Turbo/primus_turbo/flydsl/utils/prims.py \
-        /opt/venv/lib/python3.12/site-packages/primus_turbo/flydsl/utils/ && \
-    rm -rf /tmp/Primus-Turbo
-
-# The original image also ran a validation-only step whose body was not retained
-# in its public image history; it produced no filesystem changes.
-LABEL org.opencontainers.image.source="https://github.com/AMD-AGI/Primus-Turbo/pull/492" \
-      org.opencontainers.image.revision="${PRIMUS_TURBO_V041_REVISION}"
 
 CMD ["/usr/bin/bash"]
