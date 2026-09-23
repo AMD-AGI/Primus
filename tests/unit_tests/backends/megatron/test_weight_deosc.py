@@ -13,6 +13,7 @@ get wrong: DistRatio snap masking, write-back into the local fp32 shard, period
 reset, and checkpoint state round-trip.
 """
 
+import sys
 import types
 
 import pytest
@@ -339,6 +340,48 @@ def test_standard_fp32_main_is_not_precision_aware():
         shard_fp32_from_float16_groups=[[torch.zeros(4)]],
     )
     assert _uses_precision_aware_main_params(opt) is False
+
+
+def _install_get_args(monkeypatch, get_args):
+    for name in ("megatron", "megatron.training"):
+        sys.modules.setdefault(name, types.ModuleType(name))
+    module = sys.modules.get("megatron.training.global_vars")
+    if module is None:
+        module = types.ModuleType("megatron.training.global_vars")
+        monkeypatch.setitem(sys.modules, "megatron.training.global_vars", module)
+    monkeypatch.setattr(module, "get_args", get_args, raising=False)
+
+
+def test_scale_rounding_mode_prefers_megatron_args(monkeypatch):
+    _install_get_args(monkeypatch, lambda: types.SimpleNamespace(mxfp4_scale_rounding_mode=1))
+    monkeypatch.setenv("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING", "2")
+    assert weight_deosc._forward_scale_rounding_mode() == 1
+
+
+def test_scale_rounding_mode_falls_back_to_env(monkeypatch):
+    def _uninit():
+        raise RuntimeError("args are not initialized")
+
+    _install_get_args(monkeypatch, _uninit)
+    monkeypatch.setenv("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING", "2")
+    assert weight_deosc._forward_scale_rounding_mode() == 2
+    monkeypatch.delenv("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING")
+    assert weight_deosc._forward_scale_rounding_mode() == 0
+
+
+def test_scale_rounding_mode_rejects_unknown_values(monkeypatch):
+    _install_get_args(monkeypatch, lambda: types.SimpleNamespace(mxfp4_scale_rounding_mode=7))
+    with pytest.raises(ValueError, match="must be 0, 1, or 2"):
+        weight_deosc._forward_scale_rounding_mode()
+
+
+def test_local_shard_qdq_return_model_reuses_the_bf16_cast(monkeypatch):
+    monkeypatch.setattr(weight_deosc, "qdq_mxfp4", lambda weight: weight)
+    shard = torch.linspace(0.1, 1.0, 8)
+    q_local, model = qdq_mxfp4_local_shard(shard, (2, 4), 0, 8, torch.bfloat16, return_model=True)
+    assert model.dtype == torch.bfloat16
+    assert torch.equal(model, shard.to(torch.bfloat16))
+    assert torch.equal(q_local, model)
 
 
 def test_disabled_runner_is_noop(monkeypatch):
