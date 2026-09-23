@@ -96,3 +96,8 @@ so model weights are not re-downloaded.
 
 Launch capture or train with `primus-cli` from `/opt/primus`. See
 [SpecForge on Primus](../README.md).
+
+Capture and online SGLang on this image use AITER with the radix cache off.
+Primus sets `SGLANG_USE_AITER=1` and `SGLANG_DISABLE_RADIX_CACHE=1` at launch;
+you do not export them. Online SGLang also gets `--attention-backend aiter
+--disable-radix-cache` unless you set `specforge_online.sglang_extra_args`.

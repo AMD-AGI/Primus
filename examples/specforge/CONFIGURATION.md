@@ -4,7 +4,9 @@ YAML, env, and CLI for [SpecForge on Primus](README.md). Copy a recipe under
 [`configs/`](configs/) and change the fields below. Draft architecture, data
 format, optimizer, export, and SGLang serving are SpecForge's — see the
 [AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md)
-(§4 for online disaggregated).
+(§4 for online disaggregated). SpecForge Hydra keys (`specforge_overrides`)
+are documented in SpecForge
+[`examples/configs/README.md`](https://github.com/sgl-project/SpecForge/blob/main/examples/configs/README.md).
 
 Set a value in the experiment YAML, or override it on the CLI with the same
 path (`specforge_online.server_count=8`). `${VAR:default}` is expanded when
@@ -20,7 +22,7 @@ modules:
       specforge_mode: train              # train | capture  (default train)
       specforge_train_mode: online       # online | offline; required for train
       specforge_config: ...              # SpecForge Hydra YAML; required for train
-      specforge_root: ...                # SpecForge checkout (overlay: /workspace/SpecForge)
+      specforge_root: ...                # SpecForge checkout (this image: /workspace/SpecForge)
       output_dir: ...                    # checkpoints / logs
       specforge_overrides: {}            # SpecForge Hydra key=value (train)
       specforge_capture: {}              # capture only
@@ -78,8 +80,8 @@ modules:
         max_length: 2048                 # prompt + completion tokens
         tp_size: 1                       # SGLang tensor parallel
         batch_size: ${CAPTURE_BATCH_SIZE:8}  # capture batch
-        sglang_attention_backend: aiter  # required on this overlay
-        sglang_disable_radix_cache: true  # required on this overlay
+        sglang_attention_backend: aiter  # keep aiter on this image
+        sglang_disable_radix_cache: true  # keep disabled on this image
         sglang_mem_fraction_static: 0.8  # SGLang GPU memory fraction
         sglang_context_length: 2560      # SGLang context length
 ```
@@ -102,7 +104,7 @@ export MAX_STEPS=20
 ```
 
 Full config reference. `specforge_overrides` keys are SpecForge Hydra — see
-the [AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md).
+[`examples/configs/README.md`](https://github.com/sgl-project/SpecForge/blob/main/examples/configs/README.md).
 
 ```yaml
 work_group: ${PRIMUS_TEAM:amd}            # Primus experiment metadata
@@ -127,7 +129,7 @@ modules:
         training.num_epochs: 1           # epoch cap (max_steps usually wins first)
         training.save_interval: ${MAX_STEPS:20}  # checkpoint every N steps
         training.log_interval: 5         # log every N steps
-        model.use_liger_kernel: false    # not in this overlay
+        model.use_liger_kernel: false    # not shipped in this image
         data.hidden_states_path: ${HIDDEN_STATES_PATH}  # filtered capture output
         deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}  # trainer GPUs
 ```
@@ -136,17 +138,6 @@ modules:
 
 Example config and usage:
 [`configs/qwen3.5-4b-dflash-online-2node.yaml`](configs/qwen3.5-4b-dflash-online-2node.yaml)
-
-`-N` is capture nodes + trainer nodes. `--gres=gpu:N` is per node: SGLang GPUs
-on capture nodes (`server_count × server_tp`), trainer processes on trainer
-nodes (`trainer_nproc`). A single GPU id `0` expands to `0..N-1`. Rank 0
-starts Mooncake and the SpecForge producer; other capture ranks run SGLang
-only; trainer ranks train.
-
-Leave `127.0.0.1` in the SpecForge YAML. Primus fills real SGLang and
-Mooncake addresses after allocate. Put `run_root` on shared storage and
-`consumer_state_dir` on node-local disk. Both must be empty for a new
-`RUN_ID`.
 
 ```bash
 export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
@@ -162,9 +153,22 @@ export MAX_STEPS=20
   --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
 ```
 
+`-N` is capture nodes + trainer nodes. `--gres=gpu:N` is per node: SGLang GPUs
+on capture nodes (`server_count × server_tp`), trainer processes on trainer
+nodes (`trainer_nproc`). A single GPU id `0` expands to `0..N-1`. Rank 0
+starts Mooncake and the SpecForge producer; other capture ranks run SGLang
+only; trainer ranks train.
+
+The SpecForge Hydra file (`specforge_config`) lists SGLang and Mooncake as
+`http://127.0.0.1:…`. Leave those loopback URLs in that file. After the job
+allocates, Primus rewrites them to the capture nodes. Put `run_root` on shared
+storage and `consumer_state_dir` on node-local disk. Both must be empty for a
+new `RUN_ID`.
+
 Full config reference. `specforge_overrides` keys are SpecForge Hydra — see
-the [AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md)
-(§4 online disaggregated).
+[`examples/configs/README.md`](https://github.com/sgl-project/SpecForge/blob/main/examples/configs/README.md).
+Online layout is also in the [AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md)
+§4.
 
 ```yaml
 work_group: ${PRIMUS_TEAM:amd}            # Primus experiment metadata
@@ -192,8 +196,8 @@ modules:
         trainer_nnodes: ${TRAINER_NNODES:1}  # trainer ranks; -N = capture + trainer
         server_count: ${SERVER_COUNT:1}  # SGLang servers per capture node
         server_tp: ${SERVER_TP:1}        # tensor parallel per SGLang server
-        server_gpus: ${SERVER_GPUS:0}    # CSV, or 0 → 0..count*tp-1
-        trainer_gpus: ${TRAINER_GPUS:0}  # CSV, or 0 → 0..nproc-1
+        server_gpus: ${SERVER_GPUS:0}    # SGLang GPU ids; 0 means 0,1,…,server_count*server_tp-1
+        trainer_gpus: ${TRAINER_GPUS:0}  # trainer GPU ids; 0 means 0,1,…,trainer_nproc-1
         trainer_nproc: ${NPROC_PER_NODE:1}  # trainer processes per trainer node
         target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}  # HF id or local path
         mooncake_protocol: ${MOONCAKE_PROTOCOL:tcp}  # Mooncake transport
@@ -201,10 +205,9 @@ modules:
         # capture_layer_ids: 1,8,15,22,29  # else from SpecForge draft json
         # server_port: 30000             # first SGLang HTTP port
         # server_mem_fraction: 0.85      # SGLang GPU memory fraction
-        # sglang_extra_args: --attention-backend aiter --disable-radix-cache
-        # mooncake_rpc_port: 35551
-        # mooncake_http_port: 35880
-        # mooncake_metrics_port: 35903
+        # mooncake_rpc_port: 35551       # Mooncake RPC
+        # mooncake_http_port: 35880      # Mooncake HTTP metadata
+        # mooncake_metrics_port: 35903   # Mooncake metrics
         # bind_interface: ens3           # NIC if auto IP is wrong
         # start_timeout_s: 1800          # sidecar start wait
         # peer_timeout_s: 1800           # wait for the other ranks
@@ -214,28 +217,30 @@ modules:
         training.num_epochs: 1           # epoch cap (max_steps usually wins first)
         training.save_interval: ${MAX_STEPS:20}  # checkpoint every N steps
         training.log_interval: 5         # log every N steps
-        model.use_liger_kernel: false    # not in this overlay
+        model.use_liger_kernel: false    # not shipped in this image
         data.train_data_path: ${TRAIN_DATA_PATH}  # ShareGPT-style JSONL
         # runtime.in_flight_high_watermark: 64  # SpecForge online queue
         # runtime.in_flight_low_watermark: 32
 ```
 
-On Ethernet without IB, also pass `NCCL_IB_DISABLE=1` and
-`NCCL_SOCKET_IFNAME=<iface>`. To pin IPs instead of auto-detect:
+On Ethernet without IB, pass `NCCL_IB_DISABLE=1` and
+`NCCL_SOCKET_IFNAME=<iface>`.
+
+Skip the next block unless auto-detected IPs are wrong (Mooncake/SGLang not
+reachable across nodes). Then set the cluster NIC, or pin IPs:
 
 ```bash
-# capture rank 0 only
+# NIC name, or:
+export PRIMUS_SPECFORGE_BIND_IFACE=ens3
+# capture rank 0:
 export PRIMUS_SPECFORGE_HEAD_IP=10.0.0.1
-# every node, or use bind_interface / PRIMUS_SPECFORGE_BIND_IFACE
+# every node:
 export PRIMUS_SPECFORGE_LOCAL_IP=10.0.0.2
 ```
 
-Keep `SGLANG_USE_AITER=1` and `SGLANG_DISABLE_RADIX_CACHE=1` (the overlay
-default). Hugging Face cache/token: `HF_HOME`, `HF_TOKEN`.
-
 ## CLI
 
-Inside the overlay:
+Inside the docker image:
 
 ```bash
 ./runner/primus-cli direct -- train pretrain --config <experiment.yaml> \
@@ -246,7 +251,7 @@ On Slurm, from the login node, image already loaded:
 
 ```bash
 ./runner/primus-cli slurm srun -N <capture+trainer> --gres=gpu:<gpus-per-node> \
-  -- container --image <overlay> \
+  -- container --image <tag> \
   --volume <host>:<container> \
   --env KEY=VALUE \
   -- train pretrain --config <experiment.yaml> \
