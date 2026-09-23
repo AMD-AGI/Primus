@@ -1,0 +1,97 @@
+# NeMo AutoModel pre_trainer — Wan 2.2 on synthetic data.
+#
+# Standalone rather than `extends: pre_trainer.yaml` on purpose. That file
+# defaults to the cached video dataloader, and `extends` deep-merges, so
+# overriding `data.dataloader` would leave its `cache_dir`, `model_type`,
+# `base_resolution` and `dynamic_batch_size` keys behind for the synthetic
+# builder to choke on. Everything else here is the same shape as pre_trainer.yaml.
+extends:
+  - ../module_base.yaml
+
+seed: 42
+
+wandb:
+  enable: false
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+step_scheduler:
+  global_batch_size: 8
+  local_batch_size: 1
+  ckpt_every_steps: 1000
+  num_epochs: 100
+  log_remote_every_steps: 1
+  save_checkpoint_every_epoch: false
+
+data:
+  dataloader:
+    _target_: primus.backends.nemo_automodel.models.wan.data.synthetic.SyntheticWanDataloaderConfig
+    num_samples: 512
+    # One text tensor reused across samples: conditioning is not what is being
+    # exercised here, and generating it per sample dominates the dataloader.
+    share_text_features: true
+    shuffle: true
+    drop_last: false
+    num_workers: 2
+    pin_memory: true
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 5e-5
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  foreach: false
+  fused: true
+
+performance:
+  # Synthetic inputs are random noise, so the loss value is meaningless and the
+  # NaN guard would only cost a device sync per step.
+  check_loss: false
+  grad_clip_foreach: true
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 0
+  min_lr: 1e-6
+
+flow_matching:
+  adapter_type: simple
+  adapter_kwargs: {}
+  timestep_sampling: uniform
+  logit_mean: 0.0
+  logit_std: 1.0
+  flow_shift: 3.0
+  mix_uniform_ratio: 0.1
+  num_train_timesteps: 1000
+  i2v_prob: 0.3
+  use_loss_weighting: true
+  log_interval: 100
+  summary_log_interval: 10
+
+fsdp:
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  dp_replicate_size: 1
+  defer_fsdp_grad_sync: true
+  # Honored only with PRIMUS_WAN_PARALLELIZE_FIX=1; without it AutoModel drops
+  # this value and falls back to its per-layer resharding heuristic.
+  reshard_after_forward: false
+  enable_fsdp2_prefetch: true
+  fsdp2_backward_prefetch_depth: 3
+  fsdp2_forward_prefetch_depth: 2
+  reduce_dtype: bfloat16
+  enable_compile: false
+  activation_checkpointing: true
+
+checkpoint:
+  enabled: false
+  # Not optional even with `enabled: false`: the recipe's setup() calls
+  # os.makedirs() on this before it consults `enabled`, so "" aborts the run.
+  checkpoint_dir: /checkpoints/wan22_synthetic_pretrain
+  model_save_format: safetensors
+  save_consolidated: final
+  diffusers_compatible: true
+  restore_from: null
