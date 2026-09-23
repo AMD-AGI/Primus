@@ -1,0 +1,122 @@
+# NeMo AutoModel pre_trainer module config — Ideogram-4 pretrain on a REAL
+# pre-encoded cache (Primus backend: nemo_automodel).
+#
+# Real-data sibling of `ideogram4_pre_trainer.yaml`, which trains on synthetic
+# features. The recipe, optimizer and FSDP wiring are identical; only
+# `data.dataloader` differs, pointing at a cache of encoded image/caption pairs
+# built by the Ideogram-4 processor and read by the cache dataloader.
+#
+# Build the cache first:
+#
+#   primus data automodel-cache --model ideogram4 --help
+#
+# This is a separate preset rather than an override of the synthetic one on
+# purpose: the two dataloaders take different fields, and overriding would let
+# synthetic-only keys survive the deep-merge and reach a dataclass that does not
+# accept them.
+#
+# NOTE: do not declare a `model:` block here — it comes from the model preset.
+extends:
+  - ../module_base.yaml
+
+seed: 42
+
+wandb:
+  enable: false
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 2
+  ckpt_every_steps: 1000
+  num_epochs: 1000
+  log_remote_every_steps: 1
+  save_checkpoint_every_epoch: false
+
+data:
+  dataloader:
+    _target_: primus.backends.nemo_automodel.models.ideogram4.data.cache.Ideogram4CacheDataloaderConfig
+    # PLACEHOLDER: a cache directory built by the command above. Override per run.
+    cache_dir: /path/to/ideogram4_cache
+    shuffle: true
+    drop_last: true
+    # Pad the text region to a constant width, so the packed sequence length does
+    # not change between steps -- per-batch padding recompiles the graph on nearly
+    # every one. 0 derives the width from the cache's longest caption, so nothing is
+    # truncated; a positive value sets it explicitly and truncates past it; -1
+    # restores per-batch padding.
+    max_text_tokens: 0
+    num_workers: 2
+    pin_memory: true
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  # fused AdamW (mutually exclusive with foreach).
+  foreach: false
+  fused: true
+
+performance:
+  check_loss: false
+  grad_clip_foreach: true
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 0
+  min_lr: 1e-6
+
+flow_matching:
+  adapter_type: ideogram4
+  adapter_kwargs:
+    in_channels: 128
+    predict_negative_velocity: true
+  timestep_sampling: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  flow_shift: 3.0
+  mix_uniform_ratio: 0.1
+  # No classifier-free-guidance dropout, which keeps the loss signal clean while
+  # validating the data path. A real pretrain should raise this to train the
+  # unconditional branch.
+  cfg_dropout_prob: 0.0
+  sigma_min: 0.0
+  sigma_max: 1.0
+  num_train_timesteps: 1000
+  i2v_prob: 0.0
+  use_loss_weighting: false
+  log_interval: 100
+  summary_log_interval: 10
+
+fsdp:
+  tp_size: 1
+  # See `ideogram4_pre_trainer.yaml` for the constraints on a degree above 1.
+  cp_size: 1
+  pp_size: 1
+  dp_replicate_size: 1
+  defer_fsdp_grad_sync: true
+  # ZeRO-2. See `ideogram4_pre_trainer.yaml` for the trade-off; `true` gives ZeRO-3,
+  # and removing the key falls back to AutoModel's per-layer heuristic.
+  reshard_after_forward: false
+  # NOTE: inert while reshard_after_forward is false (no backward all-gather to prefetch).
+  enable_fsdp2_prefetch: true
+  fsdp2_backward_prefetch_depth: 3
+  fsdp2_forward_prefetch_depth: 2
+  reduce_dtype: bfloat16
+  enable_compile: false
+  # A SILENT NO-OP unless PRIMUS_IDEOGRAM_REAL_AC=1; see `ideogram4_pre_trainer.yaml`.
+  activation_checkpointing: true
+
+checkpoint:
+  enabled: false
+  # Not optional even with `enabled: false`: the recipe's setup() calls
+  # os.makedirs() on this before it consults `enabled`, so "" aborts the run.
+  checkpoint_dir: /checkpoints/ideogram4_cache_pretrain
+  model_save_format: safetensors
+  save_consolidated: final
+  diffusers_compatible: true
+  restore_from: null

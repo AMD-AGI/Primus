@@ -1,0 +1,139 @@
+# NeMo AutoModel pre_trainer module config — Ideogram-4 single-stream
+# rectified-flow text-to-image pretrain (Primus backend: nemo_automodel).
+#
+# Sibling of `flux_pre_trainer.yaml` (the FLUX text-to-image preset) and
+# `pre_trainer.yaml` (the Wan 2.2 video preset): the same recipe schema, wired for
+# Ideogram-4:
+#   - data.dataloader -> SyntheticIdeogram4DataloaderConfig, which emits
+#     pre-encoded image latents plus pre-encoded text features. Switch to
+#     `ideogram4_cache_pre_trainer.yaml` to train on a real encoded cache.
+#   - flow_matching.adapter_type -> ideogram4, routed to the Ideogram-4 adapter,
+#     which packs the [pad][text][image] sequence and negates the predicted
+#     velocity.
+#
+# The Primus launcher deep-merges the `model:` preset (ideogram4.yaml) and the
+# experiment `overrides:` on top of this, then runs the diffusion recipe.
+#
+# NOTE: do not declare a `model:` block here — it comes from the model preset.
+extends:
+  - ../module_base.yaml
+
+seed: 42
+
+wandb:
+  enable: false
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 2
+  ckpt_every_steps: 1000
+  num_epochs: 1000
+  log_remote_every_steps: 1
+  save_checkpoint_every_epoch: false
+
+data:
+  dataloader:
+    _target_: primus.backends.nemo_automodel.models.ideogram4.data.synthetic.SyntheticIdeogram4DataloaderConfig
+    # A fixed synthetic set, deterministic per index, so a loss that falls is
+    # evidence the model is learning these samples rather than tracking new noise.
+    num_samples: 64
+    in_channels: 128
+    grid_h: 16
+    grid_w: 16
+    max_text_tokens: 32
+    min_text_tokens: 28
+    llm_features_dim: 53248
+    feature_scale: 0.1
+    latent_scale: 1.0
+    seed: 1234
+    shuffle: true
+    # Keep the batch size constant. The packing has 2*B+1 entries, so a short final
+    # batch changes its shape along with the hidden states' and recompiles the graph.
+    drop_last: true
+    num_workers: 0
+    pin_memory: true
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  # fused AdamW (mutually exclusive with foreach).
+  foreach: false
+  fused: true
+
+performance:
+  check_loss: false
+  grad_clip_foreach: true
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 0
+  min_lr: 1e-6
+
+flow_matching:
+  adapter_type: ideogram4
+  adapter_kwargs:
+    in_channels: 128
+    predict_negative_velocity: true
+  timestep_sampling: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  flow_shift: 3.0
+  mix_uniform_ratio: 0.1
+  # No classifier-free-guidance dropout, so every sample keeps its own
+  # conditioning. A real pretrain should raise this to train the unconditional
+  # branch as well.
+  cfg_dropout_prob: 0.0
+  sigma_min: 0.0
+  sigma_max: 1.0
+  num_train_timesteps: 1000
+  i2v_prob: 0.0
+  use_loss_weighting: false
+  log_interval: 100
+  summary_log_interval: 10
+
+fsdp:
+  tp_size: 1
+  # Context parallelism. A degree above 1 needs the Ideogram-4 CP plan, which is
+  # installed automatically, and must divide both the world size and the attention
+  # head count. It cannot be combined with PRIMUS_IDEOGRAM_VARLEN_ATTN.
+  cp_size: 1
+  pp_size: 1
+  dp_replicate_size: 1
+  # dp_size intentionally unset: AutoModel derives it from the world size and the
+  # parallel dims. Pin `dp_size: <n>` via overrides only to force a value.
+  defer_fsdp_grad_sync: true
+  # ZeRO-2: blocks keep their gathered params through backward, so there is one
+  # all-gather per block per step instead of two, at the cost of roughly one
+  # parameter copy of memory. Set `true` for ZeRO-3 (least memory, most traffic),
+  # or remove the key to fall back to AutoModel's per-layer heuristic. Honored only
+  # with the FSDP2 reshard repair applied, which the Ideogram-4 strategy depends on.
+  reshard_after_forward: false
+  # NOTE: inert while reshard_after_forward is false (no backward all-gather to
+  # prefetch). They apply again if it is set back to true.
+  enable_fsdp2_prefetch: true
+  fsdp2_backward_prefetch_depth: 3
+  fsdp2_forward_prefetch_depth: 2
+  reduce_dtype: bfloat16
+  enable_compile: false
+  # A SILENT NO-OP unless PRIMUS_IDEOGRAM_REAL_AC=1, which registers the Ideogram-4
+  # parallelization strategy. Without it, AutoModel's default strategy looks for
+  # submodules an Ideogram-4 block does not have and checkpoints nothing — the same
+  # failure FLUX has. Set PRIMUS_IDEOGRAM_AC_EVERY=<n> to checkpoint every nth block
+  # instead of all of them, trading back a fraction of the recompute.
+  activation_checkpointing: true
+
+checkpoint:
+  enabled: false
+  # Not optional even with `enabled: false`: the recipe's setup() calls
+  # os.makedirs() on this before it consults `enabled`, so "" aborts the run.
+  checkpoint_dir: /checkpoints/ideogram4_pretrain
+  model_save_format: safetensors
+  save_consolidated: final
+  diffusers_compatible: true
+  restore_from: null
