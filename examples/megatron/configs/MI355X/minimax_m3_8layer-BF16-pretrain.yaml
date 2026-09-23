@@ -1,0 +1,168 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:minimax_m3_8layer-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:minimax_m3}.yaml
+    overrides:
+      # ---------------------------------------------------------------------
+      # M3-specific notes -- three things this config deliberately does NOT do,
+      # because the sibling minimax_m2.5 / qwen3_235B configs do them and
+      # copying those lines here would break M3:
+      #
+      #   1. No `moe_use_legacy_grouped_gemm: true`. M3's activation is
+      #      swigluoai == Megatron's quick_geglu, and the legacy GroupedMLP
+      #      raises "Activation function must be silu or gelu when using
+      #      GroupedMLP" at model build. TEGroupedMLP (the default) fuses
+      #      quick_geglu including both clamps.
+      #   2. This proxy DOES override `num_layers`, and therefore must
+      #      override all three per-layer patterns with it: moe_layer_freq,
+      #      sparse_attention_freq and sparse_disable_index_value are
+      #      num_layers-long, and MSATransformerConfig length-checks the two
+      #      sparse ones. 8 layers = 3 dense + 5 MoE/MSA, keeping the
+      #      released model's "first three layers are dense" structure.
+      #   3. No `norm_epsilon`. Upstream's dest is `layernorm_epsilon`, which
+      #      the preset sets; `norm_epsilon` only reaches DeepSeek-V4 and is a
+      #      silent no-op on a `model_type: gpt` model.
+      #
+      # Also note `bias_gelu_fusion` must stay false (the preset sets it):
+      # with swiglu off it is what becomes `bias_activation_fusion`, and
+      # mlp.py's fused branch covers only gelu and swiglu.
+      #
+      # MSA STATUS: MinimaxSparseAttention is still a skeleton -- it validates
+      # the sparse_* config but inherits forward, so attention runs DENSE.
+      # sparse_attention_freq is live though: layers 4-8 build
+      # MinimaxSparseAttention, layers 1-3 keep upstream SelfAttention.
+      # Throughput from this config is a dense-attention number, not M3's.
+      # ---------------------------------------------------------------------
+
+      # log
+      wandb_project: "Primus_MiniMax_M3_Pretrain"
+      stderr_sink_level: DEBUG
+
+      # debug. Forced load balancing makes routing uniform: right for a
+      # throughput measurement, wrong for a real training run.
+      moe_router_force_load_balancing: true
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # Reduced-layer proxy: 8 of M3's 60 layers, sized to run on one
+      # 8-GPU MI355X node with EP=8 (~9B params/rank). Everything else is the
+      # full model's shape -- 128 experts, hidden 6144, GQA 64/4.
+      # DP == world size (8), so gbs 64 / mbs 4 is 2 micro-batches per rank.
+      train_iters: 10
+      micro_batch_size: 4
+      global_batch_size: 64
+
+      # depth, with the three per-layer patterns kept consistent
+      num_layers: 8
+      moe_layer_freq: "([0]*3+[1]*5)"
+      sparse_attention_freq: "([0]*3+[1]*5)"
+      sparse_disable_index_value: "([0]*3+[1]*5)"
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      # The preset materialises the RoPE cache at 1048576; override it down to
+      # the run's seq_length or the cache alone costs tens of GB.
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      # lr schedule copied from deepseek_v2_lite-BF16-pretrain.yaml. The short
+      # warmup matters as much as the peak here: at the full model's
+      # lr_warmup_iters: 200 a 10-iteration bring-up run never leaves ~5e-7
+      # and the loss curve shows nothing.
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+
+      # parallel. Single node: EP=8 shards the 5 MoE layers' experts across
+      # the 8 GPUs (~4.5B expert params/rank); everything else is replicated.
+      # No PP, so DP == 8.
+      tensor_model_parallel_size: 1
+      expert_model_parallel_size: 8
+      # language_model.yaml turns this on; at TP=1 it is a no-op that validate_args
+      # would warn about and disable, so switch it off here instead.
+      sequence_parallel: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      use_torch_fsdp2: false
+      use_distributed_optimizer: true
+      gradient_accumulation_fusion: true
+
+      # recompute
+      recompute_granularity: full # full, selective
+      recompute_method: block # uniform, block
+      recompute_num_layers: 1 # int
+
+      # data
+      mock_data: true
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+
+      # MoE. Left on TEGroupedMLP -- see note 1 at the top.
+      moe_use_legacy_grouped_gemm: false
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+
+      # rope fusion
+      enable_experimental: true
+      apply_rope_fusion: true
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # Turbo. use_turbo_rms_norm is safe with M3's gemma-style norm: the
+      # PrimusTurbo RMSNorm forwards zero_centered_gamma to TE, and the
+      # fused-residual path adds the +1 itself.
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+      use_turbo_rms_norm: true
+
+      # deepep
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      turbo_deepep_num_cu: 80
+      turbo_deepep_use_comm_stream: false
+      # sync-free moe support stage 1-2, 0 means not use sync-free moe
+      turbo_sync_free_moe_stage: 1
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # precision-aware optimizer (bf16 states to save memory)
+      # use_precision_aware_optimizer: true
+      # main_grads_dtype: bf16
+      # exp_avg_dtype: bf16
+      # exp_avg_sq_dtype: bf16
+
+      # training control
+      manual_gc: true
+      manual_gc_interval: 1
+      pp_warmup: true
+      disable_wandb: true
+      disable_tensorboard: true
