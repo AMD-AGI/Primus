@@ -108,6 +108,11 @@ modules:
       recompute_num_layers: 1 # int
 
       # data
+      # M3 needs no dataloader mask: MSA layers build their own (causality plus
+      # the block selection) and the dense layers run TE with attn_mask_type
+      # causal, which applies causality itself. Skipping it saves the
+      # [b, 1, s, s] bool tensor per sample.
+      create_attention_mask_in_dataloader: false
       mock_data: true
       train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
