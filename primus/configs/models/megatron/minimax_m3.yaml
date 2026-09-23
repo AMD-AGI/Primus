@@ -63,6 +63,14 @@ sparse_init_block: 0
 sparse_local_block: 1
 sparse_disable_index_value: "([0]*3+[1]*57)"  # same per-layer list as the freq above
 
+# Indexer training signal. top-k is not differentiable, so the indexer's
+# projections get no gradient from the attention path at all -- this
+# distillation loss (KL of the real per-block attention mass against the
+# indexer's own block distribution) is the only thing that moves them. 0.0
+# freezes the indexer at its init, which makes MSA select blocks at random;
+# keep it non-zero for any run that is actually training.
+sparse_indexer_loss_coeff: 1.0e-2
+
 # MoE - layers 1-3 dense, layers 4-60 MoE; 128 routed experts + 1 shared
 moe_layer_freq: "([0]*3+[1]*57)"
 num_experts: 128

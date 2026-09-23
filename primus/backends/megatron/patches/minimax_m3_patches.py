@@ -25,7 +25,7 @@ Both are derived and validated in ``MSATransformerConfig.__post_init__``.
 M3 reuses upstream ``GPTModel``, so the whole change is one substitution in the
 decoder layer specs: on the layers where ``sparse_attention_freq`` is 1, the
 ``self_attention`` slot's ``module`` becomes
-:class:`~primus.backends.megatron.core.transformer.minimax_sparse_attention.MinimaxSparseAttention`
+:class:`~primus.backends.megatron.core.transformer.minimax_m3.MinimaxSparseAttention`
 instead of upstream ``SelfAttention``. Everything else -- the qkv/proj
 submodules, the MoE layer spec, the MTP spec -- is upstream's.
 
@@ -83,11 +83,46 @@ def _swap_self_attention(layer_spec, sparse_attention_cls, cache):
         layer_spec,
         submodules=dataclasses.replace(
             submodules,
-            self_attention=dataclasses.replace(self_attention, module=sparse_attention_cls),
+            self_attention=dataclasses.replace(
+                self_attention,
+                module=sparse_attention_cls,
+                submodules=_widen_submodules(self_attention.submodules),
+            ),
         ),
     )
     cache[id(layer_spec)] = patched_spec
     return patched_spec
+
+
+def _widen_submodules(self_attention_submodules):
+    """Carry the upstream attention submodules into the MSA dataclass.
+
+    MSA needs four more modules than ``SelfAttentionSubmodules`` has fields for
+    (the indexer's two projections and two norms), so the spec's submodules
+    object has to be rebuilt as the wider class -- ``dataclasses.replace`` keeps
+    the original class and cannot add fields.
+
+    The four are taken from the same spec provider upstream uses, so a Primus
+    patch that swaps the provider (turbo) is picked up here too. This mirrors
+    how DSA's indexer submodules are supplied in
+    ``megatron/core/models/gpt/experimental_attention_variant_module_specs.py``.
+    """
+    from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
+
+    from primus.backends.megatron.core.transformer.minimax_m3 import (
+        MinimaxSparseAttentionSubmodules,
+    )
+
+    # Resolved lazily: Primus's turbo patch replaces TESpecProvider in that
+    # module, and this runs after it (priority 45).
+    backend = TESpecProvider()
+    return MinimaxSparseAttentionSubmodules(
+        **dataclasses.asdict(self_attention_submodules),
+        linear_index_q=backend.linear(),
+        linear_index_k=backend.linear(),
+        index_q_layernorm=backend.layer_norm(rms_norm=True, for_qk=True),
+        index_k_layernorm=backend.layer_norm(rms_norm=True, for_qk=True),
+    )
 
 
 @register_patch(
@@ -107,7 +142,7 @@ def patch_minimax_sparse_attention(ctx: PatchContext):
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
-    from primus.backends.megatron.core.transformer.minimax_sparse_attention import (
+    from primus.backends.megatron.core.transformer.minimax_m3 import (
         MinimaxSparseAttention,
     )
 

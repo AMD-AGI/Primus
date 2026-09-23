@@ -43,6 +43,9 @@ _BASE = dict(
     activation_func=quick_gelu,
     gated_linear_unit=True,
     normalization="RMSNorm",
+    # The indexer emits one block selection per GQA group, so these must agree;
+    # the preset pairs num_query_groups 4 with sparse_num_index_heads 4.
+    num_query_groups=4,
 )
 
 

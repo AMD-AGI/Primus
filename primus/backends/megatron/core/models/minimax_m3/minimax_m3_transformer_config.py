@@ -43,6 +43,10 @@ _LayerPattern = Optional[Union[int, str, List[int], Tuple[int, ...]]]
 # rejected rather than silently treated as `max`.
 _SUPPORTED_SCORE_TYPES = frozenset({"max"})
 
+# Kernels that can compute the block-sparse attention. `flydsl` is declared so a
+# preset can name it; MinimaxSparseAttention rejects it until it exists.
+_SUPPORTED_MSA_BACKENDS = frozenset({"eager", "flydsl"})
+
 
 def normalize_sparse_layer_pattern(
     value: _LayerPattern, num_layers: int, *, field_name: str
@@ -139,6 +143,15 @@ class MSATransformerConfig(TransformerConfig):
     use_gemma_norm: bool = True
     """RMSNorm weighted by (1 + w); mirrored into `layernorm_zero_centered_gamma`."""
 
+    # ---- MSA runtime (Primus-side, not from config.json) ----
+
+    msa_backend: str = "eager"
+    """Which kernel computes the block-sparse attention: 'eager' or 'flydsl'."""
+
+    sparse_indexer_loss_coeff: float = 1.0e-2
+    """Weight of the indexer distillation loss. 0.0 leaves the indexer frozen: top-k is not
+    differentiable, so this loss is the only gradient its projections ever receive."""
+
     def __post_init__(self):
         # Derive the upstream fields BEFORE super(), so TransformerConfig's own
         # validation (bias_activation_fusion vs glu_linear_offset, etc.) sees
@@ -157,6 +170,38 @@ class MSATransformerConfig(TransformerConfig):
                 "minimax_sparse_attention and multi_latent_attention are mutually exclusive: "
                 "MSA runs on GQA, and core_transformer_config_from_args replaces the config "
                 "class with MLATransformerConfig whenever multi_latent_attention is set."
+            )
+
+        if self.msa_backend not in _SUPPORTED_MSA_BACKENDS:
+            raise ValueError(
+                f"msa_backend={self.msa_backend!r} is not a known backend; "
+                f"supported: {sorted(_SUPPORTED_MSA_BACKENDS)}"
+            )
+
+        # The eager backend builds a dense [b, h, sq, sk] mask over the whole key
+        # range on every rank, and reads `hidden_states` for the indexer -- which
+        # sequence parallel leaves sharded as [sq/tp, b, h] while q/k/v are full
+        # length. Neither is handled yet, so refuse loudly instead of silently
+        # attending the wrong keys.
+        if self.context_parallel_size != 1:
+            raise NotImplementedError(
+                "MiniMax Sparse Attention does not support context parallelism yet; "
+                f"got context_parallel_size={self.context_parallel_size}."
+            )
+        if self.sequence_parallel:
+            raise NotImplementedError(
+                "MiniMax Sparse Attention does not support sequence parallelism yet; "
+                "set `sequence_parallel: false`."
+            )
+
+        # The indexer emits one block selection per GQA group, which is what the
+        # reference implementation means by index_n_heads == num_key_value_heads.
+        num_query_groups = self.num_query_groups or self.num_attention_heads
+        if self.sparse_num_index_heads != num_query_groups:
+            raise ValueError(
+                f"sparse_num_index_heads ({self.sparse_num_index_heads}) must equal the number of "
+                f"GQA groups ({num_query_groups}): the indexer produces one block selection per "
+                "group."
             )
 
         if self.sparse_score_type not in _SUPPORTED_SCORE_TYPES:
