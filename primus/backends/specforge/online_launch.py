@@ -128,7 +128,10 @@ def resolve_capture_layer_ids(
 
 
 def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
-    """Flatten ``specforge_online`` plus a few env aliases used at launch."""
+    """Flatten ``specforge_online`` plus a few env aliases used at launch.
+
+    SGLang extra args default to AITER + radix-cache off so recipes omit those knobs.
+    """
 
     environ = os.environ if env is None else env
     raw = flatten_overrides(getattr(params, "specforge_online", None))

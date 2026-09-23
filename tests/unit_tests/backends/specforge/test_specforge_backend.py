@@ -354,6 +354,15 @@ class TestCaptureArgv:
         assert "--trust-remote-code" not in argv
         assert "false" not in joined
 
+    def test_capture_defaults_aiter_and_radix_when_omitted(self):
+        params = SimpleNamespace(
+            specforge_mode="capture",
+            specforge_capture={"target_model_path": "Qwen/Qwen3.5-4B"},
+        )
+        argv = build_capture_argv(params)
+        assert "--sglang-disable-radix-cache" in argv
+        assert argv[argv.index("--sglang-attention-backend") + 1] == "aiter"
+
 
 class TestWorkdirResolution:
     def test_explicit_param_wins(self, specforge_checkout, tmp_path, monkeypatch):
@@ -408,6 +417,7 @@ class TestExampleExperiment:
         assert "scripts/prepare_hidden_states.py" in argv
         assert "--sglang-disable-radix-cache" in argv
         assert "--sglang-disable-radix-cache false" not in " ".join(argv)
+        assert argv[argv.index("--sglang-attention-backend") + 1] == "aiter"
         assert "--strategy" in argv
         assert argv[argv.index("--strategy") + 1] == "dflash"
         assert argv[argv.index("--data-path") + 1] == experiment_env["CAPTURE_DATA_PATH"]

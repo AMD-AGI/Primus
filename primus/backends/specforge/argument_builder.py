@@ -212,7 +212,11 @@ def _is_true_flag(value: Any) -> bool:
 
 
 def build_capture_argv(params: Any, extra_args: Optional[list[str]] = None) -> list[str]:
-    """Build ``torchrun … scripts/prepare_hidden_states.py`` for offline capture."""
+    """Build ``torchrun … scripts/prepare_hidden_states.py`` for offline capture.
+
+    AITER and ``--sglang-disable-radix-cache`` are injected when omitted so
+    recipes do not expose those knobs.
+    """
 
     capture = flatten_overrides(getattr(params, "specforge_capture", None))
     nproc = capture.get("nproc_per_node") or os.environ.get("NPROC_PER_NODE") or "1"
@@ -226,6 +230,10 @@ def build_capture_argv(params: Any, extra_args: Optional[list[str]] = None) -> l
         str(nproc),
         str(script),
     ]
+    if capture.get("sglang_attention_backend") in (None, "", "null"):
+        capture["sglang_attention_backend"] = "aiter"
+    if capture.get("sglang_disable_radix_cache") in (None, "", "null"):
+        capture["sglang_disable_radix_cache"] = "true"
     for key, value in sorted(capture.items()):
         if key in CAPTURE_SKIP_KEYS:
             continue

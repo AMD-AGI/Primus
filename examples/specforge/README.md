@@ -56,8 +56,6 @@ modules:
         data_path: ${CAPTURE_DATA_PATH}
         output_path: ${OUTPUT_DIR}/hidden_states_raw
         nproc_per_node: ${NPROC_PER_NODE:1}
-        sglang_attention_backend: aiter
-        sglang_disable_radix_cache: true
 ```
 
 ```bash

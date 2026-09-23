@@ -80,8 +80,6 @@ modules:
         max_length: 2048                 # prompt + completion tokens
         tp_size: 1                       # SGLang tensor parallel
         batch_size: ${CAPTURE_BATCH_SIZE:8}  # capture batch
-        sglang_attention_backend: aiter  # keep aiter on this image
-        sglang_disable_radix_cache: true  # keep disabled on this image
         sglang_mem_fraction_static: 0.8  # SGLang GPU memory fraction
         sglang_context_length: 2560      # SGLang context length
 ```
