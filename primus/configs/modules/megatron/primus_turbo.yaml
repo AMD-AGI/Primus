@@ -50,6 +50,10 @@ enable_turbo_attention_float8: false
 # operator switch
 # use turbo gemm
 use_turbo_gemm: false
+# Fuse the dense SwiGLU MLP chain (fc1 + GLU + fc2) into Primus-Turbo's
+# FlyDSL MXFP4 dense MLP op. Analog of turbo_fused_grouped_gemm for G=1.
+# Default off; Llama-3.1-8B opts in from the experiment YAML.
+turbo_fused_gemm: false
 
 # ===== Grouped MLP =====
 # use turbo grouped gemm

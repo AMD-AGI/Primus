@@ -254,8 +254,9 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
     over the whole gradient buffer. It is driven by ``gradient_accumulation_fusion``.
 
     Only the BF16/FP16 GEMMs, the FP8 current-scaling (tensorwise) ones, and
-    non-preshuffled MXFP4 GEMMs carry that epilogue. FP8 block / MXFP8 scaling
-    and preshuffled or non-MX FP4 recipes keep the framework's separate add.
+    non-preshuffled MXFP4 GEMMs (FlyDSL ``gemm_fp4_accum_impl``) carry that
+    epilogue. FP8 block / MXFP8 scaling and preshuffled or non-MX FP4 recipes
+    keep the framework's separate add.
 
     ``weight`` must be the real parameter, not a quantized buffer: the buffer carries
     no ``main_grad``. On the multi-microbatch path the parameter's attributes are
@@ -268,6 +269,8 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
     turbo_fp4_enabled = PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
     if turbo_fp4_enabled:
         quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+        # FlyDSL MXFP4 already has a beta=1 wgrad epilogue. AITER/preshuffled
+        # layouts do not, and neither do non-MX FP4 recipes.
         if quant_config is None or not quant_config.mxfp4_scaling():
             return None
         # The beta=1 epilogue consumes the raw FlyDSL/hipBLASLt layout. Treat a
@@ -1747,7 +1750,10 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         elif self.config.normalization == "RMSNorm":
             from primus_turbo.pytorch.ops.normalization import rmsnorm
 
-            norm_out = rmsnorm(x, self.layer_norm_weight, self.eps)
+            if getattr(self, "_skip_fused_norm", False):
+                norm_out = x
+            else:
+                norm_out = rmsnorm(x, self.layer_norm_weight, self.eps)
         else:
             assert False, "Not support normalization type."
 
@@ -1825,6 +1831,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         self.quantized_weight_buffer = torch.empty(
                             0, device=weight.device, dtype=float4_e2m1fn_x2
                         )
+                    pre = getattr(self, "_prequant_x", None)
                     out = primus_turbo_torch.ops.gemm_fp4(
                         inp,
                         weight,
@@ -1833,6 +1840,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         out_dtype=None,
                         config=quant_config.data(),
                         fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
+                        a_prequant=pre,
                     )
                 else:
                     if is_first_microbatch:
