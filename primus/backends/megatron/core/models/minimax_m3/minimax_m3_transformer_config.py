@@ -19,9 +19,16 @@ attention path (``experimental_attention_variant: dsa``) is MLA-only.
 ``multi_latent_attention`` selects ``MLATransformerConfig``; the selection
 itself lives in ``primus/backends/megatron/patches/minimax_m3_config_patches.py``.
 
-Values come from https://huggingface.co/MiniMaxAI/MiniMax-M3 (config.json,
-``text_config.sparse_attention_config``); the field names are kept verbatim so
-the preset reads like the reference config.
+M3's other two deviations from a stock GQA+MoE decoder -- the ``swigluoai``
+activation and ``use_gemma_norm`` -- need no new machinery: Megatron already
+computes both, so this config carries them under their ``config.json`` names
+and derives the upstream fields in ``__post_init__``.
+
+Values and semantics come from https://huggingface.co/MiniMaxAI/MiniMax-M3
+(config.json) and from the official implementation in transformers,
+``models/minimax_m3_vl/modeling_minimax_m3_vl.py`` (``MiniMaxM3VLRMSNorm``,
+``MiniMaxM3VLDenseMLP``, ``MiniMaxM3VLExperts``). Field names are kept verbatim
+so the preset reads like the reference config.
 """
 
 from dataclasses import dataclass
@@ -119,7 +126,27 @@ class MSATransformerConfig(TransformerConfig):
     sparse_disable_index_value: _LayerPattern = None
     """Per-layer 0/1 pattern for the index branch; M3 ships the same list as the freq."""
 
+    # ---- Activation: config.json's `hidden_act: swigluoai` ----
+
+    swiglu_alpha: float = 1.702
+    """Gate steepness. Megatron's `quick_gelu` hardcodes 1.702, so only that value is expressible."""
+
+    swiglu_limit: float = 7.0
+    """Clamp bound on both GLU halves; mirrored into `activation_func_clamp_value`."""
+
+    # ---- Normalization: config.json's `use_gemma_norm` ----
+
+    use_gemma_norm: bool = True
+    """RMSNorm weighted by (1 + w); mirrored into `layernorm_zero_centered_gamma`."""
+
     def __post_init__(self):
+        # Derive the upstream fields BEFORE super(), so TransformerConfig's own
+        # validation (bias_activation_fusion vs glu_linear_offset, etc.) sees
+        # the values this model actually runs with.
+        if self.minimax_sparse_attention:
+            self._derive_activation()
+            self._derive_normalization()
+
         super().__post_init__()
 
         if not self.minimax_sparse_attention:
@@ -159,6 +186,94 @@ class MSATransformerConfig(TransformerConfig):
             self.num_layers,
             field_name="sparse_disable_index_value",
         )
+
+    def _derive_activation(self) -> None:
+        """Map `swigluoai` onto Megatron's quick-GEGLU fields.
+
+        The official implementation (``MiniMaxM3VLDenseMLP.forward`` and
+        ``MiniMaxM3VLExperts._apply_gate``) is::
+
+            gate, up = gate_up.chunk(2, dim=-1)
+            gate = gate.clamp(max=swiglu_limit)
+            up   = up.clamp(-swiglu_limit, swiglu_limit)
+            out  = (up + 1.0) * gate * sigmoid(gate * swiglu_alpha)
+
+        and Megatron's GLU path (``mlp.py`` / ``moe/experts.py``) is::
+
+            out = activation_func(x_glu) * (x_linear + glu_linear_offset)
+
+        with the same two clamps and the same ``chunk`` split (M3 does *not*
+        interleave the halves the way GPT-OSS does -- see that class's own
+        comment). With ``activation_func = quick_gelu`` these are the same
+        function, so the ``+1`` is ``glu_linear_offset`` and the limit is
+        ``activation_func_clamp_value``.
+
+        The one value Megatron cannot carry is a non-default alpha: `quick_gelu`
+        hardcodes 1.702. That happens to be M3's `swiglu_alpha`, but a preset
+        that changes it would otherwise train a different activation than it
+        asked for, so it is rejected.
+
+        Note the import: Megatron defines `quick_gelu` twice, in
+        ``core/activations.py`` and in ``core/fusions/fused_bias_geglu.py``.
+        The identity checks in ``arguments.py``, ``transformer_config.py``,
+        ``mlp.py`` and ``moe/experts.py`` all use the fusions one, so that is
+        the object a config actually carries and the one to compare against --
+        the two are the same maths but different objects, and `is` tells them
+        apart.
+        """
+        from megatron.core.fusions.fused_bias_geglu import quick_gelu
+
+        if self.activation_func is not quick_gelu:
+            raise ValueError(
+                "MiniMax-M3 uses the `swigluoai` activation, which Megatron spells "
+                "`quick_geglu`. Set `quick_geglu: true` (and `swiglu: false`) in the preset; "
+                f"got activation_func={getattr(self.activation_func, '__name__', self.activation_func)}."
+            )
+
+        if self.swiglu_alpha != 1.702:
+            raise NotImplementedError(
+                f"swiglu_alpha={self.swiglu_alpha} is not expressible: Megatron's quick_gelu "
+                "hardcodes 1.702. Only M3's released value is supported."
+            )
+
+        self.gated_linear_unit = True
+        self.glu_linear_offset = 1.0
+        self.activation_func_clamp_value = self.swiglu_limit
+
+        # The MoE path fuses quick_geglu (TEGroupedMLP -> weighted_bias_quick_geglu_impl,
+        # which applies both clamps), but the dense MLP's fused branch only covers
+        # gelu and swiglu: quick_gelu without a per-token scale falls through to
+        # `raise ValueError("Only support fusion of gelu and swiglu")` in mlp.py,
+        # at forward time. M3 has dense layers, so catch it here instead.
+        if self.bias_activation_fusion:
+            raise ValueError(
+                "MiniMax-M3's swigluoai activation cannot use bias_activation_fusion: the dense "
+                "MLP's fused branch handles only gelu and swiglu, and would raise at the first "
+                "forward. Set `bias_gelu_fusion: false` in the preset (that is the flag "
+                "core_transformer_config_from_args reads when swiglu is off)."
+            )
+
+    def _derive_normalization(self) -> None:
+        """Map `use_gemma_norm` onto `layernorm_zero_centered_gamma`.
+
+        ``MiniMaxM3VLRMSNorm`` normalises in fp32, scales by ``1.0 + weight``
+        and initialises ``weight`` at zeros -- exactly TE's
+        ``RMSNorm(zero_centered_gamma=True)``
+        (``megatron/core/extensions/transformer_engine.py``). Primus's turbo and
+        fused-residual RMSNorm paths read the same flag, so the fused kernels
+        stay correct.
+
+        The reference uses that one class for every norm, q/k norms included;
+        Megatron's qk norm is ``TENorm`` reading the same flag, so setting it
+        once covers them all.
+        """
+        if not self.use_gemma_norm:
+            return
+
+        if self.normalization != "RMSNorm":
+            raise ValueError(f"use_gemma_norm requires normalization=RMSNorm; got {self.normalization}.")
+
+        self.layernorm_zero_centered_gamma = True
 
     @property
     def sparse_layer_pattern(self) -> Tuple[int, ...]:

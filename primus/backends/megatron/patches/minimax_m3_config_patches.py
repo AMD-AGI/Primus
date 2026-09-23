@@ -17,9 +17,18 @@ So this patch adds the missing branch: ``args.minimax_sparse_attention`` ->
 ``MSATransformerConfig``, exactly mirroring the ``multi_latent_attention``
 branch one line above it upstream. An explicit ``config_class=`` from a caller
 still wins.
+
+It also closes a conflict upstream leaves silent. That ``multi_latent_attention``
+branch has no ``config_class is None`` guard, so it overwrites whatever the
+caller asked for -- the same trap Kimi-K3 documents in ``kimi_k3_builders.py``.
+A preset with both flags set would therefore build a plain
+``MLATransformerConfig``: every ``sparse_*`` field would vanish,
+``MSATransformerConfig`` would never be constructed, and the mutual-exclusion
+check in its ``__post_init__`` would never run. The wrapper raises first.
 """
 
 from primus.backends.megatron.patches._patch_guard import is_patched, mark_patched
+from primus.backends.megatron.patches._rebind import rebind_everywhere
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -51,30 +60,26 @@ def patch_minimax_m3_config(ctx: PatchContext):
     original = arguments_module.core_transformer_config_from_args
 
     def core_transformer_config_from_args(args, config_class=None):
-        if config_class is None and getattr(args, "minimax_sparse_attention", False):
+        wants_msa = bool(getattr(args, "minimax_sparse_attention", False))
+
+        if wants_msa and getattr(args, "multi_latent_attention", False):
+            raise ValueError(
+                "minimax_sparse_attention and multi_latent_attention cannot both be set: "
+                "MSA runs on GQA, and core_transformer_config_from_args would silently "
+                "replace the config class with MLATransformerConfig, dropping every "
+                "sparse_* field. Turn one of them off in the model preset."
+            )
+
+        if config_class is None and wants_msa:
             config_class = MSATransformerConfig
+
         return original(args, config_class=config_class)
 
-    arguments_module.core_transformer_config_from_args = core_transformer_config_from_args
+    rebound = rebind_everywhere(
+        arguments_module, "core_transformer_config_from_args", core_transformer_config_from_args
+    )
     mark_patched(arguments_module, _PATCH_KEY)
     log_rank_0(
-        f"[Patch:{_PATCH_KEY}]   Patched "
-        "megatron.training.arguments.core_transformer_config_from_args -> "
-        "MSATransformerConfig when minimax_sparse_attention is set"
-    )
-
-    # gpt_builders imports the symbol directly, so the module attribute above
-    # does not reach it; rebind its local name too.
-    try:
-        import gpt_builders as gpt_builders_module  # pyright: ignore[reportMissingImports]
-    except ImportError as exc:
-        log_rank_0(
-            f"[Patch:{_PATCH_KEY}]   Failed to import gpt_builders; cannot patch its local "
-            "core_transformer_config_from_args binding."
-        )
-        raise RuntimeError("Failed to import required module gpt_builders") from exc
-
-    gpt_builders_module.core_transformer_config_from_args = core_transformer_config_from_args
-    log_rank_0(
-        f"[Patch:{_PATCH_KEY}]   Patched gpt_builders.core_transformer_config_from_args -> same wrapper"
+        f"[Patch:{_PATCH_KEY}]   Patched core_transformer_config_from_args -> MSATransformerConfig "
+        f"when minimax_sparse_attention is set; rebound in: {', '.join(rebound)}"
     )

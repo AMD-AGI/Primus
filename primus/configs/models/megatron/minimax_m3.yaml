@@ -94,14 +94,35 @@ max_position_embeddings: 1048576
 mtp_num_layers: 0
 
 # other settings
-swiglu: true
+# Activation: config.json's `hidden_act: swigluoai`. The reference
+# implementation (transformers, MiniMaxM3VLDenseMLP / MiniMaxM3VLExperts) is
+#     gate, up = gate_up.chunk(2, dim=-1)
+#     gate = gate.clamp(max=swiglu_limit)
+#     up   = up.clamp(-swiglu_limit, swiglu_limit)
+#     out  = (up + 1.0) * gate * sigmoid(gate * swiglu_alpha)
+# which is exactly Megatron's `quick_geglu` GLU path (mlp.py / moe/experts.py)
+# with glu_linear_offset=1.0 and activation_func_clamp_value=swiglu_limit --
+# same chunk() split, and quick_gelu is x*sigmoid(1.702x) == swiglu_alpha.
+# MSATransformerConfig derives the two Megatron fields from the names below.
+swiglu: false
+quick_geglu: true
+swiglu_alpha: 1.702
+swiglu_limit: 7.0
 bias_swiglu_fusion: false
+bias_gelu_fusion: false
 add_bias_linear: false
 attention_softmax_in_fp32: true
 untie_embeddings_and_output_weights: true
 hidden_dropout: 0.0
 attention_dropout: 0.0
 normalization: RMSNorm
+# config.json's `use_gemma_norm`. The reference MiniMaxM3VLRMSNorm normalizes
+# in fp32, scales by (1.0 + weight) and inits weight at zeros -- i.e. TE's
+# RMSNorm(zero_centered_gamma=True), which Primus's turbo and fused-residual
+# norm paths also honour. It covers the q/k norms too (the reference uses the
+# same class there, and Megatron's qk norm is TENorm reading the same flag).
+# MSATransformerConfig sets the flag.
+use_gemma_norm: true
 # Upstream's dest for --norm-epsilon is `layernorm_epsilon`. The `norm_epsilon`
 # spelling the older presets here use only reaches DeepSeek-V4, and is a silent
 # no-op on a `model_type: gpt` model like this one.
@@ -121,15 +142,6 @@ init_method_std: 0.02
 #   indexer distillation KL is what trains a non-differentiable top-k. Two gaps
 #   to bridge: M3 picks top-k per GQA group rather than globally, and reduces a
 #   block to one score with max rather than a weighted sum.
-#
-# Activation: M3 uses `swigluoai` (swiglu_alpha 1.702, swiglu_limit 7.0), not
-#   plain SwiGLU. Megatron spells that family `quick_geglu` + `glu_linear_offset`
-#   + `activation_func_clamp_value`, but the linear offset M3 expects is not
-#   documented, so this preset stays on SwiGLU -- the same choice the gpt_oss
-#   presets make for the same activation family.
-#
-# Normalization: M3 sets `use_gemma_norm: true` (RMSNorm weighted by 1 + w).
-#   Megatron has no equivalent flag; RMSNorm here is the plain form.
 #
 # MTP: config.json carries both `num_mtp_modules: 7` and
 #   `num_nextn_predict_layers: 1`. Seven extra MoE layers would add ~50B params,

@@ -4,7 +4,23 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Install MinimaxSparseAttention on MiniMax-M3's MSA layers.
+"""MiniMax-M3 model patches.
+
+Companion to ``minimax_m3_config_patches``, which owns the config-class
+selection. This module owns the patches that change what the model *builds*.
+Today that is one patch: the per-layer attention swap below.
+
+M3's other two deviations from a stock GQA+MoE decoder need no patch, because
+Megatron expresses them exactly:
+
+  - ``swigluoai`` (clamp, quick-gelu gate, ``+1`` on the linear half) is
+    ``quick_geglu`` + ``glu_linear_offset`` + ``activation_func_clamp_value``;
+  - ``use_gemma_norm`` (RMSNorm weighted by ``1 + w``) is
+    ``layernorm_zero_centered_gamma``.
+
+Both are derived and validated in ``MSATransformerConfig.__post_init__``.
+
+--- Attention swap ---
 
 M3 reuses upstream ``GPTModel``, so the whole change is one substitution in the
 decoder layer specs: on the layers where ``sparse_attention_freq`` is 1, the
@@ -21,12 +37,15 @@ post-process whatever that fork (or upstream) returns, so the two compose.
 
 ``get_gpt_decoder_block_spec`` -- the branch ``gpt_builder`` takes for MoE
 models like M3 -- calls ``get_gpt_decoder_layer_specs`` through the module
-global, so patching the module attribute is enough for it.
+global, so patching the module attribute reaches it. ``gpt_builders.py``
+imports the symbol by name instead, so it needs its own rebind; see
+``_rebind.rebind_everywhere``.
 """
 
 import dataclasses
 
 from primus.backends.megatron.patches._patch_guard import is_patched, mark_patched
+from primus.backends.megatron.patches._rebind import rebind_everywhere
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
@@ -111,23 +130,11 @@ def patch_minimax_sparse_attention(ctx: PatchContext):
             for i, layer_spec in enumerate(layer_specs)
         ]
 
-    megatron_gpt_layer_specs.get_gpt_decoder_layer_specs = get_gpt_decoder_layer_specs
+    rebound = rebind_everywhere(
+        megatron_gpt_layer_specs, "get_gpt_decoder_layer_specs", get_gpt_decoder_layer_specs
+    )
     mark_patched(megatron_gpt_layer_specs, _PATCH_KEY)
     log_rank_0(
-        f"[Patch:{_PATCH_KEY}]   Wrapped "
-        "megatron.core.models.gpt.gpt_layer_specs.get_gpt_decoder_layer_specs: "
-        "MSA layers now build MinimaxSparseAttention"
+        f"[Patch:{_PATCH_KEY}]   Wrapped get_gpt_decoder_layer_specs: MSA layers now build "
+        f"MinimaxSparseAttention; rebound in: {', '.join(rebound)}"
     )
-
-    # gpt_builders imports the symbol directly; rebind its local name too.
-    try:
-        import gpt_builders as gpt_builders_module  # pyright: ignore[reportMissingImports]
-    except ImportError as exc:
-        log_rank_0(
-            f"[Patch:{_PATCH_KEY}]   Failed to import gpt_builders; cannot patch its local "
-            "get_gpt_decoder_layer_specs binding."
-        )
-        raise RuntimeError("Failed to import required module gpt_builders") from exc
-
-    gpt_builders_module.get_gpt_decoder_layer_specs = get_gpt_decoder_layer_specs
-    log_rank_0(f"[Patch:{_PATCH_KEY}]   Patched gpt_builders.get_gpt_decoder_layer_specs -> same wrapper")
