@@ -288,9 +288,7 @@ def patch_rccl_sdma_grad_reduce_scatter(ctx: PatchContext) -> None:
     # __init__ wrap (see module docstring). If the param patch has not run yet
     # for any reason, apply it now -- it is idempotent and marker-gated.
     if not getattr(param_and_grad_buffer, "_primus_rccl_sdma_direct_allocation_patched", False):
-        from .rccl_sdma_param_all_gather_patches import (
-            patch_rccl_sdma_param_all_gather,
-        )
+        from .rccl_sdma_param_all_gather_patches import patch_rccl_sdma_param_all_gather
 
         patch_rccl_sdma_param_all_gather(ctx)
         if not getattr(param_and_grad_buffer, "_primus_rccl_sdma_direct_allocation_patched", False):

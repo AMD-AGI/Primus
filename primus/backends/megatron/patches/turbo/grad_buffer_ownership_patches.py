@@ -151,16 +151,14 @@ def _reset_complement(buffer) -> bool:
     "megatron.core.distributed.grad_buffer_ownership",
     backend="megatron",
     phase="before_train",
-
     description="Zero only the complement of the gradient-buffer slices that Primus-Turbo's beta=0 wgrad epilogue fully overwrites, instead of the whole buffer.",
-
     condition=_is_enabled,
 )
 def patch_grad_buffer_ownership(ctx: PatchContext) -> None:
-    from megatron.core.distributed.distributed_data_parallel import DistributedDataParallel
-
+    from megatron.core.distributed.distributed_data_parallel import (
+        DistributedDataParallel,
+    )
     from megatron.core.distributed.param_and_grad_buffer import _ParamAndGradBuffer
-
     from primus_turbo.pytorch.core import grad_ownership
 
     if getattr(_ParamAndGradBuffer.reset, "_primus_grad_ownership", False):
@@ -188,6 +186,5 @@ def patch_grad_buffer_ownership(ctx: PatchContext) -> None:
     log_rank_0(
         "[Patch:megatron.turbo.grad_buffer_ownership] Wrapped zero_grad_buffer() and "
         "_ParamAndGradBuffer.reset(); owned slices are reported on the first iteration "
-        "that has any."
-        + ("  POISON MODE: skipped slices filled with NaN." if _POISON else "")
+        "that has any." + ("  POISON MODE: skipped slices filled with NaN." if _POISON else "")
     )

@@ -56,13 +56,9 @@ def test_start_grad_sync_uses_dedicated_group_when_eligible(monkeypatch):
     def fake_reduce_scatter(output, input_, op, group, async_op):
         rs_calls.append((output, input_, op, group, async_op))
 
-    monkeypatch.setattr(
-        torch.distributed.distributed_c10d, "_coalescing_manager", fake_coalescing_manager
-    )
+    monkeypatch.setattr(torch.distributed.distributed_c10d, "_coalescing_manager", fake_coalescing_manager)
     monkeypatch.setattr(torch.distributed, "reduce_scatter_tensor", fake_reduce_scatter)
-    monkeypatch.setattr(
-        rccl_sdma_param_gather, "get_sdma_process_group", lambda _group: dedicated_group
-    )
+    monkeypatch.setattr(rccl_sdma_param_gather, "get_sdma_process_group", lambda _group: dedicated_group)
 
     wrapped = grad_patches.make_start_grad_sync(
         lambda *_a, **_k: pytest.fail("native Megatron fallback must not run")
@@ -272,8 +268,6 @@ def test_start_grad_sync_respects_first_batch_no_op(monkeypatch):
 
 
 def test_grad_buffer_wrapper_allocates_grad_data_from_pool_and_marks_buckets(monkeypatch):
-    import megatron.core.distributed.param_and_grad_buffer as pgb
-
     group = SimpleNamespace(group_name="ce")
     pool = SimpleNamespace()
     handle = SimpleNamespace()
