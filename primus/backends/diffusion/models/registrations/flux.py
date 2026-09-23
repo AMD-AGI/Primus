@@ -51,6 +51,10 @@ _FP8_DOUBLE_MLP_SUFFIXES = {
     "txt_mlp.0",
     "txt_mlp.2",
 }
+_FLUX_QKV_SUFFIXES = {
+    "img_attn.qkv",
+    "txt_attn.qkv",
+}
 
 
 def _strip_known_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -157,6 +161,70 @@ def _build_flux_dit(params) -> Flux:
     return dit
 
 
+def _flux_block_kind(module: torch.nn.Module, fqn: str) -> str | None:
+    """Classify a FLUX block Linear as ``"qkv"`` or ``"full"``, else None.
+
+    The selection is deliberately identical to the FP8 recipe's, so an MXFP4 run
+    quantizes exactly the same 228 modules and leaves the embeddings,
+    modulation/adaLN projections and final layer in BF16.
+    """
+    if type(module) is not torch.nn.Linear:
+        return None
+    parts = fqn.split(".", 2)
+    if len(parts) != 3:
+        return None
+    if parts[0] == "double_blocks":
+        if parts[2] in _FLUX_QKV_SUFFIXES:
+            return "qkv"
+        if parts[2] in _FP8_DOUBLE_ATTN_PROJ_SUFFIXES:
+            return "full"
+        if parts[2] in _FP8_DOUBLE_MLP_SUFFIXES:
+            return "full"
+    if parts[0] == "single_blocks" and parts[2] in {"linear1", "linear2"}:
+        return "full"
+    return None
+
+
+def _apply_flux_mxfp4(dit, config):
+    """Swap the FLUX block Linears for MXFP4, keeping QKV Wgrad in BF16.
+
+    The QKV opt-out mirrors the FP8 recipe below, which already disables the
+    Wgrad casts on exactly those modules. ``FLUX_FP4_QKV_WGRAD_BF16=0`` puts
+    them fully in MXFP4 instead.
+    """
+    from dataclasses import replace
+
+    from primus.backends.diffusion.models.quantization.mxfp4_linear import (
+        convert_to_mxfp4_training,
+    )
+
+    qkv_wgrad_bf16 = os.getenv("FLUX_FP4_QKV_WGRAD_BF16", "1") == "1"
+
+    def filter_fn(module: torch.nn.Module, fqn: str) -> bool:
+        return _flux_block_kind(module, fqn) is not None
+
+    def config_for(fqn: str):
+        parts = fqn.split(".", 2)
+        if qkv_wgrad_bf16 and parts[0] == "double_blocks" and parts[2] in _FLUX_QKV_SUFFIXES:
+            return replace(config, wgrad="bf16")
+        return None
+
+    converted = convert_to_mxfp4_training(dit, filter_fn, config, config_for)
+
+    expected_full = len(dit.double_blocks) * 6 + len(dit.single_blocks) * 2
+    expected_qkv = len(dit.double_blocks) * 2
+    if len(converted) != expected_full + expected_qkv:
+        raise RuntimeError(
+            f"FLUX MXFP4 converted {len(converted)} Linear modules; "
+            f"expected {expected_full + expected_qkv}"
+        )
+    logger.info(
+        f"Enabled MXFP4 for {len(converted)} FLUX block Linear modules ({config.describe()}); "
+        f"wgrad={'BF16' if qkv_wgrad_bf16 else 'MXFP4'} for {expected_qkv} QKV modules"
+    )
+    return dit
+
+
 def build_flux_model(model_config: dict[str, Any]):
     """
     Build a FLUX model from the selected model preset.
@@ -188,6 +256,17 @@ def build_flux_model(model_config: dict[str, Any]):
         logger.info(f"Loading FLUX DiT weights from {pretrained_path}")
         default_filename = "flux1-dev.safetensors" if preset == "flux-dev" else "flux1-schnell.safetensors"
         _load_flux_weights(dit, pretrained_path, default_filename=default_filename)
+
+    # MXFP4 replaces the FP8 GEMMs on the same modules, so the two recipes are
+    # mutually exclusive and FLUX_FP4_PASSES wins when both are configured.
+    from primus.backends.diffusion.models.quantization.mxfp4_linear import (
+        config_from_env as _mxfp4_config_from_env,
+    )
+
+    mxfp4_config = _mxfp4_config_from_env()
+    if mxfp4_config is not None:
+        dit = _apply_flux_mxfp4(dit, mxfp4_config)
+        float8_recipe = ""
 
     if float8_recipe:
         try:
