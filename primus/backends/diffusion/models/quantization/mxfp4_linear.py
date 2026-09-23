@@ -52,12 +52,48 @@ MX_BLOCK_SIZE = 32
 # compiled region ("Mutating a variable not in the current scope"), so the
 # populate step must never be reachable from a traced call.
 _GEMM_FP4 = None
+_GEMM_FP4_EAGER = None
 _GRANULARITY = None
 _BACKEND = None
 
 
+def _resolve_fp4_dispatch() -> str:
+    """Import-time Linear GEMM dispatch. ``torch.compile`` must not trace getenv.
+
+    ``FLUX_FP4_DISPATCH`` selects the three measured CC12M recipes:
+
+    * ``fusion`` — fused H16 pack + stock ``gemm_fp4_impl`` (66.06 samp/GPU/s)
+    * ``host_dispatch`` — fused pack + eager ``gemm_fp4_impl`` (65.98)
+    * ``mxfp4_mm`` — one ``primus_flux::mxfp4_mm`` custom op (65.63)
+
+    Legacy flags still work if ``FLUX_FP4_DISPATCH`` is unset:
+    ``FLUX_FP4_MXFP4_MM``, ``FLUX_FP4_HOST_DISPATCH``, ``FLUX_FP4_FUSED_H16_QUANT``.
+    Empty means unfused Python H16 + C++ ``quantize_mxfp4`` (historical ~50.6).
+    """
+    explicit = os.getenv("FLUX_FP4_DISPATCH", "").strip().lower()
+    if explicit in ("fusion", "host_dispatch", "mxfp4_mm"):
+        return explicit
+    if explicit:
+        raise ValueError(
+            f"FLUX_FP4_DISPATCH={explicit!r} is invalid; expected fusion, "
+            "host_dispatch, mxfp4_mm, or empty"
+        )
+    if os.getenv("FLUX_FP4_MXFP4_MM", "0") == "1":
+        return "mxfp4_mm"
+    if os.getenv("FLUX_FP4_HOST_DISPATCH", "0") == "1":
+        return "host_dispatch"
+    if os.getenv("FLUX_FP4_FUSED_H16_QUANT", "0") == "1":
+        return "fusion"
+    return ""
+
+
+_FP4_DISPATCH = _resolve_fp4_dispatch()
+_FUSED_H16_QUANT = _FP4_DISPATCH in ("fusion", "host_dispatch", "mxfp4_mm")
+_USE_MXFP4_MM = _FP4_DISPATCH == "mxfp4_mm"
+
+
 def _init_turbo() -> None:
-    global _GEMM_FP4, _GRANULARITY, _BACKEND
+    global _GEMM_FP4, _GEMM_FP4_EAGER, _GRANULARITY, _BACKEND
     if _GEMM_FP4 is not None:
         return
     from primus_turbo.pytorch.core.backend import BackendType
@@ -104,7 +140,13 @@ def _init_turbo() -> None:
     _GRANULARITY = ScalingGranularity.MX_BLOCKWISE.value
     _BACKEND = backend.value
     _GEMM_FP4 = gemm_fp4_impl
-    logger.info(f"MXFP4 GEMM backend: {backend.name} (preshuffle off)")
+    try:
+        from primus_turbo.pytorch.kernels.gemm.gemm_fp4_impl import _gemm_fp4_impl_eager
+    except ImportError:
+        _gemm_fp4_impl_eager = gemm_fp4_impl
+    _GEMM_FP4_EAGER = _gemm_fp4_impl_eager
+    extra = f", dispatch={_FP4_DISPATCH}" if _FP4_DISPATCH else ""
+    logger.info(f"MXFP4 GEMM backend: {backend.name} (preshuffle off){extra}")
 
 
 # ---------------------------------------------------------------------------
@@ -298,9 +340,8 @@ def _quantize_rowwise(
     return _quantize_mxfp4_rowwise_op(x, use_2d, use_sr, use_rht)
 
 
-_FUSED_H16_QUANT: bool = os.getenv("FLUX_FP4_FUSED_H16_QUANT", "0") == "1"
-if _FUSED_H16_QUANT:
-    logger.info("MXFP4 operand pack: FlyDSL fused H16+quant")
+if _FP4_DISPATCH:
+    logger.info(f"MXFP4 Linear dispatch: {_FP4_DISPATCH}")
 elif os.getenv("FLUX_FP4_PASSES", "off") not in ("", "off"):
     logger.info("MXFP4 operand pack: Python H16 + C++ quantize_mxfp4")
 
@@ -372,6 +413,36 @@ def _mxfp4_mm(
     )
 
 
+@torch.library.custom_op("primus_flux::mxfp4_mm", mutates_args=(), device_types="cuda")
+def _mxfp4_mm_op(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Fused pack(A)+pack(B)+GEMM. Opaque to torch.compile.
+
+    Uses FlyDSL ``flydsl_quant_mxfp4_h16`` and Turbo ``_gemm_fp4_impl_eager``.
+    HIP-graph replay is not wired: copies wiped the micro win on large shapes.
+    """
+    _init_turbo()
+    a_q, a_s = _quantize_mxfp4_h16_op(a)
+    b_q, b_s = _quantize_mxfp4_h16_op(b)
+    return _GEMM_FP4_EAGER(
+        a_q,
+        a_s,
+        False,
+        b_q,
+        b_s,
+        True,
+        a.dtype,
+        False,
+        _GRANULARITY,
+        _BACKEND,
+        False,
+    )
+
+
+@_mxfp4_mm_op.register_fake
+def _(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return torch.empty(a.shape[0], b.shape[0], device=a.device, dtype=a.dtype)
+
+
 def _quantize_and_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -384,6 +455,14 @@ def _quantize_and_mm(
     b_2d: bool = False,
 ) -> torch.Tensor:
     """Rotate, quantize and multiply a[M,K] @ b[N,K]^T along the shared K."""
+    if (
+        _USE_MXFP4_MM
+        and not a_sr
+        and not b_sr
+        and not b_2d
+        and not cfg.randomized_hadamard
+    ):
+        return torch.ops.primus_flux.mxfp4_mm(a, b)
     a_q, a_s = _quantize_operand(a, hadamard, False, a_sr, cfg.randomized_hadamard)
     b_q, b_s = _quantize_operand(b, hadamard, b_2d, b_sr, cfg.randomized_hadamard)
     return _mxfp4_mm(a_q, a_s, b_q, b_s, out_dtype)
