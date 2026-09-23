@@ -86,9 +86,7 @@ except (ImportError, ModuleNotFoundError):
     _float4_e2m1fn_x2 = None
 
 try:
-    from primus_turbo.pytorch.ops.quantization import (
-        dequantize_fp4 as _dequantize_fp4,
-    )
+    from primus_turbo.pytorch.ops.quantization import dequantize_fp4 as _dequantize_fp4
     from primus_turbo.pytorch.ops.quantization import (
         quantize_fp4_with_trans as _quantize_fp4_with_trans,
     )
@@ -162,6 +160,33 @@ def _is_mxfp4_quantized_weight_buffer(buf) -> bool:
     return dtype == _float4_e2m1fn_x2
 
 
+def _forward_scale_rounding_mode() -> int:
+    """E8M0 block-scale rounding mode the forward quantizer is using.
+
+    The forward resolves ``mxfp4_scale_rounding_mode`` from the Megatron args
+    (see ``fp4_utils._mxfp4_scale_rounding_mode``). Reading the env var instead
+    diverges whenever the recipe sets the args field and the variable is unset:
+    DeOsc would fall back to 0 while the forward runs the configured mode.
+    The env var remains the fallback for older Turbo builds and for callers
+    with no initialized args. Unset means 0, the mode DeOsc used before this
+    was plumbed through.
+    """
+    value = None
+    try:
+        from megatron.training.global_vars import get_args
+
+        value = getattr(get_args(), "mxfp4_scale_rounding_mode", None)
+    except Exception:
+        value = None
+    if value is None:
+        raw = os.environ.get("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING")
+        value = 0 if raw is None else int(raw)
+    mode = int(value)
+    if mode not in (0, 1, 2):
+        raise ValueError(f"mxfp4_scale_rounding_mode must be 0, 1, or 2, got {mode}")
+    return mode
+
+
 def deosc_dependencies_available() -> Tuple[bool, str]:
     """Return whether the Primus-Turbo MXFP4 QDQ primitives are importable."""
     if _PrimusTurboQuantizedTensor is None:
@@ -189,12 +214,7 @@ def qdq_mxfp4(weight: torch.Tensor) -> torch.Tensor:
     ``grouped_mlp_fp4`` and avoid one HIP quantize launch per expert.
     """
     recipe = _ScalingRecipe(use_2d_block=True)
-    scale_rounding_mode = int(os.environ.get("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING", "0"))
-    if scale_rounding_mode not in (0, 1, 2):
-        raise ValueError(
-            "PRIMUS_TURBO_MXFP4_SCALE_ROUNDING must be 0, 1, or 2, "
-            f"got {scale_rounding_mode}"
-        )
+    scale_rounding_mode = _forward_scale_rounding_mode()
 
     def _qdq_2d(w2d: torch.Tensor) -> torch.Tensor:
         qt = _PrimusTurboQuantizedTensor.quantize(
@@ -308,9 +328,7 @@ def qdq_mxfp4_local_shard(
             # path. Padding by complete 32-row scale blocks cannot affect the
             # real rows and satisfies dual3's 64-row alignment requirement.
             tile_rows = tile_row_end - tile_row_begin
-            tile_row_end = tile_row_begin + ((tile_rows + 2 * block - 1) // (2 * block)) * (
-                2 * block
-            )
+            tile_row_end = tile_row_begin + ((tile_rows + 2 * block - 1) // (2 * block)) * (2 * block)
 
         tile = torch.zeros(
             (tile_row_end - tile_row_begin, cols),
