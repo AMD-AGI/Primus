@@ -132,7 +132,10 @@ NCCL_SOCKET_IFNAME=fenic GLOO_SOCKET_IFNAME=fenic NCCL_IB_GID_INDEX=1
 ```
 
 On DCCS, `LIBIONIC_ABI4_PATH` is only needed when libionic is not installed at
-its default path. On Crusoe, use the cluster-provided network defaults.
+its default path. On Crusoe, use the cluster-provided network defaults. The
+4-node profile also resets every GPU to the `auto` performance level before
+startup and forwards the qualified RCCL/ROCm environment into the container;
+set `FLUX_GPU_PERF_LEVEL` only when deliberately testing another level.
 
 ## Files
 

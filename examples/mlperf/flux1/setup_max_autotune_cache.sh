@@ -98,6 +98,7 @@ for rank in "${!nodes[@]}"; do
                 -w /workspace/Primus \
                 -e TORCHINDUCTOR_CACHE_DIR="$cache_dir" \
                 -e EVAL_BATCH_SIZE=32 \
+                -e FLUX_GPU_PERF_LEVEL=auto \
                 -e FLUX_FP8_GEMM_BACKEND=selective_flydsl \
                 -e FLUX_FP8_ALL_GATHER=1 \
                 -e TORCHINDUCTOR_BENCHMARK_FUSION=1 \
@@ -105,6 +106,7 @@ for rank in "${!nodes[@]}"; do
                 -e PRIMUS_FLUX_REUSE_FP8_INPUT=1 \
                 "$DOCKER_IMAGE" bash -lc "
                     set -euo pipefail
+                    rocm-smi --setperflevel \"\$FLUX_GPU_PERF_LEVEL\"
                     rm -rf \"$cache_dir\"
                     mkdir -p \"$cache_dir\"
                     python -m examples.mlperf.flux1.prewarm_inductor_cache
