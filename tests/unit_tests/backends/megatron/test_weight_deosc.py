@@ -144,7 +144,13 @@ def test_local_shard_qdq_treats_grouped_experts_as_independent_2d_matrices(monke
     q_local = qdq_mxfp4_local_shard(shard, shape, start, end, torch.bfloat16)
 
     assert torch.equal(q_local, shard.to(torch.bfloat16))
-    assert [tuple(tile.shape) for tile in calls] == [(32, 64), (64, 64), (32, 64)]
+    # Boundary experts stay on their own padded tiles. The fully owned middle
+    # expert is one native 3D call, not a per-row 2D tile and not a flatten
+    # that would mix it with its neighbours.
+    assert [tuple(tile.shape) for tile in calls] == [(1, 64, 64), (1, 64, 64), (1, 64, 64)]
+    expert0_len = matrix_numel - start
+    full_expert = shard[expert0_len : expert0_len + matrix_numel].to(torch.bfloat16)
+    assert torch.equal(calls[1], full_expert.view(1, 64, 64))
 
 
 # ---------------------------------------------------------------------------
