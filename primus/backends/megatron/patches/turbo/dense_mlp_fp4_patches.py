@@ -45,10 +45,7 @@ def _fused_dense_mlp_requested(args) -> bool:
         env = _env_flag("PRIMUS_TURBO_FUSED_GEMM")
     if env is not None:
         return env
-    return bool(
-        getattr(args, "turbo_fused_gemm", False)
-        or getattr(args, "use_turbo_fused_dense_mlp", False)
-    )
+    return bool(getattr(args, "turbo_fused_gemm", False) or getattr(args, "use_turbo_fused_dense_mlp", False))
 
 
 def _should_enable(mlp, args) -> bool:
@@ -122,9 +119,7 @@ def _apply_fc1_fused_norm(fc1, hidden_states, config):
             getattr(fc1, "layer_norm_bias", None),
             eps,
         )
-    raise RuntimeError(
-        f"turbo_fused_gemm: unsupported normalization {config.normalization!r}"
-    )
+    raise RuntimeError(f"turbo_fused_gemm: unsupported normalization {config.normalization!r}")
 
 
 def _run_module_forward_pre_hooks(module, args):
@@ -152,11 +147,12 @@ def _run_module_forward_pre_hooks(module, args):
 
 
 def _forward_turbo_dense_mlp_fp4(mlp, hidden_states):
+    from primus_turbo.pytorch.ops.dense_mlp_fp4 import dense_mlp_fp4
+
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboLowPrecisionGlobalStateManager,
         _fuse_wgrad_accum_pattern,
     )
-    from primus_turbo.pytorch.ops.dense_mlp_fp4 import dense_mlp_fp4
 
     # Same objects DDP registered AccumulateGrad hooks on (not TE aliases).
     w1 = mlp.linear_fc1._parameters["weight"]
@@ -170,9 +166,7 @@ def _forward_turbo_dense_mlp_fp4(mlp, hidden_states):
     x = hidden_states.reshape(-1, hidden_states.shape[-1])
 
     quant = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-    assert quant is not None and quant.mxfp4_scaling(), (
-        "turbo_fused_gemm requires MXFP4 Turbo autocast"
-    )
+    assert quant is not None and quant.mxfp4_scaling(), "turbo_fused_gemm requires MXFP4 Turbo autocast"
     pre = getattr(mlp.linear_fc1, "_prequant_x", None)
     y = dense_mlp_fp4(
         x,

@@ -90,9 +90,7 @@ def _run_rmsnorm_residual(x, residual, gamma, eps, skip_y_store=True):
     if _r3_enabled():
         from primus_turbo.pytorch.ops.normalization import rmsnorm_residual_mxfp4
 
-        y, xpr, row, rs, col, cs = rmsnorm_residual_mxfp4(
-            x, residual, gamma, eps, skip_y_store=skip_y_store
-        )
+        y, xpr, row, rs, col, cs = rmsnorm_residual_mxfp4(x, residual, gamma, eps, skip_y_store=skip_y_store)
         return y, xpr, (row.detach(), rs.detach(), col.detach(), cs.detach())
     from primus_turbo.pytorch.ops.normalization import (
         rmsnorm_residual as triton_rmsnorm_residual,
@@ -161,7 +159,7 @@ def install() -> bool:
         return False
 
     try:
-        from primus_turbo.pytorch.ops.normalization import (
+        from primus_turbo.pytorch.ops.normalization import (  # noqa: F401
             rmsnorm_residual as triton_rmsnorm_residual,
         )
     except ImportError as exc:
@@ -213,9 +211,7 @@ def install() -> bool:
             gamma = self.weight
             if getattr(self, "zero_centered_gamma", False):
                 gamma = gamma + 1
-            y, xpr, preq = _run_rmsnorm_residual(
-                x, residual, gamma, self.eps, skip_y_store=False
-            )
+            y, xpr, preq = _run_rmsnorm_residual(x, residual, gamma, self.eps, skip_y_store=False)
             if preq is not None:
                 self._prequant_x = preq
             return y, xpr
@@ -504,9 +500,7 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
 
     # ---- V1 fuse: bda(attn_out, residual) + pre_mlp RMSNorm --------------
     nvtx_range_push(suffix="fused_residual_pre_mlp_layernorm")
-    from primus.backends.megatron.core.extensions.primus_turbo import (
-        PrimusTurboRMSNorm,
-    )
+    from primus.backends.megatron.core.extensions.primus_turbo import PrimusTurboRMSNorm
 
     pre_mlp = getattr(layer, "pre_mlp_layernorm", None)
     fc1_skip = None
@@ -516,9 +510,7 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
         fc1_skip, gamma, eps = _fc1_fused_ln_params(layer)
         if getattr(fc1_skip, "zero_centered_gamma", False):
             gamma = gamma + 1
-        pre_mlp_layernorm_output, hidden_states, preq = _run_rmsnorm_residual(
-            attn_out, residual, gamma, eps
-        )
+        pre_mlp_layernorm_output, hidden_states, preq = _run_rmsnorm_residual(attn_out, residual, gamma, eps)
         fc1_skip._skip_fused_norm = True
         if preq is not None:
             fc1_skip._prequant_x = preq
