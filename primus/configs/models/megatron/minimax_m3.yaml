@@ -149,9 +149,10 @@ init_method_std: 0.02
 #   [b, heads, sq, sk] fp32 score matrix, so it is slower than dense TE and its
 #   activation memory grows with sq^2 -- several GB per MSA layer at 4k, which
 #   is why long runs need full recompute on every layer. msa_backend: flydsl is
-#   accepted by the config but rejected at build: the vendored kernel under
-#   minimax_m3/flydsl/ is not wired in. Not supported yet: context and sequence
-#   parallelism, packed sequences, and inference.
+#   accepted by the config but rejected at build: the flydsl forward kernel
+#   (minimax_m3/flydsl/msa_token_fwd.py) has no backward yet and is not wired
+#   in. Not supported yet: context and sequence parallelism, packed sequences,
+#   and inference.
 #
 # MTP: config.json carries both `num_mtp_modules: 7` and
 #   `num_nextn_predict_layers: 1`. Seven extra MoE layers would add ~50B params,
