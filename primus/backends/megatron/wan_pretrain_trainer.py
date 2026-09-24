@@ -35,12 +35,11 @@ from primus.core.utils.module_utils import log_rank_0
 # second. A run uses one spec or the other, so set both rather than have the
 # trainer work out which one is live.
 #
-# Neither default is right here. Primus' launchers override Primus-Turbo's own
-# default of "1" to "0" (``examples/run_pretrain.sh`` and
-# ``runner/helpers/envs/base_env.sh``), and the release Dockerfile pins
-# ``NVTE_CK_IS_V3_ATOMIC_FP32=0``, which is the gfx950 value; on gfx942 the CK
-# v3 backward needs fp32 atomics, as ``tools/installation/env.sh`` already spells
-# out for the bare-metal path.
+# Neither default is right here. Primus' launcher overrides Primus-Turbo's own
+# default of "1" to "0" (``runner/helpers/envs/base_env.sh``), and the release
+# Dockerfile pins ``NVTE_CK_IS_V3_ATOMIC_FP32=0``, which is the gfx950 value; on
+# gfx942 the CK v3 backward needs fp32 atomics, as ``tools/installation/env.sh``
+# already spells out for the bare-metal path.
 ATTN_ATOMIC_FP32_ENVS = (
     "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32",
     "NVTE_CK_IS_V3_ATOMIC_FP32",
