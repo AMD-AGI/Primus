@@ -16,8 +16,9 @@
 #   ./primus-cli direct -- train pretrain \
 #     --config examples/megatron/configs/MI355X/diffusion/wan2.1_t2v_1.3b_pretrain_pusa_local_spec.yaml
 #
-# Set PRIMUS_DIFFUSION_DATA_PATH to the prepared Energon dataset and HF_HOME to
-# the HuggingFace cache holding the VAE and UMT5 weights.
+# Set PRIMUS_DIFFUSION_DATA_PATH to an Energon dataset of pre-encoded WAN
+# latents whose subflavor is encoding: wan_preencoded; see
+# primus/configs/data/megatron/diffusion/templates/dataset_wan_preencoded.yaml.
 #
 # The env: block below is applied by TrainRuntime after the launcher's
 # defaults and overrides anything exported on the CLI. PYTORCH_CUDA_ALLOC_CONF
