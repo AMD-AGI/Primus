@@ -211,6 +211,15 @@ class MSATransformerConfig(TransformerConfig):
                 "MiniMax Sparse Attention does not support sequence parallelism yet; "
                 "set `sequence_parallel: false`."
             )
+        # The indexer is replicated and selects blocks for every KV head, while a
+        # TP rank holds only num_query_groups / TP of them, so the selection and
+        # the local heads would not line up (on either backend).
+        if self.tensor_model_parallel_size != 1:
+            raise NotImplementedError(
+                "MiniMax Sparse Attention does not support tensor parallelism yet; "
+                f"got tensor_model_parallel_size={self.tensor_model_parallel_size}. "
+                "Shard the model with expert and pipeline parallelism instead."
+            )
         # The indexer emits one block selection per GQA group, which is what the
         # reference implementation means by index_n_heads == num_key_value_heads.
         num_query_groups = self.num_query_groups or self.num_attention_heads

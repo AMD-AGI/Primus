@@ -382,6 +382,11 @@ def test_context_parallel_is_rejected():
         _msa_config(context_parallel_size=2)
 
 
+def test_tensor_parallel_is_rejected():
+    with pytest.raises(NotImplementedError, match="tensor parallelism"):
+        _msa_config(tensor_model_parallel_size=2)
+
+
 def test_sequence_parallel_is_rejected():
     with pytest.raises(NotImplementedError, match="sequence parallelism"):
         _msa_config(tensor_model_parallel_size=2, sequence_parallel=True)
