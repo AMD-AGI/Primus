@@ -20,8 +20,10 @@ export DATA_PATH=/data
 
 export PRIMUS_MICRO_BATCH_SIZE=4
 export PRIMUS_GLOBAL_BATCH_SIZE=32
-export PRIMUS_LR=8.0e-4
-export PRIMUS_MIN_LR=8.0e-5
+# MXFP4 de-osc converges at 4e-4 / 4e-5. The FP8 yaml still defaults to 8e-4
+# when this variable is not exported.
+export PRIMUS_LR=4.0e-4
+export PRIMUS_MIN_LR=4.0e-5
 export PRIMUS_TRAIN_ITERS=1200000
 export PRIMUS_LR_WARMUP_ITERS=128
 export PRIMUS_LR_DECAY_ITERS=$((PRIMUS_TRAIN_ITERS - PRIMUS_LR_WARMUP_ITERS))
