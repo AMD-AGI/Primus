@@ -164,29 +164,41 @@ def test_thd_requires_max_seqlen(missing):
         attention(query, key, value, None, AttnMaskType.no_mask, packed_seq_params=packing)
 
 
-def _build_wan_on_meta():
+def _build_wan_on_meta(**overrides):
     """Structure only: the flag is read in __init__, so no weights are needed."""
     set_args(argparse.Namespace(enable_turbo_attention_float8=False))
     config = WanConfig.wan2_1_t2v_1_3b()
     config.transformer_impl = "local"
     config.use_cpu_initialization = False
     config.perform_initialization = False
+    for name, value in overrides.items():
+        setattr(config, name, value)
     with torch.device("meta"):
         return WanTransformer3D(config)
 
 
-@pytest.mark.parametrize("flag,expected", [(None, False), ("0", False), ("1", True)])
-def test_wan_local_thd_is_opt_in(monkeypatch, flag, expected):
-    """The Wan blocks pack only when PRIMUS_WAN_THD_ATTN asks them to.
+@pytest.mark.parametrize("overrides,expected", [({}, False), ({"local_thd_attention": True}, True)])
+def test_wan_local_thd_is_opt_in(overrides, expected):
+    """The Wan blocks pack only when ``local_thd_attention`` asks them to.
 
     Packing swaps one aiter kernel family for another, so it is a deliberate
     choice rather than something a run should acquire by upgrading.
     """
-    if flag is None:
-        monkeypatch.delenv("PRIMUS_WAN_THD_ATTN", raising=False)
-    else:
-        monkeypatch.setenv("PRIMUS_WAN_THD_ATTN", flag)
-
-    block = _build_wan_on_meta().blocks[0]
+    block = _build_wan_on_meta(**overrides).blocks[0]
     assert block.attn1.local_thd is expected
     assert block.attn2.local_thd is expected
+
+
+def test_wan_local_thd_ignores_the_old_env_var(monkeypatch):
+    """The layout is config, so an environment left over from a sweep cannot flip it."""
+    monkeypatch.setenv("PRIMUS_WAN_THD_ATTN", "1")
+
+    assert _build_wan_on_meta().blocks[0].attn1.local_thd is False
+
+
+def test_local_thd_attention_needs_the_local_path():
+    config = WanConfig.wan2_1_t2v_1_3b()
+    config.local_thd_attention = True
+
+    with pytest.raises(ValueError, match="local_thd_attention"):
+        config.validate()

@@ -149,6 +149,12 @@ class WanConfig(BaseDiffusionConfig):
     #     unfused interleaved RoPE. torch.compile-friendly; needs Primus-Turbo.
     transformer_impl: str = "transformer_engine"
 
+    # Local path only: pack the batch into thd and run Turbo's varlen kernel
+    # instead of the dense bshd one. The TE path always packs (Megatron-Bridge
+    # parity). Off by default because the two local kernels are different
+    # kernels, so switching between them should be a deliberate choice.
+    local_thd_attention: bool = False
+
     # CPU init keeps parity with the Flux path.
     use_cpu_initialization: bool = True
 
@@ -244,6 +250,12 @@ class WanConfig(BaseDiffusionConfig):
         if self.transformer_impl not in ("transformer_engine", "local"):
             raise ValueError(
                 "transformer_impl must be 'transformer_engine' or 'local', " f"got {self.transformer_impl!r}"
+            )
+
+        if self.local_thd_attention and self.transformer_impl != "local":
+            raise ValueError(
+                "local_thd_attention selects the layout of the local attention path; "
+                f"transformer_impl={self.transformer_impl!r} always packs thd, so leave it false"
             )
 
         # MXFP4 and FP8 are only wired into the TE-free local linears.
