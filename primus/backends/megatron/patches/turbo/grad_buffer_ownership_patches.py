@@ -13,7 +13,7 @@ runs its epilogue at beta=0 and replaces the whole ``main_grad`` view. Zeroing
 those slices first is then pure bandwidth. On GPT-OSS 20B the expert weights are
 93% of a 20,488,420,224-element buffer, so almost all of the clear is dead work.
 
-The patch wraps two Megatron methods and modifies neither:
+The patch wraps three Megatron methods and modifies none:
 
 ``DistributedDataParallel.zero_grad_buffer``
     Rotates :mod:`primus_turbo.pytorch.core.grad_ownership`'s log once per
@@ -23,6 +23,10 @@ The patch wraps two Megatron methods and modifies neither:
 ``_ParamAndGradBuffer.reset``
     Zeroes the complement of the owned slices instead of the whole buffer.
 
+``_ParamAndGradBucketGroup.start_grad_sync``
+    Rejects any skipped slice that the current iteration did not overwrite,
+    before its reduce-scatter can consume stale data.
+
 What makes the skip safe:
 
 - A slice is owned only if the producer logged a beta=0 write to it during the
@@ -30,7 +34,8 @@ What makes the skip safe:
   producer selects and logs the beta=0 writer in actual backward order, so
   activation recompute and staged forwards cannot leave a forward-time claim.
 - An empty log means "zero everything". Iteration 0 has nothing logged, as do
-  configurations where no overwrite-capable producer runs.
+  configurations where no overwrite-capable producer runs. The previous log
+  is also discarded unless the current schedule has exactly one microbatch.
 - CUDA-graph configurations do not install this consumer: Python ownership
   recording is not replayed with captured backward kernels.
 - A claim is honoured only when the parameter's ``main_grad`` is exactly the
@@ -78,6 +83,25 @@ def _rotate_ownership(grad_ownership, *, discard: bool) -> FrozenSet[Slice]:
     """
     owned = grad_ownership.begin_step()
     return frozenset() if discard else owned
+
+
+def _get_num_microbatches() -> int:
+    """Read Megatron's current schedule at reset time, not patch-install time."""
+    from megatron.core.num_microbatches_calculator import get_num_microbatches
+
+    return get_num_microbatches()
+
+
+def _discard_ownership_for_step(args) -> bool:
+    """Whether this step must retain Megatron's full gradient-buffer clear."""
+    if getattr(args, "curr_iteration", None) == -1:
+        return True
+    try:
+        return _get_num_microbatches() != 1
+    except Exception:
+        # If the calculator is unavailable or not initialized, ownership for
+        # the current schedule is not proven. Fail closed with a full clear.
+        return True
 
 
 def _is_enabled(ctx: PatchContext) -> bool:
@@ -191,18 +215,34 @@ def _reset_complement(buffer) -> bool:
     return True
 
 
+def _validate_bucket_group_overwrites(bucket_group, grad_ownership) -> None:
+    """Validate this bucket group's skipped slices before its collective reads them."""
+    slices = []
+    for bucket in bucket_group.buckets:
+        params = getattr(bucket, "params_list", getattr(bucket, "params", ()))
+        for param in params:
+            main_grad = getattr(param, "main_grad", None)
+            if main_grad is not None:
+                slices.append((main_grad.data_ptr(), main_grad.numel(), main_grad.dtype))
+    grad_ownership.validate_overwritten(slices)
+
+
 @register_patch(
     "megatron.core.distributed.grad_buffer_ownership",
     backend="megatron",
     phase="before_train",
     description="Zero only the complement of the gradient-buffer slices that Primus-Turbo's beta=0 wgrad epilogue fully overwrites, instead of the whole buffer.",
     condition=_is_enabled,
+    priority=70,
 )
 def patch_grad_buffer_ownership(ctx: PatchContext) -> None:
     from megatron.core.distributed.distributed_data_parallel import (
         DistributedDataParallel,
     )
-    from megatron.core.distributed.param_and_grad_buffer import _ParamAndGradBuffer
+    from megatron.core.distributed.param_and_grad_buffer import (
+        _ParamAndGradBucketGroup,
+        _ParamAndGradBuffer,
+    )
     from primus_turbo.pytorch.core import grad_ownership
 
     if getattr(_ParamAndGradBuffer.reset, "_primus_grad_ownership", False):
@@ -210,6 +250,7 @@ def patch_grad_buffer_ownership(ctx: PatchContext) -> None:
 
     original_zero_grad_buffer = DistributedDataParallel.zero_grad_buffer
     original_reset = _ParamAndGradBuffer.reset
+    original_start_grad_sync = _ParamAndGradBucketGroup.start_grad_sync
     args = get_args(ctx)
 
     def zero_grad_buffer(self):
@@ -217,7 +258,7 @@ def patch_grad_buffer_ownership(ctx: PatchContext) -> None:
         if id(self) in seen or not seen:
             _state["owned"] = _rotate_ownership(
                 grad_ownership,
-                discard=getattr(args, "curr_iteration", None) == -1,
+                discard=_discard_ownership_for_step(args),
             )
             seen.clear()
         seen.add(id(self))
@@ -227,12 +268,21 @@ def patch_grad_buffer_ownership(ctx: PatchContext) -> None:
         if not _reset_complement(self):
             original_reset(self)
 
+    def start_grad_sync(self, *args, **kwargs):
+        # The first-batch duplicate-dispatch call is a native no-op; do not
+        # validate unrelated later buckets after communication already began.
+        if not (self.is_first_batch and self.grad_reduce_handle is not None):
+            _validate_bucket_group_overwrites(self, grad_ownership)
+        return original_start_grad_sync(self, *args, **kwargs)
+
     setattr(reset, "_primus_grad_ownership", True)
     DistributedDataParallel.zero_grad_buffer = zero_grad_buffer
     _ParamAndGradBuffer.reset = reset
+    _ParamAndGradBucketGroup.start_grad_sync = start_grad_sync
 
     log_rank_0(
         "[Patch:megatron.turbo.grad_buffer_ownership] Wrapped zero_grad_buffer() and "
-        "_ParamAndGradBuffer.reset(); owned slices are reported on the first iteration "
-        "that has any." + ("  POISON MODE: skipped slices filled with NaN." if _POISON else "")
+        "_ParamAndGradBuffer.reset(), with pre-collective overwrite validation; owned "
+        "slices are reported on the first iteration that has any."
+        + ("  POISON MODE: skipped slices filled with NaN." if _POISON else "")
     )

@@ -255,6 +255,26 @@ class TestResetComplement:
             grad_ownership.begin_step()
 
 
+class TestPreCollectiveValidation:
+    def test_rejects_bucket_group_before_reducing_a_stale_skipped_slice(self):
+        main_grad = torch.empty(8)
+        param = _fake_param(main_grad)
+        bucket_group = SimpleNamespace(buckets=[SimpleNamespace(params_list=[param])])
+        grad_ownership.note_skipped([_slice_of(main_grad)])
+
+        with pytest.raises(RuntimeError, match="left unzeroed"):
+            gbo._validate_bucket_group_overwrites(bucket_group, grad_ownership)
+
+    def test_accepts_bucket_group_after_current_iteration_overwrite(self):
+        main_grad = torch.empty(8)
+        param = _fake_param(main_grad)
+        bucket_group = SimpleNamespace(buckets=[SimpleNamespace(params={param})])
+        grad_ownership.note_skipped([_slice_of(main_grad)])
+        grad_ownership.record_overwrite(main_grad)
+
+        gbo._validate_bucket_group_overwrites(bucket_group, grad_ownership)
+
+
 class TestIsEnabled:
     def test_disabled_short_circuits_before_reading_args(self, monkeypatch):
         monkeypatch.setattr(gbo, "_DISABLED", True)
@@ -345,3 +365,35 @@ class TestOwnershipRotation:
         grad_ownership.record_overwrite(grad)
 
         assert gbo._rotate_ownership(grad_ownership, discard=False) == frozenset({_slice_of(grad)})
+
+
+class TestCurrentStepEligibility:
+    def test_discards_pipeline_warmup_without_reading_schedule(self, monkeypatch):
+        monkeypatch.setattr(
+            gbo,
+            "_get_num_microbatches",
+            lambda: pytest.fail("warmup must short-circuit before schedule lookup"),
+        )
+
+        assert gbo._discard_ownership_for_step(SimpleNamespace(curr_iteration=-1)) is True
+
+    @pytest.mark.parametrize("num_microbatches", [0, 2, 8])
+    def test_discards_previous_ownership_for_current_multi_microbatch_step(
+        self, monkeypatch, num_microbatches
+    ):
+        monkeypatch.setattr(gbo, "_get_num_microbatches", lambda: num_microbatches)
+
+        assert gbo._discard_ownership_for_step(SimpleNamespace(curr_iteration=3)) is True
+
+    def test_accepts_previous_ownership_only_for_current_single_microbatch_step(self, monkeypatch):
+        monkeypatch.setattr(gbo, "_get_num_microbatches", lambda: 1)
+
+        assert gbo._discard_ownership_for_step(SimpleNamespace(curr_iteration=3)) is False
+
+    def test_discards_when_current_schedule_cannot_be_established(self, monkeypatch):
+        def unavailable():
+            raise RuntimeError("calculator is not initialized")
+
+        monkeypatch.setattr(gbo, "_get_num_microbatches", unavailable)
+
+        assert gbo._discard_ownership_for_step(SimpleNamespace(curr_iteration=3)) is True
