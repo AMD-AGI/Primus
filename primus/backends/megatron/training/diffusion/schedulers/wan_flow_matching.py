@@ -66,13 +66,19 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
             max_image_seq_len=max_image_seq_len,
         )
 
+        if not 0.0 <= sigma_min < sigma_max <= 1.0:
+            raise ValueError(f"need 0 <= sigma_min < sigma_max <= 1, got [{sigma_min}, {sigma_max}]")
+
         # Clip sigmas to the Wan range. The Wan defaults already match [0, 1],
         # so this is a no-op for the default config; the knob exists to support
-        # future variants.
+        # future variants. ``sigma_range`` is what training reads: the base
+        # class keeps its own ``sigma_min`` / ``sigma_max`` for inference.
+        self.sigma_range: Optional[Tuple[float, float]] = None
         if (sigma_min, sigma_max) != (0.0, 1.0):
             self.sigmas = self.sigmas.clamp(min=sigma_min, max=sigma_max)
             self.sigma_min = sigma_min
             self.sigma_max = sigma_max
+            self.sigma_range = (float(sigma_min), float(sigma_max))
 
         self.training_weights = self._build_training_weights()
 
@@ -115,6 +121,10 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
             base_sigma = t / num_train_timesteps
             sigma      = shift * base_sigma / (1 + (shift - 1) * base_sigma)
 
+        then clamped to ``[sigma_min, sigma_max]`` when a non-default range
+        was configured, so the range reaches :meth:`add_noise` and
+        :meth:`conditioning_timestep` alike.
+
         Returns a 1-D float32 tensor (no broadcasting); callers reshape as
         needed.
         """
@@ -122,7 +132,10 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
             timesteps = torch.tensor(timesteps, device=device)
         t = timesteps.to(device=device or timesteps.device, dtype=torch.float32)
         base_sigma = t / float(self.num_train_timesteps)
-        return self.shift * base_sigma / (1.0 + (self.shift - 1.0) * base_sigma)
+        sigma = self.shift * base_sigma / (1.0 + (self.shift - 1.0) * base_sigma)
+        if self.sigma_range is not None:
+            sigma = sigma.clamp(*self.sigma_range)
+        return sigma
 
     def conditioning_timestep(
         self,
