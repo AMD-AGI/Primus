@@ -104,6 +104,12 @@ modules:
       cross_entropy_loss_fusion: true
 
       # enable fp8 training
-      fp8: hybrid
+      # NOTE: do NOT fall back to the Primus default `fp8_recipe: delayed`
+      # (trainer_base.yaml) here. Qwen3 uses standard GQA attention rather than
+      # MLA, and TE delayed scaling NaNs its forward loss on iteration 1.
+      # The mxfp8 recipe also keeps the Primus-Turbo FP8 path enabled, which
+      # delayed scaling disables entirely.
+      fp8: e4m3
+      fp8_recipe: mxfp8
       moe_use_legacy_grouped_gemm: true
       gradient_accumulation_fusion: true
