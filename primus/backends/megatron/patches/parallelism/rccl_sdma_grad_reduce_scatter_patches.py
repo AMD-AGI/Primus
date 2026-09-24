@@ -205,15 +205,42 @@ def make_start_grad_sync(original):
             self.grad_reduce_handle is None
         ), "Should not have multiple communication calls outstanding at once"
 
+        # CUDA graph replay is asynchronous with respect to the outer autograd
+        # hooks. Match Megatron's native path by waiting before reading,
+        # scaling, or reducing any replay-produced gradient.
+        ready_events = []
+        seen_event_ids = set()
+        for bucket in self.buckets:
+            for param in getattr(bucket, "params_list", ()):
+                event = getattr(param, "_cudagraph_wgrad_ready_event", None)
+                if event is not None and id(event) not in seen_event_ids:
+                    ready_events.append(event)
+                    seen_event_ids.add(id(event))
+        if ready_events:
+            current_stream = torch.cuda.current_stream()
+            for event in ready_events:
+                current_stream.wait_event(event)
+
+        # Higher-precision local accumulation keeps param.main_grad outside
+        # bucket.grad_data. Stage it into the communication buffer exactly as
+        # Megatron does before checks, scaling, and reduce-scatter.
+        with torch.no_grad():
+            for bucket in self.buckets:
+                for param in getattr(bucket, "params_with_extra_main_grads", ()):
+                    grad_buffer_view = getattr(param, "main_grad_copy_in_grad_buffer", None)
+                    if grad_buffer_view is not None:
+                        grad_buffer_view.copy_(param.main_grad)
+
         if self.ddp_config.check_for_nan_in_grad or self.ddp_config.check_for_large_grads:
             self.check_grads(
                 check_for_nan_or_inf=self.ddp_config.check_for_nan_in_grad,
                 check_for_large=self.ddp_config.check_for_large_grads,
             )
 
-        for bucket in self.buckets:
-            if bucket.gradient_scaling_factor != 1.0:
-                bucket.grad_data *= bucket.gradient_scaling_factor
+        with torch.no_grad():
+            for bucket in self.buckets:
+                if bucket.gradient_scaling_factor != 1.0:
+                    bucket.grad_data *= bucket.gradient_scaling_factor
 
         reduce_op = torch.distributed.ReduceOp.SUM
         if self.ddp_config.average_in_collective:

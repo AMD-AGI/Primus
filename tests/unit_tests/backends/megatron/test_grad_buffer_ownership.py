@@ -196,6 +196,23 @@ class TestResetComplement:
         assert torch.equal(grad[0:4], torch.full((4,), 3.0))
         assert torch.equal(grad[4:10], torch.zeros(6))
 
+    def test_clears_extra_main_grads_when_optimized_reset_skips_owned_slice(self):
+        grad = torch.full((10,), 3.0, dtype=torch.float32)
+        main_grad = grad[0:4]
+        extra_grad = torch.full((4,), 9.0, dtype=torch.float32)
+        param = _fake_param(main_grad)
+        buffer = SimpleNamespace(
+            grad_data=grad,
+            param_index_map={param: (0, 4, 0)},
+            extra_main_grads=[extra_grad],
+        )
+        gbo._state["owned"] = frozenset({_slice_of(main_grad)})
+
+        assert gbo._reset_complement(buffer) is True
+
+        assert torch.equal(main_grad, torch.full((4,), 3.0))
+        assert torch.equal(extra_grad, torch.zeros(4))
+
     def test_records_skipped_slices_with_grad_ownership(self):
         grad = torch.zeros(20, dtype=torch.float32)
         main_grad = grad[0:10]

@@ -149,6 +149,12 @@ def _reset_complement(buffer) -> bool:
     if cursor < numel:
         grad[cursor:numel].zero_()
 
+    # Megatron's native reset also clears the detached higher-precision local
+    # accumulation buffers. The optimized path bypasses native reset, so it
+    # must preserve that side effect explicitly.
+    for extra_grad in getattr(buffer, "extra_main_grads", ()):
+        extra_grad.zero_()
+
     if _POISON:
         for start, end, _key in slices:
             grad[start:end].fill_(float("nan"))

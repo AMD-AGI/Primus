@@ -126,6 +126,79 @@ def test_start_grad_sync_applies_gradient_scaling_before_collective(monkeypatch)
     assert torch.equal(grad_data, torch.full((8,), 1.0))
 
 
+def test_start_grad_sync_waits_for_cudagraph_wgrad_events_before_collective(monkeypatch):
+    order = []
+    event = object()
+
+    class ConsumerStream:
+        def wait_event(self, waited_event):
+            assert waited_event is event
+            order.append("wait")
+
+    grad_data = torch.zeros(8)
+    rccl_sdma_param_gather.mark_direct_param_buffer(grad_data)
+    param = SimpleNamespace(_cudagraph_wgrad_ready_event=event)
+    bucket = SimpleNamespace(
+        grad_data=grad_data,
+        gradient_scaling_factor=1.0,
+        params_list=[param],
+    )
+    bg = _bucket_group(buckets=[bucket])
+
+    monkeypatch.setattr(
+        torch.distributed.distributed_c10d,
+        "_coalescing_manager",
+        lambda group, async_ops: nullcontext(SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        torch.distributed,
+        "reduce_scatter_tensor",
+        lambda *_args, **_kwargs: order.append("reduce-scatter"),
+    )
+    monkeypatch.setattr(rccl_sdma_param_gather, "get_sdma_process_group", lambda _g: SimpleNamespace())
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: ConsumerStream())
+
+    wrapped = grad_patches.make_start_grad_sync(lambda *_a, **_k: pytest.fail("fallback must not run"))
+    wrapped(bg)
+
+    assert order == ["wait", "reduce-scatter"]
+
+
+def test_start_grad_sync_copies_extra_main_grads_before_scaling_and_collective(monkeypatch):
+    observed = []
+    grad_data = torch.zeros(8)
+    rccl_sdma_param_gather.mark_direct_param_buffer(grad_data)
+    param = SimpleNamespace(
+        main_grad=torch.full((4,), 3.0),
+        main_grad_copy_in_grad_buffer=grad_data[:4],
+    )
+    bucket = SimpleNamespace(
+        grad_data=grad_data,
+        gradient_scaling_factor=2.0,
+        params_with_extra_main_grads=[param],
+    )
+    bg = _bucket_group(buckets=[bucket])
+
+    monkeypatch.setattr(
+        torch.distributed.distributed_c10d,
+        "_coalescing_manager",
+        lambda group, async_ops: nullcontext(SimpleNamespace()),
+    )
+
+    def reduce_scatter(*_args, **_kwargs):
+        observed.append(grad_data.clone())
+
+    monkeypatch.setattr(torch.distributed, "reduce_scatter_tensor", reduce_scatter)
+    monkeypatch.setattr(rccl_sdma_param_gather, "get_sdma_process_group", lambda _g: SimpleNamespace())
+
+    wrapped = grad_patches.make_start_grad_sync(lambda *_a, **_k: pytest.fail("fallback must not run"))
+    wrapped(bg)
+
+    assert len(observed) == 1
+    assert torch.equal(observed[0][:4], torch.full((4,), 6.0))
+    assert torch.equal(observed[0][4:], torch.zeros(4))
+
+
 def test_start_grad_sync_sync_path_waits_and_synchronizes(monkeypatch):
     wait_calls = []
     sync_calls = []
