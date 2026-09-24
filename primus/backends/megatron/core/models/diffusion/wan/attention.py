@@ -21,6 +21,7 @@ Local path: q/k/v stay in SBHD and use unfused interleaved RoPE plus
 ``PrimusTurboLocalAttention``.
 """
 
+import os
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
@@ -81,6 +82,11 @@ class WanAttentionBase(MegatronModule):
         self.attn_mask_type = attn_mask_type
         self.norm_config = norm_config if norm_config is not None else config
         self.local = config.transformer_impl == "local"
+        # Opt-in thd on the local path. The TE path is thd unconditionally
+        # (Megatron-Bridge parity); the local path is bshd by default and only
+        # packs when asked, because Turbo's varlen kernel is a different kernel
+        # and the two are worth comparing rather than swapping silently.
+        self.local_thd = self.local and os.environ.get("PRIMUS_WAN_THD_ATTN", "0") == "1"
         self.use_fp32_attention = getattr(config, "use_fp32_attention", False)
         self.num_heads = config.num_attention_heads
         self.head_dim = config.kv_channels
@@ -113,6 +119,27 @@ class WanAttentionBase(MegatronModule):
         else:
             normed = norm(tensor if self.local else tensor.contiguous())
         return normed.to(dtype)
+
+    def _thd_packing(self, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv) -> PackedSeqParams:
+        """PackedSeqParams for a thd batch.
+
+        ``max_seqlen_*`` is carried explicitly because Turbo's varlen kernel
+        takes it as an argument, where TE derives it from ``cu_seqlens``.
+        """
+        return PackedSeqParams(
+            qkv_format="thd",
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            cu_seqlens_q_padded=cu_seqlens_q,
+            cu_seqlens_kv_padded=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+        )
+
+    @staticmethod
+    def _to_thd(tensor: Tensor, seq_len: int, batch: int, heads: int, head_dim: int) -> Tensor:
+        """``[S, B, H, D]`` -> the packed ``[B*S, H, D]`` the varlen kernel wants."""
+        return tensor.transpose(0, 1).reshape(batch * seq_len, heads, head_dim).contiguous()
 
     def _core(self, query, key, value, packed_seq_params=None) -> Tensor:
         """Run the attention core, honouring the fp32 parity path."""
@@ -194,10 +221,22 @@ class WanSelfAttention(WanAttentionBase):
         query, key, value, s, b = self._split_qkv(hidden_states)
 
         if self.local:
+            # RoPE runs in SBHD with the unfused interleaved kernel either way,
+            # so packing changes which attention kernel runs and nothing about
+            # the rotary math.
             if rotary_freqs is not None:
                 query = apply_rotary_pos_emb(query, rotary_freqs, config=self.rope_config)
                 key = apply_rotary_pos_emb(key, rotary_freqs, config=self.rope_config)
-            core_out = self._core(query, key, value)
+            if not self.local_thd:
+                return self.linear_proj(self._core(query, key, value))
+
+            cu_seqlens = thd_cu_seqlens(s, b, hidden_states.device)
+            packed_seq_params = self._thd_packing(cu_seqlens, cu_seqlens, s, s)
+            query, key, value = (
+                self._to_thd(t, s, b, self.num_heads, self.head_dim) for t in (query, key, value)
+            )
+            core_out = self._core(query, key, value, packed_seq_params)
+            core_out = core_out.reshape(b, s, -1).transpose(0, 1).contiguous()
             return self.linear_proj(core_out)
 
         # Pack the batch into the token dim BEFORE RoPE so the fused thd rotary
@@ -297,7 +336,17 @@ class WanCrossAttention(WanAttentionBase):
         key = self._apply_qk_norm(key, self.k_layernorm, skv, b)
 
         if self.local:
-            core_out = self._core(query, key, value)
+            if not self.local_thd:
+                return self.linear_proj(self._core(query, key, value))
+
+            cu_seqlens_q = thd_cu_seqlens(sq, b, hidden_states.device)
+            cu_seqlens_kv = thd_cu_seqlens(skv, b, hidden_states.device)
+            packed_seq_params = self._thd_packing(cu_seqlens_q, cu_seqlens_kv, sq, skv)
+            query = self._to_thd(query, sq, b, self.num_heads, self.head_dim)
+            key = self._to_thd(key, skv, b, self.num_heads, self.head_dim)
+            value = self._to_thd(value, skv, b, self.num_heads, self.head_dim)
+            core_out = self._core(query, key, value, packed_seq_params)
+            core_out = core_out.reshape(b, sq, -1).transpose(0, 1).contiguous()
             return self.linear_proj(core_out)
 
         # Query (video) and key/value (text) carry independent cu_seqlens.
