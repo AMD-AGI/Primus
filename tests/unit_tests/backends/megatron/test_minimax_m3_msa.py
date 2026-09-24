@@ -471,6 +471,28 @@ class TestMinimaxSparseAttentionModule:
         # indexer -- which is exactly why the loss has to exist.
         assert attention.indexer.linear_index_q.weight.grad is None
 
+    def test_indexer_reads_the_normalised_attention_input(self):
+        """The TE spec fuses input_layernorm into linear_qkv, so the module gets the raw
+        residual stream -- but the reference indexer reads input_layernorm's output."""
+        config, attention = self._build()
+        assert config.layernorm_zero_centered_gamma, "premise: M3's gemma norm, weight is (1 + w)"
+        with torch.no_grad():
+            attention.linear_qkv.layer_norm_weight.normal_(0.0, 0.2)
+
+        seen = {}
+
+        def record_input(_module, args):
+            seen["x"] = args[0]
+
+        attention.indexer.register_forward_pre_hook(record_input)
+        hidden = torch.randn(SQ, 2, config.hidden_size, device="cuda")
+        attention(hidden)
+
+        weight = 1.0 + attention.linear_qkv.layer_norm_weight.float()
+        rms = torch.rsqrt(hidden.pow(2).mean(-1, keepdim=True) + config.layernorm_epsilon)
+        torch.testing.assert_close(seen["x"], hidden * rms * weight)
+        assert not seen["x"].requires_grad
+
     def test_distillation_loss_does_not_reach_the_layers_below(self):
         """The KL trains the indexer only: the input gradient must not change with it."""
         config, attention = self._build(sparse_indexer_loss_coeff=1.0)

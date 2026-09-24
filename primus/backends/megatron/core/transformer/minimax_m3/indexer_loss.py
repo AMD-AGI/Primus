@@ -18,9 +18,9 @@ GQA group rather than tokens globally, so the target is aggregated the same way
 the selection is.
 
 The gradient flows one way, into the indexer only: the target is detached
-here, and ``MinimaxSparseAttention`` feeds the indexer a detached hidden state,
-so the KL can neither reshape the attention it imitates nor leak into the
-layers below.
+here, and ``MinimaxSparseAttention`` feeds the indexer a detached
+``input_layernorm(x)``, so the KL can neither reshape the attention it imitates
+nor leak into the layers below.
 """
 
 from typing import Optional

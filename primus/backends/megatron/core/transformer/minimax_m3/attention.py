@@ -127,6 +127,36 @@ class MinimaxSparseAttention(SelfAttention):
             pg_collection=self.pg_collection,
         )
 
+        if self._fused_input_norm_weight() is not None and config.normalization != "RMSNorm":
+            raise NotImplementedError(
+                "MinimaxSparseAttention recomputes linear_qkv's fused input norm for the indexer "
+                f"and supports RMSNorm only; got normalization={config.normalization!r}."
+            )
+
+    def _fused_input_norm_weight(self) -> Optional[torch.Tensor]:
+        """The input-norm weight fused into ``linear_qkv``, or None when the norm is separate."""
+        return getattr(self.linear_qkv, "layer_norm_weight", None)
+
+    def _indexer_input(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """``input_layernorm(hidden_states)``, detached: what the reference indexer reads.
+
+        The TE specs fuse the input norm into ``linear_qkv``, so ``hidden_states``
+        arrives here as the raw residual stream; the norm is recomputed from the
+        fused weight. Weight and input are both detached because the distillation
+        loss must train the indexer alone, not the layers that feed it.
+        """
+        x = hidden_states.detach()
+        norm_weight = self._fused_input_norm_weight()
+        if norm_weight is None:
+            return x
+        weight = norm_weight.detach().float()
+        if self.config.layernorm_zero_centered_gamma:
+            weight = weight + 1.0
+        normed = torch.nn.functional.rms_norm(
+            x.float(), (x.shape[-1],), weight, self.config.layernorm_epsilon
+        )
+        return normed.to(x.dtype)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -178,9 +208,7 @@ class MinimaxSparseAttention(SelfAttention):
         else:
             index_pos_emb = None
 
-        # Detached: the indexer's only gradient is the distillation loss, and that
-        # loss must train the indexer alone, not the layers that feed it.
-        block_indices, block_scores = self.indexer(hidden_states.detach(), index_pos_emb)
+        block_indices, block_scores = self.indexer(self._indexer_input(hidden_states), index_pos_emb)
 
         # sbhd -> bhsd for the eager kernel, matching the reference's layout.
         query_bhsd = query.permute(1, 2, 0, 3)
