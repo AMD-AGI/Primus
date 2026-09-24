@@ -49,15 +49,14 @@ SOURCES = {
     "wikitext103": {"repo": "Salesforce/wikitext", "name": "wikitext-103-raw-v1", "split": "train"},
 }
 
-# Several Primus model presets point at gated or simply non-existent Hugging Face
-# repos (meta-llama/Meta-Llama-3.2-1B is not a real repo name). Nobody notices
-# because mock_data swaps in NullTokenizer. These mirrors carry an identical
-# vocabulary and need no access token.
-TOKENIZER_MIRRORS = {
-    "meta-llama/Meta-Llama-3.2-1B": "NousResearch/Llama-3.2-1B",
-    "meta-llama/Llama-3.2-1B": "NousResearch/Llama-3.2-1B",
-    "meta-llama/Meta-Llama-3.1-8B": "NousResearch/Meta-Llama-3.1-8B",
-    "meta-llama/Llama-3.1-8B": "NousResearch/Meta-Llama-3.1-8B",
+# A couple of model presets name tokenizer repos that do not exist: there is no
+# meta-llama/Meta-Llama-3.2-{1B,3B}, the real repos drop the "Meta-" prefix.
+# Nobody notices because mock_data swaps in NullTokenizer. These are typo
+# corrections, not a way around gating -- the corrected repos are still gated
+# and still need HF_TOKEN. Use --tokenizer to substitute any repo you prefer.
+TOKENIZER_NAME_FIXES = {
+    "meta-llama/Meta-Llama-3.2-1B": "meta-llama/Llama-3.2-1B",
+    "meta-llama/Meta-Llama-3.2-3B": "meta-llama/Llama-3.2-3B",
 }
 
 _WORKER = {}
@@ -80,11 +79,27 @@ def resolve_tokenizer_from_model(model_preset):
     if not tokenizer_model:
         raise SystemExit(f"model preset {model_preset} declares no tokenizer_model")
 
-    mirror = TOKENIZER_MIRRORS.get(tokenizer_model)
-    if mirror:
-        log(f"model preset asks for {tokenizer_model}; using ungated mirror {mirror}")
-        tokenizer_model = mirror
+    fixed = TOKENIZER_NAME_FIXES.get(tokenizer_model)
+    if fixed:
+        log(f"model preset names {tokenizer_model}, which does not exist; using {fixed}")
+        tokenizer_model = fixed
     return tokenizer_type, tokenizer_model
+
+
+def load_tokenizer(name):
+    """Load a tokenizer, turning HF's access errors into actionable advice."""
+    from transformers import AutoTokenizer
+
+    try:
+        return AutoTokenizer.from_pretrained(name)
+    except Exception as exc:  # noqa: BLE001 - re-raised with guidance
+        hint = (
+            f"could not load tokenizer {name!r}: {type(exc).__name__}: {str(exc)[:200]}\n"
+            "If the repo is gated, accept its licence on huggingface.co and export a\n"
+            "token with access:  export HF_TOKEN=hf_...\n"
+            "Otherwise pass --tokenizer <repo-or-path> to use an equivalent vocabulary."
+        )
+        raise SystemExit(hint) from exc
 
 
 def _worker_init(tokenizer_dir):
@@ -246,13 +261,10 @@ def main():
 
     import numpy
     from megatron.core.datasets.indexed_dataset import DType
-    from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    if tokenizer.eos_token_id is None:
-        raise SystemExit(f"tokenizer {tokenizer_name} has no eos token, cannot append <eod>")
-    vocab_size = len(tokenizer)
-
+    # Resolve the output directory before touching the Hub: re-running against
+    # an existing dataset should work offline, and for a gated tokenizer it is
+    # the only way to re-verify without an access token.
     if args.out_dir:
         out_dir = Path(args.out_dir)
     else:
@@ -263,10 +275,43 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     tokenizer_dir = out_dir / "tokenizer"
 
+    manifest_path = out_dir / "dataset_info.json"
+    previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
+    reuse_local = bool(previous) and not args.force and tokenizer_dir.is_dir()
+
+    tokenizer = load_tokenizer(str(tokenizer_dir) if reuse_local else tokenizer_name)
+    if reuse_local:
+        log(f"reusing the tokenizer saved in {tokenizer_dir} (no Hub access needed)")
+        recorded_name = previous.get("tokenizer")
+        if recorded_name not in (None, tokenizer_name):
+            # Not fatal: the saved copy is what both the data and the training
+            # config use, so the pair stays self-consistent. But say so, because
+            # it will not match the tokenizer the caller asked for.
+            log(
+                f"WARNING: this dataset was built with {recorded_name}, not the requested "
+                f"{tokenizer_name}; the saved copy is being used. Pass --force to rebuild."
+            )
+    if tokenizer.eos_token_id is None:
+        raise SystemExit(f"tokenizer {tokenizer_name} has no eos token, cannot append <eod>")
+    vocab_size = len(tokenizer)
+
     log(f"output directory : {out_dir}")
     log(f"source corpus    : {SOURCES[args.source]['repo']} ({SOURCES[args.source]['name']})")
     log(f"tokenizer        : {tokenizer_name} ({tokenizer_type})")
-    tokenizer.save_pretrained(tokenizer_dir)
+
+    # Overwriting the saved tokenizer while keeping existing .bin files would
+    # leave a corpus and a vocabulary that disagree, and a larger new vocab
+    # would not even trip the max-token-id check in verify().
+    if previous and not args.force:
+        recorded = previous.get("vocab_size")
+        if recorded is not None and recorded != vocab_size:
+            raise SystemExit(
+                f"{out_dir} holds a dataset tokenised with a {recorded}-token vocabulary, "
+                f"but {tokenizer_name} has {vocab_size}.\nUse a different --out-dir, "
+                "or --force to rebuild from scratch."
+            )
+    if not reuse_local:
+        tokenizer.save_pretrained(tokenizer_dir)
     dtype = DType.optimal_dtype(vocab_size)
     log(f"vocab {vocab_size}, eod id {tokenizer.eos_token_id}, bin dtype {numpy.dtype(dtype)}")
 
@@ -278,7 +323,6 @@ def main():
     valid_prefix = out_dir / "valid_text_document"
     splits = [("valid", valid_prefix, args.valid_tokens), ("train", train_prefix, args.target_tokens)]
 
-    manifest_path = out_dir / "dataset_info.json"
     have_all = all(Path(f"{p}.idx").exists() for _, p, _ in splits)
     if have_all and not args.force:
         log("indexed datasets already exist, skipping build (use --force to rebuild)")
@@ -311,7 +355,11 @@ def main():
             {
                 "source": SOURCES[args.source]["repo"],
                 "source_subset": SOURCES[args.source]["name"],
-                "tokenizer": tokenizer_name,
+                # Record what the data was actually tokenised with, which is not
+                # necessarily what this invocation asked for.
+                "tokenizer": (
+                    (previous or {}).get("tokenizer", tokenizer_name) if reuse_local else tokenizer_name
+                ),
                 "tokenizer_type": tokenizer_type,
                 "tokenizer_dir": str(tokenizer_dir),
                 "vocab_size": vocab_size,

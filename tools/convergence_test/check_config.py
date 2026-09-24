@@ -289,7 +289,11 @@ def main():
 
     from primus.core.launcher.parser import PrimusParser
 
-    primus_config = PrimusParser().parse(SimpleNamespace(config=args.config))
+    # Configs may hold dataset paths relative to the Primus root, which is what
+    # the trainer uses as its cwd. Match that so existence checks agree.
+    config_path = Path(args.config).resolve()
+    os.chdir(PRIMUS_PATH)
+    primus_config = PrimusParser().parse(SimpleNamespace(config=str(config_path)))
     cfg = primus_config.get_module_config("pre_trainer")
 
     manifest = check_data(cfg)

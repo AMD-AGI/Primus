@@ -234,10 +234,17 @@ def write_csv(path, train, valid):
             writer.writerow(row)
 
 
-def x_values(records, mode, seq_length):
-    if mode == "tokens" and seq_length:
-        return [r.get("consumed_samples", r["iteration"]) * seq_length / 1e9 for r in records]
-    return [r["iteration"] for r in records]
+def x_values(iterations, mode, seq_length, gbs):
+    """Map iteration numbers onto the chosen x-axis.
+
+    Deliberately derived from the iteration number rather than looked up in the
+    train records: validation happens at iterations that are not necessarily
+    logged (eval_interval need not be a multiple of log_interval), and those
+    points would otherwise be silently dropped.
+    """
+    if mode == "tokens" and seq_length and gbs:
+        return [i * gbs * seq_length / 1e9 for i in iterations]
+    return list(iterations)
 
 
 def plot(runs, labels, out_prefix, mode, seq_length, detailed):
@@ -253,37 +260,35 @@ def plot(runs, labels, out_prefix, mode, seq_length, detailed):
 
     for index, ((train, valid), label) in enumerate(zip(runs, labels)):
         colour = f"C{index}"
+        gbs = train[-1].get("global_batch_size")
         axes[0].plot(
-            x_values(train, mode, seq_length),
+            x_values([r["iteration"] for r in train], mode, seq_length, gbs),
             [r.get("loss") for r in train],
             lw=1.3,
             color=colour,
             label=f"{label} train",
         )
         if valid:
-            by_iter = {r["iteration"]: r for r in train}
-            vx = [by_iter[v["iteration"]] for v in valid if v["iteration"] in by_iter]
-            if vx:
-                axes[0].plot(
-                    x_values(vx, mode, seq_length),
-                    [v["loss"] for v in valid if v["iteration"] in by_iter],
-                    "o--",
-                    ms=3.5,
-                    lw=1.0,
-                    color=colour,
-                    alpha=0.75,
-                    label=f"{label} valid",
-                )
+            axes[0].plot(
+                x_values([v["iteration"] for v in valid], mode, seq_length, gbs),
+                [v["loss"] for v in valid],
+                "o--",
+                ms=3.5,
+                lw=1.0,
+                color=colour,
+                alpha=0.75,
+                label=f"{label} valid",
+            )
         if detailed:
             for axis, key, title in (
                 (axes[1], "lr", "learning rate"),
                 (axes[2], "grad_norm", "grad norm"),
                 (axes[3], "tokens_s_gpu", "tokens/s/GPU"),
             ):
-                series = [(r, r[key]) for r in train if key in r]
+                series = [(r["iteration"], r[key]) for r in train if key in r]
                 if series:
                     axis.plot(
-                        x_values([r for r, _ in series], mode, seq_length),
+                        x_values([i for i, _ in series], mode, seq_length, gbs),
                         [v for _, v in series],
                         lw=1.2,
                         color=colour,
@@ -343,6 +348,8 @@ def main():
     labels = args.labels or [Path(p).name for p in args.logs]
     if len(labels) != len(args.logs):
         raise SystemExit("--labels must give one label per log")
+    if args.x == "tokens" and not args.seq_length:
+        print("[plot-loss] --x tokens needs --seq-length; falling back to iterations")
 
     selected = []
     for source, label in zip(args.logs, labels):

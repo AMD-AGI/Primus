@@ -102,6 +102,27 @@ fi
 cd "${PRIMUS_PATH}"
 
 # ---------------------------------------------------------------------------
+# Host prerequisites. Training runs in the container image, but dataset
+# preparation, linting and plotting all run here on the host, so fail now
+# rather than three hours from now.
+# ---------------------------------------------------------------------------
+if ! python3 - <<'PY'
+import importlib.util, sys
+required = ["yaml", "numpy", "torch", "transformers", "datasets"]
+missing = [m for m in required if importlib.util.find_spec(m) is None]
+if missing:
+    print("error: the host python is missing: " + ", ".join(missing), file=sys.stderr)
+    print("       pip install " + " ".join(missing), file=sys.stderr)
+    sys.exit(1)
+if importlib.util.find_spec("matplotlib") is None:
+    print("[convergence] note: matplotlib missing, only CSV output will be produced",
+          file=sys.stderr)
+PY
+then
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Resolve the fields we need out of the fully merged config (module preset +
 # model preset + overrides), exactly as the trainer would see them.
 # ---------------------------------------------------------------------------
@@ -189,11 +210,13 @@ if [[ "${PLOT_ONLY}" -eq 0 ]]; then
     CLI=(./primus-cli container --env "PRIMUS_CONVERGENCE_DATA=${DATA_DIR}")
     [[ -n "${IMAGE}" ]] && CLI+=(--image "${IMAGE}")
     CLI+=(-- train pretrain --config "${CONFIG}")
-    [[ -n "${TRAIN_ITERS}" ]] && CLI+=(--train_iters "${TRAIN_ITERS}" --lr_decay_iters "${TRAIN_ITERS}")
     if [[ -n "${PROBE}" ]]; then
         # A probe only measures speed: skip validation, and log every iteration
-        # so there are enough timing samples to take a median from.
+        # so there are enough timing samples to take a median from. --probe wins
+        # over --train-iters; passing both would duplicate --train_iters.
         CLI+=(--train_iters "${PROBE}" --eval_iters 0 --eval_interval 100000000 --log_interval 1)
+    elif [[ -n "${TRAIN_ITERS}" ]]; then
+        CLI+=(--train_iters "${TRAIN_ITERS}" --lr_decay_iters "${TRAIN_ITERS}")
     fi
     CLI+=("${EXTRA[@]+"${EXTRA[@]}"}")
 
@@ -231,4 +254,11 @@ PLOT_ARGS=("${EXP_DIR}" --out "${LOG_DIR}/${EXP_NAME}" --seq-length "${SEQ}" --d
 [[ -f "${DATA_DIR}/dataset_info.json" ]] && PLOT_ARGS+=(--dataset-info "${DATA_DIR}/dataset_info.json")
 [[ -n "${BUDGET_HOURS}" ]] && PLOT_ARGS+=(--budget-hours "${BUDGET_HOURS}")
 [[ -n "${WALL_CLOCK_MIN:-}" ]] && PLOT_ARGS+=(--wall-clock-min "${WALL_CLOCK_MIN}")
-python3 "${TOOL_DIR}/plot_loss.py" "${PLOT_ARGS[@]}"
+
+# Plotting is a post-processing convenience. A missing matplotlib must not make
+# a training run that already finished look like a failure.
+if ! python3 "${TOOL_DIR}/plot_loss.py" "${PLOT_ARGS[@]}"; then
+    echo "[convergence] plotting failed; the run itself is unaffected." >&2
+    echo "[convergence] re-plot later with:" >&2
+    echo "  python3 ${TOOL_DIR}/plot_loss.py ${EXP_DIR}" >&2
+fi

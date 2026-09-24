@@ -24,8 +24,28 @@ tools/convergence_test/run_convergence_test.sh --model mixtral_8x7B_v0.1
 ```
 
 That single command builds the dataset, lints the config, trains, and writes a
-loss curve to `output/convergence/`. No Hugging Face token is required: the
-corpus and all default tokenizers are ungated.
+loss curve to `output/convergence/`.
+
+**Gated tokenizers.** Most Llama presets point at gated `meta-llama` repos. For
+those, accept the licence on huggingface.co with an account that has access and
+export a token before preparing the dataset:
+
+```bash
+export HF_TOKEN=hf_...
+```
+
+Only dataset preparation needs it. `prepare_dataset.py` saves the tokenizer
+into the dataset directory and the configs point at that local copy, so
+training itself never touches the Hub. If you would rather not deal with
+gating, `--tokenizer <repo-or-path>` substitutes any equivalent vocabulary.
+
+## Requirements
+
+Training happens inside the container image, but **the three helper scripts run
+on the host**, so the host python needs `numpy`, `torch`, `transformers`,
+`datasets` and `pyyaml`, plus `matplotlib` for plots. The driver checks this
+before doing anything. `--image` changes only the training environment; it has
+no effect on dataset preparation.
 
 To find out how many iterations fit in a time budget before committing:
 
@@ -72,11 +92,16 @@ Roughly 6.5M tokens/s on a 48-core host, so 600M tokens takes about 3 minutes.
 Storage is 2 bytes/token for vocabularies under 65500 and 4 bytes otherwise, so
 600M Mixtral tokens is 1.2 GB but 600M Llama-3 tokens is 2.4 GB.
 
-Some model presets point at gated or non-existent repos (`llama3.2_1B.yaml`
-asks for `meta-llama/Meta-Llama-3.2-1B`, which is not a real repo name — nobody
-notices because `mock_data` swaps in `NullTokenizer`). Known cases are mapped to
-ungated mirrors with identical vocabularies; add to `TOKENIZER_MIRRORS` as
-needed, or pass `--tokenizer` explicitly.
+A couple of presets name repos that do not exist at all: `llama3.2_1B.yaml`
+asks for `meta-llama/Meta-Llama-3.2-1B`, but the real repo drops the `Meta-`
+prefix. Nobody notices because `mock_data` swaps in `NullTokenizer`. Those
+typos are corrected by `TOKENIZER_NAME_FIXES`; the corrected repos are still
+gated and still need `HF_TOKEN`.
+
+If you substitute a tokenizer by hand, use a **base** model, not an instruct
+one. They often differ in `eos_token_id` — `Llama-3.3-70B-Instruct` reports
+`128009` (`<|eot_id|>`) where the base model reports `128001`
+(`<|end_of_text|>`) — and that id is appended to every document as EOD.
 
 > The stock `examples/megatron/prepare.py` cannot do this job: it fetches
 > BookCorpus through a dataset loading script, which `datasets>=3.0` refuses to
