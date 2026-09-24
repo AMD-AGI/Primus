@@ -331,8 +331,11 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
 
         # FP4 / MXFP4, local transformer_impl only. ``fp4`` / ``fp4_recipe`` are
         # Megatron TransformerConfig fields; the mxfp4_* knobs are read by the
-        # Primus-Turbo MXFP4 local linears.
-        if getattr(params, "fp4", None):
+        # Primus-Turbo MXFP4 local linears. ``fp4`` keeps its YAML value: the
+        # MXFP4 linears only run their preshuffle-contract check when
+        # ``config.fp4 == "mxfp4"``.
+        fp4 = getattr(params, "fp4", None)
+        if fp4:
             fp4_recipe = getattr(params, "fp4_recipe", None)
             if not fp4_recipe:
                 raise ValueError(
@@ -341,7 +344,7 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
                 )
             cfg.update(
                 {
-                    "fp4": True,
+                    "fp4": fp4,
                     "fp4_recipe": fp4_recipe,
                     "mxfp4_backward_precision": getattr(params, "mxfp4_backward_precision", "mxfp4"),
                     "mxfp4_gradient_stochastic_rounding": getattr(
