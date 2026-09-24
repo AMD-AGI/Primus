@@ -267,6 +267,20 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
     # Timestep sampling helper
     # ------------------------------------------------------------------
 
+    def first_timestep_at_noise_level(self, noise_level: float) -> int:
+        """Smallest integer timestep whose post-shift sigma is ``>= noise_level``.
+
+        Analytically ``ceil(N * s / (shift - (shift - 1) * s))``, the inverse of
+        the static shift. It is evaluated through :meth:`conditioning_timestep`
+        and compared the way the WAN 2.2 router compares, ``timestep >=
+        boundary_ratio * N``, so a window edge at ``boundary_ratio`` splits the
+        integer timesteps exactly where routing does.
+        """
+        n = self.num_train_timesteps
+        conditioned = self.conditioning_timestep(torch.arange(n, dtype=torch.long))
+        edge = torch.tensor(float(noise_level) * float(n), dtype=conditioned.dtype)
+        return int((conditioned < edge).sum())
+
     def sample_training_timesteps(
         self,
         batch_size: int,
@@ -277,16 +291,27 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
 
         Without ``timestep_window``: uniform over ``[0, num_train_timesteps)``.
 
-        With ``timestep_window=(lo, hi)``: uniform over
-        ``[lo, hi) * num_train_timesteps``. The DiffSynth-style per-expert
-        recipe uses this to train ``transformer`` and ``transformer_2`` in
-        separate jobs.
+        With ``timestep_window=(lo, hi)``: uniform over the integer timesteps
+        whose post-shift sigma lies in ``[lo, hi)``. The DiffSynth-style
+        per-expert recipe uses this to train ``transformer`` and
+        ``transformer_2`` in separate jobs.
+
+        The window is a noise level, the axis ``boundary_ratio`` and the WAN
+        2.2 router work on, not a fraction of the raw index: under shift 5 the
+        raw index ``0.875 * N`` already has sigma ~0.972, so windowing the raw
+        index would train the low-noise expert on a band that routing sends to
+        the high-noise one.
         """
         if timestep_window is None:
             lo, hi = 0, self.num_train_timesteps
         else:
-            lo = int(self.num_train_timesteps * timestep_window[0])
-            hi = max(lo + 1, int(self.num_train_timesteps * timestep_window[1]))
+            lo = self.first_timestep_at_noise_level(timestep_window[0])
+            hi = self.first_timestep_at_noise_level(timestep_window[1])
+            if hi <= lo:
+                raise ValueError(
+                    f"timestep_window {tuple(timestep_window)} holds no integer timestep "
+                    f"at shift={self.shift}, num_train_timesteps={self.num_train_timesteps}"
+                )
 
         return torch.randint(
             low=lo,

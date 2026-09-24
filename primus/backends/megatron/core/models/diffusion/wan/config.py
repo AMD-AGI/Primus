@@ -122,9 +122,10 @@ class WanConfig(BaseDiffusionConfig):
     # the ``stage`` field of the NeMo AutoModel WAN 2.2 preset.
     stage: str = "full"
 
-    # Explicit per-expert training window, as a fraction of the schedule.
-    # Left at the full range unless ``stage`` narrows it; setting both is an
-    # error, since the derived and explicit windows would silently disagree.
+    # Explicit per-expert training window, as a noise level (post-shift sigma),
+    # the axis ``boundary_ratio`` routes on. Left at the full range unless
+    # ``stage`` narrows it; setting both is an error, since the derived and
+    # explicit windows would silently disagree.
     timestep_window_min: float = 0.0
     timestep_window_max: float = 1.0
 
@@ -271,7 +272,7 @@ class WanConfig(BaseDiffusionConfig):
 
     @property
     def timestep_window(self) -> Tuple[float, float]:
-        """Training timestep window as a fraction of the schedule."""
+        """Training window as a noise level (post-shift sigma)."""
         return (self.timestep_window_min, self.timestep_window_max)
 
     # ------------------------------------------------------------------

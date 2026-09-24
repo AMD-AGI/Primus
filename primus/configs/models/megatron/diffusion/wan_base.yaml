@@ -74,6 +74,8 @@ boundary_ratio: null         # set in (0, 1) for WAN 2.2 A14B dual-expert
 # boundary_ratio, so setting an explicit window as well is an error.
 stage: full
 
+# Training window as a noise level (post-shift sigma), the axis boundary_ratio
+# routes on.
 timestep_window_min: 0.0
 timestep_window_max: 1.0
 

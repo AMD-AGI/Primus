@@ -35,8 +35,9 @@ def wan_forward_step_func(
         data_iterator: Iterator yielding ``EncodedWanTaskEncoder`` batches.
         model: ``Wan`` or ``Wan2_2`` instance.
         scheduler: ``WanFlowMatchScheduler``.
-        timestep_window: Optional ``(lo, hi)`` in ``[0, 1]`` restricting sampled
-            timesteps to a sub-window, for training one WAN 2.2 expert per job.
+        timestep_window: Optional ``(lo, hi)`` noise-level window in ``[0, 1]``
+            restricting sampled timesteps, for training one WAN 2.2 expert per
+            job.
         boundary_timestep: Optional WAN 2.2 routing boundary in post-shift
             timestep space. Ignored by single-transformer ``Wan``.
         loss_weighting: ``"diffsynth"`` for the scheduler's per-timestep weight,
