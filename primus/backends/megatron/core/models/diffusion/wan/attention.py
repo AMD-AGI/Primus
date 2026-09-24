@@ -35,7 +35,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from torch import Tensor
 
-from .layers import thd_cu_seqlens, unfused_fp32_attention
+from .layers import thd_cu_seqlens
 
 
 @dataclass
@@ -87,7 +87,6 @@ class WanAttentionBase(MegatronModule):
         # packs when asked, because Turbo's varlen kernel is a different kernel
         # and the two are worth comparing rather than swapping silently.
         self.local_thd = self.local and os.environ.get("PRIMUS_WAN_THD_ATTN", "0") == "1"
-        self.use_fp32_attention = getattr(config, "use_fp32_attention", False)
         self.num_heads = config.num_attention_heads
         self.head_dim = config.kv_channels
         self.inner_dim = self.num_heads * self.head_dim
@@ -142,9 +141,7 @@ class WanAttentionBase(MegatronModule):
         return tensor.transpose(0, 1).reshape(batch * seq_len, heads, head_dim).contiguous()
 
     def _core(self, query, key, value, packed_seq_params=None) -> Tensor:
-        """Run the attention core, honouring the fp32 parity path."""
-        if self.use_fp32_attention and query.dtype == torch.float32:
-            return unfused_fp32_attention(query, key, value, packed_seq_params).to(query.dtype)
+        """Run the attention core."""
         return self.core_attention(
             query,
             key,
