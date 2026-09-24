@@ -63,6 +63,41 @@ def test_full_window_is_the_whole_schedule():
     assert scheduler.first_timestep_at_noise_level(1.0) == N
 
 
+@pytest.mark.parametrize("window", [(0.0, BOUNDARY), (BOUNDARY, 1.0), (0.2, 0.6)])
+def test_memoized_bounds_match_the_edges(window, monkeypatch):
+    scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=5.0)
+    expected = tuple(scheduler.first_timestep_at_noise_level(edge) for edge in window)
+
+    assert scheduler.timestep_bounds(window) == expected
+
+    def recomputed(_):
+        raise AssertionError("the bounds were recomputed")
+
+    monkeypatch.setattr(scheduler, "first_timestep_at_noise_level", recomputed)
+    assert scheduler.timestep_bounds(window) == expected
+    assert scheduler.sample_training_timesteps(64, torch.device("cpu"), window).min() >= expected[0]
+
+
+def test_memoized_bounds_follow_a_shift_change():
+    scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=5.0)
+    at_five = scheduler.timestep_bounds((0.0, BOUNDARY))
+
+    scheduler.shift = 3.0
+
+    assert scheduler.timestep_bounds((0.0, BOUNDARY)) == (
+        0,
+        scheduler.first_timestep_at_noise_level(BOUNDARY),
+    )
+    assert scheduler.timestep_bounds((0.0, BOUNDARY)) != at_five
+
+
+def test_an_empty_window_is_rejected():
+    scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=5.0)
+
+    with pytest.raises(ValueError, match="holds no integer timestep"):
+        scheduler.timestep_bounds((0.5, 0.5))
+
+
 @pytest.mark.parametrize("stage", ["high_noise", "low_noise"])
 def test_per_expert_stage_rejects_dual_transformer(stage):
     """Both experts would load the stage's weights from backbone_subfolder."""
