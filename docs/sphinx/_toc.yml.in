@@ -108,6 +108,8 @@ subtrees:
         title: Native SFT LoRA
       - file: 04-technical-guides/LoRA_Native_Trainer_MI455_README.md
         title: Native SFT LoRA on MI455X
+      - file: 04-technical-guides/Gemma4_Bridge_MI455X_README.md
+        title: Gemma 4 pre-training on MI455X
       - file: 04-technical-guides/hybrid-models/README.md
         title: Hybrid recurrent-attention models
         subtrees:

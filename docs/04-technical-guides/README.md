@@ -20,6 +20,7 @@ Deep technical topics for advanced users.
 - [Hybrid models](hybrid-models/README.md): Zebra-Llama hybrid recurrent-attention (Mamba/KDA/GDN + MLA) models, FLA-parity recipes, and checkpoint conversion
 - [Native SFT and LoRA](native-sft-lora.md): Megatron-native SFT/LoRA runbook (BF16 / FP8 / FP4), no Megatron-Bridge dependency
 - [Native SFT LoRA on MI455X](LoRA_Native_Trainer_MI455_README.md): 1-GPU gfx1250 recipes (Llama-3.2-1B + 70B/72B/235B proxies)
+- [Gemma 4 pre-training on MI455X](Gemma4_Bridge_MI455X_README.md): 1-GPU gfx1250 Megatron-Bridge proxies (26B MoE + 31B dense), hipBLASLt Tensile fix
 
 ---
 
