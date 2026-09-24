@@ -1,0 +1,100 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3.2_1B-convergence}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Llama-3.2-1B BF16 convergence test on FineWeb-Edu.
+#
+#   tools/convergence_test/run_convergence_test.sh --model llama3.2_1B
+#
+# 2000 iters x 128 x 4096 = 1.05B tokens. Measured on 8x MI325X at 1.33 s/iter
+# (49.2k tokens/s/GPU), so about 45 minutes. The reference curve this produces
+# is lm loss 12.15 -> 3.29 with validation tracking training closely.
+#
+# PRIMUS_CONVERGENCE_DATA is exported by run_convergence_test.sh. The default
+# below matches prepare_dataset.py's own default output directory, and is
+# relative to the Primus root (the trainer always runs with that as its cwd).
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: llama3.2_1B.yaml
+    overrides:
+      # log
+      disable_tensorboard: false
+      # Megatron's per-iteration line is emitted at DEBUG by Primus; at INFO the
+      # loss only reaches logs/.../rank-<last>/debug.log.
+      stderr_sink_level: DEBUG
+      log_interval: 10
+      log_throughput: true
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      train_iters: 2000
+      micro_batch_size: 4
+      global_batch_size: 128
+
+      seq_length: 4096
+      max_position_embeddings: 4096
+
+      # Convergence-oriented schedule. The stock perf configs use lr 1e-5 with a
+      # 2-iteration warmup, which barely moves the loss.
+      lr: 3.0e-4
+      min_lr: 3.0e-5
+      lr_warmup_iters: 100
+      lr_decay_iters: 2000
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      clip_grad: 1.0
+      eod_mask_loss: true
+      init_method_std: 0.02
+      norm_epsilon: 1.0e-5
+
+      # parallel
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: false
+      # The model preset asks for meta-llama/Meta-Llama-3.2-1B, which is not a
+      # real repo; prepare_dataset.py substitutes the NousResearch mirror and
+      # saves it here, so point the trainer at the saved copy.
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-llama-3.2-1b}/tokenizer
+      train_data_path:
+        - ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-llama-3.2-1b}/train_text_document
+      valid_data_path:
+        - ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-llama-3.2-1b}/valid_text_document
+      test_data_path:
+        - ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-llama-3.2-1b}/valid_text_document
+      data_cache_path: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-llama-3.2-1b}/cache
+      # split must stay null: it is incompatible with explicit per-split paths.
+      split: null
+      dataloader_type: single
+      num_workers: 8
+
+      # validation loss every 100 iterations
+      eval_interval: 100
+      eval_iters: 20
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_gemm: true

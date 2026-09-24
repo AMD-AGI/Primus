@@ -1,0 +1,127 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:mixtral_8x7B_v0.1-convergence}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Mixtral-8x7B BF16 convergence test on FineWeb-Edu, tokenised with the Mixtral
+# 32k SentencePiece vocab.
+#
+#   tools/convergence_test/run_convergence_test.sh --model mixtral_8x7B_v0.1
+#
+# 300 iters x 128 x 4096 = 157M tokens. Measured on 8x MI325X the step time
+# falls from ~31 s to ~23 s over the first 50 iterations as the router balances,
+# so expect roughly 2h10m end to end. Reference: lm loss 10.52 -> 7.17 by
+# iteration 50.
+#
+# Read the MoE block below before changing any Turbo setting.
+
+modules:
+  pre_trainer:
+    config: pre_trainer.yaml
+    framework: megatron
+    model: mixtral_8x7B_v0.1.yaml
+    overrides:
+      # log
+      disable_tensorboard: false
+      # Megatron's per-iteration line is emitted at DEBUG by Primus; at INFO the
+      # loss only reaches logs/.../rank-<last>/debug.log.
+      stderr_sink_level: DEBUG
+      log_interval: 5
+      log_throughput: true
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # ---------------------------------------------------------------------
+      # MoE: the perf configs pair force_load_balancing with the Turbo MoE fast
+      # paths, and that combination cannot be used for convergence.
+      #
+      #   moe_router_force_load_balancing feeds the router *random* logits
+      #   (Megatron calls it benchmark-only), so the router never learns.
+      #
+      #   With real routing, use_turbo_deepep produced Inf gradients at
+      #   iteration 3 on every attempt; the alltoall dispatcher is stable. That
+      #   is why this runs at ~2.1-2.8k instead of ~6k tokens/s/GPU. Re-test
+      #   DeepEP before trusting it here.
+      # ---------------------------------------------------------------------
+      moe_router_force_load_balancing: false
+      moe_router_dtype: fp32
+      use_turbo_deepep: false
+      turbo_sync_free_moe_stage: 0
+      moe_use_legacy_grouped_gemm: false
+      moe_shared_expert_overlap: false
+
+      # hyper parameters
+      train_iters: 300
+      micro_batch_size: 1
+      global_batch_size: 128
+      seq_length: 4096
+      max_position_embeddings: 4096
+
+      # Convergence-oriented schedule; the perf configs use lr 1e-5 with a
+      # 2-iteration warmup, which barely moves the loss.
+      lr: 1.5e-4
+      min_lr: 1.5e-5
+      lr_warmup_iters: 20
+      # Must track train_iters: past lr_decay_iters the scheduler pins the lr at
+      # min_lr, so a longer run would spend its tail at a flat 1.5e-5.
+      lr_decay_iters: 300
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      clip_grad: 1.0
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-5
+
+      # Peak HBM is 88% at mbs 1 and 95% at mbs 2 on MI325X. Keep the headroom:
+      # per-expert buffers grow as routing becomes less balanced.
+      recompute_activations: true
+      recompute_granularity: selective
+
+      # parallel
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 8
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: false
+      tokenizer_type: MixtralTokenizer
+      tokenizer_model: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-mixtral-8x7b-v0.1}/tokenizer
+      train_data_path:
+        - ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-mixtral-8x7b-v0.1}/train_text_document
+      valid_data_path:
+        - ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-mixtral-8x7b-v0.1}/valid_text_document
+      test_data_path:
+        - ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-mixtral-8x7b-v0.1}/valid_text_document
+      data_cache_path: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-mixtral-8x7b-v0.1}/cache
+      # split must stay null: it is incompatible with explicit per-split paths.
+      split: null
+      dataloader_type: single
+      num_workers: 8
+
+      # validation loss every 25 iterations (~4 min of extra wall clock in total)
+      eval_interval: 25
+      eval_iters: 2
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # Cross entropy: fusion left off because it was never cleared of blame for
+      # the Inf above. Worth re-testing for a few percent once DeepEP is fixed.
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: false
+
+      # Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_gemm: false
