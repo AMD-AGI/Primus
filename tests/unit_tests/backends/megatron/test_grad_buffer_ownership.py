@@ -254,6 +254,20 @@ class TestIsEnabled:
 
         assert gbo._is_enabled(ctx=None) is False
 
+    @pytest.mark.parametrize("graph_flag", ["enable_cuda_graph", "external_cuda_graph"])
+    def test_false_for_cuda_graph_configuration(self, monkeypatch, graph_flag):
+        monkeypatch.setattr(gbo, "_DISABLED", False)
+        args = SimpleNamespace(gradient_accumulation_fusion=True)
+        setattr(args, graph_flag, True)
+        monkeypatch.setattr(gbo, "get_args", lambda ctx: args)
+        monkeypatch.setattr(
+            gbo,
+            "is_primus_turbo_can_patch",
+            lambda ctx: pytest.fail("must short-circuit before Turbo patch check"),
+        )
+
+        assert gbo._is_enabled(ctx=None) is False
+
     def test_false_when_turbo_cannot_patch(self, monkeypatch):
         monkeypatch.setattr(gbo, "_DISABLED", False)
         monkeypatch.setattr(gbo, "get_args", lambda ctx: SimpleNamespace(gradient_accumulation_fusion=True))

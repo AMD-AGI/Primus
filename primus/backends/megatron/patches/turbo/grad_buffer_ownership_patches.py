@@ -31,6 +31,8 @@ What makes the skip safe:
   activation recompute and staged forwards cannot leave a forward-time claim.
 - An empty log means "zero everything". Iteration 0 has nothing logged, as do
   configurations where no overwrite-capable producer runs.
+- CUDA-graph configurations do not install this consumer: Python ownership
+  recording is not replayed with captured backward kernels.
 - A claim is honoured only when the parameter's ``main_grad`` is exactly the
   contiguous ``[start, end)`` the buffer's own index map assigns it, matched by
   address, element count, and dtype. Inter-parameter alignment padding and the padding
@@ -82,6 +84,12 @@ def _is_enabled(ctx: PatchContext) -> bool:
     if _DISABLED:
         return False
     args = get_args(ctx)
+
+    # Ownership recording happens in Python after the beta=0 custom op and is
+    # therefore not replayed by CUDA graphs. Keep full framework clearing for
+    # any configured graph mode.
+    if bool(getattr(args, "enable_cuda_graph", False)) or bool(getattr(args, "external_cuda_graph", False)):
+        return False
 
     # The claim this patch trusts is only ever recorded by the fused wgrad path.
     if not bool(getattr(args, "gradient_accumulation_fusion", False)):
