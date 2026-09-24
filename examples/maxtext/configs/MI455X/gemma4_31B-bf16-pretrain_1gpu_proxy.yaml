@@ -58,8 +58,11 @@ modules:
       base_num_query_heads: ${PRIMUS_Q_HEADS:32}
       base_num_kv_heads: ${PRIMUS_KV_HEADS:16}
       global_num_kv_heads: ${PRIMUS_GLOBAL_KV:4}
-      # Full 262144×5376 bf16 embedding is 2.62 GiB and HSA-faults (>2 GiB
-      # single buffer). Override for 1-GPU bring-up; default stays 262144.
+      # On gfx1250 with current XLA plugins, stores past 2 GiB into one buffer
+      # wrap 4 GiB lower: the full 262144×5376 bf16 embedding faults at init,
+      # and its f32 AdamW temp silently corrupts other buffers. Set
+      # vocab_size <= 99864 (e.g. 65536) for 1-GPU bring-up until the plugin
+      # is fixed; default stays 262144.
       vocab_size: ${PRIMUS_VOCAB_SIZE:262144}
 
       base_num_decoder_layers: ${PRIMUS_NUM_LAYERS:6}

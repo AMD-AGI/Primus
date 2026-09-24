@@ -56,6 +56,14 @@ modules:
       scan_layers: false
       # Only for NaN-debug runs that must keep stepping after a NaN loss.
       abort_on_nan_loss: ${PRIMUS_ABORT_ON_NAN_LOSS:true}
+      learning_rate: ${PRIMUS_LR:3e-05}
+      adam_weight_decay: ${PRIMUS_ADAM_WD:0.1}
+      opt_type: ${PRIMUS_OPT_TYPE:adamw}
+      # On gfx1250 with current XLA plugins, stores past 2 GiB into one buffer
+      # wrap 4 GiB lower and silently corrupt other buffers. The 262144×2816
+      # embedding's f32 AdamW temp is over 2 GiB; set vocab_size <= 190650
+      # (e.g. 131072) for 1-GPU bring-up until the plugin is fixed.
+      vocab_size: ${PRIMUS_VOCAB_SIZE:262144}
 
       # One 5+1 attention block. Override_model_config is true in model_base.
       base_num_decoder_layers: ${PRIMUS_NUM_LAYERS:6}

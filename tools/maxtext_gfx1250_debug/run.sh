@@ -11,6 +11,7 @@
 #       1-layer Gemma 4 31B-width MaxText run, vocab 131072, lr=0, wd=0, 3 steps,
 #       with PRIMUS_MAXTEXT_OPT_DEBUG on. Log: $OUT/<name>.log, arrays: $OUT/<name>/.
 #       Extra args are passed to docker run, e.g. -e PRIMUS_LR=3e-5 -e DUMP_HLO=1.
+#       CONFIG selects another Primus config (path relative to the Primus root).
 #
 #   IMAGE=<jax gfx1250 image> run.sh probe <script.py> [extra docker args...]
 #       Run one of the standalone probes in this directory. Log: $OUT/<script>.log.
@@ -61,11 +62,9 @@ case "$MODE" in
       -e PRIMUS_ABORT_ON_NAN_LOSS=false \
       -e PRIMUS_MAXTEXT_OPT_DEBUG=1 -e PRIMUS_MAXTEXT_OPT_DEBUG_DUMP=/dump \
       "$@" \
-      "$IMAGE" bash -lc '
-        cd /workspace/primus
-        ./primus-cli direct -- train pretrain \
-          --config examples/maxtext/configs/MI455X/gemma4_31B-bf16-pretrain_1gpu_proxy.yaml
-      ' >"$LOG" 2>&1
+      "$IMAGE" bash -lc 'cd /workspace/primus && ./primus-cli direct -- train pretrain --config "$1"' \
+      _ "${CONFIG:-examples/maxtext/configs/MI455X/gemma4_31B-bf16-pretrain_1gpu_proxy.yaml}" \
+      >"$LOG" 2>&1
     rc=$?
     ;;
   probe)
