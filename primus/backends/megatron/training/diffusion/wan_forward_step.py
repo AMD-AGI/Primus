@@ -45,7 +45,7 @@ def wan_forward_step_func(
 
     Returns:
         Tuple ``(noise_pred, clean_latents, noise, target, weight, loss_mask,
-        metrics, is_validation)``.
+        metrics)``.
     """
     from megatron.core.parallel_state import (
         get_pipeline_model_parallel_rank,
@@ -59,13 +59,20 @@ def wan_forward_step_func(
         if pp_rank not in (0, pp_size - 1):
             # WAN enforces PP=1, but stay harmless on PP middle ranks.
             dummy = torch.tensor(0.0, device="cuda", requires_grad=True)
-            return dummy, dummy, dummy, dummy, dummy, None, {}, False
+            return dummy, dummy, dummy, dummy, dummy, None, {}
 
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size != 1:
         raise RuntimeError(
             f"WAN requires tensor_model_parallel_size=1, got tp_size={tp_size}. "
             "WanConfig.validate() enforces this; this is a defense-in-depth check."
+        )
+
+    if not model.training:
+        raise RuntimeError(
+            "WAN has no validation path: every step draws random training timesteps, "
+            "so an eval pass would report a training loss. WanPretrainTrainer rejects "
+            "eval_iters > 0; this is a defense-in-depth check."
         )
 
     if model.config.bf16:
@@ -99,7 +106,6 @@ def wan_forward_step_func(
     latents = batch["latents"]
     encoder_hidden_states = batch["encoder_hidden_states"]
     loss_mask = batch.get("loss_mask")
-    is_validation = "timestep" in batch and batch.get("validation", False)
 
     with torch.no_grad():
         if "noise" in batch and isinstance(batch["noise"], torch.Tensor):
@@ -107,14 +113,11 @@ def wan_forward_step_func(
         else:
             noise = torch.randn_like(latents, dtype=compute_dtype)
 
-        if is_validation and "timestep" in batch:
-            timesteps = batch["timestep"].to(device="cuda", dtype=torch.long)
-        else:
-            timesteps = scheduler.sample_training_timesteps(
-                batch_size=latents.shape[0],
-                device=latents.device,
-                timestep_window=timestep_window,
-            )
+        timesteps = scheduler.sample_training_timesteps(
+            batch_size=latents.shape[0],
+            device=latents.device,
+            timestep_window=timestep_window,
+        )
 
         noisy_latents = scheduler.add_noise(latents, noise, timesteps)
         target = scheduler.training_target(latents, noise, timesteps)
@@ -167,7 +170,6 @@ def wan_forward_step_func(
         weight,
         loss_mask,
         metrics,
-        is_validation,
     )
 
 

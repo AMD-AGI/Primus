@@ -36,6 +36,7 @@ class _RecordingModel:
 
     def __init__(self, dtype: torch.dtype):
         self.config = types.SimpleNamespace(bf16=True, fp16=False, params_dtype=dtype)
+        self.training = True
         self.autocast_enabled: Optional[bool] = None
         self.autocast_dtype: Optional[torch.dtype] = None
         self.input_dtype: Optional[torch.dtype] = None

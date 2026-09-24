@@ -575,7 +575,6 @@ class MockWanDataset(Dataset):
         seed: Optional[int] = None,
         dtype: torch.dtype = torch.bfloat16,
         device: str = "cpu",
-        is_validation: bool = False,
         **kwargs,
     ):
         """
@@ -592,7 +591,6 @@ class MockWanDataset(Dataset):
             seed: Random seed for reproducibility
             dtype: Data type for tensors (default: torch.bfloat16)
             device: Device to create tensors on ('cpu' or 'cuda', default: 'cpu')
-            is_validation: Whether this is a validation dataset (adds fixed timesteps)
         """
         super().__init__()
         self.num_samples = num_samples
@@ -606,7 +604,6 @@ class MockWanDataset(Dataset):
         self.seed = seed if seed is not None else 0
         self.dtype = dtype
         self.device = torch.device(device)
-        self.is_validation = is_validation
 
         logger.info(
             f"Initialized MockWanDataset: {num_samples} samples, "
@@ -651,15 +648,10 @@ class MockWanDataset(Dataset):
             device=self.device,
         )
 
-        sample: Dict[str, torch.Tensor] = {
+        return {
             "latents": latents,
             "encoder_hidden_states": encoder_hidden_states,
         }
-
-        if self.is_validation:
-            sample["timestep"] = torch.tensor(idx % 8)
-
-        return sample
 
 
 class PreGeneratedMockWanDataset(MockWanDataset):
