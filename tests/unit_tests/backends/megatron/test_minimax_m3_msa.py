@@ -130,6 +130,7 @@ class _FakeIndexer:
         self.local_blocks = config.sparse_local_block
 
     _boost_always_visible = MinimaxM3Indexer._boost_always_visible
+    select_from_block_scores = MinimaxM3Indexer.select_from_block_scores
 
 
 def test_block_selection_matches_the_reference():

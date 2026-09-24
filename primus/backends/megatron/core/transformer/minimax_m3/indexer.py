@@ -115,6 +115,17 @@ class MinimaxM3Indexer(MegatronModule):
             eps=config.layernorm_epsilon,
         )
 
+        # The flydsl backend also takes over the scoring, so the [b, n, sq, sk]
+        # score matrix never exists. Its gradient runs through the selected
+        # blocks only, which is all the sparse loss (the one flydsl uses) reads.
+        self.fused_select = None
+        if config.msa_backend == "flydsl":
+            from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_select import (
+                fused_select_blocks,
+            )
+
+            self.fused_select = fused_select_blocks
+
     def _project(self, hidden_states: torch.Tensor, linear, norm, num_heads: int) -> torch.Tensor:
         """``[sq, b, h]`` -> normalised ``[sq, b, num_heads, index_head_dim]``."""
         out = linear(hidden_states)
@@ -155,6 +166,10 @@ class MinimaxM3Indexer(MegatronModule):
                 index_k, rotary_pos_emb, rotary_interleaved=self.config.rotary_interleaved
             )
 
+        if self.fused_select is not None:
+            # [sq, b, n, d] straight in: the kernel never forms the [b, n, sq, sk] scores.
+            return self.fused_select(index_q, index_k, self.select_from_block_scores, self.block_size)
+
         # [sq, b, n, d] -> [b, n, sq, d], and score in fp32 like the reference.
         index_q = index_q.permute(1, 2, 0, 3).float()
         index_k = index_k.permute(1, 2, 0, 3).float()
@@ -181,12 +196,19 @@ class MinimaxM3Indexer(MegatronModule):
         # Max-pool the keys of each block; a block nobody may attend stays -inf,
         # which sorts to the end of top-k and becomes a -1 slot below.
         block_scores = scores.view(b, n_index, sq, n_blocks, self.block_size).amax(dim=-1)
+        return self.select_from_block_scores(block_scores, sq)
 
-        block_scores = self._boost_always_visible(block_scores, sq, n_blocks, device)
+    def select_from_block_scores(
+        self, block_scores: torch.Tensor, sq: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Causally masked block scores ``[b, n, sq, n_blocks]`` -> (top-k block ids,
+        block scores with the always-visible blocks boosted to +inf)."""
+        n_blocks = block_scores.shape[-1]
+        block_scores = self._boost_always_visible(block_scores, sq, n_blocks, block_scores.device)
 
         topk = min(self.topk_blocks, n_blocks)
         topk_scores, block_indices = block_scores.topk(topk, dim=-1)
-        block_indices = block_indices.masked_fill(topk_scores == neg_inf, -1)
+        block_indices = block_indices.masked_fill(topk_scores == float("-inf"), -1)
         return block_indices, block_scores
 
     def _boost_always_visible(
