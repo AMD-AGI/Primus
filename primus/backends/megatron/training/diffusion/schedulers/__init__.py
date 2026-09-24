@@ -8,8 +8,12 @@ from primus.backends.megatron.training.diffusion.schedulers.base import BaseSche
 from primus.backends.megatron.training.diffusion.schedulers.flow_matching import (
     FlowMatchEulerDiscreteScheduler,
 )
+from primus.backends.megatron.training.diffusion.schedulers.wan_flow_matching import (
+    WanFlowMatchScheduler,
+)
 
 __all__ = [
     "BaseScheduler",
     "FlowMatchEulerDiscreteScheduler",
+    "WanFlowMatchScheduler",
 ]
