@@ -198,14 +198,16 @@ def _aligned(d: int) -> int:
       ``cdiv(d, 128)`` is odd, four blocks per logical row have no backing data;
       the quantizer never writes them and the wgrad GEMM then sums whatever the
       allocator left behind. Training stays finite but the gradient norm jumps
-      to ~1e6 at the odd micro-batch sizes that hit this, and varies run to run.
+      to ~1e6 at the token counts that hit this, and varies run to run.
 
     Rounding to 256 clears both: it is a multiple of 16, and ``cdiv(256t, 128)``
     is ``2t``, so every block is backed. Padding is not free -- it costs a full
     ``F.pad`` copy of the operand for every GEMM -- so an axis that already
-    violates neither rule is returned untouched. WAN 1.3B's hidden dims (1536,
-    4608, 8960) and its token counts at even micro-batch sizes all pass, so the
-    common case pads nothing.
+    violates neither rule is returned untouched: ``d`` passes when it is a
+    multiple of 16 and ``cdiv(d, 128)`` is even, i.e. when ``d % 256`` is 0 or
+    above 128. WAN 1.3B's hidden dims (1536, 4608, 8960) pass. Its token axis
+    is ``micro_batch_size * tokens_per_sample``, so whether it pads depends on
+    the micro-batch size, not on its parity.
     """
     if d % 16 == 0 and _cdiv(d, MXFP4_PADDING_ALIGN_SIZE) % 2 == 0:
         return d
