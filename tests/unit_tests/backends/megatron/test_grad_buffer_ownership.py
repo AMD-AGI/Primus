@@ -23,9 +23,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from primus_turbo.pytorch.core import grad_ownership
 
 from primus.backends.megatron.patches.turbo import grad_buffer_ownership_patches as gbo
+
+grad_ownership = pytest.importorskip(
+    "primus_turbo.pytorch.core.grad_ownership",
+    reason="Primus-Turbo is an optional dependency",
+)
 
 
 @pytest.fixture(autouse=True)
