@@ -1740,14 +1740,21 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
 
     def forward_internal(self, x, is_first_microbatch: bool = False):
         """Forward."""
+        norm_weight = self.layer_norm_weight
+        if self.zero_centered_gamma:
+            # TE's LayerNormLinear stores gamma centered on zero (zero init) and
+            # applies (1 + w) in its own forward; both norms below take the scale
+            # verbatim, so the +1 has to happen here or every output is zero.
+            # Same fix as PrimusTurboRMSNorm.forward.
+            norm_weight = norm_weight + 1
         if self.config.normalization == "LayerNorm":
             norm_out = torch.nn.functional.layer_norm(
-                x, [x.size(-1)], self.layer_norm_weight, self.layer_norm_bias, self.eps
+                x, [x.size(-1)], norm_weight, self.layer_norm_bias, self.eps
             )
         elif self.config.normalization == "RMSNorm":
             from primus_turbo.pytorch.ops.normalization import rmsnorm
 
-            norm_out = rmsnorm(x, self.layer_norm_weight, self.eps)
+            norm_out = rmsnorm(x, norm_weight, self.eps)
         else:
             assert False, "Not support normalization type."
 
