@@ -117,7 +117,8 @@ class WanConfig(BaseDiffusionConfig):
     boundary_ratio: Optional[float] = None
 
     # Which expert this job trains. ``full`` covers the whole schedule;
-    # ``high_noise`` / ``low_noise`` derive the timestep window and the weight
+    # ``high_noise`` / ``low_noise`` train one expert per job
+    # (``num_transformers=1``) and derive the timestep window and the weight
     # subfolder from ``boundary_ratio`` so the two cannot disagree. This mirrors
     # the ``stage`` field of the NeMo AutoModel WAN 2.2 preset.
     stage: str = "full"
@@ -221,6 +222,15 @@ class WanConfig(BaseDiffusionConfig):
 
         if self.num_transformers == 2 and self.boundary_ratio is None:
             raise ValueError("WAN 2.2 dual-expert (num_transformers=2) requires boundary_ratio")
+
+        # A per-expert stage rewrites backbone_subfolder, which Wan2_2 also
+        # loads its high-noise expert from, so both experts would get the
+        # stage's weights.
+        if self.stage != "full" and self.num_transformers != 1:
+            raise ValueError(
+                f"stage={self.stage!r} trains one WAN 2.2 expert per job; set "
+                f"num_transformers: 1 (got {self.num_transformers})"
+            )
 
         if self.boundary_ratio is not None and not (0.0 < self.boundary_ratio < 1.0):
             raise ValueError(f"boundary_ratio must be in (0, 1), got {self.boundary_ratio}")
