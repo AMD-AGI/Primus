@@ -70,8 +70,9 @@ num_transformers: 1
 boundary_ratio: null         # set in (0, 1) for WAN 2.2 A14B dual-expert
 
 # Which expert this job trains: full | high_noise | low_noise. Anything other
-# than full derives the timestep window and the weight subfolder from
-# boundary_ratio, so setting an explicit window as well is an error.
+# than full trains one expert per job, so it needs num_transformers: 1, and
+# derives the timestep window and the weight subfolder from boundary_ratio, so
+# setting an explicit window as well is an error.
 stage: full
 
 # Training window as a noise level (post-shift sigma), the axis boundary_ratio

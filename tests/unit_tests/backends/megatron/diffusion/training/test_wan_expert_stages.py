@@ -17,6 +17,7 @@ import math
 import pytest
 import torch
 
+from primus.backends.megatron.core.models.diffusion.wan.config import WanConfig
 from primus.backends.megatron.training.diffusion.schedulers import WanFlowMatchScheduler
 
 BOUNDARY = 0.875
@@ -61,3 +62,23 @@ def test_full_window_is_the_whole_schedule():
     assert scheduler.first_timestep_at_noise_level(0.0) == 0
     assert scheduler.first_timestep_at_noise_level(1.0) == N
 
+
+@pytest.mark.parametrize("stage", ["high_noise", "low_noise"])
+def test_per_expert_stage_rejects_dual_transformer(stage):
+    """Both experts would load the stage's weights from backbone_subfolder."""
+    with pytest.raises(ValueError, match="num_transformers: 1"):
+        WanConfig.wan2_2_t2v_a14b(stage=stage).validate()
+
+
+@pytest.mark.parametrize(
+    "stage, window, subfolder",
+    [
+        ("high_noise", (BOUNDARY, 1.0), "transformer"),
+        ("low_noise", (0.0, BOUNDARY), "transformer_2"),
+    ],
+)
+def test_per_expert_stage_on_one_transformer(stage, window, subfolder):
+    config = WanConfig.wan2_2_t2v_a14b(stage=stage, num_transformers=1)
+    config.validate()
+    assert config.timestep_window == window
+    assert config.backbone_subfolder == subfolder
