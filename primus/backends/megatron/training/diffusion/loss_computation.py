@@ -110,7 +110,9 @@ def compute_weighted_flow_matching_loss(
     Formula: loss = mean(((target - prediction) ** 2) * weight)
 
     Passing ``weight=1.0`` recovers the unweighted objective, which is how
-    the ``uniform`` loss weighting mode is expressed.
+    the ``uniform`` loss weighting mode is expressed. With a ``[batch_size]``
+    mask the result is the mean over the kept samples' elements; the
+    unweighted helper divides that case by the sample count instead.
 
     Args:
         prediction: Model output [any shape]
@@ -148,8 +150,11 @@ def compute_weighted_flow_matching_loss(
     if loss_mask.dim() == 1 and weighted.dim() > 1:
         mask_shape = [loss_mask.shape[0]] + [1] * (weighted.dim() - 1)
         loss_mask = loss_mask.view(*mask_shape)
-    loss_mask = loss_mask.to(dtype=weighted.dtype, device=weighted.device)
+    loss_mask = loss_mask.to(dtype=weighted.dtype, device=weighted.device).expand_as(weighted)
 
+    # Count the mask after broadcasting: a [B] mask covers every latent element
+    # of its sample, so its own sum would give a per-sample, not per-element,
+    # mean. An all-zero mask yields 0 rather than NaN.
     return (weighted * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
 
 

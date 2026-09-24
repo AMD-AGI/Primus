@@ -95,14 +95,37 @@ class TestWeightedFlowMatchingLoss(PrimusUT):
         assert torch.allclose(weighted, unweighted)
 
     def test_unit_weight_recovers_unweighted_loss_under_mask(self):
-        """The equivalence also holds on the masked reduction path."""
+        """The equivalence also holds on the masked reduction path.
+
+        Uses an element-shaped mask: for a [batch] mask the unweighted helper
+        divides by the sample count, which the next test pins separately.
+        """
         prediction, clean, noise, target = self._fixture()
-        loss_mask = torch.tensor([1.0, 0.0])
+        loss_mask = torch.zeros_like(prediction)
+        loss_mask[:, :, :4] = 1.0
 
         weighted = compute_weighted_flow_matching_loss(prediction, target, torch.ones(2), loss_mask)
         unweighted = compute_flow_matching_loss(prediction, clean, noise, loss_mask)
 
         assert torch.allclose(weighted, unweighted)
+
+    def test_per_sample_mask_averages_over_valid_elements(self):
+        """A [batch] mask keeps the loss a per-element mean of the kept samples."""
+        prediction, _, _, target = self._fixture()
+
+        actual = compute_weighted_flow_matching_loss(
+            prediction, target, torch.ones(2), torch.tensor([1.0, 0.0])
+        )
+
+        first = ((target[0].float() - prediction[0].float()) ** 2).mean()
+        assert torch.allclose(actual, first)
+
+    def test_all_zero_mask_gives_zero(self):
+        prediction, _, _, target = self._fixture()
+
+        actual = compute_weighted_flow_matching_loss(prediction, target, torch.ones(2), torch.zeros(2))
+
+        assert actual.item() == 0.0
 
     def test_uniform_weight_scales_the_loss(self):
         """A constant weight scales the squared error linearly."""
