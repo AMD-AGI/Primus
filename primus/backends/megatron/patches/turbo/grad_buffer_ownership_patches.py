@@ -87,9 +87,26 @@ def _is_enabled(ctx: PatchContext) -> bool:
 
     # Ownership recording happens in Python after the beta=0 custom op and is
     # therefore not replayed by CUDA graphs. Keep full framework clearing for
-    # any configured graph mode.
-    if bool(getattr(args, "enable_cuda_graph", False)) or bool(getattr(args, "external_cuda_graph", False)):
-        return False
+    # any configured graph mode. Megatron may expose the graph implementation
+    # directly on args or on a nested model configuration, depending on the
+    # trainer/bridge path.
+    graph_configs = [
+        args,
+        getattr(args, "model_cfg", None),
+        getattr(args, "model_config", None),
+        getattr(args, "model", None),
+    ]
+    for config in graph_configs:
+        if config is None:
+            continue
+        if bool(getattr(config, "enable_cuda_graph", False)) or bool(
+            getattr(config, "external_cuda_graph", False)
+        ):
+            return False
+        graph_impl = getattr(config, "cuda_graph_impl", None)
+        graph_impl = getattr(graph_impl, "value", graph_impl)
+        if graph_impl is not None and str(graph_impl).lower() not in {"", "none", "false"}:
+            return False
 
     # The claim this patch trusts is only ever recorded by the fused wgrad path.
     if not bool(getattr(args, "gradient_accumulation_fusion", False)):

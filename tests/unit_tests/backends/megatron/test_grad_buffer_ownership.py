@@ -285,6 +285,36 @@ class TestIsEnabled:
 
         assert gbo._is_enabled(ctx=None) is False
 
+    @pytest.mark.parametrize("graph_impl", ["local", "transformer_engine"])
+    @pytest.mark.parametrize("config_attr", [None, "model_cfg", "model_config", "model"])
+    def test_false_for_model_level_cuda_graph_implementation(self, monkeypatch, graph_impl, config_attr):
+        monkeypatch.setattr(gbo, "_DISABLED", False)
+        args = SimpleNamespace(gradient_accumulation_fusion=True)
+        if config_attr is None:
+            args.cuda_graph_impl = graph_impl
+        else:
+            setattr(args, config_attr, SimpleNamespace(cuda_graph_impl=graph_impl))
+        monkeypatch.setattr(gbo, "get_args", lambda ctx: args)
+        monkeypatch.setattr(
+            gbo,
+            "is_primus_turbo_can_patch",
+            lambda ctx: pytest.fail("must short-circuit before Turbo patch check"),
+        )
+
+        assert gbo._is_enabled(ctx=None) is False
+
+    @pytest.mark.parametrize("graph_impl", [None, "", "none", False])
+    def test_disabled_cuda_graph_implementation_does_not_block_patch(self, monkeypatch, graph_impl):
+        monkeypatch.setattr(gbo, "_DISABLED", False)
+        args = SimpleNamespace(
+            gradient_accumulation_fusion=True,
+            model_cfg=SimpleNamespace(cuda_graph_impl=graph_impl),
+        )
+        monkeypatch.setattr(gbo, "get_args", lambda ctx: args)
+        monkeypatch.setattr(gbo, "is_primus_turbo_can_patch", lambda ctx: True)
+
+        assert gbo._is_enabled(ctx=None) is True
+
     def test_false_when_turbo_cannot_patch(self, monkeypatch):
         monkeypatch.setattr(gbo, "_DISABLED", False)
         monkeypatch.setattr(gbo, "get_args", lambda ctx: SimpleNamespace(gradient_accumulation_fusion=True))
