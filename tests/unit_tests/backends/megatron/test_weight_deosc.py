@@ -13,6 +13,7 @@ get wrong: DistRatio snap masking, write-back into the local fp32 shard, period
 reset, and checkpoint state round-trip.
 """
 
+import sys
 import types
 
 import pytest
@@ -28,13 +29,33 @@ from primus.backends.megatron.core.optimizer.weight_deosc import (
     qdq_mxfp4_local_shard,
 )
 
+# CPU tests never import primus_turbo's float4 dtype. Pin a sentinel so the
+# eligibility filter can still tell an MXFP4 marker from an FP8 cache.
+_FP4_DTYPE = type("float4_e2m1fn_x2", (), {})()
+_FP8_DTYPE = type("float8_e4m3", (), {})()
+
+
+@pytest.fixture(autouse=True)
+def _fp4_marker_dtype(monkeypatch):
+    monkeypatch.setattr(weight_deosc, "_float4_e2m1fn_x2", _FP4_DTYPE)
+
+
+def _fp4_buffer():
+    return types.SimpleNamespace(dtype=_FP4_DTYPE)
+
+
+def _fp8_buffer():
+    return types.SimpleNamespace(dtype=_FP8_DTYPE)
+
 
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
 class _FakeModule:
-    def __init__(self, weight):
-        self.quantized_weight_buffer = object()  # signal: fp4 forward ran
+    def __init__(self, weight, quantized_weight_buffer=None):
+        self.quantized_weight_buffer = (
+            _fp4_buffer() if quantized_weight_buffer is None else quantized_weight_buffer
+        )
         self._parameters = {"weight": weight}
 
     def modules(self):
@@ -124,7 +145,13 @@ def test_local_shard_qdq_treats_grouped_experts_as_independent_2d_matrices(monke
     q_local = qdq_mxfp4_local_shard(shard, shape, start, end, torch.bfloat16)
 
     assert torch.equal(q_local, shard.to(torch.bfloat16))
-    assert [tuple(tile.shape) for tile in calls] == [(32, 64), (64, 64), (32, 64)]
+    # Boundary experts stay on their own padded tiles. The fully owned middle
+    # expert is one native 3D call, not a per-row 2D tile and not a flatten
+    # that would mix it with its neighbours.
+    assert [tuple(tile.shape) for tile in calls] == [(1, 64, 64), (1, 64, 64), (1, 64, 64)]
+    expert0_len = matrix_numel - start
+    full_expert = shard[expert0_len : expert0_len + matrix_numel].to(torch.bfloat16)
+    assert torch.equal(calls[1], full_expert.view(1, 64, 64))
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +206,10 @@ def test_period_resets_after_snap(monkeypatch):
     assert state.step == 0  # period was reset
     assert torch.all(state.dist_w == 0)
     assert torch.all(state.dist_w_qdq == 0)
+    assert state.prev.dtype == torch.bfloat16
+    assert state.prev_q.dtype == torch.bfloat16
+    assert state.dist_w.dtype == torch.float32
+    assert state.dist_w_qdq.dtype == torch.float32
 
 
 def test_eligibility_excludes_non_fp4_modules(monkeypatch):
@@ -201,7 +232,7 @@ def test_eligibility_collects_dense_and_grouped_fp4_weights():
     grouped_weights = torch.zeros(2, 4, 4)
     dense_module = _FakeModule(dense_weight)
     grouped_module = types.SimpleNamespace(
-        quantized_weight_buffer=object(),
+        quantized_weight_buffer=_fp4_buffer(),
         _parameters={},
         weights=grouped_weights,
     )
@@ -215,6 +246,19 @@ def test_eligibility_collects_dense_and_grouped_fp4_weights():
     eligible_ids = runner._build_eligible_ids(opt)
 
     assert eligible_ids == {id(dense_weight), id(grouped_weights)}
+
+
+def test_eligibility_excludes_fp8_quantized_weights():
+    fp4_weight = torch.zeros(4, 4)
+    fp8_weight = torch.zeros(4, 4)
+    fp4_module = _FakeModule(fp4_weight)
+    fp8_module = _FakeModule(fp8_weight, quantized_weight_buffer=_fp8_buffer())
+    opt = types.SimpleNamespace(model_chunks=[_FakeMultiChunk(fp4_module, fp8_module)])
+
+    runner = WeightDeOscRunner(WeightDeOscConfig(enable=True))
+    eligible_ids = runner._build_eligible_ids(opt)
+
+    assert eligible_ids == {id(fp4_weight)}
 
 
 def test_state_dict_round_trip(monkeypatch):
@@ -245,10 +289,32 @@ def test_state_dict_round_trip(monkeypatch):
     restored = _ParamDeOscState.from_serializable(blob, torch.device("cpu"), shard_main_param)
     assert restored is not None
     assert restored.step == 1  # one tracked step accumulated before save
+    assert restored.prev.dtype == torch.bfloat16
+    assert restored.prev_q.dtype == torch.bfloat16
+    assert restored.dist_w.dtype == torch.float32
 
     # Shape mismatch (resharding) is rejected -> caller re-seeds.
     mismatched = _ParamDeOscState.from_serializable(blob, torch.device("cpu"), torch.zeros(n + 1))
     assert mismatched is None
+
+
+def test_legacy_fp32_snapshot_blob_loads_as_bf16():
+    n = 4
+    blob = {
+        "prev": torch.linspace(0.1, 0.4, n, dtype=torch.float32),
+        "prev_q": torch.linspace(0.2, 0.5, n, dtype=torch.float32),
+        "dist_w": torch.ones(n, dtype=torch.float32),
+        "dist_w_qdq": torch.ones(n, dtype=torch.float32) * 2,
+        "step": 3,
+    }
+    restored = _ParamDeOscState.from_serializable(blob, torch.device("cpu"), torch.zeros(n))
+    assert restored is not None
+    assert restored.prev.dtype == torch.bfloat16
+    assert restored.prev_q.dtype == torch.bfloat16
+    assert restored.dist_w.dtype == torch.float32
+    assert restored.dist_w_qdq.dtype == torch.float32
+    assert restored.step == 3
+    assert torch.equal(restored.prev, blob["prev"].to(torch.bfloat16))
 
 
 def test_precision_aware_detected_by_config():
@@ -274,6 +340,48 @@ def test_standard_fp32_main_is_not_precision_aware():
         shard_fp32_from_float16_groups=[[torch.zeros(4)]],
     )
     assert _uses_precision_aware_main_params(opt) is False
+
+
+def _install_get_args(monkeypatch, get_args):
+    for name in ("megatron", "megatron.training"):
+        sys.modules.setdefault(name, types.ModuleType(name))
+    module = sys.modules.get("megatron.training.global_vars")
+    if module is None:
+        module = types.ModuleType("megatron.training.global_vars")
+        monkeypatch.setitem(sys.modules, "megatron.training.global_vars", module)
+    monkeypatch.setattr(module, "get_args", get_args, raising=False)
+
+
+def test_scale_rounding_mode_prefers_megatron_args(monkeypatch):
+    _install_get_args(monkeypatch, lambda: types.SimpleNamespace(mxfp4_scale_rounding_mode=1))
+    monkeypatch.setenv("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING", "2")
+    assert weight_deosc._forward_scale_rounding_mode() == 1
+
+
+def test_scale_rounding_mode_falls_back_to_env(monkeypatch):
+    def _uninit():
+        raise RuntimeError("args are not initialized")
+
+    _install_get_args(monkeypatch, _uninit)
+    monkeypatch.setenv("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING", "2")
+    assert weight_deosc._forward_scale_rounding_mode() == 2
+    monkeypatch.delenv("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING")
+    assert weight_deosc._forward_scale_rounding_mode() == 0
+
+
+def test_scale_rounding_mode_rejects_unknown_values(monkeypatch):
+    _install_get_args(monkeypatch, lambda: types.SimpleNamespace(mxfp4_scale_rounding_mode=7))
+    with pytest.raises(ValueError, match="must be 0, 1, or 2"):
+        weight_deosc._forward_scale_rounding_mode()
+
+
+def test_local_shard_qdq_return_model_reuses_the_bf16_cast(monkeypatch):
+    monkeypatch.setattr(weight_deosc, "qdq_mxfp4", lambda weight: weight)
+    shard = torch.linspace(0.1, 1.0, 8)
+    q_local, model = qdq_mxfp4_local_shard(shard, (2, 4), 0, 8, torch.bfloat16, return_model=True)
+    assert model.dtype == torch.bfloat16
+    assert torch.equal(model, shard.to(torch.bfloat16))
+    assert torch.equal(q_local, model)
 
 
 def test_disabled_runner_is_noop(monkeypatch):

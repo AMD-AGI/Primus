@@ -10,10 +10,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 HYBRID_GUIDE = ROOT / "docs" / "04-technical-guides" / "hybrid-models" / "README.md"
 
-# Directories that are either deprecated, vendored, or gitignored build output.
+# Directories that are either vendored or gitignored build output.
 SKIPPED_DIRS = {
     ".git",
-    "docs_deprecated",
     "logs",
     "node_modules",
     "output",
@@ -32,6 +31,9 @@ SCRIPT_INVOCATION = re.compile(r"(?:^|[\s(&;|`])(?:bash|sh|source)\s+(?:-\w+\s+)
 
 # Repo-relative references that are knowingly unresolvable.
 ALLOWED_MISSING = {
+    # This command runs after `cd MAD`; it belongs to the external ROCm/MAD
+    # checkout, not this repository.
+    "tools/fetch_primus.sh",
     # Marked "(helper; not committed)" inline: a local calibration helper that
     # is intentionally kept out of the tree.
     "examples/deepseek-v4/projection/script/_calibrate_flash.sh",

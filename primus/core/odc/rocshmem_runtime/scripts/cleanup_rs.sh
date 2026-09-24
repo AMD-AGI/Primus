@@ -12,7 +12,7 @@ ps -eo pid,etimes,comm,args 2>/dev/null \
   | grep -iE 'torchrun|primus/cli|torch.distributed|hipcc|clang|cmake|ninja|llvm|multiprocessing' \
   | grep -vE 'grep|cleanup_rs.sh' || echo "(none before)"
 
-for pat in 'torchrun' 'torch.distributed.run' 'primus/cli' 'run_pretrain.sh' \
+for pat in 'torchrun' 'torch.distributed.run' 'primus/cli' 'primus-cli' \
            'run_odc.sh' 'multiprocessing.spawn' 'multiprocessing.resource_tracker' \
            'hipcc' 'cmake' 'ninja'; do
   pkill -9 -f "$pat" 2>/dev/null

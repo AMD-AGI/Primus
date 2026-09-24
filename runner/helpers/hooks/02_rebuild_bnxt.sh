@@ -7,8 +7,6 @@
 #
 # System hook: optionally rebuild bnxt from a tar package.
 #
-# Equivalent behavior to the legacy logic in examples/run_pretrain.sh.
-#
 # Trigger:
 #   export REBUILD_BNXT=1
 #
@@ -35,7 +33,7 @@ if [[ -z "${PRIMUS_PATH:-}" ]]; then
 fi
 
 if [[ -z "${PATH_TO_BNXT_TAR_PACKAGE}" || ! -f "${PATH_TO_BNXT_TAR_PACKAGE}" ]]; then
-    LOG_INFO_RANK0 "[hook system] Skip bnxt rebuild. REBUILD_BNXT=${REBUILD_BNXT}, PATH_TO_BNXT_TAR_PACKAGE=${PATH_TO_BNXT_TAR_PACKAGE}"
+    LOG_WARN "[hook system] Skip bnxt rebuild: REBUILD_BNXT=${REBUILD_BNXT} but the tar package is unreadable here. PATH_TO_BNXT_TAR_PACKAGE=${PATH_TO_BNXT_TAR_PACKAGE}"
     exit 0
 fi
 

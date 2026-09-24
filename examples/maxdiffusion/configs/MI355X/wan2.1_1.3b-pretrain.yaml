@@ -76,10 +76,11 @@ modules:
       output_dir: "./output/wan2.1_1.3b-pretrain"
       base_output_directory: "./output/wan2.1_1.3b-pretrain"
       max_train_steps: ${MAX_STEPS:20}
-      # Log throughput every step: the perf extractor parses the per-step
-      # "completed step: N, seconds: X, TFLOP/s/device: Y" line. The image
-      # default log_period=100 emits nothing at 20 steps, so perf came back empty
-      # and madengine silently reused a stale CSV.
+      # TensorBoard flush cadence only. The per-step "completed step: ..." line
+      # the perf extractor parses is emitted every step regardless of this value
+      # (primus/backends/maxdiffusion/patches/throughput_patches.py), so keeping
+      # it at 1 only means a 20-step run that is killed early still leaves a
+      # complete event file behind.
       log_period: 1
       # Bound to run.sh's PERF_METRICS_FILE: the trainer writes per-step JSON
       # metrics here (max_utils.write_metrics_locally). This is the reliable perf

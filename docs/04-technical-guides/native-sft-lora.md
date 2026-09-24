@@ -440,6 +440,7 @@ done
 ## 6. References / further reading
 
 - **Post-training overview**: [Post-Training (SFT / LoRA / DPO)](../02-user-guide/posttraining.md)—how this native SFT LoRA path fits into the broader fine-tuning workflow.
+- **MI455X (gfx1250) 1-GPU native LoRA**: [Native SFT LoRA on MI455X](LoRA_Native_Trainer_MI455_README.md)—Llama-3.2-1B plus 70B/72B/235B proxy recipes.
 - **PR #701**—Full implementation of this native SFT stack:
   https://github.com/AMD-AGI/Primus/pull/701
 - **Megatron-LM FP4 design**:

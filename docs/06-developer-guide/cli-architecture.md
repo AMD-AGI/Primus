@@ -2,7 +2,7 @@
 
 > ⚠️ **NOTE**: This is a draft version and not the final release.
 >
-> **Author**: AMD AI Brain - Training at Scale (TAS) Team
+> **Author**: AMD Brain-TIO (Training and Inference Optimization) Team
 > **Published**: 2025-11-10
 > **Tags**: `#ROCm` `#LLM-Training` `#Primus` `#DevTools` `#AMD-GPU`
 
@@ -421,7 +421,7 @@ primus-cli direct -- train pretrain --config deepseek_v2.yaml
 - 🏛 **System Architecture**: [architecture.md](./architecture.md)
 - 🔧 **Quick Start**: `primus-cli --help`
 - 💬 **Issue Reporting**: GitHub Issues
-- 🌐 **ROCm Ecosystem**: [rocm.github.io](https://rocm.github.io)
+- 🌐 **ROCm Ecosystem**: [github.com/ROCm](https://github.com/ROCm)
 
 ---
 

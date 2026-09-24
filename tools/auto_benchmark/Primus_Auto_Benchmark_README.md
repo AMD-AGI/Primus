@@ -325,7 +325,7 @@ Preparing next benchmark...
 4. Temporarily replaces original config with edited/overridden version
 5. Changes to Primus root directory (`/workspace/Primus`) for proper path resolution
 6. Exports `EXP` environment variable pointing to the device-specific config path
-7. Executes `/workspace/Primus/examples/run_pretrain.sh`
+7. Executes `runner/primus-cli direct -- train pretrain --config <exp>`
 8. Streams output to both terminal and timestamped log file
 9. Restores original config file after completion
 10. Shows completion status with log file location
@@ -452,7 +452,8 @@ All output files are organized in the `results/` directory within the auto_bench
 │   │   │   ├── MI300X/           # MI300X-specific TorchTitan configs
 │   │   │   └── MI355X/           # MI355X-specific TorchTitan configs
 │   │   └── prepare.py
-│   └── run_pretrain.sh            # Main benchmark execution script
+├── runner/
+│   └── primus-cli                 # Main benchmark launcher (direct mode)
 └── tools/
     └── auto_benchmark/
         ├── run_primus_autobenchmark.sh
@@ -481,7 +482,7 @@ All output files are organized in the `results/` directory within the auto_bench
    - Copy edited/override config to original location
    - Change to `/workspace/Primus` directory
    - Export `EXP` variable
-   - Execute `run_pretrain.sh`
+   - Execute `runner/primus-cli direct -- train pretrain --config <exp>`
    - Restore original config
    - Save logs to `results/logs_{backend}/`
 8. Generate metrics table using backend-specific script
@@ -568,7 +569,7 @@ For issues or questions:
 2. Verify ROCm installation: `rocminfo`
 3. Ensure device-specific configs exist in proper directories
 4. Verify script is run from `/workspace/Primus/tools/auto_benchmark/`
-5. Check that `run_pretrain.sh` exists in `/workspace/Primus/examples/`
+5. Check that `runner/primus-cli` exists in `/workspace/Primus/runner/`
 6. Review this README for proper usage
 
 ---

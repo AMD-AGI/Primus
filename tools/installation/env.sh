@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # env.sh — Primus venv environment (Python 3.12, ROCm via pip rocm-sdk-devel)
-# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.5
+# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.7
 #
 # Source this both during the build (setup.sh does it) and every time you
 # want to USE the environment:   source env.sh
@@ -35,6 +35,24 @@ esac
 export PRIMUS_BASE
 export VENV_DIR="${VENV_DIR:-$PRIMUS_BASE/venv}"
 export WORKSPACE_DIR="${WORKSPACE_DIR:-$PRIMUS_BASE/workspace}"  # kept checkouts (Primus, etc.)
+
+# Both of the above honour a pre-existing value, so sourcing this file in a shell
+# that already has the JAX stack's env (tools/installation-jax/env.sh) silently
+# keeps ITS paths and installs PyTorch into the JAX venv. Refuse rather than warn:
+# the run looks healthy the whole time and only the wreckage shows up later. Set
+# PRIMUS_ALLOW_FOREIGN_ENV=1 if this is deliberate.
+_primus_foreign_env=""
+_primus_check_inside_base() {  # _primus_check_inside_base <name> <value>
+    case "$2" in
+        "$PRIMUS_BASE"/*) ;;
+        *) _primus_foreign_env="$_primus_foreign_env  $1=$2
+" ;;
+    esac
+}
+_primus_check_inside_base VENV_DIR "$VENV_DIR"
+_primus_check_inside_base WORKSPACE_DIR "$WORKSPACE_DIR"
+# UV_PYTHON_INSTALL_DIR and PRIMUS_PIP_CONSTRAINTS are set further down and get
+# checked there; the verdict is delivered once, at the end of this file.
 # Transient build sources: put on fast LOCAL /tmp (NFS is slow for compile I/O;
 # these dirs are deleted after each build anyway).
 export SRC_DIR="${SRC_DIR:-/tmp/primus-build}"
@@ -44,7 +62,7 @@ export MAX_JOBS="${MAX_JOBS:-128}"
 
 # ---- Python version ----
 # 3.12 is REQUIRED, not a preference. The pinned torch nightly
-# (2.12.0+rocm7.15.0a20260720) published a cp312 Linux wheel and nothing else,
+# (2.12.0+rocm7.15.0a20260727) published a cp312 Linux wheel and nothing else,
 # so this holds even where TransformerEngine is built from source. In wheel mode
 # TE reinforces it: its prebuilt core library `transformer_engine_rocm7` is also
 # cp312-only, with no sdist and no other cp3xx build. See README.md.
@@ -53,6 +71,7 @@ export PRIMUS_PYTHON_VERSION="${PRIMUS_PYTHON_VERSION:-3.12}"
 # than uv's default in ~/.local/share, so the whole environment stays in one
 # place and off whatever quota the home directory has.
 export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$PRIMUS_BASE/python}"
+_primus_check_inside_base UV_PYTHON_INSTALL_DIR "$UV_PYTHON_INSTALL_DIR"
 
 # ---- Target GPU architecture (auto-detected) ----
 # PYTORCH_ROCM_ARCH controls which gfx targets we build and install device
@@ -109,7 +128,7 @@ export HCC_AMDGPU_TARGET="${HCC_AMDGPU_TARGET:-$_ARCH_CSV}"
 export HIP_ARCHITECTURES="${HIP_ARCHITECTURES:-$_ARCH_CSV}"
 
 # GPU_ARCHS is deliberately `native` here, matching the `ENV GPU_ARCHS=native`
-# that v26.5 sets after the last build stage: aiter's JIT has to compile for the
+# that v26.6 sets after the last build stage: aiter's JIT has to compile for the
 # GPU it actually runs on. setup.sh overrides it to the full arch list for the
 # individual build stages that cross-compile.
 export GPU_ARCHS="${GPU_ARCHS:-native}"
@@ -136,6 +155,7 @@ fi
 # libLLVM.so, so an upstream triton (which bundles a second, statically linked
 # LLVM) segfaults on import and takes torch._dynamo/aiter/torchao with it.
 export PRIMUS_PIP_CONSTRAINTS="${PRIMUS_PIP_CONSTRAINTS:-$PRIMUS_BASE/pip-constraints.txt}"
+_primus_check_inside_base PRIMUS_PIP_CONSTRAINTS "$PRIMUS_PIP_CONSTRAINTS"
 
 # Workaround for HSA_STATUS_ERROR_OUT_OF_RESOURCES
 export HSA_ENABLE_SCRATCH_ASYNC_RECLAIM=0
@@ -171,10 +191,10 @@ if [ -n "${_ROCM_SDK:-}" ]; then
 fi
 
 # ---- TransformerEngine tuning ----
-# Only the runtime performance knobs v26.5 keeps. The NVTE_USE_ROCM /
-# NVTE_FRAMEWORK / NVTE_ROCM_ARCH / NVTE_USE_HIPBLASLT vars that v26.4 exported
-# are build-time switches, which is why v26.5 dropped them and why they are not
-# exported here; stage_te_source sets them inline for the duration of its build.
+# Only the runtime performance knobs v26.6 keeps. The NVTE_USE_ROCM /
+# NVTE_FRAMEWORK / NVTE_ROCM_ARCH / NVTE_USE_HIPBLASLT vars that earlier images
+# exported are build-time switches, which is why they are not exported here;
+# stage_te_source sets them inline for the duration of its build.
 export NVTE_USE_CAST_TRANSPOSE_TRITON="${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}"
 export NVTE_CK_USES_FWD_V3="${NVTE_CK_USES_FWD_V3:-1}"
 export NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
@@ -197,12 +217,13 @@ export NVTE_CK_IS_V3_ATOMIC_FP32="${NVTE_CK_IS_V3_ATOMIC_FP32:-$_PRIMUS_CK_ATOMI
 # Required post-v26.2 to resolve Primus attention backend issues
 export NVTE_FLASH_ATTN=0
 export NVTE_FUSED_ATTN=1
+export PRIMUS_FLA_MLA_ATTN="${PRIMUS_FLA_MLA_ATTN:-1}"
 
 # ---- causal-conv1d / mamba ----
 export CAUSAL_CONV1D_FORCE_BUILD=TRUE
 export MAMBA_FORCE_BUILD=TRUE
 
-# libz3.so safety net. v26.5 uninstalls tilelang (the mamba_ssm dep that needs
+# libz3.so safety net. v26.6 uninstalls tilelang (the mamba_ssm dep that needs
 # z3) at the end of the build, so this is normally unused; it stays because the
 # Dockerfile still ships apt libz3-dev and re-installing tilelang by hand should
 # not leave a broken environment behind. pip `z3-solver` supplies the library.
@@ -222,3 +243,21 @@ fi
 # file at the start of every stage, so a falsy test on the last line would abort
 # the build.
 :
+
+# Verdict on inherited paths (collected above). Fatal, not a warning: a stale
+# value from another PRIMUS_BASE -- or from the JAX stack's env.sh -- silently
+# redirects installs into the wrong tree, and the run looks healthy while it
+# happens. Seen in practice with both VENV_DIR and PRIMUS_PIP_CONSTRAINTS.
+if [ -n "$_primus_foreign_env" ] && [ "${PRIMUS_ALLOW_FOREIGN_ENV:-0}" != "1" ]; then
+    echo "[env] ERROR: these point outside PRIMUS_BASE=$PRIMUS_BASE:" >&2
+    printf '%s' "$_primus_foreign_env" >&2
+    echo "[env]        They were inherited from the environment -- most often by sourcing" >&2
+    echo "[env]        another Primus env.sh (a different PRIMUS_BASE, or the JAX stack)." >&2
+    echo "[env]        Continuing would install into that other environment." >&2
+    echo "[env]        Fix: start a fresh shell, or unset the variables listed above." >&2
+    echo "[env]        Override with PRIMUS_ALLOW_FOREIGN_ENV=1 if this is deliberate." >&2
+    # This file is normally sourced; `exit` is the fallback when it is executed.
+    # shellcheck disable=SC2317
+    return 1 2>/dev/null || exit 1
+fi
+unset _primus_foreign_env

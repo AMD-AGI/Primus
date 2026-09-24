@@ -1,0 +1,96 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen2.5_72B-pretrain-mxfp4}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: qwen2.5_72B.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Qwen2.5_72B_Pretrain"
+      stderr_sink_level: DEBUG
+
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      train_iters: 50
+      # MXFP4 forbids activation recompute, so activations stay resident and
+      # cap mbs at 1 on a single 288 GB node even with Megatron-FSDP.
+      # Real-data pretrain: launch with PYTORCH_HIP_ALLOC_CONF=expandable_segments:True (avoids iter-2 HBM-fragmentation OOM).
+      micro_batch_size: 1
+      global_batch_size: 32
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:131072}
+
+      lr: 1.0e-4
+      min_lr: 1.0e-5
+      lr_warmup_iters: 2
+      lr_decay_iters: 320000
+      lr_decay_style: cosine
+      weight_decay: 1.0e-1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # parallel -- TP/PP are env-overridable for multi-node / TP scaling.
+      # Defaults 1/1 match the FP8 sibling's single-node DP+FSDP layout (that sibling
+      # hardcodes 1/1/1); EP stays 1 since this dense model has no experts.
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: 1
+      sequence_parallel: 1
+      overlap_grad_reduce: true
+
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+      # torch FSDP2 breaks MXFP4 (loses column-wise FP4 weight data); shard with
+      # Megatron-FSDP (ZeRO-3) instead.
+      use_torch_fsdp2: false
+      use_megatron_fsdp: true
+      data_parallel_sharding_strategy: optim_grads_params
+      use_distributed_optimizer: true
+      ckpt_format: fsdp_dtensor
+
+      # data
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+
+      # recompute: omitted -- incompatible with MXFP4 (see micro_batch_size note).
+
+      # Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # enable mxfp4 training (BF16 grad reduction, matching llama3.1_8B-MXFP4)
+      fp4: e2m1
+      fp4_recipe: mxfp4
+      accumulate_allreduce_grads_in_fp32: false
+      grad_reduce_in_bf16: true
+      attention_softmax_in_fp32: false

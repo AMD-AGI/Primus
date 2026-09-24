@@ -109,7 +109,7 @@ export PRIMUS_EXP_NAME=qwen3_235B_A22B-pretrain-${PRETRAIN_TYPE}-node_$NNODES-mb
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 # mkdir -p "$CKPT_DIR"
-#bash ./examples/run_slurm_pretrain.sh \
+#bash ./runner/helpers/launch/slurm_pretrain.sh \
 ./primus-cli direct --numa \
   -- train pretrain --config "$EXP" \
   --num_layers "$PRIMUS_TOTAL_LAYERS" \

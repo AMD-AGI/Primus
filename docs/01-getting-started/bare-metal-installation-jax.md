@@ -15,33 +15,26 @@ training.
 > **Looking for the PyTorch/Megatron/TorchTitan stack instead?** See
 > [bare-metal-installation.md](bare-metal-installation.md). This document is the
 > JAX **MaxText** counterpart. It is leaner than the PyTorch stack — no Flash
-> Attention / aiter / Primus-Turbo / FBGEMM / rocSHMEM builds — but v26.5 still
-> compiles **TensorFlow (CPU) and RCCL from source** (and TransformerEngine from
-> source on hosts with glibc < 2.38), so it is not build-free.
+> Attention / aiter / Primus-Turbo / FBGEMM / rocSHMEM builds — but v26.7 still
+> compiles **TensorFlow (CPU) from source** (and TransformerEngine from source on
+> hosts with glibc < 2.28), so it is not build-free.
 
 > **Python 3.12+ required.** MaxText requires Python ≥ 3.12 (the reference image
 > is built on Ubuntu 24.04). Unlike the PyTorch recipe, Python 3.10 is **not**
 > sufficient here.
 
-> **⚠️ Host OS: Ubuntu 24.04 / glibc ≥ 2.38 strongly recommended.** The prebuilt
-> `transformer_engine_rocm_jax` wheel (and other JAX training wheels) are built
-> against the Dockerfile's `ubuntu:24.04` base — they need **`glibc ≥ 2.38`** and
-> **`libstdc++` with `GLIBCXX_3.4.32`** (GCC 13/14). On an older host such as
-> **Ubuntu 22.04 (glibc 2.35)** the TransformerEngine shared library fails to
-> load with `version 'GLIBC_2.38' not found` (and this failure is *silently*
-> swallowed by the launcher — training just exits right after JAX initializes
-> the GPUs). `libstdc++` can be side-loaded via `LD_LIBRARY_PATH`, but **glibc
-> cannot**. For a **manual** install on Ubuntu 22.04 you must either (a) run on a
-> 24.04 host, or (b) build TransformerEngine **from source** against the host
-> toolchain — see
-> [Section 3.7](#37-install-transformerengine-jax-from-the-prebuilt-rocm-wheel).
-> Check your host with `ldd --version`.
+> **Host OS: Ubuntu 22.04 or 24.04.** v26.7 lowered the TransformerEngine glibc
+> floor. The native code now ships as `transformer_engine_rocm10`, a
+> `manylinux_2_28` wheel, so the prebuilt path works on **glibc ≥ 2.28** — Ubuntu
+> 22.04 (2.35) included. v26.6's wheels were built against the Dockerfile's
+> `ubuntu:24.04` base and needed **`glibc ≥ 2.38`**; on 22.04 the TE shared library
+> failed to load with `version 'GLIBC_2.38' not found`, and the launcher swallowed
+> it silently so training exited right after JAX initialised the GPUs. That is no
+> longer the case. Check your host with `ldd --version`.
 >
-> **The automated `setup.sh` does (b) for you:** its `te` stage detects the host
-> glibc and, when it is < 2.38, transparently builds TransformerEngine from
-> source instead of installing the prebuilt wheel — so `bash setup.sh` works on
-> both Ubuntu 22.04 and 24.04. Only the prebuilt TE wheel needs glibc ≥ 2.38; the
-> ROCm JAX/PJRT wheels load fine on glibc 2.35.
+> **`setup.sh` still guards this:** its `te` stage reads the host glibc and only
+> falls back to the from-source build below 2.28, so `bash setup.sh` works on both
+> 22.04 and 24.04.
 
 ---
 
@@ -50,9 +43,9 @@ training.
 If you just want the environment built for you, use the helper scripts in
 [tools/installation-jax/](https://github.com/AMD-AGI/Primus/tree/main/tools/installation-jax).
 They automate everything in Section 3 (Python venv) of this guide — venv
-creation, the ROCm release tarball, MaxText and its dependencies, TensorFlow
-(built from source), JAX + ROCm PJRT/plugin, TransformerEngine, RCCL (built from
-source), and Primus itself — and provide a single `env.sh` to activate the
+creation, the ROCm pip SDK, MaxText and its dependencies, TensorFlow
+(built from source), JAX + ROCm PJRT/plugin, TransformerEngine, and Primus
+itself — and provide a single `env.sh` to activate the
 environment before each job. Read the rest of this document if you want to
 understand or customize what they do, or if you need the multi-node networking
 stack (Section 4), which the scripts do not build.
@@ -125,49 +118,64 @@ Stages are idempotent and re-runnable, so if a step fails you can fix the cause
 and re-run just that stage. On failure the script stops immediately and prints
 which stage failed.
 
-Default stages (v26.5):
+Default stages (v26.6):
 
 ```
-venv → rocm → maxtext → tf_source → jax → te → primus → jaxreqs → rccl → manifest
+venv → rocm → maxtext → tf_source → jax → te → primus → jaxreqs → manifest
 ```
 
-This mirrors the v26.5 image, which **builds TensorFlow (2.21 CPU) and RCCL from
-source** (`tf_source`, `rccl`). Those are heavy: the TF bazel build alone is
-~30–60 min. Lighter/alternative stages:
+This mirrors the v26.7 image, which **builds TensorFlow (2.21 CPU) from source**
+(`tf_source`). That is the heavy one: the bazel build alone is ~30–60 min. v26.7
+no longer rebuilds RCCL — the ROCm 10.0.0 pip SDK ships RCCL 2.30.4 and the image
+uses it as-is, so `rccl` is now an optional stage (Section 3.11).
+Lighter/alternative stages:
 
 - `tf_cpu_fix` — pip `tensorflow-cpu` instead of the `tf_source` bazel build.
 - `te_source` — force the from-source TransformerEngine build regardless of
   glibc. You normally don't need to pass this: the default `te` stage
-  **auto-falls-back** to a from-source build on glibc < 2.38 hosts (e.g. Ubuntu
+  **auto-falls-back** to a from-source build on glibc < 2.28 hosts (not Ubuntu
   22.04), where the prebuilt wheel won't load (see the host-OS note above and
   Section 3.7). Heavy (~30–60 min).
 
 ```bash
-# Ubuntu 22.04 (glibc < 2.38): `bash setup.sh` already builds TE from source
+# Ubuntu 22.04 is covered by the prebuilt TE wheel from v26.7; `bash setup.sh`
 # automatically. If you also want to skip the heavy tf_source bazel build, swap
 # in the lighter tf_cpu_fix:
-bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs rccl manifest
+bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs manifest
 ```
 
 ### Use the environment for a training job
+
+Do this in a **fresh shell**. `env.sh` honours any `VENV_DIR`, `WORKSPACE_DIR`
+and `MAXTEXT_PATH` already exported, so a shell that previously sourced the
+PyTorch `tools/installation/env.sh` (or a different `PRIMUS_JAX_BASE`) keeps
+those stale paths and the run fails later with
+`Backend path not found for 'maxtext'`.
 
 ```bash
 # Use the SAME PRIMUS_JAX_BASE you built with
 export PRIMUS_JAX_BASE=/path/to/big/disk/primus-jax-env
 source tools/installation-jax/env.sh    # activates the venv + sets ROCm/NVTE/XLA vars
 
+# Sanity check: both must point inside $PRIMUS_JAX_BASE
+echo "$VIRTUAL_ENV" "$MAXTEXT_PATH"
 python -c "import jax; print('devices:', jax.devices())"
 
 # Primus is checked out under $WORKSPACE_DIR
 cd "$WORKSPACE_DIR/Primus"
 ./primus-cli direct -- train pretrain \
-  --config examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml
+  --config examples/maxtext/configs/MI300X/llama2_7B-bf16-pretrain.yaml
 ```
+
+Running from your own Primus checkout instead of `$WORKSPACE_DIR/Primus` works
+too, as long as the JAX venv is active. In that case also set
+`export PRIMUS_USER=$USER` if `output/amd/root/` in that checkout is left over
+from container runs — it is root-owned and the logger cannot write into it.
 
 > Pick the config directory that matches your GPU: `examples/maxtext/configs/MI300X/`
 > for **gfx942** (MI300X/MI325X) and `examples/maxtext/configs/MI355X/` for
 > **gfx950** (MI350X/MI355X), e.g.
-> `--config examples/maxtext/configs/MI355X/llama2_7B-pretrain.yaml`.
+> `--config examples/maxtext/configs/MI355X/llama2_7B-bf16-pretrain.yaml`.
 
 ### What the scripts do NOT do
 
@@ -189,23 +197,24 @@ for the full rationale.
 
 ---
 
-## 0. The key idea: ROCm comes from a tarball, not from a system install
+## 0. The key idea: ROCm comes from pip, not from a system install
 
-This build **does not require a system-wide ROCm installation**. In v26.5 ROCm
-is delivered as a **release tarball** (AMD "TheRock" multi-arch dist) that is
-extracted into a user-writable directory (`$ROCM_DIR`, default
-`$PRIMUS_JAX_BASE/rocm`) — no `/opt/rocm`, no root:
+This build **does not require a system-wide ROCm installation**. In v26.6 ROCm
+is delivered as **TheRock pip wheels** (`rocm-sdk-devel` 10.0.0 from
+`stable.repo.amd.com/rocm/core/whl-next`) that land inside the virtual environment —
+no `/opt/rocm`, no root:
 
-- The tarball (`repo.amd.com/rocm/tarball-multi-arch/therock-dist-linux-multiarch-7.14.0.tar.gz`)
-  provides the full ROCm toolchain (HIP, hipBLASLt, compilers, headers,
-  libraries). `ROCM_PATH` points at the extraction dir.
-- `jax` + `jaxlib` (upstream) plus the ROCm `jax_rocm7_pjrt` and
-  `jax_rocm7_plugin` wheels (from `repo.amd.com/rocm/whl-multi-arch/`) provide
-  GPU-accelerated JAX built against that ROCm.
+- `rocm`, `rocm-sdk-core`, `rocm-sdk-devel`, `rocm-sdk-libraries` and the
+  per-arch `rocm-sdk-device-gfx*` packages provide the ROCm toolchain (HIP,
+  hipBLASLt, compilers, headers, libraries) **inside the venv**. `ROCM_PATH`
+  points at `_rocm_sdk_devel`.
+- `jax` + `jaxlib` 0.11.0 plus `jax_rocm10_pjrt` / `jax_rocm10_plugin`
+  `0.11.0+rocm10.0.0` from the **ROCm jax index** provide GPU-accelerated JAX.
 
-> The pinned **release tarball** is stable and avoids any pip version-skew that
-> could break hipBLASLt GEMMs. RCCL is then rebuilt from source (see Section 3.11)
-> and dropped into this ROCm tree.
+> RCCL comes from this ROCm tree as shipped; v26.7 no longer overrides it (see
+> Section 3.11 if you need the from-source build).
+> At runtime `LD_LIBRARY_PATH` is left empty so TE 2.17 + JAX resolve ROCm via
+> RPATH — matching the image's gfx950 CK-JIT fix.
 
 This means almost the entire stack can be installed **without root** into a
 venv. The only host-level requirements from the system administrator are:
@@ -226,8 +235,8 @@ The complete environment is composed of the following layers:
 | ----------------------- | ----------------------------------------------------------------- | ------------------------- | ------------------------- |
 | Kernel / hardware       | AMD GPU driver (amdgpu KMD), GPU device access                    | OS / admin                | Yes (one-time, by admin)  |
 | OS libraries            | Build toolchain + runtime libs (`g++`, `git`, `numactl`, RDMA, …) | `apt`                     | Yes (one-time)            |
-| ROCm user-space         | TheRock ROCm dist (HIP, hipBLASLt, compilers, libs)              | **release tarball** ($ROCM_DIR) | No (user dir)       |
-| Deep learning framework | JAX (`jax`, `jaxlib`) + ROCm `jax_rocm7_pjrt` / `jax_rocm7_plugin`| pip (upstream + repo.amd.com) | No (venv)             |
+| ROCm user-space         | TheRock `rocm-sdk-*` (HIP, hipBLASLt, compilers, libs)           | pip wheels (venv)         | No (venv)           |
+| Deep learning framework | JAX (`jax`, `jaxlib`) + ROCm `jax_rocm10_pjrt` / `jax_rocm10_plugin`| pip (upstream + stable.repo.amd.com) | No (venv)             |
 | Accelerated kernels     | TransformerEngine (JAX) — prebuilt ROCm wheel (or from source)   | pip (staging index) / build | No (venv)               |
 | Training framework      | MaxText (ROCm fork) + its Python deps                             | git + pip (`uv`)          | No (venv)                 |
 | Collectives fix         | `tensorflow-cpu` 2.21 (built from source; no bundled NCCL/LLVM)   | build from source (bazel) | No (venv)                 |
@@ -238,23 +247,22 @@ The complete environment is composed of the following layers:
 
 ### 1.1 Version requirements (pins and host prerequisites)
 
-These are the exact versions the v26.5 reference `Dockerfile` pins. The install
+These are the exact versions the v26.6 reference `Dockerfile` pins. The install
 scripts use the same pins; change one and you may have to change the others.
 
 | Component                         | Pinned version / source                                                 | Notes |
 | --------------------------------- | ----------------------------------------------------------------------- | ----- |
-| ROCm (TheRock dist tarball)       | `therock-dist-linux-multiarch-7.14.0.tar.gz`                            | Multi-arch (gfx942 + gfx950). Extracted into `$ROCM_DIR`. |
-| JAX / jaxlib                      | `0.10.0`                                                                | Upstream PyPI. |
-| ROCm PJRT / plugin                | `jax_rocm7_pjrt` / `jax_rocm7_plugin` `0.10.0+rocm7.14.0`               | From `repo.amd.com/rocm/whl-multi-arch/`. |
-| TransformerEngine (JAX)           | `transformer_engine_rocm_jax 2.15.0.dev0+rocm7.15.0a20260707.72d01a0`  | Prebuilt wheel **needs glibc ≥ 2.38**; else build from source (`te_source`). |
-| TensorFlow (CPU, from source)     | ROCm `tensorflow-upstream` branch `upstream-v2.21.0`                    | Built with bazelisk `v1.25.0`. Needs host `clang-18`/`lld-18`. |
+| ROCm (TheRock pip wheels)         | `rocm-sdk-*==10.0.0`                                                    | From `stable.repo.amd.com/rocm/core/whl-next`. |
+| JAX / jaxlib                      | `0.11.0`                                                                | Upstream PyPI. |
+| ROCm PJRT / plugin                | `jax_rocm10_pjrt` / `jax_rocm10_plugin` `0.11.0+rocm10.0.0`                     | From `stable.repo.amd.com/rocm/jax/whl-next`. |
+| TransformerEngine (JAX)           | `transformer_engine_rocm_jax 2.17.0+rocm10.0.0`                | Prebuilt wheel needs **glibc ≥ 2.28** (v26.7 lowered this from 2.38); else `te_source`. |
+| TensorFlow (CPU, from source)     | ROCm `tensorflow-upstream` branch `upstream-v2.21.0`                    | Built with bazelisk `v1.29.0`. Needs host `clang-18`/`lld-18`. |
 | RCCL (from source)                | `rocm-systems` @ `9e5e4084a4b8e1e86551b0eb054725c62354a926`            | Installed into `$ROCM_PATH/lib`. Needs host `clang-18`/`lld-18`. |
-| MaxText (ROCm fork)               | `release/v26.5`                                                         | 2-value `initialize()`/`run()` API; Primus `main` supports it (fix #912). |
+| MaxText (ROCm fork)               | `release/v26.7`                                                         | ROCm MaxText fork matching the image. |
 | Primus                            | `main`                                                                  | Includes the MaxText `initialize()`/`run()` compatibility shim. |
 | scipy                             | `1.16`                                                                  | |
-| amdsmi                            | `7.0.2`                                                                 | pip, after the ROCm tarball. |
-| Build front-end                   | `cmake 3.31.6`, `ninja 1.11.1.3`, `wheel 0.45.1`, `packaging 25.0`, `setuptools 69.5.1` | Plus `uv` (used by MaxText's dep install). |
-| TE deps                           | `pybind11 3.0.4`, `importlib-metadata 8.7.1`, `pydantic 2.13.4`, `flax 0.12.2` | |
+| Build front-end                   | `cmake 3.31.6`, `ninja 1.11.1.3`, `wheel 0.46.2`, `packaging 25.0`, `setuptools 80.10.2`, `msgpack 1.2.1` | Plus `uv` (used by MaxText's dep install). |
+| TE deps                           | `pybind11 3.0.4`, `importlib-metadata 8.7.1`, `pydantic 2.13.4`, `flax 0.12.8` | |
 
 **Host prerequisites** (independent of the pins above):
 
@@ -264,7 +272,7 @@ scripts use the same pins; change one and you may have to change the others.
 | **glibc**              | **≥ 2.38** for the prebuilt TE wheel           | Ubuntu 24.04 = glibc 2.38+. On **Ubuntu 22.04 (glibc 2.35)** the prebuilt TE wheel won't load — the `te` stage auto-falls-back to a from-source build. Check with `ldd --version`. `glibc` cannot be side-loaded via `LD_LIBRARY_PATH`. |
 | **libstdc++ (GCC)**    | `GLIBCXX_3.4.32` (GCC 13/14) for prebuilt TE   | Can be side-loaded via `LD_LIBRARY_PATH` if glibc itself is new enough. |
 | **C/C++ toolchain**    | `g++` with C++17; `clang-18`/`lld-18` for the TF/RCCL source builds | Source builds (`tf_source`, `rccl`, `te_source`) need LLVM 18. |
-| **GPU arch**           | AMD Instinct **gfx942** (MI300/MI325) or **gfx950** (MI350/MI355) | The pinned ROCm tarball + JAX wheels target these. Other archs (e.g. gfx90a/MI250) need matching wheels not pinned here. |
+| **GPU arch**           | AMD Instinct **gfx942** (MI300/MI325) or **gfx950** (MI350/MI355) | The pinned ROCm wheels + JAX plugin target these. Other archs (e.g. gfx90a/MI250) need matching wheels not pinned here. |
 | **GPU driver (KMD)**   | amdgpu / ROCm kernel driver loaded             | `/dev/kfd` + `/dev/dri` present; user in `video`/`render` groups. |
 
 > **Validated:** the scripts' default flow (with `te_source` substituted for the
@@ -313,7 +321,7 @@ sudo apt install -y \
     wget unzip zip
 ```
 
-> **Source builds (v26.5): LLVM 18 toolchain.** The `tf_source` (TensorFlow 2.21
+> **Source builds (v26.6): LLVM 18 toolchain.** The `tf_source` (TensorFlow 2.21
 > bazel) and `rccl` source builds want a host `clang-18`/`lld-18`. The reference
 > image adds the LLVM apt repo and installs them:
 >
@@ -421,9 +429,10 @@ pip uninstall -y wheel
 pip install \
     cmake==3.31.6 \
     ninja==1.11.1.3 \
-    wheel==0.45.1 \
+    wheel==0.46.2 \
     packaging==25.0 \
-    setuptools==69.5.1 \
+    setuptools==80.10.2 \
+    msgpack==1.2.1 \
     uv
 ```
 
@@ -439,36 +448,38 @@ export ROCPROFILER_QUEUE_INTERPOSITION=0
 export DEBUG_HIP_DYNAMIC_QUEUES=0
 ```
 
-### 3.4 Install ROCm from the TheRock release tarball
+### 3.4 Install ROCm from TheRock pip wheels
 
-This step replaces a system ROCm install. v26.5 uses a **release tarball**
-(not pip wheels) extracted into a user-writable dir — no `/opt/rocm`, no root.
+This step replaces a system ROCm install. v26.6 uses **pip `rocm-sdk-*` wheels**
+(10.0.0) — no `/opt/rocm`, no root.
 
 ```bash
-# Extract into a user-writable location (the automated env.sh uses
-# $PRIMUS_JAX_BASE/rocm). ROCM_PATH will point here.
-export ROCM_DIR=~/primus-jax-env/rocm
-mkdir -p "$ROCM_DIR"
-wget -O /tmp/therock-dist.tar.gz \
-    https://repo.amd.com/rocm/tarball-multi-arch/therock-dist-linux-multiarch-7.14.0.tar.gz
-tar -xzf /tmp/therock-dist.tar.gz -C "$ROCM_DIR"
+THE_ROCK_VERSION=10.0.0
+python -m pip install \
+    --index-url https://stable.repo.amd.com/rocm/core/whl-next/ --pre \
+    rocm==${THE_ROCK_VERSION} \
+    rocm-bootstrap \
+    rocm-sdk-core==${THE_ROCK_VERSION} \
+    rocm-sdk-devel==${THE_ROCK_VERSION} \
+    rocm-sdk-libraries==${THE_ROCK_VERSION} \
+    rocm-sdk-device-gfx942==${THE_ROCK_VERSION} \
+    rocm-sdk-device-gfx950==${THE_ROCK_VERSION}
 
-# amdsmi (installed via pip in the reference image)
-pip install amdsmi==7.0.2
+rocm-sdk init
 ```
 
-> The tarball is multi-arch (gfx942 + gfx950), so there is no per-arch package to
-> pick, and there is **no pip version-skew to worry about** — a pinned tarball
-> cannot drift out of sync and break hipBLASLt GEMMs.
+> Install only the `rocm-sdk-device-gfx*` package matching your GPU for a smaller
+> install. The automated scripts detect the arch and do that.
 
 ### 3.5 Export ROCm paths
 
-Point the rest of the build/runtime at the extracted ROCm. **These must be set
-every time you use the environment** — Section 5 shows how to make them
-persistent (the automated `env.sh` does all of this for you).
+Point the rest of the build at the in-venv ROCm. **`ROCM_PATH` / HIP vars must be
+set for source builds**; at **runtime** leave `LD_LIBRARY_PATH` empty (TE 2.17 +
+JAX RPATH fix). Section 5 shows how to make them persistent (the automated
+`env.sh` does all of this for you).
 
 ```bash
-export ROCM_PATH=$ROCM_DIR
+export ROCM_PATH=$(python -c 'import _rocm_sdk_devel, os; print(os.path.dirname(_rocm_sdk_devel.__file__))')
 export ROCM_HOME=$ROCM_PATH
 export HIP_PLATFORM=amd
 export HIP_PATH=$ROCM_PATH
@@ -476,12 +487,12 @@ export HIP_CLANG_PATH=$ROCM_PATH/llvm/bin
 export HIP_INCLUDE_PATH=$ROCM_PATH/include
 export HIP_LIB_PATH=$ROCM_PATH/lib
 export HIP_DEVICE_LIB_PATH=$ROCM_PATH/lib/llvm/amdgcn/bitcode
-# The reference Dockerfile puts $ROCM_PATH/lib on PATH too; mirror that.
-export PATH="$ROCM_PATH/lib:$ROCM_PATH/bin:$HIP_CLANG_PATH:$PATH"
-export LD_LIBRARY_PATH="$ROCM_PATH/lib:$ROCM_PATH/lib/rocm_sysdeps/lib:$ROCM_PATH/lib64:$ROCM_PATH/llvm/lib"
-export LIBRARY_PATH="$ROCM_PATH/lib:$ROCM_PATH/lib64"
+export PATH="$ROCM_PATH/bin:$HIP_CLANG_PATH:$PATH"
+export LIBRARY_PATH="$HIP_LIB_PATH:$ROCM_PATH/lib:$ROCM_PATH/lib64"
 export CPATH=$HIP_INCLUDE_PATH
 export PKG_CONFIG_PATH="$ROCM_PATH/lib/pkgconfig"
+# Runtime (match the image): do not prepend ROCM_PATH to LD_LIBRARY_PATH.
+export LD_LIBRARY_PATH=""
 ```
 
 Quick check before continuing:
@@ -492,7 +503,7 @@ hipcc --version
 
 ### 3.6 Install MaxText, then JAX + the ROCm PJRT/plugin
 
-> **Order matters (v26.5).** The subsections below are numbered for reference,
+> **Order matters (v26.6).** The subsections below are numbered for reference,
 > but the correct install order is: **MaxText deps (§3.8) → TensorFlow from
 > source (§3.9) → ROCm JAX/PJRT/plugin (§3.6, right here) → TransformerEngine
 > (§3.7) → Primus (§3.10) → RCCL from source (§3.11)**. MaxText's `setup.sh`
@@ -503,34 +514,46 @@ hipcc --version
 MaxText install is in Section 3.8 (deps) below; the JAX packages are:
 
 ```bash
-JAX_VERSION=0.10.0
-JAX_PJRT_VERSION=0.10.0+rocm7.14.0       # https://repo.amd.com/rocm/whl-multi-arch/jax-rocm7-pjrt/
-JAX_PLUGIN_VERSION=0.10.0+rocm7.14.0     # https://repo.amd.com/rocm/whl-multi-arch/jax-rocm7-plugin/
+JAX_VERSION=0.11.0
+JAX_ROCM_VERSION=0.11.0+rocm10.0.0
 
 pip install jax==${JAX_VERSION} jaxlib==${JAX_VERSION} scipy==1.16
-pip install \
-    --index-url https://repo.amd.com/rocm/whl-multi-arch/ \
-    --pre jax_rocm7_pjrt==${JAX_PJRT_VERSION} \
-    --pre jax_rocm7_plugin==${JAX_PLUGIN_VERSION}
+
+pip install --index-url https://stable.repo.amd.com/rocm/jax/whl-next/ --pre \
+    jax_rocm10_pjrt==${JAX_ROCM_VERSION} \
+    jax_rocm10_plugin==${JAX_ROCM_VERSION}
+
+# The rocm10 wheels landed before jaxlib knew their plugin names; rename in place.
+# Can go once the image moves to jax 0.11.1.
+wget -q https://raw.githubusercontent.com/ROCm/TheRock/main/external-builds/jax/patch_installed_jax_rocm_plugin_names.py
+python patch_installed_jax_rocm_plugin_names.py --plugin-package "jax_rocm10_plugin"
+rm -f patch_installed_jax_rocm_plugin_names.py
 ```
 
 ### 3.7 Install TransformerEngine (JAX) from the prebuilt ROCm wheel
 
 TransformerEngine is installed as a prebuilt ROCm JAX wheel. Check
-[the staging index](https://rocm.frameworks-nightlies.amd.com/whl-staging/device-all/transformer-engine-rocm-jax/)
+[the staging index](https://rocm.frameworks-devreleases.amd.com/whl-multi-arch-staging/)
 for the current pin.
 
 ```bash
-TE_VERSION=2.15.0.dev0+rocm7.15.0a20260707.72d01a0
+TE_VERSION=2.17.0+rocm10.0.0
 
 pip install \
     pybind11==3.0.4 \
     importlib-metadata==8.7.1 \
     pydantic==2.13.4 \
-    flax==0.12.2
+    flax==0.12.8
 
 pip install \
-    --index-url https://rocm.frameworks-nightlies.amd.com/whl-staging/device-all/ \
+    --index-url https://stable.repo.amd.com/rocm/transformer_engine/whl-next/ \
+    --pre \
+    --no-build-isolation \
+    transformer_engine==${TE_VERSION} \
+    transformer_engine_rocm10==${TE_VERSION}
+
+pip install \
+    --index-url https://rocm.frameworks-devreleases.amd.com/whl-multi-arch-staging/ \
     --pre \
     --no-build-isolation \
     transformer_engine_rocm_jax==${TE_VERSION}
@@ -552,10 +575,10 @@ pip install \
 > ```bash
 > pip uninstall -y transformer_engine transformer_engine_rocm_jax
 > export USE_ROCM=1 NVTE_FRAMEWORK=jax NVTE_USE_ROCM=1
-> export NVTE_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS}
+> export NVTE_ROCM_ARCH="gfx942;gfx950" CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS}
 > git clone --recursive https://github.com/ROCm/TransformerEngine.git
 > cd TransformerEngine
-> git checkout 635d7c085c39a6d9bfe4881c7d3efab7a46d7129   # last known-good ROCm JAX TE source commit
+> git checkout 50a84ad   # commit the TE_VERSION local label refers to
 > git submodule update --init --recursive
 > python3 setup.py bdist_wheel && pip install dist/*.whl
 > cd ..
@@ -572,17 +595,14 @@ image runs MaxText's `src/dependencies/scripts/setup.sh`; on bare metal we run
 the **Python portion** of that script directly (the `apt`/`gcsfuse` steps are the
 one-time root action from Section 2, and the venv already exists).
 
-> **MaxText `release/v26.5` and the Primus API.** MaxText v26.5 uses a
-> **2-value** `initialize()`/`run()` API (`config, recorder`). Primus `main`
-> handles it: `MaxTextPretrainTrainer` forwards `initialize()`'s tuple verbatim
-> to `run()` (fix #912), so v26.5 trains out of the box. Override `MAXTEXT_BRANCH`
-> only if you deliberately need to pin a different MaxText release.
+> **MaxText `release/v26.7`.** Override `MAXTEXT_BRANCH` only if you deliberately
+> need to pin a different MaxText release.
 
 ```bash
 cd ~/primus-jax-env   # or your $WORKSPACE_DIR
 git clone https://github.com/ROCm/maxtext.git
 cd maxtext
-git checkout release/v26.5   # matches the v26.5 image; Primus main supports its 2-value API
+git checkout release/v26.7   # matches the v26.7 image
 
 # MaxText installs its deps with uv. The default (tpu) requirements set contains
 # the framework-agnostic Python deps WITHOUT any CUDA packages, which is what the
@@ -602,7 +622,7 @@ cd ..
 
 ### 3.9 Build TensorFlow (CPU) from source
 
-v26.5 rebuilds TensorFlow 2.21 (CPU) from ROCm's fork. The stock PyPI TF wheel
+v26.6 rebuilds TensorFlow 2.21 (CPU) from ROCm's fork. The stock PyPI TF wheel
 bundles an LLVM whose symbols collide with ROCm's `libLLVM` in Grain "spawn"
 workers → **SIGSEGV on `import tensorflow` after `import jax`**. A CPU build has
 correct symbol visibility and no bundled NCCL (so it also preserves the XLA→RCCL
@@ -660,10 +680,16 @@ the clone and just run the `git submodule update`, `pip uninstall`, and
 > installed dependencies into (Section 3.8) so the code and the installed deps
 > match — the automated `env.sh` does this for you.
 
-### 3.11 Build RCCL from source (into the ROCm tree)
+### 3.11 Build RCCL from source (optional, into the ROCm tree)
 
-v26.5 rebuilds RCCL from `rocm-systems` and drops the libraries into the ROCm
-tree so JAX/XLA collectives use it. Requires the ROCm toolchain (`hipcc`) from
+> **Not needed for v26.7.** The ROCm 10.0.0 pip SDK ships RCCL 2.30.4, which is
+> what `rocm/jax-training:maxtext-v26.7` uses, so skip this section unless you are
+> reproducing v26.6 or your fabric needs the `rocm-systems` net-ib fix
+> (ROCM-27881).
+
+This rebuilds RCCL from `rocm-systems` and drops the libraries into the ROCm tree
+so JAX/XLA collectives use it, replacing the `librccl*` symlinks that
+`rocm-sdk-libraries` installs. Requires the ROCm toolchain (`hipcc`) from
 Section 3.4.
 
 ```bash
@@ -672,7 +698,8 @@ cd rocm-systems
 git checkout 9e5e4084a4b8e1e86551b0eb054725c62354a926
 cd projects/rccl
 ./install.sh -l --prefix build/ --amdgpu_targets="${PYTORCH_ROCM_ARCH}"
-cp -r build/release/librccl* "$ROCM_PATH/lib/"
+        && rm -f "$ROCM_PATH"/lib/librccl* \
+        && cp -r build/release/librccl* "$ROCM_PATH/lib/"
 cd ../../..
 ```
 
@@ -765,8 +792,8 @@ export HSA_NO_SCRATCH_RECLAIM=1
 export ROCPROFILER_QUEUE_INTERPOSITION=0
 export DEBUG_HIP_DYNAMIC_QUEUES=0
 
-# v26.5: ROCm lives in the extracted tarball dir (Section 3.4), NOT a pip wheel.
-export ROCM_PATH=$HOME/primus-jax-env/rocm
+# v26.6: ROCm lives in the pip SDK (Section 3.4).
+export ROCM_PATH=$(python -c 'import _rocm_sdk_devel, os; print(os.path.dirname(_rocm_sdk_devel.__file__))')
 export ROCM_HOME=$ROCM_PATH
 export HIP_PLATFORM=amd
 export HIP_PATH=$ROCM_PATH
@@ -774,8 +801,9 @@ export HIP_CLANG_PATH=$ROCM_PATH/llvm/bin
 export HIP_INCLUDE_PATH=$ROCM_PATH/include
 export HIP_LIB_PATH=$ROCM_PATH/lib
 export HIP_DEVICE_LIB_PATH=$ROCM_PATH/lib/llvm/amdgcn/bitcode
-export PATH="$ROCM_PATH/lib:$ROCM_PATH/bin:$HIP_CLANG_PATH:$HOME/primus-jax-env/openmpi/bin:$PATH"
-export LD_LIBRARY_PATH="$ROCM_PATH/lib:$ROCM_PATH/lib/rocm_sysdeps/lib:$ROCM_PATH/lib64:$ROCM_PATH/llvm/lib:$HOME/primus-jax-env/openmpi/lib"
+export PATH="$ROCM_PATH/bin:$HIP_CLANG_PATH:$HOME/primus-jax-env/openmpi/bin:$PATH"
+# v26.6 blanks LD_LIBRARY_PATH so TE 2.17 + JAX use RPATH. OpenMPI still needs its lib.
+export LD_LIBRARY_PATH="$HOME/primus-jax-env/openmpi/lib"
 export LIBRARY_PATH="$HIP_LIB_PATH:$ROCM_PATH/lib64"
 export CPATH=$HIP_INCLUDE_PATH
 export PKG_CONFIG_PATH="$ROCM_PATH/lib/pkgconfig"
@@ -803,10 +831,10 @@ export NCCL_DEBUG=VERSION
 # host, /usr/local/lib/librccl-net.so is on the default loader path and is
 # ABI-incompatible with the from-source RCCL (undefined symbol
 # ncclNetPlugin_v11/_v10 -> falls back to v9 -> segfault at clique init). The
-# v26.5 image ships no librccl-net.so, so this matches it.
+# v26.6 image ships no librccl-net.so, so this matches it.
 export NCCL_NET_PLUGIN=none
 
-# XLA / JAX runtime settings (v26.5 uses .9)
+# XLA / JAX runtime settings (v26.6 uses .9)
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.9
 export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE --xla_gpu_enable_command_buffer=''"
 # ---- end Primus JAX host environment ----
@@ -839,8 +867,8 @@ python -c "import jax, jaxlib, flax, transformer_engine.jax; print('JAX/flax/TE 
 # matches your GPU: MI300X/ for gfx942 (MI300X/MI325X), MI355X/ for gfx950 (MI350X/MI355X).
 cd ~/primus-jax-env/Primus   # or your Primus checkout
 ./primus-cli direct -- train pretrain \
-  --config examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml
-  # gfx950: --config examples/maxtext/configs/MI355X/llama2_7B-pretrain.yaml
+  --config examples/maxtext/configs/MI300X/llama2_7B-bf16-pretrain.yaml
+  # gfx950: --config examples/maxtext/configs/MI355X/llama2_7B-bf16-pretrain.yaml
 ```
 
 `jax.default_backend()` should report `gpu` (ROCm), and `jax.devices()` should
@@ -860,7 +888,7 @@ running on bare metal with everything installed in your environment.
   and `render` groups (`sudo usermod -aG video,render $USER`, then re-login).
 - **Hugging Face access**: for gated models/tokenizers, export your token
   (`export HF_TOKEN=hf_xxx` and/or `huggingface-cli login`).
-- **Install order is load-bearing (v26.5)**: MaxText → TensorFlow (from source)
+- **Install order is load-bearing (v26.6)**: MaxText → TensorFlow (from source)
   → ROCm JAX/PJRT/plugin → TransformerEngine → RCCL (from source). MaxText's
   `setup.sh` pulls in a stock `jax`/`tensorflow`, so the ROCm JAX must be
   installed *after* MaxText (to override it) and *before* TE (or `jaxlib` gets
@@ -870,7 +898,7 @@ running on bare metal with everything installed in your environment.
   `/etc/security/limits.conf` (admin help). Verify NICs with `ibv_devinfo` /
   `ibstat`. JAX uses the distributed coordinator (`JAX_COORDINATOR_IP` /
   `JAX_COORDINATOR_PORT`), which Primus sets from `MASTER_ADDR` / `MASTER_PORT`.
-- **Version drift**: the ROCm release tarball, the JAX/PJRT/plugin versions, the
+- **Version drift**: the ROCm SDK wheels, the JAX/PJRT/plugin versions, the
   TransformerEngine wheel, the TensorFlow/RCCL source revisions, and the MaxText
   branch are all pinned to one release (see the table in Section 1.1). If you
   change one, you may need to update the others. The Docker image is the
@@ -890,7 +918,7 @@ multi-node components:
 
 | Component                                              | Needed for                          |
 | ------------------------------------------------------ | ----------------------------------- |
-| ROCm (tarball), JAX + PJRT/plugin, TransformerEngine (JAX) | Core MaxText training (install these) |
+| ROCm (pip SDK), JAX + PJRT/plugin, TransformerEngine (JAX) | Core MaxText training (install these) |
 | MaxText + its deps, TensorFlow (from source), RCCL (from source) | Core MaxText training (install these) |
 | Primus + `third_party/maxtext`                         | Running MaxText via Primus          |
 | gcsfuse                                                | Reading data from GCS buckets only  |

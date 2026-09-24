@@ -5,22 +5,33 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Install + patch the MaxDiffusion (JAX) runtime from the vendored submodule.
+# Install the MaxDiffusion (JAX) runtime from the vendored submodule.
 #
-# When is this needed?
+# Used ONLY by examples/run_pretrain.sh (BACKEND=maxdiffusion). primus-cli does
+# not call this script: it installs deps through the regular per-backend hook,
+# runner/helpers/hooks/train/pretrain/maxdiffusion/00_install_requirements.sh,
+# the same way maxtext / megatron / torchtitan do.
+#
+# What it does:
 #   - Python deps (requirements-maxdiffusion.txt) are ALWAYS installed to ensure
 #     Primus core deps like loguru are present before the runtime starts.
 #   - If the container ALREADY ships maxdiffusion (e.g. the MAD primus_maxdiffusion
 #     image or the unified docker), the script installs deps then exits early.
 #     Setting PRIMUS_SKIP_PIP=1 skips calling it entirely.
 #   - If the container does NOT have maxdiffusion (e.g. a bare rocm/jax-training
-#     maxtext image), this script installs everything from the Primus checkout:
-#     torch (ROCm wheels), editable submodule install, and 4 site-package patches.
+#     maxtext image), this script installs from the Primus checkout: torch (ROCm
+#     wheels), editable submodule install, and the site-package patches below.
 #     Requires `third_party/maxdiffusion` to be initialized
 #     (git submodule update --init).
 #
-# Invoked by examples/run_pretrain.sh when BACKEND=maxdiffusion (unless
-# PRIMUS_SKIP_PIP=1). Idempotent: safe to re-run.
+# NOTE on the early exit: it tests whether `maxdiffusion` is importable, which on
+# the MaxText image succeeds against the image's own /workspace/maxdiffusion even
+# when a vendored checkout exists. The Primus adapter prepends the vendored
+# checkout to sys.path, so the copy that gets imported at train time is not
+# necessarily the one this check found. That is why runtime fixes must not live
+# here as source edits -- see primus/backends/maxdiffusion/patches/.
+#
+# Idempotent: safe to re-run.
 set -euo pipefail
 
 PRIMUS_PATH="${PRIMUS_PATH:-$(realpath "$(dirname "$0")/../..")}"
@@ -66,8 +77,15 @@ log "pip install -e maxdiffusion (--no-deps)"
 pip install -e "$MAXDIFFUSION_PATH" --no-deps --quiet
 
 # 3) Patches (idempotent). These were previously baked into
-#    docker/primus_maxdiffusion.ubuntu.amd.Dockerfile; here they target the
-#    vendored submodule + the venv site-packages.
+#    docker/primus_maxdiffusion.ubuntu.amd.Dockerfile; here they target the venv
+#    site-packages.
+#
+#    Only site-package patches remain. The two that used to rewrite the vendored
+#    submodule (TensorFlow preload in train_utils.py, Shardy in attention_flax.py)
+#    are now Primus patches under primus/backends/maxdiffusion/patches/. Both
+#    launch paths end in `primus/cli/main.py train pretrain`, so the patch phases
+#    run for run_pretrain.sh and primus-cli alike -- and unlike a sed, they cannot
+#    be undone by a git checkout of third_party/maxdiffusion.
 SP="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 
 # 4a) transformers Flax T5 (FLUX text encoder): jnp.clip a_min/a_max -> min/max.
@@ -78,23 +96,7 @@ else
   log "transformers T5 patch: not needed"
 fi
 
-# 4b) preload tensorflow before Transformer Engine (import order segfault fix).
-TU="$MAXDIFFUSION_PATH/src/maxdiffusion/train_utils.py"
-if [ -f "$TU" ] && ! grep -q "preload before Transformer Engine" "$TU"; then
-  sed -i '/from transformer_engine.jax.sharding import global_shard_guard, MeshResource/i\    import tensorflow  # noqa: F401 preload before Transformer Engine to avoid segfault' "$TU"
-  log "patched maxdiffusion train_utils (TF preload)"
-else
-  log "train_utils TF-preload patch: already applied / n/a"
-fi
-
-# 4c) keep Shardy enabled for the GSPMD fallback path (cudnn_flash_te).
-AF="$MAXDIFFUSION_PATH/src/maxdiffusion/models/attention_flax.py"
-if [ -f "$AF" ]; then
-  sed -i 's/jax.config.update("jax_use_shardy_partitioner", False)/jax.config.update("jax_use_shardy_partitioner", True)/g' "$AF"
-  log "ensured Shardy on in attention_flax"
-fi
-
-# 4d) TE fused-attn partitioner: treat empty context-parallel axis as size 1.
+# 4b) TE fused-attn partitioner: treat empty context-parallel axis as size 1.
 TE="$SP/transformer_engine/jax/sharding.py"
 if [ -f "$TE" ] && ! grep -q "if not axis:" "$TE"; then
   sed -i 's|    assert axis in mesh.shape, f"{axis} is not a axis of the given mesh {mesh.shape}"|    if not axis:\n        return 1\n    assert axis in mesh.shape, f"{axis} is not a axis of the given mesh {mesh.shape}"|' "$TE"

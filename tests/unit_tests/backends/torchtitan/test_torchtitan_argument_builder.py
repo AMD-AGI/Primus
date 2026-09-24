@@ -15,18 +15,10 @@ Focus areas:
     5. Interface consistency: same API as MegatronArgBuilder
 """
 
-import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-
-# Mock torchtitan module before importing argument_builder
-sys.modules["torchtitan"] = MagicMock()
-sys.modules["torchtitan.config"] = MagicMock()
-sys.modules["torchtitan.config.job_config"] = MagicMock()
-sys.modules["torchtitan.tools"] = MagicMock()
-sys.modules["torchtitan.tools.logging"] = MagicMock()
 
 from primus.backends.torchtitan.argument_builder import TorchTitanJobConfigBuilder
 from primus.core.config.merge_utils import deep_merge

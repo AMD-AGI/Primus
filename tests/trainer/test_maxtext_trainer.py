@@ -21,7 +21,7 @@ def run_script(
     env_override: dict = None,
     extra_args: list[str] = None,
 ):
-    shell_entry = "examples/run_pretrain.sh"
+    shell_entry = "runner/primus-cli"
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
@@ -32,7 +32,18 @@ def run_script(
     train_log_path = os.path.join(ut_log_path, f"log.test_maxtext_trainer-{tag}.txt")
     env["TRAIN_LOG"] = train_log_path
 
-    cmd = ["bash", shell_entry]
+    cmd = [
+        "bash",
+        shell_entry,
+        "direct",
+        "--log_file",
+        train_log_path,
+        "--",
+        "train",
+        "pretrain",
+        "--config",
+        exp_path,
+    ]
     if extra_args:
         cmd.extend(extra_args)
 

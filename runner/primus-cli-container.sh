@@ -451,6 +451,25 @@ for key in "${!container_config[@]}"; do
     fi
 done
 
+# The bnxt rebuild hook runs inside the container and checks for the tar on
+# disk, so forwarding PATH_TO_BNXT_TAR_PACKAGE as an env var is not enough: the
+# file has to be visible under the same path. Skip when the configured volumes
+# already provide it.
+if [[ -n "${PATH_TO_BNXT_TAR_PACKAGE:-}" && -f "${PATH_TO_BNXT_TAR_PACKAGE}" ]]; then
+    bnxt_mount="${PATH_TO_BNXT_TAR_PACKAGE}:${PATH_TO_BNXT_TAR_PACKAGE}"
+    bnxt_mounted=0
+    for opt_value in "${CONTAINER_OPTS[@]}"; do
+        if [[ "$opt_value" == "$bnxt_mount" || "$opt_value" == "${PATH_TO_BNXT_TAR_PACKAGE}" ]]; then
+            bnxt_mounted=1
+            break
+        fi
+    done
+    if [[ $bnxt_mounted -eq 0 ]]; then
+        CONTAINER_OPTS+=("--volume" "$bnxt_mount")
+        LOG_INFO_RANK0 "[container] Added cumulative: --volume $bnxt_mount"
+    fi
+fi
+
 
 ###############################################################################
 # STEP 6: Optional container cleanup

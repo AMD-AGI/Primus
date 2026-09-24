@@ -6,7 +6,12 @@
 # torch/torchvision are installed separately (ROCm wheel index) by
 # examples/maxdiffusion/setup_maxdiffusion_env.sh, because they need
 # --find-links/--no-index which cannot be mixed with a PyPI resolve here.
-transformers==5.10.1
+#
+# MUST stay on transformers 4.x: MaxDiffusion is a Flax codebase and imports
+# FlaxCLIPTextModel/FlaxT5EncoderModel at module load (src/maxdiffusion/max_utils.py).
+# transformers 5.0 removed every Flax and TensorFlow class, so any 5.x resolve
+# breaks `import maxdiffusion` outright. Upstream pins 4.48.1 for the same reason.
+transformers==4.57.3
 scikit-image
 imageio-ffmpeg
 loguru

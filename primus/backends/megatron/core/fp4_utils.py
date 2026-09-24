@@ -76,6 +76,26 @@ def _mxfp4_gradient_sr_enabled(config: TransformerConfig) -> bool:
         return False
 
 
+def _mxfp4_scale_rounding_mode(config: TransformerConfig) -> int:
+    """Resolve the MXFP4 E8M0 scale rounding mode the same way as gradient SR.
+
+    Primus-Turbo used to take this from PRIMUS_TURBO_MXFP4_SCALE_ROUNDING; since
+    the UoS work it is a ``Float4QuantConfig`` field, so it has to be carried in
+    the quant config or the recipe silently runs at the Turbo default.
+    """
+    value = getattr(config, "mxfp4_scale_rounding_mode", _UNSET)
+    if value is _UNSET:
+        try:
+            from megatron.training.global_vars import get_args
+
+            value = getattr(get_args(), "mxfp4_scale_rounding_mode", _UNSET)
+        except Exception:
+            value = _UNSET
+    if value is _UNSET or value is None:
+        return 0
+    return int(value)
+
+
 MXFP4_SCALING_BLOCK_SIZE = 32
 
 WARN_ONCE = True
@@ -147,6 +167,7 @@ if HAVE_TE and HAVE_TURBO:
             block_size=MXFP4_SCALING_BLOCK_SIZE,
             scale_dtype=ScaleDtype.E8M0,
             use_gradient_sr=_mxfp4_gradient_sr_enabled(config),
+            scale_rounding_mode=_mxfp4_scale_rounding_mode(config),
         )
         return fp4_quant_config, ""
 

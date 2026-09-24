@@ -12,7 +12,8 @@
 #   export PATCH_TE_FLASH_ATTN=1
 #
 # Implementation:
-#   Inline patch (same as examples/run_pretrain.sh).
+#   Inline sed on the installed transformer_engine attention.py; no separate
+#   helper script.
 ###############################################################################
 
 set -euo pipefail

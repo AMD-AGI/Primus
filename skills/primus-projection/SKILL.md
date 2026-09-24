@@ -14,7 +14,7 @@ Provide a quick, opinionated guide for using Primus Projection to:
 - Run the right commands fast
 
 ## Scope
-- Docs: `docs/tech_blogs/projection/projection.md`, `docs/projection.md`
+- Docs: `docs/02-user-guide/projection.md`
 - **Projection code**: `primus/core/projection/`
 - **Projection performance entrypoints**: `primus/core/projection/performance_projection/`
 - **Projection memory entrypoints**: `primus/core/projection/memory_projection/`
@@ -329,7 +329,7 @@ simulator before running expensive full-scale validation.
 - If absolute error seems high: check measurement variance first (re-run measured baseline).
 
 ## References
-- Tech blog: `docs/tech_blogs/projection/projection.md`
-- User docs: `docs/projection.md`
+- Tech blog: https://rocm.blogs.amd.com/software-tools-optimization/primus-projection/README.html
+- User docs: `docs/02-user-guide/projection.md`
 - Schedulers: `primus/core/pipeline_parallel/scheduler/`
 - Simulation backends: Origami (GEMM), SDPA simulator (attention)

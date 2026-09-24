@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import math
 import os
 import re
 import shutil
@@ -16,7 +17,19 @@ RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
 WARMUP_SKIP = 5
 
 ERROR_STATUS = "Error found - check log"
+NONFINITE_STATUS = "Diverged (non-finite loss) - invalid"
 OK_STATUS = "OK"
+
+# Per-step metric lines, one pattern per backend log format:
+#   torchtitan: "step:  1  loss: 12.78468  grad_norm:     nan  memory: ..."
+#   megatron:   "iteration  3/  3 | ... | lm loss: 1.17E+01 | ... | grad norm: 5.885 | ..."
+# Same parsing as tests/utils.py:assert_finite_training_metrics.
+STEP_METRIC_REGEXES = (
+    re.compile(r"\bstep:\s*(?P<step>\d+)\b.*?\bloss:\s*(?P<loss>\S+).*?\bgrad_norm:\s*(?P<grad>\S+)"),
+    re.compile(
+        r"\biteration\s*(?P<step>\d+)\s*/.*?\blm loss:\s*(?P<loss>\S+).*?\bgrad norm:\s*(?P<grad>\S+)"
+    ),
+)
 
 ANSI_ESCAPE_REGEX = re.compile(r"\x1b\[[0-9;]*m")
 LOG_EXIT_CODE_REGEX = re.compile(r"primus launcher exited with code (\d+)", re.IGNORECASE)
@@ -65,6 +78,8 @@ NOTE:
 - Timing/throughput fields use the current value before "/" (e.g. 5896.1/5913.1 -> 5896.1).
 - Warm-up: the first five iterations are excluded before averaging.
 - "Status" is "Error found - check log" when the log contains errors or metrics could not be computed.
+- "Status" is "Diverged (non-finite loss) - invalid" when any step logged a NaN/Inf loss or grad
+  norm. Such a run exits 0 and still prints throughput, but the numbers are meaningless.
 - Numeric fields may contain commas in logs; commas are removed before averaging.
 """
 
@@ -76,6 +91,8 @@ NOTE:
 - "Steps" is the number of training steps used after dropping the first five warm-up steps.
 - TPS and TFLOPS values may contain commas in logs; commas are removed before averaging.
 - "Status" is "Error found - check log" when the log contains errors or metrics could not be computed.
+- "Status" is "Diverged (non-finite loss) - invalid" when any step logged a NaN/Inf loss or grad
+  norm. Such a run exits 0 and still prints throughput, but the numbers are meaningless.
 """
 
 MEGATRON_NUM = r"[\d,]+(?:\.\d+)?"
@@ -311,9 +328,35 @@ def strip_ansi(text):
     return ANSI_ESCAPE_REGEX.sub("", text)
 
 
-def log_has_error(path):
+def find_nonfinite_metric(plain):
+    if "loss:" not in plain:  # the vast majority of log lines; skip the regexes
+        return None
+    for pattern in STEP_METRIC_REGEXES:
+        m = pattern.search(plain)
+        if m is None:
+            continue
+        for field in ("loss", "grad"):
+            raw = m.group(field).rstrip("|,")
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if not math.isfinite(value):
+                return f"step {m.group('step')} {field}={raw}"
+        return None
+    return None
+
+
+def scan_log(path):
+    """Single pass over a run log for launcher errors and non-finite metrics.
+
+    A diverged run still exits 0 and still prints throughput, so without the
+    second check a NaN run reports a (inflated) tps as if it were a valid result.
+    Returns (has_error, nonfinite) where nonfinite lists the offending steps.
+    """
     exit_code = None
     saw_error_line = False
+    nonfinite = []
 
     with open(path, "r", errors="ignore") as f:
         for line in f:
@@ -323,15 +366,18 @@ def log_has_error(path):
             if m:
                 exit_code = int(m.group(1))
 
+            bad = find_nonfinite_metric(plain)
+            if bad:
+                nonfinite.append(bad)
+
             if any(pattern.search(plain) for pattern in LOG_ERROR_EXCLUSIONS):
                 continue
 
             if any(pattern.search(plain) for pattern in LOG_ERROR_PATTERNS):
                 saw_error_line = True
 
-    if exit_code not in (None, 0):
-        return True
-    return saw_error_line
+    has_error = True if exit_code not in (None, 0) else saw_error_line
+    return has_error, nonfinite
 
 
 def render_results(backend, headers, rows, note_text):
@@ -347,6 +393,14 @@ def render_results(backend, headers, rows, note_text):
         print(
             f"\n{len(error_rows)} run(s) reported errors or incomplete metrics."
             " Open the corresponding log file for details."
+        )
+
+    diverged_rows = [row for row in rows if len(row) > 2 and row[2] == NONFINITE_STATUS]
+    if diverged_rows:
+        labels = ", ".join(f"{row[0]} {row[1]}" for row in diverged_rows)
+        print(
+            f"\n{len(diverged_rows)} run(s) logged a non-finite loss or grad norm and are"
+            f" reported without throughput: {labels}"
         )
 
     table_width = sum(len(str(header)) for header in headers) + 3 * len(headers)
@@ -444,17 +498,17 @@ def megatron_collect_rows():
             continue
 
         path = os.path.join(log_dir, fname)
-        has_error = log_has_error(path)
+        has_error, nonfinite = scan_log(path)
         records = megatron_parse_log_file(path)
         stats = megatron_compute_averages(records)
 
         bs, seq, gbs = load_training_params("megatron", meta["device"], meta["model"], fname, log_dir)
 
-        if has_error or not stats:
+        if has_error or nonfinite or not stats:
             if gbs == "-" and records:
                 gbs = records[0]["gbs"]
             values = [
-                ERROR_STATUS,
+                NONFINITE_STATUS if nonfinite and not has_error else ERROR_STATUS,
                 "megatron",
                 meta["device"],
                 bs,
@@ -615,7 +669,7 @@ def torchtitan_collect_rows():
             continue
 
         path = os.path.join(log_dir, fname)
-        has_error = log_has_error(path)
+        has_error, nonfinite = scan_log(path)
         steps = torchtitan_parse_log_file(path)
         stats = torchtitan_compute_averages(steps)
 
@@ -629,9 +683,9 @@ def torchtitan_collect_rows():
             if log_seq is not None:
                 seq = log_seq
 
-        if has_error or not stats:
+        if has_error or nonfinite or not stats:
             values = [
-                ERROR_STATUS,
+                NONFINITE_STATUS if nonfinite and not has_error else ERROR_STATUS,
                 "torchtitan",
                 meta["device"],
                 bs,
