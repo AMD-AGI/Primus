@@ -15,20 +15,38 @@
 # gemm_fp4_impl). Attention itself stays BF16 flash-attn; only the linears go
 # FP4.
 #
-# Requires PRIMUS_TURBO_GEMM_BACKEND=fp4:AITER, otherwise the MXFP4 linears
-# raise on the preshuffle contract check.
+# Requires PRIMUS_TURBO_GEMM_BACKEND=fp4:AITER, set in the env: block below;
+# otherwise the MXFP4 linears raise on the preshuffle contract check.
 #
 # This config and its local_spec / local_spec_mxfp4 siblings differ ONLY in the
 # implementation and precision knobs, so their losses are directly comparable.
 #
 # Usage:
-#   EXP=examples/megatron/configs/MI355X/diffusion/wan2.1_t2v_1.3b_pretrain_pusa_local_spec_mxfp4.yaml \
-#   bash examples/run_pretrain.sh
+#   ./primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI355X/diffusion/wan2.1_t2v_1.3b_pretrain_pusa_local_spec_mxfp4.yaml
+#
+# Set PRIMUS_DIFFUSION_DATA_PATH to the prepared Energon dataset and HF_HOME to
+# the HuggingFace cache holding the VAE and UMT5 weights.
+#
+# The env: block below is applied by TrainRuntime after the launcher's
+# defaults and overrides anything exported on the CLI. PYTORCH_CUDA_ALLOC_CONF
+# is deliberately not set here: expandable_segments:True helps long sequences,
+# but deadlocks in the KFD VA-map ioctl on some ROCm builds, so export it per
+# environment.
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: wan2.1_t2v_1.3b_pretrain_pusa_local_spec_mxfp4
 workspace: ./output
+
+env:
+  # base_env.sh pins Fast (2), which resolves the Conv3d patch-embed backward to
+  # a naive im2col path. DynamicHybrid (5), MIOpen's own default, finds the
+  # fused wgrad solver once per conv shape.
+  MIOPEN_FIND_MODE: "5"
+  # The HipBLASLt/rocRoller FP4 path runs a CPU-bound per-shape solution search
+  # that stalls on WAN's long-sequence shapes.
+  PRIMUS_TURBO_GEMM_BACKEND: "fp4:AITER"
 
 modules:
   pre_trainer:

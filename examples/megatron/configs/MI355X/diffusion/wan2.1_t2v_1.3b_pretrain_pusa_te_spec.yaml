@@ -12,13 +12,32 @@
 # implementation and precision knobs, so their losses are directly comparable.
 #
 # Usage:
-#   EXP=examples/megatron/configs/MI355X/diffusion/wan2.1_t2v_1.3b_pretrain_pusa_te_spec.yaml \
-#   bash examples/run_pretrain.sh
+#   ./primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI355X/diffusion/wan2.1_t2v_1.3b_pretrain_pusa_te_spec.yaml
+#
+# Set PRIMUS_DIFFUSION_DATA_PATH to the prepared Energon dataset and HF_HOME to
+# the HuggingFace cache holding the VAE and UMT5 weights.
+#
+# The env: block below is applied by TrainRuntime after the launcher's
+# defaults and overrides anything exported on the CLI. PYTORCH_CUDA_ALLOC_CONF
+# is deliberately not set here: expandable_segments:True helps long sequences,
+# but deadlocks in the KFD VA-map ioctl on some ROCm builds, so export it per
+# environment.
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: wan2.1_t2v_1.3b_pretrain_pusa_te_spec
 workspace: ./output
+
+env:
+  # base_env.sh pins Fast (2), which resolves the Conv3d patch-embed backward to
+  # a naive im2col path. DynamicHybrid (5), MIOpen's own default, finds the
+  # fused wgrad solver once per conv shape.
+  MIOPEN_FIND_MODE: "5"
+  # TE's default hipBLASLt workspace is too small for the split-K plan of the
+  # 1536 -> 1536 wgrad GEMM at large token counts, which then fails with
+  # "HIPBLASLT Error: 6". Read by te_patches/hipblaslt_workspace_patches.py.
+  PRIMUS_TE_GEMM_WORKSPACE_MIB: "128"
 
 modules:
   pre_trainer:
