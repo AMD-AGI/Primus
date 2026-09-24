@@ -21,6 +21,7 @@ from primus.backends.megatron.core.models.diffusion.flux.utils import (
     pack_latents,
     unpack_latents,
 )
+from tests.unit_tests.backends.megatron.conftest import requires_mxfp4
 from tests.unit_tests.backends.megatron.diffusion.constants import (
     CLIP_L_EMBEDDING_DIM,
     T5_XXL_EMBEDDING_DIM,
@@ -36,6 +37,27 @@ class TestFluxModel(PrimusUT):
     @pytest.fixture(autouse=True)
     def setup_parallel(self, init_parallel_state):
         """Initialize parallel state for model tests."""
+
+    @pytest.fixture(autouse=True)
+    def pin_fp4_aiter(self, monkeypatch):
+        """Pin the backend required by MXFP4 module construction."""
+        import collections
+        import os
+
+        from primus_turbo.pytorch.core.backend import (
+            BackendType,
+            GlobalBackendManager,
+            PrecisionType,
+        )
+
+        if os.environ.get("PRIMUS_TURBO_GEMM_BACKEND", None) == "":
+            monkeypatch.delenv("PRIMUS_TURBO_GEMM_BACKEND", raising=False)
+        pinned = collections.defaultdict(lambda: None)
+        if GlobalBackendManager._gemm_backend:
+            pinned.update(GlobalBackendManager._gemm_backend)
+        pinned[PrecisionType.FP4] = BackendType.AITER
+        monkeypatch.setattr(GlobalBackendManager, "_gemm_backend", pinned)
+        monkeypatch.setattr(GlobalBackendManager, "_auto_tune", False)
 
     def test_forward_pass_small(self):
         """Test forward pass with small inputs."""
@@ -78,6 +100,53 @@ class TestFluxModel(PrimusUT):
         assert output.shape == img.shape
         assert not torch.isnan(output).any()
         assert not torch.isinf(output).any()
+
+    @requires_mxfp4
+    def test_build_graduated_precision_model(self):
+        """Build a small model that instantiates BF16, FP8, and MXFP4 blocks."""
+        from megatron.core.tensor_parallel import ColumnParallelLinear
+
+        from primus.backends.megatron.core.extensions.primus_turbo_float8_local import (
+            Float8ColumnParallelLinear,
+        )
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+            MXFP4ColumnParallelLinear,
+        )
+
+        config = FluxConfig(
+            num_joint_layers=2,
+            num_single_layers=3,
+            hidden_size=128,
+            num_attention_heads=4,
+            ffn_hidden_size=256,
+            context_dim=128,
+            vec_in_dim=64,
+            model_channels=64,
+            axes_dim=(4, 14, 14),
+            transformer_impl="local",
+            fp4="mxfp4",
+            fp4_recipe="mxfp4",
+            bf16=True,
+            fp16=False,
+            params_dtype=torch.bfloat16,
+            sensitive_layers_enabled=True,
+            sensitive_layers_start=2,
+            sensitive_layers_end=2,
+            sensitive_layer_precision="tw_fp8",
+            outer_sensitive_layers_start=1,
+            outer_sensitive_layers_end=1,
+            outer_sensitive_layer_precision="bf16",
+        )
+
+        model = Flux(config).cuda()
+        layers = model.transformer.layers
+
+        assert len(layers) == 5
+        assert type(layers[0].self_attention.linear_qkv) is ColumnParallelLinear
+        assert type(layers[1].self_attention.linear_qkv) is Float8ColumnParallelLinear
+        assert type(layers[2].self_attention.linear_qkv) is MXFP4ColumnParallelLinear
+        assert type(layers[3].self_attention.linear_qkv) is Float8ColumnParallelLinear
+        assert type(layers[4].self_attention.linear_qkv) is ColumnParallelLinear
 
 
 if __name__ == "__main__":
