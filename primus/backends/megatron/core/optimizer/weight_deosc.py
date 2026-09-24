@@ -236,6 +236,10 @@ def qdq_mxfp4(weight: torch.Tensor) -> torch.Tensor:
     if weight.ndim == 2:
         return _qdq_2d(weight)
     if weight.ndim == 3:
+        # The batched kernel reinterprets bf16 pairs as int32 with vector
+        # loads, so a contiguous view at an unaligned offset must be copied.
+        if weight.data_ptr() % 16:
+            weight = weight.clone(memory_format=torch.contiguous_format)
         q_row, scale_row, q_col, scale_col = _quantize_fp4_with_trans(
             weight,
             _float4_e2m1fn_x2,
