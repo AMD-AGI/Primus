@@ -365,6 +365,9 @@ def _fused_qkv_project_norm_rope(attn, linear, hidden_states, q_norm, k_norm, q_
         True,  # interleaved; _fused_qkv_unusable_reason rejects anything else
         fuse_wgrad_accum,
         torch.is_grad_enabled(),
+        # Resolved once at build time by _init_mxfp6_linear, which also checks that the
+        # installed aiter and Primus-Turbo can actually do A6W4.
+        linear._weight_is_fp4,
     )[:3]
 
 

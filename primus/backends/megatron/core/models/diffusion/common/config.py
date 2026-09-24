@@ -21,6 +21,12 @@ MXFP6_FORMATS = ("mxfp6",)
 # Accepted values for `mxfp6_backward_precision`.
 MXFP6_BACKWARD_PRECISIONS = ("mxfp6", "fp8")
 
+# Accepted values for `mxfp6_weight_format`: the format the *weight* operand is packed in
+# while activations stay MXFP6. "mxfp4" selects AITER's A6W4 GEMM for the forward and
+# dgrad. wgrad is unaffected in either case -- it contracts the token dimension, so
+# neither of its operands is the weight and there is nothing to narrow.
+MXFP6_WEIGHT_FORMATS = ("mxfp6", "mxfp4")
+
 
 @dataclass
 class BaseDiffusionConfig(TransformerConfig):
@@ -43,6 +49,7 @@ class BaseDiffusionConfig(TransformerConfig):
         mxfp4_gradient_stochastic_rounding: Stochastic rounding on gradients (default: False)
         fp6: Set to 'mxfp6' to run linears in MXFP6 (E2M3). None disables (default: None)
         mxfp6_backward_precision: MXFP6 backward precision, 'mxfp6' or 'fp8' (default: 'mxfp6')
+        mxfp6_weight_format: Weight operand format, 'mxfp6' or 'mxfp4' (A6W4) (default: 'mxfp6')
         mxfp6_fused_wgrad_accum: MXFP6 wgrad writes weight.main_grad in place (default: False)
         sensitive_layers_enabled: Enable sensitive layer configuration (default: False)
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
@@ -96,6 +103,18 @@ class BaseDiffusionConfig(TransformerConfig):
     # MXFP6 backward precision: "mxfp6" (pure) or "fp8" (hybrid), mirroring
     # mxfp4_backward_precision.
     mxfp6_backward_precision: str = "mxfp6"
+
+    # Format of the weight operand while activations stay MXFP6. "mxfp4" runs the forward
+    # and dgrad GEMMs on AITER's A6W4 kernels, which halve the weight's operand traffic.
+    #
+    # It buys less than the narrower format suggests. A6W4 issues the same
+    # v_mfma_scale_f32_16x16x128_f8f6f4 that A6W6 does, only with blgp=FP4 instead of
+    # blgp=FP6, so the matrix pipe runs at exactly the same rate and the gain is operand
+    # traffic alone -- measured at 1.0765x geomean on the 21 eligible Flux shapes, which
+    # is a low single-digit percentage of step time once GEMM's share of the step and the
+    # two-thirds eligibility are applied. And it costs accuracy: cosine against bf16 falls from 0.99919 to 0.99293.
+    # Default "mxfp6" accordingly; this is opt-in and gated on a convergence arm.
+    mxfp6_weight_format: str = "mxfp6"
 
     # Have the MXFP6 wgrad GEMM write weight.main_grad itself, replacing the elementwise
     # add Megatron's DDP hook would otherwise run over every gradient.
@@ -197,6 +216,27 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError(
                 "mxfp6_fused_wgrad_accum=True requires fp6 to be set (e.g. fp6: mxfp6); "
                 "with no MXFP6 linears it has no effect."
+            )
+        if self.mxfp6_weight_format not in MXFP6_WEIGHT_FORMATS:
+            raise ValueError(
+                f"Unknown mxfp6_weight_format '{self.mxfp6_weight_format}'. "
+                f"Choose from: {list(MXFP6_WEIGHT_FORMATS)}."
+            )
+        if self.mxfp6_weight_format != "mxfp6" and self.fp6 is None:
+            raise ValueError(
+                f"mxfp6_weight_format='{self.mxfp6_weight_format}' requires fp6 to be set "
+                "(e.g. fp6: mxfp6); with no MXFP6 linears it has no effect."
+            )
+        # A6W4 narrows the weight in the forward and in dgrad. An FP8 backward replaces
+        # dgrad entirely -- it re-quantizes the saved bf16 rather than reusing a packed
+        # weight -- so the pair would silently degrade to forward-only W4, which is a
+        # third of the already-small gain at the same accuracy cost. Reject rather than
+        # leave it to be discovered from a disappointing profile.
+        if self.mxfp6_weight_format == "mxfp4" and self.mxfp6_backward_precision != "mxfp6":
+            raise ValueError(
+                "mxfp6_weight_format='mxfp4' needs mxfp6_backward_precision='mxfp6', got "
+                f"'{self.mxfp6_backward_precision}'. An FP8 backward does not consume the "
+                "packed weight, so A6W4 would apply to the forward only."
             )
 
         if self.sensitive_layers_enabled and self.sensitive_layer_precision == "tw_fp8":

@@ -71,6 +71,29 @@ _quantize_mxfp6_row = torch.ops.primus_turbo.quantize_mxfp6_impl
 _quantize_mxfp6_qk_norm_rope_bwd = getattr(
     torch.ops.primus_turbo, "quantize_mxfp6_qk_norm_rope_bwd_impl", None
 )
+# A6W4's weight packers. Guarded like the QK-norm op above: an older Primus-Turbo has
+# neither, and mxfp6_weight_format='mxfp4' is rejected at config time when they are absent.
+_quantize_mxfp4_gemm_dual = getattr(torch.ops.primus_turbo, "quantize_mxfp4_gemm_dual_impl", None)
+_quantize_mxfp4_gemm_row = getattr(torch.ops.primus_turbo, "quantize_mxfp4_gemm_impl", None)
+
+
+def _pack_weight_dual(weight, weight_is_fp4):
+    """Pack a weight in both contraction directions, in whichever format is configured.
+
+    Under A6W4 this *replaces* the MXFP6 weight pack rather than adding to it, and writes
+    two thirds of the bytes -- wgrad never reads the weight, so there is no third
+    direction wanting the wider format.
+    """
+    if weight_is_fp4:
+        return _quantize_mxfp4_gemm_dual(weight)
+    return _quantize_mxfp6_dual(weight)
+
+
+def _pack_weight_row(weight, weight_is_fp4):
+    """Row direction only, for a forward with no backward behind it (eval)."""
+    if weight_is_fp4:
+        return _quantize_mxfp4_gemm_row(weight, 1)
+    return _quantize_mxfp6_row(weight, 1)
 
 
 def _wgrad_into_main_grad(weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m):
@@ -169,6 +192,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
         fp8_backend_value,
         fuse_wgrad_accum,
         grad_enabled,
+        weight_is_fp4,
     ):
         out_dtype = input.dtype
         orig_shape = input.shape
@@ -189,10 +213,10 @@ class MXFP6LinearFunction(torch.autograd.Function):
         # Getting this wrong fails loudly in backward on a None operand rather than silently.
         if grad_enabled:
             a_row, a_row_scale, a_col, a_col_scale = _quantize_mxfp6_dual(input_2d)
-            b_row, b_row_scale, b_col, b_col_scale = _quantize_mxfp6_dual(weight)
+            b_row, b_row_scale, b_col, b_col_scale = _pack_weight_dual(weight, weight_is_fp4)
         else:
             a_row, a_row_scale = _quantize_mxfp6_row(input_2d, 1)
-            b_row, b_row_scale = _quantize_mxfp6_row(weight, 1)
+            b_row, b_row_scale = _pack_weight_row(weight, weight_is_fp4)
             a_col = a_col_scale = b_col = b_col_scale = None
 
         # Bias goes into the GEMM's store epilogue, where it is free: the epilogue is bound by
@@ -214,6 +238,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
             out_dtype,
             _GRAN_VALUE,
             bias,
+            weight_is_fp4,
         )
         output = output.reshape(*orig_shape[:-1], output.shape[-1])
 
@@ -233,6 +258,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
             fp8_backend_value,
             fuse_wgrad_accum,
             grad_enabled,
+            weight_is_fp4,
         ) = inputs
 
         # setup_context still runs under no_grad, so this guard is load-bearing: the column
@@ -242,6 +268,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
 
         ctx.backward_is_fp8 = backward_is_fp8
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
+        ctx.weight_is_fp4 = weight_is_fp4
         ctx.out_dtype = input.dtype
         ctx.orig_shape = input.shape
         # The packed blobs carry no shape, so the logical dims have to be saved too.
@@ -335,6 +362,8 @@ class MXFP6LinearFunction(torch.autograd.Function):
                 n,
                 ctx.out_dtype,
                 _GRAN_VALUE,
+                None,
+                ctx.weight_is_fp4,
             )
             grad_input = grad_input.reshape(ctx.orig_shape)
 
@@ -355,8 +384,31 @@ class MXFP6LinearFunction(torch.autograd.Function):
                 )
 
         # Trailing Nones cover backward_is_fp8, fp8_bwd_dtype, fp8_gran_value,
-        # fp8_backend_value, fuse_wgrad_accum, grad_enabled.
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None
+        # fp8_backend_value, fuse_wgrad_accum, grad_enabled, weight_is_fp4.
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None
+
+
+def _resolve_weight_is_fp4(config) -> bool:
+    """Whether this module's weight operand is MXFP4, i.e. whether it runs A6W4.
+
+    Checked here rather than trusted from the config alone because an aiter predating
+    ROCm/aiter#5587 has no `gemm_a6w4` at all, and the failure that produces is an
+    AttributeError deep in the first forward. The config validation cannot see the
+    installed aiter, so this is where the two meet.
+    """
+    if getattr(config, "mxfp6_weight_format", "mxfp6") != "mxfp4":
+        return False
+    from primus_turbo.pytorch.kernels.quantization.mxfp4_pack import check_a6w4_support
+
+    supported, reason = check_a6w4_support()
+    if not supported:
+        raise RuntimeError(f"mxfp6_weight_format='mxfp4' is not usable here: {reason}")
+    if _quantize_mxfp4_gemm_dual is None or _quantize_mxfp4_gemm_row is None:
+        raise RuntimeError(
+            "mxfp6_weight_format='mxfp4' needs a Primus-Turbo carrying the MXFP4 GEMM "
+            "packer (quantize_mxfp4_gemm_dual_impl); this one does not."
+        )
+    return True
 
 
 def _resolve_wgrad_fusion(module, name: str) -> bool:
@@ -435,6 +487,7 @@ def _init_mxfp6_linear(module) -> None:
         raise RuntimeError(f"MXFP6 not supported on this device: {reason}")
 
     module._backward_is_fp8 = getattr(module.config, "mxfp6_backward_precision", "mxfp6") == "fp8"
+    module._weight_is_fp4 = _resolve_weight_is_fp4(module.config)
     module._fuse_wgrad_accum = _resolve_wgrad_fusion(module, name)
 
     if module._backward_is_fp8:
@@ -468,6 +521,7 @@ def _mxfp6_forward_impl(module, input, weight, **kwargs):
         module._fp8_backend_value,
         module._fuse_wgrad_accum,
         torch.is_grad_enabled(),
+        module._weight_is_fp4,
     )
     return result[0]
 
@@ -550,7 +604,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(hidden_states, w1, b1, w2, fuse_wgrad_accum, grad_enabled):
+    def forward(hidden_states, w1, b1, w2, fuse_wgrad_accum, grad_enabled, weight_is_fp4):
         out_dtype = hidden_states.dtype
         orig_shape = hidden_states.shape
         x = hidden_states.reshape(-1, orig_shape[-1])
@@ -564,39 +618,43 @@ class MXFP6MLPFunction(torch.autograd.Function):
         # grad_enabled has to be sampled by the caller rather than read here.
         if grad_enabled:
             x_row, x_row_s, x_col, x_col_s = _quantize_mxfp6_dual(x)
-            w1_row, w1_row_s, w1_col, w1_col_s = _quantize_mxfp6_dual(w1)
+            w1_row, w1_row_s, w1_col, w1_col_s = _pack_weight_dual(w1, weight_is_fp4)
         else:
             x_row, x_row_s = _quantize_mxfp6_row(x, 1)
-            w1_row, w1_row_s = _quantize_mxfp6_row(w1, 1)
+            w1_row, w1_row_s = _pack_weight_row(w1, weight_is_fp4)
             x_col = x_col_s = w1_col = w1_col_s = None
 
         # Pre-activation. Saved for backward, where the epilogue is recomputed from it
         # rather than its output being stashed -- the same bytes are held either way.
-        y1 = gemm_fp6_impl(x_row, x_row_s, w1_row, w1_row_s, m, f, k, out_dtype, _GRAN_VALUE)
+        y1 = gemm_fp6_impl(
+            x_row, x_row_s, w1_row, w1_row_s, m, f, k, out_dtype, _GRAN_VALUE, None, weight_is_fp4
+        )
 
         # gelu(y1 + b1), packed in both directions without ever being written out.
         if grad_enabled:
             a_row, a_row_s, a_col, a_col_s, _ = _quantize_mxfp6_fused_dual(
                 y1, None, b1, MXFP6_PROLOGUE_BIAS_GELU, False
             )
-            w2_row, w2_row_s, w2_col, w2_col_s = _quantize_mxfp6_dual(w2)
+            w2_row, w2_row_s, w2_col, w2_col_s = _pack_weight_dual(w2, weight_is_fp4)
         else:
             # The fused packer has no row-only mode, so the activation still costs a dual
             # pass; only its GELU epilogue matters here and that is shared.
             a_row, a_row_s, a_col, a_col_s, _ = _quantize_mxfp6_fused_dual(
                 y1, None, b1, MXFP6_PROLOGUE_BIAS_GELU, False
             )
-            w2_row, w2_row_s = _quantize_mxfp6_row(w2, 1)
+            w2_row, w2_row_s = _pack_weight_row(w2, weight_is_fp4)
             w2_col = w2_col_s = None
 
-        output = gemm_fp6_impl(a_row, a_row_s, w2_row, w2_row_s, m, h, f, out_dtype, _GRAN_VALUE)
+        output = gemm_fp6_impl(
+            a_row, a_row_s, w2_row, w2_row_s, m, h, f, out_dtype, _GRAN_VALUE, None, weight_is_fp4
+        )
         output = output.reshape(*orig_shape[:-1], h)
 
         return output, y1, x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        hidden_states, w1, b1, w2, fuse_wgrad_accum, grad_enabled = inputs
+        hidden_states, w1, b1, w2, fuse_wgrad_accum, grad_enabled, weight_is_fp4 = inputs
 
         # setup_context still runs under no_grad, where the column blobs are None.
         if not grad_enabled:
@@ -610,6 +668,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
         ctx.k = hidden_states.shape[-1]
         ctx.f = w1.shape[0]
         ctx.h = w2.shape[0]
+        ctx.weight_is_fp4 = weight_is_fp4
 
         _, y1, x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s = output
         blobs = (x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s)
@@ -645,7 +704,9 @@ class MXFP6MLPFunction(torch.autograd.Function):
         g2_row, g2_row_s, g2_col, g2_col_s = _quantize_mxfp6_dual(g2)
 
         # fc2 dgrad: [m, f] = g2[m, h] @ w2[h, f], contracting h.
-        grad_a = gemm_fp6_impl(g2_row, g2_row_s, w2_col, w2_col_s, m, f, h, out_dtype, _GRAN_VALUE)
+        grad_a = gemm_fp6_impl(
+            g2_row, g2_row_s, w2_col, w2_col_s, m, f, h, out_dtype, _GRAN_VALUE, None, ctx.weight_is_fp4
+        )
         # fc2 wgrad: [h, f] = g2.T[h, m] @ a[m, f], contracting m.
         if ctx.fuse_wgrad_accum:
             grad_w2 = _wgrad_into_main_grad(fused_weights[1], g2_col, g2_col_s, a_col, a_col_s, h, f, m)
@@ -661,7 +722,9 @@ class MXFP6MLPFunction(torch.autograd.Function):
         )
 
         # fc1 dgrad: [m, k] = grad_y1[m, f] @ w1[f, k], contracting f.
-        grad_x = gemm_fp6_impl(g1_row, g1_row_s, w1_col, w1_col_s, m, k, f, out_dtype, _GRAN_VALUE)
+        grad_x = gemm_fp6_impl(
+            g1_row, g1_row_s, w1_col, w1_col_s, m, k, f, out_dtype, _GRAN_VALUE, None, ctx.weight_is_fp4
+        )
         grad_x = grad_x.reshape(ctx.orig_shape)
         # fc1 wgrad: [f, k] = grad_y1.T[f, m] @ x[m, k], contracting m.
         if ctx.fuse_wgrad_accum:
@@ -671,8 +734,8 @@ class MXFP6MLPFunction(torch.autograd.Function):
 
         grad_b1 = b1_partial.sum(0).to(out_dtype) if want_bias_grad else None
 
-        # Trailing Nones cover fuse_wgrad_accum and grad_enabled.
-        return grad_x, grad_w1, grad_b1, grad_w2, None, None
+        # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4.
+        return grad_x, grad_w1, grad_b1, grad_w2, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -737,6 +800,7 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         interleaved,
         fuse_wgrad_accum,
         grad_enabled,
+        weight_is_fp4,
     ):
         from primus.backends.megatron.core.models.diffusion.common.fused_norm_rope import (
             _qkv_fwd,
@@ -755,16 +819,16 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         # a no-grad forward should not pay for them.
         if grad_enabled:
             x_row, x_row_s, x_col, x_col_s = _quantize_mxfp6_dual(x)
-            w_row, w_row_s, w_col, w_col_s = _quantize_mxfp6_dual(w_qkv)
+            w_row, w_row_s, w_col, w_col_s = _pack_weight_dual(w_qkv, weight_is_fp4)
         else:
             x_row, x_row_s = _quantize_mxfp6_row(x, 1)
-            w_row, w_row_s = _quantize_mxfp6_row(w_qkv, 1)
+            w_row, w_row_s = _pack_weight_row(w_qkv, weight_is_fp4)
             x_col = x_col_s = w_col = w_col_s = None
 
         # The bias is folded into the GEMM's epilogue, so mixed_qkv is the biased projection
         # -- which is what the norm consumes and what the prologue re-reads in the backward.
         mixed_qkv = gemm_fp6_impl(
-            x_row, x_row_s, w_row, w_row_s, m, n, k, out_dtype, _GRAN_VALUE, b_qkv
+            x_row, x_row_s, w_row, w_row_s, m, n, k, out_dtype, _GRAN_VALUE, b_qkv, weight_is_fp4
         )
 
         # The norm and rotation, unchanged. This is the production Triton op, on the
@@ -788,6 +852,7 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
             interleaved,
             fuse_wgrad_accum,
             grad_enabled,
+            weight_is_fp4,
         ) = inputs
 
         # setup_context still runs under no_grad, where the column blobs are None.
@@ -803,6 +868,7 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         ctx.n = w_qkv.shape[0]
         ctx.d = wq.shape[0]
         ctx.h = ctx.n // (3 * ctx.d)
+        ctx.weight_is_fp4 = weight_is_fp4
 
         _, _, _, mixed_qkv, q_rstd, k_rstd, x_col, x_col_s, w_col, w_col_s = output
         blobs = (x_col, x_col_s, w_col, w_col_s)
@@ -852,7 +918,9 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         )
 
         # dgrad: [m, k] = d(mixed_qkv)[m, n] @ w_qkv[n, k], contracting n.
-        grad_x = gemm_fp6_impl(g_row, g_row_s, w_col, w_col_s, m, k, n, out_dtype, _GRAN_VALUE)
+        grad_x = gemm_fp6_impl(
+            g_row, g_row_s, w_col, w_col_s, m, k, n, out_dtype, _GRAN_VALUE, None, ctx.weight_is_fp4
+        )
         grad_x = grad_x.reshape(ctx.orig_shape)
         # wgrad: [n, k] = d(mixed_qkv).T[n, m] @ x[m, k], contracting m.
         if ctx.fuse_wgrad_accum:
@@ -868,8 +936,9 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         grad_wq = dwq_partial.sum((0, 1)).to(wq.dtype)
         grad_wk = dwk_partial.sum((0, 1)).to(wk.dtype)
 
-        # Trailing Nones cover cos, sin, eps, interleaved, fuse_wgrad_accum and grad_enabled.
-        return grad_x, grad_w, grad_b, grad_wq, grad_wk, None, None, None, None, None, None
+        # Trailing Nones cover cos, sin, eps, interleaved, fuse_wgrad_accum, grad_enabled
+        # and weight_is_fp4.
+        return grad_x, grad_w, grad_b, grad_wq, grad_wk, None, None, None, None, None, None, None
 
 
 def _is_tanh_gelu(fn) -> bool:
@@ -983,6 +1052,7 @@ class MXFP6FusedMLP(MLP):
             self.linear_fc2.weight,
             fuse_wgrad_accum,
             torch.is_grad_enabled(),
+            _resolve_weight_is_fp4(self.config),
         )[0]
 
         # fc2 is built with skip_bias_add=True, so MLP's contract is to hand its bias back
