@@ -126,17 +126,21 @@ def test_inverted_table_and_chunks():
     B, Hkv, S, topk = 2, 2, 700, 4
     table = _table(B, Hkv, S, topk, torch.Generator(device="cuda").manual_seed(2))
     n_blocks = -(-S // BLOCK)
-    ptr, tokens = build_inverted_table(table, n_blocks)
+    ptr, entries = build_inverted_table(table, n_blocks)
 
+    flat = table.flatten()
     for b in range(B):
         for g in range(Hkv):
             for blk in range(n_blocks):
                 row = (b * Hkv + g) * n_blocks + blk
-                got = tokens[ptr[row] : ptr[row + 1]].tolist()
+                mine = entries[ptr[row] : ptr[row + 1]].long()
+                assert (flat[mine] == blk).all(), (b, g, blk)
+                assert (mine // (S * topk) == b * Hkv + g).all(), (b, g, blk)
+                got = (mine // topk % S).tolist()
                 want = (table[b, g] == blk).any(dim=-1).nonzero().flatten().tolist()
                 assert got == want, (b, g, blk)
 
-    chunks, chunk_ptr, n_chunks = plan_chunks(ptr, tokens.numel(), target_chunks=64, min_chunk=16)
+    chunks, chunk_ptr, n_chunks = plan_chunks(ptr, entries.numel(), target_chunks=64, min_chunk=16)
     assert chunks.shape[0] == n_chunks
     for row in range(ptr.numel() - 1):
         mine = chunks[chunk_ptr[row] : chunk_ptr[row + 1]]
@@ -145,6 +149,24 @@ def test_inverted_table_and_chunks():
         assert (mine[1:, 1] == mine[:-1, 2]).all(), "chunks must tile the row without gaps"
     tail = chunks[chunk_ptr[-1] :]
     assert (tail[:, 1] == tail[:, 2]).all(), "chunks past the live ones must be empty"
+
+
+@pytest.mark.parametrize("S, B, Hkv, topk", [(700, 2, 2, 4), (4096, 1, 4, 16), (33000, 1, 2, 16)])
+def test_inverted_table_matches_a_stable_sort(S, B, Hkv, topk):
+    """The counting sort must reproduce a stable sort exactly. 33000 tokens is
+    past 256 blocks, where token chunks grow and span several staged tiles."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+        _inverted_table_by_sort,
+        build_inverted_table,
+    )
+
+    table = _table(B, Hkv, S, topk, torch.Generator(device="cuda").manual_seed(4))
+    n_blocks = -(-S // BLOCK)
+    ptr, entries = build_inverted_table(table, n_blocks)
+    ref_ptr, ref_entries = _inverted_table_by_sort(table.to(torch.int32), n_blocks)
+    assert torch.equal(ptr, ref_ptr)
+    live = int(ref_ptr[-1])
+    assert torch.equal(entries[:live], ref_entries[:live])
 
 
 def test_no_host_sync():

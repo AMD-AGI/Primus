@@ -18,28 +18,33 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd i
 
 class _MSAAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, block_table, softmax_scale, block_size, return_slot_lse):
+    def forward(ctx, q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan):
         outs = msa_token_fwd(q, k, v, block_table, softmax_scale, block_size, return_slot_lse=return_slot_lse)
         o, lse = outs[0], outs[1]
         ctx.save_for_backward(q, k, v, o, lse, block_table)
         ctx.softmax_scale = softmax_scale
         ctx.block_size = block_size
+        ctx.plan = plan
         ctx.mark_non_differentiable(*outs[1:])
         return outs
 
     @staticmethod
     def backward(ctx, dout, *_):
         q, k, v, o, lse, block_table = ctx.saved_tensors
-        dq, dk, dv = msa_token_bwd(dout, q, k, v, o, lse, block_table, ctx.softmax_scale, ctx.block_size)
-        return dq, dk, dv, None, None, None, None
+        dq, dk, dv = msa_token_bwd(
+            dout, q, k, v, o, lse, block_table, ctx.softmax_scale, ctx.block_size, plan=ctx.plan
+        )
+        return dq, dk, dv, None, None, None, None, None
 
 
-def msa_attention(q, k, v, block_table, softmax_scale, block_size=128, return_slot_lse=False):
+def msa_attention(q, k, v, block_table, softmax_scale, block_size=128, return_slot_lse=False, plan=None):
     """Differentiable MSA over ``[S, B, H, 128]`` q/k/v.
 
-    ``block_table`` is the indexer's ``[B, Hkv, S, topk]`` selection. Returns
-    ``(o, lse)``, or ``(o, lse, slot_lse)``; only ``o`` carries a gradient.
+    ``block_table`` is the indexer's ``[B, Hkv, S, topk]`` selection and
+    ``plan`` its :class:`BlockPlan`, when the indexer built one; the backward
+    builds it otherwise. Returns ``(o, lse)``, or ``(o, lse, slot_lse)``; only
+    ``o`` carries a gradient.
     """
     q, k, v = (t.contiguous() for t in (q, k, v))
     block_table = block_table.to(torch.int32).contiguous()
-    return _MSAAttention.apply(q, k, v, block_table, softmax_scale, block_size, return_slot_lse)
+    return _MSAAttention.apply(q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan)

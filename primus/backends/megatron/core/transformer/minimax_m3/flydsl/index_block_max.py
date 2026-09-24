@@ -45,6 +45,10 @@ from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
+from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+    _tr16,
+)
+
 WAVES = 4
 THREADS = 64 * WAVES
 QPW = 16  # queries per wave == MFMA columns
@@ -53,8 +57,6 @@ TKEYS = 16  # keys per MFMA tile
 # Elements per thread in the row-sum backward kernels: a 2-wide bf16 access,
 # so any even index dim works (a 1-wide vector does not lower).
 _ROW_EPT = 2
-_DK_CHUNK = 256  # key-sorted entries per work-group in the dK pass
-_DK_UNROLL = 8  # entries whose loads are in flight together
 
 
 def build_index_block_max(num_heads: int, index_dim: int, block_size: int):
@@ -236,262 +238,284 @@ def build_index_block_max(num_heads: int, index_dim: int, block_size: int):
     return launch
 
 
-def _and(a, b):
-    return ArithValue(arith.AndIOp(_raw(a), _raw(b)).result)
+def build_index_dk(num_heads: int, index_dim: int, topk: int, block_size: int):
+    """dK for the fused selection, pass 1: one work-group per chunk of the block plan.
 
+    A block score's gradient ``g`` lands on the key that won the block, so over
+    one KV block ``dK[block keys] = A^T Q`` with ``A[slot, key] = g`` where
+    ``key`` won that slot's block, 0 elsewhere -- the attention's ``dS^T Q``
+    with a one-hot ``dS``. The work therefore follows the attention's own
+    :class:`BlockPlan`: a chunk is a run of the table entries that picked one
+    (batch, index head, block), and no sort by winning key is needed.
 
-def _flag(cond):
-    """i1 -> Int32 0/1, so flags can be negated (``== 0``) and carried by loops."""
-    return fx.Int32(ArithValue(cond).select(_raw(fx.Int32(1)), _raw(fx.Int32(0))))
+    8 waves, each owning 16 of the block's keys, take 64 entries per step --
+    all their loads in flight together -- as four 16-entry MFMA sub-steps: the
+    entries' index-q rows are staged in LDS and read back transposed as the A
+    operand of ``dK^T += Q^T A``, and each lane builds its column of ``A``
+    from the entries' gradients and winning keys. ``g`` is fp32; it goes into
+    the bf16 MFMA as a high and a low half, 16 mantissa bits in all, so its
+    rounding stays far below that of the bf16 dK the pass returns. Each chunk
+    writes an fp32 ``[block_size, D]`` partial;
+    :func:`build_index_dk_reduce` sums them in order, so the result is
+    deterministic.
 
-
-def build_index_dk_chunks(num_heads: int, index_dim: int, topk: int, chunk: int = _DK_CHUNK):
-    """dK, pass 1: each work-group sums one fixed-size chunk of the key-sorted entries.
-
-    Entry ``e`` is a flat index into ``[B, n_index, S, topk]`` (a selected slot).
-    ``ORDER`` lists the live entries sorted by the key that won their block,
-    ``SKEY`` holds that key (``b * S + key``) per sorted position, and
-    ``BOUNDS`` is the CSR over keys; dead entries carry the sentinel key
-    ``B * S`` and sort past ``BOUNDS[B * S]``, so no work-group reads them.
-    ``dk[j] = sum g[e] * q[token(e), head(e)]`` over key ``j``'s run.
-
-    Splitting the sorted array, not the keys, keeps the work even when a few
-    keys win most blocks -- an attention-sink-like direction shared by q and k
-    hands a handful of keys thousands of entries each. A run that lies inside
-    the chunk is written straight to ``DK``; one that crosses a chunk edge
-    leaves an fp32 partial in ``WS[chunk, slot]`` -- slot 0 for the chunk's
-    first run, 1 for its last -- which pass 2 sums in chunk order.
+    ``ENT`` holds flat ``[B, n_index, S, topk]`` entry ids; ``GS`` and ``KEYS``
+    are indexed by them (``GS`` is 0 on slots that carry no gradient).
     """
     elem = fx.BFloat16
     H, DI = num_heads, index_dim
-    EPT = _ROW_EPT
-    THR = DI // EPT  # one thread per EPT-element slice of a row
-    U = _DK_UNROLL
-    assert DI % EPT == 0 and chunk % U == 0
+    KW = block_size // TKEYS  # waves, one per 16 keys
+    NTH = 64 * KW
+    TK = 16  # entries per MFMA: its K
+    NSUB = 4  # MFMA sub-steps per step: every load of 64 entries is in flight at once
+    TT = TK * NSUB
+    DTI = DI // 16
+    STR = DI + 16  # LDS row stride (elements)
+    VEC = 8  # elements per staging load
+    NP = TT * DI // (NTH * VEC)  # staging loads per thread per step
+    assert DI % 16 == 0 and block_size % TKEYS == 0 and TT * DI % (NTH * VEC) == 0 and DI % VEC == 0
 
-    @flyc.kernel(known_block_size=[THR, 1, 1])
+    allocator = SmemAllocator(None, arch=get_hip_arch(), global_sym_name="msa_index_dk_smem")
+    q_off = allocator._align(allocator.ptr, 16)
+    allocator.ptr = allocator._align(q_off + TT * STR * 2, 16)
+
+    @flyc.kernel(known_block_size=[NTH, 1, 1])
     def k_fn(
-        ORDER: fx.Tensor,
-        SKEY: fx.Tensor,
-        BOUNDS: fx.Tensor,
-        G: fx.Tensor,
+        ENT: fx.Tensor,
+        CHUNKS: fx.Tensor,
+        GS: fx.Tensor,
+        KEYS: fx.Tensor,
         Q: fx.Tensor,
-        DK: fx.Tensor,
         WS: fx.Tensor,
         S: fx.Int32,
         B: fx.Int32,
+        NB: fx.Int32,
+        NCH: fx.Int32,
     ):
+        v4 = Vec.make_type(4, elem)
+        v4f = Vec.make_type(4, fx.Float32)
+        lds_q = SmemPtr(allocator.get_base(), q_off, elem.ir_type, shape=(TT * STR,)).get()
+
         tid = fx.Index(gpu.thread_idx.x)
+        wave = tid // fx.Index(64)
+        lane = tid % fx.Index(64)
+        lo = lane % fx.Index(16)
+        grp = lane // fx.Index(16)
         Sn = fx.Index(S)
         Bn = fx.Index(B)
-        c = fx.Index(gpu.block_idx.x)
+        NBn = fx.Index(NB)
+        chunk = fx.Index(gpu.block_idx.x)
+
         n_entries = Bn * fx.Index(H) * Sn * fx.Index(topk)
-        n_keys = Bn * Sn
-        n_chunks = (n_entries + fx.Index(chunk - 1)) // fx.Index(chunk)
         entry_bytes = _raw(n_entries * fx.Index(4))
-        ord_rsrc = buffer_ops.create_buffer_resource(ORDER, max_size=False, num_records_bytes=entry_bytes)
-        skey_rsrc = buffer_ops.create_buffer_resource(SKEY, max_size=False, num_records_bytes=entry_bytes)
-        g_rsrc = buffer_ops.create_buffer_resource(G, max_size=False, num_records_bytes=entry_bytes)
-        bnd_rsrc = buffer_ops.create_buffer_resource(
-            BOUNDS, max_size=False, num_records_bytes=_raw((n_keys + fx.Index(1)) * fx.Index(4))
-        )
+        ent_rsrc = buffer_ops.create_buffer_resource(ENT, max_size=False, num_records_bytes=entry_bytes)
+        gs_rsrc = buffer_ops.create_buffer_resource(GS, max_size=False, num_records_bytes=entry_bytes)
+        key_rsrc = buffer_ops.create_buffer_resource(KEYS, max_size=False, num_records_bytes=entry_bytes)
         q_rsrc = buffer_ops.create_buffer_resource(
             Q, max_size=False, num_records_bytes=_raw(Sn * Bn * fx.Index(H * DI * 2))
         )
-        dk_rsrc = buffer_ops.create_buffer_resource(
-            DK, max_size=False, num_records_bytes=_raw(Sn * Bn * fx.Index(DI * 2))
+        ch_rsrc = buffer_ops.create_buffer_resource(
+            CHUNKS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(3 * 4))
         )
         ws_rsrc = buffer_ops.create_buffer_resource(
-            WS, max_size=False, num_records_bytes=_raw(n_chunks * fx.Index(2 * DI * 4))
+            WS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(block_size * DI * 4))
         )
-        col = tid * fx.Index(EPT)
-        vf = Vec.make_type(EPT, fx.Float32)
-        zero = fx.Int32(0)
 
         def load_i32(rsrc, idx):
             return fx.Int32(buffer_ops.buffer_load(rsrc, idx, vec_width=1, dtype=fx.Int32))
 
-        def at(x):  # Int32 position -> Index, clamped at 0
-            return fx.Index(fx.Int32(ArithValue(x > zero).select(_raw(x), _raw(zero))))
+        # ---- this chunk: (plan row, first entry, end entry); row -> (batch, index head, block) ----
+        row = fx.Index(load_i32(ch_rsrc, chunk * fx.Index(3)))
+        e_begin = load_i32(ch_rsrc, chunk * fx.Index(3) + fx.Index(1))
+        e_end = load_i32(ch_rsrc, chunk * fx.Index(3) + fx.Index(2))
+        bh = row // NBn
+        blk = row % NBn
+        b = bh // fx.Index(H)
+        h = bh % fx.Index(H)
+        my_key = blk * fx.Index(block_size) + wave * fx.Index(TKEYS) + lo  # this lane's column of A
+        my_key_i32 = fx.Int32(my_key)
+        c_zero = fx.Float32(0.0)
 
-        def store_dk(key_flat, vals, mask):
-            kf = fx.Index(key_flat)
-            off = ((kf % Sn) * Bn + kf // Sn) * fx.Index(DI) + col
-            packed = [fx.BFloat16(_raw(v)) for v in vals]
-            buffer_ops.buffer_store(
-                _raw(Vec.from_elements(packed, elem)),
-                dk_rsrc,
-                off * fx.Index(2),
-                mask=_raw(mask),
-                offset_is_bytes=True,
-            )
-
-        def store_ws(slot, vals, mask):
-            off = (c * fx.Index(2) + slot) * fx.Index(DI) + col
-            buffer_ops.buffer_store(
-                _raw(Vec.from_elements(vals, fx.Float32)),
-                ws_rsrc,
-                off * fx.Index(4),
-                mask=_raw(mask),
-                offset_is_bytes=True,
-            )
-
-        live = load_i32(bnd_rsrc, n_keys)
-        r0 = fx.Int32(c * fx.Index(chunk))
-        r1 = r0 + fx.Int32(chunk)
-        r1 = fx.Int32(ArithValue(r1 < live).select(_raw(r1), _raw(live)))
-        has_any = ArithValue(r0 < r1)
-        first_key = load_i32(skey_rsrc, fx.Index(r0))
-        # does the chunk's first run begin in an earlier chunk / its last run go on past it?
-        cross_l = _flag(
-            _and(ArithValue(r0 > zero), ArithValue(load_i32(skey_rsrc, at(r0 - fx.Int32(1))) == first_key))
+        st_flat = [(fx.Index(p * NTH) + tid) * fx.Index(VEC) for p in range_constexpr(NP)]
+        st_rows = [f // fx.Index(DI) for f in st_flat]
+        st_cols = [f % fx.Index(DI) for f in st_flat]
+        # transposed read of a 16-row tile: lane gets Q^T[d = lo, entry = grp*4 .. grp*4+3]
+        q_tr = fx.Int64(
+            ((grp * fx.Index(4) + lo // fx.Index(4)) * fx.Index(STR) + (lo % fx.Index(4)) * fx.Index(4))
+            * fx.Index(2)
+            + fx.Index(q_off)
         )
-        last_key = load_i32(skey_rsrc, at(r1 - fx.Int32(1)))
-        cross_r = _flag(_and(ArithValue(r1 < live), ArithValue(load_i32(skey_rsrc, at(r1)) == last_key)))
 
-        # carry: the running sum, the run's key, and whether it is the chunk's first run
-        init = [fx.Float32(0.0) for _ in range_constexpr(EPT)] + [first_key, fx.Int32(1)]
+        def entry_at(r):  # clamped into the chunk, so every load stays in bounds
+            r = ArithValue(r < e_end).select(_raw(r), _raw(e_end - fx.Int32(1)))
+            return fx.Index(load_i32(ent_rsrc, fx.Index(fx.Int32(r))))
+
+        c_zero_v4 = Vec.filled(4, 0.0, fx.Float32)
+        init = [c_zero_v4 for _ in range_constexpr(DTI)]
         results = init
-        for r, it in range(fx.Index(r0), fx.Index(r1), fx.Index(U), init=init):
-            acc = [fx.Float32(it[i]) for i in range_constexpr(EPT)]
-            cur = fx.Int32(it[EPT])
-            first = fx.Int32(it[EPT + 1])
-            # issue all U entries' loads before using any of them
-            idx = []
-            for u in range_constexpr(U):
-                ru = r + fx.Index(u)
-                idx.append(
-                    (ArithValue(fx.Int32(ru) < r1), load_i32(skey_rsrc, ru), fx.Index(load_i32(ord_rsrc, ru)))
+        for r0, it in range(fx.Index(e_begin), fx.Index(e_end), fx.Index(TT), init=init):
+            r0_i32 = fx.Int32(r0)
+            # ---- every load of the step first: the 64 index-q rows, and this lane's
+            # 16 (gradient, winning key) pairs -- entries sub*16 + grp*4 + i ----
+            q_st = []
+            for p in range_constexpr(NP):
+                t_st = (entry_at(r0_i32 + fx.Int32(st_rows[p])) // fx.Index(topk)) % Sn
+                q_st.append(
+                    buffer_ops.buffer_load(
+                        q_rsrc,
+                        ((t_st * Bn + b) * fx.Index(H) + h) * fx.Index(DI) + st_cols[p],
+                        vec_width=VEC,
+                        dtype=elem,
+                    )
                 )
-            rows = []
-            for ok, ku, e in idx:
-                tok = (e // fx.Index(topk)) % Sn
-                h = (e // fx.Index(topk) // Sn) % fx.Index(H)
-                b = e // (fx.Index(topk * H) * Sn)
-                g = fx.Float32(buffer_ops.buffer_load(g_rsrc, e, vec_width=1, dtype=fx.Float32))
-                qv = buffer_ops.buffer_load(
-                    q_rsrc, ((tok * Bn + b) * fx.Index(H) + h) * fx.Index(DI) + col, vec_width=EPT, dtype=elem
-                )
-                rows.append((ok, ku, g, qv))
-            for ok, ku, g, qv in rows:
-                ku = fx.Int32(ok.select(_raw(ku), _raw(cur)))
-                g = fx.Float32(ok.select(_raw(g), _raw(fx.Float32(0.0))))
-                qf = Vec(arith.ExtFOp(vf, _raw(qv)).result)
-                changed = ArithValue(ku != cur)
-                # the run that just ended is a partial only if it came in from the previous chunk
-                partial = first * cross_l
-                store_ws(fx.Index(0), acc, _and(changed, ArithValue(partial == fx.Int32(1))))
-                store_dk(cur, acc, _and(changed, ArithValue(partial == zero)))
-                prod = [g * fx.Float32(_raw(qf[i])) for i in range_constexpr(EPT)]
-                acc = [
-                    fx.Float32(changed.select(_raw(prod[i]), _raw(acc[i] + prod[i])))
-                    for i in range_constexpr(EPT)
-                ]
-                first = fx.Int32(changed.select(_raw(zero), _raw(first)))
-                cur = ku
-            results = yield acc + [cur, first]
+            meta = []
+            for sub in range_constexpr(NSUB):
+                for i in range_constexpr(4):
+                    r = r0_i32 + fx.Int32(grp * fx.Index(4) + fx.Index(sub * TK + i))
+                    e = entry_at(r)
+                    meta.append(
+                        (
+                            r,
+                            fx.Float32(buffer_ops.buffer_load(gs_rsrc, e, vec_width=1, dtype=fx.Float32)),
+                            load_i32(key_rsrc, e),
+                        )
+                    )
+            gpu.barrier()  # WAR: every wave is done with the previous step's tile
+            for p in range_constexpr(NP):
+                Vec(q_st[p]).store(lds_q, [st_rows[p] * fx.Index(STR) + st_cols[p]])
+            gpu.barrier()
+            acc = [it[dt] for dt in range_constexpr(DTI)]
+            for sub in range_constexpr(NSUB):
+                # this lane's column of A for the sub-step, as a high and a low bf16 half
+                hi_v, lo_v = [], []
+                for i in range_constexpr(4):
+                    r, gv, kv = meta[sub * 4 + i]
+                    hit = ArithValue(
+                        arith.AndIOp(_raw(ArithValue(r < e_end)), _raw(ArithValue(kv == my_key_i32))).result
+                    )
+                    val = fx.Float32(hit.select(_raw(gv), _raw(c_zero)))
+                    hb = fx.BFloat16(_raw(val))
+                    hi_v.append(hb)
+                    lo_v.append(
+                        fx.BFloat16(_raw(val - fx.Float32(arith.ExtFOp(fx.Float32.ir_type, _raw(hb)).result)))
+                    )
+                a_hi = _raw(Vec.from_elements(hi_v, elem).bitcast(fx.Int16))
+                a_lo = _raw(Vec.from_elements(lo_v, elem).bitcast(fx.Int16))
+                for dt in range_constexpr(DTI):
+                    q_t = _tr16(v4, q_tr + fx.Int64((sub * TK * STR + dt * 16) * 2))
+                    acc[dt] = rocdl.mfma_f32_16x16x16bf16_1k(v4f, [q_t, a_hi, acc[dt]])
+                    acc[dt] = rocdl.mfma_f32_16x16x16bf16_1k(v4f, [q_t, a_lo, acc[dt]])
+            results = yield acc
 
-        acc = [fx.Float32(results[i]) for i in range_constexpr(EPT)]
-        cur = fx.Int32(results[EPT])
-        first = fx.Int32(results[EPT + 1])
-        either = _flag(ArithValue(cross_l + cross_r > zero))
-        crossing = fx.Int32(ArithValue(first == fx.Int32(1)).select(_raw(either), _raw(cross_r)))
-        store_ws(fx.Index(fx.Int32(1) - first), acc, _and(has_any, ArithValue(crossing == fx.Int32(1))))
-        store_dk(cur, acc, _and(has_any, ArithValue(crossing == zero)))
+        # fp32 partial [chunk][key in block][d]: lane holds dK^T[d = dt*16 + grp*4 + i, key = wave*16 + lo]
+        ws_row = (chunk * fx.Index(block_size) + wave * fx.Index(TKEYS) + lo) * fx.Index(DI)
+        for dt in range_constexpr(DTI):
+            off = ws_row + fx.Index(dt * 16) + grp * fx.Index(4)
+            buffer_ops.buffer_store(results[dt], ws_rsrc, off * fx.Index(4), offset_is_bytes=True)
 
     @flyc.jit
-    def launch(ORDER, SKEY, BOUNDS, G, Q, DK, WS, S, B, stream):
-        n_entries = fx.Index(B) * fx.Index(H) * fx.Index(S) * fx.Index(topk)
-        k_fn(ORDER, SKEY, BOUNDS, G, Q, DK, WS, S, B).launch(
-            grid=((n_entries + fx.Index(chunk - 1)) // fx.Index(chunk), 1, 1),
-            block=(THR, 1, 1),
-            stream=stream,
+    def launch(ENT, CHUNKS, GS, KEYS, Q, WS, S, B, NB, NCH, stream):
+        allocator.finalized = False
+        with ir.InsertionPoint(CompilationContext.get_current().gpu_module_body):
+            allocator.finalize()
+        k_fn(ENT, CHUNKS, GS, KEYS, Q, WS, S, B, NB, NCH).launch(
+            grid=(fx.Index(NCH), 1, 1), block=(NTH, 1, 1), stream=stream
         )
 
     launch.compile = lambda *a: flyc.compile(launch, *a)
     return launch
 
 
-def build_index_dk_fix(num_heads: int, index_dim: int, topk: int, chunk: int = _DK_CHUNK):
-    """dK, pass 2: one work-group per key finishes a run that crossed chunks.
+def build_index_dk_reduce(num_heads: int, index_dim: int, block_size: int):
+    """dK for the fused selection, pass 2: one work-group per (batch, KV block,
+    1024-element slice of the block's dK).
 
-    It sums the run's partials in chunk order -- its first chunk's (slot 0 if
-    the run starts that chunk, else slot 1), then slot 0 of every later chunk
-    it reaches -- and writes zeros for a key no entry picked. Runs inside one
-    chunk were written by pass 1 and are left alone.
+    The index keys are shared by every index head (MQA), so a block's dK sums
+    the chunk partials of all its heads' plan rows, head by head and chunk by
+    chunk -- a fixed order. Every plan row has at least one chunk, so a block
+    nobody picked still gets its zeros written. The slices keep the GPU busy
+    at short sequences, where there are only a few dozen blocks.
     """
-    elem = fx.BFloat16
     H, DI = num_heads, index_dim
-    EPT = _ROW_EPT
-    THR = DI // EPT
-    U = 4
-    assert DI % EPT == 0
+    NTH = 256
+    NE = block_size * DI  # elements per partial
+    PER = 1  # v4 groups per thread
+    SLICE = NTH * 4 * PER
+    SPLIT = NE // SLICE
+    assert NE % SLICE == 0
 
-    @flyc.kernel(known_block_size=[THR, 1, 1])
-    def k_fn(BOUNDS: fx.Tensor, WS: fx.Tensor, DK: fx.Tensor, S: fx.Int32, B: fx.Int32):
+    @flyc.kernel(known_block_size=[NTH, 1, 1])
+    def k_fn(
+        WS: fx.Tensor, CHPTR: fx.Tensor, DK: fx.Tensor, S: fx.Int32, B: fx.Int32, NB: fx.Int32, NCH: fx.Int32
+    ):
         tid = fx.Index(gpu.thread_idx.x)
         Sn = fx.Index(S)
         Bn = fx.Index(B)
-        j = fx.Index(gpu.block_idx.x)  # b * S + key
-        n_entries = Bn * fx.Index(H) * Sn * fx.Index(topk)
-        n_chunks = (n_entries + fx.Index(chunk - 1)) // fx.Index(chunk)
-        bnd_rsrc = buffer_ops.create_buffer_resource(
-            BOUNDS, max_size=False, num_records_bytes=_raw((Bn * Sn + fx.Index(1)) * fx.Index(4))
-        )
+        NBn = fx.Index(NB)
+        wg = fx.Index(gpu.block_idx.x)
+        bb = wg // fx.Index(SPLIT)  # b * NB + block
+        part = wg % fx.Index(SPLIT)
+        b = bb // NBn
+        blk = bb % NBn
         ws_rsrc = buffer_ops.create_buffer_resource(
-            WS, max_size=False, num_records_bytes=_raw(n_chunks * fx.Index(2 * DI * 4))
+            WS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(NE * 4))
+        )
+        cp_rsrc = buffer_ops.create_buffer_resource(
+            CHPTR,
+            max_size=False,
+            num_records_bytes=_raw((Bn * fx.Index(H) * NBn + fx.Index(1)) * fx.Index(4)),
         )
         dk_rsrc = buffer_ops.create_buffer_resource(
             DK, max_size=False, num_records_bytes=_raw(Sn * Bn * fx.Index(DI * 2))
         )
-        col = tid * fx.Index(EPT)
-        zero = fx.Int32(0)
-        c_zero = fx.Float32(0.0)
-
-        def load_ws(cc, slot):
-            v = buffer_ops.buffer_load(
-                ws_rsrc, (cc * fx.Index(2) + slot) * fx.Index(DI) + col, vec_width=EPT, dtype=fx.Float32
-            )
-            return [fx.Float32(_raw(Vec(v)[i])) for i in range_constexpr(EPT)]
-
-        lo = fx.Int32(buffer_ops.buffer_load(bnd_rsrc, j, vec_width=1, dtype=fx.Int32))
-        hi = fx.Int32(buffer_ops.buffer_load(bnd_rsrc, j + fx.Index(1), vec_width=1, dtype=fx.Int32))
-        empty = ArithValue(lo == hi)
-        last = fx.Int32(empty.select(_raw(lo), _raw(hi - fx.Int32(1))))
-        c0 = lo // fx.Int32(chunk)
-        c1 = last // fx.Int32(chunk)
-        multi = _flag(ArithValue(c1 > c0))
-        slot0 = fx.Index(_flag(ArithValue(lo != c0 * fx.Int32(chunk))))
-
-        init = load_ws(fx.Index(c0), slot0) + [zero]
-        results = init
-        for cc, it in range(fx.Index(c0 + fx.Int32(1)), fx.Index(c1 + fx.Int32(1)), fx.Index(U), init=init):
-            vals = [
-                (ArithValue(fx.Int32(cc + fx.Index(u)) <= c1), load_ws(cc + fx.Index(u), fx.Index(0)))
-                for u in range_constexpr(U)
-            ]
-            acc = [fx.Float32(it[i]) for i in range_constexpr(EPT)]
-            for ok, v in vals:
-                acc = [acc[i] + fx.Float32(ok.select(_raw(v[i]), _raw(c_zero))) for i in range_constexpr(EPT)]
-            results = yield acc + [fx.Int32(it[EPT]) + fx.Int32(1)]
-
-        packed = [
-            fx.BFloat16(_raw(fx.Float32(empty.select(_raw(c_zero), _raw(fx.Float32(results[i]))))))
-            for i in range_constexpr(EPT)
+        elems = [
+            part * fx.Index(SLICE) + tid * fx.Index(4) + fx.Index(j * NTH * 4) for j in range_constexpr(PER)
         ]
-        write = ArithValue(_flag(empty) + multi > zero)
-        buffer_ops.buffer_store(
-            _raw(Vec.from_elements(packed, elem)),
-            dk_rsrc,
-            (((j % Sn) * Bn + j // Sn) * fx.Index(DI) + col) * fx.Index(2),
-            mask=_raw(write),
-            offset_is_bytes=True,
-        )
+        c_zero_v4 = Vec.filled(4, 0.0, fx.Float32)
+        acc = [c_zero_v4 for _ in range_constexpr(PER)]
+        for h in range_constexpr(H):
+            row = (b * fx.Index(H) + fx.Index(h)) * NBn + blk
+            c_begin = fx.Index(fx.Int32(buffer_ops.buffer_load(cp_rsrc, row, vec_width=1, dtype=fx.Int32)))
+            c_end = fx.Index(
+                fx.Int32(buffer_ops.buffer_load(cp_rsrc, row + fx.Index(1), vec_width=1, dtype=fx.Int32))
+            )
+            # plus a counter: a loop carrying one value hands it back unwrapped
+            init = acc + [fx.Int32(0)]
+            results = init
+            for c, it in range(c_begin, c_end, fx.Index(2), init=init):
+                # two chunks per step, so their loads overlap; still summed in chunk order
+                has2 = ArithValue(c + fx.Index(1) < c_end)
+                new = []
+                for j in range_constexpr(PER):
+                    w0 = buffer_ops.buffer_load(
+                        ws_rsrc, c * fx.Index(NE) + elems[j], vec_width=4, dtype=fx.Float32
+                    )
+                    w1 = buffer_ops.buffer_load(
+                        ws_rsrc, (c + fx.Index(1)) * fx.Index(NE) + elems[j], vec_width=4, dtype=fx.Float32
+                    )
+                    s = Vec(it[j]) + Vec(w0)
+                    new.append(_raw(has2.select(_raw(s + Vec(w1)), _raw(s))))
+                results = yield new + [fx.Int32(it[PER]) + fx.Int32(1)]
+            acc = [results[j] for j in range_constexpr(PER)]
+
+        for j in range_constexpr(PER):
+            key = blk * fx.Index(block_size) + elems[j] // fx.Index(DI)
+            off = (key * Bn + b) * fx.Index(DI) + elems[j] % fx.Index(DI)
+            ov = Vec(acc[j])
+            pk0 = rocdl.cvt_pk_bf16_f32(_raw(ov[0]), _raw(ov[1]))
+            pk1 = rocdl.cvt_pk_bf16_f32(_raw(ov[2]), _raw(ov[3]))
+            # keys past S fall off the end of the buffer
+            buffer_ops.buffer_store(
+                _raw(Vec.from_elements([fx.Int32(_raw(pk0)), fx.Int32(_raw(pk1))], fx.Int32)),
+                dk_rsrc,
+                off * fx.Index(2),
+                offset_is_bytes=True,
+            )
 
     @flyc.jit
-    def launch(BOUNDS, WS, DK, S, B, stream):
-        k_fn(BOUNDS, WS, DK, S, B).launch(
-            grid=(fx.Index(B) * fx.Index(S), 1, 1), block=(THR, 1, 1), stream=stream
+    def launch(WS, CHPTR, DK, S, B, NB, NCH, stream):
+        k_fn(WS, CHPTR, DK, S, B, NB, NCH).launch(
+            grid=(fx.Index(B) * fx.Index(NB) * fx.Index(SPLIT), 1, 1), block=(NTH, 1, 1), stream=stream
         )
 
     launch.compile = lambda *a: flyc.compile(launch, *a)
@@ -598,36 +622,49 @@ def index_dq(g, keys, k, num_heads):
     return dq
 
 
-def index_dk(order, sorted_keys, bounds, g, q, topk):
-    """Deterministic dK of the index keys; see :func:`build_index_dk_chunks`.
+def index_dk(plan, g, keys, q, block_size=128):
+    """Deterministic dK of the index keys; see :func:`build_index_dk`.
 
     Args:
-        order: ``[B * n_index * S * topk]`` int32 entries, stably sorted by key.
-        sorted_keys: the same length, int32 ``b * S + key`` per sorted position
-            (``B * S`` for dead entries, which sort last).
-        bounds: ``[B * S + 1]`` int32 CSR over keys.
-        g: ``[B, n_index, S, topk]`` fp32 gradients of the selected block scores.
+        plan: the selection's :class:`BlockPlan` (``msa_token_bwd``'s, shared).
+        g: ``[B, n_index, S, topk]`` fp32 gradients of the selected block
+            scores, 0 on slots that carry none.
+        keys: same shape, int32 key that won each slot's block.
         q: ``[S, B, n_index, D]`` bf16 index queries.
 
     Returns:
         ``dk`` ``[S, B, D]`` bf16.
     """
     S, B, H, DI = q.shape
+    topk = g.shape[-1]
     dk = torch.empty((S, B, DI), dtype=torch.bfloat16, device=q.device)
-    ws = torch.empty((-(-order.numel() // _DK_CHUNK), 2, DI), dtype=torch.float32, device=q.device)
+    ws = torch.empty((plan.n_chunks, block_size, DI), dtype=torch.float32, device=q.device)
     stream = torch.cuda.current_stream()
-    chunk_args = (order, sorted_keys, bounds, g.contiguous(), q.contiguous(), dk, ws, int(S), int(B), stream)
-    fix_args = (bounds, ws, dk, int(S), int(B), stream)
-    key = (H, DI, topk)
+    nb, nch = int(plan.n_blocks), int(plan.n_chunks)
+    dk_args = (
+        plan.entries,
+        plan.chunks,
+        g.contiguous(),
+        keys.contiguous(),
+        q.contiguous(),
+        ws,
+        int(S),
+        int(B),
+        nb,
+        nch,
+        stream,
+    )
+    red_args = (ws, plan.chunk_ptr, dk, int(S), int(B), nb, nch, stream)
+    key = (H, DI, topk, block_size)
     fns = _DK_CACHE.get(key)
     if fns is None:
         fns = (
-            build_index_dk_chunks(H, DI, topk).compile(*chunk_args),
-            build_index_dk_fix(H, DI, topk).compile(*fix_args),
+            build_index_dk(H, DI, topk, block_size).compile(*dk_args),
+            build_index_dk_reduce(H, DI, block_size).compile(*red_args),
         )
         _DK_CACHE[key] = fns
-    fns[0](*chunk_args)
-    fns[1](*fix_args)
+    fns[0](*dk_args)
+    fns[1](*red_args)
     return dk
 
 

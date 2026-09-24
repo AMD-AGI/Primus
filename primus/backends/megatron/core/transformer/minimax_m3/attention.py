@@ -223,7 +223,9 @@ class MinimaxSparseAttention(SelfAttention):
         else:
             index_pos_emb = None
 
-        block_indices, block_scores = self.indexer(self._indexer_input(hidden_states), index_pos_emb)
+        block_indices, block_scores, block_plan = self.indexer(
+            self._indexer_input(hidden_states), index_pos_emb
+        )
 
         # Full recompute runs this forward twice, first under no_grad; gating on
         # grad mode computes and records the loss once, in the pass that backprops.
@@ -251,6 +253,7 @@ class MinimaxSparseAttention(SelfAttention):
                 self.softmax_scale,
                 self.block_size,
                 return_slot_lse=want_loss,
+                plan=block_plan,
             )
             core_attn_out = outs[0]
             if want_loss:

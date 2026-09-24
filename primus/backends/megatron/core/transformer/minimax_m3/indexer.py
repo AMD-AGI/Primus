@@ -136,7 +136,7 @@ class MinimaxM3Indexer(MegatronModule):
 
     def forward(
         self, hidden_states: torch.Tensor, rotary_pos_emb: Optional[torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[object]]:
         """Select KV blocks for every query.
 
         Args:
@@ -145,9 +145,10 @@ class MinimaxM3Indexer(MegatronModule):
 
         Returns:
             ``block_indices`` ``[b, n_index, sq, topk]`` (int64, ``-1`` padding
-            in the unused right-hand slots) and ``block_scores``
+            in the unused right-hand slots), ``block_scores``
             ``[b, n_index, sq, n_blocks]`` (float32), which the distillation
-            loss consumes.
+            loss consumes, and the flydsl backend's ``BlockPlan`` of the
+            selection for the attention backward to reuse (None otherwise).
         """
         index_q = self._project(
             hidden_states, self.linear_index_q, self.index_q_layernorm, self.index_n_heads
@@ -175,7 +176,7 @@ class MinimaxM3Indexer(MegatronModule):
         index_k = index_k.permute(1, 2, 0, 3).float()
         scores = torch.matmul(index_q, index_k.transpose(-1, -2))  # [b, n_index, sq, sk]
 
-        return self.select_blocks(scores)
+        return (*self.select_blocks(scores), None)
 
     def select_blocks(self, scores: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Per-key scores ``[b, n, sq, sk]`` -> (top-k block ids, block scores)."""

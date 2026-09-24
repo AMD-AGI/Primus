@@ -109,7 +109,9 @@ def test_fused_selection_matches_the_pytorch_path(S, B, H, topk):
 
     selector = _Selector(topk)
     q, k = _inputs(S, B, H, 128, seed=1)
-    idx, scores = fused_select_blocks(q, k, selector.select_from_block_scores, BLOCK)
+    with torch.no_grad():
+        idx, scores, plan = fused_select_blocks(q, k, selector.select_from_block_scores, BLOCK)
+    assert plan is None, "no backward will follow, so no plan"
     ref_idx, ref_scores = _reference_select(selector, q, k)
 
     assert idx.shape == ref_idx.shape
@@ -124,10 +126,10 @@ def test_fused_selection_matches_the_pytorch_path(S, B, H, topk):
 def test_fused_gradients_match_the_pytorch_path(shared):
     """Through the sparse indexer loss, the one the flydsl backend trains with.
 
-    ``shared`` skews the winning keys so a key's entries span many of dK's
-    chunks, which exercises the partial sums and the fix-up pass."""
+    ``shared`` skews the winning keys so one key collects hundreds of slots,
+    spread over several of dK's plan chunks and every index head, which
+    exercises the one-hot accumulation and the cross-chunk reduce."""
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_block_max import (
-        _DK_CHUNK,
         index_block_max,
     )
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_select import (
@@ -141,13 +143,14 @@ def test_fused_gradients_match_the_pytorch_path(shared):
     selector = _Selector(topk)
     q, k = _inputs(S, B, H, 128, seed=2, shared=shared)
     if shared:
-        idx, _ = fused_select_blocks(q, k, selector.select_from_block_scores, BLOCK)
+        idx, _, plan = fused_select_blocks(q, k, selector.select_from_block_scores, BLOCK)
         winners = index_block_max(q, k, BLOCK)[1].gather(-1, idx.clamp_min(0))[idx >= 0]
-        assert torch.bincount(winners.long()).max() > 2 * _DK_CHUNK
+        assert torch.bincount(winners.long()).max() > 256
+        assert (plan.chunk_ptr[1:] - plan.chunk_ptr[:-1]).max() > 1
 
     def grads(select):
         qs, ks = q.clone().requires_grad_(True), k.clone().requires_grad_(True)
-        idx, scores = select(qs, ks)
+        idx, scores = select(qs, ks)[:2]
         gen = torch.Generator(device="cuda").manual_seed(3)
         target = torch.softmax(torch.randn(idx.shape, device="cuda", generator=gen), dim=-1).masked_fill(
             idx < 0, 0
@@ -172,7 +175,7 @@ def _fused_step(q, k, selector):
     )
 
     qs, ks = q.clone().requires_grad_(True), k.clone().requires_grad_(True)
-    idx, scores = fused_select_blocks(qs, ks, selector.select_from_block_scores, BLOCK)
+    idx, scores, _ = fused_select_blocks(qs, ks, selector.select_from_block_scores, BLOCK)
     target = torch.full(idx.shape, 1.0 / idx.shape[-1], device="cuda").masked_fill(idx < 0, 0)
     compute_sparse_indexer_loss(target, scores, idx, 1.0).backward()
     return qs.grad, ks.grad

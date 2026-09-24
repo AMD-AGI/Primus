@@ -24,10 +24,18 @@ from the dO and O rows it holds and writes it out for ``dkdv``.
 ``dkdv``: one work-group per chunk of the tokens that selected one (batch,
 GQA group, KV block), 8 waves, each holding 16 of the block's keys (K and V in
 registers as B operands). The token lists are an inverted, CSR-shaped copy of
-the block table, built on the host by one stable sort, so tokens arrive in
-ascending order. Each token's 16 query heads of Q and dO are staged in LDS and
-shared by the 8 waves. S = Q K^T and dP = dO V^T put heads on MFMA rows;
-dV^T += dO^T P and dK^T += Q^T dS read Q and dO back transposed.
+the block table (:class:`BlockPlan`, which the indexer's backward shares),
+holding table entries in ascending token order. Four tokens at a time, their
+16 query heads of Q and dO (and lse, delta) are staged in LDS and shared by
+the 8 waves. S = Q K^T and dP = dO V^T put heads on MFMA rows; dV^T += dO^T P
+and dK^T += Q^T dS read Q and dO back transposed. The staging is software
+pipelined -- a step's rows are loaded while the previous step computes, its
+tokens one step earlier still -- because at this register count one
+work-group fills a CU, and nothing else would hide the load latency.
+
+The inverted table itself is a counting sort (:func:`build_inverted_table`):
+the keys are block ids, so two passes that count in LDS replace a general
+sort.
 
 The lists are chunked because they are badly skewed -- early blocks are
 visible to, and picked by, far more tokens than late ones (max/mean 2-4x on
@@ -45,11 +53,14 @@ workspace follows from the input shapes alone, not from the selection.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
+from flydsl._mlir.dialects import memref as _memref
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
@@ -332,22 +343,25 @@ def build_dq(num_kv_heads: int, topk: int, block_size: int, scale: float):
 # ============================================================================
 
 
-def build_dkdv(num_kv_heads: int, block_size: int, scale: float):
+def build_dkdv(num_kv_heads: int, block_size: int, scale: float, topk: int, tokens_per_step: int = 4):
     elem = fx.BFloat16
     Hkv = num_kv_heads
     Hq = Hkv * HPW
     WAVES = block_size // TK
     THREADS = 64 * WAVES
-    # Q/dO staging: 16 rows x D, 4 elements per thread each
-    ST_CPL = HPW * D // THREADS
-    ST_LPR = D // ST_CPL
-    assert HPW * D % THREADS == 0 and ST_CPL in (2, 4, 8)
-    BUF = HPW * STRIDE
+    TPS = tokens_per_step
+    ROWS = TPS * HPW  # staged rows per step: TPS tokens x 16 heads
+    VEC = 8
+    NP = ROWS * D // (THREADS * VEC)  # staging loads per thread per tensor per step
+    assert ROWS * D % (THREADS * VEC) == 0 and ROWS <= THREADS
+    BUF = ROWS * STRIDE
 
     allocator = SmemAllocator(None, arch=get_hip_arch(), global_sym_name="msa_bwd_dkdv_smem")
     q_off = allocator._align(allocator.ptr, 16)
     do_off = allocator._align(q_off + BUF * 2, 16)
-    allocator.ptr = allocator._align(do_off + BUF * 2, 16)
+    lse_off = allocator._align(do_off + BUF * 2, 16)
+    dl_off = allocator._align(lse_off + THREADS * 4, 16)
+    allocator.ptr = allocator._align(dl_off + THREADS * 4, 16)
 
     @flyc.kernel(known_block_size=[THREADS, 1, 1])
     def k_fn(
@@ -358,12 +372,12 @@ def build_dkdv(num_kv_heads: int, block_size: int, scale: float):
         LSE: fx.Tensor,
         DELTA: fx.Tensor,
         CHUNKS: fx.Tensor,
-        TOK: fx.Tensor,
+        ENT: fx.Tensor,
         WS: fx.Tensor,
         S: fx.Int32,
         B: fx.Int32,
         NB: fx.Int32,
-        NTOK: fx.Int32,
+        NENT: fx.Int32,
         NCH: fx.Int32,
     ):
         v8 = Vec.make_type(8, elem)
@@ -371,6 +385,8 @@ def build_dkdv(num_kv_heads: int, block_size: int, scale: float):
         v4f = Vec.make_type(4, fx.Float32)
         lds_q = SmemPtr(allocator.get_base(), q_off, elem.ir_type, shape=(BUF,)).get()
         lds_do = SmemPtr(allocator.get_base(), do_off, elem.ir_type, shape=(BUF,)).get()
+        lds_lse = SmemPtr(allocator.get_base(), lse_off, fx.Float32.ir_type, shape=(THREADS,)).get()
+        lds_dl = SmemPtr(allocator.get_base(), dl_off, fx.Float32.ir_type, shape=(THREADS,)).get()
 
         tid = fx.Index(gpu.thread_idx.x)
         wave = tid // fx.Index(64)
@@ -394,8 +410,8 @@ def build_dkdv(num_kv_heads: int, block_size: int, scale: float):
         ch_rsrc = buffer_ops.create_buffer_resource(
             CHUNKS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(3 * 4))
         )
-        tok_rsrc = buffer_ops.create_buffer_resource(
-            TOK, max_size=False, num_records_bytes=_raw(fx.Index(NTOK) * fx.Index(4))
+        ent_rsrc = buffer_ops.create_buffer_resource(
+            ENT, max_size=False, num_records_bytes=_raw(fx.Index(NENT) * fx.Index(4))
         )
         ws_rsrc = buffer_ops.create_buffer_resource(
             WS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(2 * block_size * D * 4))
@@ -439,74 +455,132 @@ def build_dkdv(num_kv_heads: int, block_size: int, scale: float):
             for ks in range_constexpr(KS)
         ]
 
-        st_row = tid // fx.Index(ST_LPR)
-        st_col = (tid % fx.Index(ST_LPR)) * fx.Index(ST_CPL)
-        st_lds = st_row * fx.Index(STRIDE) + st_col
+        # staging: TPS tokens x 16 heads of Q and dO, VEC elements per load
+        st_flat = [(fx.Index(p * THREADS) + tid) * fx.Index(VEC) for p in range_constexpr(NP)]
+        st_rows = [f // fx.Index(D) for f in st_flat]
+        st_cols = [f % fx.Index(D) for f in st_flat]
+        # lse / delta: thread r < ROWS stages row r (token r // 16, head r % 16); the
+        # rest repeat those rows into slots nobody reads
+        ld_row = tid % fx.Index(ROWS)
         q_tr = _tr16_base(lo, grp, q_off)
         do_tr = _tr16_base(lo, grp, do_off)
 
+        def pick(vals, j):  # vals[j] for a per-thread j < TPS
+            out = vals[0]
+            for jj in range_constexpr(TPS - 1):
+                out = fx.Int32(ArithValue(j == fx.Index(jj + 1)).select(_raw(vals[jj + 1]), _raw(out)))
+            return out
+
+        def load_tokens(r0):
+            """The tokens of the step starting at entry r0; past the chunk's end
+            they repeat its last one (masked out by the caller)."""
+            tok = []
+            for j in range_constexpr(TPS):
+                r = r0 + fx.Int32(j)
+                r = fx.Int32(ArithValue(r < t_end).select(_raw(r), _raw(t_end - fx.Int32(1))))
+                e = fx.Index(
+                    fx.Int32(buffer_ops.buffer_load(ent_rsrc, fx.Index(r), vec_width=1, dtype=fx.Int32))
+                )
+                tok.append(fx.Int32((e // fx.Index(topk)) % Sn))
+            return tok
+
+        def head_row(t_i32, head):
+            return (fx.Index(t_i32) * Bn + b) * fx.Index(Hq) + g * fx.Index(HPW) + head
+
+        def load_rows(tok):
+            """This thread's share of the step's Q, dO rows and lse, delta values."""
+            q_st, do_st = [], []
+            for p in range_constexpr(NP):
+                src = (
+                    head_row(pick(tok, st_rows[p] // fx.Index(HPW)), st_rows[p] % fx.Index(HPW)) * fx.Index(D)
+                    + st_cols[p]
+                )
+                q_st.append(buffer_ops.buffer_load(q_rsrc, src, vec_width=VEC, dtype=elem))
+                do_st.append(buffer_ops.buffer_load(do_rsrc, src, vec_width=VEC, dtype=elem))
+            lrow = head_row(pick(tok, ld_row // fx.Index(HPW)), ld_row % fx.Index(HPW))
+            lse_st = buffer_ops.buffer_load(lse_rsrc, lrow, vec_width=1, dtype=fx.Float32)
+            dl_st = buffer_ops.buffer_load(dl_rsrc, lrow, vec_width=1, dtype=fx.Float32)
+            return [_raw(x) for x in q_st + do_st + [lse_st, dl_st]]
+
+        # Software pipeline: a step's rows are loaded during the previous step's
+        # compute, and its tokens one step before that, so neither load's
+        # latency -- nor the entry -> token -> row dependency -- is exposed.
+        NR = 2 * NP + 2  # carried row values
+        tok0 = load_tokens(t_begin)
         c_zero_v4 = Vec.filled(4, 0.0, fx.Float32)
-        init = [c_zero_v4 for _ in range_constexpr(2 * DT)]
+        init = (
+            [c_zero_v4 for _ in range_constexpr(2 * DT)]
+            + load_rows(tok0)
+            + tok0
+            + load_tokens(t_begin + fx.Int32(TPS))
+        )
         results = init
-        for i, it in range(fx.Index(0), n_tok, fx.Index(1), init=init):
+        for i, it in range(fx.Index(0), n_tok, fx.Index(TPS), init=init):
             dk_acc = [it[dt] for dt in range_constexpr(DT)]
             dv_acc = [it[DT + dt] for dt in range_constexpr(DT)]
-            t = fx.Int32(buffer_ops.buffer_load(tok_rsrc, fx.Index(t_begin) + i, vec_width=1, dtype=fx.Int32))
-            head0 = (fx.Index(t) * Bn + b) * fx.Index(Hq) + g * fx.Index(HPW)
+            rows = [it[2 * DT + x] for x in range_constexpr(NR)]
+            tok = [fx.Int32(it[2 * DT + NR + j]) for j in range_constexpr(TPS)]
+            tok_next = [fx.Int32(it[2 * DT + NR + TPS + j]) for j in range_constexpr(TPS)]
+            r0 = t_begin + fx.Int32(i)
+            valid = [ArithValue(r0 + fx.Int32(j) < t_end) for j in range_constexpr(TPS)]
 
-            # ---- stage the token's Q and dO heads in LDS, shared by all waves ----
-            st_src = (head0 + st_row) * fx.Index(D) + st_col
-            q_st = buffer_ops.buffer_load(q_rsrc, st_src, vec_width=ST_CPL, dtype=elem)
-            do_st = buffer_ops.buffer_load(do_rsrc, st_src, vec_width=ST_CPL, dtype=elem)
-            # lse, delta for heads grp*4 + i (the rows this lane holds)
-            lse4 = buffer_ops.buffer_load(lse_rsrc, head0 + grp * fx.Index(4), vec_width=4, dtype=fx.Float32)
-            dl4 = buffer_ops.buffer_load(dl_rsrc, head0 + grp * fx.Index(4), vec_width=4, dtype=fx.Float32)
-            gpu.barrier()  # WAR: every wave is done with the previous token's tiles
-            Vec(q_st).store(lds_q, [st_lds])
-            Vec(do_st).store(lds_do, [st_lds])
+            gpu.barrier()  # WAR: every wave is done with the previous step's tiles
+            for p in range_constexpr(NP):
+                lds_at = st_rows[p] * fx.Index(STRIDE) + st_cols[p]
+                Vec(rows[p]).store(lds_q, [lds_at])
+                Vec(rows[NP + p]).store(lds_do, [lds_at])
+            _memref.store(rows[2 * NP], lds_lse, [_raw(tid)])
+            _memref.store(rows[2 * NP + 1], lds_dl, [_raw(tid)])
             gpu.barrier()
+            # in flight while this step computes
+            rows_next = load_rows(tok_next)
+            tok_after = load_tokens(r0 + fx.Int32(2 * TPS))
 
-            # S = Q K^T, dP = dO V^T: lane holds [head = grp*4 + i, key = lo]
-            s_acc = Vec.filled(4, 0.0, fx.Float32)
-            dp_acc = Vec.filled(4, 0.0, fx.Float32)
-            for ks in range_constexpr(KS):
-                a_off = lo * fx.Index(STRIDE) + fx.Index(ks * 32) + grp * fx.Index(8)
-                s_acc = rocdl.mfma_f32_16x16x32_bf16(
-                    v4f, [_raw(Vec.load(v8, lds_q, [a_off])), k_ops[ks], s_acc]
-                )
-                dp_acc = rocdl.mfma_f32_16x16x32_bf16(
-                    v4f, [_raw(Vec.load(v8, lds_do, [a_off])), v_ops[ks], dp_acc]
-                )
-
-            ok = ArithValue(key_i32 <= t)
-            p = []
-            ds = []
-            for r in range_constexpr(4):
-                s = fx.Float32(_raw(Vec(s_acc)[r]))
-                pv = fx.Float32(
-                    rocdl.exp2(fx.Float32.ir_type, _raw(s * c_sl - fx.Float32(_raw(Vec(lse4)[r])) * c_log2e))
-                )
-                pv = fx.Float32(ok.select(_raw(pv), _raw(c_zero)))
-                p.append(pv)
-                ds.append(pv * (fx.Float32(_raw(Vec(dp_acc)[r])) - fx.Float32(_raw(Vec(dl4)[r]))))
-
-            # dV^T += dO^T P, dK^T += Q^T dS: A = dO^T / Q^T (transposed reads), B = P / dS
-            pB = _raw(Vec.from_elements([fx.BFloat16(_raw(x)) for x in p], elem).bitcast(fx.Int16))
-            dsB = _raw(Vec.from_elements([fx.BFloat16(_raw(x)) for x in ds], elem).bitcast(fx.Int16))
-            new_dk = []
-            new_dv = []
-            for dt in range_constexpr(DT):
-                new_dv.append(
-                    rocdl.mfma_f32_16x16x16bf16_1k(
-                        v4f, [_tr16(v4, do_tr + fx.Int64(dt * 32)), pB, dv_acc[dt]]
+            for j in range_constexpr(TPS):
+                # S = Q K^T, dP = dO V^T: lane holds [head = grp*4 + i, key = lo]
+                s_acc = Vec.filled(4, 0.0, fx.Float32)
+                dp_acc = Vec.filled(4, 0.0, fx.Float32)
+                for ks in range_constexpr(KS):
+                    a_off = (
+                        (fx.Index(j * HPW) + lo) * fx.Index(STRIDE) + fx.Index(ks * 32) + grp * fx.Index(8)
                     )
-                )
-                new_dk.append(
-                    rocdl.mfma_f32_16x16x16bf16_1k(
-                        v4f, [_tr16(v4, q_tr + fx.Int64(dt * 32)), dsB, dk_acc[dt]]
+                    s_acc = rocdl.mfma_f32_16x16x32_bf16(
+                        v4f, [_raw(Vec.load(v8, lds_q, [a_off])), k_ops[ks], s_acc]
                     )
-                )
-            results = yield new_dk + new_dv
+                    dp_acc = rocdl.mfma_f32_16x16x32_bf16(
+                        v4f, [_raw(Vec.load(v8, lds_do, [a_off])), v_ops[ks], dp_acc]
+                    )
+                lse4 = Vec.load(v4f, lds_lse, [fx.Index(j * HPW) + grp * fx.Index(4)])
+                dl4 = Vec.load(v4f, lds_dl, [fx.Index(j * HPW) + grp * fx.Index(4)])
+
+                ok = ArithValue(arith.AndIOp(_raw(ArithValue(key_i32 <= tok[j])), _raw(valid[j])).result)
+                p = []
+                ds = []
+                for r in range_constexpr(4):
+                    s = fx.Float32(_raw(Vec(s_acc)[r]))
+                    pv = fx.Float32(
+                        rocdl.exp2(
+                            fx.Float32.ir_type, _raw(s * c_sl - fx.Float32(_raw(Vec(lse4)[r])) * c_log2e)
+                        )
+                    )
+                    pv = fx.Float32(ok.select(_raw(pv), _raw(c_zero)))
+                    p.append(pv)
+                    ds.append(pv * (fx.Float32(_raw(Vec(dp_acc)[r])) - fx.Float32(_raw(Vec(dl4)[r]))))
+
+                # dV^T += dO^T P, dK^T += Q^T dS: A = dO^T / Q^T (transposed reads), B = P / dS
+                pB = _raw(Vec.from_elements([fx.BFloat16(_raw(x)) for x in p], elem).bitcast(fx.Int16))
+                dsB = _raw(Vec.from_elements([fx.BFloat16(_raw(x)) for x in ds], elem).bitcast(fx.Int16))
+                tile = fx.Int64(j * HPW * STRIDE * 2)
+                for dt in range_constexpr(DT):
+                    dv_acc[dt] = rocdl.mfma_f32_16x16x16bf16_1k(
+                        v4f, [_tr16(v4, do_tr + tile + fx.Int64(dt * 32)), pB, dv_acc[dt]]
+                    )
+                    dk_acc[dt] = rocdl.mfma_f32_16x16x16bf16_1k(
+                        v4f, [_tr16(v4, q_tr + tile + fx.Int64(dt * 32)), dsB, dk_acc[dt]]
+                    )
+            results = (
+                yield dk_acc + dv_acc + rows_next + [_raw(t) for t in tok_next] + [_raw(t) for t in tok_after]
+            )
 
         # fp32 partials, chunk-major [chunk][dK | dV][key in block][d]:
         # lane holds dK^T / dV^T[d = dt*16 + grp*4 + i, key = wave*16 + lo]
@@ -525,11 +599,11 @@ def build_dkdv(num_kv_heads: int, block_size: int, scale: float):
             )
 
     @flyc.jit
-    def launch(Q, K, V, DO, LSE, DELTA, CHUNKS, TOK, WS, S, B, NB, NTOK, NCH, stream):
+    def launch(Q, K, V, DO, LSE, DELTA, CHUNKS, ENT, WS, S, B, NB, NENT, NCH, stream):
         allocator.finalized = False
         with ir.InsertionPoint(CompilationContext.get_current().gpu_module_body):
             allocator.finalize()
-        k_fn(Q, K, V, DO, LSE, DELTA, CHUNKS, TOK, WS, S, B, NB, NTOK, NCH).launch(
+        k_fn(Q, K, V, DO, LSE, DELTA, CHUNKS, ENT, WS, S, B, NB, NENT, NCH).launch(
             grid=(fx.Index(NCH), 1, 1), block=(THREADS, 1, 1), stream=stream
         )
 
@@ -538,13 +612,18 @@ def build_dkdv(num_kv_heads: int, block_size: int, scale: float):
 
 
 def build_dkdv_reduce(num_kv_heads: int, block_size: int):
-    """Sum each (batch, KV head, block)'s chunk partials in chunk order -> bf16 dK, dV."""
-    fx.BFloat16
+    """Sum each (batch, KV head, block)'s chunk partials in chunk order -> bf16 dK, dV.
+
+    One work-group per 1024-element slice of a block's dK and dV, so short
+    sequences -- a few dozen blocks -- still fill the GPU.
+    """
     Hkv = num_kv_heads
     THREADS = 256
     NE = block_size * D  # elements per partial
-    PER = NE // (THREADS * 4)  # v4 groups per thread
-    assert NE % (THREADS * 4) == 0
+    PER = 1  # v4 groups per thread, per tensor
+    SLICE = THREADS * 4 * PER
+    SPLIT = NE // SLICE
+    assert NE % SLICE == 0
 
     @flyc.kernel(known_block_size=[THREADS, 1, 1])
     def k_fn(
@@ -561,7 +640,9 @@ def build_dkdv_reduce(num_kv_heads: int, block_size: int):
         Sn = fx.Index(S)
         Bn = fx.Index(B)
         NBn = fx.Index(NB)
-        row = fx.Index(gpu.block_idx.x)
+        wg = fx.Index(gpu.block_idx.x)
+        row = wg // fx.Index(SPLIT)
+        part = wg % fx.Index(SPLIT)
         bg = row // NBn
         blk = row % NBn
         b = bg // fx.Index(Hkv)
@@ -583,27 +664,28 @@ def build_dkdv_reduce(num_kv_heads: int, block_size: int):
             fx.Int32(buffer_ops.buffer_load(cp_rsrc, row + fx.Index(1), vec_width=1, dtype=fx.Int32))
         )
 
-        elems = [tid * fx.Index(4) + fx.Index(j * THREADS * 4) for j in range_constexpr(PER)]
+        elems = [
+            part * fx.Index(SLICE) + tid * fx.Index(4) + fx.Index(j * THREADS * 4)
+            for j in range_constexpr(PER)
+        ]
         c_zero_v4 = Vec.filled(4, 0.0, fx.Float32)
         init = [c_zero_v4 for _ in range_constexpr(2 * PER)]
         results = init
-        for c, it in range(c_begin, c_end, fx.Index(1), init=init):
-            base = c * fx.Index(2 * NE)
+        for c, it in range(c_begin, c_end, fx.Index(2), init=init):
+            # two chunks per step, so their loads overlap; still summed in chunk order
+            has2 = ArithValue(c + fx.Index(1) < c_end)
             new = []
-            for j in range_constexpr(PER):
-                new.append(
-                    Vec(it[j])
-                    + Vec(buffer_ops.buffer_load(ws_rsrc, base + elems[j], vec_width=4, dtype=fx.Float32))
-                )
-            for j in range_constexpr(PER):
-                new.append(
-                    Vec(it[PER + j])
-                    + Vec(
-                        buffer_ops.buffer_load(
-                            ws_rsrc, base + fx.Index(NE) + elems[j], vec_width=4, dtype=fx.Float32
-                        )
+            for half in range_constexpr(2):
+                for j in range_constexpr(PER):
+                    at = fx.Index(half * NE) + elems[j]
+                    w0 = buffer_ops.buffer_load(
+                        ws_rsrc, c * fx.Index(2 * NE) + at, vec_width=4, dtype=fx.Float32
                     )
-                )
+                    w1 = buffer_ops.buffer_load(
+                        ws_rsrc, (c + fx.Index(1)) * fx.Index(2 * NE) + at, vec_width=4, dtype=fx.Float32
+                    )
+                    s = Vec(it[half * PER + j]) + Vec(w0)
+                    new.append(has2.select(_raw(s + Vec(w1)), _raw(s)))
             results = yield [_raw(x) for x in new]
 
         one_v = Vec.from_elements([fx.Float32(1.0)] * 4, fx.Float32)
@@ -616,7 +698,9 @@ def build_dkdv_reduce(num_kv_heads: int, block_size: int):
     @flyc.jit
     def launch(WS, CHPTR, DK, DV, S, B, NB, NCH, stream):
         k_fn(WS, CHPTR, DK, DV, S, B, NB, NCH).launch(
-            grid=(fx.Index(B) * fx.Index(Hkv) * fx.Index(NB), 1, 1), block=(THREADS, 1, 1), stream=stream
+            grid=(fx.Index(B) * fx.Index(Hkv) * fx.Index(NB) * fx.Index(SPLIT), 1, 1),
+            block=(THREADS, 1, 1),
+            stream=stream,
         )
 
     launch.compile = lambda *a: flyc.compile(launch, *a)
@@ -624,36 +708,285 @@ def build_dkdv_reduce(num_kv_heads: int, block_size: int):
 
 
 # ============================================================================
-# host
+# inverted block table
 # ============================================================================
+
+_PLACE_SUB = 128  # tokens whose table rows are staged in LDS at a time
+
+
+def build_inverted_pass(topk: int, nb_cap: int, place: bool):
+    """One pass of the counting sort: a single-wave work-group per (batch x KV
+    head, token chunk) walks the chunk's tokens in order with one LDS counter
+    per block. A token's slots name distinct blocks, so its lanes never share
+    a counter.
+
+    ``place=False`` counts: the counters start at 0 and end up in
+    ``RUNS[(bg * NB + block) * NC + chunk]``. ``place=True`` places: ``RUNS``
+    holds where each run starts (the exclusive cumsum of the counts), and each
+    entry is written at its counter -- in token order, so every row ascends by
+    token, the same result as a stable sort, deterministically.
+    """
+    NTH = 64
+    SUB = _PLACE_SUB
+    PER = SUB * topk // NTH  # table entries each lane stages per tile
+    assert topk <= NTH and SUB * topk % NTH == 0
+    # the kernel body is traced into device control flow, so the two modes
+    # differ by constants rather than by Python branches
+    PLACE = 1 if place else 0
+
+    allocator = SmemAllocator(
+        None, arch=get_hip_arch(), global_sym_name=f"msa_inverted_{'place' if place else 'count'}_smem"
+    )
+    tab_off = allocator._align(allocator.ptr, 16)
+    cnt_off = allocator._align(tab_off + SUB * topk * 4, 16)
+    allocator.ptr = allocator._align(cnt_off + (nb_cap + 1) * 4, 16)
+
+    @flyc.kernel(known_block_size=[NTH, 1, 1])
+    def k_fn(
+        TBL: fx.Tensor,
+        RUNS: fx.Tensor,
+        ENT: fx.Tensor,
+        S: fx.Int32,
+        BG: fx.Int32,
+        NB: fx.Int32,
+        NC: fx.Int32,
+        TC: fx.Int32,
+    ):
+        i32 = fx.Int32.ir_type
+        lds_tab = SmemPtr(allocator.get_base(), tab_off, i32, shape=(SUB * topk,)).get()
+        lds_cnt = SmemPtr(allocator.get_base(), cnt_off, i32, shape=(nb_cap + 1,)).get()
+
+        def lds_load(mem, idx):
+            return fx.Int32(_memref.load(mem, [_raw(fx.Index(idx))]))
+
+        def lds_store(mem, idx, val):
+            _memref.store(_raw(fx.Int32(val)), mem, [_raw(fx.Index(idx))])
+
+        lane = fx.Index(gpu.thread_idx.x)
+        lane_i32 = fx.Int32(lane)
+        wg = fx.Index(gpu.block_idx.x)
+        NCn = fx.Index(NC)
+        NBn = fx.Index(NB)
+        bg = wg // NCn
+        c = wg % NCn
+        n_entries = fx.Index(BG) * fx.Index(S) * fx.Index(topk)
+        tbl_rsrc = buffer_ops.create_buffer_resource(
+            TBL, max_size=False, num_records_bytes=_raw(n_entries * fx.Index(4))
+        )
+        ent_rsrc = buffer_ops.create_buffer_resource(
+            ENT, max_size=False, num_records_bytes=_raw(n_entries * fx.Index(4))
+        )
+        runs_rsrc = buffer_ops.create_buffer_resource(
+            RUNS, max_size=False, num_records_bytes=_raw(fx.Index(BG) * NBn * NCn * fx.Index(4))
+        )
+        dummy = [fx.Int32(0), fx.Int32(0)]  # loops carry a list; one value would come back unwrapped
+
+        # ---- one counter per block: 0, or this chunk's offset in the block's row ----
+        for n, it in range(lane, NBn, fx.Index(NTH), init=dummy):
+            start = fx.Int32(
+                buffer_ops.buffer_load(runs_rsrc, (bg * NBn + n) * NCn + c, vec_width=1, dtype=fx.Int32)
+            )
+            lds_store(lds_cnt, n, start * fx.Int32(PLACE))
+            yield [it[0], it[1]]
+        do_place = ArithValue(fx.Int32(PLACE) == fx.Int32(1))
+
+        c_neg1 = fx.Int32(-1)
+        active = ArithValue(lane_i32 < fx.Int32(topk))
+        my_slot = fx.Int32(active.select(_raw(lane_i32), _raw(fx.Int32(topk - 1))))
+        t0 = fx.Int32(c) * TC
+        t_end = t0 + TC
+        t_end = fx.Int32(ArithValue(t_end < S).select(_raw(t_end), _raw(S)))
+        for sub, it in range(fx.Index(t0), fx.Index(t_end), fx.Index(SUB), init=dummy):
+            sub_i32 = fx.Int32(sub)
+            gpu.barrier()  # WAR on the staged tile; the first pass also orders the counter setup
+            for j in range_constexpr(PER):
+                le = fx.Index(j * NTH) + lane
+                tok = sub_i32 + fx.Int32(le // fx.Index(topk))
+                ok = ArithValue(tok < t_end)
+                v = fx.Int32(
+                    buffer_ops.buffer_load(
+                        tbl_rsrc, (bg * fx.Index(S) + sub) * fx.Index(topk) + le, vec_width=1, dtype=fx.Int32
+                    )
+                )
+                lds_store(lds_tab, le, fx.Int32(ok.select(_raw(v), _raw(c_neg1))))
+            gpu.barrier()
+            n_tok = t_end - sub_i32
+            n_tok = fx.Int32(ArithValue(n_tok < fx.Int32(SUB)).select(_raw(n_tok), _raw(fx.Int32(SUB))))
+            for i, it2 in range(fx.Index(0), fx.Index(n_tok), fx.Index(1), init=dummy):
+                blk = lds_load(lds_tab, i * fx.Index(topk) + fx.Index(my_slot))
+                valid = ArithValue(arith.AndIOp(_raw(active), _raw(ArithValue(blk >= fx.Int32(0)))).result)
+                addr = fx.Int32(valid.select(_raw(blk), _raw(fx.Int32(nb_cap))))
+                pos = lds_load(lds_cnt, addr)
+                lds_store(lds_cnt, addr, pos + fx.Int32(1))
+                e = ((bg * fx.Index(S) + sub + i) * fx.Index(topk)) + fx.Index(my_slot)
+                buffer_ops.buffer_store(
+                    fx.Int32(e),
+                    ent_rsrc,
+                    fx.Index(pos) * fx.Index(4),
+                    mask=_raw(ArithValue(arith.AndIOp(_raw(valid), _raw(do_place)).result)),
+                    offset_is_bytes=True,
+                )
+                yield [it2[0], it2[1]]
+            yield [it[0], it[1]]
+
+        # counting pass: publish the counters (the placing pass loops zero times)
+        gpu.barrier()
+        for n, it in range(lane, NBn * fx.Index(1 - PLACE), fx.Index(NTH), init=dummy):
+            buffer_ops.buffer_store(
+                lds_load(lds_cnt, n),
+                runs_rsrc,
+                ((bg * NBn + n) * NCn + c) * fx.Index(4),
+                offset_is_bytes=True,
+            )
+            yield [it[0], it[1]]
+
+    @flyc.jit
+    def launch(TBL, RUNS, ENT, S, BG, NB, NC, TC, stream):
+        allocator.finalized = False
+        with ir.InsertionPoint(CompilationContext.get_current().gpu_module_body):
+            allocator.finalize()
+        k_fn(TBL, RUNS, ENT, S, BG, NB, NC, TC).launch(
+            grid=(fx.Index(BG) * fx.Index(NC), 1, 1), block=(NTH, 1, 1), stream=stream
+        )
+
+    launch.compile = lambda *a: flyc.compile(launch, *a)
+    return launch
+
+
+_PLACE_CACHE: dict = {}
+_PLACE_MAX_BLOCKS = 16384  # LDS holds one counter per block
 
 
 def build_inverted_table(block_table: torch.Tensor, n_blocks: int):
     """CSR of the block table's transpose: for each (batch, KV head, block), the
-    tokens that selected it, ascending.
+    table entries that selected it, in ascending token order.
 
-    Returns ``(ptr, tokens)``: ``ptr`` is ``[B * Hkv * n_blocks + 1]`` int32 and
-    ``tokens[ptr[i]:ptr[i + 1]]`` are the tokens of row
-    ``i = (b * Hkv + g) * n_blocks + block``. One stable sort, the same approach
-    as Primus-Turbo's sparse-MLA backward.
+    Returns ``(ptr, entries)``: ``ptr`` is ``[B * Hkv * n_blocks + 1]`` int32 and
+    ``entries[ptr[i]:ptr[i + 1]]`` are the flat ``[B, Hkv, S, topk]`` indices of
+    the slots that picked row ``i = (b * Hkv + g) * n_blocks + block`` -- the
+    token is ``entry // topk % S``, and the slot is what the indexer's backward
+    reads its per-slot gradient from.
 
-    Sync-free: every table entry is sorted, -1 slots under a key past the last
-    row, so ``tokens`` always has ``B * Hkv * S * topk`` entries and only its
-    first ``ptr[-1]`` are real. No size ever depends on the table's contents.
+    A counting sort rather than a general one: the keys are block ids, few and
+    small. Tokens are cut into chunks; :func:`build_inverted_pass` counts each
+    chunk's run in every row, a cumsum turns the counts into run offsets, and
+    a second pass writes each chunk's entries in token order. Both passes
+    count in LDS, so there are no global atomics and nothing to sort.
+
+    Sync-free: ``entries`` always has ``B * Hkv * S * topk`` elements, of which
+    the first ``ptr[-1]`` are real; -1 slots are never placed. No size ever
+    depends on the table's contents.
     """
     B, Hkv, S, topk = block_table.shape
     device = block_table.device
+    BG = B * Hkv
+    n_rows = BG * n_blocks
+    table = block_table.to(torch.int32).contiguous()
+    if n_blocks > _PLACE_MAX_BLOCKS or topk > 64:
+        return _inverted_table_by_sort(table, n_blocks)
+
+    # chunks of 128 tokens, grown so there are at most 256 per row: the run
+    # counts stay O(rows * 256) however long the sequence
+    tc = _PLACE_SUB * -(-n_blocks // 256)
+    n_chunks = -(-S // tc)
+    nb_cap = max(64, 1 << (n_blocks - 1).bit_length())
+    stream = torch.cuda.current_stream()
+    runs = torch.empty(n_rows * n_chunks, dtype=torch.int32, device=device)
+    entries = torch.empty(BG * S * topk, dtype=torch.int32, device=device)
+    fns = _PLACE_CACHE.get((topk, nb_cap))
+    args = (table, runs, entries, int(S), int(BG), int(n_blocks), int(n_chunks), int(tc), stream)
+    if fns is None:
+        fns = tuple(build_inverted_pass(topk, nb_cap, place).compile(*args) for place in (False, True))
+        _PLACE_CACHE[(topk, nb_cap)] = fns
+
+    fns[0](*args)  # runs <- counts
+    ends = torch.cumsum(runs, 0, dtype=torch.int32)
+    offsets = ends - runs
+    ptr = torch.cat([offsets.view(n_rows, n_chunks)[:, 0], ends[-1:]])
+    fns[1](table, offsets, entries, int(S), int(BG), int(n_blocks), int(n_chunks), int(tc), stream)
+    return ptr, entries
+
+
+def _inverted_table_by_sort(table: torch.Tensor, n_blocks: int):
+    """:func:`build_inverted_table` by one stable sort: for more blocks than
+    fit a counter each in LDS."""
+    B, Hkv, S, topk = table.shape
     n_rows = B * Hkv * n_blocks
-    rows = torch.arange(B * Hkv, device=device, dtype=torch.int32).view(B, Hkv, 1, 1) * n_blocks
-    keys = torch.where(block_table >= 0, rows + block_table, n_rows).flatten()
-    toks = (
-        torch.arange(S, device=device, dtype=torch.int32).view(1, 1, S, 1).expand(B, Hkv, S, topk).flatten()
-    )
+    rows = torch.arange(B * Hkv, device=table.device, dtype=torch.int32).view(B, Hkv, 1, 1) * n_blocks
+    keys = torch.where(table >= 0, rows + table, n_rows).flatten()
     keys_sorted, order = torch.sort(keys, stable=True)
-    tokens = toks[order].contiguous()
-    bounds = torch.arange(n_rows + 1, device=device, dtype=torch.int32)
-    ptr = torch.searchsorted(keys_sorted, bounds).to(torch.int32)
-    return ptr, tokens
+    bounds = torch.arange(n_rows + 1, device=table.device, dtype=torch.int32)
+    ptr = torch.searchsorted(keys_sorted, bounds, out_int32=True)
+    return ptr, order.to(torch.int32)
+
+
+# ============================================================================
+# host
+# ============================================================================
+
+
+_SEARCH_STEPS = 24  # binary-search depth: up to 2**24 CSR rows
+
+
+def build_chunk_writer():
+    """One thread per chunk: find its CSR row by binary search over
+    ``CHPTR`` and write ``(row, begin, end)``, or zeros past the live chunks."""
+    NTH = 256
+
+    @flyc.kernel(known_block_size=[NTH, 1, 1])
+    def k_fn(
+        PTR: fx.Tensor, CHPTR: fx.Tensor, CHUNKS: fx.Tensor, NROWS: fx.Int32, NCH: fx.Int32, SIZE: fx.Int32
+    ):
+        c = fx.Int32(fx.Index(gpu.block_idx.x) * fx.Index(NTH) + fx.Index(gpu.thread_idx.x))
+        rows_bytes = _raw((fx.Index(NROWS) + fx.Index(1)) * fx.Index(4))
+        ptr_rsrc = buffer_ops.create_buffer_resource(PTR, max_size=False, num_records_bytes=rows_bytes)
+        cp_rsrc = buffer_ops.create_buffer_resource(CHPTR, max_size=False, num_records_bytes=rows_bytes)
+        ch_rsrc = buffer_ops.create_buffer_resource(
+            CHUNKS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(3 * 4))
+        )
+
+        def load(rsrc, i):
+            return fx.Int32(buffer_ops.buffer_load(rsrc, fx.Index(i), vec_width=1, dtype=fx.Int32))
+
+        # last row whose first chunk is <= c
+        lo = fx.Int32(0)
+        hi = NROWS
+        for _ in range_constexpr(_SEARCH_STEPS):
+            mid = (lo + hi) // fx.Int32(2)
+            go_right = ArithValue(load(cp_rsrc, mid) <= c)
+            lo = fx.Int32(go_right.select(_raw(mid), _raw(lo)))
+            hi = fx.Int32(go_right.select(_raw(hi), _raw(mid)))
+        row = lo
+        live = ArithValue(c < load(cp_rsrc, NROWS))
+        begin = load(ptr_rsrc, row) + (c - load(cp_rsrc, row)) * SIZE
+        end = begin + SIZE
+        row_end = load(ptr_rsrc, row + fx.Int32(1))
+        end = fx.Int32(ArithValue(end < row_end).select(_raw(end), _raw(row_end)))
+        zero = fx.Int32(0)
+        vals = [fx.Int32(live.select(_raw(x), _raw(zero))) for x in (row, begin, end)]
+        in_range = ArithValue(c < NCH)
+        for i, x in enumerate(vals):
+            buffer_ops.buffer_store(
+                x,
+                ch_rsrc,
+                (fx.Index(c) * fx.Index(3) + fx.Index(i)) * fx.Index(4),
+                mask=_raw(in_range),
+                offset_is_bytes=True,
+            )
+
+    @flyc.jit
+    def launch(PTR, CHPTR, CHUNKS, NROWS, NCH, SIZE, stream):
+        k_fn(PTR, CHPTR, CHUNKS, NROWS, NCH, SIZE).launch(
+            grid=((fx.Index(NCH) + fx.Index(NTH - 1)) // fx.Index(NTH), 1, 1),
+            block=(NTH, 1, 1),
+            stream=stream,
+        )
+
+    launch.compile = lambda *a: flyc.compile(launch, *a)
+    return launch
+
+
+_CHUNK_WRITER: list = []
 
 
 def plan_chunks(ptr: torch.Tensor, max_tokens: int, target_chunks: int = 2048, min_chunk: int = 64):
@@ -668,25 +1001,43 @@ def plan_chunks(ptr: torch.Tensor, max_tokens: int, target_chunks: int = 2048, m
     Returns ``(chunks, chunk_ptr, n_chunks)``: ``chunks`` is ``[n_chunks, 3]``
     int32 ``(row, begin, end)`` in row order, ``chunk_ptr`` ``[n_rows + 1]`` int32.
     """
-    device = ptr.device
     n_rows = ptr.numel() - 1
+    assert n_rows < 2**_SEARCH_STEPS
     size = max(min_chunk, -(-max_tokens // target_chunks))
-    counts = (ptr[1:] - ptr[:-1]).long()
-    per_row = ((counts + size - 1) // size).clamp_min(1)
-    chunk_ptr = torch.zeros(n_rows + 1, dtype=torch.long, device=device)
-    chunk_ptr[1:] = torch.cumsum(per_row, 0)
+    per_row = torch.div(ptr[1:] - ptr[:-1] + (size - 1), size, rounding_mode="floor").clamp_min_(1)
+    chunk_ptr = torch.cat([torch.zeros_like(ptr[:1]), torch.cumsum(per_row, 0, dtype=torch.int32)])
 
     n_chunks = n_rows + -(-max_tokens // size)
-    c = torch.arange(n_chunks, device=device)
-    live = c < chunk_ptr[-1]
-    rows = torch.searchsorted(chunk_ptr[1:], c, right=True).clamp_max(n_rows - 1)
-    begin = ptr[rows].long() + (c - chunk_ptr[rows]) * size
-    end = torch.minimum(begin + size, ptr[rows + 1].long())
-    zero = torch.zeros_like(c)
-    chunks = torch.stack(
-        [torch.where(live, rows, zero), torch.where(live, begin, zero), torch.where(live, end, zero)], dim=1
-    )
-    return chunks.to(torch.int32).contiguous(), chunk_ptr.to(torch.int32), n_chunks
+    chunks = torch.empty((n_chunks, 3), dtype=torch.int32, device=ptr.device)
+    args = (ptr, chunk_ptr, chunks, int(n_rows), int(n_chunks), int(size), torch.cuda.current_stream())
+    if not _CHUNK_WRITER:
+        _CHUNK_WRITER.append(build_chunk_writer().compile(*args))
+    _CHUNK_WRITER[0](*args)
+    return chunks, chunk_ptr, n_chunks
+
+
+class BlockPlan(NamedTuple):
+    """The block table inverted and chunked, shared by every backward that walks
+    it block by block: the attention's dK/dV and the indexer's dK.
+
+    ``ptr``/``entries`` are :func:`build_inverted_table`'s CSR, ``chunks``,
+    ``chunk_ptr`` and ``n_chunks`` :func:`plan_chunks`' split of it.
+    """
+
+    ptr: torch.Tensor
+    entries: torch.Tensor
+    chunks: torch.Tensor
+    chunk_ptr: torch.Tensor
+    n_chunks: int
+    n_blocks: int
+
+
+def build_block_plan(block_table: torch.Tensor, block_size: int = 128) -> BlockPlan:
+    """:class:`BlockPlan` for a ``[B, Hkv, S, topk]`` block table (-1 padded)."""
+    n_blocks = -(-block_table.shape[2] // block_size)
+    ptr, entries = build_inverted_table(block_table, n_blocks)
+    chunks, chunk_ptr, n_chunks = plan_chunks(ptr, entries.numel())
+    return BlockPlan(ptr, entries, chunks, chunk_ptr, n_chunks, n_blocks)
 
 
 _DQ_CACHE: dict = {}
@@ -694,13 +1045,15 @@ _DKDV_CACHE: dict = {}
 _RED_CACHE: dict = {}
 
 
-def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, block_size=128):
+def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, block_size=128, plan=None):
     """Gradients of ``msa_token_fwd``.
 
     Args:
         dout: ``[S, B, Hq, 128]`` bf16, the gradient of ``out``.
         q, k, v, block_table, softmax_scale, block_size: as passed to the forward.
         out, lse: the forward's outputs.
+        plan: ``block_table``'s :class:`BlockPlan`, if the caller already built
+            it; built here otherwise.
 
     Returns:
         ``dq`` ``[S, B, Hq, 128]``, ``dk`` and ``dv`` ``[S, B, Hkv, 128]``, bf16.
@@ -713,10 +1066,12 @@ def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, bloc
         softmax_scale = D**-0.5
     dout, q, k, v, block_table = (t.contiguous() for t in (dout, q, k, v, block_table))
     lse = lse.contiguous()
-    n_blocks = -(-S // block_size)
+    if plan is None:
+        plan = build_block_plan(block_table, block_size)
+    n_blocks = plan.n_blocks
+    assert n_blocks == -(-S // block_size)
 
     out = out.contiguous()
-    ptr, tokens = build_inverted_table(block_table, n_blocks)
 
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
@@ -732,7 +1087,7 @@ def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, bloc
         _DQ_CACHE[dq_key] = fn
     fn(*dq_args)
 
-    chunks, chunk_ptr, n_chunks = plan_chunks(ptr, tokens.numel())
+    n_chunks = plan.n_chunks
     ws = torch.empty((n_chunks, 2, block_size, D), dtype=torch.float32, device=q.device)
     kv_args = (
         q,
@@ -741,24 +1096,24 @@ def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, bloc
         dout,
         lse,
         delta,
-        chunks,
-        tokens,
+        plan.chunks,
+        plan.entries,
         ws,
         int(S),
         int(B),
         int(n_blocks),
-        int(tokens.numel()),
+        int(plan.entries.numel()),
         int(n_chunks),
         stream,
     )
-    kv_key = (Hkv, block_size, float(softmax_scale))
+    kv_key = (Hkv, block_size, float(softmax_scale), topk)
     fn = _DKDV_CACHE.get(kv_key)
     if fn is None:
-        fn = build_dkdv(Hkv, block_size, float(softmax_scale)).compile(*kv_args)
+        fn = build_dkdv(Hkv, block_size, float(softmax_scale), topk).compile(*kv_args)
         _DKDV_CACHE[kv_key] = fn
     fn(*kv_args)
 
-    red_args = (ws, chunk_ptr, dk, dv, int(S), int(B), int(n_blocks), int(n_chunks), stream)
+    red_args = (ws, plan.chunk_ptr, dk, dv, int(S), int(B), int(n_blocks), int(n_chunks), stream)
     red_key = (Hkv, block_size)
     fn = _RED_CACHE.get(red_key)
     if fn is None:
