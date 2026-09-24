@@ -80,9 +80,9 @@ sparse_indexer_loss_coeff: 1.0e-2
 sparse_indexer_loss_type: sparse
 
 # Attention core: flydsl runs the gfx950 (MI355X) kernels in
-# core/transformer/minimax_m3/flydsl, which never form the score matrix -- on
-# the 8-layer proxy, 1.75x faster per step and 51 GB less memory than eager,
-# same loss curve. It needs head_dim 128, 16 query heads per KV head, and no
+# core/transformer/minimax_m3/flydsl for the attention and the indexer's block
+# scoring, neither of which forms a score matrix -- on the 8-layer proxy,
+# 1.75x faster per step and 51 GB less memory than eager, same loss curve. It needs head_dim 128, 16 query heads per KV head, and no
 # dataloader attention mask. eager is the plain-PyTorch reference, for other
 # GPUs and for checking numerics. Neither supports tensor parallelism yet.
 msa_backend: flydsl
@@ -160,10 +160,9 @@ init_method_std: 0.02
 #   (core/transformer/minimax_m3/eager.py) materialises the full
 #   [b, heads, sq, sk] fp32 score matrix, so its activation memory grows with
 #   sq^2 -- several GB per MSA layer at 4k, which is why long eager runs need
-#   full recompute on every layer. msa_backend: flydsl avoids that (see above).
-#   The indexer itself still scores every key in plain PyTorch, an O(sq^2)
-#   [b, 4, sq, sk] fp32 tensor. Not supported yet: context and sequence
-#   parallelism, packed sequences, and inference.
+#   full recompute on every layer; its indexer adds an O(sq^2) [b, 4, sq, sk]
+#   fp32 tensor. msa_backend: flydsl avoids both (see above). Not supported
+#   yet: context and sequence parallelism, packed sequences, and inference.
 #
 # MTP: config.json carries both `num_mtp_modules: 7` and
 #   `num_nextn_predict_layers: 1`. Seven extra MoE layers would add ~50B params,
