@@ -48,7 +48,7 @@ def _clean_state():
 
 
 def _slice_of(tensor: torch.Tensor):
-    return (tensor.data_ptr(), tensor.numel())
+    return (tensor.data_ptr(), tensor.numel(), tensor.dtype)
 
 
 class _FakeParam:
@@ -90,7 +90,7 @@ class TestOwnedSlices:
         main_grad = grad[10:20]
         param = _fake_param(main_grad)
         buffer = SimpleNamespace(grad_data=grad, param_index_map={param: (10, 20, 0)})
-        gbo._state["owned"] = frozenset({(0xDEAD, 10)})  # unrelated key
+        gbo._state["owned"] = frozenset({(0xDEAD, 10, torch.float32)})  # unrelated key
 
         assert gbo._owned_slices(buffer) == []
 
@@ -101,6 +101,15 @@ class TestOwnedSlices:
         param = _fake_param(main_grad)
         buffer = SimpleNamespace(grad_data=grad, param_index_map={param: (10, 20, 0)})
         gbo._state["owned"] = frozenset({_slice_of(main_grad)})
+
+        assert gbo._owned_slices(buffer) == []
+
+    def test_dtype_is_part_of_the_exact_ownership_key(self):
+        grad = torch.zeros(30, dtype=torch.float32)
+        main_grad = grad[10:20]
+        param = _fake_param(main_grad)
+        buffer = SimpleNamespace(grad_data=grad, param_index_map={param: (10, 20, 0)})
+        gbo._state["owned"] = frozenset({(main_grad.data_ptr(), main_grad.numel(), torch.int32)})
 
         assert gbo._owned_slices(buffer) == []
 

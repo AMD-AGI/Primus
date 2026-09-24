@@ -33,7 +33,7 @@ What makes the skip safe:
   configurations where no overwrite-capable producer runs.
 - A claim is honoured only when the parameter's ``main_grad`` is exactly the
   contiguous ``[start, end)`` the buffer's own index map assigns it, matched by
-  address and element count. Inter-parameter alignment padding and the padding
+  address, element count, and dtype. Inter-parameter alignment padding and the padding
   at the end of each bucket therefore always get zeroed: the reduce-scatter
   reads them.
 - ``PRIMUS_TURBO_GRAD_OWNERSHIP_POISON=1`` fills the skipped slices with NaN
@@ -56,7 +56,7 @@ from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_pat
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
-Slice = Tuple[int, int]
+Slice = Tuple[int, int, object]
 
 _DISABLED = os.environ.get("PRIMUS_TURBO_GRAD_OWNERSHIP", "0") != "1"
 _POISON = os.environ.get("PRIMUS_TURBO_GRAD_OWNERSHIP_POISON", "0") == "1"
@@ -93,7 +93,7 @@ def _owned_slices(buffer) -> List[Tuple[int, int, Slice]]:
     """Buffer offsets whose parameter was fully overwritten last iteration.
 
     Returns ``(start, end, key)`` triples, where ``key`` is the producer's
-    ``(data_ptr, numel)`` log entry, so the caller can report back exactly what
+    ``(data_ptr, numel, dtype)`` log entry, so the caller can report back exactly what
     it skipped.
     """
     owned: FrozenSet[Slice] = _state["owned"]
@@ -114,7 +114,7 @@ def _owned_slices(buffer) -> List[Tuple[int, int, Slice]]:
             continue
         if main_grad.data_ptr() != base + start * itemsize:
             continue
-        key = (main_grad.data_ptr(), main_grad.numel())
+        key = (main_grad.data_ptr(), main_grad.numel(), main_grad.dtype)
         if key in owned:
             found.append((start, end, key))
 
