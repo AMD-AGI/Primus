@@ -580,6 +580,12 @@ def test_megatron_args_reads_are_derived_from_the_backend_package(megatron_repo:
     assert all(r.consumer.startswith("primus/backends/megatron/") for r in rules)
 
 
+def test_removed_megatron_arg_is_not_revived_by_compatibility_metadata():
+    patterns = {r.pattern for r in extract_args_read_rules(_REPO_ROOT, "megatron")}
+
+    assert "async_tensor_model_parallel_allreduce" not in patterns
+
+
 def test_megatron_config_extension_fields_are_schema(megatron_repo: Path):
     """A Primus TransformerConfig subclass widens the key set, transitively."""
     keys, source = extract_backend_config_extensions(megatron_repo, "megatron")
@@ -930,6 +936,25 @@ def _exp_yaml(overrides: str) -> str:
     )
 
 
+def test_scan_skips_top_level_env_but_checks_override_env(fake_repo: Path):
+    _write(
+        fake_repo / "examples/torchtitan/configs/top_env.yaml",
+        "env:\n  XLA_FLAGS: --xla_gpu_autotune_level=5\n" + _exp_yaml("training:\n  seq_len: 4096"),
+    )
+    _write(
+        fake_repo / "examples/torchtitan/configs/override_env.yaml",
+        _exp_yaml("env:\n  XLA_FLAGS: --xla_gpu_autotune_level=5\ntraining:\n  seq_len: 4096"),
+    )
+
+    env_findings = [
+        finding for finding in scan_backend(fake_repo, "torchtitan").findings if finding.key == "env"
+    ]
+
+    assert [(finding.key, Path(finding.file).name) for finding in env_findings] == [
+        ("env", "override_env.yaml")
+    ]
+
+
 def test_scan_reports_only_unknown_keys(fake_repo: Path):
     _write(
         fake_repo / "examples/torchtitan/configs/probe.yaml",
@@ -1019,6 +1044,31 @@ def test_megatron_scan_reports_only_unknown_keys(megatron_repo: Path):
     assert result.available
     assert {f.key for f in result.findings} == {"renamed_away"}
     assert not result.errors
+
+
+def test_megatron_scan_covers_all_experiment_roots(megatron_repo: Path):
+    paths = (
+        "examples/megatron/exp_pretrain.yaml",
+        "examples/mlperf/probe.yaml",
+        "examples/moe_package/configs/probe.yaml",
+        "tests/trainer/probe.yaml",
+    )
+    config = """
+        modules:
+          pre_trainer:
+            framework: megatron
+            config: pre_trainer.yaml
+            model: fake.yaml
+            overrides:
+              outside_schema: true
+    """
+    for path in paths:
+        _write(megatron_repo / path, config)
+
+    result = scan_backend(megatron_repo, "megatron")
+    findings = {finding.file for finding in result.findings if finding.key == "outside_schema"}
+
+    assert findings == set(paths)
 
 
 def test_scan_without_submodule_is_unavailable(tmp_path: Path):
@@ -1258,8 +1308,8 @@ def test_cli_warn_only_suppresses_the_failure(fake_repo: Path, monkeypatch, caps
     assert cli.main() == 0
 
 
-def test_cli_reports_a_misplaced_key_apart_from_drift(megatron_repo: Path, monkeypatch, capsys):
-    """The two need different fixes, so they must not share a table."""
+def test_cli_reports_a_misplaced_key_without_gating(megatron_repo: Path, monkeypatch, capsys):
+    """Model-scoped findings need owner validation, so report but do not gate."""
     _write(
         megatron_repo / "examples/megatron/configs/stray.yaml",
         """
@@ -1277,7 +1327,7 @@ def test_cli_reports_a_misplaced_key_apart_from_drift(megatron_repo: Path, monke
     monkeypatch.setattr(cli, "ROOT", megatron_repo)
     monkeypatch.setattr("sys.argv", ["check_config_schema.py", "--backend", "megatron"])
 
-    assert cli.main() == 1
+    assert cli.main() == 0
     out = capsys.readouterr().out
     assert "No drift: every key in" in out  # the key exists; it is only misplaced
     assert "Keys set on a model that cannot read them" in out

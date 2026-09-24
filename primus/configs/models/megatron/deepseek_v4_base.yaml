@@ -32,11 +32,9 @@ apply_rope_fusion: false   # V4 uses partial RoPE on a 512-dim head; fused path 
 hc_mult: 4
 hc_sinkhorn_iters: 20
 hc_eps: 1.0e-06
-hc_use_sinkhorn: true
 mtp_use_separate_hc_head: true
 
 # ---------- Hybrid Attention ----------
-hybrid_attention_enabled: true
 compress_ratios: null            # provided by the per-variant yaml (Flash / Pro);
                                  # entries: 0 = dense+SWA, 4 = CSA, 128 = HCA
 # RoPE base for the CSA / HCA (compressed) branches. 160000 is the V4-Pro

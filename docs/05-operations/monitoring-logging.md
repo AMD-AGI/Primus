@@ -90,8 +90,6 @@ Configuration file: `trainer_base.yaml`
 | `tensorboard_log_interval` | `1` | Steps between TensorBoard writes. |
 | `tensorboard_queue_size` | `1000` | Event file queue size. |
 | `log_timers_to_tensorboard` | `false` | Log timer stats. |
-| `log_batch_size_to_tensorboard` | `false` | Log batch size. |
-| `log_learning_rate_to_tensorboard` | `true` | Log learning rate. |
 | `log_validation_ppl_to_tensorboard` | `false` | Log validation perplexity. |
 | `log_memory_to_tensorboard` | `false` | Log memory stats. |
 | `log_world_size_to_tensorboard` | `false` | Log world size. |

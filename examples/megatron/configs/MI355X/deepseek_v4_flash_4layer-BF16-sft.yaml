@@ -119,9 +119,7 @@ modules:
       # Triton scoring kernel's _SUPPORTED_H -- so CSA gets the fused path for free.
       v4_shard_attention_heads: ${PRIMUS_SHARD_HEADS:false}
 
-      hybrid_attention_enabled: true
       attn_sink: true
-      hc_use_sinkhorn: true
       hc_mult: ${PRIMUS_HC_MULT:4}
       # NARROWING KNOB (default = stock V4-Flash width, 64).
       # V4 attention does not shard heads across TP, so the query tensor
@@ -170,7 +168,6 @@ modules:
 
       # ---------- ckpt: random init, save nothing ----------
       finetune: false
-      auto_continue_train: false
       load: null
       save: null
       no_save_optim: true

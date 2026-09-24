@@ -165,7 +165,6 @@ ddp_average_in_collective: true   # divide gradients in NCCL collective
 
 # Load FLA-initialized weights to compare apples-to-apples
 finetune: true
-auto_continue_train: false
 no_load_optim: true
 no_load_rng: true
 load: /home/<user>/Primus/output/fla_init_ckpt_300M

@@ -156,7 +156,6 @@ modules:
       load: null
       no_save_optim: true
       no_save_rng: true
-      auto_continue_train: false
       disable_last_saving: true
 
       # Logging
@@ -165,8 +164,6 @@ modules:
       log_throughput: true
       wall_clock_step_timer: true
       log_timers_to_tensorboard: true
-      log_batch_size_to_tensorboard: true
-      log_learning_rate_to_tensorboard: true
       log_memory_to_tensorboard: true
 
       # PyTorch Profiler

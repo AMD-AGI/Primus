@@ -32,10 +32,9 @@ Primus-level continuation (`primus_megatron_module.yaml`):
 
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
-| `auto_continue_train` | `false` | Automatically continue from the latest checkpoint in the experiment's save directory on relaunch. |
 | `disable_last_saving` | `false` | Disable the final end-of-run checkpoint save (leave `false` so resume points exist). |
 
-**Pattern:** enable `exit_signal_handler` + `exit_duration_in_mins` (or rely on preemption signals), set a reasonable checkpoint `save_interval`, and turn on `auto_continue_train` so requeued jobs pick up where they left off.
+**Pattern:** enable `exit_signal_handler` + `exit_duration_in_mins` (or rely on preemption signals), set a reasonable checkpoint `save_interval`, and point `load` at the save directory so requeued jobs pick up where they left off. Primus has no auto-resume switch of its own: `auto_continue_train` lost its implementation with `primus/modules` (#851) and has been removed from the configs.
 
 ---
 
@@ -109,7 +108,7 @@ In-job mechanisms still need the scheduler to relaunch on full-job failure:
 
 1. **Always checkpoint**—set a `save_interval` matched to your mean-time-between-failures; use async/distributed checkpointing to keep overhead low.
 2. **Exit cleanly**—`exit_signal_handler: true` (+ `exit_duration_in_mins` for time-boxed allocations).
-3. **Resume automatically**—`auto_continue_train: true` (Megatron) and `--requeue` (Slurm).
+3. **Resume automatically**—point `load` at the save directory (Megatron) and use `--requeue` (Slurm).
 4. **Reduce recovery time at scale**—`enable_ft_package` + `inprocess_restart` (Megatron) or torchft replica groups (TorchTitan).
 5. **Guard numerics**—keep `check_for_nan_in_loss_and_grad` on; consider spiky/large-grad checks for unstable configs.
 
