@@ -157,6 +157,12 @@ class WanTransformerBlock(nn.Module):
 # and hybrid blocks, GPT callables) or keyed on ``layers.N`` parameter names,
 # and WAN's are ``blocks.N``; ``layer_number`` is set above for the one
 # attribute the FSDP-DTensor checkpoint path would read.
+#
+# One Primus site matches too: ``patches/sdma_symm_mem_collectives_patches.py``
+# attaches ``SymmMemAllGather`` to every ``TransformerLayer`` that torch FSDP2
+# shards. It only runs with ``SDMA_ALL_GATHER=1`` and ``use_torch_fsdp2: true``,
+# which no WAN recipe sets (they use Megatron-FSDP); when both are set, WAN
+# blocks get the same per-layer all-gather Megatron's own layers do.
 TransformerLayer.register(WanTransformerBlock)
 
 
