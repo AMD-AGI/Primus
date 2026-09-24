@@ -25,18 +25,20 @@ from primus.backends.megatron.core.transformer.minimax_m3.indexer import (
     MinimaxM3IndexerSubmodules,
 )
 from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss import (
+    MSA_INDEXER_LOSS_NAME,
     MSAIndexerLossAutoScaler,
-    MSAIndexerLossTracker,
     compute_indexer_loss,
+    record_indexer_loss,
 )
 
 __all__ = [
     "MSA_BACKENDS",
+    "MSA_INDEXER_LOSS_NAME",
     "MinimaxSparseAttention",
     "MinimaxSparseAttentionSubmodules",
     "MinimaxM3Indexer",
     "MinimaxM3IndexerSubmodules",
     "MSAIndexerLossAutoScaler",
-    "MSAIndexerLossTracker",
     "compute_indexer_loss",
+    "record_indexer_loss",
 ]

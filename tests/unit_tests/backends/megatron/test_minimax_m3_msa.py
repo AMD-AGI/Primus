@@ -264,6 +264,41 @@ def test_indexer_loss_survives_the_always_visible_infinities():
     assert torch.isfinite(loss)
 
 
+def _causal_dense_scores(seed=5):
+    torch.manual_seed(seed)
+    scores = torch.randn(1, 4, SQ, SQ, dtype=torch.float64)
+    future = torch.ones(SQ, SQ, dtype=torch.bool).triu(1)
+    return scores.masked_fill(future, float("-inf"))
+
+
+def test_indexer_loss_is_finite_on_real_causal_selections():
+    """Queries in the first block see only their forced local block: no finite score.
+
+    Random block scores never produce such a row; the indexer's own causal
+    selection does, for every query in block 0.
+    """
+    _, block_scores = _select(_config(), _scores())
+    assert not torch.isfinite(block_scores[..., :BLOCK, :]).any(), "premise: block 0 rows are all forced"
+    block_scores = block_scores.double().requires_grad_(True)
+
+    loss = compute_indexer_loss(_causal_dense_scores(), block_scores, BLOCK, loss_coeff=1.0)
+
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert torch.isfinite(block_scores.grad).all()
+    assert block_scores.grad.abs().sum() > 0
+
+
+def test_indexer_loss_ignores_fully_masked_padding_rows():
+    _, block_scores = _select(_config(), _scores())
+    dense_scores = _causal_dense_scores()
+    dense_scores[:, :, -3:, :] = float("-inf")  # three padding queries
+
+    loss = compute_indexer_loss(dense_scores, block_scores.double(), BLOCK, loss_coeff=1.0)
+
+    assert torch.isfinite(loss)
+
+
 def test_zero_coefficient_scales_the_loss_away():
     torch.manual_seed(4)
     dense_scores = torch.randn(1, 4, SQ, SQ, dtype=torch.float64)
@@ -435,6 +470,119 @@ class TestMinimaxSparseAttentionModule:
         # top-k is not differentiable, so with the loss off nothing reaches the
         # indexer -- which is exactly why the loss has to exist.
         assert attention.indexer.linear_index_q.weight.grad is None
+
+    def test_distillation_loss_does_not_reach_the_layers_below(self):
+        """The KL trains the indexer only: the input gradient must not change with it."""
+        config, attention = self._build(sparse_indexer_loss_coeff=1.0)
+        attention.train()
+        hidden = torch.randn(SQ, 2, config.hidden_size, device="cuda")
+        rotary_pos_emb = self._rope(config)
+
+        def input_grad(coeff):
+            attention.indexer_loss_coeff = coeff
+            attention.zero_grad(set_to_none=True)
+            x = hidden.clone().requires_grad_(True)
+            output, _ = attention(x, rotary_pos_emb=rotary_pos_emb)
+            output.sum().backward()
+            return x.grad
+
+        torch.testing.assert_close(input_grad(1.0), input_grad(0.0))
+
+    def test_no_loss_is_computed_without_grad(self):
+        """Full recompute's first forward runs under no_grad; it must not record a loss."""
+        from megatron.core.transformer.moe.moe_utils import (
+            get_moe_layer_wise_logging_tracker,
+        )
+
+        from primus.backends.megatron.core.transformer.minimax_m3 import (
+            MSA_INDEXER_LOSS_NAME,
+        )
+
+        config, attention = self._build(sparse_indexer_loss_coeff=1.0e-2)
+        attention.train()
+        tracker = get_moe_layer_wise_logging_tracker()
+        tracker.pop(MSA_INDEXER_LOSS_NAME, None)
+
+        with torch.no_grad():
+            attention(torch.randn(SQ, 2, config.hidden_size, device="cuda"))
+        assert MSA_INDEXER_LOSS_NAME not in tracker
+
+    def test_loss_is_recorded_in_the_moe_aux_loss_tracker(self):
+        from megatron.core.transformer.moe.moe_utils import (
+            get_moe_layer_wise_logging_tracker,
+        )
+
+        from primus.backends.megatron.core.transformer.minimax_m3 import (
+            MSA_INDEXER_LOSS_NAME,
+        )
+
+        config, attention = self._build(sparse_indexer_loss_coeff=1.0e-2)
+        attention.train()
+        tracker = get_moe_layer_wise_logging_tracker()
+        tracker.pop(MSA_INDEXER_LOSS_NAME, None)
+
+        attention(torch.randn(SQ, 2, config.hidden_size, device="cuda"))
+
+        values = tracker.pop(MSA_INDEXER_LOSS_NAME)["values"]
+        assert values.shape == (config.num_layers,)
+        # layer_number=1 writes slot 0 and nothing else.
+        assert values[0] > 0
+        assert (values[1:] == 0).all()
+
+
+class TestIndexerLossScale:
+    """The seeded gradient must follow the MoE aux-loss scale the schedule installs."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_scales(self):
+        from megatron.core.transformer.moe.moe_utils import MoEAuxLossAutoScaler
+
+        from primus.backends.megatron.core.transformer.minimax_m3 import (
+            MSAIndexerLossAutoScaler,
+        )
+
+        saved_moe = MoEAuxLossAutoScaler.main_loss_backward_scale
+        saved_msa = MSAIndexerLossAutoScaler.main_loss_backward_scale
+        yield
+        MoEAuxLossAutoScaler.main_loss_backward_scale = saved_moe
+        MSAIndexerLossAutoScaler.main_loss_backward_scale = saved_msa
+
+    @staticmethod
+    def _seeded_grad():
+        from primus.backends.megatron.core.transformer.minimax_m3 import (
+            MSAIndexerLossAutoScaler,
+        )
+
+        weight = torch.ones(3, requires_grad=True)
+        activation = torch.zeros(2, requires_grad=True)
+        out = MSAIndexerLossAutoScaler.apply(activation, (weight * 2.0).sum())
+        out.sum().backward()
+        return weight.grad
+
+    def test_follows_the_moe_aux_loss_scale(self):
+        from megatron.core.transformer.moe.moe_utils import MoEAuxLossAutoScaler
+
+        from primus.backends.megatron.core.transformer.minimax_m3 import (
+            MSAIndexerLossAutoScaler,
+        )
+
+        MSAIndexerLossAutoScaler.set_loss_scale(None)
+        # What the schedule installs with 4 microbatches and no grad scaler.
+        MoEAuxLossAutoScaler.main_loss_backward_scale = torch.tensor(0.25)
+
+        torch.testing.assert_close(self._seeded_grad(), torch.full((3,), 0.5))
+
+    def test_explicit_override_wins(self):
+        from megatron.core.transformer.moe.moe_utils import MoEAuxLossAutoScaler
+
+        from primus.backends.megatron.core.transformer.minimax_m3 import (
+            MSAIndexerLossAutoScaler,
+        )
+
+        MoEAuxLossAutoScaler.main_loss_backward_scale = torch.tensor(0.25)
+        MSAIndexerLossAutoScaler.set_loss_scale(torch.tensor(1.0))
+
+        torch.testing.assert_close(self._seeded_grad(), torch.full((3,), 2.0))
 
 
 def test_external_attention_mask_is_composed():

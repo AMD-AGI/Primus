@@ -51,8 +51,8 @@ from primus.backends.megatron.core.transformer.minimax_m3.indexer import (
 )
 from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss import (
     MSAIndexerLossAutoScaler,
-    MSAIndexerLossTracker,
     compute_indexer_loss,
+    record_indexer_loss,
 )
 
 # Backends that compute the block-sparse attention itself. `eager` is the
@@ -178,7 +178,9 @@ class MinimaxSparseAttention(SelfAttention):
         else:
             index_pos_emb = None
 
-        block_indices, block_scores = self.indexer(hidden_states, index_pos_emb)
+        # Detached: the indexer's only gradient is the distillation loss, and that
+        # loss must train the indexer alone, not the layers that feed it.
+        block_indices, block_scores = self.indexer(hidden_states.detach(), index_pos_emb)
 
         # sbhd -> bhsd for the eager kernel, matching the reference's layout.
         query_bhsd = query.permute(1, 2, 0, 3)
@@ -195,11 +197,14 @@ class MinimaxSparseAttention(SelfAttention):
             attention_mask=attention_mask,
         )
 
-        if self.training and self.indexer_loss_coeff > 0.0:
+        # Full recompute runs this forward twice, first under no_grad; gating on
+        # grad mode computes and records the loss once, in the pass that backprops.
+        if self.training and torch.is_grad_enabled() and self.indexer_loss_coeff > 0.0:
             indexer_loss = compute_indexer_loss(
                 dense_scores, block_scores, self.block_size, self.indexer_loss_coeff
             )
-            MSAIndexerLossTracker.record(indexer_loss, self.layer_number, self.config.num_layers)
+            mtp_layers = getattr(self.config, "mtp_num_layers", None) or 0
+            record_indexer_loss(indexer_loss, self.layer_number, self.config.num_layers + mtp_layers)
             core_attn_out = MSAIndexerLossAutoScaler.apply(core_attn_out, indexer_loss)
 
         # bhsd -> sbhd -> [sq, b, hp] for linear_proj.
