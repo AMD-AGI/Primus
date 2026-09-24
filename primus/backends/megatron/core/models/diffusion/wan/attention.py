@@ -145,8 +145,6 @@ class WanAttentionBase(MegatronModule):
         """Run the attention core, honouring the fp32 parity path."""
         if self.use_fp32_attention and query.dtype == torch.float32:
             return unfused_fp32_attention(query, key, value, packed_seq_params).to(query.dtype)
-        if packed_seq_params is None:
-            return self.core_attention(query, key, value, None, self.attn_mask_type)
         return self.core_attention(
             query,
             key,
