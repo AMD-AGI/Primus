@@ -23,7 +23,7 @@ Reference:
     maxdiffusion ``src/maxdiffusion/trainers/wan_trainer.py``.
 """
 
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 
@@ -81,6 +81,7 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
             self.sigma_range = (float(sigma_min), float(sigma_max))
 
         self.training_weights = self._build_training_weights()
+        self._timestep_bounds: Dict[Tuple[float, float, float], Tuple[int, int]] = {}
 
     def _build_training_weights(self) -> torch.Tensor:
         """Precompute the per-timestep loss weight table.
@@ -294,6 +295,26 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         edge = torch.tensor(float(noise_level) * float(n), dtype=conditioned.dtype)
         return int((conditioned < edge).sum())
 
+    def timestep_bounds(self, timestep_window: Tuple[float, float]) -> Tuple[int, int]:
+        """``[lo, hi)``: the integer timesteps whose post-shift sigma is in the window.
+
+        Memoized, since each edge evaluates the whole schedule and the window
+        is fixed for a run while this is asked for every step. ``shift`` is a
+        plain attribute that a caller can reassign, so it is part of the key.
+        """
+        key = (float(timestep_window[0]), float(timestep_window[1]), float(self.shift))
+        bounds = self._timestep_bounds.get(key)
+        if bounds is None:
+            lo = self.first_timestep_at_noise_level(key[0])
+            hi = self.first_timestep_at_noise_level(key[1])
+            if hi <= lo:
+                raise ValueError(
+                    f"timestep_window {tuple(timestep_window)} holds no integer timestep "
+                    f"at shift={self.shift}, num_train_timesteps={self.num_train_timesteps}"
+                )
+            bounds = self._timestep_bounds[key] = (lo, hi)
+        return bounds
+
     def sample_training_timesteps(
         self,
         batch_size: int,
@@ -318,13 +339,7 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         if timestep_window is None:
             lo, hi = 0, self.num_train_timesteps
         else:
-            lo = self.first_timestep_at_noise_level(timestep_window[0])
-            hi = self.first_timestep_at_noise_level(timestep_window[1])
-            if hi <= lo:
-                raise ValueError(
-                    f"timestep_window {tuple(timestep_window)} holds no integer timestep "
-                    f"at shift={self.shift}, num_train_timesteps={self.num_train_timesteps}"
-                )
+            lo, hi = self.timestep_bounds(timestep_window)
 
         return torch.randint(
             low=lo,
