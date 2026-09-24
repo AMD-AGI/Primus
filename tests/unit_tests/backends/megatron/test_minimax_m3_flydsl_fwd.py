@@ -50,24 +50,37 @@ def _inputs(S, B, Hkv, topk, seed=0):
     return q, k, v, _table(B, Hkv, S, topk, gen)
 
 
-def _reference(q, k, v, table):
+def _snr_db(ref, x):
+    """Signal-to-noise ratio in dB, as Primus-Turbo's kernel tests measure it."""
+    ref, x = ref.double(), x.double()
+    return (10 * torch.log10(ref.norm() ** 2 / ((ref - x).norm() ** 2 + 1e-12))).item()
+
+
+def _reference(q, k, v, table, dtype):
     from primus.backends.megatron.core.transformer.minimax_m3.eager import (
         build_block_keep,
         eager_block_sparse_attention,
     )
 
     S, Hq, Hkv = q.shape[0], q.shape[2], k.shape[2]
-    qb, kb, vb = (t.permute(1, 2, 0, 3) for t in (q, k, v))
+    qb, kb, vb = (t.to(dtype).permute(1, 2, 0, 3) for t in (q, k, v))
     keep = build_block_keep(table.long(), S, BLOCK)
     out, dense = eager_block_sparse_attention(qb, kb, vb, keep, D**-0.5)
     lse = torch.logsumexp(dense.masked_fill(~keep.repeat_interleave(Hq // Hkv, dim=1), float("-inf")), dim=-1)
-    return out, lse
+    return out.float(), lse
 
 
-def _check(o, lse, out_ref, lse_ref):
+def _check(o, lse, q, k, v, table):
+    """Global SNR against fp32, as Turbo gates bf16 attention; plus the worst element
+    against eager bf16 -- one wrong row barely moves a global SNR, and a wrong
+    diagonal or tail block is exactly the local bug this kernel could have."""
+    out32, lse32 = _reference(q, k, v, table, torch.float32)
+    out16, _ = _reference(q, k, v, table, torch.bfloat16)
+    o = o.permute(1, 2, 0, 3).float()
+    assert _snr_db(out32, o) >= 40.0, f"O SNR {_snr_db(out32, o):.1f} dB"
     # One bf16 ulp at |o| < 4: both sides round P and O to bf16.
-    torch.testing.assert_close(o.permute(1, 2, 0, 3).float(), out_ref.float(), rtol=0, atol=1.6e-2)
-    torch.testing.assert_close(lse.permute(1, 2, 0), lse_ref, rtol=0, atol=1e-4)
+    torch.testing.assert_close(o, out16, rtol=0, atol=1.6e-2)
+    torch.testing.assert_close(lse.permute(1, 2, 0), lse32, rtol=0, atol=1e-4)
 
 
 @pytest.mark.parametrize(
@@ -87,7 +100,7 @@ def test_matches_eager(S, B, Hkv, topk):
 
     q, k, v, table = _inputs(S, B, Hkv, topk)
     o, lse = msa_token_fwd(q, k, v, table)
-    _check(o, lse, *_reference(q, k, v, table))
+    _check(o, lse, q, k, v, table)
 
 
 @pytest.mark.parametrize(
@@ -107,4 +120,4 @@ def test_every_tuning_path_matches_eager(config):
 
     q, k, v, table = _inputs(2048, 1, 4, 16, seed=1)
     o, lse = msa_token_fwd(q, k, v, table, **config)
-    _check(o, lse, *_reference(q, k, v, table))
+    _check(o, lse, q, k, v, table)
