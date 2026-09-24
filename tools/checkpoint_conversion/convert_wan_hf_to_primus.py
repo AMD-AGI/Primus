@@ -16,6 +16,12 @@ transformer checkpoints to Primus/Megatron-Core compatible format. It handles:
 WAN 2.2 A14B is a dual-expert model: run the tool once per expert subfolder
 (``transformer`` and ``transformer_2``).
 
+To train from the result, set ``backbone_pretrained`` to the output file. A
+dual-expert run (``num_transformers: 2``) loads both experts from one path, so
+write each expert under ``<dir>/transformer/`` and ``<dir>/transformer_2/`` and
+set ``backbone_pretrained: <dir>``. A per-expert stage (``stage: high_noise`` or
+``low_noise``) accepts either that directory or the one expert's file.
+
 Usage:
     # Convert Wan2.1-T2V-1.3B checkpoint
     python tools/checkpoint_conversion/convert_wan_hf_to_primus.py \\
@@ -88,12 +94,13 @@ Examples:
            --output primus_wan.safetensors \\
            --variant wan2.1_t2v_14b
 
-  # Convert both WAN 2.2 A14B experts (dual-expert model, one run each)
+  # Convert both WAN 2.2 A14B experts (dual-expert model, one run each) into
+  # the per-expert subfolders a dual-expert run loads from
   %(prog)s --input Wan-AI/Wan2.2-T2V-A14B-Diffusers/transformer \\
-           --output primus_wan22_a14b_high_noise.safetensors \\
+           --output checkpoints/primus_wan22_a14b/transformer/model.safetensors \\
            --variant wan2.2_t2v_a14b
   %(prog)s --input Wan-AI/Wan2.2-T2V-A14B-Diffusers/transformer_2 \\
-           --output primus_wan22_a14b_low_noise.safetensors \\
+           --output checkpoints/primus_wan22_a14b/transformer_2/model.safetensors \\
            --variant wan2.2_t2v_a14b
 
   # Convert with custom architecture

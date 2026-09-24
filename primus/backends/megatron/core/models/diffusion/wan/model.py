@@ -25,7 +25,7 @@ Tokens are transposed into ``[S, B, dim]`` after the patch embed and back to
 
 import math
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -260,19 +260,47 @@ class WanTransformer3D(nn.Module):
         return unpatchify(hs, batch_size, grid, self.patch_size_3d)
 
 
+def resolve_backbone_checkpoint(checkpoint_path: str, subfolder: Optional[str] = None) -> Path:
+    """Locate one backbone's weights under ``backbone_pretrained``.
+
+    ``backbone_pretrained`` may name the converted file itself, a directory
+    holding one transformer's checkpoint, or a directory with one subfolder per
+    transformer (the diffusers repo layout). ``subfolder`` applies only in the
+    last case, so the file ``convert_wan_hf_to_primus.py`` writes loads as is.
+    """
+    path = Path(checkpoint_path)
+    if subfolder and path.is_dir() and (path / subfolder).is_dir():
+        return path / subfolder
+    return path
+
+
+def resolve_expert_checkpoints(checkpoint_path: str, subfolder: str, subfolder_2: str) -> Tuple[Path, Path]:
+    """Locate both WAN 2.2 experts' weights, refusing to load one checkpoint twice."""
+    first = resolve_backbone_checkpoint(checkpoint_path, subfolder)
+    second = resolve_backbone_checkpoint(checkpoint_path, subfolder_2)
+    if first == second:
+        raise ValueError(
+            f"Wan2_2 loads both experts from backbone_pretrained={checkpoint_path!r}, "
+            f"so it must be a directory holding {subfolder!r} and {subfolder_2!r}; "
+            "otherwise both experts would get the same weights"
+        )
+    return first, second
+
+
 def _load_backbone_checkpoint(
     backbone: nn.Module, checkpoint_path: str, subfolder: Optional[str] = None
 ) -> None:
     """Load a fused-qkv WAN backbone checkpoint.
 
     Accepts a ``.safetensors`` file, a ``.pt``/``.pth`` file, or a directory of
-    ``.safetensors`` shards. The checkpoint must already be in the fused
-    ``linear_qkv`` layout produced by ``checkpoint_converter``; a raw diffusers
-    checkpoint with split ``to_q``/``to_k``/``to_v`` will not load.
+    ``.safetensors`` shards, located by :func:`resolve_backbone_checkpoint`. The
+    checkpoint must already be in the fused ``linear_qkv`` layout produced by
+    ``checkpoint_converter``; a raw diffusers checkpoint with split
+    ``to_q``/``to_k``/``to_v`` will not load.
     """
-    path = Path(checkpoint_path)
-    if subfolder:
-        path = path / subfolder
+    path = resolve_backbone_checkpoint(checkpoint_path, subfolder)
+    if not path.exists():
+        raise FileNotFoundError(f"WAN backbone checkpoint not found: {path}")
 
     state_dict: Dict[str, Tensor] = {}
     if path.is_dir():
@@ -422,6 +450,10 @@ class Wan2_2(DiffusionModule):
             )
         if config.boundary_ratio is None:
             raise ValueError("Wan2_2 requires boundary_ratio to route samples between experts")
+        if config.backbone_pretrained:
+            resolve_expert_checkpoints(
+                config.backbone_pretrained, config.backbone_subfolder, config.backbone_subfolder_2
+            )
 
         super().__init__(
             config=config,
