@@ -292,12 +292,15 @@ class JointSelfAttention(Attention):
         # Split into Q, K, V
         query, key, value = self._split_qkv(mixed_qkv)
 
-        # Apply optional Q/K normalization
+        # Apply optional Q/K normalization. The cast back to value's dtype matters:
+        # the norm can return a wider dtype than it was given, and every dense
+        # flash-attention backend refuses a mixed-precision (q, k, v) triple rather
+        # than casting for us. Reference Flux does the same cast inside QKNorm.
         if self.q_layernorm is not None:
-            query = self.q_layernorm(query)
+            query = self.q_layernorm(query).to(value.dtype)
 
         if self.k_layernorm is not None:
-            key = self.k_layernorm(key)
+            key = self.k_layernorm(key).to(value.dtype)
 
         return query, key, value
 
@@ -322,10 +325,10 @@ class JointSelfAttention(Attention):
 
         # Apply optional Q/K normalization
         if self.added_q_layernorm is not None:
-            query = self.added_q_layernorm(query)
+            query = self.added_q_layernorm(query).to(value.dtype)
 
         if self.added_k_layernorm is not None:
-            key = self.added_k_layernorm(key)
+            key = self.added_k_layernorm(key).to(value.dtype)
 
         return query, key, value
 
@@ -544,6 +547,10 @@ class FluxSingleAttention(SelfAttention):
 
         # Get Q, K, V
         query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
+        # The inherited Q/K norm can widen q/k past value's dtype, and every dense
+        # flash-attention backend refuses a mixed-precision (q, k, v) triple rather
+        # than casting for us. Reference Flux does the same cast inside QKNorm.
+        query, key = query.to(value.dtype), key.to(value.dtype)
 
         # Adjust for inference
         query, key, value, rotary_pos_emb, attn_mask_type, *_ = self._adjust_key_value_for_inference(
