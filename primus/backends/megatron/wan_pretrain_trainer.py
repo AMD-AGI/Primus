@@ -131,6 +131,13 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
 
         params = self.backend_args
 
+        # No producer marks a batch as validation and there is no fixed-timestep
+        # validation schedule for WAN yet, so an eval pass would score random
+        # training timesteps and report it as validation loss.
+        eval_iters = getattr(params, "eval_iters", 0) or 0
+        if eval_iters > 0:
+            raise ValueError(f"WAN has no validation path yet; set eval_iters: 0 (got {eval_iters})")
+
         self.num_train_timesteps = getattr(params, "num_train_timesteps", 1000)
         self.scheduler_shift = getattr(params, "scheduler_shift", 5.0)
         self.scheduler_sigma_min = getattr(params, "scheduler_sigma_min", 0.0)
@@ -196,7 +203,6 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
             weight,
             loss_mask,
             metrics,
-            is_validation,
         ) = wan_forward_step_func(
             data_iterator,
             model,
@@ -214,22 +220,6 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
 
         if hasattr(self, "runtime_state") and self.runtime_state:
             self.runtime_state.update_metrics(metrics)
-
-        if is_validation:
-
-            def val_loss_func(output_tensor, non_loss_data=False):
-                if non_loss_data:
-                    return output_tensor
-                loss = compute_weighted_flow_matching_loss(
-                    output_tensor,
-                    self._last_target,
-                    self._last_weight,
-                    self._last_loss_mask,
-                )
-                sample_count = torch.tensor(output_tensor.shape[0], dtype=loss.dtype, device=loss.device)
-                return loss, {"loss": (loss.detach(), sample_count.detach())}
-
-            return noise_pred, val_loss_func
 
         def wan_loss_func(output_tensor, non_loss_data=False):
             if non_loss_data:
