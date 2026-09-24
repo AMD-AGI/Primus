@@ -591,6 +591,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             {
                 "fp6": getattr(params, "fp6", None),
                 "mxfp6_backward_precision": getattr(params, "mxfp6_backward_precision", "mxfp6"),
+                "mxfp6_weight_format": getattr(params, "mxfp6_weight_format", "mxfp6"),
                 "mxfp6_fused_wgrad_accum": getattr(params, "mxfp6_fused_wgrad_accum", False),
             }
         )
@@ -792,6 +793,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "mxfp4_gradient_stochastic_rounding",
                 "fp6",
                 "mxfp6_backward_precision",
+                "mxfp6_weight_format",
                 "mxfp6_fused_wgrad_accum",
                 "sensitive_layers_enabled",
                 "sensitive_layers_start",
