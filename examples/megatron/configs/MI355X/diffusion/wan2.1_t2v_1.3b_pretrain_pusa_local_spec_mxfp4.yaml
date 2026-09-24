@@ -81,7 +81,6 @@ modules:
       # Local spec (TE-free)
       # ----------------------------------------------------------------------
       transformer_impl: "local"
-      layernorm_across_heads: true
 
       # Inert for compute on this path (attention runs through
       # PrimusTurboLocalAttention), but TransformerConfig still validates the
@@ -100,26 +99,16 @@ modules:
       gradient_accumulation_fusion: false
 
       # ----------------------------------------------------------------------
-      # WAN scheduler / routing
+      # WAN scheduler
       # ----------------------------------------------------------------------
-      num_train_timesteps: 1000
       # shift=3.0 is the WAN convention for 480p data. Keep train and inference
       # shift identical.
       scheduler_shift: 3.0
-      num_transformers: 1
-      boundary_ratio: null
-      stage: full
 
       # Unweighted MSE. The reference implementation these runs were checked
       # against disables the per-timestep weight, so "uniform" is what makes
       # the two comparable; "diffsynth" is the training default.
       loss_weighting: uniform
-
-      # ----------------------------------------------------------------------
-      # Train from scratch (random init)
-      # ----------------------------------------------------------------------
-      backbone_pretrained: null
-      backbone_subfolder: transformer
 
       # ----------------------------------------------------------------------
       # Batch / sequence
