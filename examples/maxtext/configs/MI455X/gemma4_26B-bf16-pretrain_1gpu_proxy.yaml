@@ -1,0 +1,61 @@
+# Gemma 4 26B MoE pre-training -- SINGLE-GPU MI455X throughput proxy.
+#
+# Full 26B with a complete optimiser state does not fit on one MI455X.
+# base_num_decoder_layers is reduced to 6 so the published 5 sliding : 1 global
+# attention pattern is preserved; hidden size, experts, and head dims stay as
+# in MaxText's gemma4-26b.yml.
+#
+# attention=dot_product: global layers use head_dim 512, which is outside
+# Transformer Engine flash's usual 256 cap, and TE fused attention has no
+# gfx1250 kernel in current images (unfused TE softmax fails with "invalid
+# device function"). Use cudnn_flash_te only once TE supports gfx1250.
+#
+# Launch:
+#   GPUS_PER_NODE=1 ./primus-cli direct -- train pretrain \
+#     --config examples/maxtext/configs/MI455X/gemma4_26B-bf16-pretrain_1gpu_proxy.yaml
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:gemma4_26B-pretrain-1gpu-proxy}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    model: gemma4_26B.yaml
+    overrides:
+      run_name: "gemma4_26b_1gpu_proxy"
+      base_output_directory: "./output"
+      steps: ${PRIMUS_STEPS:20}
+      profiler: ""
+
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+      use_multimodal: false
+
+      enable_checkpointing: false
+      async_checkpointing: false
+
+      dcn_data_parallelism: 1
+      dcn_fsdp_parallelism: 1
+      ici_fsdp_parallelism: 1
+      ici_data_parallelism: 1
+      ici_expert_parallelism: 1
+
+      attention: ${PRIMUS_ATTENTION:dot_product}
+      max_target_length: ${PRIMUS_SEQ_LENGTH:1024}
+      per_device_batch_size: ${PRIMUS_MBS:1}
+      remat_policy: "full"
+      sparse_matmul: false
+      megablox: false
+      capacity_factor: 1
+      num_experts: ${PRIMUS_NUM_EXPERTS:128}
+      num_experts_per_tok: ${PRIMUS_EXPERTS_PER_TOK:8}
+      scan_layers: false
+      # Only for NaN-debug runs that must keep stepping after a NaN loss.
+      abort_on_nan_loss: ${PRIMUS_ABORT_ON_NAN_LOSS:true}
+
+      # One 5+1 attention block. Override_model_config is true in model_base.
+      base_num_decoder_layers: ${PRIMUS_NUM_LAYERS:6}
