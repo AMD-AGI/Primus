@@ -106,7 +106,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `gdn_1B.yaml` | `primus/configs/models/megatron/gdn_1B.yaml` | Pure GDN preset | MI300X, MI355X | `gdn_1B_BF16-pretrain.yaml` |
 | `gdn_300M.yaml` | `primus/configs/models/megatron/gdn_300M.yaml` | Pure GDN preset | MI300X | `gdn_300M_BF16-pretrain.yaml` |
 
-**MiniMax M3:** `minimax_m3.yaml` covers the text tower only and runs its attention dense. MiniMax Sparse Attention (MSA), the `swigluoai` activation, Gemma-style RMSNorm, MTP, and the vision tower have no implementation behind them yet; the preset records their upstream `config.json` values as comments so the mapping is available when they are added.
+**MiniMax M3:** `minimax_m3.yaml` covers the text tower only. The `swigluoai` activation and Gemma-style RMSNorm map onto existing Megatron options, and MiniMax Sparse Attention (MSA) runs on an eager (plain PyTorch) reference backend that is slower than dense attention; a fused MSA kernel, context/sequence parallelism for MSA, MTP, and the vision tower are not supported yet. The preset records the unmapped `config.json` values as comments.
 
 **Parallelism:** Tensor, pipeline, and expert parallel sizes are **not** fixed in model presets; they are set in experiment `overrides` (for example `tensor_model_parallel_size`, `pipeline_model_parallel_size`, `expert_model_parallel_size`). MoE presets such as `qwen3_235B_A22B.yaml` typically require non-default expert parallelism in real runs—see the matching experiment YAML.
 

@@ -35,11 +35,11 @@ modules:
       # with swiglu off it is what becomes `bias_activation_fusion`, and
       # mlp.py's fused branch covers only gelu and swiglu.
       #
-      # MSA STATUS: MinimaxSparseAttention is still a skeleton -- it validates
-      # the sparse_* config but inherits forward, so attention runs DENSE.
-      # sparse_attention_freq is live though: layers 4-8 build
-      # MinimaxSparseAttention, layers 1-3 keep upstream SelfAttention.
-      # Throughput from this config is a dense-attention number, not M3's.
+      # MSA STATUS: layers 4-8 build MinimaxSparseAttention and run the
+      # block-sparse attention on the eager backend; layers 1-3 keep upstream
+      # SelfAttention. Eager materialises the full [b, h, sq, sk] fp32 scores,
+      # so it is slower than dense TE: throughput from this config measures
+      # the reference backend, not what M3 would do with a fused kernel.
       # ---------------------------------------------------------------------
 
       # log
