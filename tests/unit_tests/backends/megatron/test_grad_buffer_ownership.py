@@ -23,9 +23,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from primus_turbo.pytorch.core import grad_ownership
 
 from primus.backends.megatron.patches.turbo import grad_buffer_ownership_patches as gbo
-from primus_turbo.pytorch.core import grad_ownership
 
 
 @pytest.fixture(autouse=True)
@@ -258,3 +258,20 @@ class TestIsEnabled:
         monkeypatch.setattr(gbo, "is_primus_turbo_can_patch", lambda ctx: True)
 
         assert gbo._is_enabled(ctx=None) is True
+
+
+class TestOwnershipRotation:
+    def test_pipeline_warmup_writes_are_discarded_before_iteration_zero(self):
+        warmup_grad = torch.empty(8)
+        grad_ownership.record_overwrite(warmup_grad)
+
+        assert gbo._rotate_ownership(grad_ownership, discard=True) == frozenset()
+        # The discard also empties the producer's current log, so the first
+        # real iteration cannot inherit the synthetic warmup claim.
+        assert gbo._rotate_ownership(grad_ownership, discard=False) == frozenset()
+
+    def test_real_iteration_rotation_preserves_completed_overwrites(self):
+        grad = torch.empty(8)
+        grad_ownership.record_overwrite(grad)
+
+        assert gbo._rotate_ownership(grad_ownership, discard=False) == frozenset({_slice_of(grad)})

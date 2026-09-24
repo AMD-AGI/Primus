@@ -1837,9 +1837,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         "trans_b": True,
                         "out_dtype": None,
                         "config": quant_config.data(),
-                        "fuse_bgrad_accum_pattern": _fuse_wgrad_accum_pattern(
-                            self.config, weight
-                        ),
+                        "fuse_bgrad_accum_pattern": _fuse_wgrad_accum_pattern(self.config, weight),
                     }
                     if pre is not None:
                         gemm_fp4_kwargs["a_prequant"] = pre

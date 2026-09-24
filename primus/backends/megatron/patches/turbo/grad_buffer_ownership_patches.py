@@ -27,11 +27,10 @@ What makes the skip safe:
 
 - A slice is owned only if the producer logged a beta=0 write to it during the
   *previous* iteration, and the log is rebuilt from scratch every iteration. The
-  producer logs at the write, so a fallback to beta=1 -- which is what activation
-  recompute's double forward causes -- drops the claim instead of keeping it.
-- An empty log means "zero everything". Iteration 0 has nothing logged, and
-  neither does any multi-microbatch configuration, since those accumulate across
-  microbatches and take no beta=0 write at all.
+  producer selects and logs the beta=0 writer in actual backward order, so
+  activation recompute and staged forwards cannot leave a forward-time claim.
+- An empty log means "zero everything". Iteration 0 has nothing logged, as do
+  configurations where no overwrite-capable producer runs.
 - A claim is honoured only when the parameter's ``main_grad`` is exactly the
   contiguous ``[start, end)`` the buffer's own index map assigns it, matched by
   address and element count. Inter-parameter alignment padding and the padding
@@ -43,7 +42,9 @@ What makes the skip safe:
   sentinel is not usable here: real wgrad output collides with one, while finite
   operands cannot produce NaN.
 
-Set ``PRIMUS_TURBO_GRAD_OWNERSHIP=0`` to fall back to zeroing the whole buffer.
+Set ``PRIMUS_TURBO_GRAD_OWNERSHIP=1`` to opt in. It defaults off, so workloads
+that have not explicitly validated the producer/consumer contract continue to
+zero the whole buffer.
 """
 
 from __future__ import annotations
@@ -57,12 +58,24 @@ from primus.core.utils.module_utils import log_rank_0
 
 Slice = Tuple[int, int]
 
-_DISABLED = os.environ.get("PRIMUS_TURBO_GRAD_OWNERSHIP", "1") != "1"
+_DISABLED = os.environ.get("PRIMUS_TURBO_GRAD_OWNERSHIP", "0") != "1"
 _POISON = os.environ.get("PRIMUS_TURBO_GRAD_OWNERSHIP_POISON", "0") == "1"
 
 # Rebuilt every iteration by the wrapped ``zero_grad_buffer``; consumed by the
 # wrapped ``reset`` of every buffer belonging to that iteration.
 _state: Dict[str, object] = {"owned": frozenset(), "seen": set(), "logged": False}
+
+
+def _rotate_ownership(grad_ownership, *, discard: bool) -> FrozenSet[Slice]:
+    """Start a producer epoch, optionally discarding the completed epoch.
+
+    Pipeline warmup runs with ``args.curr_iteration == -1``. Its beta=0 writes
+    exercise kernels but must never authorize skipped clearing in iteration 0.
+    Rotating and discarding here clears the producer log without carrying those
+    synthetic writes into real training.
+    """
+    owned = grad_ownership.begin_step()
+    return frozenset() if discard else owned
 
 
 def _is_enabled(ctx: PatchContext) -> bool:
@@ -166,11 +179,15 @@ def patch_grad_buffer_ownership(ctx: PatchContext) -> None:
 
     original_zero_grad_buffer = DistributedDataParallel.zero_grad_buffer
     original_reset = _ParamAndGradBuffer.reset
+    args = get_args(ctx)
 
     def zero_grad_buffer(self):
         seen = _state["seen"]
         if id(self) in seen or not seen:
-            _state["owned"] = grad_ownership.begin_step()
+            _state["owned"] = _rotate_ownership(
+                grad_ownership,
+                discard=getattr(args, "curr_iteration", None) == -1,
+            )
             seen.clear()
         seen.add(id(self))
         return original_zero_grad_buffer(self)

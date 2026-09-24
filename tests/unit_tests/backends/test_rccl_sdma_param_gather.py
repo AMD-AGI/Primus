@@ -296,6 +296,7 @@ def test_param_buffer_wrapper_rendezvouses_and_marks_buckets(monkeypatch):
     )
     monkeypatch.setattr(torch.cuda, "use_mem_pool", lambda _pool: PoolContext())
     monkeypatch.setattr(torch, "zeros", fake_zeros)
+    monkeypatch.setattr(rccl_sdma_param_all_gather_patches, "_REAL_TORCH_ZEROS", fake_zeros)
     monkeypatch.setattr(rccl_sdma_param_gather, "take_direct_param_buffer", lambda *_args: None)
 
     def original(
@@ -375,6 +376,11 @@ def test_param_buffer_allocation_failure_reports_eager_retry(monkeypatch):
         raise RuntimeError("ncclMemAlloc")
 
     monkeypatch.setattr(torch, "zeros", failing_zeros)
+    monkeypatch.setattr(
+        rccl_sdma_param_all_gather_patches,
+        "_REAL_TORCH_ZEROS",
+        failing_zeros,
+    )
 
     def original(
         self,

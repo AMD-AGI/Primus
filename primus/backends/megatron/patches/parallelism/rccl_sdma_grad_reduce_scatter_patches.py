@@ -46,7 +46,9 @@ Two extensions over the existing param-gather patch:
    the param path's eager path guards against does not apply here: grad_data
    is allocated immediately after its param_data sibling, from the same pool,
    while the pool's address space is exactly as fragmented as when param_data
-   (a byte-identical-sized request) just succeeded.
+   (a byte-identical-sized request) just succeeded. The inner parameter wrapper
+   calls its import-time real allocator for param_data, explicitly handing the
+   constructor's second ``torch.zeros`` call to this outer gradient wrapper.
 
 2. ``make_start_grad_sync`` -- replaces ``_ParamAndGradBucketGroup.start_grad_sync``
    with a version that, ONLY for the single-DistOpt-instance, non-force-all-reduce,
@@ -198,7 +200,7 @@ def make_start_grad_sync(original):
         # first-batch/no-multiple-outstanding-calls invariants, NaN/large-grad
         # checks), swapping only which process group performs the collective.
         if self.is_first_batch and self.grad_reduce_handle is not None:
-            return
+            return None
         assert (
             self.grad_reduce_handle is None
         ), "Should not have multiple communication calls outstanding at once"
@@ -248,6 +250,7 @@ def make_start_grad_sync(original):
             cm.wait()
             torch.cuda.current_stream(self.buckets[0].grad_data.device).synchronize()
             self.grad_reduce_handle = None
+        return None
 
     return start_grad_sync
 

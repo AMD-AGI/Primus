@@ -14,6 +14,9 @@ from primus.backends.megatron.core.distributed import rccl_sdma_param_gather
 from primus.backends.megatron.patches.parallelism import (
     rccl_sdma_grad_reduce_scatter_patches as grad_patches,
 )
+from primus.backends.megatron.patches.parallelism import (
+    rccl_sdma_param_all_gather_patches as param_patches,
+)
 
 
 def _bucket_group(**overrides):
@@ -347,6 +350,104 @@ def test_grad_buffer_wrapper_allocates_grad_data_from_pool_and_marks_buckets(mon
     assert rccl_sdma_param_gather.is_direct_param_buffer(bucket_grad_data)
     # param_data (already handled by the inner/param wrap) must be untouched.
     assert buffer.param_data is param_data
+
+
+def test_param_and_grad_allocation_wrappers_compose_without_intercepting_each_other(
+    monkeypatch,
+):
+    """The inner param wrapper owns allocation 1; the outer grad wrapper owns 2."""
+    group = SimpleNamespace(group_name="ce")
+    pool = SimpleNamespace()
+    handles = [SimpleNamespace(), SimpleNamespace()]
+    allocations = []
+    allocation_scopes = []
+    pool_active = False
+    real_torch_zeros = torch.zeros
+
+    class PoolContext:
+        def __enter__(self):
+            nonlocal pool_active
+            assert pool_active is False
+            pool_active = True
+
+        def __exit__(self, *_args):
+            nonlocal pool_active
+            pool_active = False
+
+    def fake_real_zeros(*zeros_args, **zeros_kwargs):
+        allocation_scopes.append(pool_active)
+        tensor = real_torch_zeros(*zeros_args, **{**zeros_kwargs, "device": "cpu"})
+        allocations.append(tensor)
+        return tensor
+
+    monkeypatch.setattr(param_patches, "_REAL_TORCH_ZEROS", fake_real_zeros)
+    monkeypatch.setattr(grad_patches, "_REAL_TORCH_ZEROS", fake_real_zeros)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "use_mem_pool", lambda _pool: PoolContext())
+    monkeypatch.setattr(
+        rccl_sdma_param_gather,
+        "prepare_direct_param_buffer_pool",
+        lambda _group, _device: (group, pool),
+    )
+    monkeypatch.setattr(
+        rccl_sdma_param_gather,
+        "take_direct_param_buffer",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def rendezvous(tensor, _group):
+        rccl_sdma_param_gather.mark_direct_param_buffer(tensor)
+        return handles.pop(0)
+
+    monkeypatch.setattr(rccl_sdma_param_gather, "rendezvous_direct_param_buffer", rendezvous)
+
+    def original(
+        self,
+        ddp_config,
+        param_dtype,
+        grad_dtype,
+        params,
+        data_parallel_group,
+        bucket_size,
+        param_to_name,
+        gradient_scaling_factor,
+        param_indices,
+        nccl_ub,
+        pg_collection=None,
+    ):
+        del (
+            bucket_size,
+            param_to_name,
+            gradient_scaling_factor,
+            param_indices,
+            pg_collection,
+        )
+        self.param_data = torch.zeros(4, dtype=param_dtype, device="cuda")
+        self.grad_data = torch.zeros(4, dtype=grad_dtype, device="cuda")
+        self.buckets = [SimpleNamespace(param_data=self.param_data[:], grad_data=self.grad_data[:])]
+
+    inner = param_patches.make_param_and_grad_buffer_init(original)
+    wrapped = grad_patches.make_grad_and_param_buffer_init(inner)
+    buffer = SimpleNamespace()
+    wrapped(
+        buffer,
+        SimpleNamespace(use_distributed_optimizer=True),
+        torch.bfloat16,
+        torch.bfloat16,
+        [torch.nn.Parameter(torch.ones(1))],
+        SimpleNamespace(),
+        1024,
+        {},
+        1.0,
+        [0],
+        False,
+    )
+
+    assert buffer.param_data is allocations[0]
+    assert buffer.grad_data is allocations[1]
+    assert allocation_scopes == [True, True]
+    assert rccl_sdma_param_gather.is_direct_param_buffer(buffer.param_data)
+    assert rccl_sdma_param_gather.is_direct_param_buffer(buffer.grad_data)
 
 
 def test_grad_buffer_wrapper_skips_when_not_distributed_optimizer(monkeypatch):
