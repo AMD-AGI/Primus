@@ -44,6 +44,9 @@ freq_dim: 256
 # ==============================================================================
 
 num_train_timesteps: 1000
+# Static flow-matching shift. WAN uses 5.0 for 720p and 3.0 for 480p; keep the
+# training and inference shift identical.
+scheduler_shift: 5.0
 
 # Per-timestep loss weighting:
 #   diffsynth - DiffSynth's bell curve, normalized to mean 1 over the schedule
