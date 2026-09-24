@@ -149,11 +149,6 @@ class WanConfig(BaseDiffusionConfig):
     #     unfused interleaved RoPE. torch.compile-friendly; needs Primus-Turbo.
     transformer_impl: str = "transformer_engine"
 
-    # Compute the attention core in FP32 with unfused torch ops. Only for
-    # bit-exact parity investigations against a reference stack; there is no
-    # FP32 fused-attention backend, so this is far slower.
-    use_fp32_attention: bool = False
-
     # CPU init keeps parity with the Flux path.
     use_cpu_initialization: bool = True
 
@@ -254,12 +249,6 @@ class WanConfig(BaseDiffusionConfig):
         # MXFP4 and FP8 are only wired into the TE-free local linears.
         if getattr(self, "fp4", None) and self.transformer_impl != "local":
             raise ValueError("fp4 (MXFP4) on WAN requires transformer_impl='local'")
-
-        if self.use_fp32_attention and self.transformer_impl != "transformer_engine":
-            raise ValueError(
-                "use_fp32_attention replaces the TE fused attention core and is "
-                "only implemented for transformer_impl='transformer_engine'"
-            )
 
         # Strategy A: no tensor parallelism for the WAN backbone. (PP is
         # rejected by BaseDiffusionConfig for every diffusion model.)

@@ -10,7 +10,6 @@ reusable here: Flux embeds 2D image positions plus a text stream, whereas WAN
 embeds a 3D ``(frame, height, width)`` patch grid.
 """
 
-import math
 from typing import Tuple
 
 import torch
@@ -144,40 +143,10 @@ def thd_cu_seqlens(seqlen: int, batch: int, device: torch.device) -> Tensor:
     return torch.arange(0, batch + 1, dtype=torch.int32, device=device) * int(seqlen)
 
 
-def unfused_fp32_attention(query, key, value, packed_seq_params) -> Tensor:
-    """Scaled dot-product attention over packed THD sequences in plain fp32.
-
-    ``query``/``key``/``value`` are ``[T, H, D]`` packed in THD layout, with
-    ``cu_seqlens_{q,kv}`` delimiting the individual sequences so
-    cross-attention's differing q/kv lengths work. Returns ``[T, H*D]``.
-
-    Deliberately bare ``matmul`` + ``softmax``: there is no fp32 fused
-    attention backend, and this path exists so a parity run can be bit-exact
-    against a reference stack running the same routine.
-    """
-    heads, head_dim = query.shape[1], query.shape[2]
-    scale = 1.0 / math.sqrt(head_dim)
-    cu_q = packed_seq_params.cu_seqlens_q
-    cu_kv = packed_seq_params.cu_seqlens_kv
-    outs = []
-    for i in range(cu_q.numel() - 1):
-        qs, qe = int(cu_q[i]), int(cu_q[i + 1])
-        ks, ke = int(cu_kv[i]), int(cu_kv[i + 1])
-        q = query[qs:qe].transpose(0, 1)
-        k = key[ks:ke].transpose(0, 1)
-        v = value[ks:ke].transpose(0, 1)
-        scores = torch.matmul(q, k.transpose(-1, -2)) * scale
-        probs = torch.softmax(scores, dim=-1)
-        ctx = torch.matmul(probs, v)
-        outs.append(ctx.transpose(0, 1).reshape(qe - qs, heads * head_dim))
-    return torch.cat(outs, dim=0)
-
-
 __all__ = [
     "WanRotaryPosEmbed",
     "WanTimestepEmbedding",
     "WanTextProjection",
     "WanConditionEmbedder",
     "thd_cu_seqlens",
-    "unfused_fp32_attention",
 ]
