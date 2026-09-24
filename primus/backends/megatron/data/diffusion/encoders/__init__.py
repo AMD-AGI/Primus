@@ -14,8 +14,6 @@ Hierarchical structure:
     - encoders/image/autoencoder_kl.py - VAE (AutoencoderKL)
     - encoders/text/t5_xxl.py - T5-XXL text encoder
     - encoders/text/clip_l.py - CLIP-L text encoder
-    - encoders/text/umt5.py - UMT5 text encoder (Wan)
-    - encoders/video/vae/wan/autoencoder_kl_wan.py - Wan video VAE (AutoencoderKLWan)
 
 Each encoder type can have multiple implementations registered
 in the ENCODER_REGISTRY for flexible configuration.
@@ -32,10 +30,7 @@ from .config import (
     FluxEncoderConfig,
     T5XXLConfig,
     TextEncoderConfig,
-    UMT5Config,
     VAEConfig,
-    WanEncoderConfig,
-    WanVAEConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,9 +118,6 @@ def _auto_discover_encoders():
         "primus.backends.megatron.data.diffusion.encoders.image.autoencoder_kl",
         "primus.backends.megatron.data.diffusion.encoders.text.t5_xxl",
         "primus.backends.megatron.data.diffusion.encoders.text.clip_l",
-        # Wan-family encoders
-        "primus.backends.megatron.data.diffusion.encoders.video.vae.wan.autoencoder_kl_wan",
-        "primus.backends.megatron.data.diffusion.encoders.text.umt5",
     ]
 
     for module_path in encoder_modules:
@@ -162,9 +154,6 @@ __all__ = [
     "T5XXLConfig",
     "CLIPLConfig",
     "FluxEncoderConfig",
-    "WanVAEConfig",
-    "UMT5Config",
-    "WanEncoderConfig",
     # Registry functions
     "register_encoder",
     "get_encoder",
