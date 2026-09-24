@@ -43,9 +43,12 @@ _LayerPattern = Optional[Union[int, str, List[int], Tuple[int, ...]]]
 # rejected rather than silently treated as `max`.
 _SUPPORTED_SCORE_TYPES = frozenset({"max"})
 
-# Kernels that can compute the block-sparse attention. `flydsl` is declared so a
-# preset can name it; MinimaxSparseAttention rejects it until it exists.
+# Kernels that can compute the block-sparse attention: the plain-PyTorch
+# reference and the gfx950 FlyDSL kernels.
 _SUPPORTED_MSA_BACKENDS = frozenset({"eager", "flydsl"})
+
+# Indexer distillation losses; see indexer_loss.py.
+_SUPPORTED_INDEXER_LOSS_TYPES = frozenset({"sparse", "dense"})
 
 
 def normalize_sparse_layer_pattern(
@@ -152,6 +155,11 @@ class MSATransformerConfig(TransformerConfig):
     """Weight of the indexer distillation loss. 0.0 leaves the indexer frozen: top-k is not
     differentiable, so this loss is the only gradient its projections ever receive."""
 
+    sparse_indexer_loss_type: str = "sparse"
+    """'sparse': KL over each query's selected blocks, against the attention the block-sparse
+    layer paid them (DSA's sparse loss). 'dense': KL over every visible block, against dense
+    attention; that needs the O(S^2) dense scores, so it is eager-only."""
+
     def __post_init__(self):
         # Derive the upstream fields BEFORE super(), so TransformerConfig's own
         # validation (bias_activation_fusion vs glu_linear_offset, etc.) sees
@@ -177,6 +185,16 @@ class MSATransformerConfig(TransformerConfig):
                 f"msa_backend={self.msa_backend!r} is not a known backend; "
                 f"supported: {sorted(_SUPPORTED_MSA_BACKENDS)}"
             )
+        if self.sparse_indexer_loss_type not in _SUPPORTED_INDEXER_LOSS_TYPES:
+            raise ValueError(
+                f"sparse_indexer_loss_type={self.sparse_indexer_loss_type!r}; "
+                f"supported: {sorted(_SUPPORTED_INDEXER_LOSS_TYPES)}"
+            )
+        if self.msa_backend == "flydsl" and self.sparse_indexer_loss_type == "dense":
+            raise ValueError(
+                "msa_backend='flydsl' supports sparse_indexer_loss_type='sparse' only: the dense "
+                "loss needs the full [b, heads, sq, sk] scores the flydsl kernels never form."
+            )
 
         # The eager backend builds a dense [b, h, sq, sk] mask over the whole key
         # range on every rank, and reads `hidden_states` for the indexer -- which
@@ -193,7 +211,6 @@ class MSATransformerConfig(TransformerConfig):
                 "MiniMax Sparse Attention does not support sequence parallelism yet; "
                 "set `sequence_parallel: false`."
             )
-
         # The indexer emits one block selection per GQA group, which is what the
         # reference implementation means by index_n_heads == num_key_value_heads.
         num_query_groups = self.num_query_groups or self.num_attention_heads

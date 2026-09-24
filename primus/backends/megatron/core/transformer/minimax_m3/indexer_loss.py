@@ -15,7 +15,14 @@ the indexer's scores.
 This is the block-level analogue of ``compute_dsa_indexer_loss`` in Megatron's
 ``transformer/experimental_attention_variant/dsa.py``: M3 selects blocks per
 GQA group rather than tokens globally, so the target is aggregated the same way
-the selection is.
+the selection is. Two variants, as DSA has:
+
+- sparse (:func:`compute_sparse_indexer_loss`, the default): the KL runs over
+  each query's *selected* blocks only, and the target is the attention the
+  block-sparse layer actually paid them. It needs nothing beyond the sparse
+  attention, so the flydsl backend can supply it without an O(S^2) pass.
+- dense (:func:`compute_indexer_loss`): the KL runs over every visible block
+  against what dense attention would pay them; eager only.
 
 The gradient flows one way, into the indexer only: the target is detached
 here, and ``MinimaxSparseAttention`` feeds the indexer a detached
@@ -180,4 +187,77 @@ def compute_indexer_loss(
 
     kl = target * (torch.log(target + 1e-10) - torch.log(prediction + 1e-10))
     kl = kl.masked_fill(~has_free, 0.0)
+    return kl.sum(dim=-1).mean() * loss_coeff
+
+
+def slot_mass_from_probs(probs: torch.Tensor, block_indices: torch.Tensor, block_size: int) -> torch.Tensor:
+    """Sparse-loss target from the eager backend's attention probabilities.
+
+    Args:
+        probs: ``[b, n_q, sq, sk]`` block-sparse attention probabilities.
+        block_indices: ``[b, n_index, sq, topk]`` selected blocks, -1 padded.
+
+    Returns:
+        ``[b, n_index, sq, topk]``: the share of attention each selected slot got,
+        averaged over the GQA group's heads (0 on -1 slots; rows sum to 1).
+    """
+    b, n_q, sq, sk = probs.shape
+    n_index = block_indices.shape[1]
+    n_blocks = -(-sk // block_size)
+    mass = probs.detach().float().view(b, n_index, n_q // n_index, sq, sk).mean(dim=2)
+    if n_blocks * block_size != sk:
+        mass = torch.nn.functional.pad(mass, (0, n_blocks * block_size - sk))
+    mass = mass.view(b, n_index, sq, n_blocks, block_size).sum(dim=-1)
+    return mass.gather(-1, block_indices.clamp_min(0)).masked_fill(block_indices < 0, 0.0)
+
+
+def slot_mass_from_slot_lse(slot_lse: torch.Tensor, lse: torch.Tensor, n_index: int) -> torch.Tensor:
+    """Sparse-loss target from the flydsl forward's per-slot logsumexp.
+
+    Args:
+        slot_lse: ``[sq, b, n_q, topk]``; lse: ``[sq, b, n_q]`` (natural log).
+
+    Returns:
+        ``[b, n_index, sq, topk]``, as :func:`slot_mass_from_probs`.
+    """
+    sq, b, n_q, topk = slot_lse.shape
+    mass = torch.exp(slot_lse.detach() - lse.detach().unsqueeze(-1))
+    return mass.view(sq, b, n_index, n_q // n_index, topk).mean(dim=3).permute(1, 2, 0, 3)
+
+
+def compute_sparse_indexer_loss(
+    slot_mass: torch.Tensor,
+    block_scores: torch.Tensor,
+    block_indices: torch.Tensor,
+    loss_coeff: float,
+) -> torch.Tensor:
+    """KL(attention over the selected blocks || indexer over the same blocks).
+
+    DSA's sparse loss at block granularity: the target is the attention the
+    block-sparse layer actually paid each selected block, and the prediction
+    is the indexer's softmax over those blocks alone.
+
+    Args:
+        slot_mass: ``[b, n_index, sq, topk]`` target from
+            :func:`slot_mass_from_probs` or :func:`slot_mass_from_slot_lse`.
+        block_scores: ``[b, n_index, sq, n_blocks]`` fp32 indexer block scores
+            (``+inf`` on the always-visible blocks); the tensor that learns.
+        block_indices: ``[b, n_index, sq, topk]`` selected blocks, -1 padded.
+        loss_coeff: scaling applied to the KL.
+    """
+    valid = block_indices >= 0
+    scores = block_scores.gather(-1, block_indices.clamp_min(0)).masked_fill(~valid, -torch.inf)
+
+    # As in the dense loss: clamp the always-visible +inf to the row's largest
+    # finite score, and drop rows whose selection is all forced (no signal).
+    finite = torch.isfinite(scores)
+    finite_max = torch.where(finite, scores, torch.full_like(scores, -torch.inf)).amax(dim=-1, keepdim=True)
+    has_free = finite.any(dim=-1, keepdim=True)
+    logits = torch.minimum(scores, finite_max).masked_fill(~has_free, 0.0)
+    prediction = torch.softmax(logits, dim=-1)
+
+    target = slot_mass.detach().float()
+    target = target / target.sum(dim=-1, keepdim=True).clamp_min(1e-10)
+    kl = target * (torch.log(target + 1e-10) - torch.log(prediction + 1e-10))
+    kl = kl.masked_fill(~(valid & has_free), 0.0)
     return kl.sum(dim=-1).mean() * loss_coeff

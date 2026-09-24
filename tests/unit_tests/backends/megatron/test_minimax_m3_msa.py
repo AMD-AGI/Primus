@@ -31,6 +31,8 @@ from primus.backends.megatron.core.transformer.minimax_m3.indexer import (
 )
 from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss import (
     compute_indexer_loss,
+    compute_sparse_indexer_loss,
+    slot_mass_from_probs,
 )
 
 BLOCK = 8
@@ -307,6 +309,47 @@ def test_zero_coefficient_scales_the_loss_away():
     assert compute_indexer_loss(dense_scores, block_scores, BLOCK, loss_coeff=0.0).item() == 0.0
 
 
+def _sparse_setup():
+    indices, block_scores = _select(_config(), _scores())
+    keep = build_block_keep(indices, SQ, BLOCK)
+    q, k, v = _qkv()
+    _, _, probs = eager_block_sparse_attention(q, k, v, keep, softmax_scale=0.5, return_probs=True)
+    return indices, block_scores.double(), probs
+
+
+def test_sparse_loss_target_is_the_attention_over_the_selection():
+    indices, _, probs = _sparse_setup()
+    mass = slot_mass_from_probs(probs, indices, BLOCK)
+
+    torch.testing.assert_close(mass.sum(-1), torch.ones_like(mass[..., 0]))
+    assert (mass[indices < 0] == 0).all()
+
+
+def test_sparse_loss_trains_only_the_selected_blocks():
+    indices, block_scores, probs = _sparse_setup()
+    block_scores.requires_grad_(True)
+
+    loss = compute_sparse_indexer_loss(
+        slot_mass_from_probs(probs, indices, BLOCK), block_scores, indices, 1.0
+    )
+    assert torch.isfinite(loss) and loss > 0
+    loss.backward()
+
+    grad = block_scores.grad
+    assert torch.isfinite(grad).all() and grad.abs().sum() > 0
+    selected = torch.zeros_like(grad, dtype=torch.bool).scatter(-1, indices.clamp_min(0), indices >= 0)
+    assert (grad[~selected] == 0).all(), "an unselected block received a gradient"
+
+
+def test_sparse_loss_vanishes_when_the_indexer_agrees():
+    torch.manual_seed(6)
+    indices = torch.tensor([[[[0, 1], [2, 3], [3, 0]]]])  # [b=1, n_index=1, sq=3, topk=2]
+    target = torch.softmax(torch.randn(1, 1, 3, 2, dtype=torch.float64), dim=-1)
+    block_scores = torch.full((1, 1, 3, 4), -5.0, dtype=torch.float64).scatter(-1, indices, target.log())
+
+    assert compute_sparse_indexer_loss(target, block_scores, indices, 1.0).item() < 1e-9
+
+
 # ---------------------------------------------------------------------------
 # Config guards
 # ---------------------------------------------------------------------------
@@ -349,19 +392,16 @@ def test_index_heads_must_match_the_gqa_groups():
         _msa_config(sparse_num_index_heads=N_INDEX + 1)
 
 
-def test_flydsl_is_declared_but_not_implemented():
-    """The config accepts it; constructing the module is what refuses."""
-    config = _msa_config(msa_backend="flydsl")
-    assert config.msa_backend == "flydsl"
+def test_flydsl_backend_needs_the_sparse_indexer_loss():
+    """The dense loss needs the full score matrix, which the flydsl kernels never form."""
+    assert _msa_config(msa_backend="flydsl").sparse_indexer_loss_type == "sparse"
+    with pytest.raises(ValueError, match="flydsl"):
+        _msa_config(msa_backend="flydsl", sparse_indexer_loss_type="dense")
 
-    from primus.backends.megatron.core.transformer.minimax_m3 import (
-        MSA_BACKENDS,
-        MinimaxSparseAttention,
-    )
 
-    assert "flydsl" in MSA_BACKENDS
-    with pytest.raises(NotImplementedError, match="flydsl"):
-        MinimaxSparseAttention(config, None, layer_number=1)
+def test_unknown_indexer_loss_type_is_rejected():
+    with pytest.raises(ValueError, match="sparse_indexer_loss_type"):
+        _msa_config(sparse_indexer_loss_type="topk")
 
 
 # ---------------------------------------------------------------------------

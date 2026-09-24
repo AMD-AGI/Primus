@@ -16,7 +16,7 @@ Mirrors ``build_block_mask`` and ``eager_attention_forward`` in transformers'
 ``models/minimax_m3_vl/modeling_minimax_m3_vl.py``.
 """
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -62,7 +62,8 @@ def eager_block_sparse_attention(
     block_keep: torch.Tensor,
     softmax_scale: float,
     attention_mask: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    return_probs: bool = False,
+):
     """Causal attention restricted to the selected blocks.
 
     Args:
@@ -73,12 +74,14 @@ def eager_block_sparse_attention(
         attention_mask: optional Megatron mask broadcastable to
             ``[b, 1, sq, sk]``, ``True`` where the key must NOT be attended.
             Composed on top of causality, so padding is honoured.
+        return_probs: also return the attention probabilities.
 
     Returns:
-        ``(output [b, n_q, sq, d], dense_scores [b, n_q, sq, sk])``. The scores
-        are the causal-but-not-block-masked logits: the distillation target is
-        what dense attention *would* do, so the loss needs them before the block
-        mask is applied.
+        ``(output [b, n_q, sq, d], dense_scores [b, n_q, sq, sk])``, plus
+        ``probs [b, n_q, sq, sk]`` fp32 with ``return_probs``. The scores are the
+        causal-but-not-block-masked logits, which the dense indexer loss distils
+        from; the probabilities are the block-sparse attention itself, which the
+        sparse indexer loss distils from.
     """
     b, n_q, sq, _ = query.shape
     n_kv = key.shape[1]
@@ -110,4 +113,6 @@ def eager_block_sparse_attention(
 
     probs = torch.softmax(sparse_scores, dim=-1).masked_fill(empty_row, 0.0)
     output = torch.matmul(probs.to(value_states.dtype), value_states)
+    if return_probs:
+        return output, dense_scores, probs
     return output, dense_scores

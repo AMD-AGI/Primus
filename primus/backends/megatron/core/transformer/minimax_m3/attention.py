@@ -18,11 +18,15 @@ upstream ``GPTModel`` / ``TransformerLayer``. The swap is installed by
 ``primus/backends/megatron/patches/minimax_m3_patches.py``.
 
 ``forward`` is overridden rather than delegating to ``SelfAttention.forward``
-because the eager backend computes attention itself and must not reach
-Transformer Engine's ``core_attention``. The projections and the per-head q/k
-norms are still upstream's -- only the attention core is replaced. (The unused
+because the attention core is MSA's own and must not reach Transformer Engine's
+``core_attention``. The projections and the per-head q/k norms are still
+upstream's -- only the attention core is replaced. (The unused
 ``core_attention`` module is still built by ``Attention.__init__``; it holds no
 parameters, so leaving it costs nothing.)
+
+``msa_backend`` picks the core: ``eager``, the plain-PyTorch reference that
+materialises the full score matrix, or ``flydsl``, the gfx950 kernels in
+``minimax_m3/flydsl`` that never do.
 
 Mirrors ``MiniMaxM3VLAttention`` in transformers'
 ``models/minimax_m3_vl/modeling_minimax_m3_vl.py``.
@@ -52,12 +56,13 @@ from primus.backends.megatron.core.transformer.minimax_m3.indexer import (
 from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss import (
     MSAIndexerLossAutoScaler,
     compute_indexer_loss,
+    compute_sparse_indexer_loss,
     record_indexer_loss,
+    slot_mass_from_probs,
+    slot_mass_from_slot_lse,
 )
 
-# Backends that compute the block-sparse attention itself. `eager` is the
-# reference; `flydsl` is declared so presets and the config validation can name
-# it before it exists.
+# Backends that compute the block-sparse attention itself.
 MSA_BACKENDS = ("eager", "flydsl")
 
 
@@ -90,12 +95,6 @@ class MinimaxSparseAttention(SelfAttention):
                 f"{type(config).__name__}. Set `minimax_sparse_attention: true` in the model "
                 "preset so the config-class patch selects it."
             )
-        if config.msa_backend != "eager":
-            raise NotImplementedError(
-                f"msa_backend={config.msa_backend!r} is not implemented yet; only 'eager' is. "
-                "The eager backend is the numerical reference a faster backend aligns against."
-            )
-
         super().__init__(
             config=config,
             submodules=submodules,
@@ -132,6 +131,22 @@ class MinimaxSparseAttention(SelfAttention):
                 "MinimaxSparseAttention recomputes linear_qkv's fused input norm for the indexer "
                 f"and supports RMSNorm only; got normalization={config.normalization!r}."
             )
+
+        self.msa_attention = None
+        if config.msa_backend == "flydsl":
+            # Imported here, not at module level: flydsl exists only on gfx950 builds.
+            from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_function import (
+                msa_attention,
+            )
+
+            heads_per_group = self.num_attention_heads_per_partition // self.num_query_groups_per_partition
+            if self.hidden_size_per_attention_head != 128 or heads_per_group != 16:
+                raise NotImplementedError(
+                    "msa_backend='flydsl' is built for head_dim 128 and 16 query heads per KV head "
+                    f"(M3's shape); got head_dim={self.hidden_size_per_attention_head}, "
+                    f"{heads_per_group} heads per KV head."
+                )
+            self.msa_attention = msa_attention
 
     def _fused_input_norm_weight(self) -> Optional[torch.Tensor]:
         """The input-norm weight fused into ``linear_qkv``, or None when the norm is separate."""
@@ -210,33 +225,68 @@ class MinimaxSparseAttention(SelfAttention):
 
         block_indices, block_scores = self.indexer(self._indexer_input(hidden_states), index_pos_emb)
 
-        # sbhd -> bhsd for the eager kernel, matching the reference's layout.
-        query_bhsd = query.permute(1, 2, 0, 3)
-        key_bhsd = key.permute(1, 2, 0, 3)
-        value_bhsd = value.permute(1, 2, 0, 3)
-
-        block_keep = build_block_keep(block_indices, key_bhsd.shape[2], self.block_size)
-        core_attn_out, dense_scores = eager_block_sparse_attention(
-            query_bhsd,
-            key_bhsd,
-            value_bhsd,
-            block_keep,
-            self.softmax_scale,
-            attention_mask=attention_mask,
-        )
-
         # Full recompute runs this forward twice, first under no_grad; gating on
         # grad mode computes and records the loss once, in the pass that backprops.
-        if self.training and torch.is_grad_enabled() and self.indexer_loss_coeff > 0.0:
-            indexer_loss = compute_indexer_loss(
-                dense_scores, block_scores, self.block_size, self.indexer_loss_coeff
+        want_loss = self.training and torch.is_grad_enabled() and self.indexer_loss_coeff > 0.0
+        sparse_loss = self.config.sparse_indexer_loss_type == "sparse"
+        sq, b = hidden_states.shape[0], hidden_states.shape[1]
+
+        if self.msa_attention is not None:
+            if attention_mask is not None:
+                raise NotImplementedError(
+                    "msa_backend='flydsl' applies causality itself and has no padding mask; set "
+                    "`create_attention_mask_in_dataloader: false`."
+                )
+            if block_indices.shape[1] != key.shape[2]:
+                raise NotImplementedError(
+                    f"the indexer selected for {block_indices.shape[1]} KV heads but this rank holds "
+                    f"{key.shape[2]}; msa_backend='flydsl' needs one selection per local KV head."
+                )
+            # [sq, b, heads, hn] in and out: o needs no permute before linear_proj.
+            outs = self.msa_attention(
+                query,
+                key,
+                value,
+                block_indices,
+                self.softmax_scale,
+                self.block_size,
+                return_slot_lse=want_loss,
             )
+            core_attn_out = outs[0]
+            if want_loss:
+                slot_mass = slot_mass_from_slot_lse(outs[2], outs[1], block_indices.shape[1])
+                indexer_loss = compute_sparse_indexer_loss(
+                    slot_mass, block_scores, block_indices, self.indexer_loss_coeff
+                )
+        else:
+            # sbhd -> bhsd for the eager kernel, matching the reference's layout.
+            block_keep = build_block_keep(block_indices, key.shape[0], self.block_size)
+            need_probs = want_loss and sparse_loss
+            outs = eager_block_sparse_attention(
+                query.permute(1, 2, 0, 3),
+                key.permute(1, 2, 0, 3),
+                value.permute(1, 2, 0, 3),
+                block_keep,
+                self.softmax_scale,
+                attention_mask=attention_mask,
+                return_probs=need_probs,
+            )
+            core_attn_out = outs[0]
+            if need_probs:
+                slot_mass = slot_mass_from_probs(outs[2], block_indices, self.block_size)
+                indexer_loss = compute_sparse_indexer_loss(
+                    slot_mass, block_scores, block_indices, self.indexer_loss_coeff
+                )
+            elif want_loss:
+                indexer_loss = compute_indexer_loss(
+                    outs[1], block_scores, self.block_size, self.indexer_loss_coeff
+                )
+            # bhsd -> sbhd
+            core_attn_out = core_attn_out.permute(2, 0, 1, 3)
+
+        if want_loss:
             mtp_layers = getattr(self.config, "mtp_num_layers", None) or 0
             record_indexer_loss(indexer_loss, self.layer_number, self.config.num_layers + mtp_layers)
             core_attn_out = MSAIndexerLossAutoScaler.apply(core_attn_out, indexer_loss)
 
-        # bhsd -> sbhd -> [sq, b, hp] for linear_proj.
-        sq, b = hidden_states.shape[0], hidden_states.shape[1]
-        core_attn_out = core_attn_out.permute(2, 0, 1, 3).reshape(sq, b, -1)
-
-        return self.linear_proj(core_attn_out)
+        return self.linear_proj(core_attn_out.reshape(sq, b, -1))

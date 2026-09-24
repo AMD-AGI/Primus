@@ -78,8 +78,14 @@ def build_fwd(
     remap: str = "none",
     pipeline: bool = True,
     barriers: bool = False,
+    emit_slot_lse: bool = False,
 ):
     """Build the launcher.
+
+    ``emit_slot_lse`` also writes, per (token, head, slot), the logsumexp of the
+    scaled scores over that slot's keys, so ``exp(slot_lse - lse)`` is the share
+    of the head's attention the slot's block received (-inf past the visible
+    slots). The sparse indexer loss is built from it.
 
     Tuning knobs, defaults measured fastest on MI355X (B=1, Hq=64, 4k-32k):
     ``step_keys`` keys per softmax step (16 or 32); ``k_via_lds`` stages K in LDS
@@ -115,6 +121,7 @@ def build_fwd(
         TBL: fx.Tensor,
         O: fx.Tensor,
         LSE: fx.Tensor,
+        SLSE: fx.Tensor,
         S: fx.Int32,
         B: fx.Int32,
     ):
@@ -162,6 +169,10 @@ def build_fwd(
         lse_rsrc = buffer_ops.create_buffer_resource(
             LSE, max_size=False, num_records_bytes=_raw(Sn * Bn * fx.Index(Hq * 4))
         )
+        if const_expr(emit_slot_lse):
+            slse_rsrc = buffer_ops.create_buffer_resource(
+                SLSE, max_size=False, num_records_bytes=_raw(Sn * Bn * fx.Index(Hq * topk * 4))
+            )
 
         c_scale = fx.Float32(scale)
         c_sl = fx.Float32(scale * _LOG2E)
@@ -252,11 +263,15 @@ def build_fwd(
             return regs
 
         NR = NV8 * (2 if k_via_lds else 1)
+        NC = NR + 1 if pipeline else 0  # carried prefetch: rows + block id
+        head_row = (tok * Bn + b) * fx.Index(Hq) + head
         c_zero_v4 = Vec.filled(4, 0.0, fx.Float32)
         init = [c_big_neg, c_zero] + [c_zero_v4 for _ in range_constexpr(DT)]
         if const_expr(pipeline):
             blk0 = load_blk(fx.Index(0))
             init = init + load_rows(step_kv0(blk0, fx.Index(0))) + [blk0]
+        if const_expr(emit_slot_lse):
+            init = init + [c_zero]  # the current slot's partial sum, like l_run
         results = init
         for j, it in range(fx.Index(0), n_steps, fx.Index(1), init=init):
             m_run = it[0]
@@ -372,7 +387,27 @@ def build_fwd(
                     )
                     new_o.append(rocdl.mfma_f32_16x16x32_bf16(v4f, [a_v, pB, Vec(o_acc[dt]) * Vec(alpha_v)]))
 
-            results = yield [m_new, l_new] + new_o + carry_next
+            # ---- per-slot logsumexp: the slot's partial sum, rescaled like l ----
+            extra = []
+            if const_expr(emit_slot_lse):
+                sub = j % fx.Index(SPB)
+                ls_run = it[2 + DT + NC]
+                ls_prev = fx.Float32(ArithValue(sub == fx.Index(0)).select(_raw(c_zero), _raw(ls_run)))
+                ls_new = fx.Float32(alpha * ls_prev + lsum)
+                slot_lse = fmath.log(crossgrp_sum(ls_new)) + fx.Float32(m_new * c_scale)
+                last = ArithValue(sub == fx.Index(SPB - 1))
+                buffer_ops.buffer_store(
+                    slot_lse,
+                    slse_rsrc,
+                    (head_row * fx.Index(topk) + j // fx.Index(SPB)) * fx.Index(4),
+                    mask=_raw(
+                        ArithValue(arith.AndIOp(_raw(last), _raw(ArithValue(grp == fx.Index(0)))).result)
+                    ),
+                    offset_is_bytes=True,
+                )
+                extra = [ls_new]
+
+            results = yield [m_new, l_new] + new_o + carry_next + extra
 
         # ---- epilogue: lane holds O[head = lo, d = dt*16 + grp*4 + i] ----
         m_run = results[0]
@@ -399,13 +434,26 @@ def build_fwd(
             mask=_raw(ArithValue(grp == fx.Index(0))),
             offset_is_bytes=True,
         )
+        if const_expr(emit_slot_lse):
+            # the slots past the visible blocks were never walked
+            for s in range_constexpr(topk):
+                unvisited = ArithValue(fx.Int32(s) >= n_valid)
+                buffer_ops.buffer_store(
+                    c_neg_inf,
+                    slse_rsrc,
+                    (head_row * fx.Index(topk) + fx.Index(s)) * fx.Index(4),
+                    mask=_raw(
+                        ArithValue(arith.AndIOp(_raw(unvisited), _raw(ArithValue(grp == fx.Index(0)))).result)
+                    ),
+                    offset_is_bytes=True,
+                )
 
     @flyc.jit
-    def launch(Q, K, V, TBL, O, LSE, S, B, stream):
+    def launch(Q, K, V, TBL, O, LSE, SLSE, S, B, stream):
         allocator.finalized = False
         with ir.InsertionPoint(CompilationContext.get_current().gpu_module_body):
             allocator.finalize()
-        k_fn(Q, K, V, TBL, O, LSE, S, B).launch(
+        k_fn(Q, K, V, TBL, O, LSE, SLSE, S, B).launch(
             grid=(fx.Index(S), fx.Index(B) * fx.Index(Hkv), 1), block=(THREADS, 1, 1), stream=stream
         )
 
@@ -416,7 +464,7 @@ def build_fwd(
 _CACHE: dict = {}
 
 
-def msa_token_fwd(q, k, v, block_table, softmax_scale=None, block_size=128, **config):
+def msa_token_fwd(q, k, v, block_table, softmax_scale=None, block_size=128, return_slot_lse=False, **config):
     """MSA forward.
 
     Args:
@@ -425,10 +473,14 @@ def msa_token_fwd(q, k, v, block_table, softmax_scale=None, block_size=128, **co
         block_table: ``[B, Hkv, S, topk]`` int32 block ids, left-packed, -1 padded
             (the indexer's ``block_indices``).
         softmax_scale: defaults to ``1 / sqrt(128)``.
+        return_slot_lse: also return ``slot_lse`` ``[S, B, Hq, topk]`` fp32, the
+            logsumexp over each slot's keys; ``exp(slot_lse - lse)`` is the slot's
+            share of the head's attention.
         config: ``build_fwd`` tuning knobs (``step_keys``, ``k_via_lds``, ``remap``).
 
     Returns:
-        ``o`` ``[S, B, Hq, 128]`` bf16 and ``lse`` ``[S, B, Hq]`` fp32.
+        ``o`` ``[S, B, Hq, 128]`` bf16 and ``lse`` ``[S, B, Hq]`` fp32 (and
+        ``slot_lse``).
     """
     S, B, Hq, Dq = q.shape
     Hkv = k.shape[2]
@@ -445,12 +497,14 @@ def msa_token_fwd(q, k, v, block_table, softmax_scale=None, block_size=128, **co
 
     o = torch.empty_like(q)
     lse = torch.empty((S, B, Hq), dtype=torch.float32, device=q.device)
+    slse = torch.empty((S, B, Hq, topk) if return_slot_lse else (1,), dtype=torch.float32, device=q.device)
+    config = {**config, "emit_slot_lse": bool(return_slot_lse)}
     key = (Hkv, topk, block_size, float(softmax_scale), tuple(sorted(config.items())))
     entry = _CACHE.get(key)
-    args = (q, k, v, block_table, o, lse, int(S), int(B), torch.cuda.current_stream())
+    args = (q, k, v, block_table, o, lse, slse, int(S), int(B), torch.cuda.current_stream())
     if entry is None:
         fn = build_fwd(Hkv, topk, block_size, float(softmax_scale), **config)
         entry = fn.compile(*args)
         _CACHE[key] = entry
     entry(*args)
-    return o, lse
+    return (o, lse, slse) if return_slot_lse else (o, lse)

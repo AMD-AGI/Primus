@@ -33,13 +33,12 @@ modules:
       # with swiglu off it is what becomes `bias_activation_fusion`, and
       # mlp.py's fused branch covers only gelu and swiglu.
       #
-      # MSA STATUS: layers 4-60 run the block-sparse attention on the eager
-      # backend, which materialises the full [b, h, sq, sk] fp32 scores: slower
-      # than dense TE, and several GB of saved activations per MSA layer at 4k.
-      # With `recompute_method: block` / `recompute_num_layers: 1` below only
-      # one layer is recomputed, so all 57 MSA layers keep theirs; the full
-      # depth needs every layer recomputed. Throughput from this config
-      # measures the reference backend, not a fused kernel.
+      # MSA STATUS: layers 4-60 run the block-sparse attention on the preset's
+      # flydsl kernels. The indexer still scores every key in PyTorch, an
+      # O(sq^2) tensor per MSA layer. With `--msa_backend eager` (the PyTorch
+      # reference) each MSA layer also keeps several GB of fp32 scores at 4k;
+      # `recompute_method: block` / `recompute_num_layers: 1` below recomputes
+      # only one layer, so eager at full depth needs every layer recomputed.
       # ---------------------------------------------------------------------
 
       # log

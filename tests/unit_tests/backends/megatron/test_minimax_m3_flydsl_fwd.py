@@ -103,6 +103,38 @@ def test_matches_eager(S, B, Hkv, topk):
     _check(o, lse, q, k, v, table)
 
 
+@pytest.mark.parametrize("S, B, Hkv, topk", [(300, 1, 1, 16), (1000, 2, 2, 4)])
+def test_slot_lse_is_the_attention_each_slot_got(S, B, Hkv, topk):
+    """exp(slot_lse - lse) is the sparse indexer loss's target, per head."""
+    from primus.backends.megatron.core.transformer.minimax_m3.eager import (
+        build_block_keep,
+        eager_block_sparse_attention,
+    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
+        msa_token_fwd,
+    )
+
+    q, k, v, table = _inputs(S, B, Hkv, topk, seed=2)
+    _, lse, slot_lse = msa_token_fwd(q, k, v, table, return_slot_lse=True)
+    mass = torch.exp(slot_lse - lse.unsqueeze(-1)).permute(1, 2, 0, 3)
+
+    keep = build_block_keep(table.long(), S, BLOCK)
+    _, _, probs = eager_block_sparse_attention(
+        *(t.float().permute(1, 2, 0, 3) for t in (q, k, v)), keep, D**-0.5, return_probs=True
+    )
+    n_blocks = -(-S // BLOCK)
+    per_block = (
+        torch.nn.functional.pad(probs, (0, n_blocks * BLOCK - S))
+        .view(B, 16 * Hkv, S, n_blocks, BLOCK)
+        .sum(-1)
+    )
+    slots = table.long().repeat_interleave(16, dim=1)
+    ref = per_block.gather(-1, slots.clamp_min(0)).masked_fill(slots < 0, 0.0)
+
+    torch.testing.assert_close(mass, ref, rtol=0, atol=1e-5)
+    assert torch.isneginf(slot_lse.permute(1, 2, 0, 3)[slots < 0]).all(), "unvisited slots must be -inf"
+
+
 @pytest.mark.parametrize(
     "config",
     [

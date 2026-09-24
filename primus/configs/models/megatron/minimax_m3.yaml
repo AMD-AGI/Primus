@@ -66,14 +66,26 @@ sparse_disable_index_value: "([0]*3+[1]*57)"  # same per-layer list as the freq 
 
 # Indexer training signal. top-k is not differentiable, so the indexer's
 # projections get no gradient from the attention path at all -- this
-# distillation loss (KL of the real per-block attention mass against the
-# indexer's own block distribution) is the only thing that moves them. 0.0
-# freezes the indexer at its init, which makes MSA select blocks at random;
-# keep it non-zero for any run that is actually training. Like the reference,
-# the indexer reads input_layernorm(x) -- recomputed from linear_qkv's fused
-# norm weight -- detached, so the loss trains the indexer only. It is logged as
+# distillation loss is the only thing that moves them. 0.0 freezes the indexer
+# at its init, which makes MSA select blocks at random; keep it non-zero for any
+# run that is actually training. Like the reference, the indexer reads
+# input_layernorm(x) -- recomputed from linear_qkv's fused norm weight --
+# detached, so the loss trains the indexer only. It is logged as
 # `msa_indexer_loss` next to the MoE aux losses.
 sparse_indexer_loss_coeff: 1.0e-2
+# sparse (DSA's sparse loss): KL over each query's selected blocks, against the
+# attention the layer actually paid them; cheap, and what msa_backend: flydsl
+# supports. dense: KL over every visible block against dense attention; needs
+# the full score matrix, so eager only.
+sparse_indexer_loss_type: sparse
+
+# Attention core: flydsl runs the gfx950 (MI355X) kernels in
+# core/transformer/minimax_m3/flydsl, which never form the score matrix -- on
+# the 8-layer proxy, 1.75x faster per step and 51 GB less memory than eager,
+# same loss curve. It needs head_dim 128, 16 query heads per KV head, and no
+# dataloader attention mask. eager is the plain-PyTorch reference, for other
+# GPUs and for checking numerics. Neither supports tensor parallelism yet.
+msa_backend: flydsl
 
 # MoE - layers 1-3 dense, layers 4-60 MoE; 128 routed experts + 1 shared
 moe_layer_freq: "([0]*3+[1]*57)"
@@ -144,15 +156,14 @@ init_method_std: 0.02
 ###############################################################################
 # Unmapped: parts of M3 this preset cannot express yet.
 #
-# MSA (MiniMax Sparse Attention): implemented on the eager backend only
-#   (core/transformer/minimax_m3/eager.py). It materialises the full
-#   [b, heads, sq, sk] fp32 score matrix, so it is slower than dense TE and its
-#   activation memory grows with sq^2 -- several GB per MSA layer at 4k, which
-#   is why long runs need full recompute on every layer. msa_backend: flydsl is
-#   accepted by the config but rejected at build: the flydsl forward kernel
-#   (minimax_m3/flydsl/msa_token_fwd.py) has no backward yet and is not wired
-#   in. Not supported yet: context and sequence parallelism, packed sequences,
-#   and inference.
+# MSA (MiniMax Sparse Attention): the eager backend
+#   (core/transformer/minimax_m3/eager.py) materialises the full
+#   [b, heads, sq, sk] fp32 score matrix, so its activation memory grows with
+#   sq^2 -- several GB per MSA layer at 4k, which is why long eager runs need
+#   full recompute on every layer. msa_backend: flydsl avoids that (see above).
+#   The indexer itself still scores every key in plain PyTorch, an O(sq^2)
+#   [b, 4, sq, sk] fp32 tensor. Not supported yet: context and sequence
+#   parallelism, packed sequences, and inference.
 #
 # MTP: config.json carries both `num_mtp_modules: 7` and
 #   `num_nextn_predict_layers: 1`. Seven extra MoE layers would add ~50B params,
