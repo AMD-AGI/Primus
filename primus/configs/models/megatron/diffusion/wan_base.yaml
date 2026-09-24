@@ -54,8 +54,13 @@ scheduler_shift: 5.0
 loss_weighting: diffsynth
 
 # ==============================================================================
-# Attention backward kernel
+# Attention kernels
 # ==============================================================================
+
+# transformer_impl: local only. Pack q/k/v into thd and run Primus-Turbo's
+# varlen kernel instead of the dense bshd one; transformer_engine always packs.
+# The trainer logs which attention path a run took.
+local_thd_attention: false
 
 # Let the attention backward use fp32-atomic accumulation. WAN's sequence length
 # is not divisible by 64, so with this off no ASM backward is reachable on either

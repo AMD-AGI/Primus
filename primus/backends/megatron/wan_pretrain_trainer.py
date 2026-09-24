@@ -104,6 +104,25 @@ def _apply_atomic_fp32_backward(enabled: bool) -> None:
         )
 
 
+def describe_attention_path(config, fp8_attention: bool) -> str:
+    """Name the attention layout and kernel family a WAN config will run.
+
+    The three paths dispatch different kernels, so the log has to say which one
+    a run took. Raises for the one combination with no kernel behind it.
+    """
+    if config.transformer_impl != "local":
+        return "TransformerEngine, packed thd (TEDotProductAttention)"
+    if not config.local_thd_attention:
+        kernel = "flash_attn_fp8_func" if fp8_attention else "flash_attn_func"
+        return f"local, dense bshd (Primus-Turbo {kernel})"
+    if fp8_attention:
+        raise ValueError(
+            "local_thd_attention needs Primus-Turbo's varlen kernel, which has no fp8 "
+            "variant; drop enable_turbo_attention_float8 or local_thd_attention"
+        )
+    return "local, packed thd (Primus-Turbo flash_attn_varlen_func)"
+
+
 class WanPretrainTrainer(DiffusionPretrainTrainer):
     """Trainer for WAN 2.1 / 2.2 video diffusion pre-training.
 
@@ -124,6 +143,8 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
         - ``attn_atomic_fp32`` (default true): let the attention backward use
           the fp32-atomic ASM kernels, on both the local spec (Primus-Turbo) and
           te_spec (TE / CK v3). Set false for a deterministic backward.
+        - ``local_thd_attention`` (default false): on ``transformer_impl:
+          local``, pack attention into thd for Primus-Turbo's varlen kernel.
     """
 
     def __init__(self, *args, **kwargs):
@@ -154,6 +175,10 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
         # it rather than recomputing here and risking a disagreement.
         self.wan_config = self._build_wan_config_from_yaml()
         self.wan_config.validate()
+        attention_path = describe_attention_path(
+            self.wan_config, bool(getattr(params, "enable_turbo_attention_float8", False))
+        )
+        log_rank_0(f"WAN trainer: attention path is {attention_path}")
 
         window = (
             self.wan_config.timestep_window_min,
@@ -290,6 +315,7 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
             "boundary_ratio": getattr(params, "boundary_ratio", None),
             "stage": getattr(params, "stage", "full"),
             "transformer_impl": getattr(params, "transformer_impl", "transformer_engine"),
+            "local_thd_attention": getattr(params, "local_thd_attention", False),
             # TransformerConfig defaults this to AttnBackend.auto, which TE
             # refuses to run under an image that pins NVTE_FLASH_ATTN /
             # NVTE_FUSED_ATTN, so the resolved value has to be threaded in.

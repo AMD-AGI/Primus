@@ -18,10 +18,10 @@ attention core all operate on the same layout and dispatch the same kernels.
 TE path: q/k/v are packed into the ``thd`` layout with ``cu_seqlens`` and rotated
 with the fused RoPE kernel, matching Megatron-Bridge's WAN attention exactly.
 Local path: q/k/v stay in SBHD and use unfused interleaved RoPE plus
-``PrimusTurboLocalAttention``.
+``PrimusTurboLocalAttention``; ``local_thd_attention`` packs them into ``thd``
+for Turbo's varlen kernel instead.
 """
 
-import os
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
@@ -82,11 +82,8 @@ class WanAttentionBase(MegatronModule):
         self.attn_mask_type = attn_mask_type
         self.norm_config = norm_config if norm_config is not None else config
         self.local = config.transformer_impl == "local"
-        # Opt-in thd on the local path. The TE path is thd unconditionally
-        # (Megatron-Bridge parity); the local path is bshd by default and only
-        # packs when asked, because Turbo's varlen kernel is a different kernel
-        # and the two are worth comparing rather than swapping silently.
-        self.local_thd = self.local and os.environ.get("PRIMUS_WAN_THD_ATTN", "0") == "1"
+        # See ``WanConfig.local_thd_attention``.
+        self.local_thd = self.local and bool(getattr(config, "local_thd_attention", False))
         self.num_heads = config.num_attention_heads
         self.head_dim = config.kv_channels
         self.inner_dim = self.num_heads * self.head_dim
