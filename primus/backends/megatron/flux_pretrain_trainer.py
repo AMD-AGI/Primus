@@ -475,7 +475,16 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             "model_channels": getattr(params, "model_channels", 256),
             "guidance_embed": getattr(params, "guidance_embed", False),
             # RoPE configuration
-            "apply_rope_fusion": getattr(params, "apply_rope_fusion", False),
+            # MXFP6_FORCE_ROPE_FUSION exists because the config key alone cannot turn this
+            # on. Megatron's validate_args clears args.apply_rope_fusion whenever
+            # position_embedding_type != "rope" (arguments.py L1232-1233), and Flux never
+            # sets that type, so `params` always arrives here as False no matter what the
+            # YAML said. Forcing it is the only way to measure the fused path.
+            "apply_rope_fusion": (
+                True
+                if os.environ.get("MXFP6_FORCE_ROPE_FUSION", "0") == "1"
+                else getattr(params, "apply_rope_fusion", False)
+            ),
             "rotary_interleaved": getattr(params, "rotary_interleaved", True),
             # Training hyperparameters stored on FluxConfig
             "timestep_sampling_strategy": getattr(params, "timestep_sampling_strategy", "logit_normal"),

@@ -4,6 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import os
+import statistics
+import threading
 import time
 
 import torch
@@ -29,6 +32,303 @@ from primus.core.utils.module_utils import debug_rank_0, log_rank_0
 # (summed per-sample loss, sample count). Its denominator is the only one that
 # is a sample count rather than a microbatch count.
 VAL_LOSS_KEY = "loss"
+
+
+def _make_eval_profiler():
+    """Trace the evaluation loop, off unless MXFP6_EVAL_PROFILE=<iterations>.
+
+    PROBE ONLY. Megatron builds its profiler inside training.train(), which
+    skip_train bypasses, so an evaluation-only arm cannot be traced through the
+    ordinary profile / profile_step_start path -- those keys are read but nothing
+    ever creates the profiler. That left the eval loop the one part of the step
+    budget never profiled, which is what this exists to fix.
+
+    Profiles rank 0 only, for the first MXFP6_EVAL_PROFILE iterations after one
+    wait and one warmup, and writes a chrome trace to MXFP6_EVAL_PROFILE_DIR
+    (default /tmp). Stacks are deliberately not collected: this campaign already
+    established they add phantom overhead of the same order as the eval anomaly
+    being chased.
+    """
+    active = int(os.environ.get("MXFP6_EVAL_PROFILE", "0"))
+    if active <= 0 or torch.distributed.get_rank() != 0:
+        return None
+
+    out_dir = os.environ.get("MXFP6_EVAL_PROFILE_DIR", "/tmp")
+    os.makedirs(out_dir, exist_ok=True)
+
+    def _export(prof):
+        path = os.path.join(out_dir, "eval_profile.pt.trace.json")
+        prof.export_chrome_trace(path)
+        log_rank_0(f"[MXFP6_EVAL_PROFILE] wrote {path}")
+
+    return torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        schedule=torch.profiler.schedule(wait=1, warmup=1, active=active, repeat=1),
+        record_shapes=True,
+        with_stack=False,
+        on_trace_ready=_export,
+    )
+
+
+_VAL_PREFETCH = os.environ.get("MXFP6_VAL_PREFETCH", "1") == "1"
+
+# Keyed by id() of the validation iterator, so a recipe with more than one
+# validation set cannot hand one set's batch to another.
+_val_prefetch_state = {}
+
+
+class _FirstBatchFrom:
+    """Yield one already-fetched batch, then delegate to the real iterator."""
+
+    def __init__(self, batch, inner):
+        self._batch = batch
+        self._inner = inner
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._batch is not None:
+            batch, self._batch = self._batch, None
+            return batch
+        return next(self._inner)
+
+
+def _start_val_prefetch(data_iterator):
+    """Fetch the next evaluation's first batch on a background thread.
+
+    The first fetch of every evaluation is orders of magnitude slower than the rest,
+    which the loader hides: the loop consumes the split exactly, so every evaluation
+    ends on an epoch boundary and the next one's first fetch pays the restart with
+    nothing queued across it. Doing that fetch at the end of an evaluation would only
+    move the cost inside the same timed region, so it is issued here and the training
+    steps that follow absorb it.
+
+    The batch this pulls is the one the next evaluation would have read first: the
+    validation stream repeats deterministically, and the eval noise is keyed to the
+    eval step index rather than to the fetch, so ``val_loss`` is unchanged. That
+    bit-identity is the gate; ``MXFP6_VAL_PREFETCH=0`` turns this off.
+    """
+    if not _VAL_PREFETCH or data_iterator is None:
+        return
+    key = id(data_iterator)
+    prev = _val_prefetch_state.get(key)
+    if prev is not None and prev["thread"].is_alive():
+        # Nothing consumed the last prefetch, so the iterator's position is not
+        # what this would assume. Leave it alone rather than fetch twice.
+        return
+    state = {"thread": None, "batch": None, "error": None}
+
+    def _fetch():
+        try:
+            state["batch"] = next(data_iterator)
+        except BaseException as exc:  # surfaced on the consuming side
+            state["error"] = exc
+
+    # Daemon: a fetch blocked on storage must not keep a finished run alive.
+    state["thread"] = threading.Thread(target=_fetch, name="val-prefetch", daemon=True)
+    _val_prefetch_state[key] = state
+    state["thread"].start()
+
+
+def _take_val_prefetch(data_iterator):
+    """Return the iterator, with its first batch already in hand if we have one.
+
+    Joins the background fetch first: a DataLoader iterator is not safe to advance
+    from two threads, so the loop must not touch it until that thread is done.
+    """
+    state = _val_prefetch_state.pop(id(data_iterator), None)
+    if state is None:
+        return data_iterator, None
+    t0 = time.perf_counter()
+    state["thread"].join()
+    join_ms = (time.perf_counter() - t0) * 1000.0
+    if state["error"] is not None or state["batch"] is None:
+        # Fall back to fetching in the loop. The error resurfaces there if it is
+        # real, with the traceback the loop would have produced anyway.
+        debug_rank_0(f"[MXFP6_VAL_PREFETCH] discarded: {state['error']!r}")
+        return data_iterator, None
+    return _FirstBatchFrom(state["batch"], data_iterator), join_ms
+
+
+class _EvalIterTimer:
+    """Iteration-to-iteration wall clock for the evaluation loop, off unless
+    MXFP6_EVAL_ITER_TIMING=1.
+
+    PROBE ONLY, and it exists because pricing evaluation off a window *inside* the
+    iteration reports a much faster iteration, and a much higher GPU-busy fraction,
+    than the same arm's end-to-end rate over the split implies. The difference is host
+    time that was never in any profiled window, and a within-iteration probe cannot see
+    it by construction.
+
+    So this measures the period, not the activity: wall clock from the top of one
+    iteration to the top of the next, the wall clock of the forward-backward call inside
+    it, and CUDA-event GPU time for that same call. The three split the iteration into
+    GPU work, host time inside the model call (which includes the dataloader, since the
+    forward step is what consumes the iterator), and loop overhead outside it.
+
+    It is deliberately sync-free in the hot path. The CUDA events are recorded and read
+    only at report time, so the probe cannot create the serialization it is looking for.
+    That failure mode is real and was hit once already on this model, where an apparent
+    end-of-step "host stall" turned out to be the profiler's own overhead.
+    """
+
+    def __init__(self):
+        self.iter_wall = []
+        self.fbf_wall = []
+        self.events = []
+        self._t_iter = None
+        self._t_fbf = None
+        self._pair = None
+        self.losses = []
+
+    @classmethod
+    def maybe_create(cls):
+        if os.environ.get("MXFP6_EVAL_ITER_TIMING", "0") not in ("1", "true", "True"):
+            return None
+        return cls()
+
+    def iteration_start(self):
+        self._t_iter = time.perf_counter()
+
+    def fbf_start(self):
+        self._t_fbf = time.perf_counter()
+        start = torch.cuda.Event(enable_timing=True)
+        stop = torch.cuda.Event(enable_timing=True)
+        start.record()
+        self._pair = (start, stop)
+
+    def fbf_stop(self):
+        self._pair[1].record()
+        self.events.append(self._pair)
+        self.fbf_wall.append((time.perf_counter() - self._t_fbf) * 1000.0)
+
+    def iteration_stop(self):
+        self.iter_wall.append((time.perf_counter() - self._t_iter) * 1000.0)
+
+    def record_loss(self, numerator, denominator):
+        """Per-iteration loss, kept to localise a whole-eval loss difference.
+
+        When two arms report different whole-eval losses, each reproducibly, the
+        aggregate cannot say whether every iteration moved a little or one moved a
+        lot, and those have different causes: a uniform shift is a kernel or reduction
+        difference applying to all batches, while a single differing iteration is a
+        data or first-batch state difference. Stored as float, compared offline.
+        """
+        num = numerator.item() if isinstance(numerator, torch.Tensor) else float(numerator)
+        den = denominator.item() if isinstance(denominator, torch.Tensor) else float(denominator)
+        self.losses.append(num / den if den else float("nan"))
+
+    def report(self):
+        torch.cuda.synchronize()
+        gpu = [a.elapsed_time(b) for a, b in self.events]
+        n = len(self.iter_wall)
+        if n == 0:
+            return
+
+        def stats(xs):
+            s = sorted(xs)
+            return (
+                statistics.median(s),
+                s[len(s) // 10],
+                s[min(len(s) - 1, 9 * len(s) // 10)],
+                min(s),
+                max(s),
+                sum(s),
+            )
+
+        # The CUDA event pair measures the *span* of the device timeline between the two
+        # records, not GPU busy time: if the host blocks on the dataloader mid-call the
+        # GPU sits idle inside that span and the span still counts it. Read it as an
+        # upper bound on GPU work, and take the compute floor from a standalone
+        # forward-only microbenchmark at the same shape instead.
+        rows = [
+            ("iteration wall", self.iter_wall),
+            ("  fwd/bwd call wall", self.fbf_wall),
+            ("  fwd/bwd device span", gpu),
+        ]
+        lines = [
+            f"[MXFP6_EVAL_ITER_TIMING] {n} iterations",
+            f"{'':22}{'median':>9}{'p10':>9}{'p90':>9}{'min':>9}{'max':>9}{'total s':>10}",
+        ]
+        for label, xs in rows:
+            med, p10, p90, lo, hi, tot = stats(xs)
+            lines.append(
+                f"{label:22}{med:>9.2f}{p10:>9.2f}{p90:>9.2f}{lo:>9.2f}{hi:>9.2f}{tot/1000.0:>10.2f}"
+            )
+        med_iter = statistics.median(self.iter_wall)
+        med_fbf = statistics.median(self.fbf_wall)
+        med_gpu = statistics.median(gpu)
+        lines.append(
+            f"{'  host outside span':22}{med_fbf - med_gpu:>9.2f}"
+            f"   ({100*(med_fbf-med_gpu)/med_iter:.1f}% of iteration)"
+        )
+        lines.append(
+            f"{'  loop overhead':22}{med_iter - med_fbf:>9.2f}"
+            f"   ({100*(med_iter-med_fbf)/med_iter:.1f}% of iteration)"
+        )
+        # Optional: anything above the model's standalone forward cost at this shape is
+        # not compute. No default, because the figure is specific to a shape and a
+        # machine and does not scale across microbatch sizes -- measure it with a
+        # forward-only microbenchmark and pass it in. Two runs of the same such harness
+        # on the same tree have been seen to disagree by several percent while each was
+        # internally tight to a fraction of a percent, so treat a small residual as
+        # noise rather than signal.
+        floor_env = os.environ.get("MXFP6_EVAL_COMPUTE_FLOOR_MS")
+        if floor_env:
+            floor = float(floor_env)
+            lines.append(
+                f"{'  non-compute':22}{med_iter - floor:>9.2f}"
+                f"   ({100*(med_iter-floor)/med_iter:.1f}% of iteration, against a "
+                f"{floor:.2f} ms compute floor)"
+            )
+        # The scored eval time is a total, not a median, so a single slow iteration is
+        # worth as much as a far smaller per-iteration regression. Name them.
+        outliers = [(i + 1, x) for i, x in enumerate(self.iter_wall) if x > 2 * med_iter]
+        excess = sum(x - med_iter for _, x in outliers) / 1000.0
+        lines.append("  first 3 iterations:  " + ", ".join(f"{x:.1f}" for x in self.iter_wall[:3]) + " ms")
+        if self.losses:
+            path = os.environ.get("MXFP6_EVAL_LOSS_DUMP", "")
+            if path:
+                with open(path, "w") as fh:
+                    fh.write("\n".join(f"{i}\t{x!r}" for i, x in enumerate(self.losses)) + "\n")
+                lines.append(f"  per-iteration losses dumped to {path}")
+            lines.append("  first 4 losses:      " + ", ".join(f"{x:.9f}" for x in self.losses[:4]))
+
+        # Separates "the first eval iteration waits on the val loader" from "the
+        # first eval iteration is slow for some other reason". The probe above
+        # cannot: it brackets the whole forward_backward call, and the fetch is
+        # inside it, which is why it reports almost nothing outside the span.
+        try:
+            from primus.backends.megatron.training.diffusion.forward_step import (
+                take_batch_fetch_timings,
+            )
+
+            fetches = take_batch_fetch_timings()
+        except Exception:
+            fetches = []
+        if fetches:
+            med_f = statistics.median(fetches)
+            lines.append(
+                f"  batch fetch (n={len(fetches)}): median {med_f:.2f} ms, "
+                f"max {max(fetches):.1f} ms, first {fetches[0]:.1f} ms, "
+                f"total {sum(fetches)/1000:.2f} s"
+            )
+            slow = [(i + 1, x) for i, x in enumerate(fetches) if x > 2 * med_f]
+            lines.append(
+                "  slow fetches:        "
+                + (", ".join(f"#{i} {x:.0f}ms" for i, x in slow[:16]) if slow else "none")
+            )
+        lines.append(
+            "  above 2x median:     "
+            + (", ".join(f"#{i} {x/1000:.2f}s" for i, x in outliers) if outliers else "none")
+            + (
+                f"  -> {excess:.2f} s of excess, {100*excess/(sum(self.iter_wall)/1000):.1f}% of the eval"
+                if outliers
+                else ""
+            )
+        )
+        log_rank_0("\n".join(lines))
 
 
 def _report_eval(args, message):
@@ -214,12 +514,27 @@ def primus_evaluate(
     if eval_iters is None:
         eval_iters = args.eval_iters
 
+    eval_prof = _make_eval_profiler()
+    if eval_prof is not None:
+        eval_prof.start()
+
+    iter_timer = _EvalIterTimer.maybe_create()
+
+    # Keep the real iterator: the wrapper is per-evaluation, and the next
+    # evaluation is handed the same underlying object this one was.
+    val_iterator = data_iterator
+    data_iterator, prefetch_join_ms = _take_val_prefetch(data_iterator)
+    if prefetch_join_ms is not None:
+        debug_rank_0(f"[MXFP6_VAL_PREFETCH] first batch ready, waited {prefetch_join_ms:.1f} ms")
+
     with torch.no_grad():
         iteration = 0
         if verbose:
             _report_eval(args, f"Evaluating on {eval_iters * eval_batch_size} samples")
         while iteration < eval_iters:
             iteration += 1
+            if iter_timer is not None:
+                iter_timer.iteration_start()
             if verbose:
                 # One line per iteration, so 58 per evaluation at the MLPerf
                 # shape and 580 over a ten-evaluation run. Progress is worth
@@ -230,6 +545,8 @@ def primus_evaluate(
             # Don't care about timing during evaluation
             config.timers = None
             ft_integration.on_eval_step_start()
+            if iter_timer is not None:
+                iter_timer.fbf_start()
             loss_dicts = forward_backward_func(
                 forward_step_func=forward_step_func,
                 data_iterator=data_iterator,
@@ -240,6 +557,8 @@ def primus_evaluate(
                 decoder_seq_length=args.decoder_seq_length,
                 forward_only=True,
             )
+            if iter_timer is not None:
+                iter_timer.fbf_stop()
             ft_integration.on_eval_step_end()
             config.timers = get_timers()
 
@@ -268,6 +587,11 @@ def primus_evaluate(
                             # and so the denominator is 1.
                             numerator += val
                             denominator += 1
+                    # diffusion_trainer.py:309 reports Flux under "loss"; the GPT paths
+                    # use "lm loss". Take whichever this model produces.
+                    if iter_timer is not None and key in ("loss", "lm loss"):
+                        iter_timer.record_loss(numerator, denominator)
+
                     # Accumulate across all eval iterations
                     if key not in total_loss_numerators:
                         total_loss_numerators[key] = 0
@@ -286,6 +610,20 @@ def primus_evaluate(
                     rerun_state_machine.set_mode(rerun_mode)
                     log_rank_0("Exiting during evaluation, timelimit reached")
                     return None, None, True
+
+            if eval_prof is not None:
+                eval_prof.step()
+            if iter_timer is not None:
+                iter_timer.iteration_stop()
+
+        if eval_prof is not None:
+            eval_prof.stop()
+
+        # Before the loss reduction below, so the fetch overlaps that too.
+        _start_val_prefetch(val_iterator)
+
+        if iter_timer is not None:
+            iter_timer.report()
 
         total_loss_dict = {}
         observed_samples = None
