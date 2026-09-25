@@ -145,7 +145,10 @@ print(f"SEQ={getattr(c, 'seq_length', 0)}")
 print(f"ITERS={getattr(c, 'train_iters', 0)}")
 PY
 )
-eval "${PLAN}"
+# PrimusParser prints things like "Created path: ./output/..." on stdout the
+# first time an experiment directory is used, so only evaluate the KEY=VALUE
+# lines this script emitted.
+eval "$(printf '%s\n' "${PLAN}" | grep -E '^[A-Z_]+=')"
 
 ITERS="${TRAIN_ITERS:-${ITERS}}"
 [[ -n "${PROBE}" ]] && ITERS="${PROBE}"
