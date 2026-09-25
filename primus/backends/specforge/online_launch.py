@@ -16,6 +16,7 @@ lifetime live in ``online_supervisor``. Capture nodes are
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import socket
@@ -271,7 +272,11 @@ def interface_ipv4(name: str) -> Optional[str]:
             ["ip", "-4", "-o", "addr", "show", "dev", name],
             text=True,
             stderr=subprocess.DEVNULL,
+            timeout=5,
         )
+    except subprocess.TimeoutExpired:
+        logging.getLogger(__name__).warning("timed out reading IPv4 for interface %s", name)
+        return None
     except (OSError, subprocess.CalledProcessError):
         return None
     match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", out)

@@ -20,8 +20,12 @@ train is live Mooncake + SGLang capture plus `--role producer` / `--role
 consumer`. Capture is SpecForge `scripts/prepare_hidden_states.py`, not a
 train mode.
 
-Build and run the docker image: [`docker/README.md`](docker/README.md). Inside the
-container, Primus is `/opt/primus` and SpecForge is `/workspace/SpecForge`.
+## Runtime image
+
+Build and run: [`docker/README.md`](docker/README.md). Inside the container,
+Primus is `/opt/primus` and SpecForge is `/workspace/SpecForge`.
+
+## Launch with `primus-cli`
 
 From `/opt/primus`:
 
@@ -190,8 +194,7 @@ Both runs used the example YAMLs above via `primus-cli`, 8 trainer GPUs,
 batch 2, accumulation 1, `log_interval=20`, `save_interval=240`,
 `MAX_STEPS=2510` (~40k refs). Offline captured hidden states to disk
 (`max_length=2048`) then trained. Online recaptured the same train prompts
-live (8 SGLang `TP=1` + 8 trainer GPUs). Curves are in the same band, not
-bit-identical.
+live (8 SGLang `TP=1` + 8 trainer GPUs).
 
 Offline train:
 
