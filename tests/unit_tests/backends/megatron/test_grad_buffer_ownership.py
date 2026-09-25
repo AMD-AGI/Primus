@@ -288,9 +288,15 @@ class TestIsEnabled:
 
     def test_false_when_gradient_accumulation_fusion_is_off(self, monkeypatch):
         monkeypatch.setattr(gbo, "_DISABLED", False)
-        monkeypatch.setattr(gbo, "get_args", lambda ctx: SimpleNamespace(gradient_accumulation_fusion=False))
         monkeypatch.setattr(
-            gbo, "is_primus_turbo_can_patch", lambda ctx: pytest.fail("must short-circuit before this")
+            gbo,
+            "get_args",
+            lambda ctx: SimpleNamespace(gradient_accumulation_fusion=False),
+        )
+        monkeypatch.setattr(
+            gbo,
+            "is_primus_turbo_can_patch",
+            lambda ctx: pytest.fail("must short-circuit before this"),
         )
 
         assert gbo._is_enabled(ctx=None) is False
@@ -341,14 +347,22 @@ class TestIsEnabled:
 
     def test_false_when_turbo_cannot_patch(self, monkeypatch):
         monkeypatch.setattr(gbo, "_DISABLED", False)
-        monkeypatch.setattr(gbo, "get_args", lambda ctx: SimpleNamespace(gradient_accumulation_fusion=True))
+        monkeypatch.setattr(
+            gbo,
+            "get_args",
+            lambda ctx: SimpleNamespace(gradient_accumulation_fusion=True),
+        )
         monkeypatch.setattr(gbo, "is_primus_turbo_can_patch", lambda ctx: False)
 
         assert gbo._is_enabled(ctx=None) is False
 
     def test_true_when_all_conditions_hold(self, monkeypatch):
         monkeypatch.setattr(gbo, "_DISABLED", False)
-        monkeypatch.setattr(gbo, "get_args", lambda ctx: SimpleNamespace(gradient_accumulation_fusion=True))
+        monkeypatch.setattr(
+            gbo,
+            "get_args",
+            lambda ctx: SimpleNamespace(gradient_accumulation_fusion=True),
+        )
         monkeypatch.setattr(gbo, "is_primus_turbo_can_patch", lambda ctx: True)
 
         assert gbo._is_enabled(ctx=None) is True

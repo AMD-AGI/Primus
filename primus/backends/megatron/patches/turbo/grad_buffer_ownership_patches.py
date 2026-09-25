@@ -57,23 +57,23 @@ zero the whole buffer.
 from __future__ import annotations
 
 import os
-from typing import Dict, FrozenSet, List, Tuple
+from itertools import pairwise
 
 from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
-Slice = Tuple[int, int, object]
+Slice = tuple[int, int, object]
 
 _DISABLED = os.environ.get("PRIMUS_TURBO_GRAD_OWNERSHIP", "0") != "1"
 _POISON = os.environ.get("PRIMUS_TURBO_GRAD_OWNERSHIP_POISON", "0") == "1"
 
 # Rebuilt every iteration by the wrapped ``zero_grad_buffer``; consumed by the
 # wrapped ``reset`` of every buffer belonging to that iteration.
-_state: Dict[str, object] = {"owned": frozenset(), "seen": set(), "logged": False}
+_state: dict[str, object] = {"owned": frozenset(), "seen": set(), "logged": False}
 
 
-def _rotate_ownership(grad_ownership, *, discard: bool) -> FrozenSet[Slice]:
+def _rotate_ownership(grad_ownership, *, discard: bool) -> frozenset[Slice]:
     """Start a producer epoch, optionally discarding the completed epoch.
 
     Pipeline warmup runs with ``args.curr_iteration == -1``. Its beta=0 writes
@@ -98,7 +98,7 @@ def _discard_ownership_for_step(args) -> bool:
         return True
     try:
         return _get_num_microbatches() != 1
-    except Exception:
+    except Exception:  # noqa: BLE001 -- any uncertainty must fail closed.
         # If the calculator is unavailable or not initialized, ownership for
         # the current schedule is not proven. Fail closed with a full clear.
         return True
@@ -129,7 +129,11 @@ def _is_enabled(ctx: PatchContext) -> bool:
             return False
         graph_impl = getattr(config, "cuda_graph_impl", None)
         graph_impl = getattr(graph_impl, "value", graph_impl)
-        if graph_impl is not None and str(graph_impl).lower() not in {"", "none", "false"}:
+        if graph_impl is not None and str(graph_impl).lower() not in {
+            "",
+            "none",
+            "false",
+        }:
             return False
 
     # The claim this patch trusts is only ever recorded by the fused wgrad path.
@@ -138,14 +142,14 @@ def _is_enabled(ctx: PatchContext) -> bool:
     return is_primus_turbo_can_patch(ctx)
 
 
-def _owned_slices(buffer) -> List[Tuple[int, int, Slice]]:
+def _owned_slices(buffer) -> list[tuple[int, int, Slice]]:
     """Buffer offsets whose parameter was fully overwritten last iteration.
 
     Returns ``(start, end, key)`` triples, where ``key`` is the producer's
     ``(data_ptr, numel, dtype)`` log entry, so the caller can report back exactly what
     it skipped.
     """
-    owned: FrozenSet[Slice] = _state["owned"]
+    owned: frozenset[Slice] = _state["owned"]
     grad = getattr(buffer, "grad_data", None)
     index_map = getattr(buffer, "param_index_map", None)
     if not owned or grad is None or index_map is None or grad.numel() == 0:
@@ -168,7 +172,7 @@ def _owned_slices(buffer) -> List[Tuple[int, int, Slice]]:
             found.append((start, end, key))
 
     found.sort()
-    for (_s0, end0, _k0), (start1, _e1, _k1) in zip(found, found[1:]):
+    for (_s0, end0, _k0), (start1, _e1, _k1) in pairwise(found):
         if start1 < end0:
             raise RuntimeError(f"overlapping owned gradient slices ending {end0} and starting {start1}")
     return found
@@ -275,7 +279,7 @@ def patch_grad_buffer_ownership(ctx: PatchContext) -> None:
             _validate_bucket_group_overwrites(self, grad_ownership)
         return original_start_grad_sync(self, *args, **kwargs)
 
-    setattr(reset, "_primus_grad_ownership", True)
+    reset._primus_grad_ownership = True
     DistributedDataParallel.zero_grad_buffer = zero_grad_buffer
     _ParamAndGradBuffer.reset = reset
     _ParamAndGradBucketGroup.start_grad_sync = start_grad_sync

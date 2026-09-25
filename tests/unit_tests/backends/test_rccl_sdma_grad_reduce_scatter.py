@@ -20,8 +20,8 @@ from primus.backends.megatron.patches.parallelism import (
 
 
 def _bucket_group(**overrides):
-    defaults = dict(
-        ddp_config=SimpleNamespace(
+    defaults = {
+        "ddp_config": SimpleNamespace(
             use_distributed_optimizer=True,
             num_distributed_optimizer_instances=1,
             reduce_scatter_with_fp32_accumulation=False,
@@ -30,13 +30,13 @@ def _bucket_group(**overrides):
             average_in_collective=False,
             overlap_grad_reduce=True,
         ),
-        is_first_batch=False,
-        grad_reduce_handle=None,
-        cached_grad_buffer_shard_list=[None],
-        intra_distributed_optimizer_instance_size=2,
-        intra_distributed_optimizer_instance_rank=0,
-        intra_distributed_optimizer_instance_group=SimpleNamespace(),
-    )
+        "is_first_batch": False,
+        "grad_reduce_handle": None,
+        "cached_grad_buffer_shard_list": [None],
+        "intra_distributed_optimizer_instance_size": 2,
+        "intra_distributed_optimizer_instance_rank": 0,
+        "intra_distributed_optimizer_instance_group": SimpleNamespace(),
+    }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
 
@@ -59,7 +59,11 @@ def test_start_grad_sync_uses_dedicated_group_when_eligible(monkeypatch):
     def fake_reduce_scatter(output, input_, op, group, async_op):
         rs_calls.append((output, input_, op, group, async_op))
 
-    monkeypatch.setattr(torch.distributed.distributed_c10d, "_coalescing_manager", fake_coalescing_manager)
+    monkeypatch.setattr(
+        torch.distributed.distributed_c10d,
+        "_coalescing_manager",
+        fake_coalescing_manager,
+    )
     monkeypatch.setattr(torch.distributed, "reduce_scatter_tensor", fake_reduce_scatter)
     monkeypatch.setattr(rccl_sdma_param_gather, "get_sdma_process_group", lambda _group: dedicated_group)
 
@@ -116,7 +120,9 @@ def test_start_grad_sync_applies_gradient_scaling_before_collective(monkeypatch)
         lambda group, async_ops: nullcontext(SimpleNamespace()),
     )
     monkeypatch.setattr(
-        torch.distributed, "reduce_scatter_tensor", lambda output, input_, op, group, async_op: None
+        torch.distributed,
+        "reduce_scatter_tensor",
+        lambda output, input_, op, group, async_op: None,
     )
     monkeypatch.setattr(rccl_sdma_param_gather, "get_sdma_process_group", lambda _g: SimpleNamespace())
 
@@ -126,7 +132,9 @@ def test_start_grad_sync_applies_gradient_scaling_before_collective(monkeypatch)
     assert torch.equal(grad_data, torch.full((8,), 1.0))
 
 
-def test_start_grad_sync_waits_for_cudagraph_wgrad_events_before_collective(monkeypatch):
+def test_start_grad_sync_waits_for_cudagraph_wgrad_events_before_collective(
+    monkeypatch,
+):
     order = []
     event = object()
 
@@ -164,7 +172,9 @@ def test_start_grad_sync_waits_for_cudagraph_wgrad_events_before_collective(monk
     assert order == ["wait", "reduce-scatter"]
 
 
-def test_start_grad_sync_copies_extra_main_grads_before_scaling_and_collective(monkeypatch):
+def test_start_grad_sync_copies_extra_main_grads_before_scaling_and_collective(
+    monkeypatch,
+):
     observed = []
     grad_data = torch.zeros(8)
     rccl_sdma_param_gather.mark_direct_param_buffer(grad_data)
@@ -223,7 +233,9 @@ def test_start_grad_sync_sync_path_waits_and_synchronizes(monkeypatch):
         lambda group, async_ops: nullcontext(NativeHandle()),
     )
     monkeypatch.setattr(
-        torch.distributed, "reduce_scatter_tensor", lambda output, input_, op, group, async_op: None
+        torch.distributed,
+        "reduce_scatter_tensor",
+        lambda output, input_, op, group, async_op: None,
     )
     monkeypatch.setattr(rccl_sdma_param_gather, "get_sdma_process_group", lambda _g: SimpleNamespace())
     monkeypatch.setattr(torch.cuda, "current_stream", lambda _device: ConsumerStream())
@@ -343,7 +355,9 @@ def test_start_grad_sync_respects_first_batch_no_op(monkeypatch):
     wrapped(bg)
 
 
-def test_grad_buffer_wrapper_allocates_grad_data_from_pool_and_marks_buckets(monkeypatch):
+def test_grad_buffer_wrapper_allocates_grad_data_from_pool_and_marks_buckets(
+    monkeypatch,
+):
     group = SimpleNamespace(group_name="ce")
     pool = SimpleNamespace()
     handle = SimpleNamespace()
