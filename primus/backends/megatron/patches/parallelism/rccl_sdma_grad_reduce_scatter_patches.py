@@ -121,9 +121,10 @@ def make_grad_and_param_buffer_init(original):
         nccl_ub = bound.arguments["nccl_ub"]
 
         if not ddp_config.use_distributed_optimizer or nccl_ub:
-            # Matches the param patch's own eligibility: without the
-            # distributed optimizer there is no per-rank grad shard to
-            # register, and nccl_ub already owns a separate registered pool.
+            # Preserve the existing parameter-wrapper behavior for unsupported
+            # direct-gather layouts. With the rccl_sdma backend explicitly
+            # selected, that inner wrapper rejects these configurations before
+            # Megatron allocation rather than silently changing backends.
             return original(self, *args, **kwargs)
 
         device = torch.device("cuda", torch.cuda.current_device())
@@ -271,6 +272,7 @@ def make_start_grad_sync(original):
                     async_op=True,
                 )
 
+        self.grad_reduce_dispatched = True
         if self.ddp_config.overlap_grad_reduce:
             self.grad_reduce_handle = cm
         else:

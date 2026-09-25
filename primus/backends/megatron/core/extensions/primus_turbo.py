@@ -1832,16 +1832,20 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                             0, device=weight.device, dtype=float4_e2m1fn_x2
                         )
                     pre = getattr(self, "_prequant_x", None)
-                    gemm_fp4_kwargs = {
-                        "trans_a": False,
-                        "trans_b": True,
-                        "out_dtype": None,
-                        "config": quant_config.data(),
-                        "fuse_bgrad_accum_pattern": _fuse_wgrad_accum_pattern(self.config, weight),
-                    }
                     if pre is not None:
-                        gemm_fp4_kwargs["a_prequant"] = pre
-                    out = primus_turbo_torch.ops.gemm_fp4(inp, weight, **gemm_fp4_kwargs)
+                        raise RuntimeError(
+                            "Primus-Turbo gemm_fp4 does not support the optional "
+                            "PRIMUS_FUSED_RMSNORM_MXFP4 prequantized-input contract"
+                        )
+                    out = primus_turbo_torch.ops.gemm_fp4(
+                        inp,
+                        weight,
+                        trans_a=False,
+                        trans_b=True,
+                        out_dtype=None,
+                        config=quant_config.data(),
+                        fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
+                    )
                 else:
                     if is_first_microbatch:
                         (

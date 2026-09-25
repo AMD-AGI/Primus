@@ -79,6 +79,7 @@ def test_start_grad_sync_uses_dedicated_group_when_eligible(monkeypatch):
     assert rs_calls[0][2] == torch.distributed.ReduceOp.SUM
     assert rs_calls[0][3] is dedicated_group
     assert rs_calls[0][4] is True
+    assert bg.grad_reduce_dispatched is True
     assert bg.grad_reduce_handle is native_handle
 
 
@@ -245,6 +246,7 @@ def test_start_grad_sync_sync_path_waits_and_synchronizes(monkeypatch):
 
     assert wait_calls == [True]
     assert sync_calls == [True]
+    assert bg.grad_reduce_dispatched is True
     assert bg.grad_reduce_handle is None
 
 
@@ -366,6 +368,7 @@ def test_grad_buffer_wrapper_allocates_grad_data_from_pool_and_marks_buckets(
     bucket_grad_data = SimpleNamespace()
     pool_active = False
     allocation_scopes = []
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
 
     class PoolContext:
         def __enter__(self):
@@ -585,6 +588,7 @@ def test_grad_buffer_wrapper_skips_mxfp8_shared_buffer_path(monkeypatch):
     group = SimpleNamespace(group_name="ce")
     pool = SimpleNamespace()
     shared = SimpleNamespace()
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
 
     monkeypatch.setattr(
         rccl_sdma_param_gather,
