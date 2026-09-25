@@ -1,0 +1,44 @@
+# Gemma 4 E2B dense -- 1-GPU MI455X numerical probe (not a throughput recipe).
+#
+# Launch:
+#   GPUS_PER_NODE=1 ./primus-cli direct -- train pretrain \
+#     --config examples/maxtext/configs/MI455X/gemma4_e2b-bf16-pretrain_1gpu_proxy.yaml
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:gemma4_e2b-pretrain-1gpu-proxy}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    model: gemma4_e2b.yaml
+    overrides:
+      run_name: "gemma4_e2b_1gpu_proxy"
+      base_output_directory: "./output"
+      steps: ${PRIMUS_STEPS:20}
+      profiler: ""
+
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+      use_multimodal: false
+
+      enable_checkpointing: false
+      async_checkpointing: false
+
+      dcn_data_parallelism: 1
+      dcn_fsdp_parallelism: 1
+      ici_fsdp_parallelism: 1
+      ici_data_parallelism: 1
+
+      remat_policy: "full"
+      attention: ${PRIMUS_ATTENTION:dot_product}
+      max_target_length: ${PRIMUS_SEQ_LENGTH:1024}
+      per_device_batch_size: ${PRIMUS_MBS:1}
+      scan_layers: false
+      # Only for NaN-debug runs that must keep stepping after a NaN loss.
+      abort_on_nan_loss: ${PRIMUS_ABORT_ON_NAN_LOSS:true}
+
+      base_num_decoder_layers: ${PRIMUS_NUM_LAYERS:6}
