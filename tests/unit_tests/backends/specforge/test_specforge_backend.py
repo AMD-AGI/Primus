@@ -17,6 +17,7 @@ Coverage:
 import os
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,7 +27,24 @@ from primus.backends.specforge.argument_builder import (
     build_capture_argv,
     build_specforge_argv,
     flatten_overrides,
+    is_online_train,
     resolve_specforge_root,
+    specforge_mode,
+    specforge_role,
+    specforge_train_mode,
+)
+from primus.backends.specforge.online_launch import (
+    build_online_overrides,
+    build_role_argv,
+    expand_device_list,
+    nnodes,
+    node_rank,
+    online_settings,
+    resolve_head_ip,
+    resolve_local_ip,
+    resolve_routable_ip,
+    sglang_server_argv,
+    validate_online_identity,
 )
 from primus.backends.specforge.specforge_adapter import SpecForgeAdapter
 from primus.backends.specforge.specforge_pretrain_trainer import (
@@ -54,6 +72,7 @@ pytestmark = pytest.mark.skip(
 PRIMUS_ROOT = Path(__file__).resolve().parents[4]
 EXAMPLE_CONFIG = PRIMUS_ROOT / "examples" / "specforge" / "configs" / "qwen3.5-4b-dflash-offline.yaml"
 CAPTURE_CONFIG = PRIMUS_ROOT / "examples" / "specforge" / "configs" / "qwen3.5-4b-dflash-offline-capture.yaml"
+ONLINE_CONFIG = PRIMUS_ROOT / "examples" / "specforge" / "configs" / "qwen3.5-4b-dflash-online.yaml"
 PREPARE_HOOK = PRIMUS_ROOT / "runner/helpers/hooks/train/pretrain/specforge/prepare.py"
 
 
@@ -64,7 +83,9 @@ def specforge_checkout(tmp_path):
     (root / "configs").mkdir(parents=True)
     (root / "pyproject.toml").write_text("[project]\nname = 'specforge'\n")
     (root / "configs" / "qwen3.5-4b-dflash.yaml").write_text("model: dummy\n")
-    (root / "configs" / "qwen3.5-4b-dflash.json").write_text("{}\n")
+    (root / "configs" / "qwen3.5-4b-dflash.json").write_text(
+        '{"dflash_config": {"target_layer_ids": [1, 8, 15, 22, 29]}}\n'
+    )
     (root / "scripts").mkdir()
     (root / "scripts" / "prepare_hidden_states.py").write_text("# stub\n")
     return root
@@ -92,6 +113,12 @@ def experiment_env(monkeypatch, specforge_checkout, hidden_states, tmp_path):
         "CAPTURE_BATCH_SIZE": "8",
         "BLOCK_SIZE": "16",
         "TARGET_MODEL": "Qwen/Qwen3.5-4B",
+        "RUN_ID": "unit-online-1",
+        "RUN_ROOT": str(tmp_path / "online-run"),
+        "CONSUMER_STATE_DIR": str(tmp_path / "consumer-state"),
+        "TRAIN_DATA_PATH": str(tmp_path / "sharegpt.jsonl"),
+        "NNODES": "2",
+        "NODE_RANK": "0",
     }
     (tmp_path / "sharegpt.jsonl").write_text("{}\n")
     for key, value in env.items():
@@ -196,6 +223,19 @@ class TestArgvBuilder:
         argv = build_specforge_argv(params)
         assert "training.resume_from=/ckpt/step10" in argv
 
+    def test_producer_drops_resume_from(self):
+        params = SimpleNamespace(
+            specforge_config="/sf/a.yaml",
+            specforge_overrides={"training.resume_from": "/ckpt/step10", "training.max_steps": 2510},
+        )
+        producer = build_specforge_argv(params, role="producer")
+        consumer = build_specforge_argv(
+            params, extra_overrides=["training.resume_from=/ckpt/step10"], role="consumer"
+        )
+        assert "training.resume_from=/ckpt/step10" not in producer
+        assert "training.max_steps=2510" in producer
+        assert "training.resume_from=/ckpt/step10" in consumer
+
     def test_explicit_output_dir_override_wins(self):
         params = SimpleNamespace(
             specforge_config="/sf/a.yaml",
@@ -209,6 +249,71 @@ class TestArgvBuilder:
         params = SimpleNamespace(specforge_config="/sf/a.yaml", specforge_entrypoint="specforge-wrapper")
         assert build_specforge_argv(params)[0] == "specforge-wrapper"
 
+    def test_role_is_inserted_after_config(self):
+        params = SimpleNamespace(
+            specforge_config="/sf/a.yaml", specforge_overrides={"training.max_steps": 20}
+        )
+        argv = build_specforge_argv(params, role="producer")
+        assert argv[:6] == ["specforge", "train", "--config", "/sf/a.yaml", "--role", "producer"]
+        assert "training.max_steps=20" in argv
+        consumer = build_specforge_argv(params, extra_overrides=["run_id=x"], role="consumer")
+        assert consumer[4:6] == ["--role", "consumer"]
+        assert "run_id=x" in consumer
+
+    def test_offline_argv_has_no_role(self):
+        params = SimpleNamespace(specforge_config="/sf/a.yaml")
+        assert "--role" not in build_specforge_argv(params)
+
+    def test_role_both_is_rejected(self):
+        with pytest.raises(ValueError, match="both"):
+            specforge_role(SimpleNamespace(specforge_role="both"))
+        with pytest.raises(ValueError, match="unknown specforge_role"):
+            specforge_role(SimpleNamespace(specforge_role="sidecar"))
+
+
+class TestSpecForgeModes:
+    def test_mode_is_train_or_capture(self):
+        assert specforge_mode(SimpleNamespace(specforge_mode="train")) == "train"
+        assert specforge_mode(SimpleNamespace(specforge_mode="capture")) == "capture"
+        assert specforge_mode(SimpleNamespace()) == "train"
+
+    def test_online_offline_are_not_modes(self):
+        with pytest.raises(ValueError, match="specforge_train_mode: online"):
+            specforge_mode(SimpleNamespace(specforge_mode="online"))
+        with pytest.raises(ValueError, match="specforge_train_mode: offline"):
+            specforge_mode(SimpleNamespace(specforge_mode="offline"))
+
+    def test_train_mode_is_required_for_train(self):
+        with pytest.raises(ValueError, match="specforge_train_mode is required"):
+            specforge_train_mode(SimpleNamespace(specforge_mode="train"))
+        with pytest.raises(ValueError, match="specforge_train_mode is required"):
+            specforge_train_mode(SimpleNamespace())
+
+    def test_train_mode_online_or_offline(self):
+        assert (
+            specforge_train_mode(SimpleNamespace(specforge_mode="train", specforge_train_mode="offline"))
+            == "offline"
+        )
+        assert (
+            specforge_train_mode(SimpleNamespace(specforge_mode="train", specforge_train_mode="online"))
+            == "online"
+        )
+
+    def test_capture_ignores_train_mode(self):
+        assert specforge_train_mode(SimpleNamespace(specforge_mode="capture")) is None
+        assert (
+            specforge_train_mode(SimpleNamespace(specforge_mode="capture", specforge_train_mode="offline"))
+            is None
+        )
+
+    def test_is_online_train(self):
+        assert is_online_train(SimpleNamespace(specforge_mode="train", specforge_train_mode="online"))
+        assert not is_online_train(SimpleNamespace(specforge_mode="train", specforge_train_mode="offline"))
+        assert not is_online_train(SimpleNamespace(specforge_mode="capture"))
+        assert not is_online_train(SimpleNamespace(specforge_mode="online"))
+
+
+class TestCaptureArgv:
     def test_capture_argv_runs_prepare_hidden_states(self):
         params = SimpleNamespace(
             specforge_mode="capture",
@@ -248,6 +353,15 @@ class TestArgvBuilder:
         assert "--sglang-disable-radix-cache" not in argv
         assert "--trust-remote-code" not in argv
         assert "false" not in joined
+
+    def test_capture_defaults_aiter_and_radix_when_omitted(self):
+        params = SimpleNamespace(
+            specforge_mode="capture",
+            specforge_capture={"target_model_path": "Qwen/Qwen3.5-4B"},
+        )
+        argv = build_capture_argv(params)
+        assert "--sglang-disable-radix-cache" in argv
+        assert argv[argv.index("--sglang-attention-backend") + 1] == "aiter"
 
 
 class TestWorkdirResolution:
@@ -290,16 +404,20 @@ class TestExampleExperiment:
         assert f"data.hidden_states_path={experiment_env['HIDDEN_STATES_PATH']}" in argv
         assert f"output_dir={experiment_env['OUTPUT_DIR']}" in argv
         assert backend_args.specforge_root == experiment_env["SPECFORGE_ROOT"]
+        assert backend_args.specforge_mode == "train"
+        assert backend_args.specforge_train_mode == "offline"
 
     def test_capture_yaml_converts_to_prepare_hidden_states_argv(self, experiment_env):
         module = load_pre_trainer_params(CAPTURE_CONFIG)
         adapter = SpecForgeAdapter()
         backend_args = adapter.convert_config(module.params)
         assert backend_args.specforge_mode == "capture"
+        assert backend_args.specforge_train_mode is None
         argv = build_capture_argv(backend_args)
         assert "scripts/prepare_hidden_states.py" in argv
         assert "--sglang-disable-radix-cache" in argv
         assert "--sglang-disable-radix-cache false" not in " ".join(argv)
+        assert argv[argv.index("--sglang-attention-backend") + 1] == "aiter"
         assert "--strategy" in argv
         assert argv[argv.index("--strategy") + 1] == "dflash"
         assert argv[argv.index("--data-path") + 1] == experiment_env["CAPTURE_DATA_PATH"]
@@ -311,6 +429,8 @@ class TestExampleExperiment:
 
     def test_trainer_rejects_missing_entrypoint(self, experiment_env):
         backend_args = SimpleNamespace(
+            specforge_mode="train",
+            specforge_train_mode="offline",
             specforge_config=experiment_env["SPECFORGE_CONFIG"],
             specforge_entrypoint="specforge-does-not-exist",
             specforge_root=experiment_env["SPECFORGE_ROOT"],
@@ -507,6 +627,8 @@ class TestPrepareHook:
 class TestStackPreflight:
     def _params(self, specforge_checkout, hidden_states, **overrides):
         return SimpleNamespace(
+            specforge_mode="train",
+            specforge_train_mode="offline",
             specforge_config=str(specforge_checkout / "configs" / "qwen3.5-4b-dflash.yaml"),
             specforge_root=str(specforge_checkout),
             specforge_overrides={"data.hidden_states_path": str(hidden_states), **overrides},
@@ -590,6 +712,383 @@ class TestStackPreflight:
         )
         issues = collect_issues(params, env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0"})
         assert any("data_path" in item for item in issues)
+
+    def test_train_requires_train_mode(self, specforge_checkout, hidden_states):
+        params = self._params(specforge_checkout, hidden_states)
+        params.specforge_train_mode = None
+        issues = collect_issues(params, env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0"})
+        assert any("specforge_train_mode is required" in item for item in issues)
+
+    def test_online_as_mode_is_rejected(self, specforge_checkout, hidden_states):
+        params = self._params(specforge_checkout, hidden_states)
+        params.specforge_mode = "online"
+        issues = collect_issues(params, env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0"})
+        assert any("specforge_train_mode: online" in item for item in issues)
+
+
+class TestOnlineLaunch:
+    def _params(self, specforge_checkout, tmp_path, **online):
+        run_root = tmp_path / "run"
+        consumer = tmp_path / "consumer-state"
+        return SimpleNamespace(
+            specforge_mode="train",
+            specforge_train_mode="online",
+            specforge_config=str(specforge_checkout / "configs" / "qwen3.5-4b-dflash.yaml"),
+            specforge_root=str(specforge_checkout),
+            specforge_overrides={"model.use_liger_kernel": False},
+            specforge_online={
+                "run_id": "unit-1",
+                "run_root": str(run_root),
+                "consumer_state_dir": str(consumer),
+                "server_gpus": "0",
+                "trainer_gpus": "0",
+                "trainer_nproc": 1,
+                **online,
+            },
+            output_dir=str(tmp_path / "out"),
+        )
+
+    def test_head_ip_overrides_rewrite_loopback(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        settings = online_settings(params)
+        overrides = build_online_overrides("10.3.14.7", settings, output_dir=str(tmp_path / "out"))
+        joined = " ".join(overrides)
+        assert "127.0.0.1" not in joined
+        assert 'deployment.disaggregated.server_urls=["http://10.3.14.7:30000"]' in overrides
+        assert "deployment.disaggregated.mooncake_master_server_addr=10.3.14.7:35551" in overrides
+        assert (
+            "deployment.disaggregated.mooncake_metadata_server=http://10.3.14.7:35880/metadata" in overrides
+        )
+        assert "deployment.trainer.nnodes=1" in overrides
+        argv = build_role_argv(params, "producer", overrides)
+        assert argv[4:6] == ["--role", "producer"]
+        consumer = build_role_argv(params, "consumer", overrides)
+        assert consumer[4:6] == ["--role", "consumer"]
+        assert "--node-rank" not in consumer
+
+    def test_trainer_nnodes_emits_master_addr_and_node_rank(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path, trainer_nnodes=2)
+        settings = online_settings(params)
+        overrides = build_online_overrides(
+            "10.3.14.7", settings, trainer_master_addr="10.9.9.1", output_dir=str(tmp_path / "out")
+        )
+        assert "deployment.trainer.nnodes=2" in overrides
+        assert "deployment.trainer.master_addr=10.9.9.1" in overrides
+        argv = build_role_argv(params, "consumer", overrides, node_rank=1)
+        assert argv[argv.index("--node-rank") + 1] == "1"
+        producer = build_role_argv(params, "producer", overrides)
+        assert "deployment.trainer.master_addr=10.9.9.1" in producer
+
+    def test_resolves_head_ip_override_not_hostname(self):
+        ip = resolve_routable_ip(env={"HEAD_IP": "10.9.8.7", "MASTER_ADDR": "gpu-node-001.example"})
+        assert ip == "10.9.8.7"
+
+    def test_head_ip_beats_interface_ip(self):
+        ip = resolve_routable_ip(
+            env={"HEAD_IP": "10.9.8.7", "PRIMUS_SPECFORGE_BIND_IFACE": "eth0"},
+            interface_ip="10.4.5.6",
+            hostname_ips=["127.0.0.1"],
+        )
+        assert ip == "10.9.8.7"
+
+    def test_hostname_ipv4_fallback_skips_loopback(self):
+        ip = resolve_routable_ip(env={}, hostname_ips=["127.0.0.1", "10.1.2.3"])
+        assert ip == "10.1.2.3"
+
+    def test_local_ip_ignores_job_wide_head_ip(self):
+        ip = resolve_local_ip(
+            env={"HEAD_IP": "10.9.8.7", "PRIMUS_SPECFORGE_BIND_IFACE": "eth0"},
+            interface_ip="10.4.5.6",
+            hostname_ips=["127.0.0.1"],
+        )
+        assert ip == "10.4.5.6"
+
+    def test_local_ip_override_beats_interface(self):
+        ip = resolve_local_ip(
+            env={"PRIMUS_SPECFORGE_LOCAL_IP": "10.2.2.2", "HEAD_IP": "10.9.8.7"},
+            interface_ip="10.4.5.6",
+        )
+        assert ip == "10.2.2.2"
+
+    def test_head_ip_still_honors_head_override(self):
+        assert resolve_head_ip(env={"HEAD_IP": "10.9.8.7"}, interface_ip="10.4.5.6") == "10.9.8.7"
+
+    def test_expand_single_device_id_to_count(self):
+        assert expand_device_list("0", 8) == "0,1,2,3,4,5,6,7"
+        assert expand_device_list("1", 4) == "1,2,3,4"
+        assert expand_device_list("0,2", 8) == "0,2"
+        assert expand_device_list("0", 1) == "0"
+
+    def test_eight_plus_eight_defaults_expand_gpu_lists(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path, server_count=8, trainer_nproc=8)
+        settings = online_settings(params)
+        assert settings["server_gpus"] == "0,1,2,3,4,5,6,7"
+        assert settings["trainer_gpus"] == "0,1,2,3,4,5,6,7"
+        assert not validate_online_identity(settings, rank=0, nodes=2)
+
+    def test_bind_interface_defaults_empty(self, specforge_checkout, tmp_path):
+        settings = online_settings(self._params(specforge_checkout, tmp_path), env={})
+        assert settings["bind_interface"] == ""
+
+    def test_bind_interface_from_env(self, specforge_checkout, tmp_path):
+        settings = online_settings(
+            self._params(specforge_checkout, tmp_path),
+            env={"PRIMUS_SPECFORGE_BIND_IFACE": "eth0"},
+        )
+        assert settings["bind_interface"] == "eth0"
+
+    def test_rank_helpers(self):
+        assert node_rank({"NODE_RANK": "1", "SLURM_NODEID": "0"}) == 1
+        assert nnodes({"NNODES": "2"}) == 2
+
+    def test_identity_rejects_single_node(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        settings = online_settings(params)
+        issues = validate_online_identity(settings, rank=0, nodes=1)
+        assert any("capture_nnodes+trainer_nnodes=2" in item for item in issues)
+
+    def test_identity_accepts_capture_plus_trainer_counts(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path, capture_nnodes=1, trainer_nnodes=2)
+        settings = online_settings(params)
+        assert not validate_online_identity(settings, rank=2, nodes=3)
+        issues = validate_online_identity(settings, rank=0, nodes=2)
+        assert any("capture_nnodes+trainer_nnodes=3" in item for item in issues)
+
+    def test_sglang_aux_layers_match_qwen35_draft(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        argv = sglang_server_argv(0, online_settings(params))
+        ids = argv[argv.index("--spec-capture-aux-layer-ids") + 1 :]
+        flags = ids[: ids.index("--port")] if "--port" in ids else ids
+        # port comes after layer ids in our argv... actually port is after layer ids.
+        # argv has ... --spec-capture-aux-layer-ids 1 8 15 22 29 --port 30000 ...
+        port_at = argv.index("--port")
+        layer_at = argv.index("--spec-capture-aux-layer-ids")
+        assert argv[layer_at + 1 : port_at] == ["1", "8", "15", "22", "29"]
+        assert "--host" in argv and argv[argv.index("--host") + 1] == "0.0.0.0"
+        assert "--disable-radix-cache" in argv
+        assert "--attention-backend" in argv
+
+    def test_capture_layer_ids_env_overrides_draft_json(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        settings = online_settings(params, env={"CAPTURE_LAYER_IDS": "2 4"})
+        argv = sglang_server_argv(0, settings)
+        port_at = argv.index("--port")
+        layer_at = argv.index("--spec-capture-aux-layer-ids")
+        assert argv[layer_at + 1 : port_at] == ["2", "4"]
+
+    def test_capture_layer_ids_ignore_other_draft_json(self, specforge_checkout, tmp_path):
+        other = specforge_checkout / "configs" / "other-draft.json"
+        other.write_text('{"dflash_config": {"target_layer_ids": [3, 9]}}\n')
+        params = self._params(specforge_checkout, tmp_path)
+        settings = online_settings(params)
+        assert settings["capture_layer_ids"] == (1, 8, 15, 22, 29)
+        (specforge_checkout / "configs" / "qwen3.5-4b-dflash.json").unlink()
+        settings = online_settings(params)
+        assert settings["capture_layer_ids"] == (1, 8, 15, 22, 29)
+
+    def test_online_yaml_has_no_cluster_ips(self):
+        text = ONLINE_CONFIG.read_text(encoding="utf-8")
+        assert "specforge_mode: train" in text
+        assert "specforge_train_mode: online" in text
+        for line in text.splitlines():
+            assert "127.0.0.1" not in line.split("#", 1)[0]
+
+    def test_specforge_online_tree_has_no_site_cluster_names(self):
+        banned = (
+            "shared_nfs",
+            "amd-spur",
+            "amd-burst",
+            "crusoe",
+            "crsuse2",
+            "m2m_nobackup",
+            "ens3",
+        )
+        roots = [
+            PRIMUS_ROOT / "examples" / "specforge",
+            PRIMUS_ROOT / "primus" / "configs" / "modules" / "specforge",
+            PRIMUS_ROOT / "primus" / "backends" / "specforge",
+        ]
+        hits = []
+        for root in roots:
+            for path in root.rglob("*"):
+                if not path.is_file() or path.suffix.lower() in {".png", ".jpg", ".pyc"}:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore").lower()
+                for token in banned:
+                    if token in text:
+                        hits.append(f"{path.relative_to(PRIMUS_ROOT)}:{token}")
+        assert hits == []
+
+    def test_online_yaml_converts_to_role_argv(self, experiment_env, specforge_checkout, tmp_path):
+        module = load_pre_trainer_params(ONLINE_CONFIG)
+        adapter = SpecForgeAdapter()
+        backend_args = adapter.convert_config(module.params)
+        assert backend_args.specforge_mode == "train"
+        assert backend_args.specforge_train_mode == "online"
+        settings = online_settings(backend_args, env=experiment_env)
+        overrides = build_online_overrides("10.1.2.3", settings)
+        argv = build_role_argv(backend_args, "producer", overrides)
+        assert "--role" in argv
+        assert argv[argv.index("--role") + 1] == "producer"
+        assert "model.use_liger_kernel=false" in argv
+
+    def test_online_preflight_skips_hidden_states(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        issues = collect_issues(
+            params,
+            env={
+                "PRIMUS_SPECFORGE_ENFORCE_ROCM": "0",
+                "NNODES": "2",
+                "NODE_RANK": "0",
+            },
+        )
+        assert not any("hidden" in item.lower() for item in issues)
+
+    def test_online_preflight_rejects_stale_run_root(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        run_root = tmp_path / "run"
+        run_root.mkdir()
+        (run_root / "stale.sqlite").write_text("x")
+        issues = collect_issues(
+            params,
+            env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0", "NNODES": "2", "NODE_RANK": "0"},
+        )
+        assert any("run_root is not empty" in item for item in issues)
+
+    def test_online_preflight_allows_trainer_ip_only(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        run_root = tmp_path / "run"
+        run_root.mkdir()
+        (run_root / "trainer.ip").write_text("10.1.2.3\n")
+        issues = collect_issues(
+            params,
+            env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0", "NNODES": "2", "NODE_RANK": "0"},
+        )
+        assert not any("run_root is not empty" in item for item in issues)
+
+    def test_online_preflight_non_rank0_allows_in_progress_run_root(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        run_root = tmp_path / "run"
+        run_root.mkdir()
+        (run_root / "head.ip").write_text("10.1.2.3\n")
+        (run_root / "mooncake.log").write_text("x")
+        issues = collect_issues(
+            params,
+            env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0", "NNODES": "3", "NODE_RANK": "1"},
+        )
+        assert not any("run_root is not empty" in item for item in issues)
+
+    def test_online_preflight_requires_two_nodes(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path)
+        issues = collect_issues(
+            params,
+            env={"PRIMUS_SPECFORGE_ENFORCE_ROCM": "0", "NNODES": "1", "NODE_RANK": "0"},
+        )
+        assert any("capture_nnodes+trainer_nnodes=2" in item for item in issues)
+
+    def test_rank0_and_rank1_dispatch(self, specforge_checkout, tmp_path, monkeypatch):
+        from primus.backends.specforge import online_supervisor as supervisor
+
+        calls = []
+        monkeypatch.setattr(supervisor, "_run_capture_node", lambda *a, **k: calls.append("capture"))
+        monkeypatch.setattr(supervisor, "_run_trainer_node", lambda *a, **k: calls.append("trainer"))
+        params = self._params(specforge_checkout, tmp_path)
+        monkeypatch.setenv("NNODES", "2")
+        monkeypatch.setenv("NODE_RANK", "0")
+        supervisor.run_online(params)
+        monkeypatch.setenv("NODE_RANK", "1")
+        supervisor.run_online(params)
+        assert calls == ["capture", "trainer"]
+
+    def test_dispatch_multi_trainer_and_capture_replica(self, specforge_checkout, tmp_path, monkeypatch):
+        from primus.backends.specforge import online_supervisor as supervisor
+
+        calls = []
+        monkeypatch.setattr(supervisor, "_run_capture_node", lambda *a, **k: calls.append("head"))
+        monkeypatch.setattr(
+            supervisor, "_run_capture_replica", lambda params, settings, rank: calls.append(("replica", rank))
+        )
+        monkeypatch.setattr(
+            supervisor,
+            "_run_trainer_node",
+            lambda params, settings, specforge_rank: calls.append(("trainer", specforge_rank)),
+        )
+        params = self._params(specforge_checkout, tmp_path, capture_nnodes=2, trainer_nnodes=2)
+        monkeypatch.setenv("NNODES", "4")
+        monkeypatch.setenv("NODE_RANK", "0")
+        supervisor.run_online(params)
+        monkeypatch.setenv("NODE_RANK", "1")
+        supervisor.run_online(params)
+        monkeypatch.setenv("NODE_RANK", "2")
+        supervisor.run_online(params)
+        monkeypatch.setenv("NODE_RANK", "3")
+        supervisor.run_online(params)
+        assert calls == ["head", ("replica", 1), ("trainer", 0), ("trainer", 1)]
+
+    def test_mooncake_http_404_counts_as_up(self, monkeypatch):
+        from primus.backends.specforge import online_supervisor as supervisor
+
+        def boom(*_a, **_k):
+            raise urllib.error.HTTPError("http://x/metadata", 404, "not found", hdrs=None, fp=None)
+
+        monkeypatch.setattr(supervisor.urllib.request, "urlopen", boom)
+        assert supervisor._http_up("http://x/metadata") is True
+        assert supervisor._http_ok("http://x/metadata") is False
+
+    def test_capture_stack_failed_detects_dead_sglang(self):
+        from primus.backends.specforge import online_supervisor as supervisor
+
+        class Dead:
+            def poll(self):
+                return 1
+
+        settings = {
+            "mooncake_http_port": 35880,
+            "mooncake_rpc_port": 35551,
+        }
+        reason = supervisor._capture_stack_failed("10.0.0.1", settings, None, [Dead()])
+        assert reason == "SGLang server 0 exited"
+
+    def test_specforge_child_env_forces_single_node_rank(self, monkeypatch):
+        from primus.backends.specforge import online_supervisor as supervisor
+
+        monkeypatch.setenv("NODE_RANK", "1")
+        monkeypatch.setenv("NNODES", "2")
+        monkeypatch.setenv("SLURM_NODEID", "1")
+        monkeypatch.setenv("SLURM_NNODES", "2")
+        env = supervisor._specforge_child_env({}, "0")
+        assert env["NODE_RANK"] == "0"
+        assert env["NNODES"] == "1"
+        assert "SLURM_NODEID" not in env
+        assert "SLURM_NNODES" not in env
+        assert env["CUDA_VISIBLE_DEVICES"] == "0"
+
+        env = supervisor._specforge_child_env({}, "0", specforge_node_rank=1, specforge_nnodes=2)
+        assert env["NODE_RANK"] == "1"
+        assert env["NNODES"] == "2"
+
+    def test_online_train_does_not_execvp(self, specforge_checkout, tmp_path, monkeypatch):
+        called = []
+        monkeypatch.setattr(
+            "primus.backends.specforge.online_supervisor.run_online",
+            lambda params: called.append("online"),
+        )
+        monkeypatch.setattr("os.execvp", lambda *a, **k: called.append("exec"))
+        params = self._params(specforge_checkout, tmp_path)
+        trainer = SpecForgePretrainTrainer(backend_args=params)
+        trainer.argv = None
+        trainer.workdir = None
+        trainer.train()
+        assert called == ["online"]
+
+    def test_prepare_hook_online_emits_single_run_mode(self, experiment_env):
+        result = TestPrepareHook().run_hook(experiment_env, config=ONLINE_CONFIG)
+        assert result.returncode == 0, result.stderr
+        assert "env.RUN_MODE=single" in result.stdout
+        assert "env.GPUS_PER_NODE=1" in result.stdout
+        combined = (result.stdout + result.stderr).lower()
+        assert "stack preflight ok" in combined
+        assert "hidden-states" not in combined
 
 
 class TestPrimusParserAcceptsSpecForge:

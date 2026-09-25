@@ -252,3 +252,9 @@ Primus owns these defaults in one place per backend: `primus/backends/<backend>/
 **Managed `XLA_FLAGS` for MaxText** (see `_build_xla_flags` for the authoritative string): `--xla_gpu_memory_limit_slop_factor=95`, `--xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592`, `--xla_gpu_all_gather_combine_threshold_bytes=8589934592`, `--xla_gpu_enable_command_buffer=''`, `--xla_gpu_enable_latency_hiding_scheduler=true`, `--xla_gpu_enable_triton_gemm=false`, `--xla_gpu_enable_cublaslt=true`, `--xla_gpu_autotune_level=4`, `--xla_gpu_enable_all_gather_combine_by_dim=false`.
 
 **Note:** The MaxDiffusion backend declares no XLA defaults; its example configs set `XLA_FLAGS` themselves and are used verbatim. MaxText and JAX also read many additional knobs upstream that Primus does not wrap; see the MaxText sources for those.
+
+---
+
+## 15. SpecForge (ROCm overlay)
+
+SpecForge env, YAML, and CLI live in the [SpecForge configuration reference](../../examples/specforge/CONFIGURATION.md). That page lists Primus-owned names (`RUN_ID`, `CONSUMER_STATE_DIR`, `PRIMUS_SPECFORGE_*`, …) and points SpecForge Hydra keys at the SpecForge AMD ROCm tutorial.
