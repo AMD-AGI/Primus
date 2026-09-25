@@ -17,8 +17,8 @@ The patch wraps three Megatron methods and modifies none:
 
 ``DistributedDataParallel.zero_grad_buffer``
     Rotates :mod:`primus_turbo.pytorch.core.grad_ownership`'s log once per
-    iteration, which also re-checks that everything skipped last iteration was
-    in fact overwritten during it.
+    iteration. A reset abandoned before backward/communication (for example,
+    synthetic-warmup cleanup) is discarded by the next rotation.
 
 ``_ParamAndGradBuffer.reset``
     Zeroes the complement of the owned slices instead of the whole buffer.

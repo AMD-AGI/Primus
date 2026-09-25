@@ -1832,10 +1832,13 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                             0, device=weight.device, dtype=float4_e2m1fn_x2
                         )
                     pre = getattr(self, "_prequant_x", None)
-                    # Current Turbo accepts a prequantized activation as operand A;
-                    # the legacy ``a_prequant=`` keyword is no longer part of its API.
+                    if pre is not None:
+                        raise RuntimeError(
+                            "Primus-Turbo gemm_fp4 does not support the legacy "
+                            "PRIMUS_FUSED_RMSNORM_MXFP4 prequantized tuple"
+                        )
                     out = primus_turbo_torch.ops.gemm_fp4(
-                        pre if pre is not None else inp,
+                        inp,
                         weight,
                         trans_a=False,
                         trans_b=True,
