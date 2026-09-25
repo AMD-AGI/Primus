@@ -69,10 +69,11 @@
 #           Those are the two valid groupings; megatron,maxtext cannot work on
 #           either image, so there is no safe "run them all" default.
 #
-# The three GPUs carry the same model set. Two naming differences are
-# hardware, not oversight:
+# The three GPUs carry the same model set, except:
 #   * MaxText FP8 is `nanoo_fp8` on MI300X / MI325X (gfx942) and `fp8` on
-#     MI355X (gfx950).
+#     MI355X (gfx950) -- a hardware difference, not oversight.
+#   * MaxText llama3_70B and llama3.3_70B run FP8 only on MI355X; examples/
+#     has no nanoo_fp8 configs for them on MI300X / MI325X.
 #   * MaxDiffusion has no MI325X directory upstream, so MI325X runs the
 #     MI300X configs; the copies in the v26.7 result directory are
 #     byte-identical to them.
@@ -235,7 +236,9 @@ MI355X:
     - examples/maxtext/configs/MI355X/llama3_8B-bf16-pretrain.yaml
     - examples/maxtext/configs/MI355X/llama3_8B-fp8-pretrain.yaml
     - examples/maxtext/configs/MI355X/llama3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama3_70B-fp8-pretrain.yaml
     - examples/maxtext/configs/MI355X/llama3.3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama3.3_70B-fp8-pretrain.yaml
     - examples/maxtext/configs/MI355X/mixtral_8x7B-bf16-pretrain.yaml
     - examples/maxtext/configs/MI355X/mixtral_8x7B-fp8-pretrain.yaml
     - examples/maxtext/configs/MI355X/mixtral_8x22B-bf16-pretrain.yaml
