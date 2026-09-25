@@ -38,7 +38,7 @@ Core workflows and day-to-day usage.
 - [Environment and XLA flags](./02-user-guide/environment-and-xla-flags.md): where to set env vars, how to override `XLA_FLAGS` safely, how to verify what took effect
 - [Pretraining](./02-user-guide/pretraining.md): pretraining **concepts**: backends, YAML structure, parallelism, configuration inventory
 - [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
-- [SpecForge (capture / offline train / 2-node online train)](../examples/specforge/README.md): `primus-cli` entrypoint; `specforge_mode` is `train` or `capture`, and train requires `specforge_train_mode: offline` or `online`. YAML / env / CLI: [CONFIGURATION.md](../examples/specforge/CONFIGURATION.md)
+- [SpecForge (capture / offline train / online train)](../examples/specforge/README.md): `primus-cli` entrypoint; `specforge_mode` is `train` or `capture`, and train requires `specforge_train_mode: offline` or `online`. YAML / env / CLI: [CONFIGURATION.md](../examples/specforge/CONFIGURATION.md)
 - [Megatron-LM training performance validation](./02-user-guide/megatron-lm-training.md): reproduce the published Megatron backend benchmarks on the `rocm/primus` image
 - [TorchTitan training performance validation](./02-user-guide/torchtitan-training.md): reproduce the published TorchTitan backend benchmarks on the `rocm/primus` image
 - [JAX MaxText training performance validation](./02-user-guide/jax-maxtext-training.md): reproduce the AMD-published MaxText benchmarks via Primus, MAD, or the standalone scripts

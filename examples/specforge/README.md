@@ -20,7 +20,7 @@ train is live Mooncake + SGLang capture plus `--role producer` / `--role
 consumer`. Capture is SpecForge `scripts/prepare_hidden_states.py`, not a
 train mode.
 
-Build and run the overlay: [`docker/README.md`](docker/README.md). Inside the
+Build and run the docker image: [`docker/README.md`](docker/README.md). Inside the
 container, Primus is `/opt/primus` and SpecForge is `/workspace/SpecForge`.
 
 From `/opt/primus`:
@@ -105,11 +105,11 @@ nodes, so Primus does that and then launches `--role producer` /
 `--role consumer`.
 
 Run `./runner/primus-cli slurm` **outside** the image (login node, this
-checkout). Training runs **inside** the overlay, or a bind-mount of this tree
+checkout). Training runs **inside** the docker image, or a bind-mount of this tree
 at `/opt/primus`.
 
 Example:
-[`configs/qwen3.5-4b-dflash-online-2node.yaml`](configs/qwen3.5-4b-dflash-online-2node.yaml).
+[`configs/qwen3.5-4b-dflash-online.yaml`](configs/qwen3.5-4b-dflash-online.yaml).
 Primus maps `specforge_online.run_root` / `consumer_state_dir` onto SpecForge
 `control_dir`, `output_dir`, and `consumer_state_dir`. After allocate it
 rewrites the SpecForge loopback endpoints to a routable capture-rank-0 IP.
@@ -131,7 +131,7 @@ default 1+1 so `-N 2`):
 | `C .. C+T-1` | Wait for `inference.ready` → `--role consumer` (`--node-rank` when `T>1`) |
 
 ```yaml
-# examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
+# examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
 modules:
   pre_trainer:
     framework: specforge
@@ -164,11 +164,11 @@ cd /opt/primus
   -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
-  --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
+  --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
 ```
 
 The example above is **1 capture GPU + 1 trainer GPU** on 2 nodes. Load the
-overlay image on **every** node if the scheduler's container store is
+docker image on **every** node if the scheduler's container store is
 node-local. Do not wrap this in `managed_local` or `--role both`. SpecForge
 `deployment.trainer.nnodes` is `TRAINER_NNODES` (consumer nodes only).
 `server_gpus` / `trainer_gpus` default to `0`; a single device id expands to
@@ -219,7 +219,7 @@ export SERVER_TP=1
   -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
-  --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml \
+  --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml \
   specforge_overrides.training.num_epochs=1 \
   specforge_overrides.training.batch_size=2 \
   specforge_overrides.training.accumulation_steps=1 \

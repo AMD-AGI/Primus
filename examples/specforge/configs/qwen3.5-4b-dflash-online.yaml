@@ -17,7 +17,7 @@
 #   ./runner/primus-cli slurm srun -N 2 --gres=gpu:1 \
 #     -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
 #     --volume /shared:/shared \
-#     -- train pretrain --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
+#     -- train pretrain --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
 #
 # --gres=gpu:N is Slurm's per-node GPU request (same on every allocated node).
 # Match it to the GPUs that node uses: SERVER_COUNT*SERVER_TP on capture nodes,
@@ -27,7 +27,7 @@
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-online-2node}
+exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-online}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:

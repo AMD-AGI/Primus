@@ -72,7 +72,7 @@ pytestmark = pytest.mark.skip(
 PRIMUS_ROOT = Path(__file__).resolve().parents[4]
 EXAMPLE_CONFIG = PRIMUS_ROOT / "examples" / "specforge" / "configs" / "qwen3.5-4b-dflash-offline.yaml"
 CAPTURE_CONFIG = PRIMUS_ROOT / "examples" / "specforge" / "configs" / "qwen3.5-4b-dflash-offline-capture.yaml"
-ONLINE_CONFIG = PRIMUS_ROOT / "examples" / "specforge" / "configs" / "qwen3.5-4b-dflash-online-2node.yaml"
+ONLINE_CONFIG = PRIMUS_ROOT / "examples" / "specforge" / "configs" / "qwen3.5-4b-dflash-online.yaml"
 PREPARE_HOOK = PRIMUS_ROOT / "runner/helpers/hooks/train/pretrain/specforge/prepare.py"
 
 

@@ -135,7 +135,7 @@ modules:
 ## Online train
 
 Example config and usage:
-[`configs/qwen3.5-4b-dflash-online-2node.yaml`](configs/qwen3.5-4b-dflash-online-2node.yaml)
+[`configs/qwen3.5-4b-dflash-online.yaml`](configs/qwen3.5-4b-dflash-online.yaml)
 
 ```bash
 export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
@@ -148,7 +148,7 @@ export MAX_STEPS=20
   -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
-  --config examples/specforge/configs/qwen3.5-4b-dflash-online-2node.yaml
+  --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
 ```
 
 `-N` is capture nodes + trainer nodes. `--gres=gpu:N` is per node: SGLang GPUs
@@ -171,7 +171,7 @@ Online layout is also in the [AMD ROCm tutorial](https://github.com/sgl-project/
 ```yaml
 work_group: ${PRIMUS_TEAM:amd}            # Primus experiment metadata
 user_name: ${PRIMUS_USER:root}            # Primus experiment metadata
-exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-online-2node}  # run name
+exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-online}  # run name
 workspace: ${PRIMUS_WORKSPACE:./output}  # Primus workspace
 
 modules:
