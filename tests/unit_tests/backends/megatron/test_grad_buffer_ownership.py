@@ -241,12 +241,14 @@ class TestResetComplement:
         assert torch.isnan(grad[0:10]).all(), "poison mode must overwrite the skipped region with NaN"
         assert torch.equal(grad[10:20], torch.zeros(10)), "the real complement clear must be unaffected"
 
-    def test_begin_step_raises_when_a_claimed_slice_is_never_overwritten(self):
-        """End-to-end through the real grad_ownership consumer: this module
-        predicts (via ``_reset_complement``) that a slice will be rewritten,
-        but the producer never calls ``record_overwrite`` for it. The next
-        rotation must raise -- proving the safety net is wired all the way
-        through from this patch into ``grad_ownership.begin_step``."""
+    def test_begin_step_discards_an_uncommunicated_warmup_cleanup(self):
+        """An extra zero after synthetic warmup may skip from the warmup log,
+        then rotate again before any backward or collective. The next rotation
+        must abandon that unconsumed reset instead of leaking it into training.
+
+        Missing producers are still rejected by the pre-collective validation
+        tests below, before stale gradients can be communicated.
+        """
         grad = torch.zeros(20, dtype=torch.float32)
         main_grad = grad[0:10]
         param = _fake_param(main_grad)
@@ -255,8 +257,8 @@ class TestResetComplement:
 
         gbo._reset_complement(buffer)  # predicts + skips zeroing main_grad's slice
 
-        with pytest.raises(RuntimeError, match="left unzeroed"):
-            grad_ownership.begin_step()
+        assert grad_ownership.begin_step() == frozenset()
+        assert grad_ownership._skipped == set()
 
 
 class TestPreCollectiveValidation:
