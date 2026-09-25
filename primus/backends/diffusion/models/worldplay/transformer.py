@@ -195,8 +195,9 @@ class MMDoubleStreamBlock(nn.Module):
 
         txt_q_before = txt_q.clone()
 
-        # attn_mode = 'flash' if is_flash else self.attn_mode
-        attn_mode = 'torch_causal'     # for ar model, the default mode is flex_causal
+        # AR requires chunk-causal attention. torch_causal uses AITER kernels when
+        # runtime.attention_backend is flash_attn_aiter; otherwise SDPA.
+        attn_mode = "flash" if is_flash else "torch_causal"
         attn = parallel_attention(
             (img_q, txt_q),
             (img_k, txt_k),
@@ -340,10 +341,8 @@ class MMSingleStreamBlock(nn.Module):
         ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
         img_q, img_k = img_qq, img_kk
 
-        if is_flash:
-            attn_mode = 'flash'
-        else:
-            attn_mode = self.attn_mode
+        # Match double-stream AR: chunk-causal, with AITER when configured.
+        attn_mode = "flash" if is_flash else "torch_causal"
         attn = parallel_attention(
             (img_q, txt_q),
             (img_k, txt_k),

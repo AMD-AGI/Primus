@@ -104,10 +104,28 @@ MAX_STEPS=10 \
   --config examples/diffusion/configs/MI355X/wan2.2_ti2v_5b-posttrain.yaml
 ```
 
-## HY-WorldPlay AR SFT
+## HY-WorldPlay AR
 
-Fine-tune released WorldPlay-8B AR weights on video + camera + action. This
-example does **not** pretrain, distill, run WorldCompass RL, or do inference.
+Train the in-tree WorldPlay AR model on video + camera + action. Both runs
+use the same encoded DL3DV subset, trainer, and loss. They write separate
+checkpoints. These examples do not distill, run WorldCompass RL, or do
+inference.
+
+| | Pretrain | Posttrain |
+|---|---|---|
+| Config | `examples/diffusion/configs/MI300X/worldplay_ar_8b-pretrain.yaml` | `examples/diffusion/configs/MI300X/worldplay_ar_8b-posttrain.yaml` |
+| Model preset | `worldplay_ar_8b.yaml` | `worldplay_ar_8b_sft.yaml` |
+| HunyuanVideo-1.5 480p I2V | Loaded | Loaded |
+| Released `HY-WorldPlay` `ar_model` | Not loaded | Loaded on top of the Hunyuan base |
+| New action modules | Zero-initialized | Already trained inside `ar_model` |
+| Data | `/data/dataset/worldplay_dl3dv_100` | Same files |
+| Checkpoints | `./output/worldplay-ar-8b-pretrain` | `./output/worldplay-ar-8b-posttrain` |
+
+- **Pretrain:** load HunyuanVideo-1.5, add zero-initialized WorldPlay action
+  modules, and train them on encoded DL3DV.
+- **Posttrain:** load HunyuanVideo-1.5 plus Tencent’s trained WorldPlay AR
+  checkpoint, then fine-tune it on encoded DL3DV. This is recommended for the
+  small 100-scene set.
 
 ### How it is integrated
 
@@ -119,7 +137,7 @@ different checkpoints.
 
 | Piece | Reuse |
 |---|---|
-| Launch | `primus-cli … train posttrain`, YAML examples, `post_trainer.yaml` |
+| Launch | `primus-cli … train pretrain` or `train posttrain`, YAML examples |
 | Trainer | FSDP2 loop, AdamW, logging, checkpoint skip (`save_strategy: none`) |
 | Mesh | Device mesh + DP sampler; default `sp_size=1` (FSDP2 still shards 8 GPUs) |
 | Config | `DiffusionArgBuilder` public sections (`data`, `training`, `parallelism`) |
@@ -132,7 +150,8 @@ different checkpoints.
 | `WorldPlayForTraining` | `GenAIModel.forward_train` adapter |
 | `WorldPlayARTrainPipeline` | Flow-match noise, I2V concat, camera/action kwargs, memory-window loss |
 | `WorldPlayLatentDataset` | Precomputed latents + poses; actions derived from camera motion |
-| `worldplay_ar_8b_sft.yaml` | Hunyuan 480p I2V load + AR overlay |
+| `worldplay_ar_8b.yaml` | Hunyuan 480p I2V load; action modules stay zero-init |
+| `worldplay_ar_8b_sft.yaml` | Pretrain preset plus the released AR overlay |
 | `prepare_worldplay_dl3dv.py` | Encode a 100 / 500 / 1000-scene DL3DV subset |
 
 **Fully in-tree**
@@ -140,8 +159,9 @@ different checkpoints.
 The Hunyuan AR transformer, camera RoPE, action embeddings,
 and offline encoding helpers are maintained inside Primus. Primus loads
 `ARHunyuanVideo_1_5_DiffusionTransformer.from_pretrained(...)` from its
-diffusion backend, then overlays
-`ar_model/diffusion_pytorch_model.safetensors`. Hunyuan VAE / Qwen-VL / ByT5 /
+diffusion backend. Posttrain then overlays
+`ar_model/diffusion_pytorch_model.safetensors`. Pretrain skips that overlay.
+Hunyuan VAE / Qwen-VL / ByT5 /
 SigLIP run **only in the offline encode script**, not in the FSDP train graph.
 No HY-WorldPlay checkout, submodule, or `WORLDPLAY_SOURCE_PATH` is required.
 
@@ -201,7 +221,11 @@ smoke, pass `--scene-hash HASH` (repeatable) instead of `--scene-count`.
 export DATASET_PATH=/data/dataset/worldplay_dl3dv_100/train.json
 export HY_NEG_PROMPT=/data/dataset/worldplay_dl3dv_100/neg_prompts/hunyuan_neg_prompt.pt
 export HY_NEG_BYT5_PROMPT=/data/dataset/worldplay_dl3dv_100/neg_prompts/hunyuan_neg_byt5_prompt.pt
+```
 
+Posttrain:
+
+```bash
 python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
   --config examples/diffusion/configs/MI300X/worldplay_ar_8b-posttrain.yaml
 
@@ -210,7 +234,18 @@ SP_SIZE=1 MAX_STEPS=30 \
   --config examples/diffusion/configs/MI300X/worldplay_ar_8b-posttrain.yaml
 ```
 
-MI355X: `examples/diffusion/configs/MI355X/worldplay_ar_8b-posttrain.yaml`.
+Pretrain:
+
+```bash
+python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
+  --config examples/diffusion/configs/MI300X/worldplay_ar_8b-pretrain.yaml
+
+SP_SIZE=1 MAX_STEPS=30 \
+./primus-cli direct -- train pretrain \
+  --config examples/diffusion/configs/MI300X/worldplay_ar_8b-pretrain.yaml
+```
+
+On MI355X, use the same filenames under `examples/diffusion/configs/MI355X/`.
 
 Default is AdamW + FSDP2 + `sp_size=1`. Token SP (`SP_SIZE=8`) and Muon are
 follow-up.
@@ -228,6 +263,9 @@ python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
 
 python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
   --config examples/diffusion/configs/MI300X/worldplay_ar_8b-posttrain.yaml
+
+python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
+  --config examples/diffusion/configs/MI300X/worldplay_ar_8b-pretrain.yaml
 ```
 
 On success the hook prints `env.PREPARED=1`.

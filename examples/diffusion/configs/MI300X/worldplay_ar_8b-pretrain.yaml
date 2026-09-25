@@ -1,0 +1,73 @@
+work_group: ${PRIMUS_TEAM:local}
+user_name: ${PRIMUS_USER:local}
+exp_name: ${PRIMUS_EXP_NAME:worldplay-ar-8b-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+platform:
+  config: platform_local.yaml
+
+modules:
+  pre_trainer:
+    framework: diffusion
+    config: pre_trainer.yaml
+
+    model: worldplay_ar_8b.yaml
+    overrides:
+      sink_level: null
+      file_sink_level: INFO
+      stderr_sink_level: INFO
+
+      metrics:
+        log_freq: 1
+        # enable_wandb: ${ENABLE_WANDB:false}
+        # wandb_project: ${WANDB_PROJECT:worldplay-ar-8b}
+
+      training:
+        local_batch_size: 1
+        # Match HY-WorldPlay run_ar_hunyuan_action_mem.sh. Override MAX_STEPS
+        # for shorter experiments.
+        steps: ${MAX_STEPS:200}
+        num_train_epochs: 1000
+        gradient_accumulation_steps: ${GRAD_ACCUM_STEPS:1} # 32 is the correct one
+        dataloader_num_workers: ${DATALOADER_WORKERS:1}
+        output_dir: ${OUTPUT_DIR:./output/worldplay-ar-8b-pretrain}
+        save_steps: ${SAVE_STEPS:500}
+        save_strategy: ${SAVE_STRATEGY:dtcp_full}
+        run_name: worldplay-ar-8b-pretrain
+
+      data:
+        dataset_path: ${DATASET_PATH:/data/dataset/worldplay_dl3dv_100/train.json}
+        dataset_format: json
+        dataset_type: precomputed
+        shuffle: true
+        # Attention cost grows with the square of window_frames * 1560 tokens.
+        # The loader requires window_frames == memory_frames + 4.
+        window_frames: ${WINDOW_FRAMES:24}
+        memory_frames: ${MEMORY_FRAMES:20}
+        max_frames: ${MAX_LATENT_FRAMES:32}
+        cfg_rate: 0.1
+        memory_sample_rate: 0.8
+        negative_prompt_path: ${HY_NEG_PROMPT:/data/dataset/worldplay_dl3dv_100/neg_prompts/hunyuan_neg_prompt.pt}
+        negative_byt5_prompt_path: ${HY_NEG_BYT5_PROMPT:/data/dataset/worldplay_dl3dv_100/neg_prompts/hunyuan_neg_byt5_prompt.pt}
+
+      parallelism:
+        # HY-WorldPlay production uses 8-way sequence parallelism.
+        sp_size: ${SP_SIZE:8}
+        dp_replicate: ${DP_REPLICATE:1}
+
+      optimizer:
+        lr: 1.0e-5
+        weight_decay: 1.0e-4
+        max_grad_norm: 1.0
+
+      lr_scheduler:
+        # Upstream production defaults to constant LR with no warmup.
+        lr_scheduler_type: constant
+        warmup_steps: 0
+
+      runtime:
+        attention_backend: ${ATTENTION_BACKEND:flash_attn_aiter}
+        gradient_checkpointing: true
+        bf16: true
+        seed: 3208
+        #report_to: ${REPORT_TO:wandb}

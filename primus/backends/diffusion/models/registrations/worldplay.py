@@ -22,12 +22,8 @@ from primus.backends.diffusion.utils.train_utils import count_parameters
 def build_worldplay_model(model_config: dict):
     base_path = model_config.get("load_from_pretrained_path")
     action_path = model_config.get("action_checkpoint")
-    for name, value in (
-        ("load_from_pretrained_path", base_path),
-        ("action_checkpoint", action_path),
-    ):
-        if not value:
-            raise ValueError(f"worldplay requires model.config.{name}")
+    if not base_path:
+        raise ValueError("worldplay requires model.config.load_from_pretrained_path")
 
     logger.info(f"Loading HunyuanVideo-1.5 AR base from {base_path}")
     with torch.device("cpu"):
@@ -37,13 +33,19 @@ def build_worldplay_model(model_config: dict):
             sink_size=int(model_config.get("sink_size", 0)),
         )
     dit.add_discrete_action_parameters()
-    logger.info(f"Overlaying HY-WorldPlay action checkpoint from {action_path}")
-    state_dict = load_file(str(action_path), device="cpu")
-    incompatible = dit.load_state_dict(state_dict, strict=True)
-    if incompatible.missing_keys or incompatible.unexpected_keys:
-        raise ValueError(
-            "WorldPlay checkpoint mismatch: "
-            f"missing={incompatible.missing_keys}, unexpected={incompatible.unexpected_keys}"
+    if action_path:
+        logger.info(f"Overlaying HY-WorldPlay action checkpoint from {action_path}")
+        state_dict = load_file(str(action_path), device="cpu")
+        incompatible = dit.load_state_dict(state_dict, strict=True)
+        if incompatible.missing_keys or incompatible.unexpected_keys:
+            raise ValueError(
+                "WorldPlay checkpoint mismatch: "
+                f"missing={incompatible.missing_keys}, unexpected={incompatible.unexpected_keys}"
+            )
+    else:
+        logger.info(
+            "No HY-WorldPlay action checkpoint; pretraining from the Hunyuan "
+            "480p I2V base with zero-initialized action modules"
         )
     dit.to(dtype=torch.float32)
 

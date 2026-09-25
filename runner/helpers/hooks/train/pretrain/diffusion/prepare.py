@@ -150,11 +150,13 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
             "HunyuanVideo-1.5 480p I2V transformer",
             kind="dir",
         )
-        _require_path(
-            model_cfg.get("action_checkpoint"),
-            "HY-WorldPlay AR action checkpoint",
-            kind="file",
-        )
+        action_checkpoint = model_cfg.get("action_checkpoint")
+        if action_checkpoint:
+            _require_path(
+                action_checkpoint,
+                "HY-WorldPlay AR action checkpoint",
+                kind="file",
+            )
     elif str(model_name).startswith("flux"):
         dataset_type = str(dataset_cfg.get("dataset_type", "precomputed")).lower()
         if dataset_type == "raw":

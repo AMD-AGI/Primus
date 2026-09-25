@@ -1,0 +1,13 @@
+model:
+  name: worldplay
+  config:
+    # Pretrain preset. Loads HunyuanVideo-1.5 480p I2V and zero-initializes
+    # the WorldPlay action modules. The released HY-WorldPlay AR overlay stays
+    # on worldplay_ar_8b_sft.yaml, which posttrain uses.
+    load_from_pretrained_path: ${HUNYUAN_TRANSFORMER:/data/models/HunyuanVideo-1.5/transformer/480p_i2v}
+    local_attn_size: -1
+    sink_size: 0
+    recipe:
+      train_time_shift: 3.0
+      logit_mean: 0.0
+      logit_std: 1.0
