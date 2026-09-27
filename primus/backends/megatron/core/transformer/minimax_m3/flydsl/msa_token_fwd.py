@@ -394,17 +394,18 @@ def build_fwd(
                 ls_run = it[2 + DT + NC]
                 ls_prev = fx.Float32(ArithValue(sub == fx.Index(0)).select(_raw(c_zero), _raw(ls_run)))
                 ls_new = fx.Float32(alpha * ls_prev + lsum)
-                slot_lse = fmath.log(crossgrp_sum(ls_new)) + fx.Float32(m_new * c_scale)
+                # Only the slot's last step writes, so only it pays for the log and the
+                # cross-group sum. `sub` is wave-uniform, so this is a scalar branch.
                 last = ArithValue(sub == fx.Index(SPB - 1))
-                buffer_ops.buffer_store(
-                    slot_lse,
-                    slse_rsrc,
-                    (head_row * fx.Index(topk) + j // fx.Index(SPB)) * fx.Index(4),
-                    mask=_raw(
-                        ArithValue(arith.AndIOp(_raw(last), _raw(ArithValue(grp == fx.Index(0)))).result)
-                    ),
-                    offset_is_bytes=True,
-                )
+                if last:
+                    slot_lse = fmath.log(crossgrp_sum(ls_new)) + fx.Float32(m_new * c_scale)
+                    buffer_ops.buffer_store(
+                        slot_lse,
+                        slse_rsrc,
+                        (head_row * fx.Index(topk) + j // fx.Index(SPB)) * fx.Index(4),
+                        mask=_raw(ArithValue(grp == fx.Index(0))),
+                        offset_is_bytes=True,
+                    )
                 extra = [ls_new]
 
             results = yield [m_new, l_new] + new_o + carry_next + extra
