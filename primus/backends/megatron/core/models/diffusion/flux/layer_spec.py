@@ -248,12 +248,22 @@ class MMDiTLayer(TransformerLayer):
             scale=scale_mlp,
             layernorm_idx=1,
         )
-        mlp_output, mlp_bias = self.mlp(norm_hidden_states)
-        hidden_states = self.adaln.scale_add(hidden_states, x=(mlp_output + mlp_bias), gate=gate_mlp)
 
-        # MLP for context stream (text) - only if not pre-only
-        if not self.context_pre_only:
-            # Fused operation: gated residual + modulated layernorm for context MLP input
+        # Both streams' MLP inputs are computed before either MLP runs, so the pair can go
+        # through one grouped GEMM per pass (PRIMUS_MXFP6_GROUPED_MLP=1). The reordering is
+        # legal because the context stream's layernorm reads context_attn_output, produced
+        # by the attention above, and never reads the image stream's MLP output -- the two
+        # MLPs were already independent, only their residual adds are not.
+        # Gate checked before the hoist, not after: with grouping off this branch must
+        # leave the original op order untouched, or the baseline it is measured against
+        # is not the shipped one.
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+            grouped_mlp_enabled,
+            grouped_mlp_pair,
+        )
+
+        grouped = None
+        if grouped_mlp_enabled() and not self.context_pre_only:
             encoder_hidden_states, norm_encoder_hidden_states = self.adaln_context.scaled_modulated_layernorm(
                 residual=encoder_hidden_states,
                 x=context_attn_output,
@@ -262,7 +272,29 @@ class MMDiTLayer(TransformerLayer):
                 scale=c_scale_mlp,
                 layernorm_idx=1,
             )
-            context_mlp_output, context_mlp_bias = self.context_mlp(norm_encoder_hidden_states)
+            grouped = grouped_mlp_pair(self.mlp, self.context_mlp, norm_hidden_states,
+                                       norm_encoder_hidden_states)
+
+        if grouped is not None:
+            (mlp_output, mlp_bias), (context_mlp_output, context_mlp_bias) = grouped
+        else:
+            mlp_output, mlp_bias = self.mlp(norm_hidden_states)
+        hidden_states = self.adaln.scale_add(hidden_states, x=(mlp_output + mlp_bias), gate=gate_mlp)
+
+        # MLP for context stream (text) - only if not pre-only
+        if not self.context_pre_only:
+            if grouped is None:
+                encoder_hidden_states, norm_encoder_hidden_states = (
+                    self.adaln_context.scaled_modulated_layernorm(
+                        residual=encoder_hidden_states,
+                        x=context_attn_output,
+                        gate=c_gate_msa,
+                        shift=c_shift_mlp,
+                        scale=c_scale_mlp,
+                        layernorm_idx=1,
+                    )
+                )
+                context_mlp_output, context_mlp_bias = self.context_mlp(norm_encoder_hidden_states)
             encoder_hidden_states = self.adaln_context.scale_add(
                 encoder_hidden_states, x=(context_mlp_output + context_mlp_bias), gate=c_gate_mlp
             )
