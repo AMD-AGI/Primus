@@ -344,7 +344,8 @@ def _launchable(kernel, traceable):
     return wrap_triton(kernel) if traceable else kernel
 
 
-def _launch_fwd(x, w, cos, sin, eps, interleaved, traceable=True, copy_x=None, copy_out=None):
+def _launch_fwd(x, w, cos, sin, eps, interleaved, traceable=True, copy_x=None, copy_out=None,
+                dest=None):
     S, B, H, D = x.shape
     M = S * B * H
     x, sx = _row_strided(x)
@@ -357,7 +358,20 @@ def _launch_fwd(x, w, cos, sin, eps, interleaved, traceable=True, copy_x=None, c
         copy_x, copy_out, scopy = x, x, sx
     # The output is packed even when the input is not: it feeds FMHA, which wants it
     # that way, and writing it packed costs nothing the strided read has not saved.
-    out = torch.empty_like(x, memory_format=torch.contiguous_format)
+    #
+    # ``dest`` lets the caller own that buffer. The joint-attention path passes a slice of
+    # one q/k/v tensor covering both streams, so the two per-stream launches land either
+    # side of the sequence boundary and the torch.cat that used to join them afterwards --
+    # 3.1 ms/step of pure data movement -- is not needed at all. The concatenation still
+    # happens in the mathematical sense the reference describes; it is just produced rather
+    # than performed.
+    if dest is not None:
+        assert dest.shape == x.shape and dest.is_contiguous(), (
+            "fused norm+RoPE destination must match the input shape and be contiguous"
+        )
+        out = dest
+    else:
+        out = torch.empty_like(x, memory_format=torch.contiguous_format)
     rstd = torch.empty(M, device=x.device, dtype=torch.float32)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)
     _launchable(_fwd_kernel, traceable)[grid](
@@ -559,6 +573,47 @@ def _qkv_fwd_nov(
     q, q_rstd = _launch_fwd(qkv[..., :D], wq, cos, sin, eps, interleaved, traceable=False)
     k, k_rstd = _launch_fwd(qkv[..., D : 2 * D], wk, cos, sin, eps, interleaved, traceable=False)
     return q, k, q_rstd, k_rstd
+
+
+# Destination-writing variant, for joint attention.
+#
+# Flux's joint blocks run the two streams' QKV projections separately and then join them
+# with three torch.cat calls before attention -- 3.1 ms/step on the production configuration, and pure
+# data movement. Given q/k buffers covering the joint sequence, each stream's norm+RoPE
+# lands directly in its own half and the concatenation never happens. This is the same
+# arithmetic the reference performs; only where the result is written differs.
+#
+# `dest_*` are declared in mutates_args so functionalization treats this as the mutating op
+# it is. Note the argument names deliberately avoid `mode`, `out` and other names bound by
+# PyTorch's auto_functionalized_v2 -- an argument called `mode` on a mutating op collides
+# there and fails only under torch.compile, never in eager.
+@custom_op("primus::fused_qk_norm_rope_into", mutates_args=("dest_q", "dest_k"))
+def _qkv_fwd_into(
+    qkv: torch.Tensor,
+    wq: torch.Tensor,
+    wk: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    eps: float,
+    interleaved: bool,
+    dest_q: torch.Tensor,
+    dest_k: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    D = qkv.shape[-1] // 3
+    _, q_rstd = _launch_fwd(
+        qkv[..., :D], wq, cos, sin, eps, interleaved, traceable=False, dest=dest_q
+    )
+    _, k_rstd = _launch_fwd(
+        qkv[..., D : 2 * D], wk, cos, sin, eps, interleaved, traceable=False, dest=dest_k
+    )
+    return q_rstd, k_rstd
+
+
+@_qkv_fwd_into.register_fake
+def _qkv_fwd_into_fake(qkv, wq, wk, cos, sin, eps, interleaved, dest_q, dest_k):
+    S, B, H, T = qkv.shape
+    rstd = torch.empty(S * B * H, device=qkv.device, dtype=torch.float32)
+    return (rstd, torch.empty_like(rstd))
 
 
 @_qkv_fwd_nov.register_fake

@@ -1326,6 +1326,189 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         return grad_x, grad_w, grad_b, grad_wq, grad_wk, None, None, None, None, None, None, None
 
 
+
+
+# ---------------------------------------------------------------------------
+# Joint QKV: both streams' projections and norm+RoPE, producing joint q/k/v directly.
+#
+# Flux's joint blocks project the two streams separately and then join them with three
+# torch.cat calls before attention. The reference does the same thing
+# (torchtitan/.../flux/model/layers.py: `q = torch.cat((txt_q, img_q), dim=2)`), so the
+# concatenation is part of the model -- but *performing* it as a separate pass is not. At
+# the production configuration, those cats and their backward splits are ~3.1 ms/step of pure data movement.
+#
+# Writing both streams into one buffer removes them:
+#   * mixed_qkv is one [m_a + m_b, n] tensor, each projection writing its own half through
+#     gemm_fp6_out_impl. V then falls out as a single strided slice spanning both streams,
+#     so the V cat disappears with no extra work.
+#   * q and k are joint tensors, and each stream's norm+RoPE writes into its own slice via
+#     primus::fused_qk_norm_rope_into. The two streams keep their own QK-norm weights and
+#     their own RoPE tables, exactly as the reference has them -- only the destination is
+#     shared.
+#
+# Arithmetic is unchanged operand for operand; this is a layout change, not an
+# approximation. Off by default: PRIMUS_MXFP6_JOINT_QKV=1.
+#
+# Requires PRIMUS_MXFP6_STRIDED_V: V is taken as a slice of the joint mixed_qkv, which is
+# the same trick that gate already relies on, and the non-strided path would need a joint
+# repack destination that does not exist.
+#
+# Not grouped. The two projections stay two GEMMs writing into halves rather than one
+# 2-group GEMM. Grouping them is worth a further ~0.15 ms of forward GEMM time and needs
+# the operands packed into shared buffers; the cat removal is ~90% of the item and does not
+# depend on it. The backward stays per stream for a harder reason: its packer prologue
+# (quantize_mxfp6_qk_norm_rope_bwd) has no caller-buffer variant, so the two streams'
+# packed gradients cannot land adjacently for a grouped dgrad.
+# ---------------------------------------------------------------------------
+
+_JOINT_QKV = os.environ.get("PRIMUS_MXFP6_JOINT_QKV", "0") == "1"
+
+
+def joint_qkv_enabled() -> bool:
+    """Is the joint QKV path switched on and usable in this configuration?"""
+    return _JOINT_QKV and _STRIDED_V and _quantize_mxfp6_qk_norm_rope_bwd is not None
+
+
+class MXFP6JointQKVFunction(torch.autograd.Function):
+    """Both joint-block streams' QKV projection + QK-norm + RoPE, emitting joint q/k/v.
+
+    Stream ``a`` is the one that leads the joint sequence (the context/text stream, which
+    ``torch.cat([added, main])`` used to put first); stream ``b`` follows it.
+
+    Mirrors ``MXFP6QKVNormRopeFunction`` operand for operand. The backward runs per stream
+    on slices of the joint gradients -- each stream owns its norm weights, RoPE table and
+    saved rstd, so the fused prologue has to see them separately anyway.
+    """
+
+    @staticmethod
+    def forward(x_a, x_b, w_a, w_b, b_a, b_b, wq_a, wk_a, wq_b, wk_b,
+                cos_a, sin_a, cos_b, sin_b, eps, interleaved,
+                fuse_wgrad_accum, grad_enabled, weight_is_fp4):
+        from primus.backends.megatron.core.models.diffusion.common.fused_norm_rope import (
+            _qkv_fwd_into,
+        )
+
+        out_dtype = x_a.dtype
+        shape_a, shape_b = x_a.shape, x_b.shape
+        xa = x_a.reshape(-1, shape_a[-1])
+        xb = x_b.reshape(-1, shape_b[-1])
+        m_a, k = xa.shape
+        m_b = xb.shape[0]
+        n = w_a.shape[0]
+        d = wq_a.shape[0]
+        h = n // (3 * d)
+
+        packs = []
+        for x, w in ((xa, w_a), (xb, w_b)):
+            if grad_enabled:
+                x_row, x_row_s, x_col, x_col_s = _pack_act_dual(x, _WGRAD_A6W4)
+                w_row, w_row_s, w_col, w_col_s = _pack_weight_dual(w, weight_is_fp4)
+            else:
+                x_row, x_row_s = _quantize_mxfp6_row(x, 1)
+                w_row, w_row_s = _pack_weight_row(w, weight_is_fp4)
+                x_col = x_col_s = w_col = w_col_s = None
+            packs.append((x_row, x_row_s, x_col, x_col_s, w_row, w_row_s, w_col, w_col_s))
+
+        # One buffer for both projections. Rows are sequence-major within a stream, so
+        # stacking stream a above stream b and reshaping gives exactly the joint sequence
+        # the cat used to build.
+        mixed_qkv = torch.empty(m_a + m_b, n, device=xa.device, dtype=out_dtype)
+        gemm_fp6_out_impl(packs[0][0], packs[0][1], packs[0][4], packs[0][5],
+                          mixed_qkv[:m_a], m_a, n, k, _GRAN_VALUE, weight_is_fp4)
+        gemm_fp6_out_impl(packs[1][0], packs[1][1], packs[1][4], packs[1][5],
+                          mixed_qkv[m_a:], m_b, n, k, _GRAN_VALUE, weight_is_fp4)
+
+        s_a, s_b, batch = shape_a[0], shape_b[0], shape_a[1]
+        qkv = mixed_qkv.reshape(s_a + s_b, batch, h, 3 * d)
+        q = torch.empty(s_a + s_b, batch, h, d, device=xa.device, dtype=out_dtype)
+        k_out = torch.empty_like(q)
+        q_rstd_a, k_rstd_a = _qkv_fwd_into(
+            qkv[:s_a], wq_a, wk_a, cos_a, sin_a, eps, interleaved, q[:s_a], k_out[:s_a]
+        )
+        q_rstd_b, k_rstd_b = _qkv_fwd_into(
+            qkv[s_a:], wq_b, wk_b, cos_b, sin_b, eps, interleaved, q[s_a:], k_out[s_a:]
+        )
+        # One strided slice covering both streams -- the V cat falls out for free.
+        v = qkv[..., 2 * d :]
+
+        return (q, k_out, v, mixed_qkv, q_rstd_a, k_rstd_a, q_rstd_b, k_rstd_b,
+                packs[0][2], packs[0][3], packs[0][6], packs[0][7],
+                packs[1][2], packs[1][3], packs[1][6], packs[1][7])
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        (x_a, x_b, w_a, w_b, b_a, b_b, wq_a, wk_a, wq_b, wk_b,
+         cos_a, sin_a, cos_b, sin_b, eps, interleaved,
+         fuse_wgrad_accum, grad_enabled, weight_is_fp4) = inputs
+        if not grad_enabled:
+            return
+        ctx.fuse_wgrad_accum = fuse_wgrad_accum
+        ctx.out_dtype = x_a.dtype
+        ctx.shape_a, ctx.shape_b = x_a.shape, x_b.shape
+        ctx.m_a = x_a.numel() // x_a.shape[-1]
+        ctx.m_b = x_b.numel() // x_b.shape[-1]
+        ctx.s_a = x_a.shape[0]
+        ctx.k = x_a.shape[-1]
+        ctx.n = w_a.shape[0]
+        ctx.d = wq_a.shape[0]
+        ctx.h = ctx.n // (3 * ctx.d)
+        ctx.eps, ctx.interleaved = eps, interleaved
+        ctx.weight_is_fp4 = weight_is_fp4
+        blobs = output[3:]
+        extra = (w_a, w_b) if fuse_wgrad_accum else ()
+        ctx.save_for_backward(wq_a, wk_a, wq_b, wk_b, cos_a, sin_a, cos_b, sin_b,
+                              *blobs, *extra)
+        ctx.mark_non_differentiable(*blobs)
+
+    @staticmethod
+    def backward(ctx, dq, dk, dv, *_):
+        (wq_a, wk_a, wq_b, wk_b, cos_a, sin_a, cos_b, sin_b,
+         mixed_qkv, q_rstd_a, k_rstd_a, q_rstd_b, k_rstd_b,
+         xc_a, xcs_a, wc_a, wcs_a, xc_b, xcs_b, wc_b, wcs_b,
+         *fused) = ctx.saved_tensors
+        m_a, m_b, s_a = ctx.m_a, ctx.m_b, ctx.s_a
+        k, n, h, d = ctx.k, ctx.n, ctx.h, ctx.d
+        out_dtype = ctx.out_dtype
+        want_bias_grad = ctx.needs_input_grad[4]
+
+        grads = tuple(g.contiguous() for g in (dq, dk, dv))
+        outs = []
+        for i, (rows, off, wq, wk, cos, sin, q_rstd, k_rstd, xc, xcs, wc, wcs) in enumerate((
+            (m_a, slice(0, s_a), wq_a, wk_a, cos_a, sin_a, q_rstd_a, k_rstd_a, xc_a, xcs_a, wc_a, wcs_a),
+            (m_b, slice(s_a, None), wq_b, wk_b, cos_b, sin_b, q_rstd_b, k_rstd_b, xc_b, xcs_b, wc_b, wcs_b),
+        )):
+            g = tuple(x[off].contiguous().reshape(rows, h * d) for x in grads)
+            mq = mixed_qkv[0:m_a] if i == 0 else mixed_qkv[m_a:]
+            (g_row, g_row_s, g_col, g_col_s, b_partial, dwq_partial,
+             dwk_partial) = _quantize_mxfp6_qk_norm_rope_bwd(
+                mq, *g, cos, sin, wq, wk, q_rstd, k_rstd, want_bias_grad
+            )
+            grad_x = gemm_fp6_impl(
+                g_row, g_row_s, wc, wcs, rows, k, n, out_dtype, _GRAN_VALUE, None,
+                ctx.weight_is_fp4,
+            ).reshape(ctx.shape_a if i == 0 else ctx.shape_b)
+            if ctx.fuse_wgrad_accum:
+                grad_w = _wgrad_into_main_grad(fused[i], g_col, g_col_s, xc, xcs, n, k, rows,
+                                               _WGRAD_A6W4)
+            else:
+                grad_w = gemm_fp6_impl(g_col, g_col_s, xc, xcs, n, k, rows, out_dtype,
+                                       _GRAN_VALUE, None, _WGRAD_A6W4)
+            grad_b = b_partial.sum(0).to(out_dtype) if want_bias_grad else None
+            grad_wq = _reduce_grad_into_main_grad(
+                wq, dwq_partial, wq.dtype, ctx.fuse_wgrad_accum, dims=(0, 1)
+            )
+            grad_wk = _reduce_grad_into_main_grad(
+                wk, dwk_partial, wk.dtype, ctx.fuse_wgrad_accum, dims=(0, 1)
+            )
+            outs.append((grad_x, grad_w, grad_b, grad_wq, grad_wk))
+
+        (gx_a, gw_a, gb_a, gwq_a, gwk_a), (gx_b, gw_b, gb_b, gwq_b, gwk_b) = outs
+        # Trailing Nones cover cos_a, sin_a, cos_b, sin_b, eps, interleaved,
+        # fuse_wgrad_accum, grad_enabled and weight_is_fp4.
+        return (gx_a, gx_b, gw_a, gw_b, gb_a, gb_b, gwq_a, gwk_a, gwq_b, gwk_b,
+                None, None, None, None, None, None, None, None, None)
+
+
 def _is_tanh_gelu(fn) -> bool:
     """Whether ``fn`` is exactly ``F.gelu(approximate="tanh")``.
 
