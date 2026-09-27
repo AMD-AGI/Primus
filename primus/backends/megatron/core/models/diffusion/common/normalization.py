@@ -1212,6 +1212,50 @@ class AdaLN(MegatronModule):
         # Mark weight as sequence parallel if needed
         setattr(self.adaLN_modulation[-1].weight, "sequence_parallel", config.sequence_parallel)
 
+        # Have this projection's wgrad GEMM accumulate straight into ``weight.main_grad``
+        # instead of materialising ``.grad`` for ``AccumulateGrad`` to copy into the DDP
+        # bucket. Off by default; enable with ``PRIMUS_ADALN_FUSED_WGRAD=1``.
+        #
+        # MEASURED AND REJECTED -- do not enable this expecting a win. It is kept only so
+        # the next person does not rebuild it. Two 1000-iteration arms, rotated order, same
+        # config and stack, this gate cost **+6.7 ms/step**. The
+        # isolated kernel measurements below are real and still say -1.25 ms; they simply
+        # do not price a change that touches the gradient pipeline. Two candidate causes
+        # were tested and excluded -- the dummy-wgrad allocation (68.24 us with it vs 67.45
+        # us with a reused buffer; the caching allocator absorbs it) and memory pressure
+        # (peak 164.69 vs 165.22 GB, marginally lower). What remains unexcluded is
+        # perturbation of the grad-reduce overlap, which is worth 32.4 ms in this recipe
+        # and therefore cannot be paid for by a 1.25 ms ceiling.
+        #
+        # This is Megatron's ``gradient_accumulation_fusion`` applied to one module rather
+        # than through the config, deliberately. Setting it on ``FluxConfig`` would also
+        # set it on the MXFP6 linears, which reject it outright
+        # (``primus_turbo_mxfp6_local.py:505``) because their A6W6 store has no beta=1
+        # epilogue. ``ColumnParallelLinear`` reads the flag off the module
+        # (``layers.py:1006``), so overriding the attribute reaches exactly these 76
+        # projections and nothing else.
+        #
+        # Correcting the record in ``common/config.py:122``: that comment rejects the
+        # config-wide flag as "+11% step time ... wgrad_gemm_accum_fp16 at M=32 is slower
+        # than the separate add it replaces". Measured directly at both production shapes
+        # with an fp32 main_grad, the fused form is *faster*, not slower:
+        #
+        #     [18432,3072]  gemm+copy 85.76us -> fused 68.08us   x38
+        #      [9216,3072]  gemm+copy 48.46us -> fused 36.34us   x38
+        #                                        total -1.13 ms/step
+        #
+        # The earlier end-to-end A/B that recorded "no-op, identical copy counts" could not
+        # have shown anything: FluxConfig hardcodes gradient_accumulation_fusion=False
+        # (``flux/config.py:154``), so the yaml flag reached Megatron's args -- which is
+        # what train.log displayed -- and never reached these modules. The MXFP6 guard
+        # above is the proof: that run would have raised on the first MXFP6 linear.
+        #
+        # Accumulation (``+=``) rather than overwrite is correct here because DDP zeroes
+        # the grad buffers each step, and this recipe runs one microbatch per optimizer
+        # step, exactly as ``mxfp6_fused_wgrad_accum`` already requires.
+        if os.environ.get("PRIMUS_ADALN_FUSED_WGRAD", "0") == "1":
+            self.adaLN_modulation[-1].gradient_accumulation_fusion = True
+
         self._adaln_plain_ops = getattr(config, "adaln_plain_ops", False)
         self._use_triton_ops = getattr(config, "use_triton_ops", False)
 
