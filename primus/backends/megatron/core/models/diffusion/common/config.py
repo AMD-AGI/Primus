@@ -122,7 +122,7 @@ class BaseDiffusionConfig(TransformerConfig):
     # Deliberately not Megatron's `gradient_accumulation_fusion`: that flag is read by
     # every plain linear too, and switching it on routes Flux's 76 AdaLN projections
     # through `wgrad_gemm_accum_fp16`, which at their M=32 shapes is slower than the
-    # separate add it replaces -- measured at +11% step time on 8x MI355X, swamping the
+    # separate add it replaces -- measured at +11% step time on one node, swamping the
     # saving on the MXFP6 linears. This field moves only the MXFP6 ones.
     #
     # The A6W6 store has no beta=1 accumulate epilogue, so it overwrites main_grad and is

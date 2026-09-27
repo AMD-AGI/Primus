@@ -89,6 +89,7 @@ _quantize_hybrid_dual = getattr(
 # everything A6W4 delivers, and the weight-gradient cosine against fp32 lands
 # at 0.9928 where A6W4's forward already sits at 0.99293.
 _WGRAD_A6W4 = os.environ.get("PRIMUS_MXFP6_WGRAD_A6W4", "") not in ("", "0")
+_STRIDED_V = os.environ.get("PRIMUS_MXFP6_STRIDED_V", "0") == "1"   # skip the V repack (item D1)
 
 
 def _pack_act_dual(x, wgrad_is_fp4):
@@ -168,7 +169,7 @@ def _claim_main_grad(*weights) -> None:
     Called from the forward, which reads oddly, because the natural place -- right after
     the backward's store -- is not available: dynamo refuses to trace a mutation of state
     owned outside an autograd.Function ("HOP: Unsafe side effect"), and rather than fail it
-    breaks the graph around every MXFP6 linear. On the MBS=32 Flux 12B arm that fragmented
+    breaks the graph around every MXFP6 linear. On the production Flux 12B arm that fragmented
     one compiled block into hundreds and cost 42.7 ms of eager elementwise work per 512
     images, against the ~16 ms of ``add_`` the fusion removes -- a net regression. From the
     forward the same assignment is ordinary traced code, which dynamo records as a side
@@ -250,7 +251,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
         # Bias goes into the GEMM's store epilogue, where it is free: the epilogue is bound by
         # its scatter store rather than by VALU, so the add hides completely. Handing it to the
         # GEMM rather than adding afterwards deletes a whole pass over the output, worth 7.3 ms
-        # per step at MBS=32, and rounds once instead of twice.
+        # per step at the production configuration, and rounds once instead of twice.
         #
         # Passed unconditionally. Whether the installed aiter can actually fold it is Turbo's to
         # answer -- it probes, and adds the separate pass itself when it cannot -- so there is
@@ -599,7 +600,7 @@ class MXFP6RowParallelLinear(RowParallelLinear):
 #
 # What that removes, per Flux 12B step at the profiled shapes: the bias-add + GELU kernel's
 # read and write and the packer's read back of it in the forward, and the same round-trip
-# plus the bias gradient's own reduction pass in the backward. Measured on 8x MI355X at
+# plus the bias gradient's own reduction pass in the backward. Measured on one node at
 # micro_batch_size 64, against this same module with the fusion switched off: 75.3 ms/step of
 # epilogue and reduction kernels go away, 35.5 ms/step of added prologue cost inside the
 # packer replaces them, and the step's GPU busy time falls 856.5 -> 810.9 ms, 5.0% off wall
@@ -838,6 +839,7 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
     ):
         from primus.backends.megatron.core.models.diffusion.common.fused_norm_rope import (
             _qkv_fwd,
+            _qkv_fwd_nov,
         )
 
         out_dtype = hidden_states.dtype
@@ -868,7 +870,20 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         # The norm and rotation, unchanged. This is the production Triton op, on the
         # [..., num_heads, 3 * head_dim] view it expects; only its *backward* is replaced.
         qkv = mixed_qkv.reshape(*orig_shape[:-1], h, 3 * d)
-        q, k_out, v, q_rstd, k_rstd = _qkv_fwd(qkv, wq, wk, cos, sin, eps, interleaved)
+        if _STRIDED_V:
+            # Skip the V repack and hand FMHA the strided slice. Safe *here* specifically:
+            # this runs inside autograd.Function.forward, where grad mode is off, so the
+            # slice is not tracked and no second autograd path is created. Taking the same
+            # slice on the eager path (fused_norm_rope.py:596, under register_autograd)
+            # would add one, whose backward allocates a full [S,B,H,3D] zero buffer and
+            # scatters dv into it -- about 3x the traffic the repack costs.
+            #
+            # qkv is a view of mixed_qkv, which is produced inside this forward rather than
+            # passed in, so returning a view of it is not a view-of-an-input.
+            q, k_out, q_rstd, k_rstd = _qkv_fwd_nov(qkv, wq, wk, cos, sin, eps, interleaved)
+            v = qkv[..., 2 * d :]
+        else:
+            q, k_out, v, q_rstd, k_rstd = _qkv_fwd(qkv, wq, wk, cos, sin, eps, interleaved)
 
         return q, k_out, v, mixed_qkv, q_rstd, k_rstd, x_col, x_col_s, w_col, w_col_s
 
