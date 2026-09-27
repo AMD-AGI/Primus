@@ -529,6 +529,47 @@ def _qkv_fwd(
     return q, k, v, q_rstd, k_rstd
 
 
+# Variant that does NOT produce V.
+#
+# `_qkv_fwd` repacks V contiguous through the kernel's COPY_ROW path, justified above as
+# "it feeds FMHA, which wants it that way". FMHA does not want it that way: the production
+# path (`_flash_attn_forward` -> `fmha_v3_fwd` -> the gfx950 asm .co) asserts only
+# `v.stride(-1) == 1` (asm_mha_fwd.cu:264-266) and takes every other stride as a kernel
+# argument. The strided slice `qkv[..., 2D:]` already satisfies that -- its row stride is
+# 3x, its last dim is unit. The backward is clear too: Turbo allocates `dv` packed itself,
+# and gfx950 bypasses the `stride_k == stride_v` v3-bwd gate.
+#
+# Measured cost of the repack: 7.2 us per q-call at S=256 and 25.7 us at S=512,
+# i.e. ~1.25 ms/step across 38 joint-stream and 38 single-block q-calls.
+#
+# This op cannot simply return the slice itself: `custom_op` forbids returning a tensor that
+# aliases an input (torch/_library/utils.py:403). The caller takes the slice instead, which
+# is only safe where autograd is not tracking -- see the MXFP6 use site.
+@custom_op("primus::fused_qk_norm_rope_nov", mutates_args=())
+def _qkv_fwd_nov(
+    qkv: torch.Tensor,
+    wq: torch.Tensor,
+    wk: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    eps: float,
+    interleaved: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    D = qkv.shape[-1] // 3
+    q, q_rstd = _launch_fwd(qkv[..., :D], wq, cos, sin, eps, interleaved, traceable=False)
+    k, k_rstd = _launch_fwd(qkv[..., D : 2 * D], wk, cos, sin, eps, interleaved, traceable=False)
+    return q, k, q_rstd, k_rstd
+
+
+@_qkv_fwd_nov.register_fake
+def _qkv_fwd_nov_fake(qkv, wq, wk, cos, sin, eps, interleaved):
+    S, B, H, T = qkv.shape
+    D = T // 3
+    head = torch.empty((S, B, H, D), device=qkv.device, dtype=qkv.dtype)
+    rstd = torch.empty(S * B * H, device=qkv.device, dtype=torch.float32)
+    return (head, torch.empty_like(head), rstd, torch.empty_like(rstd))
+
+
 @_qkv_fwd.register_fake
 def _qkv_fwd_fake(qkv, wq, wk, cos, sin, eps, interleaved):
     S, B, H, T = qkv.shape
