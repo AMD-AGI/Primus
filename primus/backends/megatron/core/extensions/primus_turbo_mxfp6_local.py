@@ -1069,8 +1069,12 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
             grad_w2_a = _wgrad_into_main_grad(fused[2], g2_cols[0][0], g2_cols[0][1], ac_a, acs_a, h, f, m)
             grad_w2_b = _wgrad_into_main_grad(fused[3], g2_cols[1][0], g2_cols[1][1], ac_b, acs_b, h, f, m)
         else:
-            grad_w2_a = gemm_fp6_impl(g2_cols[0][0], g2_cols[0][1], ac_a, acs_a, h, f, m, out_dtype, _GRAN_VALUE)
-            grad_w2_b = gemm_fp6_impl(g2_cols[1][0], g2_cols[1][1], ac_b, acs_b, h, f, m, out_dtype, _GRAN_VALUE)
+            grad_w2_a = gemm_fp6_impl(
+                g2_cols[0][0], g2_cols[0][1], ac_a, acs_a, h, f, m, out_dtype, _GRAN_VALUE
+            )
+            grad_w2_b = gemm_fp6_impl(
+                g2_cols[1][0], g2_cols[1][1], ac_b, acs_b, h, f, m, out_dtype, _GRAN_VALUE
+            )
 
         want_bias_grad = ctx.needs_input_grad[4]
         g1_row, g1_row_s, g1_cols, partials = _fused_prologue_pair(
@@ -1084,11 +1088,21 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
         grad_x_b = grad_x[m:].reshape(ctx.orig_shape)
 
         if ctx.fuse_wgrad_accum:
-            grad_w1_a = _wgrad_into_main_grad(fused[0], g1_cols[0][0], g1_cols[0][1], xc_a, xcs_a, f, k, m, _WGRAD_A6W4)
-            grad_w1_b = _wgrad_into_main_grad(fused[1], g1_cols[1][0], g1_cols[1][1], xc_b, xcs_b, f, k, m, _WGRAD_A6W4)
+            grad_w1_a = _wgrad_into_main_grad(
+                fused[0], g1_cols[0][0], g1_cols[0][1], xc_a, xcs_a, f, k, m, _WGRAD_A6W4
+            )
+            grad_w1_b = _wgrad_into_main_grad(
+                fused[1], g1_cols[1][0], g1_cols[1][1], xc_b, xcs_b, f, k, m, _WGRAD_A6W4
+            )
         else:
-            grad_w1_a = gemm_fp6_impl(g1_cols[0][0], g1_cols[0][1], xc_a, xcs_a, f, k, m, out_dtype, _GRAN_VALUE, None, _WGRAD_A6W4)
-            grad_w1_b = gemm_fp6_impl(g1_cols[1][0], g1_cols[1][1], xc_b, xcs_b, f, k, m, out_dtype, _GRAN_VALUE, None, _WGRAD_A6W4)
+            grad_w1_a = gemm_fp6_impl(
+                g1_cols[0][0], g1_cols[0][1], xc_a, xcs_a, f, k, m, out_dtype,
+                _GRAN_VALUE, None, _WGRAD_A6W4,
+            )
+            grad_w1_b = gemm_fp6_impl(
+                g1_cols[1][0], g1_cols[1][1], xc_b, xcs_b, f, k, m, out_dtype,
+                _GRAN_VALUE, None, _WGRAD_A6W4,
+            )
 
         if want_bias_grad:
             grad_b1_a = _reduce_grad_into_main_grad(b1_a, partials[0], out_dtype, ctx.fuse_wgrad_accum)
