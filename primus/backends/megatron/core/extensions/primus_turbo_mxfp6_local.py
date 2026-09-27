@@ -812,9 +812,13 @@ class MXFP6MLPFunction(torch.autograd.Function):
 # ---------------------------------------------------------------------------
 
 _GROUPED_MLP = os.environ.get("PRIMUS_MXFP6_GROUPED_MLP", "0") == "1"
-# The 2-group A6W6 kernel. aiter's host gate admits an oversized B only for kernels whose
-# name carries "_grp", so every other kernel keeps its strict size equality.
-_GRP_KERNEL_NAME = "f6gemm_a6w6_grp2_kernel_func"
+# The 2-group A6W6 kernel, built with the same flags as the variant production already
+# runs for these shapes -- LDSTAGE=1 STNT=1 SWZTH=512 -- so grouping is not paying for a
+# kernel-variant downgrade at the same time. aiter's host gate admits an oversized B only
+# for kernels whose name carries "_wgrp" (weight-grouped), so every other kernel keeps its
+# strict size equality; "_grp" would also have matched dmabig_grp16/grp64, which are
+# ordinary single-weight kernels that carry a rasterization group size in their names.
+_GRP_KERNEL_NAME = "f6gemm_a6w6_stnt_allk_wgrp2_kernel_func"
 
 # Caller-buffer packers. Guarded like the other optional Turbo ops: an older Primus-Turbo
 # has none of them, and the gate above is rejected at import time when they are absent.
@@ -910,7 +914,7 @@ def _fused_prologue_pair(ys, aux, biases, mode, want_col_sum):
             else None
         )
         _quantize_mxfp6_fused_dual_out(
-            y.contiguous(),
+            y,
             aux[i] if aux is not None else None,
             biases[i],
             mode,
@@ -951,8 +955,10 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
                 fuse_wgrad_accum, grad_enabled, weight_is_fp4):
         out_dtype = x_a.dtype
         orig_shape = x_a.shape
-        xa = x_a.reshape(-1, orig_shape[-1]).contiguous()
-        xb = x_b.reshape(-1, orig_shape[-1]).contiguous()
+        # No .contiguous() here: MXFP6MLPFunction does not call it either, and adding it
+        # made Inductor materialise the reshape -- 38 as_strided_clone launches per step.
+        xa = x_a.reshape(-1, orig_shape[-1])
+        xb = x_b.reshape(-1, orig_shape[-1])
         m, k = xa.shape
         f = w1_a.shape[0]
         h = w2_a.shape[0]
@@ -1007,8 +1013,12 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
         m, k, f, h = ctx.m, ctx.k, ctx.f, ctx.h
         out_dtype = ctx.out_dtype
 
-        g2a = g_out_a.reshape(-1, h).contiguous()
-        g2b = g_out_b.reshape(-1, h).contiguous()
+        if not g_out_a.is_contiguous():
+            g_out_a = g_out_a.contiguous()
+        if not g_out_b.is_contiguous():
+            g_out_b = g_out_b.contiguous()
+        g2a = g_out_a.reshape(-1, h)
+        g2b = g_out_b.reshape(-1, h)
         g2_row, g2_row_s, g2_cols = _pack_pair_act((g2a, g2b))
 
         # fc2 dgrad, both streams: [2m, f] = g2[2m, h] @ w2[h, f], contracting h.
