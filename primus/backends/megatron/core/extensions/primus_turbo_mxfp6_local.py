@@ -90,6 +90,9 @@ _quantize_hybrid_dual = getattr(
 # at 0.9928 where A6W4's forward already sits at 0.99293.
 _WGRAD_A6W4 = os.environ.get("PRIMUS_MXFP6_WGRAD_A6W4", "") not in ("", "0")
 _STRIDED_V = os.environ.get("PRIMUS_MXFP6_STRIDED_V", "0") == "1"   # skip the V repack (item D1)
+# Route small reduction gradients (biases, QK-norm weights) into main_grad instead of
+# letting AccumulateGrad materialise them. Off by default, like every other gate here.
+_FUSED_SMALL_GRADS = os.environ.get("PRIMUS_MXFP6_FUSED_SMALL_GRADS", "0") == "1"
 
 
 def _pack_act_dual(x, wgrad_is_fp4):
@@ -187,6 +190,39 @@ def _claim_main_grad(*weights) -> None:
     for weight in weights:
         weight.grad_added_to_main_grad = True
         weight.main_grad_initialized = True
+
+
+def _reduce_grad_into_main_grad(param, partial, out_dtype, fuse_wgrad_accum, dims=0):
+    """Reduce a bias-gradient partial straight into ``bias.main_grad``.
+
+    Same trade as ``_wgrad_into_main_grad``, one operand over. Left to autograd, the
+    reduction's result is handed back as ``bias.grad``, which AccumulateGrad materialises
+    with a device-to-device copy before Megatron's DDP hook adds it into ``main_grad`` and
+    drops it. That copy is 8.7 us of pure dispatch on a tensor of a few thousand elements,
+    and there are hundreds of them per step.
+
+    Measured on the production trace: ``__amd_rocclr_copyBuffer`` is 5.23 ms/step
+    over 600 launches, 98% of them under AccumulateGrad, and the family is 94% exclusive --
+    it almost never runs alongside another kernel, so what is removed here converts to step
+    time nearly 1:1 rather than at the ~44% a GEMM saving converts at.
+
+    The MXFP6 weights already avoid this and are, tellingly, absent from the copied shapes
+    in that trace: ``_wgrad_into_main_grad`` writes their ``main_grad`` and returns a fresh
+    placeholder, which AccumulateGrad steals instead of copying. This does the same.
+
+    Returns the placeholder to hand back to autograd, or the ordinary gradient when the
+    fusion is off or the bias has no ``main_grad`` to write.
+    """
+    if not (fuse_wgrad_accum and _FUSED_SMALL_GRADS):
+        return partial.sum(dims).to(out_dtype)
+    main_grad = getattr(param, "main_grad", None)
+    if main_grad is None:
+        return partial.sum(dims).to(out_dtype)
+    # add_ rather than copy_ because DDP zeroes the grad buffers each step and this recipe
+    # runs one microbatch per optimizer step -- the same precondition _wgrad_into_main_grad
+    # relies on, enforced in _init_mxfp6_linear.
+    main_grad.add_(partial.sum(dims).to(main_grad.dtype))
+    return torch.empty_like(param)
 
 
 class MXFP6LinearFunction(torch.autograd.Function):
@@ -767,7 +803,11 @@ class MXFP6MLPFunction(torch.autograd.Function):
                 g1_col, g1_col_s, x_col, x_col_s, f, k, m, out_dtype, _GRAN_VALUE, None, _WGRAD_A6W4
             )
 
-        grad_b1 = b1_partial.sum(0).to(out_dtype) if want_bias_grad else None
+        grad_b1 = (
+            _reduce_grad_into_main_grad(b1, b1_partial, out_dtype, ctx.fuse_wgrad_accum)
+            if want_bias_grad
+            else None
+        )
 
         # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4.
         return grad_x, grad_w1, grad_b1, grad_w2, None, None, None
@@ -1050,8 +1090,11 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
             grad_w1_a = gemm_fp6_impl(g1_cols[0][0], g1_cols[0][1], xc_a, xcs_a, f, k, m, out_dtype, _GRAN_VALUE, None, _WGRAD_A6W4)
             grad_w1_b = gemm_fp6_impl(g1_cols[1][0], g1_cols[1][1], xc_b, xcs_b, f, k, m, out_dtype, _GRAN_VALUE, None, _WGRAD_A6W4)
 
-        grad_b1_a = partials[0].sum(0).to(out_dtype) if want_bias_grad else None
-        grad_b1_b = partials[1].sum(0).to(out_dtype) if want_bias_grad else None
+        if want_bias_grad:
+            grad_b1_a = _reduce_grad_into_main_grad(b1_a, partials[0], out_dtype, ctx.fuse_wgrad_accum)
+            grad_b1_b = _reduce_grad_into_main_grad(b1_b, partials[1], out_dtype, ctx.fuse_wgrad_accum)
+        else:
+            grad_b1_a = grad_b1_b = None
 
         # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4.
         return (grad_x_a, grad_x_b, grad_w1_a, grad_w1_b, grad_b1_a, grad_b1_b,
@@ -1266,11 +1309,17 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
                 g_col, g_col_s, x_col, x_col_s, n, k, m, out_dtype, _GRAN_VALUE, None, _WGRAD_A6W4
             )
 
+        # The QKV bias is not in saved_tensors, so it cannot be routed into main_grad from
+        # here without widening the save set. Its [9216] copies are left on the table.
         grad_b = b_partial.sum(0).to(out_dtype) if want_bias_grad else None
         # dw reduces over rows *and* heads: the norm weight is [head_dim] and shared across
         # heads, and a packer block owns one head, so the partial buffer carries both axes.
-        grad_wq = dwq_partial.sum((0, 1)).to(wq.dtype)
-        grad_wk = dwk_partial.sum((0, 1)).to(wk.dtype)
+        grad_wq = _reduce_grad_into_main_grad(
+            wq, dwq_partial, wq.dtype, ctx.fuse_wgrad_accum, dims=(0, 1)
+        )
+        grad_wk = _reduce_grad_into_main_grad(
+            wk, dwk_partial, wk.dtype, ctx.fuse_wgrad_accum, dims=(0, 1)
+        )
 
         # Trailing Nones cover cos, sin, eps, interleaved, fuse_wgrad_accum, grad_enabled
         # and weight_is_fp4.
@@ -1379,7 +1428,13 @@ class MXFP6FusedMLP(MLP):
         # fc2's weight too.
         fuse_wgrad_accum = self.linear_fc1._fuse_wgrad_accum
         if fuse_wgrad_accum:
-            _claim_main_grad(self.linear_fc1.weight, self.linear_fc2.weight)
+            # fc1's bias is claimed too: its backward now adds straight into main_grad, so
+            # the DDP hook must skip its own add_ or the placeholder handed to autograd
+            # would be summed on top of a gradient that is already there.
+            claimed = [self.linear_fc1.weight, self.linear_fc2.weight]
+            if _FUSED_SMALL_GRADS and self.linear_fc1.bias is not None:
+                claimed.append(self.linear_fc1.bias)
+            _claim_main_grad(*claimed)
 
         output = MXFP6MLPFunction.apply(
             hidden_states,
@@ -1425,10 +1480,17 @@ def grouped_mlp_pair(mlp_a, mlp_b, x_a, x_b):
     if fuse_a != mlp_b.linear_fc1._fuse_wgrad_accum:
         return None
     if fuse_a:
-        _claim_main_grad(
+        claimed = [
             mlp_a.linear_fc1.weight, mlp_a.linear_fc2.weight,
             mlp_b.linear_fc1.weight, mlp_b.linear_fc2.weight,
-        )
+        ]
+        # Same reason as the ungrouped wrapper: fc1's bias gradient now lands in main_grad
+        # directly, so the hook must not add the placeholder on top of it.
+        if _FUSED_SMALL_GRADS:
+            for _m in (mlp_a, mlp_b):
+                if _m.linear_fc1.bias is not None:
+                    claimed.append(_m.linear_fc1.bias)
+        _claim_main_grad(*claimed)
     out_a, out_b = MXFP6GroupedMLPFunction.apply(
         x_a, x_b,
         mlp_a.linear_fc1.weight, mlp_b.linear_fc1.weight,
