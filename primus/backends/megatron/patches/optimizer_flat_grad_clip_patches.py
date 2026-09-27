@@ -105,7 +105,10 @@ def _flat_scale(grads, coeff) -> bool:
     "megatron.optimizer.flat_grad_clip",
     backend="megatron",
     phase="before_train",
-    description="Clip gradients with one flat mul_ per contiguous run instead of the chunked multi_tensor applier.",
+    description=(
+        "Clip gradients with one flat mul_ per contiguous run instead of the "
+        "chunked multi_tensor applier."
+    ),
     condition=lambda ctx: os.environ.get("PRIMUS_FLAT_GRAD_CLIP", "0") == "1",
 )
 def patch_flat_grad_clip(ctx: PatchContext) -> None:
