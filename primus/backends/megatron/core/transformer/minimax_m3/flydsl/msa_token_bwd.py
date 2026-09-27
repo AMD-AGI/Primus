@@ -75,6 +75,7 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd i
     STRIDE,
     TK,
     D,
+    check_buffer_bytes,
 )
 
 _LOG2E = 1.4426950408889634
@@ -1077,6 +1078,9 @@ def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, bloc
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
     delta = torch.empty((S, B, Hq), dtype=torch.float32, device=q.device)  # written by the dq kernel
+    n_chunks = plan.n_chunks
+    ws = torch.empty((n_chunks, 2, block_size, D), dtype=torch.float32, device=q.device)
+    check_buffer_bytes(q=q, k=k, v=v, block_table=block_table, entries=plan.entries, workspace=ws)
     stream = torch.cuda.current_stream()
 
     dq_args = (q, k, v, dout, out, lse, delta, block_table, dq, int(S), int(B), stream)
@@ -1087,8 +1091,6 @@ def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, bloc
         _DQ_CACHE[dq_key] = fn
     fn(*dq_args)
 
-    n_chunks = plan.n_chunks
-    ws = torch.empty((n_chunks, 2, block_size, D), dtype=torch.float32, device=q.device)
     kv_args = (
         q,
         k,

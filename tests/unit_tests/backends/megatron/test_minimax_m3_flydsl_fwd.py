@@ -153,3 +153,18 @@ def test_every_tuning_path_matches_eager(config):
     q, k, v, table = _inputs(2048, 1, 4, 16, seed=1)
     o, lse = msa_token_fwd(q, k, v, table, **config)
     _check(o, lse, q, k, v, table)
+
+
+def test_refuses_buffers_past_32_bit_offsets():
+    """A 2 GiB q would wrap the kernels' 32-bit buffer offsets: refuse it up front."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
+        MAX_BUFFER_BYTES,
+        msa_token_fwd,
+    )
+
+    S, B, Hkv, topk = MAX_BUFFER_BYTES // (16 * 4 * D * 2), 1, 4, 16  # q is exactly 2 GiB
+    q = torch.empty(S, B, 16 * Hkv, D, device="cuda", dtype=torch.bfloat16)
+    k = torch.empty(S, B, Hkv, D, device="cuda", dtype=torch.bfloat16)
+    table = torch.full((B, Hkv, S, topk), -1, device="cuda", dtype=torch.int32)
+    with pytest.raises(AssertionError, match="32-bit"):
+        msa_token_fwd(q, k, k, table)

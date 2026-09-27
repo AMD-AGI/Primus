@@ -189,3 +189,21 @@ def test_no_host_sync():
         msa_token_bwd(dout, q, k, v, out, lse, table)
     finally:
         torch.cuda.set_sync_debug_mode("default")
+
+
+def test_refuses_buffers_past_32_bit_offsets():
+    """The backward checks its buffers before its first kernel launches."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+        msa_token_bwd,
+    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
+        MAX_BUFFER_BYTES,
+    )
+
+    S, B, Hkv, topk = MAX_BUFFER_BYTES // (16 * 4 * D * 2), 1, 4, 16  # q is exactly 2 GiB
+    q = torch.empty(S, B, 16 * Hkv, D, device="cuda", dtype=torch.bfloat16)
+    k = torch.empty(S, B, Hkv, D, device="cuda", dtype=torch.bfloat16)
+    lse = torch.empty(S, B, 16 * Hkv, device="cuda", dtype=torch.float32)
+    table = torch.full((B, Hkv, S, topk), -1, device="cuda", dtype=torch.int32)
+    with pytest.raises(AssertionError, match="32-bit"):
+        msa_token_bwd(q, q, k, k, q, lse, table)

@@ -66,6 +66,20 @@ NXCD = 8
 # LDS row stride in elements: 72 dwords, == 8 mod 32, so the transposed PV reads
 # hit 16 distinct banks (same rule as Turbo's sparse-MLA D_LDS).
 STRIDE = D + 16
+# Buffer offsets are 32-bit byte offsets, and a masked lane parks its offset at
+# 0x7FFFFFFF to fall off the buffer; that only works while every buffer is
+# smaller than 2 GiB.
+MAX_BUFFER_BYTES = 2**31
+
+
+def check_buffer_bytes(**tensors):
+    """Refuse any tensor a kernel would address past 32-bit buffer offsets."""
+    for name, t in tensors.items():
+        nbytes = t.numel() * t.element_size()
+        assert nbytes < MAX_BUFFER_BYTES, (
+            f"{name} is {nbytes} bytes; the flydsl MSA kernels address buffers with 32-bit "
+            f"offsets and need every tensor under {MAX_BUFFER_BYTES} bytes (shape {tuple(t.shape)})"
+        )
 
 
 def build_fwd(
@@ -499,6 +513,7 @@ def msa_token_fwd(q, k, v, block_table, softmax_scale=None, block_size=128, retu
     o = torch.empty_like(q)
     lse = torch.empty((S, B, Hq), dtype=torch.float32, device=q.device)
     slse = torch.empty((S, B, Hq, topk) if return_slot_lse else (1,), dtype=torch.float32, device=q.device)
+    check_buffer_bytes(q=q, k=k, v=v, block_table=block_table, slot_lse=slse)
     config = {**config, "emit_slot_lse": bool(return_slot_lse)}
     key = (Hkv, topk, block_size, float(softmax_scale), tuple(sorted(config.items())))
     entry = _CACHE.get(key)
