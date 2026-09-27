@@ -1217,8 +1217,12 @@ class AdaLN(MegatronModule):
         # bucket. Off by default; enable with ``PRIMUS_ADALN_FUSED_WGRAD=1``.
         #
         # MEASURED AND REJECTED -- do not enable this expecting a win. It is kept only so
-        # the next person does not rebuild it. Two 1000-iteration arms, rotated order, same
-        # config and stack, this gate cost **+6.7 ms/step**. The
+        # the next person does not rebuild it. Two 1000-iteration arms on the production
+        # stack, this gate costs **+2.5 ms/step** against a 1.25 ms
+        # ceiling. (An earlier pair measured +6.7 ms, but those arms were built without the
+        # MXFP6_FUSED_* gates and so ran an unfused baseline; equally affected on
+        # both sides, but it overstated the penalty 2.7x. The penalty shrinking against a
+        # faster baseline is itself consistent with the overlap explanation below.) The
         # isolated kernel measurements below are real and still say -1.25 ms; they simply
         # do not price a change that touches the gradient pipeline. Two candidate causes
         # were tested and excluded -- the dummy-wgrad allocation (68.24 us with it vs 67.45
