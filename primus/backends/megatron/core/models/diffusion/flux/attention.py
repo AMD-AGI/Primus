@@ -352,7 +352,19 @@ def _fused_qkv_project_norm_rope(attn, linear, hidden_states, q_norm, k_norm, q_
     cos, sin = _rope_cos_sin(q_pos_emb, hidden_states.dtype)
     fuse_wgrad_accum = linear._fuse_wgrad_accum
     if fuse_wgrad_accum:
-        _claim_main_grad(linear.weight)
+        # The two QK-norm weights are claimed alongside the projection weight: their
+        # gradients now add straight into main_grad in the backward, so the DDP hook must
+        # skip its own add_ rather than sum the placeholder on top. They are [head_dim]
+        # each, two per block, and their AccumulateGrad copies were 152 of the ~600
+        # device-to-device copies per step.
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+            _FUSED_SMALL_GRADS,
+        )
+
+        if _FUSED_SMALL_GRADS:
+            _claim_main_grad(linear.weight, q_norm.weight, k_norm.weight)
+        else:
+            _claim_main_grad(linear.weight)
     return MXFP6QKVNormRopeFunction.apply(
         hidden_states,
         linear.weight,
