@@ -684,6 +684,145 @@ def _fused_ln_modulate_bwd_reduce_partials_kernel(
     tl.store(DShift_ptr + b_idx * H + offs, acc_shift.to(OUT_DTYPE), mask=mask)
 
 
+# ---------------------------------------------------------------------------
+# Fused gated residual add: residual + gate * x, with a one-pass backward.
+#
+# `scale_add` is three lines of plain PyTorch, so Inductor owns its backward and emits two
+# kernels that both read `grad`:
+#   * a pointwise for d_x = grad * gate
+#   * a reduction for d_gate = sum over sequence of (grad * x)
+# The reduction alone reads 201 MB per launch (two full [512, 32, 3072] bf16 operands) and
+# measures 56.6 us, i.e. 3.55 TB/s against a ~7 TB/s read-only roof. Read out of Inductor's
+# generated source, not modelled.
+#
+# It is not a tuning problem. The access is already coalesced across the hidden dimension,
+# coordinate-descent tuning is on, and TORCHINDUCTOR_MULTI_KERNEL was measured and rejected.
+# The lever is the pass itself: computing d_x and d_gate together reads `grad` once instead
+# of twice.
+#
+# This is the same shape as _fused_ln_modulate_bwd_single_pass_kernel, which already folds
+# d(scale) and d(shift) into the pass that computes d_x -- the gate gradient is simply the
+# one modulation parameter that lives in `scale_add` rather than in the layernorm, and so
+# was left behind in Inductor's hands.
+#
+# MEASURED AND REJECTED -- do not enable expecting a win. Kept so the next person does not
+# rebuild it from the same reasoning, which is sound in isolation and wrong in context.
+#
+#     TRITON/compiled  25.85 -> 21.31 ms   (-4.54, the Inductor kernels this displaces)
+#     these kernels                 7.84 ms   (7.17 bwd + 0.67 partials, 114 launches)
+#     end to end                        +1.45 ms/step
+#
+# The premise was that Inductor reads `grad` twice -- once for d_x, once for the d_gate
+# reduction -- and that one pass would save a read. It does not, because Inductor never
+# paid that cost: it fuses d_x *across op boundaries* into neighbouring kernels, so the
+# write was already absorbed. Making scale_add an opaque autograd.Function forbids exactly
+# the fusion that made the existing code good. The kernel itself is fine -- 302 MB per call
+# at 4.8 TB/s -- it simply moves more total bytes than what it replaced.
+#
+# The general form, which has now come up three times: a hand fusion competes not
+# with the naive code but with whatever the compiler already fused it into. Price it against
+# the latter.
+#
+# Off by default: PRIMUS_FUSED_SCALE_ADD=1.
+# ---------------------------------------------------------------------------
+
+_FUSED_SCALE_ADD = os.environ.get("PRIMUS_FUSED_SCALE_ADD", "0") == "1"
+
+
+@triton.jit
+def _fused_scale_add_bwd_kernel(
+    Grad_ptr, X_ptr, Gate_ptr, DX_ptr, DGateP_ptr,
+    S, B, H, stride_g_sb, stride_x_sb, stride_ga_b,
+    BLOCK_H: tl.constexpr, NS: tl.constexpr, OUT_DTYPE: tl.constexpr,
+):
+    b_idx = tl.program_id(0)
+    s_blk = tl.program_id(1)
+    offs_h = tl.arange(0, BLOCK_H)
+    mask = offs_h < H
+
+    gate = tl.load(Gate_ptr + b_idx * stride_ga_b + offs_h, mask=mask, other=0.0).to(tl.float32)
+    acc_dgate = tl.zeros([BLOCK_H], dtype=tl.float32)
+
+    # Strided rather than blocked over S, matching the layernorm kernel: programs running
+    # at the same time then read neighbouring rows.
+    for s_idx in tl.range(s_blk, S, NS):
+        sb_idx = s_idx * B + b_idx
+        g = tl.load(Grad_ptr + sb_idx * stride_g_sb + offs_h, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(X_ptr + sb_idx * stride_x_sb + offs_h, mask=mask, other=0.0).to(tl.float32)
+        tl.store(DX_ptr + sb_idx * stride_x_sb + offs_h, (g * gate).to(OUT_DTYPE), mask=mask)
+        acc_dgate += g * x
+
+    tl.store(DGateP_ptr + (b_idx * NS + s_blk) * H + offs_h, acc_dgate, mask=mask)
+
+
+@triton.jit
+def _fused_scale_add_reduce_partials_kernel(
+    DGateP_ptr, DGate_ptr, H, NS: tl.constexpr, BLOCK: tl.constexpr, OUT_DTYPE: tl.constexpr,
+):
+    b_idx = tl.program_id(0)
+    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < H
+    acc = tl.zeros([BLOCK], dtype=tl.float32)
+    # Fixed trip count in a fixed order, so the sum is reproducible run to run.
+    for i in tl.static_range(NS):
+        acc += tl.load(DGateP_ptr + (b_idx * NS + i) * H + offs, mask=mask, other=0.0)
+    tl.store(DGate_ptr + b_idx * H + offs, acc.to(OUT_DTYPE), mask=mask)
+
+
+class _FusedScaleAdd(torch.autograd.Function):
+    """``residual + gate * x`` with d_x and d_gate produced in one pass over ``grad``."""
+
+    @staticmethod
+    def forward(ctx, residual, x, gate):
+        ctx.save_for_backward(x, gate)
+        return residual + gate * x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, gate = ctx.saved_tensors
+        g = grad_output.contiguous()
+        S, B, H = x.shape
+        ns = _LN_MOD_BWD_NS
+        dx = torch.empty_like(x)
+        dgate = torch.empty_like(gate)
+        partials = torch.empty(B * ns * H, device=x.device, dtype=torch.float32)
+        out_dtype = _TORCH_TO_TRITON_DTYPE[x.dtype]
+        _fused_scale_add_bwd_kernel[(B, ns)](
+            g, x, gate, dx, partials,
+            S, B, H, g.stride(1), x.stride(1), gate.stride(0),
+            BLOCK_H=triton.next_power_of_2(H), NS=ns, OUT_DTYPE=out_dtype, num_warps=4,
+        )
+        block = 1024
+        _fused_scale_add_reduce_partials_kernel[(B, triton.cdiv(H, block))](
+            partials, dgate, H, NS=ns, BLOCK=block, OUT_DTYPE=out_dtype,
+        )
+        # d(residual) is the incoming gradient unchanged, so it costs no kernel at all.
+        return grad_output, dx, dgate
+
+
+def _fused_scale_add(residual, x, gate):
+    """Eligible only for the contiguous [S, B, H] / [B, H] case the Flux blocks use."""
+    if not _FUSED_SCALE_ADD:
+        return None
+    if x.dim() != 3 or gate.dim() != 2:
+        return None
+    if x.shape != residual.shape or gate.shape[0] != x.shape[1] or gate.shape[1] != x.shape[2]:
+        return None
+    if x.dtype not in (torch.bfloat16, torch.float16) or x.dtype is not gate.dtype:
+        return None
+    # gate is a chunk of the AdaLN projection's [B, n*H] output, so it is strided along
+    # dim 0 and contiguous only in the hidden dimension. The kernel takes stride_ga_b and
+    # handles that; requiring full contiguity here silently disabled the whole path -- the
+    # arm ran with the gate on, the Inductor reduction still in the trace, and no custom
+    # kernel anywhere. x and residual are indexed as (s*B + b)*H + h, which does need them
+    # contiguous.
+    if not (x.is_contiguous() and residual.is_contiguous()):
+        return None
+    if gate.stride(1) != 1:
+        return None
+    return _FusedScaleAdd.apply(residual, x, gate)
+
+
 def _ln_modulate_bwd_single_pass(
     single_pass_kernel, reduce_kernel, grad_output, x, mean, rstd, scale, out_dtype
 ):
@@ -1325,6 +1464,9 @@ class AdaLN(MegatronModule):
         Returns:
             Combined tensor [B, ..., hidden_size]
         """
+        fused = _fused_scale_add(residual, x, gate)
+        if fused is not None:
+            return fused
         return residual + gate * x
 
     def modulated_layernorm(self, x: Tensor, shift: Tensor, scale: Tensor, layernorm_idx: int = 0) -> Tensor:
