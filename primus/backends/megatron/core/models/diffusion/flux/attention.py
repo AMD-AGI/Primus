@@ -340,6 +340,72 @@ def _fused_qkv_rope_ok(attn, hidden_states, q_norm, k_norm, rotary_pos_emb, pack
     )
 
 
+def _joint_qkv_project_norm_rope(attn, hidden_states, additional_hidden_states,
+                                 main_rope, added_rope):
+    """Both streams' projection + QK-norm + RoPE, emitting q/k/v already joint.
+
+    Returns ``(query, key, value)`` spanning the joint sequence in ``[added; main]`` order,
+    or ``None`` when the pair is not eligible -- in which case the caller runs the two
+    streams separately and concatenates, exactly as before.
+
+    Removing the concatenation does not change the model: the reference builds the same
+    joint tensors with ``torch.cat``. It changes only where the projections write.
+    """
+    from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+        MXFP6JointQKVFunction,
+        _FUSED_SMALL_GRADS,
+        _claim_main_grad,
+        joint_qkv_enabled,
+    )
+
+    if not joint_qkv_enabled():
+        return None
+    main, added = attn.linear_qkv, attn.added_linear_qkv
+    if main is None or added is None:
+        return None
+    # Both projections must agree in shape for one N/K to describe both, and both must be
+    # taking the same wgrad-fusion path.
+    if main.weight.shape != added.weight.shape:
+        return None
+    if hidden_states.shape[1:] != additional_hidden_states.shape[1:]:
+        return None
+    fuse = main._fuse_wgrad_accum
+    if fuse != added._fuse_wgrad_accum:
+        return None
+    if main._weight_is_fp4 != added._weight_is_fp4:
+        return None
+    if fuse:
+        # Every parameter whose gradient this Function writes into main_grad must be
+        # claimed here, not just the projection weights. The QK-norm weights are routed
+        # through _reduce_grad_into_main_grad in the backward when PRIMUS_MXFP6_FUSED_
+        # SMALL_GRADS is on; claiming the projections alone left the hook adding their
+        # placeholder -- uninitialised memory -- on top of a gradient already written, and
+        # the run went to grad norm nan with the loss field absent. Nothing raised: the
+        # NaN counter is blind because check_for_nan_in_loss_and_grad is false in this
+        # recipe. The write and the claim have to be kept in lockstep at every call site.
+        claimed = [main.weight, added.weight]
+        if _FUSED_SMALL_GRADS:
+            claimed += [
+                attn.q_layernorm.weight, attn.k_layernorm.weight,
+                attn.added_q_layernorm.weight, attn.added_k_layernorm.weight,
+            ]
+        _claim_main_grad(*claimed)
+    cos_a, sin_a = _rope_cos_sin(added_rope, additional_hidden_states.dtype)
+    cos_b, sin_b = _rope_cos_sin(main_rope, hidden_states.dtype)
+    return MXFP6JointQKVFunction.apply(
+        additional_hidden_states, hidden_states,
+        added.weight, main.weight,
+        added.bias, main.bias,
+        attn.added_q_layernorm.weight, attn.added_k_layernorm.weight,
+        attn.q_layernorm.weight, attn.k_layernorm.weight,
+        cos_a, sin_a, cos_b, sin_b,
+        attn.q_layernorm.eps,
+        True,  # interleaved; _fused_qkv_unusable_reason rejects anything else
+        # Resolved once at build time by _init_mxfp6_linear, like the per-stream path.
+        fuse, torch.is_grad_enabled(), main._weight_is_fp4,
+    )[:3]
+
+
 def _fused_qkv_project_norm_rope(attn, linear, hidden_states, q_norm, k_norm, q_pos_emb):
     """Projection, QK norm and RoPE in one autograd Function. Returns (query, key, value).
 
@@ -783,7 +849,20 @@ class JointSelfAttention(Attention):
             )
         )
 
+        joint_qkv = None
         if use_mxfp6:
+            # One Function for both streams, emitting q/k/v already joint, so the three
+            # torch.cat calls below have nothing left to do. Returns None when the pair is
+            # not eligible, in which case the per-stream path runs exactly as before.
+            joint_qkv = _joint_qkv_project_norm_rope(
+                self, hidden_states, additional_hidden_states, main_rope[0], added_rope[0],
+            )
+
+        if use_mxfp6 and joint_qkv is not None:
+            query, key, value = joint_qkv
+            fused_rope_applied = True
+            main_qkv = added_qkv = None
+        elif use_mxfp6:
             # Nothing above has projected yet, so the Function owns the whole chain from
             # hidden states to rotated Q/K and V, per stream and before the concatenation.
             added_query, added_key, added_value = _fused_qkv_project_norm_rope(
@@ -833,10 +912,13 @@ class JointSelfAttention(Attention):
             query, key, value = main_qkv
             added_query, added_key, added_value = added_qkv
 
-        # Concatenate streams: [added; main]
-        query = torch.cat([added_query, query], dim=0)
-        key = torch.cat([added_key, key], dim=0)
-        value = torch.cat([added_value, value], dim=0)
+        # Concatenate streams: [added; main]. Skipped when the joint path already produced
+        # them joined -- the concatenation still happened, it was just produced rather than
+        # performed.
+        if joint_qkv is None:
+            query = torch.cat([added_query, query], dim=0)
+            key = torch.cat([added_key, key], dim=0)
+            value = torch.cat([added_value, value], dim=0)
 
         # Adjust for inference (KV caching, etc.)
         query, key, value, rotary_pos_emb, attn_mask_type, *_ = self._adjust_key_value_for_inference(
