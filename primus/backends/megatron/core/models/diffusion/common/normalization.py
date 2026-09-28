@@ -703,7 +703,8 @@ def _fused_ln_modulate_bwd_reduce_partials_kernel(
 # not with the naive code but with whatever the compiler already fused it into. Price it
 # against the latter, and read the generated code before assuming a read is being paid.
 #
-# Implementation and arms: scratch/mxfp6/probes_archive in tiger-training-internal.
+# The implementation and its measurement arms are kept in the internal MXFP6
+# campaign notes rather than here; ask the diffusion team if you need them.
 # ---------------------------------------------------------------------------
 
 
@@ -1240,8 +1241,8 @@ class AdaLN(MegatronModule):
         # measured and REJECTED: +2.5 ms/step against a 1.25 ms theoretical
         # saving, because at these M=32 shapes ``wgrad_gemm_accum_fp16`` is
         # slower than the separate add it replaces. Removed rather than left as
-        # a gate; the code and the arms are in scratch/mxfp6/probes_archive in
-        # tiger-training-internal. Do not rebuild it without re-reading those.
+        # a gate. The code and its measurement arms are kept in the internal
+        # MXFP6 campaign notes; do not rebuild this without re-reading them.
         #
         # The isolated kernel numbers are genuinely favourable (-1.13 ms/step across
         # both production shapes), which is exactly why this is worth a warning: they
@@ -1318,7 +1319,7 @@ class AdaLN(MegatronModule):
         # built and measured here and cost +1.45 ms/step: Inductor was already
         # fusing the d_gate reduction across the op boundary into a neighbouring
         # kernel, and wrapping the region in an opaque autograd.Function forbade
-        # exactly that. See scratch/mxfp6/probes_archive in tiger-training-internal.
+        # exactly that. Details in the internal MXFP6 campaign notes.
         return residual + gate * x
 
     def modulated_layernorm(self, x: Tensor, shift: Tensor, scale: Tensor, layernorm_idx: int = 0) -> Tensor:
