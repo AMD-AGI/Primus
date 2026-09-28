@@ -140,8 +140,11 @@ def build_dq(num_kv_heads: int, topk: int, block_size: int, scale: float):
     LPR = THREADS // TK  # loader lanes per key row
     CPL = D // LPR
     NV8 = CPL // 8
+    RUN = 8 * LPR  # elements the LPR lanes of a row load per chunk, contiguously
     BUF = TK * STRIDE
-    NBUF = 2
+    # One wave per work-group: its LDS accesses execute in program order, so a second
+    # buffer would buy no overlap and only double the LDS footprint that caps occupancy.
+    NBUF = 1
 
     allocator = SmemAllocator(None, arch=get_hip_arch(), global_sym_name="msa_bwd_dq_smem")
     k_off = allocator._align(allocator.ptr, 16)
@@ -242,8 +245,10 @@ def build_dq(num_kv_heads: int, topk: int, block_size: int, scale: float):
         def kv_offset(key):
             return ((key * Bn + b) * fx.Index(Hkv) + g) * fx.Index(D)
 
+        # lane -> (row = lane // LPR, chunk c at column (lane % LPR)*8 + c*RUN): for each
+        # chunk the LPR lanes of a row read one contiguous run of the 256-byte row
         ld_row = lane // fx.Index(LPR)
-        ld_col = (lane % fx.Index(LPR)) * fx.Index(CPL)
+        ld_col = (lane % fx.Index(LPR)) * fx.Index(8)
         ld_lds = ld_row * fx.Index(STRIDE) + ld_col
 
         def load_blk(step):
@@ -258,10 +263,10 @@ def build_dq(num_kv_heads: int, topk: int, block_size: int, scale: float):
         def load_rows(kv0):
             src = kv_offset(fx.Index(kv0) + ld_row) + ld_col
             return [
-                buffer_ops.buffer_load(k_rsrc, src + fx.Index(c * 8), vec_width=8, dtype=elem)
+                buffer_ops.buffer_load(k_rsrc, src + fx.Index(c * RUN), vec_width=8, dtype=elem)
                 for c in range_constexpr(NV8)
             ] + [
-                buffer_ops.buffer_load(v_rsrc, src + fx.Index(c * 8), vec_width=8, dtype=elem)
+                buffer_ops.buffer_load(v_rsrc, src + fx.Index(c * RUN), vec_width=8, dtype=elem)
                 for c in range_constexpr(NV8)
             ]
 
@@ -284,8 +289,8 @@ def build_dq(num_kv_heads: int, topk: int, block_size: int, scale: float):
             kv0 = step_kv0(blk, j)
             buf = (j % fx.Index(NBUF)) * fx.Index(BUF)
             for c in range_constexpr(NV8):
-                Vec(rows[c]).store(lds_k, [buf + ld_lds + fx.Index(c * 8)])
-                Vec(rows[NV8 + c]).store(lds_v, [buf + ld_lds + fx.Index(c * 8)])
+                Vec(rows[c]).store(lds_k, [buf + ld_lds + fx.Index(c * RUN)])
+                Vec(rows[NV8 + c]).store(lds_v, [buf + ld_lds + fx.Index(c * RUN)])
 
             # S^T = K Q^T, dP^T = V dO^T: lane holds [key = grp*4 + i, head = lo]
             s_acc = Vec.filled(4, 0.0, fx.Float32)
