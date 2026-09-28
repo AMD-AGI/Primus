@@ -71,7 +71,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `mamba_370M.yaml` | `primus/configs/models/megatron/mamba_370M.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
 | `mamba_base.yaml` | `primus/configs/models/megatron/mamba_base.yaml` | Base fragment | — | — |
 | `minimax_m2.5.yaml` | `primus/configs/models/megatron/minimax_m2.5.yaml` | MoE model preset | MI355X | BF16, FP8 |
-| `minimax_m3.yaml` | `primus/configs/models/megatron/minimax_m3.yaml` | MoE model preset | No curated example in this repo | — |
+| `minimax_m3.yaml` | `primus/configs/models/megatron/minimax_m3.yaml` | MoE model preset | MI355X | BF16, FP8 |
 | `mixtral_8x7B_v0.1.yaml` | `primus/configs/models/megatron/mixtral_8x7B_v0.1.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `mixtral_8x22B_v0.1.yaml` | `primus/configs/models/megatron/mixtral_8x22B_v0.1.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `mixtral_base.yaml` | `primus/configs/models/megatron/mixtral_base.yaml` | Base fragment | — | — |
