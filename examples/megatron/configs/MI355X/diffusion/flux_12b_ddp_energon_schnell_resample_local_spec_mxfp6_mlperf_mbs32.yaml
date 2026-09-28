@@ -1,20 +1,28 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the Apache License, Version 2.0.
 
-# Flux 12B Schnell Training — DDP + Local Spec + MXFP6 (MLPerf Mode, MI355X)
+# Flux 12B Schnell Training — DDP + Local Spec + MXFP6
+# (MLPerf Mode, MI355X, single node, MBS=32 / GBS=256)
 #
-# The submission recipe for MXFP6. It is the FP8 MLPerf config with the
-# precision block swapped, so that a comparison between the two is a comparison
-# of numerics and nothing else; everything the ruleset pins -- AdamW
-# 0.9/0.95/1e-8, weight decay 0.1, gradient clip 1.0, eval every 512 steps --
-# is identical on purpose and must not be tuned. For MXFP6 development work
-# without the MLPerf machinery, use
+# The MBS=32 submission recipe for MXFP6, on one 8x MI355X node. Its sibling
+# ...local_spec_mxfp6_mlperf.yaml is the same recipe at MBS=64 / GBS=512; the
+# two differ ONLY in the batch shape and in the step counts that keep the
+# sample budget identical between them. Everything the ruleset pins -- AdamW
+# 0.9/0.95/1e-8, weight decay 0.1, gradient clip 1.0, the evaluation cadence in
+# samples -- is the same on purpose and must not be tuned. For MXFP6
+# development work without the MLPerf machinery, use
 # flux_12b_ddp_energon_schnell_resample_local_spec_mxfp6.yaml.
 #
-# Batch shape: MBS=64 / GBS=512, single node (8x MI355X). The sibling
-# ...local_spec_mxfp6_mlperf_mbs32.yaml is the same recipe at MBS=32 / GBS=256,
-# differing only in the batch shape and in the step counts that hold the sample
-# budget equal. Keep the two in step if either budget changes.
+# Why a second batch shape at all: MBS=32 is the shape the optimization
+# campaign was measured at, so it is the one whose step time has a directly
+# comparable reference. MBS=64 fits the card and amortizes better; MBS=32
+# leaves materially more headroom (peak memory at MBS=64 is most of the 288 GB).
+#
+# Performance-relevant settings in this file were swept at MBS=64/GBS=512 --
+# the bucket size, the optimizer dtypes, the fused-MLP throughput figure. The
+# settings transfer (the collective path and the fused kernels are identical);
+# the absolute numbers quoted in their comments do not. Re-measure before
+# quoting any of them for this shape.
 #
 # Hardware: gfx950 (MI350/MI355) only. The A6W6 kernels are gfx950 assembly, so
 # unlike MXFP4 there is no fallback path on older parts, and startup fails
@@ -31,7 +39,7 @@
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:flux_12b_ddp_local_mxfp6_mlperf}
+exp_name: ${PRIMUS_EXP_NAME:flux_12b_ddp_local_mxfp6_mlperf_mbs32}
 
 workspace: ${PRIMUS_WORKSPACE:./output}
 
@@ -100,27 +108,29 @@ modules:
       #
       # This is a safety cap, not a target: the run stops at the quality
       # threshold, and reaching it is the result. The reference convergence
-      # points for flux1 at GBS 512 (mlperf_logging rcp_checker
+      # points for flux1 (mlperf_logging rcp_checker
       # training_6.0.0/rcps_flux1.json, 20 NVIDIA BF16 runs) span 7077888 to
-      # 7602176 samples, i.e. 13824 to 14848 steps. The previous 5000 steps
-      # was 2560000 samples -- roughly a third of the way -- so every run
-      # exhausted its budget below target and no run could ever have counted.
-      # 16000 steps (8192000 samples) clears the slowest reference run with
-      # margin for a run that converges later than the reference spread.
-      train_iters: 16000
-      eval_interval: 512
+      # 7602176 samples. At this recipe's GBS of 256 that is 27648 to 29696
+      # steps, twice the step count of the GBS 512 recipe for the same samples.
+      #
+      # Every schedule here is therefore expressed so that the *sample* budget
+      # matches the GBS 512 sibling exactly -- 32000 steps is the same 8192000
+      # samples, lr_warmup_iters 3200 the same 819200, and eval_interval 1024
+      # the same 262144 samples between evaluations. Keep them in that
+      # relationship if either recipe's budget changes, otherwise the two stop
+      # being a controlled comparison of batch size.
+      train_iters: 32000
+      eval_interval: 1024
       # Cover the whole MLPerf validation set. eval_iters is derived from this
-      # (29696 / 512 = 58); setting both is rejected. The previous eval_iters of
-      # 10 read 5120 samples, and even at 58 the training num_workers of 16
-      # would have left 1920 of them unread.
+      # (29696 / 256 = 116); setting both is rejected.
       eval_samples: 29696
       # 1, not the training num_workers and not 0. Anything above 1 can under-read
       # the split; 1 is the one nonzero value that cannot, because Energon clamps
       # the data split to max(1, num_workers) (sharder.py:205), so 1 shards exactly
       # as 0 does and covers the split identically, while 0 additionally forgoes
       # prefetch by reading in the main process. val_loss is unchanged between the
-      # two. assert_val_worker_divisibility accepts 1 at the 4-node shape:
-      # 29696 % (32 * 1 * 32) == 0.
+      # two. assert_val_worker_divisibility accepts 1 at this single-node shape:
+      # 29696 % (32 * 1 * 8) == 0.
       val_num_workers: 1
       # MLPerf assigns each val image one fixed timestep, carried in the Arrow
       # 'timestep' column. Requires a val split ingested with that column; shards
@@ -131,8 +141,8 @@ modules:
       save_interval: 10000
 
       # Batch configuration
-      micro_batch_size: 64
-      global_batch_size: 512
+      micro_batch_size: 32
+      global_batch_size: 256
       seq_length: 512
 
       # ==========================================
@@ -154,10 +164,10 @@ modules:
       clip_grad: 1.0
 
       # Learning rate scheduler (warmup-hold, no decay)
-      lr_warmup_iters: 1600
+      lr_warmup_iters: 3200
       # Inert while lr_decay_style is constant; kept equal to the budget so
       # it cannot be misread as a decay that ends a quarter of the way in.
-      lr_decay_iters: 16000
+      lr_decay_iters: 32000
       lr_decay_style: constant
 
       # ==========================================

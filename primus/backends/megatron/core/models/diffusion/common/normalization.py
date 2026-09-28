@@ -19,7 +19,6 @@ Reference:
     - Flux Paper: "Flux: A Scalable Diffusion Model"
 """
 
-import os
 from typing import Tuple
 
 import torch
@@ -32,6 +31,8 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from torch import Tensor
 from torch.library import triton_op, wrap_triton
+
+from .mxfp6_gates import gates
 
 # ---------------------------------------------------------------------------
 # Opaque LayerNorm custom op — prevents Inductor from decomposing
@@ -48,7 +49,7 @@ _custom_op = torch.library.custom_op
 # Run the LN-modulate backward as one pass over the activations instead of two. See the
 # block above _fused_ln_modulate_bwd_single_pass_kernel. Off by default until the
 # end-to-end number is confirmed; it is numerically equivalent, not an approximation.
-_LN_MOD_SINGLE_PASS_BWD = os.environ.get("MXFP6_FUSED_LN_MOD_BWD", "0") == "1"
+# Set with `mxfp6_fused_ln_mod_bwd: true`.
 
 
 # ---------------------------------------------------------------------------
@@ -685,142 +686,25 @@ def _fused_ln_modulate_bwd_reduce_partials_kernel(
 
 
 # ---------------------------------------------------------------------------
-# Fused gated residual add: residual + gate * x, with a one-pass backward.
+# Fused gated residual add: BUILT, MEASURED, REJECTED (+1.45 ms/step).
 #
-# `scale_add` is three lines of plain PyTorch, so Inductor owns its backward and emits two
-# kernels that both read `grad`:
-#   * a pointwise for d_x = grad * gate
-#   * a reduction for d_gate = sum over sequence of (grad * x)
-# The reduction alone reads 201 MB per launch (two full [512, 32, 3072] bf16 operands) and
-# measures 56.6 us, i.e. 3.55 TB/s against a ~7 TB/s read-only roof. Read out of Inductor's
-# generated source, not modelled.
+# `scale_add` is three lines of plain PyTorch, so Inductor owns its backward. The
+# obvious win was that its two backward kernels both read `grad` -- a pointwise for
+# d_x and a reduction for d_gate -- so computing them in one pass should read `grad`
+# once instead of twice. The hand-written one-pass kernel was fine in isolation: 302 MB
+# per call at 4.8 TB/s.
 #
-# It is not a tuning problem. The access is already coalesced across the hidden dimension,
-# coordinate-descent tuning is on, and TORCHINDUCTOR_MULTI_KERNEL was measured and rejected.
-# The lever is the pass itself: computing d_x and d_gate together reads `grad` once instead
-# of twice.
+# It lost anyway, because Inductor had never actually paid for that second read: it was
+# fusing the d_gate reduction across the op boundary into a neighbouring kernel, and
+# wrapping the region in an opaque autograd.Function forbade exactly that fusion. The
+# replacement moved more total bytes than what it displaced.
 #
-# This is the same shape as _fused_ln_modulate_bwd_single_pass_kernel, which already folds
-# d(scale) and d(shift) into the pass that computes d_x -- the gate gradient is simply the
-# one modulation parameter that lives in `scale_add` rather than in the layernorm, and so
-# was left behind in Inductor's hands.
+# The general form, which came up three times in this campaign: a hand fusion competes
+# not with the naive code but with whatever the compiler already fused it into. Price it
+# against the latter, and read the generated code before assuming a read is being paid.
 #
-# MEASURED AND REJECTED -- do not enable expecting a win. Kept so the next person does not
-# rebuild it from the same reasoning, which is sound in isolation and wrong in context.
-#
-#     TRITON/compiled  25.85 -> 21.31 ms   (-4.54, the Inductor kernels this displaces)
-#     these kernels                 7.84 ms   (7.17 bwd + 0.67 partials, 114 launches)
-#     end to end                        +1.45 ms/step
-#
-# The premise was that Inductor reads `grad` twice -- once for d_x, once for the d_gate
-# reduction -- and that one pass would save a read. It does not, because Inductor never
-# paid that cost: it fuses d_x *across op boundaries* into neighbouring kernels, so the
-# write was already absorbed. Making scale_add an opaque autograd.Function forbids exactly
-# the fusion that made the existing code good. The kernel itself is fine -- 302 MB per call
-# at 4.8 TB/s -- it simply moves more total bytes than what it replaced.
-#
-# The general form, which has now come up three times: a hand fusion competes not
-# with the naive code but with whatever the compiler already fused it into. Price it against
-# the latter.
-#
-# Off by default: PRIMUS_FUSED_SCALE_ADD=1.
+# Implementation and arms: scratch/mxfp6/probes_archive in tiger-training-internal.
 # ---------------------------------------------------------------------------
-
-_FUSED_SCALE_ADD = os.environ.get("PRIMUS_FUSED_SCALE_ADD", "0") == "1"
-
-
-@triton.jit
-def _fused_scale_add_bwd_kernel(
-    Grad_ptr, X_ptr, Gate_ptr, DX_ptr, DGateP_ptr,
-    S, B, H, stride_g_sb, stride_x_sb, stride_ga_b,
-    BLOCK_H: tl.constexpr, NS: tl.constexpr, OUT_DTYPE: tl.constexpr,
-):
-    b_idx = tl.program_id(0)
-    s_blk = tl.program_id(1)
-    offs_h = tl.arange(0, BLOCK_H)
-    mask = offs_h < H
-
-    gate = tl.load(Gate_ptr + b_idx * stride_ga_b + offs_h, mask=mask, other=0.0).to(tl.float32)
-    acc_dgate = tl.zeros([BLOCK_H], dtype=tl.float32)
-
-    # Strided rather than blocked over S, matching the layernorm kernel: programs running
-    # at the same time then read neighbouring rows.
-    for s_idx in tl.range(s_blk, S, NS):
-        sb_idx = s_idx * B + b_idx
-        g = tl.load(Grad_ptr + sb_idx * stride_g_sb + offs_h, mask=mask, other=0.0).to(tl.float32)
-        x = tl.load(X_ptr + sb_idx * stride_x_sb + offs_h, mask=mask, other=0.0).to(tl.float32)
-        tl.store(DX_ptr + sb_idx * stride_x_sb + offs_h, (g * gate).to(OUT_DTYPE), mask=mask)
-        acc_dgate += g * x
-
-    tl.store(DGateP_ptr + (b_idx * NS + s_blk) * H + offs_h, acc_dgate, mask=mask)
-
-
-@triton.jit
-def _fused_scale_add_reduce_partials_kernel(
-    DGateP_ptr, DGate_ptr, H, NS: tl.constexpr, BLOCK: tl.constexpr, OUT_DTYPE: tl.constexpr,
-):
-    b_idx = tl.program_id(0)
-    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < H
-    acc = tl.zeros([BLOCK], dtype=tl.float32)
-    # Fixed trip count in a fixed order, so the sum is reproducible run to run.
-    for i in tl.static_range(NS):
-        acc += tl.load(DGateP_ptr + (b_idx * NS + i) * H + offs, mask=mask, other=0.0)
-    tl.store(DGate_ptr + b_idx * H + offs, acc.to(OUT_DTYPE), mask=mask)
-
-
-class _FusedScaleAdd(torch.autograd.Function):
-    """``residual + gate * x`` with d_x and d_gate produced in one pass over ``grad``."""
-
-    @staticmethod
-    def forward(ctx, residual, x, gate):
-        ctx.save_for_backward(x, gate)
-        return residual + gate * x
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        x, gate = ctx.saved_tensors
-        g = grad_output.contiguous()
-        S, B, H = x.shape
-        ns = _LN_MOD_BWD_NS
-        dx = torch.empty_like(x)
-        dgate = torch.empty_like(gate)
-        partials = torch.empty(B * ns * H, device=x.device, dtype=torch.float32)
-        out_dtype = _TORCH_TO_TRITON_DTYPE[x.dtype]
-        _fused_scale_add_bwd_kernel[(B, ns)](
-            g, x, gate, dx, partials,
-            S, B, H, g.stride(1), x.stride(1), gate.stride(0),
-            BLOCK_H=triton.next_power_of_2(H), NS=ns, OUT_DTYPE=out_dtype, num_warps=4,
-        )
-        block = 1024
-        _fused_scale_add_reduce_partials_kernel[(B, triton.cdiv(H, block))](
-            partials, dgate, H, NS=ns, BLOCK=block, OUT_DTYPE=out_dtype,
-        )
-        # d(residual) is the incoming gradient unchanged, so it costs no kernel at all.
-        return grad_output, dx, dgate
-
-
-def _fused_scale_add(residual, x, gate):
-    """Eligible only for the contiguous [S, B, H] / [B, H] case the Flux blocks use."""
-    if not _FUSED_SCALE_ADD:
-        return None
-    if x.dim() != 3 or gate.dim() != 2:
-        return None
-    if x.shape != residual.shape or gate.shape[0] != x.shape[1] or gate.shape[1] != x.shape[2]:
-        return None
-    if x.dtype not in (torch.bfloat16, torch.float16) or x.dtype is not gate.dtype:
-        return None
-    # gate is a chunk of the AdaLN projection's [B, n*H] output, so it is strided along
-    # dim 0 and contiguous only in the hidden dimension. The kernel takes stride_ga_b and
-    # handles that; requiring full contiguity here silently disabled the whole path -- the
-    # arm ran with the gate on, the Inductor reduction still in the trace, and no custom
-    # kernel anywhere. x and residual are indexed as (s*B + b)*H + h, which does need them
-    # contiguous.
-    if not (x.is_contiguous() and residual.is_contiguous()):
-        return None
-    if gate.stride(1) != 1:
-        return None
-    return _FusedScaleAdd.apply(residual, x, gate)
 
 
 def _ln_modulate_bwd_single_pass(
@@ -871,7 +755,7 @@ def _ln_modulate_bwd_single_pass(
 
 def _ln_modulate_bwd_can_single_pass(x, scale) -> bool:
     return (
-        _LN_MOD_SINGLE_PASS_BWD
+        gates().fused_ln_mod_bwd
         and x.dim() == 3
         and scale.dim() == 2
         and triton.next_power_of_2(x.shape[-1]) <= _LN_MOD_BWD_MAX_BLOCK_H
@@ -1351,53 +1235,19 @@ class AdaLN(MegatronModule):
         # Mark weight as sequence parallel if needed
         setattr(self.adaLN_modulation[-1].weight, "sequence_parallel", config.sequence_parallel)
 
-        # Have this projection's wgrad GEMM accumulate straight into ``weight.main_grad``
-        # instead of materialising ``.grad`` for ``AccumulateGrad`` to copy into the DDP
-        # bucket. Off by default; enable with ``PRIMUS_ADALN_FUSED_WGRAD=1``.
+        # NOTE: having this projection's wgrad GEMM accumulate straight into
+        # ``weight.main_grad`` (via ``gradient_accumulation_fusion``) was built,
+        # measured and REJECTED: +2.5 ms/step against a 1.25 ms theoretical
+        # saving, because at these M=32 shapes ``wgrad_gemm_accum_fp16`` is
+        # slower than the separate add it replaces. Removed rather than left as
+        # a gate; the code and the arms are in scratch/mxfp6/probes_archive in
+        # tiger-training-internal. Do not rebuild it without re-reading those.
         #
-        # MEASURED AND REJECTED -- do not enable this expecting a win. It is kept only so
-        # the next person does not rebuild it. Two 1000-iteration arms on the production
-        # stack, this gate costs **+2.5 ms/step** against a 1.25 ms
-        # ceiling. (An earlier pair measured +6.7 ms, but those arms were built without the
-        # MXFP6_FUSED_* gates and so ran an unfused baseline; equally affected on
-        # both sides, but it overstated the penalty 2.7x. The penalty shrinking against a
-        # faster baseline is itself consistent with the overlap explanation below.) The
-        # isolated kernel measurements below are real and still say -1.25 ms; they simply
-        # do not price a change that touches the gradient pipeline. Two candidate causes
-        # were tested and excluded -- the dummy-wgrad allocation (68.24 us with it vs 67.45
-        # us with a reused buffer; the caching allocator absorbs it) and memory pressure
-        # (peak 164.69 vs 165.22 GB, marginally lower). What remains unexcluded is
-        # perturbation of the grad-reduce overlap, which is worth 32.4 ms in this recipe
-        # and therefore cannot be paid for by a 1.25 ms ceiling.
-        #
-        # This is Megatron's ``gradient_accumulation_fusion`` applied to one module rather
-        # than through the config, deliberately. Setting it on ``FluxConfig`` would also
-        # set it on the MXFP6 linears, which reject it outright
-        # (``primus_turbo_mxfp6_local.py:505``) because their A6W6 store has no beta=1
-        # epilogue. ``ColumnParallelLinear`` reads the flag off the module
-        # (``layers.py:1006``), so overriding the attribute reaches exactly these 76
-        # projections and nothing else.
-        #
-        # Correcting the record in ``common/config.py:122``: that comment rejects the
-        # config-wide flag as "+11% step time ... wgrad_gemm_accum_fp16 at M=32 is slower
-        # than the separate add it replaces". Measured directly at both production shapes
-        # with an fp32 main_grad, the fused form is *faster*, not slower:
-        #
-        #     [18432,3072]  gemm+copy 85.76us -> fused 68.08us   x38
-        #      [9216,3072]  gemm+copy 48.46us -> fused 36.34us   x38
-        #                                        total -1.13 ms/step
-        #
-        # The earlier end-to-end A/B that recorded "no-op, identical copy counts" could not
-        # have shown anything: FluxConfig hardcodes gradient_accumulation_fusion=False
-        # (``flux/config.py:154``), so the yaml flag reached Megatron's args -- which is
-        # what train.log displayed -- and never reached these modules. The MXFP6 guard
-        # above is the proof: that run would have raised on the first MXFP6 linear.
-        #
-        # Accumulation (``+=``) rather than overwrite is correct here because DDP zeroes
-        # the grad buffers each step, and this recipe runs one microbatch per optimizer
-        # step, exactly as ``mxfp6_fused_wgrad_accum`` already requires.
-        if os.environ.get("PRIMUS_ADALN_FUSED_WGRAD", "0") == "1":
-            self.adaLN_modulation[-1].gradient_accumulation_fusion = True
+        # The isolated kernel numbers are genuinely favourable (-1.13 ms/step across
+        # both production shapes), which is exactly why this is worth a warning: they
+        # do not price a change that touches the gradient pipeline. What the end-to-end
+        # arms cost was overlap -- grad-reduce overlap is worth 32.4 ms in this recipe
+        # and cannot be paid for by a 1.25 ms ceiling.
 
         self._adaln_plain_ops = getattr(config, "adaln_plain_ops", False)
         self._use_triton_ops = getattr(config, "use_triton_ops", False)
@@ -1464,9 +1314,11 @@ class AdaLN(MegatronModule):
         Returns:
             Combined tensor [B, ..., hidden_size]
         """
-        fused = _fused_scale_add(residual, x, gate)
-        if fused is not None:
-            return fused
+        # Left as plain PyTorch deliberately. A hand-fused one-pass backward was
+        # built and measured here and cost +1.45 ms/step: Inductor was already
+        # fusing the d_gate reduction across the op boundary into a neighbouring
+        # kernel, and wrapping the region in an opaque autograd.Function forbade
+        # exactly that. See scratch/mxfp6/probes_archive in tiger-training-internal.
         return residual + gate * x
 
     def modulated_layernorm(self, x: Tensor, shift: Tensor, scale: Tensor, layernorm_idx: int = 0) -> Tensor:

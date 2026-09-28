@@ -15,13 +15,12 @@ single forward would accept fails in backward. See the module docstring of
 """
 
 import functools
-import os
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 import torch
 
+from primus.backends.megatron.core.models.diffusion.common import mxfp6_gates
 from tests.unit_tests.backends.megatron.conftest import requires_mxfp6
 from tests.utils import PrimusUT
 
@@ -97,7 +96,11 @@ def _pure_args(fuse_wgrad_accum=False, bias=None, grad_enabled=True):
     ``grad_enabled`` mirrors what the production wrapper samples with
     torch.is_grad_enabled(); it cannot be read inside forward, so it travels as an argument.
     """
-    return (bias, False, None, 0, 0, fuse_wgrad_accum, grad_enabled)
+    # Trailing False is weight_is_fp4: this is the pure-MXFP6 path, so the weight
+    # operand stays MXFP6. Added when the A6W4 work gave forward that parameter;
+    # these helpers were not updated then, which left the whole module failing to
+    # bind its arguments.
+    return (bias, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, False)
 
 
 def _hybrid_args(bias=None):
@@ -113,6 +116,9 @@ def _hybrid_args(bias=None):
         BackendType.HIPBLASLT.value,
         False,
         True,
+        # weight_is_fp4: the hybrid path is MXFP6 forward / FP8 backward, so the
+        # weight operand is not FP4 here either.
+        False,
     )
 
 
@@ -963,15 +969,17 @@ class TestMXFP6FusedMLP(PrimusUT):
 
     @pytest.fixture(autouse=True)
     def default_fused_mlp_mode(self):
-        """Pin the mode to the default instead of inheriting it from the shell.
+        """Pin the gates to their defaults rather than inheriting process state.
 
-        The submission container exports PRIMUS_MXFP6_FUSED_MLP=on, which is what makes a
-        fallback an error there -- so the two fallback tests below would fail inside the
-        very container the fused MLP is meant to run in.
+        The gate used to be read from the environment, and the submission container
+        exported it as "on" -- which made a fallback an error there, so the two
+        fallback tests below failed inside the very container the fused MLP is meant
+        to run in. It is now a config key held in a process-wide registry, so the
+        equivalent hazard is a previous test leaving the registry configured.
         """
-        with mock.patch.dict(os.environ):
-            os.environ.pop("PRIMUS_MXFP6_FUSED_MLP", None)
-            yield
+        mxfp6_gates.reset()
+        yield
+        mxfp6_gates.reset()
 
     @requires_mxfp6
     def test_forward_and_grads_match_stock_mlp(self):
@@ -1099,12 +1107,17 @@ class TestMXFP6FusedMLP(PrimusUT):
         assert not fused._fused_epilogue
 
     @requires_mxfp6
-    def test_env_kill_switch_disables_and_requires(self):
-        with mock.patch.dict(os.environ, {"PRIMUS_MXFP6_FUSED_MLP": "off"}):
-            assert not _make_fused_mlp()._fused_epilogue
+    def test_config_kill_switch_disables_and_requires(self):
+        """The gate travels on the config, not through the registry directly.
 
-        with mock.patch.dict(os.environ, {"PRIMUS_MXFP6_FUSED_MLP": "on"}):
-            assert _make_fused_mlp()._fused_epilogue
-            # "on" turns an unusable configuration into an error rather than a fallback.
-            with pytest.raises(RuntimeError, match="fused MLP is unusable"):
-                _make_fused_mlp(activation_func=torch.nn.functional.silu)
+        Setting mxfp6_gates by hand and then building a module would prove nothing:
+        constructing a config calls mxfp6_gates.configure(), which overwrites
+        whatever was set. Going through the config is both the real API and the
+        only thing that actually takes effect.
+        """
+        assert not _make_fused_mlp(mxfp6_fused_mlp="off")._fused_epilogue
+
+        assert _make_fused_mlp(mxfp6_fused_mlp="on")._fused_epilogue
+        # "on" turns an unusable configuration into an error rather than a fallback.
+        with pytest.raises(RuntimeError, match="fused MLP is unusable"):
+            _make_fused_mlp(mxfp6_fused_mlp="on", activation_func=torch.nn.functional.silu)
