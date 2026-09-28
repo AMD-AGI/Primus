@@ -732,6 +732,9 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                     torch_compile_config, "emulate_precision_casts", True
                 ),
                 "torch_compile_fused_ln_modulate": getattr(torch_compile_config, "fused_ln_modulate", True),
+                "torch_compile_coordinate_descent_tuning": getattr(
+                    torch_compile_config, "coordinate_descent_tuning", False
+                ),
             }
         else:
             # Default values if torch_compile section not present
@@ -747,6 +750,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "torch_compile_disable_inductor_cudagraphs": True,
                 "torch_compile_emulate_precision_casts": True,
                 "torch_compile_fused_ln_modulate": True,
+                "torch_compile_coordinate_descent_tuning": False,
             }
 
         # Set on FluxConfig

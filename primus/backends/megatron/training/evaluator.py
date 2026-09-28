@@ -70,7 +70,21 @@ def _make_eval_profiler():
     )
 
 
-_VAL_PREFETCH = os.environ.get("MXFP6_VAL_PREFETCH", "1") == "1"
+def _val_prefetch_enabled() -> bool:
+    """Whether to prefetch the next evaluation's first batch.
+
+    Read at point of use rather than at import: this is a config key, and the
+    config does not exist when this module is imported.
+    """
+    try:
+        from megatron.training import get_args
+
+        return bool(getattr(get_args(), "val_prefetch", True))
+    except Exception:
+        # No args yet (unit tests import this module directly). The default is on,
+        # matching the config default.
+        return True
+
 
 # Keyed by id() of the validation iterator, so a recipe with more than one
 # validation set cannot hand one set's batch to another.
@@ -107,9 +121,9 @@ def _start_val_prefetch(data_iterator):
     The batch this pulls is the one the next evaluation would have read first: the
     validation stream repeats deterministically, and the eval noise is keyed to the
     eval step index rather than to the fetch, so ``val_loss`` is unchanged. That
-    bit-identity is the gate; ``MXFP6_VAL_PREFETCH=0`` turns this off.
+    bit-identity is the gate; ``val_prefetch: false`` turns this off.
     """
-    if not _VAL_PREFETCH or data_iterator is None:
+    if not _val_prefetch_enabled() or data_iterator is None:
         return
     key = id(data_iterator)
     prev = _val_prefetch_state.get(key)
@@ -146,7 +160,7 @@ def _take_val_prefetch(data_iterator):
     if state["error"] is not None or state["batch"] is None:
         # Fall back to fetching in the loop. The error resurfaces there if it is
         # real, with the traceback the loop would have produced anyway.
-        debug_rank_0(f"[MXFP6_VAL_PREFETCH] discarded: {state['error']!r}")
+        debug_rank_0(f"[val_prefetch] discarded: {state['error']!r}")
         return data_iterator, None
     return _FirstBatchFrom(state["batch"], data_iterator), join_ms
 
@@ -525,7 +539,7 @@ def primus_evaluate(
     val_iterator = data_iterator
     data_iterator, prefetch_join_ms = _take_val_prefetch(data_iterator)
     if prefetch_join_ms is not None:
-        debug_rank_0(f"[MXFP6_VAL_PREFETCH] first batch ready, waited {prefetch_join_ms:.1f} ms")
+        debug_rank_0(f"[val_prefetch] first batch ready, waited {prefetch_join_ms:.1f} ms")
 
     with torch.no_grad():
         iteration = 0

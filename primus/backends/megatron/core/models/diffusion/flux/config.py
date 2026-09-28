@@ -217,6 +217,13 @@ class FluxConfig(BaseDiffusionConfig):
     # "full_dit": compile the entire DiT (double + cat + single + output) as one region
     torch_compile_replace_qk_rmsnorm: bool = False
     torch_compile_disable_inductor_cudagraphs: bool = True
+
+    # Inductor's coordinate-descent autotuner. Worth -2.1 ms/step on the MXFP6
+    # Flux 12B recipe, and previously reachable only as the environment variable
+    # TORCHINDUCTOR_COORDINATE_DESCENT_TUNING -- which meant the measured recipe
+    # and the config that claimed to describe it disagreed. It costs compile
+    # time, so it stays off by default and the recipes opt in.
+    torch_compile_coordinate_descent_tuning: bool = False
     torch_compile_emulate_precision_casts: bool = True  # Preserve eager BF16 precision in Triton kernels
     torch_compile_fused_ln_modulate: bool = True  # Use fused LN+modulate Triton kernel in AdaLN
 

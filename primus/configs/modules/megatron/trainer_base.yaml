@@ -246,6 +246,13 @@ eval_samples: null
 # number of batches, and a mismatch silently leaves the tail of each short
 # worker's slice unread. See backends/megatron/training/eval_budget.py.
 val_num_workers: 0
+# Prefetch the next evaluation's first batch on a background thread, so the
+# training steps that follow absorb the loader restart instead of the next
+# evaluation paying it inside its own timed region. Bit-identical val_loss --
+# the validation stream repeats deterministically and eval noise is keyed to
+# the eval step index, not to the fetch -- which is the gate for enabling it
+# by default. Set false to measure the cost it removes.
+val_prefetch: true
 # Run gc.collect() and empty_cache() after every evaluation. Off by default: it
 # costs a GC pause and an allocator flush inside the measured window.
 eval_purge_memory: false

@@ -360,3 +360,7 @@ modules:
         compile_optimizer: false
         emulate_precision_casts: false
         fused_ln_modulate: true
+        # Inductor's coordinate-descent autotuner: -2.1 ms/step, at the cost of
+        # extra compile time. Off in the framework default because that cost is
+        # not worth paying for a short run; a submission run amortises it.
+        coordinate_descent_tuning: true

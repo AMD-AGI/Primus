@@ -388,6 +388,10 @@ class Flux(DiffusionModule):
             os.environ["TORCHINDUCTOR_CUDAGRAPHS"] = "0"
             log("  Disabled Inductor CUDA graphs (TE FP8 compatibility)")
 
+        if getattr(self.config, "torch_compile_coordinate_descent_tuning", False):
+            torch._inductor.config.coordinate_descent_tuning = True
+            log("  Enabled Inductor coordinate-descent tuning (-2.1 ms/step, costs compile time)")
+
         if self.config.torch_compile_emulate_precision_casts:
             torch._inductor.config.emulate_precision_casts = True
             log(
