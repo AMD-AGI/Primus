@@ -91,6 +91,8 @@ def _check(o, lse, q, k, v, table):
         (1000, 2, 2, 16),  # batch > 1
         (2148, 1, 4, 16),
         (4096, 2, 4, 8),
+        (1001, 1, 2, 16),  # odd S: one token per work-group
+        (1002, 2, 2, 16),  # S % 4 == 2: two tokens per work-group
     ],
 )
 def test_matches_eager(S, B, Hkv, topk):
@@ -103,21 +105,14 @@ def test_matches_eager(S, B, Hkv, topk):
     _check(o, lse, q, k, v, table)
 
 
-@pytest.mark.parametrize("S, B, Hkv, topk", [(300, 1, 1, 16), (1000, 2, 2, 4)])
-def test_slot_lse_is_the_attention_each_slot_got(S, B, Hkv, topk):
-    """exp(slot_lse - lse) is the sparse indexer loss's target, per head."""
+def _slot_mass_reference(q, k, v, table):
+    """fp32 share of each head's attention that each table slot's block received."""
     from primus.backends.megatron.core.transformer.minimax_m3.eager import (
         build_block_keep,
         eager_block_sparse_attention,
     )
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
-        msa_token_fwd,
-    )
 
-    q, k, v, table = _inputs(S, B, Hkv, topk, seed=2)
-    _, lse, slot_lse = msa_token_fwd(q, k, v, table, return_slot_lse=True)
-    mass = torch.exp(slot_lse - lse.unsqueeze(-1)).permute(1, 2, 0, 3)
-
+    S, B, Hkv = q.shape[0], q.shape[1], k.shape[2]
     keep = build_block_keep(table.long(), S, BLOCK)
     _, _, probs = eager_block_sparse_attention(
         *(t.float().permute(1, 2, 0, 3) for t in (q, k, v)), keep, D**-0.5, return_probs=True
@@ -129,10 +124,59 @@ def test_slot_lse_is_the_attention_each_slot_got(S, B, Hkv, topk):
         .sum(-1)
     )
     slots = table.long().repeat_interleave(16, dim=1)
-    ref = per_block.gather(-1, slots.clamp_min(0)).masked_fill(slots < 0, 0.0)
+    return per_block.gather(-1, slots.clamp_min(0)).masked_fill(slots < 0, 0.0), slots
+
+
+@pytest.mark.parametrize(
+    "S, B, Hkv, topk",
+    [
+        (300, 1, 1, 16),
+        (1000, 2, 2, 4),
+        (1002, 1, 2, 6),  # two tokens per work-group, topk not a multiple of 4
+    ],
+)
+def test_slot_lse_is_the_attention_each_slot_got(S, B, Hkv, topk):
+    """exp(slot_lse - lse) is the sparse indexer loss's target, per head."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
+        msa_token_fwd,
+    )
+
+    q, k, v, table = _inputs(S, B, Hkv, topk, seed=2)
+    _, lse, slot_lse = msa_token_fwd(q, k, v, table, return_slot_lse=True)
+    mass = torch.exp(slot_lse - lse.unsqueeze(-1)).permute(1, 2, 0, 3)
+    ref, slots = _slot_mass_reference(q, k, v, table)
 
     torch.testing.assert_close(mass, ref, rtol=0, atol=1e-5)
     assert torch.isneginf(slot_lse.permute(1, 2, 0, 3)[slots < 0]).all(), "unvisited slots must be -inf"
+
+
+@pytest.mark.parametrize("kind, value", [("scale", 16.0), ("shift", 100.0), ("shift", -100.0)])
+def test_extreme_scores_stay_exact(kind, value):
+    """The online softmax keeps a running maximum, so scores beyond exp's float
+    range -- large ones, or rows whose every score is very negative -- neither
+    overflow nor underflow."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
+        msa_token_fwd,
+    )
+
+    q, k, v, table = _inputs(1000, 1, 2, 16, seed=4)
+    if kind == "scale":
+        q = (q.float() * value).bfloat16()  # scaled scores reach ~95
+    else:
+        # every key shares a direction u and every query points along it, so each
+        # scaled score sits within a few units of `value`
+        u = torch.randn(D, device="cuda", generator=torch.Generator(device="cuda").manual_seed(5))
+        k = (u + 0.25 * k.float()).bfloat16()
+        q = (value / (u.dot(u) * D**-0.5) * u + 0.25 * q.float()).bfloat16()
+
+    o, lse, slot_lse = msa_token_fwd(q, k, v, table, return_slot_lse=True)
+    assert torch.isfinite(o).all() and torch.isfinite(lse).all()
+    out32, lse32 = _reference(q, k, v, table, torch.float32)
+    o = o.permute(1, 2, 0, 3).float()
+    assert _snr_db(out32, o) >= 40.0, f"O SNR {_snr_db(out32, o):.1f} dB"
+    torch.testing.assert_close(lse.permute(1, 2, 0), lse32, rtol=0, atol=1e-3)
+    mass = torch.exp(slot_lse - lse.unsqueeze(-1)).permute(1, 2, 0, 3)
+    torch.testing.assert_close(mass, _slot_mass_reference(q, k, v, table)[0], rtol=0, atol=1e-4)
 
 
 @pytest.mark.parametrize(
@@ -153,6 +197,16 @@ def test_every_tuning_path_matches_eager(config):
     q, k, v, table = _inputs(2048, 1, 4, 16, seed=1)
     o, lse = msa_token_fwd(q, k, v, table, **config)
     _check(o, lse, q, k, v, table)
+
+
+def test_refuses_topk_above_16():
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
+        msa_token_fwd,
+    )
+
+    q, k, v, table = _inputs(4096, 1, 1, 17)
+    with pytest.raises(AssertionError, match="at most 16"):
+        msa_token_fwd(q, k, v, table)
 
 
 def test_refuses_buffers_past_32_bit_offsets():
