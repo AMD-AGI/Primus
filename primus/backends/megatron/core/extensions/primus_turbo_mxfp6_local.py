@@ -34,7 +34,6 @@ length that is only 128-aligned will be rejected at the first forward.
 """
 
 import functools
-import os
 import warnings
 
 import torch
@@ -83,17 +82,11 @@ _quantize_mxfp4_gemm_row = getattr(torch.ops.primus_turbo, "quantize_mxfp4_gemm_
 # narrowed B operand. Guarded like the other optional ops.
 _quantize_hybrid_dual = getattr(torch.ops.primus_turbo, "quantize_mxfp6_row_mxfp4_col_dual_impl", None)
 
-# Opt-in, because it narrows a second operand on top of A6W4's weight and so needs its own
-# convergence gate. Measured on the Flux wgrad shapes it is worth about as much as
-# everything A6W4 delivers, and the weight-gradient cosine against fp32 lands
-# at 0.9928 where A6W4's forward already sits at 0.99293.
-_WGRAD_A6W4 = os.environ.get("PRIMUS_MXFP6_WGRAD_A6W4", "") not in ("", "0")
-
 
 def _pack_act_dual(x, wgrad_is_fp4):
     """Pack an activation for the forward (row) and for wgrad (column).
 
-    Under `_WGRAD_A6W4` the column half is MXFP4, which is the operand wgrad narrows. The
+    Under `gates().wgrad_a6w4` the column half is MXFP4, which is the operand wgrad narrows. The
     row half stays MXFP6 either way, because that is what the forward's A operand is.
     """
     if wgrad_is_fp4:
@@ -269,7 +262,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
         # ctx.needs_input_grad reads True even under no_grad; neither distinguishes the two.
         # Getting this wrong fails loudly in backward on a None operand rather than silently.
         if grad_enabled:
-            a_row, a_row_scale, a_col, a_col_scale = _pack_act_dual(input_2d, _WGRAD_A6W4)
+            a_row, a_row_scale, a_col, a_col_scale = _pack_act_dual(input_2d, gates().wgrad_a6w4)
             b_row, b_row_scale, b_col, b_col_scale = _pack_weight_dual(weight, weight_is_fp4)
         else:
             a_row, a_row_scale = _quantize_mxfp6_row(input_2d, 1)
@@ -427,7 +420,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
             # grad_weight[N, K] = grad.T[N, M] @ input[M, K], contracting M.
             if ctx.fuse_wgrad_accum:
                 grad_weight = _wgrad_into_main_grad(
-                    weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m, _WGRAD_A6W4
+                    weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m, gates().wgrad_a6w4
                 )
             else:
                 grad_weight = gemm_fp6_impl(
@@ -441,7 +434,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
                     ctx.out_dtype,
                     _GRAN_VALUE,
                     None,
-                    _WGRAD_A6W4,
+                    gates().wgrad_a6w4,
                 )
 
         # Trailing Nones cover backward_is_fp8, fp8_bwd_dtype, fp8_gran_value,
@@ -678,7 +671,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
         # so a no-grad forward should not pay for them. See the note there on why
         # grad_enabled has to be sampled by the caller rather than read here.
         if grad_enabled:
-            x_row, x_row_s, x_col, x_col_s = _pack_act_dual(x, _WGRAD_A6W4)
+            x_row, x_row_s, x_col, x_col_s = _pack_act_dual(x, gates().wgrad_a6w4)
             w1_row, w1_row_s, w1_col, w1_col_s = _pack_weight_dual(w1, weight_is_fp4)
         else:
             x_row, x_row_s = _quantize_mxfp6_row(x, 1)
@@ -790,11 +783,11 @@ class MXFP6MLPFunction(torch.autograd.Function):
         # fc1 wgrad: [f, k] = grad_y1.T[f, m] @ x[m, k], contracting m.
         if ctx.fuse_wgrad_accum:
             grad_w1 = _wgrad_into_main_grad(
-                fused_weights[0], g1_col, g1_col_s, x_col, x_col_s, f, k, m, _WGRAD_A6W4
+                fused_weights[0], g1_col, g1_col_s, x_col, x_col_s, f, k, m, gates().wgrad_a6w4
             )
         else:
             grad_w1 = gemm_fp6_impl(
-                g1_col, g1_col_s, x_col, x_col_s, f, k, m, out_dtype, _GRAN_VALUE, None, _WGRAD_A6W4
+                g1_col, g1_col_s, x_col, x_col_s, f, k, m, out_dtype, _GRAN_VALUE, None, gates().wgrad_a6w4
             )
 
         grad_b1 = (
@@ -864,8 +857,8 @@ def _grouped_mlp_unavailable_reason():
     """Why the grouped MLP cannot run here, or None if it can."""
     if _quantize_mxfp6_dual_out is None or _quantize_mxfp6_fused_dual_out is None:
         return "this Primus-Turbo has no quantize_mxfp6_*_out ops"
-    if _WGRAD_A6W4:
-        return "PRIMUS_MXFP6_WGRAD_A6W4 packs the column half as MXFP4; not wired here"
+    if gates().wgrad_a6w4:
+        return "PRIMUS_MXFP6gates().wgrad_a6w4 packs the column half as MXFP4; not wired here"
     return None
 
 
@@ -1100,10 +1093,10 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
 
         if ctx.fuse_wgrad_accum:
             grad_w1_a = _wgrad_into_main_grad(
-                fused[0], g1_cols[0][0], g1_cols[0][1], xc_a, xcs_a, f, k, m, _WGRAD_A6W4
+                fused[0], g1_cols[0][0], g1_cols[0][1], xc_a, xcs_a, f, k, m, gates().wgrad_a6w4
             )
             grad_w1_b = _wgrad_into_main_grad(
-                fused[1], g1_cols[1][0], g1_cols[1][1], xc_b, xcs_b, f, k, m, _WGRAD_A6W4
+                fused[1], g1_cols[1][0], g1_cols[1][1], xc_b, xcs_b, f, k, m, gates().wgrad_a6w4
             )
         else:
             grad_w1_a = gemm_fp6_impl(
@@ -1117,7 +1110,7 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
                 out_dtype,
                 _GRAN_VALUE,
                 None,
-                _WGRAD_A6W4,
+                gates().wgrad_a6w4,
             )
             grad_w1_b = gemm_fp6_impl(
                 g1_cols[1][0],
@@ -1130,7 +1123,7 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
                 out_dtype,
                 _GRAN_VALUE,
                 None,
-                _WGRAD_A6W4,
+                gates().wgrad_a6w4,
             )
 
         if want_bias_grad:
@@ -1236,7 +1229,7 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         # Same reasoning as MXFP6LinearFunction: the column blobs are backward's operands, so
         # a no-grad forward should not pay for them.
         if grad_enabled:
-            x_row, x_row_s, x_col, x_col_s = _pack_act_dual(x, _WGRAD_A6W4)
+            x_row, x_row_s, x_col, x_col_s = _pack_act_dual(x, gates().wgrad_a6w4)
             w_row, w_row_s, w_col, w_col_s = _pack_weight_dual(w_qkv, weight_is_fp4)
         else:
             x_row, x_row_s = _quantize_mxfp6_row(x, 1)
@@ -1354,11 +1347,11 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         # wgrad: [n, k] = d(mixed_qkv).T[n, m] @ x[m, k], contracting m.
         if ctx.fuse_wgrad_accum:
             grad_w = _wgrad_into_main_grad(
-                fused_weights[0], g_col, g_col_s, x_col, x_col_s, n, k, m, _WGRAD_A6W4
+                fused_weights[0], g_col, g_col_s, x_col, x_col_s, n, k, m, gates().wgrad_a6w4
             )
         else:
             grad_w = gemm_fp6_impl(
-                g_col, g_col_s, x_col, x_col_s, n, k, m, out_dtype, _GRAN_VALUE, None, _WGRAD_A6W4
+                g_col, g_col_s, x_col, x_col_s, n, k, m, out_dtype, _GRAN_VALUE, None, gates().wgrad_a6w4
             )
 
         # The QKV bias is not in saved_tensors, so it cannot be routed into main_grad from
@@ -1464,7 +1457,7 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
         packs = []
         for x, w in ((xa, w_a), (xb, w_b)):
             if grad_enabled:
-                x_row, x_row_s, x_col, x_col_s = _pack_act_dual(x, _WGRAD_A6W4)
+                x_row, x_row_s, x_col, x_col_s = _pack_act_dual(x, gates().wgrad_a6w4)
                 w_row, w_row_s, w_col, w_col_s = _pack_weight_dual(w, weight_is_fp4)
             else:
                 x_row, x_row_s = _quantize_mxfp6_row(x, 1)
@@ -1646,10 +1639,12 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
                 ctx.weight_is_fp4,
             ).reshape(ctx.shape_a if i == 0 else ctx.shape_b)
             if ctx.fuse_wgrad_accum:
-                grad_w = _wgrad_into_main_grad(fused[i], g_col, g_col_s, xc, xcs, n, k, rows, _WGRAD_A6W4)
+                grad_w = _wgrad_into_main_grad(
+                    fused[i], g_col, g_col_s, xc, xcs, n, k, rows, gates().wgrad_a6w4
+                )
             else:
                 grad_w = gemm_fp6_impl(
-                    g_col, g_col_s, xc, xcs, n, k, rows, out_dtype, _GRAN_VALUE, None, _WGRAD_A6W4
+                    g_col, g_col_s, xc, xcs, n, k, rows, out_dtype, _GRAN_VALUE, None, gates().wgrad_a6w4
                 )
             grad_b = b_partial.sum(0).to(out_dtype) if want_bias_grad else None
             grad_wq = _reduce_grad_into_main_grad(

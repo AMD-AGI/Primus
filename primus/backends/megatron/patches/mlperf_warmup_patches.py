@@ -20,7 +20,6 @@ Self-removal restores the inner chain intact.
 """
 
 import logging
-import os
 
 import torch
 import torch.distributed
@@ -354,16 +353,10 @@ def _run_validation_warmup(models, forward_step_func, forward_backward_func, war
             get_cuda_rng_tracker().set_states(tracker_states)
     _log(f"Completed {warmup_steps} validation warmup steps, RNG state restored")
 
-    # Diagnostic, off by default, kept for the record: it tested whether a residual
-    # val_loss shift between warmed and unwarmed arms came from the compiled graph being
-    # specialized against the mock batch rather than the real one. If so, discarding the
-    # compilation would restore the unwarmed loss and give back the slow first iteration,
-    # the two being one artifact. It does not -- the loss is unchanged with the graphs
-    # thrown away -- so that hypothesis is ruled out. The shift is instead governed by
-    # per_step_rng_reseed, which the MLPerf recipe enables.
-    if os.environ.get("MXFP6_VALWARM_RESET_DYNAMO", "0") == "1":
-        torch._dynamo.reset()
-        _log("MXFP6_VALWARM_RESET_DYNAMO=1: discarded all compiled graphs after warmup")
+    # NOTE: a residual val_loss shift between warmed and unwarmed arms is governed by
+    # per_step_rng_reseed, which the MLPerf recipe enables -- not by the compiled graph
+    # being specialized against the mock batch. That was tested by discarding every
+    # compiled graph here and observing the loss unchanged, so do not re-derive it.
 
 
 def _reset_ddp_grad_ready_calibration(models):

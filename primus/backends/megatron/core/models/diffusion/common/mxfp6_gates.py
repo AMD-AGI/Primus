@@ -74,6 +74,16 @@ class Mxfp6Gates:
     # A/B against older results needs it; not something a recipe should set.
     rope_slice_legacy: bool = False
 
+    # --- A6W4 ------------------------------------------------------------
+    # Pack the wgrad column operand as MXFP4 too, narrowing a second operand on
+    # top of A6W4's weight. Worth about as much again as everything A6W4
+    # delivers, but the weight-gradient cosine against fp32 lands at 0.9928
+    # where A6W4's forward already sits at 0.99293 -- so it needs its own
+    # convergence gate and is opt-in. Requires mxfp6_weight_format='mxfp4';
+    # without A6W4 there is no narrowed weight to narrow a second operand
+    # against, and the combination is rejected in BaseDiffusionConfig.
+    wgrad_a6w4: bool = False
+
     def validate(self) -> None:
         """Reject nonsense values at config time rather than at first use."""
         for name in ("fused_mlp", "fused_qkv"):

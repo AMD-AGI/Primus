@@ -58,6 +58,7 @@ class BaseDiffusionConfig(TransformerConfig):
         mxfp6_backward_precision: MXFP6 backward precision, 'mxfp6' or 'fp8' (default: 'mxfp6')
         mxfp6_weight_format: Weight operand format, 'mxfp6' or 'mxfp4' (A6W4) (default: 'mxfp6')
         mxfp6_fused_wgrad_accum: MXFP6 wgrad writes weight.main_grad in place (default: False)
+        mxfp6_apply_rope_fusion: Use Megatron's fused RoPE kernels (default: False)
         mxfp6_fused_mlp: Fold MLP bias+GELU into the packer, 'auto'/'on'/'off' (default: 'auto')
         mxfp6_strided_v: Feed attention V to the packer strided (default: False)
         mxfp6_grouped_mlp: Run both MLP linears as one grouped A6W6 GEMM (default: False)
@@ -68,6 +69,7 @@ class BaseDiffusionConfig(TransformerConfig):
         mxfp6_fused_ln_mod_bwd: Single-pass LN-modulate backward (default: False)
         mxfp6_norm_rope_pin: Pin the norm/RoPE autotune configs (default: False)
         mxfp6_rope_slice_legacy: Pre-fusion RoPE slice order; changes numerics (default: False)
+        mxfp6_wgrad_a6w4: Pack the wgrad column operand as MXFP4; needs A6W4 (default: False)
         sensitive_layers_enabled: Enable sensitive layer configuration (default: False)
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
         sensitive_layers_end: Number of sensitive layers at end (default: 0)
@@ -154,6 +156,15 @@ class BaseDiffusionConfig(TransformerConfig):
     # because the microbatch count is not known at config time.
     mxfp6_fused_wgrad_accum: bool = False
 
+    # Turn on Megatron's fused RoPE kernels for this model.
+    #
+    # Primus-owned deliberately. Megatron's own `apply_rope_fusion` is cleared by
+    # validate_args whenever position_embedding_type != "rope" (arguments.py:1232-1233),
+    # and Flux never sets that type, so the Megatron-owned flag can never be true here --
+    # setting it in YAML looks like it works and silently does nothing. A name Megatron
+    # does not know survives validation, the same way `fp6` does.
+    mxfp6_apply_rope_fusion: bool = False
+
     # ------------------------------------------------------------------
     # MXFP6 fusion gates
     #
@@ -186,6 +197,7 @@ class BaseDiffusionConfig(TransformerConfig):
     # Changes numerics; kept only so an A/B against pre-fusion results is
     # possible. A recipe should not set this.
     mxfp6_rope_slice_legacy: bool = False
+    mxfp6_wgrad_a6w4: bool = False
 
     # Sensitive layer configuration (clean naming, maps to Megatron internals)
     sensitive_layers_enabled: bool = False
@@ -294,6 +306,17 @@ class BaseDiffusionConfig(TransformerConfig):
                 "mxfp6_weight_format='mxfp4' needs mxfp6_backward_precision='mxfp6', got "
                 f"'{self.mxfp6_backward_precision}'. An FP8 backward does not consume the "
                 "packed weight, so A6W4 would apply to the forward only."
+            )
+
+        # wgrad_a6w4 narrows a second operand on top of A6W4's already-narrowed
+        # weight, so it is meaningless without A6W4 and would silently pack a
+        # column half nothing consumes. As an environment variable this pairing
+        # could not be checked; as a config key it can be.
+        if self.mxfp6_wgrad_a6w4 and self.mxfp6_weight_format != "mxfp4":
+            raise ValueError(
+                "mxfp6_wgrad_a6w4=True requires mxfp6_weight_format='mxfp4' (A6W4), got "
+                f"'{self.mxfp6_weight_format}'. It narrows the wgrad column operand on top "
+                "of A6W4's weight; with an MXFP6 weight there is nothing for it to pair with."
             )
 
         # Publish the fusion gates before anything builds a model. The modules

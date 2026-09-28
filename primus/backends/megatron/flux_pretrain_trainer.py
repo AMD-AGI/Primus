@@ -477,15 +477,20 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             "model_channels": getattr(params, "model_channels", 256),
             "guidance_embed": getattr(params, "guidance_embed", False),
             # RoPE configuration
-            # MXFP6_FORCE_ROPE_FUSION exists because the config key alone cannot turn this
-            # on. Megatron's validate_args clears args.apply_rope_fusion whenever
-            # position_embedding_type != "rope" (arguments.py L1232-1233), and Flux never
-            # sets that type, so `params` always arrives here as False no matter what the
-            # YAML said. Forcing it is the only way to measure the fused path.
+            #
+            # Read from `mxfp6_apply_rope_fusion`, not Megatron's `apply_rope_fusion`.
+            # Megatron's validate_args clears args.apply_rope_fusion whenever
+            # position_embedding_type != "rope" (arguments.py:1232-1233), and Flux never
+            # sets that type, so the Megatron-owned flag always arrives here as False no
+            # matter what the YAML said -- the key is silently unusable for this model.
+            #
+            # A Primus-owned key is not subject to that: Megatron does not know the name,
+            # so validate_args cannot clear it, exactly as with `fp6` and the other
+            # diffusion-owned fields. Megatron's own flag is still honoured when it does
+            # survive, so a non-Flux caller that sets it the normal way keeps working.
             "apply_rope_fusion": (
-                True
-                if os.environ.get("MXFP6_FORCE_ROPE_FUSION", "0") == "1"
-                else getattr(params, "apply_rope_fusion", False)
+                getattr(params, "mxfp6_apply_rope_fusion", False)
+                or getattr(params, "apply_rope_fusion", False)
             ),
             "rotary_interleaved": getattr(params, "rotary_interleaved", True),
             # Training hyperparameters stored on FluxConfig
