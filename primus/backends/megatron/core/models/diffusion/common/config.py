@@ -9,10 +9,17 @@ TransformerConfig to include diffusion-specific parameters.
 """
 
 from dataclasses import dataclass
+from dataclasses import fields as dataclasses_fields
 from typing import Optional
 
 from megatron.core.enums import Fp8Recipe
 from megatron.core.transformer.transformer_config import TransformerConfig
+
+from . import mxfp6_gates
+
+# The all-default gate set, used to tell "the recipe asked for this" from "this
+# is just the default" when rejecting gates set without fp6.
+_GATE_DEFAULTS = mxfp6_gates.Mxfp6Gates()
 
 # Accepted values for `fp6`. Only one 6-bit format exists on gfx950 (E2M3, via AITER's
 # A6W6 kernels), but keeping this a tuple mirrors how `fp4` names its format.
@@ -51,6 +58,16 @@ class BaseDiffusionConfig(TransformerConfig):
         mxfp6_backward_precision: MXFP6 backward precision, 'mxfp6' or 'fp8' (default: 'mxfp6')
         mxfp6_weight_format: Weight operand format, 'mxfp6' or 'mxfp4' (A6W4) (default: 'mxfp6')
         mxfp6_fused_wgrad_accum: MXFP6 wgrad writes weight.main_grad in place (default: False)
+        mxfp6_fused_mlp: Fold MLP bias+GELU into the packer, 'auto'/'on'/'off' (default: 'auto')
+        mxfp6_strided_v: Feed attention V to the packer strided (default: False)
+        mxfp6_grouped_mlp: Run both MLP linears as one grouped A6W6 GEMM (default: False)
+        mxfp6_joint_qkv: Project Q, K and V in a single GEMM (default: False)
+        mxfp6_fused_small_grads: Route small reduction grads into main_grad (default: False)
+        mxfp6_fused_qk_rope: Fuse QK-norm and RoPE into one kernel (default: False)
+        mxfp6_fused_qkv: Fuse the QKV norm+RoPE prologue, 'auto'/'on'/'off' (default: 'off')
+        mxfp6_fused_ln_mod_bwd: Single-pass LN-modulate backward (default: False)
+        mxfp6_norm_rope_pin: Pin the norm/RoPE autotune configs (default: False)
+        mxfp6_rope_slice_legacy: Pre-fusion RoPE slice order; changes numerics (default: False)
         sensitive_layers_enabled: Enable sensitive layer configuration (default: False)
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
         sensitive_layers_end: Number of sensitive layers at end (default: 0)
@@ -120,15 +137,55 @@ class BaseDiffusionConfig(TransformerConfig):
     # add Megatron's DDP hook would otherwise run over every gradient.
     #
     # Deliberately not Megatron's `gradient_accumulation_fusion`: that flag is read by
-    # every plain linear too, and switching it on routes Flux's 76 AdaLN projections
-    # through `wgrad_gemm_accum_fp16`, which at their M=32 shapes is slower than the
-    # separate add it replaces -- measured at +11% step time on one node, swamping the
-    # saving on the MXFP6 linears. This field moves only the MXFP6 ones.
+    # every plain linear too, so switching it on also routes Flux's 76 AdaLN projections
+    # through `wgrad_gemm_accum_fp16`, which costs end-to-end step time. This field
+    # moves only the MXFP6 ones.
+    #
+    # Note the reason is *not* that the fused wgrad is slower at those M=32 shapes -- an
+    # earlier version of this comment said so and was wrong. Measured directly with an
+    # fp32 main_grad it is faster at both production shapes ([18432,3072] 85.76 -> 68.08
+    # us, [9216,3072] 48.46 -> 36.34 us, x38 each, -1.13 ms/step). The end-to-end arms
+    # still lost, at +2.5 ms/step, because the change perturbs grad-reduce overlap, which
+    # is worth 32.4 ms here and cannot be repaid by a 1.25 ms ceiling. Isolated kernel
+    # timings do not price changes to the gradient pipeline.
     #
     # The A6W6 store has no beta=1 accumulate epilogue, so it overwrites main_grad and is
     # only valid at one microbatch per optimizer step. Enforced per module, not here,
     # because the microbatch count is not known at config time.
     mxfp6_fused_wgrad_accum: bool = False
+
+    # ------------------------------------------------------------------
+    # MXFP6 fusion gates
+    #
+    # These were environment variables until they were migrated here. They are
+    # the difference between the measured recipe and a run that is several
+    # percent slow while looking structurally identical -- every hand-written
+    # kernel untouched, the compiled Triton layer roughly doubled -- so they
+    # belong in the file that defines the run.
+    #
+    # All default off ("auto" where tri-state), matching the environment
+    # defaults they replace: a config setting none of them behaves exactly as
+    # the unset environment did. The values are pushed into the registry in
+    # `mxfp6_gates` at the end of __post_init__; see that module for why the
+    # read happens at point of use rather than at import.
+    #
+    # "on" versus "auto" matters for a submission: "auto" lets a module whose
+    # shape the fusion cannot reproduce fall back silently, so the disclosed
+    # implementation and the measured throughput can diverge. "on" makes that
+    # an error.
+    # ------------------------------------------------------------------
+    mxfp6_fused_mlp: str = "auto"
+    mxfp6_strided_v: bool = False
+    mxfp6_grouped_mlp: bool = False
+    mxfp6_joint_qkv: bool = False
+    mxfp6_fused_small_grads: bool = False
+    mxfp6_fused_qk_rope: bool = False
+    mxfp6_fused_qkv: str = "off"
+    mxfp6_fused_ln_mod_bwd: bool = False
+    mxfp6_norm_rope_pin: bool = False
+    # Changes numerics; kept only so an A/B against pre-fusion results is
+    # possible. A recipe should not set this.
+    mxfp6_rope_slice_legacy: bool = False
 
     # Sensitive layer configuration (clean naming, maps to Megatron internals)
     sensitive_layers_enabled: bool = False
@@ -238,6 +295,45 @@ class BaseDiffusionConfig(TransformerConfig):
                 f"'{self.mxfp6_backward_precision}'. An FP8 backward does not consume the "
                 "packed weight, so A6W4 would apply to the forward only."
             )
+
+        # Publish the fusion gates before anything builds a model. The modules
+        # that consume them are imported long before this runs, which is
+        # precisely why they read through `gates()` at point of use instead of
+        # binding a module-level constant at import.
+        #
+        # Validated unconditionally, including when fp6 is None: a recipe that
+        # sets a gate but forgets `fp6: mxfp6` should hear about the typo rather
+        # than have the whole block silently ignored.
+        mxfp6_gates.configure(self)
+
+        # norm_rope_pin is consumed by a @triton.autotune decorator applied at
+        # import, so unlike the other gates it needs an explicit narrowing step
+        # once the value is known. Imported here rather than at module scope
+        # because it pulls in triton, which a CPU-only config build (and much of
+        # the unit-test suite) has no reason to require.
+        if self.fp6 is not None and self.mxfp6_norm_rope_pin:
+            try:
+                from .fused_norm_rope import apply_autotune_pin
+
+                apply_autotune_pin()
+            except ImportError:
+                # No triton: the fused kernels cannot run either, so whatever
+                # selects them will fail with a clearer message than this would.
+                pass
+
+        if self.fp6 is None:
+            requested = [
+                f.name
+                for f in dataclasses_fields(mxfp6_gates.Mxfp6Gates)
+                if getattr(self, f"mxfp6_{f.name}") != getattr(_GATE_DEFAULTS, f.name)
+            ]
+            if requested:
+                raise ValueError(
+                    "MXFP6 fusion gates were set without fp6: "
+                    f"{sorted(requested)}. Set fp6: mxfp6, or remove them -- with no "
+                    "MXFP6 linears they have no effect and the run would silently be "
+                    "slower than the config claims."
+                )
 
         if self.sensitive_layers_enabled and self.sensitive_layer_precision == "tw_fp8":
             _deferred_fp8 = "e4m3" if self.fp8 is None else None

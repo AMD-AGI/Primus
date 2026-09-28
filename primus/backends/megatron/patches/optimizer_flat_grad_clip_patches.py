@@ -39,15 +39,61 @@ mixed dtype -- is left to the original code path. It therefore never scales a by
 shipped path would not have scaled, and never scales one twice.
 
 Off by default, like every other optimization gate in this tree. Enable with
-``PRIMUS_FLAT_GRAD_CLIP=1``.
+``flat_grad_clip: true`` in the module config.
 """
-
-import os
 
 import torch
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+
+@register_patch(
+    "megatron.args.flat_grad_clip",
+    backend="megatron",
+    phase="setup",
+    description="Expose --flat-grad-clip on Megatron's regularization argparse group.",
+)
+def patch_flat_grad_clip_arg(ctx: PatchContext) -> None:
+    try:
+        import megatron.training.arguments as margs
+    except ImportError:
+        return
+
+    # `--clip-grad` itself is declared in _add_regularization_args, so the flag
+    # that changes how clipping is applied belongs in the same group.
+    orig = getattr(margs, "_add_regularization_args", None)
+    if getattr(orig, "_primus_flat_grad_clip", False):
+        return
+    if orig is None:
+        # Loudly, not silently. If the flag never gets registered the condition
+        # below reads a missing attribute, the patch never applies, and the run
+        # is simply ~1.4 ms/step slower while the config still says the gate is
+        # on -- the exact "passed but inert" failure this tree has hit before.
+        raise RuntimeError(
+            "megatron.training.arguments._add_regularization_args is missing, so "
+            "--flat-grad-clip cannot be registered. This Megatron is not the one "
+            "this patch was written against; update the patch rather than "
+            "letting flat_grad_clip silently do nothing."
+        )
+
+    def _add_regularization_args(parser):
+        parser = orig(parser)
+        group = parser.add_argument_group(title="regularization")
+        group.add_argument(
+            "--flat-grad-clip",
+            action="store_true",
+            default=False,
+            help=(
+                "Clip gradients with one flat mul_ per contiguous run instead of "
+                "the chunked multi_tensor applier."
+            ),
+        )
+        return parser
+
+    _add_regularization_args._primus_flat_grad_clip = True
+    margs._add_regularization_args = _add_regularization_args
+    log_rank_0("[Patch:megatron.args.flat_grad_clip] added --flat-grad-clip")
 
 
 def _coalesce(grads):
@@ -106,10 +152,9 @@ def _flat_scale(grads, coeff) -> bool:
     backend="megatron",
     phase="before_train",
     description=(
-        "Clip gradients with one flat mul_ per contiguous run instead of the "
-        "chunked multi_tensor applier."
+        "Clip gradients with one flat mul_ per contiguous run instead of the " "chunked multi_tensor applier."
     ),
-    condition=lambda ctx: os.environ.get("PRIMUS_FLAT_GRAD_CLIP", "0") == "1",
+    condition=lambda ctx: bool(getattr(get_args(ctx), "flat_grad_clip", False)),
 )
 def patch_flat_grad_clip(ctx: PatchContext) -> None:
     from megatron.core.optimizer import clip_grads as _clip_grads
@@ -120,9 +165,7 @@ def patch_flat_grad_clip(ctx: PatchContext) -> None:
     if getattr(orig, "_primus_flat_grad_clip", False):
         return
 
-    def clip_grad_by_total_norm_fp32(
-        parameters, max_norm, total_norm, use_decoupled_grad=False
-    ):
+    def clip_grad_by_total_norm_fp32(parameters, max_norm, total_norm, use_decoupled_grad=False):
         if isinstance(parameters, torch.Tensor):
             parameters = [parameters]
 

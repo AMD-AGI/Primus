@@ -18,7 +18,6 @@ Reference:
     - Megatron-Core: megatron.core.transformer.attention
 """
 
-import os
 import warnings
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
@@ -37,11 +36,13 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from torch import Tensor
 
+from ..common.mxfp6_gates import gates
+
 # Fuse the QK RMS norm into the RoPE kernel, one kernel per direction instead of one
 # forward and three backward. Unlike the ablation above this is numerically real: it is
 # no less accurate than the path it replaces and better on dx. Off by default until the
 # end-to-end number is confirmed. See scratch/mxfp6/rope/RESULTS_interleaved.md.
-_MXFP6_FUSED_QK_ROPE = os.environ.get("MXFP6_FUSED_QK_ROPE", "0") == "1"
+# Set with `mxfp6_fused_qk_rope: true`.
 
 # Fold the QKV projection's dgrad, the QK norm's backward and the rotation's backward into a
 # single MXFP6 packer prologue, so d(mixed_qkv) is never written to HBM. This subsumes
@@ -59,12 +60,7 @@ _MXFP6_FUSED_QK_ROPE = os.environ.get("MXFP6_FUSED_QK_ROPE", "0") == "1"
 # fixed arms, pricing the fix and the QKV prologue separately instead of confounding them.
 # **Measurement scaffolding, not a supported mode**: it reinstates a known bug and should be
 # deleted once the fix has a number against it.
-_ROPE_SLICE_LEGACY = os.environ.get("MXFP6_ROPE_SLICE_LEGACY", "0") == "1"
-
-_MXFP6_FUSED_QKV = os.environ.get("MXFP6_FUSED_QKV", "off").strip().lower()
-assert _MXFP6_FUSED_QKV in ("auto", "on", "off"), (
-    f"MXFP6_FUSED_QKV must be auto, on or off, got {_MXFP6_FUSED_QKV!r}"
-)
+# Set with `mxfp6_rope_slice_legacy: true`; `mxfp6_fused_qkv` is the tri-state.
 
 try:
     from megatron.core.transformer.custom_layers.transformer_engine import SplitAlongDim
@@ -119,7 +115,7 @@ def _can_fuse_qk_norm_rope(attn, *names: str) -> bool:
     mean subtraction and no bias. Joint blocks pass all four norms, since they carry a
     separate pair per stream and the fusion has to own every one of them or none.
     """
-    if not _MXFP6_FUSED_QK_ROPE or fused_qk_norm_rope is None:
+    if not gates().fused_qk_rope or fused_qk_norm_rope is None:
         return False
     for name in names or ("q_layernorm", "k_layernorm"):
         norm = getattr(attn, name, None)
@@ -145,7 +141,7 @@ def _slice_rope(rotary_pos_emb, lo: int, hi):
     # slicing naively here is what decided it, and it decided wrong. Self-attention passes
     # the same freqs for q and k, so preserving that identity is what lets the joint blocks
     # reach the same fused path the single blocks already take.
-    if _ROPE_SLICE_LEGACY:
+    if gates().rope_slice_legacy:
         return (q_slice, k[lo:hi])
     return (q_slice, q_slice if k is q else k[lo:hi])
 
@@ -251,7 +247,7 @@ def _fused_qkv_unusable_reason(attn, linear, q_norm, k_norm) -> str:
     Checked once at build time. The getter and the forward have to agree about who applies
     the norm, and a condition that could change between them would drop it on the floor.
     """
-    if _MXFP6_FUSED_QKV == "off":
+    if gates().fused_qkv == "off":
         return "disabled by environment"
     if MXFP6QKVNormRopeFunction is None:
         return "this build has no MXFP6 QKV norm+RoPE Function"
@@ -301,12 +297,10 @@ def _fused_qkv_unusable_reason(attn, linear, q_norm, k_norm) -> str:
 def _init_fused_qkv_mxfp6(attn, reason: str) -> None:
     """Set ``attn._fused_qkv_mxfp6`` from a reason string, honouring the env mode."""
     attn._fused_qkv_mxfp6 = reason == ""
-    if reason and _MXFP6_FUSED_QKV == "on":
+    if reason and gates().fused_qkv == "on":
         raise RuntimeError(f"MXFP6_FUSED_QKV=on but the fused QKV path is unusable: {reason}")
-    if reason and _MXFP6_FUSED_QKV == "auto":
-        warnings.warn(
-            f"MXFP6 fused QKV disabled, falling back to the stock path: {reason}", stacklevel=3
-        )
+    if reason and gates().fused_qkv == "auto":
+        warnings.warn(f"MXFP6 fused QKV disabled, falling back to the stock path: {reason}", stacklevel=3)
 
 
 def _fused_qkv_rope_ok(attn, hidden_states, q_norm, k_norm, rotary_pos_emb, packed_seq_params) -> bool:
@@ -340,8 +334,7 @@ def _fused_qkv_rope_ok(attn, hidden_states, q_norm, k_norm, rotary_pos_emb, pack
     )
 
 
-def _joint_qkv_project_norm_rope(attn, hidden_states, additional_hidden_states,
-                                 main_rope, added_rope):
+def _joint_qkv_project_norm_rope(attn, hidden_states, additional_hidden_states, main_rope, added_rope):
     """Both streams' projection + QK-norm + RoPE, emitting q/k/v already joint.
 
     Returns ``(query, key, value)`` spanning the joint sequence in ``[added; main]`` order,
@@ -353,7 +346,6 @@ def _joint_qkv_project_norm_rope(attn, hidden_states, additional_hidden_states,
     """
     from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
         MXFP6JointQKVFunction,
-        _FUSED_SMALL_GRADS,
         _claim_main_grad,
         joint_qkv_enabled,
     )
@@ -384,25 +376,37 @@ def _joint_qkv_project_norm_rope(attn, hidden_states, additional_hidden_states,
         # NaN counter is blind because check_for_nan_in_loss_and_grad is false in this
         # recipe. The write and the claim have to be kept in lockstep at every call site.
         claimed = [main.weight, added.weight]
-        if _FUSED_SMALL_GRADS:
+        if gates().fused_small_grads:
             claimed += [
-                attn.q_layernorm.weight, attn.k_layernorm.weight,
-                attn.added_q_layernorm.weight, attn.added_k_layernorm.weight,
+                attn.q_layernorm.weight,
+                attn.k_layernorm.weight,
+                attn.added_q_layernorm.weight,
+                attn.added_k_layernorm.weight,
             ]
         _claim_main_grad(*claimed)
     cos_a, sin_a = _rope_cos_sin(added_rope, additional_hidden_states.dtype)
     cos_b, sin_b = _rope_cos_sin(main_rope, hidden_states.dtype)
     return MXFP6JointQKVFunction.apply(
-        additional_hidden_states, hidden_states,
-        added.weight, main.weight,
-        added.bias, main.bias,
-        attn.added_q_layernorm.weight, attn.added_k_layernorm.weight,
-        attn.q_layernorm.weight, attn.k_layernorm.weight,
-        cos_a, sin_a, cos_b, sin_b,
+        additional_hidden_states,
+        hidden_states,
+        added.weight,
+        main.weight,
+        added.bias,
+        main.bias,
+        attn.added_q_layernorm.weight,
+        attn.added_k_layernorm.weight,
+        attn.q_layernorm.weight,
+        attn.k_layernorm.weight,
+        cos_a,
+        sin_a,
+        cos_b,
+        sin_b,
         attn.q_layernorm.eps,
         True,  # interleaved; _fused_qkv_unusable_reason rejects anything else
         # Resolved once at build time by _init_mxfp6_linear, like the per-stream path.
-        fuse, torch.is_grad_enabled(), main._weight_is_fp4,
+        fuse,
+        torch.is_grad_enabled(),
+        main._weight_is_fp4,
     )[:3]
 
 
@@ -423,11 +427,7 @@ def _fused_qkv_project_norm_rope(attn, linear, hidden_states, q_norm, k_norm, q_
         # skip its own add_ rather than sum the placeholder on top. They are [head_dim]
         # each, two per block, and their AccumulateGrad copies were 152 of the ~600
         # device-to-device copies per step.
-        from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
-            _FUSED_SMALL_GRADS,
-        )
-
-        if _FUSED_SMALL_GRADS:
+        if gates().fused_small_grads:
             _claim_main_grad(linear.weight, q_norm.weight, k_norm.weight)
         else:
             _claim_main_grad(linear.weight)
@@ -650,8 +650,10 @@ class JointSelfAttention(Attention):
         reasons = [
             _fused_qkv_unusable_reason(self, self.linear_qkv, self.q_layernorm, self.k_layernorm),
             _fused_qkv_unusable_reason(
-                self, getattr(self, "added_linear_qkv", None),
-                self.added_q_layernorm, self.added_k_layernorm,
+                self,
+                getattr(self, "added_linear_qkv", None),
+                self.added_q_layernorm,
+                self.added_k_layernorm,
             ),
         ]
         _init_fused_qkv_mxfp6(self, next((r for r in reasons if r), ""))
@@ -840,12 +842,20 @@ class JointSelfAttention(Attention):
         use_mxfp6 = (
             self._fused_qkv_mxfp6
             and _fused_qkv_rope_ok(
-                self, additional_hidden_states, self.added_q_layernorm, self.added_k_layernorm,
-                added_rope, packed_seq_params,
+                self,
+                additional_hidden_states,
+                self.added_q_layernorm,
+                self.added_k_layernorm,
+                added_rope,
+                packed_seq_params,
             )
             and _fused_qkv_rope_ok(
-                self, hidden_states, self.q_layernorm, self.k_layernorm,
-                main_rope, packed_seq_params,
+                self,
+                hidden_states,
+                self.q_layernorm,
+                self.k_layernorm,
+                main_rope,
+                packed_seq_params,
             )
         )
 
@@ -855,7 +865,11 @@ class JointSelfAttention(Attention):
             # torch.cat calls below have nothing left to do. Returns None when the pair is
             # not eligible, in which case the per-stream path runs exactly as before.
             joint_qkv = _joint_qkv_project_norm_rope(
-                self, hidden_states, additional_hidden_states, main_rope[0], added_rope[0],
+                self,
+                hidden_states,
+                additional_hidden_states,
+                main_rope[0],
+                added_rope[0],
             )
 
         if use_mxfp6 and joint_qkv is not None:
@@ -866,12 +880,20 @@ class JointSelfAttention(Attention):
             # Nothing above has projected yet, so the Function owns the whole chain from
             # hidden states to rotated Q/K and V, per stream and before the concatenation.
             added_query, added_key, added_value = _fused_qkv_project_norm_rope(
-                self, self.added_linear_qkv, additional_hidden_states,
-                self.added_q_layernorm, self.added_k_layernorm, added_rope[0],
+                self,
+                self.added_linear_qkv,
+                additional_hidden_states,
+                self.added_q_layernorm,
+                self.added_k_layernorm,
+                added_rope[0],
             )
             query, key, value = _fused_qkv_project_norm_rope(
-                self, self.linear_qkv, hidden_states,
-                self.q_layernorm, self.k_layernorm, main_rope[0],
+                self,
+                self.linear_qkv,
+                hidden_states,
+                self.q_layernorm,
+                self.k_layernorm,
+                main_rope[0],
             )
             fused_rope_applied = True
             main_qkv = added_qkv = None
@@ -1133,16 +1155,24 @@ class FluxSingleAttention(SelfAttention):
         # keep the original ordering and cannot have the rotation folded in ahead of it.
         rope_here = inference_params is None and packed_seq_params is None
         use_mxfp6 = self._fused_qkv_mxfp6 and _fused_qkv_rope_ok(
-            self, hidden_states, self.q_layernorm, self.k_layernorm,
-            rotary_pos_emb if rope_here else None, packed_seq_params,
+            self,
+            hidden_states,
+            self.q_layernorm,
+            self.k_layernorm,
+            rotary_pos_emb if rope_here else None,
+            packed_seq_params,
         )
 
         if use_mxfp6:
             # Nothing above has projected yet: the Function owns projection, norm and
             # rotation together.
             query, key, value = _fused_qkv_project_norm_rope(
-                self, self.linear_qkv, hidden_states,
-                self.q_layernorm, self.k_layernorm, rotary_pos_emb[0],
+                self,
+                self.linear_qkv,
+                hidden_states,
+                self.q_layernorm,
+                self.k_layernorm,
+                rotary_pos_emb[0],
             )
             fused_rope_applied = True
         else:

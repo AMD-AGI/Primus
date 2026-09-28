@@ -29,13 +29,15 @@
 # surrounding split and dtype casts here are exactly that kind of region.
 ###############################################################################
 
-import os
+import warnings
 from typing import Tuple
 
 import torch
 import triton
 import triton.language as tl
 from torch.library import custom_op, triton_op, wrap_triton
+
+from .mxfp6_gates import gates
 
 # The autotune key below is ["M", "D"], so every distinct M pays a full sweep: ~5 s for
 # the 40 forward configs, ~21 s for the 84 backward ones. That is charged per block, so
@@ -47,7 +49,14 @@ from torch.library import custom_op, triton_op, wrap_triton
 # Setting PRIMUS_NORM_ROPE_PIN=1 collapses each space to the measured best compromise
 # (worst case 1.001x forward, 1.002x backward across both shapes), and triton skips
 # benchmarking entirely when handed a single config.
-_PIN_CONFIGS = os.environ.get("PRIMUS_NORM_ROPE_PIN", "0").lower() in ("1", "true", "on")
+# Set with `mxfp6_norm_rope_pin: true`.
+#
+# Unlike every other gate this one is consumed by a decorator -- @triton.autotune is
+# applied at import, long before a config object exists -- so it cannot simply be read at
+# point of use. Instead both kernels are registered with the full space at import and
+# `apply_autotune_pin()` narrows them afterwards. That is equivalent because triton
+# autotunes lazily on the first launch of each (M, D) key, and the config object (which is
+# what calls the hook) is built before any forward runs.
 
 
 @triton.jit
@@ -110,9 +119,11 @@ def _pair_w(W, D: tl.constexpr, INTERLEAVED: tl.constexpr):
     )
 
 
+def _pinned_fwd_configs():
+    return [triton.Config({"BLOCK_M": 8}, num_warps=4, num_stages=2)]
+
+
 def _fwd_configs():
-    if _PIN_CONFIGS:
-        return [triton.Config({"BLOCK_M": 8}, num_warps=4, num_stages=2)]
     return [
         triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
         for bm in (1, 2, 4, 8, 16)
@@ -186,9 +197,11 @@ def _fwd_kernel(
 NPROG = 4096
 
 
+def _pinned_bwd_configs():
+    return [triton.Config({"BLOCK_M": 64}, num_warps=8, num_stages=2)]
+
+
 def _bwd_configs():
-    if _PIN_CONFIGS:
-        return [triton.Config({"BLOCK_M": 64}, num_warps=8, num_stages=2)]
     return [
         triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
         for bm in (1, 2, 4, 8, 16, 32, 64)
@@ -321,6 +334,51 @@ def _row_strided(t: torch.Tensor):
     return t, s
 
 
+_PIN_APPLIED = False
+
+
+def apply_autotune_pin(force: bool = False) -> bool:
+    """Collapse both autotune spaces to their pinned config, if the gate asks.
+
+    Called from ``BaseDiffusionConfig.__post_init__`` once the gates are known, and
+    idempotent so that building several configs in one process (as the tests do) does not
+    repeat the work. Returns whether the pin was applied.
+
+    Why pin at all: the forward space's configs sit within 2.8% of one another and the
+    winner is not stable between runs, so left on, the tuner moves the step time an A/B is
+    trying to measure. Pinning costs at most 1.001x forward and 1.002x backward.
+
+    Mutating ``.configs`` on the Autotuner is reaching into triton's internals, so it is
+    guarded: if the attribute is missing the pin is skipped rather than raising, and the
+    run is then correct but autotuned, which is the pre-pin behaviour.
+    """
+    global _PIN_APPLIED
+    if _PIN_APPLIED and not force:
+        return False
+    if not gates().norm_rope_pin:
+        return False
+
+    pinned = ((_fwd_kernel, _pinned_fwd_configs()), (_bwd_kernel, _pinned_bwd_configs()))
+    for kernel, configs in pinned:
+        if not hasattr(kernel, "configs"):
+            warnings.warn(
+                "mxfp6_norm_rope_pin is set but this triton build's autotuner has no "
+                "'configs' attribute; leaving the norm/RoPE kernels autotuned. Step "
+                "times will vary run to run by up to ~2.8%.",
+                RuntimeWarning,
+            )
+            return False
+        kernel.configs = configs
+        # Drop anything already tuned under the full space, so a process that
+        # launched before the pin does not keep a config the pin excludes.
+        cache = getattr(kernel, "cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
+
+    _PIN_APPLIED = True
+    return True
+
+
 def _launchable(kernel, traceable):
     """``kernel``, wrapped for tracing only when the caller can actually be traced.
 
@@ -344,8 +402,7 @@ def _launchable(kernel, traceable):
     return wrap_triton(kernel) if traceable else kernel
 
 
-def _launch_fwd(x, w, cos, sin, eps, interleaved, traceable=True, copy_x=None, copy_out=None,
-                dest=None):
+def _launch_fwd(x, w, cos, sin, eps, interleaved, traceable=True, copy_x=None, copy_out=None, dest=None):
     S, B, H, D = x.shape
     M = S * B * H
     x, sx = _row_strided(x)
@@ -366,9 +423,9 @@ def _launch_fwd(x, w, cos, sin, eps, interleaved, traceable=True, copy_x=None, c
     # happens in the mathematical sense the reference describes; it is just produced rather
     # than performed.
     if dest is not None:
-        assert dest.shape == x.shape and dest.is_contiguous(), (
-            "fused norm+RoPE destination must match the input shape and be contiguous"
-        )
+        assert (
+            dest.shape == x.shape and dest.is_contiguous()
+        ), "fused norm+RoPE destination must match the input shape and be contiguous"
         out = dest
     else:
         out = torch.empty_like(x, memory_format=torch.contiguous_format)
@@ -600,12 +657,8 @@ def _qkv_fwd_into(
     dest_k: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     D = qkv.shape[-1] // 3
-    _, q_rstd = _launch_fwd(
-        qkv[..., :D], wq, cos, sin, eps, interleaved, traceable=False, dest=dest_q
-    )
-    _, k_rstd = _launch_fwd(
-        qkv[..., D : 2 * D], wk, cos, sin, eps, interleaved, traceable=False, dest=dest_k
-    )
+    _, q_rstd = _launch_fwd(qkv[..., :D], wq, cos, sin, eps, interleaved, traceable=False, dest=dest_q)
+    _, k_rstd = _launch_fwd(qkv[..., D : 2 * D], wk, cos, sin, eps, interleaved, traceable=False, dest=dest_k)
     return q_rstd, k_rstd
 
 
@@ -650,10 +703,10 @@ def _qkv_bwd(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     D = qkv.shape[-1] // 3
     d_qkv = torch.empty_like(qkv, memory_format=torch.contiguous_format)
-    dwqp = _launch_bwd(dq, qkv[..., :D], wq, cos, sin, q_rstd, d_qkv[..., :D], interleaved,
-                       traceable=False)
-    dwkp = _launch_bwd(dk, qkv[..., D : 2 * D], wk, cos, sin, k_rstd, d_qkv[..., D : 2 * D],
-                       interleaved, traceable=False)
+    dwqp = _launch_bwd(dq, qkv[..., :D], wq, cos, sin, q_rstd, d_qkv[..., :D], interleaved, traceable=False)
+    dwkp = _launch_bwd(
+        dk, qkv[..., D : 2 * D], wk, cos, sin, k_rstd, d_qkv[..., D : 2 * D], interleaved, traceable=False
+    )
     d_qkv[..., 2 * D :].copy_(dv)
     return d_qkv, dwqp, dwkp
 

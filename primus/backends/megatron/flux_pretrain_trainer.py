@@ -14,11 +14,13 @@ This trainer implements Flux-specific training logic including:
 """
 
 import os
+from dataclasses import fields as dataclasses_fields
 
 import numpy as np
 import torch
 import torch.nn as nn
 
+from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import Mxfp6Gates
 from primus.backends.megatron.diffusion_trainer import DiffusionPretrainTrainer
 from primus.backends.megatron.training.diffusion.forward_step import (
     EQUIDISTANT_TIMESTEPS,
@@ -593,6 +595,26 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "mxfp6_backward_precision": getattr(params, "mxfp6_backward_precision", "mxfp6"),
                 "mxfp6_weight_format": getattr(params, "mxfp6_weight_format", "mxfp6"),
                 "mxfp6_fused_wgrad_accum": getattr(params, "mxfp6_fused_wgrad_accum", False),
+            }
+        )
+
+        # MXFP6 fusion gates. Forwarded from the module config onto FluxConfig, whose
+        # __post_init__ publishes them to the mxfp6_gates registry that the packer,
+        # attention and normalization modules read.
+        #
+        # This block is load-bearing and easy to forget: config_params is an explicit
+        # allow-list, so a gate added to BaseDiffusionConfig but not listed here parses
+        # fine, logs as True in the module dump, and is then silently dropped -- the run
+        # trains correctly and is simply ~6% slow. That is exactly what happened on the
+        # first migration attempt (428 ms against 400.75).
+        #
+        # Enumerated from the dataclass rather than written out, so adding a gate to
+        # Mxfp6Gates cannot leave it stranded here.
+        _gate_defaults = Mxfp6Gates()
+        config_params.update(
+            {
+                f"mxfp6_{f.name}": getattr(params, f"mxfp6_{f.name}", getattr(_gate_defaults, f.name))
+                for f in dataclasses_fields(Mxfp6Gates)
             }
         )
 

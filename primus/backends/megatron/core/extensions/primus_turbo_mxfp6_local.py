@@ -55,6 +55,7 @@ from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import (
 from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
 from primus_turbo.pytorch.kernels.quantization.mxfp6_pack import check_mxfp6_support
 
+from ..models.diffusion.common.mxfp6_gates import gates
 from .primus_turbo_float8_local import _quantize_fp8_tw
 
 _GRAN_VALUE = ScalingGranularity.MX_BLOCKWISE.value
@@ -80,19 +81,13 @@ _quantize_mxfp4_gemm_row = getattr(torch.ops.primus_turbo, "quantize_mxfp4_gemm_
 # and an activation rather than the weight, and A6W4 cannot reach it. Packing the
 # activation fp6 one way and fp4 the other lets wgrad run A6W4 with the activation as its
 # narrowed B operand. Guarded like the other optional ops.
-_quantize_hybrid_dual = getattr(
-    torch.ops.primus_turbo, "quantize_mxfp6_row_mxfp4_col_dual_impl", None
-)
+_quantize_hybrid_dual = getattr(torch.ops.primus_turbo, "quantize_mxfp6_row_mxfp4_col_dual_impl", None)
 
 # Opt-in, because it narrows a second operand on top of A6W4's weight and so needs its own
 # convergence gate. Measured on the Flux wgrad shapes it is worth about as much as
 # everything A6W4 delivers, and the weight-gradient cosine against fp32 lands
 # at 0.9928 where A6W4's forward already sits at 0.99293.
 _WGRAD_A6W4 = os.environ.get("PRIMUS_MXFP6_WGRAD_A6W4", "") not in ("", "0")
-_STRIDED_V = os.environ.get("PRIMUS_MXFP6_STRIDED_V", "0") == "1"   # skip the V repack (item D1)
-# Route small reduction gradients (biases, QK-norm weights) into main_grad instead of
-# letting AccumulateGrad materialise them. Off by default, like every other gate here.
-_FUSED_SMALL_GRADS = os.environ.get("PRIMUS_MXFP6_FUSED_SMALL_GRADS", "0") == "1"
 
 
 def _pack_act_dual(x, wgrad_is_fp4):
@@ -125,8 +120,7 @@ def _pack_weight_row(weight, weight_is_fp4):
     return _quantize_mxfp6_row(weight, 1)
 
 
-def _wgrad_into_main_grad(weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m,
-                          b_is_fp4=False):
+def _wgrad_into_main_grad(weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m, b_is_fp4=False):
     """Store the weight gradient directly into ``weight.main_grad``.
 
     Saves the round trip the unfused path forces: a freshly allocated wgrad, handed to
@@ -160,9 +154,7 @@ def _wgrad_into_main_grad(weight, g_col, g_col_scale, a_col, a_col_scale, n, k, 
             "Set main_grads_dtype=bf16 or mxfp6_fused_wgrad_accum=False."
         )
 
-    gemm_fp6_out_impl(
-        g_col, g_col_scale, a_col, a_col_scale, main_grad, n, k, m, _GRAN_VALUE, b_is_fp4
-    )
+    gemm_fp6_out_impl(g_col, g_col_scale, a_col, a_col_scale, main_grad, n, k, m, _GRAN_VALUE, b_is_fp4)
     return torch.empty_like(weight)
 
 
@@ -213,7 +205,7 @@ def _reduce_grad_into_main_grad(param, partial, out_dtype, fuse_wgrad_accum, dim
     Returns the placeholder to hand back to autograd, or the ordinary gradient when the
     fusion is off or the bias has no ``main_grad`` to write.
     """
-    if not (fuse_wgrad_accum and _FUSED_SMALL_GRADS):
+    if not (fuse_wgrad_accum and gates().fused_small_grads):
         return partial.sum(dims).to(out_dtype)
     main_grad = getattr(param, "main_grad", None)
     if main_grad is None:
@@ -434,7 +426,9 @@ class MXFP6LinearFunction(torch.autograd.Function):
 
             # grad_weight[N, K] = grad.T[N, M] @ input[M, K], contracting M.
             if ctx.fuse_wgrad_accum:
-                grad_weight = _wgrad_into_main_grad(weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m, _WGRAD_A6W4)
+                grad_weight = _wgrad_into_main_grad(
+                    weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m, _WGRAD_A6W4
+                )
             else:
                 grad_weight = gemm_fp6_impl(
                     g_col,
@@ -813,8 +807,6 @@ class MXFP6MLPFunction(torch.autograd.Function):
         return grad_x, grad_w1, grad_b1, grad_w2, None, None, None
 
 
-
-
 # ---------------------------------------------------------------------------
 # Grouped joint-block MLP: both streams through one GEMM per pass.
 #
@@ -848,10 +840,9 @@ class MXFP6MLPFunction(torch.autograd.Function):
 # shrink once the surrounding plumbing was timed, and the fused prologue still runs once
 # per stream here because the two streams have different fc1 biases.
 #
-# Off by default. Enable with PRIMUS_MXFP6_GROUPED_MLP=1.
+# Off by default. Enable with `mxfp6_grouped_mlp: true`.
 # ---------------------------------------------------------------------------
 
-_GROUPED_MLP = os.environ.get("PRIMUS_MXFP6_GROUPED_MLP", "0") == "1"
 # The 2-group A6W6 kernel, built with the same flags as the variant production already
 # runs for these shapes -- LDSTAGE=1 STNT=1 SWZTH=512 -- so grouping is not paying for a
 # kernel-variant downgrade at the same time. aiter's host gate admits an oversized B only
@@ -903,16 +894,13 @@ def _pack_pair_act(xs):
     for i, x in enumerate(xs):
         cp = torch.empty(cpn, dtype=torch.uint8, device=dev)
         cs = torch.empty(csn, dtype=torch.uint8, device=dev)
-        _quantize_mxfp6_dual_out(
-            x, row_p[i * pn : (i + 1) * pn], row_s[i * sn : (i + 1) * sn], cp, cs
-        )
+        _quantize_mxfp6_dual_out(x, row_p[i * pn : (i + 1) * pn], row_s[i * sn : (i + 1) * sn], cp, cs)
         cols.append((cp, cs))
     return row_p, row_s, cols
 
 
 def _pack_pair_weight(ws):
     """Both directions into halves of shared buffers -- neither is a wgrad operand."""
-    from primus_turbo.pytorch.kernels.quantization.mxfp6_pack import mxfp6_pack_sizes
 
     n, k = ws[0].shape
     dev = ws[0].device
@@ -949,9 +937,7 @@ def _fused_prologue_pair(ys, aux, biases, mode, want_col_sum):
         cp = torch.empty(cpn, dtype=torch.uint8, device=dev)
         cs = torch.empty(csn, dtype=torch.uint8, device=dev)
         part = (
-            torch.empty(mxfp6_col_sum_rows(m), n, dtype=torch.float32, device=dev)
-            if want_col_sum
-            else None
+            torch.empty(mxfp6_col_sum_rows(m), n, dtype=torch.float32, device=dev) if want_col_sum else None
         )
         _quantize_mxfp6_fused_dual_out(
             y,
@@ -991,9 +977,8 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(x_a, x_b, w1_a, w1_b, b1_a, b1_b, w2_a, w2_b,
-                fuse_wgrad_accum, grad_enabled, weight_is_fp4):
-        out_dtype = x_a.dtype
+    def forward(x_a, x_b, w1_a, w1_b, b1_a, b1_b, w2_a, w2_b, fuse_wgrad_accum, grad_enabled, weight_is_fp4):
+        x_a.dtype
         orig_shape = x_a.shape
         # No .contiguous() here: MXFP6MLPFunction does not call it either, and adding it
         # made Inductor materialise the reshape -- 38 as_strided_clone launches per step.
@@ -1018,16 +1003,26 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
         out_b = out[m:].reshape(*orig_shape[:-1], h)
 
         return (
-            out_a, out_b, y1,
-            x_cols[0][0], x_cols[0][1], x_cols[1][0], x_cols[1][1],
-            a_cols[0][0], a_cols[0][1], a_cols[1][0], a_cols[1][1],
-            w1_col, w1_col_s, w2_col, w2_col_s,
+            out_a,
+            out_b,
+            y1,
+            x_cols[0][0],
+            x_cols[0][1],
+            x_cols[1][0],
+            x_cols[1][1],
+            a_cols[0][0],
+            a_cols[0][1],
+            a_cols[1][0],
+            a_cols[1][1],
+            w1_col,
+            w1_col_s,
+            w2_col,
+            w2_col_s,
         )
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        (x_a, x_b, w1_a, w1_b, b1_a, b1_b, w2_a, w2_b,
-         fuse_wgrad_accum, grad_enabled, weight_is_fp4) = inputs
+        (x_a, x_b, w1_a, w1_b, b1_a, b1_b, w2_a, w2_b, fuse_wgrad_accum, grad_enabled, weight_is_fp4) = inputs
         if not grad_enabled:
             return
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
@@ -1045,11 +1040,24 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g_out_a, g_out_b, *_):
-        (y1, b1_a, b1_b,
-         xc_a, xcs_a, xc_b, xcs_b,
-         ac_a, acs_a, ac_b, acs_b,
-         w1_col, w1_col_s, w2_col, w2_col_s,
-         *fused) = ctx.saved_tensors
+        (
+            y1,
+            b1_a,
+            b1_b,
+            xc_a,
+            xcs_a,
+            xc_b,
+            xcs_b,
+            ac_a,
+            acs_a,
+            ac_b,
+            acs_b,
+            w1_col,
+            w1_col_s,
+            w2_col,
+            w2_col_s,
+            *fused,
+        ) = ctx.saved_tensors
         m, k, f, h = ctx.m, ctx.k, ctx.f, ctx.h
         out_dtype = ctx.out_dtype
 
@@ -1078,8 +1086,11 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
 
         want_bias_grad = ctx.needs_input_grad[4]
         g1_row, g1_row_s, g1_cols, partials = _fused_prologue_pair(
-            (y1[:m], y1[m:]), (grad_a[:m], grad_a[m:]), (b1_a, b1_b),
-            MXFP6_PROLOGUE_BIAS_GELU_BACKWARD, want_bias_grad,
+            (y1[:m], y1[m:]),
+            (grad_a[:m], grad_a[m:]),
+            (b1_a, b1_b),
+            MXFP6_PROLOGUE_BIAS_GELU_BACKWARD,
+            want_bias_grad,
         )
 
         # fc1 dgrad, both streams: [2m, k] = grad_y1[2m, f] @ w1[f, k], contracting f.
@@ -1096,12 +1107,30 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
             )
         else:
             grad_w1_a = gemm_fp6_impl(
-                g1_cols[0][0], g1_cols[0][1], xc_a, xcs_a, f, k, m, out_dtype,
-                _GRAN_VALUE, None, _WGRAD_A6W4,
+                g1_cols[0][0],
+                g1_cols[0][1],
+                xc_a,
+                xcs_a,
+                f,
+                k,
+                m,
+                out_dtype,
+                _GRAN_VALUE,
+                None,
+                _WGRAD_A6W4,
             )
             grad_w1_b = gemm_fp6_impl(
-                g1_cols[1][0], g1_cols[1][1], xc_b, xcs_b, f, k, m, out_dtype,
-                _GRAN_VALUE, None, _WGRAD_A6W4,
+                g1_cols[1][0],
+                g1_cols[1][1],
+                xc_b,
+                xcs_b,
+                f,
+                k,
+                m,
+                out_dtype,
+                _GRAN_VALUE,
+                None,
+                _WGRAD_A6W4,
             )
 
         if want_bias_grad:
@@ -1111,8 +1140,19 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
             grad_b1_a = grad_b1_b = None
 
         # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4.
-        return (grad_x_a, grad_x_b, grad_w1_a, grad_w1_b, grad_b1_a, grad_b1_b,
-                grad_w2_a, grad_w2_b, None, None, None)
+        return (
+            grad_x_a,
+            grad_x_b,
+            grad_w1_a,
+            grad_w1_b,
+            grad_b1_a,
+            grad_b1_b,
+            grad_w2_a,
+            grad_w2_b,
+            None,
+            None,
+            None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1212,7 +1252,7 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         # The norm and rotation, unchanged. This is the production Triton op, on the
         # [..., num_heads, 3 * head_dim] view it expects; only its *backward* is replaced.
         qkv = mixed_qkv.reshape(*orig_shape[:-1], h, 3 * d)
-        if _STRIDED_V:
+        if gates().strided_v:
             # Skip the V repack and hand FMHA the strided slice. Safe *here* specifically:
             # this runs inside autograd.Function.forward, where grad mode is off, so the
             # slice is not tracked and no second autograd path is created. Taking the same
@@ -1266,9 +1306,7 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         # wq/wk are leaf parameters and cos/sin are built once per step, so saving them costs
         # nothing; the prologue needs all four, plus the rstd the forward just computed.
         extra = (w_qkv,) if fuse_wgrad_accum else ()
-        ctx.save_for_backward(
-            mixed_qkv, wq, wk, cos, sin, q_rstd, k_rstd, *blobs, *extra
-        )
+        ctx.save_for_backward(mixed_qkv, wq, wk, cos, sin, q_rstd, k_rstd, *blobs, *extra)
         ctx.mark_non_differentiable(mixed_qkv, q_rstd, k_rstd, *blobs)
 
     @staticmethod
@@ -1328,18 +1366,12 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         grad_b = b_partial.sum(0).to(out_dtype) if want_bias_grad else None
         # dw reduces over rows *and* heads: the norm weight is [head_dim] and shared across
         # heads, and a packer block owns one head, so the partial buffer carries both axes.
-        grad_wq = _reduce_grad_into_main_grad(
-            wq, dwq_partial, wq.dtype, ctx.fuse_wgrad_accum, dims=(0, 1)
-        )
-        grad_wk = _reduce_grad_into_main_grad(
-            wk, dwk_partial, wk.dtype, ctx.fuse_wgrad_accum, dims=(0, 1)
-        )
+        grad_wq = _reduce_grad_into_main_grad(wq, dwq_partial, wq.dtype, ctx.fuse_wgrad_accum, dims=(0, 1))
+        grad_wk = _reduce_grad_into_main_grad(wk, dwk_partial, wk.dtype, ctx.fuse_wgrad_accum, dims=(0, 1))
 
         # Trailing Nones cover cos, sin, eps, interleaved, fuse_wgrad_accum, grad_enabled
         # and weight_is_fp4.
         return grad_x, grad_w, grad_b, grad_wq, grad_wk, None, None, None, None, None, None, None
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -1375,12 +1407,11 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
 # packed gradients cannot land adjacently for a grouped dgrad.
 # ---------------------------------------------------------------------------
 
-_JOINT_QKV = os.environ.get("PRIMUS_MXFP6_JOINT_QKV", "0") == "1"
-
 
 def joint_qkv_enabled() -> bool:
     """Is the joint QKV path switched on and usable in this configuration?"""
-    return _JOINT_QKV and _STRIDED_V and _quantize_mxfp6_qk_norm_rope_bwd is not None
+    g = gates()
+    return g.joint_qkv and g.strided_v and _quantize_mxfp6_qk_norm_rope_bwd is not None
 
 
 class MXFP6JointQKVFunction(torch.autograd.Function):
@@ -1395,9 +1426,27 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(x_a, x_b, w_a, w_b, b_a, b_b, wq_a, wk_a, wq_b, wk_b,
-                cos_a, sin_a, cos_b, sin_b, eps, interleaved,
-                fuse_wgrad_accum, grad_enabled, weight_is_fp4):
+    def forward(
+        x_a,
+        x_b,
+        w_a,
+        w_b,
+        b_a,
+        b_b,
+        wq_a,
+        wk_a,
+        wq_b,
+        wk_b,
+        cos_a,
+        sin_a,
+        cos_b,
+        sin_b,
+        eps,
+        interleaved,
+        fuse_wgrad_accum,
+        grad_enabled,
+        weight_is_fp4,
+    ):
         from primus.backends.megatron.core.models.diffusion.common.fused_norm_rope import (
             _qkv_fwd_into,
         )
@@ -1427,10 +1476,30 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
         # stacking stream a above stream b and reshaping gives exactly the joint sequence
         # the cat used to build.
         mixed_qkv = torch.empty(m_a + m_b, n, device=xa.device, dtype=out_dtype)
-        gemm_fp6_out_impl(packs[0][0], packs[0][1], packs[0][4], packs[0][5],
-                          mixed_qkv[:m_a], m_a, n, k, _GRAN_VALUE, weight_is_fp4)
-        gemm_fp6_out_impl(packs[1][0], packs[1][1], packs[1][4], packs[1][5],
-                          mixed_qkv[m_a:], m_b, n, k, _GRAN_VALUE, weight_is_fp4)
+        gemm_fp6_out_impl(
+            packs[0][0],
+            packs[0][1],
+            packs[0][4],
+            packs[0][5],
+            mixed_qkv[:m_a],
+            m_a,
+            n,
+            k,
+            _GRAN_VALUE,
+            weight_is_fp4,
+        )
+        gemm_fp6_out_impl(
+            packs[1][0],
+            packs[1][1],
+            packs[1][4],
+            packs[1][5],
+            mixed_qkv[m_a:],
+            m_b,
+            n,
+            k,
+            _GRAN_VALUE,
+            weight_is_fp4,
+        )
 
         s_a, s_b, batch = shape_a[0], shape_b[0], shape_a[1]
         qkv = mixed_qkv.reshape(s_a + s_b, batch, h, 3 * d)
@@ -1445,15 +1514,48 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
         # One strided slice covering both streams -- the V cat falls out for free.
         v = qkv[..., 2 * d :]
 
-        return (q, k_out, v, mixed_qkv, q_rstd_a, k_rstd_a, q_rstd_b, k_rstd_b,
-                packs[0][2], packs[0][3], packs[0][6], packs[0][7],
-                packs[1][2], packs[1][3], packs[1][6], packs[1][7])
+        return (
+            q,
+            k_out,
+            v,
+            mixed_qkv,
+            q_rstd_a,
+            k_rstd_a,
+            q_rstd_b,
+            k_rstd_b,
+            packs[0][2],
+            packs[0][3],
+            packs[0][6],
+            packs[0][7],
+            packs[1][2],
+            packs[1][3],
+            packs[1][6],
+            packs[1][7],
+        )
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        (x_a, x_b, w_a, w_b, b_a, b_b, wq_a, wk_a, wq_b, wk_b,
-         cos_a, sin_a, cos_b, sin_b, eps, interleaved,
-         fuse_wgrad_accum, grad_enabled, weight_is_fp4) = inputs
+        (
+            x_a,
+            x_b,
+            w_a,
+            w_b,
+            b_a,
+            b_b,
+            wq_a,
+            wk_a,
+            wq_b,
+            wk_b,
+            cos_a,
+            sin_a,
+            cos_b,
+            sin_b,
+            eps,
+            interleaved,
+            fuse_wgrad_accum,
+            grad_enabled,
+            weight_is_fp4,
+        ) = inputs
         if not grad_enabled:
             return
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
@@ -1470,16 +1572,35 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
         ctx.weight_is_fp4 = weight_is_fp4
         blobs = output[3:]
         extra = (w_a, w_b) if fuse_wgrad_accum else ()
-        ctx.save_for_backward(wq_a, wk_a, wq_b, wk_b, cos_a, sin_a, cos_b, sin_b,
-                              *blobs, *extra)
+        ctx.save_for_backward(wq_a, wk_a, wq_b, wk_b, cos_a, sin_a, cos_b, sin_b, *blobs, *extra)
         ctx.mark_non_differentiable(*blobs)
 
     @staticmethod
     def backward(ctx, dq, dk, dv, *_):
-        (wq_a, wk_a, wq_b, wk_b, cos_a, sin_a, cos_b, sin_b,
-         mixed_qkv, q_rstd_a, k_rstd_a, q_rstd_b, k_rstd_b,
-         xc_a, xcs_a, wc_a, wcs_a, xc_b, xcs_b, wc_b, wcs_b,
-         *fused) = ctx.saved_tensors
+        (
+            wq_a,
+            wk_a,
+            wq_b,
+            wk_b,
+            cos_a,
+            sin_a,
+            cos_b,
+            sin_b,
+            mixed_qkv,
+            q_rstd_a,
+            k_rstd_a,
+            q_rstd_b,
+            k_rstd_b,
+            xc_a,
+            xcs_a,
+            wc_a,
+            wcs_a,
+            xc_b,
+            xcs_b,
+            wc_b,
+            wcs_b,
+            *fused,
+        ) = ctx.saved_tensors
         m_a, m_b, s_a = ctx.m_a, ctx.m_b, ctx.s_a
         k, n, h, d = ctx.k, ctx.n, ctx.h, ctx.d
         out_dtype = ctx.out_dtype
@@ -1487,26 +1608,49 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
 
         grads = tuple(g.contiguous() for g in (dq, dk, dv))
         outs = []
-        for i, (rows, off, wq, wk, cos, sin, q_rstd, k_rstd, xc, xcs, wc, wcs) in enumerate((
-            (m_a, slice(0, s_a), wq_a, wk_a, cos_a, sin_a, q_rstd_a, k_rstd_a, xc_a, xcs_a, wc_a, wcs_a),
-            (m_b, slice(s_a, None), wq_b, wk_b, cos_b, sin_b, q_rstd_b, k_rstd_b, xc_b, xcs_b, wc_b, wcs_b),
-        )):
+        for i, (rows, off, wq, wk, cos, sin, q_rstd, k_rstd, xc, xcs, wc, wcs) in enumerate(
+            (
+                (m_a, slice(0, s_a), wq_a, wk_a, cos_a, sin_a, q_rstd_a, k_rstd_a, xc_a, xcs_a, wc_a, wcs_a),
+                (
+                    m_b,
+                    slice(s_a, None),
+                    wq_b,
+                    wk_b,
+                    cos_b,
+                    sin_b,
+                    q_rstd_b,
+                    k_rstd_b,
+                    xc_b,
+                    xcs_b,
+                    wc_b,
+                    wcs_b,
+                ),
+            )
+        ):
             g = tuple(x[off].contiguous().reshape(rows, h * d) for x in grads)
             mq = mixed_qkv[0:m_a] if i == 0 else mixed_qkv[m_a:]
-            (g_row, g_row_s, g_col, g_col_s, b_partial, dwq_partial,
-             dwk_partial) = _quantize_mxfp6_qk_norm_rope_bwd(
-                mq, *g, cos, sin, wq, wk, q_rstd, k_rstd, want_bias_grad
+            (g_row, g_row_s, g_col, g_col_s, b_partial, dwq_partial, dwk_partial) = (
+                _quantize_mxfp6_qk_norm_rope_bwd(mq, *g, cos, sin, wq, wk, q_rstd, k_rstd, want_bias_grad)
             )
             grad_x = gemm_fp6_impl(
-                g_row, g_row_s, wc, wcs, rows, k, n, out_dtype, _GRAN_VALUE, None,
+                g_row,
+                g_row_s,
+                wc,
+                wcs,
+                rows,
+                k,
+                n,
+                out_dtype,
+                _GRAN_VALUE,
+                None,
                 ctx.weight_is_fp4,
             ).reshape(ctx.shape_a if i == 0 else ctx.shape_b)
             if ctx.fuse_wgrad_accum:
-                grad_w = _wgrad_into_main_grad(fused[i], g_col, g_col_s, xc, xcs, n, k, rows,
-                                               _WGRAD_A6W4)
+                grad_w = _wgrad_into_main_grad(fused[i], g_col, g_col_s, xc, xcs, n, k, rows, _WGRAD_A6W4)
             else:
-                grad_w = gemm_fp6_impl(g_col, g_col_s, xc, xcs, n, k, rows, out_dtype,
-                                       _GRAN_VALUE, None, _WGRAD_A6W4)
+                grad_w = gemm_fp6_impl(
+                    g_col, g_col_s, xc, xcs, n, k, rows, out_dtype, _GRAN_VALUE, None, _WGRAD_A6W4
+                )
             grad_b = b_partial.sum(0).to(out_dtype) if want_bias_grad else None
             grad_wq = _reduce_grad_into_main_grad(
                 wq, dwq_partial, wq.dtype, ctx.fuse_wgrad_accum, dims=(0, 1)
@@ -1519,8 +1663,27 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
         (gx_a, gw_a, gb_a, gwq_a, gwk_a), (gx_b, gw_b, gb_b, gwq_b, gwk_b) = outs
         # Trailing Nones cover cos_a, sin_a, cos_b, sin_b, eps, interleaved,
         # fuse_wgrad_accum, grad_enabled and weight_is_fp4.
-        return (gx_a, gx_b, gw_a, gw_b, gb_a, gb_b, gwq_a, gwk_a, gwq_b, gwk_b,
-                None, None, None, None, None, None, None, None, None)
+        return (
+            gx_a,
+            gx_b,
+            gw_a,
+            gw_b,
+            gb_a,
+            gb_b,
+            gwq_a,
+            gwk_a,
+            gwq_b,
+            gwk_b,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 def _is_tanh_gelu(fn) -> bool:
@@ -1579,13 +1742,8 @@ def _fused_mlp_unusable_reason(mlp) -> str:
 
 
 def _fused_mlp_mode() -> str:
-    mode = os.environ.get("PRIMUS_MXFP6_FUSED_MLP", "").strip().lower() or "auto"
-    assert mode in (
-        "auto",
-        "on",
-        "off",
-    ), f"PRIMUS_MXFP6_FUSED_MLP must be auto, on or off, got {mode!r}"
-    return mode
+    # Validated in BaseDiffusionConfig.__post_init__; this is just the read.
+    return gates().fused_mlp
 
 
 class MXFP6FusedMLP(MLP):
@@ -1596,7 +1754,7 @@ class MXFP6FusedMLP(MLP):
     for anything the fused path does not cover, so a configuration it cannot handle is
     slow rather than wrong.
 
-    ``PRIMUS_MXFP6_FUSED_MLP=off`` forces the stock path for A/B comparison; ``on`` makes
+    ``mxfp6_fused_mlp: off`` forces the stock path for A/B comparison; ``on`` makes
     an unusable configuration an error instead of a silent fallback.
     """
 
@@ -1604,11 +1762,11 @@ class MXFP6FusedMLP(MLP):
         super().__init__(*args, **kwargs)
 
         mode = _fused_mlp_mode()
-        reason = "disabled by environment" if mode == "off" else _fused_mlp_unusable_reason(self)
+        reason = "disabled by config" if mode == "off" else _fused_mlp_unusable_reason(self)
         self._fused_epilogue = reason == ""
 
         if not self._fused_epilogue and mode == "on":
-            raise RuntimeError(f"PRIMUS_MXFP6_FUSED_MLP=on but the fused MLP is unusable: {reason}")
+            raise RuntimeError(f"mxfp6_fused_mlp=on but the fused MLP is unusable: {reason}")
         if not self._fused_epilogue and mode == "auto":
             warnings.warn(
                 f"MXFP6 fused MLP epilogue disabled, falling back to the stock MLP: {reason}",
@@ -1629,7 +1787,7 @@ class MXFP6FusedMLP(MLP):
             # the DDP hook must skip its own add_ or the placeholder handed to autograd
             # would be summed on top of a gradient that is already there.
             claimed = [self.linear_fc1.weight, self.linear_fc2.weight]
-            if _FUSED_SMALL_GRADS and self.linear_fc1.bias is not None:
+            if gates().fused_small_grads and self.linear_fc1.bias is not None:
                 claimed.append(self.linear_fc1.bias)
             _claim_main_grad(*claimed)
 
@@ -1656,7 +1814,7 @@ def grouped_mlp_pair(mlp_a, mlp_b, x_a, x_b):
     MLPs separately, as before. Every rejection here is a property of the pair rather than
     of the configuration, so the fallback is per block and cannot half-apply.
     """
-    if not _GROUPED_MLP or _grouped_mlp_unavailable_reason() is not None:
+    if not gates().grouped_mlp or _grouped_mlp_unavailable_reason() is not None:
         return None
     if mlp_a is None or mlp_b is None:
         return None
@@ -1678,22 +1836,30 @@ def grouped_mlp_pair(mlp_a, mlp_b, x_a, x_b):
         return None
     if fuse_a:
         claimed = [
-            mlp_a.linear_fc1.weight, mlp_a.linear_fc2.weight,
-            mlp_b.linear_fc1.weight, mlp_b.linear_fc2.weight,
+            mlp_a.linear_fc1.weight,
+            mlp_a.linear_fc2.weight,
+            mlp_b.linear_fc1.weight,
+            mlp_b.linear_fc2.weight,
         ]
         # Same reason as the ungrouped wrapper: fc1's bias gradient now lands in main_grad
         # directly, so the hook must not add the placeholder on top of it.
-        if _FUSED_SMALL_GRADS:
+        if gates().fused_small_grads:
             for _m in (mlp_a, mlp_b):
                 if _m.linear_fc1.bias is not None:
                     claimed.append(_m.linear_fc1.bias)
         _claim_main_grad(*claimed)
     out_a, out_b = MXFP6GroupedMLPFunction.apply(
-        x_a, x_b,
-        mlp_a.linear_fc1.weight, mlp_b.linear_fc1.weight,
-        mlp_a.linear_fc1.bias, mlp_b.linear_fc1.bias,
-        mlp_a.linear_fc2.weight, mlp_b.linear_fc2.weight,
-        fuse_a, torch.is_grad_enabled(), _resolve_weight_is_fp4(mlp_a.config),
+        x_a,
+        x_b,
+        mlp_a.linear_fc1.weight,
+        mlp_b.linear_fc1.weight,
+        mlp_a.linear_fc1.bias,
+        mlp_b.linear_fc1.bias,
+        mlp_a.linear_fc2.weight,
+        mlp_b.linear_fc2.weight,
+        fuse_a,
+        torch.is_grad_enabled(),
+        _resolve_weight_is_fp4(mlp_a.config),
     )[:2]
     # fc2 is built with skip_bias_add=True, so each MLP's contract is to hand its bias back
     # unadded for the caller to fuse into the residual.
@@ -1707,4 +1873,4 @@ def grouped_mlp_enabled() -> bool:
     the context stream's layernorm *before* it has the tensors to test eligibility on, and
     with the gate off that hoist must not happen at all.
     """
-    return _GROUPED_MLP and _grouped_mlp_unavailable_reason() is None
+    return gates().grouped_mlp and _grouped_mlp_unavailable_reason() is None
