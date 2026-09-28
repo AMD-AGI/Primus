@@ -50,6 +50,11 @@ enable_turbo_attention_float8: false
 # operator switch
 # use turbo gemm
 use_turbo_gemm: false
+# Route Megatron's GPT output projection through the Turbo tensorwise-E4M3
+# linear. This is deliberately separate from use_turbo_gemm because GPTModel
+# constructs the LM head outside the transformer-layer spec provider. Enabling
+# it also requires a te_precision_config_file matcher for ``output_layer``.
+use_turbo_fp8_output_layer: false
 # Fuse the dense SwiGLU MLP chain (fc1 + GLU + fc2) into Primus-Turbo's
 # FlyDSL MXFP4 dense MLP op. Analog of turbo_fused_grouped_gemm for G=1.
 # Default off; Llama-3.1-8B opts in from the experiment YAML.

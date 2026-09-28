@@ -1534,8 +1534,12 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         self,
         x: torch.Tensor,
         is_first_microbatch: bool = False,
+        weight: Optional[torch.Tensor] = None,
     ):
-        weight = self._parameters["weight"]
+        if weight is None:
+            weight = self._parameters["weight"]
+        if weight is None:
+            raise RuntimeError("Column-parallel weight was not allocated or supplied")
         if self.use_bias:
             bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
         original_shape = x.size()
@@ -1664,6 +1668,102 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
             out = out + bias_tensor
 
         return out, None
+
+
+class PrimusTurboFP8OutputColumnParallelLinear(PrimusTurboColumnParallelLinear):
+    """Tensorwise-E4M3 GPT output projection backed by Primus-Turbo.
+
+    Megatron constructs its output projection directly rather than through the
+    transformer-layer spec provider. It also calls the layer with ``weight``
+    and ``runtime_gather_output`` keyword arguments that ordinary transformer
+    projections do not accept. This adapter preserves that interface while
+    reusing :class:`PrimusTurboColumnParallelLinear`'s FP8 forward and backward
+    implementation.
+
+    The layer is intentionally strict: its per-module precision matcher must
+    select tensorwise E4M3 FP8. Failing during model construction is safer than
+    silently inheriting the surrounding MXFP4 recipe for the LM head.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        config: ModelParallelConfig,
+        init_method: Callable,
+        gather_output: bool,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool = False,
+        skip_weight_param_allocation: bool = False,
+        tp_comm_buffer_name: Optional[str] = None,
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        stride: int = 1,
+        embedding_activation_buffer=None,
+        grad_output_buffer=None,
+    ):
+        if embedding_activation_buffer is not None or grad_output_buffer is not None:
+            raise NotImplementedError(
+                "PrimusTurboFP8OutputColumnParallelLinear does not support "
+                "deferred embedding weight-gradient computation"
+            )
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            config=config,
+            init_method=init_method,
+            gather_output=gather_output,
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            skip_weight_param_allocation=skip_weight_param_allocation,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            tp_group=tp_group,
+            stride=stride,
+        )
+
+    def finish_init(self, quantization_config):
+        """Bind and validate the LM-head-only precision override."""
+        super().finish_init(quantization_config)
+        if self.te_quant_params is None:
+            raise ValueError(
+                "Turbo FP8 output layer requires a te_precision_config_file matcher "
+                "for module 'output_layer'"
+            )
+
+        recipes = [self.te_quant_params.training_recipe]
+        if self.te_quant_params.evaluation_recipe is not None:
+            recipes.append(self.te_quant_params.evaluation_recipe)
+        for recipe in recipes:
+            if (
+                recipe.fp8_quantization_recipe != Fp8Recipe.tensorwise
+                or recipe.fp8_format.lower() != "e4m3"
+            ):
+                raise ValueError(
+                    "Turbo FP8 output layer requires tensorwise E4M3 for both "
+                    "training and evaluation recipes"
+                )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
+        runtime_gather_output: Optional[bool] = None,
+    ):
+        # TP=1 is enforced by the parent, so changing gather_output at runtime
+        # cannot alter communication or the local result.
+        del runtime_gather_output
+        is_first_microbatch = self.is_first_microbatch
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+        with quant_context:
+            out = self.forward_internal(
+                x,
+                is_first_microbatch=is_first_microbatch,
+                weight=weight,
+            )
+        self.is_first_microbatch = False
+        return out
 
 
 class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
