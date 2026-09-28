@@ -70,6 +70,11 @@ def _build_xla_flags() -> str:
         "--xla_gpu_enable_cublaslt=true "
         f"--xla_gpu_autotune_level={autotune_level} "
         "--xla_gpu_enable_all_gather_combine_by_dim=false "
+        # XLA turned dynamic slice fusion on by default (openxla/xla 85922ac5ee), which
+        # jaxlib >= 0.11.1 ships in its DebugOptions defaults. Inside scanned layers it wraps
+        # TE's fused-attention custom calls, and under memory pressure the remat pass then
+        # recomputes the whole flash-attention backward per layer (~10% on llama2-7B fp8).
+        "--xla_gpu_enable_dynamic_slice_fusion=false "
         "--xla_gpu_enable_cub_radix_sort=false"
     )
     if os.getenv("DUMP_HLO", "0") == "1":
