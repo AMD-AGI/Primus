@@ -13,10 +13,29 @@
 # development work without the MLPerf machinery, use
 # flux_12b_ddp_energon_schnell_resample_local_spec_mxfp6.yaml.
 #
-# Why a second batch shape at all: MBS=32 is the shape the optimization
-# campaign was measured at, so it is the one whose step time has a directly
-# comparable reference. MBS=64 fits the card and amortizes better; MBS=32
-# leaves materially more headroom (peak memory at MBS=64 is most of the 288 GB).
+# Why this shape and not MBS=64, when MBS=64 has the better throughput:
+#
+# MBS=64 is genuinely faster per image -- 768.9 ms per 512 images against this
+# shape's 881.7, a 12.8% better rate. It is still the wrong shape to submit,
+# because MLPerf scores time-to-train rather than throughput, and time-to-train
+# is samples divided by throughput.
+#
+# MLPerf's reference convergence points grow with global batch: the RCP band is
+# 7.08-7.60M samples at GBS 512, 8.49M at GBS 1024 and 10.30M at GBS 2048,
+# steepening again at 4096. Large batch costs samples, by the reference's own
+# numbers. At GBS 256 the sample requirement is smaller by more than enough to
+# repay the slower rate -- MBS=64's throughput advantage was priced at roughly
+# 22% worse time-to-train.
+#
+# In actual MLPerf runs this shape is also the more run-to-run consistent of
+# the two. That matters on its own: a submission is scored on several runs, so
+# a tighter spread is worth real time independently of the mean.
+#
+# It also leaves far more headroom -- 159.5 GB peak against 245.7, on a 288 GB
+# card -- which is what makes room for anything that costs memory later.
+#
+# The practical rule: price changes on time-to-train, not step time. A step-time
+# win that costs samples-to-target is a loss here.
 #
 # Performance-relevant settings in this file were swept at MBS=64/GBS=512 --
 # the bucket size, the optimizer dtypes, the fused-MLP throughput figure. The
