@@ -3,7 +3,26 @@
 
 # Flux 12B Schnell Training — DDP + Local Spec + MXFP6 (MLPerf Mode, MI355X)
 #
-# The submission recipe for MXFP6. It is the FP8 MLPerf config with the
+# The MXFP6 throughput reference, NOT the submission recipe.
+#
+# This shape has the better images/s -- 768.9 ms per 512 images against MBS=32's
+# 881.7, a 12.8% better rate -- and it is the shape the headline 1.77x speedup
+# is quoted from. It is *not* what a submission should run.
+#
+# MLPerf scores time-to-train, and time-to-train is samples divided by
+# throughput. MLPerf's reference convergence points grow with global batch:
+# 7.08-7.60M samples at GBS 512, 8.49M at GBS 1024, 10.30M at GBS 2048. The
+# larger sample requirement at this shape more than cancels its better rate,
+# which was priced at roughly 22% worse time-to-train. In practice MBS=32 is
+# also the more run-to-run consistent of the two, which matters because a
+# submission is scored on several runs rather than one.
+#
+# So for a submission use the sibling
+# ...local_spec_mxfp6_mlperf_mbs32.yaml (MBS=32 / GBS=256). Use this file to
+# measure or regression-test throughput, or where 245.7 GB of peak memory is
+# acceptable and 159.5 GB is not required.
+#
+# It is otherwise the FP8 MLPerf config with the
 # precision block swapped, so that a comparison between the two is a comparison
 # of numerics and nothing else; everything the ruleset pins -- AdamW
 # 0.9/0.95/1e-8, weight decay 0.1, gradient clip 1.0, eval every 512 steps --
