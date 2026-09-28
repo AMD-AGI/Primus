@@ -28,9 +28,9 @@ Enabled by the same ``dataloader_mp_context`` module param that drives
 ``dataloader_patch``, since a fork-free start method is the only reason to want
 any of this.
 
-An installed tree that already carries the equivalent source changes -- the
-vendored ``energon-7.3.2-no-fork.patch`` in tiger-training-internal applies them
-to site-packages -- is detected and left alone, so the two mechanisms can
+An installed tree that already carries the equivalent source changes -- some
+deployments vendor an equivalent patch against site-packages -- is detected and
+left alone, so the two mechanisms can
 coexist while one is being retired. A tree that has neither the expected
 lambdas nor the replacements is a version mismatch and fails loudly here rather
 than segfaulting later.

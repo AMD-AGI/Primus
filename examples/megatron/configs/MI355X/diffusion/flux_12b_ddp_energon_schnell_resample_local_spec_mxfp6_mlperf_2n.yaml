@@ -42,8 +42,8 @@
 # LAUNCHING THIS NEEDS MORE THAN THE RECIPE. Inter-node bandwidth, the eight
 # rails, the MLLOG disclosure variables and the pinned container are all outside
 # this file, and a run missing any of them either dies at startup or produces a
-# result that is not comparable to the nine above. The full procedure is in
-# tiger-training-internal docs/mlperf/flux_mxfp6_twonode_reproduce.md.
+# result that is not comparable to the nine above. The full two-node procedure
+# is kept with the campaign notes; ask the diffusion team for it.
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
