@@ -283,8 +283,9 @@ class DeepseekV4MoE(MegatronModule):
 
         The upstream patch that swaps Megatron's ``MoELayer`` cannot reach V4 --
         :class:`DeepseekV4MoE` is built directly by ``deepseek_v4_block`` and
-        never instantiates ``MoELayer`` -- so V4 drives
-        :class:`MegaMoEExperts` itself.
+        never instantiates ``MoELayer`` -- so V4 builds
+        :class:`MegaMoEExperts` / :class:`MegaMoEFP8Experts` itself (selected by
+        ``turbo_mega_moe_precision``).
 
         The turbo switches live on the Megatron ``args`` namespace, not on
         :class:`TransformerConfig` (same as ``args.enable_primus_turbo`` in
@@ -384,8 +385,17 @@ class DeepseekV4MoE(MegatronModule):
         fallback leaves the run with neither MegaMoE nor the Turbo DeepEP
         dispatcher that ``use_turbo_mega_moe`` disables, which shows up only as
         an unexplained slowdown.
+
+        Honour ``turbo_mega_moe_precision`` the same way
+        :class:`PrimusTurboMegaMoELayer` does: V4 never instantiates
+        ``MoELayer``, so the megatron.turbo.mega_moe patch cannot pick the
+        expert flavour for us.
         """
-        from primus.backends.megatron.core.extensions.mega_moe import MegaMoEExperts
+        from primus.backends.megatron.core.extensions.mega_moe import (
+            MegaMoEExperts,
+            MegaMoEFP8Experts,
+            mega_moe_precision,
+        )
 
         reasons = []
         if self.config.tensor_model_parallel_size != 1:
@@ -405,12 +415,15 @@ class DeepseekV4MoE(MegatronModule):
                 + "; ".join(reasons)
             )
 
+        precision = mega_moe_precision()
+        experts_cls = MegaMoEFP8Experts if precision == "mxfp8" else MegaMoEExperts
         logger.warning(
-            "[DeepSeek-V4] MegaMoE expert path enabled: the fused kernel hardcodes unclamped "
-            "SwiGLU, so swiglu_limit=%s is NOT applied to routed experts.",
+            "[DeepSeek-V4] MegaMoE expert path enabled (%s): the fused kernel hardcodes "
+            "unclamped SwiGLU, so swiglu_limit=%s is NOT applied to routed experts.",
+            precision,
             self.clamp_alpha,
         )
-        experts = MegaMoEExperts(
+        experts = experts_cls(
             self.config,
             self.local_num_routed_experts,
             self.hidden_size,
@@ -420,8 +433,9 @@ class DeepseekV4MoE(MegatronModule):
         if self.config.perform_initialization:
             experts.reset_parameters(self.ep_rank)
         logger.info(
-            "[DeepSeek-V4] MoE expert path resolved to MegaMoEExperts "
-            "(fused dispatch/combine; token dispatcher and grouped experts not built)."
+            "[DeepSeek-V4] MoE expert path resolved to %s "
+            "(fused dispatch/combine; token dispatcher and grouped experts not built).",
+            experts_cls.__name__,
         )
         return experts
 
