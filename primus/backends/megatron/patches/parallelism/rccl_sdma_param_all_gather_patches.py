@@ -28,6 +28,12 @@ BACKEND_ENV = "MEGATRON_PARAM_GATHER_BACKEND"
 RCCL_SDMA_BACKEND = "rccl_sdma"
 _EAGER_RUNTIME_INITIALIZED = False
 
+# Keep the real allocator available when another __init__ wrapper temporarily
+# patches torch.zeros around this one. In particular, the direct-gradient
+# wrapper must receive the constructor's second allocation, not this wrapper's
+# internal param_data allocation.
+_REAL_TORCH_ZEROS = torch.zeros
+
 
 def rccl_sdma_param_gather_enabled(_ctx: PatchContext | None = None) -> bool:
     return os.getenv(BACKEND_ENV, "").strip().lower() == RCCL_SDMA_BACKEND
@@ -168,7 +174,7 @@ def make_param_and_grad_buffer_init(original):
                 recommended_bytes = recommended_eager_param_bytes(size_bytes)
                 try:
                     with torch.cuda.use_mem_pool(pool):
-                        return original_zeros(*zeros_args, **zeros_kwargs)
+                        return _REAL_TORCH_ZEROS(*zeros_args, **zeros_kwargs)
                 except RuntimeError as exc:
                     raise RuntimeError(
                         "RCCL-SDMA could not allocate the direct symmetric parameter "
