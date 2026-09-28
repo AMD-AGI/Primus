@@ -1,0 +1,90 @@
+###############################################################################
+# ZAYA1 base config.
+#
+# Forward math follows the SGLang ZAYA1 implementation and the released
+# Zyphra/ZAYA1-base checkpoint, not the paper equations where they disagree.
+###############################################################################
+
+extends:
+  - llama_base.yaml
+
+# primus/core/utils/import_utils.py and megatron_pretrain_trainer.py dispatch
+# on this string.
+model_type: zaya1
+
+# ---------- tokenizer ----------
+# The base paper uses the Gemma3 tokenizer. Real-data runs tokenize with it.
+# Mock-data runs never build it: mock_data_patches.py forces NullTokenizer and
+# preserves vocab_size, so this declaration does not download anything.
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: google/gemma-3-1b-pt
+
+# ---------- attention geometry ----------
+# multi_latent_attention must stay false. core_transformer_config_from_args
+# replaces Zaya1TransformerConfig with MLATransformerConfig when it is true
+# and drops every zaya_* field. zaya1_builder asserts on this.
+multi_latent_attention: false
+qk_layernorm: false
+# Must stay true or arguments.py forces num_query_groups back to None.
+group_query_attention: true
+sequence_parallel: false
+
+# ---------- positional encoding ----------
+# Partial RoPE is applied inside CCA (NeoX / rotate-half on the first
+# partial_rotary_factor of each head). The embedding module must not add
+# absolute positions, which is what position_embedding_type=rope does when
+# it is not "learned_absolute".
+position_embedding_type: rope
+rotary_percent: 0.5
+partial_rotary_factor: 0.5
+# Phase-1 pretraining base. The released Zyphra/ZAYA1-base checkpoint uses
+# rope_theta 1e6 after the 32K mid-training stage. That is a phase knob, not
+# a different architecture. See the concerns note.
+rotary_base: 10000
+# llama_base.yaml sets rotary_scaling_factor: 40 for Llama long-context YaRN.
+# ZAYA1 phase-1 RoPE is an unscaled 10K base. CCA does not read this field;
+# it is reset so a later Megatron rotary module cannot pick the Llama value up.
+rotary_scaling_factor: 1.0
+max_position_embeddings: 4096
+
+# ---------- norm / residual / embeddings ----------
+normalization: RMSNorm
+norm_epsilon: 1.0e-05
+layernorm_epsilon: 1.0e-05
+swiglu: true
+add_bias_linear: false
+untie_embeddings_and_output_weights: false
+hidden_dropout: 0.0
+attention_dropout: 0.0
+
+# ---------- MoE, as Megatron sees it ----------
+# Our router does not use Megatron's MoE layer. These keys still have to
+# satisfy TransformerConfig.__post_init__: top-1 softmax requires
+# moe_router_pre_softmax, because Megatron refuses the combination otherwise.
+# The ZAYA1 router already applies softmax before top-k.
+num_experts: 16
+moe_router_topk: 1
+moe_router_pre_softmax: true
+moe_router_load_balancing_type: none
+moe_aux_loss_coeff: 0.0
+moe_router_enable_expert_bias: false
+moe_grouped_gemm: false
+
+# ---------- SGLang ZAYA1 knobs ----------
+# HF config.json lists ffn width 4096 because gate and up are concatenated.
+# Megatron's ffn_hidden_size / moe_ffn_hidden_size are one SwiGLU side (2048),
+# set on zaya1.yaml.
+zaya_mlp_expansion: 256
+zaya_use_mod: true
+zaya_use_eda: true
+zaya_high_prec: true
+scale_residual_merge: true
+clamp_temp: false
+cca_time0: 2
+cca_time1: 2
+# Microbatch AdamW on p_e - 1/E, including the MOD skip class. 0 freezes the
+# balancing biases. The papers do not publish these hyperparameters.
+zaya_balance_lr: 1.0e-3
+zaya_balance_beta1: 0.9
+zaya_balance_beta2: 0.999
+zaya_balance_wd: 0.0

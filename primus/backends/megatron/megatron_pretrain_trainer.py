@@ -136,7 +136,7 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
         from primus.core.utils.import_utils import get_model_provider
 
-        # Determine model type (gpt / mamba / deepseek_v4 / kimi_k3 / diffusion)
+        # Determine model type (gpt / mamba / deepseek_v4 / kimi_k3 / zaya1 / diffusion)
         # from backend_args
         model_type = getattr(self.backend_args, "model_type", "gpt")
         log_rank_0(f"-detected model_type: {model_type}")
@@ -146,7 +146,7 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         # GPT, so we reuse pretrain_gpt's forward_step + dataset provider;
         # only the model_provider itself is model-family-specific.
         #
-        # Each of the three branches below imports a provider *function* from an
+        # Each of the branches below imports a provider *function* from an
         # upstream pretrain entrypoint, and every one of those entrypoints sets
         # `is_distributed = True` on it from inside `if __name__ == "__main__":`
         # (pretrain_gpt.py:333). Primus imports the function and calls pretrain()
@@ -185,6 +185,14 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             )
 
             log_rank_0("Using Kimi-K3 model provider; reusing pretrain_gpt forward_step + datasets")
+            train_valid_test_datasets_provider.is_distributed = True
+        elif model_type == "zaya1":
+            from pretrain_gpt import (  # type: ignore
+                forward_step,
+                train_valid_test_datasets_provider,
+            )
+
+            log_rank_0("Using ZAYA1 model provider; reusing pretrain_gpt forward_step + datasets")
             train_valid_test_datasets_provider.is_distributed = True
         else:
             # Use overridable methods so subclasses (e.g. diffusion/Flux) can plug in their own
