@@ -241,7 +241,8 @@ modules:
       # Do not push this further in one direction. Both ends lose: small buckets pay
       # per-call overhead and get thin per-call bandwidth, and buckets spanning most
       # of the model cannot start their reduce-scatter until far into backward, which
-      # re-exposes the tail. See mbs32_e2e/README.md in tiger-training-internal.
+      # re-exposes the tail. The bucket sweep behind this is in the internal
+      # MXFP6 campaign notes.
       ddp_bucket_size: 1024000000
       use_fsdp2_fp32_param_optimizer: false
 
