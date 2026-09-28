@@ -18,6 +18,7 @@ Environment variables (must set before running):
     MASTER_ADDR=localhost            # Master node address (default: localhost)
     MASTER_PORT=1234                 # Master node port (default: 1234)
     PRIMUS_HIPBLASLT_TUNING_STAGE=0  # HipBLASLt tuning stage: 0/1/2/3 (default: 0)
+    PRIMUS_ENABLE_CORE_DUMPS=0       # Allow crash core dumps (default: 0, disabled)
 EOF
 }
 
@@ -73,6 +74,21 @@ export MASTER_PORT=${MASTER_PORT:-1234}
 export NNODES=${NNODES:-1}
 export NODE_RANK=${NODE_RANK:-0}
 export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
+
+# Disable core dumps for every rank torchrun launches below. A training process
+# at this model size maps 160-170 GB of host memory per rank (see the
+# hip/rocm mem usage line in the training log), so a crash under the container
+# default of `ulimit -c unlimited` writes one multi-tens-of-GB core file per
+# crashing rank -- observed here as ~45 GB each. On a shared node that is
+# enough to fill the disk out from under every other tenant, not just this
+# job, and it has happened: several such files were found still present days
+# after the run that produced them. `ulimit -c 0` is a shell limit and is
+# inherited by every process torchrun forks, so setting it once here covers
+# all ranks. If you need a core dump to debug a specific crash, opt in for
+# that invocation only: PRIMUS_ENABLE_CORE_DUMPS=1 bash run_pretrain.sh ...
+if [ "${PRIMUS_ENABLE_CORE_DUMPS:-0}" != "1" ]; then
+    ulimit -c 0
+fi
 
 # Persistent kernel/JIT cache layout
 export PRIMUS_CACHE_ROOT=${PRIMUS_CACHE_ROOT:-/workspace/cache_persist}
