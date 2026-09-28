@@ -1,0 +1,72 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:zaya1-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # Full ZAYA1-base shape lives in zaya1.yaml (80 stages, hidden 2048).
+    model: zaya1.yaml
+    overrides:
+      wandb_project: "Primus_Pretrain"
+      stderr_sink_level: DEBUG
+
+      log_avg_skip_iterations: 1
+      log_avg_reset_interval: 10
+
+      # Smoke schedule. The full stack is about 16 GB of bf16 weights plus
+      # the tied vocabulary. Drop num_layers here (keep it even) if the node
+      # cannot hold that. Do not edit the model yaml to shrink the architecture.
+      train_iters: 30
+      micro_batch_size: 1
+      # Must be divisible by micro_batch_size * data_parallel_size.
+      # 8 covers a full MI300X/MI355X node (DP=8) and a single GPU (DP=1).
+      global_batch_size: 8
+      seq_length: 128
+      max_position_embeddings: 4096
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 1
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+
+      # Data parallel only. TP, PP, CP, EP and sequence parallel are rejected
+      # by zaya1_builder.
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 1
+      sequence_parallel: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
