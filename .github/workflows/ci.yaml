@@ -39,13 +39,11 @@ env:
   # (weekend cron, or a manual run with full_tests=true) adds the
   # @pytest.mark.weekly siblings and the slow unit tests.
   PRIMUS_CI_FULL: ${{ (github.event_name == 'schedule' || github.event.inputs.full_tests == 'true') && '1' || '0' }}
-  # FlyDSL pad-aware grouped-fp8 down-proj for gpt-oss-20b MoE (#470) -- the first commit after
-  # #482, which is what this bump is for: DeepEP's cheap fence is no longer the default. Its
-  # "release" store was an s_waitcnt plus a RELAXED system-scope store; the s_waitcnt covers only
-  # the wave publishing the channel tail, never the other waves that wrote the payload rows, so a
-  # receiver could read the previous round out of the ring buffer -- silent gradient corruption on
-  # every DeepEP run. Costs ~2.4% per step; DISABLE_CHEAP_FENCE=0 takes the old path back.
-  PRIMUS_TURBO_COMMIT: a26a5066258fb830f209212042d20332cb2a819f
+  # MegaMoE owns its FlyDSL kernels instead of sharing them (#525 / 0043e7ad): mxfp8 LDS
+  # scale-repack body moved out of utils/gemm_helper.py so host-side grouped-GEMM refactors
+  # cannot drop rd_cm/st_cm again (TypeError at trace); bf16 dispatch/combine acquire +
+  # num_dispatch_cu pin ported onto main. Still contains the DeepEP cheap-fence fix (a26a5066).
+  PRIMUS_TURBO_COMMIT: 0043e7ad561e6d28b3f24ac888b2eac90ed18ca7
   PRIMUS_TURBO_AITER_COMMIT: 0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e # AITER v0.1.14.post1 (tag commit) — required by Primus-Turbo main aiter_utils.py
   #ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
