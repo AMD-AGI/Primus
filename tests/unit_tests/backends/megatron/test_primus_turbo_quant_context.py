@@ -12,6 +12,8 @@ while ``te_fp8`` is off, and reading TE's flag alone dropped the override there
 and ran a BF16-pinned projection in MXFP4.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from tests.utils import PrimusUT, skip_if_no_cuda
@@ -28,6 +30,7 @@ from transformer_engine.pytorch.fp8 import (  # noqa: E402  isort:skip
 from primus.backends.megatron.core.extensions.primus_turbo import (  # noqa: E402  isort:skip
     PrimusTurboLowPrecisionGlobalStateManager,
     _get_fp8_autocast_for_quant_recipe,
+    _validate_fp8_output_quantization_params,
 )
 
 
@@ -48,6 +51,17 @@ class TestTurboQuantContext(PrimusUT):
         return TEQuantizationRecipe.parse_from_config({})
 
     @staticmethod
+    def _fp8_output_params(*, override_nonquantized_autocast: bool):
+        recipe = TEQuantizationRecipe.parse_from_config(
+            {
+                "fp8_quantization_recipe": "tensorwise",
+                "fp8_format": "e4m3",
+                "override_nonquantized_autocast": override_nonquantized_autocast,
+            }
+        )
+        return SimpleNamespace(training_recipe=recipe, evaluation_recipe=None)
+
+    @staticmethod
     def _set_state(*, te_fp8: bool, turbo_fp4: bool, turbo_fp8: bool = False):
         FP8GlobalStateManager.FP8_ENABLED = te_fp8
         PrimusTurboLowPrecisionGlobalStateManager.PRIMUS_TURBO_FP4_ENABLED = turbo_fp4
@@ -55,15 +69,21 @@ class TestTurboQuantContext(PrimusUT):
 
     def _assert_pins_bf16(self, context):
         with context:
-            self.assertFalse(PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled())
-            self.assertFalse(PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled())
+            self.assertFalse(
+                PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+            )
+            self.assertFalse(
+                PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
+            )
             self.assertFalse(FP8GlobalStateManager.is_fp8_enabled())
 
     def test_no_quantization_leaves_the_autocast_alone(self):
         """override_nonquantized_autocast is off by default, so nothing to do."""
         self._set_state(te_fp8=False, turbo_fp4=False)
         with _get_fp8_autocast_for_quant_recipe(self._bf16_pin()):
-            self.assertFalse(PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled())
+            self.assertFalse(
+                PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+            )
 
     def test_te_flag_on_pins_bf16(self):
         self._set_state(te_fp8=True, turbo_fp4=True)
@@ -83,7 +103,24 @@ class TestTurboQuantContext(PrimusUT):
         self._set_state(te_fp8=False, turbo_fp4=True)
         with _get_fp8_autocast_for_quant_recipe(self._bf16_pin()):
             pass
-        self.assertTrue(PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled())
+        self.assertTrue(
+            PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+        )
+
+    def test_fp8_output_recipe_must_override_nonquantized_context(self):
+        with self.assertRaisesRegex(ValueError, "override_nonquantized_autocast=true"):
+            _validate_fp8_output_quantization_params(
+                self._fp8_output_params(override_nonquantized_autocast=False)
+            )
+
+    def test_fp8_output_recipe_enables_turbo_fp8_without_outer_context(self):
+        params = self._fp8_output_params(override_nonquantized_autocast=True)
+        _validate_fp8_output_quantization_params(params)
+        self._set_state(te_fp8=False, turbo_fp4=False, turbo_fp8=False)
+        with _get_fp8_autocast_for_quant_recipe(params.training_recipe):
+            self.assertTrue(
+                PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
+            )
 
 
 if __name__ == "__main__":

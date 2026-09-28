@@ -787,6 +787,29 @@ def _get_fp8_autocast_for_quant_params(qparams: TEQuantizationParams | None, tra
         return _get_fp8_autocast_for_quant_recipe(qparams.training_recipe)
 
 
+def _validate_fp8_output_quantization_params(qparams: TEQuantizationParams | None) -> None:
+    """Require an FP8 recipe that can activate outside a decoder context."""
+    if qparams is None:
+        raise ValueError(
+            "Turbo FP8 output layer requires a te_precision_config_file matcher "
+            "for module 'output_layer'"
+        )
+
+    recipes = [qparams.training_recipe]
+    if qparams.evaluation_recipe is not None:
+        recipes.append(qparams.evaluation_recipe)
+    for recipe in recipes:
+        if (
+            recipe.fp8_quantization_recipe != Fp8Recipe.tensorwise
+            or recipe.fp8_format.lower() != "e4m3"
+            or not recipe.override_nonquantized_autocast
+        ):
+            raise ValueError(
+                "Turbo FP8 output layer requires tensorwise E4M3 with "
+                "override_nonquantized_autocast=true for both training and evaluation recipes"
+            )
+
+
 class PrimusTurboAttention(te.pytorch.DotProductAttention):
     """
     Wrapper for the Transformer-Engine's `DotProductAttention` layer that also
@@ -1726,24 +1749,7 @@ class PrimusTurboFP8OutputColumnParallelLinear(PrimusTurboColumnParallelLinear):
     def finish_init(self, quantization_config):
         """Bind and validate the LM-head-only precision override."""
         super().finish_init(quantization_config)
-        if self.te_quant_params is None:
-            raise ValueError(
-                "Turbo FP8 output layer requires a te_precision_config_file matcher "
-                "for module 'output_layer'"
-            )
-
-        recipes = [self.te_quant_params.training_recipe]
-        if self.te_quant_params.evaluation_recipe is not None:
-            recipes.append(self.te_quant_params.evaluation_recipe)
-        for recipe in recipes:
-            if (
-                recipe.fp8_quantization_recipe != Fp8Recipe.tensorwise
-                or recipe.fp8_format.lower() != "e4m3"
-            ):
-                raise ValueError(
-                    "Turbo FP8 output layer requires tensorwise E4M3 for both "
-                    "training and evaluation recipes"
-                )
+        _validate_fp8_output_quantization_params(self.te_quant_params)
 
     def forward(
         self,
@@ -1932,6 +1938,11 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                             0, device=weight.device, dtype=float4_e2m1fn_x2
                         )
                     pre = getattr(self, "_prequant_x", None)
+                    if pre is not None:
+                        raise RuntimeError(
+                            "Primus-Turbo gemm_fp4 does not support the legacy "
+                            "PRIMUS_FUSED_RMSNORM_MXFP4 prequantized tuple"
+                        )
                     out = primus_turbo_torch.ops.gemm_fp4(
                         inp,
                         weight,
@@ -1940,7 +1951,6 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         out_dtype=None,
                         config=quant_config.data(),
                         fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
-                        a_prequant=pre,
                     )
                 else:
                     if is_first_microbatch:
