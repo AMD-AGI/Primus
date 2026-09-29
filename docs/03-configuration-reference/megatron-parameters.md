@@ -185,6 +185,7 @@ models:
 | `main_params_dtype` | `fp32` | Dtype for master params. |
 | `exp_avg_dtype` | `fp32` | Optimizer first moment dtype (`fp32`, `fp16`, `fp8`). |
 | `exp_avg_sq_dtype` | `fp32` | Optimizer second moment dtype. |
+| `use_triton_fused_adam` | `false` | Build Adam from `TritonFusedAdam` (Triton kernel with a device-sized grid) instead of TE `FusedAdam`, whose `multi_tensor_apply` caps each launch at 320 workgroups and underuses MI455X HBM. Precision-aware, capturable and FP8-param paths fall back to TE. |
 
 ---
 

@@ -25,6 +25,15 @@ primus-cli direct -- benchmark attention --backend flash --dtype bf16 --report-c
 ```
 
 
+### Fused AdamW
+Compares TE `FusedAdam`, `torch.optim.AdamW(fused=True)` and Primus `TritonFusedAdam` (swept over grid sizes) on Llama 3.1 8B parameter shapes. Peak memory is ~4 x 4 B x params (~130 GB for the full 8B); use `--layers` to shrink it.
+
+```bash
+python3 benchmark/kernel/optimizer/bench_fused_adamw.py --peak-bw-tbs 20
+python3 benchmark/kernel/optimizer/bench_fused_adamw.py --layers 8 --grids 320,1024,2048,4096,0
+```
+
+
 ### RCCL
 This benchmark evaluates the performance of commonly used communication primitives in large model training, including AllReduce, AllGather, ReduceScatter, Point-to-Point (P2P), and All2All operations.
 
