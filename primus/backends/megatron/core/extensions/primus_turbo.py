@@ -1743,17 +1743,25 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
 
     def forward_internal(self, x, is_first_microbatch: bool = False):
         """Forward."""
+        norm_weight = self.layer_norm_weight
+        if self.zero_centered_gamma:
+            # TE's LayerNormLinear stores gamma centered on zero (zero init) and
+            # applies (1 + w) in its own forward; both norms below take the scale
+            # verbatim, so the +1 has to happen here or every output is zero.
+            # Same fix as PrimusTurboRMSNorm.forward.
+            norm_weight = norm_weight + 1
         if self.config.normalization == "LayerNorm":
             norm_out = torch.nn.functional.layer_norm(
-                x, [x.size(-1)], self.layer_norm_weight, self.layer_norm_bias, self.eps
+                x, [x.size(-1)], norm_weight, self.layer_norm_bias, self.eps
             )
         elif self.config.normalization == "RMSNorm":
             from primus_turbo.pytorch.ops.normalization import rmsnorm
 
             if getattr(self, "_skip_fused_norm", False):
+                # x arrives normalized by fused_residual_rmsnorm, which applies the +1 itself
                 norm_out = x
             else:
-                norm_out = rmsnorm(x, self.layer_norm_weight, self.eps)
+                norm_out = rmsnorm(x, norm_weight, self.eps)
         else:
             assert False, "Not support normalization type."
 
@@ -2612,4 +2620,13 @@ class PrimusTurboRMSNorm(te.pytorch.RMSNorm):
     def forward(self, x):
         from primus_turbo.pytorch.ops.normalization import rmsnorm
 
-        return rmsnorm(x, self.weight, self.eps)
+        weight = self.weight
+        if self.zero_centered_gamma:
+            # TE stores gamma centered on zero and applies (1 + w) itself; the
+            # turbo kernel takes the scale verbatim, so the +1 has to happen
+            # here. Without it the weight's zero init makes every norm output
+            # zero, which silently freezes the whole model (loss pinned at the
+            # uniform value, gradients ~0). The fused-residual path does the
+            # same thing -- see fused_residual_rmsnorm.py.
+            weight = weight + 1
+        return rmsnorm(x, weight, self.eps)
