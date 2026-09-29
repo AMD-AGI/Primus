@@ -360,6 +360,7 @@ class TestCaptureArgv:
             specforge_capture={"target_model_path": "Qwen/Qwen3.5-4B"},
         )
         argv = build_capture_argv(params)
+        assert "--standalone" in argv
         assert "--sglang-disable-radix-cache" in argv
         assert argv[argv.index("--sglang-attention-backend") + 1] == "aiter"
 
