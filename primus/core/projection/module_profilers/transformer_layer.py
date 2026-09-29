@@ -376,9 +376,7 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
             else:
                 # Get TransformerConfig from the layer module itself (has fp8 setting)
                 transformer_config = getattr(self.layer_module, "config", None)
-                ishapes, fkwargs = self.require_bench_inputs(
-                    LAYER, self.layer_module, batch_size, seq_len
-                )
+                ishapes, fkwargs = self.require_bench_inputs(LAYER, self.layer_module, batch_size, seq_len)
                 self._cached_results = benchmark_layer(
                     self.layer_module,
                     ishapes,
@@ -555,9 +553,7 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             ):
                 # Legacy whole-layer timing (often ~1.5-1.7x pessimistic on backward).
                 transformer_config = getattr(self.layer_module, "config", None)
-                ishapes, fkwargs = self.require_bench_inputs(
-                    LAYER, self.layer_module, batch_size, seq_len
-                )
+                ishapes, fkwargs = self.require_bench_inputs(LAYER, self.layer_module, batch_size, seq_len)
                 routing_restores = []
                 if _kernel_pad_enabled():
                     routing_restores, _ = _install_balanced_routing_patches(self.layer_module)

@@ -38,7 +38,9 @@ class BaseModuleProfiler(ABC):
     def bench_adapter(self):
         """Return the active bench adapter, defaulting to Megatron's."""
         if self._bench_adapter is None:
-            from primus.core.projection.bench_harness.megatron import MegatronBenchAdapter
+            from primus.core.projection.bench_harness.megatron import (
+                MegatronBenchAdapter,
+            )
 
             self._bench_adapter = MegatronBenchAdapter()
         return self._bench_adapter

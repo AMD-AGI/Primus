@@ -18,11 +18,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from primus.core.launcher.parser import load_primus_config
+from primus.core.projection.bench_harness import resolve_model_adapter
 from primus.core.projection.config_validation import (
     assert_recompute_pipeline_compat,
     recompute_is_enabled,
 )
-from primus.core.projection.bench_harness import resolve_model_adapter
 from primus.core.projection.frameworks import framework_of, normalize_primus_config
 from primus.core.projection.memory_capture import MemoryBenchmarkRecorder, format_bytes
 from primus.core.projection.module_profilers import collective_model as cm
