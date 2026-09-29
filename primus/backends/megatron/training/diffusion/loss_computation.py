@@ -49,7 +49,10 @@ def compute_flow_matching_loss(
                    or broadcast-compatible shape. Default None (no masking).
 
     Returns:
-        Scalar loss value (mean squared error, optionally masked).
+        Scalar loss value (mean squared error, optionally masked). With a mask
+        it is the mean over the loss elements the mask covers, so a
+        ``[batch_size]`` mask of ones equals the unmasked loss, and a mask
+        that keeps nothing gives 0.
 
     Reference:
         Flow Matching for Generative Modeling
@@ -82,9 +85,13 @@ def compute_flow_matching_loss(
         if loss_mask.dim() == 1 and loss_per_element.dim() > 1:
             mask_shape = [loss_mask.shape[0]] + [1] * (loss_per_element.dim() - 1)
             loss_mask = loss_mask.view(*mask_shape)
+        loss_mask = loss_mask.to(dtype=loss_per_element.dtype, device=loss_per_element.device)
+        loss_mask = loss_mask.expand_as(loss_per_element)
 
-        # Apply mask and compute mean over valid elements
-        loss = (loss_per_element * loss_mask).sum() / loss_mask.sum()
+        # Count the mask after broadcasting: a [B] mask covers every latent
+        # element of its sample, so its own sum would give a per-sample sum,
+        # not a per-element mean. An all-zero mask yields 0 rather than NaN.
+        loss = (loss_per_element * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
 
     return loss
 
