@@ -392,6 +392,16 @@ class Flux(DiffusionModule):
             torch._inductor.config.coordinate_descent_tuning = True
             log("  Enabled Inductor coordinate-descent tuning (-2.1 ms/step, costs compile time)")
 
+        from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import gates
+
+        if gates().ln_bwd_fused_sum:
+            from primus.backends.megatron.core.models.diffusion.common.normalization import (
+                install_ln_bwd_sum_pass,
+            )
+
+            install_ln_bwd_sum_pass()
+            log("  Installed the LN-modulate backward gradient-sum pass (mxfp6_ln_bwd_fused_sum)")
+
         if self.config.torch_compile_emulate_precision_casts:
             torch._inductor.config.emulate_precision_casts = True
             log(

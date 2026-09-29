@@ -603,6 +603,7 @@ _LN_MOD_BWD_MAX_BLOCK_H = 4096
 @triton.jit
 def _fused_ln_modulate_bwd_single_pass_kernel(
     Grad_ptr,
+    Grad2_ptr,
     X_ptr,
     Mean_ptr,
     Rstd_ptr,
@@ -619,6 +620,7 @@ def _fused_ln_modulate_bwd_single_pass_kernel(
     BLOCK_H: tl.constexpr,
     NS: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
+    HAS_G2: tl.constexpr,
 ):
     b_idx = tl.program_id(0)
     s_blk = tl.program_id(1)
@@ -640,6 +642,12 @@ def _fused_ln_modulate_bwd_single_pass_kernel(
         x_off = sb_idx * stride_x_sb + offs_h
 
         g = tl.load(Grad_ptr + g_off, mask=mask, other=0.0).to(tl.float32)
+        if HAS_G2:
+            # The gradient arrives as two terms (the norm output has two consumers). Round
+            # their sum to the storage dtype exactly as the separate Inductor add did, so the
+            # result is bit-identical to summing first and then calling this kernel.
+            g2 = tl.load(Grad2_ptr + g_off, mask=mask, other=0.0).to(tl.float32)
+            g = (g + g2).to(OUT_DTYPE).to(tl.float32)
         x = tl.load(X_ptr + x_off, mask=mask, other=0.0).to(tl.float32)
         mean = tl.load(Mean_ptr + sb_idx)
         rstd = tl.load(Rstd_ptr + sb_idx)
@@ -709,7 +717,7 @@ def _fused_ln_modulate_bwd_reduce_partials_kernel(
 
 
 def _ln_modulate_bwd_single_pass(
-    single_pass_kernel, reduce_kernel, grad_output, x, mean, rstd, scale, out_dtype
+    single_pass_kernel, reduce_kernel, grad_output, x, mean, rstd, scale, out_dtype, grad2=None
 ):
     """Launch the pair. Kernels are passed in so both the opaque and the triton_op
     registration can share this, one handing over the raw kernels and the other the
@@ -723,6 +731,7 @@ def _ln_modulate_bwd_single_pass(
     partials = torch.empty(2, B * ns * H, device=x.device, dtype=torch.float32)
     single_pass_kernel[(B, ns)](
         grad_output,
+        grad2 if grad2 is not None else grad_output,
         x,
         mean,
         rstd,
@@ -739,6 +748,7 @@ def _ln_modulate_bwd_single_pass(
         BLOCK_H=triton.next_power_of_2(H),
         NS=ns,
         OUT_DTYPE=out_dtype,
+        HAS_G2=grad2 is not None,
         num_warps=4,
     )
     reduce_kernel[(B, triton.cdiv(H, 1024))](
@@ -896,6 +906,125 @@ def _opaque_fused_ln_modulate_backward_op(
         OUT_DTYPE=out_dtype,
     )
     return dx, dscale, dshift
+
+
+@_custom_op("primus::fused_ln_modulate_backward2", mutates_args=(), device_types="cuda")
+def _opaque_fused_ln_modulate_backward2_op(
+    grad_a: torch.Tensor,
+    grad_b: torch.Tensor,
+    x: torch.Tensor,
+    mean: torch.Tensor,
+    rstd: torch.Tensor,
+    scale: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``fused_ln_modulate_backward(grad_a + grad_b, ...)`` with the sum done in the kernel.
+
+    Only ever reached through ``_ln_bwd_sum_pass_impl``, which rewrites that exact pattern.
+    In a Flux single block the norm output feeds both the QKV and the MLP Functions, so
+    autograd sums two [S, B, H] gradients before this backward; Inductor emits that as its
+    own kernel (read 2, write 1) whose output this op re-reads.
+    Summing while loading removes that pass. Bit-identical: the kernel rounds the sum to
+    the storage dtype first, as the separate add stored it.
+    """
+    if x.dim() != 3 or scale.dim() != 2 or not _ln_modulate_bwd_can_single_pass(x, scale):
+        return _opaque_fused_ln_modulate_backward_op(grad_a + grad_b, x, mean, rstd, scale)
+    if scale.stride(-1) != 1:
+        scale = scale.contiguous()
+    return _ln_modulate_bwd_single_pass(
+        _fused_ln_modulate_bwd_single_pass_kernel,
+        _fused_ln_modulate_bwd_reduce_partials_kernel,
+        grad_a.to(x.dtype).contiguous(),
+        x.contiguous(),
+        mean,
+        rstd,
+        scale,
+        _TORCH_TO_TRITON_DTYPE[x.dtype],
+        grad2=grad_b.to(x.dtype).contiguous(),
+    )
+
+
+@_opaque_fused_ln_modulate_backward2_op.register_fake
+def _opaque_fused_ln_modulate_backward2_fake(grad_a, grad_b, x, mean, rstd, scale):
+    return torch.empty_like(x), torch.empty_like(scale), torch.empty_like(scale)
+
+
+def _ln_bwd_sum_pass_impl(graph) -> int:
+    """Post-grad FX pass: ``ln_mod_bwd(add(a, b), *rest)`` -> ``ln_mod_bwd2(a, b, *rest)``.
+
+    Applies only when the add's sole user is the backward and both operands match its
+    shape and dtype, so the rewrite never changes what anything else reads. Returns the
+    number of rewrites, for tests.
+    """
+    from torch.fx.operator_schemas import normalize_function
+
+    aten = torch.ops.aten
+    target = torch.ops.primus.fused_ln_modulate_backward.default
+    rewritten = 0
+    for node in list(graph.nodes):
+        if node.op != "call_function" or node.target is not target:
+            continue
+        # Arguments may arrive positionally or by name; resolve them against the schema.
+        norm = normalize_function(target, node.args, node.kwargs, normalize_to_only_use_kwargs=True)
+        if norm is None:
+            continue
+        kw = dict(norm.kwargs)
+        add = kw.get("grad_output")
+        if not (
+            hasattr(add, "op")
+            and add.op == "call_function"
+            and add.target is aten.add.Tensor
+            and len(add.users) == 1
+            and len(add.args) == 2
+            and not add.kwargs
+            and all(hasattr(t, "op") for t in add.args)
+        ):
+            continue
+        vals = [t.meta.get("val") for t in (*add.args, add)]
+        if any(v is None for v in vals) or any(
+            v.shape != vals[-1].shape or v.dtype != vals[-1].dtype for v in vals[:2]
+        ):
+            continue
+        with graph.inserting_before(node):
+            fused = graph.call_function(
+                torch.ops.primus.fused_ln_modulate_backward2.default,
+                (add.args[0], add.args[1], kw["x"], kw["mean"], kw["rstd"], kw["scale"]),
+            )
+        # Not a wholesale copy: node.meta["eager_input_vals"] holds the *old* op's five fake
+        # inputs, which Inductor would try to normalise against this op's six-argument
+        # schema. Without it Inductor treats the node as pass-inserted, which it is.
+        fused.meta = {k: v for k, v in node.meta.items() if k != "eager_input_vals"}
+        node.replace_all_uses_with(fused)
+        graph.erase_node(node)
+        graph.erase_node(add)
+        rewritten += 1
+    return rewritten
+
+
+def install_ln_bwd_sum_pass() -> None:
+    """Register ``_ln_bwd_sum_pass_impl`` as Inductor's post-grad custom pass.
+
+    Called from the compile setup when ``mxfp6_ln_bwd_fused_sum`` is on. Being a
+    CustomGraphPass with a uuid keeps Inductor's FX-graph cache keyed on this code.
+    """
+    import torch._inductor.config as inductor_config
+    from torch._inductor.custom_graph_pass import CustomGraphPass, get_hash_for_files
+
+    existing = inductor_config.post_grad_custom_post_pass
+    if existing is not None:
+        if getattr(existing, "_primus_ln_bwd_sum", False):
+            return
+        raise RuntimeError(f"post_grad_custom_post_pass is already {existing!r}; refusing to replace it")
+
+    class _LnBwdSumPass(CustomGraphPass):
+        _primus_ln_bwd_sum = True
+
+        def __call__(self, graph):
+            _ln_bwd_sum_pass_impl(graph)
+
+        def uuid(self):
+            return get_hash_for_files((__file__,))
+
+    inductor_config.post_grad_custom_post_pass = _LnBwdSumPass()
 
 
 @_opaque_fused_ln_modulate_backward_op.register_fake

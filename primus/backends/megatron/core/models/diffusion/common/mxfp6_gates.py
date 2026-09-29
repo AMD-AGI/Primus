@@ -71,6 +71,9 @@ class Mxfp6Gates:
     # With shared_grad_pack: take fc2's bias gradient from that pack's column sums instead
     # of a separate reduction of gate*dy. Not bit-identical (summation order).
     shared_grad_pack_bias: bool = False
+    # Inductor post-grad pass: ln_mod_bwd(a + b) -> one kernel that sums a and b while
+    # loading. Removes the single block's separate gradient-accumulation add.
+    ln_bwd_fused_sum: bool = False
 
     # --- norm / RoPE fusions ---------------------------------------------
     # Fuse QK-norm and RoPE into one kernel.
