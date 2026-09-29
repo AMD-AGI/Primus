@@ -20,7 +20,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 
 @dataclass
 class Zaya1TransformerConfig(TransformerConfig):
-    """SGLang ``ZayaConfig`` knobs, plus the PID step size the papers leave unspecified."""
+    """ZAYA1 architecture knobs, plus the PID step size the papers leave unspecified."""
 
     zaya_mlp_expansion: int = 256
     zaya_use_mod: bool = True
@@ -31,7 +31,7 @@ class Zaya1TransformerConfig(TransformerConfig):
     cca_time0: int = 2
     cca_time1: int = 2
     # Half-head RoPE. ``rotary_percent`` is the Megatron name of the same fraction;
-    # this field is what ``CCA`` reads, matching SGLang ``partial_rotary_factor``.
+    # this field is what ``CCA`` reads.
     partial_rotary_factor: float = 0.5
     # Microbatch AdamW on ``p_e - 1/E``. ``0`` freezes ``balancing_biases``.
     zaya_balance_lr: float = 1.0e-3

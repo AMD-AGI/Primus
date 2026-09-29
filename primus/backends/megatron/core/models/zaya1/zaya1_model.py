@@ -6,7 +6,7 @@
 
 """ZAYA1 language model.
 
-The decoder is the SGLang stack in ``zaya1_modules`` (80 alternating CCA and
+The decoder is the stack in ``zaya1_modules`` (80 alternating CCA and
 MoE stages for the released shape). Partial RoPE lives inside CCA, so this
 module does not build a Megatron ``RotaryEmbedding``. Embeddings stay tied.
 """

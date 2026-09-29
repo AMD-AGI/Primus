@@ -60,7 +60,7 @@ def get_model_provider(model_type="gpt"):
             kimi_k3_module.kimi_k3_builder,
         )
 
-    # Primus-owned: ZAYA1 (SGLang forward; data parallel only)
+    # Primus-owned: ZAYA1 (data parallel only)
     if model_type == "zaya1":
         zaya1_module = importlib.import_module(
             "primus.backends.megatron.core.models.zaya1.zaya1_builders"

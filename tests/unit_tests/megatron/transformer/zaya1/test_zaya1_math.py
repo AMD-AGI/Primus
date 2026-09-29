@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""CPU checks that the ZAYA1 mixer matches the SGLang forward, not the paper affine."""
+"""CPU checks that the ZAYA1 mixer uses the implemented affine, not the paper affine."""
 
 import math
 
@@ -58,7 +58,7 @@ def _cfg(**overrides):
     return cfg
 
 
-def test_residual_is_sglang_affine_not_paper_affine():
+def test_residual_is_implemented_affine_not_paper_affine():
     hidden = 16
     mod = ResidualScaling(hidden, has_residual=True)
     with torch.no_grad():
