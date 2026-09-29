@@ -210,6 +210,72 @@ def _reduce_grad_into_main_grad(param, partial, out_dtype, fuse_wgrad_accum, dim
     return torch.empty_like(param)
 
 
+def _linear_mxfp6_backward(
+    saved, grad_2d, m, n, k, out_dtype, orig_shape, fuse_wgrad_accum, weight_is_fp4, want_bias_grad, g_packed=None
+):
+    """The pure-MXFP6 half of ``MXFP6LinearFunction.backward``, lifted out verbatim so that
+    ``MXFP6MLPProjFunction`` can run it on a gradient pack it shares with the MLP.
+    ``g_packed`` is ``(row, row_scale, col, col_scale)`` of ``grad_2d``, or None to pack here.
+    """
+    if fuse_wgrad_accum:
+        a_col, a_col_scale, b_col, b_col_scale, weight = saved
+    else:
+        a_col, a_col_scale, b_col, b_col_scale = saved
+
+    # The bias gradient is a reduction over exactly the tensor the packer is
+    # already streaming, so it rides along as a side output. Identity because
+    # there is no activation to undo here, unlike the MLP's fc1.
+    if g_packed is None:
+        g_row, g_row_scale, g_col, g_col_scale, b_partial = _quantize_mxfp6_fused_dual(
+            grad_2d, None, None, MXFP6_PROLOGUE_IDENTITY, want_bias_grad
+        )
+        grad_bias = b_partial.sum(0).to(out_dtype) if want_bias_grad else None
+    else:
+        # A caller-supplied pack of this same gradient (MXFP6MLPProjFunction). It is a plain
+        # dual pack with no column sums, so it is only ever passed for an unbiased linear.
+        assert not want_bias_grad, "g_packed carries no column sums; bias gradient unavailable"
+        g_row, g_row_scale, g_col, g_col_scale = g_packed
+        grad_bias = None
+
+    # grad_input[M, K] = grad[M, N] @ weight[N, K], contracting N. b_col is the
+    # weight packed along N, i.e. logically [K, N] contracting N.
+    grad_input = gemm_fp6_impl(
+        g_row,
+        g_row_scale,
+        b_col,
+        b_col_scale,
+        m,
+        k,
+        n,
+        out_dtype,
+        _GRAN_VALUE,
+        None,
+        weight_is_fp4,
+    )
+    grad_input = grad_input.reshape(orig_shape)
+
+    # grad_weight[N, K] = grad.T[N, M] @ input[M, K], contracting M.
+    if fuse_wgrad_accum:
+        grad_weight = _wgrad_into_main_grad(
+            weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m, gates().wgrad_a6w4
+        )
+    else:
+        grad_weight = gemm_fp6_impl(
+            g_col,
+            g_col_scale,
+            a_col,
+            a_col_scale,
+            n,
+            k,
+            m,
+            out_dtype,
+            _GRAN_VALUE,
+            None,
+            gates().wgrad_a6w4,
+        )
+    return grad_input, grad_weight, grad_bias
+
+
 class MXFP6LinearFunction(torch.autograd.Function):
     """MXFP6 linear (Y = X @ W^T) with MX block-of-32 scaling along the contraction axis.
 
@@ -387,55 +453,18 @@ class MXFP6LinearFunction(torch.autograd.Function):
             # No packer runs on this path, so the bias gradient pays for its own reduction.
             grad_bias = grad_2d.sum(0).to(ctx.out_dtype) if want_bias_grad else None
         else:
-            if ctx.fuse_wgrad_accum:
-                a_col, a_col_scale, b_col, b_col_scale, weight = ctx.saved_tensors
-            else:
-                a_col, a_col_scale, b_col, b_col_scale = ctx.saved_tensors
-
-            # The bias gradient is a reduction over exactly the tensor the packer is
-            # already streaming, so it rides along as a side output. Identity because
-            # there is no activation to undo here, unlike the MLP's fc1.
-            g_row, g_row_scale, g_col, g_col_scale, b_partial = _quantize_mxfp6_fused_dual(
-                grad_2d, None, None, MXFP6_PROLOGUE_IDENTITY, want_bias_grad
-            )
-            grad_bias = b_partial.sum(0).to(ctx.out_dtype) if want_bias_grad else None
-
-            # grad_input[M, K] = grad[M, N] @ weight[N, K], contracting N. b_col is the
-            # weight packed along N, i.e. logically [K, N] contracting N.
-            grad_input = gemm_fp6_impl(
-                g_row,
-                g_row_scale,
-                b_col,
-                b_col_scale,
+            grad_input, grad_weight, grad_bias = _linear_mxfp6_backward(
+                ctx.saved_tensors,
+                grad_2d,
                 m,
-                k,
                 n,
+                k,
                 ctx.out_dtype,
-                _GRAN_VALUE,
-                None,
+                ctx.orig_shape,
+                ctx.fuse_wgrad_accum,
                 ctx.weight_is_fp4,
+                want_bias_grad,
             )
-            grad_input = grad_input.reshape(ctx.orig_shape)
-
-            # grad_weight[N, K] = grad.T[N, M] @ input[M, K], contracting M.
-            if ctx.fuse_wgrad_accum:
-                grad_weight = _wgrad_into_main_grad(
-                    weight, g_col, g_col_scale, a_col, a_col_scale, n, k, m, gates().wgrad_a6w4
-                )
-            else:
-                grad_weight = gemm_fp6_impl(
-                    g_col,
-                    g_col_scale,
-                    a_col,
-                    a_col_scale,
-                    n,
-                    k,
-                    m,
-                    ctx.out_dtype,
-                    _GRAN_VALUE,
-                    None,
-                    gates().wgrad_a6w4,
-                )
 
         # Trailing Nones cover backward_is_fp8, fp8_bwd_dtype, fp8_gran_value,
         # fp8_backend_value, fuse_wgrad_accum, grad_enabled, weight_is_fp4.
@@ -645,6 +674,130 @@ class MXFP6RowParallelLinear(RowParallelLinear):
 # ---------------------------------------------------------------------------
 
 
+def _mlp_backward(
+    saved, grad_output, m, k, f, h, out_dtype, orig_shape, fuse_wgrad_accum, weight_is_fp4, want_bias_grad, g2_packed=None
+):
+    """``MXFP6MLPFunction.backward``, lifted out verbatim so that ``MXFP6MLPProjFunction``
+    can run it on a gradient pack it shares with out-proj. ``g2_packed`` is
+    ``(row, row_scale, col, col_scale)`` of the fc2 output gradient, or None to pack here.
+    """
+    (
+        y1,
+        b1,
+        x_col,
+        x_col_s,
+        a_col,
+        a_col_s,
+        w1_col,
+        w1_col_s,
+        w2_col,
+        w2_col_s,
+        *fused_weights,
+    ) = saved
+
+    if not grad_output.is_contiguous():
+        grad_output = grad_output.contiguous()
+    g2 = grad_output.reshape(-1, h)
+
+    if g2_packed is None:
+        g2_row, g2_row_s, g2_col, g2_col_s = _quantize_mxfp6_dual(g2)
+    else:
+        g2_row, g2_row_s, g2_col, g2_col_s = g2_packed
+
+    # fc2 dgrad: [m, f] = g2[m, h] @ w2[h, f], contracting h.
+    grad_a = gemm_fp6_impl(
+        g2_row, g2_row_s, w2_col, w2_col_s, m, f, h, out_dtype, _GRAN_VALUE, None, weight_is_fp4
+    )
+    # fc2 wgrad: [h, f] = g2.T[h, m] @ a[m, f], contracting m.
+    if fuse_wgrad_accum:
+        grad_w2 = _wgrad_into_main_grad(fused_weights[1], g2_col, g2_col_s, a_col, a_col_s, h, f, m)
+    else:
+        grad_w2 = gemm_fp6_impl(g2_col, g2_col_s, a_col, a_col_s, h, f, m, out_dtype, _GRAN_VALUE)
+
+    # The GELU derivative is applied while staging, so grad_y1 is never assembled. Its
+    # column sums come back as a side output because the bias gradient is a reduction
+    # over exactly the tensor that no longer exists.
+    g1_row, g1_row_s, g1_col, g1_col_s, b1_partial = _quantize_mxfp6_fused_dual(
+        y1, grad_a, b1, MXFP6_PROLOGUE_BIAS_GELU_BACKWARD, want_bias_grad
+    )
+
+    # fc1 dgrad: [m, k] = grad_y1[m, f] @ w1[f, k], contracting f.
+    grad_x = gemm_fp6_impl(
+        g1_row, g1_row_s, w1_col, w1_col_s, m, k, f, out_dtype, _GRAN_VALUE, None, weight_is_fp4
+    )
+    grad_x = grad_x.reshape(orig_shape)
+    # fc1 wgrad: [f, k] = grad_y1.T[f, m] @ x[m, k], contracting m.
+    if fuse_wgrad_accum:
+        grad_w1 = _wgrad_into_main_grad(
+            fused_weights[0], g1_col, g1_col_s, x_col, x_col_s, f, k, m, gates().wgrad_a6w4
+        )
+    else:
+        grad_w1 = gemm_fp6_impl(
+            g1_col, g1_col_s, x_col, x_col_s, f, k, m, out_dtype, _GRAN_VALUE, None, gates().wgrad_a6w4
+        )
+
+    grad_b1 = (
+        _reduce_grad_into_main_grad(b1, b1_partial, out_dtype, fuse_wgrad_accum)
+        if want_bias_grad
+        else None
+    )
+
+    return grad_x, grad_w1, grad_b1, grad_w2
+
+
+# ---------------------------------------------------------------------------
+# Grouped joint-block MLP: both streams through one GEMM per pass.
+#
+# A Flux joint block runs two independent streams -- image and text -- each with its own
+# weights. With a stream of 8192 rows, that is 384 tiles of the shipped 256x256 macro-tile,
+# which is 1.5 waves over 256 CUs and rounds up to 2, so each launch leaves about a quarter
+# of the machine idle. Issuing the pair as one 2-group GEMM (16384 rows = 3 exact waves)
+# recovers that. The grouped kernel picks a different B per group, which is what makes this
+# legal for streams that share no weights.
+#
+# Which blobs can be shared is not uniform, and getting it wrong is silent:
+#   * activation ROW blobs -> shared. They are the grouped A operand.
+#   * activation COLUMN blobs -> per-stream. wgrad contracts M, and the two streams have
+#     different weights, so a stacked column pack would sum contributions belonging to
+#     different matrices.
+#   * weight ROW and COLUMN blobs -> both shared. The column blob is only ever the B
+#     operand of a grouped dgrad, never a wgrad operand.
+#
+# Measured per pair at the production shape (m=8192, k=3072, f=12288, h=3072), packing
+# included, against two separate streams:
+#     fwd fc1  (N=12288)   499.9 -> 463.6 us
+#     fwd fc2  (N= 3072)   514.6 -> 477.8 us
+#     bwd fc2 dgrad        457.5 -> 458.7 us
+#     bwd fc1 dgrad        510.9 -> 475.3 us
+#                          total -107.5 us/pair -> -2.04 ms/step over 19 joint blocks
+# Grouping every GEMM beats grouping only the N=3072 ones (-1.37 ms), which is not what a
+# pure wave-quantisation model predicts: the out= packers also drop two allocations per
+# pair, and that part does not depend on N.
+#
+# Treat that as an upper bound. Three times now, measurement has shown a GEMM-level gain
+# shrink once the surrounding plumbing was timed, and the fused prologue still runs once
+# per stream here because the two streams have different fc1 biases.
+#
+# Off by default. Enable with `mxfp6_grouped_mlp: true`.
+# ---------------------------------------------------------------------------
+
+# The 2-group A6W6 kernel, built with the same flags as the variant production already
+# runs for these shapes -- LDSTAGE=1 STNT=1 SWZTH=512 -- so grouping is not paying for a
+# kernel-variant downgrade at the same time. aiter's host gate admits an oversized B only
+# for kernels whose name carries "_wgrp" (weight-grouped), so every other kernel keeps its
+# strict size equality; "_grp" would also have matched dmabig_grp16/grp64, which are
+# ordinary single-weight kernels that carry a rasterization group size in their names.
+_GRP_KERNEL_NAME = "f6gemm_a6w6_stnt_allk_wgrp2_kernel_func"
+
+# Caller-buffer packers. Guarded like the other optional Turbo ops: an older Primus-Turbo
+# has none of them, and the gate above is rejected at import time when they are absent.
+# Note these live in the `primus_turbo_cpp_extension` namespace rather than `primus_turbo`
+# like their allocating siblings -- an inconsistency in Turbo, not a choice here.
+_TURBO_CPP = getattr(torch.ops, "primus_turbo_cpp_extension", None)
+_quantize_mxfp6_dual_out = getattr(_TURBO_CPP, "quantize_mxfp6_dual_out", None)
+_quantize_mxfp6_fused_dual_out = getattr(_TURBO_CPP, "quantize_mxfp6_fused_dual_out", None)
+
+
 class MXFP6MLPFunction(torch.autograd.Function):
     """fc1 GEMM, bias+GELU, fc2 GEMM as one op, with the activation never in HBM.
 
@@ -735,122 +888,21 @@ class MXFP6MLPFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output, *_):
-        (
-            y1,
-            b1,
-            x_col,
-            x_col_s,
-            a_col,
-            a_col_s,
-            w1_col,
-            w1_col_s,
-            w2_col,
-            w2_col_s,
-            *fused_weights,
-        ) = ctx.saved_tensors
-        m, k, f, h = ctx.m, ctx.k, ctx.f, ctx.h
-        out_dtype = ctx.out_dtype
-
-        if not grad_output.is_contiguous():
-            grad_output = grad_output.contiguous()
-        g2 = grad_output.reshape(-1, h)
-
-        g2_row, g2_row_s, g2_col, g2_col_s = _quantize_mxfp6_dual(g2)
-
-        # fc2 dgrad: [m, f] = g2[m, h] @ w2[h, f], contracting h.
-        grad_a = gemm_fp6_impl(
-            g2_row, g2_row_s, w2_col, w2_col_s, m, f, h, out_dtype, _GRAN_VALUE, None, ctx.weight_is_fp4
+        grad_x, grad_w1, grad_b1, grad_w2 = _mlp_backward(
+            ctx.saved_tensors,
+            grad_output,
+            ctx.m,
+            ctx.k,
+            ctx.f,
+            ctx.h,
+            ctx.out_dtype,
+            ctx.orig_shape,
+            ctx.fuse_wgrad_accum,
+            ctx.weight_is_fp4,
+            ctx.needs_input_grad[2],
         )
-        # fc2 wgrad: [h, f] = g2.T[h, m] @ a[m, f], contracting m.
-        if ctx.fuse_wgrad_accum:
-            grad_w2 = _wgrad_into_main_grad(fused_weights[1], g2_col, g2_col_s, a_col, a_col_s, h, f, m)
-        else:
-            grad_w2 = gemm_fp6_impl(g2_col, g2_col_s, a_col, a_col_s, h, f, m, out_dtype, _GRAN_VALUE)
-
-        # The GELU derivative is applied while staging, so grad_y1 is never assembled. Its
-        # column sums come back as a side output because the bias gradient is a reduction
-        # over exactly the tensor that no longer exists.
-        want_bias_grad = ctx.needs_input_grad[2]
-        g1_row, g1_row_s, g1_col, g1_col_s, b1_partial = _quantize_mxfp6_fused_dual(
-            y1, grad_a, b1, MXFP6_PROLOGUE_BIAS_GELU_BACKWARD, want_bias_grad
-        )
-
-        # fc1 dgrad: [m, k] = grad_y1[m, f] @ w1[f, k], contracting f.
-        grad_x = gemm_fp6_impl(
-            g1_row, g1_row_s, w1_col, w1_col_s, m, k, f, out_dtype, _GRAN_VALUE, None, ctx.weight_is_fp4
-        )
-        grad_x = grad_x.reshape(ctx.orig_shape)
-        # fc1 wgrad: [f, k] = grad_y1.T[f, m] @ x[m, k], contracting m.
-        if ctx.fuse_wgrad_accum:
-            grad_w1 = _wgrad_into_main_grad(
-                fused_weights[0], g1_col, g1_col_s, x_col, x_col_s, f, k, m, gates().wgrad_a6w4
-            )
-        else:
-            grad_w1 = gemm_fp6_impl(
-                g1_col, g1_col_s, x_col, x_col_s, f, k, m, out_dtype, _GRAN_VALUE, None, gates().wgrad_a6w4
-            )
-
-        grad_b1 = (
-            _reduce_grad_into_main_grad(b1, b1_partial, out_dtype, ctx.fuse_wgrad_accum)
-            if want_bias_grad
-            else None
-        )
-
         # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4.
         return grad_x, grad_w1, grad_b1, grad_w2, None, None, None
-
-
-# ---------------------------------------------------------------------------
-# Grouped joint-block MLP: both streams through one GEMM per pass.
-#
-# A Flux joint block runs two independent streams -- image and text -- each with its own
-# weights. With a stream of 8192 rows, that is 384 tiles of the shipped 256x256 macro-tile,
-# which is 1.5 waves over 256 CUs and rounds up to 2, so each launch leaves about a quarter
-# of the machine idle. Issuing the pair as one 2-group GEMM (16384 rows = 3 exact waves)
-# recovers that. The grouped kernel picks a different B per group, which is what makes this
-# legal for streams that share no weights.
-#
-# Which blobs can be shared is not uniform, and getting it wrong is silent:
-#   * activation ROW blobs -> shared. They are the grouped A operand.
-#   * activation COLUMN blobs -> per-stream. wgrad contracts M, and the two streams have
-#     different weights, so a stacked column pack would sum contributions belonging to
-#     different matrices.
-#   * weight ROW and COLUMN blobs -> both shared. The column blob is only ever the B
-#     operand of a grouped dgrad, never a wgrad operand.
-#
-# Measured per pair at the production shape (m=8192, k=3072, f=12288, h=3072), packing
-# included, against two separate streams:
-#     fwd fc1  (N=12288)   499.9 -> 463.6 us
-#     fwd fc2  (N= 3072)   514.6 -> 477.8 us
-#     bwd fc2 dgrad        457.5 -> 458.7 us
-#     bwd fc1 dgrad        510.9 -> 475.3 us
-#                          total -107.5 us/pair -> -2.04 ms/step over 19 joint blocks
-# Grouping every GEMM beats grouping only the N=3072 ones (-1.37 ms), which is not what a
-# pure wave-quantisation model predicts: the out= packers also drop two allocations per
-# pair, and that part does not depend on N.
-#
-# Treat that as an upper bound. Three times now, measurement has shown a GEMM-level gain
-# shrink once the surrounding plumbing was timed, and the fused prologue still runs once
-# per stream here because the two streams have different fc1 biases.
-#
-# Off by default. Enable with `mxfp6_grouped_mlp: true`.
-# ---------------------------------------------------------------------------
-
-# The 2-group A6W6 kernel, built with the same flags as the variant production already
-# runs for these shapes -- LDSTAGE=1 STNT=1 SWZTH=512 -- so grouping is not paying for a
-# kernel-variant downgrade at the same time. aiter's host gate admits an oversized B only
-# for kernels whose name carries "_wgrp" (weight-grouped), so every other kernel keeps its
-# strict size equality; "_grp" would also have matched dmabig_grp16/grp64, which are
-# ordinary single-weight kernels that carry a rasterization group size in their names.
-_GRP_KERNEL_NAME = "f6gemm_a6w6_stnt_allk_wgrp2_kernel_func"
-
-# Caller-buffer packers. Guarded like the other optional Turbo ops: an older Primus-Turbo
-# has none of them, and the gate above is rejected at import time when they are absent.
-# Note these live in the `primus_turbo_cpp_extension` namespace rather than `primus_turbo`
-# like their allocating siblings -- an inconsistency in Turbo, not a choice here.
-_TURBO_CPP = getattr(torch.ops, "primus_turbo_cpp_extension", None)
-_quantize_mxfp6_dual_out = getattr(_TURBO_CPP, "quantize_mxfp6_dual_out", None)
-_quantize_mxfp6_fused_dual_out = getattr(_TURBO_CPP, "quantize_mxfp6_fused_dual_out", None)
 
 
 def _grouped_mlp_unavailable_reason():
@@ -1711,6 +1763,143 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
             None,
             None,
         )
+
+
+class MXFP6MLPProjFunction(torch.autograd.Function):
+    """A Flux single block's MLP and attention out-projection, sharing one gradient pack.
+
+    The single block computes ``hidden = mlp(norm) + mlp_bias + proj(attn)``, so autograd
+    hands MXFP6MLPFunction.backward (fc2) and out-proj's MXFP6LinearFunction.backward the
+    *same* gradient. As two Functions each dual-packed it -- two identical [M, 3072] packs
+    per block -- and Inductor materialised ``gate * dy`` once per consumer. AOTAutograd does
+    not CSE the backward graph, and dynamo cannot trace a cross-Function cache keyed on the
+    tensor, so the sharing has to live inside one Function.
+
+    Forward runs the two existing forwards verbatim and returns both outputs *separately*,
+    so Inductor keeps fusing ``mlp + bias + proj`` into the downstream scale_add exactly as
+    before. Backward packs the gradient once and runs the two existing backwards on it.
+
+    Precondition, enforced by the caller: the two outputs are only ever summed, so their
+    gradients are equal. The backward uses ``grad_mlp`` for both. out-proj must be unbiased
+    (the shared pack has no column sums) and take the pure-MXFP6 backward.
+    """
+
+    @staticmethod
+    def forward(x, w1, b1, w2, o, wp, fuse_wgrad_accum, grad_enabled, weight_is_fp4):
+        mlp = MXFP6MLPFunction.forward(x, w1, b1, w2, fuse_wgrad_accum, grad_enabled, weight_is_fp4)
+        proj = MXFP6LinearFunction.forward(
+            o, wp, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4
+        )
+        # (mlp_out, proj_out, 9 MLP extras, 4 out-proj column blobs)
+        return (mlp[0], proj[0]) + tuple(mlp[1:]) + tuple(proj[1:])
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        x, w1, b1, w2, o, wp, fuse_wgrad_accum, grad_enabled, weight_is_fp4 = inputs
+        if not grad_enabled:
+            return
+        ctx.fuse_wgrad_accum = fuse_wgrad_accum
+        ctx.weight_is_fp4 = weight_is_fp4
+        ctx.out_dtype = x.dtype
+        ctx.mlp_orig_shape = x.shape
+        ctx.m = x.numel() // x.shape[-1]
+        ctx.k = x.shape[-1]
+        ctx.f = w1.shape[0]
+        ctx.h = w2.shape[0]
+        ctx.proj_orig_shape = o.shape
+        ctx.pm = o.numel() // o.shape[-1]
+        ctx.pk = o.shape[-1]
+        ctx.pn = wp.shape[0]
+
+        y1 = output[2]
+        mlp_blobs = tuple(output[3:11])
+        proj_blobs = tuple(output[11:15])
+        mlp_extra = (w1, w2) if fuse_wgrad_accum else ()
+        proj_extra = (wp,) if fuse_wgrad_accum else ()
+        # Same saves as the two Functions, concatenated; backward splits them back.
+        ctx.n_mlp_saved = 2 + len(mlp_blobs) + len(mlp_extra)
+        ctx.save_for_backward(y1, b1, *mlp_blobs, *mlp_extra, *proj_blobs, *proj_extra)
+        ctx.mark_non_differentiable(*mlp_blobs, *proj_blobs)
+
+    @staticmethod
+    def backward(ctx, grad_mlp, grad_proj, *_):
+        saved = ctx.saved_tensors
+        mlp_saved, proj_saved = saved[: ctx.n_mlp_saved], saved[ctx.n_mlp_saved :]
+
+        # One pack of the shared gradient, as MXFP6MLPFunction makes it.
+        if not grad_mlp.is_contiguous():
+            grad_mlp = grad_mlp.contiguous()
+        g2 = grad_mlp.reshape(-1, ctx.h)
+        g_packed = _quantize_mxfp6_dual(g2)
+
+        grad_x, grad_w1, grad_b1, grad_w2 = _mlp_backward(
+            mlp_saved,
+            grad_mlp,
+            ctx.m,
+            ctx.k,
+            ctx.f,
+            ctx.h,
+            ctx.out_dtype,
+            ctx.mlp_orig_shape,
+            ctx.fuse_wgrad_accum,
+            ctx.weight_is_fp4,
+            ctx.needs_input_grad[2],
+            g2_packed=g_packed,
+        )
+        grad_o, grad_wp, _ = _linear_mxfp6_backward(
+            proj_saved,
+            g2,
+            ctx.pm,
+            ctx.pn,
+            ctx.pk,
+            ctx.out_dtype,
+            ctx.proj_orig_shape,
+            ctx.fuse_wgrad_accum,
+            ctx.weight_is_fp4,
+            False,
+            g_packed=g_packed,
+        )
+        # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4.
+        return grad_x, grad_w1, grad_b1, grad_w2, grad_o, grad_wp, None, None, None
+
+
+def mlp_proj_shared(mlp, proj, x, o):
+    """Run a single block's MLP and out-projection as one MXFP6MLPProjFunction.
+
+    Returns ``(mlp_out, mlp_bias, proj_out)`` shaped like ``mlp(x)`` and ``proj(o)``, or
+    None when the pair is not eligible -- the caller then runs them separately, as before.
+    The caller guarantees ``mlp_out`` and ``proj_out`` are only summed.
+    """
+    if not gates().shared_grad_pack:
+        return None
+    if not getattr(mlp, "_fused_epilogue", False):
+        return None
+    if not isinstance(proj, MXFP6RowParallelLinear) or proj.bias is not None:
+        return None
+    if getattr(proj, "_backward_is_fp8", False) or proj._fuse_wgrad_accum != mlp.linear_fc1._fuse_wgrad_accum:
+        return None
+    if proj._weight_is_fp4 != _resolve_weight_is_fp4(mlp.config):
+        return None
+    fuse_wgrad_accum = mlp.linear_fc1._fuse_wgrad_accum
+    if fuse_wgrad_accum:
+        # The same claims the two paths make separately (MXFP6FusedMLP.forward and
+        # _mxfp6_forward_impl): the backward writes these straight into main_grad.
+        claimed = [mlp.linear_fc1.weight, mlp.linear_fc2.weight, proj.weight]
+        if gates().fused_small_grads and mlp.linear_fc1.bias is not None:
+            claimed.append(mlp.linear_fc1.bias)
+        _claim_main_grad(*claimed)
+    out = MXFP6MLPProjFunction.apply(
+        x,
+        mlp.linear_fc1.weight,
+        mlp.linear_fc1.bias,
+        mlp.linear_fc2.weight,
+        o,
+        proj.weight,
+        fuse_wgrad_accum,
+        torch.is_grad_enabled(),
+        proj._weight_is_fp4,
+    )
+    return out[0], mlp.linear_fc2.bias, out[1]
 
 
 def _is_tanh_gelu(fn) -> bool:

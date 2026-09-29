@@ -64,6 +64,10 @@ class Mxfp6Gates:
     # saved weight column pair and its scales in the backward, four in-place identity
     # copies per joint block.
     grouped_gemm_functional: bool = False
+    # Run a Flux single block's MLP and attention out-projection as one autograd Function
+    # (MXFP6MLPProjFunction) whose backward packs their shared output gradient once. Saves
+    # a [M, 3072] dual pack and a store of gate*dy per single block.
+    shared_grad_pack: bool = False
 
     # --- norm / RoPE fusions ---------------------------------------------
     # Fuse QK-norm and RoPE into one kernel.

@@ -40,6 +40,7 @@ from megatron.core.transformer.transformer_layer import (
 from megatron.core.utils import make_viewless_tensor
 from torch import Tensor
 
+from primus.backends.megatron.core.models.diffusion.common import mxfp6_gates
 from primus.backends.megatron.core.models.diffusion.common.normalization import (
     AdaLN,
     AdaLNContinuous,
@@ -414,15 +415,37 @@ class FluxSingleTransformerBlock(TransformerLayer):
         # Apply modulated layer normalization
         norm_hidden_states = self.adaln.modulated_layernorm(hidden_states, shift=shift, scale=scale)
 
-        # MLP path
-        mlp_hidden_states, mlp_bias = self.mlp(norm_hidden_states)
+        shared = None
+        if mxfp6_gates.gates().shared_grad_pack and hasattr(self.self_attention, "linear_proj"):
+            from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+                mlp_proj_shared,
+            )
 
-        # Attention path
-        attention_output, attention_bias = self.self_attention(
-            norm_hidden_states,
-            attention_mask=attention_mask,
-            rotary_pos_emb=rotary_pos_emb,
-        )
+            # MXFP6: fc2 and out-proj receive the same gradient here, so run them as one
+            # Function that packs it once. Falls back per block if the pair is ineligible.
+            core_attn_out, _ = self.self_attention(
+                norm_hidden_states,
+                attention_mask=attention_mask,
+                rotary_pos_emb=rotary_pos_emb,
+                skip_output_proj=True,
+            )
+            shared = mlp_proj_shared(self.mlp, self.self_attention.linear_proj, norm_hidden_states, core_attn_out)
+            if shared is None:
+                attention_output, attention_bias = self.self_attention.linear_proj(core_attn_out)
+                mlp_hidden_states, mlp_bias = self.mlp(norm_hidden_states)
+            else:
+                mlp_hidden_states, mlp_bias, attention_output = shared
+                attention_bias = None
+        else:
+            # MLP path
+            mlp_hidden_states, mlp_bias = self.mlp(norm_hidden_states)
+
+            # Attention path
+            attention_output, attention_bias = self.self_attention(
+                norm_hidden_states,
+                attention_mask=attention_mask,
+                rotary_pos_emb=rotary_pos_emb,
+            )
 
         # Combine MLP and attention (parallel paths)
         hidden_states = mlp_hidden_states + mlp_bias + attention_output

@@ -1129,9 +1129,14 @@ class FluxSingleAttention(SelfAttention):
         inference_params=None,
         rotary_pos_emb=None,
         packed_seq_params=None,
+        skip_output_proj: bool = False,
     ) -> Tuple[Tensor, Optional[Tensor]]:
         """
         Forward pass: Self-attention on image tokens.
+
+        ``skip_output_proj=True`` returns ``(core_attn_out, None)`` without applying
+        ``linear_proj``, for a caller that runs the projection itself (the single block's
+        MXFP6 MLP+proj Function, which shares one gradient pack between the two).
 
         Args:
             hidden_states: Image tokens [seq, batch, hidden]
@@ -1242,6 +1247,9 @@ class FluxSingleAttention(SelfAttention):
         if packed_seq_params is not None:
             # Reshape: (t, np, hn) -> (t, b=1, h=np*hn)
             core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
+
+        if skip_output_proj:
+            return core_attn_out, None
 
         # Project output (return both output and bias for skip_bias_add pattern)
         output, bias = self.linear_proj(core_attn_out)

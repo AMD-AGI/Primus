@@ -65,6 +65,7 @@ class BaseDiffusionConfig(TransformerConfig):
         mxfp6_joint_qkv: Project Q, K and V in a single GEMM (default: False)
         mxfp6_fused_small_grads: Route small reduction grads into main_grad (default: False)
         mxfp6_grouped_gemm_functional: Call the grouped-MLP GEMM through a functional op (default: False)
+        mxfp6_shared_grad_pack: Single block runs MLP + out-proj as one Function sharing a grad pack (default: False)
         mxfp6_fused_qk_rope: Fuse QK-norm and RoPE into one kernel (default: False)
         mxfp6_fused_qkv: Fuse the QKV norm+RoPE prologue, 'auto'/'on'/'off' (default: 'off')
         mxfp6_fused_ln_mod_bwd: Single-pass LN-modulate backward (default: False)
@@ -192,6 +193,7 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_joint_qkv: bool = False
     mxfp6_fused_small_grads: bool = False
     mxfp6_grouped_gemm_functional: bool = False
+    mxfp6_shared_grad_pack: bool = False
     mxfp6_fused_qk_rope: bool = False
     mxfp6_fused_qkv: str = "off"
     mxfp6_fused_ln_mod_bwd: bool = False
