@@ -211,11 +211,25 @@ def _reduce_grad_into_main_grad(param, partial, out_dtype, fuse_wgrad_accum, dim
 
 
 def _linear_mxfp6_backward(
-    saved, grad_2d, m, n, k, out_dtype, orig_shape, fuse_wgrad_accum, weight_is_fp4, want_bias_grad, g_packed=None
+    saved,
+    grad_2d,
+    m,
+    n,
+    k,
+    out_dtype,
+    orig_shape,
+    fuse_wgrad_accum,
+    weight_is_fp4,
+    want_bias_grad,
+    g_packed=None,
+    grad_input_out=None,
 ):
     """The pure-MXFP6 half of ``MXFP6LinearFunction.backward``, lifted out verbatim so that
     ``MXFP6MLPProjFunction`` can run it on a gradient pack it shares with the MLP.
     ``g_packed`` is ``(row, row_scale, col, col_scale)`` of ``grad_2d``, or None to pack here.
+    ``grad_input_out``, a contiguous ``[m, k]`` buffer, makes the dgrad overwrite it in place
+    (``MXFP6JointProjFunction`` points it at one stream's half of a shared dO) and the
+    returned ``grad_input`` is then None.
     """
     if fuse_wgrad_accum:
         a_col, a_col_scale, b_col, b_col_scale, weight = saved
@@ -239,20 +253,26 @@ def _linear_mxfp6_backward(
 
     # grad_input[M, K] = grad[M, N] @ weight[N, K], contracting N. b_col is the
     # weight packed along N, i.e. logically [K, N] contracting N.
-    grad_input = gemm_fp6_impl(
-        g_row,
-        g_row_scale,
-        b_col,
-        b_col_scale,
-        m,
-        k,
-        n,
-        out_dtype,
-        _GRAN_VALUE,
-        None,
-        weight_is_fp4,
-    )
-    grad_input = grad_input.reshape(orig_shape)
+    if grad_input_out is not None:
+        gemm_fp6_out_impl(
+            g_row, g_row_scale, b_col, b_col_scale, grad_input_out, m, k, n, _GRAN_VALUE, weight_is_fp4
+        )
+        grad_input = None
+    else:
+        grad_input = gemm_fp6_impl(
+            g_row,
+            g_row_scale,
+            b_col,
+            b_col_scale,
+            m,
+            k,
+            n,
+            out_dtype,
+            _GRAN_VALUE,
+            None,
+            weight_is_fp4,
+        )
+        grad_input = grad_input.reshape(orig_shape)
 
     # grad_weight[N, K] = grad.T[N, M] @ input[M, K], contracting M.
     if fuse_wgrad_accum:
@@ -1921,6 +1941,127 @@ def mlp_proj_shared(mlp, proj, x, o):
     # With b2 owned by the Function, the caller's bias add must not open a second gradient
     # path into it -- that path is exactly the reduction this removes.
     return out[0], (b2.detach() if b2 is not None else mlp.linear_fc2.bias), out[1]
+
+
+class MXFP6JointProjFunction(torch.autograd.Function):
+    """A joint block's two attention out-projections, writing one shared dO in backward.
+
+    The joint block splits the attention output ``o = [txt; img]`` (rows, sbhd) into two
+    slices and projects each with its own weights. As two Functions, each backward returned
+    its own input gradient, and autograd reassembled dO for the attention backward with a
+    zero-fill + slice-scatter + add pass (``add_slice_backward_transpose``).
+    Here both dgrads overwrite their halves of one buffer instead, through the
+    out-variant GEMM, which stores with beta=0 -- so nothing needs zeroing.
+
+    Forward runs MXFP6LinearFunction.forward verbatim on each slice (unbiased: both
+    linears are skip_bias_add, the caller still adds their biases). Backward runs the
+    shared linear backward body on each. Bit-identical: the same GEMMs, different
+    destination.
+    """
+
+    @staticmethod
+    def forward(o, n_txt_rows, w_img, w_txt, fuse_wgrad_accum, grad_enabled, weight_is_fp4):
+        o_txt, o_img = o[:n_txt_rows], o[n_txt_rows:]
+        img = MXFP6LinearFunction.forward(
+            o_img, w_img, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4
+        )
+        txt = MXFP6LinearFunction.forward(
+            o_txt, w_txt, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4
+        )
+        # (img_out, txt_out, 4 img column blobs, 4 txt column blobs)
+        return (img[0], txt[0]) + tuple(img[1:]) + tuple(txt[1:])
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        o, n_txt_rows, w_img, w_txt, fuse_wgrad_accum, grad_enabled, weight_is_fp4 = inputs
+        if not grad_enabled:
+            return
+        ctx.fuse_wgrad_accum = fuse_wgrad_accum
+        ctx.weight_is_fp4 = weight_is_fp4
+        ctx.out_dtype = o.dtype
+        ctx.o_shape = o.shape
+        ctx.n_txt_rows = n_txt_rows
+        ctx.k = o.shape[-1]
+        ctx.row_width = o.numel() // (o.shape[0] * o.shape[-1])  # batch: rows are [S, B]
+        ctx.n_img = w_img.shape[0]
+        ctx.n_txt = w_txt.shape[0]
+        img_blobs, txt_blobs = tuple(output[2:6]), tuple(output[6:10])
+        extra_img = (w_img,) if fuse_wgrad_accum else ()
+        extra_txt = (w_txt,) if fuse_wgrad_accum else ()
+        ctx.n_img_saved = len(img_blobs) + len(extra_img)
+        ctx.save_for_backward(*img_blobs, *extra_img, *txt_blobs, *extra_txt)
+        ctx.mark_non_differentiable(*img_blobs, *txt_blobs)
+
+    @staticmethod
+    def backward(ctx, grad_img, grad_txt, *_):
+        saved = ctx.saved_tensors
+        img_saved, txt_saved = saved[: ctx.n_img_saved], saved[ctx.n_img_saved :]
+        k = ctx.k
+        m_txt = ctx.n_txt_rows * ctx.row_width
+        m_img = (ctx.o_shape[0] - ctx.n_txt_rows) * ctx.row_width
+        grad_o = torch.empty(ctx.o_shape, dtype=ctx.out_dtype, device=grad_img.device)
+        grad_o_2d = grad_o.view(-1, k)
+
+        grads_w = []
+        for grad, saved_part, n, rows in (
+            (grad_img, img_saved, ctx.n_img, slice(m_txt, m_txt + m_img)),
+            (grad_txt, txt_saved, ctx.n_txt, slice(0, m_txt)),
+        ):
+            if not grad.is_contiguous():
+                grad = grad.contiguous()
+            _, grad_w, _ = _linear_mxfp6_backward(
+                saved_part,
+                grad.reshape(-1, grad.shape[-1]),
+                rows.stop - rows.start,
+                n,
+                k,
+                ctx.out_dtype,
+                None,
+                ctx.fuse_wgrad_accum,
+                ctx.weight_is_fp4,
+                False,
+                grad_input_out=grad_o_2d[rows],
+            )
+            grads_w.append(grad_w)
+        # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4.
+        return grad_o, None, grads_w[0], grads_w[1], None, None, None
+
+
+def joint_proj_pair(proj_img, proj_txt, o, n_txt_rows):
+    """Run a joint block's two out-projections as one MXFP6JointProjFunction.
+
+    Returns ``(img_out, txt_out)`` *without* biases (both linears are skip_bias_add), or None
+    when ineligible -- the caller then projects the two slices separately, as before.
+    """
+    if not gates().joint_proj:
+        return None
+    for p in (proj_img, proj_txt):
+        if not isinstance(p, MXFP6RowParallelLinear) or getattr(p, "_backward_is_fp8", False):
+            return None
+    if proj_img._fuse_wgrad_accum != proj_txt._fuse_wgrad_accum or proj_img._weight_is_fp4 != proj_txt._weight_is_fp4:
+        return None
+    if not o.is_contiguous() or o.dim() != 3:
+        return None
+    rows_txt = n_txt_rows * o.shape[1]
+    rows_img = (o.shape[0] - n_txt_rows) * o.shape[1]
+    from primus_turbo.pytorch.kernels.quantization.mxfp6_pack import MXFP6_TILE_SIZE
+
+    # The out-variant GEMM writes only tile-aligned, unpadded outputs.
+    if any(v % MXFP6_TILE_SIZE for v in (rows_txt, rows_img, o.shape[-1])):
+        return None
+    fuse_wgrad_accum = proj_img._fuse_wgrad_accum
+    if fuse_wgrad_accum:
+        _claim_main_grad(proj_img.weight, proj_txt.weight)
+    out = MXFP6JointProjFunction.apply(
+        o,
+        n_txt_rows,
+        proj_img.weight,
+        proj_txt.weight,
+        fuse_wgrad_accum,
+        torch.is_grad_enabled(),
+        proj_img._weight_is_fp4,
+    )
+    return out[0], out[1]
 
 
 def _is_tanh_gelu(fn) -> bool:

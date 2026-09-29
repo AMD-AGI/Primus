@@ -74,6 +74,9 @@ class Mxfp6Gates:
     # Inductor post-grad pass: ln_mod_bwd(a + b) -> one kernel that sums a and b while
     # loading. Removes the single block's separate gradient-accumulation add.
     ln_bwd_fused_sum: bool = False
+    # Joint block: both attention out-projections as one Function whose backward writes
+    # the two dgrads into halves of one dO, removing autograd's slice-scatter reassembly.
+    joint_proj: bool = False
 
     # --- norm / RoPE fusions ---------------------------------------------
     # Fuse QK-norm and RoPE into one kernel.

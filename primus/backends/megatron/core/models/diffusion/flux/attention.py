@@ -1026,10 +1026,31 @@ class JointSelfAttention(Attention):
             if self.added_linear_proj.bias is not None:
                 encoder_output = encoder_output + self.added_linear_proj.bias
         else:
-            output, bias = self.linear_proj(attention_output)
-            encoder_output, encoder_bias = self.added_linear_proj(encoder_attention_output)
-            output = output + bias
-            encoder_output = encoder_output + encoder_bias
+            pair = None
+            if packed_seq_params is None:
+                from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+                    joint_proj_pair,
+                )
+
+                # MXFP6: one Function for both projections, so their input gradients land in
+                # one dO instead of being reassembled by autograd. None when ineligible.
+                pair = joint_proj_pair(
+                    self.linear_proj,
+                    self.added_linear_proj,
+                    core_attn_out,
+                    additional_hidden_states.shape[0],
+                )
+            if pair is not None:
+                output, encoder_output = pair
+                if self.linear_proj.bias is not None:
+                    output = output + self.linear_proj.bias
+                if self.added_linear_proj.bias is not None:
+                    encoder_output = encoder_output + self.added_linear_proj.bias
+            else:
+                output, bias = self.linear_proj(attention_output)
+                encoder_output, encoder_bias = self.added_linear_proj(encoder_attention_output)
+                output = output + bias
+                encoder_output = encoder_output + encoder_bias
 
         return output, encoder_output
 
