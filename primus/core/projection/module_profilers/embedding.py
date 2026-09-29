@@ -70,9 +70,7 @@ class EmbeddingProfiler(BaseModuleProfiler):
             if self._simulation_mode:
                 self._cached_results = self._get_simulated_results(batch_size, seq_len)
             else:
-                ishapes, fkwargs = self.require_bench_inputs(
-                    EMBEDDING, self.module, batch_size, seq_len
-                )
+                ishapes, fkwargs = self.require_bench_inputs(EMBEDDING, self.module, batch_size, seq_len)
                 self._cached_results = benchmark_layer(
                     self.module,
                     ishapes,

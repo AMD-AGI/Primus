@@ -8,6 +8,7 @@ import argparse as _argparse
 import os
 import tempfile
 
+
 def _benchmarkable_frameworks() -> frozenset:
     """Frameworks whose trainer the bench can run to measure time and memory.
 

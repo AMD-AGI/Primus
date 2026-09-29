@@ -28,7 +28,12 @@ import os
 from typing import Any, Dict, Optional
 
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.core.utils.module_utils import error_rank_0, log_rank_0, set_logging_rank, warning_rank_0
+from primus.core.utils.module_utils import (
+    error_rank_0,
+    log_rank_0,
+    set_logging_rank,
+    warning_rank_0,
+)
 
 # Primus-internal params that are not part of MaxText's config schema. MaxText
 # v26.4's pyconfig raises on unknown fields (v26.3 merely warns), so these must
@@ -108,7 +113,10 @@ class MaxTextPretrainTrainer(BaseTrainer):
 
         initialize, _, module_name = _resolve_maxtext_train()
 
-        from primus.backends.maxtext.argument_builder import export_params_to_yaml, namespace_to_dict
+        from primus.backends.maxtext.argument_builder import (
+            export_params_to_yaml,
+            namespace_to_dict,
+        )
 
         override_model_args = self._prepare_model_overrides()
         params_dict = namespace_to_dict(self.backend_args)

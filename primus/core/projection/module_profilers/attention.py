@@ -858,9 +858,7 @@ class AttentionProfiler(BaseModuleProfiler):
             else:
                 # Use actual GPU benchmarking
                 tcfg = getattr(self.module, "config", None)
-                ishapes, fkwargs = self.require_bench_inputs(
-                    ATTENTION, self.module, batch_size, seq_len
-                )
+                ishapes, fkwargs = self.require_bench_inputs(ATTENTION, self.module, batch_size, seq_len)
                 self._cached_results = benchmark_layer(
                     self.module, ishapes, transformer_config=tcfg, forward_kwargs=fkwargs
                 )

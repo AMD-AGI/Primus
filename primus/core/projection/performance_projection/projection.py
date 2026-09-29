@@ -19,7 +19,10 @@ import yaml
 
 from primus.core.launcher.parser import load_primus_config
 from primus.core.projection.bench_harness import get_bench_runner, resolve_model_adapter
-from primus.core.projection.config_validation import assert_recompute_pipeline_compat, recompute_is_enabled
+from primus.core.projection.config_validation import (
+    assert_recompute_pipeline_compat,
+    recompute_is_enabled,
+)
 from primus.core.projection.frameworks import framework_of, normalize_primus_config
 from primus.core.projection.memory_capture import MemoryBenchmarkRecorder, format_bytes
 from primus.core.projection.module_profilers import collective_model as cm
@@ -30,12 +33,16 @@ from primus.core.projection.module_profilers.language_model import (
     get_language_model_profiler_spec,
 )
 from primus.core.projection.module_profilers.optimizer import OptimizerProfiler
-from primus.core.projection.performance_projection.simulator import SchedulerSimulationRunner
+from primus.core.projection.performance_projection.simulator import (
+    SchedulerSimulationRunner,
+)
 from primus.core.projection.simulation_backends.factory import (
     get_gemm_simulation_backend,
     get_sdpa_simulation_backend,
 )
-from primus.core.projection.training_config import convert_primus_config_to_projection_config
+from primus.core.projection.training_config import (
+    convert_primus_config_to_projection_config,
+)
 
 # NOTE: The core runtime (PrimusRuntime) and megatron backend are imported
 # lazily inside _run_layer_benchmark() to avoid pulling in the megatron
@@ -2698,7 +2705,10 @@ def _build_runtime_primus_config(legacy_primus_config, args, module_name="pre_tr
     """
     from pathlib import Path
 
-    from primus.core.config.primus_config import _normalize_module_for_runtime, load_primus_config
+    from primus.core.config.primus_config import (
+        _normalize_module_for_runtime,
+        load_primus_config,
+    )
     from primus.core.projection.frameworks import apply_bench_overrides
 
     # The driver's edits so far are written in the projection's flat vocabulary.
@@ -3251,7 +3261,9 @@ def _run_pipeline_simulation_megatron_zb(training_config, profiling_results):
         float: Step time in ms from pipeline simulation
     """
     from primus.backends.megatron.core.pipeline_parallel.zerobubble.scheduler import zb
-    from primus.backends.megatron.core.pipeline_parallel.zerobubble.scheduler.graph import GraphConfig
+    from primus.backends.megatron.core.pipeline_parallel.zerobubble.scheduler.graph import (
+        GraphConfig,
+    )
 
     # Build chunk time matrix
     chunk_time_matrix = _build_chunk_time_matrix(training_config, profiling_results)

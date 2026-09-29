@@ -21,7 +21,11 @@ from .layer_norm import LayerNormProfiler
 from .moe_mlp import MoEMLPProfiler
 from .residual_add import ResidualAddProfiler
 from .router import RouterProfiler
-from .utils import _install_balanced_routing_patches, _kernel_pad_enabled, benchmark_layer
+from .utils import (
+    _install_balanced_routing_patches,
+    _kernel_pad_enabled,
+    benchmark_layer,
+)
 
 # ── Fallback HBM bandwidth for elementwise overhead estimation ──
 _FALLBACK_HBM_BW_GBPS = 5300.0  # MI300X default
@@ -195,7 +199,9 @@ def _deepep_overlap_efficiency(config) -> float:
     staging pushes the async overlap to 75/80/85%).  This adds only the
     ``use_turbo_deepep`` off-guard so the ladder itself is not duplicated.
     """
-    from primus.core.projection.performance_projection.projection import _get_deepep_overlap_efficiency
+    from primus.core.projection.performance_projection.projection import (
+        _get_deepep_overlap_efficiency,
+    )
 
     model_config = getattr(config, "model_config", config)
     if not getattr(model_config, "use_turbo_deepep", False):
@@ -370,9 +376,7 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
             else:
                 # Get TransformerConfig from the layer module itself (has fp8 setting)
                 transformer_config = getattr(self.layer_module, "config", None)
-                ishapes, fkwargs = self.require_bench_inputs(
-                    LAYER, self.layer_module, batch_size, seq_len
-                )
+                ishapes, fkwargs = self.require_bench_inputs(LAYER, self.layer_module, batch_size, seq_len)
                 self._cached_results = benchmark_layer(
                     self.layer_module,
                     ishapes,
@@ -549,9 +553,7 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             ):
                 # Legacy whole-layer timing (often ~1.5-1.7x pessimistic on backward).
                 transformer_config = getattr(self.layer_module, "config", None)
-                ishapes, fkwargs = self.require_bench_inputs(
-                    LAYER, self.layer_module, batch_size, seq_len
-                )
+                ishapes, fkwargs = self.require_bench_inputs(LAYER, self.layer_module, batch_size, seq_len)
                 routing_restores = []
                 if _kernel_pad_enabled():
                     routing_restores, _ = _install_balanced_routing_patches(self.layer_module)
