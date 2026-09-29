@@ -59,6 +59,11 @@ class Mxfp6Gates:
     # Route small reduction gradients (biases, QK-norm weights) into main_grad
     # instead of letting AccumulateGrad materialise them.
     fused_small_grads: bool = False
+    # Call the grouped MLP's aiter GEMM through a functional custom op. aiter registers it
+    # with mutates_args="unknown", so functionalization clones every live operand -- the
+    # saved weight column pair and its scales in the backward, four in-place identity
+    # copies per joint block.
+    grouped_gemm_functional: bool = False
 
     # --- norm / RoPE fusions ---------------------------------------------
     # Fuse QK-norm and RoPE into one kernel.

@@ -948,7 +948,7 @@ def _fused_prologue_pair(ys, aux, biases, mode, want_col_sum):
     return row_p, row_s, cols, partials
 
 
-def _grouped_gemm(a, a_s, b, b_s, m_total, n, k):
+def _grouped_gemm_raw(a, a_s, b, b_s, m_total, n, k):
     """One A6W6 GEMM over two groups stacked along M, B carrying both streams' weights.
 
     Calls aiter directly rather than ``gemm_fp6_impl``: that entry point has no kernel-name
@@ -958,6 +958,38 @@ def _grouped_gemm(a, a_s, b, b_s, m_total, n, k):
     import aiter
 
     return aiter.gemm_a6w6(a, b, a_s, b_s, m_total, n, k, kernelName=_GRP_KERNEL_NAME)
+
+
+@torch.library.custom_op("primus::mxfp6_grouped_gemm", mutates_args=(), device_types="cuda")
+def _grouped_gemm_functional(
+    a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor, b_s: torch.Tensor, m_total: int, n: int, k: int
+) -> torch.Tensor:
+    """``_grouped_gemm_raw`` behind a functional schema.
+
+    aiter registers its ctypes GEMM (``aiter._gemm_a6w6_asm``) with ``mutates_args="unknown"``,
+    which torch.compile must read as "may write every tensor argument". Functionalization
+    therefore clones each operand that is still live afterwards -- for the grouped backward
+    that is the saved weight column pair and its scales, which Inductor then copies onto
+    themselves in place: four ``as_strided_clone`` kernels per joint block of
+    identity copies. This op declares the truth (it only writes the tensor it returns), so
+    nothing is cloned. Turbo's ``gemm_fp6_impl`` already does the same for every other
+    MXFP6 GEMM, which is why only the grouped path showed the copies.
+    """
+    out = _grouped_gemm_raw(a, a_s, b, b_s, m_total, n, k)
+    # A custom op may not return a view; gemm_a6w6 returns one only when it had to pad,
+    # which the grouped shapes (M, N multiples of 256) never need.
+    return out if out._base is None else out.contiguous()
+
+
+@_grouped_gemm_functional.register_fake
+def _(a, a_s, b, b_s, m_total, n, k):
+    return torch.empty((m_total, n), dtype=torch.bfloat16, device=a.device)
+
+
+def _grouped_gemm(a, a_s, b, b_s, m_total, n, k):
+    if gates().grouped_gemm_functional:
+        return _grouped_gemm_functional(a, a_s, b, b_s, m_total, n, k)
+    return _grouped_gemm_raw(a, a_s, b, b_s, m_total, n, k)
 
 
 class MXFP6GroupedMLPFunction(torch.autograd.Function):
