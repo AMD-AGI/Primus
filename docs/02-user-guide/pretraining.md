@@ -17,7 +17,7 @@ The following table describes the backends supported by Primus and their typical
 | MaxText (JAX) | `framework: maxtext` | JAX/MaxText single- and multi-node runs; parallelism via MaxText `ici_*` / `dcn_*` settings. |
 | MaxDiffusion (JAX) | `framework: maxdiffusion` | JAX/MaxDiffusion diffusion pretraining (WAN 2.1, FLUX.1-dev). Source is vendored as the `third_party/maxdiffusion` submodule; deps/patches installed by `examples/maxdiffusion/setup_maxdiffusion_env.sh`. |
 | Megatron Bridge | `framework: megatron_bridge` | Bridge-oriented workflows (configure like other backends; see parameter reference). |
-| SpecForge | `framework: specforge` | Offline hidden states capture and draft training on a ROCm SGLang Primus image. See [SpecForge on Primus](../../examples/specforge/README.md). |
+| SpecForge | `framework: specforge` | `specforge_mode: capture`, or `train` with required `specforge_train_mode: offline` / `online` (Mooncake + SGLang), on a ROCm SGLang Primus image. YAML / env / CLI: [SpecForge configuration reference](../../examples/specforge/CONFIGURATION.md). |
 
 > Several setup steps apply to **all** backends (mock vs. real data, Hugging Face tokens, scaling to multiple nodes, and HipBLASLt autotuning). After you read the backend section that applies to you, see [Common patterns](#common-patterns) below.
 
@@ -109,9 +109,9 @@ The following files ship in the repository (sorted by name). Parallelism columns
 | `qwen3_5_35B_A3B-FP8-pretrain.yaml` | `${PRIMUS_TP:1}` | `${PRIMUS_PP:1}` | `${PRIMUS_EP:8}` |
 | `qwen3_8B-BF16-pretrain.yaml` | `1` | `1` | `1` |
 | `qwen3_8B-FP8-pretrain.yaml` | `1` | `1` | `1` |
-| `hylo_llama_mamba_1B_BF16-pretrain.yaml` | `1` | `1` | `1` |
-| `hylo_llama_mamba_3B_BF16-pretrain.yaml` | `1` | `1` | `1` |
-| `hylo_llama_mamba_8B_BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `zebra_llama_mamba_1B_BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `zebra_llama_mamba_3B_BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `zebra_llama_mamba_8B_BF16-pretrain.yaml` | `1` | `1` | `1` |
 
 ### Sample YAML file (`llama2_7B-BF16-pretrain.yaml`) explained
 

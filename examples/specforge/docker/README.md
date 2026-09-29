@@ -1,7 +1,8 @@
 # SpecForge ROCm runtime image
 
 Image for [SpecForge on Primus](../README.md). That page is the `primus-cli`
-entrypoint sketch; this file is the install reference.
+entrypoint and MI355X results; YAML/env/CLI knobs are in
+[CONFIGURATION.md](../CONFIGURATION.md). This file is the install reference.
 
 The published `primus` wheel does **not** include `primus/backends/specforge/`.
 This Dockerfile installs **this Primus checkout** editable with `--no-deps`.
@@ -95,3 +96,6 @@ so model weights are not re-downloaded.
 
 Launch capture or train with `primus-cli` from `/opt/primus`. See
 [SpecForge on Primus](../README.md).
+
+Capture and online SGLang on this image use AITER with the radix cache off.
+Primus sets that at launch; you do not put it in YAML or export it.

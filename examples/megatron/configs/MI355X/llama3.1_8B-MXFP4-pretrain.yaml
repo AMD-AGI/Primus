@@ -3,6 +3,12 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:llama3.1_8B-pretrain-mxfp4}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# MXFP4: the Triton cast-transpose kernel drops throughput vs the documented
+# recipe (docs/02-user-guide/megatron-lm-training.md prefixes this on the CLI).
+# TrainRuntime applies top-level env: after base_env.sh (which defaults this to 1).
+env:
+  NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
+
 modules:
   pre_trainer:
     framework: megatron

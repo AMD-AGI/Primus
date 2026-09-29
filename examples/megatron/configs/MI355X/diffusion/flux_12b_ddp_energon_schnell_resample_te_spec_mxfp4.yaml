@@ -15,23 +15,27 @@
 #   - torch.compile disabled (TE FP4 autocast global state breaks graph capture)
 #   - Energon pre-encoded dataset with stored VAE mean/logvar (resample mode)
 #
-# Set these environment variables before launching:
-#   export NVTE_USE_CAST_TRANSPOSE_TRITON=0
-#   export NVTE_FUSED_ATTN=1
-#   export NVTE_FUSED_ATTN_CK=1
-#   export NVTE_USE_HIPBLASLT=1
-#   export USE_HIPBLASLT=1
-#   export TORCH_BLAS_PREFER_HIPBLASLT=1
-#   export NVTE_FP4_USE_TUNED_GEMM=1
-#   export NVTE_FP4_LOG_GEMM_SHAPES=0
-#   unset NVTE_FLASH_ATTN
-#   unset NVTE_UNFUSED_ATTN
+# TE/MXFP4 env lives in the top-level env: block below (applied by TrainRuntime).
+# Do not also export these on the CLI; YAML is the source of truth for this recipe.
+#
+# YAML env: can set keys but cannot unset NVTE_FLASH_ATTN / NVTE_UNFUSED_ATTN.
+# If those are present in the process environment, clear them before launch.
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:flux_12b_ddp_te_mxfp4}
 
 workspace: ${PRIMUS_WORKSPACE:./output}
+
+env:
+  NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
+  NVTE_FUSED_ATTN: "1"
+  NVTE_FUSED_ATTN_CK: "1"
+  NVTE_USE_HIPBLASLT: "1"
+  USE_HIPBLASLT: "1"
+  TORCH_BLAS_PREFER_HIPBLASLT: "1"
+  NVTE_FP4_USE_TUNED_GEMM: "1"
+  NVTE_FP4_LOG_GEMM_SHAPES: "0"
 
 modules:
   pre_trainer:
