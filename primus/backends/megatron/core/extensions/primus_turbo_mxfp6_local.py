@@ -1785,7 +1785,10 @@ class MXFP6MLPProjFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(x, w1, b1, w2, o, wp, fuse_wgrad_accum, grad_enabled, weight_is_fp4):
+    def forward(x, w1, b1, w2, o, wp, b2, fuse_wgrad_accum, grad_enabled, weight_is_fp4):
+        # b2 (fc2's bias) is not applied here -- fc2 is skip_bias_add, the caller still adds
+        # it, detached. It is an input only so the backward can return its gradient from the
+        # shared pack's column sums instead of autograd reducing gate*dy a second time.
         mlp = MXFP6MLPFunction.forward(x, w1, b1, w2, fuse_wgrad_accum, grad_enabled, weight_is_fp4)
         proj = MXFP6LinearFunction.forward(
             o, wp, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4
@@ -1795,9 +1798,10 @@ class MXFP6MLPProjFunction(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        x, w1, b1, w2, o, wp, fuse_wgrad_accum, grad_enabled, weight_is_fp4 = inputs
+        x, w1, b1, w2, o, wp, b2, fuse_wgrad_accum, grad_enabled, weight_is_fp4 = inputs
         if not grad_enabled:
             return
+        ctx.has_b2 = b2 is not None
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
         ctx.weight_is_fp4 = weight_is_fp4
         ctx.out_dtype = x.dtype
@@ -1818,19 +1822,32 @@ class MXFP6MLPProjFunction(torch.autograd.Function):
         proj_extra = (wp,) if fuse_wgrad_accum else ()
         # Same saves as the two Functions, concatenated; backward splits them back.
         ctx.n_mlp_saved = 2 + len(mlp_blobs) + len(mlp_extra)
-        ctx.save_for_backward(y1, b1, *mlp_blobs, *mlp_extra, *proj_blobs, *proj_extra)
+        ctx.save_for_backward(
+            y1, b1, *mlp_blobs, *mlp_extra, *proj_blobs, *proj_extra, *((b2,) if b2 is not None else ())
+        )
         ctx.mark_non_differentiable(*mlp_blobs, *proj_blobs)
 
     @staticmethod
     def backward(ctx, grad_mlp, grad_proj, *_):
         saved = ctx.saved_tensors
+        if ctx.has_b2:
+            b2, saved = saved[-1], saved[:-1]
         mlp_saved, proj_saved = saved[: ctx.n_mlp_saved], saved[ctx.n_mlp_saved :]
 
-        # One pack of the shared gradient, as MXFP6MLPFunction makes it.
+        # One pack of the shared gradient.
         if not grad_mlp.is_contiguous():
             grad_mlp = grad_mlp.contiguous()
         g2 = grad_mlp.reshape(-1, ctx.h)
-        g_packed = _quantize_mxfp6_dual(g2)
+        grad_b2 = None
+        if ctx.has_b2:
+            # Identity prologue with column sums: fc2's bias gradient is exactly the column
+            # sum of this tensor, which the packer is already streaming.
+            *g_packed, b2_partial = _quantize_mxfp6_fused_dual(g2, None, None, MXFP6_PROLOGUE_IDENTITY, True)
+            g_packed = tuple(g_packed)
+            grad_b2 = _reduce_grad_into_main_grad(b2, b2_partial, ctx.out_dtype, ctx.fuse_wgrad_accum)
+        else:
+            # As MXFP6MLPFunction makes it, so the no-bias path stays bit-identical to it.
+            g_packed = _quantize_mxfp6_dual(g2)
 
         grad_x, grad_w1, grad_b1, grad_w2 = _mlp_backward(
             mlp_saved,
@@ -1860,7 +1877,7 @@ class MXFP6MLPProjFunction(torch.autograd.Function):
             g_packed=g_packed,
         )
         # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4.
-        return grad_x, grad_w1, grad_b1, grad_w2, grad_o, grad_wp, None, None, None
+        return grad_x, grad_w1, grad_b1, grad_w2, grad_o, grad_wp, grad_b2, None, None, None
 
 
 def mlp_proj_shared(mlp, proj, x, o):
@@ -1881,12 +1898,13 @@ def mlp_proj_shared(mlp, proj, x, o):
     if proj._weight_is_fp4 != _resolve_weight_is_fp4(mlp.config):
         return None
     fuse_wgrad_accum = mlp.linear_fc1._fuse_wgrad_accum
+    b2 = mlp.linear_fc2.bias if gates().shared_grad_pack_bias else None
     if fuse_wgrad_accum:
         # The same claims the two paths make separately (MXFP6FusedMLP.forward and
         # _mxfp6_forward_impl): the backward writes these straight into main_grad.
         claimed = [mlp.linear_fc1.weight, mlp.linear_fc2.weight, proj.weight]
-        if gates().fused_small_grads and mlp.linear_fc1.bias is not None:
-            claimed.append(mlp.linear_fc1.bias)
+        if gates().fused_small_grads:
+            claimed += [b for b in (mlp.linear_fc1.bias, b2) if b is not None]
         _claim_main_grad(*claimed)
     out = MXFP6MLPProjFunction.apply(
         x,
@@ -1895,11 +1913,14 @@ def mlp_proj_shared(mlp, proj, x, o):
         mlp.linear_fc2.weight,
         o,
         proj.weight,
+        b2,
         fuse_wgrad_accum,
         torch.is_grad_enabled(),
         proj._weight_is_fp4,
     )
-    return out[0], mlp.linear_fc2.bias, out[1]
+    # With b2 owned by the Function, the caller's bias add must not open a second gradient
+    # path into it -- that path is exactly the reduction this removes.
+    return out[0], (b2.detach() if b2 is not None else mlp.linear_fc2.bias), out[1]
 
 
 def _is_tanh_gelu(fn) -> bool:

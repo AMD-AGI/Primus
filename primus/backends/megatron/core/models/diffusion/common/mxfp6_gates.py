@@ -68,6 +68,9 @@ class Mxfp6Gates:
     # (MXFP6MLPProjFunction) whose backward packs their shared output gradient once. Saves
     # a [M, 3072] dual pack and a store of gate*dy per single block.
     shared_grad_pack: bool = False
+    # With shared_grad_pack: take fc2's bias gradient from that pack's column sums instead
+    # of a separate reduction of gate*dy. Not bit-identical (summation order).
+    shared_grad_pack_bias: bool = False
 
     # --- norm / RoPE fusions ---------------------------------------------
     # Fuse QK-norm and RoPE into one kernel.
