@@ -23,6 +23,8 @@ modules:
     config: offline.yaml
     model: qwen3.5-4b-dflash.yaml
     overrides:
+      specforge_mode: train
+      specforge_train_mode: offline
       specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-offline-amd.yaml}
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
       output_dir: ${OUTPUT_DIR}

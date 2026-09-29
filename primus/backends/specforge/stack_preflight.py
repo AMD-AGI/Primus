@@ -27,6 +27,7 @@ from primus.backends.specforge.argument_builder import (
     flatten_overrides,
     resolve_specforge_root,
     specforge_mode,
+    specforge_train_mode,
 )
 
 ROCM_STACK_ENV_DEFAULTS = (
@@ -105,10 +106,57 @@ def apply_rocm_stack_env(env: Optional[MutableMapping[str, str]] = None) -> list
     return applied
 
 
+# Trainer ranks may start before capture (faster image load) and write trainer.ip
+# into a still-fresh RUN_ROOT. That is in-progress, not a stale reuse.
+_ONLINE_RUN_ROOT_PRE_CAPTURE = frozenset({"trainer.ip"})
+
+
+def _stale_run_root_names(root: Path) -> list[str]:
+    if not root.exists():
+        return []
+    return sorted(p.name for p in root.iterdir() if p.name not in _ONLINE_RUN_ROOT_PRE_CAPTURE)
+
+
 def _hidden_states_path(params: Any, env: Mapping[str, str]) -> Optional[str]:
     overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
     hidden = overrides.get("data.hidden_states_path") or overrides.get("hidden_states_path")
     return hidden or env.get("HIDDEN_STATES_PATH") or None
+
+
+def _online_preflight_issues(params: Any, env: Mapping[str, str]) -> list[str]:
+    """Online skips hidden-state dirs; it needs a fresh control/state tree instead."""
+
+    import shutil
+
+    from primus.backends.specforge.online_launch import (
+        nnodes,
+        node_rank,
+        online_settings,
+        validate_online_identity,
+    )
+
+    issues: list[str] = []
+    settings = online_settings(params, env=env)
+    issues.extend(validate_online_identity(settings, rank=node_rank(env), nodes=nnodes(env)))
+    overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
+    train_data = overrides.get("data.train_data_path") or env.get("TRAIN_DATA_PATH")
+    if train_data and not Path(str(train_data)).is_file():
+        issues.append(f"online train data is not a file: {train_data}")
+    run_root = settings.get("run_root")
+    if run_root and node_rank(env) == 0:
+        root = Path(str(run_root))
+        leftover = _stale_run_root_names(root)
+        if leftover:
+            issues.append(f"run_root is not empty; choose a fresh RUN_ID: {root}")
+    consumer = settings.get("consumer_state_dir")
+    if consumer:
+        path = Path(str(consumer))
+        if path.exists() and any(path.iterdir()):
+            issues.append(f"consumer_state_dir is not empty; choose a fresh attempt: {path}")
+    if enforce_rocm_stack(env):
+        if shutil.which("mooncake_master") is None:
+            issues.append("mooncake_master is not on PATH; online mode needs the overlay Mooncake binary")
+    return issues
 
 
 def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list[str]:
@@ -116,7 +164,13 @@ def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list
 
     environ = os.environ if env is None else env
     issues: list[str] = []
-    mode = specforge_mode(params)
+    mode = None
+    train_mode = None
+    try:
+        mode = specforge_mode(params)
+        train_mode = specforge_train_mode(params)
+    except ValueError as exc:
+        issues.append(str(exc).replace("[Primus:specforge] ", ""))
     overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
     capture = flatten_overrides(getattr(params, "specforge_capture", None))
 
@@ -161,7 +215,9 @@ def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list
                 "capture sglang_disable_radix_cache is false; Mamba + AITER on ROCm "
                 "must disable the radix cache"
             )
-    else:
+    elif train_mode == "online":
+        issues.extend(_online_preflight_issues(params, environ))
+    elif mode == "train":
         hidden = _hidden_states_path(params, environ)
         if hidden:
             path = Path(str(hidden))
