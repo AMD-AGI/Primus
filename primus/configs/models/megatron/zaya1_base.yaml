@@ -1,8 +1,8 @@
 ###############################################################################
 # ZAYA1 base config.
 #
-# Forward math follows the SGLang ZAYA1 implementation and the released
-# Zyphra/ZAYA1-base checkpoint, not the paper equations where they disagree.
+# Forward math follows the released Zyphra/ZAYA1-base checkpoint, not the
+# paper equations where they disagree.
 ###############################################################################
 
 extends:
@@ -70,7 +70,7 @@ moe_aux_loss_coeff: 0.0
 moe_router_enable_expert_bias: false
 moe_grouped_gemm: false
 
-# ---------- SGLang ZAYA1 knobs ----------
+# ---------- ZAYA1 knobs ----------
 # HF config.json lists ffn width 4096 because gate and up are concatenated.
 # Megatron's ffn_hidden_size / moe_ffn_hidden_size are one SwiGLU side (2048),
 # set on zaya1.yaml.

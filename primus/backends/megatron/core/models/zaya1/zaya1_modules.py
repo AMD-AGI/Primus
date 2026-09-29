@@ -6,11 +6,9 @@
 
 """ZAYA1 mixer modules.
 
-The forward math follows the SGLang ZAYA1 implementation
-(``sglang/srt/models/zaya.py``): per-sublayer residual scaling of the form
-``(x + bias) * scale``, CCA with a raw key temperature, and the vector EDA
-router with optional mixture-of-depths. Tensors use Megatron layout
-``[sequence, batch, hidden]``.
+Per-sublayer residual scaling has the form ``(x + bias) * scale``. CCA uses a
+raw key temperature, and the router is a vector EDA router with optional
+mixture-of-depths. Tensors use Megatron layout ``[sequence, batch, hidden]``.
 """
 
 from __future__ import annotations
@@ -75,7 +73,7 @@ class RMSNorm(nn.Module):
 
 
 class ResidualScaling(nn.Module):
-    """SGLang affine: ``(x + bias) * scale`` on the mixer output and the residual.
+    """Affine ``(x + bias) * scale`` on the mixer output and the residual.
 
     Stage 0 has no incoming residual, so it stores only the mixer-output affine.
     """
@@ -150,7 +148,7 @@ class CCA(nn.Module):
         for conv in self.conv_qk:
             _init_weight(conv.weight, config)
             nn.init.zeros_(conv.bias)
-        # Ones, not zeros: SGLang's zeros are the pre-checkpoint default, and a
+        # Ones, not zeros: a zero default is the pre-checkpoint initialization, and a
         # raw temperature of zero would wipe the keys at step 0.
         self.temp = nn.Parameter(torch.ones(self.num_k_heads))
         self.o_proj = _linear(self.latent_q, self.hidden_size, bias, config)
@@ -189,8 +187,7 @@ class CCA(nn.Module):
             pos = position_ids.transpose(0, 1).to(device=query.device)
         freq_idx = torch.arange(0, self.rotary_dim, 2, device=query.device, dtype=torch.float32)
         inv_freq = 1.0 / (self.rope_base ** (freq_idx / self.rotary_dim))
-        # NeoX layout, matching SGLang ``get_rope(..., is_neox_style=True)``:
-        # the same angle is shared by the two halves of the rotary slice.
+        # NeoX layout: the same angle is shared by the two halves of the rotary slice.
         if pos.dim() == 1:
             freqs = torch.outer(pos.float(), inv_freq)
             cos = torch.cat((freqs.cos(), freqs.cos()), dim=-1)[:, None, None, :]
@@ -329,8 +326,8 @@ class ZayaRouter(nn.Module):
         routed = self.down_proj(hidden_states.reshape(seq * batch, self.hidden_size))
         if self.use_eda and prev_router is not None:
             routed = routed + prev_router.reshape(seq * batch, self.width) * self.router_states_scale
-        # EDA state is the post-add, pre-norm router hidden. RMSNorm then the
-        # 3-layer MLP see that state, matching SGLang.
+        # EDA state is the post-add, pre-norm router hidden. RMSNorm and the
+        # 3-layer MLP both see that state.
         next_router = routed.view(seq, batch, self.width)
         logits = self.rmsnorm_eda(routed)
         for stage in self.router_mlp:
@@ -398,7 +395,7 @@ class ZayaMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor, prev_router: Optional[torch.Tensor]):
         probs, index, next_router = self.router(hidden_states, prev_router)
         # Top-1 is the released configuration. The mix weight is the unbiased
-        # gathered probability, matching SGLang.
+        # gathered probability.
         prob = probs[..., 0]
         idx = index[..., 0]
         flat = hidden_states.reshape(-1, hidden_states.shape[-1])
