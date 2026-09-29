@@ -146,6 +146,38 @@ def _make_ctx(
 # ============================================================================
 
 
+def test_flux_logger_emits_v61_disclosures(monkeypatch):
+    from primus.backends.megatron.patches.mlperf_logging_patches import FluxMLPerfLogger
+
+    logger = FluxMLPerfLogger.__new__(FluxMLPerfLogger)
+    logger._mllogger = MagicMock()
+    logger._constants = SimpleNamespace(
+        GLOBAL_BATCH_SIZE="global_batch_size",
+        TRAIN_SAMPLES="train_samples",
+        EVAL_SAMPLES="eval_samples",
+        GRADIENT_ACCUMULATION_STEPS="gradient_accumulation_steps",
+        OPT_NAME="opt_name",
+        OPT_BASE_LR="opt_base_lr",
+    )
+    logger.gbs = 512
+    logger.mbs = 64
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("MLLOG_CONFIG_FILENAME", "flux_12b_mlperf.yaml")
+
+    logger.log_hyperparams(SimpleNamespace())
+
+    events = {call.kwargs["key"]: call.kwargs["value"] for call in logger._mllogger.event.call_args_list}
+    assert events["lowest_numerical_precision_in_linear"] == "fp8"
+    assert events["lowest_numerical_precision_in_attn"] == "bfloat16"
+    assert events["lowest_numerical_precision_in_comm"] == "bfloat16"
+    assert events["tensor_parallelism"] == 1
+    assert events["pipeline_parallelism"] == 1
+    assert events["context_parallelism"] == 1
+    assert events["expert_parallelism"] == 1
+    assert events["micro_batch_size"] == 64
+    assert events["config_filename"] == "flux_12b_mlperf.yaml"
+
+
 class TestLoggingPatchMonkeyPatching:
     """Verify that the logging patch replaces the expected functions."""
 

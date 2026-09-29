@@ -5,6 +5,7 @@
 ###############################################################################
 
 import importlib
+import os
 from typing import Optional
 
 import primus.backends.megatron.patches  # noqa: F401  # Register patches
@@ -12,6 +13,53 @@ from primus.backends.megatron.argument_builder import MegatronArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
 from primus.core.utils.module_utils import log_rank_0
+
+
+def _patch_primus_mllog_for_v61() -> None:
+    """Add the v6.1 precision disclosures to the optional pretrain logger.
+
+    The pinned ``primus_mllog`` package predates the v6.1 requirement for
+    separate linear, attention, and communication precision keys. Keep the
+    compatibility shim here until that package exposes the fields directly.
+    """
+    from primus_mllog.mlperf_logger import MLPerfLogger
+
+    if getattr(MLPerfLogger, "_primus_mlperf_v61_disclosures", False):
+        return
+
+    original_extract = MLPerfLogger.extract_mlperf_configs
+
+    def extract_mlperf_configs(self, args):
+        from mlperf_logging.mllog import constants
+
+        configs = original_extract(self, args)
+        # The old helper emitted a pre-standard key without ``_in_``.
+        configs.pop("lowest_numerical_precision_linear", None)
+        configs[
+            getattr(
+                constants,
+                "LOWEST_NUMERICAL_PRECISION_IN_LINEAR",
+                "lowest_numerical_precision_in_linear",
+            )
+        ] = os.getenv("MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR", "bfloat16")
+        configs[
+            getattr(
+                constants,
+                "LOWEST_NUMERICAL_PRECISION_IN_ATTN",
+                "lowest_numerical_precision_in_attn",
+            )
+        ] = os.getenv("MLLOG_LOWEST_NUMERICAL_PRECISION_ATTN", "bfloat16")
+        configs[
+            getattr(
+                constants,
+                "LOWEST_NUMERICAL_PRECISION_IN_COMM",
+                "lowest_numerical_precision_in_comm",
+            )
+        ] = os.getenv("MLLOG_LOWEST_NUMERICAL_PRECISION_COMM", "bfloat16")
+        return configs
+
+    MLPerfLogger.extract_mlperf_configs = extract_mlperf_configs
+    MLPerfLogger._primus_mlperf_v61_disclosures = True
 
 
 class MegatronAdapter(BackendAdapter):
@@ -46,6 +94,7 @@ class MegatronAdapter(BackendAdapter):
         # primus_mllog -> primus.backends.megatron -> primus_mllog.
         if stage == "mlperf_pretrain":
             try:
+                _patch_primus_mllog_for_v61()
                 from primus_mllog import MLPerfMegatronPretrainTrainer
             except ImportError as exc:
                 raise ImportError(

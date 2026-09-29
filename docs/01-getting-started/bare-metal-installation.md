@@ -440,7 +440,7 @@ If you already have a local Primus checkout, run `pip install -r requirements.tx
 ```bash
 pip install --no-deps torchrec
 pip install tensordict iopath torchmetrics==1.0.3 \
-    git+https://github.com/mlperf/logging.git \
+    git+https://github.com/mlcommons/logging.git@6.1.0-rc2 \
     --extra-index-url https://stable.repo.amd.com/rocm/pytorch/whl-next/
 
 # FBGEMM (GPU) — needs apt libtbb-dev

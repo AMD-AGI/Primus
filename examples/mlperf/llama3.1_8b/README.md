@@ -9,6 +9,7 @@ MLPerf-compliant LLama3.1 8B pretraining using Primus
 - **Model**: LLama3.1 8B (4096 hidden, 32 layers, 32 attention heads)
 - **Training**: 1.2M iterations, GBS=32, MBS=2, LR=8e-4
 - **Precision**: MXFP4
+- **Logging**: MLPerf Logging `6.1.0-rc2`, checked with training ruleset `6.1.0`
 - **Data**: C4 dataset (tokenized)
 
 

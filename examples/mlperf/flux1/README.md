@@ -2,7 +2,8 @@
 
 This recipe runs FLUX.1-Schnell on MI355X GPUs with the in-tree `diffusion`
 backend. The defaults enable tensorwise FP8 and target the MLPerf validation
-loss threshold of `0.586`.
+loss threshold of `0.586`. Logs use MLPerf Logging `6.1.0-rc2` and the
+training `6.1.0` ruleset.
 
 ## Docker image
 

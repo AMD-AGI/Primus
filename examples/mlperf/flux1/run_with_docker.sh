@@ -55,11 +55,19 @@ docker run --rm --init --privileged \
   -e MLPERF_ENABLE="${MLPERF_ENABLE:-true}" \
   -e MLPERF_CLEAR_CACHES="${MLPERF_CLEAR_CACHES:-true}" \
   -e MLLOG_OUTPUT_FILE="${MLLOG_OUTPUT_FILE:-/output/flux_mlperf/mlperf_compliance.log}" \
+  -e MLLOG_SUBMISSION_ORG="${MLLOG_SUBMISSION_ORG:-AMD}" \
+  -e MLLOG_SUBMISSION_PLATFORM="${MLLOG_SUBMISSION_PLATFORM:-MI355X}" \
+  -e MLLOG_CONFIG_FILENAME="${MLLOG_CONFIG_FILENAME:-$(basename "$CONFIG")}" \
+  -e MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR="${MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR:-fp8}" \
+  -e MLLOG_LOWEST_NUMERICAL_PRECISION_ATTN="${MLLOG_LOWEST_NUMERICAL_PRECISION_ATTN:-bfloat16}" \
+  -e MLLOG_LOWEST_NUMERICAL_PRECISION_COMM="${MLLOG_LOWEST_NUMERICAL_PRECISION_COMM:-bfloat16}" \
   -e TARGET_ACCURACY="${TARGET_ACCURACY:-0.586}" \
   -e VAL_CHECK_INTERVAL="${VAL_CHECK_INTERVAL:-262144}" \
   -e SEED="${SEED:-10007}" \
   "$DOCKER_IMAGE" bash -c '
     set -euo pipefail
+    pip install -q --upgrade \
+      "git+https://github.com/mlcommons/logging.git@6.1.0-rc2"
     export MLLOG_OUTPUT_FILE=${MLLOG_OUTPUT_FILE:-$OUTPUT_DIR/mlperf_compliance.log}
     mkdir -p "$OUTPUT_DIR"
     if [[ "${MLPERF_CLEAR_CACHES:-true}" == "true" ]]; then

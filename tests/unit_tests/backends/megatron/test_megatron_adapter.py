@@ -19,7 +19,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from primus.backends.megatron.megatron_adapter import MegatronAdapter
+from primus.backends.megatron.megatron_adapter import (
+    MegatronAdapter,
+    _patch_primus_mllog_for_v61,
+)
 from primus.backends.megatron.megatron_sft_trainer import MegatronSFTTrainer
 
 
@@ -155,6 +158,34 @@ class TestMegatronAdapterTrainerLoading:
             adapter.load_trainer_class(stage="invalid_stage")
 
         assert "backend trainer not registered" in str(exc_info.value)
+
+    def test_v61_logger_patch_adds_required_precision_disclosures(self, monkeypatch):
+        import sys
+        import types
+
+        class FakeMLPerfLogger:
+            def extract_mlperf_configs(self, args):
+                return {
+                    "global_batch_size": args.global_batch_size,
+                    "lowest_numerical_precision_linear": "legacy-key",
+                }
+
+        fake_package = types.ModuleType("primus_mllog")
+        fake_logger_module = types.ModuleType("primus_mllog.mlperf_logger")
+        fake_logger_module.MLPerfLogger = FakeMLPerfLogger
+        monkeypatch.setitem(sys.modules, "primus_mllog", fake_package)
+        monkeypatch.setitem(sys.modules, "primus_mllog.mlperf_logger", fake_logger_module)
+        monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR", "mxfp4")
+        monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_ATTN", "bfloat16")
+        monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_COMM", "bfloat16")
+
+        _patch_primus_mllog_for_v61()
+        configs = FakeMLPerfLogger().extract_mlperf_configs(SimpleNamespace(global_batch_size=32))
+
+        assert "lowest_numerical_precision_linear" not in configs
+        assert configs["lowest_numerical_precision_in_linear"] == "mxfp4"
+        assert configs["lowest_numerical_precision_in_attn"] == "bfloat16"
+        assert configs["lowest_numerical_precision_in_comm"] == "bfloat16"
 
 
 class TestMegatronAdapterDynamicTrainerLoading:

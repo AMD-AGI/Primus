@@ -499,6 +499,35 @@ class BaseWanTrainer:
             key=c.SUBMISSION_STATUS,
             value=os.getenv("MLLOG_SUBMISSION_STATUS", "onprem"),
         )
+        disclosures = (
+            (
+                "LOWEST_NUMERICAL_PRECISION_IN_LINEAR",
+                "lowest_numerical_precision_in_linear",
+                os.getenv("MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR", "fp8"),
+            ),
+            (
+                "LOWEST_NUMERICAL_PRECISION_IN_ATTN",
+                "lowest_numerical_precision_in_attn",
+                os.getenv("MLLOG_LOWEST_NUMERICAL_PRECISION_ATTN", "bfloat16"),
+            ),
+            (
+                "LOWEST_NUMERICAL_PRECISION_IN_COMM",
+                "lowest_numerical_precision_in_comm",
+                os.getenv("MLLOG_LOWEST_NUMERICAL_PRECISION_COMM", "bfloat16"),
+            ),
+            ("TENSOR_PARALLELISM", "tensor_parallelism", 1),
+            ("PIPELINE_PARALLELISM", "pipeline_parallelism", 1),
+            ("CONTEXT_PARALLELISM", "context_parallelism", 1),
+            ("EXPERT_PARALLELISM", "expert_parallelism", 1),
+            ("MICRO_BATCH_SIZE", "micro_batch_size", self.per_device_train_batch_size),
+            (
+                "CONFIG_FILENAME",
+                "config_filename",
+                os.getenv("MLLOG_CONFIG_FILENAME", "flux.1_schnell_t2i-pretrain.yaml"),
+            ),
+        )
+        for constant_name, fallback_key, value in disclosures:
+            self.mlperf_logger.event(key=getattr(c, constant_name, fallback_key), value=value)
         self.mlperf_logger.event(
             key=c.TRAIN_SAMPLES,
             value=int(self.args.get("mlperf_train_samples", 1099776)),

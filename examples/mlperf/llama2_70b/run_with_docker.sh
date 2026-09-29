@@ -37,7 +37,7 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${CONT_NAME:=mlperf_llama2_70b_lora_primus}"
 : "${CLEAR_CACHES:=0}"
 : "${CHECK_COMPLIANCE:=0}"
-: "${MLPERF_RULESET:=6.0.0}"
+: "${MLPERF_RULESET:=6.1.0}"
 : "${DATESTAMP:=$(date +'%y%m%d%H%M%S')}"
 : "${INTERACTIVE:=0}"
 : "${SUBMISSION_QUIET:=0}"
@@ -219,6 +219,8 @@ docker exec "${_setup_env[@]}" "${_cont_name}" bash -lc "
 set -e
 source /opt/venv/bin/activate
 pip install -q -e '${_primus_mount}' --no-deps 2>/dev/null || true
+pip install -q --upgrade \
+    'git+https://github.com/mlcommons/logging.git@6.1.0-rc2'
 echo '[INFO] Container Primus editable install complete.'
 "
 

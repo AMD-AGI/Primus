@@ -143,6 +143,51 @@ class FluxMLPerfLogger:
     def log_hyperparams(self, args):
         if int(os.environ.get("RANK", "0")) != 0:
             return
+        disclosures = (
+            (
+                "LOWEST_NUMERICAL_PRECISION_IN_LINEAR",
+                "lowest_numerical_precision_in_linear",
+                os.environ.get("MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR", "fp8"),
+            ),
+            (
+                "LOWEST_NUMERICAL_PRECISION_IN_ATTN",
+                "lowest_numerical_precision_in_attn",
+                os.environ.get("MLLOG_LOWEST_NUMERICAL_PRECISION_ATTN", "bfloat16"),
+            ),
+            (
+                "LOWEST_NUMERICAL_PRECISION_IN_COMM",
+                "lowest_numerical_precision_in_comm",
+                os.environ.get("MLLOG_LOWEST_NUMERICAL_PRECISION_COMM", "bfloat16"),
+            ),
+            (
+                "TENSOR_PARALLELISM",
+                "tensor_parallelism",
+                getattr(args, "tensor_model_parallel_size", 1),
+            ),
+            (
+                "PIPELINE_PARALLELISM",
+                "pipeline_parallelism",
+                getattr(args, "pipeline_model_parallel_size", 1),
+            ),
+            (
+                "CONTEXT_PARALLELISM",
+                "context_parallelism",
+                getattr(args, "context_parallel_size", 1),
+            ),
+            (
+                "EXPERT_PARALLELISM",
+                "expert_parallelism",
+                getattr(args, "expert_model_parallel_size", 1),
+            ),
+            ("MICRO_BATCH_SIZE", "micro_batch_size", self.mbs),
+            (
+                "CONFIG_FILENAME",
+                "config_filename",
+                os.environ.get("MLLOG_CONFIG_FILENAME", "flux_mlperf.yaml"),
+            ),
+        )
+        for constant_name, fallback_key, value in disclosures:
+            self._event(key=getattr(self._constants, constant_name, fallback_key), value=value)
         self._event(key=self._constants.GLOBAL_BATCH_SIZE, value=self.gbs)
         self._event(
             key=self._constants.TRAIN_SAMPLES,

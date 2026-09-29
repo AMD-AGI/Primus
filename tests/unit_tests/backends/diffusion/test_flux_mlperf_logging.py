@@ -103,6 +103,35 @@ def test_mlperf_logs_configured_base_lr_before_warmup():
         if kind == "event" and record["key"] == "opt_base_learning_rate"
     ]
     assert base_lr == [2.0e-4]
+
+    disclosures = {
+        record["key"]: record["value"]
+        for kind, record in trainer.mlperf_logger.records
+        if kind == "event"
+        and record["key"]
+        in {
+            "lowest_numerical_precision_in_linear",
+            "lowest_numerical_precision_in_attn",
+            "lowest_numerical_precision_in_comm",
+            "tensor_parallelism",
+            "pipeline_parallelism",
+            "context_parallelism",
+            "expert_parallelism",
+            "micro_batch_size",
+            "config_filename",
+        }
+    }
+    assert disclosures == {
+        "lowest_numerical_precision_in_linear": "fp8",
+        "lowest_numerical_precision_in_attn": "bfloat16",
+        "lowest_numerical_precision_in_comm": "bfloat16",
+        "tensor_parallelism": 1,
+        "pipeline_parallelism": 1,
+        "context_parallelism": 1,
+        "expert_parallelism": 1,
+        "micro_batch_size": 64,
+        "config_filename": "flux.1_schnell_t2i-pretrain.yaml",
+    }
     assert trainer.mlperf_logger.records[-1] == ("start", {"key": "init_start"})
 
 

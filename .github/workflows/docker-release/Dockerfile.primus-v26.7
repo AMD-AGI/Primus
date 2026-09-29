@@ -500,7 +500,7 @@ RUN pip install --no-deps torchrec \
         tensordict \
         iopath \
         torchmetrics==1.0.3 \
-        git+https://github.com/mlperf/logging.git \
+        git+https://github.com/mlcommons/logging.git@6.1.0-rc2 \
         --extra-index-url https://stable.repo.amd.com/rocm/pytorch/whl-next/ \
     && rm -rf /root/.cache
 

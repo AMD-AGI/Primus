@@ -410,11 +410,32 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
                 pipeline_model_parallel_size=pp,
                 context_parallel_size=int(os.getenv("MLLOG_CONTEXT_PARALLELISM", "1")),
                 config_filename=os.getenv("MLLOG_CONFIG_FILENAME", ""),
-                lowest_numerical_precision_linear=os.getenv(
-                    "MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR", "mxfp4"
-                ),
             )
             _sft_logger.log_init_params(init_cfg)
+            from mlperf_logging.mllog import constants as mllog_constants
+
+            precision_disclosures = (
+                (
+                    "LOWEST_NUMERICAL_PRECISION_IN_LINEAR",
+                    "lowest_numerical_precision_in_linear",
+                    os.getenv("MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR", "mxfp4"),
+                ),
+                (
+                    "LOWEST_NUMERICAL_PRECISION_IN_ATTN",
+                    "lowest_numerical_precision_in_attn",
+                    os.getenv("MLLOG_LOWEST_NUMERICAL_PRECISION_ATTN", "bfloat16"),
+                ),
+                (
+                    "LOWEST_NUMERICAL_PRECISION_IN_COMM",
+                    "lowest_numerical_precision_in_comm",
+                    os.getenv("MLLOG_LOWEST_NUMERICAL_PRECISION_COMM", "bfloat16"),
+                ),
+            )
+            for constant_name, fallback_key, value in precision_disclosures:
+                _sft_logger._logger.log_event(
+                    key=getattr(mllog_constants, constant_name, fallback_key),
+                    value=value,
+                )
         except Exception as exc:
             _orig_log_rank_0(f"MLPerf logging init failed ({type(exc).__name__}: {exc}) — disabled")
             _sft_logger = None

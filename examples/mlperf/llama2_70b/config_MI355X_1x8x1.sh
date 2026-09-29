@@ -1,5 +1,5 @@
 #!/bin/bash
-# MLPerf 6.0 environment for Llama2-70B LoRA on MI355X (8 GPUs, 1 node).
+# MLPerf 6.1 environment for Llama2-70B LoRA on MI355X (8 GPUs, 1 node).
 # Source before run_and_time.sh, then from ${PRIMUS_PATH}:
 #   ./primus-cli direct --log_file /results/logs/log_*.txt -- train posttrain --config "${EXP}"
 
@@ -108,6 +108,8 @@ export MLLOG_MICRO_BATCH_SIZE=1
 MLLOG_CONFIG_FILENAME=$(basename "${BASH_SOURCE[0]}")
 export MLLOG_CONFIG_FILENAME
 export MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR=mxfp4
+export MLLOG_LOWEST_NUMERICAL_PRECISION_ATTN=bfloat16
+export MLLOG_LOWEST_NUMERICAL_PRECISION_COMM=bfloat16
 
 export TP_COMM_OVERLAP=False
 export MC_TP_OVERLAP_AG=False

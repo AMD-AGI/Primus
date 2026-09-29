@@ -11,6 +11,7 @@ using Primus. The layout matches `examples/mlperf/llama3.1_8b`.
 - **Training**: 1.2M iteration ceiling, GBS=32, MBS=4, LR=8e-4
 - **Default precision**: FP8 + Turbo attention (`gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml`)
 - **Optional precision**: MXFP4 grouped GEMM, QKVO BF16, weight de-oscillation
+- **Logging**: MLPerf Logging `6.1.0-rc2`, checked with training ruleset `6.1.0`
 - **Data**: C4 dataset (tokenized, same as Llama 3.1 8B)
 
 ### Data

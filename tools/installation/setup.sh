@@ -790,7 +790,7 @@ stage_torchrec() {
     log "Installing torchrec stack (optional)"
     pipi --no-deps torchrec
     pipi tensordict iopath torchmetrics==1.0.3 \
-        "git+https://github.com/mlperf/logging.git" \
+        "git+https://github.com/mlcommons/logging.git@6.1.0-rc2" \
         --extra-index-url "$TORCH_INDEX"
 }
 
