@@ -123,6 +123,30 @@ def describe_attention_path(config, fp8_attention: bool) -> str:
     return "local, packed thd (Primus-Turbo flash_attn_varlen_func)"
 
 
+def describe_linear_precision(config) -> str:
+    """Name the precision the WAN block linears will run in."""
+    if getattr(config, "fp4", None):
+        precision = f"MXFP4 ({config.fp4_recipe})"
+    elif getattr(config, "fp8", None):
+        precision = f"FP8 {config.fp8} ({getattr(config.fp8_recipe, 'value', config.fp8_recipe)} recipe)"
+    else:
+        return "bf16"
+    if getattr(config, "sensitive_layers_enabled", False):
+        precision += (
+            f", first {config.sensitive_layers_start} / last {config.sensitive_layers_end} "
+            f"blocks in {config.sensitive_layer_precision}"
+        )
+    return precision
+
+
+def block_linear_types(model) -> list:
+    """Class names of the parallel linears a built model holds.
+
+    The config says which precision was asked for; this is what was built.
+    """
+    return sorted({type(m).__name__ for m in model.modules() if type(m).__name__.endswith("ParallelLinear")})
+
+
 class WanPretrainTrainer(DiffusionPretrainTrainer):
     """Trainer for WAN 2.1 / 2.2 video diffusion pre-training.
 
@@ -179,6 +203,7 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
             self.wan_config, bool(getattr(params, "enable_turbo_attention_float8", False))
         )
         log_rank_0(f"WAN trainer: attention path is {attention_path}")
+        log_rank_0(f"WAN trainer: linear precision is {describe_linear_precision(self.wan_config)}")
 
         window = (
             self.wan_config.timestep_window_min,
@@ -286,6 +311,7 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
 
         total_params = sum(p.numel() for p in model.parameters())
         log_rank_0(f"Total parameters: {total_params / 1e9:.2f}B")
+        log_rank_0(f"WAN block linears: {', '.join(block_linear_types(model))}")
         log_rank_0("=" * 80)
         return model
 
@@ -348,6 +374,15 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
 
         cfg.update(
             {
+                "sensitive_layers_enabled": getattr(params, "sensitive_layers_enabled", False),
+                "sensitive_layers_start": getattr(params, "sensitive_layers_start", 0),
+                "sensitive_layers_end": getattr(params, "sensitive_layers_end", 0),
+                "sensitive_layer_precision": getattr(params, "sensitive_layer_precision", "bf16"),
+            }
+        )
+
+        cfg.update(
+            {
                 "recompute_granularity": getattr(params, "recompute_granularity", None),
                 "recompute_method": getattr(params, "recompute_method", None),
                 "recompute_num_layers": getattr(params, "recompute_num_layers", None),
@@ -381,6 +416,41 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
                     "gradient_accumulation_fusion": False,
                 }
             )
+
+        # FP8, local transformer_impl only: the fields the Primus-Turbo Float8
+        # local linears and the delayed-scaling update read.
+        fp8 = getattr(params, "fp8", None)
+        if fp8:
+            cfg.update(
+                {
+                    "fp8": fp8,
+                    "fp8_recipe": getattr(params, "fp8_recipe", "delayed"),
+                    "fp8_margin": getattr(params, "fp8_margin", 0),
+                    "fp8_amax_history_len": getattr(params, "fp8_amax_history_len", 1),
+                    "fp8_amax_compute_algo": getattr(params, "fp8_amax_compute_algo", "most_recent"),
+                    "fp8_wgrad": getattr(params, "fp8_wgrad", True),
+                    "fp8_scaling_strategy": getattr(params, "fp8_scaling_strategy", "dynamic"),
+                    "fp8_force_nt_layout": getattr(params, "fp8_force_nt_layout", False),
+                    "fp8_reduce_amax": getattr(params, "fp8_reduce_amax", False),
+                    # The Float8 local linears reject grad-accum fusion as well.
+                    "gradient_accumulation_fusion": False,
+                }
+            )
+            # The delayed-scaling update seeds its weight amaxes from every
+            # Float8 linear's weight before the first step, and Megatron-FSDP's
+            # parameter sharding leaves those weights empty outside forward.
+            delayed = cfg["fp8_recipe"] == "delayed" or cfg["fp8_scaling_strategy"] == "delayed"
+            if (
+                delayed
+                and getattr(params, "use_megatron_fsdp", False)
+                and getattr(params, "data_parallel_sharding_strategy", None) == "optim_grads_params"
+            ):
+                raise ValueError(
+                    "delayed FP8 scaling does not work with Megatron-FSDP "
+                    "data_parallel_sharding_strategy=optim_grads_params; use "
+                    "fp8_recipe: tensorwise with fp8_scaling_strategy: dynamic, or "
+                    "stop sharding the parameters"
+                )
 
         if getattr(params, "use_fsdp2_fp32_param_optimizer", False):
             cfg["params_dtype"] = torch.float32

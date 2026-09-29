@@ -258,9 +258,18 @@ class WanConfig(BaseDiffusionConfig):
                 f"transformer_impl={self.transformer_impl!r} always packs thd, so leave it false"
             )
 
-        # MXFP4 and FP8 are only wired into the TE-free local linears.
+        # MXFP4 and FP8 are only wired into the TE-free local linears. The TE
+        # linears quantize only inside an FP8/FP4 autocast, which the WAN
+        # forward never enters, so on the TE path they would silently run bf16.
         if getattr(self, "fp4", None) and self.transformer_impl != "local":
             raise ValueError("fp4 (MXFP4) on WAN requires transformer_impl='local'")
+        if self.fp8 and self.transformer_impl != "local":
+            raise ValueError("fp8 on WAN requires transformer_impl='local'")
+
+        # Only the MXFP4 backend has a separate sensitive-layer backend; under
+        # FP8 or bf16 the first and last blocks would match all the others.
+        if self.sensitive_layers_enabled and not getattr(self, "fp4", None):
+            raise ValueError("sensitive_layers_enabled on WAN keeps blocks out of MXFP4, so it needs fp4 set")
 
         # Strategy A: no tensor parallelism for the WAN backbone. (PP is
         # rejected by BaseDiffusionConfig for every diffusion model.)
