@@ -1900,6 +1900,21 @@ class MXFP6MLPProjFunction(torch.autograd.Function):
         return grad_x, grad_w1, grad_b1, grad_w2, grad_o, grad_wp, grad_b2, None, None, None
 
 
+def _mlp_proj_eligible(mlp, proj):
+    """Whether a single block's MLP and out-projection can run as one shared-pack Function."""
+    if not gates().shared_grad_pack:
+        return False
+    if not getattr(mlp, "_fused_epilogue", False):
+        return False
+    if not isinstance(proj, MXFP6RowParallelLinear) or proj.bias is not None:
+        return False
+    if getattr(proj, "_backward_is_fp8", False) or proj._fuse_wgrad_accum != mlp.linear_fc1._fuse_wgrad_accum:
+        return False
+    if proj._weight_is_fp4 != _resolve_weight_is_fp4(mlp.config):
+        return False
+    return True
+
+
 def mlp_proj_shared(mlp, proj, x, o):
     """Run a single block's MLP and out-projection as one MXFP6MLPProjFunction.
 
@@ -1907,15 +1922,7 @@ def mlp_proj_shared(mlp, proj, x, o):
     None when the pair is not eligible -- the caller then runs them separately, as before.
     The caller guarantees ``mlp_out`` and ``proj_out`` are only summed.
     """
-    if not gates().shared_grad_pack:
-        return None
-    if not getattr(mlp, "_fused_epilogue", False):
-        return None
-    if not isinstance(proj, MXFP6RowParallelLinear) or proj.bias is not None:
-        return None
-    if getattr(proj, "_backward_is_fp8", False) or proj._fuse_wgrad_accum != mlp.linear_fc1._fuse_wgrad_accum:
-        return None
-    if proj._weight_is_fp4 != _resolve_weight_is_fp4(mlp.config):
+    if not _mlp_proj_eligible(mlp, proj):
         return None
     fuse_wgrad_accum = mlp.linear_fc1._fuse_wgrad_accum
     b2 = mlp.linear_fc2.bias if gates().shared_grad_pack_bias else None
@@ -2252,3 +2259,145 @@ def grouped_mlp_enabled() -> bool:
     with the gate off that hoist must not happen at all.
     """
     return gates().grouped_mlp and _grouped_mlp_unavailable_reason() is None
+
+
+class MXFP6GatedMLPProjFunction(torch.autograd.Function):
+    """MXFP6MLPProjFunction with the single block's gate multiply moved inside it.
+
+    The block computes ``residual + gate * (mlp(norm) + b2 + proj(attn))``. With the multiply
+    outside, the gradient reaching the shared pack is ``gate * dy``, which Inductor
+    materialises only so the packer can read it back. Here the Function returns
+    ``gate * (mlp + b2 + proj)`` and its backward receives ``dy`` itself, which Turbo's GateMul
+    prologue multiplies by the gate while staging it for the pack.
+
+    Everything else autograd derived from the multiply and the bias add is written out below
+    as the same tensor ops it would have produced -- ``(dy * gate).sum((0, 1))`` for fc2's
+    bias and ``(dy * h).sum(0)`` for the gate. They stay plain ops rather than an opaque
+    kernel, so Inductor fuses them exactly as before (the lesson of scale_add's note).
+    ``h`` is saved for the gate's gradient, as autograd saved it for the same product.
+
+    Forward's arithmetic is the caller's expression verbatim, so Inductor fuses it into the
+    residual add as it did scale_add.
+    """
+
+    @staticmethod
+    def forward(x, w1, b1, w2, o, wp, b2, gate, fuse_wgrad_accum, grad_enabled, weight_is_fp4):
+        mlp = MXFP6MLPFunction.forward(x, w1, b1, w2, fuse_wgrad_accum, grad_enabled, weight_is_fp4)
+        proj = MXFP6LinearFunction.forward(
+            o, wp, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4
+        )
+        h = mlp[0] + b2 + proj[0]
+        # (gate * h, h, 9 MLP extras, 4 out-proj column blobs)
+        return (gate * h, h) + tuple(mlp[1:]) + tuple(proj[1:])
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        x, w1, b1, w2, o, wp, b2, gate, fuse_wgrad_accum, grad_enabled, weight_is_fp4 = inputs
+        if not grad_enabled:
+            return
+        ctx.fuse_wgrad_accum = fuse_wgrad_accum
+        ctx.weight_is_fp4 = weight_is_fp4
+        ctx.out_dtype = x.dtype
+        ctx.mlp_orig_shape = x.shape
+        ctx.m = x.numel() // x.shape[-1]
+        ctx.k = x.shape[-1]
+        ctx.f = w1.shape[0]
+        ctx.h = w2.shape[0]
+        ctx.proj_orig_shape = o.shape
+        ctx.pm = o.numel() // o.shape[-1]
+        ctx.pk = o.shape[-1]
+        ctx.pn = wp.shape[0]
+
+        h = output[1]
+        y1 = output[2]
+        mlp_blobs = tuple(output[3:11])
+        proj_blobs = tuple(output[11:15])
+        mlp_extra = (w1, w2) if fuse_wgrad_accum else ()
+        proj_extra = (wp,) if fuse_wgrad_accum else ()
+        ctx.n_mlp_saved = 2 + len(mlp_blobs) + len(mlp_extra)
+        ctx.save_for_backward(y1, b1, *mlp_blobs, *mlp_extra, *proj_blobs, *proj_extra, h, gate)
+        ctx.mark_non_differentiable(h, *mlp_blobs, *proj_blobs)
+
+    @staticmethod
+    def backward(ctx, dy, *_):
+        *saved, h, gate = ctx.saved_tensors
+        mlp_saved, proj_saved = tuple(saved[: ctx.n_mlp_saved]), tuple(saved[ctx.n_mlp_saved :])
+
+        if not dy.is_contiguous():
+            dy = dy.contiguous()
+        g2 = dy.reshape(-1, ctx.h)
+        # The pack of gate * dy, with the product formed in the packer.
+        *g_packed, _ = torch.ops.primus_turbo.quantize_mxfp6_gate_mul_impl(g2, gate, False)
+        g_packed = tuple(g_packed)
+        # What autograd derived from `gate * h` and `mlp + b2 + ...`, as the same ops.
+        grad_b2 = (dy * gate).sum((0, 1)) if ctx.needs_input_grad[6] else None
+        grad_gate = (dy * h).sum(0) if ctx.needs_input_grad[7] else None
+
+        # The backwards take the unpacked gradient for its shape only; the pack is supplied.
+        grad_x, grad_w1, grad_b1, grad_w2 = _mlp_backward(
+            mlp_saved,
+            dy,
+            ctx.m,
+            ctx.k,
+            ctx.f,
+            ctx.h,
+            ctx.out_dtype,
+            ctx.mlp_orig_shape,
+            ctx.fuse_wgrad_accum,
+            ctx.weight_is_fp4,
+            ctx.needs_input_grad[2],
+            g2_packed=g_packed,
+        )
+        grad_o, grad_wp, _ = _linear_mxfp6_backward(
+            proj_saved,
+            g2,
+            ctx.pm,
+            ctx.pn,
+            ctx.pk,
+            ctx.out_dtype,
+            ctx.proj_orig_shape,
+            ctx.fuse_wgrad_accum,
+            ctx.weight_is_fp4,
+            False,
+            g_packed=g_packed,
+        )
+        return grad_x, grad_w1, grad_b1, grad_w2, grad_o, grad_wp, grad_b2, grad_gate, None, None, None
+
+
+def mlp_proj_gated(mlp, proj, x, o, gate):
+    """``gate * (mlp(x) + mlp_bias + proj(o))`` as one MXFP6GatedMLPProjFunction, or None.
+
+    None when the gate is off, the pair is not eligible for the shared pack, or the gate's
+    batch is not a power of two (GateMul takes the batch index as the low bits of the row);
+    the caller then takes the shared or separate path as before. ``gate`` is ``[B, H]``,
+    broadcast over the sequence axis of ``x``'s ``[S, B, H]``.
+    """
+    if not gates().gate_mul_pack or not _mlp_proj_eligible(mlp, proj):
+        return None
+    if gates().shared_grad_pack_bias or mlp.linear_fc2.bias is None:
+        return None
+    b = gate.shape[0]
+    if gate.dim() != 2 or b & (b - 1) or x.dim() != 3 or x.shape[1] != b:
+        return None
+    if not hasattr(torch.ops.primus_turbo, "quantize_mxfp6_gate_mul_impl"):
+        return None
+    fuse_wgrad_accum = mlp.linear_fc1._fuse_wgrad_accum
+    if fuse_wgrad_accum:
+        claimed = [mlp.linear_fc1.weight, mlp.linear_fc2.weight, proj.weight]
+        if gates().fused_small_grads and mlp.linear_fc1.bias is not None:
+            claimed.append(mlp.linear_fc1.bias)
+        _claim_main_grad(*claimed)
+    out = MXFP6GatedMLPProjFunction.apply(
+        x,
+        mlp.linear_fc1.weight,
+        mlp.linear_fc1.bias,
+        mlp.linear_fc2.weight,
+        o,
+        proj.weight,
+        mlp.linear_fc2.bias,
+        gate,
+        fuse_wgrad_accum,
+        torch.is_grad_enabled(),
+        proj._weight_is_fp4,
+    )
+    return out[0]

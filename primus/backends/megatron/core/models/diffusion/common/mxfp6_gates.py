@@ -77,6 +77,10 @@ class Mxfp6Gates:
     # Joint block: both attention out-projections as one Function whose backward writes
     # the two dgrads into halves of one dO, removing autograd's slice-scatter reassembly.
     joint_proj: bool = False
+    # Single block, with shared_grad_pack: the gated residual's multiply moves inside the
+    # shared Function, whose backward packs dy with Turbo's GateMul prologue, so gate * dy
+    # is never materialised. Bit-identical.
+    gate_mul_pack: bool = False
 
     # --- norm / RoPE fusions ---------------------------------------------
     # Fuse QK-norm and RoPE into one kernel.

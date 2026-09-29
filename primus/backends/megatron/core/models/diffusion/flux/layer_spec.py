@@ -418,6 +418,7 @@ class FluxSingleTransformerBlock(TransformerLayer):
         shared = None
         if mxfp6_gates.gates().shared_grad_pack and hasattr(self.self_attention, "linear_proj"):
             from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+                mlp_proj_gated,
                 mlp_proj_shared,
             )
 
@@ -429,6 +430,13 @@ class FluxSingleTransformerBlock(TransformerLayer):
                 rotary_pos_emb=rotary_pos_emb,
                 skip_output_proj=True,
             )
+            # With gate_mul_pack the Function also owns the gate multiply, so its backward
+            # receives dy and never materialises gate * dy. Same expression as below.
+            gated = mlp_proj_gated(
+                self.mlp, self.self_attention.linear_proj, norm_hidden_states, core_attn_out, gate
+            )
+            if gated is not None:
+                return residual + gated, None
             shared = mlp_proj_shared(self.mlp, self.self_attention.linear_proj, norm_hidden_states, core_attn_out)
             if shared is None:
                 attention_output, attention_bias = self.self_attention.linear_proj(core_attn_out)
