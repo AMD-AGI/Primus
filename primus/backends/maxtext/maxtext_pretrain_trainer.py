@@ -28,12 +28,7 @@ import os
 from typing import Any, Dict, Optional
 
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.core.utils.module_utils import (
-    error_rank_0,
-    log_rank_0,
-    set_logging_rank,
-    warning_rank_0,
-)
+from primus.core.utils.module_utils import error_rank_0, log_rank_0, set_logging_rank, warning_rank_0
 
 # Primus-internal params that are not part of MaxText's config schema. MaxText
 # v26.4's pyconfig raises on unknown fields (v26.3 merely warns), so these must
@@ -113,10 +108,7 @@ class MaxTextPretrainTrainer(BaseTrainer):
 
         initialize, _, module_name = _resolve_maxtext_train()
 
-        from primus.backends.maxtext.argument_builder import (
-            export_params_to_yaml,
-            namespace_to_dict,
-        )
+        from primus.backends.maxtext.argument_builder import export_params_to_yaml, namespace_to_dict
 
         override_model_args = self._prepare_model_overrides()
         params_dict = namespace_to_dict(self.backend_args)
@@ -211,6 +203,20 @@ class MaxTextPretrainTrainer(BaseTrainer):
             flat_overrides[k] = v
 
         return flat_overrides
+
+    def setup_model_only(self):
+        """Resolve the config and bring up JAX, without training.
+
+        This is the hook projection's layer benchmark calls instead of
+        :meth:`init` + :meth:`train`.  For MaxText the two coincide: its
+        ``initialize()`` resolves hyperparameters and initializes the JAX
+        distributed runtime but builds no model and reads no data -- the model
+        is only constructed inside the training loop.  The benchmark builds the
+        layers it needs itself, from ``self.train_config``.
+        """
+        if self.train_config is None:
+            self.init()
+        return self.train_config
 
     # --------------------------------------------------------------------- #
     # Training entrypoint

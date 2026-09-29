@@ -378,9 +378,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
             List of communication operations with time and message size
         """
         from primus.core.projection.module_profilers import collective_model as cm
-        from primus.core.projection.module_profilers.collective_args import (
-            get_default_args,
-        )
+        from primus.core.projection.module_profilers.collective_args import get_default_args
 
         mp_config = self.config.model_parallel_config
         model_config = self.config.model_config

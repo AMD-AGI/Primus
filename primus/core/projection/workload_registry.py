@@ -78,14 +78,12 @@ def _ensure_builtins_registered() -> None:
     _ensure_builtins_registered._done = True
 
     # Language model -- the default; preserves historical behaviour.  TorchTitan
-    # pretrains the same dense/MoE transformer stack, so it shares the tree: what
-    # differs between the backends is how the config spells the model, which the
-    # framework config adapters settle before this point.
-    from primus.core.projection.module_profilers.language_model import (
-        get_language_model_profiler_spec,
-    )
+    # and MaxText (JAX) pretrain the same dense/MoE transformer stack, so they
+    # share the tree: what differs between the backends is how the config spells
+    # the model, which the framework config adapters settle before this point.
+    from primus.core.projection.module_profilers.language_model import get_language_model_profiler_spec
 
-    for alias in ("megatron", "torchtitan"):
+    for alias in ("megatron", "torchtitan", "maxtext", "jax"):
         register_workload(alias, get_language_model_profiler_spec)
 
     # DLRM-v4 (TorchRec / HSTU ranker), under every alias the config converter

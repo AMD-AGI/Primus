@@ -39,9 +39,7 @@ from primus.core.projection.bench_harness import (
 )
 from primus.core.projection.bench_harness.megatron import MegatronBenchAdapter
 from primus.core.projection.bench_harness.torchtitan import TorchTitanBenchAdapter
-from primus.core.projection.frameworks.torchtitan import (
-    torchtitan_apply_bench_overrides,
-)
+from primus.core.projection.frameworks.torchtitan import torchtitan_apply_bench_overrides
 
 HIDDEN = 128
 SEQ = 64

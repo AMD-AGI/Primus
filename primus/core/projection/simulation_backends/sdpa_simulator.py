@@ -51,10 +51,7 @@ import os
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from primus.core.projection.simulation_backends.base import (
-    SDPASimulationBackend,
-    SimulationResult,
-)
+from primus.core.projection.simulation_backends.base import SDPASimulationBackend, SimulationResult
 
 # =========================================================================
 # FAv3 kernel tile parameters
@@ -320,12 +317,8 @@ class SDPASimulator(SDPASimulationBackend):
         Raises:
             RuntimeError: If the selected GEMM backend is not available.
         """
-        from primus.core.projection.simulation_backends.base import (
-            get_gemm_backend_factory,
-        )
-        from primus.core.projection.simulation_backends.factory import (
-            _ensure_backends_discovered,
-        )
+        from primus.core.projection.simulation_backends.base import get_gemm_backend_factory
+        from primus.core.projection.simulation_backends.factory import _ensure_backends_discovered
 
         self._hw = hardware_spec or _get_hardware_spec(gpu_arch, gpu_clock_mhz)
         self._gpu_arch = gpu_arch
@@ -450,9 +443,7 @@ class SDPASimulator(SDPASimulationBackend):
         price the FAv3 tiles.  Returns the backend on success, or ``None`` if it
         is not available.
         """
-        from primus.core.projection.simulation_backends.base import (
-            get_gemm_backend_factory,
-        )
+        from primus.core.projection.simulation_backends.base import get_gemm_backend_factory
 
         is_rank_0 = int(os.getenv("RANK", "0")) == 0
         try:

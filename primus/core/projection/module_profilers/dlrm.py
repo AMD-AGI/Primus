@@ -24,14 +24,9 @@ from typing import List, Optional, Tuple
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.module_profilers.hstu import HSTULayerProfiler
-from primus.core.projection.module_profilers.sparse_embedding import (
-    SparseEmbeddingProfiler,
-)
+from primus.core.projection.module_profilers.sparse_embedding import SparseEmbeddingProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
-from primus.core.projection.simulation_backends.base import (
-    resolve_hbm_bytes_per_ms,
-    resolve_peak_tflops,
-)
+from primus.core.projection.simulation_backends.base import resolve_hbm_bytes_per_ms, resolve_peak_tflops
 from primus.core.projection.training_config import gemm_dtype_from_config
 
 # Extra fp32 optimizer-state words carried *per embedding row* (not per element).
@@ -237,10 +232,7 @@ class DLRMProfiler(BaseModuleProfiler):
         if world <= 1 or n_tables == 0 or dim == 0:
             return 0.0
         try:
-            from primus.core.projection.module_profilers import (
-                collective_args,
-                collective_model,
-            )
+            from primus.core.projection.module_profilers import collective_args, collective_model
 
             emb = self.sub_profilers.get("sparse_embedding") if self.sub_profilers else None
             rows_per_sample = 0

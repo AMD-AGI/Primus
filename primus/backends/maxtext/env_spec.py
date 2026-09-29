@@ -37,12 +37,7 @@ from __future__ import annotations
 import os
 from typing import List
 
-from primus.core.backend.env_registry import (
-    ARCH_GFX942,
-    ARCH_GFX950,
-    MODE_XLA_APPEND,
-    EnvVar,
-)
+from primus.core.backend.env_registry import ARCH_GFX942, ARCH_GFX950, MODE_XLA_APPEND, EnvVar
 
 
 def _build_xla_flags() -> str:

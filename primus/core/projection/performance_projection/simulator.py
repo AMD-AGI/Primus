@@ -15,10 +15,7 @@ except ImportError:
     plt = None  # plotext is optional, not currently used
 import yaml
 
-from primus.core.pipeline_parallel.scheduler.scheduler_node import (
-    FuncType,
-    SchedulerNode,
-)
+from primus.core.pipeline_parallel.scheduler.scheduler_node import FuncType, SchedulerNode
 
 
 class SchedulerSimulationRunner:

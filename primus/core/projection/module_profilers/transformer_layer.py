@@ -21,11 +21,7 @@ from .layer_norm import LayerNormProfiler
 from .moe_mlp import MoEMLPProfiler
 from .residual_add import ResidualAddProfiler
 from .router import RouterProfiler
-from .utils import (
-    _install_balanced_routing_patches,
-    _kernel_pad_enabled,
-    benchmark_layer,
-)
+from .utils import _install_balanced_routing_patches, _kernel_pad_enabled, benchmark_layer
 
 # ── Fallback HBM bandwidth for elementwise overhead estimation ──
 _FALLBACK_HBM_BW_GBPS = 5300.0  # MI300X default
@@ -199,9 +195,7 @@ def _deepep_overlap_efficiency(config) -> float:
     staging pushes the async overlap to 75/80/85%).  This adds only the
     ``use_turbo_deepep`` off-guard so the ladder itself is not duplicated.
     """
-    from primus.core.projection.performance_projection.projection import (
-        _get_deepep_overlap_efficiency,
-    )
+    from primus.core.projection.performance_projection.projection import _get_deepep_overlap_efficiency
 
     model_config = getattr(config, "model_config", config)
     if not getattr(model_config, "use_turbo_deepep", False):

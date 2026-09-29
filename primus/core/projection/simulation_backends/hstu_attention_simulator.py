@@ -24,10 +24,7 @@ import os
 from typing import Optional
 
 from primus.core.projection.simulation_backends.base import SimulationResult
-from primus.core.projection.simulation_backends.sdpa_simulator import (
-    GPUHardwareSpec,
-    SDPASimulator,
-)
+from primus.core.projection.simulation_backends.sdpa_simulator import GPUHardwareSpec, SDPASimulator
 
 # Default fused-epilogue throughputs (score elements processed per second,
 # chip-wide) for HSTU's SiLU-gate + relative-bias + U-gate work.  These are
