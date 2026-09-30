@@ -84,6 +84,9 @@ class Mxfp6Gates:
     # LN-modulate backward split over 16 sequence slices instead of 8 (twice the programs).
     # dx and dshift bit-identical; dscale's fp32 partial sums regroup.
     ln_bwd_ns16: bool = False
+    # AdaLN modulation linears write their weight gradient straight into main_grad
+    # (the GEMM's output is main_grad) instead of AccumulateGrad + the DDP hook's copy.
+    adaln_wgrad_main_grad: bool = False
 
     # --- norm / RoPE fusions ---------------------------------------------
     # Fuse QK-norm and RoPE into one kernel.

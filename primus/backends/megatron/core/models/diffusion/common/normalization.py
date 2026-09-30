@@ -1302,6 +1302,85 @@ class RMSNorm(nn.Module):
         return output * self.weight
 
 
+@torch.library.custom_op("primus::mm_into", mutates_args=("out",), device_types="cuda")
+def _mm_into(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor) -> None:
+    """``out = a @ b`` into a caller-owned buffer, opaque to Inductor.
+
+    Written as ``main_grad.copy_(a @ b)`` the compiled backward would keep the GEMM's own
+    output buffer and add a copy kernel -- the very copy this exists to remove. As a
+    mutating custom op, functionalization reinplaces it and the GEMM stores into ``out``.
+    """
+    torch.mm(a, b, out=out)
+
+
+@_mm_into.register_fake
+def _(a, b, out):
+    return None
+
+
+class AdaLNLinearFunction(torch.autograd.Function):
+    """The AdaLN modulation linear with its weight gradient stored into ``main_grad``.
+
+    Same ops as Megatron's ``LinearWithGradAccumulationAndAsyncCommunication`` at TP=1
+    (forward ``x @ w.T + b``; dgrad ``go @ w``; wgrad ``go.T @ x``; bias ``go.sum(0)``),
+    so the values are the ones autograd produced. Only the destination changes: the wgrad
+    GEMM writes ``weight.main_grad`` and the bias reduction writes ``bias.main_grad``,
+    which removes the AccumulateGrad hand-off and the DDP hook's ``main_grad.copy_``.
+
+    One microbatch per optimizer step is required (the store overwrites), the same rule
+    as ``_wgrad_into_main_grad``. The caller claims the params from the forward
+    (``_claim_adaln_main_grad``) for the dynamo reason given there.
+    """
+
+    @staticmethod
+    def forward(ctx, x, weight, bias):
+        ctx.save_for_backward(x, weight)
+        ctx.bias = bias
+        out = torch.matmul(x, weight.t())
+        if bias is not None:
+            out = out + bias
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, weight = ctx.saved_tensors
+        bias = ctx.bias
+        grad_input = grad_output.matmul(weight)
+        _mm_into(grad_output.t(), x, weight.main_grad)
+        grad_weight = torch.empty_like(weight)
+        grad_bias = None
+        if bias is not None:
+            bias.main_grad.copy_(grad_output.sum(dim=0).to(bias.main_grad.dtype))
+            grad_bias = torch.empty_like(bias)
+        return grad_input, grad_weight, grad_bias
+
+
+def _adaln_linear_usable(linear) -> bool:
+    """Whether AdaLNLinearFunction may replace this ColumnParallelLinear's forward."""
+    w = linear.weight
+    mg = getattr(w, "main_grad", None)
+    if not torch.is_grad_enabled() or mg is None or mg.dtype != w.dtype:
+        return False
+    if linear.bias is not None and getattr(linear.bias, "main_grad", None) is None:
+        return False
+    if getattr(linear, "tp_size", 1) != 1 and linear.tp_size is not None:
+        return False
+    try:
+        from megatron.core.num_microbatches_calculator import get_num_microbatches
+
+        return get_num_microbatches() == 1
+    except Exception:
+        return False
+
+
+def _claim_adaln_main_grad(*params) -> None:
+    """Mark params whose gradient the backward stores into main_grad (see
+    ``_claim_main_grad`` in primus_turbo_mxfp6_local for why this runs in the forward)."""
+    for p in params:
+        p.grad_added_to_main_grad = True
+        p.main_grad_initialized = True
+
+
 class AdaLN(MegatronModule):
     """
     Adaptive Layer Normalization for DiT (Diffusion Transformer).
@@ -1416,6 +1495,14 @@ class AdaLN(MegatronModule):
         Returns:
             Tuple of n_adaln_chunks tensors, each [B, hidden_size]
         """
+        linear = self.adaLN_modulation[-1]
+        if gates().adaln_wgrad_main_grad and _adaln_linear_usable(linear):
+            # The wgrad and bias grad land in main_grad directly.
+            _claim_adaln_main_grad(*(p for p in (linear.weight, linear.bias) if p is not None))
+            output = AdaLNLinearFunction.apply(
+                self.adaLN_modulation[0](timestep_emb), linear.weight, linear.bias
+            )
+            return output.chunk(self.n_adaln_chunks, dim=-1)
         output, bias = self.adaLN_modulation(timestep_emb)
         if bias is not None:
             output = output + bias
