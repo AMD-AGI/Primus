@@ -316,10 +316,27 @@ modules:
       # winner is not stable between runs, so leaving the tuner on moves the
       # step time a measurement is trying to read.
       mxfp6_norm_rope_pin: true
+      # Grouped MLP GEMM through a functional custom op, so torch.compile does
+      # not clone its live operands. Bit-identical.
+      mxfp6_grouped_gemm_functional: true
+      # Single block: MLP and out-proj as one Function packing their shared
+      # output gradient once. Bit-identical.
+      mxfp6_shared_grad_pack: true
+      # Single block: the LN-modulate backward sums its two incoming gradients
+      # while loading (Inductor post-grad pass). Bit-identical.
+      mxfp6_ln_bwd_fused_sum: true
+      # Joint block: both out-projections write one shared dO. Bit-identical.
+      mxfp6_joint_proj: true
+      # Single block, with mxfp6_shared_grad_pack: the gate multiply is formed
+      # in the gradient packer (Turbo GateMul prologue). Bit-identical.
+      mxfp6_gate_mul_pack: true
 
       # Clip gradients with one flat mul_ per contiguous run instead of the
       # chunked multi_tensor applier.
       flat_grad_clip: true
+      # Copy the next batch to the GPU on a side stream during the current step.
+      # Batches are identical; costs one extra batch of device memory.
+      cuda_data_prefetch: true
 
       empty_unused_memory_level: 0
 
