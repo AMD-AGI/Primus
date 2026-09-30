@@ -14,6 +14,11 @@ modules:
       wandb_project: "Primus_Pretrain"
       stderr_sink_level: DEBUG
 
+      # GSM8K indexed with the Gemma tokenizer shipped in Zyphra/ZAYA1-8B.
+      # Train split is the training blend; test split is validation.
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: /data/zaya1/ZAYA1-8B
+
       log_avg_skip_iterations: 1
       log_avg_reset_interval: 10
 
@@ -50,10 +55,12 @@ modules:
       overlap_param_gather: false
       gradient_accumulation_fusion: false
 
-      mock_data: true
-      train_data_path: null
-      valid_data_path: null
+      mock_data: false
+      train_data_path: "1 /data/zaya1/gsm8k_megatron/gsm8k_text_document"
+      valid_data_path: "1 /data/zaya1/gsm8k_megatron/gsm8k_valid_text_document"
       test_data_path: null
+      eval_interval: 100
+      eval_iters: 8
 
       finetune: false
       auto_continue_train: false
