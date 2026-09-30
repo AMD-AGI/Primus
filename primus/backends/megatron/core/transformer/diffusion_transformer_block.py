@@ -8,6 +8,7 @@ This module provides a specialized TransformerBlock for diffusion models that pr
 handles timestep embeddings and other conditioning parameters through gradient checkpointing.
 """
 
+from contextlib import nullcontext
 from typing import Optional, Union
 
 from megatron.core.inference.contexts import BaseInferenceContext
@@ -15,6 +16,36 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.utils import WrappedTensor
 from torch import Tensor
+
+
+def uses_per_layer_quantization_context(config) -> bool:
+    """Whether FP8/FP4 has to be entered per layer rather than around the stack.
+
+    Megatron keeps a first/last layer in bf16 by handing it ``nullcontext()``,
+    which cannot switch off an autocast that is already active around it. So
+    once ``first_last_layers_bf16`` is set, only per-layer contexts may be
+    active, as in Megatron's ``TransformerBlock`` (delayed scaling, the one
+    recipe that needs an outer context, is rejected with bf16 first/last
+    layers). The local spec quantizes inside its linears and enters none.
+    """
+    if getattr(config, "transformer_impl", None) == "local":
+        return False
+    if not (getattr(config, "fp8", None) or getattr(config, "fp4", None)):
+        return False
+    return bool(getattr(config, "first_last_layers_bf16", False))
+
+
+def layer_quantization_context(config, layer_number: int):
+    """FP8/FP4 context for the layer with 1-based ``layer_number``; bf16 layers get nullcontext."""
+    if config.fp8:
+        from megatron.core.fp8_utils import get_fp8_context
+
+        return get_fp8_context(config, layer_number - 1)
+    if config.fp4:
+        from megatron.core.fp4_utils import get_fp4_context
+
+        return get_fp4_context(config, layer_number - 1)
+    return nullcontext()
 
 
 class DiffusionTransformerBlock(TransformerBlock):
@@ -148,6 +179,7 @@ class DiffusionTransformerBlock(TransformerBlock):
                 # Process layers manually with conditioning
                 current_hidden = hidden_states
                 current_context = context
+                per_layer_quantization = uses_per_layer_quantization_context(self.config)
 
                 for layer in self.layers:
                     layer_kwargs = {
@@ -163,7 +195,13 @@ class DiffusionTransformerBlock(TransformerBlock):
                     # Add conditioning
                     layer_kwargs.update(conditioning_kwargs)
 
-                    layer_output = layer(**layer_kwargs)
+                    quantization_context = (
+                        layer_quantization_context(self.config, layer.layer_number)
+                        if per_layer_quantization
+                        else nullcontext()
+                    )
+                    with quantization_context:
+                        layer_output = layer(**layer_kwargs)
                     if isinstance(layer_output, tuple):
                         current_hidden, current_context = layer_output
                     else:
