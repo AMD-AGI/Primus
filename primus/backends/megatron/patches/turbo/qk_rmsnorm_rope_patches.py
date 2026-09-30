@@ -4,16 +4,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Opt-in GPT-OSS packed-QKV RMSNorm + RoPE integration.
+"""Opt-in GPT-OSS Q/K RMSNorm + RoPE integration.
 
 ``PRIMUS_FUSED_QK_RMSNORM_ROPE=1`` replaces the training-only sequence
 
     split packed QKV -> Q/K RMSNorm -> Q/K RoPE
 
-with Primus-Turbo's packed FlyDSL operator.  The patch is intentionally narrow:
-TP=1, self attention, SBHD, non-interleaved full RoPE, no packed sequences,
-and PrimusTurboRMSNorm for both Q and K.  Unsupported calls continue through
-the original Megatron path.
+with either Primus-Turbo's packed FlyDSL operator or AITER's two-channel RoPE
+operator.  ``PRIMUS_QK_RMSNORM_ROPE_BACKEND`` selects ``flydsl`` (default) or
+``aiter_2c``.  The patch is intentionally narrow: TP=1, self attention, SBHD,
+non-interleaved full RoPE, no packed sequences, and PrimusTurboRMSNorm for both
+Q and K.  Unsupported calls continue through the original Megatron path.
 """
 
 from __future__ import annotations
@@ -34,15 +35,46 @@ def _enabled(_ctx: PatchContext) -> bool:
     "megatron.turbo.qk_rmsnorm_rope",
     backend="megatron",
     phase="before_train",
-    description="Fuse GPT-OSS packed QKV split, Q/K RMSNorm, and RoPE with FlyDSL",
+    description="Select GPT-OSS FlyDSL fused QK path or AITER paired Q/K RoPE",
     condition=_enabled,
     priority=70,
 )
 def patch_qk_rmsnorm_rope(_ctx: PatchContext):
     import megatron.core.transformer.attention as attention_module
-    from primus_turbo.pytorch.ops.rope import fused_qkv_rmsnorm_rope
+    import torch
 
     from primus.backends.megatron.core.extensions.primus_turbo import PrimusTurboRMSNorm
+
+    backend = os.environ.get("PRIMUS_QK_RMSNORM_ROPE_BACKEND", "flydsl").strip().lower()
+    if backend not in ("flydsl", "aiter_2c"):
+        raise ValueError(
+            "PRIMUS_QK_RMSNORM_ROPE_BACKEND must be 'flydsl' or 'aiter_2c'; "
+            f"got {backend!r}"
+        )
+
+    if backend == "flydsl":
+        from primus_turbo.pytorch.ops.rope import fused_qkv_rmsnorm_rope
+    else:
+        from aiter.ops.rope import rope_2c_bwd, rope_2c_fwd
+
+        class _AiterRope2C(torch.autograd.Function):
+            """Autograd bridge for AITER's paired Q/K training kernels."""
+
+            @staticmethod
+            def forward(ctx, query, key, freqs):
+                if freqs.dtype != torch.float32:
+                    freqs = freqs.float()
+                query_out, key_out = rope_2c_fwd(query, key, freqs, 0, False, False)
+                ctx.save_for_backward(freqs)
+                return query_out, key_out
+
+            @staticmethod
+            def backward(ctx, grad_query, grad_key):
+                (freqs,) = ctx.saved_tensors
+                grad_query, grad_key = rope_2c_bwd(
+                    grad_query, grad_key, freqs, 0, False, False
+                )
+                return grad_query, grad_key, None
 
     if getattr(attention_module, "_primus_qk_rmsnorm_rope_installed", False):
         return
@@ -141,21 +173,35 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
                 split_qkv=split_qkv,
             )
 
-        mixed_qkv, split_sizes = original_get_qkv(
-            self,
-            hidden_states,
-            key_value_states=key_value_states,
-            output_gate=False,
-            split_qkv=False,
-        )
-        query, key, value = fused_qkv_rmsnorm_rope(
-            mixed_qkv,
-            self.q_layernorm.weight,
-            self.k_layernorm.weight,
-            freqs,
-            split_sizes,
-            self.q_layernorm.eps,
-        )
+        if backend == "flydsl":
+            mixed_qkv, split_sizes = original_get_qkv(
+                self,
+                hidden_states,
+                key_value_states=key_value_states,
+                output_gate=False,
+                split_qkv=False,
+            )
+            query, key, value = fused_qkv_rmsnorm_rope(
+                mixed_qkv,
+                self.q_layernorm.weight,
+                self.k_layernorm.weight,
+                freqs,
+                split_sizes,
+                self.q_layernorm.eps,
+            )
+            dispatch_shape = tuple(mixed_qkv.shape)
+            dispatch_detail = f"splits={list(split_sizes)}"
+        else:
+            query, key, value = original_get_qkv(
+                self,
+                hidden_states,
+                key_value_states=key_value_states,
+                output_gate=False,
+                split_qkv=True,
+            )
+            query, key = _AiterRope2C.apply(query, key, freqs)
+            dispatch_shape = (tuple(query.shape), tuple(key.shape))
+            dispatch_detail = "paired_qk=True"
         # The outer attention forward still visits its normal RoPE callsite.
         # Tensor-owned markers make exactly these two calls no-ops without
         # changing behavior for any other attention module or invocation.
@@ -164,8 +210,8 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
         if not getattr(self, "_primus_qk_rmsnorm_rope_seen", False):
             self._primus_qk_rmsnorm_rope_seen = True
             log_rank_0(
-                "[Patch:megatron.turbo.qk_rmsnorm_rope] First fused packed-QKV dispatch: "
-                f"shape={tuple(mixed_qkv.shape)} splits={list(split_sizes)}"
+                "[Patch:megatron.turbo.qk_rmsnorm_rope] First Q/K RoPE dispatch: "
+                f"backend={backend} shape={dispatch_shape} {dispatch_detail}"
             )
         return query, key, value
 
@@ -180,6 +226,6 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
     attention_module.apply_rotary_pos_emb = _apply_rotary_pos_emb
     attention_module._primus_qk_rmsnorm_rope_installed = True
     log_rank_0(
-        "[Patch:megatron.turbo.qk_rmsnorm_rope] Installed GPT-OSS FlyDSL "
-        "packed QKV + Q/K RMSNorm + RoPE fusion"
+        "[Patch:megatron.turbo.qk_rmsnorm_rope] Installed GPT-OSS Q/K RMSNorm + RoPE "
+        f"backend={backend}"
     )
