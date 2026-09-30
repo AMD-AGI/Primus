@@ -148,6 +148,23 @@ def block_linear_types(model) -> list:
     return sorted({type(m).__name__ for m in model.modules() if type(m).__name__.endswith("ParallelLinear")})
 
 
+def check_dual_expert_data_parallel(config, data_parallel_size: int) -> None:
+    """Reject the dual-expert model when data-parallel ranks could route apart.
+
+    ``Wan2_2`` routes each micro-batch on its own rank and skips an expert that
+    no sample reaches. Two ranks that route differently then issue different
+    Megatron-FSDP gathers, which hangs or, since both experts have the same
+    shapes, silently pairs the wrong ones.
+    """
+    if config.num_transformers == 2 and data_parallel_size > 1:
+        raise ValueError(
+            "num_transformers: 2 routes each rank's micro-batch on its own, so data-parallel "
+            "ranks can run different experts and issue mismatched collectives. Train each "
+            "WAN 2.2 expert as its own job (num_transformers: 1, stage: high_noise or "
+            f"low_noise), or run on one data-parallel rank (got {data_parallel_size})"
+        )
+
+
 class WanPretrainTrainer(DiffusionPretrainTrainer):
     """Trainer for WAN 2.1 / 2.2 video diffusion pre-training.
 
@@ -156,6 +173,7 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
           (default 5.0), ``scheduler_sigma_min`` / ``scheduler_sigma_max``.
         - ``loss_weighting``: ``diffsynth`` (default) or ``uniform``.
         - ``num_transformers`` (1 or 2) and ``boundary_ratio`` for WAN 2.2.
+          2 needs a data-parallel size of 1.
         - ``stage``: ``full`` / ``high_noise`` / ``low_noise``. Narrowing the
           stage derives the timestep window and the weight subfolder from
           ``boundary_ratio`` so the two cannot disagree.
@@ -292,12 +310,15 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
 
     def create_model(self, pre_process=True, post_process=True):
         """Build a Wan / Wan2_2 model from the YAML configuration."""
+        from megatron.core import parallel_state
+
         from primus.backends.megatron.core.models.diffusion.wan.model import Wan, Wan2_2
 
         log_rank_0("=" * 80)
         log_rank_0("Creating WAN model from YAML config")
 
         config = self.wan_config
+        check_dual_expert_data_parallel(config, parallel_state.get_data_parallel_world_size())
 
         if config.num_transformers == 2:
             model = Wan2_2(config=config)
