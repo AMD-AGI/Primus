@@ -7,8 +7,9 @@ Sensitive layers (``sensitive_layers_enabled``) must stay out of FP8/FP4.
 Megatron keeps a first/last layer in bf16 by giving it ``nullcontext()``, which
 cannot switch off an autocast already active around it. Flux used to wrap the
 whole transformer in one FP8/FP4 context on the TransformerEngine spec, so the
-sensitive layers were quantized like every other layer. These pin the per-layer
-contexts, the config rejections and, on GPU, what TE's linears see.
+sensitive layers were quantized like every other layer, and on the local spec
+FP8 built them with the Float8 linears. These pin the per-layer contexts, the
+config rejections, the local-spec backend, and, on GPU, what TE's linears see.
 """
 
 import contextlib
@@ -185,6 +186,53 @@ def test_stack_runners_still_build_without_sensitive_layers():
 def test_non_bf16_sensitive_precision_is_rejected_on_the_te_spec():
     with pytest.raises(ValueError, match="can only keep sensitive layers in bf16"):
         _te_config(**{**SENSITIVE, "sensitive_layer_precision": "tw_fp8"})
+
+
+# ----------------------------------------------------------------------------
+# Local spec: FP8 sensitive layers get the bf16 backend
+# ----------------------------------------------------------------------------
+
+
+class TestLocalSpecSensitiveBackend:
+    @pytest.fixture(autouse=True)
+    def setup_parallel(self, init_parallel_state):
+        pass
+
+    def test_fp8_sensitive_layers_use_the_bf16_linears(self):
+        from megatron.core.tensor_parallel import ColumnParallelLinear
+
+        from primus.backends.megatron.core.extensions.primus_turbo_float8_local import (
+            Float8ColumnParallelLinear,
+        )
+        from primus.backends.megatron.core.models.diffusion.flux.layer_spec import (
+            get_flux_layer_spec,
+        )
+
+        config = _te_config(transformer_impl="local", **SENSITIVE)
+        specs = get_flux_layer_spec(config, backend=None).layer_specs
+
+        qkv = [spec.submodules.self_attention.submodules.linear_qkv for spec in specs]
+        assert qkv == [
+            ColumnParallelLinear,
+            Float8ColumnParallelLinear,
+            Float8ColumnParallelLinear,
+            ColumnParallelLinear,
+        ]
+
+    def test_fp8_without_sensitive_layers_stays_float8_throughout(self):
+        from primus.backends.megatron.core.extensions.primus_turbo_float8_local import (
+            Float8ColumnParallelLinear,
+        )
+        from primus.backends.megatron.core.models.diffusion.flux.layer_spec import (
+            get_flux_layer_spec,
+        )
+
+        specs = get_flux_layer_spec(_te_config(transformer_impl="local"), backend=None).layer_specs
+
+        assert all(
+            spec.submodules.self_attention.submodules.linear_qkv is Float8ColumnParallelLinear
+            for spec in specs
+        )
 
 
 # ----------------------------------------------------------------------------
