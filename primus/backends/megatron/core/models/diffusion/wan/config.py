@@ -279,6 +279,14 @@ class WanConfig(BaseDiffusionConfig):
                 f"got {self.tensor_model_parallel_size}"
             )
 
+        # Nothing splits the video sequence across context-parallel ranks, but
+        # PrimusTurboLocalAttention switches to its context-parallel kernel above 1.
+        if self.context_parallel_size != 1:
+            raise ValueError(
+                "WAN does not split the sequence across context-parallel ranks; "
+                f"set context_parallel_size: 1 (got {self.context_parallel_size})"
+            )
+
     def get_num_layers(self) -> int:
         """Number of DiT blocks in one transformer."""
         return self.num_dit_layers

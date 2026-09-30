@@ -16,8 +16,9 @@ Mirrors :class:`FluxPretrainTrainer` but specialized for the WAN family:
     - Loss: :func:`compute_weighted_flow_matching_loss`.
     - Task encoder: :class:`EncodedWanTaskEncoder` for the pre-encoded path.
 
-WAN runs at ``tensor_model_parallel_size=1`` and
-``pipeline_model_parallel_size=1``; ``WanConfig.validate()`` enforces both.
+WAN runs at ``tensor_model_parallel_size=1``,
+``pipeline_model_parallel_size=1`` and ``context_parallel_size=1``;
+``WanConfig.validate()`` enforces all three.
 """
 
 import os
