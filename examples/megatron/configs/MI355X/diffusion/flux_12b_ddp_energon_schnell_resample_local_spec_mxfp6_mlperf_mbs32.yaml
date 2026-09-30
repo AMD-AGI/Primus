@@ -337,6 +337,12 @@ modules:
       # Copy the next batch to the GPU on a side stream during the current step.
       # Batches are identical; costs one extra batch of device memory.
       cuda_data_prefetch: true
+      # Cap the data-parallel collectives (grad reduce-scatter, param all-gather)
+      # at 64 RCCL channels. Each channel holds a CU for the collective's
+      # lifetime; beyond what the collective needs they only slow the overlapped
+      # GEMMs. Other process groups keep RCCL's defaults. Path is relative to
+      # the Primus root (the launch directory).
+      nccl_communicator_config_path: examples/megatron/configs/MI355X/diffusion/nccl_comm_dp_max_ctas64.yaml
 
       empty_unused_memory_level: 0
 

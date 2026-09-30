@@ -1,0 +1,13 @@
+# Per-communicator RCCL settings for Megatron (nccl_communicator_config_path).
+#
+# Caps the data-parallel groups -- the DDP gradient reduce-scatter and the distributed
+# optimizer's parameter all-gather -- at 64 CTAs (channels). Each channel is a CU-resident
+# workgroup for the collective's lifetime, and the MXFP6 GEMMs run one workgroup per CU, so
+# every channel above what the collective needs is a CU taken from overlapped compute. Other
+# groups keep RCCL's defaults. Stays within a 64-channel multi-node limit.
+dp_cp:
+  max_ctas: 64
+intra_dp_cp:
+  max_ctas: 64
+dp:
+  max_ctas: 64
