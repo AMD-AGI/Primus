@@ -504,9 +504,7 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
             qkv_skip, gamma, eps = qkv_params
             if getattr(qkv_skip, "zero_centered_gamma", False):
                 gamma = gamma + 1
-            fused_qkv = _run_qkv_rmsnorm_mxfp4(
-                prev_mlp_out, prev_residual, gamma, eps, qkv_skip
-            )
+            fused_qkv = _run_qkv_rmsnorm_mxfp4(prev_mlp_out, prev_residual, gamma, eps, qkv_skip)
             if fused_qkv is not None:
                 input_layernorm_output, hidden_states = fused_qkv
                 preq = None
@@ -524,9 +522,7 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
             if getattr(in_ln, "zero_centered_gamma", False):
                 gamma = gamma + 1
             linear_qkv = getattr(layer.self_attention, "linear_qkv", None)
-            fused_qkv = _run_qkv_rmsnorm_mxfp4(
-                prev_mlp_out, prev_residual, gamma, in_ln.eps, linear_qkv
-            )
+            fused_qkv = _run_qkv_rmsnorm_mxfp4(prev_mlp_out, prev_residual, gamma, in_ln.eps, linear_qkv)
             if fused_qkv is not None:
                 input_layernorm_output, hidden_states = fused_qkv
                 preq = None

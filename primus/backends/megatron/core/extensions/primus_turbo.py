@@ -189,8 +189,7 @@ def _bridge_activation_grad(
     global _LOGGED_FUSED_MXFP4_CONSUMER
     if not _LOGGED_FUSED_MXFP4_CONSUMER:
         warning_rank_0(
-            "First fused RMSNorm MXFP4 activation consumed by QKV GEMM: "
-            f"shape={tuple(carrier.shape)}"
+            "First fused RMSNorm MXFP4 activation consumed by QKV GEMM: " f"shape={tuple(carrier.shape)}"
         )
         _LOGGED_FUSED_MXFP4_CONSUMER = True
 
@@ -1655,9 +1654,9 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         fused_mxfp4_payload = _take_fused_mxfp4_activation(x)
         if fused_mxfp4_payload is not None:
             assert x.is_contiguous(), "fused RMSNorm MXFP4 carrier must remain contiguous"
-            assert PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled(), (
-                "fused RMSNorm MXFP4 payload reached a non-FP4 linear context"
-            )
+            assert (
+                PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+            ), "fused RMSNorm MXFP4 payload reached a non-FP4 linear context"
         weight = self._parameters["weight"]
         if self.use_bias:
             bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
@@ -1728,9 +1727,9 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                 assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
 
                 if fused_mxfp4_payload is not None:
-                    assert can_consume_fused_mxfp4_activation(self), (
-                        "fused RMSNorm MXFP4 payload reached an incompatible linear"
-                    )
+                    assert can_consume_fused_mxfp4_activation(
+                        self
+                    ), "fused RMSNorm MXFP4 payload reached an incompatible linear"
 
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
@@ -1877,13 +1876,13 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         """Forward."""
         fused_mxfp4_payload = _take_fused_mxfp4_activation(x)
         if fused_mxfp4_payload is not None:
-            assert getattr(self, "_skip_fused_norm", False), (
-                "fused RMSNorm MXFP4 payload requires the fused layernorm to be skipped"
-            )
+            assert getattr(
+                self, "_skip_fused_norm", False
+            ), "fused RMSNorm MXFP4 payload requires the fused layernorm to be skipped"
             assert x.is_contiguous(), "fused RMSNorm MXFP4 carrier must remain contiguous"
-            assert PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled(), (
-                "fused RMSNorm MXFP4 payload reached a non-FP4 linear context"
-            )
+            assert (
+                PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+            ), "fused RMSNorm MXFP4 payload reached a non-FP4 linear context"
 
         norm_weight = self.layer_norm_weight
         if self.zero_centered_gamma:
@@ -1919,9 +1918,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         inp = norm_out.view(-1, original_shape[-1])
 
         if _use_split_wgrad_op():
-            assert fused_mxfp4_payload is None, (
-                "fused RMSNorm MXFP4 payload is incompatible with split wgrad"
-            )
+            assert fused_mxfp4_payload is None, "fused RMSNorm MXFP4 payload is incompatible with split wgrad"
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
             out = gemm_with_weight_gradient_store(inp, weight, bias=None)
@@ -1980,9 +1977,9 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                 assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
 
                 if fused_mxfp4_payload is not None:
-                    assert can_consume_fused_mxfp4_activation(self), (
-                        "fused RMSNorm MXFP4 payload reached an incompatible linear"
-                    )
+                    assert can_consume_fused_mxfp4_activation(
+                        self
+                    ), "fused RMSNorm MXFP4 payload reached an incompatible linear"
 
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
