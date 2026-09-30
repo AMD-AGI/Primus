@@ -161,6 +161,16 @@ def test_block_linear_types_lists_the_built_linear_classes():
     assert block_linear_types(model) == ["Float8ColumnParallelLinear", "Float8RowParallelLinear"]
 
 
+def test_context_parallelism_is_rejected():
+    """Nothing splits the sequence, yet the local attention would switch to its CP kernel."""
+    with pytest.raises(ValueError, match="set context_parallel_size: 1"):
+        _build(context_parallel_size=2)
+
+
+def test_context_parallel_size_one_builds():
+    assert _build(context_parallel_size=1).context_parallel_size == 1
+
+
 def test_local_thd_attention_reaches_the_model_config():
     assert _build(local_thd_attention=True).local_thd_attention is True
     assert _build().local_thd_attention is False
