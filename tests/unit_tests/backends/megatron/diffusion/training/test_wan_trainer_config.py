@@ -20,6 +20,7 @@ import torch.nn as nn
 from primus.backends.megatron.wan_pretrain_trainer import (
     WanPretrainTrainer,
     block_linear_types,
+    check_dual_expert_data_parallel,
     describe_attention_path,
     describe_linear_precision,
 )
@@ -169,6 +170,31 @@ def test_context_parallelism_is_rejected():
 
 def test_context_parallel_size_one_builds():
     assert _build(context_parallel_size=1).context_parallel_size == 1
+
+
+def test_dual_expert_is_rejected_above_one_data_parallel_rank():
+    """Ranks that route apart would issue different expert gathers."""
+    config = SimpleNamespace(num_transformers=2)
+
+    with pytest.raises(ValueError, match="Train each WAN 2.2 expert as its own job"):
+        check_dual_expert_data_parallel(config, data_parallel_size=2)
+
+
+@pytest.mark.parametrize("num_transformers,data_parallel_size", [(2, 1), (1, 1), (1, 8)])
+def test_dual_expert_on_one_rank_and_single_expert_at_any_size_build(num_transformers, data_parallel_size):
+    config = SimpleNamespace(num_transformers=num_transformers)
+
+    check_dual_expert_data_parallel(config, data_parallel_size=data_parallel_size)
+
+
+def test_create_model_checks_the_data_parallel_size(monkeypatch):
+    from megatron.core import parallel_state
+
+    monkeypatch.setattr(parallel_state, "get_data_parallel_world_size", lambda: 4)
+    trainer = SimpleNamespace(wan_config=SimpleNamespace(num_transformers=2))
+
+    with pytest.raises(ValueError, match=r"got 4\)"):
+        WanPretrainTrainer.create_model(trainer)
 
 
 def test_local_thd_attention_reaches_the_model_config():

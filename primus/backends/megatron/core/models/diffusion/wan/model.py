@@ -532,6 +532,8 @@ class Wan2_2(DiffusionModule):
                 return_dict=False,
             )
 
+        # Routing is per rank, so ranks may run different experts; the trainer
+        # rejects this model above one data-parallel rank.
         if bool(torch.all(high_mask)):
             return run(self.transformer, hidden_states, timestep, encoder_hidden_states)
         if not bool(torch.any(high_mask)):
