@@ -69,6 +69,7 @@ modules:
         data_path: ${CAPTURE_DATA_PATH}  # ShareGPT-style JSONL
         output_path: ${OUTPUT_DIR}/hidden_states_raw  # raw shards
         nproc_per_node: ${NPROC_PER_NODE:1}  # GPUs for capture
+        nnodes: ${NNODES:1}              # capture nodes; slurm -N
         filter_output_path: ${OUTPUT_DIR}/hidden_states  # filtered shards (train on these)
         filter_block_size: ${BLOCK_SIZE:16}  # DFlash block size
         filter_min_kept: ${FILTER_MIN_KEPT:1}  # fail if fewer shards survive
@@ -130,6 +131,7 @@ modules:
         model.use_liger_kernel: false    # not shipped in this image
         data.hidden_states_path: ${HIDDEN_STATES_PATH}  # filtered capture output
         deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}  # trainer GPUs
+        deployment.trainer.nnodes: ${NNODES:1}  # trainer nodes; slurm -N
 ```
 
 ## Online train
@@ -242,10 +244,11 @@ export PRIMUS_SPECFORGE_LOCAL_IP=10.0.0.2
 then runs `direct`. `slurm` allocates, then each node runs `container` or
 `direct`.
 
-Capture and offline train are one node: `direct`, `container`, or
-`slurm srun -N 1`. Do not use `-N` greater than 1 (that starts independent
-copies, not one multi-node SpecForge job). Multi-GPU on one node is
-`NPROC_PER_NODE`.
+Capture and offline train are homogeneous: `direct` or `container` on one
+node, or `slurm srun -N <nnodes>` for DP across nodes. The same command runs
+on every node. Point `OUTPUT_DIR` / `HIDDEN_STATES_PATH` at shared storage.
+Multi-GPU on one node is `NPROC_PER_NODE`. On Ethernet without IB, pass
+`NCCL_IB_DISABLE=1` and `NCCL_SOCKET_IFNAME=<iface>`.
 
 Online train is `slurm` only. `-N` must equal `CAPTURE_NNODES + TRAINER_NNODES`
 (default 1+1 so `-N 2`). Do not use `direct` or `container` on a single host.
@@ -269,10 +272,11 @@ From the host:
   [dotted.overrides...]
 ```
 
-On Slurm, from the login node, image already loaded. Capture or offline:
+On Slurm, from the login node, image already loaded. Capture or offline
+(`-N` is the node count):
 
 ```bash
-./runner/primus-cli slurm srun -N 1 --gres=gpu:<gpus-per-node> \
+./runner/primus-cli slurm srun -N <nnodes> --gres=gpu:<gpus-per-node> \
   -- container --image <tag> \
   --volume <host>:<container> \
   --env KEY=VALUE \

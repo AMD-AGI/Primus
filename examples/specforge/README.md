@@ -29,14 +29,15 @@ Primus is `/opt/primus` and SpecForge is `/workspace/SpecForge`.
 
 | Workload | `direct` (inside the image) | `container` (from the host) | `slurm` |
 | --- | --- | --- | --- |
-| Capture / offline train | yes | yes | `-N 1` only |
+| Capture / offline train | yes | yes | `-N` = nodes (homogeneous DP) |
 | Online train | no | no | `-N` = capture nodes + trainer nodes |
 
 `direct` is the in-image command. `container` starts this image from the host
 and runs the same command. `slurm` allocates nodes, then each node runs
-`container` or `direct`. Multi-GPU on one node is `NPROC_PER_NODE`, not extra
-Slurm nodes. `slurm -N` greater than 1 for capture or offline starts
-independent copies, not one multi-node SpecForge job.
+`container` or `direct`. Multi-GPU on one node is `NPROC_PER_NODE`. Capture
+and offline train on `-N` greater than 1 are **one** SpecForge job (DP across
+nodes): same command on every node, shared `OUTPUT_DIR` / `HIDDEN_STATES_PATH`.
+Online is a capture+trainer split, not that homogeneous job.
 
 Inside the image:
 
@@ -49,6 +50,16 @@ From the host, capture or offline train:
 ```bash
 ./runner/primus-cli container --image primus-specforge:v0.5.14-rocm700-mi35x \
   --shm-size 64g --volume /data:/data \
+  -- train pretrain \
+  --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
+```
+
+Multi-node capture or offline train (shared output path; `-N` is the node count):
+
+```bash
+./runner/primus-cli slurm srun -N 2 --gres=gpu:8 \
+  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
 ```
@@ -85,6 +96,7 @@ modules:
         data_path: ${CAPTURE_DATA_PATH}
         output_path: ${OUTPUT_DIR}/hidden_states_raw
         nproc_per_node: ${NPROC_PER_NODE:1}
+        nnodes: ${NNODES:1}
 ```
 
 ```bash
@@ -114,6 +126,7 @@ modules:
         training.max_steps: ${MAX_STEPS:20}
         data.hidden_states_path: ${HIDDEN_STATES_PATH}
         deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}
+        deployment.trainer.nnodes: ${NNODES:1}
 ```
 
 ```bash
