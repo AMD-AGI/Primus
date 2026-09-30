@@ -589,10 +589,13 @@ def _fused_ln_modulate_bwd_dx_kernel(
 # substantially faster and lands much closer to the bandwidth roof.
 # ---------------------------------------------------------------------------
 
-# S is split this many ways. 8 was the best of {4, 8, 16, 32} at both production shapes;
-# 4 leaves the machine short of programs and 16 shortens each program's run below the
-# point where the strided-S loop keeps its loads in flight.
+# S is split this many ways. 8 was the best of {4, 8, 16, 32} at both production shapes
+# when first measured; on the current stack 16 is faster at both (the grid is (B, NS),
+# so NS=8 is 256 programs at 4 warps -- one wave per SIMD, too little to hide latency).
+# 16 keeps dx and dshift bit-identical but regroups dscale's fp32 partial sums, so it sits
+# behind the ln_bwd_ns16 gate.
 _LN_MOD_BWD_NS = 8
+_LN_MOD_BWD_NS_WIDE = 16
 
 # Two fp32 accumulators of BLOCK_H live in registers for the whole kernel, so the tile
 # cannot grow the way the two-kernel path's could. 4096 covers Flux's H=3072; anything
@@ -726,7 +729,7 @@ def _ln_modulate_bwd_single_pass(
     dx = torch.empty_like(x)
     dscale = torch.empty_like(scale)
     dshift = torch.empty_like(scale)
-    ns = _LN_MOD_BWD_NS
+    ns = _LN_MOD_BWD_NS_WIDE if gates().ln_bwd_ns16 else _LN_MOD_BWD_NS
     # One allocation for both partials; they are consumed together.
     partials = torch.empty(2, B * ns * H, device=x.device, dtype=torch.float32)
     single_pass_kernel[(B, ns)](

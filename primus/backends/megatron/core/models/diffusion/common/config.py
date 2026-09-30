@@ -70,6 +70,7 @@ class BaseDiffusionConfig(TransformerConfig):
         mxfp6_ln_bwd_fused_sum: Fold the LN-modulate backward's gradient sum into its kernel (default: False)
         mxfp6_joint_proj: Joint block's two out-projections as one Function sharing dO (default: False)
         mxfp6_gate_mul_pack: Single block's shared pack multiplies dy by the gate while packing (default: False)
+        mxfp6_ln_bwd_ns16: LN-modulate backward over 16 sequence slices instead of 8 (default: False)
         mxfp6_fused_qk_rope: Fuse QK-norm and RoPE into one kernel (default: False)
         mxfp6_fused_qkv: Fuse the QKV norm+RoPE prologue, 'auto'/'on'/'off' (default: 'off')
         mxfp6_fused_ln_mod_bwd: Single-pass LN-modulate backward (default: False)
@@ -202,6 +203,7 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_ln_bwd_fused_sum: bool = False
     mxfp6_joint_proj: bool = False
     mxfp6_gate_mul_pack: bool = False
+    mxfp6_ln_bwd_ns16: bool = False
     mxfp6_fused_qk_rope: bool = False
     mxfp6_fused_qkv: str = "off"
     mxfp6_fused_ln_mod_bwd: bool = False

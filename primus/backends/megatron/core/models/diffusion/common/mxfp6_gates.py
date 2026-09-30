@@ -81,6 +81,9 @@ class Mxfp6Gates:
     # shared Function, whose backward packs dy with Turbo's GateMul prologue, so gate * dy
     # is never materialised. Bit-identical.
     gate_mul_pack: bool = False
+    # LN-modulate backward split over 16 sequence slices instead of 8 (twice the programs).
+    # dx and dshift bit-identical; dscale's fp32 partial sums regroup.
+    ln_bwd_ns16: bool = False
 
     # --- norm / RoPE fusions ---------------------------------------------
     # Fuse QK-norm and RoPE into one kernel.

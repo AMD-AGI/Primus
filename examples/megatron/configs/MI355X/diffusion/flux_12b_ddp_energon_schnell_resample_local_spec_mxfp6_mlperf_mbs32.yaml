@@ -330,6 +330,10 @@ modules:
       # Single block, with mxfp6_shared_grad_pack: the gate multiply is formed
       # in the gradient packer (Turbo GateMul prologue). Bit-identical.
       mxfp6_gate_mul_pack: true
+      # LN-modulate backward split over 16 sequence slices instead of 8 (twice the
+      # programs, so memory latency is hidden). dx and dshift bit-identical; dscale's
+      # fp32 partial sums regroup (one bf16 ulp).
+      mxfp6_ln_bwd_ns16: true
 
       # Clip gradients with one flat mul_ per contiguous run instead of the
       # chunked multi_tensor applier.
