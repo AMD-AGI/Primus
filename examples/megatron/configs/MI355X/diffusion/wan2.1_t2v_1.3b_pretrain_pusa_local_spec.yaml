@@ -128,8 +128,9 @@ modules:
 
       # ----------------------------------------------------------------------
       # Activation recomputation
-      # The video sequence is long (latents [16, 21, 90, 160] -> ~75k tokens
-      # after (1,2,2) patchify), so activation memory dominates. uniform with
+      # The video sequence is long (PusaV1 480p latents [16, 7, 60, 104] ->
+      # 10,920 tokens per sample after (1,2,2) patchify, times
+      # micro_batch_size), so activation memory dominates. uniform with
       # num_layers=1 recomputes every layer.
       # ----------------------------------------------------------------------
       recompute_granularity: full
