@@ -120,16 +120,15 @@ def can_consume_fused_mxfp4_activation(module) -> bool:
         (PrimusTurboColumnParallelLinear, PrimusTurboLayerNormColumnParallelLinear),
     ):
         return False
+    if (
+        isinstance(module, PrimusTurboLayerNormColumnParallelLinear)
+        and module.config.normalization != "RMSNorm"
+    ):
+        return False
     # This probe runs immediately before the module's own forward, outside its
     # per-module quantization context. Enter the same context briefly so the
     # decision reflects this linear's recipe rather than stale global state.
-    already_enabled = PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
-    quant_context = (
-        nullcontext()
-        if already_enabled
-        else _get_fp8_autocast_for_quant_params(module.te_quant_params, module.training)
-    )
-    with quant_context:
+    with _get_fp8_autocast_for_quant_params(module.te_quant_params, module.training):
         if not PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             return False
         quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()

@@ -118,10 +118,7 @@ def _run_qkv_rmsnorm_mxfp4(x, residual, gamma, eps, linear_qkv):
     )
 
     if not can_consume_fused_mxfp4_activation(linear_qkv):
-        raise RuntimeError(
-            "PRIMUS_FUSED_RMSNORM_MXFP4_QKV=1, but linear_qkv cannot consume "
-            f"the fused MXFP4 activation (consumer={type(linear_qkv).__name__})"
-        )
+        return None
 
     from primus_turbo.flydsl.quantization.rmsnorm_mxfp4_fusion import (
         rmsnorm_residual_mxfp4_fused,
