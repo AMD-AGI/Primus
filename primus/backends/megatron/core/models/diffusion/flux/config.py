@@ -263,6 +263,8 @@ class FluxConfig(BaseDiffusionConfig):
         if any(d <= 0 for d in self.axes_dim):
             raise ValueError(f"All axes_dim values must be positive, got {self.axes_dim}")
 
+        self._validate_sensitive_layers_on_te_spec()
+
         # Validate RoPE fusion constraints
         if self.apply_rope_fusion:
             import warnings
@@ -284,6 +286,37 @@ class FluxConfig(BaseDiffusionConfig):
                 "=" * 80,
                 UserWarning,
                 stacklevel=2,
+            )
+
+    def _validate_sensitive_layers_on_te_spec(self):
+        """Reject sensitive-layer settings the TransformerEngine spec cannot honour."""
+        from primus.backends.megatron.core.transformer.diffusion_transformer_block import (
+            uses_per_layer_quantization_context,
+        )
+
+        if not self.sensitive_layers_enabled or self.transformer_impl == "local":
+            return
+
+        # Megatron can only switch a first/last layer's quantization off, so on
+        # this spec those layers run in bf16 whatever else is asked for.
+        if self.sensitive_layer_precision != "bf16":
+            raise ValueError(
+                f"sensitive_layer_precision={self.sensitive_layer_precision!r} is not supported on "
+                "transformer_impl='transformer_engine', which can only keep sensitive layers in bf16; "
+                "use sensitive_layer_precision: bf16, or transformer_impl: local with fp4"
+            )
+
+        # The stack and full_dit runners call the layers directly, so they miss
+        # the per-layer contexts DiffusionTransformerBlock enters.
+        if uses_per_layer_quantization_context(self) and self.torch_compile_strategy not in (
+            "whole_model",
+            "per_block",
+        ):
+            raise ValueError(
+                f"sensitive_layers_enabled with fp8/fp4 on transformer_impl='transformer_engine' "
+                f"needs torch_compile_strategy 'per_block' or 'whole_model', got "
+                f"{self.torch_compile_strategy!r}: the stack runners bypass the per-layer "
+                "quantization contexts that keep sensitive layers in bf16"
             )
 
     def get_num_layers(self):
