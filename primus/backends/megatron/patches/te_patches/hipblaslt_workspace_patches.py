@@ -29,7 +29,7 @@ changes hipBLASLt's solution choice for runs that do not need it.
 import os
 
 from primus.core.patches import PatchContext, register_patch
-from primus.core.utils.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 ENV_VAR = "PRIMUS_TE_GEMM_WORKSPACE_MIB"
 
@@ -42,8 +42,14 @@ def _requested_workspace_mib():
     try:
         requested = int(raw)
     except ValueError:
-        return None
-    return requested if requested > 0 else None
+        requested = 0
+    if requested > 0:
+        return requested
+    warning_rank_0(
+        f"{ENV_VAR}={raw!r} is not a positive whole number of MiB (e.g. 128); "
+        "leaving TE's GEMM workspace at its default"
+    )
+    return None
 
 
 def _needs_te_gemm_workspace_patch(_ctx: PatchContext) -> bool:
