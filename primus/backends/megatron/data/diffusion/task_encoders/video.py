@@ -69,9 +69,9 @@ def load_wan_tensor(data: Any) -> Optional[torch.Tensor]:
     if data is None:
         return None
     if isinstance(data, (str, Path)):
-        return torch.load(data, map_location="cpu")
+        return torch.load(data, map_location="cpu", weights_only=True)
     if isinstance(data, bytes):
-        return torch.load(io.BytesIO(data), map_location="cpu")
+        return torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
     if isinstance(data, torch.Tensor):
         return data
     return data
