@@ -148,6 +148,19 @@ def block_linear_types(model) -> list:
     return sorted({type(m).__name__ for m in model.modules() if type(m).__name__.endswith("ParallelLinear")})
 
 
+def seed_training_rng_per_dp_rank(seed: int, dp_rank: int) -> int:
+    """Reseed the ambient RNGs so each data-parallel rank draws its own noise.
+
+    Megatron seeds every data-parallel rank alike unless
+    ``data_parallel_random_init`` is set, and the forward step draws noise and
+    timesteps from the ambient RNG. The offset matches Flux's.
+    """
+    per_rank_seed = seed + 100 * dp_rank
+    torch.manual_seed(per_rank_seed)
+    torch.cuda.manual_seed(per_rank_seed)
+    return per_rank_seed
+
+
 def check_dual_expert_data_parallel(config, data_parallel_size: int) -> None:
     """Reject the dual-expert model when data-parallel ranks could route apart.
 
@@ -194,6 +207,7 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
         super().__init__(*args, **kwargs)
 
         params = self.backend_args
+        self._training_rng_seeded = False
 
         # No producer marks a batch as validation and there is no fixed-timestep
         # validation schedule for WAN yet, so an eval pass would score random
@@ -260,6 +274,16 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
         from primus.backends.megatron.training.diffusion.wan_forward_step import (
             wan_forward_step_func,
         )
+
+        if not self._training_rng_seeded:
+            from megatron.core import parallel_state
+            from megatron.training import get_args
+
+            seed = get_args().seed
+            dp_rank = parallel_state.get_data_parallel_rank()
+            per_rank_seed = seed_training_rng_per_dp_rank(seed, dp_rank)
+            self._training_rng_seeded = True
+            log_rank_0(f"Per-DP-rank training seed: {per_rank_seed} (base={seed}, dp_rank={dp_rank})")
 
         if model.training:
             self._forward_step_count += 1
