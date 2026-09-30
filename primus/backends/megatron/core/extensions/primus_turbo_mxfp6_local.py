@@ -203,10 +203,12 @@ def _reduce_grad_into_main_grad(param, partial, out_dtype, fuse_wgrad_accum, dim
     main_grad = getattr(param, "main_grad", None)
     if main_grad is None:
         return partial.sum(dims).to(out_dtype)
-    # add_ rather than copy_ because DDP zeroes the grad buffers each step and this recipe
-    # runs one microbatch per optimizer step -- the same precondition _wgrad_into_main_grad
-    # relies on, enforced in _init_mxfp6_linear.
-    main_grad.add_(partial.sum(dims).to(main_grad.dtype))
+    # copy_, not add_: under defer_grad_buffer_zero DDP no longer zeroes the grad buffer
+    # between steps, and an add_ here summed every previous step's gradient into this one.
+    # With one
+    # microbatch per optimizer step -- the precondition _wgrad_into_main_grad's beta=0 store
+    # relies on, enforced in _init_mxfp6_linear -- this is the whole gradient either way.
+    main_grad.copy_(partial.sum(dims).to(main_grad.dtype))
     return torch.empty_like(param)
 
 
