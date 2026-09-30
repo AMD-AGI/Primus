@@ -25,6 +25,7 @@ This guide covers the complete workflow: environment setup, data preparation, pr
   - [Single-Node (Local / Docker)](#single-node-local--docker)
   - [Multi-Node (Slurm)](#multi-node-slurm)
   - [Mock Data (Smoke Test)](#mock-data-smoke-test)
+- [Upcycling a dense checkpoint](#upcycling-a-dense-checkpoint)
 - [Step 4: Checkpoint Conversion to HuggingFace](#step-4-checkpoint-conversion-to-huggingface)
 - [Step 5: Evaluation with lm-eval-harness](#step-5-evaluation-with-lm-eval-harness)
 - [Configuration Reference](#configuration-reference)
@@ -391,6 +392,53 @@ To quickly verify the model runs without real data, the 3B and 8B configs come w
 
 ---
 
+## Upcycling a dense checkpoint
+
+Dense-to-hybrid upcycling continues pretraining from a dense Transformer checkpoint. Embeddings, the final norm, and every MLP are copied into the hybrid stack. A pattern slot of `*` also copies that dense attention block when the target tensors have the same shapes. A slot of `M` is a new Mamba, GDN, or KDA mixer and keeps the hybrid model's own initialization. Megatron's `--moe-use-upcycling` flag remains the path that duplicates one MLP into experts.
+
+The hybrid stack is twice as long as the dense model: dense layer `i` becomes mixer sublayer `2i` and MLP sublayer `2i + 1`. A 25% attention model is the repeated block `*-M-M-M-`.
+
+1. Save a legacy torch checkpoint of the **target** hybrid config at TP=PP=1. `lr: 0` keeps the constructor initialization through the one logged step:
+
+```yaml
+lr: 0.0
+min_lr: 0.0
+train_iters: 1
+save_interval: 1
+mock_data: true
+ckpt_format: torch
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 1
+```
+
+2. Convert. The dense checkpoint must use the same hidden size, FFN size, SwiGLU layout, and padded vocabulary. Both checkpoints are single-rank `mp_rank_00/model_optim_rng.pt` files (or a load directory that points at one).
+
+```bash
+python tools/hybrid/upcycle_dense_to_hybrid.py \
+    --dense-checkpoint /path/to/dense/checkpoints \
+    --hybrid-init-checkpoint /path/to/hybrid-init \
+    --output-dir /path/to/upcycled \
+    --hybrid-pattern '*-M-M-M-'
+```
+
+`--hybrid-pattern` can be omitted when the hybrid checkpoint stored `hybrid_override_pattern` or `hybrid_layer_pattern`. The tool writes `iter_0000000`, `latest_checkpointed_iteration.txt`, and `upcycle_report.json`.
+
+The file-by-file notes for this change, including the one-GPU smoke run, are in [upcycling-changes.md](upcycling-changes.md).
+
+3. Continue pretraining with the hybrid YAML:
+
+```yaml
+load: /path/to/upcycled
+finetune: true
+no_load_optim: true
+no_load_rng: true
+auto_continue_train: false
+```
+
+MLA attention does not share a QKV layout with a dense GQA checkpoint, so those attention tensors stay at the hybrid initialization and are listed in `upcycle_report.json`. Matched projections, including an output projection of the same shape, are copied. Start the continued run from a learning rate several times below the dense model's peak, with a short warmup.
+
+---
+
 ## Step 4: Checkpoint Conversion to HuggingFace
 
 Convert a Megatron checkpoint to HuggingFace format for inference and evaluation.
@@ -650,7 +698,8 @@ Primus/
 │   │   ├── eval_zebra_llama_lm_eval.sh          # Eval shell wrapper
 │   │   ├── run_zebra_eval.sh                    # Quick eval script
 │   │   ├── chat_zebra_llama.py                  # Interactive chat
-│   │   └── convert_fla_to_megatron.py           # FLA Arrow → Megatron binary converter
+│   │   ├── convert_fla_to_megatron.py           # FLA Arrow → Megatron binary converter
+│   │   └── upcycle_dense_to_hybrid.py           # Dense Transformer → hybrid checkpoint
 │   └── docker/start_container.sh                # Dev container launcher
 ├── runner/
 │   ├── primus-cli                               # Unified launcher (direct/container/slurm)
