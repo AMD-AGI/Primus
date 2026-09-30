@@ -358,3 +358,4 @@ The tables above in the Megatron, TorchTitan, and MaxText sections are curated M
 - [CLI reference](cli-reference.md): launcher usage
 - [Configuration system](configuration-system.md): YAML merge rules
 - Backend parameter references: [Megatron parameters](../03-configuration-reference/megatron-parameters.md), [TorchTitan parameters](../03-configuration-reference/torchtitan-parameters.md), [MaxText parameters](../03-configuration-reference/maxtext-parameters.md)
+- [Gemma 4 pre-training on MI455X](../04-technical-guides/Gemma4_Bridge_MI455X_README.md): single-GPU gfx1250 Megatron-Bridge proxies for Gemma-4-26B MoE and 31B dense
