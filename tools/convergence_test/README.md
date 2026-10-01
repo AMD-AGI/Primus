@@ -44,6 +44,26 @@ backend comes from the config's `framework:`; `--model` takes
 `--config <file>` runs any other experiment YAML, as long as it trains on real
 data (see [Adding a model](#adding-a-model)).
 
+### From an agent
+
+In Cursor or Claude Code opened on this repository, ask in plain language:
+
+> run convergence test for qwen3 8B using c4, docker image rocm/primus:v26.7
+
+The `convergence-test` skill (`skills/convergence-test/`) plans the run, builds a
+config from the model's example when there is no bundled recipe, launches it in
+the background, watches the first minutes, and reports the verdict and loss
+curve. "How is it going?", "stop it" and "compare it with <run>" work too. It
+drives the same scripts you can run yourself:
+
+```bash
+python3 tools/convergence_test/plan_request.py --model "qwen3 8B" --source c4 \
+    --image rocm/primus:v26.7                     # prints a plan, saves it to plan_file
+python3 tools/convergence_test/jobs.py start --plan <plan_file> [--probe] [--queue]
+python3 tools/convergence_test/jobs.py status     # phase, iteration, loss, ETA, verdict
+python3 tools/convergence_test/jobs.py list       # and: stop <job>
+```
+
 ### Gated tokenizers
 
 Most Llama presets point at gated `meta-llama` repos. For those, accept the
@@ -222,6 +242,9 @@ anything after `--` is a training override, e.g. `-- --packing false`.
 | `check_config.py` | Flags settings that silently ruin a convergence run |
 | `plot_loss.py` | Log to loss curve, CSV, health summary, baseline verdict |
 | `configs/<backend>/` | Ready-to-run convergence configs |
+| `plan_request.py` | A request in the user's words (model, precision, dataset, image) to a runnable plan, or a question |
+| `make_config.py` | A convergence config generated from a model's example config |
+| `jobs.py` | Runs the driver in the background after checking the GPUs are free; status, list, stop |
 
 Each script is usable on its own; the driver just chains them.
 
@@ -526,8 +549,32 @@ And things to know when reading a MaxText run:
 
 ## Adding a model
 
-Copy a bundled config from the same backend and change `model:` plus the
-dataset paths. Megatron:
+The quickest way is to generate one from the model's example config:
+
+```bash
+python3 tools/convergence_test/make_config.py \
+    --example examples/megatron/configs/MI325X/qwen3_8B-BF16-pretrain.yaml
+tools/convergence_test/run_convergence_test.sh \
+    --config output/convergence/configs/megatron/qwen3_8B-BF16-convergence.yaml --probe 20
+```
+
+The generated file `extends:` the example, so it trains what ships for that
+model (architecture, parallelism, precision, kernels), and overrides only what
+a convergence run needs, with the reason for each group in the file:
+
+- 1000 iterations x 128 x 4096 tokens;
+- a cosine schedule whose peak learning rate follows the model size;
+- real data and validation;
+- logging, with checkpoints off;
+- for MoE models, real routing with a balancing loss.
+
+Probe it before a long run: the example's batch was sized for benchmark routing
+and data, not for this. Once a generated config has a reference run behind it,
+write it into the bundled set with `--out
+tools/convergence_test/configs/<backend>/<name>-convergence.yaml`.
+
+To write one by hand, copy a bundled config from the same backend and change
+`model:` plus the dataset paths. Megatron:
 
 ```yaml
 model: qwen2.5_7B.yaml

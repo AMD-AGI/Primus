@@ -363,6 +363,11 @@ if [[ "${PLOT_ONLY}" -eq 0 ]]; then
     if [[ -n "${OUTPUT_DIR}" && "${OUTPUT_DIR}/" != "${PRIMUS_PATH}/"* && "${OUTPUT_DIR}" != "${DATA_DIR_ABS}" ]]; then
         CLI+=(--volume "${OUTPUT_DIR}:${OUTPUT_DIR}")
     fi
+    CONFIG_DIR="$(dirname "${CONFIG}")"
+    if [[ "${CONFIG_DIR}/" != "${PRIMUS_PATH}/"* && "${CONFIG_DIR}/" != "${DATA_DIR_ABS}/"* \
+          && ( -z "${OUTPUT_DIR}" || "${CONFIG_DIR}/" != "${OUTPUT_DIR}/"* ) ]]; then
+        CLI+=(--volume "${CONFIG_DIR}:${CONFIG_DIR}")
+    fi
     for kv in "${ENVS[@]+"${ENVS[@]}"}"; do
         CLI+=(--env "${kv}")
     done
