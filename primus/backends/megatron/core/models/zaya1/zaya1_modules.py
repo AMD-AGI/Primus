@@ -35,9 +35,7 @@ def layer_kinds(num_layers: int, zaya_layers: Optional[Sequence] = None) -> List
             else:
                 kinds.append("m")
         if len(kinds) != num_layers:
-            raise ValueError(
-                f"zaya_layers has length {len(kinds)}, num_layers is {num_layers}."
-            )
+            raise ValueError(f"zaya_layers has length {len(kinds)}, num_layers is {num_layers}.")
         return kinds
     return ["a" if i % 2 == 0 else "m" for i in range(num_layers)]
 
@@ -454,9 +452,7 @@ class ZayaStack(nn.Module):
         eps = float(getattr(config, "layernorm_epsilon", 1e-5))
         self.final_norm = RMSNorm(int(config.hidden_size), eps)
         use_scale = bool(getattr(config, "scale_residual_merge", True))
-        self.res_scale = (
-            ResidualScaling(int(config.hidden_size), True) if use_scale else None
-        )
+        self.res_scale = ResidualScaling(int(config.hidden_size), True) if use_scale else None
 
     def forward(self, hidden_states, position_ids, attention_mask):
         residual = None
