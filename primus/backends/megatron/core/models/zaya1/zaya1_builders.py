@@ -63,9 +63,9 @@ def zaya1_builder(
         "Leave multi_latent_attention false."
     )
     assert not args.use_legacy_models, "ZAYA1 requires use_legacy_models=False."
-    assert not getattr(args, "multi_latent_attention", False), (
-        "ZAYA1 must leave multi_latent_attention false."
-    )
+    assert not getattr(
+        args, "multi_latent_attention", False
+    ), "ZAYA1 must leave multi_latent_attention false."
     if args.position_embedding_type != "rope":
         raise ValueError(
             "ZAYA1 applies partial RoPE inside CCA. "

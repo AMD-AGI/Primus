@@ -62,12 +62,9 @@ def get_model_provider(model_type="gpt"):
 
     # Primus-owned: ZAYA1 (data parallel only)
     if model_type == "zaya1":
-        zaya1_module = importlib.import_module(
-            "primus.backends.megatron.core.models.zaya1.zaya1_builders"
-        )
+        zaya1_module = importlib.import_module("primus.backends.megatron.core.models.zaya1.zaya1_builders")
         log_rank_0(
-            "[Primus][MegatronCompat] Loaded ZAYA1 model_provider + builder "
-            f"from {zaya1_module.__name__}"
+            "[Primus][MegatronCompat] Loaded ZAYA1 model_provider + builder " f"from {zaya1_module.__name__}"
         )
         return partial(
             zaya1_module.model_provider,
