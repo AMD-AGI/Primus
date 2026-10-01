@@ -15,17 +15,13 @@ import torch
 
 import primus.backends.megatron.training.diffusion.wan_forward_step as wan_forward_step
 import primus.backends.megatron.wan_pretrain_trainer as trainer_module
-from primus.backends.megatron.wan_pretrain_trainer import (
-    WanPretrainTrainer,
-    seed_training_rng_per_dp_rank,
-)
 
 
 def test_data_parallel_ranks_draw_different_noise():
     draws = []
     with torch.random.fork_rng():
         for dp_rank in (0, 1):
-            seed_training_rng_per_dp_rank(1234, dp_rank)
+            trainer_module.seed_training_rng_per_dp_rank(1234, dp_rank)
             draws.append(torch.rand(8))
 
     assert not torch.equal(draws[0], draws[1])
@@ -33,9 +29,9 @@ def test_data_parallel_ranks_draw_different_noise():
 
 def test_the_same_rank_draws_the_same_noise():
     with torch.random.fork_rng():
-        seed_training_rng_per_dp_rank(1234, 3)
+        trainer_module.seed_training_rng_per_dp_rank(1234, 3)
         first = torch.rand(8)
-        seed_training_rng_per_dp_rank(1234, 3)
+        trainer_module.seed_training_rng_per_dp_rank(1234, 3)
         second = torch.rand(8)
 
     assert torch.equal(first, second)
@@ -43,7 +39,7 @@ def test_the_same_rank_draws_the_same_noise():
 
 def test_the_offset_matches_flux():
     with torch.random.fork_rng():
-        assert seed_training_rng_per_dp_rank(1234, 2) == 1434
+        assert trainer_module.seed_training_rng_per_dp_rank(1234, 2) == 1434
 
 
 def test_forward_step_seeds_once_from_the_data_parallel_rank(monkeypatch):
@@ -71,8 +67,8 @@ def test_forward_step_seeds_once_from_the_data_parallel_rank(monkeypatch):
     )
     model = SimpleNamespace(training=True)
 
-    WanPretrainTrainer.forward_step(trainer, iter(()), model)
-    WanPretrainTrainer.forward_step(trainer, iter(()), model)
+    trainer_module.WanPretrainTrainer.forward_step(trainer, iter(()), model)
+    trainer_module.WanPretrainTrainer.forward_step(trainer, iter(()), model)
 
     assert seeds == [(1234, 3)]
     assert trainer._training_rng_seeded is True
