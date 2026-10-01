@@ -55,7 +55,7 @@ fastjsonschema==2.22.1
     #   rocm-docs-core
 gitdb==4.0.12
     # via gitpython
-gitpython==3.1.59
+gitpython==3.1.62
     # via rocm-docs-core
 greenlet==3.5.5
     # via sqlalchemy
@@ -190,7 +190,7 @@ requests==2.34.2
     #   pygithub
     #   sphinx
 rocm-docs-core[llms]==1.38.0
-    # via -r docs/sphinx/requirements.in
+    # via -r requirements.in
 roman-numerals==4.1.0
     # via sphinx
 rpds-py==2026.6.3
@@ -243,7 +243,7 @@ sphinxcontrib-htmlhelp==2.1.0
 sphinxcontrib-jsmath==1.0.1
     # via sphinx
 sphinxcontrib-mermaid==2.1.0
-    # via -r docs/sphinx/requirements.in
+    # via -r requirements.in
 sphinxcontrib-qthelp==2.0.0
     # via sphinx
 sphinxcontrib-serializinghtml==2.0.0
