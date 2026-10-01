@@ -89,7 +89,8 @@ modules:
       clip_grad: 1.0
 
       lr_warmup_iters: ${PRIMUS_LR_WARMUP_ITERS:800}
-      lr_decay_iters: ${PRIMUS_TRAIN_ITERS:20000}
+      # Constant after warmup: the decay length only has to exceed the warmup (and the run).
+      lr_decay_iters: 100000
       lr_decay_style: constant
 
       tensor_model_parallel_size: 1
