@@ -555,7 +555,7 @@ class Wan2_2(DiffusionModule):
             encoder_hidden_states.index_select(0, low_idx),
         )
 
-        output = torch.empty_like(hidden_states)
+        output = hidden_states.new_empty((hidden_states.shape[0], *out_high.shape[1:]))
         output.index_copy_(0, high_idx, out_high.to(output.dtype))
         output.index_copy_(0, low_idx, out_low.to(output.dtype))
         return output
