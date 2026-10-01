@@ -32,9 +32,9 @@ export MLLOG_SUBMISSION_PLATFORM MLLOG_SUBMISSION_STATUS
 
 # --- Numerics disclosure ----------------------------------------------------
 # The compliance checker accepts a fixed vocabulary here (see
-# mlperf_logging/compliance_checker/training_6.0.0/common.yaml). mxfp6 is not
-# in it yet, so an MXFP6 run needs the format approved upstream before its log
-# can pass; describing the run as anything else would be a false disclosure.
+# mlperf_logging/compliance_checker/training_6.1.0/common.yaml, which includes
+# mxfp6 from v6.1). The defaults describe the FP8 recipe; an MXFP6 run sets
+# MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR=mxfp6.
 : "${MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR:=fp8}"
 : "${MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN:=bfloat16}"
 : "${MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM:=bfloat16}"
@@ -113,7 +113,7 @@ fi
 # --- Check the artifact before it is treated as a result --------------------
 # Finding out at submission time that a week of runs produced unparseable logs
 # is the failure this guards against.
-: "${MLPERF_RULESET:=6.0.0}"
+: "${MLPERF_RULESET:=6.1.0}"
 : "${CHECK_COMPLIANCE:=1}"
 if [[ "${CHECK_COMPLIANCE}" == "1" ]]; then
     python3 -m mlperf_logging.compliance_checker \

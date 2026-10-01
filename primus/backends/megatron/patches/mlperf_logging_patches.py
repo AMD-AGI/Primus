@@ -32,11 +32,9 @@ _PRECISION_DISCLOSURE_ENV = {
 }
 
 # The compliance checker rejects any lowest_numerical_precision_* value outside
-# this set (training_6.0.0/common.yaml). mxfp6 is deliberately absent: adding it
-# is the Training WG request tracked separately, and until it lands a run that
-# discloses mxfp6 produces a structurally valid log that the checker refuses.
-# Emitting anything else would misdescribe the run, so the value is passed
-# through and the mismatch is surfaced loudly rather than silently corrected.
+# this set (training_6.1.0/common.yaml; mxfp6 is pre-approved since v6.1). A value
+# outside it is passed through and surfaced loudly rather than silently corrected,
+# since emitting anything else would misdescribe the run.
 _CHECKER_PRECISION_VALUES = frozenset(
     {
         "fp64",
@@ -44,6 +42,7 @@ _CHECKER_PRECISION_VALUES = frozenset(
         "tf32",
         "fp16",
         "fp8",
+        "mxfp6",
         "nvfp4",
         "mxfp4",
         "bfloat16",
@@ -66,6 +65,13 @@ _SUBMISSION_IDENTITY_ENV = {
 
 def _is_rank_zero() -> bool:
     return int(os.environ.get("RANK", "0")) == 0
+
+
+def _config_filename() -> str:
+    explicit = os.environ.get("MLLOG_CONFIG_FILENAME", "").strip()
+    if explicit:
+        return explicit
+    return _require_env("EXP", "the recipe this run was launched from")
 
 
 def _require_env(name: str, purpose: str) -> str:
@@ -253,9 +259,11 @@ class FluxMLPerfLogger:
             ("context_parallelism", getattr(args, "context_parallel_size", 1)),
             ("expert_parallelism", getattr(args, "expert_model_parallel_size", 1)),
             ("micro_batch_size", self.mbs),
-            # Names the recipe a reviewer has to be able to find in the
-            # submission's code/ directory, so "unknown" is not an answer.
-            ("config_filename", _require_env("EXP", "the recipe this run was launched from")),
+            # Names the configuration a reviewer has to be able to find in the
+            # submission's code directory, so "unknown" is not an answer. Submission
+            # launchers set MLLOG_CONFIG_FILENAME to their config_*.sh; otherwise the
+            # recipe path (EXP) is logged.
+            ("config_filename", _config_filename()),
         ):
             self._event(key=key, value=value)
         self._event(

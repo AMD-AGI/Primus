@@ -337,11 +337,27 @@ def test_missing_precision_disclosure_fails_mlperf_startup(monkeypatch):
 
 
 def test_precision_value_outside_the_checker_enum_warns(monkeypatch, caplog):
-    """mxfp6 is not yet an accepted disclosure, and a run must say so.
+    """A disclosure the compliance checker does not accept must not pass silently.
 
-    The value is still emitted -- describing an MXFP6 run as fp8 would be
-    worse than a log the checker rejects -- but it cannot pass silently.
+    The value is still emitted -- describing a run as a different format would be
+    worse than a log the checker rejects. mxfp8 is not in the v6.1 vocabulary.
     """
+    from primus.backends.megatron.patches.mlperf_logging_patches import (
+        _precision_disclosures_from_env,
+    )
+
+    monkeypatch.setenv("MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR", "mxfp8")
+
+    with caplog.at_level("WARNING"):
+        values = _precision_disclosures_from_env()
+
+    assert values["lowest_numerical_precision_in_linear"] == "mxfp8"
+    assert "mxfp8" in caplog.text
+    assert "compliance checker" in caplog.text
+
+
+def test_mxfp6_is_an_accepted_disclosure(monkeypatch, caplog):
+    """mxfp6 is pre-approved from MLPerf Training v6.1 (training_6.1.0/common.yaml)."""
     from primus.backends.megatron.patches.mlperf_logging_patches import (
         _precision_disclosures_from_env,
     )
@@ -352,8 +368,7 @@ def test_precision_value_outside_the_checker_enum_warns(monkeypatch, caplog):
         values = _precision_disclosures_from_env()
 
     assert values["lowest_numerical_precision_in_linear"] == "mxfp6"
-    assert "mxfp6" in caplog.text
-    assert "compliance checker" in caplog.text
+    assert "compliance checker" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -1284,3 +1299,14 @@ class TestResetOptimizerState:
 
         assert opt1.param_groups[0]["step"] == 0
         assert opt2.param_groups[0]["step"] == 0
+
+
+def test_config_filename_prefers_the_launcher_config(monkeypatch):
+    """Submission launchers log their config_*.sh; without one the recipe path is logged."""
+    from primus.backends.megatron.patches.mlperf_logging_patches import _config_filename
+
+    monkeypatch.setenv("EXP", "/workspace/code/conf/recipe.yaml")
+    monkeypatch.delenv("MLLOG_CONFIG_FILENAME", raising=False)
+    assert _config_filename() == "/workspace/code/conf/recipe.yaml"
+    monkeypatch.setenv("MLLOG_CONFIG_FILENAME", "config_MI355X_04x08x32.sh")
+    assert _config_filename() == "config_MI355X_04x08x32.sh"
