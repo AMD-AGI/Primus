@@ -156,6 +156,10 @@ class FluxConfig(BaseDiffusionConfig):
     use_triton_ops: bool = False
     adaln_plain_ops: bool = False
     adaln_always_jit_fuser: bool = False
+    # Initialize the single blocks' split linears (qkv, fc1 | proj, fc2) with the Xavier
+    # bound of the reference's fused linear1 | linear2, as MLPerf closed division requires
+    # ("the same ... random value distribution as the reference implementation").
+    single_block_reference_init: bool = False
 
     # FSDP2 prefetch depth: number of layers to prefetch ahead for all-gather overlap.
     # 1 = prefetch next layer (default), 2 = prefetch next 2 layers, 0 = no prefetch.

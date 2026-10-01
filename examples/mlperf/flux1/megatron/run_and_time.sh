@@ -52,16 +52,23 @@ export RESULTS_DIR RUN_INDEX PRIMUS_SEED MLLOG_OUTPUT_FILE
 mkdir -p "${RESULTS_DIR}"
 
 # --- Cold start -------------------------------------------------------------
-# cache_clear is a claim about the machine, so drop the caches here and report
-# what actually happened rather than what was requested. Dropping caches needs
-# privileges the container may not have; a run that could not do it says so.
+# MLPerf requires the cache to be flushed (or the system restarted) before every
+# scored run, so the dataset starts on durable storage rather than in RAM
+# (training_rules.adoc, "Data State at Start of Run"). This runs on every node,
+# because each node's run_and_time.sh reaches this point before training starts.
+# Dropping caches needs a privileged container (or host root); if it fails, the
+# run stops rather than going ahead unflushed. MLPERF_CLEAR_CACHES=false skips
+# the flush for development runs and is then logged as cache_clear=false.
 : "${MLPERF_CLEAR_CACHES:=true}"
 if [[ "${MLPERF_CLEAR_CACHES}" == "true" ]]; then
     if sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; then
-        echo "[MLPerf] Dropped page cache"
+        echo "[MLPerf] Dropped page cache on $(hostname)"
     else
-        echo "[MLPerf] WARNING: could not drop page cache; reporting cache_clear=false"
-        MLPERF_CLEAR_CACHES=false
+        echo "[MLPerf] ERROR: could not drop the page cache on $(hostname)." >&2
+        echo "[MLPerf]        Run the container privileged (or drop caches as root on the host" >&2
+        echo "[MLPerf]        before launching), or set MLPERF_CLEAR_CACHES=false for a" >&2
+        echo "[MLPerf]        development run that will log cache_clear=false." >&2
+        exit 1
     fi
 fi
 export MLPERF_CLEAR_CACHES

@@ -285,6 +285,9 @@ class Flux(DiffusionModule):
             layer.adaln_context.ln.reset_parameters()
             layer.adaln_context.ln2.reset_parameters()
 
+        if getattr(self.config, "single_block_reference_init", False):
+            self._init_single_block_linears_as_reference()
+
         # Output layers: zero-init for stable training start
         nn.init.constant_(self.proj_out.weight, 0)
         nn.init.constant_(self.proj_out.bias, 0)
@@ -295,6 +298,38 @@ class Flux(DiffusionModule):
         self.norm_out.norm.reset_parameters()
 
         log_rank_0("Applied custom weight initialization (MLPerf v5.1 aligned, NeMo RNG-matched)")
+
+    def _init_single_block_linears_as_reference(self):
+        """Re-draw the single blocks' split linears from the reference's fused distribution.
+
+        The reference SingleStreamBlock applies xavier_uniform_ to linear1 [3H + F, H] and
+        linear2 [H, H + F]. Here linear1 is split into the attention QKV and fc1 and linear2 into
+        the attention projection and fc2, and Megatron applies xavier_uniform_ per piece, which
+        widens the bound by 1.10x-1.73x. Xavier-uniform is i.i.d. per element, so drawing every
+        piece from U(-b, b) with the fused matrix's bound b gives exactly the reference
+        distribution. Biases stay zero, as in the reference.
+        """
+        import math
+
+        b1 = b2 = float("nan")
+        for layer in self.transformer.layers[self.config.num_joint_layers :]:
+            qkv = layer.self_attention.linear_qkv.weight
+            proj = layer.self_attention.linear_proj.weight
+            fc1 = layer.mlp.linear_fc1.weight
+            fc2 = layer.mlp.linear_fc2.weight
+            # linear1: fan_in = hidden, fan_out = qkv rows + fc1 rows
+            b1 = math.sqrt(6.0 / (qkv.shape[1] + qkv.shape[0] + fc1.shape[0]))
+            # linear2: fan_in = proj cols + fc2 cols, fan_out = hidden
+            b2 = math.sqrt(6.0 / (proj.shape[1] + fc2.shape[1] + proj.shape[0]))
+            with torch.no_grad():
+                for w, b in ((qkv, b1), (fc1, b1), (proj, b2), (fc2, b2)):
+                    nn.init.uniform_(w, -b, b)
+        from primus.core.utils.module_utils import log_rank_0
+
+        log_rank_0(
+            "Single-block linears initialized with the reference fused bounds "
+            f"(linear1 {b1:.6f}, linear2 {b2:.6f}) [single_block_reference_init]"
+        )
 
     @staticmethod
     def _init_mlpembedder(module, init_std: float = 0.02):

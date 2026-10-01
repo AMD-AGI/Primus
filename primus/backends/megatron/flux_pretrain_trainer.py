@@ -665,6 +665,11 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             "adaln_plain_ops",
             False,
         )
+        config_params["single_block_reference_init"] = getattr(
+            params,
+            "single_block_reference_init",
+            False,
+        )
         config_params["adaln_always_jit_fuser"] = getattr(
             params,
             "adaln_always_jit_fuser",

@@ -92,6 +92,12 @@ modules:
       # recipe, which is the configuration the convergence evidence so far was
       # collected under; flipping it is a convergence experiment, not a cleanup.
       nemo_aligned_lr_warmup: false
+      # MLPerf reference warmup, peak * (step+1) / warmup_steps (torchtitan LambdaLR).
+      # Megatron's stock form runs step 0 at lr 0; nemo_aligned is (step+1)/(W+1).
+      reference_lr_warmup: true
+      # Single blocks: draw the split qkv/fc1 | proj/fc2 from the reference's fused
+      # linear1 | linear2 Xavier bound (closed division: same init distribution).
+      single_block_reference_init: true
 
       # ==========================================
       # MLPerf Training v5.1 Alignment
