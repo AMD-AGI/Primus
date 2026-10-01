@@ -55,6 +55,17 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
     original_get_qkv = attention_cls.get_query_key_value_tensors
     original_apply_rope = attention_module.apply_rotary_pos_emb
 
+    def _has_module_hooks(module) -> bool:
+        return any(
+            getattr(module, name, None)
+            for name in (
+                "_forward_pre_hooks",
+                "_forward_hooks",
+                "_backward_pre_hooks",
+                "_backward_hooks",
+            )
+        )
+
     def _eligible(self, rotary_pos_emb, inference_context, packed_seq_params) -> bool:
         q_norm = getattr(self, "q_layernorm", None)
         k_norm = getattr(self, "k_layernorm", None)
@@ -76,6 +87,8 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
             and not getattr(self, "offload_qkv_linear", False)
             and isinstance(q_norm, PrimusTurboRMSNorm)
             and isinstance(k_norm, PrimusTurboRMSNorm)
+            and not _has_module_hooks(q_norm)
+            and not _has_module_hooks(k_norm)
             and not getattr(q_norm, "zero_centered_gamma", False)
             and not getattr(k_norm, "zero_centered_gamma", False)
             and q_norm.eps == k_norm.eps
@@ -179,6 +192,8 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
             self.q_layernorm.eps,
         )
         # The outer attention forward still visits its normal RoPE callsite.
+        if self.config.test_mode:
+            self.run_realtime_tests()
         # Tensor-owned markers make exactly these two calls no-ops without
         # changing behavior for any other attention module or invocation.
         query._primus_qk_rmsnorm_rope_applied = True
