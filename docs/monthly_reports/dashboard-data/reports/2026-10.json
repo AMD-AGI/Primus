@@ -1,0 +1,84 @@
+{
+  "report_id": "2026-10",
+  "content_type": "monthly-report",
+  "title": "Primus Monthly Engineering Report — 2026-10",
+  "report_path": "docs/monthly_reports/2026-10-primus-monthly.md",
+  "report_github_url": "https://github.com/AMD-AGI/Primus/blob/dashboard-data/docs/monthly_reports/2026-10-primus-monthly.md",
+  "time_window": {
+    "timezone": "Asia/Shanghai",
+    "start": "2026-09-01T17:05:00+08:00",
+    "end": "2026-10-01T17:02:00+08:00"
+  },
+  "generated_at": "2026-10-01T17:02:00+08:00",
+  "merged_pr_count": 73,
+  "category_breakdown": {
+    "CI/Infra": 20,
+    "Other": 16,
+    "Bug Fix": 12,
+    "Performance Optimization": 9,
+    "Docs": 9,
+    "Turbo/Dependency Version Update": 4,
+    "Refactor": 3
+  },
+  "megatron_status": {
+    "pin_commit": "d3528a21301db2d12e92912b3ec025dc8a2ed4d6",
+    "pin_date": "2026-03-06",
+    "pin_version": "0.16.0rc0",
+    "pin_changed_in_window": false,
+    "upstream_repo": "https://github.com/NVIDIA/Megatron-LM",
+    "upstream_ref": "main",
+    "upstream_head": "1b638343ed4b3a3a630103a666e4266ac064cf0b",
+    "upstream_head_date": "2026-10-01",
+    "upstream_version": "0.20.0",
+    "commit_gap": 1662,
+    "recommendation": "plan sync"
+  },
+  "torchtitan_status": {
+    "pin_commit": "73a0e6979dd10b6b1904098eb3c8f62c18ab87ce",
+    "pin_date": "2026-02-20",
+    "pin_version": "v0.2.2",
+    "pin_changed_in_window": false,
+    "upstream_repo": "https://github.com/pytorch/torchtitan",
+    "upstream_ref": "main",
+    "upstream_head": "1aaee42bf476c74d746ee842fc23cf09612b3aa9",
+    "upstream_head_date": "2026-10-01",
+    "upstream_version": "0.2.2",
+    "commit_gap": 1194,
+    "recommendation": "plan sync"
+  },
+  "primus_turbo_status": {
+    "drift_type": "quarterly_in_repo",
+    "quarter_start_ts": "2026-10-01T00:00:00+08:00",
+    "quarter_start_anchor_commit": "bc8fd627f4cffe92ba739940831cf8d6b57a7f11",
+    "current_ci_commit": "ae1ac068e8ac08b98c7467f27b3cbd53ebe292af",
+    "quarter_start_ci_commit": "ae1ac068e8ac08b98c7467f27b3cbd53ebe292af",
+    "current_benchmark_commit": "a04a233cbfb468dbe21600cbf9db70953428b25c",
+    "quarter_start_benchmark_commit": "a04a233cbfb468dbe21600cbf9db70953428b25c",
+    "current_aiter_commit": "0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e",
+    "quarter_start_aiter_commit": "0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e",
+    "current_triton_commit": "09500db9f0fe66fd176d1f080e2017b37e7e995d",
+    "quarter_start_triton_commit": "09500db9f0fe66fd176d1f080e2017b37e7e995d",
+    "current_uccl_commit": "5afb4117893c58cc0c8557d9286336141a301053",
+    "quarter_start_uccl_commit": "5afb4117893c58cc0c8557d9286336141a301053",
+    "ci_drift_commits_since_quarter_start": 0,
+    "benchmark_drift_commits_since_quarter_start": 0,
+    "ci_pin_movement_in_month": "6d5ff979eb019fbbcd91790ac812024cca05a882 -> ae1ac068e8ac08b98c7467f27b3cbd53ebe292af (+47 commits, PR #1195)",
+    "pin_changed_in_window": true,
+    "recommendation": "monitor"
+  },
+  "recommendations": {
+    "megatron": "plan sync",
+    "torchtitan": "plan sync",
+    "primus_turbo": "monitor"
+  },
+  "key_findings": [
+    "Continuity-based window 2026-09-01 17:05 GMT+8 -> 2026-10-01 17:02 GMT+8 (~30 days). gap_detected = true because window_start (2026-09-01) is earlier than the first day of the current calendar month (2026-10-01), so this run captures September activity a plain calendar-month window would have dropped. All prior weekly+monthly report windows merge into one contiguous coverage group (no >7-day gap), and the span is within the healthy monthly range (<45 days).",
+    "73 PRs merged to main in the window. Largest categories: CI/Infra 20 (PRPUNDIT test series, v26.6/v26.7 OOB dockerfiles, GPU-label gating), Other 16 (SpecForge offline+online backends, MiniMax-M3, DLRM-v4, model recipes), Bug Fix 12, Performance Optimization 9, Docs 9, Turbo/Dependency Version Update 4, Refactor 3.",
+    "No backend-gap-tracked pin changed in-window: third_party/Megatron-LM stayed at d3528a21 and third_party/torchtitan stayed at 73a0e697 (v0.2.2 tag) for the whole window. Therefore backend_gap_updated = false; no backend-gap report was regenerated.",
+    "Other in-window pin movement (not backend-gap targets): third_party/maxtext advanced b47d74bf -> b3c53763 (PR #1172, align JAX backends with v26.7). maxtext has no backend-gap report set, so it is noted but not regenerated.",
+    "Megatron-LM upstream drift: pin d3528a21 (2026-03-06, unchanged) is now 1662 commits behind upstream HEAD 1b638343 (2026-10-01); upstream core version advanced 0.16.0rc0 (pin) -> 0.20.0. Notable upstream since pin: MFSDP v2 hardening, TransformerEngine 2.20, distributed-optimizer GTP dedup, selective replay for wide-residual streams, hybrid/Mamba + DeepSeek Sparse Attention. Recommendation: plan sync.",
+    "torchtitan upstream drift: pin 73a0e697 (v0.2.2, 2026-02-20, unchanged) is now 1194 commits behind upstream HEAD 1aaee42b (2026-10-01). Notable upstream since tag: local compile (OffsetRMSNorm/gated RMSNorm), CUDA-graph optimizer/grad capture, graph_trainer + RL stack, DeepSeek-V4 packed docs/Attention Gym, Qwen 3.5, Tyro->Python config loading. Recommendation: plan sync.",
+    "Primus-Turbo Q4 quarterly drift: Q4 began 2026-10-01, only hours before this report, so all tracked pins (CI ae1ac068, benchmark a04a233c, AITER 0f3c58e6, TRITON 09500db9, UCCL 5afb4117) equal their quarter-start values -> 0 commits of Q4 drift. Context: the CI pin advanced 6d5ff979 -> ae1ac068 (+47) during September via PR #1195 (MegaMoE FlyDSL ownership, upstream #525). Recommendation: monitor.",
+    "Notable hardening this month: Flux validation-loss clone out of Megatron rescale (#1079), TE requantize_data UnboundLocalError fix (#1108), Triton buffer-store/ROCm NaN workaround (#962), scientific-notation CLI float parsing (#1112), FileNotFoundError (not assert) in setup_backend_path under python -O (#1111), and torchtitan GPT-OSS router-bias init (#1183)."
+  ]
+}
