@@ -901,8 +901,11 @@ def _load_state_dict(path: Path) -> StateDict:
         pts = sorted([*path.glob("*.pt"), *path.glob("*.pth"), *path.glob("*.bin")])
         if not pts:
             raise FileNotFoundError(f"No checkpoint files under {path}")
-        loaded = torch.load(str(pts[0]), map_location="cpu", weights_only=False)
-        return loaded.get("state_dict", loaded)
+        for f in pts:
+            logger.info("  Loading %s...", f.name)
+            loaded = torch.load(str(f), map_location="cpu", weights_only=False)
+            sd.update(loaded.get("state_dict", loaded))
+        return sd
     if path.suffix == ".safetensors":
         return load_safetensors(str(path))
     loaded = torch.load(str(path), map_location="cpu", weights_only=False)
