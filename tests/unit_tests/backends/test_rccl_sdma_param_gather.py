@@ -612,7 +612,7 @@ def test_megatron_hook_enables_and_tunes_grad_reduce_scatter():
             "MEGATRON_GRAD_REDUCE_BACKEND": "rccl_sdma",
             "RCCL_FORCE_CE_REDUCESCATTER": "1",
             "RCCL_CE_REDUCE_PER_CHUNK": "1",
-            "RCCL_CE_REDUCE_MAX_BLOCKS": "92",
+            "RCCL_CE_REDUCE_MAX_BLOCKS": "64",
         },
     )
 
@@ -621,7 +621,7 @@ def test_megatron_hook_enables_and_tunes_grad_reduce_scatter():
     assert "env.RCCL_CE_REDUCESCATTER=1" in result.stdout
     assert "env.RCCL_FORCE_CE_REDUCESCATTER=1" in result.stdout
     assert "env.RCCL_CE_REDUCE_PER_CHUNK=1" in result.stdout
-    assert "env.RCCL_CE_REDUCE_MAX_BLOCKS=92" in result.stdout
+    assert "env.RCCL_CE_REDUCE_MAX_BLOCKS=64" in result.stdout
     assert "env.NCCL_CTA_POLICY" not in result.stdout
 
 

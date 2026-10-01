@@ -113,7 +113,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `RCCL_CE_REDUCESCATTER` | `0` in RCCL | Primus hook sets `1` for the gradient selector | RCCL | Enables CE ReduceScatter, subject to RCCL eligibility checks. |
 | `RCCL_FORCE_CE_REDUCESCATTER` | `0` in RCCL | User | RCCL | Bypasses the zero-CTA, registered-user-buffer, and tuned-size gates; useful for staged large-message testing. Still requires `RCCL_CE_REDUCESCATTER=1`. |
 | `RCCL_CE_REDUCE_PER_CHUNK` | `0` in RCCL | User | RCCL | Uses a finite reducer after each staged chunk instead of a persistent reduction grid. This mode uses 12 staging slots. |
-| `RCCL_CE_REDUCE_MAX_BLOCKS` | `46` in RCCL | User | RCCL | Caps the local CE reduction kernel from 1 through 92 blocks. This affects the reduction phase, not SDMA scatter movement. |
+| `RCCL_CE_REDUCE_MAX_BLOCKS` | `46` in RCCL | User | RCCL | Caps the local CE reduction kernel from 1 through 92 blocks. This affects the reduction phase, not copy-engine scatter movement. |
 | `RCCL_CE_AR_STAGING_BYTES` | `268435456` in RCCL | User | RCCL | Per-slot staging capacity shared by CE AllReduce and CE ReduceScatter. Increasing it raises per-rank HBM use. |
 | `RCCL_DDA_ENABLE` | `1` in RCCL | User | RCCL | Enables DDA collectives. Keep enabled for the optimized AllGather path; disabling it is mainly useful when a profiler cannot observe DDA operations. |
 | `TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK` | `0` | `base_env.sh` | PyTorch + RCCL | Tensor allocator hook for NCCL registration. |

@@ -98,7 +98,7 @@ export MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma
 export RCCL_CE_REDUCESCATTER=1
 export RCCL_FORCE_CE_REDUCESCATTER=1
 export RCCL_CE_REDUCE_PER_CHUNK=1
-export RCCL_CE_REDUCE_MAX_BLOCKS=92
+export RCCL_CE_REDUCE_MAX_BLOCKS=64
 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
 ```
 

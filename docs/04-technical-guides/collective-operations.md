@@ -246,15 +246,17 @@ is:
 ```bash
 export RCCL_FORCE_CE_REDUCESCATTER=1
 export RCCL_CE_REDUCE_PER_CHUNK=1
-export RCCL_CE_REDUCE_MAX_BLOCKS=92
+export RCCL_CE_REDUCE_MAX_BLOCKS=64
 ```
 
 These are workload-specific tuning values, not universal defaults.
 `RCCL_FORCE_CE_REDUCESCATTER=1` lets an oversized message use the staged CE
 path. `RCCL_CE_REDUCE_PER_CHUNK=1` launches a finite local reducer only after
-each SDMA-staged chunk is ready instead of keeping a persistent grid resident.
-`RCCL_CE_REDUCE_MAX_BLOCKS=92` lets that finite reducer use up to 92 compute
-blocks while it runs; the scatter movement itself remains on copy engines.
+each copy-engine-staged chunk is ready instead of keeping a persistent grid
+resident. `RCCL_CE_REDUCE_MAX_BLOCKS=64` lets that finite reducer use up to 64
+compute blocks while it runs; the scatter movement itself remains on copy
+engines. The RCCL-wide default remains 46 blocks; 64 is the measured GPT-OSS
+20B tuning on one MI355X node.
 Per-chunk mode reserves 12 staging slots, so the default 256 MiB slot capacity
 uses about 3 GiB of additional HBM per rank.
 
