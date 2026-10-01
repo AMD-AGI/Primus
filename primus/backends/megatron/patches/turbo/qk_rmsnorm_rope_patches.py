@@ -70,6 +70,8 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
             and self.hidden_size_per_attention_head == 64
             and not getattr(self.config, "rotary_interleaved", False)
             and getattr(self.config, "rotary_percent", 1.0) == 1.0
+            and attention_module._yarn_get_concentration_factor_from_config(self.config)
+            == 1.0
             and not getattr(self.config, "attention_output_gate", False)
             and getattr(self, "world_size", 1) == 1
             and not getattr(self, "offload_qkv_linear", False)
@@ -159,7 +161,12 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
             split_sizes,
         )
         if why is not None:
-            query, key, value = mixed_qkv.split(split_sizes, dim=3)
+            if attention_module.SplitAlongDim is not None:
+                query, key, value = attention_module.SplitAlongDim(
+                    mixed_qkv, 3, split_sizes
+                )
+            else:
+                query, key, value = mixed_qkv.split(split_sizes, dim=3)
             query = query.reshape(
                 query.size(0), query.size(1), -1, self.hidden_size_per_attention_head
             )

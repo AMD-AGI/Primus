@@ -107,10 +107,14 @@ def _run_rmsnorm_residual(x, residual, gamma, eps, skip_y_store=True):
     return y, xpr, None
 
 
-def _run_qkv_rmsnorm_mxfp4(x, residual, gamma, eps, linear_qkv):
+def _run_qkv_rmsnorm_mxfp4(x, residual, gamma, eps, attention):
     """Run the GPT-OSS QKV-only fused producer when its consumer matches."""
     if not _mxfp4_qkv_enabled():
         return None
+    if getattr(attention, "offload_qkv_linear", False):
+        return None
+
+    linear_qkv = getattr(attention, "linear_qkv", None)
 
     from primus.backends.megatron.core.extensions.primus_turbo import (
         attach_fused_mxfp4_activation,
@@ -502,7 +506,9 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
             qkv_skip, gamma, eps = qkv_params
             if getattr(qkv_skip, "zero_centered_gamma", False):
                 gamma = gamma + 1
-            fused_qkv = _run_qkv_rmsnorm_mxfp4(prev_mlp_out, prev_residual, gamma, eps, qkv_skip)
+            fused_qkv = _run_qkv_rmsnorm_mxfp4(
+                prev_mlp_out, prev_residual, gamma, eps, layer.self_attention
+            )
             if fused_qkv is not None:
                 input_layernorm_output, hidden_states = fused_qkv
                 preq = None
@@ -519,8 +525,9 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
             gamma = in_ln.weight
             if getattr(in_ln, "zero_centered_gamma", False):
                 gamma = gamma + 1
-            linear_qkv = getattr(layer.self_attention, "linear_qkv", None)
-            fused_qkv = _run_qkv_rmsnorm_mxfp4(prev_mlp_out, prev_residual, gamma, in_ln.eps, linear_qkv)
+            fused_qkv = _run_qkv_rmsnorm_mxfp4(
+                prev_mlp_out, prev_residual, gamma, in_ln.eps, layer.self_attention
+            )
             if fused_qkv is not None:
                 input_layernorm_output, hidden_states = fused_qkv
                 preq = None

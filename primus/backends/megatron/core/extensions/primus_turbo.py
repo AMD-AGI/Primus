@@ -125,6 +125,8 @@ def can_consume_fused_mxfp4_activation(module) -> bool:
         and module.config.normalization != "RMSNorm"
     ):
         return False
+    if _use_split_wgrad_op():
+        return False
     # This probe runs immediately before the module's own forward, outside its
     # per-module quantization context. Enter the same context briefly so the
     # decision reflects this linear's recipe rather than stale global state.
