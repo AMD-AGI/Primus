@@ -162,6 +162,7 @@ Presets: `primus/configs/models/maxtext/`. Examples: `examples/maxtext/configs/M
 | `llama3_8B.yaml` | `primus/configs/models/maxtext/llama3_8B.yaml` | MI300X, MI355X |
 | `llama3_70B.yaml` | `primus/configs/models/maxtext/llama3_70B.yaml` | MI300X, MI355X |
 | `llama3.1_405B.yaml` | `primus/configs/models/maxtext/llama3.1_405B.yaml` | MI355X |
+| `llama3.2_1B.yaml` | `primus/configs/models/maxtext/llama3.2_1B.yaml` | Convergence test only (`tools/convergence_test/configs/maxtext/`) |
 | `llama3.3_70B.yaml` | `primus/configs/models/maxtext/llama3.3_70B.yaml` | MI300X, MI355X |
 | `mixtral_8x7B.yaml` | `primus/configs/models/maxtext/mixtral_8x7B.yaml` | MI300X, MI355X |
 | `qwen3_14B.yaml` | `primus/configs/models/maxtext/qwen3_14B.yaml` | MI300X, MI355X |

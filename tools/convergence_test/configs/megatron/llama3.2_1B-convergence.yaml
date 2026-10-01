@@ -5,7 +5,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 
 # Llama-3.2-1B BF16 convergence test on FineWeb-Edu.
 #
-#   tools/convergence_test/run_convergence_test.sh --model llama3.2_1B
+#   tools/convergence_test/run_convergence_test.sh --model megatron/llama3.2_1B
 #
 # 2000 iters x 128 x 4096 = 1.05B tokens. Measured on 8x MI325X at 1.33 s/iter
 # (49.2k tokens/s/GPU), so about 45 minutes. The reference curve this produces

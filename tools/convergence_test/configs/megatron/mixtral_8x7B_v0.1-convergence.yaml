@@ -6,7 +6,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # Mixtral-8x7B BF16 convergence test on FineWeb-Edu, tokenised with the Mixtral
 # 32k SentencePiece vocab.
 #
-#   tools/convergence_test/run_convergence_test.sh --model mixtral_8x7B_v0.1
+#   tools/convergence_test/run_convergence_test.sh --model megatron/mixtral_8x7B_v0.1
 #
 # 300 iters x 128 x 4096 = 157M tokens. Measured on 8x MI325X the step time
 # falls from ~31 s to ~23 s over the first 50 iterations as the router balances,
