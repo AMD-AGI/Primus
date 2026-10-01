@@ -111,6 +111,9 @@ moe_grouped_gemm: false
 # router arguments
 moe_router_load_balancing_type: "aux_loss" # 'aux_loss', 'seq_aux_loss', 'sinkhorn', 'none'
 moe_router_dtype: null # str, fp32, fp64
+# Keep FP32 router logits while using BF16 operands in the router backward.
+# With gradient_accumulation_fusion, dW is written directly to FP32 main_grad.
+moe_router_bwd_bf16: false
 moe_router_score_function: softmax # softmax, sigmoid
 moe_router_topk: 2
 moe_router_pre_softmax: false
