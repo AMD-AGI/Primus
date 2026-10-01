@@ -159,13 +159,15 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
             split_sizes,
         )
         if why is not None:
-            return original_get_qkv(
-                self,
-                hidden_states,
-                key_value_states=key_value_states,
-                output_gate=False,
-                split_qkv=True,
+            query, key, value = mixed_qkv.split(split_sizes, dim=3)
+            query = query.reshape(
+                query.size(0), query.size(1), -1, self.hidden_size_per_attention_head
             )
+            query = attention_module.apply_module(self.q_layernorm)(query)
+            key = attention_module.apply_module(self.k_layernorm)(key)
+            if self.config.test_mode:
+                self.run_realtime_tests()
+            return query, key, value
         query, key, value = fused_qkv_rmsnorm_rope(
             mixed_qkv,
             self.q_layernorm.weight,
