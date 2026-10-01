@@ -340,6 +340,10 @@ modules:
       # programs, so memory latency is hidden). dx and dshift bit-identical; dscale's
       # fp32 partial sums regroup (one bf16 ulp).
       mxfp6_ln_bwd_ns16: true
+      # AdaLN modulation linears store their weight and bias gradients straight into
+      # main_grad (the wgrad GEMM's output is main_grad), skipping AccumulateGrad and
+      # the DDP hook's copy. Bit-identical; needs one microbatch per step.
+      mxfp6_adaln_wgrad_main_grad: true
 
       # Clip gradients with one flat mul_ per contiguous run instead of the
       # chunked multi_tensor applier.
