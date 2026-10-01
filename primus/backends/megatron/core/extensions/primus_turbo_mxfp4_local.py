@@ -68,8 +68,12 @@ def _enable_preshuffle() -> bool:
     (pre Primus-Turbo PR #383) so MXFP4LinearFunction can keep passing a bool
     into its custom ops.
     """
+    # Newer Primus-Turbo returns a BackendChoice(backend, auto_tune) here
+    # rather than a bare BackendType.
+    choice = GlobalBackendManager.get_gemm_backend(PrecisionType.FP4)
     return (
-        GlobalBackendManager.get_gemm_backend(PrecisionType.FP4) == BackendType.AITER
+        getattr(choice, "backend", choice) == BackendType.AITER
+        and not getattr(choice, "auto_tune", False)
         and not GlobalBackendManager.auto_tune_enabled()
     )
 
