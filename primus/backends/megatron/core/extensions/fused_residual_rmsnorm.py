@@ -133,10 +133,11 @@ def _run_qkv_rmsnorm_mxfp4(x, residual, gamma, eps, linear_qkv):
         float4_e2m1fn_x2,
         skip_y_store=True,
     )
+    fused_dispatch = getattr(y, "_primus_turbo_rmsnorm_mxfp4_fused", False)
     attach_fused_mxfp4_activation(y, row, row_scale, col, col_scale)
 
     global _LOGGED_MXFP4_QKV_PATH
-    if not _LOGGED_MXFP4_QKV_PATH:
+    if fused_dispatch and not _LOGGED_MXFP4_QKV_PATH:
         _log(
             "First fused residual+RMSNorm+MXFP4 QKV dispatch: "
             f"shape={tuple(x.shape)} consumer={type(linear_qkv).__name__}"

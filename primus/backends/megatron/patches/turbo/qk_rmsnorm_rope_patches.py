@@ -40,6 +40,9 @@ def _enabled(_ctx: PatchContext) -> bool:
 )
 def patch_qk_rmsnorm_rope(_ctx: PatchContext):
     import megatron.core.transformer.attention as attention_module
+    from primus_turbo.pytorch.kernels.rope.qk_rmsnorm_rope_impl import (
+        qk_rmsnorm_rope_shape_error,
+    )
     from primus_turbo.pytorch.ops.rope import fused_qkv_rmsnorm_rope
 
     from primus.backends.megatron.core.extensions.primus_turbo import PrimusTurboRMSNorm
@@ -148,6 +151,21 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
             output_gate=False,
             split_qkv=False,
         )
+        why = qk_rmsnorm_rope_shape_error(
+            mixed_qkv,
+            self.q_layernorm.weight,
+            self.k_layernorm.weight,
+            freqs,
+            split_sizes,
+        )
+        if why is not None:
+            return original_get_qkv(
+                self,
+                hidden_states,
+                key_value_states=key_value_states,
+                output_gate=False,
+                split_qkv=True,
+            )
         query, key, value = fused_qkv_rmsnorm_rope(
             mixed_qkv,
             self.q_layernorm.weight,
