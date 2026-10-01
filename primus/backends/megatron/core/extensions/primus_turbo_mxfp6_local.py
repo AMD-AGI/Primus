@@ -1575,6 +1575,9 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
         # stacking stream a above stream b and reshaping gives exactly the joint sequence
         # the cat used to build.
         mixed_qkv = torch.empty(m_a + m_b, n, device=xa.device, dtype=out_dtype)
+        # Each stream's QKV bias is folded into its GEMM's store epilogue, as the per-stream
+        # MXFP6QKVNormRopeFunction does through gemm_fp6_impl. (BUG-2: until 2026-09-30 this
+        # call passed no bias, so both streams' QKV biases were missing from the forward.)
         gemm_fp6_out_impl(
             packs[0][0],
             packs[0][1],
@@ -1586,6 +1589,7 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
             k,
             _GRAN_VALUE,
             weight_is_fp4,
+            b_a,
         )
         gemm_fp6_out_impl(
             packs[1][0],
@@ -1598,6 +1602,7 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
             k,
             _GRAN_VALUE,
             weight_is_fp4,
+            b_b,
         )
 
         s_a, s_b, batch = shape_a[0], shape_b[0], shape_a[1]
