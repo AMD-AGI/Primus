@@ -17,6 +17,30 @@ namespace {
 constexpr int kBlockSize = 512;
 constexpr int kIlp = 8;
 
+__device__ __forceinline__ void unpack_bf16x8(const uint4& packed, float* values) {
+  const uint32_t words[kIlp / 2] = {packed.x, packed.y, packed.z, packed.w};
+#pragma unroll
+  for (int j = 0; j < kIlp / 2; ++j) {
+    values[j * 2] = c10::detail::f32_from_bits(
+        static_cast<uint16_t>(words[j] & UINT32_C(0xffff)));
+    values[j * 2 + 1] = c10::detail::f32_from_bits(
+        static_cast<uint16_t>(words[j] >> 16));
+  }
+}
+
+__device__ __forceinline__ uint4 pack_bf16x8(const float* values) {
+  uint32_t words[kIlp / 2];
+#pragma unroll
+  for (int j = 0; j < kIlp / 2; ++j) {
+    words[j] = static_cast<uint32_t>(
+                   c10::detail::round_to_nearest_even(values[j * 2])) |
+        (static_cast<uint32_t>(
+             c10::detail::round_to_nearest_even(values[j * 2 + 1]))
+         << 16);
+  }
+  return {words[0], words[1], words[2], words[3]};
+}
+
 template <bool AdamW, typename MomentT>
 __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
     int chunk_size,
@@ -94,11 +118,10 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
         v[0] = v0.x; v[1] = v0.y; v[2] = v0.z; v[3] = v0.w;
         v[4] = v1.x; v[5] = v1.y; v[6] = v1.z; v[7] = v1.w;
       } else {
-#pragma unroll
-        for (int j = 0; j < kIlp; ++j) {
-          m[j] = static_cast<float>(exp_avg[i + j]);
-          v[j] = static_cast<float>(exp_avg_sq[i + j]);
-        }
+        const uint4 packed_m = *reinterpret_cast<const uint4*>(exp_avg + i);
+        const uint4 packed_v = *reinterpret_cast<const uint4*>(exp_avg_sq + i);
+        unpack_bf16x8(packed_m, m);
+        unpack_bf16x8(packed_v, v);
       }
     } else {
 #pragma unroll
@@ -135,11 +158,8 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
         *reinterpret_cast<float4*>(exp_avg_sq + i) = {v[0], v[1], v[2], v[3]};
         *reinterpret_cast<float4*>(exp_avg_sq + i + 4) = {v[4], v[5], v[6], v[7]};
       } else {
-#pragma unroll
-        for (int j = 0; j < kIlp; ++j) {
-          exp_avg[i + j] = static_cast<MomentT>(m[j]);
-          exp_avg_sq[i + j] = static_cast<MomentT>(v[j]);
-        }
+        *reinterpret_cast<uint4*>(exp_avg + i) = pack_bf16x8(m);
+        *reinterpret_cast<uint4*>(exp_avg_sq + i) = pack_bf16x8(v);
       }
       if (model_param != nullptr) {
 #pragma unroll
