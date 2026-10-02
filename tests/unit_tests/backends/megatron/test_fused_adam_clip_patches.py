@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from primus.backends.megatron.patches.te_patches.fused_adam_clip_patches import (
+    _chained_step_with_device_clip,
     _clip_coeff,
     _get_grad_norm_tensor,
 )
@@ -63,3 +64,59 @@ def test_grad_norm_stays_on_device(monkeypatch):
     assert norm.device == optimizer.grad.device
     assert torch.equal(norm, torch.tensor([6.0]))
     assert optimizer._primus_norm_overflow_buf.dtype == torch.int32
+
+
+def test_chained_step_forwards_device_norm_to_each_adam(monkeypatch):
+    class FakeAdam:
+        pass
+
+    class FakeChildOptimizer:
+        def __init__(self, clip_grad):
+            self.optimizer = FakeAdam()
+            self.config = type("Config", (), {"clip_grad": clip_grad})()
+
+        def get_parameters(self):
+            return [object()]
+
+    class FakeChainedOptimizer:
+        def __init__(self):
+            self.chained_optimizers = [FakeChildOptimizer(1.0), FakeChildOptimizer(2.0)]
+            self.config = type("Config", (), {"log_num_zeros_in_grad": True})()
+            self.stepped = False
+
+        def prepare_grads(self):
+            return False
+
+        def grads_states_parallel_group_is_shared(self):
+            return True
+
+        def count_zeros(self):
+            return 7.0
+
+        def step_with_ready_grads(self):
+            self.stepped = True
+            return True
+
+    norm = torch.tensor([3.0])
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.te_patches.fused_adam_clip_patches."
+        "_get_grad_norm_tensor",
+        lambda optimizer: norm,
+    )
+    optimizer = FakeChainedOptimizer()
+
+    success, returned_norm, num_zeros = _chained_step_with_device_clip(
+        optimizer, FakeAdam
+    )
+
+    assert success
+    assert returned_norm is norm
+    assert num_zeros == 7.0
+    assert optimizer.stepped
+    assert [
+        child.optimizer._primus_clip_norm for child in optimizer.chained_optimizers
+    ] == [norm, norm]
+    assert [
+        child.optimizer._primus_clip_max_norm
+        for child in optimizer.chained_optimizers
+    ] == [1.0, 2.0]
