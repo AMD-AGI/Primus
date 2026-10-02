@@ -12,6 +12,7 @@ Experiments live in [`configs/MI355X/diffusion/`](./configs/MI355X/diffusion/):
 | --- | --- |
 | Wan 2.2 T2V A14B | `wan2_2_t2v_a14b-*.yaml` (pretrain, finetune, synthetic, TE FP8) |
 | FLUX.1-dev / schnell | `flux_1_dev-pretrain.yaml`, `flux_1_dev-synthetic.yaml`, `flux_1_schnell-synthetic.yaml` |
+| Ideogram-4 | `ideogram4-pretrain.yaml` (synthetic) |
 
 ## Launch
 
@@ -78,4 +79,22 @@ off by default, and the module that implements it documents its remaining keys.
 | --- | --- |
 | `primus_profiler.enabled` | torch profiler traces of a few steady-state steps, one per rank |
 | `primus_turbo.fp8_linear`, `primus_turbo.mxfp4_linear`, `primus_te.mxfp4_linear` | FP8 / MXFP4 linear layers. At most one applies, and it turns on `model.transformer_engine_linear`, the AutoModel setting that performs the swap. MXFP4 is experimental. |
-| `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend. |
+| `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend, or with Ideogram-4's variable-length attention. |
+| `primus_ideogram4.varlen_attention` | Ideogram-4 variable-length packed attention. Its backward is non-deterministic: the deterministic kernel needs far more memory at image-sized sequences. |
+| `primus_ideogram4.ac_every: n` | Ideogram-4: checkpoint every nth block instead of all |
+
+## Ideogram-4 setup
+
+The transformer is randomly initialised from a weightless config directory, so no
+transformer weights are needed. Writing that directory needs the diffusers the
+pinned AutoModel brings in, so on a fresh image install it first by running the
+prepare hook once (a launch runs the same hook):
+
+```bash
+PYTHONPATH=. python3 runner/helpers/hooks/train/pretrain/nemo_automodel/prepare.py \
+    --primus_path . --data_path ./data \
+    --config examples/nemo_automodel/configs/MI355X/diffusion/ideogram4-pretrain.yaml
+python tools/nemo_automodel/make_ideogram4_config_dir.py --out <config_dir>
+```
+
+Then launch with `model.pretrained_model_name_or_path=<config_dir>`.
