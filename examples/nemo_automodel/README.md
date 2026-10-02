@@ -77,3 +77,5 @@ off by default, and the module that implements it documents its remaining keys.
 | Setting | Effect |
 | --- | --- |
 | `primus_profiler.enabled` | torch profiler traces of a few steady-state steps, one per rank |
+| `primus_turbo.fp8_linear`, `primus_turbo.mxfp4_linear`, `primus_te.mxfp4_linear` | FP8 / MXFP4 linear layers. At most one applies, and it turns on `model.transformer_engine_linear`, the AutoModel setting that performs the swap. MXFP4 is experimental. |
+| `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend. |
