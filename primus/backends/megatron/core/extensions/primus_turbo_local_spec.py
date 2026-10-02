@@ -29,9 +29,15 @@ from typing import Optional
 
 import primus_turbo.pytorch as pt
 import torch
-from primus_turbo.pytorch.ops.attention.flash_attn_interface import FlashAttnFunc
+from primus_turbo.pytorch.ops.attention.flash_attn_interface import (
+    FlashAttnFunc,
+    FlashAttnVarlenFunc,
+)
 
+# Both autograd Functions have to be inlined, not just the dense one: without
+# the varlen entry here Dynamo breaks the graph at every packed attention call.
 torch._dynamo.allow_in_graph(FlashAttnFunc)
+torch._dynamo.allow_in_graph(FlashAttnVarlenFunc)
 
 
 @torch._dynamo.disable
@@ -156,6 +162,20 @@ class PrimusTurboLocalAttention(MegatronModule):
                 pt.ops.flash_attn_usp_func if config.context_parallel_size > 1 else pt.ops.flash_attn_func
             )
 
+        # The varlen counterpart, used only when a caller hands us a thd packing.
+        # Turbo ships no fp8 varlen kernel, so that combination stays unset and
+        # is reported at the call site rather than silently running a different
+        # precision than the config asked for.
+        self.attn_varlen_func = (
+            None
+            if args.enable_turbo_attention_float8
+            else (
+                pt.ops.flash_attn_varlen_usp_func
+                if config.context_parallel_size > 1
+                else pt.ops.flash_attn_varlen_func
+            )
+        )
+
         # The transpose in forward() produces a non-contiguous, SBHD-strided view.
         # aiter's v3 flash-attention backward mishandles that strided layout on
         # gfx942 (MI300X), corrupting gradients and causing grad-norm divergence
@@ -173,6 +193,56 @@ class PrimusTurboLocalAttention(MegatronModule):
         # Validate configuration
         if config.window_size is not None:
             raise ValueError("PrimusTurboLocalAttention does not support sliding window attention")
+
+    def _forward_thd(
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        packed_seq_params: PackedSeqParams,
+        causal: bool,
+    ) -> Tensor:
+        """Attention over a packed ``thd`` batch, ``[total_tokens, heads, dim]``.
+
+        The caller has already flattened the batch into the token dim, so there
+        is no transpose here and nothing to make contiguous -- which is also why
+        the gfx942 strided-backward workaround does not apply on this path.
+
+        ``max_seqlen_q``/``max_seqlen_kv`` are required: TE derives them from
+        ``cu_seqlens`` itself, Turbo takes them as arguments.
+        """
+        if self.attn_varlen_func is None:
+            raise RuntimeError(
+                "thd attention was requested with enable_turbo_attention_float8, but Turbo "
+                "has no fp8 varlen kernel. Use bshd, or drop the fp8 attention flag."
+            )
+        for name in ("max_seqlen_q", "max_seqlen_kv"):
+            if getattr(packed_seq_params, name, None) is None:
+                raise ValueError(
+                    f"thd attention needs {name} on PackedSeqParams; Turbo's varlen kernel "
+                    "takes it as an argument rather than deriving it from cu_seqlens."
+                )
+
+        output = self.attn_varlen_func(
+            query,
+            key,
+            value,
+            packed_seq_params.cu_seqlens_q,
+            packed_seq_params.cu_seqlens_kv,
+            packed_seq_params.max_seqlen_q,
+            packed_seq_params.max_seqlen_kv,
+            dropout_p=0.0,
+            softmax_scale=self.softmax_scale,
+            causal=causal,
+            window_size=(-1, -1),
+            bias=None,
+            alibi_slopes=None,
+            deterministic=False,
+            return_lse=False,
+            return_attn_probs=False,
+            **self.attn_kwargs,
+        )
+        return output.reshape(output.shape[0], -1)
 
     def forward(
         self,
@@ -194,18 +264,26 @@ class PrimusTurboLocalAttention(MegatronModule):
             attention_mask: Attention mask (not used by flash attention)
             attn_mask_type: Type of attention mask (causal, no_mask, etc.)
             attention_bias: Attention bias (not used in this implementation)
-            packed_seq_params: Packed sequence parameters (optional)
+            packed_seq_params: Packed sequence parameters. With qkv_format
+                "thd" the inputs are read as packed [total_tokens, heads, dim]
+                and served by the varlen kernel instead.
 
         Returns:
-            Attention output [seq_len, batch, num_heads * head_dim] (merged heads)
+            Attention output [seq_len, batch, num_heads * head_dim] (merged heads),
+            or [total_tokens, num_heads * head_dim] on the thd path.
         """
+        causal = attn_mask_type == AttnMaskType.causal
+
+        # A thd packing means the caller has already flattened the batch into the
+        # token dim, so the bshd transpose below would be wrong for it.
+        if packed_seq_params is not None and packed_seq_params.qkv_format == "thd":
+            return self._forward_thd(query, key, value, packed_seq_params, causal)
+
         query, key, value = [x.transpose(0, 1) for x in (query, key, value)]
 
         # gfx942: avoid aiter's broken strided-sbhd backward (see __init__).
         if self.force_contiguous_qkv:
             query, key, value = query.contiguous(), key.contiguous(), value.contiguous()
-
-        causal = attn_mask_type == AttnMaskType.causal
 
         if os.environ.get("PRIMUS_PT_MIMIC_TE_RNG", "0") == "1":
             B = query.size(0)
