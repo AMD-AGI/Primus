@@ -195,7 +195,10 @@ def _warmup_actors(monkeypatch):
         state={},
         zero_grad=lambda set_to_none=True: None,
     )
-    return [model], optimizer, SimpleNamespace(num_steps=0)
+    # The warmup restores the scheduler's step count and calls step(0) to rewrite the lr.
+    scheduler = SimpleNamespace(num_steps=0, step_calls=[])
+    scheduler.step = lambda increment: scheduler.step_calls.append(increment)
+    return [model], optimizer, scheduler
 
 
 def _install_mock_mllog(monkeypatch, events=None):
