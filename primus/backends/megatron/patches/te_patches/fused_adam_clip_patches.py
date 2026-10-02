@@ -190,7 +190,11 @@ def _chained_step_with_device_clip(optimizer, fused_adam_type):
         optimizer.count_zeros() if optimizer.config.log_num_zeros_in_grad else None
     )
     update_successful = optimizer.step_with_ready_grads()
-    return update_successful, grad_norm, num_zeros_in_grad
+    # Returning the device tensor would make Megatron's per-step logger format
+    # it as a Python float, reinstating the synchronization this patch removes.
+    # The norm has already served its training purpose inside Adam, so suppress
+    # the optional logging statistic.
+    return update_successful, None, num_zeros_in_grad
 
 
 def _install_patch() -> None:
@@ -273,7 +277,7 @@ def _install_patch() -> None:
             self._primus_clip_norm = None
             self._primus_clip_max_norm = 1.0
 
-    def patched_clip_grad_norm(self, clip_grad: float) -> torch.Tensor:
+    def patched_clip_grad_norm(self, clip_grad: float) -> None:
         # Preserve Megatron's norm kernel and global SUM reduction, but retain
         # the result on device and omit clip_grad_by_total_norm_fp32's scale pass.
         grad_norm = _get_grad_norm_tensor(self)
@@ -285,7 +289,8 @@ def _install_patch() -> None:
             )
         inner_optimizer._primus_clip_norm = grad_norm
         inner_optimizer._primus_clip_max_norm = float(clip_grad)
-        return grad_norm
+        # Megatron only uses this return value for optional logging after the
+        # update. Falling through with None avoids a device-to-host synchronization.
 
     @torch.no_grad()
     def patched_chained_step(self):
