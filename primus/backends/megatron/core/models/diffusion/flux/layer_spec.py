@@ -547,6 +547,10 @@ def get_flux_layer_spec(
                 and PrimusTurboFloat8LocalSpecProvider is not None
             ):
                 backend = PrimusTurboFloat8LocalSpecProvider()
+
+                # A tw_fp8 sensitive layer stays on the Float8 backend and the run's fp8_recipe.
+                if getattr(config, "sensitive_layer_precision", "bf16") == "bf16":
+                    sensitive_backend = PrimusTurboLocalSpecProvider()
             elif HAVE_PRIMUS_TURBO_LOCAL and PrimusTurboLocalSpecProvider is not None:
                 backend = PrimusTurboLocalSpecProvider()
             else:
