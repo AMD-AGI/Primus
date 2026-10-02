@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Mixed-precision MoE router backward with direct FP32 wgrad accumulation.
+"""Mixed-precision MoE router backward with direct wgrad accumulation.
 
 Megatron keeps FP32 router logits while the router input and parameter are
 typically BF16.  Its stock backward promotes both large operands to FP32.  The
@@ -12,12 +12,14 @@ opt-in Primus path keeps the forward in FP32, but runs the backward GEMMs with
 BF16 operands:
 
 * dX is emitted in BF16.
-* dW uses FP32 accumulation/output.
+* dW uses FP32 GEMM accumulation and matches the destination buffer dtype.
 * With gradient-accumulation fusion, dW is written directly into the
-  parameter's FP32 ``main_grad`` buffer.
+  parameter's contiguous BF16 or FP32 ``main_grad`` buffer.
 
 The final point avoids materializing a temporary FP32 dW, narrowing it to a
-BF16 ``param.grad``, and then widening/adding it into FP32 ``main_grad``.
+BF16 ``param.grad``, and separately adding it into ``main_grad``.  When the
+distributed gradient buffer is BF16, the GEMM still accumulates internally in
+FP32 and rounds once when storing directly into the BF16 destination.
 """
 
 from __future__ import annotations
@@ -29,6 +31,16 @@ import torch
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+_logged_wgrad_paths: set[str] = set()
+
+
+def _log_wgrad_path_once(path: str) -> None:
+    """Log the selected runtime wgrad destination once per process."""
+    if path in _logged_wgrad_paths:
+        return
+    _logged_wgrad_paths.add(path)
+    log_rank_0(f"[Patch:megatron.moe.router_bwd_bf16] Runtime path: {path}")
 
 
 def _enabled(ctx: PatchContext) -> bool:
@@ -45,8 +57,8 @@ def _uses_bf16_router_backward(ctx, te_general_gemm: Callable | None) -> bool:
     )
 
 
-def _resolve_fp32_main_grad(weight: torch.Tensor) -> torch.Tensor | None:
-    """Return a writable contiguous FP32 main-grad target, when one exists."""
+def _resolve_main_grad(weight: torch.Tensor) -> torch.Tensor | None:
+    """Return a writable contiguous BF16/FP32 main-grad target, when one exists."""
     if hasattr(weight, "__fsdp_param__"):
         main_grad = weight.get_main_grad()
         weight.main_grad = main_grad
@@ -55,7 +67,9 @@ def _resolve_fp32_main_grad(weight: torch.Tensor) -> torch.Tensor | None:
 
     if not isinstance(main_grad, torch.Tensor):
         return None
-    if main_grad.dtype != torch.float32 or not main_grad.is_contiguous():
+    if main_grad.dtype not in (torch.bfloat16, torch.float32):
+        return None
+    if not main_grad.is_contiguous():
         return None
     return main_grad
 
@@ -150,8 +164,9 @@ def _router_backward_bf16(
         grad=True,
     )[0].to(ctx.input_dtype)
 
-    main_grad = _resolve_fp32_main_grad(weight) if fuse_main_grad else None
+    main_grad = _resolve_main_grad(weight) if fuse_main_grad else None
     if main_grad is not None:
+        _log_wgrad_path_once(f"direct {main_grad.dtype} main_grad")
         te_general_gemm_accumulate(
             inp,
             grad_output_bf16,
@@ -174,9 +189,19 @@ def _router_backward_bf16(
         else:
             grad_weight = None
     else:
-        # Keep FP32 accumulation/output for the token reduction even when no
-        # main-grad target is available.  The autograd-facing gradient must
-        # match the BF16 parameter dtype.
+        candidate = getattr(weight, "main_grad", None)
+        if not fuse_main_grad:
+            reason = "gradient accumulation fusion disabled"
+        elif not isinstance(candidate, torch.Tensor):
+            reason = "main_grad unavailable"
+        elif candidate.dtype not in (torch.bfloat16, torch.float32):
+            reason = f"unsupported main_grad dtype={candidate.dtype}"
+        else:
+            reason = "main_grad is non-contiguous"
+        _log_wgrad_path_once(f"BF16 param.grad fallback ({reason})")
+        # Keep FP32 accumulation/output for the token reduction when no
+        # compatible main-grad target is available.  The autograd-facing
+        # gradient must match the BF16 parameter dtype.
         grad_weight = te_general_gemm(
             inp,
             grad_output_bf16,
@@ -196,7 +221,10 @@ def _router_backward_bf16(
     "megatron.moe.router_bwd_bf16",
     backend="megatron",
     phase="before_train",
-    description="Run the FP32 MoE router backward with BF16 operands and direct FP32 main-grad accumulation",
+    description=(
+        "Run the FP32 MoE router backward with BF16 operands and direct "
+        "dtype-matched main-grad accumulation"
+    ),
     condition=_enabled,
 )
 def patch_router_bwd_bf16(ctx: PatchContext) -> None:
@@ -225,7 +253,7 @@ def patch_router_bwd_bf16(ctx: PatchContext) -> None:
 
     router_function.backward = staticmethod(backward)
     mode = (
-        "direct FP32 main_grad"
+        "direct dtype-matched main_grad"
         if router_function._primus_fuse_router_main_grad
         else "BF16 param.grad"
     )

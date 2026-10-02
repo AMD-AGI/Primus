@@ -8,6 +8,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from primus.backends.megatron.patches.moe_patches import (
@@ -67,10 +68,11 @@ def _dummy(shape, dtype, zero=False):
     return torch.zeros(shape, dtype=dtype) if zero else torch.empty(shape, dtype=dtype)
 
 
-def test_direct_wgrad_overwrites_fp32_main_grad_and_returns_bf16_dummy():
+@pytest.mark.parametrize("main_grad_dtype", [torch.bfloat16, torch.float32])
+def test_direct_wgrad_overwrites_main_grad_and_returns_bf16_dummy(main_grad_dtype):
     inp = torch.randn(8, 6, dtype=torch.bfloat16)
     weight = torch.nn.Parameter(torch.randn(4, 6, dtype=torch.bfloat16))
-    weight.main_grad = torch.full_like(weight, 17.0, dtype=torch.float32)
+    weight.main_grad = torch.full_like(weight, 17.0, dtype=main_grad_dtype)
     weight.overwrite_main_grad = True
     weight.grad_added_to_main_grad = False
     grad_output = torch.randn(8, 4, dtype=torch.float32)
@@ -96,16 +98,17 @@ def test_direct_wgrad_overwrites_fp32_main_grad_and_returns_bf16_dummy():
     assert weight.overwrite_main_grad is False
     assert weight.grad_added_to_main_grad is True
     assert accum_gemm.calls[0]["out"] is weight.main_grad
-    assert accum_gemm.calls[0]["out_dtype"] == torch.float32
+    assert accum_gemm.calls[0]["out_dtype"] == main_grad_dtype
     assert accum_gemm.calls[0]["accumulate"] is False
     assert accum_gemm.calls[0]["a"].dtype == torch.bfloat16
     assert accum_gemm.calls[0]["b"].dtype == torch.bfloat16
 
 
-def test_direct_wgrad_accumulates_after_first_microbatch():
+@pytest.mark.parametrize("main_grad_dtype", [torch.bfloat16, torch.float32])
+def test_direct_wgrad_accumulates_after_first_microbatch(main_grad_dtype):
     inp = torch.randn(8, 6, dtype=torch.bfloat16)
     weight = torch.nn.Parameter(torch.randn(4, 6, dtype=torch.bfloat16))
-    weight.main_grad = torch.ones_like(weight, dtype=torch.float32)
+    weight.main_grad = torch.ones_like(weight, dtype=main_grad_dtype)
     weight.overwrite_main_grad = False
     weight.grad_added_to_main_grad = False
     accum_gemm = _FakeAccumGemm()
@@ -168,10 +171,17 @@ def test_precision_gate_requires_fp32_router_and_bf16_input_and_weight():
     assert not router_bwd._uses_bf16_router_backward(ctx, None)
 
 
-def test_non_fp32_or_noncontiguous_main_grad_falls_back_to_param_grad():
+@pytest.mark.parametrize(
+    "main_grad",
+    [
+        torch.zeros(4, 6, dtype=torch.float16),
+        torch.zeros(6, 4, dtype=torch.bfloat16).t(),
+    ],
+)
+def test_unsupported_or_noncontiguous_main_grad_falls_back_to_param_grad(main_grad):
     inp = torch.randn(8, 6, dtype=torch.bfloat16)
     weight = torch.nn.Parameter(torch.randn(4, 6, dtype=torch.bfloat16))
-    weight.main_grad = torch.zeros_like(weight, dtype=torch.bfloat16)
+    weight.main_grad = main_grad
     te_gemm = _FakeTEGemm()
 
     _, grad_weight, _, _ = router_bwd._router_backward_bf16(
