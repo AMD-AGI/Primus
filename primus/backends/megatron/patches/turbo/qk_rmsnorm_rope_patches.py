@@ -24,6 +24,53 @@ from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_pat
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
+_DDP_PARAM_GATHER_HOOK_ATTR = "_primus_ddp_param_gather_hook"
+_DDP_HOOK_MARKER_INSTALLED_ATTR = "_primus_qk_rmsnorm_rope_hook_marker_installed"
+
+
+def _install_ddp_param_gather_hook_marker(ddp_cls) -> None:
+    """Tag Megatron's parameter-gather pre-hooks so fusion can replay them."""
+    if getattr(ddp_cls, _DDP_HOOK_MARKER_INSTALLED_ATTR, False):
+        return
+
+    original_make_forward_pre_hook = ddp_cls._make_forward_pre_hook
+
+    def _make_forward_pre_hook(self, *args, **kwargs):
+        hook = original_make_forward_pre_hook(self, *args, **kwargs)
+        setattr(hook, _DDP_PARAM_GATHER_HOOK_ATTR, True)
+        return hook
+
+    ddp_cls._make_forward_pre_hook = _make_forward_pre_hook
+    setattr(ddp_cls, _DDP_HOOK_MARKER_INSTALLED_ATTR, True)
+
+
+def _supported_forward_pre_hooks(module):
+    """Return replayable DDP hooks, or ``None`` for unsupported hook semantics."""
+    if any(
+        getattr(module, name, None)
+        for name in (
+            "_forward_hooks",
+            "_backward_pre_hooks",
+            "_backward_hooks",
+        )
+    ):
+        return None
+
+    hooks = tuple(getattr(module, "_forward_pre_hooks", {}).values())
+    if any(not getattr(hook, _DDP_PARAM_GATHER_HOOK_ATTR, False) for hook in hooks):
+        return None
+    return hooks
+
+
+def _run_forward_pre_hooks(module, hooks) -> None:
+    """Replay supported hooks before directly consuming a module's parameters."""
+    for hook in hooks:
+        result = hook(module, ())
+        if result is not None:
+            raise RuntimeError(
+                "DDP parameter-gather pre-hook unexpectedly modified its inputs"
+            )
+
 
 def _enabled(_ctx: PatchContext) -> bool:
     value = os.environ.get("PRIMUS_FUSED_QK_RMSNORM_ROPE", "0").strip().lower()
@@ -40,6 +87,9 @@ def _enabled(_ctx: PatchContext) -> bool:
 )
 def patch_qk_rmsnorm_rope(_ctx: PatchContext):
     import megatron.core.transformer.attention as attention_module
+    from megatron.core.distributed.distributed_data_parallel import (
+        DistributedDataParallel,
+    )
     from primus_turbo.pytorch.kernels.rope.qk_rmsnorm_rope_impl import (
         qk_rmsnorm_rope_shape_error,
     )
@@ -50,21 +100,16 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
     if getattr(attention_module, "_primus_qk_rmsnorm_rope_installed", False):
         return
 
+    # The fused path directly consumes q/k norm weights, bypassing the module
+    # calls that normally run Megatron's overlap_param_gather pre-hooks. Tag
+    # those hooks at creation time so the fused path can replay exactly that
+    # synchronization while still rejecting arbitrary module hooks.
+    _install_ddp_param_gather_hook_marker(DistributedDataParallel)
+
     attention_cls = attention_module.SelfAttention
     original_forward = attention_cls.forward
     original_get_qkv = attention_cls.get_query_key_value_tensors
     original_apply_rope = attention_module.apply_rotary_pos_emb
-
-    def _has_module_hooks(module) -> bool:
-        return any(
-            getattr(module, name, None)
-            for name in (
-                "_forward_pre_hooks",
-                "_forward_hooks",
-                "_backward_pre_hooks",
-                "_backward_hooks",
-            )
-        )
 
     def _eligible(self, rotary_pos_emb, inference_context, packed_seq_params) -> bool:
         q_norm = getattr(self, "q_layernorm", None)
@@ -81,14 +126,15 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
             and self.hidden_size_per_attention_head == 64
             and not getattr(self.config, "rotary_interleaved", False)
             and getattr(self.config, "rotary_percent", 1.0) == 1.0
-            and attention_module._yarn_get_concentration_factor_from_config(self.config) == 1.0
+            and attention_module._yarn_get_concentration_factor_from_config(self.config)
+            == 1.0
             and not getattr(self.config, "attention_output_gate", False)
             and getattr(self, "world_size", 1) == 1
             and not getattr(self, "offload_qkv_linear", False)
             and isinstance(q_norm, PrimusTurboRMSNorm)
             and isinstance(k_norm, PrimusTurboRMSNorm)
-            and not _has_module_hooks(q_norm)
-            and not _has_module_hooks(k_norm)
+            and _supported_forward_pre_hooks(q_norm) is not None
+            and _supported_forward_pre_hooks(k_norm) is not None
             and not getattr(q_norm, "zero_centered_gamma", False)
             and not getattr(k_norm, "zero_centered_gamma", False)
             and q_norm.eps == k_norm.eps
@@ -165,6 +211,22 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
             output_gate=False,
             split_qkv=False,
         )
+        # Preserve DDP overlap_param_gather semantics even though the fused
+        # operator bypasses q_layernorm(...) and k_layernorm(...).
+        q_pre_hooks = _supported_forward_pre_hooks(self.q_layernorm)
+        k_pre_hooks = _supported_forward_pre_hooks(self.k_layernorm)
+        if q_pre_hooks is None or k_pre_hooks is None:
+            raise RuntimeError("Q/K RMSNorm hooks changed during the attention forward")
+        _run_forward_pre_hooks(self.q_layernorm, q_pre_hooks)
+        _run_forward_pre_hooks(self.k_layernorm, k_pre_hooks)
+        if (q_pre_hooks or k_pre_hooks) and not getattr(
+            self, "_primus_qk_rmsnorm_rope_ddp_hooks_seen", False
+        ):
+            self._primus_qk_rmsnorm_rope_ddp_hooks_seen = True
+            log_rank_0(
+                "[Patch:megatron.turbo.qk_rmsnorm_rope] Replayed DDP parameter-gather "
+                f"hooks for fused dispatch: q={len(q_pre_hooks)} k={len(k_pre_hooks)}"
+            )
         why = qk_rmsnorm_rope_shape_error(
             mixed_qkv,
             self.q_layernorm.weight,
@@ -174,10 +236,14 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
         )
         if why is not None:
             if attention_module.SplitAlongDim is not None:
-                query, key, value = attention_module.SplitAlongDim(mixed_qkv, 3, split_sizes)
+                query, key, value = attention_module.SplitAlongDim(
+                    mixed_qkv, 3, split_sizes
+                )
             else:
                 query, key, value = mixed_qkv.split(split_sizes, dim=3)
-            query = query.reshape(query.size(0), query.size(1), -1, self.hidden_size_per_attention_head)
+            query = query.reshape(
+                query.size(0), query.size(1), -1, self.hidden_size_per_attention_head
+            )
             query = attention_module.apply_module(self.q_layernorm)(query)
             key = attention_module.apply_module(self.k_layernorm)(key)
             if self.config.test_mode:
