@@ -308,6 +308,10 @@ class Flux(DiffusionModule):
         widens the bound by 1.10x-1.73x. Xavier-uniform is i.i.d. per element, so drawing every
         piece from U(-b, b) with the fused matrix's bound b gives exactly the reference
         distribution. Biases stay zero, as in the reference.
+
+        The draw is made in fp32 and copied into the weights: these Megatron weights are already
+        bf16 here, and Tensor.uniform_ on a bf16 tensor is biased (a mean of about -0.002 b,
+        some 30 standard errors at these sizes), where an fp32 draw rounded to bf16 is not.
         """
         import math
 
@@ -323,7 +327,7 @@ class Flux(DiffusionModule):
             b2 = math.sqrt(6.0 / (proj.shape[1] + fc2.shape[1] + proj.shape[0]))
             with torch.no_grad():
                 for w, b in ((qkv, b1), (fc1, b1), (proj, b2), (fc2, b2)):
-                    nn.init.uniform_(w, -b, b)
+                    w.copy_(torch.empty(w.shape, dtype=torch.float32, device=w.device).uniform_(-b, b))
         from primus.core.utils.module_utils import log_rank_0
 
         log_rank_0(
