@@ -36,7 +36,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip_v4"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v5"
 _extension = None
 
 
