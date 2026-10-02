@@ -12,7 +12,7 @@ Experiments live in [`configs/MI355X/diffusion/`](./configs/MI355X/diffusion/):
 | --- | --- |
 | Wan 2.2 T2V A14B | `wan2_2_t2v_a14b-*.yaml` (pretrain, finetune, synthetic, TE FP8) |
 | FLUX.1-dev / schnell | `flux_1_dev-pretrain.yaml`, `flux_1_dev-synthetic.yaml`, `flux_1_schnell-synthetic.yaml` |
-| Ideogram-4 | `ideogram4-pretrain.yaml` (synthetic) |
+| Ideogram-4 | `ideogram4-pretrain.yaml` (synthetic), `ideogram4-pretrain-cache.yaml` (encoded cache) |
 
 ## Launch
 
@@ -97,4 +97,17 @@ PYTHONPATH=. python3 runner/helpers/hooks/train/pretrain/nemo_automodel/prepare.
 python tools/nemo_automodel/make_ideogram4_config_dir.py --out <config_dir>
 ```
 
-Then launch with `model.pretrained_model_name_or_path=<config_dir>`.
+Then launch with `model.pretrained_model_name_or_path=<config_dir>`. The cache
+experiment also needs an encoded cache, built once on a single GPU. The default
+encoders (Qwen3-VL-8B-Instruct and the Ideogram-4 autoencoder) are public.
+FLUX.1-dev, used by the FLUX experiment, is the gated one.
+
+```bash
+bash ./runner/primus-cli direct --single -- data automodel-cache --model ideogram4 \
+    --image-dir /path/to/images --caption-dir /path/to/captions \
+    --output-dir /path/to/cache --resolution 256 --max-text-tokens 256
+```
+
+A caption longer than `--max-text-tokens` is skipped, not truncated, and the
+skip counts are printed at the end. The default is 128, which drops most long
+prompts; raise it before treating a small cache as the whole dataset.

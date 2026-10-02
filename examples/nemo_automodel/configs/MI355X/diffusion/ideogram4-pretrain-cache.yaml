@@ -1,0 +1,55 @@
+# Primus experiment — Ideogram-4 text-to-image pretrain on REAL encoded data.
+# =============================================================================
+# ideogram4-pretrain.yaml reading a real pre-encoded cache instead of synthetic
+# features. Only the data is real: the transformer is still randomly initialised
+# from a weightless config directory, so no gated transformer weights are needed.
+#
+# SETUP:
+#   1. A weightless config directory, as in ideogram4-pretrain.yaml.
+#   2. A cache of encoded image/caption pairs. Building one needs a single GPU and
+#      the public encoder weights. Captions longer than --max-text-tokens are
+#      skipped, not truncated; the default 128 drops long prompts:
+#
+#        bash ./runner/primus-cli direct --single -- data automodel-cache --model ideogram4 \
+#            --image-dir /path/to/images --caption-dir /path/to/captions \
+#            --output-dir /path/to/cache --resolution 256 --max-text-tokens 256
+#
+#      Then point data.dataloader.cache_dir at the result.
+#
+# LAUNCH (inside the Primus container, 8 GPUs):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/nemo_automodel/configs/MI355X/diffusion/ideogram4-pretrain-cache.yaml
+#
+# WHAT THIS IS. A short run whose point is a clearly decreasing loss on real
+# conditioning, which validates the processor and the cache loader end to end.
+# Remove step_scheduler.max_steps for a full run.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:ideogram4-pretrain-cache}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: ideogram4_cache_pre_trainer.yaml
+    model: ideogram4.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 200           # remove for a full run
+        local_batch_size: 2
+        global_batch_size: 16    # 2 x 8 ranks, so no gradient accumulation
+        log_remote_every_steps: 1
+      optimizer:
+        lr: 1.0e-4
+      fsdp:
+        activation_checkpointing: true
+        enable_compile: false
+      data:
+        dataloader:
+          # PLACEHOLDER: set this to your cache directory.
+          cache_dir: /path/to/ideogram4_cache
+      checkpoint:
+        enabled: false           # set true + checkpoint_dir for a real run
