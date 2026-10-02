@@ -22,6 +22,13 @@ still declared in FLA 0.5.2 (the pinned version) and in upstream ``main``, so
 there is no fixed release to upgrade to instead. Delete this patch once the
 supported toolchain floor reaches Triton >= 3.7.
 
+Triton 3.8 compiles the deeper variants but some of them compute wrong
+results: with a warm caching allocator, ``chunk_kda``'s backward returned NaN
+dq/dk/dg/dbeta from finite inputs (GLM-5.3 training, first iteration), while
+the same tensors replayed in a fresh process were finite. Capping every
+autotuned kernel on the ``chunk_kda`` path (``_FLA_KDA_PATH_MODULES``) at
+``num_stages=2`` fixed it, so the narrowing now covers that whole path.
+
 The gate is the platform (ROCm) plus the run actually using FLA KDA, never the
 GPU architecture: the pass at fault is chip-independent, so an architecture
 allowlist would only record where the failure was first seen and would silently
@@ -70,6 +77,22 @@ _FLA_KDA_INTRA_KERNELS = (
     # place, but re-measure before enabling safe_gate -- at those shapes this is
     # the one kernel where num_stages=4 has been seen to win.
     "chunk_kda_fwd_kernel_intra_sub_chunk",
+)
+
+# The rest of the chunk_kda fwd/bwd path. On Triton 3.8 (ROCm, gfx950) these
+# compile at num_stages >= 3 but return non-finite results for some inputs once
+# the caching allocator is warm (finite in a fresh process, NaN dq/dk/dg/dbeta
+# mid-training), first observed in recompute_w_u_fwd_kda_kernel and
+# chunk_kda_bwd_kernel_wy_dqkg_fused. Every autotuned kernel defined in these
+# modules is narrowed.
+_FLA_KDA_PATH_MODULES = (
+    "fla.ops.kda.chunk_intra",
+    "fla.ops.kda.chunk_intra_token_parallel",
+    "fla.ops.kda.chunk_bwd",
+    "fla.ops.kda.wy_fast",
+    "fla.ops.common.chunk_delta_h",
+    "fla.ops.gla.chunk",
+    "fla.ops.utils.cumsum",
 )
 
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -240,6 +263,18 @@ def _install_kda_safe_autotune_patch() -> None:
 
     secured = [name for name in _FLA_KDA_INTRA_KERNELS if _narrow_kernel_autotune(module, name)]
 
+    for path_module_name in _FLA_KDA_PATH_MODULES:
+        try:
+            path_module = importlib.import_module(path_module_name)
+        except Exception as exc:  # noqa: BLE001 - layout differs across FLA versions
+            log_rank_0(f"[Patch:{_PATCH_KEY}] cannot import {path_module_name} ({exc!r}); skipping.")
+            continue
+        for name, kernel in sorted(vars(path_module).items()):
+            if name in secured or _find_autotuner(kernel) is None:
+                continue
+            if _narrow_kernel_autotune(path_module, name):
+                secured.append(name)
+
     mark_patched(module, _PATCH_KEY)
     if not secured:
         log_rank_0(
@@ -254,8 +289,8 @@ def _install_kda_safe_autotune_patch() -> None:
     backend="megatron",
     phase="before_train",
     description=(
-        "Drop num_stages >= 3 from the autotune space of FLA's KDA intra-chunk "
-        "kernels, which AMD Triton 3.6 fails to compile."
+        "Drop num_stages >= 3 from the autotune space of FLA's chunk_kda kernels, "
+        "which AMD Triton 3.6 fails to compile and Triton 3.8 can miscompute (NaN grads)."
     ),
     # Well before the first KDA kernel launch triggers autotuning.
     priority=50,
