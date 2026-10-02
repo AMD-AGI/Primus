@@ -10,8 +10,9 @@ Set ``PRIMUS_FUSED_ADAM_CLIP=1`` to retain Megatron's global-norm calculation
 but defer application of its clip coefficient to Adam while the gradient is
 already resident in registers.
 
-GPT-OSS gives TE FP32 gradients, FP32 optimizer parameters, and FP32 moments.
-TE's ROCm non-capturable path is important here: it uses one custom
+GPT-OSS gives TE FP32 gradients and FP32 optimizer parameters. Moments may be
+FP32 or BF16; arithmetic remains FP32 in either case. TE's ROCm non-capturable
+path is important here: it uses one custom
 device-metadata Adam launch instead of the generic path's many launches. This
 patch preserves that layout and compiles a small Primus-owned HIP extension
 with a device-resident norm argument. It does not modify the TE installation.
@@ -34,7 +35,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip_v2"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v3"
 _extension = None
 
 
@@ -119,6 +120,12 @@ def _build_metadata(chunk_size: int, tensor_lists):
         raise RuntimeError("PRIMUS_FUSED_ADAM_CLIP received inconsistent empty tensor lists")
 
     device = tensor_lists[0][0].device
+    moment_dtype = tensor_lists[2][0].dtype
+    if moment_dtype not in (torch.float32, torch.bfloat16):
+        raise RuntimeError(
+            "PRIMUS_FUSED_ADAM_CLIP requires FP32 or BF16 Adam moments, got "
+            f"{moment_dtype}"
+        )
     addresses = []
     sizes = []
     block_to_tensor = []
@@ -129,11 +136,12 @@ def _build_metadata(chunk_size: int, tensor_lists):
         tensors = [tensor_lists[list_idx][tensor_idx] for list_idx in range(4)]
         if any(tensor.device != device for tensor in tensors):
             raise RuntimeError("PRIMUS_FUSED_ADAM_CLIP requires one device per Adam call")
-        if any(tensor.dtype != torch.float32 for tensor in tensors):
+        expected_dtypes = (torch.float32, torch.float32, moment_dtype, moment_dtype)
+        if any(tensor.dtype != expected for tensor, expected in zip(tensors, expected_dtypes)):
             dtypes = tuple(tensor.dtype for tensor in tensors)
             raise RuntimeError(
-                "PRIMUS_FUSED_ADAM_CLIP specializes the GPT-OSS FP32 optimizer path; "
-                f"tensor {tensor_idx} has dtypes {dtypes}"
+                "PRIMUS_FUSED_ADAM_CLIP requires FP32 gradients/parameters and matching "
+                f"FP32 or BF16 moments; tensor {tensor_idx} has dtypes {dtypes}"
             )
         if any(not tensor.is_contiguous() for tensor in tensors):
             raise RuntimeError("PRIMUS_FUSED_ADAM_CLIP requires contiguous optimizer tensors")
@@ -154,6 +162,7 @@ def _build_metadata(chunk_size: int, tensor_lists):
         torch.tensor(block_to_tensor, dtype=torch.int32, device=device),
         torch.tensor(chunk_offsets, dtype=torch.int32, device=device),
         total_chunks,
+        0 if moment_dtype == torch.float32 else 1,
     )
 
 
@@ -238,7 +247,14 @@ def _install_patch() -> None:
             if metadata is None:
                 metadata = _build_metadata(chunk_size, tensor_lists)
                 self._primus_adam_metadata_cache[key] = metadata
-            addresses, sizes, block_to_tensor, chunk_offsets, total_chunks = metadata
+            (
+                addresses,
+                sizes,
+                block_to_tensor,
+                chunk_offsets,
+                total_chunks,
+                moment_dtype,
+            ) = metadata
             if self._primus_clip_norm is None:
                 raise RuntimeError(
                     "PRIMUS_FUSED_ADAM_CLIP did not receive a device gradient norm"
@@ -258,6 +274,7 @@ def _install_patch() -> None:
                 int(mode),
                 int(bias_correction),
                 float(weight_decay),
+                int(moment_dtype),
                 self._primus_clip_norm,
                 float(self._primus_clip_max_norm),
             )
