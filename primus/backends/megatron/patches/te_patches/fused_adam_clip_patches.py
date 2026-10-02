@@ -14,11 +14,11 @@ GPT-OSS gives TE FP32 gradients, FP32 optimizer parameters, and FP32 moments.
 TE's ROCm non-capturable path is important here: it uses one custom
 device-metadata Adam launch instead of the generic path's many launches. This
 patch preserves that layout and compiles a small Primus-owned HIP extension
-with one additional scalar argument. It does not modify the TE installation.
+with a device-resident norm argument. It does not modify the TE installation.
 
-This first phase intentionally leaves Megatron's norm ``.item()`` in place.
-Removing that host synchronization requires a device-scalar coefficient and is
-best validated separately after the HBM round-trip is removed.
+The global norm and clip coefficient remain device-resident. The Adam kernel
+loads the one-element norm tensor and derives the coefficient in-kernel, so the
+optimizer no longer drains the GPU pipeline through ``Tensor.item()``.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip_v1"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v2"
 _extension = None
 
 
@@ -46,6 +46,36 @@ def _clip_coeff(total_norm: float, max_norm: float) -> float:
     """Return Megatron's gradient clipping coefficient."""
 
     return min(1.0, float(max_norm) / (float(total_norm) + 1.0e-6))
+
+
+def _get_grad_norm_tensor(optimizer) -> torch.Tensor:
+    """Megatron's FP32 L2 norm path without its final host synchronization."""
+
+    from megatron.core.optimizer import clip_grads
+
+    grads_for_norm = optimizer.get_main_grads_for_grad_norm()
+    if grads_for_norm:
+        dummy_overflow_buf = getattr(optimizer, "_primus_norm_overflow_buf", None)
+        grad_device = grads_for_norm[0].device
+        if dummy_overflow_buf is None or dummy_overflow_buf.device != grad_device:
+            dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=grad_device)
+            optimizer._primus_norm_overflow_buf = dummy_overflow_buf
+        local_norm, _ = clip_grads.multi_tensor_applier(
+            clip_grads.l2_norm_impl,
+            dummy_overflow_buf,
+            [grads_for_norm],
+            False,
+        )
+        total_norm_squared = local_norm.square()
+    else:
+        total_norm_squared = torch.zeros(1, dtype=torch.float32, device="cuda")
+
+    torch.distributed.all_reduce(
+        total_norm_squared,
+        op=torch.distributed.ReduceOp.SUM,
+        group=optimizer.get_grad_stats_parallel_group(),
+    )
+    return total_norm_squared.sqrt()
 
 
 def _load_extension():
@@ -145,7 +175,8 @@ def _install_patch() -> None:
                 "PRIMUS_FUSED_ADAM_CLIP preserves TE's optimized non-capturable ROCm path"
             )
         original_adam_init(self, *args, **kwargs)
-        self._primus_clip_coeff = 1.0
+        self._primus_clip_norm = None
+        self._primus_clip_max_norm = 1.0
         self._primus_adam_metadata_cache = {}
 
         def fused_multi_tensor_adam(
@@ -168,6 +199,10 @@ def _install_patch() -> None:
                 metadata = _build_metadata(chunk_size, tensor_lists)
                 self._primus_adam_metadata_cache[key] = metadata
             addresses, sizes, block_to_tensor, chunk_offsets, total_chunks = metadata
+            if self._primus_clip_norm is None:
+                raise RuntimeError(
+                    "PRIMUS_FUSED_ADAM_CLIP did not receive a device gradient norm"
+                )
             extension.fused_adam_clip(
                 addresses,
                 sizes,
@@ -183,7 +218,8 @@ def _install_patch() -> None:
                 int(mode),
                 int(bias_correction),
                 float(weight_decay),
-                float(self._primus_clip_coeff),
+                self._primus_clip_norm,
+                float(self._primus_clip_max_norm),
             )
 
         # FusedAdam.step calls this attribute through TE's existing
@@ -198,29 +234,47 @@ def _install_patch() -> None:
         try:
             return original_adam_step(self, closure=closure, grad_scaler=None)
         finally:
-            self._primus_clip_coeff = 1.0
+            self._primus_clip_norm = None
+            self._primus_clip_max_norm = 1.0
 
-    def patched_clip_grad_norm(self, clip_grad: float) -> float:
-        # Preserve Megatron's exact norm calculation and collective behavior,
-        # but do not launch clip_grad_by_total_norm_fp32's scale pass.
-        grad_norm = self.get_grad_norm()
+    def patched_clip_grad_norm(self, clip_grad: float) -> torch.Tensor:
+        # Preserve Megatron's norm kernel and global SUM reduction, but retain
+        # the result on device and omit clip_grad_by_total_norm_fp32's scale pass.
+        grad_norm = _get_grad_norm_tensor(self)
         inner_optimizer = self.optimizer
         if not isinstance(inner_optimizer, FusedAdam):
-            raise RuntimeError(
+            raise TypeError(
                 "PRIMUS_FUSED_ADAM_CLIP requires Transformer Engine FusedAdam, got "
                 f"{type(inner_optimizer).__module__}.{type(inner_optimizer).__name__}"
             )
-        inner_optimizer._primus_clip_coeff = _clip_coeff(grad_norm, clip_grad)
+        inner_optimizer._primus_clip_norm = grad_norm
+        inner_optimizer._primus_clip_max_norm = float(clip_grad)
         return grad_norm
 
     FusedAdam.__init__ = patched_adam_init
     FusedAdam.step = patched_adam_step
     MegatronOptimizer.clip_grad_norm = patched_clip_grad_norm
 
+    # The existing TP1/PP1 synchronization-skip patch has already established
+    # that the model-parallel reduction is a no-op. Keep a tensor statistic on
+    # device instead of converting it back to a host float after Adam.
+    import megatron.training.training as megatron_training
+
+    reduce_max_stat = megatron_training.reduce_max_stat_across_model_parallel_group
+    if getattr(reduce_max_stat, "__name__", "") == "_passthrough_reduce_max":
+
+        def _deferred_passthrough_reduce_max(value):
+            return value
+
+        megatron_training.reduce_max_stat_across_model_parallel_group = (
+            _deferred_passthrough_reduce_max
+        )
+
     mark_patched(FusedAdam, _PATCH_KEY)
     log_rank_0(
-        f"[Patch:{_PATCH_KEY}] enabled: clip coefficient is applied inside the "
-        "Primus HIP Adam kernel; standalone multi_tensor_scale is disabled."
+        f"[Patch:{_PATCH_KEY}] enabled: device gradient norm and clip coefficient "
+        "are consumed inside the Primus HIP Adam kernel; host item() and standalone "
+        "multi_tensor_scale are disabled."
     )
 
 

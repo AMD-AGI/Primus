@@ -31,7 +31,8 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
     float epsilon,
     float lr,
     float decay,
-    float grad_scale) {
+    const float* __restrict__ grad_norm,
+    float max_norm) {
   const int global_chunk = blockIdx.x;
   if (global_chunk >= total_chunks) return;
 
@@ -53,6 +54,14 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
   exp_avg_sq += elem_offset;
   const int n_this = static_cast<int>(
       min(sizes[tensor_idx] - elem_offset, static_cast<int64_t>(chunk_size)));
+  __shared__ float grad_scale_shared;
+  if (threadIdx.x == 0) {
+    const float clip_coeff = max_norm / (*grad_norm + 1.0e-6f);
+    // Match Python's min(1.0, coeff), including its NaN behavior.
+    grad_scale_shared = clip_coeff < 1.0f ? clip_coeff : 1.0f;
+  }
+  __syncthreads();
+  const float grad_scale = grad_scale_shared;
 
   for (int i = threadIdx.x * kIlp; i < n_this;
        i += blockDim.x * kIlp) {
@@ -140,7 +149,8 @@ void fused_adam_clip(
     int mode,
     int bias_correction,
     double weight_decay,
-    double grad_scale) {
+    torch::Tensor grad_norm,
+    double max_norm) {
   TORCH_CHECK(addresses.is_cuda() && sizes.is_cuda() &&
               block_to_tensor.is_cuda() && chunk_offsets.is_cuda(),
               "fused_adam_clip metadata must be on GPU");
@@ -149,6 +159,11 @@ void fused_adam_clip(
   TORCH_CHECK(block_to_tensor.scalar_type() == at::kInt &&
               chunk_offsets.scalar_type() == at::kInt,
               "fused_adam_clip maps must be int32");
+  TORCH_CHECK(grad_norm.is_cuda() && grad_norm.scalar_type() == at::kFloat &&
+              grad_norm.numel() == 1,
+              "fused_adam_clip grad_norm must be one FP32 GPU scalar");
+  TORCH_CHECK(grad_norm.get_device() == addresses.get_device(),
+              "fused_adam_clip grad_norm and optimizer tensors must share a device");
   TORCH_CHECK(mode == 0 || mode == 1, "fused_adam_clip Adam mode must be 0 or 1");
 
   float correction1 = 1.0f;
@@ -167,7 +182,8 @@ void fused_adam_clip(
       block_to_tensor.data_ptr<int>(), chunk_offsets.data_ptr<int>(), total_chunks, \
       static_cast<float>(beta1), static_cast<float>(beta2), step_size, \
       beta2_corr_inv, static_cast<float>(epsilon), static_cast<float>(lr), \
-      static_cast<float>(weight_decay), static_cast<float>(grad_scale))
+      static_cast<float>(weight_decay), grad_norm.data_ptr<float>(), \
+      static_cast<float>(max_norm))
   if (mode == 1) {
     LAUNCH(true);
   } else {
