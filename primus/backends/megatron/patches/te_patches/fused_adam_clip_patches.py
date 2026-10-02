@@ -157,8 +157,44 @@ def _build_metadata(chunk_size: int, tensor_lists):
     )
 
 
+def _chained_step_with_device_clip(optimizer, fused_adam_type):
+    """Run ChainedOptimizer.step while deferring clipping to each fused Adam."""
+
+    found_inf_flag = optimizer.prepare_grads()
+    if found_inf_flag:
+        return False, None, None
+    if not optimizer.grads_states_parallel_group_is_shared():
+        raise RuntimeError(
+            "PRIMUS_FUSED_ADAM_CLIP requires chained optimizers to share "
+            "their gradient-statistics process group"
+        )
+
+    grad_norm = _get_grad_norm_tensor(optimizer)
+    for child_optimizer in optimizer.chained_optimizers:
+        if getattr(child_optimizer, "is_stub_optimizer", False):
+            continue
+        if not child_optimizer.get_parameters():
+            continue
+        if child_optimizer.config.clip_grad <= 0.0:
+            raise RuntimeError("PRIMUS_FUSED_ADAM_CLIP requires a positive clip_grad")
+        inner_optimizer = child_optimizer.optimizer
+        if not isinstance(inner_optimizer, fused_adam_type):
+            raise TypeError(
+                "PRIMUS_FUSED_ADAM_CLIP requires Transformer Engine FusedAdam, got "
+                f"{type(inner_optimizer).__module__}.{type(inner_optimizer).__name__}"
+            )
+        inner_optimizer._primus_clip_norm = grad_norm
+        inner_optimizer._primus_clip_max_norm = float(child_optimizer.config.clip_grad)
+
+    num_zeros_in_grad = (
+        optimizer.count_zeros() if optimizer.config.log_num_zeros_in_grad else None
+    )
+    update_successful = optimizer.step_with_ready_grads()
+    return update_successful, grad_norm, num_zeros_in_grad
+
+
 def _install_patch() -> None:
-    from megatron.core.optimizer.optimizer import MegatronOptimizer
+    from megatron.core.optimizer.optimizer import ChainedOptimizer, MegatronOptimizer
     from transformer_engine.pytorch.optimizers import FusedAdam
 
     if is_patched(FusedAdam, _PATCH_KEY):
@@ -251,9 +287,15 @@ def _install_patch() -> None:
         inner_optimizer._primus_clip_max_norm = float(clip_grad)
         return grad_norm
 
+    @torch.no_grad()
+    def patched_chained_step(self):
+        """ChainedOptimizer.step with device clipping delegated to each Adam."""
+        return _chained_step_with_device_clip(self, FusedAdam)
+
     FusedAdam.__init__ = patched_adam_init
     FusedAdam.step = patched_adam_step
     MegatronOptimizer.clip_grad_norm = patched_clip_grad_norm
+    ChainedOptimizer.step = patched_chained_step
 
     # The existing TP1/PP1 synchronization-skip patch has already established
     # that the model-parallel reduction is a no-op. Keep a tensor statistic on
