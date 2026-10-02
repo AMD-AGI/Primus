@@ -3,6 +3,9 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:mixtral_8x22B_v0.1-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+env:
+  PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE: "0"
+
 modules:
   pre_trainer:
     config: pre_trainer.yaml
