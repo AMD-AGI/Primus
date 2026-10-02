@@ -211,22 +211,6 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
             output_gate=False,
             split_qkv=False,
         )
-        # Preserve DDP overlap_param_gather semantics even though the fused
-        # operator bypasses q_layernorm(...) and k_layernorm(...).
-        q_pre_hooks = _supported_forward_pre_hooks(self.q_layernorm)
-        k_pre_hooks = _supported_forward_pre_hooks(self.k_layernorm)
-        if q_pre_hooks is None or k_pre_hooks is None:
-            raise RuntimeError("Q/K RMSNorm hooks changed during the attention forward")
-        _run_forward_pre_hooks(self.q_layernorm, q_pre_hooks)
-        _run_forward_pre_hooks(self.k_layernorm, k_pre_hooks)
-        if (q_pre_hooks or k_pre_hooks) and not getattr(
-            self, "_primus_qk_rmsnorm_rope_ddp_hooks_seen", False
-        ):
-            self._primus_qk_rmsnorm_rope_ddp_hooks_seen = True
-            log_rank_0(
-                "[Patch:megatron.turbo.qk_rmsnorm_rope] Replayed DDP parameter-gather "
-                f"hooks for fused dispatch: q={len(q_pre_hooks)} k={len(k_pre_hooks)}"
-            )
         why = qk_rmsnorm_rope_shape_error(
             mixed_qkv,
             self.q_layernorm.weight,
@@ -249,6 +233,24 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
             if self.config.test_mode:
                 self.run_realtime_tests()
             return query, key, value
+        # Preserve DDP overlap_param_gather semantics even though the fused
+        # operator bypasses q_layernorm(...) and k_layernorm(...). Replay only
+        # after validating the fused path so fallback module calls own their
+        # hooks normally.
+        q_pre_hooks = _supported_forward_pre_hooks(self.q_layernorm)
+        k_pre_hooks = _supported_forward_pre_hooks(self.k_layernorm)
+        if q_pre_hooks is None or k_pre_hooks is None:
+            raise RuntimeError("Q/K RMSNorm hooks changed during the attention forward")
+        _run_forward_pre_hooks(self.q_layernorm, q_pre_hooks)
+        _run_forward_pre_hooks(self.k_layernorm, k_pre_hooks)
+        if (q_pre_hooks or k_pre_hooks) and not getattr(
+            self, "_primus_qk_rmsnorm_rope_ddp_hooks_seen", False
+        ):
+            self._primus_qk_rmsnorm_rope_ddp_hooks_seen = True
+            log_rank_0(
+                "[Patch:megatron.turbo.qk_rmsnorm_rope] Replayed DDP parameter-gather "
+                f"hooks for fused dispatch: q={len(q_pre_hooks)} k={len(k_pre_hooks)}"
+            )
         query, key, value = fused_qkv_rmsnorm_rope(
             mixed_qkv,
             self.q_layernorm.weight,
