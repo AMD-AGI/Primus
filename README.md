@@ -30,6 +30,7 @@
 - **MaxText (JAX)**: LLaMA2 / LLaMA3.x, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, and Qwen3 14B / 30B-A3B (subset; see MaxText docs for details)
 - **Megatron-Bridge**: SFT and LoRA post-training for Qwen3 8B/32B, LLaMA3.1 70B, Zebra-LLaMA, and Mamba
 - **Diffusion**: Flux.1 (schnell / dev) text-to-image and Wan 2.1 / 2.2 text- and image-to-video
+- **NeMo AutoModel**: Flux.1, Wan 2.2 and Ideogram-4 diffusion training through AutoModel's diffusion recipe ([examples](./examples/nemo_automodel/README.md))
 
 For the full and up-to-date model matrix, see [Supported Models](./docs/06-developer-guide/model-support-matrix.md).
 

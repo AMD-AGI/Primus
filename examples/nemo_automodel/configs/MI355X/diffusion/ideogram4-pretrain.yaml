@@ -1,0 +1,53 @@
+# Primus experiment — Ideogram-4 text-to-image pretrain, from scratch.
+# =============================================================================
+# Everything Ideogram-specific (the adapter, the synthetic loader, whole-block
+# activation checkpointing) is a Primus patch installed by the trainer; no
+# upstream source is modified.
+#
+# ONE-TIME SETUP. The transformer is randomly initialised from a local config
+# directory and needs no weights. Write one with
+#
+#   python tools/nemo_automodel/make_ideogram4_config_dir.py --out <dir>
+#
+# and pass model.pretrained_model_name_or_path=<dir> on the command line. The
+# tool needs the diffusers the pinned AutoModel brings in; on a fresh image,
+# run the prepare hook first (see examples/nemo_automodel/README.md).
+#
+# LAUNCH (inside the Primus container, 8 GPUs):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/nemo_automodel/configs/MI355X/diffusion/ideogram4-pretrain.yaml
+#
+# A small overfit run on a fixed synthetic set: the goal is a clearly decreasing
+# loss, not convergence.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:ideogram4-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: ideogram4_pre_trainer.yaml
+    model: ideogram4.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 60            # overfit cap; remove for a real pretrain run
+        local_batch_size: 2
+        global_batch_size: 16    # 2 x 8 ranks, so no gradient accumulation
+        log_remote_every_steps: 1
+      optimizer:
+        lr: 1.0e-4
+      fsdp:
+        activation_checkpointing: true
+        enable_compile: false
+      data:
+        dataloader:
+          num_samples: 64
+          grid_h: 16
+          grid_w: 16
+          max_text_tokens: 32
+      checkpoint:
+        enabled: false           # set true + checkpoint_dir for a real run
