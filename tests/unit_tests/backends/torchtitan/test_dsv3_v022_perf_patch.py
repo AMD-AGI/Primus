@@ -6,8 +6,8 @@
 
 """Regression tests for the TorchTitan v0.2.2 DeepSeek memory patch.
 
-DeepSeek keeps whole-block compilation for dense layers. MoE parents remain
-eager while numerically safe pure-compute children compile independently.
+DeepSeek uses whole-block compilation with an explicit graph break around
+GroupedExperts so EP/FSDP hooks remain eager.
 """
 
 from types import SimpleNamespace
@@ -228,6 +228,42 @@ def test_selective_compile_updates_checkpoint_wrapped_moe_children(monkeypatch):
     assert not isinstance(inner.moe.experts, _Compiled)
 
 
+def test_unified_compile_breaks_at_grouped_experts(monkeypatch):
+    import torchtitan.models.moe.moe as moe_module
+
+    model = _Model()
+    compile_calls = []
+    disable_calls = []
+
+    def fake_compile(module, *, backend, fullgraph):
+        compile_calls.append((module.name, backend, fullgraph))
+        return _Compiled(module)
+
+    def fake_disable(fn, *, recursive):
+        disable_calls.append((fn, recursive))
+
+        def eager_boundary(*args, **kwargs):
+            return fn(*args, **kwargs)
+
+        return eager_boundary
+
+    monkeypatch.setattr(dsv3_patch.torch, "compile", fake_compile)
+    monkeypatch.setattr(dsv3_patch.torch.compiler, "disable", fake_disable)
+    with patch.object(moe_module.GroupedExperts, "forward", moe_module.GroupedExperts.forward):
+        dsv3_patch._apply_unified_compile(
+            model,
+            SimpleNamespace(backend="inductor"),
+            ep_enabled=True,
+        )
+
+    assert compile_calls == [
+        ("dense_block", "inductor", False),
+        ("moe_block", "inductor", False),
+    ]
+    assert len(disable_calls) == 1
+    assert disable_calls[0][1] is False
+
+
 def test_compile_patch_rebinds_source_and_deepseek_alias(monkeypatch):
     import torchtitan.models.deepseek_v3.infra.parallelize as deepseek_parallelize
     import torchtitan.models.llama4.infra.parallelize as llama4_parallelize
@@ -238,8 +274,8 @@ def test_compile_patch_rebinds_source_and_deepseek_alias(monkeypatch):
         patch.object(deepseek_parallelize, "apply_compile", object()),
     ):
         dsv3_patch.patch_whole_block_compile(_ctx("deepseek_v3"))
-        assert llama4_parallelize.apply_compile is dsv3_patch._apply_selective_compile
-        assert deepseek_parallelize.apply_compile is dsv3_patch._apply_selective_compile
+        assert llama4_parallelize.apply_compile is dsv3_patch._apply_unified_compile
+        assert deepseek_parallelize.apply_compile is dsv3_patch._apply_unified_compile
 
 
 def test_compile_patch_repeated_install_is_idempotent(monkeypatch):
@@ -253,8 +289,8 @@ def test_compile_patch_repeated_install_is_idempotent(monkeypatch):
     ):
         dsv3_patch.patch_whole_block_compile(_ctx("deepseek_v3"))
         dsv3_patch.patch_whole_block_compile(_ctx("deepseek_v3"))
-        assert llama4_parallelize.apply_compile is dsv3_patch._apply_selective_compile
-        assert deepseek_parallelize.apply_compile is dsv3_patch._apply_selective_compile
+        assert llama4_parallelize.apply_compile is dsv3_patch._apply_unified_compile
+        assert deepseek_parallelize.apply_compile is dsv3_patch._apply_unified_compile
 
 
 def test_grouped_mm_sentinel_keeps_turbo_function_eager(monkeypatch):
