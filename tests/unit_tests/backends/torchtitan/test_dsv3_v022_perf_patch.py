@@ -137,6 +137,7 @@ def test_unified_compile_breaks_at_grouped_experts(monkeypatch):
 
     monkeypatch.setattr(dsv3_patch.torch, "compile", fake_compile)
     monkeypatch.setattr(dsv3_patch.torch.compiler, "disable", fake_disable)
+    monkeypatch.setattr(torch._dynamo.config, "capture_scalar_outputs", False)
     with patch.object(moe_module.GroupedExperts, "forward", moe_module.GroupedExperts.forward):
         dsv3_patch._apply_unified_compile(
             model,
@@ -148,6 +149,7 @@ def test_unified_compile_breaks_at_grouped_experts(monkeypatch):
         ("dense_block", "inductor", False),
         ("moe_block", "inductor", False),
     ]
+    assert torch._dynamo.config.capture_scalar_outputs is True
     assert len(disable_calls) == 1
     assert disable_calls[0][1] is False
 

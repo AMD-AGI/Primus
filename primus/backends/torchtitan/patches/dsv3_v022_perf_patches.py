@@ -60,6 +60,9 @@ def _apply_unified_compile(model: nn.Module, compile_config: Any, ep_enabled: bo
     import torchtitan.models.moe.moe as moe_module
     from torchtitan.tools.logging import logger
 
+    # Preserve TorchTitan's required setup for dynamic token-choice MoE shapes.
+    torch._dynamo.config.capture_scalar_outputs = True
+
     experts_forward = moe_module.GroupedExperts.forward
     if not getattr(experts_forward, "_primus_graph_break", False):
         experts_forward = torch.compiler.disable(experts_forward, recursive=False)
