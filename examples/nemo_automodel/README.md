@@ -12,7 +12,7 @@ Experiments live in [`configs/MI355X/diffusion/`](./configs/MI355X/diffusion/):
 | --- | --- |
 | Wan 2.2 T2V A14B | `wan2_2_t2v_a14b-*.yaml` (pretrain, finetune, synthetic, TE FP8) |
 | FLUX.1-dev / schnell | `flux_1_dev-pretrain.yaml`, `flux_1_dev-synthetic.yaml`, `flux_1_schnell-synthetic.yaml` |
-| Ideogram-4 | `ideogram4-pretrain.yaml` (synthetic), `ideogram4-pretrain-cache.yaml` (encoded cache) |
+| Ideogram-4 | `ideogram4-pretrain.yaml` (synthetic), `ideogram4-pretrain-cache.yaml` (encoded cache), `ideogram4-pretrain-ddp.yaml` (DDP + ZeRO-1), `ideogram4-pretrain-ddp-cache.yaml` (DDP + ZeRO-1, encoded cache) |
 
 ## Launch
 
@@ -82,6 +82,7 @@ off by default, and the module that implements it documents its remaining keys.
 | `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend, or with Ideogram-4's variable-length attention. |
 | `primus_ideogram4.varlen_attention` | Ideogram-4 variable-length packed attention. Its backward is non-deterministic: the deterministic kernel needs far more memory at image-sized sequences. |
 | `primus_ideogram4.ac_every: n` | Ideogram-4: checkpoint every nth block instead of all |
+| `primus_ideogram4.zero1` | ZeRO-1 optimizer sharding on the DDP path. Incompatible with `checkpoint.enabled`; tested on a single node only. |
 
 ## Ideogram-4 setup
 
@@ -111,3 +112,4 @@ bash ./runner/primus-cli direct --single -- data automodel-cache --model ideogra
 A caption longer than `--max-text-tokens` is skipped, not truncated, and the
 skip counts are printed at the end. The default is 128, which drops most long
 prompts; raise it before treating a small cache as the whole dataset.
+Use `ideogram4-pretrain-cache.yaml` for FSDP2, or `ideogram4-pretrain-ddp-cache.yaml` for the DDP/ZeRO-1 path.
