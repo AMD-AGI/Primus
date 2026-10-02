@@ -1,0 +1,92 @@
+# NeMo AutoModel pre_trainer module config — Ideogram-4 real-cache pretrain on
+# the DDP path, with optional ZeRO-1 (Primus backend: nemo_automodel).
+#
+# This is the real-data counterpart of ideogram4_ddp_pre_trainer.yaml. A
+# separate preset is intentional: Primus deep-merges experiment overrides, so
+# changing only the dataloader target would retain synthetic-only constructor
+# fields and fail before training. Set primus_ideogram4.zero1 in the experiment;
+# false gives the like-for-like pure-DDP control.
+#
+# Context parallelism and per-layer torch.compile are FSDP2-only upstream.
+# NOTE: do not declare a model block here — it comes from the model preset.
+extends:
+  - ../module_base.yaml
+
+seed: 42
+
+wandb:
+  enable: false
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 2
+  ckpt_every_steps: 1000
+  num_epochs: 1000
+  log_remote_every_steps: 1
+  save_checkpoint_every_epoch: false
+
+data:
+  dataloader:
+    _target_: primus.backends.nemo_automodel.models.ideogram4.data.cache.Ideogram4CacheDataloaderConfig
+    cache_dir: /path/to/ideogram4_cache
+    shuffle: true
+    drop_last: true
+    max_text_tokens: 0
+    num_workers: 2
+    pin_memory: true
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  foreach: false
+  fused: true
+
+performance:
+  check_loss: false
+  grad_clip_foreach: true
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 0
+  min_lr: 1e-6
+
+flow_matching:
+  adapter_type: ideogram4
+  adapter_kwargs:
+    in_channels: 128
+    predict_negative_velocity: true
+  timestep_sampling: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  flow_shift: 3.0
+  mix_uniform_ratio: 0.1
+  cfg_dropout_prob: 0.0
+  sigma_min: 0.0
+  sigma_max: 1.0
+  num_train_timesteps: 1000
+  i2v_prob: 0.0
+  use_loss_weighting: false
+  log_interval: 100
+  summary_log_interval: 10
+
+ddp:
+  activation_checkpointing: true
+  gradient_as_bucket_view: true
+  broadcast_buffers: false
+  find_unused_parameters: false
+  static_graph: false
+
+checkpoint:
+  enabled: false
+  # The recipe creates this directory before consulting enabled.
+  checkpoint_dir: /checkpoints/ideogram4_ddp_cache_pretrain
+  model_save_format: safetensors
+  save_consolidated: final
+  diffusers_compatible: true
+  restore_from: null

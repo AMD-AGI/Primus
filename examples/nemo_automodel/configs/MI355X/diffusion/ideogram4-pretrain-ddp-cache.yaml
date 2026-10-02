@@ -1,0 +1,41 @@
+# Primus experiment — Ideogram-4 real-cache pretrain on DDP with ZeRO-1.
+# =============================================================================
+# This is the reproducible real-data version of ideogram4-pretrain-ddp.yaml.
+# Build the cache as documented in ideogram4-pretrain-cache.yaml, then replace
+# the cache_dir placeholder below. Turn zero1 off for the pure-DDP control.
+#
+# ZeRO-1 and checkpoint saving are mutually exclusive on this path. Disable
+# ZeRO-1 before enabling checkpointing.
+#
+# LAUNCH (inside the Primus container, 8 GPUs):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/nemo_automodel/configs/MI355X/diffusion/ideogram4-pretrain-ddp-cache.yaml
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:ideogram4-pretrain-ddp-cache}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: ideogram4_ddp_cache_pre_trainer.yaml
+    model: ideogram4.yaml
+
+    overrides:
+      primus_ideogram4:
+        zero1: true
+      step_scheduler:
+        max_steps: 50
+        local_batch_size: 2
+        global_batch_size: 16
+        log_remote_every_steps: 1
+      model:
+        # Matches the verified cache run and lowers replicated DDP memory.
+        torch_dtype: bfloat16
+      data:
+        dataloader:
+          cache_dir: /path/to/ideogram4_cache
+      checkpoint:
+        enabled: false
