@@ -113,3 +113,9 @@ A caption longer than `--max-text-tokens` is skipped, not truncated, and the
 skip counts are printed at the end. The default is 128, which drops most long
 prompts; raise it before treating a small cache as the whole dataset.
 Use `ideogram4-pretrain-cache.yaml` for FSDP2, or `ideogram4-pretrain-ddp-cache.yaml` for the DDP/ZeRO-1 path.
+
+Context parallelism (`fsdp.cp_size` above 1) is available on the FSDP2 path. The
+degree has to divide both the world size and the attention head count, and it
+cannot be combined with `primus_ideogram4.varlen_attention`. The packed sequence
+is left-padded so its length divides the degree; a caption plus grid that is
+not already a multiple still trains.
