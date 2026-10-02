@@ -44,6 +44,10 @@ def _enabled() -> bool:
     return os.environ.get("PRIMUS_FUSED_ADAM_CLIP", "0") == "1"
 
 
+def _mcore_master_enabled() -> bool:
+    return os.environ.get("PRIMUS_FUSED_ADAM_MCORE_MASTER", "0") == "1"
+
+
 def _clip_coeff(total_norm: float, max_norm: float) -> float:
     """Return Megatron's gradient clipping coefficient."""
 
@@ -208,6 +212,7 @@ def _chained_step_with_device_clip(optimizer, fused_adam_type):
 
 
 def _install_patch() -> None:
+    from megatron.core.optimizer.optimizer_config import OptimizerConfig
     from megatron.core.optimizer.optimizer import ChainedOptimizer, MegatronOptimizer
     from transformer_engine.pytorch.optimizers import FusedAdam
 
@@ -218,6 +223,26 @@ def _install_patch() -> None:
     extension = _load_extension()
     original_adam_init = FusedAdam.__init__
     original_adam_step = FusedAdam.step
+    original_optimizer_config_post_init = OptimizerConfig.__post_init__
+
+    @wraps(original_optimizer_config_post_init)
+    def patched_optimizer_config_post_init(self):
+        original_optimizer_config_post_init(self)
+        if not _mcore_master_enabled():
+            return
+        if not self.use_precision_aware_optimizer:
+            raise RuntimeError(
+                "PRIMUS_FUSED_ADAM_MCORE_MASTER requires use_precision_aware_optimizer"
+            )
+        if self.main_params_dtype != torch.float32:
+            raise RuntimeError(
+                "PRIMUS_FUSED_ADAM_MCORE_MASTER requires FP32 main_params_dtype"
+            )
+        # MXFP4 is provided by Primus-Turbo rather than Megatron's fp8_recipe,
+        # so upstream classifies it as the generic no-FP8 path and moves master
+        # ownership into TE. Keep MCore's FP32 shards and use precision-aware
+        # mode only to select BF16 moments.
+        self.use_precision_aware_optimizer_no_fp8_or_ds_fp8 = False
 
     @wraps(original_adam_init)
     def patched_adam_init(self, *args, **kwargs):
@@ -319,6 +344,7 @@ def _install_patch() -> None:
 
     FusedAdam.__init__ = patched_adam_init
     FusedAdam.step = patched_adam_step
+    OptimizerConfig.__post_init__ = patched_optimizer_config_post_init
     MegatronOptimizer.clip_grad_norm = patched_clip_grad_norm
     ChainedOptimizer.step = patched_chained_step
 
