@@ -102,8 +102,8 @@ class TimeStepEmbedder(nn.Module):
         Returns:
             Timestep embeddings [B, hidden_dim]
         """
-        # Get sinusoidal embeddings
-        t_emb = self.time_proj(t)  # [B, embedding_dim]
+        # Get sinusoidal embeddings (in t's dtype), then in the MLP's dtype
+        t_emb = self.time_proj(t).to(self.time_embedding.in_layer.weight.dtype)  # [B, embedding_dim]
 
         # Project through MLP
         t_emb = self.time_embedding(t_emb)  # [B, hidden_dim]

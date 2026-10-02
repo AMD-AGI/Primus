@@ -176,6 +176,18 @@ def _restore_optimizer(optimizer, saved):
     _log("Restored optimizer parameters")
 
 
+def _restore_lr_scheduler(opt_param_scheduler, num_steps):
+    """Put the LR scheduler back at ``num_steps`` and rewrite the optimizer's lr / weight decay.
+
+    Each warmup ``train_step`` advances the scheduler, which writes that step's lr and weight
+    decay into every ``param_group``. Restoring ``num_steps`` alone leaves those values in place,
+    so the first real step would use the lr of the last warmup step. ``step(0)`` recomputes them
+    for the restored count without advancing it.
+    """
+    opt_param_scheduler.num_steps = num_steps
+    opt_param_scheduler.step(0)
+
+
 def _reset_optimizer_state(optimizer):
     """Zero per-parameter step counters so Adam acts as if no steps occurred.
 
@@ -547,7 +559,7 @@ def _run_warmup_and_restore(
     # ---- 12. Reset counters ----
     megatron_args.consumed_train_samples = 0
     megatron_args.skipped_train_samples = 0
-    opt_param_scheduler.num_steps = saved_lr_num_steps
+    _restore_lr_scheduler(opt_param_scheduler, saved_lr_num_steps)
     _log(
         f"Reset consumed_train_samples=0, skipped_train_samples=0, "
         f"lr_scheduler.num_steps={saved_lr_num_steps}"

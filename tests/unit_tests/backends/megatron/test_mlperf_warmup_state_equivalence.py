@@ -84,3 +84,33 @@ class TestOptimizerStateCleanAfterWarmup:
         _reset_optimizer_state(wrapper)
 
         assert opt.param_groups[0].get("step", 0) == 0
+
+
+class TestLrSchedulerRestoredAfterWarmup:
+    """The first real step must use the lr of the restored scheduler step, not the warmup's."""
+
+    def test_param_group_lr_matches_restored_step(self):
+        from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+
+        from primus.backends.megatron.patches.mlperf_warmup_patches import (
+            _restore_lr_scheduler,
+        )
+
+        model = torch.nn.Linear(16, 8, bias=True)
+        opt = torch.optim.AdamW(model.parameters(), lr=0.0, weight_decay=0.1)
+        sched = OptimizerParamScheduler(
+            opt, init_lr=0.0, max_lr=2.5e-4, min_lr=2.5e-4, lr_warmup_steps=800 * 1024,
+            lr_decay_steps=100000 * 1024, lr_decay_style="constant", start_wd=0.1, end_wd=0.1,
+            wd_incr_steps=1, wd_incr_style="constant",
+        )
+        first_lr = opt.param_groups[0]["lr"]
+        saved = sched.num_steps
+
+        for _ in range(2):  # the warmup's train_step calls
+            sched.step(1024)
+        assert opt.param_groups[0]["lr"] != first_lr
+
+        _restore_lr_scheduler(sched, saved)
+        assert sched.num_steps == saved
+        for group in opt.param_groups:
+            assert group["lr"] == sched.get_lr(group) == first_lr
