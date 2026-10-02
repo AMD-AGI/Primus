@@ -20,7 +20,8 @@
 #       --config examples/nemo_automodel/configs/MI355X/diffusion/ideogram4-pretrain.yaml
 #
 # A small overfit run on a fixed synthetic set: the goal is a clearly decreasing
-# loss, not convergence.
+# loss, not convergence. For a real run, remove step_scheduler.max_steps and use
+# ideogram4-pretrain-cache.yaml.
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:ideogram4-pretrain}

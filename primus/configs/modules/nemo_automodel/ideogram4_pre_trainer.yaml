@@ -2,7 +2,8 @@
 # rectified-flow text-to-image pretrain (Primus backend: nemo_automodel).
 #
 # The diffusion recipe schema, wired for Ideogram-4:
-#   - data.dataloader -> synthetic pre-encoded latents and text features.
+#   - data.dataloader -> synthetic pre-encoded latents and text features; use
+#     `ideogram4_cache_pre_trainer.yaml` for a real encoded cache.
 #   - flow_matching.adapter_type -> ideogram4, the adapter that packs the
 #     [pad][text][image] sequence and negates the predicted velocity.
 #
