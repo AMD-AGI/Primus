@@ -5,7 +5,17 @@
 # One-time setup (like any other Primus backend): initialize the submodule. The
 # launcher's prepare step then installs it editable (ROCm-pinned) on first run.
 #   git submodule update --init third_party/Automodel
-#   # (skipped automatically if the image already ships nemo_automodel)
+#   # (skipped if the installed copy already matches the pinned commit)
+#
+# Data: a pre-encoded cache. The image's diffusers has no
+# AutoencoderKLWan.enable_slicing, so build it after the pin is installed,
+# from the AutoModel checkout. Captions are one <stem>.txt beside each video.
+#   cd third_party/Automodel
+#   python -m tools.diffusion.preprocessing_multiprocess video \
+#     --video_dir /path/to/videos --output_dir /path/to/cache \
+#     --processor wan2.2 --model_name /path/to/Wan2.2-T2V-A14B-Diffusers \
+#     --mode video --num_frames 81 --height 512 --width 512 \
+#     --caption_format sidecar --output_format meta
 #
 # Launch (inside the Primus container, 8 GPUs free):
 #   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \

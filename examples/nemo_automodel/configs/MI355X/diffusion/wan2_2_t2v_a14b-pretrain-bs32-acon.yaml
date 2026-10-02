@@ -14,7 +14,7 @@
 # One-time setup (like any Primus backend): initialize the submodule; the
 # launcher's prepare step installs it editable (ROCm-pinned) on first run.
 #   git submodule update --init third_party/Automodel
-#   # (auto-skipped if the image already ships nemo_automodel)
+#   # (skipped if the installed copy already matches the pinned commit)
 #
 # Launch (inside the Primus container, 8 GPUs free):
 #   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \

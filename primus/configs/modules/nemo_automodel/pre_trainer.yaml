@@ -1,6 +1,6 @@
 # NeMo AutoModel pre_trainer module config (Primus backend: nemo_automodel).
 #
-# This is the AutoModel recipe schema (model:/fsdp:/optim:/step_scheduler:/...);
+# This is the AutoModel recipe schema (model:/fsdp:/optimizer:/step_scheduler:/...);
 # the Primus launcher deep-merges the `model:` preset and the EXP `overrides:`
 # on top of it, then the nemo_automodel backend materialises the whole tree into
 # an AutoModel ConfigNode and runs TrainDiffusionRecipe. The defaults below are
@@ -25,7 +25,7 @@ step_scheduler:
   local_batch_size: 32
   ckpt_every_steps: 1000
   num_epochs: 100
-  log_every: 2
+  log_remote_every_steps: 2
   save_checkpoint_every_epoch: false
 
 data:
@@ -39,15 +39,14 @@ data:
     drop_last: false
     num_workers: 2
 
-optim:
-  learning_rate: 5e-5
-  optimizer:
-    _target_: torch.optim.AdamW
-    weight_decay: 0.1
-    betas: [0.9, 0.95]
-    # fused AdamW (mutually exclusive with foreach).
-    foreach: false
-    fused: true
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 5e-5
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  # fused AdamW (mutually exclusive with foreach).
+  foreach: false
+  fused: true
 
 performance:
   check_loss: false

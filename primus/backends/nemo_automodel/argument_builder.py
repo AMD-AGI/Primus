@@ -52,6 +52,10 @@ PRIMUS_ONLY_TOP_KEYS = frozenset(
     }
 )
 
+# Top-level sections holding Primus-side settings (``primus_profiler:``,
+# ``primus_turbo:``, ...). Read by ``options``, never by AutoModel.
+PRIMUS_SECTION_PREFIX = "primus_"
+
 
 class NemoAutomodelConfigBuilder:
     """Absorb Primus ``module_config.params`` and return it for downstream use."""
@@ -83,7 +87,11 @@ def namespace_to_dict(obj: Any) -> Any:
 
 def strip_primus_keys(params_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Drop Primus-only top-level keys so AutoModel sees a clean recipe config."""
-    return {k: v for k, v in params_dict.items() if k not in PRIMUS_ONLY_TOP_KEYS}
+    return {
+        k: v
+        for k, v in params_dict.items()
+        if k not in PRIMUS_ONLY_TOP_KEYS and not k.startswith(PRIMUS_SECTION_PREFIX)
+    }
 
 
 def export_params_to_yaml(params_dict: Dict[str, Any]) -> str:

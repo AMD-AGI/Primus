@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[3]
 EXAMPLES = ROOT / "examples"
 
 # Backend dir -> the `framework` every experiment under it must declare.
-BACKENDS = ("megatron", "torchtitan", "maxtext", "megatron_bridge")
+BACKENDS = ("megatron", "torchtitan", "maxtext", "megatron_bridge", "nemo_automodel")
 
 MODULE_NAMES = {"pre_trainer", "post_trainer"}
 

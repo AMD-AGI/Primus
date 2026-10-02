@@ -12,8 +12,10 @@ model:
   # REQUIRED in pretrain mode (the from_config pipeline carries no config to
   # infer it from). Wan 2.2-A14B ships boundary_ratio = 0.875.
   boundary_ratio: 0.875
-  # AITER attention backend (gfx950). Falls back to "flash" if needed.
-  attention_backend: aiter
+  # "aiter" is not a registered backend name in the pinned diffusers: it raises
+  # at startup rather than falling back. flash is registered, and it is what the
+  # pretrain shape was run with.
+  attention_backend: flash
   # fp32 master + bf16 compute (canonical pretraining precision, GB300-comparable).
   torch_dtype: float32
   compute_dtype: bfloat16

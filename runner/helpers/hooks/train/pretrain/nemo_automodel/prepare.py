@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -18,9 +18,14 @@ AutoModel-specific differences from the torchtitan flow:
      versions already installed and pass them as a pip *constraint*, so the
      editable install never replaces the ROCm stack. The ``diffusion`` extras
      are installed for the Wan diffusion recipe.
-  2. **Idempotent / skip-if-present.** If ``nemo_automodel`` is already importable
-     (e.g. a base image that ships it pre-installed) we skip the install unless
-     ``AUTOMODEL_REINSTALL=1`` is set.
+  2. **Pinned, not merely present.** Base images may ship no ``nemo_automodel`` or
+     an older one, and the Primus patches need the commit ``primus/_thirdparty.lock``
+     pins. An importable copy is kept only when it is that commit (or is the
+     checkout itself) and its installed metadata and dependencies match that code;
+     any other copy is replaced from the checkout, and every package version the
+     install moves (transformers, typically) is logged. ``AUTOMODEL_REINSTALL=1``
+     always reinstalls; ``AUTOMODEL_REINSTALL=0`` keeps whatever copy is importable
+     and warns if it looks stale; ``PRIMUS_SKIP_PIP=1`` installs nothing.
 
 Unlike torchtitan there is no tokenizer asset to pre-download: the Wan diffusion
 recipe pulls model weights from HuggingFace / a local ``/models`` mount at
@@ -29,6 +34,7 @@ is done later by ``NemoAutomodelPretrainTrainer`` inside the Primus core runtime
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -40,6 +46,7 @@ from runner.helpers.hooks.train.pretrain.utils import (
     get_env_case_insensitive,
     log_error_and_exit,
     log_info,
+    log_warning,
     write_patch_args,
 )
 
@@ -59,9 +66,14 @@ _ROCM_PINS = [
 # diffusers gates its ``aiter`` attention backend behind a minimum amd-aiter
 # version. Some ROCm base images ship a functional but dev-versioned aiter (e.g.
 # ``0.1.1.dev*``) that fails that guard even though the kernel works (its
-# ``flash_attn_func`` supports ``return_lse``). The configs default to
-# ``model.attention_backend: aiter``, so without a fix diffusers would refuse it.
+# ``flash_attn_func`` supports ``return_lse``). The shipped Wan preset uses
+# ``flash``: the name ``aiter`` is not in the pinned diffusers' backend list and
+# raises before this version check runs. The shim still covers a config that
+# asks for ``aiter`` on a diffusers that has the name.
 _REQUIRED_AITER_VERSION = "0.1.5"
+
+_AUTOMODEL_SUBMODULE = "third_party/Automodel"
+_DEFAULT_EXTRAS = "diffusion,diffusion-media"
 
 
 def parse_args():
@@ -125,12 +137,15 @@ def install_automodel_editable(automodel_path: Path):
             f"AutoModel checkout not found at {automodel_path} (no pyproject.toml/setup.py).\n"
             "Initialize the submodule first:\n"
             "    git submodule update --init third_party/Automodel\n"
-            "or run `primus-cli deps sync`, or pass --backend_path / set AUTOMODEL_PATH."
+            "or run `primus-cli deps sync`, or pass --backend_path / set AUTOMODEL_PATH.\n"
+            "AUTOMODEL_REINSTALL=0 keeps an already-importable nemo_automodel instead, pinned or not."
         )
 
-    extras = os.environ.get("AUTOMODEL_EXTRAS", "diffusion,diffusion-media")
+    ensure_git_trusts_checkout(automodel_path)
+    extras = os.environ.get("AUTOMODEL_EXTRAS", _DEFAULT_EXTRAS)
     spec = f"{automodel_path}[{extras}]" if extras else str(automodel_path)
     constraints = write_rocm_constraints()
+    before = installed_versions()
 
     env = os.environ.copy()
     env["PIP_CONSTRAINT"] = constraints
@@ -153,8 +168,229 @@ def install_automodel_editable(automodel_path: Path):
             log_info(f"Non-fatal: could not remove temp ROCm constraints file {constraints!r}: {e}")
     if ret is None or ret.returncode != 0:
         rc = ret.returncode if ret is not None else "n/a"
-        log_error_and_exit(f"AutoModel editable install failed (exit {rc}).")
+        log_error_and_exit(
+            f"AutoModel editable install failed (exit {rc}). To use a nemo_automodel that is "
+            "already importable instead (offline nodes, prepared images), set AUTOMODEL_REINSTALL=0 "
+            "or PRIMUS_SKIP_PIP=1."
+        )
     log_info("AutoModel editable install complete.")
+    log_version_changes(before, installed_versions())
+
+
+def _git_env() -> dict:
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def ensure_git_trusts_checkout(path: Path):
+    """Add ``path`` to git's global ``safe.directory`` when git refuses it for ownership.
+
+    A container running as root over a host-owned bind mount trips that check, and the
+    install's setuptools-scm file finder then fails. setuptools-scm strips ``GIT_*``
+    variables from the git it runs, so only the global config can reach it.
+    """
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--git-dir"],
+            capture_output=True,
+            text=True,
+            env=_git_env(),
+            timeout=30,
+            check=False,
+        )
+        if probe.returncode == 0 or "dubious ownership" not in probe.stderr:
+            return
+        added = subprocess.run(
+            ["git", "config", "--global", "--add", "safe.directory", str(path)],
+            capture_output=True,
+            text=True,
+            env=_git_env(),
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    if added.returncode == 0:
+        log_info(
+            f"git refused {path} as owned by another user; added it to safe.directory in the "
+            "global git config, which the AutoModel install needs to read the checkout."
+        )
+    else:
+        log_warning(
+            f"git refuses {path} as owned by another user, and adding it to safe.directory failed "
+            f"({added.stderr.strip()}). Run: git config --global --add safe.directory {path}"
+        )
+
+
+def installed_versions() -> dict:
+    """Installed distribution versions, keyed by normalised project name."""
+    import importlib
+    import importlib.metadata as md
+
+    importlib.invalidate_caches()
+    versions = {}
+    for dist in md.distributions():
+        name = dist.metadata["Name"] if dist.metadata else None
+        if name:
+            versions[name.lower().replace("_", "-")] = dist.version
+    return versions
+
+
+def log_version_changes(before: dict, after: dict):
+    """Say which packages the install added, upgraded or downgraded."""
+    changes = [
+        f"{name} {before.get(name, '(new)')} -> {after[name]}"
+        for name in sorted(after)
+        if before.get(name) != after[name]
+    ]
+    if not changes:
+        log_info("The AutoModel install changed no package versions.")
+        return
+    log_info(f"The AutoModel install changed {len(changes)} package version(s):")
+    for change in changes:
+        log_info(f"    {change}")
+
+
+def pinned_automodel_commit(lock_path=None):
+    """The AutoModel commit ``primus/_thirdparty.lock`` pins, or None without a lock entry."""
+    if lock_path is None:
+        import primus
+
+        lock_path = Path(primus.__file__).resolve().parent / "_thirdparty.lock"
+    try:
+        entries = json.loads(Path(lock_path).read_text(encoding="utf-8"))["third_party"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    for entry in entries:
+        if entry.get("path") == _AUTOMODEL_SUBMODULE:
+            return entry.get("commit")
+    return None
+
+
+def _git_head(path: Path):
+    """HEAD of the git checkout rooted exactly at ``path``, else None."""
+    try:
+        out = subprocess.run(
+            ["git", "-c", "safe.directory=*", "-C", str(path), "rev-parse", "--show-toplevel", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = out.stdout.splitlines()
+    if out.returncode != 0 or len(lines) != 2:
+        return None
+    toplevel, head = lines
+    return head if Path(toplevel).resolve() == path.resolve() else None
+
+
+def _direct_url_commit():
+    """The commit pip recorded for a VCS install of nemo_automodel (PEP 610), else None."""
+    import importlib.metadata as md
+
+    try:
+        raw = md.distribution("nemo_automodel").read_text("direct_url.json")
+        return json.loads(raw or "{}").get("vcs_info", {}).get("commit_id")
+    except (md.PackageNotFoundError, ValueError, AttributeError):
+        return None
+
+
+def importable_automodel():
+    """``(source root, commit)`` of the nemo_automodel Python would import, or None.
+
+    The commit is None when nothing records it -- a wheel baked into an image, say.
+    Found without importing, so a mismatched copy never runs its import side effects.
+    """
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec("nemo_automodel")
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    root = Path(list(spec.submodule_search_locations)[0]).resolve().parent
+    return root, _git_head(root) or _direct_url_commit()
+
+
+def _same_commit(a, b) -> bool:
+    if not a or not b:
+        return False
+    n = min(len(a), len(b))
+    return n >= 7 and a[:n] == b[:n]
+
+
+def _installed_dist_commit():
+    """The commit the installed nemo_automodel metadata was built from, else None.
+
+    setuptools-scm puts it in the local version (``0.7.0+bd1ca5a07``); a VCS install
+    records it in ``direct_url.json`` instead.
+    """
+    import importlib.metadata as md
+
+    try:
+        local = md.version("nemo_automodel").partition("+")[2]
+    except md.PackageNotFoundError:
+        return None
+    candidate = local.lstrip("g").split(".")[0]
+    if len(candidate) >= 7 and all(c in "0123456789abcdef" for c in candidate):
+        return candidate
+    return _direct_url_commit()
+
+
+def _canonical(name: str) -> str:
+    return name.lower().replace("_", "-")
+
+
+def _unsatisfied_requirements():
+    """Declared requirements of the installed nemo_automodel that are not met, or None if not installed.
+
+    The ROCm packages are left out: the install holds them at the image's
+    versions on purpose, so a mismatch there is not something reinstalling fixes,
+    and counting it would reinstall on every launch.
+    """
+    import importlib.metadata as md
+
+    from packaging.requirements import Requirement
+
+    try:
+        declared = md.requires("nemo_automodel") or []
+    except md.PackageNotFoundError:
+        return None
+    extras = [
+        "",
+        *filter(None, (e.strip() for e in os.environ.get("AUTOMODEL_EXTRAS", _DEFAULT_EXTRAS).split(","))),
+    ]
+    held = {_canonical(p) for p in _ROCM_PINS}
+    unmet = []
+    for line in declared:
+        req = Requirement(line)
+        if _canonical(req.name) in held:
+            continue
+        if req.marker is not None and not any(req.marker.evaluate({"extra": extra}) for extra in extras):
+            continue
+        try:
+            version = md.version(req.name)
+        except md.PackageNotFoundError:
+            unmet.append(f"{req} (missing)")
+            continue
+        if req.specifier and not req.specifier.contains(version, prereleases=True):
+            unmet.append(f"{req} (installed {version})")
+    return unmet
+
+
+def stale_install_reason(commit):
+    """Why the installed nemo_automodel does not match the code at ``commit``, else None."""
+    unmet = _unsatisfied_requirements()
+    if unmet is None:
+        return "nemo_automodel is importable but not installed, so none of its dependencies were"
+    built_from = _installed_dist_commit()
+    if commit and built_from and not _same_commit(built_from, commit):
+        return f"its installed metadata is from {built_from[:12]}, not {commit[:12]}"
+    if unmet:
+        return "unsatisfied requirements: " + ", ".join(unmet)
+    return None
 
 
 def maybe_shim_aiter_version():
@@ -167,12 +403,6 @@ def maybe_shim_aiter_version():
     guard, when aiter is absent, or when its metadata is read-only). Disable with
     ``AITER_VERSION_SHIM=0``.
 
-    NOTE (single source of truth): the same metadata-rewrite is performed by the
-    NeMo-AutoModel dev-env ``entrypoint.sh`` (tiger-training-internal #208). The
-    two must stay in sync -- keep ``_REQUIRED_AITER_VERSION`` and the rewrite
-    logic identical, or fold both onto a shared helper if the dev-env starts
-    importing from this repo. Kept duplicated for now because the dev-env image
-    does not depend on Primus at container-build time.
     """
     if os.environ.get("AITER_VERSION_SHIM", "1") != "1":
         log_info("AITER version shim disabled (AITER_VERSION_SHIM=0).")
@@ -245,31 +475,85 @@ def maybe_shim_aiter_version():
     )
 
 
+def keep_importable_automodel(
+    found, automodel_path: Path, pinned, reinstall: str, kept_by: str = "AUTOMODEL_REINSTALL=0"
+) -> bool:
+    """Whether the importable nemo_automodel can stand in for installing ``automodel_path``."""
+    if found is None:
+        log_info("nemo_automodel not importable; installing from the AutoModel checkout.")
+        return False
+    root, commit = found
+    where = f"{root} at {commit[:12] if commit else 'an unrecorded commit'}"
+    pin_note = f"; Primus pins {pinned[:12]}" if pinned and not _same_commit(commit, pinned) else ""
+    if reinstall == "0":
+        log_info(f"nemo_automodel importable from {where}; kept, as {kept_by}{pin_note}.")
+        reason = stale_install_reason(commit)
+        if reason:
+            log_warning(f"the kept nemo_automodel may not run: {reason}.")
+        return True
+    if root == automodel_path.resolve():
+        log_info(f"nemo_automodel importable from the AutoModel checkout itself ({where}){pin_note}.")
+        if pin_note:
+            log_warning(
+                f"the AutoModel checkout is not the commit Primus pins ({pinned[:12]}). Run "
+                "`git submodule update --init third_party/Automodel`; off the pin, the Primus "
+                "repairs that cannot find the AutoModel APIs they patch stand aside."
+            )
+        reason = stale_install_reason(commit)
+        if reason:
+            log_warning(f"the checkout's install is stale ({reason}); reinstalling from {automodel_path}.")
+            return False
+        return True
+    if pinned is None:
+        log_info(
+            f"nemo_automodel importable from {where}, and _thirdparty.lock pins no AutoModel commit; "
+            "kept. Set AUTOMODEL_REINSTALL=1 to install from the checkout."
+        )
+        return True
+    if _same_commit(commit, pinned):
+        reason = stale_install_reason(commit)
+        if reason:
+            log_warning(f"nemo_automodel at {where} is the pinned commit, but {reason}; reinstalling.")
+            return False
+        log_info(f"nemo_automodel importable from {where}, the pinned commit; skipping install.")
+        return True
+    log_info(
+        f"nemo_automodel importable from {where}, but Primus pins {pinned[:12]}; "
+        f"reinstalling from {automodel_path}. Set AUTOMODEL_REINSTALL=0 to keep the importable copy."
+    )
+    return False
+
+
 def ensure_automodel_installed(cli_path, primus_path: Path):
-    """Install AutoModel from the submodule unless it is already importable."""
-    reinstall = os.environ.get("AUTOMODEL_REINSTALL", "0") == "1"
-    # Only take the skip-if-present fast path when the user did not explicitly
-    # point us at a checkout (CLI --backend_path / AUTOMODEL_PATH / BACKEND_PATH).
-    # If they did, honor it and (re)install so an explicit override beats a
-    # nemo_automodel that the base image happens to ship (matches --backend_path help).
+    """Install AutoModel from the checkout unless the importable copy is the pinned commit.
+
+    ``AUTOMODEL_REINSTALL=1`` always installs, ``AUTOMODEL_REINSTALL=0`` keeps any
+    importable copy. An explicit --backend_path / AUTOMODEL_PATH / BACKEND_PATH is
+    always installed, so it beats a nemo_automodel the base image happens to ship.
+    """
+    reinstall = os.environ.get("AUTOMODEL_REINSTALL", "").strip()
     explicit_source = (
         bool(cli_path)
         or bool(get_env_case_insensitive("AUTOMODEL_PATH"))
         or bool(get_env_case_insensitive("BACKEND_PATH"))
     )
-    if not reinstall and not explicit_source:
-        try:
-            import nemo_automodel  # noqa: F401
-
-            log_info(
-                f"nemo_automodel already importable ({getattr(nemo_automodel, '__file__', '?')}); "
-                "skipping install. Set AUTOMODEL_REINSTALL=1 to force a reinstall from third_party."
-            )
-            return
-        except Exception:
-            log_info("nemo_automodel not importable; installing from the AutoModel checkout.")
-
     automodel_path = resolve_backend_path(cli_path, primus_path)
+    if os.environ.get("PRIMUS_SKIP_PIP", "").strip() == "1":
+        found = importable_automodel()
+        if found is None:
+            log_error_and_exit(
+                "PRIMUS_SKIP_PIP=1, but nemo_automodel is not importable. Unset it to let the hook "
+                f"install AutoModel from {automodel_path}."
+            )
+        keep_importable_automodel(
+            found, automodel_path, pinned_automodel_commit(), "0", kept_by="PRIMUS_SKIP_PIP=1"
+        )
+        return
+    if reinstall != "1" and not explicit_source:
+        if keep_importable_automodel(
+            importable_automodel(), automodel_path, pinned_automodel_commit(), reinstall
+        ):
+            return
     install_automodel_editable(automodel_path)
 
 
@@ -283,7 +567,8 @@ def main():
     log_info(f"PRIMUS_PATH: {primus_path}")
     log_info(f"DATA_PATH: {Path(args.data_path).resolve()}")
     log_info(f"EXP: {exp_path}")
-    log_info(f"BACKEND_PATH: {args.backend_path}")
+    if args.backend_path:
+        log_info(f"BACKEND_PATH (--backend_path): {args.backend_path}")
     log_info(f"PATCH-ARGS: {patch_args_file}")
 
     if not exp_path.is_file():
@@ -293,7 +578,7 @@ def main():
     ensure_automodel_installed(args.backend_path, primus_path)
 
     # 1b) Make diffusers' aiter attention backend selectable on images that ship a
-    #     dev-versioned amd-aiter (configs default to attention_backend: aiter).
+    #     dev-versioned amd-aiter. The shipped preset uses flash; see the note above.
     maybe_shim_aiter_version()
 
     # 2) Validate the experiment parses and routes to the nemo_automodel backend.

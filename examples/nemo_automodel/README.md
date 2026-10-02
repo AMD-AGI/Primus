@@ -1,0 +1,77 @@
+# NeMo AutoModel Diffusion Examples
+
+Text-to-image and text-to-video training through the `nemo_automodel` backend,
+which runs [NeMo AutoModel](https://github.com/NVIDIA-NeMo/Automodel)'s diffusion
+recipe with Primus patches applied at startup. No AutoModel or diffusers source is
+modified; see the [backend README](../../primus/backends/nemo_automodel/README.md)
+for how the patches are organised.
+
+Experiments live in [`configs/MI355X/diffusion/`](./configs/MI355X/diffusion/):
+
+| Model | Experiments |
+| --- | --- |
+| Wan 2.2 T2V A14B | `wan2_2_t2v_a14b-*.yaml` (pretrain, finetune) |
+
+## Launch
+
+Inside the Primus container, from the repository root:
+
+```bash
+USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+GPUS_PER_NODE=8 \
+bash ./runner/primus-cli direct -- train pretrain \
+    --config examples/nemo_automodel/configs/MI355X/diffusion/<experiment>.yaml
+```
+
+Any config key can be overridden after `--config` as `key=value`, for example
+`step_scheduler.max_steps=10`. Each experiment's header lists what it needs
+before the first launch (model weights, a dataset, or a cache).
+
+### The AutoModel pin
+
+Primus pins AutoModel to the commit in `primus/_thirdparty.lock`, which is also the
+`third_party/Automodel` submodule pointer. That commit requires
+`transformers==5.15.1` and, through its `diffusion` extra, `diffusers>=0.39.0`.
+Published Primus images may ship no `nemo_automodel` or an older one, so
+initialise the submodule before the first launch:
+
+```bash
+git submodule update --init third_party/Automodel
+```
+
+On each launch the prepare hook compares the importable `nemo_automodel` with
+the pinned commit. If they differ, or the installed copy's metadata or
+dependencies do not match its code, it installs the submodule editable with the
+image's ROCm packages (torch, triton, aiter, flash-attn) held at their installed
+versions, and logs why and every package version the install moved. If the
+container runs as root over a checkout owned by your host user, git refuses the
+checkout, so the hook adds the AutoModel checkout to git's global
+`safe.directory` and says so.
+
+Environment variables change that (`PRIMUS_SKIP_PIP` is the switch the other
+backends' install hooks honour too):
+
+| Variable | Effect |
+| --- | --- |
+| `AUTOMODEL_REINSTALL=1` | Always install. An explicit `BACKEND_PATH` / `AUTOMODEL_PATH` does too, and takes precedence over `AUTOMODEL_REINSTALL=0`. |
+| `AUTOMODEL_REINSTALL=0` | Keep whatever copy is importable, with a warning if it looks stale. |
+| `PRIMUS_SKIP_PIP=1` | Install nothing; stop if `nemo_automodel` is not importable. |
+
+On a copy other than the pinned commit, a Primus repair that cannot find the
+AutoModel code it patches logs a warning and leaves AutoModel's stock behaviour in
+place.
+
+## Settings
+
+Training behaviour is set in the YAML: batch sizes, `fsdp.activation_checkpointing`,
+and so on. The Primus repairs that make those keys take effect are always on.
+
+Primus features that AutoModel has no setting for are configured in top-level
+`primus_*` sections of the module config, either in the experiment's
+`overrides:` or on the launch line (`primus_profiler.enabled=true`). Primus
+removes these sections before the config reaches AutoModel. Every feature is
+off by default, and the module that implements it documents its remaining keys.
+
+| Setting | Effect |
+| --- | --- |
+| `primus_profiler.enabled` | torch profiler traces of a few steady-state steps, one per rank |
