@@ -127,9 +127,62 @@ class MaxTextPretrainTrainer(BaseTrainer):
             params_dict.pop(key, None)
 
         yaml_path = export_params_to_yaml(params_dict)
+        # MaxText treats argv[1] as *base.yml*, then merges
+        # configs/models/{model_name}.yml on top. Model-yaml keys therefore
+        # overwrite the Primus dump (gemma4-26b.yml has 30 layers) unless they
+        # are also in CLI/kwargs (overrides_cfg, last merge).
+        # Only forward known MaxText fields — a blanket dump includes Primus
+        # keys like ``config`` which pyconfig interprets as a file path.
+        _KWARG_ALLOW = (
+            "abort_on_nan_loss",
+            "adam_weight_decay",
+            "attention",
+            "async_checkpointing",
+            "base_num_decoder_layers",
+            "base_emb_dim",
+            "base_mlp_dim",
+            "base_num_kv_heads",
+            "base_num_query_heads",
+            "capacity_factor",
+            "dataset_type",
+            "dcn_data_parallelism",
+            "dcn_fsdp_parallelism",
+            "enable_checkpointing",
+            "global_num_kv_heads",
+            "ici_data_parallelism",
+            "ici_expert_parallelism",
+            "ici_fsdp_parallelism",
+            "max_target_length",
+            "megablox",
+            "logits_via_embedding",
+            "learning_rate",
+            "mu_dtype",
+            "num_experts",
+            "num_experts_per_tok",
+            "opt_type",
+            "override_model_config",
+            "per_device_batch_size",
+            "profiler",
+            "remat_policy",
+            "run_name",
+            "scan_layers",
+            "sparse_matmul",
+            "steps",
+            "use_multimodal",
+            "vocab_size",
+            "weight_dtype",
+        )
+        init_kwargs = dict(override_model_args)
+        for k in _KWARG_ALLOW:
+            if k in params_dict and params_dict[k] is not None:
+                init_kwargs[k] = params_dict[k]
+        if init_kwargs:
+            warning_rank_0(
+                f"MaxText Pre-Trainer: initialize() kwargs { {k: init_kwargs[k] for k in sorted(init_kwargs)} }"
+            )
         try:
             argv = [module_name, yaml_path]
-            init_result = initialize(argv, **override_model_args)
+            init_result = initialize(argv, **init_kwargs)
         finally:
             try:
                 os.unlink(yaml_path)
