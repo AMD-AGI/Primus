@@ -10,13 +10,14 @@
 
 #include <cmath>
 #include <cstdint>
+#include <type_traits>
 
 namespace {
 
 constexpr int kBlockSize = 512;
 constexpr int kIlp = 8;
 
-template <bool AdamW>
+template <bool AdamW, typename MomentT>
 __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
     int chunk_size,
     const int64_t* __restrict__ addresses,
@@ -42,10 +43,10 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
       reinterpret_cast<float*>(addresses[tensor_idx * 4 + 0]);
   float* __restrict__ param =
       reinterpret_cast<float*>(addresses[tensor_idx * 4 + 1]);
-  float* __restrict__ exp_avg =
-      reinterpret_cast<float*>(addresses[tensor_idx * 4 + 2]);
-  float* __restrict__ exp_avg_sq =
-      reinterpret_cast<float*>(addresses[tensor_idx * 4 + 3]);
+  MomentT* __restrict__ exp_avg =
+      reinterpret_cast<MomentT*>(addresses[tensor_idx * 4 + 2]);
+  MomentT* __restrict__ exp_avg_sq =
+      reinterpret_cast<MomentT*>(addresses[tensor_idx * 4 + 3]);
 
   const int64_t elem_offset = static_cast<int64_t>(chunk_idx) * chunk_size;
   grad += elem_offset;
@@ -76,18 +77,26 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
       const float4 g1 = *reinterpret_cast<const float4*>(grad + i + 4);
       const float4 p0 = *reinterpret_cast<const float4*>(param + i);
       const float4 p1 = *reinterpret_cast<const float4*>(param + i + 4);
-      const float4 m0 = *reinterpret_cast<const float4*>(exp_avg + i);
-      const float4 m1 = *reinterpret_cast<const float4*>(exp_avg + i + 4);
-      const float4 v0 = *reinterpret_cast<const float4*>(exp_avg_sq + i);
-      const float4 v1 = *reinterpret_cast<const float4*>(exp_avg_sq + i + 4);
       g[0] = g0.x; g[1] = g0.y; g[2] = g0.z; g[3] = g0.w;
       g[4] = g1.x; g[5] = g1.y; g[6] = g1.z; g[7] = g1.w;
       p[0] = p0.x; p[1] = p0.y; p[2] = p0.z; p[3] = p0.w;
       p[4] = p1.x; p[5] = p1.y; p[6] = p1.z; p[7] = p1.w;
-      m[0] = m0.x; m[1] = m0.y; m[2] = m0.z; m[3] = m0.w;
-      m[4] = m1.x; m[5] = m1.y; m[6] = m1.z; m[7] = m1.w;
-      v[0] = v0.x; v[1] = v0.y; v[2] = v0.z; v[3] = v0.w;
-      v[4] = v1.x; v[5] = v1.y; v[6] = v1.z; v[7] = v1.w;
+      if constexpr (std::is_same_v<MomentT, float>) {
+        const float4 m0 = *reinterpret_cast<const float4*>(exp_avg + i);
+        const float4 m1 = *reinterpret_cast<const float4*>(exp_avg + i + 4);
+        const float4 v0 = *reinterpret_cast<const float4*>(exp_avg_sq + i);
+        const float4 v1 = *reinterpret_cast<const float4*>(exp_avg_sq + i + 4);
+        m[0] = m0.x; m[1] = m0.y; m[2] = m0.z; m[3] = m0.w;
+        m[4] = m1.x; m[5] = m1.y; m[6] = m1.z; m[7] = m1.w;
+        v[0] = v0.x; v[1] = v0.y; v[2] = v0.z; v[3] = v0.w;
+        v[4] = v1.x; v[5] = v1.y; v[6] = v1.z; v[7] = v1.w;
+      } else {
+#pragma unroll
+        for (int j = 0; j < kIlp; ++j) {
+          m[j] = static_cast<float>(exp_avg[i + j]);
+          v[j] = static_cast<float>(exp_avg_sq[i + j]);
+        }
+      }
     } else {
 #pragma unroll
       for (int j = 0; j < kIlp; ++j) {
@@ -117,10 +126,18 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
     if (vectorized) {
       *reinterpret_cast<float4*>(param + i) = {p[0], p[1], p[2], p[3]};
       *reinterpret_cast<float4*>(param + i + 4) = {p[4], p[5], p[6], p[7]};
-      *reinterpret_cast<float4*>(exp_avg + i) = {m[0], m[1], m[2], m[3]};
-      *reinterpret_cast<float4*>(exp_avg + i + 4) = {m[4], m[5], m[6], m[7]};
-      *reinterpret_cast<float4*>(exp_avg_sq + i) = {v[0], v[1], v[2], v[3]};
-      *reinterpret_cast<float4*>(exp_avg_sq + i + 4) = {v[4], v[5], v[6], v[7]};
+      if constexpr (std::is_same_v<MomentT, float>) {
+        *reinterpret_cast<float4*>(exp_avg + i) = {m[0], m[1], m[2], m[3]};
+        *reinterpret_cast<float4*>(exp_avg + i + 4) = {m[4], m[5], m[6], m[7]};
+        *reinterpret_cast<float4*>(exp_avg_sq + i) = {v[0], v[1], v[2], v[3]};
+        *reinterpret_cast<float4*>(exp_avg_sq + i + 4) = {v[4], v[5], v[6], v[7]};
+      } else {
+#pragma unroll
+        for (int j = 0; j < kIlp; ++j) {
+          exp_avg[i + j] = static_cast<MomentT>(m[j]);
+          exp_avg_sq[i + j] = static_cast<MomentT>(v[j]);
+        }
+      }
     } else {
 #pragma unroll
       for (int j = 0; j < kIlp; ++j) {
@@ -149,6 +166,7 @@ void fused_adam_clip(
     int mode,
     int bias_correction,
     double weight_decay,
+    int moment_dtype,
     torch::Tensor grad_norm,
     double max_norm) {
   TORCH_CHECK(addresses.is_cuda() && sizes.is_cuda() &&
@@ -165,6 +183,8 @@ void fused_adam_clip(
   TORCH_CHECK(grad_norm.get_device() == addresses.get_device(),
               "fused_adam_clip grad_norm and optimizer tensors must share a device");
   TORCH_CHECK(mode == 0 || mode == 1, "fused_adam_clip Adam mode must be 0 or 1");
+  TORCH_CHECK(moment_dtype == 0 || moment_dtype == 1,
+              "fused_adam_clip moment dtype must be 0 (FP32) or 1 (BF16)");
 
   float correction1 = 1.0f;
   float correction2 = 1.0f;
@@ -176,18 +196,22 @@ void fused_adam_clip(
   const float beta2_corr_inv = 1.0f / correction2;
   auto stream = at::cuda::getCurrentCUDAStream();
 
-#define LAUNCH(ADAMW) \
-  fused_adam_clip_kernel<ADAMW><<<total_chunks, kBlockSize, 0, stream>>>( \
+#define LAUNCH(ADAMW, MOMENT_T) \
+  fused_adam_clip_kernel<ADAMW, MOMENT_T><<<total_chunks, kBlockSize, 0, stream>>>( \
       chunk_size, addresses.data_ptr<int64_t>(), sizes.data_ptr<int64_t>(), \
       block_to_tensor.data_ptr<int>(), chunk_offsets.data_ptr<int>(), total_chunks, \
       static_cast<float>(beta1), static_cast<float>(beta2), step_size, \
       beta2_corr_inv, static_cast<float>(epsilon), static_cast<float>(lr), \
       static_cast<float>(weight_decay), grad_norm.data_ptr<float>(), \
       static_cast<float>(max_norm))
-  if (mode == 1) {
-    LAUNCH(true);
+  if (mode == 1 && moment_dtype == 0) {
+    LAUNCH(true, float);
+  } else if (mode == 1) {
+    LAUNCH(true, c10::BFloat16);
+  } else if (moment_dtype == 0) {
+    LAUNCH(false, float);
   } else {
-    LAUNCH(false);
+    LAUNCH(false, c10::BFloat16);
   }
 #undef LAUNCH
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -197,5 +221,5 @@ void fused_adam_clip(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("fused_adam_clip", &fused_adam_clip,
-             "Fused FP32 Adam/AdamW with an in-register gradient clip factor");
+             "Fused Adam/AdamW with FP32 or BF16 moments and in-register clipping");
 }

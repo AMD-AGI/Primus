@@ -726,18 +726,16 @@ def load_deosc_sidecars(optimizer, ckpt_dir: Optional[str]) -> None:
 
 
 def _uses_precision_aware_main_params(opt) -> bool:
-    """True if the optimizer holds bf16 main params inside FusedAdam.
+    """True if FusedAdam, rather than MCore, owns the main parameters.
 
-    With ``use_precision_aware_optimizer`` the distributed optimizer does not
-    keep a separate fp32 master shard: ``shard_fp32_from_float16_groups`` is
-    filled with ``None`` and the main params live inside FusedAdam. De-osc reads
-    those shards for dist_w and as the snap target, so this mode is unsupported
-    and must be detected explicitly (otherwise de-osc would silently no-op).
+    Precision-aware optimization can lower only the moment dtypes while leaving
+    MCore's FP32 main-parameter shards intact. That mode is compatible with
+    de-oscillation. It is unsupported only when the decoupled-grad path moves
+    main-parameter ownership into FusedAdam, leaving the MCore shard slots empty.
     """
     cfg = getattr(opt, "config", None)
-    if cfg is not None and (
-        getattr(cfg, "use_precision_aware_optimizer", False)
-        or getattr(cfg, "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False)
+    if cfg is not None and getattr(
+        cfg, "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False
     ):
         return True
     # Structural fallback: float16 params exist but every main shard is None.
