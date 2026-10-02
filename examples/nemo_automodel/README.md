@@ -10,7 +10,8 @@ Experiments live in [`configs/MI355X/diffusion/`](./configs/MI355X/diffusion/):
 
 | Model | Experiments |
 | --- | --- |
-| Wan 2.2 T2V A14B | `wan2_2_t2v_a14b-*.yaml` (pretrain, finetune) |
+| Wan 2.2 T2V A14B | `wan2_2_t2v_a14b-*.yaml` (pretrain, finetune, synthetic, TE FP8) |
+| FLUX.1-dev / schnell | `flux_1_dev-pretrain.yaml`, `flux_1_dev-synthetic.yaml`, `flux_1_schnell-synthetic.yaml` |
 
 ## Launch
 
@@ -63,8 +64,9 @@ place.
 
 ## Settings
 
-Training behaviour is set in the YAML: batch sizes, `fsdp.activation_checkpointing`,
-and so on. The Primus repairs that make those keys take effect are always on.
+Training behaviour is set in the YAML: batch sizes, `fsdp.activation_checkpointing`
+(`true` or `selective`), `fsdp.reshard_after_forward`, `fsdp.enable_compile`, and
+so on. The Primus repairs that make those keys take effect are always on.
 
 Primus features that AutoModel has no setting for are configured in top-level
 `primus_*` sections of the module config, either in the experiment's

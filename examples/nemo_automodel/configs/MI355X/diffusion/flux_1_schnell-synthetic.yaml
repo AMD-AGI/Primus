@@ -1,0 +1,33 @@
+# Primus EXP — FLUX.1-schnell T2I pretrain on SYNTHETIC data, NeMo AutoModel backend.
+#
+# Same as flux_1_dev-synthetic.yaml except for the model: schnell's transformer is
+# built with guidance_embeds=false, so the adapter must not pass a guidance tensor.
+# use_guidance_embeds below is what tells it so; with the dev value the run stops
+# at step 0 with an error naming the key.
+#
+# Launch (inside the Primus container, 8 GPUs):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/nemo_automodel/configs/MI355X/diffusion/flux_1_schnell-synthetic.yaml
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_1_schnell-synthetic}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: flux_synth_pre_trainer.yaml
+    model: flux_1_schnell.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 25
+        local_batch_size: 4
+        global_batch_size: 32
+      checkpoint:
+        enabled: false
+      flow_matching:
+        adapter_kwargs:
+          use_guidance_embeds: false
