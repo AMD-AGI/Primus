@@ -3,6 +3,9 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_lite-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+env:
+  NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
+
 modules:
   pre_trainer:
     framework: megatron
