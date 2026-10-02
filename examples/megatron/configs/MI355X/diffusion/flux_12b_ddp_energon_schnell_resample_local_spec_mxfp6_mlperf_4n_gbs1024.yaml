@@ -39,6 +39,7 @@ modules:
       nemo_aligned_lr_warmup: false
       reference_lr_warmup: true
       single_block_reference_init: true
+      reference_weight_decay: true
 
       timestep_sampling_strategy: "direct_uniform"
       activation_func: "openai_gelu"
