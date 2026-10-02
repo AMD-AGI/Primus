@@ -103,6 +103,123 @@ from primus.core.utils.module_utils import warning_rank_0
 
 _dummy_wgrads = {}
 
+# A fused RMSNorm producer attaches raw MXFP4 buffers to its (deliberately
+# unwritten) BF16 autograd carrier. The next ColumnParallelLinear consumes the
+# payload exactly once. Keeping this on the tensor, rather than in an id-keyed
+# cache, makes ownership and lifetime follow the actual QKV input.
+_FUSED_MXFP4_ACTIVATION_ATTR = "_primus_fused_mxfp4_activation"
+_LOGGED_FUSED_MXFP4_CONSUMER = False
+
+
+def can_consume_fused_mxfp4_activation(module) -> bool:
+    """Whether ``module`` can consume the GPT-OSS fused activation payload."""
+    if PrimusTurboQuantizedTensor is None or PrimusTurboQuantizedTensorPair is None:
+        return False
+    if not isinstance(
+        module,
+        (PrimusTurboColumnParallelLinear, PrimusTurboLayerNormColumnParallelLinear),
+    ):
+        return False
+    if (
+        isinstance(module, PrimusTurboLayerNormColumnParallelLinear)
+        and module.config.normalization != "RMSNorm"
+    ):
+        return False
+    if _use_split_wgrad_op():
+        return False
+    # This probe runs immediately before the module's own forward, outside its
+    # per-module quantization context. Enter the same context briefly so the
+    # decision reflects this linear's recipe rather than stale global state.
+    with _get_fp8_autocast_for_quant_params(module.te_quant_params, module.training):
+        if not PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+            return False
+        quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+        if quant_config is None or not quant_config.mxfp4_scaling():
+            return False
+        config = quant_config.data()
+        return (
+            not config.use_preshuffle
+            and config.granularity == ScalingGranularity.MX_BLOCKWISE
+            and config.block_size == 32
+            and getattr(config, "scale_rounding_mode", 0) == 2
+            and module.in_features == 2880
+        )
+
+
+def attach_fused_mxfp4_activation(
+    carrier: torch.Tensor,
+    row: torch.Tensor,
+    row_scale: torch.Tensor,
+    col: torch.Tensor,
+    col_scale: torch.Tensor,
+) -> None:
+    """Attach a single-use, prequantized activation payload to ``carrier``."""
+    setattr(carrier, _FUSED_MXFP4_ACTIVATION_ATTR, (row, row_scale, col, col_scale))
+
+
+def _take_fused_mxfp4_activation(carrier: torch.Tensor):
+    payload = getattr(carrier, _FUSED_MXFP4_ACTIVATION_ATTR, None)
+    if payload is not None:
+        delattr(carrier, _FUSED_MXFP4_ACTIVATION_ATTR)
+    return payload
+
+
+def _bridge_activation_grad(
+    carrier: torch.Tensor,
+    row: torch.Tensor,
+    row_scale: torch.Tensor,
+    col: torch.Tensor,
+    col_scale: torch.Tensor,
+) -> PrimusTurboQuantizedTensorPair:
+    """Feed prequantized buffers to GEMM while gradients flow to ``carrier``.
+
+    GEMM differentiates its QuantizedTensor input. This bridge maps that
+    gradient onto the fused RMSNorm's BF16 carrier without reading its forward
+    bytes, which are intentionally unwritten on the optimized path.
+    """
+
+    class _ActivationGradBridge(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, rowwise, colwise):
+            return rowwise, colwise
+
+        @staticmethod
+        def backward(ctx, grad_rowwise, grad_colwise):
+            return grad_rowwise, None, None
+
+    global _LOGGED_FUSED_MXFP4_CONSUMER
+    if not _LOGGED_FUSED_MXFP4_CONSUMER:
+        warning_rank_0(
+            "First fused RMSNorm MXFP4 activation consumed by QKV GEMM: " f"shape={tuple(carrier.shape)}"
+        )
+        _LOGGED_FUSED_MXFP4_CONSUMER = True
+
+    common = dict(
+        shape=carrier.shape,
+        orig_dtype=carrier.dtype,
+        dest_dtype=float4_e2m1fn_x2,
+        granularity=ScalingGranularity.MX_BLOCKWISE,
+        block_size=32,
+        scale_rounding_mode=2,
+        requires_grad=carrier.requires_grad,
+    )
+    rowwise = PrimusTurboQuantizedTensor(
+        row,
+        row_scale,
+        scaling_recipe=ScalingRecipe(),
+        quantized_axis=-1,
+        **common,
+    )
+    colwise = PrimusTurboQuantizedTensor(
+        col,
+        col_scale,
+        scaling_recipe=ScalingRecipe(use_rht=True),
+        quantized_axis=-2,
+        **common,
+    )
+    rowwise, colwise = _ActivationGradBridge.apply(carrier, rowwise, colwise)
+    return PrimusTurboQuantizedTensorPair(data=rowwise, data_t=colwise)
+
 
 @lru_cache(maxsize=1)
 def _apply_turbo_gemm_backend_env() -> None:
@@ -1535,6 +1652,12 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         x: torch.Tensor,
         is_first_microbatch: bool = False,
     ):
+        fused_mxfp4_payload = _take_fused_mxfp4_activation(x)
+        if fused_mxfp4_payload is not None:
+            assert x.is_contiguous(), "fused RMSNorm MXFP4 carrier must remain contiguous"
+            assert (
+                PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+            ), "fused RMSNorm MXFP4 payload reached a non-FP4 linear context"
         weight = self._parameters["weight"]
         if self.use_bias:
             bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
@@ -1604,11 +1727,18 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
 
+                if fused_mxfp4_payload is not None:
+                    assert can_consume_fused_mxfp4_activation(
+                        self
+                    ), "fused RMSNorm MXFP4 payload reached an incompatible linear"
+
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
                         self.quantized_weight_buffer = torch.empty(
                             0, device=weight.device, dtype=float4_e2m1fn_x2
                         )
+                    if fused_mxfp4_payload is not None:
+                        x = _bridge_activation_grad(x, *fused_mxfp4_payload)
                     out = primus_turbo_torch.ops.gemm_fp4(
                         x,
                         weight,
@@ -1639,6 +1769,8 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                         ),
                         fuse_wgrad_accum=fuse_pattern is not None,
                     )
+                    if fused_mxfp4_payload is not None:
+                        x = _bridge_activation_grad(x, *fused_mxfp4_payload)
                     out = primus_turbo_torch.ops.gemm_fp4(
                         x,
                         quantized_weight,
@@ -1743,6 +1875,16 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
 
     def forward_internal(self, x, is_first_microbatch: bool = False):
         """Forward."""
+        fused_mxfp4_payload = _take_fused_mxfp4_activation(x)
+        if fused_mxfp4_payload is not None:
+            assert getattr(
+                self, "_skip_fused_norm", False
+            ), "fused RMSNorm MXFP4 payload requires the fused layernorm to be skipped"
+            assert x.is_contiguous(), "fused RMSNorm MXFP4 carrier must remain contiguous"
+            assert (
+                PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+            ), "fused RMSNorm MXFP4 payload reached a non-FP4 linear context"
+
         norm_weight = self.layer_norm_weight
         if self.zero_centered_gamma:
             # TE's LayerNormLinear stores gamma centered on zero (zero init) and
@@ -1777,6 +1919,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         inp = norm_out.view(-1, original_shape[-1])
 
         if _use_split_wgrad_op():
+            assert fused_mxfp4_payload is None, "fused RMSNorm MXFP4 payload is incompatible with split wgrad"
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
             out = gemm_with_weight_gradient_store(inp, weight, bias=None)
@@ -1834,17 +1977,24 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
 
+                if fused_mxfp4_payload is not None:
+                    assert can_consume_fused_mxfp4_activation(
+                        self
+                    ), "fused RMSNorm MXFP4 payload reached an incompatible linear"
+
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
                         self.quantized_weight_buffer = torch.empty(
                             0, device=weight.device, dtype=float4_e2m1fn_x2
                         )
-                    pre = getattr(self, "_prequant_x", None)
-                    if pre is not None:
+                    legacy_prequant = getattr(self, "_prequant_x", None)
+                    if legacy_prequant is not None:
                         raise RuntimeError(
                             "Primus-Turbo gemm_fp4 does not support the legacy "
                             "PRIMUS_FUSED_RMSNORM_MXFP4 prequantized tuple"
                         )
+                    if fused_mxfp4_payload is not None:
+                        inp = _bridge_activation_grad(inp, *fused_mxfp4_payload)
                     out = primus_turbo_torch.ops.gemm_fp4(
                         inp,
                         weight,
@@ -1875,6 +2025,8 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         ),
                         fuse_wgrad_accum=fuse_pattern is not None,
                     )
+                    if fused_mxfp4_payload is not None:
+                        inp = _bridge_activation_grad(inp, *fused_mxfp4_payload)
                     out = primus_turbo_torch.ops.gemm_fp4(
                         inp,
                         quantized_weight,
