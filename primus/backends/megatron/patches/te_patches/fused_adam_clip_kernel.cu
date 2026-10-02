@@ -40,19 +40,22 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
   const int tensor_idx = block_to_tensor[global_chunk];
   const int chunk_idx = global_chunk - chunk_offsets[tensor_idx];
   float* __restrict__ grad =
-      reinterpret_cast<float*>(addresses[tensor_idx * 4 + 0]);
+      reinterpret_cast<float*>(addresses[tensor_idx * 5 + 0]);
   float* __restrict__ param =
-      reinterpret_cast<float*>(addresses[tensor_idx * 4 + 1]);
+      reinterpret_cast<float*>(addresses[tensor_idx * 5 + 1]);
   MomentT* __restrict__ exp_avg =
-      reinterpret_cast<MomentT*>(addresses[tensor_idx * 4 + 2]);
+      reinterpret_cast<MomentT*>(addresses[tensor_idx * 5 + 2]);
   MomentT* __restrict__ exp_avg_sq =
-      reinterpret_cast<MomentT*>(addresses[tensor_idx * 4 + 3]);
+      reinterpret_cast<MomentT*>(addresses[tensor_idx * 5 + 3]);
+  c10::BFloat16* __restrict__ model_param =
+      reinterpret_cast<c10::BFloat16*>(addresses[tensor_idx * 5 + 4]);
 
   const int64_t elem_offset = static_cast<int64_t>(chunk_idx) * chunk_size;
   grad += elem_offset;
   param += elem_offset;
   exp_avg += elem_offset;
   exp_avg_sq += elem_offset;
+  if (model_param != nullptr) model_param += elem_offset;
   const int n_this = static_cast<int>(
       min(sizes[tensor_idx] - elem_offset, static_cast<int64_t>(chunk_size)));
   __shared__ float grad_scale_shared;
@@ -138,6 +141,12 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
           exp_avg_sq[i + j] = static_cast<MomentT>(v[j]);
         }
       }
+      if (model_param != nullptr) {
+#pragma unroll
+        for (int j = 0; j < kIlp; ++j) {
+          model_param[i + j] = static_cast<c10::BFloat16>(p[j]);
+        }
+      }
     } else {
 #pragma unroll
       for (int j = 0; j < kIlp; ++j) {
@@ -145,6 +154,9 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
           param[i + j] = p[j];
           exp_avg[i + j] = m[j];
           exp_avg_sq[i + j] = v[j];
+          if (model_param != nullptr) {
+            model_param[i + j] = static_cast<c10::BFloat16>(p[j]);
+          }
         }
       }
     }
