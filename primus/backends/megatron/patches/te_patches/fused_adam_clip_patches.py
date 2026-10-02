@@ -25,6 +25,7 @@ optimizer no longer drains the GPU pipeline through ``Tensor.item()``.
 from __future__ import annotations
 
 import os
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -218,6 +219,7 @@ def _install_patch() -> None:
     original_adam_init = FusedAdam.__init__
     original_adam_step = FusedAdam.step
 
+    @wraps(original_adam_init)
     def patched_adam_init(self, *args, **kwargs):
         if kwargs.get("capturable", False):
             raise RuntimeError(
@@ -283,6 +285,7 @@ def _install_patch() -> None:
         # multi_tensor_applier, so all Python-side grouping remains unchanged.
         self.multi_tensor_adam = fused_multi_tensor_adam
 
+    @wraps(original_adam_step)
     def patched_adam_step(self, closure=None, grad_scaler=None):
         if grad_scaler is not None:
             raise RuntimeError(
