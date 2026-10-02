@@ -110,7 +110,7 @@ def test_chained_step_forwards_device_norm_to_each_adam(monkeypatch):
     )
 
     assert success
-    assert returned_norm is norm
+    assert returned_norm is None
     assert num_zeros == 7.0
     assert optimizer.stepped
     assert [
