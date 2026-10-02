@@ -8,9 +8,11 @@ import pytest
 import torch
 
 from primus.backends.megatron.patches.te_patches.fused_adam_clip_patches import (
+    _build_metadata,
     _chained_step_with_device_clip,
     _clip_coeff,
     _get_grad_norm_tensor,
+    _prepare_bf16_writeback,
 )
 
 
@@ -117,6 +119,78 @@ def test_chained_step_forwards_device_norm_to_each_adam(monkeypatch):
         child.optimizer._primus_clip_norm for child in optimizer.chained_optimizers
     ] == [norm, norm]
     assert [
-        child.optimizer._primus_clip_max_norm
-        for child in optimizer.chained_optimizers
+        child.optimizer._primus_clip_max_norm for child in optimizer.chained_optimizers
     ] == [1.0, 2.0]
+
+
+def test_metadata_carries_bf16_writeback_address():
+    grad = torch.zeros(5, dtype=torch.float32)
+    param = torch.zeros(5, dtype=torch.float32)
+    exp_avg = torch.zeros(5, dtype=torch.bfloat16)
+    exp_avg_sq = torch.zeros(5, dtype=torch.bfloat16)
+    model_param = torch.zeros(5, dtype=torch.bfloat16)
+
+    addresses, sizes, block_map, chunk_offsets, chunks, moment_dtype = _build_metadata(
+        4,
+        [[grad], [param], [exp_avg], [exp_avg_sq]],
+        {param.data_ptr(): model_param},
+    )
+
+    assert addresses.tolist() == [
+        grad.data_ptr(),
+        param.data_ptr(),
+        exp_avg.data_ptr(),
+        exp_avg_sq.data_ptr(),
+        model_param.data_ptr(),
+    ]
+    assert sizes.tolist() == [5]
+    assert block_map.tolist() == [0, 0]
+    assert chunk_offsets.tolist() == [0]
+    assert chunks == 2
+    assert moment_dtype == 1
+
+
+def test_prepare_bf16_writeback_maps_master_to_param_buffer(monkeypatch):
+    class FakeAdam:
+        pass
+
+    class Range:
+        start = 2
+        end = 6
+        size = 4
+
+    main_param = torch.zeros(4, dtype=torch.float32)
+    model_param = torch.zeros(4, dtype=torch.bfloat16)
+    param_buffer = torch.zeros(8, dtype=torch.bfloat16)
+    bucket = type("Bucket", (), {"param_data": param_buffer})()
+    buffer = type("Buffer", (), {"buckets": [bucket]})()
+    optimizer = type(
+        "FakeDistributedOptimizer",
+        (),
+        {
+            "is_stub_optimizer": False,
+            "ddp_config": type("DDPConfig", (), {"use_megatron_fsdp": False})(),
+            "config": type(
+                "Config",
+                (),
+                {"use_precision_aware_optimizer_no_fp8_or_ds_fp8": False},
+            )(),
+            "optimizer": FakeAdam(),
+            "shard_fp32_from_float16_groups": [[main_param]],
+            "model_float16_groups": [[model_param]],
+            "model_param_gbuf_map": {model_param: (0, None, 0)},
+            "buffers": [buffer],
+            "_get_model_param_range_map": lambda self, param: {
+                "gbuf_world_in_bucket": Range()
+            },
+        },
+    )()
+    monkeypatch.setenv("PRIMUS_FUSED_ADAM_BF16_WRITEBACK", "1")
+
+    _prepare_bf16_writeback(optimizer, FakeAdam)
+
+    destination = optimizer.optimizer._primus_bf16_writeback_by_param_ptr[
+        main_param.data_ptr()
+    ]
+    assert destination.data_ptr() == param_buffer[2:6].data_ptr()
+    assert optimizer._primus_bf16_writeback_active
