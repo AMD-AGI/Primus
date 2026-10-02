@@ -41,7 +41,7 @@ __device__ __forceinline__ uint4 pack_bf16x8(const float* values) {
   return {words[0], words[1], words[2], words[3]};
 }
 
-template <bool AdamW, typename MomentT>
+template <bool AdamW, typename MomentT, typename GradT>
 __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
     int chunk_size,
     const int64_t* __restrict__ addresses,
@@ -63,8 +63,8 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
 
   const int tensor_idx = block_to_tensor[global_chunk];
   const int chunk_idx = global_chunk - chunk_offsets[tensor_idx];
-  float* __restrict__ grad =
-      reinterpret_cast<float*>(addresses[tensor_idx * 5 + 0]);
+  GradT* __restrict__ grad =
+      reinterpret_cast<GradT*>(addresses[tensor_idx * 5 + 0]);
   float* __restrict__ param =
       reinterpret_cast<float*>(addresses[tensor_idx * 5 + 1]);
   MomentT* __restrict__ exp_avg =
@@ -100,12 +100,17 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
     const bool vectorized = i + kIlp <= n_this;
 
     if (vectorized) {
-      const float4 g0 = *reinterpret_cast<const float4*>(grad + i);
-      const float4 g1 = *reinterpret_cast<const float4*>(grad + i + 4);
       const float4 p0 = *reinterpret_cast<const float4*>(param + i);
       const float4 p1 = *reinterpret_cast<const float4*>(param + i + 4);
-      g[0] = g0.x; g[1] = g0.y; g[2] = g0.z; g[3] = g0.w;
-      g[4] = g1.x; g[5] = g1.y; g[6] = g1.z; g[7] = g1.w;
+      if constexpr (std::is_same_v<GradT, float>) {
+        const float4 g0 = *reinterpret_cast<const float4*>(grad + i);
+        const float4 g1 = *reinterpret_cast<const float4*>(grad + i + 4);
+        g[0] = g0.x; g[1] = g0.y; g[2] = g0.z; g[3] = g0.w;
+        g[4] = g1.x; g[5] = g1.y; g[6] = g1.z; g[7] = g1.w;
+      } else {
+        const uint4 packed_g = *reinterpret_cast<const uint4*>(grad + i);
+        unpack_bf16x8(packed_g, g);
+      }
       p[0] = p0.x; p[1] = p0.y; p[2] = p0.z; p[3] = p0.w;
       p[4] = p1.x; p[5] = p1.y; p[6] = p1.z; p[7] = p1.w;
       if constexpr (std::is_same_v<MomentT, float>) {
@@ -199,6 +204,7 @@ void fused_adam_clip(
     int bias_correction,
     double weight_decay,
     int moment_dtype,
+    int grad_dtype,
     torch::Tensor grad_norm,
     double max_norm) {
   TORCH_CHECK(addresses.is_cuda() && sizes.is_cuda() &&
@@ -217,6 +223,8 @@ void fused_adam_clip(
   TORCH_CHECK(mode == 0 || mode == 1, "fused_adam_clip Adam mode must be 0 or 1");
   TORCH_CHECK(moment_dtype == 0 || moment_dtype == 1,
               "fused_adam_clip moment dtype must be 0 (FP32) or 1 (BF16)");
+  TORCH_CHECK(grad_dtype == 0 || grad_dtype == 1,
+              "fused_adam_clip gradient dtype must be 0 (FP32) or 1 (BF16)");
 
   float correction1 = 1.0f;
   float correction2 = 1.0f;
@@ -228,22 +236,31 @@ void fused_adam_clip(
   const float beta2_corr_inv = 1.0f / correction2;
   auto stream = at::cuda::getCurrentCUDAStream();
 
-#define LAUNCH(ADAMW, MOMENT_T) \
-  fused_adam_clip_kernel<ADAMW, MOMENT_T><<<total_chunks, kBlockSize, 0, stream>>>( \
+#define LAUNCH(ADAMW, MOMENT_T, GRAD_T) \
+  fused_adam_clip_kernel<ADAMW, MOMENT_T, GRAD_T> \
+      <<<total_chunks, kBlockSize, 0, stream>>>( \
       chunk_size, addresses.data_ptr<int64_t>(), sizes.data_ptr<int64_t>(), \
       block_to_tensor.data_ptr<int>(), chunk_offsets.data_ptr<int>(), total_chunks, \
       static_cast<float>(beta1), static_cast<float>(beta2), step_size, \
       beta2_corr_inv, static_cast<float>(epsilon), static_cast<float>(lr), \
       static_cast<float>(weight_decay), grad_norm.data_ptr<float>(), \
       static_cast<float>(max_norm))
-  if (mode == 1 && moment_dtype == 0) {
-    LAUNCH(true, float);
+  if (mode == 1 && moment_dtype == 0 && grad_dtype == 0) {
+    LAUNCH(true, float, float);
+  } else if (mode == 1 && moment_dtype == 0) {
+    LAUNCH(true, float, c10::BFloat16);
+  } else if (mode == 1 && grad_dtype == 0) {
+    LAUNCH(true, c10::BFloat16, float);
   } else if (mode == 1) {
-    LAUNCH(true, c10::BFloat16);
+    LAUNCH(true, c10::BFloat16, c10::BFloat16);
+  } else if (moment_dtype == 0 && grad_dtype == 0) {
+    LAUNCH(false, float, float);
   } else if (moment_dtype == 0) {
-    LAUNCH(false, float);
+    LAUNCH(false, float, c10::BFloat16);
+  } else if (grad_dtype == 0) {
+    LAUNCH(false, c10::BFloat16, float);
   } else {
-    LAUNCH(false, c10::BFloat16);
+    LAUNCH(false, c10::BFloat16, c10::BFloat16);
   }
 #undef LAUNCH
   C10_CUDA_KERNEL_LAUNCH_CHECK();

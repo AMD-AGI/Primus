@@ -11,6 +11,7 @@ from primus.backends.megatron.patches.te_patches.fused_adam_clip_patches import 
     _build_metadata,
     _chained_step_with_device_clip,
     _clip_coeff,
+    _copy_model_grads_to_decoupled,
     _get_grad_norm_tensor,
     _prepare_bf16_writeback,
 )
@@ -130,10 +131,12 @@ def test_metadata_carries_bf16_writeback_address():
     exp_avg_sq = torch.zeros(5, dtype=torch.bfloat16)
     model_param = torch.zeros(5, dtype=torch.bfloat16)
 
-    addresses, sizes, block_map, chunk_offsets, chunks, moment_dtype = _build_metadata(
-        4,
-        [[grad], [param], [exp_avg], [exp_avg_sq]],
-        {param.data_ptr(): model_param},
+    addresses, sizes, block_map, chunk_offsets, chunks, moment_dtype, grad_dtype = (
+        _build_metadata(
+            4,
+            [[grad], [param], [exp_avg], [exp_avg_sq]],
+            {param.data_ptr(): model_param},
+        )
     )
 
     assert addresses.tolist() == [
@@ -148,6 +151,51 @@ def test_metadata_carries_bf16_writeback_address():
     assert chunk_offsets.tolist() == [0]
     assert chunks == 2
     assert moment_dtype == 1
+    assert grad_dtype == 0
+
+
+def test_metadata_accepts_direct_bf16_gradient():
+    grad = torch.zeros(8, dtype=torch.bfloat16)
+    param = torch.zeros(8, dtype=torch.float32)
+    exp_avg = torch.zeros(8, dtype=torch.bfloat16)
+    exp_avg_sq = torch.zeros(8, dtype=torch.bfloat16)
+
+    *_, moment_dtype, grad_dtype = _build_metadata(
+        8, [[grad], [param], [exp_avg], [exp_avg_sq]]
+    )
+
+    assert moment_dtype == 1
+    assert grad_dtype == 1
+
+
+def test_copy_model_grads_attaches_bf16_view_without_cast():
+    class Range:
+        start = 2
+        end = 6
+        size = 4
+
+    model_param = torch.zeros(4, dtype=torch.bfloat16)
+    model_param.main_grad = torch.arange(8, dtype=torch.bfloat16)
+    main_param = torch.zeros(4, dtype=torch.float32)
+    optimizer = type(
+        "FakeDistributedOptimizer",
+        (),
+        {
+            "is_stub_optimizer": False,
+            "ddp_config": type("DDPConfig", (), {"use_megatron_fsdp": False})(),
+            "model_float16_groups": [[model_param]],
+            "shard_fp32_from_float16_groups": [[main_param]],
+            "model_fp32_groups": [],
+            "shard_fp32_groups": [],
+            "_get_model_param_range_map": lambda self, param: {"param": Range()},
+        },
+    )()
+
+    _copy_model_grads_to_decoupled(optimizer)
+
+    assert main_param.decoupled_grad.dtype == torch.bfloat16
+    assert main_param.decoupled_grad.data_ptr() == model_param.main_grad[2:6].data_ptr()
+    assert torch.equal(main_param.decoupled_grad, model_param.main_grad[2:6])
 
 
 def test_prepare_bf16_writeback_maps_master_to_param_buffer(monkeypatch):

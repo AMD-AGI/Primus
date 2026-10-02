@@ -36,7 +36,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip_v5"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v6"
 _extension = None
 
 
@@ -46,6 +46,10 @@ def _enabled() -> bool:
 
 def _bf16_writeback_enabled() -> bool:
     return os.environ.get("PRIMUS_FUSED_ADAM_BF16_WRITEBACK", "0") == "1"
+
+
+def _bf16_grad_enabled() -> bool:
+    return os.environ.get("PRIMUS_FUSED_ADAM_BF16_GRAD", "0") == "1"
 
 
 def _mcore_master_enabled() -> bool:
@@ -143,6 +147,11 @@ def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
 
     device = tensor_lists[0][0].device
     moment_dtype = tensor_lists[2][0].dtype
+    grad_dtype = tensor_lists[0][0].dtype
+    if grad_dtype not in (torch.float32, torch.bfloat16):
+        raise RuntimeError(
+            f"PRIMUS_FUSED_ADAM_CLIP requires FP32 or BF16 gradients, got {grad_dtype}"
+        )
     if moment_dtype not in (torch.float32, torch.bfloat16):
         raise RuntimeError(
             "PRIMUS_FUSED_ADAM_CLIP requires FP32 or BF16 Adam moments, got "
@@ -161,15 +170,16 @@ def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
             raise RuntimeError(
                 "PRIMUS_FUSED_ADAM_CLIP requires one device per Adam call"
             )
-        expected_dtypes = (torch.float32, torch.float32, moment_dtype, moment_dtype)
+        expected_dtypes = (grad_dtype, torch.float32, moment_dtype, moment_dtype)
         if any(
             tensor.dtype != expected
             for tensor, expected in zip(tensors, expected_dtypes)
         ):
             dtypes = tuple(tensor.dtype for tensor in tensors)
             raise RuntimeError(
-                "PRIMUS_FUSED_ADAM_CLIP requires FP32 gradients/parameters and matching "
-                f"FP32 or BF16 moments; tensor {tensor_idx} has dtypes {dtypes}"
+                "PRIMUS_FUSED_ADAM_CLIP requires uniform FP32/BF16 gradients, FP32 "
+                "parameters, and matching FP32 or BF16 moments; tensor "
+                f"{tensor_idx} has dtypes {dtypes}"
             )
         if any(not tensor.is_contiguous() for tensor in tensors):
             raise RuntimeError(
@@ -207,7 +217,67 @@ def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
         torch.tensor(chunk_offsets, dtype=torch.int32, device=device),
         total_chunks,
         0 if moment_dtype == torch.float32 else 1,
+        0 if grad_dtype == torch.float32 else 1,
     )
+
+
+def _copy_model_grads_to_decoupled(distributed_optimizer) -> None:
+    """Attach DDP gradient-buffer shards directly to FP32 master parameters."""
+
+    if distributed_optimizer.is_stub_optimizer:
+        return
+    if distributed_optimizer.ddp_config.use_megatron_fsdp:
+        raise RuntimeError("PRIMUS_FUSED_ADAM_BF16_GRAD does not support Megatron FSDP")
+
+    def attach_group_grads(model_groups, shard_main_groups):
+        for model_group, shard_main_group in zip(model_groups, shard_main_groups):
+            for model_param, shard_main_param in zip(model_group, shard_main_group):
+                param_range = distributed_optimizer._get_model_param_range_map(
+                    model_param
+                )["param"]
+                if param_range.size != shard_main_param.nelement():
+                    raise RuntimeError(
+                        "Gradient shard range does not match its FP32 master"
+                    )
+                model_grad = model_param.main_grad
+                shard_model_grad = model_grad.view(-1)[
+                    param_range.start : param_range.end
+                ]
+                if shard_model_grad.dtype not in (torch.bfloat16, torch.float32):
+                    raise RuntimeError(
+                        "PRIMUS_FUSED_ADAM_BF16_GRAD requires BF16 or FP32 DDP gradients, "
+                        f"got {shard_model_grad.dtype}"
+                    )
+                shard_main_param.decoupled_grad = shard_model_grad
+
+    attach_group_grads(
+        distributed_optimizer.model_float16_groups,
+        distributed_optimizer.shard_fp32_from_float16_groups,
+    )
+    attach_group_grads(
+        distributed_optimizer.model_fp32_groups,
+        distributed_optimizer.shard_fp32_groups,
+    )
+
+
+def _get_decoupled_grads_for_grad_norm(optimizer):
+    """Megatron's grad-norm filtering applied to decoupled gradient views."""
+
+    from megatron.core import tensor_parallel
+    from megatron.core.utils import param_is_not_shared
+
+    grads_for_norm = []
+    for param in optimizer.get_parameters():
+        grad = getattr(param, "decoupled_grad", None)
+        if (
+            grad is not None
+            and param_is_not_shared(param)
+            and tensor_parallel.param_is_not_tensor_parallel_duplicate(
+                param, getattr(optimizer, "tp_group", None)
+            )
+        ):
+            grads_for_norm.append(grad)
+    return grads_for_norm
 
 
 def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
@@ -378,7 +448,11 @@ def _install_patch() -> None:
     extension = _load_extension()
     original_adam_init = FusedAdam.__init__
     original_adam_step = FusedAdam.step
+    original_get_main_grads = MegatronOptimizer.get_main_grads_for_grad_norm
+    original_copy_model_grads = DistributedOptimizer._copy_model_grads_to_main_grads
     original_copy_main_params = DistributedOptimizer._copy_main_params_to_model_params
+    original_collect_grads = DistributedOptimizer._collect_main_grad_data_for_unscaling
+    original_zero_grad = DistributedOptimizer.zero_grad
     original_optimizer_config_post_init = OptimizerConfig.__post_init__
 
     @wraps(original_optimizer_config_post_init)
@@ -406,6 +480,8 @@ def _install_patch() -> None:
             raise RuntimeError(
                 "PRIMUS_FUSED_ADAM_CLIP preserves TE's optimized non-capturable ROCm path"
             )
+        if _bf16_grad_enabled():
+            kwargs["use_decoupled_grad"] = True
         original_adam_init(self, *args, **kwargs)
         self._primus_clip_norm = None
         self._primus_clip_max_norm = 1.0
@@ -442,6 +518,7 @@ def _install_patch() -> None:
                 chunk_offsets,
                 total_chunks,
                 moment_dtype,
+                grad_dtype,
             ) = metadata
             if self._primus_clip_norm is None:
                 raise RuntimeError(
@@ -463,6 +540,7 @@ def _install_patch() -> None:
                 int(bias_correction),
                 float(weight_decay),
                 int(moment_dtype),
+                int(grad_dtype),
                 self._primus_clip_norm,
                 float(self._primus_clip_max_norm),
             )
@@ -493,6 +571,38 @@ def _install_patch() -> None:
         finally:
             self._primus_bf16_writeback_active = False
 
+    @wraps(original_get_main_grads)
+    def patched_get_main_grads_for_grad_norm(self):
+        if not _bf16_grad_enabled():
+            return original_get_main_grads(self)
+        return _get_decoupled_grads_for_grad_norm(self)
+
+    @wraps(original_copy_model_grads)
+    def patched_copy_model_grads_to_main_grads(self):
+        if not _bf16_grad_enabled():
+            return original_copy_model_grads(self)
+        return _copy_model_grads_to_decoupled(self)
+
+    @wraps(original_collect_grads)
+    def patched_collect_main_grad_data_for_unscaling(self):
+        if not _bf16_grad_enabled():
+            return original_collect_grads(self)
+        return [
+            param.decoupled_grad.data
+            for group in self.optimizer.param_groups
+            for param in group["params"]
+            if getattr(param, "decoupled_grad", None) is not None
+        ]
+
+    @wraps(original_zero_grad)
+    def patched_zero_grad(self, set_to_none: bool = True):
+        result = original_zero_grad(self, set_to_none=set_to_none)
+        if _bf16_grad_enabled():
+            for group in self.optimizer.param_groups:
+                for param in group["params"]:
+                    param.decoupled_grad = None
+        return result
+
     def patched_clip_grad_norm(self, clip_grad: float) -> None:
         # Preserve Megatron's norm kernel and global SUM reduction, but retain
         # the result on device and omit clip_grad_by_total_norm_fp32's scale pass.
@@ -516,11 +626,21 @@ def _install_patch() -> None:
     FusedAdam.__init__ = patched_adam_init
     FusedAdam.step = patched_adam_step
     OptimizerConfig.__post_init__ = patched_optimizer_config_post_init
+    MegatronOptimizer.get_main_grads_for_grad_norm = (
+        patched_get_main_grads_for_grad_norm
+    )
     MegatronOptimizer.clip_grad_norm = patched_clip_grad_norm
     ChainedOptimizer.step = patched_chained_step
     DistributedOptimizer._copy_main_params_to_model_params = (
         patched_copy_main_params_to_model_params
     )
+    DistributedOptimizer._copy_model_grads_to_main_grads = (
+        patched_copy_model_grads_to_main_grads
+    )
+    DistributedOptimizer._collect_main_grad_data_for_unscaling = (
+        patched_collect_main_grad_data_for_unscaling
+    )
+    DistributedOptimizer.zero_grad = patched_zero_grad
 
     # The existing TP1/PP1 synchronization-skip patch has already established
     # that the model-parallel reduction is a no-op. Keep a tensor statistic on
@@ -546,6 +666,11 @@ def _install_patch() -> None:
             "; FP32-master to BF16 model-buffer writeback is fused into Adam."
             if _bf16_writeback_enabled()
             else "."
+        )
+        + (
+            "; BF16 DDP gradient shards are consumed directly by Adam."
+            if _bf16_grad_enabled()
+            else ""
         )
     )
 
