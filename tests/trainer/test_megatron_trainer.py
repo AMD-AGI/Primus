@@ -695,6 +695,31 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_zaya1_8B_bf16(self):
+        # Own architecture: alternating CCA and a nonlinear MoE router.
+        # The tag includes the platform so the MI300X and MI355X logs stay
+        # distinct. Depth is cut to 4 stages and mock data replaces GSM8K so
+        # CI does not need /data/zaya1. The full 80-stage BF16 run is in
+        # docs/04-technical-guides/zaya1/validation.md.
+        run_script(
+            self.__class__.__name__,
+            f"zaya1_8b_{GPU_PLATFORM.lower()}_bf16",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/zaya1_8B-BF16-pretrain.yaml",
+            env_override={"GPUS_PER_NODE": "1"},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "1",
+                "--mock_data",
+                "true",
+            ],
+        )
+
     def test_mamba_130M_bridge_pretrain(self):
         # Only E2E covering the megatron_bridge backend (mamba/zebra above use
         # the megatron backend). extra_args pin a tiny shape so the test doesn't
