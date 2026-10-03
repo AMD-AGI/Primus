@@ -15,6 +15,7 @@ from primus.backends.megatron.patches.te_patches.fused_adam_clip_patches import 
     _get_decoupled_grads_for_grad_norm,
     _get_grad_norm_tensor,
     _prepare_bf16_writeback,
+    _uses_static_bf16_unity_scale,
 )
 
 
@@ -221,6 +222,24 @@ def test_decoupled_grad_norm_filter_uses_transformer_module_helper(monkeypatch):
     grads = _get_decoupled_grads_for_grad_norm(optimizer)
 
     assert grads == [kept.decoupled_grad]
+
+
+def test_static_bf16_unity_scale_requires_bf16_without_grad_scaler():
+    static = type(
+        "StaticOptimizer",
+        (),
+        {"config": type("Config", (), {"bf16": True})(), "grad_scaler": None},
+    )()
+    scaled = type(
+        "ScaledOptimizer",
+        (),
+        {"config": type("Config", (), {"bf16": True})(), "grad_scaler": object()},
+    )()
+    chained = type("Chained", (), {"chained_optimizers": [static]})()
+
+    assert _uses_static_bf16_unity_scale(static)
+    assert _uses_static_bf16_unity_scale(chained)
+    assert not _uses_static_bf16_unity_scale(scaled)
 
 
 def test_prepare_bf16_writeback_maps_master_to_param_buffer(monkeypatch):
