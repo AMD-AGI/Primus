@@ -104,26 +104,19 @@ def test_chained_step_forwards_device_norm_to_each_adam(monkeypatch):
 
     norm = torch.tensor([3.0])
     monkeypatch.setattr(
-        "primus.backends.megatron.patches.te_patches.fused_adam_clip_patches."
-        "_get_grad_norm_tensor",
+        "primus.backends.megatron.patches.te_patches.fused_adam_clip_patches." "_get_grad_norm_tensor",
         lambda optimizer: norm,
     )
     optimizer = FakeChainedOptimizer()
 
-    success, returned_norm, num_zeros = _chained_step_with_device_clip(
-        optimizer, FakeAdam
-    )
+    success, returned_norm, num_zeros = _chained_step_with_device_clip(optimizer, FakeAdam)
 
     assert success
     assert returned_norm is None
     assert num_zeros == 7.0
     assert optimizer.stepped
-    assert [
-        child.optimizer._primus_clip_norm for child in optimizer.chained_optimizers
-    ] == [norm, norm]
-    assert [
-        child.optimizer._primus_clip_max_norm for child in optimizer.chained_optimizers
-    ] == [1.0, 2.0]
+    assert [child.optimizer._primus_clip_norm for child in optimizer.chained_optimizers] == [norm, norm]
+    assert [child.optimizer._primus_clip_max_norm for child in optimizer.chained_optimizers] == [1.0, 2.0]
 
 
 def test_metadata_carries_bf16_writeback_address():
@@ -133,12 +126,10 @@ def test_metadata_carries_bf16_writeback_address():
     exp_avg_sq = torch.zeros(5, dtype=torch.bfloat16)
     model_param = torch.zeros(5, dtype=torch.bfloat16)
 
-    addresses, sizes, block_map, chunk_offsets, chunks, moment_dtype, grad_dtype = (
-        _build_metadata(
-            4,
-            [[grad], [param], [exp_avg], [exp_avg_sq]],
-            {param.data_ptr(): model_param},
-        )
+    addresses, sizes, block_map, chunk_offsets, chunks, moment_dtype, grad_dtype = _build_metadata(
+        4,
+        [[grad], [param], [exp_avg], [exp_avg_sq]],
+        {param.data_ptr(): model_param},
     )
 
     assert addresses.tolist() == [
@@ -162,9 +153,7 @@ def test_metadata_accepts_direct_bf16_gradient():
     exp_avg = torch.zeros(8, dtype=torch.bfloat16)
     exp_avg_sq = torch.zeros(8, dtype=torch.bfloat16)
 
-    *_, moment_dtype, grad_dtype = _build_metadata(
-        8, [[grad], [param], [exp_avg], [exp_avg_sq]]
-    )
+    *_, moment_dtype, grad_dtype = _build_metadata(8, [[grad], [param], [exp_avg], [exp_avg_sq]])
 
     assert moment_dtype == 1
     assert grad_dtype == 1
@@ -272,17 +261,13 @@ def test_prepare_bf16_writeback_maps_master_to_param_buffer(monkeypatch):
             "model_float16_groups": [[model_param]],
             "model_param_gbuf_map": {model_param: (0, None, 0)},
             "buffers": [buffer],
-            "_get_model_param_range_map": lambda self, param: {
-                "gbuf_world_in_bucket": Range()
-            },
+            "_get_model_param_range_map": lambda self, param: {"gbuf_world_in_bucket": Range()},
         },
     )()
     monkeypatch.setenv("PRIMUS_FUSED_ADAM_BF16_WRITEBACK", "1")
 
     _prepare_bf16_writeback(optimizer, FakeAdam)
 
-    destination = optimizer.optimizer._primus_bf16_writeback_by_param_ptr[
-        main_param.data_ptr()
-    ]
+    destination = optimizer.optimizer._primus_bf16_writeback_by_param_ptr[main_param.data_ptr()]
     assert destination.data_ptr() == param_buffer[2:6].data_ptr()
     assert optimizer._primus_bf16_writeback_active
