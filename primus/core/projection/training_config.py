@@ -438,13 +438,15 @@ def dlrm_derive_default_args(args):
 
 
 def convert_primus_config_to_projection_config(primus_config) -> TrainingConfig:
-    from primus.core.projection.frameworks import framework_of, resolve_config_adapter
-
     args = primus_config.get_module_config("pre_trainer")
-    fw = framework_of(args)
-    # Each training backend spells its config differently; the adapter registered
-    # for this framework rewrites it in the projection's field names.
-    args = resolve_config_adapter(fw)(args)
+    framework = getattr(args, "framework", "") or ""
+    fw = framework.lower().strip()
+    if fw == "megatron":
+        args = megatron_derive_default_args(args)
+    elif fw in _DLRM_FRAMEWORKS:
+        args = dlrm_derive_default_args(args)
+    else:
+        raise NotImplementedError(f"Unsupported framework: {framework}")
 
     model_config = update_config_from_args(ModelConfig(), args)
     runtime_config = update_config_from_args(RuntimeConfig(), args)
@@ -454,7 +456,7 @@ def convert_primus_config_to_projection_config(primus_config) -> TrainingConfig:
         model_config=model_config,
         runtime_config=runtime_config,
         model_parallel_config=model_parallel_config,
-        framework=fw,
+        framework=fw or "megatron",
     )
 
     return training_config
