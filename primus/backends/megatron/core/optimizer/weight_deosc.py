@@ -734,9 +734,7 @@ def _uses_precision_aware_main_params(opt) -> bool:
     main-parameter ownership into FusedAdam, leaving the MCore shard slots empty.
     """
     cfg = getattr(opt, "config", None)
-    if cfg is not None and getattr(
-        cfg, "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False
-    ):
+    if cfg is not None and getattr(cfg, "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False):
         return True
     # Structural fallback: float16 params exist but every main shard is None.
     saw_slot = False
