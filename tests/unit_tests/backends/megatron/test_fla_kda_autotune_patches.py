@@ -6,8 +6,8 @@
 
 """Unit tests for the FLA KDA safe-autotune patch.
 
-The patch drops ``num_stages >= 3`` from the autotune space of FLA's KDA
-intra-chunk kernels, which AMD Triton 3.6 fails to compile.
+The patch drops ``num_stages >= 3`` from the autotune space of FLA's chunk_kda
+kernels, which AMD Triton 3.6 fails to compile and Triton 3.8 can miscompute.
 
 Covered here:
   1. Gating -- ROCm only, and only for runs that actually reach FLA's KDA
@@ -107,6 +107,7 @@ def fake_fla_module(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "fake_fla_chunk_intra", module)
     monkeypatch.setattr(patch_mod, "_FLA_KDA_INTRA_MODULE", "fake_fla_chunk_intra")
+    monkeypatch.setattr(patch_mod, "_FLA_KDA_PATH_MODULES", ())
     monkeypatch.setattr(patch_mod, "log_rank_0", lambda *a, **k: None)
     return module, tuners
 
@@ -215,7 +216,8 @@ def test_fla_is_imported_only_for_kda_runs(monkeypatch, on_rocm, fields, expect_
 
     _apply_if_gated(_ctx(SimpleNamespace(**fields)))
 
-    assert imports == ([patch_mod._FLA_KDA_INTRA_MODULE] if expect_import else [])
+    expected = [patch_mod._FLA_KDA_INTRA_MODULE, *patch_mod._FLA_KDA_PATH_MODULES]
+    assert imports == (expected if expect_import else [])
 
 
 # ─── Finding the autotuner in Triton's decorator chain ───────────────────────
@@ -439,6 +441,28 @@ def test_cache_guard_keeps_a_safe_cached_config(fake_fla_module):
     tuner.maybe_load_cached_config("key")
 
     assert tuner.cache == {"key": safe}
+
+
+def test_every_autotuned_kernel_on_the_chunk_kda_path_is_narrowed(fake_fla_module, monkeypatch):
+    """Triton 3.8 miscomputes (NaN grads) beyond the intra kernels, so the
+    whole chunk_kda path is capped, including kernels that merely re-export."""
+    path = types.ModuleType("fake_fla_chunk_bwd")
+    wy, wy_tuner = _make_kernel(kernel_name="recompute_w_u_fwd_kda_kernel")
+    dqkg, dqkg_tuner = _make_kernel(cached_config=FakeConfig(num_warps=2, num_stages=3))
+    path.recompute_w_u_fwd_kda_kernel = wy
+    path.chunk_kda_bwd_kernel_wy_dqkg_fused = dqkg
+    path.not_a_kernel = lambda: None
+    monkeypatch.setitem(sys.modules, "fake_fla_chunk_bwd", path)
+    monkeypatch.setattr(patch_mod, "_FLA_KDA_PATH_MODULES", ("fake_fla_chunk_bwd", "fake_fla_missing"))
+
+    patch_mod._install_kda_safe_autotune_patch()
+    dqkg_tuner.maybe_load_cached_config("key")
+
+    assert {c.num_stages for c in wy_tuner.configs} == {2}
+    assert {c.num_stages for c in dqkg_tuner.configs} == {2}
+    assert dqkg_tuner.cache["key"].num_stages == patch_mod._MAX_SAFE_NUM_STAGES
+    _, intra_tuners = fake_fla_module
+    assert all({c.num_stages for c in t.configs} == {2} for t in intra_tuners.values())
 
 
 def test_cache_guard_is_skipped_when_the_tuner_has_no_cache_hook():

@@ -1,0 +1,12 @@
+###############################################################################
+# GLM-5.3-Flash truncated to its first GLM5_NUM_LAYERS (4 or 8) layers, for
+# smoke tests. Layer i is the released layer i (KDA/DSA, dense/MoE pattern
+# preserved), so the HF checkpoint loads into it unchanged.
+###############################################################################
+
+extends:
+  - glm5_3_flash.yaml
+
+num_layers: ${GLM5_NUM_LAYERS:8}
+linear_attention_freq: ${GLM5_LINEAR_ATTN_FREQ:[1,1,1,0,1,1,1,0]}
+moe_layer_freq: ${GLM5_MOE_LAYER_FREQ:[0,0,0,1,1,1,1,1]}
