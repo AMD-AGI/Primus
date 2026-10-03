@@ -12,6 +12,7 @@ from primus.backends.megatron.patches.te_patches.fused_adam_clip_patches import 
     _chained_step_with_device_clip,
     _clip_coeff,
     _copy_model_grads_to_decoupled,
+    _get_decoupled_grads_for_grad_norm,
     _get_grad_norm_tensor,
     _prepare_bf16_writeback,
 )
@@ -196,6 +197,30 @@ def test_copy_model_grads_attaches_bf16_view_without_cast():
     assert main_param.decoupled_grad.dtype == torch.bfloat16
     assert main_param.decoupled_grad.data_ptr() == model_param.main_grad[2:6].data_ptr()
     assert torch.equal(main_param.decoupled_grad, model_param.main_grad[2:6])
+
+
+def test_decoupled_grad_norm_filter_uses_transformer_module_helper(monkeypatch):
+    from megatron.core import tensor_parallel
+
+    kept = torch.nn.Parameter(torch.zeros(2))
+    kept.decoupled_grad = torch.ones(2, dtype=torch.bfloat16)
+    shared = torch.nn.Parameter(torch.zeros(2))
+    shared.decoupled_grad = torch.ones(2, dtype=torch.bfloat16)
+    shared.shared = True
+    monkeypatch.setattr(
+        tensor_parallel,
+        "param_is_not_tensor_parallel_duplicate",
+        lambda param, group: True,
+    )
+    optimizer = type(
+        "FakeOptimizer",
+        (),
+        {"get_parameters": lambda self: [kept, shared], "tp_group": object()},
+    )()
+
+    grads = _get_decoupled_grads_for_grad_norm(optimizer)
+
+    assert grads == [kept.decoupled_grad]
 
 
 def test_prepare_bf16_writeback_maps_master_to_param_buffer(monkeypatch):

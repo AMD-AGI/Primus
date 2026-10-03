@@ -264,7 +264,7 @@ def _get_decoupled_grads_for_grad_norm(optimizer):
     """Megatron's grad-norm filtering applied to decoupled gradient views."""
 
     from megatron.core import tensor_parallel
-    from megatron.core.utils import param_is_not_shared
+    from megatron.core.transformer.module import param_is_not_shared
 
     grads_for_norm = []
     for param in optimizer.get_parameters():
