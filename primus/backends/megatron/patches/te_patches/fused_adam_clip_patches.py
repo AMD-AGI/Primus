@@ -52,6 +52,22 @@ def _bf16_grad_enabled() -> bool:
     return os.environ.get("PRIMUS_FUSED_ADAM_BF16_GRAD", "0") == "1"
 
 
+def _static_bf16_loss_scale_cpu_enabled() -> bool:
+    return os.environ.get("PRIMUS_STATIC_BF16_LOSS_SCALE_CPU", "0") == "1"
+
+
+def _uses_static_bf16_unity_scale(optimizer) -> bool:
+    """Return whether every concrete optimizer uses BF16 without a grad scaler."""
+
+    children = getattr(optimizer, "chained_optimizers", None)
+    optimizers = children if children is not None else [optimizer]
+    return bool(optimizers) and all(
+        getattr(child.config, "bf16", False)
+        and getattr(child, "grad_scaler", None) is None
+        for child in optimizers
+    )
+
+
 def _mcore_master_enabled() -> bool:
     return os.environ.get("PRIMUS_FUSED_ADAM_MCORE_MASTER", "0") == "1"
 
@@ -448,6 +464,8 @@ def _install_patch() -> None:
     extension = _load_extension()
     original_adam_init = FusedAdam.__init__
     original_adam_step = FusedAdam.step
+    original_scale_loss = MegatronOptimizer.scale_loss
+    original_chained_get_loss_scale = ChainedOptimizer.get_loss_scale
     original_get_main_grads = MegatronOptimizer.get_main_grads_for_grad_norm
     original_copy_model_grads = DistributedOptimizer._copy_model_grads_to_main_grads
     original_copy_main_params = DistributedOptimizer._copy_main_params_to_model_params
@@ -561,6 +579,26 @@ def _install_patch() -> None:
             self._primus_clip_norm = None
             self._primus_clip_max_norm = 1.0
 
+    @wraps(original_scale_loss)
+    def patched_scale_loss(self, loss):
+        if _static_bf16_loss_scale_cpu_enabled() and _uses_static_bf16_unity_scale(
+            self
+        ):
+            return loss
+        return original_scale_loss(self, loss)
+
+    @wraps(original_chained_get_loss_scale)
+    def patched_chained_get_loss_scale(self):
+        if _static_bf16_loss_scale_cpu_enabled() and _uses_static_bf16_unity_scale(
+            self
+        ):
+            scale = getattr(self, "_primus_cpu_loss_scale_one", None)
+            if scale is None:
+                scale = torch.ones(1, dtype=torch.float32, device="cpu")
+                self._primus_cpu_loss_scale_one = scale
+            return scale
+        return original_chained_get_loss_scale(self)
+
     def patched_copy_main_params_to_model_params(self):
         if not getattr(self, "_primus_bf16_writeback_active", False):
             return original_copy_main_params(self)
@@ -625,6 +663,8 @@ def _install_patch() -> None:
 
     FusedAdam.__init__ = patched_adam_init
     FusedAdam.step = patched_adam_step
+    MegatronOptimizer.scale_loss = patched_scale_loss
+    ChainedOptimizer.get_loss_scale = patched_chained_get_loss_scale
     OptimizerConfig.__post_init__ = patched_optimizer_config_post_init
     MegatronOptimizer.get_main_grads_for_grad_norm = (
         patched_get_main_grads_for_grad_norm
@@ -670,6 +710,11 @@ def _install_patch() -> None:
         + (
             "; BF16 DDP gradient shards are consumed directly by Adam."
             if _bf16_grad_enabled()
+            else ""
+        )
+        + (
+            "; static BF16 unity loss scale is logged from CPU without a device sync."
+            if _static_bf16_loss_scale_cpu_enabled()
             else ""
         )
     )
