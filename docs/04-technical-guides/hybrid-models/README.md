@@ -391,6 +391,28 @@ To quickly verify the model runs without real data, the 3B and 8B configs come w
 
 ---
 
+### Stability: decoupled-RoPE MLA (`qk_clip` + QK-Norm)
+
+Decoupled-RoPE MLA hybrids (`qk_pos_emb_head_dim > 0`) can diverge as the rotary q/k grow — the attention logits and deep residual explode (a finite blow-up that never `NaN`s). The NoPE arm is unaffected. Two stabilizers, both **off by default**:
+
+| Flag / env var | Default | Purpose |
+|---|---|---|
+| `mla_rope_qk_norm` / `PRIMUS_MLA_ROPE_QK_NORM=1` | `false` / `0` | **The fix** ([#1176](https://github.com/AMD-AGI/Primus/pull/1176)): parameter-free unit-RMS on the decoupled-RoPE q/k before RoPE, capping the rotary logit contribution that bypasses `q_layernorm`/`kv_layernorm` and escapes `qk_clip`. Env var needs no config-schema change; parameter-free so checkpoints resume unchanged. |
+| `qk_clip` | `false` | MuonClip safety net: rescale a head's q/k weights when its max logit exceeds the threshold. |
+| `qk_clip_threshold` | `100` | Max-logit ceiling that triggers clipping; set just above the healthy per-step max. |
+| `qk_clip_alpha` | `0.5` | Rescale split (q × `eta^alpha`, k × `eta^(1-alpha)`); in (0, 1). |
+| `log_max_attention_logit` | `false` | Log per-step max logit (implied by `qk_clip`); use it to pick the threshold. |
+
+```yaml
+mla_rope_qk_norm: true      # or: export PRIMUS_MLA_ROPE_QK_NORM=1
+qk_clip: true
+qk_clip_threshold: 5500
+qk_clip_alpha: 0.5
+log_max_attention_logit: true
+```
+
+---
+
 ## Step 4: Checkpoint Conversion to HuggingFace
 
 Convert a Megatron checkpoint to HuggingFace format for inference and evaluation.
