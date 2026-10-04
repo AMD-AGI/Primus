@@ -197,6 +197,11 @@ def _should_forward_training_log_to_rank_0() -> bool:
         return False
 
 
+# Set by --light-log-sync (light_log_sync_patches): a zero-arg callable returning the process group to forward the log
+# line on (a gloo group, so per-step logging stays off the NCCL queue). None = the default (NCCL) group.
+FORWARD_LOG_GROUP = None
+
+
 def _forward_single_node_training_log(message: str) -> None:
     """
     Broadcast the last-rank training log line to rank 0 on single-node runs so
@@ -221,7 +226,10 @@ def _forward_single_node_training_log(message: str) -> None:
     payload = [message if rank == last_rank else None]
 
     try:
-        dist.broadcast_object_list(payload, src=last_rank)
+        if FORWARD_LOG_GROUP is not None:
+            dist.broadcast_object_list(payload, src=last_rank, group=FORWARD_LOG_GROUP())
+        else:
+            dist.broadcast_object_list(payload, src=last_rank)
     except Exception:
         return
 
