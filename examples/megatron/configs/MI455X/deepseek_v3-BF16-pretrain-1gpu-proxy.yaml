@@ -1,0 +1,207 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# DeepSeek-V3 BF16 pretrain -- 4-layer MoE PROXY, 1x MI455X (gfx1250).
+#
+# Derived from MI355X/deepseek_v3-BF16-pretrain.yaml plus the canonical CI
+# overrides of tests/trainer/test_megatron_trainer.py::test_deepseek_v3.
+# It keeps the per-GPU shapes of a real EP=8 DeepSeek-V3 run and cuts depth:
+#
+#   attention  unchanged: hidden 7168, 128 heads, q_lora 1536, kv_lora 512,
+#              qk 128 + rope 64 (= 192), v 128, YaRN softmax scale
+#   MoE        4 layers, all MoE (moe_layer_freq 1), 32 experts per layer
+#              (= 256 / EP8, the per-GPU expert count of the real run), top-8,
+#              moe_ffn 2048, 1 shared expert, sigmoid + expert bias. Group-limited
+#              routing stays on and is compatible with 32 experts: 8 groups of 4,
+#              top-4 groups -> 16 candidate experts >= topk 8.
+#   MTP        off
+#
+# About 8.4B parameters, so the optimizer keeps standard fp32 states (main
+# params, main grads, exp_avg, exp_avg_sq): ~150 GiB, well inside 432 GiB.
+# Random init + mock data: loss values are only a finiteness/stability signal.
+#
+# Launch with examples/moe_package/run_deepseek_v3_proxy_1gpu_mi455x.sh; it sets
+# the environment this file depends on (see "Environment" below).
+#
+# Environment (set by the launcher, not expressible in this file):
+#   PRIMUS_TURBO_ATTN_BACKEND=triton  Turbo attention backend for MLA 192/128.
+#   TORCH_COMPILE_DISABLE=1           Megatron's jit_fuser is torch.compile; the
+#                                     inductor Triton autotune has taken a
+#                                     gfx1250 card down (also covers the init-time
+#                                     JIT warm-up of the fused bias/activation fns).
+#   NVTE_USE_RMSNORM_TRITON=0         TE's Triton RMSNorm autotunes over
+#   NVTE_USE_LAYERNORM_TRITON=0       num_warps (1,4,8,16) in process; num_warps=16
+#                                     hangs gfx1250. TE's HIP norms are used.
+#   PYTHONPATH += examples/deepseek-v4/rccl_avg_workaround
+#                                     all_reduce(AVG) hangs at world size 1 on this
+#                                     RCCL build (MoE aux-loss tracker uses AVG).
+#   PRIMUS_GPU_MODEL=MI455X           skips GPU-model probing; loads MI455X.sh, which
+#                                     derives the world-size-1 NCCL settings.
+#   PRIMUS_SKIP_PIP=1                 the image already carries every dependency.
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v3-BF16-pretrain-1gpu-proxy}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: deepseek_v3.yaml
+
+    overrides:
+      # ---------------- log ----------------
+      wandb_project: "Primus_DeepSeek_Pretrain"
+      disable_wandb: true
+      stderr_sink_level: DEBUG
+      log_interval: 1
+      log_throughput: true
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      # The trainer samples memory through rocm-smi on the listed iterations; an
+      # SMI query from inside the training process is avoidable risk on gfx1250.
+      # Megatron's own allocator report ("memory (MB) | allocated ...") remains.
+      use_rocm_mem_info: false
+      use_rocm_mem_info_iters: []
+
+      # ---------------- model: 4-layer proxy ----------------
+      num_layers: ${PRIMUS_TOTAL_LAYERS:4}
+      moe_layer_freq: 1
+      num_experts: ${PRIMUS_NUM_EXPERTS:32}
+      moe_router_topk: 8
+      moe_ffn_hidden_size: 2048
+      moe_shared_expert_intermediate_size: 2048
+      moe_router_num_groups: 8
+      moe_router_group_topk: 4
+      mtp_num_layers: 0
+      # Random router logits -> balanced expert loads, as in the MI355X recipe.
+      moe_router_force_load_balancing: true
+      moe_router_dtype: fp32
+
+      # ---------------- data / tokenizer ----------------
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+      # NullTokenizer appends one EOD token: 129279 + 1 = 129280, DeepSeek-V3's vocab.
+      tokenizer_type: NullTokenizer
+      tokenizer_model: null
+      vocab_size: 129279
+      num_workers: 2
+
+      # ---------------- hyper parameters ----------------
+      train_iters: ${PRIMUS_TRAIN_ITERS:20}
+      micro_batch_size: ${PRIMUS_MBS:2}
+      global_batch_size: ${PRIMUS_GBS:16}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+      eval_iters: 0
+
+      # ---------------- parallel: one GPU ----------------
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      pipeline_model_parallel_layout: null
+      num_virtual_stages_per_pipeline_rank: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      pp_warmup: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      # Off: the Turbo FlyDSL wgrad (variable-K grouped GEMM) has no beta=1
+      # accumulate epilogue, so with the grouped-GEMM backend pinned to FLYDSL the
+      # fused main_grad path would raise. Same setting as the MI455X 1-GPU proxies.
+      gradient_accumulation_fusion: false
+
+      # ---------------- recompute: none (4 layers fit) ----------------
+      recompute_granularity: null
+      recompute_method: null
+      recompute_num_layers: null
+      recompute_layer_ids: null
+
+      # ---------------- MLA ----------------
+      multi_latent_attention: true
+      # Off: the rope fusion autotunes in process.
+      apply_rope_fusion: false
+      enable_experimental: true
+
+      # ---------------- optimizer: fp32 states ----------------
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: false
+      main_grads_dtype: fp32
+      main_params_dtype: fp32
+      exp_avg_dtype: fp32
+      exp_avg_sq_dtype: fp32
+
+      # ---------------- ckpt: none ----------------
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # ---------------- torch.compile: off ----------------
+      # Megatron's jit_fuser is torch.compile and decorates at import time, so the
+      # process-wide switch is TORCH_COMPILE_DISABLE=1 in the launcher; this flag
+      # only covers functions decorated after argument parsing.
+      disable_jit_fuser: true
+
+      # ---------------- Primus-Turbo ----------------
+      enable_primus_turbo: true
+      use_turbo_autotune: false
+      # MLA core attention through Turbo flash_attn_func; the backend is chosen by
+      # PRIMUS_TURBO_ATTN_BACKEND (triton) in the launcher.
+      use_turbo_attention: true
+      # Experts through Turbo grouped GEMM, pinned to the FlyDSL gfx1250 kernels
+      # (fwd NT / dgrad NN / wgrad variable-K). Legacy and TE grouped GEMM are
+      # mutually exclusive with it.
+      use_turbo_grouped_gemm: true
+      turbo_grouped_gemm_backend: ${PRIMUS_TURBO_GROUPED_GEMM_BACKEND_CFG:flydsl}
+      moe_grouped_gemm: true
+      moe_use_legacy_grouped_gemm: false
+      # Off: at hidden 7168 the Turbo RMSNorm forward launches num_warps=16 (hangs
+      # gfx1250) and its backward autotunes 4 configs in process. TE norms instead.
+      use_turbo_rms_norm: false
+      # Off: Turbo DeepEP hangs on this gfx1250 box (CPU recv timeout), and there is
+      # no EP traffic at world size 1. Sync-free MoE stage >0 would re-enable
+      # DeepEP / permute fusion / the fused router, so it stays 0.
+      use_turbo_deepep: false
+      turbo_sync_free_moe_stage: 0
+      moe_token_dispatcher_type: alltoall
+      moe_shared_expert_overlap: false
+      # Off: the Triton permute backward autotune hung at hidden 7168.
+      moe_permute_fusion: false
+      # Off: fused router + aux score is a Turbo Triton path not validated here.
+      moe_use_fused_router_with_aux_score: false
+
+      # ---------------- loss ----------------
+      # Off (stability first): the TE cross-entropy fusion is a Triton kernel.
+      cross_entropy_loss_fusion: false
+
+      # ---------------- profiling (one startup collects everything) ----------------
+      profile: ${PRIMUS_PROFILE:true}
+      use_pytorch_profiler: ${PRIMUS_PROFILE:true}
+      profile_ranks: [0]
+      profile_step_start: ${PRIMUS_PROFILE_STEP_START:6}
+      profile_step_end: ${PRIMUS_PROFILE_STEP_END:8}
+      torch_profiler_record_shapes: true
+      torch_profiler_with_stack: false
+      torch_profiler_use_gzip: true
