@@ -978,6 +978,8 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
 
     ok, reason = deosc_dependencies_available()
     if not ok:
+        if config.fusion:
+            raise RuntimeError(f"[WeightDeOsc] fused deosc cannot be installed: {reason}")
         warning_rank_0(f"[WeightDeOsc] disabled: {reason}")
         return 0
 
@@ -1005,6 +1007,8 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
         # shard to track/snap -> de-osc cannot run. Skip with a clear warning
         # instead of silently doing nothing.
         if _uses_precision_aware_main_params(opt):
+            if config.fusion:
+                raise RuntimeError("fused deosc requires explicit FP32 master shards")
             skipped_precision_aware += 1
             warning_rank_0(
                 "[WeightDeOsc] use_precision_aware_optimizer detected (bf16 main params held "
@@ -1020,7 +1024,13 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
             def _wrapped(*args, **kwargs):
                 ok_update = orig(*args, **kwargs)
                 try:
-                    run.run(bound_opt)
+                    if run.config.enable and run._global_step + 1 >= run.config.start_step:
+                        # One range per optimizer step attributes QDQ and state
+                        # traffic to deosc instead of mixing it with forward QDQ.
+                        with torch.profiler.record_function("WeightDeOsc"):
+                            run.run(bound_opt)
+                    else:
+                        run.run(bound_opt)
                 except Exception as exc:  # never let de-osc crash training
                     if run.config.fusion:
                         # Opted-in experiments must not report a speedup by
@@ -1046,6 +1056,8 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
         # Already warned per instance above; avoid the misleading "no instance" message.
         pass
     else:
+        if config.fusion:
+            raise RuntimeError("fused deosc requires a compatible DistributedOptimizer instance")
         warning_rank_0(
             "[WeightDeOsc] no DistributedOptimizer instance found; de-oscillation not installed "
             "(requires use_distributed_optimizer=true)."
