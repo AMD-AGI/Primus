@@ -8,13 +8,12 @@
 
 Every gate here used to be an environment variable read at module import. That
 worked while they were experiments but is wrong for a shipped recipe, for two
-reasons that both bit this campaign:
+reasons:
 
-* An arm that forgets one still runs, still converges and is simply several
+* A run that forgets one still runs, still converges and is simply several
   percent slow, because Inductor compiles the unfused graph instead of calling
-  the fused kernel. A set of arms built without five of these read as a 25 ms
-  *hardware* regression and was chased through clocks, thermals, GPU tenants and
-  the compiler cache before a kernel census located it in the compiled layer.
+  the fused kernel. That is easy to misread as a hardware regression rather than
+  a missing gate.
 * Read at import, a gate cannot be described by the config file that is supposed
   to define the run, so the YAML and the measured throughput can diverge
   silently.
@@ -107,7 +106,7 @@ class Mxfp6Gates:
     # top of A6W4's weight. Worth about as much again as everything A6W4
     # delivers, but the weight-gradient cosine against fp32 lands at 0.9928
     # where A6W4's forward already sits at 0.99293 -- so it needs its own
-    # convergence gate and is opt-in. Requires mxfp6_weight_format='mxfp4';
+    # convergence validation and is opt-in. Requires mxfp6_weight_format='mxfp4';
     # without A6W4 there is no narrowed weight to narrow a second operand
     # against, and the combination is rejected in BaseDiffusionConfig.
     wgrad_a6w4: bool = False
@@ -216,7 +215,7 @@ def configure(config) -> Mxfp6Gates:
     # Log the RESOLVED gates, not the requested ones. The two can differ: the
     # trainer copies a fixed list of fields onto the model config, so a gate the
     # YAML sets and the argument dump reports as True can still be dropped before
-    # it reaches here -- which costs ~6% of step time and changes nothing visible
+    # it reaches here -- which costs step time and changes nothing visible
     # otherwise. This line is the one place the truth is recorded, so read it
     # rather than the argument dump when a run comes back mysteriously slow.
     active = {f.name: getattr(resolved, f.name) for f in fields(Mxfp6Gates)}

@@ -142,10 +142,9 @@ class BaseDiffusionConfig(TransformerConfig):
     # It buys less than the narrower format suggests. A6W4 issues the same
     # v_mfma_scale_f32_16x16x128_f8f6f4 that A6W6 does, only with blgp=FP4 instead of
     # blgp=FP6, so the matrix pipe runs at exactly the same rate and the gain is operand
-    # traffic alone -- measured at 1.0765x geomean on the 21 eligible Flux shapes, which
-    # is a low single-digit percentage of step time once GEMM's share of the step and the
-    # two-thirds eligibility are applied. And it costs accuracy: cosine against bf16 falls from 0.99919 to 0.99293.
-    # Default "mxfp6" accordingly; this is opt-in and gated on a convergence arm.
+    # traffic alone, a modest per-GEMM gain that shrinks further once GEMM's share of the step
+    # and the two-thirds eligibility are applied. And it costs accuracy: cosine against bf16 falls from 0.99919 to 0.99293.
+    # Default "mxfp6" accordingly; this is opt-in and needs its own convergence validation.
     mxfp6_weight_format: str = "mxfp6"
 
     # Have the MXFP6 wgrad GEMM write weight.main_grad itself, replacing the elementwise
@@ -158,11 +157,9 @@ class BaseDiffusionConfig(TransformerConfig):
     #
     # Note the reason is *not* that the fused wgrad is slower at those M=32 shapes -- an
     # earlier version of this comment said so and was wrong. Measured directly with an
-    # fp32 main_grad it is faster at both production shapes ([18432,3072] 85.76 -> 68.08
-    # us, [9216,3072] 48.46 -> 36.34 us, x38 each, -1.13 ms/step). The end-to-end arms
-    # still lost, at +2.5 ms/step, because the change perturbs grad-reduce overlap, which
-    # is worth 32.4 ms here and cannot be repaid by a 1.25 ms ceiling. Isolated kernel
-    # timings do not price changes to the gradient pipeline.
+    # fp32 main_grad it is faster at both production shapes. End to end it still lost,
+    # because the change perturbs grad-reduce overlap, which is worth far more than the
+    # kernel saving. Isolated kernel timings do not price changes to the gradient pipeline.
     #
     # The A6W6 store has no beta=1 accumulate epilogue, so it overwrites main_grad and is
     # only valid at one microbatch per optimizer step. Enforced per module, not here,

@@ -379,9 +379,9 @@ def _claim_main_grad(*weights) -> None:
     Called from the forward, which reads oddly, because the natural place -- right after
     the backward's store -- is not available: dynamo refuses to trace a mutation of state
     owned outside an autograd.Function ("HOP: Unsafe side effect"), and rather than fail it
-    breaks the graph around every MXFP6 linear. On the production Flux 12B arm that fragmented
-    one compiled block into hundreds and cost 42.7 ms of eager elementwise work per 512
-    images, against the ~16 ms of ``add_`` the fusion removes -- a net regression. From the
+    breaks the graph around every MXFP6 linear. On Flux 12B that fragmented one compiled
+    block into hundreds, and the eager elementwise work cost more than the ``add_`` the
+    fusion removes -- a net regression. From the
     forward the same assignment is ordinary traced code, which dynamo records as a side
     effect and replays.
 
@@ -394,6 +394,7 @@ def _claim_main_grad(*weights) -> None:
     under TE CUDA graphs precisely because the capture "no longer has the opportunity to
     set it back to True".
     """
+
     for weight in weights:
         weight.grad_added_to_main_grad = True
         weight.main_grad_initialized = True
@@ -405,13 +406,10 @@ def _reduce_grad_into_main_grad(param, partial, out_dtype, fuse_wgrad_accum, dim
     Same trade as ``_wgrad_into_main_grad``, one operand over. Left to autograd, the
     reduction's result is handed back as ``bias.grad``, which AccumulateGrad materialises
     with a device-to-device copy before Megatron's DDP hook adds it into ``main_grad`` and
-    drops it. That copy is 8.7 us of pure dispatch on a tensor of a few thousand elements,
-    and there are hundreds of them per step.
-
-    Measured on the production trace: ``__amd_rocclr_copyBuffer`` is 5.23 ms/step
-    over 600 launches, 98% of them under AccumulateGrad, and the family is 94% exclusive --
-    it almost never runs alongside another kernel, so what is removed here converts to step
-    time nearly 1:1 rather than at the ~44% a GEMM saving converts at.
+    drops it. That copy is pure dispatch on a tensor of a few thousand elements, and there
+    are hundreds of them per step. Nearly all of them run under AccumulateGrad and almost
+    never alongside another kernel, so what is removed here converts to step time nearly
+    1:1, more than a GEMM saving of the same size does.
 
     The MXFP6 weights already avoid this and are, tellingly, absent from the copied shapes
     in that trace: ``_wgrad_into_main_grad`` writes their ``main_grad`` and returns a fresh
@@ -620,8 +618,8 @@ class MXFP6LinearFunction(torch.autograd.Function):
 
         # Bias goes into the GEMM's store epilogue, where it is free: the epilogue is bound by
         # its scatter store rather than by VALU, so the add hides completely. Handing it to the
-        # GEMM rather than adding afterwards deletes a whole pass over the output, worth 7.3 ms
-        # per step at the production configuration, and rounds once instead of twice.
+        # GEMM rather than adding afterwards deletes a whole pass over the output and rounds
+        # once instead of twice.
         #
         # Passed unconditionally. Whether the installed aiter can actually fold it is Turbo's to
         # answer -- it probes, and adds the separate pass itself when it cannot -- so there is
@@ -943,25 +941,21 @@ class MXFP6RowParallelLinear(RowParallelLinear):
 #
 # What that removes, per Flux 12B step at the profiled shapes: the bias-add + GELU kernel's
 # read and write and the packer's read back of it in the forward, and the same round-trip
-# plus the bias gradient's own reduction pass in the backward. Measured on one node at
-# micro_batch_size 64, against this same module with the fusion switched off: 75.3 ms/step of
-# epilogue and reduction kernels go away, 35.5 ms/step of added prologue cost inside the
-# packer replaces them, and the step's GPU busy time falls 856.5 -> 810.9 ms, 5.0% off wall
-# clock (863.6 -> 820.3 ms/step). The step is GPU bound at 96.8% busy, so that lands as
-# throughput: 74.1 -> 78.0 images/s/GPU. The pre-activation y1 is still saved, but it was
-# already being saved for the activation's own backward, so peak allocated memory only grows
-# by the column-sum buffer, 4 MB of 244 GB. Reserved memory grows more, 249.0 -> 250.2 GB,
-# because the freed epilogue temporaries leave differently shaped holes in the caching
-# allocator; that is the number the driver reports, so it is what a memory ceiling will see.
+# plus the bias gradient's own reduction pass in the backward. The removed epilogue and
+# reduction kernels cost roughly twice the prologue work added inside the packer, and the
+# step is GPU bound, so the difference lands as throughput. The pre-activation y1 is still
+# saved, but it was already being saved for the activation's own backward, so peak allocated
+# memory only grows by the column-sum buffer. Reserved memory grows a little more, because the
+# freed epilogue temporaries leave differently shaped holes in the caching allocator; that is
+# the number the driver reports, so it is what a memory ceiling will see.
 #
-# The backward is where the win is, ~0.40 ms per call against ~0.11 for the forward, and the
-# reason is worth knowing before trying to improve this. The packer is bandwidth bound at
-# 3.8 TB/s without a prologue, so fusing work into it only pays while it stays that way. The
-# forward prologue removes a 0.26 ms kernel and adds 0.14 ms of arithmetic to a 0.38 ms pack;
-# the backward removes two kernels totalling 0.73 ms and its extra read of the incoming
-# gradient is traffic it would have done anyway. An early version of the prologue used a libm
-# tanh and a per-element bounds branch and cost 0.38 ms of arithmetic instead of 0.14, which
-# made the forward a net regression and cost most of the win.
+# The backward is where most of the win is, and the reason is worth knowing before trying to
+# improve this. The packer is bandwidth bound without a prologue, so fusing work into it only
+# pays while it stays that way. The forward prologue removes one kernel and adds about half
+# that kernel's time of arithmetic to the pack; the backward removes two kernels and its extra
+# read of the incoming gradient is traffic it would have done anyway. An early version of the
+# prologue used a libm tanh and a per-element bounds branch, which made its arithmetic cost
+# several times higher, made the forward a net regression and cost most of the win.
 # ---------------------------------------------------------------------------
 
 
@@ -1113,14 +1107,9 @@ def _mlp_backward(
 #   * weight ROW and COLUMN blobs -> both shared. The column blob is only ever the B
 #     operand of a grouped dgrad, never a wgrad operand.
 #
-# Measured per pair at the production shape (m=8192, k=3072, f=12288, h=3072), packing
-# included, against two separate streams:
-#     fwd fc1  (N=12288)   499.9 -> 463.6 us
-#     fwd fc2  (N= 3072)   514.6 -> 477.8 us
-#     bwd fc2 dgrad        457.5 -> 458.7 us
-#     bwd fc1 dgrad        510.9 -> 475.3 us
-#                          total -107.5 us/pair -> -2.04 ms/step over 19 joint blocks
-# Grouping every GEMM beats grouping only the N=3072 ones (-1.37 ms), which is not what a
+# Against two separate streams at the joint-block shapes, packing included, grouping is
+# faster for the fc1 / fc2 forwards and the fc1 dgrad, and neutral for the fc2 dgrad.
+# Grouping every GEMM beats grouping only the N=3072 ones, which is not what a
 # pure wave-quantisation model predicts: the out= packers also drop two allocations per
 # pair, and that part does not depend on N.
 #
@@ -1787,9 +1776,7 @@ class MXFP6GroupedMLPFunction(torch.autograd.Function):
 # they would be reduced from no longer exists.
 #
 # Priced on the shapes it runs at rather than modelled: the prologue costs roughly half of
-# the kernel time it removes, and most of that difference survives into wall clock. The
-# measured account -- the figures, a probe that predicted a lower cost, and why production
-# disagrees with it -- is in the campaign's packer/RESULTS_qkr_kernel.md.
+# the kernel time it removes, and most of that difference survives into wall clock.
 #
 # Correctness is gated two ways. packer/qkr_exact_test.cu proves the packed blobs are
 # byte-identical to packing a host-computed dx; packer/qkr_triton_gate.py proves that dx is
@@ -2040,7 +2027,7 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
 # torch.cat calls before attention. The reference does the same thing
 # (torchtitan/.../flux/model/layers.py: `q = torch.cat((txt_q, img_q), dim=2)`), so the
 # concatenation is part of the model -- but *performing* it as a separate pass is not. At
-# the production configuration, those cats and their backward splits are ~3.1 ms/step of pure data movement.
+# the production configuration, those cats and their backward splits are pure data movement.
 #
 # Writing both streams into one buffer removes them:
 #   * mixed_qkv is one [m_a + m_b, n] tensor, each projection writing its own half through
@@ -2059,8 +2046,8 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
 # repack destination that does not exist.
 #
 # Not grouped. The two projections stay two GEMMs writing into halves rather than one
-# 2-group GEMM. Grouping them is worth a further ~0.15 ms of forward GEMM time and needs
-# the operands packed into shared buffers; the cat removal is ~90% of the item and does not
+# 2-group GEMM. Grouping them would save a little more forward GEMM time and needs
+# the operands packed into shared buffers; the cat removal is most of the gain and does not
 # depend on it. The backward stays per stream for a harder reason: its packer prologue
 # (quantize_mxfp6_qk_norm_rope_bwd) has no caller-buffer variant, so the two streams'
 # packed gradients cannot land adjacently for a grouped dgrad.

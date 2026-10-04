@@ -422,8 +422,8 @@ class Flux(DiffusionModule):
             if getattr(args, "overlap_param_gather", False):
                 raise ValueError(
                     "whole_model compile strategy is incompatible with overlap_param_gather. "
-                    "DDP hooks are traced inside the compiled graph, causing ~20% convergence "
-                    "degradation. Use 'per_block' strategy instead, or disable overlap_param_gather."
+                    "DDP hooks are traced inside the compiled graph, degrading convergence. "
+                    "Use 'per_block' strategy instead, or disable overlap_param_gather."
                 )
 
         if strategy == "per_block" and getattr(self.config, "enable_cuda_graph", False):
@@ -446,7 +446,7 @@ class Flux(DiffusionModule):
 
         if getattr(self.config, "torch_compile_coordinate_descent_tuning", False):
             torch._inductor.config.coordinate_descent_tuning = True
-            log("  Enabled Inductor coordinate-descent tuning (-2.1 ms/step, costs compile time)")
+            log("  Enabled Inductor coordinate-descent tuning (costs compile time)")
 
         from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import (
             gates,
