@@ -41,6 +41,42 @@ def _bucket_group(**overrides):
     return SimpleNamespace(**defaults)
 
 
+def test_grad_reduce_backend_is_independent_opt_in(monkeypatch):
+    monkeypatch.setenv("MEGATRON_PARAM_GATHER_BACKEND", "rccl_sdma")
+    monkeypatch.delenv("MEGATRON_GRAD_REDUCE_BACKEND", raising=False)
+
+    assert not grad_patches.rccl_sdma_grad_reduce_enabled()
+
+    monkeypatch.setenv("MEGATRON_GRAD_REDUCE_BACKEND", "RCCL_SDMA")
+    assert grad_patches.rccl_sdma_grad_reduce_enabled()
+
+
+def test_grad_reduce_backend_requires_param_gather_backend(monkeypatch):
+    monkeypatch.setenv("MEGATRON_GRAD_REDUCE_BACKEND", "rccl_sdma")
+    monkeypatch.delenv("MEGATRON_PARAM_GATHER_BACKEND", raising=False)
+    monkeypatch.setenv("RCCL_CE_REDUCESCATTER", "1")
+
+    with pytest.raises(RuntimeError, match="MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma"):
+        grad_patches.validate_grad_reduce_backend_config()
+
+
+def test_grad_reduce_backend_requires_rccl_ce_flag(monkeypatch):
+    monkeypatch.setenv("MEGATRON_GRAD_REDUCE_BACKEND", "rccl_sdma")
+    monkeypatch.setenv("MEGATRON_PARAM_GATHER_BACKEND", "rccl_sdma")
+    monkeypatch.delenv("RCCL_CE_REDUCESCATTER", raising=False)
+
+    with pytest.raises(RuntimeError, match="RCCL_CE_REDUCESCATTER=1"):
+        grad_patches.validate_grad_reduce_backend_config()
+
+
+def test_grad_reduce_backend_accepts_complete_config(monkeypatch):
+    monkeypatch.setenv("MEGATRON_GRAD_REDUCE_BACKEND", "rccl_sdma")
+    monkeypatch.setenv("MEGATRON_PARAM_GATHER_BACKEND", "rccl_sdma")
+    monkeypatch.setenv("RCCL_CE_REDUCESCATTER", "1")
+
+    grad_patches.validate_grad_reduce_backend_config()
+
+
 def test_start_grad_sync_uses_dedicated_group_when_eligible(monkeypatch):
     dedicated_group = SimpleNamespace()
     native_handle = SimpleNamespace()
@@ -641,9 +677,6 @@ def test_grad_buffer_wrapper_skips_mxfp8_shared_buffer_path(monkeypatch):
 
 
 def test_patch_registration_orders_after_param_gather_patch():
-    from primus.backends.megatron.patches.parallelism import (
-        rccl_sdma_param_all_gather_patches as param_patches,
-    )
     from primus.core.patches.patch_registry import PatchRegistry
 
     grad_patch = PatchRegistry.get("megatron.distributed.rccl_sdma_grad_reduce_scatter")
@@ -652,4 +685,4 @@ def test_patch_registration_orders_after_param_gather_patch():
     assert grad_patch is not None
     assert param_patch is not None
     assert grad_patch.priority > param_patch.priority
-    assert grad_patch.condition is param_patches.rccl_sdma_param_gather_enabled
+    assert grad_patch.condition is grad_patches.rccl_sdma_grad_reduce_enabled

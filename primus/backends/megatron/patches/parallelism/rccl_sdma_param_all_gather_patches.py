@@ -7,8 +7,9 @@
 """Route Megatron parameter AllGather directly through RCCL CE.
 
 The replacement touches only ``_ParamAndGradBucketGroup.start_param_sync``.
-Gradient ReduceScatter, gradient-norm AllReduce, and other collectives retain
-their original process groups and algorithms.
+Gradient ReduceScatter can independently opt into the same dedicated process
+group with ``MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma``. Gradient-norm AllReduce
+and other collectives retain their original process groups and algorithms.
 """
 
 from __future__ import annotations
