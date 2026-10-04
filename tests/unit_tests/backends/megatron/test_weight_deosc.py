@@ -148,7 +148,11 @@ def test_local_shard_qdq_treats_grouped_experts_as_independent_2d_matrices(monke
     # Boundary experts stay on their own padded tiles. The fully owned middle
     # expert is one native 3D call, not a per-row 2D tile and not a flatten
     # that would mix it with its neighbours.
-    assert [tuple(tile.shape) for tile in calls] == [(1, 64, 64), (1, 64, 64), (1, 64, 64)]
+    assert [tuple(tile.shape) for tile in calls] == [
+        (1, 64, 64),
+        (1, 64, 64),
+        (1, 64, 64),
+    ]
     expert0_len = matrix_numel - start
     full_expert = shard[expert0_len : expert0_len + matrix_numel].to(torch.bfloat16)
     assert torch.equal(calls[1], full_expert.view(1, 64, 64))
@@ -467,3 +471,87 @@ def test_disabled_runner_is_noop(monkeypatch):
     runner = WeightDeOscRunner(WeightDeOscConfig(enable=False, period=2, ratio_threshold=2.0))
     runner.run(opt)
     assert len(runner._state) == 0
+
+
+@pytest.mark.parametrize("slabs", [False, True])
+def test_direct_state_seeding_closure_and_checkpoint(monkeypatch, slabs):
+    calls = []
+
+    def fake_direct(main, previous, previous_q, distance, distance_q, rows, cols, start, **kw):
+        current = main.bfloat16()
+        qdq = current.round()
+        calls.append((kw["seed"], kw["close"]))
+        if kw["seed"]:
+            distance.zero_()
+            distance_q.zero_()
+        else:
+            distance.add_((current - previous).abs())
+            distance_q.add_((qdq - previous_q).abs())
+            if kw["close"]:
+                mask = (distance > 0) & (distance_q / distance.clamp(min=kw["eps"]) >= kw["ratio_threshold"])
+                main.copy_(torch.where(mask, qdq, main))
+                current = torch.where(mask, qdq, current)
+                distance.zero_()
+                distance_q.zero_()
+        previous.copy_(current)
+        previous_q.copy_(qdq)
+
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_qdq", fake_direct)
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_update", lambda *a, **kw: None)
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_close", lambda *a, **kw: None)
+    monkeypatch.setattr(weight_deosc, "_forward_scale_rounding_mode", lambda: 2)
+    model = torch.zeros((1, 2), dtype=torch.bfloat16)
+    main = torch.tensor([0.49, 1.0])
+    opt = _FakeDistOpt(model, main, 0, 2)
+    config = WeightDeOscConfig(
+        enable=True,
+        start_step=2,
+        period=2,
+        fusion=True,
+        direct_qdq=True,
+        state_slabs=slabs,
+    )
+    runner = WeightDeOscRunner(config)
+    runner.run(opt)
+    assert not runner._state
+    runner.run(opt)  # Seed at start_step, no accumulated movement.
+    state = next(iter(runner._state.values()))
+    pointers = [getattr(state, name).data_ptr() for name in ("prev", "prev_q", "dist_w", "dist_w_qdq")]
+    assert len(set(pointers)) == 4
+    assert bool(runner._state_slabs) == slabs
+    main.copy_(torch.tensor([0.51, 1.0]))
+    runner.run(opt)
+    assert state.step == 1
+    saved = runner.state_dict()
+    # Emulate serialization (CPU tensors in this test otherwise alias state).
+    saved["params"] = {
+        k: {f: v.clone() if isinstance(v, torch.Tensor) else v for f, v in blob.items()}
+        for k, blob in saved["params"].items()
+    }
+    main.copy_(torch.tensor([0.49, 1.0]))
+    runner.run(opt)
+    assert calls == [(True, False), (False, False), (False, True)]
+    assert main[0].item() == 0.0
+    assert pointers == [
+        getattr(state, name).data_ptr() for name in ("prev", "prev_q", "dist_w", "dist_w_qdq")
+    ]
+    assert runner._period_index == 1
+    # Loading into an already-used runner must discard stale state and slabs.
+    runner.load_state_dict(saved)
+    assert not runner._state and not runner._state_slabs
+    main.copy_(torch.tensor([0.49, 1.0]))
+    runner.run(opt)
+    assert calls[-1] == (False, True)
+    assert main[0].item() == 0.0
+    assert runner._period_index == 1
+
+
+def test_direct_qdq_requires_fusion():
+    with pytest.raises(ValueError, match="requires"):
+        WeightDeOscConfig(enable=True, direct_qdq=True, fusion=False).validate()
+
+
+def test_fusion_unavailable_fails_explicitly(monkeypatch):
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_update", None)
+    with pytest.raises(RuntimeError, match="requested but unavailable"):
+        WeightDeOscRunner(WeightDeOscConfig(enable=True, fusion=True))

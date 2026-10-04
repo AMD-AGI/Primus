@@ -54,6 +54,8 @@ def patch_get_megatron_optimizer_weight_deosc(ctx: PatchContext) -> None:
         start_step=int(getattr(args, "weight_deosc_start_step", 0)),
         log_freq=int(getattr(args, "weight_deosc_log_freq", 0)),
         fusion=bool(getattr(args, "weight_deosc_fusion", False)),
+        direct_qdq=bool(getattr(args, "weight_deosc_direct_qdq", False)),
+        state_slabs=bool(getattr(args, "weight_deosc_state_slabs", True)),
     )
 
     original_get_megatron_optimizer = training_module.get_megatron_optimizer
@@ -66,6 +68,8 @@ def patch_get_megatron_optimizer_weight_deosc(ctx: PatchContext) -> None:
         try:
             install_weight_deosc(optimizer, config)
         except Exception as exc:  # never block optimizer construction
+            if config.fusion:
+                raise
             log_rank_0(f"[Patch:megatron.turbo.weight_deosc] install failed, skipped: {exc}")
         return optimizer
 
@@ -74,7 +78,8 @@ def patch_get_megatron_optimizer_weight_deosc(ctx: PatchContext) -> None:
     log_rank_0(
         "[Patch:megatron.turbo.weight_deosc] Patched get_megatron_optimizer to install "
         f"MXFP4 weight de-oscillation (period={config.period}, ratio={config.ratio_threshold}, "
-        f"start_step={config.start_step}, fusion={config.fusion})."
+        f"start_step={config.start_step}, fusion={config.fusion}, "
+        f"direct_qdq={config.direct_qdq}, state_slabs={config.state_slabs})."
     )
 
     _install_checkpoint_persistence()
@@ -121,7 +126,9 @@ def _install_checkpoint_persistence() -> None:
             try:
                 a = get_args()
                 ckpt_dir = _checkpoint_iter_dir(
-                    getattr(a, "save", None), iteration, release=bool(kwargs.get("release", False))
+                    getattr(a, "save", None),
+                    iteration,
+                    release=bool(kwargs.get("release", False)),
                 )
                 save_deosc_sidecars(optimizer, ckpt_dir)
             except Exception as exc:
