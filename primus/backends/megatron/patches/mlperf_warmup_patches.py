@@ -491,6 +491,19 @@ def _run_warmup_and_restore(
         config.finalize_model_grads_func = saved_finalize
     _log(f"Completed {warmup_steps} warmup steps")
 
+    # ---- 4b. Finish outstanding param gathers before anything below rewrites the params ----
+    # An overlapped param all-gather still in flight (e.g. one dispatched at the end of the last warmup optimizer step,
+    # --ddp-param-gather-after-optimizer) would land in the param buffer after the CPU snapshot is restored.
+    for m in models:
+        for g in list(getattr(m, "bucket_groups", [])) + list(
+            getattr(m, "expert_parallel_bucket_groups", [])
+        ):
+            if getattr(g, "param_gather_handle", None) is not None:
+                g.param_gather_handle.wait()
+                g.param_gather_handle = None
+            if hasattr(g, "param_gather_dispatched"):
+                g.param_gather_dispatched = False
+
     # ---- 5. Restore optimizer ----
     _restore_optimizer(optimizer, saved_opt)
     _reset_optimizer_state(optimizer)
