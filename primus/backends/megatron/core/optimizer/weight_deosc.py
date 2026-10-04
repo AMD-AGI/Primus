@@ -577,6 +577,7 @@ class WeightDeOscRunner:
             ratio_threshold=self.config.ratio_threshold,
             eps=self._EPS,
             reset_count=self._period_reset_count if close else None,
+            grouped=len(shape) == 3,
         )
         state.step = 0 if seed or close else state.step + 1
         return None, main.numel(), close

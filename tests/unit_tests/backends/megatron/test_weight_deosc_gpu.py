@@ -206,3 +206,49 @@ def test_fused_period_logging_is_deferred(monkeypatch):
     runner._drain_pending_logs()
     assert not runner._pending_logs
     assert len(messages) == 1 and "[deferred]" in messages[0]
+
+
+@pytest.mark.parametrize(
+    "shape,start,trim",
+    [
+        ((64, 64), 0, 0),
+        ((2, 64, 64), 0, 0),
+        ((2, 96, 64), 0, 0),  # Full experts fall back to the HIP quantizer.
+        ((3, 96, 64), 3, 7),  # Partial experts use padded batched quantization.
+    ],
+)
+@pytest.mark.parametrize("pattern", ["all_nan", "nan_row", "isolated_nan", "large_with_nan"])
+@pytest.mark.parametrize("mode", [0, 1, 2])
+def test_direct_qdq_preserves_backend_nan_semantics(monkeypatch, shape, start, trim, pattern, mode):
+    monkeypatch.setattr(weight_deosc, "_forward_scale_rounding_mode", lambda: mode)
+    full = torch.ones(shape, device="cuda")
+    if pattern == "all_nan":
+        full.fill_(float("nan"))
+    else:
+        matrices = full.view(-1, *shape[-2:])
+        if pattern == "large_with_nan":
+            full.fill_(1e38)
+        if pattern in ("nan_row", "large_with_nan"):
+            matrices[:, 3, :32] = float("nan")
+        else:
+            matrices[:, 3, 5] = float("nan")
+    end = full.numel() - trim
+    master = full.flatten()[start:end].clone()
+    expected = weight_deosc.qdq_mxfp4_local_shard(master, shape, start, end, torch.bfloat16)
+    previous = torch.empty_like(master, dtype=torch.bfloat16)
+    previous_q = torch.empty_like(previous)
+    distance, distance_q = torch.empty_like(master), torch.empty_like(master)
+    weight_deosc._weight_deosc_qdq(
+        master,
+        previous,
+        previous_q,
+        distance,
+        distance_q,
+        shape[-2],
+        shape[-1],
+        start,
+        seed=True,
+        scale_rounding_mode=mode,
+        grouped=len(shape) == 3,
+    )
+    torch.testing.assert_close(previous_q, expected, rtol=0, atol=0, equal_nan=True)
