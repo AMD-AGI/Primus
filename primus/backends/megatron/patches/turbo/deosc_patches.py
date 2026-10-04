@@ -53,6 +53,7 @@ def patch_get_megatron_optimizer_weight_deosc(ctx: PatchContext) -> None:
         ratio_threshold=float(getattr(args, "weight_deosc_ratio", 4.0)),
         start_step=int(getattr(args, "weight_deosc_start_step", 0)),
         log_freq=int(getattr(args, "weight_deosc_log_freq", 0)),
+        fusion=bool(getattr(args, "weight_deosc_fusion", False)),
     )
 
     original_get_megatron_optimizer = training_module.get_megatron_optimizer
@@ -73,7 +74,7 @@ def patch_get_megatron_optimizer_weight_deosc(ctx: PatchContext) -> None:
     log_rank_0(
         "[Patch:megatron.turbo.weight_deosc] Patched get_megatron_optimizer to install "
         f"MXFP4 weight de-oscillation (period={config.period}, ratio={config.ratio_threshold}, "
-        f"start_step={config.start_step})."
+        f"start_step={config.start_step}, fusion={config.fusion})."
     )
 
     _install_checkpoint_persistence()

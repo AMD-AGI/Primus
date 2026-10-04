@@ -212,6 +212,65 @@ def test_period_resets_after_snap(monkeypatch):
     assert state.dist_w_qdq.dtype == torch.float32
 
 
+def test_fused_update_and_close_match_reference_path(monkeypatch):
+    monkeypatch.setattr(weight_deosc, "qdq_mxfp4", _fake_qdq_round)
+    calls = {"update": 0, "close": 0, "reset_count": "unset"}
+
+    def _fused_update(current, current_qdq, previous, previous_qdq, dist, dist_qdq):
+        calls["update"] += 1
+        dist.add_((current - previous).abs())
+        dist_qdq.add_((current_qdq - previous_qdq).abs())
+
+    def _fused_close(
+        master,
+        previous,
+        current_qdq,
+        dist,
+        dist_qdq,
+        ratio_threshold,
+        eps,
+        reset_count=None,
+    ):
+        calls["close"] += 1
+        calls["reset_count"] = reset_count
+        mask = (dist > 0) & (dist_qdq / dist.clamp(min=eps) >= ratio_threshold)
+        torch.where(mask, current_qdq, master, out=master)
+        torch.where(mask, current_qdq, previous, out=previous)
+        if reset_count is not None:
+            reset_count.add_(mask.sum())
+        dist.zero_()
+        dist_qdq.zero_()
+
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_update", _fused_update)
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_close", _fused_close)
+
+    model_param = torch.zeros(1, 2)
+    shard_main_param = torch.zeros(2)
+    opt = _FakeDistOpt(model_param, shard_main_param, start=0, end=2)
+    runner = WeightDeOscRunner(
+        WeightDeOscConfig(
+            enable=True,
+            period=2,
+            ratio_threshold=2.0,
+            log_freq=0,
+            fusion=True,
+        )
+    )
+
+    for vals in ([0.49, 1.0], [0.51, 1.0], [0.49, 1.0]):
+        value = torch.tensor(vals)
+        model_param.copy_(value.view(1, 2))
+        shard_main_param.copy_(value)
+        runner.run(opt)
+
+    assert calls == {"update": 2, "close": 1, "reset_count": None}
+    assert shard_main_param[0].item() == pytest.approx(0.0)
+    state = next(iter(runner._state.values()))
+    assert state.step == 0
+    assert torch.count_nonzero(state.dist_w) == 0
+    assert torch.count_nonzero(state.dist_w_qdq) == 0
+
+
 def test_eligibility_excludes_non_fp4_modules(monkeypatch):
     monkeypatch.setattr(weight_deosc, "qdq_mxfp4", _fake_qdq_round)
     n = 4

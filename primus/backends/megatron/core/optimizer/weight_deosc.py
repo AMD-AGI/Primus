@@ -94,6 +94,17 @@ except (ImportError, ModuleNotFoundError):
     _dequantize_fp4 = None
     _quantize_fp4_with_trans = None
 
+try:
+    from primus_turbo.pytorch.ops.deoscillation import (
+        weight_deosc_close as _weight_deosc_close,
+    )
+    from primus_turbo.pytorch.ops.deoscillation import (
+        weight_deosc_update as _weight_deosc_update,
+    )
+except (ImportError, ModuleNotFoundError):
+    _weight_deosc_close = None
+    _weight_deosc_update = None
+
 # Block size used by the Primus-Turbo MXFP4 weight path (== 32).
 try:
     from primus.backends.megatron.core.fp4_utils import MXFP4_SCALING_BLOCK_SIZE
@@ -121,6 +132,7 @@ class WeightDeOscConfig:
         ratio_threshold: DistRatio threshold above which an element is snapped.
         start_step: Global optimizer step at which tracking begins.
         log_freq: Log a summary every ``log_freq`` periods (0 disables logging).
+        fusion: Use Primus-Turbo's fused update and closure operators when available.
     """
 
     enable: bool = False
@@ -128,6 +140,7 @@ class WeightDeOscConfig:
     ratio_threshold: float = 4.0
     start_step: int = 0
     log_freq: int = 0
+    fusion: bool = False
 
     def validate(self) -> None:
         if not self.enable:
@@ -444,6 +457,16 @@ class WeightDeOscRunner:
         # the FP4 forward (auto-excludes bf16 first/last layers and any layer
         # whose FP4 path never ran, e.g. grouped experts).
         self._eligible_ids: Optional[set] = None
+        self._use_fusion = bool(
+            config.fusion and _weight_deosc_update is not None and _weight_deosc_close is not None
+        )
+        if config.fusion and not self._use_fusion:
+            warning_rank_0(
+                "[WeightDeOsc] fused operators requested but unavailable; using the PyTorch fallback."
+            )
+        # Lazily allocated once on a closure step that is selected for logging;
+        # every shard atomically contributes to the same device scalar.
+        self._period_reset_count: Optional[torch.Tensor] = None
 
     # ------------------------------------------------------------------
     # Stable keys (for in-memory tracking + checkpoint round-trip)
@@ -533,6 +556,11 @@ class WeightDeOscRunner:
         total_reset = None
         total_elems = 0
         period_closed = False
+        collect_reset_count = bool(
+            self.config.log_freq > 0
+            and (self._period_index + 1) % self.config.log_freq == 0
+        )
+        self._period_reset_count = None
 
         for shard_group, model_group in zip(shard_groups, model_groups):
             for shard_main_param, model_param in zip(shard_group, model_group):
@@ -564,13 +592,21 @@ class WeightDeOscRunner:
                     w_model = w_local
 
                 key = self._stable_key(dist_opt, model_param, start, end)
-                reset, elems, closed = self._track_and_snap(key, shard_main_param, w_model, q_local)
+                reset, elems, closed = self._track_and_snap(
+                    key,
+                    shard_main_param,
+                    w_model,
+                    q_local,
+                    collect_reset_count=collect_reset_count,
+                )
                 if reset is not None:
                     total_reset = reset if total_reset is None else total_reset + reset
                 total_elems += elems
                 period_closed = period_closed or closed
 
         if period_closed:
+            if self._use_fusion:
+                total_reset = self._period_reset_count
             self._period_index += 1
             if (
                 self.config.log_freq > 0
@@ -596,7 +632,9 @@ class WeightDeOscRunner:
         shard_main_param: torch.Tensor,
         w_local: torch.Tensor,
         q_local: torch.Tensor,
-    ) -> Tuple[int, int, bool]:
+        *,
+        collect_reset_count: bool = True,
+    ) -> Tuple[Optional[torch.Tensor], int, bool]:
         state = self._state.get(key)
         w_snap = _as_snap(w_local)
         q_snap = _as_snap(q_local)
@@ -614,9 +652,20 @@ class WeightDeOscRunner:
             self._state[key] = state
             # fall through to track this step using the restored snapshots
 
-        # Promote only the BF16 delta into the FP32 window accumulators.
-        state.dist_w += (w_snap - state.prev).abs()
-        state.dist_w_qdq += (q_snap - state.prev_q).abs()
+        # Promote only the BF16 delta into the FP32 window accumulators. The
+        # fused path combines the two subtract/abs/add chains into one launch.
+        if self._use_fusion:
+            _weight_deosc_update(
+                w_snap,
+                q_snap,
+                state.prev,
+                state.prev_q,
+                state.dist_w,
+                state.dist_w_qdq,
+            )
+        else:
+            state.dist_w += (w_snap - state.prev).abs()
+            state.dist_w_qdq += (q_snap - state.prev_q).abs()
         # w_snap and q_snap are freshly allocated every step, so adopting them
         # as the next snapshot is a rebind. Copying into a persistent buffer
         # instead would move the whole shard twice more per step for nothing.
@@ -627,29 +676,45 @@ class WeightDeOscRunner:
         if state.step < self.config.period:
             return None, n_elem, False
 
-        # End of period: snap oscillating elements to the current bin center.
-        # Mask math is left exactly as it was; only the way the mask is applied
-        # below changes, so the set of snapped elements is unaffected.
-        ratio = state.dist_w_qdq / state.dist_w.clamp(min=self._EPS)
-        reset_mask = (state.dist_w > 0) & (ratio >= self.config.ratio_threshold)
-
-        # Boolean-mask read/write lowers to masked_select + index_put_, and each
-        # of those synchronizes the device to size its data-dependent output.
-        # Over 32 shards that is ~190 syncs in a single step. torch.where does
-        # the same job branch-free at a fixed cost.
         main = shard_main_param.data.view(-1)
-        torch.where(reset_mask, q_snap, main, out=main)
-        # prev already holds w_snap from the update above, so only the snapped
-        # positions still need fixing. prev_q needs none: QDQ is idempotent on
-        # bin centers, so Q(snapped) is already what q_snap holds there.
-        torch.where(reset_mask, q_snap, state.prev, out=state.prev)
+        if self._use_fusion:
+            if collect_reset_count and self._period_reset_count is None:
+                self._period_reset_count = torch.zeros(
+                    (), device=main.device, dtype=torch.int64
+                )
+            _weight_deosc_close(
+                main,
+                state.prev,
+                q_snap,
+                state.dist_w,
+                state.dist_w_qdq,
+                self.config.ratio_threshold,
+                self._EPS,
+                reset_count=self._period_reset_count,
+            )
+            reset_count = None
+        else:
+            # End of period: snap oscillating elements to the current bin center.
+            ratio = state.dist_w_qdq / state.dist_w.clamp(min=self._EPS)
+            reset_mask = (state.dist_w > 0) & (ratio >= self.config.ratio_threshold)
 
-        state.dist_w.zero_()
-        state.dist_w_qdq.zero_()
+            # Boolean-mask read/write lowers to masked_select + index_put_, and each
+            # of those synchronizes the device to size its data-dependent output.
+            # Over 32 shards that is ~190 syncs in a single step. torch.where does
+            # the same job branch-free at a fixed cost.
+            torch.where(reset_mask, q_snap, main, out=main)
+            # prev already holds w_snap from the update above, so only the snapped
+            # positions still need fixing. prev_q needs none: QDQ is idempotent on
+            # bin centers, so Q(snapped) is already what q_snap holds there.
+            torch.where(reset_mask, q_snap, state.prev, out=state.prev)
+
+            state.dist_w.zero_()
+            state.dist_w_qdq.zero_()
+            reset_count = reset_mask.sum() if collect_reset_count else None
         state.step = 0
-        # Left as a device tensor: calling .item() here costs one sync per
-        # shard, and the count is only ever consumed once, by the period log.
-        return reset_mask.sum(), n_elem, True
+        # Left as a device tensor: calling .item() here costs one sync per shard,
+        # and the count is only ever consumed once, by a selected period log.
+        return reset_count, n_elem, True
 
     # ------------------------------------------------------------------
     # Checkpoint persistence (per-rank; correct for same parallel layout)
