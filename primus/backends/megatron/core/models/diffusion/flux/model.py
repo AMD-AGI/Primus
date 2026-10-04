@@ -208,6 +208,23 @@ class Flux(DiffusionModule):
             post_process=True,
         )
 
+        # Selective A4W4 backward: no-op unless mxfp6_bwd_fp4_a6w6_first/last set.
+        from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import (
+            install_a6w6_backward_blocks,
+        )
+        from primus.core.utils.module_utils import log_rank_0
+
+        hooked = install_a6w6_backward_blocks(
+            self.transformer.layers,
+            (
+                getattr(config, "torch_compile_strategy", None)
+                if getattr(config, "enable_torch_compile", False)
+                else None
+            ),
+        )
+        if hooked:
+            log_rank_0(f"[mxfp6] A6W6 backward kept for blocks {hooked} (bwd_fp4_a6w6_first/last)")
+
         # Output layers
         self.norm_out = AdaLNContinuous(
             config=config,
@@ -431,7 +448,9 @@ class Flux(DiffusionModule):
             torch._inductor.config.coordinate_descent_tuning = True
             log("  Enabled Inductor coordinate-descent tuning (-2.1 ms/step, costs compile time)")
 
-        from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import gates
+        from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import (
+            gates,
+        )
 
         if gates().ln_bwd_fused_sum:
             from primus.backends.megatron.core.models.diffusion.common.normalization import (

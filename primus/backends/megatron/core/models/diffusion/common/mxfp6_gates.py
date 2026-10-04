@@ -112,6 +112,58 @@ class Mxfp6Gates:
     # against, and the combination is rejected in BaseDiffusionConfig.
     wgrad_a6w4: bool = False
 
+    # --- A4W4 backward -----------------------------------
+    # Run the dgrad / wgrad GEMMs as A4W4 on AITER's f4gemm kernels, both operands MXFP4
+    # (Hadamard-rotated like MXFP6), packed in f4gemm's layouts by Primus-Turbo's
+    # quantize_mx_* ops. The forward stays MXFP6. dgrad and wgrad are separate gates.
+    # Changes numerics; exclusive with A6W4.
+    bwd_fp4_dgrad: bool = False
+    bwd_fp4_wgrad: bool = False
+    # Stochastic rounding for the A4W4 gradient operand: each FP4 code of a
+    # gradient pack rounds up or down with probability proportional to distance, so the
+    # gradient GEMMs are unbiased. Activations and weights stay round-to-nearest.
+    bwd_fp4_sr: bool = False
+    # The grouped MLP under the A4W4 backward: format-aware pair packers, grouped
+    # A6W6 forward, per-stream A4W4 dgrads. (there is no grouped A4W4 kernel).
+    # Bit-identical to the ungrouped A4W4 path. Off: without it the grouped MLP falls back to two MLPs while a bwd_fp4 gate is on.
+    bwd_fp4_grouped_mlp: bool = False
+    # Which kernel runs the A4W4 GEMMs: "aiter" (f4gemm asm, tuned table) or "flydsl"
+    # (Turbo's FlyDSL MXFP4 GEMM). FlyDSL
+    # takes plain-layout operands, so the packs switch to fmt 8 / 9 / 12. Needs both bwd_fp4 gates.
+    # "flydsl_packed": the packers also store the scales in FlyDSL's packed per-tile layout,
+    # so FlyDSL skips its per-GEMM scale repack; bit-identical to "flydsl".
+    # "aiter_fly": the same packed operands on aiter `gemm_a4w4_fly_asm`, assembly ports of FlyDSL's 256-wide
+    # kernel (one AOT code object per supported shape; no FlyDSL at runtime). FlyDSL's 192-wide tile and its
+    # split-K variants are not bit-exact, so both are off in Turbo.
+    bwd_fp4_backend: str = "aiter"
+    # MXFP4 forward for the single blocks' linear2 (attention out-projection + MLP fc2): their
+    # activations and weights pack as
+    # plain FP4 both ways (fmt 8) and the forward GEMMs run FlyDSL A4W4. Changes forward numerics.
+    # Needs both bwd_fp4 gates and bwd_fp4_backend 'flydsl', 'flydsl_packed' or 'aiter_fly' (whose backward columns are the
+    # layouts its forward packs write).
+    fwd_fp4_single_linear2: bool = False
+    # MXFP4 forward for the single blocks' MLP fc1 too: same packs / backends / requirements as
+    # fwd_fp4_single_linear2. Changes forward numerics.
+    fwd_fp4_single_fc1: bool = False
+    # MXFP4 forward for the joint blocks' stream MLPs, fc1 and fc2; same requirements.
+    fwd_fp4_joint_mlp: bool = False
+    # Forward A6W6 GEMMs on aiter `gemm_a6w6_fly_asm`: assembly ports of FlyDSL's MXFP6 GEMM, one AOT code
+    # object per supported (M, N, K, bias). Those GEMMs' operands
+    # pack their rows in the K128-blocked fly layout; columns (the backward's operands) are unchanged. Bit-identical
+    # to the A6W6 tile-blob kernels; other shapes keep them. Needs bwd_fp4_backend 'aiter_fly' or no bwd_fp4 gate,
+    # and neither wgrad_a6w4 nor the MXFP4 weight format.
+    fwd_a6w6_fly: bool = False
+    # Which kernels run the A6W6 GEMMs: "aiter" (the tuned asm table) or "flydsl" (Turbo's FlyDSL
+    # MXFP6 GEMM compiled at runtime on the same MXFP6 blobs, one tile per WG; bit-identical to AITER, bias included).
+    # Process-wide in Turbo (set_a6w6_backend); shapes the FlyDSL kernel does not take stay on AITER.
+    a6w6_backend: str = "aiter"
+    # Selective A4W4: the first / last N transformer blocks keep the A6W6
+    # backward while the bwd_fp4 gates are on. Forward hooks switch the three bwd_fp4 gates off
+    # around those blocks' forwards; every MXFP6 Function captures the flags at forward time
+    # (ctx.b4), so its backward follows the forward's choice. per_block compile only.
+    bwd_fp4_a6w6_first: int = 0
+    bwd_fp4_a6w6_last: int = 0
+
     def validate(self) -> None:
         """Reject nonsense values at config time rather than at first use."""
         for name in ("fused_mlp", "fused_qkv"):
@@ -132,6 +184,17 @@ def gates() -> Mxfp6Gates:
     return _GATES
 
 
+def _apply_a6w6_backend(name: str) -> None:
+    """Hand ``a6w6_backend`` to Primus-Turbo, whose GEMM entry points read it."""
+    try:
+        from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import set_a6w6_backend
+    except ImportError:
+        if name != "aiter":
+            raise RuntimeError(f"mxfp6_a6w6_backend={name!r} needs a Primus-Turbo with set_a6w6_backend")
+        return
+    set_a6w6_backend(name)
+
+
 def configure(config) -> Mxfp6Gates:
     """Populate the registry from a diffusion config.
 
@@ -148,6 +211,7 @@ def configure(config) -> Mxfp6Gates:
             setattr(resolved, f.name, getattr(config, key))
     resolved.validate()
     _GATES = resolved
+    _apply_a6w6_backend(resolved.a6w6_backend)
 
     # Log the RESOLVED gates, not the requested ones. The two can differ: the
     # trainer copies a fixed list of fields onto the model config, so a gate the
@@ -170,3 +234,42 @@ def reset(gate_set: Optional[Mxfp6Gates] = None) -> None:
     """Restore defaults, or install an explicit set. For tests."""
     global _GATES
     _GATES = gate_set if gate_set is not None else Mxfp6Gates()
+    _apply_a6w6_backend(_GATES.a6w6_backend)
+
+
+_A6W6_BWD_SAVED = []
+
+
+def _a6w6_bwd_pre(module, args, kwargs=None):
+    g = gates()
+    _A6W6_BWD_SAVED.append((g.bwd_fp4_dgrad, g.bwd_fp4_wgrad, g.bwd_fp4_sr))
+    g.bwd_fp4_dgrad = g.bwd_fp4_wgrad = g.bwd_fp4_sr = False
+
+
+def _a6w6_bwd_post(module, args, output):
+    g = gates()
+    g.bwd_fp4_dgrad, g.bwd_fp4_wgrad, g.bwd_fp4_sr = _A6W6_BWD_SAVED.pop()
+
+
+def install_a6w6_backward_blocks(layers, compile_strategy) -> list:
+    """Hook the first ``bwd_fp4_a6w6_first`` and last ``bwd_fp4_a6w6_last`` of ``layers`` so
+    they run the A6W6 backward under the A4W4 gates. Returns the hooked indices.
+
+    The hooks sit in ``Module.__call__``, outside a per-block compiled ``forward``; Dynamo
+    guards on the gate values, so the hooked blocks compile their own variant. Under a
+    strategy that compiles across blocks the hooks would be traced, so that is rejected.
+    """
+    g = gates()
+    first, last = g.bwd_fp4_a6w6_first, g.bwd_fp4_a6w6_last
+    if not (first or last) or not (g.bwd_fp4_dgrad or g.bwd_fp4_wgrad):
+        return []
+    if compile_strategy not in (None, "per_block"):
+        raise ValueError(
+            f"mxfp6_bwd_fp4_a6w6_first/last need torch_compile strategy per_block, got {compile_strategy!r}"
+        )
+    n = len(layers)
+    idx = [i for i in range(n) if i < first or i >= n - last]
+    for i in idx:
+        layers[i].register_forward_pre_hook(_a6w6_bwd_pre)
+        layers[i].register_forward_hook(_a6w6_bwd_post)
+    return idx

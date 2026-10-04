@@ -78,6 +78,11 @@ class BaseDiffusionConfig(TransformerConfig):
         mxfp6_norm_rope_pin: Pin the norm/RoPE autotune configs (default: False)
         mxfp6_rope_slice_legacy: Pre-fusion RoPE slice order; changes numerics (default: False)
         mxfp6_wgrad_a6w4: Pack the wgrad column operand as MXFP4; needs A6W4 (default: False)
+        mxfp6_bwd_fp4_dgrad: dgrad GEMMs as A4W4 (MXFP4 both operands, f4gemm) (default: False)
+        mxfp6_bwd_fp4_wgrad: wgrad GEMMs as A4W4 (MXFP4 both operands, f4gemm) (default: False)
+        mxfp6_bwd_fp4_sr: stochastic rounding for the A4W4 gradient operand (default: False)
+        mxfp6_bwd_fp4_a6w6_first / _last: keep the A6W6 backward in the first / last N blocks
+            while the A4W4 backward gates are on (default: 0)
         sensitive_layers_enabled: Enable sensitive layer configuration (default: False)
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
         sensitive_layers_end: Number of sensitive layers at end (default: 0)
@@ -214,6 +219,19 @@ class BaseDiffusionConfig(TransformerConfig):
     # possible. A recipe should not set this.
     mxfp6_rope_slice_legacy: bool = False
     mxfp6_wgrad_a6w4: bool = False
+    # A4W4 backward GEMMs (MXFP4 both operands); see Mxfp6Gates.bwd_fp4_*.
+    mxfp6_bwd_fp4_dgrad: bool = False
+    mxfp6_bwd_fp4_wgrad: bool = False
+    mxfp6_bwd_fp4_sr: bool = False
+    mxfp6_bwd_fp4_grouped_mlp: bool = False
+    mxfp6_bwd_fp4_backend: str = "aiter"
+    mxfp6_fwd_fp4_single_linear2: bool = False
+    mxfp6_fwd_fp4_single_fc1: bool = False
+    mxfp6_fwd_fp4_joint_mlp: bool = False
+    mxfp6_fwd_a6w6_fly: bool = False
+    mxfp6_a6w6_backend: str = "aiter"
+    mxfp6_bwd_fp4_a6w6_first: int = 0
+    mxfp6_bwd_fp4_a6w6_last: int = 0
 
     # Sensitive layer configuration (clean naming, maps to Megatron internals)
     sensitive_layers_enabled: bool = False
@@ -333,6 +351,61 @@ class BaseDiffusionConfig(TransformerConfig):
                 "mxfp6_wgrad_a6w4=True requires mxfp6_weight_format='mxfp4' (A6W4), got "
                 f"'{self.mxfp6_weight_format}'. It narrows the wgrad column operand on top "
                 "of A6W4's weight; with an MXFP6 weight there is nothing for it to pair with."
+            )
+
+        # A4W4 backward replaces the backward GEMMs outright; the A6W4 paths would pack the
+        # same operands a third way, so the two families are exclusive.
+        if (self.mxfp6_bwd_fp4_dgrad or self.mxfp6_bwd_fp4_wgrad) and (
+            self.mxfp6_weight_format == "mxfp4" or self.mxfp6_wgrad_a6w4
+        ):
+            raise ValueError(
+                "mxfp6_bwd_fp4_dgrad / mxfp6_bwd_fp4_wgrad (A4W4 backward) exclude A6W4 "
+                "(mxfp6_weight_format='mxfp4', mxfp6_wgrad_a6w4)."
+            )
+        if (
+            self.mxfp6_bwd_fp4_dgrad or self.mxfp6_bwd_fp4_wgrad
+        ) and self.mxfp6_backward_precision != "mxfp6":
+            raise ValueError("A4W4 backward needs mxfp6_backward_precision='mxfp6'.")
+        if self.mxfp6_bwd_fp4_backend not in ("aiter", "flydsl", "flydsl_packed", "aiter_fly"):
+            raise ValueError(
+                "mxfp6_bwd_fp4_backend must be 'aiter', 'flydsl', 'flydsl_packed' or 'aiter_fly', "
+                f"got {self.mxfp6_bwd_fp4_backend!r}"
+            )
+        if self.mxfp6_bwd_fp4_backend != "aiter" and not (
+            self.mxfp6_bwd_fp4_dgrad and self.mxfp6_bwd_fp4_wgrad
+        ):
+            raise ValueError("a non-aiter mxfp6_bwd_fp4_backend needs both mxfp6_bwd_fp4_dgrad and _wgrad.")
+        if (
+            self.mxfp6_fwd_fp4_single_linear2 or self.mxfp6_fwd_fp4_single_fc1 or self.mxfp6_fwd_fp4_joint_mlp
+        ) and not (
+            self.mxfp6_bwd_fp4_dgrad
+            and self.mxfp6_bwd_fp4_wgrad
+            and self.mxfp6_bwd_fp4_backend in ("flydsl", "flydsl_packed", "aiter_fly")
+        ):
+            raise ValueError(
+                "mxfp6_fwd_fp4_single_linear2 / _single_fc1 / _joint_mlp need mxfp6_bwd_fp4_dgrad, _wgrad and "
+                "mxfp6_bwd_fp4_backend 'flydsl', "
+                "'flydsl_packed' or 'aiter_fly'."
+            )
+        if self.mxfp6_a6w6_backend not in ("aiter", "flydsl"):
+            raise ValueError(
+                f"mxfp6_a6w6_backend must be 'aiter' or 'flydsl', got {self.mxfp6_a6w6_backend!r}"
+            )
+        if self.mxfp6_fwd_a6w6_fly and (
+            self.mxfp6_wgrad_a6w4
+            or self.mxfp6_weight_format == "mxfp4"
+            or (
+                (self.mxfp6_bwd_fp4_dgrad or self.mxfp6_bwd_fp4_wgrad)
+                and self.mxfp6_bwd_fp4_backend != "aiter_fly"
+            )
+        ):
+            raise ValueError(
+                "mxfp6_fwd_a6w6_fly needs mxfp6_bwd_fp4_backend 'aiter_fly' (or no mxfp6_bwd_fp4 gate), "
+                "and neither mxfp6_wgrad_a6w4 nor mxfp6_weight_format='mxfp4'."
+            )
+        if self.mxfp6_bwd_fp4_sr and not (self.mxfp6_bwd_fp4_dgrad or self.mxfp6_bwd_fp4_wgrad):
+            raise ValueError(
+                "mxfp6_bwd_fp4_sr rounds the A4W4 gradient; it needs mxfp6_bwd_fp4_dgrad or _wgrad."
             )
 
         # Publish the fusion gates before anything builds a model. The modules

@@ -179,6 +179,11 @@ class MMDiTLayer(TransformerLayer):
             self.context_mlp = build_module(submodules.mlp, config=cp_override_config)
         else:
             self.context_mlp = None
+        # The joint stream MLPs, as opposed to the single blocks' (whose tail functions bypass MLP.forward): gates that
+        # target only one block type key on this (e.g. mxfp6_fwd_fp4_joint_mlp).
+        for _mlp in (self.mlp, self.context_mlp):
+            if _mlp is not None:
+                _mlp._mxfp6_joint = True
 
     def forward(
         self,
