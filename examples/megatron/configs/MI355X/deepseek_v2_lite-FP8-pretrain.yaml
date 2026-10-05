@@ -4,7 +4,7 @@ exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_lite-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 env:
-  NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
+  PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE: "0"
 
 modules:
   pre_trainer:
