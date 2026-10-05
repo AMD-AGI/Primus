@@ -1120,6 +1120,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             q_cache is not None
             and not self.offload
             and qkv_format == "sbhd"
+            and self.softmax_scale in (None, 0.125)
             and self.config.context_parallel_size == 1
             and self.attn is primus_turbo_torch.ops.flash_attn_func
         ):
