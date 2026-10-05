@@ -109,6 +109,5 @@ modules:
       moe_router_fusion: true
       moe_shared_expert_overlap: false
       overlap_moe_expert_parallel_comm: true
-      use_turbo_fused_act_with_probs: true
       use_turbo_norm_te_linear: true
       use_turbo_rms_norm: true
