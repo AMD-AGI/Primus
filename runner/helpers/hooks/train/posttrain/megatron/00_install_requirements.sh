@@ -99,9 +99,11 @@ mkdir -p "${PIP_CACHE_DIR}"
 # Minimal bridge conversion set for AutoBridge.import_ckpt(). `nvidia-modelopt`
 # is a hard dependency because Megatron-Bridge imports it at module import time
 # from its GPT provider / checkpoint-save modules.
-pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0"
+# datasets 5.1+ requires Hugging Face Hub 1.x/2.x, while Transformers 4.x
+# requires Hub <1. Resolve the compatible pair together to avoid upgrading
+# datasets and then breaking its imports when Transformers downgrades Hub.
+pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0,<5.1" "transformers==4.57.6"
 pip install --cache-dir="${PIP_CACHE_DIR}" "onnx==1.20.0rc1"
-pip install --cache-dir="${PIP_CACHE_DIR}" "transformers==4.57.6"
 pip install --cache-dir="${PIP_CACHE_DIR}" -U "safetensors>=0.4.0"
 pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia-modelopt
 
