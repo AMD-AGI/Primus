@@ -159,10 +159,12 @@ modules:
       # GEMM kernels: Primus-Turbo's FlyDSL GEMMs compiled at runtime (prefill FLYDSL_RUNTIME_CACHE_DIR with
       # `python -m primus_turbo.flydsl.precompile` to skip the compile at startup).
       mxfp6_a6w6_backend: flydsl
-      # MXFP4 (A4W4) backward GEMMs, dgrad and wgrad, with stochastic rounding on the gradient operand.
+      # MXFP4 (A4W4) backward GEMMs, dgrad and wgrad, with stochastic rounding on both operands: the gradient and the
+      # activations' / weights' MXFP4 backward copies (so the backward GEMMs are unbiased).
       mxfp6_bwd_fp4_dgrad: true
       mxfp6_bwd_fp4_wgrad: true
       mxfp6_bwd_fp4_sr: true
+      mxfp6_fp4_sr_actw: true
       mxfp6_bwd_fp4_backend: flydsl_packed
 
       flat_grad_clip: true
