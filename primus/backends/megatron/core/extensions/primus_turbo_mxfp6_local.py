@@ -2951,6 +2951,11 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
     kernel, so Inductor fuses them exactly as before (the lesson of scale_add's note).
     ``h`` is saved for the gate's gradient, as autograd saved it for the same product.
 
+    With ``gate_mul_pack_bias`` fc2's bias gradient is instead the column sums of the pack,
+    which is streaming ``gate * dy`` anyway: Inductor fuses the separate reduction with
+    nothing, so it was a second full read of ``dy`` for a vector. Not bit-identical: the
+    sums run per 64-row tile over the bf16-rounded product.
+
     Forward's arithmetic is the caller's expression verbatim, so Inductor fuses it into the
     residual add as it did scale_add.
     """
@@ -2995,23 +3000,36 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
         mlp_extra = (w1, w2) if fuse_wgrad_accum else ()
         proj_extra = (wp,) if fuse_wgrad_accum else ()
         ctx.n_mlp_saved = 2 + len(mlp_blobs) + len(mlp_extra)
-        ctx.save_for_backward(y1, b1, *mlp_blobs, *mlp_extra, *proj_blobs, *proj_extra, h, gate)
+        # Read at forward time, like ctx.b4, so the backward follows the forward's choice.
+        ctx.b2_from_pack = gates().gate_mul_pack_bias
+        b2_saved = (b2,) if ctx.b2_from_pack else ()
+        ctx.save_for_backward(
+            y1, b1, *mlp_blobs, *mlp_extra, *proj_blobs, *proj_extra, h, gate, *b2_saved
+        )
         ctx.mark_non_differentiable(h, *mlp_blobs, *proj_blobs)
 
     @staticmethod
     def backward(ctx, dy, *_):
         b4 = ctx.b4
-        *saved, h, gate = ctx.saved_tensors
+        saved = ctx.saved_tensors
+        b2 = None
+        if ctx.b2_from_pack:
+            b2, saved = saved[-1], saved[:-1]
+        *saved, h, gate = saved
         mlp_saved, proj_saved = tuple(saved[: ctx.n_mlp_saved]), tuple(saved[ctx.n_mlp_saved :])
 
         if not dy.is_contiguous():
             dy = dy.contiguous()
         g2 = dy.reshape(-1, ctx.h)
         # The pack of gate * dy, with the product formed in the packer.
-        *g_packed, _ = _pack_grad_gate_mul(g2, gate, False, b4)
+        b2_from_pack = ctx.b2_from_pack and ctx.needs_input_grad[6]
+        *g_packed, b2_partial = _pack_grad_gate_mul(g2, gate, b2_from_pack, b4)
         g_packed = tuple(g_packed)
         # What autograd derived from `gate * h` and `mlp + b2 + ...`, as the same ops.
-        grad_b2 = (dy * gate).sum((0, 1)) if ctx.needs_input_grad[6] else None
+        if b2_from_pack:
+            grad_b2 = _reduce_grad_into_main_grad(b2, b2_partial, ctx.out_dtype, ctx.fuse_wgrad_accum)
+        else:
+            grad_b2 = (dy * gate).sum((0, 1)) if ctx.needs_input_grad[6] else None
         grad_gate = (dy * h).sum(0) if ctx.needs_input_grad[7] else None
 
         # The backwards take the unpacked gradient for its shape only; the pack is supplied.
@@ -3069,6 +3087,8 @@ def mlp_proj_gated(mlp, proj, x, o, gate):
         claimed = [mlp.linear_fc1.weight, mlp.linear_fc2.weight, proj.weight]
         if gates().fused_small_grads and mlp.linear_fc1.bias is not None:
             claimed.append(mlp.linear_fc1.bias)
+        if gates().fused_small_grads and gates().gate_mul_pack_bias:
+            claimed.append(mlp.linear_fc2.bias)  # the backward writes it from the pack's column sums
         _claim_main_grad(*claimed)
     out = MXFP6GatedMLPProjFunction.apply(
         x,

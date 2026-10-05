@@ -70,6 +70,7 @@ class BaseDiffusionConfig(TransformerConfig):
         mxfp6_ln_bwd_fused_sum: Fold the LN-modulate backward's gradient sum into its kernel (default: False)
         mxfp6_joint_proj: Joint block's two out-projections as one Function sharing dO (default: False)
         mxfp6_gate_mul_pack: Single block's shared pack multiplies dy by the gate while packing (default: False)
+        mxfp6_gate_mul_pack_bias: ...and takes fc2's bias gradient from that pack's column sums (default: False)
         mxfp6_ln_bwd_ns16: LN-modulate backward over 16 sequence slices instead of 8 (default: False)
         mxfp6_adaln_wgrad_main_grad: AdaLN modulation wgrad written straight into main_grad (default: False)
         mxfp6_fused_qk_rope: Fuse QK-norm and RoPE into one kernel (default: False)
@@ -213,6 +214,7 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_ln_bwd_fused_sum: bool = False
     mxfp6_joint_proj: bool = False
     mxfp6_gate_mul_pack: bool = False
+    mxfp6_gate_mul_pack_bias: bool = False
     mxfp6_ln_bwd_ns16: bool = False
     mxfp6_adaln_wgrad_main_grad: bool = False
     mxfp6_fused_qk_rope: bool = False

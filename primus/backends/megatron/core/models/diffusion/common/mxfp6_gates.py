@@ -82,6 +82,9 @@ class Mxfp6Gates:
     # shared Function, whose backward packs dy with Turbo's GateMul prologue, so gate * dy
     # is never materialised. Bit-identical.
     gate_mul_pack: bool = False
+    # With gate_mul_pack: fc2's bias gradient from the GateMul pack's column sums instead of a
+    # separate reduction of gate * dy. Not bit-identical (summation order, bf16 product).
+    gate_mul_pack_bias: bool = False
     # LN-modulate backward split over 16 sequence slices instead of 8 (twice the programs).
     # dx and dshift bit-identical; dscale's fp32 partial sums regroup.
     ln_bwd_ns16: bool = False
