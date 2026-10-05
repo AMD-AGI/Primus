@@ -184,6 +184,7 @@ class MMDiTLayer(TransformerLayer):
         for _mlp in (self.mlp, self.context_mlp):
             if _mlp is not None:
                 _mlp._mxfp6_joint = True
+        self.mlp._mxfp6_joint_img = True  # the image stream's (mxfp6_fwd_bf16_joint_img_fc1)
 
     def forward(
         self,

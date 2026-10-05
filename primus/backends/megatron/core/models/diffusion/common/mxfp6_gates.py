@@ -35,6 +35,8 @@ from typing import Optional
 # configuration the fusion cannot reproduce exactly cannot quietly become a
 # slower unfused run with the same logged throughput claim.
 TRISTATE = ("auto", "on", "off")
+FP4_SCALE_ROUNDING = ("rceil", "m0", "m1", "m2")
+FP4_HADAMARD = ("h32", "h16", "none")
 
 
 @dataclass
@@ -163,12 +165,69 @@ class Mxfp6Gates:
     bwd_fp4_a6w6_first: int = 0
     bwd_fp4_a6w6_last: int = 0
 
+    # --- MXFP4 quantization options (the FP4 packs of the A4W4 GEMMs; MXFP6 packs are unaffected) ---
+    # E8M0 scale rule per operand class: "rceil" = ceil_pow2(amax / 6), never saturates (the default);
+    # "m0" / "m1" / "m2" = Turbo's scale_rounding_mode 0 / 1 / 2, whose scale steps up only at amax mantissa
+    # >= 1.75 / 1.5 / 1.8125, so a group's largest values may saturate to 6 in exchange for a finer grid.
+    # _grad: gradients. _actw_hp: the FP4 backward copies of activations / weights of layers whose forward is
+    # MXFP6. _actw_fp4fwd: activations / weights of the MXFP4-forward layers (fwd_fp4_*), both directions.
+    fp4_scale_rounding_grad: str = "rceil"
+    fp4_scale_rounding_actw_hp: str = "rceil"
+    fp4_scale_rounding_actw_fp4fwd: str = "rceil"
+    # Hadamard of the FP4 operands per GEMM, along its contraction axis: "h32" (the default, as MXFP6), "h16"
+    # (two 16-point transforms per 32-group) or "none". Per GEMM, not per operand: both operands of a GEMM must
+    # be rotated alike, so each setting drives both. _fwd covers only the MXFP4-forward layers.
+    fp4_hadamard_fwd: str = "h32"
+    fp4_hadamard_dgrad: str = "h32"
+    fp4_hadamard_wgrad: str = "h32"
+    # 2-D 32x32 block scaling of the weights' FP4 copies: one E8M0 scale per tile, shared by the row and column
+    # directions, so one FP4 weight serves forward and dgrad. Needs fp4_hadamard_dgrad "none" (and _fwd "none"
+    # with an MXFP4-forward layer): a rotation along one axis would break the shared grid.
+    fp4_weight_2d: bool = False
+    # Stochastic rounding of the activations' and weights' MXFP4 backward copies (the wgrad / dgrad B operands), on
+    # top of bwd_fp4_sr's gradient operand: with both operands of a backward GEMM rounded stochastically and
+    # independently the product is unbiased; with one round-to-nearest it carries that operand's rounding bias. The
+    # forward rows of MXFP4-forward layers stay round-to-nearest. Needs bwd_fp4_backend flydsl_packed or aiter_fly.
+    fp4_sr_actw: bool = False
+    # The joint blocks' image-stream fc1 forward as a bf16 GEMM (its most sensitive GEMM); its backward stays as the
+    # gates above set it, on FP4 / MXFP6 column packs of the bf16 operands. Disables the grouped joint MLP (the two
+    # streams' fc1 would differ in precision).
+    fwd_bf16_joint_img_fc1: bool = False
+
     def validate(self) -> None:
         """Reject nonsense values at config time rather than at first use."""
         for name in ("fused_mlp", "fused_qkv"):
             value = getattr(self, name)
             if value not in TRISTATE:
                 raise ValueError(f"mxfp6_{name} must be one of {list(TRISTATE)}, got {value!r}.")
+        for name in ("grad", "actw_hp", "actw_fp4fwd"):
+            value = getattr(self, f"fp4_scale_rounding_{name}")
+            if value not in FP4_SCALE_ROUNDING:
+                raise ValueError(
+                    f"mxfp6_fp4_scale_rounding_{name} must be one of {list(FP4_SCALE_ROUNDING)}, got {value!r}."
+                )
+        for name in ("fwd", "dgrad", "wgrad"):
+            value = getattr(self, f"fp4_hadamard_{name}")
+            if value not in FP4_HADAMARD:
+                raise ValueError(
+                    f"mxfp6_fp4_hadamard_{name} must be one of {list(FP4_HADAMARD)}, got {value!r}."
+                )
+        if self.fp4_sr_actw and self.bwd_fp4_backend not in ("flydsl_packed", "aiter_fly"):
+            raise ValueError("mxfp6_fp4_sr_actw needs mxfp6_bwd_fp4_backend 'flydsl_packed' or 'aiter_fly'.")
+        if self.fp4_weight_2d:
+            fwd_fp4 = self.fwd_fp4_single_linear2 or self.fwd_fp4_single_fc1 or self.fwd_fp4_joint_mlp
+            if self.fp4_hadamard_dgrad != "none" or (fwd_fp4 and self.fp4_hadamard_fwd != "none"):
+                raise ValueError(
+                    "mxfp6_fp4_weight_2d shares one scale grid between a weight's two directions; it needs "
+                    "mxfp6_fp4_hadamard_dgrad 'none' (and mxfp6_fp4_hadamard_fwd 'none' with an MXFP4-forward layer)."
+                )
+
+    def fp4_options_set(self) -> bool:
+        """Whether any MXFP4 quantization option differs from the default."""
+        d = Mxfp6Gates()
+        return any(
+            getattr(self, f.name) != getattr(d, f.name) for f in fields(self) if f.name.startswith("fp4_")
+        )
 
 
 _GATES = Mxfp6Gates()

@@ -83,6 +83,13 @@ class BaseDiffusionConfig(TransformerConfig):
         mxfp6_bwd_fp4_sr: stochastic rounding for the A4W4 gradient operand (default: False)
         mxfp6_bwd_fp4_a6w6_first / _last: keep the A6W6 backward in the first / last N blocks
             while the A4W4 backward gates are on (default: 0)
+        mxfp6_fp4_scale_rounding_{grad,actw_hp,actw_fp4fwd}: E8M0 scale rule of the MXFP4 packs,
+            'rceil' / 'm0' / 'm1' / 'm2' (default: 'rceil')
+        mxfp6_fp4_hadamard_{fwd,dgrad,wgrad}: Hadamard of each A4W4 GEMM's operands, 'h32' / 'h16' / 'none'
+            (default: 'h32')
+        mxfp6_fp4_weight_2d: 32x32 block scaling of the weights' MXFP4 copies (default: False)
+        mxfp6_fp4_sr_actw: stochastic rounding of the activations' / weights' MXFP4 backward copies (default: False)
+        mxfp6_fwd_bf16_joint_img_fc1: joint blocks' image-stream fc1 forward in bf16 (default: False)
         sensitive_layers_enabled: Enable sensitive layer configuration (default: False)
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
         sensitive_layers_end: Number of sensitive layers at end (default: 0)
@@ -229,6 +236,16 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_a6w6_backend: str = "aiter"
     mxfp6_bwd_fp4_a6w6_first: int = 0
     mxfp6_bwd_fp4_a6w6_last: int = 0
+    # MXFP4 quantization options of the A4W4 packs; see Mxfp6Gates.fp4_*.
+    mxfp6_fp4_scale_rounding_grad: str = "rceil"
+    mxfp6_fp4_scale_rounding_actw_hp: str = "rceil"
+    mxfp6_fp4_scale_rounding_actw_fp4fwd: str = "rceil"
+    mxfp6_fp4_hadamard_fwd: str = "h32"
+    mxfp6_fp4_hadamard_dgrad: str = "h32"
+    mxfp6_fp4_hadamard_wgrad: str = "h32"
+    mxfp6_fp4_weight_2d: bool = False
+    mxfp6_fp4_sr_actw: bool = False
+    mxfp6_fwd_bf16_joint_img_fc1: bool = False
 
     # Sensitive layer configuration (clean naming, maps to Megatron internals)
     sensitive_layers_enabled: bool = False
@@ -399,6 +416,30 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError(
                 "mxfp6_fwd_a6w6_fly needs mxfp6_bwd_fp4_backend 'aiter_fly' (or no mxfp6_bwd_fp4 gate), "
                 "and neither mxfp6_wgrad_a6w4 nor mxfp6_weight_format='mxfp4'."
+            )
+        fp4_opts = {
+            k: getattr(self, k)
+            for k in (
+                "mxfp6_fp4_scale_rounding_grad",
+                "mxfp6_fp4_scale_rounding_actw_hp",
+                "mxfp6_fp4_scale_rounding_actw_fp4fwd",
+                "mxfp6_fp4_hadamard_fwd",
+                "mxfp6_fp4_hadamard_dgrad",
+                "mxfp6_fp4_hadamard_wgrad",
+                "mxfp6_fp4_weight_2d",
+                "mxfp6_fp4_sr_actw",
+            )
+        }
+        if fp4_opts != {k: getattr(type(self), k) for k in fp4_opts}:
+            if not (self.mxfp6_bwd_fp4_dgrad or self.mxfp6_bwd_fp4_wgrad):
+                raise ValueError(
+                    "the mxfp6_fp4_* options shape the A4W4 packs; they need mxfp6_bwd_fp4_dgrad or _wgrad."
+                )
+        if self.mxfp6_fwd_bf16_joint_img_fc1 and (
+            self.mxfp6_wgrad_a6w4 or self.mxfp6_weight_format == "mxfp4"
+        ):
+            raise ValueError(
+                "mxfp6_fwd_bf16_joint_img_fc1 packs its backward operands as MXFP6 or A4W4, not A6W4."
             )
         if self.mxfp6_bwd_fp4_sr and not (self.mxfp6_bwd_fp4_dgrad or self.mxfp6_bwd_fp4_wgrad):
             raise ValueError(

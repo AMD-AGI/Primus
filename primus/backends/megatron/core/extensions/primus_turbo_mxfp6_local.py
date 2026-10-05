@@ -152,7 +152,39 @@ def _a4(flag, b4):
     return (1 + b4[3]) if flag else 0
 
 
+def _fp4(fmt, row=None, col=None, tile2d=False, actw=False):
+    """``fmt`` with the MXFP4 options (``Mxfp6Gates.fp4_*``) of its FP4 directions: ``row`` / ``col`` =
+    (scale rule, Hadamard), ``tile2d`` = 2-D 32x32 block scaling (weights). FP6 directions take none. With every
+    option at its default ``fmt`` is returned as is, so the packs are byte-identical to a build without them.
+    """
+    if not fmt or not gates().fp4_options_set():
+        return fmt
+    r4, c4 = _mx.mx_fp4_dirs(fmt)
+    if not (r4 or c4):
+        return fmt
+    rr, rh = row if r4 and row else ("rceil", "h32")
+    cr, ch = col if c4 and col else ("rceil", "h32")
+    # actw: an activation / weight pack, whose column direction is a backward copy (SR under fp4_sr_actw; packed
+    # FlyDSL formats only -- a row-only blob pack has no column direction).
+    col_sr = actw and c4 and gates().fp4_sr_actw and bool(_mx.mx_fmt_base(fmt) & _mx.MX_FMT_FLY)
+    return _mx.fp4_options(fmt, rr, cr, rh, ch, tile2d=tile2d and gates().fp4_weight_2d, col_sr=col_sr)
+
+
+def _grad_fp4(fmt):
+    """A gradient's options: its rows feed dgrad, its columns wgrad."""
+    g = gates()
+    return _fp4(
+        fmt,
+        row=(g.fp4_scale_rounding_grad, g.fp4_hadamard_dgrad),
+        col=(g.fp4_scale_rounding_grad, g.fp4_hadamard_wgrad),
+    )
+
+
 def _grad_fmt(b4):
+    return _grad_fp4(_grad_fmt_base(b4))
+
+
+def _grad_fmt_base(b4):
     if b4[3] in (2, 3) and b4[0] and b4[1]:  # packed scales: a gradient is always an A operand
         return _mx.fly_fmt(row=_mx.FLY_A, col=_mx.FLY_A, sr=b4[2])
     if b4[3] and b4[0] and b4[1]:  # FlyDSL operands: plain layout both ways
@@ -192,10 +224,20 @@ def _fwd_fp4_fmt(role, m, n, k, dual=True):
     (n, k, m), weight columns dgrad's B (m, k, n), as `_act_fmt` / `_weight_fmt` lay them out for the backward.
     """
     if gates().bwd_fp4_backend not in ("aiter_fly", "flydsl_packed"):
-        return _mx.MX_FMT_FLY_GRAD
-    if role == "act":
-        return _mx.fly_fmt(row=_mx.FLY_A, col=_mx.fly_b_params(n, k, m) if dual else None)
-    return _mx.fly_fmt(row=_mx.fly_b_params(m, n, k), col=_mx.fly_b_params(m, k, n) if dual else None)
+        fmt = _mx.MX_FMT_FLY_GRAD
+    elif role == "act":
+        fmt = _mx.fly_fmt(row=_mx.FLY_A, col=_mx.fly_b_params(n, k, m) if dual else None)
+    else:
+        fmt = _mx.fly_fmt(row=_mx.fly_b_params(m, n, k), col=_mx.fly_b_params(m, k, n) if dual else None)
+    return _fwd_fp4_opts(fmt, role)
+
+
+def _fwd_fp4_opts(fmt, role):
+    """An MXFP4-forward layer's options: rows feed the forward; columns wgrad (activation) or dgrad (weight)."""
+    g = gates()
+    r = g.fp4_scale_rounding_actw_fp4fwd
+    col_had = g.fp4_hadamard_wgrad if role == "act" else g.fp4_hadamard_dgrad
+    return _fp4(fmt, row=(r, g.fp4_hadamard_fwd), col=(r, col_had), tile2d=role == "weight", actw=True)
 
 
 def _fwd_fp4_blob(m, n, k):
@@ -222,7 +264,7 @@ def _fwd_fp4_a4w4(m, n, k):
 def _fwd_fp4_rows(x, role, m, n, k):
     """Row-only forward-FP4 pack (no backward behind it) of the activation or weight of that GEMM."""
     if _fwd_fp4_blob(m, n, k):
-        return _mx.quantize_mx(x, 1, _mx.MX_FMT_BLOB_GRAD)
+        return _mx.quantize_mx(x, 1, _fwd_fp4_opts(_mx.MX_FMT_BLOB_GRAD, role))
     return _mx.quantize_mx(x, 1, _fwd_fp4_fmt(role, m, n, k, dual=False))
 
 
@@ -262,7 +304,8 @@ def _act_fmt(x_shape=None, n_out=None):
     if not gates().bwd_fp4_wgrad:
         return 0
     mnk = None if n_out is None else (int(n_out), int(x_shape[-1]), int(x_shape[0]))
-    return _fp4_col_fmt(mnk)
+    g = gates()
+    return _fp4(_fp4_col_fmt(mnk), col=(g.fp4_scale_rounding_actw_hp, g.fp4_hadamard_wgrad), actw=True)
 
 
 def _weight_fmt(w_shape=None, m=None):
@@ -271,7 +314,10 @@ def _weight_fmt(w_shape=None, m=None):
     if not gates().bwd_fp4_dgrad:
         return 0
     mnk = None if m is None else (int(m), int(w_shape[1]), int(w_shape[0]))
-    return _fp4_col_fmt(mnk)
+    g = gates()
+    return _fp4(
+        _fp4_col_fmt(mnk), col=(g.fp4_scale_rounding_actw_hp, g.fp4_hadamard_dgrad), tile2d=True, actw=True
+    )
 
 
 def _pack_grad_dual(g, b4):
@@ -1160,8 +1206,11 @@ class MXFP6MLPFunction(torch.autograd.Function):
         weight_is_fp4,
         fwd_fp4=False,
         fwd_fp4_fc1=False,
+        bf16_fc1=False,
     ):
         # fwd_fp4: fc2 only (the single block's linear2 half); see MXFP6LinearFunction.
+        # bf16_fc1: fc1's forward as a bf16 GEMM (mxfp6_fwd_bf16_joint_img_fc1); its backward is unchanged, on column
+        # packs of x and w1 taken here from the bf16 operands.
         # fwd_fp4_fc1: fc1's forward in MXFP4 too. Its packs write the same column layouts the A4W4 backward
         # reads (wgrad's / dgrad's B), so fc1's backward is unchanged. Only passed by direct .forward callers.
         out_dtype = hidden_states.dtype
@@ -1175,9 +1224,11 @@ class MXFP6MLPFunction(torch.autograd.Function):
         # Same reasoning as MXFP6LinearFunction: the column blobs are backward's operands,
         # so a no-grad forward should not pay for them. See the note there on why
         # grad_enabled has to be sampled by the caller rather than read here.
-        fly6_1 = not fwd_fp4_fc1 and _fly6(m, f, k, None, weight_is_fp4)
+        fly6_1 = not fwd_fp4_fc1 and not bf16_fc1 and _fly6(m, f, k, None, weight_is_fp4)
         fly6_2 = not fwd_fp4 and _fly6(m, h, f, None, weight_is_fp4)
-        if fwd_fp4_fc1 and grad_enabled:
+        if bf16_fc1:
+            x_col, x_col_s, w1_col, w1_col_s = _bf16_fc1_cols(x, w1) if grad_enabled else (None,) * 4
+        elif fwd_fp4_fc1 and grad_enabled:
             # fc1's forward GEMM: [m, k] x [f, k]^T.
             x_row, x_row_s, x_col, x_col_s = _mx.quantize_mx_dual(x, _fwd_fp4_fmt("act", m, f, k))
             w1_row, w1_row_s, w1_col, w1_col_s = _mx.quantize_mx_dual(w1, _fwd_fp4_fmt("weight", m, f, k))
@@ -1202,20 +1253,24 @@ class MXFP6MLPFunction(torch.autograd.Function):
 
         # Pre-activation. Saved for backward, where the epilogue is recomputed from it
         # rather than its output being stashed -- the same bytes are held either way.
-        y1 = gemm_fp6_impl(
-            x_row,
-            x_row_s,
-            w1_row,
-            w1_row_s,
-            m,
-            f,
-            k,
-            out_dtype,
-            _GRAN_VALUE,
-            None,
-            weight_is_fp4,
-            a4w4=_fwd_fp4_a4w4(m, f, k) if fwd_fp4_fc1 else 0,
-            a6w6_fly=fly6_1,
+        y1 = (
+            torch.mm(x, w1.t())
+            if bf16_fc1
+            else gemm_fp6_impl(
+                x_row,
+                x_row_s,
+                w1_row,
+                w1_row_s,
+                m,
+                f,
+                k,
+                out_dtype,
+                _GRAN_VALUE,
+                None,
+                weight_is_fp4,
+                a4w4=_fwd_fp4_a4w4(m, f, k) if fwd_fp4_fc1 else 0,
+                a6w6_fly=fly6_1,
+            )
         )
 
         # gelu(y1 + b1), packed in both directions without ever being written out.
@@ -1230,7 +1285,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
                 blob
             ):  # no fly code object (e.g. an eval batch): rows in the blob, recomputed by the same prologue
                 a_row, a_row_s, _, _, _ = _mx.quantize_mx_fused_dual(
-                    y1, None, b1, MXFP6_PROLOGUE_BIAS_GELU, False, _mx.MX_FMT_BLOB_GRAD
+                    y1, None, b1, MXFP6_PROLOGUE_BIAS_GELU, False, _fwd_fp4_opts(_mx.MX_FMT_BLOB_GRAD, "act")
                 )
                 if not grad_enabled:
                     a_col = a_col_s = None
@@ -1284,9 +1339,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
     @staticmethod
     def setup_context(ctx, inputs, output):
         ctx.b4 = _b4()  # the backward uses the formats the forward chose
-        hidden_states, w1, b1, w2, fuse_wgrad_accum, grad_enabled, weight_is_fp4, _fwd_fp4, _fwd_fp4_fc1 = (
-            inputs
-        )
+        hidden_states, w1, b1, w2, fuse_wgrad_accum, grad_enabled, weight_is_fp4 = inputs[:7]
 
         # setup_context still runs under no_grad, where the column blobs are None.
         if not grad_enabled:
@@ -1329,7 +1382,36 @@ class MXFP6MLPFunction(torch.autograd.Function):
             b4=b4,
         )
         # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4.
-        return grad_x, grad_w1, grad_b1, grad_w2, None, None, None, None, None  # + fwd_fp4, fwd_fp4_fc1
+        return (
+            grad_x,
+            grad_w1,
+            grad_b1,
+            grad_w2,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )  # + fwd_fp4, _fc1, bf16_fc1
+
+
+def _bf16_fc1_cols(x, w1):
+    """The backward's column packs of a bf16-forward fc1 [m, k] x [f, k]^T: x's for wgrad, w1's for dgrad. FP4 under
+    the A4W4 gates, with the FP4-forward layers' scale rule (the layer has no MXFP6 forward copy to follow); MXFP6
+    otherwise, exactly as `_pack_act_dual` / `_pack_weight_dual` lay them out."""
+    (m, k), f = x.shape, w1.shape[0]
+    g = gates()
+    r = g.fp4_scale_rounding_actw_fp4fwd
+    x_fmt = _fp4(_fp4_col_fmt((f, k, m)), col=(r, g.fp4_hadamard_wgrad), actw=True) if g.bwd_fp4_wgrad else 0
+    w_fmt = (
+        _fp4(_fp4_col_fmt((m, k, f)), col=(r, g.fp4_hadamard_dgrad), tile2d=True, actw=True)
+        if g.bwd_fp4_dgrad
+        else 0
+    )
+    x_col, x_col_s = _mx.quantize_mx(x, 0, x_fmt)
+    w1_col, w1_col_s = _mx.quantize_mx(w1, 0, w_fmt)
+    return x_col, x_col_s, w1_col, w1_col_s
 
 
 def _grouped_mlp_unavailable_reason():
@@ -2763,6 +2845,7 @@ class MXFP6FusedMLP(MLP):
             _claim_main_grad(*claimed)
 
         joint_fp4 = bool(getattr(self, "_mxfp6_joint", False)) and gates().fwd_fp4_joint_mlp
+        bf16_fc1 = bool(getattr(self, "_mxfp6_joint_img", False)) and gates().fwd_bf16_joint_img_fc1
         output = MXFP6MLPFunction.apply(
             hidden_states,
             self.linear_fc1.weight,
@@ -2772,7 +2855,8 @@ class MXFP6FusedMLP(MLP):
             torch.is_grad_enabled(),
             _resolve_weight_is_fp4(self.config),
             joint_fp4,  # fwd_fp4 (fc2), for the joint stream MLPs under mxfp6_fwd_fp4_joint_mlp
-            joint_fp4,  # fwd_fp4_fc1
+            joint_fp4 and not bf16_fc1,  # fwd_fp4_fc1
+            bf16_fc1,
         )[0]
 
         # fc2 is built with skip_bias_add=True, so MLP's contract is to hand its bias back
@@ -2789,6 +2873,8 @@ def grouped_mlp_pair(mlp_a, mlp_b, x_a, x_b):
     of the configuration, so the fallback is per block and cannot half-apply.
     """
     if not gates().grouped_mlp or _grouped_mlp_unavailable_reason() is not None:
+        return None
+    if gates().fwd_bf16_joint_img_fc1:  # the image stream's fc1 runs bf16, the text stream's does not
         return None
     if mlp_a is None or mlp_b is None:
         return None
