@@ -360,7 +360,7 @@ srun -t 00:45:00 -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
 
 ```bash
 export USING_AINIC=1
-export NCCL_IB_GID_INDEX=1   # AINIC uses index 1 (default in base_env.sh is 3)
+export NCCL_IB_GID_INDEX=1   # AINIC uses index 1 (base_env.sh defaults to 1 only when USING_AINIC=1)
 export NCCL_PXN_DISABLE=0
 
 srun -t 00:45:00 -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
@@ -624,7 +624,7 @@ Variables consumed downstream by `primus-cli direct` / `base_env.sh` (set them v
 | -------------------- | ------------------------ | ------------------------------------------------- |
 | `NCCL_SOCKET_IFNAME` | auto-detected            | Force a specific Ethernet interface for bootstrap |
 | `NCCL_IB_HCA`        | auto-detected            | Force specific RDMA HCAs                          |
-| `NCCL_IB_GID_INDEX`  | `3`                      | `1` on AINIC clusters                             |
+| `NCCL_IB_GID_INDEX`  | `3` (`1` with `USING_AINIC=1`) | `1` on AINIC clusters                       |
 | `NCCL_CROSS_NIC`     | `0`                      | `1` for multi-rail IB fabrics                     |
 | `NCCL_PXN_DISABLE`   | `1`                      | `0` to enable PXN multi-hop NIC sharing           |
 | `USING_AINIC`        | unset                    | `1` on Pensando Pollara clusters                  |

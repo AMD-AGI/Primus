@@ -392,6 +392,43 @@ test_mi350x_env_file() {
 }
 
 # ============================================================================
+# Test 12: NCCL_IB_GID_INDEX default follows USING_AINIC
+# ============================================================================
+gid_index_with() {
+    bash -c "
+        export MASTER_ADDR=localhost MASTER_PORT=1234 NNODES=1 NODE_RANK=0 GPUS_PER_NODE=8
+        export PRIMUS_SKIP_VALIDATION=1
+        export PRIMUS_GPU_MODEL=MI350X
+        unset NCCL_IB_GID_INDEX USING_AINIC
+        $1
+        source '$PROJECT_ROOT/runner/helpers/envs/primus-env.sh' >/dev/null
+        echo \"GID=\$NCCL_IB_GID_INDEX\"
+    " 2>/dev/null | grep -o 'GID=.*'
+}
+
+test_gid_index_default() {
+    echo "Test 12: NCCL_IB_GID_INDEX default follows USING_AINIC"
+
+    # The AI NICs have GID indices 0 and 1 only; 03_enable_ainic.sh's own default of 1
+    # cannot apply once base_env.sh has set the variable, so base_env.sh must choose 1.
+    if [[ "$(gid_index_with 'export USING_AINIC=1')" == "GID=1" ]]; then
+        assert_pass "USING_AINIC=1 defaults NCCL_IB_GID_INDEX to 1"
+    else
+        assert_fail "USING_AINIC=1 defaults NCCL_IB_GID_INDEX to 1"
+    fi
+    if [[ "$(gid_index_with '')" == "GID=3" ]]; then
+        assert_pass "Without AINIC NCCL_IB_GID_INDEX defaults to 3"
+    else
+        assert_fail "Without AINIC NCCL_IB_GID_INDEX defaults to 3"
+    fi
+    if [[ "$(gid_index_with 'export USING_AINIC=1 NCCL_IB_GID_INDEX=3')" == "GID=3" ]]; then
+        assert_pass "An explicit NCCL_IB_GID_INDEX is kept with USING_AINIC=1"
+    else
+        assert_fail "An explicit NCCL_IB_GID_INDEX is kept with USING_AINIC=1"
+    fi
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 echo "=========================================="
@@ -410,6 +447,7 @@ test_loading_order
 test_missing_base_env
 test_env_defaults
 test_mi350x_env_file
+test_gid_index_default
 
 echo ""
 echo "=========================================="

@@ -187,8 +187,14 @@ export NCCL_DEBUG=${NCCL_DEBUG:-}
 # Disable NCCL internal checks to reduce overhead
 export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
 
-# Set InfiniBand GID index for NCCL communication
-export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
+# Set InfiniBand GID index for NCCL communication. AMD AI NICs (USING_AINIC=1) have GID
+# indices 0 and 1 only, RoCE v2 on 1. The default is chosen here rather than left to
+# 03_enable_ainic.sh: hooks run after this file, so its ${:-1} would always find 3 already set.
+if [[ "${USING_AINIC:-0}" == "1" ]]; then
+    export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-1}
+else
+    export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
+fi
 
 # Disable cross NIC communication for NCCL
 export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}

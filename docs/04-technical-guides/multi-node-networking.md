@@ -48,10 +48,14 @@ If `NCCL_IB_HCA` is **unset**, `base_env.sh` runs `runner/helpers/envs/get_nccl_
 Default in `base_env.sh`:
 
 ```bash
-export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
+if [[ "${USING_AINIC:-0}" == "1" ]]; then
+    export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-1}
+else
+    export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
+fi
 ```
 
-AINIC-oriented configs often override `NCCL_IB_GID_INDEX` to `1` (see `runner/use_ainic.yaml` and `03_enable_ainic.sh`).
+AMD AI NICs have GID indices 0 and 1 only, so with `USING_AINIC=1` the default is `1`. An explicitly exported `NCCL_IB_GID_INDEX` always wins.
 
 ---
 

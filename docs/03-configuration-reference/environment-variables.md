@@ -86,7 +86,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `NCCL_SOCKET_IFNAME` | derived from `IP_INTERFACE` | `base_env.sh` | `primus/tools/preflight/network/*.py`, GPU topology helpers | Socket NIC for host networking. |
 | `GLOO_SOCKET_IFNAME` | same as NCCL if unset | `base_env.sh` | Preflight | Gloo TCP backend interface. |
 | `NCCL_IB_HCA` | auto via `runner/helpers/envs/get_nccl_ib_hca.sh` if empty | `base_env.sh`, container passthrough | Preflight, multi-node tuning | InfiniBand HCAs to use. |
-| `NCCL_IB_GID_INDEX` | `3` | `base_env.sh` | RCCL | GID index for IB/RoCE; many sites use `1` for RoCE v2 (override as needed). |
+| `NCCL_IB_GID_INDEX` | `1` with `USING_AINIC=1`, else `3` | `base_env.sh` | RCCL | GID index for IB/RoCE; many sites use `1` for RoCE v2 (override as needed). |
 | `NCCL_IB_TC` | (unset) | User | RCCL | InfiniBand traffic class. |
 | `NCCL_IB_FIFO_TC` | (unset) | User | RCCL | InfiniBand FIFO traffic class. |
 | `NCCL_IB_ROCE_VERSION_NUM` | (unset) | User | RCCL | RoCE version selection. |
