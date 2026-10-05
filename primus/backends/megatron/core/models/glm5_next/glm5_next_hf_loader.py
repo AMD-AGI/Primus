@@ -99,7 +99,13 @@ def _layer_maps(
 ) -> List[Tuple[str, object]]:
     """``[(local name suffix, HF spec)]``; spec is a key or a list of keys to concatenate on dim 0."""
     out: List[Tuple[str, object]] = []
+    param_names = {pname for pname, _ in layer.named_parameters()}
     for pname, _ in layer.named_parameters():
+        # Primus-Turbo grouped GEMM packs all local experts into `weights` and exposes
+        # per-expert `weight{i}` views of it; the views are loaded below.
+        m = re.fullmatch(r"(mlp\.experts\.linear_fc[12])\.weights", pname)
+        if m is not None and f"{m.group(1)}.weight0" in param_names:
+            continue
         hf: Optional[object] = None
         if pname.startswith("hc_"):
             hf = hf_layer + pname

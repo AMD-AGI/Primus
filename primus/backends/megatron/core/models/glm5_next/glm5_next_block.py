@@ -136,7 +136,13 @@ class Glm5NextLayer(KeepFp32ParamsMixin, TransformerLayer):
             mlp_kwargs["pg_collection"] = pg_collection
         elif isinstance(submodules.mlp, ModuleSpec) and submodules.mlp.module is MLP:
             mlp_kwargs["tp_group"] = pg_collection.tp
-        self.mlp = build_module(submodules.mlp, config=config, **mlp_kwargs)
+        if isinstance(submodules.mlp, ModuleSpec) or isinstance(submodules.mlp, type):
+            self.mlp = build_module(submodules.mlp, config=config, **mlp_kwargs)
+        else:
+            # Megatron >= 0.19 returns MLP builders (functools.partial) instead of ModuleSpecs.
+            self.mlp = submodules.mlp(
+                config=config, pg_collection=pg_collection, layer_number=self.layer_number
+            )
         if hasattr(self.mlp, "set_layer_number"):
             self.mlp.set_layer_number(self.layer_number)
         self.is_moe_layer = isinstance(self.mlp, MoELayer)
@@ -237,13 +243,19 @@ class Glm5NextTransformerBlock(TransformerBlock):
 
         self.offload_context, self.group_prefetch_offload_commit_async = nullcontext(), None
         if _get_cpu_offload_context is not None:
-            self.offload_context, self.group_prefetch_offload_commit_async = _get_cpu_offload_context(
+            offload_args = [
                 config.cpu_offloading,
                 config.cpu_offloading_num_layers,
                 config.num_layers,
                 config.cpu_offloading_activations,
                 config.cpu_offloading_weights,
                 config.cpu_offloading_double_buffering,
+            ]
+            # Megatron >= 0.19 added a required retain_pinned_cpu_buffers argument.
+            if hasattr(config, "cpu_offloading_retain_pinned_cpu_buffers"):
+                offload_args.append(config.cpu_offloading_retain_pinned_cpu_buffers)
+            self.offload_context, self.group_prefetch_offload_commit_async = _get_cpu_offload_context(
+                *offload_args
             )
             config._cpu_offloading_context = self.offload_context if config.cpu_offloading else None
 
