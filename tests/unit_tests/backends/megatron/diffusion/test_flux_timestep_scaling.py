@@ -2,9 +2,10 @@
 # Licensed under the Apache License, Version 2.0.
 
 """
-Flux scales the timestep by 1000 as the MLPerf reference does: t at the bf16 compute dtype's
-resolution (the reference samples it in that dtype), multiplied in fp32. A bf16 multiply rounds
-t * 1000 a second time, e.g. the evaluation timestep 3/8 becomes 376 instead of 375.
+Flux scales the timestep by 1000 as the MLPerf reference (torchtitan) and NeMo do: t is cast to the
+compute dtype and multiplied by 1000 in that dtype, so in bf16 the product is rounded again. The
+reference's evaluation timesteps k/8 therefore enter the embedding as 0, 125, 250, 376, 500, 624,
+752, 876.
 """
 
 from types import SimpleNamespace
@@ -38,15 +39,20 @@ def _embedded_timesteps(t):
     return seen["t"]
 
 
-def test_eval_timesteps_scale_exactly():
+def _reference_scaled(t, dtype=torch.bfloat16):
+    """The reference: ``timesteps.to(model_dtype)``, then ``t = time_factor * t`` in that dtype."""
+    return 1000.0 * t.to(dtype)
+
+
+def test_eval_timesteps_match_reference():
     t = torch.tensor([k / 8 for k in range(8)], dtype=torch.float32)
     out = _embedded_timesteps(t)
-    assert out.dtype == torch.float32
-    assert out.tolist() == [125.0 * k for k in range(8)]
+    assert out.dtype == torch.bfloat16
+    assert out.float().tolist() == [0.0, 125.0, 250.0, 376.0, 500.0, 624.0, 752.0, 876.0]
+    assert torch.equal(out, _reference_scaled(t))
 
 
-def test_training_timesteps_keep_bf16_resolution_only():
+def test_training_timesteps_match_reference():
     t = torch.rand(4096)
     out = _embedded_timesteps(t)
-    expected = t.to(torch.bfloat16).float() * 1000.0
-    assert torch.equal(out, expected)
+    assert torch.equal(out, _reference_scaled(t))

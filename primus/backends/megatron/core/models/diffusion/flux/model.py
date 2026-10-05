@@ -564,10 +564,10 @@ class Flux(DiffusionModule):
 
         txt_seq_len = encoder_hidden_states.shape[0]
 
-        # As the reference: t at the compute dtype's resolution (the reference samples it in its
-        # bf16 compute dtype), then scaled by 1000 in fp32. Scaling in bf16 would round t * 1000
-        # a second time (0.375 -> 376).
-        timesteps = timesteps.to(hidden_states.dtype).float() * 1000.0
+        # As the MLPerf reference and NeMo: t in the compute dtype, scaled by 1000 in that dtype. In
+        # bf16 the product is rounded again (e.g. 3/8 -> 376), and the reference trains and
+        # evaluates on those rounded values, so this must not be done in fp32.
+        timesteps = timesteps.to(hidden_states.dtype) * 1000.0
         vec_emb = self.timestep_embedding(timesteps)
 
         if guidance is not None:
