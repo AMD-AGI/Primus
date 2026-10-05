@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import os
 
+import torch
+
 from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
@@ -244,14 +246,23 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
                 "[Patch:megatron.turbo.qk_rmsnorm_rope] Replayed DDP parameter-gather "
                 f"hooks for fused dispatch: q={len(q_pre_hooks)} k={len(k_pre_hooks)}"
             )
-        query, key, value = fused_qkv_rmsnorm_rope(
+        emit_q_cache = (
+            os.getenv("PRIMUS_TURBO_ATTN_Q_PREP", "standalone") == "producer"
+            and torch.is_grad_enabled()
+        )
+        producer_kwargs = {"return_scaled_q": True} if emit_q_cache else {}
+        outputs = fused_qkv_rmsnorm_rope(
             mixed_qkv,
             self.q_layernorm.weight,
             self.k_layernorm.weight,
             freqs,
             split_sizes,
             self.q_layernorm.eps,
+            **producer_kwargs,
         )
+        query, key, value = outputs[:3]
+        if emit_q_cache:
+            query._primus_attention_scaled_q = outputs[3]
         # The outer attention forward still visits its normal RoPE callsite.
         if self.config.test_mode:
             self.run_realtime_tests()

@@ -40,6 +40,8 @@ from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_pg_size
 from megatron.training.global_vars import get_args
 
+from primus.core.utils.module_utils import log_rank_0
+
 # QuantizedTensor / QuantizedTensorPair are only used in the FP8/FP4 weight
 # quantization paths (added in PR #735).  Older primus_turbo 0.2.0 builds shipped
 # in the rocm/primus v26.2 / v26.3 containers do not export them yet.  Keep the
@@ -1112,6 +1114,20 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_k", key)
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_v", value)
 
+        q_cache = getattr(query, "_primus_attention_scaled_q", None)
+        cache_kwargs = {}
+        if (
+            q_cache is not None
+            and not self.offload
+            and qkv_format == "sbhd"
+            and self.config.context_parallel_size == 1
+            and self.attn is primus_turbo_torch.ops.flash_attn_func
+        ):
+            cache_kwargs["q_for_backward"] = q_cache.permute(1, 0, 2, 3)
+            if not getattr(self, "_primus_prepared_q_seen", False):
+                self._primus_prepared_q_seen = True
+                log_rank_0(f"[Attention Q cache] producer cache used by layer {self.layer_number}")
+
         # NOTE: query, key, value maybe a view of the original tensor, call contiguous to copy a new tensor
         # and let torch allocator can release the original tensor.
         # This must also run under no-grad evaluation: the unified FlyDSL
@@ -1144,6 +1160,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             return_attn_probs=False,
             sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
             **self.attn_kwargs,
+            **cache_kwargs,
         )
 
         if qkv_format == "sbhd":
