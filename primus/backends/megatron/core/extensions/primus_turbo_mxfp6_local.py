@@ -91,7 +91,7 @@ def _pack_act_dual(x, wgrad_is_fp4, n_out=None, ts=False):
     (see `_ts_fwd`): the row half in the A6W6 fly layout, the column half unchanged.
     """
     if ts:
-        return _mx.quantize_mx_dual(x, _mx.with_fly6_row(_act_fmt(x.shape, n_out), False))
+        return _mx.quantize_mx_dual(x, _mx.with_ts6_row(_act_fmt(x.shape, n_out), False))
     if gates().bwd_fp4_wgrad:
         return _mx.quantize_mx_dual(x, _act_fmt(x.shape, n_out))
     if wgrad_is_fp4:
@@ -109,7 +109,7 @@ def _pack_weight_dual(weight, weight_is_fp4, m=None, ts=False):
     if ts == "a6w4":  # the A6W4 tilescale GEMM's B: K128-blocked MXFP4 rows, the backward column unchanged
         return _mx.quantize_mx_dual(weight, _mx.with_ts4_row(_weight_fmt(weight.shape, m)))
     if ts:
-        return _mx.quantize_mx_dual(weight, _mx.with_fly6_row(_weight_fmt(weight.shape, m), True))
+        return _mx.quantize_mx_dual(weight, _mx.with_ts6_row(_weight_fmt(weight.shape, m), True))
     if gates().bwd_fp4_dgrad:
         return _mx.quantize_mx_dual(weight, _weight_fmt(weight.shape, m))
     if weight_is_fp4:
@@ -122,7 +122,7 @@ def _pack_weight_row(weight, weight_is_fp4, ts=False):
     if ts == "a6w4":
         return _mx.quantize_mx(weight, 1, _mx.with_ts4_row(0))
     if ts:
-        return _mx.quantize_mx(weight, 1, _mx.fly6_fmt(True))
+        return _mx.quantize_mx(weight, 1, _mx.ts6_fmt(True))
     if weight_is_fp4:
         return _quantize_mxfp4_gemm_row(weight, 1)
     return _quantize_mxfp6_row(weight, 1)
@@ -170,7 +170,7 @@ def _fp4(fmt, row=None, col=None, tile2d=False, actw=False):
     cr, ch = col if c4 and col else ("rceil", "h32")
     # actw: an activation / weight pack, whose column direction is a backward copy (SR under fp4_sr_actw; packed
     # FlyDSL formats only -- a row-only blob pack has no column direction).
-    col_sr = actw and c4 and gates().fp4_sr_actw and bool(_mx.mx_fmt_base(fmt) & _mx.MX_FMT_FLY)
+    col_sr = actw and c4 and gates().fp4_sr_actw and bool(_mx.mx_fmt_base(fmt) & _mx.MX_FMT_TS)
     return _mx.fp4_options(fmt, rr, cr, rh, ch, tile2d=tile2d and gates().fp4_weight_2d, col_sr=col_sr)
 
 
@@ -190,7 +190,7 @@ def _grad_fmt(b4):
 
 def _grad_fmt_base(b4):
     if b4[3] in (2, 3) and b4[0] and b4[1]:  # packed scales: a gradient is always an A operand
-        return _mx.fly_fmt(row=_mx.FLY_A, col=_mx.FLY_A, sr=b4[2])
+        return _mx.ts_fmt(row=_mx.TS_A, col=_mx.TS_A, sr=b4[2])
     if b4[3] and b4[0] and b4[1]:  # FlyDSL operands: plain layout both ways
         return _mx.MX_FMT_FLY_GRAD_SR if b4[2] else _mx.MX_FMT_FLY_GRAD
     fmt = {
@@ -214,7 +214,7 @@ def _fp4_col_fmt(gemm_mnk=None):
     direction is the B operand of the GEMM ``gemm_mnk`` = (M, N, K), and its scale layout depends on that GEMM."""
     if _tilescale():
         assert gemm_mnk is not None, "the tilescale layout needs the consuming GEMM's shape at the pack site"
-        return _mx.fly_fmt(col=_mx.fly_b_params(*gemm_mnk))
+        return _mx.ts_fmt(col=_mx.ts_b_params(*gemm_mnk))
     return _mx.MX_FMT_A4W4_ACT
 
 
@@ -229,9 +229,9 @@ def _fwd_fp4_fmt(role, m, n, k, dual=True):
     (n, k, m), weight columns dgrad's B (m, k, n), as `_act_fmt` / `_weight_fmt` lay them out for the backward.
     """
     if role == "act":
-        fmt = _mx.fly_fmt(row=_mx.FLY_A, col=_mx.fly_b_params(n, k, m) if dual else None)
+        fmt = _mx.ts_fmt(row=_mx.TS_A, col=_mx.ts_b_params(n, k, m) if dual else None)
     else:
-        fmt = _mx.fly_fmt(row=_mx.fly_b_params(m, n, k), col=_mx.fly_b_params(m, k, n) if dual else None)
+        fmt = _mx.ts_fmt(row=_mx.ts_b_params(m, n, k), col=_mx.ts_b_params(m, k, n) if dual else None)
     return _fwd_fp4_opts(fmt, role)
 
 
@@ -250,7 +250,7 @@ def _fwd_fp4_blob(m, n, k):
     return (
         _tilescale()
         and _A4W4_TS is not None
-        and not tilescale_table_has(_A4W4_TS[_mx.fly_b_params(m, n, k)[2]], int(m), int(n), int(k), False)
+        and not tilescale_table_has(_A4W4_TS[_mx.ts_b_params(m, n, k)[2]], int(m), int(n), int(k), False)
     )
 
 
@@ -268,7 +268,7 @@ def _fwd_fp4_rows(x, role, m, n, k):
 
 # A6W6 fly: forward A6W6 GEMMs on aiter `gemm_a6w6_fly_asm`, assembly ports of the FlyDSL
 # MXFP6 persistent GEMM (one AOT code object per (M, N, K, bias)). Its operands' row directions pack in the K128-blocked
-# fly layout (`fly6_fmt`); column directions are unchanged. Per shape: where aiter has no code object the GEMM keeps
+# fly layout (`ts6_fmt`); column directions are unchanged. Per shape: where aiter has no code object the GEMM keeps
 # the A6W6 tile-blob kernels.
 # The shape set is read once here, at import: `_ts_fwd` runs inside compiled blocks, where reading aiter's manifest would
 # break the graph -- and a graph break changes how Inductor fuses the surrounding ops, i.e. the numerics.
@@ -291,7 +291,7 @@ except ImportError:
 def _ts_fwd(m, n, k, bias, weight_is_fp4):
     """Whether the forward GEMM [m, k] x [n, k]^T (+ bias) runs on the tilescale layout: "a6w4" (fwd_a6w4, aiter
     has the A6W4 kernel), True (A6W6, aiter has the kernel), else False (the blob kernels). Decided before packing, since the operands' row layout
-    depends on it; the activation's rows are the same for both (fly6_fmt), the weight's differ."""
+    depends on it; the activation's rows are the same for both (ts6_fmt), the weight's differ."""
     if weight_is_fp4:
         return False
     if not _tilescale():
@@ -341,14 +341,14 @@ def _pack_grad_fused_dual(x, aux, bias, mode, want_col_sum, b4):
 def _pack_act_row(x, ts=False):
     """An activation's row direction only (eval): MXFP6 tile blob, or the A6W6 fly layout (``ts``)."""
     if ts:
-        return _mx.quantize_mx(x, 1, _mx.fly6_fmt(False))
+        return _mx.quantize_mx(x, 1, _mx.ts6_fmt(False))
     return _quantize_mxfp6_row(x, 1)
 
 
 def _pack_act_fused_dual(x, aux, bias, mode, want_col_sum, n_out=None, ts=False):
     """A forward activation formed in the packer (fc1's bias + GELU): wgrad's B operand."""
     if ts:
-        fmt = _mx.with_fly6_row(_act_fmt(x.shape, n_out) if n_out is not None else 0, False)
+        fmt = _mx.with_ts6_row(_act_fmt(x.shape, n_out) if n_out is not None else 0, False)
         return _mx.quantize_mx_fused_dual(x, aux, bias, mode, want_col_sum, fmt)
     if gates().bwd_fp4_wgrad:
         return _mx.quantize_mx_fused_dual(x, aux, bias, mode, want_col_sum, _act_fmt(x.shape, n_out))
@@ -689,7 +689,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
             bias,
             weight_is_fp4,
             a4w4=_fwd_fp4_a4w4(m, n, k) if fwd_fp4 else 0,
-            a6w6_fly=ts is True,
+            a6w6_ts=ts is True,
             a6w4_ts=ts == "a6w4",
         )
         output = output.reshape(*orig_shape[:-1], output.shape[-1])
@@ -1276,7 +1276,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
                 None,
                 weight_is_fp4,
                 a4w4=_fwd_fp4_a4w4(m, f, k) if fwd_fp4_fc1 else 0,
-                a6w6_fly=ts_1 is True,
+                a6w6_ts=ts_1 is True,
                 a6w4_ts=ts_1 == "a6w4",
             )
         )
@@ -1338,7 +1338,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
             None,
             weight_is_fp4,
             a4w4=_fwd_fp4_a4w4(m, h, f) if fwd_fp4 else 0,
-            a6w6_fly=ts_2 is True,
+            a6w6_ts=ts_2 is True,
             a6w4_ts=ts_2 == "a6w4",
         )
         output = output.reshape(*orig_shape[:-1], h)
@@ -1950,7 +1950,7 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
             _GRAN_VALUE,
             b_qkv,
             weight_is_fp4,
-            a6w6_fly=ts is True,
+            a6w6_ts=ts is True,
             a6w4_ts=ts == "a6w4",
         )
 
@@ -2240,7 +2240,7 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
             _GRAN_VALUE,
             weight_is_fp4,
             b_a,
-            a6w6_fly=ts[0] is True,
+            a6w6_ts=ts[0] is True,
             a6w4_ts=ts[0] == "a6w4",
         )
         gemm_fp6_out_impl(
@@ -2255,7 +2255,7 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
             _GRAN_VALUE,
             weight_is_fp4,
             b_b,
-            a6w6_fly=ts[1] is True,
+            a6w6_ts=ts[1] is True,
             a6w4_ts=ts[1] == "a6w4",
         )
 
