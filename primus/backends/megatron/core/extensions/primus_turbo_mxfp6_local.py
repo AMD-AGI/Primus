@@ -249,8 +249,8 @@ def _fwd_fp4_blob(m, n, k):
     sum. The shape set is read at import, like `_A6W6_TS` (no file reads inside compiled blocks)."""
     return (
         _tilescale()
-        and _A4W4_FLY_SHAPES is not None
-        and (int(m), int(n), int(k)) not in _A4W4_FLY_SHAPES
+        and _A4W4_TS is not None
+        and not tilescale_table_has(_A4W4_TS[_mx.fly_b_params(m, n, k)[2]], int(m), int(n), int(k), False)
     )
 
 
@@ -280,12 +280,12 @@ try:
     _A6W4_TS = tilescale_table(6, 4, 1, 0)
 except ImportError:  # an older Primus-Turbo; the tilescale layout fails in _ts_fwd
     _A6W6_TS = _A6W4_TS = tilescale_table_has = None
-try:  # forward-FP4 per-shape fallback (`_fwd_fp4_blob`); an older Primus-Turbo keeps a4w4=4 everywhere
-    from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import a4w4_fly_shapes as _a4w4_fly_shapes
+try:  # forward-FP4 per-shape fallback (`_fwd_fp4_blob`): aiter's A4W4 tilescale coverage per B interleave
+    from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import tilescale_table as _ts_table
 
-    _A4W4_FLY_SHAPES = _a4w4_fly_shapes()
+    _A4W4_TS = {ilv: _ts_table(4, 4, 0, ilv) for ilv in (0, 4)}
 except ImportError:
-    _A4W4_FLY_SHAPES = None
+    _A4W4_TS = None
 
 
 def _ts_fwd(m, n, k, bias, weight_is_fp4):
