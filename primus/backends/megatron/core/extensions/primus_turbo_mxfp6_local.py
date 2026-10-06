@@ -246,7 +246,7 @@ def _fwd_fp4_opts(fmt, role):
 def _fwd_fp4_blob(m, n, k):
     """Whether aiter has no tilescale kernel for the forward-FP4 GEMM [m, k] x [n, k]^T (e.g. an eval batch): its
     operands' rows then pack in the A4W4 tile blob and it runs aiter's tile-blob kernel (a4w4=5), the same exact fp32
-    sum. The shape set is read at import, like `_A6W6_FLY_SHAPES` (no file reads inside compiled blocks)."""
+    sum. The shape set is read at import, like `_A6W6_TS` (no file reads inside compiled blocks)."""
     return (
         _tilescale()
         and _A4W4_FLY_SHAPES is not None
@@ -273,26 +273,19 @@ def _fwd_fp4_rows(x, role, m, n, k):
 # The shape set is read once here, at import: `_ts_fwd` runs inside compiled blocks, where reading aiter's manifest would
 # break the graph -- and a graph break changes how Inductor fuses the surrounding ops, i.e. the numerics.
 try:
-    from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import a6w6_fly_shapes as _a6w6_fly_shapes
+    from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import tilescale_table, tilescale_table_has
 
-    _A6W6_FLY_SHAPES = _a6w6_fly_shapes()
+    # (exact shapes, shape-generic K-loop classes) of aiter's A6W6 / A6W4 tilescale kernels, as plain data
+    _A6W6_TS = tilescale_table(6, 6)
+    _A6W4_TS = tilescale_table(6, 4, 1, 0)
 except ImportError:  # an older Primus-Turbo; the tilescale layout fails in _ts_fwd
-    _A6W6_FLY_SHAPES = None
+    _A6W6_TS = _A6W4_TS = tilescale_table_has = None
 try:  # forward-FP4 per-shape fallback (`_fwd_fp4_blob`); an older Primus-Turbo keeps a4w4=4 everywhere
     from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import a4w4_fly_shapes as _a4w4_fly_shapes
 
     _A4W4_FLY_SHAPES = _a4w4_fly_shapes()
 except ImportError:
     _A4W4_FLY_SHAPES = None
-
-
-# A6W4 tilescale shapes (aiter tsgemm manifest), read once at import: _ts_fwd runs inside compiled regions.
-try:
-    from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import _a6w4_ts_rows
-
-    _A6W4_TS_SHAPES = _a6w4_ts_rows()
-except ImportError:  # an older Primus-Turbo; mxfp6_fwd_a6w4 fails in _ts_fwd
-    _A6W4_TS_SHAPES = None
 
 
 def _ts_fwd(m, n, k, bias, weight_is_fp4):
@@ -303,14 +296,12 @@ def _ts_fwd(m, n, k, bias, weight_is_fp4):
         return False
     if not _tilescale():
         return False
-    if gates().fwd_a6w4:
-        if _A6W4_TS_SHAPES is None:
-            raise RuntimeError("mxfp6_fwd_a6w4 needs a Primus-Turbo with gemm_fp6_impl.a6w4_ts_available")
-        if (int(m), int(n), int(k), bias is not None) in _A6W4_TS_SHAPES:
-            return "a6w4"
-    if _A6W6_FLY_SHAPES is None:
-        raise RuntimeError("mxfp6_gemm_layout 'tilescale' needs a Primus-Turbo with gemm_fp6_impl.a6w6_fly_shapes")
-    return (int(m), int(n), int(k), bias is not None) in _A6W6_FLY_SHAPES
+    if tilescale_table_has is None:
+        raise RuntimeError("mxfp6_gemm_layout 'tilescale' needs a Primus-Turbo with gemm_fp6_impl.tilescale_table")
+    shape = (int(m), int(n), int(k), bias is not None)
+    if gates().fwd_a6w4 and tilescale_table_has(_A6W4_TS, *shape):
+        return "a6w4"
+    return tilescale_table_has(_A6W6_TS, *shape)
 
 
 def _act_fmt(x_shape=None, n_out=None):
