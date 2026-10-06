@@ -155,6 +155,12 @@ class Mxfp6Gates:
     # (M, N, K, bias). Columns (the backward's operands) are unchanged. GEMMs on the MXFP4 forward (fwd_fp4_*) keep
     # it. Changes forward numerics. Needs gemm_layout "tilescale", and neither wgrad_a6w4 nor the MXFP4 weight format.
     fwd_a6w4: bool = False
+    # Gather the MXFP6 linear weights as their tilescale packs instead of bf16 (distributed optimizer): each rank
+    # packs the rows it owns after the optimizer step and the packs are all-gathered; the forward / dgrad read them
+    # (the per-step weight packs leave the forward). Lays the DDP buckets out so every shard boundary inside a weight
+    # is on a 32-row edge. Needs gemm_layout "tilescale". Bit-identical forward; the column (dgrad) copy's SR seed
+    # becomes per (step, weight).
+    packed_param_gather: bool = False
     # Selective A4W4: the first / last N transformer blocks keep the A6W6
     # backward while the bwd_fp4 gates are on. Forward hooks switch the three bwd_fp4 gates off
     # around those blocks' forwards; every MXFP6 Function captures the flags at forward time

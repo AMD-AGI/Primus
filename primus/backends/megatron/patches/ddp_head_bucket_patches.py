@@ -151,14 +151,13 @@ def patch_ddp_head_bucket(ctx: PatchContext) -> None:
     def __init__(
         self, ddp_config, param_dtype, grad_dtype, params, data_parallel_group, bucket_size, *a, **kw
     ):
+        inner = __init__._inner  # Megatron's, or a layout patch installed later (packed_param_gather)
         if bucket_size is None or head <= 0:
-            return orig_init(
-                self, ddp_config, param_dtype, grad_dtype, params, data_parallel_group, bucket_size, *a, **kw
-            )
+            return inner(self, ddp_config, param_dtype, grad_dtype, params, data_parallel_group, bucket_size, *a, **kw)
         numels = [p.data.nelement() for p in params]
         decide, cuts = close_after(numels, head, ramp, int(bucket_size))
         stand_in = _HeadRampBucketSize(decide, len(params))
-        orig_init(self, ddp_config, param_dtype, grad_dtype, params, data_parallel_group, stand_in, *a, **kw)
+        inner(self, ddp_config, param_dtype, grad_dtype, params, data_parallel_group, stand_in, *a, **kw)
         assert stand_in.calls == len(params), (
             f"ddp_head_bucket: bucket_size consulted {stand_in.calls} times for {len(params)} params; "
             "Megatron's bucketing loop changed, update this patch"
@@ -171,6 +170,7 @@ def patch_ddp_head_bucket(ctx: PatchContext) -> None:
         )
 
     __init__._primus_ddp_head_bucket = True
+    __init__._inner = orig_init
     pgb._ParamAndGradBuffer.__init__ = __init__
     log_rank_0(f"[Patch:megatron.ddp.head_bucket] head bucket {head} elements, ramp {ramp}")
 

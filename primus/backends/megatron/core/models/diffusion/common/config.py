@@ -236,6 +236,7 @@ class BaseDiffusionConfig(TransformerConfig):
     # Operand layout of every MX GEMM, "blob" or "tilescale"; see Mxfp6Gates.gemm_layout.
     mxfp6_gemm_layout: str = "blob"
     mxfp6_fwd_a6w4: bool = False
+    mxfp6_packed_param_gather: bool = False
     mxfp6_bwd_fp4_a6w6_first: int = 0
     mxfp6_bwd_fp4_a6w6_last: int = 0
     # MXFP4 quantization options of the A4W4 packs; see Mxfp6Gates.fp4_*.
@@ -405,6 +406,8 @@ class BaseDiffusionConfig(TransformerConfig):
             )
         if self.mxfp6_fwd_a6w4 and not tilescale:
             raise ValueError("mxfp6_fwd_a6w4 needs mxfp6_gemm_layout 'tilescale'.")
+        if self.mxfp6_packed_param_gather and not tilescale:
+            raise ValueError("mxfp6_packed_param_gather needs mxfp6_gemm_layout 'tilescale'.")
         fp4_opts = {
             k: getattr(self, k)
             for k in (
