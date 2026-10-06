@@ -48,6 +48,7 @@ is a Triton ``Heuristics`` wrapper, and the ``CachedAutotuner`` that owns
 from __future__ import annotations
 
 import importlib
+import os
 from typing import Any
 
 import torch
@@ -121,6 +122,9 @@ def _should_narrow_kda_autotune(ctx: PatchContext) -> bool:
     but importing FLA into a run that has no other use for it is not.
     """
     if not _is_rocm():
+        return False
+    if os.environ.get("PRIMUS_FLA_KDA_SAFE_AUTOTUNE", "1").strip().lower() not in _TRUTHY:
+        log_rank_0(f"[Patch:{_PATCH_KEY}] disabled by PRIMUS_FLA_KDA_SAFE_AUTOTUNE.")
         return False
     return _uses_fla_kda(get_args(ctx)) is not None
 

@@ -23,7 +23,7 @@
 #
 # MXFP4 recipe:
 #   export EXP=/workspace/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml
-#   export MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR=mxfp4
+#   export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR=mxfp4
 #
 # Interactive (prompts for HF_TOKEN, image, NEXP, paths):
 #   INTERACTIVE=1 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
@@ -49,7 +49,9 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${CONT_NAME:=mlperf_gpt_oss_20b_pretrain_primus}"
 : "${CLEAR_CACHES:=0}"
 : "${CHECK_COMPLIANCE:=0}"
-: "${MLPERF_RULESET:=6.0.0}"
+: "${MLPERF_RULESET:=6.1.0}"
+: "${MLPERF_LOGGING_REF:=6.1.0-rc2}"
+: "${MLPERF_COMMON_REF:=7771aeabc8b91402e95cb7a33f447d9d9941361f}"
 : "${DATESTAMP:=$(date +'%y%m%d%H%M%S')}"
 : "${INTERACTIVE:=0}"
 : "${SUBMISSION_QUIET:=0}"
@@ -166,9 +168,14 @@ fi
 if [[ -n "${EXP:-}" ]]; then
     _extra_env+=("--env=EXP=${EXP}")
 fi
-if [[ -n "${MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR:-}" ]]; then
-    _extra_env+=("--env=MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR=${MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR}")
-fi
+for _precision_env in \
+    MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR \
+    MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN \
+    MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM; do
+    if [[ -n "${!_precision_env:-}" ]]; then
+        _extra_env+=("--env=${_precision_env}=${!_precision_env}")
+    fi
+done
 if [[ -n "${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING:-}" ]]; then
     _extra_env+=("--env=PRIMUS_TURBO_MXFP4_SCALE_ROUNDING=${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING}")
 fi
@@ -261,19 +268,17 @@ fi
 sleep 3
 docker exec "${_cont_name}" true
 
-# Editable Primus from the host mount (ML deps including mlperf-logging come from the image venv).
+# Editable Primus from the host mount, plus the exact MLPerf logging stack used by this ruleset.
 _setup_env=("${_base_exec_env[@]}")
 docker exec "${_setup_env[@]}" "${_cont_name}" bash -lc "
 set -e
 pip install -q -e '${_primus_mount}' --no-deps 2>/dev/null || true
-if ! python -c 'import primus_mllog' 2>/dev/null; then
-    echo '[INFO] primus_mllog not found; installing pinned mlperf-common package.'
-    pip install -q \
-        'git+https://github.com/AMD-AGI/mlperf-common.git@56d8ca70f60f866312add84adfea66f5447a4c86'
-else
-    echo '[INFO] primus_mllog is already installed; skipping installation.'
-fi
-python -c 'import primus_mllog'
+echo '[INFO] Installing pinned MLPerf Logging package.'
+pip install -q --upgrade --force-reinstall --no-deps \
+    'git+https://github.com/mlcommons/logging.git@${MLPERF_LOGGING_REF}'
+echo '[INFO] Installing pinned AMD MLPerf common package.'
+pip install -q --upgrade --force-reinstall --no-deps \
+    'git+https://github.com/AMD-AGI/mlperf-common.git@${MLPERF_COMMON_REF}'
 echo '[INFO] Container Primus editable install complete.'
 "
 
