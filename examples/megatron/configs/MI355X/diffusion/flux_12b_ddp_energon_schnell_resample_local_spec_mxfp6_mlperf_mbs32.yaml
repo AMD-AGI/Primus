@@ -336,6 +336,7 @@ modules:
       # Single block, with mxfp6_shared_grad_pack: the gate multiply is formed
       # in the gradient packer (Turbo GateMul prologue). Bit-identical.
       mxfp6_gate_mul_pack: true
+      mxfp6_gate_mul_pack_bias: true
       # LN-modulate backward split over 16 sequence slices instead of 8 (twice the
       # programs, so memory latency is hidden). dx and dshift bit-identical; dscale's
       # fp32 partial sums regroup (one bf16 ulp).
@@ -411,3 +412,4 @@ modules:
         # extra compile time. Off in the framework default because that cost is
         # not worth paying for a short run; a submission run amortises it.
         coordinate_descent_tuning: true
+        combo_kernels: true

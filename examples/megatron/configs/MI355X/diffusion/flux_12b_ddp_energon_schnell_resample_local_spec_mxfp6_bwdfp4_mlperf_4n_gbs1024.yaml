@@ -154,6 +154,7 @@ modules:
       mxfp6_ln_bwd_fused_sum: true
       mxfp6_joint_proj: true
       mxfp6_gate_mul_pack: true
+      mxfp6_gate_mul_pack_bias: true
       mxfp6_ln_bwd_ns16: true
       mxfp6_adaln_wgrad_main_grad: true
       # GEMM kernels: Primus-Turbo's FlyDSL GEMMs compiled at runtime (prefill FLYDSL_RUNTIME_CACHE_DIR with
@@ -212,3 +213,4 @@ modules:
         emulate_precision_casts: false
         fused_ln_modulate: true
         coordinate_descent_tuning: true
+        combo_kernels: true
