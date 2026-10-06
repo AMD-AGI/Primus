@@ -47,6 +47,8 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${CLEAR_CACHES:=0}"
 : "${CHECK_COMPLIANCE:=0}"
 : "${MLPERF_RULESET:=6.1.0}"
+: "${MLPERF_LOGGING_REF:=6.1.0-rc2}"
+: "${MLPERF_COMMON_REF:=7771aeabc8b91402e95cb7a33f447d9d9941361f}"
 : "${DATESTAMP:=$(date +'%y%m%d%H%M%S')}"
 : "${INTERACTIVE:=0}"
 : "${SUBMISSION_QUIET:=0}"
@@ -237,19 +239,17 @@ fi
 sleep 3
 docker exec "${_cont_name}" true
 
-# Editable Primus from the host mount (ML deps including mlperf-logging come from the image venv).
+# Editable Primus from the host mount, plus the exact MLPerf logging stack used by this ruleset.
 _setup_env=("${_base_exec_env[@]}")
 docker exec "${_setup_env[@]}" "${_cont_name}" bash -lc "
 set -e
 pip install -q -e '${_primus_mount}' --no-deps 2>/dev/null || true
-if ! python -c 'import primus_mllog' 2>/dev/null; then
-    echo '[INFO] primus_mllog not found; installing pinned mlperf-common package.'
-    pip install -q \
-        'git+https://github.com/AMD-AGI/mlperf-common.git@56d8ca70f60f866312add84adfea66f5447a4c86'
-else
-    echo '[INFO] primus_mllog is already installed; skipping installation.'
-fi
-python -c 'import primus_mllog'
+echo '[INFO] Installing pinned MLPerf Logging package.'
+pip install -q --upgrade --force-reinstall --no-deps \
+    'git+https://github.com/mlcommons/logging.git@${MLPERF_LOGGING_REF}'
+echo '[INFO] Installing pinned AMD MLPerf common package.'
+pip install -q --upgrade --force-reinstall --no-deps \
+    'git+https://github.com/AMD-AGI/mlperf-common.git@${MLPERF_COMMON_REF}'
 echo '[INFO] Container Primus editable install complete.'
 "
 
