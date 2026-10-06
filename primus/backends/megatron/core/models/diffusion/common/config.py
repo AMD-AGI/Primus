@@ -235,6 +235,7 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_fwd_fp4_single_fc1: bool = False
     mxfp6_fwd_fp4_joint_mlp: bool = False
     mxfp6_fwd_a6w6_fly: bool = False
+    mxfp6_fwd_a6w4_ts: bool = False
     mxfp6_a6w6_backend: str = "aiter"
     mxfp6_bwd_fp4_a6w6_first: int = 0
     mxfp6_bwd_fp4_a6w6_last: int = 0
@@ -418,6 +419,18 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError(
                 "mxfp6_fwd_a6w6_fly needs mxfp6_bwd_fp4_backend 'aiter_fly' (or no mxfp6_bwd_fp4 gate), "
                 "and neither mxfp6_wgrad_a6w4 nor mxfp6_weight_format='mxfp4'."
+            )
+        if self.mxfp6_fwd_a6w4_ts and (
+            self.mxfp6_wgrad_a6w4
+            or self.mxfp6_weight_format == "mxfp4"
+            or (
+                (self.mxfp6_bwd_fp4_dgrad or self.mxfp6_bwd_fp4_wgrad)
+                and self.mxfp6_bwd_fp4_backend not in ("flydsl_packed", "aiter_fly")
+            )
+        ):
+            raise ValueError(
+                "mxfp6_fwd_a6w4_ts needs mxfp6_bwd_fp4_backend 'flydsl_packed' or 'aiter_fly' (or no mxfp6_bwd_fp4 "
+                "gate), and neither mxfp6_wgrad_a6w4 nor mxfp6_weight_format='mxfp4'."
             )
         fp4_opts = {
             k: getattr(self, k)

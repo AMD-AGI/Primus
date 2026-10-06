@@ -1,0 +1,222 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 12B Schnell Training -- DDP + Local Spec + MXFP6, MXFP4 backward and single-block fc1 forward
+# Variant of ...mxfp6_mlperf_4n_gbs1024.yaml: identical except for the MXFP4 GEMMs listed under the gates.
+# MLPerf Training v6.1 submission recipe: 4 nodes x 8 MI355X, MBS=32, GBS=1024.
+#
+# Same model, gates and numerics as ...mxfp6_mlperf_mbs32.yaml (single node,
+# GBS=256); only the batch shape and the schedule differ. The schedule is the
+# reference convergence point for GBS 1024 (mlperf_logging rcps_flux1.json):
+# AdamW 0.9/0.95/1e-8, weight decay 0.1, clip 1.0 (fixed by the ruleset),
+# lr 2.5e-4 constant after 800 warmup steps, evaluation every 262,144 samples.
+#
+# The schedule values below are env-overridable so the same file can be
+# exercised on a single node during validation (PRIMUS_GLOBAL_BATCH_SIZE,
+# PRIMUS_LR, PRIMUS_LR_WARMUP_ITERS, PRIMUS_EVAL_INTERVAL, PRIMUS_TRAIN_ITERS).
+# A submission run must not set them: the defaults are the submitted values.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_12b_ddp_local_mxfp6_a6w4fwd_fp4bwd_mlperf_4n_gbs1024}
+
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: diffusion/flux_12b.yaml
+
+    trainer_class: FluxPretrainTrainer
+
+    overrides:
+      model_type: flux_schnell
+
+      mlperf_mode: true
+      warmup_train_steps: 2
+      warmup_validation_steps: 2
+      target_val_loss: 0.586
+
+      nemo_aligned_lr_warmup: false
+      reference_lr_warmup: true
+      single_block_reference_init: true
+      reference_weight_decay: true
+
+      timestep_sampling_strategy: "direct_uniform"
+      activation_func: "openai_gelu"
+      cfg_dropout_prob: 0.1
+
+      vae_scale: 0.3611
+      vae_shift: 0.1159
+      vae_latent_mode: resample
+
+      rotary_interleaved: true
+
+      transformer_impl: "local"
+
+      mock_data: false
+      dataloader_type: external
+      data_path: ${PRIMUS_DIFFUSION_DATA_PATH:/path/to/energon/dataset}
+      num_workers: 16
+      # Data loader workers start through forkserver: forking after GPU-direct RDMA has
+      # registered GPU memory (multi-node RCCL) is unsafe.
+      dataloader_mp_context: ${PRIMUS_DATALOADER_MP_CONTEXT:forkserver}
+      prefetch_factor: 4
+      max_samples_per_sequence: null
+
+      train_iters: ${PRIMUS_TRAIN_ITERS:20000}
+      eval_interval: ${PRIMUS_EVAL_INTERVAL:256}
+      eval_samples: 29696
+      val_num_workers: 1
+      eval_timestep_source: dataset
+      log_interval: 10
+      save_interval: 10000
+
+      micro_batch_size: 32
+      global_batch_size: ${PRIMUS_GLOBAL_BATCH_SIZE:1024}
+      seq_length: 512
+
+      bf16: true
+      fp16: false
+      params_dtype: bfloat16
+      grad_reduce_in_bf16: true
+
+      optimizer: adam
+      lr: ${PRIMUS_LR:2.5e-4}
+      min_lr: ${PRIMUS_LR:2.5e-4}
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_eps: 1.0e-8
+      clip_grad: 1.0
+
+      lr_warmup_iters: ${PRIMUS_LR_WARMUP_ITERS:800}
+      # Constant after warmup: the decay length only has to exceed the warmup (and the run).
+      lr_decay_iters: 100000
+      lr_decay_style: constant
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+
+      use_torch_fsdp2: false
+      use_megatron_fsdp: false
+
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      overlap_param_gather_with_optimizer_step: false
+      use_precision_aware_optimizer: true
+      main_params_dtype: fp32
+      main_grads_dtype: bf16
+      exp_avg_dtype: fp32
+      exp_avg_sq_dtype: fp32
+
+      ddp_average_in_collective: true
+
+      defer_grad_buffer_zero: true
+
+      ddp_bucket_size: 1024000000
+      # Small buckets for the parameters the forward needs first, so the first all-gather and the
+      # last reduce-scatter of a step are short; the head groups' all-gathers are dispatched at the
+      # end of the optimizer step. Neither changes what is computed.
+      ddp_head_bucket_size: 64000000
+      ddp_head_bucket_ramp: 1.4
+      ddp_param_gather_after_optimizer: -1
+      # Per-step logging without NCCL barriers or device-wide syncs.
+      light_log_sync: true
+      use_fsdp2_fp32_param_optimizer: false
+
+      ckpt_format: torch_dist
+
+      gradient_accumulation_fusion: false
+      check_for_nan_in_loss_and_grad: false
+
+      use_flash_attn: true
+
+      fp6: "mxfp6"
+      mxfp6_backward_precision: "mxfp6"  # "mxfp6" (pure) or "fp8" (hybrid)
+
+      mxfp6_fused_wgrad_accum: true
+
+      mxfp6_fused_mlp: "on"
+      mxfp6_grouped_mlp: true
+      mxfp6_joint_qkv: true
+      mxfp6_strided_v: true
+      mxfp6_fused_small_grads: true
+      mxfp6_fused_qk_rope: true
+      mxfp6_fused_qkv: "on"
+      mxfp6_fused_ln_mod_bwd: true
+      mxfp6_norm_rope_pin: true
+      mxfp6_grouped_gemm_functional: true
+      mxfp6_shared_grad_pack: true
+      mxfp6_ln_bwd_fused_sum: true
+      mxfp6_joint_proj: true
+      mxfp6_gate_mul_pack: true
+      mxfp6_gate_mul_pack_bias: true
+      mxfp6_ln_bwd_ns16: true
+      mxfp6_adaln_wgrad_main_grad: true
+      # GEMM kernels: Primus-Turbo's FlyDSL GEMMs compiled at runtime (prefill FLYDSL_RUNTIME_CACHE_DIR with
+      # `python -m primus_turbo.flydsl.precompile` to skip the compile at startup).
+      mxfp6_a6w6_backend: flydsl
+      # MXFP4 (A4W4) backward GEMMs, dgrad and wgrad, with stochastic rounding on both operands: the gradient and the
+      # activations' / weights' MXFP4 backward copies (so the backward GEMMs are unbiased).
+      mxfp6_bwd_fp4_dgrad: true
+      mxfp6_bwd_fp4_wgrad: true
+      mxfp6_bwd_fp4_sr: true
+      mxfp6_fp4_sr_actw: true
+      mxfp6_bwd_fp4_backend: flydsl_packed
+      # MXFP4 forward for the single blocks' MLP fc1; their fc2 + attention out-projection forward stays MXFP6.
+      # Every forward GEMM A6W4 on the tilescale layout: MXFP6 activations times MXFP4 weights (H32, round to
+      # nearest), where aiter has the kernel for the shape; the rest stay A6W6.
+      mxfp6_fwd_fp4_single_linear2: false
+      mxfp6_fwd_fp4_single_fc1: false
+      mxfp6_fwd_a6w4_ts: true
+
+      flat_grad_clip: true
+      cuda_data_prefetch: true
+      nccl_communicator_config_path: examples/megatron/configs/MI355X/diffusion/nccl_comm_dp_max_ctas64.yaml
+
+      empty_unused_memory_level: 0
+
+      distributed_timeout_minutes: 60
+      distributed_backend: nccl
+
+      finetune: false
+      save: null
+      load: null
+      no_save_optim: true
+      no_save_rng: true
+      auto_continue_train: false
+      disable_last_saving: true
+
+      tensorboard_dir: null
+      wandb_project: null
+      log_throughput: false
+      wall_clock_step_timer: true
+      log_timers_to_tensorboard: false
+      log_batch_size_to_tensorboard: false
+      log_learning_rate_to_tensorboard: false
+      log_memory_to_tensorboard: false
+
+      profile: false
+
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_dual_fp8_output_projection: false
+
+      seed: ${PRIMUS_SEED:2025}
+      per_step_rng_reseed: true
+
+      torch_compile:
+        enable: true
+        strategy: "per_block"
+        backend: "inductor"
+        mode: "default"
+        fullgraph: false
+        compile_optimizer: false
+        emulate_precision_casts: false
+        fused_ln_modulate: true
+        coordinate_descent_tuning: true
+        combo_kernels: true

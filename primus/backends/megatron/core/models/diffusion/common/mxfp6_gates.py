@@ -157,6 +157,12 @@ class Mxfp6Gates:
     # to the A6W6 tile-blob kernels; other shapes keep them. Needs bwd_fp4_backend 'aiter_fly' or no bwd_fp4 gate,
     # and neither wgrad_a6w4 nor the MXFP4 weight format.
     fwd_a6w6_fly: bool = False
+    # Forward GEMMs as A6W4 on the tilescale layout (aiter `gemm_a6w4_tilescale`): MXFP6 activations (the fly6 rows)
+    # times MXFP4 weights (H32, RCEIL, round to nearest; K128-blocked codes), wherever aiter has the kernel for the
+    # (M, N, K, bias). Columns (the backward's operands) are unchanged. GEMMs on the MXFP4 forward
+    # (fwd_fp4_*) keep it. Changes forward numerics. Needs bwd_fp4_backend 'flydsl_packed' / 'aiter_fly' or no
+    # bwd_fp4 gate, and neither wgrad_a6w4 nor the MXFP4 weight format.
+    fwd_a6w4_ts: bool = False
     # Which kernels run the A6W6 GEMMs: "aiter" (the tuned asm table) or "flydsl" (Turbo's FlyDSL
     # MXFP6 GEMM compiled at runtime on the same MXFP6 blobs, one tile per WG; bit-identical to AITER, bias included).
     # Process-wide in Turbo (set_a6w6_backend); shapes the FlyDSL kernel does not take stay on AITER.

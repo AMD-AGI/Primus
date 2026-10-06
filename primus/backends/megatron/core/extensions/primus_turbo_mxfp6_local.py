@@ -106,6 +106,8 @@ def _pack_weight_dual(weight, weight_is_fp4, m=None, fly6=False):
     two thirds of the bytes -- wgrad never reads the weight, so there is no third
     direction wanting the wider format. ``fly6``: the row half (forward B) in the A6W6 fly layout.
     """
+    if fly6 == "a6w4":  # the A6W4 tilescale GEMM's B: K128-blocked MXFP4 rows, the backward column unchanged
+        return _mx.quantize_mx_dual(weight, _mx.with_ts4_row(_weight_fmt(weight.shape, m)))
     if fly6:
         return _mx.quantize_mx_dual(weight, _mx.with_fly6_row(_weight_fmt(weight.shape, m), True))
     if gates().bwd_fp4_dgrad:
@@ -117,6 +119,8 @@ def _pack_weight_dual(weight, weight_is_fp4, m=None, fly6=False):
 
 def _pack_weight_row(weight, weight_is_fp4, fly6=False):
     """Row direction only, for a forward with no backward behind it (eval)."""
+    if fly6 == "a6w4":
+        return _mx.quantize_mx(weight, 1, _mx.with_ts4_row(0))
     if fly6:
         return _mx.quantize_mx(weight, 1, _mx.fly6_fmt(True))
     if weight_is_fp4:
@@ -288,10 +292,27 @@ except ImportError:
     _A4W4_FLY_SHAPES = None
 
 
+# A6W4 tilescale shapes (aiter tsgemm manifest), read once at import: _fly6 runs inside compiled regions.
+try:
+    from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import _a6w4_ts_rows
+
+    _A6W4_TS_SHAPES = _a6w4_ts_rows()
+except ImportError:  # an older Primus-Turbo; mxfp6_fwd_a6w4_ts fails in _fly6
+    _A6W4_TS_SHAPES = None
+
+
 def _fly6(m, n, k, bias, weight_is_fp4):
-    """Whether the forward A6W6 GEMM [m, k] x [n, k]^T (+ bias) runs A6W6 fly: decided before packing, since the
-    operands' row layout depends on it."""
-    if not gates().fwd_a6w6_fly or weight_is_fp4:
+    """Whether the forward GEMM [m, k] x [n, k]^T (+ bias) runs on the tilescale layout: "a6w4" (fwd_a6w4_ts, aiter
+    has the A6W4 kernel), True (A6W6 fly), else False. Decided before packing, since the operands' row layout
+    depends on it; the activation's rows are the same for both (fly6_fmt), the weight's differ."""
+    if weight_is_fp4:
+        return False
+    if gates().fwd_a6w4_ts:
+        if _A6W4_TS_SHAPES is None:
+            raise RuntimeError("mxfp6_fwd_a6w4_ts needs a Primus-Turbo with gemm_fp6_impl.a6w4_ts_available")
+        if (int(m), int(n), int(k), bias is not None) in _A6W4_TS_SHAPES:
+            return "a6w4"
+    if not gates().fwd_a6w6_fly:
         return False
     if _A6W6_FLY_SHAPES is None:
         raise RuntimeError("mxfp6_fwd_a6w6_fly needs a Primus-Turbo with gemm_fp6_impl.a6w6_fly_shapes")
@@ -683,7 +704,8 @@ class MXFP6LinearFunction(torch.autograd.Function):
             bias,
             weight_is_fp4,
             a4w4=_fwd_fp4_a4w4(m, n, k) if fwd_fp4 else 0,
-            a6w6_fly=fly6,
+            a6w6_fly=fly6 is True,
+            a6w4_ts=fly6 == "a6w4",
         )
         output = output.reshape(*orig_shape[:-1], output.shape[-1])
 
@@ -1269,7 +1291,8 @@ class MXFP6MLPFunction(torch.autograd.Function):
                 None,
                 weight_is_fp4,
                 a4w4=_fwd_fp4_a4w4(m, f, k) if fwd_fp4_fc1 else 0,
-                a6w6_fly=fly6_1,
+                a6w6_fly=fly6_1 is True,
+                a6w4_ts=fly6_1 == "a6w4",
             )
         )
 
@@ -1330,7 +1353,8 @@ class MXFP6MLPFunction(torch.autograd.Function):
             None,
             weight_is_fp4,
             a4w4=_fwd_fp4_a4w4(m, h, f) if fwd_fp4 else 0,
-            a6w6_fly=fly6_2,
+            a6w6_fly=fly6_2 is True,
+            a6w4_ts=fly6_2 == "a6w4",
         )
         output = output.reshape(*orig_shape[:-1], h)
 
@@ -1941,7 +1965,8 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
             _GRAN_VALUE,
             b_qkv,
             weight_is_fp4,
-            a6w6_fly=fly6,
+            a6w6_fly=fly6 is True,
+            a6w4_ts=fly6 == "a6w4",
         )
 
         # The norm and rotation, unchanged. This is the production Triton op, on the
@@ -2230,7 +2255,8 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
             _GRAN_VALUE,
             weight_is_fp4,
             b_a,
-            a6w6_fly=fly6[0],
+            a6w6_fly=fly6[0] is True,
+            a6w4_ts=fly6[0] == "a6w4",
         )
         gemm_fp6_out_impl(
             packs[1][0],
@@ -2244,7 +2270,8 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
             _GRAN_VALUE,
             weight_is_fp4,
             b_b,
-            a6w6_fly=fly6[1],
+            a6w6_fly=fly6[1] is True,
+            a6w4_ts=fly6[1] == "a6w4",
         )
 
         s_a, s_b, batch = shape_a[0], shape_b[0], shape_a[1]
