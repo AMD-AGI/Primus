@@ -380,12 +380,27 @@ def test_legacy_fp32_snapshot_blob_loads_as_bf16():
     assert torch.equal(restored.prev, blob["prev"].to(torch.bfloat16))
 
 
-def test_precision_aware_detected_by_config():
+def test_precision_aware_main_params_detected_by_config():
     opt = types.SimpleNamespace(
-        config=types.SimpleNamespace(use_precision_aware_optimizer=True),
+        config=types.SimpleNamespace(
+            use_precision_aware_optimizer=True,
+            use_precision_aware_optimizer_no_fp8_or_ds_fp8=True,
+        ),
         shard_fp32_from_float16_groups=[],
     )
     assert _uses_precision_aware_main_params(opt) is True
+
+
+def test_precision_aware_bf16_moments_keep_fp32_main_params_compatible():
+    fp32_main = torch.ones(1, dtype=torch.float32)
+    opt = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            use_precision_aware_optimizer=True,
+            use_precision_aware_optimizer_no_fp8_or_ds_fp8=False,
+        ),
+        shard_fp32_from_float16_groups=[[fp32_main]],
+    )
+    assert _uses_precision_aware_main_params(opt) is False
 
 
 def test_precision_aware_detected_structurally():
