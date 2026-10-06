@@ -23,7 +23,7 @@ pip install --cache-dir="${PIP_CACHE_DIR}" "onnx==1.20.0rc1"
 pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia-modelopt
 pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia_resiliency_ext
 
-pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0"
+pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0,<5.1.0"
 
 pip install --cache-dir="${PIP_CACHE_DIR}" -r "${SCRIPT_DIR}/requirements-megatron-bridge.txt"
 
