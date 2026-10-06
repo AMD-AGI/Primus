@@ -740,6 +740,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "torch_compile_coordinate_descent_tuning": getattr(
                     torch_compile_config, "coordinate_descent_tuning", False
                 ),
+                "torch_compile_combo_kernels": getattr(torch_compile_config, "combo_kernels", False),
             }
         else:
             # Default values if torch_compile section not present
@@ -756,6 +757,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "torch_compile_emulate_precision_casts": True,
                 "torch_compile_fused_ln_modulate": True,
                 "torch_compile_coordinate_descent_tuning": False,
+                "torch_compile_combo_kernels": False,
             }
 
         # Set on FluxConfig

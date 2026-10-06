@@ -460,6 +460,9 @@ class Flux(DiffusionModule):
             install_ln_bwd_sum_pass()
             log("  Installed the LN-modulate backward gradient-sum pass (mxfp6_ln_bwd_fused_sum)")
 
+        if getattr(self.config, "torch_compile_combo_kernels", False):
+            torch._inductor.config.combo_kernels = True
+            log("  Enabled Inductor combo kernels (independent kernels of a graph share one launch)")
         if self.config.torch_compile_emulate_precision_casts:
             torch._inductor.config.emulate_precision_casts = True
             log(

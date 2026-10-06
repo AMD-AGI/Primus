@@ -228,6 +228,12 @@ class FluxConfig(BaseDiffusionConfig):
     # and the config that claimed to describe it disagreed. It costs compile
     # time, so it stays off by default and the recipes opt in.
     torch_compile_coordinate_descent_tuning: bool = False
+    # Inductor's combo kernels: independent kernels of a compiled graph (the per-block bias
+    # and norm-weight gradient reductions, small casts and concatenations) launched as one
+    # kernel instead of one each, removing the launch floor of a few hundred tiny kernels per
+    # step. Not bit-identical: a combined reduction can take different block sizes, and so a
+    # different summation order. Off by default.
+    torch_compile_combo_kernels: bool = False
     torch_compile_emulate_precision_casts: bool = True  # Preserve eager BF16 precision in Triton kernels
     torch_compile_fused_ln_modulate: bool = True  # Use fused LN+modulate Triton kernel in AdaLN
 
