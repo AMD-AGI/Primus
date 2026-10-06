@@ -410,8 +410,14 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
                 pipeline_model_parallel_size=pp,
                 context_parallel_size=int(os.getenv("MLLOG_CONTEXT_PARALLELISM", "1")),
                 config_filename=os.getenv("MLLOG_CONFIG_FILENAME", ""),
-                lowest_numerical_precision_linear=os.getenv(
-                    "MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR", "mxfp4"
+                lowest_numerical_precision_in_linear=os.getenv(
+                    "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR", "mxfp4"
+                ),
+                lowest_numerical_precision_in_attn=os.getenv(
+                    "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN", "bfloat16"
+                ),
+                lowest_numerical_precision_in_comm=os.getenv(
+                    "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM", "bfloat16"
                 ),
             )
             _sft_logger.log_init_params(init_cfg)
