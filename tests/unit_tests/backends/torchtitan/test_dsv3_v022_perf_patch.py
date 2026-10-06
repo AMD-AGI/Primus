@@ -24,13 +24,14 @@ COMBINE_PATCH_ID = "torchtitan.dsv3.moe_bf16_combine"
 COMPILE_PATCH_ID = "torchtitan.dsv3.whole_block_compile"
 
 
-def _ctx(model_name, compile_enable=True):
+def _ctx(model_name, compile_enable=True, backend_version="0.2.2"):
     params = SimpleNamespace(compile=SimpleNamespace(enable=compile_enable))
     module_config = SimpleNamespace(params=params)
     return PatchContext(
         backend="torchtitan",
         phase="setup",
         model_name=model_name,
+        backend_version=backend_version,
         extra={"module_config": module_config},
     )
 
@@ -40,12 +41,14 @@ class TestDsv3V022PatchRegistration:
         patch = PatchRegistry.get(COMPILE_PATCH_ID)
         assert patch is not None
         assert patch.backend == "torchtitan"
+        assert patch.backend_version_patterns == ["0.2.2"]
         assert patch.phase == "setup"
 
     def test_bf16_combine_remains_registered(self):
         patch = PatchRegistry.get(COMBINE_PATCH_ID)
         assert patch is not None
         assert patch.backend == "torchtitan"
+        assert patch.backend_version_patterns == ["0.2.2"]
         assert patch.phase == "setup"
 
 
@@ -68,6 +71,13 @@ class TestDsv3V022PatchCondition:
         assert patch is not None
         assert patch.condition(_ctx("llama3")) is False
         assert patch.condition(_ctx(None)) is False
+
+    def test_patches_only_apply_to_torchtitan_v022(self):
+        for patch_id in (COMPILE_PATCH_ID, COMBINE_PATCH_ID):
+            patch = PatchRegistry.get(patch_id)
+            assert patch is not None
+            assert patch.applies_to(_ctx("deepseek_v3", backend_version="0.2.2"))
+            assert not patch.applies_to(_ctx("deepseek_v3", backend_version="0.2.3"))
 
 
 class _Leaf(nn.Module):
@@ -116,10 +126,11 @@ class _Model(nn.Module):
         )
 
 
-def test_unified_compile_breaks_at_grouped_experts(monkeypatch):
+def test_unified_compile_breaks_at_grouped_experts_once(monkeypatch):
     import torchtitan.models.moe.moe as moe_module
 
-    model = _Model()
+    first_model = _Model()
+    second_model = _Model()
     compile_calls = []
     disable_calls = []
 
@@ -140,12 +151,19 @@ def test_unified_compile_breaks_at_grouped_experts(monkeypatch):
     monkeypatch.setattr(torch._dynamo.config, "capture_scalar_outputs", False)
     with patch.object(moe_module.GroupedExperts, "forward", moe_module.GroupedExperts.forward):
         dsv3_patch._apply_unified_compile(
-            model,
+            first_model,
+            SimpleNamespace(backend="inductor"),
+            ep_enabled=True,
+        )
+        dsv3_patch._apply_unified_compile(
+            second_model,
             SimpleNamespace(backend="inductor"),
             ep_enabled=True,
         )
 
     assert compile_calls == [
+        ("dense_block", "inductor", False),
+        ("moe_block", "inductor", False),
         ("dense_block", "inductor", False),
         ("moe_block", "inductor", False),
     ]

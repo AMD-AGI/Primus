@@ -86,6 +86,7 @@ def _apply_unified_compile(model: nn.Module, compile_config: Any, ep_enabled: bo
 @register_patch(
     "torchtitan.dsv3.whole_block_compile",
     backend="torchtitan",
+    backend_versions=["0.2.2"],
     phase="setup",
     description="Compile whole blocks with an eager GroupedExperts boundary",
     condition=lambda ctx: _is_deepseek_model(ctx) and _compile_enabled(ctx),
@@ -155,6 +156,7 @@ def _moe_forward_bf16_combine(self: Any, x: torch.Tensor) -> torch.Tensor:
 @register_patch(
     "torchtitan.dsv3.moe_bf16_combine",
     backend="torchtitan",
+    backend_versions=["0.2.2"],
     phase="setup",
     description="MoE expert combine in bf16 (avoid fp32 bmm activation retention)",
     condition=lambda ctx: _is_deepseek_model(ctx),
@@ -163,7 +165,7 @@ def patch_moe_bf16_combine(ctx: PatchContext) -> None:
     """Replace MoE.forward to drop the fp32 bmm copy in the combine step."""
     import torchtitan.models.moe.moe as moe_module
 
-    # The outer MoE TransformerBlock is already eager. An additional
-    # whole-function compiler.disable wrapper has no numerical or memory effect.
+    # Keep MoE.forward compilable as part of the outer TransformerBlock.
+    # GroupedExperts.forward is the only explicit eager EP/FSDP boundary.
     moe_module.MoE.forward = _moe_forward_bf16_combine
     log_rank_0("[Patch:torchtitan.dsv3.moe_bf16_combine] Patched MoE.forward with bf16 weighted combine")

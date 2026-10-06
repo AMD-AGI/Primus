@@ -17,6 +17,7 @@ This is the TorchTitan counterpart of ``MegatronAdapter``. It is responsible for
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 # Trigger registration of all TorchTitan patches (logger, turbo, model_override, etc.)
@@ -62,19 +63,27 @@ class TorchTitanAdapter(BackendAdapter):
         """
         Detect TorchTitan version for patching/diagnostics.
 
-        We try to resolve the installed ``torchtitan`` package version.
-        If this fails (e.g., editable install without metadata), we fall
-        back to "unknown".
+        Prefer installed package metadata. Source-tree/container deployments do
+        not install TorchTitan as a distribution, so fall back to its pinned
+        ``assets/version.txt`` before reporting "unknown".
         """
         try:
             import importlib.metadata as importlib_metadata
         except Exception:  # pragma: no cover - very old Python / fallback
-            return "unknown"
+            importlib_metadata = None
 
+        if importlib_metadata is not None:
+            try:
+                return importlib_metadata.version("torchtitan")
+            except Exception:
+                pass
+
+        version_file = Path(__file__).resolve().parents[3] / "third_party" / "torchtitan" / "assets" / "version.txt"
         try:
-            return importlib_metadata.version("torchtitan")
-        except Exception:
+            version = version_file.read_text(encoding="utf-8").strip()
+        except OSError:
             return "unknown"
+        return version or "unknown"
 
     # Config → TorchTitan JobConfig
     def convert_config(self, params: Any):
