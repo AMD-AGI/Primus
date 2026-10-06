@@ -1987,6 +1987,9 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
             return
 
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
+        # A parameter, kept by reference (as AdaLNLinearFunction keeps its bias) so the backward can write its
+        # gradient into main_grad; the caller claims it under fused_small_grads.
+        ctx.b_qkv = b_qkv
         ctx.out_dtype = hidden_states.dtype
         ctx.orig_shape = hidden_states.shape
         # The packed blobs carry no shape, so the logical dims have to be saved too.
@@ -2089,9 +2092,12 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
                 a4w4=_a4(b4[1], b4),
             )
 
-        # The QKV bias is not in saved_tensors, so it cannot be routed into main_grad from
-        # here without widening the save set. Its [9216] copies are left on the table.
-        grad_b = b_partial.sum(0).to(out_dtype) if want_bias_grad else None
+        # Into main_grad (claimed by the caller under fused_small_grads), which removes its AccumulateGrad copy.
+        grad_b = (
+            _reduce_grad_into_main_grad(ctx.b_qkv, b_partial, out_dtype, ctx.fuse_wgrad_accum)
+            if want_bias_grad
+            else None
+        )
         # dw reduces over rows *and* heads: the norm weight is [head_dim] and shared across
         # heads, and a packer block owns one head, so the partial buffer carries both axes.
         grad_wq = _reduce_grad_into_main_grad(wq, dwq_partial, wq.dtype, ctx.fuse_wgrad_accum, dims=(0, 1))
@@ -2300,6 +2306,7 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
         if not grad_enabled:
             return
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
+        ctx.biases = (b_a, b_b)  # by reference, as the per-stream Function keeps its bias
         ctx.out_dtype = x_a.dtype
         ctx.shape_a, ctx.shape_b = x_a.shape, x_b.shape
         ctx.m_a = x_a.numel() // x_a.shape[-1]
@@ -2407,7 +2414,11 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
                     gates().wgrad_a6w4,
                     a4w4=_a4(b4[1], b4),
                 )
-            grad_b = b_partial.sum(0).to(out_dtype) if want_bias_grad else None
+            grad_b = (
+                _reduce_grad_into_main_grad(ctx.biases[i], b_partial, out_dtype, ctx.fuse_wgrad_accum)
+                if want_bias_grad
+                else None
+            )
             grad_wq = _reduce_grad_into_main_grad(
                 wq, dwq_partial, wq.dtype, ctx.fuse_wgrad_accum, dims=(0, 1)
             )

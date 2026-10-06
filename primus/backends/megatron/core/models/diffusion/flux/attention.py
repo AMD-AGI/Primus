@@ -383,6 +383,8 @@ def _joint_qkv_project_norm_rope(attn, hidden_states, additional_hidden_states, 
                 attn.added_q_layernorm.weight,
                 attn.added_k_layernorm.weight,
             ]
+            # The QKV biases too: the backward writes them into main_grad (MXFP6JointQKVFunction).
+            claimed += [b for b in (main.bias, added.bias) if b is not None]
         _claim_main_grad(*claimed)
     cos_a, sin_a = _rope_cos_sin(added_rope, additional_hidden_states.dtype)
     cos_b, sin_b = _rope_cos_sin(main_rope, hidden_states.dtype)
@@ -428,7 +430,8 @@ def _fused_qkv_project_norm_rope(attn, linear, hidden_states, q_norm, k_norm, q_
         # each, two per block, and their AccumulateGrad copies were 152 of the ~600
         # device-to-device copies per step.
         if gates().fused_small_grads:
-            _claim_main_grad(linear.weight, q_norm.weight, k_norm.weight)
+            # The QKV bias too: the backward writes it into main_grad (MXFP6QKVNormRopeFunction).
+            _claim_main_grad(*(p for p in (linear.weight, q_norm.weight, k_norm.weight, linear.bias) if p is not None))
         else:
             _claim_main_grad(linear.weight)
     return MXFP6QKVNormRopeFunction.apply(
