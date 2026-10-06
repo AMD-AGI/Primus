@@ -174,12 +174,21 @@ class HSTULayerProfiler(BaseModuleProfiler):
         mc = self.config.model_config
         g_fwd = float(getattr(mc, "hstu_attn_epilogue_gelem_fwd", 0.0) or 0.0) or _DEFAULT_EPILOGUE_GELEM_FWD
         g_bwd = float(getattr(mc, "hstu_attn_epilogue_gelem_bwd", 0.0) or 0.0) or _DEFAULT_EPILOGUE_GELEM_BWD
+        fpe_f = float(getattr(mc, "hstu_attn_epilogue_flops_per_elem_fwd", 0.0) or 0.0)
+        fpe_b = float(getattr(mc, "hstu_attn_epilogue_flops_per_elem_bwd", 0.0) or 0.0)
+        vector_flops = None
+        if fpe_f > 0 and fpe_b > 0:
+            probe = getattr(self._gemm_backend, "vector_flops", None)
+            vector_flops = probe() if callable(probe) else None
         sdpa = self._sdpa_backend
         sim = HSTUAttentionSimulator(
             gpu_arch=getattr(sdpa, "_gpu_arch", None),
             gpu_clock_mhz=getattr(sdpa, "_gpu_clock_mhz", None),
             epilogue_gelem_fwd=g_fwd,
             epilogue_gelem_bwd=g_bwd,
+            epilogue_flops_per_elem_fwd=fpe_f,
+            epilogue_flops_per_elem_bwd=fpe_b,
+            vector_flops=vector_flops,
         )
         self._hstu_attn_sim = sim
         return sim

@@ -210,6 +210,8 @@ class ModelConfig:
     # per second.  0 = use the calibrated defaults in the HSTU simulator.
     hstu_attn_epilogue_gelem_fwd: float = 0.0
     hstu_attn_epilogue_gelem_bwd: float = 0.0
+    hstu_attn_epilogue_flops_per_elem_fwd: float = 0.0
+    hstu_attn_epilogue_flops_per_elem_bwd: float = 0.0
     # Attention backward / forward wall-time ratio, used with the FLOP model.
     # The bwd_dkdv kernel measures ~2.0x the forward on MI350X.
     hstu_attn_bwd_ratio: float = 2.0

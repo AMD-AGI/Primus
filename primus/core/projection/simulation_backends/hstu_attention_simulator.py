@@ -56,27 +56,27 @@ class HSTUAttentionSimulator(SDPASimulator):
         gemm_backend: Optional[str] = None,
         epilogue_gelem_fwd: float = _DEFAULT_EPILOGUE_GELEM_FWD,
         epilogue_gelem_bwd: float = _DEFAULT_EPILOGUE_GELEM_BWD,
+        epilogue_flops_per_elem_fwd: float = 0.0,
+        epilogue_flops_per_elem_bwd: float = 0.0,
+        vector_flops: Optional[float] = None,
     ):
         """
         Args:
             gpu_arch / hardware_spec / gpu_clock_mhz: forwarded to
                 ``SDPASimulator``.
-            gemm_backend: tile GEMM engine.  Must honour ``n_cu_override=1``
-                (origami); gemmologist prices across the full chip and is
-                unsuitable for per-tile simulation, so a non-origami request is
-                coerced to origami for the tiles.
+            gemm_backend: tile GEMM engine; any registered backend that honours
+                ``n_cu_override=1``.  Defaults to ``PRIMUS_GEMM_BACKEND``, then
+                origami.
             epilogue_gelem_fwd / epilogue_gelem_bwd: fused-epilogue throughput
                 (Gelem/s) for the SiLU-gate + relative-bias + U-gate work.
+                Arch-independent; used only when the vector model below is off.
+            epilogue_flops_per_elem_fwd / epilogue_flops_per_elem_bwd: vector
+                FLOPs per causal score element for the epilogue.  With
+                ``vector_flops`` (full-chip FLOP/s) both > 0, the epilogue is
+                priced as ``score_elems x flops_per_elem / vector_flops`` so it
+                scales with the target's vector throughput.
         """
-        # Only origami honours the 1-CU tile override; force it for the tiles.
         name = (gemm_backend or os.getenv("PRIMUS_GEMM_BACKEND") or "origami").lower().strip()
-        if name != "origami":
-            if int(os.getenv("RANK", "0")) == 0:
-                print(
-                    f"[Primus:HSTU-Attn] tile GEMM backend '{name}' cannot price "
-                    "per-tile 1-CU GEMMs; using origami for the attention tiles."
-                )
-            name = "origami"
 
         super().__init__(
             gpu_arch=gpu_arch,
@@ -86,6 +86,14 @@ class HSTUAttentionSimulator(SDPASimulator):
         )
         self._epi_fwd = float(epilogue_gelem_fwd)
         self._epi_bwd = float(epilogue_gelem_bwd)
+        vf = float(vector_flops or 0.0)
+        fpe_f, fpe_b = float(epilogue_flops_per_elem_fwd), float(epilogue_flops_per_elem_bwd)
+        if vf > 0 and fpe_f > 0 and fpe_b > 0:
+            # Gelem/s equivalent of flops_per_elem at this arch's vector rate.
+            self._epi_fwd = vf / fpe_f / 1e9
+            self._epi_bwd = vf / fpe_b / 1e9
+        self._vector_flops = vf
+        self._fpe = (fpe_f, fpe_b)
 
     def name(self) -> str:
         return f"hstu_attention_simulator (FAv3 gated-jagged, {self._mode} 1-CU)"
@@ -134,7 +142,7 @@ class HSTUAttentionSimulator(SDPASimulator):
         md = dict(base.metadata)
         md.update(
             {
-                "backend": "hstu_attention_simulator (FAv3 gated-jagged, Origami 1-CU)",
+                "backend": self.name(),
                 "hstu_matmul_fwd_ms": base.forward_time_ms,
                 "hstu_matmul_bwd_ms": base.backward_time_ms,
                 "hstu_epilogue_fwd_ms": pw_fwd_ms,
@@ -142,6 +150,8 @@ class HSTUAttentionSimulator(SDPASimulator):
                 "hstu_score_elems": score_elems,
                 "hstu_epilogue_gelem_fwd": self._epi_fwd,
                 "hstu_epilogue_gelem_bwd": self._epi_bwd,
+                "hstu_epilogue_vector_flops": self._vector_flops,
+                "hstu_epilogue_flops_per_elem": self._fpe,
             }
         )
 

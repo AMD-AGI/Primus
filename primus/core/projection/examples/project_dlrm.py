@@ -79,6 +79,8 @@ def build_yambda_config(args) -> TrainingConfig:
         hstu_attn_model=args.attn_model,
         hstu_attn_epilogue_gelem_fwd=args.attn_epilogue_gelem_fwd,
         hstu_attn_epilogue_gelem_bwd=args.attn_epilogue_gelem_bwd,
+        hstu_attn_epilogue_flops_per_elem_fwd=args.attn_epilogue_flops_per_elem_fwd,
+        hstu_attn_epilogue_flops_per_elem_bwd=args.attn_epilogue_flops_per_elem_bwd,
         hstu_attn_bwd_ratio=args.attn_bwd_ratio,
         hstu_recompute_attn=args.recompute_attn,
         hstu_output_input_dim=args.output_input_dim,
@@ -172,7 +174,20 @@ def main():
         default="flop",
         choices=["flop", "fav3_hstu"],
         help="attention cost model: 'flop' (direct-FLOP roofline, default) or "
-        "'fav3_hstu' (FAv3 tile-level matmuls via origami 1-CU + HSTU pointwise epilogue)",
+        "'fav3_hstu' (FAv3 tile-level matmuls via the GEMM backend at 1 CU + HSTU pointwise epilogue)",
+    )
+    p.add_argument(
+        "--attn-epilogue-flops-per-elem-fwd",
+        type=float,
+        default=0.0,
+        help="fav3_hstu epilogue vector FLOPs per causal score element (fwd); >0 (with bwd) prices the "
+        "epilogue against the arch's vector throughput instead of a fixed Gelem/s rate",
+    )
+    p.add_argument(
+        "--attn-epilogue-flops-per-elem-bwd",
+        type=float,
+        default=0.0,
+        help="fav3_hstu epilogue vector FLOPs per causal score element (bwd)",
     )
     p.add_argument(
         "--attn-epilogue-gelem-fwd",
