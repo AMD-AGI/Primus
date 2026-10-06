@@ -3,7 +3,7 @@
 #
 # Subclasses the FAv3 ``SDPASimulator`` so the dominant matmul work (QKᵀ and
 # A·V, plus the five backward sub-GEMMs) is still priced per-tile on a single
-# CU via the origami 1-CU GEMM backend.  On top of that matmul time we add the
+# CU via the configured 1-CU GEMM backend.  On top of that matmul time we add the
 # HSTU-specific pointwise epilogue that ordinary softmax-flash does not have:
 #
 #   * relative positional/temporal bias add per score,
@@ -41,7 +41,7 @@ _DEFAULT_EPILOGUE_GELEM_BWD = 798.0  # backward gate/bias grads are heavier
 class HSTUAttentionSimulator(SDPASimulator):
     """FAv3 tile-level simulator specialised for HSTU gated-jagged attention.
 
-    Reuses the parent's per-tile matmul pricing (origami 1-CU) unchanged and
+    Reuses the parent's per-tile matmul pricing (configured 1-CU GEMM backend) unchanged and
     adds the HSTU pointwise epilogue as an additive throughput term.  The
     epilogue is *not* present in softmax-flash, so the parent alone
     under-predicts HSTU attention by ~2.6x; this class closes that gap with a
