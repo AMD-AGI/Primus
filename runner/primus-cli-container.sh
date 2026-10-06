@@ -7,15 +7,15 @@
 #
 # Primus Container Mode Launcher
 #
-# This script launches Primus workflows in a Docker/Podman container.
+# This script launches Primus workflows in a Docker/Podman or Apptainer/Singularity container.
 #
 # Execution Flow:
-#   1. Parse global options (--config, --debug, --dry-run)
+#   1. Parse global options (--config, --debug, --dry-run, --container-runtime)
 #   2. Load configuration from YAML files
 #   3. Extract and apply container.* configuration parameters
 #   4. Parse CLI arguments (--image, --volume, generic docker options)
-#   5. Build volume mounts and container options
-#   6. Detect docker/podman CLI
+#   5. Build volume mounts and container options (translated for Apptainer)
+#   6. Select docker/podman/apptainer/singularity CLI
 #   7. Launch container with primus-cli-direct.sh inside
 #
 ###############################################################################
@@ -26,13 +26,15 @@ print_usage() {
 cat <<EOF
 Usage: bash primus-run-container.sh [OPTIONS] -- [SCRIPT_ARGS...]
 
-Launch a Primus task (train / benchmark / preflight / etc.) in a Docker/Podman container.
+Launch a Primus task (train / benchmark / preflight / etc.) in a Docker/Podman or Apptainer container.
 
 Global Options:
     --config <FILE>             Load configuration from specified YAML file
     --debug                     Enable debug mode (verbose logging)
     --dry-run                   Show what would be executed without running
     --clean                     Remove all containers before launch
+    --container-runtime <NAME>  docker | podman | apptainer | singularity
+                                [default: container.runtime in config, else the first one found in that order]
     --help, -h                  Show this message and exit
 
 Docker/Podman Options:
@@ -59,6 +61,18 @@ Docker/Podman Options:
 
     Note: Any other docker/podman run option (e.g., --privileged, --rm) is also supported.
 
+Apptainer / Singularity:
+    Runs 'apptainer exec --cleanenv <image> ...' as the calling user, with the options above translated:
+        --volume becomes --bind (only the ro/rw modes are kept).
+        --device /dev/... is dropped: Apptainer mounts the host /dev (its --device takes CDI names).
+        --name, --ipc, --network/--net, --pid, --uts, --userns, --cgroupns, --privileged,
+        --security-opt, --group-add, --cap-add/--cap-drop, --ulimit, --shm-size, --gpus, --user and
+        --rm are dropped: Apptainer already shares the host network, IPC and PID namespaces,
+        /dev/shm and resource limits.
+        Any other option (e.g. --bind, --rocm, --writable-tmpfs, --fakeroot, --overlay) is passed through.
+    --image takes a .sif file or sandbox directory; a plain image name is pulled as docker://<image>.
+    Each run gets a private /tmp that is removed afterwards, unless a volume already targets /tmp.
+
 Examples:
     # Basic training with mounted data
     primus-cli container --volume /mnt/data -- train --config /mnt/data/exp.yaml
@@ -71,6 +85,9 @@ Examples:
 
     # Use configuration file
     primus-cli --config .primus.yaml container -- train
+
+    # Run with Apptainer from a pre-built SIF (apptainer pull primus.sif docker://rocm/primus:v26.7)
+    primus-cli container --container-runtime apptainer --image /shared/primus.sif -- train pretrain
 EOF
 }
 
@@ -124,6 +141,7 @@ CONFIG_FILE=""
 DEBUG_MODE=false
 DRY_RUN_MODE=false
 CLEAN_DOCKER_CONTAINER=false
+CONTAINER_RUNTIME_CLI=""
 PRE_PARSE_ARGS=()
 POST_PARSE_ARGS=()
 
@@ -150,6 +168,14 @@ while [[ $# -gt 0 ]]; do
         --clean)
             CLEAN_DOCKER_CONTAINER=true
             shift
+            ;;
+        --container-runtime)
+            if [[ -z "${2:-}" || "$2" == --* ]]; then
+                LOG_ERROR "[container] --container-runtime requires a value (docker, podman, apptainer or singularity)"
+                exit 2
+            fi
+            CONTAINER_RUNTIME_CLI="$2"
+            shift 2
             ;;
         --help|-h)
             print_usage
@@ -217,15 +243,43 @@ if [[ "$DRY_RUN_MODE" == "false" ]]; then
     fi
 fi
 
-# Validate container runtime (docker/podman)
-if command -v docker >/dev/null 2>&1; then
-    export CONTAINER_RUNTIME="docker"
-elif command -v podman >/dev/null 2>&1; then
-    export CONTAINER_RUNTIME="podman"
+# Select container runtime. Priority: --container-runtime > container.runtime > auto-detect
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME_CLI:-${container_config[runtime]:-auto}}"
+case "$CONTAINER_RUNTIME" in
+    auto)
+        for candidate in docker podman apptainer singularity; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+                CONTAINER_RUNTIME="$candidate"
+                break
+            fi
+        done
+        if [[ "$CONTAINER_RUNTIME" == "auto" ]]; then
+            # Mock runtime for dry-run testing
+            CONTAINER_RUNTIME="docker"
+            LOG_INFO_RANK0 "[container] Using mock container runtime for dry-run (no docker/podman/apptainer found)"
+        fi
+        ;;
+    docker|podman|apptainer|singularity)
+        if ! command -v "$CONTAINER_RUNTIME" >/dev/null 2>&1; then
+            if [[ "$DRY_RUN_MODE" != "true" ]]; then
+                LOG_ERROR "[container] Container runtime '$CONTAINER_RUNTIME' not found in PATH"
+                exit 1
+            fi
+            LOG_INFO_RANK0 "[container] Container runtime '$CONTAINER_RUNTIME' not found; continuing for dry-run"
+        fi
+        ;;
+    *)
+        LOG_ERROR "[container] Unsupported container runtime: '$CONTAINER_RUNTIME' (expected docker, podman, apptainer or singularity)"
+        exit 2
+        ;;
+esac
+export CONTAINER_RUNTIME
+
+# Apptainer and Singularity share one CLI dialect; Docker and Podman share the other.
+if [[ "$CONTAINER_RUNTIME" == "apptainer" || "$CONTAINER_RUNTIME" == "singularity" ]]; then
+    RUNTIME_IS_APPTAINER=true
 else
-    # Mock runtime for dry-run testing
-    export CONTAINER_RUNTIME="docker"
-    LOG_INFO_RANK0 "[container] Using mock container runtime for dry-run (no docker/podman found)"
+    RUNTIME_IS_APPTAINER=false
 fi
 
 ###############################################################################
@@ -372,11 +426,100 @@ validate_volume_format "${container_config[options.volume]:-}" "[container]"
 LOG_INFO_RANK0 "[container] Parameter validation passed"
 
 ###############################################################################
-# STEP 5: Convert container_config to Docker/Podman options
+# STEP 5: Convert container_config to Docker/Podman or Apptainer options
 # Now we have a complete container_config with CLI overrides applied
 ###############################################################################
 
 LOG_INFO_RANK0 "[container] Converting configuration to container options..."
+
+# Rewrite one container_config option (name and newline-separated values) in
+# place for Apptainer. Returns non-zero when the option must not be passed.
+apptainer_translate_option() {
+    local -n _name="$1"
+    local -n _value="$2"
+    local entry src dst modes mode kept
+    local -a mode_list out=()
+
+    case "$_name" in
+        env)
+            # Forwarded as inner primus-cli --env arguments instead
+            return 1
+            ;;
+        # Several of these exist in Apptainer as booleans (--ipc, --net, --pid,
+        # --uts, --userns), so forwarding Docker's "<flag> host" form would make
+        # Apptainer read "host" as the image.
+        name|ipc|network|net|pid|uts|userns|cgroupns|privileged|security-opt|group-add|ulimit|shm-size|gpus|user|cap-add|cap-drop|rm)
+            APPTAINER_DROPPED_OPTIONS+=("--$_name")
+            return 1
+            ;;
+        volume)
+            _name="bind"
+            while IFS= read -r entry; do
+                [[ -n "$entry" ]] || continue
+                IFS=':' read -r src dst modes <<< "$entry"
+                # --bind only understands ro/rw; drop Docker-only modes such as z, Z or cached
+                kept=""
+                IFS=',' read -ra mode_list <<< "$modes"
+                for mode in "${mode_list[@]}"; do
+                    if [[ "$mode" == "ro" || "$mode" == "rw" ]]; then
+                        kept="${kept:+$kept,}$mode"
+                    fi
+                done
+                if [[ -z "$dst" ]]; then
+                    out+=("$src")
+                elif [[ -z "$kept" ]]; then
+                    out+=("$src:$dst")
+                else
+                    out+=("$src:$dst:$kept")
+                fi
+            done <<< "$_value"
+            ;;
+        device)
+            # Apptainer mounts the host /dev already; its --device only takes CDI names
+            while IFS= read -r entry; do
+                [[ -n "$entry" ]] || continue
+                if [[ "$entry" == /dev/* ]]; then
+                    APPTAINER_DROPPED_OPTIONS+=("--device $entry")
+                else
+                    out+=("$entry")
+                fi
+            done <<< "$_value"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    [[ ${#out[@]} -gt 0 ]] || return 1
+    _value="$(printf '%s\n' "${out[@]}")"
+}
+
+# Print the container-side destination of a bind spec (src[:dst[:opts]]).
+apptainer_bind_target() {
+    local spec="$1" target="$1"
+    if [[ "$spec" == *:* ]]; then
+        target="${spec#*:}"
+        target="${target%%:*}"
+    fi
+    echo "${target%/}"
+}
+
+# True when a configured volume/bind already targets /tmp inside the container.
+# Native --bind values may hold a comma-separated list of specs.
+apptainer_binds_tmp() {
+    local entry spec
+    local -a specs
+    while IFS= read -r entry; do
+        [[ -n "$entry" && "$entry" != "[]" ]] || continue
+        IFS=',' read -ra specs <<< "$entry"
+        for spec in "${specs[@]}"; do
+            if [[ "$(apptainer_bind_target "$spec")" == "/tmp" ]]; then
+                return 0
+            fi
+        done
+    done <<< "${container_config[options.volume]:-}"$'\n'"${container_config[options.bind]:-}"
+    return 1
+}
 
 # 1. Image (required, validated above)
 # Allow users to override the image using the environment variable DOCKER_IMAGE.
@@ -384,19 +527,60 @@ if [ -z "${DOCKER_IMAGE:-}" ]; then
     # For single-value options like image, take the last value (CLI overrides config)
     DOCKER_IMAGE=$(echo "${container_config[options.image]}" | tail -n1)
 fi
+# Apptainer treats a bare "repo/image:tag" as a local path, so registry images
+# need an explicit transport. Local .sif files, sandbox directories and refs
+# that already name a transport are used as-is.
+if [[ "$RUNTIME_IS_APPTAINER" == "true" \
+      && ! "$DOCKER_IMAGE" =~ ^(docker|docker-daemon|docker-archive|oci|oci-archive|library|shub|oras|https?|instance): \
+      && ! -e "$DOCKER_IMAGE" && "$DOCKER_IMAGE" != *.sif \
+      && "$DOCKER_IMAGE" != /* && "$DOCKER_IMAGE" != ./* && "$DOCKER_IMAGE" != ../* ]]; then
+    DOCKER_IMAGE="docker://$DOCKER_IMAGE"
+    LOG_INFO_RANK0 "[container] Pulling $DOCKER_IMAGE at launch; for multi-node runs, build a SIF once with '$CONTAINER_RUNTIME pull primus.sif $DOCKER_IMAGE' on a shared filesystem and pass --image /path/to/primus.sif"
+fi
 LOG_INFO_RANK0 "[container] Final image: $DOCKER_IMAGE"
 
 # 2. Build CONTAINER_OPTS from configuration
 CONTAINER_OPTS=()
+CONTAINER_TMPDIR=""
 
-# Always mount project root directory first
-CONTAINER_OPTS+=("-v" "$PRIMUS_PATH:$PRIMUS_PATH")
+if [[ "$RUNTIME_IS_APPTAINER" == "true" ]]; then
+    # Start from the image environment, as Docker does: host variables reach the
+    # container only through the inner --env arguments built above.
+    CONTAINER_OPTS+=("--cleanenv")
+
+    # Apptainer shares the host /tmp, where hooks write fixed-name files (e.g.
+    # /tmp/primus_patch_args.txt) that would collide between users and between
+    # concurrent jobs on a node. Give each run its own /tmp, as Docker does.
+    if ! apptainer_binds_tmp; then
+        CONTAINER_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/primus-container.XXXXXX")" || {
+            LOG_ERROR "[container] Failed to create a private /tmp under ${TMPDIR:-/tmp}"
+            exit 1
+        }
+        register_cleanup_hook "cleanup_temp $(printf '%q' "$CONTAINER_TMPDIR")"
+        # common.sh skips its setup, including this trap, when a parent launcher
+        # (primus-cli, slurm-entry) already sourced it and exported the guard.
+        trap run_cleanup_hooks EXIT
+        CONTAINER_OPTS+=("--bind" "$CONTAINER_TMPDIR:/tmp")
+        LOG_INFO_RANK0 "[container] Added private /tmp: $CONTAINER_TMPDIR"
+    fi
+
+    CONTAINER_OPTS+=("--bind" "$PRIMUS_PATH:$PRIMUS_PATH")
+    BIND_FLAG="--bind"
+else
+    # Always mount project root directory first
+    CONTAINER_OPTS+=("-v" "$PRIMUS_PATH:$PRIMUS_PATH")
+    BIND_FLAG="--volume"
+fi
 LOG_INFO_RANK0 "[container] Added project root volume: $PRIMUS_PATH"
 
 # Cumulative options (all values used, config + CLI merge)
 # Note: options.env is handled separately above and is NOT treated as a
 # container-level --env; it becomes inner primus-cli --env arguments instead.
 CUMULATIVE_OPTIONS=("device" "cap-add" "volume")
+if [[ "$RUNTIME_IS_APPTAINER" == "true" ]]; then
+    CUMULATIVE_OPTIONS+=("bind" "mount" "overlay")
+fi
+APPTAINER_DROPPED_OPTIONS=()
 
 for key in "${!container_config[@]}"; do
     [[ "$key" =~ ^options\. ]] || continue
@@ -407,6 +591,10 @@ for key in "${!container_config[@]}"; do
     # Skip image (used separately) and empty array markers
     [[ "$opt_name" == "image" ]] && continue
     [[ "$opt_value" == "[]" ]] && continue
+
+    if [[ "$RUNTIME_IS_APPTAINER" == "true" ]]; then
+        apptainer_translate_option opt_name opt_value || continue
+    fi
 
     # Make the container name unique per job so an orphaned container left by a
     # previous/cancelled job on a reused node doesn't cause a "name already in
@@ -451,6 +639,10 @@ for key in "${!container_config[@]}"; do
     fi
 done
 
+if [[ ${#APPTAINER_DROPPED_OPTIONS[@]} -gt 0 ]]; then
+    LOG_INFO_RANK0 "[container] Not passed to ${CONTAINER_RUNTIME} (it shares the host network, IPC, /dev and limits, and runs as the calling user): ${APPTAINER_DROPPED_OPTIONS[*]}"
+fi
+
 # The bnxt rebuild hook runs inside the container and checks for the tar on
 # disk, so forwarding PATH_TO_BNXT_TAR_PACKAGE as an env var is not enough: the
 # file has to be visible under the same path. Skip when the configured volumes
@@ -465,9 +657,29 @@ if [[ -n "${PATH_TO_BNXT_TAR_PACKAGE:-}" && -f "${PATH_TO_BNXT_TAR_PACKAGE}" ]];
         fi
     done
     if [[ $bnxt_mounted -eq 0 ]]; then
-        CONTAINER_OPTS+=("--volume" "$bnxt_mount")
-        LOG_INFO_RANK0 "[container] Added cumulative: --volume $bnxt_mount"
+        CONTAINER_OPTS+=("$BIND_FLAG" "$bnxt_mount")
+        LOG_INFO_RANK0 "[container] Added cumulative: $BIND_FLAG $bnxt_mount"
     fi
+fi
+
+# Apptainer cannot create a missing bind destination inside another bind, so
+# targets under the private /tmp (e.g. a checkout in /tmp) must exist there.
+if [[ -n "${CONTAINER_TMPDIR:-}" ]]; then
+    for ((opt_i = 0; opt_i < ${#CONTAINER_OPTS[@]} - 1; opt_i++)); do
+        [[ "${CONTAINER_OPTS[opt_i]}" == "--bind" ]] || continue
+        IFS=',' read -ra bind_specs <<< "${CONTAINER_OPTS[opt_i + 1]}"
+        for bind_spec in "${bind_specs[@]}"; do
+            bind_target="$(apptainer_bind_target "$bind_spec")"
+            [[ "$bind_target" == /tmp/?* ]] || continue
+            bind_point="$CONTAINER_TMPDIR/${bind_target#/tmp/}"
+            if [[ -d "${bind_spec%%:*}" ]]; then
+                mkdir -p "$bind_point"
+            else
+                mkdir -p "$(dirname "$bind_point")" && touch "$bind_point"
+            fi
+            LOG_DEBUG_RANK0 "[container] Created bind point in private /tmp: $bind_target"
+        done
+    done
 fi
 
 
@@ -475,7 +687,9 @@ fi
 # STEP 6: Optional container cleanup
 ###############################################################################
 
-if [[ "$CLEAN_DOCKER_CONTAINER" == "true" ]]; then
+if [[ "$CLEAN_DOCKER_CONTAINER" == "true" && "$RUNTIME_IS_APPTAINER" == "true" ]]; then
+    LOG_INFO_RANK0 "[container] --clean: ${CONTAINER_RUNTIME} keeps no containers between runs; nothing to remove."
+elif [[ "$CLEAN_DOCKER_CONTAINER" == "true" ]]; then
     LOG_INFO_RANK0 "[container] Cleaning up existing containers..."
     CONTAINERS="$($CONTAINER_RUNTIME ps -aq)"
     if [[ -n "$CONTAINERS" ]]; then
@@ -519,18 +733,34 @@ CONTAINER_SCRIPT="\
     echo [container ${NODE_RANK:-0}][INFO]: finished at \$(date +%Y.%m.%d) \$(date +%H:%M:%S)"
 
 # Build complete command array
-CMD=(
-    "${CONTAINER_RUNTIME}"
-    run
-    --rm
-    "${OPTION_ARGS[@]}"
-    "$DOCKER_IMAGE"
-    /bin/bash
-    -c
-    "$CONTAINER_SCRIPT"
-    bash
-    "${ARGS[@]}"
-)
+if [[ "$RUNTIME_IS_APPTAINER" == "true" ]]; then
+    # `exec` runs the given command instead of the image runscript, and an
+    # Apptainer container leaves nothing behind, so there is no --rm.
+    CMD=(
+        "${CONTAINER_RUNTIME}"
+        exec
+        "${OPTION_ARGS[@]}"
+        "$DOCKER_IMAGE"
+        /bin/bash
+        -c
+        "$CONTAINER_SCRIPT"
+        bash
+        "${ARGS[@]}"
+    )
+else
+    CMD=(
+        "${CONTAINER_RUNTIME}"
+        run
+        --rm
+        "${OPTION_ARGS[@]}"
+        "$DOCKER_IMAGE"
+        /bin/bash
+        -c
+        "$CONTAINER_SCRIPT"
+        bash
+        "${ARGS[@]}"
+    )
+fi
 
 # Display command
 LOG_INFO_RANK0 "[container] Launching container with the following configuration:"
@@ -569,17 +799,31 @@ fi
 # and the scheduler propagates them to every node (spur sbatch --export=ALL),
 # so the login+pull happens automatically at launch. DOCKER_LOGIN_REGISTRY is
 # optional and defaults to Docker Hub.
+# Apptainer/Singularity read the same credentials from their
+# <RUNTIME>_DOCKER_USERNAME/PASSWORD variables when pulling a docker:// image.
 # ---------------------------------------------------------------------------
 if [[ -n "${DOCKER_LOGIN_KEY:-}" ]]; then
     if [[ -z "${DOCKER_LOGIN_USER:-}" ]]; then
         LOG_ERROR "[container] DOCKER_LOGIN_KEY is set but DOCKER_LOGIN_USER is empty."
         exit 1
     fi
-    LOG_INFO_RANK0 "[container] Logging in to registry ${DOCKER_LOGIN_REGISTRY:-docker.io} as ${DOCKER_LOGIN_USER}..."
-    if ! printf '%s' "${DOCKER_LOGIN_KEY}" | \
-        "$CONTAINER_RUNTIME" login ${DOCKER_LOGIN_REGISTRY:+"$DOCKER_LOGIN_REGISTRY"} -u "${DOCKER_LOGIN_USER}" --password-stdin; then
-        LOG_ERROR "[container] Registry login failed for user ${DOCKER_LOGIN_USER}."
-        exit 1
+    if [[ "$RUNTIME_IS_APPTAINER" == "true" ]]; then
+        # A "singularity" binary is either SingularityCE or Apptainer's compat
+        # link, which read different variable prefixes.
+        registry_env_prefixes=(APPTAINER)
+        [[ "$CONTAINER_RUNTIME" == "singularity" ]] && registry_env_prefixes+=(SINGULARITY)
+        for registry_env_prefix in "${registry_env_prefixes[@]}"; do
+            export "${registry_env_prefix}_DOCKER_USERNAME=${DOCKER_LOGIN_USER}"
+            export "${registry_env_prefix}_DOCKER_PASSWORD=${DOCKER_LOGIN_KEY}"
+        done
+        LOG_INFO_RANK0 "[container] Using registry credentials of ${DOCKER_LOGIN_USER} for ${CONTAINER_RUNTIME} image pulls"
+    else
+        LOG_INFO_RANK0 "[container] Logging in to registry ${DOCKER_LOGIN_REGISTRY:-docker.io} as ${DOCKER_LOGIN_USER}..."
+        if ! printf '%s' "${DOCKER_LOGIN_KEY}" | \
+            "$CONTAINER_RUNTIME" login ${DOCKER_LOGIN_REGISTRY:+"$DOCKER_LOGIN_REGISTRY"} -u "${DOCKER_LOGIN_USER}" --password-stdin; then
+            LOG_ERROR "[container] Registry login failed for user ${DOCKER_LOGIN_USER}."
+            exit 1
+        fi
     fi
 fi
 

@@ -124,6 +124,32 @@ When using `runner/.primus.yaml`, the default container section includes:
 
 `container.options.env` in `runner/.primus.yaml` lists **names** that are forwarded into the container as inner `--env` arguments when the variable is set in the host environment (for example `MASTER_ADDR`, `HF_TOKEN`, `NCCL_SOCKET_IFNAME`). The container script also auto-forwards host variables whose names start with `PRIMUS_`, `NCCL_`, `RCCL_`, `GLOO_`, `IONIC_`, or `HIPBLASLT_` when not already listed.
 
+### Apptainer / Singularity
+
+On clusters without Docker or Podman, container mode can use Apptainer (or Singularity). It is picked automatically when `docker` and `podman` are not on `PATH`. To choose it explicitly, pass `--container-runtime apptainer` or set `container.runtime: apptainer` in the launcher YAML.
+
+```bash
+# Build the SIF once on a shared filesystem, then launch from it
+apptainer pull /shared/images/primus_v26.7.sif docker://rocm/primus:v26.7
+./runner/primus-cli container --container-runtime apptainer --image /shared/images/primus_v26.7.sif \
+  -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
+
+# Same through Slurm
+./runner/primus-cli slurm srun -N 4 -- container --container-runtime apptainer \
+  --image /shared/images/primus_v26.7.sif -- train pretrain --config exp.yaml
+```
+
+The launcher runs `apptainer exec --cleanenv` as the calling user, so environment forwarding works the same as with Docker. Options are translated as follows:
+
+- `--volume` becomes `--bind`. Only the `ro` and `rw` modes are kept.
+- `--device /dev/...` is dropped, because Apptainer already mounts the host `/dev`. The user needs the usual host permissions on `/dev/kfd` and `/dev/dri`, typically membership in the `render` and `video` groups.
+- `--name`, `--ipc`, `--network`/`--net`, `--pid`, `--uts`, `--userns`, `--cgroupns`, `--privileged`, `--security-opt`, `--group-add`, `--cap-add`/`--cap-drop`, `--ulimit`, `--shm-size`, `--gpus`, `--user`, and `--rm` are dropped. Apptainer already shares the host network, IPC and PID namespaces, `/dev/shm`, and resource limits. Raise `ulimit -n` on the host if needed.
+- Other options are passed through unchanged, for example `--bind`, `--rocm`, `--writable-tmpfs`, `--fakeroot`, and `--overlay`.
+- `--image` accepts a `.sif` file or a sandbox directory. A plain image name is pulled as `docker://<image>`, using `DOCKER_LOGIN_USER` and `DOCKER_LOGIN_KEY` when they are set.
+- Each run gets a private `/tmp`, which is removed afterwards, unless a volume already targets `/tmp`.
+
+The image is mounted read-only, and the process does not run as root. Hooks that modify the image therefore need the change baked into the image, or `--fakeroot --writable-tmpfs` if the site allows it. Affected hooks are `REBUILD_PRIMUS_TURBO`, `REBUILD_UEP`, `REBUILD_BNXT`, `PATCH_TE_FLASH_ATTN`, the AITER asm-dir fix, and pip installs of missing dependencies.
+
 ---
 
 ## Slurm mode

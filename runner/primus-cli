@@ -35,7 +35,7 @@ Global Options:
 
 Supported modes:
     slurm      Launch distributed workflows via Slurm cluster (srun/sbatch)
-    container  Launch workflows in a managed Docker/Podman container
+    container  Launch workflows in a managed Docker/Podman/Apptainer container
     direct     Launch workflows directly on the current host or container
     deps       Sync third_party sources (from packaged lock) for an installed wheel
 

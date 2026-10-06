@@ -21,9 +21,14 @@ slurm:
 container:
   debug: false
   dry_run: false
+  # Container runtime: docker | podman | apptainer | singularity
+  # (default: the first one found in that order; CLI: --container-runtime)
+  # runtime: "apptainer"
 
   # Docker/Podman runtime options
   # All keys directly map to CLI arguments (--key value)
+  # With Apptainer, volumes become --bind and Docker-only options are dropped
+  # (see: primus-cli container --help)
   options:
     # Container image
     image: "rocm/primus:v26.7"

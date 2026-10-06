@@ -359,6 +359,217 @@ test_help_output() {
 }
 
 # ============================================================================
+# Apptainer tests. Host device validation only needs an existing node, so
+# /dev/null keeps these runnable on machines without ROCm devices.
+# ============================================================================
+
+# ============================================================================
+# Test 11: Apptainer option translation
+# ============================================================================
+test_apptainer_translation() {
+    print_section "Test 11: Apptainer Option Translation"
+
+    local test_config="/tmp/test_container_config_$$.yaml"
+    cat > "$test_config" << 'EOF'
+container:
+  options:
+    image: "test_image:v1"
+    ipc: "host"
+    network: "host"
+    privileged: "true"
+    name: "primus-training"
+    device:
+      - "/dev/null"
+    cap-add:
+      - "SYS_PTRACE"
+    volume:
+      - "/data:/data:ro,z"
+    env:
+      - "CONFIG_VAR=from_config"
+EOF
+
+    local output
+    output=$(timeout 10 bash "$RUNNER_DIR/primus-cli-container.sh" --config "$test_config" --dry-run \
+        --container-runtime apptainer --rocm -- test 2>&1 || true)
+
+    assert_contains "$output" "Runtime: apptainer" "Apptainer runtime selected via --container-runtime"
+    assert_contains "$output" "Would execute: apptainer exec --cleanenv" "Uses apptainer exec with a clean environment"
+    assert_contains "$output" "docker://test_image:v1" "Registry image gets docker:// transport"
+    assert_contains "$output" "--bind /data:/data:ro" "Volume becomes --bind"
+    assert_not_contains "$output" "ro,z" "Docker-only volume mode dropped"
+    assert_contains "$output" ":/tmp --bind $PROJECT_ROOT:$PROJECT_ROOT" "Private /tmp and project root bound"
+    assert_contains "$output" "--rocm" "Apptainer-native flag passed through"
+    assert_contains "$output" "--env CONFIG_VAR=from_config" "Config env forwarded to inner launcher"
+    assert_not_contains "$output" "Would execute: docker" "Docker command not used"
+    for docker_only in "--ipc host" "--network host" "--privileged" "--name primus-training" "--device /dev/null" "--cap-add SYS_PTRACE"; do
+        assert_not_contains "$(grep 'Would execute' <<< "$output")" "$docker_only" "Docker-only option dropped: $docker_only"
+    done
+
+    rm -f "$test_config"
+}
+
+# ============================================================================
+# Test 12: Apptainer runtime from config with a local SIF image
+# ============================================================================
+test_apptainer_sif_from_config() {
+    print_section "Test 12: Apptainer Runtime from Config with SIF Image"
+
+    local test_config="/tmp/test_container_config_$$.yaml"
+    cat > "$test_config" << 'EOF'
+container:
+  runtime: "apptainer"
+  options:
+    image: "test_image:v1"
+    device:
+      - "/dev/null"
+EOF
+
+    local output
+    output=$(timeout 10 bash "$RUNNER_DIR/primus-cli-container.sh" --config "$test_config" --dry-run \
+        --image /shared/images/primus.sif --volume /scratch/tmp:/tmp -- test 2>&1 || true)
+
+    assert_contains "$output" "Runtime: apptainer" "container.runtime selects apptainer"
+    assert_contains "$output" "Image: /shared/images/primus.sif" "SIF path used as-is"
+    assert_not_contains "$output" "docker:///shared" "SIF path not given a docker:// transport"
+    assert_contains "$output" "--bind /scratch/tmp:/tmp" "User /tmp volume kept"
+    assert_not_contains "$output" "Added private /tmp" "No private /tmp when a volume targets /tmp"
+
+    rm -f "$test_config"
+}
+
+# ============================================================================
+# Test 13: Unsupported runtime is rejected
+# ============================================================================
+test_unsupported_runtime() {
+    print_section "Test 13: Unsupported Runtime"
+
+    local test_config="/tmp/test_container_config_$$.yaml"
+    cat > "$test_config" << 'EOF'
+container:
+  options:
+    image: "test_image:v1"
+    device:
+      - "/dev/null"
+EOF
+
+    local output exit_code=0
+    output=$(timeout 10 bash "$RUNNER_DIR/primus-cli-container.sh" --config "$test_config" --dry-run \
+        --container-runtime lxc -- test 2>&1) || exit_code=$?
+
+    assert_equals "2" "$exit_code" "Unsupported runtime exits with code 2"
+    assert_contains "$output" "Unsupported container runtime: 'lxc'" "Unsupported runtime reported"
+
+    rm -f "$test_config"
+}
+
+# ============================================================================
+# Test 14: Apptainer launch (non dry-run) with a stub runtime
+# ============================================================================
+test_apptainer_launch_with_stub() {
+    print_section "Test 14: Apptainer Launch with Stub Runtime"
+
+    local stub_dir="/tmp/test_container_stub_$$"
+    local test_config="/tmp/test_container_config_$$.yaml"
+    mkdir -p "$stub_dir"
+    cat > "$stub_dir/apptainer" << 'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    if [[ "$arg" == *:/tmp ]]; then
+        tmp_src="${arg%:/tmp}"
+        [[ -d "$tmp_src" ]] && echo "stub: private tmp exists: $tmp_src"
+    fi
+done
+echo "stub: user=${APPTAINER_DOCKER_USERNAME:-} password=${APPTAINER_DOCKER_PASSWORD:-}"
+echo "stub: args=$*"
+exit 7
+EOF
+    chmod +x "$stub_dir/apptainer"
+    cat > "$test_config" << 'EOF'
+container:
+  options:
+    image: "test_image:v1"
+    device:
+      - "/dev/null"
+EOF
+
+    # Launch through primus-cli: it sources common.sh first, which is the path
+    # where the container script cannot rely on common.sh's own exit trap.
+    local output exit_code=0
+    output=$(PATH="$stub_dir:$PATH" DOCKER_LOGIN_USER=alice DOCKER_LOGIN_KEY=secret \
+        timeout 10 bash "$RUNNER_DIR/primus-cli" container --config "$test_config" \
+        --container-runtime apptainer -- test 2>&1) || exit_code=$?
+
+    local private_tmp
+    private_tmp=$(sed -n 's/^stub: private tmp exists: //p' <<< "$output")
+
+    assert_equals "7" "$exit_code" "Runtime exit code propagated"
+    assert_contains "$output" "stub: args=exec --cleanenv" "Stub invoked with apptainer exec"
+    assert_contains "$output" "stub: user=alice password=secret" "Registry credentials passed via APPTAINER_DOCKER_*"
+    if [[ -n "$private_tmp" && ! -e "$private_tmp" ]]; then
+        assert_pass "Private /tmp existed during the run and was removed afterwards"
+    else
+        assert_fail "Private /tmp existed during the run and was removed afterwards" "private tmp: '${private_tmp}'"
+    fi
+
+    rm -rf "$stub_dir" "$test_config"
+}
+
+# ============================================================================
+# Test 15: Apptainer binds nested under the private /tmp
+# ============================================================================
+test_apptainer_nested_tmp_binds() {
+    print_section "Test 15: Apptainer Binds Nested Under Private /tmp"
+
+    # A checkout under /tmp (as CI does) makes the project-root bind nested too.
+    local work="/tmp/test_container_nested_$$"
+    local checkout="$work/Primus"
+    local test_config="$work/config.yaml"
+    mkdir -p "$work/stub" "$work/data" "$checkout"
+    cp -r "$RUNNER_DIR" "$checkout/runner"
+    touch "$work/bnxt.tar.gz"
+    cat > "$work/stub/apptainer" << 'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    if [[ "$arg" == *:/tmp ]]; then
+        (cd "${arg%:/tmp}" && find . -mindepth 1 | sort | sed 's/^/stub: in private tmp: /')
+    fi
+done
+printf 'stub: arg=%s\n' "$@"
+EOF
+    chmod +x "$work/stub/apptainer"
+    cat > "$test_config" << 'EOF'
+container:
+  options:
+    image: "test_image:v1"
+    device:
+      - "/dev/null"
+EOF
+
+    local output exit_code=0
+    output=$(PATH="$work/stub:$PATH" PATH_TO_BNXT_TAR_PACKAGE="$work/bnxt.tar.gz" \
+        timeout 10 bash "$checkout/runner/primus-cli-container.sh" --config "$test_config" \
+        --container-runtime apptainer --volume "$work/data:$work/data:ro" \
+        --bind "/opt/a:/a,/opt/b:/b" --pid host --network host -- test 2>&1) || exit_code=$?
+    local rel="${work#/tmp/}"
+
+    assert_equals "0" "$exit_code" "Launch with nested binds succeeds"
+    assert_contains "$output" "stub: in private tmp: ./$rel/Primus" "Project-root bind point created in private /tmp"
+    assert_contains "$output" "stub: in private tmp: ./$rel/data" "Volume bind point created in private /tmp"
+    assert_contains "$output" "stub: in private tmp: ./$rel/bnxt.tar.gz" "File bind point created in private /tmp"
+    assert_contains "$output" "stub: arg=/opt/a:/a,/opt/b:/b" "Native --bind list passed through unchanged"
+    assert_not_contains "$output" "stub: arg=--pid" "Docker --pid dropped"
+    assert_not_contains "$output" "stub: arg=host" "No stray 'host' value forwarded"
+
+    exit_code=0
+    output=$(timeout 10 bash "$RUNNER_DIR/primus-cli-container.sh" --config "$test_config" \
+        --container-runtime -- test 2>&1) || exit_code=$?
+    assert_equals "2" "$exit_code" "--container-runtime without a value exits with code 2"
+    assert_contains "$output" "--container-runtime requires a value" "Missing runtime value reported"
+
+    rm -rf "$work"
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 main() {
@@ -376,6 +587,11 @@ main() {
     test_boolean_flags
     test_config_priority
     test_help_output
+    test_apptainer_translation
+    test_apptainer_sif_from_config
+    test_unsupported_runtime
+    test_apptainer_launch_with_stub
+    test_apptainer_nested_tmp_binds
 
     # Print summary
     echo ""

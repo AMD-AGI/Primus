@@ -170,7 +170,7 @@ test_container_mode_help() {
     local output
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" container --help 2>&1)
 
-    assert_contains "$output" "Docker/Podman container" "Shows container mode help"
+    assert_contains "$output" "Docker/Podman or Apptainer container" "Shows container mode help"
 }
 
 # ============================================================================
