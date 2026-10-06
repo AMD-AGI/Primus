@@ -157,16 +157,15 @@ modules:
       mxfp6_gate_mul_pack_bias: true
       mxfp6_ln_bwd_ns16: true
       mxfp6_adaln_wgrad_main_grad: true
-      # GEMM kernels: Primus-Turbo's FlyDSL GEMMs compiled at runtime (prefill FLYDSL_RUNTIME_CACHE_DIR with
-      # `python -m primus_turbo.flydsl.precompile` to skip the compile at startup).
-      mxfp6_a6w6_backend: flydsl
+      # GEMM operands in the tilescale layout: the MX GEMMs run on aiter's tilescale kernels where one exists for
+      # the shape, on its tile-blob kernels otherwise.
+      mxfp6_gemm_layout: tilescale
       # MXFP4 (A4W4) backward GEMMs, dgrad and wgrad, with stochastic rounding on both operands: the gradient and the
       # activations' / weights' MXFP4 backward copies (so the backward GEMMs are unbiased).
       mxfp6_bwd_fp4_dgrad: true
       mxfp6_bwd_fp4_wgrad: true
       mxfp6_bwd_fp4_sr: true
       mxfp6_fp4_sr_actw: true
-      mxfp6_bwd_fp4_backend: flydsl_packed
       # MXFP4 forward for the single blocks' MLP fc1; their fc2 + attention out-projection forward stays MXFP6.
       mxfp6_fwd_fp4_single_linear2: false
       mxfp6_fwd_fp4_single_fc1: true

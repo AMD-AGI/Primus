@@ -37,6 +37,7 @@ from typing import Optional
 TRISTATE = ("auto", "on", "off")
 FP4_SCALE_ROUNDING = ("rceil", "m0", "m1", "m2")
 FP4_HADAMARD = ("h32", "h16", "none")
+GEMM_LAYOUTS = ("blob", "tilescale")
 
 
 @dataclass
@@ -131,42 +132,29 @@ class Mxfp6Gates:
     # A6W6 forward, per-stream A4W4 dgrads. (there is no grouped A4W4 kernel).
     # Bit-identical to the ungrouped A4W4 path. Off: without it the grouped MLP falls back to two MLPs while a bwd_fp4 gate is on.
     bwd_fp4_grouped_mlp: bool = False
-    # Which kernel runs the A4W4 GEMMs: "aiter" (f4gemm asm, tuned table) or "flydsl"
-    # (Turbo's FlyDSL MXFP4 GEMM). FlyDSL
-    # takes plain-layout operands, so the packs switch to fmt 8 / 9 / 12. Needs both bwd_fp4 gates.
-    # "flydsl_packed": the packers also store the scales in FlyDSL's packed per-tile layout,
-    # so FlyDSL skips its per-GEMM scale repack; bit-identical to "flydsl".
-    # "aiter_fly": the same packed operands on aiter `gemm_a4w4_fly_asm`, assembly ports of FlyDSL's 256-wide
-    # kernel (one AOT code object per supported shape; no FlyDSL at runtime). FlyDSL's 192-wide tile and its
-    # split-K variants are not bit-exact, so both are off in Turbo.
-    bwd_fp4_backend: str = "aiter"
+    # Operand layout of every MX GEMM, and with it the kernels (all AITER asm):
+    #   "blob":      AITER's tile blobs -- A6W6 on the tuned table, A4W4 on f4gemm.
+    #   "tilescale": the tilescale layout (aiter.ops.tilescale) -- forward A6W6, the MXFP4 forward and the A4W4
+    #                backward on aiter's tilescale kernels where one exists for the shape; other A6W6 shapes stay on
+    #                the blob kernels, other MXFP4-forward shapes on the A4W4 tile-blob kernels. The A4W4 backward
+    #                packs store the scales per consuming GEMM. Needs both bwd_fp4 gates if either is on.
+    gemm_layout: str = "blob"
     # MXFP4 forward for the single blocks' linear2 (attention out-projection + MLP fc2): their
     # activations and weights pack as
     # plain FP4 both ways (fmt 8) and the forward GEMMs run FlyDSL A4W4. Changes forward numerics.
-    # Needs both bwd_fp4 gates and bwd_fp4_backend 'flydsl', 'flydsl_packed' or 'aiter_fly' (whose backward columns are the
-    # layouts its forward packs write).
+    # Needs both bwd_fp4 gates and gemm_layout "tilescale" (whose backward columns are the layouts its forward
+    # packs write).
     fwd_fp4_single_linear2: bool = False
     # MXFP4 forward for the single blocks' MLP fc1 too: same packs / backends / requirements as
     # fwd_fp4_single_linear2. Changes forward numerics.
     fwd_fp4_single_fc1: bool = False
     # MXFP4 forward for the joint blocks' stream MLPs, fc1 and fc2; same requirements.
     fwd_fp4_joint_mlp: bool = False
-    # Forward A6W6 GEMMs on aiter `gemm_a6w6_fly_asm`: assembly ports of FlyDSL's MXFP6 GEMM, one AOT code
-    # object per supported (M, N, K, bias). Those GEMMs' operands
-    # pack their rows in the K128-blocked fly layout; columns (the backward's operands) are unchanged. Bit-identical
-    # to the A6W6 tile-blob kernels; other shapes keep them. Needs bwd_fp4_backend 'aiter_fly' or no bwd_fp4 gate,
-    # and neither wgrad_a6w4 nor the MXFP4 weight format.
-    fwd_a6w6_fly: bool = False
-    # Forward GEMMs as A6W4 on the tilescale layout (aiter `gemm_a6w4_tilescale`): MXFP6 activations (the fly6 rows)
-    # times MXFP4 weights (H32, RCEIL, round to nearest; K128-blocked codes), wherever aiter has the kernel for the
-    # (M, N, K, bias). Columns (the backward's operands) are unchanged. GEMMs on the MXFP4 forward
-    # (fwd_fp4_*) keep it. Changes forward numerics. Needs bwd_fp4_backend 'flydsl_packed' / 'aiter_fly' or no
-    # bwd_fp4 gate, and neither wgrad_a6w4 nor the MXFP4 weight format.
-    fwd_a6w4_ts: bool = False
-    # Which kernels run the A6W6 GEMMs: "aiter" (the tuned asm table) or "flydsl" (Turbo's FlyDSL
-    # MXFP6 GEMM compiled at runtime on the same MXFP6 blobs, one tile per WG; bit-identical to AITER, bias included).
-    # Process-wide in Turbo (set_a6w6_backend); shapes the FlyDSL kernel does not take stay on AITER.
-    a6w6_backend: str = "aiter"
+    # Forward GEMMs as A6W4 on the tilescale layout (aiter `gemm_a6w4_tilescale`): MXFP6 activations times MXFP4
+    # weights (H32, RCEIL, round to nearest; K128-blocked codes), wherever aiter has the kernel for the
+    # (M, N, K, bias). Columns (the backward's operands) are unchanged. GEMMs on the MXFP4 forward (fwd_fp4_*) keep
+    # it. Changes forward numerics. Needs gemm_layout "tilescale", and neither wgrad_a6w4 nor the MXFP4 weight format.
+    fwd_a6w4: bool = False
     # Selective A4W4: the first / last N transformer blocks keep the A6W6
     # backward while the bwd_fp4 gates are on. Forward hooks switch the three bwd_fp4 gates off
     # around those blocks' forwards; every MXFP6 Function captures the flags at forward time
@@ -196,7 +184,7 @@ class Mxfp6Gates:
     # Stochastic rounding of the activations' and weights' MXFP4 backward copies (the wgrad / dgrad B operands), on
     # top of bwd_fp4_sr's gradient operand: with both operands of a backward GEMM rounded stochastically and
     # independently the product is unbiased; with one round-to-nearest it carries that operand's rounding bias. The
-    # forward rows of MXFP4-forward layers stay round-to-nearest. Needs bwd_fp4_backend flydsl_packed or aiter_fly.
+    # forward rows of MXFP4-forward layers stay round-to-nearest. Needs gemm_layout "tilescale".
     fp4_sr_actw: bool = False
     # The joint blocks' image-stream fc1 forward as a bf16 GEMM (its most sensitive GEMM); its backward stays as the
     # gates above set it, on FP4 / MXFP6 column packs of the bf16 operands. Disables the grouped joint MLP (the two
@@ -221,8 +209,10 @@ class Mxfp6Gates:
                 raise ValueError(
                     f"mxfp6_fp4_hadamard_{name} must be one of {list(FP4_HADAMARD)}, got {value!r}."
                 )
-        if self.fp4_sr_actw and self.bwd_fp4_backend not in ("flydsl_packed", "aiter_fly"):
-            raise ValueError("mxfp6_fp4_sr_actw needs mxfp6_bwd_fp4_backend 'flydsl_packed' or 'aiter_fly'.")
+        if self.gemm_layout not in GEMM_LAYOUTS:
+            raise ValueError(f"mxfp6_gemm_layout must be one of {list(GEMM_LAYOUTS)}, got {self.gemm_layout!r}.")
+        if self.fp4_sr_actw and self.gemm_layout != "tilescale":
+            raise ValueError("mxfp6_fp4_sr_actw needs mxfp6_gemm_layout 'tilescale'.")
         if self.fp4_weight_2d:
             fwd_fp4 = self.fwd_fp4_single_linear2 or self.fwd_fp4_single_fc1 or self.fwd_fp4_joint_mlp
             if self.fp4_hadamard_dgrad != "none" or (fwd_fp4 and self.fp4_hadamard_fwd != "none"):
@@ -251,15 +241,33 @@ def gates() -> Mxfp6Gates:
     return _GATES
 
 
-def _apply_a6w6_backend(name: str) -> None:
-    """Hand ``a6w6_backend`` to Primus-Turbo, whose GEMM entry points read it."""
+# Retired config keys -> what replaces them. Setting one is an error, not a silent no-op.
+RETIRED_KEYS = {
+    "mxfp6_bwd_fp4_backend": "mxfp6_gemm_layout ('aiter' -> 'blob'; 'aiter_fly' / 'flydsl_packed' -> 'tilescale'; "
+    "'flydsl' is gone)",
+    "mxfp6_fwd_a6w6_fly": "mxfp6_gemm_layout: tilescale",
+    "mxfp6_a6w6_backend": "nothing (the GEMMs run on AITER's kernels; the FlyDSL backend is gone)",
+    "mxfp6_fwd_a6w4_ts": "mxfp6_fwd_a6w4",
+}
+
+
+def check_retired(source) -> None:
+    """Raise if ``source`` (a config or the parsed arguments) sets a retired key."""
+    hit = [k for k in RETIRED_KEYS if getattr(source, k, None) is not None]
+    if hit:
+        raise ValueError(
+            "retired MXFP6 config keys: "
+            + "; ".join(f"{k} -> use {RETIRED_KEYS[k]}" for k in hit)
+        )
+
+
+def _pin_aiter_backend() -> None:
+    """Keep Primus-Turbo's A6W6 GEMMs on AITER whatever its environment says (the FlyDSL backend is not used)."""
     try:
         from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import set_a6w6_backend
     except ImportError:
-        if name != "aiter":
-            raise RuntimeError(f"mxfp6_a6w6_backend={name!r} needs a Primus-Turbo with set_a6w6_backend")
         return
-    set_a6w6_backend(name)
+    set_a6w6_backend("aiter")
 
 
 def configure(config) -> Mxfp6Gates:
@@ -270,6 +278,7 @@ def configure(config) -> Mxfp6Gates:
     so that modules which captured a reference to it still observe the update.
     """
     global _GATES
+    check_retired(config)
     resolved = Mxfp6Gates()
     defaults = Mxfp6Gates()
     for f in fields(Mxfp6Gates):
@@ -278,7 +287,7 @@ def configure(config) -> Mxfp6Gates:
             setattr(resolved, f.name, getattr(config, key))
     resolved.validate()
     _GATES = resolved
-    _apply_a6w6_backend(resolved.a6w6_backend)
+    _pin_aiter_backend()
 
     # Log the RESOLVED gates, not the requested ones. The two can differ: the
     # trainer copies a fixed list of fields onto the model config, so a gate the
@@ -301,7 +310,7 @@ def reset(gate_set: Optional[Mxfp6Gates] = None) -> None:
     """Restore defaults, or install an explicit set. For tests."""
     global _GATES
     _GATES = gate_set if gate_set is not None else Mxfp6Gates()
-    _apply_a6w6_backend(_GATES.a6w6_backend)
+    _pin_aiter_backend()
 
 
 _A6W6_BWD_SAVED = []

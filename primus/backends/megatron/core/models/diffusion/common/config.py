@@ -230,13 +230,12 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_bwd_fp4_wgrad: bool = False
     mxfp6_bwd_fp4_sr: bool = False
     mxfp6_bwd_fp4_grouped_mlp: bool = False
-    mxfp6_bwd_fp4_backend: str = "aiter"
     mxfp6_fwd_fp4_single_linear2: bool = False
     mxfp6_fwd_fp4_single_fc1: bool = False
     mxfp6_fwd_fp4_joint_mlp: bool = False
-    mxfp6_fwd_a6w6_fly: bool = False
-    mxfp6_fwd_a6w4_ts: bool = False
-    mxfp6_a6w6_backend: str = "aiter"
+    # Operand layout of every MX GEMM, "blob" or "tilescale"; see Mxfp6Gates.gemm_layout.
+    mxfp6_gemm_layout: str = "blob"
+    mxfp6_fwd_a6w4: bool = False
     mxfp6_bwd_fp4_a6w6_first: int = 0
     mxfp6_bwd_fp4_a6w6_last: int = 0
     # MXFP4 quantization options of the A4W4 packs; see Mxfp6Gates.fp4_*.
@@ -383,55 +382,29 @@ class BaseDiffusionConfig(TransformerConfig):
             self.mxfp6_bwd_fp4_dgrad or self.mxfp6_bwd_fp4_wgrad
         ) and self.mxfp6_backward_precision != "mxfp6":
             raise ValueError("A4W4 backward needs mxfp6_backward_precision='mxfp6'.")
-        if self.mxfp6_bwd_fp4_backend not in ("aiter", "flydsl", "flydsl_packed", "aiter_fly"):
+        if self.mxfp6_gemm_layout not in mxfp6_gates.GEMM_LAYOUTS:
             raise ValueError(
-                "mxfp6_bwd_fp4_backend must be 'aiter', 'flydsl', 'flydsl_packed' or 'aiter_fly', "
-                f"got {self.mxfp6_bwd_fp4_backend!r}"
+                f"mxfp6_gemm_layout must be one of {list(mxfp6_gates.GEMM_LAYOUTS)}, got {self.mxfp6_gemm_layout!r}"
             )
-        if self.mxfp6_bwd_fp4_backend != "aiter" and not (
-            self.mxfp6_bwd_fp4_dgrad and self.mxfp6_bwd_fp4_wgrad
-        ):
-            raise ValueError("a non-aiter mxfp6_bwd_fp4_backend needs both mxfp6_bwd_fp4_dgrad and _wgrad.")
+        tilescale = self.mxfp6_gemm_layout == "tilescale"
+        # The tilescale A4W4 backward stores each FP4 pack's scales for the GEMM that consumes it, so a gradient's two
+        # directions are both A4W4 or neither.
+        if tilescale and (self.mxfp6_bwd_fp4_dgrad != self.mxfp6_bwd_fp4_wgrad):
+            raise ValueError("mxfp6_gemm_layout 'tilescale' needs both mxfp6_bwd_fp4_dgrad and _wgrad, or neither.")
         if (
             self.mxfp6_fwd_fp4_single_linear2 or self.mxfp6_fwd_fp4_single_fc1 or self.mxfp6_fwd_fp4_joint_mlp
-        ) and not (
-            self.mxfp6_bwd_fp4_dgrad
-            and self.mxfp6_bwd_fp4_wgrad
-            and self.mxfp6_bwd_fp4_backend in ("flydsl", "flydsl_packed", "aiter_fly")
-        ):
+        ) and not (self.mxfp6_bwd_fp4_dgrad and self.mxfp6_bwd_fp4_wgrad and tilescale):
             raise ValueError(
                 "mxfp6_fwd_fp4_single_linear2 / _single_fc1 / _joint_mlp need mxfp6_bwd_fp4_dgrad, _wgrad and "
-                "mxfp6_bwd_fp4_backend 'flydsl', "
-                "'flydsl_packed' or 'aiter_fly'."
+                "mxfp6_gemm_layout 'tilescale'."
             )
-        if self.mxfp6_a6w6_backend not in ("aiter", "flydsl"):
+        if tilescale and (self.mxfp6_wgrad_a6w4 or self.mxfp6_weight_format == "mxfp4"):
             raise ValueError(
-                f"mxfp6_a6w6_backend must be 'aiter' or 'flydsl', got {self.mxfp6_a6w6_backend!r}"
+                "mxfp6_gemm_layout 'tilescale' excludes the blob A6W4 paths (mxfp6_wgrad_a6w4, "
+                "mxfp6_weight_format='mxfp4'); its A6W4 is mxfp6_fwd_a6w4."
             )
-        if self.mxfp6_fwd_a6w6_fly and (
-            self.mxfp6_wgrad_a6w4
-            or self.mxfp6_weight_format == "mxfp4"
-            or (
-                (self.mxfp6_bwd_fp4_dgrad or self.mxfp6_bwd_fp4_wgrad)
-                and self.mxfp6_bwd_fp4_backend != "aiter_fly"
-            )
-        ):
-            raise ValueError(
-                "mxfp6_fwd_a6w6_fly needs mxfp6_bwd_fp4_backend 'aiter_fly' (or no mxfp6_bwd_fp4 gate), "
-                "and neither mxfp6_wgrad_a6w4 nor mxfp6_weight_format='mxfp4'."
-            )
-        if self.mxfp6_fwd_a6w4_ts and (
-            self.mxfp6_wgrad_a6w4
-            or self.mxfp6_weight_format == "mxfp4"
-            or (
-                (self.mxfp6_bwd_fp4_dgrad or self.mxfp6_bwd_fp4_wgrad)
-                and self.mxfp6_bwd_fp4_backend not in ("flydsl_packed", "aiter_fly")
-            )
-        ):
-            raise ValueError(
-                "mxfp6_fwd_a6w4_ts needs mxfp6_bwd_fp4_backend 'flydsl_packed' or 'aiter_fly' (or no mxfp6_bwd_fp4 "
-                "gate), and neither mxfp6_wgrad_a6w4 nor mxfp6_weight_format='mxfp4'."
-            )
+        if self.mxfp6_fwd_a6w4 and not tilescale:
+            raise ValueError("mxfp6_fwd_a6w4 needs mxfp6_gemm_layout 'tilescale'.")
         fp4_opts = {
             k: getattr(self, k)
             for k in (

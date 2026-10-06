@@ -30,7 +30,7 @@ from primus.backends.megatron.core.extensions import (  # noqa: E402
 
 ROUND = {0: "rceil", 1: "m0", 2: "m1", 3: "m2"}
 HAD = {0: "h32", 1: "none", 2: "h16"}
-# A flydsl_packed backward at Flux single-block shapes: M tokens, a 3072 -> 12288 fc1.
+# A tilescale A4W4 backward at Flux single-block shapes: M tokens, a 3072 -> 12288 fc1.
 M, N_OUT, K_IN = 8192, 12288, 3072
 
 
@@ -48,7 +48,7 @@ def _decode(fmt):
 
 def _gates(**kw):
     base = dict(
-        bwd_fp4_dgrad=True, bwd_fp4_wgrad=True, bwd_fp4_backend="flydsl_packed", fwd_fp4_single_fc1=True
+        bwd_fp4_dgrad=True, bwd_fp4_wgrad=True, gemm_layout="tilescale", fwd_fp4_single_fc1=True
     )
     base.update(kw)
     g = Mxfp6Gates(**base)
@@ -76,9 +76,9 @@ def _formats(sr=False):
     }
 
 
-@pytest.mark.parametrize("backend", ["aiter", "flydsl", "flydsl_packed", "aiter_fly"])
-def test_defaults_leave_every_format_untouched(backend):
-    _gates(bwd_fp4_backend=backend, fwd_fp4_single_fc1=backend != "aiter")
+@pytest.mark.parametrize("layout", ["blob", "tilescale"])
+def test_defaults_leave_every_format_untouched(layout):
+    _gates(gemm_layout=layout, fwd_fp4_single_fc1=layout == "tilescale")
     for name, fmt in _formats().items():
         assert fmt >> 16 == 0, (name, hex(fmt))
 
@@ -159,15 +159,15 @@ def _snr(got, ref):
     return 10 * torch.log10(ref.pow(2).sum() / (got.float() - ref).pow(2).sum()).item()
 
 
-@pytest.mark.parametrize("backend", ["flydsl_packed", None])
-def test_bf16_joint_img_fc1(backend):
+@pytest.mark.parametrize("layout", ["tilescale", None])
+def test_bf16_joint_img_fc1(layout):
     """fc1 forward in bf16: its pre-activation is the bf16 GEMM exactly; the backward still runs (A4W4 or A6W6) on
     column packs of the bf16 operands, and every output tracks an fp32 reference at least as well as the MXFP6
     fc1 does."""
     if not torch.cuda.is_available():
         pytest.skip("needs a GPU")
-    if backend:
-        _gates(bwd_fp4_backend=backend, fwd_fp4_single_fc1=False, fwd_bf16_joint_img_fc1=True)
+    if layout:
+        _gates(gemm_layout=layout, fwd_fp4_single_fc1=False, fwd_bf16_joint_img_fc1=True)
     else:
         mxfp6_gates.reset(Mxfp6Gates(fwd_bf16_joint_img_fc1=True))
     m, k, f, h = 1024, 3072, 12288, 3072
@@ -200,4 +200,14 @@ def test_sr_actw_marks_only_activation_and_weight_columns():
         assert not _mx.mx_fmt_base(f[name]) & _mx.MX_FMT_FLY_SR, name  # rows stay round-to-nearest
     assert not f["grad"] & _mx.MX_FMT_FP4_COL_SR
     with pytest.raises(ValueError, match="sr_actw"):
-        _gates(fp4_sr_actw=True, bwd_fp4_backend="flydsl", fwd_fp4_single_fc1=False)
+        _gates(fp4_sr_actw=True, gemm_layout="blob", fwd_fp4_single_fc1=False)
+
+
+def test_retired_keys_raise():
+    """A retired gate key is an error that names its replacement, never a silent no-op."""
+    import types
+
+    for key in mxfp6_gates.RETIRED_KEYS:
+        with pytest.raises(ValueError, match=key):
+            mxfp6_gates.check_retired(types.SimpleNamespace(**{key: "x"}))
+    mxfp6_gates.check_retired(types.SimpleNamespace(mxfp6_gemm_layout="tilescale"))

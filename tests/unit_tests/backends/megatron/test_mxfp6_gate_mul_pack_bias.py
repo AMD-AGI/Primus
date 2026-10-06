@@ -38,9 +38,7 @@ S, B, H = 256, 32, 3072
 
 GATES = {
     "mxfp6": dict(),
-    "a4w4_flydsl_packed_sr": dict(
-        bwd_fp4_dgrad=True, bwd_fp4_wgrad=True, bwd_fp4_sr=True, bwd_fp4_backend="flydsl_packed"
-    ),
+    "a4w4_tilescale_sr": dict(bwd_fp4_dgrad=True, bwd_fp4_wgrad=True, bwd_fp4_sr=True, gemm_layout="tilescale"),
 }
 
 

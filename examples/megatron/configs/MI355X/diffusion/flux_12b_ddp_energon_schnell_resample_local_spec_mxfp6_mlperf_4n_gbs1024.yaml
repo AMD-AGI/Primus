@@ -156,9 +156,9 @@ modules:
       mxfp6_gate_mul_pack_bias: true
       mxfp6_ln_bwd_ns16: true
       mxfp6_adaln_wgrad_main_grad: true
-      # GEMM kernels: Primus-Turbo's FlyDSL GEMMs compiled at runtime (prefill FLYDSL_RUNTIME_CACHE_DIR with
-      # `python -m primus_turbo.flydsl.precompile` to skip the compile at startup).
-      mxfp6_a6w6_backend: flydsl
+      # GEMM operands in the tilescale layout: the MX GEMMs run on aiter's tilescale kernels where one exists for
+      # the shape, on its tile-blob kernels otherwise.
+      mxfp6_gemm_layout: tilescale
 
       flat_grad_clip: true
       cuda_data_prefetch: true

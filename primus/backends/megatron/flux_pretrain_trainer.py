@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from primus.backends.megatron.core.models.diffusion.common import mxfp6_gates
 from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import Mxfp6Gates
 from primus.backends.megatron.diffusion_trainer import DiffusionPretrainTrainer
 from primus.backends.megatron.training.diffusion.forward_step import (
@@ -615,6 +616,8 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
         #
         # Enumerated from the dataclass rather than written out, so adding a gate to
         # Mxfp6Gates cannot leave it stranded here.
+        # A retired gate key in the YAML would otherwise be dropped here without a word.
+        mxfp6_gates.check_retired(params)
         _gate_defaults = Mxfp6Gates()
         config_params.update(
             {
