@@ -113,7 +113,7 @@ Override `EXP` to switch from the default FP8 Turbo-attention yaml:
 
 ```bash
 export EXP=/workspace/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml
-export MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR=mxfp4
+export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR=mxfp4
 # Optional scale rounding for Turbo MXFP4 quant: 0=RTE, 1=RZ, 2=stochastic
 # export PRIMUS_TURBO_MXFP4_SCALE_ROUNDING=0
 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
