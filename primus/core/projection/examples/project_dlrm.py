@@ -181,7 +181,8 @@ def main():
         type=float,
         default=0.0,
         help="fav3_hstu epilogue vector FLOPs per causal score element (fwd); >0 (with bwd) prices the "
-        "epilogue against the arch's vector throughput instead of a fixed Gelem/s rate",
+        "epilogue against the arch's vector throughput instead of a fixed Gelem/s rate.  Calibrate per "
+        "GEMM backend: (measured attn time - simulated tile-matmul time) x vector FLOP/s / score elements",
     )
     p.add_argument(
         "--attn-epilogue-flops-per-elem-bwd",

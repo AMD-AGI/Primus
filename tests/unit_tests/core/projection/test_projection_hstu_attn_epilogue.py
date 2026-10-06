@@ -51,6 +51,33 @@ def test_vector_epilogue_scales_with_vector_throughput():
     assert r2.forward_time_ms - MATMUL_FWD == pytest.approx((r1.forward_time_ms - MATMUL_FWD) / 2)
 
 
+@pytest.mark.parametrize(
+    "arch, clock_mhz, expected_tf",
+    [
+        ("mi300x", None, 304 * 2.1e9 * 256 / 1e12),  # 163.4 TF published fp32 vector peak
+        ("mi355x", 2400, 256 * 2.4e9 * 256 / 1e12),  # 157.3 TF published fp32 vector peak
+        ("mi355x", None, 256 * 2.1e9 * 256 / 1e12),  # profile clock
+    ],
+)
+def test_origami_vector_flops_from_profile(arch, clock_mhz, expected_tf):
+    from primus.core.projection.simulation_backends.origami_backend import (
+        OrigamiGEMMBackend,
+    )
+
+    full = OrigamiGEMMBackend(gpu_arch=arch, gpu_clock_mhz=clock_mhz).vector_flops()
+    one_cu = OrigamiGEMMBackend(gpu_arch=arch, gpu_clock_mhz=clock_mhz, n_cu_override=1).vector_flops()
+    assert full / 1e12 == pytest.approx(expected_tf)
+    assert one_cu == full  # always full chip
+
+
+def test_origami_vector_flops_unknown_arch():
+    from primus.core.projection.simulation_backends.origami_backend import (
+        OrigamiGEMMBackend,
+    )
+
+    assert OrigamiGEMMBackend(gpu_arch="not-a-gpu").vector_flops() is None
+
+
 def test_vector_epilogue_falls_back_without_vector_flops():
     r = _run(
         epilogue_gelem_fwd=1000.0,
