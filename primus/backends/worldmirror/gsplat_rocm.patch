@@ -1,0 +1,265 @@
+--- a/setup.py	2026-10-06 19:01:06.726239404 +0000
++++ b/setup.py	2026-10-05 18:42:50.341668094 +0000
+@@ -3,7 +3,9 @@
+ import os.path as osp
+ import pathlib
+ import platform
++import shutil
+ import sys
++import tempfile
+ 
+ from setuptools import find_packages, setup
+ 
+@@ -69,7 +71,7 @@
+ 
+     nvcc_flags = os.getenv("NVCC_FLAGS", "")
+     nvcc_flags = [] if nvcc_flags == "" else nvcc_flags.split(" ")
+-    nvcc_flags += ["-O3", "--use_fast_math", "-std=c++17"]
++    nvcc_flags += ["-O3", "-std=c++17"]
+     if LINE_INFO:
+         nvcc_flags += ["-lineinfo"]
+     if torch.version.hip:
+@@ -77,11 +79,12 @@
+         # Define here to support older PyTorch versions as well:
+         define_macros += [("USE_ROCM", None)]
+         undef_macros += ["__HIP_NO_HALF_CONVERSIONS__"]
++        # hipcc rejects nvcc-only flags (--use_fast_math, -diag-suppress).
++        nvcc_flags += ["-ffast-math"]
+     else:
+-        nvcc_flags += ["--expt-relaxed-constexpr"]
+-
+-    # GLM/Torch has spammy and very annoyingly verbose warnings that this suppresses
+-    nvcc_flags += ["-diag-suppress", "20012,186"]
++        nvcc_flags += ["--use_fast_math", "--expt-relaxed-constexpr"]
++        # GLM/Torch has spammy and very annoyingly verbose warnings that this suppresses
++        nvcc_flags += ["-diag-suppress", "20012,186"]
+     extra_compile_args["nvcc"] = nvcc_flags
+     if sys.platform == "win32":
+         extra_compile_args["nvcc"] += [
+@@ -91,6 +94,14 @@
+ 
+     current_dir = pathlib.Path(__file__).parent.resolve()
+     glm_path = osp.join(current_dir, "gsplat", "cuda", "csrc", "third_party", "glm")
++    if torch.version.hip:
++        # torch hipifies every header under the build directory, which mangles
++        # GLM (drops its .inl files and breaks its compiler detection). Keep GLM
++        # outside that scope so hip-clang uses GLM's native __HIP__ path.
++        hip_glm_path = osp.join(tempfile.gettempdir(), "gsplat_glm")
++        shutil.rmtree(hip_glm_path, ignore_errors=True)
++        shutil.copytree(osp.join(glm_path, "glm"), osp.join(hip_glm_path, "glm"))
++        glm_path = hip_glm_path
+     include_dirs = [glm_path, osp.join(current_dir, "gsplat", "cuda", "include")]
+ 
+     extension = CUDAExtension(
+--- a/gsplat/cuda/include/Utils.cuh	2026-10-06 19:01:06.614275172 +0000
++++ b/gsplat/cuda/include/Utils.cuh	2026-10-05 18:49:44.483287140 +0000
+@@ -3,12 +3,42 @@
+ #include "Common.h"
+ 
+ #include <cooperative_groups.h>
++#ifdef USE_ROCM
++#include <hip/cooperative_groups/hip_reduce.h>
++
++// HIP has no cg::labeled_partition. Substitute a single-thread group so each
++// thread issues its own atomics instead of reducing within the label group.
++namespace cooperative_groups {
++struct single_thread_group {
++    __device__ unsigned thread_rank() const { return 0; }
++    __device__ unsigned size() const { return 1; }
++};
++template <class ParentT, class LabelT>
++inline __device__ single_thread_group
++labeled_partition(const ParentT &, LabelT) {
++    return {};
++}
++} // namespace cooperative_groups
++#else
+ #include <cooperative_groups/reduce.h>
++#endif
+ 
+ namespace gsplat {
+ 
+ namespace cg = cooperative_groups;
+ 
++template <class WarpT, class T, class OpT>
++inline __device__ T warpReduce(WarpT &warp, T val, OpT op) {
++    return cg::reduce(warp, val, op);
++}
++
++#ifdef USE_ROCM
++template <class T, class OpT>
++inline __device__ T warpReduce(cg::single_thread_group &, T val, OpT) {
++    return val;
++}
++#endif
++
+ ///////////////////////////////
+ // Coordinate Transformations
+ ///////////////////////////////
+@@ -87,30 +117,30 @@
+ inline __device__ void warpSum(float *val, WarpT &warp) {
+ #pragma unroll
+     for (uint32_t i = 0; i < DIM; i++) {
+-        val[i] = cg::reduce(warp, val[i], cg::plus<float>());
++        val[i] = warpReduce(warp, val[i], cg::plus<float>());
+     }
+ }
+ 
+ template <class WarpT> inline __device__ void warpSum(float &val, WarpT &warp) {
+-    val = cg::reduce(warp, val, cg::plus<float>());
++    val = warpReduce(warp, val, cg::plus<float>());
+ }
+ 
+ template <class WarpT> inline __device__ void warpSum(vec4 &val, WarpT &warp) {
+-    val.x = cg::reduce(warp, val.x, cg::plus<float>());
+-    val.y = cg::reduce(warp, val.y, cg::plus<float>());
+-    val.z = cg::reduce(warp, val.z, cg::plus<float>());
+-    val.w = cg::reduce(warp, val.w, cg::plus<float>());
++    val.x = warpReduce(warp, val.x, cg::plus<float>());
++    val.y = warpReduce(warp, val.y, cg::plus<float>());
++    val.z = warpReduce(warp, val.z, cg::plus<float>());
++    val.w = warpReduce(warp, val.w, cg::plus<float>());
+ }
+ 
+ template <class WarpT> inline __device__ void warpSum(vec3 &val, WarpT &warp) {
+-    val.x = cg::reduce(warp, val.x, cg::plus<float>());
+-    val.y = cg::reduce(warp, val.y, cg::plus<float>());
+-    val.z = cg::reduce(warp, val.z, cg::plus<float>());
++    val.x = warpReduce(warp, val.x, cg::plus<float>());
++    val.y = warpReduce(warp, val.y, cg::plus<float>());
++    val.z = warpReduce(warp, val.z, cg::plus<float>());
+ }
+ 
+ template <class WarpT> inline __device__ void warpSum(vec2 &val, WarpT &warp) {
+-    val.x = cg::reduce(warp, val.x, cg::plus<float>());
+-    val.y = cg::reduce(warp, val.y, cg::plus<float>());
++    val.x = warpReduce(warp, val.x, cg::plus<float>());
++    val.y = warpReduce(warp, val.y, cg::plus<float>());
+ }
+ 
+ template <class WarpT> inline __device__ void warpSum(mat4 &val, WarpT &warp) {
+@@ -132,7 +162,7 @@
+ }
+ 
+ template <class WarpT> inline __device__ void warpMax(float &val, WarpT &warp) {
+-    val = cg::reduce(warp, val, cg::greater<float>());
++    val = warpReduce(warp, val, cg::greater<float>());
+ }
+ 
+ ///////////////////////////////
+--- a/gsplat/cuda/include/Cameras.cuh	2026-10-06 19:01:06.598992797 +0000
++++ b/gsplat/cuda/include/Cameras.cuh	2026-10-05 18:51:59.042325473 +0000
+@@ -1065,10 +1065,10 @@
+ 
+         if (dist.reference_poly == FThetaCameraDistortionParameters::PolynomialType::PIXELDIST_TO_ANGLE)
+             // compute first derivative of the backwards polynomial
+-            dreference_poly = {1.f * dist.pixeldist_to_angle_poly.at(1), 2.f * dist.pixeldist_to_angle_poly.at(2), 3.f * dist.pixeldist_to_angle_poly.at(3), 4.f * dist.pixeldist_to_angle_poly.at(4), 5.f * dist.pixeldist_to_angle_poly.at(5)};
++            dreference_poly = {1.f * dist.pixeldist_to_angle_poly[1], 2.f * dist.pixeldist_to_angle_poly[2], 3.f * dist.pixeldist_to_angle_poly[3], 4.f * dist.pixeldist_to_angle_poly[4], 5.f * dist.pixeldist_to_angle_poly[5]};
+         else
+             // compute first derivative of the forward polynomial
+-            dreference_poly = {1.f * dist.angle_to_pixeldist_poly.at(1), 2.f * dist.angle_to_pixeldist_poly.at(2), 3.f * dist.angle_to_pixeldist_poly.at(3), 4.f * dist.angle_to_pixeldist_poly.at(4), 5.f * dist.angle_to_pixeldist_poly.at(5)};
++            dreference_poly = {1.f * dist.angle_to_pixeldist_poly[1], 2.f * dist.angle_to_pixeldist_poly[2], 3.f * dist.angle_to_pixeldist_poly[3], 4.f * dist.angle_to_pixeldist_poly[4], 5.f * dist.angle_to_pixeldist_poly[5]};
+ 
+         // FThetaCameraModelParameters are defined such that the image coordinate origin corresponds to
+         // the center of the first pixel. We therefore need to offset the principal point by half a pixel.
+--- a/gsplat/cuda/csrc/IntersectTile.cu	2026-10-06 19:01:06.464774510 +0000
++++ b/gsplat/cuda/csrc/IntersectTile.cu	2026-10-05 18:51:53.535087013 +0000
+@@ -11,6 +11,10 @@
+ #include "Intersect.h"
+ #include "Utils.cuh"
+ 
++#ifdef USE_ROCM
++namespace cub = hipcub;
++#endif
++
+ namespace gsplat {
+ 
+ namespace cg = cooperative_groups;
+--- a/gsplat/cuda/csrc/RasterizeToIndices2DGS.cu	2026-10-06 19:01:06.531332153 +0000
++++ b/gsplat/cuda/csrc/RasterizeToIndices2DGS.cu	2026-10-05 18:50:08.753016462 +0000
+@@ -253,7 +253,7 @@
+     // channels into the kernel functions and avoid necessary global memory
+     // writes. This requires moving the channel padding from python to C side.
+     if (cudaFuncSetAttribute(
+-            rasterize_to_indices_2dgs_kernel<float>,
++            reinterpret_cast<const void *>(rasterize_to_indices_2dgs_kernel<float>),
+             cudaFuncAttributeMaxDynamicSharedMemorySize,
+             shmem_size
+         ) != cudaSuccess) {
+--- a/gsplat/cuda/csrc/RasterizeToIndices3DGS.cu	2026-10-06 19:01:06.535307084 +0000
++++ b/gsplat/cuda/csrc/RasterizeToIndices3DGS.cu	2026-10-05 18:50:08.763509933 +0000
+@@ -214,7 +214,7 @@
+     // channels into the kernel functions and avoid necessary global memory
+     // writes. This requires moving the channel padding from python to C side.
+     if (cudaFuncSetAttribute(
+-            rasterize_to_indices_3dgs_kernel<float>,
++            reinterpret_cast<const void *>(rasterize_to_indices_3dgs_kernel<float>),
+             cudaFuncAttributeMaxDynamicSharedMemorySize,
+             shmem_size
+         ) != cudaSuccess) {
+--- a/gsplat/cuda/csrc/RasterizeToPixels2DGSBwd.cu	2026-10-06 19:01:06.538841577 +0000
++++ b/gsplat/cuda/csrc/RasterizeToPixels2DGSBwd.cu	2026-10-05 18:50:08.775589357 +0000
+@@ -746,7 +746,7 @@
+     // channels into the kernel functions and avoid necessary global memory
+     // writes. This requires moving the channel padding from python to C side.
+     if (cudaFuncSetAttribute(
+-            rasterize_to_pixels_2dgs_bwd_kernel<CDIM, float>,
++            reinterpret_cast<const void *>(rasterize_to_pixels_2dgs_bwd_kernel<CDIM, float>),
+             cudaFuncAttributeMaxDynamicSharedMemorySize,
+             shmem_size
+         ) != cudaSuccess) {
+--- a/gsplat/cuda/csrc/RasterizeToPixels2DGSFwd.cu	2026-10-06 19:01:06.543529008 +0000
++++ b/gsplat/cuda/csrc/RasterizeToPixels2DGSFwd.cu	2026-10-05 18:50:08.825450952 +0000
+@@ -487,7 +487,7 @@
+     // channels into the kernel functions and avoid necessary global memory
+     // writes. This requires moving the channel padding from python to C side.
+     if (cudaFuncSetAttribute(
+-            rasterize_to_pixels_2dgs_fwd_kernel<CDIM, float>,
++            reinterpret_cast<const void *>(rasterize_to_pixels_2dgs_fwd_kernel<CDIM, float>),
+             cudaFuncAttributeMaxDynamicSharedMemorySize,
+             shmem_size
+         ) != cudaSuccess) {
+--- a/gsplat/cuda/csrc/RasterizeToPixels3DGSBwd.cu	2026-10-06 19:01:06.547086958 +0000
++++ b/gsplat/cuda/csrc/RasterizeToPixels3DGSBwd.cu	2026-10-05 18:50:08.838076467 +0000
+@@ -332,7 +332,7 @@
+     // channels into the kernel functions and avoid necessary global memory
+     // writes. This requires moving the channel padding from python to C side.
+     if (cudaFuncSetAttribute(
+-            rasterize_to_pixels_3dgs_bwd_kernel<CDIM, float>,
++            reinterpret_cast<const void *>(rasterize_to_pixels_3dgs_bwd_kernel<CDIM, float>),
+             cudaFuncAttributeMaxDynamicSharedMemorySize,
+             shmem_size
+         ) != cudaSuccess) {
+--- a/gsplat/cuda/csrc/RasterizeToPixels3DGSFwd.cu	2026-10-06 19:01:06.558821937 +0000
++++ b/gsplat/cuda/csrc/RasterizeToPixels3DGSFwd.cu	2026-10-05 18:50:08.850039716 +0000
+@@ -228,7 +228,7 @@
+     // channels into the kernel functions and avoid necessary global memory
+     // writes. This requires moving the channel padding from python to C side.
+     if (cudaFuncSetAttribute(
+-            rasterize_to_pixels_3dgs_fwd_kernel<CDIM, float>,
++            reinterpret_cast<const void *>(rasterize_to_pixels_3dgs_fwd_kernel<CDIM, float>),
+             cudaFuncAttributeMaxDynamicSharedMemorySize,
+             shmem_size
+         ) != cudaSuccess) {
+--- a/gsplat/cuda/csrc/RasterizeToPixelsFromWorld3DGSBwd.cu	2026-10-06 19:01:06.562630063 +0000
++++ b/gsplat/cuda/csrc/RasterizeToPixelsFromWorld3DGSBwd.cu	2026-10-05 18:50:08.861710757 +0000
+@@ -464,7 +464,7 @@
+     // channels into the kernel functions and avoid necessary global memory
+     // writes. This requires moving the channel padding from python to C side.
+     if (cudaFuncSetAttribute(
+-            rasterize_to_pixels_from_world_3dgs_bwd_kernel<CDIM, float>,
++            reinterpret_cast<const void *>(rasterize_to_pixels_from_world_3dgs_bwd_kernel<CDIM, float>),
+             cudaFuncAttributeMaxDynamicSharedMemorySize,
+             shmem_size
+         ) != cudaSuccess) {
+--- a/gsplat/cuda/csrc/RasterizeToPixelsFromWorld3DGSFwd.cu	2026-10-06 19:01:06.566486072 +0000
++++ b/gsplat/cuda/csrc/RasterizeToPixelsFromWorld3DGSFwd.cu	2026-10-05 18:50:08.872933127 +0000
+@@ -354,7 +354,7 @@
+     // channels into the kernel functions and avoid necessary global memory
+     // writes. This requires moving the channel padding from python to C side.
+     if (cudaFuncSetAttribute(
+-        rasterize_to_pixels_from_world_3dgs_fwd_kernel<CDIM, float>,
++        reinterpret_cast<const void *>(rasterize_to_pixels_from_world_3dgs_fwd_kernel<CDIM, float>),
+         cudaFuncAttributeMaxDynamicSharedMemorySize,
+         shmem_size
+     ) != cudaSuccess) {

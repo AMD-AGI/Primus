@@ -30,3 +30,7 @@
 	path = third_party/Automodel
 	url = https://github.com/NVIDIA-NeMo/Automodel.git
 	branch = main
+[submodule "third_party/HunyuanWorld-Mirror-rocm"]
+	path = third_party/HunyuanWorld-Mirror-rocm
+	url = https://github.com/AMD-AGI/HunyuanWorld-Mirror-rocm.git
+	branch = amd_dev
