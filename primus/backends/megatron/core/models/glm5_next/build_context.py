@@ -22,7 +22,9 @@ def resolve_glm5_next_provider(config):
     provider = Glm5NextSpecProvider(config=config)
     try:
         setattr(config, _PROVIDER_ATTR, provider)
-    except Exception:
+    except (AttributeError, TypeError):
+        # Best-effort cache attach: some config objects may disallow dynamic attrs.
+        # Returning `provider` keeps behavior correct even when caching is unavailable.
         pass
     return provider
 
