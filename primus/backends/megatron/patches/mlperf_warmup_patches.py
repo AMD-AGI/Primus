@@ -552,6 +552,14 @@ def _run_warmup_and_restore(
         optimizer.reload_model_params()
         _log("Called optimizer.reload_model_params()")
 
+    # ---- 9b. mxfp6_packed_param_gather: the weights' gathered packs still hold the warmup's weights ----
+    if getattr(megatron_args, "mxfp6_packed_param_gather", False):
+        from primus.backends.megatron.patches import packed_param_gather_patches as ppg
+
+        for m in models:
+            ppg.refresh_packed_params(m)
+        _log("Rebuilt the packed-gather weight packs from the restored parameters")
+
     # ---- 10. Post-restore NaN check ----
     nan_params = 0
     for m in models:

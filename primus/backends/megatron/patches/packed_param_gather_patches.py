@@ -31,7 +31,7 @@ import re
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
-ALIGN_ROWS = 32  # C1 (the coarsest code plane) blocks 32 rows; scales travel in row-major form
+ALIGN_ROWS = 256  # the GEMM operands are range-closed per 256 rows (core/extensions/mxfp6_packed_gather)
 _LIN = re.compile(
     r"layers\.(\d+)\.(self_attention\.(linear_qkv|linear_proj|added_linear_qkv|added_linear_proj)|"
     r"mlp\.linear_fc[12]|context_mlp\.linear_fc[12])\.weight$"
@@ -328,6 +328,7 @@ def patch_packed_param_gather_layout(ctx: PatchContext) -> None:
         cur._inner = ours
     else:
         pgb._ParamAndGradBuffer.__init__ = ours
+    patch_bucket_group_sync()
     grouped = partition_buckets_grouped(pgb.partition_buckets)
     pgb.partition_buckets = grouped
     ddp_mod.partition_buckets = grouped
@@ -335,3 +336,142 @@ def patch_packed_param_gather_layout(ctx: PatchContext) -> None:
         f"[Patch:megatron.ddp.packed_param_gather] row-aligned weight buckets ({ALIGN_ROWS}-row edges; "
         f"n_joint {n_joint}, fwd FP4 fc1/l2/joint_mlp {fc1}/{l2}/{jm})"
     )
+
+
+# ── the gather: W6 / W4 buckets gather their packed planes (runtime: core/extensions/mxfp6_packed_gather) ──
+
+
+def refresh_packed_params(ddp):
+    """Rebuild the gathered packs of a DDP model chunk from its bf16 rows (after the bf16 parameters were rewritten,
+    e.g. restored after warmup steps). Bound by ``patch_bucket_group_sync``; a no-op while the gate is off."""
+
+
+def _packed_states(group):
+    """The PackedBucket of each W6 / W4 bucket of a bucket group (built on first use)."""
+    st = getattr(group, "_ppg_states", None)
+    if st is None:
+        from primus.backends.megatron.core.extensions.mxfp6_packed_gather import PackedBucket
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import ppg_formats
+
+        dp = group.intra_distributed_optimizer_instance_size
+        rank = group.intra_distributed_optimizer_instance_rank
+        fmts = ppg_formats()
+        st = {id(b): PackedBucket(b, dp, rank, fmts) for b in group.buckets if getattr(b, "mxfp6_kind", "R") != "R"}
+        group._ppg_states = st
+    return st
+
+
+class _Handles:
+    """One param-gather handle over several async collectives."""
+
+    def __init__(self, works):
+        self.works = [w for w in works if w is not None]
+
+    def wait(self):
+        for w in self.works:
+            w.wait()
+
+
+def patch_bucket_group_sync():
+    import torch
+    from torch.distributed import _coalescing_manager
+
+    import megatron.core.distributed.param_and_grad_buffer as pgb
+
+    BG = pgb._ParamAndGradBucketGroup
+    if getattr(BG.start_param_sync, "_primus_packed_param_gather", False):
+        return
+    orig_start = BG.start_param_sync
+
+    def _packed(group):
+        return any(getattr(b, "mxfp6_kind", "R") != "R" for b in group.buckets)
+
+    def start_param_sync(self, force_sync: bool = False):
+        if not self.ddp_config.use_distributed_optimizer or not _packed(self):
+            return orig_start(self, force_sync)
+        if force_sync:
+            if self.param_gather_handle is not None:
+                self.param_gather_handle.wait()
+                self.param_gather_handle = None
+                return
+        else:
+            assert self.param_gather_handle is None
+        # Without the forward pre-hooks nothing waits on an overlapped gather before the next forward (Megatron's
+        # first iteration, warmup steps), so the gather is synchronous then.
+        async_op = self.ddp_config.overlap_param_gather and not force_sync and getattr(self, "_ppg_hooked", False)
+        _gather(self, async_op, packed_only=False)
+        self.param_gather_dispatched = True
+
+    def _gather(self, async_op, packed_only):
+        """Owner packs into this rank's plane shards, then one coalesced all-gather: planes for the W6 / W4
+        buckets, bf16 for the rest (as Megatron)."""
+        states = _packed_states(self)
+        for st in states.values():
+            st.owner_pack()
+        grp = self.intra_distributed_optimizer_instance_group
+        rank = self.intra_distributed_optimizer_instance_rank
+        works = []
+        for st in states.values():  # the SR dgrad copies: one draw per destination (see mxfp6_packed_gather)
+            for out, inp in st.a2a_ops():
+                works.append(torch.distributed.all_to_all_single(out, inp, group=grp, async_op=async_op))
+        with _coalescing_manager(grp, async_ops=async_op) as cm:
+            for idx, bucket in enumerate(self.buckets):
+                st = states.get(id(bucket))
+                if st is not None:
+                    for out, inp in st.gather_ops():
+                        pgb.dist_all_gather_func(out, inp, group=grp, async_op=async_op)
+                    continue
+                if packed_only:
+                    continue
+                if self.cached_param_buffer_shard_list[idx] is None:
+                    self.cached_param_buffer_shard_list[idx] = pgb.shard_buffer(
+                        bucket.param_data, self.intra_distributed_optimizer_instance_size
+                    )
+                pgb.dist_all_gather_func(
+                    bucket.param_data, self.cached_param_buffer_shard_list[idx][rank], group=grp, async_op=async_op
+                )
+        self.param_gather_handle = _Handles([cm] + works) if async_op else None
+
+    start_param_sync._primus_packed_param_gather = True
+    BG.start_param_sync = start_param_sync
+
+    # The forward pre-hooks' state, on every bucket group of the DDP. Turning them off with param_sync=False declares
+    # the bf16 parameters valid as they are (Megatron's first iteration): the packs are rebuilt from them (the owners'
+    # rows; no bf16 gather), since a forward without the hooks reads the packs as they stand.
+    import megatron.core.distributed.distributed_data_parallel as ddp_mod
+
+    DDP = ddp_mod.DistributedDataParallel
+    orig_enable, orig_disable = DDP.enable_forward_pre_hook, DDP.disable_forward_pre_hook
+
+    def _groups(ddp):
+        return list(getattr(ddp, "bucket_groups", [])) + list(getattr(ddp, "expert_parallel_bucket_groups", []))
+
+    def enable_forward_pre_hook(self, *a, **k):
+        orig_enable(self, *a, **k)
+        for g in _groups(self):
+            g._ppg_hooked = True
+
+    def disable_forward_pre_hook(self, param_sync: bool = True):
+        for g in _groups(self):
+            g._ppg_hooked = False
+        orig_disable(self, param_sync=param_sync)
+        if not param_sync:
+            _refresh(self)
+
+    def _refresh(ddp):
+        if not ddp.ddp_config.use_distributed_optimizer:
+            return
+        for g in _groups(ddp):
+            if not _packed(g):
+                continue
+            if g.param_gather_handle is not None:  # superseded: the packs are rebuilt from the current rows below
+                g.param_gather_handle.wait()
+                g.param_gather_handle = None
+            _gather(g, async_op=False, packed_only=True)
+
+    global refresh_packed_params
+    refresh_packed_params = _refresh
+
+    BG._ppg_hooked = False
+    DDP.enable_forward_pre_hook = enable_forward_pre_hook
+    DDP.disable_forward_pre_hook = disable_forward_pre_hook

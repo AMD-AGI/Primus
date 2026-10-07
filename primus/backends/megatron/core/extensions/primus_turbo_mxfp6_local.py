@@ -99,6 +99,39 @@ def _pack_act_dual(x, wgrad_is_fp4, n_out=None, ts=False):
     return _quantize_mxfp6_dual(x)
 
 
+def _ppg(weight, kind):
+    """The gathered packs of a weight under mxfp6_packed_param_gather (None otherwise): see mxfp6_packed_gather."""
+    return getattr(weight, "_ppg_row", None) is not None and getattr(weight, "_ppg_kind", None) == kind
+
+
+def _ppg_refuse(weight):
+    """A packed-gather weight is never gathered as bf16: packing it here would read stale rows."""
+    if getattr(weight, "_ppg_kind", None) is not None:
+        raise RuntimeError(
+            f"mxfp6_packed_param_gather: a {weight._ppg_kind} weight {tuple(weight.shape)} reached a pack its gathered "
+            "packs do not serve (no tilescale kernel for this GEMM shape?)"
+        )
+
+
+def _ppg_c1(weight):
+    """B's C1 plane of a packed-gather W6 weight (its forward codes arrive as two planes), else None."""
+    return getattr(weight, "_ppg_c1", None)
+
+
+def ppg_formats():
+    """The owner-pack formats of mxfp6_packed_param_gather, per bucket kind, as functions of the weight's (R, K): the
+    per-rank weight packs' formats exactly (W6: ts6 rows + the dgrad FP4 column; W4: the forward-FP4 dual pack),
+    with the column direction K256-outer so every 256-row range of the weight packs into its own byte range."""
+    g = gates()
+    assert not g.fp4_weight_2d, "mxfp6_packed_param_gather: 2-D weight scales are not supported"
+    ko = _mx.MX_FMT_COL_KOUTER
+    return dict(
+        W6=lambda R, K: _mx.with_ts6_row(_weight_fmt((R, K), 256), True) | ko,
+        W4=lambda R, K: _fwd_fp4_fmt("weight", 256, R, K) | ko,
+        col_sr=bool(g.fp4_sr_actw),
+    )
+
+
 def _pack_weight_dual(weight, weight_is_fp4, m=None, ts=False):
     """Pack a weight in both contraction directions, in whichever format is configured.
 
@@ -106,6 +139,9 @@ def _pack_weight_dual(weight, weight_is_fp4, m=None, ts=False):
     two thirds of the bytes -- wgrad never reads the weight, so there is no third
     direction wanting the wider format. ``ts``: the row half (forward B) in the A6W6 fly layout.
     """
+    if ts is True and _ppg(weight, "W6"):  # mxfp6_packed_param_gather: the gathered packs (C1 in _ppg_c1)
+        return weight._ppg_row, weight._ppg_row_s, weight._ppg_col, weight._ppg_col_s
+    _ppg_refuse(weight)
     if ts == "a6w4":  # the A6W4 tilescale GEMM's B: K128-blocked MXFP4 rows, the backward column unchanged
         return _mx.quantize_mx_dual(weight, _mx.with_ts4_row(_weight_fmt(weight.shape, m)))
     if ts:
@@ -119,6 +155,9 @@ def _pack_weight_dual(weight, weight_is_fp4, m=None, ts=False):
 
 def _pack_weight_row(weight, weight_is_fp4, ts=False):
     """Row direction only, for a forward with no backward behind it (eval)."""
+    if ts is True and _ppg(weight, "W6"):
+        return weight._ppg_row, weight._ppg_row_s
+    _ppg_refuse(weight)
     if ts == "a6w4":
         return _mx.quantize_mx(weight, 1, _mx.with_ts4_row(0))
     if ts:
@@ -259,8 +298,20 @@ def _fwd_fp4_a4w4(m, n, k):
     return 5 if _fwd_fp4_blob(m, n, k) else 4
 
 
+def _fwd_fp4_weight_dual(w, m, n, k):
+    """Forward-FP4 dual pack of a weight (rows: forward B; columns: dgrad B), or its gathered packs."""
+    if _ppg(w, "W4") and not _fwd_fp4_blob(m, n, k):
+        return w._ppg_row, w._ppg_row_s, w._ppg_col, w._ppg_col_s
+    _ppg_refuse(w)
+    return _mx.quantize_mx_dual(w, _fwd_fp4_fmt("weight", m, n, k))
+
+
 def _fwd_fp4_rows(x, role, m, n, k):
     """Row-only forward-FP4 pack (no backward behind it) of the activation or weight of that GEMM."""
+    if role == "weight" and _ppg(x, "W4") and not _fwd_fp4_blob(m, n, k):
+        return x._ppg_row, x._ppg_row_s
+    if role == "weight":
+        _ppg_refuse(x)
     if _fwd_fp4_blob(m, n, k):
         return _mx.quantize_mx(x, 1, _fwd_fp4_opts(_mx.MX_FMT_BLOB_GRAD, role))
     return _mx.quantize_mx(x, 1, _fwd_fp4_fmt(role, m, n, k, dual=False))
@@ -645,9 +696,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
             a_row, a_row_scale, a_col, a_col_scale = _mx.quantize_mx_dual(
                 input_2d, _fwd_fp4_fmt("act", fm, fn, fk)
             )
-            b_row, b_row_scale, b_col, b_col_scale = _mx.quantize_mx_dual(
-                weight, _fwd_fp4_fmt("weight", fm, fn, fk)
-            )
+            b_row, b_row_scale, b_col, b_col_scale = _fwd_fp4_weight_dual(weight, fm, fn, fk)
             if _fwd_fp4_blob(fm, fn, fk):  # no fly code object: the columns stay as the backward reads them
                 a_row, a_row_scale = _fwd_fp4_rows(input_2d, "act", fm, fn, fk)
                 b_row, b_row_scale = _fwd_fp4_rows(weight, "weight", fm, fn, fk)
@@ -691,6 +740,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
             a4w4=_fwd_fp4_a4w4(m, n, k) if fwd_fp4 else 0,
             a6w6_ts=ts is True,
             a6w4_ts=ts == "a6w4",
+            b_c1=_ppg_c1(weight) if ts is True else None,
         )
         output = output.reshape(*orig_shape[:-1], output.shape[-1])
 
@@ -1238,7 +1288,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
         elif fwd_fp4_fc1 and grad_enabled:
             # fc1's forward GEMM: [m, k] x [f, k]^T.
             x_row, x_row_s, x_col, x_col_s = _mx.quantize_mx_dual(x, _fwd_fp4_fmt("act", m, f, k))
-            w1_row, w1_row_s, w1_col, w1_col_s = _mx.quantize_mx_dual(w1, _fwd_fp4_fmt("weight", m, f, k))
+            w1_row, w1_row_s, w1_col, w1_col_s = _fwd_fp4_weight_dual(w1, m, f, k)
             if _fwd_fp4_blob(m, f, k):  # no fly code object: the columns stay as the backward reads them
                 x_row, x_row_s = _fwd_fp4_rows(x, "act", m, f, k)
                 w1_row, w1_row_s = _fwd_fp4_rows(w1, "weight", m, f, k)
@@ -1278,6 +1328,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
                 a4w4=_fwd_fp4_a4w4(m, f, k) if fwd_fp4_fc1 else 0,
                 a6w6_ts=ts_1 is True,
                 a6w4_ts=ts_1 == "a6w4",
+                b_c1=_ppg_c1(w1) if ts_1 is True else None,
             )
         )
 
@@ -1298,7 +1349,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
                 if not grad_enabled:
                     a_col = a_col_s = None
             if grad_enabled:
-                w2_row, w2_row_s, w2_col, w2_col_s = _mx.quantize_mx_dual(w2, _fwd_fp4_fmt("weight", m, h, f))
+                w2_row, w2_row_s, w2_col, w2_col_s = _fwd_fp4_weight_dual(w2, m, h, f)
                 if blob:
                     w2_row, w2_row_s = _fwd_fp4_rows(w2, "weight", m, h, f)
             else:
@@ -1340,6 +1391,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
             a4w4=_fwd_fp4_a4w4(m, h, f) if fwd_fp4 else 0,
             a6w6_ts=ts_2 is True,
             a6w4_ts=ts_2 == "a6w4",
+            b_c1=_ppg_c1(w2) if ts_2 is True else None,
         )
         output = output.reshape(*orig_shape[:-1], h)
 
@@ -1952,6 +2004,7 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
             weight_is_fp4,
             a6w6_ts=ts is True,
             a6w4_ts=ts == "a6w4",
+            b_c1=_ppg_c1(w_qkv) if ts is True else None,
         )
 
         # The norm and rotation, unchanged. This is the production Triton op, on the
@@ -2242,6 +2295,7 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
             b_a,
             a6w6_ts=ts[0] is True,
             a6w4_ts=ts[0] == "a6w4",
+            b_c1=_ppg_c1(w_a) if ts[0] is True else None,
         )
         gemm_fp6_out_impl(
             packs[1][0],
@@ -2257,6 +2311,7 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
             b_b,
             a6w6_ts=ts[1] is True,
             a6w4_ts=ts[1] == "a6w4",
+            b_c1=_ppg_c1(w_b) if ts[1] is True else None,
         )
 
         s_a, s_b, batch = shape_a[0], shape_b[0], shape_a[1]
