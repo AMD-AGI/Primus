@@ -7,8 +7,9 @@
 """Upcycle a dense Megatron checkpoint into a non-MoE hybrid checkpoint.
 
 Embeddings, the final norm, and every MLP are copied from the dense model.
-Attention sublayers are copied only when the tensor shapes match. Recurrent
-mixer sublayers (Mamba, GDN, or KDA) keep the initialization in
+MLA, GDN, and Mamba sublayers are initialized with the HyLo from-teacher
+recipes (SVD for MLA, Q/K/V/O copy for GDN and Mamba) when the checkpoint
+args carry those widths. KDA mixers keep the initialization in
 ``--hybrid-init-checkpoint``.
 
 The hybrid init checkpoint is a legacy ``ckpt_format: torch`` save of the

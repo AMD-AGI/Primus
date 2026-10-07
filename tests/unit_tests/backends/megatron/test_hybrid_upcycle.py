@@ -9,13 +9,16 @@ from argparse import Namespace
 import torch
 
 from primus.backends.megatron.checkpoint.hybrid_upcycle import (
+    UpcycleLayout,
     attention_ratio_from_args,
     build_upcycle_checkpoint,
     count_decoder_layers,
     hybrid_pattern_from_ratio,
+    hylo_reinit_q,
     load_checkpoint,
     main,
     resolve_checkpoint_file,
+    split_fused_qkv,
     upcycle_state_dict,
     validate_upcycle_pattern,
 )
@@ -195,3 +198,102 @@ def test_checkpoint_round_trip_resets_iteration_and_drops_optimizer(tmp_path):
     envelope = build_upcycle_checkpoint(hybrid_ckpt, loaded_state)
     assert envelope["iteration"] == 0
     assert "rng_state" not in envelope
+
+
+def _fuse_qkv(q, k, v, num_heads, num_kv_heads, head_dim):
+    heads_per_group = num_heads // num_kv_heads
+    hidden = q.shape[1]
+    q = q.view(num_kv_heads, heads_per_group * head_dim, hidden)
+    k = k.view(num_kv_heads, head_dim, hidden)
+    v = v.view(num_kv_heads, head_dim, hidden)
+    return torch.cat((q, k, v), dim=1).reshape(-1, hidden)
+
+
+def test_gdn_mixer_copies_hylo_qkv_slices():
+    hidden, heads, kv_heads, head_dim = 4, 2, 2, 2
+    key_dim, value_dim, value_heads = 4, 4, 2
+    q = torch.arange(heads * head_dim * hidden, dtype=torch.float32).reshape(heads * head_dim, hidden)
+    k = torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden) + 3
+    v = torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden) + 5
+    dense = _dense_state(num_layers=1, hidden=hidden, ffn=8, attn_out=1)
+    dense["decoder.layers.0.self_attention.linear_qkv.weight"] = _fuse_qkv(q, k, v, heads, kv_heads, head_dim)
+    dense["decoder.layers.0.self_attention.linear_proj.weight"] = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+
+    in_rows = key_dim * 2 + value_dim * 2 + value_heads * 2
+    hybrid = _hybrid_state("M-", hidden=hidden, ffn=8)
+    hybrid["decoder.layers.0.mixer.in_proj.weight"] = torch.full((in_rows, hidden), -1.0)
+    hybrid["decoder.layers.0.mixer.out_proj.weight"] = torch.zeros(hidden, value_dim)
+    hybrid["decoder.layers.0.mixer.A_log"] = torch.full((2,), -2.0)
+    layout = UpcycleLayout(
+        num_attention_heads=heads,
+        num_query_groups=kv_heads,
+        head_dim=head_dim,
+        linear_type="gdn",
+        gdn_num_key_heads=2,
+        gdn_key_head_dim=2,
+        gdn_num_value_heads=value_heads,
+        gdn_value_head_dim=2,
+    )
+    upcycled, report = upcycle_state_dict(dense, hybrid, "M-", layout)
+    copied = upcycled["decoder.layers.0.mixer.in_proj.weight"]
+    split_q, split_k, split_v = split_fused_qkv(
+        dense["decoder.layers.0.self_attention.linear_qkv.weight"], heads, kv_heads, head_dim
+    )
+    assert torch.equal(copied[:key_dim], split_q[:key_dim])
+    assert torch.equal(copied[key_dim : key_dim * 2], split_k[:key_dim])
+    assert torch.equal(copied[key_dim * 2 : key_dim * 2 + value_dim], split_v[:value_dim])
+    assert torch.equal(copied[key_dim * 2 + value_dim :], hybrid["decoder.layers.0.mixer.in_proj.weight"][key_dim * 2 + value_dim :])
+    assert torch.equal(upcycled["decoder.layers.0.mixer.A_log"], hybrid["decoder.layers.0.mixer.A_log"])
+    assert torch.equal(
+        upcycled["decoder.layers.0.mixer.out_proj.weight"],
+        dense["decoder.layers.0.self_attention.linear_proj.weight"],
+    )
+    assert report.mixer_layers_left_initialized == []
+
+
+def test_mla_slot_uses_hylo_svd_and_keeps_rope_rows():
+    hidden, heads, kv_heads, head_dim = 4, 2, 2, 2
+    nope, rope, v_head, q_rank, kv_rank = 1, 1, 1, 2, 2
+    q = torch.arange(heads * head_dim * hidden, dtype=torch.float32).reshape(heads * head_dim, hidden) + 1
+    k = torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden) + 2
+    v = torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden) + 3
+    dense = _dense_state(num_layers=1, hidden=hidden, ffn=8)
+    dense["decoder.layers.0.self_attention.linear_qkv.weight"] = _fuse_qkv(q, k, v, heads, kv_heads, head_dim)
+    dense["decoder.layers.0.self_attention.linear_proj.weight"] = torch.arange(16, dtype=torch.float32).reshape(hidden, hidden)
+
+    hybrid = {
+        "embedding.word_embeddings.weight": torch.zeros(3, 2),
+        "decoder.final_norm.weight": torch.zeros(hidden),
+        "decoder.layers.0.input_layernorm.weight": torch.zeros(hidden),
+        "decoder.layers.0.self_attention.linear_q_down_proj.weight": torch.zeros(q_rank, hidden),
+        "decoder.layers.0.self_attention.linear_q_up_proj.weight": torch.zeros(heads * (nope + rope), q_rank),
+        "decoder.layers.0.self_attention.linear_kv_down_proj.weight": torch.zeros(kv_rank + rope, hidden),
+        "decoder.layers.0.self_attention.linear_kv_up_proj.weight": torch.zeros(heads * (nope + v_head), kv_rank),
+        "decoder.layers.0.self_attention.linear_proj.weight": torch.zeros(hidden, heads * v_head),
+        "decoder.layers.1.pre_mlp_layernorm.weight": torch.zeros(hidden),
+        "decoder.layers.1.mlp.linear_fc1.weight": torch.zeros(8, hidden),
+        "decoder.layers.1.mlp.linear_fc2.weight": torch.zeros(hidden, 8),
+    }
+    layout = UpcycleLayout(
+        num_attention_heads=heads,
+        num_query_groups=kv_heads,
+        head_dim=head_dim,
+        q_lora_rank=q_rank,
+        kv_lora_rank=kv_rank,
+        qk_nope_head_dim=nope,
+        qk_rope_head_dim=rope,
+        v_head_dim=v_head,
+    )
+    upcycled, report = upcycle_state_dict(dense, hybrid, "*-", layout)
+    split_q, _, _ = split_fused_qkv(dense["decoder.layers.0.self_attention.linear_qkv.weight"], heads, kv_heads, head_dim)
+    q_down, q_up_nope = hylo_reinit_q(split_q, q_rank, heads, head_dim, nope)
+    assert torch.equal(upcycled["decoder.layers.0.self_attention.linear_q_down_proj.weight"], q_down)
+    q_up = upcycled["decoder.layers.0.self_attention.linear_q_up_proj.weight"].view(heads, nope + rope, q_rank)
+    assert torch.equal(q_up[:, :nope, :].reshape(-1, q_rank), q_up_nope)
+    assert torch.equal(q_up[:, nope:, :], torch.zeros(heads, rope, q_rank))
+    assert "decoder.layers.0.self_attention.linear_q_up_proj.weight" in report.hylo_partial
+    assert "decoder.layers.0.self_attention.linear_kv_down_proj.weight" in report.hylo_partial
+    assert torch.equal(
+        upcycled["decoder.layers.0.self_attention.linear_proj.weight"],
+        dense["decoder.layers.0.self_attention.linear_proj.weight"][:, : heads * v_head],
+    )

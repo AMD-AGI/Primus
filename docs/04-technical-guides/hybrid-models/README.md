@@ -394,7 +394,7 @@ To quickly verify the model runs without real data, the 3B and 8B configs come w
 
 ## Upcycling a dense checkpoint
 
-Dense-to-hybrid upcycling continues pretraining from a dense Transformer checkpoint. Embeddings, the final norm, and every MLP are copied into the hybrid stack. A pattern slot of `*` also copies that dense attention block when the target tensors have the same shapes. A slot of `M` is a new Mamba, GDN, or KDA mixer and keeps the hybrid model's own initialization. Megatron's `--moe-use-upcycling` flag remains the path that duplicates one MLP into experts.
+Dense-to-hybrid upcycling continues pretraining from a dense Transformer checkpoint. Embeddings, the final norm, and every MLP are copied into the hybrid stack. MLA (`*`) and GDN or Mamba (`M`) slots are then initialized with the from-teacher recipes in [HyLo](https://github.com/AMD-AGI/AMD-Hybrid-Models/tree/feat/HyLo) (`HybridModelWrapper` on `feat/HyLo`): an SVD of the dense Q and KV for MLA, and a Q/K/V/O copy into the GDN or Mamba mixer. KDA has no HyLo recipe, so those mixers stay at the hybrid initialization. Megatron's `--moe-use-upcycling` flag remains the path that duplicates one MLP into experts.
 
 The hybrid stack is twice as long as the dense model: dense layer `i` becomes mixer sublayer `2i` and MLP sublayer `2i + 1`. A 25% attention model is the repeated block `*-M-M-M-`.
 
@@ -435,7 +435,7 @@ no_load_rng: true
 auto_continue_train: false
 ```
 
-MLA attention does not share a QKV layout with a dense GQA checkpoint, so those attention tensors stay at the hybrid initialization and are listed in `upcycle_report.json`. Matched projections, including an output projection of the same shape, are copied. Start the continued run from a learning rate several times below the dense model's peak, with a short warmup.
+The checkpoint `args` must carry the HyLo widths (`q_lora_rank`, `kv_lora_rank`, `qk_head_dim`, `v_head_dim`, and for GDN the `linear_num_*` / `linear_*_head_dim` fields). `upcycle_report.json` lists tensors that were copied and `hylo_partial` lists slices that were only partly filled, including MLA RoPE rows. Start the continued run from a learning rate several times below the dense model's peak, with a short warmup. The mapping and the differences from the earlier exact-shape copy are in [upcycling-changes.md](upcycling-changes.md).
 
 ---
 
