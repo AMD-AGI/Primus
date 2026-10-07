@@ -88,6 +88,12 @@ except ImportError:  # no triton, or an unsupported one
     fused_qkv_norm_rope = None
 
 
+def _split_softmax_d_slot(core_attn_out):
+    """(output, softmax_d placeholder or None): the core attention returns the pair under
+    ``mxfp6_dgrad_emit_attn_delta`` (``PrimusTurboLocalAttention``), the output alone otherwise."""
+    return core_attn_out if isinstance(core_attn_out, tuple) else (core_attn_out, None)
+
+
 def _rope_cos_sin(freqs: Tensor, dtype: torch.dtype) -> Tuple[Tensor, Tensor]:
     """cos/sin as the fused kernel wants them: 2D [rows, D], contiguous, in t's dtype.
 
@@ -985,6 +991,7 @@ class JointSelfAttention(Attention):
                 attn_mask_type=attn_mask_type,
                 packed_seq_params=packed_seq_params,
             )
+        core_attn_out, sd_slot = _split_softmax_d_slot(core_attn_out)
 
         # Handle packed sequences output
         if packed_seq_params is not None:
@@ -1042,6 +1049,7 @@ class JointSelfAttention(Attention):
                     self.added_linear_proj,
                     core_attn_out,
                     additional_hidden_states.shape[0],
+                    sd_slot,
                 )
             if pair is not None:
                 output, encoder_output = pair
@@ -1158,9 +1166,10 @@ class FluxSingleAttention(SelfAttention):
         """
         Forward pass: Self-attention on image tokens.
 
-        ``skip_output_proj=True`` returns ``(core_attn_out, None)`` without applying
+        ``skip_output_proj=True`` returns ``(core_attn_out, sd_slot)`` without applying
         ``linear_proj``, for a caller that runs the projection itself (the single block's
-        MXFP6 MLP+proj Function, which shares one gradient pack between the two).
+        MXFP6 MLP+proj Function, which shares one gradient pack between the two); ``sd_slot``
+        is the attention's softmax_d placeholder under ``mxfp6_dgrad_emit_attn_delta``, else None.
 
         Args:
             hidden_states: Image tokens [seq, batch, hidden]
@@ -1266,6 +1275,7 @@ class FluxSingleAttention(SelfAttention):
                 attn_mask_type=attn_mask_type,
                 packed_seq_params=packed_seq_params,
             )
+        core_attn_out, sd_slot = _split_softmax_d_slot(core_attn_out)
 
         # Handle packed sequences output
         if packed_seq_params is not None:
@@ -1273,7 +1283,7 @@ class FluxSingleAttention(SelfAttention):
             core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
 
         if skip_output_proj:
-            return core_attn_out, None
+            return core_attn_out, sd_slot
 
         # Project output (return both output and bias for skip_bias_add pattern)
         output, bias = self.linear_proj(core_attn_out)

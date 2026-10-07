@@ -170,6 +170,21 @@ class PrimusTurboLocalAttention(MegatronModule):
         if config.context_parallel_size > 1:
             self.attn_kwargs["ulysses_group"] = pg_collection.cp
 
+        # mxfp6_dgrad_emit_attn_delta: also return the softmax_d placeholder (see forward). Fixed at construction,
+        # so compiled code sees a constant.
+        self.softmax_d_slot = False
+        if config.context_parallel_size == 1 and not args.enable_turbo_attention_float8:
+            try:
+                from ..models.diffusion.common.mxfp6_gates import gates
+
+                self.softmax_d_slot = gates().dgrad_emit_attn_delta
+            except ImportError:
+                pass
+            if self.softmax_d_slot:
+                from .primus_turbo_mxfp6_local import prime_softmax_d
+
+                prime_softmax_d()
+
         # Validate configuration
         if config.window_size is not None:
             raise ValueError("PrimusTurboLocalAttention does not support sliding window attention")
@@ -197,7 +212,9 @@ class PrimusTurboLocalAttention(MegatronModule):
             packed_seq_params: Packed sequence parameters (optional)
 
         Returns:
-            Attention output [seq_len, batch, num_heads * head_dim] (merged heads)
+            Attention output [seq_len, batch, num_heads * head_dim] (merged heads); with ``softmax_d_slot`` the
+            pair (output, placeholder), the placeholder a [batch, heads, seq_len] fp32 tensor whose gradient, if
+            the output's consumer supplies one, is the attention backward's softmax_d (rowsum(dO * O)).
         """
         query, key, value = [x.transpose(0, 1) for x in (query, key, value)]
 
@@ -226,13 +243,17 @@ class PrimusTurboLocalAttention(MegatronModule):
             return_lse=False,
             return_attn_probs=False,
             **self.attn_kwargs,
+            **({"return_softmax_d_slot": True} if self.softmax_d_slot else {}),
         )
+        slot = None
+        if self.softmax_d_slot:
+            output, slot = output
 
         # Transpose back to Megatron format (bshd -> sbhd) and merge heads
         output = output.transpose(0, 1)
         output = output.reshape(output.shape[0], output.shape[1], -1)
 
-        return output
+        return output if slot is None else (output, slot)
 
 
 class PrimusTurboMXFP4LocalSpecProvider(LocalSpecProvider):

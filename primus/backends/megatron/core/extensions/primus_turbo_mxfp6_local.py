@@ -51,6 +51,26 @@ from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import (
     gemm_fp6_impl,
     gemm_fp6_out_impl,
 )
+
+try:  # Turbo builds before the softmax_d epilogue: the gate then never engages
+    from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import (
+        a4w4_softmax_d_ok,
+        a4w4_softmax_d_table,
+        gemm_a4w4_ts_softmax_d_out,
+    )
+except ImportError:  # pragma: no cover
+    a4w4_softmax_d_ok = a4w4_softmax_d_table = gemm_a4w4_ts_softmax_d_out = None
+
+# The softmax_d dgrad kernels as plain data (``a4w4_softmax_d_table``), read by ``prime_softmax_d`` outside compiled
+# regions so the backward's check is arithmetic.
+_SOFTMAX_D_TABLE = frozenset()
+
+
+def prime_softmax_d():
+    """Read the softmax_d kernel table (``mxfp6_dgrad_emit_attn_delta``); call once, outside compiled code."""
+    global _SOFTMAX_D_TABLE
+    if a4w4_softmax_d_table is not None:
+        _SOFTMAX_D_TABLE = a4w4_softmax_d_table()
 from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
 from primus_turbo.pytorch.kernels.quantization.mxfp6_pack import check_mxfp6_support
 
@@ -193,6 +213,16 @@ def _a4(flag, b4):
     plain scales, 3 = FlyDSL on scales the packers stored packed, 4 = aiter's assembly ports of
     FlyDSL's kernel in aiter on those same packed operands."""
     return (1 + b4[3]) if flag else 0
+
+
+def _softmax_d_ok(b4, b_col, m, n, k, batch, seq):
+    """Whether an out-projection's dgrad (out [m, n], contracting k) can also emit its attention's softmax_d
+    [batch, n/128, seq] (``mxfp6_dgrad_emit_attn_delta``): the aiter tilescale A4W4 dgrad has a kernel for it."""
+    return (
+        a4w4_softmax_d_ok is not None
+        and _a4(b4[0], b4) == 4
+        and a4w4_softmax_d_ok(_SOFTMAX_D_TABLE, m, n, k, batch, seq, b_col.dim() == 3)
+    )
 
 
 def _fp4(fmt, row=None, col=None, tile2d=False, actw=False):
@@ -550,6 +580,7 @@ def _linear_mxfp6_backward(
     grad_input_out=None,
     *,
     b4,
+    softmax_d=None,
 ):
     """The pure-MXFP6 half of ``MXFP6LinearFunction.backward``, lifted out verbatim so that
     ``MXFP6MLPProjFunction`` can run it on a gradient pack it shares with the MLP.
@@ -557,6 +588,9 @@ def _linear_mxfp6_backward(
     ``grad_input_out``, a contiguous ``[m, k]`` buffer, makes the dgrad overwrite it in place
     (``MXFP6JointProjFunction`` points it at one stream's half of a shared dO) and the
     returned ``grad_input`` is then None.
+    ``softmax_d`` = ``(o, delta, s0)`` (an attention out-projection, ``_softmax_d_ok``): the dgrad also adds the
+    attention's softmax_d for these rows -- per row and head, the sum of dO * O with ``o`` the attention output's
+    rows [m, k] -- into ``delta`` [B, H, S] from sequence position ``s0`` on.
     """
     if fuse_wgrad_accum:
         a_col, a_col_scale, b_col, b_col_scale, weight = saved
@@ -580,7 +614,13 @@ def _linear_mxfp6_backward(
 
     # grad_input[M, K] = grad[M, N] @ weight[N, K], contracting N. b_col is the
     # weight packed along N, i.e. logically [K, N] contracting N.
-    if grad_input_out is not None:
+    if softmax_d is not None:
+        out = grad_input_out
+        if out is None:
+            out = torch.empty(m, k, dtype=out_dtype, device=grad_2d.device)
+        gemm_a4w4_ts_softmax_d_out(g_row, g_row_scale, b_col, b_col_scale, out, m, k, n, *softmax_d)
+        grad_input = None if grad_input_out is not None else out.reshape(orig_shape)
+    elif grad_input_out is not None:
         gemm_fp6_out_impl(
             g_row,
             g_row_scale,
@@ -2707,10 +2747,13 @@ class MXFP6JointProjFunction(torch.autograd.Function):
     linears are skip_bias_add, the caller still adds their biases). Backward runs the
     shared linear backward body on each. Bit-identical: the same GEMMs, different
     destination.
+
+    ``sd_slot``: the attention's softmax_d placeholder (``mxfp6_dgrad_emit_attn_delta``); when the dgrads can emit
+    softmax_d (``_softmax_d_ok``) its gradient is that softmax_d, both streams adding into one, else None.
     """
 
     @staticmethod
-    def forward(o, n_txt_rows, w_img, w_txt, fuse_wgrad_accum, grad_enabled, weight_is_fp4):
+    def forward(o, n_txt_rows, w_img, w_txt, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot=None):
         o_txt, o_img = o[:n_txt_rows], o[n_txt_rows:]
         img = MXFP6LinearFunction.forward(
             o_img, w_img, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4
@@ -2724,9 +2767,10 @@ class MXFP6JointProjFunction(torch.autograd.Function):
     @staticmethod
     def setup_context(ctx, inputs, output):
         ctx.b4 = _b4()  # the backward uses the formats the forward chose
-        o, n_txt_rows, w_img, w_txt, fuse_wgrad_accum, grad_enabled, weight_is_fp4 = inputs
+        o, n_txt_rows, w_img, w_txt, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot = inputs
         if not grad_enabled:
             return
+        ctx.sd = sd_slot is not None  # o is then saved last (the attention saved the same storage)
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
         ctx.weight_is_fp4 = weight_is_fp4
         ctx.out_dtype = o.dtype
@@ -2740,19 +2784,29 @@ class MXFP6JointProjFunction(torch.autograd.Function):
         extra_img = (w_img,) if fuse_wgrad_accum else ()
         extra_txt = (w_txt,) if fuse_wgrad_accum else ()
         ctx.n_img_saved = len(img_blobs) + len(extra_img)
-        ctx.save_for_backward(*img_blobs, *extra_img, *txt_blobs, *extra_txt)
+        ctx.save_for_backward(*img_blobs, *extra_img, *txt_blobs, *extra_txt, *((o,) if ctx.sd else ()))
         ctx.mark_non_differentiable(*img_blobs, *txt_blobs)
 
     @staticmethod
     def backward(ctx, grad_img, grad_txt, *_):
         b4 = ctx.b4
         saved = ctx.saved_tensors
+        o = None
+        if ctx.sd:
+            *saved, o = saved
         img_saved, txt_saved = saved[: ctx.n_img_saved], saved[ctx.n_img_saved :]
         k = ctx.k
         m_txt = ctx.n_txt_rows * ctx.row_width
         m_img = (ctx.o_shape[0] - ctx.n_txt_rows) * ctx.row_width
         grad_o = torch.empty(ctx.o_shape, dtype=ctx.out_dtype, device=grad_img.device)
         grad_o_2d = grad_o.view(-1, k)
+        delta = None
+        nb, ns = ctx.row_width, ctx.o_shape[0]
+        if o is not None and all(
+            _softmax_d_ok(b4, sv[2], m_, k, n_, nb, ns)
+            for sv, m_, n_ in ((img_saved, m_img, ctx.n_img), (txt_saved, m_txt, ctx.n_txt))
+        ):
+            delta = torch.zeros(nb, k // 128, ns, dtype=torch.float32, device=grad_img.device)
 
         grads_w = []
         for grad, saved_part, n, rows in (
@@ -2774,17 +2828,19 @@ class MXFP6JointProjFunction(torch.autograd.Function):
                 False,
                 grad_input_out=grad_o_2d[rows],
                 b4=b4,
+                softmax_d=None if delta is None else (o.view(-1, k)[rows], delta, rows.start // nb),
             )
             grads_w.append(grad_w)
-        # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4.
-        return grad_o, None, grads_w[0], grads_w[1], None, None, None
+        # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4; then sd_slot's.
+        return grad_o, None, grads_w[0], grads_w[1], None, None, None, delta
 
 
-def joint_proj_pair(proj_img, proj_txt, o, n_txt_rows):
+def joint_proj_pair(proj_img, proj_txt, o, n_txt_rows, sd_slot=None):
     """Run a joint block's two out-projections as one MXFP6JointProjFunction.
 
     Returns ``(img_out, txt_out)`` *without* biases (both linears are skip_bias_add), or None
     when ineligible -- the caller then projects the two slices separately, as before.
+    ``sd_slot``: the attention's softmax_d placeholder, if it returned one.
     """
     if not gates().joint_proj:
         return None
@@ -2813,6 +2869,7 @@ def joint_proj_pair(proj_img, proj_txt, o, n_txt_rows):
         fuse_wgrad_accum,
         torch.is_grad_enabled(),
         proj_img._weight_is_fp4,
+        sd_slot,
     )
     return out[0], out[1]
 
@@ -3036,10 +3093,13 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
 
     Forward's arithmetic is the caller's expression verbatim, so Inductor fuses it into the
     residual add as it did scale_add.
+
+    ``sd_slot``: the attention's softmax_d placeholder (``mxfp6_dgrad_emit_attn_delta``); when the out-projection's
+    dgrad can emit softmax_d (``_softmax_d_ok``) its gradient is that softmax_d, else None.
     """
 
     @staticmethod
-    def forward(x, w1, b1, w2, o, wp, b2, gate, fuse_wgrad_accum, grad_enabled, weight_is_fp4):
+    def forward(x, w1, b1, w2, o, wp, b2, gate, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot=None):
         # the single block's linear2 (fc2 + out-proj) may run its forward in MXFP4.
         l2 = gates().fwd_fp4_single_linear2
         mlp = MXFP6MLPFunction.forward(
@@ -3055,9 +3115,10 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
     @staticmethod
     def setup_context(ctx, inputs, output):
         ctx.b4 = _b4()  # the backward uses the formats the forward chose
-        x, w1, b1, w2, o, wp, b2, gate, fuse_wgrad_accum, grad_enabled, weight_is_fp4 = inputs
+        x, w1, b1, w2, o, wp, b2, gate, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot = inputs
         if not grad_enabled:
             return
+        ctx.sd = sd_slot is not None and o.dim() == 3 and o.is_contiguous()  # o is then saved last
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
         ctx.weight_is_fp4 = weight_is_fp4
         ctx.out_dtype = x.dtype
@@ -3082,7 +3143,7 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
         ctx.b2_from_pack = gates().gate_mul_pack_bias
         b2_saved = (b2,) if ctx.b2_from_pack else ()
         ctx.save_for_backward(
-            y1, b1, *mlp_blobs, *mlp_extra, *proj_blobs, *proj_extra, h, gate, *b2_saved
+            y1, b1, *mlp_blobs, *mlp_extra, *proj_blobs, *proj_extra, h, gate, *b2_saved, *((o,) if ctx.sd else ())
         )
         ctx.mark_non_differentiable(h, *mlp_blobs, *proj_blobs)
 
@@ -3090,6 +3151,9 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
     def backward(ctx, dy, *_):
         b4 = ctx.b4
         saved = ctx.saved_tensors
+        o = None
+        if ctx.sd:
+            *saved, o = saved
         b2 = None
         if ctx.b2_from_pack:
             b2, saved = saved[-1], saved[:-1]
@@ -3126,6 +3190,9 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
             g2_packed=g_packed,
             b4=b4,
         )
+        delta = None
+        if o is not None and _softmax_d_ok(b4, proj_saved[2], ctx.pm, ctx.pk, ctx.pn, o.shape[1], o.shape[0]):
+            delta = torch.zeros(o.shape[1], ctx.pk // 128, o.shape[0], dtype=torch.float32, device=dy.device)
         grad_o, grad_wp, _ = _linear_mxfp6_backward(
             proj_saved,
             g2,
@@ -3139,11 +3206,12 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
             False,
             g_packed=g_packed,
             b4=b4,
+            softmax_d=None if delta is None else (o.view(-1, ctx.pk), delta, 0),
         )
-        return grad_x, grad_w1, grad_b1, grad_w2, grad_o, grad_wp, grad_b2, grad_gate, None, None, None
+        return grad_x, grad_w1, grad_b1, grad_w2, grad_o, grad_wp, grad_b2, grad_gate, None, None, None, delta
 
 
-def mlp_proj_gated(mlp, proj, x, o, gate):
+def mlp_proj_gated(mlp, proj, x, o, gate, sd_slot=None):
     """``gate * (mlp(x) + mlp_bias + proj(o))`` as one MXFP6GatedMLPProjFunction, or None.
 
     None when the gate is off, the pair is not eligible for the shared pack, or the gate's
@@ -3180,5 +3248,6 @@ def mlp_proj_gated(mlp, proj, x, o, gate):
         fuse_wgrad_accum,
         torch.is_grad_enabled(),
         proj._weight_is_fp4,
+        sd_slot,
     )
     return out[0]

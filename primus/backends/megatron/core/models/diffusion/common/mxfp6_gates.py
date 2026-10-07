@@ -161,6 +161,16 @@ class Mxfp6Gates:
     # is on a 32-row edge. Needs gemm_layout "tilescale". Bit-identical forward; the column (dgrad) copy's SR seed
     # becomes per (step, weight).
     packed_param_gather: bool = False
+    # With packed_param_gather: each owned piece of a packed weight takes its optimizer step inside its owner pack
+    # (Transformer Engine FusedAdam with store_param_remainders, same arithmetic), so Adam's pass over those rows and
+    # the pack's read of the rows it just wrote become one kernel. Bit-identical.
+    packed_param_gather_fused_adam: bool = False
+    # The attention out-projections' dgrad (A4W4 on tilescale) also emits the attention backward's softmax_d =
+    # rowsum(dO * O) per (token, head), which the attention backward then takes instead of computing it: the
+    # attention returns a placeholder whose gradient the joint pair / gated single-block Function supplies. Falls
+    # back per call to the attention's own when no kernel matches. Changes numerics within fp32 rounding (another
+    # summation order). Needs gemm_layout "tilescale" and bwd_fp4_dgrad.
+    dgrad_emit_attn_delta: bool = False
     # Selective A4W4: the first / last N transformer blocks keep the A6W6
     # backward while the bwd_fp4 gates are on. Forward hooks switch the three bwd_fp4 gates off
     # around those blocks' forwards; every MXFP6 Function captures the flags at forward time

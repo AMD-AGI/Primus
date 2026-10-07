@@ -430,7 +430,7 @@ class FluxSingleTransformerBlock(TransformerLayer):
 
             # MXFP6: fc2 and out-proj receive the same gradient here, so run them as one
             # Function that packs it once. Falls back per block if the pair is ineligible.
-            core_attn_out, _ = self.self_attention(
+            core_attn_out, sd_slot = self.self_attention(
                 norm_hidden_states,
                 attention_mask=attention_mask,
                 rotary_pos_emb=rotary_pos_emb,
@@ -439,7 +439,7 @@ class FluxSingleTransformerBlock(TransformerLayer):
             # With gate_mul_pack the Function also owns the gate multiply, so its backward
             # receives dy and never materialises gate * dy. Same expression as below.
             gated = mlp_proj_gated(
-                self.mlp, self.self_attention.linear_proj, norm_hidden_states, core_attn_out, gate
+                self.mlp, self.self_attention.linear_proj, norm_hidden_states, core_attn_out, gate, sd_slot
             )
             if gated is not None:
                 return residual + gated, None
