@@ -69,6 +69,7 @@ modules:
         data_path: ${CAPTURE_DATA_PATH}  # ShareGPT-style JSONL
         output_path: ${OUTPUT_DIR}/hidden_states_raw  # raw shards
         nproc_per_node: ${NPROC_PER_NODE:1}  # GPUs for capture
+        nnodes: ${NNODES:1}              # capture nodes; slurm -N
         filter_output_path: ${OUTPUT_DIR}/hidden_states  # filtered shards (train on these)
         filter_block_size: ${BLOCK_SIZE:16}  # DFlash block size
         filter_min_kept: ${FILTER_MIN_KEPT:1}  # fail if fewer shards survive
@@ -130,6 +131,7 @@ modules:
         model.use_liger_kernel: false    # not shipped in this image
         data.hidden_states_path: ${HIDDEN_STATES_PATH}  # filtered capture output
         deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}  # trainer GPUs
+        deployment.trainer.nnodes: ${NNODES:1}  # trainer nodes; slurm -N
 ```
 
 ## Online train
@@ -238,6 +240,22 @@ export PRIMUS_SPECFORGE_LOCAL_IP=10.0.0.2
 
 ## CLI
 
+`direct` runs inside the image. `container` starts the image from the host and
+then runs `direct`. `slurm` allocates, then each node runs `container` or
+`direct`.
+
+Capture and offline train are homogeneous: `direct` or `container` on one
+node, or `slurm srun -N <nnodes>` for DP across nodes. The same command runs
+on every node. Point `OUTPUT_DIR` / `HIDDEN_STATES_PATH` at shared storage.
+Multi-GPU on one node is `NPROC_PER_NODE`. On Ethernet without IB, pass
+`NCCL_IB_DISABLE=1` and `NCCL_SOCKET_IFNAME=<iface>`.
+
+Online train is `slurm` only. `-N` must equal `CAPTURE_NNODES + TRAINER_NNODES`
+(default 1+1 so `-N 2`). Do not use `direct` or `container` on a single host.
+Do not wrap SpecForge `managed_local`; for one-node online, run the SpecForge
+CLI inside the image (AMD ROCm tutorial §4). `specforge export` and data-prep
+scripts stay on the SpecForge CLI.
+
 Inside the docker image:
 
 ```bash
@@ -245,7 +263,28 @@ Inside the docker image:
   [dotted.overrides...]
 ```
 
-On Slurm, from the login node, image already loaded:
+From the host:
+
+```bash
+./runner/primus-cli container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  --shm-size 64g --volume /data:/data --env KEY=VALUE \
+  -- train pretrain --config <experiment.yaml> \
+  [dotted.overrides...]
+```
+
+On Slurm, from the login node, image already loaded. Capture or offline
+(`-N` is the node count):
+
+```bash
+./runner/primus-cli slurm srun -N <nnodes> --gres=gpu:<gpus-per-node> \
+  -- container --image <tag> \
+  --volume <host>:<container> \
+  --env KEY=VALUE \
+  -- train pretrain --config <experiment.yaml> \
+  [dotted.overrides...]
+```
+
+Online (`-N` is capture nodes + trainer nodes):
 
 ```bash
 ./runner/primus-cli slurm srun -N <capture+trainer> --gres=gpu:<gpus-per-node> \
@@ -262,6 +301,4 @@ Dotted keys match the YAML (`specforge_overrides.training.max_steps=1000`,
 a SpecForge checkout if it is not `/workspace/SpecForge`.
 
 Slurm `-p`, `-t`, `-o`, `--exclude` and launcher `--debug` / `--dry-run` are
-in the [CLI reference](../../docs/02-user-guide/cli-reference.md). Do not wrap
-this in `managed_local`. `specforge export` and data-prep scripts stay on the
-SpecForge CLI.
+in the [CLI reference](../../docs/02-user-guide/cli-reference.md).

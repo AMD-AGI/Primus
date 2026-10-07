@@ -27,16 +27,53 @@ Primus is `/opt/primus` and SpecForge is `/workspace/SpecForge`.
 
 ## Launch with `primus-cli`
 
-From `/opt/primus`:
+| Workload | `direct` (inside the image) | `container` (from the host) | `slurm` |
+| --- | --- | --- | --- |
+| Capture / offline train | yes | yes | `-N` = nodes (homogeneous DP) |
+| Online train | no | no | `-N` = capture nodes + trainer nodes |
+
+`direct` is the in-image command. `container` starts this image from the host
+and runs the same command. `slurm` allocates nodes, then each node runs
+`container` or `direct`. Multi-GPU on one node is `NPROC_PER_NODE`. Capture
+and offline train on `-N` greater than 1 are **one** SpecForge job (DP across
+nodes): same command on every node, shared `OUTPUT_DIR` / `HIDDEN_STATES_PATH`.
+Online is a capture+trainer split, not that homogeneous job.
+
+Inside the image:
 
 ```bash
 ./runner/primus-cli direct -- train pretrain --config <experiment.yaml>
 ```
 
-Same command for capture and train; only the YAML changes. Dotted CLI keys
-override YAML, for example `specforge_overrides.training.max_steps=1000`.
-See the [configuration reference](CONFIGURATION.md) for the full
-configuration, CLI, and env reference.
+From the host, capture or offline train:
+
+```bash
+./runner/primus-cli container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  --shm-size 64g --volume /data:/data \
+  -- train pretrain \
+  --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
+```
+
+Multi-node capture or offline train (shared output path; `-N` is the node count):
+
+```bash
+./runner/primus-cli slurm srun -N 2 --gres=gpu:8 \
+  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  --volume /shared:/shared \
+  -- train pretrain \
+  --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
+```
+
+Dotted CLI keys override YAML, for example
+`specforge_overrides.training.max_steps=1000`. See the
+[configuration reference](CONFIGURATION.md) for the full configuration, CLI,
+and env reference.
+
+One-node online (Mooncake + SGLang + producer + consumer on a single host) is
+SpecForge `managed_local`: run the SpecForge CLI inside this image, not
+`primus-cli`. Follow the
+[AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md)
+§4.
 
 ## Offline
 
@@ -59,6 +96,7 @@ modules:
         data_path: ${CAPTURE_DATA_PATH}
         output_path: ${OUTPUT_DIR}/hidden_states_raw
         nproc_per_node: ${NPROC_PER_NODE:1}
+        nnodes: ${NNODES:1}
 ```
 
 ```bash
@@ -88,6 +126,7 @@ modules:
         training.max_steps: ${MAX_STEPS:20}
         data.hidden_states_path: ${HIDDEN_STATES_PATH}
         deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}
+        deployment.trainer.nnodes: ${NNODES:1}
 ```
 
 ```bash
@@ -172,8 +211,10 @@ cd /opt/primus
 
 The example above is **1 capture GPU + 1 trainer GPU** on 2 nodes. Load the
 docker image on **every** node if the scheduler's container store is
-node-local. Do not wrap this in `managed_local` or `--role both`. SpecForge
-`deployment.trainer.nnodes` is `TRAINER_NNODES` (consumer nodes only).
+node-local. Do not wrap this in `managed_local` or `--role both`. On one
+node, use SpecForge `managed_local` inside the image (see Launch above), not
+`primus-cli`. SpecForge `deployment.trainer.nnodes` is `TRAINER_NNODES`
+(consumer nodes only).
 `server_gpus` / `trainer_gpus` default to `0`; a single device id expands to
 `0..N-1` (`N = server_count * server_tp` or `trainer_nproc`), so 8+8 only
 needs `SERVER_COUNT=8` and `NPROC_PER_NODE=8`. Set an explicit CSV to pin
