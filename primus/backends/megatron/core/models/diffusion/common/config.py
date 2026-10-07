@@ -219,7 +219,7 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_adaln_wgrad_main_grad: bool = False
     # Pinned TunableOp solutions for the AdaLN GEMMs; see Mxfp6Gates.adaln_tunableop.
     mxfp6_adaln_tunableop: bool = False
-    # "hipblaslt" or "pyisa"; see Mxfp6Gates.adaln_gemm_backend.
+    # "hipblaslt" or "aiter"; see Mxfp6Gates.adaln_gemm_backend.
     mxfp6_adaln_gemm_backend: str = "hipblaslt"
     mxfp6_fused_qk_rope: bool = False
     mxfp6_fused_qkv: str = "off"

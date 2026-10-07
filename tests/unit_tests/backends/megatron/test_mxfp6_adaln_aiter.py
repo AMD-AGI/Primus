@@ -1,4 +1,4 @@
-"""mxfp6_adaln_gemm_backend "pyisa": AdaLNLinearFunction on aiter's AdaLN GEMM kernels vs the hipBLASLt path -- wgrad
+"""mxfp6_adaln_gemm_backend "aiter": AdaLNLinearFunction on aiter's AdaLN GEMM kernels vs the hipBLASLt path -- wgrad
 (into main_grad) bitwise, forward / dgrad within bf16 GEMM tolerance, eager and under torch.compile(fullgraph=True)."""
 import pytest
 import torch
@@ -13,15 +13,15 @@ def _setup(backend):
     g = Mxfp6Gates(adaln_wgrad_main_grad=True, adaln_gemm_backend=backend)
     g.validate()
     mxfp6_gates.reset(g)
-    if backend == "pyisa":
+    if backend == "aiter":
         from primus.backends.megatron.core.models.diffusion.common import normalization as N
 
-        N.prime_adaln_pyisa()
+        N.prime_adaln_aiter()
 
 
 @pytest.mark.parametrize("n", [18432, 9216])
 @pytest.mark.parametrize("compiled", [False, True])
-def test_adaln_pyisa_matches(n, compiled):
+def test_adaln_aiter_matches(n, compiled):
     from primus.backends.megatron.core.models.diffusion.common import normalization as N
 
     try:
@@ -36,7 +36,7 @@ def test_adaln_pyisa_matches(n, compiled):
     b = torch.randn(n, device="cuda", dtype=torch.bfloat16, generator=g)
     go = torch.randn(32, n, device="cuda", dtype=torch.bfloat16, generator=g)
     res = {}
-    for backend in ("hipblaslt", "pyisa"):
+    for backend in ("hipblaslt", "aiter"):
         _setup(backend)
         wp = torch.nn.Parameter(w.clone()); bp = torch.nn.Parameter(b.clone())
         wp.main_grad = torch.zeros_like(w); bp.main_grad = torch.zeros(n, device="cuda", dtype=torch.float32)
@@ -48,7 +48,7 @@ def test_adaln_pyisa_matches(n, compiled):
         y = f(x, wp, bp)
         y.backward(go)
         res[backend] = (y.detach(), x.grad, wp.main_grad.clone())
-    (y0, dx0, dw0), (y1, dx1, dw1) = res["hipblaslt"], res["pyisa"]
+    (y0, dx0, dw0), (y1, dx1, dw1) = res["hipblaslt"], res["aiter"]
     assert torch.equal(dw0.view(torch.int16), dw1.view(torch.int16))
     torch.testing.assert_close(y1, y0, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(dx1, dx0, rtol=2e-2, atol=2e-2)
