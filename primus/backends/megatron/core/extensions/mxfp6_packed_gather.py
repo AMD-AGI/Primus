@@ -61,6 +61,7 @@ class PackedBucket:
         self.sr = bool(fmts["col_sr"])
         self.send = {k: torch.empty_like(self.planes[k]) for k in _A2A} if self.sr else None
         self.items = []
+        self.fused_done = set()  # (idx, ra) packed by the optimizer step (fused) since the last owner_pack
         for idx, p in enumerate(bucket.params_list):
             s, e = bucket.param_to_index[p]
             R, K = p.shape
@@ -90,34 +91,51 @@ class PackedBucket:
         p._ppg_col_s = self._view("cs", s, R * K)
         p._ppg_kind = self.kind
 
+    def owner_pieces(self):
+        """(item index, rows ra..rb) of every piece this rank owns."""
+        for idx, p, s, R, K, pieces in self.items:
+            for r, ra, rb in pieces:
+                if r == self.rank:
+                    yield idx, ra, rb
+
     def owner_pack(self):
-        """Pack the rows this rank owns into its shard of every plane (and, SR, one dgrad draw per destination)."""
+        """Pack the rows this rank owns into its shard of every plane (and, SR, one dgrad draw per destination).
+        Pieces the optimizer step already packed this step (``pack_piece(..., adam=...)``) are skipped."""
+        self.step += 1
+        done, self.fused_done = self.fused_done, set()
+        for idx, ra, rb in self.owner_pieces():
+            if (idx, ra) not in done:
+                self.pack_piece(idx, ra, rb, self.step)
+
+    def pack_piece(self, idx, ra, rb, step, adam=None):
+        """Pack rows ra..rb of item ``idx`` for ``step``. ``adam``: (grad, exp_avg, exp_avg_sq, remainder, hyper)
+        applies that optimizer step to the rows first, in the same kernel (``quantize_mx_dual_out_adam``)."""
         from primus_turbo.pytorch.kernels.quantization import mx_a4w4_pack as MX
         from primus_turbo.pytorch.ops.quantization import set_sr_seed_next_pack
 
-        self.step += 1
+        _, p, s, R, K, _ = self.items[idx]
         w6 = self.kind == "W6"
-        for idx, p, s, R, K, pieces in self.items:
-            for r, ra, rb in pieces:
-                if r != self.rank:
-                    continue
-                o, nel, w, fmt = s + ra * K, (rb - ra) * K, p.data[ra:rb], self.fmts[self.kind](R, K)
-                rows = (
-                    self._view("c0" if w6 else "r4", o, nel),
-                    self._view("rs", o, nel),
-                    dict(row_c1=self._view("c1", o, nel) if w6 else None),
-                )
-                if not self.sr:  # round to nearest: one dual pack into the planes
-                    MX.quantize_mx_dual_out(w, rows[0], rows[1], self._view("cc", o, nel), self._view("cs", o, nel),
-                                            fmt, **rows[2])
-                    continue
-                # one read of the rows: the forward rows and every destination's dgrad draw (draw d -> rank d's
-                # row of the send buffers, a shard apart)
-                set_sr_seed_next_pack(_seed(self.step, self.bucket.bucket_id, idx, ra))
-                MX.quantize_mx_dual_out(
-                    w, rows[0], rows[1], self._send("cc", 0, o, nel), self._view("cs", o, nel), fmt, **rows[2],
-                    draws=self.dp, draw_codes=self.S // DENSITY[self.kind]["cc"], draw_scales=0,
-                )
+        o, nel, w, fmt = s + ra * K, (rb - ra) * K, p.data[ra:rb], self.fmts[self.kind](R, K)
+        rows = (
+            self._view("c0" if w6 else "r4", o, nel),
+            self._view("rs", o, nel),
+            dict(row_c1=self._view("c1", o, nel) if w6 else None),
+        )
+        if not self.sr:  # round to nearest: one dual pack into the planes
+            cols, kw = (self._view("cc", o, nel), self._view("cs", o, nel)), rows[2]
+        else:
+            # one read of the rows: the forward rows and every destination's dgrad draw (draw d -> rank d's row of
+            # the send buffers, a shard apart)
+            set_sr_seed_next_pack(_seed(step, self.bucket.bucket_id, idx, ra))
+            cols = (self._send("cc", 0, o, nel), self._view("cs", o, nel))
+            kw = dict(rows[2], draws=self.dp, draw_codes=self.S // DENSITY[self.kind]["cc"], draw_scales=0)
+        if adam is None:
+            MX.quantize_mx_dual_out(w, rows[0], rows[1], *cols, fmt, **kw)
+        else:
+            grad, m, v, rem, hyper = adam
+            MX.quantize_mx_dual_out_adam(w, grad.view_as(w), m.view_as(w), v.view_as(w), rem.view_as(w), rows[0],
+                                         rows[1], *cols, fmt, **hyper, **kw)
+            self.fused_done.add((idx, ra))
 
     def _send(self, plane, dst, s, nel):
         """This rank's shard positions [s, s + nel) of the draw for rank ``dst``."""

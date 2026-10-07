@@ -329,6 +329,8 @@ def patch_packed_param_gather_layout(ctx: PatchContext) -> None:
     else:
         pgb._ParamAndGradBuffer.__init__ = ours
     patch_bucket_group_sync()
+    if bool(getattr(args, "mxfp6_packed_param_gather_fused_adam", False)):
+        patch_fused_adam_owner_pack()
     grouped = partition_buckets_grouped(pgb.partition_buckets)
     pgb.partition_buckets = grouped
     ddp_mod.partition_buckets = grouped
@@ -358,7 +360,103 @@ def _packed_states(group):
         fmts = ppg_formats()
         st = {id(b): PackedBucket(b, dp, rank, fmts) for b in group.buckets if getattr(b, "mxfp6_kind", "R") != "R"}
         group._ppg_states = st
+        for b in st.values():  # the optimizer-step side (patch_fused_adam_owner_pack): this rank's pieces
+            _OWNED.update({(b.items[i][1].data[ra:rb].data_ptr(), (rb - ra) * b.items[i][4]): (b, i, ra, rb)
+                           for i, ra, rb in b.owner_pieces()})
     return st
+
+
+# (data_ptr, numel) of this rank's owned piece of a packed weight -> (PackedBucket, item, ra, rb). The distributed
+# optimizer's parameter for that piece is a view of exactly these elements (a 256-row-aligned shard of one weight).
+_OWNED = {}
+
+
+def patch_fused_adam_owner_pack():
+    """``mxfp6_packed_param_gather_fused_adam``: Transformer Engine's FusedAdam.step leaves out the parameters that
+    are owned pieces of packed weights, and each of those takes the same Adam step inside its owner pack
+    (``PackedBucket.pack_piece(adam=...)``, Turbo ``quantize_mx_dual_out_adam``); the owner pack then skips them.
+    Only for the configuration that kernel reproduces (bf16 parameters with store_param_remainders, fp32 moments,
+    bf16 gradients, not capturable) and once TE has created the parameter's state; anything else stays in TE."""
+    import torch
+    from transformer_engine.pytorch.optimizers import FusedAdam
+
+    if getattr(FusedAdam.step, "_primus_fused_owner_pack", False):
+        return
+    orig_step = FusedAdam.step
+
+    def _fusable(opt, p):
+        st = opt.state.get(p)
+        g = getattr(p, "decoupled_grad", None) if opt.use_decoupled_grad else p.grad
+        return (
+            st is not None
+            and (p.data_ptr(), p.numel()) in _OWNED
+            and p.dtype == torch.bfloat16
+            and g is not None
+            and g.dtype == torch.bfloat16
+            and g.is_contiguous()
+            and st.get("master_param") is not None
+            and st["master_param"].dtype == torch.int16
+            and st["exp_avg"].dtype == torch.float32
+            and st["exp_avg_sq"].dtype == torch.float32
+        )
+
+    def _why_not(opt, p):
+        st = opt.state.get(p)
+        g = getattr(p, "decoupled_grad", None) if opt.use_decoupled_grad else p.grad
+        if st is None:
+            return "no state"
+        if (p.data_ptr(), p.numel()) not in _OWNED:
+            return "not an owned piece"
+        if g is None:
+            return "no grad"
+        return f"dtypes p {p.dtype} g {g.dtype} rem {getattr(st.get('master_param'), 'dtype', None)}"
+
+    def step(self, closure=None, grad_scaler=None):
+        if not _OWNED or grad_scaler is not None or self.capturable or not self.store_param_remainders:
+            if not getattr(self, "_ppg_fa_logged", False) and _OWNED:
+                self._ppg_fa_logged = True
+                log_rank_0(f"[mxfp6 fused adam+pack] not engaged: grad_scaler {grad_scaler is not None}, "
+                           f"capturable {self.capturable}, store_param_remainders {self.store_param_remainders}")
+            return orig_step(self, closure, grad_scaler)
+        if getattr(self, "_ppg_fa_logged", 0) < 2:  # the first two steps (step 1 has no state yet)
+            self._ppg_fa_logged = getattr(self, "_ppg_fa_logged", 0) + 1
+            from collections import Counter
+
+            ps = [p for grp in self.param_groups for p in grp["params"]]
+            n = sum(_fusable(self, p) for p in ps)
+            why = Counter(_why_not(self, p) for p in ps if not _fusable(self, p))
+            log_rank_0(f"[mxfp6 fused adam+pack] {n} of {len(ps)} optimizer params fused "
+                       f"({len(_OWNED)} owned pieces); the rest: {dict(why)}")
+        held = []
+        for group in self.param_groups:
+            mine = [p for p in group["params"] if _fusable(self, p)]
+            if mine:
+                ids = {id(p) for p in mine}
+                held.append((group, group["params"], mine))
+                group["params"] = [p for p in group["params"] if id(p) not in ids]
+        try:
+            loss = orig_step(self, closure, grad_scaler)
+        finally:
+            for group, params, _ in held:
+                group["params"] = params
+        for group, params, mine in held:
+            if len(params) == len(mine):  # TE skipped the emptied group and so did not count its step
+                group["step"] = group.get("step", 0) + 1
+            b1, b2 = group["betas"]
+            hyper = dict(lr=float(group["lr"]), beta1=b1, beta2=b2, eps=group["eps"],
+                         weight_decay=group["weight_decay"], step=int(group["step"]), adamw=bool(self.adam_w_mode),
+                         bias_correction=bool(group["bias_correction"]))
+            for p in mine:
+                b, idx, ra, rb = _OWNED[(p.data_ptr(), p.numel())]
+                st = self.state[p]
+                g = p.decoupled_grad if self.use_decoupled_grad else p.grad
+                # the step number the next owner_pack runs under (its SR seed)
+                b.pack_piece(idx, ra, rb, b.step + 1,
+                             adam=(g, st["exp_avg"], st["exp_avg_sq"], st["master_param"], hyper))
+        return loss
+
+    step._primus_fused_owner_pack = True
+    FusedAdam.step = step
 
 
 class _Handles:
