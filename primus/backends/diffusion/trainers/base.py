@@ -78,7 +78,9 @@ def create_lr_scheduler(optimizer, scheduler_type, warmup_steps, total_steps):
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
     def constant_with_warmup(step):
-        return linear_warmup(step)
+        if warmup_steps == 0:
+            return 1.0
+        return min(1.0, float(step + 1) / float(warmup_steps))
 
     def polynomial_decay(step, power=1.0):
         if step <= warmup_steps:
@@ -255,11 +257,7 @@ class BaseWanTrainer:
 
         performance_mode = self.args.get("performance_mode")
         if performance_mode is None:
-            performance_mode = (
-                "nemo_mlperf"
-                if self.args.get("mlperf_enable", False)
-                else "performance_only"
-            )
+            performance_mode = "nemo_mlperf" if self.args.get("mlperf_enable", False) else "performance_only"
         if performance_mode not in {"performance_only", "nemo_mlperf"}:
             raise ValueError(f"Unsupported performance_mode={performance_mode!r}")
         self.performance_mode = performance_mode
@@ -291,12 +289,8 @@ class BaseWanTrainer:
         )
         self.eval_dataloader = None
         if self.eval_dataset is not None:
-            eval_num_workers = int(
-                self.args.get("eval_dataloader_num_workers", num_workers) or 0
-            )
-            eval_prefetch_factor = int(
-                self.args.get("eval_dataloader_prefetch_factor", 2) or 2
-            )
+            eval_num_workers = int(self.args.get("eval_dataloader_num_workers", num_workers) or 0)
+            eval_prefetch_factor = int(self.args.get("eval_dataloader_prefetch_factor", 2) or 2)
             if mlperf_mode:
                 self.eval_sampler = ContiguousDistributedSampler(
                     self.eval_dataset,
@@ -327,16 +321,10 @@ class BaseWanTrainer:
                 )
 
         self.mlperf_enabled = mlperf_mode
-        self.mlperf_warmup_train_steps = int(
-            self.args.get("mlperf_warmup_train_steps", 0)
-        )
-        self.mlperf_warmup_validation_steps = int(
-            self.args.get("mlperf_warmup_validation_steps", 0)
-        )
+        self.mlperf_warmup_train_steps = int(self.args.get("mlperf_warmup_train_steps", 0))
+        self.mlperf_warmup_validation_steps = int(self.args.get("mlperf_warmup_validation_steps", 0))
         self._mlperf_block_open = False
-        self.mlperf_target_eval_loss = float(
-            self.args.get("mlperf_target_eval_loss", 0.586)
-        )
+        self.mlperf_target_eval_loss = float(self.args.get("mlperf_target_eval_loss", 0.586))
         self.mlperf_eval_samples = int(self.args.get("mlperf_eval_samples", 262144))
         self.mlperf_run_success = False
         self.mlperf_logger = None
@@ -426,6 +414,9 @@ class BaseWanTrainer:
 
     def _clip_grad_norm(self) -> float | torch.Tensor:
         """Clip gradient norm. Returns the total norm value."""
+        fused_clip = hasattr(getattr(self, "optimizer", None), "clip_scale")
+        if fused_clip:
+            self.optimizer.clip_scale = None
         if self.max_grad_norm <= 0:
             return 0.0
 
@@ -445,10 +436,20 @@ class BaseWanTrainer:
         if dtensor_cls is not None and isinstance(norm, dtensor_cls):
             norm = norm.full_tensor()
 
-        torch.nn.utils.clip_grads_with_norm_(
-            parameters, self.max_grad_norm, norm, foreach=True
-        )
-        return norm
+        if fused_clip:
+            self.optimizer.clip_scale = torch.clamp((norm.float() + 1e-6) / self.max_grad_norm, min=1.0)
+            return norm
+
+        if os.getenv("FLUX_LOCAL_ADAMW", "0") == "1":
+            from primus.backends.diffusion.optim.flux_local_adamw import (
+                clip_grads_with_norm_local_,
+            )
+
+            clip_grads_with_norm_local_(parameters, self.max_grad_norm, norm)
+            return norm
+        else:
+            torch.nn.utils.clip_grads_with_norm_(parameters, self.max_grad_norm, norm, foreach=True)
+            return norm
 
     def _save_checkpoint(self):
         """Save checkpoint at save_steps intervals. Override for custom strategies."""
@@ -566,6 +567,32 @@ class BaseWanTrainer:
 
         self.mlperf_logger = mllog.get_mllogger()
         self.mlperf_constants = constants
+        allowed = {
+            "fp64",
+            "fp32",
+            "tf32",
+            "fp16",
+            "fp8",
+            "mxfp6",
+            "nvfp4",
+            "mxfp4",
+            "bfloat16",
+            "Graphcore FLOAT 16.16",
+            "int8",
+            "uint8",
+            "int4",
+            "uint4",
+        }
+        self.mlperf_precision = {}
+        for part in ("linear", "attn", "comm"):
+            name = f"MLLOG_LOWEST_NUMERICAL_PRECISION_IN_{part.upper()}"
+            value = os.getenv(name, "").strip()
+            if value not in allowed:
+                raise ValueError(f"{name}={value!r}: MLPerf 6.1 requires one of {sorted(allowed)}")
+            self.mlperf_precision[part] = value
+        self.mlperf_config_filename = os.getenv("MLLOG_CONFIG_FILENAME", "").strip()
+        if not self.mlperf_config_filename:
+            raise ValueError("MLLOG_CONFIG_FILENAME must name the submission config_*.sh")
         if self.rank == 0:
             output_file = (
                 self.args.get("mlperf_output_file")
@@ -650,14 +677,27 @@ class BaseWanTrainer:
             key=c.OPT_BASE_LR, value=float(self.args["learning_rate"])
         )
         self.mlperf_logger.event(key=c.OPT_GRADIENT_CLIP_NORM, value=self.max_grad_norm)
-        self.mlperf_logger.event(
-            key="evaluation_frequency", value=self.mlperf_eval_samples
-        )
+        self.mlperf_logger.event(key="evaluation_frequency", value=self.mlperf_eval_samples)
+        for part, value in self.mlperf_precision.items():
+            self.mlperf_logger.event(key=f"lowest_numerical_precision_in_{part}", value=value)
+        self.mlperf_logger.event(key="tensor_parallelism", value=1)
+        self.mlperf_logger.event(key="pipeline_parallelism", value=1)
+        self.mlperf_logger.event(key="context_parallelism", value=self.sp_size)
+        self.mlperf_logger.event(key="expert_parallelism", value=1)
+        self.mlperf_logger.event(key="micro_batch_size", value=self.per_device_train_batch_size)
+        self.mlperf_logger.event(key="config_filename", value=self.mlperf_config_filename)
         self.mlperf_logger.start(key=c.INIT_START)
 
-    def _mlperf_warmup(self, train_batch) -> None:
+    def _mlperf_warmup(self) -> None:
         if not (self.mlperf_warmup_train_steps or self.mlperf_warmup_validation_steps):
             return
+
+        make_train_batch = getattr(self.processing_class, "make_synthetic_batch", None)
+        make_eval_batch = getattr(self.eval_processor, "make_synthetic_batch", None)
+        if not callable(make_train_batch) or not callable(make_eval_batch):
+            raise RuntimeError("MLPerf warmup requires synthetic batches from the data processor.")
+        train_batch = make_train_batch(self.per_device_train_batch_size)
+        eval_batch = make_eval_batch(self.per_device_eval_batch_size, include_timestep=True)
 
         python_rng = random.getstate()
         cpu_rng = torch.random.get_rng_state()
@@ -672,12 +712,9 @@ class BaseWanTrainer:
 
             if self.mlperf_warmup_validation_steps:
                 self.model.eval()
-                eval_batches = iter(self.eval_dataloader)
                 with torch.no_grad():
                     for _ in range(self.mlperf_warmup_validation_steps):
-                        self.compute_loss(
-                            next(eval_batches), processor=self.eval_processor
-                        )
+                        self.compute_loss(eval_batch, processor=self.eval_processor)
 
             for module in self.model.modules():
                 reset = getattr(module, "reset_fp8_meta_tensors", None)
@@ -776,9 +813,29 @@ class BaseWanTrainer:
 
         optimizer = None
         try:
-            optimizer = torch.optim.AdamW(**optimizer_kwargs, fused=True)
-            if self.rank == 0:
-                logger.info("Optimizer: torch.optim.AdamW(fused=True)")
+            if os.getenv("FLUX_FUSED_ADAMW", "0") == "1":
+                from primus.backends.diffusion.optim.flux_fused_adamw import (
+                    FusedClipAdamW,
+                )
+
+                optimizer = FusedClipAdamW(**optimizer_kwargs)
+                if self.rank == 0:
+                    logger.info("Optimizer: FusedClipAdamW (FLUX_FUSED_ADAMW, clip folded into the step)")
+            else:
+                if os.getenv("FLUX_LOCAL_ADAMW", "0") == "1":
+                    from primus.backends.diffusion.optim.flux_local_adamw import (
+                        LocalShardAdamW,
+                    )
+
+                    optimizer = LocalShardAdamW(**optimizer_kwargs)
+                    if self.rank == 0:
+                        logger.info(
+                            "Optimizer: LocalShardAdamW (FLUX_LOCAL_ADAMW, fused AdamW on local shards)"
+                        )
+                else:
+                    optimizer = torch.optim.AdamW(**optimizer_kwargs, fused=True)
+                    if self.rank == 0:
+                        logger.info("Optimizer: torch.optim.AdamW(fused=True)")
         except (TypeError, RuntimeError):
             try:
                 optimizer = torch.optim.AdamW(**optimizer_kwargs, foreach=True)
@@ -1037,10 +1094,29 @@ class BaseWanTrainer:
         if hasattr(core, "freeze_except"):
             core.freeze_except()
 
+        precompute_fp8_scales = None
+        if os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1":
+            try:
+                if os.getenv("FLUX_FP4_PASSES", "off") in ("", "off"):
+                    raise ImportError("MXFP4 is disabled")
+                from primus.backends.diffusion.models.quantization.mxfp4_linear import (
+                    precompute_float8_dynamic_scale_for_fsdp,
+                )
+            except ImportError:
+                from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
+
+            precompute_fp8_scales = precompute_float8_dynamic_scale_for_fsdp
+            precompute_fp8_scales(self.model)
+
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         torch.cuda.reset_peak_memory_stats()
         self._start_profiler()
+
+        if self.mlperf_enabled:
+            self._mlperf_warmup()
+            self._mlperf_log_train_start()
+            self._mlperf_log_block_start(self.global_step)
 
         start_time = time.time()
         last_log_time = start_time
@@ -1049,7 +1125,6 @@ class BaseWanTrainer:
         update_steps_since_log = 0
         update_loss_sum = None
         update_loss_count = 0
-        mlperf_train_started = False
 
         steps_per_epoch = math.ceil(
             len(self.dataloader) / max(1, self.grad_accum_steps)
@@ -1059,6 +1134,7 @@ class BaseWanTrainer:
             self.global_step % steps_per_epoch
         ) * self.grad_accum_steps
 
+        _step_timer = _flux_step_timer(self)
         for epoch in range(start_epoch, self.num_train_epochs):
             self.sampler.set_epoch(epoch)
             if isinstance(self.sampler, ContiguousDistributedSampler):
@@ -1069,18 +1145,14 @@ class BaseWanTrainer:
                 )
                 self.sampler.set_offset(sample_offset)
 
-            for batch_idx, batch in enumerate(self.dataloader):
+            for batch_idx, batch in enumerate(_flux_h2d_prefetch(self.dataloader, self.device)):
                 if self.rank == 0 and self.global_step == 0 and batch_idx == 0:
                     logger.info("First training batch loaded; entering forward pass")
-                if self.mlperf_enabled and not mlperf_train_started:
-                    self._mlperf_warmup(batch)
-                    start_time = last_log_time = time.time()
-                    self._mlperf_log_train_start()
-                    self._mlperf_log_block_start(self.global_step)
-                    mlperf_train_started = True
                 is_update_step = ((batch_idx + 1) % max(1, self.grad_accum_steps)) == 0
                 local_samples_in_update += self._infer_local_batch_size(batch)
 
+                if _step_timer is not None:
+                    _step_timer.begin()
                 with self._grad_sync_context(is_update_step):
                     try:
                         raw_loss = self.compute_loss(batch)
@@ -1093,9 +1165,9 @@ class BaseWanTrainer:
                         )
                         raise
                     if self.rank == 0 and self.global_step == 0 and batch_idx == 0:
-                        logger.info(
-                            "First training forward completed; entering backward pass"
-                        )
+                        logger.info("First training forward completed; entering backward pass")
+                    if _step_timer is not None:
+                        _step_timer.mark("fwd")
                     detached_loss = raw_loss.detach().float()
                     update_loss_sum = (
                         detached_loss
@@ -1105,6 +1177,8 @@ class BaseWanTrainer:
                     update_loss_count += 1
                     loss = raw_loss / max(1, self.grad_accum_steps)
                     loss.backward()
+                    if _step_timer is not None:
+                        _step_timer.mark("bwd")
                     if self.rank == 0 and self.global_step == 0 and batch_idx == 0:
                         logger.info("First training backward completed")
 
@@ -1113,11 +1187,38 @@ class BaseWanTrainer:
                     update_loss_sum = None
                     update_loss_count = 0
                     grad_norm = self._clip_grad_norm()
+                    # FLUX_LIGHT_LOG: read the scalars before Adam is queued, so the
+                    # log step does not wait out the optimizer before the next forward.
+                    if (
+                        os.getenv("FLUX_LIGHT_LOG", "0") == "1"
+                        and os.getenv("FLUX_LIGHT_LOG_REORDER", "0") == "1"
+                        and self.logging_steps > 0
+                        and (self.global_step + 1) % self.logging_steps == 0
+                    ):
+                        if isinstance(loss_val, torch.Tensor):
+                            loss_val = loss_val.detach().float().item()
+                        if isinstance(grad_norm, torch.Tensor):
+                            grad_norm = grad_norm.detach().float().item()
 
                     self.optimizer.step()
+                    if os.getenv("FLUX_FP4_DEOSC", "0") == "1":
+                        _deosc = getattr(self, "_flux_weight_deosc", False)
+                        if _deosc is False:
+                            from primus.backends.diffusion.optim.flux_weight_deosc import (
+                                build_weight_deosc,
+                            )
+
+                            _deosc = build_weight_deosc(self.model)
+                            self._flux_weight_deosc = _deosc
+                        if _deosc is not None:
+                            _deosc.step(self.global_step)
+                    if precompute_fp8_scales is not None:
+                        precompute_fp8_scales(self.model)
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
+                    if _step_timer is not None:
+                        _step_timer.finish(self.global_step)
                     self._step_profiler()
                     update_steps_since_log += 1
                     local_samples_since_log += local_samples_in_update
@@ -1153,10 +1254,7 @@ class BaseWanTrainer:
                     if self.save_steps > 0 and self.global_step % self.save_steps == 0:
                         self._save_checkpoint()
 
-                    if (
-                        self.mlperf_enabled
-                        and self.global_step % self.mlperf_eval_freq_steps == 0
-                    ):
+                    if self.mlperf_enabled and self.global_step % self.mlperf_eval_freq_steps == 0:
                         self._mlperf_log_block_stop(self.global_step)
                         self._mlperf_log_eval_start()
                         val_loss = self.validate_loss()
@@ -1229,3 +1327,265 @@ class BaseWanTrainer:
     def save_model(self):
         """Save final model. Override in subclass."""
         raise NotImplementedError
+
+
+def _flux_h2d_prefetch(loader, device):
+    """Yield loader's batches with the next batch's pinned tensors already on device."""
+    device = torch.device(device)
+    if os.getenv("FLUX_BATCH_PREFETCH", "0") != "1" or device.type != "cuda" or not torch.cuda.is_available():
+        yield from loader
+        return
+    stream = torch.cuda.Stream(device=device)
+
+    def stage(batch):
+        if not isinstance(batch, dict):
+            return batch, None
+        with torch.cuda.stream(stream):
+            staged = {
+                k: (
+                    v.to(device, non_blocking=True)
+                    if isinstance(v, torch.Tensor) and not v.is_cuda and v.is_pinned()
+                    else v
+                )
+                for k, v in batch.items()
+            }
+        event = torch.cuda.Event()
+        event.record(stream)
+        return staged, event
+
+    it = iter(loader)
+    try:
+        pending = stage(next(it))
+    except StopIteration:
+        return
+    while pending is not None:
+        batch, event = pending
+        if event is not None:
+            current = torch.cuda.current_stream(device)
+            current.wait_event(event)
+            for v in batch.values():
+                if isinstance(v, torch.Tensor) and v.is_cuda:
+                    v.record_stream(current)
+        try:
+            pending = stage(next(it))
+        except StopIteration:
+            pending = None
+        yield batch
+
+
+class _FluxStepTiming:
+    def __init__(self, trainer):
+        import os
+
+        self.rank = trainer.rank
+        self.every = max(1, int(os.environ.get("FLUX_STEP_TIMING_EVERY", "10")))
+        self.log_rank = self.rank % max(1, torch.cuda.device_count()) == 0
+        self.pending = []
+        self.current = None
+        self.prev_end = None
+        self.all_gather = None
+        if os.environ.get("FLUX_AG_TIMING", "0") == "1":
+            try:
+                self.all_gather = _FluxAllGatherTiming(self.rank)
+            except Exception as error:
+                logger.warning(f"[ag-timing] rank={self.rank} not installed: {error!r}")
+        self._reset()
+
+    def _reset(self):
+        self.sums = {"fwd": 0.0, "bwd": 0.0, "opt": 0.0, "gap": 0.0, "step": 0.0}
+        self.count = 0
+        self.gaps = 0
+
+    def _event(self):
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        return event
+
+    def begin(self):
+        self.current = {"start": self._event(), "prev_end": self.prev_end}
+
+    def mark(self, name):
+        if self.current is not None:
+            self.current[name] = self._event()
+
+    def finish(self, step):
+        current, self.current = self.current, None
+        if current is None or "fwd" not in current or "bwd" not in current:
+            return
+        current["end"] = self._event()
+        self.prev_end = current["end"]
+        self.pending.append(current)
+        while self.pending and self.pending[0]["end"].query():
+            done = self.pending.pop(0)
+            self.sums["fwd"] += done["start"].elapsed_time(done["fwd"])
+            self.sums["bwd"] += done["fwd"].elapsed_time(done["bwd"])
+            self.sums["opt"] += done["bwd"].elapsed_time(done["end"])
+            self.sums["step"] += done["start"].elapsed_time(done["end"])
+            if done["prev_end"] is not None:
+                self.sums["gap"] += done["prev_end"].elapsed_time(done["start"])
+                self.gaps += 1
+            self.count += 1
+        if step % self.every == 0 and self.count and self.log_rank:
+            n = self.count
+            logger.info(
+                f"[step-timing] rank={self.rank} step={step} n={n} "
+                f"fwd_ms={self.sums['fwd'] / n:.2f} bwd_ms={self.sums['bwd'] / n:.2f} "
+                f"opt_ms={self.sums['opt'] / n:.2f} step_ms={self.sums['step'] / n:.2f} "
+                f"gap_ms={self.sums['gap'] / max(1, self.gaps):.2f}"
+            )
+        if self.all_gather is not None:
+            self.all_gather.finish(step, step % self.every == 0 and self.log_rank)
+        if step % self.every == 0:
+            self._reset()
+
+
+class _FluxAllGatherTiming:
+    def __init__(self, rank):
+        import re
+        import time
+
+        from torch.distributed.fsdp._fully_shard import _fsdp_param_group
+
+        self.rank = rank
+        self.clock = time.perf_counter
+        self.digits = re.compile(r"[0-9]+")
+        self.records = []
+        self.pending = []
+        self.broken = False
+        self._reset()
+        timing = self
+        group_cls = _fsdp_param_group.FSDPParamGroup
+        unshard, wait_for_unshard = group_cls.unshard, group_cls.wait_for_unshard
+
+        class _TimedAllGather:
+            def __init__(self, comm, record):
+                self.comm, self.record = comm, record
+
+            def allocate(self, *args, **kwargs):
+                return self.comm.allocate(*args, **kwargs)
+
+            def __call__(self, *args, **kwargs):
+                self.record["ag_start"] = timing._event()
+                start = timing.clock()
+                work = self.comm(*args, **kwargs)
+                self.record["issue_cpu"] = (timing.clock() - start) * 1e3
+                self.record["ag_end"] = timing._event()
+                return work
+
+        def timed_unshard(group, async_op=False):
+            if timing.broken or group._all_gather_result is not None or group.is_unsharded:
+                return unshard(group, async_op)
+            record = {"issue": timing._event()}
+            comm = group._all_gather_comm
+            group._all_gather_comm = _TimedAllGather(comm, record)
+            start = timing.clock()
+            try:
+                unshard(group, async_op)
+            finally:
+                group._all_gather_comm = comm
+            record["unshard_cpu"] = (timing.clock() - start) * 1e3
+            if "ag_end" in record and group._all_gather_result is not None:
+                group._flux_ag_record = record
+
+        def timed_wait_for_unshard(group):
+            record = getattr(group, "_flux_ag_record", None)
+            if timing.broken or record is None or group._all_gather_result is None:
+                return wait_for_unshard(group)
+            group._flux_ag_record = None
+            record["wait_start"] = timing._event()
+            wait_for_unshard(group)
+            record["wait_end"] = timing._event()
+            try:
+                record["name"] = timing.digits.sub("N", group._module_fqn or "?")
+                record["phase"] = group._training_state.name
+                timing.records.append(record)
+            except Exception as error:
+                timing._disable(error)
+
+        group_cls.unshard = timed_unshard
+        group_cls.wait_for_unshard = timed_wait_for_unshard
+        if rank == 0:
+            logger.info("[ag-timing] timing FSDP all-gathers per param group")
+
+    def _event(self):
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        return event
+
+    def _reset(self):
+        self.sums = {
+            "n": 0,
+            "ag": 0.0,
+            "exposed": 0.0,
+            "copy_out": 0.0,
+            "queue": 0.0,
+            "issue_cpu": 0.0,
+            "unshard_cpu": 0.0,
+        }
+        self.steps = 0
+        self.by_name = {}
+        self.by_phase = {}
+
+    def _disable(self, error):
+        self.broken = True
+        self.records, self.pending = [], []
+        logger.warning(f"[ag-timing] rank={self.rank} disabled after error: {error!r}")
+
+    def finish(self, step, log):
+        if self.broken:
+            return
+        try:
+            self._finish(step, log)
+        except Exception as error:
+            self._disable(error)
+
+    def _finish(self, step, log):
+        self.pending.append(self.records)
+        self.records = []
+        while self.pending and all(r["wait_end"].query() for r in self.pending[0]):
+            for r in self.pending.pop(0):
+                exposed = max(0.0, r["wait_start"].elapsed_time(r["ag_end"]))
+                values = {
+                    "n": 1,
+                    "ag": r["ag_start"].elapsed_time(r["ag_end"]),
+                    "exposed": exposed,
+                    "copy_out": r["wait_start"].elapsed_time(r["wait_end"]) - exposed,
+                    "queue": r["issue"].elapsed_time(r["ag_start"]),
+                    "issue_cpu": r["issue_cpu"],
+                    "unshard_cpu": r["unshard_cpu"],
+                }
+                for key, value in values.items():
+                    self.sums[key] += value
+                name = self.by_name.setdefault(r["name"], [0, 0.0, 0.0])
+                name[0] += 1
+                name[1] += exposed
+                name[2] += values["ag"]
+                self.by_phase[r["phase"]] = self.by_phase.get(r["phase"], 0) + 1
+            self.steps += 1
+        if not log:
+            return
+        if self.steps:
+            s, n = self.sums, self.steps
+            logger.info(
+                f"[ag-timing] rank={self.rank} step={step} steps={n} groups/step={s['n'] / n:.1f} "
+                f"ag_ms={s['ag'] / n:.2f} exposed_ms={s['exposed'] / n:.2f} copy_out_ms={s['copy_out'] / n:.2f} "
+                f"queue_ms={s['queue'] / n:.2f} issue_cpu_ms={s['issue_cpu'] / n:.2f} "
+                f"unshard_cpu_ms={s['unshard_cpu'] / n:.2f} phases={self.by_phase}"
+            )
+            top = sorted(self.by_name.items(), key=lambda item: -item[1][1])[:5]
+            logger.info(
+                f"[ag-timing] rank={self.rank} step={step} top_exposed "
+                + " ".join(
+                    f"{name}:n={v[0] / n:.0f},exposed_ms={v[1] / n:.2f},ag_ms={v[2] / n:.2f}"
+                    for name, v in top
+                )
+            )
+        self._reset()
+
+
+def _flux_step_timer(trainer):
+    import os
+
+    if os.environ.get("FLUX_STEP_TIMING", "0") != "1" or max(1, trainer.grad_accum_steps) != 1:
+        return None
+    return _FluxStepTiming(trainer)

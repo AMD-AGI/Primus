@@ -35,6 +35,16 @@ from primus.backends.diffusion.distributed import (
 )
 from primus.backends.diffusion.utils.log import logger
 
+
+def _pin_symm_mem_pools() -> None:
+    import ctypes
+
+    from torch.distributed import _symmetric_memory as symm_mem
+
+    for pool in list(getattr(symm_mem, "_symm_mem_pools", {}).values()):
+        ctypes.pythonapi.Py_IncRef(ctypes.py_object(pool))
+
+
 from .base import BaseWanTrainer
 
 
@@ -107,6 +117,53 @@ class FSDP2Trainer(BaseWanTrainer):
 
         self._apply_fsdp2()
 
+    def _sdma_all_gather_enabled(self) -> bool:
+        return (
+            os.getenv("FSDP_ALL_GATHER_BACKEND", "") == "rccl_sdma"
+            and os.getenv("FLUX_SDMA_ATTACH", "1") == "1"
+        )
+
+    def _maybe_attach_sdma_all_gather(self, module, module_name: str) -> None:
+        if not self._sdma_all_gather_enabled():
+            return
+        # FSDP_SDMA_MODULES: comma-separated module-path prefixes (e.g. "single_blocks") that take the
+        # copy-engine gather; the rest keep the kernel gather. Empty means every module.
+        prefixes = [p.strip() for p in os.getenv("FSDP_SDMA_MODULES", "").split(",") if p.strip()]
+        if prefixes and not any(module_name == p or module_name.startswith(p + ".") for p in prefixes):
+            return
+
+        from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
+            SymmMemAllGather,
+        )
+
+        try:
+            state = module._get_fsdp_state()
+        except Exception:
+            return
+
+        # set_custom_all_gather rejects modules whose parameters span more than one group.
+        groups = getattr(state, "_fsdp_param_groups", None) or []
+        if len(groups) != 1:
+            if self.rank == 0:
+                logger.warning(
+                    f"FSDP2/SDMA: skipping {type(module).__name__}: "
+                    f"expected one parameter group, found {len(groups)}"
+                )
+            return
+
+        process_group = groups[0]._all_gather_process_group
+        try:
+            module.set_custom_all_gather(SymmMemAllGather(process_group, "NCCL"))
+        except (AttributeError, ValueError, AssertionError) as error:
+            if self.rank == 0:
+                logger.warning(f"FSDP2/SDMA: failed to attach to {type(module).__name__}: {error}")
+            return
+        self._sdma_attached = getattr(self, "_sdma_attached", 0) + 1
+        if self._sdma_attached == 1:
+            import atexit
+
+            atexit.register(_pin_symm_mem_pools)
+
     def _apply_fsdp2(self):
         """Apply torch.distributed._composable.fsdp.fully_shard to the model."""
         mp_dtype = self._resolve_dtype()
@@ -174,6 +231,8 @@ class FSDP2Trainer(BaseWanTrainer):
             if self.rank == 0:
                 scaling = f"block-{block_size}" if block_size else "tensor-wise"
                 logger.info(f"FSDP2: HSDP gradient AllReduce uses FP8 {fp8_all_reduce}, {scaling}")
+        if os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1" and self.rank == 0:
+            logger.info("FSDP2: FP8 AllGather uses native one-byte transport")
 
         # Keep FP32 parameter/optimizer storage while allowing an explicit
         # reduction-dtype experiment around the FP32-qualified default.
@@ -244,6 +303,7 @@ class FSDP2Trainer(BaseWanTrainer):
                 reshard_after_forward=False if module_path in no_reshard_paths else reshard_after_forward,
                 mp_policy=mp_policy,
             )
+            self._maybe_attach_sdma_all_gather(module, module_path)
             wrapped_paths += 1
         if self.rank == 0 and wrapped_paths:
             logger.info(
@@ -296,6 +356,7 @@ class FSDP2Trainer(BaseWanTrainer):
                         reshard_after_forward=reshard_after_forward,
                         mp_policy=mp_policy,
                     )
+                    self._maybe_attach_sdma_all_gather(module, module_name)
                     if checkpointed_module is not None:
                         seen.add(id(checkpointed_module))
                     wrapped_count += 1
@@ -309,11 +370,37 @@ class FSDP2Trainer(BaseWanTrainer):
             reshard_after_forward=reshard_after_forward,
             mp_policy=mp_policy,
         )
+        self._maybe_attach_sdma_all_gather(wrap_root, "")
+        if self.rank == 0 and self._sdma_all_gather_enabled():
+            logger.info(
+                f"FSDP2/SDMA: SymmMemAllGather attached to {getattr(self, '_sdma_attached', 0)} modules"
+            )
         if self.rank == 0:
             logger.info(
                 f"FSDP2: applied fully_shard to '{wrap_target or '<model>'}' "
                 f"with mp={mp_dtype}, reduce={reduce_dtype}"
             )
+
+        if int(os.getenv("FLUX_FSDP_FWD_PREFETCH", "0") or 0) > 0:
+            from torch.distributed.fsdp import FSDPModule
+
+            fwd_order = [wrap_root] + [
+                getattr(wrap_root, name, None)
+                for name in ("img_in", "time_in", "guidance_in", "vector_in", "txt_in")
+            ]
+            for attr in ("double_blocks", "single_blocks"):
+                fwd_order.extend(getattr(wrap_root, attr, None) or [])
+            fwd_order.append(getattr(wrap_root, "final_layer", None))
+            fwd_order = [m for m in fwd_order if isinstance(m, FSDPModule)]
+            import os as _os
+
+            _depth = max(1, int(_os.environ.get("FLUX_FSDP_FWD_PREFETCH", "1") or 1))
+            for _i, cur in enumerate(fwd_order[:-1]):
+                cur.set_modules_to_forward_prefetch(fwd_order[_i + 1 : _i + 1 + _depth])
+            if self.rank == 0:
+                logger.info(
+                    f"FSDP2: explicit forward prefetch chained across {len(fwd_order)} modules, depth={_depth}"
+                )
 
     def _compile_transformer_blocks(self, root: torch.nn.Module) -> None:
         strategy = str(self.args.get("compile_strategy", "per_block")).strip().lower()

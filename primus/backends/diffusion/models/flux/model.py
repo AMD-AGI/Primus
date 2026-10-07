@@ -13,6 +13,11 @@ from dataclasses import asdict, dataclass
 import torch
 from torch import Tensor, nn
 
+from primus.backends.diffusion.models.flux import layers
+from primus.backends.diffusion.models.flux.fused_norm_rope import (
+    RopeTables,
+    rope_tables,
+)
 from primus.backends.diffusion.models.flux.layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -21,6 +26,14 @@ from primus.backends.diffusion.models.flux.layers import (
     SingleStreamBlock,
     timestep_embedding,
 )
+
+
+def build_rope_tables(pe, txt_len: int, img_len: int) -> RopeTables:
+    """cos/sin for the whole sequence and for each side of a double block."""
+    (a_cos, a_sin), (t_cos, t_sin), (i_cos, i_sin) = rope_tables(
+        pe, ((0, txt_len + img_len), (0, txt_len), (txt_len, img_len))
+    )
+    return RopeTables(a_cos, a_sin, t_cos, t_sin, i_cos, i_sin)
 
 
 @dataclass
@@ -190,4 +203,8 @@ class Flux(nn.Module):
 
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
+        if layers.FUSED_NORM_ROPE:
+            # Built once here and shared by all 57 blocks, so the per-span
+            # table copies are a per-step cost, not a per-block one.
+            pe = build_rope_tables(pe, txt.shape[1], img.shape[1])
         return self._run_dit(img, txt, vec, pe)
