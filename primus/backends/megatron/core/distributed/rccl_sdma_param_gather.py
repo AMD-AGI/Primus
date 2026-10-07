@@ -33,11 +33,7 @@ def recommended_eager_param_bytes(size_bytes: int) -> int:
     """Round a parameter buffer size up to the symmetric allocator granule."""
     if size_bytes <= 0:
         raise ValueError("parameter buffer size must be positive")
-    return (
-        (size_bytes + LARGE_SEGMENT_BYTES - 1)
-        // LARGE_SEGMENT_BYTES
-        * LARGE_SEGMENT_BYTES
-    )
+    return (size_bytes + LARGE_SEGMENT_BYTES - 1) // LARGE_SEGMENT_BYTES * LARGE_SEGMENT_BYTES
 
 
 def get_sdma_process_group(
@@ -63,9 +59,7 @@ def get_sdma_process_group(
                 0,
             )
         else:
-            raise ValueError(
-                f"MEGATRON_RCCL_SDMA_CTA_POLICY must be 0 or 2, got {cta_policy}"
-            )
+            raise ValueError(f"MEGATRON_RCCL_SDMA_CTA_POLICY must be 0 or 2, got {cta_policy}")
         options.config.split_share = 0
         _SDMA_GROUP = dist.new_group(
             ranks=list(range(dist.get_world_size())),
@@ -75,8 +69,7 @@ def get_sdma_process_group(
         )
         if dist.get_rank() == 0:
             print(
-                "[RCCL-SDMA:Megatron] created dedicated zero-CTA group "
-                f"name={_SDMA_GROUP.group_name}",
+                "[RCCL-SDMA:Megatron] created dedicated zero-CTA group " f"name={_SDMA_GROUP.group_name}",
                 flush=True,
             )
     return _SDMA_GROUP
