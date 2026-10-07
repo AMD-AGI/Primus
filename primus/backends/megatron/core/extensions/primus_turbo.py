@@ -2339,6 +2339,13 @@ class PrimusTurboColumnParallelGroupedLinear(PrimusTurboGroupedLinear):
         tp_size = get_pg_size(self._tp_group)
         assert tp_size == 1, "PrimusTurboColumnParallelGroupedLinear only supports tensor parallel size = 1"
 
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Same as TEColumnParallelGroupedLinear: one key per weight, experts on the EP axis."""
+        tp_axis_map = {}
+        for gemm_idx in range(self.num_gemms):
+            tp_axis_map.update({f"{gemm_idx}.weight": 0, f"{gemm_idx}.bias": 0})
+        return super()._sharded_state_dict_grouped(tp_axis_map, prefix, sharded_offsets, metadata)
+
 
 class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
     """
@@ -2376,6 +2383,11 @@ class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
 
         tp_size = get_pg_size(self._tp_group)
         assert tp_size == 1, "PrimusTurboRowParallelGroupedLinear only supports tensor parallel size = 1"
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Same as TERowParallelGroupedLinear: one key per weight, experts on the EP axis."""
+        tp_axis_map = {f"{gemm_idx}.weight": 1 for gemm_idx in range(self.num_gemms)}
+        return super()._sharded_state_dict_grouped(tp_axis_map, prefix, sharded_offsets, metadata)
 
 
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):

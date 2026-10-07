@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import logging
 from contextlib import nullcontext
-from dataclasses import dataclass
-from typing import List, Optional, Union
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Union
 
 import torch
 from megatron.core import tensor_parallel
@@ -76,12 +76,24 @@ class Glm5NextLayerSubmodules:
     self_attention: Union[ModuleSpec, type] = IdentityOp
     pre_mlp_layernorm: Union[ModuleSpec, type] = IdentityOp
     mlp: Union[ModuleSpec, type] = IdentityOp
+    # Read by TransformerLayer.sharded_state_dict when saving checkpoints.
+    sharded_state_dict_keys_map: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class Glm5NextTransformerBlockSubmodules:
     layer_specs: Optional[List[ModuleSpec]] = None
     final_layernorm: Optional[Union[ModuleSpec, type]] = None
+
+
+def _tp_group(pg_collection):
+    # Megatron's sharded_state_dict (checkpoint save) reads ``self.tp_group``, which the
+    # stock TransformerLayer/TransformerBlock __init__ (bypassed here) would set.
+    if pg_collection is not None and getattr(pg_collection, "tp", None) is not None:
+        return pg_collection.tp
+    from megatron.core import parallel_state
+
+    return parallel_state.get_tensor_model_parallel_group()
 
 
 def _hc_param(*shape: int) -> nn.Parameter:
@@ -114,6 +126,7 @@ class Glm5NextLayer(KeepFp32ParamsMixin, TransformerLayer):
         self.layer_number = self.layer_idx + 1
         self.is_kda_layer = bool(is_kda_layer)
         self.pg_collection = pg_collection
+        self.tp_group = _tp_group(pg_collection)
         self.vp_stage = vp_stage
         self.hc_mult = int(config.hc_mult)
         hidden = int(config.hidden_size)
@@ -238,6 +251,7 @@ class Glm5NextTransformerBlock(TransformerBlock):
         self.post_process = post_process
         self.vp_stage = vp_stage
         self.pg_collection = pg_collection
+        self.tp_group = _tp_group(pg_collection)
         self.input_tensor = None
         self.hc_mult = int(config.hc_mult)
 
