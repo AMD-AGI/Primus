@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -92,30 +93,29 @@ def _run_logprob_eval(model_chunks, in_path: str, out_path: str) -> None:
     tp = parallel_state.get_tensor_model_parallel_world_size()
     pad_to = 64 * tp
     rank0 = dist.get_rank() == 0
-    out_f = open(out_path, "w") if rank0 else None
+    out_ctx = open(out_path, "w") if rank0 else contextlib.nullcontext(None)
     device = torch.cuda.current_device()
-    for i, sample in enumerate(samples):
-        tokens = [int(t) for t in sample["tokens"]]
-        n = len(tokens)
-        padded = n + (-n) % pad_to
-        ids = torch.zeros(1, padded, dtype=torch.long, device=device)
-        ids[0, :n] = torch.tensor(tokens, device=device)
-        target = torch.zeros_like(ids)
-        target[0, : n - 1] = ids[0, 1:n]
-        with torch.no_grad():
-            logits = model(input_ids=ids, position_ids=None, attention_mask=None)  # [1, S, V/tp]
-            nll = tensor_parallel.vocab_parallel_cross_entropy(
-                logits.float().transpose(0, 1).contiguous(), target.t()
+    with out_ctx as out_f:
+        for i, sample in enumerate(samples):
+            tokens = [int(t) for t in sample["tokens"]]
+            n = len(tokens)
+            padded = n + (-n) % pad_to
+            ids = torch.zeros(1, padded, dtype=torch.long, device=device)
+            ids[0, :n] = torch.tensor(tokens, device=device)
+            target = torch.zeros_like(ids)
+            target[0, : n - 1] = ids[0, 1:n]
+            with torch.no_grad():
+                logits = model(input_ids=ids, position_ids=None, attention_mask=None)  # [1, S, V/tp]
+                nll = tensor_parallel.vocab_parallel_cross_entropy(
+                    logits.float().transpose(0, 1).contiguous(), target.t()
+                )
+            logprobs = (-nll[: n - 1, 0]).tolist()
+            if rank0:
+                out_f.write(json.dumps({"id": sample.get("id", i), "logprobs": logprobs}) + "\n")
+                out_f.flush()
+            log_rank_0(
+                f"[GLM5-Next logprob eval] sample {i}: {n} tokens, mean logprob {sum(logprobs) / max(1, len(logprobs)):.4f}"
             )
-        logprobs = (-nll[: n - 1, 0]).tolist()
-        if rank0:
-            out_f.write(json.dumps({"id": sample.get("id", i), "logprobs": logprobs}) + "\n")
-            out_f.flush()
-        log_rank_0(
-            f"[GLM5-Next logprob eval] sample {i}: {n} tokens, mean logprob {sum(logprobs) / max(1, len(logprobs)):.4f}"
-        )
-    if rank0:
-        out_f.close()
 
 
 @register_patch(
