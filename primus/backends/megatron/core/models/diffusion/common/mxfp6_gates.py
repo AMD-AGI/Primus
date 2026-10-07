@@ -92,6 +92,12 @@ class Mxfp6Gates:
     # AdaLN modulation linears write their weight gradient straight into main_grad
     # (the GEMM's output is main_grad) instead of AccumulateGrad + the DDP hook's copy.
     adaln_wgrad_main_grad: bool = False
+    # The AdaLN modulation wgrads ([out, 32] x [32, in], K = the micro-batch) on the hipBLASLt solutions in the pinned
+    # PyTorch TunableOp results file next to this module (tunableop_adaln_wgrad_gfx950.csv): TunableOp is enabled with
+    # tuning off, so only GEMMs with an entry in that file change and every other GEMM keeps the default solution.
+    # Bitwise identical outputs (K = 32 is one K tile). If the file does not validate against this image's
+    # PyTorch / HIP / hipBLASLt versions, TunableOp is switched back off with a warning.
+    adaln_wgrad_tunableop: bool = False
 
     # --- norm / RoPE fusions ---------------------------------------------
     # Fuse QK-norm and RoPE into one kernel.
@@ -305,6 +311,26 @@ def check_retired(source) -> None:
         )
 
 
+def _load_adaln_tunableop() -> None:
+    """mxfp6_adaln_wgrad_tunableop: TunableOp on, tuning off, the pinned AdaLN wgrad results loaded. No results file is
+    named for writing, so nothing is ever written back into the source tree."""
+    import os
+    import warnings
+
+    import torch.cuda.tunable as tunable
+
+    if tunable.is_enabled():
+        warnings.warn("mxfp6_adaln_wgrad_tunableop: TunableOp is already enabled (environment); leaving it as configured.")
+        return
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tunableop_adaln_wgrad_gfx950.csv")
+    tunable.enable(True)
+    tunable.tuning_enable(False)
+    tunable.record_untuned_enable(False)
+    if not tunable.read_file(path):
+        tunable.enable(False)
+        warnings.warn(f"mxfp6_adaln_wgrad_tunableop: {path} does not validate on this image; using the default GEMMs.")
+
+
 def _pin_aiter_backend() -> None:
     """Keep Primus-Turbo's A6W6 GEMMs on AITER whatever its environment says (the FlyDSL backend is not used)."""
     try:
@@ -332,6 +358,8 @@ def configure(config) -> Mxfp6Gates:
     resolved.validate()
     _GATES = resolved
     _pin_aiter_backend()
+    if resolved.adaln_wgrad_tunableop:
+        _load_adaln_tunableop()
 
     # Log the RESOLVED gates, not the requested ones. The two can differ: the
     # trainer copies a fixed list of fields onto the model config, so a gate the
