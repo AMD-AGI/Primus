@@ -26,7 +26,6 @@ local ``s / tp`` shard; the mHC parameters are replicated and carry the
 
 from __future__ import annotations
 
-import logging
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
@@ -59,8 +58,6 @@ from primus.backends.megatron.core.transformer.glm5_next.mhc import (
     mhc_post,
     mhc_pre,
 )
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "Glm5NextLayer",
