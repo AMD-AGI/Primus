@@ -42,8 +42,11 @@ def _pad(x: int, d: int) -> int:
     return -(-x // d) * d
 
 
-def pack_kind(name: str, n_joint: int, fwd_fp4_fc1: bool, fwd_fp4_l2: bool, fwd_fp4_joint_mlp: bool):
-    """``"W6"``, ``"W4"`` or None (gathered as bf16) for a parameter, from its name and the forward-FP4 gates."""
+def pack_kind(
+    name: str, n_joint: int, fwd_fp4_fc1: bool, fwd_fp4_l2: bool, fwd_fp4_joint_mlp: bool, joint_mlp_parts="all"
+):
+    """``"W6"``, ``"W4"`` or None (gathered as bf16) for a parameter, from its name and the forward-FP4 gates
+    (``joint_mlp_parts``: mxfp6_fwd_fp4_joint_mlp_parts)."""
     m = _LIN.search(name)
     if not m:
         return None
@@ -54,7 +57,11 @@ def pack_kind(name: str, n_joint: int, fwd_fp4_fc1: bool, fwd_fp4_l2: bool, fwd_
     if single and what in ("mlp.linear_fc2", "self_attention.linear_proj") and fwd_fp4_l2:
         return "W4"
     if not single and what.startswith(("mlp.", "context_mlp.")) and fwd_fp4_joint_mlp:
-        return "W4"
+        from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import joint_mlp_parts as _parts
+
+        part = f"{'img' if what.startswith('mlp.') else 'txt'}_{what.rsplit('_', 1)[1]}"
+        if part in _parts(joint_mlp_parts):
+            return "W4"
     return "W6"
 
 
@@ -311,9 +318,10 @@ def patch_packed_param_gather_layout(ctx: PatchContext) -> None:
     fc1 = bool(getattr(args, "mxfp6_fwd_fp4_single_fc1", False))
     l2 = bool(getattr(args, "mxfp6_fwd_fp4_single_linear2", False))
     jm = bool(getattr(args, "mxfp6_fwd_fp4_joint_mlp", False))
+    jp = str(getattr(args, "mxfp6_fwd_fp4_joint_mlp_parts", "all"))
 
     def kinds_of(params, names):
-        return [pack_kind(n, n_joint, fc1, l2, jm) if p.dim() == 2 else None for p, n in zip(params, names)]
+        return [pack_kind(n, n_joint, fc1, l2, jm, jp) if p.dim() == 2 else None for p, n in zip(params, names)]
 
     cur = pgb._ParamAndGradBuffer.__init__
     if getattr(cur, "_primus_packed_param_gather", False) or getattr(

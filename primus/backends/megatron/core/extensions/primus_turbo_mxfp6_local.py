@@ -2979,8 +2979,11 @@ class MXFP6FusedMLP(MLP):
                 claimed.append(self.linear_fc1.bias)
             _claim_main_grad(*claimed)
 
-        joint_fp4 = bool(getattr(self, "_mxfp6_joint", False)) and gates().fwd_fp4_joint_mlp
-        bf16_fc1 = bool(getattr(self, "_mxfp6_joint_img", False)) and gates().fwd_bf16_joint_img_fc1
+        joint = bool(getattr(self, "_mxfp6_joint", False))
+        img = bool(getattr(self, "_mxfp6_joint_img", False))
+        fp4_fc1 = joint and gates().joint_mlp_fp4(img, "fc1")
+        fp4_fc2 = joint and gates().joint_mlp_fp4(img, "fc2")
+        bf16_fc1 = img and gates().fwd_bf16_joint_img_fc1
         output = MXFP6MLPFunction.apply(
             hidden_states,
             self.linear_fc1.weight,
@@ -2989,8 +2992,8 @@ class MXFP6FusedMLP(MLP):
             fuse_wgrad_accum,
             torch.is_grad_enabled(),
             _resolve_weight_is_fp4(self.config),
-            joint_fp4,  # fwd_fp4 (fc2), for the joint stream MLPs under mxfp6_fwd_fp4_joint_mlp
-            joint_fp4 and not bf16_fc1,  # fwd_fp4_fc1
+            fp4_fc2,  # fwd_fp4 (fc2), for the joint stream MLPs under mxfp6_fwd_fp4_joint_mlp (_parts)
+            fp4_fc1 and not bf16_fc1,  # fwd_fp4_fc1
             bf16_fc1,
         )[0]
 

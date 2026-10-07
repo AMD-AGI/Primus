@@ -233,6 +233,8 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_fwd_fp4_single_linear2: bool = False
     mxfp6_fwd_fp4_single_fc1: bool = False
     mxfp6_fwd_fp4_joint_mlp: bool = False
+    # "all" or a comma list of img_fc1, img_fc2, txt_fc1, txt_fc2; see Mxfp6Gates.fwd_fp4_joint_mlp_parts.
+    mxfp6_fwd_fp4_joint_mlp_parts: str = "all"
     # Operand layout of every MX GEMM, "blob" or "tilescale"; see Mxfp6Gates.gemm_layout.
     mxfp6_gemm_layout: str = "blob"
     mxfp6_fwd_a6w4: bool = False

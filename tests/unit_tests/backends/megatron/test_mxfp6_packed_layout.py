@@ -83,6 +83,31 @@ def test_pack_kind():
     assert pack_kind("module.transformer.layers.2.self_attention.added_linear_qkv.weight", 19, 1, 0, 0) == "W6"
 
 
+def test_pack_kind_joint_mlp_parts():
+    img1 = "module.transformer.layers.3.mlp.linear_fc1.weight"
+    txt2 = "module.transformer.layers.3.context_mlp.linear_fc2.weight"
+    assert pack_kind(img1, 19, False, False, True) == "W4"  # default parts: all
+    assert pack_kind(txt2, 19, False, False, True) == "W4"
+    assert pack_kind(img1, 19, False, False, True, "txt_fc1,txt_fc2") == "W6"
+    assert pack_kind(txt2, 19, False, False, True, "txt_fc1,txt_fc2") == "W4"
+    assert pack_kind(img1, 19, False, False, True, "img_fc1") == "W4"
+    assert pack_kind(txt2, 19, False, False, False, "txt_fc2") == "W6"  # parts need fwd_fp4_joint_mlp
+    with pytest.raises(ValueError):
+        pack_kind(img1, 19, False, False, True, "img_fc3")
+
+
+def test_gates_joint_mlp_parts():
+    from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import Mxfp6Gates
+
+    g = Mxfp6Gates(fwd_fp4_joint_mlp=True, fwd_fp4_joint_mlp_parts="img_fc2, txt_fc1")
+    g.validate()
+    assert [g.joint_mlp_fp4(i, f) for i in (True, False) for f in ("fc1", "fc2")] == [False, True, True, False]
+    assert Mxfp6Gates(fwd_fp4_joint_mlp=True).joint_mlp_fp4(False, "fc1")
+    assert not Mxfp6Gates(fwd_fp4_joint_mlp_parts="img_fc1").joint_mlp_fp4(True, "fc1")
+    with pytest.raises(ValueError):
+        Mxfp6Gates(fwd_fp4_joint_mlp_parts="img").validate()
+
+
 def test_plan_weight_bucket_simple():
     S, starts, pad = plan_weight_bucket([(12288, 3072), (3072, 12288)], 8)
     assert S % 128 == 0 and pad >= 0 and starts[0] == 0

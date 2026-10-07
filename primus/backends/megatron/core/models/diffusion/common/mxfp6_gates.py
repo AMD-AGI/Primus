@@ -150,6 +150,9 @@ class Mxfp6Gates:
     fwd_fp4_single_fc1: bool = False
     # MXFP4 forward for the joint blocks' stream MLPs, fc1 and fc2; same requirements.
     fwd_fp4_joint_mlp: bool = False
+    # Which of the joint stream MLPs' GEMMs fwd_fp4_joint_mlp moves to the MXFP4 forward: "all", or a comma list of
+    # img_fc1, img_fc2, txt_fc1, txt_fc2 (img = the image stream's `mlp`, txt = the text stream's `context_mlp`).
+    fwd_fp4_joint_mlp_parts: str = "all"
     # Forward GEMMs as A6W4 on the tilescale layout (aiter `gemm_a6w4_tilescale`): MXFP6 activations times MXFP4
     # weights (H32, RCEIL, round to nearest; K128-blocked codes), wherever aiter has the kernel for the
     # (M, N, K, bias). Columns (the backward's operands) are unchanged. GEMMs on the MXFP4 forward (fwd_fp4_*) keep
@@ -225,6 +228,7 @@ class Mxfp6Gates:
                 raise ValueError(
                     f"mxfp6_fp4_hadamard_{name} must be one of {list(FP4_HADAMARD)}, got {value!r}."
                 )
+        joint_mlp_parts(self.fwd_fp4_joint_mlp_parts)  # raises on an unknown part
         if self.gemm_layout not in GEMM_LAYOUTS:
             raise ValueError(f"mxfp6_gemm_layout must be one of {list(GEMM_LAYOUTS)}, got {self.gemm_layout!r}.")
         if self.fp4_sr_actw and self.gemm_layout != "tilescale":
@@ -237,12 +241,36 @@ class Mxfp6Gates:
                     "mxfp6_fp4_hadamard_dgrad 'none' (and mxfp6_fp4_hadamard_fwd 'none' with an MXFP4-forward layer)."
                 )
 
+    def joint_mlp_fp4(self, img: bool, fc: str) -> bool:
+        """Whether a joint stream MLP's ``fc`` ("fc1" / "fc2") runs the MXFP4 forward (fwd_fp4_joint_mlp, _parts)."""
+        if not self.fwd_fp4_joint_mlp:
+            return False
+        return self.fwd_fp4_joint_mlp_parts == "all" or f"{'img' if img else 'txt'}_{fc}" in joint_mlp_parts(
+            self.fwd_fp4_joint_mlp_parts
+        )
+
     def fp4_options_set(self) -> bool:
         """Whether any MXFP4 quantization option differs from the default."""
         d = Mxfp6Gates()
         return any(
             getattr(self, f.name) != getattr(d, f.name) for f in fields(self) if f.name.startswith("fp4_")
         )
+
+
+JOINT_MLP_PARTS = ("img_fc1", "img_fc2", "txt_fc1", "txt_fc2")
+
+
+def joint_mlp_parts(value: str) -> frozenset:
+    """The parts named by a fwd_fp4_joint_mlp_parts value ("all" or a comma list of JOINT_MLP_PARTS)."""
+    if value == "all":
+        return frozenset(JOINT_MLP_PARTS)
+    parts = frozenset(x.strip() for x in value.split(",") if x.strip())
+    bad = parts - set(JOINT_MLP_PARTS)
+    if bad or not parts:
+        raise ValueError(
+            f"mxfp6_fwd_fp4_joint_mlp_parts must be 'all' or a comma list of {list(JOINT_MLP_PARTS)}, got {value!r}."
+        )
+    return parts
 
 
 _GATES = Mxfp6Gates()
