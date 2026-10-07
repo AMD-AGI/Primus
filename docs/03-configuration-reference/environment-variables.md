@@ -108,6 +108,14 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `RCCL_MSCCL_ENABLE` | `0` | `base_env.sh` | RCCL | Enable MSCCL algorithms. |
 | `RCCL_MSCCLPP_THRESHOLD` | `1GiB` default | `base_env.sh` | RCCL | MSCCL++ message-size threshold. |
 | `RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING` | `0` in hooks | `runner/helpers/hooks/03_enable_ainic.sh` | RCCL | Stricter GDR flush memory ordering; relevant for some NIC/GPU combos. |
+| `MEGATRON_PARAM_GATHER_BACKEND` | unset | User; `06_enable_sdma_all_gather.sh` forwards it | Megatron Primus patch | Set to `rccl_sdma` to allocate distributed-optimizer parameter buffers from symmetric memory and use the dedicated zero-CTA process group for parameter AllGather. Requires `NCCL_CTA_POLICY` to be unset. |
+| `MEGATRON_GRAD_REDUCE_BACKEND` | unset | User; `06_enable_sdma_all_gather.sh` forwards it | Megatron Primus patch | Set to `rccl_sdma` to opt gradient ReduceScatter into the same group. Requires `MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma` and `RCCL_CE_REDUCESCATTER=1`. |
+| `RCCL_CE_REDUCESCATTER` | `0` in RCCL | Primus hook sets `1` for the gradient selector | RCCL | Enables CE ReduceScatter, subject to RCCL eligibility checks. |
+| `RCCL_FORCE_CE_REDUCESCATTER` | `0` in RCCL | User | RCCL | Bypasses the zero-CTA, registered-user-buffer, and tuned-size gates; useful for staged large-message testing. Still requires `RCCL_CE_REDUCESCATTER=1`. |
+| `RCCL_CE_REDUCE_PER_CHUNK` | `0` in RCCL | User | RCCL | Uses a finite reducer after each staged chunk instead of a persistent reduction grid. This mode uses 12 staging slots. |
+| `RCCL_CE_REDUCE_MAX_BLOCKS` | `46` in RCCL | User | RCCL | Caps the local CE reduction kernel from 1 through 92 blocks. This affects the reduction phase, not copy-engine scatter movement. |
+| `RCCL_CE_AR_STAGING_BYTES` | `268435456` in RCCL | User | RCCL | Per-slot staging capacity shared by CE AllReduce and CE ReduceScatter. Increasing it raises per-rank HBM use. |
+| `RCCL_DDA_ENABLE` | `1` in RCCL | User | RCCL | Enables DDA collectives. Keep enabled for the optimized AllGather path; disabling it is mainly useful when a profiler cannot observe DDA operations. |
 | `TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK` | `0` | `base_env.sh` | PyTorch + RCCL | Tensor allocator hook for NCCL registration. |
 | `TORCH_NCCL_HIGH_PRIORITY` | `1` | `base_env.sh` | PyTorch | High-priority NCCL streams. |
 
@@ -252,3 +260,9 @@ Primus owns these defaults in one place per backend: `primus/backends/<backend>/
 **Managed `XLA_FLAGS` for MaxText** (see `_build_xla_flags` for the authoritative string): `--xla_gpu_memory_limit_slop_factor=95`, `--xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592`, `--xla_gpu_all_gather_combine_threshold_bytes=8589934592`, `--xla_gpu_enable_command_buffer=''`, `--xla_gpu_enable_latency_hiding_scheduler=true`, `--xla_gpu_enable_triton_gemm=false`, `--xla_gpu_enable_cublaslt=true`, `--xla_gpu_autotune_level=4`, `--xla_gpu_enable_all_gather_combine_by_dim=false`.
 
 **Note:** The MaxDiffusion backend declares no XLA defaults; its example configs set `XLA_FLAGS` themselves and are used verbatim. MaxText and JAX also read many additional knobs upstream that Primus does not wrap; see the MaxText sources for those.
+
+---
+
+## 15. SpecForge (ROCm overlay)
+
+SpecForge env, YAML, and CLI live in the [SpecForge configuration reference](../../examples/specforge/CONFIGURATION.md). That page lists Primus-owned names (`RUN_ID`, `CONSUMER_STATE_DIR`, `PRIMUS_SPECFORGE_*`, …) and points SpecForge Hydra keys at the SpecForge AMD ROCm tutorial.

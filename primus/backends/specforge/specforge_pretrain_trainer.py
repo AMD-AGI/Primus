@@ -8,13 +8,11 @@
 SpecForgePretrainTrainer: Primus wrapper for SpecForge draft-model training.
 
 SpecForge spawns and manages its own distributed workers, so this trainer does
-not run a training loop in-process. It replaces the Primus process with the
-SpecForge CLI via ``os.execvp``, which keeps a single process tree and lets
-SpecForge's exit code propagate to the scheduler unchanged.
+not run a training loop in-process.
 
-Train uses ``os.execvp``, so ``cleanup()`` only runs on the error path.
-Capture uses ``subprocess.run`` so the trainer can filter hidden-state shards after
-``prepare_hidden_states.py`` exits.
+Offline train uses ``os.execvp``. Capture and online return so Primus can run
+cleanup: capture filters shards after ``prepare_hidden_states.py``; online
+keeps Mooncake/SGLang alive on rank 0 until the consumer finishes.
 """
 
 from __future__ import annotations
@@ -28,6 +26,10 @@ from primus.backends.specforge.argument_builder import (
     build_capture_argv,
     build_specforge_argv,
     flatten_overrides,
+    homogeneous_nnodes,
+    homogeneous_rendezvous_dir,
+    is_online_train,
+    offline_multinode_overrides,
     specforge_mode,
 )
 from primus.backends.specforge.stack_preflight import raise_if_issues
@@ -85,6 +87,14 @@ def resolve_filter_min_kept(capture: Optional[dict] = None) -> int:
     return max(1, int(raw))
 
 
+def should_filter_capture(env=None) -> bool:
+    """Hidden-state filter runs once, on node rank 0, after torchrun returns."""
+
+    from primus.backends.specforge.online_launch import node_rank
+
+    return node_rank(env) == 0
+
+
 def clear_partial_distributed_env(env=None) -> list:
     """Hand SpecForge either a complete torchrun environment or none at all.
 
@@ -120,25 +130,62 @@ class SpecForgePretrainTrainer(BaseTrainer):
     def setup(self):
         log_rank_0("SpecForgePretrainTrainer.setup()")
 
+    def _homogeneous_argv(self) -> list[str]:
+        """Capture or offline train argv, with multi-node rendezvous when ``NNODES>1``."""
+
+        from primus.backends.specforge.online_launch import (
+            node_rank,
+            rendezvous_head_ip,
+        )
+
+        nodes = homogeneous_nnodes(self.backend_args)
+        rank = node_rank()
+        master = None
+        if nodes > 1:
+            shared = homogeneous_rendezvous_dir(self.backend_args)
+            master = rendezvous_head_ip(shared)
+            log_rank_0(f"Multi-node rendezvous nnodes={nodes} node_rank={rank} master_addr={master}")
+        if self.mode == "capture":
+            return build_capture_argv(self.backend_args, nnodes=nodes, node_rank=rank, master_addr=master)
+        extra = (
+            offline_multinode_overrides(self.backend_args, master_addr=master, nnodes=nodes)
+            if nodes > 1 and master
+            else []
+        )
+        return build_specforge_argv(
+            self.backend_args,
+            extra_overrides=extra or None,
+            node_rank=rank if nodes > 1 else None,
+        )
+
     def init(self):
         """Build the SpecForge argv and validate the entrypoint is reachable."""
 
         raise_if_issues(self.backend_args)
         self.mode = specforge_mode(self.backend_args)
-        if self.mode == "capture":
-            self.argv = build_capture_argv(self.backend_args)
+        if is_online_train(self.backend_args):
+            # Capture/trainer ranks supervise sidecars; argv is built per-role later.
+            self.argv = None
         else:
-            self.argv = build_specforge_argv(self.backend_args)
+            self.argv = self._homogeneous_argv()
         self.workdir = getattr(self.backend_args, "specforge_root", None)
 
-        if shutil.which(self.argv[0]) is None:
+        entry = (
+            self.argv[0]
+            if self.argv
+            else (getattr(self.backend_args, "specforge_entrypoint", None) or "specforge")
+        )
+        if shutil.which(entry) is None:
             raise RuntimeError(
-                f"[Primus:specforge] Entrypoint '{self.argv[0]}' not found on PATH. "
+                f"[Primus:specforge] Entrypoint '{entry}' not found on PATH. "
                 "Install SpecForge in the training image, or set "
                 "'specforge_entrypoint' in the pre_trainer module config."
             )
 
-        log_rank_0(f"SpecForge command: {' '.join(self.argv)}")
+        if self.argv:
+            log_rank_0(f"SpecForge command: {' '.join(self.argv)}")
+        else:
+            log_rank_0("SpecForge online mode: rank-aware Mooncake/SGLang supervisor")
         if self.workdir:
             log_rank_0(f"SpecForge cwd: {self.workdir}")
         else:
@@ -148,10 +195,19 @@ class SpecForgePretrainTrainer(BaseTrainer):
             )
 
     def train(self):
-        """Hand off to SpecForge. Train replaces this process; capture returns."""
+        """Hand off to SpecForge. Offline train replaces this process; capture and online return."""
 
-        if self.argv is None:
+        if self.argv is None and not is_online_train(self.backend_args):
             raise RuntimeError("SpecForgePretrainTrainer.init() must be called before train().")
+
+        if is_online_train(self.backend_args):
+            if self.workdir:
+                os.chdir(self.workdir)
+            from primus.backends.specforge.online_supervisor import run_online
+
+            log_rank_0("Starting SpecForge online supervisor (no exec).")
+            run_online(self.backend_args)
+            return
 
         cleared = clear_partial_distributed_env()
         if cleared:
@@ -170,6 +226,9 @@ class SpecForgePretrainTrainer(BaseTrainer):
             completed = subprocess.run(self.argv, check=False)
             if completed.returncode != 0:
                 raise SystemExit(completed.returncode)
+            if not should_filter_capture():
+                log_rank_0("Skipping hidden-state filter on non-zero node rank")
+                return
             capture = flatten_overrides(getattr(self.backend_args, "specforge_capture", None))
             filter_out = capture.get("filter_output_path")
             raw = capture.get("output_path")
