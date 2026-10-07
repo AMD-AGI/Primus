@@ -550,6 +550,16 @@ def compare_to_baseline(train, valid, base_train, base_valid, tolerance):
     """
     print("\nbaseline comparison\n" + "-" * 19)
     failures = []
+    for label, records in (
+        ("run training", train),
+        ("run validation", valid),
+        ("baseline training", base_train),
+        ("baseline validation", base_valid),
+    ):
+        for record in records:
+            if not math.isfinite(record["loss"]):
+                failures.append(f"{label} loss is non-finite at iteration {record['iteration']}")
+                break
     run_end, base_end = train[-1]["iteration"], base_train[-1]["iteration"]
     if run_end < base_end:
         failures.append(f"the run stopped at iteration {run_end}, the baseline reached {base_end}")

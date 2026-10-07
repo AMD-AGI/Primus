@@ -329,6 +329,18 @@ def test_baseline_fails_a_run_that_stopped_early():
     assert not plot_loss.compare_to_baseline(train, valid, *_curve(0.0), tolerance=0.05)
 
 
+@pytest.mark.parametrize("loss", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("series", range(4), ids=["run-train", "run-valid", "base-train", "base-valid"])
+def test_baseline_rejects_nonfinite_losses(loss, series, capsys):
+    curves = (*_curve(0.0), *_curve(0.0))
+    # Other points still agree: dropping the bad training point from the mean,
+    # or comparing a NaN validation delta, must not turn divergence into PASS.
+    curves[series][-1]["loss"] = loss
+
+    assert not plot_loss.compare_to_baseline(*curves, tolerance=0.05)
+    assert "loss is non-finite at iteration 200" in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # Lint
 # ---------------------------------------------------------------------------
