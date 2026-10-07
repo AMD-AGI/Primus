@@ -38,4 +38,6 @@ modules:
         model.use_liger_kernel: false
         data.hidden_states_path: ${HIDDEN_STATES_PATH}
         # AMD recipe defaults to 1. Set NPROC_PER_NODE to self-launch more ranks.
+        # slurm -N K sets NNODES; Primus injects master_addr after allocate.
         deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}
+        deployment.trainer.nnodes: ${NNODES:1}

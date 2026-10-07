@@ -111,6 +111,16 @@ class MaxTextPretrainTrainer(BaseTrainer):
         """
         log_rank_0("MaxTextPretrainTrainer.init() - initializing MaxText training")
 
+        # MaxText normally starts under absl.app.run, which parses absl flags.
+        # Primus calls initialize()/run() directly, and grain reads absl flags when
+        # it starts worker processes (grain_worker_count > 0): unparsed, the first
+        # batch raises UnparsedFlagAccessError, which MaxText's training loop then
+        # reports as a graceful stop after zero steps. Keep the flag defaults.
+        from absl import flags
+
+        if not flags.FLAGS.is_parsed():
+            flags.FLAGS.mark_as_parsed()
+
         initialize, _, module_name = _resolve_maxtext_train()
 
         from primus.backends.maxtext.argument_builder import (
