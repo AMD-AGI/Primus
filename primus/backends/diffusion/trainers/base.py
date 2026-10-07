@@ -24,6 +24,7 @@ import torch
 from torch.utils.data import Sampler
 
 from primus.backends.diffusion.optim.adamw_fp32_state import AdamWFP32State
+from primus.backends.diffusion.patches.flux_mlperf_v61_logging import mlperf_v61_disclosure
 from primus.backends.diffusion.schedulers.flow_match import FlowMatchScheduler
 from primus.backends.diffusion.utils.log import logger
 from primus.backends.diffusion.utils.train_utils import (
@@ -518,6 +519,16 @@ class BaseWanTrainer:
     def _setup_mlperf(self):
         if not self.mlperf_enabled:
             return
+        # Validate on every rank before importing the logger. A rank-0-only
+        # check lets the other ranks train, and compliance then fails only
+        # after the run finishes.
+        self.mlperf_v61_disclosure = mlperf_v61_disclosure(
+            tensor_parallelism=1,
+            pipeline_parallelism=1,
+            context_parallelism=self.sp_size,
+            expert_parallelism=1,
+            micro_batch_size=self.per_device_train_batch_size,
+        )
         try:
             from mlperf_logging import mllog
             from mlperf_logging.mllog import constants
@@ -530,32 +541,6 @@ class BaseWanTrainer:
 
         self.mlperf_logger = mllog.get_mllogger()
         self.mlperf_constants = constants
-        allowed = {
-            "fp64",
-            "fp32",
-            "tf32",
-            "fp16",
-            "fp8",
-            "mxfp6",
-            "nvfp4",
-            "mxfp4",
-            "bfloat16",
-            "Graphcore FLOAT 16.16",
-            "int8",
-            "uint8",
-            "int4",
-            "uint4",
-        }
-        self.mlperf_precision = {}
-        for part in ("linear", "attn", "comm"):
-            name = f"MLLOG_LOWEST_NUMERICAL_PRECISION_IN_{part.upper()}"
-            value = os.getenv(name, "").strip()
-            if value not in allowed:
-                raise ValueError(f"{name}={value!r}: MLPerf 6.1 requires one of {sorted(allowed)}")
-            self.mlperf_precision[part] = value
-        self.mlperf_config_filename = os.getenv("MLLOG_CONFIG_FILENAME", "").strip()
-        if not self.mlperf_config_filename:
-            raise ValueError("MLLOG_CONFIG_FILENAME must name the submission config_*.sh")
         if self.rank == 0:
             output_file = (
                 self.args.get("mlperf_output_file")
@@ -623,14 +608,8 @@ class BaseWanTrainer:
         self.mlperf_logger.event(key=c.OPT_BASE_LR, value=float(self.args["learning_rate"]))
         self.mlperf_logger.event(key=c.OPT_GRADIENT_CLIP_NORM, value=self.max_grad_norm)
         self.mlperf_logger.event(key="evaluation_frequency", value=self.mlperf_eval_samples)
-        for part, value in self.mlperf_precision.items():
-            self.mlperf_logger.event(key=f"lowest_numerical_precision_in_{part}", value=value)
-        self.mlperf_logger.event(key="tensor_parallelism", value=1)
-        self.mlperf_logger.event(key="pipeline_parallelism", value=1)
-        self.mlperf_logger.event(key="context_parallelism", value=self.sp_size)
-        self.mlperf_logger.event(key="expert_parallelism", value=1)
-        self.mlperf_logger.event(key="micro_batch_size", value=self.per_device_train_batch_size)
-        self.mlperf_logger.event(key="config_filename", value=self.mlperf_config_filename)
+        for key, value in self.mlperf_v61_disclosure.items():
+            self.mlperf_logger.event(key=key, value=value)
         self.mlperf_logger.start(key=c.INIT_START)
 
     def _mlperf_warmup(self) -> None:
