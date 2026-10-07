@@ -24,7 +24,9 @@ import torch
 from torch.utils.data import Sampler
 
 from primus.backends.diffusion.optim.adamw_fp32_state import AdamWFP32State
-from primus.backends.diffusion.patches.flux_mlperf_v61_logging import mlperf_v61_disclosure
+from primus.backends.diffusion.patches.flux_mlperf_v61_logging import (
+    mlperf_v61_disclosure,
+)
 from primus.backends.diffusion.schedulers.flow_match import FlowMatchScheduler
 from primus.backends.diffusion.utils.log import logger
 from primus.backends.diffusion.utils.train_utils import (

@@ -237,7 +237,9 @@ def test_mlperf_v61_keys_follow_evaluation_frequency():
 
 
 def test_linear_precision_alias_matches_mlperf_common(monkeypatch):
-    from primus.backends.diffusion.patches.flux_mlperf_v61_logging import mlperf_v61_disclosure
+    from primus.backends.diffusion.patches.flux_mlperf_v61_logging import (
+        mlperf_v61_disclosure,
+    )
 
     _v61_env(
         monkeypatch,
