@@ -410,6 +410,13 @@ class BaseDiffusionConfig(TransformerConfig):
             )
         if self.mxfp6_fwd_a6w4 and not tilescale:
             raise ValueError("mxfp6_fwd_a6w4 needs mxfp6_gemm_layout 'tilescale'.")
+        if self.mxfp6_fwd_a6w4 and self.mxfp6_packed_param_gather:
+            # The gathered weight kinds (packed_param_gather_patches.pack_kind) know only the fwd_fp4_* gates, so an
+            # A6W4 weight would arrive as MXFP6 planes and the forward would refuse it at the first step.
+            raise ValueError(
+                "mxfp6_fwd_a6w4 is not wired into mxfp6_packed_param_gather yet (its weights gather as MXFP6 planes); "
+                "set one of the two."
+            )
         if self.mxfp6_packed_param_gather and not tilescale:
             raise ValueError("mxfp6_packed_param_gather needs mxfp6_gemm_layout 'tilescale'.")
         if self.mxfp6_packed_param_gather_fused_adam and not self.mxfp6_packed_param_gather:

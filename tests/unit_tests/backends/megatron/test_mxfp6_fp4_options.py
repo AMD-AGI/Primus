@@ -211,3 +211,15 @@ def test_retired_keys_raise():
         with pytest.raises(ValueError, match=key):
             mxfp6_gates.check_retired(types.SimpleNamespace(**{key: "x"}))
     mxfp6_gates.check_retired(types.SimpleNamespace(mxfp6_gemm_layout="tilescale"))
+
+
+def test_a6w4_with_packed_param_gather_is_rejected():
+    """fwd_a6w4 weights are not a packed-gather kind yet: the combination fails at config time, not at step 1."""
+    from primus.backends.megatron.core.models.diffusion.common.config import BaseDiffusionConfig
+
+    kw = dict(num_layers=1, hidden_size=64, num_attention_heads=1, fp6="mxfp6", mxfp6_gemm_layout="tilescale",
+              mxfp6_bwd_fp4_dgrad=True, mxfp6_bwd_fp4_wgrad=True)
+    BaseDiffusionConfig(**kw, mxfp6_fwd_a6w4=True)
+    BaseDiffusionConfig(**kw, mxfp6_packed_param_gather=True)
+    with pytest.raises(ValueError, match="packed_param_gather"):
+        BaseDiffusionConfig(**kw, mxfp6_fwd_a6w4=True, mxfp6_packed_param_gather=True)
