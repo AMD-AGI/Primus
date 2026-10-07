@@ -18,7 +18,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 from PIL import Image, ImageFile
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate
 
 from primus.backends.diffusion.data.collator import RawBatchCollator
 
@@ -89,7 +89,8 @@ class FluxPrecomputedDataset(Dataset):
         return result
 
     def get_collator(self):
-        return RawBatchCollator()
+        # Stack in DataLoader workers so pin_memory applies to complete batches.
+        return default_collate
 
 
 class FluxRawImageTextDataset(Dataset):
@@ -279,15 +280,40 @@ class FluxPrecomputedProcessor:
             collated[key] = torch.stack([_to_tensor(sample[key]) for sample in batch], dim=0)
         return collated
 
+    @staticmethod
+    def make_synthetic_batch(batch_size: int, *, include_timestep: bool = False) -> dict[str, torch.Tensor]:
+        batch = {
+            "t5_encodings": torch.zeros(batch_size, 256, 4096, dtype=torch.bfloat16),
+            "clip_encodings": torch.zeros(batch_size, 768, dtype=torch.bfloat16),
+            "mean": torch.zeros(batch_size, 16, 32, 32, dtype=torch.bfloat16),
+            "logvar": torch.zeros(batch_size, 16, 32, 32, dtype=torch.bfloat16),
+        }
+        if include_timestep:
+            batch["timestep"] = torch.zeros(batch_size, dtype=torch.int64)
+        return batch
+
     def prepare_batch(
         self, *, batch: Any, device: torch.device, dtype: torch.dtype
     ) -> dict[str, torch.Tensor]:
         tensors = self._collate_raw(batch)
         for key, value in tensors.items():
-            if key == "timestep":
-                tensors[key] = value.to(device=device, dtype=torch.int64, non_blocking=True)
+            if (
+                key == "t5_encodings"
+                and device.type == "cuda"
+                and not value.is_cuda
+                and os.getenv("PIN_FLUX_T5_STACK", "1") == "1"
+            ):
+                value = value.pin_memory()
+            if os.getenv("FLUX_BATCH_NOSYNC", "1") == "1":
+                if key == "timestep":
+                    tensors[key] = value.to(device=device, non_blocking=True).to(torch.int64)
+                else:
+                    tensors[key] = value.to(device=device, non_blocking=True).to(dtype)
             else:
-                tensors[key] = value.to(device=device, dtype=dtype, non_blocking=True)
+                if key == "timestep":
+                    tensors[key] = value.to(device=device, dtype=torch.int64, non_blocking=True)
+                else:
+                    tensors[key] = value.to(device=device, dtype=dtype, non_blocking=True)
 
         if self.prompt_dropout_prob > 0.0:
             self._load_empty_encodings()
@@ -296,14 +322,29 @@ class FluxPrecomputedProcessor:
             bsz = tensors["t5_encodings"].shape[0]
             # TorchTitan draws CFG dropout from Python's rank-distinct RNG.
             # Do not consume the CUDA RNG used for latent noise/timesteps.
-            drop_mask = torch.tensor(
-                [random.random() < self.prompt_dropout_prob for _ in range(bsz)],
-                device=device,
-                dtype=torch.bool,
-            )
-            if drop_mask.any():
-                tensors["t5_encodings"][drop_mask] = self._empty_t5.to(device=device, dtype=dtype)
-                tensors["clip_encodings"][drop_mask] = self._empty_clip.to(device=device, dtype=dtype)
+            if os.getenv("FLUX_BATCH_NOSYNC", "1") == "1":
+                drop = [random.random() < self.prompt_dropout_prob for _ in range(bsz)]
+                drop_idx = [i for i, d in enumerate(drop) if d]
+                if drop_idx:
+                    idx = torch.tensor(drop_idx, dtype=torch.long)
+                    if device.type == "cuda":
+                        idx = idx.pin_memory()
+                    idx = idx.to(device=device, non_blocking=True)
+                    if getattr(self, "_empty_dev_key", None) != (device, dtype):
+                        self._empty_t5_dev = self._empty_t5.to(device=device, dtype=dtype)
+                        self._empty_clip_dev = self._empty_clip.to(device=device, dtype=dtype)
+                        self._empty_dev_key = (device, dtype)
+                    tensors["t5_encodings"][idx] = self._empty_t5_dev
+                    tensors["clip_encodings"][idx] = self._empty_clip_dev
+            else:
+                drop_mask = torch.tensor(
+                    [random.random() < self.prompt_dropout_prob for _ in range(bsz)],
+                    device=device,
+                    dtype=torch.bool,
+                )
+                if drop_mask.any():
+                    tensors["t5_encodings"][drop_mask] = self._empty_t5.to(device=device, dtype=dtype)
+                    tensors["clip_encodings"][drop_mask] = self._empty_clip.to(device=device, dtype=dtype)
 
         return tensors
 

@@ -5,6 +5,7 @@ model:
     config:
       trainable_modules: dit
       float8_recipe: ${FLUX_FLOAT8_RECIPE:}
+      float8_gemm_backend: ${FLUX_FP8_GEMM_BACKEND:}
       guidance: ${FLUX_GUIDANCE:1.0}
       autoencoder_scale_factor: 0.3611
       autoencoder_shift_factor: 0.1159
