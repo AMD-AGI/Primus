@@ -217,8 +217,8 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_gate_mul_pack_bias: bool = False
     mxfp6_ln_bwd_ns16: bool = False
     mxfp6_adaln_wgrad_main_grad: bool = False
-    # Pinned TunableOp solutions for the AdaLN wgrads; see Mxfp6Gates.adaln_wgrad_tunableop.
-    mxfp6_adaln_wgrad_tunableop: bool = False
+    # Pinned TunableOp solutions for the AdaLN GEMMs; see Mxfp6Gates.adaln_tunableop.
+    mxfp6_adaln_tunableop: bool = False
     mxfp6_fused_qk_rope: bool = False
     mxfp6_fused_qkv: str = "off"
     mxfp6_fused_ln_mod_bwd: bool = False

@@ -1,4 +1,4 @@
-"""mxfp6_adaln_wgrad_tunableop: the pinned TunableOp results load, change only their own GEMMs (bitwise), and nothing
+"""mxfp6_adaln_tunableop: the pinned TunableOp results load, change only their own GEMMs (bitwise), and nothing
 is written back on exit. Runs in a subprocess: TunableOp's state is process-global."""
 import os
 import subprocess
@@ -18,8 +18,10 @@ _SCRIPT = textwrap.dedent(
     dy = torch.randn(32, 18432, device="cuda", dtype=torch.bfloat16, generator=g)
     x = torch.randn(32, 3072, device="cuda", dtype=torch.bfloat16, generator=g)
     a = torch.randn(512, 3072, device="cuda", dtype=torch.bfloat16, generator=g)
-    ref_w, ref_o = torch.mm(dy.t(), x), a @ x.t()
-    mxfp6_gates.configure(types.SimpleNamespace(mxfp6_adaln_wgrad_tunableop=True))
+    w9 = torch.randn(9216, 3072, device="cuda", dtype=torch.bfloat16, generator=g)
+    b9 = torch.randn(9216, device="cuda", dtype=torch.bfloat16, generator=g)
+    ref_w, ref_o, ref_f = torch.mm(dy.t(), x), a @ x.t(), torch.addmm(b9, x, w9.t())
+    mxfp6_gates.configure(types.SimpleNamespace(mxfp6_adaln_tunableop=True))
     assert tn.is_enabled() and not tn.tuning_is_enabled()
     loaded = tn.get_results()
     if len(loaded) != 2:  # a different hipBLASLt / PyTorch: the gate must have switched TunableOp back off
@@ -30,6 +32,7 @@ _SCRIPT = textwrap.dedent(
         torch.mm(dy.t(), x, out=out)
         assert torch.equal(out.view(torch.int16), ref_w.view(torch.int16))
         assert torch.equal((a @ x.t()).view(torch.int16), ref_o.view(torch.int16))  # no entry: default GEMM
+        assert torch.equal(torch.addmm(b9, x, w9.t()).view(torch.int16), ref_f.view(torch.int16))  # forward: no entry
         print("OK")
     """
 )
