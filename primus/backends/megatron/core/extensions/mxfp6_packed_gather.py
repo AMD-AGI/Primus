@@ -23,15 +23,16 @@ gather, and the bf16 weight is never gathered.
 The forward planes are round to nearest, the same bytes on every rank: one all-gather. The dgrad copy is
 stochastically rounded (``fp4_sr_actw``), and each rank must see its own draw, as when it packs the weight itself
 (the SR seeds differ per rank, so the rounding noise of the weight averages over the data-parallel gradient
-reduction): the owner's pack emits one draw of its rows per destination rank from a single read, and the dgrad
-planes go by all-to-all (the same bytes per receiver as a gather). Round to nearest, the draws are equal and the dgrad planes are gathered.
+reduction): the owner's pack emits one draw of its rows' codes per destination rank from a single read, and the
+dgrad code plane goes by all-to-all (the same bytes per receiver as a gather); its scales are draw-independent and
+gathered with the rest. Round to nearest, the draws are equal and the dgrad planes are gathered.
 """
 
 import hashlib
 
 import torch
 
-_COL = ("cc", "cs")  # the dgrad copy's planes
+_A2A = ("cc",)  # the dgrad copy's codes: one SR draw per destination (its scales do not depend on the draw)
 DENSITY = {  # plane -> elements per byte
     "W6": {"c0": 2, "c1": 4, "rs": 32, "cc": 2, "cs": 32},
     "W4": {"r4": 2, "rs": 32, "cc": 2, "cs": 32},
@@ -58,7 +59,7 @@ class PackedBucket:
         self.planes = {k: torch.empty(n // d, dtype=torch.uint8, device=dev) for k, d in DENSITY[self.kind].items()}
         # per-destination draws of this rank's dgrad rows ([dp, shard]: row d goes to rank d), SR only
         self.sr = bool(fmts["col_sr"])
-        self.send = {k: torch.empty_like(self.planes[k]) for k in _COL} if self.sr else None
+        self.send = {k: torch.empty_like(self.planes[k]) for k in _A2A} if self.sr else None
         self.items = []
         for idx, p in enumerate(bucket.params_list):
             s, e = bucket.param_to_index[p]
@@ -114,9 +115,8 @@ class PackedBucket:
                 # row of the send buffers, a shard apart)
                 set_sr_seed_next_pack(_seed(self.step, self.bucket.bucket_id, idx, ra))
                 MX.quantize_mx_dual_out(
-                    w, rows[0], rows[1], self._send("cc", 0, o, nel), self._send("cs", 0, o, nel), fmt, **rows[2],
-                    draws=self.dp, draw_codes=self.S // DENSITY[self.kind]["cc"],
-                    draw_scales=self.S // DENSITY[self.kind]["cs"],
+                    w, rows[0], rows[1], self._send("cc", 0, o, nel), self._view("cs", o, nel), fmt, **rows[2],
+                    draws=self.dp, draw_codes=self.S // DENSITY[self.kind]["cc"], draw_scales=0,
                 )
 
     def _send(self, plane, dst, s, nel):
@@ -127,8 +127,8 @@ class PackedBucket:
 
     def gather_ops(self):
         """(output, input) of each all-gathered plane."""
-        return [(pl, pl.view(self.dp, -1)[self.rank]) for k, pl in self.planes.items() if not (self.sr and k in _COL)]
+        return [(pl, pl.view(self.dp, -1)[self.rank]) for k, pl in self.planes.items() if not (self.sr and k in _A2A)]
 
     def a2a_ops(self):
         """(output, input) of each all-to-all plane (SR dgrad copy): row r of the output is owner r's draw for us."""
-        return [(self.planes[k], self.send[k]) for k in _COL] if self.sr else []
+        return [(self.planes[k], self.send[k]) for k in _A2A] if self.sr else []
