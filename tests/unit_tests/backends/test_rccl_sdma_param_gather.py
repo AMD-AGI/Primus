@@ -296,6 +296,7 @@ def test_param_buffer_wrapper_rendezvouses_and_marks_buckets(monkeypatch):
     )
     monkeypatch.setattr(torch.cuda, "use_mem_pool", lambda _pool: PoolContext())
     monkeypatch.setattr(torch, "zeros", fake_zeros)
+    monkeypatch.setattr(rccl_sdma_param_all_gather_patches, "_REAL_TORCH_ZEROS", fake_zeros)
     monkeypatch.setattr(rccl_sdma_param_gather, "take_direct_param_buffer", lambda *_args: None)
 
     def original(
@@ -375,6 +376,11 @@ def test_param_buffer_allocation_failure_reports_eager_retry(monkeypatch):
         raise RuntimeError("ncclMemAlloc")
 
     monkeypatch.setattr(torch, "zeros", failing_zeros)
+    monkeypatch.setattr(
+        rccl_sdma_param_all_gather_patches,
+        "_REAL_TORCH_ZEROS",
+        failing_zeros,
+    )
 
     def original(
         self,
@@ -539,11 +545,17 @@ def _run_sdma_hook(extra_env, kernel_release="6.8.0"):
     for name in (
         "FSDP_ALL_GATHER_BACKEND",
         "MEGATRON_PARAM_GATHER_BACKEND",
+        "MEGATRON_GRAD_REDUCE_BACKEND",
         "MEGATRON_RCCL_SDMA_DIRECT",
         "MEGATRON_RCCL_SDMA_SCRATCH_BYTES",
         "MEGATRON_RCCL_SDMA_EAGER_INIT",
         "NCCL_CTA_POLICY",
         "NCCL_CUMEM_ENABLE",
+        "RCCL_CE_REDUCESCATTER",
+        "RCCL_FORCE_CE_REDUCESCATTER",
+        "RCCL_CE_REDUCE_PER_CHUNK",
+        "RCCL_CE_REDUCE_MAX_BLOCKS",
+        "RCCL_CE_AR_STAGING_BYTES",
     ):
         env.pop(name, None)
     env.update(extra_env)
@@ -591,6 +603,48 @@ def test_megatron_hook_enables_cumem_without_global_cta_policy():
     assert "env.MEGATRON_RCCL_SDMA_EAGER_INIT=1" in result.stdout
     assert "MEGATRON_RCCL_SDMA_DIRECT" not in result.stdout
     assert "MEGATRON_RCCL_SDMA_SCRATCH_BYTES" not in result.stdout
+
+
+def test_megatron_hook_enables_and_tunes_grad_reduce_scatter():
+    result = _run_sdma_hook(
+        {
+            "MEGATRON_PARAM_GATHER_BACKEND": "rccl_sdma",
+            "MEGATRON_GRAD_REDUCE_BACKEND": "rccl_sdma",
+            "RCCL_FORCE_CE_REDUCESCATTER": "1",
+            "RCCL_CE_REDUCE_PER_CHUNK": "1",
+            "RCCL_CE_REDUCE_MAX_BLOCKS": "64",
+        },
+    )
+
+    assert result.returncode == 0
+    assert "env.MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma" in result.stdout
+    assert "env.RCCL_CE_REDUCESCATTER=1" in result.stdout
+    assert "env.RCCL_FORCE_CE_REDUCESCATTER=1" in result.stdout
+    assert "env.RCCL_CE_REDUCE_PER_CHUNK=1" in result.stdout
+    assert "env.RCCL_CE_REDUCE_MAX_BLOCKS=64" in result.stdout
+    assert "env.NCCL_CTA_POLICY" not in result.stdout
+
+
+def test_megatron_hook_rejects_grad_reduce_without_param_gather():
+    result = _run_sdma_hook(
+        {"MEGATRON_GRAD_REDUCE_BACKEND": "rccl_sdma"},
+    )
+
+    assert result.returncode == 2
+    assert "MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma" in result.stderr
+
+
+def test_megatron_hook_rejects_disabled_ce_reduce_scatter():
+    result = _run_sdma_hook(
+        {
+            "MEGATRON_PARAM_GATHER_BACKEND": "rccl_sdma",
+            "MEGATRON_GRAD_REDUCE_BACKEND": "rccl_sdma",
+            "RCCL_CE_REDUCESCATTER": "0",
+        },
+    )
+
+    assert result.returncode == 2
+    assert "RCCL_CE_REDUCESCATTER=1" in result.stderr
 
 
 def test_fsdp_hook_keeps_global_cumem_and_cta_policy():

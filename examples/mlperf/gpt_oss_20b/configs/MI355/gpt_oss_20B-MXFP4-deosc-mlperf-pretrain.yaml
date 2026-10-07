@@ -48,8 +48,8 @@ modules:
       profile_step_start: ${PRIMUS_PROFILE_STEP_START:16}
       profile_ranks: [0]
 
-      # MXFP4 grouped experts; dense QKVO is tensorwise FP8 via
-      # te_precision_config_file. No first/last BF16 layers.
+      # MXFP4 grouped experts and dense QKVO. No first/last BF16 layers.
+      # Dense GEMM stays on the MXFP4 recipe (no QKVO FP8 override).
       fp8: null
       fp4: e2m1
       fp4_recipe: mxfp4
@@ -58,7 +58,6 @@ modules:
       num_layers_at_end_in_bf16: 0
       mxfp4_gradient_stochastic_rounding: true
       mxfp4_scale_rounding_mode: ${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING:2}
-      te_precision_config_file: ${PRIMUS_PATH:/workspace/Primus}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-qkvo-fp8.yaml
       clip_grad: 1.0
       check_for_nan_in_loss_and_grad: false
 
@@ -69,8 +68,8 @@ modules:
       seq_length: ${PRIMUS_SEQ_LENGTH:8192}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:131072}
       seed: ${SEED:1234}
-      lr: ${PRIMUS_LR:8.0e-4}
-      min_lr: ${PRIMUS_MIN_LR:8.0e-5}
+      lr: ${PRIMUS_LR:4.0e-4}
+      min_lr: ${PRIMUS_MIN_LR:4.0e-5}
       lr_warmup_iters: ${PRIMUS_LR_WARMUP_ITERS:128}
       lr_decay_iters: ${PRIMUS_LR_DECAY_ITERS:1199872}
       lr_decay_style: cosine
@@ -95,7 +94,7 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
       overlap_param_gather: true
-      ddp_num_buckets: 8
+      ddp_num_buckets: 24
       ddp_average_in_collective: true
 
       # data
@@ -183,7 +182,7 @@ modules:
       enable_primus_turbo: true
       use_turbo_attention: true
       enable_turbo_attention_float8: false
-      # Dense QKVO GEMM on Primus-Turbo FP8 FlyDSL; grouped experts stay MXFP4.
+      # Dense QKVO and grouped experts both use MXFP4 FlyDSL.
       # FlyDSL is not registered for BF16 dense GEMM, so other:hipblaslt remains
       # as the fallback if a site is not quantized.
       use_turbo_gemm: ${PRIMUS_USE_TURBO_GEMM:true}

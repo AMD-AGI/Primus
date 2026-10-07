@@ -1,7 +1,8 @@
 # SpecForge ROCm runtime image
 
 Image for [SpecForge on Primus](../README.md). That page is the `primus-cli`
-entrypoint sketch; this file is the install reference.
+entrypoint and MI355X results; YAML/env/CLI knobs are in
+[CONFIGURATION.md](../CONFIGURATION.md). This file is the install reference.
 
 The published `primus` wheel does **not** include `primus/backends/specforge/`.
 This Dockerfile installs **this Primus checkout** editable with `--no-deps`.
@@ -84,6 +85,17 @@ docker run -it --name primus-specforge \
 `--ipc=host --shm-size=64g` is enough shared memory for multi-GPU capture/train.
 Re-enter with `docker exec -it primus-specforge bash`.
 
+From the host, `primus-cli container` is the same as `docker run` plus
+`primus-cli direct` inside. ROCm devices are mapped by default; set
+`--shm-size 64g` and this image (not the default `rocm/primus` tag):
+
+```bash
+./runner/primus-cli container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  --shm-size 64g --volume /path/to/data:/data \
+  -- train pretrain \
+  --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
+```
+
 Inside the image:
 
 - Primus: `/opt/primus` (`WORKDIR`)
@@ -95,3 +107,6 @@ so model weights are not re-downloaded.
 
 Launch capture or train with `primus-cli` from `/opt/primus`. See
 [SpecForge on Primus](../README.md).
+
+Capture and online SGLang on this image use AITER with the radix cache off.
+Primus sets that at launch; you do not put it in YAML or export it.
