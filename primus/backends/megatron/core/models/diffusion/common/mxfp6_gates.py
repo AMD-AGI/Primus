@@ -98,6 +98,10 @@ class Mxfp6Gates:
     # GEMMs with an entry in that file change and every other GEMM keeps the default solution. If the file does not
     # validate against this image's PyTorch / HIP / hipBLASLt versions, TunableOp is switched back off with a warning.
     adaln_tunableop: bool = False
+    # AdaLN modulation GEMMs on aiter's PyISA kernels (aiter.ops.adaln_gemm) where aiter has one for the (pass, N, K):
+    # "hipblaslt" (default) or "pyisa". The wgrad is bitwise identical to the hipBLASLt GEMM; the forward and dgrad
+    # sum in a different (fixed, run-to-run identical) order. Needs adaln_wgrad_main_grad (the path they replace).
+    adaln_gemm_backend: str = "hipblaslt"
 
     # --- norm / RoPE fusions ---------------------------------------------
     # Fuse QK-norm and RoPE into one kernel.
@@ -235,6 +239,10 @@ class Mxfp6Gates:
                     f"mxfp6_fp4_hadamard_{name} must be one of {list(FP4_HADAMARD)}, got {value!r}."
                 )
         joint_mlp_parts(self.fwd_fp4_joint_mlp_parts)  # raises on an unknown part
+        if self.adaln_gemm_backend not in ("hipblaslt", "pyisa"):
+            raise ValueError(f"mxfp6_adaln_gemm_backend must be 'hipblaslt' or 'pyisa', got {self.adaln_gemm_backend!r}.")
+        if self.adaln_gemm_backend == "pyisa" and not self.adaln_wgrad_main_grad:
+            raise ValueError("mxfp6_adaln_gemm_backend 'pyisa' replaces the mxfp6_adaln_wgrad_main_grad path's GEMMs; enable it.")
         if self.gemm_layout not in GEMM_LAYOUTS:
             raise ValueError(f"mxfp6_gemm_layout must be one of {list(GEMM_LAYOUTS)}, got {self.gemm_layout!r}.")
         if self.fp4_sr_actw and self.gemm_layout != "tilescale":
@@ -360,6 +368,10 @@ def configure(config) -> Mxfp6Gates:
     _pin_aiter_backend()
     if resolved.adaln_tunableop:
         _load_adaln_tunableop()
+    if resolved.adaln_gemm_backend == "pyisa":
+        from primus.backends.megatron.core.models.diffusion.common import normalization as _norm
+
+        _norm.prime_adaln_pyisa()
 
     # Log the RESOLVED gates, not the requested ones. The two can differ: the
     # trainer copies a fixed list of fields onto the model config, so a gate the

@@ -1318,6 +1318,65 @@ def _(a, b, out):
     return None
 
 
+# mxfp6_adaln_gemm_backend "pyisa": aiter's AdaLN GEMM kernels, as opaque custom ops. The (pass, N, K) aiter has kernels
+# for are read once, eagerly, by prime_adaln_pyisa() at gate configuration -- never inside a compiled region.
+_ADALN_PYISA: frozenset = frozenset()
+
+
+def prime_adaln_pyisa() -> None:
+    global _ADALN_PYISA
+    try:
+        from aiter.ops.adaln_gemm import _manifest
+
+        _ADALN_PYISA = frozenset(_manifest().keys())
+    except ImportError:
+        _ADALN_PYISA = frozenset()
+
+
+def _pyisa(pass_: int, n: int, k: int, m: int) -> bool:
+    return m == 32 and (pass_, n, k) in _ADALN_PYISA
+
+
+@torch.library.custom_op("primus::adaln_pyisa_fwd", mutates_args=(), device_types="cuda")
+def _adaln_pyisa_fwd(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    from aiter.ops.adaln_gemm import adaln_fwd
+
+    out = torch.empty(x.shape[0], w.shape[0], dtype=x.dtype, device=x.device)
+    adaln_fwd(x.contiguous(), w, b, out)
+    return out
+
+
+@_adaln_pyisa_fwd.register_fake
+def _(x, w, b):
+    return x.new_empty(x.shape[0], w.shape[0])
+
+
+@torch.library.custom_op("primus::adaln_pyisa_dgrad", mutates_args=(), device_types="cuda")
+def _adaln_pyisa_dgrad(go: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    from aiter.ops.adaln_gemm import adaln_dgrad
+
+    out = torch.empty(go.shape[0], w.shape[1], dtype=go.dtype, device=go.device)
+    adaln_dgrad(go.contiguous(), w, out)
+    return out
+
+
+@_adaln_pyisa_dgrad.register_fake
+def _(go, w):
+    return go.new_empty(go.shape[0], w.shape[1])
+
+
+@torch.library.custom_op("primus::adaln_pyisa_wgrad_into", mutates_args=("out",), device_types="cuda")
+def _adaln_pyisa_wgrad_into(go: torch.Tensor, x: torch.Tensor, out: torch.Tensor) -> None:
+    from aiter.ops.adaln_gemm import adaln_wgrad
+
+    adaln_wgrad(go.contiguous(), x.contiguous(), out)
+
+
+@_adaln_pyisa_wgrad_into.register_fake
+def _(go, x, out):
+    return None
+
+
 class AdaLNLinearFunction(torch.autograd.Function):
     """The AdaLN modulation linear with its weight gradient stored into ``main_grad``.
 
@@ -1336,6 +1395,9 @@ class AdaLNLinearFunction(torch.autograd.Function):
     def forward(ctx, x, weight, bias):
         ctx.save_for_backward(x, weight)
         ctx.bias = bias
+        n, k = weight.shape
+        if bias is not None and gates().adaln_gemm_backend == "pyisa" and _pyisa(0, n, k, x.shape[0]):
+            return _adaln_pyisa_fwd(x, weight, bias)
         out = torch.matmul(x, weight.t())
         if bias is not None:
             out = out + bias
@@ -1345,8 +1407,16 @@ class AdaLNLinearFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         x, weight = ctx.saved_tensors
         bias = ctx.bias
-        grad_input = grad_output.matmul(weight)
-        _mm_into(grad_output.t(), x, weight.main_grad)
+        n, k = weight.shape
+        pyisa = gates().adaln_gemm_backend == "pyisa"
+        if pyisa and _pyisa(1, n, k, grad_output.shape[0]):
+            grad_input = _adaln_pyisa_dgrad(grad_output, weight)
+        else:
+            grad_input = grad_output.matmul(weight)
+        if pyisa and _pyisa(2, n, k, grad_output.shape[0]):
+            _adaln_pyisa_wgrad_into(grad_output, x, weight.main_grad)
+        else:
+            _mm_into(grad_output.t(), x, weight.main_grad)
         grad_weight = torch.empty_like(weight)
         grad_bias = None
         if bias is not None:
