@@ -87,8 +87,25 @@ bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
 if the model layout changes; an undersized allocation reports the rounded value
 needed before model construction. The launcher raises Docker's `memlock` and
 `nofile` limits for the symmetric buffer and dedicated communicator. Gradient
-ReduceScatter and other collectives continue to use their original process
-groups.
+ReduceScatter continues to use its original process group unless separately
+selected.
+
+To opt into the CE gradient ReduceScatter tested with the large GPT-OSS bucket,
+use an image containing the corresponding RCCL implementation and export:
+
+```bash
+export MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma
+export RCCL_CE_REDUCESCATTER=1
+export RCCL_FORCE_CE_REDUCESCATTER=1
+export RCCL_CE_REDUCE_PER_CHUNK=1
+export RCCL_CE_REDUCE_MAX_BLOCKS=64
+bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
+```
+
+Keep the default `MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma`, leave
+`NCCL_CTA_POLICY` unset, and do not disable `RCCL_DDA_ENABLE`; the gradient
+path reuses the parameter path's dedicated zero-CTA group and symmetric-memory
+pool. The gradient selector is off by default.
 
 ### MXFP4 recipe
 
@@ -96,7 +113,7 @@ Override `EXP` to switch from the default FP8 Turbo-attention yaml:
 
 ```bash
 export EXP=/workspace/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml
-export MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR=mxfp4
+export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR=mxfp4
 # Optional scale rounding for Turbo MXFP4 quant: 0=RTE, 1=RZ, 2=stochastic
 # export PRIMUS_TURBO_MXFP4_SCALE_ROUNDING=0
 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh

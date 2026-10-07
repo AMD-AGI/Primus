@@ -27,7 +27,10 @@ from primus.backends.specforge.argument_builder import (
     build_capture_argv,
     build_specforge_argv,
     flatten_overrides,
+    homogeneous_nnodes,
+    homogeneous_rendezvous_dir,
     is_online_train,
+    offline_multinode_overrides,
     resolve_specforge_root,
     specforge_mode,
     specforge_role,
@@ -40,6 +43,7 @@ from primus.backends.specforge.online_launch import (
     nnodes,
     node_rank,
     online_settings,
+    rendezvous_head_ip,
     resolve_head_ip,
     resolve_local_ip,
     resolve_routable_ip,
@@ -52,6 +56,7 @@ from primus.backends.specforge.specforge_pretrain_trainer import (
     align_visible_devices,
     clear_partial_distributed_env,
     resolve_filter_min_kept,
+    should_filter_capture,
 )
 from primus.backends.specforge.stack_preflight import (
     apply_rocm_stack_env,
@@ -360,8 +365,92 @@ class TestCaptureArgv:
             specforge_capture={"target_model_path": "Qwen/Qwen3.5-4B"},
         )
         argv = build_capture_argv(params)
+        assert "--standalone" in argv
         assert "--sglang-disable-radix-cache" in argv
         assert argv[argv.index("--sglang-attention-backend") + 1] == "aiter"
+
+
+class TestHomogeneousMultinode:
+    def test_capture_nnodes_one_stays_standalone(self):
+        params = SimpleNamespace(specforge_mode="capture", specforge_capture={"nproc_per_node": 2})
+        argv = build_capture_argv(params, nnodes=1, node_rank=0)
+        assert argv[:5] == [
+            "torchrun",
+            "--standalone",
+            "--nproc_per_node",
+            "2",
+            "scripts/prepare_hidden_states.py",
+        ]
+        assert "--nnodes" not in argv
+
+    def test_capture_nnodes_two_uses_static_rendezvous(self):
+        params = SimpleNamespace(specforge_mode="capture", specforge_capture={"nproc_per_node": 1})
+        argv = build_capture_argv(
+            params, nnodes=2, node_rank=1, master_addr="10.0.0.8", env={"SPECFORGE_MASTER_PORT": "29500"}
+        )
+        assert "--standalone" not in argv
+        assert argv[argv.index("--nnodes") + 1] == "2"
+        assert argv[argv.index("--node_rank") + 1] == "1"
+        assert argv[argv.index("--master_addr") + 1] == "10.0.0.8"
+        assert argv[argv.index("--master_port") + 1] == "29500"
+        assert argv[argv.index("--nproc_per_node") + 1] == "1"
+        assert "scripts/prepare_hidden_states.py" in argv
+
+    def test_capture_nnodes_two_requires_master_addr(self):
+        params = SimpleNamespace(specforge_mode="capture", specforge_capture={})
+        with pytest.raises(ValueError, match="master_addr"):
+            build_capture_argv(params, nnodes=2, node_rank=0)
+
+    def test_offline_overrides_inject_nnodes_and_master(self):
+        params = SimpleNamespace(specforge_overrides={"training.max_steps": 20})
+        extra = offline_multinode_overrides(params, master_addr="10.0.0.8", nnodes=2)
+        assert "deployment.trainer.nnodes=2" in extra
+        assert "deployment.trainer.master_addr=10.0.0.8" in extra
+
+    def test_offline_overrides_skip_keys_already_in_yaml(self):
+        params = SimpleNamespace(
+            specforge_overrides={
+                "deployment.trainer.nnodes": 2,
+                "deployment.trainer.master_addr": "10.0.0.1",
+            }
+        )
+        assert offline_multinode_overrides(params, master_addr="10.0.0.8", nnodes=2) == []
+
+    def test_offline_argv_has_node_rank_and_hydra(self):
+        params = SimpleNamespace(
+            specforge_mode="train",
+            specforge_train_mode="offline",
+            specforge_config="/workspace/SpecForge/run.yaml",
+            specforge_overrides={"training.max_steps": 20},
+        )
+        extra = offline_multinode_overrides(params, master_addr="10.0.0.8", nnodes=2)
+        argv = build_specforge_argv(params, extra_overrides=extra, node_rank=1)
+        assert "--node-rank" in argv
+        assert argv[argv.index("--node-rank") + 1] == "1"
+        assert "deployment.trainer.nnodes=2" in argv
+        assert "deployment.trainer.master_addr=10.0.0.8" in argv
+
+    def test_homogeneous_nnodes_from_env(self):
+        params = SimpleNamespace(specforge_mode="capture", specforge_capture={})
+        assert homogeneous_nnodes(params, env={"NNODES": "2"}) == 2
+        assert homogeneous_nnodes(params, env={}) == 1
+
+    def test_rendezvous_dir_is_parent_of_capture_output(self, tmp_path):
+        params = SimpleNamespace(
+            specforge_mode="capture",
+            specforge_capture={"output_path": str(tmp_path / "run" / "hidden_states_raw")},
+        )
+        assert homogeneous_rendezvous_dir(params) == tmp_path / "run"
+
+    def test_rendezvous_head_ip_rank0_writes_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PRIMUS_SPECFORGE_HEAD_IP", "10.1.2.3")
+        ip = rendezvous_head_ip(tmp_path, rank=0)
+        assert ip == "10.1.2.3"
+        assert (tmp_path / "head.ip").read_text(encoding="utf-8").strip() == "10.1.2.3"
+
+    def test_rendezvous_head_ip_rank1_reads_file(self, tmp_path):
+        (tmp_path / "head.ip").write_text("10.9.8.7\n", encoding="utf-8")
+        assert rendezvous_head_ip(tmp_path, rank=1, timeout_s=1) == "10.9.8.7"
 
 
 class TestWorkdirResolution:
@@ -406,6 +495,7 @@ class TestExampleExperiment:
         assert backend_args.specforge_root == experiment_env["SPECFORGE_ROOT"]
         assert backend_args.specforge_mode == "train"
         assert backend_args.specforge_train_mode == "offline"
+        assert "deployment.trainer.nnodes=2" in argv
 
     def test_capture_yaml_converts_to_prepare_hidden_states_argv(self, experiment_env):
         module = load_pre_trainer_params(CAPTURE_CONFIG)
@@ -414,6 +504,7 @@ class TestExampleExperiment:
         assert backend_args.specforge_mode == "capture"
         assert backend_args.specforge_train_mode is None
         argv = build_capture_argv(backend_args)
+        assert "--standalone" in argv
         assert "scripts/prepare_hidden_states.py" in argv
         assert "--sglang-disable-radix-cache" in argv
         assert "--sglang-disable-radix-cache false" not in " ".join(argv)
@@ -427,7 +518,8 @@ class TestExampleExperiment:
         )
         assert "--filter-output-path" not in argv
 
-    def test_trainer_rejects_missing_entrypoint(self, experiment_env):
+    def test_trainer_rejects_missing_entrypoint(self, experiment_env, monkeypatch):
+        monkeypatch.setenv("NNODES", "1")
         backend_args = SimpleNamespace(
             specforge_mode="train",
             specforge_train_mode="offline",
@@ -564,6 +656,26 @@ class TestFilterMinKept:
         )
         with pytest.raises(SystemExit, match="too few kept shards \\(3\\); need at least 8"):
             trainer.train()
+
+    def test_non_zero_node_rank_skips_filter(self, monkeypatch):
+        monkeypatch.setenv("NODE_RANK", "1")
+        monkeypatch.setattr(
+            "primus.backends.specforge.specforge_pretrain_trainer.subprocess.run",
+            lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+        )
+        called = []
+
+        def boom(*_args, **_kwargs):
+            called.append(True)
+            raise AssertionError("filter must not run on node rank 1")
+
+        fake = SimpleNamespace(filter_dflash_dir=boom)
+        monkeypatch.setitem(sys.modules, "primus.backends.specforge.filter_hidden_states", fake)
+        trainer = self._trainer({"output_path": "/raw", "filter_output_path": "/filtered"})
+        assert trainer.train() is None
+        assert called == []
+        assert should_filter_capture({"NODE_RANK": "1"}) is False
+        assert should_filter_capture({"NODE_RANK": "0"}) is True
 
 
 class TestPrepareHook:
