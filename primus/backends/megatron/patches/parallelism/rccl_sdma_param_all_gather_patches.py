@@ -201,6 +201,12 @@ def make_param_and_grad_buffer_init(original):
         for bucket in self.buckets:
             if bucket.param_data is not None:
                 mark_direct_param_buffer(bucket.param_data)
+        if os.getenv("MEGATRON_MXFP4_PARAM_GATHER_AUDIT", "0") == "1":
+            from primus.backends.megatron.core.distributed.mxfp4_shard_layout import audit_buffer
+
+            self._primus_mxfp4_shard_audit = audit_buffer(self, bound.arguments["param_to_name"])
+            for report in self._primus_mxfp4_shard_audit:
+                log_rank_0(f"[MXFP4 parameter gather audit] {report}")
         return result
 
     return wrapped
