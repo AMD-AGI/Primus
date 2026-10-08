@@ -44,6 +44,8 @@ System defaults (`runner/.primus.yaml`, `container.options.device`) pass each pa
 | `/dev/dri` | Direct Rendering Infrastructure (GPU access) |
 | `/dev/infiniband` | InfiniBand character devices (multi-node / RDMA) |
 
+At launch, Primus checks that the RDMA userspace driver in the image works with the host's NIC driver and installs a matching one in the container when it does not. For Broadcom NICs it needs the NetXtreme-E Linux bundle used for the host install: keep it on every node under `/opt/broadcom` (or set `PRIMUS_NIC_DRIVER_SEARCH_PATH`), or install `libbnxt_re` on the hosts from it. `primus-cli container` mounts these read-only. AINIC needs nothing if nodes can reach `repo.radeon.com`. See [Multi-node networking](../04-technical-guides/multi-node-networking.md#5-rdma-userspace-driver-libibverbs-provider).
+
 ### 2.3 Required capabilities
 
 Defaults (`container.options.cap-add`):
@@ -220,6 +222,7 @@ Required variables for distributed training:
 | ROCm drivers | Install and verify with `rocm-smi` |
 | Container image | Pulled and aligned with host ROCm expectations |
 | Network | Run `preflight --network` (see [Preflight](../02-user-guide/preflight.md)) |
+| RDMA userspace driver | Broadcom: driver bundle on every node under `/opt/broadcom` (or `libbnxt_re` installed on the hosts). Check that the `[nic-driver]` lines of a first run report `works` or `installed` on every node; set `PRIMUS_NIC_DRIVER_STRICT=1` for production jobs that must not run over TCP |
 | Shared data | Paths visible and consistent on all nodes |
 | Hugging Face | Set `HF_TOKEN` if using gated models |
 | Checkpoints | Save directory on shared or replicated storage with sufficient space |

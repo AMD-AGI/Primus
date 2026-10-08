@@ -474,6 +474,36 @@ EOF
 }
 
 # ============================================================================
+# Test 13: Other nodes stay quiet but still show hook warnings
+# ============================================================================
+test_other_nodes_show_warnings() {
+    print_section "Test 13: Other Nodes Show Hook Warnings"
+
+    local test_group="test_group_$$"
+    local test_name="warning_hook"
+    local test_hook_dir="$HOOKS_BASE_DIR/$test_group/$test_name"
+    mkdir -p "$test_hook_dir"
+
+    cat > "$test_hook_dir/01_warn.sh" << 'EOF'
+#!/bin/bash
+echo "routine progress line"
+echo "[WARN] [test] driver bundle missing on this node" >&2
+exit 0
+EOF
+    chmod +x "$test_hook_dir/01_warn.sh"
+
+    local output
+    output=$(NODE_RANK=1 bash "$RUNNER_DIR/helpers/execute_hooks.sh" "$test_group" "$test_name" 2>&1)
+    local exit_code=$?
+
+    assert_exit_code "$exit_code" 0 "Exit code is 0 on another node"
+    assert_contains "$output" "driver bundle missing on this node" "Warning shown on another node"
+    assert_not_contains "$output" "routine progress line" "Routine output stays hidden on another node"
+
+    rm -rf "${HOOKS_BASE_DIR:?}/$test_group"
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 echo "Starting execute_hooks.sh unit tests..."
@@ -492,6 +522,7 @@ test_bash_hook_failure
 test_python_hook_failure
 test_stop_on_failure
 test_mixed_hook_types
+test_other_nodes_show_warnings
 
 # Print summary
 echo ""

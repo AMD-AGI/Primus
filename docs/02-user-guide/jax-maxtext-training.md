@@ -104,6 +104,8 @@ apt install -y gcc make libtool autoconf librdmacm-dev rdmacm-utils infiniband-d
 
 Refer to your NIC manufacturer's webpage for further steps about compiling and installing the RoCE driver. For Broadcom, see the section **Compiling Broadcom NIC Software from Source** in the [Ethernet Networking Guide for AMD Instinct MI300X GPU Clusters](https://docs.broadcom.com/doc/957608-AN2XX).
 
+You do not need to rebuild the RDMA userspace driver inside the container: `primus-cli` matches it to the host driver at launch. For Broadcom NICs, keep the driver bundle used for the host install on each node (by default under `/opt/broadcom`). See [Multi-node networking](../04-technical-guides/multi-node-networking.md#5-rdma-userspace-driver-libibverbs-provider), and [When RDMA still does not work](../04-technical-guides/multi-node-networking.md#when-rdma-still-does-not-work) if the `[nic-driver]` lines at the top of the log report a problem.
+
 ### Multi-node environment variables
 
 Set the following environment variables.

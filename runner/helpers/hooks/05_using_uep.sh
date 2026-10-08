@@ -44,8 +44,8 @@ if [[ "${USING_UEP:-0}" == "1" ]]; then
         UCCL_IB_MAX_INFLIGHT_NORMAL=${UCCL_IB_MAX_INFLIGHT_NORMAL:-1}
         UCCL_IB_MAX_INFLIGHT_LOW_LATENCY=${UCCL_IB_MAX_INFLIGHT_LOW_LATENCY:-1}
         UCCL_IB_MAX_INFLIGHT_BYTES=${UCCL_IB_MAX_INFLIGHT_BYTES:-4194304} # 4MB
-    elif [[ "${REBUILD_BNXT:-0}" == "1" ]]; then # Broadcom Thor-2
-        # FIXME(zhuang12): use `USING_BNXT` for Broadcom Thor-2 maybe better than `REBUILD_BNXT`
+    elif [[ "${REBUILD_BNXT:-0}" == "1" ]] || grep -qsx '0x14e4' /sys/class/infiniband/*/device/vendor; then # Broadcom Thor-2
+        # REBUILD_BNXT=1 used to be the only signal; Broadcom RDMA devices are now detected directly.
         UCCL_IB_MAX_INFLIGHT_NORMAL=${UCCL_IB_MAX_INFLIGHT_NORMAL:-1}
         UCCL_IB_MAX_INFLIGHT_LOW_LATENCY=${UCCL_IB_MAX_INFLIGHT_LOW_LATENCY:-1}
         UCCL_IB_MAX_INFLIGHT_BYTES=${UCCL_IB_MAX_INFLIGHT_BYTES:-1572864} # 1.5MB

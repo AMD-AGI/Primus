@@ -642,7 +642,7 @@ export NCCL_IB_GID_INDEX=1
 
 Notes:
 
-- Make sure the correct network drivers are installed on the nodes. If inside a Docker container, either install the drivers inside the container or pass the network drivers from the host while creating the container.
+- Make sure the NIC kernel drivers are installed on the nodes. You do not need to rebuild the RDMA userspace driver inside the container: `primus-cli` installs one that matches the host driver at launch. For Broadcom NICs, keep the driver bundle used for the host install on each node (by default under `/opt/broadcom`). If the `[nic-driver]` lines at the top of the log report that RDMA is unusable, see [When RDMA still does not work](../04-technical-guides/multi-node-networking.md#when-rdma-still-does-not-work).
 - If `NCCL_IB_HCA` and `NCCL_SOCKET_IFNAME` are not set, Primus tries to auto-detect them. However, since NICs can vary across clusters, explicitly export your NCCL parameters for the cluster.
 - To find your network interface, use `ip a`.
 - To find RDMA interfaces, use `ibv_devices` to get the list of all RDMA/IB devices.

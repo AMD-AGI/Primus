@@ -359,6 +359,45 @@ test_help_output() {
 }
 
 # ============================================================================
+# Test 11: NIC userspace driver sources are mounted read-only
+# ============================================================================
+test_nic_driver_source_mounts() {
+    print_section "Test 11: NIC Userspace Driver Source Mounts"
+
+    local test_config="/tmp/test_container_config_$$.yaml"
+    cat > "$test_config" << 'EOF'
+container:
+  options:
+    image: "test_image:v1"
+    device:
+      - "/dev/kfd"
+EOF
+    local bundles="/tmp/test_nic_bundles_$$"
+    local tarball="/tmp/test_nic_pkg_$$/libbnxt_re-1.2.3.tar.gz"
+    mkdir -p "$bundles" "$(dirname "$tarball")"
+    touch "$tarball"
+
+    local output
+    output=$(PRIMUS_NIC_DRIVER_SEARCH_PATH="$bundles:/nonexistent_$$" PATH_TO_BNXT_TAR_PACKAGE="$tarball" \
+        timeout 10 bash "$RUNNER_DIR/primus-cli-container.sh" --config "$test_config" --dry-run -- test 2>&1 || true)
+    assert_contains "$output" "--volume $bundles:$bundles:ro" "Search path directory mounted read-only"
+    assert_contains "$output" "--volume $tarball:$tarball:ro" "PATH_TO_BNXT_TAR_PACKAGE mounted read-only"
+    assert_not_contains "$output" "--volume /nonexistent_$$" "Missing search path entries are skipped"
+    assert_contains "$output" "--env PRIMUS_NIC_DRIVER_SEARCH_PATH=$bundles:/nonexistent_$$" "Search path forwarded to the hook"
+
+    output=$(PRIMUS_NIC_DRIVER_SEARCH_PATH="$bundles" \
+        timeout 10 bash "$RUNNER_DIR/primus-cli-container.sh" --config "$test_config" --dry-run \
+        --volume "$bundles:$bundles" -- test 2>&1 || true)
+    assert_not_contains "$output" "--volume $bundles:$bundles:ro" "Destination already mounted by the user is not mounted twice"
+
+    output=$(PRIMUS_NIC_USERSPACE_DRIVER=off PRIMUS_NIC_DRIVER_SEARCH_PATH="$bundles" \
+        timeout 10 bash "$RUNNER_DIR/primus-cli-container.sh" --config "$test_config" --dry-run -- test 2>&1 || true)
+    assert_not_contains "$output" "NIC driver source" "PRIMUS_NIC_USERSPACE_DRIVER=off adds no mounts"
+
+    rm -rf "$test_config" "$bundles" "$(dirname "$tarball")"
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 main() {
@@ -376,6 +415,7 @@ main() {
     test_boolean_flags
     test_config_priority
     test_help_output
+    test_nic_driver_source_mounts
 
     # Print summary
     echo ""

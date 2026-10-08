@@ -69,6 +69,8 @@ For end-to-end checks including optional performance probes, see [Preflight](../
 | `MASTER_ADDR` unreachable | From every node, resolve DNS/IP consistently; verify firewalls and routing. |
 | Port already in use | Change **`MASTER_PORT`** to a free port on all nodes. |
 | InfiniBand not used or missing | Confirm `/dev/infiniband` exists where expected; run `ibstat`; ensure IB kernel modules are loaded. See [Multi-node networking](../04-technical-guides/multi-node-networking.md). |
+| RCCL uses `NET/Socket`; libibverbs warns `does not support the kernel ABI` | The RDMA userspace driver in the container does not match the host NIC driver. Primus installs a matching one at launch; the `[nic-driver]` lines at the top of the log say whether that worked and, if not, why. See [When RDMA still does not work](../04-technical-guides/multi-node-networking.md#when-rdma-still-does-not-work). |
+| Hang at the first collective on a multi-node job, one node logs `RDMA is unusable on this node` | Nodes use different transports. Fix that node's driver source, or set `PRIMUS_NIC_DRIVER_STRICT=1` to fail fast. |
 | Timeout too aggressive | Megatron: increase **`distributed_timeout_minutes`**. TorchTitan: increase **`comm.init_timeout_seconds`**. |
 | Mismatched world size | Align **`NNODES`**, **`GPUS_PER_NODE`**, and launcher settings across **all** nodes. |
 
@@ -98,6 +100,8 @@ Collective behavior and RCCL roles are summarized in [Collective operations](../
 | GPU not visible | Devices not passed through | Ensure **`--device /dev/kfd`** and **`--device /dev/dri`** (Primus container mode typically sets these). |
 | Permission denied on GPU | Group membership / permissions | Add **`--group-add video`**; ensure the user has **video/render** access on the host. |
 | InfiniBand missing in container | Device not mounted | Add **`--device /dev/infiniband`** (and related uverbs devices as required by your site). |
+| `[nic-driver]` warns that no `libbnxt_re` / `libionic` was found | No driver source matching the host is visible in the container | Keep the NIC vendor bundle on every node (Broadcom: under `/opt/broadcom`), or see [When RDMA still does not work](../04-technical-guides/multi-node-networking.md#when-rdma-still-does-not-work). |
+| `ibv_create_cq fails ... Operation not permitted` | Locked-memory limit too low | Add **`--ulimit memlock=-1`** or keep **`--privileged`** (the Primus default). |
 | Debugger/profiler failures | Missing capabilities | **`--cap-add SYS_PTRACE`** and **`--cap-add CAP_SYS_ADMIN`** are required for many ROCm tooling paths. |
 | Driver/library mismatch | Image vs. host ROCm | Match **container image ROCm** to **host ROCm driver** version. |
 | Data or code not found | Bind mounts | Use **`--volume /host/path:/container/path`** for datasets and workspace. |

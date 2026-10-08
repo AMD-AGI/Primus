@@ -451,22 +451,68 @@ for key in "${!container_config[@]}"; do
     fi
 done
 
-# The bnxt rebuild hook runs inside the container and checks for the tar on
-# disk, so forwarding PATH_TO_BNXT_TAR_PACKAGE as an env var is not enough: the
-# file has to be visible under the same path. Skip when the configured volumes
-# already provide it.
-if [[ -n "${PATH_TO_BNXT_TAR_PACKAGE:-}" && -f "${PATH_TO_BNXT_TAR_PACKAGE}" ]]; then
-    bnxt_mount="${PATH_TO_BNXT_TAR_PACKAGE}:${PATH_TO_BNXT_TAR_PACKAGE}"
-    bnxt_mounted=0
-    for opt_value in "${CONTAINER_OPTS[@]}"; do
-        if [[ "$opt_value" == "$bnxt_mount" || "$opt_value" == "${PATH_TO_BNXT_TAR_PACKAGE}" ]]; then
-            bnxt_mounted=1
-            break
-        fi
+# The NIC userspace driver hook (runner/helpers/hooks/02_setup_nic_userspace_driver.sh)
+# runs inside the container and installs a libibverbs provider matching this
+# host's NIC driver. It can only use sources it can see, so mount them read-only:
+# PATH_TO_BNXT_TAR_PACKAGE and the bundle search path at their host paths, and
+# the host's own libbnxt_re (when it matches the loaded bnxt_re module) where the
+# hook looks for it. Destinations the configured volumes already cover are skipped.
+container_has_mount() {
+    local dest="$1" i spec spec_dest field
+    local -a fields
+    for ((i = 0; i < ${#CONTAINER_OPTS[@]} - 1; i++)); do
+        spec="${CONTAINER_OPTS[i + 1]}"
+        case "${CONTAINER_OPTS[i]}" in
+            -v|--volume)
+                IFS=':' read -r _ spec_dest _ <<< "$spec"
+                [[ "${spec_dest:-$spec}" == "$dest" ]] && return 0
+                ;;
+            --mount)
+                IFS=',' read -r -a fields <<< "$spec"
+                for field in "${fields[@]}"; do
+                    case "$field" in
+                        dst="$dest"|target="$dest"|destination="$dest") return 0 ;;
+                    esac
+                done
+                ;;
+        esac
     done
-    if [[ $bnxt_mounted -eq 0 ]]; then
-        CONTAINER_OPTS+=("--volume" "$bnxt_mount")
-        LOG_INFO_RANK0 "[container] Added cumulative: --volume $bnxt_mount"
+    return 1
+}
+
+add_nic_driver_mount() {
+    local src="$1" dest="${2:-$1}"
+    container_has_mount "$dest" && return 0
+    CONTAINER_OPTS+=("--volume" "${src}:${dest}:ro")
+    LOG_INFO_RANK0 "[container] Added NIC driver source: --volume ${src}:${dest}:ro"
+}
+
+case "${PRIMUS_NIC_USERSPACE_DRIVER:-auto}" in
+    off|OFF|0|false|no) nic_driver_hook=0 ;;
+    *) nic_driver_hook=1 ;;
+esac
+if [[ $nic_driver_hook -eq 1 ]]; then
+    if [[ -n "${PATH_TO_BNXT_TAR_PACKAGE:-}" && -e "${PATH_TO_BNXT_TAR_PACKAGE}" ]]; then
+        add_nic_driver_mount "$PATH_TO_BNXT_TAR_PACKAGE"
+    fi
+    # Keep the default in sync with DEFAULT_SEARCH_PATH in runner/helpers/nic_userspace_driver.py.
+    IFS=':' read -r -a nic_search_path <<< "${PRIMUS_NIC_DRIVER_SEARCH_PATH-/opt/broadcom:/opt/bnxt-bundles:/opt/ainic-bundles}"
+    for nic_path in "${nic_search_path[@]}"; do
+        [[ -n "$nic_path" && -e "$nic_path" ]] && add_nic_driver_mount "$nic_path"
+    done
+    # Broadcom's installers leave libbnxt_re-<version>.so next to the provider they
+    # installed, or one level above it for packages that use the libibverbs directory.
+    if [[ -r /sys/module/bnxt_re/version ]]; then
+        bnxt_version="$(< /sys/module/bnxt_re/version)"
+        for lib_dir in /usr/local/lib /usr/local/lib/x86_64-linux-gnu /usr/local/lib64 /usr/lib64 /usr/lib/x86_64-linux-gnu; do
+            [[ -e "${lib_dir}/libbnxt_re-${bnxt_version}.so" ]] || continue
+            for host_provider in "${lib_dir}"/libbnxt_re-rdmav*.so "${lib_dir}"/libibverbs/libbnxt_re-rdmav*.so; do
+                [[ -e "$host_provider" ]] || continue
+                add_nic_driver_mount "$(readlink -f "$host_provider")" \
+                    "/run/primus/host-rdma-providers/bnxt_re/${bnxt_version}/$(basename "$host_provider")"
+                break 2
+            done
+        done
     fi
 fi
 

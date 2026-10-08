@@ -896,7 +896,11 @@ running on bare metal with everything installed in your environment.
 - **RDMA / multi-node limits**: high-performance networking typically requires
   `ulimit -l unlimited` and possibly hugepages, configured in
   `/etc/security/limits.conf` (admin help). Verify NICs with `ibv_devinfo` /
-  `ibstat`. JAX uses the distributed coordinator (`JAX_COORDINATOR_IP` /
+  `ibstat`. At every launch, Primus also checks that the installed RDMA
+  userspace driver works with the NIC kernel driver and, if it does not, uses a
+  matching build for that run from a private directory under `/tmp`; see
+  [When RDMA still does not work](../04-technical-guides/multi-node-networking.md#when-rdma-still-does-not-work).
+  JAX uses the distributed coordinator (`JAX_COORDINATOR_IP` /
   `JAX_COORDINATOR_PORT`), which Primus sets from `MASTER_ADDR` / `MASTER_PORT`.
 - **Version drift**: the ROCm SDK wheels, the JAX/PJRT/plugin versions, the
   TransformerEngine wheel, the TensorFlow/RCCL source revisions, and the MaxText

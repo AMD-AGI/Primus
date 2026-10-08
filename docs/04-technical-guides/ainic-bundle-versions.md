@@ -20,6 +20,13 @@ here; the correct bundle for your cluster is often an older one.
 > *enabled* at runtime — for that, see
 > [Multi-node networking](./multi-node-networking.md#4-ainic-amd-ai-nic).
 >
+> You may not need to rebuild at all: at launch, Primus installs the `libionic`
+> that matches the bundle version the host reports (`fw_ver`), from a local
+> bundle or from the published repository, whenever the image's `libionic`
+> cannot use the devices — or always, with `PRIMUS_NIC_USERSPACE_DRIVER=force`.
+> See [Multi-node networking](./multi-node-networking.md#5-rdma-userspace-driver-libibverbs-provider).
+> Rebuilding the image remains the way to bake a bundle in.
+>
 > This guide assumes a **published** bundle throughout. If you have been given a
 > bundle as a tarball rather than a repository, see
 > [section 7](#7-installing-from-a-pre-downloaded-bundle).
@@ -176,9 +183,10 @@ modinfo ionic | grep '^version'
 ```
 
 If `fw_ver` reports a bundle version, that is the bundle the host is running and
-the natural target for the container. Where it does not, or where the host is
-managed by someone else, bring your cluster's operators the output above together
-with:
+the natural target for the container; it is also what Primus installs at launch.
+Where it does not, set `PRIMUS_AINIC_BUNDLE_VERSION` once you know the bundle, so
+the launch-time install uses it. If you do not know it, or the host is managed by
+someone else, bring your cluster's operators the output above together with:
 
 ```bash
 cat /sys/class/infiniband_verbs/uverbs*/abi_version
@@ -525,6 +533,7 @@ the runtime `ibv_devices` / RCCL log check on a node with AINIC hardware;
 | `ibv_devices` lists no `ionic` device | Not AINIC hardware; the host `ionic` driver is not loaded; or `libionic` is ABI-incompatible with the host driver. See sections 2 and 3. |
 | Training runs fine but throughput is far below expectation | RCCL fell back to `NET/Socket`. The job still completes and converges normally, so check the transport rather than the loss. See section 6. |
 | The requested `libionic` is installed but the fabric is unreachable | The installed bundle is not compatible with the host. Bundle selection is a cluster question — check `fw_ver` on the host, and note that the required version may be older than what the image shipped. See section 3. |
+| `[nic-driver]` lines at launch say no `libionic1` was found or the package index cannot be fetched | The launch-time install could not get the bundle: `repo.radeon.com` unreachable, or `fw_ver` is not a published bundle name. Set `PRIMUS_AINIC_REPO_URL` to a mirror, put the bundle tarball under `/opt/ainic-bundles`, or set `PRIMUS_AINIC_BUNDLE_VERSION`. See [When RDMA still does not work](./multi-node-networking.md#when-rdma-still-does-not-work). |
 
 ---
 

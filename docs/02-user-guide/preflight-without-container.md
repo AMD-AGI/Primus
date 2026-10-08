@@ -345,7 +345,9 @@ runner/primus-cli direct -- preflight ...
 
 ### Broadcom NICs (no AINIC)
 
-Most clusters fall here. The defaults from `base_env.sh` are usually fine, but the two values most commonly worth overriding are:
+Most clusters fall here. Before preflight runs, the launcher checks that the host's `libbnxt_re` works with its `bnxt_re` driver; if it does not, it uses a matching build for this run only, without modifying the host. Its `[nic-driver]` lines at the top of the output say which; see [When RDMA still does not work](../04-technical-guides/multi-node-networking.md#when-rdma-still-does-not-work) if they report a problem.
+
+The defaults from `base_env.sh` are usually fine, but the two values most commonly worth overriding are:
 
 ```bash
 export NCCL_CROSS_NIC=1     # default in base_env.sh is 0

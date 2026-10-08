@@ -151,6 +151,8 @@ export NCCL_IB_GID_INDEX=3                     # 3 for RoCE (1 for AMD AINIC)
 
 For AMD AINIC clusters also set `USING_AINIC=1`, `NCCL_PXN_DISABLE=0`, `NCCL_IB_GID_INDEX=1`. See [Multi-node networking](../04-technical-guides/multi-node-networking.md) for the full reference.
 
+The RDMA userspace driver inside the container is matched to the host NIC driver at launch. Check the `[nic-driver]` lines at the top of the first multi-node log: `works` or `installed` on every node means RDMA is ready. For Broadcom NICs this needs the driver bundle on each node (by default under `/opt/broadcom`). Anything else is explained in [When RDMA still does not work](../04-technical-guides/multi-node-networking.md#when-rdma-still-does-not-work).
+
 ---
 
 ## Megatron-LM

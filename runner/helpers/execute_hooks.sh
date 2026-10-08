@@ -115,6 +115,12 @@ execute_hooks() {
                 continue
             fi
 
+            # Other nodes stay quiet, but warnings are often specific to one node (a missing
+            # driver bundle, a device not passed through), so every node shows those.
+            if [[ "${NODE_RANK:-0}" -ne 0 ]]; then
+                grep -E '\[(WARN|ERROR)\]' <<< "$hook_output" >&2 || true
+            fi
+
             # Note: hook_output is still captured for parsing extra.* and env.* variables
             # The tee command ensures logs are printed in real-time to the terminal
 

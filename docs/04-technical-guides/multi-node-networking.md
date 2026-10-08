@@ -14,6 +14,7 @@ This guide summarizes how Primus configures networking, how **InfiniBand**, **Ro
 | AINIC hook (container/CLI integration) | `runner/helpers/hooks/03_enable_ainic.sh` |
 | AINIC CLI defaults | `runner/use_ainic.yaml` |
 | ANP / `NCCL_NET_PLUGIN` selection | `runner/helpers/hooks/03_enable_ainic.sh` |
+| RDMA userspace driver matching | `runner/helpers/hooks/02_setup_nic_userspace_driver.sh`, `runner/helpers/nic_userspace_driver.py` |
 
 ---
 
@@ -109,7 +110,139 @@ From `03_enable_ainic.sh` (non-exhaustive):
 
 ---
 
-## 5. Socket configuration
+## 5. RDMA userspace driver (libibverbs provider)
+
+An RDMA NIC driver has two halves: the kernel driver on the host, and the userspace provider that libibverbs loads inside the container — `libbnxt_re` for Broadcom, `libionic` for AMD Pensando AINIC. Training images ship a fixed provider, so on a cluster that runs a different driver release the provider can reject every device:
+
+```text
+libibverbs: Warning: Driver bnxt_re does not support the kernel ABI of 8 (supports 1 to 1) for device /sys/class/infiniband/rdma0
+NCCL INFO NET/IB : No device found.
+NCCL INFO Using network Socket
+```
+
+RCCL then runs over TCP sockets. Training still completes, just much slower: on a node with eight Broadcom 400G NICs, a 256 MB all-reduce forced over the network ran at 3.3 GB/s this way, against 33 GB/s with a matching provider.
+
+The system hook `runner/helpers/hooks/02_setup_nic_userspace_driver.sh` fixes this before every launch, in every launcher mode. In the common case it needs no configuration.
+
+### What the hook does
+
+1. Finds RDMA devices by PCI vendor and checks whether the current provider can list and open them and create a queue pair on each. If it can, the hook does nothing. Only devices whose `/dev/infiniband/uverbs*` character device is available are checked.
+2. Reads the host driver version: the `bnxt_re` module version (`/sys/module/bnxt_re/version`), or, for AINIC, the bundle version that the ionic devices report in `fw_ver`.
+3. Looks for a provider of that version:
+
+   | NIC | Sources, in order |
+   |-----|-------------------|
+   | Broadcom | `PATH_TO_BNXT_TAR_PACKAGE`; `libbnxt_re-<version>.tar.gz`, then `bnxt-rocelib-<version>*.deb`, under `PRIMUS_NIC_DRIVER_SEARCH_PATH`, as plain files (an extracted `bcm_<release>` bundle) or inside bundle archives; the host's own `libbnxt_re` of that version. Without an exact match, the closest release found is tried. |
+   | AINIC | `libionic1_*.deb` for the container's distribution, inside a bundle named after the version under `PRIMUS_NIC_DRIVER_SEARCH_PATH`; otherwise the package from `https://repo.radeon.com/amdainic/pensando/ubuntu/<bundle>/`, checked against the repository's SHA256. |
+
+4. Builds the provider (Broadcom source tarball, about 10 seconds) or unpacks it (`.deb`), installs it, and probes again: every device must be listed and opened and accept a queue pair, libibverbs must have loaded the new file, and for AINIC `libionic.so.1` must resolve to that same file. A provider that fails is rolled back and the next source is tried.
+
+If no working provider is found, the job continues exactly as it would have without the hook: RCCL uses TCP sockets on that node. The hook's warnings are printed on every node, not only node 0. On a multi-node job this deserves attention: nodes that did install a provider use RDMA, and RCCL can hang when nodes use different transports. Set `PRIMUS_NIC_DRIVER_STRICT=1` to stop the launch on such a node instead. See [When RDMA still does not work](#when-rdma-still-does-not-work) for what each warning means.
+
+Where the provider is installed depends on where the hook runs:
+
+- **As root inside a container** (the `primus-cli container` and `primus-cli slurm` default): over the image's provider, in the system library paths. Only the container is changed, and it is discarded after the run.
+- **Anywhere else** (non-root containers, bare metal): into a private, user-owned prefix under `/tmp`, selected for this run through `RDMAV_DRIVERS` (plus `LD_LIBRARY_PATH` for AINIC). System files are never modified. In this mode the image's own Broadcom provider still prints the `does not support the kernel ABI` warning before the new provider claims the device; the warning is harmless.
+
+The hook never fails a launch on its own (unless `PRIMUS_NIC_DRIVER_STRICT=1`): if it cannot run or crashes, it prints a warning and the launch proceeds.
+
+### Making driver sources available
+
+`primus-cli container`, and therefore `primus-cli slurm` on every node, mounts these into the container read-only:
+
+- every existing entry of `PRIMUS_NIC_DRIVER_SEARCH_PATH` (default `/opt/broadcom:/opt/bnxt-bundles:/opt/ainic-bundles`), at the same path;
+- `PATH_TO_BNXT_TAR_PACKAGE`, at the same path;
+- the host's `libbnxt_re-rdmav*.so`, when the same directory has `libbnxt_re-<version>.so` for the loaded `bnxt_re` module, which is what Broadcom's installer leaves in `/usr/local/lib`.
+
+On a Broadcom cluster it is therefore enough to keep the NetXtreme-E Linux bundle that was used for the host install on every node, extracted or not — for example `/opt/broadcom/bcm_237.1.148.0a.tar.gz` — or to have installed `libbnxt_re` on the hosts from that bundle. Broadcom's downloads require accepting a license on Broadcom's site, so the hook never downloads `libbnxt_re` itself. AINIC clusters with access to `repo.radeon.com` need nothing.
+
+If you start the container yourself and run `primus-cli direct` inside it, mount the bundle directory and `/dev/infiniband` yourself, and set `PRIMUS_NIC_DRIVER_SEARCH_PATH` if the bundle is not under one of the default paths.
+
+### Controls
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `PRIMUS_NIC_USERSPACE_DRIVER` | `auto` | `auto` installs a provider only when the current one cannot use the NICs. `force` always installs the version matching the host, which also catches an AINIC version skew that still enumerates devices. `off` disables the hook. |
+| `PRIMUS_NIC_DRIVER_SEARCH_PATH` | `/opt/broadcom:/opt/bnxt-bundles:/opt/ainic-bundles` | Colon-separated directories or bundle files to search. |
+| `PRIMUS_NIC_DRIVER_STRICT` | `0` | `1` aborts the launch when RDMA is still unusable, instead of continuing over TCP sockets. |
+| `PRIMUS_AINIC_REPO_URL` | `https://repo.radeon.com/amdainic/pensando/ubuntu` | AINIC package repository, for example a mirror on air-gapped sites. `none` disables downloads. |
+| `PRIMUS_AINIC_BUNDLE_VERSION` | unset | AINIC bundle to install (for example `1.117.5-a-147`) when the host's `fw_ver` does not name it. |
+| `REBUILD_BNXT`, `PATH_TO_BNXT_TAR_PACKAGE` | unset | Still honored but no longer needed: `REBUILD_BNXT=1` forces a Broadcom reinstall, and the given tarball is tried first. |
+
+`PRIMUS_*` variables are forwarded into the container automatically.
+
+### Checking that it worked
+
+The hook's lines are tagged `[nic-driver]` and appear near the top of the launch log, before training starts. Node 0 prints all of them; every other node prints its warnings. Either of these lines means the provider is good:
+
+```text
+[nic-driver] Broadcom bnxt_re: the bnxt_re provider in this environment works with all 8 devices
+[nic-driver] Broadcom bnxt_re: installed bnxt_re 237.1.137.0 from /opt/broadcom/bcm_237.1.148.0a/drivers_linux/bnxt_rocelib/libbnxt_re-237.1.137.0.tar.gz (system install, 8 devices verified)
+```
+
+To inspect a node without changing anything, run the `status` command in the same environment the job uses. For a container, start it with the same image, devices and mounts:
+
+```bash
+docker run --rm --privileged --network host --device /dev/infiniband \
+  -v "$PWD:$PWD" -w "$PWD" -v /opt/broadcom:/opt/broadcom:ro \
+  rocm/primus:v26.7 python3 runner/helpers/nic_userspace_driver.py status
+```
+
+```text
+Broadcom bnxt_re: 8 devices, host driver 237.1.137.0
+  rdma0: fw 237.1.148.0, /dev/infiniband/uverbs1
+  ...
+  provider loaded from: /usr/lib/x86_64-linux-gnu/libibverbs/libbnxt_re-rdmav34.so
+  status: libibverbs lists 0 of 8 devices ("Driver bnxt_re does not support the kernel ABI of 8 (supports 1 to 1) for device /sys/class/infiniband/rdma0")
+```
+
+`status: OK` means the provider works; anything else is what the hook would fix. Finally, confirm that RCCL uses the NICs: run with `NCCL_DEBUG=INFO` and check for `Using network IB` and the absence of `NET/Socket`, as described in [AINIC bundle versions](./ainic-bundle-versions.md#confirm-the-fabric-is-actually-used).
+
+### When RDMA still does not work
+
+If the hook cannot install a working provider, it prints `RDMA is unusable on this node` with the reason in the `[nic-driver]` lines just above, and the job continues over TCP sockets on that node. Find the reason below.
+
+| Message in the `[nic-driver]` lines | Cause | What to do |
+|-------------------------------------|-------|------------|
+| `no libbnxt_re <version> found (searched ...)` | No Broadcom source of the host's driver version is visible. | Put the NetXtreme-E Linux bundle used for the host install — the one that contains `drivers_linux/bnxt_rocelib/libbnxt_re-<version>.tar.gz`, where `<version>` is `cat /sys/module/bnxt_re/version` on the host — under `/opt/broadcom` on every node. Alternatively set `PRIMUS_NIC_DRIVER_SEARCH_PATH` to where it is, or `PATH_TO_BNXT_TAR_PACKAGE` to the tarball. Your cluster administrator has this bundle. |
+| `trying bnxt_re <X> (host runs <Y>)` | Only a different Broadcom release was found. It is kept only if it passes every check. | Usually fine. For a supported setup, provide the bundle that matches the host driver. |
+| `cannot build libbnxt_re here, missing ...` | The image lacks the build tools (autotools, a C compiler, `libibverbs-dev`). The Primus images have them. | Use a Primus image, or make the `bnxt-rocelib` `.deb` from the same bundle available, or install `libbnxt_re` on the hosts from the bundle. |
+| `` `make` failed with exit code N (full log: /tmp/primus-libbnxt_re-….log) `` | The source tarball does not build in this image. | Read the log. Use the `.deb` from the bundle or a host-installed `libbnxt_re` instead. |
+| `package provides lib…-rdmavN.so but this libibverbs loads …` or `does not match this libibverbs` | A prebuilt provider was built against a different rdma-core than the image's. | Provide the source tarball, which is built against the image's own rdma-core. |
+| `<source> did not work (<reason>); rolled back` | A provider installed but failed a check, and the image's provider was restored. The next source is tried automatically. | If every source fails, the reasons say why. `kernel ABI` means that release cannot drive the host driver; provide the matching bundle. |
+| `N devices are in /sys but none of their /dev/infiniband/uverbs* character devices is accessible here` | The container was started without the RDMA devices or, on bare metal, your user cannot open them. | Add `--device /dev/infiniband` (`primus-cli container` does by default). On bare metal, ask your administrator for read/write access to `/dev/infiniband/uverbs*`. |
+| `<devices> not passed into this environment; checking the other N` | Only some RDMA devices were passed into the container. | Informational. Pass all of `/dev/infiniband` to use every NIC. |
+| `ibv_create_cq fails on <device>: Operation not permitted; RCCL needs locked memory` | The locked-memory limit is too low for RDMA. The provider itself is fine. | Run the container with `--ulimit memlock=-1` or `--privileged` (the Primus default). On bare metal, raise `ulimit -l`. |
+| `the ionic devices do not report fw_ver ...` | The AINIC bundle version cannot be read from the host. | Set `PRIMUS_AINIC_BUNDLE_VERSION` to the bundle installed on the hosts. |
+| `cannot fetch the package index: ...` | `repo.radeon.com` is unreachable (air-gapped site, proxy), or `fw_ver` is not a published bundle name. | Set `https_proxy`, or point `PRIMUS_AINIC_REPO_URL` at a mirror, or put the AINIC bundle tarball under `/opt/ainic-bundles` on every node. If the bundle name is the problem, set `PRIMUS_AINIC_BUNDLE_VERSION`. |
+| `.../Packages has no libionic1 package` | The bundle directory on the repository is an empty placeholder. | Use a published bundle; see [AINIC bundle versions](./ainic-bundle-versions.md#4-list-published-bundles). |
+| `dpkg-deb is required ...` or `cannot determine the OS codename ...` | The image is not Debian/Ubuntu-based, and AINIC packages are Ubuntu `.deb` files. | Use an Ubuntu-based image, or install `libionic` into the image yourself. |
+| `cannot check the RDMA userspace driver: cannot load libibverbs.so.1` | The image has no RDMA userspace at all. | Use an image with `libibverbs1` and `ibverbs-providers` (the Primus images have them). |
+| `PATH_TO_BNXT_TAR_PACKAGE=... is not readable here` | The path does not exist inside the container. | Check the path on the host. `primus-cli container` mounts it automatically; a container you start yourself needs `--volume`. |
+| `nodes that did get a matching provider will use RDMA, and RCCL can hang on mixed transports` | A multi-node job where this node has no working provider. | Fix this node as above, or set `PRIMUS_NIC_DRIVER_STRICT=1` so the job stops instead of hanging. |
+| `python3 >= 3.7 not found`, `the NIC userspace driver check exited with N`, or `setup crashed` | The hook itself could not run. The launch continued without it. | Run the `status` command above and report the problem (see below). |
+| `could not restore ... (backup kept in ...)` | A rollback failed, which should not happen. | Restart the container; the backup directory holds the original files. |
+
+If the table does not get you there, these always work:
+
+- **Name the source explicitly.** Set `PATH_TO_BNXT_TAR_PACKAGE=/path/to/libbnxt_re-<version>.tar.gz` (Broadcom) or `PRIMUS_AINIC_BUNDLE_VERSION=<bundle>` (AINIC).
+- **Turn the hook off.** `PRIMUS_NIC_USERSPACE_DRIVER=off` restores the old behavior: the image's provider is used as is.
+- **Install the provider yourself**, in a running container or in a derived image. For Broadcom, in an image with autotools, a C compiler and `libibverbs-dev`:
+
+  ```bash
+  tar xzf libbnxt_re-<version>.tar.gz && cd libbnxt_re-<version>
+  sh autogen.sh && ./configure && make -j && make install
+  # Replace the image's provider; keep the rdmavNN suffix the image already uses.
+  cp /usr/local/lib/libbnxt_re-rdmav34.so /usr/lib/x86_64-linux-gnu/libibverbs/libbnxt_re-rdmav34.so
+  ```
+
+  For AINIC, rebuild the image as described in [AINIC bundle versions](./ainic-bundle-versions.md). An image built this way only matches hosts that run that driver release.
+
+**Reporting a problem.** Include, from the failing node: the `[nic-driver]` lines of the launch log; the output of the `status` command run in the job's environment; the host driver version (`cat /sys/module/bnxt_re/version` for Broadcom, `cat /sys/class/infiniband/*/fw_ver` for AINIC); the image tag; and the build log if one is named.
+
+---
+
+## 6. Socket configuration
 
 CPU-side and fallback socket traffic uses interface selection:
 
@@ -124,7 +257,7 @@ CPU-side and fallback socket traffic uses interface selection:
 
 ---
 
-## 6. PCIe cross-NIC (PXN)
+## 7. PCIe cross-NIC (PXN)
 
 | Variable | Default in `base_env.sh` | Meaning |
 |----------|--------------------------|---------|
@@ -134,7 +267,7 @@ When **`NCCL_PXN_DISABLE=0`**, **PCIe cross-NIC** is enabled: GPUs might use NIC
 
 ---
 
-## 7. Network diagnostics
+## 8. Network diagnostics
 
 ### Preflight
 
@@ -170,7 +303,7 @@ Use for short, controlled runs; **TRACE** can be extremely verbose.
 
 ---
 
-## 8. Multi-node setup checklist
+## 9. Multi-node setup checklist
 
 - **ROCm version** matches across all nodes (driver and container image).
 - **`NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`** (or auto-detected `IP_INTERFACE`) identify the **same logical network** on every node.
@@ -179,16 +312,19 @@ Use for short, controlled runs; **TRACE** can be extremely verbose.
 - **`MASTER_ADDR`** resolves and is reachable from **all** nodes.
 - **`GPUS_PER_NODE`** matches physical GPUs per node.
 - **Containers** mount `/dev/kfd`, `/dev/dri`, and `/dev/infiniband` when using IB/RoCE/AINIC (see `runner/use_ainic.yaml`).
+- **Broadcom NICs:** the NetXtreme-E bundle used for the host driver is on every node under `PRIMUS_NIC_DRIVER_SEARCH_PATH`, or `libbnxt_re` is installed on the hosts (see [section 5](#5-rdma-userspace-driver-libibverbs-provider)).
 
 ---
 
-## 9. Troubleshooting network issues
+## 10. Troubleshooting network issues
 
 | Symptom | What to check |
 |---------|----------------|
 | **Timeout or hang** at init | `MASTER_ADDR` / `MASTER_PORT`, firewall, VPN, wrong `NCCL_SOCKET_IFNAME`, or inconsistent interface across nodes. |
 | **Slow** collectives | IB vs Ethernet path, `NCCL_NET_GDR_LEVEL`, fabric errors, or contention; compare **`benchmark rccl`** to baseline. |
 | **IB not detected** | `/dev/infiniband` missing, modules not loaded, or wrong container devices. |
+| **`does not support the kernel ABI`**, `NET/IB : No device found`, `Using network Socket` | The container's RDMA provider does not match the host driver, and the `[nic-driver]` lines at the top of the log say why the hook could not install one. See [When RDMA still does not work](#when-rdma-still-does-not-work). |
+| **`ibv_create_cq fails ... Operation not permitted`** in the `[nic-driver]` output | Locked memory is limited. Run the container with `--ulimit memlock=-1` or `--privileged` (the Primus default). |
 | **Wrong interface** | Restrict with `NCCL_SOCKET_IFNAME=^docker0,lo` (exclude loopback and Docker bridges). |
 | **GID / RoCE issues** | `NCCL_IB_GID_INDEX` vs site documentation; RoCE v2 settings (`NCCL_IB_ROCE_VERSION_NUM`). |
 
