@@ -305,7 +305,9 @@ def main():
         if state is not None:
             state.close()
         bucket.param_data = None
-        for param in params:
+        # Ordinary BF16 parameters also alias the raw symmetric allocation.
+        # Release every parameter view before destroying its private pool.
+        for param in mapping:
             param.data = torch.empty(0, device=device, dtype=torch.bfloat16)
         params.clear()
         mapping.clear()
