@@ -87,12 +87,7 @@ jobs:
       - name: Check backend config schema drift
         # No --warn-only: unknown keys parse but do nothing, so accepting one
         # would make a broken config look valid.
-        # `pipefail` is not on by default, and without it `tee` would report
-        # success for a check that failed -- the same silent pass this step
-        # exists to stop.
-        run: |
-          set -o pipefail
-          python tools/ci/check_config_schema.py | tee -a "$GITHUB_STEP_SUMMARY"
+        run: python tools/ci/check_config_schema.py --annotate --summary-file "$GITHUB_STEP_SUMMARY"
 
   # Flag PRs that introduce known-vulnerable dependencies. Warn-only during
   # burn-in; drop warn-only to turn it into a hard gate once the team is ready.
