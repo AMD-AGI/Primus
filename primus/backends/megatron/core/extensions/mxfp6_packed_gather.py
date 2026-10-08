@@ -27,8 +27,9 @@ reduction): the owner's pack emits one draw of its rows' codes per destination r
 dgrad code plane goes by all-to-all (the same bytes per receiver as a gather); its scales are draw-independent and
 gathered with the rest. Round to nearest, the draws are equal and the dgrad planes are gathered.
 
-With ``packed_param_gather_prob4`` the draws are made by the receivers instead: the owner packs one copy of the dgrad
-codes rounded down plus a plane of 4-bit round-up probabilities (same layout, a nibble per code), both are
+With ``packed_param_gather_prob_bits`` (4 or 2) the draws are made by the receivers instead: the owner packs one copy
+of the dgrad codes rounded down plus a plane of round-up probabilities (4 bits: a nibble per code in the codes' layout;
+2 bits: half the bytes), both are
 all-gathered with the forward planes, and after the gather each rank rounds every code up with its probability from
 its own seed (``receive``). The ranks' draws stay independent; nothing goes by all-to-all.
 """
@@ -38,7 +39,7 @@ import hashlib
 import torch
 
 _A2A = ("cc",)  # the dgrad copy's codes: one SR draw per destination (its scales do not depend on the draw)
-_PROB = "cp"  # prob4: the dgrad codes' round-up probabilities (a nibble per code, the codes' layout)
+_PROB = "cp"  # prob4: the dgrad codes' round-up probabilities (4 or 2 bits per code, the codes' element order)
 DENSITY = {  # plane -> elements per byte
     "W6": {"c0": 2, "c1": 4, "rs": 32, "cc": 2, "cs": 32},
     "W4": {"r4": 2, "rs": 32, "cc": 2, "cs": 32},
@@ -64,9 +65,10 @@ class PackedBucket:
         assert n == dp * self.S and all(n % d == 0 for d in DENSITY[self.kind].values())
         self.planes = {k: torch.empty(n // d, dtype=torch.uint8, device=dev) for k, d in DENSITY[self.kind].items()}
         # prob4: one dgrad copy (floor codes + probabilities) for every rank, rounded by each receiver
-        self.prob4 = bool(fmts.get("col_prob4", False))
+        self.prob_bits = int(fmts.get("col_prob_bits", 0))
+        self.prob4 = self.prob_bits != 0
         if self.prob4:
-            self.planes[_PROB] = torch.empty_like(self.planes["cc"])
+            self.planes[_PROB] = torch.empty(n // (8 // self.prob_bits), dtype=torch.uint8, device=dev)
         # per-destination draws of this rank's dgrad rows ([dp, shard]: row d goes to rank d), SR only
         self.sr = bool(fmts["col_sr"]) and not self.prob4
         self.send = {k: torch.empty_like(self.planes[k]) for k in _A2A} if self.sr else None
@@ -86,7 +88,7 @@ class PackedBucket:
             self._attach(p, s, R, K)
 
     def _view(self, plane, s, nel):
-        d = DENSITY[self.kind]["cc" if plane == _PROB else plane]
+        d = (8 // self.prob_bits) if plane == _PROB else DENSITY[self.kind][plane]
         return self.planes[plane][s // d : (s + nel) // d]
 
     def _attach(self, p, s, R, K):
