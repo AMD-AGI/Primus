@@ -126,6 +126,28 @@ class ExpertWeight:
         self.owner.wait()
         if self.owner.generation == 0:
             raise RuntimeError("MXFP4 expert weight consumed before parameter synchronization")
+        self.assemble_pair()
+        if self.owner.device.type == "cuda":
+            # Cache storage is produced on the preparation stream and consumed
+            # on the training stream, including backward. Protect its allocator
+            # lifetime independently of the gather workspace's lifetime.
+            stream = torch.cuda.current_stream(self.owner.device)
+            for tensor in (
+                self.pair.data.qdata,
+                self.pair.data.scale_inv,
+                self.pair.data_t.qdata,
+                self.pair.data_t.scale_inv,
+            ):
+                tensor.record_stream(stream)
+        if self.consumed_generation < 0 and self.owner.rank == 0:
+            _emit_comm_status(
+                f"[MXFP4-COMM] consumed expert cache shape={tuple(self.param.shape)} generation={self.owner.generation}"
+            )
+        self.consumed_generation = self.owner.generation
+        return self.pair
+
+    def assemble_pair(self):
+        """Caller must first establish dependency on the packed AllGather."""
         if self.pair is None:
             from primus_turbo.pytorch.core.mxfp4_comm import MXFP4StripGatherPlan, MXFP4WireLayout
 
@@ -153,12 +175,6 @@ class ExpertWeight:
                         )
                 components = self.layout.assemble_strip_shards(pieces)
             self.pair = self.layout.wrap_components(components)
-        if self.consumed_generation < 0 and self.owner.rank == 0:
-            _emit_comm_status(
-                f"[MXFP4-COMM] consumed expert cache shape={tuple(self.param.shape)} generation={self.owner.generation}"
-            )
-        self.consumed_generation = self.owner.generation
-        return self.pair
 
     def materialize(self):
         self.owner.materialize_bf16()
@@ -177,6 +193,7 @@ class PackedExpertBucket:
         self.weights = []
         self.device = bucket.param_data.device
         self.preparation_stream = _preparation_stream(self.device) if self.device.type == "cuda" else None
+        self.ready_event = torch.cuda.Event() if self.preparation_stream is not None else None
         if bucket.param_data.dtype != torch.bfloat16:
             raise ValueError("MXFP4 communication requires BF16 model parameter storage")
         numel = bucket.param_data.numel()
@@ -279,8 +296,8 @@ class PackedExpertBucket:
         # Keep the boundary wait, quantizer, and packing off the caller stream
         # so that prefetch does not serialize that layer behind preparation.
         # The dependency includes all preceding optimizer BF16 writes. NCCL
-        # records the preparation stream when launching the final AllGather;
-        # its Work.wait() subsequently makes the consumer stream wait for both.
+        # records the preparation stream when launching the final AllGather.
+        # A completion event also covers cache assembly and BF16 restoration.
         self.preparation_stream.wait_stream(torch.cuda.current_stream(self.device))
         with torch.cuda.stream(self.preparation_stream):
             return self._dispatch()
@@ -309,13 +326,24 @@ class PackedExpertBucket:
             self.packed.local[offset : offset + layout.nbytes].copy_(payload)
         self.work = self.packed.launch()
         self.generation += 1
+        if self.ready_event is not None:
+            # Complete cache preparation while the preceding layer computes.
+            # The consumer waits for this event, not just for the transport.
+            self.work.wait()
+            self._restore_bf16_ranges(self.packed, self.ordinary_restore_plan)
+            for weight in self.weights:
+                weight.assemble_pair()
+            self.ready_event.record(self.preparation_stream)
         return self
 
     @torch.no_grad()
     def wait(self):
         if self.work is not None:
             self.work.wait()
-            self._restore_bf16_ranges(self.packed, self.ordinary_restore_plan)
+            if self.ready_event is not None:
+                torch.cuda.current_stream(self.device).wait_event(self.ready_event)
+            else:
+                self._restore_bf16_ranges(self.packed, self.ordinary_restore_plan)
             self.work = None
 
     @torch.no_grad()
