@@ -214,7 +214,14 @@ def eager_initialize_runtime() -> bool:
 
     if not dist.is_initialized():
         return False
-    device = torch.device("cuda", torch.cuda.current_device())
+    # This runs before Megatron's initialize sets each rank's device, so the
+    # current device is still cuda:0 on every local rank but the first. The probe
+    # would then sit on another rank's GPU, and with the register-allocator hook
+    # on, ProcessGroupNCCL asserts "Mismatch between CUDA memory segment device
+    # and current device". Select the rank's own device first, as the eager
+    # reservation in patch_rccl_sdma_param_all_gather already does.
+    device = torch.device("cuda", int(os.getenv("LOCAL_RANK", torch.cuda.current_device())))
+    torch.cuda.set_device(device)
     world_probe = torch.zeros(1, dtype=torch.int32, device=device)
     dist.broadcast(world_probe, src=0)
     prepare_direct_param_buffer_pool(dist.group.WORLD, device)
