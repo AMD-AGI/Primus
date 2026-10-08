@@ -80,43 +80,6 @@ accuracy without raising an error. The safe fence costs about 2.5% of step time 
 For convergence or production runs, set it to `"1"` (or delete the line) in the
 recipe's `env:` block. A host `export` does not override a recipe's `env:` value.
 
-<!-- NEEDS CONFIRMATION: carried over from v26.7. v26.8 moves hipBLASLt from
-     1.4.1-8d1ae90e to 1.4.1-39d8d603 and ROCm from 10.0.0 to 10.1.0, which may
-     change the heuristic ranking, but nothing in the v26.7..v26.8 range addresses
-     it and it has not been re-tested on MI355X. Confirm or drop before publishing. -->
-**Mamba 370M on MI355X fails in the backward pass.** Training aborts with
-`HIPBLAS_STATUS_INTERNAL_ERROR (6)` from inside `hipblasLtMatmul`, on the weight
-gradient GEMM (`NT`, M=1024, N=4384, K=65536, bf16).
-
-Transformer Engine does not pick the kernel itself: it asks hipBLASLt for a ranked
-list of solutions and launches the first entry. On MI355X the default heuristic ranks
-solution `12103` best for this shape, and that solution then fails at launch.
-
-**Workaround — offset the pick by one.** `TE_HIPBLASLT_ALGO_SELECTION=1` makes TE take
-the second heuristic result (`12082`), which is valid for the same shape, layout and
-dtypes and completes the backward pass. Measured throughput with the workaround:
-87109.8 tokens/s/GPU.
-
-```bash
-export TE_HIPBLASLT_ALGO_SELECTION=1
-
-./runner/primus-cli direct -- train pretrain \
-  --config examples/megatron/configs/MI355X/mamba_370M-pretrain.yaml
-
-# drop the override again when you move off this model
-unset TE_HIPBLASLT_ALGO_SELECTION
-```
-
-> In container mode, export alone is not enough: `TE_*` is not in the
-> `container.options.env` allowlist in `runner/.primus.yaml`, so pass it explicitly
-> with `--env TE_HIPBLASLT_ALGO_SELECTION=1` or add it to that list. See
-> [Environment variables](../03-configuration-reference/environment-variables.md).
-
-**If you are still on v26.6, upgrade.** On v26.6, Primus-Turbo's non-fused
-weight-gradient path accumulated the gradient only on the first microbatch, so any
-run using gradient accumulation on that path trained on partial gradients. Fixed in
-v26.7 by [#1046](https://github.com/AMD-AGI/Primus/pull/1046).
-
 ### Registry change
 
 The `rocm/pytorch-training` Docker Hub registry is deprecated. Use `rocm/primus` for the latest ROCm PyTorch training images, which cover all the PyTorch training ecosystem frameworks (TorchTitan, TorchTune, Megatron-LM, and others).
