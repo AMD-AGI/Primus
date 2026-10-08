@@ -33,6 +33,27 @@ def load(name, path):
     return module
 
 
+def check_shared_tile_wire(wire, device, rank):
+    """Validate compact reconstruction against the original dual quantizer."""
+    shape = (3, 96, 160)  # Both orientations require kernel padding.
+    coordinates = torch.arange(torch.Size(shape).numel(), device=device, dtype=torch.float32)
+    weight = (torch.sin(coordinates * 0.037) * torch.exp2((coordinates // 1024) % 31 - 15)).to(torch.bfloat16)
+    weight[::97] = -0.0
+    weight = weight.view(shape)
+    for mode in (0, 1, 2):
+        reference = wire.MXFP4WireLayout(shape, mode)
+        expected = reference.assemble(reference.quantize(weight).unsqueeze(0))
+        compact = wire.MXFP4WireLayout(shape, mode, shared_2d=True)
+        payload = compact.quantize(weight)
+        plan = wire.MXFP4StripGatherPlan(
+            compact, [(0, shape[0] * shape[1] // 32)], [0], payload.numel(), device
+        )
+        for actual, full_dual in zip(plan.assemble(payload), expected):
+            torch.testing.assert_close(actual, full_dual, rtol=0, atol=0)
+    if rank == 0:
+        print("[MXFP4-COMM-PREFLIGHT] shared_tile_padding_scale_modes=PASS", flush=True)
+
+
 def main():
     faulthandler.enable()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -105,6 +126,8 @@ def main():
             data=lambda: config,
             mxfp4_scaling=lambda: True,
         )
+        if os.getenv("MEGATRON_MXFP4_PARAM_GATHER_FORMAT", "dual") == "shared_2d":
+            check_shared_tile_wire(wire, device, rank)
 
     # Non-aligned offsets guarantee strips cross rank boundaries, including an
     # expert boundary. Ordinary BF16 parameters share the same bucket.
