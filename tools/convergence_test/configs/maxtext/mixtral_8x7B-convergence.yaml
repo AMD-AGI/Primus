@@ -1,0 +1,96 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:mixtral_8x7B-maxtext-convergence}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Mixtral-8x7B BF16 convergence test on FineWeb-Edu, MaxText backend, tokenised
+# with the Mixtral 32k SentencePiece vocab.
+#
+#   tools/convergence_test/run_convergence_test.sh --model maxtext/mixtral_8x7B
+#
+# Same tokens and schedule as configs/megatron/mixtral_8x7B_v0.1: 300 steps x
+# 128 sequences x 4096 = 157M token slots, lr 1.5e-4 cosine to 1.5e-5 after 20
+# warmup steps.
+#
+# Read the MoE block below before changing any routing setting.
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+    model: mixtral_8x7B.yaml
+    overrides:
+      run_name: mixtral_8x7B-maxtext-convergence
+      base_output_directory: ./output
+      enable_tensorboard: true
+      profiler: ""
+
+      steps: 300
+      per_device_batch_size: 16
+      max_target_length: 4096
+
+      learning_rate: 1.5e-4
+      lr_schedule_type: cosine
+      learning_rate_final_fraction: 0.1
+      # 20 of 300 steps
+      warmup_steps_fraction: 0.0667
+      learning_rate_schedule_steps: -1
+      adam_b1: 0.9
+      adam_b2: 0.95
+      adam_eps: 1.0e-8
+      adam_weight_decay: 0.1
+      gradient_clipping_threshold: 1.0
+
+      # fp32 master weights and Adam moments; see the llama3.2_1B config.
+      weight_dtype: float32
+      dtype: bfloat16
+
+      # ---------------------------------------------------------------------
+      # MoE. These are the routing kernels every Primus MaxText MoE config uses
+      # on AMD GPUs (dense dispatch with a token capacity), so they are what this
+      # test exercises. Two settings differ from the perf configs:
+      #
+      #   load_balance_loss_weight defaults to 0 in MaxText, so the perf configs
+      #   train the router with no balancing term at all. With real data the
+      #   experts can collapse; 0.01 matches the Megatron recipe.
+      #
+      #   capacity_factor 1.25 instead of 1: tokens beyond an expert's capacity
+      #   are dropped, and an untrained router is unbalanced.
+      # ---------------------------------------------------------------------
+      sparse_matmul: false
+      megablox: false
+      capacity_factor: 1.25
+      load_balance_loss_weight: 0.01
+
+      # parallel: experts across the node, data parallel across nodes
+      ici_fsdp_parallelism: 1
+      ici_data_parallelism: 1
+      ici_expert_parallelism: -1
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+      remat_policy: save_dot_with_context_except_mlp
+
+      # data
+      dataset_type: grain
+      grain_file_type: parquet
+      grain_train_files: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-mixtral-8x7b-v0.1-maxtext-4096}/train-*.parquet
+      grain_eval_files: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-mixtral-8x7b-v0.1-maxtext-4096}/valid-*.parquet
+      train_data_columns: ["tokens"]
+      eval_data_columns: ["tokens"]
+      tokenize_train_data: false
+      tokenize_eval_data: false
+      tokenizer_type: huggingface
+      tokenizer_path: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-mixtral-8x7b-v0.1-maxtext-4096}/tokenizer
+      packing: true
+      grain_worker_count: 4
+      enable_data_shuffling: true
+      data_shuffle_seed: 0
+      init_weights_seed: 0
+
+      # validation loss every 25 steps over 4 x 128 x 4096 = 2.1M tokens
+      eval_interval: 25
+      eval_steps: 4
+
+      # ckpt
+      enable_checkpointing: false
+      async_checkpointing: false

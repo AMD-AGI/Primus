@@ -7,6 +7,7 @@
 from typing import Optional, Tuple
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.bench_harness.base import MLP
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import (
     TrainingConfig,
@@ -98,9 +99,11 @@ class DenseMLPProfiler(BaseModuleProfiler):
             if self._gemm_backend is not None:
                 self._cached_results = self._get_simulated_results(batch_size, seq_len)
             else:
+                ishapes, fkwargs = self.require_bench_inputs(MLP, self.module, batch_size, seq_len)
                 self._cached_results = benchmark_layer(
                     self.module,
-                    [(seq_len, batch_size, self.config.model_config.hidden_size)],
+                    ishapes,
+                    forward_kwargs=fkwargs,
                 )
             self._cache_key = cache_key
         return self._cached_results
