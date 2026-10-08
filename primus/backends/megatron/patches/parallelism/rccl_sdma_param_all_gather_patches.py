@@ -71,7 +71,16 @@ def make_ddp_init(original):
 
                     def ensure_ready(group=group):
                         if group.ddp_config.overlap_param_gather:
-                            group.finish_param_sync(skip_next_bucket_dispatch=True)
+                            # A fused MLP bypasses the Linear forward hook. Preserve
+                            # that hook's next-bucket prefetch policy as well as
+                            # its readiness wait, or every gather becomes demand
+                            # driven and communication loses compute overlap.
+                            group.finish_param_sync(
+                                skip_next_bucket_dispatch=(
+                                    self.ddp_config.align_param_gather
+                                    or self.overlap_param_gather_with_optimizer_step
+                                )
+                            )
                         elif not group.param_gather_dispatched:
                             group.start_param_sync(force_sync=True)
 
