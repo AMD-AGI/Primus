@@ -925,8 +925,8 @@ class MXFP6LinearFunction(torch.autograd.Function):
 
         # Trailing Nones cover backward_is_fp8, fp8_bwd_dtype, fp8_gran_value,
         # fp8_backend_value, fuse_wgrad_accum, grad_enabled, weight_is_fp4.
-        # Trailing Nones: the seven flag inputs, then fwd_fp4.
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None
+        # Trailing Nones: the seven flag inputs, then fwd_fp4 and defer.
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None, None
 
 
 def _resolve_weight_is_fp4(config) -> bool:
@@ -1528,7 +1528,8 @@ class MXFP6MLPFunction(torch.autograd.Function):
             None,
             None,
             None,
-        )  # + fwd_fp4, _fc1, bf16_fc1
+            None,
+        )  # + fwd_fp4, _fc1, bf16_fc1, defer_fc2
 
 
 def _bf16_fc1_cols(x, w1):
