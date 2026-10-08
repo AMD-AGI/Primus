@@ -255,7 +255,11 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
         else:
             dtype = None
 
-        device = torch.cuda.current_device()
+        # This runs in __init__, before Megatron's initialize selects each rank's device, so the
+        # current device is still cuda:0 on every local rank. Use the rank's own device: on cuda:0
+        # the encodings would be copied across GPUs every step, and with the RCCL tensor-register
+        # allocator hook on, ProcessGroupNCCL rejects the foreign segment at communicator init.
+        device = torch.device("cuda", int(os.getenv("LOCAL_RANK", torch.cuda.current_device())))
         self.empty_t5_encodings = self.empty_t5_encodings.to(device=device, dtype=dtype)
         self.empty_clip_encodings = self.empty_clip_encodings.to(device=device, dtype=dtype)
         log_rank_0(
