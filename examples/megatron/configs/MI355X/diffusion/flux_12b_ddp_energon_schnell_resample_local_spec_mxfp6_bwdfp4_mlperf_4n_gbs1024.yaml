@@ -157,6 +157,8 @@ modules:
       mxfp6_gate_mul_pack_bias: true
       mxfp6_ln_bwd_ns16: true
       mxfp6_adaln_wgrad_main_grad: true
+      # The AdaLN modulation GEMMs (forward, dgrad, wgrad) on aiter's adaln_gemm kernels where it has the shape.
+      mxfp6_adaln_gemm_backend: aiter
       # GEMM operands in the tilescale layout: the MX GEMMs run on aiter's tilescale kernels where one exists for
       # the shape, on its tile-blob kernels otherwise.
       mxfp6_gemm_layout: tilescale
@@ -166,6 +168,9 @@ modules:
       mxfp6_bwd_fp4_wgrad: true
       mxfp6_bwd_fp4_sr: true
       mxfp6_fp4_sr_actw: true
+      # The attention out-projections' A4W4 dgrad also emits the attention backward's softmax_d (rowsum(dO * O)),
+      # which the attention backward then takes instead of computing it.
+      mxfp6_dgrad_emit_attn_delta: true
 
       flat_grad_clip: true
       cuda_data_prefetch: true

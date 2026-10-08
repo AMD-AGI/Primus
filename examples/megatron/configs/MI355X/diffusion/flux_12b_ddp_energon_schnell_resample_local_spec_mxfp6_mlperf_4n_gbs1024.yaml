@@ -156,6 +156,8 @@ modules:
       mxfp6_gate_mul_pack_bias: true
       mxfp6_ln_bwd_ns16: true
       mxfp6_adaln_wgrad_main_grad: true
+      # The AdaLN modulation GEMMs (forward, dgrad, wgrad) on aiter's adaln_gemm kernels where it has the shape.
+      mxfp6_adaln_gemm_backend: aiter
       # GEMM operands in the tilescale layout: the MX GEMMs run on aiter's tilescale kernels where one exists for
       # the shape, on its tile-blob kernels otherwise.
       mxfp6_gemm_layout: tilescale
