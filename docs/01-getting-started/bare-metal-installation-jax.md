@@ -258,7 +258,7 @@ scripts use the same pins; change one and you may have to change the others.
 | TransformerEngine (JAX)           | `transformer_engine_rocm_jax 2.17.0+rocm10.0.0`                | Prebuilt wheel needs **glibc ≥ 2.28** (v26.7 lowered this from 2.38); else `te_source`. |
 | TensorFlow (CPU, from source)     | ROCm `tensorflow-upstream` branch `upstream-v2.21.0`                    | Built with bazelisk `v1.29.0`. Needs host `clang-18`/`lld-18`. |
 | RCCL (from source)                | `rocm-systems` @ `9e5e4084a4b8e1e86551b0eb054725c62354a926`            | Installed into `$ROCM_PATH/lib`. Needs host `clang-18`/`lld-18`. |
-| MaxText (ROCm fork)               | `release/v26.7`                                                         | ROCm MaxText fork matching the image. |
+| MaxText (ROCm fork)               | `release/v26.8`                                                         | ROCm MaxText fork matching the image. |
 | Primus                            | `main`                                                                  | Includes the MaxText `initialize()`/`run()` compatibility shim. |
 | scipy                             | `1.16`                                                                  | |
 | Build front-end                   | `cmake 3.31.6`, `ninja 1.11.1.3`, `wheel 0.46.2`, `packaging 25.0`, `setuptools 80.10.2`, `msgpack 1.2.1` | Plus `uv` (used by MaxText's dep install). |
@@ -595,14 +595,14 @@ image runs MaxText's `src/dependencies/scripts/setup.sh`; on bare metal we run
 the **Python portion** of that script directly (the `apt`/`gcsfuse` steps are the
 one-time root action from Section 2, and the venv already exists).
 
-> **MaxText `release/v26.7`.** Override `MAXTEXT_BRANCH` only if you deliberately
+> **MaxText `release/v26.8`.** Override `MAXTEXT_BRANCH` only if you deliberately
 > need to pin a different MaxText release.
 
 ```bash
 cd ~/primus-jax-env   # or your $WORKSPACE_DIR
 git clone https://github.com/ROCm/maxtext.git
 cd maxtext
-git checkout release/v26.7   # matches the v26.7 image
+git checkout release/v26.8   # matches the v26.8 image
 
 # MaxText installs its deps with uv. The default (tpu) requirements set contains
 # the framework-agnostic Python deps WITHOUT any CUDA packages, which is what the
@@ -683,7 +683,7 @@ the clone and just run the `git submodule update`, `pip uninstall`, and
 ### 3.11 Build RCCL from source (optional, into the ROCm tree)
 
 > **Not needed for v26.7.** The ROCm 10.0.0 pip SDK ships RCCL 2.30.4, which is
-> what `rocm/jax-training:maxtext-v26.7` uses, so skip this section unless you are
+> what `rocm/jax-training:maxtext-v26.8` uses, so skip this section unless you are
 > reproducing v26.6 or your fabric needs the `rocm-systems` net-ib fix
 > (ROCM-27881).
 

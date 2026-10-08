@@ -8,13 +8,13 @@ MaxText for ROCm is a specialized fork of upstream MaxText, designed to enable t
 
 AMD provides a ready-to-use Docker image for AMD Instinct MI300X and MI355X GPUs containing essential components, including JAX, XLA, ROCm libraries, and MaxText utilities.
 
-For the full software stack of this image (ROCm, JAX, Transformer Engine, hipBLASLt, RCCL, TensorFlow, and the rest), see [Release notes → `rocm/jax-training:maxtext-v26.7`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v267). The release notes are the single source of truth for image contents.
+For the full software stack of this image (ROCm, JAX, Transformer Engine, hipBLASLt, RCCL, TensorFlow, and the rest), see [Release notes → `rocm/jax-training:maxtext-v26.8`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v268). The release notes are the single source of truth for image contents.
 
-> **Primus source:** use the `release/v26.7` branch rather than the Primus copy baked into the image — see [Release notes → Primus source for v26.7](../01-getting-started/release-notes.md#primus-source-for-v267) for why.
+> **Primus source:** use the `release/v26.8` branch rather than the Primus copy baked into the image — see [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268) for why.
 
 ---
 
-## Important notes for v26.7
+## Important notes for v26.8
 
 Read this section before starting a training run. It collects the settings this release requires, the architecture-specific workarounds, and the known issues. The contents change from release to release, so re-read it when you move to a new image tag.
 
@@ -174,13 +174,13 @@ JAX MaxText is integrated into [Primus](https://github.com/AMD-AGI/Primus), whic
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.7
+git checkout release/v26.8
 git submodule update --init third_party/maxtext/
 ```
 
 That is all the setup required. `primus-cli container` starts the image for you, mounts this checkout into it at the same path, and runs the training inside — so this is the code that executes, and the `/workspace/Primus` copy baked into the image is not used. It also forwards environment variables you export on the host; the forwarded list is `container.options.env` in `runner/.primus.yaml`.
 
-> **Pass `--image` for MaxText.** The default image in `runner/.primus.yaml` is `rocm/primus`, which is the PyTorch image. MaxText runs need `--image rocm/jax-training:maxtext-v26.7` in container mode, or the image set in your Slurm config file.
+> **Pass `--image` for MaxText.** The default image in `runner/.primus.yaml` is `rocm/primus`, which is the PyTorch image. MaxText runs need `--image rocm/jax-training:maxtext-v26.8` in container mode, or the image set in your Slurm config file.
 
 For detailed usage of `primus-cli`, refer to the [CLI reference](./cli-reference.md).
 
@@ -189,7 +189,7 @@ The examples below target MI355X. Primus automatically sets `RCCL_WARP_SPEED_AUT
 **Container mode (recommended)**—run from the host; `primus-cli` starts the container:
 
 ```bash
-./runner/primus-cli container --image rocm/jax-training:maxtext-v26.7 \
+./runner/primus-cli container --image rocm/jax-training:maxtext-v26.8 \
   -- train pretrain --config examples/maxtext/configs/MI355X/llama2_7B-bf16-pretrain.yaml
 ```
 
@@ -217,7 +217,7 @@ To run a different model or GPU architecture, swap the `--config` path. Configur
 Use the following command to pull the Docker image from Docker Hub:
 
 ```bash
-docker pull rocm/jax-training:maxtext-v26.7
+docker pull rocm/jax-training:maxtext-v26.8
 ```
 
 ### Single-node training
@@ -247,7 +247,7 @@ docker run -it \
   -v $HF_HOME:/hf_cache -e HF_HOME=/hf_cache \
   -e HF_TOKEN=$HF_TOKEN \
   --shm-size 64G --name training_env \
-  rocm/jax-training:maxtext-v26.7
+  rocm/jax-training:maxtext-v26.8
 ```
 
 Execute the `training_env` container (optional if you are already in the container):
@@ -400,7 +400,7 @@ Profile output will be written under the `base_output_directory` specified in th
 #!/bin/bash
 set -e
 
-IMAGE="$1"       # Docker image, e.g. rocm/jax-training:maxtext-v26.7
+IMAGE="$1"       # Docker image, e.g. rocm/jax-training:maxtext-v26.8
 TAG="$2"         # Short tag for output folder, e.g. v26.6_llama2_7b
 PROFILE_DIR="/path/to/profiles/${TAG}"
 

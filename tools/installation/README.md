@@ -2,7 +2,7 @@
 
 Reproduces the Primus **v26.7** training image in a Python virtual environment on
 a bare-metal host. Derived from
-[`.github/workflows/docker-release/Dockerfile.primus-v26.7`](../../.github/workflows/docker-release/Dockerfile.primus-v26.7),
+[`.github/workflows/docker-release/Dockerfile.primus-v26.8`](../../.github/workflows/docker-release/Dockerfile.primus-v26.8),
 using the same package pins and commits, adapted for the constraints of a machine
 where we have no root.
 
@@ -177,7 +177,7 @@ The order matters for `te`: see the note on the staging index below.
   and installs `nvidia-cuda-nvdisasm==13.3.73`.
 - **Updated pins:** torch `2.12.0+rocm10.0.0` (v26.7 moves to the ROCm 10.0.0 pip
   SDK), TE `2.17.0+rocm10.0.0` from the devreleases index, transformers `5.10.0`,
-  wandb `0.28.2`, Primus `2631e68d…` (the `release/v26.7` tip, also the `v26.7.0`
+  wandb `0.28.2`, Primus `2631e68d…` (the `release/v26.8` tip, also the `v26.7.0`
   tag), Primus-Turbo `6d5ff979…`.
   CVE pins: `cryptography==50.0.0`, `mlflow==3.15.1` (`--no-deps`).
 - **`ck_jit_compile.sh` no longer needs patching.** TE 2.17 ships its own tolerance

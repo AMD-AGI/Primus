@@ -1,7 +1,7 @@
-# Primus JAX / MaxText environment in a venv (no docker, no sudo) — v26.7
+# Primus JAX / MaxText environment in a venv (no docker, no sudo) — v26.8
 
 Reproduces the Primus **v26.7 JAX training Dockerfile**
-([`Dockerfile.jax-v26.7`](../../.github/workflows/docker-release/Dockerfile.jax-v26.7))
+([`Dockerfile.jax-v26.8`](../../.github/workflows/docker-release/Dockerfile.jax-v26.8))
 in a Python virtual environment. Same package pins as the Dockerfile, adapted for
 a bare-metal host with no root and no containers.
 
@@ -81,7 +81,7 @@ cd "$WORKSPACE_DIR/Primus"
 `env.sh` exports `MAXTEXT_PATH=$MAXTEXT_DIR`, so Primus runs the same MaxText
 checkout we installed the dependencies for.
 
-## Stages (default order, v26.7)
+## Stages (default order, v26.8)
 
 `venv` → `rocm` → `maxtext` → `tf_source` → `jax` → `te` → `primus`
 → `jaxreqs` → `manifest`
@@ -89,7 +89,7 @@ checkout we installed the dependencies for.
 - **venv** — create the venv (Python ≥ 3.12) and bootstrap `cmake`/`ninja`/`uv`.
 - **rocm** — pip-install TheRock `rocm-sdk-*` 10.0.0 (core/devel/libraries +
   per-arch device wheels) and run `rocm-sdk init`.
-- **maxtext** — clone ROCm/MaxText (`release/v26.7`) and install its deps (the
+- **maxtext** — clone ROCm/MaxText (`release/v26.8`) and install its deps (the
   Python part of MaxText's `setup.sh`) + the editable MaxText package.
 - **tf_source** — build **tensorflow-cpu 2.21 from source** (bazel, ~30–60 min);
   fixes the ROCm-vs-TF LLVM symbol clash (SIGSEGV) and drops bundled NCCL.

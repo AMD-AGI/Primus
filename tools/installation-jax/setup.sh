@@ -30,7 +30,7 @@ die()  { echo -e "\033[1;31m[setup][ERROR] $*\033[0m" >&2; exit 1; }
 # shellcheck disable=SC1091
 reload_env() { source "$SCRIPT_DIR/env.sh"; }
 
-# ---- pinned versions / commits (from Dockerfile.jax-v26.7) ----
+# ---- pinned versions / commits (from Dockerfile.jax-v26.8) ----
 # ROCm: TheRock pip wheels. v26.7 moves from the 7.x line to ROCm 10.0.0.
 # See: https://stable.repo.amd.com/rocm/core/whl-next/
 # v26.7 serves the ROCm SDK from stable.repo.amd.com; repo.amd.com/whl-multi-arch
@@ -73,7 +73,7 @@ RCCL_COMMIT="9e5e4084a4b8e1e86551b0eb054725c62354a926"
 
 # MaxText (ROCm fork)
 MAXTEXT_REPO="https://github.com/ROCm/maxtext.git"
-MAXTEXT_BRANCH="${MAXTEXT_BRANCH:-release/v26.7}"
+MAXTEXT_BRANCH="${MAXTEXT_BRANCH:-release/v26.8}"
 # Which MaxText requirements set to install. The reference Docker image runs
 # MaxText's setup.sh with defaults (DEVICE=tpu), which — on ROCm — pulls the
 # framework-agnostic deps WITHOUT any CUDA packages. Override to `cuda12` only
@@ -468,7 +468,7 @@ stage_manifest() {
     log "Writing manifest to $WORKSPACE_DIR/.manifest"
     mkdir -p "$WORKSPACE_DIR/.manifest"
     env > "$WORKSPACE_DIR/.manifest/env.txt"
-    echo "Dockerfile.jax-v26.7" > "$WORKSPACE_DIR/.manifest/derived_from"
+    echo "Dockerfile.jax-v26.8" > "$WORKSPACE_DIR/.manifest/derived_from"
     $PIP list > "$WORKSPACE_DIR/.manifest/requirements.txt"
     cp "$SCRIPT_DIR/env.sh" "$WORKSPACE_DIR/.manifest/env.sh"
 }
