@@ -18,6 +18,7 @@ Patches included:
   - aiter_deepbind_patches: Install the aiter mha RTLD_DEEPBIND isolation hook (gfx942/gfx950)
     so the Turbo attention backward binds the pinned aiter::mha_bwd, not TE's stale libmha
   - dense_mlp_fp4_patches: Route dense SwiGLU MLP through FlyDSL G=1 grouped MXFP4 GLU/dGLU
+  - qk_rmsnorm_rope_patches: Fuse GPT-OSS packed QKV, Q/K RMSNorm and RoPE with FlyDSL
 
 Patch modules are discovered and imported automatically by
 ``primus.backends.megatron.patches``; no explicit imports are required here.

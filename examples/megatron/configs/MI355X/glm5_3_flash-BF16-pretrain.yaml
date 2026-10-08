@@ -1,0 +1,93 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:glm5_3_flash-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# GLM-5.3-Flash BF16 pretraining / fine-tuning on MI355X.
+#   model: primus/configs/models/megatron/glm5_3_flash.yaml (45 layers) or
+#          glm5_3_flash_8L.yaml (first GLM5_NUM_LAYERS layers, smoke tests).
+#   Initial weights: GLM5_HF_LOAD=<HF checkpoint dir> loads the released
+#   checkpoint online (any TP / EP / PP); see patches/glm5_next_patches.py.
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: ${PRIMUS_MODEL:glm5_3_flash}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_GLM5_3_Flash"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # hyper parameters
+      train_iters: ${TRAIN_ITERS:20}
+      micro_batch_size: ${MBS:1}
+      global_batch_size: ${GBS:16}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      sequence_parallel: ${PRIMUS_SP:false}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: ${PRIMUS_MOCK_DATA:true}
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+
+      # HF checkpoint (online load) and the forward-only logprob eval mode
+      glm5_hf_load_path: ${GLM5_HF_LOAD:null}
+      glm5_logprob_eval_input: ${GLM5_LOGPROB_EVAL_INPUT:null}
+      glm5_logprob_eval_output: ${GLM5_LOGPROB_EVAL_OUTPUT:null}
+
+      # GLM-5.3 kernels: fla chunk_kda for KDA, triton kpool indexer + sparse MLA for DSA
+      kda_backend: fla
+      dsa_backend: ${GLM5_DSA_BACKEND:triton}
+
+      # optimizer
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: false
+
+      # recompute
+      recompute_granularity: ${RECOMPUTE_GRANULARITY:full}
+      recompute_method: block
+      recompute_num_layers: ${PRIMUS_RECOMPUTE_LAYERS:0}
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # turbo: off by default (plain TE GEMMs / grouped GEMM, alltoall dispatcher)
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:false}
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+      use_turbo_deepep: false
+      moe_router_dtype: fp32
+      moe_permute_fusion: true
+
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

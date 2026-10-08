@@ -118,7 +118,9 @@ def _make_k3_get_tensor_shapes(original_fn, seq_mult: int):
 
     def patched_get_tensor_shapes(*args, **kwargs):
         shapes = original_fn(*args, **kwargs)
-        return [(s * seq_mult, b, h) for (s, b, h) in shapes]
+        # With config.variable_seq_lengths Megatron returns [()] and the sender transmits
+        # the real (already folded) shape at runtime, so there is nothing to scale.
+        return [shape if len(shape) == 0 else (shape[0] * seq_mult, *shape[1:]) for shape in shapes]
 
     patched_get_tensor_shapes.__wrapped__ = original_fn
     patched_get_tensor_shapes._k3_pp_seq_mult = seq_mult
