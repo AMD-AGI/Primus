@@ -163,6 +163,9 @@ class Mxfp6Gates:
     # Which of the joint stream MLPs' GEMMs fwd_fp4_joint_mlp moves to the MXFP4 forward: "all", or a comma list of
     # img_fc1, img_fc2, txt_fc1, txt_fc2 (img = the image stream's `mlp`, txt = the text stream's `context_mlp`).
     fwd_fp4_joint_mlp_parts: str = "all"
+    # MXFP4 forward for the joint blocks' text-stream attention out-projection (added_linear_proj); same packs and
+    # requirements as fwd_fp4_joint_mlp.
+    fwd_fp4_joint_txt_proj: bool = False
     # Forward GEMMs as A6W4 on the tilescale layout (aiter `gemm_a6w4_tilescale`): MXFP6 activations times MXFP4
     # weights (H32, RCEIL, round to nearest; K128-blocked codes), wherever aiter has the kernel for the
     # (M, N, K, bias). Columns (the backward's operands) are unchanged. GEMMs on the MXFP4 forward (fwd_fp4_*) keep
@@ -270,7 +273,8 @@ class Mxfp6Gates:
         if self.fp4_sr_actw and self.gemm_layout != "tilescale":
             raise ValueError("mxfp6_fp4_sr_actw needs mxfp6_gemm_layout 'tilescale'.")
         if self.fp4_weight_2d:
-            fwd_fp4 = self.fwd_fp4_single_linear2 or self.fwd_fp4_single_fc1 or self.fwd_fp4_joint_mlp
+            fwd_fp4 = (self.fwd_fp4_single_linear2 or self.fwd_fp4_single_fc1 or self.fwd_fp4_joint_mlp
+                       or self.fwd_fp4_joint_txt_proj)
             if self.fp4_hadamard_dgrad != "none" or (fwd_fp4 and self.fp4_hadamard_fwd != "none"):
                 raise ValueError(
                     "mxfp6_fp4_weight_2d shares one scale grid between a weight's two directions; it needs "

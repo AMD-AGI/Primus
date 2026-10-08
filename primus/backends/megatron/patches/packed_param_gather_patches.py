@@ -43,10 +43,16 @@ def _pad(x: int, d: int) -> int:
 
 
 def pack_kind(
-    name: str, n_joint: int, fwd_fp4_fc1: bool, fwd_fp4_l2: bool, fwd_fp4_joint_mlp: bool, joint_mlp_parts="all"
+    name: str,
+    n_joint: int,
+    fwd_fp4_fc1: bool,
+    fwd_fp4_l2: bool,
+    fwd_fp4_joint_mlp: bool,
+    joint_mlp_parts="all",
+    fwd_fp4_txt_proj: bool = False,
 ):
     """``"W6"``, ``"W4"`` or None (gathered as bf16) for a parameter, from its name and the forward-FP4 gates
-    (``joint_mlp_parts``: mxfp6_fwd_fp4_joint_mlp_parts)."""
+    (``joint_mlp_parts``: mxfp6_fwd_fp4_joint_mlp_parts; ``fwd_fp4_txt_proj``: mxfp6_fwd_fp4_joint_txt_proj)."""
     m = _LIN.search(name)
     if not m:
         return None
@@ -55,6 +61,8 @@ def pack_kind(
     if single and what == "mlp.linear_fc1" and fwd_fp4_fc1:
         return "W4"
     if single and what in ("mlp.linear_fc2", "self_attention.linear_proj") and fwd_fp4_l2:
+        return "W4"
+    if not single and what == "self_attention.added_linear_proj" and fwd_fp4_txt_proj:
         return "W4"
     if not single and what.startswith(("mlp.", "context_mlp.")) and fwd_fp4_joint_mlp:
         from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import joint_mlp_parts as _parts
@@ -319,9 +327,10 @@ def patch_packed_param_gather_layout(ctx: PatchContext) -> None:
     l2 = bool(getattr(args, "mxfp6_fwd_fp4_single_linear2", False))
     jm = bool(getattr(args, "mxfp6_fwd_fp4_joint_mlp", False))
     jp = str(getattr(args, "mxfp6_fwd_fp4_joint_mlp_parts", "all"))
+    tp = bool(getattr(args, "mxfp6_fwd_fp4_joint_txt_proj", False))
 
     def kinds_of(params, names):
-        return [pack_kind(n, n_joint, fc1, l2, jm, jp) if p.dim() == 2 else None for p, n in zip(params, names)]
+        return [pack_kind(n, n_joint, fc1, l2, jm, jp, tp) if p.dim() == 2 else None for p, n in zip(params, names)]
 
     cur = pgb._ParamAndGradBuffer.__init__
     if getattr(cur, "_primus_packed_param_gather", False) or getattr(

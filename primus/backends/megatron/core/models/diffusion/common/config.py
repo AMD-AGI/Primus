@@ -239,6 +239,7 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_fwd_fp4_joint_mlp: bool = False
     # "all" or a comma list of img_fc1, img_fc2, txt_fc1, txt_fc2; see Mxfp6Gates.fwd_fp4_joint_mlp_parts.
     mxfp6_fwd_fp4_joint_mlp_parts: str = "all"
+    mxfp6_fwd_fp4_joint_txt_proj: bool = False
     # Operand layout of every MX GEMM, "blob" or "tilescale"; see Mxfp6Gates.gemm_layout.
     mxfp6_gemm_layout: str = "blob"
     mxfp6_fwd_a6w4: bool = False
@@ -405,11 +406,14 @@ class BaseDiffusionConfig(TransformerConfig):
         if tilescale and (self.mxfp6_bwd_fp4_dgrad != self.mxfp6_bwd_fp4_wgrad):
             raise ValueError("mxfp6_gemm_layout 'tilescale' needs both mxfp6_bwd_fp4_dgrad and _wgrad, or neither.")
         if (
-            self.mxfp6_fwd_fp4_single_linear2 or self.mxfp6_fwd_fp4_single_fc1 or self.mxfp6_fwd_fp4_joint_mlp
+            self.mxfp6_fwd_fp4_single_linear2
+            or self.mxfp6_fwd_fp4_single_fc1
+            or self.mxfp6_fwd_fp4_joint_mlp
+            or self.mxfp6_fwd_fp4_joint_txt_proj
         ) and not (self.mxfp6_bwd_fp4_dgrad and self.mxfp6_bwd_fp4_wgrad and tilescale):
             raise ValueError(
-                "mxfp6_fwd_fp4_single_linear2 / _single_fc1 / _joint_mlp need mxfp6_bwd_fp4_dgrad, _wgrad and "
-                "mxfp6_gemm_layout 'tilescale'."
+                "mxfp6_fwd_fp4_single_linear2 / _single_fc1 / _joint_mlp / _joint_txt_proj need mxfp6_bwd_fp4_dgrad, "
+                "_wgrad and mxfp6_gemm_layout 'tilescale'."
             )
         if tilescale and (self.mxfp6_wgrad_a6w4 or self.mxfp6_weight_format == "mxfp4"):
             raise ValueError(
@@ -454,6 +458,8 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError("mxfp6_dgrad_emit_attn_delta needs mxfp6_gemm_layout 'tilescale' and mxfp6_bwd_fp4_dgrad.")
         if self.mxfp6_single_linear2_cat and not (tilescale and self.mxfp6_gate_mul_pack):
             raise ValueError("mxfp6_single_linear2_cat needs mxfp6_gemm_layout 'tilescale' and mxfp6_gate_mul_pack.")
+        if self.mxfp6_fwd_fp4_joint_txt_proj and not self.mxfp6_joint_proj:
+            raise ValueError("mxfp6_fwd_fp4_joint_txt_proj runs inside the joint out-projection pair: set mxfp6_joint_proj.")
         if self.mxfp6_attn_q_norm_rope and not self.mxfp6_strided_v:
             raise ValueError("mxfp6_attn_q_norm_rope needs mxfp6_strided_v (q leaves the QKV Function as a view, like v).")
         fp4_opts = {

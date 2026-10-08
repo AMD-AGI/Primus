@@ -2824,6 +2824,9 @@ class MXFP6JointProjFunction(torch.autograd.Function):
 
     ``sd_slot``: the attention's softmax_d placeholder (``mxfp6_dgrad_emit_attn_delta``); when the dgrads can emit
     softmax_d (``_softmax_d_ok``) its gradient is that softmax_d, both streams adding into one, else None.
+
+    The text stream's projection runs the MXFP4 forward under ``mxfp6_fwd_fp4_joint_txt_proj`` (its packs write the
+    column layouts the A4W4 backward reads, so the backward is unchanged).
     """
 
     @staticmethod
@@ -2833,7 +2836,8 @@ class MXFP6JointProjFunction(torch.autograd.Function):
             o_img, w_img, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4
         )
         txt = MXFP6LinearFunction.forward(
-            o_txt, w_txt, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4
+            o_txt, w_txt, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4,
+            gates().fwd_fp4_joint_txt_proj,
         )
         # (img_out, txt_out, 4 img column blobs, 4 txt column blobs)
         return (img[0], txt[0]) + tuple(img[1:]) + tuple(txt[1:])
