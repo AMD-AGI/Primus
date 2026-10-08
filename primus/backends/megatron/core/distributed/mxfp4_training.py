@@ -21,6 +21,17 @@ from math import prod
 import torch
 import torch.distributed as dist
 
+_PREPARATION_STREAMS = {}
+
+
+def _preparation_stream(device):
+    # Share one stream across buckets to preserve their preparation order and
+    # avoid creating a GPU queue for every expert weight. Each process owns one
+    # device in the supported single-node training configuration.
+    if device not in _PREPARATION_STREAMS:
+        _PREPARATION_STREAMS[device] = torch.cuda.Stream(device=device)
+    return _PREPARATION_STREAMS[device]
+
 
 def _emit_comm_status(message):
     # Primus replaces builtins.print with a DEBUG-level logger. The launcher
@@ -165,6 +176,7 @@ class PackedExpertBucket:
         self.work = None
         self.weights = []
         self.device = bucket.param_data.device
+        self.preparation_stream = _preparation_stream(self.device) if self.device.type == "cuda" else None
         if bucket.param_data.dtype != torch.bfloat16:
             raise ValueError("MXFP4 communication requires BF16 model parameter storage")
         numel = bucket.param_data.numel()
@@ -240,6 +252,19 @@ class PackedExpertBucket:
 
     @torch.no_grad()
     def dispatch(self):
+        if self.preparation_stream is None:
+            return self._dispatch()
+        # DDP dispatches the next bucket before computing the current layer.
+        # Keep the boundary wait, quantizer, and packing off the caller stream
+        # so that prefetch does not serialize that layer behind preparation.
+        # The dependency includes all preceding optimizer BF16 writes. NCCL
+        # records the preparation stream when launching the final AllGather;
+        # its Work.wait() subsequently makes the consumer stream wait for both.
+        self.preparation_stream.wait_stream(torch.cuda.current_stream(self.device))
+        with torch.cuda.stream(self.preparation_stream):
+            return self._dispatch()
+
+    def _dispatch(self):
         from primus_turbo.pytorch.core.mxfp4_comm import MXFP4WireLayout
 
         if self.work is not None:
