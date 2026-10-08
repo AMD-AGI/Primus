@@ -281,8 +281,14 @@ def main():
             state.materialize_bf16()
             torch.testing.assert_close(storage, reference, rtol=0, atol=0)
             reduced = torch.empty(shard_size, device=device, dtype=torch.bfloat16)
+            expected_reduced = torch.empty_like(reduced)
             dist.reduce_scatter_tensor(reduced, actual_grad, group=dist.group.WORLD)
-            dist.all_reduce(expected_grad, group=dist.group.WORLD)
+            # Match the baseline's reduction operation: BF16 AllReduce may
+            # associate additions differently from ReduceScatter. That rounding
+            # difference is unrelated to quantized parameter communication.
+            dist.reduce_scatter_tensor(expected_reduced, expected_grad, group=dist.group.WORLD)
+            torch.testing.assert_close(reduced, expected_reduced, rtol=0, atol=0)
+            dist.all_gather_into_tensor(expected_grad, expected_reduced, group=dist.group.WORLD)
             local_master.add_(reduced.float(), alpha=-0.01 / world)
             reference_master.add_(expected_grad.float(), alpha=-0.01 / world)
             reference = reference_master.to(torch.bfloat16)
