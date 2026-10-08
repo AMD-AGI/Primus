@@ -52,6 +52,28 @@ def validate_global_cta_policy() -> None:
         )
 
 
+def make_bucket_group_init(original):
+    """Give fused MLP consumers a sync hook even when Linear.__call__ is bypassed."""
+
+    @functools.wraps(original)
+    def wrapped(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        if os.getenv("MEGATRON_MXFP4_PARAM_GATHER", "0") == "1":
+
+            def ensure_ready():
+                if self.ddp_config.overlap_param_gather:
+                    self.finish_param_sync(skip_next_bucket_dispatch=True)
+                elif not self.param_gather_dispatched:
+                    self.start_param_sync(force_sync=True)
+
+            for param in self.params:
+                if getattr(param, "_primus_mxfp4_comm_candidate", False):
+                    param._primus_mxfp4_ensure_ready = ensure_ready
+        return result
+
+    return wrapped
+
+
 def make_start_param_sync(original):
     """Build the RCCL CE replacement for Megatron's parameter gather."""
     from megatron.core.distributed.param_and_grad_buffer import shard_buffer
@@ -74,7 +96,23 @@ def make_start_param_sync(original):
 
         async_op = self.ddp_config.overlap_param_gather and not force_sync
         jobs = []
+        packed_handles = []
         for index, bucket in enumerate(self.buckets):
+            if os.getenv("MEGATRON_MXFP4_PARAM_GATHER", "0") == "1" and any(
+                getattr(param, "_primus_mxfp4_comm_candidate", False) for param in bucket.params
+            ):
+                from primus.backends.megatron.core.distributed.mxfp4_training import (
+                    PackedExpertBucket,
+                )
+
+                if not hasattr(bucket, "_primus_mxfp4_gather"):
+                    bucket._primus_mxfp4_gather = PackedExpertBucket(
+                        bucket,
+                        self.intra_distributed_optimizer_instance_group,
+                        scale_rounding_mode=int(os.getenv("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING", "2")),
+                    )
+                packed_handles.append(bucket._primus_mxfp4_gather.dispatch())
+                continue
             if self.cached_param_buffer_shard_list[index] is None:
                 self.cached_param_buffer_shard_list[index] = shard_buffer(
                     bucket.param_data,
@@ -112,6 +150,18 @@ def make_start_param_sync(original):
                 self.param_gather_handle = None
         else:
             self.param_gather_handle = None
+        if packed_handles:
+            from primus.backends.megatron.core.distributed.mxfp4_training import (
+                GatherGroupWork,
+            )
+
+            if self.param_gather_handle is not None:
+                packed_handles.append(self.param_gather_handle)
+            combined = GatherGroupWork(packed_handles)
+            if async_op:
+                self.param_gather_handle = combined
+            else:
+                combined.wait()
         self.param_gather_dispatched = True
 
     return start_param_sync
@@ -202,7 +252,9 @@ def make_param_and_grad_buffer_init(original):
             if bucket.param_data is not None:
                 mark_direct_param_buffer(bucket.param_data)
         if os.getenv("MEGATRON_MXFP4_PARAM_GATHER_AUDIT", "0") == "1":
-            from primus.backends.megatron.core.distributed.mxfp4_shard_layout import audit_buffer
+            from primus.backends.megatron.core.distributed.mxfp4_shard_layout import (
+                audit_buffer,
+            )
 
             self._primus_mxfp4_shard_audit = audit_buffer(self, bound.arguments["param_to_name"])
             for report in self._primus_mxfp4_shard_audit:
@@ -306,6 +358,7 @@ def patch_rccl_sdma_param_all_gather(ctx: PatchContext) -> None:
 
     marker = "_primus_rccl_sdma_param_gather_patched"
     if not getattr(bucket_group, marker, False):
+        bucket_group.__init__ = make_bucket_group_init(bucket_group.__init__)
         bucket_group.start_param_sync = make_start_param_sync(bucket_group.start_param_sync)
         setattr(bucket_group, marker, True)
 

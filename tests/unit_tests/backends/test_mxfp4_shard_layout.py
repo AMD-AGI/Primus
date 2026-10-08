@@ -78,6 +78,30 @@ class TestShardLayout(unittest.TestCase):
         self.assertEqual(reports[0]["boundary_elements"], 1024)
         self.assertEqual(_MODULE.audit_buffer(buffer, {param: "unrelated.weight"}), [])
 
+    def test_strip_ownership_and_boundary_exchange(self):
+        spec = importlib.util.spec_from_file_location(
+            "mxfp4_training_layout_test", _PATH.with_name("mxfp4_training.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        rng = random.Random(1701)
+        for _ in range(200):
+            shape = (rng.randint(1, 4), 32 * rng.randint(1, 12), 32 * rng.randint(1, 8))
+            start, world = rng.randint(0, 4096), rng.randint(1, 16)
+            size = (start + prod(shape) + world - 1) // world * world
+            owners, boundaries = module.strip_ownership(shape, start, size, world)
+            cursor, strip = 0, 32 * shape[-1]
+            for rank, (first, count) in enumerate(owners):
+                self.assertEqual(first, cursor)
+                for index in range(first, first + count):
+                    tile_start = start + index * strip
+                    self.assertEqual(tile_start // (size // world), rank)
+                    if (tile_start + strip - 1) // (size // world) != rank:
+                        self.assertIn((tile_start, tile_start + strip), boundaries)
+                cursor += count
+            self.assertEqual(cursor, shape[0] * shape[1] // 32)
+
 
 if __name__ == "__main__":
     unittest.main()

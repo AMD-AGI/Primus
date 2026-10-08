@@ -2286,6 +2286,23 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         for attr_name, attr_val in saved_weight_attrs[0].items():
             setattr(self.weights, attr_name, attr_val)
 
+        if os.getenv("MEGATRON_MXFP4_PARAM_GATHER", "0") == "1" and is_expert:
+            if os.getenv("MEGATRON_PARAM_GATHER_BACKEND") != "rccl_sdma":
+                raise ValueError("MXFP4 parameter gather requires MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma")
+            if any(
+                getattr(config, field, 1) != 1
+                for field in (
+                    "tensor_model_parallel_size",
+                    "pipeline_model_parallel_size",
+                    "expert_model_parallel_size",
+                    "context_parallel_size",
+                )
+            ):
+                raise ValueError("MXFP4 parameter gather currently requires TP=PP=EP=CP=1")
+            if self.weights.dtype != torch.bfloat16:
+                raise ValueError("MXFP4 parameter gather requires BF16 model weights")
+            self.weights._primus_mxfp4_comm_candidate = True
+
         # Free the per-expert weight{i} Parameters now that their data has been
         # consolidated into self.weights.
         for i in range(self.num_gemms):
@@ -2325,8 +2342,18 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         module._ensure_weight_views()
 
     def state_dict(self, *args, **kwargs):
+        state = getattr(self.weights, "_primus_mxfp4_comm_state", None)
+        if state is not None:
+            state.materialize()
         self._ensure_weight_views()
         return super().state_dict(*args, **kwargs)
+
+    def sharded_state_dict(self, *args, **kwargs):
+        state = getattr(self.weights, "_primus_mxfp4_comm_state", None)
+        if state is not None:
+            state.materialize()
+        self._ensure_weight_views()
+        return super().sharded_state_dict(*args, **kwargs)
 
     def prepare_weights(self, x: torch.Tensor):
         """Resolve the weight operand for grouped GEMM / fused grouped MLP.
@@ -2339,9 +2366,32 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         """
         self._ensure_weight_views()
         weights = self.weights
+        ensure_ready = getattr(weights, "_primus_mxfp4_ensure_ready", None)
+        if ensure_ready is not None:
+            ensure_ready()
         is_first_microbatch = self.is_first_microbatch
         self.is_first_microbatch = False
         fuse_wgrad_accum_pattern = _fuse_wgrad_accum_pattern(self.config, weights)
+
+        comm_state = getattr(weights, "_primus_mxfp4_comm_state", None)
+        if getattr(weights, "_primus_mxfp4_comm_candidate", False):
+            if comm_state is None:
+                raise RuntimeError("MXFP4 communication enabled but the expert parameter gather did not run")
+            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config().data()
+                if (
+                    quant_config.use_preshuffle
+                    or not quant_config.granularity == ScalingGranularity.MX_BLOCKWISE
+                ):
+                    raise ValueError("MXFP4 communication requires unshuffled MX blockwise weights")
+                pair = comm_state.get_pair(quant_config.scale_rounding_mode)
+                # Preserve the deosc dtype marker without retaining an old cache.
+                self.quantized_weight_buffer = torch.empty(0, device=weights.device, dtype=float4_e2m1fn_x2)
+                x, pair = _bridge_weight_grad(
+                    x, weights, pair, fuse_wgrad_accum=fuse_wgrad_accum_pattern is not None
+                )
+                return x, pair, fuse_wgrad_accum_pattern
+            comm_state.materialize()
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()

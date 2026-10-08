@@ -1,0 +1,313 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""torchrun preflight for mixed-bucket MXFP4 training communication.
+
+GPU mode tests the production dispatch hook and prepare_weights gradient bridge,
+two optimizer updates, exact quantized bytes, and BF16 materialization. CPU mode
+uses a deterministic stand-in quantizer to test ownership and cache lifecycle;
+it makes no claim about MXFP4 arithmetic. Neither mode needs training datasets.
+"""
+
+import argparse
+import importlib.util
+import os
+import sys
+import types
+from datetime import timedelta
+from pathlib import Path
+
+import torch
+import torch.distributed as dist
+
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--turbo-root", type=Path)
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[2]
+    device = torch.device("cpu" if args.cpu else f"cuda:{os.environ['LOCAL_RANK']}")
+    if not args.cpu:
+        torch.cuda.set_device(device)
+    dist.init_process_group("gloo" if args.cpu else "nccl", timeout=timedelta(seconds=180))
+    rank, world = dist.get_rank(), dist.get_world_size()
+    if args.cpu:
+        if args.turbo_root is None:
+            parser.error("--cpu requires --turbo-root")
+        wire = load(
+            "primus_turbo.pytorch.core.mxfp4_comm",
+            args.turbo_root / "primus_turbo/pytorch/core/mxfp4_comm.py",
+        )
+        namespace = types.ModuleType("mxfp4_test_runtime")
+        namespace.__path__ = [str(root / "primus/backends/megatron/core/distributed")]
+        sys.modules[namespace.__name__] = namespace
+        runtime = load("mxfp4_test_runtime.mxfp4_training", Path(namespace.__path__[0]) / "mxfp4_training.py")
+
+        def fake_quantize(layout, weight):
+            assert torch.isfinite(weight).all(), "a remote/stale fragment reached quantization"
+            torch.testing.assert_close(
+                weight.flatten(),
+                reference[weight.storage_offset() : weight.storage_offset() + weight.numel()],
+                rtol=0,
+                atol=0,
+            )
+            # Coordinate-dependent bytes make transposition and shard ordering observable.
+            values = (weight.float() * 11).to(torch.uint8)
+            components = (
+                values[..., ::2],
+                values[..., ::32],
+                values.transpose(-2, -1)[..., ::2],
+                values.transpose(-2, -1)[..., ::32],
+            )
+            return layout.pack([part.contiguous() for part in components])
+
+        wire.MXFP4WireLayout.quantize = fake_quantize
+        wire.MXFP4WireLayout.wrap_components = lambda _self, components, shape=None: components
+    else:
+        from megatron.core.distributed.distributed_data_parallel_config import (
+            DistributedDataParallelConfig,
+        )
+        from megatron.core.distributed.param_and_grad_buffer import (
+            _ParamAndGradBucketGroup,
+        )
+        from primus_turbo.pytorch.core import mxfp4_comm as wire
+        from primus_turbo.pytorch.core.low_precision import Float4QuantConfig
+        from primus_turbo.pytorch.ops.grouped_gemm_fp4 import grouped_gemm_fp4
+        from primus_turbo.pytorch.ops.grouped_mlp_fp4 import grouped_mlp_fp4
+
+        from primus.backends.megatron.core.distributed import mxfp4_training as runtime
+        from primus.backends.megatron.core.extensions import primus_turbo as extension
+        from primus.backends.megatron.patches.parallelism.rccl_sdma_param_all_gather_patches import (
+            make_bucket_group_init,
+            make_start_param_sync,
+        )
+
+        os.environ["MEGATRON_MXFP4_PARAM_GATHER"] = "1"
+        os.environ["PRIMUS_TURBO_MXFP4_SCALE_ROUNDING"] = "2"
+        config = Float4QuantConfig(scale_rounding_mode=2, use_gradient_sr=False)
+        manager = extension.PrimusTurboLowPrecisionGlobalStateManager
+        manager.PRIMUS_TURBO_FP4_ENABLED = True
+        manager.PRIMUS_TURBO_QUANT_CONFIG = types.SimpleNamespace(
+            data=lambda: config,
+            mxfp4_scaling=lambda: True,
+        )
+
+    # Non-aligned offsets guarantee strips cross rank boundaries, including an
+    # expert boundary. Ordinary BF16 parameters share the same bucket.
+    shapes = [(3, 256, 128), (3, 128, 128)]
+    starts = [127, 127 + 3 * 256 * 128]
+    last = starts[1] + 3 * 128 * 128
+    numel = ((last + 259 + world * 128 - 1) // (world * 128)) * world * 128
+    shard_size = numel // world
+    reference_master = torch.sin(torch.arange(numel, device=device).float() * 0.037)
+    reference = reference_master.to(torch.bfloat16)
+    local_master = reference_master[rank * shard_size : (rank + 1) * shard_size].clone()
+    raw_workspace = None
+    if args.cpu:
+        storage = torch.empty(numel, dtype=torch.bfloat16, device=device)
+    else:
+        raw_workspace = runtime.ByteAllGather(numel * 2 // world, dist.group.WORLD, device, True)
+        storage = raw_workspace.storage.view(torch.bfloat16)
+    params, mapping = [], {}
+    for shape, start in zip(shapes, starts):
+        param = torch.nn.Parameter(storage[start : start + torch.Size(shape).numel()].view(shape))
+        param._primus_mxfp4_comm_candidate = True
+        params.append(param)
+        mapping[param] = (start, start + param.numel())
+    for start, end in ((0, 127), (last, numel)):
+        mapping[torch.nn.Parameter(storage[start:end])] = (start, end)
+    bucket = types.SimpleNamespace(
+        param_data=storage, param_to_index=mapping, params=set(mapping), params_list=list(mapping)
+    )
+    state = None
+    try:
+        if args.cpu:
+            state = runtime.PackedExpertBucket(bucket, dist.group.WORLD, use_sdma=False)
+        else:
+
+            class BucketGroup(_ParamAndGradBucketGroup):
+                __init__ = make_bucket_group_init(_ParamAndGradBucketGroup.__init__)
+                start_param_sync = make_start_param_sync(_ParamAndGradBucketGroup.start_param_sync)
+
+            ddp_config = DistributedDataParallelConfig(
+                use_distributed_optimizer=True, overlap_param_gather=True
+            )
+            bucket_group = BucketGroup([bucket], ddp_config, dist.group.WORLD, world)
+        for step in range(3):
+            storage.fill_(float("nan"))
+            storage[rank * shard_size : (rank + 1) * shard_size].copy_(local_master.to(torch.bfloat16))
+            if args.cpu:
+                state.dispatch().wait()
+            else:
+                bucket_group.param_gather_dispatched = False
+                # Step 1 exercises the path used by a fused MLP that bypasses
+                # the Linear module's DDP forward hook entirely.
+                if step == 1:
+                    params[0]._primus_mxfp4_ensure_ready()
+                else:
+                    bucket_group.start_param_sync(force_sync=step == 2)
+                    bucket_group.finish_param_sync()
+                state = bucket._primus_mxfp4_gather
+            actual_grad = torch.zeros_like(storage)
+            expected_grad = torch.zeros_like(storage)
+            for param, start, shape in zip(params, starts, shapes):
+                layout = wire.MXFP4WireLayout(shape, 2)
+                full = reference[start : start + param.numel()].view(shape)
+                expected_bytes = layout.assemble(layout.quantize(full).unsqueeze(0))
+                weight_state = param._primus_mxfp4_comm_state
+                pair = weight_state.get_pair(2)
+                assert pair is weight_state.get_pair(2), "cache was not reused within an update"
+                actual_bytes = (
+                    pair
+                    if args.cpu
+                    else (pair.data.qdata, pair.data.scale_inv, pair.data_t.qdata, pair.data_t.scale_inv)
+                )
+                for actual, expected in zip(actual_bytes, expected_bytes):
+                    torch.testing.assert_close(actual.view(torch.uint8), expected, rtol=0, atol=0)
+                if args.cpu:
+                    actual_grad[start : start + param.numel()].fill_(rank + 1 + step)
+                    expected_grad[start : start + param.numel()].fill_(rank + 1 + step)
+                else:
+                    # Exercise the actual single-microbatch consumer and weight
+                    # gradient bridge, both fused and unfused across updates.
+                    module = extension.PrimusTurboGroupedLinear.__new__(extension.PrimusTurboGroupedLinear)
+                    torch.nn.Module.__init__(module)
+                    module.weights = param
+                    module.config = types.SimpleNamespace(gradient_accumulation_fusion=step != 0)
+                    module.is_first_microbatch = True
+                    module._weight_views_registered = True
+                    param.main_grad = actual_grad[start : start + param.numel()].view(shape)
+                    param.grad_added_to_main_grad = False
+                    generator = torch.Generator(device=device).manual_seed(1701 + rank + step)
+                    x = torch.randn(
+                        shape[0] * 128, shape[-1], device=device, dtype=torch.bfloat16, generator=generator
+                    ).requires_grad_(True)
+                    xr, wr = x.detach().clone().requires_grad_(True), full.detach().clone().requires_grad_(
+                        True
+                    )
+                    lens = torch.full((shape[0],), 128, device=device, dtype=torch.int64)
+                    bridged_x, cached_weight, pattern = module.prepare_weights(x)
+                    out = grouped_gemm_fp4(
+                        bridged_x, cached_weight, lens, config=config, fuse_bgrad_accum_pattern=pattern
+                    )
+                    expected_out = grouped_gemm_fp4(xr, wr, lens, config=config)
+                    cotangent = torch.randn(out.shape, device=device, dtype=out.dtype, generator=generator)
+                    out.backward(cotangent)
+                    expected_out.backward(cotangent)
+                    torch.testing.assert_close(out, expected_out, rtol=0, atol=0)
+                    torch.testing.assert_close(x.grad, xr.grad, rtol=0, atol=0)
+                    torch.testing.assert_close(param.main_grad, wr.grad, rtol=0, atol=0)
+                    assert param.grad_added_to_main_grad
+                    expected_grad[start : start + param.numel()].copy_(wr.grad.flatten())
+                    param.grad = None
+            if not args.cpu:
+                # GPT-OSS uses this fused FC1/SwiGLU/FC2 path. Exercise its
+                # gradient bridge separately from the individual GEMM checks.
+                actual_grad.zero_()
+                expected_grad.zero_()
+                modules = []
+                for param in params:
+                    module = extension.PrimusTurboGroupedLinear.__new__(extension.PrimusTurboGroupedLinear)
+                    torch.nn.Module.__init__(module)
+                    module.weights = param
+                    module.config = types.SimpleNamespace(gradient_accumulation_fusion=step != 0)
+                    module.is_first_microbatch = True
+                    module._weight_views_registered = True
+                    param.grad_added_to_main_grad = False
+                    modules.append(module)
+                x = torch.randn(
+                    384, 128, device=device, dtype=torch.bfloat16, generator=generator
+                ).requires_grad_(True)
+                probs = torch.rand(
+                    384, device=device, dtype=torch.float32, generator=generator
+                ).requires_grad_(True)
+                xr = x.detach().clone().requires_grad_(True)
+                pr = probs.detach().clone().requires_grad_(True)
+                refs = [
+                    reference[start : start + param.numel()].view(shape).detach().clone().requires_grad_(True)
+                    for param, start, shape in zip(params, starts, shapes)
+                ]
+                bridged_x, w1, pattern = modules[0].prepare_weights(x)
+                bridged_x, w2, pattern2 = modules[1].prepare_weights(bridged_x)
+                assert pattern == pattern2
+                lens = torch.full((3,), 128, device=device, dtype=torch.int64)
+                out = grouped_mlp_fp4(
+                    bridged_x,
+                    w1,
+                    w2,
+                    lens,
+                    probs=probs,
+                    config=config,
+                    trans_w1=True,
+                    trans_w2=True,
+                    activation="silu",
+                    clamp_limit=7.0,
+                    fuse_wgrad_accum_pattern=pattern,
+                )
+                expected_out = grouped_mlp_fp4(
+                    xr,
+                    refs[0],
+                    refs[1],
+                    lens,
+                    probs=pr,
+                    config=config,
+                    trans_w1=True,
+                    trans_w2=True,
+                    activation="silu",
+                    clamp_limit=7.0,
+                )
+                cotangent = torch.randn(out.shape, device=device, dtype=out.dtype, generator=generator)
+                out.backward(cotangent)
+                expected_out.backward(cotangent)
+                for actual, expected in ((out, expected_out), (x.grad, xr.grad), (probs.grad, pr.grad)):
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                for param, ref, start in zip(params, refs, starts):
+                    torch.testing.assert_close(param.main_grad, ref.grad, rtol=0, atol=0)
+                    expected_grad[start : start + param.numel()].copy_(ref.grad.flatten())
+                    param.grad = None
+            # Saving a checkpoint must see exact BF16, never dequantized MXFP4.
+            state.materialize_bf16()
+            torch.testing.assert_close(storage, reference, rtol=0, atol=0)
+            reduced = torch.empty(shard_size, device=device, dtype=torch.bfloat16)
+            dist.reduce_scatter_tensor(reduced, actual_grad, group=dist.group.WORLD)
+            dist.all_reduce(expected_grad, group=dist.group.WORLD)
+            local_master.add_(reduced.float(), alpha=-0.01 / world)
+            reference_master.add_(expected_grad.float(), alpha=-0.01 / world)
+            reference = reference_master.to(torch.bfloat16)
+            if rank == 0:
+                print(
+                    f"[MXFP4-COMM-PREFLIGHT] step={step} PASS backend={'gloo-simulated-quantizer' if args.cpu else 'rccl-sdma'}",
+                    flush=True,
+                )
+        if rank == 0:
+            print(
+                "[MXFP4-COMM-PREFLIGHT] PASS updates=2 cache_refresh=3 bf16_materialization=exact", flush=True
+            )
+    finally:
+        if state is not None:
+            state.close()
+        bucket.param_data = None
+        for param in params:
+            param.data = torch.empty(0, device=device, dtype=torch.bfloat16)
+        params.clear()
+        mapping.clear()
+        storage = None
+        if raw_workspace is not None:
+            raw_workspace.close()
+        dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()
