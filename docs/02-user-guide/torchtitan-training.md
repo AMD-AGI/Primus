@@ -8,7 +8,7 @@ PyTorch is an open-source machine learning framework that is widely used for mod
 
 The ROCm PyTorch training Docker image `rocm/primus:v26.8`, available through [Docker hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for fine-tuning and pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
 
-For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.6`](../01-getting-started/release-notes.md#rocmprimusv266).
+For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.7`](../01-getting-started/release-notes.md#rocmprimusv267).
 
 Training is launched with `primus-cli`, the unified Primus CLI that covers direct, container, and Slurm execution from the same YAML configuration. See the [CLI reference](./cli-reference.md).
 
@@ -33,11 +33,18 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Known issues
 
-<!-- NEEDS CONFIRMATION: no open TorchTitan issue is derivable from the v26.6..v26.7
-     commit range. Confirm before publishing. -->
-No TorchTitan backend issues are currently tracked for v26.7.
+<!-- NEEDS CONFIRMATION: no open TorchTitan issue is derivable from the v26.7..v26.8
+     commit range; the TorchTitan commits in it are all fixes (listed below).
+     Confirm before publishing. -->
+No TorchTitan backend issues are currently tracked for v26.8.
 
-**The Turbo grouped-GEMM config was renamed** in v26.7 ([#1041](https://github.com/AMD-AGI/Primus/pull/1041)). If you carry a local TorchTitan config that sets it, update the key.
+**Fixed in v26.8:**
+
+- A Triton buffer-store miscompile could silently corrupt gradients in Inductor-generated backward kernels. Affected kernels are now detected and recompiled with buffer ops disabled, and TorchTitan restores eager precision semantics under `torch.compile` on ROCm ([#962](https://github.com/AMD-AGI/Primus/pull/962)).
+- The GPT-OSS MoE router bias was left uninitialized after meta-device materialization, producing non-finite router scores ([#1183](https://github.com/AMD-AGI/Primus/pull/1183)).
+- DeepSeek `torch.compile` is bounded at the routed experts and keeps scalar capture ([#1216](https://github.com/AMD-AGI/Primus/pull/1216); on `release/v26.8`, not yet on `main`).
+
+**The Turbo grouped-GEMM config was renamed** in v26.7 ([#1041](https://github.com/AMD-AGI/Primus/pull/1041)). If you are moving from v26.6 with a local TorchTitan config that sets it, update the key.
 
 ### Registry change
 

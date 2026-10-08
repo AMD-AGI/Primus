@@ -8,7 +8,7 @@ The Primus framework with the Megatron backend is designed to enable efficient t
 
 The ROCm PyTorch training Docker image `rocm/primus:v26.8`, available through [Docker hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
 
-For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.6`](../01-getting-started/release-notes.md#rocmprimusv266).
+For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.7`](../01-getting-started/release-notes.md#rocmprimusv267).
 
 Training is launched with `primus-cli`, the unified Primus CLI that covers direct, container, and Slurm execution from the same YAML configuration. See the [CLI reference](./cli-reference.md).
 
@@ -20,7 +20,13 @@ Read this section before starting a training run. It collects the settings this 
 
 ### Required settings
 
-**Use the `release/v26.8` branch.** It is the Primus branch matching the `rocm/primus:v26.8` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image — see [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268). [Environment setup](#1-environment-setup) has the clone command.
+**Use the `release/v26.8` branch.** It is the Primus branch matching the `rocm/primus:v26.8` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image: the image was built from `1f4f6f6e`, and the MI325X tuning for the 70B/72B and MoE recipes ([#1227](https://github.com/AMD-AGI/Primus/pull/1227)) landed on the branch afterwards. See [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268). [Environment setup](#1-environment-setup) has the clone command.
+
+### Changes you may need to act on
+
+**Hybrid configs are named `zebra_*` again.** v26.7 shipped the Zebra-Llama hybrid recipes as `hylo_*`; v26.8 restores the original name ([#1167](https://github.com/AMD-AGI/Primus/pull/1167)). For example, `examples/megatron/configs/MI300X/hylo_llama_mamba_8B_BF16-pretrain.yaml` is now `zebra_llama_mamba_8B_BF16-pretrain.yaml`, the model presets are `zebra_<mixer>_<size>_hybrid.yaml`, and the `HyloLlama*` classes are `ZebraLlama*`. Update local configs and scripts that name the old files.
+
+**The `examples/run_*` launchers are gone.** Launch with `./runner/primus-cli`, or use `runner/helpers/launch/slurm_pretrain.sh` if you rely on the `EXP` / `NNODES` / `DATA_PATH` contract ([#999](https://github.com/AMD-AGI/Primus/pull/999)).
 
 ### Architecture-specific settings
 
@@ -63,6 +69,10 @@ In `direct` mode inside a container, a plain `export PYTORCH_CUDA_ALLOC_CONF=exp
 
 ### Known issues
 
+<!-- NEEDS CONFIRMATION: carried over from v26.7. v26.8 moves hipBLASLt from
+     1.4.1-8d1ae90e to 1.4.1-39d8d603 and ROCm from 10.0.0 to 10.1.0, which may
+     change the heuristic ranking, but nothing in the v26.7..v26.8 range addresses
+     it and it has not been re-tested on MI355X. Confirm or drop before publishing. -->
 **Mamba 370M on MI355X fails in the backward pass.** Training aborts with
 `HIPBLAS_STATUS_INTERNAL_ERROR (6)` from inside `hipblasLtMatmul`, on the weight
 gradient GEMM (`NT`, M=1024, N=4384, K=65536, bf16).
@@ -91,7 +101,7 @@ unset TE_HIPBLASLT_ALGO_SELECTION
 > with `--env TE_HIPBLASLT_ALGO_SELECTION=1` or add it to that list. See
 > [Environment variables](../03-configuration-reference/environment-variables.md).
 
-**If you are upgrading from v26.6, do upgrade.** On v26.6, Primus-Turbo's non-fused
+**If you are still on v26.6, upgrade.** On v26.6, Primus-Turbo's non-fused
 weight-gradient path accumulated the gradient only on the first microbatch, so any
 run using gradient accumulation on that path trained on partial gradients. Fixed in
 v26.7 by [#1046](https://github.com/AMD-AGI/Primus/pull/1046).
@@ -138,6 +148,7 @@ The following models are pre-optimized for performance on the AMD Instinct MI300
 - Qwen3 32B (SFT / LoRA)
 - GPT-OSS-20B
 - GPT-OSS-120B
+- ZAYA1-8B (new in v26.8; MI300X and MI355X mock-data recipes)
 
 ---
 
