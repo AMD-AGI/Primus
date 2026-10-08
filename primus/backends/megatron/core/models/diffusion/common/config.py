@@ -245,6 +245,7 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_packed_param_gather: bool = False
     mxfp6_packed_param_gather_fused_adam: bool = False
     mxfp6_packed_param_gather_prob_bits: int = 0
+    mxfp6_packed_param_gather_neutral: str = ""
     mxfp6_dgrad_emit_attn_delta: bool = False
     mxfp6_bwd_fp4_a6w6_first: int = 0
     mxfp6_bwd_fp4_a6w6_last: int = 0
@@ -430,6 +431,19 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError("mxfp6_packed_param_gather_prob_bits is 0 (off), 2 or 4.")
         if self.mxfp6_packed_param_gather_prob_bits and not (self.mxfp6_packed_param_gather and self.mxfp6_fp4_sr_actw):
             raise ValueError("mxfp6_packed_param_gather_prob_bits needs mxfp6_packed_param_gather and mxfp6_fp4_sr_actw.")
+        if self.mxfp6_packed_param_gather_neutral not in ("", "sr", "rn"):
+            raise ValueError('mxfp6_packed_param_gather_neutral is "", "sr" or "rn".')
+        if self.mxfp6_packed_param_gather_neutral and not (
+            self.mxfp6_packed_param_gather and self.mxfp6_bwd_fp4_dgrad and self.mxfp6_fp4_hadamard_dgrad == "none"
+        ):
+            raise ValueError(
+                "mxfp6_packed_param_gather_neutral needs mxfp6_packed_param_gather, mxfp6_bwd_fp4_dgrad and "
+                'mxfp6_fp4_hadamard_dgrad "none" (the dgrad copy is made from an unrotated plane).'
+            )
+        if self.mxfp6_packed_param_gather_neutral == "sr" and not self.mxfp6_fp4_sr_actw:
+            raise ValueError('mxfp6_packed_param_gather_neutral "sr" rounds the weight copy stochastically: set mxfp6_fp4_sr_actw.')
+        if self.mxfp6_packed_param_gather_neutral and self.mxfp6_packed_param_gather_fused_adam:
+            raise ValueError("mxfp6_packed_param_gather_neutral is not wired into the fused Adam + owner pack.")
         if self.mxfp6_packed_param_gather_prob_bits and self.mxfp6_packed_param_gather_fused_adam:
             raise ValueError(
                 "mxfp6_packed_param_gather_prob_bits is not wired into the fused Adam + owner pack; set one of the two."

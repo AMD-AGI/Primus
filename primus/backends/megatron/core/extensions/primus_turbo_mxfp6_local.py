@@ -103,6 +103,12 @@ _quantize_mxfp4_gemm_row = getattr(torch.ops.primus_turbo, "quantize_mxfp4_gemm_
 _quantize_hybrid_dual = getattr(torch.ops.primus_turbo, "quantize_mxfp6_row_mxfp4_col_dual_impl", None)
 
 
+def _neutral_rows():
+    """fmt bits for the A6W6 forward A operands under packed_param_gather_neutral: FP6 rows without the Hadamard (their
+    B operand, the gathered plane, carries none)."""
+    return _mx.FP4_HADAMARD["none"] << 20 if gates().packed_param_gather_neutral else 0
+
+
 def _pack_act_dual(x, wgrad_is_fp4, n_out=None, ts=False):
     """Pack an activation for the forward (row) and for wgrad (column).
 
@@ -111,7 +117,7 @@ def _pack_act_dual(x, wgrad_is_fp4, n_out=None, ts=False):
     (see `_ts_fwd`): the row half in the A6W6 fly layout, the column half unchanged.
     """
     if ts:
-        return _mx.quantize_mx_dual(x, _mx.with_ts6_row(_act_fmt(x.shape, n_out), False))
+        return _mx.quantize_mx_dual(x, _mx.with_ts6_row(_act_fmt(x.shape, n_out), False) | _neutral_rows())
     if gates().bwd_fp4_wgrad:
         return _mx.quantize_mx_dual(x, _act_fmt(x.shape, n_out))
     if wgrad_is_fp4:
@@ -145,11 +151,14 @@ def ppg_formats():
     g = gates()
     assert not g.fp4_weight_2d, "mxfp6_packed_param_gather: 2-D weight scales are not supported"
     ko = _mx.MX_FMT_COL_KOUTER
+    # neutral: the W6 rows unrotated with 32x32 tile scales (the column -- made by the receivers -- keeps its options)
+    neutral = (_mx.FP4_HADAMARD["none"] << 20 | _mx.MX_FMT_FP4_TILE2D) if g.packed_param_gather_neutral else 0
     return dict(
-        W6=lambda R, K: _mx.with_ts6_row(_weight_fmt((R, K), 256), True) | ko,
+        W6=lambda R, K: _mx.with_ts6_row(_weight_fmt((R, K), 256), True) | ko | neutral,
         W4=lambda R, K: _fwd_fp4_fmt("weight", 256, R, K) | ko,
         col_sr=bool(g.fp4_sr_actw),
         col_prob_bits=int(g.packed_param_gather_prob_bits) if g.fp4_sr_actw else 0,
+        neutral=g.packed_param_gather_neutral,
     )
 
 
@@ -423,14 +432,14 @@ def _pack_grad_fused_dual(x, aux, bias, mode, want_col_sum, b4):
 def _pack_act_row(x, ts=False):
     """An activation's row direction only (eval): MXFP6 tile blob, or the A6W6 fly layout (``ts``)."""
     if ts:
-        return _mx.quantize_mx(x, 1, _mx.ts6_fmt(False))
+        return _mx.quantize_mx(x, 1, _mx.ts6_fmt(False) | _neutral_rows())
     return _quantize_mxfp6_row(x, 1)
 
 
 def _pack_act_fused_dual(x, aux, bias, mode, want_col_sum, n_out=None, ts=False):
     """A forward activation formed in the packer (fc1's bias + GELU): wgrad's B operand."""
     if ts:
-        fmt = _mx.with_ts6_row(_act_fmt(x.shape, n_out) if n_out is not None else 0, False)
+        fmt = _mx.with_ts6_row(_act_fmt(x.shape, n_out) if n_out is not None else 0, False) | _neutral_rows()
         return _mx.quantize_mx_fused_dual(x, aux, bias, mode, want_col_sum, fmt)
     if gates().bwd_fp4_wgrad:
         return _mx.quantize_mx_fused_dual(x, aux, bias, mode, want_col_sum, _act_fmt(x.shape, n_out))

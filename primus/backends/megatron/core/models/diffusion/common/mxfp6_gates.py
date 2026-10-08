@@ -183,6 +183,12 @@ class Mxfp6Gates:
     # the same all-gather as the forward planes, and each rank finishes the rounding itself (its own draw). Replaces
     # the per-destination draws sent by all-to-all, which cross the NICs at scale.
     packed_param_gather_prob_bits: int = 0
+    # With packed_param_gather, "sr" or "rn": the W6 weights travel as one orientation-neutral plane -- MXFP6 rows with
+    # no Hadamard and one scale per 32x32 tile -- that is the A6W6 forward's B operand as it arrives, and each rank
+    # makes the FP4 dgrad copy from it after the gather (stochastically rounded from its own seed with "sr", round to
+    # nearest with "rn"). The forward A operands of those GEMMs drop their Hadamard too; dgrad must run without one
+    # (fp4_hadamard_dgrad "none"). W4 buckets are unaffected (combine with packed_param_gather_prob_bits for them).
+    packed_param_gather_neutral: str = ""
     # The attention out-projections' dgrad (A4W4 on tilescale) also emits the attention backward's softmax_d =
     # rowsum(dO * O) per (token, head), which the attention backward then takes instead of computing it: the
     # attention returns a placeholder whose gradient the joint pair / gated single-block Function supplies. Falls

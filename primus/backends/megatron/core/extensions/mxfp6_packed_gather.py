@@ -32,6 +32,11 @@ of the dgrad codes rounded down plus a plane of round-up probabilities (4 bits: 
 2 bits: half the bytes), both are
 all-gathered with the forward planes, and after the gather each rank rounds every code up with its probability from
 its own seed (``receive``). The ranks' draws stay independent; nothing goes by all-to-all.
+
+With ``packed_param_gather_neutral`` (W6 buckets) only the forward planes travel, in an orientation-neutral form: MXFP6
+rows with no Hadamard and one scale per 32x32 tile (the A6W6 forward reads them as they arrive). The dgrad copy is
+made by every rank from the gathered planes (``receive``: Turbo ``mxfp6_tile_to_fp4_col``, stochastically rounded from
+the rank's own seed, or round to nearest); its planes are local, not gathered.
 """
 
 import hashlib
@@ -70,7 +75,13 @@ class PackedBucket:
         if self.prob4:
             self.planes[_PROB] = torch.empty(n // (8 // self.prob_bits), dtype=torch.uint8, device=dev)
         # per-destination draws of this rank's dgrad rows ([dp, shard]: row d goes to rank d), SR only
-        self.sr = bool(fmts["col_sr"]) and not self.prob4
+        # neutral (W6): the forward planes alone travel; each rank makes its dgrad copy from them (sr or rn)
+        self.neutral = fmts.get("neutral", "") if self.kind == "W6" else ""
+        if self.neutral:
+            self.prob_bits, self.prob4 = 0, False
+            self.planes.pop(_PROB, None)
+            self._none = torch.empty(0, dtype=torch.uint8, device=dev)
+        self.sr = bool(fmts["col_sr"]) and not self.prob4 and not self.neutral
         self.send = {k: torch.empty_like(self.planes[k]) for k in _A2A} if self.sr else None
         self.items = []
         self.fused_done = set()  # (idx, ra) packed by the optimizer step (fused) since the last owner_pack
@@ -133,6 +144,10 @@ class PackedBucket:
             self._view("rs", o, nel),
             dict(row_c1=self._view("c1", o, nel) if w6 else None),
         )
+        if self.neutral:  # the forward rows alone (no column direction: the receivers make it)
+            assert adam is None, "packed_param_gather_neutral is not wired into the fused Adam + owner pack"
+            MX.quantize_mx_dual_out(w, rows[0], rows[1], self._none, self._none, fmt, **rows[2])
+            return
         if self.prob4:  # the codes rounded down + their round-up probabilities, finished by each receiver
             assert adam is None, "packed_param_gather_prob4 is not wired into the fused Adam + owner pack"
             from primus_turbo.pytorch.kernels.quantization.mx_a4w4_pack import MX_FMT_FP4_COL_SR
@@ -163,11 +178,21 @@ class PackedBucket:
 
     def gather_ops(self):
         """(output, input) of each all-gathered plane."""
-        return [(pl, pl.view(self.dp, -1)[self.rank]) for k, pl in self.planes.items() if not (self.sr and k in _A2A)]
+        local = ("cc", "cs") if self.neutral else (_A2A if self.sr else ())
+        return [(pl, pl.view(self.dp, -1)[self.rank]) for k, pl in self.planes.items() if k not in local]
 
     def receive(self):
-        """prob4: after the gather, round this rank's copy of every dgrad code up with its probability -- one draw,
-        seeded by (step, bucket, rank), so the ranks' draws are independent as with per-rank packs."""
+        """After the gather. prob4: round this rank's copy of every dgrad code up with its probability -- one draw,
+        seeded by (step, bucket, rank), so the ranks' draws are independent as with per-rank packs. neutral: make every
+        weight's dgrad copy from its gathered forward planes (sr: seeded by (step, bucket, weight, rank))."""
+        if self.neutral:
+            from primus_turbo.pytorch.kernels.quantization import mx_a4w4_pack as MX
+
+            for idx, p, s, R, K, _ in self.items:
+                fmt = self.fmts[self.kind](R, K)
+                MX.mxfp6_tile_to_fp4_col(p._ppg_row, p._ppg_c1, p._ppg_row_s, R, K, p._ppg_col.reshape(-1),
+                                         p._ppg_col_s, fmt, self.neutral == "sr",
+                                         _seed(self.step, self.bucket.bucket_id, idx, f"rx{self.rank}"))
         if self.prob4:
             from primus_turbo.triton.quantization.fp4_prob_round import fp4_prob_round
 

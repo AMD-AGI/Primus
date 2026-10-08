@@ -542,7 +542,7 @@ def patch_bucket_group_sync():
                     bucket.param_data, self.cached_param_buffer_shard_list[idx][rank], group=grp, async_op=async_op
                 )
         # prob4: each rank finishes its own stochastic rounding of the gathered dgrad copies
-        recv = [st.receive for st in states.values() if st.prob4]
+        recv = [st.receive for st in states.values() if st.prob4 or st.neutral]
         if async_op:
             self.param_gather_handle = _Handles([cm] + works, after=recv)
         else:
