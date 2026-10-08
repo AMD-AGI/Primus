@@ -11,7 +11,7 @@ MaxDiffusion TransformerEngine preload patch
 TransformerEngine as its first statement. On this ROCm/JAX stack that import
 segfaults unless TensorFlow has already been loaded in the process.
 
-This was previously repaired by a ``sed`` in
+This was previously repaired by a ``sed`` in the since-removed
 ``examples/maxdiffusion/setup_maxdiffusion_env.sh`` that inserted
 ``import tensorflow`` immediately above the TE import in the vendored submodule.
 That edit had the same durability problem as the Shardy ``sed``: any
