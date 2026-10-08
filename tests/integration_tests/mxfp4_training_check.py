@@ -192,6 +192,8 @@ def main():
                 assert not bookkeeping_group.param_gather_dispatched
                 assert state.generation == step + 1, "duplicate parameter gather"
                 assert next_bucket.dispatches == (1 if step < 2 else 0), "lost next-bucket prefetch"
+                if step == 2:
+                    assert all(weight.pair is None for weight in state.weights), "eager evaluation caches"
             # Ordinary BF16 weights must be ready before any forward consumer,
             # independently of the explicit full-BF16 materialization below.
             for param, (start, end) in mapping.items():

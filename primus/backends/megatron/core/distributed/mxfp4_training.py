@@ -289,9 +289,9 @@ class PackedExpertBucket:
             )
 
     @torch.no_grad()
-    def dispatch(self):
+    def dispatch(self, *, prefetch_cache=True):
         if self.preparation_stream is None:
-            return self._dispatch()
+            return self._dispatch(prefetch_cache=prefetch_cache)
         # DDP dispatches the next bucket before computing the current layer.
         # Keep the boundary wait, quantizer, and packing off the caller stream
         # so that prefetch does not serialize that layer behind preparation.
@@ -300,9 +300,9 @@ class PackedExpertBucket:
         # A completion event also covers cache assembly and BF16 restoration.
         self.preparation_stream.wait_stream(torch.cuda.current_stream(self.device))
         with torch.cuda.stream(self.preparation_stream):
-            return self._dispatch()
+            return self._dispatch(prefetch_cache=prefetch_cache)
 
-    def _dispatch(self):
+    def _dispatch(self, *, prefetch_cache):
         from primus_turbo.pytorch.core.mxfp4_comm import MXFP4WireLayout
 
         if self.work is not None:
@@ -331,8 +331,12 @@ class PackedExpertBucket:
             # The consumer waits for this event, not just for the transport.
             self.work.wait()
             self._restore_bf16_ranges(self.packed, self.ordinary_restore_plan)
-            for weight in self.weights:
-                weight.assemble_pair()
+            # Synchronous evaluation gathers all buckets before consumption.
+            # Keep assembly lazy there so module references to old caches do
+            # not retain a second full model's worth of quantized storage.
+            if prefetch_cache:
+                for weight in self.weights:
+                    weight.assemble_pair()
             self.ready_event.record(self.preparation_stream)
         return self
 

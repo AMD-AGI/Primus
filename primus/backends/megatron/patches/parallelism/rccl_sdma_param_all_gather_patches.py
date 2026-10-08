@@ -125,7 +125,7 @@ def make_start_param_sync(original):
                         self.intra_distributed_optimizer_instance_group,
                         scale_rounding_mode=int(os.getenv("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING", "2")),
                     )
-                packed_handles.append(bucket._primus_mxfp4_gather.dispatch())
+                packed_handles.append(bucket._primus_mxfp4_gather.dispatch(prefetch_cache=async_op))
                 continue
             if self.cached_param_buffer_shard_list[index] is None:
                 self.cached_param_buffer_shard_list[index] = shard_buffer(
