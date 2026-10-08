@@ -13,7 +13,7 @@
 #   export PRIMUS_BASE=/big/disk/primus-env   # REQUIRED, no default
 #   bash setup.sh                # run all default stages in order
 #   bash setup.sh <stage>...     # run only specific stage(s), e.g.
-#   bash setup.sh venv torch flash_attn
+#   bash setup.sh venv torch te
 #
 # Stages are re-runnable. List them with:  bash setup.sh --list
 
@@ -24,14 +24,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # here rather than from the workspace clone, so it needs the same treatment.
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-DEFAULT_STAGES=(venv torch flash_attn te torchtune torchao pydeps \
+DEFAULT_STAGES=(venv torch te flash_attn torchtune torchao pydeps \
                 grouped_gemm causal_conv1d mamba primus aiter turbo boto \
                 cleanup manifest)
 OPTIONAL_STAGES=(torchrec)
 
 usage() {
     cat <<EOF
-setup.sh — build the Primus v26.7 training environment in a venv.
+setup.sh — build the Primus v26.8 training environment in a venv.
 
 PRIMUS_BASE must be exported first; it has no default because the right location
 is site-specific. Point it at a writable dir on a disk with tens of GB free:
@@ -42,7 +42,7 @@ is site-specific. Point it at a writable dir on a disk with tens of GB free:
 Run selected stages only (they are idempotent, so this is how you resume after a
 failure):
 
-    bash setup.sh te
+    bash setup.sh flash_attn
     bash setup.sh venv torch
 
 default stages: ${DEFAULT_STAGES[*]}
@@ -65,47 +65,39 @@ die()  { echo -e "\033[1;31m[setup][ERROR] $*\033[0m" >&2; exit 1; }
 reload_env() { source "$SCRIPT_DIR/env.sh"; }
 
 # ---- pinned versions / commits (from Dockerfile.primus-v26.8) ----
-# v26.7 splits the wheels across stable.repo.amd.com indexes; the single
-# rocm.nightlies.amd.com/whl-multi-arch index used up to v26.6 no longer carries
-# them. ROCm core and the torch set live on separate indexes, so stage_torch
-# passes one as --index-url and the other as --extra-index-url.
+# ROCm core and the torch set live on separate stable.repo.amd.com indexes, so
+# stage_torch passes one as --index-url and the other as --extra-index-url.
 ROCM_INDEX="https://stable.repo.amd.com/rocm/core/whl-next/"
 TORCH_INDEX="https://stable.repo.amd.com/rocm/pytorch/whl-next/"
-# The Dockerfile pins only `torch` and lets torchaudio/apex float and
-# torchvision resolve as `==0.27`. That no longer resolves: newer rocm10.x
-# nightlies now publish matching version numbers, so a floating torchvision
-# drags in a build for a different ROCm line and the resolve dies on a
-# backtracking storm. These are the versions read out of the published
-# rocm/primus:v26.8 image, i.e. the exact set the Dockerfile resolved to.
-PYTORCH_VERSION="2.12.0+rocm10.0.0"
-ROCM_SDK_VERSION="10.0.0"
-TORCHAUDIO_VERSION="2.11.0+rocm10.0.0"
-TORCHVISION_VERSION="0.27.0+rocm10.0.0"
-APEX_VERSION="1.13.0+rocm10.0.0"
-FLASH_ATTN_VERSION="2.8.1"
-# v26.7 installs TransformerEngine from the ROCm multi-arch staging index, which
-# moved from frameworks-nightlies to frameworks-devreleases this release. Those
-# wheels are built on Ubuntu 24.04 though, and libtransformer_engine.so needs
-# glibc >= 2.38, so they cannot load on a 22.04 host. stage_te falls back to
-# building TE from source; see PRIMUS_TE_MODE and the README.
-# v26.7 installs three TE distributions (v26.6 had two): the `transformer_engine`
-# and `transformer_engine_rocm10` pair from the ROCm TE index, plus the torch
-# flavour from the multi-arch staging index.
-TE_CORE_INDEX="https://stable.repo.amd.com/rocm/transformer_engine/whl-next/"
-TE_INDEX="https://rocm.frameworks-devreleases.amd.com/whl-multi-arch-staging/"
-TE_VERSION="2.17.0+rocm10.0.0"
-# v26.7 lowers this from 2.38. The native code now ships as
-# `transformer_engine_rocm10`, a manylinux_2_28 wheel whose libtransformer_engine.so
-# needs no symbol newer than GLIBC_2.27; the torch flavour is a small sdist built
-# locally. v26.6's wheels were Ubuntu 24.04 builds and genuinely needed 2.38.
-# Verified on Ubuntu 22.04 / glibc 2.35: installs and imports cleanly.
-TE_WHEEL_MIN_GLIBC="2.28"
+# The Dockerfile pins torch and torchaudio exactly but resolves torchvision as
+# `==0.29.0a0` and apex unpinned, leaving the +rocm local label to the resolver.
+# These are the versions read out of the published rocm/primus:v26.8 image, i.e.
+# the exact set the Dockerfile resolved to, so a bare-metal install cannot pick
+# up a build for a different ROCm line.
+PYTORCH_VERSION="2.14.0+rocm10.1.0"
+ROCM_SDK_VERSION="10.1.0"
+TORCHAUDIO_VERSION="2.11.0+rocm10.1.0"
+TORCHVISION_VERSION="0.29.0a0+rocm10.1.0"
+APEX_VERSION="1.14.0+rocm10.1.0"
+# v26.8 builds TransformerEngine from source again (v26.7 installed wheels). The
+# Dockerfile names the commit TE_VERSION; the same name is kept here. CK fused
+# attention is JIT-compiled at run time from an aiter tree that TE's QoLA tool
+# checks out at the commit its manifest pins; stage_te keeps that tree under
+# $WORKSPACE_DIR/deps/te-aiter, where the image keeps /workspace/deps/te-aiter.
 TE_REPO="https://github.com/ROCm/TransformerEngine.git"
-# NEEDS CONFIRMATION for v26.7: the v26.6 wheel carried its source commit in the
-# local label (…a20260727.e028a6c), but 2.17.0+rocm10.0.0 does not, and the
-# Dockerfile no longer checks TE out, so the commit cannot be derived from either.
-# This is still the v26.6 commit and only affects the source-build fallback path.
-TE_COMMIT="e028a6c"
+TE_VERSION="130099ce48dc806398611de9960f8e0c486ad5f1"
+# Numerically validated gfx950 backward attention payload, assembled and dropped
+# into the te-aiter tree before TE is built. Only used on gfx950.
+BWD_ATTN_ASM_REPO="https://github.com/mawad-amd/bwd-attn-asm.git"
+BWD_ATTN_ASM_REF="9b9fb6444f3fee388617f62432c3faea74079377"
+BWD_ATTN_SOURCE_SYMBOL="_ZN5aiter43fmha_bwd_hd64_bf16_causal_a16_rtz_recompileE"
+BWD_ATTN_SYMBOL="_ZN5aiter44fmha_bwd_hd64_bf16_causal_a16_rtne_recompileE"
+BWD_ATTN_SLOT="bwd_hd64_bf16_causal_a16_rtne.co"
+# v26.8 builds flash-attention from the ROCm fork again (tag v2.8.4.1-cktile).
+# PyPI flash-attn compiles the full CK-tile FMHA instance set, which OOM-kills a
+# single translation unit at any -j; the fork's curated set builds cleanly.
+FA_REPO="https://github.com/ROCm/flash-attention.git"
+FA_REF="5301a359f59ef8fa10f211618d9f7a69716a8898"
 TORCHTUNE_REPO="https://github.com/pytorch/torchtune.git"
 TORCHTUNE_BRANCH="b4c98ac2a37f0397d64c22579aed415ce7264db6"
 TORCHAO_REPO="https://github.com/pytorch/ao.git"
@@ -118,22 +110,20 @@ MAMBA_REPO="https://github.com/AndreasKaratzas/mamba.git"
 MAMBA_BRANCH="enable-primus-hybrid-models"
 TVM_FFI_VERSION="0.1.11"
 PRIMUS_REPO="https://github.com/AMD-AGI/Primus.git"
-# The v26.7.0 tag commit (2026-09-02), which is what Dockerfile.primus-v26.8
-# pins. This is also the `release/v26.8` tip and the `v26.7.0` tag; the commit is
-# used rather than the branch so the install keeps matching the image even if later
-# commits land on the branch.
-PRIMUS_BRANCH="2631e68dd8b658ab1f991cbc671d538205a51fee"
+# The commit Dockerfile.primus-v26.8 pins (2026-10-02, on `release/v26.8`). The
+# commit is used rather than the branch so the install keeps matching the image
+# even though later commits have landed on the branch.
+PRIMUS_BRANCH="1f4f6f6e02798f97929777b2270ea019c74f36de"
 AITER_REPO="https://github.com/ROCm/aiter.git"
-AITER_COMMIT="0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e"
+AITER_COMMIT="b4d9154d125e09efbe098d986e40fea3549c1244"
 TURBO_REPO="https://github.com/AMD-AGI/Primus-Turbo.git"
-# The commit Dockerfile.primus-v26.8 pins; ships as primus-turbo 0.4.1.dev33.
-TURBO_COMMIT="6d5ff979eb019fbbcd91790ac812024cca05a882"
-# aiter pins `flydsl==0.1.7` and Primus-Turbo wants `flydsl>=0.2.0`, so one of
-# them is always unsatisfied; Turbo installs last and wins. aiter only needs
+# The commit Dockerfile.primus-v26.8 pins; ships as primus-turbo 0.5.1.dev7.
+TURBO_COMMIT="9c645c5fe1c9179a4a26373466d8637801185d87"
+# Primus-Turbo itself pins `flydsl==0.2.4`; it is spelled out here because Turbo
+# is installed with --no-deps (see stage_turbo). aiter only needs
 # `flydsl.expr.vector` at runtime, which survived until 0.3.0 removed it -- and
 # with it aiter's whole CK/HIP JIT path ("CK and HIP ops are disabled. Triton ops
-# remain available."). 0.2.4 is the newest release that satisfies Turbo and still
-# keeps aiter whole.
+# remain available.").
 # Primus-Turbo's requirements.txt drags setuptools down to 69.5.1, which then
 # stays in the venv. The Dockerfile hits the same downgrade via FBGEMM's
 # requirements and re-pins immediately afterwards; do the same so the venv ends
@@ -252,9 +242,9 @@ stage_venv() {
         local have
         have="$("$VENV_DIR/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
         [ "$have" = "$PRIMUS_PYTHON_VERSION" ] || die \
-"existing venv at $VENV_DIR is Python $have, but v26.7 requires $PRIMUS_PYTHON_VERSION.
-  The pinned torch nightly ships a cp312 Linux wheel only, so an older venv
-  cannot be upgraded in place. Remove it and re-run:
+"existing venv at $VENV_DIR is Python $have, but this environment is built on
+  Python $PRIMUS_PYTHON_VERSION, matching the v26.8 image. A venv cannot change its
+  interpreter in place. Remove it and re-run:
       rm -rf '$VENV_DIR' && bash setup.sh"
     else
         "$PRIMUS_PYTHON" -m venv "$VENV_DIR" || die "venv creation failed"
@@ -275,7 +265,7 @@ stage_venv() {
 
 stage_torch() {
     reload_env
-    log "Installing PyTorch ${PYTORCH_VERSION} + ROCm SDK (arch: $PYTORCH_ROCM_ARCH) from nightly index"
+    log "Installing PyTorch ${PYTORCH_VERSION} + ROCm SDK ${ROCM_SDK_VERSION} (arch: $PYTORCH_ROCM_ARCH)"
     # Early pip deps (Dockerfile block before torch). apex declares cxxfilt and
     # pytest requirements that the nightly index does not serve, so these have
     # to land before the torch install or its resolve fails.
@@ -324,6 +314,8 @@ stage_torch() {
         "apex==${APEX_VERSION}" \
         "${arch_args[@]}"
 
+    patch_apex_cxx20
+
     log "Running rocm-sdk init"
     rocm-sdk init
     relink_comgr
@@ -333,6 +325,27 @@ stage_torch() {
     log "ROCM_PATH=$ROCM_PATH"
     write_pip_constraints
     python -c "import torch; print('torch', torch.__version__, 'cuda avail', torch.cuda.is_available())"
+}
+
+# apex JIT-compiles its fused wgrad kernel at run time through
+# apex/op_builder/builder.py, which hardcodes -std=c++17 and so hits a C++20
+# #error on the first fused-wgrad call. Same sed as Dockerfile.primus-v26.8,
+# which also moves the from-source builds below to C++20.
+patch_apex_cxx20() {
+    local f
+    f="$(python - <<'PY'
+import os, sysconfig
+for base in {sysconfig.get_paths()[k] for k in ("purelib", "platlib")}:
+    p = os.path.join(base, "apex", "op_builder", "builder.py")
+    if os.path.exists(p):
+        print(p)
+        break
+PY
+)"
+    [ -n "$f" ] || die "apex/op_builder/builder.py not found; did the apex wheel install?"
+    sed -i 's/-std=c++17/-std=c++20/g' "$f"
+    grep -q -- '-std=c++17' "$f" && die "apex C++20 patch did not apply to $f"
+    log "Patched $f to -std=c++20"
 }
 
 # rocm-sdk-core and rocm-sdk-devel both ship libamd_comgr.so.3 as separate
@@ -374,11 +387,16 @@ PY
 
 stage_flash_attn() {
     reload_env
-    # v26.6 switched from the ROCm/flash-attention git fork to the pip package.
-    log "Installing flash-attn==${FLASH_ATTN_VERSION} (--no-build-isolation)"
-    MAX_JOBS="$MAX_JOBS" GPU_ARCHS="$PYTORCH_ROCM_ARCH" pipi \
-        --no-build-isolation "flash-attn==${FLASH_ATTN_VERSION}" \
-        || die "flash-attn install failed"
+    log "Building flash-attention @ $FA_REF (ROCm fork, CK-tile; arch: $PYTORCH_ROCM_ARCH)"
+    fresh_clone "$FA_REPO" flash-attention --recursive
+    ( cd "$SRC_DIR/flash-attention" \
+        && git checkout "$FA_REF" \
+        && git submodule update --init --recursive \
+        && FLASH_ATTENTION_FORCE_BUILD=TRUE \
+           MAX_JOBS="$MAX_JOBS" \
+           GPU_ARCHS="$PYTORCH_ROCM_ARCH" \
+           pipi --no-build-isolation . ) || die "flash-attention build failed"
+    rm -rf "$SRC_DIR/flash-attention"
     python -c "import flash_attn; print('flash_attn', flash_attn.__version__)" \
         || die "flash_attn installed but cannot be imported"
 }
@@ -400,16 +418,16 @@ for base in {sysconfig.get_paths()[k] for k in ("purelib", "platlib")}:
 PY
 )"
     if [ -z "$f" ]; then
-        # Both install paths ship this today; tolerate a layout change upstream
-        # rather than failing the build over a race-condition mitigation.
+        # TE ships this today; tolerate a layout change upstream rather than
+        # failing the build over a race-condition mitigation.
         log "ck_jit_compile.sh not present, nothing to patch"
         return 0
     fi
     # The point of the patch is only that a lost `mv -n` race must not fail the
     # build. Accept any form that already tolerates it: our own `2>/dev/null ||
-    # true`, or upstream's own fix. TE 2.17 (v26.7) ships
-    # `mv -n ... || [ -f "$OUTPUT" ]` and the v26.7 Dockerfile consequently
-    # dropped the sed that v26.6 applied, so on v26.7 there is nothing to do.
+    # true`, or upstream's own fix. TE 2.17 and later ship
+    # `mv -n ... || [ -f "$OUTPUT" ]` (the v26.8 source build included), which is
+    # why the Dockerfiles stopped applying the sed v26.6 used.
     if grep -qE 'mv -n "\$_TMP_SO" "\$OUTPUT"[[:space:]]*($|\|\||2>)' "$f" \
         && grep -qE 'mv -n "\$_TMP_SO" "\$OUTPUT"[[:space:]]+(2>/dev/null|\|\|)' "$f"; then
         log "ck_jit_compile.sh already tolerates a lost mv race, nothing to patch"
@@ -421,108 +439,102 @@ PY
     log "Patched $f"
 }
 
-host_glibc() { ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$'; }
-
-# version_ge <a> <b> -> true when a >= b
-version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
-
-# The v26.5 wheels only load where glibc is new enough; otherwise build the same
-# commit locally. Force either path with PRIMUS_TE_MODE=wheel|source.
-resolve_te_mode() {
-    local mode="${PRIMUS_TE_MODE:-auto}"
-    if [ "$mode" != auto ]; then echo "$mode"; return 0; fi
-    local glibc; glibc="$(host_glibc)"
-    if [ -n "$glibc" ] && version_ge "$glibc" "$TE_WHEEL_MIN_GLIBC"; then
-        echo wheel
-    else
-        echo source
-    fi
+# The gfx950 backward attention payload: assembled from bwd-attn-asm with the
+# kernel symbol renamed to the slot the TE build expects, then installed into
+# the te-aiter tree. Skipped when gfx950 is not a target, since nothing else
+# loads it.
+build_bwd_attn_payload() {  # build_bwd_attn_payload <te_aiter_dir>
+    local aiter_dir="$1"
+    case ";${PYTORCH_ROCM_ARCH};" in
+        *";gfx950;"*) ;;
+        *) log "gfx950 not in PYTORCH_ROCM_ARCH; skipping the gfx950 backward attention payload"; return 0 ;;
+    esac
+    log "Assembling the gfx950 backward attention payload @ $BWD_ATTN_ASM_REF"
+    fresh_clone "$BWD_ATTN_ASM_REPO" bwd-attn-asm
+    ( cd "$SRC_DIR/bwd-attn-asm" \
+        && git checkout "$BWD_ATTN_ASM_REF" \
+        && sed "s/${BWD_ATTN_SOURCE_SYMBOL}/${BWD_ATTN_SYMBOL}/g" \
+               kernels/bwd_d64_v3_causal_opt_16x32.s > "$SRC_DIR/bwd_attn.s" \
+        && amdclang -x assembler -target amdgcn-amd-amdhsa -mcpu=gfx950 \
+               -o "$SRC_DIR/bwd_attn.co" "$SRC_DIR/bwd_attn.s" \
+        && install -m 0644 "$SRC_DIR/bwd_attn.co" \
+               "$aiter_dir/hsa/gfx950/fmha_v3_bwd/${BWD_ATTN_SLOT}" ) \
+        || die "gfx950 backward attention payload build failed"
+    rm -rf "$SRC_DIR/bwd-attn-asm" "$SRC_DIR/bwd_attn.s" "$SRC_DIR/bwd_attn.co"
 }
 
-# TE's own dependencies, needed by both install paths. TE_INDEX serves only the
-# transformer-engine packages, so pip cannot fall back to PyPI for these while
-# --index-url points there; they must already be installed. The Dockerfile gets
-# einops transitively from flash-attention and onnx from onnxscript -- install
-# both explicitly rather than relying on that.
-install_te_deps() {
-    pipi \
-        pybind11==3.0.4 \
-        importlib-metadata==8.7.1 \
-        onnxscript==0.7.0 \
-        pydantic==2.13.4 \
-        nvdlfw_inspect==0.2.2 \
-        einops==0.9.0.dev0 \
-        onnx
-}
-
-stage_te_wheel() {
-    log "Installing TransformerEngine $TE_VERSION from the ROCm staging index"
-    install_te_deps
-    # transformer_engine_rocm_torch ships as an sdist: the torch glue layer is
-    # compiled here against the installed torch (hence --no-build-isolation),
-    # and it pulls the prebuilt transformer_engine_rocm7 core wheel.
-    MAX_JOBS="$MAX_JOBS" GPU_ARCHS="$PYTORCH_ROCM_ARCH" pipi \
-        --index-url "$TE_CORE_INDEX" \
-        --pre \
-        --no-build-isolation \
-        "transformer_engine==${TE_VERSION}" \
-        "transformer_engine_rocm10==${TE_VERSION}" \
-        || die "TransformerEngine (core) install failed"
-    $PIP install \
-        --index-url "$TE_INDEX" \
-        --pre \
-        --no-build-isolation \
-        "transformer_engine_rocm_torch==${TE_VERSION}" \
-        || die "TransformerEngine (torch flavour) install failed"
-}
-
-stage_te_source() {
-    log "Building TransformerEngine from source @ $TE_COMMIT (glibc $(host_glibc) < $TE_WHEEL_MIN_GLIBC, so the v26.7 wheels cannot load)"
-    # Drop any previously wheel-installed TE, otherwise the unusable prebuilt
-    # core library stays behind and keeps winning the import.
-    $PIP uninstall -y transformer_engine_rocm_torch transformer_engine_rocm7 \
-        transformer_engine transformer_engine_torch >/dev/null 2>&1 || true
-    install_te_deps
+# TransformerEngine from source, as Dockerfile.primus-v26.8 builds it: QoLA
+# checks out the aiter commit TE's manifest pins, the gfx950 payload is dropped
+# into that tree, and three source patches are applied before the build:
+#   * cdna3 kittens: cast away hipFuncSetAttribute's unused return value;
+#   * cdna4 kittens: stub the blockwise FP8 backend, as the image does;
+#   * userbuffers-host.cpp: drop the dead cuda_nvml.h include, which hipify turns
+#     into rocm_smi/rocm_smi.h -- a header the rocm-sdk wheels do not ship.
+# The NVTE_* switches below are build-time only, which is why env.sh does not
+# export them.
+stage_te() {
+    reload_env
+    local aiter_dir="$WORKSPACE_DIR/deps/te-aiter"
+    log "Building TransformerEngine from source @ $TE_VERSION (arch: $PYTORCH_ROCM_ARCH; aiter tree: $aiter_dir)"
+    # Drop any TE left by an older install (v26.7 shipped three wheel
+    # distributions), otherwise a stale prebuilt core library keeps winning the import.
+    $PIP uninstall -y transformer_engine transformer_engine_rocm10 transformer_engine_rocm7 \
+        transformer_engine_rocm_torch transformer_engine_torch >/dev/null 2>&1 || true
     pipi psutil
+    rm -rf "$aiter_dir"
+    mkdir -p "$(dirname "$aiter_dir")"
     fresh_clone "$TE_REPO" TransformerEngine --recursive
-    # NVTE_FRAMEWORK/NVTE_USE_ROCM/NVTE_ROCM_ARCH/NVTE_USE_HIPBLASLT only matter
-    # for a from-source build, which is why env.sh no longer exports them.
     ( cd "$SRC_DIR/TransformerEngine" \
-        && git checkout "$TE_COMMIT" \
+        && git checkout "$TE_VERSION" \
         && git submodule update --init --recursive \
-        && MAX_JOBS="$MAX_JOBS" \
+        && PYTHONPATH="$PWD/3rdparty/QoLA:${PYTHONPATH:-}" \
+           python -m qola.cli checkout \
+               --manifest transformer_engine/common/ck_fused_attn/qola_manifest.toml \
+               --aiter-root "$aiter_dir" ) || die "TransformerEngine checkout / QoLA aiter checkout failed"
+    build_bwd_attn_payload "$aiter_dir"
+    # The single quotes in the printf below are deliberate: the C++ is literal text.
+    ( cd "$SRC_DIR/TransformerEngine" \
+        && sed -i 's/hipFuncSetAttribute(/(void)hipFuncSetAttribute(/g' \
+               transformer_engine/common/gemm/kittens/cdna3/blockwise_fp8_gemm.cpp \
+        && printf '#include "../kittens_common.h"\nBlockwiseGemmBackend *BlockwiseGemmBackend::get_cdna4() { return nullptr; }\n' \
+               > transformer_engine/common/gemm/kittens/cdna4/blockwise_fp8_gemm.cpp \
+        && sed -i '\|#include "common/util/cuda_nvml.h"|d' \
+               transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers-host.cpp \
+        && CXXFLAGS="-Wno-error=unused-value" \
+           HIPFLAGS="-Wno-error -Wno-unused-value" \
            NVTE_FRAMEWORK=pytorch \
            NVTE_USE_ROCM=1 \
            NVTE_USE_HIPBLASLT=1 \
            NVTE_ROCM_ARCH="$PYTORCH_ROCM_ARCH" \
+           NVTE_FUSED_ATTN_AOTRITON=0 \
+           NVTE_FUSED_ATTN_CK=1 \
+           NVTE_CK_JIT=1 \
+           NVTE_CK_FUSED_ATTN_PATH="" \
+           NVTE_AITER_SOURCE_DIR="$aiter_dir" \
+           NVTE_BUILD_MAX_JOBS="$MAX_JOBS" \
+           NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \
+           CU_NUM=304 \
+           CMAKE_BUILD_PARALLEL_LEVEL="$MAX_JOBS" \
            GPU_ARCHS="$PYTORCH_ROCM_ARCH" \
            pipi --no-build-isolation . ) || die "TransformerEngine source build failed"
     rm -rf "$SRC_DIR/TransformerEngine"
-}
-
-stage_te() {
-    reload_env
-    local mode; mode="$(resolve_te_mode)"
-    case "$mode" in
-        wheel)  stage_te_wheel ;;
-        source) stage_te_source ;;
-        *) die "PRIMUS_TE_MODE must be one of auto, wheel, source (got '$mode')" ;;
-    esac
     patch_te_ck_jit
-    python -c "import transformer_engine" 2>/dev/null \
-        || die "TransformerEngine installed but cannot be imported. Re-run with
-  PRIMUS_TE_MODE=source to build it against this host's toolchain:
-      bash setup.sh te"
+    python -c "import transformer_engine.pytorch" \
+        || die "TransformerEngine built but transformer_engine.pytorch cannot be imported"
 }
 
 stage_torchtune() {
     reload_env
     log "Installing torchtune @ $TORCHTUNE_BRANCH (with use_grouped_mm patch)"
     fresh_clone "$TORCHTUNE_REPO" torchtune
+    # huggingface-hub is capped below 2: hub 2.x conflicts with tokenizers<2.0,
+    # so pip backtracks tokenizers to 0.13.3, which has no cp312 wheel and fails
+    # to build without Rust. The image applies the same cap in its Flux stage,
+    # which runs before torchtune there but is skipped here.
     ( cd "$SRC_DIR/torchtune" \
         && git checkout "$TORCHTUNE_BRANCH" \
         && sed -i 's/use_grouped_mm = True/use_grouped_mm = False/g' torchtune/modules/moe/utils.py \
-        && pipi . ) || die "torchtune install failed"
+        && pipi . "huggingface-hub<2" ) || die "torchtune install failed"
     rm -rf "$SRC_DIR/torchtune"
 }
 
@@ -546,13 +558,13 @@ stage_pydeps() {
         av==16.0.1 \
         transformers==5.10.0 \
         optree==0.18.0 \
-        sympy \
+        sympy==1.14.0 \
         accelerate==1.9.0 \
         trl==0.21.0 \
         tensorboard==2.20.0 \
         peft \
         scipy \
-        einops==0.9.0.dev0 \
+        einops \
         flask-restful \
         nltk \
         pytest \
@@ -582,6 +594,7 @@ stage_grouped_gemm() {
     ( cd "$SRC_DIR/grouped_gemm" \
         && git checkout "$GROUPED_GEMM_BRANCH" \
         && git submodule update --init --recursive \
+        && sed -i 's/-std=c++17/-std=c++20/g' setup.py \
         && pipi --no-build-isolation . ) || die "grouped_gemm build failed"
     rm -rf "$SRC_DIR/grouped_gemm"
 }
@@ -592,6 +605,7 @@ stage_causal_conv1d() {
     fresh_clone "$CAUSAL_CONV1D_REPO" causal-conv1d
     ( cd "$SRC_DIR/causal-conv1d" \
         && git checkout "$CAUSAL_CONV1D_BRANCH" \
+        && sed -i 's/-std=c++17/-std=c++20/g' setup.py \
         && pipi --no-build-isolation . ) || die "causal-conv1d build failed"
     rm -rf "$SRC_DIR/causal-conv1d"
 }
@@ -630,6 +644,12 @@ stage_mamba() {
     # of every unpinned dep as .egg files, clobbering our pins (it pulled
     # transformers 5.x, removed accelerate/trl, and dragged in NVIDIA CUDA
     # packages). pip respects already-installed versions.
+    #
+    # The complex-valued selective_scan backward kernels are dropped, as in the
+    # image: the ROCm 10.1 LLVM crashes ("Cannot select: f32 = Constant<-1>") when
+    # LTO-linking them for gfx942/gfx950, and real-valued Mamba/Mamba-2 never use
+    # a complex A matrix. The ComplexFloat dispatch branch goes too, so nothing
+    # references the dropped kernels under `ld.lld --no-undefined`.
     ( cd "$SRC_DIR/mamba" \
         && pipi "apache-tvm-ffi==${TVM_FFI_VERSION}" \
            "nvidia-cuda-nvdisasm==${NVDISASM_VERSION}" \
@@ -637,6 +657,9 @@ stage_mamba() {
         && sed -i '/namespace cuda {/,/^    }/{/namespace cuda {/d;/namespace std = ::std;/d;/^    }$/d;}' \
                csrc/selective_scan/uninitialized_copy.cuh \
         && sed -i 's/::cuda::std::/::std::/g' csrc/selective_scan/uninitialized_copy.cuh \
+        && sed -i '/selective_scan_bwd_fp32_complex\.cu/d;/selective_scan_bwd_fp16_complex\.cu/d;/selective_scan_bwd_bf16_complex\.cu/d' setup.py \
+        && sed -i '/} else if (WTYPE == at::ScalarType::ComplexFloat) {/,+2d' csrc/selective_scan/selective_scan.cpp \
+        && sed -i 's/-std=c++17/-std=c++20/g' setup.py \
         && pipi --no-build-isolation . ) || die "mamba build failed"
     rm -rf "$SRC_DIR/mamba"
     # Ahead of the check below, which then doubles as proof mamba survives it.
@@ -711,15 +734,16 @@ stage_turbo() {
     reload_env
     ensure_pip_constraints
     log "Building Primus-Turbo @ $TURBO_COMMIT"
-    # Installed with --no-deps on purpose. Primus-Turbo's setup.py hard-pins
-    # upstream `triton==3.7.0`, but torch is built against ROCm's
-    # `triton==3.7.1+git...rocm...`. Letting the upstream wheel win (as the
-    # unconstrained Dockerfile does) breaks this environment: ROCm's HIP runtime
-    # already loads its own libLLVM.so.23 from the pip SDK, and upstream triton
-    # bundles a second, statically linked LLVM, so importing it segfaults inside
-    # LLVM's static initialisers. That takes down torch._dynamo, aiter, torchao
-    # and mamba_ssm. Keeping ROCm's triton fixes all of them, so install without
-    # deps and supply the real runtime requirements explicitly.
+    # Installed with --no-deps on purpose. Up to v26.7 Primus-Turbo's setup.py
+    # hard-pinned upstream `triton==3.7.0`, and letting that wheel replace ROCm's
+    # triton breaks this environment: ROCm's HIP runtime already loads its own
+    # libLLVM.so from the pip SDK, and upstream triton bundles a second,
+    # statically linked LLVM, so importing it segfaults inside LLVM's static
+    # initialisers -- taking down torch._dynamo, aiter, torchao and mamba_ssm.
+    # The v26.8 commit relaxes this to `triton>=3.7.0`, which ROCm's
+    # 3.8.0+git...rocm10.1.0 satisfies, but the install stays --no-deps: it is the
+    # tested path, and it keeps a future re-pin from undoing the fix. The real
+    # runtime requirements (scipy, flydsl) are supplied explicitly.
     #
     # Disable the DeepEP internode path. Primus-Turbo probes for rocSHMEM and,
     # finding none, falls back to the pip ROCm SDK dir, which does exist and even
@@ -743,6 +767,7 @@ stage_turbo() {
         && pipi "setuptools==${SETUPTOOLS_VERSION}" \
         && pipi scipy "flydsl==${FLYDSL_VERSION}" \
         && GPU_ARCHS="$PYTORCH_ROCM_ARCH" \
+           PRIMUS_TURBO_FRAMEWORK=PYTORCH \
            ROCSHMEM_HOME="$rocshmem_home" \
            pipi --no-build-isolation --no-deps . -v ) || die "Primus-Turbo build failed"
     rm -rf "$SRC_DIR/Primus-Turbo"
@@ -751,12 +776,12 @@ stage_turbo() {
     python -c "from flydsl.expr import vector" 2>/dev/null \
         || die "flydsl ${FLYDSL_VERSION} has no flydsl.expr.vector, so aiter's CK/HIP
   ops would be disabled. Pick a flydsl that still exports it and satisfies
-  Primus-Turbo's flydsl>=0.2.0."
+  Primus-Turbo's own flydsl pin."
 }
 
 stage_boto() {
     reload_env
-    log "Installing boto3/botocore and CVE-fix pins from the v26.7 image"
+    log "Installing boto3/botocore and CVE-fix pins from the v26.8 image"
     pipi boto3==1.35.42 botocore==1.35.99
     pipi cryptography==50.0.0 diffusers==0.38.0 "jaraco.context==6.1.0" pyarrow==23.0.1 hydra-core==1.3.4
     # mlflow caps cryptography<50; --no-deps keeps the 50.0.0 pin above.
