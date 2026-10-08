@@ -23,7 +23,7 @@ class WorldMirrorAdapter(BackendAdapter):
         if not hasattr(params, "worldmirror"):
             raise ValueError(
                 "World Mirror module config is missing the 'worldmirror' block. "
-                "Point model: at stage1_hypersim.yaml or stage2_hypersim.yaml."
+                "Point model: at stage1.yaml, stage2.yaml, stage1_hypersim.yaml, or stage2_hypersim.yaml."
             )
         try:
             hydra_config = params.worldmirror.hydra_config

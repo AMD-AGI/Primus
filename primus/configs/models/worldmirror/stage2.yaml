@@ -1,0 +1,12 @@
+# Stage 2 from the official World Mirror recipe: freeze the stage-1 modules
+# and train the Gaussian head. Load weights with pretrained. Do not resume
+# the stage-1 optimizer. gsplat rendering stays float32 inside World Mirror.
+worldmirror:
+  repo_path: ${WORLD_MIRROR_PATH:}
+  hydra_config: stage2.yaml
+  attention_backend: aiter
+  hypersim_dir: ${HYPERSIM_DIR:/shared_nfs/3dwm/hywm-3dwm-sub20/hypersim}
+  max_steps: ${MAX_STEPS:100000}
+  max_images_per_gpu: ${MAX_IMAGES_PER_GPU:24}
+  pretrained: ${PRETRAINED_CKPT:}
+  output_dir: ${OUTPUT_DIR:./output/worldmirror-stage2}

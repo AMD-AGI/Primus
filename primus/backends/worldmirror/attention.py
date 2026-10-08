@@ -6,7 +6,7 @@
 
 """Route World Mirror attention through aiter when that package is installed.
 
-The amd_dev checkout calls PyTorch SDPA. This wraps that call inside the
+The official checkout calls PyTorch SDPA. This wraps that call inside the
 World Mirror attention module. Float32 queries, keys, and values are cast to
 bf16 for aiter and the result is cast back. Dropout and head dims above 256
 stay on SDPA. If aiter is missing, SDPA is used and a warning is logged once.

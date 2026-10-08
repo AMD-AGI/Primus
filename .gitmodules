@@ -32,5 +32,5 @@
 	branch = main
 [submodule "third_party/HunyuanWorld-Mirror-rocm"]
 	path = third_party/HunyuanWorld-Mirror-rocm
-	url = https://github.com/AMD-AGI/HunyuanWorld-Mirror-rocm.git
-	branch = amd_dev
+	url = https://github.com/Tencent-Hunyuan/HunyuanWorld-Mirror.git
+	branch = main
