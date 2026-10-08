@@ -65,6 +65,10 @@ def make_ddp_init(original):
     def wrapped(self, *args, **kwargs):
         result = original(self, *args, **kwargs)
         if os.getenv("MEGATRON_MXFP4_PARAM_GATHER", "0") == "1":
+            if os.getenv("MEGATRON_MXFP4_PARAM_GATHER_SHARED_WORKSPACE", "0") == "1":
+                from primus.backends.megatron.core.distributed.mxfp4_training import assign_shared_workspaces
+
+                self._primus_mxfp4_workspaces = assign_shared_workspaces(self.param_to_bucket_group)
 
             for param, group in self.param_to_bucket_group.items():
                 if getattr(param, "_primus_mxfp4_comm_candidate", False):

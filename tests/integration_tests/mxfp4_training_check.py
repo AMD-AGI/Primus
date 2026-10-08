@@ -138,6 +138,10 @@ def main():
     state = None
     try:
         if args.cpu:
+            if os.getenv("MEGATRON_MXFP4_PARAM_GATHER_SHARED_WORKSPACE", "0") == "1":
+                bucket._primus_mxfp4_workspace = runtime.ByteAllGather(
+                    runtime.packed_workspace_width_bound(bucket, world), dist.group.WORLD, device, False
+                )
             state = runtime.PackedExpertBucket(bucket, dist.group.WORLD, use_sdma=False)
         else:
 
@@ -192,8 +196,24 @@ def main():
                 assert not bookkeeping_group.param_gather_dispatched
                 assert state.generation == step + 1, "duplicate parameter gather"
                 assert next_bucket.dispatches == (1 if step < 2 else 0), "lost next-bucket prefetch"
-                if step == 2:
+                if step == 2 and not state.shared_workspace:
                     assert all(weight.pair is None for weight in state.weights), "eager evaluation caches"
+            if state.shared_workspace:
+                assert all(weight.pair is not None for weight in state.weights)
+                # Simulate the next bucket reusing the same allocation with a
+                # different rank width. Previously assembled caches and BF16
+                # ordinary weights must survive complete payload destruction.
+                state.packed.storage.fill_(205)
+                borrowed = state.packed._owner.narrow(256)
+                borrowed.local.fill_(rank + step)
+                borrowed.launch().wait()
+                for peer in range(world):
+                    torch.testing.assert_close(
+                        borrowed.rows[peer], torch.full_like(borrowed.rows[peer], peer + step), rtol=0, atol=0
+                    )
+                borrowed.close()
+                if rank == 0:
+                    print(f"[MXFP4-COMM-PREFLIGHT] step={step} shared_workspace_reuse=PASS", flush=True)
             # Ordinary BF16 weights must be ready before any forward consumer,
             # independently of the explicit full-BF16 materialization below.
             for param, (start, end) in mapping.items():
@@ -357,6 +377,8 @@ def main():
     finally:
         if state is not None:
             state.close()
+        if hasattr(bucket, "_primus_mxfp4_workspace"):
+            bucket._primus_mxfp4_workspace.close()
         bucket.param_data = None
         # Ordinary BF16 parameters also alias the raw symmetric allocation.
         # Release every parameter view before destroying its private pool.

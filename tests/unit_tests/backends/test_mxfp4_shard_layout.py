@@ -129,5 +129,81 @@ class TestShardLayout(unittest.TestCase):
         self.assertEqual(plan, [(2, 0, 16, 20), (2, 10, 22, 24), (3, 0, 24, 25)])
 
 
+class TestSharedWorkspace(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "mxfp4_workspace_test", _PATH.with_name("mxfp4_training.py")
+        )
+        cls.runtime = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cls.runtime
+        spec.loader.exec_module(cls.runtime)
+
+    def test_capacity_bound_covers_uneven_experts_and_bf16_gaps(self):
+        rng = random.Random(4811)
+        for _ in range(250):
+            world, cursor, weights = rng.randint(1, 16), 0, []
+            for _ in range(rng.randint(1, 5)):
+                shape = (rng.randint(1, 4), 32 * rng.randint(1, 9), 32 * rng.randint(1, 8))
+                start = cursor + rng.randint(0, 3000)
+                cursor = start + prod(shape)
+                weights.append((shape, start, cursor))
+            size = (cursor + rng.randint(0, 30000) + world - 1) // world * world
+            bucket = SimpleNamespace(
+                param_data=SimpleNamespace(numel=lambda: size),
+                params=[
+                    SimpleNamespace(shape=shape, _primus_mxfp4_comm_candidate=True) for shape, _, _ in weights
+                ],
+            )
+            capacity = self.runtime.packed_workspace_width_bound(bucket, world)
+            capacity = (capacity + 255) // 256 * 256
+            for rank in range(world):
+                begin, end = rank * (size // world), (rank + 1) * (size // world)
+                expert_elements = sum(
+                    max(0, min(end, stop) - max(begin, start)) for _, start, stop in weights
+                )
+                payload = 2 * (size // world - expert_elements)
+                for shape, start, _ in weights:
+                    ownership, _ = self.runtime.strip_ownership(shape, start, size, world)
+                    payload += ownership[rank][1] * 32 * shape[-1] * 17 // 16
+                self.assertLessEqual((payload + 255) // 256 * 256, capacity)
+
+    def test_pool_selection_preserves_process_group_ownership(self):
+        from unittest import mock
+
+        import torch
+
+        class Param:
+            shape = (1, 32, 32)
+            _primus_mxfp4_comm_candidate = True
+
+        class Group:
+            def __init__(self, process_group, bucket):
+                self.intra_distributed_optimizer_instance_group = process_group
+                self.buckets = [bucket]
+
+        class Workspace:
+            rank = 1
+
+            def __init__(self, width, group, device, use_sdma):
+                self.width, self.group, self.device = width, group, device
+
+        a, b = object(), object()
+        params = [Param() for _ in range(3)]
+        buckets = [
+            SimpleNamespace(params=[p], param_data=torch.empty(2048 * (i + 1), dtype=torch.bfloat16))
+            for i, p in enumerate(params)
+        ]
+        mapping = {p: Group(group, bucket) for p, group, bucket in zip(params, (a, a, b), buckets)}
+        with mock.patch.object(self.runtime.dist, "get_world_size", return_value=2), mock.patch.object(
+            self.runtime, "ByteAllGather", Workspace
+        ):
+            workspaces = self.runtime.assign_shared_workspaces(mapping)
+        self.assertEqual(len(workspaces), 2)
+        self.assertIs(buckets[0]._primus_mxfp4_workspace, buckets[1]._primus_mxfp4_workspace)
+        self.assertIsNot(buckets[0]._primus_mxfp4_workspace, buckets[2]._primus_mxfp4_workspace)
+        self.assertEqual(workspaces[0].width, self.runtime.packed_workspace_width_bound(buckets[1], 2))
+
+
 if __name__ == "__main__":
     unittest.main()

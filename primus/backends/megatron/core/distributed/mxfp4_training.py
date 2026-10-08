@@ -80,6 +80,7 @@ class ByteAllGather:
         self.world, self.rank = dist.get_world_size(group), dist.get_rank(group)
         self.width = max(256, (width + 255) // 256 * 256)
         self.pool = self.symmetric_memory = None
+        self._owner = None
         if use_sdma:
             import torch.distributed._symmetric_memory as symm_mem
 
@@ -98,6 +99,21 @@ class ByteAllGather:
         self.rows = self.storage.view(self.world, self.width)
         self.local = self.rows[self.rank]
 
+    def narrow(self, width):
+        """Borrow a rank-major prefix; caller serializes reuse of its contents."""
+        width = max(256, (width + 255) // 256 * 256)
+        if width > self.width:
+            raise ValueError("packed payload exceeds the shared workspace capacity")
+        view = object.__new__(ByteAllGather)
+        view.group, view.device = self.group, self.device
+        view.world, view.rank, view.width = self.world, self.rank, width
+        view.pool = view.symmetric_memory = None
+        view._owner = self
+        view.storage = self.storage[: self.world * width]
+        view.rows = view.storage.view(self.world, width)
+        view.local = view.rows[self.rank]
+        return view
+
     def launch(self):
         return dist.all_gather_into_tensor(self.storage, self.local, group=self.group, async_op=True)
 
@@ -105,7 +121,52 @@ class ByteAllGather:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         self.local = self.rows = self.storage = None
-        self.symmetric_memory = self.pool = None
+        self.symmetric_memory = self.pool = self._owner = None
+
+
+def packed_workspace_width_bound(bucket, world):
+    """Bound one rank's payload by its BF16 shard plus one crossing strip.
+
+    Owned strips cover the rank's BF16 interval except at its two ends. Only
+    the right end can add elements outside that interval, within one strip.
+    Both supported packed orientations together use fewer than two bytes per
+    weight, so a BF16-sized extra strip is a conservative capacity bound.
+    """
+    if world <= 0 or bucket.param_data.numel() % world:
+        raise ValueError("shared workspace requires evenly sharded buckets")
+    columns = [
+        param.shape[-1] for param in bucket.params if getattr(param, "_primus_mxfp4_comm_candidate", False)
+    ]
+    if not columns:
+        raise ValueError("shared workspace requires expert weights")
+    return 2 * (bucket.param_data.numel() // world + 32 * max(columns))
+
+
+def assign_shared_workspaces(param_to_bucket_group):
+    """Allocate one reusable transport buffer per DDP process group/device."""
+    plans = {}
+    # Keep DDP insertion order across ranks; communicator setup is collective.
+    for bucket_group in dict.fromkeys(param_to_bucket_group.values()):
+        group = bucket_group.intra_distributed_optimizer_instance_group
+        world = dist.get_world_size(group)
+        for bucket in bucket_group.buckets:
+            if not any(getattr(p, "_primus_mxfp4_comm_candidate", False) for p in bucket.params):
+                continue
+            key = (group, bucket.param_data.device)
+            width, buckets = plans.setdefault(key, (0, []))
+            buckets.append(bucket)
+            plans[key] = (max(width, packed_workspace_width_bound(bucket, world)), buckets)
+    workspaces = []
+    for (group, device), (width, buckets) in plans.items():
+        workspace = ByteAllGather(width, group, device, use_sdma=device.type == "cuda")
+        for bucket in buckets:
+            bucket._primus_mxfp4_workspace = workspace
+        workspaces.append(workspace)
+        if workspace.rank == 0:
+            _emit_comm_status(
+                f"[MXFP4-COMM] shared workspace bytes={workspace.storage.numel()} buckets={len(buckets)}"
+            )
+    return workspaces
 
 
 @dataclass
@@ -232,7 +293,13 @@ class PackedExpertBucket:
         self.fallback = (
             ByteAllGather(max(fallback_sizes), group, self.device, use_sdma) if any(fallback_sizes) else None
         )
-        self.packed = ByteAllGather(max(packed_sizes), group, self.device, use_sdma)
+        workspace = getattr(bucket, "_primus_mxfp4_workspace", None)
+        self.shared_workspace = workspace is not None
+        self.packed = (
+            workspace.narrow(max(packed_sizes))
+            if self.shared_workspace
+            else ByteAllGather(max(packed_sizes), group, self.device, use_sdma)
+        )
         # Only the owner of a strip's first element quantizes that strip. Other
         # ranks need not restore its BF16 boundary fragments. Local BF16 values
         # are already authoritative and also need no copy back from the wire.
@@ -326,7 +393,7 @@ class PackedExpertBucket:
             self.packed.local[offset : offset + layout.nbytes].copy_(payload)
         self.work = self.packed.launch()
         self.generation += 1
-        if self.ready_event is not None:
+        if self.ready_event is not None or self.shared_workspace:
             # Complete cache preparation while the preceding layer computes.
             # The consumer waits for this event, not just for the transport.
             self.work.wait()
@@ -334,10 +401,13 @@ class PackedExpertBucket:
             # Synchronous evaluation gathers all buckets before consumption,
             # with no preceding layer compute to overlap. Keep assembly lazy
             # there instead of queuing all cache allocations in advance.
-            if prefetch_cache:
+            # A shared transport buffer must be fully consumed before the
+            # next bucket overwrites it, including synchronous evaluation.
+            if prefetch_cache or self.shared_workspace:
                 for weight in self.weights:
                     weight.assemble_pair()
-            self.ready_event.record(self.preparation_stream)
+            if self.ready_event is not None:
+                self.ready_event.record(self.preparation_stream)
         return self
 
     @torch.no_grad()
@@ -346,7 +416,7 @@ class PackedExpertBucket:
             self.work.wait()
             if self.ready_event is not None:
                 torch.cuda.current_stream(self.device).wait_event(self.ready_event)
-            else:
+            elif not self.shared_workspace:
                 self._restore_bf16_ranges(self.packed, self.ordinary_restore_plan)
             self.work = None
 
