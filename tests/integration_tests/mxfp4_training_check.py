@@ -152,12 +152,25 @@ def main():
             class DDPBinding:
                 @make_ddp_init
                 def __init__(self):
+                    self.ddp_config = ddp_config
+                    self.overlap_param_gather_with_optimizer_step = False
                     self.param_to_bucket_group = {param: bucket_group for param in mapping}
 
             DDPBinding()
             # Match DistributedOptimizer's later partition_buckets call over
             # the same buffers. These bookkeeping groups must not own hooks.
             bookkeeping_group = BucketGroup([bucket], ddp_config, dist.group.WORLD, world)
+
+            class NextBucketProbe:
+                param_gather_dispatched = False
+                dispatches = 0
+
+                def start_param_sync(self):
+                    self.param_gather_dispatched = True
+                    self.dispatches += 1
+
+            next_bucket = NextBucketProbe()
+            bucket_group.next_param_gather_bucket_group = next_bucket
         for step in range(3):
             storage.fill_(float("nan"))
             storage[rank * shard_size : (rank + 1) * shard_size].copy_(local_master.to(torch.bfloat16))
@@ -165,6 +178,8 @@ def main():
                 state.dispatch().wait()
             else:
                 bucket_group.param_gather_dispatched = False
+                next_bucket.param_gather_dispatched = False
+                next_bucket.dispatches = 0
                 # Step 1 exercises the path used by a fused MLP that bypasses
                 # the Linear module's DDP forward hook entirely.
                 if step == 1:
@@ -176,6 +191,7 @@ def main():
                 state = bucket._primus_mxfp4_gather
                 assert not bookkeeping_group.param_gather_dispatched
                 assert state.generation == step + 1, "duplicate parameter gather"
+                assert next_bucket.dispatches == (1 if step < 2 else 0), "lost next-bucket prefetch"
             # Ordinary BF16 weights must be ready before any forward consumer,
             # independently of the explicit full-BF16 materialization below.
             for param, (start, end) in mapping.items():
