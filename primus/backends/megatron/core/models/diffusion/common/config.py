@@ -247,6 +247,7 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_packed_param_gather_prob_bits: int = 0
     mxfp6_packed_param_gather_neutral: str = ""
     mxfp6_dgrad_emit_attn_delta: bool = False
+    mxfp6_single_linear2_cat: bool = False
     mxfp6_bwd_fp4_a6w6_first: int = 0
     mxfp6_bwd_fp4_a6w6_last: int = 0
     # MXFP4 quantization options of the A4W4 packs; see Mxfp6Gates.fp4_*.
@@ -450,6 +451,8 @@ class BaseDiffusionConfig(TransformerConfig):
             )
         if self.mxfp6_dgrad_emit_attn_delta and not (tilescale and self.mxfp6_bwd_fp4_dgrad):
             raise ValueError("mxfp6_dgrad_emit_attn_delta needs mxfp6_gemm_layout 'tilescale' and mxfp6_bwd_fp4_dgrad.")
+        if self.mxfp6_single_linear2_cat and not (tilescale and self.mxfp6_gate_mul_pack):
+            raise ValueError("mxfp6_single_linear2_cat needs mxfp6_gemm_layout 'tilescale' and mxfp6_gate_mul_pack.")
         fp4_opts = {
             k: getattr(self, k)
             for k in (

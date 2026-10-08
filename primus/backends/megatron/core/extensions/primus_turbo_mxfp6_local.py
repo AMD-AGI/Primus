@@ -377,6 +377,15 @@ try:  # forward-FP4 per-shape fallback (`_fwd_fp4_blob`): aiter's A4W4 tilescale
     _A4W4_TS = {ilv: _ts_table(4, 4, 0, ilv) for ilv in (0, 4)}
 except ImportError:
     _A4W4_TS = None
+try:  # mxfp6_single_linear2_cat: the out-proj + fc2 GEMM with the gated residual in its epilogue, {(M, N, K, K2, B)}
+    from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import (
+        a6w6_ts_cat_table,
+        gemm_a6w6_ts_cat_gres_out,
+    )
+
+    _CAT_TS = a6w6_ts_cat_table()
+except ImportError:  # an older Primus-Turbo: the gate never engages
+    _CAT_TS, gemm_a6w6_ts_cat_gres_out = frozenset(), None
 
 
 def _ts_fwd(m, n, k, bias, weight_is_fp4):
@@ -719,10 +728,13 @@ class MXFP6LinearFunction(torch.autograd.Function):
         grad_enabled,
         weight_is_fp4,
         fwd_fp4=False,
+        defer=False,
     ):
         # fwd_fp4 (single-block linear2 only, passed by MXFP6(Gated)MLPProjFunction): the
         # forward runs FlyDSL A4W4 on plain FP4 packs (fmt 8); their columns are the same plain
         # layout the FlyDSL backward reads, so the backward is unchanged.
+        # defer (direct .forward callers only, A6W6 tilescale): pack as usual but leave the GEMM to the caller; the
+        # first output is then its operands (a_row, a_row_scale, b_row, b_row_scale, b_c1).
         out_dtype = input.dtype
         orig_shape = input.shape
         input_2d = input.reshape(-1, input.shape[-1])
@@ -775,6 +787,11 @@ class MXFP6LinearFunction(torch.autograd.Function):
         # Passed unconditionally. Whether the installed aiter can actually fold it is Turbo's to
         # answer -- it probes, and adds the separate pass itself when it cannot -- so there is
         # nothing to gate here and no aiter version for this layer to know about.
+        if defer:
+            if ts is not True or bias is not None:
+                raise ValueError("defer needs an unbiased A6W6 tilescale forward")
+            rows = (a_row, a_row_scale, b_row, b_row_scale, _ppg_c1(weight))
+            return rows, a_col, a_col_scale, b_col, b_col_scale
         output = gemm_fp6_impl(
             a_row,
             a_row_scale,
@@ -813,6 +830,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
             grad_enabled,
             weight_is_fp4,
             _fwd_fp4,
+            *_,
         ) = inputs
 
         # setup_context still runs under no_grad, so this guard is load-bearing: the column
@@ -1314,8 +1332,10 @@ class MXFP6MLPFunction(torch.autograd.Function):
         fwd_fp4=False,
         fwd_fp4_fc1=False,
         bf16_fc1=False,
+        defer_fc2=False,
     ):
         # fwd_fp4: fc2 only (the single block's linear2 half); see MXFP6LinearFunction.
+        # defer_fc2: as MXFP6LinearFunction's defer, for fc2 (the first output is fc2's operands).
         # bf16_fc1: fc1's forward as a bf16 GEMM (mxfp6_fwd_bf16_joint_img_fc1); its backward is unchanged, on column
         # packs of x and w1 taken here from the bf16 operands.
         # fwd_fp4_fc1: fc1's forward in MXFP4 too. Its packs write the same column layouts the A4W4 backward
@@ -1426,6 +1446,11 @@ class MXFP6MLPFunction(torch.autograd.Function):
             w2_row, w2_row_s = _pack_weight_row(w2, weight_is_fp4, ts_2)
             w2_col = w2_col_s = None
 
+        if defer_fc2:
+            if ts_2 is not True:
+                raise ValueError("defer_fc2 needs an A6W6 tilescale fc2")
+            rows = (a_row, a_row_s, w2_row, w2_row_s, _ppg_c1(w2))
+            return rows, y1, x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s
         output = gemm_fp6_impl(
             a_row,
             a_row_s,
@@ -3109,18 +3134,34 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
 
     ``sd_slot``: the attention's softmax_d placeholder (``mxfp6_dgrad_emit_attn_delta``); when the out-projection's
     dgrad can emit softmax_d (``_softmax_d_ok``) its gradient is that softmax_d, else None.
+
+    ``residual`` (``mxfp6_single_linear2_cat``, given only when ``_linear2_cat_ok``): the out-projection and fc2 run as
+    one aiter GEMM over both operand pairs, whose epilogue adds b2 and writes h and ``residual + gate * h``; the
+    Function then returns the block's output and passes ``dy`` through as the residual's gradient.
     """
 
     @staticmethod
-    def forward(x, w1, b1, w2, o, wp, b2, gate, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot=None):
+    def forward(
+        x, w1, b1, w2, o, wp, b2, gate, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot=None, residual=None
+    ):
         # the single block's linear2 (fc2 + out-proj) may run its forward in MXFP4.
         l2 = gates().fwd_fp4_single_linear2
+        cat = residual is not None
         mlp = MXFP6MLPFunction.forward(
-            x, w1, b1, w2, fuse_wgrad_accum, grad_enabled, weight_is_fp4, l2, gates().fwd_fp4_single_fc1
+            x, w1, b1, w2, fuse_wgrad_accum, grad_enabled, weight_is_fp4, l2, gates().fwd_fp4_single_fc1, False, cat
         )
         proj = MXFP6LinearFunction.forward(
-            o, wp, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4, l2
+            o, wp, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4, l2, cat
         )
+        if cat:
+            hid = residual.shape[-1]
+            out = torch.empty_like(residual)
+            h = torch.empty_like(residual)
+            gemm_a6w6_ts_cat_gres_out(
+                *proj[0], *mlp[0], b2, residual.view(-1, hid), gate, out.view(-1, hid), h.view(-1, hid),
+                o.shape[-1], w2.shape[1],
+            )
+            return (out, h) + tuple(mlp[1:]) + tuple(proj[1:])
         h = mlp[0] + b2 + proj[0]
         # (gate * h, h, 9 MLP extras, 4 out-proj column blobs)
         return (gate * h, h) + tuple(mlp[1:]) + tuple(proj[1:])
@@ -3128,10 +3169,11 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
     @staticmethod
     def setup_context(ctx, inputs, output):
         ctx.b4 = _b4()  # the backward uses the formats the forward chose
-        x, w1, b1, w2, o, wp, b2, gate, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot = inputs
+        x, w1, b1, w2, o, wp, b2, gate, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot, residual = inputs
         if not grad_enabled:
             return
         ctx.sd = sd_slot is not None and o.dim() == 3 and o.is_contiguous()  # o is then saved last
+        ctx.cat = residual is not None
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
         ctx.weight_is_fp4 = weight_is_fp4
         ctx.out_dtype = x.dtype
@@ -3221,16 +3263,32 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
             b4=b4,
             softmax_d=None if delta is None else (o.view(-1, ctx.pk), delta, 0),
         )
-        return grad_x, grad_w1, grad_b1, grad_w2, grad_o, grad_wp, grad_b2, grad_gate, None, None, None, delta
+        grad_res = dy if ctx.cat else None
+        return grad_x, grad_w1, grad_b1, grad_w2, grad_o, grad_wp, grad_b2, grad_gate, None, None, None, delta, grad_res
 
 
-def mlp_proj_gated(mlp, proj, x, o, gate, sd_slot=None):
+def _linear2_cat_ok(mlp, proj, x, o, gate, residual, weight_is_fp4):
+    """Whether the single block's out-proj + fc2 can run as one gated-residual GEMM (``mxfp6_single_linear2_cat``):
+    both A6W6 tilescale forwards and aiter has the kernel for the shapes. Plain arithmetic on import-time data."""
+    if not gates().single_linear2_cat or gates().fwd_fp4_single_linear2 or gemm_a6w6_ts_cat_gres_out is None:
+        return False
+    if residual is None or residual.shape != x.shape or not residual.is_contiguous() or gate.stride(-1) != 1:
+        return False
+    m, f, n, pk = x.numel() // x.shape[-1], mlp.linear_fc1.weight.shape[0], proj.weight.shape[0], o.shape[-1]
+    if _ts_fwd(m, n, f, None, weight_is_fp4) is not True or _ts_fwd(m, n, pk, None, weight_is_fp4) is not True:
+        return False
+    return (int(m), int(n), int(pk), int(f), int(gate.shape[0])) in _CAT_TS
+
+
+def mlp_proj_gated(mlp, proj, x, o, gate, sd_slot=None, residual=None):
     """``gate * (mlp(x) + mlp_bias + proj(o))`` as one MXFP6GatedMLPProjFunction, or None.
 
     None when the gate is off, the pair is not eligible for the shared pack, or the gate's
     batch is not a power of two (GateMul takes the batch index as the low bits of the row);
     the caller then takes the shared or separate path as before. ``gate`` is ``[B, H]``,
-    broadcast over the sequence axis of ``x``'s ``[S, B, H]``.
+    broadcast over the sequence axis of ``x``'s ``[S, B, H]``. With ``residual`` the result
+    is the block's output, ``residual + gate * (...)`` (the same expression, or the fused
+    GEMM epilogue under ``mxfp6_single_linear2_cat``).
     """
     if not gates().gate_mul_pack or not _mlp_proj_eligible(mlp, proj):
         return None
@@ -3249,6 +3307,7 @@ def mlp_proj_gated(mlp, proj, x, o, gate, sd_slot=None):
         if gates().fused_small_grads and gates().gate_mul_pack_bias:
             claimed.append(mlp.linear_fc2.bias)  # the backward writes it from the pack's column sums
         _claim_main_grad(*claimed)
+    cat = _linear2_cat_ok(mlp, proj, x, o, gate, residual, proj._weight_is_fp4)
     out = MXFP6GatedMLPProjFunction.apply(
         x,
         mlp.linear_fc1.weight,
@@ -3262,5 +3321,8 @@ def mlp_proj_gated(mlp, proj, x, o, gate, sd_slot=None):
         torch.is_grad_enabled(),
         proj._weight_is_fp4,
         sd_slot,
+        residual if cat else None,
     )
-    return out[0]
+    if cat or residual is None:
+        return out[0]
+    return residual + out[0]

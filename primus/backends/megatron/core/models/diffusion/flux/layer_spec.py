@@ -439,10 +439,10 @@ class FluxSingleTransformerBlock(TransformerLayer):
             # With gate_mul_pack the Function also owns the gate multiply, so its backward
             # receives dy and never materialises gate * dy. Same expression as below.
             gated = mlp_proj_gated(
-                self.mlp, self.self_attention.linear_proj, norm_hidden_states, core_attn_out, gate, sd_slot
+                self.mlp, self.self_attention.linear_proj, norm_hidden_states, core_attn_out, gate, sd_slot, residual
             )
             if gated is not None:
-                return residual + gated, None
+                return gated, None
             shared = mlp_proj_shared(self.mlp, self.self_attention.linear_proj, norm_hidden_states, core_attn_out)
             if shared is None:
                 attention_output, attention_bias = self.self_attention.linear_proj(core_attn_out)

@@ -195,6 +195,12 @@ class Mxfp6Gates:
     # back per call to the attention's own when no kernel matches. Changes numerics within fp32 rounding (another
     # summation order). Needs gemm_layout "tilescale" and bwd_fp4_dgrad.
     dgrad_emit_attn_delta: bool = False
+    # With gate_mul_pack: the single block's out-projection and fc2 forward GEMMs (A6W6 tilescale) run as one aiter
+    # GEMM that sums both into one fp32 accumulator and applies fc2's bias, the gate and the residual add in its store
+    # epilogue (h = proj + fc2 + b2, out = x + gate * h), replacing the two GEMMs and the separate elementwise pass.
+    # Falls back per call when aiter has no kernel for the shape. Changes numerics within bf16 rounding (proj and
+    # fc2 are no longer rounded separately). Needs gemm_layout "tilescale" and gate_mul_pack.
+    single_linear2_cat: bool = False
     # Selective A4W4: the first / last N transformer blocks keep the A6W6
     # backward while the bwd_fp4 gates are on. Forward hooks switch the three bwd_fp4 gates off
     # around those blocks' forwards; every MXFP6 Function captures the flags at forward time
