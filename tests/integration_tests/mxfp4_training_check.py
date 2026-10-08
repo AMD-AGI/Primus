@@ -106,9 +106,12 @@ def main():
 
     # Non-aligned offsets guarantee strips cross rank boundaries, including an
     # expert boundary. Ordinary BF16 parameters share the same bucket.
-    shapes = [(3, 256, 128), (3, 128, 128)]
-    starts = [127, 127 + 3 * 256 * 128]
-    last = starts[1] + 3 * 128 * 128
+    # Use a supported fused-MLP shape in GPU mode. Its activation-quantization
+    # epilogue needs at least four K iterations and a trailing 128-element tile;
+    # the smaller CPU fixture tests ownership without invoking that kernel.
+    shapes = [(3, 256, 128), (3, 128, 128)] if args.cpu else [(4, 1024, 896), (4, 896, 512)]
+    starts = [127, 127 + torch.Size(shapes[0]).numel()]
+    last = starts[1] + torch.Size(shapes[1]).numel()
     numel = ((last + 259 + world * 128 - 1) // (world * 128)) * world * 128
     shard_size = numel // world
     reference_master = torch.sin(torch.arange(numel, device=device).float() * 0.037)
@@ -227,11 +230,14 @@ def main():
                     module._weight_views_registered = True
                     param.grad_added_to_main_grad = False
                     modules.append(module)
+                groups, _, hidden = shapes[0]
+                tokens_per_group = 512
+                tokens = groups * tokens_per_group
                 x = torch.randn(
-                    384, 128, device=device, dtype=torch.bfloat16, generator=generator
+                    tokens, hidden, device=device, dtype=torch.bfloat16, generator=generator
                 ).requires_grad_(True)
                 probs = torch.rand(
-                    384, device=device, dtype=torch.float32, generator=generator
+                    tokens, device=device, dtype=torch.float32, generator=generator
                 ).requires_grad_(True)
                 xr = x.detach().clone().requires_grad_(True)
                 pr = probs.detach().clone().requires_grad_(True)
@@ -242,7 +248,7 @@ def main():
                 bridged_x, w1, pattern = modules[0].prepare_weights(x)
                 bridged_x, w2, pattern2 = modules[1].prepare_weights(bridged_x)
                 assert pattern == pattern2
-                lens = torch.full((3,), 128, device=device, dtype=torch.int64)
+                lens = torch.full((groups,), tokens_per_group, device=device, dtype=torch.int64)
                 out = grouped_mlp_fp4(
                     bridged_x,
                     w1,
