@@ -109,6 +109,9 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `RCCL_MSCCLPP_THRESHOLD` | `1GiB` default | `base_env.sh` | RCCL | MSCCL++ message-size threshold. |
 | `RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING` | `0` in hooks | `runner/helpers/hooks/03_enable_ainic.sh` | RCCL | Stricter GDR flush memory ordering; relevant for some NIC/GPU combos. |
 | `MEGATRON_PARAM_GATHER_BACKEND` | unset | User; `06_enable_sdma_all_gather.sh` forwards it | Megatron Primus patch | Set to `rccl_sdma` to allocate distributed-optimizer parameter buffers from symmetric memory and use the dedicated zero-CTA process group for parameter AllGather. Requires `NCCL_CTA_POLICY` to be unset. |
+| `MEGATRON_MXFP4_PARAM_GATHER` | `0` | User | Turbo grouped experts and RCCL parameter-gather patch | Experimental packed expert-weight AllGather. Requires `MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma`, BF16 model weights, distributed optimizer, and TP=PP=EP=CP=1. Ordinary parameters remain BF16. |
+| `MEGATRON_MXFP4_PARAM_GATHER_FORMAT` | `dual` | User | `mxfp4_training.py` | `dual` transmits both MXFP4 orientations and their scales. Experimental `shared_2d` transmits one nibble orientation and one scale per 32×32 tile, then reconstructs both compute operands without requantization. All ranks must select the same format and matching Turbo implementation. |
+| `MEGATRON_MXFP4_PARAM_GATHER_AUDIT` | `0` | User | DDP parameter-buffer initialization | Logs flat-shard ownership and boundaries for evaluating packed-gather layouts. Does not enable quantized communication by itself. |
 | `MEGATRON_GRAD_REDUCE_BACKEND` | unset | User; `06_enable_sdma_all_gather.sh` forwards it | Megatron Primus patch | Set to `rccl_sdma` to opt gradient ReduceScatter into the same group. Requires `MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma` and `RCCL_CE_REDUCESCATTER=1`. |
 | `RCCL_CE_REDUCESCATTER` | `0` in RCCL | Primus hook sets `1` for the gradient selector | RCCL | Enables CE ReduceScatter, subject to RCCL eligibility checks. |
 | `RCCL_FORCE_CE_REDUCESCATTER` | `0` in RCCL | User | RCCL | Bypasses the zero-CTA, registered-user-buffer, and tuned-size gates; useful for staged large-message testing. Still requires `RCCL_CE_REDUCESCATTER=1`. |
@@ -118,6 +121,22 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `RCCL_DDA_ENABLE` | `1` in RCCL | User | RCCL | Enables DDA collectives. Keep enabled for the optimized AllGather path; disabling it is mainly useful when a profiler cannot observe DDA operations. |
 | `TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK` | `0` | `base_env.sh` | PyTorch + RCCL | Tensor allocator hook for NCCL registration. |
 | `TORCH_NCCL_HIGH_PRIORITY` | `1` | `base_env.sh` | PyTorch | High-priority NCCL streams. |
+
+MXFP4 parameter gathering is an experimental single-node GPT-OSS path for
+unshuffled Turbo weights with deterministic 32×32 scaling. It quantizes updated
+BF16 optimizer shards, exchanges boundary fragments when a scaling strip crosses
+a shard, gathers packed bytes, and refreshes the expert caches consumed by forward
+and backward. Master-parameter and gradient precisions are unchanged. Cache
+refresh follows DDP parameter synchronization, including next-bucket prefetch.
+Explicit BF16 fallback and checkpoint materialization use a collective gather of
+the exact BF16 shards; all participating ranks must enter that operation.
+
+Before a training experiment, run `tests/integration_tests/mxfp4_training_check.py`
+with the intended GPU count and wire-format environment. It checks byte parity,
+fused and unfused outputs/gradients, cache refresh after updates, and exact BF16
+materialization. The `[MXFP4-COMM] consumed expert cache` markers confirm that
+training actually consumes gathered operands. A passing preflight does not
+establish training convergence or a throughput improvement.
 
 ---
 
