@@ -331,9 +331,9 @@ class PackedExpertBucket:
             # The consumer waits for this event, not just for the transport.
             self.work.wait()
             self._restore_bf16_ranges(self.packed, self.ordinary_restore_plan)
-            # Synchronous evaluation gathers all buckets before consumption.
-            # Keep assembly lazy there so module references to old caches do
-            # not retain a second full model's worth of quantized storage.
+            # Synchronous evaluation gathers all buckets before consumption,
+            # with no preceding layer compute to overlap. Keep assembly lazy
+            # there instead of queuing all cache allocations in advance.
             if prefetch_cache:
                 for weight in self.weights:
                     weight.assemble_pair()
