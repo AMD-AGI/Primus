@@ -67,7 +67,7 @@ SYSFS = Path("/sys")
 DEV_INFINIBAND = Path("/dev/infiniband")
 OS_RELEASE = Path("/etc/os-release")
 # Keep in sync with the default in runner/primus-cli-container.sh.
-DEFAULT_SEARCH_PATH = "/opt/broadcom:/opt/bnxt-bundles:/opt/ainic-bundles"
+DEFAULT_SEARCH_PATH = "/opt/broadcom:/opt/bnxt-bundles:/opt/amd/ainic"
 # primus-cli-container.sh mounts the host's libbnxt_re here as bnxt_re/<version>/<file>.
 HOST_PROVIDER_ROOT = Path("/run/primus/host-rdma-providers")
 DEFAULT_AINIC_REPO_URL = "https://repo.radeon.com/amdainic/pensando/ubuntu"

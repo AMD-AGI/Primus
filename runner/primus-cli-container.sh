@@ -496,7 +496,7 @@ if [[ $nic_driver_hook -eq 1 ]]; then
         add_nic_driver_mount "$PATH_TO_BNXT_TAR_PACKAGE"
     fi
     # Keep the default in sync with DEFAULT_SEARCH_PATH in runner/helpers/nic_userspace_driver.py.
-    IFS=':' read -r -a nic_search_path <<< "${PRIMUS_NIC_DRIVER_SEARCH_PATH-/opt/broadcom:/opt/bnxt-bundles:/opt/ainic-bundles}"
+    IFS=':' read -r -a nic_search_path <<< "${PRIMUS_NIC_DRIVER_SEARCH_PATH-/opt/broadcom:/opt/bnxt-bundles:/opt/amd/ainic}"
     for nic_path in "${nic_search_path[@]}"; do
         [[ -n "$nic_path" && -e "$nic_path" ]] && add_nic_driver_mount "$nic_path"
     done
