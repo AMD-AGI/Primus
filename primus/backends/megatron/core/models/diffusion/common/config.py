@@ -244,6 +244,7 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_fwd_a6w4: bool = False
     mxfp6_packed_param_gather: bool = False
     mxfp6_packed_param_gather_fused_adam: bool = False
+    mxfp6_packed_param_gather_prob4: bool = False
     mxfp6_dgrad_emit_attn_delta: bool = False
     mxfp6_bwd_fp4_a6w6_first: int = 0
     mxfp6_bwd_fp4_a6w6_last: int = 0
@@ -425,6 +426,12 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError("mxfp6_packed_param_gather needs mxfp6_gemm_layout 'tilescale'.")
         if self.mxfp6_packed_param_gather_fused_adam and not self.mxfp6_packed_param_gather:
             raise ValueError("mxfp6_packed_param_gather_fused_adam needs mxfp6_packed_param_gather.")
+        if self.mxfp6_packed_param_gather_prob4 and not (self.mxfp6_packed_param_gather and self.mxfp6_fp4_sr_actw):
+            raise ValueError("mxfp6_packed_param_gather_prob4 needs mxfp6_packed_param_gather and mxfp6_fp4_sr_actw.")
+        if self.mxfp6_packed_param_gather_prob4 and self.mxfp6_packed_param_gather_fused_adam:
+            raise ValueError(
+                "mxfp6_packed_param_gather_prob4 is not wired into the fused Adam + owner pack; set one of the two."
+            )
         if self.mxfp6_dgrad_emit_attn_delta and not (tilescale and self.mxfp6_bwd_fp4_dgrad):
             raise ValueError("mxfp6_dgrad_emit_attn_delta needs mxfp6_gemm_layout 'tilescale' and mxfp6_bwd_fp4_dgrad.")
         fp4_opts = {

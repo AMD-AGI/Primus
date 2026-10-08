@@ -178,6 +178,11 @@ class Mxfp6Gates:
     # (Transformer Engine FusedAdam with store_param_remainders, same arithmetic), so Adam's pass over those rows and
     # the pack's read of the rows it just wrote become one kernel. Bit-identical.
     packed_param_gather_fused_adam: bool = False
+    # With packed_param_gather and fp4_sr_actw: the weights' stochastically rounded dgrad copy travels as one copy for
+    # every rank -- FP4 codes rounded down plus a 4-bit round-up probability per code -- in the same all-gather as the
+    # forward planes, and each rank finishes the rounding itself (its own draw). Replaces the per-destination draws
+    # sent by all-to-all, which cross the NICs at scale.
+    packed_param_gather_prob4: bool = False
     # The attention out-projections' dgrad (A4W4 on tilescale) also emits the attention backward's softmax_d =
     # rowsum(dO * O) per (token, head), which the attention backward then takes instead of computing it: the
     # attention returns a placeholder whose gradient the joint pair / gated single-block Function supplies. Falls

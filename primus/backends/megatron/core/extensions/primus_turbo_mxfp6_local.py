@@ -149,6 +149,7 @@ def ppg_formats():
         W6=lambda R, K: _mx.with_ts6_row(_weight_fmt((R, K), 256), True) | ko,
         W4=lambda R, K: _fwd_fp4_fmt("weight", 256, R, K) | ko,
         col_sr=bool(g.fp4_sr_actw),
+        col_prob4=bool(g.fp4_sr_actw and g.packed_param_gather_prob4),
     )
 
 

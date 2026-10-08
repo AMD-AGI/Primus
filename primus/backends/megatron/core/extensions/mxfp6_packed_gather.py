@@ -26,6 +26,11 @@ stochastically rounded (``fp4_sr_actw``), and each rank must see its own draw, a
 reduction): the owner's pack emits one draw of its rows' codes per destination rank from a single read, and the
 dgrad code plane goes by all-to-all (the same bytes per receiver as a gather); its scales are draw-independent and
 gathered with the rest. Round to nearest, the draws are equal and the dgrad planes are gathered.
+
+With ``packed_param_gather_prob4`` the draws are made by the receivers instead: the owner packs one copy of the dgrad
+codes rounded down plus a plane of 4-bit round-up probabilities (same layout, a nibble per code), both are
+all-gathered with the forward planes, and after the gather each rank rounds every code up with its probability from
+its own seed (``receive``). The ranks' draws stay independent; nothing goes by all-to-all.
 """
 
 import hashlib
@@ -33,6 +38,7 @@ import hashlib
 import torch
 
 _A2A = ("cc",)  # the dgrad copy's codes: one SR draw per destination (its scales do not depend on the draw)
+_PROB = "cp"  # prob4: the dgrad codes' round-up probabilities (a nibble per code, the codes' layout)
 DENSITY = {  # plane -> elements per byte
     "W6": {"c0": 2, "c1": 4, "rs": 32, "cc": 2, "cs": 32},
     "W4": {"r4": 2, "rs": 32, "cc": 2, "cs": 32},
@@ -57,8 +63,12 @@ class PackedBucket:
         dev = bucket.param_data.device
         assert n == dp * self.S and all(n % d == 0 for d in DENSITY[self.kind].values())
         self.planes = {k: torch.empty(n // d, dtype=torch.uint8, device=dev) for k, d in DENSITY[self.kind].items()}
+        # prob4: one dgrad copy (floor codes + probabilities) for every rank, rounded by each receiver
+        self.prob4 = bool(fmts.get("col_prob4", False))
+        if self.prob4:
+            self.planes[_PROB] = torch.empty_like(self.planes["cc"])
         # per-destination draws of this rank's dgrad rows ([dp, shard]: row d goes to rank d), SR only
-        self.sr = bool(fmts["col_sr"])
+        self.sr = bool(fmts["col_sr"]) and not self.prob4
         self.send = {k: torch.empty_like(self.planes[k]) for k in _A2A} if self.sr else None
         self.items = []
         self.fused_done = set()  # (idx, ra) packed by the optimizer step (fused) since the last owner_pack
@@ -76,7 +86,7 @@ class PackedBucket:
             self._attach(p, s, R, K)
 
     def _view(self, plane, s, nel):
-        d = DENSITY[self.kind][plane]
+        d = DENSITY[self.kind]["cc" if plane == _PROB else plane]
         return self.planes[plane][s // d : (s + nel) // d]
 
     def _attach(self, p, s, R, K):
@@ -121,7 +131,13 @@ class PackedBucket:
             self._view("rs", o, nel),
             dict(row_c1=self._view("c1", o, nel) if w6 else None),
         )
-        if not self.sr:  # round to nearest: one dual pack into the planes
+        if self.prob4:  # the codes rounded down + their round-up probabilities, finished by each receiver
+            assert adam is None, "packed_param_gather_prob4 is not wired into the fused Adam + owner pack"
+            from primus_turbo.pytorch.kernels.quantization.mx_a4w4_pack import MX_FMT_FP4_COL_SR
+            fmt &= ~MX_FMT_FP4_COL_SR
+            cols = (self._view("cc", o, nel), self._view("cs", o, nel))
+            kw = dict(rows[2], col_prob=self._view(_PROB, o, nel))
+        elif not self.sr:  # round to nearest: one dual pack into the planes
             cols, kw = (self._view("cc", o, nel), self._view("cs", o, nel)), rows[2]
         else:
             # one read of the rows: the forward rows and every destination's dgrad draw (draw d -> rank d's row of
@@ -146,6 +162,15 @@ class PackedBucket:
     def gather_ops(self):
         """(output, input) of each all-gathered plane."""
         return [(pl, pl.view(self.dp, -1)[self.rank]) for k, pl in self.planes.items() if not (self.sr and k in _A2A)]
+
+    def receive(self):
+        """prob4: after the gather, round this rank's copy of every dgrad code up with its probability -- one draw,
+        seeded by (step, bucket, rank), so the ranks' draws are independent as with per-rank packs."""
+        if self.prob4:
+            from primus_turbo.triton.quantization.fp4_prob_round import fp4_prob_round
+
+            seed = _seed(self.step, self.bucket.bucket_id, "rx", self.rank)
+            fp4_prob_round(self.planes["cc"], self.planes[_PROB], seed)
 
     def a2a_ops(self):
         """(output, input) of each all-to-all plane (SR dgrad copy): row r of the output is owner r's draw for us."""

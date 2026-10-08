@@ -468,14 +468,19 @@ def patch_fused_adam_owner_pack():
 
 
 class _Handles:
-    """One param-gather handle over several async collectives."""
+    """One param-gather handle over several async collectives, and what must run once they are complete (on the
+    stream that waits: the prob4 receivers)."""
 
-    def __init__(self, works):
+    def __init__(self, works, after=()):
         self.works = [w for w in works if w is not None]
+        self.after = list(after)
 
     def wait(self):
         for w in self.works:
             w.wait()
+        for f in self.after:
+            f()
+        self.after = []
 
 
 def patch_bucket_group_sync():
@@ -536,7 +541,14 @@ def patch_bucket_group_sync():
                 pgb.dist_all_gather_func(
                     bucket.param_data, self.cached_param_buffer_shard_list[idx][rank], group=grp, async_op=async_op
                 )
-        self.param_gather_handle = _Handles([cm] + works) if async_op else None
+        # prob4: each rank finishes its own stochastic rounding of the gathered dgrad copies
+        recv = [st.receive for st in states.values() if st.prob4]
+        if async_op:
+            self.param_gather_handle = _Handles([cm] + works, after=recv)
+        else:
+            self.param_gather_handle = None
+            for f in recv:
+                f()
 
     start_param_sync._primus_packed_param_gather = True
     BG.start_param_sync = start_param_sync
