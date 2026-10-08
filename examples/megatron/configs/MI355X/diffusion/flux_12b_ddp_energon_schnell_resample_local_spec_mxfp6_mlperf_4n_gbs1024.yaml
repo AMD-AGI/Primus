@@ -161,6 +161,9 @@ modules:
       # GEMM operands in the tilescale layout: the MX GEMMs run on aiter's tilescale kernels where one exists for
       # the shape, on its tile-blob kernels otherwise.
       mxfp6_gemm_layout: tilescale
+      # The single blocks' attention out-projection and MLP fc2 forward as one GEMM, with fc2's bias, the gate and the
+      # residual add in its epilogue.
+      mxfp6_single_linear2_cat: true
 
       flat_grad_clip: true
       cuda_data_prefetch: true
