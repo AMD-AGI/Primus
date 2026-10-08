@@ -102,6 +102,32 @@ class TestShardLayout(unittest.TestCase):
                 cursor += count
             self.assertEqual(cursor, shape[0] * shape[1] // 32)
 
+    def test_restore_plan_preserves_wire_offsets_and_skips_unneeded_values(self):
+        import torch
+
+        spec = importlib.util.spec_from_file_location(
+            "mxfp4_restore_plan_test", _PATH.with_name("mxfp4_training.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        state = module.PackedExpertBucket.__new__(module.PackedExpertBucket)
+        state.rank = 1
+        state.bucket = SimpleNamespace(param_data=torch.full((32,), -1, dtype=torch.bfloat16))
+        state.bucket.param_data[8:16] = torch.arange(8, 16, dtype=torch.bfloat16)
+        ranges = [[(2, 5), (7, 8)], [(8, 11), (14, 16)], [(16, 20), (21, 24)], [(24, 26)]]
+        rows = torch.zeros((4, 32), dtype=torch.uint8)
+        for rank, pieces in enumerate(ranges):
+            values = torch.cat([torch.arange(start, end, dtype=torch.bfloat16) for start, end in pieces])
+            rows[rank, : values.numel() * 2] = values.view(torch.uint8)
+        plan = state._restore_plan(ranges, [(14, 20), (22, 25)])
+        state._restore_bf16_ranges(SimpleNamespace(rows=rows), plan)
+        expected = torch.full((32,), -1, dtype=torch.bfloat16)
+        expected[8:20] = torch.arange(8, 20, dtype=torch.bfloat16)
+        expected[22:25] = torch.arange(22, 25, dtype=torch.bfloat16)
+        torch.testing.assert_close(state.bucket.param_data, expected, rtol=0, atol=0)
+        self.assertEqual(plan, [(2, 0, 16, 20), (2, 10, 22, 24), (3, 0, 24, 25)])
+
 
 if __name__ == "__main__":
     unittest.main()

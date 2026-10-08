@@ -216,6 +216,14 @@ class PackedExpertBucket:
             ByteAllGather(max(fallback_sizes), group, self.device, use_sdma) if any(fallback_sizes) else None
         )
         self.packed = ByteAllGather(max(packed_sizes), group, self.device, use_sdma)
+        # Only the owner of a strip's first element quantizes that strip. Other
+        # ranks need not restore its BF16 boundary fragments. Local BF16 values
+        # are already authoritative and also need no copy back from the wire.
+        local_boundaries = merge_ranges(
+            (start, end) for start, end in fallback if start // self.shard_size == self.rank
+        )
+        self.fallback_restore_plan = self._restore_plan(self.fallback_ranges, local_boundaries)
+        self.ordinary_restore_plan = self._restore_plan(self.ordinary_ranges)
         if self.rank == 0:
             wire_bytes = self.world * (self.packed.width + (self.fallback.width if self.fallback else 0))
             _emit_comm_status(
@@ -240,15 +248,28 @@ class PackedExpertBucket:
             workspace.local[offset : offset + size].copy_(self.bucket.param_data[start:end].view(torch.uint8))
             offset += size
 
-    def _restore_bf16_ranges(self, workspace, ranges_by_rank):
+    def _restore_plan(self, ranges_by_rank, required=None):
+        plan = []
         for rank, ranges in enumerate(ranges_by_rank):
+            if rank == self.rank:
+                continue
             offset = 0
             for start, end in ranges:
                 size = (end - start) * 2
-                self.bucket.param_data[start:end].copy_(
-                    workspace.rows[rank, offset : offset + size].view(torch.bfloat16)
-                )
+                targets = [(start, end)] if required is None else required
+                for first, last in targets:
+                    begin, stop = max(start, first), min(end, last)
+                    if begin < stop:
+                        source = offset + (begin - start) * 2
+                        plan.append((rank, source, begin, stop))
                 offset += size
+        return plan
+
+    def _restore_bf16_ranges(self, workspace, plan):
+        for rank, source, start, end in plan:
+            self.bucket.param_data[start:end].copy_(
+                workspace.rows[rank, source : source + (end - start) * 2].view(torch.bfloat16)
+            )
 
     @torch.no_grad()
     def dispatch(self):
@@ -275,7 +296,7 @@ class PackedExpertBucket:
         if self.fallback is not None:
             self._pack_bf16_ranges(self.fallback, self.fallback_ranges)
             self.fallback.launch().wait()
-            self._restore_bf16_ranges(self.fallback, self.fallback_ranges)
+            self._restore_bf16_ranges(self.fallback, self.fallback_restore_plan)
         for weight in self.weights:
             first, count = weight.ownership[self.rank]
             if not count:
@@ -294,7 +315,7 @@ class PackedExpertBucket:
     def wait(self):
         if self.work is not None:
             self.work.wait()
-            self._restore_bf16_ranges(self.packed, self.ordinary_ranges)
+            self._restore_bf16_ranges(self.packed, self.ordinary_restore_plan)
             self.work = None
 
     @torch.no_grad()
