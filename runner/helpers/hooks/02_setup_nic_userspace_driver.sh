@@ -15,7 +15,7 @@
 # Controls:
 #   PRIMUS_NIC_USERSPACE_DRIVER=auto|force|off  (default: auto)
 #   PRIMUS_NIC_DRIVER_SEARCH_PATH=dir:dir:...    vendor bundles to search
-#       (default: /opt/broadcom:/opt/bnxt-bundles:/opt/ainic-bundles)
+#       (default: /opt/broadcom:/opt/bnxt-bundles:/opt/amd/ainic)
 #   PRIMUS_NIC_DRIVER_STRICT=1                   abort the launch if RDMA stays unusable
 #   PRIMUS_AINIC_REPO_URL=<url>|none             AINIC package repository
 #   PRIMUS_AINIC_BUNDLE_VERSION=<bundle>         AINIC bundle to install when fw_ver does not name it
