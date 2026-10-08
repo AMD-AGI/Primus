@@ -12,7 +12,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # optimizer, bf16 grads/moments, recompute full/block/8) is folded in so the file
 # runs at 4-node scale as written. Synthetic data (mock_data: true).
 #
-# Launched by examples/models/kimi-k3/run_kimi_k3_8L_official_pretrain_mi355x.sh.
+# Launched by examples/megatron/models/kimi-k3/run_kimi_k3_8L_official_pretrain_mi355x.sh.
 
 modules:
   pre_trainer:

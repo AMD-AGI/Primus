@@ -26,7 +26,7 @@ falls back to GSPMD and lowering aborts before the first step::
 Every WAN and FLUX config Primus ships sets ``attention: cudnn_flash_te``, so
 this is on the path of every MaxDiffusion run.
 
-This was previously repaired by a ``sed`` in
+This was previously repaired by a ``sed`` in the since-removed
 ``examples/maxdiffusion/setup_maxdiffusion_env.sh`` that rewrote both call sites
 in the vendored submodule. That fix only survived while the submodule working
 tree kept the edit -- a ``git restore``, ``git checkout`` or ``submodule update``

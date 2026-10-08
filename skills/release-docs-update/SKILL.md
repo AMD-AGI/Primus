@@ -224,7 +224,7 @@ Read these before Phase 3; they are the things that actually went wrong.
 - Never splice or rotate the release notes by hand — use `release_notes.py rotate`.
 - Never rewrite `.github/workflows/docker-release/**` — those record what
   published images were built from.
-- Never bump image tags under `examples/mlperf/`, `examples/models/`,
+- Never bump image tags under `examples/mlperf/`, `examples/megatron/models/`,
   `benchmark/` or `tools/docker/`. Those pin the image a result was validated
   against; the v26.6 release deliberately left all of them alone.
 - Never resolve a held item by guessing. Ask.

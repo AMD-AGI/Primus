@@ -15,7 +15,7 @@ The following table describes the backends supported by Primus and their typical
 | Megatron-LM | `framework: megatron` | Large-scale transformer pretraining with Megatron-style parallelism (TP/PP/EP). |
 | TorchTitan | `framework: torchtitan` | PyTorch-native scaled training (FSDP / tensor / pipeline / expert parallelism per config). |
 | MaxText (JAX) | `framework: maxtext` | JAX/MaxText single- and multi-node runs; parallelism via MaxText `ici_*` / `dcn_*` settings. |
-| MaxDiffusion (JAX) | `framework: maxdiffusion` | JAX/MaxDiffusion diffusion pretraining (WAN 2.1, FLUX.1-dev). Source is vendored as the `third_party/maxdiffusion` submodule; deps/patches installed by `examples/maxdiffusion/setup_maxdiffusion_env.sh`. |
+| MaxDiffusion (JAX) | `framework: maxdiffusion` | JAX/MaxDiffusion diffusion pretraining (WAN 2.1, FLUX.1-dev). Source is vendored as the `third_party/maxdiffusion` submodule; deps installed by the `train/pretrain/maxdiffusion` prepare hooks. |
 | Megatron Bridge | `framework: megatron_bridge` | Bridge-oriented workflows (configure like other backends; see parameter reference). |
 | SpecForge | `framework: specforge` | `specforge_mode: capture`, or `train` with required `specforge_train_mode: offline` / `online` (Mooncake + SGLang), on a ROCm SGLang Primus image. YAML / env / CLI: [SpecForge configuration reference](../../examples/specforge/CONFIGURATION.md). |
 
@@ -233,18 +233,13 @@ The `llama2_7B-bf16-pretrain.yaml` example also sets `dataset_type: "synthetic"`
 
 ## MaxDiffusion (JAX) pretraining
 
-The MaxDiffusion backend runs JAX diffusion pretraining (WAN 2.1, FLUX.1-dev). Environment setup depends on your image:
+The MaxDiffusion backend runs JAX diffusion pretraining (WAN 2.1, FLUX.1-dev). `primus-cli` sets up the environment through the `train/pretrain/maxdiffusion` prepare hooks, the same way it does for MaxText, Megatron and TorchTitan:
 
-| Image has `maxdiffusion` installed? | What happens |
-| --- | --- |
-| **Yes** (e.g. MAD `primus_maxdiffusion` image, unified docker) | `setup_maxdiffusion_env.sh` detects it and is a **no-op**. Set `PRIMUS_SKIP_PIP=1` to skip calling it entirely. |
-| **No** (e.g. bare `rocm/jax-training:maxtext-*` image) | The script installs everything from the Primus checkout: torch (ROCm wheels), deps, editable submodule, and patches. Requires `third_party/maxdiffusion` submodule to be initialized. |
+- **Source** is vendored as the `third_party/maxdiffusion` submodule. `prepare.py` passes it to the adapter as `--backend_path` (override with `MAXDIFFUSION_PATH`); when no checkout exists, the adapter falls back to the `maxdiffusion` package already installed in the image.
+- **Dependencies** live in `requirements-maxdiffusion.txt` (kept separate from `requirements-jax.txt` so the MaxDiffusion pins never affect MaxText runs). `00_install_requirements.sh` installs them, installs torch/torchvision from the ROCm wheel source that matches the image when torch is missing, and applies two idempotent site-package fixes (Flax-T5 clip rename and the TransformerEngine empty context-parallel-axis fix).
+- **Runtime patches** (Shardy partitioner, TensorFlow preload before TransformerEngine) are applied in-process from `primus/backends/maxdiffusion/patches/`, so the vendored checkout is never edited.
 
-The relevant pieces:
-
-- **Source** is vendored as the `third_party/maxdiffusion` submodule.
-- **Dependencies** live in `requirements-maxdiffusion.txt` (kept separate from `requirements-jax.txt` so the MaxDiffusion pins never affect MaxText runs).
-- **Install + patches** are applied by `examples/maxdiffusion/setup_maxdiffusion_env.sh` (idempotent): torch/torchvision (ROCm wheels), the requirements above, an editable install of the vendored submodule, and four source patches (Flax-T5 clip rename, TensorFlow-preload-before-TransformerEngine, Shardy-on, and the TransformerEngine empty context-parallel-axis fix).
+Set `PRIMUS_SKIP_PIP=1` to skip the dependency install on images that already ship the stack (e.g. the MAD `primus_maxdiffusion` image).
 
 ### Prerequisites
 
@@ -258,24 +253,24 @@ Run on a JAX base image (for example `rocm/jax-training`) or a bare-metal JAX en
 
 ### Quick start (run from a bare Primus checkout)
 
-Use `primus-cli direct` with `BACKEND=MaxDiffusion`. When `PRIMUS_SKIP_PIP` is unset, the prepare hooks run `setup_maxdiffusion_env.sh` for you (installs the stack + applies the patches), set `NVTE_FRAMEWORK=jax` and `MAXDIFFUSION_PATH`, then launch:
+Use `primus-cli direct` with `BACKEND=MaxDiffusion`. When `PRIMUS_SKIP_PIP` is unset, the prepare hooks install the dependencies for you, resolve the MaxDiffusion checkout and set `NVTE_FRAMEWORK=jax`, then launch:
 
 ```bash
 BACKEND=MaxDiffusion ./primus-cli direct -- train pretrain \
   --config examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml
 ```
 
-To run the environment setup once by itself (e.g. to warm an image or a shared venv), invoke the script directly, then launch with `PRIMUS_SKIP_PIP=1`:
+To run the dependency install once by itself (e.g. to warm an image or a shared venv), invoke the hook directly, then launch with `PRIMUS_SKIP_PIP=1`:
 
 ```bash
-bash examples/maxdiffusion/setup_maxdiffusion_env.sh
+bash runner/helpers/hooks/train/pretrain/maxdiffusion/00_install_requirements.sh
 PRIMUS_SKIP_PIP=1 BACKEND=MaxDiffusion ./primus-cli direct -- train pretrain \
   --config examples/maxdiffusion/configs/MI355X/flux_dev-pretrain.yaml
 ```
 
 ### Quick start (container mode)
 
-`primus-cli` bootstraps the same environment: the `train/pretrain/maxdiffusion` prepare hooks run `setup_maxdiffusion_env.sh` before training and select the plain-python launcher (JAX drives every GPU from one process, so `torchrun` is never used).
+`primus-cli` bootstraps the same environment: the `train/pretrain/maxdiffusion` prepare hooks install the dependencies before training and select the plain-python launcher (JAX drives every GPU from one process, so `torchrun` is never used).
 
 ```bash
 ./primus-cli container -- train pretrain \
@@ -325,7 +320,7 @@ Controlled with `PRIMUS_HIPBLASLT_TUNING_STAGE` (see `examples/README.md`):
 | Stage | Purpose |
 | --- | --- |
 | 1 | Dump GEMM shapes seen during training (reduce `train_iters` for faster collection). |
-| 2 | Tune kernels from dumped shapes (offline tooling under `examples/offline_tune`). |
+| 2 | Tune kernels from dumped shapes (offline tooling under `examples/megatron/guides/offline_tune`). |
 | 3 | Train using tuned kernel artifacts from `./output/tune_hipblaslt/...`. |
 
 Example (from in-repo docs):
@@ -349,7 +344,7 @@ The tables above in the Megatron, TorchTitan, and MaxText sections are curated M
 | TorchTitan | `examples/torchtitan/configs/MI300X/` | `parallelism.*` (e.g. `tensor_parallel_degree`, `pipeline_parallel_degree`, `expert_parallel_degree`, FSDP shard settings). |
 | MaxText | `examples/maxtext/configs/MI300X/` | `ici_fsdp_parallelism`, `ici_data_parallelism`, `dcn_fsdp_parallelism`, `dcn_data_parallelism`. |
 
-`./runner/primus-cli` is the only entry point. The packaged launchers under `examples/customer_package/` and `examples/moe_package/` reach it through the shared helper `runner/helpers/launch/slurm_pretrain.sh`, which translates their `EXP` / `NNODES` / `DATA_PATH` environment contract into a `primus-cli slurm` invocation; call the CLI directly as shown above.
+`./runner/primus-cli` is the only entry point. The packaged launchers under `examples/megatron/guides/customer_package/` and `examples/megatron/guides/moe_package/` reach it through the shared helper `runner/helpers/launch/slurm_pretrain.sh`, which translates their `EXP` / `NNODES` / `DATA_PATH` environment contract into a `primus-cli slurm` invocation; call the CLI directly as shown above.
 
 ---
 

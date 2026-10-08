@@ -12,7 +12,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 #   2) qwen3_30B_A3B-BF16-pretrain.yaml       -- Qwen3-specific fusion /
 #      recompute / precision-aware optimizer settings that have been
 #      empirically validated for this 30 B param + 128 expert architecture.
-#   3) examples/moe_package/start_training_qwen_30B_a3B.sh
+#   3) examples/megatron/guides/moe_package/start_training_qwen_30B_a3B.sh
 #      -- the actual override values used to reach the published
 #      ~555 TFLOPS pretrain steady state (mbs=8, gbs=512, recompute=5,
 #      manual_gc, mtp_num_layers=0).

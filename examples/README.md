@@ -10,6 +10,7 @@ It supports both **single-node** and **multi-node** training, and includes optio
 - [🧠 Pretraining with Primus](#-pretraining-with-primus)
   - [📚 Table of Contents](#-table-of-contents)
   - [⚙️ Supported Backends](#️-supported-backends)
+  - [📂 Directory Layout](#-directory-layout)
   - [🖥️ Single Node Training](#️-single-node-training)
     - [Setup Docker](#setup-docker)
     - [Setup Primus](#setup-primus)
@@ -35,6 +36,42 @@ Primus supports multiple backends.
 | Megatron       | Open-source framework for large-scale transformer training   |
 | TorchTitan     | PyTorch-compatible framework developed for training at scale |
 | NeMo AutoModel | NVIDIA-NeMo AutoModel (diffusion: Wan 2.2 T2V); `third_party/Automodel` submodule, installed editable on first run |
+
+## 📂 Directory Layout
+
+Every backend owns a top-level directory whose name matches the `framework` field in
+the experiment YAML. Anything specific to one backend lives underneath it, so a config
+and the material explaining it stay together:
+
+```text
+examples/
+├── megatron/              # framework: megatron
+│   ├── configs/           #   experiment YAMLs, grouped by GPU (MI300X, MI355X, …)
+│   ├── models/            #   model-specific launchers and studies
+│   │   ├── deepseek-v4/
+│   │   ├── glm5-3-flash/
+│   │   └── kimi-k3/
+│   └── guides/            #   walkthroughs and packaged workflows
+│       ├── customer_package/
+│       ├── moe_package/
+│       ├── odc/
+│       ├── offline_tune/
+│       └── tuning_agent/
+├── torchtitan/            # framework: torchtitan
+├── maxtext/               # framework: maxtext
+├── megatron_bridge/       # framework: megatron_bridge
+├── diffusion/             # framework: diffusion
+├── maxdiffusion/          # framework: maxdiffusion
+├── nemo_automodel/        # framework: nemo_automodel
+├── hummingbirdxt/         # framework: hummingbirdxt
+├── specforge/             # framework: specforge
+├── mlperf/                # MLPerf submissions; spans several backends
+└── hardware_configs/      # per-GPU bandwidth/latency inputs for primus projection
+```
+
+`mlperf/` and `hardware_configs/` sit at the top level because they are not tied to a
+single backend: MLPerf submissions cover Megatron, Megatron-Bridge and diffusion, and
+the hardware configs are consumed by `primus projection`.
 
 
 ## 🖥️ Single Node Training
@@ -95,7 +132,8 @@ Notes on the argument shape:
 - `runner/.primus.yaml` holds the defaults for each mode (container image, devices, and
   the list of environment variables forwarded into the container).
 
-The packaged launchers under `examples/customer_package/` and `examples/moe_package/` share
+The packaged launchers under `examples/megatron/guides/customer_package/` and
+`examples/megatron/guides/moe_package/` share
 `runner/helpers/launch/slurm_pretrain.sh`, which turns the `EXP` / `NNODES` / `DATA_PATH`
 environment contract into the `primus-cli slurm srun ... -- container -- train pretrain`
 command above. It is an internal helper, not an entry point: launch training with
@@ -147,7 +185,7 @@ export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
 
 # MaxDiffusion (JAX) directly from Primus (on a JAX base image, e.g. rocm/jax-training).
 # Requires the vendored submodule: git submodule update --init third_party/maxdiffusion
-# The prepare hooks run examples/maxdiffusion/setup_maxdiffusion_env.sh to install deps + patches.
+# The train/pretrain/maxdiffusion prepare hooks install the dependencies.
 # See docs/02-user-guide/pretraining.md ("MaxDiffusion (JAX) pretraining").
 BACKEND=MaxDiffusion ./primus-cli direct -- train pretrain \
   --config examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml
@@ -207,7 +245,7 @@ export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 
 ### Stage 2: Tune GEMM Kernel
 
-This stage performs kernel tuning based on the dumped GEMM shapes using the [offline_tune tool](https://github.com/AMD-AGI/Primus/tree/main/examples/offline_tune).
+This stage performs kernel tuning based on the dumped GEMM shapes using the [offline_tune tool](https://github.com/AMD-AGI/Primus/tree/main/examples/megatron/guides/offline_tune).
 It typically takes 10–30 minutes depending on model size and shape complexity.
 
 

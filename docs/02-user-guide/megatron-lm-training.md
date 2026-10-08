@@ -128,7 +128,7 @@ The following models are pre-optimized for performance on the AMD Instinct MI300
 - Llama 3/3.1/3.3 70B
 - DeepSeek-V2-lite
 - DeepSeek-V3
-- DeepSeek-V4 (BF16 SFT, and packed-sequence THD SFT at 4k/128k — see [`examples/deepseek-v4`](https://github.com/AMD-AGI/Primus/tree/main/examples/deepseek-v4); gfx942 recipes added in v26.7)
+- DeepSeek-V4 (BF16 SFT, and packed-sequence THD SFT at 4k/128k — see [`examples/megatron/models/deepseek-v4`](https://github.com/AMD-AGI/Primus/tree/main/examples/megatron/models/deepseek-v4); gfx942 recipes added in v26.7)
 - Mixtral 8x7B
 - Mixtral 8x22B
 - Qwen 2.5 7B/72B

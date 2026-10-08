@@ -4,8 +4,9 @@
 # transformers/torch versions that we do not want to force onto MaxText runs.
 #
 # torch/torchvision are installed separately (ROCm wheel index) by
-# examples/maxdiffusion/setup_maxdiffusion_env.sh, because they need
-# --find-links/--no-index which cannot be mixed with a PyPI resolve here.
+# runner/helpers/hooks/train/pretrain/maxdiffusion/00_install_requirements.sh,
+# because they need --index-url/--find-links which cannot be mixed with a PyPI
+# resolve here.
 #
 # MUST stay on transformers 4.x: MaxDiffusion is a Flax codebase and imports
 # FlaxCLIPTextModel/FlaxT5EncoderModel at module load (src/maxdiffusion/max_utils.py).
