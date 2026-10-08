@@ -69,6 +69,17 @@ In `direct` mode inside a container, a plain `export PYTORCH_CUDA_ALLOC_CONF=exp
 
 ### Known issues
 
+**DeepEP MoE recipes use the cheap fence, which can affect gradient accuracy.** The
+DeepSeek-V2-Lite, Mixtral and Qwen3-30B-A3B recipes on MI325X and MI355X set
+`PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE: "0"`, as in our performance runs. This
+re-enables a DeepEP fence that Primus-Turbo turned off by default in
+[`fb35ba7`](https://github.com/AMD-AGI/Primus-Turbo/commit/fb35ba7ef83460da8121fdffd0be7a7e9f0399be):
+it can let a rank read stale dispatch data, which can occasionally degrade gradient
+accuracy without raising an error. The safe fence costs about 2.5% of step time on MI355X and about 5% on MI325X.
+
+For convergence or production runs, set it to `"1"` (or delete the line) in the
+recipe's `env:` block. A host `export` does not override a recipe's `env:` value.
+
 <!-- NEEDS CONFIRMATION: carried over from v26.7. v26.8 moves hipBLASLt from
      1.4.1-8d1ae90e to 1.4.1-39d8d603 and ROCm from 10.0.0 to 10.1.0, which may
      change the heuristic ranking, but nothing in the v26.7..v26.8 range addresses
