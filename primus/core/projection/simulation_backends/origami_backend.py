@@ -105,6 +105,10 @@ class _HardwareProfile:
     compute_clock_khz: int
     hbm_bandwidth_gbps: float = 5300.0  # peak HBM bandwidth (GB/s)
     rf_capacity: int = 512 * 1024  # Register File (VGPR) capacity per CU in bytes
+    # Peak fp32 vector FLOPs per CU per clock (packed FP32), matching the
+    # published peaks: MI300X 304 CU x 2.1 GHz x 256 = 163.4 TF,
+    # MI355X 256 CU x 2.4 GHz x 256 = 157.3 TF.
+    fp32_vector_flops_per_cu_clk: int = 256
 
 
 _KNOWN_PROFILES: Dict[str, _HardwareProfile] = {
@@ -241,6 +245,23 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         arch = arch.lower().strip()
         profile = _KNOWN_PROFILES.get(arch)
         return profile.hbm_bandwidth_gbps if profile is not None else None
+
+    def vector_flops(self) -> Optional[float]:
+        """Full-chip peak fp32 vector FLOP/s from the arch profile, or *None*.
+
+        ``n_cu x clock x fp32_vector_flops_per_cu_clk``, always for the full chip
+        (independent of ``n_cu_override``).  Honours the clock override.
+        """
+        arch = (self._gpu_arch or os.getenv("PRIMUS_GPU_ARCH", "mi300x")).lower().strip()
+        profile = _KNOWN_PROFILES.get(arch)
+        if profile is None:
+            return None
+        clock_khz = (
+            self._clock_override_mhz * 1000
+            if self._clock_override_mhz is not None
+            else profile.compute_clock_khz
+        )
+        return float(profile.n_cu) * float(clock_khz) * 1e3 * float(profile.fp32_vector_flops_per_cu_clk)
 
     def simulate_gemm(
         self,

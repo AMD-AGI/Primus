@@ -6,11 +6,16 @@
 ###############################################################################
 
 
+import builtins
 import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# Captured before anything imports primus, so the guard below can always restore
+# the real print even if something rebinds it during collection.
+_PRISTINE_PRINT = builtins.print
 
 
 def pytest_addoption(parser):
@@ -56,6 +61,20 @@ def pytest_configure(config):
             "with --run-slow or '-m slow'."
         ),
     )
+
+
+@pytest.fixture(autouse=True)
+def _restore_builtin_print():
+    """Undo Primus's process-wide ``builtins.print`` rebinding between tests.
+
+    ``init_worker_logger`` and ``BaseModule`` repoint ``builtins.print`` at a
+    DEBUG-level logger call and never put it back. Once any test starts a worker
+    logger, every later test's ``print`` goes to the log sink instead of stdout,
+    so ``capsys`` sees nothing.
+    """
+    yield
+    if builtins.print is not _PRISTINE_PRINT:
+        builtins.print = _PRISTINE_PRINT
 
 
 def pytest_collection_modifyitems(config, items):
