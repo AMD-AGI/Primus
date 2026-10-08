@@ -22,7 +22,9 @@ from primus.backends.megatron.patches.parallelism import (
 
 
 @pytest.mark.parametrize("overlap", [False, True])
-def test_mxfp4_callbacks_keep_ddp_group_ownership(monkeypatch, overlap):
+@pytest.mark.parametrize("align", [False, True])
+@pytest.mark.parametrize("optimizer_overlap", [False, True])
+def test_mxfp4_callbacks_keep_ddp_group_ownership(monkeypatch, overlap, align, optimizer_overlap):
     monkeypatch.setenv("MEGATRON_MXFP4_PARAM_GATHER", "1")
     candidates = [torch.nn.Parameter(torch.zeros(1)) for _ in range(2)]
     ordinary = torch.nn.Parameter(torch.zeros(1))
@@ -37,7 +39,7 @@ def test_mxfp4_callbacks_keep_ddp_group_ownership(monkeypatch, overlap):
             self.param_gather_dispatched = False
 
         def finish_param_sync(self, skip_next_bucket_dispatch):
-            assert skip_next_bucket_dispatch
+            assert skip_next_bucket_dispatch == (align or optimizer_overlap)
             calls.append(self)
 
         def start_param_sync(self, force_sync):
@@ -50,6 +52,8 @@ def test_mxfp4_callbacks_keep_ddp_group_ownership(monkeypatch, overlap):
     class DDP:
         @rccl_sdma_param_all_gather_patches.make_ddp_init
         def __init__(self):
+            self.ddp_config = SimpleNamespace(align_param_gather=align)
+            self.overlap_param_gather_with_optimizer_step = optimizer_overlap
             self.param_to_bucket_group = dict(zip(candidates, groups))
             self.param_to_bucket_group[ordinary] = groups[0]
 
