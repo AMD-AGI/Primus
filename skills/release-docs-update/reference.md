@@ -114,12 +114,20 @@ is a derived artifact and never the source of a version number or of a highlight
 versions from `data/vX.Y-*.json` like everything else, and put anything new on the page
 first.
 
+The file is public — it is committed to the Primus repo — so it contains only the
+highlights. Nothing addressed to the next agent (how the file was produced, where the
+source of truth is, why it lives under `tools/`), and no section recording what was left
+out. That reasoning goes to the user and to the gitignored
+`output/release-docs/vX.Y/announcement-notes.md`; see the last editorial rule below.
+
 #### Format
 
 `announcements/v26.8.md` is the model; copy its shape. A reader who reads only the bold
 text should still come away with the release.
 
 ```markdown
+# vX.Y release highlights
+
 Images: `rocm/primus:vX.Y` (built YYYY-MM-DD) and `rocm/jax-training:maxtext-vX.Y`
 (built YYYY-MM-DD).
 
@@ -184,8 +192,12 @@ Each one a mistake avoided in an earlier release.
   because v26.6 carried a ROCm 10.1 nightly on a 7.15 base.
 - **Nothing marked NEEDS CONFIRMATION goes in.** An unverified known issue is worse in an
   exec summary than in a doc, where the marker is at least visible.
-- **Close with what was held back and why**, so the next release inherits the reasoning
-  rather than re-deriving it — including anything excluded for disclosure reasons.
+- **Report what was held back and why — outside the file.** Tell the user in the Gate C
+  summary and write the same list to `output/release-docs/vX.Y/announcement-notes.md`,
+  which is gitignored. A judgement that will recur (like "upgraded" needing a version
+  change) becomes an editorial rule in this list instead, worded without naming
+  anything unreleased. Exclusions made for disclosure reasons are told to the user only
+  and never written to a tracked file, this one included.
 
 ## Version reference surface
 
