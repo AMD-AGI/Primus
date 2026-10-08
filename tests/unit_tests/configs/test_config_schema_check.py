@@ -1308,6 +1308,46 @@ def test_cli_warn_only_suppresses_the_failure(fake_repo: Path, monkeypatch, caps
     assert cli.main() == 0
 
 
+def test_cli_annotates_a_failure_and_ends_with_a_verdict(fake_repo: Path, monkeypatch, capsys):
+    """A red check has to say what broke on the checks page, not only in the job summary."""
+    config = _write(
+        fake_repo / "examples/torchtitan/configs/probe.yaml",
+        _exp_yaml("training:\n  seed: 42\n"),
+    )
+    line = next(n for n, text in enumerate(config.read_text().splitlines(), 1) if "seed:" in text)
+    summary = fake_repo / "summary.md"
+    cli = _load_cli()
+    monkeypatch.setattr(cli, "ROOT", fake_repo)
+    argv = ["check_config_schema.py", "--backend", "torchtitan", "--annotate", "--summary-file", str(summary)]
+    monkeypatch.setattr("sys.argv", argv)
+
+    assert cli.main() == 1
+    out = capsys.readouterr().out.splitlines()
+    assert (
+        f"::error file=examples/torchtitan/configs/probe.yaml,line={line},"
+        "title=Unknown torchtitan key%3A training.seed::"
+    ) in "\n".join(out)
+    assert out[-1].startswith(
+        "Backend config schema check FAILED: 1 unknown key(s) in 1 config(s): training.seed"
+    )
+    report = summary.read_text()
+    assert "`training.seed`" in report and "::error" not in report
+
+    monkeypatch.setattr("sys.argv", argv + ["--warn-only"])
+    assert cli.main() == 0
+    assert "::error" not in capsys.readouterr().out
+
+
+def test_annotations_stay_within_what_github_shows():
+    cli = _load_cli()
+    rows = [_row(f"dead_{i}", (f"cfg{i}.yaml",)) for i in range(cli.MAX_ANNOTATIONS + 3)]
+
+    out = cli.build_annotations(rows, [], [], [], "allow.yaml")
+
+    assert len(out) == cli.MAX_ANNOTATIONS
+    assert out[-1] == "::error title=More schema findings::4 more finding(s); see the job summary."
+
+
 def test_cli_reports_a_misplaced_key_without_gating(megatron_repo: Path, monkeypatch, capsys):
     """Model-scoped findings need owner validation, so report but do not gate."""
     _write(
