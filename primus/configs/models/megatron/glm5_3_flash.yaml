@@ -1,0 +1,43 @@
+###############################################################################
+# GLM-5.3-Flash text backbone (HF model_type glm5_next_text).
+#
+# 45 layers: KDA on every layer except 3, 7, ..., 43 (DSA); first 3 layers
+# dense, the rest 288-expert top-8 MoE with one shared expert. The checkpoint's
+# MTP layer (index 45) is not built.
+###############################################################################
+
+extends:
+  - glm5_next_base.yaml
+
+num_layers: ${GLM5_NUM_LAYERS:45}
+hidden_size: 4096
+num_attention_heads: 64
+num_query_groups: null
+kv_channels: 256
+ffn_hidden_size: 12288                       # dense MLP (first_k_dense_replace layers)
+
+linear_num_key_heads: 64
+linear_num_value_heads: 64
+linear_key_head_dim: 128
+linear_value_head_dim: 128
+# 1 = KDA, 0 = DSA
+linear_attention_freq: "([1,1,1,0]*11+[1])"
+
+num_experts: 288
+moe_router_topk: 8
+moe_router_topk_scaling_factor: 2.5
+moe_ffn_hidden_size: 2048
+moe_shared_expert_intermediate_size: 2048
+moe_layer_freq: "([0]*3+[1]*42)"
+first_k_dense_replace: 3
+
+seq_length: 4096
+max_position_embeddings: 1048576
+vocab_size: 154880
+make_vocab_size_divisible_by: 64
+untie_embeddings_and_output_weights: true
+
+tokenizer_model: ${GLM5_TOKENIZER:zai-org/GLM-5.3-Flash}
+trust_remote_code: true
+
+init_method_std: 0.02
