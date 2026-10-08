@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the Apache License, Version 2.0.
 
-# Flux 12B Schnell Training -- DDP + Local Spec + MXFP6, MXFP4 backward and single-block fc1 forward
+# Flux 12B Schnell Training -- DDP + Local Spec + MXFP6, MXFP4 backward and text-stream forward
 # Variant of ...mxfp6_mlperf_4n_gbs1024.yaml: identical except for the MXFP4 GEMMs listed under the gates.
 # MLPerf Training v6.1 submission recipe: 4 nodes x 8 MI355X, MBS=32, GBS=1024.
 #
@@ -174,12 +174,13 @@ modules:
       # The attention out-projections' A4W4 dgrad also emits the attention backward's softmax_d (rowsum(dO * O)),
       # which the attention backward then takes instead of computing it.
       mxfp6_dgrad_emit_attn_delta: true
-      # MXFP4 forward for the single blocks' MLP fc1; their fc2 + attention out-projection forward stays MXFP6.
+      # MXFP4 forward only for the joint blocks' text stream: its MLP (fc1 and fc2) and its attention out-projection.
+      # The single blocks and the image stream keep the MXFP6 forward.
       mxfp6_fwd_fp4_single_linear2: false
-      mxfp6_fwd_fp4_single_fc1: true
-      # MXFP4 forward for the joint blocks' text-stream MLP (fc1 and fc2); the image-stream MLP stays MXFP6.
+      mxfp6_fwd_fp4_single_fc1: false
       mxfp6_fwd_fp4_joint_mlp: true
       mxfp6_fwd_fp4_joint_mlp_parts: "txt_fc1,txt_fc2"
+      mxfp6_fwd_fp4_joint_txt_proj: true
 
       flat_grad_clip: true
       cuda_data_prefetch: true
