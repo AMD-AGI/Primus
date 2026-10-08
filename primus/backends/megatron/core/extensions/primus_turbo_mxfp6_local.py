@@ -106,7 +106,7 @@ _quantize_hybrid_dual = getattr(torch.ops.primus_turbo, "quantize_mxfp6_row_mxfp
 def _neutral_rows():
     """fmt bits for the A6W6 forward A operands under packed_param_gather_neutral: FP6 rows without the Hadamard (their
     B operand, the gathered plane, carries none)."""
-    return _mx.FP4_HADAMARD["none"] << 20 if gates().packed_param_gather_neutral else 0
+    return _mx.FP4_HADAMARD["none"] << 20 if gates().packed_param_gather_neutral in ("sr", "rn") else 0
 
 
 def _pack_act_dual(x, wgrad_is_fp4, n_out=None, ts=False):
@@ -150,9 +150,16 @@ def ppg_formats():
     with the column direction K256-outer so every 256-row range of the weight packs into its own byte range."""
     g = gates()
     assert not g.fp4_weight_2d, "mxfp6_packed_param_gather: 2-D weight scales are not supported"
+    if g.packed_param_gather_neutral == "d2" and not getattr(_mx, "MXFP6_COL_FROM_ROTATED_ROWS", False):
+        # an older receiver packs the column from the rows as they are -- in the rotated basis, silently wrong
+        raise RuntimeError('mxfp6_packed_param_gather_neutral "d2" needs a Primus-Turbo whose mxfp6_tile_to_fp4_col '
+                           "un-rotates H32 rows (mx_a4w4_pack.MXFP6_COL_FROM_ROTATED_ROWS)")
     ko = _mx.MX_FMT_COL_KOUTER
-    # neutral: the W6 rows unrotated with 32x32 tile scales (the column -- made by the receivers -- keeps its options)
-    neutral = (_mx.FP4_HADAMARD["none"] << 20 | _mx.MX_FMT_FP4_TILE2D) if g.packed_param_gather_neutral else 0
+    # neutral sr / rn: the W6 rows unrotated with 32x32 tile scales (the column -- made by the receivers -- keeps its
+    # options); d2: today's rows (the receivers un-rotate them)
+    neutral = (
+        (_mx.FP4_HADAMARD["none"] << 20 | _mx.MX_FMT_FP4_TILE2D) if g.packed_param_gather_neutral in ("sr", "rn") else 0
+    )
     return dict(
         W6=lambda R, K: _mx.with_ts6_row(_weight_fmt((R, K), 256), True) | ko | neutral,
         W4=lambda R, K: _fwd_fp4_fmt("weight", 256, R, K) | ko,

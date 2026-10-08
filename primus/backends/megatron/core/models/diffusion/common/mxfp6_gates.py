@@ -191,6 +191,10 @@ class Mxfp6Gates:
     # makes the FP4 dgrad copy from it after the gather (stochastically rounded from its own seed with "sr", round to
     # nearest with "rn"). The forward A operands of those GEMMs drop their Hadamard too; dgrad must run without one
     # (fp4_hadamard_dgrad "none"). W4 buckets are unaffected (combine with packed_param_gather_prob_bits for them).
+    # "d2": the W6 weights travel as today's forward rows (H32 along K, per-32 scales: the forward is unchanged), and
+    # each rank makes the round-to-nearest FP4 dgrad copy from them -- dequantized and un-rotated along K, then packed as
+    # today's column. Needs the round-to-nearest backward (fp4_sr_actw off), so the W4 buckets' planes are
+    # deterministic and plainly all-gathered too.
     packed_param_gather_neutral: str = ""
     # The attention out-projections' dgrad (A4W4 on tilescale) also emits the attention backward's softmax_d =
     # rowsum(dO * O) per (token, head), which the attention backward then takes instead of computing it: the

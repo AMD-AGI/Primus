@@ -36,7 +36,8 @@ its own seed (``receive``). The ranks' draws stay independent; nothing goes by a
 With ``packed_param_gather_neutral`` (W6 buckets) only the forward planes travel, in an orientation-neutral form: MXFP6
 rows with no Hadamard and one scale per 32x32 tile (the A6W6 forward reads them as they arrive). The dgrad copy is
 made by every rank from the gathered planes (``receive``: Turbo ``mxfp6_tile_to_fp4_col``, stochastically rounded from
-the rank's own seed, or round to nearest); its planes are local, not gathered.
+the rank's own seed, or round to nearest); its planes are local, not gathered. Mode ``d2`` gathers today's forward
+rows instead (H32 along K, per-32 scales), and the receiver un-rotates them before packing the round-to-nearest copy.
 """
 
 import hashlib

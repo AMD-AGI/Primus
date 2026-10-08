@@ -437,9 +437,16 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError("mxfp6_packed_param_gather_prob_bits is 0 (off), 2 or 4.")
         if self.mxfp6_packed_param_gather_prob_bits and not (self.mxfp6_packed_param_gather and self.mxfp6_fp4_sr_actw):
             raise ValueError("mxfp6_packed_param_gather_prob_bits needs mxfp6_packed_param_gather and mxfp6_fp4_sr_actw.")
-        if self.mxfp6_packed_param_gather_neutral not in ("", "sr", "rn"):
-            raise ValueError('mxfp6_packed_param_gather_neutral is "", "sr" or "rn".')
-        if self.mxfp6_packed_param_gather_neutral and not (
+        if self.mxfp6_packed_param_gather_neutral not in ("", "sr", "rn", "d2"):
+            raise ValueError('mxfp6_packed_param_gather_neutral is "", "sr", "rn" or "d2".')
+        if self.mxfp6_packed_param_gather_neutral == "d2" and not (
+            self.mxfp6_packed_param_gather and self.mxfp6_bwd_fp4_dgrad and not self.mxfp6_fp4_sr_actw
+        ):
+            raise ValueError(
+                'mxfp6_packed_param_gather_neutral "d2" needs mxfp6_packed_param_gather and mxfp6_bwd_fp4_dgrad, with the '
+                "backward copies rounded to nearest (mxfp6_fp4_sr_actw off): every gathered plane is then deterministic."
+            )
+        if self.mxfp6_packed_param_gather_neutral in ("sr", "rn") and not (
             self.mxfp6_packed_param_gather and self.mxfp6_bwd_fp4_dgrad and self.mxfp6_fp4_hadamard_dgrad == "none"
         ):
             raise ValueError(
