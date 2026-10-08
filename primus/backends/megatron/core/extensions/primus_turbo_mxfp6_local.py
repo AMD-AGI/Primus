@@ -2034,8 +2034,13 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         fuse_wgrad_accum,
         grad_enabled,
         weight_is_fp4,
+        q_in_attn=False,
     ):
+        # q_in_attn (mxfp6_attn_q_norm_rope; needs strided_v): the attention normalizes and rotates q as it loads
+        # it, so q leaves raw (a view of mixed_qkv, like v) and only k takes the Triton pass. The q_rstd output is
+        # then a placeholder whose gradient -- supplied by the attention backward -- is q's rstd.
         from primus.backends.megatron.core.models.diffusion.common.fused_norm_rope import (
+            _k_fwd_nov,
             _qkv_fwd,
             _qkv_fwd_nov,
         )
@@ -2084,7 +2089,11 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         # The norm and rotation, unchanged. This is the production Triton op, on the
         # [..., num_heads, 3 * head_dim] view it expects; only its *backward* is replaced.
         qkv = mixed_qkv.reshape(*orig_shape[:-1], h, 3 * d)
-        if gates().strided_v:
+        if q_in_attn:
+            k_out, k_rstd = _k_fwd_nov(qkv, wk, cos, sin, eps, interleaved)
+            q, v = qkv[..., :d], qkv[..., 2 * d :]
+            q_rstd = torch.empty(m * h, device=x.device, dtype=torch.float32)
+        elif gates().strided_v:
             # Skip the V repack and hand FMHA the strided slice. Safe *here* specifically:
             # this runs inside autograd.Function.forward, where grad mode is off, so the
             # slice is not tracked and no second autograd path is created. Taking the same
@@ -2117,12 +2126,16 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
             fuse_wgrad_accum,
             grad_enabled,
             weight_is_fp4,
+            *q_in_attn,
         ) = inputs
 
         # setup_context still runs under no_grad, where the column blobs are None.
         if not grad_enabled:
             return
 
+        ctx.q_in_attn = bool(q_in_attn and q_in_attn[0])
+        if ctx.q_in_attn:
+            ctx.set_materialize_grads(False)  # a missing rstd must not arrive as zeros
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
         # A parameter, kept by reference (as AdaLNLinearFunction keeps its bias) so the backward can write its
         # gradient into main_grad; the caller claims it under fused_small_grads.
@@ -2143,10 +2156,10 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         # nothing; the prologue needs all four, plus the rstd the forward just computed.
         extra = (w_qkv,) if fuse_wgrad_accum else ()
         ctx.save_for_backward(mixed_qkv, wq, wk, cos, sin, q_rstd, k_rstd, *blobs, *extra)
-        ctx.mark_non_differentiable(mixed_qkv, q_rstd, k_rstd, *blobs)
+        ctx.mark_non_differentiable(mixed_qkv, k_rstd, *blobs, *(() if ctx.q_in_attn else (q_rstd,)))
 
     @staticmethod
-    def backward(ctx, dq, dk, dv, *_):
+    def backward(ctx, dq, dk, dv, _dmixed=None, q_rstd_in=None, *_):
         b4 = ctx.b4
         (
             mixed_qkv,
@@ -2164,6 +2177,10 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         ) = ctx.saved_tensors
         m, k, n, h, d = ctx.m, ctx.k, ctx.n, ctx.h, ctx.d
         out_dtype = ctx.out_dtype
+        if ctx.q_in_attn:
+            if q_rstd_in is None or dq is None or dk is None or dv is None:
+                raise RuntimeError("q_in_attn: the attention backward must supply dq, dk, dv and q's rstd")
+            q_rstd = q_rstd_in
 
         # The prologue reads all three slices as [m, num_heads * head_dim]. dv is included
         # because v is still packed -- plainly, but packed -- and that read is the
@@ -2240,9 +2257,9 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
         grad_wq = _reduce_grad_into_main_grad(wq, dwq_partial, wq.dtype, ctx.fuse_wgrad_accum, dims=(0, 1))
         grad_wk = _reduce_grad_into_main_grad(wk, dwk_partial, wk.dtype, ctx.fuse_wgrad_accum, dims=(0, 1))
 
-        # Trailing Nones cover cos, sin, eps, interleaved, fuse_wgrad_accum, grad_enabled
-        # and weight_is_fp4.
-        return grad_x, grad_w, grad_b, grad_wq, grad_wk, None, None, None, None, None, None, None
+        # Trailing Nones cover cos, sin, eps, interleaved, fuse_wgrad_accum, grad_enabled,
+        # weight_is_fp4 and q_in_attn.
+        return grad_x, grad_w, grad_b, grad_wq, grad_wk, None, None, None, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -2317,8 +2334,13 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
         fuse_wgrad_accum,
         grad_enabled,
         weight_is_fp4,
+        q_in_attn=False,
     ):
+        # q_in_attn: as MXFP6QKVNormRopeFunction's. q leaves raw and joint (a view of mixed_qkv); q_rstd_a is the
+        # placeholder for both streams' rstd, [(s_a + s_b) * B * H], whose gradient the attention backward supplies;
+        # q_rstd_b is then an empty tensor.
         from primus.backends.megatron.core.models.diffusion.common.fused_norm_rope import (
+            _k_fwd_into,
             _qkv_fwd_into,
         )
 
@@ -2390,14 +2412,21 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
 
         s_a, s_b, batch = shape_a[0], shape_b[0], shape_a[1]
         qkv = mixed_qkv.reshape(s_a + s_b, batch, h, 3 * d)
-        q = torch.empty(s_a + s_b, batch, h, d, device=xa.device, dtype=out_dtype)
-        k_out = torch.empty_like(q)
-        q_rstd_a, k_rstd_a = _qkv_fwd_into(
-            qkv[:s_a], wq_a, wk_a, cos_a, sin_a, eps, interleaved, q[:s_a], k_out[:s_a]
-        )
-        q_rstd_b, k_rstd_b = _qkv_fwd_into(
-            qkv[s_a:], wq_b, wk_b, cos_b, sin_b, eps, interleaved, q[s_a:], k_out[s_a:]
-        )
+        k_out = torch.empty(s_a + s_b, batch, h, d, device=xa.device, dtype=out_dtype)
+        if q_in_attn:
+            k_rstd_a = _k_fwd_into(qkv[:s_a], wk_a, cos_a, sin_a, eps, interleaved, k_out[:s_a])
+            k_rstd_b = _k_fwd_into(qkv[s_a:], wk_b, cos_b, sin_b, eps, interleaved, k_out[s_a:])
+            q = qkv[..., :d]
+            q_rstd_a = torch.empty((s_a + s_b) * batch * h, device=xa.device, dtype=torch.float32)
+            q_rstd_b = torch.empty(0, device=xa.device, dtype=torch.float32)
+        else:
+            q = torch.empty_like(k_out)
+            q_rstd_a, k_rstd_a = _qkv_fwd_into(
+                qkv[:s_a], wq_a, wk_a, cos_a, sin_a, eps, interleaved, q[:s_a], k_out[:s_a]
+            )
+            q_rstd_b, k_rstd_b = _qkv_fwd_into(
+                qkv[s_a:], wq_b, wk_b, cos_b, sin_b, eps, interleaved, q[s_a:], k_out[s_a:]
+            )
         # One strided slice covering both streams -- the V cat falls out for free.
         v = qkv[..., 2 * d :]
 
@@ -2443,9 +2472,13 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
             fuse_wgrad_accum,
             grad_enabled,
             weight_is_fp4,
+            *q_in_attn,
         ) = inputs
         if not grad_enabled:
             return
+        ctx.q_in_attn = bool(q_in_attn and q_in_attn[0])
+        if ctx.q_in_attn:
+            ctx.set_materialize_grads(False)  # a missing rstd must not arrive as zeros
         ctx.fuse_wgrad_accum = fuse_wgrad_accum
         ctx.biases = (b_a, b_b)  # by reference, as the per-stream Function keeps its bias
         ctx.out_dtype = x_a.dtype
@@ -2462,10 +2495,11 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
         blobs = output[3:]
         extra = (w_a, w_b) if fuse_wgrad_accum else ()
         ctx.save_for_backward(wq_a, wk_a, wq_b, wk_b, cos_a, sin_a, cos_b, sin_b, *blobs, *extra)
-        ctx.mark_non_differentiable(*blobs)
+        # blobs[1] is q_rstd_a: the rstd placeholder under q_in_attn, which must stay differentiable.
+        ctx.mark_non_differentiable(*(b for i, b in enumerate(blobs) if not (ctx.q_in_attn and i == 1)))
 
     @staticmethod
-    def backward(ctx, dq, dk, dv, *_):
+    def backward(ctx, dq, dk, dv, _dmixed=None, q_rstd_in=None, *_):
         b4 = ctx.b4
         (
             wq_a,
@@ -2495,6 +2529,10 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
         k, n, h, d = ctx.k, ctx.n, ctx.h, ctx.d
         out_dtype = ctx.out_dtype
         want_bias_grad = ctx.needs_input_grad[4]
+        if ctx.q_in_attn:
+            if q_rstd_in is None or dq is None or dk is None or dv is None:
+                raise RuntimeError("q_in_attn: the attention backward must supply dq, dk, dv and q's rstd")
+            q_rstd_a, q_rstd_b = q_rstd_in[: m_a * h], q_rstd_in[m_a * h :]
 
         grads = tuple(g.contiguous() for g in (dq, dk, dv))
         outs = []
@@ -2570,7 +2608,7 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
 
         (gx_a, gw_a, gb_a, gwq_a, gwk_a), (gx_b, gw_b, gb_b, gwq_b, gwk_b) = outs
         # Trailing Nones cover cos_a, sin_a, cos_b, sin_b, eps, interleaved,
-        # fuse_wgrad_accum, grad_enabled and weight_is_fp4.
+        # fuse_wgrad_accum, grad_enabled, weight_is_fp4 and q_in_attn.
         return (
             gx_a,
             gx_b,
@@ -2582,6 +2620,7 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
             gwk_a,
             gwq_b,
             gwk_b,
+            None,
             None,
             None,
             None,

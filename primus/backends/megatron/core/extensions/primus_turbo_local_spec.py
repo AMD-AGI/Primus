@@ -184,6 +184,14 @@ class PrimusTurboLocalAttention(MegatronModule):
                 from .primus_turbo_mxfp6_local import prime_softmax_d
 
                 prime_softmax_d()
+        # mxfp6_attn_q_norm_rope: forward() accepts q_norm (the raw q, normalized and rotated by the attention forward;
+        # see Turbo's flash_attn_func). Plain bf16 dense attention on aiter only.
+        self.q_norm_ok = (
+            config.context_parallel_size == 1
+            and not args.enable_turbo_attention_float8
+            and not self.force_contiguous_qkv
+            and hasattr(torch.ops.primus_turbo, "attention_aiter_qnorm_forward_impl")
+        )
 
         # Validate configuration
         if config.window_size is not None:
@@ -198,6 +206,7 @@ class PrimusTurboLocalAttention(MegatronModule):
         attn_mask_type: AttnMaskType,
         attention_bias: Optional[Tensor] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
+        q_norm: Optional[tuple] = None,
     ) -> Tensor:
         """
         Forward pass using Primus Turbo flash attention.
@@ -210,6 +219,9 @@ class PrimusTurboLocalAttention(MegatronModule):
             attn_mask_type: Type of attention mask (causal, no_mask, etc.)
             attention_bias: Attention bias (not used in this implementation)
             packed_seq_params: Packed sequence parameters (optional)
+            q_norm: ``mxfp6_attn_q_norm_rope`` (only when ``q_norm_ok``): query is the raw projection, and this is
+                Turbo flash_attn_func's ``q_norm`` -- (weight, RoPE table) per stream, the first stream's 256-row
+                tile count, eps and the producer's rstd placeholder.
 
         Returns:
             Attention output [seq_len, batch, num_heads * head_dim] (merged heads); with ``softmax_d_slot`` the
@@ -244,6 +256,7 @@ class PrimusTurboLocalAttention(MegatronModule):
             return_attn_probs=False,
             **self.attn_kwargs,
             **({"return_softmax_d_slot": True} if self.softmax_d_slot else {}),
+            **({} if q_norm is None else {"q_norm": q_norm}),
         )
         slot = None
         if self.softmax_d_slot:

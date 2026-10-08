@@ -201,6 +201,11 @@ class Mxfp6Gates:
     # Falls back per call when aiter has no kernel for the shape. Changes numerics within bf16 rounding (proj and
     # fc2 are no longer rounded separately). Needs gemm_layout "tilescale" and gate_mul_pack.
     single_linear2_cat: bool = False
+    # Q's RMSNorm and RoPE inside the attention forward (aiter fmha_v3_fwd_qnorm_rope): the fused QKV Functions hand
+    # the attention the raw q and run the Triton norm + RoPE pass for k only; the attention writes the normalized q
+    # and its rstd for the backwards, which are unchanged. Single blocks and the joint QKV path; falls back per
+    # call when aiter has no kernel for the shape. Bit-identical. Needs strided_v and the aiter attention backend.
+    attn_q_norm_rope: bool = False
     # Selective A4W4: the first / last N transformer blocks keep the A6W6
     # backward while the bwd_fp4 gates are on. Forward hooks switch the three bwd_fp4 gates off
     # around those blocks' forwards; every MXFP6 Function captures the flags at forward time

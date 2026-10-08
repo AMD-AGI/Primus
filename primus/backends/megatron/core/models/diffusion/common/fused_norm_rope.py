@@ -662,6 +662,49 @@ def _qkv_fwd_into(
     return q_rstd, k_rstd
 
 
+# K-only variants, for mxfp6_attn_q_norm_rope: the attention forward normalizes and rotates q itself as it loads
+# it, so only k takes this pass. The k half is the same launch as in the ops above.
+@custom_op("primus::fused_k_norm_rope_nov", mutates_args=())
+def _k_fwd_nov(
+    qkv: torch.Tensor,
+    wk: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    eps: float,
+    interleaved: bool,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    D = qkv.shape[-1] // 3
+    return _launch_fwd(qkv[..., D : 2 * D], wk, cos, sin, eps, interleaved, traceable=False)
+
+
+@_k_fwd_nov.register_fake
+def _k_fwd_nov_fake(qkv, wk, cos, sin, eps, interleaved):
+    S, B, H, T = qkv.shape
+    k = torch.empty(S, B, H, T // 3, device=qkv.device, dtype=qkv.dtype)
+    return k, torch.empty(S * B * H, device=qkv.device, dtype=torch.float32)
+
+
+@custom_op("primus::fused_k_norm_rope_into", mutates_args=("dest_k",))
+def _k_fwd_into(
+    qkv: torch.Tensor,
+    wk: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    eps: float,
+    interleaved: bool,
+    dest_k: torch.Tensor,
+) -> torch.Tensor:
+    D = qkv.shape[-1] // 3
+    _, k_rstd = _launch_fwd(qkv[..., D : 2 * D], wk, cos, sin, eps, interleaved, traceable=False, dest=dest_k)
+    return k_rstd
+
+
+@_k_fwd_into.register_fake
+def _k_fwd_into_fake(qkv, wk, cos, sin, eps, interleaved, dest_k):
+    S, B, H, T = qkv.shape
+    return torch.empty(S * B * H, device=qkv.device, dtype=torch.float32)
+
+
 @_qkv_fwd_into.register_fake
 def _qkv_fwd_into_fake(qkv, wq, wk, cos, sin, eps, interleaved, dest_q, dest_k):
     S, B, H, T = qkv.shape

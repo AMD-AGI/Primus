@@ -94,6 +94,26 @@ def _split_softmax_d_slot(core_attn_out):
     return core_attn_out if isinstance(core_attn_out, tuple) else (core_attn_out, None)
 
 
+def _q_norm_tab(cos: Tensor, sin: Tensor) -> Tensor:
+    """The attention's q RoPE table (``mxfp6_attn_q_norm_rope``): ``[rows, D]`` = cos then sin of each interleaved
+    pair. Exact: Flux builds every pair from one angle, so both entries of a pair are equal."""
+    return torch.cat([cos[:, 0::2], sin[:, 0::2]], dim=-1)
+
+
+def _q_in_attn_ok(attn, b: int, s: int, ntile_a: int, packed_seq_params) -> bool:
+    """Whether this attention's q can be normalized and rotated inside the attention forward
+    (``mxfp6_attn_q_norm_rope``): the gate is on, the core attention takes ``q_norm`` (PrimusTurboLocalAttention on
+    aiter), the attention is not recomputed, and aiter has the kernel for the shape."""
+    if not gates().attn_q_norm_rope or packed_seq_params is not None:
+        return False
+    if not getattr(attn.core_attention, "q_norm_ok", False) or (attn.checkpoint_core_attention and attn.training):
+        return False
+    from primus_turbo.pytorch.kernels.attention.attention_aiter_impl import attention_aiter_qnorm_ok
+
+    h, d = attn.num_attention_heads_per_partition, attn.hidden_size_per_attention_head
+    return attention_aiter_qnorm_ok(b, s, h, d, ntile_a)
+
+
 def _rope_cos_sin(freqs: Tensor, dtype: torch.dtype) -> Tuple[Tensor, Tensor]:
     """cos/sin as the fused kernel wants them: 2D [rows, D], contiguous, in t's dtype.
 
@@ -340,7 +360,9 @@ def _fused_qkv_rope_ok(attn, hidden_states, q_norm, k_norm, rotary_pos_emb, pack
     )
 
 
-def _joint_qkv_project_norm_rope(attn, hidden_states, additional_hidden_states, main_rope, added_rope):
+def _joint_qkv_project_norm_rope(
+    attn, hidden_states, additional_hidden_states, main_rope, added_rope, packed_seq_params=None
+):
     """Both streams' projection + QK-norm + RoPE, emitting q/k/v already joint.
 
     Returns ``(query, key, value)`` spanning the joint sequence in ``[added; main]`` order,
@@ -394,7 +416,9 @@ def _joint_qkv_project_norm_rope(attn, hidden_states, additional_hidden_states, 
         _claim_main_grad(*claimed)
     cos_a, sin_a = _rope_cos_sin(added_rope, additional_hidden_states.dtype)
     cos_b, sin_b = _rope_cos_sin(main_rope, hidden_states.dtype)
-    return MXFP6JointQKVFunction.apply(
+    s_a, s_b, batch = additional_hidden_states.shape[0], hidden_states.shape[0], hidden_states.shape[1]
+    q_in_attn = s_a % 256 == 0 and _q_in_attn_ok(attn, batch, s_a + s_b, s_a // 256, packed_seq_params)
+    out = MXFP6JointQKVFunction.apply(
         additional_hidden_states,
         hidden_states,
         added.weight,
@@ -415,10 +439,24 @@ def _joint_qkv_project_norm_rope(attn, hidden_states, additional_hidden_states, 
         fuse,
         torch.is_grad_enabled(),
         main._weight_is_fp4,
-    )[:3]
+        q_in_attn,
+    )
+    if not q_in_attn:
+        return out[:3]
+    # (norm weight, RoPE table) per stream, the text stream's leading; the rstd placeholder covers both.
+    q_norm = (
+        attn.added_q_layernorm.weight,
+        _q_norm_tab(cos_a, sin_a),
+        attn.q_layernorm.weight,
+        _q_norm_tab(cos_b, sin_b),
+        s_a // 256,
+        attn.q_layernorm.eps,
+        out[4],
+    )
+    return out[0], out[1], out[2], q_norm
 
 
-def _fused_qkv_project_norm_rope(attn, linear, hidden_states, q_norm, k_norm, q_pos_emb):
+def _fused_qkv_project_norm_rope(attn, linear, hidden_states, q_norm, k_norm, q_pos_emb, q_in_attn=False):
     """Projection, QK norm and RoPE in one autograd Function. Returns (query, key, value).
 
     Callers must have cleared both ``_fused_qkv_unusable_reason`` (at build time) and
@@ -426,6 +464,9 @@ def _fused_qkv_project_norm_rope(attn, linear, hidden_states, q_norm, k_norm, q_
     projection and the same Triton norm+RoPE as the unfused path, so its outputs are
     bit-identical; only the backward differs, and only in that d(mixed_qkv) is computed
     inside the packer rather than written out and read back.
+
+    ``q_in_attn`` (``_q_in_attn_ok`` cleared by the caller): q leaves raw and the result is
+    ``(query, key, value, q_norm)``, ``q_norm`` the core attention's argument of that name.
     """
     cos, sin = _rope_cos_sin(q_pos_emb, hidden_states.dtype)
     fuse_wgrad_accum = linear._fuse_wgrad_accum
@@ -440,7 +481,7 @@ def _fused_qkv_project_norm_rope(attn, linear, hidden_states, q_norm, k_norm, q_
             _claim_main_grad(*(p for p in (linear.weight, q_norm.weight, k_norm.weight, linear.bias) if p is not None))
         else:
             _claim_main_grad(linear.weight)
-    return MXFP6QKVNormRopeFunction.apply(
+    out = MXFP6QKVNormRopeFunction.apply(
         hidden_states,
         linear.weight,
         linear.bias,
@@ -455,7 +496,12 @@ def _fused_qkv_project_norm_rope(attn, linear, hidden_states, q_norm, k_norm, q_
         # Resolved once at build time by _init_mxfp6_linear, which also checks that the
         # installed aiter and Primus-Turbo can actually do A6W4.
         linear._weight_is_fp4,
-    )[:3]
+        q_in_attn,
+    )
+    if not q_in_attn:
+        return out[:3]
+    tab = _q_norm_tab(cos, sin)
+    return out[0], out[1], out[2], (q_norm.weight, tab, q_norm.weight, tab, out[0].shape[0] // 256, q_norm.eps, out[4])
 
 
 @dataclass
@@ -879,10 +925,13 @@ class JointSelfAttention(Attention):
                 additional_hidden_states,
                 main_rope[0],
                 added_rope[0],
+                packed_seq_params,
             )
 
+        q_norm = None  # mxfp6_attn_q_norm_rope: q is raw, and the core attention normalizes and rotates it
         if use_mxfp6 and joint_qkv is not None:
-            query, key, value = joint_qkv
+            query, key, value, *q_norm = joint_qkv
+            q_norm = q_norm[0] if q_norm else None
             fused_rope_applied = True
             main_qkv = added_qkv = None
         elif use_mxfp6:
@@ -990,6 +1039,7 @@ class JointSelfAttention(Attention):
                 attention_mask,
                 attn_mask_type=attn_mask_type,
                 packed_seq_params=packed_seq_params,
+                **({} if q_norm is None else {"q_norm": q_norm}),
             )
         core_attn_out, sd_slot = _split_softmax_d_slot(core_attn_out)
 
@@ -1201,17 +1251,22 @@ class FluxSingleAttention(SelfAttention):
             packed_seq_params,
         )
 
+        q_norm = None  # mxfp6_attn_q_norm_rope: q is raw, and the core attention normalizes and rotates it
         if use_mxfp6:
             # Nothing above has projected yet: the Function owns projection, norm and
             # rotation together.
-            query, key, value = _fused_qkv_project_norm_rope(
+            seq, batch = hidden_states.shape[0], hidden_states.shape[1]
+            q_in_attn = seq % 256 == 0 and _q_in_attn_ok(self, batch, seq, seq // 256, packed_seq_params)
+            query, key, value, *q_norm = _fused_qkv_project_norm_rope(
                 self,
                 self.linear_qkv,
                 hidden_states,
                 self.q_layernorm,
                 self.k_layernorm,
                 rotary_pos_emb[0],
+                q_in_attn,
             )
+            q_norm = q_norm[0] if q_norm else None
             fused_rope_applied = True
         else:
             qkv = self.get_query_key_value_tensors(hidden_states, key_value_states)
@@ -1274,6 +1329,7 @@ class FluxSingleAttention(SelfAttention):
                 attention_mask,
                 attn_mask_type=attn_mask_type,
                 packed_seq_params=packed_seq_params,
+                **({} if q_norm is None else {"q_norm": q_norm}),
             )
         core_attn_out, sd_slot = _split_softmax_d_slot(core_attn_out)
 
