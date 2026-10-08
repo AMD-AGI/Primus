@@ -93,3 +93,7 @@ weight_deosc_ratio: 4.0
 weight_deosc_start_step: 0
 # log a summary every N periods (0 disables logging)
 weight_deosc_log_freq: 0
+# use Primus-Turbo fused distance-update and period-closure kernels
+weight_deosc_fusion: false
+weight_deosc_direct_qdq: false
+weight_deosc_state_slabs: true

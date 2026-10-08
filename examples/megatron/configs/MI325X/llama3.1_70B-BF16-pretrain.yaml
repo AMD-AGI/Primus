@@ -3,6 +3,9 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:llama3_70B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+env:
+  GPU_MAX_HW_QUEUES: "4"
+
 modules:
   pre_trainer:
     framework: megatron

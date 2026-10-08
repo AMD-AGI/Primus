@@ -191,6 +191,12 @@ class KimiDeltaAttentionSubmodules:
     f_b_proj: Union[ModuleSpec, type] = IdentityOp
     b_proj: Union[ModuleSpec, type] = IdentityOp
     g_proj: Union[ModuleSpec, type] = IdentityOp
+    # Low-rank output gate (Kimi Linear / GLM-5.3), used when
+    # ``kda_use_full_rank_gate`` is False: ``g_a_proj`` is the duplicated
+    # ``hidden -> head_dim`` down-projection, ``g_b_proj`` the column-parallel
+    # ``head_dim -> H*V`` up-projection -- the same pairing as ``f_a/f_b``.
+    g_a_proj: Union[ModuleSpec, type] = IdentityOp
+    g_b_proj: Union[ModuleSpec, type] = IdentityOp
     out_norm: Union[ModuleSpec, type] = KimiGatedRMSNorm
     o_proj: Union[ModuleSpec, type] = IdentityOp
 
@@ -417,15 +423,38 @@ class KimiDeltaAttention(MegatronModule):
         self.b_proj = self._build_column_parallel(submodules.b_proj, self.num_heads, "b_proj")
 
         # --- output gate -------------------------------------------------
-        # K3 sets use_full_rank_gate=True, so the gate is a single wide
-        # projection rather than Kimi Linear's low-rank g_a/g_b pair.
-        if not self.use_full_rank_gate:
-            raise NotImplementedError(
-                "Only the full-rank KDA output gate (kda_use_full_rank_gate=True, what Kimi K3 "
-                "ships) is implemented; the low-rank g_a_proj/g_b_proj variant from Kimi Linear "
-                "is not."
+        # K3 sets use_full_rank_gate=True: one wide hidden -> H*V projection.
+        # Kimi Linear / GLM-5.3 use the low-rank g_a -> g_b pair instead, built
+        # exactly like the decay gate's f_a -> f_b.
+        if self.use_full_rank_gate:
+            self.g_proj = self._build_column_parallel(submodules.g_proj, self.v_dim, "g_proj")
+        else:
+            self.g_a_proj = build_module(
+                submodules.g_a_proj,
+                self.hidden_size,
+                self.value_head_dim,
+                config=self.config,
+                init_method=self.config.init_method,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="g_a_proj",
+                tp_group=self.pg_collection.tp,
+                **_duplicated_linear_kwargs(submodules.g_a_proj),
             )
-        self.g_proj = self._build_column_parallel(submodules.g_proj, self.v_dim, "g_proj")
+            self.g_b_proj = build_module(
+                submodules.g_b_proj,
+                self.value_head_dim,
+                self.v_dim,
+                config=self._f_b_proj_config(),
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="g_b_proj",
+                tp_group=self.pg_collection.tp,
+            )
 
         self.out_norm = build_module(
             submodules.out_norm,
@@ -712,7 +741,11 @@ class KimiDeltaAttention(MegatronModule):
 
         # --- sigmoid-gated head-wise RMSNorm, then o_proj ---------------
         nvtx_range_push(suffix="kda_out_norm")
-        gate, _ = self.g_proj(hidden_states)
+        if self.use_full_rank_gate:
+            gate, _ = self.g_proj(hidden_states)
+        else:
+            gate, _ = self.g_a_proj(hidden_states)
+            gate, _ = self.g_b_proj(gate)
         gate = gate.transpose(0, 1).reshape(batch, seq_len, self.num_heads_local_tp, self.value_head_dim)
         out = self.out_norm(core_out, gate)
         nvtx_range_pop(suffix="kda_out_norm")

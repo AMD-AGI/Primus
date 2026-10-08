@@ -13,6 +13,7 @@ get wrong: DistRatio snap masking, write-back into the local fp32 shard, period
 reset, and checkpoint state round-trip.
 """
 
+import sys
 import types
 
 import pytest
@@ -144,7 +145,17 @@ def test_local_shard_qdq_treats_grouped_experts_as_independent_2d_matrices(monke
     q_local = qdq_mxfp4_local_shard(shard, shape, start, end, torch.bfloat16)
 
     assert torch.equal(q_local, shard.to(torch.bfloat16))
-    assert [tuple(tile.shape) for tile in calls] == [(32, 64), (64, 64), (32, 64)]
+    # Boundary experts stay on their own padded tiles. The fully owned middle
+    # expert is one native 3D call, not a per-row 2D tile and not a flatten
+    # that would mix it with its neighbours.
+    assert [tuple(tile.shape) for tile in calls] == [
+        (1, 64, 64),
+        (1, 64, 64),
+        (1, 64, 64),
+    ]
+    expert0_len = matrix_numel - start
+    full_expert = shard[expert0_len : expert0_len + matrix_numel].to(torch.bfloat16)
+    assert torch.equal(calls[1], full_expert.view(1, 64, 64))
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +214,65 @@ def test_period_resets_after_snap(monkeypatch):
     assert state.prev_q.dtype == torch.bfloat16
     assert state.dist_w.dtype == torch.float32
     assert state.dist_w_qdq.dtype == torch.float32
+
+
+def test_fused_update_and_close_match_reference_path(monkeypatch):
+    monkeypatch.setattr(weight_deosc, "qdq_mxfp4", _fake_qdq_round)
+    calls = {"update": 0, "close": 0, "reset_count": "unset"}
+
+    def _fused_update(current, current_qdq, previous, previous_qdq, dist, dist_qdq):
+        calls["update"] += 1
+        dist.add_((current - previous).abs())
+        dist_qdq.add_((current_qdq - previous_qdq).abs())
+
+    def _fused_close(
+        master,
+        previous,
+        current_qdq,
+        dist,
+        dist_qdq,
+        ratio_threshold,
+        eps,
+        reset_count=None,
+    ):
+        calls["close"] += 1
+        calls["reset_count"] = reset_count
+        mask = (dist > 0) & (dist_qdq / dist.clamp(min=eps) >= ratio_threshold)
+        torch.where(mask, current_qdq, master, out=master)
+        torch.where(mask, current_qdq, previous, out=previous)
+        if reset_count is not None:
+            reset_count.add_(mask.sum())
+        dist.zero_()
+        dist_qdq.zero_()
+
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_update", _fused_update)
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_close", _fused_close)
+
+    model_param = torch.zeros(1, 2)
+    shard_main_param = torch.zeros(2)
+    opt = _FakeDistOpt(model_param, shard_main_param, start=0, end=2)
+    runner = WeightDeOscRunner(
+        WeightDeOscConfig(
+            enable=True,
+            period=2,
+            ratio_threshold=2.0,
+            log_freq=0,
+            fusion=True,
+        )
+    )
+
+    for vals in ([0.49, 1.0], [0.51, 1.0], [0.49, 1.0]):
+        value = torch.tensor(vals)
+        model_param.copy_(value.view(1, 2))
+        shard_main_param.copy_(value)
+        runner.run(opt)
+
+    assert calls == {"update": 2, "close": 1, "reset_count": None}
+    assert shard_main_param[0].item() == pytest.approx(0.0)
+    state = next(iter(runner._state.values()))
+    assert state.step == 0
+    assert torch.count_nonzero(state.dist_w) == 0
+    assert torch.count_nonzero(state.dist_w_qdq) == 0
 
 
 def test_eligibility_excludes_non_fp4_modules(monkeypatch):
@@ -310,12 +380,27 @@ def test_legacy_fp32_snapshot_blob_loads_as_bf16():
     assert torch.equal(restored.prev, blob["prev"].to(torch.bfloat16))
 
 
-def test_precision_aware_detected_by_config():
+def test_precision_aware_main_params_detected_by_config():
     opt = types.SimpleNamespace(
-        config=types.SimpleNamespace(use_precision_aware_optimizer=True),
+        config=types.SimpleNamespace(
+            use_precision_aware_optimizer=True,
+            use_precision_aware_optimizer_no_fp8_or_ds_fp8=True,
+        ),
         shard_fp32_from_float16_groups=[],
     )
     assert _uses_precision_aware_main_params(opt) is True
+
+
+def test_precision_aware_bf16_moments_keep_fp32_main_params_compatible():
+    fp32_main = torch.ones(1, dtype=torch.float32)
+    opt = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            use_precision_aware_optimizer=True,
+            use_precision_aware_optimizer_no_fp8_or_ds_fp8=False,
+        ),
+        shard_fp32_from_float16_groups=[[fp32_main]],
+    )
+    assert _uses_precision_aware_main_params(opt) is False
 
 
 def test_precision_aware_detected_structurally():
@@ -335,6 +420,48 @@ def test_standard_fp32_main_is_not_precision_aware():
     assert _uses_precision_aware_main_params(opt) is False
 
 
+def _install_get_args(monkeypatch, get_args):
+    for name in ("megatron", "megatron.training"):
+        sys.modules.setdefault(name, types.ModuleType(name))
+    module = sys.modules.get("megatron.training.global_vars")
+    if module is None:
+        module = types.ModuleType("megatron.training.global_vars")
+        monkeypatch.setitem(sys.modules, "megatron.training.global_vars", module)
+    monkeypatch.setattr(module, "get_args", get_args, raising=False)
+
+
+def test_scale_rounding_mode_prefers_megatron_args(monkeypatch):
+    _install_get_args(monkeypatch, lambda: types.SimpleNamespace(mxfp4_scale_rounding_mode=1))
+    monkeypatch.setenv("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING", "2")
+    assert weight_deosc._forward_scale_rounding_mode() == 1
+
+
+def test_scale_rounding_mode_falls_back_to_env(monkeypatch):
+    def _uninit():
+        raise RuntimeError("args are not initialized")
+
+    _install_get_args(monkeypatch, _uninit)
+    monkeypatch.setenv("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING", "2")
+    assert weight_deosc._forward_scale_rounding_mode() == 2
+    monkeypatch.delenv("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING")
+    assert weight_deosc._forward_scale_rounding_mode() == 0
+
+
+def test_scale_rounding_mode_rejects_unknown_values(monkeypatch):
+    _install_get_args(monkeypatch, lambda: types.SimpleNamespace(mxfp4_scale_rounding_mode=7))
+    with pytest.raises(ValueError, match="must be 0, 1, or 2"):
+        weight_deosc._forward_scale_rounding_mode()
+
+
+def test_local_shard_qdq_return_model_reuses_the_bf16_cast(monkeypatch):
+    monkeypatch.setattr(weight_deosc, "qdq_mxfp4", lambda weight: weight)
+    shard = torch.linspace(0.1, 1.0, 8)
+    q_local, model = qdq_mxfp4_local_shard(shard, (2, 4), 0, 8, torch.bfloat16, return_model=True)
+    assert model.dtype == torch.bfloat16
+    assert torch.equal(model, shard.to(torch.bfloat16))
+    assert torch.equal(q_local, model)
+
+
 def test_disabled_runner_is_noop(monkeypatch):
     monkeypatch.setattr(weight_deosc, "qdq_mxfp4", _fake_qdq_round)
     n = 2
@@ -344,3 +471,87 @@ def test_disabled_runner_is_noop(monkeypatch):
     runner = WeightDeOscRunner(WeightDeOscConfig(enable=False, period=2, ratio_threshold=2.0))
     runner.run(opt)
     assert len(runner._state) == 0
+
+
+@pytest.mark.parametrize("slabs", [False, True])
+def test_direct_state_seeding_closure_and_checkpoint(monkeypatch, slabs):
+    calls = []
+
+    def fake_direct(main, previous, previous_q, distance, distance_q, rows, cols, start, **kw):
+        current = main.bfloat16()
+        qdq = current.round()
+        calls.append((kw["seed"], kw["close"]))
+        if kw["seed"]:
+            distance.zero_()
+            distance_q.zero_()
+        else:
+            distance.add_((current - previous).abs())
+            distance_q.add_((qdq - previous_q).abs())
+            if kw["close"]:
+                mask = (distance > 0) & (distance_q / distance.clamp(min=kw["eps"]) >= kw["ratio_threshold"])
+                main.copy_(torch.where(mask, qdq, main))
+                current = torch.where(mask, qdq, current)
+                distance.zero_()
+                distance_q.zero_()
+        previous.copy_(current)
+        previous_q.copy_(qdq)
+
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_qdq", fake_direct)
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_update", lambda *a, **kw: None)
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_close", lambda *a, **kw: None)
+    monkeypatch.setattr(weight_deosc, "_forward_scale_rounding_mode", lambda: 2)
+    model = torch.zeros((1, 2), dtype=torch.bfloat16)
+    main = torch.tensor([0.49, 1.0])
+    opt = _FakeDistOpt(model, main, 0, 2)
+    config = WeightDeOscConfig(
+        enable=True,
+        start_step=2,
+        period=2,
+        fusion=True,
+        direct_qdq=True,
+        state_slabs=slabs,
+    )
+    runner = WeightDeOscRunner(config)
+    runner.run(opt)
+    assert not runner._state
+    runner.run(opt)  # Seed at start_step, no accumulated movement.
+    state = next(iter(runner._state.values()))
+    pointers = [getattr(state, name).data_ptr() for name in ("prev", "prev_q", "dist_w", "dist_w_qdq")]
+    assert len(set(pointers)) == 4
+    assert bool(runner._state_slabs) == slabs
+    main.copy_(torch.tensor([0.51, 1.0]))
+    runner.run(opt)
+    assert state.step == 1
+    saved = runner.state_dict()
+    # Emulate serialization (CPU tensors in this test otherwise alias state).
+    saved["params"] = {
+        k: {f: v.clone() if isinstance(v, torch.Tensor) else v for f, v in blob.items()}
+        for k, blob in saved["params"].items()
+    }
+    main.copy_(torch.tensor([0.49, 1.0]))
+    runner.run(opt)
+    assert calls == [(True, False), (False, False), (False, True)]
+    assert main[0].item() == 0.0
+    assert pointers == [
+        getattr(state, name).data_ptr() for name in ("prev", "prev_q", "dist_w", "dist_w_qdq")
+    ]
+    assert runner._period_index == 1
+    # Loading into an already-used runner must discard stale state and slabs.
+    runner.load_state_dict(saved)
+    assert not runner._state and not runner._state_slabs
+    main.copy_(torch.tensor([0.49, 1.0]))
+    runner.run(opt)
+    assert calls[-1] == (False, True)
+    assert main[0].item() == 0.0
+    assert runner._period_index == 1
+
+
+def test_direct_qdq_requires_fusion():
+    with pytest.raises(ValueError, match="requires"):
+        WeightDeOscConfig(enable=True, direct_qdq=True, fusion=False).validate()
+
+
+def test_fusion_unavailable_fails_explicitly(monkeypatch):
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_update", None)
+    with pytest.raises(RuntimeError, match="requested but unavailable"):
+        WeightDeOscRunner(WeightDeOscConfig(enable=True, fusion=True))

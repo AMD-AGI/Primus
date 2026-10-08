@@ -1,0 +1,78 @@
+###############################################################################
+# GLM-5.3 (glm5_next) base.
+#
+# Hybrid decoder: Kimi Delta Attention (KDA) layers interleaved with DSA layers
+# (NoPE absorbed MLA + kpool lightning indexer), mHC hyper-connection residual
+# streams, DeepSeek-V3 style noaux_tc MoE with a clamped SwiGLU.
+# Model code: primus/backends/megatron/core/models/glm5_next/.
+###############################################################################
+
+extends:
+  - llama_base.yaml
+
+model_type: glm5_next
+
+tokenizer_type: HuggingFaceTokenizer
+layernorm_epsilon: 1.0e-05
+normalization: RMSNorm
+
+# Primus owns the attention modules; upstream MLA / RoPE stay off.
+multi_latent_attention: false
+qk_layernorm: false
+group_query_attention: false
+position_embedding_type: none
+add_position_embedding: true      # Megatron rejects type "none" with add_position_embedding false
+apply_rope_fusion: false
+
+# ---- KDA ----
+linear_conv_kernel_dim: 4
+kda_gate_lower_bound: -5.0
+kda_use_full_rank_gate: false     # low-rank g_a_proj -> g_b_proj output gate
+kda_chunk_size: 64
+kda_backend: fla
+
+# ---- DSA ----
+q_lora_rank: 1536
+kv_lora_rank: 512
+qk_head_dim: 256
+v_head_dim: 256
+index_n_heads: 32
+index_head_dim: 128
+index_topk: 2048
+index_kpool: 4
+index_k_norm_eps: 1.0e-06
+dsa_backend: triton
+
+# ---- mHC ----
+hc_mult: 4
+hc_sinkhorn_iters: 20
+hc_eps: 1.0e-06
+hc_post_mult: 2.0
+glm5_keep_fp32_params: true
+
+# ---- MoE (noaux_tc) ----
+moe_router_score_function: sigmoid
+moe_router_pre_softmax: false
+moe_router_enable_expert_bias: true
+moe_router_bias_update_rate: 1.0e-3
+moe_router_load_balancing_type: seq_aux_loss
+moe_aux_loss_coeff: 1.0e-3
+moe_router_num_groups: null
+moe_router_group_topk: null
+moe_router_dtype: fp32
+moe_token_dispatcher_type: alltoall
+moe_grouped_gemm: true
+moe_use_legacy_grouped_gemm: false
+moe_permute_fusion: true
+moe_shared_expert_overlap: false
+
+# Clamped SwiGLU: silu(min(gate, 10)) * clamp(up, -10, 10). Upstream applies
+# activation_func_clamp_value on the non-fused activation path only.
+swiglu: true
+activation_func_clamp_value: 10.0
+bias_swiglu_fusion: false
+use_te_activation_func: false
+
+mtp_num_layers: null
+expert_model_parallel_size: 1
+expert_tensor_parallel_size: null

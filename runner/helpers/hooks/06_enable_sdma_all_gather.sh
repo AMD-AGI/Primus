@@ -5,19 +5,22 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Global hook: opt into an SDMA/RCCL AllGather path.
+# Global hook: opt into SDMA/RCCL parameter AllGather and gradient
+# ReduceScatter paths.
 #
 # Backend selectors:
 #
 #   export FSDP_ALL_GATHER_BACKEND=rccl_sdma
 #   export MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma  # direct symmetric buffers
+#   export MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma   # optional CE ReduceScatter
 #   primus-cli direct -- train pretrain --config <any existing yaml>
 #
 # The FSDP selector uses global NCCL_CTA_POLICY=2 because FSDP's custom
 # collective owns the relevant communicator. The Megatron distributed-
 # optimizer selector creates a dedicated zero-CTA process group in Python, so
-# this hook deliberately does not change the global policy; ReduceScatter and
-# gradient-norm AllReduce remain on their stock RCCL path.
+# this hook deliberately does not change the global policy. Gradient
+# ReduceScatter uses that group only when its separate selector is set;
+# gradient-norm AllReduce remains on the stock RCCL path.
 #
 # For either selector, this hook:
 #   1. Exports cuMem and allocator prerequisites used by RCCL's copy-engine path.
@@ -38,9 +41,18 @@ set -euo pipefail
 
 fsdp_backend="${FSDP_ALL_GATHER_BACKEND:-}"
 megatron_backend="${MEGATRON_PARAM_GATHER_BACKEND:-}"
+megatron_grad_backend="${MEGATRON_GRAD_REDUCE_BACKEND:-}"
 
-if [[ "${fsdp_backend}" != "rccl_sdma" && "${megatron_backend}" != "rccl_sdma" ]]; then
+if [[ "${fsdp_backend}" != "rccl_sdma" && "${megatron_backend}" != "rccl_sdma" && \
+      "${megatron_grad_backend}" != "rccl_sdma" ]]; then
     exit 0
+fi
+
+if [[ "${megatron_grad_backend}" == "rccl_sdma" && "${megatron_backend}" != "rccl_sdma" ]]; then
+    echo "[ERROR] MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma requires " \
+         "MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma because both paths share " \
+         "the dedicated process group and symmetric-memory pool." >&2
+    exit 2
 fi
 
 if [[ "${fsdp_backend}" == "rccl_sdma" && "${megatron_backend}" == "rccl_sdma" ]]; then
@@ -88,6 +100,21 @@ if [[ "${megatron_backend}" == "rccl_sdma" ]]; then
     echo "env.MEGATRON_RCCL_SDMA_CTA_POLICY=${MEGATRON_RCCL_SDMA_CTA_POLICY:-2}"
     echo "env.MEGATRON_RCCL_SDMA_EAGER_INIT=${MEGATRON_RCCL_SDMA_EAGER_INIT:-1}"
     for name in MEGATRON_RCCL_SDMA_EAGER_PARAM_BYTES MEGATRON_RCCL_SDMA_LOG; do
+        if [[ -n "${!name:-}" ]]; then
+            echo "env.${name}=${!name}"
+        fi
+    done
+fi
+if [[ "${megatron_grad_backend}" == "rccl_sdma" ]]; then
+    if [[ -n "${RCCL_CE_REDUCESCATTER:-}" && "${RCCL_CE_REDUCESCATTER}" != "1" ]]; then
+        echo "[ERROR] MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma requires " \
+             "RCCL_CE_REDUCESCATTER=1; found ${RCCL_CE_REDUCESCATTER}." >&2
+        exit 2
+    fi
+    echo "env.MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma"
+    echo "env.RCCL_CE_REDUCESCATTER=1"
+    for name in RCCL_FORCE_CE_REDUCESCATTER RCCL_CE_REDUCE_PER_CHUNK \
+                RCCL_CE_REDUCE_MAX_BLOCKS RCCL_CE_AR_STAGING_BYTES; do
         if [[ -n "${!name:-}" ]]; then
             echo "env.${name}=${!name}"
         fi
