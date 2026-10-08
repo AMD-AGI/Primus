@@ -13,6 +13,7 @@ import pytest
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state
+from megatron.core.fusions.fused_bias_geglu import quick_gelu
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.moe.moe_layer import MoELayer
@@ -59,7 +60,15 @@ def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
     return (a @ b / (a.norm() * b.norm() + 1e-12)).item()
 
 
-def _build_config(ep_size, num_moe_experts, moe_router_topk):
+def _activation_config(activation):
+    if activation == "silu":
+        return dict(activation_func=torch.nn.functional.silu)
+    # MiniMax-M3's swigluoai, spelled the way Megatron does: quick_geglu with the +1 offset and limit.
+    assert activation == "swigluoai", activation
+    return dict(activation_func=quick_gelu, glu_linear_offset=1.0, activation_func_clamp_value=7.0)
+
+
+def _build_config(ep_size, num_moe_experts, moe_router_topk, activation="silu"):
     """DeepSeek-V3 MoE config: sigmoid group-limited routing + shared expert."""
     return TransformerConfig(
         num_layers=1,
@@ -91,8 +100,9 @@ def _build_config(ep_size, num_moe_experts, moe_router_topk):
         moe_router_dtype="fp64",
         moe_grouped_gemm=False,
         gated_linear_unit=True,
-        activation_func=torch.nn.functional.silu,  # MegaMoE hardcodes SwiGLU/SiLU
+        **_activation_config(activation),
         add_bias_linear=False,
+        # unfused: Megatron's reference MLP then applies glu_linear_offset and the clamp itself
         bias_activation_fusion=False,
         use_cpu_initialization=True,
         params_dtype=torch.bfloat16,
@@ -197,7 +207,8 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
     @parametrize("moe_router_topk", [8])
     @parametrize("num_ga", [4])
     @parametrize("precision", ["bf16", "mxfp8"])
-    def test_forward_backward(self, moe_router_topk, num_ga, precision):
+    @parametrize("activation", ["silu", "swigluoai"])
+    def test_forward_backward(self, moe_router_topk, num_ga, precision, activation):
         # DeepSeek-V3 EP8 shapes: 256 experts, top-8, hidden 7168.
         # Single MoE layer, num_ga gradient-accumulation microbatches: forward +
         # backward num_ga times without zeroing grads (mirrors real GA training).
@@ -205,11 +216,14 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
         # precision="mxfp8" flips the experts while the reference stays bf16 Megatron, so its floor
         # also absorbs the fp8 quantization error -- it is a functional check of the fp8 wiring
         # (state threading, GA-safe weight-quant cache), not a precision measurement.
+        # activation="swigluoai" checks the MegaMoE kernels' activation against Megatron's own
+        # quick_geglu; x is scaled so the L1 output (std ~1.7 at unit x) crosses the 7.0 clamp.
         num_moe_experts, hidden_size = 256, 7168
+        x_gain = 3.0 if activation == "swigluoai" else 1.0
         self._init_process(precision=precision)
         self._setup_ep()
         try:
-            config = _build_config(self.world_size, num_moe_experts, moe_router_topk)
+            config = _build_config(self.world_size, num_moe_experts, moe_router_topk, activation)
             moe_layers, mega_layers = _build_layers(config, num_moe_experts, 1)
             moe_layer, mega_layer = moe_layers[0], mega_layers[0]
             self.assertEqual(isinstance(mega_layer.experts, MegaMoEFP8Experts), precision == "mxfp8")
@@ -224,6 +238,8 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
             for step in range(num_ga):
                 torch.manual_seed(1000 + self.rank + step * 97)
                 x = torch.randn((seq, batch, hidden_size), dtype=torch.bfloat16, device=self.device)
+                if x_gain != 1.0:
+                    x = x * x_gain
                 g = torch.randn((seq, batch, hidden_size), dtype=torch.bfloat16, device=self.device)
 
                 x_ref = x.clone().requires_grad_(True)
