@@ -25,6 +25,9 @@ optimizer:
   lr: 0.0008
   name: AdamW
   weight_decay: 0.1
+  # Primus: build AdamW from TritonFusedAdamW (device-sized grid) instead of
+  # ATen fused AdamW, whose launches are capped at 320 workgroups.
+  use_triton_fused_adam: false
 
 profiling:
   enable_memory_snapshot: false
