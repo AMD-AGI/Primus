@@ -106,6 +106,7 @@ class ExpertWeight:
     ownership: list
     offsets: list
     pair: object = None
+    assembly_plan: object = None
     consumed_generation: int = -1
 
     def get_pair(self, scale_rounding_mode):
@@ -115,20 +116,32 @@ class ExpertWeight:
         if self.owner.generation == 0:
             raise RuntimeError("MXFP4 expert weight consumed before parameter synchronization")
         if self.pair is None:
-            from primus_turbo.pytorch.core.mxfp4_comm import MXFP4WireLayout
+            from primus_turbo.pytorch.core.mxfp4_comm import MXFP4StripGatherPlan, MXFP4WireLayout
 
-            pieces = []
-            for rank, (first, count) in enumerate(self.ownership):
-                if count:
-                    size = MXFP4WireLayout((count, 32, self.layout.shape[-1])).nbytes
-                    pieces.append(
-                        (
-                            first,
-                            count,
-                            self.owner.packed.rows[rank, self.offsets[rank] : self.offsets[rank] + size],
-                        )
+            if self.owner.device.type == "cuda":
+                if self.assembly_plan is None:
+                    self.assembly_plan = MXFP4StripGatherPlan(
+                        self.layout,
+                        self.ownership,
+                        self.offsets,
+                        self.owner.packed.width,
+                        self.owner.device,
                     )
-            self.pair = self.layout.wrap_components(self.layout.assemble_strip_shards(pieces))
+                components = self.assembly_plan.assemble(self.owner.packed.storage)
+            else:
+                pieces = []
+                for rank, (first, count) in enumerate(self.ownership):
+                    if count:
+                        size = MXFP4WireLayout((count, 32, self.layout.shape[-1])).nbytes
+                        pieces.append(
+                            (
+                                first,
+                                count,
+                                self.owner.packed.rows[rank, self.offsets[rank] : self.offsets[rank] + size],
+                            )
+                        )
+                components = self.layout.assemble_strip_shards(pieces)
+            self.pair = self.layout.wrap_components(components)
         if self.consumed_generation < 0 and self.owner.rank == 0:
             _emit_comm_status(
                 f"[MXFP4-COMM] consumed expert cache shape={tuple(self.param.shape)} generation={self.owner.generation}"
@@ -276,6 +289,7 @@ class PackedExpertBucket:
         self.wait()
         for weight in self.weights:
             weight.pair = None
+            weight.assembly_plan = None
         self.packed.close()
         if self.fallback is not None:
             self.fallback.close()
