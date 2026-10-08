@@ -7,18 +7,27 @@
 """Opt-in MXFP4 expert parameter synchronization for Megatron TP=PP=EP=1.
 
 Only optimizer-owned BF16 elements are authoritative after an update. First
-gather ordinary parameters and the small set of 32-row strips crossing shard
-boundaries. The owner of each strip's first element can then quantize complete
-tiles. A second byte AllGather carries both quantized orientations and scales.
+gather the small set of 32-row strips crossing shard boundaries. The owner of
+each strip's first element can then quantize complete tiles. A second byte
+AllGather carries both quantized orientations, scales, and ordinary BF16 weights.
 Remote BF16 expert interiors remain stale until explicit checkpoint/fallback
 materialization; compute MUST consume the refreshed quantized cache instead.
 """
 
+import sys
 from dataclasses import dataclass
 from math import prod
 
 import torch
 import torch.distributed as dist
+
+
+def _emit_comm_status(message):
+    # Primus replaces builtins.print with a DEBUG-level logger. The launcher
+    # checks the captured stdout for cache consumption, so these once-per-weight
+    # diagnostics must remain visible at the normal console verbosity.
+    sys.stdout.write(message + "\n")
+    sys.stdout.flush()
 
 
 def strip_ownership(shape, start, bucket_numel, world):
@@ -121,9 +130,8 @@ class ExpertWeight:
                     )
             self.pair = self.layout.wrap_components(self.layout.assemble_strip_shards(pieces))
         if self.consumed_generation < 0 and self.owner.rank == 0:
-            print(
-                f"[MXFP4-COMM] consumed expert cache shape={tuple(self.param.shape)} generation={self.owner.generation}",
-                flush=True,
+            _emit_comm_status(
+                f"[MXFP4-COMM] consumed expert cache shape={tuple(self.param.shape)} generation={self.owner.generation}"
             )
         self.consumed_generation = self.owner.generation
         return self.pair
@@ -150,10 +158,20 @@ class PackedExpertBucket:
         if numel % self.world:
             raise ValueError("parameter bucket is not evenly sharded")
         self.shard_size = numel // self.world
-        fallback, packed_sizes = [], [0] * self.world
-        for param, (start, end) in sorted(bucket.param_to_index.items(), key=lambda item: item[1][0]):
+        ordered_params = sorted(bucket.param_to_index.items(), key=lambda item: item[1][0])
+        ordinary = [
+            (start, end)
+            for param, (start, end) in ordered_params
+            if not getattr(param, "_primus_mxfp4_comm_candidate", False)
+        ]
+        self.ordinary_ranges = self._ranges_by_rank(ordinary)
+        # Put ordinary weights in the same rank payload as that rank's expert
+        # strips. Separate max-rank padding would amplify a concentrated BF16
+        # tail by world_size and make the pre-quantization exchange much larger.
+        packed_sizes = [sum(end - start for start, end in ranges) * 2 for ranges in self.ordinary_ranges]
+        fallback = []
+        for param, (start, end) in ordered_params:
             if not getattr(param, "_primus_mxfp4_comm_candidate", False):
-                fallback.append((start, end))
                 continue
             shape = tuple(param.shape)
             layout = MXFP4WireLayout(shape, scale_rounding_mode)
@@ -167,16 +185,7 @@ class PackedExpertBucket:
             fallback.extend(boundaries)
         if not self.weights:
             raise ValueError("packed bucket requires at least one marked expert weight")
-        self.fallback_ranges = []
-        merged = merge_ranges(fallback)
-        for rank in range(self.world):
-            self.fallback_ranges.append(
-                [
-                    (max(start, rank * self.shard_size), min(end, (rank + 1) * self.shard_size))
-                    for start, end in merged
-                    if max(start, rank * self.shard_size) < min(end, (rank + 1) * self.shard_size)
-                ]
-            )
+        self.fallback_ranges = self._ranges_by_rank(fallback)
         fallback_sizes = [sum(end - start for start, end in ranges) * 2 for ranges in self.fallback_ranges]
         self.fallback = (
             ByteAllGather(max(fallback_sizes), group, self.device, use_sdma) if any(fallback_sizes) else None
@@ -184,10 +193,37 @@ class PackedExpertBucket:
         self.packed = ByteAllGather(max(packed_sizes), group, self.device, use_sdma)
         if self.rank == 0:
             wire_bytes = self.world * (self.packed.width + (self.fallback.width if self.fallback else 0))
-            print(
-                f"[MXFP4-COMM] enabled experts={len(self.weights)} bf16_bytes={numel * 2} wire_bytes={wire_bytes} scale_rounding={scale_rounding_mode}",
-                flush=True,
+            _emit_comm_status(
+                f"[MXFP4-COMM] enabled experts={len(self.weights)} bf16_bytes={numel * 2} wire_bytes={wire_bytes} scale_rounding={scale_rounding_mode}"
             )
+
+    def _ranges_by_rank(self, ranges):
+        merged = merge_ranges(ranges)
+        return [
+            [
+                (max(start, rank * self.shard_size), min(end, (rank + 1) * self.shard_size))
+                for start, end in merged
+                if max(start, rank * self.shard_size) < min(end, (rank + 1) * self.shard_size)
+            ]
+            for rank in range(self.world)
+        ]
+
+    def _pack_bf16_ranges(self, workspace, ranges_by_rank):
+        offset = 0
+        for start, end in ranges_by_rank[self.rank]:
+            size = (end - start) * 2
+            workspace.local[offset : offset + size].copy_(self.bucket.param_data[start:end].view(torch.uint8))
+            offset += size
+
+    def _restore_bf16_ranges(self, workspace, ranges_by_rank):
+        for rank, ranges in enumerate(ranges_by_rank):
+            offset = 0
+            for start, end in ranges:
+                size = (end - start) * 2
+                self.bucket.param_data[start:end].copy_(
+                    workspace.rows[rank, offset : offset + size].view(torch.bfloat16)
+                )
+                offset += size
 
     @torch.no_grad()
     def dispatch(self):
@@ -197,23 +233,11 @@ class PackedExpertBucket:
             raise RuntimeError("previous MXFP4 parameter gather is still outstanding")
         for weight in self.weights:
             weight.pair = None
+        self._pack_bf16_ranges(self.packed, self.ordinary_ranges)
         if self.fallback is not None:
-            offset = 0
-            for start, end in self.fallback_ranges[self.rank]:
-                size = (end - start) * 2
-                self.fallback.local[offset : offset + size].copy_(
-                    self.bucket.param_data[start:end].view(torch.uint8)
-                )
-                offset += size
+            self._pack_bf16_ranges(self.fallback, self.fallback_ranges)
             self.fallback.launch().wait()
-            for rank, ranges in enumerate(self.fallback_ranges):
-                offset = 0
-                for start, end in ranges:
-                    size = (end - start) * 2
-                    self.bucket.param_data[start:end].copy_(
-                        self.fallback.rows[rank, offset : offset + size].view(torch.bfloat16)
-                    )
-                    offset += size
+            self._restore_bf16_ranges(self.fallback, self.fallback_ranges)
         for weight in self.weights:
             first, count = weight.ownership[self.rank]
             if not count:
@@ -228,9 +252,11 @@ class PackedExpertBucket:
         self.generation += 1
         return self
 
+    @torch.no_grad()
     def wait(self):
         if self.work is not None:
             self.work.wait()
+            self._restore_bf16_ranges(self.packed, self.ordinary_ranges)
             self.work = None
 
     @torch.no_grad()

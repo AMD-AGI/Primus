@@ -110,7 +110,10 @@ def main():
     shapes = [(3, 256, 128), (3, 128, 128)] if args.cpu else [(4, 1024, 896), (4, 896, 512)]
     starts = [127, 127 + torch.Size(shapes[0]).numel()]
     last = starts[1] + torch.Size(shapes[1]).numel()
-    numel = ((last + 259 + world * 128 - 1) // (world * 128)) * world * 128
+    # A substantial ordinary tail also exercises ranks with no expert strips,
+    # as in a training bucket that contains embedding or output weights.
+    ordinary_tail = max(259, last // 4)
+    numel = ((last + ordinary_tail + world * 128 - 1) // (world * 128)) * world * 128
     shard_size = numel // world
     reference_master = torch.sin(torch.arange(numel, device=device).float() * 0.037)
     reference = reference_master.to(torch.bfloat16)
@@ -173,6 +176,11 @@ def main():
                 state = bucket._primus_mxfp4_gather
                 assert not bookkeeping_group.param_gather_dispatched
                 assert state.generation == step + 1, "duplicate parameter gather"
+            # Ordinary BF16 weights must be ready before any forward consumer,
+            # independently of the explicit full-BF16 materialization below.
+            for param, (start, end) in mapping.items():
+                if not getattr(param, "_primus_mxfp4_comm_candidate", False):
+                    torch.testing.assert_close(param.detach(), reference[start:end], rtol=0, atol=0)
             actual_grad = torch.zeros_like(storage)
             expected_grad = torch.zeros_like(storage)
             for param, start, shape in zip(params, starts, shapes):
