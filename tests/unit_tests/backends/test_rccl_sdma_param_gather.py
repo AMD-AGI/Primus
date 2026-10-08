@@ -21,6 +21,51 @@ from primus.backends.megatron.patches.parallelism import (
 )
 
 
+@pytest.mark.parametrize("overlap", [False, True])
+def test_mxfp4_callbacks_keep_ddp_group_ownership(monkeypatch, overlap):
+    monkeypatch.setenv("MEGATRON_MXFP4_PARAM_GATHER", "1")
+    candidates = [torch.nn.Parameter(torch.zeros(1)) for _ in range(2)]
+    ordinary = torch.nn.Parameter(torch.zeros(1))
+    for param in candidates:
+        param._primus_mxfp4_comm_candidate = True
+    calls = []
+
+    class Group:
+        def __init__(self, params):
+            self.params = params
+            self.ddp_config = SimpleNamespace(overlap_param_gather=overlap)
+            self.param_gather_dispatched = False
+
+        def finish_param_sync(self, skip_next_bucket_dispatch):
+            assert skip_next_bucket_dispatch
+            calls.append(self)
+
+        def start_param_sync(self, force_sync):
+            assert force_sync
+            self.param_gather_dispatched = True
+            calls.append(self)
+
+    groups = [Group([param]) for param in candidates]
+
+    class DDP:
+        @rccl_sdma_param_all_gather_patches.make_ddp_init
+        def __init__(self):
+            self.param_to_bucket_group = dict(zip(candidates, groups))
+            self.param_to_bucket_group[ordinary] = groups[0]
+
+    DDP()
+    bookkeeping = Group(candidates)
+    for param in candidates:
+        param._primus_mxfp4_ensure_ready()
+    assert calls == groups
+    assert bookkeeping not in calls
+    assert not hasattr(ordinary, "_primus_mxfp4_ensure_ready")
+    if not overlap:
+        for param in candidates:
+            param._primus_mxfp4_ensure_ready()
+        assert calls == groups, "already dispatched groups must not gather twice"
+
+
 def test_rccl_backend_disables_direct_hip_patch(monkeypatch):
     monkeypatch.setenv("ENABLE_SDMA_ALLGATHER", "1")
     monkeypatch.setenv("MEGATRON_PARAM_GATHER_BACKEND", "rccl_sdma")

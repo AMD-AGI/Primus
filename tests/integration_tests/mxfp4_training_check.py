@@ -78,12 +78,8 @@ def main():
         wire.MXFP4WireLayout.quantize = fake_quantize
         wire.MXFP4WireLayout.wrap_components = lambda _self, components, shape=None: components
     else:
-        from megatron.core.distributed.distributed_data_parallel_config import (
-            DistributedDataParallelConfig,
-        )
-        from megatron.core.distributed.param_and_grad_buffer import (
-            _ParamAndGradBucketGroup,
-        )
+        from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
+        from megatron.core.distributed.param_and_grad_buffer import _ParamAndGradBucketGroup
         from primus_turbo.pytorch.core import mxfp4_comm as wire
         from primus_turbo.pytorch.core.low_precision import Float4QuantConfig
         from primus_turbo.pytorch.ops.grouped_gemm_fp4 import grouped_gemm_fp4
@@ -92,7 +88,7 @@ def main():
         from primus.backends.megatron.core.distributed import mxfp4_training as runtime
         from primus.backends.megatron.core.extensions import primus_turbo as extension
         from primus.backends.megatron.patches.parallelism.rccl_sdma_param_all_gather_patches import (
-            make_bucket_group_init,
+            make_ddp_init,
             make_start_param_sync,
         )
 
@@ -143,13 +139,22 @@ def main():
         else:
 
             class BucketGroup(_ParamAndGradBucketGroup):
-                __init__ = make_bucket_group_init(_ParamAndGradBucketGroup.__init__)
                 start_param_sync = make_start_param_sync(_ParamAndGradBucketGroup.start_param_sync)
 
             ddp_config = DistributedDataParallelConfig(
                 use_distributed_optimizer=True, overlap_param_gather=True
             )
             bucket_group = BucketGroup([bucket], ddp_config, dist.group.WORLD, world)
+
+            class DDPBinding:
+                @make_ddp_init
+                def __init__(self):
+                    self.param_to_bucket_group = {param: bucket_group for param in mapping}
+
+            DDPBinding()
+            # Match DistributedOptimizer's later partition_buckets call over
+            # the same buffers. These bookkeeping groups must not own hooks.
+            bookkeeping_group = BucketGroup([bucket], ddp_config, dist.group.WORLD, world)
         for step in range(3):
             storage.fill_(float("nan"))
             storage[rank * shard_size : (rank + 1) * shard_size].copy_(local_master.to(torch.bfloat16))
@@ -163,8 +168,11 @@ def main():
                     params[0]._primus_mxfp4_ensure_ready()
                 else:
                     bucket_group.start_param_sync(force_sync=step == 2)
+                    params[0]._primus_mxfp4_ensure_ready()
                     bucket_group.finish_param_sync()
                 state = bucket._primus_mxfp4_gather
+                assert not bookkeeping_group.param_gather_dispatched
+                assert state.generation == step + 1, "duplicate parameter gather"
             actual_grad = torch.zeros_like(storage)
             expected_grad = torch.zeros_like(storage)
             for param, start, shape in zip(params, starts, shapes):
