@@ -13,6 +13,7 @@ it makes no claim about MXFP4 arithmetic. Neither mode needs training datasets.
 """
 
 import argparse
+import faulthandler
 import importlib.util
 import os
 import sys
@@ -33,6 +34,7 @@ def load(name, path):
 
 
 def main():
+    faulthandler.enable()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--turbo-root", type=Path)
@@ -283,18 +285,29 @@ def main():
                     torch.testing.assert_close(param.main_grad, ref.grad, rtol=0, atol=0)
                     expected_grad[start : start + param.numel()].copy_(ref.grad.flatten())
                     param.grad = None
+                if rank == 0:
+                    print(f"[MXFP4-COMM-PREFLIGHT] step={step} fused_mlp_parity=PASS", flush=True)
             # Saving a checkpoint must see exact BF16, never dequantized MXFP4.
             state.materialize_bf16()
             torch.testing.assert_close(storage, reference, rtol=0, atol=0)
+            if rank == 0:
+                print(f"[MXFP4-COMM-PREFLIGHT] step={step} bf16_materialization=PASS", flush=True)
             reduced = torch.empty(shard_size, device=device, dtype=torch.bfloat16)
             expected_reduced = torch.empty_like(reduced)
-            dist.reduce_scatter_tensor(reduced, actual_grad, group=dist.group.WORLD)
+            # Match production's ProcessGroupNCCL stream path. Synchronous CE
+            # calls can enter RCCL's null-stream fallback, which does not safely
+            # handle the imported ROCr VMM pointers used by this transport.
+            dist.reduce_scatter_tensor(reduced, actual_grad, group=dist.group.WORLD, async_op=True).wait()
             # Match the baseline's reduction operation: BF16 AllReduce may
             # associate additions differently from ReduceScatter. That rounding
             # difference is unrelated to quantized parameter communication.
-            dist.reduce_scatter_tensor(expected_reduced, expected_grad, group=dist.group.WORLD)
+            dist.reduce_scatter_tensor(
+                expected_reduced, expected_grad, group=dist.group.WORLD, async_op=True
+            ).wait()
             torch.testing.assert_close(reduced, expected_reduced, rtol=0, atol=0)
-            dist.all_gather_into_tensor(expected_grad, expected_reduced, group=dist.group.WORLD)
+            dist.all_gather_into_tensor(
+                expected_grad, expected_reduced, group=dist.group.WORLD, async_op=True
+            ).wait()
             local_master.add_(reduced.float(), alpha=-0.01 / world)
             reference_master.add_(expected_grad.float(), alpha=-0.01 / world)
             reference = reference_master.to(torch.bfloat16)
