@@ -117,7 +117,7 @@ def test_every_gemm_pairs_its_hadamard(fwd, dgrad, wgrad):
 def test_sr_gradient_keeps_its_options():
     _gates(fp4_scale_rounding_grad="m0", fp4_hadamard_wgrad="none")
     g = _formats(sr=True)["grad"]
-    assert _mx.mx_fmt_base(g) & _mx.MX_FMT_FLY_SR
+    assert _mx.mx_fmt_base(g) & _mx.MX_FMT_TS_SR
     assert _decode(g)[:2] == (("m0", "h32"), ("m0", "none"))
 
 
@@ -197,7 +197,7 @@ def test_sr_actw_marks_only_activation_and_weight_columns():
     f = _formats()
     for name in ("act", "weight", "fwd_act", "fwd_weight"):
         assert f[name] & _mx.MX_FMT_FP4_COL_SR, name
-        assert not _mx.mx_fmt_base(f[name]) & _mx.MX_FMT_FLY_SR, name  # rows stay round-to-nearest
+        assert not _mx.mx_fmt_base(f[name]) & _mx.MX_FMT_TS_SR, name  # rows stay round-to-nearest
     assert not f["grad"] & _mx.MX_FMT_FP4_COL_SR
     with pytest.raises(ValueError, match="sr_actw"):
         _gates(fp4_sr_actw=True, gemm_layout="blob", fwd_fp4_single_fc1=False)

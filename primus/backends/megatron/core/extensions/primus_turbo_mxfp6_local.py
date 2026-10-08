@@ -114,7 +114,7 @@ def _pack_act_dual(x, wgrad_is_fp4, n_out=None, ts=False):
 
     Under `gates().wgrad_a6w4` the column half is MXFP4, which is the operand wgrad narrows. The
     row half stays MXFP6 either way, because that is what the forward's A operand is. ``ts``
-    (see `_ts_fwd`): the row half in the A6W6 fly layout, the column half unchanged.
+    (see `_ts_fwd`): the row half in the A6W6 tilescale layout, the column half unchanged.
     """
     if ts:
         return _mx.quantize_mx_dual(x, _mx.with_ts6_row(_act_fmt(x.shape, n_out), False) | _neutral_rows())
@@ -167,7 +167,7 @@ def _pack_weight_dual(weight, weight_is_fp4, m=None, ts=False):
 
     Under A6W4 this *replaces* the MXFP6 weight pack rather than adding to it, and writes
     two thirds of the bytes -- wgrad never reads the weight, so there is no third
-    direction wanting the wider format. ``ts``: the row half (forward B) in the A6W6 fly layout.
+    direction wanting the wider format. ``ts``: the row half (forward B) in the A6W6 tilescale layout.
     """
     if ts is True and _ppg(weight, "W6"):  # mxfp6_packed_param_gather: the gathered packs (C1 in _ppg_c1)
         return weight._ppg_row, weight._ppg_row_s, weight._ppg_col, weight._ppg_col_s
@@ -271,7 +271,7 @@ def _grad_fmt_base(b4):
     if b4[3] in (2, 3) and b4[0] and b4[1]:  # packed scales: a gradient is always an A operand
         return _mx.ts_fmt(row=_mx.TS_A, col=_mx.TS_A, sr=b4[2])
     if b4[3] and b4[0] and b4[1]:  # FlyDSL operands: plain layout both ways
-        return _mx.MX_FMT_FLY_GRAD_SR if b4[2] else _mx.MX_FMT_FLY_GRAD
+        return _mx.MX_FMT_PLAIN_GRAD_SR if b4[2] else _mx.MX_FMT_PLAIN_GRAD
     fmt = {
         (False, False): 0,
         (True, True): _mx.MX_FMT_A4W4_GRAD,
@@ -357,10 +357,9 @@ def _fwd_fp4_rows(x, role, m, n, k):
     return _mx.quantize_mx(x, 1, _fwd_fp4_fmt(role, m, n, k, dual=False))
 
 
-# A6W6 fly: forward A6W6 GEMMs on aiter `gemm_a6w6_fly_asm`, assembly ports of the FlyDSL
-# MXFP6 persistent GEMM (one AOT code object per (M, N, K, bias)). Its operands' row directions pack in the K128-blocked
-# fly layout (`ts6_fmt`); column directions are unchanged. Per shape: where aiter has no code object the GEMM keeps
-# the A6W6 tile-blob kernels.
+# A6W6 tilescale: forward A6W6 GEMMs on aiter `gemm_a6w6_tilescale` (one AOT code object per (M, N, K, bias)). Its
+# operands' row directions pack in the K128-blocked tilescale layout (`ts6_fmt`); column directions are unchanged. Per
+# shape: where aiter has no code object the GEMM keeps the A6W6 tile-blob kernels.
 # The shape set is read once here, at import: `_ts_fwd` runs inside compiled blocks, where reading aiter's manifest would
 # break the graph -- and a graph break changes how Inductor fuses the surrounding ops, i.e. the numerics.
 try:
@@ -439,7 +438,7 @@ def _pack_grad_fused_dual(x, aux, bias, mode, want_col_sum, b4):
 
 
 def _pack_act_row(x, ts=False):
-    """An activation's row direction only (eval): MXFP6 tile blob, or the A6W6 fly layout (``ts``)."""
+    """An activation's row direction only (eval): MXFP6 tile blob, or the A6W6 tilescale layout (``ts``)."""
     if ts:
         return _mx.quantize_mx(x, 1, _mx.ts6_fmt(False) | _neutral_rows())
     return _quantize_mxfp6_row(x, 1)
@@ -759,7 +758,7 @@ class MXFP6LinearFunction(torch.autograd.Function):
                 input_2d, _fwd_fp4_fmt("act", fm, fn, fk)
             )
             b_row, b_row_scale, b_col, b_col_scale = _fwd_fp4_weight_dual(weight, fm, fn, fk)
-            if _fwd_fp4_blob(fm, fn, fk):  # no fly code object: the columns stay as the backward reads them
+            if _fwd_fp4_blob(fm, fn, fk):  # no tilescale code object: the columns stay as the backward reads them
                 a_row, a_row_scale = _fwd_fp4_rows(input_2d, "act", fm, fn, fk)
                 b_row, b_row_scale = _fwd_fp4_rows(weight, "weight", fm, fn, fk)
         elif fwd_fp4:
@@ -1359,7 +1358,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
             # fc1's forward GEMM: [m, k] x [f, k]^T.
             x_row, x_row_s, x_col, x_col_s = _mx.quantize_mx_dual(x, _fwd_fp4_fmt("act", m, f, k))
             w1_row, w1_row_s, w1_col, w1_col_s = _fwd_fp4_weight_dual(w1, m, f, k)
-            if _fwd_fp4_blob(m, f, k):  # no fly code object: the columns stay as the backward reads them
+            if _fwd_fp4_blob(m, f, k):  # no tilescale code object: the columns stay as the backward reads them
                 x_row, x_row_s = _fwd_fp4_rows(x, "act", m, f, k)
                 w1_row, w1_row_s = _fwd_fp4_rows(w1, "weight", m, f, k)
         elif fwd_fp4_fc1:
@@ -1412,7 +1411,7 @@ class MXFP6MLPFunction(torch.autograd.Function):
                 )
             if (
                 blob
-            ):  # no fly code object (e.g. an eval batch): rows in the blob, recomputed by the same prologue
+            ):  # no tilescale code object (e.g. an eval batch): rows in the blob, recomputed by the same prologue
                 a_row, a_row_s, _, _, _ = _mx.quantize_mx_fused_dual(
                     y1, None, b1, MXFP6_PROLOGUE_BIAS_GELU, False, _fwd_fp4_opts(_mx.MX_FMT_BLOB_GRAD, "act")
                 )
@@ -1560,7 +1559,7 @@ def _grouped_mlp_unavailable_reason():
         if not gates().bwd_fp4_grouped_mlp:
             return "A4W4 backward without mxfp6_bwd_fp4_grouped_mlp"
         if _tilescale():
-            return "packed fly scales are laid out per consuming GEMM; the pair packers are not wired"
+            return "packed tilescale scales are laid out per consuming GEMM; the pair packers are not wired"
         if getattr(_TURBO_CPP, "quantize_mx_dual_out", None) is None:
             return "this Primus-Turbo has no quantize_mx_*_out ops (A4W4 grouped MLP)"
     return None
