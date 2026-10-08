@@ -65,13 +65,17 @@ def main():
                 rtol=0,
                 atol=0,
             )
-            # Coordinate-dependent bytes make transposition and shard ordering observable.
-            values = (weight.float() * 11).to(torch.uint8)
+            # A deterministic nibble matrix and shared tile scales support both
+            # wire formats while keeping stale-source/ownership checks exact.
+            values = (weight.float() * 11).to(torch.uint8) & 15
+            transposed = values.transpose(-2, -1)
+            g, n, k = weight.shape
+            scales = torch.full((g, n // 32, k // 32), 127, dtype=torch.uint8)
             components = (
-                values[..., ::2],
-                values[..., ::32],
-                values.transpose(-2, -1)[..., ::2],
-                values.transpose(-2, -1)[..., ::32],
+                values[..., ::2] | (values[..., 1::2] << 4),
+                scales.repeat_interleave(32, dim=1),
+                transposed[..., ::2] | (transposed[..., 1::2] << 4),
+                scales.transpose(1, 2).repeat_interleave(32, dim=1),
             )
             return layout.pack([part.contiguous() for part in components])
 

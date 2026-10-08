@@ -9,11 +9,14 @@
 Only optimizer-owned BF16 elements are authoritative after an update. First
 gather the small set of 32-row strips crossing shard boundaries. The owner of
 each strip's first element can then quantize complete tiles. A second byte
-AllGather carries both quantized orientations, scales, and ordinary BF16 weights.
+AllGather carries packed quantized weights, scales, and ordinary BF16 weights.
+The default format carries both orientations. The shared_2d format reconstructs
+both from one nibble matrix and one scale per deterministic 32x32 tile.
 Remote BF16 expert interiors remain stale until explicit checkpoint/fallback
 materialization; compute MUST consume the refreshed quantized cache instead.
 """
 
+import os
 import sys
 from dataclasses import dataclass
 from math import prod
@@ -143,7 +146,11 @@ class ExpertWeight:
                 pieces = []
                 for rank, (first, count) in enumerate(self.ownership):
                     if count:
-                        size = MXFP4WireLayout((count, 32, self.layout.shape[-1])).nbytes
+                        size = MXFP4WireLayout(
+                            (count, 32, self.layout.shape[-1]),
+                            self.layout.scale_rounding_mode,
+                            self.layout.shared_2d,
+                        ).nbytes
                         pieces.append(
                             (
                                 first,
@@ -179,6 +186,10 @@ class PackedExpertBucket:
         self.preparation_stream = _preparation_stream(self.device) if self.device.type == "cuda" else None
         if bucket.param_data.dtype != torch.bfloat16:
             raise ValueError("MXFP4 communication requires BF16 model parameter storage")
+        wire_format = os.getenv("MEGATRON_MXFP4_PARAM_GATHER_FORMAT", "dual")
+        if wire_format not in ("dual", "shared_2d"):
+            raise ValueError("MXFP4 gather format must be dual or shared_2d")
+        shared_2d = wire_format == "shared_2d"
         numel = bucket.param_data.numel()
         if numel % self.world:
             raise ValueError("parameter bucket is not evenly sharded")
@@ -199,14 +210,16 @@ class PackedExpertBucket:
             if not getattr(param, "_primus_mxfp4_comm_candidate", False):
                 continue
             shape = tuple(param.shape)
-            layout = MXFP4WireLayout(shape, scale_rounding_mode)
+            layout = MXFP4WireLayout(shape, scale_rounding_mode, shared_2d)
             owners, boundaries = strip_ownership(shape, start, numel, self.world)
             state = ExpertWeight(self, param, start, layout, owners, packed_sizes.copy())
             self.weights.append(state)
             param._primus_mxfp4_comm_state = state
             for rank, (_first, count) in enumerate(owners):
                 if count:
-                    packed_sizes[rank] += MXFP4WireLayout((count, 32, shape[-1])).nbytes
+                    packed_sizes[rank] += MXFP4WireLayout(
+                        (count, 32, shape[-1]), scale_rounding_mode, shared_2d
+                    ).nbytes
             fallback.extend(boundaries)
         if not self.weights:
             raise ValueError("packed bucket requires at least one marked expert weight")
@@ -227,7 +240,7 @@ class PackedExpertBucket:
         if self.rank == 0:
             wire_bytes = self.world * (self.packed.width + (self.fallback.width if self.fallback else 0))
             _emit_comm_status(
-                f"[MXFP4-COMM] enabled experts={len(self.weights)} bf16_bytes={numel * 2} wire_bytes={wire_bytes} scale_rounding={scale_rounding_mode}"
+                f"[MXFP4-COMM] enabled experts={len(self.weights)} bf16_bytes={numel * 2} wire_bytes={wire_bytes} scale_rounding={scale_rounding_mode} wire_format={wire_format}"
             )
 
     def _ranges_by_rank(self, ranges):
@@ -303,7 +316,9 @@ class PackedExpertBucket:
                 continue
             k = weight.layout.shape[-1]
             source = weight.param.detach().view(-1, 32, k)[first : first + count]
-            layout = MXFP4WireLayout((count, 32, k), weight.layout.scale_rounding_mode)
+            layout = MXFP4WireLayout(
+                (count, 32, k), weight.layout.scale_rounding_mode, weight.layout.shared_2d
+            )
             payload = layout.quantize(source)
             offset = weight.offsets[self.rank]
             self.packed.local[offset : offset + layout.nbytes].copy_(payload)
