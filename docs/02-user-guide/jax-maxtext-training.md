@@ -42,10 +42,6 @@ This variable is a no-op on MI300X (gfx942).
 
 ### Known issues
 
-<!-- NEEDS CONFIRMATION: carried over from v26.6. Nothing in the v26.6..v26.8 range
-     addresses it, so it is assumed still open on the ROCm 10.2 nightly stack — but
-     it has not been re-tested against v26.7 or v26.8. Confirm or drop before
-     publishing. -->
 **Loss curve discrepancy with `packing=false`.** With `packing=false` the loss converges at a slightly higher value than in previous images. To reproduce the earlier convergence, set `NVTE_CK_USES_FWD_V3=0`, which uses Flash Attention v2 for the forward pass instead of v3. This is being tracked and will be addressed in a future release.
 
 **v26.8 runs on a ROCm nightly.** The image takes ROCm `10.2.0a20260923` and a Transformer Engine 2.18 development build. The per-model settings below have not all been re-validated on this stack; re-check throughput and convergence on your own hardware before trusting a number here.
