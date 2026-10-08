@@ -287,7 +287,7 @@ mkdir -p "$LOG_DIR"
 rm -rf "$LOG_FILE"
 
 ######################### Training Job #########################
-export EXP="examples/megatron/configs/MI355X/qwen3_235B_A22B-pretrain.yaml"
+export EXP="examples/megatron/configs/MI355X/qwen3_235B_A22B-BF16-pretrain.yaml"
 
 echo "--------------------------------" | tee -a "$LOG_FILE"
 echo "Begin Training... $(date +%Y%m%d_%H%M%S)" | tee -a "$LOG_FILE"
