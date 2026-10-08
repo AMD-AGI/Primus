@@ -196,7 +196,7 @@ class TestSharedWorkspace(unittest.TestCase):
         ]
         mapping = {p: Group(group, bucket) for p, group, bucket in zip(params, (a, a, b), buckets)}
         with mock.patch.object(self.runtime.dist, "get_world_size", return_value=2), mock.patch.object(
-            self.runtime, "ByteAllGather", Workspace
+            self.runtime, "SharedPackedWorkspace", Workspace
         ):
             workspaces = self.runtime.assign_shared_workspaces(mapping)
         self.assertEqual(len(workspaces), 2)

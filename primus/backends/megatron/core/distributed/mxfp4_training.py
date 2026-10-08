@@ -142,8 +142,41 @@ def packed_workspace_width_bound(bucket, world):
     return 2 * (bucket.param_data.numel() // world + 32 * max(columns))
 
 
+class SharedPackedWorkspace:
+    """Two transport slots; materialize any unconsumed victim before reuse.
+
+    Native DDP prefetches the next bucket before the current fused consumer
+    assembles its cache. Two slots preserve that overlap without enqueueing a
+    collective wait on the preparation stream. Synchronous evaluation can
+    dispatch more buckets; eviction then saves their caches on the caller
+    stream before the preparation stream is allowed to overwrite the slot.
+    """
+
+    def __init__(self, width, group, device, use_sdma):
+        self.buffers = [ByteAllGather(width, group, device, use_sdma) for _ in range(2)]
+        self.owners = [None, None]
+        self.next_slot = 0
+        self.rank = self.buffers[0].rank
+
+    def acquire(self, owner):
+        slot = self.next_slot
+        previous = self.owners[slot]
+        if previous is not None:
+            previous.wait()
+            for weight in previous.weights:
+                weight.assemble_pair()
+        self.owners[slot] = owner
+        self.next_slot = (slot + 1) % len(self.buffers)
+        return self.buffers[slot].narrow(owner.packed_width)
+
+    def close(self):
+        self.owners = [None, None]
+        for buffer in self.buffers:
+            buffer.close()
+
+
 def assign_shared_workspaces(param_to_bucket_group):
-    """Allocate one reusable transport buffer per DDP process group/device."""
+    """Allocate a transport pool per DDP process group/device."""
     plans = {}
     # Keep DDP insertion order across ranks; communicator setup is collective.
     for bucket_group in dict.fromkeys(param_to_bucket_group.values()):
@@ -158,13 +191,14 @@ def assign_shared_workspaces(param_to_bucket_group):
             plans[key] = (max(width, packed_workspace_width_bound(bucket, world)), buckets)
     workspaces = []
     for (group, device), (width, buckets) in plans.items():
-        workspace = ByteAllGather(width, group, device, use_sdma=device.type == "cuda")
+        workspace = SharedPackedWorkspace(width, group, device, use_sdma=device.type == "cuda")
         for bucket in buckets:
             bucket._primus_mxfp4_workspace = workspace
         workspaces.append(workspace)
         if workspace.rank == 0:
             _emit_comm_status(
-                f"[MXFP4-COMM] shared workspace bytes={workspace.storage.numel()} buckets={len(buckets)}"
+                f"[MXFP4-COMM] shared workspace bytes={sum(b.storage.numel() for b in workspace.buffers)} "
+                f"slots={len(workspace.buffers)} buckets={len(buckets)}"
             )
     return workspaces
 
@@ -254,7 +288,6 @@ class PackedExpertBucket:
         self.weights = []
         self.device = bucket.param_data.device
         self.preparation_stream = _preparation_stream(self.device) if self.device.type == "cuda" else None
-        self.ready_event = torch.cuda.Event() if self.preparation_stream is not None else None
         if bucket.param_data.dtype != torch.bfloat16:
             raise ValueError("MXFP4 communication requires BF16 model parameter storage")
         numel = bucket.param_data.numel()
@@ -294,9 +327,11 @@ class PackedExpertBucket:
             ByteAllGather(max(fallback_sizes), group, self.device, use_sdma) if any(fallback_sizes) else None
         )
         workspace = getattr(bucket, "_primus_mxfp4_workspace", None)
+        self.workspace = workspace
+        self.packed_width = max(packed_sizes)
         self.shared_workspace = workspace is not None
         self.packed = (
-            workspace.narrow(max(packed_sizes))
+            workspace.buffers[0].narrow(self.packed_width)
             if self.shared_workspace
             else ByteAllGather(max(packed_sizes), group, self.device, use_sdma)
         )
@@ -356,20 +391,27 @@ class PackedExpertBucket:
             )
 
     @torch.no_grad()
-    def dispatch(self, *, prefetch_cache=True):
+    def dispatch(self):
+        if self.work is not None:
+            raise RuntimeError("previous MXFP4 parameter gather is still outstanding")
+        if self.shared_workspace:
+            # Eviction runs on the consumer stream. The dependency below then
+            # protects its BF16 restoration and cache reads before slot reuse.
+            self.packed = self.workspace.acquire(self)
         if self.preparation_stream is None:
-            return self._dispatch(prefetch_cache=prefetch_cache)
+            return self._dispatch()
         # DDP dispatches the next bucket before computing the current layer.
         # Keep the boundary wait, quantizer, and packing off the caller stream
         # so that prefetch does not serialize that layer behind preparation.
         # The dependency includes all preceding optimizer BF16 writes. NCCL
         # records the preparation stream when launching the final AllGather.
-        # A completion event also covers cache assembly and BF16 restoration.
+        # Leave the final gather asynchronous; waiting here can also block the
+        # compute stream when ROCm maps both streams to the same hardware queue.
         self.preparation_stream.wait_stream(torch.cuda.current_stream(self.device))
         with torch.cuda.stream(self.preparation_stream):
-            return self._dispatch(prefetch_cache=prefetch_cache)
+            return self._dispatch()
 
-    def _dispatch(self, *, prefetch_cache):
+    def _dispatch(self):
         from primus_turbo.pytorch.core.mxfp4_comm import MXFP4WireLayout
 
         if self.work is not None:
@@ -393,31 +435,13 @@ class PackedExpertBucket:
             self.packed.local[offset : offset + layout.nbytes].copy_(payload)
         self.work = self.packed.launch()
         self.generation += 1
-        if self.ready_event is not None or self.shared_workspace:
-            # Complete cache preparation while the preceding layer computes.
-            # The consumer waits for this event, not just for the transport.
-            self.work.wait()
-            self._restore_bf16_ranges(self.packed, self.ordinary_restore_plan)
-            # Synchronous evaluation gathers all buckets before consumption,
-            # with no preceding layer compute to overlap. Keep assembly lazy
-            # there instead of queuing all cache allocations in advance.
-            # A shared transport buffer must be fully consumed before the
-            # next bucket overwrites it, including synchronous evaluation.
-            if prefetch_cache or self.shared_workspace:
-                for weight in self.weights:
-                    weight.assemble_pair()
-            if self.ready_event is not None:
-                self.ready_event.record(self.preparation_stream)
         return self
 
     @torch.no_grad()
     def wait(self):
         if self.work is not None:
             self.work.wait()
-            if self.ready_event is not None:
-                torch.cuda.current_stream(self.device).wait_event(self.ready_event)
-            elif not self.shared_workspace:
-                self._restore_bf16_ranges(self.packed, self.ordinary_restore_plan)
+            self._restore_bf16_ranges(self.packed, self.ordinary_restore_plan)
             self.work = None
 
     @torch.no_grad()

@@ -139,7 +139,7 @@ def main():
     try:
         if args.cpu:
             if os.getenv("MEGATRON_MXFP4_PARAM_GATHER_SHARED_WORKSPACE", "0") == "1":
-                bucket._primus_mxfp4_workspace = runtime.ByteAllGather(
+                bucket._primus_mxfp4_workspace = runtime.SharedPackedWorkspace(
                     runtime.packed_workspace_width_bound(bucket, world), dist.group.WORLD, device, False
                 )
             state = runtime.PackedExpertBucket(bucket, dist.group.WORLD, use_sdma=False)
@@ -179,7 +179,11 @@ def main():
             storage.fill_(float("nan"))
             storage[rank * shard_size : (rank + 1) * shard_size].copy_(local_master.to(torch.bfloat16))
             if args.cpu:
-                state.dispatch().wait()
+                state.dispatch()
+                if not state.shared_workspace:
+                    state.wait()
+                # Shared mode deliberately leaves the gather outstanding:
+                # eviction below must wait and restore ordinary BF16 values.
             else:
                 bucket_group.param_gather_dispatched = False
                 next_bucket.param_gather_dispatched = False
@@ -199,21 +203,26 @@ def main():
                 if step == 2 and not state.shared_workspace:
                     assert all(weight.pair is None for weight in state.weights), "eager evaluation caches"
             if state.shared_workspace:
-                assert all(weight.pair is not None for weight in state.weights)
-                # Simulate the next bucket reusing the same allocation with a
-                # different rank width. Previously assembled caches and BF16
-                # ordinary weights must survive complete payload destruction.
-                state.packed.storage.fill_(205)
-                borrowed = state.packed._owner.narrow(256)
-                borrowed.local.fill_(rank + step)
-                borrowed.launch().wait()
-                for peer in range(world):
-                    torch.testing.assert_close(
-                        borrowed.rows[peer], torch.full_like(borrowed.rows[peer], peer + step), rtol=0, atol=0
-                    )
-                borrowed.close()
+                assert all(weight.pair is None for weight in state.weights), "unnecessary eager assembly"
+                # The next prefetch uses the other slot. A second prefetch
+                # evicts this bucket and must preserve its unconsumed caches.
+                for reuse in range(2):
+                    borrower = types.SimpleNamespace(packed_width=256, weights=[], wait=lambda: None)
+                    borrowed = state.workspace.acquire(borrower)
+                    assert all((weight.pair is not None) == (reuse == 1) for weight in state.weights)
+                    borrowed._owner.storage.fill_(205)
+                    borrowed.local.fill_(rank + step)
+                    borrowed.launch().wait()
+                    for peer in range(world):
+                        torch.testing.assert_close(
+                            borrowed.rows[peer],
+                            torch.full_like(borrowed.rows[peer], peer + step),
+                            rtol=0,
+                            atol=0,
+                        )
+                    borrowed.close()
                 if rank == 0:
-                    print(f"[MXFP4-COMM-PREFLIGHT] step={step} shared_workspace_reuse=PASS", flush=True)
+                    print(f"[MXFP4-COMM-PREFLIGHT] step={step} double_buffer_eviction=PASS", flush=True)
             # Ordinary BF16 weights must be ready before any forward consumer,
             # independently of the explicit full-BF16 materialization below.
             for param, (start, end) in mapping.items():
