@@ -25,6 +25,8 @@ parameter; it asserts it was consulted exactly once per parameter, so a change t
 fails loudly instead of bucketing silently wrong.
 """
 
+import functools
+
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -148,6 +150,9 @@ def patch_ddp_head_bucket(ctx: PatchContext) -> None:
     if getattr(orig_init, "_primus_ddp_head_bucket", False):
         return
 
+    # wraps() keeps Megatron's signature visible (via __wrapped__) to patches that wrap this one and
+    # bind arguments by name, e.g. rccl_sdma_param_all_gather reads nccl_ub.
+    @functools.wraps(orig_init)
     def __init__(
         self, ddp_config, param_dtype, grad_dtype, params, data_parallel_group, bucket_size, *a, **kw
     ):

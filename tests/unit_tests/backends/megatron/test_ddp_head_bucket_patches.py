@@ -112,3 +112,27 @@ def test_real_megatron_buffer_ramp():
     assert head_b == len(got.bucket_indices) - 1
     assert head_numel <= cuts[0] + max(sizes)
     assert len(got.bucket_indices) > len(ref.bucket_indices)
+
+
+def test_patched_init_keeps_megatron_signature(monkeypatch):
+    """Patches installed on top (rccl_sdma_param_all_gather) bind the init's arguments by name: the head-bucket
+    wrapper must expose Megatron's signature, or nccl_ub disappears into *args (KeyError: 'nccl_ub')."""
+    import inspect
+    from types import SimpleNamespace
+
+    from megatron.core.distributed import param_and_grad_buffer as pgb
+
+    from primus.backends.megatron.patches import ddp_head_bucket_patches as P
+
+    orig = pgb._ParamAndGradBuffer.__init__
+    monkeypatch.setattr(pgb._ParamAndGradBuffer, "__init__", orig)  # restored after the test
+    monkeypatch.setattr(
+        P, "get_args", lambda ctx: SimpleNamespace(ddp_head_bucket_size=64, ddp_head_bucket_ramp=1.4)
+    )
+    P.patch_ddp_head_bucket(None)
+    patched = pgb._ParamAndGradBuffer.__init__
+    assert patched is not orig
+    assert inspect.signature(patched) == inspect.signature(orig)
+    n_positional = len(inspect.signature(orig).parameters) - 1  # Megatron calls it positionally, after self
+    bound = inspect.signature(patched).bind(object(), *range(n_positional))
+    assert "nccl_ub" in bound.arguments
