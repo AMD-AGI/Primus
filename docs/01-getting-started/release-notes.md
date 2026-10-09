@@ -50,7 +50,7 @@ Every version below was read out of the published image itself. From v26.4 on, t
 
 - **Fewer gradient-buffer clears and an isolated gradient reduce-scatter.** Slices that Primus-Turbo's expert WGRAD fully overwrites are no longer zeroed first, and the reduce-scatter runs on a dedicated RCCL group ([#1186](https://github.com/AMD-AGI/Primus/pull/1186)).
 - **Cheaper MXFP4 de-oscillation**, now quantized on the same scale grid as the forward pass ([#1184](https://github.com/AMD-AGI/Primus/pull/1184)).
-- **Tuned configs:** MI355X pretraining ([#1218](https://github.com/AMD-AGI/Primus/pull/1218)), and MI325X 70B/72B and MoE recipes ([#1227](https://github.com/AMD-AGI/Primus/pull/1227)). The MI325X tuning landed on `release/v26.8` after the image was built, so it is in a branch checkout but not in the image's `/workspace/Primus`.
+- **Tuned configs:** MI355X pretraining ([#1218](https://github.com/AMD-AGI/Primus/pull/1218)), and MI325X 70B/72B and MoE recipes ([#1227](https://github.com/AMD-AGI/Primus/pull/1227)).
 
 #### Bug fixes
 
@@ -79,10 +79,10 @@ Megatron-LM, TorchTitan, and Megatron Bridge backends.
 
 | | |
 | --- | --- |
-| Image ID | `cb6bc1aa4c7b` |
+| Image ID | `e86c9bb570ec` |
 | Built | 2026-10-08 |
 | Size | 56.4 GB |
-| Manifest | `922a7d6bdfe02a3397c408635a3d3baa53631cf9` |
+| Manifest | `6025d2033abe4288c190d2db916bfeb2c9585d06` |
 | Dockerfile | [`Dockerfile.primus-v26.8`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.8) |
 
 | Software component | Version |
@@ -169,7 +169,7 @@ Only the MaxText pin moved since v26.7; Megatron-LM, TorchTitan and Megatron Bri
 
 > **Use a `release/v26.8` checkout rather than anything baked into the images.**
 >
-> - `rocm/primus:v26.8` was built from `1f4f6f6e` (2026-10-02). Three commits have landed on `release/v26.8` since: MI325X environment tuning for the 70B/72B and MoE recipes ([#1227](https://github.com/AMD-AGI/Primus/pull/1227)), the JAX release Dockerfile ([#1226](https://github.com/AMD-AGI/Primus/pull/1226)), and the MaxText alignment ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)), which moves `third_party/maxtext` from `b3c53763` to `07c240fa`. The in-image `/workspace/Primus` therefore lacks the MI325X tuning.
+> - `rocm/primus:v26.8` was built from `f487a934`, which is the current `release/v26.8` tip, so the in-image `/workspace/Primus` currently matches, including the MI325X tuning for the 70B/72B and MoE recipes ([#1227](https://github.com/AMD-AGI/Primus/pull/1227)). Cloning the branch still keeps you current if later commits land on it.
 > - `rocm/jax-training:maxtext-v26.8` ships no Primus at all. `release/v26.8` carries the MaxText environment defaults that restore performance on JAX 0.11.1 ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)); an older checkout runs without them. Its `third_party/maxtext` matches the image's `/workspace/maxtext`.
 
 ### Changes since v26.7
