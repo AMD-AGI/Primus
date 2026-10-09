@@ -171,8 +171,18 @@ log_exported_vars "Python Path and Data Paths" \
 # NCCL and Network Configuration
 # =============================================================================
 
-# Set visible GPUs for the current node (0 to GPUS_PER_NODE-1)
-HIP_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
+# Visible GPUs for the current node: keep a selection made by the user or the
+# scheduler (overwriting it can land a job on another user's GPU on a shared
+# node), otherwise default to 0..GPUS_PER_NODE-1.
+if [[ -n "${HIP_VISIBLE_DEVICES:-}" ]]; then
+    IFS=',' read -r -a _primus_visible_gpus <<< "$HIP_VISIBLE_DEVICES"
+    if [[ "${#_primus_visible_gpus[@]}" -ne "$GPUS_PER_NODE" ]]; then
+        LOG_WARN "HIP_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES lists ${#_primus_visible_gpus[@]} GPU(s) but GPUS_PER_NODE=$GPUS_PER_NODE"
+    fi
+    unset _primus_visible_gpus
+else
+    HIP_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
+fi
 export HIP_VISIBLE_DEVICES
 
 # Keep ROCm libraries ahead of any system-provided HSA runtime.
