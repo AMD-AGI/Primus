@@ -34,6 +34,10 @@ from primus.core.utils.module_utils import log_rank_0
 
 _GLOO = [None]
 
+# Set by --light-log-sync-events (light_log_sync_events_patches) while it runs a deferred training_log: the all-zeros
+# accumulators training_log creates then live on the host, so the loss sums it reads with .item() are host tensors.
+HOST_ZEROS = [False]
+
 
 def gloo_world_group():
     """A gloo group over all ranks, created on first use. Every caller reaches it on every rank in the same order (the
@@ -68,6 +72,13 @@ def patch_light_log_sync_arg(ctx: PatchContext) -> None:
             default=False,
             help="Per-step logging without NCCL barriers/broadcasts or device-wide syncs (gloo barrier, compute-stream "
             "sync, gloo log forwarding).",
+        )
+        group.add_argument(
+            "--light-log-sync-events",
+            action="store_true",
+            default=False,
+            help="With --light-log-sync: no host syncs for logging at all. Values are read back asynchronously and "
+            "each training_log call runs one step late; interval time is measured with CUDA events, rank-local.",
         )
         return parser
 
@@ -141,7 +152,10 @@ def patch_light_log_sync(ctx: PatchContext) -> None:
             and str(dev).startswith("cuda")
         ):
             return torch.zeros(
-                len(data), dtype=k.get("dtype"), device=dev, requires_grad=k.get("requires_grad", False)
+                len(data),
+                dtype=k.get("dtype"),
+                device="cpu" if HOST_ZEROS[0] else dev,
+                requires_grad=k.get("requires_grad", False),
             )
         return torch.tensor(data, *a, **k)
 
