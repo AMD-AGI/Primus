@@ -20,7 +20,7 @@ Architecture follows functional composition for clarity and testability.
 import logging
 import os
 import time
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 import torch
 
@@ -268,7 +268,39 @@ def prepare_flux_latents(
 _eager_prepare_flux_latents = prepare_flux_latents
 
 
-def flux_forward_step_func(
+# Position IDs depend only on (batch, height, width / sequence length, device, dtype), so with
+# cache_position_ids they are built once per shape and the same tensors are reused every step (which also
+# lets the Flux model reuse the RoPE frequencies derived from them, see Flux._compute_embeddings).
+_POSITION_ID_CACHE: dict = {}
+
+
+def _image_position_ids(batch_size, height, width, device, dtype, cache):
+    if not cache:
+        return generate_image_position_ids(
+            batch_size=batch_size, height=height, width=width, device=device, dtype=dtype
+        )
+    key = ("img", batch_size, height, width, device, dtype)
+    ids = _POSITION_ID_CACHE.get(key)
+    if ids is None:
+        ids = generate_image_position_ids(
+            batch_size=batch_size, height=height, width=width, device=device, dtype=dtype
+        )
+        _POSITION_ID_CACHE[key] = ids
+    return ids
+
+
+def _text_position_ids(batch_size, seq_len, device, dtype, cache):
+    if not cache:
+        return generate_text_position_ids(batch_size=batch_size, seq_len=seq_len, device=device, dtype=dtype)
+    key = ("txt", batch_size, seq_len, device, dtype)
+    ids = _POSITION_ID_CACHE.get(key)
+    if ids is None:
+        ids = generate_text_position_ids(batch_size=batch_size, seq_len=seq_len, device=device, dtype=dtype)
+        _POSITION_ID_CACHE[key] = ids
+    return ids
+
+
+def flux_prepare_step_inputs(
     data_iterator,
     model,
     scheduler,
@@ -285,9 +317,10 @@ def flux_forward_step_func(
     step_count=0,
     eval_step_index=None,
     eval_timestep_source=EQUIDISTANT_TIMESTEPS,
+    cache_position_ids=False,
 ):
     """
-    Forward step function for Flux training with distributed data loading.
+    Input preparation of the Flux forward step, with distributed data loading.
 
     Following Megatron's multimodal data loading pattern:
     - When TP=1 (pure DP): each rank loads data directly, no broadcast needed
@@ -333,8 +366,13 @@ def flux_forward_step_func(
             caller (DiffusionPretrainTrainer) and reconstructed from checkpoint
             state on resume as iteration * num_microbatches.
 
+        cache_position_ids: Build the RoPE position IDs once per shape and reuse them
+            (default: False).
+
     Returns:
-        Tuple of (noise_pred, clean_latents, noise, loss_mask, metrics_dict, is_validation)
+        FluxStepInputs: the model inputs and loss inputs. flux_forward_step_func runs the
+        model on them and returns (noise_pred, clean_latents, noise, loss_mask, metrics_dict,
+        is_validation):
         - noise_pred: Model output (predicted velocity) [B, C, H, W]
         - clean_latents: Original clean latents [B, C, H, W]
         - noise: Sampled noise [B, C, H, W]
@@ -612,12 +650,13 @@ def flux_forward_step_func(
         # applies the same position grid across all batch samples. This requires all images in
         # the batch to have the same resolution (same height/width).
         rope_fusion_batch_size = 1 if model.config.apply_rope_fusion else latents.shape[0]
-        img_ids = generate_image_position_ids(
-            batch_size=rope_fusion_batch_size,
-            height=latents.shape[2],
-            width=latents.shape[3],
-            device=latents.device,
-            dtype=latents.dtype,
+        img_ids = _image_position_ids(
+            rope_fusion_batch_size,
+            latents.shape[2],
+            latents.shape[3],
+            latents.device,
+            latents.dtype,
+            cache_position_ids,
         )
 
         # Generate text_ids (Flux convention: zeros for text position IDs)
@@ -625,11 +664,12 @@ def flux_forward_step_func(
         # (broadcasting will handle the actual batch dimension). This matches NVIDIA's MLPerf
         # implementation strategy: both txt_ids and img_ids have shape [1, seq_len, 3] with
         # RoPE fusion, allowing proper concatenation before the fused RoPE kernel.
-        text_ids = generate_text_position_ids(
-            batch_size=rope_fusion_batch_size,
-            seq_len=prompt_embeds.shape[1],
-            device=latents.device,
-            dtype=latents.dtype,
+        text_ids = _text_position_ids(
+            rope_fusion_batch_size,
+            prompt_embeds.shape[1],
+            latents.device,
+            latents.dtype,
+            cache_position_ids,
         )
 
         # Extract pre-generated noise/timesteps from batch (deterministic tests)
@@ -714,6 +754,72 @@ def flux_forward_step_func(
     # Use raw sigma directly instead of timesteps/1000 to avoid bf16 round-trip
     timesteps_norm = sigma_1d.to(dtype=packed_noisy_latents.dtype)
 
+    return FluxStepInputs(
+        packed_noisy_latents=packed_noisy_latents,
+        prompt_embeds=prompt_embeds,
+        pooled_prompt_embeds=pooled_prompt_embeds,
+        timesteps_norm=timesteps_norm,
+        img_ids=img_ids,
+        text_ids=text_ids,
+        guidance_vec=guidance_vec,
+        clean_latents=clean_latents,
+        noise=noise,
+        loss_mask=loss_mask,
+        latents_batch=latents.shape[0],
+        timesteps=timesteps,
+        is_validation=is_validation,
+        compute_dtype=compute_dtype,
+    )
+
+
+class FluxStepInputs(NamedTuple):
+    """Everything a Flux forward step computes before calling the model (see flux_prepare_step_inputs)."""
+
+    packed_noisy_latents: torch.Tensor
+    prompt_embeds: torch.Tensor
+    pooled_prompt_embeds: torch.Tensor
+    timesteps_norm: torch.Tensor
+    img_ids: torch.Tensor
+    text_ids: torch.Tensor
+    guidance_vec: Optional[torch.Tensor]
+    clean_latents: torch.Tensor
+    noise: torch.Tensor
+    loss_mask: Optional[torch.Tensor]
+    latents_batch: int
+    timesteps: torch.Tensor
+    is_validation: bool
+    compute_dtype: torch.dtype
+
+
+def flux_forward_step_func(data_iterator, model, *args, prepared: Optional[FluxStepInputs] = None, **kwargs):
+    """Flux forward step: prepare the step's inputs (flux_prepare_step_inputs) and run the model on them.
+
+    ``prepared`` -- inputs prepared ahead of time by flux_prepare_step_inputs with the same arguments; the data
+    iterator and the remaining arguments are then not used.
+
+    Returns:
+        Tuple of (noise_pred, clean_latents, noise, loss_mask, metrics_dict, is_validation); see
+        flux_prepare_step_inputs.
+    """
+    if prepared is None:
+        prepared = flux_prepare_step_inputs(data_iterator, model, *args, **kwargs)
+    (
+        packed_noisy_latents,
+        prompt_embeds,
+        pooled_prompt_embeds,
+        timesteps_norm,
+        img_ids,
+        text_ids,
+        guidance_vec,
+        clean_latents,
+        noise,
+        loss_mask,
+        latents_batch,
+        timesteps,
+        is_validation,
+        compute_dtype,
+    ) = prepared
+
     with torch.amp.autocast("cuda", enabled=True, dtype=compute_dtype):
         noise_pred = model(
             img=packed_noisy_latents,
@@ -735,7 +841,7 @@ def flux_forward_step_func(
 
     # Create metrics dict for logging
     metrics = {
-        "batch_size": latents.shape[0],
+        "batch_size": latents_batch,
         "image_height": clean_latents.shape[2] * 8,  # VAE 8x downsampling
         "image_width": clean_latents.shape[3] * 8,
         "latent_channels": clean_latents.shape[1],
@@ -750,5 +856,7 @@ def flux_forward_step_func(
 
 __all__ = [
     "prepare_flux_latents",
+    "flux_prepare_step_inputs",
     "flux_forward_step_func",
+    "FluxStepInputs",
 ]

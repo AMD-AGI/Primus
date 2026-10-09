@@ -692,6 +692,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             "overlap_grad_norm",
             False,
         )
+        config_params["flux_rope_ids_cache"] = bool(getattr(params, "flux_rope_ids_cache", False))
         config_params["use_cpp_fp8_quantize"] = getattr(
             params,
             "use_cpp_fp8_quantize",

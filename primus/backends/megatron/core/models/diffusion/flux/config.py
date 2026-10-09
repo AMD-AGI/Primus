@@ -180,6 +180,11 @@ class FluxConfig(BaseDiffusionConfig):
     # in clip_grad_norm with a single all-reduce + sqrt + clip.
     overlap_grad_norm: bool = False
 
+    # Reuse the RoPE frequencies while the position-ID tensors are the same objects and unmodified
+    # (the forward step builds them once per shape with flux_rope_ids_cache). Bitwise: the
+    # frequencies are a pure function of the IDs.
+    flux_rope_ids_cache: bool = False
+
     # Use the C++ quantize_fp8 kernel from primus_turbo for tensorwise FP8
     # quantization instead of the default inline implementation.
     use_cpp_fp8_quantize: bool = False

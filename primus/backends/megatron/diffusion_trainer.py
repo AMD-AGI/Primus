@@ -54,6 +54,10 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
         # that never opens a session must still reset on its first evaluation.
         self._eval_session = None
         self._eval_microbatch_index = 0
+        # flux_prep_ahead: the next training step's inputs, prepared at the end of the current step (see
+        # prepare_next_training_step), with what they were prepared for.
+        self._prepared_next = None
+        self._last_training_forward = None
 
         # Composition pattern: avoids recreating the provider on each call
         use_mock_data = getattr(self.backend_args, "mock_data", False)
@@ -229,7 +233,6 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
             Tuple of (noise_pred, loss_func_callable)
         """
         from primus.backends.megatron.training.diffusion.forward_step import (
-            EQUIDISTANT_TIMESTEPS,
             flux_forward_step_func,
         )
 
@@ -253,24 +256,16 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
             # behaviour both references have.
             eval_step_index = self._next_eval_step_index()
 
+        prepared = self._take_prepared_inputs(data_iterator, model)
+        if model.training:
+            self._last_training_forward = (data_iterator, model)
+
         # Megatron's pattern: forward_step returns model output, loss_func computes loss
         noise_pred, clean_latents, noise, loss_mask, metrics, is_validation = flux_forward_step_func(
             data_iterator,
             model,
-            scheduler=self.scheduler,
-            use_guidance_embed=getattr(self, "use_guidance_embed", False),
-            guidance_scale=getattr(self, "guidance_scale", None),
-            timestep_sampler=getattr(self, "timestep_sampler", None),
-            cfg_dropout_prob=getattr(self, "cfg_dropout_prob", 0.0),
-            empty_t5_encodings=getattr(self, "empty_t5_encodings", None),
-            empty_clip_encodings=getattr(self, "empty_clip_encodings", None),
-            vae_scale=getattr(self, "vae_scale", None),
-            vae_shift=getattr(self, "vae_shift", None),
-            vae_latent_mode=getattr(self, "vae_latent_mode", "presampled"),
-            per_step_rng_reseed=per_step_rng_reseed,
-            step_count=self._forward_step_count,
-            eval_step_index=eval_step_index,
-            eval_timestep_source=getattr(self, "eval_timestep_source", EQUIDISTANT_TIMESTEPS),
+            prepared=prepared,
+            **self._flux_step_kwargs(self._forward_step_count, eval_step_index),
         )
 
         # Store values needed for loss computation (will be used by loss function)
@@ -323,6 +318,74 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
             return loss, reporting_metrics
 
         return noise_pred, diffusion_loss_func
+
+    def _flux_step_kwargs(self, step_count, eval_step_index):
+        """Keyword arguments of flux_prepare_step_inputs for one forward step."""
+        from primus.backends.megatron.training.diffusion.forward_step import (
+            EQUIDISTANT_TIMESTEPS,
+        )
+
+        return dict(
+            scheduler=self.scheduler,
+            use_guidance_embed=getattr(self, "use_guidance_embed", False),
+            guidance_scale=getattr(self, "guidance_scale", None),
+            timestep_sampler=getattr(self, "timestep_sampler", None),
+            cfg_dropout_prob=getattr(self, "cfg_dropout_prob", 0.0),
+            empty_t5_encodings=getattr(self, "empty_t5_encodings", None),
+            empty_clip_encodings=getattr(self, "empty_clip_encodings", None),
+            vae_scale=getattr(self, "vae_scale", None),
+            vae_shift=getattr(self, "vae_shift", None),
+            vae_latent_mode=getattr(self, "vae_latent_mode", "presampled"),
+            per_step_rng_reseed=getattr(self, "per_step_rng_reseed", False),
+            step_count=step_count,
+            eval_step_index=eval_step_index,
+            eval_timestep_source=getattr(self, "eval_timestep_source", EQUIDISTANT_TIMESTEPS),
+            cache_position_ids=bool(getattr(getattr(self, "backend_args", None), "flux_rope_ids_cache", False)),
+        )
+
+    def _take_prepared_inputs(self, data_iterator, model):
+        """The inputs prepare_next_training_step built for this forward step, or None.
+
+        They were drawn from the data iterator and the CUDA generator ahead of time, so using them for anything but
+        the forward step they were prepared for would change the run; that is an error, not a fallback.
+        """
+        stash, self._prepared_next = getattr(self, "_prepared_next", None), None
+        if stash is None:
+            return None
+        step_count, stash_iterator, stash_model, inputs = stash
+        if not (
+            model.training
+            and step_count == self._forward_step_count
+            and stash_iterator is data_iterator
+            and stash_model is model
+        ):
+            raise RuntimeError(
+                "flux_prep_ahead: inputs were prepared for training forward step "
+                f"{step_count}, but the next forward step is {self._forward_step_count} "
+                f"(training={model.training}, same iterator={stash_iterator is data_iterator}, "
+                f"same model={stash_model is model})."
+            )
+        return inputs
+
+    def prepare_next_training_step(self):
+        """Prepare the next training forward step's inputs now (flux_prep_ahead).
+
+        Called at the end of a training step, after its backward and optimizer step are launched, when the caller
+        knows the next forward is the next training step's (no evaluation, checkpoint or exit in between). It runs
+        exactly what that forward step would run first -- fetching the batch, the per-step reseed, the VAE resample,
+        noise, timestep and CFG-dropout draws -- in the same order on the same generator, so the values are
+        unchanged; only the host-side work and its kernel launches move off the step boundary.
+        """
+        from primus.backends.megatron.training.diffusion.forward_step import (
+            flux_prepare_step_inputs,
+        )
+
+        if getattr(self, "_prepared_next", None) is not None or getattr(self, "_last_training_forward", None) is None:
+            return
+        data_iterator, model = self._last_training_forward
+        step_count = self._forward_step_count + 1
+        inputs = flux_prepare_step_inputs(data_iterator, model, **self._flux_step_kwargs(step_count, None))
+        self._prepared_next = (step_count, data_iterator, model, inputs)
 
     def _next_eval_step_index(self) -> int:
         """Index identifying this validation microbatch within the run.
@@ -406,6 +469,8 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
 
             return self.forward_step(data_iterator, model, return_schedule_plan=False)
 
+        # flux_prep_ahead reaches the trainer through the function Megatron's train loop is given.
+        diffusion_forward_step.prepare_next_training_step = self.prepare_next_training_step
         return diffusion_forward_step
 
     def get_datasets_provider(self):

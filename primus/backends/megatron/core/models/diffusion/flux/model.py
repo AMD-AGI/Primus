@@ -579,10 +579,36 @@ class Flux(DiffusionModule):
 
         vec_emb = vec_emb + self.vector_embedding(y)
 
-        ids = torch.cat((txt_ids, img_ids), dim=1)
-        rotary_pos_emb = self.pos_embed(ids)
+        rotary_pos_emb = self._rotary_pos_emb(txt_ids, img_ids)
 
         return hidden_states, encoder_hidden_states, vec_emb, rotary_pos_emb, txt_seq_len
+
+    def _rotary_pos_emb(self, txt_ids, img_ids):
+        """RoPE frequencies for the concatenated position IDs.
+
+        With ``flux_rope_ids_cache`` the result is reused while ``txt_ids`` / ``img_ids`` are the same tensor objects
+        as last time and none of the three tensors has been written since (version counters), which the forward
+        step's per-shape position-ID cache provides. The cache holds references, so the objects compared by
+        identity cannot be freed and replaced at the same address.
+        """
+        cache = getattr(self, "_rope_cache", None) if self.config.flux_rope_ids_cache else None
+        if (
+            cache is not None
+            and cache[0] is txt_ids
+            and cache[1] is img_ids
+            and cache[2] == (txt_ids._version, img_ids._version, cache[3]._version)
+        ):
+            return cache[3]
+        ids = torch.cat((txt_ids, img_ids), dim=1)
+        rotary_pos_emb = self.pos_embed(ids)
+        if self.config.flux_rope_ids_cache and not torch.compiler.is_compiling():
+            self._rope_cache = (
+                txt_ids,
+                img_ids,
+                (txt_ids._version, img_ids._version, rotary_pos_emb._version),
+                rotary_pos_emb,
+            )
+        return rotary_pos_emb
 
     # ------------------------------------------------------------------
     # Stack runners: self-contained compilable callables that iterate
