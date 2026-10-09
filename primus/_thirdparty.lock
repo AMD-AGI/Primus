@@ -53,6 +53,12 @@
       "path": "third_party/Automodel",
       "url": "https://github.com/NVIDIA-NeMo/Automodel.git",
       "commit": "44f2acdee1628b8a5a5acb35ada6ed8c539a22e4"
+    },
+    {
+      "name": "HunyuanWorld-Mirror-rocm",
+      "path": "third_party/HunyuanWorld-Mirror-rocm",
+      "url": "https://github.com/Tencent-Hunyuan/HunyuanWorld-Mirror.git",
+      "commit": "c61300e47ce06db2f02c8e2551aae68be7ae3a0b"
     }
   ]
 }

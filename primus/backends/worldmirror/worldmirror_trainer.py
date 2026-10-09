@@ -45,9 +45,7 @@ def resolve_worldmirror_repo(configured: str | None, primus_root: Path = _PRIMUS
     if explicit:
         path = Path(explicit).expanduser()
         if not _has_launch(path):
-            raise FileNotFoundError(
-                "HunyuanWorld-Mirror checkout is missing training/launch.py: " f"{path}"
-            )
+            raise FileNotFoundError("HunyuanWorld-Mirror checkout is missing training/launch.py: " f"{path}")
         return path.resolve()
 
     third_party_root = os.environ.get("PRIMUS_THIRDPARTY_DIR", "").strip()
@@ -68,6 +66,33 @@ def resolve_worldmirror_repo(configured: str | None, primus_root: Path = _PRIMUS
     )
 
 
+# Dataset roots in the submodule's training/configs/paths/default.yaml.
+# A set variable replaces that file's placeholder. An unset variable leaves it.
+_DATASET_ENV = {
+    "hypersim_dir": "HYPERSIM_DIR",
+    "dtu_dir": "DTU_DIR",
+    "nrgbd_dir": "NRGBD_DIR",
+    "sevenscenes_dir": "SEVENSCENES_DIR",
+    "re10k_pose_dir": "RE10K_POSE_DIR",
+    "re10k_nvs_dir": "RE10K_NVS_DIR",
+    "dl3dv_nvs_dir": "DL3DV_NVS_DIR",
+    "nyuv2_depth_dir": "NYUV2_DEPTH_DIR",
+    "sintel_depth_dir": "SINTEL_DEPTH_DIR",
+    "kitti_depth_dir": "KITTI_DEPTH_DIR",
+    "ibims_normal_dir": "IBIMS_NORMAL_DIR",
+    "nyuv2_normal_dir": "NYUV2_NORMAL_DIR",
+    "scannet_normal_dir": "SCANNET_NORMAL_DIR",
+}
+
+
+def dataset_root(cfg: Mapping[str, Any], key: str, env: Mapping[str, str]) -> str:
+    """Prefer the Primus config value, then the matching environment variable."""
+    configured = str(cfg.get(key) or "").strip()
+    if configured:
+        return configured
+    return str(env.get(_DATASET_ENV[key]) or "").strip()
+
+
 def require_stage2_checkpoint(hydra_config: str, pretrained: str | None) -> None:
     """Stage 2 must load weights only. Resuming the stage-1 optimizer fails."""
     if "stage2" in hydra_config and not str(pretrained or "").strip():
@@ -84,13 +109,23 @@ def build_hydra_overrides(cfg: Mapping[str, Any], env: Mapping[str, str] | None 
     pretrained = str(cfg.get("pretrained") or "").strip()
     require_stage2_checkpoint(str(cfg["hydra_config"]), pretrained)
 
+    hypersim_dir = dataset_root(cfg, "hypersim_dir", env)
+    if not hypersim_dir:
+        raise ValueError("Set HYPERSIM_DIR or worldmirror.hypersim_dir.")
+
     overrides = [
         f"train={cfg['hydra_config']}",
         f"trainer.max_steps={int(cfg['max_steps'])}",
         f"data.max_images_per_gpu={int(cfg['max_images_per_gpu'])}",
-        f"paths.hypersim_dir={cfg['hypersim_dir']}",
+        f"paths.hypersim_dir={hypersim_dir}",
         f"paths.root_dir={cfg['output_dir']}",
     ]
+    for key in _DATASET_ENV:
+        if key == "hypersim_dir":
+            continue
+        root = dataset_root(cfg, key, env)
+        if root:
+            overrides.append(f"paths.{key}={root}")
     if pretrained:
         overrides.append(f"wrapper.pretrained={pretrained}")
     log_every = str(cfg.get("log_every_n_steps") or env.get("LOG_EVERY_N_STEPS") or "").strip()

@@ -20,8 +20,23 @@ Before training, the World Mirror install script installs the packages in `runne
 
 Data parallel and bf16 stay as World Mirror defines them.
 
+Set the path for each dataset you use. An unset variable leaves the placeholder in the submodule's `training/configs/paths/default.yaml`.
+
+- `HYPERSIM_DIR`
+- `NRGBD_DIR`
+- `DTU_DIR`
+- `SEVENSCENES_DIR`
+- `RE10K_POSE_DIR`
+- `NYUV2_NORMAL_DIR`
+- `SCANNET_NORMAL_DIR`
+- `NYUV2_DEPTH_DIR`
+- `SINTEL_DEPTH_DIR`
+- `KITTI_DEPTH_DIR`
+- `IBIMS_NORMAL_DIR`
+- `RE10K_NVS_DIR`
+- `DL3DV_NVS_DIR`
+
 ```bash
-export HYPERSIM_DIR=/shared_nfs/3dwm/hywm-3dwm-sub20/hypersim
 export NNODES=${NNODES:-1}
 export NODE_RANK=${NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
@@ -29,7 +44,14 @@ export MASTER_PORT=${MASTER_PORT:-29500}
 export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 ```
 
-Official stage 1 and stage 2 use the upstream recipe (`stage1_wogs`, `stage2_wgs`). Stage 1 validation expects NRGBD, DTU, 7Scenes, Re10K, NYUv2, ScanNet, Sintel, and KITTI. iBims is left out because its normals are EXR files and this image's OpenCV cannot read them. Stage 2 validation is Hypersim only. Re10K novel-view chunks and the DL3DV 10K test scenes are not on the mounted data. Primus sets `paths.hypersim_dir` only. The other roots stay at the placeholders in the submodule's `training/configs/paths/default.yaml` until those datasets are mounted.
+## Training stages and datasets
+
+Primus launches the upstream World Mirror Lightning trainer for both stages:
+
+- **Stage 1 (`stage1_wogs`)** starts from the public pretrained weights. It trains the geometry transformer and the camera, point-map, depth, and normal heads; the Gaussian head is disabled. Training uses the Hypersim `train` split. Validation measures geometry, pose, normal, and depth quality using NRGBD, DTU, 7Scenes, Re10K, NYUv2, ScanNet, Sintel, and KITTI.
+- **Stage 2 (`stage2_wgs`)** loads the Stage 1 checkpoint through `PRETRAINED_CKPT`. It freezes the geometry transformer and all Stage 1 heads, enables the Gaussian head, and trains only the novel-view rendering part. Training and validation use the Hypersim `train` and `test` splits respectively.
+
+The dataset environment variables are converted to World Mirror Hydra `paths.*` values when Primus starts. Training batches come only from the configured training dataset; validation datasets are used only for evaluation and do not update model weights.
 
 ```bash
 MAX_STEPS=20 \

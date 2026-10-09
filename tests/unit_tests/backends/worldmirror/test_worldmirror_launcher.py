@@ -90,6 +90,42 @@ def test_stage1_overrides_keep_ddp_recipe_and_skip_pretrained():
     assert not any(item.startswith("trainer.devices=") for item in overrides)
 
 
+def test_validation_roots_come_from_env():
+    overrides = build_hydra_overrides(
+        _stage1(),
+        env={
+            "NRGBD_DIR": "/data/nrgbd",
+            "DTU_DIR": "/data/dtu",
+            "SEVENSCENES_DIR": "/data/7scenes",
+            "RE10K_POSE_DIR": "/data/re10k",
+            "NYUV2_NORMAL_DIR": "/data/nyuv2-normal",
+            "SCANNET_NORMAL_DIR": "/data/scannet",
+            "NYUV2_DEPTH_DIR": "/data/nyuv2-depth",
+            "SINTEL_DEPTH_DIR": "/data/sintel",
+            "KITTI_DEPTH_DIR": "/data/kitti",
+        },
+    )
+    assert "paths.nrgbd_dir=/data/nrgbd" in overrides
+    assert "paths.dtu_dir=/data/dtu" in overrides
+    assert "paths.sevenscenes_dir=/data/7scenes" in overrides
+    assert "paths.re10k_pose_dir=/data/re10k" in overrides
+    assert "paths.nyuv2_normal_dir=/data/nyuv2-normal" in overrides
+    assert "paths.scannet_normal_dir=/data/scannet" in overrides
+    assert "paths.nyuv2_depth_dir=/data/nyuv2-depth" in overrides
+    assert "paths.sintel_depth_dir=/data/sintel" in overrides
+    assert "paths.kitti_depth_dir=/data/kitti" in overrides
+    assert not any(item.startswith("paths.ibims_normal_dir=") for item in overrides)
+    assert not any(item.startswith("paths.re10k_nvs_dir=") for item in overrides)
+
+
+def test_configured_dataset_root_wins_over_env():
+    overrides = build_hydra_overrides(
+        _stage1(nrgbd_dir="/cfg/nrgbd"),
+        env={"NRGBD_DIR": "/env/nrgbd"},
+    )
+    assert "paths.nrgbd_dir=/cfg/nrgbd" in overrides
+
+
 def test_torchrun_env_sets_lightning_device_count():
     overrides = build_hydra_overrides(
         _stage1(),
