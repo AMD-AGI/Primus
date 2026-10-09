@@ -343,6 +343,10 @@ class FluxSingleTransformerBlock(TransformerLayer):
         (hidden_states [S, B, H], timestep_emb [B, H]) -> (hidden_states, None)
     """
 
+    # The block stack concatenates [context, hidden] before the first single block (diffusion_transformer_block.py),
+    # so all single blocks see context=None and share one compiled graph; forward still handles a context if given.
+    concat_context_input = True
+
     def __init__(
         self,
         config: TransformerConfig,

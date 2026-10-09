@@ -14,6 +14,7 @@ from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.utils import WrappedTensor
+import torch
 from torch import Tensor
 
 
@@ -150,6 +151,12 @@ class DiffusionTransformerBlock(TransformerBlock):
                 current_context = context
 
                 for layer in self.layers:
+                    # A layer that would concatenate [context, hidden] itself (the first single block) gets them
+                    # concatenated here instead, so every such layer is called with context=None: per-block
+                    # torch.compile then builds one graph for all of them instead of a second one for the first.
+                    if current_context is not None and getattr(layer, "concat_context_input", False):
+                        current_hidden = torch.cat([current_context, current_hidden], dim=0)
+                        current_context = None
                     layer_kwargs = {
                         "hidden_states": current_hidden,
                         "attention_mask": attention_mask,
