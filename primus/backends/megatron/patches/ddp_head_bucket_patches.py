@@ -70,6 +70,14 @@ def patch_ddp_head_bucket_args(ctx: PatchContext) -> None:
             help="With overlap_param_gather: dispatch the first N bucket groups' param all-gathers (forward order; -1 = "
             "all) right after the distributed optimizer's step instead of from the next forward's pre-hooks. 0 = off.",
         )
+        group.add_argument(
+            "--optimizer-head-first",
+            type=int,
+            default=0,
+            help="With --ddp-param-gather-after-optimizer: step the first N bucket groups' (forward order) params "
+            "first, dispatch their all-gathers, then step the rest, so the head gathers overlap the rest of the "
+            "optimizer. 0 = off.",
+        )
         return parser
 
     _add_distributed_args._primus_ddp_head_bucket = True
@@ -180,6 +188,31 @@ def patch_ddp_head_bucket(ctx: PatchContext) -> None:
     log_rank_0(f"[Patch:megatron.ddp.head_bucket] head bucket {head} elements, ramp {ramp}")
 
 
+def split_optimizer_step(opt, inner_step, head_ids, between):
+    """One optimizer step as two: ``inner_step()`` on the params whose ``id`` is in ``head_ids``, ``between()``, then
+    ``inner_step()`` on the rest. Adam is elementwise, so the result is the same as one full step. Each param group's
+    step counter (TE FusedAdam keeps it per group and skips empty groups) advances once, as in one full step."""
+    assert not getattr(opt, "capturable", False), "--optimizer-head-first: capturable Adam is not supported"
+    saved = [(pg, pg["params"], pg.get("step")) for pg in opt.param_groups]
+    try:
+        for pg, ps, _ in saved:
+            pg["params"] = [p for p in ps if id(p) in head_ids]
+        inner_step()
+        between()
+        for pg, ps, st in saved:
+            pg["params"] = [p for p in ps if id(p) not in head_ids]
+            if st is None:
+                pg.pop("step", None)
+            else:
+                pg["step"] = st
+        inner_step()
+    finally:
+        for pg, ps, st in saved:
+            pg["params"] = ps
+            if ps:
+                pg["step"] = (st or 0) + 1
+
+
 @register_patch(
     "megatron.optimizer.param_gather_after_step",
     backend="megatron",
@@ -197,38 +230,87 @@ def patch_param_gather_after_step(ctx: PatchContext) -> None:
     waits on the outstanding handle and dispatches the next group only if it is not already dispatched."""
     from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 
-    n = int(get_args(ctx).ddp_param_gather_after_optimizer)
+    args = get_args(ctx)
+    n = int(args.ddp_param_gather_after_optimizer)
+    head_first = int(getattr(args, "optimizer_head_first", 0) or 0)
+    if head_first > 0:
+        assert n < 0 or n >= head_first, "--optimizer-head-first N needs --ddp-param-gather-after-optimizer -1 or >= N"
+        assert args.use_precision_aware_optimizer, (
+            "--optimizer-head-first needs the precision-aware optimizer (it writes the model params in Adam, so the "
+            "head params are final before the rest is stepped)"
+        )
     orig = DistributedOptimizer.step_with_ready_grads
     if getattr(orig, "_primus_param_gather_after_step", False):
         return
 
     stale = [0]
 
+    def dispatch(self, groups):
+        for g in groups:
+            if g.param_gather_dispatched:
+                continue
+            if g.param_gather_handle is not None:
+                # A gather of the previous params that nothing waited on: finish it before gathering the
+                # updated ones (Megatron's own force_sync path does the same). Logged: in a normal step the
+                # forward consumes every dispatch, so this should only occur around warmup / eval paths.
+                g.param_gather_handle.wait()
+                g.param_gather_handle = None
+                stale[0] += 1
+                if stale[0] <= 3:
+                    log_rank_0(
+                        f"[Patch:megatron.optimizer.param_gather_after_step] waited a stale param "
+                        f"gather before re-dispatch ({stale[0]})"
+                    )
+            g.start_param_sync()
+
+    def forward_groups(self, k):
+        out = []
+        for chunk in self.model_chunks:
+            groups = list(reversed(chunk.bucket_groups))
+            out += groups if k < 0 else groups[:k]
+        return out
+
+    def head_shard_ids(self):
+        """ids of the optimizer's (shard) params whose model params are in the first ``head_first`` bucket groups."""
+        head = set()
+        for g in forward_groups(self, head_first):
+            head |= g.params
+        ids = set()
+        for models, shards in (
+            (self.model_float16_groups, self.shard_float16_groups),
+            (self.model_fp32_groups, self.shard_fp32_groups),
+        ):
+            for mg, sg in zip(models, shards):
+                ids.update(id(s) for m, s in zip(mg, sg) if m in head and s is not None)
+        return ids
+
     def step_with_ready_grads(self):
-        ok = orig(self)
-        if ok and self.ddp_config.overlap_param_gather and not self.ddp_config.use_megatron_fsdp:
-            for chunk in self.model_chunks:
-                groups = list(reversed(chunk.bucket_groups))
-                for g in groups if n < 0 else groups[:n]:
-                    if g.param_gather_dispatched:
-                        continue
-                    if g.param_gather_handle is not None:
-                        # A gather of the previous params that nothing waited on: finish it before gathering the
-                        # updated ones (Megatron's own force_sync path does the same). Logged: in a normal step the
-                        # forward consumes every dispatch, so this should only occur around warmup / eval paths.
-                        g.param_gather_handle.wait()
-                        g.param_gather_handle = None
-                        stale[0] += 1
-                        if stale[0] <= 3:
-                            log_rank_0(
-                                f"[Patch:megatron.optimizer.param_gather_after_step] waited a stale param "
-                                f"gather before re-dispatch ({stale[0]})"
-                            )
-                    g.start_param_sync()
+        overlap = self.ddp_config.overlap_param_gather and not self.ddp_config.use_megatron_fsdp
+        if head_first > 0 and overlap and not self.is_stub_optimizer:
+            if getattr(self, "_primus_head_shard_ids", None) is None:
+                self._primus_head_shard_ids = head_shard_ids(self)
+            opt = self.optimizer
+            own = vars(opt).get("step")  # an instance-level step (e.g. a compiled one) is restored as it was
+            inner_step = opt.step
+            opt.step = lambda *a, **kw: split_optimizer_step(
+                opt, inner_step, self._primus_head_shard_ids, lambda: dispatch(self, forward_groups(self, head_first))
+            )
+            try:
+                ok = orig(self)
+            finally:
+                if own is None:
+                    del opt.step
+                else:
+                    opt.step = own
+        else:
+            ok = orig(self)
+        if ok and overlap:
+            dispatch(self, forward_groups(self, n))
         return ok
 
     step_with_ready_grads._primus_param_gather_after_step = True
     DistributedOptimizer.step_with_ready_grads = step_with_ready_grads
     log_rank_0(
         f"[Patch:megatron.optimizer.param_gather_after_step] dispatching {n} head bucket group(s) after the step"
+        + (f"; stepping the first {head_first} group(s)' params first" if head_first > 0 else "")
     )

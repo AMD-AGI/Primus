@@ -136,3 +136,39 @@ def test_patched_init_keeps_megatron_signature(monkeypatch):
     n_positional = len(inspect.signature(orig).parameters) - 1  # Megatron calls it positionally, after self
     bound = inspect.signature(patched).bind(object(), *range(n_positional))
     assert "nccl_ub" in bound.arguments
+
+
+class _GroupStepOpt:
+    """TE FusedAdam's bookkeeping: per-group ``step`` advanced on every non-empty group, params updated in place."""
+
+    def __init__(self, groups):
+        self.param_groups = groups
+        self.calls = []
+
+    def step(self):
+        stepped = []
+        for pg in self.param_groups:
+            if not pg["params"]:
+                continue
+            pg["step"] = pg.get("step", 0) + 1
+            for p in pg["params"]:
+                p.add_(1.0)  # one "update" per param and call
+            stepped.append([id(p) for p in pg["params"]])
+        self.calls.append(stepped)
+
+
+def test_split_optimizer_step_steps_head_first_once_each():
+    from primus.backends.megatron.patches.ddp_head_bucket_patches import (
+        split_optimizer_step,
+    )
+
+    a, b, c, d = (torch.zeros(2) for _ in range(4))
+    groups = [{"params": [a, b], "step": 5}, {"params": [c]}, {"params": [d], "step": 2}, {"params": []}]
+    opt = _GroupStepOpt(groups)
+    order = []
+    split_optimizer_step(opt, opt.step, {id(a), id(d)}, lambda: order.append(len(opt.calls)))
+    assert order == [1]  # between() ran after the head step, before the rest
+    assert opt.calls[0] == [[id(a)], [id(d)]] and opt.calls[1] == [[id(b)], [id(c)]]
+    assert all(torch.equal(p, torch.ones(2)) for p in (a, b, c, d))  # every param updated exactly once
+    assert [pg["params"] for pg in groups] == [[a, b], [c], [d], []]  # groups restored
+    assert [pg.get("step") for pg in groups] == [6, 1, 3, None]  # one full step's worth of counter
