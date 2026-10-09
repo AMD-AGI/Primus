@@ -3069,13 +3069,21 @@ class MXFP6FusedMLP(MLP):
         fp4_fc1 = joint and gates().joint_mlp_fp4(img, "fc1")
         fp4_fc2 = joint and gates().joint_mlp_fp4(img, "fc2")
         bf16_fc1 = img and gates().fwd_bf16_joint_img_fc1
-        output = MXFP6MLPFunction.apply(
+        grad_enabled = torch.is_grad_enabled()
+        # Without grad there is no autograd graph to build, so call the forward itself (as the single-block Functions
+        # do). Under torch.compile, Dynamo mis-binds Function.apply of this ctx-less (setup_context-style) Function
+        # under no_grad -- the Function object arrives as hidden_states -- which is an unrecoverable graph break: Dynamo
+        # then skips the calling block's forward code object for the rest of the run, so every joint block (the last
+        # one, context_pre_only, has no grouped pair and takes this path) ran eagerly in training too after the first
+        # no-grad call (the MLPerf validation warmup).
+        fn = MXFP6MLPFunction.apply if grad_enabled else MXFP6MLPFunction.forward
+        output = fn(
             hidden_states,
             self.linear_fc1.weight,
             self.linear_fc1.bias,
             self.linear_fc2.weight,
             fuse_wgrad_accum,
-            torch.is_grad_enabled(),
+            grad_enabled,
             _resolve_weight_is_fp4(self.config),
             fp4_fc2,  # fwd_fp4 (fc2), for the joint stream MLPs under mxfp6_fwd_fp4_joint_mlp (_parts)
             fp4_fc1 and not bf16_fc1,  # fwd_fp4_fc1
