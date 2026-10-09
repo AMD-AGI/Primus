@@ -119,10 +119,12 @@ modules:
       ddp_bucket_size: 1024000000
       # Small buckets for the parameters the forward needs first, so the first all-gather and the
       # last reduce-scatter of a step are short; the head groups' all-gathers are dispatched at the
-      # end of the optimizer step. Neither changes what is computed.
-      ddp_head_bucket_size: 64000000
+      # end of the optimizer step, the first two groups' params are stepped first so their gathers
+      # run under the rest of the step. None of these changes what is computed.
+      ddp_head_bucket_size: 172000000
       ddp_head_bucket_ramp: 1.4
       ddp_param_gather_after_optimizer: -1
+      optimizer_head_first: 2
       # Per-step logging without NCCL barriers or device-wide syncs.
       light_log_sync: true
       use_fsdp2_fp32_param_optimizer: false
