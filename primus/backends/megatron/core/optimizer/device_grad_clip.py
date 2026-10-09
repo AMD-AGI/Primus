@@ -23,9 +23,11 @@ Bitwise notes (checked on the GPU this targets):
   fp32 cast only when it straddles an fp32 rounding boundary). The *reported* norm is still computed on the host
   with the original expression, from the same fp32 squared norm, so it is identical to the original.
 * A bf16 tensor multiplied by an fp32 0-dim CUDA tensor (``mul_`` or ``_foreach_mul_``) rounds the multiplier to
-  bf16 first, so it does not reproduce ``mul_(python_float)``. bf16 gradients are therefore scaled by a small
-  Triton kernel that multiplies in fp32 and rounds once, as the eager kernel does; fp32 gradients use
-  ``torch._foreach_mul_``, which is exact there.
+  bf16 first, so it does not reproduce ``mul_(python_float)``. The gradients are therefore scaled by a small
+  Triton kernel that multiplies in fp32 and rounds once, as the eager kernel does. (For fp32 gradients
+  ``torch._foreach_mul_`` with the device scalar would be exact too, but it always reads and writes every byte.)
+* The kernel masks all loads and stores off when the coefficient is exactly 1.0, so a step that does not clip costs
+  one near-empty launch per contiguous run instead of a full read and write of the gradients.
 """
 
 import operator
@@ -114,8 +116,10 @@ def clip_coefficient(total_norm: DeviceGradNorm, max_norm: float) -> torch.Tenso
 def _scale_by_device_scalar_kernel(x_ptr, n_elements, coeff_ptr, BLOCK: tl.constexpr):
     pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n_elements
     coeff = tl.load(coeff_ptr)
+    # A coefficient of exactly 1.0 leaves every element unchanged: mask everything off, so a step that does not
+    # clip moves no gradient bytes.
+    mask = (offs < n_elements) & (coeff != 1.0)
     x = tl.load(x_ptr + offs, mask=mask)
     y = x.to(tl.float32) * coeff
     tl.store(x_ptr + offs, y.to(x_ptr.dtype.element_ty), mask=mask)
@@ -137,18 +141,13 @@ def scale_grads_(grads, coeff: torch.Tensor, runs=None) -> None:
     """Scale every gradient in ``grads`` by the device scalar ``coeff`` (fp32, 0-dim).
 
     ``runs`` -- optional ``(base, offset, numel)`` contiguous runs covering ``grads`` exactly once (as produced by the
-    flat-clip coalescer); each is scaled with one launch. Otherwise fp32 gradients go through
-    ``torch._foreach_mul_`` and the rest are scaled one tensor at a time.
+    flat-clip coalescer); each is scaled with one launch. Otherwise each gradient is scaled with one launch.
     """
     if runs is not None:
         for base, offset, numel in runs:
             scale_flat_(torch.as_strided(base, (numel,), (1,), offset), coeff)
         return
-    fp32 = [g for g in grads if g.dtype == torch.float32]
-    other = [g for g in grads if g.dtype != torch.float32]
-    if fp32:
-        torch._foreach_mul_(fp32, coeff)
-    for g in other:
+    for g in grads:
         if g.is_contiguous():
             scale_flat_(g.view(-1), coeff)
         else:

@@ -21,8 +21,9 @@ With this gate:
   ``--light-log-sync-events`` reads it back asynchronously.
 
 Losses, gradient norms and parameters are bitwise identical to the host path; see ``device_grad_clip`` for the
-numerics. ``foreach`` is the only implementation; ``te`` (scaling inside the fused Adam kernel) is reserved and
-rejected until a Transformer Engine build with a device-side gradient scale is available.
+numerics. ``foreach`` scales the gradients in a separate pass after the norm (one launch per contiguous run, no
+memory traffic when the coefficient is 1.0); ``te`` (scaling inside the fused Adam kernel) is reserved and rejected
+until a Transformer Engine build with a device-side gradient scale is available.
 
 Off by default (``device_grad_clip: off``).
 """
