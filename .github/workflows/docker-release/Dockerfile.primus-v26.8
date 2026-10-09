@@ -313,6 +313,11 @@ RUN git clone --recursive ${TE_REPO} \
     && cd TransformerEngine \
     && git checkout ${TE_VERSION} \
     && git submodule update --init --recursive \
+    # ROCm LLVM 24 lld (>= a20261004) treats the quoted typeinfo names in QoLA's
+    # version script as literals and errors when they match nothing; older lld
+    # silently ignored them, so dropping them keeps the exported symbols identical.
+    && sed -i '/"typeinfo for qola::\*";/d; /"typeinfo name for qola::\*";/d' \
+        3rdparty/QoLA/qola/cpp_itfs/qola_exports.lds \
     && PYTHONPATH="$PWD/3rdparty/QoLA:${PYTHONPATH}" \
         python3 -m qola.cli checkout \
         --manifest transformer_engine/common/ck_fused_attn/qola_manifest.toml \
@@ -558,6 +563,11 @@ RUN git clone ${TURBO_REPO} --recursive \
     && cd Primus-Turbo \
     && git checkout ${TURBO_COMMIT} \
     && git submodule update --init --recursive \
+    # Triton 3.9 rejects autotune keys that are not kernel arguments; older Triton
+    # silently dropped them. The bwd kernels take BLOCK_DMODEL_QK/_V, so the stale
+    # "BLOCK_DMODEL" key is removed (same effective key as before).
+    && { [ ! -f primus_turbo/triton/attention/attention_kernel.py ] \
+         || sed -i '/^        "BLOCK_DMODEL",$/d' primus_turbo/triton/attention/attention_kernel.py; } \
     && uv pip install -r requirements.txt \
     && uv pip install --no-build-isolation . -v \
         --extra-index-url https://stable.repo.amd.com/rocm/core/whl-next \
@@ -565,6 +575,12 @@ RUN git clone ${TURBO_REPO} --recursive \
     && find . -type f \( -iname 'Dockerfile*' -o -iname '*.Dockerfile' \) -delete \
     && cd .. \
     && rm -rf /root/.cache
+
+# fla 0.5.2 lists a stale "BT" autotune key on merge_fwd_bwd_kernel (not a kernel
+# argument), which Triton 3.9 rejects at import. Fixed upstream in fla-org/flash-linear-attention#1330
+# but unreleased; this is a no-op once a release includes it.
+RUN f=/opt/venv/lib/python3.12/site-packages/fla/ops/cp/chunk_delta_h.py \
+    && { [ ! -f "$f" ] || sed -i "s/key=\['HV', 'K', 'V', 'BT'\]/key=['HV', 'K', 'V']/" "$f"; }
 
 RUN uv pip install \
     boto3==1.35.42 \
