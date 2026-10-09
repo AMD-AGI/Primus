@@ -15,7 +15,9 @@
     "primus": {
       "THE_ROCK_VERSION": "ROCM_SDK_VERSION"
     },
-    "jax": {}
+    "jax": {
+      "JAX_PJRT_VERSION": "JAX_ROCM_VERSION"
+    }
   },
   "not_pins": [
     "DEFAULT_STAGES",
@@ -32,16 +34,16 @@
   ],
   "documented_divergences": {
     "primus": {
-      "TORCHVISION_VERSION": "Dockerfile floats `torchvision==0.27`; the script pins the full nightly so a bare-metal install is reproducible.",
-      "TORCHAUDIO_VERSION": "Dockerfile floats `torchaudio==2.11.0`; the script pins the full nightly.",
-      "APEX_VERSION": "Dockerfile builds APEX unpinned; the script pins the wheel it was built against.",
-      "FLYDSL_VERSION": "Primus-Turbo is installed with --no-deps bare-metal, so flydsl is pinned explicitly.",
-      "TE_COMMIT": "Source-build fallback for the TE wheel; the Dockerfile only ever uses the wheel."
+      "TORCHVISION_VERSION": "Dockerfile pins `torchvision==0.29.0a0` inline and leaves the +rocm local label to the resolver; the script pins the full version the image resolved to.",
+      "TORCHAUDIO_VERSION": "Dockerfile pins `torchaudio==2.11.0+rocm${THE_ROCK_VERSION}` inline rather than as an ARG; the script spells out the same version.",
+      "APEX_VERSION": "Dockerfile installs apex unpinned from the torch index; the script pins the version the image resolved to.",
+      "FLYDSL_VERSION": "Primus-Turbo is installed with --no-deps bare-metal, so its own flydsl pin is restated explicitly."
     },
     "jax": {
-      "TE_SOURCE_COMMIT": "Optional `te_source` stage, which has no Dockerfile counterpart.",
-      "RCCL_COMMIT": "Dockerfile checks RCCL out inline in jax_base; the script pins the same commit as a variable.",
-      "JAX_ROCM_VERSION": "Dockerfile derives the plugin version from JAX_VERSION; the script pins it so the pjrt/plugin pair cannot skew."
+      "TE_SOURCE_COMMIT": "Optional `te_source` stage, which has no Dockerfile counterpart; the commit is the one the TE wheel's local label names.",
+      "RCCL_COMMIT": "Optional `rccl` stage (the v26.6 behaviour). The Dockerfile has taken RCCL from the pip ROCm SDK since v26.7.",
+      "PRIMUS_BRANCH": "The JAX image ships no Primus since v26.8 (it runs from a mounted checkout); the script checks out the release branch the docs pair with the image.",
+      "PRIMUS_REPO": "Same as PRIMUS_BRANCH: the image no longer clones Primus."
     }
   },
   "_dockerfile_only_packages_why": [
@@ -55,7 +57,8 @@
   ],
   "dockerfile_only_packages": {
     "primus": {
-      "msgpack": "a sed on pip's own vendored dependency list (src/pip/_vendor/vendor.txt) in the pip_builder stage, not a package installed into the training environment; bare metal uses stock pip"
+      "msgpack": "a sed on pip's own vendored dependency list (src/pip/_vendor/vendor.txt) in the pip_builder stage, not a package installed into the training environment; bare metal uses stock pip",
+      "urllib3": "same pip_builder sed as msgpack (pip's vendored copy, not an installed package); bare metal uses stock pip"
     },
     "jax": {
       "torch": "installed by the MaxDiffusion stage, which the bare-metal script skips",
@@ -65,9 +68,7 @@
   },
   "inline_pins": {
     "_comment": "Pins the Dockerfiles express inside RUN lines rather than as ARG. Only four exist in Dockerfile.primus-v26.6 against 66 ARG/ENV declarations, so an explicit list beats a general parser.",
-    "primus": {
-      "FLASH_ATTN_VERSION": "pip install\\s+flash-attn==(\\S+)"
-    },
+    "primus": {},
     "jax": {}
   }
 }
