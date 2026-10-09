@@ -17,8 +17,11 @@ Image: `YOUR_DOCKER_IMAGE`.
 |---|---|---|
 | `llama3.2_1B-BF16-lora-sft.yaml` | Full Llama-3.2-1B LoRA SFT | Converts HF weights (`meta-llama/Llama-3.2-1B`, gated) |
 | `llama2_70B-BF16-lora-sft-1gpu-proxy.yaml` | Llama-2-70B shape, **4 of 80 layers** | Random init, no 70B download |
+| `llama2_70B-FP8-lora-sft-1gpu-proxy.yaml` | Same proxy, TE FP8 hybrid GEMMs | Random init, no 70B download |
 | `qwen2.5_72B-BF16-lora-sft-1gpu-proxy.yaml` | Qwen2.5-72B shape, **4 of 80 layers** | Random init, no 72B download |
+| `qwen2.5_72B-FP8-lora-sft-1gpu-proxy.yaml` | Same proxy, TE FP8 hybrid GEMMs | Random init, no 72B download |
 | `qwen3_235B_A22B-BF16-lora-sft-1gpu-proxy.yaml` | Qwen3-235B-A22B MoE shape, **4 of 94 layers** | Random init, no 235B download |
+| `qwen3_235B_A22B-FP8-lora-sft-1gpu-proxy.yaml` | Same proxy, TE FP8 hybrid GEMMs | Random init, no 235B download |
 
 Primus has **Qwen3-235B-A22B**, not a 253B variant. The MoE smoke uses that
 in-tree model. LoRA on that recipe is attention-only (`linear_qkv` /
@@ -140,6 +143,11 @@ mkdir -p /tmp/primus-proxy-no-ckpt
   --env PRIMUS_TURBO_ATTN_BACKEND=triton \
   -- train posttrain \
   --config examples/megatron/configs/MI455X/qwen3_235B_A22B-BF16-lora-sft-1gpu-proxy.yaml
+
+# FP8 hybrid siblings: same command, swap BF16 for FP8 in the config name.
+#   llama2_70B-FP8-lora-sft-1gpu-proxy.yaml
+#   qwen2.5_72B-FP8-lora-sft-1gpu-proxy.yaml
+#   qwen3_235B_A22B-FP8-lora-sft-1gpu-proxy.yaml
 ```
 
 ---
@@ -243,6 +251,11 @@ mkdir -p /tmp/primus-proxy-no-ckpt
 # Qwen3-235B-A22B MoE 4-layer proxy (random init)
 ./primus-cli direct -- train posttrain \
   --config examples/megatron/configs/MI455X/qwen3_235B_A22B-BF16-lora-sft-1gpu-proxy.yaml
+
+# FP8 hybrid siblings: same command, swap BF16 for FP8 in the config name.
+#   llama2_70B-FP8-lora-sft-1gpu-proxy.yaml
+#   qwen2.5_72B-FP8-lora-sft-1gpu-proxy.yaml
+#   qwen3_235B_A22B-FP8-lora-sft-1gpu-proxy.yaml
 ```
 
 ---
