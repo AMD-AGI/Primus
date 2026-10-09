@@ -20,7 +20,7 @@ Read this section before starting a training run. It collects the settings this 
 
 ### Required settings
 
-**Use the `release/v26.8` branch.** It is the Primus branch matching the `rocm/primus:v26.8` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image: the image was built from `1f4f6f6e`, and the MI325X tuning for the 70B/72B and MoE recipes ([#1227](https://github.com/AMD-AGI/Primus/pull/1227)) landed on the branch afterwards. See [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268). [Environment setup](#1-environment-setup) has the clone command.
+**Use the `release/v26.8` branch.** It is the Primus branch matching the `rocm/primus:v26.8` image. The image was built from `f487a934`, the current branch tip, so the `/workspace/Primus` copy baked into it currently matches; a checkout keeps you current if later commits land on the branch. See [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268). [Environment setup](#1-environment-setup) has the clone command.
 
 ### Changes you may need to act on
 

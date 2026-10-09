@@ -409,7 +409,7 @@ python3 -m nltk.downloader punkt_tab
 
 # AWS SDK (used by some data pipelines)
 pip install boto3==1.35.42 botocore==1.35.99
-pip install cryptography==50.0.0 diffusers==0.38.0 jaraco.context==6.1.0 pyarrow==23.0.1 hydra-core==1.3.4
+pip install cryptography==50.0.0 diffusers==0.38.0 jaraco.context==6.1.0 pyarrow==23.0.1 hydra-core==1.3.7
 pip install --no-deps mlflow==3.15.1
 ```
 
@@ -424,7 +424,7 @@ export PRIMUS_FLA_MLA_ATTN=1
 
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout 1f4f6f6e02798f97929777b2270ea019c74f36de   # the commit Dockerfile.primus-v26.8 pins (on release/v26.8)
+git checkout f487a934fbc21def28077d5e919dad0b68ecaf9d   # the commit Dockerfile.primus-v26.8 pins (on release/v26.8)
 git submodule update --init --recursive
 pip install -r requirements.txt
 

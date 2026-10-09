@@ -171,11 +171,12 @@ Optional: `torchrec` (DLRM/recommendation stack).
 - **Runtime:** `env.sh` exports `GPU_USE_DEVICE_QUEUE=1` and
   `DEBUG_CLR_AQL_DEV_QUEUE=1` (the image's device-queue path) and
   `NVTE_AITER_SOURCE_DIR`.
-- **Updated pins:** Primus `1f4f6f6e…` (on `release/v26.8`, the commit the
+- **Updated pins:** Primus `f487a934…` (on `release/v26.8`, the commit the
   Dockerfile pins), aiter `b4d9154d…`, Primus-Turbo `9c645c5f…`
   (`0.5.1.dev7`), `sympy==1.14.0`. `einops` is no longer pinned to
   `0.9.0.dev0`: that pin came with the v26.7 TE wheels, and the image now
-  resolves `einops 0.8.2`. CVE pins are unchanged: `cryptography==50.0.0`,
+  resolves `einops 0.8.2`. `hydra-core` moves to `1.3.7` for CVE fixes, as in
+  the image; the other CVE pins are unchanged: `cryptography==50.0.0`,
   `mlflow==3.15.1` (`--no-deps`).
 - **`ck_jit_compile.sh` still needs no patch.** The source-built TE ships its own
   tolerance for a lost `mv -n` race; `setup.sh` detects either form and skips.

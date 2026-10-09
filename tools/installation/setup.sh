@@ -110,10 +110,10 @@ MAMBA_REPO="https://github.com/AndreasKaratzas/mamba.git"
 MAMBA_BRANCH="enable-primus-hybrid-models"
 TVM_FFI_VERSION="0.1.11"
 PRIMUS_REPO="https://github.com/AMD-AGI/Primus.git"
-# The commit Dockerfile.primus-v26.8 pins (2026-10-02, on `release/v26.8`). The
+# The commit Dockerfile.primus-v26.8 pins (2026-10-07, on `release/v26.8`). The
 # commit is used rather than the branch so the install keeps matching the image
-# even though later commits have landed on the branch.
-PRIMUS_BRANCH="1f4f6f6e02798f97929777b2270ea019c74f36de"
+# if later commits land on the branch.
+PRIMUS_BRANCH="f487a934fbc21def28077d5e919dad0b68ecaf9d"
 AITER_REPO="https://github.com/ROCm/aiter.git"
 AITER_COMMIT="b4d9154d125e09efbe098d986e40fea3549c1244"
 TURBO_REPO="https://github.com/AMD-AGI/Primus-Turbo.git"
@@ -783,7 +783,7 @@ stage_boto() {
     reload_env
     log "Installing boto3/botocore and CVE-fix pins from the v26.8 image"
     pipi boto3==1.35.42 botocore==1.35.99
-    pipi cryptography==50.0.0 diffusers==0.38.0 "jaraco.context==6.1.0" pyarrow==23.0.1 hydra-core==1.3.4
+    pipi cryptography==50.0.0 diffusers==0.38.0 "jaraco.context==6.1.0" pyarrow==23.0.1 hydra-core==1.3.7
     # mlflow caps cryptography<50; --no-deps keeps the 50.0.0 pin above.
     $PIP install --no-deps mlflow==3.15.1
 }
