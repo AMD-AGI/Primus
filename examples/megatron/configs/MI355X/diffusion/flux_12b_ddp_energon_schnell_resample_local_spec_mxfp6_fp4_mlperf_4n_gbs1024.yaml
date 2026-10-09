@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the Apache License, Version 2.0.
 
-# Flux 12B Schnell Training -- DDP + Local Spec + MXFP6, MXFP4 backward and text-stream forward
+# Flux 12B Schnell Training -- DDP + Local Spec + MXFP6, MXFP4 backward (round to nearest) and text-stream forward
 # Variant of ...mxfp6_mlperf_4n_gbs1024.yaml: identical except for the MXFP4 GEMMs listed under the gates.
 # MLPerf Training v6.1 submission recipe: 4 nodes x 8 MI355X, MBS=32, GBS=1024.
 #
@@ -165,12 +165,12 @@ modules:
       # The single blocks' attention out-projection and MLP fc2 forward as one GEMM, with fc2's bias, the gate and the
       # residual add in its epilogue.
       mxfp6_single_linear2_cat: true
-      # MXFP4 (A4W4) backward GEMMs, dgrad and wgrad, with stochastic rounding on both operands: the gradient and the
-      # activations' / weights' MXFP4 backward copies (so the backward GEMMs are unbiased).
+      # MXFP4 (A4W4) backward GEMMs, dgrad and wgrad, every operand rounded to nearest: the gradient and the
+      # activations' / weights' MXFP4 backward copies (no stochastic rounding).
       mxfp6_bwd_fp4_dgrad: true
       mxfp6_bwd_fp4_wgrad: true
-      mxfp6_bwd_fp4_sr: true
-      mxfp6_fp4_sr_actw: true
+      mxfp6_bwd_fp4_sr: false
+      mxfp6_fp4_sr_actw: false
       # The attention out-projections' A4W4 dgrad also emits the attention backward's softmax_d (rowsum(dO * O)),
       # which the attention backward then takes instead of computing it.
       mxfp6_dgrad_emit_attn_delta: true
