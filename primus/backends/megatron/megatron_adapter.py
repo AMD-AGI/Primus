@@ -90,6 +90,7 @@ class MegatronAdapter(BackendAdapter):
         MEGATRON_TRAINERS = {
             "MegatronPretrainTrainer": "primus.backends.megatron.megatron_pretrain_trainer.MegatronPretrainTrainer",
             "FluxPretrainTrainer": "primus.backends.megatron.flux_pretrain_trainer.FluxPretrainTrainer",
+            "WanPretrainTrainer": "primus.backends.megatron.wan_pretrain_trainer.WanPretrainTrainer",
         }
 
         if trainer_class not in MEGATRON_TRAINERS:
