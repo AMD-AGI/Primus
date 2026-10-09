@@ -12,17 +12,12 @@ upstream submodule. The balanced-routing field migration
 (``training.debug_moe_force_load_balance`` -> ``debug.moe_force_load_balance``)
 is already handled in the DeepSeek configs on main.
 
-Compiling an outer MoE TransformerBlock is unsafe: it pulls expert-parallel
-token dispatch/combine and GroupedExperts FSDP hooks into one inductor graph,
-which silently produces NaNs. Keeping the whole MoE block eager is correct but
-costs about 18 GiB on DSv3-16B FP8.
-
-Use a selective boundary instead. Dense blocks compile as a full graph; MoE
-parents stay eager while their pure-compute attention, norms, router,
-reorderer, and shared experts compile independently. Routed experts, EP
-dispatch/combine, FSDP hooks, output unsort, and residuals remain eager. This
-keeps training finite while recovering most of the eager-MoE memory and
-throughput loss.
+Compile whole TransformerBlocks with graph breaks enabled, while explicitly
+keeping GroupedExperts eager. This places the graph break at the routed-expert
+EP/FSDP boundary: surrounding attention, routing, combine, residual, and dense
+compute can still be captured without pulling expert communication and FSDP
+hooks into the same graph. It avoids the BF16 HBM regression from separately
+compiled MoE children and the FP8 NaNs from compiling GroupedExperts.
 
 The MoE forward replacement also changes its fp32 ``bmm`` combine into a bf16
 weighted sum, dropping the fp32 activation copy retained across MoE layers.
@@ -60,83 +55,31 @@ def _compile_enabled(ctx: PatchContext) -> bool:
     return bool(get_param(ctx, "compile.enable", False))
 
 
-_GROUPED_MM_SENTINEL = "_run_experts_grouped_mm_dynamic"
-_MOE_BLOCK_COMPILE_ATTRS = ("attention", "attention_norm", "ffn_norm")
-_MOE_COMPILE_ATTRS = ("router", "reorderer", "shared_experts")
-
-
-def _compile_attr(module: nn.Module, attr_name: str, backend: str) -> None:
-    submodule = getattr(module, attr_name, None)
-    if submodule is not None:
-        setattr(
-            module,
-            attr_name,
-            torch.compile(submodule, backend=backend, fullgraph=True),
-        )
-
-
-def _compile_grouped_mm(backend: str, ep_enabled: bool) -> None:
-    """Keep Turbo grouped-MM eager; compile TorchTitan's implementation."""
+def _apply_unified_compile(model: nn.Module, compile_config: Any, ep_enabled: bool) -> None:
+    """Compile whole blocks with an explicit graph break at routed experts."""
     import torchtitan.models.moe.moe as moe_module
-
-    if _GROUPED_MM_SENTINEL in moe_module._run_experts_grouped_mm.__qualname__:
-        return
-
-    compiled_fn = torch.compile(
-        moe_module._run_experts_grouped_mm,
-        backend=backend,
-        fullgraph=True,
-    )
-    if not ep_enabled:
-        moe_module._run_experts_grouped_mm = compiled_fn
-        return
-
-    def _run_experts_grouped_mm_dynamic(
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        w3: torch.Tensor,
-        x: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
-    ) -> torch.Tensor:
-        torch._dynamo.mark_dynamic(x, 0)
-        return compiled_fn(w1, w2, w3, x, num_tokens_per_expert)
-
-    moe_module._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
-
-
-def _apply_selective_compile(model: nn.Module, compile_config: Any, ep_enabled: bool) -> None:
-    """Compile pure MoE compute while keeping unsafe communication boundaries eager."""
-    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-        CheckpointWrapper,
-    )
     from torchtitan.tools.logging import logger
 
-    backend = compile_config.backend
+    # Preserve TorchTitan's required setup for dynamic token-choice MoE shapes.
+    torch._dynamo.config.capture_scalar_outputs = True
+
+    experts_forward = moe_module.GroupedExperts.forward
+    if not getattr(experts_forward, "_primus_graph_break", False):
+        experts_forward = torch.compiler.disable(experts_forward, recursive=False)
+        experts_forward._primus_graph_break = True
+        moe_module.GroupedExperts.forward = experts_forward
 
     for layer_id, transformer_block in model.layers.named_children():
-        if not transformer_block.moe_enabled:
-            transformer_block = torch.compile(
-                transformer_block,
-                backend=backend,
-                fullgraph=True,
-            )
-        else:
-            block = (
-                transformer_block._checkpoint_wrapped_module
-                if isinstance(transformer_block, CheckpointWrapper)
-                else transformer_block
-            )
-            for attr_name in _MOE_BLOCK_COMPILE_ATTRS:
-                _compile_attr(block, attr_name, backend)
-            for attr_name in _MOE_COMPILE_ATTRS:
-                _compile_attr(block.moe, attr_name, backend)
-
+        transformer_block = torch.compile(
+            transformer_block,
+            backend=compile_config.backend,
+            fullgraph=False,
+        )
         model.layers.register_module(layer_id, transformer_block)
 
-    _compile_grouped_mm(backend, ep_enabled)
     logger.info(
-        "Compiling dense TransformerBlocks and safe MoE compute submodules; "
-        "leaving outer MoE/EP/FSDP boundaries eager (Primus patch)"
+        "Compiling whole TransformerBlocks with an eager GroupedExperts "
+        "EP/FSDP boundary (Primus unified policy)"
     )
 
 
@@ -144,21 +87,21 @@ def _apply_selective_compile(model: nn.Module, compile_config: Any, ep_enabled: 
     "torchtitan.dsv3.whole_block_compile",
     backend="torchtitan",
     phase="setup",
-    description="Compile dense blocks and safe MoE compute submodules",
+    description="Compile whole blocks with an eager GroupedExperts boundary",
     condition=lambda ctx: _is_deepseek_model(ctx) and _compile_enabled(ctx),
 )
 def patch_whole_block_compile(ctx: PatchContext) -> None:
-    """Install the numerically safe, low-memory selective compile policy."""
+    """Install the unified, numerically safe whole-block compile policy."""
     import torchtitan.models.deepseek_v3.infra.parallelize as deepseek_parallelize
     import torchtitan.models.llama4.infra.parallelize as llama4_parallelize
 
     # DeepSeek imports apply_compile by value, so patch both the source module
     # and the already-bound local alias regardless of import order.
-    llama4_parallelize.apply_compile = _apply_selective_compile
-    deepseek_parallelize.apply_compile = _apply_selective_compile
+    llama4_parallelize.apply_compile = _apply_unified_compile
+    deepseek_parallelize.apply_compile = _apply_unified_compile
     log_rank_0(
         "[Patch:torchtitan.dsv3.whole_block_compile] "
-        "Patched DeepSeek apply_compile with safe MoE selective compilation",
+        "Patched DeepSeek apply_compile with unified graph-break compilation",
     )
 
 
