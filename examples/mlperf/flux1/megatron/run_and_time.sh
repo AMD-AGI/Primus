@@ -90,8 +90,13 @@ start=$(date +%s)
 start_fmt=$(date +%Y-%m-%d\ %r)
 echo "STARTING TIMING RUN AT ${start_fmt}"
 
+# PRIMUS_NUMA_BIND=1: each rank (and its data-loader workers) runs bound to its GPU's NUMA node, CPUs and memory
+# (primus-cli direct --numa). Off unless set.
+numa_args=()
+[[ "${PRIMUS_NUMA_BIND:-0}" == 1 ]] && numa_args=(--numa)
+
 set +e
-"${PRIMUS_PATH}/primus-cli" direct -- \
+"${PRIMUS_PATH}/primus-cli" direct "${numa_args[@]}" -- \
     train pretrain \
     --config "${EXP}" \
     2>&1 | tee "${RESULTS_DIR}/train_flux1_${RUN_INDEX}.log"
