@@ -37,6 +37,7 @@ For the full and up-to-date model matrix, see [Supported Models](./docs/06-devel
 
 ## 🆕 What's New
 
+- **[2026/10/08]** Primus **v26.8** training images: `rocm/primus:v26.8` (**ROCm 10.1.0**, PyTorch 2.14) and `rocm/jax-training:maxtext-v26.8` (JAX 0.11.1 on a ROCm 10.2 nightly), plus ZAYA1-8B and MiniMax-M3 on Megatron-LM ([release notes](./docs/01-getting-started/release-notes.md#highlights-for-v268))
 - **[2026/09/16]** Primus **v26.7** training images: `rocm/primus:v26.7` and `rocm/jax-training:maxtext-v26.7` — **ROCm 10.0.0** across both families, plus DeepSeek-V4 on gfx942 with 128k context parallelism ([release notes](./docs/01-getting-started/release-notes.md#highlights-for-v267))
 - **[2026/09/07]** Primus **v26.6** training images: `rocm/primus:v26.6` and `rocm/jax-training:maxtext-v26.6` (JAX 0.11.0, Transformer Engine 2.17)
 - **[2026/07/29]** ⚡ **MegaMoE** - FlyDSL-based fused MoE layer that folds expert all-to-all into the grouped GEMMs, plus FP4 grouped GEMM support ([MegaMoE guide](./docs/04-technical-guides/mega-moe.md))
@@ -113,9 +114,9 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
 
     ```bash
     # For Megatron-LM and TorchTitan backends
-    docker pull rocm/primus:v26.7
+    docker pull rocm/primus:v26.8
     # For MaxText backend
-    docker pull rocm/jax-training:maxtext-v26.7
+    docker pull rocm/jax-training:maxtext-v26.8
     ```
 
 2. **Clone the repository**
@@ -124,7 +125,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
     cd Primus
     # checkout the branch for the specific release
-    git checkout release/v26.7
+    git checkout release/v26.8
     git submodule update --init --recursive
     ```
 
@@ -135,7 +136,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     # NOTE: If your config downloads weights/tokenizer from Hugging Face Hub,
     #       you typically need to pass HF_TOKEN into the container.
     # Run in the Primus repository root directory
-    ./primus-cli container --image rocm/primus:v26.7 \
+    ./primus-cli container --image rocm/primus:v26.8 \
       --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
       -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
     ```
@@ -153,7 +154,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/02-user-gu
     python -m venv primus-env
     source primus-env/bin/activate
     # Install Primus
-    pip install "primus==26.7.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
+    pip install "primus==26.8.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
 
     ```
 
@@ -164,7 +165,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/02-user-gu
 2. **Run training in container using pip-installed Primus**
 
     ```bash
-    primus-cli container --image rocm/primus:v26.7 \
+    primus-cli container --image rocm/primus:v26.8 \
     --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
     --volume /path/to/your/data:/data  -- --log_file /data/run.log \
     -- train pretrain --config /data/your/config.yaml

@@ -264,6 +264,11 @@ def main():
     parser.add_argument("--previous")
     parser.add_argument("--from", dest="from_commit", help="override the start commit")
     parser.add_argument("--to", dest="to_commit", help="override the end commit")
+    parser.add_argument(
+        "--output",
+        help="where to write the changelog (default output/release-docs/<version>/changelog.json); "
+        "use it to keep a second family's range, e.g. changelog-jax.json, beside the primus one",
+    )
     args = parser.parse_args()
 
     previous = args.previous
@@ -281,7 +286,11 @@ def main():
         )
 
     data = collect(args.version, previous, from_commit, to_commit)
-    path = C.ROOT / f"output/release-docs/{args.version}/changelog.json"
+    path = (
+        Path(args.output).resolve()
+        if args.output
+        else C.ROOT / f"output/release-docs/{args.version}/changelog.json"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
 
