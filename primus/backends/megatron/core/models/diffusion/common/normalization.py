@@ -1318,30 +1318,29 @@ def _(a, b, out):
     return None
 
 
-# mxfp6_adaln_gemm_backend "turbo": the AdaLN GEMMs on Primus-Turbo's adaln_gemm ops. The (pass, N, K) they have
-# kernels for are read once, eagerly, by prime_adaln_turbo() at gate configuration -- never inside a compiled region.
-# The ops are called through torch.ops, so the traced code imports nothing.
-_ADALN_TURBO: frozenset = frozenset()
-_ADALN_TURBO_M = 32
+# mxfp6_adaln_gemm_backend "turbo": the AdaLN GEMMs through Primus-Turbo's bf16 GEMM dispatcher, pinned to its AITER
+# backend (aiter's adaln_gemm kernels) wherever that backend can handle the GEMM. prime_adaln_turbo() resolves the
+# backend and reads the shapes it has kernels for once, eagerly, at gate configuration -- never inside a compiled
+# region -- so its per-call can_handle is plain arithmetic. The GEMMs are called through torch.ops, so the traced code
+# imports nothing.
+_ADALN_TURBO = None  # Primus-Turbo's GEMMAiterBackend once primed, if it has kernels
+_ADALN_TURBO_BACKEND = 0  # BackendType.AITER.value once primed
 
 
 def prime_adaln_turbo() -> frozenset:
-    """Read Primus-Turbo's AdaLN GEMM table into this module and return it (empty without Turbo or its kernels)."""
-    global _ADALN_TURBO, _ADALN_TURBO_M
+    """Resolve Primus-Turbo's AITER GEMM backend into this module and return the shapes it has kernels for, as
+    {(pass, N, K)} (empty without Primus-Turbo, without that backend or without the kernels)."""
+    global _ADALN_TURBO, _ADALN_TURBO_BACKEND
     try:
-        from primus_turbo.pytorch.kernels.gemm.gemm_adaln_impl import (
-            ADALN_GEMM_M,
-            adaln_gemm_table,
-        )
+        from primus_turbo.pytorch.core.backend import BackendType
+        from primus_turbo.pytorch.kernels.gemm.gemm_impl import GEMMAiterBackend
     except ImportError:
-        _ADALN_TURBO = frozenset()
-        return _ADALN_TURBO
-    _ADALN_TURBO, _ADALN_TURBO_M = adaln_gemm_table(), ADALN_GEMM_M
-    return _ADALN_TURBO
-
-
-def _turbo_adaln(pass_: str, n: int, k: int, m: int) -> bool:
-    return m == _ADALN_TURBO_M and (pass_, n, k) in _ADALN_TURBO
+        _ADALN_TURBO = None
+        return frozenset()
+    shapes = GEMMAiterBackend.shapes()
+    _ADALN_TURBO = GEMMAiterBackend if shapes else None
+    _ADALN_TURBO_BACKEND = BackendType.AITER.value
+    return shapes
 
 
 class AdaLNLinearFunction(torch.autograd.Function):
@@ -1362,9 +1361,17 @@ class AdaLNLinearFunction(torch.autograd.Function):
     def forward(ctx, x, weight, bias):
         ctx.save_for_backward(x, weight)
         ctx.bias = bias
-        n, k = weight.shape
-        if bias is not None and gates().adaln_gemm_backend == "turbo" and _turbo_adaln("fwd", n, k, x.shape[0]):
-            return torch.ops.primus_turbo.adaln_gemm_fwd(x, weight, bias)
+        aiter = _ADALN_TURBO if gates().adaln_gemm_backend == "turbo" else None
+        if (
+            bias is not None
+            and aiter is not None
+            and aiter.can_handle(
+                a=x, trans_a=False, b=weight, trans_b=True, out_dtype=x.dtype, trans_c=False, bias=bias
+            )
+        ):
+            return torch.ops.primus_turbo.gemm_impl(
+                x, False, weight, True, x.dtype, False, _ADALN_TURBO_BACKEND, bias
+            )
         out = torch.matmul(x, weight.t())
         if bias is not None:
             out = out + bias
@@ -1374,16 +1381,25 @@ class AdaLNLinearFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         x, weight = ctx.saved_tensors
         bias = ctx.bias
-        n, k = weight.shape
-        on_turbo = gates().adaln_gemm_backend == "turbo"
-        if on_turbo and _turbo_adaln("dgrad", n, k, grad_output.shape[0]):
-            grad_input = torch.ops.primus_turbo.adaln_gemm_dgrad(grad_output, weight)
+        go, main_grad = grad_output, weight.main_grad
+        aiter = _ADALN_TURBO if gates().adaln_gemm_backend == "turbo" else None
+        if aiter is not None and aiter.can_handle(
+            a=go, trans_a=False, b=weight, trans_b=False, out_dtype=go.dtype, trans_c=False
+        ):
+            grad_input = torch.ops.primus_turbo.gemm_impl(
+                go, False, weight, False, go.dtype, False, _ADALN_TURBO_BACKEND
+            )
         else:
-            grad_input = grad_output.matmul(weight)
-        if on_turbo and _turbo_adaln("wgrad", n, k, grad_output.shape[0]):
-            torch.ops.primus_turbo.adaln_gemm_wgrad_out(grad_output, x, weight.main_grad)
+            grad_input = go.matmul(weight)
+        # the wgrad stores into main_grad (accumulate=False): see the one-microbatch rule above
+        if aiter is not None and aiter.can_handle(
+            a=go, trans_a=True, b=x, trans_b=False, out_dtype=main_grad.dtype, trans_c=False, out=main_grad
+        ):
+            torch.ops.primus_turbo.gemm_accum_impl(
+                go, True, x, False, main_grad.dtype, False, main_grad, _ADALN_TURBO_BACKEND, False
+            )
         else:
-            _mm_into(grad_output.t(), x, weight.main_grad)
+            _mm_into(go.t(), x, main_grad)
         grad_weight = torch.empty_like(weight)
         grad_bias = None
         if bias is not None:

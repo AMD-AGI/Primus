@@ -100,10 +100,11 @@ class Mxfp6Gates:
     # GEMMs with an entry in that file change and every other GEMM keeps the default solution. If the file does not
     # validate against this image's PyTorch / HIP / hipBLASLt versions, TunableOp is switched back off with a warning.
     adaln_tunableop: bool = False
-    # AdaLN modulation GEMMs on Primus-Turbo's adaln_gemm ops (aiter's kernels) where Turbo's table has the
-    # (pass, N, K): "hipblaslt" (default) or "turbo" ("aiter" is a deprecated alias of "turbo"). The wgrad and dgrad are
-    # bitwise identical to the hipBLASLt GEMMs and the forward to torch.addmm. Needs adaln_wgrad_main_grad (the path
-    # they replace). With "turbo", an empty table (no Turbo, or an aiter without the kernels) is a configuration error.
+    # AdaLN modulation GEMMs through Primus-Turbo's bf16 GEMM dispatcher, pinned to its AITER backend (aiter's
+    # kernels) wherever that backend can handle the GEMM: "hipblaslt" (default) or "turbo" ("aiter" is a deprecated
+    # alias of "turbo"). The wgrad and dgrad are bitwise identical to the hipBLASLt GEMMs and the forward to
+    # torch.addmm. Needs adaln_wgrad_main_grad (the path they replace). With "turbo", a backend without shapes (no
+    # Turbo, or an aiter without the kernels) is a configuration error.
     adaln_gemm_backend: str = "hipblaslt"
 
     # --- norm / RoPE fusions ---------------------------------------------
@@ -392,8 +393,9 @@ def _pin_aiter_backend() -> None:
 
 
 def _prime_adaln_gemm(resolved: Mxfp6Gates) -> Optional[frozenset]:
-    """mxfp6_adaln_gemm_backend "turbo": read Primus-Turbo's AdaLN GEMM table (once, outside compiled regions) and
-    return it. An empty one is an error: a stack without the kernels must fail here, not run the default GEMMs."""
+    """mxfp6_adaln_gemm_backend "turbo": read the shapes Primus-Turbo's AITER GEMM backend has kernels for (once,
+    outside compiled regions) and return them. None is an error: a stack without the kernels must fail here, not run
+    the default GEMMs."""
     if resolved.adaln_gemm_backend != "turbo":
         return None
     from primus.backends.megatron.core.models.diffusion.common import normalization as _norm
@@ -401,9 +403,9 @@ def _prime_adaln_gemm(resolved: Mxfp6Gates) -> Optional[frozenset]:
     table = _norm.prime_adaln_turbo()
     if not table:
         raise RuntimeError(
-            "mxfp6_adaln_gemm_backend 'turbo': Primus-Turbo's adaln_gemm_table() is empty (Primus-Turbo without the "
-            "AdaLN GEMM ops, or an aiter without the adaln_gemm kernels for this GPU). Install a stack that has them, "
-            "or set mxfp6_adaln_gemm_backend: hipblaslt."
+            "mxfp6_adaln_gemm_backend 'turbo': Primus-Turbo's AITER GEMM backend has no shapes "
+            "(GEMMAiterBackend.shapes() is empty: a Primus-Turbo without that backend, or an aiter without the "
+            "adaln_gemm kernels for this GPU). Install a stack that has them, or set mxfp6_adaln_gemm_backend: hipblaslt."
         )
     return table
 
@@ -441,7 +443,7 @@ def configure(config) -> Mxfp6Gates:
     try:
         from primus.core.utils.module_utils import log_rank_0
 
-        adaln = "" if adaln_table is None else f" | adaln_gemm_table: {sorted(adaln_table)}"
+        adaln = "" if adaln_table is None else f" | adaln_gemm_shapes: {sorted(adaln_table)}"
         log_rank_0(f"[mxfp6-gates] active: {changed or 'none (all default)'}{adaln}")
     except ImportError:
         pass
