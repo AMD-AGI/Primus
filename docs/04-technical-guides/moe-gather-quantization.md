@@ -37,11 +37,10 @@ so disabling the flags keeps compatibility with installations without them.
 
 ## Evidence and validation limits
 
-The original pinned MLPerf campaign measured two controls and two candidates,
-with 1920 clean training steps per run: 482.948 to 477.264 ms/step, or +1.191%
-throughput. Profiled throughput improved +1.387%. Forty-eight gather launches
-per step disappeared, with 11.08–11.18 ms of net raw target savings. The estimated
-72.48 GB/rank/step avoided intermediate reads/writes are logical tensor traffic,
+The original pinned MLPerf campaign's PyTorch traces show 24 forward and 24
+backward gather launches removed per step, with 11.08–11.18 ms of net raw target
+kernel savings after accounting for replacement work. The estimated 72.48
+GB/rank/step of avoided intermediate reads/writes is logical tensor traffic,
 not measured HBM traffic or peak-memory savings.
 
 - [First candidate CI](https://github.com/AMD-MLPerf/mlperf-training/actions/runs/37915713696)
@@ -53,7 +52,7 @@ including stochastic-rounding progression, defined quantized payload/scales,
 BF16 main-gradient ownership, hooks, aliases and outstanding backward calls.
 They used older pinned source revisions. The latest-main port and its composition
 with router-backward optimization need new paired GPU correctness/profiling
-runs; the historical throughput result must not be attributed to that stack.
+runs; the kernel measurements above do not validate that stack.
 Full training-to-target/convergence equivalence has not been established.
 
 ## Implementation and tests
