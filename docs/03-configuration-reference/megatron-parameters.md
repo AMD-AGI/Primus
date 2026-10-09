@@ -185,6 +185,7 @@ models:
 | `main_params_dtype` | `fp32` | Dtype for master params. |
 | `exp_avg_dtype` | `fp32` | Optimizer first moment dtype (`fp32`, `fp16`, `fp8`). |
 | `exp_avg_sq_dtype` | `fp32` | Optimizer second moment dtype. |
+| `use_triton_fused_adam` | `false` | Build Adam from `TritonFusedAdam` (Triton kernel with a device-sized grid) instead of TE `FusedAdam`. Matters for TE builds on the generic `multi_tensor_apply` launcher (capped at 320 workgroups per launch); ROCm TE builds with the custom Adam kernel are already uncapped. Precision-aware, capturable and FP8-param paths fall back to TE. |
 
 ---
 
