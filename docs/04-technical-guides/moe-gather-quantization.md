@@ -37,17 +37,13 @@ so disabling the flags keeps compatibility with installations without them.
 
 ## Evidence and validation limits
 
-The original pinned MLPerf campaign's PyTorch traces show 24 forward and 24
+PyTorch profiles of the original implementation show 24 forward and 24
 backward gather launches removed per step, with 11.08–11.18 ms of net raw target
 kernel savings after accounting for replacement work. The estimated 72.48
 GB/rank/step of avoided intermediate reads/writes is logical tensor traffic,
 not measured HBM traffic or peak-memory savings.
 
-- [First candidate CI](https://github.com/AMD-MLPerf/mlperf-training/actions/runs/37915713696)
-- [Repeated candidate CI](https://github.com/AMD-MLPerf/mlperf-training/actions/runs/37925568140)
-- [Original patches and full preflights](https://github.com/AMD-MLPerf/mlperf-training/tree/990dffd0acdd24693918010636e833621dc8320f/small_llm_moe_pretraining/primus/dev/experiments/permute_quant_fusion)
-
-Those workflows passed six forward and fourteen backward exactness cases,
+The original implementation passed six forward and fourteen backward exactness cases,
 including stochastic-rounding progression, defined quantized payload/scales,
 BF16 main-gradient ownership, hooks, aliases and outstanding backward calls.
 They used older pinned source revisions. The latest-main port and its composition
