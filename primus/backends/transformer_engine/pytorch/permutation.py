@@ -4,6 +4,8 @@
 # See LICENSE for license information.
 
 """MoE Permutation API"""
+
+import os
 import warnings
 from typing import Optional, Tuple
 
@@ -791,6 +793,11 @@ def _moe_unpermute_mask_map_setup_context(ctx, inputs, output):  # pylint: disab
     ctx.num_permuted_tokens = inp.size(0)
     ctx.hidden_size = hidden_size
     ctx.with_probs = merging_probs is not None
+    ctx.backward_gather_plan = None
+    if _fused_permute_quant_enabled() and os.environ.get("GPTOSS_FUSED_BACKWARD_PERMUTE_QUANT") == "1":
+        ctx.backward_gather_plan = _gather_helpers().claim_backward_gather_output(
+            inp, row_id_map, merging_probs, pad_offsets, num_tokens, num_experts, hidden_size
+        )
     if ctx.with_probs:
         ctx.save_for_backward(inp, row_id_map, merging_probs, pad_offsets)
         ctx.needs_probs_grad = merging_probs.requires_grad
@@ -829,15 +836,18 @@ def _moe_unpermute_mask_map_backward_wrapper(ctx, unpermuted_act_grad):
         )
     else:
         row_id_map, pad_offsets = ctx.saved_tensors
-        act_grad = torch.ops.te_moe.unpermute_mask_map_bwd_no_probs(
-            unpermuted_act_grad,
-            row_id_map,
-            pad_offsets,
-            ctx.num_tokens,
-            ctx.num_experts,
-            ctx.num_permuted_tokens,
-            ctx.hidden_size,
-        )
+        if ctx.backward_gather_plan is not None:
+            act_grad = _gather_helpers().make_backward_gather(unpermuted_act_grad, ctx.backward_gather_plan)
+        if act_grad is None:
+            act_grad = torch.ops.te_moe.unpermute_mask_map_bwd_no_probs(
+                unpermuted_act_grad,
+                row_id_map,
+                pad_offsets,
+                ctx.num_tokens,
+                ctx.num_experts,
+                ctx.num_permuted_tokens,
+                ctx.hidden_size,
+            )
 
     if not ctx.needs_probs_grad:
         probs_grad = None
@@ -912,6 +922,102 @@ def moe_permute(
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
 
+# Experimental EP1/TP1 handoff to a single gather-quantize consumer. Source
+# preparation in this workload preserves the activation storage. The consumer
+# claims and removes the metadata; a missing handoff for a zero-stride placeholder
+# is an error, never permission to quantize its uninitialized bytes.
+def _fused_permute_quant_enabled():
+    return (
+        os.environ.get("GPTOSS_FUSED_PERMUTE_QUANT", "0") == "1"
+        and os.environ.get("PRIMUS_TP") == "1"
+        and os.environ.get("PRIMUS_EP") == "1"
+        and os.environ.get("MOE_SKIP_IDENTITY_SORT") == "1"
+    )
+
+
+def _gather_helpers():
+    # Primus remains usable without Turbo (or with an older Turbo) when disabled.
+    try:
+        from primus_turbo.pytorch.ops import moe_gather
+    except ImportError as exc:
+        raise RuntimeError(
+            "GPTOSS_FUSED_PERMUTE_QUANT requires Primus Turbo's moe_gather support; "
+            "install the paired Turbo revision or disable the fusion."
+        ) from exc
+    return moe_gather
+
+
+def _lazy_permute_eligible(
+    inp: torch.Tensor, probs: Optional[torch.Tensor], routing_map: torch.Tensor
+) -> bool:
+    return (
+        _fused_permute_quant_enabled()
+        # Exactly torch.Tensor, not a subclass (QuantizedTensor, ...): the
+        # gather-quantize consumer needs plain bf16/fp16 source bytes.
+        and type(inp) is torch.Tensor
+        and inp.is_cuda
+        and inp.ndim == 2
+        and inp.dtype == torch.bfloat16
+        and inp.is_contiguous()
+        and probs is not None
+        and probs.dtype == torch.float32
+        and routing_map.dtype == torch.bool
+        and inp.shape[0] == routing_map.shape[0]
+    )
+
+
+def _num_experts_from_row_id_map(row_id_map: torch.Tensor) -> int:
+    """row_id_map is [num_tokens, num_experts * 2 + 1] (see `make_row_id_map`)."""
+    return (row_id_map.shape[1] - 1) // 2
+
+
+class _LazyPermuteFn(torch.autograd.Function):
+    """Same forward/backward autograd contract as `te_moe::permute_mask_map_fwd` /
+    `_bwd`, minus materializing the permuted activation. Backward is literally
+    the existing, unmodified backward op: gradient computation only depends on
+    `row_id_map` (which routes each incoming grad row back to its source token),
+    never on how the forward output's bytes were produced.
+    """
+
+    @staticmethod
+    def forward(ctx, inp, probs, row_id_map, permuted_probs, num_out_tokens, needs_probs_grad):
+        hidden_size = inp.shape[1]
+        # A supported consumer claims the metadata before reading values.
+        placeholder = torch.empty((1, hidden_size), dtype=inp.dtype, device=inp.device).expand(
+            num_out_tokens, hidden_size
+        )
+        ctx.save_for_backward(row_id_map)
+        ctx.num_tokens = inp.shape[0]
+        ctx.num_experts = _num_experts_from_row_id_map(row_id_map)
+        ctx.hidden_size = hidden_size
+        ctx.needs_probs_grad = needs_probs_grad
+        # permuted_probs is small ([num_out_tokens]); the side table also holds a
+        # reference to it, so return a clone rather than let the same tensor be
+        # both a table payload and a value flowing through the training graph.
+        return placeholder, permuted_probs.clone()
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_permuted_probs):
+        (row_id_map,) = ctx.saved_tensors
+        probs_grad_input = (
+            grad_permuted_probs
+            if grad_permuted_probs is not None and grad_permuted_probs.numel() > 0
+            else None
+        )
+        act_grad, probs_grad = torch.ops.te_moe.permute_mask_map_bwd(
+            grad_output.contiguous(),
+            probs_grad_input,
+            row_id_map,
+            None,
+            ctx.num_tokens,
+            ctx.num_experts,
+            ctx.hidden_size,
+        )
+        if not ctx.needs_probs_grad or probs_grad.numel() == 0:
+            probs_grad = None
+        return act_grad, probs_grad, None, None, None, None
+
+
 def moe_permute_with_probs(
     inp: torch.Tensor,
     probs: torch.Tensor,
@@ -944,6 +1050,21 @@ def moe_permute_with_probs(
             "moe_permute_with_probs with quantized (FP8) input is not supported under "
             "torch.compile. Please move quantization outside the compiled region."
         )
+
+    if num_out_tokens > 0 and _lazy_permute_eligible(inp, probs, routing_map):
+        _gather_helpers()  # Check the paired dependency before creating a placeholder.
+        num_tokens, num_experts = inp.shape[0], routing_map.shape[1]
+        row_id_map, dest2src, permuted_probs_raw = triton_permutation.make_row_id_map_with_dest2src(
+            routing_map, probs, num_tokens, num_experts, num_out_tokens
+        )
+        output, permuted_probs = _LazyPermuteFn.apply(
+            inp, probs, row_id_map, permuted_probs_raw, num_out_tokens, bool(probs.requires_grad)
+        )
+        _gather_helpers().register_permuted_activation_seam(
+            output, inp.detach(), dest2src, permuted_probs_raw, row_id_map
+        )
+        return output, permuted_probs, row_id_map
+
     output, row_id_map, permuted_probs = torch.ops.te_moe.permute_mask_map_fwd(
         inp, routing_map, num_out_tokens, probs, None
     )
