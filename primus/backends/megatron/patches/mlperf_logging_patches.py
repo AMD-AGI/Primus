@@ -549,11 +549,14 @@ def patch_mlperf_logging(ctx: PatchContext):
 
             if loss_dict:
                 loss_val = next(iter(loss_dict.values()))
-                if hasattr(loss_val, "item"):
+                # The loss is read only where it is logged (tracked_stats and the progress line: rank 0, every
+                # log_interval steps). Reading it on every step and rank would stall the host on a device sync.
+                log_step = iteration % log_interval == 0 and _is_rank_zero()
+                if log_step and hasattr(loss_val, "item"):
                     loss_val = loss_val.item()
                 mlperf_logger.on_train_batch_end(iteration, loss_val, learning_rate)
 
-                if iteration % log_interval == 0:
+                if log_step:
                     lr_str = f"{learning_rate:.2e}" if learning_rate else "N/A"
                     sys.stdout.write(
                         f"step {iteration} | loss: {loss_val:.4f} | lr: {lr_str}"
