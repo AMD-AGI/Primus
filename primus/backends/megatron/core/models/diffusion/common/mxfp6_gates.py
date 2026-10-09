@@ -38,6 +38,8 @@ TRISTATE = ("auto", "on", "off")
 FP4_SCALE_ROUNDING = ("rceil", "m0", "m1", "m2")
 FP4_HADAMARD = ("h32", "h16", "none")
 GEMM_LAYOUTS = ("blob", "tilescale")
+# "aiter" is accepted as a deprecated alias of "turbo" (see Mxfp6Gates.validate).
+ADALN_GEMM_BACKENDS = ("hipblaslt", "turbo")
 
 
 @dataclass
@@ -98,9 +100,10 @@ class Mxfp6Gates:
     # GEMMs with an entry in that file change and every other GEMM keeps the default solution. If the file does not
     # validate against this image's PyTorch / HIP / hipBLASLt versions, TunableOp is switched back off with a warning.
     adaln_tunableop: bool = False
-    # AdaLN modulation GEMMs on aiter's adaln_gemm kernels (aiter.ops.adaln_gemm) where aiter has one for the
-    # (pass, N, K): "hipblaslt" (default) or "aiter". The wgrad is bitwise identical to the hipBLASLt GEMM; the forward and dgrad
-    # sum in a different (fixed, run-to-run identical) order. Needs adaln_wgrad_main_grad (the path they replace).
+    # AdaLN modulation GEMMs on Primus-Turbo's adaln_gemm ops (aiter's kernels) where Turbo's table has the
+    # (pass, N, K): "hipblaslt" (default) or "turbo" ("aiter" is a deprecated alias of "turbo"). The wgrad and dgrad are
+    # bitwise identical to the hipBLASLt GEMMs and the forward to torch.addmm. Needs adaln_wgrad_main_grad (the path
+    # they replace). With "turbo", an empty table (no Turbo, or an aiter without the kernels) is a configuration error.
     adaln_gemm_backend: str = "hipblaslt"
 
     # --- norm / RoPE fusions ---------------------------------------------
@@ -268,10 +271,20 @@ class Mxfp6Gates:
                     f"mxfp6_fp4_hadamard_{name} must be one of {list(FP4_HADAMARD)}, got {value!r}."
                 )
         joint_mlp_parts(self.fwd_fp4_joint_mlp_parts)  # raises on an unknown part
-        if self.adaln_gemm_backend not in ("hipblaslt", "aiter"):
-            raise ValueError(f"mxfp6_adaln_gemm_backend must be 'hipblaslt' or 'aiter', got {self.adaln_gemm_backend!r}.")
-        if self.adaln_gemm_backend == "aiter" and not self.adaln_wgrad_main_grad:
-            raise ValueError("mxfp6_adaln_gemm_backend 'aiter' replaces the mxfp6_adaln_wgrad_main_grad path's GEMMs; enable it.")
+        if self.adaln_gemm_backend == "aiter":
+            import warnings
+
+            warnings.warn(
+                "mxfp6_adaln_gemm_backend: 'aiter' is deprecated, use 'turbo' (the same kernels, through Primus-Turbo).",
+                FutureWarning,
+            )
+            self.adaln_gemm_backend = "turbo"
+        if self.adaln_gemm_backend not in ADALN_GEMM_BACKENDS:
+            raise ValueError(
+                f"mxfp6_adaln_gemm_backend must be one of {list(ADALN_GEMM_BACKENDS)}, got {self.adaln_gemm_backend!r}."
+            )
+        if self.adaln_gemm_backend == "turbo" and not self.adaln_wgrad_main_grad:
+            raise ValueError("mxfp6_adaln_gemm_backend 'turbo' replaces the mxfp6_adaln_wgrad_main_grad path's GEMMs; enable it.")
         if self.gemm_layout not in GEMM_LAYOUTS:
             raise ValueError(f"mxfp6_gemm_layout must be one of {list(GEMM_LAYOUTS)}, got {self.gemm_layout!r}.")
         if self.fp4_sr_actw and self.gemm_layout != "tilescale":
@@ -378,6 +391,23 @@ def _pin_aiter_backend() -> None:
     set_a6w6_backend("aiter")
 
 
+def _prime_adaln_gemm(resolved: Mxfp6Gates) -> Optional[frozenset]:
+    """mxfp6_adaln_gemm_backend "turbo": read Primus-Turbo's AdaLN GEMM table (once, outside compiled regions) and
+    return it. An empty one is an error: a stack without the kernels must fail here, not run the default GEMMs."""
+    if resolved.adaln_gemm_backend != "turbo":
+        return None
+    from primus.backends.megatron.core.models.diffusion.common import normalization as _norm
+
+    table = _norm.prime_adaln_turbo()
+    if not table:
+        raise RuntimeError(
+            "mxfp6_adaln_gemm_backend 'turbo': Primus-Turbo's adaln_gemm_table() is empty (Primus-Turbo without the "
+            "AdaLN GEMM ops, or an aiter without the adaln_gemm kernels for this GPU). Install a stack that has them, "
+            "or set mxfp6_adaln_gemm_backend: hipblaslt."
+        )
+    return table
+
+
 def configure(config) -> Mxfp6Gates:
     """Populate the registry from a diffusion config.
 
@@ -398,10 +428,7 @@ def configure(config) -> Mxfp6Gates:
     _pin_aiter_backend()
     if resolved.adaln_tunableop:
         _load_adaln_tunableop()
-    if resolved.adaln_gemm_backend == "aiter":
-        from primus.backends.megatron.core.models.diffusion.common import normalization as _norm
-
-        _norm.prime_adaln_aiter()
+    adaln_table = _prime_adaln_gemm(resolved)
 
     # Log the RESOLVED gates, not the requested ones. The two can differ: the
     # trainer copies a fixed list of fields onto the model config, so a gate the
@@ -414,7 +441,8 @@ def configure(config) -> Mxfp6Gates:
     try:
         from primus.core.utils.module_utils import log_rank_0
 
-        log_rank_0(f"[mxfp6-gates] active: {changed or 'none (all default)'}")
+        adaln = "" if adaln_table is None else f" | adaln_gemm_table: {sorted(adaln_table)}"
+        log_rank_0(f"[mxfp6-gates] active: {changed or 'none (all default)'}{adaln}")
     except ImportError:
         pass
     return _GATES
@@ -425,6 +453,7 @@ def reset(gate_set: Optional[Mxfp6Gates] = None) -> None:
     global _GATES
     _GATES = gate_set if gate_set is not None else Mxfp6Gates()
     _pin_aiter_backend()
+    _prime_adaln_gemm(_GATES)
 
 
 _A6W6_BWD_SAVED = []
