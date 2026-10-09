@@ -167,10 +167,17 @@ class PrimusRuntime:
         #    to, but excluding, the training step).
         self._run_phase_patches(phase="setup", backend_args=self.ctx.backend_args)
         trainer.setup()
-        trainer.init()
         self._run_phase_patches(phase="before_train", backend_args=self.ctx.backend_args)
 
         # 5) Build only the model (no datasets / no train loop).
+        #
+        # ``setup_model_only`` stands in for ``init``, it does not follow it:
+        # ``init`` is where a backend builds everything a training run needs, and
+        # for TorchTitan that is the tokenizer, dataloader and checkpoint manager
+        # as well as the model -- work this path exists to avoid, and which would
+        # make a benchmark depend on dataset assets being present on the bench
+        # node. Each trainer's ``setup_model_only`` therefore builds whatever it
+        # needs itself.
         build_fn = getattr(trainer, "setup_model_only", None)
         if build_fn is None:
             raise NotImplementedError(
