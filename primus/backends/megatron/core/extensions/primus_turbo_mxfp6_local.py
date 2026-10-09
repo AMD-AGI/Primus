@@ -3071,11 +3071,12 @@ class MXFP6FusedMLP(MLP):
         bf16_fc1 = img and gates().fwd_bf16_joint_img_fc1
         grad_enabled = torch.is_grad_enabled()
         # Without grad there is no autograd graph to build, so call the forward itself (as the single-block Functions
-        # do). Under torch.compile, Dynamo mis-binds Function.apply of this ctx-less (setup_context-style) Function
-        # under no_grad -- the Function object arrives as hidden_states -- which is an unrecoverable graph break: Dynamo
-        # then skips the calling block's forward code object for the rest of the run, so every joint block (the last
-        # one, context_pre_only, has no grouped pair and takes this path) ran eagerly in training too after the first
-        # no-grad call (the MLPerf validation warmup).
+        # do), and pass every forward parameter explicitly either way. Under torch.compile and no_grad, Dynamo decides
+        # whether a Function's forward takes ctx from the argument count: an apply that leaves a defaulted parameter
+        # out (defer_fc2, added by mxfp6_single_linear2_cat) reads as forward(ctx, ...) and the Function object
+        # arrives as hidden_states. That is an unrecoverable graph break: Dynamo then skips the calling block's forward
+        # code object for the rest of the run, so every joint block (the last one, context_pre_only, has no grouped
+        # pair and takes this path) ran eagerly in training too after the first no-grad call (the validation warmup).
         fn = MXFP6MLPFunction.apply if grad_enabled else MXFP6MLPFunction.forward
         output = fn(
             hidden_states,
@@ -3088,6 +3089,7 @@ class MXFP6FusedMLP(MLP):
             fp4_fc2,  # fwd_fp4 (fc2), for the joint stream MLPs under mxfp6_fwd_fp4_joint_mlp (_parts)
             fp4_fc1 and not bf16_fc1,  # fwd_fp4_fc1
             bf16_fc1,
+            False,  # defer_fc2 -- pass every forward parameter: see the note above
         )[0]
 
         # fc2 is built with skip_bias_add=True, so MLP's contract is to hand its bias back
