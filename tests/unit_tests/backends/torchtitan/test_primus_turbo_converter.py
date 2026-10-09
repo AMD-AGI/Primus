@@ -43,7 +43,7 @@ def test_converter_replaces_attention_only_with_turbo_attention(
 ):
     calls = []
     monkeypatch.setattr(converter_mod, "replace_turbo_attention_modules", lambda m, cfg: calls.append(m))
-    converter = converter_mod.PrimusTubroConverter(
+    converter = converter_mod.PrimusTurboConverter(
         _job_config(enable_primus_turbo, use_turbo_attention), parallel_dims=None
     )
     model = torch.nn.Linear(2, 2)

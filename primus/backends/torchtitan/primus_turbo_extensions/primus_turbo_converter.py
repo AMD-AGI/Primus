@@ -31,7 +31,7 @@ def replace_turbo_attention_modules(model: torch.nn.Module, fp8_config):
             replace_turbo_attention_modules(module, fp8_config)
 
 
-class PrimusTubroConverter(ModelConverter):
+class PrimusTurboConverter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.primus_turbo_config = job_config.primus_turbo
         # Model configs list this converter unconditionally, but TurboAttention only matches
@@ -63,4 +63,4 @@ class PrimusTubroConverter(ModelConverter):
         return
 
 
-register_model_converter(PrimusTubroConverter, "primus_turbo")
+register_model_converter(PrimusTurboConverter, "primus_turbo")
