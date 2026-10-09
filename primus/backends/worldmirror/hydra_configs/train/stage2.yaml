@@ -54,4 +54,3 @@ data:
   # trees only have the 1K-7K training chunks, and those test scene ids are not in them.
   validation_datasets:
     - 32 @ HyperSim_Multi(split='test', num_views=10, ROOT='${paths.hypersim_dir}', resolution=(518, 378), seed=777)
-

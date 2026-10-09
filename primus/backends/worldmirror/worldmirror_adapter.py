@@ -34,7 +34,9 @@ class WorldMirrorAdapter(BackendAdapter):
 
     def load_trainer_class(self, stage: str = "pretrain"):
         if stage in ("pretrain", "posttrain", "sft"):
-            from primus.backends.worldmirror.worldmirror_trainer import WorldMirrorTrainer
+            from primus.backends.worldmirror.worldmirror_trainer import (
+                WorldMirrorTrainer,
+            )
 
             return WorldMirrorTrainer
         raise ValueError(f"Invalid stage for World Mirror backend: {stage}")

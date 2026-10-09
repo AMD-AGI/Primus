@@ -72,7 +72,6 @@ def install_raster_float32() -> None:
 def install_render_depth_mask() -> None:
     """Depth confidence is a float. Compare it with > 0 before combining masks."""
     import torch
-
     import training.losses.render as render
 
     if getattr(render.RenderDepthLoss.compute_loss, "_primus_wrapped", False):
@@ -189,9 +188,7 @@ def _ensure_glm(staged: Path) -> None:
     if glm_root.exists():
         shutil.rmtree(glm_root)
     glm_root.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.check_call(
-        ["git", "clone", "--filter=blob:none", "--no-checkout", _GLM_URL, str(glm_root)]
-    )
+    subprocess.check_call(["git", "clone", "--filter=blob:none", "--no-checkout", _GLM_URL, str(glm_root)])
     subprocess.check_call(["git", "fetch", "--depth", "1", "origin", _GLM_COMMIT], cwd=glm_root)
     subprocess.check_call(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=glm_root)
 
@@ -279,8 +276,7 @@ def disable_msc_hydra_search_path() -> None:
             found = [
                 plugin
                 for plugin in found
-                if "multistorageclient" not in plugin.__module__
-                and "msc" not in plugin.__module__.lower()
+                if "multistorageclient" not in plugin.__module__ and "msc" not in plugin.__module__.lower()
             ]
         return found
 
@@ -305,9 +301,7 @@ def install_sampler_aspect_ratio() -> None:
         _view_idxs = int(self.rng.choice(self.possible_nums, p=self.normalized_weights))
         _source_view_idxs = self._sample_source_view_idxs(_view_idxs)
         if self.aspect_ratio_range is not None:
-            _aspect_ratio = float(
-                self.rng.uniform(self.aspect_ratio_range[0], self.aspect_ratio_range[1])
-            )
+            _aspect_ratio = float(self.rng.uniform(self.aspect_ratio_range[0], self.aspect_ratio_range[1]))
         else:
             _aspect_ratio = 1.0
         min_pixels = self.num_pixels_range[0]
@@ -316,9 +310,7 @@ def install_sampler_aspect_ratio() -> None:
         return _view_idxs, _source_view_idxs, _aspect_ratio, _target_pixels
 
     _sample_view_idxs_and_ar_and_tp._primus_wrapped = True
-    dynamic_sampler.DynamicBatchSampler._sample_view_idxs_and_ar_and_tp = (
-        _sample_view_idxs_and_ar_and_tp
-    )
+    dynamic_sampler.DynamicBatchSampler._sample_view_idxs_and_ar_and_tp = _sample_view_idxs_and_ar_and_tp
 
 
 def install_runtime_fixes() -> None:

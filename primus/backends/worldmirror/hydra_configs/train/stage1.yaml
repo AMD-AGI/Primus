@@ -51,9 +51,8 @@ data:
         ROOT='${paths.re10k_pose_dir}',
       )
     - 32 @ Nyuv2(split='test', resolution=(630, 476), ROOT='${paths.nyuv2_normal_dir}')
-    - 32 @ ScanNetNormal(split='test', resolution=(630, 476), ROOT='${paths.scannet_normal_dir}') 
+    - 32 @ ScanNetNormal(split='test', resolution=(630, 476), ROOT='${paths.scannet_normal_dir}')
     - 32 @ Nyuv2_MonoDepth(split='test', ROOT='${paths.nyuv2_depth_dir}', target_width=518)
     - Sintel_VideoDepth(split='test', type='mono', ROOT='${paths.sintel_depth_dir}', target_width=518)
     - Sintel_VideoDepth(split='test', type='video', ROOT='${paths.sintel_depth_dir}', target_width=518)
     - Kitti_VideoDepth(split='test', ROOT='${paths.kitti_depth_dir}', target_width=518)
-

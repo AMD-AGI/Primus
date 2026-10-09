@@ -7,11 +7,11 @@
 +import shutil
  import sys
 +import tempfile
- 
+
  from setuptools import find_packages, setup
- 
+
 @@ -69,7 +71,7 @@
- 
+
      nvcc_flags = os.getenv("NVCC_FLAGS", "")
      nvcc_flags = [] if nvcc_flags == "" else nvcc_flags.split(" ")
 -    nvcc_flags += ["-O3", "--use_fast_math", "-std=c++17"]
@@ -37,7 +37,7 @@
      if sys.platform == "win32":
          extra_compile_args["nvcc"] += [
 @@ -91,6 +94,14 @@
- 
+
      current_dir = pathlib.Path(__file__).parent.resolve()
      glm_path = osp.join(current_dir, "gsplat", "cuda", "csrc", "third_party", "glm")
 +    if torch.version.hip:
@@ -49,13 +49,13 @@
 +        shutil.copytree(osp.join(glm_path, "glm"), osp.join(hip_glm_path, "glm"))
 +        glm_path = hip_glm_path
      include_dirs = [glm_path, osp.join(current_dir, "gsplat", "cuda", "include")]
- 
+
      extension = CUDAExtension(
 --- a/gsplat/cuda/include/Utils.cuh	2026-10-06 19:01:06.614275172 +0000
 +++ b/gsplat/cuda/include/Utils.cuh	2026-10-05 18:49:44.483287140 +0000
 @@ -3,12 +3,42 @@
  #include "Common.h"
- 
+
  #include <cooperative_groups.h>
 +#ifdef USE_ROCM
 +#include <hip/cooperative_groups/hip_reduce.h>
@@ -76,11 +76,11 @@
 +#else
  #include <cooperative_groups/reduce.h>
 +#endif
- 
+
  namespace gsplat {
- 
+
  namespace cg = cooperative_groups;
- 
+
 +template <class WarpT, class T, class OpT>
 +inline __device__ T warpReduce(WarpT &warp, T val, OpT op) {
 +    return cg::reduce(warp, val, op);
@@ -104,12 +104,12 @@
 +        val[i] = warpReduce(warp, val[i], cg::plus<float>());
      }
  }
- 
+
  template <class WarpT> inline __device__ void warpSum(float &val, WarpT &warp) {
 -    val = cg::reduce(warp, val, cg::plus<float>());
 +    val = warpReduce(warp, val, cg::plus<float>());
  }
- 
+
  template <class WarpT> inline __device__ void warpSum(vec4 &val, WarpT &warp) {
 -    val.x = cg::reduce(warp, val.x, cg::plus<float>());
 -    val.y = cg::reduce(warp, val.y, cg::plus<float>());
@@ -120,7 +120,7 @@
 +    val.z = warpReduce(warp, val.z, cg::plus<float>());
 +    val.w = warpReduce(warp, val.w, cg::plus<float>());
  }
- 
+
  template <class WarpT> inline __device__ void warpSum(vec3 &val, WarpT &warp) {
 -    val.x = cg::reduce(warp, val.x, cg::plus<float>());
 -    val.y = cg::reduce(warp, val.y, cg::plus<float>());
@@ -129,28 +129,28 @@
 +    val.y = warpReduce(warp, val.y, cg::plus<float>());
 +    val.z = warpReduce(warp, val.z, cg::plus<float>());
  }
- 
+
  template <class WarpT> inline __device__ void warpSum(vec2 &val, WarpT &warp) {
 -    val.x = cg::reduce(warp, val.x, cg::plus<float>());
 -    val.y = cg::reduce(warp, val.y, cg::plus<float>());
 +    val.x = warpReduce(warp, val.x, cg::plus<float>());
 +    val.y = warpReduce(warp, val.y, cg::plus<float>());
  }
- 
+
  template <class WarpT> inline __device__ void warpSum(mat4 &val, WarpT &warp) {
 @@ -132,7 +162,7 @@
  }
- 
+
  template <class WarpT> inline __device__ void warpMax(float &val, WarpT &warp) {
 -    val = cg::reduce(warp, val, cg::greater<float>());
 +    val = warpReduce(warp, val, cg::greater<float>());
  }
- 
+
  ///////////////////////////////
 --- a/gsplat/cuda/include/Cameras.cuh	2026-10-06 19:01:06.598992797 +0000
 +++ b/gsplat/cuda/include/Cameras.cuh	2026-10-05 18:51:59.042325473 +0000
 @@ -1065,10 +1065,10 @@
- 
+
          if (dist.reference_poly == FThetaCameraDistortionParameters::PolynomialType::PIXELDIST_TO_ANGLE)
              // compute first derivative of the backwards polynomial
 -            dreference_poly = {1.f * dist.pixeldist_to_angle_poly.at(1), 2.f * dist.pixeldist_to_angle_poly.at(2), 3.f * dist.pixeldist_to_angle_poly.at(3), 4.f * dist.pixeldist_to_angle_poly.at(4), 5.f * dist.pixeldist_to_angle_poly.at(5)};
@@ -159,7 +159,7 @@
              // compute first derivative of the forward polynomial
 -            dreference_poly = {1.f * dist.angle_to_pixeldist_poly.at(1), 2.f * dist.angle_to_pixeldist_poly.at(2), 3.f * dist.angle_to_pixeldist_poly.at(3), 4.f * dist.angle_to_pixeldist_poly.at(4), 5.f * dist.angle_to_pixeldist_poly.at(5)};
 +            dreference_poly = {1.f * dist.angle_to_pixeldist_poly[1], 2.f * dist.angle_to_pixeldist_poly[2], 3.f * dist.angle_to_pixeldist_poly[3], 4.f * dist.angle_to_pixeldist_poly[4], 5.f * dist.angle_to_pixeldist_poly[5]};
- 
+
          // FThetaCameraModelParameters are defined such that the image coordinate origin corresponds to
          // the center of the first pixel. We therefore need to offset the principal point by half a pixel.
 --- a/gsplat/cuda/csrc/IntersectTile.cu	2026-10-06 19:01:06.464774510 +0000
@@ -167,13 +167,13 @@
 @@ -11,6 +11,10 @@
  #include "Intersect.h"
  #include "Utils.cuh"
- 
+
 +#ifdef USE_ROCM
 +namespace cub = hipcub;
 +#endif
 +
  namespace gsplat {
- 
+
  namespace cg = cooperative_groups;
 --- a/gsplat/cuda/csrc/RasterizeToIndices2DGS.cu	2026-10-06 19:01:06.531332153 +0000
 +++ b/gsplat/cuda/csrc/RasterizeToIndices2DGS.cu	2026-10-05 18:50:08.753016462 +0000
