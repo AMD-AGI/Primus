@@ -25,18 +25,20 @@ Run-to-run loss noise is about 4e-4 at iteration 20.
 
 ## Settings for the last row
 
-The final configuration is `examples/megatron/configs/MI355X/qwen3_30B_A3B-FP8-pretrain.yaml` plus:
-- `--use_turbo_fused_act_with_probs True`
-- `--turbo_deepep_num_cu 160`
-- `--turbo_fused_grouped_gemm True`
-- `--turbo_fp8_permute True`
-- env `PRIMUS_FUSED_QK_RMSNORM_ROPE=1`
+On the Primus branch `perf/qwen3-30b-a3b-fp8-turbo`, `examples/megatron/configs/MI355X/qwen3_30B_A3B-FP8-pretrain.yaml` turns all of these on:
+- `use_turbo_fused_act_with_probs: true`
+- `turbo_deepep_num_cu: 160`
+- `turbo_fused_grouped_gemm: true`
+- `turbo_fp8_permute: true`
+- top-level `env: PRIMUS_FUSED_QK_RMSNORM_ROPE: "1"`
+
+On that branch, the config alone gave 6410.6 and 6459.6 ms/iter (40,892 / 40,582 tokens/s/GPU). One more config-only run hit the intermittent NaN (see open items).
 
 Code it needs:
 - Turbo: all five Turbo branches below. Building on `perf/moe/fp8-permute-tensorwise` also brings in the permute-default change.
-- Primus: `perf/qwen3-qk-rmsnorm-rope-hd128`, which sits on `perf/qwen3-30b-a3b-tuning`, plus `perf/megatron/turbo-fp8-permute`.
+- Primus: `perf/qwen3-30b-a3b-fp8-turbo`.
 
-See [e2e/e2e_run.sh](e2e/e2e_run.sh) and [e2e/env_turbo_opt_qknorm.sh](e2e/env_turbo_opt_qknorm.sh). Their paths are for the old machine.
+See [e2e/e2e_run_cfg.sh](e2e/e2e_run_cfg.sh) (config only) and [e2e/env_turbo_opt_cfg.sh](e2e/env_turbo_opt_cfg.sh). The older [e2e/e2e_run.sh](e2e/e2e_run.sh) passes the switches on the command line. All paths are for the old machine.
 
 ## Branches and PRs
 
@@ -58,9 +60,9 @@ Primus (`AMD-AGI/Primus`):
 
 | branch | head | PR | notes |
 |---|---|---|---|
-| `perf/qwen3-30b-a3b-tuning` | 82ebf666 | not opened | Qwen3 FP8 config tuned to Turbo tensorwise |
-| `perf/qwen3-qk-rmsnorm-rope-hd128` | bfa227f2 | not opened | on top of the tuning branch; fused qk-norm patch for head_dim 128 |
-| `perf/megatron/turbo-fp8-permute` | 69a32f64 | not opened | on main; `turbo_fp8_permute` flag |
+| `perf/qwen3-30b-a3b-fp8-turbo` | bef41e8a | opening | the one Primus PR, on main 0a68e5cd; body: [pr_bodies/primus-perf-qwen3-30b-a3b-fp8-turbo.md](pr_bodies/primus-perf-qwen3-30b-a3b-fp8-turbo.md) |
+
+It holds five commits: the FP8 attention fix, the tensorwise config, the head_dim 128 qk-norm patch, `turbo_fp8_permute` (with new unit tests), and the config turning every switch on. It replaces `perf/qwen3-30b-a3b-tuning`, `perf/qwen3-qk-rmsnorm-rope-hd128` and `perf/megatron/turbo-fp8-permute`. Their force-"even" routing fix is already on main (#1243).
 
 ## Rebuilding the stack on a new machine
 
@@ -80,15 +82,14 @@ GPU_ARCHS=gfx950 MAX_JOBS=64 python setup.py build_ext --inplace
 Primus:
 
 ```bash
-git fetch origin && git checkout -b integ/qwen3-fp8 origin/perf/qwen3-qk-rmsnorm-rope-hd128
-git merge --no-edit origin/perf/megatron/turbo-fp8-permute
+git fetch origin && git checkout -b integ/qwen3-fp8 origin/perf/qwen3-30b-a3b-fp8-turbo
 git submodule update --init third_party/Megatron-LM
 ```
 
-Then edit the paths in `e2e/env_turbo_opt_qknorm.sh` and `e2e/e2e_run.sh` for the new machine, and run, for example:
+Then edit the paths in `e2e/env_turbo_opt_cfg.sh` and `e2e/e2e_run_cfg.sh` for the new machine, and run, for example:
 
 ```bash
-e2e/e2e_run.sh g1 --turbo_fused_grouped_gemm True --turbo_fp8_permute True
+e2e/e2e_run_cfg.sh cfg1
 ```
 
 Summarize the runs with `e2e/parse_e2e.py <run names>`, which reads `/tmp/q3_e2e_<name>.log`.
@@ -99,7 +100,7 @@ Run Python from the campaign directory with `PYTHONPATH=<turbo checkout>`. Other
 
 - **MegaMoE** (bf16 and mxfp8) runs out of memory at MBS 8. When the worst-case dispatch pool allocation fails, 261 GB (bf16, failing on 3 GiB) or 264 GB (mxfp8, failing on 1.5 GiB) is already allocated. Using it would need a MegaMoE change, a smaller MBS, or recompute.
 - **`turbo_deepep_num_cu`**:
-  - 192 gives a NaN forward loss on rank 2 at iteration 5, a DeepEP bug at high channel counts.
+  - 192 gave a NaN forward loss on rank 2 at iteration 5 in its only run. 160 also hit it once (see open items), so this is not specific to 192.
   - 256 is slower (7028 ms).
   - 160 is best.
 - **Sync-free MoE stage 2** costs +300 ms over stage 1. `num_worst_tokens` makes every post-dispatch step scan 262144 receive rows instead of 32768 tokens.
@@ -111,6 +112,12 @@ Run Python from the campaign directory with `PYTHONPATH=<turbo checkout>`. Other
 
 ## Open items
 
+- **Intermittent NaN forward loss.** Run `cfg1` of the final config (`perf/qwen3-30b-a3b-fp8-turbo`, config only) died at iteration 3 with `found NaN in local forward loss calculation` on rank 4. The per-rank traceback is in `output/.../logs/pre_trainer/rank-4/error.log`.
+  - Its 847 parsed arguments match the passing run `pr1` exactly, and the wgrad autotune winners match too.
+  - At `turbo_deepep_num_cu 160`, 1 of 13 runs hit it. The only run at 192 hit it (rank 2, iteration 5). The only run at 256 did not.
+  - None of the 5 runs at 80 CUs hit it, but those predate the fused qk-norm, fused grouped MLP and FP8 permute, so the cause is not isolated.
+  - The `turbo-opt` build includes the #553 padding fix.
+  - Next step: a DeepEP intranode dispatch/combine stress loop with exact checks at `num_sms` 80 / 160 / 192. It runs much faster than a 1-in-13 end-to-end bisection.
 - **Unexplained e2e jitter with FP8 permute.** The first run took 6442 ms; three later runs took 6515-6549 ms with more per-iteration jitter. These causes are ruled out:
   - the Primus change: a same-code rerun gave 6515 ms;
   - the padding fix: permute kernel times are unchanged;
