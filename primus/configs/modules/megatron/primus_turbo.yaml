@@ -61,6 +61,11 @@ use_turbo_grouped_gemm: false
 # Fuse the grouped MLP chain (fc1 + GLU + fc2, including WGRAD) into Primus-Turbo's
 # fused grouped MLP op.
 turbo_fused_grouped_gemm: false
+# Hand the fused grouped MLP its input and output gradient already in FP8 (tensorwise current
+# scaling only): the DeepEP dispatcher quantizes the dispatched tokens before permute, and the
+# combine gradient before un-permute's backward, instead of their topk-times larger permuted
+# copies. Bit-identical. Requires turbo_fused_grouped_gemm and use_turbo_deepep.
+turbo_fp8_permute: false
 # let Turbo grouped GEMMs consume non-aligned expert token counts directly,
 # without TE Fp8Padding/Fp8Unpadding
 turbo_grouped_gemm_without_padding: false
