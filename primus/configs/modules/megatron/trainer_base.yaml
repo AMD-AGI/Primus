@@ -373,6 +373,12 @@ main_params_dtype: fp32 # str: fp32, bf16
 exp_avg_dtype: fp32 # 'fp32', 'fp16', 'fp8'
 exp_avg_sq_dtype: fp32 # 'fp32', 'fp16', 'fp8'
 
+# Triton AdamW with a device-sized grid instead of TE FusedAdam. Matters for TE
+# builds on the generic multi_tensor_apply launcher (capped at 320 workgroups per
+# launch); ROCm TE builds with the custom Adam kernel are already uncapped.
+# Falls back to TE for precision-aware / capturable / FP8 paths.
+use_triton_fused_adam: false
+
 # vision
 vision_pretraining: false
 vision_pretraining_type: classify
