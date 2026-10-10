@@ -34,7 +34,7 @@
   - the output shape;
   - that the output keeps the caller's storage layout;
   - output, dQ, dK and dV SNR > 20 dB vs the PyTorch reference.
-- `tests/pytorch/ops/test_attention.py -k test_attention_fp8`: 78 passed (MI355X / gfx950).
+- `tests/pytorch/ops/test_attention.py -k test_attention_fp8`: 78 passed, including the 6 new cases (MI355X / gfx950).
 
 # Checklist:
 
