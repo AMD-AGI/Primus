@@ -1,0 +1,39 @@
+# @package _global_
+# Stage 1 on the mounted Hypersim subset.
+# Geometry heads only. Gaussian head stays off.
+# Hypersim is not scored by the stage-1 eval hooks, so validation is skipped.
+
+task_name: stage1_hypersim
+tags: ["train", "stage1"]
+slurm_job_id: 99999
+
+paths:
+  hypersim_dir: /shared_nfs/3dwm/hywm-3dwm-sub20/hypersim
+
+wrapper:
+  eval_modalities: ["point_map", "camera_pose", "normal", "depth_map"]
+  enable_cond: true
+  model:
+    enable_cam: true
+    enable_pts: true
+    enable_depth: true
+    enable_norm: true
+    enable_gs: false
+
+trainer:
+  limit_val_batches: 0
+  num_sanity_val_steps: 0
+
+data:
+  max_images_per_gpu: 24
+  min_num_of_views: 2
+  num_workers: 4
+  num_workers_val: 2
+  pin_memory: true
+  transform: "ImageAugmentation(apply_aug=True, color_jitter={'brightness': 0.5, 'contrast': 0.5, 'saturation': 0.5, 'hue': 0.1, 'p': 0.9}, gray_scale=True, gau_blur=False)"
+  aspect_ratios: [0.5, 2.0]
+  num_pixels_range: [100000, 250000]
+  train_datasets:
+    - 400 @ HyperSim_Multi(split='train', num_views=${data.max_images_per_gpu}, aug_crop=0.77, transform=${data.transform}, ROOT='${paths.hypersim_dir}')
+  validation_datasets:
+    - 4 @ HyperSim_Multi(split='test', num_views=4, ROOT='${paths.hypersim_dir}', resolution=(518, 378), seed=777)

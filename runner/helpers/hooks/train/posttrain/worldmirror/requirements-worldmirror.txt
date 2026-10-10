@@ -1,0 +1,9 @@
+lpips
+lightning>=2.5.0
+tensorboardX
+rootutils
+h5py
+opencv-python
+imageio
+open3d==0.19.0
+moviepy==1.0.3
