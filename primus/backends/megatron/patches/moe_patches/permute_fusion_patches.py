@@ -13,13 +13,24 @@ Patches for replacing TE and Megatron MoE permutation functions with fused imple
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
+from .gather_quant_config import (
+    configure_gather_quant_fusion,
+    validate_gather_quant_config,
+)
+
+
+def _enabled(ctx):
+    args = get_args(ctx)
+    validate_gather_quant_config(args)
+    return bool(getattr(args, "moe_permute_fusion", False))
+
 
 @register_patch(
     "megatron.moe.permute_fusion",
     backend="megatron",
     phase="before_train",
     description="Patch TE and Megatron MoE with fused permutation implementations",
-    condition=lambda ctx: getattr(get_args(ctx), "moe_permute_fusion", False),
+    condition=_enabled,
 )
 def patch_moe_permute_fusion(ctx: PatchContext):
     """
@@ -41,6 +52,8 @@ def patch_moe_permute_fusion(ctx: PatchContext):
         moe_sort_chunks_by_index_with_probs,
         moe_unpermute,
     )
+
+    moe_permute_with_probs = configure_gather_quant_fusion(get_args(ctx), moe_permute_with_probs)
 
     ori_transformer_engine.fused_permute = moe_permute
     ori_transformer_engine.fused_permute_with_probs = moe_permute_with_probs

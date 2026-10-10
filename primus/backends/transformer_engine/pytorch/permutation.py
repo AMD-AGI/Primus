@@ -5,7 +5,6 @@
 
 """MoE Permutation API"""
 
-import os
 import warnings
 from typing import Optional, Tuple
 
@@ -794,8 +793,8 @@ def _moe_unpermute_mask_map_setup_context(ctx, inputs, output):  # pylint: disab
     ctx.hidden_size = hidden_size
     ctx.with_probs = merging_probs is not None
     ctx.backward_gather_plan = None
-    if _fused_permute_quant_enabled() and os.environ.get("GPTOSS_FUSED_BACKWARD_PERMUTE_QUANT") == "1":
-        ctx.backward_gather_plan = _gather_helpers().claim_backward_gather_output(
+    if _GATHER_HELPERS is not None:
+        ctx.backward_gather_plan = _GATHER_HELPERS.claim_backward_gather_output(
             inp, row_id_map, merging_probs, pad_offsets, num_tokens, num_experts, hidden_size
         )
     if ctx.with_probs:
@@ -922,28 +921,22 @@ def moe_permute(
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
 
-# Experimental EP1/TP1 handoff to a single gather-quantize consumer. Source
-# preparation in this workload preserves the activation storage. The consumer
-# claims and removes the metadata; a missing handoff for a zero-stride placeholder
-# is an error, never permission to quantize its uninitialized bytes.
-def _fused_permute_quant_enabled():
-    return (
-        os.environ.get("GPTOSS_FUSED_PERMUTE_QUANT", "0") == "1"
-        and os.environ.get("PRIMUS_TP") == "1"
-        and os.environ.get("PRIMUS_EP") == "1"
-        and os.environ.get("MOE_SKIP_IDENTITY_SORT") == "1"
-    )
+# Loaded only by an explicitly enabled forward handoff. Backward enrollment is
+# carried by that handoff, so unrelated unpermutes retain their eager path.
+_GATHER_HELPERS = None
 
 
 def _gather_helpers():
+    global _GATHER_HELPERS
     # Primus remains usable without Turbo (or with an older Turbo) when disabled.
     try:
         from primus_turbo.pytorch.ops import moe_gather
     except ImportError as exc:
         raise RuntimeError(
-            "GPTOSS_FUSED_PERMUTE_QUANT requires Primus Turbo's moe_gather support; "
+            "moe_permute_quant_fusion requires Primus Turbo's moe_gather support; "
             "install the paired Turbo revision or disable the fusion."
         ) from exc
+    _GATHER_HELPERS = moe_gather
     return moe_gather
 
 
@@ -951,12 +944,13 @@ def _lazy_permute_eligible(
     inp: torch.Tensor, probs: Optional[torch.Tensor], routing_map: torch.Tensor
 ) -> bool:
     return (
-        _fused_permute_quant_enabled()
         # Exactly torch.Tensor, not a subclass (QuantizedTensor, ...): the
         # gather-quantize consumer needs plain bf16/fp16 source bytes.
-        and type(inp) is torch.Tensor
+        type(inp) is torch.Tensor
+        and not torch.is_inference_mode_enabled()
         and inp.is_cuda
         and inp.ndim == 2
+        and inp.shape[0] > 0
         and inp.dtype == torch.bfloat16
         and inp.is_contiguous()
         and probs is not None
@@ -1023,6 +1017,9 @@ def moe_permute_with_probs(
     probs: torch.Tensor,
     routing_map: torch.Tensor,
     num_out_tokens: int,
+    *,
+    fuse_permute_quant: bool = False,
+    fuse_backward_permute_quant: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Permute the tokens and probs based on the routing_map.
@@ -1044,14 +1041,21 @@ def moe_permute_with_probs(
     num_out_tokens : int
         Number of output tokens (rows in the permuted buffer). Must be > 0,
         e.g. int(routing_map.sum()) or num_tokens * top_k.
+    fuse_permute_quant : bool, default = False
+        Defer activation gathering to a paired Turbo MXFP4 quantizer. The caller
+        must guarantee that the next value consumer is the supported quantizer.
+    fuse_backward_permute_quant : bool, default = False
+        Also enroll the paired grouped MLP output for deferred backward gathering.
     """
+    if fuse_backward_permute_quant and not fuse_permute_quant:
+        raise ValueError("Backward gather fusion requires forward gather fusion")
     if isinstance(inp, QuantizedTensor) and torch.compiler.is_compiling():
         raise RuntimeError(
             "moe_permute_with_probs with quantized (FP8) input is not supported under "
             "torch.compile. Please move quantization outside the compiled region."
         )
 
-    if num_out_tokens > 0 and _lazy_permute_eligible(inp, probs, routing_map):
+    if fuse_permute_quant and num_out_tokens > 0 and _lazy_permute_eligible(inp, probs, routing_map):
         _gather_helpers()  # Check the paired dependency before creating a placeholder.
         num_tokens, num_experts = inp.shape[0], routing_map.shape[1]
         row_id_map, dest2src, permuted_probs_raw = triton_permutation.make_row_id_map_with_dest2src(
@@ -1061,7 +1065,12 @@ def moe_permute_with_probs(
             inp, probs, row_id_map, permuted_probs_raw, num_out_tokens, bool(probs.requires_grad)
         )
         _gather_helpers().register_permuted_activation_seam(
-            output, inp.detach(), dest2src, permuted_probs_raw, row_id_map
+            output,
+            inp.detach(),
+            dest2src,
+            permuted_probs_raw,
+            row_id_map,
+            fuse_backward_permute_quant=fuse_backward_permute_quant,
         )
         return output, permuted_probs, row_id_map
 

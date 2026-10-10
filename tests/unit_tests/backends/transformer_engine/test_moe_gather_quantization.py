@@ -15,7 +15,7 @@ moe_gather = pytest.importorskip(
     "primus_turbo.pytorch.ops.moe_gather", reason="Install the companion Primus Turbo gather revision"
 )
 
-import transformer_engine.pytorch  # noqa: F401  Register the TE binary extension first.
+__import__("transformer_engine.pytorch")  # Register the TE binary extension first.
 from primus_turbo.flydsl.quantization import mxfp4_quant_kernel
 from primus_turbo.pytorch.core.low_precision import Float4QuantConfig
 from primus_turbo.pytorch.ops.grouped_mlp_fp4 import grouped_mlp_fp4
@@ -42,10 +42,7 @@ def test_gather_fusions_preserve_outputs_and_all_gradients(monkeypatch, tokens, 
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     if (props.major, props.minor) != (9, 5):
         pytest.skip("Validated grouped MXFP4 path requires gfx950")
-    for key, value in dict(
-        PRIMUS_TP="1", PRIMUS_EP="1", MOE_SKIP_IDENTITY_SORT="1", GPTOSS_BACKWARD_GATHER_AUDIT="1"
-    ).items():
-        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("GPTOSS_BACKWARD_GATHER_AUDIT", "1")
     torch.manual_seed(9555)
     selected = torch.rand(tokens, 8 if skew else 32, device="cuda").topk(4, dim=1).indices
     routing = torch.zeros(tokens, 32, dtype=torch.bool, device="cuda").scatter_(1, selected, True)
@@ -62,12 +59,17 @@ def test_gather_fusions_preserve_outputs_and_all_gradients(monkeypatch, tokens, 
     saved_counter = mxfp4_quant_kernel._SR_COUNTER[0]
     try:
         for forward, backward in [(0, 0), (1, 0), (1, 1)]:
-            monkeypatch.setenv("GPTOSS_FUSED_PERMUTE_QUANT", str(forward))
-            monkeypatch.setenv("GPTOSS_FUSED_BACKWARD_PERMUTE_QUANT", str(backward))
             mxfp4_quant_kernel._SR_COUNTER[0] = 9555
             moe_gather._BACKWARD_GATHER_AUDIT.clear()
             x, probs, w1, w2 = [value.detach().clone().requires_grad_() for value in data]
-            packed, pp, rowmap = moe_permute_with_probs(x, probs, routing, tokens * 4)
+            packed, pp, rowmap = moe_permute_with_probs(
+                x,
+                probs,
+                routing,
+                tokens * 4,
+                fuse_permute_quant=bool(forward),
+                fuse_backward_permute_quant=bool(backward),
+            )
             if forward:
                 assert packed.stride(0) == 0
             out = grouped_mlp_fp4(
@@ -106,3 +108,14 @@ def test_gather_fusions_preserve_outputs_and_all_gradients(monkeypatch, tokens, 
         mxfp4_quant_kernel._SR_COUNTER[0] = saved_counter
         gc.collect()
         torch.cuda.empty_cache()
+
+
+def test_empty_input_keeps_eager_contract():
+    x = torch.empty(0, 2880, dtype=torch.bfloat16, device="cuda")
+    probs = torch.empty(0, 32, dtype=torch.float32, device="cuda")
+    routing = torch.empty(0, 32, dtype=torch.bool, device="cuda")
+    expected = moe_permute_with_probs(x, probs, routing, 4)
+    actual = moe_permute_with_probs(x, probs, routing, 4, fuse_permute_quant=True)
+    for output, reference in zip(actual, expected):
+        torch.testing.assert_close(output, reference, rtol=0, atol=0)
+    assert not moe_gather._PERMUTED_ACTIVATION_SEAM_TABLE
