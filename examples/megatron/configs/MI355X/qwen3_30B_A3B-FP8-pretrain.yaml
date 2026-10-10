@@ -3,6 +3,11 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# Fused packed-QKV split + Q/K RMSNorm + RoPE. head_dim 128 needs a Primus-Turbo
+# with QK_RMSNORM_ROPE_HEAD_DIMS; older Turbo keeps the unfused path.
+env:
+  PRIMUS_FUSED_QK_RMSNORM_ROPE: "1"
+
 modules:
   pre_trainer:
     framework: megatron
@@ -86,14 +91,18 @@ modules:
       use_turbo_gemm: true
       use_turbo_grouped_gemm: true
       use_turbo_rms_norm: false # bug
+      turbo_fused_grouped_gemm: true
+      use_turbo_fused_act_with_probs: true
+      # needs a Primus-Turbo whose moe_permute takes quantize_dtype
+      turbo_fp8_permute: true
 
       # deepep
       use_turbo_deepep: true
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
-      # 64 or 80 for ep8, 32 for ep16-64 is best practice
-      turbo_deepep_num_cu: 80
+      # 160 for ep8 on MI355X (192 gives a NaN loss, 256 is slower), 32 for ep16-64
+      turbo_deepep_num_cu: 160
       turbo_deepep_use_comm_stream: false
 
       # sync-free moe support stage 1-2, 0 means not use sync-free moe
