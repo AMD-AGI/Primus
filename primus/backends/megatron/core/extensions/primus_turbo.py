@@ -2640,6 +2640,23 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         self.moe_router_force_load_balancing_type = getattr(
             args, "moe_router_force_load_balancing_type", "uniform"
         )
+        self.turbo_fp8_permute = getattr(args, "turbo_fp8_permute", False)
+
+    def _fp8_permute_dtypes(self):
+        """(input, grad) FP8 dtypes the fused grouped MLP expects, or (None, None).
+
+        Only tensorwise current scaling: that is the one recipe whose scale is a single scalar,
+        so quantizing the dispatched tokens before permute is exact.
+        """
+        if not self.turbo_fp8_permute or not PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+            return None, None
+        quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+        if not quant_config.current_scaling():
+            return None, None
+        from primus_turbo.pytorch.ops.utils import _get_fp8_dtype
+
+        fmt = quant_config.data().format
+        return _get_fp8_dtype(fmt, True), _get_fp8_dtype(fmt, False)
 
     def dispatch_preprocess(
         self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
@@ -2721,9 +2738,15 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         Returns:
             A tuple of permuted tokens, token counts per expert, and permuted probabilities.
         """
-        permuted_input, tokens_per_expert, permuted_probs = self.deepep_dispatcher._post_dispatch(
-            hidden_states, probs
-        )
+        quantize_dtype, _ = self._fp8_permute_dtypes()
+        if quantize_dtype is None:
+            permuted_input, tokens_per_expert, permuted_probs = self.deepep_dispatcher._post_dispatch(
+                hidden_states, probs
+            )
+        else:
+            permuted_input, tokens_per_expert, permuted_probs = self.deepep_dispatcher._post_dispatch(
+                hidden_states, probs, quantize_dtype=quantize_dtype
+            )
         if self.config.moe_router_dtype == "fp64":
             permuted_probs = permuted_probs.to(torch.float64)
         return permuted_input, tokens_per_expert, permuted_probs
@@ -2734,7 +2757,13 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         This method restores the hidden states to their original ordering before expert processing
         by using the communication manager's restoration function.
         """
-        hidden_states = self.deepep_dispatcher._pre_combine(hidden_states)
+        _, grad_quantize_dtype = self._fp8_permute_dtypes()
+        if grad_quantize_dtype is None:
+            hidden_states = self.deepep_dispatcher._pre_combine(hidden_states)
+        else:
+            hidden_states = self.deepep_dispatcher._pre_combine(
+                hidden_states, grad_quantize_dtype=grad_quantize_dtype
+            )
         return hidden_states
 
     def token_combine(
