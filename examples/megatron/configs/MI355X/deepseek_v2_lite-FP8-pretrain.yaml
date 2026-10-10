@@ -72,7 +72,11 @@ modules:
       # Turbo
       enable_primus_turbo: true
       use_turbo_attention: true
+      use_turbo_gemm: true
       use_turbo_grouped_gemm: true
+      # hipBLASLt, the default FP8 tensorwise GEMM backend, fails with
+      # HIPBLAS_STATUS_INTERNAL_ERROR on this model's backward GEMMs.
+      turbo_gemm_backend: "fp8:triton"
 
       # deepep
       use_turbo_deepep: true
