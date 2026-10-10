@@ -68,6 +68,7 @@ Deep technical topics for advanced users.
 - [Parallelism configuration](./04-technical-guides/parallelism-configuration.md): per-backend parallelism setup and batch size relationships
 - [Collective operations](./04-technical-guides/collective-operations.md): NCCL/RCCL operations and their role in each parallelism strategy
 - [Performance tuning](./04-technical-guides/performance-tuning.md): HipBLASLt, Primus-Turbo, FP8, MoE optimization
+- [Turbo cross entropy](./features/turbo_cross_entropy.md): TP1 fused loss and configuration
 - [MoE training deep-dive](./04-technical-guides/moe-training.md): bottlenecks and Primus-Turbo optimizations for Mixture-of-Experts models
 - [MegaMoE fused MoE layer](./04-technical-guides/mega-moe.md): FlyDSL-based fused MoE layer for EP-only bf16 training, setup and reproduction
 - [Data preparation](./04-technical-guides/data-preparation.md): tokenization, data formats, mock data

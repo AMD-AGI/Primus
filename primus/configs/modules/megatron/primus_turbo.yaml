@@ -96,3 +96,11 @@ use_turbo_rms_norm: false
 # GEMM on Transformer Engine. use_turbo_gemm moves that GEMM to Turbo as well,
 # which costs more than the norm saves on the GPT-OSS-20B shapes.
 use_turbo_norm_te_linear: false
+
+# ===== Cross entropy =====
+# Use Turbo fused cross entropy for TP=1 BF16/FP32 logits when
+# cross_entropy_loss_fusion is enabled. Other cases keep the configured loss.
+use_turbo_cross_entropy: false
+# Allow backward to overwrite contiguous logits with their gradient. Only enable
+# when no other consumer needs the original logits.
+turbo_ce_overwrite_input: false

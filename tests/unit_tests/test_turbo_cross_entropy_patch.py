@@ -12,7 +12,17 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from primus.core.patches import PatchContext
+
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+
+
+def _context(**kwargs):
+    return PatchContext(
+        backend="megatron",
+        phase="before_train",
+        extra={"module_config": SimpleNamespace(params=SimpleNamespace(**kwargs))},
+    )
 
 
 @pytest.fixture
@@ -47,8 +57,7 @@ def installed_patch(monkeypatch):
 @pytest.mark.parametrize("overwrite", [False, True])
 def test_lm_head_backward_and_layout(installed_patch, monkeypatch, overwrite):
     mod, cls, calls = installed_patch
-    monkeypatch.setenv("PRIMUS_TURBO_CE_OVERWRITE_INPUT", str(int(overwrite)))
-    mod.patch_cross_entropy(None)
+    mod.patch_cross_entropy(_context(turbo_ce_overwrite_input=overwrite))
     # Exercise the real linear->loss->linear backward ownership contract.
     torch.manual_seed(312)
     h = torch.randn(7, 3, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -83,9 +92,9 @@ def test_lm_head_backward_and_layout(installed_patch, monkeypatch, overwrite):
 )
 def test_fallback(installed_patch, tp, fused, dtype):
     mod, cls, calls = installed_patch
-    mod.patch_cross_entropy(None)
+    mod.patch_cross_entropy(_context())
     first = cls.compute_language_model_loss
-    mod.patch_cross_entropy(None)
+    mod.patch_cross_entropy(_context())
     assert cls.compute_language_model_loss is first
     fake = SimpleNamespace(
         config=SimpleNamespace(tensor_model_parallel_size=tp, cross_entropy_loss_fusion=fused)

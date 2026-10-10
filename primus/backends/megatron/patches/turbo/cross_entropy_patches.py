@@ -3,13 +3,16 @@
 
 """Opt-in Turbo TP=1 vocabulary CE without replacing installed TE files."""
 
-import os
 from functools import wraps
 
 import torch
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+
+def _enabled(ctx: PatchContext) -> bool:
+    return bool(getattr(get_args(ctx), "use_turbo_cross_entropy", False))
 
 
 @register_patch(
@@ -17,7 +20,7 @@ from primus.core.utils.module_utils import log_rank_0
     backend="megatron",
     phase="before_train",
     description="Use Turbo fused CE with deferred backward for TP=1 BF16/FP32 logits",
-    condition=lambda ctx: os.environ.get("PRIMUS_TURBO_CROSS_ENTROPY", "0") == "1",
+    condition=_enabled,
 )
 def patch_cross_entropy(ctx: PatchContext) -> None:
     from megatron.core.models.common.language_module.language_module import (
@@ -28,7 +31,7 @@ def patch_cross_entropy(ctx: PatchContext) -> None:
     original = LanguageModule.compute_language_model_loss
     if getattr(original, "_primus_turbo_ce", False):
         return
-    overwrite_input = os.environ.get("PRIMUS_TURBO_CE_OVERWRITE_INPUT", "0") == "1"
+    overwrite_input = bool(getattr(get_args(ctx), "turbo_ce_overwrite_input", False))
 
     @wraps(original)
     def compute_language_model_loss(self, labels, logits):
