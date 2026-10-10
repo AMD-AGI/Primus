@@ -103,3 +103,11 @@ moe_permute_quant_fusion: false
 moe_backward_permute_quant_fusion: false
 # Preserve activation storage across identity expert sorting.
 moe_skip_identity_sort: true
+
+# ===== Cross entropy =====
+# Use Turbo fused cross entropy for TP=1 BF16/FP32 logits when
+# cross_entropy_loss_fusion is enabled. Other cases keep the configured loss.
+use_turbo_cross_entropy: false
+# Allow backward to overwrite contiguous logits with their gradient. Only enable
+# when no other consumer needs the original logits.
+turbo_ce_overwrite_input: false
