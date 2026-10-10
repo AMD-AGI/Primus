@@ -156,7 +156,7 @@ def ppg_formats():
                            "un-rotates H32 rows (mx_a4w4_pack.MXFP6_COL_FROM_ROTATED_ROWS)")
     ko = _mx.MX_FMT_COL_KOUTER
     # neutral sr / rn: the W6 rows unrotated with 32x32 tile scales (the column -- made by the receivers -- keeps its
-    # options); d2: today's rows (the receivers un-rotate them)
+    # options); d2: the forward rows as packed (the receivers un-rotate them)
     neutral = (
         (_mx.FP4_HADAMARD["none"] << 20 | _mx.MX_FMT_FP4_TILE2D) if g.packed_param_gather_neutral in ("sr", "rn") else 0
     )
@@ -2920,6 +2920,23 @@ class MXFP6JointProjFunction(torch.autograd.Function):
         return grad_o, None, grads_w[0], grads_w[1], None, None, None, delta
 
 
+_JOINT_PROJ_FALLBACK_WARNED = set()
+
+
+@torch._dynamo.disable
+def _joint_proj_fallback(reason: str):
+    """joint_proj_pair's ineligible exit: the two slices are then projected separately in MXFP6, so the text stream's
+    MXFP4 forward (``mxfp6_fwd_fp4_joint_txt_proj``) does not apply -- say so once per reason. Kept out of compiled
+    graphs; it runs only on the fallback path."""
+    if gates().fwd_fp4_joint_txt_proj and reason not in _JOINT_PROJ_FALLBACK_WARNED:
+        _JOINT_PROJ_FALLBACK_WARNED.add(reason)
+        warnings.warn(
+            f"mxfp6_fwd_fp4_joint_txt_proj: a joint block's out-projections run separately in MXFP6 ({reason}); "
+            "the text stream's MXFP4 forward does not apply there."
+        )
+    return None
+
+
 def joint_proj_pair(proj_img, proj_txt, o, n_txt_rows, sd_slot=None):
     """Run a joint block's two out-projections as one MXFP6JointProjFunction.
 
@@ -2931,18 +2948,18 @@ def joint_proj_pair(proj_img, proj_txt, o, n_txt_rows, sd_slot=None):
         return None
     for p in (proj_img, proj_txt):
         if not isinstance(p, MXFP6RowParallelLinear) or getattr(p, "_backward_is_fp8", False):
-            return None
+            return _joint_proj_fallback("an out-projection is not an MXFP6 row-parallel linear with an MXFP6 backward")
     if proj_img._fuse_wgrad_accum != proj_txt._fuse_wgrad_accum or proj_img._weight_is_fp4 != proj_txt._weight_is_fp4:
-        return None
+        return _joint_proj_fallback("the two out-projections differ in wgrad fusion or weight format")
     if not o.is_contiguous() or o.dim() != 3:
-        return None
+        return _joint_proj_fallback("the attention output is not a contiguous [s, b, h] tensor")
     rows_txt = n_txt_rows * o.shape[1]
     rows_img = (o.shape[0] - n_txt_rows) * o.shape[1]
     from primus_turbo.pytorch.kernels.quantization.mxfp6_pack import MXFP6_TILE_SIZE
 
     # The out-variant GEMM writes only tile-aligned, unpadded outputs.
     if any(v % MXFP6_TILE_SIZE for v in (rows_txt, rows_img, o.shape[-1])):
-        return None
+        return _joint_proj_fallback(f"text / image rows or the hidden size are not multiples of {MXFP6_TILE_SIZE}")
     fuse_wgrad_accum = proj_img._fuse_wgrad_accum
     if fuse_wgrad_accum:
         _claim_main_grad(proj_img.weight, proj_txt.weight)

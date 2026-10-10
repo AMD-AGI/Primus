@@ -95,8 +95,8 @@ class Mxfp6Gates:
     # (the GEMM's output is main_grad) instead of AccumulateGrad + the DDP hook's copy.
     adaln_wgrad_main_grad: bool = False
     # AdaLN modulation GEMMs on the hipBLASLt solutions in the pinned PyTorch TunableOp results file next to this
-    # module (tunableop_adaln_gfx950.csv: today the wgrads [out, 32] x [32, in]; an entry is pinned only if its output
-    # is bitwise identical to the default solution's and it is faster in-step, not just standalone). TunableOp is enabled with tuning off, so only
+    # module (tunableop_adaln_gfx950.csv: the wgrads [out, 32] x [32, in]; each entry's output is bitwise identical
+    # to the default solution's). TunableOp is enabled with tuning off, so only
     # GEMMs with an entry in that file change and every other GEMM keeps the default solution. If the file does not
     # validate against this image's PyTorch / HIP / hipBLASLt versions, TunableOp is switched back off with a warning.
     adaln_tunableop: bool = False

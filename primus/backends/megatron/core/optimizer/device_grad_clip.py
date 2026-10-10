@@ -17,10 +17,10 @@ when no clipping is needed, which leaves them unchanged bit for bit.
 
 Bitwise notes (checked on the GPU this targets):
 
-* fp64 ``sqrt``, ``+`` and ``/`` on the GPU are correctly rounded (they agree with the CPU on 2M samples). The host
-  path's ``x ** 0.5`` (libm ``pow``) is not: it is one ulp away from the correctly rounded square root for ~0.08% of
-  inputs. The fp32 coefficient derived from either agreed on all 2M samples (a one-ulp fp64 difference survives the
-  fp32 cast only when it straddles an fp32 rounding boundary). The *reported* norm is still computed on the host
+* fp64 ``sqrt``, ``+`` and ``/`` on the GPU are correctly rounded. The host path's ``x ** 0.5`` (libm ``pow``) is
+  not always: for a small fraction of inputs it is one ulp away from the correctly rounded square root. The fp32
+  coefficient derived from either is the same in practice (a one-ulp fp64 difference survives the fp32 cast only when
+  it straddles an fp32 rounding boundary). The *reported* norm is still computed on the host
   with the original expression, from the same fp32 squared norm, so it is identical to the original.
 * A bf16 tensor multiplied by an fp32 0-dim CUDA tensor (``mul_`` or ``_foreach_mul_``) rounds the multiplier to
   bf16 first, so it does not reproduce ``mul_(python_float)``. The gradients are therefore scaled by a small

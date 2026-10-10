@@ -177,6 +177,26 @@ class _DeferredTrainingLog:
         self.prev_event = None
 
 
+def _flushing_train(orig_train, deferred):
+    """``train`` that writes the last deferred training_log when it returns, and also when it leaves through
+    ``sys.exit`` (exit interval, exit signal) or an exception. A failing flush there does not replace the exception
+    that is already propagating."""
+
+    def train(*a, **k):
+        try:
+            result = orig_train(*a, **k)
+        except BaseException:
+            try:
+                deferred.flush()
+            except Exception as err:  # noqa: BLE001
+                log_rank_0(f"[Patch:megatron.training.light_log_sync_events] last deferred training_log lost: {err}")
+            raise
+        deferred.flush()
+        return result
+
+    return train
+
+
 @register_patch(
     "megatron.training.light_log_sync_events",
     backend="megatron",
@@ -226,14 +246,7 @@ def patch_light_log_sync_events(ctx: PatchContext) -> None:
 
     T.Timer.start, T.Timer.stop = start, stop
 
-    orig_train = MT.train
-
-    def train(*a, **k):
-        result = orig_train(*a, **k)
-        deferred.flush()
-        return result
-
-    MT.train = train
+    MT.train = _flushing_train(MT.train, deferred)
     mark_patched(MT, key)
     log_rank_0(
         "[Patch:megatron.training.light_log_sync_events] training_log deferred by one step; values read back "

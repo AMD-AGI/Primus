@@ -20,8 +20,10 @@ logging, evaluation or checkpointing). Hooking it rather than ``train_step`` kee
 warmup paths replace ``training_log`` with a no-op while they run (and the in-step one rewrites ``train_step`` when it
 removes itself). Preparation is skipped when the next forward is not the next training step's:
 
-* an evaluation, a checkpoint save or an exit-interval stop follows the step, or it was the last step (evaluation
-  draws from the same generator; a checkpoint records the RNG and data position).
+* an evaluation, a checkpoint save (regular or non-persistent), a phase transition or an exit-interval stop follows
+  the step, or it was the last step (evaluation draws from the same generator; a checkpoint records the RNG and data
+  position);
+* the rerun state machine is enabled (it may replay a step with its own data and draws).
 
 An exit by signal or wall-clock duration after a prepared step leaves one batch and one step's draws consumed but
 unused, which only matters if the RNG state is checkpointed at that exit.
@@ -44,9 +46,16 @@ def _next_is_training_forward(args, iteration) -> bool:
     save_interval = getattr(args, "save_interval", None)
     if getattr(args, "save", None) and save_interval and iteration % save_interval == 0:
         return False
+    non_persistent = getattr(args, "non_persistent_save_interval", None)
+    if non_persistent and iteration % non_persistent == 0:
+        return False
+    if iteration in (getattr(args, "phase_transition_iterations", None) or ()):
+        return False  # Megatron saves and exits at a phase transition
     exit_interval = getattr(args, "exit_interval", None)
     if exit_interval and iteration % exit_interval == 0:
         return False
+    if str(getattr(args, "rerun_mode", "disabled")) not in ("disabled", "RerunMode.DISABLED"):
+        return False  # the rerun state machine may replay a step with its own data and draws
     return True
 
 

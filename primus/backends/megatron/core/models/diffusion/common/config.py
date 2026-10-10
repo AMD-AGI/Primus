@@ -429,6 +429,13 @@ class BaseDiffusionConfig(TransformerConfig):
                 "mxfp6_fwd_a6w4 is not wired into mxfp6_packed_param_gather yet (its weights gather as MXFP6 planes); "
                 "set one of the two."
             )
+        if self.mxfp6_fwd_bf16_joint_img_fc1 and self.mxfp6_packed_param_gather:
+            # The packed gather moves only the MX packs; a bf16 forward reads the parameter itself, which only its
+            # owner rank has updated, so every other rank would run that fc1 with a stale weight.
+            raise ValueError(
+                "mxfp6_fwd_bf16_joint_img_fc1 reads the bf16 weight, which mxfp6_packed_param_gather does not gather; "
+                "set one of the two."
+            )
         if self.mxfp6_packed_param_gather and not tilescale:
             raise ValueError("mxfp6_packed_param_gather needs mxfp6_gemm_layout 'tilescale'.")
         if self.mxfp6_packed_param_gather_fused_adam and not self.mxfp6_packed_param_gather:
