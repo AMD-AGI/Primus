@@ -45,17 +45,14 @@ Turbo (`AMD-AGI/Primus-Turbo`):
 | branch | head | PR | notes |
 |---|---|---|---|
 | `fix/moe/permute-padding-rows` | f1a59fb9 | #553 merged | TURBO permute padding rows with worst-case buffers + pad |
-| `perf/moe/permute-default-hip` | 30b6cc7c | open next | body: [pr_bodies/perf-moe-permute-default-hip.md](pr_bodies/perf-moe-permute-default-hip.md) |
-| `perf/moe/fp8-permute-tensorwise` | 83e712a9 | after permute-default | stacked on it; body: [pr_bodies/perf-moe-fp8-permute-tensorwise.md](pr_bodies/perf-moe-fp8-permute-tensorwise.md) |
+| `perf/moe/permute-default-hip` | 30b6cc7c | #554 open | body: [pr_bodies/perf-moe-permute-default-hip.md](pr_bodies/perf-moe-permute-default-hip.md) |
+| `perf/moe/fp8-permute-tensorwise` | f4485b88 | opening | on main + #554's commit; body: [pr_bodies/perf-moe-fp8-permute-tensorwise.md](pr_bodies/perf-moe-fp8-permute-tensorwise.md) |
 | `perf/quantization/tensorwise-fp8-qwen3` | 6351abf4 | not opened | independent; flat no-pad quant kernel |
 | `perf/deep_ep/dispatch-layout-per-token` | 0931ba1e | not opened | independent; `get_dispatch_layout` 340 -> 45 us |
 | `perf/flydsl/qk-rmsnorm-rope-hd128` | 1b920afe | not opened | independent; needed by the Primus qk-norm patch |
 | `fix/fp8-attn-strided-layout` | c825b13e | not opened | FP8 attention with sbhd/bhsd storage |
 
-Before opening the FP8 permute PR, rebase `perf/moe/fp8-permute-tensorwise` onto main once permute-default has merged:
-- Drop a04d011b, its duplicate of #553.
-- Put the permute-default PR number into the body.
-- The commit message quotes the single-run gain (-5.54%); the PR body uses the 4-run mean (-4.55%).
+`perf/moe/fp8-permute-tensorwise` is main (with #553) plus #554's commit plus the FP8 permute commit, whose message quotes the 4-run mean (-4.55%). The pre-rebase history is kept locally as `backup/fp8-permute-pre-rebase`. Once #554 merges, rebase the branch onto main and drop #554's commit.
 
 Primus (`AMD-AGI/Primus`):
 

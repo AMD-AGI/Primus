@@ -1,6 +1,6 @@
 # Description
 
-> Stacked on #<permute-default PR> (`perf/moe/permute-default-hip`): the dispatcher must run the TURBO permute. I will rebase onto main once that merges; until then, review the last two commits (`perf(moe): emit tensorwise FP8 ...` and the format fix).
+> Stacked on #554 (`perf/moe/permute-default-hip`): the dispatcher must run the TURBO permute. The first commit is #554's; please review the second one (`perf(moe): emit tensorwise FP8 from the TURBO permute for the grouped MLP`). I will rebase onto main once #554 merges.
 
 Under FP8 tensorwise, the fused grouped MLP (`grouped_mlp_fp8`) quantizes:
 - its input right after `DeepEPTokenDispatcher` permutes it, and
