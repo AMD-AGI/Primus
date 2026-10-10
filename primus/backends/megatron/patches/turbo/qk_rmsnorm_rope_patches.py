@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Opt-in GPT-OSS packed-QKV RMSNorm + RoPE integration.
+"""Opt-in packed-QKV RMSNorm + RoPE integration (GPT-OSS head_dim 64, Qwen3 head_dim 128).
 
 ``PRIMUS_FUSED_QK_RMSNORM_ROPE=1`` replaces the training-only sequence
 
@@ -12,8 +12,8 @@
 
 with Primus-Turbo's packed FlyDSL operator.  The patch is intentionally narrow:
 TP=1, self attention, SBHD, non-interleaved full RoPE, no packed sequences,
-and PrimusTurboRMSNorm for both Q and K.  Unsupported calls continue through
-the original Megatron path.
+a head_dim the installed Turbo supports, and TE RMSNorm (or PrimusTurboRMSNorm)
+for both Q and K.  Unsupported calls continue through the original Megatron path.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ def _enabled(_ctx: PatchContext) -> bool:
     "megatron.turbo.qk_rmsnorm_rope",
     backend="megatron",
     phase="before_train",
-    description="Fuse GPT-OSS packed QKV split, Q/K RMSNorm, and RoPE with FlyDSL",
+    description="Fuse packed QKV split, Q/K RMSNorm, and RoPE with FlyDSL",
     condition=_enabled,
     priority=70,
 )
@@ -92,8 +92,14 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
         qk_rmsnorm_rope_shape_error,
     )
     from primus_turbo.pytorch.ops.rope import fused_qkv_rmsnorm_rope
+    from transformer_engine.pytorch.module.rmsnorm import RMSNorm as TERMSNorm
 
-    from primus.backends.megatron.core.extensions.primus_turbo import PrimusTurboRMSNorm
+    try:
+        from primus_turbo.pytorch.kernels.rope.qk_rmsnorm_rope_impl import (
+            QK_RMSNORM_ROPE_HEAD_DIMS,
+        )
+    except ImportError:
+        QK_RMSNORM_ROPE_HEAD_DIMS = (64,)
 
     if getattr(attention_module, "_primus_qk_rmsnorm_rope_installed", False):
         return
@@ -121,15 +127,16 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
             and rotary_pos_emb is not None
             and not no_rope
             and self.attention_type == "self"
-            and self.hidden_size_per_attention_head == 64
+            and self.hidden_size_per_attention_head in QK_RMSNORM_ROPE_HEAD_DIMS
             and not getattr(self.config, "rotary_interleaved", False)
             and getattr(self.config, "rotary_percent", 1.0) == 1.0
             and attention_module._yarn_get_concentration_factor_from_config(self.config) == 1.0
             and not getattr(self.config, "attention_output_gate", False)
             and getattr(self, "world_size", 1) == 1
             and not getattr(self, "offload_qkv_linear", False)
-            and isinstance(q_norm, PrimusTurboRMSNorm)
-            and isinstance(k_norm, PrimusTurboRMSNorm)
+            # Only weight / eps are consumed, so TE RMSNorm and its PrimusTurboRMSNorm subclass both qualify.
+            and isinstance(q_norm, TERMSNorm)
+            and isinstance(k_norm, TERMSNorm)
             and _supported_forward_pre_hooks(q_norm) is not None
             and _supported_forward_pre_hooks(k_norm) is not None
             and not getattr(q_norm, "zero_centered_gamma", False)
@@ -278,6 +285,5 @@ def patch_qk_rmsnorm_rope(_ctx: PatchContext):
     attention_module.apply_rotary_pos_emb = _apply_rotary_pos_emb
     attention_module._primus_qk_rmsnorm_rope_installed = True
     log_rank_0(
-        "[Patch:megatron.turbo.qk_rmsnorm_rope] Installed GPT-OSS FlyDSL "
-        "packed QKV + Q/K RMSNorm + RoPE fusion"
+        "[Patch:megatron.turbo.qk_rmsnorm_rope] Installed FlyDSL packed QKV + Q/K RMSNorm + RoPE fusion"
     )
