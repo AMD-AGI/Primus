@@ -589,21 +589,28 @@ def _ar_pack(group):
         _AR["packed"].add(id(group))
 
 
-def _ar_forward_scales():
-    """phased_ar, the first forward wait of the step (the optimizer is done): pack every group not packed yet, then one
-    SUM all-reduce of the forward scales; the compute stream waits for it here, so every later forward is behind it."""
+def _ar_issue_forward_scales():
+    """phased_ar: pack every group not packed yet (the optimizer is done), then one SUM all-reduce of the forward
+    scales, once per step."""
     if _AR["fwd_work"] is None:
         for g in _AR["groups"]:
             _ar_pack(g)
         _AR["fwd_work"] = torch.distributed.all_reduce(_AR["fwd"], group=_AR["pg"], async_op=True)
         _AR["works"].append(_AR["fwd_work"])
+
+
+def _ar_forward_scales():
+    """phased_ar, the first forward wait of the step: the compute stream waits for the forward scales' all-reduce
+    here, so every later forward is behind it."""
+    _ar_issue_forward_scales()
     _AR["fwd_work"].wait()
 
 
 def _ar_dgrad_scales():
-    """phased_ar, at the dgrad flush: the dgrad scales' all-reduce (every group's dgrad wait waits for it too)."""
-    for g in _AR["groups"]:
-        _ar_pack(g)
+    """phased_ar, at the dgrad flush: the dgrad scales' all-reduce (every group's dgrad wait waits for it too). The
+    forward scales' all-reduce is issued first: both share one communicator, so a dgrad all-reduce issued before it
+    (the last group dispatched at the end of the optimizer step) would hold up the step's first forward."""
+    _ar_issue_forward_scales()
     work = torch.distributed.all_reduce(_AR["bwd"], group=_AR["pg"], async_op=True)
     _AR["works"].append(work)
     _AR["open"] = False  # the next step's first gather zeroes the buffers again (after these complete)

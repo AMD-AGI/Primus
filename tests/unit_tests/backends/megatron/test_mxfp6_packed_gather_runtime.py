@@ -286,3 +286,40 @@ def test_phased_ar_scale_sum_is_exact(kind, sr, shapes):
     for k in ("rs", "cs"):
         assert int(writers[k].max()) <= 1, f"{k}: a scale byte written by two ranks"
         assert torch.equal(total[k].to(torch.uint8)[covered], ref.planes[k][covered]), k
+
+
+def test_phased_ar_forward_scales_issued_before_dgrad(monkeypatch):
+    """``phased_ar`` with the gathers dispatched at the end of the optimizer step: the last group's dispatch flushes the
+    dgrad gathers; the forward scales' all-reduce must be issued before the dgrad scales' (one communicator, so the
+    first forward would otherwise wait for both), and only once per step."""
+    from primus.backends.megatron.patches import packed_param_gather_patches as P
+
+    order = []
+    fwd, bwd = torch.zeros(4, dtype=torch.uint8), torch.zeros(4, dtype=torch.uint8)
+
+    class Work:
+        def wait(self):
+            pass
+
+    def all_reduce(t, group=None, async_op=False):
+        order.append("fwd" if t is fwd else "bwd")
+        return Work()
+
+    class Dgrad:
+        def __init__(self):
+            self.extra, self.issued = [], False
+
+        def issue(self):
+            self.issued = True
+
+    groups = [types.SimpleNamespace(_ppg_dgrad=Dgrad()) for _ in range(3)]
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+    monkeypatch.setattr(P, "_ar_pack", lambda g: order.append("pack"))
+    monkeypatch.setattr(P, "_AR", dict(fwd=fwd, bwd=bwd, groups=groups, open=True, packed=set(), fwd_work=None,
+                                       works=[], pg=None))
+    monkeypatch.setattr(P, "_DGRAD_PENDING", list(groups))
+    P._flush_dgrad()
+    assert order == ["pack"] * 3 + ["fwd", "bwd"]
+    assert all(g._ppg_dgrad.issued and len(g._ppg_dgrad.extra) == 1 for g in groups)
+    P._ar_forward_scales()  # the first forward wait: already issued
+    assert order.count("fwd") == 1
