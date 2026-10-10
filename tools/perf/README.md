@@ -414,7 +414,8 @@ A few notes on why these specific fields:
 python3 tools/perf/extract_results.py "$RESULT_DIR"
 ```
 
-Writes `benchmark_results_<timestamp>.csv` into that directory. Throughput uses
+Writes `<RESULT_DIR>_<timestamp>.csv` into that directory, where
+`<RESULT_DIR>` is the directory's own name. Throughput uses
 the harmonic mean over post-warmup steps, memory the arithmetic mean; at least
 the first three logged steps are always dropped as compile/autotune. Multi-rank
 logs are filtered to a single rank so the iteration count stays honest.
@@ -423,6 +424,21 @@ Alongside the metrics, each row carries `world_size`, `docker_image`,
 `image_digest`, `primus_commit`, `submodule_pins`, `gpu_model`, `rocm_version`,
 `torch_version`/`jax_version` and, for multi-node, `slurm_job_id`/`nodelist`.
 Logs written before these fields existed simply leave the columns empty.
+
+## Diffusion and DLRM suite
+
+[`diffusion_bench/`](./diffusion_bench/README.md) benchmarks AMDiffusionBenchmark
+(FLUX.1-dev, Stable Diffusion XL, Mochi 1, HunyuanVideo, Wan 2.1 I2V) and
+DLRMBenchmark (TF32, FP32) in the CI image. It is a separate runner from
+`run_batch.sh`: it reads its own `diffusion_bench/config.yaml` rather than
+`configs.yaml`, and writes `summary.{md,csv,json}` per run rather than the
+per-run logs that `extract_results.py` reads.
+
+```bash
+export HF_TOKEN=hf_...
+bash tools/perf/diffusion_bench/run_benchmarks.sh --dry-run   # check the plan first
+bash tools/perf/diffusion_bench/run_benchmarks.sh
+```
 
 ## Relationship to the other benchmark tools
 

@@ -1,0 +1,122 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Models published in the AI Training section of
+# https://www.amd.com/en/developer/resources/rocm-hub/ai-cloud-development/performance-results.html#ai-training
+#
+# Website sections and the backend key used here:
+#   PyTorch      -> torchtitan     (batch size is training.local_batch_size)
+#   Megatron-LM  -> megatron       (batch size is micro_batch_size)
+#   JaxMaxText   -> maxtext        (batch size is per_device_batch_size)
+#
+# Every path below is a model row on that page (MI355X, MI325X, MI300X).
+# Sequence length in the matching example config agrees with the page
+# (8192 for Llama and Qwen3-14B, 4096 for Mixtral, DeepSeek-V2-Lite,
+# Qwen3-30B-A3B, and GPT-OSS-20B).
+#
+# Batch size was checked against examples/. A trailing comment marks a
+# config whose batch size differs from the published number. Rows with no
+# example config are listed in the notes under that backend, not as paths.
+#
+# MaxText FP8 files are named `fp8` on MI355X and `nanoo_fp8` on
+# MI300X / MI325X. The page says NANOO_FP8 on MI325X and FP8 on MI300X;
+# the MI300X Llama 3.1 8B FP8 row matches llama3_8B-nanoo_fp8 (batch 4).
+# MaxText Llama 3/3.1 8B and 70B use the llama3_8B and llama3_70B prefixes.
+#
+# Usage:
+#   GPU=MI325X BACKEND=megatron CONFIG_FILE=tools/perf/perf-config.yaml \
+#     bash tools/perf/run_batch.sh
+#
+###############################################################################
+
+MI355X:
+  torchtitan:
+    - examples/torchtitan/configs/MI355X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/torchtitan/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI355X/llama3.1_70B-FP8-pretrain.yaml
+    - examples/torchtitan/configs/MI355X/llama3.1_70B-BF16-pretrain.yaml
+
+  megatron:
+    - examples/megatron/configs/MI355X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.1_8B-MXFP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.1_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.3_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/qwen3_30B_A3B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/qwen3_30B_A3B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/gpt_oss_20B-FP8-pretrain.yaml
+
+  maxtext:
+    - examples/maxtext/configs/MI355X/llama3_8B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama3_8B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/llama3.3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/mixtral_8x7B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/mixtral_8x7B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI355X/qwen3_14B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI355X/qwen3_14B-fp8-pretrain.yaml
+
+MI325X:
+  torchtitan:
+    - examples/torchtitan/configs/MI325X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/torchtitan/configs/MI325X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI325X/llama3.1_70B-FP8-pretrain.yaml
+    - examples/torchtitan/configs/MI325X/llama3.1_70B-BF16-pretrain.yaml
+
+  megatron:
+    - examples/megatron/configs/MI325X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI325X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/llama3.1_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/llama3.1_70B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI325X/llama3.3_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/qwen3_30B_A3B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/qwen3_30B_A3B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI325X/gpt_oss_20B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/gpt_oss_20B-FP8-pretrain.yaml
+
+  maxtext:
+    - examples/maxtext/configs/MI325X/llama3_8B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/llama3_8B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI325X/llama3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/llama3.3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/mixtral_8x7B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/mixtral_8x7B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI325X/qwen3_14B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI325X/qwen3_14B-nanoo_fp8-pretrain.yaml
+
+MI300X:
+  torchtitan:
+    - examples/torchtitan/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/torchtitan/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml
+    - examples/torchtitan/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml
+
+  megatron:
+    - examples/megatron/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/llama3.3_70B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/qwen3_30B_A3B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/qwen3_30B_A3B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI300X/gpt_oss_20B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/gpt_oss_20B-FP8-pretrain.yaml
+
+  maxtext:
+    - examples/maxtext/configs/MI300X/llama3_8B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/llama3_8B-nanoo_fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/llama3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/llama3.3_70B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/mixtral_8x7B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/mixtral_8x7B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/qwen3_14B-bf16-pretrain.yaml
+    - examples/maxtext/configs/MI300X/qwen3_14B-fp8-pretrain.yaml

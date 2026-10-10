@@ -37,8 +37,10 @@ the second is the backend's running average; the instantaneous value is what
 gets captured, so this script computes its own harmonic mean over the
 post-warmup window.
 
-Per-iteration metrics are parsed for megatron, torchtitan, maxtext and
-maxdiffusion backends. At least the first three unique logged steps are
+Per-iteration metrics are parsed for megatron, megatron_bridge, torchtitan,
+maxtext and maxdiffusion backends. Megatron-Bridge only logs TFLOP/s/GPU,
+as the number immediately before ``MODEL_TFLOP/s/GPU`` (no space between
+the value and the unit). At least the first three unique logged steps are
 always dropped before aggregates (compile / autotune / ramp); a larger
 configured warmup is still honored when it leaves some steps behind. For
 megatron the warmup prefers ``log_avg_skip_iterations`` (the steps the
@@ -367,6 +369,34 @@ def parse_megatron_iterations(lines: list[str], keep_rank: int | None = None) ->
 
         if "step" in it:
             iterations.append(it)
+    return iterations
+
+
+def parse_megatron_bridge_iterations(lines: list[str], keep_rank: int | None = None) -> list[dict]:
+    """Parse Megatron-Bridge per-step TFLOP lines.
+
+    The value is glued to the unit, with no separator::
+
+        Step Time : 0.79s GPU utilization: 9013.4MODEL_TFLOP/s/GPU
+
+    These lines carry no step index, so steps are numbered in log order
+    starting at 1. That lets the shared warmup skip drop the first compile
+    steps before the harmonic mean. Tokens and memory are not logged here.
+    """
+    iterations = []
+    step = 0
+    for line in lines:
+        clean = strip_ansi(line)
+        if "MODEL_TFLOP/s/GPU" not in clean:
+            continue
+        if not _line_matches_rank(clean, keep_rank):
+            continue
+
+        m = re.search(r"([\d.]+)\s*MODEL_TFLOP/s/GPU", clean)
+        if not m:
+            continue
+        step += 1
+        iterations.append({"step": step, "tflops": float(m.group(1))})
     return iterations
 
 
@@ -860,6 +890,9 @@ def parse_log_file(filepath: str) -> dict | None:
     if backend == "megatron":
         keep_rank = _detect_iter_logging_rank(lines, "elapsed time per iteration")
         iterations = parse_megatron_iterations(lines, keep_rank=keep_rank)
+    elif backend == "megatron_bridge":
+        keep_rank = _detect_iter_logging_rank(lines, "MODEL_TFLOP/s/GPU")
+        iterations = parse_megatron_bridge_iterations(lines, keep_rank=keep_rank)
     elif backend == "torchtitan":
         keep_rank = _detect_iter_logging_rank(lines, "tflops:")
         iterations = parse_torchtitan_iterations(lines, keep_rank=keep_rank)
@@ -1023,7 +1056,8 @@ def main():
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_filename = f"benchmark_results_{timestamp}.csv"
+    result_dir_name = os.path.basename(input_dir)
+    csv_filename = f"{result_dir_name}_{timestamp}.csv"
     csv_path = os.path.join(input_dir, csv_filename)
 
     with open(csv_path, "w", newline="") as f:
