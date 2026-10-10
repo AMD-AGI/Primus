@@ -975,6 +975,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         self._num_heads_for_sinks = self.config.num_attention_heads
 
         self.offload = args.offload and "attn" in args.offload_ops
+        self.use_fp8_attention = args.enable_turbo_attention_float8
         if args.enable_turbo_attention_float8:
             self.attn = (
                 primus_turbo_torch.ops.flash_attn_fp8_usp_func
@@ -1129,6 +1130,15 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             key = key.permute(0, 2, 1, 3)
             value = value.permute(0, 2, 1, 3)
 
+        if self.use_fp8_attention:
+            # flash_attn_fp8_func permutes non-bshd *storage* as if it were the
+            # logical layout, swapping b and s, so hand it bshd-contiguous q/k/v.
+            query = query.contiguous()
+            key = key.contiguous()
+            value = value.contiguous()
+
+        # flash_attn_fp8_func takes no ``sink`` argument.
+        sink_kwargs = {"sink": sink_tensor} if sink_tensor is not None else {}
         o = self.attn(
             query,
             key,
@@ -1142,7 +1152,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             deterministic=self.deterministic_mode,
             return_lse=False,
             return_attn_probs=False,
-            sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
+            **sink_kwargs,
             **self.attn_kwargs,
         )
 
