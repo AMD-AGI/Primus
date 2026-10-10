@@ -392,6 +392,39 @@ test_mi350x_env_file() {
 }
 
 # ============================================================================
+# Test 12: HIP_VISIBLE_DEVICES selection is preserved
+# ============================================================================
+test_hip_visible_devices() {
+    echo "Test 12: HIP_VISIBLE_DEVICES selection is preserved"
+
+    result=$(bash -c "
+        unset HIP_VISIBLE_DEVICES
+        export MASTER_ADDR=localhost MASTER_PORT=1234 NNODES=1 NODE_RANK=0 GPUS_PER_NODE=4
+        export PRIMUS_SKIP_VALIDATION=1
+        source '$PROJECT_ROOT/runner/helpers/envs/primus-env.sh' >/dev/null
+        [[ \"\$HIP_VISIBLE_DEVICES\" == '0,1,2,3' ]] && echo PASS || echo FAIL
+    " 2>/dev/null)
+    if echo "$result" | grep -q PASS; then
+        assert_pass "Unset HIP_VISIBLE_DEVICES defaults to 0..GPUS_PER_NODE-1"
+    else
+        assert_fail "Unset HIP_VISIBLE_DEVICES defaults to 0..GPUS_PER_NODE-1"
+    fi
+
+    result=$(bash -c "
+        export HIP_VISIBLE_DEVICES=2
+        export MASTER_ADDR=localhost MASTER_PORT=1234 NNODES=1 NODE_RANK=0 GPUS_PER_NODE=1
+        export PRIMUS_SKIP_VALIDATION=1
+        source '$PROJECT_ROOT/runner/helpers/envs/primus-env.sh' >/dev/null
+        [[ \"\$HIP_VISIBLE_DEVICES\" == '2' ]] && echo PASS || echo FAIL
+    " 2>/dev/null)
+    if echo "$result" | grep -q PASS; then
+        assert_pass "Preset HIP_VISIBLE_DEVICES is kept"
+    else
+        assert_fail "Preset HIP_VISIBLE_DEVICES is kept"
+    fi
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 echo "=========================================="
@@ -410,6 +443,7 @@ test_loading_order
 test_missing_base_env
 test_env_defaults
 test_mi350x_env_file
+test_hip_visible_devices
 
 echo ""
 echo "=========================================="
