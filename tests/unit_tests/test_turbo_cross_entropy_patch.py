@@ -4,6 +4,7 @@
 """GPU integration contract for Core's batch/sequence layout and Turbo CE."""
 
 import importlib.util
+from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,15 @@ def installed_patch(monkeypatch):
         LanguageModule,
     )
 
+    from primus.core.patches.patch_registry import PatchRegistry
+
+    # Loading the module registers its patch; keep the suite's global registry intact.
+    monkeypatch.setattr(PatchRegistry, "_all_patches", [])
+    monkeypatch.setattr(
+        PatchRegistry,
+        "_patches_by_backend_phase",
+        defaultdict(lambda: defaultdict(list)),
+    )
     calls = []
 
     def original(self, labels, logits):
