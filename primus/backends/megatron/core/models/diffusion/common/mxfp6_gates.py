@@ -200,6 +200,12 @@ class Mxfp6Gates:
     # today's column. Needs the round-to-nearest backward (fp4_sr_actw off), so the W4 buckets' planes are
     # deterministic and plainly all-gathered too.
     packed_param_gather_neutral: str = ""
+    # With packed_param_gather, how the planes travel. "planes": every plane of a bucket group in one coalesced call
+    # before the group's forward. "phased": the forward planes (MXFP6 C0 / C1 or FP4 rows, their scales, and the bf16
+    # buckets) before the forward; the dgrad copies' planes queued once the last group's forward gather is out, in
+    # backward order, and waited for only when the backward reaches the layer -- off the forward's critical path. Same
+    # bytes into the same planes: bitwise as "planes".
+    packed_param_gather_transport: str = "planes"
     # The attention out-projections' dgrad (A4W4 on tilescale) also emits the attention backward's softmax_d =
     # rowsum(dO * O) per (token, head), which the attention backward then takes instead of computing it: the
     # attention returns a placeholder whose gradient the joint pair / gated single-block Function supplies. Falls

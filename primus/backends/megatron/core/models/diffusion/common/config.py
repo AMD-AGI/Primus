@@ -247,6 +247,7 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_packed_param_gather_fused_adam: bool = False
     mxfp6_packed_param_gather_prob_bits: int = 0
     mxfp6_packed_param_gather_neutral: str = ""
+    mxfp6_packed_param_gather_transport: str = "planes"
     mxfp6_dgrad_emit_attn_delta: bool = False
     mxfp6_single_linear2_cat: bool = False
     mxfp6_attn_q_norm_rope: bool = False
@@ -444,6 +445,10 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError("mxfp6_packed_param_gather_prob_bits is 0 (off), 2 or 4.")
         if self.mxfp6_packed_param_gather_prob_bits and not (self.mxfp6_packed_param_gather and self.mxfp6_fp4_sr_actw):
             raise ValueError("mxfp6_packed_param_gather_prob_bits needs mxfp6_packed_param_gather and mxfp6_fp4_sr_actw.")
+        if self.mxfp6_packed_param_gather_transport not in ("planes", "phased"):
+            raise ValueError('mxfp6_packed_param_gather_transport is "planes" or "phased".')
+        if self.mxfp6_packed_param_gather_transport != "planes" and not self.mxfp6_packed_param_gather:
+            raise ValueError("mxfp6_packed_param_gather_transport needs mxfp6_packed_param_gather.")
         if self.mxfp6_packed_param_gather_neutral not in ("", "sr", "rn", "d2"):
             raise ValueError('mxfp6_packed_param_gather_neutral is "", "sr", "rn" or "d2".')
         if self.mxfp6_packed_param_gather_neutral == "d2" and not (

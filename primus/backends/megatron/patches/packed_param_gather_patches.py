@@ -492,6 +492,49 @@ class _Handles:
         self.after = []
 
 
+class _Dgrad:
+    """``phased``: a bucket group's dgrad-copy collectives, issued late (``issue``: once every forward gather is out)
+    and waited for when the backward reaches the group (``wait``, on the waiting stream; the receivers run after)."""
+
+    def __init__(self, issue_fn, after):
+        self._issue_fn, self.after, self.works, self.issued, self.done = issue_fn, list(after), [], False, False
+
+    def issue(self):
+        if not self.issued:
+            self.works, self.issued = self._issue_fn(), True
+
+    def wait(self):
+        if self.done:
+            return
+        self.issue()
+        for w in self.works:
+            w.wait()
+        for f in self.after:
+            f()
+        self.done = True
+
+
+# ``phased``: bucket groups whose dgrad collectives are not yet issued, in forward order
+_DGRAD_PENDING = []
+
+
+def _flush_dgrad():
+    """Issue every pending dgrad gather, last forward group first -- the order the backward needs them."""
+    for g in reversed(_DGRAD_PENDING):
+        g._ppg_dgrad.issue()
+    _DGRAD_PENDING.clear()
+
+
+def _finish_dgrad(group):
+    """Complete a group's previous dgrad gather (issuing it if it never was) before its planes are written again."""
+    d = getattr(group, "_ppg_dgrad", None)
+    if d is not None:
+        d.wait()
+        group._ppg_dgrad = None
+        if group in _DGRAD_PENDING:
+            _DGRAD_PENDING.remove(group)
+
+
 def patch_bucket_group_sync():
     import torch
     from torch.distributed import _coalescing_manager
@@ -522,36 +565,59 @@ def patch_bucket_group_sync():
         _gather(self, async_op, packed_only=False)
         self.param_gather_dispatched = True
 
+    def _phased():
+        from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import gates
+
+        return gates().packed_param_gather_transport == "phased"
+
     def _gather(self, async_op, packed_only):
-        """Owner packs into this rank's plane shards, then one coalesced all-gather: planes for the W6 / W4
-        buckets, bf16 for the rest (as Megatron)."""
+        """Owner packs into this rank's plane shards, then the all-gathers: planes for the W6 / W4 buckets, bf16 for the
+        rest (as Megatron). ``planes``: one coalesced call. ``phased`` (overlapped gathers): the forward planes and bf16
+        in one coalesced call, the dgrad copies' planes in a second one issued once the last group's forward gather is
+        out and waited for in the backward (``_Dgrad``)."""
+        _finish_dgrad(self)
         states = _packed_states(self)
         for st in states.values():
             st.owner_pack()
         grp = self.intra_distributed_optimizer_instance_group
         rank = self.intra_distributed_optimizer_instance_rank
-        works = []
-        for st in states.values():  # the SR dgrad copies: one draw per destination (see mxfp6_packed_gather)
-            for out, inp in st.a2a_ops():
-                works.append(torch.distributed.all_to_all_single(out, inp, group=grp, async_op=async_op))
-        with _coalescing_manager(grp, async_ops=async_op) as cm:
-            for idx, bucket in enumerate(self.buckets):
-                st = states.get(id(bucket))
-                if st is not None:
-                    for out, inp in st.gather_ops():
-                        pgb.dist_all_gather_func(out, inp, group=grp, async_op=async_op)
-                    continue
-                if packed_only:
-                    continue
-                if self.cached_param_buffer_shard_list[idx] is None:
-                    self.cached_param_buffer_shard_list[idx] = pgb.shard_buffer(
-                        bucket.param_data, self.intra_distributed_optimizer_instance_size
-                    )
-                pgb.dist_all_gather_func(
-                    bucket.param_data, self.cached_param_buffer_shard_list[idx][rank], group=grp, async_op=async_op
-                )
-        # prob4: each rank finishes its own stochastic rounding of the gathered dgrad copies
+        phased = async_op and not packed_only and _phased()
+        # prob4 / neutral: each rank finishes its own dgrad copies from the gathered planes
         recv = [st.receive for st in states.values() if st.prob4 or st.neutral]
+
+        def a2a():  # the SR dgrad copies: one draw per destination (see mxfp6_packed_gather)
+            return [torch.distributed.all_to_all_single(out, inp, group=grp, async_op=async_op)
+                    for st in states.values() for out, inp in st.a2a_ops()]
+
+        def gather(phase):
+            with _coalescing_manager(grp, async_ops=async_op) as cm:
+                for idx, bucket in enumerate(self.buckets):
+                    st = states.get(id(bucket))
+                    if st is not None:
+                        for out, inp in st.gather_ops(phase):
+                            pgb.dist_all_gather_func(out, inp, group=grp, async_op=async_op)
+                        continue
+                    if packed_only or phase == "bwd":
+                        continue
+                    if self.cached_param_buffer_shard_list[idx] is None:
+                        self.cached_param_buffer_shard_list[idx] = pgb.shard_buffer(
+                            bucket.param_data, self.intra_distributed_optimizer_instance_size
+                        )
+                    pgb.dist_all_gather_func(
+                        bucket.param_data, self.cached_param_buffer_shard_list[idx][rank], group=grp,
+                        async_op=async_op
+                    )
+            return cm
+
+        if phased:
+            self.param_gather_handle = _Handles([gather("fwd")])
+            self._ppg_dgrad = _Dgrad(lambda: a2a() + [gather("bwd")], recv)
+            _DGRAD_PENDING.append(self)
+            if self.next_param_gather_bucket_group is None:  # the last group's forward gather is out
+                _flush_dgrad()
+            return
+        works = a2a()
+        cm = gather(None)
         if async_op:
             self.param_gather_handle = _Handles([cm] + works, after=recv)
         else:
@@ -573,14 +639,49 @@ def patch_bucket_group_sync():
     def _groups(ddp):
         return list(getattr(ddp, "bucket_groups", [])) + list(getattr(ddp, "expert_parallel_bucket_groups", []))
 
+    def _dgrad_groups(ddp, module, recurse):
+        """The packed bucket groups of a hooked module's parameters (cached): a layer's whole subtree, any other module's
+        own parameters only -- as the forward pre-hooks, so a container never waits for its children's groups."""
+        cache = ddp.__dict__.setdefault("_ppg_module_groups", {})
+        if module not in cache:
+            ps = module.parameters(recurse=recurse)
+            groups = {ddp.param_to_bucket_group[p] for p in ps if p in ddp.param_to_bucket_group}
+            cache[module] = [g for g in groups if _packed(g)]
+        return cache[module]
+
+    def _make_dgrad_hook(ddp, layers):
+        """``phased``: after a hooked module's forward, have the backward wait for its groups' dgrad planes when it
+        reaches the module (a gradient hook on the module's outputs; runs outside the compiled regions)."""
+
+        def post(module, _inputs, output):
+            if not torch.is_grad_enabled():
+                return
+            pending = [g._ppg_dgrad for g in _dgrad_groups(ddp, module, module in layers)
+                       if getattr(g, "_ppg_dgrad", None) is not None and not g._ppg_dgrad.done]
+            if not pending:
+                return
+            outs = output if isinstance(output, (tuple, list)) else (output,)
+            for t in outs:
+                if isinstance(t, torch.Tensor) and t.requires_grad:
+                    t.register_hook(lambda grad, ds=tuple(pending): [d.wait() for d in ds] and None)
+
+        return post
+
     def enable_forward_pre_hook(self, *a, **k):
         orig_enable(self, *a, **k)
         for g in _groups(self):
             g._ppg_hooked = True
+        if _phased() and any(_packed(g) for g in _groups(self)):
+            layers = set(self._get_overlap_hook_modules()[0]) if hasattr(self, "_get_overlap_hook_modules") else set()
+            post = _make_dgrad_hook(self, layers)
+            self._ppg_post_hooks = [m.register_forward_hook(post) for m in list(self.remove_forward_pre_hook_handles)]
 
     def disable_forward_pre_hook(self, param_sync: bool = True):
         for g in _groups(self):
             g._ppg_hooked = False
+        for h in getattr(self, "_ppg_post_hooks", []):
+            h.remove()
+        self._ppg_post_hooks = []
         orig_disable(self, param_sync=param_sync)
         if not param_sync:
             _refresh(self)

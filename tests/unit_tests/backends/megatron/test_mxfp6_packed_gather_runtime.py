@@ -232,3 +232,26 @@ def test_neutral(mode, shapes):
         assert same(a, a2) and not same(a, r1) and not same(a, s1)
     else:
         assert same(a, a2) and same(a, r1) and same(a, s1)
+
+
+@pytest.mark.parametrize("mode", ["rn", "sr", "prob4", "neutral_rn"])
+@pytest.mark.parametrize("kind", ["W6", "W4"])
+def test_phased_transport_partitions_the_planes(kind, mode):
+    """``packed_param_gather_transport: phased`` sends exactly the planes of the one-call transport, split into the
+    forward GEMM's (rows and their scales) and the dgrad copy's (column codes and scales, prob4 probabilities)."""
+    from primus.backends.megatron.core.extensions.mxfp6_packed_gather import _DGRAD
+
+    if mode == "neutral_rn" and kind == "W4":
+        pytest.skip("neutral applies to W6 buckets only")
+    kw = {"rn": {}, "sr": dict(fp4_sr_actw=True), "prob4": dict(fp4_sr_actw=True, packed_param_gather_prob_bits=4),
+          "neutral_rn": dict(fp4_hadamard_dgrad="none", packed_param_gather_neutral="rn")}[mode]
+    _gates(fwd_fp4_single_fc1=(kind == "W4"), **kw)
+    from primus.backends.megatron.core.extensions import primus_turbo_mxfp6_local as L
+    from primus.backends.megatron.core.extensions.mxfp6_packed_gather import PackedBucket
+
+    st = PackedBucket(_bucket(list(BIG), kind), DP, 0, L.ppg_formats())
+    every = {id(o) for o, _ in st.gather_ops()}
+    fwd, bwd = ({id(o) for o, _ in st.gather_ops(ph)} for ph in ("fwd", "bwd"))
+    assert fwd | bwd == every and not fwd & bwd and fwd
+    names = {id(t): k for k, t in st.planes.items()}
+    assert {names[i] for i in bwd} <= set(_DGRAD) and not {names[i] for i in fwd} & set(_DGRAD)

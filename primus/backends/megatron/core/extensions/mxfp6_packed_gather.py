@@ -46,6 +46,7 @@ import torch
 
 _A2A = ("cc",)  # the dgrad copy's codes: one SR draw per destination (its scales do not depend on the draw)
 _PROB = "cp"  # prob4: the dgrad codes' round-up probabilities (4 or 2 bits per code, the codes' element order)
+_DGRAD = ("cc", "cs", _PROB)  # the dgrad copy's planes (the rest are the forward GEMM's)
 DENSITY = {  # plane -> elements per byte
     "W6": {"c0": 2, "c1": 4, "rs": 32, "cc": 2, "cs": 32},
     "W4": {"r4": 2, "rs": 32, "cc": 2, "cs": 32},
@@ -177,10 +178,12 @@ class PackedBucket:
         base = dst * sh - self.rank * sh
         return self.send[plane][base + s // d : base + (s + nel) // d]
 
-    def gather_ops(self):
-        """(output, input) of each all-gathered plane."""
+    def gather_ops(self, phase=None):
+        """(output, input) of each all-gathered plane; ``phase`` "fwd" / "bwd": only the forward GEMM's planes (rows and
+        their scales) / only the dgrad copy's (column codes and scales, the prob4 probabilities)."""
         local = ("cc", "cs") if self.neutral else (_A2A if self.sr else ())
-        return [(pl, pl.view(self.dp, -1)[self.rank]) for k, pl in self.planes.items() if k not in local]
+        return [(pl, pl.view(self.dp, -1)[self.rank]) for k, pl in self.planes.items()
+                if k not in local and (phase is None or (k in _DGRAD) == (phase == "bwd"))]
 
     def receive(self):
         """After the gather. prob4: round this rank's copy of every dgrad code up with its probability -- one draw,
