@@ -19,21 +19,28 @@ Both repositories need their paired gather-fusion implementation. Enable in the
 training process only when the permutation output goes directly to the supported
 Turbo grouped MLP/quantizer (storage-preserving EP1 identity transport is allowed):
 
-```bash
-export PRIMUS_TP=1
-export PRIMUS_EP=1
-export MOE_SKIP_IDENTITY_SORT=1
-export GPTOSS_FUSED_PERMUTE_QUANT=1
-export GPTOSS_FUSED_BACKWARD_PERMUTE_QUANT=1
+```yaml
+tensor_model_parallel_size: 1
+expert_model_parallel_size: 1
+moe_token_dispatcher_type: alltoall
+moe_permute_fusion: true
+enable_primus_turbo: true
+use_turbo_grouped_gemm: true
+turbo_fused_grouped_gemm: true
+fp4: e2m1
+fp4_recipe: mxfp4
+moe_skip_identity_sort: true
+moe_permute_quant_fusion: true
+moe_backward_permute_quant_fusion: true
 ```
 
-Set the backward flag to `0` for forward-only fusion. Both feature flags are off
+Set `moe_backward_permute_quant_fusion: false` for forward-only fusion. Both fusion arguments are false
 by default; they are not a general-purpose replacement for every permutation
 consumer. The forward placeholder has no activation values until its registered
 quantizer consumes the source and map. Do not apply ordinary value operations to
 it. Missing or mismatched handoff metadata raises an error rather than reading
 uninitialized activation storage. Primus loads the paired Turbo helpers lazily,
-so disabling the flags keeps compatibility with installations without them.
+so disabling the arguments keeps compatibility with installations without them.
 
 ## Evidence and validation limits
 
@@ -67,3 +74,19 @@ This compares unfused, forward-only and bidirectional paths, including every
 input/weight/probability gradient and the stochastic-rounding counter. The test
 skips when the paired Turbo module or a GPU is unavailable; a skip is not GPU
 validation.
+
+## Argument-based integration
+
+Primus validates the topology and Turbo consumer from the training arguments,
+then opts in only inside the all-to-all dispatcher’s MXFP4 forward path. Generic
+permutation calls remain eager. Direct callers use
+`moe_permute_with_probs(..., fuse_permute_quant=True,
+fuse_backward_permute_quant=True)` and must provide the supported Turbo consumer.
+The backward choice travels with the registered forward handoff; Turbo no longer
+reads the training process’s topology or fusion environment variables.
+
+The old `GPTOSS_FUSED_PERMUTE_QUANT`, `GPTOSS_FUSED_BACKWARD_PERMUTE_QUANT`, and
+`MOE_SKIP_IDENTITY_SORT` switches must be mapped into the corresponding Primus
+YAML arguments by downstream launchers. `PRIMUS_TP` and `PRIMUS_EP` may still be
+used by launchers to populate the parallelism arguments; kernels do not read them.
+Both repositories must be updated together for the new handoff keyword argument.
