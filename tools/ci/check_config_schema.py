@@ -7,10 +7,13 @@
 """Fail CI when a Primus YAML sets a backend key upstream no longer defines.
 
 Every backend adapter accepts unknown keys silently, so a field that upstream
-renamed or moved keeps parsing while doing nothing. Prints the drift as Markdown
-for `$GITHUB_STEP_SUMMARY`:
+renamed or moved keeps parsing while doing nothing. Prints the drift as Markdown,
+and in CI also writes it to the job summary and annotates every failing finding:
 
-    python tools/ci/check_config_schema.py --warn-only >> "$GITHUB_STEP_SUMMARY"
+    python tools/ci/check_config_schema.py --annotate --summary-file "$GITHUB_STEP_SUMMARY"
+
+The Markdown alone leaves a failed run showing nothing but an exit code on the
+checks page, so `--annotate` puts each finding there with its file and line.
 
 A key upstream looks to have merely renamed gets a table and a row of its own:
 that is a fix someone applies one key at a time. The rest share a table where a
@@ -31,9 +34,12 @@ passing one. `--warn-only` suppresses both.
 Misplaced model-scoped keys get their own table. Such a key is not unknown --
 some Primus config class does declare it -- but that class is built for one
 model only, so setting the key on any other model is the same silent no-op.
+This table never fails the check: fixing one moves training numerics for
+whichever model owns the key, so it needs that owner and a convergence run.
 """
 
 import argparse
+import re
 import sys
 import time
 from collections import Counter
@@ -57,6 +63,9 @@ from primus.core.config.schema_check import (  # noqa: E402
 
 SHOWN_PATTERNS = 40
 SHOWN_FILES = 3
+SHOWN_VERDICT_KEYS = 5
+# GitHub drops error annotations past this many per step, without saying so.
+MAX_ANNOTATIONS = 10
 
 
 def shorten_paths(paths: Iterable[str]) -> dict[str, str]:
@@ -124,6 +133,82 @@ def subsection(title: str, lead: str) -> list[str]:
     return ["", f"### {title}", "", lead, ""]
 
 
+def _escape(value: str, prop: bool = False) -> str:
+    value = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return value.replace(":", "%3A").replace(",", "%2C") if prop else value
+
+
+def annotation(title: str, message: str, file: str | None = None, line: int | None = None) -> str:
+    """A GitHub Actions ``::error`` workflow command."""
+    props = [f"file={_escape(file, True)}"] if file else []
+    if file and line:
+        props.append(f"line={line}")
+    props.append(f"title={_escape(title, True)}")
+    return f"::error {','.join(props)}::{_escape(message)}"
+
+
+def key_line(path: str, key: str) -> int | None:
+    """The first line of ``path`` that sets ``key``'s last segment; ``None`` when the file only
+    inherits it through ``extends:``, so the annotation falls back to the whole file."""
+    pattern = re.compile(rf"^\s*{re.escape(key.rsplit('.', 1)[-1])}\s*:")
+    try:
+        lines = (ROOT / path).read_text().splitlines()
+    except OSError:
+        return None
+    return next((n for n, text in enumerate(lines, 1) if pattern.match(text)), None)
+
+
+def build_annotations(rows, errors, stale, skipped, allowlist: str) -> list[str]:
+    """One annotation per failing finding: an unknown key points at the first config that sets it."""
+    out = [
+        annotation(
+            "Backend not checked",
+            f"{backend}: upstream schema not found under third_party/, so none of its configs were "
+            "checked. Run `git submodule update --init` to restore the check.",
+        )
+        for backend in skipped
+    ]
+    out += [annotation("Stale allowlist entry", problem, allowlist) for problem in stale]
+    out += [annotation("Config could not be loaded", e.message, e.file) for e in errors]
+    for row in rows:
+        message = f"`{row.key}` is not a {row.backend} config key, so this setting does nothing."
+        if row.suggestion:
+            message += f" Upstream has `{row.suggestion}`; was it renamed?"
+        if len(row.files) > 1:
+            message += f" Also set in {len(row.files) - 1} other config(s); see the job summary."
+        out.append(
+            annotation(
+                f"Unknown {row.backend} key: {row.key}",
+                message,
+                row.files[0],
+                key_line(row.files[0], row.key),
+            )
+        )
+    if len(out) > MAX_ANNOTATIONS:
+        hidden = len(out) - MAX_ANNOTATIONS + 1
+        out = out[: MAX_ANNOTATIONS - 1]
+        out.append(annotation("More schema findings", f"{hidden} more finding(s); see the job summary."))
+    return out
+
+
+def verdict(rows, errors, stale, skipped) -> str:
+    """The last line of a failed run, so the log says what broke without scrolling the tables."""
+    parts = []
+    if skipped:
+        parts.append(f"{len(skipped)} backend(s) not checked ({', '.join(skipped)})")
+    if rows:
+        keys = ", ".join(row.key for row in rows[:SHOWN_VERDICT_KEYS])
+        if len(rows) > SHOWN_VERDICT_KEYS:
+            keys += f", +{len(rows) - SHOWN_VERDICT_KEYS} more"
+        configs = len({f for row in rows for f in row.files})
+        parts.append(f"{len(rows)} unknown key(s) in {configs} config(s): {keys}")
+    if errors:
+        parts.append(f"{len(errors)} config(s) could not be loaded")
+    if stale:
+        parts.append(f"{len(stale)} stale allowlist entr(y/ies)")
+    return "Backend config schema check FAILED: " + "; ".join(parts) + "."
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", action="append", choices=BACKENDS, help="Limit to one backend.")
@@ -137,15 +222,45 @@ def parse_args():
     parser.add_argument(
         "--warn-only",
         action="store_true",
-        help="Report findings but exit 0. A skipped backend still fails.",
+        help="Report unknown-key drift/errors/stale allowlist entries but exit 0. "
+        "A skipped backend still fails, and model-scoped findings never gate either way.",
     )
     parser.add_argument(
         "--show-allowlist", action="store_true", help="Also print the derived allowlist patterns."
+    )
+    parser.add_argument(
+        "--annotate",
+        action="store_true",
+        help="On failure, also emit a GitHub Actions error annotation for every failing finding.",
+    )
+    parser.add_argument(
+        "--summary-file",
+        type=Path,
+        help="Also append the Markdown report to this file, e.g. $GITHUB_STEP_SUMMARY.",
     )
     args = parser.parse_args()
     if args.path and len(args.backend or BACKENDS) != 1:
         parser.error("--path requires exactly one --backend")
     return args
+
+
+def finish(args, lines, rows, errors, stale, skipped, allowlist: str) -> int:
+    report = "\n".join(lines)
+    print(report)
+    if args.summary_file:
+        with args.summary_file.open("a") as summary:
+            summary.write(report + "\n")
+    # A missing submodule is an infrastructure failure, not a config one, so it
+    # gets none of the grace period `--warn-only` buys the findings.
+    # `scoped` is deliberately out of the gate: fixing one moves training
+    # numerics for whichever model owns the key, so it needs that owner, not a
+    # CI gate blocking unrelated PRs. An unknown key costs nothing to remove.
+    if not skipped and (args.warn_only or not (rows or errors or stale)):
+        return 0
+    if args.annotate:
+        print("\n".join(build_annotations(rows, errors, stale, skipped, allowlist)))
+    print(verdict(rows, errors, stale, skipped))
+    return 1
 
 
 def main():
@@ -195,10 +310,14 @@ def main():
             lines.append(f"- {problem}")
         lines.append("")
 
+    try:
+        allowlist = str(allowlist_path.resolve().relative_to(ROOT.resolve()))
+    except ValueError:
+        allowlist = str(allowlist_path)
+
     if len(skipped) == len(backends):
         lines.append("Nothing to check." if not stale else "No schema available; allowlist checked.")
-        print("\n".join(lines))
-        return 1
+        return finish(args, lines, [], [], stale, skipped, allowlist)
 
     if rows:
         renamed, merged = group_rows(rows)
@@ -310,12 +429,7 @@ def main():
     lines.append("")
     scope = f"{checked} config(s)" if not errors else f"{checked} of {checked + len(errors)} config(s)"
     lines.append(f"_Checked {scope} in {time.perf_counter() - started:.2f}s._")
-    print("\n".join(lines))
-    # A missing submodule is an infrastructure failure, not a config one, so it
-    # gets none of the grace period `--warn-only` buys the findings.
-    if skipped:
-        return 1
-    return 1 if (rows or scoped or errors or stale) and not args.warn_only else 0
+    return finish(args, lines, rows, errors, stale, skipped, allowlist)
 
 
 if __name__ == "__main__":

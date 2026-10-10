@@ -83,6 +83,4 @@ masked_softmax_fusion: false
 disable_primus_topk_router: false
 moe_router_force_load_balancing: false
 use_deprecated_20241209_moe_layer: false
-final_logit_softcapping: null
-attn_logit_softcapping: null
 router_logit_softcapping: null

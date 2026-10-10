@@ -56,7 +56,6 @@ modules:
 
       # ckpt
       finetune: false
-      auto_continue_train: ${CONTI_PARAMS:0}
       load: null
       no_load_optim: null
       no_load_rng: null

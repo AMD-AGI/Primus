@@ -14,7 +14,6 @@ extends:
 # Parallelism configuration
 model_parallel_size: null
 tensor_model_parallel_size: 1
-encoder_tensor_model_parallel_size: 0
 context_parallel_size: 1
 cp_comm_type: p2p  # p2p, a2a, allgather or a2a+p2p
 hierarchical_context_parallel_sizes: null
@@ -22,8 +21,6 @@ hierarchical_context_parallel_sizes: null
 pipeline_model_parallel_size: 1
 pipeline_model_parallel_layout: null
 pipeline_model_parallel_comm_backend: null  # str: nccl, ucc
-encoder_pipeline_model_parallel_size: 0
-pipeline_model_parallel_split_rank: null
 decoder_first_pipeline_num_layers: null  # int
 decoder_last_pipeline_num_layers: null  # int
 num_layers_per_virtual_pipeline_stage: null  # int
@@ -83,7 +80,6 @@ moe_expert_capacity_factor: null
 moe_pad_expert_input_to_capacity: false
 moe_token_drop_policy: probs
 moe_layer_recompute: false
-moe_extended_tp: false
 moe_use_upcycling: false
 moe_permute_fusion: false
 disable_primus_topk_router: false
@@ -102,9 +98,6 @@ tp_comm_bulk_dgrad: true
 
 # Optimization flags
 gradient_accumulation_fusion: true  # Should be disabled for FSDP2
-
-# Other compatibility fields
-fused_padded_mla_attention: false
 
 # ==============================================================================
 # Important: Tokenizer Not Applicable

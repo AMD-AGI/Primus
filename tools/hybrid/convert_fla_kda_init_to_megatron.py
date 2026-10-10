@@ -34,7 +34,6 @@ After running this tool, the YAML flips to:
     use_fla_kda_in_kernel_gate: true
     use_fla_fused_norm_gated: true
     finetune: true
-    auto_continue_train: false
     no_load_optim: true
     no_load_rng: true
     load: <OUT_DIR from this script>
@@ -304,7 +303,7 @@ def write_megatron_checkpoint(mg_sd: OrderedDict, output_dir: Path) -> None:
     print(f"[save] wrote {ckpt_path}  ({ckpt_path.stat().st_size / 1e6:.1f} MB)")
 
     # latest_checkpointed_iteration.txt — Megatron uses this to discover the
-    # most recent checkpoint when `auto_continue_train: false` is unset.
+    # most recent checkpoint under `load`.
     (output_dir / "latest_checkpointed_iteration.txt").write_text("0\n")
     print(f"[save] wrote {output_dir / 'latest_checkpointed_iteration.txt'}")
 
@@ -351,7 +350,6 @@ def main():
     print(f"    use_fla_kda_in_kernel_gate: true")
     print(f"    use_fla_fused_norm_gated: true")
     print(f"    finetune: true")
-    print(f"    auto_continue_train: false")
     print(f"    no_load_optim: true")
     print(f"    no_load_rng: true")
     print(f"    load: {args.output_dir}")

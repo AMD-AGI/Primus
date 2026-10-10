@@ -1,5 +1,6 @@
-bases:
-  - mamba_base.yaml
+# The old `bases: [mamba_base.yaml]` was ignored. Do not replace it with
+# `extends` as cleanup: adopting that base changes position embeddings,
+# linear biases, dropout, and sequence parallelism.
 
 # Mamba 370M configuration
 model_type: mamba  # CRITICAL: Mamba models must use mamba model type

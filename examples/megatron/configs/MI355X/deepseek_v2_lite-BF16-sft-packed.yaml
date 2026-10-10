@@ -58,16 +58,16 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 10
 
-      # Runtime tuning env vars.
-      HSA_NO_SCRATCH_RECLAIM: 1
-      NVTE_CK_USES_BWD_V3: 1
-      GPU_MAX_HW_QUEUES: 4
-      CLEAN_DOCKER_CONTAINER: 1
-      TURBO_DEEPEEP: true
-      TURBO_GROUPED_MLP: false
-      LEGACY_GG: true
-      PRIMUS_DETERMINISTIC: 0
-      USING_AIC: 1
+      # Runtime tuning env vars do not belong in `overrides:` -- nothing here is
+      # exported. Two of the ones this experiment used to list differ from the
+      # launcher defaults in `runner/helpers/envs/base_env.sh`, so pass them at
+      # launch instead:
+      #
+      #   ./runner/primus-cli direct --env GPU_MAX_HW_QUEUES=4 --env USING_AINIC=1 \
+      #       -- train posttrain --config <this file>
+      #
+      # (`primus-cli container` takes the same `--env`, and both names are
+      # already on the container passthrough allowlist in `runner/.primus.yaml`.)
 
 
       train_iters: 20

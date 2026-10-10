@@ -1,5 +1,6 @@
-bases:
-  - language_model.yaml
+# The old `bases: [language_model.yaml]` was ignored. Do not replace it with
+# `extends` as cleanup: adopting that base changes position embeddings and
+# sequence parallelism.
 
 # MiniMax-M2.5 Model (GQA + MoE)
 # 229B total params, ~10B active params
@@ -63,6 +64,4 @@ masked_softmax_fusion: false
 disable_primus_topk_router: false
 moe_router_force_load_balancing: false
 use_deprecated_20241209_moe_layer: false
-final_logit_softcapping: null
-attn_logit_softcapping: null
 router_logit_softcapping: null
