@@ -1,8 +1,8 @@
 # Qwen3-30B-A3B FP8 tensorwise on 8x MI355X: Turbo kernel campaign (handoff)
 
-Task: [prompt.md](prompt.md). Log of every round: [logs/optimize.md](logs/optimize.md).
+Task: [prompt.md](prompt.md). Log of every round: [logs/optimize.md](logs/optimize.md). Every end-to-end run: [e2e/results.md](e2e/results.md).
 
-Status (2026-10-10): the 40,000 tokens/s/GPU target is reached. The baseline was 29,474 tokens/s/GPU and the best stack runs at 40,283 (mean of 4 runs).
+Status (2026-10-10): the 40,000 tokens/s/GPU target is reached. The baseline was 29,474 tokens/s/GPU and the best stack runs at 40,283 (mean of 4 runs). One open correctness issue: an intermittent NaN forward loss (see open items).
 
 ## End-to-end
 
@@ -67,6 +67,8 @@ It holds five commits: the FP8 attention fix, the tensorwise config, the head_di
 ## Rebuilding the stack on a new machine
 
 All of these merges are clean as of 2026-10-10.
+
+Container: every build, test and run used the image `tasimage/primus:pr-1236` (container `xiaoming-dev`, started with `--network=host --ipc=host --privileged`, `/dev/kfd`, `/dev/dri` and `/dev/infiniband`, home directory mounted). Run everything with `ulimit -c 0`, because core dumps fill the disk.
 
 Turbo:
 
