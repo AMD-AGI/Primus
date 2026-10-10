@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from primus.backends.megatron.patches.args.rocm_arg_validation import (
+    validate_turbo_fp8_permute,
     validate_turbo_grouped_gemm_without_padding,
 )
 
@@ -62,3 +63,49 @@ def test_turbo_grouped_gemm_without_padding_disabled_is_noop():
 def test_turbo_grouped_gemm_without_padding_rejects_unsupported_config(overrides, message):
     with pytest.raises(ValueError, match=message):
         validate_turbo_grouped_gemm_without_padding(_no_padding_args(**overrides))
+
+
+def _fp8_permute_args(**overrides):
+    values = {
+        "turbo_fp8_permute": True,
+        "enable_primus_turbo": True,
+        "use_turbo_deepep": True,
+        "turbo_fused_grouped_gemm": True,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"recompute_granularity": "full", "recompute_modules": ["moe_act"]},
+        {"recompute_granularity": "selective", "recompute_modules": ["core_attn"]},
+        {"recompute_granularity": "selective", "recompute_modules": None},
+    ],
+)
+def test_turbo_fp8_permute_accepts_supported_config(overrides):
+    validate_turbo_fp8_permute(_fp8_permute_args(**overrides))
+
+
+def test_turbo_fp8_permute_disabled_is_noop():
+    validate_turbo_fp8_permute(SimpleNamespace())
+    validate_turbo_fp8_permute(SimpleNamespace(turbo_fp8_permute=False, use_turbo_deepep=False))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"enable_primus_turbo": False}, "requires enable_primus_turbo=True"),
+        ({"use_turbo_deepep": False}, "requires use_turbo_deepep=True"),
+        ({"turbo_fused_grouped_gemm": False}, "requires turbo_fused_grouped_gemm=True"),
+        (
+            {"recompute_granularity": "selective", "recompute_modules": ["core_attn", "moe_act"]},
+            "does not support recompute of moe_act",
+        ),
+    ],
+)
+def test_turbo_fp8_permute_rejects_unsupported_config(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        validate_turbo_fp8_permute(_fp8_permute_args(**overrides))
