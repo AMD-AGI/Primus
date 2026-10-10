@@ -47,8 +47,8 @@ Turbo (`AMD-AGI/Primus-Turbo`):
 | `fix/moe/permute-padding-rows` | f1a59fb9 | #553 merged | TURBO permute padding rows with worst-case buffers + pad |
 | `perf/moe/permute-default-hip` | 30b6cc7c | #554 open | body: [pr_bodies/perf-moe-permute-default-hip.md](pr_bodies/perf-moe-permute-default-hip.md) |
 | `perf/moe/fp8-permute-tensorwise` | f4485b88 | #555 open | on main + #554's commit; body: [pr_bodies/perf-moe-fp8-permute-tensorwise.md](pr_bodies/perf-moe-fp8-permute-tensorwise.md) |
-| `perf/quantization/tensorwise-fp8-qwen3` | 6351abf4 | not opened | independent; body: [pr_bodies/perf-quantization-tensorwise-fp8-qwen3.md](pr_bodies/perf-quantization-tensorwise-fp8-qwen3.md) |
-| `perf/deep_ep/dispatch-layout-per-token` | 0931ba1e | opening | independent; body: [pr_bodies/perf-deep-ep-dispatch-layout-per-token.md](pr_bodies/perf-deep-ep-dispatch-layout-per-token.md) |
+| `perf/quantization/tensorwise-fp8-qwen3` | 6351abf4 | opening | independent; body: [pr_bodies/perf-quantization-tensorwise-fp8-qwen3.md](pr_bodies/perf-quantization-tensorwise-fp8-qwen3.md) |
+| `perf/deep_ep/dispatch-layout-per-token` | 0931ba1e | #557 open | independent; body: [pr_bodies/perf-deep-ep-dispatch-layout-per-token.md](pr_bodies/perf-deep-ep-dispatch-layout-per-token.md) |
 | `perf/flydsl/qk-rmsnorm-rope-hd128` | 1b920afe | #556 open | independent; needed by the Primus qk-norm patch; body: [pr_bodies/perf-flydsl-qk-rmsnorm-rope-hd128.md](pr_bodies/perf-flydsl-qk-rmsnorm-rope-hd128.md) |
 | `fix/fp8-attn-strided-layout` | c825b13e | not opened | FP8 attention with sbhd/bhsd storage; body: [pr_bodies/fix-fp8-attn-strided-layout.md](pr_bodies/fix-fp8-attn-strided-layout.md) |
 

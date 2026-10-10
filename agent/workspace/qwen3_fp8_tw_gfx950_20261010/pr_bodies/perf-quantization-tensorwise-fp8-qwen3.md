@@ -45,7 +45,7 @@ That is −0.69% ms/iter and +0.69% tokens/s/GPU. The loss difference is within 
   - covers bf16 / fp16 / fp32 × e4m3 / e5m2, unaligned row counts, and 1-row and odd-K shapes;
   - checks against the reference, and byte equality with the misaligned fallback path.
 - `tests/pytorch/ops/test_quantization.py -k tensorwise`: 116 passed (MI355X / gfx950).
-- The tensorwise FP8 GEMM / grouped GEMM tests pass.
+- Tensorwise FP8 GEMM / grouped GEMM tests (which quantize through this path): about 1400 passed.
 
 # Checklist:
 
