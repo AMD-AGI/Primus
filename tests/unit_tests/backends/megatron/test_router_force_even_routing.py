@@ -13,13 +13,12 @@ import torch
 from megatron.core.transformer.moe.router import TopKRouter
 
 import primus.backends.megatron.core.transformer.moe.router as router_mod
-from primus.backends.megatron.core.transformer.moe.router import PrimusTopKRouter
 
 NUM_TOKENS, NUM_EXPERTS, TOPK = 16, 32, 4
 
 
 def _router():
-    router = object.__new__(PrimusTopKRouter)
+    router = object.__new__(router_mod.PrimusTopKRouter)
     router.config = SimpleNamespace(num_moe_experts=NUM_EXPERTS)
     router.topk = TOPK
     return router
