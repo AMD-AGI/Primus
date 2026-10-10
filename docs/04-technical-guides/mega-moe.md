@@ -19,7 +19,7 @@ the load-balancing aux loss is computed internally and returned. Runtime target 
   baseline additionally needs the optional **rocSHMEM**. Image `rocm/primus:v26.3` is recommended.
 - **Primus-Turbo with MegaMoE**: MegaMoE requires Primus-Turbo
   (`https://github.com/AMD-AGI/Primus-Turbo.git`) at commit
-  **`9b5d3092efcbc087657b233d8e9ae662cee6ec6b` or newer** on `main`. The default image does not ship
+  **`e2d9f1d7285f3e77e9f02bdc2ad802f9322ab5f0` or newer** on `main`. The default image does not ship
   this kernel, so Primus-Turbo must be rebuilt from source. See upstream
   [main README](https://github.com/AMD-AGI/Primus-Turbo/blob/main/README.md) and
   [MegaMoE doc](https://github.com/AMD-AGI/Primus-Turbo/blob/main/docs/README_Mega_MoE.md)
@@ -32,7 +32,7 @@ conflicts. Point it at a commit for reproducibility, or at `main` to track the l
 
 ```bash
 export REBUILD_PRIMUS_TURBO=1                       # trigger the hook
-export PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b   # min required commit (or main)
+export PRIMUS_TURBO_REF=e2d9f1d7285f3e77e9f02bdc2ad802f9322ab5f0   # min required commit (or main)
 export GPU_ARCHS="gfx950"                           # build only target arch (multiple: semicolon-separated)
 # Optional: custom build dir (default /tmp/primus_turbo_<hostname>)
 # export PRIMUS_TURBO_BUILD_DIR=/tmp/primus_turbo_build
@@ -116,7 +116,7 @@ The following model settings are **required** — MegaMoE asserts on anything el
 ```yaml
 tensor_model_parallel_size: 1           # EP-only, TP=1
 add_bias_linear: false                  # no bias in linear layers
-# gated SwiGLU + SiLU activation
+# gated activation: SwiGLU (SiLU), or quick_geglu (MiniMax-M3's swigluoai)
 ```
 
 Unsupported (each raises an error): sequence-level / global aux loss, z-loss, sinkhorn, and input
@@ -142,7 +142,7 @@ token counts. Measuring under `even` therefore understates MegaMoE's gain; `unif
 balancing (for reproducibility) but preserves the step-to-step shape variation of real training.
 
 The examples below use the rebuild hook (`REBUILD_PRIMUS_TURBO=1
-PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b`) to build Primus-Turbo from source.
+PRIMUS_TURBO_REF=e2d9f1d7285f3e77e9f02bdc2ad802f9322ab5f0`) to build Primus-Turbo from source.
 
 ### Example 1 — single-node EP8, 4 layers (`primus-cli direct`)
 
@@ -157,7 +157,7 @@ set -e
 export EXP=examples/megatron/configs/MI355X/deepseek_v3-BF16-pretrain.yaml
 # Build Primus-Turbo from source before training (hook)
 export REBUILD_PRIMUS_TURBO=1
-export PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b
+export PRIMUS_TURBO_REF=e2d9f1d7285f3e77e9f02bdc2ad802f9322ab5f0
 export GPU_ARCHS=gfx950
 
 # Parallelism (EP-only) + fused MegaMoE
@@ -195,7 +195,7 @@ set -e
 
 export EXP=examples/megatron/configs/MI355X/deepseek_v3-BF16-pretrain.yaml
 export REBUILD_PRIMUS_TURBO=1
-export PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b
+export PRIMUS_TURBO_REF=e2d9f1d7285f3e77e9f02bdc2ad802f9322ab5f0
 export GPU_ARCHS=gfx950
 
 ./primus-cli direct -- train pretrain --config "$EXP" \
