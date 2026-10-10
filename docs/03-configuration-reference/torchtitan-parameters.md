@@ -93,6 +93,7 @@ modules:
 | `optimizer.weight_decay` | `0.1` | Weight decay coefficient. |
 | `optimizer.implementation` | `fused` | Kernel implementation (`fused`, `foreach`, …). |
 | `optimizer.early_step_in_backward` | `false` | Experimental: step optimizer during backward when supported. |
+| `optimizer.use_triton_fused_adam` | `false` | Primus: build `AdamW` from `TritonFusedAdamW` (Triton kernels with a device-sized grid, small tensors batched) instead of `torch.optim.AdamW(fused=True)`, whose ATen launches are capped at 320 workgroups and underuse MI455X HBM. State layout matches `torch.optim.AdamW`, so checkpoints are interchangeable; unsupported configurations fall back to the stock step. |
 
 ---
 
