@@ -37,10 +37,7 @@ def installed_patch(monkeypatch):
         return "fallback"
 
     monkeypatch.setattr(LanguageModule, "compute_language_model_loss", original)
-    path = (
-        Path(__file__).parents[2]
-        / "primus/backends/megatron/patches/turbo/cross_entropy_patches.py"
-    )
+    path = Path(__file__).parents[2] / "primus/backends/megatron/patches/turbo/cross_entropy_patches.py"
     spec = importlib.util.spec_from_file_location("ce_patch_under_test", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -62,15 +59,11 @@ def test_lm_head_backward_and_layout(installed_patch, monkeypatch, overwrite):
     labels[0, 0] = -100
     weights = torch.rand(3, 7, device="cuda")
     fake = SimpleNamespace(
-        config=SimpleNamespace(
-            tensor_model_parallel_size=1, cross_entropy_loss_fusion=True
-        )
+        config=SimpleNamespace(tensor_model_parallel_size=1, cross_entropy_loss_fusion=True)
     )
     actual = cls.compute_language_model_loss(fake, labels, logits)
     ref = (
-        F.cross_entropy(
-            ref_logits.flatten(0, 1), labels.T.contiguous().flatten(), reduction="none"
-        )
+        F.cross_entropy(ref_logits.flatten(0, 1), labels.T.contiguous().flatten(), reduction="none")
         .reshape(7, 3)
         .T.contiguous()
     )
@@ -95,9 +88,7 @@ def test_fallback(installed_patch, tp, fused, dtype):
     mod.patch_cross_entropy(None)
     assert cls.compute_language_model_loss is first
     fake = SimpleNamespace(
-        config=SimpleNamespace(
-            tensor_model_parallel_size=tp, cross_entropy_loss_fusion=fused
-        )
+        config=SimpleNamespace(tensor_model_parallel_size=tp, cross_entropy_loss_fusion=fused)
     )
     logits = torch.empty(7, 3, 1009, device="cuda", dtype=dtype)
     labels = torch.zeros(3, 7, device="cuda", dtype=torch.long)
