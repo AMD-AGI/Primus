@@ -96,3 +96,10 @@ use_turbo_rms_norm: false
 # GEMM on Transformer Engine. use_turbo_gemm moves that GEMM to Turbo as well,
 # which costs more than the norm saves on the GPT-OSS-20B shapes.
 use_turbo_norm_te_linear: false
+
+# ===== MoE gather quantization =====
+# EP1/TP1 all-to-all with the fused Turbo MXFP4 grouped MLP only.
+moe_permute_quant_fusion: false
+moe_backward_permute_quant_fusion: false
+# Preserve activation storage across identity expert sorting.
+moe_skip_identity_sort: true
