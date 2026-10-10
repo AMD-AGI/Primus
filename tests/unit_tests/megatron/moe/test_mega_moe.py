@@ -33,9 +33,12 @@ from torch.testing._internal.common_utils import (
 if not torch.cuda.is_available() or torch.version.hip is None or torch.cuda.get_device_capability() != (9, 5):
     pytest.skip("MegaMoE only supports gfx950", allow_module_level=True)
 
+from primus_turbo.pytorch.ops.moe.fused_mega_moe import GLUActivation
+
 from primus.backends.megatron.core.extensions.mega_moe import (
     MegaMoEFP8Experts,
     PrimusTurboMegaMoELayer,
+    mega_moe_activation,
 )
 
 
@@ -66,6 +69,40 @@ def _activation_config(activation):
     # MiniMax-M3's swigluoai, spelled the way Megatron does: quick_geglu with the +1 offset and limit.
     assert activation == "swigluoai", activation
     return dict(activation_func=quick_gelu, glu_linear_offset=1.0, activation_func_clamp_value=7.0)
+
+
+def _activation_fields(activation_func, glu_linear_offset=0.0, activation_func_clamp_value=None):
+    return SimpleNamespace(
+        activation_func=activation_func,
+        glu_linear_offset=glu_linear_offset,
+        activation_func_clamp_value=activation_func_clamp_value,
+    )
+
+
+@pytest.mark.parametrize("silu", [torch.nn.functional.silu, torch.nn.SiLU])
+@pytest.mark.parametrize("clamp", [None, 10.0])
+def test_mega_moe_activation_silu_keeps_kernel_default(silu, clamp):
+    # DeepSeek-V4 sets activation_func_clamp_value on a SiLU config; forwarding it would change its numerics.
+    assert mega_moe_activation(_activation_fields(silu, activation_func_clamp_value=clamp)) is None
+
+
+def test_mega_moe_activation_quick_geglu_bounds():
+    act = mega_moe_activation(_activation_fields(quick_gelu, 1.0, 7.0))
+    # Megatron's quick_geglu clamps the gate from above only and the linear half on both sides.
+    assert act == GLUActivation(
+        alpha=1.702, glu_offset=1.0, gate_clamp_lo=None, gate_clamp_hi=7.0, up_clamp=7.0
+    )
+    assert act == GLUActivation.swigluoai()
+
+    unclamped = mega_moe_activation(_activation_fields(quick_gelu, 0.5, None))
+    assert unclamped == GLUActivation(
+        alpha=1.702, glu_offset=0.5, gate_clamp_lo=None, gate_clamp_hi=None, up_clamp=None
+    )
+
+
+def test_mega_moe_activation_rejects_other_activations():
+    with pytest.raises(AssertionError):
+        mega_moe_activation(_activation_fields(torch.nn.functional.gelu))
 
 
 def _build_config(ep_size, num_moe_experts, moe_router_topk, activation="silu"):
