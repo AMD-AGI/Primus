@@ -76,7 +76,9 @@ def _steps(opt):
 
 
 def _run_pair(dtype=torch.float32, steps=4, **kwargs):
-    from primus.backends.torchtitan.components.optimizer.triton_adamw import TritonFusedAdamW
+    from primus.backends.torchtitan.components.optimizer.triton_adamw import (
+        TritonFusedAdamW,
+    )
 
     ref_params = _params(SHAPES, dtype)
     tri_params = [torch.nn.Parameter(p.detach().clone()) for p in ref_params]
@@ -111,7 +113,9 @@ def test_bf16_params_match_torch_fused_adamw():
 
 @requires_gpu
 def test_state_dict_is_interchangeable_with_torch_adamw():
-    from primus.backends.torchtitan.components.optimizer.triton_adamw import TritonFusedAdamW
+    from primus.backends.torchtitan.components.optimizer.triton_adamw import (
+        TritonFusedAdamW,
+    )
 
     ref, ref_params, tri, tri_params = _run_pair(steps=2)
 
@@ -152,7 +156,9 @@ def test_unsupported_configs_fall_back_to_torch(kwargs, monkeypatch):
 
 @requires_gpu
 def test_unsupported_tensors_use_torch_within_the_same_step():
-    from primus.backends.torchtitan.components.optimizer.triton_adamw import TritonFusedAdamW
+    from primus.backends.torchtitan.components.optimizer.triton_adamw import (
+        TritonFusedAdamW,
+    )
 
     shapes = [(4096,), (300, 7), (2048, 4096)]
     ref_params = _params(shapes) + [torch.nn.Parameter(torch.randn(500, device="cuda", dtype=torch.float64))]
@@ -171,7 +177,9 @@ def test_unsupported_tensors_use_torch_within_the_same_step():
 
 @requires_gpu
 def test_step_counts_match_torch_when_grads_are_missing():
-    from primus.backends.torchtitan.components.optimizer.triton_adamw import TritonFusedAdamW
+    from primus.backends.torchtitan.components.optimizer.triton_adamw import (
+        TritonFusedAdamW,
+    )
 
     ref_params = _params(SHAPES)
     tri_params = [torch.nn.Parameter(p.detach().clone()) for p in ref_params]
@@ -193,7 +201,9 @@ def test_step_counts_match_torch_when_grads_are_missing():
 
 @requires_gpu
 def test_closure_step_keeps_step_counts():
-    from primus.backends.torchtitan.components.optimizer.triton_adamw import TritonFusedAdamW
+    from primus.backends.torchtitan.components.optimizer.triton_adamw import (
+        TritonFusedAdamW,
+    )
 
     ref_params = _params(SHAPES)
     tri_params = [torch.nn.Parameter(p.detach().clone()) for p in ref_params]
@@ -211,9 +221,14 @@ def test_closure_step_keeps_step_counts():
 
 @requires_gpu
 def test_dcp_state_dict_round_trip():
-    from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict, set_optimizer_state_dict
+    from torch.distributed.checkpoint.state_dict import (
+        get_optimizer_state_dict,
+        set_optimizer_state_dict,
+    )
 
-    from primus.backends.torchtitan.components.optimizer.triton_adamw import TritonFusedAdamW
+    from primus.backends.torchtitan.components.optimizer.triton_adamw import (
+        TritonFusedAdamW,
+    )
 
     def model():
         torch.manual_seed(0)
@@ -269,7 +284,9 @@ def single_rank_mesh():
 def test_dtensor_params_update_local_shards(single_rank_mesh, monkeypatch):
     from torch.distributed.tensor import Shard, distribute_tensor
 
-    from primus.backends.torchtitan.components.optimizer.triton_adamw import TritonFusedAdamW
+    from primus.backends.torchtitan.components.optimizer.triton_adamw import (
+        TritonFusedAdamW,
+    )
 
     ref_params = _params(SHAPES[:5])
     tri_params = [
@@ -296,7 +313,9 @@ def test_patch_swaps_adamw_in_optimizers_container():
     pytest.importorskip("torchtitan")
     from torchtitan.components.optimizer import OptimizersContainer
 
-    from primus.backends.torchtitan.components.optimizer.triton_adamw import TritonFusedAdamW
+    from primus.backends.torchtitan.components.optimizer.triton_adamw import (
+        TritonFusedAdamW,
+    )
 
     original_init = OptimizersContainer.__init__
     try:
