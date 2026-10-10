@@ -28,6 +28,8 @@ import inspect
 import math
 import re
 
+import torch
+
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -304,6 +306,7 @@ def partition_buckets_grouped(orig_partition):
             if cur:
                 groups.append(_ParamAndGradBucketGroup(cur, buf.ddp_config, buf.data_parallel_group,
                                                        buf.data_parallel_world_size))
+        _ALL_GROUPS.extend(groups)  # phased_ar: every group's scale planes share two buffers
         return groups
 
     partition_buckets._primus_packed_param_gather = True
@@ -365,21 +368,53 @@ def refresh_packed_params(ddp):
     e.g. restored after warmup steps). Bound by ``patch_bucket_group_sync``; a no-op while the gate is off."""
 
 
-def _packed_states(group):
-    """The PackedBucket of each W6 / W4 bucket of a bucket group (built on first use)."""
-    st = getattr(group, "_ppg_states", None)
-    if st is None:
-        from primus.backends.megatron.core.extensions.mxfp6_packed_gather import PackedBucket
-        from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import ppg_formats
+def _transport():
+    from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import gates
 
-        dp = group.intra_distributed_optimizer_instance_size
-        rank = group.intra_distributed_optimizer_instance_rank
-        fmts = ppg_formats()
-        st = {id(b): PackedBucket(b, dp, rank, fmts) for b in group.buckets if getattr(b, "mxfp6_kind", "R") != "R"}
-        group._ppg_states = st
-        for b in st.values():  # the optimizer-step side (patch_fused_adam_owner_pack): this rank's pieces
-            _OWNED.update({(b.items[i][1].data[ra:rb].data_ptr(), (rb - ra) * b.items[i][4]): (b, i, ra, rb)
-                           for i, ra, rb in b.owner_pieces()})
+    return gates().packed_param_gather_transport
+
+
+def _register_owned(st):
+    """The optimizer-step side (patch_fused_adam_owner_pack): this rank's pieces of a PackedBucket."""
+    _OWNED.update({(st.items[i][1].data[ra:rb].data_ptr(), (rb - ra) * st.items[i][4]): (st, i, ra, rb)
+                   for i, ra, rb in st.owner_pieces()})
+
+
+def _packed_states(group):
+    """The PackedBucket of each W6 / W4 bucket of a bucket group (built on first use; ``phased_ar``: every packed
+    group's at once, their scale planes slices of the two shared scale buffers)."""
+    st = getattr(group, "_ppg_states", None)
+    if st is not None:
+        return st
+    from primus.backends.megatron.core.extensions.mxfp6_packed_gather import PackedBucket
+    from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import ppg_formats
+
+    fmts = ppg_formats()
+    if _transport() == "phased_ar" and group in _ALL_GROUPS:
+        groups = [g for g in _ALL_GROUPS if any(getattr(b, "mxfp6_kind", "R") != "R" for b in g.buckets)]
+        buckets = [(g, b) for g in groups for b in g.buckets if getattr(b, "mxfp6_kind", "R") != "R"]
+        n_scale = [b.param_data.numel() // 32 for _g, b in buckets]  # rs and cs: one byte per 32 elements
+        dev = buckets[0][1].param_data.device
+        _AR["fwd"] = torch.zeros(sum(n_scale), dtype=torch.uint8, device=dev)
+        _AR["bwd"] = torch.zeros(sum(n_scale), dtype=torch.uint8, device=dev)
+        _AR["groups"], off = groups, 0
+        for g in groups:
+            g._ppg_states = {}
+        for (g, b), n in zip(buckets, n_scale):
+            ext = {"rs": _AR["fwd"][off:off + n], "cs": _AR["bwd"][off:off + n]}
+            g._ppg_states[id(b)] = PackedBucket(b, g.intra_distributed_optimizer_instance_size,
+                                                g.intra_distributed_optimizer_instance_rank, fmts, external=ext)
+            off += n
+        for g in groups:
+            for b in g._ppg_states.values():
+                _register_owned(b)
+        return group._ppg_states
+    dp = group.intra_distributed_optimizer_instance_size
+    rank = group.intra_distributed_optimizer_instance_rank
+    st = {id(b): PackedBucket(b, dp, rank, fmts) for b in group.buckets if getattr(b, "mxfp6_kind", "R") != "R"}
+    group._ppg_states = st
+    for b in st.values():
+        _register_owned(b)
     return st
 
 
@@ -480,11 +515,15 @@ class _Handles:
     """One param-gather handle over several async collectives, and what must run once they are complete (on the
     stream that waits: the prob4 receivers)."""
 
-    def __init__(self, works, after=()):
+    def __init__(self, works, after=(), before=None):
         self.works = [w for w in works if w is not None]
         self.after = list(after)
+        self.before = before
 
     def wait(self):
+        if self.before is not None:
+            self.before()
+            self.before = None
         for w in self.works:
             w.wait()
         for f in self.after:
@@ -498,6 +537,7 @@ class _Dgrad:
 
     def __init__(self, issue_fn, after):
         self._issue_fn, self.after, self.works, self.issued, self.done = issue_fn, list(after), [], False, False
+        self.extra = []  # collectives on other streams the dgrad also needs (phased_ar: the dgrad scales)
 
     def issue(self):
         if not self.issued:
@@ -507,7 +547,7 @@ class _Dgrad:
         if self.done:
             return
         self.issue()
-        for w in self.works:
+        for w in self.extra + self.works:
             w.wait()
         for f in self.after:
             f()
@@ -517,9 +557,66 @@ class _Dgrad:
 # ``phased``: bucket groups whose dgrad collectives are not yet issued, in forward order
 _DGRAD_PENDING = []
 
+# every bucket group of a packed layout (partition_buckets), and the phased_ar scale state: the two shared scale
+# buffers, whether this step's packs have begun (``open``), the groups packed this step, the scale all-reduces
+_ALL_GROUPS = []
+_AR = {"fwd": None, "bwd": None, "groups": [], "open": False, "packed": set(), "fwd_work": None, "works": [],
+       "pg": None}
+
+
+def _ar_open(pg):
+    """phased_ar, the step's first gather: the previous step's scale all-reduces are complete; both scale buffers to
+    zero, so each owner's pack leaves its rows' scales and zeros elsewhere -- the all-reduce's sum is then exact.
+
+    The scale all-reduces run on their own communicator (the data-parallel ranks, created here once): on the gathers'
+    they would queue behind every plane gather already dispatched, and the first forward would wait for all of them."""
+    if _AR["open"]:
+        return
+    for w in _AR["works"]:
+        w.wait()
+    _AR["fwd"].zero_()
+    _AR["bwd"].zero_()
+    if _AR["pg"] is None:
+        ranks = torch.distributed.get_process_group_ranks(pg)
+        _AR["pg"] = torch.distributed.new_group(ranks, use_local_synchronization=True)
+    _AR.update(open=True, packed=set(), fwd_work=None, works=[])
+
+
+def _ar_pack(group):
+    if id(group) not in _AR["packed"]:
+        for st in _packed_states(group).values():
+            st.owner_pack()
+        _AR["packed"].add(id(group))
+
+
+def _ar_forward_scales():
+    """phased_ar, the first forward wait of the step (the optimizer is done): pack every group not packed yet, then one
+    SUM all-reduce of the forward scales; the compute stream waits for it here, so every later forward is behind it."""
+    if _AR["fwd_work"] is None:
+        for g in _AR["groups"]:
+            _ar_pack(g)
+        _AR["fwd_work"] = torch.distributed.all_reduce(_AR["fwd"], group=_AR["pg"], async_op=True)
+        _AR["works"].append(_AR["fwd_work"])
+    _AR["fwd_work"].wait()
+
+
+def _ar_dgrad_scales():
+    """phased_ar, at the dgrad flush: the dgrad scales' all-reduce (every group's dgrad wait waits for it too)."""
+    for g in _AR["groups"]:
+        _ar_pack(g)
+    work = torch.distributed.all_reduce(_AR["bwd"], group=_AR["pg"], async_op=True)
+    _AR["works"].append(work)
+    _AR["open"] = False  # the next step's first gather zeroes the buffers again (after these complete)
+    return work
+
 
 def _flush_dgrad():
-    """Issue every pending dgrad gather, last forward group first -- the order the backward needs them."""
+    """Issue every pending dgrad gather, last forward group first -- the order the backward needs them (phased_ar: the
+    dgrad scales' all-reduce first)."""
+    if _DGRAD_PENDING and _AR["open"]:
+        work = _ar_dgrad_scales()
+        for g in _DGRAD_PENDING:
+            g._ppg_dgrad.extra.append(work)
     for g in reversed(_DGRAD_PENDING):
         g._ppg_dgrad.issue()
     _DGRAD_PENDING.clear()
@@ -565,23 +662,24 @@ def patch_bucket_group_sync():
         _gather(self, async_op, packed_only=False)
         self.param_gather_dispatched = True
 
-    def _phased():
-        from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import gates
-
-        return gates().packed_param_gather_transport == "phased"
-
     def _gather(self, async_op, packed_only):
         """Owner packs into this rank's plane shards, then the all-gathers: planes for the W6 / W4 buckets, bf16 for the
         rest (as Megatron). ``planes``: one coalesced call. ``phased`` (overlapped gathers): the forward planes and bf16
         in one coalesced call, the dgrad copies' planes in a second one issued once the last group's forward gather is
         out and waited for in the backward (``_Dgrad``)."""
         _finish_dgrad(self)
+        mode = _transport() if async_op and not packed_only else "planes"
         states = _packed_states(self)
-        for st in states.values():
-            st.owner_pack()
         grp = self.intra_distributed_optimizer_instance_group
         rank = self.intra_distributed_optimizer_instance_rank
-        phased = async_op and not packed_only and _phased()
+        if mode == "phased_ar":
+            _ar_open(grp)
+            _ar_pack(self)
+        else:
+            for st in states.values():
+                st.owner_pack()
+            _AR["open"] = False  # a plain gather (re)fills the scale planes: phased_ar starts afresh next step
+        phased = mode in ("phased", "phased_ar")
         # prob4 / neutral: each rank finishes its own dgrad copies from the gathered planes
         recv = [st.receive for st in states.values() if st.prob4 or st.neutral]
 
@@ -594,7 +692,7 @@ def patch_bucket_group_sync():
                 for idx, bucket in enumerate(self.buckets):
                     st = states.get(id(bucket))
                     if st is not None:
-                        for out, inp in st.gather_ops(phase):
+                        for out, inp in st.gather_ops(phase, scales=mode != "phased_ar"):
                             pgb.dist_all_gather_func(out, inp, group=grp, async_op=async_op)
                         continue
                     if packed_only or phase == "bwd":
@@ -610,7 +708,9 @@ def patch_bucket_group_sync():
             return cm
 
         if phased:
-            self.param_gather_handle = _Handles([gather("fwd")])
+            self.param_gather_handle = _Handles(
+                [gather("fwd")], before=_ar_forward_scales if mode == "phased_ar" else None
+            )
             self._ppg_dgrad = _Dgrad(lambda: a2a() + [gather("bwd")], recv)
             _DGRAD_PENDING.append(self)
             if self.next_param_gather_bucket_group is None:  # the last group's forward gather is out
@@ -671,7 +771,7 @@ def patch_bucket_group_sync():
         orig_enable(self, *a, **k)
         for g in _groups(self):
             g._ppg_hooked = True
-        if _phased() and any(_packed(g) for g in _groups(self)):
+        if _transport() in ("phased", "phased_ar") and any(_packed(g) for g in _groups(self)):
             layers = set(self._get_overlap_hook_modules()[0]) if hasattr(self, "_get_overlap_hook_modules") else set()
             post = _make_dgrad_hook(self, layers)
             self._ppg_post_hooks = [m.register_forward_hook(post) for m in list(self.remove_forward_pre_hook_handles)]

@@ -204,7 +204,10 @@ class Mxfp6Gates:
     # before the group's forward. "phased": the forward planes (MXFP6 C0 / C1 or FP4 rows, their scales, and the bf16
     # buckets) before the forward; the dgrad copies' planes queued once the last group's forward gather is out, in
     # backward order, and waited for only when the backward reaches the layer -- off the forward's critical path. Same
-    # bytes into the same planes: bitwise as "planes".
+    # bytes into the same planes: bitwise as "planes". "phased_ar": as "phased", with every bucket's scale planes in two
+    # shared buffers (forward / dgrad scales) instead of gathered per bucket: each step every rank zeroes them, packs
+    # the rows it owns (all groups at once, at the first gather) and one uint8 SUM all-reduce per phase completes them
+    # (owners are disjoint, so the sum is exact) -- 2 collectives instead of 2 per packed bucket.
     packed_param_gather_transport: str = "planes"
     # The attention out-projections' dgrad (A4W4 on tilescale) also emits the attention backward's softmax_d =
     # rowsum(dO * O) per (token, head), which the attention backward then takes instead of computing it: the

@@ -255,3 +255,34 @@ def test_phased_transport_partitions_the_planes(kind, mode):
     assert fwd | bwd == every and not fwd & bwd and fwd
     names = {id(t): k for k, t in st.planes.items()}
     assert {names[i] for i in bwd} <= set(_DGRAD) and not {names[i] for i in fwd} & set(_DGRAD)
+
+
+@pytest.mark.parametrize("kind,sr", [("W6", False), ("W4", False), ("W6", True)])
+@pytest.mark.parametrize("shapes", [BIG, REP], ids=["big", "shard_cuts"])
+def test_phased_ar_scale_sum_is_exact(kind, sr, shapes):
+    """``packed_param_gather_transport: phased_ar``: each rank zeroes the shared scale buffers and packs only its own
+    rows; at most one rank writes any scale byte, and the byte-wise sum over ranks (the all-reduce) equals the scale
+    planes the per-plane transport gathers."""
+    from primus.backends.megatron.core.extensions import primus_turbo_mxfp6_local as L
+    from primus.backends.megatron.core.extensions.mxfp6_packed_gather import PackedBucket
+
+    _gates(fp4_sr_actw=sr, fwd_fp4_single_fc1=(kind == "W4"))
+    b = _bucket(list(shapes), kind)
+    ref = _gathered(b)  # the per-plane transport: every owner's pack in one set of planes
+    n = b.param_data.numel() // 32
+    total = {k: torch.zeros(n, dtype=torch.int32, device=DEV) for k in ("rs", "cs")}
+    writers = {k: torch.zeros(n, dtype=torch.int32, device=DEV) for k in ("rs", "cs")}
+    for r in range(DP):
+        ext = {"rs": torch.zeros(n, dtype=torch.uint8, device=DEV), "cs": torch.zeros(n, dtype=torch.uint8, device=DEV)}
+        st = PackedBucket(b, DP, r, L.ppg_formats(), external=ext)
+        st.step = 0
+        st.owner_pack()
+        for k in ("rs", "cs"):
+            total[k] += ext[k].int()
+            writers[k] += (ext[k] != 0).int()
+    covered = torch.zeros(n, dtype=torch.bool, device=DEV)  # the weights' bytes (padding is never read)
+    for _i, _p, s, R, K, _pieces in ref.items:
+        covered[s // 32:(s + R * K) // 32] = True
+    for k in ("rs", "cs"):
+        assert int(writers[k].max()) <= 1, f"{k}: a scale byte written by two ranks"
+        assert torch.equal(total[k].to(torch.uint8)[covered], ref.planes[k][covered]), k

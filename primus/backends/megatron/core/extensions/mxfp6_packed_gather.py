@@ -47,6 +47,7 @@ import torch
 _A2A = ("cc",)  # the dgrad copy's codes: one SR draw per destination (its scales do not depend on the draw)
 _PROB = "cp"  # prob4: the dgrad codes' round-up probabilities (4 or 2 bits per code, the codes' element order)
 _DGRAD = ("cc", "cs", _PROB)  # the dgrad copy's planes (the rest are the forward GEMM's)
+SCALES = {"rs": "fwd", "cs": "bwd"}  # the scale planes and the phase whose GEMMs read them
 DENSITY = {  # plane -> elements per byte
     "W6": {"c0": 2, "c1": 4, "rs": 32, "cc": 2, "cs": 32},
     "W4": {"r4": 2, "rs": 32, "cc": 2, "cs": 32},
@@ -64,13 +65,20 @@ def _seed(step, bucket, idx, ra):
 class PackedBucket:
     """The planes of one W6 / W4 bucket and the per-weight views into them."""
 
-    def __init__(self, bucket, dp, rank, fmts):
+    def __init__(self, bucket, dp, rank, fmts, external=None):
+        """``external``: plane name -> a caller-owned uint8 tensor of that plane's size to use as its storage (the
+        ``phased_ar`` transport keeps every bucket's scale planes in two shared buffers)."""
         self.bucket, self.dp, self.rank, self.kind = bucket, dp, rank, bucket.mxfp6_kind
         self.S, self.fmts, self.step = bucket.mxfp6_shard, fmts, 0
         n = bucket.param_data.numel()
         dev = bucket.param_data.device
         assert n == dp * self.S and all(n % d == 0 for d in DENSITY[self.kind].values())
-        self.planes = {k: torch.empty(n // d, dtype=torch.uint8, device=dev) for k, d in DENSITY[self.kind].items()}
+        external = external or {}
+        self.planes = {}
+        for k, d in DENSITY[self.kind].items():
+            t = external.get(k)
+            assert t is None or (t.dtype == torch.uint8 and t.numel() == n // d), (k, None if t is None else t.shape)
+            self.planes[k] = t if t is not None else torch.empty(n // d, dtype=torch.uint8, device=dev)
         # prob4: one dgrad copy (floor codes + probabilities) for every rank, rounded by each receiver
         self.prob_bits = int(fmts.get("col_prob_bits", 0))
         self.prob4 = self.prob_bits != 0
@@ -178,12 +186,14 @@ class PackedBucket:
         base = dst * sh - self.rank * sh
         return self.send[plane][base + s // d : base + (s + nel) // d]
 
-    def gather_ops(self, phase=None):
+    def gather_ops(self, phase=None, scales=True):
         """(output, input) of each all-gathered plane; ``phase`` "fwd" / "bwd": only the forward GEMM's planes (rows and
-        their scales) / only the dgrad copy's (column codes and scales, the prob4 probabilities)."""
+        their scales) / only the dgrad copy's (column codes and scales, the prob4 probabilities); ``scales=False``
+        leaves the scale planes out (``phased_ar`` all-reduces them instead)."""
         local = ("cc", "cs") if self.neutral else (_A2A if self.sr else ())
         return [(pl, pl.view(self.dp, -1)[self.rank]) for k, pl in self.planes.items()
-                if k not in local and (phase is None or (k in _DGRAD) == (phase == "bwd"))]
+                if k not in local and (phase is None or (k in _DGRAD) == (phase == "bwd"))
+                and (scales or k not in SCALES)]
 
     def receive(self):
         """After the gather. prob4: round this rank's copy of every dgrad code up with its probability -- one draw,
