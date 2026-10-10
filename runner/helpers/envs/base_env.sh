@@ -293,6 +293,25 @@ fi
 # process holding dmabuf-registered GPU memory segfaults inside os.fork(). That
 # needs an Energon that does not fork and ENERGON_MP_CONTEXT set away from fork,
 # so refuse rather than hand back a segfault with no explanation.
+#
+# RCCL's cuMem path needs Linux 6.8 or newer, and RCCL_FORCE_ENABLE_DMABUF skips its own
+# DMA-BUF capability check. On an older kernel (seen on 5.15 with the DKMS amdgpu driver)
+# the first collective floods the driver with exported buffers, and the driver stays
+# degraded for every later GPU job until the node reboots. Leave GDR off there unless
+# PRIMUS_RCCL_GDR_ALLOW_OLD_KERNEL=1 says this kernel and driver are known to handle it.
+_primus_kernel_ver="$(uname -r)"
+_primus_kernel_major="${_primus_kernel_ver%%.*}"
+_primus_kernel_minor="${_primus_kernel_ver#*.}"
+_primus_kernel_minor="${_primus_kernel_minor%%[!0-9]*}"
+if [ "${PRIMUS_RCCL_GDR:-0}" = "1" ] && [ "${PRIMUS_RCCL_GDR_ALLOW_OLD_KERNEL:-0}" != "1" ] &&
+    { [ "${_primus_kernel_major}" -lt 6 ] ||
+        { [ "${_primus_kernel_major}" -eq 6 ] && [ "${_primus_kernel_minor:-0}" -lt 8 ]; }; }; then
+    LOG_WARN "PRIMUS_RCCL_GDR=1 ignored: kernel ${_primus_kernel_ver} is older than 6.8, which RCCL's cuMem + DMA-BUF path needs."
+    LOG_WARN "Running without GPU-Direct RDMA. Set PRIMUS_RCCL_GDR_ALLOW_OLD_KERNEL=1 to force it."
+    export PRIMUS_RCCL_GDR=0
+fi
+unset _primus_kernel_ver _primus_kernel_major _primus_kernel_minor
+
 if [ "${PRIMUS_RCCL_GDR:-0}" = "1" ]; then
     if [ "${ENERGON_MP_CONTEXT:-fork}" = "fork" ]; then
         LOG_ERROR "PRIMUS_RCCL_GDR=1 requires ENERGON_MP_CONTEXT=forkserver (or spawn)."
