@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# env.sh — Primus JAX/MaxText venv environment (v26.6).
+# env.sh — Primus JAX/MaxText venv environment (v26.8).
 # Source this both during the build (setup.sh does it) and every time you
 # want to USE the environment:   source env.sh
 #
-# This mirrors the v26.6 JAX training Dockerfile, adapted for a no-docker /
-# no-sudo bare-metal install. In v26.6 ROCm is delivered as pip TheRock wheels
-# (`rocm-sdk-devel` 7.14.0), same as the image — not the v26.5 release tarball.
-# No system ROCm is required.
+# This mirrors the v26.8 JAX training Dockerfile, adapted for a no-docker /
+# no-sudo bare-metal install. ROCm is delivered as pip TheRock wheels
+# (`rocm-sdk-devel` 10.2.0a20260923), same as the image. No system ROCm is
+# required.
 #
 # NOTE: PRIMUS_JAX_BASE is REQUIRED (no default) — export it to a big-disk dir
 #       before sourcing this file. MaxText requires Python >= 3.12; see
@@ -41,8 +41,9 @@ export MAXTEXT_PATH="${MAXTEXT_PATH:-$MAXTEXT_DIR}"
 
 # Python interpreter used to CREATE the venv. MaxText needs >= 3.12.
 # 3.12 is PREFERRED: it is the version the reference image (ubuntu:24.04) uses,
-# and the prebuilt ROCm wheels (transformer_engine_rocm_jax, jax_rocm7_*) are
-# built for cp312 — a 3.13 venv would need those built from source instead.
+# and the version this environment is validated on. The prebuilt ROCm wheels
+# (jax_rocm10_*, transformer_engine_rocm10) also publish cp313 builds, but
+# nothing else here has been validated on 3.13.
 # Resolution order:
 #   1. An explicit python3.12 / python3.13 on PATH (3.12 first).
 #   2. A uv-managed interpreter (>= 3.12), if `uv` is installed. This is the
@@ -179,7 +180,7 @@ if [ ! -d "$MAXTEXT_PATH" ]; then
     echo "[env]          (before the 'maxtext' stage of setup.sh this is expected)" >&2
 fi
 
-# NOTE: the two HSA_* vars below are NOT in the v26.6 Dockerfile — they are a
+# NOTE: the two HSA_* vars below are NOT in the JAX Dockerfile — they are a
 # carryover workaround for HSA_STATUS_ERROR_OUT_OF_RESOURCES. Harmless, but
 # remove them if you want an exact match to the image.
 export HSA_ENABLE_SCRATCH_ASYNC_RECLAIM=0
@@ -189,7 +190,7 @@ export HSA_NO_SCRATCH_RECLAIM=1
 export ROCPROFILER_QUEUE_INTERPOSITION=0
 export DEBUG_HIP_DYNAMIC_QUEUES=0
 
-# ---- ROCm path: from the pip-installed _rocm_sdk_devel package (v26.6) ----
+# ---- ROCm path: from the pip-installed _rocm_sdk_devel package ----
 # Computed dynamically so it works for any Python minor version.
 if command -v python >/dev/null 2>&1; then
     _ROCM_SDK="$(python - <<'PY' 2>/dev/null
@@ -215,7 +216,7 @@ if [ -n "${_ROCM_SDK:-}" ]; then
     export LIBRARY_PATH="$HIP_LIB_PATH:$ROCM_PATH/lib:$ROCM_PATH/lib64"
     export CPATH="$HIP_INCLUDE_PATH"
     export PKG_CONFIG_PATH="$ROCM_PATH/lib/pkgconfig"
-    # v26.6 blanks LD_LIBRARY_PATH at runtime so TE 2.17 + JAX resolve ROCm via
+    # The image blanks LD_LIBRARY_PATH at runtime so TE + JAX resolve ROCm via
     # RPATH instead of loading a mismatched HIP copy from rocm-sdk-devel
     # (CK-JIT fmha_bwd segfault on gfx950). Source builds that need the devel
     # tree can export PRIMUS_JAX_KEEP_ROCM_LD=1.
@@ -254,7 +255,7 @@ export NCCL_DEBUG=VERSION
 # NCCL_NET_PLUGIN=none makes RCCL ignore that host plugin, matching the image.
 export NCCL_NET_PLUGIN=none
 
-# NOT in the v26.6 Dockerfile: avoids a NaN-loss issue when training on gfx950
+# NOT in the JAX Dockerfile: avoids a NaN-loss issue when training on gfx950
 # (no-op on gfx942). Keep it if you train on MI350/MI355; drop for exact parity.
 export RCCL_WARP_SPEED_AUTO=0
 

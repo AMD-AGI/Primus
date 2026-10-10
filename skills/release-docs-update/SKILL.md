@@ -122,19 +122,26 @@ python tools/release_docs/check_links.py
 snapshots; `check_links.py` catches the anchors that rotation orphans and the
 heading renames that break inbound links.
 
-Then write the management email in `tools/release_docs/announcements/vX.Y.md`, using the
-most recent release there as the model: 4-6 bullets per image family, no PR links, plain
-enough to paste into an inbox. It goes under `tools/` rather than `docs/` because ROCm
-documentation sources `docs/` from this repo and this copy is internal.
+Then write the management email in `tools/release_docs/announcements/vX.Y.md`, in the
+format set out in [reference.md → The management email](reference.md#the-management-email)
+(v26.8 is the model): one section per image family, 4-6 top-level bullets each, every
+bullet led by a bold phrase that makes the point on its own, sub-bullets for grouped
+items, plain language, no PR links and no per-model performance numbers. It goes under
+`tools/` rather than `docs/` so that ROCm documentation, which sources `docs/` from this
+repo, does not publish it. **The repo itself is public, so the file holds only the
+highlights** — a title, the images line and the two family sections. No preamble
+addressed to the next agent, and no "held back" section.
 
 The page highlights and the email are not the same document. The page explains a change
 to someone about to run the image; the email tells a manager what moved. Two rules the
 first one earned: **do not write "upgraded to X" unless the version actually changed** —
 v26.7 rebuilt JAX 0.11.0 and TE 2.17.0 on ROCm 10 without moving either version, so the
-v26.6-style upgrade line would have been false — and **record what you held back** in a
-closing section, so the next release inherits the judgement instead of re-deriving it.
-Anything marked NEEDS CONFIRMATION in the recipe notes is not email material until it is
-confirmed.
+v26.6-style upgrade line would have been false — and **report what you held back to the
+user, not in the file**. List the judgements in the Gate C summary and in
+`output/release-docs/vX.Y/announcement-notes.md` (gitignored), and turn any judgement
+that will recur into an editorial rule in reference.md. Exclusions made for disclosure
+reasons go to the user only, never into a tracked file. Anything marked NEEDS
+CONFIRMATION in the recipe notes is not email material until it is confirmed.
 
 ### Phase 6 — Recipe notes and new models
 
