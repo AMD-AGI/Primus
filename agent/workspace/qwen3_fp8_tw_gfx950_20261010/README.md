@@ -114,12 +114,10 @@ Run Python from the campaign directory with `PYTHONPATH=<turbo checkout>`. Other
 
 ## Open items
 
-- **Intermittent NaN forward loss.** Run `cfg1` of the final config (`perf/qwen3-30b-a3b-fp8-turbo`, config only) died at iteration 3 with `found NaN in local forward loss calculation` on rank 4. The per-rank traceback is in `output/.../logs/pre_trainer/rank-4/error.log`.
-  - Its 847 parsed arguments match the passing run `pr1` exactly, and the wgrad autotune winners match too.
-  - At `turbo_deepep_num_cu 160`, 1 of 13 runs hit it. The only run at 192 hit it (rank 2, iteration 5). The only run at 256 did not.
-  - None of the 5 runs at 80 CUs hit it, but those predate the fused qk-norm, fused grouped MLP and FP8 permute, so the cause is not isolated.
-  - The `turbo-opt` build includes the #553 padding fix.
-  - Next step: a DeepEP intranode dispatch/combine stress loop with exact checks at `num_sms` 80 / 160 / 192. It runs much faster than a 1-in-13 end-to-end bisection.
+- **Intermittent NaN forward loss (mitigated).** Run `cfg1` of the final config died at iteration 3 with `found NaN in local forward loss calculation` on rank 4. Rate: 1/13 at `turbo_deepep_num_cu 160`, 1/1 at 192; none at 80 (those also predated the fused paths).
+  - Idle DeepEP dispatch/combine stress at 80/160/192 (200 iters, exact checks) passed under both fences; concurrent-GEMM stress at 160 also stayed numerically clean until a launch-resource abort.
+  - Mitigation landed: Primus config sets `PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE=1` (full release/acquire fence; ~2–3%/step historically). Turbo branch `fix/deep_ep/cheap-fence-high-cu` defaults to the full fence when `num_sms > 80` unless the env forces otherwise (#539 only validated ≤80 CUs).
+  - e2e confirmation: `fence1`–`fence4` queue under `/tmp/q3_e2e_fence*.log`.
 - **Unexplained e2e jitter with FP8 permute.** The first run took 6442 ms; three later runs took 6515-6549 ms with more per-iteration jitter. These causes are ruled out:
   - the Primus change: a same-code rerun gave 6515 ms;
   - the padding fix: permute kernel times are unchanged;

@@ -36,10 +36,9 @@ From the FP8 tensorwise config to the last row: −26.8% ms/iter, +36.7% tokens/
 | this config alone | 6410.6 | 40,892 | 11.33433 |
 | this config alone | 6459.6 | 40,582 | 11.33445 |
 
-**Known issue: intermittent NaN.**
-- One more config-only run of this branch hit a NaN forward loss on rank 4 at iteration 3. Its parsed arguments match a passing run exactly.
-- Across this work, 1 of 13 20-iteration runs at `turbo_deepep_num_cu 160` hit this, as did the only run at 192 (rank 2, iteration 5).
-- None of the 5 runs at 80 CUs did. Those runs also predate the fused paths, though, so the cause is not isolated yet.
+**NaN mitigation.**
+- Intermittent NaN forward loss at `turbo_deepep_num_cu` 160/192 (~1/13). The DeepEP cheap fence (#539) was only row-validated at ≤80 CUs.
+- Config now sets `PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE=1` (full release/acquire fence). Pair with Turbo `fix/deep_ep/cheap-fence-high-cu`, which defaults to the full fence above 80 CUs.
 
 ## Changes
 
