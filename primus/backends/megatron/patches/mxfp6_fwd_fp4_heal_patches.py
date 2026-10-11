@@ -171,10 +171,26 @@ def f8_setup(plan: HealPlan) -> Dict[int, list]:
                     states.append(w._mxfp6_f8)
             if not getattr(layer, "_mxfp6_f8_hooked", False):
                 layer.register_forward_pre_hook(_f8_pre)
-                layer.register_forward_hook(_f8_post)
+                # always_call: the gates are restored even when the layer's forward raises
+                layer.register_forward_hook(_f8_post, always_call=True)
                 layer._mxfp6_f8_hooked = True
         out[idx] = states
     return out
+
+
+def f8_coverage(states: Dict[int, list]) -> Tuple[int, List[int]]:
+    """After a healed training step: how many of the planned layers' linear weights ran the FP8 forward (a pack
+    wrote their amax slot), and the layer indices with a weight that did not. A weight falls back to its MX forward
+    when aiter has no FP8 kernel for the GEMM's shape -- silently, inside the compiled forward -- so the pre-warm,
+    which runs at production shapes, is where that shows. One host sync (warmup only)."""
+    used, missed = 0, []
+    for idx, ss in states.items():
+        for st in ss:
+            if any(float(st.amax[r].item()) > 0.0 for r in st.ROLES):
+                used += 1
+            elif idx not in missed:
+                missed.append(idx)
+    return used, missed
 
 
 _IN_WARMUP = [False]
@@ -210,11 +226,13 @@ def heal_target(args) -> str:
 
 
 def prewarm_healed_graphs(models: Sequence[torch.nn.Module], run: Callable[[], None], what: str,
-                          target: str = "mxfp6", seed: bool = False) -> None:
+                          target: str = "mxfp6", seed: bool = False, strict: bool = False) -> None:
     """Run ``run`` (a training step or the validation warmup, at production shapes) with every planned layer healed,
     then restore. Under torch.compile (the warmup steps before it have compiled graphs) this compiles the healed cache
     entries, and the Dynamo graph counter must rise: otherwise the flag is not guarded and the switch would be a silent
-    no-op. ``fp8``: ``seed`` compiles the seed-step variant; the scales are reset afterwards (warmup data)."""
+    no-op. ``fp8``: ``seed`` compiles the seed-step variant; the scales are reset afterwards (warmup data). The seed
+    training step also checks that every linear weight of the healed layers ran the FP8 forward (``f8_coverage``):
+    a warning, or an error with ``strict``."""
     plan = build_heal_plan(models, target=target)
     if not plan:
         raise RuntimeError("mxfp6_fwd_fp4_heal: nothing found to heal")
@@ -223,6 +241,17 @@ def prewarm_healed_graphs(models: Sequence[torch.nn.Module], run: Callable[[], N
     set_heal(plan, len(plan), target, 0 if seed else None)
     try:
         run()
+        if states and seed and what.startswith("training"):
+            used, missed = f8_coverage(states)
+            total = sum(len(ss) for ss in states.values())
+            if missed:
+                msg = (f"mxfp6_fwd_fp4_heal: {total - used} of {total} linear weights in the healed layers did not run "
+                       f"the FP8 forward (no aiter FP8 kernel for their GEMM shapes); layers {sorted(missed)}")
+                if strict:
+                    raise RuntimeError(msg)
+                _log("WARNING: " + msg)
+            else:
+                _log(f"All {total} linear weights of the healed layers ran the FP8 forward")
     finally:
         set_heal(plan, 0, target)
         for ss in states.values():
@@ -285,6 +314,15 @@ def patch_mxfp6_fwd_fp4_heal(ctx: PatchContext) -> None:
     layers_per_iter = int(getattr(args, "mxfp6_fwd_fp4_heal_layers_per_iter", 0) or 0)
     order = getattr(args, "mxfp6_fwd_fp4_heal_order", "deep_to_shallow")
     target = heal_target(args)
+    if target == "fp8":
+        # A healed block class carries training and evaluation entries for the MX, FP8-seed and FP8 forwards (plus
+        # the grad-mode variants): close to Dynamo's default of 8 per code object, past which it falls back to eager
+        # without an error. Leave room.
+        import torch._dynamo
+
+        for knob in ("cache_size_limit", "recompile_limit"):
+            if hasattr(torch._dynamo.config, knob) and getattr(torch._dynamo.config, knob) < 16:
+                setattr(torch._dynamo.config, knob, 16)
     if getattr(args, "mlperf_mode", False) and not (
         getattr(args, "mxfp6_fwd_fp4_heal_prewarm", True) and int(getattr(args, "warmup_train_steps", 0) or 0) > 0
     ):

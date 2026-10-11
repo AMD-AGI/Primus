@@ -1716,6 +1716,8 @@ def _bf16_fc1_cols(x, w1):
 
 def _grouped_mlp_unavailable_reason():
     """Why the grouped MLP cannot run here, or None if it can."""
+    if gates().fwd_fp8:  # the grouped Function has no FP8 forward: a healed layer runs its MLPs ungrouped
+        return "the tensorwise FP8 forward (fwd_fp8) runs the MLPs ungrouped"
     if _quantize_mxfp6_dual_out is None or _quantize_mxfp6_fused_dual_out is None:
         return "this Primus-Turbo has no quantize_mxfp6_*_out ops"
     if gates().wgrad_a6w4:

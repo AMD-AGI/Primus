@@ -522,6 +522,7 @@ def _run_warmup_and_restore_impl(
                     "training step" + (" (seed)" if seed else ""),
                     heal_target(megatron_args),
                     seed,
+                    strict=bool(getattr(megatron_args, "mlperf_mode", False)),
                 )
     finally:
         config.finalize_model_grads_func = saved_finalize

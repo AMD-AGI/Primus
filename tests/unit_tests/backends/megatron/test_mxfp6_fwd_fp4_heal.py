@@ -371,6 +371,46 @@ class TestFp8Wrapper:
         assert calls == [(5, 5), (5, 0)]
 
 
+class TestFp8Hardening:
+    def test_coverage_names_the_layers_that_did_not_run_fp8(self):
+        L = _L()
+        a, b, c = L.F8State("cpu"), L.F8State("cpu"), L.F8State("cpu")
+        a.amax["a"].fill_(2.0)
+        c.amax["w"].fill_(0.5)
+        used, missed = H.f8_coverage({3: [a, b], 7: [c]})
+        assert used == 2 and missed == [3]
+        b.amax["a"].fill_(1.0)
+        assert H.f8_coverage({3: [a, b], 7: [c]}) == (3, [])
+
+    def test_gates_restored_when_a_layer_raises(self):
+        from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import Mxfp6Gates, gates, reset
+
+        layer = torch.nn.Module()
+        layer._mxfp6_fwd_fp8_healed, layer._mxfp6_fwd_fp8_seed = True, True
+
+        def boom():
+            assert gates().fwd_fp8 and gates().fwd_fp8_seed
+            raise ValueError("layer failed")
+
+        layer.forward = boom
+        layer.register_forward_pre_hook(H._f8_pre)
+        layer.register_forward_hook(H._f8_post, always_call=True)
+        reset(Mxfp6Gates())
+        with pytest.raises(ValueError):
+            layer()
+        assert (gates().fwd_fp8, gates().fwd_fp8_seed) == (False, False) and not H._F8_SAVED
+
+    def test_grouped_mlp_steps_aside_under_fp8(self):
+        L = _L()
+        from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import Mxfp6Gates, reset
+
+        reset(Mxfp6Gates(fwd_fp8=True))
+        try:
+            assert "FP8" in (L._grouped_mlp_unavailable_reason() or "")
+        finally:
+            reset(Mxfp6Gates())
+
+
 class TestFp8DelayedScaling:
     def test_amax_is_max_reduced_before_the_history(self, monkeypatch):
         L = _L()
