@@ -183,6 +183,11 @@ modules:
       mxfp6_fwd_fp4_joint_mlp: true
       mxfp6_fwd_fp4_joint_mlp_parts: "txt_fc1,txt_fc2"
       mxfp6_fwd_fp4_joint_txt_proj: true
+      # Forward healing: from this iteration on, the joint blocks' MXFP4 forwards above run MXFP6 (0 = off); all at
+      # once, or _layers_per_iter layers per iteration in _order.
+      mxfp6_fwd_fp4_heal_iter: ${PRIMUS_MXFP6_FWD_FP4_HEAL_ITER:0}
+      mxfp6_fwd_fp4_heal_layers_per_iter: ${PRIMUS_MXFP6_FWD_FP4_HEAL_LAYERS_PER_ITER:0}
+      mxfp6_fwd_fp4_heal_order: deep_to_shallow
 
       flat_grad_clip: true
       cuda_data_prefetch: true

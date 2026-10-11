@@ -15,6 +15,9 @@ hidden 3072, 24 heads of 128, MLP 12288), eager and under torch.compile:
   only (half the launches), the same number of graph breaks.
 * ``mxfp6_fwd_fp4_joint_txt_proj``: the joint out-projection pair with the text stream's forward in MXFP4. The image
   stream's output and weight gradient bitwise, the text stream at the MXFP4 error level, one more A4W4 launch.
+* ``mxfp6_fwd_fp4_heal_*``: healing a joint MLP / text out-projection (``_mxfp6_fwd_fp4_healed``) mid-process under one
+  compiled function gives bitwise what a fresh run with the MXFP4 forward off gives, through exactly one new graph, and
+  flipping back is a cache hit that reproduces the unhealed result.
 
 Stochastic rounding is off: its per-call seeds would round two runs in one process differently.
 """
@@ -212,13 +215,14 @@ def test_fwd_fp4_joint_txt_proj(compiled):
     base = dict(o=rn(S, B, K), w_img=rn(K, K, scale=0.02), w_txt=rn(K, K, scale=0.02))
     g_img, g_txt = rn(S - S_TXT, B, K), rn(S_TXT, B, K)
 
-    def fn(t):
-        out = MXFP6JointProjFunction.apply(t["o"], S_TXT, t["w_img"], t["w_txt"], False, True, False)
-        return (out[0].float() * g_img.float()).sum() + (out[1].float() * g_txt.float()).sum(), out[:2]
-
     def run(on):
         reset(Mxfp6Gates(gemm_layout="tilescale", bwd_fp4_dgrad=True, bwd_fp4_wgrad=True, joint_proj=True,
                          fwd_fp4_joint_txt_proj=on))
+
+        def fn(t):  # every argument passed: the text forward's format is the last one (joint_proj_pair passes the gate)
+            out = MXFP6JointProjFunction.apply(t["o"], S_TXT, t["w_img"], t["w_txt"], False, True, False, None, on)
+            return (out[0].float() * g_img.float()).sum() + (out[1].float() * g_txt.float()).sum(), out[:2]
+
         torch._dynamo.reset()
         t = {n: x.clone().requires_grad_(True) for n, x in base.items()}
         f = torch.compile(fn) if compiled else fn
@@ -244,3 +248,106 @@ def test_fwd_fp4_joint_txt_proj(compiled):
     assert e0 < e1 < 0.25  # MXFP6 -> MXFP4 error level on the text stream
     assert all(torch.isfinite(x).all() for x in g1.values())
     assert n1 == n0 + 1  # the text forward's A4W4 (the A4W4 backward already runs at this shape)
+
+
+# -- forward healing: the healed flag, flipped in place, under one compiled function ---------------------------------
+
+
+def _heal_check(fn, base, gates_on, gates_off, compiled):
+    """``fn(t, holder)`` reads ``holder._mxfp6_fwd_fp4_healed`` as the model does. Returns nothing; asserts that
+    healing in place equals a fresh run with the MXFP4 forward off (bitwise: output and every gradient), costs exactly
+    one compiled graph, and that un-healing is a cache hit reproducing the unhealed run."""
+    from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import (
+        Mxfp6Gates,
+        reset,
+    )
+
+    class Holder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self._mxfp6_fwd_fp4_healed = False
+
+    def step(f, holder):
+        t = {n: x.clone().requires_grad_(True) for n, x in base.items()}
+        loss, out = f(t, holder)
+        loss.backward()
+        torch.cuda.synchronize()
+        return out.detach(), {n: x.grad for n, x in t.items()}
+
+    def graphs():
+        return torch._dynamo.utils.counters["stats"].get("unique_graphs", 0)
+
+    try:
+        reset(Mxfp6Gates(**gates_off))
+        torch._dynamo.reset()
+        ref_o, ref_g = step(torch.compile(fn) if compiled else fn, Holder())
+
+        reset(Mxfp6Gates(**gates_on))
+        torch._dynamo.reset()
+        torch._dynamo.utils.counters.clear()
+        f, holder = (torch.compile(fn) if compiled else fn), Holder()
+        fp4_o, fp4_g = step(f, holder)
+        n_fp4 = graphs()
+        holder._mxfp6_fwd_fp4_healed = True
+        heal_o, heal_g = step(f, holder)
+        n_heal = graphs()
+        holder._mxfp6_fwd_fp4_healed = False
+        back_o, back_g = step(f, holder)
+        n_back = graphs()
+    finally:
+        reset(Mxfp6Gates())
+    assert torch.equal(heal_o, ref_o) and not torch.equal(heal_o, fp4_o)
+    for n in ref_g:
+        assert torch.equal(heal_g[n], ref_g[n]), n
+    assert torch.equal(back_o, fp4_o) and all(torch.equal(back_g[n], fp4_g[n]) for n in fp4_g)
+    if compiled:
+        assert n_heal > n_fp4 and n_back == n_heal  # one new entry for the healed variant; un-healing is a cache hit
+
+
+@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compile"])
+def test_fwd_fp4_heal_joint_txt_proj(compiled):
+    from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+        MXFP6JointProjFunction,
+    )
+    from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import gates
+
+    dev, bf16 = "cuda", torch.bfloat16
+    g = torch.Generator(device=dev).manual_seed(3)
+    rn = lambda *s, scale=1.0: torch.randn(*s, device=dev, dtype=bf16, generator=g) * scale  # noqa: E731
+    base = dict(o=rn(S, B, K), w_img=rn(K, K, scale=0.02), w_txt=rn(K, K, scale=0.02))
+    g_img, g_txt = rn(S - S_TXT, B, K), rn(S_TXT, B, K)
+
+    def fn(t, holder):  # as joint_proj_pair: the gate, unless the text projection is healed
+        fp4_txt = gates().fwd_fp4_joint_txt_proj and not holder._mxfp6_fwd_fp4_healed
+        out = MXFP6JointProjFunction.apply(t["o"], S_TXT, t["w_img"], t["w_txt"], False, True, False, None, fp4_txt)
+        loss = (out[0].float() * g_img.float()).sum() + (out[1].float() * g_txt.float()).sum()
+        return loss, out[1]
+
+    common = dict(gemm_layout="tilescale", bwd_fp4_dgrad=True, bwd_fp4_wgrad=True, joint_proj=True)
+    _heal_check(fn, base, dict(common, fwd_fp4_joint_txt_proj=True), dict(common), compiled)
+
+
+@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compile"])
+def test_fwd_fp4_heal_joint_mlp(compiled):
+    from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+        MXFP6MLPFunction,
+    )
+    from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import gates
+
+    dev, bf16 = "cuda", torch.bfloat16
+    g = torch.Generator(device=dev).manual_seed(4)
+    rn = lambda *s, scale=1.0: torch.randn(*s, device=dev, dtype=bf16, generator=g) * scale  # noqa: E731
+    base = dict(x=rn(S_TXT, B, K), w1=rn(F, K, scale=0.02), b1=rn(F, scale=0.02), w2=rn(K, F, scale=0.02))
+    g_out = rn(S_TXT, B, K)
+
+    def fn(t, holder):  # as MXFP6FusedMLP.forward for the text stream's MLP
+        fp4 = not holder._mxfp6_fwd_fp4_healed
+        fp4_fc1 = fp4 and gates().joint_mlp_fp4(False, "fc1")
+        fp4_fc2 = fp4 and gates().joint_mlp_fp4(False, "fc2")
+        out = MXFP6MLPFunction.apply(t["x"], t["w1"], t["b1"], t["w2"], False, True, False, fp4_fc2, fp4_fc1, False,
+                                     False)[0]
+        return (out.float() * g_out.float()).sum(), out
+
+    common = dict(gemm_layout="tilescale", bwd_fp4_dgrad=True, bwd_fp4_wgrad=True)
+    on = dict(common, fwd_fp4_joint_mlp=True, fwd_fp4_joint_mlp_parts="txt_fc1,txt_fc2")
+    _heal_check(fn, base, on, dict(common), compiled)

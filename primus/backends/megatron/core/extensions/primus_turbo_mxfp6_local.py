@@ -1102,6 +1102,9 @@ class MXFP6RowParallelLinear(RowParallelLinear):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         _init_mxfp6_linear(self)
+        # A joint block's text out-projection runs the MXFP4 forward (mxfp6_fwd_fp4_joint_txt_proj) until the
+        # mxfp6_fwd_fp4_heal_* switch sets this (joint_proj_pair reads it).
+        self._mxfp6_fwd_fp4_healed = False
 
     def _forward_impl(self, input, weight, *args, **kwargs):
         return _mxfp6_forward_impl(self, input, weight, **kwargs)
@@ -2832,19 +2835,21 @@ class MXFP6JointProjFunction(torch.autograd.Function):
     ``sd_slot``: the attention's softmax_d placeholder (``mxfp6_dgrad_emit_attn_delta``); when the dgrads can emit
     softmax_d (``_softmax_d_ok``) its gradient is that softmax_d, both streams adding into one, else None.
 
-    The text stream's projection runs the MXFP4 forward under ``mxfp6_fwd_fp4_joint_txt_proj`` (its packs write the
-    column layouts the A4W4 backward reads, so the backward is unchanged).
+    The text stream's projection runs the MXFP4 forward when ``fwd_fp4_txt`` is set (``mxfp6_fwd_fp4_joint_txt_proj``,
+    unless the layer is healed; see ``joint_proj_pair``). Its packs write the column layouts the A4W4 backward reads, so
+    the backward is unchanged.
     """
 
     @staticmethod
-    def forward(o, n_txt_rows, w_img, w_txt, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot=None):
+    def forward(
+        o, n_txt_rows, w_img, w_txt, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot=None, fwd_fp4_txt=False
+    ):
         o_txt, o_img = o[:n_txt_rows], o[n_txt_rows:]
         img = MXFP6LinearFunction.forward(
             o_img, w_img, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4
         )
         txt = MXFP6LinearFunction.forward(
-            o_txt, w_txt, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4,
-            gates().fwd_fp4_joint_txt_proj,
+            o_txt, w_txt, None, False, None, 0, 0, fuse_wgrad_accum, grad_enabled, weight_is_fp4, fwd_fp4_txt,
         )
         # (img_out, txt_out, 4 img column blobs, 4 txt column blobs)
         return (img[0], txt[0]) + tuple(img[1:]) + tuple(txt[1:])
@@ -2852,7 +2857,7 @@ class MXFP6JointProjFunction(torch.autograd.Function):
     @staticmethod
     def setup_context(ctx, inputs, output):
         ctx.b4 = _b4()  # the backward uses the formats the forward chose
-        o, n_txt_rows, w_img, w_txt, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot = inputs
+        o, n_txt_rows, w_img, w_txt, fuse_wgrad_accum, grad_enabled, weight_is_fp4, sd_slot, _ = inputs
         if not grad_enabled:
             return
         ctx.sd = sd_slot is not None  # o is then saved last (the attention saved the same storage)
@@ -2916,8 +2921,8 @@ class MXFP6JointProjFunction(torch.autograd.Function):
                 softmax_d=None if delta is None else (o.view(-1, k)[rows], delta, rows.start // nb),
             )
             grads_w.append(grad_w)
-        # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4; then sd_slot's.
-        return grad_o, None, grads_w[0], grads_w[1], None, None, None, delta
+        # Trailing Nones cover fuse_wgrad_accum, grad_enabled and weight_is_fp4; then sd_slot's, then fwd_fp4_txt.
+        return grad_o, None, grads_w[0], grads_w[1], None, None, None, delta, None
 
 
 _JOINT_PROJ_FALLBACK_WARNED = set()
@@ -2942,7 +2947,9 @@ def joint_proj_pair(proj_img, proj_txt, o, n_txt_rows, sd_slot=None):
 
     Returns ``(img_out, txt_out)`` *without* biases (both linears are skip_bias_add), or None
     when ineligible -- the caller then projects the two slices separately, as before.
-    ``sd_slot``: the attention's softmax_d placeholder, if it returned one.
+    ``sd_slot``: the attention's softmax_d placeholder, if it returned one. The text projection runs the MXFP4 forward
+    under ``mxfp6_fwd_fp4_joint_txt_proj`` until its layer is healed (``_mxfp6_fwd_fp4_healed``, set by the
+    ``mxfp6_fwd_fp4_heal_*`` switch); the choice is passed to the Function, so compiled graphs guard it.
     """
     if not gates().joint_proj:
         return None
@@ -2972,6 +2979,7 @@ def joint_proj_pair(proj_img, proj_txt, o, n_txt_rows, sd_slot=None):
         torch.is_grad_enabled(),
         proj_img._weight_is_fp4,
         sd_slot,
+        gates().fwd_fp4_joint_txt_proj and not proj_txt._mxfp6_fwd_fp4_healed,
     )
     return out[0], out[1]
 
@@ -3054,6 +3062,8 @@ class MXFP6FusedMLP(MLP):
         mode = _fused_mlp_mode()
         reason = "disabled by config" if mode == "off" else _fused_mlp_unusable_reason(self)
         self._fused_epilogue = reason == ""
+        # A joint MLP runs the MXFP4 forward (mxfp6_fwd_fp4_joint_mlp) until the mxfp6_fwd_fp4_heal_* switch sets this.
+        self._mxfp6_fwd_fp4_healed = False
 
         if not self._fused_epilogue and mode == "on":
             raise RuntimeError(f"mxfp6_fused_mlp=on but the fused MLP is unusable: {reason}")
@@ -3083,8 +3093,10 @@ class MXFP6FusedMLP(MLP):
 
         joint = bool(getattr(self, "_mxfp6_joint", False))
         img = bool(getattr(self, "_mxfp6_joint_img", False))
-        fp4_fc1 = joint and gates().joint_mlp_fp4(img, "fc1")
-        fp4_fc2 = joint and gates().joint_mlp_fp4(img, "fc2")
+        # A healed joint MLP (mxfp6_fwd_fp4_heal_*) is back on the MXFP6 forward.
+        fp4 = joint and not self._mxfp6_fwd_fp4_healed
+        fp4_fc1 = fp4 and gates().joint_mlp_fp4(img, "fc1")
+        fp4_fc2 = fp4 and gates().joint_mlp_fp4(img, "fc2")
         bf16_fc1 = img and gates().fwd_bf16_joint_img_fc1
         grad_enabled = torch.is_grad_enabled()
         # Without grad there is no autograd graph to build, so call the forward itself (as the single-block Functions

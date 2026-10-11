@@ -24,6 +24,10 @@ import logging
 import torch
 import torch.distributed
 
+from primus.backends.megatron.patches.mxfp6_fwd_fp4_heal_patches import (
+    heal_prewarm_wanted,
+    prewarm_healed_graphs,
+)
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -487,6 +491,23 @@ def _run_warmup_and_restore(
                 forward_backward_func,
                 iteration=iteration,
             )
+        # ---- 4a. mxfp6_fwd_fp4_heal: one more step on the healed forward, so its training graphs (forward and
+        # backward) are compiled before the clock starts; the restores below undo it like the steps above ----
+        if heal_prewarm_wanted(megatron_args):
+            prewarm_healed_graphs(
+                models,
+                lambda: train_step_fn(
+                    forward_step_func,
+                    synthetic_iter,
+                    model,
+                    optimizer,
+                    opt_param_scheduler,
+                    config,
+                    forward_backward_func,
+                    iteration=iteration,
+                ),
+                "training step",
+            )
     finally:
         config.finalize_model_grads_func = saved_finalize
     _log(f"Completed {warmup_steps} warmup steps")
@@ -627,6 +648,13 @@ def _run_warmup_and_restore(
     # ---- 13c. Warm the evaluation graph, which nothing above has touched ----
     if validation_steps > 0:
         _run_validation_warmup(models, forward_step_func, forward_backward_func, validation_steps)
+        # ---- 13d. ... and its healed variant (mxfp6_fwd_fp4_heal), which the first evaluation after the switch runs ----
+        if heal_prewarm_wanted(megatron_args):
+            prewarm_healed_graphs(
+                models,
+                lambda: _run_validation_warmup(models, forward_step_func, forward_backward_func, validation_steps),
+                "evaluation",
+            )
 
     # ---- 14. Synchronize ----
     torch.cuda.synchronize()

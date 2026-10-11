@@ -240,6 +240,14 @@ class BaseDiffusionConfig(TransformerConfig):
     # "all" or a comma list of img_fc1, img_fc2, txt_fc1, txt_fc2; see Mxfp6Gates.fwd_fp4_joint_mlp_parts.
     mxfp6_fwd_fp4_joint_mlp_parts: str = "all"
     mxfp6_fwd_fp4_joint_txt_proj: bool = False
+    # Forward healing: from this iteration on, the joint blocks' MXFP4 forwards (_joint_mlp, _joint_txt_proj) run MXFP6
+    # (0 = off). Applied at a train_step boundary by patches/mxfp6_fwd_fp4_heal_patches.py, either all at once or
+    # _layers_per_iter layers per iteration in _order ("deep_to_shallow" / "shallow_to_deep"); _prewarm compiles the
+    # healed graphs during the MLPerf warmup so the switch costs no compile in the timed run.
+    mxfp6_fwd_fp4_heal_iter: int = 0
+    mxfp6_fwd_fp4_heal_layers_per_iter: int = 0
+    mxfp6_fwd_fp4_heal_order: str = "deep_to_shallow"
+    mxfp6_fwd_fp4_heal_prewarm: bool = True
     # Operand layout of every MX GEMM, "blob" or "tilescale"; see Mxfp6Gates.gemm_layout.
     mxfp6_gemm_layout: str = "blob"
     mxfp6_fwd_a6w4: bool = False
@@ -269,6 +277,32 @@ class BaseDiffusionConfig(TransformerConfig):
     sensitive_layers_start: int = 0
     sensitive_layers_end: int = 0
     sensitive_layer_precision: str = "bf16"  # "bf16", "tw_fp8", or "mxfp8" (future)
+
+    def _validate_fwd_fp4_heal(self):
+        """The forward-healing switch (mxfp6_fwd_fp4_heal_*) heals what the joint blocks run in MXFP4 forward, and only
+        that: anything it cannot flip back would leave the model in a mixed end state."""
+        heal_iter = int(self.mxfp6_fwd_fp4_heal_iter or 0)
+        if heal_iter < 0 or int(self.mxfp6_fwd_fp4_heal_layers_per_iter or 0) < 0:
+            raise ValueError("mxfp6_fwd_fp4_heal_iter and mxfp6_fwd_fp4_heal_layers_per_iter must be >= 0.")
+        if self.mxfp6_fwd_fp4_heal_order not in ("deep_to_shallow", "shallow_to_deep"):
+            raise ValueError('mxfp6_fwd_fp4_heal_order is "deep_to_shallow" or "shallow_to_deep".')
+        if heal_iter == 0:
+            return
+        if not (self.mxfp6_fwd_fp4_joint_mlp or self.mxfp6_fwd_fp4_joint_txt_proj):
+            raise ValueError(
+                "mxfp6_fwd_fp4_heal_iter heals the joint blocks' MXFP4 forward, but neither mxfp6_fwd_fp4_joint_mlp nor "
+                "mxfp6_fwd_fp4_joint_txt_proj is set: the switch would change nothing."
+            )
+        if self.mxfp6_fwd_fp4_single_linear2 or self.mxfp6_fwd_fp4_single_fc1:
+            raise ValueError(
+                "mxfp6_fwd_fp4_heal_iter covers the joint blocks only; the single blocks' MXFP4 forward "
+                "(mxfp6_fwd_fp4_single_linear2 / _single_fc1) would stay MXFP4 after the switch."
+            )
+        if self.mxfp6_packed_param_gather:
+            raise ValueError(
+                "mxfp6_fwd_fp4_heal_iter cannot be combined with mxfp6_packed_param_gather: the packed gather lays out "
+                "its weight buckets from the forward formats when the model is built."
+            )
 
     def __post_init__(self):
         """Post-initialization processing."""
@@ -487,6 +521,7 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError("mxfp6_single_linear2_cat needs mxfp6_gemm_layout 'tilescale' and mxfp6_gate_mul_pack.")
         if self.mxfp6_fwd_fp4_joint_txt_proj and not self.mxfp6_joint_proj:
             raise ValueError("mxfp6_fwd_fp4_joint_txt_proj runs inside the joint out-projection pair: set mxfp6_joint_proj.")
+        self._validate_fwd_fp4_heal()
         if self.mxfp6_attn_q_norm_rope and not self.mxfp6_strided_v:
             raise ValueError("mxfp6_attn_q_norm_rope needs mxfp6_strided_v (q leaves the QKV Function as a view, like v).")
         fp4_opts = {
