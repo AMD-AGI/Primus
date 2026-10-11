@@ -34,4 +34,7 @@ They are not kept because they contain internal host names.
 | cfg2 | repeat of cfg1 | 160 | 6410.6 | 20.5 | 930.4 | 40,892 | 223.3 | 11.33433 |
 | cfg3 | repeat of cfg1 | 160 | 6459.6 | 45.4 | 923.3 | 40,582 | 223.3 | 11.33445 |
 
+| fence1–4 | cfg + `PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE=1` | 160 | pending (waiting for GPUs; node shared with vLLM on 0–3) | | | | | |
+
+
 The cfg1 and pr1 runs parsed the same 847 arguments, and their wgrad autotune winners match.
