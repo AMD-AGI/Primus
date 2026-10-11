@@ -79,3 +79,29 @@ All PR branches are based on Turbo 1103b2df (post-#455).
   1 of 13 20-iteration runs hit it; c192 hit it too. Not isolated; next step is a DeepEP intranode
   dispatch/combine stress loop with exact checks at num_sms 80 / 160 / 192.
 - All runs: e2e/results.md.
+
+## #556 cross-model check (2026-10-11)
+Microbench fused QKV RMSNorm+RoPE, main (turbo-base / D=64 only) vs #556 (turbo-pr-rope).
+S=4096, MBS matching typical EP8 configs. Unit tests: 20 passed.
+
+GPT-OSS-20B shape (D=64, the existing fused path) — no regression:
+| tree | fwd us | fwd+bwd us |
+|---|---|---|
+| main run1 | 140.5 | 361.2 |
+| main run2 | 142.9 | 363.2 |
+| #556 run1 | 140.7 | 359.8 |
+| #556 run2 | 140.9 | 360.1 |
+
+Other D=128 shapes — only reachable after Primus enables the patch for head_dim 128
+(Turbo #556 alone does not change those training paths). fused vs unfused on #556:
+| model shape | D | fused fwd+bwd | unfused fwd+bwd | speedup |
+|---|---|---|---|---|
+| gpt_oss_20B NG=8 NPG=8 | 64 | 367 | 2044 | 5.56x |
+| qwen3_30B NG=4 NPG=8 | 128 | 357 | (prior) 1244 | ~3.5x |
+| minimax_m3 NG=4 NPG=16 | 128 | 626 | 2228 | 3.56x |
+| lfm2_8B NG=8 NPG=4 | 128 | 419 | 1395 | 3.33x |
+| glm5-like NG=1 NPG=64 | 128 | 571 | 2112 | 3.70x |
+
+Models that do not hit this kernel with or without #556: no qk_layernorm, MLA
+(DeepSeek), head_dim not in {64,128} (e.g. Qwen3.5 kv_channels 256), or
+PRIMUS_FUSED_QK_RMSNORM_ROPE unset.
