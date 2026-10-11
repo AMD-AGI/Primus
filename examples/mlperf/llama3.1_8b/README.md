@@ -91,3 +91,25 @@ bash run_and_time.sh
 
 - `log_interval: 99999999` suppresses regular Primus logs
 - `RUN_RUNTIME_TUNABLES` defaults to `0`; set `RUN_RUNTIME_TUNABLES=1` to run `runtime_tunables.sh` on the host before each trial (some steps require `sudo`).
+
+### Attention backward dS layout
+
+The Megatron pre-training preparation hook applies the Llama 8B attention
+backward dS layout patch before launching training processes. It requires the
+MLPerf recipe with 32 layers, hidden size 4096, 32 query heads, 8 KV heads,
+sequence length 8192, microbatch size 4, TP1, and Turbo attention enabled.
+The kernel change is additionally limited to its BF16 gfx950 A16 Q32/KV256
+SBHD dispatch; it pads physical shared-memory rows without changing arithmetic.
+
+The helper accepts only the pinned Turbo attention source from commit
+`728e15ff2b05c575c3193ee04faad84290e6adfe` or the exact already-patched source.
+It checks the resulting source hash and replaces the installed file atomically.
+A source mismatch fails preparation. The installed source directory must be
+writable. No Turbo rebuild is needed for this Python FlyDSL kernel.
+
+Set `PRIMUS_LLAMA8B_ATTENTION_DS_LAYOUT=0` to skip preparation. For an
+unpatched comparison, start from a fresh installation/container: disabling
+preparation does not undo a patch applied by an earlier launch.
+
+CPU-only launcher checks: `python3 tests/runner/helpers/test_llama8b_attention.py`.
+Training performance and convergence must be validated on the target workload.

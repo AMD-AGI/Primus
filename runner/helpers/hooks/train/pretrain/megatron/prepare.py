@@ -19,6 +19,7 @@ from datasets import load_dataset
 from primus.core.launcher.config import PrimusConfig
 from primus.core.launcher.parser import load_primus_config
 from primus.pretrain import setup_backend_path
+from runner.helpers.hooks.train.pretrain.megatron.llama8b_attention import prepare_attention
 from runner.helpers.hooks.train.pretrain.utils import (
     default_backend_path,
     get_env_case_insensitive,
@@ -574,6 +575,7 @@ def main():
     log_info(f"BACKEND_PATH {args.backend_path}")
     # primus_config = PrimusParser().parse(args)
     primus_config, _ = load_primus_config(args, unknown)
+    prepare_attention(primus_config.get_module_config("pre_trainer"))
 
     primus_path = Path(args.primus_path).resolve()
     log_info(f"PRIMUS_PATH is set to: {primus_path}")
