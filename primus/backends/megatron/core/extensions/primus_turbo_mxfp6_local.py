@@ -451,16 +451,6 @@ class F8State:
             self.amax[r].zero_()
             self.hist[r].zero_()
 
-    def state_dict(self):
-        """The multipliers, the amax history and the amax of the step not yet rolled into it (CPU copies)."""
-        return {f"{k}_{r}": getattr(self, k)[r].detach().cpu().clone() for k in ("q", "amax", "hist")
-                for r in self.ROLES}
-
-    def load_state_dict(self, sd):
-        for k in ("q", "amax", "hist"):
-            for r in self.ROLES:
-                getattr(self, k)[r].copy_(sd[f"{k}_{r}"])
-
 
 @torch.no_grad()
 def f8_step(states, slot: int, group=None) -> None:

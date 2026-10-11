@@ -363,18 +363,6 @@ class TestFp8Wrapper:
         step(4)
         assert calls == [(0, 0), (0, 0)] and rolled == []
 
-    def test_resume_with_checkpointed_scales_continues_without_seeding(self, wrapped, monkeypatch):
-        make, calls, rolled, model = wrapped
-        restored = []
-        monkeypatch.setattr(H, "f8_restore", lambda plan, states, ck: restored.append(ck) or 5)
-        step = make(5)
-        step.heal_state["f8_ckpt"] = {"ran": 5}  # what the load wrapper stores on finding the side file
-        step(41)
-        step(42)
-        assert restored == [{"ran": 5}]
-        assert calls == [(5, 0), (5, 0)]  # healed, never a seed step
-        assert rolled == [([0, 1, 2, 3, 4], 41), ([0, 1, 2, 3, 4], 42)]  # the saved step's amax rolls first
-
     def test_resume_past_the_heal_iteration_seeds_everything(self, wrapped):
         make, calls, _, _ = wrapped
         step = make(5)
@@ -403,26 +391,6 @@ class TestFp8DelayedScaling:
         assert len(seen) == 1 and seen[0].tolist() == [2.0, 0.5, 3.0, 0.75]  # one flat all-reduce, state order
         assert a.q["a"].item() == 448.0 / 8.0
         assert b.q["a"].item() == pytest.approx(448.0 / 3.0, rel=1e-6) and b.q["w"].item() == pytest.approx(448.0 / 0.75, rel=1e-6)
-
-    def test_checkpoint_round_trip(self):
-        L = _L()
-        plan = H.build_heal_plan([_toy_model()], target="fp8")
-        states = {idx: [L.F8State("cpu"), L.F8State("cpu")] for idx, _ in plan}
-        for k, (idx, _) in enumerate(plan):
-            for st in states[idx]:
-                st.amax["a"].fill_(k + 1.0)
-                L.f8_step([st], k)
-                st.amax["w"].fill_(0.5 * (k + 1))  # this step's amax, not rolled yet
-        ck = H.f8_checkpoint(plan, states, ran=5)
-        fresh = {idx: [L.F8State("cpu"), L.F8State("cpu")] for idx, _ in plan}
-        assert H.f8_restore(plan, fresh, ck) == 5
-        for idx, _ in plan:
-            for x, y in zip(states[idx], fresh[idx]):
-                for r in L.F8State.ROLES:
-                    assert torch.equal(x.q[r], y.q[r]) and torch.equal(x.hist[r], y.hist[r])
-                    assert torch.equal(x.amax[r], y.amax[r])
-        with pytest.raises(RuntimeError, match="do not match"):
-            H.f8_restore(plan[:-1], fresh, ck)
 
 
 class TestFp8ConfigValidation:

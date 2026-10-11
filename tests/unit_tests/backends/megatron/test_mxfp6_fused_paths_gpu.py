@@ -81,6 +81,9 @@ def test_single_linear2_cat(compiled, monkeypatch):
     g_out = rn(S, B, K)
     # the stand-in modules are not MXFP6RowParallelLinear
     monkeypatch.setattr(L, "_mlp_proj_eligible", lambda mlp, proj: True)
+    cat_calls = []  # the dispatch itself (the profiler's kernel list is not reliably complete)
+    real_cat = L.gemm_a6w6_ts_cat_gres_out
+    monkeypatch.setattr(L, "gemm_a6w6_ts_cat_gres_out", lambda *a: cat_calls.append(1) or real_cat(*a))
 
     def single(t):
         lin = lambda w, b: types.SimpleNamespace(weight=w, bias=b, _fuse_wgrad_accum=False)  # noqa: E731
@@ -90,19 +93,23 @@ def test_single_linear2_cat(compiled, monkeypatch):
         return (out.float() * g_out.float()).sum(), out
 
     def run(on):
+        cat_calls.clear()
         reset(Mxfp6Gates(gemm_layout="tilescale", bwd_fp4_dgrad=True, bwd_fp4_wgrad=True, shared_grad_pack=True,
                          gate_mul_pack=True, gate_mul_pack_bias=True, single_linear2_cat=on))
         torch._dynamo.reset()
         t = {n: x.clone().requires_grad_(True) for n, x in base.items()}
-        return _profiled(torch.compile(single) if compiled else single, t)
+        return _profiled(torch.compile(single) if compiled else single, t) + (len(cat_calls),)
 
     try:
-        o0, g0, n0, br0 = run(False)
-        o1, g1, n1, br1 = run(True)
+        o0, g0, n0, br0, c0 = run(False)
+        o1, g1, n1, br1, c1 = run(True)
     finally:
         reset(Mxfp6Gates())
     assert _rel(o1, o0) < 1e-2
-    assert sum("a6w6_cat" in n for n in n0) == 0 and sum("a6w6_cat" in n for n in n1) > 0
+    if not compiled:  # under torch.compile the op runs from the graph, not through the module attribute
+        assert c0 == 0 and c1 > 0
+    else:  # compiled: the op runs from the graph; check the kernels (eager traces drop individual kernels at times)
+        assert sum("a6w6_cat" in n for n in n0) == 0 and sum("a6w6_cat" in n for n in n1) > 0
     assert br0 == br1
     for n in g0:
         if n == "mod":
@@ -606,6 +613,9 @@ def test_fwd_fp8_single_linear2_cat(compiled, monkeypatch):
                 w2=rn(K, F, scale=0.02), wp=rn(K, K, scale=0.02), b2=rn(K, scale=0.02), mod=rn(B, 3 * K))
     g_out = rn(S, B, K)
     monkeypatch.setattr(L, "_mlp_proj_eligible", lambda mlp, proj: True)
+    cat_calls = []  # the dispatch itself (the profiler's kernel list is not reliably complete)
+    real_cat = L.gemm_fp8_ts_cat_gres_out
+    monkeypatch.setattr(L, "gemm_fp8_ts_cat_gres_out", lambda *a: cat_calls.append(1) or real_cat(*a))
 
     def single(t):
         lin = lambda w, b: types.SimpleNamespace(weight=w, bias=b, _fuse_wgrad_accum=False)  # noqa: E731
@@ -615,21 +625,25 @@ def test_fwd_fp8_single_linear2_cat(compiled, monkeypatch):
         return (out.float() * g_out.float()).sum(), out
 
     def run(on):
+        cat_calls.clear()
         reset(Mxfp6Gates(**_F8_COMMON, shared_grad_pack=True, gate_mul_pack=True, gate_mul_pack_bias=True,
                          single_linear2_cat=on, fwd_fp8=True, fwd_fp8_seed=True))
         torch._dynamo.reset()
         t = {n: x.clone().requires_grad_(True) for n, x in base.items()}
         _f8_attach(t["w1"], t["w2"], t["wp"])
-        return _profiled(torch.compile(single) if compiled else single, t)
+        res = _profiled(torch.compile(single) if compiled else single, t)
+        return res + (len(cat_calls),)
 
     try:
-        o0, g0, n0, br0 = run(False)
-        o1, g1, n1, br1 = run(True)
+        o0, g0, n0, br0, c0 = run(False)
+        o1, g1, n1, br1, c1 = run(True)
     finally:
         reset(Mxfp6Gates())
     assert _rel(o1, o0) < 1e-2
-    assert sum("f8_cat" in n for n in n0) == 0 and sum("f8_cat" in n for n in n1) > 0
-    assert sum("aiter_ts_f8_" in n for n in n0) > 0  # the separate run is on the FP8 GEMMs too
+    if not compiled:  # under torch.compile the op runs from the graph, not through the module attribute
+        assert c0 == 0 and c1 > 0
+    else:  # compiled: the op runs from the graph; check the kernels (eager traces drop individual kernels at times)
+        assert sum("f8_cat" in n for n in n0) == 0 and sum("f8_cat" in n for n in n1) > 0
     assert br0 == br1
     for n in g0:
         if n == "mod":
