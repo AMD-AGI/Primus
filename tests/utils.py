@@ -12,11 +12,35 @@ import subprocess
 import sys
 import time
 import unittest
+import uuid
 from typing import Optional
 
 from primus.core.utils import logger
 
 TRAINING_COMPLETED_MARKER = "Training completed."
+
+
+def isolated_torchrun_env(env: Optional[dict] = None) -> dict:
+    """Give each single-node test launch its own kernel-assigned rendezvous port.
+
+    Distributed fixtures can leave MASTER_PORT in the parent environment. A
+    bind/close probe also releases its chosen port before torchrun can use it.
+    Torchrun's c10d endpoint accepts port 0 and holds the socket it allocates,
+    avoiding both stale inherited ports and the probe-to-launch race.
+    """
+    env = dict(os.environ if env is None else env)
+    if int(env.get("NNODES", env.get("SLURM_NNODES", "1"))) != 1:
+        return env
+    # PET_* are torchrun's native argument defaults. The production launcher
+    # and multi-node rendezvous settings do not need to change for these tests.
+    env.update(
+        PET_RDZV_BACKEND="c10d",
+        PET_RDZV_ENDPOINT="127.0.0.1:0",
+        PET_RDZV_ID=uuid.uuid4().hex,
+        PET_LOCAL_ADDR="127.0.0.1",
+    )
+    return env
+
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -178,8 +202,8 @@ def run_training_script(
     # ~20s per end-to-end test. The marker we rely on ("Training completed.")
     # is emitted well before cleanup(), so this does not affect assertions.
     # Developers can opt out locally via PRIMUS_EXIT_FAST=0.
-    if env is not None:
-        env.setdefault("PRIMUS_EXIT_FAST", "1")
+    env = isolated_torchrun_env(env)
+    env.setdefault("PRIMUS_EXIT_FAST", "1")
 
     try:
         logger.info(f"[{tag}] Begin run...")
