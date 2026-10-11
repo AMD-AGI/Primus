@@ -178,18 +178,26 @@ class _DeferredTrainingLog:
 
 
 def _flushing_train(orig_train, deferred):
-    """``train`` that writes the last deferred training_log when it returns, and also when it leaves through
-    ``sys.exit`` (exit interval, exit signal) or an exception. A failing flush there does not replace the exception
-    that is already propagating."""
+    """``train`` that writes the last deferred training_log when it returns or leaves through ``sys.exit`` (Megatron's
+    exit interval, exit signal and duration limit: every rank decides those together, through a collective).
+
+    Any other exception may be this rank's alone (an out-of-memory error, a bad batch), and the deferred training_log
+    can issue collectives -- the single-node log forwarding is a gloo broadcast -- that the other ranks will never
+    join: flushing there would hold the failing rank in that collective until the distributed timeout, turning the
+    crash into a hang instead of letting the launcher stop the job. Its last deferred line is dropped instead. A
+    failing flush on the ``sys.exit`` path does not replace the exit that is already propagating."""
 
     def train(*a, **k):
         try:
             result = orig_train(*a, **k)
-        except BaseException:
+        except SystemExit:
             try:
                 deferred.flush()
             except Exception as err:  # noqa: BLE001
                 log_rank_0(f"[Patch:megatron.training.light_log_sync_events] last deferred training_log lost: {err}")
+            raise
+        except BaseException:
+            deferred.pending = None  # never run collectives on a path the other ranks may not take
             raise
         deferred.flush()
         return result
