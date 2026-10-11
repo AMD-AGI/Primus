@@ -232,6 +232,13 @@ class Mxfp6Gates:
     # (ctx.b4), so its backward follows the forward's choice. per_block compile only.
     bwd_fp4_a6w6_first: int = 0
     bwd_fp4_a6w6_last: int = 0
+    # Tensorwise FP8 forward. Runtime only, never a config key: the forward-healing switch (target "fp8",
+    # patches/mxfp6_fwd_fp4_heal_patches.py) sets it around a healed layer's forward. Every forward GEMM of the layer
+    # then runs E4M3 x E4M3 with delayed per-tensor scales (``weight._mxfp6_f8``) on aiter's FP8 tilescale kernels;
+    # its packs still write the MX columns the backward reads, so the backward is unchanged. fwd_fp8_seed: the
+    # layer's first FP8 step, whose scales come from the operands themselves (no amax history yet).
+    fwd_fp8: bool = False
+    fwd_fp8_seed: bool = False
 
     # --- MXFP4 quantization options (the FP4 packs of the A4W4 GEMMs; MXFP6 packs are unaffected) ---
     # E8M0 scale rule per operand class: "rceil" = ceil_pow2(amax / 6), never saturates (the default);
@@ -362,6 +369,15 @@ RETIRED_KEYS = {
 }
 
 
+# Gates set at run time only (by the forward-healing switch), never read from or written to a config.
+RUNTIME_ONLY = frozenset({"fwd_fp8", "fwd_fp8_seed"})
+
+
+def config_fields():
+    """The Mxfp6Gates fields that are config keys (``mxfp6_<name>``): all but the runtime-only ones."""
+    return [f for f in fields(Mxfp6Gates) if f.name not in RUNTIME_ONLY]
+
+
 def check_retired(source) -> None:
     """Raise if ``source`` (a config or the parsed arguments) sets a retired key."""
     hit = [k for k in RETIRED_KEYS if getattr(source, k, None) is not None]
@@ -430,7 +446,7 @@ def configure(config) -> Mxfp6Gates:
     check_retired(config)
     resolved = Mxfp6Gates()
     defaults = Mxfp6Gates()
-    for f in fields(Mxfp6Gates):
+    for f in config_fields():
         key = f"mxfp6_{f.name}"
         if hasattr(config, key):
             setattr(resolved, f.name, getattr(config, key))

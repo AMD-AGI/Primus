@@ -392,6 +392,121 @@ try:  # mxfp6_single_linear2_cat: the out-proj + fc2 GEMM with the gated residua
     _CAT_TS = a6w6_ts_cat_table()
 except ImportError:  # an older Primus-Turbo: the gate never engages
     _CAT_TS, gemm_a6w6_ts_cat_gres_out = frozenset(), None
+try:  # tensorwise FP8 forward (Mxfp6Gates.fwd_fp8): aiter's FP8 tilescale kernels
+    from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import (
+        fp8_ts_table,
+        gemm_fp8_ts_impl,
+        gemm_fp8_ts_out_impl,
+    )
+
+    _F8_TS = fp8_ts_table()
+except ImportError:  # an older Primus-Turbo: the FP8 forward never engages
+    _F8_TS, gemm_fp8_ts_impl, gemm_fp8_ts_out_impl = None, None, None
+
+_F8_MAX = 448.0  # E4M3's largest finite value
+
+
+def f8_available() -> bool:
+    """Whether this Primus-Turbo / aiter can run the tensorwise FP8 forward at all."""
+    return _F8_TS is not None and bool(_F8_TS[0] or _F8_TS[1]) and hasattr(_mx, "quantize_mx_dual_f8")
+
+
+def _f8_fwd(m, n, k, bias):
+    """Whether this forward GEMM runs tensorwise FP8: ``Mxfp6Gates.fwd_fp8`` is on (around a healed layer's forward)
+    and aiter has the kernel; otherwise the layer's MX forward runs. Plain arithmetic on import-time data."""
+    return (
+        gates().fwd_fp8
+        and _F8_TS is not None
+        and tilescale_table_has(_F8_TS, int(m), int(n), int(k), bias is not None)
+    )
+
+
+class F8State:
+    """A linear weight's delayed tensorwise-FP8 scales: the quantization multipliers of its input activation ("a")
+    and of the weight ("w"), the slots this step's packs max their amax into, and the amax history. Attached as
+    ``weight._mxfp6_f8`` by the forward-healing switch, which rolls the multipliers from the history at each step
+    boundary (``f8_step``): multiplier = 448 / max(history). Forwards without grad (evaluation) max into ``scratch``,
+    which nothing reads: evaluation data never moves the training scales."""
+
+    ROLES = ("a", "w")
+
+    def __init__(self, device, history=16):
+        self.q = {r: torch.ones(1, device=device) for r in self.ROLES}
+        self.amax = {r: torch.zeros(1, device=device) for r in self.ROLES}
+        self.hist = {r: torch.zeros(history, device=device) for r in self.ROLES}
+        self.scratch = torch.zeros(1, device=device)
+
+    def reset(self):
+        for r in self.ROLES:
+            self.q[r].fill_(1.0)
+            self.amax[r].zero_()
+            self.hist[r].zero_()
+
+
+@torch.no_grad()
+def f8_step(states, slot: int) -> None:
+    """Step boundary (outside compiled code): record each state's amax of the step that just ran in history slot
+    ``slot``, set every multiplier to 448 / max(history) and clear the amax slots. A handful of fused launches for any
+    number of states."""
+    if not states:
+        return
+    amax = [s.amax[r] for s in states for r in F8State.ROLES]
+    hist = [s.hist[r] for s in states for r in F8State.ROLES]
+    q = [s.q[r] for s in states for r in F8State.ROLES]
+    h = hist[0].numel()
+    torch._foreach_copy_([t[slot % h : slot % h + 1] for t in hist], amax)
+    mx = torch._foreach_norm(hist, float("inf"))
+    torch._foreach_clamp_min_(mx, 1e-30)
+    torch._foreach_copy_(q, torch._foreach_div([torch.full_like(m_, _F8_MAX) for m_ in mx], mx))
+    torch._foreach_zero_(amax)
+
+
+def _f8_q(w, role, seed_src):
+    """The quantization multiplier of ``w``'s operand ``role``: the delayed one, or on a seed step (the layer's first
+    FP8 step) 448 / amax of the operand itself (``seed_src()``)."""
+    if gates().fwd_fp8_seed:
+        amax = seed_src().detach().abs().amax().float().reshape(1)
+        return _F8_MAX / amax.clamp_min(1e-30)
+    return w._mxfp6_f8.q[role]
+
+
+def _f8_pack(x, w, role, fmt, q, training, fused=None):
+    """(row, dequant factor, col, col scales) of one FP8 forward operand; ``fused`` = (bias, prologue mode) packs
+    ``prologue(x + bias)`` instead (the fused packer is dual only). ``training``: the MX columns are packed too and the
+    amax goes to the state's slot (else to its scratch)."""
+    st = w._mxfp6_f8
+    amax = st.amax[role] if training else st.scratch
+    if fused is not None:
+        row, _, col, col_s, _ = _mx.quantize_mx_fused_dual_f8(x, None, fused[0], fused[1], False, fmt, q, amax)
+    elif training:
+        row, _, col, col_s = _mx.quantize_mx_dual_f8(x, fmt, q, amax)
+    else:
+        (row, _), col, col_s = _mx.quantize_mx_f8(x, fmt, q, amax), None, None
+    if not training:
+        col = col_s = None
+    return row, 1.0 / q, col, col_s
+
+
+def _f8_act(x, w, grad_enabled):
+    """A linear's input as the FP8 forward operand, plus (training) the MX column its wgrad reads."""
+    fmt = _mx.with_ts8_row(_act_fmt(x.shape, w.shape[0]) if grad_enabled else 0)
+    return _f8_pack(x, w, "a", fmt, _f8_q(w, "a", lambda: x), grad_enabled)
+
+
+def _f8_act_gelu(y1, b1, w2, grad_enabled):
+    """fc2's input gelu(y1 + b1) as the FP8 forward operand, formed inside the packer (never in HBM)."""
+    fmt = _mx.with_ts8_row(_act_fmt(y1.shape, w2.shape[0]))
+
+    def seed():
+        return F.gelu((y1 + b1).float(), approximate="tanh")
+
+    return _f8_pack(y1, w2, "a", fmt, _f8_q(w2, "a", seed), grad_enabled, (b1, MXFP6_PROLOGUE_BIAS_GELU))
+
+
+def _f8_weight(w, m, grad_enabled):
+    """A weight as the FP8 forward operand, plus (training) the MX column its dgrad reads."""
+    fmt = _mx.with_ts8_row(_weight_fmt(w.shape, m) if grad_enabled else 0)
+    return _f8_pack(w, w, "w", fmt, _f8_q(w, "w", lambda: w), grad_enabled)
 
 
 def _ts_fwd(m, n, k, bias, weight_is_fp4):
@@ -747,6 +862,14 @@ class MXFP6LinearFunction(torch.autograd.Function):
 
         m, k = input_2d.shape
         n = weight.shape[0]
+
+        if _f8_fwd(m, n, k, bias):  # tensorwise FP8 forward (fwd_fp8); the columns are the backward's, as below
+            if defer or backward_is_fp8:
+                raise ValueError("the tensorwise FP8 forward takes no defer and no FP8 backward")
+            a_row, a_s, a_col, a_col_scale = _f8_act(input_2d, weight, grad_enabled)
+            b_row, b_s, b_col, b_col_scale = _f8_weight(weight, m, grad_enabled)
+            output = gemm_fp8_ts_impl(a_row, a_s, b_row, b_s, m, n, k, bias)
+            return output.reshape(*orig_shape[:-1], n), a_col, a_col_scale, b_col, b_col_scale
 
         # The column blobs are backward's operands and nothing else reads them, so a forward
         # with no backward behind it should not pay for them. Eval is entirely such a region,
@@ -1356,6 +1479,17 @@ class MXFP6MLPFunction(torch.autograd.Function):
         m, k = x.shape
         f = w1.shape[0]
         h = w2.shape[0]
+
+        if not bf16_fc1 and _f8_fwd(m, f, k, None) and _f8_fwd(m, h, f, None):  # tensorwise FP8 forward (fwd_fp8)
+            if defer_fc2:
+                raise ValueError("the tensorwise FP8 forward takes no defer_fc2")
+            x_row, x_s, x_col, x_col_s = _f8_act(x, w1, grad_enabled)
+            w1_row, w1_s, w1_col, w1_col_s = _f8_weight(w1, m, grad_enabled)
+            y1 = gemm_fp8_ts_impl(x_row, x_s, w1_row, w1_s, m, f, k, None)
+            a_row, a_s, a_col, a_col_s = _f8_act_gelu(y1, b1, w2, grad_enabled)
+            w2_row, w2_s, w2_col, w2_col_s = _f8_weight(w2, m, grad_enabled)
+            output = gemm_fp8_ts_impl(a_row, a_s, w2_row, w2_s, m, h, f, None).reshape(*orig_shape[:-1], h)
+            return output, y1, x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s
 
         # Same reasoning as MXFP6LinearFunction: the column blobs are backward's operands,
         # so a no-grad forward should not pay for them. See the note there on why
@@ -2067,35 +2201,40 @@ class MXFP6QKVNormRopeFunction(torch.autograd.Function):
 
         # Same reasoning as MXFP6LinearFunction: the column blobs are backward's operands, so
         # a no-grad forward should not pay for them.
-        ts = _ts_fwd(m, n, k, b_qkv, weight_is_fp4)
-        if grad_enabled:
-            x_row, x_row_s, x_col, x_col_s = _pack_act_dual(
-                x, gates().wgrad_a6w4, n_out=w_qkv.shape[0], ts=ts
-            )
-            w_row, w_row_s, w_col, w_col_s = _pack_weight_dual(w_qkv, weight_is_fp4, m=x.shape[0], ts=ts)
+        if _f8_fwd(m, n, k, b_qkv):  # tensorwise FP8 forward (fwd_fp8); the columns are the backward's, as below
+            x_row, x_s, x_col, x_col_s = _f8_act(x, w_qkv, grad_enabled)
+            w_row, w_s, w_col, w_col_s = _f8_weight(w_qkv, m, grad_enabled)
+            mixed_qkv = gemm_fp8_ts_impl(x_row, x_s, w_row, w_s, m, n, k, b_qkv)
         else:
-            x_row, x_row_s = _pack_act_row(x, ts)
-            w_row, w_row_s = _pack_weight_row(w_qkv, weight_is_fp4, ts)
-            x_col = x_col_s = w_col = w_col_s = None
+            ts = _ts_fwd(m, n, k, b_qkv, weight_is_fp4)
+            if grad_enabled:
+                x_row, x_row_s, x_col, x_col_s = _pack_act_dual(
+                    x, gates().wgrad_a6w4, n_out=w_qkv.shape[0], ts=ts
+                )
+                w_row, w_row_s, w_col, w_col_s = _pack_weight_dual(w_qkv, weight_is_fp4, m=x.shape[0], ts=ts)
+            else:
+                x_row, x_row_s = _pack_act_row(x, ts)
+                w_row, w_row_s = _pack_weight_row(w_qkv, weight_is_fp4, ts)
+                x_col = x_col_s = w_col = w_col_s = None
 
-        # The bias is folded into the GEMM's epilogue, so mixed_qkv is the biased projection
-        # -- which is what the norm consumes and what the prologue re-reads in the backward.
-        mixed_qkv = gemm_fp6_impl(
-            x_row,
-            x_row_s,
-            w_row,
-            w_row_s,
-            m,
-            n,
-            k,
-            out_dtype,
-            _GRAN_VALUE,
-            b_qkv,
-            weight_is_fp4,
-            a6w6_ts=ts is True,
-            a6w4_ts=ts == "a6w4",
-            b_c1=_ppg_c1(w_qkv) if ts is True else None,
-        )
+            # The bias is folded into the GEMM's epilogue, so mixed_qkv is the biased projection
+            # -- which is what the norm consumes and what the prologue re-reads in the backward.
+            mixed_qkv = gemm_fp6_impl(
+                x_row,
+                x_row_s,
+                w_row,
+                w_row_s,
+                m,
+                n,
+                k,
+                out_dtype,
+                _GRAN_VALUE,
+                b_qkv,
+                weight_is_fp4,
+                a6w6_ts=ts is True,
+                a6w4_ts=ts == "a6w4",
+                b_c1=_ppg_c1(w_qkv) if ts is True else None,
+            )
 
         # The norm and rotation, unchanged. This is the production Triton op, on the
         # [..., num_heads, 3 * head_dim] view it expects; only its *backward* is replaced.
@@ -2365,61 +2504,70 @@ class MXFP6JointQKVFunction(torch.autograd.Function):
         d = wq_a.shape[0]
         h = n // (3 * d)
 
-        packs, ts = [], []
-        for x, w, b in ((xa, w_a, b_a), (xb, w_b, b_b)):
-            ts.append(_ts_fwd(x.shape[0], n, k, b, weight_is_fp4))
-            if grad_enabled:
-                x_row, x_row_s, x_col, x_col_s = _pack_act_dual(
-                    x, gates().wgrad_a6w4, n_out=w.shape[0], ts=ts[-1]
-                )
-                w_row, w_row_s, w_col, w_col_s = _pack_weight_dual(
-                    w, weight_is_fp4, m=x.shape[0], ts=ts[-1]
-                )
-            else:
-                x_row, x_row_s = _pack_act_row(x, ts[-1])
-                w_row, w_row_s = _pack_weight_row(w, weight_is_fp4, ts[-1])
-                x_col = x_col_s = w_col = w_col_s = None
-            packs.append((x_row, x_row_s, x_col, x_col_s, w_row, w_row_s, w_col, w_col_s))
+        if _f8_fwd(m_a, n, k, b_a) and _f8_fwd(m_b, n, k, b_b):  # tensorwise FP8 forward (fwd_fp8)
+            packs = []
+            mixed_qkv = torch.empty(m_a + m_b, n, device=xa.device, dtype=out_dtype)
+            for x, w, b, rows in ((xa, w_a, b_a, slice(0, m_a)), (xb, w_b, b_b, slice(m_a, m_a + m_b))):
+                x_row, x_s, x_col, x_col_s = _f8_act(x, w, grad_enabled)
+                w_row, w_s, w_col, w_col_s = _f8_weight(w, x.shape[0], grad_enabled)
+                gemm_fp8_ts_out_impl(x_row, x_s, w_row, w_s, mixed_qkv[rows], x.shape[0], n, k, b)
+                packs.append((None, None, x_col, x_col_s, None, None, w_col, w_col_s))
+        else:
+            packs, ts = [], []
+            for x, w, b in ((xa, w_a, b_a), (xb, w_b, b_b)):
+                ts.append(_ts_fwd(x.shape[0], n, k, b, weight_is_fp4))
+                if grad_enabled:
+                    x_row, x_row_s, x_col, x_col_s = _pack_act_dual(
+                        x, gates().wgrad_a6w4, n_out=w.shape[0], ts=ts[-1]
+                    )
+                    w_row, w_row_s, w_col, w_col_s = _pack_weight_dual(
+                        w, weight_is_fp4, m=x.shape[0], ts=ts[-1]
+                    )
+                else:
+                    x_row, x_row_s = _pack_act_row(x, ts[-1])
+                    w_row, w_row_s = _pack_weight_row(w, weight_is_fp4, ts[-1])
+                    x_col = x_col_s = w_col = w_col_s = None
+                packs.append((x_row, x_row_s, x_col, x_col_s, w_row, w_row_s, w_col, w_col_s))
 
-        # One buffer for both projections. Rows are sequence-major within a stream, so
-        # stacking stream a above stream b and reshaping gives exactly the joint sequence
-        # the cat used to build.
-        mixed_qkv = torch.empty(m_a + m_b, n, device=xa.device, dtype=out_dtype)
-        # Each stream's QKV bias is folded into its GEMM's store epilogue, as the per-stream
-        # MXFP6QKVNormRopeFunction does through gemm_fp6_impl. (BUG-2: until 2026-09-30 this
-        # call passed no bias, so both streams' QKV biases were missing from the forward.)
-        gemm_fp6_out_impl(
-            packs[0][0],
-            packs[0][1],
-            packs[0][4],
-            packs[0][5],
-            mixed_qkv[:m_a],
-            m_a,
-            n,
-            k,
-            _GRAN_VALUE,
-            weight_is_fp4,
-            b_a,
-            a6w6_ts=ts[0] is True,
-            a6w4_ts=ts[0] == "a6w4",
-            b_c1=_ppg_c1(w_a) if ts[0] is True else None,
-        )
-        gemm_fp6_out_impl(
-            packs[1][0],
-            packs[1][1],
-            packs[1][4],
-            packs[1][5],
-            mixed_qkv[m_a:],
-            m_b,
-            n,
-            k,
-            _GRAN_VALUE,
-            weight_is_fp4,
-            b_b,
-            a6w6_ts=ts[1] is True,
-            a6w4_ts=ts[1] == "a6w4",
-            b_c1=_ppg_c1(w_b) if ts[1] is True else None,
-        )
+            # One buffer for both projections. Rows are sequence-major within a stream, so
+            # stacking stream a above stream b and reshaping gives exactly the joint sequence
+            # the cat used to build.
+            mixed_qkv = torch.empty(m_a + m_b, n, device=xa.device, dtype=out_dtype)
+            # Each stream's QKV bias is folded into its GEMM's store epilogue, as the per-stream
+            # MXFP6QKVNormRopeFunction does through gemm_fp6_impl. (BUG-2: until 2026-09-30 this
+            # call passed no bias, so both streams' QKV biases were missing from the forward.)
+            gemm_fp6_out_impl(
+                packs[0][0],
+                packs[0][1],
+                packs[0][4],
+                packs[0][5],
+                mixed_qkv[:m_a],
+                m_a,
+                n,
+                k,
+                _GRAN_VALUE,
+                weight_is_fp4,
+                b_a,
+                a6w6_ts=ts[0] is True,
+                a6w4_ts=ts[0] == "a6w4",
+                b_c1=_ppg_c1(w_a) if ts[0] is True else None,
+            )
+            gemm_fp6_out_impl(
+                packs[1][0],
+                packs[1][1],
+                packs[1][4],
+                packs[1][5],
+                mixed_qkv[m_a:],
+                m_b,
+                n,
+                k,
+                _GRAN_VALUE,
+                weight_is_fp4,
+                b_b,
+                a6w6_ts=ts[1] is True,
+                a6w4_ts=ts[1] == "a6w4",
+                b_c1=_ppg_c1(w_b) if ts[1] is True else None,
+            )
 
         s_a, s_b, batch = shape_a[0], shape_b[0], shape_a[1]
         qkv = mixed_qkv.reshape(s_a + s_b, batch, h, 3 * d)
@@ -3360,6 +3508,8 @@ def _linear2_cat_ok(mlp, proj, x, o, gate, residual, weight_is_fp4):
     """Whether the single block's out-proj + fc2 can run as one gated-residual GEMM (``mxfp6_single_linear2_cat``):
     both A6W6 tilescale forwards and aiter has the kernel for the shapes. Plain arithmetic on import-time data."""
     if not gates().single_linear2_cat or gates().fwd_fp4_single_linear2 or gemm_a6w6_ts_cat_gres_out is None:
+        return False
+    if gates().fwd_fp8:  # the FP8 forward runs the two GEMMs and the gated residual separately
         return False
     if residual is None or residual.shape != x.shape or not residual.is_contiguous() or gate.stride(-1) != 1:
         return False

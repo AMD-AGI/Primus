@@ -188,6 +188,9 @@ modules:
       mxfp6_fwd_fp4_heal_iter: ${PRIMUS_MXFP6_FWD_FP4_HEAL_ITER:0}
       mxfp6_fwd_fp4_heal_layers_per_iter: ${PRIMUS_MXFP6_FWD_FP4_HEAL_LAYERS_PER_ITER:0}
       mxfp6_fwd_fp4_heal_order: deep_to_shallow
+      # mxfp6: the MXFP4 forwards above go back to MXFP6. fp8: every forward linear of the healed layers runs
+      # tensorwise FP8 (E4M3, delayed per-tensor scales); the backward is unchanged.
+      mxfp6_fwd_fp4_heal_target: ${PRIMUS_MXFP6_FWD_FP4_HEAL_TARGET:mxfp6}
 
       flat_grad_clip: true
       cuda_data_prefetch: true

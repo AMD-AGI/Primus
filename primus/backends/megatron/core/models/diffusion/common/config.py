@@ -9,7 +9,6 @@ TransformerConfig to include diffusion-specific parameters.
 """
 
 from dataclasses import dataclass
-from dataclasses import fields as dataclasses_fields
 from typing import Optional
 
 from megatron.core.enums import Fp8Recipe
@@ -248,6 +247,10 @@ class BaseDiffusionConfig(TransformerConfig):
     mxfp6_fwd_fp4_heal_layers_per_iter: int = 0
     mxfp6_fwd_fp4_heal_order: str = "deep_to_shallow"
     mxfp6_fwd_fp4_heal_prewarm: bool = True
+    # The healed forward: "mxfp6" (the joint MXFP4 forwards back to MXFP6) or "fp8" (every forward linear of the
+    # healed layers in tensorwise FP8 -- E4M3 with delayed per-tensor scales -- on aiter's FP8 tilescale kernels; the
+    # MXFP4 backward unchanged).
+    mxfp6_fwd_fp4_heal_target: str = "mxfp6"
     # Operand layout of every MX GEMM, "blob" or "tilescale"; see Mxfp6Gates.gemm_layout.
     mxfp6_gemm_layout: str = "blob"
     mxfp6_fwd_a6w4: bool = False
@@ -286,7 +289,31 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError("mxfp6_fwd_fp4_heal_iter and mxfp6_fwd_fp4_heal_layers_per_iter must be >= 0.")
         if self.mxfp6_fwd_fp4_heal_order not in ("deep_to_shallow", "shallow_to_deep"):
             raise ValueError('mxfp6_fwd_fp4_heal_order is "deep_to_shallow" or "shallow_to_deep".')
+        if self.mxfp6_fwd_fp4_heal_target not in ("mxfp6", "fp8"):
+            raise ValueError('mxfp6_fwd_fp4_heal_target is "mxfp6" or "fp8".')
         if heal_iter == 0:
+            return
+        if self.mxfp6_packed_param_gather:
+            raise ValueError(
+                "mxfp6_fwd_fp4_heal_iter cannot be combined with mxfp6_packed_param_gather: the packed gather lays out "
+                "its weight buckets from the forward formats when the model is built."
+            )
+        if self.mxfp6_fwd_fp4_heal_target == "fp8":
+            # The FP8 packs write the tilescale MXFP4 columns the A4W4 backward reads, from plain (unrotated) rows.
+            bad = [k for k, ok in (
+                ("mxfp6_gemm_layout 'tilescale'", self.mxfp6_gemm_layout == "tilescale"),
+                ("mxfp6_bwd_fp4_dgrad and _wgrad", self.mxfp6_bwd_fp4_dgrad and self.mxfp6_bwd_fp4_wgrad),
+                ("no mxfp6_fwd_a6w4", not self.mxfp6_fwd_a6w4),
+                ("no mxfp6_wgrad_a6w4", not getattr(self, "mxfp6_wgrad_a6w4", False)),
+                ("mxfp6_weight_format 'mxfp6'", self.mxfp6_weight_format == "mxfp6"),
+                ("no mxfp6_fwd_bf16_joint_img_fc1", not self.mxfp6_fwd_bf16_joint_img_fc1),
+                ("the default MXFP4 scale rules, Hadamards and 1-D weight scales", all(
+                    getattr(self, "mxfp6_" + f.name, f.default) == f.default
+                    for f in mxfp6_gates.config_fields()
+                    if f.name.startswith(("fp4_scale_rounding", "fp4_hadamard", "fp4_weight_2d")))),
+            ) if not ok]
+            if bad:
+                raise ValueError("mxfp6_fwd_fp4_heal_target 'fp8' needs " + ", ".join(bad) + ".")
             return
         if not (self.mxfp6_fwd_fp4_joint_mlp or self.mxfp6_fwd_fp4_joint_txt_proj):
             raise ValueError(
@@ -297,11 +324,6 @@ class BaseDiffusionConfig(TransformerConfig):
             raise ValueError(
                 "mxfp6_fwd_fp4_heal_iter covers the joint blocks only; the single blocks' MXFP4 forward "
                 "(mxfp6_fwd_fp4_single_linear2 / _single_fc1) would stay MXFP4 after the switch."
-            )
-        if self.mxfp6_packed_param_gather:
-            raise ValueError(
-                "mxfp6_fwd_fp4_heal_iter cannot be combined with mxfp6_packed_param_gather: the packed gather lays out "
-                "its weight buckets from the forward formats when the model is built."
             )
 
     def __post_init__(self):
@@ -581,7 +603,7 @@ class BaseDiffusionConfig(TransformerConfig):
         if self.fp6 is None:
             requested = [
                 f.name
-                for f in dataclasses_fields(mxfp6_gates.Mxfp6Gates)
+                for f in mxfp6_gates.config_fields()
                 if getattr(self, f"mxfp6_{f.name}") != getattr(_GATE_DEFAULTS, f.name)
             ]
             if requested:

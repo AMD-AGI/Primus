@@ -14,7 +14,6 @@ This trainer implements Flux-specific training logic including:
 """
 
 import os
-from dataclasses import fields as dataclasses_fields
 
 import numpy as np
 import torch
@@ -607,6 +606,12 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "mxfp6_fused_wgrad_accum": getattr(params, "mxfp6_fused_wgrad_accum", False),
             }
         )
+        # Forward healing (patches/mxfp6_fwd_fp4_heal_patches.py reads the args); copied so the config validates the
+        # combination, including against the packed gather.
+        _heal_defaults = {"mxfp6_fwd_fp4_heal_iter": 0, "mxfp6_fwd_fp4_heal_layers_per_iter": 0,
+                          "mxfp6_fwd_fp4_heal_order": "deep_to_shallow", "mxfp6_fwd_fp4_heal_prewarm": True,
+                          "mxfp6_fwd_fp4_heal_target": "mxfp6", "mxfp6_packed_param_gather": False}
+        config_params.update({k: getattr(params, k, v) for k, v in _heal_defaults.items()})
 
         # MXFP6 fusion gates. Forwarded from the module config onto FluxConfig, whose
         # __post_init__ publishes them to the mxfp6_gates registry that the packer,
@@ -626,7 +631,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
         config_params.update(
             {
                 f"mxfp6_{f.name}": getattr(params, f"mxfp6_{f.name}", getattr(_gate_defaults, f.name))
-                for f in dataclasses_fields(Mxfp6Gates)
+                for f in mxfp6_gates.config_fields()
             }
         )
 

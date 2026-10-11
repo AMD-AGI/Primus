@@ -4,15 +4,24 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Forward healing for the MXFP6 local spec: the joint blocks' MXFP4 forwards go back to MXFP6 at a preset iteration.
+"""Forward healing for the MXFP6 local spec: at a preset iteration the forward moves to a more accurate format.
 
 WHAT IT DOES
 ------------
+Target ``mxfp6`` (``mxfp6_fwd_fp4_heal_target``, the default):
 ``mxfp6_fwd_fp4_joint_mlp`` and ``mxfp6_fwd_fp4_joint_txt_proj`` run some of the joint blocks' forward GEMMs in MXFP4.
 From ``mxfp6_fwd_fp4_heal_iter`` on, those GEMMs run MXFP6 instead. Each joint MLP (``MXFP6FusedMLP``) and each joint
 block's text out-projection (``MXFP6RowParallelLinear``) carries ``_mxfp6_fwd_fp4_healed``; the forward reads it where it
 chooses the format, so the backward (MXFP4, captured at forward time) is unchanged and nothing else is touched: no
 weights, no optimizer state, no gradient buffers.
+
+Target ``fp8``: every forward linear of the healed transformer layers (joint and single, both streams) runs tensorwise
+FP8 -- E4M3 with delayed per-tensor scales on aiter's FP8 tilescale kernels -- with every forward fusion kept; the MXFP4
+backward is unchanged (the FP8 packs still write the MX columns it reads). Forward hooks on each healed layer switch
+``Mxfp6Gates.fwd_fp8`` on around its forward (the gate is read where each GEMM's format is chosen, so Dynamo guards
+it), and every linear weight carries its scales (``F8State``): the packs max each operand's amax into it, and at each
+step boundary the multipliers are rolled from the amax history (448 / max(history)). A layer's first FP8 step is a
+seed step (``fwd_fp8_seed``): its scales come from the operands themselves.
 
 HOW IT IS APPLIED
 -----------------
@@ -67,14 +76,23 @@ def _is_heal_target(name: str, module: torch.nn.Module) -> bool:
     return name.endswith("self_attention.added_linear_proj")
 
 
-def build_heal_plan(models: Sequence[torch.nn.Module], order: str = "deep_to_shallow") -> HealPlan:
+_LAYER_NAME_RE = re.compile(r"transformer\.layers\.(\d+)$")
+
+
+def build_heal_plan(models: Sequence[torch.nn.Module], order: str = "deep_to_shallow", target: str = "mxfp6") -> HealPlan:
     """Every heal target, grouped by its transformer layer index, in switch order.
 
-    Derived from the live module tree, so it covers exactly the modules that can run the MXFP4 forward.
+    Derived from the live module tree. ``mxfp6``: the modules that can run the MXFP4 forward. ``fp8``: the transformer
+    layers themselves (every forward linear in them switches).
     """
     by_layer: Dict[int, List[torch.nn.Module]] = {}
     for chunk in models:
         for name, module in chunk.named_modules():
+            if target == "fp8":
+                match = _LAYER_NAME_RE.search(name)
+                if match is not None:
+                    by_layer.setdefault(int(match.group(1)), []).append(module)
+                continue
             if not _is_heal_target(name, module):
                 continue
             match = _LAYER_RE.search(name)
@@ -97,11 +115,66 @@ def target_layer_count(iteration: Optional[int], heal_iter: int, layers_per_iter
     return min(plan_len, (iteration - heal_iter + 1) * layers_per_iter)
 
 
-def set_heal(plan: HealPlan, count: int) -> None:
-    """Heal the first ``count`` planned layers and un-heal the rest (absolute, so repeating it is a no-op)."""
+def set_heal(plan: HealPlan, count: int, target: str = "mxfp6", seed_from: Optional[int] = None) -> None:
+    """Heal the first ``count`` planned layers and un-heal the rest (absolute, so repeating it is a no-op). ``fp8``:
+    layers ``seed_from`` .. ``count - 1`` take this step as their seed step (no amax history yet); default none."""
+    lo = count if seed_from is None else seed_from
     for position, (_, modules) in enumerate(plan):
         for module in modules:
-            module._mxfp6_fwd_fp4_healed = position < count
+            if target == "fp8":
+                module._mxfp6_fwd_fp8_healed = position < count
+                module._mxfp6_fwd_fp8_seed = lo <= position < count
+            else:
+                module._mxfp6_fwd_fp4_healed = position < count
+
+
+_F8_SAVED: List[Tuple[bool, bool]] = []
+
+
+def _f8_pre(module, args, kwargs=None):
+    from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import gates
+
+    g = gates()
+    _F8_SAVED.append((g.fwd_fp8, g.fwd_fp8_seed))
+    g.fwd_fp8 = bool(getattr(module, "_mxfp6_fwd_fp8_healed", False))
+    g.fwd_fp8_seed = g.fwd_fp8 and bool(getattr(module, "_mxfp6_fwd_fp8_seed", False))
+
+
+def _f8_post(module, args, output):
+    from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import gates
+
+    g = gates()
+    g.fwd_fp8, g.fwd_fp8_seed = _F8_SAVED.pop()
+
+
+def f8_setup(plan: HealPlan) -> Dict[int, list]:
+    """Target ``fp8``: attach delayed scales to every MXFP6 linear weight of the planned layers and hook the layers'
+    forwards (once each). Returns {layer index: [F8State, ...]}."""
+    from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import (
+        F8State,
+        MXFP6ColumnParallelLinear,
+        MXFP6RowParallelLinear,
+        f8_available,
+    )
+
+    if not f8_available():
+        raise RuntimeError("mxfp6_fwd_fp4_heal_target fp8 needs a Primus-Turbo / aiter with the FP8 tilescale kernels")
+    out = {}
+    for idx, layers in plan:
+        states = []
+        for layer in layers:
+            for mod in layer.modules():
+                if isinstance(mod, (MXFP6ColumnParallelLinear, MXFP6RowParallelLinear)):
+                    w = mod.weight
+                    if getattr(w, "_mxfp6_f8", None) is None:
+                        w._mxfp6_f8 = F8State(w.device)
+                    states.append(w._mxfp6_f8)
+            if not getattr(layer, "_mxfp6_f8_hooked", False):
+                layer.register_forward_pre_hook(_f8_pre)
+                layer.register_forward_hook(_f8_post)
+                layer._mxfp6_f8_hooked = True
+        out[idx] = states
+    return out
 
 
 def _unique_graph_count() -> int:
@@ -119,20 +192,29 @@ def heal_prewarm_wanted(args) -> bool:
     return _heal_iter(args) > 0 and bool(getattr(args, "mxfp6_fwd_fp4_heal_prewarm", True))
 
 
-def prewarm_healed_graphs(models: Sequence[torch.nn.Module], run: Callable[[], None], what: str) -> None:
+def heal_target(args) -> str:
+    return str(getattr(args, "mxfp6_fwd_fp4_heal_target", "mxfp6") or "mxfp6")
+
+
+def prewarm_healed_graphs(models: Sequence[torch.nn.Module], run: Callable[[], None], what: str,
+                          target: str = "mxfp6", seed: bool = False) -> None:
     """Run ``run`` (a training step or the validation warmup, at production shapes) with every planned layer healed,
     then restore. Under torch.compile (the warmup steps before it have compiled graphs) this compiles the healed cache
     entries, and the Dynamo graph counter must rise: otherwise the flag is not guarded and the switch would be a silent
-    no-op."""
-    plan = build_heal_plan(models)
+    no-op. ``fp8``: ``seed`` compiles the seed-step variant; the scales are reset afterwards (warmup data)."""
+    plan = build_heal_plan(models, target=target)
     if not plan:
-        raise RuntimeError("mxfp6_fwd_fp4_heal: no joint MLP or text out-projection found to heal")
+        raise RuntimeError("mxfp6_fwd_fp4_heal: nothing found to heal")
+    states = f8_setup(plan) if target == "fp8" else {}
     before = _unique_graph_count()
-    set_heal(plan, len(plan))
+    set_heal(plan, len(plan), target, 0 if seed else None)
     try:
         run()
     finally:
-        set_heal(plan, 0)
+        set_heal(plan, 0, target)
+        for ss in states.values():
+            for st in ss:
+                st.reset()
     after = _unique_graph_count()
     if before == 0:
         _log(f"Pre-warm ran the healed {what} eagerly (torch.compile off)")
@@ -148,10 +230,11 @@ def prewarm_healed_graphs(models: Sequence[torch.nn.Module], run: Callable[[], N
     _log(f"Pre-warmed the healed {what} graphs (unique_graphs {before} -> {after})")
 
 
-def _report_heal(args, iteration: Optional[int], healed: int, total: int) -> None:
+def _report_heal(args, iteration: Optional[int], healed: int, total: int, target: str = "mxfp6") -> None:
     """Log the switch. Peak memory is reported, never fed back into the decision."""
     peak_gib = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
-    _log(f"iteration={iteration}: {healed}/{total} joint layers on the MXFP6 forward; peak allocated {peak_gib:.2f} GiB")
+    what = "joint layers on the MXFP6 forward" if target == "mxfp6" else "layers on the tensorwise FP8 forward"
+    _log(f"iteration={iteration}: {healed}/{total} {what}; peak allocated {peak_gib:.2f} GiB")
     if not getattr(args, "mlperf_mode", False):
         return
     try:
@@ -159,7 +242,7 @@ def _report_heal(args, iteration: Optional[int], healed: int, total: int) -> Non
 
         mllog.get_mllogger().event(
             key="mxfp6_fwd_fp4_heal",
-            value={"iteration": iteration, "layers_healed": healed, "layers_total": total},
+            value={"iteration": iteration, "layers_healed": healed, "layers_total": total, "target": target},
         )
     except Exception as exc:  # pragma: no cover - logger not initialised
         _log(f"mllog emission skipped ({exc}).")
@@ -169,7 +252,7 @@ def _report_heal(args, iteration: Optional[int], healed: int, total: int) -> Non
     _PATCH_KEY,
     backend="megatron",
     phase="before_train",
-    description="Move the joint blocks' MXFP4 forwards back to MXFP6 at a preset iteration.",
+    description="Move the forward to a more accurate format (MXFP6 or tensorwise FP8) at a preset iteration.",
     priority=46,
     condition=_needs_fwd_fp4_heal,
 )
@@ -188,6 +271,7 @@ def patch_mxfp6_fwd_fp4_heal(ctx: PatchContext) -> None:
     heal_iter = _heal_iter(args)
     layers_per_iter = int(getattr(args, "mxfp6_fwd_fp4_heal_layers_per_iter", 0) or 0)
     order = getattr(args, "mxfp6_fwd_fp4_heal_order", "deep_to_shallow")
+    target = heal_target(args)
     if getattr(args, "mlperf_mode", False) and not (
         getattr(args, "mxfp6_fwd_fp4_heal_prewarm", True) and int(getattr(args, "warmup_train_steps", 0) or 0) > 0
     ):
@@ -198,22 +282,25 @@ def patch_mxfp6_fwd_fp4_heal(ctx: PatchContext) -> None:
         _log(f"WARNING: mxfp6_fwd_fp4_heal_iter={heal_iter} >= train_iters={train_iters}; the switch never happens.")
 
     original_train_step = megatron_training.train_step
-    state: Dict[str, object] = {"plan": None, "applied": 0, "graphs_at_switch": None}
+    state: Dict[str, object] = {"plan": None, "applied": 0, "graphs_at_switch": None, "f8": {}, "f8_ran": 0}
 
     def _patched_train_step(*fn_args, **fn_kwargs):
         if state["plan"] is None:
             model = fn_args[2] if len(fn_args) > 2 else fn_kwargs.get("model")
             if model is not None:
                 models = model if isinstance(model, (list, tuple)) else [model]
-                plan = build_heal_plan(models, order)
+                plan = build_heal_plan(models, order, target)
                 if not plan:
                     raise RuntimeError(
-                        "mxfp6_fwd_fp4_heal_iter > 0 but no joint MLP or text out-projection with a heal flag was "
-                        "found: the switch would be a no-op. Check that the model uses the MXFP6 local spec."
+                        "mxfp6_fwd_fp4_heal_iter > 0 but nothing to heal was found: the switch would be a no-op. "
+                        "Check that the model uses the MXFP6 local spec."
                     )
                 state["plan"] = plan
+                if target == "fp8":
+                    state["f8"] = f8_setup(plan)
                 mode = "all at once" if layers_per_iter <= 0 else f"{layers_per_iter}/iter"
-                _log(f"Planned {len(plan)} joint layers; switch at iteration {heal_iter}, {mode}, order={order}")
+                _log(f"Planned {len(plan)} layers (target {target}); switch at iteration {heal_iter}, {mode}, "
+                     f"order={order}")
         plan = state["plan"] or []
 
         # The iteration kwarg is authoritative; curr_iteration is the live value Megatron sets before train_step
@@ -230,14 +317,30 @@ def patch_mxfp6_fwd_fp4_heal(ctx: PatchContext) -> None:
                 _log(f"WARNING: {grown} graph(s) compiled across the switch; the healed graphs were not pre-warmed.")
             state["graphs_at_switch"] = None
 
-        target = target_layer_count(iteration, heal_iter, layers_per_iter, len(plan))
-        if target != state["applied"]:
-            set_heal(plan, target)
-            state["applied"] = target
+        count = target_layer_count(iteration, heal_iter, layers_per_iter, len(plan))
+        if target == "fp8":
+            # Step boundary: the layers that ran FP8 in the step before roll their scales from its amaxes. Then this
+            # step's layers -- the newly healed ones seed their scales from their own operands.
+            from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import f8_step
+
+            ran = state["f8_ran"]
+            if ran:
+                f8_step([st for pos, (idx, _) in enumerate(plan) if pos < ran for st in state["f8"][idx]],
+                        int(iteration or 0))
+            # Flags change only with the healed count or to end a seed step: the warmup's re-entry (count 0) must not
+            # undo the pre-warm's forced flags.
+            if count != ran or state.get("f8_seeded"):
+                set_heal(plan, count, target, seed_from=ran)
+                state["f8_seeded"] = count > ran
+            state["f8_ran"] = count
+        if count != state["applied"]:
+            if target != "fp8":
+                set_heal(plan, count, target)
+            state["applied"] = count
             # No torch.cuda.empty_cache() here: the saved backward packs keep their size, and the healed forward's
             # buffers were allocated by the warmup's pre-warm step, so the cached blocks serve both. Emptying the cache
             # would stall this step on freeing and re-allocating the whole pool.
-            _report_heal(args, iteration, target, len(plan))
+            _report_heal(args, iteration, count, len(plan), target)
             state["graphs_at_switch"] = _unique_graph_count()
 
         return original_train_step(*fn_args, **fn_kwargs)

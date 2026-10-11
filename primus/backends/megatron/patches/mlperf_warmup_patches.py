@@ -26,6 +26,7 @@ import torch.distributed
 
 from primus.backends.megatron.patches.mxfp6_fwd_fp4_heal_patches import (
     heal_prewarm_wanted,
+    heal_target,
     prewarm_healed_graphs,
 )
 from primus.core.patches import PatchContext, get_args, register_patch
@@ -494,20 +495,24 @@ def _run_warmup_and_restore(
         # ---- 4a. mxfp6_fwd_fp4_heal: one more step on the healed forward, so its training graphs (forward and
         # backward) are compiled before the clock starts; the restores below undo it like the steps above ----
         if heal_prewarm_wanted(megatron_args):
-            prewarm_healed_graphs(
-                models,
-                lambda: train_step_fn(
-                    forward_step_func,
-                    synthetic_iter,
-                    model,
-                    optimizer,
-                    opt_param_scheduler,
-                    config,
-                    forward_backward_func,
-                    iteration=iteration,
-                ),
-                "training step",
-            )
+            # target fp8: the seed-step variant (scales from the operands) and the steady one
+            for seed in (True, False) if heal_target(megatron_args) == "fp8" else (False,):
+                prewarm_healed_graphs(
+                    models,
+                    lambda: train_step_fn(
+                        forward_step_func,
+                        synthetic_iter,
+                        model,
+                        optimizer,
+                        opt_param_scheduler,
+                        config,
+                        forward_backward_func,
+                        iteration=iteration,
+                    ),
+                    "training step" + (" (seed)" if seed else ""),
+                    heal_target(megatron_args),
+                    seed,
+                )
     finally:
         config.finalize_model_grads_func = saved_finalize
     _log(f"Completed {warmup_steps} warmup steps")
@@ -654,6 +659,7 @@ def _run_warmup_and_restore(
                 models,
                 lambda: _run_validation_warmup(models, forward_step_func, forward_backward_func, validation_steps),
                 "evaluation",
+                heal_target(megatron_args),
             )
 
     # ---- 14. Synchronize ----

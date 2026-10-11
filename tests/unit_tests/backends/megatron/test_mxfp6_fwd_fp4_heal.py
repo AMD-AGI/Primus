@@ -216,6 +216,171 @@ class TestConfigValidation:
             self._config(**overrides)
 
 
+# -- target fp8: every forward linear of the healed layers on tensorwise FP8 with delayed scales --------------------
+
+
+def _L():
+    return pytest.importorskip("primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local")
+
+
+class TestFp8Plan:
+    def test_plan_is_every_layer(self):
+        model = _toy_model()
+        plan = H.build_heal_plan([model], "deep_to_shallow", "fp8")
+        assert [i for i, _ in plan] == [4, 3, 2, 1, 0]
+        assert [mods for _, mods in plan] == [[model.transformer.layers[i]] for i in (4, 3, 2, 1, 0)]
+
+    def test_set_heal_seeds_only_the_newly_healed(self):
+        plan = H.build_heal_plan([_toy_model()], "shallow_to_deep", "fp8")
+        H.set_heal(plan, 3, "fp8", seed_from=1)
+        assert [m._mxfp6_fwd_fp8_healed for _, (m,) in plan] == [True, True, True, False, False]
+        assert [m._mxfp6_fwd_fp8_seed for _, (m,) in plan] == [False, True, True, False, False]
+        H.set_heal(plan, 3, "fp8")  # default: no seed step
+        assert not any(m._mxfp6_fwd_fp8_seed for _, (m,) in plan)
+        # the MXFP6 target's flags are not touched
+        assert not any(m._mxfp6_fwd_fp4_healed for m in plan[0][1][0].modules() if hasattr(m, "_mxfp6_fwd_fp4_healed"))
+
+    def test_hooks_set_and_restore_the_gates(self):
+        from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import Mxfp6Gates, gates, reset
+
+        seen = []
+        inner, outer = torch.nn.Module(), torch.nn.Module()
+        inner.forward = lambda: seen.append((gates().fwd_fp8, gates().fwd_fp8_seed))
+        outer.inner = inner
+        outer.forward = lambda: (seen.append((gates().fwd_fp8, gates().fwd_fp8_seed)), inner())
+        for m, healed, seed in ((outer, False, False), (inner, True, True)):
+            m._mxfp6_fwd_fp8_healed, m._mxfp6_fwd_fp8_seed = healed, seed
+            m.register_forward_pre_hook(H._f8_pre)
+            m.register_forward_hook(H._f8_post)
+        reset(Mxfp6Gates())
+        outer()
+        assert seen == [(False, False), (True, True)]
+        assert (gates().fwd_fp8, gates().fwd_fp8_seed) == (False, False) and not H._F8_SAVED
+
+
+class TestF8Step:
+    def test_rolls_the_multiplier_from_the_history(self):
+        L = _L()
+        a, b = L.F8State("cpu", history=4), L.F8State("cpu", history=4)
+        for slot, (va, vw) in enumerate([(2.0, 0.5), (8.0, 0.25), (1.0, 0.125)]):
+            a.amax["a"].fill_(va)
+            a.amax["w"].fill_(vw)
+            b.amax["a"].fill_(va / 2)
+            L.f8_step([a, b], slot)
+            assert a.amax["a"].item() == a.amax["w"].item() == b.amax["a"].item() == 0
+        assert a.q["a"].item() == 448.0 / 8.0 and a.q["w"].item() == 448.0 / 0.5 and b.q["a"].item() == 448.0 / 4.0
+        assert 1e30 < b.q["w"].item() < float("inf")  # never seen: finite (a seed step precedes any real use)
+        for slot in range(3, 7):  # the ring forgets the old maxima
+            a.amax["a"].fill_(1.0)
+            L.f8_step([a], slot)
+        assert a.q["a"].item() == 448.0
+
+    def test_reset(self):
+        L = _L()
+        st = L.F8State("cpu")
+        st.amax["a"].fill_(3.0)
+        L.f8_step([st], 0)
+        st.reset()
+        assert st.q["a"].item() == 1.0 and st.hist["a"].abs().sum() == 0 and st.amax["a"].item() == 0
+
+
+class TestFp8Wrapper:
+    @pytest.fixture
+    def wrapped(self, monkeypatch):
+        import megatron.training.training as mt
+
+        from primus.backends.megatron.patches import _patch_guard
+
+        L = _L()
+        calls, rolled = [], []
+        model = _toy_model()
+
+        def fake_train_step(*a, **kw):
+            layers = list(model.transformer.layers)
+            calls.append((sum(getattr(m, "_mxfp6_fwd_fp8_healed", False) for m in layers),
+                          sum(getattr(m, "_mxfp6_fwd_fp8_seed", False) for m in layers)))
+
+        monkeypatch.setattr(mt, "train_step", fake_train_step)
+        monkeypatch.setattr(_patch_guard, "is_patched", lambda *a: False)
+        monkeypatch.setattr(_patch_guard, "mark_patched", lambda *a: None)
+        monkeypatch.setattr(H, "_report_heal", lambda *a: None)
+        monkeypatch.setattr(H, "f8_setup", lambda plan: {idx: [idx] for idx, _ in plan})
+        monkeypatch.setattr(L, "f8_step", lambda states, slot: rolled.append((sorted(states), slot)))
+
+        def make(heal_iter, rate=0):
+            args = types.SimpleNamespace(mxfp6_fwd_fp4_heal_iter=heal_iter, mxfp6_fwd_fp4_heal_layers_per_iter=rate,
+                                         mxfp6_fwd_fp4_heal_order="deep_to_shallow", train_iters=1000,
+                                         mxfp6_fwd_fp4_heal_target="fp8")
+            monkeypatch.setattr(H, "get_args", lambda ctx: args)
+            H.patch_mxfp6_fwd_fp4_heal(None)
+            step = mt.train_step
+            return lambda it: step(None, None, [model], iteration=it)
+
+        return make, calls, rolled, model
+
+    def test_seed_step_then_delayed(self, wrapped):
+        make, calls, rolled, _ = wrapped
+        step = make(5)
+        for it in (4, 5, 6, 7):
+            step(it)
+        assert calls == [(0, 0), (5, 5), (5, 0), (5, 0)]
+        assert rolled == [([0, 1, 2, 3, 4], 6), ([0, 1, 2, 3, 4], 7)]
+
+    def test_ramp_seeds_each_new_layer_once(self, wrapped):
+        make, calls, rolled, _ = wrapped
+        step = make(5, rate=2)
+        for it in (5, 6, 7, 8):
+            step(it)
+        assert calls == [(2, 2), (4, 2), (5, 1), (5, 0)]
+        assert rolled == [([3, 4], 6), ([1, 2, 3, 4], 7), ([0, 1, 2, 3, 4], 8)]  # deep first: layers 4, 3 lead
+
+    def test_warmup_reentry_keeps_a_forced_prewarm(self, wrapped):
+        make, calls, rolled, model = wrapped
+        step = make(5)
+        step(0)
+        plan = H.build_heal_plan([model], target="fp8")
+        H.set_heal(plan, len(plan), "fp8", 0)  # prewarm_healed_graphs' seed variant
+        step(0)
+        H.set_heal(plan, 0, "fp8")
+        assert calls == [(0, 0), (5, 5)] and rolled == []
+
+    def test_resume_past_the_heal_iteration_seeds_everything(self, wrapped):
+        make, calls, _, _ = wrapped
+        step = make(5)
+        step(40)
+        step(41)
+        assert calls == [(5, 5), (5, 0)]
+
+
+class TestFp8ConfigValidation:
+    @staticmethod
+    def _config(**overrides):
+        d = dict(mxfp6_fwd_fp4_heal_iter=100, mxfp6_fwd_fp4_heal_target="fp8", mxfp6_fwd_fp4_joint_mlp=False,
+                 mxfp6_fwd_fp4_joint_txt_proj=False)
+        d.update(overrides)
+        return TestConfigValidation._config(**d)
+
+    def test_accepted_with_and_without_an_mxfp4_forward(self):
+        assert self._config().mxfp6_fwd_fp4_heal_target == "fp8"
+        assert self._config(mxfp6_fwd_fp4_joint_mlp=True, mxfp6_fwd_fp4_joint_mlp_parts="txt_fc1,txt_fc2",
+                            mxfp6_fwd_fp4_joint_txt_proj=True)
+
+    @pytest.mark.parametrize(
+        "overrides,match",
+        [
+            (dict(mxfp6_fwd_fp4_heal_target="fp16"), "fp8"),
+            (dict(mxfp6_gemm_layout="blob"), "tilescale"),
+            (dict(mxfp6_bwd_fp4_wgrad=False), "bwd_fp4"),
+            (dict(mxfp6_fwd_a6w4=True), "fwd_a6w4"),
+            (dict(mxfp6_weight_format="mxfp4"), "weight_format"),
+            (dict(mxfp6_packed_param_gather=True), "packed_param_gather"),
+        ],
+    )
+    def test_rejections(self, overrides, match):
+        with pytest.raises(ValueError, match=match):
+            self._config(**overrides)
+
+
 # -- the Dynamo guard the switch relies on ----------------------------------------------------------------------------
 
 
