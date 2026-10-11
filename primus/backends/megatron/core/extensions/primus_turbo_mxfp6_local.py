@@ -402,6 +402,15 @@ try:  # tensorwise FP8 forward (Mxfp6Gates.fwd_fp8): aiter's FP8 tilescale kerne
     _F8_TS = fp8_ts_table()
 except ImportError:  # an older Primus-Turbo: the FP8 forward never engages
     _F8_TS, gemm_fp8_ts_impl, gemm_fp8_ts_out_impl = None, None, None
+try:  # the single block's linear2 as one FP8 two-segment GEMM with the gated residual (mxfp6_single_linear2_cat)
+    from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import (
+        fp8_ts_cat_table,
+        gemm_fp8_ts_cat_gres_out,
+    )
+
+    _F8_CAT = fp8_ts_cat_table()
+except ImportError:
+    _F8_CAT, gemm_fp8_ts_cat_gres_out = frozenset(), None
 
 _F8_MAX = 448.0  # E4M3's largest finite value
 
@@ -446,8 +455,8 @@ class F8State:
 @torch.no_grad()
 def f8_step(states, slot: int) -> None:
     """Step boundary (outside compiled code): record each state's amax of the step that just ran in history slot
-    ``slot``, set every multiplier to 448 / max(history) and clear the amax slots. A handful of fused launches for any
-    number of states."""
+    ``slot``, set every multiplier to 448 / max(history) (as 448 * (1 / max)) and clear the amax slots. A handful of
+    fused launches for any number of states."""
     if not states:
         return
     amax = [s.amax[r] for s in states for r in F8State.ROLES]
@@ -457,7 +466,9 @@ def f8_step(states, slot: int) -> None:
     torch._foreach_copy_([t[slot % h : slot % h + 1] for t in hist], amax)
     mx = torch._foreach_norm(hist, float("inf"))
     torch._foreach_clamp_min_(mx, 1e-30)
-    torch._foreach_copy_(q, torch._foreach_div([torch.full_like(m_, _F8_MAX) for m_ in mx], mx))
+    torch._foreach_reciprocal_(mx)
+    torch._foreach_mul_(mx, _F8_MAX)  # 448 * (1 / max): fused launches, no per-state constant tensors
+    torch._foreach_copy_(q, mx)
     torch._foreach_zero_(amax)
 
 
@@ -864,10 +875,12 @@ class MXFP6LinearFunction(torch.autograd.Function):
         n = weight.shape[0]
 
         if _f8_fwd(m, n, k, bias):  # tensorwise FP8 forward (fwd_fp8); the columns are the backward's, as below
-            if defer or backward_is_fp8:
-                raise ValueError("the tensorwise FP8 forward takes no defer and no FP8 backward")
+            if backward_is_fp8 or (defer and bias is not None):
+                raise ValueError("the tensorwise FP8 forward takes no FP8 backward, and defer needs no bias")
             a_row, a_s, a_col, a_col_scale = _f8_act(input_2d, weight, grad_enabled)
             b_row, b_s, b_col, b_col_scale = _f8_weight(weight, m, grad_enabled)
+            if defer:  # the FP8 operands (4, where the MX defer gives 5)
+                return (a_row, a_s, b_row, b_s), a_col, a_col_scale, b_col, b_col_scale
             output = gemm_fp8_ts_impl(a_row, a_s, b_row, b_s, m, n, k, bias)
             return output.reshape(*orig_shape[:-1], n), a_col, a_col_scale, b_col, b_col_scale
 
@@ -1481,13 +1494,13 @@ class MXFP6MLPFunction(torch.autograd.Function):
         h = w2.shape[0]
 
         if not bf16_fc1 and _f8_fwd(m, f, k, None) and _f8_fwd(m, h, f, None):  # tensorwise FP8 forward (fwd_fp8)
-            if defer_fc2:
-                raise ValueError("the tensorwise FP8 forward takes no defer_fc2")
             x_row, x_s, x_col, x_col_s = _f8_act(x, w1, grad_enabled)
             w1_row, w1_s, w1_col, w1_col_s = _f8_weight(w1, m, grad_enabled)
             y1 = gemm_fp8_ts_impl(x_row, x_s, w1_row, w1_s, m, f, k, None)
             a_row, a_s, a_col, a_col_s = _f8_act_gelu(y1, b1, w2, grad_enabled)
             w2_row, w2_s, w2_col, w2_col_s = _f8_weight(w2, m, grad_enabled)
+            if defer_fc2:  # fc2's FP8 operands (4, where the MX defer gives 5)
+                return (a_row, a_s, w2_row, w2_s), y1, x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s
             output = gemm_fp8_ts_impl(a_row, a_s, w2_row, w2_s, m, h, f, None).reshape(*orig_shape[:-1], h)
             return output, y1, x_col, x_col_s, a_col, a_col_s, w1_col, w1_col_s, w2_col, w2_col_s
 
@@ -3394,7 +3407,9 @@ class MXFP6GatedMLPProjFunction(torch.autograd.Function):
             hid = residual.shape[-1]
             out = torch.empty_like(residual)
             h = torch.empty_like(residual)
-            gemm_a6w6_ts_cat_gres_out(
+            # the FP8 forward (fwd_fp8) deferred 4 operands per GEMM, the MX one 5
+            cat_gemm = gemm_fp8_ts_cat_gres_out if len(proj[0]) == 4 else gemm_a6w6_ts_cat_gres_out
+            cat_gemm(
                 *proj[0], *mlp[0], b2, residual.view(-1, hid), gate, out.view(-1, hid), h.view(-1, hid),
                 o.shape[-1], w2.shape[1],
             )
@@ -3509,11 +3524,18 @@ def _linear2_cat_ok(mlp, proj, x, o, gate, residual, weight_is_fp4):
     both A6W6 tilescale forwards and aiter has the kernel for the shapes. Plain arithmetic on import-time data."""
     if not gates().single_linear2_cat or gates().fwd_fp4_single_linear2 or gemm_a6w6_ts_cat_gres_out is None:
         return False
-    if gates().fwd_fp8:  # the FP8 forward runs the two GEMMs and the gated residual separately
-        return False
     if residual is None or residual.shape != x.shape or not residual.is_contiguous() or gate.stride(-1) != 1:
         return False
     m, f, n, pk = x.numel() // x.shape[-1], mlp.linear_fc1.weight.shape[0], proj.weight.shape[0], o.shape[-1]
+    if gates().fwd_fp8:  # the FP8 forward: both its GEMMs on FP8 (fc1 too, it shares the MLP's branch) and the kernel
+        k = x.shape[-1]
+        return (
+            gemm_fp8_ts_cat_gres_out is not None
+            and _f8_fwd(m, f, k, None)
+            and _f8_fwd(m, n, f, None)
+            and _f8_fwd(m, n, pk, None)
+            and (int(m), int(n), int(pk), int(f), int(gate.shape[0])) in _F8_CAT
+        )
     if _ts_fwd(m, n, f, None, weight_is_fp4) is not True or _ts_fwd(m, n, pk, None, weight_is_fp4) is not True:
         return False
     return (int(m), int(n), int(pk), int(f), int(gate.shape[0])) in _CAT_TS

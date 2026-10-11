@@ -438,7 +438,8 @@ def test_fwd_fp8_linear(compiled):
     assert st.amax["a"].item() == 0 and st.amax["w"].item() == 0 and st.scratch.item() > 0
 
 
-def test_fwd_fp8_mlp():
+@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compile"])
+def test_fwd_fp8_mlp(compiled):
     """FP8 forward of the fused MLP: fc1, the bias+GELU prologue inside fc2's FP8 pack, fc2; the columns the backward
     reads of x, w1 and w2 are bitwise the MX forward's."""
     L = _f8_ready()
@@ -457,7 +458,12 @@ def test_fwd_fp8_mlp():
     def run(fp8):
         reset(Mxfp6Gates(**_F8_COMMON, fwd_fp8=fp8, fwd_fp8_seed=fp8))  # seed step: scales from the operands
         s1, s2 = _f8_attach(w1, w2)
-        out = L.MXFP6MLPFunction.forward(x, w1, b1, w2, False, True, False, False, False, False, False)
+        torch._dynamo.reset()
+
+        def fn(x, w1, b1, w2):
+            return L.MXFP6MLPFunction.forward(x, w1, b1, w2, False, True, False, False, False, False, False)
+
+        out = (torch.compile(fn) if compiled else fn)(x, w1, b1, w2)
         torch.cuda.synchronize()
         return out, s1, s2
 
@@ -578,3 +584,55 @@ def test_fwd_fp8_joint_qkv(compiled):
         assert st.amax["w"].item() == w.float().abs().max().item()
     for n in g6:  # FP8 vs MXFP6 forward: the gradients differ only through the forward's values
         assert torch.isfinite(g8[n]).all() and _rel(g8[n], g6[n]) < 0.1, n
+
+
+@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compile"])
+def test_fwd_fp8_single_linear2_cat(compiled, monkeypatch):
+    """The single block's linear2 under the FP8 forward: with mxfp6_single_linear2_cat the out-projection and fc2 run
+    as one FP8 two-segment GEMM with the gated residual (aiter_ts_f8_cat_*); the output matches the separate FP8
+    GEMMs within bf16 rounding and every gradient but the gate's (which reads h) is bitwise the same."""
+    L = _f8_ready()
+    from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import (
+        Mxfp6Gates,
+        reset,
+    )
+
+    if not L._F8_CAT:
+        pytest.skip("no FP8 two-segment tilescale GEMM in this aiter / Primus-Turbo")
+    dev, bf16 = "cuda", torch.bfloat16
+    g = torch.Generator(device=dev).manual_seed(45)
+    rn = lambda *s, scale=1.0: torch.randn(*s, device=dev, dtype=bf16, generator=g) * scale  # noqa: E731
+    base = dict(x=rn(S, B, K), o=rn(S, B, K), res=rn(S, B, K), w1=rn(F, K, scale=0.02), b1=rn(F, scale=0.02),
+                w2=rn(K, F, scale=0.02), wp=rn(K, K, scale=0.02), b2=rn(K, scale=0.02), mod=rn(B, 3 * K))
+    g_out = rn(S, B, K)
+    monkeypatch.setattr(L, "_mlp_proj_eligible", lambda mlp, proj: True)
+
+    def single(t):
+        lin = lambda w, b: types.SimpleNamespace(weight=w, bias=b, _fuse_wgrad_accum=False)  # noqa: E731
+        mlp = types.SimpleNamespace(linear_fc1=lin(t["w1"], t["b1"]), linear_fc2=lin(t["w2"], t["b2"]))
+        proj = types.SimpleNamespace(weight=t["wp"], _weight_is_fp4=False)
+        out = L.mlp_proj_gated(mlp, proj, t["x"], t["o"], t["mod"].chunk(3, dim=-1)[2], None, t["res"])
+        return (out.float() * g_out.float()).sum(), out
+
+    def run(on):
+        reset(Mxfp6Gates(**_F8_COMMON, shared_grad_pack=True, gate_mul_pack=True, gate_mul_pack_bias=True,
+                         single_linear2_cat=on, fwd_fp8=True, fwd_fp8_seed=True))
+        torch._dynamo.reset()
+        t = {n: x.clone().requires_grad_(True) for n, x in base.items()}
+        _f8_attach(t["w1"], t["w2"], t["wp"])
+        return _profiled(torch.compile(single) if compiled else single, t)
+
+    try:
+        o0, g0, n0, br0 = run(False)
+        o1, g1, n1, br1 = run(True)
+    finally:
+        reset(Mxfp6Gates())
+    assert _rel(o1, o0) < 1e-2
+    assert sum("f8_cat" in n for n in n0) == 0 and sum("f8_cat" in n for n in n1) > 0
+    assert sum("aiter_ts_f8_" in n for n in n0) > 0  # the separate run is on the FP8 GEMMs too
+    assert br0 == br1
+    for n in g0:
+        if n == "mod":
+            assert _rel(g1[n], g0[n]) < 1e-2
+        else:
+            assert torch.equal(g0[n], g1[n]), n

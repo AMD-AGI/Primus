@@ -19,6 +19,15 @@ import torch
 
 from primus.backends.megatron.patches import mxfp6_fwd_fp4_heal_patches as H
 
+
+@pytest.fixture(autouse=True)
+def _restore_gates():
+    """Building a config publishes its gates process-wide; leave the defaults behind for the next test file."""
+    yield
+    from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import Mxfp6Gates, reset
+
+    reset(Mxfp6Gates())
+
 # -- the schedule -----------------------------------------------------------------------------------------------------
 
 
