@@ -35,7 +35,7 @@ On the Primus branch `perf/qwen3-30b-a3b-fp8-turbo`, `examples/megatron/configs/
 On that branch, the config alone gave 6410.6 and 6459.6 ms/iter (40,892 / 40,582 tokens/s/GPU). One more config-only run hit the intermittent NaN (see open items).
 
 Code it needs:
-- Turbo: all five Turbo branches below. Building on `perf/moe/fp8-permute-tensorwise` also brings in the permute-default change.
+- Turbo: all five Turbo branches below. `#554` (HIP permute default) is on main; `#555` is rebased onto it.
 - Primus: `perf/qwen3-30b-a3b-fp8-turbo`.
 
 See [e2e/e2e_run_cfg.sh](e2e/e2e_run_cfg.sh) (config only) and [e2e/env_turbo_opt_cfg.sh](e2e/env_turbo_opt_cfg.sh). The older [e2e/e2e_run.sh](e2e/e2e_run.sh) passes the switches on the command line. All paths are for the old machine.
@@ -47,14 +47,14 @@ Turbo (`AMD-AGI/Primus-Turbo`):
 | branch | head | PR | notes |
 |---|---|---|---|
 | `fix/moe/permute-padding-rows` | f1a59fb9 | #553 merged | TURBO permute padding rows with worst-case buffers + pad |
-| `perf/moe/permute-default-hip` | 30b6cc7c | #554 open | body: [pr_bodies/perf-moe-permute-default-hip.md](pr_bodies/perf-moe-permute-default-hip.md) |
+| `perf/moe/permute-default-hip` | 30b6cc7c | #554 merged | body: [pr_bodies/perf-moe-permute-default-hip.md](pr_bodies/perf-moe-permute-default-hip.md) |
 | `perf/moe/fp8-permute-tensorwise` | cf630aad | #555 open | rebased onto main after #554 squash; body: [pr_bodies/perf-moe-fp8-permute-tensorwise.md](pr_bodies/perf-moe-fp8-permute-tensorwise.md) |
 | `perf/quantization/tensorwise-fp8-qwen3` | 6351abf4 | #558 open | independent; body: [pr_bodies/perf-quantization-tensorwise-fp8-qwen3.md](pr_bodies/perf-quantization-tensorwise-fp8-qwen3.md) |
 | `perf/deep_ep/dispatch-layout-per-token` | 0931ba1e | #557 open | independent; body: [pr_bodies/perf-deep-ep-dispatch-layout-per-token.md](pr_bodies/perf-deep-ep-dispatch-layout-per-token.md) |
 | `perf/flydsl/qk-rmsnorm-rope-hd128` | 1b920afe | #556 open | independent; needed by the Primus qk-norm patch; body: [pr_bodies/perf-flydsl-qk-rmsnorm-rope-hd128.md](pr_bodies/perf-flydsl-qk-rmsnorm-rope-hd128.md) |
 | `fix/fp8-attn-strided-layout` | c825b13e | opening | FP8 attention with sbhd/bhsd storage; body: [pr_bodies/fix-fp8-attn-strided-layout.md](pr_bodies/fix-fp8-attn-strided-layout.md) |
 
-`perf/moe/fp8-permute-tensorwise` is main (with #553) plus #554's commit plus the FP8 permute commit, whose message quotes the 4-run mean (-4.55%). The pre-rebase history is kept locally as `backup/fp8-permute-pre-rebase`. Once #554 merges, rebase the branch onto main and drop #554's commit.
+`perf/moe/fp8-permute-tensorwise` is now one commit on main (`cf630aad`); rebased after #554's squash merge.
 
 Primus (`AMD-AGI/Primus`):
 
