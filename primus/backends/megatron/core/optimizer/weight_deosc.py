@@ -507,25 +507,29 @@ class WeightDeOscRunner:
                 if main.numel() != rng.end - rng.start:
                     raise ValueError("direct deosc QDQ shard size does not match the parameter range")
                 key = self._stable_key(dist_opt, model, rng.start, rng.end)
-                shards_by_device.setdefault(main.device, []).append((key, main))
+                shards_by_device.setdefault(main.device, []).append((key, main, rng.start))
 
         for device, shards in shards_by_device.items():
-            # Keep every view aligned, including odd shard lengths.
-            sizes = [(main.numel() + 255) // 256 * 256 for _, main in shards]
+            # Align complete logical 32-column tiles in the persistent state.
+            # Padding is allocated once; shapes and checkpoint values stay unchanged.
+            padding = [start % 32 if self.config.state_slabs else 0 for _, _, start in shards]
+            sizes = [(main.numel() + pad + 255) // 256 * 256
+                     for (_, main, _), pad in zip(shards, padding)]
             total = sum(sizes)
             if self.config.state_slabs:
                 snaps = torch.empty(2 * total, dtype=_SNAP_DTYPE, device=device)
                 distances = torch.empty(2 * total, dtype=torch.float32, device=device)
                 self._state_slabs[device] = (snaps, distances)
             offset = 0
-            for (key, main), size in zip(shards, sizes):
+            for (key, main, _), size, pad in zip(shards, sizes, padding):
                 n = main.numel()
                 state = _ParamDeOscState.__new__(_ParamDeOscState)
                 if self.config.state_slabs:
-                    state.prev = snaps[offset : offset + n].view(main.shape)
-                    state.prev_q = snaps[total + offset : total + offset + n].view(main.shape)
-                    state.dist_w = distances[offset : offset + n].view(main.shape)
-                    state.dist_w_qdq = distances[total + offset : total + offset + n].view(main.shape)
+                    view_offset = offset + pad
+                    state.prev = snaps[view_offset : view_offset + n].view(main.shape)
+                    state.prev_q = snaps[total + view_offset : total + view_offset + n].view(main.shape)
+                    state.dist_w = distances[view_offset : view_offset + n].view(main.shape)
+                    state.dist_w_qdq = distances[total + view_offset : total + view_offset + n].view(main.shape)
                 else:
                     state.prev = torch.empty_like(main, dtype=_SNAP_DTYPE)
                     state.prev_q = torch.empty_like(main, dtype=_SNAP_DTYPE)
