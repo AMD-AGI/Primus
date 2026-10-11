@@ -5,3 +5,7 @@ tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Llama-3.1-8B
 
 max_position_embeddings: 131072
+
+# Exact-shape optimizations apply only to the qualified MI355X MLPerf recipe.
+llama8b_deferred_ce: true
+llama8b_head_wgrad: true
