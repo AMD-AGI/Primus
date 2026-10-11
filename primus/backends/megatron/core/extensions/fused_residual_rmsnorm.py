@@ -582,12 +582,24 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
 
     # ---- mlp -------------------------------------------------------------
     padding_mask = kwargs.get("padding_mask", None)
+    # This normalized tensor is private to the MLP. The separate residual
+    # remains outside the router/expert gradient join, including V2 carry.
+    router_merge_token = None
+    if os.environ.get("PRIMUS_ROUTER_GRAD_MERGE", "0") == "1":
+        from primus.backends.megatron.patches.moe_patches.router_bwd_bf16_patches import (
+            _begin_fused_router_merge, _end_fused_router_merge,
+        )
+        router_merge_token = _begin_fused_router_merge(
+            layer, pre_mlp_layernorm_output, hidden_states, inference_context, padding_mask
+        )
     try:
         try:
             mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output, padding_mask=padding_mask)
         except TypeError:
             mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output)
     finally:
+        if router_merge_token is not None:
+            _end_fused_router_merge(router_merge_token)
         if fc1_skip is not None:
             fc1_skip._skip_fused_norm = False
             fc1_skip._prequant_x = None
