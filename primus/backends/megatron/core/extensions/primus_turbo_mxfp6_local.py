@@ -451,15 +451,32 @@ class F8State:
             self.amax[r].zero_()
             self.hist[r].zero_()
 
+    def state_dict(self):
+        """The multipliers, the amax history and the amax of the step not yet rolled into it (CPU copies)."""
+        return {f"{k}_{r}": getattr(self, k)[r].detach().cpu().clone() for k in ("q", "amax", "hist")
+                for r in self.ROLES}
+
+    def load_state_dict(self, sd):
+        for k in ("q", "amax", "hist"):
+            for r in self.ROLES:
+                getattr(self, k)[r].copy_(sd[f"{k}_{r}"])
+
 
 @torch.no_grad()
-def f8_step(states, slot: int) -> None:
+def f8_step(states, slot: int, group=None) -> None:
     """Step boundary (outside compiled code): record each state's amax of the step that just ran in history slot
     ``slot``, set every multiplier to 448 / max(history) (as 448 * (1 / max)) and clear the amax slots. A handful of
-    fused launches for any number of states."""
+    fused launches for any number of states.
+
+    ``group``: the amaxes are first max-reduced over it (one all-reduce of one flat buffer), so every rank of the
+    group quantizes with the same scales. ``states`` must list the same weights in the same order on every rank."""
     if not states:
         return
     amax = [s.amax[r] for s in states for r in F8State.ROLES]
+    if group is not None and torch.distributed.is_initialized() and torch.distributed.get_world_size(group) > 1:
+        flat = torch.cat(amax)
+        torch.distributed.all_reduce(flat, op=torch.distributed.ReduceOp.MAX, group=group)
+        torch._foreach_copy_(amax, list(flat.split(1)))
     hist = [s.hist[r] for s in states for r in F8State.ROLES]
     q = [s.q[r] for s in states for r in F8State.ROLES]
     h = hist[0].numel()

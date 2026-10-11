@@ -414,7 +414,17 @@ def _reset_ddp_grad_ready_calibration(models):
     return groups_reset
 
 
-def _run_warmup_and_restore(
+def _run_warmup_and_restore(**kw):
+    """``_run_warmup_and_restore_impl`` inside the forward-healing warmup scope: the healing switch leaves the warmup's
+    train_step calls alone (its pre-warms set the flags themselves), so synthetic steps never move the FP8 scales or
+    consume a checkpoint's."""
+    from primus.backends.megatron.patches import mxfp6_fwd_fp4_heal_patches as heal
+
+    with heal.warmup_scope():
+        return _run_warmup_and_restore_impl(**kw)
+
+
+def _run_warmup_and_restore_impl(
     *,
     warmup_steps,
     train_step_fn,
@@ -655,12 +665,16 @@ def _run_warmup_and_restore(
         _run_validation_warmup(models, forward_step_func, forward_backward_func, validation_steps)
         # ---- 13d. ... and its healed variant (mxfp6_fwd_fp4_heal), which the first evaluation after the switch runs ----
         if heal_prewarm_wanted(megatron_args):
-            prewarm_healed_graphs(
-                models,
-                lambda: _run_validation_warmup(models, forward_step_func, forward_backward_func, validation_steps),
-                "evaluation",
-                heal_target(megatron_args),
-            )
+            # target fp8: an evaluation right after the switch step still sees the seed flags (they end at the next
+            # training step), so its seed variant is compiled too
+            for seed in (True, False) if heal_target(megatron_args) == "fp8" else (False,):
+                prewarm_healed_graphs(
+                    models,
+                    lambda: _run_validation_warmup(models, forward_step_func, forward_backward_func, validation_steps),
+                    "evaluation" + (" (seed)" if seed else ""),
+                    heal_target(megatron_args),
+                    seed,
+                )
 
     # ---- 14. Synchronize ----
     torch.cuda.synchronize()

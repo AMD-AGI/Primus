@@ -314,7 +314,7 @@ class TestFp8Wrapper:
         monkeypatch.setattr(_patch_guard, "mark_patched", lambda *a: None)
         monkeypatch.setattr(H, "_report_heal", lambda *a: None)
         monkeypatch.setattr(H, "f8_setup", lambda plan: {idx: [idx] for idx, _ in plan})
-        monkeypatch.setattr(L, "f8_step", lambda states, slot: rolled.append((sorted(states), slot)))
+        monkeypatch.setattr(L, "f8_step", lambda states, slot, group=None: rolled.append((sorted(states), slot)))
 
         def make(heal_iter, rate=0):
             args = types.SimpleNamespace(mxfp6_fwd_fp4_heal_iter=heal_iter, mxfp6_fwd_fp4_heal_layers_per_iter=rate,
@@ -323,7 +323,9 @@ class TestFp8Wrapper:
             monkeypatch.setattr(H, "get_args", lambda ctx: args)
             H.patch_mxfp6_fwd_fp4_heal(None)
             step = mt.train_step
-            return lambda it: step(None, None, [model], iteration=it)
+            run = lambda it: step(None, None, [model], iteration=it)  # noqa: E731
+            run.heal_state = step.heal_state
+            return run
 
         return make, calls, rolled, model
 
@@ -353,12 +355,74 @@ class TestFp8Wrapper:
         H.set_heal(plan, 0, "fp8")
         assert calls == [(0, 0), (5, 5)] and rolled == []
 
+    def test_warmup_steps_pass_straight_through(self, wrapped):
+        make, calls, rolled, _ = wrapped
+        step = make(5)
+        with H.warmup_scope():
+            step(40)
+        step(4)
+        assert calls == [(0, 0), (0, 0)] and rolled == []
+
+    def test_resume_with_checkpointed_scales_continues_without_seeding(self, wrapped, monkeypatch):
+        make, calls, rolled, model = wrapped
+        restored = []
+        monkeypatch.setattr(H, "f8_restore", lambda plan, states, ck: restored.append(ck) or 5)
+        step = make(5)
+        step.heal_state["f8_ckpt"] = {"ran": 5}  # what the load wrapper stores on finding the side file
+        step(41)
+        step(42)
+        assert restored == [{"ran": 5}]
+        assert calls == [(5, 0), (5, 0)]  # healed, never a seed step
+        assert rolled == [([0, 1, 2, 3, 4], 41), ([0, 1, 2, 3, 4], 42)]  # the saved step's amax rolls first
+
     def test_resume_past_the_heal_iteration_seeds_everything(self, wrapped):
         make, calls, _, _ = wrapped
         step = make(5)
         step(40)
         step(41)
         assert calls == [(5, 5), (5, 0)]
+
+
+class TestFp8DelayedScaling:
+    def test_amax_is_max_reduced_before_the_history(self, monkeypatch):
+        L = _L()
+        a, b = L.F8State("cpu", history=4), L.F8State("cpu", history=4)
+        for st, v in ((a, 2.0), (b, 3.0)):
+            st.amax["a"].fill_(v)
+            st.amax["w"].fill_(v / 4)
+        seen = []
+
+        def fake_all_reduce(t, op=None, group=None):  # another rank saw larger activations
+            seen.append(t.clone())
+            t.copy_(torch.maximum(t, torch.tensor([8.0, 0.5, 1.0, 0.75])))
+
+        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 2)
+        monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
+        L.f8_step([a, b], 0, group=object())
+        assert len(seen) == 1 and seen[0].tolist() == [2.0, 0.5, 3.0, 0.75]  # one flat all-reduce, state order
+        assert a.q["a"].item() == 448.0 / 8.0
+        assert b.q["a"].item() == pytest.approx(448.0 / 3.0, rel=1e-6) and b.q["w"].item() == pytest.approx(448.0 / 0.75, rel=1e-6)
+
+    def test_checkpoint_round_trip(self):
+        L = _L()
+        plan = H.build_heal_plan([_toy_model()], target="fp8")
+        states = {idx: [L.F8State("cpu"), L.F8State("cpu")] for idx, _ in plan}
+        for k, (idx, _) in enumerate(plan):
+            for st in states[idx]:
+                st.amax["a"].fill_(k + 1.0)
+                L.f8_step([st], k)
+                st.amax["w"].fill_(0.5 * (k + 1))  # this step's amax, not rolled yet
+        ck = H.f8_checkpoint(plan, states, ran=5)
+        fresh = {idx: [L.F8State("cpu"), L.F8State("cpu")] for idx, _ in plan}
+        assert H.f8_restore(plan, fresh, ck) == 5
+        for idx, _ in plan:
+            for x, y in zip(states[idx], fresh[idx]):
+                for r in L.F8State.ROLES:
+                    assert torch.equal(x.q[r], y.q[r]) and torch.equal(x.hist[r], y.hist[r])
+                    assert torch.equal(x.amax[r], y.amax[r])
+        with pytest.raises(RuntimeError, match="do not match"):
+            H.f8_restore(plan[:-1], fresh, ck)
 
 
 class TestFp8ConfigValidation:

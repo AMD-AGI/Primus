@@ -177,6 +177,37 @@ def f8_setup(plan: HealPlan) -> Dict[int, list]:
     return out
 
 
+_F8_FILE = "mxfp6_fwd_fp8_scales.pt"
+_IN_WARMUP = [False]
+
+
+class warmup_scope:
+    """The MLPerf warmup's extent: the train_step wrapper passes its calls straight through."""
+
+    def __enter__(self):
+        _IN_WARMUP[0] = True
+
+    def __exit__(self, *exc):
+        _IN_WARMUP[0] = False
+
+
+def f8_checkpoint(plan: HealPlan, states: Dict[int, list], ran: int) -> dict:
+    """The delayed FP8 scales of every planned layer (identical on every rank: f8_step reduces the amaxes), keyed by
+    layer index, plus how many planned layers ran FP8 in the last step."""
+    return {"version": 1, "ran": int(ran), "layers": {idx: [st.state_dict() for st in states[idx]] for idx, _ in plan}}
+
+
+def f8_restore(plan: HealPlan, states: Dict[int, list], ckpt: dict) -> int:
+    """Load ``f8_checkpoint``'s scales into ``states``; returns its ``ran``. Raises if the plan does not match."""
+    layers = ckpt["layers"]
+    if set(layers) != {idx for idx, _ in plan} or any(len(layers[idx]) != len(states[idx]) for idx, _ in plan):
+        raise RuntimeError("mxfp6_fwd_fp4_heal: the checkpoint's FP8 scales do not match this model's healed layers")
+    for idx, _ in plan:
+        for st, sd in zip(states[idx], layers[idx]):
+            st.load_state_dict(sd)
+    return int(ckpt["ran"])
+
+
 def _unique_graph_count() -> int:
     """Dynamo's compiled-graph counter, or -1 when it cannot be read."""
     try:
@@ -285,6 +316,8 @@ def patch_mxfp6_fwd_fp4_heal(ctx: PatchContext) -> None:
     state: Dict[str, object] = {"plan": None, "applied": 0, "graphs_at_switch": None, "f8": {}, "f8_ran": 0}
 
     def _patched_train_step(*fn_args, **fn_kwargs):
+        if _IN_WARMUP[0]:  # synthetic warmup steps (the pre-warms force the flags themselves)
+            return original_train_step(*fn_args, **fn_kwargs)
         if state["plan"] is None:
             model = fn_args[2] if len(fn_args) > 2 else fn_kwargs.get("model")
             if model is not None:
@@ -318,6 +351,13 @@ def patch_mxfp6_fwd_fp4_heal(ctx: PatchContext) -> None:
             state["graphs_at_switch"] = None
 
         count = target_layer_count(iteration, heal_iter, layers_per_iter, len(plan))
+        if target == "fp8" and state.get("f8_ckpt") is not None:
+            # resumed from a checkpoint with FP8 scales: continue their history instead of seeding again
+            ckpt, state["f8_ckpt"] = state["f8_ckpt"], None
+            state["f8_ran"] = f8_restore(plan, state["f8"], ckpt)
+            set_heal(plan, count, target, seed_from=min(state["f8_ran"], count))
+            state["f8_seeded"] = count > state["f8_ran"]
+            _log(f"Restored the FP8 scales of {len(plan)} layers ({state['f8_ran']} ran FP8 at the save)")
         if target == "fp8":
             # Step boundary: the layers that ran FP8 in the step before roll their scales from its amaxes. Then this
             # step's layers -- the newly healed ones seed their scales from their own operands.
@@ -325,8 +365,10 @@ def patch_mxfp6_fwd_fp4_heal(ctx: PatchContext) -> None:
 
             ran = state["f8_ran"]
             if ran:
+                # amaxes max-reduced over every rank (no pipeline parallelism: every rank holds every layer), so all
+                # ranks quantize with the same scales
                 f8_step([st for pos, (idx, _) in enumerate(plan) if pos < ran for st in state["f8"][idx]],
-                        int(iteration or 0))
+                        int(iteration or 0), torch.distributed.group.WORLD if torch.distributed.is_initialized() else None)
             # Flags change only with the healed count or to end a seed step: the warmup's re-entry (count 0) must not
             # undo the pre-warm's forced flags.
             if count != ran or state.get("f8_seeded"):
@@ -345,6 +387,44 @@ def patch_mxfp6_fwd_fp4_heal(ctx: PatchContext) -> None:
 
         return original_train_step(*fn_args, **fn_kwargs)
 
+    _patched_train_step.heal_state = state  # inspection (tests)
     megatron_training.train_step = _patched_train_step
+
+    if target == "fp8":
+        # The delayed scales ride along with checkpoints (a side file in the iteration directory, rank 0 writes it);
+        # a resume without one seeds again.
+        from megatron.training import checkpointing
+
+        original_save = megatron_training.save_checkpoint
+        original_load = checkpointing.load_checkpoint
+
+        def _save_with_f8(iteration, *a, **kw):
+            out = original_save(iteration, *a, **kw)
+            plan_ = state["plan"]
+            if plan_ and state["f8_ran"] and getattr(args, "save", None):
+                import os
+
+                if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                    d = checkpointing.get_checkpoint_name(args.save, iteration, return_base_dir=True)
+                    os.makedirs(d, exist_ok=True)
+                    torch.save(f8_checkpoint(plan_, state["f8"], state["f8_ran"]), os.path.join(d, _F8_FILE))
+            return out
+
+        def _load_with_f8(*a, **kw):
+            out = original_load(*a, **kw)
+            iteration = out[0] if isinstance(out, tuple) else out
+            load_dir = getattr(args, "load", None)
+            if load_dir and iteration:
+                import os
+
+                f = os.path.join(checkpointing.get_checkpoint_name(load_dir, iteration, return_base_dir=True), _F8_FILE)
+                if os.path.exists(f):
+                    state["f8_ckpt"] = torch.load(f, map_location="cpu", weights_only=True)
+                    _log(f"Found FP8 scales in {f}")
+            return out
+
+        megatron_training.save_checkpoint = _save_with_f8
+        checkpointing.load_checkpoint = _load_with_f8
+        megatron_training.load_checkpoint = _load_with_f8
     mark_patched(megatron_training, _PATCH_KEY)
     _log(f"Wrapped train_step (heal_iter={heal_iter}, priority=46)")
