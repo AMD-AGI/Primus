@@ -1,0 +1,25 @@
+###############################################################################
+# Primus SpecForge module config - online (disaggregated capture + train)
+#
+# Primus owns Mooncake / patched SGLang / --role producer|consumer. SpecForge
+# still owns the training YAML pointed to by specforge_config (keep loopback
+# 127.0.0.1 there; Primus rewrites it to the capture-rank-0 IP after allocate).
+###############################################################################
+extends:
+  - ../module_base.yaml
+
+trainable: true
+
+specforge_config: null
+specforge_root: null
+specforge_entrypoint: specforge
+# Live capture+train. specforge_train_mode is required for train (no default).
+specforge_mode: train
+specforge_train_mode: online
+
+# Sidecar / node+GPU split. Rendered into SpecForge Hydra overrides plus
+# Mooncake/SGLang argv. Do not put cluster IPs here.
+specforge_online: {}
+
+output_dir: null
+specforge_overrides: {}

@@ -91,7 +91,9 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
       overlap_param_gather: true
-      ddp_num_buckets: 8
+      # Match the 24 transformer layers so parameter AllGather can be
+      # scheduled at approximately layer granularity.
+      ddp_num_buckets: 24
       ddp_average_in_collective: true
 
       # data

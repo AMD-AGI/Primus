@@ -85,6 +85,33 @@ except (ImportError, ModuleNotFoundError):
     _ScalingGranularity = None
     _float4_e2m1fn_x2 = None
 
+try:
+    from primus_turbo.pytorch.ops.quantization import dequantize_fp4 as _dequantize_fp4
+    from primus_turbo.pytorch.ops.quantization import (
+        quantize_fp4_with_trans as _quantize_fp4_with_trans,
+    )
+except (ImportError, ModuleNotFoundError):
+    _dequantize_fp4 = None
+    _quantize_fp4_with_trans = None
+
+try:
+    from primus_turbo.pytorch.ops.deoscillation import (
+        weight_deosc_close as _weight_deosc_close,
+    )
+    from primus_turbo.pytorch.ops.deoscillation import (
+        weight_deosc_update as _weight_deosc_update,
+    )
+except (ImportError, ModuleNotFoundError):
+    _weight_deosc_close = None
+    _weight_deosc_update = None
+
+try:
+    from primus_turbo.pytorch.ops.deoscillation import (
+        weight_deosc_qdq as _weight_deosc_qdq,
+    )
+except (ImportError, ModuleNotFoundError):
+    _weight_deosc_qdq = None
+
 # Block size used by the Primus-Turbo MXFP4 weight path (== 32).
 try:
     from primus.backends.megatron.core.fp4_utils import MXFP4_SCALING_BLOCK_SIZE
@@ -112,6 +139,9 @@ class WeightDeOscConfig:
         ratio_threshold: DistRatio threshold above which an element is snapped.
         start_step: Global optimizer step at which tracking begins.
         log_freq: Log a summary every ``log_freq`` periods (0 disables logging).
+        fusion: Require Primus-Turbo's fused update and closure operators.
+        direct_qdq: Fuse QDQ into tracking/closure on gfx950; requires fusion.
+        state_slabs: Allocate direct-QDQ snapshots and accumulators in two slabs.
     """
 
     enable: bool = False
@@ -119,6 +149,9 @@ class WeightDeOscConfig:
     ratio_threshold: float = 4.0
     start_step: int = 0
     log_freq: int = 0
+    fusion: bool = False
+    direct_qdq: bool = False
+    state_slabs: bool = True
 
     def validate(self) -> None:
         if not self.enable:
@@ -131,6 +164,8 @@ class WeightDeOscConfig:
             raise ValueError(f"weight_deosc_start_step must be >= 0, got {self.start_step}")
         if self.log_freq < 0:
             raise ValueError(f"weight_deosc_log_freq must be >= 0, got {self.log_freq}")
+        if self.direct_qdq and not self.fusion:
+            raise ValueError("weight_deosc_direct_qdq requires weight_deosc_fusion")
 
 
 def _is_mxfp4_quantized_weight_buffer(buf) -> bool:
@@ -151,6 +186,33 @@ def _is_mxfp4_quantized_weight_buffer(buf) -> bool:
     return dtype == _float4_e2m1fn_x2
 
 
+def _forward_scale_rounding_mode() -> int:
+    """E8M0 block-scale rounding mode the forward quantizer is using.
+
+    The forward resolves ``mxfp4_scale_rounding_mode`` from the Megatron args
+    (see ``fp4_utils._mxfp4_scale_rounding_mode``). Reading the env var instead
+    diverges whenever the recipe sets the args field and the variable is unset:
+    DeOsc would fall back to 0 while the forward runs the configured mode.
+    The env var remains the fallback for older Turbo builds and for callers
+    with no initialized args. Unset means 0, the mode DeOsc used before this
+    was plumbed through.
+    """
+    value = None
+    try:
+        from megatron.training.global_vars import get_args
+
+        value = getattr(get_args(), "mxfp4_scale_rounding_mode", None)
+    except Exception:
+        value = None
+    if value is None:
+        raw = os.environ.get("PRIMUS_TURBO_MXFP4_SCALE_ROUNDING")
+        value = 0 if raw is None else int(raw)
+    mode = int(value)
+    if mode not in (0, 1, 2):
+        raise ValueError(f"mxfp4_scale_rounding_mode must be 0, 1, or 2, got {mode}")
+    return mode
+
+
 def deosc_dependencies_available() -> Tuple[bool, str]:
     """Return whether the Primus-Turbo MXFP4 QDQ primitives are importable."""
     if _PrimusTurboQuantizedTensor is None:
@@ -159,6 +221,8 @@ def deosc_dependencies_available() -> Tuple[bool, str]:
         return False, "primus_turbo ScalingRecipe / MXScalingRecipe is unavailable"
     if _ScalingGranularity is None or _float4_e2m1fn_x2 is None:
         return False, "primus_turbo low_precision MXFP4 symbols are unavailable"
+    if _quantize_fp4_with_trans is None or _dequantize_fp4 is None:
+        return False, "primus_turbo MXFP4 quantize/dequantize ops are unavailable"
     return True, ""
 
 
@@ -171,14 +235,12 @@ def qdq_mxfp4(weight: torch.Tensor) -> torch.Tensor:
     ``ScalingRecipe(use_2d_block=True)``, quantized along ``axis=-1``.
 
     Supports 2D dense weights ``[out, in]`` and 3D grouped expert weights
-    ``[num_experts, out, in]``. The grouped case is handled per-expert because
-    the single-direction MXFP4 kernel only accepts 2D input; this reproduces the
-    Primus-Turbo grouped MXFP4 forward weight operand (PR #398), which quantizes
-    each expert row-wise along the K (in) axis with ``use_2d_block=True``.
-    Whether a grouped weight is actually de-osc eligible still depends on the
-    grouped FP4 forward setting ``quantized_weight_buffer`` on its module.
+    ``[num_experts, out, in]``. Primus-Turbo supports native batched 3D MXFP4
+    dual quantization; use that path for grouped weights to match
+    ``grouped_mlp_fp4`` and avoid one HIP quantize launch per expert.
     """
     recipe = _ScalingRecipe(use_2d_block=True)
+    scale_rounding_mode = _forward_scale_rounding_mode()
 
     def _qdq_2d(w2d: torch.Tensor) -> torch.Tensor:
         qt = _PrimusTurboQuantizedTensor.quantize(
@@ -188,6 +250,7 @@ def qdq_mxfp4(weight: torch.Tensor) -> torch.Tensor:
             block_size=MXFP4_SCALING_BLOCK_SIZE,
             scaling_recipe=recipe,
             axis=-1,
+            scale_rounding_mode=scale_rounding_mode,
         )
         out = qt.dequantize()
         # dequantize() only un-pads the last dim; defensively restore the exact
@@ -199,7 +262,32 @@ def qdq_mxfp4(weight: torch.Tensor) -> torch.Tensor:
     if weight.ndim == 2:
         return _qdq_2d(weight)
     if weight.ndim == 3:
-        return torch.stack([_qdq_2d(weight[g]) for g in range(weight.shape[0])], dim=0)
+        # The batched kernel reinterprets bf16 pairs as int32 with vector
+        # loads, so a contiguous view at an unaligned offset must be copied.
+        if weight.data_ptr() % 16:
+            weight = weight.clone(memory_format=torch.contiguous_format)
+        q_row, scale_row, q_col, scale_col = _quantize_fp4_with_trans(
+            weight,
+            _float4_e2m1fn_x2,
+            _ScalingGranularity.MX_BLOCKWISE,
+            block_size=MXFP4_SCALING_BLOCK_SIZE,
+            scaling_recipe=recipe,
+            scaling_recipe_for_trans=recipe,
+            scale_rounding_mode=scale_rounding_mode,
+        )
+        del q_col, scale_col
+        out = _dequantize_fp4(
+            q_row,
+            weight.dtype,
+            _ScalingGranularity.MX_BLOCKWISE,
+            block_size=MXFP4_SCALING_BLOCK_SIZE,
+            axis=weight.ndim - 1,
+            scale_inv=scale_row,
+            scaling_recipe=recipe,
+        )
+        if out.shape != weight.shape:
+            out = out[tuple(slice(0, s) for s in weight.shape)].contiguous()
+        return out.to(weight.dtype)
     raise ValueError(f"qdq_mxfp4 expects a 2D or 3D weight, got {weight.ndim}D")
 
 
@@ -210,6 +298,8 @@ def qdq_mxfp4_local_shard(
     start: int,
     end: int,
     model_dtype: torch.dtype,
+    *,
+    return_model: bool = False,
 ) -> torch.Tensor:
     """QDQ a flattened local shard in its original 32x32 tile coordinates.
 
@@ -218,6 +308,10 @@ def qdq_mxfp4_local_shard(
     outside the local shard in a touched boundary tile row are represented by
     zeros, avoiding communication while preserving exact coordinates for all
     locally complete tiles.
+
+    With ``return_model`` the bf16 cast of the shard is returned alongside the
+    QDQ result. The caller needs exactly that tensor as its tracking snapshot,
+    and recomputing it there casts the whole shard a second time.
     """
     shape = tuple(int(dim) for dim in full_shape)
     if len(shape) not in (2, 3):
@@ -238,7 +332,8 @@ def qdq_mxfp4_local_shard(
             f"for range [{start}, {end})"
         )
     if local_fp32.numel() == 0:
-        return local_fp32.to(dtype=model_dtype)
+        empty = local_fp32.to(dtype=model_dtype)
+        return (empty, empty) if return_model else empty
 
     # Forward quantizes bf16 model weights, not fp32 masters. Casting here
     # reproduces the copy-to-model rounding without gathering the model param.
@@ -247,14 +342,10 @@ def qdq_mxfp4_local_shard(
 
     rows, cols = shape[-2:]
     matrix_numel = rows * cols
-    first_matrix = start // matrix_numel
-    last_matrix = (end - 1) // matrix_numel
     block = MXFP4_SCALING_BLOCK_SIZE
 
-    for matrix_idx in range(first_matrix, last_matrix + 1):
+    def _qdq_partial_matrix(matrix_idx: int, local_begin: int, local_end: int) -> None:
         matrix_base = matrix_idx * matrix_numel
-        local_begin = max(start, matrix_base)
-        local_end = min(end, matrix_base + matrix_numel)
         begin_in_matrix = local_begin - matrix_base
         end_in_matrix = local_end - matrix_base
 
@@ -262,6 +353,12 @@ def qdq_mxfp4_local_shard(
         last_row = (end_in_matrix - 1) // cols
         tile_row_begin = (first_row // block) * block
         tile_row_end = ((last_row // block) + 1) * block
+        if len(shape) == 3:
+            # Keep grouped boundary fragments on the same batched 3D FlyDSL
+            # path. Padding by complete 32-row scale blocks cannot affect the
+            # real rows and satisfies dual3's 64-row alignment requirement.
+            tile_rows = tile_row_end - tile_row_begin
+            tile_row_end = tile_row_begin + ((tile_rows + 2 * block - 1) // (2 * block)) * (2 * block)
 
         tile = torch.zeros(
             (tile_row_end - tile_row_begin, cols),
@@ -274,10 +371,37 @@ def qdq_mxfp4_local_shard(
         shard_end = local_end - start
         tile.reshape(-1)[tile_begin:tile_end].copy_(local_model[shard_begin:shard_end])
 
-        q_tile = qdq_mxfp4(tile)
+        q_tile = qdq_mxfp4(tile.unsqueeze(0))[0] if len(shape) == 3 else qdq_mxfp4(tile)
         q_local[shard_begin:shard_end].copy_(q_tile.reshape(-1)[tile_begin:tile_end])
 
-    return q_local
+    if len(shape) == 2:
+        _qdq_partial_matrix(0, start, end)
+        return (q_local, local_model) if return_model else q_local
+
+    # A DP shard may start/end inside an expert. Keep those two boundary
+    # fragments on the established 2D tile-preserving path, but quantize all
+    # fully-owned experts between them in one native 3D Turbo call.
+    cursor = start
+    if cursor % matrix_numel:
+        matrix_idx = cursor // matrix_numel
+        prefix_end = min(end, (matrix_idx + 1) * matrix_numel)
+        _qdq_partial_matrix(matrix_idx, cursor, prefix_end)
+        cursor = prefix_end
+
+    full_end = end - (end % matrix_numel)
+    if cursor < full_end:
+        shard_begin = cursor - start
+        shard_end = full_end - start
+        expert_count = (full_end - cursor) // matrix_numel
+        full_experts = local_model[shard_begin:shard_end].view(expert_count, rows, cols)
+        q_full_experts = qdq_mxfp4(full_experts)
+        q_local[shard_begin:shard_end].copy_(q_full_experts.reshape(-1))
+        cursor = full_end
+
+    if cursor < end:
+        _qdq_partial_matrix(cursor // matrix_numel, cursor, end)
+
+    return (q_local, local_model) if return_model else q_local
 
 
 class _ParamDeOscState:
@@ -346,6 +470,117 @@ class WeightDeOscRunner:
         # the FP4 forward (auto-excludes bf16 first/last layers and any layer
         # whose FP4 path never ran, e.g. grouped experts).
         self._eligible_ids: Optional[set] = None
+        self._use_fusion = bool(
+            config.fusion and _weight_deosc_update is not None and _weight_deosc_close is not None
+        )
+        if config.fusion and not self._use_fusion:
+            raise RuntimeError(
+                "[WeightDeOsc] fused operators requested but unavailable; install the matching Primus-Turbo build."
+            )
+        # Lazily allocated once on a closure step that is selected for logging;
+        # every shard atomically contributes to the same device scalar.
+        self._period_reset_count: Optional[torch.Tensor] = None
+        self._use_direct_qdq = bool(config.direct_qdq)
+        if self._use_direct_qdq and (not self._use_fusion or _weight_deosc_qdq is None):
+            raise RuntimeError("direct deosc QDQ requested but Primus-Turbo operators are unavailable")
+        self._state_slabs: Dict[torch.device, Tuple[torch.Tensor, torch.Tensor]] = {}
+        self._direct_states_ready = False
+        self._pending_logs = []
+
+    def _prepare_direct_states(self, dist_opt, shard_groups, model_groups) -> None:
+        """Allocate persistent state without zero-fill kernels or QDQ temporaries.
+
+        Each new state is initialized by its first fused QDQ call. Checkpoint
+        state is copied into the same views and participates in the next update.
+        Two allocations per device replace four allocations per weight.
+        """
+        shards_by_device = {}
+        for shards, models in zip(shard_groups, model_groups):
+            for main, model in zip(shards, models):
+                if main is None or model is None or id(model) not in self._eligible_ids:
+                    continue
+                rng = dist_opt._get_model_param_range_map(model)["param"]
+                if rng.end <= rng.start:
+                    continue
+                if model.ndim not in (2, 3) or model.dtype != _SNAP_DTYPE:
+                    raise ValueError("direct deosc QDQ requires 2D/3D BF16 model weights")
+                if main.numel() != rng.end - rng.start:
+                    raise ValueError("direct deosc QDQ shard size does not match the parameter range")
+                key = self._stable_key(dist_opt, model, rng.start, rng.end)
+                shards_by_device.setdefault(main.device, []).append((key, main))
+
+        for device, shards in shards_by_device.items():
+            # Keep every view aligned, including odd shard lengths.
+            sizes = [(main.numel() + 255) // 256 * 256 for _, main in shards]
+            total = sum(sizes)
+            if self.config.state_slabs:
+                snaps = torch.empty(2 * total, dtype=_SNAP_DTYPE, device=device)
+                distances = torch.empty(2 * total, dtype=torch.float32, device=device)
+                self._state_slabs[device] = (snaps, distances)
+            offset = 0
+            for (key, main), size in zip(shards, sizes):
+                n = main.numel()
+                state = _ParamDeOscState.__new__(_ParamDeOscState)
+                if self.config.state_slabs:
+                    state.prev = snaps[offset : offset + n].view(main.shape)
+                    state.prev_q = snaps[total + offset : total + offset + n].view(main.shape)
+                    state.dist_w = distances[offset : offset + n].view(main.shape)
+                    state.dist_w_qdq = distances[total + offset : total + offset + n].view(main.shape)
+                else:
+                    state.prev = torch.empty_like(main, dtype=_SNAP_DTYPE)
+                    state.prev_q = torch.empty_like(main, dtype=_SNAP_DTYPE)
+                    state.dist_w = torch.empty_like(main)
+                    state.dist_w_qdq = torch.empty_like(main)
+                state.step = -1  # First observation seeds all four buffers in-kernel.
+                loaded = self._loaded_params.pop(key, None)
+                fields = ("prev", "prev_q", "dist_w", "dist_w_qdq")
+                if loaded is not None and all(tuple(loaded[f].shape) == tuple(main.shape) for f in fields):
+                    for field in fields:
+                        getattr(state, field).copy_(loaded[field])
+                    state.step = int(loaded["step"])
+                self._state[key] = state
+                offset += size
+        self._direct_states_ready = True
+
+    def _drain_pending_logs(self) -> None:
+        pending = []
+        for event, host_count, device_count, step, period, elems in self._pending_logs:
+            if not event.query():
+                pending.append((event, host_count, device_count, step, period, elems))
+                continue
+            n_reset = int(host_count.item())  # CPU pinned scalar; event already completed.
+            frac = 100.0 * n_reset / max(elems, 1)
+            log_rank_0(
+                f"[WeightDeOsc] step={step} period={period} "
+                f"snapped {n_reset}/{elems} elems ({frac:.3f}%) [deferred]"
+            )
+        self._pending_logs = pending
+
+    def _track_direct(self, key, main, shape, start, collect_reset_count):
+        state = self._state[key]
+        seed = state.step < 0
+        close = not seed and state.step + 1 >= self.config.period
+        if close and collect_reset_count and self._period_reset_count is None:
+            self._period_reset_count = torch.zeros((), device=main.device, dtype=torch.int64)
+        _weight_deosc_qdq(
+            main.detach(),
+            state.prev,
+            state.prev_q,
+            state.dist_w,
+            state.dist_w_qdq,
+            shape[-2],
+            shape[-1],
+            start,
+            scale_rounding_mode=_forward_scale_rounding_mode(),
+            seed=seed,
+            close=close,
+            ratio_threshold=self.config.ratio_threshold,
+            eps=self._EPS,
+            reset_count=self._period_reset_count if close else None,
+            grouped=len(shape) == 3,
+        )
+        state.step = 0 if seed or close else state.step + 1
+        return None, main.numel(), close
 
     # ------------------------------------------------------------------
     # Stable keys (for in-memory tracking + checkpoint round-trip)
@@ -415,6 +650,9 @@ class WeightDeOscRunner:
         if not self.config.enable:
             return
 
+        if self._pending_logs:
+            self._drain_pending_logs()
+
         self._global_step += 1
         if self._global_step < self.config.start_step:
             return
@@ -431,9 +669,17 @@ class WeightDeOscRunner:
         if shard_groups is None or model_groups is None:
             return
 
-        total_reset = 0
+        if self._use_direct_qdq and not self._direct_states_ready:
+            self._prepare_direct_states(dist_opt, shard_groups, model_groups)
+
+        # Kept as a device tensor (or None) and only materialised for the log.
+        total_reset = None
         total_elems = 0
         period_closed = False
+        collect_reset_count = bool(
+            self.config.log_freq > 0 and (self._period_index + 1) % self.config.log_freq == 0
+        )
+        self._period_reset_count = None
 
         for shard_group, model_group in zip(shard_groups, model_groups):
             for shard_main_param, model_param in zip(shard_group, model_group):
@@ -447,35 +693,83 @@ class WeightDeOscRunner:
                 if end <= start:
                     continue
 
+                key = self._stable_key(dist_opt, model_param, start, end)
+                if self._use_direct_qdq:
+                    _, elems, closed = self._track_direct(
+                        key,
+                        shard_main_param,
+                        model_param.shape,
+                        start,
+                        collect_reset_count,
+                    )
+                    total_elems += elems
+                    period_closed = period_closed or closed
+                    continue
+
                 # QDQ the local fp32 master after bf16 rounding, preserving the
                 # original 32x32 tile coordinates and zero-filling only missing
                 # cross-rank boundary values.
                 w_local = shard_main_param.detach()
-                q_local = qdq_mxfp4_local_shard(
+                q_local, w_model = qdq_mxfp4_local_shard(
                     w_local,
                     tuple(model_param.shape),
                     start,
                     end,
                     model_param.dtype,
+                    return_model=True,
                 )
+                # w_model is already the bf16 view of this shard, so hand it over
+                # as the tracking snapshot rather than casting the shard again.
+                if w_model.dtype is not _SNAP_DTYPE:
+                    w_model = w_local
 
-                key = self._stable_key(dist_opt, model_param, start, end)
-                reset, elems, closed = self._track_and_snap(key, shard_main_param, w_local, q_local)
-                total_reset += reset
+                reset, elems, closed = self._track_and_snap(
+                    key,
+                    shard_main_param,
+                    w_model,
+                    q_local,
+                    collect_reset_count=collect_reset_count,
+                )
+                if reset is not None:
+                    total_reset = reset if total_reset is None else total_reset + reset
                 total_elems += elems
                 period_closed = period_closed or closed
 
         if period_closed:
+            if self._use_fusion:
+                total_reset = self._period_reset_count
             self._period_index += 1
             if (
                 self.config.log_freq > 0
                 and self._period_index % self.config.log_freq == 0
                 and total_elems > 0
             ):
-                frac = 100.0 * total_reset / max(total_elems, 1)
+                if self._use_fusion and total_reset is not None:
+                    # Pinned D2H on the current stream; print on a later step
+                    # only after query() succeeds. Never wait on .item() here.
+                    host_count = torch.empty((), dtype=torch.int64, pin_memory=True)
+                    with torch.cuda.device(total_reset.device):
+                        host_count.copy_(total_reset, non_blocking=True)
+                        event = torch.cuda.Event()
+                        event.record()
+                    self._pending_logs.append(
+                        (
+                            event,
+                            host_count,
+                            total_reset,
+                            self._global_step,
+                            self._period_index,
+                            total_elems,
+                        )
+                    )
+                    return
+                # The only device sync in the whole period, and only when the
+                # summary is actually about to be logged.
+                n_reset = int(total_reset.item()) if total_reset is not None else 0
+                frac = 100.0 * n_reset / max(total_elems, 1)
                 log_rank_0(
                     f"[WeightDeOsc] step={self._global_step} period={self._period_index} "
-                    f"snapped {total_reset}/{total_elems} elems ({frac:.3f}%)"
+                    f"snapped {n_reset}/{total_elems} elems ({frac:.3f}%)"
                 )
 
     # ------------------------------------------------------------------
@@ -488,7 +782,9 @@ class WeightDeOscRunner:
         shard_main_param: torch.Tensor,
         w_local: torch.Tensor,
         q_local: torch.Tensor,
-    ) -> Tuple[int, int, bool]:
+        *,
+        collect_reset_count: bool = True,
+    ) -> Tuple[Optional[torch.Tensor], int, bool]:
         state = self._state.get(key)
         w_snap = _as_snap(w_local)
         q_snap = _as_snap(q_local)
@@ -502,40 +798,70 @@ class WeightDeOscRunner:
             if state is None:
                 # First observation: seed snapshots, do not track this step.
                 self._state[key] = _ParamDeOscState(w_snap, q_snap)
-                return 0, n_elem, False
+                return None, n_elem, False
             self._state[key] = state
             # fall through to track this step using the restored snapshots
 
-        # Promote only the BF16 delta into the FP32 window accumulators.
-        state.dist_w += (w_snap - state.prev).abs()
-        state.dist_w_qdq += (q_snap - state.prev_q).abs()
-        state.prev.copy_(w_snap)
-        state.prev_q.copy_(q_snap)
+        # Promote only the BF16 delta into the FP32 window accumulators. The
+        # fused path combines the two subtract/abs/add chains into one launch.
+        if self._use_fusion:
+            _weight_deosc_update(
+                w_snap,
+                q_snap,
+                state.prev,
+                state.prev_q,
+                state.dist_w,
+                state.dist_w_qdq,
+            )
+        else:
+            state.dist_w += (w_snap - state.prev).abs()
+            state.dist_w_qdq += (q_snap - state.prev_q).abs()
+        # w_snap and q_snap are freshly allocated every step, so adopting them
+        # as the next snapshot is a rebind. Copying into a persistent buffer
+        # instead would move the whole shard twice more per step for nothing.
+        state.prev = w_snap
+        state.prev_q = q_snap
         state.step += 1
 
         if state.step < self.config.period:
-            return 0, n_elem, False
+            return None, n_elem, False
 
-        # End of period: snap oscillating elements to the current bin center.
-        ratio = state.dist_w_qdq / state.dist_w.clamp(min=self._EPS)
-        reset_mask = (state.dist_w > 0) & (ratio >= self.config.ratio_threshold)
+        main = shard_main_param.data.view(-1)
+        if self._use_fusion:
+            if collect_reset_count and self._period_reset_count is None:
+                self._period_reset_count = torch.zeros((), device=main.device, dtype=torch.int64)
+            _weight_deosc_close(
+                main,
+                state.prev,
+                q_snap,
+                state.dist_w,
+                state.dist_w_qdq,
+                self.config.ratio_threshold,
+                self._EPS,
+                reset_count=self._period_reset_count,
+            )
+            reset_count = None
+        else:
+            # End of period: snap oscillating elements to the current bin center.
+            ratio = state.dist_w_qdq / state.dist_w.clamp(min=self._EPS)
+            reset_mask = (state.dist_w > 0) & (ratio >= self.config.ratio_threshold)
 
-        reset_count = 0
-        if reset_mask.any():
-            reset_count = int(reset_mask.sum().item())
-            q_flat = q_snap.reshape(-1)
-            # Snap target is the dequantized bin center, written back in FP32.
-            shard_main_param.data.view(-1)[reset_mask] = q_flat[reset_mask].to(dtype=shard_main_param.dtype)
-            # Refresh master snapshot so the snap is not counted as a large
-            # movement on the next period's first step. prev_q already equals
-            # Q(snapped) because the snapped values are dequantized bin centers
-            # (QDQ is idempotent on them).
-            state.prev.copy_(w_snap)
-            state.prev.view(-1)[reset_mask] = q_flat[reset_mask]
+            # Boolean-mask read/write lowers to masked_select + index_put_, and each
+            # of those synchronizes the device to size its data-dependent output.
+            # Over 32 shards that is ~190 syncs in a single step. torch.where does
+            # the same job branch-free at a fixed cost.
+            torch.where(reset_mask, q_snap, main, out=main)
+            # prev already holds w_snap from the update above, so only the snapped
+            # positions still need fixing. prev_q needs none: QDQ is idempotent on
+            # bin centers, so Q(snapped) is already what q_snap holds there.
+            torch.where(reset_mask, q_snap, state.prev, out=state.prev)
 
-        state.dist_w.zero_()
-        state.dist_w_qdq.zero_()
+            state.dist_w.zero_()
+            state.dist_w_qdq.zero_()
+            reset_count = reset_mask.sum() if collect_reset_count else None
         state.step = 0
+        # Left as a device tensor: calling .item() here costs one sync per shard,
+        # and the count is only ever consumed once, by a selected period log.
         return reset_count, n_elem, True
 
     # ------------------------------------------------------------------
@@ -553,6 +879,10 @@ class WeightDeOscRunner:
             return
         self._global_step = int(sd.get("global_step", 0))
         self._period_index = int(sd.get("period_index", 0))
+        self._state.clear()
+        self._state_slabs.clear()
+        self._direct_states_ready = False
+        self._pending_logs.clear()
         # Consumed lazily on each param's next observation (shape-checked there).
         self._loaded_params = dict(sd.get("params", {}))
 
@@ -613,19 +943,15 @@ def load_deosc_sidecars(optimizer, ckpt_dir: Optional[str]) -> None:
 
 
 def _uses_precision_aware_main_params(opt) -> bool:
-    """True if the optimizer holds bf16 main params inside FusedAdam.
+    """True if FusedAdam, rather than MCore, owns the main parameters.
 
-    With ``use_precision_aware_optimizer`` the distributed optimizer does not
-    keep a separate fp32 master shard: ``shard_fp32_from_float16_groups`` is
-    filled with ``None`` and the main params live inside FusedAdam. De-osc reads
-    those shards for dist_w and as the snap target, so this mode is unsupported
-    and must be detected explicitly (otherwise de-osc would silently no-op).
+    Precision-aware optimization can lower only the moment dtypes while leaving
+    MCore's FP32 main-parameter shards intact. That mode is compatible with
+    de-oscillation. It is unsupported only when the decoupled-grad path moves
+    main-parameter ownership into FusedAdam, leaving the MCore shard slots empty.
     """
     cfg = getattr(opt, "config", None)
-    if cfg is not None and (
-        getattr(cfg, "use_precision_aware_optimizer", False)
-        or getattr(cfg, "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False)
-    ):
+    if cfg is not None and getattr(cfg, "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False):
         return True
     # Structural fallback: float16 params exist but every main shard is None.
     saw_slot = False
@@ -649,6 +975,8 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
 
     ok, reason = deosc_dependencies_available()
     if not ok:
+        if config.fusion:
+            raise RuntimeError(f"[WeightDeOsc] fused deosc cannot be installed: {reason}")
         warning_rank_0(f"[WeightDeOsc] disabled: {reason}")
         return 0
 
@@ -676,6 +1004,8 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
         # shard to track/snap -> de-osc cannot run. Skip with a clear warning
         # instead of silently doing nothing.
         if _uses_precision_aware_main_params(opt):
+            if config.fusion:
+                raise RuntimeError("fused deosc requires explicit FP32 master shards")
             skipped_precision_aware += 1
             warning_rank_0(
                 "[WeightDeOsc] use_precision_aware_optimizer detected (bf16 main params held "
@@ -691,8 +1021,18 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
             def _wrapped(*args, **kwargs):
                 ok_update = orig(*args, **kwargs)
                 try:
-                    run.run(bound_opt)
+                    if run.config.enable and run._global_step + 1 >= run.config.start_step:
+                        # One range per optimizer step attributes QDQ and state
+                        # traffic to deosc instead of mixing it with forward QDQ.
+                        with torch.profiler.record_function("WeightDeOsc"):
+                            run.run(bound_opt)
+                    else:
+                        run.run(bound_opt)
                 except Exception as exc:  # never let de-osc crash training
+                    if run.config.fusion:
+                        # Opted-in experiments must not report a speedup by
+                        # silently skipping a broken deosc implementation.
+                        raise
                     warning_rank_0(f"[WeightDeOsc] skipped this step due to error: {exc}")
                 return ok_update
 
@@ -713,6 +1053,8 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
         # Already warned per instance above; avoid the misleading "no instance" message.
         pass
     else:
+        if config.fusion:
+            raise RuntimeError("fused deosc requires a compatible DistributedOptimizer instance")
         warning_rank_0(
             "[WeightDeOsc] no DistributedOptimizer instance found; de-oscillation not installed "
             "(requires use_distributed_optimizer=true)."

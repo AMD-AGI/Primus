@@ -99,7 +99,7 @@ mkdir -p "${PIP_CACHE_DIR}"
 # Minimal bridge conversion set for AutoBridge.import_ckpt(). `nvidia-modelopt`
 # is a hard dependency because Megatron-Bridge imports it at module import time
 # from its GPT provider / checkpoint-save modules.
-pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0"
+pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0,<5.1.0"
 pip install --cache-dir="${PIP_CACHE_DIR}" "onnx==1.20.0rc1"
 pip install --cache-dir="${PIP_CACHE_DIR}" "transformers==4.57.6"
 pip install --cache-dir="${PIP_CACHE_DIR}" -U "safetensors>=0.4.0"

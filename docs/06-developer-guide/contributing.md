@@ -122,13 +122,13 @@ Before opening a pull request, run the following from the repository root:
 6. Reference related issues when applicable.
 7. Request reviewers.
 8. Address review feedback.
-9. Ensure CI passes (lint and unit tests on the paths your PR triggers).
+9. Ensure CI passes (lint always; GPU unit tests after a maintainer adds the `ci:gpu` label).
 
 ## 7. CI pipeline
 
 The workflow **`.github/workflows/ci.yaml`** defines how changes are validated.
 
-**Triggers:** `workflow_dispatch`, pushes to `main`, tags matching `v*`, and pull requests.
+**Triggers:** `workflow_dispatch`, pushes to `main`, tags matching `v*`, and pull requests. On PRs, GPU unit-test jobs run only after a maintainer adds the `ci:gpu` label (drafts stay skipped).
 
 **Jobs (high level):**
 

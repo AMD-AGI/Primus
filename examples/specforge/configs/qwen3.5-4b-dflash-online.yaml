@@ -1,0 +1,67 @@
+# Qwen3.5-4B DFlash online (Mooncake + SGLang capture + SpecForge train).
+#
+# Checked-in SpecForge YAML keeps 127.0.0.1. Primus rewrites Mooncake/SGLang
+# endpoints to the capture-rank-0 IP after allocate (HEAD_IP is rank 0 only).
+#
+# Shape is C capture nodes + T trainer nodes (defaults 1+1). Each capture node
+# runs SERVER_COUNT SGLang servers (GPU). Rank 0 also runs Mooncake and the
+# SpecForge producer, which is a CPU HTTP client — not the capture server.
+# Each trainer node runs trainer_nproc consumer ranks.
+#
+#   # Host-side: primus-cli from this checkout. Training runs in the container.
+#   export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+#   export RUN_ROOT=/path/to/shared/run/$RUN_ID
+#   export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
+#   export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
+#   export MAX_STEPS=20
+#   ./runner/primus-cli slurm srun -N 2 --gres=gpu:1 \
+#     -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+#     --volume /shared:/shared \
+#     -- train pretrain --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
+#
+# --gres=gpu:N is Slurm's per-node GPU request (same on every allocated node).
+# Match it to the GPUs that node uses: SERVER_COUNT*SERVER_TP on capture nodes,
+# trainer_nproc on trainer nodes. 1 GPU/role is the smallest smoke. A single
+# SERVER_GPUS / TRAINER_GPUS id expands to 0..N-1 for that count (8+8:
+# SERVER_COUNT=8 NPROC_PER_NODE=8). Raise -N with CAPTURE_NNODES / TRAINER_NNODES.
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-online}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: specforge
+    config: online.yaml
+    model: qwen3.5-4b-dflash.yaml
+    overrides:
+      specforge_mode: train
+      specforge_train_mode: online
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-amd.yaml}
+      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
+      output_dir: ${OUTPUT_DIR}
+
+      specforge_online:
+        run_id: ${RUN_ID}
+        run_root: ${RUN_ROOT}
+        consumer_state_dir: ${CONSUMER_STATE_DIR}
+        capture_nnodes: ${CAPTURE_NNODES:1}
+        trainer_nnodes: ${TRAINER_NNODES:1}
+        server_count: ${SERVER_COUNT:1}
+        server_tp: ${SERVER_TP:1}
+        server_gpus: ${SERVER_GPUS:0}
+        trainer_gpus: ${TRAINER_GPUS:0}
+        trainer_nproc: ${NPROC_PER_NODE:1}
+        mooncake_protocol: ${MOONCAKE_PROTOCOL:tcp}
+        mooncake_lease_ttl_ms: ${MOONCAKE_LEASE_TTL_MS:500}
+        target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}
+
+      specforge_overrides:
+        training.max_steps: ${MAX_STEPS:20}
+        training.num_epochs: 1
+        training.save_interval: ${MAX_STEPS:20}
+        training.log_interval: 5
+        # Liger kernels are not built in this SpecForge ROCm image.
+        model.use_liger_kernel: false
+        data.train_data_path: ${TRAIN_DATA_PATH}
