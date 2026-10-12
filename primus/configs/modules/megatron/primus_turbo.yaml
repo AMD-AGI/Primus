@@ -45,6 +45,10 @@ sink_sliding_window: 0
 sink_window_even_layers_only: true
 # attention float8 path
 enable_turbo_attention_float8: false
+# Fuse the packed-QKV split, Q/K RMSNorm and RoPE into one Primus-Turbo FlyDSL op
+# (training, TP=1, SBHD, head_dim supported by the installed Turbo). Layers that do
+# not qualify keep the Megatron path.
+use_turbo_fused_qk_rmsnorm_rope: false
 
 # ===== Parallel Linear =====
 # operator switch

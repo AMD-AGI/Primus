@@ -3,11 +3,6 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
-# Fused packed-QKV split + Q/K RMSNorm + RoPE. head_dim 128 needs a Primus-Turbo
-# with QK_RMSNORM_ROPE_HEAD_DIMS; older Turbo keeps the unfused path.
-env:
-  PRIMUS_FUSED_QK_RMSNORM_ROPE: "1"
-
 modules:
   pre_trainer:
     framework: megatron
@@ -88,6 +83,8 @@ modules:
       # Turbo
       enable_primus_turbo: true
       use_turbo_attention: false
+      # head_dim 128 needs a Primus-Turbo with QK_RMSNORM_ROPE_HEAD_DIMS; older Turbo keeps the unfused path
+      use_turbo_fused_qk_rmsnorm_rope: true
       use_turbo_gemm: true
       use_turbo_grouped_gemm: true
       use_turbo_rms_norm: false # bug

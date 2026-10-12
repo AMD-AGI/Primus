@@ -6,7 +6,7 @@
 
 """Opt-in packed-QKV RMSNorm + RoPE integration (GPT-OSS head_dim 64, Qwen3 head_dim 128).
 
-``PRIMUS_FUSED_QK_RMSNORM_ROPE=1`` replaces the training-only sequence
+``use_turbo_fused_qk_rmsnorm_rope: true`` replaces the training-only sequence
 
     split packed QKV -> Q/K RMSNorm -> Q/K RoPE
 
@@ -18,10 +18,8 @@ for both Q and K.  Unsupported calls continue through the original Megatron path
 
 from __future__ import annotations
 
-import os
-
 from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _DDP_PARAM_GATHER_HOOK_ATTR = "_primus_ddp_param_gather_hook"
@@ -70,9 +68,10 @@ def _run_forward_pre_hooks(module, hooks) -> None:
             raise RuntimeError("DDP parameter-gather pre-hook unexpectedly modified its inputs")
 
 
-def _enabled(_ctx: PatchContext) -> bool:
-    value = os.environ.get("PRIMUS_FUSED_QK_RMSNORM_ROPE", "0").strip().lower()
-    return value in ("1", "true", "yes", "on") and is_primus_turbo_can_patch(_ctx)
+def _enabled(ctx: PatchContext) -> bool:
+    args = get_args(ctx)
+    use_fused = bool(getattr(args, "use_turbo_fused_qk_rmsnorm_rope", False))
+    return use_fused and is_primus_turbo_can_patch(ctx)
 
 
 @register_patch(
