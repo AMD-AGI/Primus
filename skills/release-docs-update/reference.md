@@ -108,12 +108,82 @@ PyTorch family, and a single merged list implied MaxText gained capability it di
 
 ### The management email
 
-`tools/release_docs/announcements/vX.Y.md`, 4-6 bullets per family, no PR links, written
-to be pasted into an inbox rather than read next to the docs. It restates the page
-highlights for a different reader, so it is a derived artifact and never the source of a
-version number — take those from `data/vX.Y-*.json` like everything else.
+`tools/release_docs/announcements/vX.Y.md`, written to be pasted into an inbox rather
+than read next to the docs. It restates the page highlights for a different reader, so it
+is a derived artifact and never the source of a version number or of a highlight — take
+versions from `data/vX.Y-*.json` like everything else, and put anything new on the page
+first.
 
-Editorial rules, each one a mistake avoided in v26.7:
+The file is public — it is committed to the Primus repo — so it contains only the
+highlights. Nothing addressed to the next agent (how the file was produced, where the
+source of truth is, why it lives under `tools/`), and no section recording what was left
+out. That reasoning goes to the user and to the gitignored
+`output/release-docs/vX.Y/announcement-notes.md`; see the last editorial rule below.
+
+#### Format
+
+`announcements/v26.8.md` is the model; copy its shape. A reader who reads only the bold
+text should still come away with the release.
+
+```markdown
+# vX.Y release highlights
+
+Images: `rocm/primus:vX.Y` (built YYYY-MM-DD) and `rocm/jax-training:maxtext-vX.Y`
+(built YYYY-MM-DD).
+
+## JAX MaxText — `rocm/jax-training:maxtext-vX.Y`
+
+- **Upgraded to JAX A.B.C and TransformerEngine D.E** (dev build), on ROCm <version>
+- **Pinned MaxText to vX.Y**, with about N upstream commits
+  - including <the user-visible fix or capability it brings>
+- **<Problem> fixed** with new <XLA / HIP / ...> settings in Primus defaults
+  - <what changed, in one line>
+- **<Packaging or behaviour change, stated plainly>**
+  - <one-line consequence for the user>
+
+## PyTorch — `rocm/primus:vX.Y`
+
+- **Upgraded to ROCm X and PyTorch Y**, with <build-provenance note, if it changed>
+- **New models:** A and B
+- **New features**
+  - <one feature per line>
+- **Performance:** <outcome in one line>; retuned <SKU> recipes
+- **Fixes**
+  - <bug>, now <resolved state>
+```
+
+- **One section per family**, JAX first, each headed with its image tag, under a line that
+  names both images and their build dates.
+- **4-6 top-level bullets per family.** Each opens with a bold lead that makes the point
+  on its own: the stack upgrade, the backend version, new models, new features,
+  performance, fixes. Omit a lead that has nothing behind it rather than padding it.
+- **One idea per line, about one line long.** When a bullet groups several items, the
+  items go in sub-bullets, at most four, each a short phrase. A sub-bullet that needs a
+  second sentence belongs on the release-notes page instead.
+- **Plain language.** Say what the user gets, not how it was built: "faster gradient
+  handling", not "skip overwritten grad clears and isolate the gradient reduce-scatter".
+  When a technical term is unavoidable, gloss it once: "the GPU's copy engines (SDMA)".
+- **Fixes say they are fixed.** "now correct", "detected and worked around" — a bare
+  description of the bug reads as an open problem.
+- **No per-model performance numbers.** Name the fix, not the gain: "MoE top-k routing
+  no longer goes through a slow CUB radix sort", not "about 0.8 s/step on
+  DeepSeek-V2-16B". Measured gains stay on the release-notes page.
+- **No PR links, file paths or config keys**, except a single parenthetical name a reader
+  would search for (`qk_clip`).
+
+#### Editorial rules
+
+Each one a mistake avoided in an earlier release.
+
+- **Every email bullet needs a counterpart on the release-notes page.** The email is a
+  restatement; a highlight that exists only in the email has not been checked against
+  the changelog and will be missing for users.
+- **Check every adjective against the data.** v26.8's draft called the JAX image "leaner"
+  because it stopped bundling Primus, but the image grew (43.7 → 43.9 GB). Size, speed and
+  memory words need the delta table or a measured number behind them.
+- **Name the mechanism correctly or not at all.** v26.8's JAX regression fixes were two
+  XLA flags and one HIP environment variable; "new XLA flags" would have been wrong for
+  one of the three.
 
 - **"Upgraded to X" requires the version to have moved.** JAX 0.11.0 and TE 2.17.0 were
   rebuilt on ROCm 10.0.0 without changing version, so the upgrade phrasing the v26.6 and
@@ -122,8 +192,12 @@ Editorial rules, each one a mistake avoided in v26.7:
   because v26.6 carried a ROCm 10.1 nightly on a 7.15 base.
 - **Nothing marked NEEDS CONFIRMATION goes in.** An unverified known issue is worse in an
   exec summary than in a doc, where the marker is at least visible.
-- **Close with what was held back and why**, so the next release inherits the reasoning
-  rather than re-deriving it — including anything excluded for disclosure reasons.
+- **Report what was held back and why — outside the file.** Tell the user in the Gate C
+  summary and write the same list to `output/release-docs/vX.Y/announcement-notes.md`,
+  which is gitignored. A judgement that will recur (like "upgraded" needing a version
+  change) becomes an editorial rule in this list instead, worded without naming
+  anything unreleased. Exclusions made for disclosure reasons are told to the user only
+  and never written to a tracked file, this one included.
 
 ## Version reference surface
 
