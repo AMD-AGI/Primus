@@ -28,8 +28,10 @@ class WorldMirrorAdapter(BackendAdapter):
         try:
             hydra_config = params.worldmirror.hydra_config
             log_rank_0(f"[Primus:WorldMirrorAdapter] hydra train config -> {hydra_config}")
-        except Exception:
-            pass
+        except Exception as exc:
+            log_rank_0(
+                f"[Primus:WorldMirrorAdapter] unable to read/log hydra train config: {exc}"
+            )
         return params
 
     def load_trainer_class(self, stage: str = "pretrain"):
