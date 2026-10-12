@@ -34,8 +34,7 @@
 #     "+rocm10.0.0" wheels with a device-<gfx> extra that reuses the image's
 #     already-installed rocm-sdk-device-* packages.
 #   ROCm 7.x (classic, e.g. rocm/jax-training:maxtext-*): repo.radeon.com
-#     find-links, the same install examples/maxdiffusion/setup_maxdiffusion_env.sh
-#     performs.
+#     find-links.
 # Overrides (all optional):
 #   MAXDIFFUSION_ROCM_VERSION   wheel local-version, e.g. 10.0.0
 #   MAXDIFFUSION_TORCH_GFX      gfx942 / gfx950 / all / gfx942;gfx950
@@ -235,7 +234,7 @@ else
       "torch[${DEVICE_EXTRA}]==${TORCH_VERSION}+rocm${ROCM_VERSION}" \
       "torchvision[${DEVICE_EXTRA}]==${TORCHVISION_VERSION}+rocm${ROCM_VERSION}"
   else
-    # Classic ROCm wheels; keep in sync with examples/maxdiffusion/setup_maxdiffusion_env.sh.
+    # Classic ROCm wheels.
     TORCH_VERSION="${MAXDIFFUSION_TORCH_VERSION:-2.8.0}"
     TORCHVISION_VERSION="${MAXDIFFUSION_TORCHVISION_VERSION:-0.23.0}"
     TORCH_LINKS="${MAXDIFFUSION_TORCH_LINKS:-${MAXDIFFUSION_TORCH_INDEX:-https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/}}"

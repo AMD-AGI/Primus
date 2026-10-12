@@ -43,11 +43,11 @@ def patch_turbo_fp8_linear(ctx: PatchContext) -> None:
     from torchtitan.protocols.model_converter import _registry_model_converter_cls
 
     from primus.backends.torchtitan.components.quantization.float8 import (
-        PrimusTubroFP8Converter,
+        PrimusTurboFP8Converter,
     )
 
-    _registry_model_converter_cls["turbo_fp8_linear"] = PrimusTubroFP8Converter
-    torchtitan.components.quantization.float8.Float8LinearConverter = PrimusTubroFP8Converter
+    _registry_model_converter_cls["turbo_fp8_linear"] = PrimusTurboFP8Converter
+    torchtitan.components.quantization.float8.Float8LinearConverter = PrimusTurboFP8Converter
 
     log_rank_0(
         "[Patch:torchtitan.primus_turbo.turbo_float8_linear] "
