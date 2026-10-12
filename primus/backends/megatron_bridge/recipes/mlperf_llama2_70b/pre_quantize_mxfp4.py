@@ -184,6 +184,197 @@ def _pre_quantize_model(model):
     torch.cuda.empty_cache()
 
 
+def _turbo_fp4_weights_enabled() -> bool:
+    """Whether to also pre-quantize weights into Primus-Turbo's MXFP4 layout."""
+    return _truthy_env("PRIMUS_TURBO_FP4_WEIGHTS", default=False)
+
+
+def _turbo_fp4_quant_config(model):
+    """The exact quant config the Turbo GEMM will validate the weight against.
+
+    ``check_quantized_tensor`` compares granularity, block_size,
+    scale_rounding_mode and the whole ``ScalingRecipe`` by strict equality, so a
+    hand-rolled lookalike is not good enough -- it has to be the config
+    ``get_fp4_context`` installs. Ask Primus for it rather than guessing, since
+    it folds in ``mxfp4_gradient_stochastic_rounding`` and the E8M0 scale
+    rounding mode off the model config.
+    """
+    from primus_turbo.pytorch.core.low_precision import (
+        Format,
+        ScaleDtype,
+        ScalingGranularity,
+    )
+
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboQuantConfig,
+    )
+
+    module_config = _extract_module(model).config
+
+    # Mirror primus.backends.megatron.core.fp4_utils, which is what builds the
+    # config get_fp4_context installs. Its module-level get_fp4_recipe is TE's
+    # and hands back an MXFP4BlockScaling, so it cannot be reused here; these
+    # two values are the only ones it derives from the model config, and both
+    # feed the recipe equality check, so they are read through its own helpers
+    # rather than assumed.
+    try:
+        from primus.backends.megatron.core.fp4_utils import (
+            _mxfp4_gradient_sr_enabled,
+            _mxfp4_scale_rounding_mode,
+        )
+
+        use_gradient_sr = _mxfp4_gradient_sr_enabled(module_config)
+        scale_rounding_mode = _mxfp4_scale_rounding_mode(module_config)
+    except Exception:
+        use_gradient_sr = bool(
+            getattr(module_config, "mxfp4_gradient_stochastic_rounding", False)
+        )
+        scale_rounding_mode = int(getattr(module_config, "mxfp4_scale_rounding_mode", 0) or 0)
+
+    quant_config = PrimusTurboQuantConfig(
+        granularity=ScalingGranularity.MX_BLOCKWISE,
+        format=Format.E2M1_X2,
+        block_size=32,
+        scale_dtype=ScaleDtype.E8M0,
+        use_gradient_sr=use_gradient_sr,
+        scale_rounding_mode=scale_rounding_mode,
+    )
+    _LOG.info(
+        "%s Turbo weight quant config: gradient_sr=%s scale_rounding_mode=%s",
+        _TAG,
+        use_gradient_sr,
+        scale_rounding_mode,
+    )
+    return quant_config.data()
+
+
+def _turbo_log(message: str) -> None:
+    """Record to a file, not the logger.
+
+    This recipe runs with ``stderr_sink_level: ERROR`` and ``_log_suppression``,
+    so ``_LOG.info`` here goes nowhere -- which already cost one debugging cycle
+    where the hook ran and looked like it had not.
+    """
+    if not _truthy_env("TURBO_DEBUG", default=False):
+        return
+    try:
+        with open("/results/turbo_decide.log", "a") as fh:
+            fh.write(message + "\n")
+    except Exception:
+        pass
+
+
+def _release_te_mxfp4_storage(qparam) -> None:
+    """Free the TE MXFP4 weight's data and scales, keeping the parameter object.
+
+    With the Turbo pair attached, the Turbo linears read only the pair and use the
+    parameter for autograd bookkeeping, and healing unlinks it without reading it.
+    TE derives the tensor's ``size()`` from the row-wise data, so each buffer becomes
+    a zero-stride view of one element: same shape, no memory, not contiguous.
+    """
+    for attr in ("_rowwise_data", "_rowwise_scale_inv", "_columnwise_data", "_columnwise_scale_inv"):
+        t = getattr(qparam, attr, None)
+        if t is not None:
+            setattr(qparam, attr, t.new_empty(()).expand(t.shape))
+
+
+def _attach_turbo_fp4_weight(module, qparam, bf16_weight, quant_config) -> None:
+    """Quantize one weight into Turbo's MXFP4 row/column pair and attach it.
+
+    FlyDSL's MXFP4 GEMM cannot consume the TE ``MXFP4Tensor`` this function
+    otherwise installs: TE scales per 1x32 block while Turbo's weight path wants
+    one scale per 32x32 tile, and TE's ``dequantize()`` from packed FP4 is an
+    unimplemented stub, so there is no conversion in either direction at
+    runtime. ``bf16_weight`` is the only point in the entire run where the
+    high-precision weight exists, which is why this has to happen here.
+
+    The Turbo linears read their GEMM operand from ``quantized_weight_buffer`` /
+    ``quantized_weight_t_buffer``; ``_bridge_weight_grad`` uses the parameter
+    itself only for autograd bookkeeping and never for data. LoRA freezes these
+    base weights, so quantizing once at load is valid for the whole run and
+    replaces a per-step weight quantize plus a dequantize-and-re-quantize for
+    the column direction -- both pure HBM traffic.
+    """
+    import torch
+    from primus_turbo.pytorch.core.low_precision import ScalingGranularity, ScalingRecipe
+    from primus_turbo.pytorch.core.quantized_tensor import (
+        QuantizedTensor,
+        create_quantized_weight,
+    )
+
+    # Which weight layout the consumer wants, and the two disagree.
+    #
+    # Stock gemm_fp4 builds its weight recipe with use_2d_block=True (one scale
+    # per 32x32 tile), which is what create_quantized_weight produces. The
+    # frozen-weight GEMM (turbo_fp4_frozen) and dense_mlp_fp4 only take 1x32,
+    # which is also TE's recipe, so the frozen path defaults to 1x32.
+    _frozen = _truthy_env("PRIMUS_TURBO_FP4_FROZEN_WEIGHT", default=False)
+    _default_2d = "0" if _frozen else "1"
+    use_2d_block = os.environ.get("PRIMUS_TURBO_FP4_WEIGHT_2D_BLOCK", _default_2d) not in (
+        "0",
+        "",
+        "false",
+        "False",
+    )
+
+    if use_2d_block:
+        wq, wqt = create_quantized_weight(
+            bf16_weight,
+            torch.float4_e2m1fn_x2,
+            quant_config,
+            need_weight_transpose_cache=True,
+        )
+    elif _frozen and not quant_config.use_preshuffle:
+        # One FlyDSL dual quantize for both halves, bit-exact against the two
+        # QuantizedTensor.quantize calls below.
+        from turbo_fp4_frozen import quantize_weight_pair
+
+        wq, wqt = quantize_weight_pair(bf16_weight, quant_config)
+    else:
+        # create_quantized_weight hardcodes use_2d_block=True, so mirror its
+        # MX_BLOCKWISE branch with the overlay's recipe: row along -1, the
+        # transpose cache along -2.
+        recipe = ScalingRecipe(
+            use_2d_block=False,
+            shuffle_scale=quant_config.use_preshuffle,
+            shuffle_out=quant_config.use_preshuffle,
+        )
+        assert quant_config.granularity == ScalingGranularity.MX_BLOCKWISE
+        kw = dict(
+            dest_dtype=torch.float4_e2m1fn_x2,
+            granularity=quant_config.granularity,
+            block_size=quant_config.block_size,
+            scaling_recipe=recipe,
+            scale_rounding_mode=quant_config.scale_rounding_mode,
+        )
+        wq = QuantizedTensor.quantize(bf16_weight, axis=-1, **kw)
+        wqt = QuantizedTensor.quantize(bf16_weight, axis=-2, **kw)
+    module.quantized_weight_buffer = wq
+    module.quantized_weight_t_buffer = wqt
+    # Also hang it on the parameter. The Turbo linear rebuilds its buffers on
+    # the first microbatch of every step via the module-level
+    # _maybe_create_quantized_weight_buffers(weight, ...), which only receives
+    # the weight -- so the weight is the only place a reuse hook can find this.
+    # Without it the rebuild re-quantizes the TE MXFP4Tensor and dies in TE's
+    # dequantize stub.
+    try:
+        qparam._turbo_fp4_pair = (wq, wqt)
+    except Exception:
+        pass
+
+    # Carrying both quantizations is ~140 GB of weights against ~70 GB for one,
+    # and OOMs at 280 of 288 GiB. TE's column-wise half is its own wgrad
+    # transpose cache: on this path the Turbo linear owns the forward, LoRA
+    # freezes these base weights so there is no base wgrad, and the row-wise
+    # half still backs the parameter for shape/dtype and checkpointing. Only the
+    # assert on _rowwise_data has to keep holding.
+    if _truthy_env("PRIMUS_TURBO_FP4_DROP_TE_COLUMNWISE", default=True):
+        if getattr(qparam, "_columnwise_data", None) is not None:
+            qparam._columnwise_data = None
+            if getattr(qparam, "_columnwise_scale_inv", None) is not None:
+                qparam._columnwise_scale_inv = None
+
+
 def _get_quantized_params_cpu(model, quantizer, qtype: str, replace: bool = False) -> List:
     """Byte-equivalent to NeMo
     ``custom_callbacks.CustomCallback._get_quantized_params_cpu``
@@ -216,6 +407,14 @@ def _get_quantized_params_cpu(model, quantizer, qtype: str, replace: bool = Fals
     layers = extracted_module.decoder.layers
     layer_count = len(layers)
 
+    # Only on the replacing MXFP4 pass: the non-replacing one builds the CPU FP8
+    # healing stash and must not touch live weights.
+    _turbo_weight_config = None
+    _turbo_attached = 0
+    if qtype == "MXFP4" and replace and _turbo_fp4_weights_enabled():
+        _turbo_weight_config = _turbo_fp4_quant_config(model)
+        _turbo_log("[TurboWeights] pre-quantizing weights into the Turbo MXFP4 pair")
+
     quantized_params = []
     for layer_idx, layer in enumerate(layers):
         if first_last_layers_bf16:
@@ -241,6 +440,13 @@ def _get_quantized_params_cpu(model, quantizer, qtype: str, replace: bool = Fals
                         bf16_param = param.detach().to(torch.bfloat16)
                     bf16_param = bf16_param.contiguous()
                     qparam = quantizer(bf16_param)
+                    if replace and _turbo_weight_config is not None:
+                        _attach_turbo_fp4_weight(
+                            module, qparam, bf16_param, _turbo_weight_config
+                        )
+                        _turbo_attached += 1
+                        if _truthy_env("PRIMUS_TURBO_FP4_DROP_TE_WEIGHT", default=False):
+                            _release_te_mxfp4_storage(qparam)
                     del bf16_param
                     assert qparam._rowwise_data is not None, "No rowwise data."
                 elif qtype == "FP8_DS":
@@ -274,6 +480,9 @@ def _get_quantized_params_cpu(model, quantizer, qtype: str, replace: bool = Fals
                                 qparam._transpose = qparam._transpose.cpu().pin_memory()
                     quantized_layer_params.append(qparam)
         quantized_params.append(quantized_layer_params)
+
+    if _turbo_weight_config is not None:
+        _turbo_log(f"[TurboWeights] attached {_turbo_attached} weight pairs")
 
     return quantized_params
 
