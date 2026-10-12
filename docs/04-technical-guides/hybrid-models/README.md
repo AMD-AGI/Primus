@@ -386,7 +386,6 @@ To quickly verify the model runs without real data, the 3B and 8B configs come w
 | `seq_length` | Sequence length | 2048, 4096, 8192 |
 | `lr` | Peak learning rate | 2.0e-4 |
 | `save_interval` | Checkpoint save frequency | 1000 |
-| `auto_continue_train` | Auto-resume from last checkpoint on crash | `true` / `false` |
 | `hybrid_attention_ratio` | Fraction of attention layers (0.0 = pure recurrent) | 0.0, 0.25 |
 
 ---
@@ -610,7 +609,7 @@ Messages like `Combined length of context and continuation exceeds model's maxim
 
 On MI300X, intermittent RCCL hangs can occur (typically during checkpoint saves). Mitigations:
 
-- Set `auto_continue_train: true` in the pretrain config to auto-resume from the last checkpoint
+- Point `load:` at the save directory so a relaunch picks up the last checkpoint
 - Increase the heartbeat timeout: `export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=7200`
 
 ---

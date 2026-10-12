@@ -162,10 +162,7 @@ modules:
       # ---------- Profiling: OFF for performance measurement ----
       profile: false
       use_pytorch_profiler: false
-      use_nsys_profiler: false
-      record_shapes: false
       record_memory_history: false
-      nvtx_ranges: false
 
       eval_iters: 0
 

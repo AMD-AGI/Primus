@@ -99,7 +99,6 @@ def get_new_yaml_config(args, yaml_config):
     config["no_save_rng"] = None
     config["no_save_optim"] = None
     config["disable_last_saving"] = True
-    config["auto_continue_train"] = False
     config["finetune"] = False
     return new_yaml_config
 

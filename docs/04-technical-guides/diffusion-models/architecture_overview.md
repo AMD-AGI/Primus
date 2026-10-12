@@ -451,7 +451,7 @@ Generated Image [1, 3, H*8, W*8]
 1. **Create encoder file**: e.g., `data/diffusion/encoders/text/t5/t5_large.py`
 2. **Implement encoder class**: Extend `BaseEncoder`
 3. **Register**: Add to `ENCODER_REGISTRY`
-4. **Add config**: Update `encoders.yaml`
+4. **Add config**: Add a dataclass to `primus/backends/megatron/data/diffusion/encoders/config.py`
 5. **Add tests**: Test in `tests/unit_tests/backends/megatron/diffusion/data/encoders/`
 
 ### Adding a new scheduler

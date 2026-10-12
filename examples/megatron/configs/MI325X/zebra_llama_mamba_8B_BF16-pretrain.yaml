@@ -62,7 +62,6 @@ modules:
 
       # ckpt
       finetune: false
-      auto_continue_train: false
       load: null
       save: null
       save_interval: 10000

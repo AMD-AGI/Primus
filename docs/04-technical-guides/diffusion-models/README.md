@@ -104,8 +104,7 @@ primus/backends/megatron/
 
 primus/configs/models/megatron/diffusion/
 ├── flux_535m.yaml                  # Flux 535M config
-├── flux_12b.yaml                   # Flux 12B config
-└── encoders.yaml                   # Encoder configuration
+└── flux_12b.yaml                   # Flux 12B config
 
 tests/unit_tests/backends/megatron/diffusion/  # Comprehensive test suite (390 tests)
 ├── models/                         # Model-level tests
@@ -169,7 +168,7 @@ encoders/
 
 Benefits:
 - Easy to add new encoder variants (5+ planned per modality)
-- Config-driven selection via `encoders.yaml`
+- Config-driven selection via the encoder dataclasses in `data/diffusion/encoders/config.py`
 - Lazy loading (encoders loaded only when needed)
 - Shared base classes for common functionality
 

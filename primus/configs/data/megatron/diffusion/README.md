@@ -475,7 +475,7 @@ graph TB
     subgraph training [Training Phase]
         trainConfig[Training Config examples/*.yaml]
         modelConfig[Model Config primus/configs/models/]
-        encoderConfig[Encoder Config encoders.yaml]
+        encoderConfig[Encoder Config encoders/config.py]
 
         trainConfig --> modelConfig
         trainConfig -.raw mode only.-> encoderConfig
@@ -585,7 +585,7 @@ model:
 - **FP8 Training Guide**: [`docs/04-technical-guides/diffusion-models/fp8_training.md`](../../../../../docs/04-technical-guides/diffusion-models/fp8_training.md)
 
 ### Related Configs
-- **Encoder Configs**: [`primus/configs/models/megatron/diffusion/encoders.yaml`](../../../models/megatron/diffusion/encoders.yaml)
+- **Encoder Configs**: [`primus/backends/megatron/data/diffusion/encoders/config.py`](../../../../backends/megatron/data/diffusion/encoders/config.py)
 - **Model Architecture**: [`primus/configs/models/megatron/diffusion/`](../../../models/megatron/diffusion/)
 - **Training Configs (MI300X)**: [`examples/megatron/configs/MI300X/diffusion/`](../../../../../examples/megatron/configs/MI300X/diffusion/)
 - **Training Configs (MI355X)**: [`examples/megatron/configs/MI355X/diffusion/`](../../../../../examples/megatron/configs/MI355X/diffusion/)

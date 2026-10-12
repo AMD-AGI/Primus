@@ -94,6 +94,10 @@ SCAN_ROOTS = {
     ),
     "megatron": (
         Path("examples/megatron/configs"),
+        Path("examples/megatron/exp_pretrain.yaml"),
+        Path("examples/mlperf"),
+        Path("examples/moe_package/configs"),
+        Path("tests/trainer"),
         Path("primus/configs/modules/megatron"),
         Path("primus/configs/models/megatron"),
     ),
@@ -104,6 +108,10 @@ DEFAULT_ALLOWLIST = Path("tools/ci/config_schema_allowlist.yaml")
 # Keys PrimusParser.parse_trainer_module consumes on the module node itself;
 # they never reach the backend.
 MODULE_RESERVED_KEYS = frozenset({"name", "framework", "config", "model", "overrides", "params"})
+# Keys TrainRuntime consumes from the experiment envelope before the selected
+# module is handed to a backend. The same spelling inside `overrides:` is not
+# reserved and must still be checked.
+EXPERIMENT_RESERVED_KEYS = frozenset({"modules", "env"})
 
 
 # ---------------------------------------------------------------------------
@@ -1044,7 +1052,7 @@ def scan_file(
             scoped.extend(ScopedFinding(backend, key, rel, scope, actual) for key in misplaced)
 
     if "modules" in doc:
-        envelope = {k: v for k, v in doc.items() if k != "modules"}
+        envelope = {k: v for k, v in doc.items() if k not in EXPERIMENT_RESERVED_KEYS}
         for framework, keys, module in _module_key_sources(doc):
             if framework != backend:
                 continue

@@ -80,8 +80,7 @@ Primus/
 │   └── diffusion/                          # YAML configs
 │       ├── __init__.py
 │       ├── flux_535m.yaml                  # ✓ Flux 535M config
-│       ├── flux_12b.yaml                   # ✓ Flux 12B config
-│       └── encoders.yaml                   # ✓ Encoder configs
+│       └── flux_12b.yaml                   # ✓ Flux 12B config
 │
 ├── examples/megatron/
 │   ├── diffusion/

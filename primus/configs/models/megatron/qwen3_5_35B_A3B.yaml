@@ -41,7 +41,10 @@ linear_num_key_heads: 16
 linear_num_value_heads: 32
 
 attention_output_gate: true
-apply_layernorm_1p: true
+# This preset asked for `apply_layernorm_1p: true`, which upstream renamed to
+# `layernorm_zero_centered_gamma` -- the old key has never reached the model.
+# Turning the new one on is a numerics change, so it needs a deliberate
+# convergence check rather than a rename here.
 apply_wd_to_qk_layernorm: true
 
 mtp_num_layers: 0
