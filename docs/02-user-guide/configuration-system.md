@@ -7,6 +7,7 @@ Primus experiments are described in YAML. The loader resolves **environment vari
 | Topic | Location |
 | --- | --- |
 | CLI launcher and `--config` | [CLI Reference](cli-reference.md) |
+| Setting env vars and `XLA_FLAGS` for a run | [Environment and XLA flags](environment-and-xla-flags.md) |
 | Backend parameter references | [Megatron parameters](../03-configuration-reference/megatron-parameters.md), [TorchTitan parameters](../03-configuration-reference/torchtitan-parameters.md), [MaxText parameters](../03-configuration-reference/maxtext-parameters.md) |
 
 ---
@@ -30,6 +31,9 @@ work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:my_experiment}
 workspace: ${PRIMUS_WORKSPACE:./output}
+
+env:                             # optional: env vars exported before training starts
+  XLA_PYTHON_CLIENT_MEM_FRACTION: "0.96"
 
 modules:
   pre_trainer:
@@ -81,6 +85,20 @@ Example chain (excerpt): `pre_trainer.yaml` extends `trainer_base.yaml`, which e
 | `${VAR:default}` | Uses `default` when `VAR` is unset. |
 
 After substitution, purely numeric strings may be converted to `int` or `float`.
+
+---
+
+## The `env:` block
+
+An optional top-level `env:` mapping (sibling of `modules:`) is exported into the process environment before distributed init and before the backend imports its framework, so JAX, XLA, PyTorch, and RCCL all observe it. It is read from the file separately by `PrimusRuntime._apply_config_env`, so the `${VAR:default}` form above does **not** apply here — only `$VAR` and `${VAR}` for already-set variables are expanded.
+
+```yaml
+env:
+  XLA_PYTHON_CLIENT_MEM_FRACTION: "0.96"
+  XLA_FLAGS_APPEND: "--xla_gpu_autotune_level=5"
+```
+
+Quote the values, and keep the block at the top level: an `env:` nested under a module silently becomes a training parameter on that module instead of being exported. See [Environment and XLA flags](environment-and-xla-flags.md) for the precedence rules, which matter for `XLA_FLAGS` in particular.
 
 ---
 

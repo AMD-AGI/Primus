@@ -1,0 +1,8 @@
+extends:
+  - qwen2.5_72B.yaml
+
+# One-GPU smoke-test variant. Keep the Qwen2.5-72B per-layer architecture,
+# reduce depth, and use the small ungated repository with the same tokenizer.
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: Qwen/Qwen2.5-0.5B
+num_layers: 4

@@ -26,10 +26,10 @@ exceptions, which are the only arch-gated entries below:
 Everything else — including all ``XLA_FLAGS`` knobs and the NVTE/HIP/HSA tunables —
 is architecture-agnostic (``arch="all"``).
 
-Precedence (see env_registry): per-config ``env:`` > outer/shell env > these
-defaults > image-baked. ``XLA_FLAGS`` is merged per-flag so the managed knobs win
-over an image-baked ``XLA_FLAGS`` (which may carry ``--xla_gpu_autotune_level=0``)
-while preserving any unrelated baked flags.
+Precedence (see env_registry): ``XLA_FLAGS_APPEND`` > per-config ``env:`` > these
+defaults > inherited (image-baked or outer shell). ``XLA_FLAGS`` is *appended* to
+whatever was inherited, so the managed knobs override an image-baked
+``--xla_gpu_autotune_level=0`` while unrelated baked flags survive.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from typing import List
 from primus.core.backend.env_registry import (
     ARCH_GFX942,
     ARCH_GFX950,
-    MODE_XLA_MERGE,
+    MODE_XLA_APPEND,
     EnvVar,
 )
 
@@ -53,6 +53,11 @@ def _build_xla_flags() -> str:
     XLA/hipBLASLt always picks the default fp8 GEMM kernel, which overflows on the
     fine-grained MoE expert einsums (qwen3-30B-A3B, deepseek-v2-lite) -> NaN loss on
     ~every fp8 run. autotune_level>=4 lets XLA pick a numerically stable fp8 kernel.
+
+    ``--xla_gpu_enable_cub_radix_sort=false``: newer XLA packs BF16 TopK into a single S32 sort and, on ROCm,
+    rewrites it to a hipCUB segmented sort whose handler does a pageable host->device copy of the segment
+    offsets on every call. For the MoE router top_k this costs ~15 ms per sort in single-controller JAX
+    (8 GPU threads serialize on the copy), i.e. +0.8 s/step on DeepSeek-V2-16B.
     """
     autotune_level = os.getenv("XLA_GPU_AUTOTUNE_LEVEL", "4")
     flags = (
@@ -64,7 +69,13 @@ def _build_xla_flags() -> str:
         "--xla_gpu_enable_triton_gemm=false "
         "--xla_gpu_enable_cublaslt=true "
         f"--xla_gpu_autotune_level={autotune_level} "
-        "--xla_gpu_enable_all_gather_combine_by_dim=false"
+        "--xla_gpu_enable_all_gather_combine_by_dim=false "
+        # XLA turned dynamic slice fusion on by default (openxla/xla 85922ac5ee), which
+        # jaxlib >= 0.11.1 ships in its DebugOptions defaults. Inside scanned layers it wraps
+        # TE's fused-attention custom calls, and under memory pressure the remat pass then
+        # recomputes the whole flash-attention backward per layer (~10% on llama2-7B fp8).
+        "--xla_gpu_enable_dynamic_slice_fusion=false "
+        "--xla_gpu_enable_cub_radix_sort=false"
     )
     if os.getenv("DUMP_HLO", "0") == "1":
         dump_dir = os.getenv("DUMP_HLO_DIR", "output/xla_dump_hlo")
@@ -84,7 +95,7 @@ def maxtext_env_defaults() -> List[EnvVar]:
         EnvVar(
             "XLA_FLAGS",
             _build_xla_flags(),
-            mode=MODE_XLA_MERGE,
+            mode=MODE_XLA_APPEND,
             note="managed XLA knobs incl. autotune (fp8 MoE NaN fix)",
         ),
         EnvVar("XLA_PYTHON_CLIENT_MEM_FRACTION", ".97", note="avoid HSA OOM during multi-node"),
@@ -101,6 +112,12 @@ def maxtext_env_defaults() -> List[EnvVar]:
         EnvVar("NVTE_CK_HOW_V3_BF16_CVT", "2"),
         # ---- AMD GPU / HIP / HSA ----
         EnvVar("GPU_MAX_HW_QUEUES", "2"),
+        EnvVar(
+            "DEBUG_HIP_IGNORE_STREAM_PRIORITY",
+            "0",
+            note="HIP >= 7.17 defaults to ignoring stream priority, which puts XLA's collective stream on the "
+            "compute HW queue and removes comm/compute overlap",
+        ),
         EnvVar("HIP_FORCE_DEV_KERNARG", "1"),
         EnvVar("HSA_FORCE_FINE_GRAIN_PCIE", "1"),
         # NOTE: NCCL_DEBUG is deliberately NOT managed here. It is purely

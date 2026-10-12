@@ -1,0 +1,133 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Qwen3-235B-A22B (MoE) LoRA SFT -- 4-layer PROXY, 1x MI455X. SMOKE TEST ONLY.
+#
+# Primus has Qwen3-235B-A22B (235B total / 22B active), not a 253B variant.
+# This keeps that model's per-layer MoE shape (hidden 4096, 128 experts / topk 8,
+# expert ffn 1536, 64 heads / 4 KV groups) and cuts depth 94 -> 4 so one card
+# can hold it. EP=1 because world size is 1 (the MI355 4-layer SFT uses EP=8).
+#
+# NO PRETRAINED WEIGHTS. Random init. load is an empty dir so the posttrain
+# convert hook does not treat tokenizer_model as hf_path and does not pull
+# Qwen/Qwen3-235B-A22B. Tokenizer files only come from Qwen/Qwen3-0.6B (same
+# Qwen3 vocab, ungated, a few MB).
+#
+# DeepEP is off: turbo DeepEP hangs with CPU recv timeout on this gfx1250 box.
+#
+# Launch:
+#
+#   mkdir -p /tmp/primus-proxy-no-ckpt
+#   ./primus-cli container --image amdprimus/amdprimus:gfx1250-20260831 \
+#     --env HIP_VISIBLE_DEVICES=0 --env NNODES=1 --env GPUS_PER_NODE=1 \
+#     --env PRIMUS_GPU_MODEL=MI455X \
+#     --env PRIMUS_TURBO_ATTN_BACKEND=triton \
+#     -- train posttrain \
+#     --config examples/megatron/configs/MI455X/qwen3_235B_A22B-BF16-lora-sft-1gpu-proxy.yaml
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_235B_A22B-BF16-lora-sft-1gpu-proxy}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    model: qwen3_235B_A22B_4layer_proxy.yaml
+
+    overrides:
+      stage: sft
+
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+
+      disable_wandb: true
+      disable_tensorboard: true
+      stderr_sink_level: DEBUG
+      log_interval: 1
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      train_iters: 6
+      micro_batch_size: 1
+      global_batch_size: 8
+      num_workers: 2
+
+      seq_length: 512
+      max_position_embeddings: 512
+
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 1
+      lr_decay_iters: 6
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: false
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      use_turbo_deepep: false
+      use_turbo_grouped_gemm: true
+      moe_use_legacy_grouped_gemm: false
+      moe_grouped_gemm: true
+      # 128 experts without fp32 routing trips a numerical-stability warning
+      # from transformer_config.py; the MI355X 4-layer SFT recipe sets this too.
+      moe_router_dtype: fp32
+
+      load: ${PRIMUS_PROXY_LOAD_DIR:/tmp/primus-proxy-no-ckpt}
+      exit_on_missing_checkpoint: false
+      finetune: false
+      save: null
+      disable_last_saving: true
+      ckpt_format: torch
+      auto_detect_ckpt_format: false
+      eval_iters: 0
+
+      bf16: true
+
+      enable_primus_turbo: true
+      use_turbo_attention: false
+
+      recompute_granularity: full
+      recompute_method: uniform
+      recompute_num_layers: 1
+
+      # ATTENTION ONLY -- do not add linear_fc1 / linear_fc2 here.
+      #
+      # target_modules matches on the leaf module name, so "linear_fc1" also
+      # matches decoder.layers.N.mlp.experts.linear_fc1. In a grouped-GEMM MoE
+      # those experts are a single PrimusTurboColumnParallelGroupedLinear, and
+      # peft/utils.get_adapter_attributes_from_linear only understands
+      # TE/Megatron Column/RowParallelLinear + TopKRouter -- a grouped linear
+      # raises "Layer type is unrecognized for LoRA".
+      #
+      # moe_layer_freq: 1 means every layer is MoE, so there is no dense MLP to
+      # adapt anyway. The expert GEMMs still run in the forward/backward as
+      # frozen base weights, which is what this smoke is meant to exercise.
+      # To LoRA the experts you would need moe_grouped_gemm: false (slow
+      # SequentialMLP: one linear per expert, 128 per layer).
+      lora:
+        enabled: true
+        dim: 16
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj

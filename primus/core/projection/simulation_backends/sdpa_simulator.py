@@ -140,6 +140,14 @@ _HW_PROFILES: Dict[str, GPUHardwareSpec] = {
         n_cu=304,
         n_xcd=8,
     ),
+    "mi350x": GPUHardwareSpec(  # CDNA4 (gfx950) die, same compute profile as MI355X
+        peak_tflops_bf16=2500.0,
+        peak_tflops_fp16=2500.0,
+        peak_tflops_fp8=5000.0,
+        hbm_bandwidth_gbps=8000.0,
+        n_cu=256,
+        n_xcd=8,
+    ),
     "mi355x": GPUHardwareSpec(
         peak_tflops_bf16=2500.0,
         peak_tflops_fp16=2500.0,
@@ -164,6 +172,7 @@ _PROFILE_CLOCK_MHZ: Dict[str, int] = {
     "mi300x": 2100,
     "gfx942": 2100,
     "mi325x": 2100,  # same gfx942 compute die as MI300X
+    "mi350x": 2100,  # same gfx950 compute die as MI355X
     "mi355x": 2100,
     "gfx950": 2100,
     "mi300a": 2100,
@@ -319,6 +328,8 @@ class SDPASimulator(SDPASimulationBackend):
         )
 
         self._hw = hardware_spec or _get_hardware_spec(gpu_arch, gpu_clock_mhz)
+        self._gpu_arch = gpu_arch
+        self._gpu_clock_mhz = gpu_clock_mhz
 
         _ensure_backends_discovered()
         name = (gemm_backend or os.getenv("PRIMUS_GEMM_BACKEND") or "origami").lower().strip()
@@ -343,6 +354,25 @@ class SDPASimulator(SDPASimulationBackend):
 
     def is_available(self) -> bool:
         return self._tile_gemm is not None and self._tile_gemm.is_available()
+
+    # ------------------------------------------------------------------
+    # Hardware-spec accessors (used by memory-bound / MFU projections)
+    # ------------------------------------------------------------------
+    @property
+    def hbm_bandwidth_gbps(self) -> float:
+        return self._hw.hbm_bandwidth_gbps
+
+    @property
+    def peak_tflops_bf16(self) -> float:
+        return self._hw.peak_tflops_bf16
+
+    @property
+    def peak_tflops_fp16(self) -> float:
+        return self._hw.peak_tflops_fp16
+
+    @property
+    def peak_tflops_fp8(self) -> float:
+        return self._hw.peak_tflops_fp8
 
     # ------------------------------------------------------------------
     # Public API

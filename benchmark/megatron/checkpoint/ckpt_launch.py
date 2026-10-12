@@ -135,7 +135,7 @@ def train_with_yaml_config(args, yaml_config):
         with open(new_yaml_config_path, "w") as f:
             yaml.dump(yaml_config, f)
 
-        command = "bash examples/run_slurm_pretrain.sh"
+        command = "bash runner/helpers/launch/slurm_pretrain.sh"
         result = subprocess.run(command, shell=True, capture_output=True, text=True, env=env)
         logger.debug(f"training subprocess stdout : {result.stdout}")
         logger.debug(f"training subprocess stderr : {result.stderr}")

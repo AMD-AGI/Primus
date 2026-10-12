@@ -72,8 +72,8 @@ def classify(path):
         m = _TRAINER_RE.search(path)
         return ("backend", m.group(1)) if m else ("ignore", None)
     # A bare examples/<file> (no backend subdir, so it didn't match _BACKEND_RE
-    # above) is shared launcher plumbing, not per-backend -- e.g. maxtext's E2E
-    # shells out to examples/run_pretrain.sh directly.
+    # above) is shared plumbing, not per-backend -- every backend's E2E shells
+    # out to runner/primus-cli and reads the shared examples/ layout.
     if path.startswith("primus/") or path.startswith("tests/unit_tests/") or path.startswith("examples/"):
         return ("component", None)  # any other source/unit-test/launcher change
     return ("ignore", None)  # docs, README, ... outside the source/test trees

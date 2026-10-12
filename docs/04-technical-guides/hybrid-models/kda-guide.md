@@ -68,7 +68,7 @@ trillion-token training to lift above 25 %).
 - [Prerequisites](#prerequisites)
 - [Step 1: Environment](#step-1-environment)
 - [Step 2: Dataset preparation](#step-2-dataset-preparation)
-- [Step 3: Apply Megatron-LM patches](#step-3-apply-megatron-lm-patches)
+- [Step 3: Apply Megatron-LM patches](#step-3-megatron-lm-patches-automatic--no-action-needed)
 - [Step 4: (Optional) Initialize from FLA weights](#step-4-optional-initialize-from-fla-weights)
 - [Step 5: Train](#step-5-train)
 - [Step 6: Monitor and compare against FLA](#step-6-monitor-and-compare-against-fla)
@@ -267,6 +267,25 @@ The architecture-only YAML it extends from is
   -- train pretrain \
   --config examples/megatron/configs/MI300X/kda_300M_BF16-pretrain.yaml
 ```
+
+AMD Triton 3.6 cannot compile the `num_stages = 4` variants of FLA's KDA
+intra-chunk kernels — the MLIR pass pipeline aborts inside
+`tritonamdgpu-schedule-loops` — so the first autotune sweep fails. The training
+process removes those candidates from the autotune space itself, at startup,
+via the `megatron.fla.kda_safe_autotune` patch
+([`fla_kda_autotune_patches.py`](https://github.com/AMD-AGI/Primus/blob/main/primus/backends/megatron/patches/fla_kda_autotune_patches.py)) —
+nothing on disk is modified, so the installed `fla` package stays pristine. It
+fires on ROCm for any run that resolves to the FLA KDA backend, which this one
+does via `use_fla_triton_kda: true`, and the `num_warps` sweep is kept so the
+autotuner still picks the best remaining config. Look for this line in the log:
+
+```
+[Patch:megatron.fla.kda_safe_autotune] chunk_kda_bwd_kernel_intra: kept 4/12 autotune configs ...
+```
+
+On Triton 3.7 the full sweep compiles and the autotuner picks `num_stages = 2`
+for this model anyway, so the narrowing is free here; the patch stays until the
+supported toolchain floor reaches Triton 3.7.
 
 Expected wall time on a healthy MI300X box: **~1h 56m** for the full 4768
 iters (about 2 min faster than FLA's HF-Trainer reference run).
@@ -552,9 +571,9 @@ primus/backends/megatron/patches/                  ← same 6 patches as GDN (Pr
 ├── mlp_fla_swiglu_patches.py                      ← FLA Triton SwiGLU for MLP
 ├── torch_norm_fla_rmsnorm_patches.py              ← FLA RMSNorm for WrappedTorchNorm
 ├── fla_runtime_patches.py                         ← resolves PRIMUS_FLA_* knobs onto args
+├── fla_kda_autotune_patches.py                    ← narrows the KDA Triton autotune space on ROCm (auto-applied, in-process)
 └── mamba_fla_data_patches.py                      ← FLA-order dataset shim wiring
 tools/hybrid/
-├── patch_fla_triton_autotune_hang.sh              ← MI300X FLA Triton autotune-hang workaround
 ├── convert_fla_to_megatron.py                     ← FLA Arrow → Megatron .bin/.idx (shared)
 ├── fla_order_dataset.py                           ← FLA-order dataset shim (shared)
 ├── convert_fla_kda_init_to_megatron.py            ← FLA HF init → Megatron sharded ckpt
@@ -638,7 +657,7 @@ meaningfully affects RACE.
 
 ## See also
 
-- [`docs/04-technical-guides/hybrid-models/README.md`](README.md) — full Hylo hybrid family
+- [`docs/04-technical-guides/hybrid-models/README.md`](README.md) — full Zebra hybrid family
   overview (1 B / 3 B / 8 B Mamba+MLA, KDA variants)
 - [`docs/04-technical-guides/hybrid-models/gdn-guide.md`](gdn-guide.md) — the GDN companion
   recipe (shares Megatron patches and dataset shim with this one)

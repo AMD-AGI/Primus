@@ -4,7 +4,8 @@
 """
 Tests for data preprocessing config parsing, validation, and authentication.
 
-Tests the YAML-to-CLI mapping in data.py and the auth priority chain in auth.py.
+Tests the Megatron preprocessing YAML-to-CLI mapping, public CLI compatibility,
+and the authentication priority chain.
 """
 
 import argparse
@@ -17,12 +18,23 @@ import pytest
 from primus.backends.megatron.data.diffusion.preprocessing.auth import (
     setup_hf_authentication,
 )
-from primus.cli.subcommands.data import (
-    _flatten_preprocessing_config,
-    _get_encoded_parser_defaults,
+from primus.backends.megatron.data.diffusion.preprocessing.commands import (
     _load_config_with_cli_overrides,
     _validate_preprocessing_config,
 )
+from primus.backends.megatron.data.diffusion.preprocessing.config import (
+    CONFIG_PATH_BY_DEST as _CONFIG_PATH_BY_DEST,
+)
+from primus.backends.megatron.data.diffusion.preprocessing.config import (
+    ENCODED_CONFIG_DEFAULTS as _ENCODED_CONFIG_DEFAULTS,
+)
+from primus.backends.megatron.data.diffusion.preprocessing.config import (
+    flatten_preprocessing_config as _flatten_preprocessing_config,
+)
+from primus.backends.megatron.data.diffusion.preprocessing.config import (
+    get_encoded_config_defaults as _get_encoded_parser_defaults,
+)
+from primus.cli.subcommands.data import register_subcommand
 from tests.utils import PrimusUT
 
 
@@ -89,26 +101,9 @@ class TestFlattenPreprocessingConfig(PrimusUT):
         assert "model_path" not in flat
         assert "image_size" not in flat
 
-    def test_model_defaults(self):
-        """Model section injects correct defaults when keys are absent."""
-        config = {"model": {}}
-        flat = _flatten_preprocessing_config(config)
-
-        assert flat["model_path"] == "black-forest-labs/FLUX.1-dev"
-        assert flat["batch_size"] == 8
-        assert flat["precision"] == "bf16"
-        assert flat["device"] == "cuda"
-        assert flat["t5_max_length"] == 512
-
-    def test_image_defaults(self):
-        """Image section injects correct defaults when keys are absent."""
-        config = {"image": {}}
-        flat = _flatten_preprocessing_config(config)
-
-        assert flat["image_size"] == 1024
-        assert flat["variable_size"] is False
-        assert flat["center_crop"] is True
-        assert flat["max_size"] == 1024
+    def test_flatten_does_not_inject_defaults(self):
+        """Flattening is structural; defaults are applied by the shared merge path."""
+        assert _flatten_preprocessing_config({"model": {}, "image": {}}) == {}
 
 
 class TestValidatePreprocessingConfig(PrimusUT):
@@ -156,7 +151,19 @@ class TestValidatePreprocessingConfig(PrimusUT):
 
 
 class TestLoadConfigWithCliOverrides(PrimusUT):
-    """Tests for _load_config_with_cli_overrides merge logic."""
+    """Tests for _load_config_with_cli_overrides merge logic.
+
+    These drive the real parser rather than hand-building a namespace: only the
+    parser can express the difference between "flag omitted" and "flag typed
+    with a value that happens to equal the default", which is precisely the
+    distinction the merge depends on.
+    """
+
+    def _merge(self, *argv):
+        parser = argparse.ArgumentParser(prog="primus")
+        register_subcommand(parser.add_subparsers(dest="command"))
+        args = parser.parse_args(["data", "diffusion-encoded", *argv])
+        return _load_config_with_cli_overrides(args)
 
     @patch("primus.core.utils.yaml_utils.parse_yaml")
     def test_cli_overrides_yaml(self, mock_parse_yaml):
@@ -165,36 +172,155 @@ class TestLoadConfigWithCliOverrides(PrimusUT):
             "source": {"type": "huggingface", "hf_dataset": "yaml-dataset"},
             "model": {"batch_size": 4},
         }
-        defaults = _get_encoded_parser_defaults()
-        args = argparse.Namespace(
-            config="test.yaml",
-            batch_size=16,
-            **{k: v for k, v in defaults.items() if k not in ("config", "batch_size")},
-        )
 
-        result = _load_config_with_cli_overrides(args)
+        result = self._merge("--config", "test.yaml", "--batch-size", "16")
 
         assert result.batch_size == 16
         assert result.hf_dataset == "yaml-dataset"
 
     @patch("primus.core.utils.yaml_utils.parse_yaml")
-    def test_yaml_used_when_cli_is_default(self, mock_parse_yaml):
-        """YAML values used when CLI arg equals its default."""
-        mock_parse_yaml.return_value = {
-            "model": {"batch_size": 4},
-        }
-        defaults = _get_encoded_parser_defaults()
-        args = argparse.Namespace(config="test.yaml", **{k: v for k, v in defaults.items() if k != "config"})
+    def test_yaml_used_when_flag_not_passed(self, mock_parse_yaml):
+        """YAML values are used for options the user did not pass."""
+        mock_parse_yaml.return_value = {"model": {"batch_size": 4}}
 
-        result = _load_config_with_cli_overrides(args)
+        result = self._merge("--config", "test.yaml")
 
         assert result.batch_size == 4
 
-    def test_no_config_passthrough(self):
-        """No config file returns args unchanged."""
-        original = argparse.Namespace(config=None, batch_size=8)
-        result = _load_config_with_cli_overrides(original)
-        assert result is original
+    @patch("primus.core.utils.yaml_utils.parse_yaml")
+    def test_partial_yaml_section_is_deep_merged_with_defaults(self, mock_parse_yaml):
+        """A partial nested section inherits the remaining canonical defaults."""
+        mock_parse_yaml.return_value = {"model": {"batch_size": 4}, "image": {"image_size": 512}}
+
+        result = self._merge("--config", "test.yaml")
+
+        assert result.batch_size == 4
+        assert result.precision == "bf16"
+        assert result.t5_max_length == 512
+        assert result.image_size == 512
+        assert result.variable_size is False
+        assert result.center_crop is True
+
+    @patch("primus.core.utils.yaml_utils.parse_yaml")
+    def test_explicit_cli_wins_when_value_equals_default(self, mock_parse_yaml):
+        """A flag typed with its default value still overrides the YAML.
+
+        Regression test: the merge used to infer "was this typed?" by comparing
+        against the default table, so passing the default value looked identical
+        to passing nothing and the YAML silently won.
+        """
+        mock_parse_yaml.return_value = {
+            "model": {"batch_size": 64, "precision": "fp32", "t5_max_length": 256},
+            "image": {"image_size": 512},
+        }
+
+        result = self._merge(
+            "--config",
+            "test.yaml",
+            "--batch-size",
+            "8",  # 8 is also the parser default
+            "--precision",
+            "bf16",  # bf16 is also the parser default
+            "--t5-max-length",
+            "512",  # 512 is also the parser default
+            "--image-size",
+            "1024",  # 1024 is also the parser default
+        )
+
+        assert result.batch_size == 8
+        assert result.precision == "bf16"
+        assert result.t5_max_length == 512
+        assert result.image_size == 1024
+
+    @patch("primus.core.utils.yaml_utils.parse_yaml")
+    def test_omitted_yaml_section_falls_back_to_defaults(self, mock_parse_yaml):
+        """Options in no YAML section and not typed still resolve to defaults.
+
+        Regression test: the merged namespace was built from the YAML plus the
+        flags believed to be explicit, so a key absent from both simply vanished
+        and _prepare_encoded raised AttributeError on it.
+        """
+        mock_parse_yaml.return_value = {
+            "source": {"type": "huggingface", "hf_dataset": "yaml-dataset"},
+            "output": {"output_dir": "/data/out"},
+        }
+
+        result = self._merge("--config", "test.yaml")
+
+        # The optional image: section is absent, so these come from the defaults.
+        assert result.image_size == 1024
+        assert result.variable_size is False
+        assert result.center_crop is True
+        assert result.max_size == 1024
+
+    @patch("primus.core.utils.yaml_utils.parse_yaml")
+    def test_every_configurable_key_present(self, mock_parse_yaml):
+        """The merged namespace exposes every key the pipeline may read."""
+        mock_parse_yaml.return_value = {"source": {"type": "huggingface"}}
+
+        result = self._merge("--config", "test.yaml")
+
+        missing = [key for key in _get_encoded_parser_defaults() if not hasattr(result, key)]
+        assert missing == []
+
+    def test_no_config_applies_defaults(self):
+        """Without a config file, defaults are applied and CLI args preserved."""
+        result = self._merge("--batch-size", "16")
+
+        assert result.batch_size == 16
+        assert result.image_size == 1024
+        assert result.precision == "bf16"
+
+
+class TestParserDefaults(PrimusUT):
+    """The raw parser keeps argparse defaults; the encoded parser reads them from
+    _get_encoded_parser_defaults(). Guard the two against drifting apart."""
+
+    def test_raw_parser_defaults_match_table(self):
+        parser = argparse.ArgumentParser(prog="primus")
+        register_subcommand(parser.add_subparsers(dest="command"))
+        raw = vars(parser.parse_args(["data", "diffusion-raw"]))
+        table = _get_encoded_parser_defaults()
+
+        mismatched = {
+            key: (value, table[key]) for key, value in raw.items() if key in table and value != table[key]
+        }
+        assert mismatched == {}
+
+    def test_default_schema_and_flat_mapping_cover_the_same_fields(self):
+        """Every canonical default has exactly one YAML-to-CLI mapping."""
+        default_paths = {
+            (section, key) for section, values in _ENCODED_CONFIG_DEFAULTS.items() for key in values
+        }
+
+        assert set(_CONFIG_PATH_BY_DEST.values()) == default_paths
+        assert set(_CONFIG_PATH_BY_DEST) == set(_get_encoded_parser_defaults())
+
+    def test_encoded_parser_suppresses_configurable_defaults(self):
+        """Only explicitly supplied configurable options enter the namespace."""
+        parser = argparse.ArgumentParser(prog="primus")
+        register_subcommand(parser.add_subparsers(dest="command"))
+
+        parsed = vars(parser.parse_args(["data", "diffusion-encoded"]))
+
+        assert set(parsed).isdisjoint(_get_encoded_parser_defaults())
+
+    def test_compatibility_entrypoint_preserves_public_commands(self):
+        """The thin compatibility entry point preserves all public command names."""
+        cases = [
+            ("diffusion-raw", []),
+            ("diffusion-encoded", []),
+            ("diffusion-ingest", ["--config", "ingest.yaml"]),
+        ]
+        for command, extra_args in cases:
+            with self.subTest(command=command):
+                parser = argparse.ArgumentParser(prog="primus")
+                register_subcommand(parser.add_subparsers(dest="command"))
+
+                parsed = parser.parse_args(["data", command, *extra_args])
+
+                assert parsed.data_command == command
+                assert callable(parsed.func)
 
 
 class TestSetupHfAuthenticationPriority(PrimusUT):

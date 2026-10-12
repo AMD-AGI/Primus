@@ -10,6 +10,7 @@ It supports both **single-node** and **multi-node** training, and includes optio
 - [🧠 Pretraining with Primus](#-pretraining-with-primus)
   - [📚 Table of Contents](#-table-of-contents)
   - [⚙️ Supported Backends](#️-supported-backends)
+  - [📂 Directory Layout](#-directory-layout)
   - [🖥️ Single Node Training](#️-single-node-training)
     - [Setup Docker](#setup-docker)
     - [Setup Primus](#setup-primus)
@@ -23,12 +24,6 @@ It supports both **single-node** and **multi-node** training, and includes optio
     - [Stage 3: Train with Tuned Kernel](#stage-3-train-with-tuned-kernel)
   - [✅ Supported Models](#-supported-models)
     - [🏃‍♂️ How to Run a Supported Model](#️-how-to-run-a-supported-model)
-  - [☸️ Kubernetes Training Management (`run_k8s_pretrain.sh`)](#️-kubernetes-training-management-run_k8s_pretrainsh)
-    - [Requirements](#requirements)
-    - [Usage](#usage)
-    - [⚙️ Commands](#️-commands)
-    - [⚙️ Create Command Options](#️-create-command-options)
-    - [Example](#example)
 
 ---
 
@@ -41,6 +36,42 @@ Primus supports multiple backends.
 | Megatron       | Open-source framework for large-scale transformer training   |
 | TorchTitan     | PyTorch-compatible framework developed for training at scale |
 | NeMo AutoModel | NVIDIA-NeMo AutoModel (diffusion: Wan 2.2 T2V); `third_party/Automodel` submodule, installed editable on first run |
+
+## 📂 Directory Layout
+
+Every backend owns a top-level directory whose name matches the `framework` field in
+the experiment YAML. Anything specific to one backend lives underneath it, so a config
+and the material explaining it stay together:
+
+```text
+examples/
+├── megatron/              # framework: megatron
+│   ├── configs/           #   experiment YAMLs, grouped by GPU (MI300X, MI355X, …)
+│   ├── models/            #   model-specific launchers and studies
+│   │   ├── deepseek-v4/
+│   │   ├── glm5-3-flash/
+│   │   └── kimi-k3/
+│   └── guides/            #   walkthroughs and packaged workflows
+│       ├── customer_package/
+│       ├── moe_package/
+│       ├── odc/
+│       ├── offline_tune/
+│       └── tuning_agent/
+├── torchtitan/            # framework: torchtitan
+├── maxtext/               # framework: maxtext
+├── megatron_bridge/       # framework: megatron_bridge
+├── diffusion/             # framework: diffusion
+├── maxdiffusion/          # framework: maxdiffusion
+├── nemo_automodel/        # framework: nemo_automodel
+├── hummingbirdxt/         # framework: hummingbirdxt
+├── specforge/             # framework: specforge
+├── mlperf/                # MLPerf submissions; spans several backends
+└── hardware_configs/      # per-GPU bandwidth/latency inputs for primus projection
+```
+
+`mlperf/` and `hardware_configs/` sit at the top level because they are not tied to a
+single backend: MLPerf submissions cover Megatron, Megatron-Bridge and diffusion, and
+the hardware configs are consumed by `primus projection`.
 
 
 ## 🖥️ Single Node Training
@@ -100,6 +131,14 @@ Notes on the argument shape:
   enablement and dataset preparation run as hooks under `runner/helpers/hooks/`.
 - `runner/.primus.yaml` holds the defaults for each mode (container image, devices, and
   the list of environment variables forwarded into the container).
+
+The packaged launchers under `examples/megatron/guides/customer_package/` and
+`examples/megatron/guides/moe_package/` share
+`runner/helpers/launch/slurm_pretrain.sh`, which turns the `EXP` / `NNODES` / `DATA_PATH`
+environment contract into the `primus-cli slurm srun ... -- container -- train pretrain`
+command above. It is an internal helper, not an entry point: launch training with
+`primus-cli` directly.
+
 #### 🚀 Quick Start Mode
 
 Use this mode for **rapid iteration or validation** of a model config.
@@ -146,9 +185,10 @@ export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
 
 # MaxDiffusion (JAX) directly from Primus (on a JAX base image, e.g. rocm/jax-training).
 # Requires the vendored submodule: git submodule update --init third_party/maxdiffusion
-# run_pretrain.sh runs examples/maxdiffusion/setup_maxdiffusion_env.sh to install deps + patches,
-# then launches. See docs/02-user-guide/pretraining.md ("MaxDiffusion (JAX) pretraining").
-BACKEND=MaxDiffusion EXP=examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml bash ./examples/run_pretrain.sh
+# The train/pretrain/maxdiffusion prepare hooks install the dependencies.
+# See docs/02-user-guide/pretraining.md ("MaxDiffusion (JAX) pretraining").
+BACKEND=MaxDiffusion ./primus-cli direct -- train pretrain \
+  --config examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml
 
 ```
 
@@ -205,7 +245,7 @@ export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 
 ### Stage 2: Tune GEMM Kernel
 
-This stage performs kernel tuning based on the dumped GEMM shapes using the [offline_tune tool](https://github.com/AMD-AGI/Primus/tree/main/examples/offline_tune).
+This stage performs kernel tuning based on the dumped GEMM shapes using the [offline_tune tool](https://github.com/AMD-AGI/Primus/tree/main/examples/megatron/guides/offline_tune).
 It typically takes 10–30 minutes depending on model size and shape complexity.
 
 
@@ -290,100 +330,4 @@ export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 # run torchtitan
 export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
 ./primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
-```
-
-## ☸️ Kubernetes Training Management (`run_k8s_pretrain.sh`)
-
-The `run_k8s_pretrain.sh` script provides convenient CLI commands to manage training workloads on a Kubernetes cluster via a REST API. It supports creating, querying, deleting training jobs, and listing cluster nodes, facilitating flexible workload control for distributed training with Primus or similar frameworks.
-
-### Requirements
-
-- `jq` installed (for JSON processing)
-- Access to Kubernetes API endpoint URL
-
-### Usage
-
-```bash
-./run_k8s_pretrain.sh --url <api_base_url> <command> [options]
-
-```
-
-
-
-### ⚙️ Commands
-
-Primus provides several command-line interfaces to manage training workloads and cluster resources. Below are the commonly used commands:
-
-| Command | Description                    |
-| ------- | ------------------------------|
-| create  | Create a new training workload |
-| get     | Retrieve workload details      |
-| delete  | Delete an existing workload    |
-| list    | List all current workloads     |
-| nodes   | List all nodes in the cluster  |
-
-Use these commands to interact with Primus for workload scheduling and resource management.
-
-
----
-
-### ⚙️ Create Command Options
-
-When using the `create` command to start a new training workload, the following options are supported:
-
-| Option       | Description                                          | Default                                  |
-| ------------ | ---------------------------------------------------- | ---------------------------------------- |
-| `--replica`    | Number of replicas (instances)                       | 1                                        |
-| `--cpu`        | Number of CPUs                                       | 96                                       |
-| `--gpu`        | Number of GPUs                                       | 8                                        |
-| `--exp`        | Path to experiment (training config) file (required) | —                                        |
-| `--data_path`  | Path to training data                                | —                                        |
-| `--image`      | Docker image to use                                  | `docker.io/rocm/primus:v26.5` |
-| `--hf_token`   | HuggingFace token                                    | Read from env var `HF_TOKEN`             |
-| `--workspace`  | Workspace name                                       | `primus-safe-pretrain`                   |
-| `--nodelist`   | Comma-separated list of node hostnames to run on     | —                                        |
-
-### Example
-
-Create a training workload with 2 replicas and custom config:
-
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com create --replica 2 --cpu 96 --gpu 4 \
-  --exp examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml --data_path /mnt/data/train \
-  --image docker.io/custom/image:latest --hf_token myhf_token --workspace team-dev
-
-#result:
-{
-  "workloadId": "abc123"
-}
-
-```
-
-Get workload details:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com get --workload-id abc123
-
-```
-
-Delete a workload:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com delete --workload-id abc123
-
-```
-
-List all workloads:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com list
-
-```
-
-List all cluster nodes:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com nodes
-
 ```

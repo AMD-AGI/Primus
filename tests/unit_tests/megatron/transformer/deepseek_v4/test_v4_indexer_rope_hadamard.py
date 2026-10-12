@@ -319,9 +319,12 @@ def test_csa_forward_threads_position_ids_into_the_indexer():
     captured = []
     original = attn.indexer.forward
 
-    def _spy(h, position_ids=None):
+    def _spy(h, position_ids=None, **kw):
+        # **kw so this spy asserts what it is about -- that position_ids reaches the
+        # indexer -- without also pinning the rest of the signature. Packed input adds a
+        # cu_seqlens keyword, and a spy that breaks on it is testing the wrong thing.
         captured.append(position_ids)
-        return original(h, position_ids)
+        return original(h, position_ids, **kw)
 
     attn.indexer.forward = _spy
     try:

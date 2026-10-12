@@ -5,13 +5,11 @@ from pathlib import Path
 
 import lm_eval
 from lm_eval.utils import make_table
-from transformers import AutoConfig, AutoModelForCausalLM
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from modeling_hylo_llama import HyloLlamaConfig, HyloLlamaForCausalLM
-
-AutoConfig.register("hylo_llama", HyloLlamaConfig)
-AutoModelForCausalLM.register(HyloLlamaConfig, HyloLlamaForCausalLM)
+# Importing the module is what registers zebra_llama with the Auto* classes;
+# registering again here would raise a duplicate-registration ValueError.
+import modeling_zebra_llama  # noqa: F401
 
 
 def main():
@@ -38,7 +36,7 @@ def main():
     )
 
     print("=" * 72)
-    print("Hylo hybrid lm-eval")
+    print("Zebra hybrid lm-eval")
     print("=" * 72)
     print(f"  Model path:  {args.model_path}")
     print(f"  Tokenizer:   {tokenizer_path}")

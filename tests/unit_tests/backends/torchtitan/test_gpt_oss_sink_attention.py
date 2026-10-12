@@ -16,7 +16,10 @@ Two groups:
 """
 
 import inspect
+import sys
+import types
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -110,6 +113,59 @@ class TestSinkAttentionMirror:
         params = inspect.signature(attn.forward).parameters
         assert "rope_cache" in params
         assert "attention_masks" in params
+
+    def test_forward_calls_turbo_flash_attn_with_sink_and_window(self, gpt_oss_args, monkeypatch):
+        """Attention.forward routes through primus_turbo's flash_attn_func, passing
+        the per-head sinks and the currently-selected window, and reshapes the
+        kernel output back through the output projection."""
+        import torch
+        from torchtitan.models.gpt_oss.model.model import precompute_rope_cache
+
+        from primus.backends.torchtitan.models.gpt_oss.model.model import (
+            Attention,
+            apply_rotary_emb,
+        )
+
+        attn = Attention(gpt_oss_args)
+        attn._turbo_window = (gpt_oss_args.sliding_window_size, 0)
+
+        bsz, seqlen = 2, 4
+        x = torch.randn(bsz, seqlen, gpt_oss_args.dim)
+        rope_cache = precompute_rope_cache(gpt_oss_args.head_dim, seqlen)
+
+        # Recreate the reference q/k/v (post-RoPE) so we can assert the kernel is
+        # called with exactly the tensors the forward pass computes.
+        hidden_shape = (bsz, seqlen, -1, gpt_oss_args.head_dim)
+        q_ref = attn.wq(x).view(hidden_shape)
+        k_ref = attn.wk(x).view(hidden_shape)
+        v_ref = attn.wv(x).view(hidden_shape)
+        q_ref, k_ref = apply_rotary_emb(q_ref, k_ref, rope_cache)
+
+        kernel_output = torch.randn_like(q_ref)
+        fake_flash_attn_func = MagicMock(return_value=kernel_output)
+        fake_turbo_pkg = types.ModuleType("primus_turbo")
+        fake_turbo_pytorch = types.ModuleType("primus_turbo.pytorch")
+        fake_turbo_pytorch.ops = SimpleNamespace(flash_attn_func=fake_flash_attn_func)
+        fake_turbo_pkg.pytorch = fake_turbo_pytorch
+        monkeypatch.setitem(sys.modules, "primus_turbo", fake_turbo_pkg)
+        monkeypatch.setitem(sys.modules, "primus_turbo.pytorch", fake_turbo_pytorch)
+
+        out = attn.forward(x, rope_cache, attention_masks=None)
+
+        fake_flash_attn_func.assert_called_once()
+        call_args, call_kwargs = fake_flash_attn_func.call_args
+        q, k, v = call_args
+        assert torch.allclose(q, q_ref)
+        assert torch.allclose(k, k_ref)
+        assert torch.allclose(v, v_ref)
+        assert call_kwargs["causal"] is True
+        assert call_kwargs["window_size"] == (gpt_oss_args.sliding_window_size, 0)
+        assert call_kwargs["softmax_scale"] == attn.softmax_scale
+        assert torch.allclose(call_kwargs["sink"], attn.sinks.to(q.dtype))
+
+        expected = attn.wo(kernel_output.reshape(bsz, seqlen, -1).contiguous())
+        assert out.shape == (bsz, seqlen, gpt_oss_args.dim)
+        assert torch.allclose(out, expected)
 
     def test_block_selects_sliding_window_on_even_layers(self, gpt_oss_args):
         import torch

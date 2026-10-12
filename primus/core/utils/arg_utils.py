@@ -23,13 +23,15 @@ def _coerce_cli_value_modern(raw_value):
                 return ast.literal_eval(value)
             except (ValueError, SyntaxError):
                 pass
-        if "." in value:
-            try:
-                return float(value)
-            except ValueError:
-                pass
+        # Integers first so "32" stays int; floats (including scientific
+        # notation like "1e-5"/"2E4", which contain no ".") fall through to the
+        # float branch instead of leaking out as strings.
         try:
             return int(value)
+        except ValueError:
+            pass
+        try:
+            return float(value)
         except ValueError:
             return value
     except AttributeError:

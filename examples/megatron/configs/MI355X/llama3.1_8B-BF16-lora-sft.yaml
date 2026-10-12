@@ -1,0 +1,128 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3.1_8B-BF16-lora-sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# LoRA (parameter-efficient) supervised fine-tuning recipe for Llama-3.1-8B on a
+# single 8x MI350X / MI355X (gfx950) node, BF16.
+#
+# Why this recipe exists:
+#   examples/megatron/configs/MI355X ships a LoRA-SFT recipe for Llama-3 8B
+#   (llama3_8B-BF16-sft.yaml) but none for Llama-3.1 8B, even though the
+#   llama3.1_8B model definition and BF16/FP8 pretrain recipes are present. This
+#   fills that gap; it mirrors the proven llama3_8B SFT recipe structure and only
+#   swaps the model + tokenizer to the 3.1 family and tunes the LoRA/optimizer
+#   settings for parameter-efficient fine-tuning.
+#
+# Parallelism: pure data parallelism (TP=PP=CP=1, DP=8). The 8B base is frozen
+# and only the low-rank adapters train, so the recipe fits comfortably on one
+# node without tensor/pipeline sharding.
+#
+# Checkpoint handling: finetune=true with load unset drives the posttrain hook
+# (01_convert_checkpoints.py) to convert the HF base weights (hf_path) into a
+# Megatron checkpoint, load them, then wrap the target linears with LoRA.
+#
+# Run:
+#   primus-cli direct -- train posttrain \
+#     --config examples/megatron/configs/MI355X/llama3.1_8B-BF16-lora-sft.yaml
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    # Model to run
+    model: llama3.1_8B.yaml
+
+    overrides:
+      # Specify stage to use SFT trainer (required)
+      stage: sft
+
+      # Use the community mirror (weights identical, no HF gating).
+      # hf_path: source for 01_convert_checkpoints.py (HF -> Megatron).
+      # tokenizer_model: used by HuggingFaceTokenizer at training time.
+      hf_path: NousResearch/Meta-Llama-3.1-8B
+      tokenizer_model: NousResearch/Meta-Llama-3.1-8B
+
+      # SFT dataset from HuggingFace (default: tatsu-lab/alpaca).
+      # OR point at a local JSONL file for offline training.
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+
+      # Logging
+      wandb_project: "Primus_Llama3.1_LoRA_SFT"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      # Training configuration
+      train_iters: 20
+      micro_batch_size: 1
+      global_batch_size: 128
+
+      # Sequence length
+      seq_length: 2048
+      max_position_embeddings: 2048
+
+      # Learning rate: LoRA adapters tolerate (and benefit from) a higher LR than
+      # full fine-tuning, so use 2e-4 rather than the 1e-5 used for full SFT.
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 50
+      lr_decay_iters: 950
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+
+      # Loss masking (SFT uses custom loss masking over the response tokens)
+      eod_mask_loss: false
+
+      # Model initialization
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # Parallelism: pure data parallelism (DP=8 on a single node)
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # Checkpoint configuration
+      finetune: true  # Load pretrained base checkpoint, then wrap with LoRA
+      load: null
+      save: null
+      save_interval: 100
+      eval_interval: 50
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch
+
+      # Precision (BF16 mixed precision)
+      bf16: true
+
+      # Turbo optimizations
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+
+      # Validation
+      eval_iters: 10
+
+      # LoRA (Low-Rank Adaptation) configuration
+      lora:
+        enabled: true                    # Parameter-efficient fine-tuning
+        dim: 16                          # Low-rank dimension (8-64)
+        alpha: 32                        # Scaling factor (alpha/dim = 2.0)
+        dropout: 0.05                    # Adapter dropout for regularization
+        dropout_position: pre            # "pre" or "post"
+        lora_A_init_method: xavier       # "xavier" or "kaiming"
+        lora_B_init_method: zero         # "zero" (standard)
+        target_modules:                  # Attention + MLP projection linears
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

@@ -1,0 +1,74 @@
+{
+  "_comment": [
+    "Rules for install_parity.py, which compares the pins in a release Dockerfile",
+    "with the pin block in the matching bare-metal setup.sh.",
+    "",
+    "Most pins share a name on both sides (18 of them for the primus pair), so",
+    "name matching is the default and this file only carries the exceptions:",
+    "renames, script-internal variables that are not pins at all, and the",
+    "divergences the install READMEs document as deliberate.",
+    "",
+    "A parity checker that cannot tell deliberate divergence from drift is worse",
+    "than none, because it trains people to ignore it."
+  ],
+  "aliases": {
+    "primus": {
+      "THE_ROCK_VERSION": "ROCM_SDK_VERSION"
+    },
+    "jax": {
+      "JAX_PJRT_VERSION": "JAX_ROCM_VERSION"
+    }
+  },
+  "not_pins": [
+    "DEFAULT_STAGES",
+    "OPTIONAL_STAGES",
+    "PIP",
+    "UVPIP",
+    "SCRIPT_DIR",
+    "REPO_ROOT",
+    "MAXTEXT_DEVICE",
+    "TE_WHEEL_MIN_GLIBC",
+    "BASE_IMAGE",
+    "DEBIAN_FRONTEND",
+    "PYTHONUNBUFFERED"
+  ],
+  "documented_divergences": {
+    "primus": {
+      "TORCHVISION_VERSION": "Dockerfile pins `torchvision==0.29.0a0` inline and leaves the +rocm local label to the resolver; the script pins the full version the image resolved to.",
+      "TORCHAUDIO_VERSION": "Dockerfile pins `torchaudio==2.11.0+rocm${THE_ROCK_VERSION}` inline rather than as an ARG; the script spells out the same version.",
+      "APEX_VERSION": "Dockerfile installs apex unpinned from the torch index; the script pins the version the image resolved to.",
+      "FLYDSL_VERSION": "Primus-Turbo is installed with --no-deps bare-metal, so its own flydsl pin is restated explicitly."
+    },
+    "jax": {
+      "TE_SOURCE_COMMIT": "Optional `te_source` stage, which has no Dockerfile counterpart; the commit is the one the TE wheel's local label names.",
+      "RCCL_COMMIT": "Optional `rccl` stage (the v26.6 behaviour). The Dockerfile has taken RCCL from the pip ROCm SDK since v26.7.",
+      "PRIMUS_BRANCH": "The JAX image ships no Primus since v26.8 (it runs from a mounted checkout); the script checks out the release branch the docs pair with the image.",
+      "PRIMUS_REPO": "Same as PRIMUS_BRANCH: the image no longer clones Primus."
+    }
+  },
+  "_dockerfile_only_packages_why": [
+    "Packages the release Dockerfile pins that the bare-metal script legitimately",
+    "never names. Anything not listed here is reported as drift, because a changed",
+    "package set moves no shared variable and so nothing else catches it: v26.7 grew",
+    "Transformer Engine from two distributions to three and renamed the JAX plugin",
+    "pair, and the first release run shipped scripts missing both.",
+    "Per-arch wheels (*-gfx942, *-gfx950) are excluded automatically -- the script",
+    "builds those names from PYTORCH_ROCM_ARCH at run time."
+  ],
+  "dockerfile_only_packages": {
+    "primus": {
+      "msgpack": "a sed on pip's own vendored dependency list (src/pip/_vendor/vendor.txt) in the pip_builder stage, not a package installed into the training environment; bare metal uses stock pip",
+      "urllib3": "same pip_builder sed as msgpack (pip's vendored copy, not an installed package); bare metal uses stock pip"
+    },
+    "jax": {
+      "torch": "installed by the MaxDiffusion stage, which the bare-metal script skips",
+      "torchvision": "same MaxDiffusion stage",
+      "transformers": "pinned by the jax_training stage; bare metal takes it from Primus' requirements-jax.txt"
+    }
+  },
+  "inline_pins": {
+    "_comment": "Pins the Dockerfiles express inside RUN lines rather than as ARG. Only four exist in Dockerfile.primus-v26.6 against 66 ARG/ENV declarations, so an explicit list beats a general parser.",
+    "primus": {},
+    "jax": {}
+  }
+}

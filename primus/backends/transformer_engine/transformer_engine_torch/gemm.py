@@ -102,9 +102,9 @@ if is_te_min_version("2.0"):
                 quantizer.columnwise_usage,
             )
             quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
-            inp = quantizer(inp.dequantize())
+            requantized = quantizer(inp.dequantize())
             quantizer.set_usage(rowwise=init_rowwise_usage, columnwise=init_columnwise_usage)
-            return inp
+            return requantized
 
         if isinstance(inp, Float8TensorBase):
             scale_inv = inp._scale_inv

@@ -127,3 +127,20 @@ def test_adapter_setup_backend_path_with_env_var(tmp_path, monkeypatch):
         assert str(backend_dir) in __import__("sys").path
     finally:
         __import__("sys").path[:] = original_sys_path
+
+
+def test_adapter_setup_backend_path_rejects_missing_explicit_path(tmp_path):
+    adapter = DummyBackendAdapter(framework="test_backend")
+    missing_path = tmp_path / "missing_backend"
+
+    with pytest.raises(FileNotFoundError, match="Requested path"):
+        adapter.setup_backend_path(backend_path=str(missing_path))
+
+
+def test_adapter_setup_backend_path_rejects_missing_env_path(tmp_path, monkeypatch):
+    adapter = DummyBackendAdapter(framework="test_backend")
+    missing_path = tmp_path / "missing_backend"
+    monkeypatch.setenv("BACKEND_PATH", str(missing_path))
+
+    with pytest.raises(FileNotFoundError, match="BACKEND_PATH does not exist"):
+        adapter.setup_backend_path()

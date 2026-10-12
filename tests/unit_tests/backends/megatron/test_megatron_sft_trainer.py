@@ -138,8 +138,73 @@ def test_create_sft_datasets_provider_uses_runtime_args(monkeypatch: pytest.Monk
             "seed": 123,
             "enable_packed_sequences": False,
             "bridge_compat_inline_bos": False,
+            # Packing-only knob, forwarded unconditionally so the call shape does
+            # not depend on its value. build_train_valid_test_datasets names it and
+            # drops it on the unpacked path -- see the leak test below.
+            "segment_align": 1,
         }
     ]
+
+
+def test_segment_align_does_not_leak_into_hf_load_dataset(monkeypatch: pytest.MonkeyPatch):
+    """``segment_align`` must not reach ``SFTDataset``'s ``**kwargs``.
+
+    ``build_train_valid_test_datasets`` forwards its surplus ``**kwargs`` to the
+    dataset class, and ``SFTDataset`` hands them straight to HuggingFace
+    ``load_dataset(dataset_name, split=split, **kwargs)``, which rejects unknown
+    builder-config keys. ``segment_align`` is accepted only by
+    ``PackedSFTDataset``, so on the unpacked path it must be consumed by the
+    builder rather than passed down. Without that, every unpacked SFT run against
+    a Hub dataset dies at train-set construction -- and the local-``.jsonl`` path
+    hides it, because that branch never calls ``load_dataset``.
+    """
+    from primus.backends.megatron.sft import dataset as sft_dataset
+
+    seen = []
+
+    class FakeSFTDataset:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+    monkeypatch.setattr(sft_dataset, "SFTDataset", FakeSFTDataset)
+
+    sft_dataset.build_train_valid_test_datasets(
+        dataset_name="my-org/my-sft-dataset",
+        tokenizer="TOKENIZER",
+        max_seq_length=2048,
+        train_val_test_num_samples=[100, 0, 0],
+        enable_packed_sequences=False,
+        segment_align=128,
+    )
+
+    assert len(seen) == 1
+    assert "segment_align" not in seen[0]
+
+
+def test_segment_align_reaches_the_packed_dataset(monkeypatch: pytest.MonkeyPatch):
+    """The other half of the contract: when packing is on it must be forwarded."""
+    from primus.backends.megatron.sft import dataset as sft_dataset
+    from primus.backends.megatron.sft import packing as sft_packing
+
+    seen = []
+
+    class FakePackedSFTDataset:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+    monkeypatch.setattr(sft_packing, "PackedSFTDataset", FakePackedSFTDataset)
+
+    sft_dataset.build_train_valid_test_datasets(
+        dataset_name="my-org/my-sft-dataset",
+        tokenizer="TOKENIZER",
+        max_seq_length=2048,
+        train_val_test_num_samples=[100, 0, 0],
+        enable_packed_sequences=True,
+        segment_align=128,
+    )
+
+    assert len(seen) == 1
+    assert seen[0]["segment_align"] == 128
 
 
 def test_run_sft_pretrain_uses_new_megatron_entrypoint_signature(monkeypatch: pytest.MonkeyPatch):

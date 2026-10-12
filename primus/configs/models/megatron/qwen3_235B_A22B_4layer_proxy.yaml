@@ -1,0 +1,8 @@
+extends:
+  - qwen3_235B_A22B.yaml
+
+# One-GPU smoke-test variant. Keep the Qwen3-235B-A22B attention and MoE
+# architecture, reduce depth, and use the small repository with the same tokenizer.
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: Qwen/Qwen3-0.6B
+num_layers: 4

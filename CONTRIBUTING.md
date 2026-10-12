@@ -59,7 +59,7 @@ This format helps us to automatically generate changelogs and provide more clari
 2. Create a **branch** for your work following the branch naming convention described above.
 3. Make your changes and **commit** them following the commit message convention.
 4. **Push** your changes to your fork or branch in the repository.
-5. Create a **pull request** with a clear description of the changes, and reference any related issues.
+5. Create a **pull request** with a clear description of the changes, and reference any related issues. Lint CI runs on every PR; GPU unit tests run after a maintainer adds the `ci:gpu` label.
 6. Add appropriate reviewers to the PR.
 7. Wait for the review and make any requested changes.
 8. Once approved, your PR will be merged.

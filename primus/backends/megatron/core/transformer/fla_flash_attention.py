@@ -41,12 +41,15 @@ Caveats
   Varlen / packed sequences are not implemented; the wrapper will raise.
 * Always uses causal masking (matches Megatron's MLA spec
   ``params={"attn_mask_type": AttnMaskType.causal}`` and FLA's MLA path).
-* ``current_max_attn_logits`` is exposed as ``None`` so MLA's optional
-  qk_clip path (disabled in our configs) keeps importing without error.
+* ``current_max_attn_logits`` is populated per-head when ``qk_clip`` (or
+  ``log_max_attention_logit``) is enabled, so MLA's MuonClip-style qk_clip
+  path works on the FLA fused backend (see ``_accumulate_max_attn_logit``).
+  When both are disabled it stays ``None`` at zero cost.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import time
@@ -118,6 +121,44 @@ _flash_attn_func = None
 # because the FLA path and TE+CK path produce near-identical loss/speed
 # numbers on small attention dims.
 _BANNER_PRINTED = False
+
+
+@torch._dynamo.disable
+@torch.no_grad()
+def _accumulate_max_attn_logit(module, q, k, softmax_scale):
+    """Populate ``module.current_max_attn_logits`` for MLA qk_clip (MuonClip).
+
+    Computes the per-head max scaled logit ``max_{b,i,j<=i}(softmax_scale*q_i.k_j)``
+    that the fused flash kernel does not expose. Chunked over queries to bound
+    memory (no O(s^2) materialisation); bf16, no autograd (pure statistic).
+    Matches TE's ``return_max_logit`` semantics: shape
+    ``(num_heads_per_partition,)``, MAX-accumulated across micro-batches and reset
+    by ``clip_qk``. q, k: ``[b, s, h, d]``.
+    """
+    b, s, h, d = q.shape
+    qf = q.permute(0, 2, 1, 3)  # [b, h, s, d]
+    kf = k.permute(0, 2, 1, 3)  # [b, h, s, d]
+    dev = q.device
+    per_head = torch.full((h,), float("-inf"), device=dev, dtype=torch.float32)
+    chunk = int(os.environ.get("PRIMUS_MAXLOGIT_QCHUNK", "256"))
+    if chunk <= 0:
+        chunk = 256
+    for i in range(0, s, chunk):
+        c = min(chunk, s - i)
+        qc = qf[:, :, i : i + c, :]  # [b, h, c, d]
+        kend = i + c  # causal: keys 0..i+c-1
+        kk = kf[:, :, :kend, :]  # [b, h, kend, d]
+        scores = torch.matmul(qc, kk.transpose(-1, -2))  # [b, h, c, kend] bf16
+        scores = scores.float().mul_(softmax_scale)
+        qpos = torch.arange(i, i + c, device=dev).view(1, 1, c, 1)
+        kpos = torch.arange(0, kend, device=dev).view(1, 1, 1, kend)
+        scores.masked_fill_(kpos > qpos, float("-inf"))
+        cmax = scores.amax(dim=(0, 2, 3))  # [h]
+        per_head = torch.maximum(per_head, cmax)
+    if module.current_max_attn_logits is None:
+        module.current_max_attn_logits = per_head
+    else:
+        module.current_max_attn_logits = torch.maximum(module.current_max_attn_logits, per_head)
 
 
 def _load_flash_attn():
@@ -201,7 +242,7 @@ class FLAFlashAttention(MegatronModule):
             )
             # Megatron silently consumes plain `print()` from rank-non-zero
             # workers (and sometimes from rank-0 once its logger is set up),
-            # so emit to stderr -- which the run_pretrain.sh tee pipeline
+            # so emit to stderr -- which the primus-cli tee pipeline
             # still captures -- AND drop a marker file so activation is
             # provable even if all stdio gets eaten.
             print(_msg, file=sys.stderr, flush=True)
@@ -250,8 +291,27 @@ class FLAFlashAttention(MegatronModule):
         k = key.transpose(0, 1).contiguous()
         v = value.transpose(0, 1).contiguous()
 
-        # FLA's MLA path:
-        #   o = flash_attn_func(q, k, v, causal=True, softmax_scale=…)
+        # flash-attn only accepts fp16/bf16, but MLA's rotary path can leave q/k
+        # in fp32 on the eval/generate path (while v stays bf16). flash_attn_func
+        # needs q/k/v in one matching dtype, so reconcile only when they differ,
+        # casting to whichever half dtype is present (no-op when they already
+        # match, e.g. all-bf16 training).
+        _half = (torch.float16, torch.bfloat16)
+        if q.dtype != k.dtype or q.dtype != v.dtype:
+            cast_dt = next((t.dtype for t in (v, q, k) if t.dtype in _half), torch.bfloat16)
+            q = q.to(cast_dt)
+            k = k.to(cast_dt)
+            v = v.to(cast_dt)
+
+        # qk_clip (MuonClip): the fused kernel doesn't expose attention logits,
+        # so report the per-head max logit for MLASelfAttention.clip_qk. Gated so
+        # runs without qk_clip/log_max_attention_logit pay nothing.
+        if getattr(self.config, "qk_clip", False) or getattr(self.config, "log_max_attention_logit", False):
+            scale = self.softmax_scale
+            if scale is None:
+                scale = 1.0 / math.sqrt(q.shape[-1])
+            _accumulate_max_attn_logit(self, q, k, scale)
+
         out = flash_attn_func(
             q,
             k,

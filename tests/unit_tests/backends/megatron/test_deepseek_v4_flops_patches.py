@@ -24,11 +24,17 @@ Coverage:
 * G36 — Plan-6 P33: SWA visible-pair correction.  Parametrised over
   ``swa_window``, ``compress_ratio``, ``hc_mult`` so the dense + HCA +
   CSA per-layer pair counts and the over-count ratio vs the legacy
-  ``S_eff^2`` upper bound are pinned independently.
+  ``S^2`` upper bound are pinned independently.
 * G36a — Plan-6 P33: HyperConnection ``fn.weight`` matmul accounting.
   Asserts the ``hc`` breakdown row equals the closed form
   ``B * S * K * D * K * (2 * (L + M) * (2+K) + (1 + M))`` and degrades
   to 0 when ``hc_mult <= 1``.
+* G36b — mHC must not inflate the token count.  ``hc_mult`` is swept over
+  the whole breakdown and every non-``hc`` row must come out bit-identical,
+  because ``DeepseekV4HybridLayer._hc_apply`` collapses the K streams to
+  one hidden per token before running attention / MoE.  This is the
+  regression guard for the ``S * hc_mult`` over-count that made the
+  reported total ~3.6x too high at the V4-Flash shape.
 """
 
 from __future__ import annotations
@@ -103,75 +109,75 @@ def _v4_flash_smoke_args(
     )
 
 
-def _hand_attn_qkv_o(*, B, S_eff, H, n, d, q_lora, o_lora, o_groups):
+def _hand_attn_qkv_o(*, B, S, H, n, d, q_lora, o_lora, o_groups):
     """Reference closed-form QKV+O FMAC per layer (matches the patch helper)."""
     n_d = n * d
     qkv = H * q_lora + q_lora * n_d + H * d
     o_proj = n_d * o_lora + (o_groups * o_lora) * H if o_lora > 0 else n_d * H
-    return B * S_eff * (qkv + o_proj)
+    return B * S * (qkv + o_proj)
 
 
-def _hand_local_pairs(*, swa, S_eff):
+def _hand_local_pairs(*, swa, S):
     """Reference closed form for SWA-pruned local visible pairs."""
-    if swa <= 0 or swa >= S_eff:
-        return S_eff * (S_eff + 1) // 2
-    return swa * S_eff - swa * (swa - 1) // 2
+    if swa <= 0 or swa >= S:
+        return S * (S + 1) // 2
+    return swa * S - swa * (swa - 1) // 2
 
 
-def _hand_pool_pairs(*, ratio, S_eff):
+def _hand_pool_pairs(*, ratio, S):
     """Reference closed form for the causal-visible HCA pool pair count."""
     c = int(ratio)
-    if c <= 0 or S_eff <= 0:
+    if c <= 0 or S <= 0:
         return 0
-    n_full = S_eff // c
+    n_full = S // c
     if n_full == 0:
         return 0
-    return c * n_full * (n_full - 1) // 2 + n_full * (S_eff - c * n_full + 1)
+    return c * n_full * (n_full - 1) // 2 + n_full * (S - c * n_full + 1)
 
 
-def _hand_attn_scores(*, B, S_eff, n, d, ratio, index_topk, swa):
+def _hand_attn_scores(*, B, S, n, d, ratio, index_topk, swa):
     """Reference closed-form attention-score FMAC per layer.
 
     Plan-6 P33: counts only causal-visible ``(query, key)`` pairs
     surviving the per-layer mask (SWA + pool + sparse top-K), not the
-    legacy ``S_eff^2`` upper bound.
+    legacy ``S^2`` upper bound.
     """
-    local_pairs = _hand_local_pairs(swa=swa, S_eff=S_eff)
+    local_pairs = _hand_local_pairs(swa=swa, S=S)
     if ratio == 0:
         pairs = local_pairs
     elif ratio == 128:
-        pairs = local_pairs + _hand_pool_pairs(ratio=ratio, S_eff=S_eff)
+        pairs = local_pairs + _hand_pool_pairs(ratio=ratio, S=S)
     elif ratio == 4:
-        pool = max(1, S_eff // 4)
+        pool = max(1, S // 4)
         keys = min(index_topk, pool) if index_topk else pool
-        pairs = local_pairs + keys * S_eff
+        pairs = local_pairs + keys * S
     else:
-        pool = max(1, S_eff // ratio)
-        pairs = local_pairs + pool * S_eff
+        pool = max(1, S // ratio)
+        pairs = local_pairs + pool * S
     return 2 * B * n * d * pairs
 
 
-def _hand_compressor(*, B, S_eff, H, d, ratio):
+def _hand_compressor(*, B, S, H, d, ratio):
     if ratio == 0:
         return 0
     coff = 2 if ratio == 4 else 1
-    return 2 * B * S_eff * H * (coff * d)
+    return 2 * B * S * H * (coff * d)
 
 
-def _hand_indexer(*, B, S_eff, H, ratio, ihd, inh):
+def _hand_indexer(*, B, S, H, ratio, ihd, inh):
     if ratio != 4:
         return 0
-    pool = max(1, S_eff // ratio)
+    pool = max(1, S // ratio)
     proj = H * ihd + ihd * (inh * ihd) + H * inh + 2 * H * (2 * ihd)
     scoring = inh * pool * ihd
-    return B * S_eff * (proj + scoring)
+    return B * S * (proj + scoring)
 
 
-def _hand_moe(*, B, S_eff, H, H_moe, topk, n_experts, hash_layer, H_shared):
+def _hand_moe(*, B, S, H, H_moe, topk, n_experts, hash_layer, H_shared):
     router = 0 if hash_layer else H * n_experts
     routed = topk * _SWIGLU_FFN_EXPANSION_FACTOR * H * H_moe
     shared = _SWIGLU_FFN_EXPANSION_FACTOR * H * H_shared if H_shared > 0 else 0
-    return B * S_eff * (router + routed + shared)
+    return B * S * (router + routed + shared)
 
 
 # ---------------------------------------------------------------------------
@@ -197,10 +203,10 @@ class TestComputeV4FlopsClosedForm:
 
     def test_attn_qkv_o_term_matches_reference(self, args, batch_size, computed):
         _total, br = computed
-        S_eff = args.seq_length * args.hc_mult
+        S = args.seq_length
         per_layer = _hand_attn_qkv_o(
             B=batch_size,
-            S_eff=S_eff,
+            S=S,
             H=args.hidden_size,
             n=args.num_attention_heads,
             d=args.kv_channels,
@@ -212,11 +218,11 @@ class TestComputeV4FlopsClosedForm:
 
     def test_attn_scores_term_matches_reference(self, args, batch_size, computed):
         _total, br = computed
-        S_eff = args.seq_length * args.hc_mult
+        S = args.seq_length
         expected = sum(
             _hand_attn_scores(
                 B=batch_size,
-                S_eff=S_eff,
+                S=S,
                 n=args.num_attention_heads,
                 d=args.kv_channels,
                 ratio=int(r),
@@ -229,11 +235,11 @@ class TestComputeV4FlopsClosedForm:
 
     def test_compressor_term_matches_reference(self, args, batch_size, computed):
         _total, br = computed
-        S_eff = args.seq_length * args.hc_mult
+        S = args.seq_length
         expected = sum(
             _hand_compressor(
                 B=batch_size,
-                S_eff=S_eff,
+                S=S,
                 H=args.hidden_size,
                 d=args.kv_channels,
                 ratio=int(r),
@@ -244,11 +250,11 @@ class TestComputeV4FlopsClosedForm:
 
     def test_indexer_term_matches_reference(self, args, batch_size, computed):
         _total, br = computed
-        S_eff = args.seq_length * args.hc_mult
+        S = args.seq_length
         expected = sum(
             _hand_indexer(
                 B=batch_size,
-                S_eff=S_eff,
+                S=S,
                 H=args.hidden_size,
                 ratio=int(r),
                 ihd=args.index_head_dim,
@@ -260,11 +266,11 @@ class TestComputeV4FlopsClosedForm:
 
     def test_moe_term_respects_hash_layers(self, args, batch_size, computed):
         _total, br = computed
-        S_eff = args.seq_length * args.hc_mult
+        S = args.seq_length
         expected = sum(
             _hand_moe(
                 B=batch_size,
-                S_eff=S_eff,
+                S=S,
                 H=args.hidden_size,
                 H_moe=args.moe_ffn_hidden_size,
                 topk=args.moe_router_topk,
@@ -306,9 +312,9 @@ class TestG36SWAVisiblePairs:
     """Plan-6 P33: ``_attn_scores_fmac_per_layer`` must count only causal-
     visible ``(q, k)`` pairs surviving SWA + pool + sparse top-K masks.
 
-    The legacy plan-3 P20 closed form used ``B * n * d * S_eff^2`` for the
+    The legacy plan-3 P20 closed form used ``B * n * d * S^2`` for the
     local branch (Megatron's ``S^2/2`` causal upper bound x the FMA-pair
-    factor) which over-counted by ``S_eff / swa_window`` once the kernel
+    factor) which over-counted by ``S / swa_window`` once the kernel
     started honoring SWA per-row pruning.  This test pins the new
     ``2 * n * d * visible_pairs`` form against the helper, the per-branch
     over-count ratios, and the proxy-shape values printed in
@@ -318,43 +324,43 @@ class TestG36SWAVisiblePairs:
     @pytest.mark.parametrize("swa", [0, 64, 128, 4096, 8192])
     def test_local_visible_pair_helper(self, swa):
         """Helper closed form matches the exhaustive sum-over-queries."""
-        S_eff = 4096
+        S = 4096
         pairs = _visible_pairs(
             swa_window=swa,
             compress_ratio=0,
             index_topk=0,
-            seq_len_eff=S_eff,
+            seq_len=S,
         )
-        exhaustive = sum(min(q + 1, swa) if (0 < swa < S_eff) else (q + 1) for q in range(S_eff))
+        exhaustive = sum(min(q + 1, swa) if (0 < swa < S) else (q + 1) for q in range(S))
         assert pairs == exhaustive
 
     def test_proxy_shape_dense_visible_pairs_matches_attn_perf_doc(self):
-        """``swa=128, S_eff=4096, cr=0`` → 516,160 (attention_perf.md row)."""
+        """``swa=128, S=4096, cr=0`` → 516,160 (attention_perf.md row)."""
         pairs = _visible_pairs(
             swa_window=128,
             compress_ratio=0,
             index_topk=0,
-            seq_len_eff=4096,
+            seq_len=4096,
         )
         assert pairs == 516_160
 
     def test_proxy_shape_hca_visible_pairs_matches_attn_perf_doc(self):
-        """``swa=128, S_eff=4096, cr=128`` → 516,160 + 63,520 = 579,680."""
+        """``swa=128, S=4096, cr=128`` → 516,160 + 63,520 = 579,680."""
         pairs = _visible_pairs(
             swa_window=128,
             compress_ratio=128,
             index_topk=0,
-            seq_len_eff=4096,
+            seq_len=4096,
         )
         assert pairs == 516_160 + 63_520
 
     def test_proxy_shape_csa_visible_pairs_matches_attn_perf_doc(self):
-        """``swa=128, S_eff=4096, cr=4, topk=512`` → 516,160 + 512*4096."""
+        """``swa=128, S=4096, cr=4, topk=512`` → 516,160 + 512*4096."""
         pairs = _visible_pairs(
             swa_window=128,
             compress_ratio=4,
             index_topk=512,
-            seq_len_eff=4096,
+            seq_len=4096,
         )
         assert pairs == 516_160 + 512 * 4096
 
@@ -393,22 +399,22 @@ class TestG36SWAVisiblePairs:
         assert br_swa.hc == br_no.hc
 
     def test_swa_pruned_attn_scores_matches_proxy_overcount_ratio(self):
-        """Per-layer over-count ratio between legacy ``S_eff^2`` and the
-        SWA-pruned visible-pair count is ``S_eff / (2*swa) + O(1/S)`` for
-        swa < S_eff (the factor of 2 comes from counting both the QK^T
+        """Per-layer over-count ratio between legacy ``S^2`` and the
+        SWA-pruned visible-pair count is ``S / (2*swa) + O(1/S)`` for
+        swa < S (the factor of 2 comes from counting both the QK^T
         and PV matmul halves of the attention score).  At the V4-Flash
-        proxy shape (S=4096, hc_mult=4, S_eff=16384, swa=128) that ratio
-        is ``16384 / (2 * 128) = 64`` — pin it at >= 60x so a regression
-        that silently reverts to the legacy ``S_eff^2`` form is caught
-        while leaving 4-5x of headroom for off-by-one fringe corrections.
+        proxy shape (S=4096, swa=128) that ratio is
+        ``4096 / (2 * 128) = 16`` — pin it at >= 15x so a regression
+        that silently reverts to the legacy ``S^2`` form is caught
+        while leaving headroom for off-by-one fringe corrections.
         """
-        S_eff = 16384
+        S = 4096
         swa = 128
-        legacy_local = S_eff * S_eff  # plan-3 P20 ``S_eff^2`` form
-        swa_local_pairs = swa * S_eff - swa * (swa - 1) // 2
+        legacy_local = S * S  # plan-3 P20 ``S^2`` form
+        swa_local_pairs = swa * S - swa * (swa - 1) // 2
         new_local = 2 * swa_local_pairs  # 2 * visible_pairs (QK + PV)
         ratio = legacy_local / new_local
-        assert ratio >= 60, f"SWA over-count ratio collapsed: {ratio:.2f}"
+        assert ratio >= 15, f"SWA over-count ratio collapsed: {ratio:.2f}"
 
 
 # ---------------------------------------------------------------------------
@@ -445,9 +451,9 @@ class TestG36aHCMatmulAccounting:
         expected = B * S * K * D * K * (2 * (L + M) * (2 + K) + (1 + M))
         assert br.hc == expected
 
-    def test_hc_matmul_uses_seq_len_not_seq_len_eff(self):
-        """HyperMixer runs on the un-packed ``[B, S, K, D]`` tensor; cost
-        must scale with ``seq_len`` not ``seq_len * hc_mult``.
+    def test_hc_matmul_scales_with_k_on_the_feature_axis_only(self):
+        """HyperMixer runs once per token on ``[B, S, K, D]``, so ``hc_mult``
+        enters through the ``K*D`` feature axis, never the sequence axis.
 
         Concretely: doubling ``hc_mult`` from ``K=2 -> 4`` multiplies the
         mixer factor ``K * D * K * (2+K)`` by ``(4*4*6) / (2*2*4) = 6``,
@@ -481,6 +487,79 @@ class TestG36aHCMatmulAccounting:
 
 
 # ---------------------------------------------------------------------------
+# G36b: mHC must not inflate the token count
+# ---------------------------------------------------------------------------
+
+
+class TestG36bMHCDoesNotScaleTokenCount:
+    """``hc_mult`` must move the ``hc`` row and nothing else.
+
+    :meth:`DeepseekV4HybridLayer._hc_apply` collapses ``[B, S, K, D] ->
+    [B, S, D]`` before every attention / FFN sub-block and expands back
+    afterwards, so the projection, Compressor, Indexer and expert GEMMs all
+    see ``B * S`` tokens.  The ``[S*K, B, D]`` shape only ever exists on the
+    PP P2P wire.  An earlier form of the closed form evaluated those terms at
+    ``S * hc_mult`` and inflated the reported total by ~3.6x at the V4-Flash
+    shape (~12x on the Indexer, whose scoring einsum is quadratic in S).
+    """
+
+    _TOKEN_COUNT_ROWS = (
+        "attn_qkv_o",
+        "attn_scores",
+        "compressor",
+        "indexer",
+        "moe",
+        "mtp",
+        "logits",
+    )
+
+    @pytest.mark.parametrize("hc_mult", [2, 4, 8])
+    def test_non_hc_rows_are_invariant_to_hc_mult(self, hc_mult):
+        baseline = _v4_flash_smoke_args(hc_mult=1, mtp_num_layers=1, attn_sliding_window=128)
+        scaled = _v4_flash_smoke_args(hc_mult=hc_mult, mtp_num_layers=1, attn_sliding_window=128)
+        _t1, br_base = compute_v4_flops(baseline, batch_size=4)
+        _t2, br_scaled = compute_v4_flops(scaled, batch_size=4)
+
+        for row in self._TOKEN_COUNT_ROWS:
+            assert getattr(br_scaled, row) == getattr(br_base, row), (
+                f"{row} moved with hc_mult={hc_mult}; mHC collapses the K streams "
+                "to one hidden per token, so only the `hc` row may scale with K."
+            )
+        assert br_scaled.hc > br_base.hc
+
+    def test_attention_projection_is_charged_at_plain_seq_length(self):
+        """One dense layer: ``attn_qkv_o`` is exactly ``B * S * (qkv + o)``."""
+        args = _v4_flash_smoke_args(
+            num_layers=1,
+            compress_ratios=(0,),
+            num_hash_layers=0,
+            hc_mult=4,
+        )
+        _total, br = compute_v4_flops(args, batch_size=3)
+        assert br.attn_qkv_o == _hand_attn_qkv_o(
+            B=3,
+            S=args.seq_length,  # NOT args.seq_length * args.hc_mult
+            H=args.hidden_size,
+            n=args.num_attention_heads,
+            d=args.kv_channels,
+            q_lora=args.q_lora_rank,
+            o_lora=args.o_lora_rank,
+            o_groups=args.o_groups,
+        )
+
+    def test_moe_is_charged_once_per_token_not_once_per_stream(self):
+        """``moe`` is linear in ``seq_length`` and flat in ``hc_mult``."""
+        short = _v4_flash_smoke_args(seq_length=64, hc_mult=4, num_hash_layers=0)
+        long_seq = _v4_flash_smoke_args(seq_length=128, hc_mult=4, num_hash_layers=0)
+        wide = _v4_flash_smoke_args(seq_length=64, hc_mult=8, num_hash_layers=0)
+        _t1, br_short = compute_v4_flops(short, batch_size=1)
+        _t2, br_long = compute_v4_flops(long_seq, batch_size=1)
+        _t3, br_wide = compute_v4_flops(wide, batch_size=1)
+        assert br_long.moe == 2 * br_short.moe
+        assert br_wide.moe == br_short.moe
+
+
+# ---------------------------------------------------------------------------
 # Hash-layer / no-hash variant
 # ---------------------------------------------------------------------------
 
@@ -497,7 +576,7 @@ class TestHashLayerHandling:
 
         # All-hash strictly less because router cost is dropped on every layer.
         assert all_hash.moe < with_hash.moe
-        delta_per_layer = 4 * args.seq_length * args.hc_mult * args.hidden_size * args.num_experts
+        delta_per_layer = 4 * args.seq_length * args.hidden_size * args.num_experts
         assert with_hash.moe - all_hash.moe == delta_per_layer * args.num_layers
 
 

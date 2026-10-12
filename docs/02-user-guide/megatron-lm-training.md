@@ -6,21 +6,27 @@ Training performance validation of the Primus Docker image with the Megatron bac
 
 The Primus framework with the Megatron backend is designed to enable efficient training of large-scale language models on AMD GPUs. By leveraging AMD Instinct™ MI300X/MI350X accelerators, the Primus Megatron framework delivers enhanced scalability, performance, and resource utilization for AI workloads. It is purpose-built to support models like Llama 2, Llama 3/3.1, DeepSeek V2/V3, and Mixtral MoE, enabling developers to train next-generation AI models with greater efficiency. See the GitHub repository at [AMD-AGI/Primus](https://github.com/AMD-AGI/Primus).
 
-The ROCm PyTorch training Docker image `rocm/primus:v26.5`, available through [AMD Infinity Hub](https://www.amd.com/en/developer/resources/infinity-hub.html), provides a prebuilt, optimized environment for pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
+The ROCm PyTorch training Docker image `rocm/primus:v26.8`, available through [Docker hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
 
-For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.5`](../01-getting-started/release-notes.md#rocmprimusv265). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.4`](../01-getting-started/release-notes.md#rocmprimusv264).
+For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.7`](../01-getting-started/release-notes.md#rocmprimusv267).
 
 Training is launched with `primus-cli`, the unified Primus CLI that covers direct, container, and Slurm execution from the same YAML configuration. See the [CLI reference](./cli-reference.md).
 
 ---
 
-## Important notes for v26.5
+## Important notes for v26.8
 
 Read this section before starting a training run. It collects the settings this release requires, the architecture-specific tuning, and the known issues. The contents change from release to release, so re-read it when you move to a new image tag.
 
 ### Required settings
 
-**Use the `release/v26.5` branch.** It is the Primus branch matching the `rocm/primus:v26.5` image. The `/workspace/Primus` checkout baked into the image is built from commit `b511d1b6` and the branch has moved on since — see [Release notes → Primus source for v26.5](../01-getting-started/release-notes.md#primus-source-for-v265). [Environment setup](#1-environment-setup) has the clone command.
+**Use the `release/v26.8` branch.** It is the Primus branch matching the `rocm/primus:v26.8` image. The image was built from `f487a934`, the current branch tip, so the `/workspace/Primus` copy baked into it currently matches; a checkout keeps you current if later commits land on the branch. See [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268). [Environment setup](#1-environment-setup) has the clone command.
+
+### Changes you may need to act on
+
+**Hybrid configs are named `zebra_*` again.** v26.7 shipped the Zebra-Llama hybrid recipes as `hylo_*`; v26.8 restores the original name ([#1167](https://github.com/AMD-AGI/Primus/pull/1167)). For example, `examples/megatron/configs/MI300X/hylo_llama_mamba_8B_BF16-pretrain.yaml` is now `zebra_llama_mamba_8B_BF16-pretrain.yaml`, the model presets are `zebra_<mixer>_<size>_hybrid.yaml`, and the `HyloLlama*` classes are `ZebraLlama*`. Update local configs and scripts that name the old files.
+
+**The `examples/run_*` launchers are gone.** Launch with `./runner/primus-cli`, or use `runner/helpers/launch/slurm_pretrain.sh` if you rely on the `EXP` / `NNODES` / `DATA_PATH` contract ([#999](https://github.com/AMD-AGI/Primus/pull/999)).
 
 ### Architecture-specific settings
 
@@ -63,7 +69,16 @@ In `direct` mode inside a container, a plain `export PYTORCH_CUDA_ALLOC_CONF=exp
 
 ### Known issues
 
-No Megatron-LM backend issues are currently tracked for v26.5.
+**DeepEP MoE recipes use the cheap fence, which can affect gradient accuracy.** The
+DeepSeek-V2-Lite, Mixtral and Qwen3-30B-A3B recipes on MI325X and MI355X set
+`PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE: "0"`, as in our performance runs. This
+re-enables a DeepEP fence that Primus-Turbo turned off by default in
+[`fb35ba7`](https://github.com/AMD-AGI/Primus-Turbo/commit/fb35ba7ef83460da8121fdffd0be7a7e9f0399be):
+it can let a rank read stale dispatch data, which can occasionally degrade gradient
+accuracy without raising an error. The safe fence costs about 2.5% of step time on MI355X and about 5% on MI325X.
+
+For convergence or production runs, set it to `"1"` (or delete the line) in the
+recipe's `env:` block. A host `export` does not override a recipe's `env:` value.
 
 ### Registry change
 
@@ -97,21 +112,23 @@ The following models are pre-optimized for performance on the AMD Instinct MI300
 - Llama 3/3.1/3.3 70B
 - DeepSeek-V2-lite
 - DeepSeek-V3
+- DeepSeek-V4 (BF16 SFT, and packed-sequence THD SFT at 4k/128k — see [`examples/megatron/models/deepseek-v4`](https://github.com/AMD-AGI/Primus/tree/main/examples/megatron/models/deepseek-v4); gfx942 recipes added in v26.7)
 - Mixtral 8x7B
 - Mixtral 8x22B
 - Qwen 2.5 7B/72B
-- Hylo hybrid 1B/3B/8B
+- Zebra hybrid 1B/3B/8B
 - Qwen3-30B-A3B
 - Qwen3-235B-A22B
 - Qwen3 32B (SFT / LoRA)
 - GPT-OSS-20B
 - GPT-OSS-120B
+- ZAYA1-8B (new in v26.8; MI300X and MI355X mock-data recipes)
 
 ---
 
 ## System validation steps
 
-If you have already validated your system, skip this step. Otherwise, complete the [system validation and optimization steps](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/prerequisite-system-validation.html) to set up your system before starting training.
+If you have already validated your system, skip this step. Otherwise, complete the [system validation and optimization steps](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/system-setup/prerequisite-system-validation.html#prerequisite-system-validation-before-running-ai-workloads) to set up your system before starting training.
 
 ### Disable NUMA auto-balancing
 
@@ -142,11 +159,11 @@ Use the following instructions to set up the environment, configure the script t
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.5
+git checkout release/v26.8
 git submodule update --init --recursive
 ```
 
-That is all the setup required. The training commands below use `primus-cli container`, which starts `rocm/primus:v26.5` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used — see [Release notes → Primus source for v26.5](../01-getting-started/release-notes.md#primus-source-for-v265).
+That is all the setup required. The training commands below use `primus-cli container`, which starts `rocm/primus:v26.8` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used — see [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268).
 
 Container mode also forwards environment variables you export on the host, including `HF_TOKEN`, the gfx942 tuning variables, and the `NCCL_*` networking variables. The forwarded list is `container.options.env` in `runner/.primus.yaml`.
 
@@ -158,12 +175,12 @@ Container mode also forwards environment variables you export on the host, inclu
 If you want an interactive shell — for debugging, or to run `primus-cli direct` yourself — start the container manually and bind your Primus checkout:
 
 ```bash
-docker pull rocm/primus:v26.5
+docker pull rocm/primus:v26.8
 docker run -it --device /dev/dri --device /dev/kfd --device /dev/infiniband \
     --network host --ipc host --group-add video --cap-add SYS_PTRACE \
     --security-opt seccomp=unconfined --privileged \
     -v $PWD:$PWD -w $PWD --shm-size 128G \
-    --name primus_training_env rocm/primus:v26.5
+    --name primus_training_env rocm/primus:v26.8
 ```
 
 Re-enter it later with `docker start primus_training_env && docker exec -it primus_training_env bash`. Inside the container, replace `primus-cli container` with `primus-cli direct` in every command below. Remember to re-export `HF_TOKEN` and any architecture or `NCCL_*` variables, since a manual `docker run` does not forward them.
@@ -207,7 +224,7 @@ export HF_TOKEN=<your_hftoken>
 
 ### 3.1 Single-node training
 
-To run model training on a single node, run the commands below from your `release/v26.5` Primus checkout on the host (recommended). When using `./runner/primus-cli container`, no additional `pip install` step is required.
+To run model training on a single node, run the commands below from your `release/v26.8` Primus checkout on the host (recommended). When using `./runner/primus-cli container`, no additional `pip install` step is required.
 
 #### MI300X performance configs
 
@@ -323,13 +340,13 @@ Examples for MoE models with expert parallelism enabled (that is, `expert_model_
   --config examples/megatron/configs/MI300X/qwen2.5_72B-BF16-pretrain.yaml
 ```
 
-- **Hylo hybrid-1B BF16:**
+- **Zebra hybrid-1B BF16:**
 
 ```bash
 PRIMUS_TRAIN_RUNTIME=legacy ./runner/primus-cli container \
-  --log_file /tmp/primus_hylo_mamba_1B_hybrid.log \
+  --log_file /tmp/primus_zebra_mamba_1B_hybrid.log \
   -- train pretrain \
-  --config examples/megatron/configs/MI300X/hylo_llama_mamba_1B_BF16-pretrain.yaml
+  --config examples/megatron/configs/MI300X/zebra_llama_mamba_1B_BF16-pretrain.yaml
 ```
 
 - **Qwen3-32B BF16 LoRA:**
@@ -523,13 +540,13 @@ NVTE_USE_CAST_TRANSPOSE_TRITON=0 ./runner/primus-cli container \
   --config examples/megatron/configs/MI355X/qwen2.5_72B-BF16-pretrain.yaml
 ```
 
-- **Hylo hybrid-1B BF16:**
+- **Zebra hybrid-1B BF16:**
 
 ```bash
 PRIMUS_TRAIN_RUNTIME=legacy ./runner/primus-cli container \
-  --log_file /tmp/primus_hylo_mamba_1B_hybrid.log \
+  --log_file /tmp/primus_zebra_mamba_1B_hybrid.log \
   -- train pretrain \
-  --config examples/megatron/configs/MI355X/hylo_llama_mamba_1B_BF16-pretrain.yaml
+  --config examples/megatron/configs/MI355X/zebra_llama_mamba_1B_BF16-pretrain.yaml
 ```
 
 - **Qwen3-32B BF16 LoRA:**
@@ -579,16 +596,16 @@ PRIMUS_TRAIN_RUNTIME=legacy ./runner/primus-cli container \
 
 ### 3.2 Multi-node training
 
-To run training on multiple nodes, you can use `primus-cli` (recommended) or the [`run_slurm_pretrain.sh`](https://github.com/AMD-AGI/Primus/blob/main/examples/run_slurm_pretrain.sh) script to launch multi-node workloads. Below are the multi-node setup and examples to run multi-node tests.
+To run training on multiple nodes, you can use `primus-cli` (recommended) or the shared [`runner/helpers/launch/slurm_pretrain.sh`](../../runner/helpers/launch/slurm_pretrain.sh) helper, which turns the `EXP` / `NNODES` environment contract into the same `primus-cli slurm srun ... -- container -- train pretrain` invocation. Below are the multi-node setup and examples to run multi-node tests.
 
 **Multi-node setup**
 
 > **Verify NCCL / network env first.** The `primus-cli` launcher script sets sensible `NCCL_*` defaults via `base_env.sh`, but auto-detection can pick the wrong device on multi-NIC nodes. Always confirm `NCCL_IB_HCA`, `NCCL_IB_GID_INDEX`, `NCCL_SOCKET_IFNAME`, and `GLOO_SOCKET_IFNAME` (set to the same value as `NCCL_SOCKET_IFNAME`) are correct for your fabric. If necessary, you can `export` these environment variables before running.
 
-From your `release/v26.5` checkout (see [Environment setup](#1-environment-setup)), export the cluster settings:
+From your `release/v26.8` checkout (see [Environment setup](#1-environment-setup)), export the cluster settings:
 
 ```bash
-export DOCKER_IMAGE=rocm/primus:v26.5
+export DOCKER_IMAGE=rocm/primus:v26.8
 export HF_TOKEN=<your_HF_token>
 export NCCL_IB_HCA=<your_NCCL_IB_HCA> # specify which RDMA interfaces to use for communication
 export NCCL_SOCKET_IFNAME=<your_NCCL_SOCKET_IFNAME> # your network interface
@@ -598,7 +615,7 @@ export NCCL_IB_GID_INDEX=3 # Set InfiniBand GID index for NCCL communication. De
 # On MI300X/MI325X also export the gfx942 tuning variables; see "Architecture-specific settings"
 ```
 
-> **Note:** `release/v26.5` is the branch matching the `rocm/primus:v26.5` image. If you are reproducing published v26.4 numbers instead, use `git checkout 236cfa9` with `rocm/primus:v26.4` — see [Release notes → Primus source for v26.4](../01-getting-started/release-notes.md#primus-source-for-v264).
+> **Note:** `release/v26.8` is the branch matching the `rocm/primus:v26.8` image. If you are reproducing published v26.4 numbers instead, use `git checkout 236cfa9` with `rocm/primus:v26.4` — that release is now summarised under [Release notes → Earlier releases](../01-getting-started/release-notes.md#earlier-releases).
 
 For clusters using AMD AINIC, set the following environment variables:
 
@@ -619,62 +636,62 @@ Notes:
 
 ```bash
 # Adjust the training parameters. For example, `global_batch_size: 8 * #single_node_bs` for 8 nodes in this case
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml bash ./examples/run_slurm_pretrain.sh --global_batch_size 1024
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --global_batch_size 1024
 ```
 
 - **Llama2-7B FP8, 8 nodes:**
 
 ```bash
 # Adjust the training parameters. For example, `global_batch_size: 8 * #single_node_bs` for 8 nodes in this case
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_7B-FP8-pretrain.yaml bash ./examples/run_slurm_pretrain.sh --global_batch_size 2048
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_7B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --global_batch_size 2048
 ```
 
 - **Llama3.1-70B FP8, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 4 --global_batch_size 256 --recompute_num_layers 80
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 4 --global_batch_size 256 --recompute_num_layers 80
 ```
 
 - **Llama3.1-70B BF16, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --recompute_num_layers 12
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --recompute_num_layers 12
 ```
 
 - **Llama2-70B FP8, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_70B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 10 --global_batch_size 640 --recompute_num_layers 80
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_70B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 10 --global_batch_size 640 --recompute_num_layers 80
 ```
 
 - **Llama2-70B BF16, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_70B-BF16-pretrain.yaml bash ./examples/run_slurm_pretrain.sh --micro_batch_size 2 --global_batch_size 1536 --recompute_num_layers 12
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama2_70B-BF16-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 2 --global_batch_size 1536 --recompute_num_layers 12
 ```
 
 - **Llama3.3-70B FP8, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.3_70B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 4 --global_batch_size 256 --recompute_num_layers 80
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.3_70B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 4 --global_batch_size 256 --recompute_num_layers 80
 ```
 
 - **Llama3.3-70B BF16, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.3_70B-BF16-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --recompute_num_layers 12
+NNODES=8 EXP=examples/megatron/configs/MI300X/llama3.3_70B-BF16-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --recompute_num_layers 12
 ```
 
 - **Mixtral 8x7B BF16, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 2 --global_batch_size 256
+NNODES=8 EXP=examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 2 --global_batch_size 256
 ```
 
 - **Qwen2.5-72B FP8, 8 nodes:**
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI300X/qwen2.5_72B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 8 --global_batch_size 512 --recompute_num_layers 80
+NNODES=8 EXP=examples/megatron/configs/MI300X/qwen2.5_72B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 8 --global_batch_size 512 --recompute_num_layers 80
 ```
 
 - **Mixtral-8x22B BF16, 4 nodes, MI355X**
@@ -686,10 +703,10 @@ Launch the training using `primus-cli` (recommended):
 ./runner/primus-cli slurm srun -N 4 -- train pretrain --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml --micro_batch_size 1 --global_batch_size 512 --num_virtual_stages_per_pipeline_rank 2 --pipeline_model_parallel_size 4 --expert_model_parallel_size 8 --recompute_num_layers 1 --moe_use_legacy_grouped_gemm True --gradient_accumulation_fusion True
 ```
 
-Launch the training using the legacy script:
+Or with the shared `EXP` / `NNODES` helper:
 
 ```bash
-NNODES=4 EXP=examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 512 --num_virtual_stages_per_pipeline_rank 2 --pipeline_model_parallel_size 4 --expert_model_parallel_size 8 --recompute_num_layers 1 --moe_use_legacy_grouped_gemm True --gradient_accumulation_fusion True
+NNODES=4 EXP=examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 512 --num_virtual_stages_per_pipeline_rank 2 --pipeline_model_parallel_size 4 --expert_model_parallel_size 8 --recompute_num_layers 1 --moe_use_legacy_grouped_gemm True --gradient_accumulation_fusion True
 ```
 
 - **Llama3.1-405B FP8, 8 nodes, MI325X**
@@ -703,10 +720,10 @@ Launch the training using `primus-cli` (recommended):
 
 We use TP=8 for the Llama 3.1 405B model on 8 nodes. Because it has 126 layers, which is not divisible by 8, you need to set `decoder_first_pipeline_num_layers` and `decoder_last_pipeline_num_layers`.
 
-Launch the training using the legacy script:
+Or with the shared `EXP` / `NNODES` helper:
 
 ```bash
-NNODES=8 EXP=examples/megatron/configs/MI325X/llama3.1_405B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --decoder_first_pipeline_num_layers 15 --decoder_last_pipeline_num_layers 15
+NNODES=8 EXP=examples/megatron/configs/MI325X/llama3.1_405B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --micro_batch_size 1 --global_batch_size 256 --decoder_first_pipeline_num_layers 15 --decoder_last_pipeline_num_layers 15
 ```
 
 ---

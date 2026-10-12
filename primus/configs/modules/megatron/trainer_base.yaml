@@ -110,8 +110,8 @@ muon_use_nesterov: false
 muon_split_qkv: true
 muon_momentum: 0.95
 
-optimizer_cpu_offload: false
-optimizer_offload_fraction: 1.0 # float
+optimizer_cpu_offload: ${PRIMUS_OPTIMIZER_CPU_OFFLOAD:false}
+optimizer_offload_fraction: ${PRIMUS_OPTIMIZER_OFFLOAD_FRACTION:1.0} # float
 use_torch_optimizer_for_cpu_offload: false
 overlap_cpu_optimizer_d2h_h2d: false
 pin_cpu_grads: true

@@ -226,6 +226,15 @@ def _make_v4_pre_broadcast_schedule(original_schedule, original_get_batch):
         getattr(get_args(ctx), "model_type", None) == "deepseek_v4"
         and int(getattr(get_args(ctx), "num_hash_layers", 0) or 0) > 0
         and int(getattr(get_args(ctx), "pipeline_model_parallel_size", 1) or 1) > 1
+        # SFT does NOT need this. It exists only to compensate for pretrain_gpt.get_batch
+        # gating tokens to first/last PP stages. The SFT dataloader is built on every PP
+        # stage (is_distributed=True, no per-stage gating) and yields the full dict batch
+        # (with input_ids) on each, so every stage's hash router already has its tokens.
+        # Worse, in SFT this patch calls pretrain_gpt.get_batch -> get_batch_on_this_tp_rank,
+        # which reads data["tokens"] while the SFT batch has "input_ids" -> KeyError, and it
+        # would also double-consume the shared data_iterator. So it must be a no-op for SFT.
+        and getattr(get_args(ctx), "stage", None) != "sft"
+        and not getattr(get_args(ctx), "sft", False)
     ),
     # Ordered after pp_dump_data so its schedule_wrapper does not double-wrap;
     # see ``pp_dump_data_patches.py`` for the priority=100 anchor.

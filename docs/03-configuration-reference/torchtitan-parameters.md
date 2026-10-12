@@ -304,7 +304,7 @@ modules:
 | `primus_turbo.use_turbo_async_tp` | `true` | Async tensor-parallel communication in Turbo. |
 | `primus_turbo.use_turbo_mx_linear` | `true` | MX linear layers via Turbo. |
 | `primus_turbo.use_turbo_float8_linear` | `true` | FP8 linear layers via Turbo. |
-| `primus_turbo.use_turbo_grouped_mm` | `false` | Turbo grouped GEMM for MoE (off by default). |
+| `primus_turbo.use_turbo_grouped_gemm` | `false` | Turbo grouped GEMM for MoE (off by default). |
 | `primus_turbo.use_moe_fp8` | `true` | FP8 paths for MoE experts when applicable. |
 | `primus_turbo.enable_embedding_autocast` | `true` | Autocast policy around embeddings for Turbo. |
 

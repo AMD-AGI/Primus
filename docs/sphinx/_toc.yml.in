@@ -82,6 +82,8 @@ subtrees:
         title: Parallelism configuration
       - file: 04-technical-guides/multi-node-networking.md
         title: Multi-node networking
+      - file: 04-technical-guides/ainic-bundle-versions.md
+        title: AINIC bundle versions
       - file: 04-technical-guides/collective-operations.md
         title: Collective operations (NCCL/RCCL)
       - file: 04-technical-guides/data-preparation.md
@@ -104,6 +106,8 @@ subtrees:
         title: Determinism and reproducibility
       - file: 04-technical-guides/native-sft-lora.md
         title: Native SFT LoRA
+      - file: 04-technical-guides/LoRA_Native_Trainer_MI455_README.md
+        title: Native SFT LoRA on MI455X
       - file: 04-technical-guides/hybrid-models/README.md
         title: Hybrid recurrent-attention models
         subtrees:
@@ -168,6 +172,11 @@ subtrees:
         title: Tooling
       - file: 06-developer-guide/backend-patch-notes.md
         title: Backend patch notes
+
+  - caption: Technical blogs
+    entries:
+      - file: 07-technical-blogs/README.md
+        title: Blog index
 
   - caption: About
     entries:

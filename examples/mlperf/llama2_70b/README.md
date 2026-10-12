@@ -1,6 +1,6 @@
 # Llama2-70B LoRA MLPerf on MI355X (Primus)
 
-MLPerf Training 6.0 Llama2-70B LoRA on **MI355X** (8× GPU, 1 node) via Megatron-Bridge and `primus-cli`.
+MLPerf Training 6.1 Llama2-70B LoRA on **MI355X** (8× GPU, 1 node) via Megatron-Bridge and `primus-cli`.
 
 Dataset: [GovReport](https://gov-report-data.github.io/) (SCROLLS `gov_report`), packed to **8192** tokens.
 Model: **meta-llama/Llama-2-70b-hf** with LoRA (rank 16, alpha 32).
@@ -188,7 +188,7 @@ Optional tuning:
 | **`RUN_RUNTIME_TUNABLES`** | `1` | `0` → skip host **`runtime_tunables.sh`** |
 | **`CLEAR_CACHES`** | `0` | `1` → extra host page-cache drop before each trial (needs sudo) |
 | **`CHECK_COMPLIANCE`** | `0` | `1` → run `mlperf_logging.compliance_checker` after each trial (non-blocking on failure) |
-| **`MLPERF_RULESET`** | `6.0.0` | Ruleset passed to compliance checker |
+| **`MLPERF_RULESET`** | `6.1.0` | Ruleset passed to compliance checker |
 | **`DATESTAMP`** | `date +%y%m%d%H%M%S` | Prefix for host trial log filenames |
 
 The script also sets **`PRIMUS_GPU_MODEL`** from **`DGXSYSTEM`** (e.g. `MI355X`) so **`primus-env.sh`** works when **`rocm-smi`** is missing inside **`docker exec`**.

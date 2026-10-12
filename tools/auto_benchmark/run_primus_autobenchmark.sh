@@ -43,6 +43,11 @@ if [[ ! -f "$PRIMUS_CLI" && -f "${PRIMUS_ROOT}/runner/primus-cli" ]]; then
     PRIMUS_CLI="${PRIMUS_ROOT}/runner/primus-cli"
 fi
 
+if [[ ! -x "$PRIMUS_CLI" && ! -f "$PRIMUS_CLI" ]]; then
+    echo "[ERROR] primus-cli not found at $PRIMUS_CLI" >&2
+    exit 1
+fi
+
 # ------------------------------------------
 # Helpers
 # ------------------------------------------

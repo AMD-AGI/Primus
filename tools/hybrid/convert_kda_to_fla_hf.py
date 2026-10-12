@@ -78,7 +78,22 @@ def _get_first(state, *candidates):
     )
 
 
-def convert(checkpoint: dict, fla_config_path: Path) -> OrderedDict:
+def _padded_in_proj_dim(in_proj_dim: int, pad_multiple: int) -> int:
+    """Mirror of ``_pad_in_proj_dim`` in the KDA mixer.
+
+    Duplicated rather than imported so this tool stays runnable without a
+    Megatron install; keep the two in sync if the dead zone changes.
+    """
+    lo, hi = 2176, 2304  # hipBLASLt bf16 dead zone on gfx950
+    if not pad_multiple or pad_multiple <= 1 or not lo <= in_proj_dim <= hi:
+        return in_proj_dim
+    padded = ((in_proj_dim + pad_multiple - 1) // pad_multiple) * pad_multiple
+    while lo <= padded <= hi:
+        padded += pad_multiple
+    return padded
+
+
+def convert(checkpoint: dict, fla_config_path: Path, in_proj_pad_multiple: int = 512) -> OrderedDict:
     """Map Primus KDA Megatron state_dict → FLA HF KDA state_dict."""
     state = checkpoint["model"]
 
@@ -103,6 +118,7 @@ def convert(checkpoint: dict, fla_config_path: Path) -> OrderedDict:
         + head_v_dim  # g_a (low-rank output-gate bottleneck)
         + num_v_heads  # beta
     )
+    padded_in_proj_dim = _padded_in_proj_dim(fused_in_proj_dim, in_proj_pad_multiple)
     print(
         f"[cfg ] hidden={hidden_size} num_heads={num_heads} num_v_heads={num_v_heads}\n"
         f"       head_dim={head_dim} expand_v={expand_v} head_v_dim={head_v_dim}\n"
@@ -129,11 +145,25 @@ def convert(checkpoint: dict, fla_config_path: Path) -> OrderedDict:
 
         # ── fused in_proj split: [q | k | v | f_a | g_a | beta] ───────
         in_proj_w = state[f"decoder.layers.{kda_i}.mixer.in_proj.weight"]
-        assert in_proj_w.shape == (fused_in_proj_dim, hidden_size), (
-            f"in_proj shape {tuple(in_proj_w.shape)} != "
-            f"expected ({fused_in_proj_dim}, {hidden_size}) for layer {kda_i}. "
-            "Did you train with the post-fusion KDA code?"
-        )
+        # A checkpoint is either native width or padded past the hipBLASLt dead
+        # zone (kimi_delta_attention.py). Accept exactly those two widths so a
+        # genuinely mismatched architecture still fails loudly. This is the check
+        # that stops a corrupted export, so it raises rather than asserting:
+        # `python -O` strips asserts.
+        if in_proj_w.shape not in {
+            (fused_in_proj_dim, hidden_size),
+            (padded_in_proj_dim, hidden_size),
+        }:
+            raise ValueError(
+                f"in_proj shape {tuple(in_proj_w.shape)} for layer {kda_i} is neither the "
+                f"native ({fused_in_proj_dim}, {hidden_size}) nor the dead-zone-padded "
+                f"({padded_in_proj_dim}, {hidden_size}). Did you train with the post-fusion "
+                f"KDA code, or a different --in-proj-pad-multiple than {in_proj_pad_multiple}?"
+            )
+        if in_proj_w.shape[0] != fused_in_proj_dim:
+            # The mixer slices the pad rows off in forward, so they never
+            # trained; drop them instead of exporting dead weights.
+            in_proj_w = in_proj_w[:fused_in_proj_dim]
         o = 0
         q_w = in_proj_w[o : o + qk_dim]
         o += qk_dim
@@ -285,6 +315,13 @@ def main():
     p.add_argument(
         "--tokenizer-src", type=Path, default=None, help="Optional tokenizer dir to copy into --output-dir."
     )
+    p.add_argument(
+        "--in-proj-pad-multiple",
+        type=int,
+        default=512,
+        help="Must match kda_in_proj_pad_multiple used at training time (default: 512). "
+        "Only affects widths inside the hipBLASLt bf16 dead zone, i.e. the 1B model.",
+    )
     args = p.parse_args()
 
     if args.config is None:
@@ -302,7 +339,7 @@ def main():
     print()
 
     ckpt = load_megatron_checkpoint(args.checkpoint_path)
-    hf_state = convert(ckpt, args.config)
+    hf_state = convert(ckpt, args.config, in_proj_pad_multiple=args.in_proj_pad_multiple)
     print(f"[map ] converted {len(hf_state)} tensors")
 
     save_hf_dir(hf_state, args.output_dir, args.config)

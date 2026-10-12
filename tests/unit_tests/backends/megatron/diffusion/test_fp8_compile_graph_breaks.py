@@ -71,6 +71,12 @@ _OUT_DIM = 128
 _BATCH = 4
 _GRAN_VALUE = ScalingGranularity.TENSORWISE.value
 _BACKEND_VALUE = BackendType.HIPBLASLT.value
+# quantize_fp8_tensorwise padding alignment (padding_align_size,
+# pad_penultimate_align_size).  The cpp op defaults the first to 128, which zero-pads the
+# last dim for the pad-aware grouped-GEMM path; 1/1 asks for the shape-preserving cast the
+# linear path below needs -- _DIM is 64, so a padded weight would turn the dgrad GEMM's
+# N from 64 into 128.
+_NO_PAD = (1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -95,11 +101,13 @@ class _Level1FP8Linear(torch.autograd.Function):
             input_2d,
             fp8_dtype,
             None,
+            *_NO_PAD,
         )
         b_fp8, b_scale_inv = torch.ops.primus_turbo_cpp_extension.quantize_fp8_tensorwise(
             weight,
             fp8_dtype,
             None,
+            *_NO_PAD,
         )
 
         output = gemm_fp8_impl(
@@ -141,6 +149,7 @@ class _Level1FP8Linear(torch.autograd.Function):
             grad_2d,
             ctx.fp8_dtype,
             None,
+            *_NO_PAD,
         )
         grad_input = gemm_fp8_impl(
             grad_fp8,

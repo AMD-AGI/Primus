@@ -1,8 +1,8 @@
 # Primus environment in a venv (no docker, no sudo)
 
-Reproduces the Primus **v26.5** training image in a Python virtual environment on
+Reproduces the Primus **v26.8** training image in a Python virtual environment on
 a bare-metal host. Derived from
-[`.github/workflows/docker-release/Dockerfile.primus-v26.5`](../../.github/workflows/docker-release/Dockerfile.primus-v26.5),
+[`.github/workflows/docker-release/Dockerfile.primus-v26.8`](../../.github/workflows/docker-release/Dockerfile.primus-v26.8),
 using the same package pins and commits, adapted for the constraints of a machine
 where we have no root.
 
@@ -11,12 +11,11 @@ exactly produces an environment that does not work outside the container. Each o
 is listed under [Fixes applied](#fixes-applied-gotchas-vs-the-dockerfile) with the
 failure it avoids — worth reading before "correcting" any of them back.
 
-## Python 3.12 is required
+## Python 3.12
 
-This is a hard requirement from upstream packaging, not a preference. The pinned
-torch nightly `2.12.0+rocm7.15.0a20260720` ships a **cp312 Linux wheel only** —
-that nightly date published no cp310 Linux build — and the v26.5
-TransformerEngine wheels are cp312-only as well.
+The environment is built on Python 3.12 because that is what the image uses and
+what every source build here has been validated against. It is no longer forced
+by packaging: torch `2.14.0+rocm10.1.0` publishes cp310–cp314 Linux wheels.
 
 Ubuntu 22.04 hosts only have `python3.10`, so `setup.sh` provisions a standalone
 CPython 3.12 with [`uv`](https://docs.astral.sh/uv/). No sudo, no apt. Interpreters
@@ -35,35 +34,38 @@ python3 -m pip install --user uv     # ~/.local/bin, one of the paths setup.sh s
 If you cannot install it at all, supply your own interpreter instead and it is never
 used: `PRIMUS_PYTHON=/path/to/python3.12 bash setup.sh`.
 
-> **Migrating from the v26.4-based scripts:** a Python 3.10 venv cannot be
+> **Migrating from an older venv:** a Python 3.10 venv cannot be
 > upgraded in place. `setup.sh` detects the mismatch and stops with instructions;
 > remove the old venv and rebuild:
 > `rm -rf "$PRIMUS_BASE/venv" && bash setup.sh`
 
-## TransformerEngine: wheel on glibc ≥ 2.38, otherwise built from source
+## TransformerEngine and flash-attention are built from source
 
-v26.5 installs TransformerEngine from the ROCm staging index instead of building
-it. Those wheels are produced on Ubuntu 24.04, and `libtransformer_engine.so`
-requires **glibc ≥ 2.38** plus `GLIBCXX_3.4.32`. Ubuntu 22.04 has glibc 2.35, and
-unlike libstdc++, glibc cannot be side-loaded through `LD_LIBRARY_PATH` — so on a
-22.04 host the v26.5 wheels install fine but fail at import with:
+v26.8 builds both from source again, as the image does, so there is no wheel
+path and no glibc floor to check. Budget for it: these two are the longest
+stages after aiter.
 
-```
-OSError: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found
-```
+- **TransformerEngine** is built at commit `130099ce…` of `ROCm/TransformerEngine`.
+  TE's QoLA tool first checks out the aiter commit TE's manifest pins into
+  `$WORKSPACE_DIR/deps/te-aiter`, which is kept afterwards (the image keeps
+  `/workspace/deps/te-aiter`) and exported as `NVTE_AITER_SOURCE_DIR` by
+  `env.sh`. CK fused attention is JIT-compiled at run time (`NVTE_CK_JIT=1`)
+  rather than prebuilt into the wheel. `stage_te`
+  applies the same three source patches as the Dockerfile, and on gfx950 it
+  also assembles the backward-attention payload from `mawad-amd/bwd-attn-asm`
+  into that tree; on a gfx942-only host that step is skipped, since nothing
+  loads it.
+- **flash-attention** is built from the `ROCm/flash-attention` fork at
+  `5301a359…` (tag `v2.8.4.1-cktile`, reported as `flash_attn 2.8.4`). The
+  PyPI `flash-attn` package that v26.6 and v26.7 used compiles the full CK-tile
+  instance set, which the image notes OOM-kills a single translation unit; the
+  fork's curated set builds cleanly.
 
-`stage_te` therefore picks its install path from the host's glibc:
-
-| Host glibc | Path | What happens |
-|---|---|---|
-| ≥ 2.38 (e.g. Ubuntu 24.04) | wheel | exactly what v26.5 does |
-| < 2.38 (e.g. Ubuntu 22.04) | source | clones `ROCm/TransformerEngine` and builds commit `a07e607f14a…`, the same commit the `TE_VERSION` label refers to |
-
-Either way you get the same TE version; the source build just links against the
-host toolchain. It takes considerably longer than the wheel install. Override the
-choice with `PRIMUS_TE_MODE=wheel|source` (default `auto`). After installing,
-`stage_te` imports `transformer_engine` and fails loudly if it cannot load, rather
-than letting the problem surface later during training.
+Both builds target only the GPUs detected on the host (see `PYTORCH_ROCM_ARCH`
+below), which keeps them considerably faster than the image's two-arch build.
+After installing, `stage_te` imports `transformer_engine.pytorch` and fails
+loudly if it cannot load, rather than letting the problem surface during
+training.
 
 ## Why it differs from the Dockerfile
 
@@ -74,20 +76,20 @@ than letting the problem surface later during training.
 | GPU arch | gfx942 + gfx950 | **auto-detected** from the host (`rocminfo`/KFD sysfs); builds only what's present → faster builds |
 | Build dir | container FS | venv under **`$PRIMUS_BASE`** (persistent, you choose it); build sources on local `/tmp` |
 | System deps | `apt install ...` | **skipped** (no sudo); pip provides what's needed |
-| torchaudio / torchvision / apex | floating (`torchvision==0.27`) | pinned to the exact `a20260720` nightly builds — see below |
+| torchvision / apex | `torchvision==0.29.0a0`, apex unpinned | pinned to the exact builds the image resolved — see below |
+| Installer | `uv pip` | `pip`, with a constraint file that pins the ROCm torch/triton (see [Fixes applied](#fixes-applied-gotchas-vs-the-dockerfile)) |
 
 The key reason no sudo is required: the `rocm-sdk-devel` pip wheel ships a full
 ROCm toolchain inside the venv, so we don't depend on system ROCm or apt.
 
-### Companion wheels are pinned, the Dockerfile's floating versions are not reproducible
+### Companion wheels are pinned to what the image resolved
 
-The Dockerfile pins `torch` exactly but lets `torchaudio` and `apex` float and
-resolves torchvision as `==0.27`. That set no longer resolves at all: newer
-`rocm10.x` nightlies now publish matching version numbers, so a floating
-torchvision selects a build for a different ROCm line, conflicts with the pinned
-torch, and pip dies after a long backtracking storm. `setup.sh` pins each
-companion wheel to the version the `a20260720` nightly published, i.e. exactly
-what the Dockerfile picked up on the day it was built.
+The Dockerfile pins `torch` and `torchaudio` exactly, but resolves torchvision as
+`==0.29.0a0` and leaves apex unpinned, so the `+rocm` local label is whatever the
+index offered on build day. `setup.sh` pins each one to the version read out of
+the published `rocm/primus:v26.8` image (`torchvision 0.29.0a0+rocm10.1.0`,
+`apex 1.14.0+rocm10.1.0`), so a later index cannot pull in a build for a
+different ROCm line.
 
 ## Run it
 
@@ -102,10 +104,9 @@ export PRIMUS_BASE="$HOME/envs/primus-env"   # required, pick your own location
 bash setup.sh                                # all default stages
 ```
 
-The build compiles aiter, Primus-Turbo, flash-attention and TransformerEngine
-from source, so budget hours rather than minutes — on glibc < 2.38 that means all
-of TE, not just its torch glue layer. Running it detached avoids losing it to a
-dropped connection:
+The build compiles TransformerEngine, flash-attention, aiter and Primus-Turbo
+from source, so budget hours rather than minutes. Running it detached avoids
+losing it to a dropped connection:
 
 ```bash
 nohup bash setup.sh > ~/primus-setup.log 2>&1 &
@@ -118,13 +119,12 @@ same `PRIMUS_BASE` again, since that is how it finds the venv:
 
 ```bash
 bash setup.sh --list          # show stages (works without PRIMUS_BASE)
-bash setup.sh te              # reinstall just TransformerEngine
+bash setup.sh te              # rebuild just TransformerEngine
 bash setup.sh venv torch      # venv + torch only
 ```
 
-When cherry-picking stages, note that `te` depends on `torch` and `flash_attn`
-having run first: the TE staging index serves only TE packages, so every other
-dependency must already be installed.
+When cherry-picking stages, `te` and `flash_attn` need `torch` to have run first:
+both are built against the installed torch with `--no-build-isolation`.
 
 ## Use the environment afterward
 
@@ -141,54 +141,47 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 ## Stages (default order)
 
-`venv` → `torch` → `flash_attn` → `te` → `torchtune` → `torchao` → `pydeps`
+`venv` → `torch` → `te` → `flash_attn` → `torchtune` → `torchao` → `pydeps`
 → `grouped_gemm` → `causal_conv1d` → `mamba` → `primus` → `aiter` → `turbo`
 → `boto` → `cleanup` → `manifest`
 
 Optional: `torchrec` (DLRM/recommendation stack).
 
-The order matters for `te`: see the note on the staging index below.
+`te` runs before `flash_attn`, matching the Dockerfile.
 
-## What changed from the v26.4-based scripts
+## What changed for v26.8
 
-- **TransformerEngine now comes from the ROCm staging index where it can.**
-  `stage_te` installs `transformer_engine_rocm_torch==2.15.0.dev0+rocm7.15.0a20260716.a07e607`
-  from `rocm.frameworks-nightlies.amd.com/whl-staging/device-all/`, which pulls a
-  prebuilt core library and compiles only the thin torch glue layer. On hosts
-  whose glibc is too old for those wheels it builds the same commit from source
-  instead — see the section above.
-- **`stage_te` must run after `stage_flash_attn`.** That staging index serves
-  *only* the transformer-engine packages, so while `--index-url` points at it pip
-  cannot reach PyPI for anything else. Every TE dependency has to be installed
-  beforehand. The Dockerfile gets `einops` transitively from flash-attention and
-  `onnx` from `onnxscript`; `stage_te` installs both explicitly rather than
-  relying on another package's transitive deps.
-- **`ck_jit_compile.sh` is patched** the same way v26.5 patches it inside the
-  image: concurrent CK JIT compiles race to publish the same `.so`, and without
-  the patch the loser aborts the run. The script locates the file through
-  `sysconfig` (rather than a hardcoded `/opt/venv/lib/python3.12` path) and the
-  patch is idempotent.
-- **New `cleanup` stage** uninstalls `tilelang`, mirroring v26.5. `mamba-ssm`
-  pulls it in as a hard dependency and v26.5 removes it again once everything is
-  built.
-- **`apache-tvm-ffi` now follows the Dockerfile pin (0.1.11).** The old scripts
-  held it at 0.1.6 to dodge a `tilelang` import failure; with `tilelang`
-  uninstalled at the end, that workaround is obsolete.
-- **`GPU_ARCHS` is `native` at runtime.** v26.5 sets `ENV GPU_ARCHS=native` after
-  the last build stage so aiter's JIT compiles for the GPU actually in the box.
-  `env.sh` therefore defaults it to `native`, and `setup.sh` overrides it to the
-  full arch list for the individual stages that cross-compile.
-- **Build-only NVTE vars dropped from the runtime environment.** `NVTE_USE_ROCM`,
-  `NVTE_FRAMEWORK`, `NVTE_ROCM_ARCH` and `NVTE_USE_HIPBLASLT` configure the
-  from-source TE build and are gone from v26.5, so `env.sh` no longer exports
-  them; `stage_te_source` still sets them inline for the duration of its build.
-  The runtime performance knobs (`NVTE_CK_*`,
-  `NVTE_USE_CAST_TRANSPOSE_TRITON`, `NVTE_FLASH_ATTN=0`, `NVTE_FUSED_ATTN=1`)
-  stay.
-- **Updated pins:** torch `2.12.0+rocm7.15.0a20260720`, Primus
-  `b511d1b66b0068715308ea9bfe8ba147ea1a3860` (`release/v26.5`), Primus-Turbo
-  `edc8d2ccb0be4888e80ee7c6e765fd3956026a32`. flash-attention, torchtune,
-  torchao, grouped_gemm, causal-conv1d, mamba and aiter are unchanged in v26.5.
+- **ROCm 10.1.0 and PyTorch 2.14.** `rocm-sdk-*` `10.1.0` and torch
+  `2.14.0+rocm10.1.0` from the `stable.repo.amd.com` core and pytorch indexes;
+  torchvision `0.29.0a0` (it must match torch's minor), torchaudio
+  `2.11.0+rocm10.1.0`, apex `1.14.0+rocm10.1.0`.
+- **TransformerEngine and flash-attention from source** — see
+  [above](#transformerengine-and-flash-attention-are-built-from-source). The
+  three TE wheel distributions v26.7 installed are uninstalled first if present,
+  and the wheel/source switch (`PRIMUS_TE_MODE`, the glibc check) is gone.
+- **C++20 for the extension builds.** grouped_gemm, causal-conv1d and mamba are
+  built with `-std=c++20`, and apex's runtime JIT builder is patched the same way
+  (`patch_apex_cxx20`), as in the image.
+- **mamba drops its complex-valued `selective_scan` backward kernels.** The ROCm
+  10.1 LLVM crashes when LTO-linking them; real-valued Mamba/Mamba-2 never use them.
+- **torchtune is installed with `huggingface-hub<2`.** Otherwise pip pulls hub
+  2.x and backtracks `tokenizers` to `0.13.3`, which has no cp312 wheel and fails
+  to build without Rust. The image applies this cap in its Flux stage, which this
+  script skips.
+- **Runtime:** `env.sh` exports `GPU_USE_DEVICE_QUEUE=1` and
+  `DEBUG_CLR_AQL_DEV_QUEUE=1` (the image's device-queue path) and
+  `NVTE_AITER_SOURCE_DIR`.
+- **Updated pins:** Primus `f487a934…` (on `release/v26.8`, the commit the
+  Dockerfile pins), aiter `b4d9154d…`, Primus-Turbo `9c645c5f…`
+  (`0.5.1.dev7`), `sympy==1.14.0`. `einops` is no longer pinned to
+  `0.9.0.dev0`: that pin came with the v26.7 TE wheels, and the image now
+  resolves `einops 0.8.2`. `hydra-core` moves to `1.3.7` for CVE fixes, as in
+  the image; the other CVE pins are unchanged: `cryptography==50.0.0`,
+  `mlflow==3.15.1` (`--no-deps`).
+- **`ck_jit_compile.sh` still needs no patch.** The source-built TE ships its own
+  tolerance for a lost `mv -n` race; `setup.sh` detects either form and skips.
+- **`GPU_ARCHS` remains `native` at runtime.** `setup.sh` still overrides it to
+  the full arch list for stages that cross-compile.
 
 ## What is SKIPPED (needs sudo / apt — not reproducible here)
 
@@ -203,7 +196,7 @@ The order matters for `te`: see the note on the staging index below.
   install (it has rocshmem headers and device bitcode, but no host
   `librocshmem.a`) and the link then fails. Intranode DeepEP is unaffected.
   Export a real `ROCSHMEM_HOME` to opt back in.
-- **MLPerf `primus_mllog`**: v26.5 installs it from `training_results_v6.0`. Not
+- **MLPerf `primus_mllog` / `mlperf-common`**: the image installs it; it is not
   part of the core training path, so it is not installed here.
 - **DLRM / FBGEMM / Flux**: not part of the default Primus training path.
   `torchrec` is provided as an optional stage; FBGEMM additionally needs apt
@@ -223,16 +216,16 @@ scripts:
   `-c`. Many packages depend on a bare `torch`; a resolver that decides to
   "upgrade" it silently replaces the whole GPU stack with `nvidia-*` wheels.
   With the constraint, such an attempt fails loudly instead.
-- **Primus-Turbo is installed with `--no-deps`, keeping ROCm's triton.** Its
-  `setup.py` hard-pins upstream `triton==3.7.0`, while torch is built against
-  ROCm's `triton==3.7.1+git…rocm…`. The unconstrained Dockerfile lets the upstream
-  wheel win, but doing that here breaks the environment: ROCm's HIP runtime
-  already loads its own `libLLVM.so.23` from the pip SDK, and the upstream triton
-  wheel bundles a second, statically linked LLVM, so importing it segfaults inside
-  LLVM's static initialisers — taking down `torch._dynamo`, `aiter`, `torchao` and
-  `mamba_ssm` with it. `stage_turbo` therefore installs Primus-Turbo without deps
-  and supplies its real runtime requirements (`scipy`, `flydsl`) explicitly. This
-  is a deliberate, tested deviation from v26.5.
+- **Primus-Turbo is installed with `--no-deps`, keeping ROCm's triton.** Up to
+  v26.7 its `setup.py` hard-pinned upstream `triton==3.7.0`, and letting that wheel
+  replace ROCm's triton breaks the environment: ROCm's HIP runtime already loads
+  its own `libLLVM.so` from the pip SDK, and the upstream triton wheel bundles a
+  second, statically linked LLVM, so importing it segfaults inside LLVM's static
+  initialisers — taking down `torch._dynamo`, `aiter`, `torchao` and `mamba_ssm`
+  with it. The v26.8 commit relaxes the pin to `triton>=3.7.0`, which ROCm's
+  `3.8.0+git…rocm10.1.0` satisfies, but `stage_turbo` keeps `--no-deps` and
+  supplies the real runtime requirements (`scipy`, `flydsl==0.2.4`) explicitly.
+  This is a deliberate, tested deviation from the image.
 - **mamba built with pip, not `python setup.py install`.** The legacy
   `easy_install` path ignores pip-installed packages and re-fetches the *latest*
   of every unpinned dep as `.egg`s — it clobbered `transformers` (→5.x), removed
@@ -243,7 +236,7 @@ scripts:
   backward attention kernel emit Inf gradients on MI300X/MI325X, killing training at
   the first step. Primus's own tuning guide already prescribes fp32 atomics for these
   GPUs (the MI300X/MI325X block in
-  [docs/02-user-guide/training-recipes.md](../../docs/02-user-guide/training-recipes.md)),
+  [docs/02-user-guide/end-to-end-training-recipes.md](../../docs/02-user-guide/end-to-end-training-recipes.md)),
   so `env.sh` applies it from the detected architecture and leaves `0` for gfx950,
   which the Dockerfile value targets. `NVTE_CK_USES_BWD_V3` itself stays at the
   Dockerfile's `1` — it is worth roughly 15% throughput, and the atomic mode is what
@@ -260,26 +253,25 @@ scripts:
   Ubuntu 24.04 build that needs `GLIBCXX_3.4.32`, cannot load here, is not
   writable, and otherwise takes precedence. Either problem surfaces as
   `MockGPTDataset failed to build as a mock data generator`.
-- **`flydsl` pinned to 0.2.4 so aiter keeps its CK/HIP kernels.** aiter pins
-  `flydsl==0.1.7` and Primus-Turbo requires `flydsl>=0.2.0`, so one of the two is
-  always unsatisfied and Turbo, installing last, wins. aiter only needs
+- **`flydsl` pinned to 0.2.4 so aiter keeps its CK/HIP kernels.** Primus-Turbo
+  itself now pins `flydsl==0.2.4`, and the image resolves the same version; it is
+  restated because Turbo is installed with `--no-deps`. aiter only needs
   `flydsl.expr.vector` at runtime, and that survived until 0.3.0 removed it —
   after which aiter prints `ROCm/HIP JIT runtime not available … CK and HIP ops
-  are disabled. Triton ops remain available.` and quietly runs Triton-only. 0.2.4
-  is the newest release that satisfies Turbo and keeps aiter whole, and is what
-  the Dockerfile itself resolved to, since 0.3.0 was published after v26.5 was
-  built. `stage_turbo` asserts the symbol is importable afterwards. This is about
+  are disabled. Triton ops remain available.` and quietly runs Triton-only.
+  `stage_turbo` asserts the symbol is importable afterwards. This is about
   capability parity with the image, not speed: on llama3.1_8B BF16 an A/B of 0.2.4
   against 0.3.0 measured 535.9 vs 534.5 TFLOP/s/GPU, i.e. no difference. Other
   workloads that lean on aiter's CK/HIP kernels are the ones that would notice.
-- **`nvidia-cutlass-dsl` pinned to 4.5.3 so `import mamba_ssm` works.**
-  `mamba_ssm` pins `quack-kernels==0.3.1`, which requires `nvidia-cutlass-dsl>=4.4.1`
-  with no upper bound. 4.6.x restructured the DSL and removed `cute.core.ThrCopy`
-  that quack 0.3.1 imports, so the unpinned resolution ends in
-  `AttributeError: module 'cutlass.cute.core' has no attribute 'ThrCopy'`. 4.5.3 is
-  the newest release quack 0.3.1 still works with, and pip cannot choose it
-  unaided because 4.5.3 was published *after* 4.6.0 yet sorts lower. v26.5 does
-  not pin this, so the released image is affected by the same break.
+- **The CUDA-only CUTLASS DSL stack is uninstalled after mamba.** `mamba_ssm`
+  pins `quack-kernels`, which pulls `nvidia-cutlass-dsl`. Its MLIR Python bindings
+  and FlyDSL's (installed with Primus-Turbo) share one process-wide nanobind type
+  registry, so whichever loads second aborts
+  ([#955](https://github.com/AMD-AGI/Primus/issues/955)). No ROCm path can run
+  those kernels, and mamba's `ops/cute/mamba3`, their only importer, degrades
+  without them. `stage_mamba` removes `quack-kernels` and `nvidia-cutlass-dsl*`
+  and then checks that `import mamba_ssm` still works. The v26.8 image ships
+  neither package either.
 - **`patchelf` from pip**, since the apt one is unavailable.
 - **`libz3.so` from pip** (`z3-solver`, added to `LD_LIBRARY_PATH` by `env.sh`).
   With `tilelang` now uninstalled this is only a safety net, kept so that
@@ -290,16 +282,24 @@ scripts:
 
 ## Caveats
 
+- **Runtime-validated for v26.8.** A clean run of the default stages completed on
+  **MI325X (gfx942) / Ubuntu 22.04 (glibc 2.35, GCC 11) / Python 3.12**, followed by
+  `examples/megatron/configs/MI325X/llama3.1_8B-BF16-pretrain.yaml` for 10
+  iterations on 8 GPUs (with `--micro_batch_size 2`, because the node was shared).
+  It ran at about 608 TFLOP/s/GPU with no NaN iterations, and its loss matched the
+  same command in `rocm/primus:v26.8` at every iteration to five significant digits.
+  The installed package set matches the image's except for the optional stages
+  skipped here and four minor transitive versions.
 - **Persistence**: the venv, the provisioned interpreter and the kept checkouts
   live under `$PRIMUS_BASE` (persistent). Transient build sources go to local
   `/tmp` for speed and are deleted after each build.
 - **Disk**: a full build needs tens of GB.
-- **Nightly indexes are pruned.** The pinned torch/TE nightlies will eventually
-  disappear from the ROCm index. When that happens, pick a new nightly date that
-  publishes a *complete* cp312 set and update the pin block at the top of
-  `setup.sh` — all of `torch`, `amd-torch-device-*`, `rocm-sdk-*`, `torchaudio`,
-  `torchvision`, `amd-torchvision-device-*` and `apex` should come from the same
-  date.
+- **Index contents move.** v26.8's torch set comes from the
+  `stable.repo.amd.com` indexes, which have kept their releases so far, but the
+  companion builds there are versioned per ROCm line. If a pin stops resolving,
+  update the pin block at the top of `setup.sh` as a set — `torch`,
+  `amd-torch-device-*`, `rocm-sdk-*`, `torchaudio`, `torchvision`,
+  `amd-torchvision-device-*` and `apex` must all target the same ROCm version.
 - **GPU arch is auto-detected** (`env.sh` reads `rocminfo`, else the kernel KFD
   sysfs `gfx_target_version`), and `stage_torch` installs the matching device
   wheels for whatever it finds (gfx942 and/or gfx950). To force a target — e.g.

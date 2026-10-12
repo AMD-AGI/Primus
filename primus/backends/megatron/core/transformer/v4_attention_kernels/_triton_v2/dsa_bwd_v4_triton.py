@@ -72,7 +72,29 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
         R_CHUNK = min(topk, 1536)
     else:
         R_CHUNK = min(256, topk)
-    BH_DQ, TK_DQ = 64, 16
+    # The defaults above are tuned for SHORT sequences, where the per-chunk buffers are
+    # small and the dq read-modify-write traffic dominates. At long context that trade
+    # inverts hard: the buffers below scale with total_tokens * R_CHUNK, so at
+    # S_local = 131072 (1M context, CP=8) R_CHUNK=256 makes `interm` alone
+    # 131072 * 256 * 576 * 2 B = 36 GiB, plus 8 GiB for chunk_dS/chunk_P -- a 44 GiB
+    # workspace spent to avoid some dq reloads. PRIMUS_DSA_BWD_R_CHUNK trades that back.
+    # Chunking is a partition of the same computation, so any value is numerically
+    # equivalent; note that R_CHUNK % 128 != 0 also disables the fused dKV path below.
+    _r_override = os.environ.get("PRIMUS_DSA_BWD_R_CHUNK", "")
+    if _r_override:
+        R_CHUNK = max(1, min(int(_r_override), topk))
+    # BH_DQ x D_V is the dominant LDS term of _bwd_chunk_dq_store_ds. With the V4
+    # latent head_dim of 512, BH_DQ=64 needs 64*512*2 = 65536 B for the Q tile
+    # alone -- exactly the whole 64 KB LDS budget of gfx942/CDNA3 -- and the kernel
+    # asks for 73728 B total, so it fails to compile there. gfx950/CDNA4 has 160 KB
+    # and is unaffected. Expose the head-block so CDNA3 can halve it (32 -> 32 KB
+    # Q tile). Default is unchanged.
+    # Triton multi-buffers LDS operand tiles across pipeline stages; on gfx942
+    # (64 KB LDS vs gfx950's 160 KB) the default staging pushes this kernel to
+    # 73728 B. num_stages=1 disables the double-buffering. 0 = leave to Triton.
+    _BWD_NUM_STAGES = int(os.environ.get("PRIMUS_DSA_BWD_NUM_STAGES", "0")) or None
+    BH_DQ = int(os.environ.get("PRIMUS_DSA_BWD_BLOCK_H", "64"))
+    TK_DQ = int(os.environ.get("PRIMUS_DSA_BWD_TILE_K", "16"))
     # dKV-intermediate tiling. The default (BH_DKV=32, TK_DKV=64) is best for high
     # head counts (H>=128) and for chunk widths that are not 128-aligned. For low
     # head counts (H<=64) with a 128-aligned chunk, a wider TILE_K=128 over a single
@@ -176,6 +198,7 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
                 IS_FIRST_CHUNK=is_first,
                 num_warps=4,
                 waves_per_eu=1,
+                num_stages=_BWD_NUM_STAGES,
             )
 
             # The wide dKV kernel MUST compile with ping-pong off to fit LDS, even
@@ -205,6 +228,7 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
                     D_ROPE=rope_rank,
                     HAS_ROPE=HAS_ROPE,
                     num_warps=4,
+                    num_stages=_BWD_NUM_STAGES,
                 )
 
             inv_ptr, inv_data = all_csr[chunk_idx]
@@ -219,6 +243,7 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
                 D_ROPE=rope_rank,
                 HAS_ROPE=HAS_ROPE,
                 num_warps=4,
+                num_stages=_BWD_NUM_STAGES,
             )
 
     d_sink = None

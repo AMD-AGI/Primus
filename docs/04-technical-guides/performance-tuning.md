@@ -72,7 +72,7 @@ export HIPBLASLT_TUNING_OVERRIDE_FILE=/path/to/tune_hipblas_gemm_results.txt
 
 ### Standalone offline tool
 
-For manual HipBLASLt bench workflows, see `examples/offline_tune/offline_tune_gemm.py` and `examples/offline_tune/README.md` (hipblaslt-bench integration and `HIPBLASLT_TUNING_OVERRIDE_FILE` usage).
+For manual HipBLASLt bench workflows, see `examples/megatron/guides/offline_tune/offline_tune_gemm.py` and `examples/megatron/guides/offline_tune/README.md` (hipblaslt-bench integration and `HIPBLASLT_TUNING_OVERRIDE_FILE` usage).
 
 ---
 
@@ -115,7 +115,7 @@ primus_turbo:
   use_turbo_attention: true
   use_turbo_async_tp: true
   use_turbo_float8_linear: true
-  use_turbo_grouped_mm: false
+  use_turbo_grouped_gemm: false
 ```
 
 ### Documentation
@@ -230,6 +230,35 @@ From `trainer_base.yaml` and model settings:
 | `use_turbo_deepep: true` | DeepEP dispatcher (`enable_primus_turbo` must be true). |
 | `turbo_sync_free_moe_stage: 2` | Recommended stage for sync-free MoE (per patch notes). |
 | `overlap_moe_expert_parallel_comm: true` | Overlap expert parallel communication (`trainer_base.yaml`). |
+
+---
+
+## 8. Known ROCm correctness workarounds
+
+The AMD Triton backend can emit a `buffer_store_dwordx4` whose data registers are redefined by a
+later instruction with no `s_waitcnt vmcnt` in between, so the store writes whatever the
+clobbering instruction left behind. Nothing faults and nothing warns; a few percent of the
+kernel's output elements simply hold garbage. Inductor's SwiGLU backward fusion trips it and
+poisons the MLP weight gradients, which diverges TorchTitan training. Megatron is exposed to the
+same kernels, since its fused activations are inductor-generated as well (`megatron/core/jit.py`
+sets `jit_fuser = torch.compile` on torch 2.2+).
+
+`primus/core/patches/triton_bufops_war_patches.py` handles this automatically on ROCm: every
+kernel compiles normally, and only those whose emitted AMDGCN contains the hazard are recompiled
+with buffer ops disabled. It has no switch: the recompile is a correctness fix, and a kernel that
+does not need one is left alone anyway.
+
+Two things about the design are deliberate. It selects per kernel rather than setting
+`AMDGCN_USE_BUFFER_OPS=0` globally, because the hazardous kernels lose nothing without buffer
+addressing while the Primus-Turbo grouped-GEMM kernels spill without it and carry no hazard — the
+global switch costs ~18% on MoE recipes for kernels that never needed fixing. And it decides from
+the emitted machine code rather than from a list of affected architectures, so a newly shipped
+architecture cannot silently fall out of coverage.
+
+It also appends to `TORCH_COMPILE_CACHE_KEY_TAG`, because on an FX graph cache hit inductor never
+calls `triton.compile`; without that, a cache filled before the patch existed would keep serving
+hazardous binaries. Note that every Triton build tried so far still emits the pattern, so this is
+not something an image upgrade removes.
 
 ---
 

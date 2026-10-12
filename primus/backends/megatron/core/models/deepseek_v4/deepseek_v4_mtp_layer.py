@@ -192,6 +192,13 @@ class DeepseekV4MTPLayer(MultiTokenPredictionLayer):
                     x,
                     position_ids=self._mtp_position_ids,
                     token_ids=None,
+                    # Without this the MTP depth runs dense-causal across the whole pack:
+                    # the inner layer accepts packed_seq_params, and when it is None
+                    # _thd_seq_starts returns None, which also switches off the packing
+                    # guard -- so sample B attends to every token of sample A with no
+                    # error, no NaN and a finite loss. Upstream's equivalent passes it on
+                    # both branches (multi_token_prediction.py).
+                    packed_seq_params=packed_seq_params,
                 )
                 # Per-depth collapse K streams -> single stream.
                 if self.hc_mult > 1 and self.mtp_hyper_head is not None:

@@ -82,6 +82,49 @@ def patch_method_source(
     return new_func
 
 
+def patch_method_source_multi(
+    cls: Any,
+    method_name: str,
+    replacements: "list[tuple[str, str]]",
+) -> Callable:
+    """Apply several ``(anchor, replacement)`` rewrites to one method in one pass.
+
+    A method can only be source-patched *once*: ``inspect.getsource`` cannot read
+    a function that was already rebuilt by ``exec``, so a second
+    :func:`patch_method_source` call on the same method raises ``OSError``.
+    Batching the rewrites keeps multiple independent injections possible.
+    """
+    original = getattr(cls, method_name)
+    source = inspect.getsource(original)
+    for ori_code, new_code in replacements:
+        # Require exactly one match. A missing anchor means upstream moved, and
+        # an ambiguous one would rewrite every occurrence and inject the patch
+        # somewhere it was never meant to go. Raise rather than assert so the
+        # check survives `python -O`.
+        found = source.count(ori_code)
+        if found != 1:
+            raise RuntimeError(
+                f"[SourcePatch] Anchor matched {found} times in "
+                f"{cls.__name__}.{method_name}, expected exactly 1; upstream "
+                f"source may have changed. Anchor: {ori_code!r}"
+            )
+        source = source.replace(ori_code, new_code, 1)
+    modified_source = textwrap.dedent(source)
+
+    wrapper_source = "class _PrimusPatchWrapper:\n" + textwrap.indent(modified_source, "    ")
+    namespace: dict = {}
+    exec(wrapper_source, original.__globals__, namespace)  # noqa: S102
+    wrapper_cls = namespace["_PrimusPatchWrapper"]
+    new_func = wrapper_cls.__dict__[original.__name__]
+    if new_func.__closure__:
+        for cell in new_func.__closure__:
+            if cell.cell_contents is wrapper_cls:
+                cell.cell_contents = cls
+    new_func.__qualname__ = f"{cls.__qualname__}.{method_name}"
+    setattr(cls, method_name, new_func)
+    return new_func
+
+
 def patch_function_source(
     module: Any,
     function_name: str,

@@ -53,6 +53,10 @@ def create_sft_datasets_provider() -> Callable:
         # (per-segment tokenize -> inline BOS in front of each supervised
         # segment -> trailing EOS). Used only for numerical A/B against Bridge.
         bridge_compat_inline_bos = bool(getattr(args, "sft_bridge_compat_inline_bos", False))
+        # Round every packed segment up to this many tokens. DeepSeek-V4's compressed
+        # branches under context parallelism need it set to the largest compress_ratio;
+        # see _build_packed_sequence. 1 (default) leaves packing unchanged.
+        segment_align = int(getattr(args, "sft_packing_segment_align", 1) or 1)
 
         log_rank_0(f"Building SFT datasets from: {dataset_name}")
         log_rank_0(f"Using conversation format: {conversation_format}")
@@ -83,6 +87,7 @@ def create_sft_datasets_provider() -> Callable:
             seed=args.seed,
             enable_packed_sequences=enable_packed_sequences,
             bridge_compat_inline_bos=bridge_compat_inline_bos,
+            segment_align=segment_align,
         )
 
     # Required by Megatron pretrain dataset setup path.

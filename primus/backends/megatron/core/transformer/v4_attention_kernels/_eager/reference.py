@@ -235,6 +235,7 @@ def eager_v4_csa_attention(
     attn_dropout: float,
     training: bool,
     scale: float,
+    local_mask_extra: Optional[torch.Tensor] = None,  # [Sq, Sq] additive, packed (THD) only
 ) -> torch.Tensor:
     """Eager-Python V4 CSA fused attention (joint local SWA + sparse top-K).
 
@@ -272,6 +273,11 @@ def eager_v4_csa_attention(
 
     # _build_local_attention_mask(Sq, swa_window) -> local_mask: [Sq, Sq] in q.dtype
     local_mask = _build_local_attention_mask(Sq, swa_window, device=q.device, dtype=q.dtype)
+    if local_mask_extra is not None:
+        # Packed (THD): additionally block keys outside the query's own sequence. The
+        # sliding window above is built from a scalar origin, so on its own it lets a
+        # token near a pack boundary see the tail of the previous sample.
+        local_mask = local_mask + local_mask_extra.to(device=q.device, dtype=q.dtype)
 
     # q: [B, H, Sq, D], k_local.transpose(-2,-1): [B, H, D, Sq]
     # -> matmul(...): [B, H, Sq, Sq] in q.dtype   (bf16 tensor core, fp32 accumulator inside)

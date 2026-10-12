@@ -28,11 +28,11 @@ from primus.core.patches.patch_registry import PatchRegistry
 PATCH_ID = "torchtitan.primus_turbo.moe_grouped_mm"
 
 
-def _ctx(enable_turbo=True, use_turbo_grouped_mm=True, use_moe_fp8=False):
+def _ctx(enable_turbo=True, use_turbo_grouped_gemm=True, use_moe_fp8=False):
     params = SimpleNamespace(
         primus_turbo=SimpleNamespace(
             enable_primus_turbo=enable_turbo,
-            use_turbo_grouped_mm=use_turbo_grouped_mm,
+            use_turbo_grouped_gemm=use_turbo_grouped_gemm,
             use_moe_fp8=use_moe_fp8,
         ),
     )

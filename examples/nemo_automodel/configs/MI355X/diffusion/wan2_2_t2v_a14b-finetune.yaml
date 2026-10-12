@@ -11,7 +11,7 @@
 #
 # Runs through the SAME diffusion recipe and the SAME launcher as pretrain
 # (AutoModel selects pretrain vs finetune from model.mode), so it launches via
-# `examples/run_pretrain.sh` like the other diffusion EXPs.
+# `primus-cli direct -- train pretrain` like the other diffusion EXPs.
 #
 # NOTE: the finetune recipe is AutoModel's original Wan 2.2 path, provided here
 # as a complete, first-class example. The throughput numbers documented in the
@@ -25,8 +25,8 @@
 # Launch (inside the Primus container, 8 GPUs free):
 #   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
 #   GPUS_PER_NODE=8 \
-#   EXP=examples/nemo_automodel/configs/MI355X/diffusion/wan2_2_t2v_a14b-finetune.yaml \
-#   bash examples/run_pretrain.sh
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/nemo_automodel/configs/MI355X/diffusion/wan2_2_t2v_a14b-finetune.yaml
 #
 # Run once per expert. The expert is chosen solely by model.stage (finetune loads
 # via from_pretrained with the matching active_transformer; pipeline_spec/subfolder

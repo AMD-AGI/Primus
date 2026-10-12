@@ -18,10 +18,10 @@ for GPT / MLA / Mamba and gets V4 wrong on every axis that matters:
 * Output projection — V4 uses grouped low-rank ``linear_o_a`` /
   ``linear_o_b`` (``(n*d/o_groups) -> o_groups*o_lora -> hidden``); the
   upstream branch counts a flat ``(n*d) -> hidden`` proj.
-* Attention scores at the wrong sequence length — V4's mHC residual
-  packs ``hc_mult`` parallel streams into the layer-internal sequence axis
-  (``[B, S*K, D]``).  Per-layer GEMMs run at ``S_eff = S * hc_mult``, but
-  upstream uses ``args.seq_length``.
+* Attention scores at the wrong visible-pair count — every V4 layer masks
+  its score matmuls with a sliding window, plus (on HCA / CSA layers) a
+  compressed-pool or sparse top-K branch, so far fewer ``(q, k)`` pairs
+  are touched than the dense causal ``S^2 / 2`` upstream assumes.
 * Compressor + Indexer side paths — CSA (``compress_ratio==4``) and HCA
   (``compress_ratio==128``) layers add a Compressor (``wkv`` + ``wgate``);
   CSA additionally runs an Indexer (``w_dq`` + ``w_iuq`` + ``w_w`` +
@@ -60,14 +60,28 @@ Plan-6 P33 closes two known gaps in the plan-3 P20 closed form:
 * SWA visible-pair pruning — :func:`_attn_scores_fmac_per_layer` now
   counts only causal-visible ``(q, k)`` pairs surviving the per-layer
   SWA + pool + sparse top-K masks (via :func:`_visible_pairs`).  The
-  legacy ``B * n * d * S_eff^2`` upper bound over-counted the local
-  branch by ``S_eff / swa_window`` once plan-5 P30+ made kernels honor
+  legacy ``B * n * d * S^2`` upper bound over-counted the local
+  branch by ``S / swa_window`` once plan-5 P30+ made kernels honor
   per-row SWA pruning (~128x at the V4-Flash proxy shape).
 * HyperConnection matmul accounting — the new ``hc`` row of
   :class:`_V4FlopsBreakdown` counts ``HyperMixer.fn`` (``K*D ->
   (2+K)*K`` per token, twice per layer) and ``HyperHead.fn`` (``K*D
   -> K`` per token, once at the trunk end and per MTP depth).  These
   matmuls were not in the plan-3 P20 form.
+
+mHC does **not** multiply the token count.  An earlier form of this module
+evaluated every attention / Compressor / Indexer / MoE term at
+``S_eff = S * hc_mult`` on the belief that the K parallel streams are packed
+into the layer-internal sequence axis.  They are not: ``[S*K, B, D]`` only
+ever exists on the PP P2P wire, and
+:meth:`~primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_block.DeepseekV4HybridLayer._hc_apply`
+collapses ``[B, S, K, D] -> [B, S, D]`` *before* calling the sub-block and
+expands back after it, so the projection and expert GEMMs see ``B * S``
+tokens.  Only the HyperConnection matmuls themselves (the ``hc`` row) scale
+with ``K``, and they already run at ``seq_len``.  Counting the rest at
+``S * hc_mult`` inflated the reported total by ~3.6x at the V4-Flash shape
+(and by ~12x on the Indexer, whose scoring einsum is quadratic in the
+sequence axis).
 
 See ``deepseek-v4/develop/plan-6/02-phase-details.md#phase-33`` for
 the design and ``develop/progress/p33/p33-summary.md`` for the
@@ -158,7 +172,7 @@ def _normalize_layer_ratios(
 def _attn_qkv_o_fmac_per_layer(
     *,
     batch_size: int,
-    seq_len_eff: int,
+    seq_len: int,
     hidden_size: int,
     num_heads: int,
     head_dim: int,
@@ -190,41 +204,41 @@ def _attn_qkv_o_fmac_per_layer(
         # Flat fallback: (n*d) -> hidden
         o_proj = n_d * hidden_size
 
-    return batch_size * seq_len_eff * (qkv + o_proj)
+    return batch_size * seq_len * (qkv + o_proj)
 
 
-def _local_visible_pairs(swa_window: int, seq_len_eff: int) -> int:
+def _local_visible_pairs(swa_window: int, seq_len: int) -> int:
     """Causal-visible ``(q, k)`` pair count for the local SWA branch.
 
     Each query at position ``q`` attends to keys in
     ``[max(0, q - swa_window + 1), q]``.  Summed over
-    ``q in [0, seq_len_eff)`` the count is:
+    ``q in [0, seq_len)`` the count is:
 
-    * ``swa_window * seq_len_eff - swa_window * (swa_window - 1) // 2`` for
-      ``0 < swa_window < seq_len_eff`` (queries below ``swa_window - 1``
+    * ``swa_window * seq_len - swa_window * (swa_window - 1) // 2`` for
+      ``0 < swa_window < seq_len`` (queries below ``swa_window - 1``
       see only ``q + 1`` keys, queries above saturate at ``swa_window``).
-    * ``seq_len_eff * (seq_len_eff + 1) // 2`` for the full-causal
-      fallback (``swa_window == 0`` or ``>= seq_len_eff``).
+    * ``seq_len * (seq_len + 1) // 2`` for the full-causal
+      fallback (``swa_window == 0`` or ``>= seq_len``).
     """
-    s = int(seq_len_eff)
+    s = int(seq_len)
     w = int(swa_window)
     if w <= 0 or w >= s:
         return s * (s + 1) // 2
     return w * s - w * (w - 1) // 2
 
 
-def _pool_visible_pairs(compress_ratio: int, seq_len_eff: int) -> int:
+def _pool_visible_pairs(compress_ratio: int, seq_len: int) -> int:
     """Causal-visible ``(q, p)`` pair count for the HCA compressed pool.
 
     Pool slot ``p`` covers source positions ``[p*c, (p+1)*c)`` with
     ``c == compress_ratio``; slot ``p`` is visible to query ``q`` iff
     ``(p+1) * c - 1 <= q``.  Summed over queries, the count equals
-    ``sum_{m=1..seq_len_eff} floor(m / c)`` with closed form
+    ``sum_{m=1..seq_len} floor(m / c)`` with closed form
     ``c * n * (n - 1) // 2 + n * (T - c*n + 1)`` where ``n = T // c`` and
-    ``T = seq_len_eff``.
+    ``T = seq_len``.
     """
     c = int(compress_ratio)
-    t = int(seq_len_eff)
+    t = int(seq_len)
     if c <= 0 or t <= 0:
         return 0
     n = t // c
@@ -238,7 +252,7 @@ def _visible_pairs(
     swa_window: int,
     compress_ratio: int,
     index_topk: int,
-    seq_len_eff: int,
+    seq_len: int,
 ) -> int:
     """Total causal-visible ``(q, k)`` pair count for one V4 attention layer.
 
@@ -249,29 +263,29 @@ def _visible_pairs(
     * ``cr == 0`` (dense + SWA): local SWA pairs only.
     * ``cr == 128`` (HCA): local SWA pairs + causal pool pairs.
     * ``cr == 4`` (CSA): local SWA pairs + sparse top-K pairs
-      (``min(index_topk, pool) * seq_len_eff``); top-K is treated as
+      (``min(index_topk, pool) * seq_len``); top-K is treated as
       fully visible because the indexer assigns each query a per-row
       causal-respecting pool subset.
     """
-    local = _local_visible_pairs(swa_window, seq_len_eff)
+    local = _local_visible_pairs(swa_window, seq_len)
     cr = int(compress_ratio)
     if cr == 0:
         return local
 
-    pool = max(1, int(seq_len_eff) // cr)
+    pool = max(1, int(seq_len) // cr)
     if cr == 128:
-        return local + _pool_visible_pairs(cr, seq_len_eff)
+        return local + _pool_visible_pairs(cr, seq_len)
     if cr == 4:
         sparse_keys = min(int(index_topk) if index_topk else pool, pool)
-        return local + sparse_keys * int(seq_len_eff)
+        return local + sparse_keys * int(seq_len)
     # Forward-compatible: any other ratio is treated as full pool cross-attn.
-    return local + pool * int(seq_len_eff)
+    return local + pool * int(seq_len)
 
 
 def _attn_scores_fmac_per_layer(
     *,
     batch_size: int,
-    seq_len_eff: int,
+    seq_len: int,
     num_heads: int,
     head_dim: int,
     compress_ratio: int,
@@ -282,8 +296,8 @@ def _attn_scores_fmac_per_layer(
 
     Plan-6 P33 rewrite: counts only the causal-visible ``(query, key)``
     pairs surviving the per-layer mask (SWA + pool + sparse top-K) — the
-    plan-3 P20 ``S_eff^2`` upper bound over-counted dense / HCA local
-    attention by ``S_eff / swa_window`` (16x at ``swa=128, S_eff=4096``)
+    plan-3 P20 ``S^2`` upper bound over-counted dense / HCA local
+    attention by ``S / swa_window`` (16x at ``swa=128, S=4096``)
     once plan-5 P30 SWA K-loop pruning made the per-layer kernels track
     visible pairs only.
 
@@ -296,7 +310,7 @@ def _attn_scores_fmac_per_layer(
         swa_window=swa_window,
         compress_ratio=compress_ratio,
         index_topk=index_topk,
-        seq_len_eff=seq_len_eff,
+        seq_len=seq_len,
     )
     return 2 * batch_size * num_heads * head_dim * pairs
 
@@ -304,7 +318,7 @@ def _attn_scores_fmac_per_layer(
 def _compressor_fmac_per_layer(
     *,
     batch_size: int,
-    seq_len_eff: int,
+    seq_len: int,
     hidden_size: int,
     head_dim: int,
     compress_ratio: int,
@@ -314,19 +328,19 @@ def _compressor_fmac_per_layer(
     Compressor projects ``hidden -> coff*head_dim`` for both ``wkv`` and
     ``wgate``; ``coff = 2`` in overlap mode (CSA, ratio==4) and ``coff = 1``
     in non-overlap mode (HCA, ratio==128).  Inputs are at the full
-    pre-pool seq length, so cost is paid at ``S_eff``.
+    pre-pool seq length, so cost is paid at ``seq_len``.
     """
     if compress_ratio == 0:
         return 0
     coff = 2 if compress_ratio == 4 else 1
     # wkv + wgate, each hidden -> coff * head_dim
-    return 2 * batch_size * seq_len_eff * hidden_size * (coff * head_dim)
+    return 2 * batch_size * seq_len * hidden_size * (coff * head_dim)
 
 
 def _indexer_fmac_per_layer(
     *,
     batch_size: int,
-    seq_len_eff: int,
+    seq_len: int,
     hidden_size: int,
     compress_ratio: int,
     index_head_dim: int,
@@ -336,7 +350,7 @@ def _indexer_fmac_per_layer(
     if compress_ratio != 4:
         return 0
 
-    pool = max(1, seq_len_eff // compress_ratio)
+    pool = max(1, seq_len // compress_ratio)
     dq_rank = index_head_dim  # Indexer.__init__ default: dq_rank = index_head_dim
     inh_ihd = index_n_heads * index_head_dim
 
@@ -353,10 +367,10 @@ def _indexer_fmac_per_layer(
     mini_compressor = 2 * hidden_size * (2 * index_head_dim)
     proj += mini_compressor
 
-    proj_fmac = batch_size * seq_len_eff * proj
+    proj_fmac = batch_size * seq_len * proj
 
-    # Scoring einsum: (B, S_eff, inh, ihd) · (B, P, ihd) → (B, S_eff, inh, P)
-    scoring_fmac = batch_size * seq_len_eff * index_n_heads * pool * index_head_dim
+    # Scoring einsum: (B, S, inh, ihd) · (B, P, ihd) → (B, S, inh, P)
+    scoring_fmac = batch_size * seq_len * index_n_heads * pool * index_head_dim
 
     return proj_fmac + scoring_fmac
 
@@ -364,7 +378,7 @@ def _indexer_fmac_per_layer(
 def _moe_fmac_per_layer(
     *,
     batch_size: int,
-    seq_len_eff: int,
+    seq_len: int,
     hidden_size: int,
     moe_ffn_hidden_size: int,
     moe_router_topk: int,
@@ -387,7 +401,7 @@ def _moe_fmac_per_layer(
         if shared_expert_ffn_hidden_size > 0
         else 0
     )
-    return batch_size * seq_len_eff * (router + routed + shared)
+    return batch_size * seq_len * (router + routed + shared)
 
 
 def _hc_mixer_fmac_per_layer(
@@ -399,16 +413,17 @@ def _hc_mixer_fmac_per_layer(
 ) -> int:
     """FMAC for the two ``HyperMixer.fn`` matmuls in one V4 hybrid layer.
 
-    Each :class:`HyperMixer` projects the un-packed K streams
+    Each :class:`HyperMixer` projects the K streams
     ``[B, S, K*D] -> [B, S, (2+K)*K]``; the V4 hybrid layer runs two
-    mixers per layer (one before / one inside the attention sub-block,
-    and one for the FFN sub-block — see
+    mixers per layer (one for the attention sub-block, one for the FFN
+    sub-block — see
     ``primus.backends.megatron.core.transformer.hyper_connection``).
 
-    The leading axis is ``B * S`` (not ``B * S * hc_mult``) because the
-    K stream lifting that packs streams into the sequence axis happens
-    *after* the mixer.  The (small) ``HyperMixer.expand`` matmul
-    ``comb @ x`` is left out by design (see plan-6 P33 spec).
+    This is the only term that scales with ``hc_mult``, and it does so
+    through the ``K*D`` feature axis, not the sequence axis: there is one
+    mixer invocation per token, so the leading axis stays ``B * S``.  The
+    (small) ``HyperMixer.expand`` matmul ``comb @ x`` is left out by
+    design (see plan-6 P33 spec).
     """
     if hc_mult <= 0:
         return 0
@@ -446,9 +461,9 @@ def _mtp_eh_proj_fmac(
 ) -> int:
     """FMAC for the per-MTP-depth ``eh_proj`` (``2H -> H``).
 
-    Runs at the original (un-packed) seq length because MTP runs **before**
-    the V4 transformer layer's stream-lift, on the embedding output.  Two
-    norms per depth are negligible.
+    Runs on the single-stream embedding output, before the MTP depth lifts
+    to K streams for its inner V4 layer.  Two norms per depth are
+    negligible.
     """
     if mtp_num_layers <= 0:
         return 0
@@ -519,8 +534,10 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
     (FMAC pre-expansion) for sanity logging.
     """
     seq_len = int(args.seq_length)
+    # ``hc_mult`` sizes the HyperConnection matmuls only.  The K mHC streams
+    # are collapsed to one hidden per token before every attention / FFN
+    # sub-block, so those terms stay at ``seq_len`` (see module docstring).
     hc_mult = int(getattr(args, "hc_mult", 1) or 1)
-    seq_len_eff = seq_len * hc_mult
 
     hidden_size = int(args.hidden_size)
     num_heads = int(args.num_attention_heads)
@@ -565,7 +582,7 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
 
         attn_qkv_o += _attn_qkv_o_fmac_per_layer(
             batch_size=batch_size,
-            seq_len_eff=seq_len_eff,
+            seq_len=seq_len,
             hidden_size=hidden_size,
             num_heads=num_heads,
             head_dim=head_dim,
@@ -575,7 +592,7 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
         )
         attn_scores += _attn_scores_fmac_per_layer(
             batch_size=batch_size,
-            seq_len_eff=seq_len_eff,
+            seq_len=seq_len,
             num_heads=num_heads,
             head_dim=head_dim,
             compress_ratio=ratio,
@@ -584,14 +601,14 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
         )
         compressor += _compressor_fmac_per_layer(
             batch_size=batch_size,
-            seq_len_eff=seq_len_eff,
+            seq_len=seq_len,
             hidden_size=hidden_size,
             head_dim=head_dim,
             compress_ratio=ratio,
         )
         indexer += _indexer_fmac_per_layer(
             batch_size=batch_size,
-            seq_len_eff=seq_len_eff,
+            seq_len=seq_len,
             hidden_size=hidden_size,
             compress_ratio=ratio,
             index_head_dim=index_head_dim,
@@ -599,7 +616,7 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
         )
         moe += _moe_fmac_per_layer(
             batch_size=batch_size,
-            seq_len_eff=seq_len_eff,
+            seq_len=seq_len,
             hidden_size=hidden_size,
             moe_ffn_hidden_size=moe_ffn_hidden_size,
             moe_router_topk=moe_router_topk,
@@ -625,7 +642,7 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
         ratio = int(mtp_ratios[depth]) if depth < len(mtp_ratios) else 0
         mtp_attn_qkv_o += _attn_qkv_o_fmac_per_layer(
             batch_size=batch_size,
-            seq_len_eff=seq_len_eff,
+            seq_len=seq_len,
             hidden_size=hidden_size,
             num_heads=num_heads,
             head_dim=head_dim,
@@ -635,7 +652,7 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
         )
         mtp_attn_scores += _attn_scores_fmac_per_layer(
             batch_size=batch_size,
-            seq_len_eff=seq_len_eff,
+            seq_len=seq_len,
             num_heads=num_heads,
             head_dim=head_dim,
             compress_ratio=ratio,
@@ -644,14 +661,14 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
         )
         mtp_compressor += _compressor_fmac_per_layer(
             batch_size=batch_size,
-            seq_len_eff=seq_len_eff,
+            seq_len=seq_len,
             hidden_size=hidden_size,
             head_dim=head_dim,
             compress_ratio=ratio,
         )
         mtp_indexer += _indexer_fmac_per_layer(
             batch_size=batch_size,
-            seq_len_eff=seq_len_eff,
+            seq_len=seq_len,
             hidden_size=hidden_size,
             compress_ratio=ratio,
             index_head_dim=index_head_dim,
@@ -659,7 +676,7 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
         )
         mtp_moe += _moe_fmac_per_layer(
             batch_size=batch_size,
-            seq_len_eff=seq_len_eff,
+            seq_len=seq_len,
             hidden_size=hidden_size,
             moe_ffn_hidden_size=moe_ffn_hidden_size,
             moe_router_topk=moe_router_topk,
@@ -815,9 +832,10 @@ def _make_v4_num_floating_point_operations(original_fn, *, dispatch_v4: bool):
     description=(
         "DeepSeek-V4: replace Megatron's GPT/MLA-shaped "
         "num_floating_point_operations with a V4 closed form (Q LoRA + "
-        "single-latent KV + grouped low-rank O at S * hc_mult, plus "
-        "Compressor / Indexer side paths and MTP per-depth full inner "
-        "layer cost). Falls through byte-for-byte for non-V4 model types."
+        "single-latent KV + grouped low-rank O over SWA/sparse-pruned "
+        "visible pairs, plus Compressor / Indexer side paths, mHC mixer "
+        "matmuls and MTP per-depth full inner layer cost). Falls through "
+        "byte-for-byte for non-V4 model types."
     ),
     condition=lambda ctx: getattr(get_args(ctx), "model_type", None) == "deepseek_v4",
 )
