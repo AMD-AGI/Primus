@@ -3,6 +3,11 @@ user_name: ${PRIMUS_USER:qyy}
 exp_name: ${PRIMUS_EXP_NAME:gpt_oss_20B-pretrain}
 workspace: ./output
 
+# With the real 201088-token vocab the default caching allocator fragments enough
+# to peak at ~98.6% of HBM; expandable segments bring it back to ~92%.
+env:
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
 modules:
   pre_trainer:
     framework: megatron
@@ -105,6 +110,7 @@ modules:
       eval_iters: 0
 
       cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
 
       moe_router_fusion: true
       moe_shared_expert_overlap: false
