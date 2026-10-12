@@ -7,8 +7,11 @@ Returns per-component FMAC (multiply-only, pre fwd+bwd/FMA expansion) for ONE
 layer of a given cr at batch_size=1. Multiply by FB_FMA (=6) for Megatron-
 convention FLOPs (fwd 1 + bwd 2, times FMA 2).
 
-Validated against the measured flash 16-layer run (TOTAL 34093 TFLOP/global-
-batch; per-component within rounding) — see __main__ self-test.
+Every per-layer term is charged at ``seq``, NOT ``seq * hc_mult``: mHC collapses
+its K streams to one hidden per token before the attention / FFN sub-block (see
+``DeepseekV4HybridLayer._hc_apply``), so only the HyperMixer matmuls scale with
+K, and they do so on the feature axis. The __main__ self-test cross-checks the
+flash 16-layer totals against the Megatron patch's closed form.
 """
 
 from __future__ import annotations
@@ -81,44 +84,44 @@ def _visible_pairs(swa, cr, index_topk, s):
     return local + pool * s
 
 
-def _attn_qkv_o(s_eff, p):
+def _attn_qkv_o(seq, p):
     n_d = p["heads"] * p["head_dim"]
     qkv = p["hidden"] * p["q_lora"] + p["q_lora"] * n_d + p["hidden"] * p["head_dim"]
     if p["o_lora"] > 0:
         o_proj = n_d * p["o_lora"] + (p["o_groups"] * p["o_lora"]) * p["hidden"]
     else:
         o_proj = n_d * p["hidden"]
-    return s_eff * (qkv + o_proj)
+    return seq * (qkv + o_proj)
 
 
-def _attn_scores(s_eff, cr, p):
-    pairs = _visible_pairs(SHARED["swa_window"], cr, p["index_topk"], s_eff)
+def _attn_scores(seq, cr, p):
+    pairs = _visible_pairs(SHARED["swa_window"], cr, p["index_topk"], seq)
     return 2 * p["heads"] * p["head_dim"] * pairs
 
 
-def _compressor(s_eff, cr, p):
+def _compressor(seq, cr, p):
     if cr == 0:
         return 0
     coff = 2 if cr == 4 else 1
-    return 2 * s_eff * p["hidden"] * (coff * p["head_dim"])
+    return 2 * seq * p["hidden"] * (coff * p["head_dim"])
 
 
-def _indexer(s_eff, cr, p):
+def _indexer(seq, cr, p):
     if cr != 4:
         return 0
     ihd, inh = SHARED["index_head_dim"], SHARED["index_n_heads"]
-    pool = max(1, s_eff // cr)
+    pool = max(1, seq // cr)
     dq_rank = ihd
     proj = p["hidden"] * dq_rank + dq_rank * (inh * ihd) + p["hidden"] * inh
     proj += 2 * p["hidden"] * (2 * ihd)  # mini-compressor
-    return s_eff * proj + s_eff * inh * pool * ihd
+    return seq * proj + seq * inh * pool * ihd
 
 
-def _moe(s_eff, p):
+def _moe(seq, p):
     router = p["hidden"] * p["experts"]
     routed = p["topk"] * SWIGLU * p["hidden"] * p["moe_ffn"]
     shared = SWIGLU * p["hidden"] * p["shared_ffn"] if p["shared_ffn"] > 0 else 0
-    return s_eff * (router + routed + shared)
+    return seq * (router + routed + shared)
 
 
 def _hc_mixer(s, p):
@@ -138,15 +141,20 @@ def _mtp_eh_proj(s, p, mtp_num_layers):
 
 
 def layer_fmac(model: str, cr: int, seq: int) -> dict[str, float]:
-    """Per-layer FMAC components (batch_size=1) for one cr layer."""
+    """Per-layer FMAC components (batch_size=1) for one cr layer.
+
+    Every term runs at ``seq``, not ``seq * hc_mult``: the mHC layer collapses
+    its K streams to one hidden per token before the attention / FFN sub-block
+    and expands back afterwards, so only the HyperMixer matmuls see K (and they
+    see it on the feature axis).
+    """
     p = MODEL_PARAMS[model]
-    s_eff = seq * SHARED["hc_mult"]
     return {
-        "attn_qkv_o": _attn_qkv_o(s_eff, p),
-        "attn_scores": _attn_scores(s_eff, cr, p),
-        "compressor": _compressor(s_eff, cr, p),
-        "indexer": _indexer(s_eff, cr, p),
-        "moe": _moe(s_eff, p),
+        "attn_qkv_o": _attn_qkv_o(seq, p),
+        "attn_scores": _attn_scores(seq, cr, p),
+        "compressor": _compressor(seq, cr, p),
+        "indexer": _indexer(seq, cr, p),
+        "moe": _moe(seq, p),
         "hc": _hc_mixer(seq, p),
     }
 
@@ -230,7 +238,14 @@ def mtp_flops(model: str, seq: int, mtp_num_layers: int = 1, mtp_cr: int = 4) ->
 
 
 def _self_test() -> None:
-    """Self-test against measured flash 16L (GBS64): cr [0x3,4x6,128x7]."""
+    """Cross-check flash 16L (GBS64, cr [0x3,4x6,128x7]) against the Megatron
+    patch closed form (``deepseek_v4_flops_patches.compute_v4_flops``).
+
+    The patch reports 8858.5 TFLOP/global-batch at this shape.  This sum lands
+    ~0.2 lower because it walks decoder layers only and so omits the trunk
+    HyperHead, which the patch folds in and which this module exposes through
+    :func:`mtp_fmac`.
+    """
     sched = [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]
     seq_t, batch = 4096, 64
     comp = {k: 0.0 for k in ("attn_qkv_o", "attn_scores", "compressor", "indexer", "moe", "hc")}
@@ -239,11 +254,11 @@ def _self_test() -> None:
             comp[k] += v
     logits = nonlayer_fmac("flash", seq_t)["logits"]
     tot = (sum(comp.values()) + logits) * FB_FMA * batch / 1e12
-    print("flash 16L analytic vs measured (TFLOP/global-batch):")
+    print("flash 16L analytic vs megatron patch (TFLOP/global-batch):")
     for k, v in comp.items():
         print(f"  {k:12s} = {v*FB_FMA*batch/1e12:9.1f}")
     print(f"  {'logits':12s} = {logits*FB_FMA*batch/1e12:9.1f}")
-    print(f"  TOTAL        = {tot:9.1f}   (measured 34093.4)")
+    print(f"  TOTAL        = {tot:9.1f}   (megatron patch closed form 8858.5)")
 
 
 if __name__ == "__main__":

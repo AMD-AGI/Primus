@@ -1,0 +1,13 @@
+###############################################################################
+# Qwen3.5-4B DFlash draft model (SpecForge)
+#
+# Primus model preset: experiment YAML under examples/specforge/configs/ points
+# here via `model:`. Launch recipes stay in examples/; this directory is the
+# framework model-preset layer (see docs/06-developer-guide/adding-models.md).
+# Architecture and training hyperparameters live in SpecForge's own config,
+# referenced from the experiment via `specforge_config`.
+###############################################################################
+model: qwen3.5-4b-dflash
+
+target_model: Qwen/Qwen3.5-4B
+draft_algorithm: dflash

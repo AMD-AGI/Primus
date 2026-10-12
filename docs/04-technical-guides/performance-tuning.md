@@ -233,6 +233,35 @@ From `trainer_base.yaml` and model settings:
 
 ---
 
+## 8. Known ROCm correctness workarounds
+
+The AMD Triton backend can emit a `buffer_store_dwordx4` whose data registers are redefined by a
+later instruction with no `s_waitcnt vmcnt` in between, so the store writes whatever the
+clobbering instruction left behind. Nothing faults and nothing warns; a few percent of the
+kernel's output elements simply hold garbage. Inductor's SwiGLU backward fusion trips it and
+poisons the MLP weight gradients, which diverges TorchTitan training. Megatron is exposed to the
+same kernels, since its fused activations are inductor-generated as well (`megatron/core/jit.py`
+sets `jit_fuser = torch.compile` on torch 2.2+).
+
+`primus/core/patches/triton_bufops_war_patches.py` handles this automatically on ROCm: every
+kernel compiles normally, and only those whose emitted AMDGCN contains the hazard are recompiled
+with buffer ops disabled. It has no switch: the recompile is a correctness fix, and a kernel that
+does not need one is left alone anyway.
+
+Two things about the design are deliberate. It selects per kernel rather than setting
+`AMDGCN_USE_BUFFER_OPS=0` globally, because the hazardous kernels lose nothing without buffer
+addressing while the Primus-Turbo grouped-GEMM kernels spill without it and carry no hazard — the
+global switch costs ~18% on MoE recipes for kernels that never needed fixing. And it decides from
+the emitted machine code rather than from a list of affected architectures, so a newly shipped
+architecture cannot silently fall out of coverage.
+
+It also appends to `TORCH_COMPILE_CACHE_KEY_TAG`, because on an FX graph cache hit inductor never
+calls `triton.compile`; without that, a cache filled before the patch existed would keep serving
+hazardous binaries. Note that every Triton build tried so far still emits the pattern, so this is
+not something an image upgrade removes.
+
+---
+
 ## Quick checklist
 
 1. **GEMMs:** run HipBLASLt stages 1–3 or use `offline_tune_gemm.py` for custom workflows.

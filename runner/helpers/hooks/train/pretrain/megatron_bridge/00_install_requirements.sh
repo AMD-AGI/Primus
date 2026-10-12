@@ -26,6 +26,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${PRIMUS_SKIP_PIP:-0}" == "1" ]]; then
+  echo "[INFO] PRIMUS_SKIP_PIP=1: skipping Megatron-Bridge dependency installation"
+  exit 0
+fi
+
 DATA_PATH="${DATA_PATH:-${PRIMUS_ROOT}/data}"
 PIP_CACHE_DIR="${PIP_CACHE_DIR:-${DATA_PATH}/pip_cache}"
 
@@ -36,7 +41,7 @@ pip install --cache-dir="${PIP_CACHE_DIR}" "onnx==1.20.0rc1"
 pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia-modelopt
 pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia_resiliency_ext
 
-pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0"
+pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0,<5.1.0"
 
 REQ_FILE="${SCRIPT_DIR}/requirements-megatron_bridge.txt"
 if [[ -f "${REQ_FILE}" ]] && grep -qE '^[[:space:]]*[^#[:space:]]' "${REQ_FILE}"; then

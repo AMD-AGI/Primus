@@ -217,7 +217,7 @@ echo "PROFILE_ARGS=${PROFILE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
 
-bash ./examples/run_slurm_pretrain.sh \
+bash ./runner/helpers/launch/slurm_pretrain.sh \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
     --seq_length "$SEQ_LENGTH" \

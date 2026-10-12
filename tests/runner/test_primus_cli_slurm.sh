@@ -107,6 +107,37 @@ print_section() {
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
+# Run primus-cli-slurm.sh in dry-run with a fake `spur` on PATH, which is how
+# the launcher detects a Spur cluster.
+run_with_fake_spur() {
+    local fake_bin
+    fake_bin="$(mktemp -d)"
+    printf '#!/bin/bash\nexit 0\n' > "$fake_bin/spur"
+    chmod +x "$fake_bin/spur"
+    PATH="$fake_bin:$PATH" bash "$RUNNER_DIR/primus-cli-slurm.sh" --dry-run "$@" 2>&1
+    rm -rf "$fake_bin"
+}
+
+# Extract just the assembled command from the dry-run output, so assertions do
+# not accidentally match the surrounding log lines.
+dry_run_cmd() {
+    echo "$1" | grep -F "Would execute:" | head -1
+}
+
+# Count how many times a bare token appears in the assembled command.
+count_token() {
+    local cmd="$1"
+    local token="$2"
+    local count=0
+    local word
+    for word in $cmd; do
+        if [[ "$word" == "$token" ]]; then
+            ((count++)) || true
+        fi
+    done
+    echo "$count"
+}
+
 # ============================================================================
 # Test 1: Basic dry-run functionality
 # ============================================================================
@@ -613,6 +644,106 @@ EOF
 }
 
 # ============================================================================
+# Test 21: Spur srun drops --export (both spellings)
+# ============================================================================
+test_spur_drops_export() {
+    print_section "Test 21: Spur srun Drops --export"
+
+    local cmd
+    cmd=$(dry_run_cmd "$(run_with_fake_spur srun -N 2 --export ALL -- container -- train)")
+
+    assert_not_contains "$cmd" "--export" "Spur: detached --export ALL should be dropped"
+    assert_not_contains "$cmd" " ALL" "Spur: the --export value should be dropped with the flag"
+    assert_contains "$cmd" "-N 2" "Spur: node count should survive --export removal"
+
+    cmd=$(dry_run_cmd "$(run_with_fake_spur srun -N 2 --export=ALL -- container -- train)")
+
+    assert_not_contains "$cmd" "--export" "Spur: inline --export=ALL should be dropped"
+    assert_contains "$cmd" "-N 2" "Spur: node count should survive inline --export removal"
+}
+
+# ============================================================================
+# Test 22: Spur srun translates --ntasks-per-node into -n
+# ============================================================================
+test_spur_translates_ntasks_per_node() {
+    print_section "Test 22: Spur srun Translates --ntasks-per-node"
+
+    # Inline form, one task per node: -N 4 --ntasks-per-node=1 -> -n 4
+    local cmd
+    cmd=$(dry_run_cmd "$(run_with_fake_spur srun -N 4 --ntasks-per-node=1 -- container -- train)")
+
+    assert_not_contains "$cmd" "--ntasks-per-node" "Spur: --ntasks-per-node should not reach srun"
+    assert_contains "$cmd" "-n 4" "Spur: -N 4 --ntasks-per-node=1 should become -n 4"
+    assert_equals "1" "$(count_token "$cmd" "-n")" "Spur: exactly one -n should be present"
+
+    # Detached form with a multiplier: -N 4 --ntasks-per-node 2 -> -n 8
+    cmd=$(dry_run_cmd "$(run_with_fake_spur srun -N 4 --ntasks-per-node 2 -- container -- train)")
+
+    assert_not_contains "$cmd" "--ntasks-per-node" "Spur: detached --ntasks-per-node should not reach srun"
+    assert_contains "$cmd" "-n 8" "Spur: -N 4 --ntasks-per-node 2 should become -n 8"
+    assert_equals "1" "$(count_token "$cmd" "-n")" "Spur: detached form should emit exactly one -n"
+
+    # An explicit task count from the caller wins and is not duplicated.
+    cmd=$(dry_run_cmd "$(run_with_fake_spur srun -N 4 -n 3 --ntasks-per-node=1 -- container -- train)")
+
+    assert_contains "$cmd" "-n 3" "Spur: explicit -n should be preserved"
+    assert_not_contains "$cmd" "-n 4" "Spur: explicit -n should not be overridden by the translation"
+    assert_equals "1" "$(count_token "$cmd" "-n")" "Spur: explicit -n should not be duplicated"
+
+    # Existing behaviour: no --ntasks-per-node at all still gets one task per node.
+    cmd=$(dry_run_cmd "$(run_with_fake_spur srun -N 4 -- container -- train)")
+
+    assert_contains "$cmd" "-n 4" "Spur: bare -N 4 should still get -n 4"
+    assert_equals "1" "$(count_token "$cmd" "-n")" "Spur: fallback should emit exactly one -n"
+}
+
+# ============================================================================
+# Test 23: Spur srun with an unusable node count
+# ============================================================================
+test_spur_unresolvable_node_count() {
+    print_section "Test 23: Spur srun With Unusable Node Count"
+
+    # Slurm accepts a min-max node range, which cannot be multiplied out. Keep
+    # the flag rather than silently shrinking the job to spur's default of one
+    # task, and warn so the caller knows to pass -n explicitly.
+    local output
+    output=$(run_with_fake_spur srun -N 2-4 --ntasks-per-node=1 -- container -- train)
+    local cmd
+    cmd=$(dry_run_cmd "$output")
+
+    assert_contains "$cmd" "--ntasks-per-node=1" "Spur: unresolvable node count should keep the flag"
+    assert_equals "0" "$(count_token "$cmd" "-n")" "Spur: no -n should be invented from a node range"
+    assert_contains "$output" "WARN" "Spur: unresolvable node count should warn"
+}
+
+# ============================================================================
+# Test 24: Standard Slurm is untouched by the Spur normalization
+# ============================================================================
+test_standard_slurm_flags_unchanged() {
+    print_section "Test 24: Standard Slurm Flags Unchanged"
+
+    # No `spur` on PATH -> standard Slurm path. Both flags must reach srun
+    # verbatim and no task count may be injected.
+    local cmd
+    cmd=$(dry_run_cmd "$(bash "$RUNNER_DIR/primus-cli-slurm.sh" --dry-run \
+        srun -N 4 --exclusive --export ALL --ntasks-per-node=1 --cpus-per-task=128 \
+        -- container -- train 2>&1)")
+
+    assert_contains "$cmd" "--export ALL" "Standard Slurm: --export ALL should be passed through"
+    assert_contains "$cmd" "--ntasks-per-node=1" "Standard Slurm: --ntasks-per-node should be passed through"
+    assert_contains "$cmd" "--exclusive" "Standard Slurm: --exclusive should be passed through"
+    assert_contains "$cmd" "--cpus-per-task=128" "Standard Slurm: --cpus-per-task should be passed through"
+    assert_contains "$cmd" "-N 4" "Standard Slurm: node count should be passed through"
+    assert_equals "0" "$(count_token "$cmd" "-n")" "Standard Slurm: no -n should be injected"
+
+    # The inline --export=ALL spelling is equally untouched.
+    cmd=$(dry_run_cmd "$(bash "$RUNNER_DIR/primus-cli-slurm.sh" --dry-run \
+        srun -N 4 --export=ALL -- container -- train 2>&1)")
+
+    assert_contains "$cmd" "--export=ALL" "Standard Slurm: --export=ALL should be passed through"
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 main() {
@@ -640,6 +771,10 @@ main() {
     test_config_dry_run
     test_config_debug
     test_cli_overrides_config_debug_dryrun
+    test_spur_drops_export
+    test_spur_translates_ntasks_per_node
+    test_spur_unresolvable_node_count
+    test_standard_slurm_flags_unchanged
 
     # Print summary
     echo ""

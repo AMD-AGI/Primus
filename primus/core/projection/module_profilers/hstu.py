@@ -131,6 +131,19 @@ class HSTULayerProfiler(BaseModuleProfiler):
         self._peak_fpm = (2.0 * n * n * n / t) if t > 0 else 1.0e12
         return self._peak_fpm
 
+    def _gemm_fwd_bwd(self, m: int, n: int, k: int, dtype: str) -> tuple[float, float]:
+        """Forward plus explicitly simulated dgrad + wgrad for ``[m, k] x [k, n]``.
+
+        The backward is not 2x the forward: the wgrad reduces over the
+        (multi-million) token dimension and runs at a very different efficiency.
+        """
+        fwd = self._gemm_backend.simulate_gemm(m, n, k, dtype=dtype).forward_time_ms
+        # dgrad: dY [m, n] x W^T [n, k] -> dX [m, k]
+        dgrad = self._gemm_backend.simulate_gemm(m, k, n, dtype=dtype).forward_time_ms
+        # wgrad: X^T [k, m] x dY [m, n] -> dW [k, n]
+        wgrad = self._gemm_backend.simulate_gemm(k, n, m, dtype=dtype).forward_time_ms
+        return fwd, dgrad + wgrad
+
     def _attn_seq(self, seq_len: int) -> int:
         """Effective sequence for the attention core, which scales as E[L^2].
 
@@ -161,12 +174,21 @@ class HSTULayerProfiler(BaseModuleProfiler):
         mc = self.config.model_config
         g_fwd = float(getattr(mc, "hstu_attn_epilogue_gelem_fwd", 0.0) or 0.0) or _DEFAULT_EPILOGUE_GELEM_FWD
         g_bwd = float(getattr(mc, "hstu_attn_epilogue_gelem_bwd", 0.0) or 0.0) or _DEFAULT_EPILOGUE_GELEM_BWD
+        fpe_f = float(getattr(mc, "hstu_attn_epilogue_flops_per_elem_fwd", 0.0) or 0.0)
+        fpe_b = float(getattr(mc, "hstu_attn_epilogue_flops_per_elem_bwd", 0.0) or 0.0)
+        vector_flops = None
+        if fpe_f > 0 and fpe_b > 0:
+            probe = getattr(self._gemm_backend, "vector_flops", None)
+            vector_flops = probe() if callable(probe) else None
         sdpa = self._sdpa_backend
         sim = HSTUAttentionSimulator(
             gpu_arch=getattr(sdpa, "_gpu_arch", None),
             gpu_clock_mhz=getattr(sdpa, "_gpu_clock_mhz", None),
             epilogue_gelem_fwd=g_fwd,
             epilogue_gelem_bwd=g_bwd,
+            epilogue_flops_per_elem_fwd=fpe_f,
+            epilogue_flops_per_elem_bwd=fpe_b,
+            vector_flops=vector_flops,
         )
         self._hstu_attn_sim = sim
         return sim
@@ -183,9 +205,7 @@ class HSTULayerProfiler(BaseModuleProfiler):
 
         # 1. Fused UVQK projection GEMM: [T, D] x [D, H*(2 d_qk + 2 d_v)]/tp
         uvqk_n = self._uvqk_out(heads_per_rank, d_qk, d_v)
-        g = self._gemm_backend.simulate_gemm(tokens, uvqk_n, D, dtype=dtype)
-        uvqk_fwd = g.forward_time_ms
-        uvqk_bwd = g.backward_time_ms or (2.0 * g.forward_time_ms)
+        uvqk_fwd, uvqk_bwd = self._gemm_fwd_bwd(tokens, uvqk_n, D, dtype)
 
         # 2. Attention core (gated dot-product).  HSTU attention is a *gated
         #    jagged* attention (SiLU gate + relative bias, not softmax); the FAv3
@@ -240,9 +260,7 @@ class HSTULayerProfiler(BaseModuleProfiler):
         #    attention output is concatenated with residual/gate streams, so the
         #    measured input width is 3*D (1536), not H*d_v -- configurable.
         out_in = int(getattr(mc, "hstu_output_input_dim", 0) or 0) or (heads_per_rank * d_v)
-        o = self._gemm_backend.simulate_gemm(tokens, D, out_in, dtype=dtype)
-        out_fwd = o.forward_time_ms
-        out_bwd = o.backward_time_ms or (2.0 * o.forward_time_ms)
+        out_fwd, out_bwd = self._gemm_fwd_bwd(tokens, D, out_in, dtype)
 
         # Selective activation recomputation: the UVQK projection is recomputed
         # in the backward to regenerate Q/K/V for the attention-backward, so its
@@ -265,6 +283,10 @@ class HSTULayerProfiler(BaseModuleProfiler):
         # Per-role split (mirrors the Kineto trace buckets) so a projection can
         # be calibrated against measured kernel time role-by-role.
         self._components = {
+            "uvqk_fwd": uvqk_fwd,
+            "uvqk_bwd": uvqk_bwd,
+            "out_fwd": out_fwd,
+            "out_bwd": out_bwd,
             "gemm_fwd": uvqk_fwd + out_fwd,
             "gemm_bwd": uvqk_bwd + out_bwd,
             "attn_fwd": attn_fwd,

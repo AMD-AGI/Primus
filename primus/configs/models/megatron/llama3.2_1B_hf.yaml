@@ -1,0 +1,6 @@
+extends:
+  - llama3.2_1B.yaml
+
+# Hugging Face tokenizer variant used by native SFT checkpoint conversion.
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: meta-llama/Llama-3.2-1B

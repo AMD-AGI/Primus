@@ -20,6 +20,29 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
 from megatron.training.global_vars import get_args
 
+from primus.core.utils.module_utils import warning_rank_0
+
+_TURBO_FUSED_GROUPED_GEMM_FALLBACK_WARNED = False
+
+
+def is_turbo_fused_grouped_mlp_supported() -> Tuple[bool, Optional[str]]:
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboLowPrecisionGlobalStateManager,
+    )
+
+    if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+        quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+        if not (quant_config.current_scaling() or quant_config.mxfp8_scaling()):
+            return False, "turbo_fused_grouped_gemm only supports current scaling or mxfp8 scaling currently"
+    elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+        quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+        if not quant_config.mxfp4_scaling():
+            return False, "turbo_fused_grouped_gemm only supports mxfp4 scaling currently"
+    else:
+        return False, "`turbo_fused_grouped_gemm` requires Turbo FP8 (current or mxfp8 scaling) or Turbo FP4."
+
+    return True, None
+
 
 class PrimusGroupedMLP(TEGroupedMLP):
     """An efficient implementation of the Experts layer using TE's GroupedLinear.
@@ -46,10 +69,39 @@ class PrimusGroupedMLP(TEGroupedMLP):
         # NOTE: use_turbo_fused_act_with_probs is prioritized over use_te_activation_func and bias_activation_fusion
         self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
         self.moe_router_padding_for_quantization = args.moe_router_padding_for_quantization
-        self.turbo_grouped_gemm_without_padding = getattr(args, "turbo_grouped_gemm_without_padding", False)
         # PrimusTurbo grouped GEMMs consume the original GPU tokens_per_expert
         # tensor for every supported quantization recipe. Keep TE's explicit
         # zero-padding fallback only when the no-padding path is not enabled.
+        self.turbo_grouped_gemm_without_padding = getattr(args, "turbo_grouped_gemm_without_padding", False)
+        self.turbo_fused_grouped_gemm = getattr(args, "turbo_fused_grouped_gemm", False)
+        if self.turbo_fused_grouped_gemm:
+            self._check_turbo_fused_grouped_gemm_contract()
+
+    def _check_turbo_fused_grouped_gemm_contract(self) -> None:
+        """Fail early on configs the fused grouped-MLP op does not implement."""
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            PrimusTurboGroupedLinear,
+        )
+
+        assert isinstance(self.linear_fc1, PrimusTurboGroupedLinear) and isinstance(
+            self.linear_fc2, PrimusTurboGroupedLinear
+        ), "`turbo_fused_grouped_gemm` requires PrimusTurboGroupedLinear (enable `use_turbo_grouped_gemm`)."
+        assert (
+            not self.config.add_bias_linear
+        ), "`turbo_fused_grouped_gemm` does not support `add_bias_linear`."
+        assert (
+            self.config.glu_linear_offset == 0.0
+        ), "`turbo_fused_grouped_gemm` does not support a non-zero glu_linear_offset."
+        assert (
+            not self.config.activation_func_fp8_input_store
+        ), "`turbo_fused_grouped_gemm` does not support activation_func_fp8_input_store."
+        assert not self.config.moe_apply_probs_on_input, (
+            "`turbo_fused_grouped_gemm` applies probs inside the fused GLU; "
+            "`moe_apply_probs_on_input` (scale before fc1) is a different contract."
+        )
+        assert (
+            not self.offload_expert_fc1 and not self.offload_moe_act
+        ), "`turbo_fused_grouped_gemm` does not support expert fc1 / moe-act offload."
 
     def _use_explicit_quantization_padding(self) -> bool:
         """Whether this forward must pad expert groups before quantization."""
@@ -133,10 +185,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
                 tokens_per_experts is not None
             ), "tokens_per_experts is required when `use_turbo_fused_act_with_probs` is True."
 
-            # TODO(ruibin)： The turbo kernel takes no clamp / offset / fp8-input-store arguments
-            assert (
-                self.config.activation_func_clamp_value is None
-            ), "`use_turbo_fused_act_with_probs` does not support activation_func_clamp_value."
+            # TODO(ruibin)： The turbo kernel takes no offset / fp8-input-store arguments
             assert (
                 self.config.glu_linear_offset == 0.0
             ), "`use_turbo_fused_act_with_probs` does not support a non-zero glu_linear_offset."
@@ -156,13 +205,94 @@ class PrimusGroupedMLP(TEGroupedMLP):
             # `forward()` unsqueeze(-1)'s `permuted_probs` to [tokens, 1] so the non-fused
             # asserts ndim == 1. Squeeze back to 1D for the fused kernel only.
             probs_1d = permuted_probs.squeeze(-1) if permuted_probs.dim() == 2 else permuted_probs
+
             # dtype is handled inside the fused kernel
             return fused_bias_act_with_probs(
-                intermediate_parallel, bias_parallel, probs_1d, tokens_per_experts, activation
+                intermediate_parallel,
+                bias_parallel,
+                probs_1d,
+                tokens_per_experts,
+                activation,
+                self.config.activation_func_clamp_value,
             )
         else:
             # use the original bias_act_func from TEGroupedMLP, ignore the tokens_per_experts
             return self.bias_act_func(intermediate_parallel, bias_parallel, permuted_probs)
+
+    def _forward_with_turbo_fused_grouped_mlp(
+        self,
+        permuted_local_hidden_states: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        permuted_probs: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            PrimusTurboLowPrecisionGlobalStateManager,
+        )
+
+        assert (
+            tokens_per_expert.device == permuted_local_hidden_states.device
+        ), "tokens_per_expert and permuted_local_hidden_states must be on the same device"
+
+        if self.activation_func == F.silu and self.config.gated_linear_unit:
+            activation = "silu"
+        elif self.activation_func == F.gelu and self.config.gated_linear_unit:
+            activation = "gelu"
+        else:
+            raise ValueError(
+                "Only support fusion of silu and gelu in PrimusGroupedMLP when `turbo_fused_grouped_gemm` is True."
+            )
+
+        x, w1, fuse_w1_grad_accum = self.linear_fc1.prepare_weights(permuted_local_hidden_states)
+        x, w2, fuse_w2_grad_accum = self.linear_fc2.prepare_weights(x)
+        assert fuse_w1_grad_accum == fuse_w2_grad_accum, (
+            "fc1 and fc2 resolved different fuse_wgrad_accum_pattern values: "
+            f"fc1={fuse_w1_grad_accum!r}, fc2={fuse_w2_grad_accum!r}"
+        )
+        fuse_wgrad_accum_pattern = fuse_w1_grad_accum
+
+        if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+            from primus_turbo.pytorch.ops.grouped_mlp_fp8 import grouped_mlp_fp8
+
+            mlp_op = grouped_mlp_fp8
+            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+        elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+            from primus_turbo.pytorch.ops.grouped_mlp_fp4 import grouped_mlp_fp4
+
+            mlp_op = grouped_mlp_fp4
+            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+        else:
+            raise ValueError(
+                "`turbo_fused_grouped_gemm` only available when Turbo FP8 "
+                "(current or mxfp8 scaling) or Turbo FP4 is enabled."
+            )
+
+        def _turbo_fused_grouped_mlp(hidden, group_lens, probs):
+            # w1/w2 stay in the closure: they may be a QuantizedTensorPair (not a
+            # Tensor checkpoint arg). Weight prep stays outside the checkpoint so
+            # the first-microbatch cache / de-osc marker / grad bridge run once.
+            return mlp_op(
+                hidden,
+                w1,
+                w2,
+                group_lens,
+                probs=probs,
+                trans_w1=True,
+                trans_w2=True,
+                config=quant_config.data(),
+                activation=activation,
+                fuse_wgrad_accum_pattern=fuse_wgrad_accum_pattern,
+                clamp_limit=self.config.activation_func_clamp_value,
+            )
+
+        if self.activation_recompute:
+            output = tensor_parallel.checkpoint(
+                _turbo_fused_grouped_mlp, False, x, tokens_per_expert, permuted_probs
+            )
+        else:
+            output = _turbo_fused_grouped_mlp(x, tokens_per_expert, permuted_probs)
+
+        # NOTE: None means no bias
+        return output, None
 
     @staticmethod
     def _apply_bias(intermediate_parallel, bias_parallel, tokens_per_expert, permuted_probs):
@@ -172,7 +302,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
         # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
         tokens_per_expert_cpu = tokens_per_expert.tolist()
 
-        return super()._apply_bias(
+        return TEGroupedMLP._apply_bias(
             intermediate_parallel, bias_parallel, tokens_per_expert_cpu, permuted_probs
         )
 
@@ -193,6 +323,20 @@ class PrimusGroupedMLP(TEGroupedMLP):
         Return:
             output (torch.Tensor): The output of the local experts.
         """
+        if self.turbo_fused_grouped_gemm:
+            supported, reason = is_turbo_fused_grouped_mlp_supported()
+            if supported:
+                return self._forward_with_turbo_fused_grouped_mlp(
+                    permuted_local_hidden_states, tokens_per_expert, permuted_probs
+                )
+            global _TURBO_FUSED_GROUPED_GEMM_FALLBACK_WARNED
+            if not _TURBO_FUSED_GROUPED_GEMM_FALLBACK_WARNED:
+                warning_rank_0(
+                    f"`turbo_fused_grouped_gemm` is not used because {reason}. "
+                    "Falling back to unfused PrimusGroupedMLP."
+                )
+                _TURBO_FUSED_GROUPED_GEMM_FALLBACK_WARNED = True
+
         use_explicit_quantization_padding = self._use_explicit_quantization_padding()
         if use_explicit_quantization_padding:
             # NOTE: When moe_router_padding_for_quantization is true the token is padded. So we can skip the padding here to reduce cpu sync.

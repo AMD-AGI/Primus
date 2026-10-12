@@ -10,18 +10,20 @@ export MASTER_PORT=29501
 
 export PRIMUS_PATH=/workspace/Primus
 export PRIMUS_MLPERF=1
-export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-LM:${PYTHONPATH}"
+export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-LM:${PYTHONPATH:-}"
 export EXP=${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml
 export DATA_PATH=/data
 
 # MXFP4 + de-oscillation:
 #   export EXP=${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml
-#   export MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR=mxfp4
+#   export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR=mxfp4
 
 export PRIMUS_MICRO_BATCH_SIZE=4
 export PRIMUS_GLOBAL_BATCH_SIZE=32
-export PRIMUS_LR=8.0e-4
-export PRIMUS_MIN_LR=8.0e-5
+# MXFP4 de-osc converges at 4e-4 / 4e-5. The FP8 yaml still defaults to 8e-4
+# when this variable is not exported.
+export PRIMUS_LR=4.0e-4
+export PRIMUS_MIN_LR=4.0e-5
 export PRIMUS_TRAIN_ITERS=1200000
 export PRIMUS_LR_WARMUP_ITERS=128
 export PRIMUS_LR_DECAY_ITERS=$((PRIMUS_TRAIN_ITERS - PRIMUS_LR_WARMUP_ITERS))
@@ -39,9 +41,12 @@ export PRIMUS_GRAD_REDUCE_IN_BF16=true
 export USE_TURBO_RMS_NORM=true
 export USE_TURBO_NORM_TE_LINEAR=true
 
-# 0=RTE (default), 1=RZ, 2=stochastic. Consumed by Turbo MXFP4 HIP/FlyDSL quant
-# on gpt-oss-mxfp4 branches; ignored by Turbo builds that do not read it.
-export PRIMUS_TURBO_MXFP4_SCALE_ROUNDING="${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING:-0}"
+# E8M0 block-scale rounding: 0=half ULP, 1=one ULP, 2=three-eighths ULP. This is
+# not gradient stochastic rounding, which mxfp4_gradient_stochastic_rounding
+# controls separately. The MXFP4 recipe is validated at 2. Read by the recipe as
+# mxfp4_scale_rounding_mode; Turbo builds from before the UoS work took it as an
+# environment variable of the same name instead.
+export PRIMUS_TURBO_MXFP4_SCALE_ROUNDING="${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING:-2}"
 
 export HSA_ENABLE_INTERRUPT=0
 export HSA_NO_SCRATCH_RECLAIM=1
@@ -63,6 +68,16 @@ export NCCL_NCHANNELS_PER_NET_PEER=32
 export NCCL_NVLS_ENABLE=0
 export NCCL_CHECKS_DISABLE=1
 export TORCH_NCCL_HIGH_PRIORITY=1
+
+# Route distributed-optimizer parameter AllGather through the dedicated
+# zero-CTA RCCL communicator backed by symmetric memory. The eager allocation
+# size is the validated GPT-OSS-20B reservation for this 8x MI355X recipe.
+export MEGATRON_PARAM_GATHER_BACKEND="${MEGATRON_PARAM_GATHER_BACKEND:-rccl_sdma}"
+export MEGATRON_RCCL_SDMA_EAGER_PARAM_BYTES="${MEGATRON_RCCL_SDMA_EAGER_PARAM_BYTES:-40978350080}"
+
+# More than one synthetic warmup step can exceed memory headroom while the
+# approximately 41 GB symmetric parameter buffer is resident.
+export SYNTH_WARMUP_STEPS="${SYNTH_WARMUP_STEPS:-1}"
 
 export USE_HIPBLASLT=1
 export TORCH_BLAS_PREFER_HIPBLASLT=1
@@ -101,7 +116,9 @@ export MLLOG_EXPERT_PARALLELISM=1
 export MLLOG_MICRO_BATCH_SIZE=4
 MLLOG_CONFIG_FILENAME=$(basename "${BASH_SOURCE[0]}")
 export MLLOG_CONFIG_FILENAME
-export MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR="${MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR:-fp8}"
+export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR="${MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR:-fp8}"
+export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN="${MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN:-bfloat16}"
+export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM="${MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM:-bfloat16}"
 
 export MOE_SKIP_IDENTITY_SORT=1
 export PRIMUS_FUSED_RESIDUAL_NORM=1

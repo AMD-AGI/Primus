@@ -5,7 +5,9 @@
 ###############################################################################
 
 
+import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -15,6 +17,58 @@ from typing import Optional
 from primus.core.utils import logger
 
 TRAINING_COMPLETED_MARKER = "Training completed."
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# Per-step metric lines, one pattern per backend log format:
+#   torchtitan: "step:  1  loss: 12.78468  grad_norm:     nan  memory: ..."
+#   megatron:   "iteration  3/  3 | ... | lm loss: 1.17E+01 | ... | grad norm: 5.885 | ..."
+_STEP_METRIC_RES = (
+    re.compile(r"\bstep:\s*(?P<step>\d+)\b.*?\bloss:\s*(?P<loss>\S+).*?\bgrad_norm:\s*(?P<grad>\S+)"),
+    re.compile(
+        r"\biteration\s*(?P<step>\d+)\s*/.*?\blm loss:\s*(?P<loss>\S+).*?\bgrad norm:\s*(?P<grad>\S+)"
+    ),
+)
+
+
+def assert_finite_training_metrics(tag: str, log_text: str) -> int:
+    """Fail when any logged per-step loss or grad norm is NaN/Inf.
+
+    A training run that diverges numerically still exits 0 and still prints the
+    "Training completed." marker, so without this check such a run passes as a
+    green test. Returns the number of steps that were checked; 0 means the log
+    had no recognizable metric lines, which is not treated as a failure so that
+    backends with other log formats keep working.
+    """
+    plain = _ANSI_ESCAPE_RE.sub("", log_text)
+
+    checked = 0
+    bad: list[str] = []
+    for line in plain.splitlines():
+        if "loss:" not in line:  # the vast majority of log lines; skip the regexes
+            continue
+        for pattern in _STEP_METRIC_RES:
+            match = pattern.search(line)
+            if match is None:
+                continue
+            checked += 1
+            for field in ("loss", "grad"):
+                raw = match.group(field).rstrip("|,")
+                try:
+                    value = float(raw)
+                except ValueError:
+                    continue
+                if not math.isfinite(value):
+                    bad.append(f"step {match.group('step')}: {field}={raw}")
+            break
+
+    if bad:
+        raise AssertionError(
+            f"[{tag}] Training reported non-finite metrics, so the run diverged even "
+            f"though the process exited 0: {', '.join(bad[:8])}"
+        )
+
+    return checked
 
 
 def skip_if_no_cuda(reason: str = "requires GPU (primus_turbo initializes CUDA at import)") -> None:
@@ -97,6 +151,7 @@ def run_training_script(
     cmd: list[str],
     train_log_path: str,
     env: Optional[dict] = None,
+    check_metrics: bool = True,
 ) -> tuple[str, str]:
     """Execute a training command and validate that training completed successfully.
 
@@ -110,6 +165,7 @@ def run_training_script(
         cmd: Command to execute (passed to subprocess.run).
         train_log_path: Path to the training log file written by the launcher.
         env: Environment variables for the subprocess.
+        check_metrics: Also require every logged loss and grad norm to be finite.
 
     Returns:
         (stdout_output, stderr_output) tuple where stdout_output is the
@@ -150,6 +206,9 @@ def run_training_script(
                 f"not found in log output. Training may have failed silently.\n"
                 f"Log file: {train_log_path}"
             )
+
+        if check_metrics:
+            assert_finite_training_metrics(tag, stdout_output)
 
         return stdout_output, ""
 

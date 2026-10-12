@@ -38,6 +38,7 @@ Core workflows and day-to-day usage.
 - [Environment and XLA flags](./02-user-guide/environment-and-xla-flags.md): where to set env vars, how to override `XLA_FLAGS` safely, how to verify what took effect
 - [Pretraining](./02-user-guide/pretraining.md): pretraining **concepts**: backends, YAML structure, parallelism, configuration inventory
 - [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
+- [SpecForge (capture / offline train / online train)](../examples/specforge/README.md): `primus-cli` entrypoint; `specforge_mode` is `train` or `capture`, and train requires `specforge_train_mode: offline` or `online`. YAML / env / CLI: [CONFIGURATION.md](../examples/specforge/CONFIGURATION.md)
 - [Megatron-LM training performance validation](./02-user-guide/megatron-lm-training.md): reproduce the published Megatron backend benchmarks on the `rocm/primus` image
 - [TorchTitan training performance validation](./02-user-guide/torchtitan-training.md): reproduce the published TorchTitan backend benchmarks on the `rocm/primus` image
 - [JAX MaxText training performance validation](./02-user-guide/jax-maxtext-training.md): reproduce the AMD-published MaxText benchmarks via Primus, MAD, or the standalone scripts
@@ -56,6 +57,7 @@ Parameter references for Primus presets, backend-facing keys, and commonly used 
 - [TorchTitan parameters](./03-configuration-reference/torchtitan-parameters.md): Primus TorchTitan preset keys and common JobConfig fields
 - [MaxText parameters](./03-configuration-reference/maxtext-parameters.md): Primus MaxText overlay defaults and common fields
 - [Megatron Bridge parameters](./03-configuration-reference/megatron-bridge-parameters.md): Megatron Bridge recipe, SFT, and pretraining fields surfaced through Primus
+- [SpecForge YAML, env, and CLI](../examples/specforge/CONFIGURATION.md): Primus-owned SpecForge fields; SpecForge Hydra stays in SpecForge docs
 - [Environment variables](./03-configuration-reference/environment-variables.md): practical reference for commonly encountered environment variables
 
 ### [Technical guides](./04-technical-guides/)
@@ -78,6 +80,7 @@ Deep technical topics for advanced users.
 - [Determinism and reproducibility](./04-technical-guides/determinism-and-reproducibility.md): deterministic mode, seeds, trade-offs
 - [Diffusion models](./04-technical-guides/diffusion-models/README.md): Flux diffusion architecture, data pipeline, and FP8 / MXFP4 training
 - [Native SFT and LoRA](./04-technical-guides/native-sft-lora.md): Megatron-native SFT/LoRA runbook (BF16 / FP8 / FP4), no Megatron-Bridge dependency
+- [Native SFT LoRA on MI455X](./04-technical-guides/LoRA_Native_Trainer_MI455_README.md): 1-GPU gfx1250 native LoRA recipes and launch notes
 
 ### [Operations](./05-operations/)
 
@@ -102,6 +105,12 @@ For contributors and maintainers.
 - [Backend patch notes](./06-developer-guide/backend-patch-notes.md): Primus-specific backend arguments and the files they patch
 - [Tooling](./06-developer-guide/tooling.md): auxiliary analysis, benchmarking, visualization, and diagnostics tools
 
+### [Technical blogs](./07-technical-blogs/)
+
+Long-form articles on the reasoning behind Primus features, most of them published on ROCm Blogs.
+
+- [Blog index](./07-technical-blogs/README.md): every Primus article, published and in progress, with the documentation each one maps to
+
 ---
 
 ## Common use cases
@@ -116,6 +125,7 @@ For contributors and maintainers.
 | Run my first training | [Quickstart](./01-getting-started/quickstart.md) |
 | Find out what is inside a training image | [Release notes](./01-getting-started/release-notes.md) |
 | Get an exact run command for my model/GPU | [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md) |
+| Train a SpecForge drafter on ROCm | [SpecForge on Primus](../examples/specforge/README.md) |
 | Write a training YAML configuration | [Configuration system](./02-user-guide/configuration-system.md) |
 | Look up a Megatron parameter | [Megatron parameters](./03-configuration-reference/megatron-parameters.md) |
 | Look up a TorchTitan parameter | [TorchTitan parameters](./03-configuration-reference/torchtitan-parameters.md) |
@@ -127,6 +137,7 @@ For contributors and maintainers.
 | Use the fused MegaMoE layer | [MegaMoE fused MoE layer](./04-technical-guides/mega-moe.md) |
 | Train a diffusion (Flux) model | [Diffusion models](./04-technical-guides/diffusion-models/README.md) |
 | Fine-tune with native SFT / LoRA | [Native SFT and LoRA](./04-technical-guides/native-sft-lora.md) |
+| Run native LoRA on MI455X (gfx1250) | [Native SFT LoRA on MI455X](./04-technical-guides/LoRA_Native_Trainer_MI455_README.md) |
 | Auto-tune my training configuration | [Tuning agent](./02-user-guide/tuning-agent.md) |
 | Profile a training run | [Profiling and observability](./04-technical-guides/profiling-and-observability.md) |
 | Track experiments (WandB/MLflow/TensorBoard) | [Logging and experiment tracking](./04-technical-guides/logging-and-experiment-tracking.md) |
@@ -138,11 +149,14 @@ For contributors and maintainers.
 | Contribute to Primus | [Contributing](./06-developer-guide/contributing.md) |
 | Understand the code architecture | [Architecture](./06-developer-guide/architecture.md) |
 | Add a new training backend | [Extending backends](./06-developer-guide/extending-backends.md) |
+| Read the technical blogs behind a feature | [Blog index](./07-technical-blogs/README.md) |
+| Cite Primus in a paper | [Citation](https://github.com/AMD-AGI/Primus#-citation) |
 
 ---
 
 ## External resources
 
+- [ROCm Blogs](https://rocm.blogs.amd.com/): where the Primus technical articles are published
 - [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo): high-performance operators and kernels
 - [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE): external stability/platform layer; this repository does not include a production integration guide
 - [AMD ROCm documentation](https://rocm.docs.amd.com/)

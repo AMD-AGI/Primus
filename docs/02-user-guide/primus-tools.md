@@ -19,6 +19,7 @@ point; follow a tool's link for the full reference.
 | [model_stats](https://github.com/AMD-AGI/Primus/blob/main/tools/model_stats/README.md) | Auxiliary | Chart model dimensions from the config registry. | See the [README](https://github.com/AMD-AGI/Primus/blob/main/tools/model_stats/README.md) |
 | [Pipeline visualization](https://github.com/AMD-AGI/Primus/blob/main/tools/visualization/pp_vis/README.md) | Auxiliary | Render pipeline-parallel schedules in a local web UI. | See the [README](https://github.com/AMD-AGI/Primus/blob/main/tools/visualization/pp_vis/README.md) |
 | [Auto benchmark](https://github.com/AMD-AGI/Primus/blob/main/tools/auto_benchmark/Primus_Auto_Benchmark_README.md) | Auxiliary | Interactive Megatron/TorchTitan benchmark menu with metrics collection. | See the [README](https://github.com/AMD-AGI/Primus/blob/main/tools/auto_benchmark/Primus_Auto_Benchmark_README.md) |
+| [Perf batch runner](https://github.com/AMD-AGI/Primus/blob/main/tools/perf/README.md) | Auxiliary | Non-interactive batch benchmarking across all backends, single and multi-node, recording per-run provenance and extracting results to CSV. | `GPU=MI325X BACKEND=megatron bash tools/perf/run_batch.sh` |
 
 ---
 

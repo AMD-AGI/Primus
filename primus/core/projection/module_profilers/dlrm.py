@@ -216,9 +216,11 @@ class DLRMProfiler(BaseModuleProfiler):
     def _mlp_step_ms(self, layers: List[Tuple[int, int]], batch: int, dtype: str) -> Tuple[float, float]:
         fwd = bwd = 0.0
         for in_dim, out_dim in layers:
-            g = self._gemm_backend.simulate_gemm(batch, out_dim, in_dim, dtype=dtype)
-            fwd += g.forward_time_ms
-            bwd += g.backward_time_ms or (2.0 * g.forward_time_ms)
+            fwd += self._gemm_backend.simulate_gemm(batch, out_dim, in_dim, dtype=dtype).forward_time_ms
+            # dgrad: dY [batch, out] x W^T [out, in] -> dX [batch, in]
+            bwd += self._gemm_backend.simulate_gemm(batch, in_dim, out_dim, dtype=dtype).forward_time_ms
+            # wgrad: X^T [in, batch] x dY [batch, out] -> dW [in, out]
+            bwd += self._gemm_backend.simulate_gemm(in_dim, out_dim, batch, dtype=dtype).forward_time_ms
         return fwd, bwd
 
     def _embedding_a2a_ms(self, batch: int, seq_len: int) -> float:

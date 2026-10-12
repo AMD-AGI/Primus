@@ -32,7 +32,7 @@ Loss trajectories overlap from iter ~2000 onward; the only persistent gap is in 
 - [Prerequisites](#prerequisites)
 - [Step 1: Environment](#step-1-environment)
 - [Step 2: Dataset preparation](#step-2-dataset-preparation)
-- [Step 3: Apply Megatron-LM patches](#step-3-apply-megatron-lm-patches)
+- [Step 3: Apply Megatron-LM patches](#step-3-megatron-lm-patches-automatic--no-action-needed)
 - [Step 4: (Optional) Initialize from FLA weights](#step-4-optional-initialize-from-fla-weights)
 - [Step 5: Train](#step-5-train)
 - [Step 6: Monitor and compare against FLA](#step-6-monitor-and-compare-against-fla)
@@ -260,6 +260,11 @@ The architecture-only YAML it extends from is `[primus/configs/models/megatron/g
   -- train pretrain \
   --config examples/megatron/configs/MI300X/gdn_300M_BF16-pretrain.yaml
 ```
+
+The FLA Triton autotune workaround (the `megatron.fla.kda_safe_autotune` patch)
+does **not** fire for GDN: it narrows the autotune space of FLA's KDA
+intra-chunk kernels, which a GDN run never reaches — GDN goes through
+`fla/ops/common/chunk_h.py`, which AMD Triton compiles without trouble.
 
 This brings up `torchrun` with 8 ranks on the local node. Expected wall time on a healthy MI300X box: **~1h 54m** for the full 4768 iters.
 
@@ -526,7 +531,6 @@ primus/backends/megatron/core/models/hybrid/
 ├── hybrid_block.py                                    ← HybridStack, fp32-residual + fusion
 └── hybrid_mamba_mla_layer_specs.py                    ← gdn_hybrid_stack_spec_no_te
 tools/hybrid/
-├── patch_fla_triton_autotune_hang.sh                  ← MI300X FLA Triton autotune-hang workaround
 ├── convert_fla_to_megatron.py                         ← FLA Arrow → Megatron .bin/.idx
 ├── fla_order_dataset.py                               ← FLA-order dataset shim
 ├── convert_gdn_to_fla_hf.py                           ← Megatron → FLA HF (handles TE + no-TE)
@@ -574,6 +578,6 @@ Expected with all four `PRIMUS_FLA_`* env vars set. The biggest single cost is `
 
 ## See also
 
-- `[docs/04-technical-guides/hybrid-models/README.md](README.md)` — full Hylo hybrid family overview (1B / 3B / 8B Mamba+MLA, KDA variants)
+- `[docs/04-technical-guides/hybrid-models/README.md](README.md)` — full Zebra hybrid family overview (1B / 3B / 8B Mamba+MLA, KDA variants)
 - `[gdn-fla-parity.md](gdn-fla-parity.md)` — exhaustive list of code/config/runtime changes that made parity possible
 - FLA upstream: [https://github.com/fla-org/flash-linear-attention](https://github.com/fla-org/flash-linear-attention)
