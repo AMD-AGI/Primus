@@ -136,7 +136,7 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
         from primus.core.utils.import_utils import get_model_provider
 
-        # Determine model type (gpt / mamba / deepseek_v4 / kimi_k3 / zaya1 / diffusion)
+        # Determine model type (gpt / mamba / deepseek_v4 / kimi_k3 / zaya1 / glm5_next / diffusion)
         # from backend_args
         model_type = getattr(self.backend_args, "model_type", "gpt")
         log_rank_0(f"-detected model_type: {model_type}")
@@ -193,6 +193,14 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             )
 
             log_rank_0("Using ZAYA1 model provider; reusing pretrain_gpt forward_step + datasets")
+            train_valid_test_datasets_provider.is_distributed = True
+        elif model_type == "glm5_next":
+            from pretrain_gpt import (  # type: ignore
+                forward_step,
+                train_valid_test_datasets_provider,
+            )
+
+            log_rank_0("Using GLM5-Next model provider; reusing pretrain_gpt forward_step + datasets")
             train_valid_test_datasets_provider.is_distributed = True
         else:
             # Use overridable methods so subclasses (e.g. diffusion/Flux) can plug in their own

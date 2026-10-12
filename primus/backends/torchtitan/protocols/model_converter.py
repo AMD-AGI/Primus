@@ -19,8 +19,8 @@ class ModelConvertersContainer(TTModelConvertersContainer):
         super().__init__(job_config=job_config, parallel_dims=parallel_dims)
 
         if job_config.primus_turbo.enable_primus_turbo:
-            self.primus_turbo_entension(job_config, ParallelDims)
+            self.primus_turbo_extension(job_config, ParallelDims)
 
-    def primus_turbo_entension(self, job_config, ParallelDims):
-        # Append different converts according to the primus turbo config.
+    def primus_turbo_extension(self, job_config, ParallelDims):
+        # Append different converters according to the primus turbo config.
         self.converters.append(registry_model_converter_cls["primus_turbo"](job_config, ParallelDims))

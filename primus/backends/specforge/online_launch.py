@@ -21,6 +21,7 @@ import os
 import re
 import socket
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -517,6 +518,39 @@ def write_status(path: Path, value: str) -> None:
 
 def read_status(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip()
+
+
+def wait_for_status(path: Path, timeout_s: int = 1800, interval_s: float = 2.0) -> str:
+    """Block until ``path`` exists, then return its stripped contents."""
+
+    started = time.time()
+    while not path.exists():
+        if time.time() - started >= timeout_s:
+            raise RuntimeError(f"[Primus:specforge] timed out waiting for {path}")
+        time.sleep(interval_s)
+    return read_status(path)
+
+
+def rendezvous_head_ip(
+    shared_dir: str | Path,
+    env: Optional[Mapping[str, str]] = None,
+    timeout_s: int = 1800,
+    *,
+    rank: Optional[int] = None,
+) -> str:
+    """Rank 0 writes ``head.ip`` under ``shared_dir``; other ranks wait and read it.
+
+    ``PRIMUS_SPECFORGE_HEAD_IP`` / ``HEAD_IP`` apply only on rank 0. Do not trust
+    Slurm ``MASTER_ADDR``.
+    """
+
+    path = Path(shared_dir) / "head.ip"
+    this_rank = node_rank(env) if rank is None else int(rank)
+    if this_rank == 0:
+        ip = resolve_head_ip(env=env)
+        write_status(path, ip)
+        return ip
+    return wait_for_status(path, timeout_s=timeout_s)
 
 
 def mooncake_env(head_ip: str, settings: Mapping[str, Any], local_ip: str) -> dict[str, str]:
