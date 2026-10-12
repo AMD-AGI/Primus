@@ -128,14 +128,13 @@ def set_heal(plan: HealPlan, count: int, target: str = "mxfp6", seed_from: Optio
                 module._mxfp6_fwd_fp4_healed = position < count
 
 
-_F8_SAVED: List[Tuple[bool, bool]] = []
-
-
 def _f8_pre(module, args, kwargs=None):
     from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import gates
 
     g = gates()
-    _F8_SAVED.append((g.fwd_fp8, g.fwd_fp8_seed))
+    # Saved on the layer itself, so a post-hook can only restore what its own pre-hook saved (an always-call post-hook
+    # also runs when an earlier pre-hook raised and this one never did).
+    module._mxfp6_f8_saved = (g.fwd_fp8, g.fwd_fp8_seed)
     g.fwd_fp8 = bool(getattr(module, "_mxfp6_fwd_fp8_healed", False))
     g.fwd_fp8_seed = g.fwd_fp8 and bool(getattr(module, "_mxfp6_fwd_fp8_seed", False))
 
@@ -143,8 +142,12 @@ def _f8_pre(module, args, kwargs=None):
 def _f8_post(module, args, output):
     from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import gates
 
+    saved = getattr(module, "_mxfp6_f8_saved", None)
+    if saved is None:
+        return
+    module._mxfp6_f8_saved = None
     g = gates()
-    g.fwd_fp8, g.fwd_fp8_seed = _F8_SAVED.pop()
+    g.fwd_fp8, g.fwd_fp8_seed = saved
 
 
 def f8_setup(plan: HealPlan) -> Dict[int, list]:
@@ -176,6 +179,16 @@ def f8_setup(plan: HealPlan) -> Dict[int, list]:
                 layer._mxfp6_f8_hooked = True
         out[idx] = states
     return out
+
+
+def _all_ranks_ok(ok: bool) -> bool:
+    """Whether ``ok`` holds on every rank (one tiny all-reduce; warmup only). A check that fails on one rank alone
+    must not raise there alone: the other ranks would wait in their next collective until the distributed timeout."""
+    if not torch.distributed.is_initialized():
+        return ok
+    t = torch.tensor([1 if ok else 0], dtype=torch.int32, device=torch.cuda.current_device())
+    torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.MIN)
+    return bool(t.item())
 
 
 def f8_coverage(states: Dict[int, list]) -> Tuple[int, List[int]]:
@@ -239,20 +252,39 @@ def prewarm_healed_graphs(models: Sequence[torch.nn.Module], run: Callable[[], N
     states = f8_setup(plan) if target == "fp8" else {}
     before = _unique_graph_count()
     set_heal(plan, len(plan), target, 0 if seed else None)
+    # A block class past Dynamo's per-code-object cache limit would run its healed variant eagerly from then on --
+    # silently, and the global graph counter below cannot tell which code object compiled. Make that an error here,
+    # before the clock starts.
+    import torch._dynamo
+
+    fail_knobs = [k for k in ("fail_on_recompile_limit_hit", "fail_on_cache_limit_hit")
+                  if hasattr(torch._dynamo.config, k)]
+    saved_knobs = {k: getattr(torch._dynamo.config, k) for k in fail_knobs}
+    for k in fail_knobs:
+        setattr(torch._dynamo.config, k, True)
     try:
         run()
         if states and seed and what.startswith("training"):
             used, missed = f8_coverage(states)
             total = sum(len(ss) for ss in states.values())
-            if missed:
-                msg = (f"mxfp6_fwd_fp4_heal: {total - used} of {total} linear weights in the healed layers did not run "
-                       f"the FP8 forward (no aiter FP8 kernel for their GEMM shapes); layers {sorted(missed)}")
+            if not _all_ranks_ok(not missed):
+                msg = (f"mxfp6_fwd_fp4_heal: linear weights in the healed layers did not run the FP8 forward on some "
+                       f"rank (no aiter FP8 kernel for their GEMM shapes); here {total - used} of {total}, layers "
+                       f"{sorted(missed)}")
                 if strict:
                     raise RuntimeError(msg)
                 _log("WARNING: " + msg)
             else:
                 _log(f"All {total} linear weights of the healed layers ran the FP8 forward")
+            # The step-boundary scale update, with its all-reduce over every rank: run once here, so the first time
+            # the timed run issues it is not the first time ever.
+            from primus.backends.megatron.core.extensions.primus_turbo_mxfp6_local import f8_step
+
+            f8_step([st for ss in states.values() for st in ss], 0,
+                    torch.distributed.group.WORLD if torch.distributed.is_initialized() else None)
     finally:
+        for k, v in saved_knobs.items():
+            setattr(torch._dynamo.config, k, v)
         set_heal(plan, 0, target)
         for ss in states.values():
             for st in ss:
@@ -264,7 +296,7 @@ def prewarm_healed_graphs(models: Sequence[torch.nn.Module], run: Callable[[], N
     if before < 0 or after < 0:
         _log(f"WARNING: could not read Dynamo's graph counter; healed {what} pre-warm unverified")
         return
-    if after <= before:
+    if not _all_ranks_ok(after > before):
         raise RuntimeError(
             f"mxfp6_fwd_fp4_heal: the healed {what} pre-warm compiled no new graph (unique_graphs stayed at {after}). "
             "Dynamo did not guard _mxfp6_fwd_fp4_healed, so the switch would leave the MXFP4 forward running."
@@ -279,6 +311,8 @@ def _report_heal(args, iteration: Optional[int], healed: int, total: int, target
     _log(f"iteration={iteration}: {healed}/{total} {what}; peak allocated {peak_gib:.2f} GiB")
     if not getattr(args, "mlperf_mode", False):
         return
+    if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+        return  # the result log is rank 0's, as for every other MLPerf record
     try:
         from mlperf_logging import mllog
 

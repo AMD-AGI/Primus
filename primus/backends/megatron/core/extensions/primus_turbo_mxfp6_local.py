@@ -413,6 +413,9 @@ except ImportError:
     _F8_CAT, gemm_fp8_ts_cat_gres_out = frozenset(), None
 
 _F8_MAX = 448.0  # E4M3's largest finite value
+# amax floor: below it a tensor quantizes to zero codes anyway. High enough that a dequant factor (amax / 448) and the
+# product of two of them stay normal fp32 -- the FP8 cat GEMM divides one segment's product by the other's.
+_F8_AMAX_FLOOR = 1e-12
 
 
 def f8_available() -> bool:
@@ -463,16 +466,19 @@ def f8_step(states, slot: int, group=None) -> None:
     if not states:
         return
     amax = [s.amax[r] for s in states for r in F8State.ROLES]
+    flat = torch.cat(amax)
     if group is not None and torch.distributed.is_initialized() and torch.distributed.get_world_size(group) > 1:
-        flat = torch.cat(amax)
         torch.distributed.all_reduce(flat, op=torch.distributed.ReduceOp.MAX, group=group)
-        torch._foreach_copy_(amax, list(flat.split(1)))
+    # An inf amax (an overflowed step) is not recorded: it would set the multiplier to 0 for the whole history window,
+    # and every FP8 forward of the operand would then dequantize 0 * inf = NaN long after that step.
+    flat = torch.where(torch.isfinite(flat), flat, torch.zeros_like(flat))
+    torch._foreach_copy_(amax, list(flat.split(1)))
     hist = [s.hist[r] for s in states for r in F8State.ROLES]
     q = [s.q[r] for s in states for r in F8State.ROLES]
     h = hist[0].numel()
     torch._foreach_copy_([t[slot % h : slot % h + 1] for t in hist], amax)
     mx = torch._foreach_norm(hist, float("inf"))
-    torch._foreach_clamp_min_(mx, 1e-30)
+    torch._foreach_clamp_min_(mx, _F8_AMAX_FLOOR)
     torch._foreach_reciprocal_(mx)
     torch._foreach_mul_(mx, _F8_MAX)  # 448 * (1 / max): fused launches, no per-state constant tensors
     torch._foreach_copy_(q, mx)
@@ -484,7 +490,7 @@ def _f8_q(w, role, seed_src):
     FP8 step) 448 / amax of the operand itself (``seed_src()``)."""
     if gates().fwd_fp8_seed:
         amax = seed_src().detach().abs().amax().float().reshape(1)
-        return _F8_MAX / amax.clamp_min(1e-30)
+        return _F8_MAX / amax.clamp_min(_F8_AMAX_FLOOR)
     return w._mxfp6_f8.q[role]
 
 

@@ -155,8 +155,9 @@ def _detach_mllog_handlers():
         handler.close()
 
 
-def _drive_a_run(mt, eval_losses):
-    """Walk the run through the same call sequence Megatron would."""
+def _drive_a_run(mt, eval_losses, on_step=None):
+    """Walk the run through the same call sequence Megatron would. ``on_step(iteration)`` runs before each logged
+    step's training_log (where a train_step wrapper would act)."""
     for module in (
         "primus.backends.megatron.patches.mlperf_logging_patches",
         "primus.backends.megatron.patches.mlperf_warmup_patches",
@@ -177,6 +178,8 @@ def _drive_a_run(mt, eval_losses):
     for loss in eval_losses:
         for _ in range(EVAL_INTERVAL // 10):
             iteration += 10
+            if on_step is not None:
+                on_step(iteration)
             mt.training_log({"loss": 1.2}, {}, 2e-4, iteration, 1.0, False, False, 0.0, None, 0, None)
 
         mt.evaluate = lambda *a, _loss=loss, **k: ({"loss": _loss},)
@@ -318,3 +321,27 @@ def test_a_run_without_a_terminal_record_is_rejected(monkeypatch, caplog, _run_e
         assert not _check(without_run_stop)
 
     assert any("run_stop" in record.message for record in caplog.records)
+
+
+def test_the_forward_healing_record_keeps_the_log_valid(monkeypatch, _run_environment):
+    """The forward-healing switch writes one ``mxfp6_fwd_fp4_heal`` point-in-time record between run_start and
+    run_stop (a key the ruleset does not know). The checker must still accept a converged run that carries it."""
+    log_path = _run_environment
+    mt, _ = _install_fake_megatron(monkeypatch)
+    mt.evaluate_and_print_results = lambda *a, **k: mt.evaluate(*a, **k)
+
+    from primus.backends.megatron.patches import mxfp6_fwd_fp4_heal_patches as H
+
+    healed_at = []
+
+    def on_step(iteration):  # the first logged step past the first evaluation
+        if iteration > EVAL_INTERVAL and not healed_at:
+            healed_at.append(iteration)
+            H._report_heal(SimpleNamespace(mlperf_mode=True), iteration, 57, 57, "fp8")
+
+    _drive_a_run(mt, eval_losses=[0.9, 0.7, 0.5], on_step=on_step)
+
+    assert _values(log_path, "mxfp6_fwd_fp4_heal") == [
+        {"iteration": healed_at[0], "layers_healed": 57, "layers_total": 57, "target": "fp8"}
+    ]
+    assert _check(log_path), log_path.read_text()

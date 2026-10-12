@@ -264,7 +264,7 @@ class TestFp8Plan:
         reset(Mxfp6Gates())
         outer()
         assert seen == [(False, False), (True, True)]
-        assert (gates().fwd_fp8, gates().fwd_fp8_seed) == (False, False) and not H._F8_SAVED
+        assert (gates().fwd_fp8, gates().fwd_fp8_seed) == (False, False)
 
 
 class TestF8Step:
@@ -278,11 +278,28 @@ class TestF8Step:
             L.f8_step([a, b], slot)
             assert a.amax["a"].item() == a.amax["w"].item() == b.amax["a"].item() == 0
         assert a.q["a"].item() == 448.0 / 8.0 and a.q["w"].item() == 448.0 / 0.5 and b.q["a"].item() == 448.0 / 4.0
-        assert 1e30 < b.q["w"].item() < float("inf")  # never seen: finite (a seed step precedes any real use)
+        assert b.q["w"].item() == pytest.approx(448.0 / 1e-12, rel=1e-6)  # never seen: the amax floor
         for slot in range(3, 7):  # the ring forgets the old maxima
             a.amax["a"].fill_(1.0)
             L.f8_step([a], slot)
         assert a.q["a"].item() == 448.0
+
+    def test_an_inf_amax_is_not_recorded(self):
+        L = _L()
+        st = L.F8State("cpu", history=4)
+        st.amax["a"].fill_(2.0)
+        L.f8_step([st], 0)
+        st.amax["a"].fill_(float("inf"))
+        L.f8_step([st], 1)
+        assert st.q["a"].item() == 448.0 / 2.0  # the overflowed step left the multiplier alone
+        assert torch.isfinite(st.hist["a"]).all() and st.amax["a"].item() == 0
+
+    def test_dequant_factors_stay_normal_for_a_zero_operand(self):
+        L = _L()
+        st = L.F8State("cpu")
+        L.f8_step([st], 0)  # nothing seen: amax 0
+        inv = 1.0 / st.q["a"]
+        assert (inv * inv).item() > torch.finfo(torch.float32).tiny  # a product of two still a normal fp32
 
     def test_reset(self):
         L = _L()
@@ -398,7 +415,17 @@ class TestFp8Hardening:
         reset(Mxfp6Gates())
         with pytest.raises(ValueError):
             layer()
-        assert (gates().fwd_fp8, gates().fwd_fp8_seed) == (False, False) and not H._F8_SAVED
+        assert (gates().fwd_fp8, gates().fwd_fp8_seed) == (False, False)
+
+    def test_post_hook_without_its_pre_hook_changes_nothing(self):
+        from primus.backends.megatron.core.models.diffusion.common.mxfp6_gates import Mxfp6Gates, gates, reset
+
+        reset(Mxfp6Gates(fwd_fp8=True))
+        try:
+            H._f8_post(torch.nn.Module(), (), None)  # an earlier pre-hook raised before _f8_pre ran
+            assert gates().fwd_fp8
+        finally:
+            reset(Mxfp6Gates())
 
     def test_grouped_mlp_steps_aside_under_fp8(self):
         L = _L()
