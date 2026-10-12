@@ -31,7 +31,10 @@ from megatron.core.transformer.moe.experts import (
 )
 from megatron.core.utils import get_te_version, is_te_min_version
 
-from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
+try:
+    from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
+except ImportError:
+    PrimusGroupedMLP = None  # Bridge Megatron-LM lacks MoE offload APIs; dense Llama-2 unused
 from primus.backends.megatron.training.global_vars import get_primus_args
 
 try:
