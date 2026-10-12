@@ -28,8 +28,8 @@
 # This module should be imported as early as possible in the recipe to
 # suppress logs emitted during model construction and training.
 # ---------------------------------------------------------------------------
-import logging as _logging
 import os as _os
+import logging as _logging
 
 VERBOSE_LOGS = _os.environ.get("MLLOG_VERBOSE_LOGS", "0") == "1"
 
@@ -44,7 +44,7 @@ QUIET_LOGGER_NAMES = (
     "primus",
     "primus.cli",
     "primus.backends",
-    "primus.core",
+    "primus.modules",
 )
 
 
@@ -68,7 +68,8 @@ def _configure_env_and_loggers() -> None:
 def _install_fd_level_fallback_filter() -> None:
     """Last-resort line filter for logs that bypass Python ``logging``.
 
-    * FD 2 (stderr) -> left untouched unless MLLOG_SUPPRESS_STDERR=1 (/dev/null).
+    * FD 2 (stderr) -> /dev/null (only torchrun OMP_NUM_THREADS and hipify
+      banners land there; no MLLOG signal).
     * FD 1 (stdout) -> pipe + reader thread that applies regex suppression.
       ``:::MLLOG`` lines always pass through unconditionally.
     """
@@ -88,10 +89,6 @@ def _install_fd_level_fallback_filter() -> None:
             # hipblaslt latency warnings (ROCm)
             r"Warning: Latency not found for MI_M=",
             r"Returning latency value of 32 \(really slow\)",
-            r"Warning: Stream-K Data Parallel does not support GSU",
-            r"^libibverbs: Warning:",
-            r"^\[WARNING\] Field \"",
-            r"`torch_dtype` is deprecated",
             r"^(?:\s*(?:BFloat8Float8_fnuz|Float8_fnuz|,\s*(?:MI_[MNK]|mi_input_type)=\d*|\d+)\s*)+\.?\s*$",
             # Gloo C++ peer-connect banners
             r"\[Gloo\] Rank \d+ is connected to ",
@@ -190,10 +187,9 @@ def _install_fd_level_fallback_filter() -> None:
 
     orig_stdout_fd = _os.dup(1)
 
-    if _os.environ.get("MLLOG_SUPPRESS_STDERR", "0") == "1":
-        devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
-        _os.dup2(devnull_fd, 2)
-        _os.close(devnull_fd)
+    devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
+    _os.dup2(devnull_fd, 2)
+    _os.close(devnull_fd)
 
     stdout_r, stdout_w = _os.pipe()
     _os.dup2(stdout_w, 1)
