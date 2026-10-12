@@ -21,9 +21,8 @@ via:
         [--backend_path <override>] \
         [<extra CLI args>...]
 
-It is the primus-cli counterpart of the MaxDiffusion branch in
-``examples/run_pretrain.sh``: both launch paths must agree on the launcher mode,
-the backend checkout location, and the JAX multi-node coordinator.
+It decides the launcher mode, the backend checkout location, and the JAX
+multi-node coordinator for MaxDiffusion runs.
 """
 
 import argparse
@@ -98,8 +97,7 @@ def emit_env_if_unset(name: str, value: str) -> None:
     """Emit an ``env.<name>=<value>`` line unless the variable is already set.
 
     ``execute_hooks.sh`` exports every emitted line unconditionally, so guarding
-    here is what preserves the outer-env-wins precedence that the equivalent
-    ``${VAR:-default}`` assignments in ``examples/run_pretrain.sh`` provide.
+    here is what lets a value already set in the outer environment win.
     """
     if os.environ.get(name):
         log_info(f"{name} already set to '{os.environ[name]}'; leaving it untouched")
