@@ -1,85 +1,83 @@
-# DeepSeek-V3 proxy on MI455X (gfx1250)
+# DeepSeek-V3 proxy on MI455X
 
-The 4-GPU DeepSeek-V3 proxy of the internal GFX1250 runbook v3 (§3), plus a 1-GPU variant, run with
-the Primus `direct` launcher. Runs happen in a container that maps only the selected GPUs, and
-Primus-Turbo can come from a local checkout.
+DeepSeek-V3 MoE proxy pretraining on one node of 4x MI455X (gfx1250): full DeepSeek-V3 layer shapes
+(MLA, hidden 7168), 4 MoE layers of 128 experts, EP4, seq 4096, BF16, mock data, no activation
+recompute. The config is
+`examples/megatron/configs/MI455X/deepseek_v3-BF16-pretrain.yaml`.
 
-| File | Runs on | Purpose |
-| --- | --- | --- |
-| `start_container_mi455x.sh` | host | Starts a container that sees only the selected GPUs (not privileged). |
-| `prepare_container_mi455x.sh` | container, as root, once | Patches Triton's gfx1250 expert scheduling off. With `TURBO_DIR`, also builds that Primus-Turbo checkout and pip-installs the flydsl it pins (network, or a wheel via `FLYDSL_SPEC`). |
-| `run_deepseek_v3_proxy_mi455x.sh` | container | The launcher. Preset `ep4_4gpu` (default) or `ep1_1gpu`. |
+| File | Purpose |
+| --- | --- |
+| `run_deepseek_v3_proxy_mi455x.sh` | Launcher. With `PRIMUS_LAUNCHER=container` (default) it runs from the host in a new container of `DOCKER_IMAGE`; with `PRIMUS_LAUNCHER=direct` it runs inside the current container. |
+| `prepare_mi455x.sh` | Optional host-side setup. `TURBO_DIR` builds a Primus-Turbo checkout for the image, and `CONTAINER` starts a container for direct runs. |
 
-## Quick start
-
-From the Primus checkout on the host:
+## Run
 
 ```bash
-GPUS=0,1,2,3 NAME=primus-dsv3-4gpu MOUNTS=/path/to/Primus-Turbo \
-    bash examples/megatron/models/deepseek-v3/start_container_mi455x.sh
-docker exec -e TURBO_DIR=/path/to/Primus-Turbo primus-dsv3-4gpu \
-    bash examples/megatron/models/deepseek-v3/prepare_container_mi455x.sh
-docker exec -u "$(id -u):$(id -g)" -e TURBO_DIR=/path/to/Primus-Turbo primus-dsv3-4gpu \
+# On the host, with the image's Primus-Turbo
+bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
+
+# With a Primus-Turbo checkout instead (built once)
+TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/deepseek-v3/prepare_mi455x.sh
+TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
+
+# Inside a container
+CONTAINER=dsv3 bash examples/megatron/models/deepseek-v3/prepare_mi455x.sh
+docker exec -it dsv3 bash
+PRIMUS_LAUNCHER=direct bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
+```
+
+**Settings** are environment variables:
+
+- Parallelism and size: `GPUS_PER_NODE`, `HIP_VISIBLE_DEVICES`, `PRIMUS_TP`, `PRIMUS_PP`, `PRIMUS_EP`,
+  `PRIMUS_TOTAL_LAYERS`, `PRIMUS_NUM_EXPERTS`, `PRIMUS_MOE_TOPK`.
+- Training: `TRAIN_ITERS`, `MBS`, `GBS`, `PRIMUS_RECOMPUTE_LAYER_IDS` (layers to recompute, e.g. `0,3`;
+  empty, the default, disables recompute).
+- Feature switches: `USE_TURBO_ATTENTION`, `USE_TURBO_GROUPED_GEMM`, `USE_TURBO_DEEPEP`, `MOCK_DATA`.
+- `PROFILE=True` profiles iterations 6–7 (trace under `output/<team>/<user>/<exp>/tensorboard/`).
+
+The defaults are in the script. Arguments to the script are appended to the Primus command line. The
+1-GPU variant:
+
+```bash
+GPUS_PER_NODE=1 PRIMUS_EP=1 PRIMUS_TOTAL_LAYERS=1 PRIMUS_NUM_EXPERTS=32 GBS=16 \
     bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
 ```
 
-- **One GPU.** Use, for example, `GPUS=3`, and run the launcher with `-e PRESET=ep1_1gpu`.
-- **Options.**
-  - Arguments to the launcher are appended to the Primus command line and override the preset, e.g.
-    `--train_iters 20` or `--use_turbo_attention True`.
-  - `-e PROFILE=1` profiles iterations 6–7 on rank 0.
-  - `-e DRY_RUN=1` prints the command without running it.
-  - Without `TURBO_DIR`, the image's `primus_turbo` is used.
-- **Output.** The launcher prints the path of `output/amd/<user>/<exp>/train.log`, the console log (rank
-  0, plus the per-iteration lines, which the last rank prints). Every rank also logs to
-  `logs/pre_trainer/rank-<N>/` in the same directory. Under `docker exec -u <uid>`, `<user>` is the
-  image's name for that uid or, if it has none, `uid<uid>` (Primus reads a numeric user name as an int).
+**Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. Training runs as
+root in both modes (the Triton patch needs it), so the files it creates are owned by root.
 
-The launcher refuses to start in these cases:
+**Triton patch.** Every run applies `runner/helpers/patches/12_fix_triton_expert_scheduling.sh`. It
+turns off Triton's gfx1250 expert scheduling, which otherwise makes Triton kernels fault or return NaN
+at random.
 
-- Triton still enables expert scheduling.
-- `primus_turbo` does not load from `TURBO_DIR`.
-- flydsl is not the version that checkout pins.
-- `HIP_VISIBLE_DEVICES` does not list exactly the preset's number of GPUs or, when it is unset, the
-  container cannot open exactly that many.
+## Reference
 
-If the run succeeds but a kernel in `TRITON_CACHE_DIR` was compiled with expert scheduling, the launcher
-exits with code 3.
+Measured on 4x MI455X with `amdprimus/amdprimus:tas-20261011`, running inside a container. Primus-Turbo
+`dev/mi455x_v1` (a1800137) and the image's Primus-Turbo gave identical results:
 
-`TURBO_DIR` reaches the training processes through `primus-cli direct --env PYTHONPATH=...`.
-`runner/helpers/envs/base_env.sh` puts site-packages in front of an exported `PYTHONPATH`, so an
-exported path would silently lose to the image's `primus_turbo`.
+| Variant | ms/iter | TFLOP/s/GPU | Peak VRAM/GPU | lm loss at iteration 10 |
+| --- | --- | --- | --- | --- |
+| Default (no recompute) | 2202 | 646 | 197–199 GiB | 5.57984 |
+| `PRIMUS_RECOMPUTE_LAYER_IDS=0,3` | 2543 | 558 | 181–191 GiB | 5.57984 |
+| 1-GPU (one MI455X, another node) | 671 | 942 | - | 9.4595 |
 
-## Reference (2026-10-13)
+**Grad norms per iteration.**
 
-Image `amdprimus/amdprimus:tas-20261011`, Primus `dev/mi455x_v1` (ab873556), Primus-Turbo
-`dev/mi455x_v1` (a1800137), 4 × MI455X:
+| Variant | Grad norms, iterations 1–10 |
+| --- | --- |
+| Default | 3.790, 3.758, 3.795, 4.995, 9.034, 10.183, 7.921, 7.203, 6.827, 6.680 |
+| 1-GPU | 3.193, 3.232, 3.314, 3.263, 3.210, 3.713, 3.362, 3.779, 3.329, 3.289 |
 
-| Run | ms/iter | TFLOP/s/GPU | lm loss at iteration 10 |
-| --- | --- | --- | --- |
-| Runbook v3 §3: image Turbo 1d47bb72, privileged `primus-cli container`, Primus commit not recorded | 2500 | 567.8 | 5.580 |
-| `ep4_4gpu`, Turbo a1800137 or the image's 1d47bb72 (same numbers) | 2543 | 558 | 5.57984 |
+**Profile with `PRIMUS_RECOMPUTE_LAYER_IDS=0,3`, rank 0.**
 
-The 1.7% gap is not from Turbo; the host, the Primus commit and the container mode were not compared.
-
-- **Correctness.** 10/10 iterations without a NaN/Inf abort. All six `ep4_4gpu` runs, with either Turbo, logged the same
-  grad norms: 3.790, 3.758, 3.795, 4.995, 9.034, 10.183, 7.921, 7.203, 6.827, 6.680.
-- **`ep1_1gpu`.** 671 ms/iter on one MI455X of another node. Clean runs logged the grad norms 3.193,
-  3.232, 3.314, 3.263, 3.210, 3.713, 3.362, 3.779, 3.329, 3.289 and lm loss 9.4595 at iteration 10.
-- **Profile of `ep4_4gpu`, rank 0.**
-  - TE's unfused attention takes 47% of the GPU compute time.
-  - The MoE all-to-all, about 180 ms per iteration, is not overlapped with compute.
+- Shares of GPU compute time: TE unfused attention 47%, MoE grouped GEMMs 22%, output layer 8%.
+- About 180 ms per iteration of MoE all-to-all is not overlapped with compute.
 
 ## Known issues
 
-- **Attention backends.** On this image, only two backends run MLA (q/k 192, v 128):
-  - TE `UnfusedDotProductAttention`, the default;
-  - Primus-Turbo's Triton backend (`--use_turbo_attention True`).
-
-  aiter/CK, FlyDSL, and TE fused/flash attention do not.
-- **Silent gradient corruption.** 9 of 29 ten-iteration `ep1_1gpu` runs, all on the same MI455X, left
-  the reference grad norms at a random iteration (a wrong value, NaN or Inf). This happened with both
-  attention backends and both Turbo builds. Megatron aborts on NaN/Inf gradients but not on a wrong
-  finite value, and with bf16 its `nan iterations` counter stays 0, so compare grad norms with a
-  reference run. The cause is not known. None of the six `ep4_4gpu` runs (another node) deviated, too
-  few to rule it out there.
+- **Attention backends.** On this image only two attention backends run MLA (q/k 192, v 128): TE
+  `UnfusedDotProductAttention` (default) and Primus-Turbo Triton (`USE_TURBO_ATTENTION=True`).
+- **Silent gradient corruption on one GPU.** 9 of 29 ten-iteration 1-GPU runs left the reference grad
+  norms at a random iteration (a wrong value, NaN or Inf). All of these runs used the same GPU and
+  covered both attention backends. Megatron aborts only on NaN/Inf, so compare grad norms against a
+  reference run. None of six default-variant runs on another node deviated.
