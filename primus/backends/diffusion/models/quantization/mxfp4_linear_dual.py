@@ -1868,28 +1868,36 @@ def _a6w4_act_dual_ok(x_2d: torch.Tensor, cfg: MXFP4LinearConfig, hadamard: torc
     )
 
 
-def _a6w4_gelu_dual_ok(m: int, n: int, k: int, cfg: MXFP4LinearConfig, bias) -> bool:
-    """Whether the fused epilogue can serve this Linear, so the caller keeps its own path."""
+def _a6w4_gelu_dual_ok(m: int, n: int, k: int, cfg: MXFP4LinearConfig, bias, a_pack: int) -> bool:
+    """Whether the fused epilogue can serve this Linear, so the caller keeps its own path.
+
+    It does not ask whether the bias was already in the epilogue: the fused store puts it
+    there itself, and `act_rounded` is what carries the difference that choice made."""
     if not (_FWD_GELU_PACK and cfg.fprop == "a6w4" and bias is not None):
         return False
     from primus_turbo.pytorch.ops.flux_a6w4 import a6w4_gelu_dual_eligible
 
-    return a6w4_gelu_dual_eligible(m, n, k)
+    return a6w4_gelu_dual_eligible(m, n, k, a_pack)
 
 
 @torch.library.custom_op("primus_flux::a6w4_mm_gelu_dual_qa_w", mutates_args=(), device_types="cuda")
 def _a6w4_mm_gelu_dual_qa_w_op(
-    aq: torch.Tensor, sa: torch.Tensor, b: torch.Tensor, bias: torch.Tensor
+    aq: torch.Tensor, sa: torch.Tensor, b: torch.Tensor, bias: torch.Tensor, act_rounded: bool
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """`a6w4_mm_gelu_dual_qa` against a weight still in bf16, as `a6w4_mm_qa` takes it."""
+    """`a6w4_mm_gelu_dual_qa` against a weight still in bf16, as `a6w4_mm_qa` takes it.
+
+    ``act_rounded`` is what the consumer this replaces would have activated: the biased
+    output it read back (1), or the bias-free one plus its own f32 bias add (0)."""
     from primus_turbo.pytorch.ops.flux_a6w4 import a6w4_mm_gelu_dual_qa_prequant_w, quantizers
 
     wq, sb = quantizers()[1](b.to(torch.bfloat16).contiguous())
-    return a6w4_mm_gelu_dual_qa_prequant_w(aq, sa, wq, sb, b.shape[0], bias)
+    return a6w4_mm_gelu_dual_qa_prequant_w(
+        aq, sa, wq, sb, b.shape[0], bias, act_rounded=act_rounded
+    )
 
 
 @_a6w4_mm_gelu_dual_qa_w_op.register_fake
-def _(aq, sa, b, bias):
+def _(aq, sa, b, bias, act_rounded):
     m, n = aq.shape[0], b.shape[0]
     pre = torch.empty(m, n, dtype=torch.bfloat16, device=aq.device)
     r_q = torch.empty(m, n, dtype=torch.uint8, device=aq.device)
@@ -2394,18 +2402,24 @@ class _MXFP4LinearFunction(torch.autograd.Function):
         elif cfg.fprop == "a6w4":
             fuse_gelu = (
                 gelu_dual
-                and fuse_bias
                 and bias is not None
                 and x_a6w4_dual is not None
                 and _a6w4_gelu_dual_ok(
-                    x_a6w4_dual[0].shape[0], weight.shape[0], weight.shape[1], cfg, bias
+                    x_a6w4_dual[0].shape[0],
+                    weight.shape[0],
+                    weight.shape[1],
+                    cfg,
+                    bias,
+                    0 if x_a6w4_dual[0].shape[-1] == weight.shape[1] else 1,
                 )
             )
             if fuse_gelu:
                 out, *packs = _a6w4_mm_gelu_dual_qa_w_op(
-                    x_a6w4_dual[0], x_a6w4_dual[1], weight, bias
+                    x_a6w4_dual[0], x_a6w4_dual[1], weight, bias, fuse_bias
                 )
                 ctx.gelu_dual_packs = tuple(packs)
+                # The epilogue added the bias, so the separate add below must not.
+                fuse_bias = True
             elif x_a6w4_dual is not None:
                 out = _a6w4_mm_qa_op(x_a6w4_dual[0], x_a6w4_dual[1], weight, bias if fuse_bias else None)
             else:
@@ -2725,10 +2739,13 @@ class LazyAct(NamedTuple):
 
     ``dual`` is ``a6w4_act_dual(gelu(act))``, so a consumer holding one has nothing to read
     back; it is None when the producer could not fuse, and then ``act`` behaves exactly as
-    the bare tensor `forward_gelu(lazy=True)` used to return."""
+    the bare tensor `forward_gelu(lazy=True)` used to return. ``rebiased`` says the producer
+    moved its bias into the epilogue to fuse, so ``act`` carries it and only the packs
+    describe what the consumer wanted -- declining them is a wiring fault, not a fallback."""
 
     act: torch.Tensor
     dual: tuple[torch.Tensor, ...] | None = None
+    rebiased: bool = False
 
 
 class _MXFP4LinearGeluInFunction(torch.autograd.Function):
@@ -2947,7 +2964,6 @@ class _MXFP4LinearGeluFunction(torch.autograd.Function):
         )
         packs = ctx.gelu_dual_packs
         if packs is not None:
-            # The act goes out unchanged: it carries the gradient edge either way.
             ctx.mark_non_differentiable(*packs)
             return (preact.reshape(*ctx.x_shape[:-1], preact.shape[1]), *packs)
         if lazy and cfg.fprop == "a6w4":
@@ -3104,7 +3120,11 @@ class MXFP4Linear(nn.Linear):
                 lazy,
             )
             dual = None if packs[0] is None else tuple(packs)
-            return LazyAct(act, dual) if lazy else act
+            # Same predicate `_forward` used, read from this module's own width.
+            rebiased = dual is not None and not _fuse_bias_eligible(
+                self.config, self.out_features, any_width=True
+            )
+            return LazyAct(act, dual, rebiased) if lazy else act
         return torch.nn.functional.gelu(self(x), approximate="tanh")
 
     def lazy_gelu_into(self, consumer: nn.Module, x: torch.Tensor, widths) -> bool:
@@ -3147,12 +3167,17 @@ class MXFP4Linear(nn.Linear):
         ``act_bias``, and the residual gate is ``[B, 1, N]``, not the GELU leg's bias."""
         # The gated Function has no act_bias parameter, so it can only take a lazy act whose
         # producer kept its bias in the GEMM. A6W4 is the case that hands one over.
-        ready = None
+        ready, rebiased = None, False
         if isinstance(act, LazyAct):
-            act, ready = act.act, act.dual
+            act, ready, rebiased = act.act, act.dual, act.rebiased
+        if ready is not None and (attn is not None or act_bias is not None) and rebiased:
+            raise RuntimeError(
+                "a6w4 fused epilogue: the producer moved its bias into the GEMM for this "
+                "consumer, so its act cannot be re-activated here. lazy_gelu_into must not "
+                "offer the fused path to a consumer with another leg or a bias of its own."
+            )
         if ready is not None and (attn is not None or act_bias is not None):
-            # The packs cover this act's columns, bias included, so anything more to
-            # concatenate or add means they do not describe what this consumer needs.
+            # The packs cover this act's columns, bias included, and nothing more.
             ready = None
         if gate is not None and act_bias is None and self._gated_ok(act, gate):
             return _MXFP4GatedLinearGeluInFunction.apply(
