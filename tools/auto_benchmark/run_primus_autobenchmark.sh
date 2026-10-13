@@ -239,9 +239,7 @@ resolve_release_config() {
 load_release_configs() {
     local gpu="$1"
     local backend="$2"
-    local fp8_name="nanoo_fp8"
-    local config_gpu="$gpu"
-    local name path
+    local name
     local -a names=()
 
     # This curated release preset intentionally lives in the auto-benchmark
@@ -284,7 +282,7 @@ load_release_configs() {
                 )
             fi
             for name in "${names[@]}"; do
-                echo "$(resolve_release_config "$MEGATRON_BASE_DIR" "$gpu" "$name")"
+                resolve_release_config "$MEGATRON_BASE_DIR" "$gpu" "$name"
             done
             ;;
         torchtitan)
@@ -294,12 +292,12 @@ load_release_configs() {
                 llama3.1_8B-FP8-pretrain.yaml \
                 llama3.1_70B-BF16-pretrain.yaml \
                 llama3.1_70B-FP8-pretrain.yaml; do
-                echo "$(resolve_release_config "$TORCHTITAN_BASE_DIR" "$gpu" "$name")"
+                resolve_release_config "$TORCHTITAN_BASE_DIR" "$gpu" "$name"
             done
             ;;
         megatron_bridge)
             for name in qwen3_32b_lora_posttrain.yaml qwen3_32b_sft_posttrain.yaml; do
-                echo "$(resolve_release_config "$MEGATRON_BRIDGE_BASE_DIR" "$gpu" "$name")"
+                resolve_release_config "$MEGATRON_BRIDGE_BASE_DIR" "$gpu" "$name"
             done
             ;;
         maxtext)
@@ -348,7 +346,7 @@ load_release_configs() {
             local quant_tag
             local -a quant_names=()
             for name in "${bf16_names[@]}"; do
-                echo "$(resolve_release_config "$MAXTEXT_BASE_DIR" "$gpu" "${name}-bf16-pretrain.yaml")"
+                resolve_release_config "$MAXTEXT_BASE_DIR" "$gpu" "${name}-bf16-pretrain.yaml"
             done
             if [[ "$gpu" == "MI355X" ]]; then
                 quant_tag="fp8"
@@ -358,12 +356,12 @@ load_release_configs() {
                 quant_names=("${nanoo_names[@]}")
             fi
             for name in "${quant_names[@]}"; do
-                echo "$(resolve_release_config "$MAXTEXT_BASE_DIR" "$gpu" "${name}-${quant_tag}-pretrain.yaml")"
+                resolve_release_config "$MAXTEXT_BASE_DIR" "$gpu" "${name}-${quant_tag}-pretrain.yaml"
             done
             ;;
         maxdiffusion)
             for name in flux_dev-pretrain.yaml wan2.1_1.3b-pretrain.yaml wan2.1_14b-pretrain.yaml; do
-                echo "$(resolve_release_config "$MAXDIFFUSION_BASE_DIR" "$gpu" "$name")"
+                resolve_release_config "$MAXDIFFUSION_BASE_DIR" "$gpu" "$name"
             done
             ;;
     esac
@@ -697,21 +695,9 @@ capture_system_snapshot() {
         echo "nccl_ib_hca=${NCCL_IB_HCA:-}"
         echo
 
-        if [[ -f /opt/rocm/.info/version ]]; then
-            echo "----- rocm version -----"
-            cat /opt/rocm/.info/version
-            echo
-            echo
-        elif [[ -f /opt/rocm/share/rocm/.info/version ]]; then
-            echo "----- rocm version -----"
-            cat /opt/rocm/share/rocm/.info/version
-            echo
-            echo
-        else
-            echo "----- rocm version -----"
-            echo "(unavailable)"
-            echo
-        fi
+        echo "----- rocm version -----"
+        echo "${SUITE_ROCM:-unavailable}"
+        echo
 
         if select_gpu_tool; then
             echo "gpu_tool=${GPU_SMI_KIND}"
@@ -729,6 +715,8 @@ capture_system_snapshot() {
         fi
 
         if [[ "$AUTO_BENCHMARK_MODE" == "container" && -n "${DOCKER_IMAGE:-}" ]]; then
+            # The variables in this snippet intentionally expand in the child shell.
+            # shellcheck disable=SC2016
             append_snapshot_command "container image digest" bash -c '
                 image="$1"
                 if command -v docker >/dev/null 2>&1; then
@@ -778,6 +766,8 @@ write_reproduce_script() {
         if [[ -n "${GLOO_SOCKET_IFNAME:-}" ]]; then
             echo "export GLOO_SOCKET_IFNAME=${q_gloo}"
         fi
+        # HF_TOKEN is intentionally evaluated when the generated script runs.
+        # shellcheck disable=SC2016
         echo 'if [[ -z "${HF_TOKEN:-}" ]]; then'
         echo '    echo "Export HF_TOKEN before reproducing this run." >&2'
         echo "    exit 1"
@@ -888,7 +878,7 @@ one_line() {
 }
 
 collect_setup_identity() {
-    local cli pins probe_out rocm_line framework_line gpu_name
+    local cli probe_out rocm_line framework_line gpu_name
 
     SUITE_SUBMODULE_PINS="$(
         git -C "$PRIMUS_ROOT" submodule status --recursive 2>/dev/null | awk '
@@ -920,24 +910,22 @@ collect_setup_identity() {
         SUITE_IMAGE_DIGEST="$(one_line "$("$cli" image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' "$DOCKER_IMAGE" 2>/dev/null || echo "$DOCKER_IMAGE")")"
     fi
 
-    if [[ -f /opt/rocm/.info/version ]]; then
-        SUITE_ROCM="$(one_line "$(head -n 1 /opt/rocm/.info/version)")"
-    elif [[ -f /opt/rocm/share/rocm/.info/version ]]; then
-        SUITE_ROCM="$(one_line "$(head -n 1 /opt/rocm/share/rocm/.info/version)")"
-    fi
-
-    if [[ "$AUTO_BENCHMARK_MODE" == "container" && -n "$cli" && -n "${DOCKER_IMAGE:-}" ]]; then
-        local probe_script
-        probe_script="$(mktemp)"
-        cat > "$probe_script" << 'EOF'
+    # ROCm is the "ROCm version" field on the amd-smi version line inside the
+    # image that trains. Older images without that line still use
+    # /opt/rocm/.info/version. The host install is not used for a container launch.
+    local probe_script probe_cmd
+    probe_script="$(mktemp)"
+    cat > "$probe_script" << 'EOF'
+#!/usr/bin/env bash
+rocm="$(amd-smi version 2>/dev/null | sed -n 's/.*ROCm version:[[:space:]]*//p' | head -n 1 | tr -d '\r')"
+if [[ -z "$rocm" && -f /opt/rocm/.info/version ]]; then
+    rocm="$(head -n 1 /opt/rocm/.info/version)"
+elif [[ -z "$rocm" && -f /opt/rocm/share/rocm/.info/version ]]; then
+    rocm="$(head -n 1 /opt/rocm/share/rocm/.info/version)"
+fi
+printf '%s\n' "${rocm:-unavailable}"
+PYTHONUNBUFFERED=1 python3 - << 'PY'
 import importlib
-import pathlib
-rocm = "unavailable"
-for path in ("/opt/rocm/.info/version", "/opt/rocm/share/rocm/.info/version"):
-    file = pathlib.Path(path)
-    if file.is_file():
-        rocm = file.read_text(errors="replace").strip().splitlines()[0]
-        break
 parts = []
 for name in ("torch", "jax", "transformers"):
     try:
@@ -945,33 +933,24 @@ for name in ("torch", "jax", "transformers"):
         parts.append(name + "=" + str(getattr(mod, "__version__", "unknown")))
     except Exception:
         pass
-print(rocm)
-print(" ".join(parts) if parts else "unavailable")
+print(" ".join(parts) if parts else "unavailable", flush=True)
+PY
 EOF
+    if [[ "$AUTO_BENCHMARK_MODE" == "container" && -n "$cli" && -n "${DOCKER_IMAGE:-}" ]]; then
+        probe_cmd=("$cli" run --rm -v "${probe_script}:/tmp/primus_probe.sh:ro" --entrypoint bash "$DOCKER_IMAGE" /tmp/primus_probe.sh)
         if command -v timeout >/dev/null 2>&1; then
-            probe_out="$(timeout 180 "$cli" run --rm -v "${probe_script}:/tmp/primus_probe.py:ro" --entrypoint python3 "$DOCKER_IMAGE" /tmp/primus_probe.py 2>/dev/null || true)"
+            probe_out="$(timeout 180 "${probe_cmd[@]}" 2>/dev/null || true)"
         else
-            probe_out="$("$cli" run --rm -v "${probe_script}:/tmp/primus_probe.py:ro" --entrypoint python3 "$DOCKER_IMAGE" /tmp/primus_probe.py 2>/dev/null || true)"
+            probe_out="$("${probe_cmd[@]}" 2>/dev/null || true)"
         fi
-        rm -f "$probe_script"
-        rocm_line="$(printf '%s\n' "$probe_out" | sed -n '1p')"
-        framework_line="$(printf '%s\n' "$probe_out" | sed -n '2p')"
-        [[ -n "$rocm_line" && "$rocm_line" != "unavailable" ]] && SUITE_ROCM="$(one_line "$rocm_line")"
-        [[ -n "$framework_line" ]] && SUITE_FRAMEWORK="$(one_line "$framework_line")"
     else
-        probe_out="$(python3 -c '
-import importlib
-parts = []
-for name in ("torch", "jax", "transformers"):
-    try:
-        mod = importlib.import_module(name)
-        parts.append(name + "=" + str(getattr(mod, "__version__", "unknown")))
-    except Exception:
-        pass
-print(" ".join(parts) if parts else "unavailable")
-' 2>/dev/null || true)"
-        [[ -n "$probe_out" ]] && SUITE_FRAMEWORK="$(one_line "$probe_out")"
+        probe_out="$(bash "$probe_script" 2>/dev/null || true)"
     fi
+    rm -f "$probe_script"
+    rocm_line="$(printf '%s\n' "$probe_out" | sed -n '1p')"
+    framework_line="$(printf '%s\n' "$probe_out" | sed -n '2p')"
+    [[ -n "$rocm_line" ]] && SUITE_ROCM="$(one_line "$rocm_line")"
+    [[ -n "$framework_line" ]] && SUITE_FRAMEWORK="$(one_line "$framework_line")"
 
     [[ -n "$SUITE_FRAMEWORK" ]] || SUITE_FRAMEWORK="unavailable"
     export SUITE_GIT_COMMIT SUITE_SUBMODULE_PINS SUITE_GPU SUITE_ROCM SUITE_FRAMEWORK SUITE_IMAGE_DIGEST
@@ -1332,7 +1311,6 @@ prepare_mlperf_artifacts() {
     local model_id="$1"
     local run_num artifact_prefix
 
-    PREP_MLPERF_MODEL="$model_id"
     PREP_MLPERF_MODEL_DIR="${MLPERF_BASE_DIR}/${model_id}"
     PREP_MODEL_NAME="$model_id"
     run_num=$(next_run_number "$model_id")

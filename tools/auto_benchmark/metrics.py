@@ -836,7 +836,10 @@ def megatron_collect_rows(
 
     assign_run_labels(entries)
 
-    rows = [[entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])] for entry in entries]
+    rows = [
+        [entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])]
+        for entry in entries
+    ]
     rows.sort(key=lambda row: (row[0], run_sort_key(row[1]), row[7]))
     return rows
 
@@ -984,11 +987,7 @@ def mlperf_parse_log_file(path, model=None):
     else:
         chosen = buckets["pretrain"]
 
-    if (
-        chosen["run_duration"] is None
-        and chosen["throughput"] is None
-        and chosen["samples"] is None
-    ):
+    if chosen["run_duration"] is None and chosen["throughput"] is None and chosen["samples"] is None:
         return None
 
     return {
@@ -1048,7 +1047,10 @@ def mlperf_collect_rows():
 
     assign_run_labels(entries)
 
-    rows = [[entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])] for entry in entries]
+    rows = [
+        [entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])]
+        for entry in entries
+    ]
     rows.sort(key=lambda row: (row[0], run_sort_key(row[1]), str(row[5])))
     return rows
 
@@ -1219,7 +1221,10 @@ def torchtitan_collect_rows():
 
     assign_run_labels(entries)
 
-    rows = [[entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])] for entry in entries]
+    rows = [
+        [entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])]
+        for entry in entries
+    ]
     rows.sort(key=lambda row: (row[0], run_sort_key(row[1]), row[7]))
     return rows
 
@@ -1357,6 +1362,7 @@ def jax_collect_rows(backend):
                 "-",
             ]
         else:
+
             def metric(field, digits):
                 value = stats[field]
                 return f"{value:.{digits}f}" if value is not None else "-"
@@ -1386,7 +1392,10 @@ def jax_collect_rows(backend):
         )
 
     assign_run_labels(entries)
-    rows = [[entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])] for entry in entries]
+    rows = [
+        [entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])]
+        for entry in entries
+    ]
     rows.sort(key=lambda row: (row[0], run_sort_key(row[1]), row[4]))
     return rows
 
