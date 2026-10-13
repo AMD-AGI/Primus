@@ -2938,7 +2938,7 @@ class _MXFP4LinearGeluFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, lazy=False):
+    def forward(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, lazy=False, sink=None):
         preact, save_list, unbiased = _MXFP4LinearFunction._forward(
             ctx,
             x,
@@ -2964,26 +2964,27 @@ class _MXFP4LinearGeluFunction(torch.autograd.Function):
         )
         packs = ctx.gelu_dual_packs
         if packs is not None:
-            ctx.mark_non_differentiable(*packs)
-            return (preact.reshape(*ctx.x_shape[:-1], preact.shape[1]), *packs)
+            # Out through ``sink``: an fp4 output drags autograd into a `zeros_like`.
+            sink.extend(p.detach() for p in packs)
+            return preact.reshape(*ctx.x_shape[:-1], preact.shape[1])
         if lazy and cfg.fprop == "a6w4":
             # The A6W4 consumer adds the bias itself, in f32 ahead of its GELU, as Inductor's fused
             # gelu(out + bias) did; handing it the bf16-rounded preact would change the bytes.
             act = unbiased
         else:
             act = preact if lazy else torch.nn.functional.gelu(preact, approximate="tanh")
-        return act.reshape(*ctx.x_shape[:-1], preact.shape[1]), None, None, None, None
+        return act.reshape(*ctx.x_shape[:-1], preact.shape[1])
 
     @staticmethod
-    def backward(ctx, grad_act, *_pack_grads):
+    def backward(ctx, grad_act):
         saved = ctx.saved_tensors
         preact = saved[-1]
         d_act = grad_act.reshape(-1, preact.shape[1])
         if ctx.fused_dgelu:
             packs = _quantize_mxfp4_h16_dual_bias_dgelu_op(d_act, preact)
-            return (*_MXFP4LinearFunction._backward(ctx, saved[:-1], None, packs), None)
+            return (*_MXFP4LinearFunction._backward(ctx, saved[:-1], None, packs), None, None)
         grad_2d = torch.ops.aten.gelu_backward(d_act, preact, approximate="tanh")
-        return (*_MXFP4LinearFunction._backward(ctx, saved[:-1], grad_2d), None)
+        return (*_MXFP4LinearFunction._backward(ctx, saved[:-1], grad_2d), None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -3109,7 +3110,8 @@ class MXFP4Linear(nn.Linear):
         Under ``lazy`` the result is a `LazyAct`, whose ``dual`` carries the consumer's
         operands when this GEMM's epilogue could build them."""
         if self.config.any_mxfp4 and self.training:
-            act, *packs = _MXFP4LinearGeluFunction.apply(
+            sink = []
+            act = _MXFP4LinearGeluFunction.apply(
                 x,
                 self.weight,
                 self.bias,
@@ -3118,8 +3120,9 @@ class MXFP4Linear(nn.Linear):
                 self.fp8_wgt_slot,
                 self.config,
                 lazy,
+                sink,
             )
-            dual = None if packs[0] is None else tuple(packs)
+            dual = tuple(sink) or None
             # Same predicate `_forward` used, read from this module's own width.
             rebiased = dual is not None and not _fuse_bias_eligible(
                 self.config, self.out_features, any_width=True
