@@ -68,10 +68,12 @@ Measured on 4x MI455X with `amdprimus/amdprimus:tas-20261011`, running inside a 
 | Default | 3.790, 3.758, 3.795, 4.995, 9.034, 10.183, 7.921, 7.203, 6.827, 6.680 |
 | 1-GPU | 3.193, 3.232, 3.314, 3.263, 3.210, 3.713, 3.362, 3.779, 3.329, 3.289 |
 
-**Profile with `PRIMUS_RECOMPUTE_LAYER_IDS=0,3`, rank 0.**
+**Profile of the default run, rank 0.**
 
-- Shares of GPU compute time: TE unfused attention 47%, MoE grouped GEMMs 22%, output layer 8%.
-- About 180 ms per iteration of MoE all-to-all is not overlapped with compute.
+- Shares of GPU compute time: TE unfused attention 45% (its softmax alone 24%), MoE grouped GEMMs
+  22%, output layer 10%.
+- About 150 ms per iteration of MoE all-to-all is not overlapped with compute.
+- `PRIMUS_RECOMPUTE_LAYER_IDS=0,3` adds about 320 ms of compute and 37 ms of all-to-all per iteration.
 
 ## Known issues
 
