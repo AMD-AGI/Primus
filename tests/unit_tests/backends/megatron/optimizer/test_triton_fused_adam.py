@@ -187,6 +187,31 @@ _PATCH_CTX = SimpleNamespace(
 )
 
 
+def test_patch_enabled_by_default():
+    import os
+
+    import yaml
+
+    from primus.backends.megatron.patches import triton_fused_adam_patches as patch_mod
+    from primus.core.patches import PatchContext
+    from primus.core.patches.patch_registry import PatchRegistry
+
+    def ctx(params):
+        return PatchContext(
+            backend="megatron", phase="before_train", extra={"module_config": SimpleNamespace(params=params)}
+        )
+
+    patch = PatchRegistry.get(patch_mod._PATCH_KEY)
+    assert patch.applies_to(ctx(SimpleNamespace()))
+    assert not patch.applies_to(ctx(SimpleNamespace(use_triton_fused_adam=False)))
+
+    path = os.path.join(
+        os.path.dirname(__file__), "../../../../../primus/configs/modules/megatron/trainer_base.yaml"
+    )
+    with open(path) as f:
+        assert yaml.safe_load(f)["use_triton_fused_adam"] is True
+
+
 def test_patch_routes_megatron_factory_to_triton(monkeypatch):
     import megatron.core.optimizer as optimizer_module
 
