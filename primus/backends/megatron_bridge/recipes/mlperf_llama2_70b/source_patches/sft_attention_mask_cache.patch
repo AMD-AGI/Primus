@@ -1,0 +1,36 @@
+diff --git a/src/megatron/bridge/data/datasets/sft.py b/src/megatron/bridge/data/datasets/sft.py
+index ce9931b5..26969bd2 100644
+--- a/src/megatron/bridge/data/datasets/sft.py
++++ b/src/megatron/bridge/data/datasets/sft.py
+@@ -661,14 +661,26 @@ class GPTSFTDataset(Dataset):
+ 
+     @torch.no_grad()
+     def _create_attention_mask(self, max_length):
+-        """Creates an upper-triangular causal attention mask.
+-        Args:
+-            input_ids: A 1D tensor that holds the indices of tokens.
++        """Creates an upper-triangular causal attention mask, cached by max_length.
++
++        Returns a tensor of shape [1, max_length, max_length] (boolean), where
++        True = masked (upper triangle, exclusive of diagonal).
++
++        With seq_length constant in the steady-state SFT loop (Primus packs
++        to self.max_seq_length=8192), this cache hits 100% of the time after
++        the first batch — eliminating ~57 ms/step of CPU work
++        (aten::tril + aten::ones + aten::fill_) on the dataloader thread.
+         """
+-        # seq_length = len(input_ids)
+-        # `attention_mask` has the shape of [1, seq_length, seq_length]
++        cache = getattr(self, "_attention_mask_cache", None)
++        if cache is None:
++            cache = {}
++            object.__setattr__(self, "_attention_mask_cache", cache)
++        cached = cache.get(max_length)
++        if cached is not None:
++            return cached
+         attention_mask = torch.tril(torch.ones((max_length, max_length))).unsqueeze(0)
+         attention_mask = attention_mask < 0.5
++        cache[max_length] = attention_mask
+         return attention_mask
+ 
+     def collate_fn(self, batch):

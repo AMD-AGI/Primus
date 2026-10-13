@@ -1,0 +1,13 @@
+diff --git a/megatron/core/transformer/moe/experts.py b/megatron/core/transformer/moe/experts.py
+--- a/megatron/core/transformer/moe/experts.py
++++ b/megatron/core/transformer/moe/experts.py
+@@ -39,4 +39,9 @@ from megatron.core.tensor_parallel.utils import divide
+ from megatron.core.transformer.mlp import MLP, MLPSubmodules, apply_swiglu_sharded_factory
++# Primus f32da485 turbo spec provider imports TEGroupedMLPSubmodules. That
++# symbol exists on newer Megatron-LM; this Bridge submodule still types
++# TEGroupedMLP with MLPSubmodules. Alias so dense Llama-2 (no MoE) can import
++# PrimusTurboSpecProvider.
++TEGroupedMLPSubmodules = MLPSubmodules
+ from megatron.core.transformer.module import MegatronModule
+ from megatron.core.transformer.moe import grouped_gemm_util as gg
+ from megatron.core.transformer.moe.moe_utils import (
