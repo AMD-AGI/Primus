@@ -132,12 +132,17 @@ class EnergonDatasetProvider(DatasetProvider):
             log_rank_0("skip_train is set: not creating a training dataset")
         else:
             log_rank_0(f"Creating training dataset from: {data_path}")
+            # virtual_epoch_length defaults to Energon's own default, 0: no EpochizeDataset. A nonzero length
+            # makes every worker materialise list(range(length // num_workers)) before its first sample (see
+            # EpochizeDataset.__iter__), which for a "never ends" value such as 1e9 costs seconds of
+            # GIL-held CPU and gigabytes of memory per worker. The training stream repeats either way and the
+            # trainer stops on its iteration count, so the samples and their order do not depend on it.
             train_dataset = get_train_dataset(
                 data_path,
                 batch_size=args.micro_batch_size,
                 task_encoder=task_encoder,
                 worker_config=worker_config,
-                virtual_epoch_length=getattr(args, "virtual_epoch_length", 1_000_000_000),
+                virtual_epoch_length=getattr(args, "virtual_epoch_length", 0),
                 max_samples_per_sequence=getattr(args, "max_samples_per_sequence", 100),
                 shuffle_buffer_size=getattr(args, "shuffle_buffer_size", None),
             )

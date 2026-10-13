@@ -30,6 +30,11 @@ Config (YAML module param, mirrors PyTorch's DataLoader argument):
     multiprocessing_context: "forkserver" | "spawn" | "fork" | null
 
 ``null`` leaves PyTorch's default behavior untouched.
+
+With ``forkserver`` the patch also starts the forkserver daemon (with torch preloaded) during
+initialization instead of at the first worker launch, and lets worker processes start
+concurrently (see ``_install_concurrent_forkserver_launch``):
+    dataloader_concurrent_worker_start: true | false   (default true)
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
@@ -55,14 +60,80 @@ def _enabled(ctx: PatchContext) -> bool:
 
 
 def _preload_forkserver_torch() -> None:
-    """Preload ``torch`` in the forkserver daemon to speed up worker startup.
-    Pure optimization; safe to skip."""
+    """Preload ``torch`` in the forkserver daemon and start the daemon now.
+
+    multiprocessing starts the forkserver lazily, at the first worker launch, so without the
+    explicit start the daemon (and its torch import) would come up inside the first data-loader
+    iteration, which in an MLPerf run is after run_start. Starting it here moves that process
+    set-up into initialization; no dataset file is touched. Pure optimization; safe to skip."""
     try:
         import torch.multiprocessing as tmp
 
         tmp.get_context("forkserver").set_forkserver_preload(["torch"])
+        from multiprocessing import forkserver
+
+        forkserver.ensure_running()
     except Exception:
         pass
+
+
+def _install_concurrent_forkserver_launch() -> bool:
+    """Let DataLoader worker processes start concurrently under ``forkserver``.
+
+    ``popen_forkserver.Popen._launch`` writes the pickled process object (for a DataLoader worker:
+    the dataset, collate function and queues) into the new child's pipe and only returns once the
+    write has completed. A pickle larger than the pipe buffer is consumed while the child unpickles
+    it, so every ``Process.start()`` waits for that child to finish unpickling, and DataLoader, which
+    starts its workers in a loop, ends up unpickling them one after another. This replacement is the
+    same function with the write moved to a background thread, so the children unpickle concurrently.
+    The child's pid comes from the forkserver right after the fork, independently of the write.
+
+    Installed only where ``_launch`` has the CPython 3.10-3.13 shape it reproduces; returns whether
+    it was installed.
+    """
+    import io
+    import os
+    import sys
+    import threading
+
+    if not (3, 10) <= sys.version_info[:2] <= (3, 13):
+        return False
+    try:
+        from multiprocessing import forkserver, popen_forkserver, spawn, util
+        from multiprocessing.context import reduction, set_spawning_popen
+    except ImportError:
+        return False
+    if getattr(popen_forkserver.Popen._launch, _PATCHED_ATTR, False):
+        return True
+
+    def _launch(self, process_obj):
+        prep_data = spawn.get_preparation_data(process_obj._name)
+        buf = io.BytesIO()
+        set_spawning_popen(self)
+        try:
+            reduction.dump(prep_data, buf)
+            reduction.dump(process_obj, buf)
+        finally:
+            set_spawning_popen(None)
+
+        self.sentinel, w = forkserver.connect_to_new_process(self._fds)
+        # Keep a duplicate of the data pipe's write end as a sentinel of the
+        # parent process used by the child process.
+        _parent_w = os.dup(w)
+        self.finalizer = util.Finalize(self, util.close_fds, (_parent_w, self.sentinel))
+        data = buf.getbuffer()
+
+        def _write():
+            with open(w, "wb", closefd=True) as f:
+                f.write(data)
+
+        self._primus_launch_writer = threading.Thread(target=_write, name="forkserver-launch", daemon=True)
+        self._primus_launch_writer.start()
+        self.pid = forkserver.read_signed(self.sentinel)
+
+    setattr(_launch, _PATCHED_ATTR, True)
+    popen_forkserver.Popen._launch = _launch
+    return True
 
 
 def _caller_context_is_fork(value) -> bool:
@@ -145,4 +216,7 @@ def patch_dataloader(ctx: PatchContext) -> None:
 
     if mp_context == "forkserver":
         _preload_forkserver_torch()
+        if getattr(get_args(ctx), "dataloader_concurrent_worker_start", True):
+            if _install_concurrent_forkserver_launch():
+                log_rank_0("[Patch:megatron.dataloader_mp_context] forkserver workers start concurrently.")
     _install_dataloader_monkeypatch(mp_context)

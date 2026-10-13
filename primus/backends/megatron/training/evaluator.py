@@ -145,6 +145,19 @@ def _start_val_prefetch(data_iterator):
     state["thread"].start()
 
 
+def start_first_eval_prefetch(valid_data_iterator):
+    """Prefetch the first evaluation's first batch when training starts.
+
+    ``_start_val_prefetch`` runs at the end of an evaluation, so it covers every evaluation but
+    the first, which would otherwise start its loader workers and read its first batch inside the
+    evaluation. Called as training begins (after run_start in an MLPerf run, so inside the timed
+    region), it lets the first block's training steps absorb that start-up the same way later blocks
+    absorb theirs. The batch is the one the first evaluation would have read first, and it is taken
+    through the same ``_take_val_prefetch`` path, so ``val_loss`` is unchanged.
+    """
+    _start_val_prefetch(valid_data_iterator)
+
+
 def _take_val_prefetch(data_iterator):
     """Return the iterator, with its first batch already in hand if we have one.
 

@@ -40,6 +40,23 @@ def patch_evaluate(ctx: PatchContext):
 
     import megatron.training.training as orig_training
 
-    from primus.backends.megatron.training.evaluator import primus_evaluate
+    from primus.backends.megatron.training.evaluator import (
+        primus_evaluate,
+        start_first_eval_prefetch,
+    )
 
     orig_training.evaluate = primus_evaluate
+
+    # Prefetch the first evaluation's first batch as train() starts, as later evaluations get theirs
+    # at the end of the previous one. train(forward_step_func, model, optimizer, opt_param_scheduler,
+    # train_data_iterator, valid_data_iterator, ...): the validation iterator is the sixth argument.
+    orig_train = orig_training.train
+    if not getattr(orig_train, "_primus_first_eval_prefetch", False):
+
+        def train(*args, **kwargs):
+            valid = kwargs.get("valid_data_iterator", args[5] if len(args) > 5 else None)
+            start_first_eval_prefetch(valid)
+            return orig_train(*args, **kwargs)
+
+        train._primus_first_eval_prefetch = True
+        orig_training.train = train
