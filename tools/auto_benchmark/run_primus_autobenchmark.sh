@@ -910,14 +910,24 @@ collect_setup_identity() {
         SUITE_IMAGE_DIGEST="$(one_line "$("$cli" image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' "$DOCKER_IMAGE" 2>/dev/null || echo "$DOCKER_IMAGE")")"
     fi
 
-    # ROCm is the "ROCm version" field on the amd-smi version line inside the
-    # image that trains. Older images without that line still use
-    # /opt/rocm/.info/version. The host install is not used for a container launch.
+    # Both modes read the "ROCm version" field from amd-smi inside the image
+    # that trains. On the host, launch that image first. A shell that is already
+    # inside the container runs amd-smi in the current environment. Older images
+    # without that line still use /opt/rocm/.info/version. The host install is not used.
     local probe_script probe_cmd
     probe_script="$(mktemp)"
     cat > "$probe_script" << 'EOF'
 #!/usr/bin/env bash
-rocm="$(amd-smi version 2>/dev/null | sed -n 's/.*ROCm version:[[:space:]]*//p' | head -n 1 | tr -d '\r')"
+rocm=""
+for bin in amd-smi /opt/rocm/bin/amd-smi; do
+    if [[ "$bin" == /* ]]; then
+        [[ -x "$bin" ]] || continue
+    elif ! command -v "$bin" >/dev/null 2>&1; then
+        continue
+    fi
+    rocm="$("$bin" version 2>/dev/null | sed -n 's/.*ROCm version[[:space:]]*:[[:space:]]*//p' | head -n 1 | awk '{print $1}' | tr -d '\r|')"
+    [[ -n "$rocm" ]] && break
+done
 if [[ -z "$rocm" && -f /opt/rocm/.info/version ]]; then
     rocm="$(head -n 1 /opt/rocm/.info/version)"
 elif [[ -z "$rocm" && -f /opt/rocm/share/rocm/.info/version ]]; then
@@ -936,8 +946,12 @@ for name in ("torch", "jax", "transformers"):
 print(" ".join(parts) if parts else "unavailable", flush=True)
 PY
 EOF
-    if [[ "$AUTO_BENCHMARK_MODE" == "container" && -n "$cli" && -n "${DOCKER_IMAGE:-}" ]]; then
-        probe_cmd=("$cli" run --rm -v "${probe_script}:/tmp/primus_probe.sh:ro" --entrypoint bash "$DOCKER_IMAGE" /tmp/primus_probe.sh)
+    if ! running_inside_container && [[ -n "$cli" && -n "${DOCKER_IMAGE:-}" ]]; then
+        probe_cmd=("$cli" run --rm)
+        [[ -e /dev/kfd ]] && probe_cmd+=(--device=/dev/kfd)
+        [[ -d /dev/dri ]] && probe_cmd+=(--device=/dev/dri)
+        [[ -e /dev/infiniband ]] && probe_cmd+=(--device=/dev/infiniband)
+        probe_cmd+=(-v "${probe_script}:/tmp/primus_probe.sh:ro" --entrypoint bash "$DOCKER_IMAGE" /tmp/primus_probe.sh)
         if command -v timeout >/dev/null 2>&1; then
             probe_out="$(timeout 180 "${probe_cmd[@]}" 2>/dev/null || true)"
         else

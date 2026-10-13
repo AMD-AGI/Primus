@@ -65,7 +65,7 @@ On a login node that same choice submits one Slurm job. On a machine with a GPU,
 - A dropped SSH session does not stop a run that has already started
 - A login node submits the run to Slurm without an extra prompt
 - Metrics table and CSV after the runs, with the first five steps dropped and a harmonic mean for throughput
-- Each log and CSV row records the image digest, Primus commit, submodule pins, GPU, the ROCm version inside the Docker image, and framework versions
+- Each log and CSV row records the image digest, Primus commit, submodule pins, GPU, the ROCm version from `amd-smi` inside the launched image, and framework versions
 - One JSON manifest per suite lists every model, status, runtime, artifact path, and that same environment
 
 ---
@@ -347,13 +347,13 @@ tools/auto_benchmark/results/logs_<backend>/<model>_<backend>_<device>_runN.log
 
 `runN` increments from logs already in that directory.
 
-Each log ends with an `AUTO BENCHMARK ENVIRONMENT` block: image digest, Primus commit, submodule pins, GPU, ROCm version, and framework versions (`torch`, `jax`, and `transformers` when they import). Those same fields are copied onto every metrics CSV row. The ROCm version is the `ROCm version` field from `amd-smi version` inside the Docker image. An image without that line uses `/opt/rocm/.info/version`. A run that is already inside a container reads the same source from its own environment. The host ROCm install is not recorded for a container launch.
+Each log ends with an `AUTO BENCHMARK ENVIRONMENT` block: image digest, Primus commit, submodule pins, GPU, ROCm version, and framework versions (`torch`, `jax`, and `transformers` when they import). Those same fields are copied onto every metrics CSV row. Direct mode and container mode both read the `ROCm version` field from `amd-smi version` inside the image. On the host, the tool launches that image and then runs `amd-smi`. A shell that is already inside the container runs `amd-smi` in that environment. An image without that line uses `/opt/rocm/.info/version`. The host ROCm install is not recorded.
 
 The suite also writes one JSON manifest, `results/manifest_<suite>_<device>_<timestamp>.json`. It is updated after every model and holds the environment plus each model's status, exit code, runtime in seconds, and artifact paths.
 
 Each run also writes two files beside that log:
 
-- `..._runN_snapshot.txt` records the kernel, Primus git commit, the ROCm version from inside the Docker image, GPU firmware, container image digest, and the launch environment. Firmware comes from `amd-smi` when `amd-smi version` succeeds, and from `rocm-smi` otherwise. Tokens are not included. A suite-level copy is `results/system_snapshot.txt`.
+- `..._runN_snapshot.txt` records the kernel, Primus git commit, the ROCm version from `amd-smi` inside the launched image, GPU firmware, container image digest, and the launch environment. Firmware comes from `amd-smi` when `amd-smi version` succeeds, and from `rocm-smi` otherwise. Tokens are not included. A suite-level copy is `results/system_snapshot.txt`.
 - `..._runN_reproduce.sh` is one command that reruns that model. Export `HF_TOKEN` first. The script sets the image, train suite, and config that produced the result.
 
 A non-zero exit also writes `..._runN_failure.tar.gz`. The archive holds the log, the working YAML, the snapshot, the reproduce script, and a GPU capture from the moment the model failed. That capture uses `amd-smi` when `amd-smi version` succeeds, and `rocm-smi` when that is the tool that runs.
@@ -402,7 +402,7 @@ These files are written whether the model succeeds or fails:
 | --- | --- |
 | `..._runN.log` | Training output, then `AUTO_BENCHMARK_EXIT_CODE=<code>`, then the environment block and the record block |
 | `..._runN_working.yaml` | The YAML passed to `primus-cli`. The file under `examples/` is unchanged |
-| `..._runN_snapshot.txt` | Kernel, Primus commit, ROCm from inside the image, GPU firmware, image digest, and this run's exit code. No tokens |
+| `..._runN_snapshot.txt` | Kernel, Primus commit, ROCm from `amd-smi` inside the launched image, GPU firmware, image digest, and this run's exit code. No tokens |
 | `..._runN_reproduce.sh` | One command that reruns this model. Export `HF_TOKEN` first |
 
 The log ends with:
