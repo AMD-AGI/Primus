@@ -8,11 +8,12 @@
 Triton Fused AdamW Patch
 ========================
 
-Set ``use_triton_fused_adam: true`` to build Megatron's Adam optimizer from
-``TritonFusedAdam`` instead of TE ``FusedAdam``. TE builds that use the generic
-``multi_tensor_apply`` launcher cap each Adam launch at 320 workgroups, which
-leaves MI455X HBM far from saturated; the Triton kernel sizes its grid to the
-device's CU count. ROCm TE builds with the custom Adam kernel are not capped.
+Builds Megatron's Adam optimizer from ``TritonFusedAdam`` instead of TE
+``FusedAdam``. TE builds that use the generic ``multi_tensor_apply`` launcher
+cap each Adam launch at 320 workgroups, which leaves MI455X HBM far from
+saturated; the Triton kernel sizes its grid to the device's CU count. ROCm TE
+builds with the custom Adam kernel are not capped. On by default; set
+``use_triton_fused_adam: false`` to keep TE ``FusedAdam``.
 
 Mechanism:
     ``_get_megatron_optimizer_based_on_param_groups`` reads the module global
@@ -37,7 +38,7 @@ _PATCH_KEY = "megatron.optimizer.triton_fused_adam"
     phase="before_train",
     description="Use TritonFusedAdam (device-sized grid) instead of TE FusedAdam for the Adam optimizer.",
     priority=40,
-    condition=lambda ctx: getattr(get_args(ctx), "use_triton_fused_adam", False),
+    condition=lambda ctx: getattr(get_args(ctx), "use_triton_fused_adam", True),
 )
 def patch_triton_fused_adam(ctx: PatchContext) -> None:
     import megatron.core.optimizer as optimizer_module
