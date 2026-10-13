@@ -8,9 +8,10 @@
 TorchTitan Triton Fused AdamW Patch
 ===================================
 
-Set ``optimizer.use_triton_fused_adam: true`` to build TorchTitan's AdamW from
-``TritonFusedAdamW`` instead of ``torch.optim.AdamW(fused=True)``, whose ATen
-``multi_tensor_apply`` launches are capped at 320 workgroups.
+Builds TorchTitan's AdamW from ``TritonFusedAdamW`` instead of
+``torch.optim.AdamW(fused=True)``, whose ATen ``multi_tensor_apply`` launches
+are capped at 320 workgroups. On by default; set
+``optimizer.use_triton_fused_adam: false`` to keep the stock optimizer.
 
 ``OptimizersContainer.__init__`` is wrapped rather than ``build_optimizers``,
 because train specs capture ``build_optimizers`` at registration time. The FT
@@ -28,7 +29,7 @@ _PATCH_ID = "torchtitan.optimizer.triton_fused_adamw"
 
 def _enabled(ctx: PatchContext) -> bool:
     optimizer = getattr(get_args(ctx), "optimizer", None)
-    return bool(getattr(optimizer, "use_triton_fused_adam", False))
+    return bool(getattr(optimizer, "use_triton_fused_adam", True))
 
 
 @register_patch(

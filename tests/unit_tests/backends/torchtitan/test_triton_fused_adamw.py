@@ -42,6 +42,22 @@ def test_patch_registration_and_condition():
     assert patch.backend == "torchtitan"
     assert patch.applies_to(_ctx(True))
     assert not patch.applies_to(_ctx(False))
+    no_flag = SimpleNamespace(optimizer=SimpleNamespace(name="AdamW"))
+    assert patch.applies_to(
+        PatchContext(
+            backend="torchtitan", phase="setup", extra={"module_config": SimpleNamespace(params=no_flag)}
+        )
+    )
+
+
+def test_module_config_enables_triton_adamw_by_default():
+    import yaml
+
+    path = os.path.join(
+        os.path.dirname(__file__), "../../../../primus/configs/modules/torchtitan/pre_trainer.yaml"
+    )
+    with open(path) as f:
+        assert yaml.safe_load(f)["optimizer"]["use_triton_fused_adam"] is True
 
 
 def test_job_config_keeps_primus_optimizer_flag():
