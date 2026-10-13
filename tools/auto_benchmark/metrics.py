@@ -34,7 +34,7 @@ STEP_METRIC_REGEXES = (
 
 ANSI_ESCAPE_REGEX = re.compile(r"\x1b\[[0-9;]*m")
 LOG_EXIT_CODE_REGEX = re.compile(
-    r"(?:primus launcher|\[direct\].*torchrun|torchrun) exited with code (\d+)",
+    r"(?:AUTO_BENCHMARK_EXIT_CODE=|(?:primus launcher|\[direct\].*torchrun|torchrun) exited with code )(\d+)",
     re.IGNORECASE,
 )
 
@@ -58,6 +58,64 @@ LOG_ERROR_EXCLUSIONS = (
     re.compile(r"\[CK-JIT\] ERROR:", re.IGNORECASE),
     re.compile(r"\[Patch\].*failed due to missing dependency", re.IGNORECASE),
     re.compile(r"\[Patch\].*Patch '.*' failed", re.IGNORECASE),
+    # The triton buffer-store patch logs a caught traceback when triton is
+    # absent. Training continues. The header and the exception line are not a
+    # failed run; [ERROR] on that patch line is already excluded above.
+    re.compile(r"^Traceback \(most recent call last\):"),
+    re.compile(r"No module named ['\"]triton['\"]", re.IGNORECASE),
+    # primus-cli logs the docker command it would run. That command contains the
+    # literal text "[ERROR]: Primus not found" inside a shell test, which is not
+    # a failed run. Matching it blanked every successful CSV row.
+    re.compile(r"Would execute:.*\[ERROR\]: Primus not found", re.IGNORECASE),
+)
+
+# First matching category wins. Patterns stay specific so a normal log line
+# (RCCL settings, a caught import, a quoted launcher string) does not become
+# the label for a different failure.
+ERROR_CLASSIFIERS = (
+    (
+        "huggingface_auth",
+        re.compile(
+            r"GatedRepoError|401 Client Error|use_auth_token|huggingface-cli login",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "out_of_memory",
+        re.compile(
+            r"OutOfMemoryError|\bCUDA out of memory\b|\bHIP out of memory\b|cannot allocate memory",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "distributed_or_network",
+        re.compile(
+            r"NCCL error|RCCL operation|no socket interface found|connection (?:reset|refused)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "dataset_or_checkpoint",
+        re.compile(
+            r"FileNotFoundError|No such file or directory|dataset.*(?:missing|not found)|"
+            r"checkpoint.*(?:missing|not found|invalid)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "dependency_or_import",
+        re.compile(r"ModuleNotFoundError|ImportError:|No module named|command not found", re.IGNORECASE),
+    ),
+    (
+        "jax_or_compilation",
+        re.compile(r"JaxRuntimeError|LLVM ERROR|hipErrorNoBinary", re.IGNORECASE),
+    ),
+    (
+        "configuration",
+        re.compile(r"ValidationError|Config(?:uration)?Error|unrecognized arguments", re.IGNORECASE),
+    ),
+    ("permission", re.compile(r"PermissionError|Permission denied|Operation not permitted", re.IGNORECASE)),
+    ("timeout", re.compile(r"TimeoutError|\btimed out\b|watchdog.*(?:abort|timeout)", re.IGNORECASE)),
 )
 
 RUN_LABEL_REGEX = re.compile(r"_run(\d+)\.log$", re.IGNORECASE)
@@ -83,7 +141,7 @@ NOTE:
 - Megatron logs often print each iteration twice (Primus log forwarding); metrics
   deduplicate by iteration number before averaging.
 - Timing/throughput fields use the current value before "/" (e.g. 5896.1/5913.1 -> 5896.1).
-- Warm-up: the first five iterations are excluded before averaging.
+- Warm-up: the first five iterations are excluded; throughput uses the harmonic mean.
 - "Status" is "Error found - check log" when the log contains errors or metrics could not be computed.
 - "Status" is "Diverged (non-finite loss) - invalid" when any step logged a NaN/Inf loss or grad
   norm. Such a run exits 0 and still prints throughput, but the numbers are meaningless.
@@ -96,7 +154,7 @@ NOTE:
 - "Run" is run1, run2, ... per model and device, ordered oldest to newest.
 - "BS", "Seq", and "GBS" come from the benchmark yaml when available.
 - "Steps" is the number of training steps used after dropping the first five warm-up steps.
-- TPS and TFLOPS values may contain commas in logs; commas are removed before averaging.
+- TPS and TFLOPS use the post-warm-up harmonic mean; memory and MFU use arithmetic means.
 - "Status" is "Error found - check log" when the log contains errors or metrics could not be computed.
 - "Status" is "Diverged (non-finite loss) - invalid" when any step logged a NaN/Inf loss or grad
   norm. Such a run exits 0 and still prints throughput, but the numbers are meaningless.
@@ -108,7 +166,7 @@ NOTE:
 - "Run" is run1, run2, ... per model and device, ordered oldest to newest.
 - "BS", "Seq", and "GBS" come from the benchmark yaml when available.
 - Megatron-Bridge logs split iteration timing and MODEL_TFLOP/s/GPU across lines; both are merged.
-- Warm-up: the first five iterations are excluded before averaging.
+- Warm-up: the first five iterations are excluded; throughput uses the harmonic mean.
 - "Status" is "Error found - check log" when metrics could not be computed from the log.
 """
 
@@ -117,8 +175,18 @@ NOTE:
 - Results are saved to results/metrics_mlperf.csv (latest) and a timestamped snapshot.
 - Metrics are parsed from :::MLLOG lines emitted at the end of MLPerf timed runs.
 - "Run Duration", "Throughput", and "Samples" come from run_duration / overall_throughput / throughput keys.
-- llama3.1_8b uses overall_throughput; llama2_70b uses throughput.
+- llama3.1_8b, gpt_oss_20b, and flux1 use overall_throughput; llama2_70b uses throughput.
 - "Status" is "Error found - check log" when MLLOG metrics could not be parsed from the log.
+"""
+
+JAX_NOTE_TEXT = """
+NOTE:
+- Results are saved to results/metrics_<backend>.csv (latest) and a timestamped snapshot.
+- Metrics come from MaxText/MaxDiffusion "completed step:" lines and are deduplicated by step.
+- The first five steps are excluded as warm-up.
+- TFLOPS, Tokens/s, Samples/s, and Frames/s use the harmonic mean when logged.
+- "Status" is "Error found - check log" when the run failed or metrics could not be computed.
+- "Status" is "Diverged (non-finite loss) - invalid" when a step logged NaN/Inf loss.
 """
 
 MEGATRON_NUM = r"[\d,]+(?:\.\d+)?"
@@ -168,6 +236,7 @@ TORCHTITAN_SEQ_REGEX = re.compile(r"training\.seq_len\s*\.{2,}\s*(\d+)")
 TORCHTITAN_FILENAME_REGEX = re.compile(r"(?P<model>.+?)_torchtitan_(?P<device>MI\d+X?)", re.IGNORECASE)
 
 MLPERF_FILENAME_REGEX = re.compile(r"(?P<model>.+?)_mlperf_(?P<device>MI\d+X?)", re.IGNORECASE)
+JAX_FILENAME_REGEX_TEMPLATE = r"(?P<model>.+?)_{backend}_(?P<device>MI\d+X?)"
 MLPERF_MLLOG_PREFIX = ":::MLLOG"
 MLPERF_SFT_SOURCE = "mlperf_sft.py"
 MLPERF_PRETRAIN_SOURCE = "mlperf_pretrain_trainer.py"
@@ -355,6 +424,45 @@ def print_table(headers, rows, max_col_width=36):
     print(sep)
 
 
+SETUP_HEADERS = [
+    "Image Digest",
+    "Primus Commit",
+    "Submodule Pins",
+    "GPU",
+    "ROCm",
+    "Framework Versions",
+]
+SETUP_KEYS = [
+    "image_digest",
+    "primus_commit",
+    "submodule_pins",
+    "gpu",
+    "rocm_version",
+    "framework_versions",
+]
+
+
+def environment_from_log(path):
+    blank = ["-"] * len(SETUP_KEYS)
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as handle:
+            handle.seek(max(0, size - 65536))
+            tail = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return blank
+    marker = tail.rfind("===== AUTO BENCHMARK ENVIRONMENT =====")
+    if marker < 0:
+        return blank
+    found = {}
+    for line in tail[marker:].splitlines():
+        if "=" not in line or line.startswith("="):
+            continue
+        key, value = line.split("=", 1)
+        found[key.strip()] = value.strip() or "-"
+    return [found.get(key, "-") for key in SETUP_KEYS]
+
+
 def save_csv(headers, rows, backend):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -372,6 +480,13 @@ def save_csv(headers, rows, backend):
 
 def strip_ansi(text):
     return ANSI_ESCAPE_REGEX.sub("", text)
+
+
+def harmonic_mean(values):
+    positive = [value for value in values if value is not None and value > 0]
+    if not positive:
+        return None
+    return len(positive) / sum(1.0 / value for value in positive)
 
 
 def find_nonfinite_metric(plain):
@@ -423,7 +538,53 @@ def scan_log(path):
                 saw_error_line = True
 
     has_error = True if exit_code not in (None, 0) else saw_error_line
-    return has_error, nonfinite
+    return has_error, nonfinite, exit_code
+
+
+def metrics_are_reportable(has_error, nonfinite, stats, exit_code):
+    """Keep parsed throughput when the run exited 0.
+
+    A completed run can still contain a caught patch traceback or a quoted
+    launcher error string. Those lines must not wipe the CSV. A non-zero exit,
+    a missing exit plus an error line, or non-finite loss still blanks the row.
+    """
+    if nonfinite or not stats:
+        return False
+    if exit_code not in (None, 0):
+        return False
+    if has_error and exit_code != 0:
+        return False
+    return True
+
+
+def classify_log_error(path):
+    matches = set()
+    with open(path, "r", errors="ignore") as handle:
+        for line in handle:
+            plain = strip_ansi(line)
+            if any(pattern.search(plain) for pattern in LOG_ERROR_EXCLUSIONS):
+                continue
+            for category, pattern in ERROR_CLASSIFIERS:
+                if pattern.search(plain):
+                    matches.add(category)
+    for category, _ in ERROR_CLASSIFIERS:
+        if category in matches:
+            return category
+    return "runtime_or_incomplete"
+
+
+def failed_status(path, has_error, nonfinite, has_metrics, exit_code=None):
+    if nonfinite and not has_error:
+        return NONFINITE_STATUS
+    if exit_code == 137:
+        return f"{ERROR_STATUS} (killed_sigkill)"
+    if exit_code == 143:
+        return f"{ERROR_STATUS} (killed_sigterm)"
+    if has_error:
+        return f"{ERROR_STATUS} ({classify_log_error(path)})"
+    if not has_metrics:
+        return f"{ERROR_STATUS} (incomplete_metrics)"
+    return OK_STATUS
 
 
 def render_results(backend, headers, rows, note_text):
@@ -434,14 +595,14 @@ def render_results(backend, headers, rows, note_text):
     latest_path, snapshot_path = save_csv(headers, rows, backend)
     print_table(headers, rows)
 
-    error_rows = [row for row in rows if len(row) > 2 and row[2] == ERROR_STATUS]
+    error_rows = [row for row in rows if len(row) > 2 and str(row[2]).startswith(ERROR_STATUS)]
     if error_rows:
         print(
             f"\n{len(error_rows)} run(s) reported errors or incomplete metrics."
             " Open the corresponding log file for details."
         )
 
-    diverged_rows = [row for row in rows if len(row) > 2 and row[2] == NONFINITE_STATUS]
+    diverged_rows = [row for row in rows if len(row) > 2 and str(row[2]).startswith(NONFINITE_STATUS)]
     if diverged_rows:
         labels = ", ".join(f"{row[0]} {row[1]}" for row in diverged_rows)
         print(
@@ -581,8 +742,8 @@ def megatron_compute_averages(records):
     return {
         "count": len(records),
         "elapsed_ms": mean(r["elapsed_ms"] for r in records),
-        "tflops_gpu": mean(tflops_values) if tflops_values else None,
-        "tokens_gpu": mean(token_values) if token_values else None,
+        "tflops_gpu": harmonic_mean(tflops_values),
+        "tokens_gpu": harmonic_mean(token_values),
         "gbs": records[0]["gbs"],
     }
 
@@ -619,17 +780,17 @@ def megatron_collect_rows(
             continue
 
         path = os.path.join(log_dir, fname)
-        has_error, nonfinite = scan_log(path)
+        has_error, nonfinite, exit_code = scan_log(path)
         records = parse_log_file(path)
         stats = megatron_compute_averages(records)
 
         bs, seq, gbs = load_training_params(backend, meta["device"], meta["model"], fname, log_dir)
 
-        if has_error or nonfinite or not stats:
+        if not metrics_are_reportable(has_error, nonfinite, stats, exit_code):
             if gbs == "-" and records:
                 gbs = records[0]["gbs"]
             values = [
-                NONFINITE_STATUS if nonfinite and not has_error else ERROR_STATUS,
+                failed_status(path, has_error, nonfinite, bool(stats), exit_code),
                 backend,
                 meta["device"],
                 bs,
@@ -675,7 +836,7 @@ def megatron_collect_rows(
 
     assign_run_labels(entries)
 
-    rows = [[entry["model"], entry["run"], *entry["values"]] for entry in entries]
+    rows = [[entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])] for entry in entries]
     rows.sort(key=lambda row: (row[0], run_sort_key(row[1]), row[7]))
     return rows
 
@@ -693,8 +854,9 @@ def megatron_main():
         "Precision",
         "Iterations",
         "Iter Time (ms)",
-        "TFLOPS/GPU",
-        "Tokens/GPU",
+        "HMean TFLOPS/GPU",
+        "HMean Tokens/GPU",
+        *SETUP_HEADERS,
     ]
     render_results("megatron", headers, megatron_collect_rows(), MEGATRON_NOTE_TEXT)
 
@@ -712,7 +874,8 @@ def megatron_bridge_main():
         "Precision",
         "Iterations",
         "Iter Time (ms)",
-        "TFLOPS/GPU",
+        "HMean TFLOPS/GPU",
+        *SETUP_HEADERS,
     ]
     render_results(
         "megatron_bridge",
@@ -770,7 +933,7 @@ def mlperf_model_metric_profile(model):
     model_name = (model or "").lower()
     if "llama2" in model_name:
         return "sft"
-    if "llama3" in model_name:
+    if "llama3" in model_name or "gpt_oss" in model_name or "flux" in model_name:
         return "pretrain"
     return None
 
@@ -791,7 +954,10 @@ def mlperf_parse_log_file(path, model=None):
 
             source = mlperf_event_source(event)
             if source not in buckets:
-                continue
+                if profile in buckets:
+                    source = profile
+                else:
+                    continue
 
             bucket = buckets[source]
             key = event.get("key")
@@ -848,10 +1014,18 @@ def mlperf_collect_rows():
             continue
 
         path = os.path.join(log_dir, fname)
+        has_error, nonfinite, exit_code = scan_log(path)
         stats = mlperf_parse_log_file(path, model=meta["model"])
 
-        if not stats:
-            values = [ERROR_STATUS, "mlperf", meta["device"], "-", "-", "-"]
+        if not metrics_are_reportable(has_error, nonfinite, stats, exit_code):
+            values = [
+                failed_status(path, has_error, nonfinite, bool(stats), exit_code),
+                "mlperf",
+                meta["device"],
+                "-",
+                "-",
+                "-",
+            ]
         else:
             values = [
                 OK_STATUS,
@@ -874,7 +1048,7 @@ def mlperf_collect_rows():
 
     assign_run_labels(entries)
 
-    rows = [[entry["model"], entry["run"], *entry["values"]] for entry in entries]
+    rows = [[entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])] for entry in entries]
     rows.sort(key=lambda row: (row[0], run_sort_key(row[1]), str(row[5])))
     return rows
 
@@ -889,6 +1063,7 @@ def mlperf_main():
         "Samples",
         "Run Duration",
         "Throughput",
+        *SETUP_HEADERS,
     ]
     render_results("mlperf", headers, mlperf_collect_rows(), MLPERF_NOTE_TEXT)
 
@@ -965,8 +1140,8 @@ def torchtitan_compute_averages(steps):
     return {
         "count": len(steps),
         "memory": mean(s["memory"] for s in steps),
-        "tps": mean(s["tps"] for s in steps),
-        "tflops": mean(s["tflops"] for s in steps),
+        "tps": harmonic_mean([s["tps"] for s in steps]),
+        "tflops": harmonic_mean([s["tflops"] for s in steps]),
         "mfu": mean(s["mfu"] for s in steps),
     }
 
@@ -987,7 +1162,7 @@ def torchtitan_collect_rows():
             continue
 
         path = os.path.join(log_dir, fname)
-        has_error, nonfinite = scan_log(path)
+        has_error, nonfinite, exit_code = scan_log(path)
         steps = torchtitan_parse_log_file(path)
         stats = torchtitan_compute_averages(steps)
 
@@ -1001,9 +1176,9 @@ def torchtitan_collect_rows():
             if log_seq is not None:
                 seq = log_seq
 
-        if has_error or nonfinite or not stats:
+        if not metrics_are_reportable(has_error, nonfinite, stats, exit_code):
             values = [
-                NONFINITE_STATUS if nonfinite and not has_error else ERROR_STATUS,
+                failed_status(path, has_error, nonfinite, bool(stats), exit_code),
                 "torchtitan",
                 meta["device"],
                 bs,
@@ -1044,7 +1219,7 @@ def torchtitan_collect_rows():
 
     assign_run_labels(entries)
 
-    rows = [[entry["model"], entry["run"], *entry["values"]] for entry in entries]
+    rows = [[entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])] for entry in entries]
     rows.sort(key=lambda row: (row[0], run_sort_key(row[1]), row[7]))
     return rows
 
@@ -1062,14 +1237,191 @@ def torchtitan_main():
         "Precision",
         "Steps",
         "Mem(GiB)",
-        "TPS",
-        "TFLOPS",
+        "HMean TPS",
+        "HMean TFLOPS",
         "MFU(%)",
+        *SETUP_HEADERS,
     ]
     render_results("torchtitan", headers, torchtitan_collect_rows(), TORCHTITAN_NOTE_TEXT)
 
 
+def jax_parse_filename(filename, backend):
+    pattern = re.compile(JAX_FILENAME_REGEX_TEMPLATE.format(backend=re.escape(backend)), re.IGNORECASE)
+    match = pattern.search(filename)
+    if not match:
+        return None
+    return {"model": match.group("model"), "device": match.group("device")}
+
+
+def jax_parse_log_file(path):
+    records_by_step = {}
+    nonfinite = []
+
+    with open(path, "r", errors="ignore") as handle:
+        for line in handle:
+            plain = strip_ansi(line)
+            if "completed step:" not in plain or "TFLOP/s/device" not in plain:
+                continue
+
+            step_match = re.search(r"completed step:\s*(\d+)", plain, re.IGNORECASE)
+            seconds_match = re.search(r"seconds:\s*([\d.]+)", plain, re.IGNORECASE)
+            tflops_match = re.search(r"TFLOP/s/device:\s*([\d.]+)", plain, re.IGNORECASE)
+            loss_match = re.search(r"loss:\s*([^,\s]+)", plain, re.IGNORECASE)
+            if not (step_match and seconds_match and tflops_match):
+                continue
+
+            step = int(step_match.group(1))
+            record = {
+                "step": step,
+                "seconds": float(seconds_match.group(1)),
+                "tflops": float(tflops_match.group(1)),
+            }
+
+            optional_fields = (
+                ("tokens", r"Tokens/s/device:\s*([\d,.]+)"),
+                ("samples", r"Samples/s/device:\s*([\d,.]+)"),
+                ("frames", r"Frames/s/device:\s*([\d,.]+)"),
+            )
+            for field, pattern in optional_fields:
+                match = re.search(pattern, plain, re.IGNORECASE)
+                if match:
+                    record[field] = float(match.group(1).replace(",", ""))
+
+            if loss_match:
+                raw_loss = loss_match.group(1).rstrip("|,")
+                try:
+                    record["loss"] = float(raw_loss)
+                    if not math.isfinite(record["loss"]):
+                        nonfinite.append(f"step {step} loss={raw_loss}")
+                except ValueError:
+                    pass
+
+            records_by_step[step] = record
+
+    return [records_by_step[step] for step in sorted(records_by_step)], nonfinite
+
+
+def jax_compute_averages(records):
+    if len(records) <= WARMUP_SKIP:
+        return None
+
+    records = records[WARMUP_SKIP:]
+    result = {
+        "count": len(records),
+        "seconds": mean(record["seconds"] for record in records),
+        "tflops": mean(record["tflops"] for record in records),
+    }
+    for field in ("tokens", "samples", "frames", "loss"):
+        values = [record[field] for record in records if field in record]
+        if field in ("tokens", "samples", "frames"):
+            result[field] = harmonic_mean(values)
+        else:
+            result[field] = mean(values) if values else None
+    return result
+
+
+def jax_collect_rows(backend):
+    log_dir = os.path.join(RESULTS_DIR, f"logs_{backend}")
+    entries = []
+    if not os.path.isdir(log_dir):
+        return []
+
+    for fname in sorted(os.listdir(log_dir)):
+        if not fname.endswith(".log") or f"_{backend}_" not in fname.lower():
+            continue
+
+        meta = jax_parse_filename(fname, backend)
+        if not meta:
+            continue
+
+        path = os.path.join(log_dir, fname)
+        has_error, scanned_nonfinite, exit_code = scan_log(path)
+        records, jax_nonfinite = jax_parse_log_file(path)
+        nonfinite = scanned_nonfinite + jax_nonfinite
+        stats = jax_compute_averages(records)
+        precision_match = PRECISION_REGEX.search(meta["model"])
+        precision = precision_match.group(1).upper() if precision_match else "-"
+
+        if not metrics_are_reportable(has_error, nonfinite, stats, exit_code):
+            values = [
+                failed_status(path, has_error, nonfinite, bool(stats), exit_code),
+                backend,
+                meta["device"],
+                precision,
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+            ]
+        else:
+            def metric(field, digits):
+                value = stats[field]
+                return f"{value:.{digits}f}" if value is not None else "-"
+
+            values = [
+                OK_STATUS,
+                backend,
+                meta["device"],
+                precision,
+                stats["count"],
+                metric("seconds", 3),
+                metric("tflops", 2),
+                metric("tokens", 2),
+                metric("samples", 4),
+                metric("frames", 2),
+                metric("loss", 4),
+            ]
+
+        entries.append(
+            {
+                "model": meta["model"],
+                "device": meta["device"],
+                "fname": fname,
+                "path": path,
+                "values": values,
+            }
+        )
+
+    assign_run_labels(entries)
+    rows = [[entry["model"], entry["run"], *entry["values"], *environment_from_log(entry["path"])] for entry in entries]
+    rows.sort(key=lambda row: (row[0], run_sort_key(row[1]), row[4]))
+    return rows
+
+
+def jax_main(backend):
+    headers = [
+        "Model",
+        "Run",
+        "Status",
+        "Backend",
+        "Device",
+        "Precision",
+        "Steps",
+        "Step Time(s)",
+        "HMean TFLOPS/Device",
+        "HMean Tokens/s/Device",
+        "HMean Samples/s/Device",
+        "HMean Frames/s/Device",
+        "Loss",
+        *SETUP_HEADERS,
+    ]
+    render_results(backend, headers, jax_collect_rows(backend), JAX_NOTE_TEXT)
+
+
+def maxtext_main():
+    jax_main("maxtext")
+
+
+def maxdiffusion_main():
+    jax_main("maxdiffusion")
+
+
 BACKENDS = {
+    "maxdiffusion": maxdiffusion_main,
+    "maxtext": maxtext_main,
     "megatron": megatron_main,
     "megatron_bridge": megatron_bridge_main,
     "mlperf": mlperf_main,
