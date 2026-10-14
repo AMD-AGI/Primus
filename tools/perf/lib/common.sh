@@ -9,7 +9,9 @@
 # selection, EXTRA_ENV and provenance capture. Per-run helpers (config fields,
 # banner, footer) live in lib/run.sh.
 #
-# Callers must set PRIMUS_PATH (repo root) before sourcing.
+# Callers must set PRIMUS_PATH (repo root) before sourcing, and also source
+# lib/control.sh before taking the batch snapshots: those use its perf_log
+# and perf_on_nodes.
 ###############################################################################
 
 # ---------------------------------------------------------------------------
@@ -586,53 +588,75 @@ perf_gpu_snapshot() {
 # one "key: value" per line. Shipped to remote nodes as source text for the
 # multi-node snapshot, so it must stay self-contained.
 perf_host_settings() {
-    local governors cmdline thp
-    governors=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null |
-        sort | uniq -c | awk '{ printf "%s%s x%s", sep, $2, $1; sep = ", " }')
-    cmdline=$(grep -oE '(amd_)?iommu=[^ ]+' /proc/cmdline 2>/dev/null | paste -sd ' ')
+    local f governors cmdline iommu_type thp defrag driver
+    # A loop rather than `cat <glob>`: under the runners' nullglob an
+    # unmatched glob would leave cat reading stdin, and the batch would hang.
+    governors=$(for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [ -r "$f" ] && cat "$f"
+    done | sort | uniq -c | awk '{ printf "%s%s x%s", sep, $2, $1; sep = ", " }')
+    cmdline=$(grep -oE '(^| )(amd_|intel_)?iommu=[^ ]+' /proc/cmdline 2>/dev/null | sed 's/^ //' | paste -sd ' ')
+    iommu_type=$(cat /sys/kernel/iommu_groups/0/type 2>/dev/null </dev/null)
     thp=$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)
+    defrag=$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null)
+    # The DKMS driver reports a version; the in-kernel one does not.
+    if [ -r /sys/module/amdgpu/version ]; then
+        driver=$(cat /sys/module/amdgpu/version </dev/null)
+    elif [ -d /sys/module/amdgpu ]; then
+        driver="inbox (kernel $(uname -r))"
+    else
+        driver="not loaded"
+    fi
     echo "cpu_governor: ${governors:-unknown}"
-    echo "numa_balancing: $(cat /proc/sys/kernel/numa_balancing 2>/dev/null || echo unknown)"
+    echo "numa_balancing: $(cat /proc/sys/kernel/numa_balancing 2>/dev/null </dev/null || echo unknown)"
     echo "transparent_hugepages: ${thp:-unknown}"
-    echo "thp_defrag: $(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null)"
-    echo "iommu: ${cmdline:-not set on the kernel command line}"
-    echo "amdgpu_driver: $(cat /sys/module/amdgpu/version 2>/dev/null || echo unknown)"
+    echo "thp_defrag: ${defrag:-unknown}"
+    echo "iommu: ${cmdline:-not set on the kernel command line}${iommu_type:+ (default domain: $iommu_type)}"
+    echo "amdgpu_driver: $driver"
     echo "kernel: $(uname -r)"
     echo "cpu_model: $(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo 2>/dev/null | head -1)"
-    echo "cpus: $(nproc 2>/dev/null)"
+    # --all: inside an srun step plain nproc counts only the step's CPUs.
+    echo "cpus: $(nproc --all 2>/dev/null)"
     echo "memory: $(awk '/^MemTotal/ { printf "%.0f GiB", $2 / 1048576 }' /proc/meminfo 2>/dev/null)"
 }
 
 # One section per node, plus the network interfaces (which NIC NCCL can use).
+# srun interleaves the nodes' output line by line, so every line carries its
+# host and the sections are put back together here.
 perf_host_snapshot() {
     # shellcheck disable=SC2016
     perf_on_nodes bash -c "$(declare -f perf_host_settings)"'
-        echo "== $(hostname) =="
-        perf_host_settings
-        echo "-- interfaces --"
-        ip -br addr 2>/dev/null || echo "(no ip command)"
-        echo
-    ' 2>&1
+        h=$(hostname)
+        {
+            perf_host_settings
+            echo "-- interfaces --"
+            ip -br addr 2>/dev/null || echo "(no ip command)"
+        } | sed "s/^/$h\t/"
+    ' 2>&1 | sort -s -t $'\t' -k1,1 |
+        awk -F '\t' '$1 != host { if (host != "") print ""; print "== " $1 " =="; host = $1 } { sub(/^[^\t]*\t/, ""); print }'
 }
 
 # The image's build manifest (build recipe, dpkg and pip lists), copied once
 # per batch so the result directory records how its image was built. Prints
 # what happened.
 perf_copy_image_manifest() {
-    local image="$1" dest="$2" cid
+    local image="$1" dest="$2" cid err
     if [ -z "$image" ] || ! command -v docker >/dev/null 2>&1; then
         echo "not copied (no image or no docker)"
         return 0
     fi
-    cid=$(docker create "$image" /bin/true 2>/dev/null)
+    # --pull=never: never start an unbounded pull just for the manifest.
+    cid=$(docker create --pull=never "$image" /bin/true 2>/dev/null)
     if [ -z "$cid" ]; then
-        echo "not copied (cannot create a container from $image)"
+        echo "not copied (cannot create a container from $image; is it present locally?)"
         return 0
     fi
-    if docker cp "$cid:/workspace/.manifest" "$dest" >/dev/null 2>&1 && [ -d "$dest" ]; then
+    # "/." copies the contents, so an existing directory is not nested into.
+    if err=$(docker cp "$cid:/workspace/.manifest/." "$dest" 2>&1) && [ -d "$dest" ]; then
         echo "$dest"
-    else
+    elif [[ "$err" == *"Could not find"* || "$err" == *"No such"* ]]; then
         echo "none in the image (/workspace/.manifest)"
+    else
+        echo "copy failed: ${err:0:200}"
     fi
     docker rm -f "$cid" >/dev/null 2>&1
 }
@@ -736,9 +760,9 @@ perf_print_provenance_banner() {
     # Distinguished from the block below because these are *guaranteed* to
     # reach the container, whereas a plain export may be filtered out.
     echo "# Extra env (--env): ${EXTRA_ENV:-<none>}"
-    # The runner's own shell. What the container actually ran with (after
-    # Primus's GPU-specific defaults and hooks) is logged by Primus at the
-    # start of the run output.
+    # The runner's own shell. Primus prints its main environment settings
+    # (and each hook's exports) at the start of the run output; settings from
+    # runner/helpers/envs/<GPU>.sh are not all echoed there.
     echo "# Perf environment (host shell):"
     local line
     while IFS= read -r line; do

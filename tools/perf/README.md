@@ -223,7 +223,7 @@ duplicate entries are reported before anything launches.
 | `GPU_BUSY_WAIT_SECONDS` | `60` | How long to wait for busy GPUs to free up before refusing. |
 | `ALLOW_BUSY_GPUS` | `0` | `1` runs even when the GPUs are busy. |
 | `EXTRACT` | `1` | `0` skips refreshing `results.csv` / `results.json` at the end of a batch. |
-| `PULL_IMAGE` | `0` | `1` pulls `DOCKER_IMAGE` on every node before the batch even if the tag is present. |
+| `PULL_IMAGE` | `0` | `1` (or `true` / `yes`) pulls `DOCKER_IMAGE` on every node before the batch even if the tag is present. |
 | `RESULT_DIR` | `$PWD/primus-perf-<date>` | Where logs and snapshots go; created if missing. |
 | `CONFIG_FILE` | `tools/perf/configs.yaml` | Catalog to read. |
 | `CONFIG_DIR` | — | Switches to directory mode. |
@@ -489,16 +489,19 @@ A few notes on why these specific fields:
 
 - The **digest** is recorded alongside the tag because a tag can be re-pushed;
   two runs with the same tag are not necessarily the same image. The **image
-  ID** goes one step further: the repo digest depends on which registry the
-  image came from, so a CI image re-tagged locally as `rocm/primus:v26.8`
-  shows a different digest name but its own ID. Two runs used the same image
-  exactly when their IDs match. Multi-node batches refuse to start when the
-  nodes hold different images under the same tag; `PULL_IMAGE=1` pulls the
-  registry's copy on every node first.
-- **ROCm** is reported twice: the host's (driver side, from `ROCM_PATH` or
-  `amd-smi`) and the container's (the user space that actually ran; read
-  from `/opt/rocm` or, in TheRock images, from the pip `rocm` package). The
-  HIP version is a separate number.
+  ID** covers the case the digest misses: a CI image re-tagged locally as
+  `rocm/primus:v26.8` still reports the CI repository's digest, which says
+  nothing about the tag it ran under, but its ID identifies it. On nodes
+  using the same docker image store, two runs used the same image exactly
+  when their IDs match (docker's classic and containerd stores report
+  different IDs for the same image). Multi-node batches refuse to start when
+  the nodes report different IDs under the same tag; `PULL_IMAGE=1` (or
+  `true` / `yes`) pulls the registry's copy on every node first.
+- **ROCm** is reported twice: the host's user-space install (from `ROCM_PATH`
+  or `amd-smi`) and the container's, which is what the run actually used
+  (read from `/opt/rocm` or, in TheRock images, from the pip `rocm` package).
+  The HIP version is a separate number, and the kernel driver is the
+  `amdgpu driver` field.
 - **Host settings** (CPU frequency governor, NUMA balancing, transparent huge
   pages, IOMMU mode, amdgpu driver) explain why one node is slower than
   another with the same image and code. The banner carries the node running
@@ -506,17 +509,18 @@ A few notes on why these specific fields:
 - The image's **build manifest** (`/workspace/.manifest`, including
   `docker-build-recipe.txt`) is copied once per batch, so the result directory
   says how its image was built.
-- The **perf environment** block is the runner's own shell. What the
-  container actually ran with, after Primus applied its GPU-specific defaults
-  and hooks, is printed by Primus at the start of the run output.
 - **Submodule pins** matter because Primus vendors ten submodules, and bumping
   one changes performance while leaving the Primus commit unchanged.
 - **Library versions are read from inside the container**, since the image
   digest does not cover packages installed at runtime.
-- The **perf environment** is captured by prefix (`HSA_*`, `NCCL_*`, `XLA_*`,
-  `TORCH_*`, `NVTE_*`, and so on) rather than as a hand-maintained list, which
-  is always out of date. Anything matching `*TOKEN*`, `*SECRET*`, `*PASSWORD*`,
-  `*_KEY` or `AWS_*` is redacted.
+- The **perf environment** block is the runner's own shell, captured by
+  prefix (`HSA_*`, `NCCL_*`, `XLA_*`, `TORCH_*`, `NVTE_*`, and so on) rather
+  than as a hand-maintained list, which is always out of date. Anything
+  matching `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*_KEY` or `AWS_*` is
+  redacted. Inside the container, Primus prints its main environment
+  settings, and each hook's exports, at the start of the run output; the
+  GPU-specific file (`runner/helpers/envs/<GPU>.sh`) may set more than is
+  echoed there.
 
 ## Extracting results
 

@@ -175,11 +175,19 @@ perf_stop_leftover_containers() {
 # DOCKER_LOGIN_KEY / DOCKER_LOGIN_USER (/ DOCKER_LOGIN_REGISTRY) are set. The
 # key is read from the environment, never passed on a command line.
 PULL_IMAGE="${PULL_IMAGE:-0}"
+PERF_IMAGE_CHECK="not checked"
 
 perf_ensure_image() {
-    local out rc ids
+    local out rc ids pull=0 reported nodes
     perf_uses_containers || return 0
     [ -n "${DOCKER_IMAGE:-}" ] || return 0
+    case "${PULL_IMAGE,,}" in
+        1|true|yes) pull=1 ;;
+    esac
+    nodes=$([ "${PERF_MULTINODE:-0}" = 1 ] && echo "$NNODES" || echo 1)
+    # The per-node output only arrives once every node is done, so say up
+    # front that a pull may be about to take a while.
+    perf_log "[INFO] Checking $DOCKER_IMAGE on $nodes node(s); missing copies are pulled first, which can take minutes."
     # shellcheck disable=SC2016
     out=$(perf_on_nodes bash -c '
         if ! command -v docker >/dev/null 2>&1; then
@@ -199,17 +207,27 @@ perf_ensure_image() {
             fi
         fi
         echo "IMAGE_ID $(hostname) $(docker image inspect --format "{{.Id}}" "$1" 2>/dev/null)"
-    ' _ "$DOCKER_IMAGE" "$PULL_IMAGE" 2>&1)
+    ' _ "$DOCKER_IMAGE" "$pull" 2>&1)
     rc=$?
-    grep -v '^IMAGE_ID ' <<< "$out" | sed '/^$/d' | perf_log_stream
+    grep -v 'IMAGE_ID ' <<< "$out" | sed '/^$/d' | perf_log_stream
     [ "$rc" -eq 0 ] || return 1
 
-    ids=$(awk '$1 == "IMAGE_ID" { print $3 }' <<< "$out" | sort -u)
+    # "<host> <id>" per node that answered with an ID; tolerant of a prefix
+    # srun may put on each line (SLURM_LABELIO).
+    reported=$(awk '{ for (i = 1; i < NF; i++) if ($i == "IMAGE_ID") { if ($(i + 2) != "") print $(i + 1), $(i + 2); next } }' <<< "$out")
+    ids=$(awk '{ print $2 }' <<< "$reported" | sed '/^$/d' | sort -u)
     if [ "$(sed '/^$/d' <<< "$ids" | wc -l)" -gt 1 ]; then
         perf_log "[ERROR] $DOCKER_IMAGE is a different image on different nodes:"
-        awk '$1 == "IMAGE_ID" { printf "          %s %s\n", $2, $3 }' <<< "$out" | perf_log_stream
+        sed 's/^/          /' <<< "$reported" | perf_log_stream
         perf_log "        Rerun with PULL_IMAGE=1 to pull the registry's copy on every node."
         return 1
+    fi
+    PERF_IMAGE_ID=$(head -1 <<< "$ids")
+    if [ "$(sed '/^$/d' <<< "$reported" | wc -l)" -lt "$nodes" ]; then
+        perf_log "[WARN] only $(sed '/^$/d' <<< "$reported" | wc -l) of $nodes node(s) reported an image ID; the same-image check is incomplete."
+        PERF_IMAGE_CHECK="incomplete ($(sed '/^$/d' <<< "$reported" | wc -l) of $nodes nodes reported an ID)"
+    else
+        PERF_IMAGE_CHECK="same on all $nodes node(s)"
     fi
 }
 
@@ -412,7 +430,7 @@ perf_check_socket_ifname() {
 perf_preflight() {
     perf_log "[INFO] Pre-run checks: image, leftover containers, GPU memory, NCCL interface."
     if ! perf_ensure_image; then
-        perf_log "[ERROR] the image is not available on every node."
+        perf_log "[ERROR] the image check failed (see above)."
         return 1
     fi
     perf_prepare_gpus || return 1

@@ -634,6 +634,12 @@ def test_image_and_host_provenance_reach_the_result(tmp_path):
     assert result["amdgpu_version"] == "6.14.14"
 
 
+def test_older_banner_leaves_new_fields_empty(tmp_path):
+    result = extract.parse_log_file(str(write_log(tmp_path, MEGATRON_AVG)))
+    for field in ("image_id", "container_rocm_version", "cpu_governor", "gpu_check", "batch_stamp"):
+        assert result[field] is None, field
+
+
 def test_fractional_batch_size_is_kept(tmp_path):
     log = tmp_path / "frac.log"
     log.write_text(
@@ -674,8 +680,17 @@ def test_outputs_have_fixed_names_and_keep_old_column_order(tmp_path):
     assert Path(json_path).name == "results.json"
 
     header = next(csv.reader(open(csv_path)))
-    assert header[:3] == ["filename", "backend", "model_name"]
-    assert header.index("timestamp") < header.index("status")
+    # The columns of parser version 1 keep their order; new ones come after.
+    v1_columns = [
+        "filename", "backend", "model_name", "precision", "seq_len", "micro_batch_size",
+        "global_batch_size", "nnodes", "gpus_per_node", "world_size", "warmup_steps", "repeat",
+        "total_steps", "num_iterations", "num_post_warmup", "hmean_tps_per_gpu", "hmean_tflops",
+        "hmean_samples_per_gpu", "hmean_frames_per_gpu", "amean_memory_usage",
+        "amean_memory_usage_pct", "exit_code", "elapsed_sec", "docker_image", "image_digest",
+        "primus_commit", "submodule_pins", "gpu_model", "rocm_version", "torch_version",
+        "jax_version", "config_hash", "host", "slurm_job_id", "nodelist", "timestamp",
+    ]
+    assert header[: len(v1_columns)] == v1_columns
 
     data = json.loads(Path(json_path).read_text())
     assert data["parser_version"] == extract.PARSER_VERSION

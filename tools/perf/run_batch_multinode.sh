@@ -362,7 +362,7 @@ fi
     echo "# PRIMUS_MODE           : $PRIMUS_MODE"
     echo "# Docker image          : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
     echo "# Image digest          : $(perf_image_digest "${DOCKER_IMAGE:-}")"
-    echo "# Image ID              : $(perf_image_id "${DOCKER_IMAGE:-}")  (same on every node)"
+    echo "# Image ID              : ${PERF_IMAGE_ID:-$(perf_image_id "${DOCKER_IMAGE:-}")}  ($PERF_IMAGE_CHECK)"
     echo "# Launcher mode         : multi-node (primus-cli slurm srun -N $NNODES)"
     echo "# Container label       : ${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
     echo "# TRAIN_STEPS           : ${TRAIN_STEPS:-<unset; use YAML>}"
