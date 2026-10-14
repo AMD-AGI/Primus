@@ -116,7 +116,15 @@ modules:
       cross_entropy_fusion_impl: "te"
 
       moe_router_fusion: true
+
+      # deepep
+      use_turbo_deepep: true
+      moe_router_dtype: fp32
       moe_shared_expert_overlap: false
-      overlap_moe_expert_parallel_comm: true
+      turbo_deepep_num_cu: 160
+      turbo_deepep_use_comm_stream: false
+      # DeepEP replaces the all-to-all overlap; keeping it off also frees ~45 GB
+      # of activations from the second in-flight micro-batch
+      overlap_moe_expert_parallel_comm: false
       use_turbo_norm_te_linear: true
       use_turbo_rms_norm: true
