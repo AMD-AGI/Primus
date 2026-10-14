@@ -223,6 +223,22 @@ spur exec <jobid> bash -lc 'docker exec -e PYTHONDONTWRITEBYTECODE=1 primus_v26.
     python -m pytest -q -p no:cacheprovider -W ignore tests/unit_tests/backends/megatron/inkling"'
 ```
 
+## 8 GPUs: parallel layouts
+
+`parallel_reference_check.py` is a `torchrun` script, not a pytest file. It
+checks DP, EP, PP and interleaved-PP layouts against the reference in fp64; see
+the "Testing" section of
+[the model README](../../../../../primus/backends/megatron/core/models/inkling/README.md):
+
+```bash
+PYTHONPATH=/tmp/inkling_ref/site torchrun --nproc-per-node 8 \
+    tests/unit_tests/backends/megatron/inkling/parallel_reference_check.py
+```
+
+It takes about 5 minutes on 8 MI355X GPUs, most of it FlexAttention and
+aiter compilation. Last run: Oct 14, 2026, `rocm/primus:v26.8`, 14 of 14
+layouts passed.
+
 ## Not covered by P1 yet
 
 - Faster global-layer FlexAttention. It's 3× faster than eager but about 10×
