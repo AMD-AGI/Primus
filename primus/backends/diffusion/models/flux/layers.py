@@ -1,9 +1,7 @@
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc.
-#
 # See LICENSE for license information.
 ###############################################################################
-#
 # Adapted from Black Forest Labs FLUX official implementation.
 
 from __future__ import annotations
@@ -13,6 +11,8 @@ import os
 from dataclasses import dataclass
 
 import torch
+import triton
+import triton.language as tl
 from einops import rearrange
 from torch import Tensor, nn
 
@@ -31,6 +31,7 @@ FUSED_DGELU_MLP = os.getenv("FLUX_FUSED_DGELU_MLP", "0") == "1"
 FWD_GELU_PACK = os.getenv("FLUX_FWD_GELU_PACK", "0") == "1"
 GATE_DGATE = os.getenv("FLUX_GATE_DGATE", "0") == "1"
 ATTN_REGION = os.getenv("FLUX_ATTN_REGION", "0") == "1"
+LN_MOD_BWD = os.getenv("FLUX_LN_MOD_BWD", "0") == "1"
 if FWD_GELU_PACK and not (FUSED_DGELU_LEGPACK and FUSED_DGELU_MLP):
     raise ValueError("FLUX_FWD_GELU_PACK=1 needs FLUX_FUSED_DGELU_LEGPACK=1 and FLUX_FUSED_DGELU_MLP=1")
 if GATE_DGATE and (
@@ -113,8 +114,8 @@ class MLPEmbedder(nn.Module):
 
 class RMSNorm(nn.RMSNorm):
     def __init__(self, dim: int):
-        # Match TorchTitan's nn.RMSNorm(dim): eps remains None and PyTorch
-        # selects the epsilon for the BF16 input dtype at runtime.
+        # Match TorchTitan's nn.RMSNorm(dim): eps remains None and PyTorch selects the epsilon for the
+        # BF16 input dtype at runtime.
         super().__init__(dim)
 
 
@@ -183,6 +184,134 @@ class Modulation(nn.Module):
         return ModulationOut(*out[:3]), ModulationOut(*out[3:]) if self.is_double else None
 
 
+_LN_EPS = 1e-6
+_LN_MOD_ROWS = int(os.getenv("FLUX_LN_MOD_BWD_ROWS", "32"))
+_LN_MOD_RB = int(os.getenv("FLUX_LN_MOD_BWD_RB", "2"))
+_LN_MOD_WARPS = int(os.getenv("FLUX_LN_MOD_BWD_WARPS", "8"))
+_LN_MOD_STAGES = int(os.getenv("FLUX_LN_MOD_BWD_STAGES", "2"))
+
+
+@triton.jit
+def _ln_mod_bwd_kernel(
+    DY, X, DRES, SCALE, MEAN, RSTD, DX, PART,
+    L, K, stride_sb, part_half,
+    HAS_RES: tl.constexpr, ROWS: tl.constexpr, RB: tl.constexpr, KP: tl.constexpr, STAGES: tl.constexpr,
+):
+    """Rows [c*ROWS, (c+1)*ROWS) of batch b: dx (+ dres), and this chunk's column sums of dy and
+    dy * x_hat into PART[0|1, b, c, :]."""
+    b = tl.program_id(0)
+    c = tl.program_id(1)
+    k = tl.arange(0, KP)
+    km = k < K
+    s1 = 1.0 + tl.load(SCALE + b * stride_sb + k, mask=km, other=0.0).to(tl.float32)
+    acc_sh = tl.zeros([KP], dtype=tl.float32)
+    acc_sc = tl.zeros([KP], dtype=tl.float32)
+    for i in tl.range(0, ROWS, RB, num_stages=STAGES):
+        r = c * ROWS + i + tl.arange(0, RB)
+        rm = r < L
+        row = (b * L + r).to(tl.int64)
+        off = row[:, None] * K + k[None, :]
+        m = rm[:, None] & km[None, :]
+        dy = tl.load(DY + off, mask=m, other=0.0).to(tl.float32)
+        x = tl.load(X + off, mask=m, other=0.0).to(tl.float32)
+        mu = tl.load(MEAN + row, mask=rm, other=0.0)
+        rs = tl.load(RSTD + row, mask=rm, other=0.0)
+        xh = (x - mu[:, None]) * rs[:, None]
+        acc_sh += tl.sum(dy, axis=0)
+        acc_sc += tl.sum(dy * xh, axis=0)
+        g = dy * s1[None, :]
+        c1 = tl.sum(g * xh, axis=1) / K
+        c2 = tl.sum(g, axis=1) / K
+        dx = rs[:, None] * (g - c2[:, None] - xh * c1[:, None])
+        if HAS_RES:
+            dx += tl.load(DRES + off, mask=m, other=0.0).to(tl.float32)
+        tl.store(DX + off, dx.to(DX.dtype.element_ty), mask=m)
+    pb = (b * tl.num_programs(1) + c).to(tl.int64) * K
+    tl.store(PART + pb + k, acc_sh, mask=km)
+    tl.store(PART + part_half + pb + k, acc_sc, mask=km)
+
+
+@triton.jit
+def _ln_mod_colsum_kernel(PART, DSHIFT, DSCALE, K, NCH, part_half, BK: tl.constexpr):
+    b = tl.program_id(0)
+    k = tl.program_id(1) * BK + tl.arange(0, BK)
+    km = k < K
+    acc_sh = tl.zeros([BK], dtype=tl.float32)
+    acc_sc = tl.zeros([BK], dtype=tl.float32)
+    for c in range(NCH):
+        pb = (b * NCH + c).to(tl.int64) * K
+        acc_sh += tl.load(PART + pb + k, mask=km, other=0.0)
+        acc_sc += tl.load(PART + part_half + pb + k, mask=km, other=0.0)
+    tl.store(DSHIFT + b * K + k, acc_sh.to(DSHIFT.dtype.element_ty), mask=km)
+    tl.store(DSCALE + b * K + k, acc_sc.to(DSCALE.dtype.element_ty), mask=km)
+
+
+@torch.library.triton_op("primus_flux::ln_mod_bwd", mutates_args=())
+def _ln_mod_bwd_op(
+    d_out: Tensor, x: Tensor, scale: Tensor, mean: Tensor, rstd: Tensor, d_res: Tensor | None
+) -> tuple[Tensor, Tensor, Tensor]:
+    """(d_x + d_res, d_shift, d_scale) of ``(1 + scale) * layer_norm(x) + shift`` for x [B, L, K]
+    and shift/scale [B, 1, K], from the forward's LN mean and rstd [B, L, 1] fp32."""
+    b, l, k = x.shape
+    d_out = d_out.contiguous()
+    x = x.contiguous()
+    if d_res is not None:
+        d_res = d_res.contiguous()
+    if scale.stride(-1) != 1:
+        scale = scale.contiguous()
+    nch = triton.cdiv(l, _LN_MOD_ROWS)
+    dx = torch.empty_like(x)
+    part = torch.empty(2, b, nch, k, dtype=torch.float32, device=x.device)
+    torch.library.wrap_triton(_ln_mod_bwd_kernel)[(b, nch)](
+        d_out, x, d_res if d_res is not None else d_out, scale, mean, rstd, dx, part,
+        l, k, scale.stride(0), b * nch * k,
+        HAS_RES=d_res is not None, ROWS=_LN_MOD_ROWS, RB=_LN_MOD_RB, KP=triton.next_power_of_2(k),
+        STAGES=_LN_MOD_STAGES, num_warps=_LN_MOD_WARPS,
+    )
+    d_shift = torch.empty(b, 1, k, dtype=scale.dtype, device=x.device)
+    d_scale = torch.empty_like(d_shift)
+    torch.library.wrap_triton(_ln_mod_colsum_kernel)[(b, triton.cdiv(k, 1024))](
+        part, d_shift, d_scale, k, nch, b * nch * k, BK=1024, num_warps=4
+    )
+    return dx, d_shift, d_scale
+
+
+class _LnModFunction(torch.autograd.Function):
+    """``((1 + scale) * layer_norm(x) + shift, x)``. The second output is ``x`` for the residual
+    add, so the residual gradient reaches `_ln_mod_bwd_op` and is added in its pass."""
+
+    @staticmethod
+    def forward(ctx, x, shift, scale):
+        y, mean, rstd = torch.ops.aten.native_layer_norm(x, [x.shape[-1]], None, None, _LN_EPS)
+        ctx.save_for_backward(x, scale, mean, rstd)
+        return (1 + scale) * y + shift, x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, d_out, d_res):
+        x, scale, mean, rstd = ctx.saved_tensors
+        return _ln_mod_bwd_op(d_out, x, scale, mean, rstd, d_res)
+
+
+def _ln_mod_ok(norm: nn.LayerNorm, x: Tensor, mod: ModulationOut) -> bool:
+    b, k = x.shape[0], x.shape[-1]
+    return (
+        LN_MOD_BWD
+        and x.dim() == 3
+        and norm.weight is None
+        and norm.eps == _LN_EPS
+        and mod.shift.shape == mod.scale.shape == (b, 1, k)
+        and x.dtype == mod.scale.dtype
+    )
+
+
+def _ln_mod(norm: nn.LayerNorm, x: Tensor, mod: ModulationOut) -> tuple[Tensor, Tensor]:
+    """``((1 + mod.scale) * norm(x) + mod.shift, residual)``: take the residual add from the second
+    output, not from ``x``."""
+    if _ln_mod_ok(norm, x, mod):
+        return _LnModFunction.apply(x, mod.shift, mod.scale)
+    return (1 + mod.scale) * norm(x) + mod.shift, x
+
+
 def _gated_linear(lin: nn.Module, x: Tensor, gate: Tensor) -> Tensor:
     """``gate * lin(x)``, through MXFP4Linear.forward_gated when that exists."""
     if GATE_DGATE and hasattr(lin, "forward_gated"):
@@ -190,17 +319,50 @@ def _gated_linear(lin: nn.Module, x: Tensor, gate: Tensor) -> Tensor:
     return gate * lin(x)
 
 
-def _mlp_gelu_fused(mlp: nn.Sequential, x: Tensor, gate: Tensor) -> Tensor:
-    """``gate * mlp(x)`` for Sequential(Linear, GELU(tanh), Linear), with the first Linear and
-    the GELU as one MXFP4Linear.forward_gelu call when that exists."""
+def _lnmod_ok(lin: nn.Module, x: Tensor, mod: ModulationOut) -> bool:
+    return hasattr(lin, "lnmod_ok") and lin.lnmod_ok(x, mod.shift, mod.scale)
+
+
+def _modulated_linear(
+    lin: nn.Module, norm: nn.LayerNorm, x: Tensor, mod: ModulationOut
+) -> tuple[Tensor, Tensor]:
+    """``(lin((1 + mod.scale) * norm(x) + mod.shift), residual)`` (see `_ln_mod`); ``norm`` is
+    LayerNorm(eps 1e-6, no affine), which is what MXFP4Linear.forward_lnmod folds into its
+    activation pack."""
+    if _lnmod_ok(lin, x, mod):
+        return lin.forward_lnmod(x, mod.shift, mod.scale), x
+    x_mod, res = _ln_mod(norm, x, mod)
+    return lin(x_mod), res
+
+
+def _mlp_gelu_fused(
+    mlp: nn.Sequential, norm: nn.LayerNorm, x: Tensor, mod: ModulationOut
+) -> tuple[Tensor, Tensor]:
+    """``(mod.gate * mlp((1 + mod.scale) * norm(x) + mod.shift), residual)`` (see `_ln_mod`) for
+    Sequential(Linear, GELU(tanh), Linear), with the first Linear and the GELU as one
+    MXFP4Linear.forward_gelu call when that exists, and the modulate in its activation pack when
+    `_lnmod_ok`."""
+    gate = mod.gate
     if FUSED_DGELU_MLP and hasattr(mlp[0], "forward_gelu"):
-        if FWD_GELU_PACK and mlp[0].lazy_gelu_into(mlp[2], x, (mlp[2].in_features,)):
-            act = mlp[0].forward_gelu(x, lazy=True)
+        lazy = FWD_GELU_PACK and mlp[0].lazy_gelu_into(mlp[2], x, (mlp[2].in_features,))
+        if _lnmod_ok(mlp[0], x, mod):
+            act = mlp[0].forward_lnmod(x, mod.shift, mod.scale, "gelu", lazy=lazy)
+            res = x
+        else:
+            x_mod, res = _ln_mod(norm, x, mod)
+            act = mlp[0].forward_gelu(x_mod, lazy=lazy)
+        if lazy:
+            # A6W4 fc1 returns its output without the bias (width 12288 is not in the bias epilogue); the
+            # consumer's pack must add it ahead of the GELU. The gated Function has no act_bias, so
+            # forward_gelu_input takes the ungated one when a bias is passed.
+            fused = getattr(act, "dual", None) is not None
+            act_bias = None if fused else mlp[0].lazy_gelu_bias()
             if GATE_DGATE:
-                return mlp[2].forward_gelu_input(None, act, gate=gate)
-            return gate * mlp[2].forward_gelu_input(None, act)
-        return _gated_linear(mlp[2], mlp[0].forward_gelu(x), gate)
-    return gate * mlp(x)
+                return mlp[2].forward_gelu_input(None, act, act_bias, gate=gate), res
+            return gate * mlp[2].forward_gelu_input(None, act, act_bias), res
+        return _gated_linear(mlp[2], act, gate), res
+    x_mod, res = _ln_mod(norm, x, mod)
+    return gate * mlp(x_mod), res
 
 
 class DoubleStreamBlock(nn.Module):
@@ -241,10 +403,8 @@ class DoubleStreamBlock(nn.Module):
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
 
-        img_modulated = (1 + img_mod1.scale) * self.img_norm1(img) + img_mod1.shift
-        img_qkv = self.img_attn.qkv(img_modulated)
-        txt_modulated = (1 + txt_mod1.scale) * self.txt_norm1(txt) + txt_mod1.shift
-        txt_qkv = self.txt_attn.qkv(txt_modulated)
+        img_qkv, img = _modulated_linear(self.img_attn.qkv, self.img_norm1, img, img_mod1)
+        txt_qkv, txt = _modulated_linear(self.txt_attn.qkv, self.txt_norm1, txt, txt_mod1)
 
         if FUSED_NORM_ROPE and ATTN_REGION:
             txt_attn, img_attn = _attn_region.double_attention(
@@ -297,13 +457,11 @@ class DoubleStreamBlock(nn.Module):
             txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
         img = img + _gated_linear(self.img_attn.proj, img_attn, img_mod1.gate)
-        img = img + _mlp_gelu_fused(
-            self.img_mlp, (1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift, img_mod2.gate
-        )
+        img_mlp, img = _mlp_gelu_fused(self.img_mlp, self.img_norm2, img, img_mod2)
+        img = img + img_mlp
         txt = txt + _gated_linear(self.txt_attn.proj, txt_attn, txt_mod1.gate)
-        txt = txt + _mlp_gelu_fused(
-            self.txt_mlp, (1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift, txt_mod2.gate
-        )
+        txt_mlp, txt = _mlp_gelu_fused(self.txt_mlp, self.txt_norm2, txt, txt_mod2)
+        txt = txt + txt_mlp
         return img, txt
 
 
@@ -335,14 +493,20 @@ class SingleStreamBlock(nn.Module):
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         mod, _ = self.modulation(vec)
-        x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
         lazy_act = False
         if FUSED_DGELU_LEGPACK and hasattr(self.linear1, "forward_split_gelu"):
             lazy_act = FWD_GELU_PACK and self.linear1.lazy_gelu_into(
-                self.linear2, x_mod, (self.hidden_size, self.mlp_hidden_dim)
+                self.linear2, x, (self.hidden_size, self.mlp_hidden_dim)
             )
-            qkv, mlp_act = self.linear1.forward_split_gelu(x_mod, 3 * self.hidden_size, lazy=lazy_act)
+            if _lnmod_ok(self.linear1, x, mod):
+                qkv, mlp_act = self.linear1.forward_lnmod(
+                    x, mod.shift, mod.scale, "legs", 3 * self.hidden_size, lazy_act
+                )
+            else:
+                x_mod, x = _ln_mod(self.pre_norm, x, mod)
+                qkv, mlp_act = self.linear1.forward_split_gelu(x_mod, 3 * self.hidden_size, lazy=lazy_act)
         else:
+            x_mod, x = _ln_mod(self.pre_norm, x, mod)
             qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
             mlp_act = self.mlp_act(mlp)
         if FUSED_NORM_ROPE:

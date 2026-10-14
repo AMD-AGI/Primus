@@ -1,6 +1,5 @@
 ###############################################################################
 # Copyright (c) 2026, Advanced Micro Devices, Inc.
-#
 # See LICENSE for license information.
 ###############################################################################
 
@@ -38,7 +37,7 @@ import os
 _BF16_EVAL = os.getenv("FLUX_FP4_BF16_EVAL", "0") == "1"
 import re
 from dataclasses import dataclass, replace
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import torch
 import torch.nn as nn
@@ -50,13 +49,11 @@ from primus.backends.diffusion.utils.log import logger
 FP4_DTYPE = torch.float4_e2m1fn_x2
 MX_BLOCK_SIZE = 32
 
-# Resolved on first module construction rather than at import: pulling in
-# primus_turbo triggers an AITER JIT build, which FP8-only runs should not pay.
-#
-# These are populated eagerly by MXFP4Linear.__init__ and only *read* from the
-# GEMM path. Dynamo rejects mutating a module-level container from inside a
-# compiled region ("Mutating a variable not in the current scope"), so the
-# populate step must never be reachable from a traced call.
+# Resolved on first module construction rather than at import: pulling in primus_turbo triggers an
+# AITER JIT build, which FP8-only runs should not pay.
+# These are populated eagerly by MXFP4Linear.__init__ and only *read* from the GEMM path. Dynamo
+# rejects mutating a module-level container from inside a compiled region ("Mutating a variable
+# not in the current scope"), so the populate step must never be reachable from a traced call.
 _GEMM_FP4 = None
 _GEMM_FP4_EAGER = None
 _GEMM_FP4_BIAS = False  # does the installed gemm_fp4_impl take a fused bias? see _init_turbo
@@ -88,18 +85,13 @@ def _op_takes(op, name: str) -> bool:
 
 
 def _resolve_fp4_dispatch() -> str:
-    """Import-time Linear GEMM dispatch. ``torch.compile`` must not trace getenv.
-
-    ``FLUX_FP4_DISPATCH`` selects the three measured CC12M recipes:
-
-    * ``fusion`` — fused H16 pack + stock ``gemm_fp4_impl`` (66.06 samp/GPU/s)
-    * ``host_dispatch`` — fused pack + eager ``gemm_fp4_impl`` (65.98)
-    * ``mxfp4_mm`` — one ``primus_flux::mxfp4_mm`` custom op (65.63)
-
-    Legacy flags still work if ``FLUX_FP4_DISPATCH`` is unset:
-    ``FLUX_FP4_MXFP4_MM``, ``FLUX_FP4_HOST_DISPATCH``, ``FLUX_FP4_FUSED_H16_QUANT``.
-    Unset or empty selects the launch recipe default, fusion.
     """
+Import-time Linear GEMM dispatch. ``torch.compile`` must not trace getenv.
+
+* ``fusion`` — fused H16 pack + stock ``gemm_fp4_impl`` (66.06 samp/GPU/s) * ``host_dispatch`` — fused pack + eager ``gemm_fp4_impl`` (65.98) * ``mxfp4_mm`` — one ``primus_flux::mxfp4_mm`` custom op (65.63)
+
+Legacy flags still work if ``FLUX_FP4_DISPATCH`` is unset: ``FLUX_FP4_MXFP4_MM``, ``FLUX_FP4_HOST_DISPATCH``, ``FLUX_FP4_FUSED_H16_QUANT``. Unset or empty selects the launch recipe default, fusion.
+"""
     explicit = (os.getenv("FLUX_FP4_DISPATCH") or "fusion").strip().lower()
     if explicit in ("fusion", "host_dispatch", "mxfp4_mm"):
         return explicit
@@ -123,21 +115,15 @@ _USE_MXFP4_MM = _FP4_DISPATCH == "mxfp4_mm"
 
 
 def _resolve_scale_rounding_mode() -> int:
-    """E8M0 rounding bias applied when a block's scale exponent is derived.
-
-    The FlyDSL packs add a constant to the fp32 bits before taking the exponent, so the mode
-    picks where inside a power-of-two bin the scale rounds up: 0 is a quarter ULP, 1 is a half
-    (round-to-nearest on the exponent), 2 is three eighths. All three are exact and equally
-    cheap -- the bias is a compile-time constant folded into the kernel -- so this is a pure
-    numerics knob with no throughput term.
-
-    We ran mode 0 for every MXFP4 run to date, not by choice but because nothing ever passed
-    this argument and the kernels default it. GPT-OSS-20B's converged MXFP4 recipe uses mode 2
-    (they call it UOS), alongside RHT, gradient SR and weight de-oscillation, and that is the
-    only MXFP4 recipe in the building that converges on its own schedule.
-
-    Resolved at import, like the dispatch flag above, so torch.compile never traces os.getenv.
     """
+E8M0 rounding bias applied when a block's scale exponent is derived.
+
+The FlyDSL packs add a constant to the fp32 bits before taking the exponent, so the mode picks where inside a power-of-two bin the scale rounds up: 0 is a quarter ULP, 1 is a half (round-to-nearest on the exponent), 2 is three eighths.
+
+We ran mode 0 for every MXFP4 run to date, not by choice but because nothing ever passed this argument and the kernels default it. GPT-OSS-20B's converged MXFP4 recipe uses mode 2 (they call it UOS), alongside RHT, gradient SR and weight de-oscillation, and that is the only MXFP4 recipe in the building that converges on its own schedule.
+
+Resolved at import, like the dispatch flag above, so torch.compile never traces os.getenv.
+"""
     # `or "0"`, not a getenv default: the launcher forwards every name the config exports and
     # materialises the value from the live environment, so an unset knob arrives as "" and int("")
     # raises before anything useful has been logged.
@@ -148,9 +134,9 @@ def _resolve_scale_rounding_mode() -> int:
 
 
 _SCALE_ROUNDING_MODE = _resolve_scale_rounding_mode()
-# Backward hands both FP4 GEMMs their scales already in the GEMM's packed layout, built by
-# the grad dual-bias pack (`_quantize_mxfp4_h16_dual_bias_packed_op`), so neither GEMM
-# launches its scale preshuffle.
+# Backward hands both FP4 GEMMs their scales already in the GEMM's packed layout, built by the
+# grad dual-bias pack (`_quantize_mxfp4_h16_dual_bias_packed_op`), so neither GEMM launches its
+# scale preshuffle.
 _PACKED_SCALES = os.environ.get("FLUX_MXFP4_PACKED_SCALES", "1") == "1"
 
 
@@ -170,31 +156,23 @@ def _resolve_fp8_fprop_backend() -> str:
 
 _FP8_FPROP_BACKEND = _resolve_fp8_fprop_backend()
 
-# Collapse the activation's three HBM passes -- FP8 amax, FP8 row cast, MXFP4 col pack -- into
-# the single-read `flydsl_quant_fp8_mxfp4_dual` kernel. Read at import for the same reason as
-# above: torch.compile must not trace a getenv.
-#
+# Collapse the activation's three HBM passes -- FP8 amax, FP8 row cast, MXFP4 col pack -- into the
+# single-read `flydsl_quant_fp8_mxfp4_dual` kernel. Read at import for the same reason as above:
+# torch.compile must not trace a getenv.
 # Default OFF because it is the one thing here that changes numerics: the FP8 scale becomes the
-# PREVIOUS step's, since a tensorwise scale otherwise has to be known before the first output
-# byte can be written, which is exactly what forces the amax into its own pass. See the kernel's
-# own header in primus-turbo-mxfp4-quant-h16-fusion.py for the measurements -- both the 47.91
-# ms/step those three passes cost in a real trace, and the staleness cost (0 to 1 clipped
-# elements out of 25M, relative error 2.652e-02 stale against 2.650e-02 fresh).
+# PREVIOUS step's, since a tensorwise scale otherwise has to be known before the first output byte
+# can be written, which is exactly what forces the amax into its own pass.
 _FP8_DUAL_PACK = os.getenv("FLUX_FP8_DUAL_PACK", "0") == "1"
 
 # Fold the dual pack's delayed-scale arithmetic (reciprocal, amax reduce, clamp, `/ 448.0`) into
 # `flydsl_quant_fp8_mxfp4_dual_delayed`: ~6 eager launches per Linear per step become two FlyDSL
 # ones. Byte-identical to the eager path on all four outputs, so numerics do not move.
-#
-# Ported from b81f50e73 (sukylasa). Inert unless FLUX_FP8_DUAL_PACK is also on AND the fprop is
-# FP8 -- see the `_FP8_DUAL_PACK and self.config.fprop == "fp8"` gate below -- so it cannot touch
-# the full-MXFP4 forward this branch measures at 83.53 on 4 nodes.
 _FP8_DUAL_DELAYED = os.getenv("FLUX_FP8_DUAL_DELAYED", "0") == "1"
 
-# FP8 all-gather: quantize each weight shard with ONE `flydsl_quant_fp8_mxfp4_dual` read instead of
-# `quantize_fp8_tensorwise` (a scale kernel + the row cast) followed by a separate col-pack read.
-# Byte-identical on all three payloads and scale_inv. Shards the kernel's R % 128, C % 256 tiling
-# does not cover keep the old path.
+# FP8 all-gather: quantize each weight shard with ONE `flydsl_quant_fp8_mxfp4_dual` read instead
+# of `quantize_fp8_tensorwise` (a scale kernel + the row cast) followed by a separate col-pack
+# read. Byte-identical on all three payloads and scale_inv. Shards the kernel's R % 128, C % 256
+# tiling does not cover keep the old path.
 _FP8_AG_FUSED_QUANT = os.getenv("FLUX_FP8_AG_FUSED_QUANT", "0") == "1"
 _FP8_AG_FUSED_QUANT_LOGGED = False
 
@@ -215,10 +193,9 @@ def _init_turbo() -> None:
     if not supported:
         raise RuntimeError(f"MXFP4 unsupported on this device: {reason}")
 
-    # FlyDSL by default: same policy as FLUX FP8 (full_flydsl). Turbo's MXFP4
-    # FlyDSL kernel tiles 256x256x256; every FLUX block GEMM dim is a multiple
-    # of 256 so the backend can_handle all three passes. AITER / HIPBLASLT
-    # remain selectable via FLUX_FP4_GEMM_BACKEND.
+    # FlyDSL by default: same policy as FLUX FP8 (full_flydsl). Turbo's MXFP4 FlyDSL kernel tiles
+    # 256x256x256; every FLUX block GEMM dim is a multiple of 256 so the backend can_handle all three
+    # passes. AITER / HIPBLASLT remain selectable via FLUX_FP4_GEMM_BACKEND.
     name = os.getenv("FLUX_FP4_GEMM_BACKEND", "flydsl").strip().upper()
     try:
         backend = BackendType[name]
@@ -228,13 +205,9 @@ def _init_turbo() -> None:
             f"FLUX_FP4_GEMM_BACKEND={name!r} is not a Primus-Turbo backend; expected one of: {valid}"
         ) from exc
 
-    # PRIMUS_TURBO_GEMM_BACKEND outranks the per-call default_backend we pass,
-    # and pinning FP4 to AITER through it also arms the preshuffle fast path.
-    # That path expects pre-shuffled operands; ours are not shuffled (the
-    # shuffle_* flags into quantize_mxfp4 are all False), and the mismatch is
-    # silent -- measured relative GEMM error goes from 0.158 to 1.55, i.e. the
-    # result is noise, with no error raised. Refuse to start rather than train
-    # on garbage.
+    # PRIMUS_TURBO_GEMM_BACKEND outranks the per-call default_backend we pass, and pinning FP4 to
+    # AITER through it also arms the preshuffle fast path. That path expects pre-shuffled operands;
+    # the result is noise, with no error raised. Refuse to start rather than train on garbage.
     env_pin = os.getenv("PRIMUS_TURBO_GEMM_BACKEND")
     if env_pin:
         raise RuntimeError(
@@ -248,22 +221,17 @@ def _init_turbo() -> None:
     _GRANULARITY = ScalingGranularity.MX_BLOCKWISE.value
     _BACKEND = backend.value
     _GEMM_FP4 = gemm_fp4_impl
-    # The fused `bias=` is the P3 overlay's, so it is absent whenever FLUX_MXFP4_P3_GEMM=0 or
-    # the image's Turbo is newer than that overlay. Passing it anyway is not a soft failure:
-    # run 37176485614 lost all 32 ranks to "Unknown keyword argument 'bias'" raised inside
-    # dynamo while tracing the wgrad GEMM, with bias=None at that call site. Decide once here
-    # and let _mxfp4_mm fold the bias in on the host when the operator cannot take it.
+    # The fused `bias=` is the P3 overlay's, so it is absent whenever FLUX_MXFP4_P3_GEMM=0 or the
+    # image's Turbo is newer than that overlay. Decide once here and let _mxfp4_mm fold the bias in on
+    # the host when the operator cannot take it.
     _GEMM_FP4_BIAS = _op_takes(gemm_fp4_impl, "bias")
     # Packed scales reach the GEMM by one of two names. The P3 overlay takes them alongside the
     # canonical ones as `a_scale_packed=`; upstream's own equivalent, which landed after that
     # overlay was taken, takes them INSTEAD of the canonical ones with `preshuffled=True`. Same
     # saving either way -- the GEMM stops repacking scales on every launch.
     _GEMM_FP4_PACKED_KW = _op_takes(gemm_fp4_impl, "a_scale_packed")
-    # Upstream's interface also needs its layout predicate, and both the predicate and the
-    # module it lives in have to be resolved HERE. Everything that reads them runs inside
-    # `_MXFP4LinearFunction.backward`, which is traced, so an import or a cache fill at that
-    # point is an unsafe side effect rather than a slow path -- that is what ended runs
-    # 37183081545 and 37184679793. `warm_packed_scale_api` also primes upstream's own lazy CU
+    # Upstream's interface also needs its layout predicate, and both the predicate and the module it
+    # lives in have to be resolved HERE. `warm_packed_scale_api` also primes upstream's own lazy CU
     # count, which was the specific mutation the second of those tripped on.
     from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
         _turbo_packed_layout_agrees,
@@ -354,9 +322,9 @@ SR_OPERAND_PRESETS = {
     # What Transformer Engine ships for NVFP4: stochastic rounding on the incoming
     # gradient only, round-to-nearest everywhere else.
     "grad": frozenset({("grad", "dgrad"), ("grad", "wgrad")}),
-    # "FP4 All the Way" (arXiv 2505.19115) eq. 4-5, the full selective scheme from
-    # its six-way sweep: the gradient in both backward GEMMs, plus Wgrad's
-    # activation, which is the one forward tensor that helped.
+    # "FP4 All the Way" (arXiv 2505.19115) eq. 4-5, the full selective scheme from its six-way sweep:
+    # the gradient in both backward GEMMs, plus Wgrad's activation, which is the one forward tensor
+    # that helped.
     "paper": frozenset({("grad", "dgrad"), ("grad", "wgrad"), ("act", "wgrad")}),
 }
 
@@ -376,39 +344,32 @@ class MXFP4LinearConfig:
     # Deterministic Hadamard order; 0 disables. 16 is cheaper than 32 and
     # reported to stabilise equally well.
     hadamard: int = 16
-    # 2D 32x32 block scaling for weights is transpose-invariant, but measured
-    # ~8% *worse* than 1D rowwise on FLUX's shapes, so it is off by default.
     weight_2d_block: bool = False
     # Primus-Turbo's randomised Hadamard, reported not to rescue Wgrad.
     randomized_hadamard: bool = False
-    # Stash the Wgrad operand as MXFP4 (~0.53 B/element) rather than BF16.
-    # The FP8 baseline saves ~18GB/GPU of activations here; BF16 would be ~36GB
-    # and MXFP4 is ~10GB, so this keeps peak memory under the baseline.
+    # Stash the Wgrad operand as MXFP4 (~0.53 B/element) rather than BF16. The FP8 baseline saves
+    # ~18GB/GPU of activations here; BF16 would be ~36GB and MXFP4 is ~10GB, so this keeps peak memory
+    # under the baseline.
     save_quantized: bool = True
     # Passes that pack their operands with stochastic rounding, via the FlyDSL
     # packs' hardware SR convert. This replaces FLUX_FP4_SR, which never did
     # anything: the C++ quantize_mxfp4 takes use_sr and ignores it.
-    #
     # This is per-PASS, so it necessarily rounds BOTH operands of a pass the same
     # way, and that turns out to be the wrong granularity -- see sr_operands.
     sr_passes: frozenset = frozenset()
-    # (tensor, pass) pairs that round stochastically, i.e. SR at the granularity
-    # the literature actually prescribes it at.
-    #
-    # Three GEMMs x two operands is six independently roundable tensors, and both
-    # published FP4 recipes ablate them one at a time and land on the same split:
-    # SR helps on the incoming gradient, and HURTS on the forward tensors.
-    # NVFP4 (arXiv 2509.25149) states it directly -- "use stochastic rounding for
-    # gradients and round-to-nearest-even for weights and activations", with
-    # "applying stochastic rounding to the forward pass tensors is detrimental, as
-    # it amplifies quantization error relative to nearest rounding" -- and ships
-    # exactly that in Transformer Engine, where SR is enabled for gradients only.
-    # "FP4 All the Way" (arXiv 2505.19115) sweeps all six and keeps SR on the
-    # gradient in both the Dgrad and Wgrad GEMMs plus the activation in Wgrad,
-    # with round-to-nearest on both weight orientations and on Fprop's activation.
-    #
-    # sr_passes cannot express any of that: dgrad,wgrad also rounds the weight
-    # stochastically, which is one of the placements both papers call harmful.
+    # (tensor, pass) pairs that round stochastically, i.e. SR at the granularity the literature
+    # actually prescribes it at.
+    # Three GEMMs x two operands is six independently roundable tensors, and both published FP4
+    # recipes ablate them one at a time and land on the same split: SR helps on the incoming gradient,
+    # and HURTS on the forward tensors. NVFP4 (arXiv 2509.25149) states it directly -- "use stochastic
+    # rounding for gradients and round-to-nearest-even for weights and activations", with "applying
+    # stochastic rounding to the forward pass tensors is detrimental, as it amplifies quantization
+    # error relative to nearest rounding" -- and ships exactly that in Transformer Engine, where SR is
+    # enabled for gradients only. "FP4 All the Way" (arXiv 2505.19115) sweeps all six and keeps SR on
+    # the gradient in both the Dgrad and Wgrad GEMMs plus the activation in Wgrad, with round-to-
+    # nearest on both weight orientations and on Fprop's activation.
+    # sr_passes cannot express any of that: dgrad,wgrad also rounds the weight stochastically, which
+    # is one of the placements both papers call harmful.
     sr_operands: frozenset = frozenset()
 
     def __post_init__(self):
@@ -456,61 +417,26 @@ class MXFP4LinearConfig:
         return pass_name in self.sr_passes
 
     def sr_op(self, tensor: str, pass_name: str) -> bool:
-        """Whether ``tensor`` rounds stochastically when packed for ``pass_name``.
-
-        ``tensor`` is one of act/weight/grad. Every pack site asks with its own
-        role, so the six quantized tensors are controllable one at a time; the
-        per-pass ``sr_passes`` still forces both operands of a pass on, which keeps
-        already-measured FLUX_FP4_SR_PASSES runs reproducing bit-identically.
         """
+Whether ``tensor`` rounds stochastically when packed for ``pass_name``.
+
+``tensor`` is one of act/weight/grad. Every pack site asks with its own role, so the six quantized tensors are controllable one at a time;
+"""
         if (tensor, pass_name) not in SR_OPERANDS:
             raise ValueError(f"{tensor!r} is not an operand of {pass_name!r}")
         return pass_name in self.sr_passes or (tensor, pass_name) in self.sr_operands
 
 
 def config_from_env() -> MXFP4LinearConfig | None:
-    """Build a config from FLUX_FP4_* env vars, or None if FP4 is not requested.
-
-    ``FLUX_FP4_PASSES`` is the ladder control: a comma list drawn from
-    ``fprop,dgrad,wgrad``. Omitted dgrad/wgrad stay BF16. Omitted fprop takes
-    ``FLUX_FP4_FPROP_CAST``, which defaults to bf16 but should usually be mxfp6.
-    MXFP4 in the backward is close to free -- a bf16 forward over it converges at
-    8.13M samples, inside MLPerf's own RCP list -- while MXFP4 in the forward costs
-    1.84x that. The whole ladder, every number from one run on our own 4x8 stack at
-    GBS 1024 and measured the same way (block-2 including the eval that closes it):
-
-        forward   samples   block-2   TTT       run
-        bf16       8.13M     52.71    80.6 min  36056959752
-        fp8        8.65M     63.36    71.5 min  36238640172  old flags, see below
-        fp8       10.49M     67.96    80.4 min  36439930802  current flags + flydsl
-        mxfp6      9.96M     74.31    70.5 min  36356017668
-        mxfp4     14.94M     77.05   101.3 min  36328207195
-
-    mxfp6 is the time-to-train optimum and the fp8 row is why. The 8.65M fp8 run predates
-    FLUX_FUSED_NORM_ROPE=1 and FLUX_FP4_SAVE_QUANTIZED=1, and this docstring used to argue
-    that correcting for those two would put fp8 near 69 min. That argument has now been
-    measured (36439930802, both flags on, flydsl fprop, 40 evals, loss healthy throughout)
-    and it was wrong in both directions at once: throughput came in BETTER than the +3.2%
-    correction predicted, 67.96 against 65.4, but the crossing moved from 8.65M to 10.49M
-    samples, so TTT went to 80.4 min rather than 69. fp8 is the worst time-to-train in the
-    table apart from all-pass mxfp4.
-
-    Read the 10.49M with seed noise in mind. That run sat on the threshold from 9.44M
-    (0.58636, 0.58659, 0.58699, 0.58629) before crossing at 0.58596, so a luckier draw
-    crosses a million samples earlier and fp8's sample count is plausibly the same as
-    mxfp6's. What is not in doubt is the throughput: 67.96 against 74.31, from 11
-    consecutive blocks spanning 67.15-67.97. So mxfp6 wins on the axis that is stable.
-
-    Worth knowing when reading the table: samples track measured matmul error almost
-    exactly (bf16 1.7e-3, fp8 tensorwise 3.8e-2, mxfp6 4.0e-2, mxfp4 1.6e-1). fp8 used to
-    sit ~1M samples better than that line predicted, which made it the anomaly and left
-    mxfp6 looking like it had headroom to find; at 10.49M it sits on the line or slightly
-    worse, and the anomaly is gone. There is in any case no known numerics fix left for
-    mxfp6: its real operands measure well-conditioned (group-of-32 max/rms 2.29-2.69 for
-    activations against a Gaussian ~2.2, weights 1.695), so a rotation along K has nothing
-    to spread and measures 0.0%, and E2M3's three mantissa bits are already at their
-    rounding limit.
     """
+Build a config from FLUX_FP4_* env vars, or None if FP4 is not requested.
+
+``FLUX_FP4_PASSES`` is the ladder control: a comma list drawn from ``fprop,dgrad,wgrad``. Omitted dgrad/wgrad stay BF16. Omitted fprop takes ``FLUX_FP4_FPROP_CAST``, which defaults to bf16 but should usually be mxfp6.
+
+So mxfp6 wins on the axis that is stable.
+
+fp8 used to sit ~1M samples better than that line predicted, which made it the anomaly and left mxfp6 looking like it had headroom to find;
+"""
     passes = os.getenv("FLUX_FP4_PASSES", "").strip().lower()
     if not passes or passes in {"0", "off", "none"}:
         return None
@@ -544,10 +470,9 @@ def config_from_env() -> MXFP4LinearConfig | None:
             raise ValueError(f"FLUX_FP4_SR_PASSES has unknown entries: {sorted(unknown)}")
     sr_set &= selected
 
-    # Operand-level SR. Either a preset name (grad, paper) or a comma list of
-    # tensor@pass tokens drawn from SR_OPERANDS. Intersected with the selected
-    # passes for the same reason sr_passes is: a pass that is not MXFP4 has no pack
-    # to round, so naming it is a no-op rather than an error.
+    # Operand-level SR. Either a preset name (grad, paper) or a comma list of tensor@pass tokens drawn
+    # from SR_OPERANDS. Intersected with the selected passes for the same reason sr_passes is: a pass
+    # that is not MXFP4 has no pack to round, so naming it is a no-op rather than an error.
     sr_ops_env = os.getenv("FLUX_FP4_SR_OPERANDS", "").strip().lower()
     if not sr_ops_env or sr_ops_env in {"0", "off", "none"}:
         sr_ops = frozenset()
@@ -605,20 +530,15 @@ def config_from_env() -> MXFP4LinearConfig | None:
 def _quantize_mxfp4_rowwise_op(
     x: torch.Tensor, use_2d_block: bool, use_sr: bool, use_rht: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """MXFP4-quantize along ``x``'s last dim.
-
-    Single-axis rather than ``quantize_mxfp4_dual``: each pass needs its operands
-    rotated along *its own* contraction dim and one dual call can only carry one
-    rotation, so the colwise half of a dual pack was always discarded -- half a
-    packer paid for on every call. Row-only measured 14% cheaper overall and up
-    to 35% on the smaller activations, and is bit-identical to the dual packer's
-    row blob (same bytes, same dtypes, same resulting GEMM error).
-
-    ``axis=1`` is the row direction; the kernel accepts only 0 or 1.
-
-    Wrapped as a custom op because the raw C++ op has no meta kernel, which
-    would force a graph break and cost the torch.compile speedup.
     """
+MXFP4-quantize along ``x``'s last dim.
+
+Single-axis rather than ``quantize_mxfp4_dual``: each pass needs its operands rotated along *its own* contraction dim and one dual call can only carry one rotation, so the colwise half of a dual pack was always discarded -- half a packer paid for on every call.
+
+``axis=1`` is the row direction; the kernel accepts only 0 or 1.
+
+Wrapped as a custom op because the raw C++ op has no meta kernel, which would force a graph break and cost the torch.compile speedup.
+"""
     data, scale = torch.ops.primus_turbo_cpp_extension.quantize_mxfp4(
         x.contiguous(),
         FP4_DTYPE,
@@ -649,10 +569,10 @@ def _quantize_rowwise(
     if x.shape[-1] % 128:
         raise ValueError(f"MXFP4 quantized dim must be a multiple of 128, got {x.shape[-1]}")
     if _SCALE_ROUNDING_MODE:
-        # The C++ quantize_mxfp4 takes no scale rounding mode, so this path would hand back a
-        # mode-0 pack while the log claims otherwise -- the same silent lie FLUX_FP4_SR used to
-        # tell. 2D-block and randomized RHT are what route here (see _fused_h16_quant_enabled),
-        # so the fix is to drop one of those rather than to accept a mixed-grid run.
+        # The C++ quantize_mxfp4 takes no scale rounding mode, so this path would hand back a mode-0 pack
+        # while the log claims otherwise -- the same silent lie FLUX_FP4_SR used to tell. 2D-block and
+        # randomized RHT are what route here (see _fused_h16_quant_enabled), so the fix is to drop one of
+        # those rather than to accept a mixed-grid run.
         raise ValueError(
             f"FLUX_FP4_SCALE_ROUNDING={_SCALE_ROUNDING_MODE} needs the FlyDSL H16 packs, but "
             "this tensor fell back to the C++ quantize_mxfp4, which always rounds at mode 0. "
@@ -712,22 +632,11 @@ def _(x, sr=False):
 def _quantize_mxfp4_h16_dual_op(
     x: torch.Tensor, row_sr: bool = False, col_sr: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """One read of ``x`` -> both the row pack (along ``x``'s own last dim) and
-    the col pack (along ``x.t()``'s last dim) that two separate
-    ``_quantize_mxfp4_h16_op`` calls -- the second fed ``x.t().contiguous()``
-    -- would otherwise independently produce. Bit-identical to those two
-    calls (see ``flydsl_quant_mxfp4_h16_dual``'s docstring in
-    ``mxfp4_quant_kernel.py``, and this round's ROUND_REPORT for the
-    on-hardware `torch.equal` verification); this only removes the
-    materialized transpose copy that used to sit between them.
-
-    ``row_sr``/``col_sr`` select stochastic rounding per orientation, which is why
-    the two travel separately rather than as one flag: the row pack serves Fprop
-    (from x) or Dgrad (from g) while the col pack serves Wgrad, so each side
-    carries its own pass's setting. The kernel does it with MI355X's native
-    ``cvt_scalef32_sr_pk_fp4_f32`` convert, inside a pack that already has the data
-    resident, so it is free -- measured 0.90x and 1.11x against sr=off.
     """
+One read of ``x`` -> both the row pack (along ``x``'s own last dim) and the col pack (along ``x.t()``'s last dim) that two separate ``_quantize_mxfp4_h16_op`` calls -- the second fed ``x.t().contiguous()`` -- would otherwise independently produce. Bit-identical to those two calls; this only removes the materialized transpose copy that used to sit between them.
+
+``row_sr``/``col_sr`` select stochastic rounding per orientation, which is why the two travel separately rather than as one flag: the row pack serves Fprop (from x) or Dgrad (from g) while the col pack serves Wgrad, so each side carries its own pass's setting.
+"""
     from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
         flydsl_quant_mxfp4_h16_dual,
     )
@@ -760,19 +669,11 @@ def _(x, row_sr=False, col_sr=False):
 def _quantize_mxfp4_h16_dual_bias_op(
     x: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``_quantize_mxfp4_h16_dual_op`` plus the bias-gradient column sum,
-    fused into the dual kernel's col phase (optimize round 5 / P2) -- see
-    ``flydsl_quant_mxfp4_h16_dual_bias``'s docstring in
-    ``mxfp4_quant_kernel.py`` for the mechanism.
-
-    ``_MXFP4LinearFunction.backward`` used to read ``grad_2d`` a THIRD time
-    via ``grad_2d.sum(0)`` for the bias gradient, after this same tensor had
-    already been read once for Dgrad's dual pack. Used only for ``grad_2d``
-    when the module has a bias AND the plain dual pack would already be
-    fused (``fuse_g``) -- see that call site; a bias-less Linear keeps using
-    the plain ``_quantize_mxfp4_h16_dual_op`` so it never pays for an unused
-    column sum.
     """
+``_quantize_mxfp4_h16_dual_op`` plus the bias-gradient column sum, fused into the dual kernel's col phase -- see ``flydsl_quant_mxfp4_h16_dual_bias``'s docstring in ``mxfp4_quant_kernel.py`` for the mechanism.
+
+``_MXFP4LinearFunction.backward`` used to read ``grad_2d`` a THIRD time via ``grad_2d.sum(0)`` for the bias gradient, after this same tensor had already been read once for Dgrad's dual pack. Used only for ``grad_2d`` when the module has a bias AND the plain dual pack would already be fused (``fuse_g``) -- see that call site; a bias-less Linear keeps using the plain ``_quantize_mxfp4_h16_dual_op`` so it never pays for an unused column sum.
+"""
     from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
         flydsl_quant_mxfp4_h16_dual_bias,
     )
@@ -805,21 +706,11 @@ def _(x):
 def _quantize_mxfp4_h16_dual_bias_legs_op(
     x: torch.Tensor, leg0: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``_quantize_mxfp4_h16_dual_bias_op`` split into two column-slice
-    launches (optimize round 10 / P6, `XPAD`/`XOFF` in `mxfp4_quant_kernel.
-    py`'s `_emit_dual_bias_body`) at the producer boundary ``leg0`` /
-    ``x.shape[1] - leg0`` -- e.g. single.l1's backward ``grad_2d`` is itself
-    ``cat(FA-bwd dqkv[*, 9216], dGELU(linear2_C)[*, 12288])`` one level up
-    (`_legpack_g_split` below is the shape-exact gate this is used through).
-
-    Bit-identical (row/row_scale/col/col_scale) and bias `allclose` vs
-    ``_quantize_mxfp4_h16_dual_bias_op`` -- see ``flydsl_quant_mxfp4_h16_
-    dual_bias_legs``'s docstring for the mechanism and this round's
-    ROUND_REPORT for the on-hardware `torch.equal`/SNR verification and the
-    measured A/B (net win in the cold/once-per-step regime, flat warm).
-    ``leg0`` is a plain Python int (a shape constant from the caller-side
-    gate, not data-dependent), so it is safe as a non-tensor custom-op arg.
     """
+py`'s `_emit_dual_bias_body`) at the producer boundary ``leg0`` / ``x.shape[1] - leg0`` -- e.g. single.l1's backward ``grad_2d`` is itself ``cat(FA-bwd dqkv[*, 9216], dGELU(linear2_C)[*, 12288])`` one level up (`_legpack_g_split` below is the shape-exact gate this is used through).
+
+``leg0`` is a plain Python int (a shape constant from the caller-side gate, not data-dependent), so it is safe as a non-tensor custom-op arg.
+"""
     from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
         flydsl_quant_mxfp4_h16_dual_bias_legs,
     )
@@ -964,19 +855,13 @@ def _dual_bias_packed_ok(grad_2d, x_s, w_s):
 
 
 def _packed_gemm_flags(grad_2d, x_s):
-    """``(dgrad_ok, wgrad_ok)``: may each backward GEMM read the pack the quant just wrote?
-
-    Both backward GEMMs get a pack, but upstream's GEMM tiles the packed layout and picks the
-    tile from the shape, so it reads ours for some shapes and not others -- in practice the
-    Dgrad and not the Wgrad, whose K is the token count. The one that cannot keeps its
-    canonical scales.
-
-    This runs under tracing, as does every other part of the backward -- an earlier version of
-    this docstring called the backward eager and that is simply wrong, which is how the import
-    that killed run 37184679793 came to be written three lines below here. So nothing in this
-    function may import, memoise, or allocate. The predicate is bound once in ``_init_turbo``
-    and only called from here; see ``warm_packed_scale_api`` for what that costs to arrange.
     """
+``(dgrad_ok, wgrad_ok)``: may each backward GEMM read the pack the quant just wrote?
+
+Both backward GEMMs get a pack, but upstream's GEMM tiles the packed layout and picks the tile from the shape, so it reads ours for some shapes and not others -- in practice the Dgrad and not the Wgrad, whose K is the token count. The one that cannot keeps its canonical scales.
+
+So nothing in this function may import, memoise, or allocate. The predicate is bound once in ``_init_turbo`` and only called from here; see ``warm_packed_scale_api`` for what that costs to arrange.
+"""
     if not _GEMM_FP4_PRESHUFFLED:
         return True, True  # overlay interface: it takes the pack at any shape
     _turbo_packed_layout_agrees = _TURBO_LAYOUT_OK
@@ -985,9 +870,9 @@ def _packed_gemm_flags(grad_2d, x_s):
     return _turbo_packed_layout_agrees(R, bdim, C), _turbo_packed_layout_agrees(C, bdim, R)
 
 
-# Gated residuals `x + gate * linear(h)` (FLUX_GATE_DGATE): backward hands the Linear dY
-# instead of the bf16 `gate * dY`, and one pack applies the gate at its load and accumulates
-# dgate from the same read. Off, `forward_gated` and the gated GELU-input path are never called.
+# Gated residuals `x + gate * linear(h)` (FLUX_GATE_DGATE): backward hands the Linear dY instead
+# of the bf16 `gate * dY`, and one pack applies the gate at its load and accumulates dgate from
+# the same read. Off, `forward_gated` and the gated GELU-input path are never called.
 _GATE_DGATE = os.getenv("FLUX_GATE_DGATE", "0") == "1"
 # The fused kernel needs every 64-row tile inside one batch sample.
 _GATE_DGATE_ROWS = 64
@@ -1019,13 +904,11 @@ def _quantize_mxfp4_h16_dual_bias_gate_op(
     gate applied at the pack's bf16 load, plus ``dgate[b] = sum_l dy * (y + y_bias)`` from the
     same read. ``gate`` is ``[B, C]`` and the rows of ``dy`` and ``y`` are B samples of R / B
     tokens. See ``flydsl_quant_mxfp4_h16_dual_bias_gate``."""
-    from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
-        flydsl_quant_mxfp4_h16_dual_bias_gate,
-    )
+    from primus_turbo.flydsl.quantization import mxfp4_quant_kernel as _mqk
 
-    return flydsl_quant_mxfp4_h16_dual_bias_gate(
+    return _mqk.flydsl_quant_mxfp4_h16_dual_bias_gate(
         dy.contiguous(),
-        gate.contiguous(),
+        gate if getattr(_mqk, "GATE_ROW_STRIDE_OK", False) else gate.contiguous(),
         y.contiguous(),
         y_bias.contiguous(),
         FP4_DTYPE,
@@ -1114,25 +997,9 @@ def _(d_act, preact):
 
 
 def _legpack_g_split(R, C):
-    """optimize round 10 / P6: shape-exact whitelist for the two-leg
-    column-slice bias-dual pack above. Measured this round (ROUND_REPORT):
-    net win in the cold/once-per-step regime (-2.04% to -2.51%, 2 independent
-    interleaved reps) and flat (noise-level +0.03%/+0.14%) in the back-to-
-    back warm regime, at the one real production (R, C) this currently
-    covers -- single.l1's backward `grad_2d`, split at its own producer
-    boundary (FA-bwd dqkv width 9216 + dGELU(linear2_C) width 12288).
-
-    Deliberately an exact-shape whitelist, not a general `C > R` or similar
-    rule: the plain-dual (non-bias) sibling shape (single.l2's forward X,
-    16384x15360 split 3072+12288) was ALSO measured this round and found to
-    be a net LOSS (+1.17% to +5.15% across warm/cold, 2 reps, even after
-    adding this round's own `_ORDER_TABLE` fix for both split's leg widths)
-    -- so "is a leg split of a big single-block tensor" alone does not
-    predict a win; only this one shape is validated as a keep so far. The
-    next concrete lever (see ROUND_REPORT `expect`) is measuring whether
-    single.l2's OWN backward-G shape (16384x3072, not a legpack case at all
-    today) or a 3-way split changes that verdict, not widening this
-    whitelist speculatively."""
+    """
+only this one shape is validated as a keep so far.
+"""
     if R == 16384 and C == 21504:
         return (9216, 12288)
     return None
@@ -1140,18 +1007,11 @@ def _legpack_g_split(R, C):
 
 @torch.library.custom_op("primus_flux::quantize_mxfp4_h16_col", mutates_args=(), device_types="cuda")
 def _quantize_mxfp4_h16_col_op(x: torch.Tensor, sr: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
-    """Colwise-transpose-read H16 + MXFP4 pack in one FlyDSL launch: bit-
-    identical to ``_quantize_mxfp4_h16_op(x.t().contiguous())`` (the row pack
-    of ``x``'s transpose) without materializing that transpose copy first.
-    Custom-op so torch.compile does not trace into FlyDSL JIT.
-
-    optimize round 9 / N2: used for weight's Dgrad operand, which previously
-    paid a full ``weight.t().contiguous()`` HBM copy (profiled at 22.87% of a
-    4-layer Flux Linear stack's fwd+bwd device time -- see this round's
-    ROUND_REPORT, /results/r9/p1_rank.json) before packing. Weight's own row
-    pack (Fprop) is untouched -- it keeps using ``_quantize_mxfp4_h16_op``
-    directly on the un-transposed weight.
     """
+Colwise-transpose-read H16 + MXFP4 pack in one FlyDSL launch: bit- identical to ``_quantize_mxfp4_h16_op(x.t().contiguous())`` (the row pack of ``x``'s transpose) without materializing that transpose copy first. Custom-op so torch.compile does not trace into FlyDSL JIT.
+
+Weight's own row pack (Fprop) is untouched -- it keeps using ``_quantize_mxfp4_h16_op`` directly on the un-transposed weight.
+"""
     from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
         flydsl_quant_mxfp4_h16_col,
     )
@@ -1170,9 +1030,7 @@ def _(x, sr=False):
 
 
 # Delayed scales, keyed by the address of the calling module's slot tensor.
-#
 # Both halves of that sentence are forced, and each rules out the obvious alternative.
-#
 # The values do NOT live in the module's tensor, they live here, because putting them there means
 # mutating a tensor inside the op; a mutating custom op gets wrapped in an `auto_functionalized`
 # node; and Inductor's `decompose_auto_functionalized` post-grad pass cannot remove that node for a
@@ -1180,17 +1038,14 @@ def _(x, sr=False):
 # removed" during the MLPerf warmup compile, before step 1. That happens on BOTH functionalization
 # paths -- turning `enable_auto_functionalized_v2` off only changes which of the two spellings
 # appears in the assertion. A pure op with its state behind it cannot reach that pass at all.
-#
 # The key is a tensor ADDRESS and not an `int` slot, even though an int reads better, because
 # Dynamo value-specialises int arguments. Every block's Linears would carry different slot numbers
 # while sharing one `DoubleStreamBlock.forward` code object, so each block forced its own graph and
 # the run died on "Dynamo recompile limit exceeded" instead. Tensors are guarded on metadata only,
 # never on value, so a tensor key lets all blocks share a single graph.
-#
 # So the module's tensor is a pure identity token: never read, never written, only its address
 # used. Writing to it from in here would be exactly the unannounced mutation functionalization
 # assumes cannot happen.
-#
 # Plain Python state is safe only because a custom op is opaque to Dynamo and runs eagerly -- the
 # same property that lets FlyDSL JIT live behind these ops. Values stay device-resident f32
 # tensors, never floats, because reading one as a float would sync to the host once per Linear per
@@ -1216,31 +1071,17 @@ def _scale_inv_from_amax(amax: torch.Tensor) -> torch.Tensor:
 def _fp8_mxfp4_dual_op(
     x: torch.Tensor, slot: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """One read of ``x`` -> (FP8 row pack, FP8 scale_inv, MXFP4 col pack, col scales).
-
-    Replaces three separate full-tensor reads that the FP8 fprop pays today, all of the same
-    tensor: ``quantize_fp8``'s amax reduction, ``quantize_fp8``'s row cast, and
-    ``_quantize_mxfp4_h16_col_op``'s Wgrad col pack. Measured at 47.91 ms of a 455 ms step.
-
-    ``slot`` is the calling module's identity token; its address names this Linear's entry in
-    `_FP8_DUAL_SCALE`, and its contents are never touched. The pack uses the scale found there
-    and then replaces it with the value implied by the amax the same kernel reduced, so step N's
-    amax sets step N+1's scale -- delayed scaling. The scale returned alongside the pack is the
-    one that actually applied to it, which is what the GEMM needs for dequant.
-
-    The slot holds ``scale_inv`` (``amax/448``) and not the forward scale, even though the
-    kernel wants the forward scale, because the CONVENTION has to match ``quantize_fp8``
-    exactly rather than approximately. ``quantize_fp8`` produces ``amax/448`` and quantizes with
-    its reciprocal, so storing ``amax/448`` and inverting once here reproduces it bit for bit.
-    Storing ``448/amax`` instead and inverting to report ``scale_inv`` looks equivalent and is
-    not: the two differ by one f32 ulp, and BF16 operands quantized to FP8 land exactly on
-    rounding boundaries often enough that a 7e-08 scale shift broke ~1% of those ties the other
-    way -- 263196 of 25165824 bytes -- which is what made a bootstrapped step 0 differ from the
-    unfused forward it must match.
-
-    The bootstrap computes a real amax so step 0 is not quantized with a garbage scale. It costs
-    one extra read on the first step of the run and nothing after.
     """
+One read of ``x`` -> (FP8 row pack, FP8 scale_inv, MXFP4 col pack, col scales).
+
+Replaces three separate full-tensor reads that the FP8 fprop pays today, all of the same tensor: ``quantize_fp8``'s amax reduction, ``quantize_fp8``'s row cast, and ``_quantize_mxfp4_h16_col_op``'s Wgrad col pack.
+
+``slot`` is the calling module's identity token; its address names this Linear's entry in `_FP8_DUAL_SCALE`, and its contents are never touched. The pack uses the scale found there and then replaces it with the value implied by the amax the same kernel reduced, so step N's amax sets step N+1's scale -- delayed scaling. The scale returned alongside the pack is the one that actually applied to it, which is what the GEMM needs for dequant.
+
+The slot holds ``scale_inv`` (``amax/448``) and not the forward scale, even though the kernel wants the forward scale, because the CONVENTION has to match ``quantize_fp8`` exactly rather than approximately. ``quantize_fp8`` produces ``amax/448`` and quantizes with its reciprocal, so storing ``amax/448`` and inverting once here reproduces it bit for bit.
+
+The bootstrap computes a real amax so step 0 is not quantized with a garbage scale. It costs one extra read on the first step of the run and nothing after.
+"""
     from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
         flydsl_quant_fp8_mxfp4_dual,
     )
@@ -1283,9 +1124,9 @@ def _(x, slot):
 
 # Forward GELU folded into the next Linear's FP8 dual pack (FLUX_FWD_GELU_PACK). The producing
 # Linear hands on its pre-activation in place of gelu(pre-activation) -- a "lazy act": its value
-# is the pre-activation, but the gradient flowing back into it is d(act), which that Linear's
-# own backward turns into dGELU. So a lazy act may only be produced after `lazy_gelu_into`
-# confirmed its one consumer packs it with the GELU applied (`_fp8_mxfp4_dual_legs_gelu_op`).
+# is the pre-activation, but the gradient flowing back into it is d(act), which that Linear's own
+# backward turns into dGELU. So a lazy act may only be produced after `lazy_gelu_into` confirmed
+# its one consumer packs it with the GELU applied (`_fp8_mxfp4_dual_legs_gelu_op`).
 _FWD_GELU_PACK = os.getenv("FLUX_FWD_GELU_PACK", "0") == "1"
 _FWD_GELU_PACK_CALLS = [0, 0]  # [with attn leg, gelu only]
 
@@ -1338,26 +1179,13 @@ def _(attn, preact, slot):
     return row, used_inv, col.view(FP4_DTYPE), col_s.view(torch.float8_e8m0fnu)
 
 
-# optimize round 7 / P3: fuse `+bias` into the GEMM's FlyDSL epilogue for Linears
-# whose output feeds an opaque consumer -- QKV projection (into attention) and the
-# single-block MLP's first Linear (into an activation the compiled block does not fold
-# the preceding add into). Every other Linear (out_proj, mlp.2, double-block linear2,
-# ...) keeps the unfused `out = out + bias`, which inductor already folds into the next
-# op for free at zero cost -- see this round's ROUND_REPORT / memory.md for the
-# compiled-block A/B that motivates restricting the fusion to just these sites.
-#
-# Gated on out_features rather than the module's FQN so this needs no change to any
-# file outside this one: 9216 = QKV (3 * hidden=3072), 21504 = single-block linear1
-# (7 * hidden=3072, FLUX's single-stream blocks fuse the MLP-up projection into the
-# same Linear as QKV). Both are exact multiples of 256 (see producer-map notes in
-# memory.md), so there is no N-tail masking edge case to worry about here.
+# Gated on out_features rather than the module's FQN so this needs no change to any file outside
+# this one: 9216 = QKV (3 * hidden=3072), 21504 = single-block linear1 (7 * hidden=3072, FLUX's
+# single-stream blocks fuse the MLP-up projection into the same Linear as QKV).
 _FUSE_BIAS_OUT_FEATURES = frozenset((9216, 21504))
 _FUSE_BIAS_EPILOGUE = os.getenv("FLUX_FP4_FUSE_BIAS_EPILOGUE", "1") == "1"
 
-# The same fusion for the FP8 tensorwise fprop, on its own flag and defaulted OFF. Needs the
-# gemm_helper/gemm_fp8_kernel overlays apply_mxfp4_overlays.sh installs under the same flag; with
-# the flag off the image's own Turbo is used and this file's FP8 path is byte-for-byte what the
-# eight submission runs measured.
+# The same fusion for the FP8 tensorwise fprop, on its own flag and defaulted OFF.
 _FP8_FUSE_BIAS_EPILOGUE = os.getenv("FLUX_FP8_FUSE_BIAS_EPILOGUE", "0") == "1"
 
 # The A6W4 GEMM's bias epilogue, on its own flag so it ablates apart from the MXFP4 one.
@@ -1365,27 +1193,20 @@ _A6W4_FUSE_BIAS_EPILOGUE = os.getenv("FLUX_A6W4_FUSE_BIAS_EPILOGUE", "1") == "1"
 
 
 def _fuse_bias_eligible(cfg: MXFP4LinearConfig, out_features: int, any_width: bool = False) -> bool:
-    """True iff this Linear's `+bias` should move into the GEMM epilogue instead of
-    running as a separate elementwise add. Requires a quantized Fprop (bf16 Fprop has
-    no fused-GEMM epilogue to fuse into) and one of the opaque-consumer output widths,
-    or ``any_width`` from a caller that saves the biased output itself (the GELU
-    Function below, whose saved pre-activation would otherwise cost its own write).
+    """
+True iff this Linear's `+bias` should move into the GEMM epilogue instead of running as a separate elementwise add. Requires a quantized Fprop (bf16 Fprop has no fused-GEMM epilogue to fuse into) and one of the opaque-consumer output widths, or ``any_width`` from a caller that saves the biased output itself (the GELU Function below, whose saved pre-activation would otherwise cost its own write).
 
-    MXFP6 qualifies as well as MXFP4: AITER's A6W6 asm GEMM shares the A4W4 kernarg
-    ABI, bias epilogue included.
+MXFP6 qualifies as well as MXFP4: AITER's A6W6 asm GEMM shares the A4W4 kernarg ABI, bias epilogue included.
 
-    FP8 qualifies only under its own flag. It arrived later (ported from 93228f84a /
-    34cde344a, sukylasa) and it reaches the recipe behind all eight converging submission
-    runs, so it is not allowed to ride in on FLUX_FP4_FUSE_BIAS_EPILOGUE -- that one has
-    defaulted to 1 since round 7 and flipping it would move the FP8 forward with no way
-    to A/B the two fusions apart."""
+FP8 qualifies only under its own flag.
+"""
     width_ok = any_width or out_features in _FUSE_BIAS_OUT_FEATURES
     if cfg.fprop == "fp8":
         return _FP8_FUSE_BIAS_EPILOGUE and width_ok
     if cfg.fprop == "a6w4":
-        # Rounds like an eager separate add. Under torch.compile it is not byte-identical: without
-        # it Inductor folds the add into the consumer (GELU, QK norm) in f32, unrounded.
-        # Opaque-consumer widths only: elsewhere Inductor already folds the add for free.
+        # Rounds like an eager separate add. Under torch.compile it is not byte-identical: without it
+        # Inductor folds the add into the consumer (GELU, QK norm) in f32, unrounded. Opaque-consumer
+        # widths only: elsewhere Inductor already folds the add for free.
         return _A6W4_FUSE_BIAS_EPILOGUE and out_features in _FUSE_BIAS_OUT_FEATURES
     return _FUSE_BIAS_EPILOGUE and cfg.fprop in ("mxfp4", "mxfp6") and width_ok
 
@@ -1420,29 +1241,19 @@ def _fp8_dual_pack_eligible(
     tensor: str,
     col_pass: str,
 ) -> bool:
-    """True iff ``tensor``'s FP8 row pack and MXFP4 col pack can come from one read.
-
-    Serves both operands of an FP8 fprop, which need the same pair of orientations: the
-    activation wants an FP8 row pack for Fprop and an MXFP4 col pack for Wgrad, the weight wants
-    an FP8 row pack for Fprop and an MXFP4 col pack for Dgrad. Hence ``col_pass``.
-
-    Builds on `_dual_pack_eligible`, which already asks the col-orientation question, and adds
-    what is specific to mixing an FP8 row half in:
-
-    no SR on either half -- the fused kernel's col phase is the round-to-nearest one, copied
-    verbatim from `_emit_dual_bias_body` so its output stays bit-exact with
-    `flydsl_quant_mxfp4_h16_col`, and its row half is a plain FP8 cast. The current recipe has
-    FLUX_FP4_SR=0 with no per-pass or per-operand overrides, so this is always true today;
-    gating on it means a future SR run falls back to the separate packs rather than silently
-    losing the stochastic rounding.
-
-    no 2D block scaling -- only ever requested for the weight, and it is a different scale
-    layout than the 1D rowwise pack this kernel emits. `FLUX_FP4_WEIGHT_2D` is 0 in the recipe
-    (2D measured ~8% worse on FLUX's shapes), so this costs nothing today.
-
-    shape alignment -- `fp8_dual_eligible`'s R % 128 and C % 256, inherited from the validated
-    H16 dual geometry. Every Flux fprop activation and weight clears it.
     """
+True iff ``tensor``'s FP8 row pack and MXFP4 col pack can come from one read.
+
+Serves both operands of an FP8 fprop, which need the same pair of orientations: the activation wants an FP8 row pack for Fprop and an MXFP4 col pack for Wgrad, the weight wants an FP8 row pack for Fprop and an MXFP4 col pack for Dgrad. Hence ``col_pass``.
+
+Builds on `_dual_pack_eligible`, which already asks the col-orientation question, and adds what is specific to mixing an FP8 row half in:
+
+no SR on either half -- the fused kernel's col phase is the round-to-nearest one, copied verbatim from `_emit_dual_bias_body` so its output stays bit-exact with `flydsl_quant_mxfp4_h16_col`, and its row half is a plain FP8 cast. The current recipe has FLUX_FP4_SR=0 with no per-pass or per-operand overrides, so this is always true today; gating on it means a future SR run falls back to the separate packs rather than silently losing the stochastic rounding.
+
+no 2D block scaling -- only ever requested for the weight, and it is a different scale layout than the 1D rowwise pack this kernel emits.
+
+shape alignment -- `fp8_dual_eligible`'s R % 128 and C % 256, inherited from the validated H16 dual geometry. Every Flux fprop activation and weight clears it.
+"""
     from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import fp8_dual_eligible
 
     if tensor == "weight" and cfg.weight_2d_block:
@@ -1497,17 +1308,13 @@ def _mxfp4_mm(
     bias: torch.Tensor | None = None,
     packed_scales: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """a[M,K] @ b[N,K]^T -> [M,N]; both operands quantized along K.
-
-    ``packed_scales``: ``(a_scale, b_scale)`` already in the FlyDSL GEMM's packed layout;
-    the GEMM then skips its scale preshuffle (it falls back to the canonical scales on
-    its own when the shape/config cannot use them).
-
-    ``bias`` (optimize round 7 / P3): fp32 [N], fused into gemm_fp4_impl's FlyDSL
-    epilogue when that backend and shape are eligible; gemm_fp4_impl falls back to a
-    host-side add on its own if not (e.g. a non-FlyDSL backend, or a shape the tile
-    autotune steers off the fused-store path), so this call is correct either way.
     """
+a[M,K] @ b[N,K]^T -> [M,N]; both operands quantized along K.
+
+``packed_scales``: ``(a_scale, b_scale)`` already in the FlyDSL GEMM's packed layout; the GEMM then skips its scale preshuffle (it falls back to the canonical scales on its own when the shape/config cannot use them).
+
+``bias``: fp32 [N], fused into gemm_fp4_impl's FlyDSL epilogue when that backend and shape are eligible; gemm_fp4_impl falls back to a host-side add on its own if not (e.g. a non-FlyDSL backend, or a shape the tile autotune steers off the fused-store path), so this call is correct either way.
+"""
     kw = {"granularity": _GRANULARITY, "default_backend": _BACKEND}
     host_bias = None
     if _GEMM_FP4_BIAS:
@@ -1660,12 +1467,9 @@ def _fp8_tensorwise_mm_aq_op(
             gemm_fp8_tensorwise_flydsl_kernel,
         )
 
-        # The `bias=` kwarg exists only on the OVERLAID kernel, which apply_mxfp4_overlays.sh
-        # installs only when FLUX_FP8_FUSE_BIAS_EPILOGUE=1. Passing it unconditionally therefore
-        # breaks the unflagged path against the image's own kernel -- which it did, killing both
-        # FUSE_BIAS=0 arms of the first ladder batch with "unexpected keyword argument 'bias'"
-        # while the three flagged arms ran fine. Keep the call byte-identical when there is no
-        # bias to fuse, so the recipe the submission runs measured needs no overlay at all.
+        # Passing it unconditionally therefore breaks the unflagged path against the image's own kernel --
+        # which it did, killing both FUSE_BIAS=0 arms of the first ladder batch with "unexpected keyword
+        # argument 'bias'" while the three flagged arms ran fine.
         if bias is None:
             return gemm_fp8_tensorwise_flydsl_kernel(a_fp8, a_scale_inv, b_fp8, b_si, False, True, out_dtype)
         return gemm_fp8_tensorwise_flydsl_kernel(
@@ -1706,22 +1510,13 @@ except OSError:
 
 
 def _record_act_stats(x: torch.Tensor, w: torch.Tensor) -> None:
-    """Accumulate outlier statistics for real MXFP6 fprop operands. Diagnostic only.
-
-    Exists to settle one question. MXFP6's matmul error is 23.9x bf16's, and that error
-    is what makes this recipe need 9.96M samples where a bf16 forward needs 8.13M. A
-    rotation along K is algebraically free -- (A Q)(Q^T B^T) = A B^T -- and is the standard
-    way to reduce quantization error, but it only pays by spreading outliers. Measured on
-    Gaussian inputs it bought 0.0%, which is expected there because Gaussian data has no
-    outliers to spread and E2M3 with per-32 scaling is already at its rounding limit.
-
-    So the rotation question reduces to whether the real operands are heavy-tailed. What
-    matters is the ratio of the group maximum to the group RMS *within each 32-element
-    scale group along K*, since that is the granularity the format scales at: a group
-    whose max dwarfs its RMS spends its 3 mantissa bits representing one large value and
-    quantizes the rest coarsely. For Gaussian data that ratio is about 2.2; meaningfully
-    above that means headroom a rotation could recover.
     """
+Accumulate outlier statistics for real MXFP6 fprop operands. Diagnostic only.
+
+Exists to settle one question. A rotation along K is algebraically free -- (A Q)(Q^T B^T) = A B^T -- and is the standard way to reduce quantization error, but it only pays by spreading outliers.
+
+So the rotation question reduces to whether the real operands are heavy-tailed. What matters is the ratio of the group maximum to the group RMS *within each 32-element scale group along K*, since that is the granularity the format scales at: a group whose max dwarfs its RMS spends its 3 mantissa bits representing one large value and quantizes the rest coarsely. For Gaussian data that ratio is about 2.2; meaningfully above that means headroom a rotation could recover.
+"""
     global _act_stats_calls
     _act_stats_calls += 1
     if _act_stats_calls == 1:
@@ -1775,23 +1570,15 @@ def _dump_act_stats() -> None:
 
 @torch.library.custom_op("primus_flux::mxfp6_mm", mutates_args=(), device_types="cuda")
 def _mxfp6_mm_op(a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-    """MXFP6 fprop: A[M,K] @ B[N,K]^T -> [M,N], via AITER's A6W6 asm GEMM.
-
-    E2M3 data on the same E8M0 per-32 block scales MXFP4 uses, so the only thing
-    that changes versus the mxfp4 fprop is the element format: 3 mantissa bits
-    instead of 1, measured at 30.98 dB against MXFP4's 19.08 on FLUX's own
-    activation distributions. That closes the convergence gap MXFP4 cannot
-    (total remaining FP4 headroom is 1.85 dB) for 1.25x the fprop GEMM.
-
-    No rotation is applied. H16 exists to keep MXFP4's 8 levels from being
-    dominated by block outliers; at 32 levels the rotation is not what is
-    binding, and skipping it also avoids paying for a pack this path cannot fuse.
-
-    Dgrad and Wgrad are untouched and stay MXFP4, which is free: the Wgrad arm
-    tracked all-pass within 0.0007 over 32 evals. That also sidesteps the
-    gradient_accumulation_fusion opt-out an FP6 wgrad would force, since the A6W6
-    entry point has no beta=1 accumulate epilogue to write main_grad in place.
     """
+MXFP6 fprop: A[M,K] @ B[N,K]^T -> [M,N], via AITER's A6W6 asm GEMM.
+
+That closes the convergence gap MXFP4 cannot (total remaining FP4 headroom is 1.85 dB) for 1.25x the fprop GEMM.
+
+No rotation is applied. H16 exists to keep MXFP4's 8 levels from being dominated by block outliers; at 32 levels the rotation is not what is binding, and skipping it also avoids paying for a pack this path cannot fuse.
+
+Dgrad and Wgrad are untouched and stay MXFP4, which is free: the Wgrad arm tracked all-pass within 0.0007 over 32 evals. That also sidesteps the gradient_accumulation_fusion opt-out an FP6 wgrad would force, since the A6W6 entry point has no beta=1 accumulate epilogue to write main_grad in place.
+"""
     from aiter.ops.gemm_op_a6w6 import gemm_a6w6, quant_mxfp6_gemm
 
     a_q, a_s = quant_mxfp6_gemm(a.contiguous())
@@ -1868,6 +1655,90 @@ def _a6w4_act_dual_ok(x_2d: torch.Tensor, cfg: MXFP4LinearConfig, hadamard: torc
     )
 
 
+_A6W4_GELU_DUAL = os.getenv("FLUX_A6W4_GELU_DUAL", "1") == "1"
+_A6W4_GELU_DUAL_SEEN: dict = {}
+
+
+def _a6w4_gelu_dual_ok(m: int, n: int, k: int, cfg: MXFP4LinearConfig, bias, a_pack: int) -> bool:
+    """Whether the fused epilogue can serve this Linear, so the caller keeps its own path.
+
+    It does not ask whether the bias was already in the epilogue: the fused store puts it
+    there itself, and `act_rounded` is what carries the difference that choice made."""
+    if not (_A6W4_GELU_DUAL and _FWD_GELU_PACK and cfg.fprop == "a6w4" and bias is not None):
+        return False
+    from primus_turbo.pytorch.ops.flux_a6w4 import a6w4_gelu_dual_eligible
+
+    return a6w4_gelu_dual_eligible(m, n, k, a_pack)
+
+
+@torch.library.custom_op("primus_flux::a6w4_mm_gelu_dual_qa_w", mutates_args=(), device_types="cuda")
+def _a6w4_mm_gelu_dual_qa_w_op(
+    aq: torch.Tensor, sa: torch.Tensor, b: torch.Tensor, bias: torch.Tensor, act_rounded: bool
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`a6w4_mm_gelu_dual_qa` against a weight still in bf16, as `a6w4_mm_qa` takes it.
+
+    ``act_rounded`` is what the consumer this replaces would have activated: the biased
+    output it read back (1), or the bias-free one plus its own f32 bias add (0)."""
+    from primus_turbo.pytorch.ops.flux_a6w4 import a6w4_mm_gelu_dual_qa_prequant_w, quantizers
+
+    wq, sb = quantizers()[1](b.to(torch.bfloat16).contiguous())
+    _log_gelu_dual(aq, b.shape[0], wq, "bf16 weight")
+    return a6w4_mm_gelu_dual_qa_prequant_w(
+        aq, sa, wq, sb, b.shape[0], bias, act_rounded=act_rounded
+    )
+
+
+def _log_gelu_dual(aq: torch.Tensor, n: int, wq: torch.Tensor, weight: str) -> None:
+    key = (aq.shape[0], n, aq.shape[1], weight)
+    _A6W4_GELU_DUAL_SEEN[key] = _A6W4_GELU_DUAL_SEEN.get(key, 0) + 1
+    if _A6W4_GELU_DUAL_SEEN[key] == 1:
+        logger.info(
+            f"A6W4_GELU_DUAL fused: M={aq.shape[0]} N={n} K={wq.numel() * 2 // n} "
+            f"aq row={aq.shape[1]} bytes, {weight}"
+        )
+
+
+@torch.library.custom_op(
+    "primus_flux::a6w4_mm_gelu_dual_qa_prequant_w", mutates_args=(), device_types="cuda"
+)
+def _a6w4_mm_gelu_dual_qa_prequant_w_op(
+    aq: torch.Tensor,
+    sa: torch.Tensor,
+    wq: torch.Tensor,
+    sb: torch.Tensor,
+    n: int,
+    bias: torch.Tensor,
+    act_rounded: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`a6w4_mm_gelu_dual_qa_w` on `_A6W4GatheredWeight`'s already-quantized row pack."""
+    from primus_turbo.pytorch.ops.flux_a6w4 import a6w4_mm_gelu_dual_qa_prequant_w
+
+    _log_gelu_dual(aq, n, wq, "gathered A6W4 weight")
+    return a6w4_mm_gelu_dual_qa_prequant_w(aq, sa, wq, sb, n, bias, act_rounded=act_rounded)
+
+
+@_a6w4_mm_gelu_dual_qa_prequant_w_op.register_fake
+def _(aq, sa, wq, sb, n, bias, act_rounded):
+    return _gelu_dual_fake(aq, n)
+
+
+@_a6w4_mm_gelu_dual_qa_w_op.register_fake
+def _(aq, sa, b, bias, act_rounded):
+    return _gelu_dual_fake(aq, b.shape[0])
+
+
+def _gelu_dual_fake(aq: torch.Tensor, n: int):
+    m = aq.shape[0]
+    pre = torch.empty(m, n, dtype=torch.bfloat16, device=aq.device)
+    r_q = torch.empty(m, n, dtype=torch.uint8, device=aq.device)
+    r_s = torch.empty(m * n // MX_BLOCK_SIZE, dtype=torch.uint8, device=aq.device)
+    c_q = torch.empty(n, m // 2, dtype=torch.uint8, device=aq.device).view(FP4_DTYPE)
+    c_s = torch.empty(n, m // MX_BLOCK_SIZE, dtype=torch.uint8, device=aq.device).view(
+        torch.float8_e8m0fnu
+    )
+    return pre, r_q, r_s, c_q, c_s
+
+
 @torch.library.custom_op("primus_flux::a6w4_act_dual", mutates_args=(), device_types="cuda")
 def _a6w4_act_dual_op(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(A6W4 fprop A, its shuffled scales, Wgrad col pack, its scales) from one read of x."""
@@ -1888,6 +1759,83 @@ def _(x):
     return aq, sa, co, cs
 
 
+# The A6W4 Linears behind an adaLN modulate (double qkv and fc1, single linear1) pack (1 + scale)
+# * layer_norm(x) + shift straight from x: a stats-only Triton pass emits each row's rstd and
+# -mean * rstd, and the dual pack applies the LN and the modulate in its tile load, so the
+# modulated bf16 activation is never written or reread.
+_A6W4_LNMOD_PACK = os.getenv("FLUX_A6W4_LNMOD_PACK", "0") == "1"
+_LNMOD_L_ALIGN = 64
+
+
+@torch.library.custom_op("primus_flux::a6w4_act_dual_lnmod", mutates_args=(), device_types="cuda")
+def _a6w4_act_dual_lnmod_op(
+    x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`_a6w4_act_dual_op((1 + scale) * layer_norm(x) + shift)` for x [B, L, K] and shift/scale
+    [B, 1, K], plus the LN stats (rstd, nmr) [B*L] fp32 that backward needs."""
+    from primus_turbo.flydsl.flux.a6w4_fwd_pack import _ln_stats
+    from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
+        flydsl_quant_a6w4_act_dual_lnmod,
+    )
+
+    x = x.contiguous()
+    b, l, k = x.shape
+    rstd, nmr = _ln_stats(x)
+    aq, sa, co, cs = flydsl_quant_a6w4_act_dual_lnmod(
+        x.view(b * l, k),
+        rstd,
+        nmr,
+        shift.reshape(b, k).contiguous(),
+        scale.reshape(b, k).contiguous(),
+    )
+    return aq, sa, co, cs, rstd, nmr
+
+
+@_a6w4_act_dual_lnmod_op.register_fake
+def _(x, shift, scale):
+    b, l, k = x.shape
+    m = b * l
+    aq = torch.empty(m, k, dtype=torch.uint8, device=x.device)
+    sa = torch.empty(m * k // MX_BLOCK_SIZE, dtype=torch.uint8, device=x.device)
+    co = torch.empty(k, m // 2, dtype=torch.uint8, device=x.device).view(FP4_DTYPE)
+    cs = torch.empty(k, m // MX_BLOCK_SIZE, dtype=torch.uint8, device=x.device).view(torch.float8_e8m0fnu)
+    rstd = torch.empty(m, dtype=torch.float32, device=x.device)
+    return aq, sa, co, cs, rstd, torch.empty_like(rstd)
+
+
+def _a6w4_lnmod_eligible(linear: "MXFP4Linear", x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> bool:
+    if not (_A6W4_LNMOD_PACK and isinstance(linear, MXFP4Linear) and linear.config.any_mxfp4 and linear.training):
+        return False
+    if x.dim() != 3 or x.shape[1] % _LNMOD_L_ALIGN:
+        return False
+    b, _, k = x.shape
+    return (
+        shift.shape == (b, 1, k)
+        and scale.shape == (b, 1, k)
+        and shift.dtype == scale.dtype == torch.bfloat16
+        and _a6w4_act_dual_ok(x.reshape(-1, k), linear.config, linear.hadamard)
+    )
+
+
+def _lnmod_pre(x, shift, scale):
+    aq, sa, co, cs, rstd, nmr = _a6w4_act_dual_lnmod_op(x, shift, scale)
+    return ((aq, sa, co, cs), tuple(x.shape), x.dtype), rstd, nmr
+
+
+def _lnmod_backward(d_y, x, scale, rstd, nmr):
+    """d(x, shift, scale) of ``(1 + scale) * layer_norm(x) + shift`` (eps 1e-6, no affine), in f32
+    from the stats the forward pack used."""
+    b, l, k = x.shape
+    rstd = rstd.view(b, l, 1)
+    xn = x.float() * rstd + nmr.view(b, l, 1)
+    d_y = d_y.reshape(b, l, k).float()
+    d_shift = d_y.sum(1, keepdim=True)
+    d_scale = (d_y * xn).sum(1, keepdim=True)
+    g = d_y * (1 + scale.float())
+    d_x = rstd * (g - g.mean(-1, keepdim=True) - xn * (g * xn).mean(-1, keepdim=True))
+    return d_x.to(x.dtype), d_shift.to(scale.dtype), d_scale.to(scale.dtype)
+
+
 # The single block's linear2 input cat(attn, gelu(preact)) packed from its two legs by
 # `a6w4_act_dual_legs_gelu`, so the bf16 cat is never written. Byte-identical only while the
 # producer's bias is in its GEMM epilogue: otherwise Inductor folds that add into the GELU in f32
@@ -1895,22 +1843,21 @@ def _(x):
 _A6W4_GELU_PACK = os.getenv("FLUX_A6W4_GELU_PACK", "1") == "1"
 # The double block's fc2 input gelu(fc1(x)) packed the same way. fc1's bias is not in its epilogue
 # (width 12288), so fc1 hands over its bias-free GEMM output and the pack adds the bias in f32
-# ahead of the GELU, as Inductor's fused gelu(out + bias) does. Byte-identical, but OFF: it saves
-# only the GELU write (~35 us/call at [8192, 12288]) while the f32-exact GELU costs ~80 us in the
-# pack and the preact add still runs; 600-step A6W4 run 87.83 -> 87.51 samples/GPU/s.
+# ahead of the GELU, as Inductor's fused gelu(out + bias) does. Byte-identical.
 _A6W4_GELU_PACK_DOUBLE = os.getenv("FLUX_A6W4_GELU_PACK_DOUBLE", "0") == "1"
+# Single linear2's two legs (attn, gelu(preact + bias)) packed in one launch instead of one per
+# leg: flydsl_quant_a6w4_act_dual_legs_merged, byte-identical to flydsl_quant_a6w4_act_dual_legs.
+# Needs the mounted mxfp4_quant_kernel_flux.py.
+_A6W4_LEGS_ONE_LAUNCH = os.getenv("FLUX_A6W4_LEGS_ONE_LAUNCH", "0") == "1"
 _A6W4_LEGS_BIAS_WIDTH_LOGGED = False
 
 
 def _legs_bias_unfit(preact: torch.Tensor, bias: torch.Tensor | None) -> str:
-    """Why flydsl_quant_a6w4_act_dual_legs would reject this bias, or "" if it would not.
-
-    It asserts `b.shape == (w,) and b.dtype is bfloat16 and b.is_contiguous()` on the GELU leg,
-    as a bare assert with no values. _a6w4_legs_gelu_eligible checks the width ahead of time,
-    but only the width, and it reads the producer's parameter while this sees the tensor that
-    actually arrives. Run 37177266602 lost all 32 ranks to that assert with the width guard in
-    place, which is how we know the predicate is not sufficient on its own.
     """
+Why flydsl_quant_a6w4_act_dual_legs would reject this bias, or "" if it would not.
+
+It asserts `b.shape == (w,) and b.dtype is bfloat16 and b.is_contiguous()` on the GELU leg, as a bare assert with no values. _a6w4_legs_gelu_eligible checks the width ahead of time, but only the width, and it reads the producer's parameter while this sees the tensor that actually arrives.
+"""
     if bias is None:
         return ""
     if preact.dim() != 2:
@@ -1944,19 +1891,16 @@ def _a6w4_act_dual_legs_gelu_op(
         preact = preact.contiguous()
     unfit = _legs_bias_unfit(preact, preact_bias)
     if unfit:
-        # Materialise what the legs kernel would have fused. Same arithmetic in the same order
-        # -- bias in f32, tanh GELU, back to bf16 for the cat -- so this costs the write it
-        # exists to avoid and nothing else. Declining here rather than asserting keeps a
-        # mismatch a throughput question instead of 32 dead ranks.
+        # Materialise what the legs kernel would have fused. Same arithmetic in the same order -- bias in
+        # f32, tanh GELU, back to bf16 for the cat -- so this costs the write it exists to avoid and
+        # nothing else.
         global _A6W4_LEGS_UNFIT_LOGGED
         if not _A6W4_LEGS_UNFIT_LOGGED:
             _A6W4_LEGS_UNFIT_LOGGED = True
             logger.info(f"A6W4_LEGS_GELU declined at call time: {unfit}; materialising the cat")
         if tuple(preact_bias.shape) != (int(preact.shape[-1]),):
-            # Not a fusion question any more: nothing here can apply a bias of the wrong width,
-            # and adding it under broadcasting would be silently wrong rather than slow. The
-            # 1-node gate hit this with a 3072 bias against a 12288 leg, which means the lazy
-            # act and the bias came from different Linears -- a wiring fault upstream of here.
+            # Not a fusion question any more: nothing here can apply a bias of the wrong width, and adding it
+            # under broadcasting would be silently wrong rather than slow.
             raise RuntimeError(
                 f"a6w4 legs GELU got a bias {tuple(preact_bias.shape)} for a preact "
                 f"{tuple(preact.shape)}; they are not the same Linear's. Set "
@@ -1971,6 +1915,12 @@ def _a6w4_act_dual_legs_gelu_op(
         return flydsl_quant_a6w4_act_dual_legs((preact,), (True,), (preact_bias,))
     if attn.stride(1) != 1:
         attn = attn.contiguous()
+    if _A6W4_LEGS_ONE_LAUNCH:
+        from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
+            flydsl_quant_a6w4_act_dual_legs_merged,
+        )
+
+        return flydsl_quant_a6w4_act_dual_legs_merged((attn, preact), (False, True), (None, preact_bias))
     return flydsl_quant_a6w4_act_dual_legs((attn, preact), (False, True), (None, preact_bias))
 
 
@@ -2006,11 +1956,9 @@ def _a6w4_legs_gelu_eligible(producer, consumer, rows: int, widths) -> bool:
             and (producer.bias is None or producer.bias.dtype == torch.bfloat16)
         )
     # The pack asserts that a lazy bias is exactly the GELU leg's width -- in
-    # mxfp4_quant_kernel.flydsl_quant_a6w4_act_dual_legs, `b.shape == (w,)`. Check that here,
-    # where returning False falls back to the materialised cat, instead of letting it reach an
-    # assert inside a custom op. Run 37169424579 lost 18 of 32 ranks to exactly that assert two
-    # minutes in, with the gate fusion on, and an eligibility predicate is the only place the
-    # mismatch can be handled rather than crashed on.
+    # mxfp4_quant_kernel.flydsl_quant_a6w4_act_dual_legs, `b.shape == (w,)`. Check that here, where
+    # returning False falls back to the materialised cat, instead of letting it reach an assert inside
+    # a custom op.
     lazy_bias = producer.lazy_gelu_bias()
     if lazy_bias is not None and tuple(lazy_bias.shape) != (int(widths[-1]),):
         global _A6W4_LEGS_BIAS_WIDTH_LOGGED
@@ -2084,31 +2032,17 @@ def _quantize_and_mm(
     bias: torch.Tensor | None = None,
     packed_scales: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """Rotate, quantize and multiply a[M,K] @ b[N,K]^T along the shared K.
-
-    ``packed_scales`` (with both operands pre-quantized): see ``_mxfp4_mm``.
-
-    ``a_quantized``, if given, is an already-quantized ``(a_q, a_s)`` pair --
-    e.g. the row half of a fused dual pack the caller computed once because
-    it also needed the col half for something else -- used instead of
-    quantizing ``a`` here. Left as ``None`` this is exactly the previous
-    behaviour. The opaque ``mxfp4_mm`` single-op fast path re-quantizes both
-    operands from scratch, so it cannot consume a pre-quantized ``a``; skip
-    it (fall through to the explicit-quantize route below) whenever
-    ``a_quantized`` is supplied.
-
-    ``b_quantized`` is the same idea for ``b`` (optimize round 9 / N2): e.g.
-    weight's Dgrad col pack, computed directly from the UNTRANSPOSED weight
-    via ``_quantize_mxfp4_h16_col_op`` instead of transposing first and
-    packing that. When supplied, ``b``'s own value is never read (neither the
-    ``mxfp4_mm`` fast path nor ``_quantize_operand(b, ...)`` runs), so the
-    caller may pass the untransposed tensor as ``b`` in that case -- exactly
-    what the Dgrad call site below does.
-
-    ``bias`` (optimize round 7 / P3) also disables the opaque ``mxfp4_mm`` fast
-    path: that single-op custom op has no bias epilogue of its own, so a bias
-    request always takes the explicit-quantize route below, which does.
     """
+Rotate, quantize and multiply a[M,K] @ b[N,K]^T along the shared K.
+
+``packed_scales`` (with both operands pre-quantized): see ``_mxfp4_mm``.
+
+``a_quantized``, if given, is an already-quantized ``(a_q, a_s)`` pair -- e.g. the row half of a fused dual pack the caller computed once because it also needed the col half for something else -- used instead of quantizing ``a`` here. Left as ``None`` this is exactly the previous behaviour. The opaque ``mxfp4_mm`` single-op fast path re-quantizes both operands from scratch, so it cannot consume a pre-quantized ``a``; skip it (fall through to the explicit-quantize route below) whenever ``a_quantized`` is supplied.
+
+``b_quantized`` is the same idea for ``b``: e.g. weight's Dgrad col pack, computed directly from the UNTRANSPOSED weight via ``_quantize_mxfp4_h16_col_op`` instead of transposing first and packing that. When supplied, ``b``'s own value is never read (neither the ``mxfp4_mm`` fast path nor ``_quantize_operand(b,...)`` runs), so the caller may pass the untransposed tensor as ``b`` in that case -- exactly what the Dgrad call site below does.
+
+``bias`` also disables the opaque ``mxfp4_mm`` fast path: that single-op custom op has no bias epilogue of its own, so a bias request always takes the explicit-quantize route below, which does.
+"""
     if (
         _USE_MXFP4_MM
         and a_quantized is None
@@ -2139,29 +2073,15 @@ def _quantize_and_mm(
 
 
 class _MXFP4LinearFunction(torch.autograd.Function):
-    """y = x @ w^T (+ bias) with each pass independently castable to MXFP4.
-
-    Every pass is expressed as ``A[M,K] @ B[N,K]^T`` so one quantize-and-multiply
-    helper serves all three. The transposes that normalise them to that form are
-    also what lets each pass carry its own rotation: Fprop contracts over the
-    input features, Dgrad over the output features and Wgrad over the tokens, so
-    a rotation that cancels for one does nothing for the others.
-
-    Weights are re-quantized in backward rather than stashed -- FSDP2 runs with
-    ``reshard_after_forward=false``, so the BF16 parameter is still resident and
-    holding a reference to it is free, whereas a saved FP4 copy would not be.
-
-    optimize round 9 / P5 is the one deliberate exception: the weight's COL pack
-    (Dgrad's operand) is stashed fwd->bwd when the row (Fprop) and col (Dgrad)
-    orientations would otherwise be produced by two independent HBM reads of the
-    same weight matrix -- see `fuse_w` in `forward()`. That FP4 col pack is
-    ~4-8x smaller than a BF16 copy of the weight (0.5 B/elem data + ~0.03 B/elem
-    E8M0 scale vs 2 B/elem), and it replaces a full second read+relaunch
-    (`_quantize_mxfp4_h16_col_op`, optimize round 8's carried-forward N2) with
-    zero extra reads -- so the "saved FP4 copy would not be free" caution above
-    is about a BF16-sized stash, not this much smaller, already-being-computed
-    FP4 one. See this round's ROUND_REPORT for the measured memory delta.
     """
+y = x @ w^T (+ bias) with each pass independently castable to MXFP4.
+
+Every pass is expressed as ``A[M,K] @ B[N,K]^T`` so one quantize-and-multiply helper serves all three. The transposes that normalise them to that form are also what lets each pass carry its own rotation: Fprop contracts over the input features, Dgrad over the output features and Wgrad over the tokens, so a rotation that cancels for one does nothing for the others.
+
+Weights are re-quantized in backward rather than stashed -- FSDP2 runs with ``reshard_after_forward=false``, so the BF16 parameter is still resident and holding a reference to it is free, whereas a saved FP4 copy would not be.
+
+That FP4 col pack is ~4-8x smaller than a BF16 copy of the weight (0.5 B/elem data + ~0.03 B/elem E8M0 scale vs 2 B/elem), and it replaces a full second read+relaunch with zero extra reads -- so the "saved FP4 copy would not be free" caution above is about a BF16-sized stash, not this much smaller, already-being-computed FP4 one.
+"""
 
     @staticmethod
     def forward(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg):
@@ -2184,6 +2104,7 @@ class _MXFP4LinearFunction(torch.autograd.Function):
         bias_any_width=False,
         x_pre=None,
         return_unbiased=False,
+        gelu_dual=False,
     ):
         """Everything ``forward`` does except ``save_for_backward``, so a caller can save
         extra tensors after these. Returns the 2D output, bias applied, and the save list.
@@ -2200,13 +2121,10 @@ class _MXFP4LinearFunction(torch.autograd.Function):
             x_2d = x.reshape(-1, x.shape[-1])
             out_dtype = x.dtype
 
-        # Fprop packs x_2d row-major (along K, its own last dim); the
-        # Wgrad-prep pack below packs x_2d.t() (along tokens). Whenever both
-        # are needed and both would independently resolve to the fused-H16
-        # path (see `_dual_pack_eligible`), get both from ONE
-        # `_quantize_mxfp4_h16_dual_op` read instead of a
-        # `.t().contiguous()` transpose copy feeding a second, independent
-        # pack launch.
+        # Fprop packs x_2d row-major (along K, its own last dim); the Wgrad-prep pack below packs x_2d.t()
+        # (along tokens). Whenever both are needed and both would independently resolve to the fused-H16
+        # path (see `_dual_pack_eligible`), get both from ONE `_quantize_mxfp4_h16_dual_op` read instead
+        # of a `.t().contiguous()` transpose copy feeding a second, independent pack launch.
         fuse_x = (
             x_pre is None
             and cfg.fprop == "mxfp4"
@@ -2229,7 +2147,6 @@ class _MXFP4LinearFunction(torch.autograd.Function):
         # half cast to FP8 for Fprop instead of packed to MXFP4. `save_quantized` belongs in this
         # gate for exactly the reason it is in `fuse_x`'s -- without it there is no col pack for
         # the row cast to share a read with, and the fusion has nothing to fuse.
-        #
         # This is the branch that removes the FP8 fprop's three-reads-of-one-tensor: the amax
         # reduction and the row cast that `_fp8_tensorwise_mm_op` does internally, plus the col
         # pack the `elif` further down would launch on its own. See `_fp8_mxfp4_dual_op`.
@@ -2246,19 +2163,12 @@ class _MXFP4LinearFunction(torch.autograd.Function):
             )
             x_fp8_dual = _fp8_mxfp4_dual_op(x_2d, act_slot) if fuse_x_fp8 else None
 
-        # optimize round 9 / P5: weight is read TWICE per step today -- once
-        # here for Fprop's row pack (`_quantize_mxfp4_h16_op` via
-        # `_quantize_operand` inside `_quantize_and_mm`) and once in backward
-        # for Dgrad's col pack (`_quantize_mxfp4_h16_col_op`, optimize round 8's
-        # carried-forward N2 -- see that call site). Both orientations always
-        # use the SAME (use_2d=cfg.weight_2d_block, use_sr=False,
-        # use_rht=cfg.randomized_hadamard) args (`_weight_colpack_eligible`'s
-        # own docstring establishes this), so whenever that resolves to the
-        # fused-H16 path AND both consuming passes are MXFP4, get both packs
-        # from ONE `_quantize_mxfp4_h16_dual_op` read here (mirrors `fuse_x`
-        # above exactly) and carry the col half to backward via
-        # `ctx.save_for_backward` (Rule 11 bucket K4 -- same-call data flow,
-        # not an id()-keyed cache) instead of a second, independent read.
+        # Both orientations always use the SAME (use_2d=cfg.weight_2d_block, use_sr=False,
+        # use_rht=cfg.randomized_hadamard) args (`_weight_colpack_eligible`'s own docstring establishes
+        # this), so whenever that resolves to the fused-H16 path AND both consuming passes are MXFP4, get
+        # both packs from ONE `_quantize_mxfp4_h16_dual_op` read here (mirrors `fuse_x` above exactly) and
+        # carry the col half to backward via `ctx.save_for_backward` (Rule 11 bucket K4 -- same-call data
+        # flow, not an id()-keyed cache) instead of a second, independent read.
         fuse_w = cfg.fprop == "mxfp4" and cfg.dgrad == "mxfp4" and _weight_colpack_eligible(hadamard, cfg)
         # Row half feeds Fprop, col half feeds Dgrad, so each carries that pass's
         # stochastic-rounding setting -- the same row/col-to-pass mapping `fuse_x`
@@ -2271,23 +2181,21 @@ class _MXFP4LinearFunction(torch.autograd.Function):
             else None
         )
 
-        # The FP8 twin of `fuse_w`, and the reason it is needed: `fuse_w` above requires
-        # `cfg.fprop == "mxfp4"`, so on an FP8 forward the weight gets NO fusion at all today and
-        # is read three times per step -- amax, FP8 row cast, MXFP4 Dgrad col pack. The weight is
-        # the LARGER of the two operands on FLUX's fprop shapes (21504x3072 against a 16384x3072
-        # activation), so this half is worth more than the activation half, not less.
-        #
-        # Everything downstream of it already exists: backward reuses a saved weight col pack
-        # whenever `ctx.w_is_dual`, and that reuse is orientation- and SR-correct for Dgrad.
-        #
-        # Not when the weight arrived from the FP8 all-gather. `_FP8GatheredWeight` already
-        # holds both halves this fusion would produce -- it intercepts the fprop GEMM into
-        # `fp8_tensorwise_mm_prequant_w` using its own `_fp8`/`_scale_inv`, and answers the
-        # Dgrad col pack from `_dgrad_col_pack()`. Packing again would redo, on the full
-        # matrix, work the gather already did on a shard, so this is `world` times the cost
-        # for a bit-identical result. Without the guard it does not merely waste time: the
-        # subclass raises NotImplementedError on `fp8_mxfp4_dual` and Dynamo fails the graph,
-        # which is how turning both features on at once was found to abort at step 0.
+        # The FP8 twin of `fuse_w`, and the reason it is needed: `fuse_w` above requires `cfg.fprop ==
+        # "mxfp4"`, so on an FP8 forward the weight gets NO fusion at all today and is read three times
+        # per step -- amax, FP8 row cast, MXFP4 Dgrad col pack. The weight is the LARGER of the two
+        # operands on FLUX's fprop shapes (21504x3072 against a 16384x3072 activation), so this half is
+        # worth more than the activation half, not less.
+        # Everything downstream of it already exists: backward reuses a saved weight col pack whenever
+        # `ctx.w_is_dual`, and that reuse is orientation- and SR-correct for Dgrad.
+        # Not when the weight arrived from the FP8 all-gather. `_FP8GatheredWeight` already holds both
+        # halves this fusion would produce -- it intercepts the fprop GEMM into
+        # `fp8_tensorwise_mm_prequant_w` using its own `_fp8`/`_scale_inv`, and answers the Dgrad col pack
+        # from `_dgrad_col_pack()`. Packing again would redo, on the full matrix, work the gather already
+        # did on a shard, so this is `world` times the cost for a bit-identical result. Without the guard
+        # it does not merely waste time: the subclass raises NotImplementedError on `fp8_mxfp4_dual` and
+        # Dynamo fails the graph, which is how turning both features on at once was found to abort at step
+        # 0.
         fuse_w_fp8 = (
             _FP8_DUAL_PACK
             and cfg.fprop == "fp8"
@@ -2303,8 +2211,8 @@ class _MXFP4LinearFunction(torch.autograd.Function):
         else:
             x_a6w4_dual = _a6w4_act_dual_op(x_2d) if _a6w4_act_dual_ok(x_2d, cfg, hadamard) else None
 
-        # optimize round 7 / P3: see _fuse_bias_eligible. Computed before the GEMM so
-        # the fused-bias request can be threaded straight into _quantize_and_mm below.
+        # Computed before the GEMM so the fused-bias request can be threaded straight into
+        # _quantize_and_mm below.
         fuse_bias = bias is not None and _fuse_bias_eligible(cfg, weight.shape[0], bias_any_width)
 
         if cfg.fprop == "mxfp4":
@@ -2323,8 +2231,8 @@ class _MXFP4LinearFunction(torch.autograd.Function):
             )
         elif cfg.fprop == "fp8":
             if x_fp8_dual is not None or w_fp8_dual is not None:
-                # Either operand may be pre-quantized independently -- the two fusions are gated
-                # on different passes (Wgrad for x, Dgrad for w) and one can be eligible alone.
+                # Either operand may be pre-quantized independently -- the two fusions are gated on different
+                # passes (Wgrad for x, Dgrad for w) and one can be eligible alone.
                 if x_fp8_dual is not None:
                     a_fp8, a_si = x_fp8_dual[0], x_fp8_dual[1]
                 else:
@@ -2358,7 +2266,26 @@ class _MXFP4LinearFunction(torch.autograd.Function):
                 _record_act_stats(x_2d, weight)
             out = _mxfp6_mm_op(x_2d, weight, bias if fuse_bias else None)
         elif cfg.fprop == "a6w4":
-            if x_a6w4_dual is not None:
+            fuse_gelu = (
+                gelu_dual
+                and bias is not None
+                and x_a6w4_dual is not None
+                and _a6w4_gelu_dual_ok(
+                    x_a6w4_dual[0].shape[0],
+                    weight.shape[0],
+                    weight.shape[1],
+                    cfg,
+                    bias,
+                    0 if x_a6w4_dual[0].shape[-1] == weight.shape[1] else 1,
+                )
+            )
+            if fuse_gelu:
+                out, *packs = _a6w4_mm_gelu_dual_qa_w_op(
+                    x_a6w4_dual[0], x_a6w4_dual[1], weight, bias, fuse_bias
+                )
+                ctx.gelu_dual_packs = tuple(packs)
+                fuse_bias = True
+            elif x_a6w4_dual is not None:
                 out = _a6w4_mm_qa_op(x_a6w4_dual[0], x_a6w4_dual[1], weight, bias if fuse_bias else None)
             else:
                 out = _a6w4_mm_op(x_2d, weight, bias if fuse_bias else None)
@@ -2377,22 +2304,20 @@ class _MXFP4LinearFunction(torch.autograd.Function):
             save_list = [x_q.view(torch.uint8), x_s, weight, hadamard]
             ctx.x_is_quantized = True
         elif x_fp8_dual is not None:
-            # Col half of the very read the FP8 row cast came from, so the standalone col-pack
-            # launch in the branch below never happens. Bit-identical to what that branch would
-            # have produced -- `_fp8_dual_pack_eligible` refuses the fusion in any case where it
-            # would not be (SR on either half, or a shape the kernel's tiling does not cover).
+            # Col half of the very read the FP8 row cast came from, so the standalone col-pack launch in the
+            # branch below never happens. Bit-identical to what that branch would have produced --
+            # `_fp8_dual_pack_eligible` refuses the fusion in any case where it would not be (SR on either
+            # half, or a shape the kernel's tiling does not cover).
             x_q, x_s = x_fp8_dual[2], x_fp8_dual[3]
             save_list = [x_q.view(torch.uint8), x_s, weight, hadamard]
             ctx.x_is_quantized = True
         elif cfg.wgrad == "mxfp4" and cfg.save_quantized and _dual_pack_eligible(hadamard, cfg):
-            # A non-MXFP4 Fprop (fp8, mxfp6) leaves no row pack for Wgrad's col pack
-            # to share a read with, but the col packer still produces that col
-            # orientation from one coalesced read of `x_2d` -- bit-identical to
-            # packing `x_2d.t().contiguous()`, without materializing the transpose.
-            # `_dual_pack_eligible` is the right gate unchanged: it already asks the
-            # col-orientation question for this operand with use_2d=False.
-            # Without this the fallback below pays a full activation-sized HBM round
-            # trip per Linear per step purely because Fprop changed format.
+            # A non-MXFP4 Fprop (fp8, mxfp6) leaves no row pack for Wgrad's col pack to share a read with, but
+            # the col packer still produces that col orientation from one coalesced read of `x_2d` -- bit-
+            # identical to packing `x_2d.t().contiguous()`, without materializing the transpose.
+            # `_dual_pack_eligible` is the right gate unchanged: it already asks the col-orientation question
+            # for this operand with use_2d=False. Without this the fallback below pays a full activation-sized
+            # HBM round trip per Linear per step purely because Fprop changed format.
             x_q, x_s = _quantize_mxfp4_h16_col_op(x_2d, cfg.sr_op("act", "wgrad"))
             save_list = [x_q.view(torch.uint8), x_s, weight, hadamard]
             ctx.x_is_quantized = True
@@ -2410,15 +2335,11 @@ class _MXFP4LinearFunction(torch.autograd.Function):
             save_list = [x_2d, weight, hadamard]
             ctx.x_is_quantized = False
 
-        # optimize round 9 / P5 (cont.): append the weight col pack at a FIXED
-        # (always-last) position so backward's unpack stays a simple, static
-        # tuple layout keyed off one flag, regardless of which x-branch above
-        # fired. `.view(torch.uint8)` mirrors the x_q treatment above -- same
-        # reason (the FP4 view dtype survives a plain attribute store but not
-        # every autograd-internal tensor op, so store it as the safe view).
-        # The FP8 weight dual lands in the same fixed-position suffix as the MXFP4 one: its col
-        # half is the same orientation, packed by the same code, for the same consumer. Only the
-        # row half differs, and that was consumed by the GEMM above.
+        # `.view(torch.uint8)` mirrors the x_q treatment above -- same reason (the FP4 view dtype survives
+        # a plain attribute store but not every autograd-internal tensor op, so store it as the safe
+        # view). The FP8 weight dual lands in the same fixed-position suffix as the MXFP4 one: its col
+        # half is the same orientation, packed by the same code, for the same consumer. Only the row half
+        # differs, and that was consumed by the GEMM above.
         _w_dual_any = w_dual if w_dual is not None else w_fp8_dual
         ctx.w_is_dual = _w_dual_any is not None
         if ctx.w_is_dual:
@@ -2426,6 +2347,7 @@ class _MXFP4LinearFunction(torch.autograd.Function):
             save_list = save_list + [w_col_q.view(torch.uint8), w_col_s]
 
         ctx.cfg = cfg
+        ctx.gelu_dual_packs = getattr(ctx, "gelu_dual_packs", None)
         ctx.x_shape = tuple(x.shape) if x_pre is None else tuple(x_pre[1])
         ctx.out_dtype = out_dtype
         ctx.has_bias = bias is not None
@@ -2454,10 +2376,6 @@ class _MXFP4LinearFunction(torch.autograd.Function):
         cfg: MXFP4LinearConfig = ctx.cfg
         out_dtype = ctx.out_dtype
 
-        # optimize round 9 / P5 (cont.): the weight col pack, when present, is
-        # always the last two saved tensors regardless of which x-branch
-        # forward took -- unpack the common (x-side) prefix first, then peel
-        # the fixed-position w-side suffix off if `ctx.w_is_dual`.
         if ctx.w_is_dual:
             w_col_q, w_col_s = saved[-2], saved[-1]
             saved = saved[:-2]
@@ -2472,61 +2390,35 @@ class _MXFP4LinearFunction(torch.autograd.Function):
             x_2d, weight, hadamard = saved
             x_q = x_s = None
 
-        # Dgrad packs grad_2d row-major (along N, its own last dim); Wgrad
-        # packs grad_2d.t() (along tokens). Whenever both passes are MXFP4
-        # and both would independently resolve to the fused-H16 path (see
-        # `_dual_pack_eligible`), get
-        # both from ONE `_quantize_mxfp4_h16_dual_op` read instead of a
-        # transpose copy feeding a second pack launch.
-        #
-        # When the module also has a bias, `grad_bias = grad_2d.sum(0)`
-        # below would be a THIRD full read of this exact tensor -- the
-        # dual's col phase already holds every row of each column
-        # microblock in registers, so folding a running sum into that phase
-        # (optimize round 5 / P2, `quantize_mxfp4_h16_dual_bias`) makes the
-        # bias gradient a byproduct of the pack read instead of another
-        # independent one. Gated on `ctx.has_bias` too so a bias-less Linear
-        # never pays the fused kernel's (small) extra col-phase cost for a
-        # sum nobody wants.
+        # Dgrad packs grad_2d row-major (along N, its own last dim); Wgrad packs grad_2d.t() (along
+        # tokens). Whenever both passes are MXFP4 and both would independently resolve to the fused-H16
+        # path (see `_dual_pack_eligible`), get both from ONE `_quantize_mxfp4_h16_dual_op` read instead
+        # of a transpose copy feeding a second pack launch.
+        # When the module also has a bias, `grad_bias = grad_2d.sum(0)` below would be a THIRD full read
+        # of this exact tensor -- the dual's col phase already holds every row of each column microblock
+        # in registers, so folding a running sum into that phase makes the bias gradient a byproduct of
+        # the pack read instead of another independent one. Gated on `ctx.has_bias` too so a bias-less
+        # Linear never pays the fused kernel's (small) extra col-phase cost for a sum nobody wants.
         fuse_g = cfg.dgrad == "mxfp4" and cfg.wgrad == "mxfp4" and _dual_pack_eligible(hadamard, cfg)
-        # The fused-bias pack kernels (`flydsl_quant_mxfp4_h16_dual_bias` and its
-        # legs variant) have no SR path -- unlike the plain dual, they take no
-        # row_sr/col_sr. So when either consuming pass wants stochastic rounding,
-        # skip the bias fusion and fall back to the plain dual plus an explicit
-        # `grad_2d.sum(0)` below. That trades P6 back for correctness on biased
-        # modules only, and only while SR is on; with SR off (the default, and the
-        # throughput champion config) this is unchanged. Threading row_sr/col_sr
-        # through the bias kernels would recover it.
+        # The fused-bias pack kernels (`flydsl_quant_mxfp4_h16_dual_bias` and its legs variant) have no SR
+        # path -- unlike the plain dual, they take no row_sr/col_sr. So when either consuming pass wants
+        # stochastic rounding, skip the bias fusion and fall back to the plain dual plus an explicit
+        # `grad_2d.sum(0)` below. That trades P6 back for correctness on biased modules only, and only
+        # while SR is on; Threading row_sr/col_sr through the bias kernels would recover it.
         fuse_g_bias = (
             fuse_g and ctx.has_bias and not (cfg.sr_op("grad", "dgrad") or cfg.sr_op("grad", "wgrad"))
         )
-        # B = weight.t() used to always be materialized via `.t().contiguous()`
-        # before packing (profiled this round at 22.87% of a 4-layer Flux
-        # Linear stack's fwd+bwd device time -- the single largest non-GEMM
-        # item; see ROUND_REPORT / /results/r9/p1_rank.json). Weight's OWN row
-        # pack (Fprop, above) is untouched -- only this second, transposed
-        # orientation is replaced: whenever it would resolve to the fused-H16
-        # path (see `_weight_colpack_eligible`), get it directly from the
-        # UNTRANSPOSED weight via `_quantize_mxfp4_h16_col_op` (one coalesced
-        # read, no transpose copy) instead of transpose-then-pack.
-        #
-        # optimize round 9 / P5 (cont.): if forward already produced this via
-        # the fused dual (`ctx.w_is_dual`), reuse that saved pack instead of
-        # reading `weight` a second time -- `_weight_colpack_eligible` is
-        # guaranteed true here whenever `ctx.w_is_dual` is, so this is a pure
-        # reuse, not a new gate.
-        #
-        # `ctx.w_is_dual` now has two sources and the guarantee holds for both.
-        # An MXFP4 fprop sets it from `fuse_w`, which gates on
-        # `_weight_colpack_eligible` directly. An FP8 fprop sets it from
-        # `fuse_w_fp8`, which gates on `_fp8_dual_pack_eligible(..., "weight",
-        # "dgrad")`; that requires `_dual_pack_eligible` AND
-        # `not cfg.weight_2d_block`, and with 2D off those two predicates are
-        # the same call -- `_fused_h16_quant_enabled(hadamard, False,
-        # cfg.randomized_hadamard)`. Either way the col half was packed for
-        # Dgrad with `cfg.sr_op("weight", "dgrad")`, which is exactly what this
-        # call site would ask for, so the reuse is SR-correct rather than
-        # SR-losing.
+        # Weight's OWN row pack (Fprop, above) is untouched -- only this second, transposed orientation is
+        # replaced: whenever it would resolve to the fused-H16 path (see `_weight_colpack_eligible`), get
+        # it directly from the UNTRANSPOSED weight via `_quantize_mxfp4_h16_col_op` (one coalesced read,
+        # no transpose copy) instead of transpose-then-pack.
+        # `ctx.w_is_dual` now has two sources and the guarantee holds for both. An MXFP4 fprop sets it
+        # from `fuse_w`, which gates on `_weight_colpack_eligible` directly. An FP8 fprop sets it from
+        # `fuse_w_fp8`, which gates on `_fp8_dual_pack_eligible(..., "weight", "dgrad")`; that requires
+        # `_dual_pack_eligible` AND `not cfg.weight_2d_block`, and with 2D off those two predicates are
+        # the same call -- `_fused_h16_quant_enabled(hadamard, False, cfg.randomized_hadamard)`. Either
+        # way the col half was packed for Dgrad with `cfg.sr_op("weight", "dgrad")`, which is exactly what
+        # this call site would ask for, so the reuse is SR-correct rather than SR-losing.
         if ctx.w_is_dual:
             w_col = (w_col_q.view(FP4_DTYPE), w_col_s)
         else:
@@ -2565,12 +2457,7 @@ class _MXFP4LinearFunction(torch.autograd.Function):
             g_dual = (g_row, g_row_scale, g_col, g_col_scale)
             pk_dgrad, pk_wgrad = _packed_gemm_flags(grad_2d, x_s)
         elif fuse_g_bias:
-            # optimize round 10 / P6: at the one shape measured this round to
-            # be a net win (single.l1's G, see `_legpack_g_split`'s docstring
-            # for the A/B), pack via two column-slice launches straight into
-            # the same shared (row/col/bias) buffers instead of one
-            # monolithic dual-bias launch. Every other shape keeps the
-            # existing, unmodified monolithic call.
+            # Every other shape keeps the existing, unmodified monolithic call.
             _legs = _legpack_g_split(*grad_2d.shape)
             if _legs is not None:
                 g_row, g_row_scale, g_col, g_col_scale, grad_bias = _quantize_mxfp4_h16_dual_bias_legs_op(
@@ -2671,6 +2558,20 @@ def _fp8_legs_gelu_eligible(module, rows: int, widths) -> bool:
     )
 
 
+class LazyAct(NamedTuple):
+    """A lazy act plus the operands its producer's epilogue already built from it.
+
+    ``dual`` is ``a6w4_act_dual(gelu(act))``, so a consumer holding one has nothing to read
+    back; it is None when the producer could not fuse, and then ``act`` behaves exactly as
+    the bare tensor `forward_gelu(lazy=True)` used to return. ``rebiased`` says the producer
+    moved its bias into the epilogue to fuse, so ``act`` carries it and only the packs
+    describe what the consumer wanted -- declining them is a wiring fault, not a fallback."""
+
+    act: torch.Tensor
+    dual: tuple[torch.Tensor, ...] | None = None
+    rebiased: bool = False
+
+
 class _MXFP4LinearGeluInFunction(torch.autograd.Function):
     """``_MXFP4LinearFunction(cat(attn, gelu(preact)))`` -- or of ``gelu(preact)`` when
     ``attn`` is None -- where ``preact`` is a lazy act. Fprop and the saved Wgrad col pack
@@ -2679,11 +2580,15 @@ class _MXFP4LinearGeluInFunction(torch.autograd.Function):
     applies dGELU."""
 
     @staticmethod
-    def forward(ctx, attn, preact, weight, bias, hadamard, act_slot, wgt_slot, cfg, preact_bias=None):
+    def forward(
+        ctx, attn, preact, weight, bias, hadamard, act_slot, wgt_slot, cfg, preact_bias=None, ready=None
+    ):
         lead = preact.shape[:-1]
         a_2d = None if attn is None else attn.reshape(-1, attn.shape[-1])
         p_2d = preact.reshape(-1, preact.shape[-1])
-        if cfg.fprop == "a6w4":
+        if ready is not None:
+            packs = ready
+        elif cfg.fprop == "a6w4":
             packs = _a6w4_act_dual_legs_gelu_op(a_2d, p_2d, preact_bias)
         else:
             packs = _fp8_mxfp4_dual_legs_gelu_op(a_2d, p_2d, act_slot)
@@ -2713,7 +2618,7 @@ class _MXFP4LinearGeluInFunction(torch.autograd.Function):
             d_attn, d_act = d_x[..., : ctx.leg0], d_x[..., ctx.leg0 :]
         else:
             d_attn, d_act = None, d_x
-        return d_attn, d_act, grads[1], grads[2], None, None, None, None, None
+        return d_attn, d_act, grads[1], grads[2], None, None, None, None, None, None
 
 
 def _gated_out(ctx, mm, gate, bias, lead, n):
@@ -2757,7 +2662,7 @@ class _MXFP4GatedLinearGeluInFunction(torch.autograd.Function):
     consumer (single-block linear2, double-block MLP fc2)."""
 
     @staticmethod
-    def forward(ctx, attn, preact, gate, weight, bias, hadamard, act_slot, wgt_slot, cfg):
+    def forward(ctx, attn, preact, gate, weight, bias, hadamard, act_slot, wgt_slot, cfg, ready=None):
         lead = preact.shape[:-1]
         a_2d = None if attn is None else attn.reshape(-1, attn.shape[-1])
         p_2d = preact.reshape(-1, preact.shape[-1])
@@ -2765,7 +2670,9 @@ class _MXFP4GatedLinearGeluInFunction(torch.autograd.Function):
         # so a gated lazy-GELU consumer on A6W4 silently took the FP8 pack -- a different element
         # format for the same activation. It could not be noticed while the gate flag also swapped
         # the whole overlay for a copy with no A6W4 code in it, because the two never ran together.
-        if cfg.fprop == "a6w4":
+        if ready is not None:
+            packs = ready
+        elif cfg.fprop == "a6w4":
             packs = _a6w4_act_dual_legs_gelu_op(a_2d, p_2d, None)
         else:
             packs = _fp8_mxfp4_dual_legs_gelu_op(a_2d, p_2d, act_slot)
@@ -2794,7 +2701,7 @@ class _MXFP4GatedLinearGeluInFunction(torch.autograd.Function):
             d_attn, d_act = d_x[..., : ctx.leg0], d_x[..., ctx.leg0 :]
         else:
             d_attn, d_act = None, d_x
-        return d_attn, d_act, grad_gate, grads[1], grads[2], None, None, None, None
+        return d_attn, d_act, grad_gate, grads[1], grads[2], None, None, None, None, None
 
 
 class _MXFP4LinearGeluLegsFunction(torch.autograd.Function):
@@ -2810,11 +2717,18 @@ class _MXFP4LinearGeluLegsFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, leg0, lazy=False):
+        outs, save_list = _MXFP4LinearGeluLegsFunction._fwd(
+            ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, leg0, lazy
+        )
+        ctx.save_for_backward(*save_list)
+        return outs
+
+    @staticmethod
+    def _fwd(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, leg0, lazy, x_pre=None):
         out, save_list = _MXFP4LinearFunction._forward(
-            ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg
+            ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, x_pre=x_pre
         )
         preact = out[:, leg0:]
-        ctx.save_for_backward(*save_list, preact)
         ctx.leg0 = leg0
         ctx.fused_dgelu = (
             bias is not None
@@ -2826,11 +2740,16 @@ class _MXFP4LinearGeluLegsFunction(torch.autograd.Function):
         )
         lead = ctx.x_shape[:-1]
         act = preact if lazy else torch.nn.functional.gelu(preact, approximate="tanh")
-        return out[:, :leg0].reshape(*lead, leg0), act.reshape(*lead, preact.shape[1])
+        outs = (out[:, :leg0].reshape(*lead, leg0), act.reshape(*lead, preact.shape[1]))
+        return outs, [*save_list, preact]
 
     @staticmethod
     def backward(ctx, grad_qkv, grad_act):
-        saved = ctx.saved_tensors
+        grads = _MXFP4LinearGeluLegsFunction._bwd(ctx, ctx.saved_tensors, grad_qkv, grad_act)
+        return (*grads, None, None)
+
+    @staticmethod
+    def _bwd(ctx, saved, grad_qkv, grad_act):
         preact = saved[-1]
         d_qkv = grad_qkv.reshape(-1, ctx.leg0)
         d_act = grad_act.reshape(-1, preact.shape[1])
@@ -2841,7 +2760,7 @@ class _MXFP4LinearGeluLegsFunction(torch.autograd.Function):
             d_pre = torch.ops.aten.gelu_backward(d_act, preact, approximate="tanh")
             grad_2d = torch.cat((d_qkv, d_pre), dim=1)
             grads = _MXFP4LinearFunction._backward(ctx, saved[:-1], grad_2d)
-        return (*grads, None, None)
+        return grads
 
 
 class _MXFP4LinearGeluFunction(torch.autograd.Function):
@@ -2855,7 +2774,20 @@ class _MXFP4LinearGeluFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, lazy=False):
+    def forward(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, lazy=False, dual_out=False):
+        act, save_list = _MXFP4LinearGeluFunction._fwd(
+            ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, lazy, dual_out=dual_out
+        )
+        ctx.save_for_backward(*save_list)
+        packs, ctx.gelu_dual_packs = ctx.gelu_dual_packs, None
+        if packs is None:
+            return act
+        u8 = tuple(p.view(torch.uint8) for p in packs)
+        ctx.mark_non_differentiable(*u8)
+        return (act, *u8)
+
+    @staticmethod
+    def _fwd(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, lazy, x_pre=None, dual_out=False):
         preact, save_list, unbiased = _MXFP4LinearFunction._forward(
             ctx,
             x,
@@ -2866,9 +2798,10 @@ class _MXFP4LinearGeluFunction(torch.autograd.Function):
             wgt_slot,
             cfg,
             bias_any_width=True,
+            x_pre=x_pre,
             return_unbiased=True,
+            gelu_dual=lazy and dual_out,
         )
-        ctx.save_for_backward(*save_list, preact)
         ctx.fused_dgelu = (
             bias is not None
             and cfg.dgrad == "mxfp4"
@@ -2878,24 +2811,67 @@ class _MXFP4LinearGeluFunction(torch.autograd.Function):
             and preact.shape[0] % 128 == 0
             and preact.shape[1] % 256 == 0
         )
+        if ctx.gelu_dual_packs is not None:
+            return preact.reshape(*ctx.x_shape[:-1], preact.shape[1]), [*save_list, preact]
         if lazy and cfg.fprop == "a6w4":
-            # The A6W4 consumer adds the bias itself, in f32 ahead of its GELU, as Inductor's fused
-            # gelu(out + bias) did; handing it the bf16-rounded preact would change the bytes.
+            # The A6W4 consumer adds the bias itself, in f32 ahead of its GELU, as Inductor's fused gelu(out +
+            # bias) did; handing it the bf16-rounded preact would change the bytes.
             act = unbiased
         else:
             act = preact if lazy else torch.nn.functional.gelu(preact, approximate="tanh")
-        return act.reshape(*ctx.x_shape[:-1], preact.shape[1])
+        return act.reshape(*ctx.x_shape[:-1], preact.shape[1]), [*save_list, preact]
 
     @staticmethod
-    def backward(ctx, grad_act):
-        saved = ctx.saved_tensors
+    def backward(ctx, grad_act, *_packs):
+        return (*_MXFP4LinearGeluFunction._bwd(ctx, ctx.saved_tensors, grad_act), None, None)
+
+    @staticmethod
+    def _bwd(ctx, saved, grad_act):
         preact = saved[-1]
         d_act = grad_act.reshape(-1, preact.shape[1])
         if ctx.fused_dgelu:
             packs = _quantize_mxfp4_h16_dual_bias_dgelu_op(d_act, preact)
-            return (*_MXFP4LinearFunction._backward(ctx, saved[:-1], None, packs), None)
+            return _MXFP4LinearFunction._backward(ctx, saved[:-1], None, packs)
         grad_2d = torch.ops.aten.gelu_backward(d_act, preact, approximate="tanh")
-        return (*_MXFP4LinearFunction._backward(ctx, saved[:-1], grad_2d), None)
+        return _MXFP4LinearFunction._backward(ctx, saved[:-1], grad_2d)
+
+
+class _MXFP4LinearLnModFunction(torch.autograd.Function):
+    """One of the Functions above on ``(1 + scale) * layer_norm(x) + shift`` (eps 1e-6, no affine),
+    with the LN and the modulate folded into the A6W4 activation pack (`_A6W4_LNMOD_PACK`).
+    ``kind`` picks the Linear: "plain" (`_MXFP4LinearFunction`), "gelu" (`_MXFP4LinearGeluFunction`)
+    or "legs" (`_MXFP4LinearGeluLegsFunction`, split at ``leg0``). Saves x and the row stats in place
+    of the modulated activation; backward rebuilds the normalised x from them."""
+
+    @staticmethod
+    def forward(ctx, x, shift, scale, weight, bias, hadamard, act_slot, wgt_slot, cfg, kind, leg0, lazy):
+        x_pre, rstd, nmr = _lnmod_pre(x, shift, scale)
+        args = (ctx, None, weight, bias, hadamard, act_slot, wgt_slot, cfg)
+        if kind == "legs":
+            outs, save_list = _MXFP4LinearGeluLegsFunction._fwd(*args, leg0, lazy, x_pre=x_pre)
+        elif kind == "gelu":
+            outs, save_list = _MXFP4LinearGeluFunction._fwd(*args, lazy, x_pre=x_pre)
+        else:
+            out, save_list = _MXFP4LinearFunction._forward(*args, x_pre=x_pre)
+            outs = out.reshape(*x.shape[:-1], weight.shape[0])
+        ctx.kind = kind
+        ctx.n_lin = len(save_list)
+        ctx.save_for_backward(*save_list, x, scale, rstd, nmr)
+        return outs
+
+    @staticmethod
+    def backward(ctx, *grad_outs):
+        saved = ctx.saved_tensors
+        lin, ln = saved[: ctx.n_lin], saved[ctx.n_lin :]
+        if ctx.kind == "legs":
+            grads = _MXFP4LinearGeluLegsFunction._bwd(ctx, lin, *grad_outs)
+        elif ctx.kind == "gelu":
+            grads = _MXFP4LinearGeluFunction._bwd(ctx, lin, *grad_outs)
+        else:
+            g = grad_outs[0]
+            grads = _MXFP4LinearFunction._backward(ctx, lin, g.reshape(-1, g.shape[-1]).contiguous())
+        # x, shift, scale, weight, bias, hadamard, act_slot, wgt_slot, cfg, kind, leg0, lazy
+        return (*_lnmod_backward(grads[0], *ln), *grads[1:], None, None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -3014,11 +2990,14 @@ class MXFP4Linear(nn.Linear):
         qkv, mlp = torch.split(self(x), [leg0, self.out_features - leg0], dim=-1)
         return qkv, torch.nn.functional.gelu(mlp, approximate="tanh")
 
-    def forward_gelu(self, x: torch.Tensor, lazy: bool = False) -> torch.Tensor:
+    def forward_gelu(self, x: torch.Tensor, lazy: bool = False):
         """``gelu(self(x), approximate="tanh")``, same calling contract as
-        ``forward_split_gelu``."""
+        ``forward_split_gelu``.
+
+        Under ``lazy`` the result is a `LazyAct`, whose ``dual`` carries the consumer's
+        operands when this GEMM's epilogue could build them."""
         if self.config.any_mxfp4 and self.training:
-            return _MXFP4LinearGeluFunction.apply(
+            out = _MXFP4LinearGeluFunction.apply(
                 x,
                 self.weight,
                 self.bias,
@@ -3027,8 +3006,49 @@ class MXFP4Linear(nn.Linear):
                 self.fp8_wgt_slot,
                 self.config,
                 lazy,
+                lazy,
             )
+            dual = None
+            if isinstance(out, tuple):
+                out, aq, sa, co, cs = out
+                dual = (aq, sa, co.view(FP4_DTYPE), cs.view(torch.float8_e8m0fnu))
+            act = out
+            rebiased = dual is not None and not _fuse_bias_eligible(
+                self.config, self.out_features, any_width=True
+            )
+            return LazyAct(act, dual, rebiased) if lazy else act
         return torch.nn.functional.gelu(self(x), approximate="tanh")
+
+    def lnmod_ok(self, x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> bool:
+        """True iff `forward_lnmod` can take ``x`` unmodulated (see `_A6W4_LNMOD_PACK`)."""
+        return _a6w4_lnmod_eligible(self, x, shift, scale)
+
+    def forward_lnmod(
+        self,
+        x: torch.Tensor,
+        shift: torch.Tensor,
+        scale: torch.Tensor,
+        kind: str = "plain",
+        leg0: int = 0,
+        lazy: bool = False,
+    ):
+        """``self``, `forward_gelu` (``kind="gelu"``) or `forward_split_gelu` (``kind="legs"``) on
+        ``(1 + scale) * layer_norm(x) + shift``, with the LN and the modulate in the activation
+        pack. Only after `lnmod_ok` said yes; same calling contract as ``forward_split_gelu``."""
+        return _MXFP4LinearLnModFunction.apply(
+            x,
+            shift,
+            scale,
+            self.weight,
+            self.bias,
+            self.hadamard,
+            self.fp8_act_slot,
+            self.fp8_wgt_slot,
+            self.config,
+            kind,
+            leg0,
+            lazy,
+        )
 
     def lazy_gelu_into(self, consumer: nn.Module, x: torch.Tensor, widths) -> bool:
         """True iff this Linear's GELU output can be handed lazily to ``consumer``, whose
@@ -3058,7 +3078,7 @@ class MXFP4Linear(nn.Linear):
     def forward_gelu_input(
         self,
         attn: torch.Tensor | None,
-        act: torch.Tensor,
+        act: "torch.Tensor | LazyAct",
         act_bias: torch.Tensor | None = None,
         *,
         gate: torch.Tensor | None = None,
@@ -3070,6 +3090,17 @@ class MXFP4Linear(nn.Linear):
         ``act_bias``, and the residual gate is ``[B, 1, N]``, not the GELU leg's bias."""
         # The gated Function has no act_bias parameter, so it can only take a lazy act whose
         # producer kept its bias in the GEMM. A6W4 is the case that hands one over.
+        ready, rebiased = None, False
+        if isinstance(act, LazyAct):
+            act, ready, rebiased = act.act, act.dual, act.rebiased
+        if ready is not None and (attn is not None or act_bias is not None) and rebiased:
+            raise RuntimeError(
+                "a6w4 fused epilogue: the producer moved its bias into the GEMM for this "
+                "consumer, so its act cannot be re-activated here. lazy_gelu_into must not "
+                "offer the fused path to a consumer with another leg or a bias of its own."
+            )
+        if ready is not None and (attn is not None or act_bias is not None):
+            ready = None
         if gate is not None and act_bias is None and self._gated_ok(act, gate):
             return _MXFP4GatedLinearGeluInFunction.apply(
                 attn,
@@ -3081,6 +3112,7 @@ class MXFP4Linear(nn.Linear):
                 self.fp8_act_slot,
                 self.fp8_wgt_slot,
                 self.config,
+                ready,
             )
         out = _MXFP4LinearGeluInFunction.apply(
             attn,
@@ -3092,6 +3124,7 @@ class MXFP4Linear(nn.Linear):
             self.fp8_wgt_slot,
             self.config,
             act_bias,
+            ready,
         )
         return out if gate is None else gate * out
 
@@ -3130,8 +3163,8 @@ class MXFP4Linear(nn.Linear):
         return f"{super().extra_repr()}, mxfp4=({self.config.describe()})"
 
 
-# Single-block linear2 (23j) and both linears of each double-block MLP (24d step 2).
-# Activation goes FP6 to FP4; backward stays MXFP4. Off restores A6W4 on all 228.
+# Single-block linear2 (23j) and both linears of each double-block MLP (24d step 2). Activation
+# goes FP6 to FP4; backward stays MXFP4. Off restores A6W4 on all 228.
 _A6W4_FWD_FP4_MLP = os.getenv("FLUX_A6W4_FWD_FP4_MLP", "1") == "1"
 _A6W4_FWD_FP4_RE = re.compile(
     r"(?:^|\.)single_blocks\.\d+\.linear2$" r"|(?:^|\.)double_blocks\.\d+\.(?:img_mlp|txt_mlp)\.[02]$"
@@ -3188,30 +3221,19 @@ def convert_to_mxfp4_training(
                 wrapped += 1
         logger.info(f"FLUX_FP8_ALL_GATHER: {wrapped} MXFP4 linears gather FP8 fprop + MXFP4 dgrad weights")
 
-    # The full-MXFP4 twin. Mutually exclusive with the FP8 gather by construction rather than
-    # by check: the two eligibility gates require cfg.fprop == "fp8" and == "mxfp4", so at most
-    # one can ever claim a given module. Logged either way, including the zero, because a silent
-    # 0 here is exactly how an all-gather flag can look enabled and do nothing -- which is what
+    # The full-MXFP4 twin. Mutually exclusive with the FP8 gather by construction rather than by
+    # check: the two eligibility gates require cfg.fprop == "fp8" and == "mxfp4", so at most one can
+    # ever claim a given module. Logged either way, including the zero, because a silent 0 here is
+    # exactly how an all-gather flag can look enabled and do nothing -- which is what
     # FLUX_FP8_ALL_GATHER=1 does on a full-MXFP4 recipe.
-    #
-    # Defaults ON, and inert on anything that is not a full-MXFP4 forward, so it costs an
-    # FP8-forward recipe exactly one isinstance check per module at startup.
-    #
-    # MEASURED on 1x8 MI355X, GBS 256, MAX_STEPS=2200, two-eval block-2, against a control repeat
-    # in the same tree (arm f0b, the i2b/i6 rule): 82.13 against 80.38, so +2.18%. Zero loss=nan,
-    # zero NaN evals, 228 linears wrapped -- every transformer Linear, 19 double blocks x 8 plus
-    # 38 single blocks x 2. The packs are bit-exact against packing the gathered weight on all
-    # five real FLUX [N, K] shapes at world 8 and 32, both orientations
+    # Defaults ON, and inert on anything that is not a full-MXFP4 forward, so it costs an FP8-forward
+    # recipe exactly one isinstance check per module at startup.
+    # Zero loss=nan, zero NaN evals, 228 linears wrapped -- every transformer Linear, 19 double blocks
+    # x 8 plus 38 single blocks x 2. The packs are bit-exact against packing the gathered weight on
+    # all five real FLUX [N, K] shapes at world 8 and 32, both orientations
     # (.tmp_cmp/mxfp4_ag_test.py).
-    #
-    # +2.18% is SMALLER than the FP8 gather's +3.45% at this topology despite cutting twice the
-    # bytes, and the traces say why. Against the same recipe with this off, it removes 22.33 ms/step
-    # from nccl:_all_gather_base (65.17 -> 42.84, -34%) and 5.22 from quantize_mxfp4_h16_dual (the
-    # weight packs leaving the step), about 32 ms/step of kernel time in total. But 98% of collective
-    # time on one node is already hidden behind compute -- exposed collective is 3.59 ms/step out of
-    # 158.91 -- so almost none of that 22 ms is on the critical path. One node structurally cannot pay
-    # for this; four nodes, where the gather crosses the network instead of xGMI, should. The FP8
-    # gather showed the same shape, +3.45% at 8 GPUs against +4.6% at 32.
+    # One node structurally cannot pay for this; four nodes, where the gather crosses the network
+    # instead of xGMI, should.
     if os.getenv("FLUX_FP4_ALL_GATHER", "1") == "1":
         wrapped = wrapped_a6w4 = 0
         a6w4_named: list[tuple[str, nn.Module]] = []
@@ -3241,24 +3263,21 @@ def convert_to_mxfp4_training(
     return converted
 
 
+# --------------------------------------------------------------------------- FP8 weight all-
+# gather under FSDP2 (FLUX_FP8_ALL_GATHER=1)
 # ---------------------------------------------------------------------------
-# FP8 weight all-gather under FSDP2 (FLUX_FP8_ALL_GATHER=1)
-# ---------------------------------------------------------------------------
-#
-# The TorchAO flag of the same name only acts on Float8Linear, which this module
-# replaces, so without this every rank gathers the bf16 weight and then quantizes the
-# full matrix itself. Here each rank quantizes only its own shard before the gather:
-# the FP8 tensorwise copy Fprop multiplies with, and the colwise H16 MXFP4 pack Dgrad
-# multiplies with, 1.53 B/elem on the wire instead of 2.
-#
-# Both are bit-identical to quantizing the gathered bf16 weight. FP8 bytes depend only
-# on the value and the scale, and the scale comes from the same kernel fed the global
-# amax through `amax_partials`. The col pack's H16 rotation and 32-element scale blocks
-# run along N, the dim FSDP shards on, so a shard's pack is exactly its slice of the
-# full pack as long as the shard height is a multiple of 32.
-#
-# The linear itself is unchanged: the unsharded weight intercepts the two custom ops it
-# already calls on `weight` and serves them from the gathered payloads.
+# The TorchAO flag of the same name only acts on Float8Linear, which this module replaces, so
+# without this every rank gathers the bf16 weight and then quantizes the full matrix itself. Here
+# each rank quantizes only its own shard before the gather: the FP8 tensorwise copy Fprop
+# multiplies with, and the colwise H16 MXFP4 pack Dgrad multiplies with, 1.53 B/elem on the wire
+# instead of 2.
+# Both are bit-identical to quantizing the gathered bf16 weight. FP8 bytes depend only on the
+# value and the scale, and the scale comes from the same kernel fed the global amax through
+# `amax_partials`. The col pack's H16 rotation and 32-element scale blocks run along N, the dim
+# FSDP shards on, so a shard's pack is exactly its slice of the full pack as long as the shard
+# height is a multiple of 32.
+# The linear itself is unchanged: the unsharded weight intercepts the two custom ops it already
+# calls on `weight` and serves them from the gathered payloads.
 
 
 def _fp8_all_gather_eligible(module: "MXFP4Linear") -> bool:
@@ -3321,8 +3340,8 @@ class _FP8AllGatherWeight(torch.Tensor):
     def __init__(self, tensor: torch.Tensor, amax: torch.Tensor | None = None):
         self._tensor = tensor
         self._amax = amax
-        # (payloads, scale_inv, param_dtype, ready event) from precompute_fp8_all_gather_amax;
-        # taken by the next fsdp_pre_all_gather, which quantizes itself when it is absent.
+        # (payloads, scale_inv, param_dtype, ready event) from precompute_fp8_all_gather_amax; taken by
+        # the next fsdp_pre_all_gather, which quantizes itself when it is absent.
         self._prequant = None
         # FLUX_FP8_AG_PREQUANT=gather: (graph entry, index of this shard's output in it).
         self._pq_slot = None
@@ -3439,10 +3458,6 @@ class _FP8AllGatherWeight(torch.Tensor):
 
 # Regroup the gathered Dgrad col pack in one opaque copy per payload instead of the inline
 # view/transpose/reshape/dtype-view chain. Read at import: torch.compile must not trace a getenv.
-#
-# Ported from sukylasa/flux-fp8-integrated-dgelu-mlp (1ccb4ef9c, cbbd545a9). His 1x8 ladder puts
-# it at 77.52 -> 78.39 block-2 on top of the double-block dGELU, which is far above our 1-node
-# repeat error of 0.05-0.18%, so unlike keep 4 this one is sized to be visible here.
 _COLPACK_REGROUP_OP = os.getenv("FLUX_COLPACK_REGROUP_OP", "0") == "1"
 
 
@@ -3504,16 +3519,16 @@ def _(col_q, col_s, world):
 
 # FLUX_AG_COLPACK_KMAJOR=1: FSDP2's all-gather copy-out writes each gathered col pack straight
 # into the Dgrad operand's [K, N/2] / [K, N/32] order, so `_dgrad_col_pack` is a view and the
-# regroup above (one more read and write of every col pack, 228 launches per step) goes away.
-# The other payloads are copied as FSDP2's split_with_sizes_copy would. One launch per group
-# for the 4-byte-aligned segments and one for the rest (the col scales' 3-21 byte rank rows).
-#
+# regroup above (one more read and write of every col pack, 228 launches per step) goes away. The
+# other payloads are copied as FSDP2's split_with_sizes_copy would. One launch per group for the
+# 4-byte-aligned segments and one for the rest (the col scales' 3-21 byte rank rows).
 # A segment is the [W, K, rb] block of one payload across the W ranks, written as [K, W, rb]:
-# dst[(k * W + r) * rb + j] = src[r * PR + off + k * rb + j]. An ordinary payload is K = 1.
-# Mode 0 tiles it by dst rows of rb (long rows); mode 1 by K rows of W * rb (short rank rows).
+# dst[(k * W + r) * rb + j] = src[r * PR + off + k * rb + j]. An ordinary payload is K = 1. Mode 0
+# tiles it by dst rows of rb (long rows); mode 1 by K rows of W * rb (short rank rows).
 _AG_KMAJOR = os.getenv("FLUX_AG_COLPACK_KMAJOR", "0") == "1"
 _AG_KMAJOR_CHECK = int(os.getenv("FLUX_AG_COLPACK_KMAJOR_CHECK", "0"))
 _AG_TAB = 8  # dst ptr, src off, rb, K, mode, first program, col blocks, -
+_AG_TABLE_ARGS = os.getenv("FLUX_AG_TABLE_ARGS", "0") == "1"
 
 
 @triton.jit
@@ -3534,6 +3549,51 @@ def _ag_copyout_kernel(
     s = tl.sum((starts <= pid).to(tl.int32)) - 1
     row = tab + s * 8
     dst = tl.load(row).to(tl.pointer_type(src.dtype.element_ty))
+    off = tl.load(row + 1)
+    rb = tl.load(row + 2)
+    K = tl.load(row + 3)
+    mode = tl.load(row + 4)
+    p = pid - tl.load(row + 5)
+    ncb = tl.load(row + 6)
+    if mode == 0:
+        d = p // ncb
+        j = (p % ncb) * BC0 + tl.arange(0, BC0)
+        m0 = j < rb
+        v0 = tl.load(src + ((d % W) * PR + off + (d // W) * rb) + j, mask=m0)
+        tl.store(dst + d * rb + j, v0, mask=m0)
+    else:
+        k = (p // ncb) * BR1 + tl.arange(0, BR1)
+        c = (p % ncb) * BC1 + tl.arange(0, BC1)
+        r = c // rb
+        m1 = (k[:, None] < K) & (c[None, :] < W * rb)
+        sidx = (r * PR + off + (c - r * rb))[None, :] + k[:, None] * rb
+        v1 = tl.load(src + sidx, mask=m1)
+        tl.store(dst + k[:, None] * (W * rb) + c[None, :], v1, mask=m1)
+
+
+@triton.jit
+def _ag_copyout_args_kernel(
+    src,
+    tab,
+    PR,
+    NSEG,
+    dsts,
+    W: tl.constexpr,
+    NSEG_P2: tl.constexpr,
+    BC0: tl.constexpr,
+    BR1: tl.constexpr,
+    BC1: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    segs = tl.arange(0, NSEG_P2)
+    starts = tl.load(tab + segs * 8 + 5, mask=segs < NSEG, other=1 << 62)
+    s = tl.sum((starts <= pid).to(tl.int32)) - 1
+    row = tab + s * 8
+    di = tl.load(row)
+    addr = dsts[0].to(tl.int64)
+    for i in tl.static_range(1, len(dsts)):
+        addr = tl.where(di == i, dsts[i].to(tl.int64), addr)
+    dst = addr.to(tl.pointer_type(src.dtype.element_ty))
     off = tl.load(row + 1)
     rb = tl.load(row + 2)
     K = tl.load(row + 3)
@@ -3578,16 +3638,13 @@ class _AGKMajorPlan:
         self.kmajor = []
         off = i = 0
         # Each payload's bytes come from ITS OWN dtype, not from the all-gather buffer's.
-        #
-        # This group is mixed: the weight payload is bf16 while the Dgrad column packs are uint8
-        # FP4 and E8M0. Sizing everything by all_gather_output.element_size() undercounts a bf16
-        # payload by 2x, every later offset inherits the error, and the scatter then reads and
-        # writes the wrong regions -- weights come out garbage and the loss is nan by step 6.
-        # The checker caught it as "output 0 (K=1, rb=1769472) is 113246208 bytes, the gathered
-        # segment is 56623104", a ratio of exactly 2.
-        #
-        # It only bites when a payload dtype differs from the buffer's, which is why the flag can
-        # be clean on one recipe or image and diverge on another.
+        # This group is mixed: the weight payload is bf16 while the Dgrad column packs are uint8 FP4 and
+        # E8M0. Sizing everything by all_gather_output.element_size() undercounts a bf16 payload by 2x,
+        # every later offset inherits the error, and the scatter then reads and writes the wrong regions
+        # -- weights come out garbage and the loss is nan by step 6. The checker caught it as "output 0
+        # (K=1, rb=1769472) is 113246208 bytes, the gathered segment is 56623104", a ratio of exactly 2.
+        # It only bites when a payload dtype differs from the buffer's, which is why the flag can be clean
+        # on one recipe or image and diverge on another.
         for fp, param_numels, param_dtypes in zip(fsdp_params, numels, dtypes):
             cols = _ag_col_payloads(fp)
             kdim = fp._orig_size[1] if len(fp._orig_size) == 2 else 0
@@ -3606,6 +3663,31 @@ class _AGKMajorPlan:
                 off += b
                 i += 1
         self.tables = {}
+        self.static = {}
+
+    def _rows(self, ptrs):
+        """Per launch word: (word, rows, programs, output index of each row). Column 0 is a
+        placeholder; ptrs only decides which segments are 4-byte aligned."""
+        out = []
+        for word, (bc0, br1, bc1) in _AG_LAUNCH.items():
+            rows, idx, prog = [], [], 0
+            for i, off, rb, k in self.segs:
+                fits = all(x % 4 == 0 for x in (off, rb, self.pr, ptrs[i]))
+                if (word == 4) != fits:
+                    continue
+                o, rbw = off // word, rb // word
+                if k == 1:
+                    ncb = triton.cdiv(rbw, bc0)
+                    rows.append([0, o, rbw, 1, 0, prog, ncb, 0])
+                    prog += self.world * ncb
+                else:
+                    ncb = triton.cdiv(self.world * rbw, bc1)
+                    rows.append([0, o, rbw, k, 1, prog, ncb, 0])
+                    prog += triton.cdiv(k, br1) * ncb
+                idx.append(i)
+            if rows:
+                out.append((word, rows, prog, idx))
+        return out
 
     def _table(self, outs, device):
         key = tuple(o.data_ptr() for o in outs)
@@ -3613,31 +3695,49 @@ class _AGKMajorPlan:
         if hit is not None:
             return hit
         launches = []
-        for word, (bc0, br1, bc1) in _AG_LAUNCH.items():
-            rows, prog = [], 0
-            for i, off, rb, k in self.segs:
-                fits = all(x % 4 == 0 for x in (off, rb, self.pr, key[i]))
-                if (word == 4) != fits:
-                    continue
-                o, rbw = off // word, rb // word
-                if k == 1:
-                    ncb = triton.cdiv(rbw, bc0)
-                    rows.append([key[i], o, rbw, 1, 0, prog, ncb, 0])
-                    prog += self.world * ncb
-                else:
-                    ncb = triton.cdiv(self.world * rbw, bc1)
-                    rows.append([key[i], o, rbw, k, 1, prog, ncb, 0])
-                    prog += triton.cdiv(k, br1) * ncb
-            if rows:
-                host = torch.tensor(rows, dtype=torch.int64).pin_memory()
-                launches.append((word, len(rows), prog, host, host.to(device, non_blocking=True)))
+        for word, rows, prog, idx in self._rows(key):
+            for r, i in zip(rows, idx):
+                r[0] = key[i]
+            host = torch.tensor(rows, dtype=torch.int64).pin_memory()
+            launches.append((word, len(rows), prog, host, host.to(device, non_blocking=True)))
         if len(self.tables) >= 4:
             self.tables.pop(next(iter(self.tables)))
         self.tables[key] = launches
         return launches
 
+    def _static_table(self, outs, device):
+        ptrs = [o.data_ptr() for o in outs]
+        align = tuple(p % 4 == 0 for p in ptrs)
+        hit = self.static.get(align)
+        if hit is None:
+            hit = []
+            for word, rows, prog, idx in self._rows(ptrs):
+                for j, r in enumerate(rows):
+                    r[0] = j
+                hit.append((word, len(rows), prog, idx, torch.tensor(rows, dtype=torch.int64, device=device)))
+            self.static[align] = hit
+        return hit
+
     def copy(self, src: torch.Tensor, outs) -> None:
         src8 = src.view(torch.uint8)
+        if _AG_TABLE_ARGS:
+            for word, nseg, prog, idx, tab in self._static_table(outs, src.device):
+                bc0, br1, bc1 = _AG_LAUNCH[word]
+                s = src8.view(torch.int32) if word == 4 else src8
+                _ag_copyout_args_kernel[(prog,)](
+                    s,
+                    tab,
+                    self.pr // word,
+                    nseg,
+                    tuple(outs[i].data_ptr() for i in idx),
+                    W=self.world,
+                    NSEG_P2=triton.next_power_of_2(nseg),
+                    BC0=bc0,
+                    BR1=br1,
+                    BC1=bc1,
+                    num_warps=4,
+                )
+            return
         for word, nseg, prog, _host, tab in self._table(outs, src.device):
             bc0, br1, bc1 = _AG_LAUNCH[word]
             s = src8.view(torch.int32) if word == 4 else src8
@@ -3660,20 +3760,15 @@ _AG_CHECKED: dict = {}
 
 
 def _ag_check(all_gather_output, split_sizes, plan, outs, world) -> None:
-    """Compare the K-major copy-out against the bytes the stock path would have written.
-
-    The reference is sliced straight out of the gathered buffer rather than produced by
-    torch.ops.fsdp.split_with_sizes_copy. That op requires every `out` tensor to share the
-    source's dtype, and this all-gather carries MIXED dtypes -- bf16 weights beside uint8 FP4
-    and E8M0 packs -- so handing it `empty_like(o)` raises
-
-        Expected out tensor to have dtype unsigned char, but got c10::BFloat16 instead
-
-    and the check dies before it can compare anything (run 37306379386, before step 1). Slicing
-    bytes has no dtype constraint, and it tests the mapping more directly: the kernel's contract
-    is dst[(k * W + r) * rb + j] = src[r * PR + off + k * rb + j], which is exactly a [W, k, rb]
-    block read rank-major and written K-major.
     """
+Compare the K-major copy-out against the bytes the stock path would have written.
+
+The reference is sliced straight out of the gathered buffer rather than produced by torch.ops.fsdp.split_with_sizes_copy. That op requires every `out` tensor to share the source's dtype, and this all-gather carries MIXED dtypes -- bf16 weights beside uint8 FP4 and E8M0 packs -- so handing it `empty_like(o)` raises
+
+Expected out tensor to have dtype unsigned char, but got c10::BFloat16 instead
+
+Slicing bytes has no dtype constraint, and it tests the mapping more directly: the kernel's contract is dst[(k * W + r) * rb + j] = src[r * PR + off + k * rb + j], which is exactly a [W, k, rb] block read rank-major and written K-major.
+"""
     src8 = all_gather_output.view(torch.uint8).view(world, -1)
     for (i, off, rb, k), got in zip(plan.segs, outs):
         want = src8[:, off : off + k * rb].reshape(world, k, rb)
@@ -3825,8 +3920,8 @@ class _FP8GatheredWeight(torch.Tensor):
             from primus_turbo.pytorch.core.low_precision import float8_e4m3
 
             a_fp8, a_si, b, out_dtype = args[0], args[1], args[2], args[3]
-            # Slot 5, past the b_scale_inv the caller cannot have supplied here (B is this
-            # subclass, so its scale comes from `_scale_inv` below, not from the call).
+            # Slot 5, past the b_scale_inv the caller cannot have supplied here (B is this subclass, so its
+            # scale comes from `_scale_inv` below, not from the call).
             bias = args[5] if len(args) > 5 else kwargs.get("bias")
             return torch.ops.primus_flux.fp8_tensorwise_mm_aq(
                 a_fp8, a_si, b._fp8.view(float8_e4m3), out_dtype, b._scale_inv, bias
@@ -3856,35 +3951,26 @@ class _FP8GatheredWeight(torch.Tensor):
         return f"_FP8GatheredWeight(shape={tuple(self.shape)}, world={self._world})"
 
 
+# --------------------------------------------------------------------------- MXFP4 weight all-
+# gather under FSDP2 (FLUX_FP4_ALL_GATHER=1)
 # ---------------------------------------------------------------------------
-# MXFP4 weight all-gather under FSDP2 (FLUX_FP4_ALL_GATHER=1)
-# ---------------------------------------------------------------------------
-#
 # The FP8 gather above only fires when `cfg.fprop == "fp8"`, so a full-MXFP4 recipe
-# (FLUX_FP4_PASSES=all) gathers the bf16 weight and then has every rank pack the whole
-# matrix itself -- twice, since an MXFP4 forward needs both orientations. This is the
-# same idea for that recipe: each rank packs only its own shard before the gather.
-#
+# (FLUX_FP4_PASSES=all) gathers the bf16 weight and then has every rank pack the whole matrix
+# itself -- twice, since an MXFP4 forward needs both orientations. This is the same idea for that
+# recipe: each rank packs only its own shard before the gather.
 # It moves strictly more than the FP8 version and costs strictly less to set up:
-#
-#   bf16 (what FP4-only gathers today)          2.0     B/elem
-#   FP8 recipe payloads (fp8 + col_q + col_s)   1.53           -23.4%
-#   MXFP4 payloads (row_q+row_s+col_q+col_s)    1.0625         -46.9%
-#
 # and there is NO amax to agree on. FP8 tensorwise needs one global scale, which is why
-# `precompute_fp8_all_gather_amax` runs a foreach-norm plus an all-reduce every step;
-# MXFP4 scales are per-32-element block and computed entirely inside the shard, so this
-# path adds no collective of its own.
-#
-# Sliceability differs per orientation and only one of them needs a guard. For a [N, K]
-# weight the row pack is [N, K/2] with scale blocks along K, so a shard's row pack IS its
-# slice of the full one and the gather's dim-0 concat lands it already correct. The col
-# pack is [K, N/2] with blocks along N -- the dim FSDP shards -- so it needs the shard
-# height to be a multiple of 32 and a regroup after the gather, exactly like FP8's.
-#
-# Stochastic rounding is refused rather than supported: the pack is fixed at gather time,
-# so one draw would have to serve both Fprop and Dgrad, which is not what `sr_op("weight",
-# "fprop")` and `sr_op("weight", "dgrad")` mean. Same refusal as the FP8 path.
+# `precompute_fp8_all_gather_amax` runs a foreach-norm plus an all-reduce every step; MXFP4 scales
+# are per-32-element block and computed entirely inside the shard, so this path adds no collective
+# of its own.
+# Sliceability differs per orientation and only one of them needs a guard. For a [N, K] weight the
+# row pack is [N, K/2] with scale blocks along K, so a shard's row pack IS its slice of the full
+# one and the gather's dim-0 concat lands it already correct. The col pack is [K, N/2] with blocks
+# along N -- the dim FSDP shards -- so it needs the shard height to be a multiple of 32 and a
+# regroup after the gather, exactly like FP8's.
+# Stochastic rounding is refused rather than supported: the pack is fixed at gather time, so one
+# draw would have to serve both Fprop and Dgrad, which is not what `sr_op("weight", "fprop")` and
+# `sr_op("weight", "dgrad")` mean. Same refusal as the FP8 path.
 
 
 def _mxfp4_all_gather_eligible(module: "MXFP4Linear") -> bool:
@@ -4069,10 +4155,9 @@ class _MXFP4GatheredWeight(torch.Tensor):
         return f"{type(self).__name__}(shape={tuple(self.shape)}, world={self._world})"
 
 
-# The A6W4 forward (cfg.fprop == "a6w4") under the same gather. Neither gate above admits it,
-# so without this it gathers the bf16 weight and every rank quantizes the full matrix twice
-# per step: quant_w_a6w4 for the fprop and the H16 col pack for Dgrad.
-#
+# The A6W4 forward (cfg.fprop == "a6w4") under the same gather. Neither gate above admits it, so
+# without this it gathers the bf16 weight and every rank quantizes the full matrix twice per step:
+# quant_w_a6w4 for the fprop and the H16 col pack for Dgrad.
 # The row payload is quant_w_a6w4's own output, per shard, so the fprop weight is the same
 # kernel's bytes as before. Its layout is shuffle_weight_w4(16) / shuffle_scale_w4, whose
 # outermost dims are 16- and 32-row groups, so with a shard height % 32 == 0 the dim-0 concat
@@ -4273,6 +4358,11 @@ class _A6W4GatheredWeight(_MXFP4GatheredWeight):
             return torch.ops.primus_flux.a6w4_mm_qa_prequant_w(
                 aq, sa, self._row_q, self._row_s, self.shape[0], bias
             )
+        if func == torch.ops.primus_flux.a6w4_mm_gelu_dual_qa_w.default:
+            aq, sa, self, bias, act_rounded = args
+            return torch.ops.primus_flux.a6w4_mm_gelu_dual_qa_prequant_w(
+                aq, sa, self._row_q, self._row_s, self.shape[0], bias, act_rounded
+            )
         if func == torch.ops.primus_flux.quantize_mxfp4_h16_dual.default:
             raise NotImplementedError("_A6W4GatheredWeight's row pack is in the A6W4 GEMM layout")
         return super().__torch_dispatch__(func, types, args, kwargs)
@@ -4324,18 +4414,14 @@ def precompute_fp8_all_gather_amax(model: nn.Module) -> None:
         shard._amax = amax[i : i + 1]
 
 
-# Quantize every FP8-gathered shard right after the optimizer, on a side stream, instead of
-# inside the forward just before each block's all-gather, where the per-weight launches sit on
-# the CPU-bound double blocks' critical chain. Same ops, same inputs, so bit-identical.
-#
-# Issued eagerly, the ~880 launches merely move to the step boundary and cost about as much
-# CPU there (measured -4.5%), so from the second call on each block's quantizes are one CUDA
-# graph replay. The graph reads the shards in place (the optimizer updates them in place) and
-# the amax from a static copy; its outputs are reused every step, which is safe because this
-# runs after the optimizer, long after the previous forward's all-gathers have read them.
-#
-# FLUX_FP8_AG_PREQUANT=gather keeps the quantize where it always ran -- inside each block's
-# all-gather, on FSDP's copy-in stream -- and only turns that block's ~16 launches into one graph
+# Quantize every FP8-gathered shard right after the optimizer, on a side stream, instead of inside
+# the forward just before each block's all-gather, where the per-weight launches sit on the CPU-
+# bound double blocks' critical chain. Same ops, same inputs, so bit-identical.
+# The graph reads the shards in place and the amax from a static copy; its outputs are reused
+# every step, which is safe because this runs after the optimizer, long after the previous
+# forward's all-gathers have read them.
+# FLUX_FP8_AG_PREQUANT=gather keeps the quantize where it always ran -- inside each block's all-
+# gather, on FSDP's copy-in stream -- and only turns that block's ~16 launches into one graph
 # replay, so the GPU schedule is the stock one minus the launch gaps. The replay is skipped when
 # no optimizer step happened since the last one, because the shards and amax are unchanged.
 _FP8_AG_PREQUANT = os.getenv("FLUX_FP8_AG_PREQUANT", "0") in ("1", "gather")
@@ -4502,18 +4588,16 @@ def _prequantize_fp8_all_gather(shards: list, groups: list, amax: torch.Tensor) 
                 shards[i]._prequant = (payloads, scale_inv, torch.bfloat16, ready)
 
 
+# --------------------------------------------------------------------------- FSDP2 reduce-scatter
+# copy-in off the compute stream (FLUX_FSDP_RS_COPY_IN=side)
 # ---------------------------------------------------------------------------
-# FSDP2 reduce-scatter copy-in off the compute stream (FLUX_FSDP_RS_COPY_IN=side)
-# ---------------------------------------------------------------------------
-#
-# FSDP2 packs each group's unsharded grads into the reduce-scatter input with
-# `_chunk_cat` on the compute stream, ~8 ms/step inside the GPU-bound backward. The
-# same copy runs here on its own stream: it waits for the grads, the reduce-scatter
-# stream waits for it, and the grads and the input are recorded on it so the
-# allocator keeps them until it finishes. The bytes are chunk_cat's own.
-#
-# copy_in is not handed the reduce-scatter stream, so the foreach_reduce wrapper
-# publishes it for the duration of the call.
+# FSDP2 packs each group's unsharded grads into the reduce-scatter input with `_chunk_cat` on the
+# compute stream, ~8 ms/step inside the GPU-bound backward. The same copy runs here on its own
+# stream: it waits for the grads, the reduce-scatter stream waits for it, and the grads and the
+# input are recorded on it so the allocator keeps them until it finishes. The bytes are
+# chunk_cat's own.
+# copy_in is not handed the reduce-scatter stream, so the foreach_reduce wrapper publishes it for
+# the duration of the call.
 
 _RS_STREAM = None
 _RS_COPY_STREAM = None
@@ -4575,3 +4659,4 @@ def precompute_float8_dynamic_scale_for_fsdp(model: nn.Module) -> None:
 
     torchao_precompute(model)
     precompute_fp8_all_gather_amax(model)
+

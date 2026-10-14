@@ -730,6 +730,7 @@ def _(qkv, wq, wk, cos, sin, heads, eps, interleaved):
 # kernel. FLUX_ATTN_SINGLE_V_COPYROW=1 writes that copy from the q/k launch's
 # COPY_ROW instead, as the double block does; v is then already contiguous.
 _SINGLE_V_COPYROW = os.getenv("FLUX_ATTN_SINGLE_V_COPYROW", "0") == "1"
+_SINGLE_DV_COPYROW = os.getenv("FLUX_ATTN_SINGLE_DV_COPYROW", "0") == "1"  # _flux_single_dv_copyrow
 # Double block: the FlyDSL attention writes its txt and img rows to two contiguous outputs (needs
 # FLUX_ATTN_FLYDSL=1), so neither the consumers' reshape copies nor the backward's join run.
 _DOUBLE_SPLIT = os.getenv("FLUX_ATTN_DOUBLE_SPLIT", "0") == "1" and os.getenv("FLUX_ATTN_FLYDSL", "0") == "1"
@@ -796,6 +797,7 @@ def _qkv_bwd(
     d_qkv = torch.empty_like(qkv, memory_format=torch.contiguous_format)
     src = qkv.view(B, L, 3, heads, D)
     dst = d_qkv.view(B, L, 3, heads, D)
+    cx = dict(copy_x=dv, copy_out=dst[:, :, 2]) if _SINGLE_DV_COPYROW else {}
     dwqp = _launch_bwd(
         dq,
         src[:, :, 0],
@@ -807,6 +809,7 @@ def _qkv_bwd(
         interleaved,
         traceable=False,
         round_grad=round_grad,
+        **cx,
     )
     dwkp = _launch_bwd(
         dk,
@@ -820,7 +823,8 @@ def _qkv_bwd(
         traceable=False,
         round_grad=round_grad,
     )
-    dst[:, :, 2].copy_(dv)
+    if not cx:
+        dst[:, :, 2].copy_(dv)
     return d_qkv, dwqp, dwkp
 
 

@@ -641,6 +641,16 @@ class BaseWanTrainer:
                 with torch.no_grad():
                     for _ in range(self.mlperf_warmup_validation_steps):
                         self.compute_loss(eval_batch, processor=self.eval_processor)
+                    # flux_eval_tail_warmup
+                    _tail = (
+                        len(self.eval_dataloader.sampler) % self.per_device_eval_batch_size
+                        if self.eval_dataloader is not None
+                        else 0
+                    )
+                    if _tail:
+                        self.compute_loss(
+                            make_eval_batch(_tail, include_timestep=True), processor=self.eval_processor
+                        )
 
             for module in self.model.modules():
                 reset = getattr(module, "reset_fp8_meta_tensors", None)
@@ -1021,7 +1031,14 @@ class BaseWanTrainer:
         self._start_profiler()
 
         if self.mlperf_enabled:
+            from primus.backends.diffusion.models.quantization import flux_fprop_switch as _fsw_mod
+
+            _fsw_on = _fsw_mod.switch_step() is not None
+            if _fsw_on:
+                _fsw_mod.prepare(self.model)
             self._mlperf_warmup()
+            if _fsw_on:
+                _fsw_mod.precompile(self)
             self._mlperf_log_train_start()
             self._mlperf_log_block_start(self.global_step)
 
@@ -1116,6 +1133,21 @@ class BaseWanTrainer:
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
+                    _fsw = getattr(self, "_flux_fprop_switch", False)
+                    if _fsw is False:
+                        from primus.backends.diffusion.models.quantization.flux_fprop_switch import switch_step
+
+                        _fsw = switch_step()
+                        self._flux_fprop_switch = _fsw
+                    if _fsw is not None and self.global_step >= _fsw:
+                        from primus.backends.diffusion.models.quantization.flux_fprop_switch import (
+                            guard_eval_scales,
+                            switch_fprop,
+                        )
+
+                        switch_fprop(self.model, self.global_step)
+                        guard_eval_scales(self)
+                        self._flux_fprop_switch = None
                     if _step_timer is not None:
                         _step_timer.finish(self.global_step)
                     self._step_profiler()
