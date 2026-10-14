@@ -1980,6 +1980,7 @@ _A6W4_GELU_PACK = os.getenv("FLUX_A6W4_GELU_PACK", "1") == "1"
 # legs kernel (exp2 tanh, bias loaded once per call) makes it a win, so config_common.sh turns it
 # on with FLUX_A6W4_PACK_HARVEST.
 _A6W4_GELU_PACK_DOUBLE = os.getenv("FLUX_A6W4_GELU_PACK_DOUBLE", "0") == "1"
+_A6W4_FC1_GELU_DUAL = os.getenv("FLUX_A6W4_FC1_GELU_DUAL", "0") == "1"
 # Single linear2's two legs (attn, gelu(preact + bias)) packed in one launch instead of one per leg:
 # flydsl_quant_a6w4_act_dual_legs_merged, byte-identical to flydsl_quant_a6w4_act_dual_legs (the
 # a6w4-legs-one-launch campaign). Needs the mounted mxfp4_quant_kernel_flux.py.
@@ -2160,6 +2161,53 @@ def _(aq, sa, wq, sb, n, bias=None):
     return torch.empty(aq.shape[0], n, device=aq.device, dtype=torch.bfloat16)
 
 
+@torch.library.custom_op("primus_flux::a6w4_fc1_gelu_dual", mutates_args=(), device_types="cuda")
+def _a6w4_fc1_gelu_dual_op(
+    aq: torch.Tensor,
+    sa: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor,
+    sb: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Double-MLP fc1: biased BF16 preact and four GELU packs. With ``sb``, B is already packed."""
+    from primus_turbo.flydsl.gemm.gemm_a6w4_kernel import gelu_dual_eligible, gemm_a6w4
+    from primus_turbo.pytorch.ops.flux_a6w4 import quantizers
+
+    m, n, k = 8192, 12288, 3072
+    if (
+        tuple(aq.shape) != (m, k)
+        or aq.dtype != torch.uint8
+        or tuple(bias.shape) != (n,)
+        or bias.dtype != torch.bfloat16
+        or not gelu_dual_eligible(m, n, k, a_pack=0)
+    ):
+        raise RuntimeError("A6W4 fc1 GELU dual requires the eligible 8192x12288x3072 padded-input path")
+    if sb is None:
+        wq, sb = quantizers()[1](b.to(torch.bfloat16).contiguous())
+    else:
+        wq = b
+    preact = gemm_a6w4(
+        aq, wq, sa, sb, n, k, bias, gelu=True, keep_preact=True, act_rounded=False
+    )
+    packs = getattr(preact, "a6w4_dual", None)
+    if packs is None or len(packs) != 4:
+        # On decline C may already be activated, so it cannot serve as the saved preact.
+        raise RuntimeError("A6W4 fc1 GEMM unexpectedly declined the full GELU dual pack")
+    del preact.a6w4_dual
+    return preact, *packs
+
+
+@_a6w4_fc1_gelu_dual_op.register_fake
+def _(aq, sa, b, bias, sb=None):
+    m, n = 8192, 12288
+    preact = torch.empty(m, n, dtype=torch.bfloat16, device=aq.device)
+    next_aq = torch.empty(m, n, dtype=torch.uint8, device=aq.device)
+    next_sa = torch.empty(m * n // MX_BLOCK_SIZE, dtype=torch.uint8, device=aq.device)
+    co = torch.empty(n, m // 2, dtype=torch.uint8, device=aq.device).view(FP4_DTYPE)
+    cs = torch.empty(n, m // MX_BLOCK_SIZE, dtype=torch.uint8, device=aq.device).view(torch.float8_e8m0fnu)
+    return preact, next_aq, next_sa, co, cs
+
+
 def _quantize_and_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -2275,10 +2323,12 @@ class _MXFP4LinearFunction(torch.autograd.Function):
         bias_any_width=False,
         x_pre=None,
         return_unbiased=False,
+        fc1_gelu_dual=False,
     ):
         """Everything ``forward`` does except ``save_for_backward``, so a caller can save
         extra tensors after these. Returns the 2D output, bias applied, and the save list.
-        ``bias_any_width`` is `_fuse_bias_eligible`'s ``any_width``.
+        ``bias_any_width`` is `_fuse_bias_eligible`'s ``any_width``. ``fc1_gelu_dual`` instead
+        returns ``((P, aq, sa, co, cs), save_list)`` for the double-MLP GELU producer.
 
         ``x_pre`` is ``(x_fp8_dual, x_shape, x_dtype)`` from a caller that already packed an
         activation it never materialised; ``x`` is then None. Only the FP8 and A6W4 dual-pack
@@ -2398,7 +2448,11 @@ class _MXFP4LinearFunction(torch.autograd.Function):
         # the fused-bias request can be threaded straight into _quantize_and_mm below.
         fuse_bias = bias is not None and _fuse_bias_eligible(cfg, weight.shape[0], bias_any_width)
 
-        if cfg.fprop == "mxfp4":
+        if fc1_gelu_dual:
+            out, aq, sa, co, cs = _a6w4_fc1_gelu_dual_op(
+                x_a6w4_dual[0], x_a6w4_dual[1], weight, bias
+            )
+        elif cfg.fprop == "mxfp4":
             out = _quantize_and_mm(
                 x_2d,
                 weight,
@@ -2521,6 +2575,9 @@ class _MXFP4LinearFunction(torch.autograd.Function):
         ctx.out_dtype = out_dtype
         ctx.has_bias = bias is not None
 
+        if fc1_gelu_dual:
+            # P is already biased; these packs used the unrounded FP32 U + bias for GELU.
+            return (out, aq, sa, co, cs), save_list
         unbiased = out
         if bias is not None and not fuse_bias:
             out = out + bias
@@ -2767,14 +2824,21 @@ class _MXFP4LinearGeluInFunction(torch.autograd.Function):
     ``attn`` is None -- where ``preact`` is a lazy act. Fprop and the saved Wgrad col pack
     both come from `_fp8_mxfp4_dual_legs_gelu_op`, so the bf16 input is never built. Backward
     returns d(attn) and d(act) as column views of Dgrad's output; the producer of ``preact``
-    applies dGELU."""
+    applies dGELU. With explicit fc1 packs, ``preact`` is only the gradient carrier and
+    the packer is bypassed."""
 
     @staticmethod
-    def forward(ctx, attn, preact, weight, bias, hadamard, act_slot, wgt_slot, cfg, preact_bias=None):
+    def forward(
+        ctx, attn, preact, weight, bias, hadamard, act_slot, wgt_slot, cfg,
+        preact_bias=None, aq=None, sa=None, co=None, cs=None
+    ):
+        ctx.fc1_pack_inputs = aq is not None
         lead = preact.shape[:-1]
         a_2d = None if attn is None else attn.reshape(-1, attn.shape[-1])
         p_2d = preact.reshape(-1, preact.shape[-1])
-        if cfg.fprop == "a6w4":
+        if aq is not None:
+            packs = (aq, sa, co, cs)
+        elif cfg.fprop == "a6w4":
             packs = _a6w4_act_dual_legs_gelu_op(a_2d, p_2d, preact_bias)
         else:
             packs = _fp8_mxfp4_dual_legs_gelu_op(a_2d, p_2d, act_slot)
@@ -2804,7 +2868,8 @@ class _MXFP4LinearGeluInFunction(torch.autograd.Function):
             d_attn, d_act = d_x[..., : ctx.leg0], d_x[..., ctx.leg0 :]
         else:
             d_attn, d_act = None, d_x
-        return d_attn, d_act, grads[1], grads[2], None, None, None, None, None
+        result = (d_attn, d_act, grads[1], grads[2], None, None, None, None, None)
+        return result + (None, None, None, None) if ctx.fc1_pack_inputs else result
 
 
 def _gated_out(ctx, mm, gate, bias, lead, n):
@@ -2966,20 +3031,16 @@ class _MXFP4LinearGeluFunction(torch.autograd.Function):
         return act
 
     @staticmethod
-    def _fwd(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, lazy, x_pre=None):
-        preact, save_list, unbiased = _MXFP4LinearFunction._forward(
-            ctx,
-            x,
-            weight,
-            bias,
-            hadamard,
-            act_slot,
-            wgt_slot,
-            cfg,
-            bias_any_width=True,
-            x_pre=x_pre,
-            return_unbiased=True,
-        )
+    def _fwd(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, lazy, fc1_gelu_dual=False, x_pre=None):
+        args = (ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg)
+        if fc1_gelu_dual:
+            (preact, aq, sa, co, cs), save_list = _MXFP4LinearFunction._forward(
+                *args, x_pre=x_pre, fc1_gelu_dual=True
+            )
+        else:
+            preact, save_list, unbiased = _MXFP4LinearFunction._forward(
+                *args, bias_any_width=True, x_pre=x_pre, return_unbiased=True
+            )
         ctx.fused_dgelu = (
             bias is not None
             and cfg.dgrad == "mxfp4"
@@ -2989,6 +3050,11 @@ class _MXFP4LinearGeluFunction(torch.autograd.Function):
             and preact.shape[0] % 128 == 0
             and preact.shape[1] % 256 == 0
         )
+        if fc1_gelu_dual:
+            # P carries fc2's d_act back to this producer; its values are never re-packed.
+            ctx.mark_non_differentiable(aq, sa, co, cs)
+            ctx.set_materialize_grads(False)
+            return (preact.reshape(*ctx.x_shape[:-1], preact.shape[1]), aq, sa, co, cs), [*save_list, preact]
         if lazy and cfg.fprop == "a6w4":
             # The A6W4 consumer adds the bias itself, in f32 ahead of its GELU, as Inductor's fused
             # gelu(out + bias) did; handing it the bf16-rounded preact would change the bytes.
@@ -3020,13 +3086,15 @@ class _MXFP4LinearLnModFunction(torch.autograd.Function):
     of the modulated activation; backward rebuilds the normalised x from them."""
 
     @staticmethod
-    def forward(ctx, x, shift, scale, weight, bias, hadamard, act_slot, wgt_slot, cfg, kind, leg0, lazy):
+    def forward(
+        ctx, x, shift, scale, weight, bias, hadamard, act_slot, wgt_slot, cfg, kind, leg0, lazy, fc1_gelu_dual
+    ):
         x_pre, rstd, nmr = _lnmod_pre(x, shift, scale)
         args = (ctx, None, weight, bias, hadamard, act_slot, wgt_slot, cfg)
         if kind == "legs":
             outs, save_list = _MXFP4LinearGeluLegsFunction._fwd(*args, leg0, lazy, x_pre=x_pre)
         elif kind == "gelu":
-            outs, save_list = _MXFP4LinearGeluFunction._fwd(*args, lazy, x_pre=x_pre)
+            outs, save_list = _MXFP4LinearGeluFunction._fwd(*args, lazy, fc1_gelu_dual, x_pre=x_pre)
         else:
             out, save_list = _MXFP4LinearFunction._forward(*args, x_pre=x_pre)
             outs = out.reshape(*x.shape[:-1], weight.shape[0])
@@ -3042,12 +3110,12 @@ class _MXFP4LinearLnModFunction(torch.autograd.Function):
         if ctx.kind == "legs":
             grads = _MXFP4LinearGeluLegsFunction._bwd(ctx, lin, *grad_outs)
         elif ctx.kind == "gelu":
-            grads = _MXFP4LinearGeluFunction._bwd(ctx, lin, *grad_outs)
+            grads = _MXFP4LinearGeluFunction._bwd(ctx, lin, grad_outs[0])
         else:
             g = grad_outs[0]
             grads = _MXFP4LinearFunction._backward(ctx, lin, g.reshape(-1, g.shape[-1]).contiguous())
-        # x, shift, scale, weight, bias, hadamard, act_slot, wgt_slot, cfg, kind, leg0, lazy
-        return (*_lnmod_backward(grads[0], *ln), *grads[1:], None, None, None)
+        # x, shift, scale, weight, bias, hadamard, act_slot, wgt_slot, cfg, kind, leg0, lazy, fc1_gelu_dual
+        return (*_lnmod_backward(grads[0], *ln), *grads[1:], None, None, None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -3194,6 +3262,8 @@ class MXFP4Linear(nn.Linear):
         kind: str = "plain",
         leg0: int = 0,
         lazy: bool = False,
+        *,
+        fc1_gelu_dual: bool = False,
     ):
         """``self``, `forward_gelu` (``kind="gelu"``) or `forward_split_gelu` (``kind="legs"``) on
         ``(1 + scale) * layer_norm(x) + shift``, with the LN and the modulate in the activation
@@ -3211,7 +3281,32 @@ class MXFP4Linear(nn.Linear):
             kind,
             leg0,
             lazy,
+            fc1_gelu_dual,
         )
+
+    def fc1_gelu_dual_into(self, consumer: nn.Module, x: torch.Tensor) -> bool:
+        """Opt-in only for the existing lazy double-MLP path and its padded BF16 input pack."""
+        if not (
+            _A6W4_FC1_GELU_DUAL
+            and not _A6W4_DENSE_ACT
+            and _A6W4_LNMOD_PACK
+            and self.training
+            and isinstance(consumer, MXFP4Linear)
+            and (self.in_features, self.out_features) == (3072, 12288)
+            and (consumer.in_features, consumer.out_features) == (12288, 3072)
+            and x.shape[-1] == 3072
+            and x.numel() // x.shape[-1] == 8192
+            and self.bias is not None
+            and tuple(self.bias.shape) == (12288,)
+            and self.bias.dtype == torch.bfloat16
+            and self.bias.is_contiguous()
+            and _a6w4_act_dual_ok(x.reshape(-1, 3072), self.config, self.hadamard)
+            and self.lazy_gelu_into(consumer, x, (12288,))
+        ):
+            return False
+        from primus_turbo.flydsl.gemm.gemm_a6w4_kernel import gelu_dual_eligible
+
+        return gelu_dual_eligible(8192, 12288, 3072, a_pack=0)
 
     def lazy_gelu_into(self, consumer: nn.Module, x: torch.Tensor, widths) -> bool:
         """True iff this Linear's GELU output can be handed lazily to ``consumer``, whose
@@ -3245,15 +3340,29 @@ class MXFP4Linear(nn.Linear):
         act_bias: torch.Tensor | None = None,
         *,
         gate: torch.Tensor | None = None,
+        aq: torch.Tensor | None = None,
+        sa: torch.Tensor | None = None,
+        co: torch.Tensor | None = None,
+        cs: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """``self(cat(attn, gelu(act + act_bias)))`` -- ``attn`` and ``act_bias`` optional -- for
         a lazy ``act`` (and its producer's `lazy_gelu_bias`) from a producer whose
         `lazy_gelu_into` returned True for this module. With ``gate``, ``gate * self(...)``
         (see `forward_gated`). ``gate`` is keyword-only: the third positional argument is
-        ``act_bias``, and the residual gate is ``[B, 1, N]``, not the GELU leg's bias."""
+        ``act_bias``, and the residual gate is ``[B, 1, N]``, not the GELU leg's bias.
+        With four fc1 packs, ``act`` is only a gradient carrier and no GELU is rebuilt."""
+        if aq is not None and (
+            attn is not None
+            or act_bias is not None
+            or self.config.fprop != "a6w4"
+            or sa is None
+            or co is None
+            or cs is None
+        ):
+            raise ValueError("fc1 GELU dual requires all four packs, no attention leg and no extra bias")
         # The gated Function has no act_bias parameter, so it can only take a lazy act whose
         # producer kept its bias in the GEMM. A6W4 is the case that hands one over.
-        if gate is not None and act_bias is None and self._gated_ok(act, gate):
+        if gate is not None and act_bias is None and aq is None and self._gated_ok(act, gate):
             return _MXFP4GatedLinearGeluInFunction.apply(
                 attn,
                 act,
@@ -3265,17 +3374,11 @@ class MXFP4Linear(nn.Linear):
                 self.fp8_wgt_slot,
                 self.config,
             )
-        out = _MXFP4LinearGeluInFunction.apply(
-            attn,
-            act,
-            self.weight,
-            self.bias,
-            self.hadamard,
-            self.fp8_act_slot,
-            self.fp8_wgt_slot,
-            self.config,
-            act_bias,
-        )
+        args = (attn, act, self.weight, self.bias, self.hadamard, self.fp8_act_slot,
+                self.fp8_wgt_slot, self.config, act_bias)
+        if aq is not None:
+            args += (aq, sa, co, cs)
+        out = _MXFP4LinearGeluInFunction.apply(*args)
         return out if gate is None else gate * out
 
     def _gated_ok(self, x: torch.Tensor, gate: torch.Tensor) -> bool:
@@ -4456,6 +4559,10 @@ class _A6W4GatheredWeight(_MXFP4GatheredWeight):
             return torch.ops.primus_flux.a6w4_mm_qa_prequant_w(
                 aq, sa, self._row_q, self._row_s, self.shape[0], bias
             )
+        if func == torch.ops.primus_flux.a6w4_fc1_gelu_dual.default:
+            aq, sa, self = args[0], args[1], args[2]
+            bias = args[3] if len(args) > 3 else (kwargs or {})["bias"]
+            return torch.ops.primus_flux.a6w4_fc1_gelu_dual(aq, sa, self._row_q, bias, self._row_s)
         if func == torch.ops.primus_flux.quantize_mxfp4_h16_dual.default:
             raise NotImplementedError("_A6W4GatheredWeight's row pack is in the A6W4 GEMM layout")
         return super().__torch_dispatch__(func, types, args, kwargs)
