@@ -5,15 +5,37 @@
 ###############################################################################
 
 from collections import OrderedDict
+from types import SimpleNamespace
 
 import pytest
 
+from primus.backends.megatron.patches.turbo import qk_rmsnorm_rope_patches
 from primus.backends.megatron.patches.turbo.qk_rmsnorm_rope_patches import (
     _DDP_PARAM_GATHER_HOOK_ATTR,
+    _enabled,
     _install_ddp_param_gather_hook_marker,
     _run_forward_pre_hooks,
     _supported_forward_pre_hooks,
 )
+from primus.core.patches import PatchContext
+
+
+@pytest.mark.parametrize(
+    "use_flag, turbo_can_patch, expected",
+    [(True, True, True), (False, True, False), (True, False, False)],
+)
+def test_enabled_follows_use_turbo_fused_qk_rmsnorm_rope(monkeypatch, use_flag, turbo_can_patch, expected):
+    monkeypatch.setattr(qk_rmsnorm_rope_patches, "is_primus_turbo_can_patch", lambda _ctx: turbo_can_patch)
+    monkeypatch.setenv("PRIMUS_FUSED_QK_RMSNORM_ROPE", "1")
+    ctx = PatchContext(
+        backend="megatron",
+        phase="before_train",
+        extra={
+            "module_config": SimpleNamespace(params=SimpleNamespace(use_turbo_fused_qk_rmsnorm_rope=use_flag))
+        },
+    )
+
+    assert _enabled(ctx) is expected
 
 
 class _FakeModule:

@@ -239,7 +239,7 @@ if [[ "$FRAMEWORK_DIR" == "megatron" ]]; then
                 mkdir -p "${TUNE_ROOT}/gemm_tune"
                 # Usually stage-2 is single-node. Guard by rank for safety.
                 if [[ "${NODE_RANK_VAL}" == "0" ]]; then
-                    python "${PRIMUS_ROOT}/examples/offline_tune/offline_tune_gemm.py" \
+                    python "${PRIMUS_ROOT}/examples/megatron/guides/offline_tune/offline_tune_gemm.py" \
                         --dump-shape-path-or-file "${TUNE_ROOT}/gemm_shape" \
                         --tune-result-path "${TUNE_ROOT}/gemm_tune/${RESULT_FILE}" \
                         --num-devices "${NUM_DEVICES}"
