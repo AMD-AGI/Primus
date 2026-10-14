@@ -1,8 +1,9 @@
 # Primus Perf Batch Runner
 
 Batch-runs Primus training benchmarks across Megatron, Megatron-Bridge,
-TorchTitan, MaxText and MaxDiffusion, and extracts the results into a CSV that
-records not just the throughput but the settings that produced it.
+TorchTitan, MaxText and MaxDiffusion, and extracts the results into
+`results.csv` / `results.json`, which record not just the throughput but the
+settings that produced it and, for a run that failed, why.
 
 Two goals shape this tool:
 
@@ -13,9 +14,13 @@ Two goals shape this tool:
   that — in the catalog itself, or in a copy. Running something outside the
   curated suite means adding its `examples/...` path to the catalog, which is
   the only case where a path gets typed.
-- **Every number is attributable.** Each log carries the image digest,
-  submodule pins, GPU model, ROCm and framework versions, world size and the
-  full perf-relevant environment, and those land in the CSV as columns.
+- **Every number is attributable.** Each log carries the image digest and ID,
+  submodule pins, GPU model, host and container ROCm, framework versions,
+  host settings, world size and the full perf-relevant environment, and those
+  land in the CSV as columns.
+- **Every run ends with a verdict.** Runs are stopped when they hang or run
+  too long, nothing starts on busy GPUs, and each log and CSV row says why a
+  run ended.
 
 ## Quick start
 
@@ -39,7 +44,7 @@ export RESULT_DIR=~/primus-bench/mi325x-v26.7
 
 DRY_RUN=1 bash tools/perf/run_batch.sh                    # check the plan first
 bash tools/perf/run_batch.sh                              # single node
-python3 tools/perf/extract_results.py "$RESULT_DIR"       # logs -> CSV
+python3 tools/perf/extract_results.py "$RESULT_DIR"       # optional: already run at the end of a batch
 ```
 
 `DRY_RUN=1` prints every selected config with its batch size, steps, log
@@ -182,6 +187,14 @@ cp tools/perf/configs.yaml "$RESULT_DIR/configs.yaml"
 $EDITOR "$RESULT_DIR/configs.yaml"
 CONFIG_FILE="$RESULT_DIR/configs.yaml" bash tools/perf/run_batch.sh
 ```
+
+[`perf_configs.yaml`](./perf_configs.yaml) is a second catalog in the same
+format: the models published in the AI Training section of AMD's
+[performance results page](https://www.amd.com/en/developer/resources/rocm-hub/ai-cloud-development/performance-results.html#ai-training),
+for MI355X, MI325X and MI300X. Its header notes where a config's batch size
+differs from the published number. Run it with
+`CONFIG_FILE=tools/perf/perf_configs.yaml`. The catalog test does not cover
+this file.
 
 Editing `tools/perf/configs.yaml` directly is the right move when the change
 really is a change to the release suite: it is reviewed like any other file,

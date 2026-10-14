@@ -310,9 +310,9 @@ def parse_new_banner(lines: list[str]) -> dict | None:
 
     The banner is a contiguous block of ``# key : value`` lines bracketed by
     ``###...`` separator rows, starting on line 1 with either
-    ``# Primus Benchmark Run`` (single-node, ``primus-bench-batch.sh``) or
+    ``# Primus Benchmark Run`` (single-node, ``run_batch.sh``) or
     ``# Primus Multi-Node Benchmark Run`` (multi-node,
-    ``primus-bench-batch-multinode.sh``), and ending at the
+    ``run_batch_multinode.sh``), and ending at the
     ``Begin Config File Dump`` marker. Returns the collected key/value pairs,
     or ``None`` if this log is not in the new format.
     """
