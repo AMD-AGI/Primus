@@ -190,17 +190,39 @@ def _gated_linear(lin: nn.Module, x: Tensor, gate: Tensor) -> Tensor:
     return gate * lin(x)
 
 
-def _mlp_gelu_fused(mlp: nn.Sequential, x: Tensor, gate: Tensor) -> Tensor:
-    """``gate * mlp(x)`` for Sequential(Linear, GELU(tanh), Linear), with the first Linear and
-    the GELU as one MXFP4Linear.forward_gelu call when that exists."""
+def _lnmod_ok(lin: nn.Module, x: Tensor, mod: ModulationOut) -> bool:
+    return hasattr(lin, "lnmod_ok") and lin.lnmod_ok(x, mod.shift, mod.scale)
+
+
+def _modulated_linear(lin: nn.Module, norm: nn.LayerNorm, x: Tensor, mod: ModulationOut) -> Tensor:
+    """``lin((1 + mod.scale) * norm(x) + mod.shift)``; ``norm`` is LayerNorm(eps 1e-6, no affine),
+    which is what MXFP4Linear.forward_lnmod folds into its activation pack."""
+    if _lnmod_ok(lin, x, mod):
+        return lin.forward_lnmod(x, mod.shift, mod.scale)
+    return lin((1 + mod.scale) * norm(x) + mod.shift)
+
+
+def _mlp_gelu_fused(mlp: nn.Sequential, norm: nn.LayerNorm, x: Tensor, mod: ModulationOut) -> Tensor:
+    """``mod.gate * mlp((1 + mod.scale) * norm(x) + mod.shift)`` for Sequential(Linear, GELU(tanh),
+    Linear), with the first Linear and the GELU as one MXFP4Linear.forward_gelu call when that
+    exists, and the modulate in its activation pack when `_lnmod_ok`."""
+    gate = mod.gate
     if FUSED_DGELU_MLP and hasattr(mlp[0], "forward_gelu"):
-        if FWD_GELU_PACK and mlp[0].lazy_gelu_into(mlp[2], x, (mlp[2].in_features,)):
-            act = mlp[0].forward_gelu(x, lazy=True)
+        lazy = FWD_GELU_PACK and mlp[0].lazy_gelu_into(mlp[2], x, (mlp[2].in_features,))
+        if _lnmod_ok(mlp[0], x, mod):
+            act = mlp[0].forward_lnmod(x, mod.shift, mod.scale, "gelu", lazy=lazy)
+        else:
+            act = mlp[0].forward_gelu((1 + mod.scale) * norm(x) + mod.shift, lazy=lazy)
+        if lazy:
+            # A6W4 fc1 returns its output without the bias (width 12288 is not in the bias
+            # epilogue); the consumer's pack must add it ahead of the GELU. The gated Function
+            # has no act_bias, so forward_gelu_input takes the ungated one when a bias is passed.
+            act_bias = mlp[0].lazy_gelu_bias()
             if GATE_DGATE:
-                return mlp[2].forward_gelu_input(None, act, gate=gate)
-            return gate * mlp[2].forward_gelu_input(None, act)
-        return _gated_linear(mlp[2], mlp[0].forward_gelu(x), gate)
-    return gate * mlp(x)
+                return mlp[2].forward_gelu_input(None, act, act_bias, gate=gate)
+            return gate * mlp[2].forward_gelu_input(None, act, act_bias)
+        return _gated_linear(mlp[2], act, gate)
+    return gate * mlp((1 + mod.scale) * norm(x) + mod.shift)
 
 
 class DoubleStreamBlock(nn.Module):
@@ -241,10 +263,8 @@ class DoubleStreamBlock(nn.Module):
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
 
-        img_modulated = (1 + img_mod1.scale) * self.img_norm1(img) + img_mod1.shift
-        img_qkv = self.img_attn.qkv(img_modulated)
-        txt_modulated = (1 + txt_mod1.scale) * self.txt_norm1(txt) + txt_mod1.shift
-        txt_qkv = self.txt_attn.qkv(txt_modulated)
+        img_qkv = _modulated_linear(self.img_attn.qkv, self.img_norm1, img, img_mod1)
+        txt_qkv = _modulated_linear(self.txt_attn.qkv, self.txt_norm1, txt, txt_mod1)
 
         if FUSED_NORM_ROPE and ATTN_REGION:
             txt_attn, img_attn = _attn_region.double_attention(
@@ -297,13 +317,9 @@ class DoubleStreamBlock(nn.Module):
             txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
         img = img + _gated_linear(self.img_attn.proj, img_attn, img_mod1.gate)
-        img = img + _mlp_gelu_fused(
-            self.img_mlp, (1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift, img_mod2.gate
-        )
+        img = img + _mlp_gelu_fused(self.img_mlp, self.img_norm2, img, img_mod2)
         txt = txt + _gated_linear(self.txt_attn.proj, txt_attn, txt_mod1.gate)
-        txt = txt + _mlp_gelu_fused(
-            self.txt_mlp, (1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift, txt_mod2.gate
-        )
+        txt = txt + _mlp_gelu_fused(self.txt_mlp, self.txt_norm2, txt, txt_mod2)
         return img, txt
 
 
@@ -335,14 +351,20 @@ class SingleStreamBlock(nn.Module):
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         mod, _ = self.modulation(vec)
-        x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
         lazy_act = False
         if FUSED_DGELU_LEGPACK and hasattr(self.linear1, "forward_split_gelu"):
             lazy_act = FWD_GELU_PACK and self.linear1.lazy_gelu_into(
-                self.linear2, x_mod, (self.hidden_size, self.mlp_hidden_dim)
+                self.linear2, x, (self.hidden_size, self.mlp_hidden_dim)
             )
-            qkv, mlp_act = self.linear1.forward_split_gelu(x_mod, 3 * self.hidden_size, lazy=lazy_act)
+            if _lnmod_ok(self.linear1, x, mod):
+                qkv, mlp_act = self.linear1.forward_lnmod(
+                    x, mod.shift, mod.scale, "legs", 3 * self.hidden_size, lazy_act
+                )
+            else:
+                x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
+                qkv, mlp_act = self.linear1.forward_split_gelu(x_mod, 3 * self.hidden_size, lazy=lazy_act)
         else:
+            x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
             qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
             mlp_act = self.mlp_act(mlp)
         if FUSED_NORM_ROPE:

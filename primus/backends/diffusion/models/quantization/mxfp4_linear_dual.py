@@ -1851,6 +1851,8 @@ def _(
 # the H16 col pack Wgrad saves. `a6w4_act_dual` makes both from one read of x, byte-identical to
 # quant_act_a6w4 and `quantize_mxfp4_h16_col`. 0 puts back the two separate reads.
 _A6W4_ACT_DUAL = os.getenv("FLUX_A6W4_ACT_DUAL", "1") == "1"
+# Resolve before tracing, matching the dual quantizer's import-time layout choice.
+_A6W4_DENSE_ACT = os.getenv("FLUX_A6W4_DENSE_ACT", "0") == "1"
 
 
 def _a6w4_act_dual_ok(x_2d: torch.Tensor, cfg: MXFP4LinearConfig, hadamard: torch.Tensor | None) -> bool:
@@ -1881,11 +1883,89 @@ def _a6w4_act_dual_op(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torc
 @_a6w4_act_dual_op.register_fake
 def _(x):
     m, k = x.shape
-    aq = torch.empty(m, k, dtype=torch.uint8, device=x.device)
+    aq = torch.empty(m, k * 3 // 4 if _A6W4_DENSE_ACT else k, dtype=torch.uint8, device=x.device)
     sa = torch.empty(m * k // MX_BLOCK_SIZE, dtype=torch.uint8, device=x.device)
     co = torch.empty(k, m // 2, dtype=torch.uint8, device=x.device).view(FP4_DTYPE)
     cs = torch.empty(k, m // MX_BLOCK_SIZE, dtype=torch.uint8, device=x.device).view(torch.float8_e8m0fnu)
     return aq, sa, co, cs
+
+
+# The A6W4 Linears behind an adaLN modulate (double qkv and fc1, single linear1) pack
+# (1 + scale) * layer_norm(x) + shift straight from x: a stats-only Triton pass emits each row's
+# rstd and -mean * rstd, and the dual pack applies the LN and the modulate in its tile load, so the
+# modulated bf16 activation is never written or reread. Needs the a6w4-fwd-pack campaign's
+# mxfp4_quant_kernel_flux.py and flux/a6w4_fwd_pack.py in the image (see run_with_docker*.sh).
+_A6W4_LNMOD_PACK = os.getenv("FLUX_A6W4_LNMOD_PACK", "0") == "1"
+_LNMOD_L_ALIGN = 64
+
+
+@torch.library.custom_op("primus_flux::a6w4_act_dual_lnmod", mutates_args=(), device_types="cuda")
+def _a6w4_act_dual_lnmod_op(
+    x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`_a6w4_act_dual_op((1 + scale) * layer_norm(x) + shift)` for x [B, L, K] and shift/scale
+    [B, 1, K], plus the LN stats (rstd, nmr) [B*L] fp32 that backward needs."""
+    from primus_turbo.flydsl.flux.a6w4_fwd_pack import _ln_stats
+    from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
+        flydsl_quant_a6w4_act_dual_lnmod,
+    )
+
+    x = x.contiguous()
+    b, l, k = x.shape
+    rstd, nmr = _ln_stats(x)
+    aq, sa, co, cs = flydsl_quant_a6w4_act_dual_lnmod(
+        x.view(b * l, k),
+        rstd,
+        nmr,
+        shift.reshape(b, k).contiguous(),
+        scale.reshape(b, k).contiguous(),
+    )
+    return aq, sa, co, cs, rstd, nmr
+
+
+@_a6w4_act_dual_lnmod_op.register_fake
+def _(x, shift, scale):
+    b, l, k = x.shape
+    m = b * l
+    aq = torch.empty(m, k * 3 // 4 if _A6W4_DENSE_ACT else k, dtype=torch.uint8, device=x.device)
+    sa = torch.empty(m * k // MX_BLOCK_SIZE, dtype=torch.uint8, device=x.device)
+    co = torch.empty(k, m // 2, dtype=torch.uint8, device=x.device).view(FP4_DTYPE)
+    cs = torch.empty(k, m // MX_BLOCK_SIZE, dtype=torch.uint8, device=x.device).view(torch.float8_e8m0fnu)
+    rstd = torch.empty(m, dtype=torch.float32, device=x.device)
+    return aq, sa, co, cs, rstd, torch.empty_like(rstd)
+
+
+def _a6w4_lnmod_eligible(linear: "MXFP4Linear", x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> bool:
+    if not (_A6W4_LNMOD_PACK and isinstance(linear, MXFP4Linear) and linear.config.any_mxfp4 and linear.training):
+        return False
+    if x.dim() != 3 or x.shape[1] % _LNMOD_L_ALIGN:
+        return False
+    b, _, k = x.shape
+    return (
+        shift.shape == (b, 1, k)
+        and scale.shape == (b, 1, k)
+        and shift.dtype == scale.dtype == torch.bfloat16
+        and _a6w4_act_dual_ok(x.reshape(-1, k), linear.config, linear.hadamard)
+    )
+
+
+def _lnmod_pre(x, shift, scale):
+    aq, sa, co, cs, rstd, nmr = _a6w4_act_dual_lnmod_op(x, shift, scale)
+    return ((aq, sa, co, cs), tuple(x.shape), x.dtype), rstd, nmr
+
+
+def _lnmod_backward(d_y, x, scale, rstd, nmr):
+    """d(x, shift, scale) of ``(1 + scale) * layer_norm(x) + shift`` (eps 1e-6, no affine), in f32
+    from the stats the forward pack used."""
+    b, l, k = x.shape
+    rstd = rstd.view(b, l, 1)
+    xn = x.float() * rstd + nmr.view(b, l, 1)
+    d_y = d_y.reshape(b, l, k).float()
+    d_shift = d_y.sum(1, keepdim=True)
+    d_scale = (d_y * xn).sum(1, keepdim=True)
+    g = d_y * (1 + scale.float())
+    d_x = rstd * (g - g.mean(-1, keepdim=True) - xn * (g * xn).mean(-1, keepdim=True))
+    return d_x.to(x.dtype), d_shift.to(scale.dtype), d_scale.to(scale.dtype)
 
 
 # The single block's linear2 input cat(attn, gelu(preact)) packed from its two legs by
@@ -1895,10 +1975,15 @@ def _(x):
 _A6W4_GELU_PACK = os.getenv("FLUX_A6W4_GELU_PACK", "1") == "1"
 # The double block's fc2 input gelu(fc1(x)) packed the same way. fc1's bias is not in its epilogue
 # (width 12288), so fc1 hands over its bias-free GEMM output and the pack adds the bias in f32
-# ahead of the GELU, as Inductor's fused gelu(out + bias) does. Byte-identical, but OFF: it saves
-# only the GELU write (~35 us/call at [8192, 12288]) while the f32-exact GELU costs ~80 us in the
-# pack and the preact add still runs; 600-step A6W4 run 87.83 -> 87.51 samples/GPU/s.
+# ahead of the GELU, as Inductor's fused gelu(out + bias) does. Byte-identical. With the image's
+# legs kernel it lost (600-step A6W4 run 87.83 -> 87.51 samples/GPU/s); the a6w4-fwd-pack campaign's
+# legs kernel (exp2 tanh, bias loaded once per call) makes it a win, so config_common.sh turns it
+# on with FLUX_A6W4_PACK_HARVEST.
 _A6W4_GELU_PACK_DOUBLE = os.getenv("FLUX_A6W4_GELU_PACK_DOUBLE", "0") == "1"
+# Single linear2's two legs (attn, gelu(preact + bias)) packed in one launch instead of one per leg:
+# flydsl_quant_a6w4_act_dual_legs_merged, byte-identical to flydsl_quant_a6w4_act_dual_legs (the
+# a6w4-legs-one-launch campaign). Needs the mounted mxfp4_quant_kernel_flux.py.
+_A6W4_LEGS_ONE_LAUNCH = os.getenv("FLUX_A6W4_LEGS_ONE_LAUNCH", "0") == "1"
 _A6W4_LEGS_BIAS_WIDTH_LOGGED = False
 
 
@@ -1971,13 +2056,19 @@ def _a6w4_act_dual_legs_gelu_op(
         return flydsl_quant_a6w4_act_dual_legs((preact,), (True,), (preact_bias,))
     if attn.stride(1) != 1:
         attn = attn.contiguous()
+    if _A6W4_LEGS_ONE_LAUNCH:
+        from primus_turbo.flydsl.quantization.mxfp4_quant_kernel import (
+            flydsl_quant_a6w4_act_dual_legs_merged,
+        )
+
+        return flydsl_quant_a6w4_act_dual_legs_merged((attn, preact), (False, True), (None, preact_bias))
     return flydsl_quant_a6w4_act_dual_legs((attn, preact), (False, True), (None, preact_bias))
 
 
 @_a6w4_act_dual_legs_gelu_op.register_fake
 def _(attn, preact, preact_bias=None):
     m, k = preact.shape[0], (0 if attn is None else attn.shape[1]) + preact.shape[1]
-    aq = torch.empty(m, k, dtype=torch.uint8, device=preact.device)
+    aq = torch.empty(m, k * 3 // 4 if _A6W4_DENSE_ACT else k, dtype=torch.uint8, device=preact.device)
     sa = torch.empty(m * k // MX_BLOCK_SIZE, dtype=torch.uint8, device=preact.device)
     co = torch.empty(k, m // 2, dtype=torch.uint8, device=preact.device).view(FP4_DTYPE)
     cs = torch.empty(k, m // MX_BLOCK_SIZE, dtype=torch.uint8, device=preact.device).view(
@@ -2810,11 +2901,18 @@ class _MXFP4LinearGeluLegsFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, leg0, lazy=False):
+        outs, save_list = _MXFP4LinearGeluLegsFunction._fwd(
+            ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, leg0, lazy
+        )
+        ctx.save_for_backward(*save_list)
+        return outs
+
+    @staticmethod
+    def _fwd(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, leg0, lazy, x_pre=None):
         out, save_list = _MXFP4LinearFunction._forward(
-            ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg
+            ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, x_pre=x_pre
         )
         preact = out[:, leg0:]
-        ctx.save_for_backward(*save_list, preact)
         ctx.leg0 = leg0
         ctx.fused_dgelu = (
             bias is not None
@@ -2826,11 +2924,16 @@ class _MXFP4LinearGeluLegsFunction(torch.autograd.Function):
         )
         lead = ctx.x_shape[:-1]
         act = preact if lazy else torch.nn.functional.gelu(preact, approximate="tanh")
-        return out[:, :leg0].reshape(*lead, leg0), act.reshape(*lead, preact.shape[1])
+        outs = (out[:, :leg0].reshape(*lead, leg0), act.reshape(*lead, preact.shape[1]))
+        return outs, [*save_list, preact]
 
     @staticmethod
     def backward(ctx, grad_qkv, grad_act):
-        saved = ctx.saved_tensors
+        grads = _MXFP4LinearGeluLegsFunction._bwd(ctx, ctx.saved_tensors, grad_qkv, grad_act)
+        return (*grads, None, None)
+
+    @staticmethod
+    def _bwd(ctx, saved, grad_qkv, grad_act):
         preact = saved[-1]
         d_qkv = grad_qkv.reshape(-1, ctx.leg0)
         d_act = grad_act.reshape(-1, preact.shape[1])
@@ -2841,7 +2944,7 @@ class _MXFP4LinearGeluLegsFunction(torch.autograd.Function):
             d_pre = torch.ops.aten.gelu_backward(d_act, preact, approximate="tanh")
             grad_2d = torch.cat((d_qkv, d_pre), dim=1)
             grads = _MXFP4LinearFunction._backward(ctx, saved[:-1], grad_2d)
-        return (*grads, None, None)
+        return grads
 
 
 class _MXFP4LinearGeluFunction(torch.autograd.Function):
@@ -2856,6 +2959,14 @@ class _MXFP4LinearGeluFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, lazy=False):
+        act, save_list = _MXFP4LinearGeluFunction._fwd(
+            ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, lazy
+        )
+        ctx.save_for_backward(*save_list)
+        return act
+
+    @staticmethod
+    def _fwd(ctx, x, weight, bias, hadamard, act_slot, wgt_slot, cfg, lazy, x_pre=None):
         preact, save_list, unbiased = _MXFP4LinearFunction._forward(
             ctx,
             x,
@@ -2866,9 +2977,9 @@ class _MXFP4LinearGeluFunction(torch.autograd.Function):
             wgt_slot,
             cfg,
             bias_any_width=True,
+            x_pre=x_pre,
             return_unbiased=True,
         )
-        ctx.save_for_backward(*save_list, preact)
         ctx.fused_dgelu = (
             bias is not None
             and cfg.dgrad == "mxfp4"
@@ -2884,18 +2995,59 @@ class _MXFP4LinearGeluFunction(torch.autograd.Function):
             act = unbiased
         else:
             act = preact if lazy else torch.nn.functional.gelu(preact, approximate="tanh")
-        return act.reshape(*ctx.x_shape[:-1], preact.shape[1])
+        return act.reshape(*ctx.x_shape[:-1], preact.shape[1]), [*save_list, preact]
 
     @staticmethod
     def backward(ctx, grad_act):
-        saved = ctx.saved_tensors
+        return (*_MXFP4LinearGeluFunction._bwd(ctx, ctx.saved_tensors, grad_act), None)
+
+    @staticmethod
+    def _bwd(ctx, saved, grad_act):
         preact = saved[-1]
         d_act = grad_act.reshape(-1, preact.shape[1])
         if ctx.fused_dgelu:
             packs = _quantize_mxfp4_h16_dual_bias_dgelu_op(d_act, preact)
-            return (*_MXFP4LinearFunction._backward(ctx, saved[:-1], None, packs), None)
+            return _MXFP4LinearFunction._backward(ctx, saved[:-1], None, packs)
         grad_2d = torch.ops.aten.gelu_backward(d_act, preact, approximate="tanh")
-        return (*_MXFP4LinearFunction._backward(ctx, saved[:-1], grad_2d), None)
+        return _MXFP4LinearFunction._backward(ctx, saved[:-1], grad_2d)
+
+
+class _MXFP4LinearLnModFunction(torch.autograd.Function):
+    """One of the Functions above on ``(1 + scale) * layer_norm(x) + shift`` (eps 1e-6, no affine),
+    with the LN and the modulate folded into the A6W4 activation pack (`_A6W4_LNMOD_PACK`).
+    ``kind`` picks the Linear: "plain" (`_MXFP4LinearFunction`), "gelu" (`_MXFP4LinearGeluFunction`)
+    or "legs" (`_MXFP4LinearGeluLegsFunction`, split at ``leg0``). Saves x and the row stats in place
+    of the modulated activation; backward rebuilds the normalised x from them."""
+
+    @staticmethod
+    def forward(ctx, x, shift, scale, weight, bias, hadamard, act_slot, wgt_slot, cfg, kind, leg0, lazy):
+        x_pre, rstd, nmr = _lnmod_pre(x, shift, scale)
+        args = (ctx, None, weight, bias, hadamard, act_slot, wgt_slot, cfg)
+        if kind == "legs":
+            outs, save_list = _MXFP4LinearGeluLegsFunction._fwd(*args, leg0, lazy, x_pre=x_pre)
+        elif kind == "gelu":
+            outs, save_list = _MXFP4LinearGeluFunction._fwd(*args, lazy, x_pre=x_pre)
+        else:
+            out, save_list = _MXFP4LinearFunction._forward(*args, x_pre=x_pre)
+            outs = out.reshape(*x.shape[:-1], weight.shape[0])
+        ctx.kind = kind
+        ctx.n_lin = len(save_list)
+        ctx.save_for_backward(*save_list, x, scale, rstd, nmr)
+        return outs
+
+    @staticmethod
+    def backward(ctx, *grad_outs):
+        saved = ctx.saved_tensors
+        lin, ln = saved[: ctx.n_lin], saved[ctx.n_lin :]
+        if ctx.kind == "legs":
+            grads = _MXFP4LinearGeluLegsFunction._bwd(ctx, lin, *grad_outs)
+        elif ctx.kind == "gelu":
+            grads = _MXFP4LinearGeluFunction._bwd(ctx, lin, *grad_outs)
+        else:
+            g = grad_outs[0]
+            grads = _MXFP4LinearFunction._backward(ctx, lin, g.reshape(-1, g.shape[-1]).contiguous())
+        # x, shift, scale, weight, bias, hadamard, act_slot, wgt_slot, cfg, kind, leg0, lazy
+        return (*_lnmod_backward(grads[0], *ln), *grads[1:], None, None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -3029,6 +3181,37 @@ class MXFP4Linear(nn.Linear):
                 lazy,
             )
         return torch.nn.functional.gelu(self(x), approximate="tanh")
+
+    def lnmod_ok(self, x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> bool:
+        """True iff `forward_lnmod` can take ``x`` unmodulated (see `_A6W4_LNMOD_PACK`)."""
+        return _a6w4_lnmod_eligible(self, x, shift, scale)
+
+    def forward_lnmod(
+        self,
+        x: torch.Tensor,
+        shift: torch.Tensor,
+        scale: torch.Tensor,
+        kind: str = "plain",
+        leg0: int = 0,
+        lazy: bool = False,
+    ):
+        """``self``, `forward_gelu` (``kind="gelu"``) or `forward_split_gelu` (``kind="legs"``) on
+        ``(1 + scale) * layer_norm(x) + shift``, with the LN and the modulate in the activation
+        pack. Only after `lnmod_ok` said yes; same calling contract as ``forward_split_gelu``."""
+        return _MXFP4LinearLnModFunction.apply(
+            x,
+            shift,
+            scale,
+            self.weight,
+            self.bias,
+            self.hadamard,
+            self.fp8_act_slot,
+            self.fp8_wgt_slot,
+            self.config,
+            kind,
+            leg0,
+            lazy,
+        )
 
     def lazy_gelu_into(self, consumer: nn.Module, x: torch.Tensor, widths) -> bool:
         """True iff this Linear's GELU output can be handed lazily to ``consumer``, whose
