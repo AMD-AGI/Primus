@@ -95,6 +95,9 @@
 #     batch_stack_<stamp>.txt       - image digest + library versions from
 #                                     inside the container.
 #     run_batch_multinode_<stamp>.sh - a copy of THIS script as it was run.
+#     results.csv, results.json     - every log in RESULT_DIR parsed by
+#                                     extract_results.py, refreshed at the end
+#                                     (EXTRACT=0 skips this).
 #   <stamp> is YYYYmmdd-HHMMSS, captured once when the script starts, so every
 #   artefact of one batch shares it and repeated runs in the same RESULT_DIR
 #   accumulate side by side instead of overwriting each other. Export BATCH_TS
@@ -494,6 +497,7 @@ EXPECTED_GOOD=$(( ${#CONFIG_FILES[@]} * NUM_REPS ))
 echo "Saved batch driver -> $SCRIPT_COPY" | tee -a "$SUMMARY_FILE"
 echo "Saved env snapshot -> $ENV_FILE"    | tee -a "$SUMMARY_FILE"
 echo "Saved provenance   -> $RESULT_DIR/batch_{submodules,gpu,stack}_${BATCH_TS}.txt" | tee -a "$SUMMARY_FILE"
+perf_extract_results
 echo "Saved summary      -> $SUMMARY_FILE"
 
 if [ "$RUNS_GOOD" -ge "$EXPECTED_GOOD" ]; then

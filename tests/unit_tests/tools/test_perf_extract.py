@@ -52,7 +52,7 @@ BANNER_TEMPLATE = """\
 # Sequence Length  : 8192
 # Train Steps/Iters: 10
 # Repetition       : 1 / 3
-# Cluster          : NNODES={nnodes} GPUS_PER_NODE=8 NODE_RANK=0
+{banner_extra}# Cluster          : NNODES={nnodes} GPUS_PER_NODE=8 NODE_RANK=0
 # Docker image     : registry.example/ci:some-tag
 # Image digest     : registry.example/ci@sha256:deadbeef
 # Primus commit    : 137d6c256119
@@ -69,14 +69,16 @@ BANNER_TEMPLATE = """\
 ########################### End Config File Dump ###############################
 
 ############################## Begin Run Output ################################
-{body}
+{body}{footer}"""
+
+FOOTER_TEMPLATE = """\
 ############################### End Run Output #################################
 
 ################################################################################
 # Run finished at : 2026-09-12 20:10:00 UTC
 # Exit code       : {exit_code}
 # Elapsed (sec)   : 600
-################################################################################
+{failure_line}################################################################################
 """
 
 
@@ -91,17 +93,23 @@ def write_log(
     exit_code: int = 0,
     config_body: str = "modules:\n  pre_trainer:\n    framework: megatron\n",
     name: str = "run.log",
+    failure_reason: str | None = None,
+    with_footer: bool = True,
+    banner_extra: str = "",
 ) -> Path:
     path = tmp_path / name
+    failure_line = f"# Failure reason   : {failure_reason}\n" if failure_reason else ""
+    footer = FOOTER_TEMPLATE.format(exit_code=exit_code, failure_line=failure_line) if with_footer else ""
     path.write_text(
         BANNER_TEMPLATE.format(
             config_name=config_name,
             framework=framework,
             nnodes=nnodes,
             world_size=world_size,
-            exit_code=exit_code,
             config_body=config_body,
             body=body,
+            footer=footer,
+            banner_extra=banner_extra,
         )
     )
     return path
@@ -128,6 +136,7 @@ def write_log(
         # Multi-word precision must not be truncated to its fp8 tail.
         ("llama3_8B-nanoo_fp8-pretrain", ("llama3_8B", "NANOO_FP8")),
         ("gpt_oss_20B-MXFP4-pretrain", ("gpt_oss_20B", "MXFP4")),
+        ("llama3.1_8B-MXFP8-pretrain", ("llama3.1_8B", "MXFP8")),
         # No precision in the name at all.
         ("mamba_370M-pretrain", ("mamba_370M", None)),
         # The sft/lora marker distinguishes two workloads and must survive.
@@ -381,3 +390,198 @@ def test_non_primus_log_is_skipped(tmp_path):
     log = tmp_path / "random.log"
     log.write_text("\n".join(f"line {i}" for i in range(20)))
     assert extract.parse_log_file(str(log)) is None
+
+
+# --------------------------------------------------------------------------
+# Status and failure reasons
+# --------------------------------------------------------------------------
+
+
+def test_successful_run_is_ok_without_a_reason(tmp_path):
+    result = extract.parse_log_file(str(write_log(tmp_path, MEGATRON_AVG, failure_reason="none")))
+    assert result["status"] == "ok"
+    assert result["failure_reason"] is None
+
+
+@pytest.mark.parametrize(
+    "body,exit_code,footer_reason,expected",
+    [
+        pytest.param(
+            "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB. GPU 0 has a "
+            "total capacity of 255.98 GiB of which 34.00 MiB is free. Of the allocated memory "
+            "250.10 GiB is allocated by PyTorch\n",
+            1,
+            "exit: launcher exited with code 1",
+            "oom",
+            id="oom",
+        ),
+        pytest.param(
+            "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB. GPU 0 has a "
+            "total capacity of 255.98 GiB of which 34.00 MiB is free. Of the allocated memory "
+            "10.23 GiB is allocated by PyTorch\n",
+            1,
+            "exit: launcher exited with code 1",
+            "gpu_contended",
+            id="oom-while-another-process-holds-the-gpu",
+        ),
+        pytest.param(
+            "[rank-3/8] Signal 11 (SIGSEGV) received by PID 1234\nChildFailedError: boom\n",
+            1,
+            None,
+            "segfault",
+            id="segfault-from-old-footer",
+        ),
+        pytest.param(
+            "RuntimeError: ncclRemoteError: remote process exited\n",
+            1,
+            "fail_pattern: failure text matching FAIL_PATTERN appeared in the output",
+            "nccl_error",
+            id="nccl-behind-a-fail-pattern-hit",
+        ),
+        pytest.param(
+            "Last RCCL warning: 'Bootstrap : no socket interface found'\nRuntimeError: ncclInternalError\n",
+            1,
+            "exit: launcher exited with code 1",
+            "nic_error",
+            id="nic-beats-the-nccl-symptom",
+        ),
+        pytest.param(
+            "Traceback (most recent call last):\nValueError: bad config value\n",
+            1,
+            "exit: launcher exited with code 1",
+            "python_error",
+            id="python-exception",
+        ),
+        pytest.param("training...\n", 137, None, "killed", id="sigkill-without-an-error"),
+        pytest.param(
+            "RuntimeError: ncclRemoteError\n",
+            143,
+            "idle: no new output for MAX_IDLE_SECONDS=1200s",
+            "idle",
+            id="runner-verdict-wins",
+        ),
+    ],
+)
+def test_failure_reason(tmp_path, body, exit_code, footer_reason, expected):
+    result = extract.parse_log_file(
+        str(write_log(tmp_path, body, exit_code=exit_code, failure_reason=footer_reason))
+    )
+    assert result["status"] == "failed"
+    assert result["failure_reason"] == expected
+    assert result["failure_detail"]
+
+
+def test_interrupted_and_incomplete_runs(tmp_path):
+    interrupted = extract.parse_log_file(
+        str(
+            write_log(
+                tmp_path,
+                "",
+                exit_code=130,
+                failure_reason="interrupted: the batch was stopped by a signal",
+                name="a.log",
+            )
+        )
+    )
+    assert interrupted["status"] == "interrupted"
+    assert interrupted["failure_reason"] == "interrupted"
+
+    incomplete = extract.parse_log_file(str(write_log(tmp_path, MEGATRON_AVG, with_footer=False, name="b.log")))
+    assert incomplete["status"] == "incomplete"
+    assert incomplete["exit_code"] is None
+    # The throughput up to the kill is still reported.
+    assert incomplete["num_iterations"] == 5
+
+
+def test_failed_attempt_is_flagged(tmp_path):
+    result = extract.parse_log_file(
+        str(
+            write_log(
+                tmp_path,
+                "",
+                exit_code=143,
+                failure_reason="timeout: still running after MAX_RUN_SECONDS=3600s",
+                name="megatron-x-abcd1234-MBS2-GBS16-rep1-failed-attempt2_20261014-093907.log",
+                banner_extra="# Attempt          : 2 / 6 (incl. failed)\n",
+            )
+        )
+    )
+    assert result["status"] == "failed"
+    assert result["failure_reason"] == "timeout"
+    assert result["failed_attempt"] == 2
+    assert result["attempt"] == 2
+
+
+# --------------------------------------------------------------------------
+# Fields added in parser version 2
+# --------------------------------------------------------------------------
+
+
+def test_banner_fields_reach_the_result(tmp_path):
+    result = extract.parse_log_file(
+        str(
+            write_log(
+                tmp_path,
+                MEGATRON_AVG,
+                config_name="examples/megatron/configs/MI355X/llama3.1_8B-BF16-pretrain",
+                banner_extra=(
+                    "# Batch Stamp      : 20261014-093907\n"
+                    "# GPU check        : idle (8 GPUs, at most 283 MiB in use; threshold 2048 MiB)\n"
+                ),
+            )
+        )
+    )
+    assert result["config_path"] == "examples/megatron/configs/MI355X/llama3.1_8B-BF16-pretrain"
+    assert result["batch_stamp"] == "20261014-093907"
+    assert result["num_reps"] == 3
+    assert result["gpu_check"].startswith("idle (8 GPUs")
+    assert result["parser_version"] == extract.PARSER_VERSION
+
+
+def test_fractional_batch_size_is_kept(tmp_path):
+    log = tmp_path / "frac.log"
+    log.write_text(
+        write_log(tmp_path, "", framework="maxtext", name="tmp.log")
+        .read_text()
+        .replace("# Micro Batch Size : 2", "# Micro Batch Size : 0.5")
+    )
+    assert extract.parse_log_file(str(log))["micro_batch_size"] == 0.5
+
+
+def test_per_step_spread(tmp_path):
+    result = extract.parse_log_file(str(write_log(tmp_path, MEGATRON_LEGACY)))
+    # Post-warmup steps are 400 and 400.
+    assert result["tflops_min"] == pytest.approx(400.0)
+    assert result["tflops_max"] == pytest.approx(400.0)
+    assert result["tflops_cv"] == pytest.approx(0.0)
+    assert result["tps_per_gpu_stdev"] == pytest.approx(0.0)
+
+
+def test_version_mismatch_warnings_are_collected(tmp_path):
+    warning = (
+        "[20261014 14:44:00][rank-0/8][WARNING] aiter version mismatch: "
+        "installed=0.1.22.post1, expected=0.1.14.post1\n"
+    )
+    result = extract.parse_log_file(str(write_log(tmp_path, warning * 8 + MEGATRON_AVG)))
+    assert result["version_warnings"] == [
+        "aiter version mismatch: installed=0.1.22.post1, expected=0.1.14.post1"
+    ]
+
+
+def test_outputs_have_fixed_names_and_keep_old_column_order(tmp_path):
+    import csv
+    import json
+
+    results = [extract.parse_log_file(str(write_log(tmp_path, MEGATRON_AVG)))]
+    csv_path, json_path = extract.write_outputs(results, str(tmp_path))
+    assert Path(csv_path).name == "results.csv"
+    assert Path(json_path).name == "results.json"
+
+    header = next(csv.reader(open(csv_path)))
+    assert header[:3] == ["filename", "backend", "model_name"]
+    assert header.index("timestamp") < header.index("status")
+
+    data = json.loads(Path(json_path).read_text())
+    assert data["parser_version"] == extract.PARSER_VERSION
+    assert data["runs"][0]["status"] == "ok"
+    assert isinstance(data["runs"][0]["version_warnings"], list)

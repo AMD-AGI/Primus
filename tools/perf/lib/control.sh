@@ -464,6 +464,27 @@ perf_launch_with_watchdog() {
 }
 
 # ---------------------------------------------------------------------------
+# Results
+# ---------------------------------------------------------------------------
+
+# Refresh results.csv / results.json from every log in RESULT_DIR. EXTRACT=0
+# skips it. A failure is reported but never changes the batch's exit code.
+perf_extract_results() {
+    local out
+    [ "${EXTRACT:-1}" = 1 ] || return 0
+    if ! command -v python3 >/dev/null 2>&1; then
+        perf_log "[WARN] python3 not found; results.csv / results.json not written."
+        return 0
+    fi
+    if out=$(python3 "$SCRIPT_DIR/extract_results.py" --quiet "$RESULT_DIR" 2>&1); then
+        perf_log "$out"
+    else
+        perf_log "$out"
+        perf_log "[WARN] result extraction failed; rerun: python3 $SCRIPT_DIR/extract_results.py $RESULT_DIR"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Interrupt handling
 #
 # Ctrl+C, SIGTERM or SIGHUP stops the run in flight and its containers, closes
@@ -506,6 +527,7 @@ perf_on_interrupt() {
         echo "################################################################################"
     } | tee -a "$SUMMARY_FILE"
 
+    perf_extract_results
     exit "$PERF_EXIT_INTERRUPTED"
 }
 

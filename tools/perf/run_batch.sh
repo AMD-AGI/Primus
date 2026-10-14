@@ -54,6 +54,7 @@
 #   GPU_BUSY_MIB     a GPU with more memory in use than this counts as busy,
 #                    and the run is refused (default 2048).
 #   ALLOW_BUSY_GPUS=1  run even when the GPUs are busy.
+#   EXTRACT=0        do not refresh results.csv / results.json at the end.
 #   EXTRA_ENV=...    space-separated KEY=VALUE pairs forwarded into the
 #                    container as explicit `--env` flags, e.g.
 #                    EXTRA_ENV="DEBUG_HIP_DYNAMIC_QUEUES=0". A plain export is
@@ -107,6 +108,8 @@
 #     run_batch_<stamp>.sh          - a copy of THIS script as it was run,
 #                                     written before the first run starts.
 #     <framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>_<stamp>.log - per-run logs.
+#     results.csv, results.json     - every log in RESULT_DIR parsed by
+#                                     extract_results.py, refreshed at the end.
 #   <stamp> is YYYYmmdd-HHMMSS, captured once when the script starts, so every
 #   artefact of one batch shares it and repeated runs in the same RESULT_DIR
 #   accumulate side by side instead of overwriting each other. Export BATCH_TS
@@ -428,6 +431,7 @@ RUNS_NOT_STARTED=$((TOTAL_PLANNED - RUNS_STARTED))
 echo "Saved batch driver -> $SCRIPT_COPY" | tee -a "$SUMMARY_FILE"
 echo "Saved env snapshot -> $ENV_FILE"    | tee -a "$SUMMARY_FILE"
 echo "Saved provenance   -> $RESULT_DIR/batch_{submodules,gpu,stack}_${BATCH_TS}.txt" | tee -a "$SUMMARY_FILE"
+perf_extract_results
 echo "Saved summary      -> $SUMMARY_FILE"
 
 if [ "$RUNS_FAILED" -eq 0 ] && [ "$RUNS_NOT_STARTED" -eq 0 ]; then

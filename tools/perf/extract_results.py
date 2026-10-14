@@ -9,7 +9,24 @@
 
 Usage::
 
-    python3 tools/perf/extract_results.py <result_dir>
+    python3 tools/perf/extract_results.py [--quiet] <result_dir>
+
+Writes ``results.csv`` and ``results.json`` into ``<result_dir>``, replacing
+any previous ones: both are derived from every log in the directory, so
+re-running is always safe. The batch runners call this automatically at the
+end of a batch. ``results.json`` carries the same rows plus the parser
+version, and keeps list-valued fields (warnings) as lists.
+
+Every row has a ``status``: ``ok``, ``failed``, ``interrupted``,
+``incomplete`` (no footer: still running, or the batch was killed) or
+``unknown`` (legacy logs without a footer). Rows that are not ``ok`` also get
+a ``failure_reason`` and the log line behind it (``failure_detail``). The
+runner's own verdict (``timeout``, ``idle``, ``interrupted``) is taken from
+the log footer; otherwise the run output is searched for the cause:
+``nic_error``, ``oom``, ``gpu_contended`` (an out-of-memory error while
+PyTorch itself held less than half the GPU, i.e. another process had it),
+``segfault``, ``nccl_error`` or ``python_error``; failing that ``killed``
+(SIGKILL with no error in the log), ``signal``, ``fail_pattern`` or ``exit``.
 
 Supported header formats:
 
@@ -66,12 +83,23 @@ lines, otherwise the lowest rank that does. Legacy logs that have no
 ``[rank-N/M]`` tag are not filtered.
 """
 
+# Keeps the annotations below unevaluated, so the batch runners can call this
+# script on hosts whose python3 predates 3.10.
+from __future__ import annotations
+
 import argparse
 import csv
 import glob
+import json
 import os
 import re
+import statistics
+import subprocess
+import sys
 from datetime import datetime
+
+# Bumped whenever a column is added or its meaning changes.
+PARSER_VERSION = 2
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 BANNER_KV_RE = re.compile(r"^#\s*([^:]+?)\s*:\s*(.*?)\s*$")
@@ -179,6 +207,19 @@ def _maybe_int(value: str | None) -> int | None:
         return None
 
 
+def _maybe_number(value: str | None) -> int | float | None:
+    """Like ``_maybe_int``, but keeps a fractional value such as MaxText's
+    ``per_device_batch_size: 0.5`` instead of truncating it to 0."""
+    if value is None:
+        return None
+    resolved = _resolve_placeholder(value)
+    m = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*(?:$|\()", resolved or "")
+    if not m:
+        return _maybe_int(value)
+    number = float(m.group(1))
+    return int(number) if number.is_integer() else number
+
+
 def parse_config_section(lines: list[str]) -> str:
     """Extract the YAML config dump from a log file.
 
@@ -243,7 +284,11 @@ def parse_run_footer(lines: list[str]) -> dict:
     out: dict = {}
     for line in reversed(lines[-50:]):
         clean = strip_ansi(line.rstrip())
-        if "Exit code" in clean and "exit_code" not in out:
+        if clean.startswith("# Failure reason") and "failure_reason" not in out:
+            m = re.match(r"# Failure reason\s*:\s*(.*)$", clean)
+            if m:
+                out["failure_reason"] = m.group(1).strip()
+        elif "Exit code" in clean and "exit_code" not in out:
             m = re.search(r"Exit code\s*:\s*(-?\d+)", clean)
             if m:
                 out["exit_code"] = int(m.group(1))
@@ -493,9 +538,10 @@ def parse_maxtext_iterations(lines: list[str], keep_rank: int | None = None) -> 
 
 # Precision tokens as they appear in config names. Order matters: the longer
 # spellings must be tried first so ``nanoo_fp8`` is not truncated to ``fp8``
-# and ``mxfp4`` not to ``fp4``.
+# and ``mxfp8`` / ``mxfp4`` not to ``fp8`` / ``fp4``.
 PRECISION_TOKENS = (
     "nanoo_fp8",
+    "mxfp8",
     "mxfp4",
     "bf16",
     "fp16",
@@ -587,6 +633,11 @@ def _populate_from_new_banner(result: dict, banner: dict, config_text: str) -> N
     model_name, precision = _split_model_precision(config_name)
     result["model_name"] = model_name or None
     result["precision"] = precision or _precision_from_config(config_text)
+    result["config_path"] = config_name or None
+    result["batch_stamp"] = banner.get("Batch Stamp") or None
+    result["gpu_check"] = banner.get("GPU check") or None
+    attempt = banner.get("Attempt", "")
+    result["attempt"] = _maybe_int(attempt.split("/")[0]) if attempt else None
 
     # Provenance emitted by tools/perf/lib/common.sh. Absent from older logs,
     # which simply leave these columns empty.
@@ -617,8 +668,8 @@ def _populate_from_new_banner(result: dict, banner: dict, config_text: str) -> N
     if result["world_size"] is None and result["nnodes"] and result["gpus_per_node"]:
         result["world_size"] = result["nnodes"] * result["gpus_per_node"]
 
-    result["micro_batch_size"] = _maybe_int(banner.get("Micro Batch Size"))
-    result["global_batch_size"] = _maybe_int(banner.get("Global Batch Size"))
+    result["micro_batch_size"] = _maybe_number(banner.get("Micro Batch Size"))
+    result["global_batch_size"] = _maybe_number(banner.get("Global Batch Size"))
     result["seq_len"] = _maybe_int(banner.get("Sequence Length"))
     result["total_steps"] = _maybe_int(banner.get("Train Steps/Iters"))
 
@@ -626,6 +677,8 @@ def _populate_from_new_banner(result: dict, banner: dict, config_text: str) -> N
     m = re.match(r"\s*(\d+)\s*(?:/\s*(\d+))?", rep)
     if m:
         result["repeat"] = int(m.group(1))
+        if m.group(2):
+            result["num_reps"] = int(m.group(2))
 
     backend = result["backend"]
     if backend == "megatron":
@@ -685,7 +738,7 @@ def _populate_from_new_banner(result: dict, banner: dict, config_text: str) -> N
         if result["micro_batch_size"] is None:
             mm = re.search(r"per_device_batch_size:\s*(\S+)", config_text)
             if mm:
-                result["micro_batch_size"] = _maybe_int(mm.group(1))
+                result["micro_batch_size"] = _maybe_number(mm.group(1))
         if result["total_steps"] is None:
             mm = re.search(r"\bsteps:\s*(\S+)", config_text)
             if mm:
@@ -706,7 +759,7 @@ def _populate_from_new_banner(result: dict, banner: dict, config_text: str) -> N
         if result["micro_batch_size"] is None:
             mm = re.search(r"per_device_batch_size:\s*(\S+)", config_text)
             if mm:
-                result["micro_batch_size"] = _maybe_int(mm.group(1))
+                result["micro_batch_size"] = _maybe_number(mm.group(1))
         if result["total_steps"] is None:
             mm = re.search(r"max_train_steps:\s*(\S+)", config_text)
             if mm:
@@ -826,6 +879,152 @@ def _int_from_cmd_or_config(
     return None
 
 
+# --------------------------------------------------------------------------
+# Why a run failed, and warnings worth surfacing
+# --------------------------------------------------------------------------
+
+# Searched in this order; the first category found anywhere in the run output
+# wins. A bad NIC or an OOM usually also produces NCCL errors and tracebacks
+# further down, so the specific causes come before the generic ones.
+FAILURE_PATTERNS = (
+    ("nic_error", re.compile(r"no socket interface found", re.IGNORECASE)),
+    ("oom", re.compile(r"out of memory|OutOfMemoryError|RESOURCE_EXHAUSTED", re.IGNORECASE)),
+    ("segfault", re.compile(r"Signal 11 \(SIGSEGV\)|Segmentation fault|SIGSEGV")),
+    (
+        "nccl_error",
+        re.compile(
+            r"ncclRemoteError|ncclInternalError|ncclSystemError|ncclUnhandledCudaError|"
+            r"NCCL error|RCCL error|Watchdog caught collective operation timeout"
+        ),
+    ),
+)
+# First Python exception that is not torchrun's generic wrapper.
+PY_EXCEPTION_RE = re.compile(r"\b([A-Za-z_][\w.]*(?:Error|Exception)):\s")
+GENERIC_EXCEPTIONS = ("ChildFailedError",)
+# PyTorch's OOM message says how much of the GPU PyTorch itself held. When that
+# is a small part of the capacity, something else was occupying the GPU.
+OOM_HOLDINGS_RE = re.compile(
+    r"total capacity of ([\d.]+) GiB.*?([\d.]+) (GiB|MiB) is allocated by PyTorch", re.IGNORECASE
+)
+VERSION_WARNING_RE = re.compile(r"([\w.\-]*\s*version mismatch\b.*)", re.IGNORECASE)
+# Leading "[timestamp][rank-N/M][LEVEL] [file:line] :" decorations.
+LOG_PREFIX_RE = re.compile(r"^(?:\s*\[[^\]]*\])+\s*(?::\s*)?")
+MAX_DETAIL_CHARS = 300
+
+
+def _clean_detail(line: str) -> str:
+    text = LOG_PREFIX_RE.sub("", strip_ansi(line).strip()).strip()
+    return text[:MAX_DETAIL_CHARS]
+
+
+def run_output_lines(lines: list[str]) -> list[str]:
+    """The launcher's output, without banner, config dump or footer."""
+    start = end = None
+    for i, line in enumerate(lines):
+        if start is None and "Begin Run Output" in line:
+            start = i + 1
+        elif start is not None and "End Run Output" in line:
+            end = i
+    if start is None:
+        return lines
+    return lines[start:end]
+
+
+def _scan_failure_text(run_lines: list[str]) -> tuple[str | None, str | None]:
+    first: dict[str, str] = {}
+    for line in run_lines:
+        clean = strip_ansi(line)
+        for category, pattern in FAILURE_PATTERNS:
+            if category not in first and pattern.search(clean):
+                first[category] = clean
+        if "python_error" not in first:
+            m = PY_EXCEPTION_RE.search(clean)
+            if m and not m.group(1).endswith(GENERIC_EXCEPTIONS):
+                first["python_error"] = clean[m.start() :]
+    for category in [c for c, _ in FAILURE_PATTERNS] + ["python_error"]:
+        if category not in first:
+            continue
+        line = first[category]
+        if category == "oom":
+            m = OOM_HOLDINGS_RE.search(line)
+            if m:
+                total = float(m.group(1))
+                held = float(m.group(2)) / (1024.0 if m.group(3) == "MiB" else 1.0)
+                if total > 0 and held < 0.5 * total:
+                    category = "gpu_contended"
+        return category, _clean_detail(line)
+    return None, None
+
+
+def _last_output_line(run_lines: list[str]) -> str | None:
+    for line in reversed(run_lines):
+        text = _clean_detail(line)
+        if text and not text.startswith(">>>"):
+            return text
+    return None
+
+
+def classify_failure(
+    run_lines: list[str], footer_reason: str | None, exit_code: int | None
+) -> tuple[str | None, str | None]:
+    """Return ``(failure_reason, failure_detail)`` for a run that did not pass.
+
+    The runner's own verdict wins when it is definitive (it stopped a hang,
+    or the batch was interrupted). Otherwise the cause in the output is more
+    useful than the bare exit status, which comes last.
+    """
+    footer_cat, _, footer_detail = (footer_reason or "").partition(":")
+    footer_cat = footer_cat.strip()
+    footer_detail = footer_detail.strip() or None
+    if not footer_cat and exit_code is not None:
+        # Logs written before the footer recorded a reason.
+        if exit_code > 128:
+            footer_cat = "signal"
+            footer_detail = "SIGKILL" if exit_code == 137 else f"exit {exit_code}"
+        elif exit_code != 0:
+            footer_cat = "exit"
+
+    if footer_cat in ("timeout", "idle", "interrupted"):
+        return footer_cat, footer_detail
+    text_cat, text_detail = _scan_failure_text(run_lines)
+    if text_cat:
+        return text_cat, text_detail
+    if footer_cat == "signal":
+        return ("killed" if "SIGKILL" in (footer_detail or "") else "signal"), footer_detail
+    if footer_cat in ("fail_pattern", "exit"):
+        return footer_cat, _last_output_line(run_lines) or footer_detail
+    return None, None
+
+
+def version_warnings(run_lines: list[str], limit: int = 10) -> list[str]:
+    """Distinct ``... version mismatch ...`` messages (e.g. aiter installed vs
+    expected), which affect performance but never fail a run."""
+    seen: list[str] = []
+    for line in run_lines:
+        if "mismatch" not in line:
+            continue
+        m = VERSION_WARNING_RE.search(strip_ansi(line))
+        if m:
+            text = m.group(1).strip()[:MAX_DETAIL_CHARS]
+            if text not in seen:
+                seen.append(text)
+                if len(seen) >= limit:
+                    break
+    return seen
+
+
+def _spread(values: list[float]) -> dict:
+    """min / max / sample stdev / coefficient of variation of per-step values."""
+    if not values:
+        return {"min": None, "max": None, "stdev": None, "cv": None}
+    stdev = statistics.stdev(values) if len(values) > 1 else 0.0
+    mean = statistics.fmean(values) if hasattr(statistics, "fmean") else statistics.mean(values)
+    return {"min": min(values), "max": max(values), "stdev": stdev, "cv": stdev / mean if mean else None}
+
+
+FAILED_ATTEMPT_RE = re.compile(r"-failed-attempt(\d+)_")
+
+
 def parse_log_file(filepath: str) -> dict | None:
     """Parse a single log file and return extracted metadata + statistics."""
     with open(filepath, "r", errors="replace") as f:
@@ -871,6 +1070,25 @@ def parse_log_file(filepath: str) -> dict | None:
         "hmean_frames_per_gpu": None,
         "amean_memory_usage": None,
         "amean_memory_usage_pct": None,
+        "status": None,
+        "failure_reason": None,
+        "failure_detail": None,
+        "attempt": None,
+        "failed_attempt": None,
+        "config_path": None,
+        "batch_stamp": None,
+        "num_reps": None,
+        "gpu_check": None,
+        "tps_per_gpu_min": None,
+        "tps_per_gpu_max": None,
+        "tps_per_gpu_stdev": None,
+        "tps_per_gpu_cv": None,
+        "tflops_min": None,
+        "tflops_max": None,
+        "tflops_stdev": None,
+        "tflops_cv": None,
+        "version_warnings": [],
+        "parser_version": PARSER_VERSION,
     }
 
     config_text = parse_config_section(lines)
@@ -885,6 +1103,27 @@ def parse_log_file(filepath: str) -> dict | None:
     footer = parse_run_footer(lines)
     result["exit_code"] = footer.get("exit_code")
     result["elapsed_sec"] = footer.get("elapsed_sec")
+
+    m = FAILED_ATTEMPT_RE.search(result["filename"])
+    if m:
+        result["failed_attempt"] = int(m.group(1))
+
+    run_lines = run_output_lines(lines)
+    exit_code = result["exit_code"]
+    footer_reason = footer.get("failure_reason")
+    if exit_code is None:
+        result["status"] = "incomplete" if banner else "unknown"
+    elif footer_reason and footer_reason.startswith("interrupted"):
+        result["status"] = "interrupted"
+    elif exit_code == 0 and footer_reason in (None, "none") and result["failed_attempt"] is None:
+        result["status"] = "ok"
+    else:
+        result["status"] = "failed"
+    if result["status"] != "ok":
+        result["failure_reason"], result["failure_detail"] = classify_failure(
+            run_lines, footer_reason, exit_code
+        )
+    result["version_warnings"] = version_warnings(run_lines)
 
     backend = result["backend"]
     if backend == "megatron":
@@ -955,6 +1194,12 @@ def parse_log_file(filepath: str) -> dict | None:
     result["amean_memory_usage"] = arithmetic_mean(mem_vals)
     result["amean_memory_usage_pct"] = arithmetic_mean(mem_pct_vals)
 
+    # Spread across post-warmup steps: a low mean from a few slow steps reads
+    # very differently from a uniformly slow run.
+    for prefix, values in (("tps_per_gpu", tps_vals), ("tflops", tflops_vals)):
+        for stat, value in _spread(values).items():
+            result[f"{prefix}_{stat}"] = value
+
     return result
 
 
@@ -996,69 +1241,52 @@ CSV_FIELDS = [
     "slurm_job_id",
     "nodelist",
     "timestamp",
+    # Added in parser version 2; kept at the end so positional readers of
+    # older CSVs keep working.
+    "status",
+    "failure_reason",
+    "failure_detail",
+    "attempt",
+    "failed_attempt",
+    "config_path",
+    "batch_stamp",
+    "num_reps",
+    "gpu_check",
+    "tps_per_gpu_min",
+    "tps_per_gpu_max",
+    "tps_per_gpu_stdev",
+    "tps_per_gpu_cv",
+    "tflops_min",
+    "tflops_max",
+    "tflops_stdev",
+    "tflops_cv",
+    "version_warnings",
+    "parser_version",
 ]
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Extract benchmarking results from Primus training log files."
-    )
-    parser.add_argument("input_dir", help="Directory containing .txt / .log log files")
-    args = parser.parse_args()
+CSV_NAME = "results.csv"
+JSON_NAME = "results.json"
 
-    input_dir = os.path.abspath(args.input_dir)
-    if not os.path.isdir(input_dir):
-        print(f"Error: {input_dir} is not a directory")
-        return
 
-    log_files = sorted(
-        glob.glob(os.path.join(input_dir, "*.txt")) + glob.glob(os.path.join(input_dir, "*.log"))
-    )
-    if not log_files:
-        print(f"No .txt or .log files found in {input_dir}")
-        return
+def tools_commit() -> str:
+    """Commit of the checkout this parser runs from, for the JSON metadata."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", os.path.dirname(os.path.abspath(__file__)), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return out.stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
 
-    results = []
-    for fpath in log_files:
-        fname = os.path.basename(fpath)
-        print(f"Processing: {fname}")
-        try:
-            result = parse_log_file(fpath)
-        except Exception as e:
-            print(f"  -> Error: {e}")
-            continue
-        if result:
-            hmean_tflops = result["hmean_tflops"]
-            hmean_tps = result["hmean_tps_per_gpu"]
-            tflops_str = f"{hmean_tflops:.2f}" if hmean_tflops else "N/A"
-            tps_str = f"{hmean_tps:.2f}" if hmean_tps else "N/A"
-            exit_code = result.get("exit_code")
-            status = "OK" if exit_code == 0 else f"FAIL(exit={exit_code})" if exit_code is not None else "?"
-            if result["num_iterations"] == 0:
-                print(
-                    f"  -> {result['backend']} | {result['model_name']} | "
-                    f"precision={result['precision']} | repeat={result['repeat']} | "
-                    f"status={status} | no iteration metrics found"
-                )
-            else:
-                print(
-                    f"  -> {result['backend']} | {result['model_name']} | "
-                    f"precision={result['precision']} | repeat={result['repeat']} | "
-                    f"warmup={result['warmup_steps']} | status={status} | "
-                    f"hmean_tflops={tflops_str} | hmean_tps={tps_str}"
-                )
-            results.append(result)
-        else:
-            print("  -> Skipped (not a Primus run log)")
 
-    if not results:
-        print("No results extracted.")
-        return
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_dir_name = os.path.basename(input_dir)
-    csv_filename = f"{result_dir_name}_{timestamp}.csv"
-    csv_path = os.path.join(input_dir, csv_filename)
+def write_outputs(results: list[dict], input_dir: str) -> tuple[str, str]:
+    """Write results.csv and results.json into ``input_dir``; return their paths."""
+    csv_path = os.path.join(input_dir, CSV_NAME)
+    json_path = os.path.join(input_dir, JSON_NAME)
 
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
@@ -1071,13 +1299,97 @@ def main():
                     row[field] = f"{val:.4f}"
                 elif val is None:
                     row[field] = ""
+                elif isinstance(val, list):
+                    row[field] = " | ".join(val)
                 else:
                     row[field] = val
             writer.writerow(row)
 
-    print(f"\nResults written to: {csv_path}")
-    print(f"Total files processed: {len(log_files)}, results extracted: {len(results)}")
+    with open(json_path, "w") as f:
+        json.dump(
+            {
+                "parser_version": PARSER_VERSION,
+                "tools_commit": tools_commit(),
+                "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "result_dir": input_dir,
+                "runs": [{field: r.get(field) for field in CSV_FIELDS} for r in results],
+            },
+            f,
+            indent=2,
+        )
+        f.write("\n")
+    return csv_path, json_path
+
+
+def _describe(result: dict) -> str:
+    text = (
+        f"{result['backend']} | {result['model_name']} | precision={result['precision']} | "
+        f"repeat={result['repeat']} | status={result['status']}"
+    )
+    if result["failure_reason"]:
+        text += f" ({result['failure_reason']})"
+    if result["num_iterations"] == 0:
+        return text + " | no iteration metrics found"
+    tflops = result["hmean_tflops"]
+    tps = result["hmean_tps_per_gpu"]
+    return (
+        f"{text} | warmup={result['warmup_steps']} | "
+        f"hmean_tflops={f'{tflops:.2f}' if tflops else 'N/A'} | "
+        f"hmean_tps={f'{tps:.2f}' if tps else 'N/A'}"
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Extract benchmarking results from Primus training log files."
+    )
+    parser.add_argument("input_dir", help="Directory containing .txt / .log log files")
+    parser.add_argument(
+        "--quiet", action="store_true", help="Print only the totals and the output paths."
+    )
+    args = parser.parse_args()
+
+    input_dir = os.path.abspath(args.input_dir)
+    if not os.path.isdir(input_dir):
+        print(f"Error: {input_dir} is not a directory")
+        return 1
+
+    log_files = sorted(
+        glob.glob(os.path.join(input_dir, "*.txt")) + glob.glob(os.path.join(input_dir, "*.log"))
+    )
+    if not log_files:
+        print(f"No .txt or .log files found in {input_dir}")
+        return 1
+
+    results = []
+    for fpath in log_files:
+        fname = os.path.basename(fpath)
+        try:
+            result = parse_log_file(fpath)
+        except Exception as e:
+            print(f"Processing: {fname}\n  -> Error: {e}")
+            continue
+        if result:
+            results.append(result)
+            if not args.quiet:
+                print(f"Processing: {fname}\n  -> {_describe(result)}")
+        elif not args.quiet:
+            print(f"Processing: {fname}\n  -> Skipped (not a Primus run log)")
+
+    if not results:
+        print("No results extracted.")
+        return 1
+
+    csv_path, json_path = write_outputs(results, input_dir)
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    totals = ", ".join(f"{n} {status}" for status, n in sorted(counts.items()))
+    print(f"Extracted {len(results)} runs ({totals}) from {len(log_files)} files.")
+    print(f"Results written to: {csv_path}")
+    print(f"                    {json_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

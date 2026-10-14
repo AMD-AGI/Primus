@@ -222,6 +222,7 @@ duplicate entries are reported before anything launches.
 | `GPU_BUSY_MIB` | `2048` | A GPU with more memory in use than this counts as busy. |
 | `GPU_BUSY_WAIT_SECONDS` | `60` | How long to wait for busy GPUs to free up before refusing. |
 | `ALLOW_BUSY_GPUS` | `0` | `1` runs even when the GPUs are busy. |
+| `EXTRACT` | `1` | `0` skips refreshing `results.csv` / `results.json` at the end of a batch. |
 | `RESULT_DIR` | `$PWD/primus-perf-<date>` | Where logs and snapshots go; created if missing. |
 | `CONFIG_FILE` | `tools/perf/configs.yaml` | Catalog to read. |
 | `CONFIG_DIR` | — | Switches to directory mode. |
@@ -420,6 +421,7 @@ Into `$RESULT_DIR`:
 | `batch_gpu_<stamp>.txt` | `rocm-smi` clocks, power caps, topology. |
 | `batch_stack_<stamp>.txt` | Image digest plus library versions from inside the container. |
 | `run_batch_<stamp>.sh` | The driver as it was run, copied *before* the first run. |
+| `results.csv`, `results.json` | Every log in the directory parsed by `extract_results.py`; refreshed at the end of each batch. |
 
 `<stamp>` is shared by every artefact of one batch, so repeated batches in the
 same directory accumulate instead of overwriting.
@@ -484,16 +486,44 @@ A few notes on why these specific fields:
 python3 tools/perf/extract_results.py "$RESULT_DIR"
 ```
 
-Writes `<RESULT_DIR>_<timestamp>.csv` into that directory, where
-`<RESULT_DIR>` is the directory's own name. Throughput uses
-the harmonic mean over post-warmup steps, memory the arithmetic mean; at least
-the first three logged steps are always dropped as compile/autotune. Multi-rank
-logs are filtered to a single rank so the iteration count stays honest.
+Both runners do this automatically at the end of every batch (also after an
+interrupt; `EXTRACT=0` skips it). It writes `results.csv` and `results.json`
+into the directory, replacing the previous ones: they are derived from every
+log there, including earlier batches, so re-running is always safe. The JSON
+holds the same rows plus `parser_version`, the tools commit and the time it
+was generated. Throughput uses the harmonic mean over post-warmup steps,
+memory the arithmetic mean; at least the first three logged steps are always
+dropped as compile/autotune. Multi-rank logs are filtered to a single rank so
+the iteration count stays honest.
 
 Alongside the metrics, each row carries `world_size`, `docker_image`,
 `image_digest`, `primus_commit`, `submodule_pins`, `gpu_model`, `rocm_version`,
 `torch_version`/`jax_version` and, for multi-node, `slurm_job_id`/`nodelist`.
-Logs written before these fields existed simply leave the columns empty.
+Columns added later sit at the end of the CSV, so positional readers of older
+files keep working:
+
+| Column | Meaning |
+|---|---|
+| `status` | `ok`, `failed`, `interrupted`, `incomplete` (no footer: still running or killed), `unknown` (legacy log). |
+| `failure_reason`, `failure_detail` | Why a non-`ok` run ended, and the log line behind it (see below). |
+| `attempt`, `failed_attempt` | Multi-node attempt number; set on `-failed-attempt<n>` logs. Filter these out for performance numbers. |
+| `config_path`, `batch_stamp`, `num_reps`, `gpu_check` | From the run banner. |
+| `tps_per_gpu_*`, `tflops_*` (`min`, `max`, `stdev`, `cv`) | Spread over the post-warmup steps; tells a few slow steps from a uniformly slow run. |
+| `version_warnings` | Distinct `... version mismatch ...` messages, e.g. aiter installed vs expected. |
+| `parser_version` | Bumped when columns change. |
+
+`failure_reason` takes the runner's verdict from the footer when it is
+definitive (`timeout`, `idle`, `interrupted`). Otherwise the run output is
+searched, in this order, for `nic_error` (no usable socket interface), `oom`,
+`gpu_contended` (out of memory while PyTorch itself held less than half the
+GPU, i.e. another process had it), `segfault`, `nccl_error` and
+`python_error` (the first exception other than torchrun's `ChildFailedError`).
+Failing that it is `killed` (SIGKILL with no error in the log, e.g. the host
+OOM killer), `signal`, `fail_pattern` or `exit`.
+
+Logs written before these fields existed simply leave the columns empty, and
+older logs still get a `status` and a `failure_reason` from their exit code
+and output.
 
 ## Relationship to the other benchmark tools
 
