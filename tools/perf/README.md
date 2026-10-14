@@ -362,6 +362,9 @@ batch and leaves the remaining runs unstarted.
 - **Image present, and the same everywhere.** A missing image is pulled once,
   up front, so the pull neither counts against the run limits nor leaves the
   image digest unknown (`PULL_IMAGE=1` pulls even when the tag is present).
+  For a private image, export `DOCKER_LOGIN_USER` and `DOCKER_LOGIN_KEY` (and
+  `DOCKER_LOGIN_REGISTRY` if not Docker Hub), as for `primus-cli`; the runner
+  logs in before pulling.
   Multi-node batches refuse to start when the nodes hold different images
   under the same tag.
 - **Leftover containers stopped.** Every container this tool starts carries
@@ -375,11 +378,13 @@ batch and leaves the remaining runs unstarted.
 - **GPUs idle.** No GPU may have more than `GPU_BUSY_MIB` of memory in use
   (idle MI355X GPUs show about 280 MiB). After `GPU_BUSY_WAIT_SECONDS` the
   batch refuses and lists the busy GPUs and the running containers.
-  `ALLOW_BUSY_GPUS=1` overrides this. Memory is read from the amdgpu driver's
-  counters in sysfs, which needs no tool on `PATH` and also works from a Slurm
-  job step that was not given the GPUs (how the multi-node check reaches
-  every node); `amd-smi` / `rocm-smi` are the fallback. When nothing is
-  readable the check is recorded as "not checked" and does not block.
+  `ALLOW_BUSY_GPUS=1` overrides this. Memory is read with `amd-smi` (or
+  `rocm-smi`), which only sees the GPUs this job was given. A Slurm job step
+  that was not given the GPUs (how the multi-node check reaches the other
+  nodes) sees none that way, so the amdgpu driver's counters in sysfs are the
+  fallback; those cover every GPU on the node, so on a node shared with
+  another job, its GPUs count too. When nothing is readable the check is
+  recorded as "not checked" and does not block.
 - **NCCL interface usable.** See the socket interface section above.
 
 The result of the GPU check is recorded in every run's banner (`GPU check`).

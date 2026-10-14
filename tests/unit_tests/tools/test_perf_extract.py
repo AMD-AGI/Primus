@@ -510,6 +510,37 @@ def test_contention_reads_every_unit_and_counts_reserved_memory(tmp_path):
     assert b["failure_reason"] == "oom"
 
 
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        pytest.param(
+            "RuntimeError: HIP OUT OF MEMORY. GPU 0 has a total capacity of 287.98 gib of which 1 mib "
+            "is free. Of the allocated memory 250.00 gib is allocated by PyTorch\n",
+            "oom",
+            id="upper-case-message-lower-case-units",
+        ),
+        pytest.param("*** SIGSEGV (@0x0) received by PID 1234 (TID 0x7f) from PID 0\n", "segfault", id="glog-segv"),
+    ],
+)
+def test_failure_text_variants(tmp_path, body, expected):
+    result = extract.parse_log_file(str(write_log(tmp_path, body, exit_code=1)))
+    assert result["failure_reason"] == expected
+
+
+def test_exit_codes_tell_no_logs_from_errors(tmp_path, monkeypatch):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr("sys.argv", ["extract_results.py", "--quiet", str(empty)])
+    assert extract.main() == 3
+
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    write_log(broken, MEGATRON_AVG)
+    monkeypatch.setattr(extract, "parse_log_file", lambda path: 1 / 0)
+    monkeypatch.setattr("sys.argv", ["extract_results.py", "--quiet", str(broken)])
+    assert extract.main() == 1
+
+
 def test_primus_patch_lines_and_benign_exceptions_are_not_the_cause(tmp_path):
     body = (
         "[rank-0/8][INFO] [Patch] Applying megatron.dataloader_mp_context: spawn to avoid SIGSEGV\n"

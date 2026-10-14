@@ -406,15 +406,13 @@ print_per_run_footer() {
     local exit_code="$2"
     local run_elapsed="$3"
     local failure_reason="$4"
-    {
-        echo ""
-        echo "############################### End Run Output #################################"
-        echo ""
-        echo "################################################################################"
-        echo "# Run finished at  : $(date '+%Y-%m-%d %H:%M:%S %Z')"
-        echo "# Exit code        : $exit_code"
-        echo "# Elapsed (sec)    : $run_elapsed"
-        echo "# Failure reason   : $failure_reason"
-        echo "################################################################################"
-    } >> "$result_file"
+    local rule="################################################################################"
+    local footer
+    # Built first and written with one printf: a signal can then not land
+    # between its lines, nor run the interrupt handler with stdout still
+    # pointing into the log.
+    printf -v footer '\n%s\n\n%s\n# Run finished at  : %s\n# Exit code        : %s\n# Elapsed (sec)    : %s\n# Failure reason   : %s\n%s\n' \
+        "############################### End Run Output #################################" "$rule" \
+        "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$exit_code" "$run_elapsed" "$failure_reason" "$rule"
+    printf '%s' "$footer" >> "$result_file"
 }

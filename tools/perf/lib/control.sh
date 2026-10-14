@@ -55,6 +55,14 @@ perf_check_run_limits() {
         echo "[ERROR] POLL_INTERVAL must be at least 1, got: '$POLL_INTERVAL'" >&2
         return 1
     fi
+    # MAX_ATTEMPTS_PER_CONFIG exists only in the multi-node runner.
+    for name in NUM_REPS MAX_ATTEMPTS_PER_CONFIG; do
+        [ -n "${!name+x}" ] || continue
+        if ! [[ "${!name}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "[ERROR] $name must be a positive integer, got: '${!name}'" >&2
+            return 1
+        fi
+    done
 }
 
 perf_run_limits_text() {
@@ -96,13 +104,14 @@ perf_uses_containers() {
 # a training step that is still completing.
 perf_on_nodes() {
     local cmd=()
-    [ -n "${PERF_ON_NODES_TIMEOUT:-}" ] && cmd=(timeout "$PERF_ON_NODES_TIMEOUT")
+    [ -n "${PERF_ON_NODES_TIMEOUT:-}" ] && cmd=(timeout -k 10 "$PERF_ON_NODES_TIMEOUT")
     if [ "${PERF_MULTINODE:-0}" = 1 ]; then
         cmd+=(srun -N "$NNODES" -n "$NNODES")
         command -v spur >/dev/null 2>&1 || cmd+=(--overlap)
         "${cmd[@]}" "$@" </dev/null
     else
-        "${cmd[@]}" "$@"
+        # Guarded expansion: bash < 4.4 treats an empty array as unset under set -u.
+        ${cmd[@]+"${cmd[@]}"} "$@"
     fi
 }
 
@@ -249,33 +258,41 @@ PERF_GPU_CHECK="not checked yet"
 # cannot be read. Shipped to remote nodes as source text, so it must stay
 # self-contained.
 #
-# The amdgpu driver's own counter in sysfs comes first: it needs no tool on
-# PATH, and unlike amd-smi it is readable from a Slurm job step that was not
-# given the GPUs as a resource (device cgroups do not cover sysfs), which is
-# how the multi-node check reaches the other nodes.
+# amd-smi / rocm-smi come first: they only see the GPUs this job was given.
+# A Slurm step started without the GPUs as a resource (how the multi-node
+# check reaches the other nodes) sees none through them, so the amdgpu
+# driver's counters in sysfs are the fallback. Device cgroups do not cover
+# sysfs, so that fallback covers every GPU on the node, including another
+# job's on a shared node.
 perf_gpu_vram_used() {
-    local tool f card used found=0
-    for f in /sys/class/drm/card*/device/mem_info_vram_used; do
-        [ -r "$f" ] || continue
-        used=$(cat "$f" 2>/dev/null) || continue
-        card=${f#/sys/class/drm/}
-        card=${card%%/*}
-        echo "${card}($(basename "$(readlink -f "/sys/class/drm/$card/device")")) $((used / 1048576))"
-        found=1
-    done
-    [ "$found" = 1 ] && return 0
-
+    local tool readings f card used
     if command -v amd-smi >/dev/null 2>&1; then
         tool=amd-smi
     elif command -v rocm-smi >/dev/null 2>&1; then
         tool=rocm-smi
-    else
-        return 0
     fi
+    if [ -n "${tool:-}" ]; then
+        readings=$(perf_gpu_vram_from_tool "$tool")
+        if [ -n "$readings" ]; then
+            echo "$readings"
+            return 0
+        fi
+    fi
+    for f in /sys/class/drm/card*/device/mem_info_vram_used; do
+        [ -r "$f" ] || continue
+        used=$(cat "$f" 2>/dev/null </dev/null) || continue
+        card=${f#/sys/class/drm/}
+        card=${card%%/*}
+        echo "${card}($(basename "$(readlink -f "/sys/class/drm/$card/device")")) $((used / 1048576))"
+    done
+}
+
+perf_gpu_vram_from_tool() {
+    local tool="$1"
     if [ "$tool" = amd-smi ]; then
-        amd-smi metric --mem-usage --json 2>/dev/null
+        amd-smi metric --mem-usage --json 2>/dev/null </dev/null
     else
-        rocm-smi --showmeminfo vram --json 2>/dev/null
+        rocm-smi --showmeminfo vram --json 2>/dev/null </dev/null
     fi | python3 -c '
 import json, sys
 tool = sys.argv[1]
@@ -304,7 +321,7 @@ else:
 # is recorded and does not block the run.
 perf_check_gpus_idle_once() {
     local report busy max
-    report=$(perf_on_nodes bash -c "$(declare -f perf_gpu_vram_used); h=\$(hostname); perf_gpu_vram_used | sed \"s/^/\$h /\"" 2>/dev/null)
+    report=$(perf_on_nodes bash -c "$(declare -f perf_gpu_vram_used perf_gpu_vram_from_tool); h=\$(hostname); perf_gpu_vram_used | sed \"s/^/\$h /\"" 2>/dev/null)
     if [ -z "$report" ]; then
         PERF_GPU_CHECK="not checked (no GPU memory readings from sysfs, amd-smi or rocm-smi)"
         return 0
@@ -566,17 +583,23 @@ perf_launch_with_watchdog() {
     wait "$RUN_PID" 2>/dev/null
     RUN_EXIT_CODE=$?
     end=$(date +%s)
-    # A background child the launcher left behind must not outlive the run.
-    kill -TERM -- "-$RUN_PID" 2>/dev/null
-    RUN_PID=""
-
     RUN_ELAPSED=$((end - start))
     RUN_FAILURE_REASON="${reason:-$(perf_exit_reason "$RUN_EXIT_CODE")}"
+    # From here an interrupt records this result rather than "interrupted".
+    PERF_RUN_DONE=1
+    # A background child the launcher left behind must not outlive the run.
+    local group=$RUN_PID
+    kill -TERM -- "-$group" 2>/dev/null
+    RUN_PID=""
+
     print_per_run_footer "$result_file" "$RUN_EXIT_CODE" "$RUN_ELAPSED" "$RUN_FAILURE_REASON"
     CURRENT_RESULT_FILE=""
+    PERF_RUN_DONE=0
 
-    # Let tail print the last lines before stopping it.
+    # Let tail print the last lines before stopping it, and give stragglers
+    # the same second before SIGKILL.
     sleep 1
+    kill -KILL -- "-$group" 2>/dev/null
     kill "$TAIL_PID" 2>/dev/null
     wait "$TAIL_PID" 2>/dev/null
     TAIL_PID=""
@@ -599,15 +622,14 @@ perf_extract_results() {
         perf_log "[WARN] python3 not found; results.csv / results.json not written."
         return 0
     fi
-    out=$(trap - INT TERM HUP; timeout 600 python3 "$SCRIPT_DIR/extract_results.py" --quiet "$RESULT_DIR" 2>&1)
+    out=$(trap - INT TERM HUP; timeout -k 10 600 python3 "$SCRIPT_DIR/extract_results.py" --quiet "$RESULT_DIR" 2>&1)
     rc=$?
-    if [ "$rc" -eq 0 ]; then
-        perf_log "$out"
-    elif [ "$rc" -eq 2 ]; then
+    [ -n "$out" ] && perf_log "$out"
+    if [ "$rc" -eq 3 ]; then
+        # The extractor's own code for "no run logs here yet".
         perf_log "[INFO] no run logs in $RESULT_DIR yet; results.csv / results.json not written."
-    else
-        perf_log "$out"
-        perf_log "[WARN] result extraction failed; rerun: python3 $SCRIPT_DIR/extract_results.py $RESULT_DIR"
+    elif [ "$rc" -ne 0 ]; then
+        perf_log "[WARN] result extraction reported errors (see above); rerun: python3 $SCRIPT_DIR/extract_results.py $RESULT_DIR"
     fi
 }
 
@@ -643,8 +665,13 @@ perf_on_interrupt() {
     fi
 
     if [ -n "$CURRENT_RESULT_FILE" ]; then
-        print_per_run_footer "$CURRENT_RESULT_FILE" "$PERF_EXIT_INTERRUPTED" \
-            "$(( $(date +%s) - CURRENT_RUN_START ))" "interrupted: the batch was stopped by a signal"
+        if [ "${PERF_RUN_DONE:-0}" = 1 ]; then
+            # The run had already ended on its own; keep its real outcome.
+            print_per_run_footer "$CURRENT_RESULT_FILE" "$RUN_EXIT_CODE" "$RUN_ELAPSED" "$RUN_FAILURE_REASON"
+        else
+            print_per_run_footer "$CURRENT_RESULT_FILE" "$PERF_EXIT_INTERRUPTED" \
+                "$(( $(date +%s) - CURRENT_RUN_START ))" "interrupted: the batch was stopped by a signal"
+        fi
         echo ">>> Interrupted run log: $CURRENT_RESULT_FILE" >&2
     fi
 

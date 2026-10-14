@@ -632,7 +632,12 @@ perf_host_snapshot() {
             ip -br addr 2>/dev/null || echo "(no ip command)"
         } | sed "s/^/$h\t/"
     ' 2>&1 | sort -s -t $'\t' -k1,1 |
-        awk -F '\t' '$1 != host { if (host != "") print ""; print "== " $1 " =="; host = $1 } { sub(/^[^\t]*\t/, ""); print }'
+        awk -F '\t' '
+            # Untagged lines are messages from srun itself, not node settings.
+            NF < 2 { other = other $0 "\n"; next }
+            $1 != host { if (host != "") print ""; print "== " $1 " =="; host = $1 }
+            { sub(/^[^\t]*\t/, ""); print }
+            END { if (other != "") printf "\n== other output ==\n%s", other }'
 }
 
 # The image's build manifest (build recipe, dpkg and pip lists), copied once
@@ -645,7 +650,12 @@ perf_copy_image_manifest() {
         return 0
     fi
     # --pull=never: never start an unbounded pull just for the manifest.
+    # Docker before 20.10 lacks the flag; with the image present locally a
+    # plain create cannot pull either.
     cid=$(docker create --pull=never "$image" /bin/true 2>/dev/null)
+    if [ -z "$cid" ] && docker image inspect "$image" >/dev/null 2>&1; then
+        cid=$(docker create "$image" /bin/true 2>/dev/null)
+    fi
     if [ -z "$cid" ]; then
         echo "not copied (cannot create a container from $image; is it present locally?)"
         return 0

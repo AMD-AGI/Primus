@@ -903,7 +903,10 @@ FAILURE_PATTERNS = (
     ("oom", re.compile(r"out of memory|OutOfMemoryError|RESOURCE_EXHAUSTED", re.IGNORECASE)),
     # Not a bare "SIGSEGV": Primus logs "... to avoid SIGSEGV ..." when it
     # applies its dataloader patch.
-    ("segfault", re.compile(r"Signal 11 \(SIGSEGV\)|Segmentation fault|signal SIGSEGV|SIGSEGV received")),
+    (
+        "segfault",
+        re.compile(r"Signal 11 \(SIGSEGV\)|Segmentation fault|signal SIGSEGV|SIGSEGV received|\*\*\* SIGSEGV"),
+    ),
     (
         "nccl_error",
         re.compile(
@@ -914,9 +917,11 @@ FAILURE_PATTERNS = (
 )
 # Cheap first pass, so a multi-million-line log only pays for the regexes
 # above on the few lines that can match.
+# Applied to the lower-cased line: re.IGNORECASE over these alternatives is
+# several times slower than lower() plus a case-sensitive search.
 FAILURE_PREFILTER_RE = re.compile(
-    r"socket interface|out of memory|Out of memory|OutOfMemory|RESOURCE_EXHAUSTED|SIGSEGV|"
-    r"Segmentation fault|nccl|NCCL|RCCL|Watchdog caught|Traceback|Error|Exception"
+    r"socket interface|out of memory|outofmemory|resource_exhausted|sigsegv|"
+    r"segmentation fault|nccl|rccl|watchdog caught|traceback|error|exception"
 )
 # Primus's own patch log lines quote error and version strings they guard
 # against; they are never the failure.
@@ -933,7 +938,7 @@ OOM_TOTAL_RE = re.compile(r"total capacity of " + _SIZE, re.IGNORECASE)
 OOM_PROCESS_RE = re.compile(r"this process has " + _SIZE + r" memory in use", re.IGNORECASE)
 OOM_ALLOCATED_RE = re.compile(_SIZE + r" is allocated by PyTorch", re.IGNORECASE)
 OOM_RESERVED_RE = re.compile(_SIZE + r" is reserved by PyTorch but unallocated", re.IGNORECASE)
-_GIB_PER_UNIT = {"bytes": 1.0 / 2**30, "B": 1.0 / 2**30, "KiB": 1.0 / 2**20, "MiB": 1.0 / 2**10, "GiB": 1.0}
+_GIB_PER_UNIT = {"bytes": 1.0 / 2**30, "b": 1.0 / 2**30, "kib": 1.0 / 2**20, "mib": 1.0 / 2**10, "gib": 1.0}
 VERSION_WARNING_RE = re.compile(r"([\w.\-]*\s*version mismatch\b.*)", re.IGNORECASE)
 # Leading "[timestamp][rank-N/M][LEVEL] [file:line] :" decorations.
 LOG_PREFIX_RE = re.compile(r"^(?:\s*\[[^\]]*\])+\s*(?::\s*)?")
@@ -959,7 +964,8 @@ def run_output_lines(lines: list[str]) -> list[str]:
 
 
 def _gib(match: re.Match | None) -> float | None:
-    return float(match.group(1)) * _GIB_PER_UNIT[match.group(2)] if match else None
+    # The size regexes ignore case, so the unit lookup must too.
+    return float(match.group(1)) * _GIB_PER_UNIT[match.group(2).lower()] if match else None
 
 
 def _oom_is_contended(oom_lines: list[str]) -> bool:
@@ -986,7 +992,7 @@ def _scan_failure_text(run_lines: list[str]) -> tuple[str | None, str | None]:
     traceback_seen = False
     loose_exception = None
     for line in run_lines:
-        if not FAILURE_PREFILTER_RE.search(line) or PRIMUS_NOISE in line:
+        if not FAILURE_PREFILTER_RE.search(line.lower()) or PRIMUS_NOISE in line:
             continue
         clean = strip_ansi(line)
         for category, pattern in FAILURE_PATTERNS:
@@ -1477,16 +1483,21 @@ def main() -> int:
     log_files = sorted(
         glob.glob(os.path.join(input_dir, "*.txt")) + glob.glob(os.path.join(input_dir, "*.log"))
     )
+    # Exit codes: 0 written, 1 a log could not be parsed (results are still
+    # written for the others), 3 no run logs here yet. 2 is left to Python
+    # and argparse, so the batch runners can tell these apart.
     if not log_files:
         print(f"No .txt or .log files found in {input_dir}")
-        return 2
+        return 3
 
     results = []
+    errors = 0
     for fpath in log_files:
         fname = os.path.basename(fpath)
         try:
             result = parse_log_file(fpath)
         except Exception as e:
+            errors += 1
             print(f"Processing: {fname}\n  -> Error: {e}")
             continue
         if result:
@@ -1497,9 +1508,8 @@ def main() -> int:
             print(f"Processing: {fname}\n  -> Skipped (not a Primus run log)")
 
     if not results:
-        # Exit code 2 tells the batch runners "nothing to extract yet".
         print("No results extracted.")
-        return 2
+        return 1 if errors else 3
 
     csv_path, json_path = write_outputs(results, input_dir)
     counts: dict[str, int] = {}
@@ -1509,6 +1519,9 @@ def main() -> int:
     print(f"Extracted {len(results)} runs ({totals}) from {len(log_files)} files.")
     print(f"Results written to: {csv_path}")
     print(f"                    {json_path}")
+    if errors:
+        print(f"{errors} log(s) could not be parsed and are missing from the results.")
+        return 1
     return 0
 
 
