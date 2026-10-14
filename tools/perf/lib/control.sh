@@ -104,7 +104,14 @@ perf_stop_batch_containers() {
     perf_on_nodes bash -c '
         command -v docker >/dev/null 2>&1 || exit 0
         ids=$(docker ps -q --filter "label=$1")
-        [ -z "$ids" ] || docker stop -t 20 $ids >/dev/null 2>&1
+        [ -n "$ids" ] || exit 0
+        docker stop -t 20 $ids >/dev/null 2>&1
+        # --rm removes the container asynchronously, and the next run reuses
+        # its name (primus-training-<job id>), so wait until it is gone.
+        for _ in $(seq 1 30); do
+            [ -z "$(docker ps -aq --filter "label=$1")" ] && break
+            sleep 1
+        done
         exit 0
     ' _ "${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}" >/dev/null 2>&1 || true
 }
@@ -118,9 +125,9 @@ perf_stop_leftover_containers() {
     # shellcheck disable=SC2016
     perf_on_nodes bash -c '
         command -v docker >/dev/null 2>&1 || exit 0
-        key=$1 me=$2 current=$3
-        docker ps --filter "label=$key" --format "{{.ID}}|{{.Names}}|{{.Label \"$key\"}}" 2>/dev/null |
+        key=$1 me=$2 current=$3 stopped=""
         while IFS="|" read -r id name value; do
+            [ -n "$id" ] || continue
             IFS=/ read -r user stamp host pid <<< "$value"
             [ "$user" = "$me" ] || continue
             [ "$value" = "$current" ] && continue
@@ -130,6 +137,14 @@ perf_stop_leftover_containers() {
             fi
             echo "[INFO] $(hostname): stopping container $name left over from batch $stamp."
             docker stop -t 20 "$id" >/dev/null 2>&1
+            stopped="$stopped $id"
+        done < <(docker ps --filter "label=$key" --format "{{.ID}}|{{.Names}}|{{.Label \"$key\"}}" 2>/dev/null)
+        # Wait for --rm to finish removing them: this batch reuses the name.
+        for id in $stopped; do
+            for _ in $(seq 1 30); do
+                [ -z "$(docker ps -aq --filter "id=$id")" ] && break
+                sleep 1
+            done
         done
         exit 0
     ' _ "$PERF_LABEL_KEY" "$(id -un)" "$PERF_LABEL_VALUE" 2>/dev/null | perf_log_stream

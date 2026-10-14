@@ -344,6 +344,12 @@ perf_parse_extra_env() {
             echo "        Example: EXTRA_ENV=\"DEBUG_HIP_DYNAMIC_QUEUES=0 GPU_MAX_HW_QUEUES=2\"" >&2
             return 1
         fi
+        # Each entry is also exported here, so PERF_* would rewrite the
+        # runner's own state (e.g. PERF_MULTINODE) rather than the container's.
+        if [[ "$kv" == PERF_* ]]; then
+            echo "[ERROR] EXTRA_ENV must not set the runner's internal PERF_* variables, got: '$kv'" >&2
+            return 1
+        fi
         PERF_EXTRA_ENV_ARGS+=(--env "$kv")
         # Also set it in this shell, so the banner and env snapshot record what
         # was requested and direct (non-container) mode picks it up too.

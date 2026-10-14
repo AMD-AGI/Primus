@@ -14,8 +14,9 @@
 ###############################################################################
 
 # Input validation run before anything launches: EXTRA_ENV, the selected
-# configs, the repo and CLI paths, and TRAIN_STEPS. Sets PRIMUS_CLI_ABS.
+# configs, the repo and CLI paths, and TRAIN_STEPS.
 check_batch_inputs() {
+    local cli_abs
     perf_parse_extra_env || return 1
     perf_select_configs || return 1
 
@@ -25,9 +26,9 @@ check_batch_inputs() {
     fi
 
     # Resolve absolute path of the CLI (handles default './primus-cli').
-    PRIMUS_CLI_ABS="$PRIMUS_PATH/${PRIMUS_CLI#./}"
-    if [ ! -x "$PRIMUS_CLI_ABS" ]; then
-        echo "[ERROR] primus-cli not found or not executable at: $PRIMUS_CLI_ABS" >&2
+    cli_abs="$PRIMUS_PATH/${PRIMUS_CLI#./}"
+    if [ ! -x "$cli_abs" ]; then
+        echo "[ERROR] primus-cli not found or not executable at: $cli_abs" >&2
         return 1
     fi
 
