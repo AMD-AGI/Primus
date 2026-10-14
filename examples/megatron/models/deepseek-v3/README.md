@@ -1,0 +1,85 @@
+# DeepSeek-V3 proxy on MI455X
+
+DeepSeek-V3 MoE proxy pretraining on one node of 4x MI455X (gfx1250): full DeepSeek-V3 layer shapes
+(MLA, hidden 7168), 4 MoE layers of 128 experts, EP4, seq 4096, BF16, mock data, no activation
+recompute. The config is
+`examples/megatron/configs/MI455X/deepseek_v3-BF16-pretrain.yaml`.
+
+| File | Purpose |
+| --- | --- |
+| `run_deepseek_v3_proxy_mi455x.sh` | Launcher. With `PRIMUS_LAUNCHER=container` (default) it runs from the host in a new container of `DOCKER_IMAGE`; with `PRIMUS_LAUNCHER=direct` it runs inside the current container. |
+| `prepare_mi455x.sh` | Optional host-side setup. `TURBO_DIR` builds a Primus-Turbo checkout for the image, and `CONTAINER` starts a container for direct runs. |
+
+## Run
+
+```bash
+# On the host, with the image's Primus-Turbo
+bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
+
+# With a Primus-Turbo checkout instead (built once)
+TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/deepseek-v3/prepare_mi455x.sh
+TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
+
+# Inside a container
+CONTAINER=dsv3 bash examples/megatron/models/deepseek-v3/prepare_mi455x.sh
+docker exec -it dsv3 bash
+PRIMUS_LAUNCHER=direct bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
+```
+
+**Settings** are environment variables:
+
+- Parallelism and size: `GPUS_PER_NODE`, `HIP_VISIBLE_DEVICES`, `PRIMUS_TP`, `PRIMUS_PP`, `PRIMUS_EP`,
+  `PRIMUS_TOTAL_LAYERS`, `PRIMUS_NUM_EXPERTS`, `PRIMUS_MOE_TOPK`.
+- Training: `TRAIN_ITERS`, `MBS`, `GBS`, `PRIMUS_RECOMPUTE_LAYER_IDS` (layers to recompute, e.g. `0,3`;
+  empty, the default, disables recompute).
+- Feature switches: `USE_TURBO_ATTENTION`, `USE_TURBO_GROUPED_GEMM`, `USE_TURBO_DEEPEP`, `MOCK_DATA`.
+- `PROFILE=True` profiles iterations 6–7 (trace under `output/<team>/<user>/<exp>/tensorboard/`).
+
+The defaults are in the script. Arguments to the script are appended to the Primus command line. The
+1-GPU variant:
+
+```bash
+GPUS_PER_NODE=1 PRIMUS_EP=1 PRIMUS_TOTAL_LAYERS=1 PRIMUS_NUM_EXPERTS=32 GBS=16 \
+    bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
+```
+
+**Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. Training runs as
+root in both modes (the Triton patch needs it), so the files it creates are owned by root.
+
+**Triton patch.** Every run applies `runner/helpers/patches/12_fix_triton_expert_scheduling.sh`. It
+turns off Triton's gfx1250 expert scheduling, which otherwise makes Triton kernels fault or return NaN
+at random.
+
+## Reference
+
+Measured on 4x MI455X with `amdprimus/amdprimus:tas-20261011`, running inside a container. Primus-Turbo
+`dev/mi455x_v1` (a1800137) and the image's Primus-Turbo gave identical results:
+
+| Variant | ms/iter | TFLOP/s/GPU | Peak VRAM/GPU | lm loss at iteration 10 |
+| --- | --- | --- | --- | --- |
+| Default (no recompute) | 2202 | 646 | 197–199 GiB | 5.57984 |
+| `PRIMUS_RECOMPUTE_LAYER_IDS=0,3` | 2543 | 558 | 181–191 GiB | 5.57984 |
+| 1-GPU (one MI455X, another node) | 671 | 942 | - | 9.4595 |
+
+**Grad norms per iteration.**
+
+| Variant | Grad norms, iterations 1–10 |
+| --- | --- |
+| Default | 3.790, 3.758, 3.795, 4.995, 9.034, 10.183, 7.921, 7.203, 6.827, 6.680 |
+| 1-GPU | 3.193, 3.232, 3.314, 3.263, 3.210, 3.713, 3.362, 3.779, 3.329, 3.289 |
+
+**Profile of the default run, rank 0.**
+
+- Shares of GPU compute time: TE unfused attention 45% (its softmax alone 24%), MoE grouped GEMMs
+  22%, output layer 10%.
+- About 150 ms per iteration of MoE all-to-all is not overlapped with compute.
+- `PRIMUS_RECOMPUTE_LAYER_IDS=0,3` adds about 320 ms of compute and 37 ms of all-to-all per iteration.
+
+## Known issues
+
+- **Attention backends.** On this image only two attention backends run MLA (q/k 192, v 128): TE
+  `UnfusedDotProductAttention` (default) and Primus-Turbo Triton (`USE_TURBO_ATTENTION=True`).
+- **Silent gradient corruption on one GPU.** 9 of 29 ten-iteration 1-GPU runs left the reference grad
+  norms at a random iteration (a wrong value, NaN or Inf). All of these runs used the same GPU and
+  covered both attention backends. Megatron aborts only on NaN/Inf, so compare grad norms against a
+  reference run. None of six default-variant runs on another node deviated.
