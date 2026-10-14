@@ -19,10 +19,17 @@ rather than on a tag, a release branch, or HEAD:
   - The release branch often does not exist at doc-writing time. release/v26.7
     did not exist while v26.7.0 was already tagged.
 
-Resolution order per family: `ARG PRIMUS_BRANCH` from the release Dockerfile
-when it is a commit (the primus image pins one), otherwise the image's own
-/workspace/Primus HEAD from the snapshot (the JAX Dockerfile pins
-PRIMUS_BRANCH=main, so only the image knows).
+Resolution order per family: `--build-commit FAMILY=SHA` when given, then
+`ARG PRIMUS_BRANCH` from the release Dockerfile when it is a commit (the primus
+image pins one), otherwise the image's own /workspace/Primus HEAD from the
+snapshot (the JAX Dockerfile pinned PRIMUS_BRANCH=main through v26.7, so only the
+image knew).
+
+From v26.8 the JAX image ships no Primus at all -- it runs from a mounted
+checkout -- so there is no build commit to read. The Primus commit that pairs
+with such an image is an editorial choice (normally the release-branch commit
+that aligns the backend with the image), so it has to be passed explicitly with
+--build-commit rather than guessed.
 
 Also decides the release shape (full / single-family / patch) and which shape
 the user-facing checkout instruction must take, since writing
@@ -96,19 +103,31 @@ def git_remote_readable():
     return result.returncode == 0, (result.stderr.strip().splitlines() or [""])[0]
 
 
-def resolve_family(version, family, previous):
+def resolve_family(version, family, previous, override=None):
     """Everything known about one family for this release."""
     image = C.image_for(family, version)
     dockerfile = C.dockerfile_for(family, version)
     args = dockerfile_args(dockerfile)
     snapshot = C.load_snapshot(version, family)
+    ships_primus = snapshot is None or "Primus" in snapshot.get("workspace_repos", {})
 
     pinned = args.get("PRIMUS_BRANCH", "")
-    if SHA40.match(pinned):
+    if override:
+        resolved = git("rev-parse", "--verify", "--quiet", f"{override}^{{commit}}").stdout.strip()
+        build_commit = resolved or None
+        origin = (
+            f"--build-commit {override}"
+            if resolved
+            else f"unresolved: --build-commit {override} is not a local commit"
+        )
+    elif SHA40.match(pinned):
         build_commit, origin = pinned, "Dockerfile ARG PRIMUS_BRANCH"
     elif snapshot and snapshot.get("build_commit"):
         build_commit = snapshot["build_commit"]
         origin = f"image /workspace/Primus (Dockerfile pins PRIMUS_BRANCH={pinned or 'unset'})"
+    elif not ships_primus:
+        build_commit = None
+        origin = "unresolved: the image ships no /workspace/Primus; pass --build-commit " f"{family}=<sha>"
     else:
         build_commit, origin = None, "unresolved: probe the image first"
 
@@ -133,6 +152,7 @@ def resolve_family(version, family, previous):
         "build_commit_short": build_commit[:8] if build_commit else None,
         "build_commit_source": origin,
         "build_commit_known_locally": bool(build_commit) and ref_exists(build_commit),
+        "image_ships_primus": ships_primus,
         "previous_build_commit": (previous_snapshot or {}).get("build_commit"),
     }
 
@@ -158,12 +178,15 @@ def release_shape(families, version):
     return "unknown", present
 
 
-def build_state(version, previous, ssh_key):
+def build_state(version, previous, ssh_key, overrides=None):
     if ssh_key:
         os.environ["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key} -o IdentitiesOnly=yes"
 
+    overrides = overrides or {}
     previous = previous or previous_version_for(version)
-    families = {name: resolve_family(version, name, previous) for name in sorted(C.FAMILIES)}
+    families = {
+        name: resolve_family(version, name, previous, overrides.get(name)) for name in sorted(C.FAMILIES)
+    }
     shape, present = release_shape(families, version)
 
     tag = f"{version.lstrip('v')}.0"
@@ -208,9 +231,9 @@ def report(state):
         print(f"    {mark(bool(info['build_commit']))} build commit         {info['build_commit_short']}")
         print(f"         via                  {info['build_commit_source']}")
         if info["maxtext_branch"]:
-            state = info["maxtext_branch_exists_upstream"]
-            verdict = {True: "exists upstream", False: "NOT in ROCm/maxtext", None: "unverified"}[state]
-            print(f"    {mark(state is True)} MAXTEXT_BRANCH       {info['maxtext_branch']} ({verdict})")
+            upstream = info["maxtext_branch_exists_upstream"]
+            verdict = {True: "exists upstream", False: "NOT in ROCm/maxtext", None: "unverified"}[upstream]
+            print(f"    {mark(upstream is True)} MAXTEXT_BRANCH       {info['maxtext_branch']} ({verdict})")
     print(f"  {mark(state['tag']['exists'])} tag                  {state['tag']['ref']}")
     print(
         f"  {mark(state['release_branch']['exists_on_origin'])} release branch       {state['release_branch']['ref']} (on origin)"
@@ -231,7 +254,7 @@ def report(state):
         )
     for name, info in state["families"].items():
         if info["image_present"] and not info["build_commit"]:
-            blockers.append(f"{name}: build commit unresolved (run probe_image.py)")
+            blockers.append(f"{name}: build commit {info['build_commit_source']}")
         if info["image_present"] and not info["dockerfile_present"]:
             blockers.append(f"{name}: {info['dockerfile']} is missing")
         if info["dockerfile_verified"] == "differs":
@@ -256,10 +279,26 @@ def main():
     parser.add_argument("--version", required=True)
     parser.add_argument("--previous", help="previous release (defaults to the newest other snapshot)")
     parser.add_argument("--ssh-key", help="SSH key for origin; sets GIT_SSH_COMMAND")
+    parser.add_argument(
+        "--build-commit",
+        action="append",
+        default=[],
+        metavar="FAMILY=REV",
+        help="Primus commit to anchor a family on when its image ships no Primus checkout",
+    )
     parser.add_argument("--no-write", action="store_true", help="report without writing state.json")
     args = parser.parse_args()
 
-    state = build_state(args.version, args.previous, args.ssh_key)
+    overrides = {}
+    for item in args.build_commit:
+        family, _, rev = item.partition("=")
+        if family not in C.FAMILIES or not rev:
+            parser.error(
+                f"--build-commit expects FAMILY=REV with FAMILY in {sorted(C.FAMILIES)}, got {item!r}"
+            )
+        overrides[family] = rev
+
+    state = build_state(args.version, args.previous, args.ssh_key, overrides)
     blockers = report(state)
 
     if not args.no_write:

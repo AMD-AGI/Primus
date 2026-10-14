@@ -1,0 +1,93 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3.2_1B-maxtext-convergence}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Llama-3.2-1B BF16 convergence test on FineWeb-Edu, MaxText backend.
+#
+#   tools/convergence_test/run_convergence_test.sh --model maxtext/llama3.2_1B
+#
+# Same network, tokens and schedule as configs/megatron/llama3.2_1B: 2000 steps
+# x 128 sequences x 4096 = 1.05B token slots, lr 3e-4 cosine to 3e-5 after 100
+# warmup steps. The two backends are therefore directly comparable; see the
+# README for how far apart they are expected to land.
+#
+# The dataset is pre-tokenized parquet written by prepare_dataset.py --format
+# maxtext. PRIMUS_CONVERGENCE_DATA is exported by run_convergence_test.sh; the
+# default below is prepare_dataset.py's own output directory, relative to the
+# Primus root (the trainer's working directory).
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+    model: llama3.2_1B.yaml
+    overrides:
+      # run_convergence_test.sh appends a timestamp so every run gets its own
+      # TensorBoard directory under base_output_directory.
+      run_name: llama3.2_1B-maxtext-convergence
+      base_output_directory: ./output
+      enable_tensorboard: true
+      # pre_trainer.yaml enables an xplane profile at step 3, which also hides
+      # that step's metrics.
+      profiler: ""
+
+      steps: 2000
+      # 16 x 8 GPUs = 128 sequences per step, as in the Megatron recipe.
+      per_device_batch_size: 16
+      max_target_length: 4096
+
+      # Convergence-oriented schedule. MaxText's cosine schedule warms up
+      # linearly over warmup_steps_fraction * steps, then decays to
+      # learning_rate * learning_rate_final_fraction at the last step.
+      learning_rate: 3.0e-4
+      lr_schedule_type: cosine
+      learning_rate_final_fraction: 0.1
+      warmup_steps_fraction: 0.05
+      learning_rate_schedule_steps: -1
+      adam_b1: 0.9
+      adam_b2: 0.95
+      adam_eps: 1.0e-8
+      adam_weight_decay: 0.1
+      gradient_clipping_threshold: 1.0
+
+      # pre_trainer.yaml keeps the master weights and Adam moments in bf16 for
+      # throughput. Late in a run the updates fall below bf16 resolution and are
+      # rounded away, so a convergence reference uses fp32 master weights like
+      # Megatron does. Compute stays in bf16.
+      weight_dtype: float32
+      dtype: bfloat16
+
+      # parallel: FSDP across the node, data parallel across nodes
+      ici_fsdp_parallelism: -1
+      ici_data_parallelism: 1
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+      remat_policy: minimal_with_context
+
+      # data: pre-tokenized, pre-chunked rows, packed by grain with per-document
+      # attention masking (packing + max_segments_per_seq from pre_trainer.yaml).
+      dataset_type: grain
+      grain_file_type: parquet
+      grain_train_files: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-llama-3.2-1b-maxtext-4096}/train-*.parquet
+      grain_eval_files: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-llama-3.2-1b-maxtext-4096}/valid-*.parquet
+      train_data_columns: ["tokens"]
+      eval_data_columns: ["tokens"]
+      tokenize_train_data: false
+      tokenize_eval_data: false
+      # Still needed with pre-tokenized data: MaxText takes the pad id from it.
+      tokenizer_type: huggingface
+      tokenizer_path: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-llama-3.2-1b-maxtext-4096}/tokenizer
+      packing: true
+      grain_worker_count: 4
+      enable_data_shuffling: true
+      data_shuffle_seed: 0
+      init_weights_seed: 0
+
+      # validation loss every 100 steps over 10 x 128 x 4096 = 5.2M tokens
+      eval_interval: 100
+      eval_steps: 10
+
+      # ckpt
+      enable_checkpointing: false
+      async_checkpointing: false

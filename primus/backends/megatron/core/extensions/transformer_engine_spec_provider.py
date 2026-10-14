@@ -443,6 +443,22 @@ class DeepSeekV4SpecProvider(PrimusTurboSpecProvider):
         return ModuleSpec(module=(DeepseekV4LearnedRouter if learned else DeepseekV4HashRouter))
 
 
+class Glm5NextSpecProvider(PrimusTurboSpecProvider):
+    """GLM-5.3 (``glm5_next``) provider rooted on PrimusTurboSpecProvider.
+
+    GLM-5.3 needs no bespoke router or activation: the gate is ``noaux_tc``
+    (upstream ``TopKRouter``) and the clamped SwiGLU is upstream's
+    ``activation_func_clamp_value`` on the non-fused activation path.
+    """
+
+    def __init__(self, config=None):
+        super().__init__()
+        self.config = config
+
+    def glm5_norm_module(self) -> type:
+        return self.layer_norm(rms_norm=True)
+
+
 class KimiK3SpecProvider(PrimusTurboSpecProvider):
     """Kimi K3 provider rooted on PrimusTurboSpecProvider.
 
