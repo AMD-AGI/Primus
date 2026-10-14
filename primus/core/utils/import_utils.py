@@ -39,8 +39,8 @@ def get_model_provider(model_type="gpt"):
     Resolve model_provider across Megatron versions and model types.
 
     Args:
-        model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4' or
-            'kimi_k3'. Defaults to 'gpt'.
+        model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4',
+            'kimi_k3' or 'inkling'. Defaults to 'gpt'.
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
@@ -59,6 +59,16 @@ def get_model_provider(model_type="gpt"):
             kimi_k3_module.model_provider,
             kimi_k3_module.kimi_k3_builder,
         )
+
+    # Primus-owned: Inkling (Thinking Machines) text backbone
+    if model_type == "inkling":
+        inkling_module = importlib.import_module(
+            "primus.backends.megatron.core.models.inkling.inkling_builders"
+        )
+        log_rank_0(
+            f"[Primus][MegatronCompat] Loaded Inkling model_provider + builder from {inkling_module.__name__}"
+        )
+        return partial(inkling_module.model_provider, inkling_module.inkling_builder)
 
     # Primus-owned: DeepSeek-V4 (Phase 2 stub; full V4 wiring lands in Phase 3+)
     if model_type == "deepseek_v4":
