@@ -1,0 +1,6 @@
+recipe: gemma.gemma4
+flavor: gemma4_26b_finetune_config
+hf_path: google/gemma-4-26B-A4B
+
+dataset:
+    dataset_name: "rajpurkar/squad"

@@ -1,0 +1,16 @@
+extends:
+  - gemma4_31b.yaml
+
+# Layer-reduced variant of Gemma 4 31B (Dense) for single-GPU proxies.
+# Keeps the 31B hidden size, attention, head_dims and sliding-window shape, but
+# reduces depth. 6 preserves the published 5 sliding : 1 full attention ratio.
+#
+# Depth has to be expressed as a nested `model:` block rather than a flat
+# top-level `num_layers`. A Megatron-Bridge preset is a recipe pointer
+# (recipe / flavor / hf_path), not an architecture spec -- architecture comes
+# from the HF config named by hf_path -- so `num_layers` is neither a recipe
+# kwarg nor a top-level ConfigContainer field, and a flat one is dropped in
+# silence. parser.py keeps a preset's own `model` block instead of replacing it
+# with the preset name, which is what makes this work.
+model:
+  num_layers: ${PRIMUS_NUM_LAYERS:6}
