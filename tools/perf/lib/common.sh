@@ -5,11 +5,9 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Shared helpers for the Primus perf batch runners.
-#
-# This file holds only code that is new to tools/perf (config selection and
-# provenance capture). The runners keep their own copies of the pre-existing
-# helpers; nothing that already worked was moved here.
+# Shared helpers for the Primus perf batch runners: yq bootstrap, config
+# selection, EXTRA_ENV and provenance capture. Per-run helpers (config fields,
+# banner, footer) live in lib/run.sh.
 #
 # Callers must set PRIMUS_PATH (repo root) before sourcing.
 ###############################################################################
