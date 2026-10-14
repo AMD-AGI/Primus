@@ -1,0 +1,8 @@
+extends:
+  - model_base.yaml
+
+# Gemma 4 E2B dense (gemma4_small). Architecture from MaxText gemma4-e2b.yml.
+model_name: "gemma4-e2b"
+
+tokenizer_path: "src/maxtext/assets/tokenizers/tokenizer.gemma3"
+tokenizer_type: "sentencepiece"
