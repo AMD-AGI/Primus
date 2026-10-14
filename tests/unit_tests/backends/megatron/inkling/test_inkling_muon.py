@@ -88,7 +88,8 @@ def test_sliding_qkv_fails_with_model_shapes_and_splits_with_its_own():
     stub, seen = _stub_muon(model_shapes)
     out = make_orthogonalize(muon.TensorParallelMuon.orthogonalize)(stub, p, grad)
     assert seen == [(16 * 512, HIDDEN), (16 * 128, HIDDEN), (16 * 128, HIDDEN)]
-    torch.testing.assert_close(out, grad, rtol=0, atol=0)  # identity "Newton-Schulz": split and concat round-trip
+    # identity "Newton-Schulz": split and concat round-trip
+    torch.testing.assert_close(out, grad, rtol=0, atol=0)
     assert stub.qkv_split_shapes == list(model_shapes)
 
 

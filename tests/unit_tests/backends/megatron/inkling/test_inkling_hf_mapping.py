@@ -72,7 +72,11 @@ def test_fused_qkv_layout_groups_heads():
 def test_linear_qkv_matches_megatron_muon_split():
     """``linear_qkv`` is Megatron's 3-part grouped layout, which Muon's ``qkv_split_shapes`` assumes."""
     heads, groups, hd, hidden = 4, 2, 3, 5
-    q, k, v = torch.randn(heads * hd, hidden), torch.randn(groups * hd, hidden), torch.randn(groups * hd, hidden)
+    q, k, v = (
+        torch.randn(heads * hd, hidden),
+        torch.randn(groups * hd, hidden),
+        torch.randn(groups * hd, hidden),
+    )
     fused = fuse_qkv(q, k, v, heads=heads, groups=groups, head_dim=hd)
     split_shapes = [heads // groups * hd, hd, hd]
     mq, mk, mv = fused.view(groups, sum(split_shapes), hidden).split(split_shapes, dim=1)
