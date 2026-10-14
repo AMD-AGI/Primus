@@ -27,7 +27,7 @@
 # MaxText Llama 3/3.1 8B and 70B use the llama3_8B and llama3_70B prefixes.
 #
 # Usage:
-#   GPU=MI325X BACKEND=megatron CONFIG_FILE=tools/perf/perf-config.yaml \
+#   GPU=MI325X BACKEND=megatron CONFIG_FILE=tools/perf/perf_configs.yaml \
 #     bash tools/perf/run_batch.sh
 #
 ###############################################################################
@@ -117,6 +117,6 @@ MI300X:
     - examples/maxtext/configs/MI300X/llama3_70B-bf16-pretrain.yaml
     - examples/maxtext/configs/MI300X/llama3.3_70B-bf16-pretrain.yaml
     - examples/maxtext/configs/MI300X/mixtral_8x7B-bf16-pretrain.yaml
-    - examples/maxtext/configs/MI300X/mixtral_8x7B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/mixtral_8x7B-nanoo_fp8-pretrain.yaml
     - examples/maxtext/configs/MI300X/qwen3_14B-bf16-pretrain.yaml
-    - examples/maxtext/configs/MI300X/qwen3_14B-fp8-pretrain.yaml
+    - examples/maxtext/configs/MI300X/qwen3_14B-nanoo_fp8-pretrain.yaml
