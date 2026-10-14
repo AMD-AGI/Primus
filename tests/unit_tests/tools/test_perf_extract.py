@@ -471,6 +471,73 @@ def test_failure_reason(tmp_path, body, exit_code, footer_reason, expected):
     assert result["failure_detail"]
 
 
+def test_old_footers_still_get_the_right_reason(tmp_path):
+    # Older runners wrote no reason line: exit 130 was a Ctrl+C, 255 is not a signal.
+    old_interrupt = extract.parse_log_file(str(write_log(tmp_path, "", exit_code=130, name="a.log")))
+    assert (old_interrupt["status"], old_interrupt["failure_reason"]) == ("interrupted", "interrupted")
+    exit_255 = extract.parse_log_file(str(write_log(tmp_path, "srun: error\n", exit_code=255, name="b.log")))
+    assert exit_255["failure_reason"] == "exit"
+
+    # The older multi-node runner flagged watchdog kills in its footer, even with exit 0.
+    old_multinode = write_log(
+        tmp_path, ">>> [12:00:00] TIMEOUT — attempt exceeded MAX_RUN_SECONDS\n", exit_code=0,
+        name="m-abcd1234-MBS2-GBS16-rep1-failed-attempt1_20261001-000000.log",
+    )
+    old_multinode.write_text(
+        old_multinode.read_text().replace(
+            "# Elapsed (sec)   : 600\n", "# Elapsed (sec)   : 600\n# Failure pattern? : true\n"
+        )
+    )
+    result = extract.parse_log_file(str(old_multinode))
+    assert (result["status"], result["failure_reason"]) == ("failed", "timeout")
+
+
+def test_contention_reads_every_unit_and_counts_reserved_memory(tmp_path):
+    contended = (
+        "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB. GPU 0 has a total "
+        "capacity of 287.98 GiB of which 0 bytes is free. Of the allocated memory 0 bytes is "
+        "allocated by PyTorch, and 0 bytes is reserved by PyTorch but unallocated.\n"
+    )
+    fragmented = (
+        "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB. GPU 0 has a total "
+        "capacity of 287.98 GiB of which 1.00 GiB is free. Including non-PyTorch memory, this "
+        "process has 277.00 GiB memory in use. Of the allocated memory 100.00 GiB is allocated by "
+        "PyTorch, and 170.00 GiB is reserved by PyTorch but unallocated.\n"
+    )
+    a = extract.parse_log_file(str(write_log(tmp_path, contended, exit_code=1, name="a.log")))
+    b = extract.parse_log_file(str(write_log(tmp_path, fragmented, exit_code=1, name="b.log")))
+    assert a["failure_reason"] == "gpu_contended"
+    assert b["failure_reason"] == "oom"
+
+
+def test_primus_patch_lines_and_benign_exceptions_are_not_the_cause(tmp_path):
+    body = (
+        "[rank-0/8][INFO] [Patch] Applying megatron.dataloader_mp_context: spawn to avoid SIGSEGV\n"
+        "[rank-0/8][WARNING] ModuleNotFoundError: No module named 'apex'\n"
+        "[Patch] Skipped: x (backend version mismatch: 1.0 vs 2.0)\n"
+        "Traceback (most recent call last):\n"
+        '  File "train.py", line 1, in <module>\n'
+        "AssertionError: micro batch size must divide the global batch size\n"
+    )
+    result = extract.parse_log_file(str(write_log(tmp_path, body, exit_code=1)))
+    assert result["failure_reason"] == "python_error"
+    assert result["failure_detail"].startswith("AssertionError")
+    assert result["version_warnings"] == []
+
+
+def test_legacy_log_without_footer_is_not_guessed(tmp_path):
+    log = tmp_path / "legacy_exp.log"
+    log.write_text(
+        "starting benchmark\nsome preamble\nconfig seq_len=4096\n"
+        "EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml\n"
+        "CMD: --micro_batch_size 2\nrepeat: 1\n"
+        "[WARNING] ModuleNotFoundError: No module named 'apex'\n" + MEGATRON_LEGACY
+    )
+    result = extract.parse_log_file(str(log))
+    assert result["status"] == "unknown"
+    assert result["failure_reason"] is None
+
+
 def test_interrupted_and_incomplete_runs(tmp_path):
     interrupted = extract.parse_log_file(
         str(
@@ -614,3 +681,19 @@ def test_outputs_have_fixed_names_and_keep_old_column_order(tmp_path):
     assert data["parser_version"] == extract.PARSER_VERSION
     assert data["runs"][0]["status"] == "ok"
     assert isinstance(data["runs"][0]["version_warnings"], list)
+    # Written via a temporary file and renamed into place.
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_fractional_batch_size_is_written_plainly(tmp_path):
+    import csv
+
+    log = tmp_path / "frac.log"
+    log.write_text(
+        write_log(tmp_path, "", framework="maxtext", name="tmp.log")
+        .read_text()
+        .replace("# Micro Batch Size : 2", "# Micro Batch Size : 0.5")
+    )
+    (tmp_path / "tmp.log").unlink()
+    csv_path, _ = extract.write_outputs([extract.parse_log_file(str(log))], str(tmp_path))
+    assert next(csv.DictReader(open(csv_path)))["micro_batch_size"] == "0.5"

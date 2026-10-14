@@ -53,6 +53,8 @@
 #   POLL_INTERVAL    how often the log is checked, in seconds (default 15).
 #   GPU_BUSY_MIB     a GPU with more memory in use than this counts as busy,
 #                    and the run is refused (default 2048).
+#   GPU_BUSY_WAIT_SECONDS  how long busy GPUs may take to free up before the
+#                    run is refused (default 60).
 #   ALLOW_BUSY_GPUS=1  run even when the GPUs are busy.
 #   PULL_IMAGE=1     pull DOCKER_IMAGE before the batch even if the tag is
 #                    present, replacing a stale or re-tagged local copy.
@@ -124,8 +126,10 @@
 
 # Strict-ish mode: catch typos / unset vars, keep pipe exit codes accurate.
 # We intentionally do NOT use `set -e`: a single failing benchmark must not
-# abort the rest of the batch.
+# abort the rest of the batch. No job control (+m): under it a background
+# setsid forks, and the launcher's PID would no longer be its process group.
 set -uo pipefail
+set +m
 
 # ----------------------------- User Settings ---------------------------------
 # Every knob below is overridable from the environment, so a run never needs
@@ -386,10 +390,9 @@ for config_file in "${CONFIG_FILES[@]}"; do
             break
         fi
 
-        RUNS_STARTED=$((RUNS_STARTED + 1))
         result_file=$(run_log_name "$rep")
 
-        echo "[$(date '+%H:%M:%S')] [run ${RUNS_STARTED}/${TOTAL_PLANNED}] ${FRAMEWORK}/${TRAIN_SUITE}/${config_name} [${config_hash}] MBS=${MBS} GBS=${GBS} steps=${STEPS} rep ${rep}/${NUM_REPS}" \
+        echo "[$(date '+%H:%M:%S')] [run $((RUNS_STARTED + 1))/${TOTAL_PLANNED}] ${FRAMEWORK}/${TRAIN_SUITE}/${config_name} [${config_hash}] MBS=${MBS} GBS=${GBS} steps=${STEPS} rep ${rep}/${NUM_REPS}" \
             | tee -a "$SUMMARY_FILE"
         echo "                    -> $result_file" | tee -a "$SUMMARY_FILE"
 
@@ -397,8 +400,8 @@ for config_file in "${CONFIG_FILES[@]}"; do
             "$FRAMEWORK" "$MODEL" "$MBS" "$GBS" "$SEQ_LEN" "$STEPS" "$rep" "$NUM_REPS" \
             "$launcher_cmd" "$MODULE" "$TRAIN_SUITE"
 
+        RUNS_STARTED=$((RUNS_STARTED + 1))
         perf_launch_with_watchdog "$result_file" "$(( $(wc -l < "$result_file") + 1 ))"
-        print_per_run_footer "$result_file" "$RUN_EXIT_CODE" "$RUN_ELAPSED" "$RUN_FAILURE_REASON"
 
         if [ "$RUN_FAILURE_REASON" != "none" ]; then
             RUNS_FAILED=$((RUNS_FAILED + 1))

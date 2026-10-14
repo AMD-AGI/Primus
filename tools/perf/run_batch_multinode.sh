@@ -110,8 +110,10 @@
 
 # Strict-ish mode: catch typos / unset vars, keep pipe exit codes accurate.
 # We intentionally do NOT use `set -e`: a single failing benchmark must not
-# abort the rest of the batch.
+# abort the rest of the batch. No job control (+m): under it a background
+# setsid forks, and the launcher's PID would no longer be its process group.
 set -uo pipefail
+set +m
 
 # ----------------------------- User Settings ---------------------------------
 # Every knob below is overridable from the environment, so a run never needs
@@ -425,7 +427,6 @@ for config_file in "${CONFIG_FILES[@]}"; do
         fi
 
         attempts=$((attempts + 1))
-        RUNS_STARTED=$((RUNS_STARTED + 1))
         rep=$((good_runs + 1))
 
         # "Active" log file: written into during the run, renamed afterwards
@@ -442,8 +443,8 @@ for config_file in "${CONFIG_FILES[@]}"; do
             "$rep" "$NUM_REPS" "$launcher_cmd" "$MODULE" "$TRAIN_SUITE" \
             "$attempts" "$MAX_ATTEMPTS_PER_CONFIG"
 
+        RUNS_STARTED=$((RUNS_STARTED + 1))
         perf_launch_with_watchdog "$result_file" "$(( $(wc -l < "$result_file") + 1 ))"
-        print_per_run_footer "$result_file" "$RUN_EXIT_CODE" "$RUN_ELAPSED" "$RUN_FAILURE_REASON"
 
         if [ "$RUN_FAILURE_REASON" != "none" ]; then
             RUNS_FAILED=$((RUNS_FAILED + 1))

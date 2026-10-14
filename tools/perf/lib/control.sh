@@ -45,7 +45,8 @@ perf_log_stream() {
 perf_check_run_limits() {
     local name
     for name in MAX_RUN_SECONDS MAX_IDLE_SECONDS POLL_INTERVAL GPU_BUSY_MIB GPU_BUSY_WAIT_SECONDS; do
-        if ! [[ "${!name}" =~ ^[0-9]+$ ]]; then
+        # No leading zeros: bash arithmetic reads 08 as a bad octal number.
+        if ! [[ "${!name}" =~ ^(0|[1-9][0-9]*)$ ]]; then
             echo "[ERROR] $name must be a non-negative integer, got: '${!name}'" >&2
             return 1
         fi
@@ -86,12 +87,22 @@ perf_uses_containers() {
 }
 
 # Run a command on every node of the batch: locally for single node, once per
-# node through srun for multi-node.
+# node through srun for multi-node. PERF_ON_NODES_TIMEOUT (seconds) bounds it,
+# which the interrupt handler uses so cleanup cannot hang.
+#
+# `-n NNODES` pins exactly one task per node: spur's srun otherwise starts a
+# single task, and an inherited SLURM_NTASKS* would start several. --overlap
+# (not understood by spur) lets these short steps run next to, or right after,
+# a training step that is still completing.
 perf_on_nodes() {
+    local cmd=()
+    [ -n "${PERF_ON_NODES_TIMEOUT:-}" ] && cmd=(timeout "$PERF_ON_NODES_TIMEOUT")
     if [ "${PERF_MULTINODE:-0}" = 1 ]; then
-        srun -N "$NNODES" "$@"
+        cmd+=(srun -N "$NNODES" -n "$NNODES")
+        command -v spur >/dev/null 2>&1 || cmd+=(--overlap)
+        "${cmd[@]}" "$@" </dev/null
     else
-        "$@"
+        "${cmd[@]}" "$@"
     fi
 }
 
@@ -159,6 +170,10 @@ perf_stop_leftover_containers() {
 # Every node must then hold the same image: the same tag can name different
 # images on different nodes, and a multi-node run mixing them measures
 # neither. Mismatching image IDs refuse the batch.
+#
+# Private images: like runner/primus-cli-container.sh, log in first when
+# DOCKER_LOGIN_KEY / DOCKER_LOGIN_USER (/ DOCKER_LOGIN_REGISTRY) are set. The
+# key is read from the environment, never passed on a command line.
 PULL_IMAGE="${PULL_IMAGE:-0}"
 
 perf_ensure_image() {
@@ -172,6 +187,11 @@ perf_ensure_image() {
             exit 0
         fi
         if [ "$2" = 1 ] || ! docker image inspect "$1" >/dev/null 2>&1; then
+            if [ -n "${DOCKER_LOGIN_KEY:-}" ] && [ -n "${DOCKER_LOGIN_USER:-}" ]; then
+                printf "%s" "$DOCKER_LOGIN_KEY" | docker login ${DOCKER_LOGIN_REGISTRY:+"$DOCKER_LOGIN_REGISTRY"} \
+                    -u "$DOCKER_LOGIN_USER" --password-stdin >/dev/null 2>&1 ||
+                    echo "[WARN] $(hostname): docker login as $DOCKER_LOGIN_USER failed."
+            fi
             echo "[INFO] $(hostname): pulling $1 before the batch starts."
             if ! docker pull -q "$1" >/dev/null; then
                 echo "[ERROR] $(hostname): docker pull $1 failed."
@@ -207,11 +227,26 @@ GPU_BUSY_WAIT_SECONDS="${GPU_BUSY_WAIT_SECONDS:-60}"
 ALLOW_BUSY_GPUS="${ALLOW_BUSY_GPUS:-0}"
 PERF_GPU_CHECK="not checked yet"
 
-# One "<gpu index> <MiB in use>" line per GPU on this node; nothing when no
-# GPU tool works here. Shipped to remote nodes as source text, so it must
-# stay self-contained.
+# One "<gpu> <MiB in use>" line per GPU on this node; nothing when the memory
+# cannot be read. Shipped to remote nodes as source text, so it must stay
+# self-contained.
+#
+# The amdgpu driver's own counter in sysfs comes first: it needs no tool on
+# PATH, and unlike amd-smi it is readable from a Slurm job step that was not
+# given the GPUs as a resource (device cgroups do not cover sysfs), which is
+# how the multi-node check reaches the other nodes.
 perf_gpu_vram_used() {
-    local tool
+    local tool f card used found=0
+    for f in /sys/class/drm/card*/device/mem_info_vram_used; do
+        [ -r "$f" ] || continue
+        used=$(cat "$f" 2>/dev/null) || continue
+        card=${f#/sys/class/drm/}
+        card=${card%%/*}
+        echo "${card}($(basename "$(readlink -f "/sys/class/drm/$card/device")")) $((used / 1048576))"
+        found=1
+    done
+    [ "$found" = 1 ] && return 0
+
     if command -v amd-smi >/dev/null 2>&1; then
         tool=amd-smi
     elif command -v rocm-smi >/dev/null 2>&1; then
@@ -253,7 +288,7 @@ perf_check_gpus_idle_once() {
     local report busy max
     report=$(perf_on_nodes bash -c "$(declare -f perf_gpu_vram_used); h=\$(hostname); perf_gpu_vram_used | sed \"s/^/\$h /\"" 2>/dev/null)
     if [ -z "$report" ]; then
-        PERF_GPU_CHECK="not checked (no GPU memory readings from amd-smi or rocm-smi)"
+        PERF_GPU_CHECK="not checked (no GPU memory readings from sysfs, amd-smi or rocm-smi)"
         return 0
     fi
     max=$(awk '$3 > m { m = $3 } END { print m + 0 }' <<< "$report")
@@ -293,7 +328,9 @@ perf_prepare_gpus() {
             perf_log "        Free the GPUs, or set ALLOW_BUSY_GPUS=1 to run anyway (results may be meaningless)."
             return 1
         fi
-        sleep 5
+        # Backgrounded so a Ctrl+C is handled at once rather than after it.
+        sleep 5 &
+        wait $!
         waited=$((waited + 5))
     done
 }
@@ -317,17 +354,30 @@ perf_is_bad_ifname() {
     return 1
 }
 
+# True when a NCCL/Gloo interface setting selects a bridge or loopback. The
+# value can be a comma list, optionally with `=` (exact match) per entry; a
+# leading `^` makes it an exclusion list, which never selects one.
+perf_ifname_setting_is_bad() {
+    local entry entries
+    [ "${1#^}" = "$1" ] || return 1
+    IFS=',' read -r -a entries <<< "$1"
+    for entry in ${entries[@]+"${entries[@]}"}; do
+        perf_is_bad_ifname "${entry#=}" && return 0
+    done
+    return 1
+}
+
 perf_check_socket_ifname() {
     local var picked route
     for var in NCCL_SOCKET_IFNAME GLOO_SOCKET_IFNAME; do
-        if [ -n "${!var:-}" ] && perf_is_bad_ifname "${!var}"; then
-            perf_log "[ERROR] $var=${!var} is a bridge or loopback interface; RCCL/Gloo cannot bootstrap over it."
+        if [ -n "${!var:-}" ] && perf_ifname_setting_is_bad "${!var}"; then
+            perf_log "[ERROR] $var=${!var} selects a bridge or loopback interface; RCCL/Gloo cannot bootstrap over it."
             perf_log "        Export a real NIC instead (see \`ip -br addr\`), e.g. $var=eno0."
             return 1
         fi
     done
     if [ -n "${NCCL_SOCKET_IFNAME:-}" ]; then
-        PERF_NIC_CHECK="NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME (set by the user)"
+        PERF_NIC_CHECK="NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME (set in the environment or by the runner)"
         return 0
     fi
     if ! command -v ip >/dev/null 2>&1; then
@@ -402,42 +452,51 @@ perf_exit_reason() {
     fi
 }
 
-# Stop a run: SIGTERM to its process group, SIGKILL after 10 s, then stop its
-# containers, since `docker run` losing its client leaves the container up.
+# Stop a run: SIGTERM to its process group, SIGKILL to whatever in the group
+# is still alive after 10 s, then stop its containers, since `docker run`
+# losing its client leaves the container up.
 perf_kill_run() {
     local pid="$1" i
     if [ -n "$pid" ]; then
         kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
         for i in 1 2 3 4 5 6 7 8 9 10; do
-            kill -0 "$pid" 2>/dev/null || break
+            kill -0 -- "-$pid" 2>/dev/null || kill -0 "$pid" 2>/dev/null || break
             sleep 1
         done
-        kill -KILL -- "-$pid" 2>/dev/null
-        kill -KILL "$pid" 2>/dev/null
+        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
     fi
     perf_stop_batch_containers
 }
 
 # perf_launch_with_watchdog <result_file> <first output line of the log>
+# Also writes the run's footer, so a finished run always gets one.
 perf_launch_with_watchdog() {
     local result_file="$1" first_line="$2"
-    local start now size last_size=-1 last_change tick=0 reason=""
+    local start end now size last_size last_change tick=0 reason=""
     # Run inside the new session: the launcher's output, with secret values
-    # masked, appended to the log. PIPESTATUS[0] is the launcher's exit code.
+    # masked, appended to the log. The filter ignores the stop signals, so
+    # what the launcher prints while shutting down still reaches the log; it
+    # ends at EOF or with the final SIGKILL. PIPESTATUS[0] is the launcher's
+    # exit code.
     local runner_cmd
     runner_cmd="$(declare -f perf_redact_stream)"'
         set -o pipefail
-        "$@" 2>&1 | perf_redact_stream >> "$PERF_RUN_LOG"
+        "$@" 2>&1 | { trap "" TERM INT HUP; perf_redact_stream; } >> "$PERF_RUN_LOG"
         exit "${PIPESTATUS[0]}"'
 
-    tail -n +"$first_line" -F "$result_file" 2>/dev/null &
+    # --pid: the terminal mirror exits with the runner, even after a SIGKILL.
+    tail --pid=$$ -n +"$first_line" -F "$result_file" 2>/dev/null &
     TAIL_PID=$!
 
     start=$(date +%s)
     last_change=$start
+    last_size=$(stat -c %s "$result_file" 2>/dev/null || echo 0)
     CURRENT_RESULT_FILE="$result_file"
     CURRENT_RUN_START=$start
 
+    # Lets the interrupt handler adopt $! should a signal land between the
+    # launch and the RUN_PID assignment.
+    PERF_LAUNCHING=1
     if command -v setsid >/dev/null 2>&1; then
         PERF_RUN_LOG="$result_file" setsid bash -c "$runner_cmd" _ "${LAUNCH_ARGV[@]}" &
     else
@@ -446,6 +505,7 @@ perf_launch_with_watchdog() {
         PERF_RUN_LOG="$result_file" bash -c "$runner_cmd" _ "${LAUNCH_ARGV[@]}" &
     fi
     RUN_PID=$!
+    PERF_LAUNCHING=0
 
     while kill -0 "$RUN_PID" 2>/dev/null; do
         sleep 1
@@ -460,8 +520,9 @@ perf_launch_with_watchdog() {
         fi
 
         # FAIL_PATTERN is matched against the run output only, never the
-        # banner or the config dump above it.
-        if [ -n "$FAIL_PATTERN" ] && tail -n +"$first_line" "$result_file" 2>/dev/null | grep -qE -- "$FAIL_PATTERN"; then
+        # banner or the config dump above it. Not a pipeline: with pipefail,
+        # grep -q exiting at the first match makes tail fail with SIGPIPE.
+        if [ -n "$FAIL_PATTERN" ] && grep -qE -- "$FAIL_PATTERN" < <(tail -n +"$first_line" "$result_file" 2>/dev/null); then
             reason="fail_pattern: failure text matching FAIL_PATTERN appeared in the output"
         elif [ "$MAX_RUN_SECONDS" -gt 0 ] && [ $((now - start)) -ge "$MAX_RUN_SECONDS" ]; then
             reason="timeout: still running after MAX_RUN_SECONDS=${MAX_RUN_SECONDS}s"
@@ -486,16 +547,21 @@ perf_launch_with_watchdog() {
 
     wait "$RUN_PID" 2>/dev/null
     RUN_EXIT_CODE=$?
+    end=$(date +%s)
+    # A background child the launcher left behind must not outlive the run.
+    kill -TERM -- "-$RUN_PID" 2>/dev/null
     RUN_PID=""
+
+    RUN_ELAPSED=$((end - start))
+    RUN_FAILURE_REASON="${reason:-$(perf_exit_reason "$RUN_EXIT_CODE")}"
+    print_per_run_footer "$result_file" "$RUN_EXIT_CODE" "$RUN_ELAPSED" "$RUN_FAILURE_REASON"
+    CURRENT_RESULT_FILE=""
+
     # Let tail print the last lines before stopping it.
     sleep 1
     kill "$TAIL_PID" 2>/dev/null
     wait "$TAIL_PID" 2>/dev/null
     TAIL_PID=""
-
-    RUN_ELAPSED=$(( $(date +%s) - start ))
-    RUN_FAILURE_REASON="${reason:-$(perf_exit_reason "$RUN_EXIT_CODE")}"
-    CURRENT_RESULT_FILE=""
 }
 
 # ---------------------------------------------------------------------------
@@ -504,15 +570,23 @@ perf_launch_with_watchdog() {
 
 # Refresh results.csv / results.json from every log in RESULT_DIR. EXTRACT=0
 # skips it. A failure is reported but never changes the batch's exit code.
+#
+# Called from the interrupt handler too, which ignores INT/TERM; children
+# inherit that, so the default handling is restored for the extractor, and a
+# time limit keeps it from holding up the exit.
 perf_extract_results() {
-    local out
-    [ "${EXTRACT:-1}" = 1 ] || return 0
+    local out rc
+    [ "${EXTRACT:-1}" != 0 ] || return 0
     if ! command -v python3 >/dev/null 2>&1; then
         perf_log "[WARN] python3 not found; results.csv / results.json not written."
         return 0
     fi
-    if out=$(python3 "$SCRIPT_DIR/extract_results.py" --quiet "$RESULT_DIR" 2>&1); then
+    out=$(trap - INT TERM HUP; timeout 600 python3 "$SCRIPT_DIR/extract_results.py" --quiet "$RESULT_DIR" 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
         perf_log "$out"
+    elif [ "$rc" -eq 2 ]; then
+        perf_log "[INFO] no run logs in $RESULT_DIR yet; results.csv / results.json not written."
     else
         perf_log "$out"
         perf_log "[WARN] result extraction failed; rerun: python3 $SCRIPT_DIR/extract_results.py $RESULT_DIR"
@@ -532,11 +606,18 @@ perf_extract_results() {
 # Invoked through `trap`, so shellcheck sees no caller.
 # shellcheck disable=SC2317,SC2329
 perf_on_interrupt() {
-    trap '' INT TERM HUP
+    # PIPE as well: with `run_batch.sh | tee log`, Ctrl+C also kills tee, and
+    # the first write below must not kill this handler before cleanup.
+    trap '' INT TERM HUP PIPE
     echo "" >&2
     echo ">>> Interrupted. Stopping the current run; the rest of the batch is abandoned." >&2
 
+    if [ -z "$RUN_PID" ] && [ "${PERF_LAUNCHING:-0}" = 1 ] && [ "$!" != "$TAIL_PID" ]; then
+        RUN_PID=$!
+    fi
     [ -n "$TAIL_PID" ] && kill "$TAIL_PID" 2>/dev/null
+    # INT/TERM are ignored from here on, so cleanup gets a time bound instead.
+    PERF_ON_NODES_TIMEOUT=120
     if [ -n "$RUN_PID" ]; then
         perf_kill_run "$RUN_PID"
     else

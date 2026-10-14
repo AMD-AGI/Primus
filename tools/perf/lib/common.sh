@@ -515,13 +515,18 @@ perf_gpu_model() {
 }
 
 perf_gpu_count() {
-    local n=""
+    local n=0
     if command -v amd-smi >/dev/null 2>&1; then
         n=$(amd-smi list 2>/dev/null | grep -c '^GPU:')
-    elif command -v rocm-smi >/dev/null 2>&1; then
+    fi
+    if [ "$n" -eq 0 ] && command -v rocm-smi >/dev/null 2>&1; then
         n=$(rocm-smi --showid 2>/dev/null | grep -c '^GPU\[')
     fi
-    echo "${n:-unknown}"
+    if [ "$n" -gt 0 ]; then
+        echo "$n"
+    else
+        echo "unknown"
+    fi
 }
 
 # Catalog key for the hardware this node actually has, e.g. "MI325X".

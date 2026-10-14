@@ -25,7 +25,7 @@ export DOCKER_IMAGE=unifiedtrainingdockers.azurecr.io/utd/ci:<tag>   # required
 export BACKEND=maxtext,maxdiffusion                        # required
 export RESULT_DIR=~/primus-bench/mi325x-v26.7
 
-# GPU is auto-detected from rocm-smi; set it to override.
+# GPU is auto-detected from amd-smi / rocm-smi; set it to override.
 # GPU=MI325X
 
 # RCCL still needs a real NIC on a single node.
@@ -45,7 +45,7 @@ python3 tools/perf/extract_results.py "$RESULT_DIR"       # logs -> CSV
 `DRY_RUN=1` prints every selected config with its batch size, steps, log
 filename and exact launch command, then exits without touching docker or the
 GPUs. It does not need `HF_TOKEN` or `DOCKER_IMAGE`, so it also works on a
-login node.
+login node (set `GPU` there, since there is no GPU to detect it from).
 
 Multi-node, from inside a Slurm allocation (`salloc -N 8 -p mi325x`):
 
@@ -58,7 +58,7 @@ The runner can be invoked from any directory.
 ## Dependencies
 
 [`yq`](https://github.com/mikefarah/yq) v4+ is the only external requirement.
-Everything else (`bash`, `docker`, `git`, `python3`, `rocm-smi`) is already
+Everything else (`bash`, `docker`, `git`, `python3`, `amd-smi` or `rocm-smi`) is already
 present on a node that can run Primus.
 
 ### Automatic installation
@@ -325,24 +325,22 @@ address belongs to **docker0**.
 skip `docker0` / `lo` / `veth*`, but it never runs once `base_env.sh` has
 already set the variables.
 
-Export a real NIC before `run_batch.sh`. `NCCL_*` and `GLOO_*` are
-prefix-forwarded into the container, so a plain export is enough:
+The runner guards against this before the first run. An explicit
+`NCCL_SOCKET_IFNAME` or `GLOO_SOCKET_IFNAME` that selects `lo`, `docker*`,
+`br-*`, `veth*` or another bridge is refused (comma lists are checked entry
+by entry; a `^` exclusion list is accepted). When they are unset and Primus's
+own pick would be such an interface, the runner exports the default-route
+interface instead and logs it in the summary.
+
+To choose the interface yourself, export it before `run_batch.sh`. `NCCL_*`
+and `GLOO_*` are prefix-forwarded into the container, so a plain export is
+enough:
 
 ```bash
 export NCCL_SOCKET_IFNAME=eno0          # whatever `ip -br addr` shows, not docker0
 export GLOO_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME
 export NCCL_DEBUG=WARN                  # optional: confirm UniqueId / bootstrap
 ```
-
-Check `hostname -I` and `ip -br addr` on the node you will run on. Do not
-unset these hoping RCCL will pick: Primus will fill them from `hostname -I`
-again, which is how `docker0` got selected in the first place.
-
-The runner now guards against this before the first run: an explicit
-`NCCL_SOCKET_IFNAME` or `GLOO_SOCKET_IFNAME` naming `lo`, `docker*`, `br-*`,
-`veth*` or another bridge is refused, and when they are unset and Primus's
-own pick would be such an interface, the default-route interface is exported
-instead (and logged in the summary).
 
 ### Multi-node extras
 
@@ -371,12 +369,17 @@ batch and leaves the remaining runs unstarted.
   earlier batches of the same user left running (after a SIGKILL, a scheduler
   time limit or a lost session) are stopped. Other users' containers, and
   containers whose batch is still running on this host, are never touched.
+  "Still running" can only be checked on the host that ran the batch: on the
+  other nodes of a multi-node batch, any earlier batch of yours counts as
+  left over.
 - **GPUs idle.** No GPU may have more than `GPU_BUSY_MIB` of memory in use
   (idle MI355X GPUs show about 280 MiB). After `GPU_BUSY_WAIT_SECONDS` the
   batch refuses and lists the busy GPUs and the running containers.
-  `ALLOW_BUSY_GPUS=1` overrides this. When neither `amd-smi` nor `rocm-smi`
-  gives readings (e.g. `PRIMUS_MODE=direct` inside a container) the check is
-  recorded as "not checked" and does not block.
+  `ALLOW_BUSY_GPUS=1` overrides this. Memory is read from the amdgpu driver's
+  counters in sysfs, which needs no tool on `PATH` and also works from a Slurm
+  job step that was not given the GPUs (how the multi-node check reaches
+  every node); `amd-smi` / `rocm-smi` are the fallback. When nothing is
+  readable the check is recorded as "not checked" and does not block.
 - **NCCL interface usable.** See the socket interface section above.
 
 The result of the GPU check is recorded in every run's banner (`GPU check`).
@@ -418,7 +421,7 @@ Into `$RESULT_DIR`:
 
 | File | Contents |
 |---|---|
-| `<framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>_<stamp>.log` | Banner, full config dump, raw output, exit code and elapsed time. |
+| `<framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>_<stamp>.log` | Banner, full config dump, raw output, exit code, elapsed time and failure reason. |
 | `batch_summary_<stamp>.txt` | System info, the resolved config list with content hashes, per-run status. |
 | `batch_env_<stamp>.txt` | Full environment, **secrets redacted**. |
 | `batch_submodules_<stamp>.txt` | `git submodule status` — which vendored code ran. |
@@ -430,7 +433,8 @@ Into `$RESULT_DIR`:
 | `results.csv`, `results.json` | Every log in the directory parsed by `extract_results.py`; refreshed at the end of each batch. |
 
 `<stamp>` is shared by every artefact of one batch, so repeated batches in the
-same directory accumulate instead of overwriting.
+same directory accumulate instead of overwriting. Only `results.csv` and
+`results.json` are rewritten each time, from all the logs together.
 
 ## Stopping a batch
 
@@ -551,15 +555,19 @@ files keep working:
 `failure_reason` takes the runner's verdict from the footer when it is
 definitive (`timeout`, `idle`, `interrupted`). Otherwise the run output is
 searched, in this order, for `nic_error` (no usable socket interface), `oom`,
-`gpu_contended` (out of memory while PyTorch itself held less than half the
+`gpu_contended` (out of memory while this process held less than half the
 GPU, i.e. another process had it), `segfault`, `nccl_error` and
-`python_error` (the first exception other than torchrun's `ChildFailedError`).
+`python_error` (the exception at the end of the first traceback, other than
+torchrun's `ChildFailedError`). Primus's own `[Patch]` log lines are ignored.
 Failing that it is `killed` (SIGKILL with no error in the log, e.g. the host
-OOM killer), `signal`, `fail_pattern` or `exit`.
+OOM killer), `signal`, `fail_pattern`, `exit`, or `unknown`; a failed run
+always has a reason. `incomplete` rows only get one when the output shows a
+cause.
 
-Logs written before these fields existed simply leave the columns empty, and
-older logs still get a `status` and a `failure_reason` from their exit code
-and output.
+Logs written before these fields existed simply leave the columns empty.
+Older logs still get a `status` and a `failure_reason`: from their exit code
+(130 counts as `interrupted`), from the older multi-node footer
+(`Failure pattern? : true`), and from their output.
 
 ## Relationship to the other benchmark tools
 
