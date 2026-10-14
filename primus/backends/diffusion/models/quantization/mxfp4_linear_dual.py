@@ -4593,15 +4593,20 @@ def _prequantize_fp8_all_gather(shards: list, groups: list, amax: torch.Tensor) 
 # ---------------------------------------------------------------------------
 # FSDP2 packs each group's unsharded grads into the reduce-scatter input with `_chunk_cat` on the
 # compute stream, ~8 ms/step inside the GPU-bound backward. The same copy runs here on its own
-# stream: it waits for the grads, the reduce-scatter stream waits for it, and the grads and the
-# input are recorded on it so the allocator keeps them until it finishes. The bytes are
+# stream: it waits for the grads and the reduce-scatter stream waits for it. The bytes are
 # chunk_cat's own.
+# No record_stream: a recorded block is only reused once the GPU reaches an event taken when the
+# CPU frees it, so with the CPU steps ahead every step's grads and inputs stay parked and the
+# caching allocator grows until RCCL and HSA have no device memory left. The input is already
+# kept by FSDP2 until the compute stream waits on its reduce-scatter. The grads are held here and
+# released on the next copy-in, after the compute stream waits on the copy that read them.
 # copy_in is not handed the reduce-scatter stream, so the foreach_reduce wrapper publishes it for
 # the duration of the call.
 
 _RS_STREAM = None
 _RS_COPY_STREAM = None
 _RS_COPY_CHECKS = 0
+_RS_COPY_PENDING = None
 
 
 def _foreach_reduce_publishing_stream(*args, **kwargs):
@@ -4614,7 +4619,7 @@ def _foreach_reduce_publishing_stream(*args, **kwargs):
 
 
 def _rs_copy_in_side_stream(unsharded_grads, reduce_scatter_input, world_size):
-    global _RS_COPY_STREAM, _RS_COPY_CHECKS
+    global _RS_COPY_STREAM, _RS_COPY_CHECKS, _RS_COPY_PENDING
     if _RS_STREAM is None:
         return _RS_COPY_IN_ORIG(unsharded_grads, reduce_scatter_input, world_size)
     if _RS_COPY_STREAM is None:
@@ -4623,12 +4628,13 @@ def _rs_copy_in_side_stream(unsharded_grads, reduce_scatter_input, world_size):
             f"FLUX_FSDP_RS_COPY_IN=side: reduce-scatter copy-in on its own stream (check {_RS_COPY_CHECK})"
         )
     copy_stream, current = _RS_COPY_STREAM, torch.cuda.current_stream()
+    if _RS_COPY_PENDING is not None:
+        current.wait_event(_RS_COPY_PENDING[0])
+        _RS_COPY_PENDING = None
     copy_stream.wait_stream(current)
     with torch.cuda.stream(copy_stream):
         _RS_COPY_IN_ORIG(unsharded_grads, reduce_scatter_input, world_size)
-    for g in unsharded_grads:
-        g.record_stream(copy_stream)
-    reduce_scatter_input.record_stream(copy_stream)
+        _RS_COPY_PENDING = (copy_stream.record_event(), list(unsharded_grads))
     _RS_STREAM.wait_stream(copy_stream)
     if _RS_COPY_CHECK and _RS_COPY_CHECKS < 64:
         _RS_COPY_CHECKS += 1
