@@ -663,6 +663,26 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         else:
             base_model_provider = get_model_provider()
 
+        hylo_stage = getattr(self.backend_args, "hylo_distill_stage", None)
+        if hylo_stage:
+            if self.peft is not None:
+                raise ValueError("Native HyLo SFT does not support LoRA")
+            if self.model_type != "mamba":
+                raise ValueError("Native HyLo SFT requires model_type: mamba")
+            from primus.backends.megatron.training.hylo_distillation import (
+                create_sft_forward_step,
+                validate_hylo_args,
+                wrap_model_provider,
+            )
+
+            validate_hylo_args(self.backend_args)
+            base_model_provider = wrap_model_provider(base_model_provider, self.backend_args)
+            forward_step = create_sft_forward_step()
+            log_rank_0(
+                "Using native HyLo pure-KL SFT with teacher "
+                f"{self.backend_args.hylo_teacher_checkpoint}"
+            )
+
         if self.peft is not None:
             model_provider = self._create_model_provider_with_lora(base_model_provider)
             log_rank_0("Using LoRA-enabled model provider")

@@ -41,6 +41,7 @@ This guide covers the complete workflow: environment setup, data preparation, pr
 | [Pure KDA guide](kda-guide.md) | End-to-end 300M pure Kimi Delta Attention (KDA) recipe, FLA-validated on 8× MI300X |
 | [GDN ⇄ FLA parity](gdn-fla-parity.md) | Every Primus/Megatron-LM change required for GDN to match the FLA reference implementation |
 | [KDA ⇄ FLA parity](kda-fla-parity.md) | Every Primus/Megatron-LM change required for KDA to match the FLA reference implementation |
+| [Native HyLo training](hylo-native-training.md) | Enhanced-ILD and pure-KL 4MLA12GDN 1B training with dense Llama teachers |
 
 ---
 

@@ -35,12 +35,12 @@ This version uses the from-teacher initialization in [HyLo](https://github.com/A
 | HyLo (`feat/HyLo`) | Primus checkpoint |
 | --- | --- |
 | `DeepseekV3Attention.re_init_q` writes `q_a_proj` and the nope rows of `q_b_proj` | `self_attention.linear_q_down_proj.weight` and the nope rows of `linear_q_up_proj.weight` |
-| `re_init_kv` writes `kv_a_proj_with_mqa` and `kv_b_proj` | the leading `kv_lora_rank` rows of `linear_kv_down_proj.weight`, and `linear_kv_up_proj.weight` |
+| `re_init_kv` writes `kv_a_proj_with_mqa` and `kv_b_proj` | `linear_kv_down_proj.weight` (compressed rows plus the averaged teacher-K RoPE tail) and `linear_kv_up_proj.weight` |
 | `out_proj` copies `o_proj[:, :mla_o_in]` | overlapping columns of `self_attention.linear_proj.weight` |
 | `_copy_llama_attn_to_gdn` writes `gdn.q_proj` / `k_proj` / `v_proj` / `o_proj` after repeating GQA K and V | the `q`, `k`, `v` slices of fused `mixer.in_proj.weight` (the order in `convert_gdn_hybrid_to_fla_hf.py`) and `mixer.out_proj.weight` |
 | Mamba `in_proj[d_inner:d_inner+d_xb] <- V`, then K, then Q into `C`, and `out_proj <- o_proj` | the same slices when `mixer.in_proj` has HyLo's width `2 * d_inner + 2 * d_xb + nheads` |
 
-RoPE rows in `linear_q_up_proj` and the rows of `linear_kv_down_proj` after `kv_lora_rank` stay at hybrid init. HyLo's SVD does not fill those channels. They are listed in `hylo_partial`.
+`linear_q_up_proj` keeps both the nope rows and the last `qk_rope_head_dim` rows of each head, which is the `q_b_proj` HyLo writes. `linear_kv_down_proj` is the low-rank factor followed by the mean teacher K's last `qk_rope_head_dim` rows, which is the `kv_a_proj_with_mqa` HyLo writes. Those tensors are a full replace, not a partial overlay.
 
 GDN `g_proj`, `a_proj`, `b_proj`, `A_log`, `dt_bias`, and `conv1d` stay at hybrid init, matching the comment in `_copy_llama_attn_to_gdn`. HyLo's `post_attention_layernorm` is the norm in front of the MLP; on a Primus stack that tensor lives on the following `-` sublayer and is copied with the MLP.
 

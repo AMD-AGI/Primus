@@ -10,10 +10,12 @@ import torch
 
 from primus.backends.megatron.checkpoint.hybrid_upcycle import (
     UpcycleLayout,
+    assemble_ild_state_dict,
     attention_ratio_from_args,
     build_upcycle_checkpoint,
     count_decoder_layers,
     hybrid_pattern_from_ratio,
+    hylo_reinit_kv,
     hylo_reinit_q,
     load_checkpoint,
     main,
@@ -251,7 +253,7 @@ def test_gdn_mixer_copies_hylo_qkv_slices():
     assert report.mixer_layers_left_initialized == []
 
 
-def test_mla_slot_uses_hylo_svd_and_keeps_rope_rows():
+def test_mla_slot_matches_hylo_svd_including_rope_rows():
     hidden, heads, kv_heads, head_dim = 4, 2, 2, 2
     nope, rope, v_head, q_rank, kv_rank = 1, 1, 1, 2, 2
     q = torch.arange(heads * head_dim * hidden, dtype=torch.float32).reshape(heads * head_dim, hidden) + 1
@@ -285,15 +287,37 @@ def test_mla_slot_uses_hylo_svd_and_keeps_rope_rows():
         v_head_dim=v_head,
     )
     upcycled, report = upcycle_state_dict(dense, hybrid, "*-", layout)
-    split_q, _, _ = split_fused_qkv(dense["decoder.layers.0.self_attention.linear_qkv.weight"], heads, kv_heads, head_dim)
-    q_down, q_up_nope = hylo_reinit_q(split_q, q_rank, heads, head_dim, nope)
+    split_q, split_k, split_v = split_fused_qkv(
+        dense["decoder.layers.0.self_attention.linear_qkv.weight"], heads, kv_heads, head_dim
+    )
+    q_down, q_up = hylo_reinit_q(split_q, q_rank, heads, head_dim, nope, rope)
+    kv_down, kv_up = hylo_reinit_kv(split_k, split_v, kv_heads, head_dim, kv_heads, kv_rank, nope, rope, v_head)
     assert torch.equal(upcycled["decoder.layers.0.self_attention.linear_q_down_proj.weight"], q_down)
-    q_up = upcycled["decoder.layers.0.self_attention.linear_q_up_proj.weight"].view(heads, nope + rope, q_rank)
-    assert torch.equal(q_up[:, :nope, :].reshape(-1, q_rank), q_up_nope)
-    assert torch.equal(q_up[:, nope:, :], torch.zeros(heads, rope, q_rank))
-    assert "decoder.layers.0.self_attention.linear_q_up_proj.weight" in report.hylo_partial
-    assert "decoder.layers.0.self_attention.linear_kv_down_proj.weight" in report.hylo_partial
+    assert torch.equal(upcycled["decoder.layers.0.self_attention.linear_q_up_proj.weight"], q_up)
+    assert torch.equal(upcycled["decoder.layers.0.self_attention.linear_kv_down_proj.weight"], kv_down)
+    assert torch.equal(upcycled["decoder.layers.0.self_attention.linear_kv_up_proj.weight"], kv_up)
+    assert "decoder.layers.0.self_attention.linear_q_up_proj.weight" not in report.hylo_partial
+    assert "decoder.layers.0.self_attention.linear_kv_down_proj.weight" not in report.hylo_partial
     assert torch.equal(
         upcycled["decoder.layers.0.self_attention.linear_proj.weight"],
         dense["decoder.layers.0.self_attention.linear_proj.weight"][:, : heads * v_head],
     )
+
+
+def test_assemble_ild_state_dict_selects_complete_layer_pairs():
+    pattern = "*-M-"
+    base = _hybrid_state(pattern)
+    gdn = {key: value.clone() for key, value in base.items()}
+    mla = {key: value.clone() for key, value in base.items()}
+    for key in gdn:
+        if key.startswith("decoder.layers."):
+            gdn[key].fill_(3.0)
+            mla[key].fill_(7.0)
+    assembled = assemble_ild_state_dict(base, gdn, mla, pattern)
+    for key, value in assembled.items():
+        if key.startswith(("decoder.layers.0.", "decoder.layers.1.")):
+            assert torch.all(value == 7.0)
+        elif key.startswith(("decoder.layers.2.", "decoder.layers.3.")):
+            assert torch.all(value == 3.0)
+        elif not key.startswith("decoder.layers."):
+            assert torch.equal(value, base[key])

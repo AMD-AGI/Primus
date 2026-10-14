@@ -1,0 +1,60 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:hylo-4mla12gdn-1b-8k-sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    model: hylo_gdn_1B_hybrid.yaml
+    overrides:
+      stage: sft
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hylo_gdn_hybrid_stack_spec']
+      hybrid_attention_ratio: 0.25
+      hybrid_override_pattern: "M-*-M-M-M-*-M-M-M-M-*-M-M-M-*-M-"
+
+      # Exact released 8K objective: pure KL(teacher || student), no CE.
+      hylo_distill_stage: sft
+      hylo_teacher_checkpoint: ${HYLO_LLAMA31_8B_MEGATRON_CKPT:./data/checkpoints/llama31-8b-megatron}
+      hylo_teacher_num_layers: 32
+      hylo_kl_weight: 1.0
+      hylo_ce_weight: 0.0
+      hylo_kl_chunk_size: 4096
+
+      load: ${HYLO_STAGE2_INIT_CKPT:./data/checkpoints/hylo-4mla12gdn-1b-stage2-init}
+      save: ${HYLO_SFT_OUTPUT:./output/hylo-4mla12gdn-1b-8k-sft}
+      finetune: true
+      no_load_optim: true
+      no_load_rng: true
+      auto_continue_train: false
+      ckpt_format: torch
+      save_interval: 1000
+      disable_last_saving: ${HYLO_DISABLE_LAST_SAVING:false}
+
+      tokenizer_model: ${HYLO_TOKENIZER_MODEL:meta-llama/Llama-3.2-1B-Instruct}
+      sft_dataset_name: ${HYLO_SFT_DATASET:JunxiongWang/sftdatasetv3}
+      sft_conversation_format: openai
+      seq_length: ${HYLO_SEQ_LENGTH:8192}
+      max_position_embeddings: 131072
+      rotary_scaling_factor: 4.0
+      original_max_position_embeddings: 2048
+      micro_batch_size: ${HYLO_MICRO_BATCH_SIZE:4}
+      global_batch_size: ${HYLO_GLOBAL_BATCH_SIZE:32}
+      train_iters: ${HYLO_SFT_TRAIN_ITERS:1000}
+      lr: 6.0e-5
+      min_lr: 0.0
+      lr_decay_style: cosine
+      lr_warmup_iters: 0
+      lr_warmup_fraction: 0.01
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      use_distributed_optimizer: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      fused_ce_mode: 0
+      bf16: true
+      eval_iters: 0
+      lora: {enabled: false}

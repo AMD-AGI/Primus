@@ -292,6 +292,54 @@ def upcycle_state_dict(
     return upcycled, report
 
 
+def assemble_ild_state_dict(
+    hybrid_base_state: Mapping[str, torch.Tensor],
+    gdn_ild_state: Mapping[str, torch.Tensor],
+    mla_ild_state: Mapping[str, torch.Tensor],
+    pattern: str,
+) -> dict[str, torch.Tensor]:
+    """Assemble HyLo stage 2 from all-GDN and all-MLA Enhanced-ILD checkpoints.
+
+    Global tensors remain from ``hybrid_base_state`` (the upcycled Llama
+    backbone). Each mixer/MLP pair is copied wholesale from the corresponding
+    stage-1 checkpoint, matching ``HybridModelWrapper.init_distillation``.
+    """
+    num_sublayers = count_decoder_layers(hybrid_base_state)
+    if num_sublayers % 2:
+        raise ValueError("HyLo ILD assembly requires paired mixer/MLP sublayers")
+    pattern = validate_upcycle_pattern(pattern, num_sublayers // 2)
+    for name, state in (("GDN", gdn_ild_state), ("MLA", mla_ild_state)):
+        if count_decoder_layers(state) != num_sublayers:
+            raise ValueError(
+                f"{name} ILD checkpoint has {count_decoder_layers(state)} sublayers; "
+                f"expected {num_sublayers}"
+            )
+
+    assembled = {key: value for key, value in hybrid_base_state.items()}
+    for block in range(num_sublayers // 2):
+        symbol = pattern[2 * block]
+        source = mla_ild_state if symbol == ATTENTION else gdn_ild_state
+        for layer_index in (2 * block, 2 * block + 1):
+            prefix = f"decoder.layers.{layer_index}."
+            target_keys = {key for key in assembled if key.startswith(prefix)}
+            source_keys = {key for key in source if key.startswith(prefix)}
+            if target_keys != source_keys:
+                missing = sorted(target_keys - source_keys)
+                extra = sorted(source_keys - target_keys)
+                raise ValueError(
+                    f"ILD layer {layer_index} layout mismatch; "
+                    f"missing={missing[:5]}, extra={extra[:5]}"
+                )
+            for key in target_keys:
+                if tuple(assembled[key].shape) != tuple(source[key].shape):
+                    raise ValueError(
+                        f"ILD tensor {key}: target {tuple(assembled[key].shape)} "
+                        f"!= source {tuple(source[key].shape)}"
+                    )
+                assembled[key] = source[key].detach().to(device="cpu").clone()
+    return assembled
+
+
 def build_upcycle_checkpoint(hybrid_checkpoint: dict, upcycled_state: Mapping[str, torch.Tensor]) -> dict:
     """Return a legacy Megatron checkpoint envelope at iteration 0.
 
@@ -578,29 +626,30 @@ def _copy_mla_hylo(
 ) -> None:
     """Port of HyLo ``init_with_svd`` onto Megatron MLA tensor names.
 
-    ``re_init_q`` / ``re_init_kv`` fill the compressed nope projections. RoPE
-    channels in ``linear_q_up_proj`` and ``linear_kv_down_proj`` are not part of
-    that SVD, so they stay at hybrid init. ``out_proj`` copies the overlapping
-    columns of the dense output projection.
+    ``re_init_q`` writes ``q_a_proj`` and a ``q_b_proj`` that keeps the nope
+    rows plus the last ``qk_rope_head_dim`` rows of each head. ``re_init_kv``
+    writes ``kv_b_proj`` and a ``kv_a_proj_with_mqa`` whose tail is the mean of
+    the teacher K over KV heads, not a leftover from the hybrid initializer.
+    ``out_proj`` copies the overlapping columns of the dense output projection.
     """
     _copy_norm_alias(dense, hybrid, source, target, "input_layernorm.weight", _ATTN_NORM_ALIASES, report)
-    if not _mla_ranks_ready(layout):
+    if not _mla_ranks_ready(layout) or not layout.qk_rope_head_dim:
         for relative, target_key in sorted(target.items()):
             if relative.startswith("self_attention.linear_q_") or relative.startswith("self_attention.linear_kv_"):
                 report.attention_left_initialized.append(target_key)
         return
 
     q, k, v = _dense_qkv(dense, dense_index, source, layout)
-    q_down, q_up_nope = hylo_reinit_q(
+    q_down, q_up = hylo_reinit_q(
         q,
         layout.q_lora_rank,
         layout.num_attention_heads,
         layout.head_dim,
         layout.qk_nope_head_dim,
+        layout.qk_rope_head_dim,
     )
     _assign_tensor(hybrid, target["self_attention.linear_q_down_proj.weight"], q_down, report, partial=False)
-    q_up_key = target["self_attention.linear_q_up_proj.weight"]
-    _write_q_up_nope(hybrid, q_up_key, q_up_nope, layout, report)
+    _assign_tensor(hybrid, target["self_attention.linear_q_up_proj.weight"], q_up, report, partial=False)
 
     kv_down, kv_up = hylo_reinit_kv(
         k,
@@ -610,10 +659,10 @@ def _copy_mla_hylo(
         _mla_kv_heads(hybrid[target["self_attention.linear_kv_up_proj.weight"]], layout),
         layout.kv_lora_rank,
         layout.qk_nope_head_dim,
+        layout.qk_rope_head_dim,
         layout.v_head_dim,
     )
-    kv_down_key = target["self_attention.linear_kv_down_proj.weight"]
-    _write_kv_down_prefix(hybrid, kv_down_key, kv_down, report)
+    _assign_tensor(hybrid, target["self_attention.linear_kv_down_proj.weight"], kv_down, report, partial=False)
     _assign_tensor(hybrid, target["self_attention.linear_kv_up_proj.weight"], kv_up, report, partial=False)
 
     if "self_attention.linear_proj.weight" in target:
@@ -751,18 +800,20 @@ def hylo_reinit_q(
     num_heads: int,
     head_dim: int,
     qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``DeepseekV3Attention.re_init_q`` without the module.
 
-    Returns ``(q_a_proj, q_b_nope)`` with shapes ``(q_lora_rank, hidden)`` and
-    ``(num_heads * qk_nope_head_dim, q_lora_rank)``.
+    Returns ``(q_a_proj, q_b_proj)``. ``q_b_proj`` keeps the leading nope rows
+    and the trailing RoPE rows of each head, matching HyLo's ``torch.cat``.
     """
-    u_q, s_q, v_q = torch.linalg.svd(q_matrix.float(), full_matrices=True)
+    u_q, s_q, v_q = torch.linalg.svd(q_matrix.float())
     q_down = (torch.diag(s_q[:q_lora_rank]) @ v_q[:q_lora_rank, :]).to(dtype=q_matrix.dtype)
     q_up = u_q[:, :q_lora_rank].to(dtype=q_matrix.dtype)
-    q_up = q_up.view(num_heads, head_dim, q_lora_rank)[:, :qk_nope_head_dim, :]
-    q_up = q_up.reshape(num_heads * qk_nope_head_dim, q_lora_rank).contiguous()
-    return q_down.contiguous(), q_up
+    q_up = q_up.view(num_heads, head_dim, q_lora_rank)
+    q_up = torch.cat((q_up[:, :qk_nope_head_dim, :], q_up[:, -qk_rope_head_dim:, :]), dim=1)
+    q_up = q_up.reshape(num_heads * (qk_nope_head_dim + qk_rope_head_dim), q_lora_rank)
+    return q_down.contiguous(), q_up.contiguous()
 
 
 def hylo_reinit_kv(
@@ -773,25 +824,29 @@ def hylo_reinit_kv(
     num_kv_heads: int,
     kv_lora_rank: int,
     qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
     v_head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``DeepseekV3Attention.re_init_kv`` without the module.
 
-    Returns ``(kv_a, kv_b)``. ``kv_a`` is the compressed rows only; Megatron's
-    ``linear_kv_down_proj`` also stores RoPE rows after those.
+    Returns ``(kv_a_proj_with_mqa, kv_b_proj)``. The down projection is the
+    rank-``kv_lora_rank`` factor followed by the last ``qk_rope_head_dim`` rows
+    of the teacher K, averaged over KV heads before the GQA repeat.
     """
     if num_kv_heads % num_kv_heads_init != 0:
         raise ValueError(
             f"MLA kv heads ({num_kv_heads}) must be a multiple of dense kv heads ({num_kv_heads_init})"
         )
     group_size = num_kv_heads // num_kv_heads_init
-    k_matrix = k_matrix.view(num_kv_heads_init, head_dim, -1).repeat_interleave(group_size, dim=0)
+    k_heads = k_matrix.view(num_kv_heads_init, head_dim, -1)
+    k_avg = torch.mean(k_heads, dim=0)
+    k_matrix = k_heads.repeat_interleave(group_size, dim=0).reshape(num_kv_heads * head_dim, -1)
     v_matrix = v_matrix.view(num_kv_heads_init, head_dim, -1).repeat_interleave(group_size, dim=0)
-    k_matrix = k_matrix.reshape(num_kv_heads * head_dim, -1)
     v_matrix = v_matrix.reshape(num_kv_heads * head_dim, -1)
     kv_matrix = torch.cat((k_matrix, v_matrix), dim=0)
-    u_kv, s_kv, v_kv = torch.linalg.svd(kv_matrix.float(), full_matrices=True)
+    u_kv, s_kv, v_kv = torch.linalg.svd(kv_matrix.float())
     kv_down = (torch.diag(s_kv[:kv_lora_rank]) @ v_kv[:kv_lora_rank, :]).to(dtype=k_matrix.dtype)
+    kv_down = torch.cat((kv_down, k_avg[-qk_rope_head_dim:, :].to(dtype=k_matrix.dtype)), dim=0)
 
     k_new = u_kv[:, :kv_lora_rank][: num_kv_heads * head_dim, :]
     k_new = k_new.view(num_kv_heads, head_dim, kv_lora_rank)[:, :qk_nope_head_dim, :]
@@ -920,43 +975,6 @@ def _copy_norm_alias(
         report.attention_left_initialized.append(target[relative])
         return
     _assign_matching(dense, hybrid, source[source_relative], target[relative], report, required=True)
-
-
-def _write_q_up_nope(
-    hybrid: dict, key: str, q_up_nope: torch.Tensor, layout: UpcycleLayout, report: UpcycleReport
-) -> None:
-    current = hybrid[key].detach().to(device="cpu").clone()
-    nope = layout.qk_nope_head_dim
-    rope = layout.qk_rope_head_dim or 0
-    head_span = nope + rope
-    if rope == 0 and tuple(current.shape) == tuple(q_up_nope.shape):
-        hybrid[key] = q_up_nope.to(dtype=current.dtype).contiguous()
-        report.copied.append(key)
-        return
-    if current.shape[0] != layout.num_attention_heads * head_span:
-        raise ValueError(
-            f"{key} rows {current.shape[0]} != {layout.num_attention_heads} * {head_span}"
-        )
-    viewed = current.view(layout.num_attention_heads, head_span, current.shape[1])
-    viewed[:, :nope, :] = q_up_nope.to(dtype=current.dtype).view(layout.num_attention_heads, nope, -1)
-    hybrid[key] = viewed.reshape(current.shape).contiguous()
-    report.copied.append(key)
-    if rope:
-        report.hylo_partial.append(key)
-
-
-def _write_kv_down_prefix(hybrid: dict, key: str, kv_down: torch.Tensor, report: UpcycleReport) -> None:
-    current = hybrid[key].detach().to(device="cpu").clone()
-    rows = kv_down.shape[0]
-    if current.shape[0] < rows or current.shape[1] != kv_down.shape[1]:
-        raise ValueError(
-            f"{key} is {tuple(current.shape)}, HyLo kv_a is {tuple(kv_down.shape)}"
-        )
-    current[:rows, :] = kv_down.to(dtype=current.dtype)
-    hybrid[key] = current.contiguous()
-    report.copied.append(key)
-    if current.shape[0] != rows:
-        report.hylo_partial.append(key)
 
 
 def _dense_proj_key(source: Mapping[str, str]) -> Optional[str]:

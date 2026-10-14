@@ -228,6 +228,24 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
                 model_provider = get_model_provider(model_type=model_type)
             else:
                 model_provider = get_model_provider()
+
+        hylo_stage = getattr(self.backend_args, "hylo_distill_stage", None)
+        if hylo_stage:
+            if model_type != "mamba":
+                raise ValueError("Native HyLo distillation requires model_type: mamba")
+            from primus.backends.megatron.training.hylo_distillation import (
+                create_pretrain_forward_step,
+                validate_hylo_args,
+                wrap_model_provider,
+            )
+
+            validate_hylo_args(self.backend_args)
+            model_provider = wrap_model_provider(model_provider, self.backend_args)
+            forward_step = create_pretrain_forward_step()
+            log_rank_0(
+                f"Using native HyLo {hylo_stage} forward step with teacher "
+                f"{self.backend_args.hylo_teacher_checkpoint}"
+            )
         log_rank_0(f"-model_provider: {model_provider}")
 
         # Patch Megatron's get_forward_backward_func to support dump_pp_data
