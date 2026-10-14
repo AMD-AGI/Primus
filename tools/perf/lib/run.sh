@@ -119,6 +119,9 @@ extract_config_fields() {
             GBS=$(yq_or_na ".modules.$MODULE.overrides.training.global_batch_size" "$config_file")
             SEQ_LEN=$(yq_or_na ".modules.$MODULE.overrides.training.seq_len" "$config_file")
             STEPS=$(yq_or_na ".modules.$MODULE.overrides.training.steps" "$config_file")
+            if [ "$GBS" = "N/A" ] && [[ "$MBS" =~ ^[0-9]+$ ]]; then
+                GBS=$(torchtitan_default_gbs "$config_file" "$MBS")
+            fi
             ;;
         maxtext)
             # MaxText (JAX) uses per_device_batch_size; the effective global
@@ -164,6 +167,58 @@ extract_config_fields() {
             STEPS="N/A"
             ;;
     esac
+}
+
+# TorchTitan's global batch when the config leaves it unset: one local batch
+# per data-parallel rank, i.e. MBS x GPUs divided by the tensor, pipeline and
+# context parallel degrees (expert parallelism does not change it).
+torchtitan_default_gbs() {
+    local config_file="$1" mbs="$2" degree divisor=1 key
+    for key in tensor_parallel_degree pipeline_parallel_degree context_parallel_degree; do
+        degree=$(yq_or_na ".modules.$MODULE.overrides.parallelism.$key" "$config_file")
+        if [[ "$degree" =~ ^[0-9]+$ ]] && [ "$degree" -gt 1 ]; then
+            divisor=$((divisor * degree))
+        fi
+    done
+    echo $(( mbs * NNODES * ${GPUS_PER_NODE:-8} / divisor ))
+}
+
+# Everything the loop needs to know about one config. Sets config_rel,
+# config_name (path relative to the repo, shown in banners), the
+# extract_config_fields globals, YAML_STEPS, STEPS (with the TRAIN_STEPS
+# override noted), config_hash and the filename-safe *_safe parts.
+prepare_config() {
+    local config_file="$1" config_basename
+    # The extractor tolerates a path in Config Name: `_split_model_precision`
+    # takes the last segment before parsing the model name.
+    config_rel="${config_file#"$PRIMUS_PATH"/}"
+    config_name="${config_rel%.yaml}"
+    config_name="${config_name%.yml}"
+
+    # The log filename uses only the basename: the `${fw_safe}-` prefix already
+    # tells same-named YAMLs from different framework folders apart.
+    config_basename=$(basename "$config_file")
+    config_basename="${config_basename%.yaml}"
+    config_basename="${config_basename%.yml}"
+
+    extract_config_fields "$config_file"
+    YAML_STEPS="$STEPS"
+    if [ -n "$TRAIN_STEPS" ]; then
+        STEPS="$TRAIN_STEPS (CLI override; yaml=$YAML_STEPS)"
+    fi
+
+    fw_safe=$(sanitize "$FRAMEWORK")
+    name_safe=$(sanitize "$config_basename")
+    mbs_safe=$(sanitize "$MBS")
+    gbs_safe=$(sanitize "$GBS")
+    config_hash=$(config_fingerprint "$config_file")
+}
+
+# Log path for repetition <rep> of the config last passed to prepare_config.
+# <suffix> marks a failed multi-node attempt, e.g. "-failed-attempt2".
+run_log_name() {
+    local rep="$1" suffix="${2:-}"
+    echo "${RESULT_DIR}/${fw_safe}-${name_safe}-${config_hash}-MBS${mbs_safe}-GBS${gbs_safe}-rep${rep}${suffix}_${BATCH_TS}.log"
 }
 
 # Primus CLI override flag that sets training length for a given framework.
@@ -236,20 +291,9 @@ collect_system_info() {
             echo "# SLURM nnodes   : ${SLURM_NNODES:-<unknown>}"
             echo "# NNODES (script): $NNODES"
         fi
-        if command -v rocminfo >/dev/null 2>&1; then
-            local rocm_ver
-            rocm_ver=$(rocminfo 2>/dev/null | awk '/ROCm Version/ {print $3; exit}')
-            echo "# ROCm version  : ${rocm_ver:-unknown}"
-        fi
-        if command -v rocm-smi >/dev/null 2>&1; then
-            local gpu_count
-            gpu_count=$(rocm-smi --showid 2>/dev/null | grep -c '^GPU\[' || echo "?")
-            if [ "${PERF_MULTINODE:-0}" = 1 ]; then
-                echo "# ROCm GPUs(loc): $gpu_count"
-            else
-                echo "# ROCm GPUs     : $gpu_count"
-            fi
-        fi
+        echo "# ROCm version  : $(perf_rocm_version)"
+        echo "# GPU model     : $(perf_gpu_model)"
+        echo "# GPUs (local)  : $(perf_gpu_count)"
         echo "################################################################################"
     }
 }
@@ -304,9 +348,7 @@ print_per_run_banner() {
         echo "# Config Name      : $config_name"
         echo "# Config Hash      : $config_hash  (sha256, first 8 hex chars)"
         echo "# Framework        : $framework"
-        if [ "$multinode" != 1 ]; then
-            echo "# Train Module     : $module  (CLI verb: train $suite)"
-        fi
+        echo "# Train Module     : $module  (CLI verb: train $suite)"
         echo "# Model            : $model"
         echo "# Micro Batch Size : $mbs"
         echo "# Global Batch Size: $gbs"
@@ -327,14 +369,16 @@ print_per_run_banner() {
         fi
         echo "# PRIMUS_MODE      : $PRIMUS_MODE"
         echo "# Launcher command : $launcher_cmd"
-        if [ "$multinode" = 1 ]; then
-            # NOTE: do NOT print FAIL_PATTERN verbatim here. The polling loop
-            # greps this very file for that pattern, so writing it into the
-            # banner causes an immediate self-match (false positive). The
-            # pattern is recorded in batch_summary.txt / batch_env.txt instead.
+        echo "# Run limits       : $(perf_run_limits_text)"
+        if [ -n "$FAIL_PATTERN" ]; then
+            # Not printed verbatim: the watchdog greps the run output for it,
+            # and keeping it out of the log avoids any chance of a self-match.
             echo "# Fail pattern     : <recorded in batch_summary.txt>"
-            echo "# Poll interval(s) : $POLL_INTERVAL"
         fi
+        if perf_uses_containers; then
+            echo "# Container label  : ${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
+        fi
+        echo "# GPU check        : $PERF_GPU_CHECK"
         echo "# --------------------------------------------------------------------------------"
         echo "# HF_TOKEN         : $([ -n "$HF_TOKEN" ] && echo '<set>' || echo '<unset>')"
         perf_print_provenance_banner "${DOCKER_IMAGE:-}"
@@ -353,31 +397,23 @@ print_per_run_banner() {
 }
 
 # Footer appended once the run has ended (or been interrupted). The extractor
-# reads `Exit code` and `Elapsed (sec)` from the last lines of the log.
+# reads `Exit code` and `Elapsed (sec)` from the last lines of the log;
+# `Failure reason` is "none" or "<category>: <detail>" (see
+# perf_launch_with_watchdog).
 print_per_run_footer() {
     local result_file="$1"
     local exit_code="$2"
     local run_elapsed="$3"
-    local error_detected="${4:-}"
+    local failure_reason="$4"
     {
-        if [ "${PERF_MULTINODE:-0}" = 1 ]; then
-            echo ""
-            echo "############################### End Run Output #################################"
-            echo ""
-            echo "################################################################################"
-            echo "# Run finished at  : $(date '+%Y-%m-%d %H:%M:%S %Z')"
-            echo "# Exit code        : $exit_code"
-            echo "# Elapsed (sec)    : $run_elapsed"
-            echo "# Failure pattern? : $error_detected"
-            echo "################################################################################"
-        else
-            echo "############################### End Run Output #################################"
-            echo ""
-            echo "################################################################################"
-            echo "# Run finished at : $(date '+%Y-%m-%d %H:%M:%S %Z')"
-            echo "# Exit code       : $exit_code"
-            echo "# Elapsed (sec)   : $run_elapsed"
-            echo "################################################################################"
-        fi
+        echo ""
+        echo "############################### End Run Output #################################"
+        echo ""
+        echo "################################################################################"
+        echo "# Run finished at  : $(date '+%Y-%m-%d %H:%M:%S %Z')"
+        echo "# Exit code        : $exit_code"
+        echo "# Elapsed (sec)    : $run_elapsed"
+        echo "# Failure reason   : $failure_reason"
+        echo "################################################################################"
     } >> "$result_file"
 }

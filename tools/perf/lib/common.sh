@@ -225,11 +225,11 @@ perf_select_from_catalog() {
     if [ -z "${GPU:-}" ]; then
         GPU=$(perf_detect_gpu)
         if [ -z "$GPU" ]; then
-            echo "[ERROR] GPU is not set and could not be detected from rocm-smi." >&2
+            echo "[ERROR] GPU is not set and could not be detected from amd-smi or rocm-smi." >&2
             echo "        Set GPU=<key>, one of: $(yq -r 'keys | .[]' "$catalog" 2>/dev/null | tr '\n' ' ')" >&2
             return 1
         fi
-        echo "[INFO] GPU not set; detected $GPU from rocm-smi." >&2
+        echo "[INFO] GPU not set; detected $GPU ($(perf_gpu_model))." >&2
     fi
 
     if [ "$(yq -r "has(\"$GPU\")" "$catalog" 2>/dev/null)" != "true" ]; then
@@ -333,9 +333,12 @@ PERF_EXTRA_ENV_ARGS=()
 
 perf_parse_extra_env() {
     PERF_EXTRA_ENV_ARGS=()
-    local kv
+    local kv kvs=()
 
-    for kv in ${EXTRA_ENV:-}; do
+    # read -a splits on whitespace without glob expansion, so a value such as
+    # `FOO=a*` is kept as typed rather than matched against files.
+    read -r -a kvs <<< "${EXTRA_ENV:-}"
+    for kv in ${kvs[@]+"${kvs[@]}"}; do
         if [[ "$kv" != *=* ]] || [[ "$kv" != [A-Za-z_]* ]]; then
             echo "[ERROR] EXTRA_ENV entries must look like KEY=VALUE, got: '$kv'" >&2
             echo "        Example: EXTRA_ENV=\"DEBUG_HIP_DYNAMIC_QUEUES=0 GPU_MAX_HW_QUEUES=2\"" >&2
@@ -472,13 +475,36 @@ perf_submodule_pins() {
     printf '%s' "$status" | sha256sum | cut -c1-8
 }
 
+# Marketing name of the first GPU, e.g. "AMD Instinct MI355X". amd-smi first:
+# some nodes ship only amd-smi. Its PRODUCT_NAME drops the suffix
+# ("AMD Instinct MI355 OAM"), so MARKET_NAME is the field to read.
 perf_gpu_model() {
-    command -v rocm-smi >/dev/null 2>&1 || { echo "unknown"; return 0; }
-    local model
-    model=$(rocm-smi --showproductname 2>/dev/null |
-        sed -n 's/.*Card Series:[[:space:]]*//p' | head -1 |
-        sed 's/[[:space:]]*$//')
-    [ -n "$model" ] && echo "$model" || echo "unknown"
+    local model=""
+    if command -v amd-smi >/dev/null 2>&1; then
+        model=$(amd-smi static --asic 2>/dev/null |
+            sed -n 's/.*MARKET_NAME:[[:space:]]*//p' | head -1 |
+            sed 's/[[:space:]]*$//')
+    fi
+    if { [ -z "$model" ] || [ "$model" = "N/A" ]; } && command -v rocm-smi >/dev/null 2>&1; then
+        model=$(rocm-smi --showproductname 2>/dev/null |
+            sed -n 's/.*Card Series:[[:space:]]*//p' | head -1 |
+            sed 's/[[:space:]]*$//')
+    fi
+    if [ -n "$model" ] && [ "$model" != "N/A" ]; then
+        echo "$model"
+    else
+        echo "unknown"
+    fi
+}
+
+perf_gpu_count() {
+    local n=""
+    if command -v amd-smi >/dev/null 2>&1; then
+        n=$(amd-smi list 2>/dev/null | grep -c '^GPU:')
+    elif command -v rocm-smi >/dev/null 2>&1; then
+        n=$(rocm-smi --showid 2>/dev/null | grep -c '^GPU\[')
+    fi
+    echo "${n:-unknown}"
 }
 
 # Catalog key for the hardware this node actually has, e.g. "MI325X".
@@ -499,14 +525,23 @@ perf_detect_gpu() {
     echo "$key"
 }
 
+# Host ROCm version. ROCm is not always under /opt/rocm (some clusters load it
+# as a module and set ROCM_PATH), and recent rocminfo no longer prints it.
 perf_rocm_version() {
-    if [ -r /opt/rocm/.info/version ]; then
-        head -1 /opt/rocm/.info/version
-    elif command -v rocminfo >/dev/null 2>&1; then
-        rocminfo 2>/dev/null | awk '/ROCm Version/ {print $3; exit}'
-    else
-        echo "unknown"
+    local v="" f
+    for f in "${ROCM_PATH:+$ROCM_PATH/.info/version}" /opt/rocm/.info/version; do
+        if [ -n "$f" ] && [ -r "$f" ]; then
+            v=$(head -1 "$f")
+            [ -n "$v" ] && break
+        fi
+    done
+    if [ -z "$v" ] && command -v amd-smi >/dev/null 2>&1; then
+        v=$(amd-smi version 2>/dev/null | sed -n 's/.*ROCm version: *\([^ |]*\).*/\1/p' | head -1)
     fi
+    if [ -z "$v" ] && command -v rocminfo >/dev/null 2>&1; then
+        v=$(rocminfo 2>/dev/null | awk '/ROCm Version/ {print $3; exit}')
+    fi
+    echo "${v:-unknown}"
 }
 
 perf_gpu_snapshot() {

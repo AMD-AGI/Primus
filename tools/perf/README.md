@@ -37,9 +37,15 @@ export RESULT_DIR=~/primus-bench/mi325x-v26.7
 # export NCCL_SOCKET_IFNAME=eno0                            # e.g. eno0 / ibp...
 # export GLOO_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME
 
+DRY_RUN=1 bash tools/perf/run_batch.sh                    # check the plan first
 bash tools/perf/run_batch.sh                              # single node
 python3 tools/perf/extract_results.py "$RESULT_DIR"       # logs -> CSV
 ```
+
+`DRY_RUN=1` prints every selected config with its batch size, steps, log
+filename and exact launch command, then exits without touching docker or the
+GPUs. It does not need `HF_TOKEN` or `DOCKER_IMAGE`, so it also works on a
+login node.
 
 Multi-node, from inside a Slurm allocation (`salloc -N 8 -p mi325x`):
 
@@ -208,7 +214,14 @@ duplicate entries are reported before anything launches.
 | `HF_TOKEN` | — | **Required.** Never defaulted, so it cannot be baked into a shared script. |
 | `DOCKER_IMAGE` | — | **Required.** Which build to benchmark; a stale default would silently measure the wrong one. |
 | `BACKEND` | — | **Required.** Comma-separated backends, e.g. `megatron,torchtitan`. |
-| `GPU` | auto-detected | Catalog top-level key, e.g. `MI325X`. Read from `rocm-smi` when unset. |
+| `GPU` | auto-detected | Catalog top-level key, e.g. `MI325X`. Read from `amd-smi` or `rocm-smi` when unset. |
+| `DRY_RUN` | `0` | `1` prints the plan and exits. |
+| `MAX_RUN_SECONDS` | `3600` | Stop a run still going after this long. `0` = no limit. |
+| `MAX_IDLE_SECONDS` | `1200` | Stop a run whose log has not grown for this long. `0` = no limit. |
+| `POLL_INTERVAL` | `15` | Seconds between checks of the run log. |
+| `GPU_BUSY_MIB` | `2048` | A GPU with more memory in use than this counts as busy. |
+| `GPU_BUSY_WAIT_SECONDS` | `60` | How long to wait for busy GPUs to free up before refusing. |
+| `ALLOW_BUSY_GPUS` | `0` | `1` runs even when the GPUs are busy. |
 | `RESULT_DIR` | `$PWD/primus-perf-<date>` | Where logs and snapshots go; created if missing. |
 | `CONFIG_FILE` | `tools/perf/configs.yaml` | Catalog to read. |
 | `CONFIG_DIR` | — | Switches to directory mode. |
@@ -238,16 +251,16 @@ listed for the GPU: there is no image for which "all" is correct, so a default
 would only ever queue runs doomed to fail.
 
 `GPU` is the opposite case: the node already knows what it is, so when unset
-the runner reads the part number out of the `rocm-smi` product name
-(`AMD Instinct MI325X` → `MI325X`) and says so:
+the runner reads the part number out of the GPU's marketing name from
+`amd-smi` (or `rocm-smi`) (`AMD Instinct MI325X` → `MI325X`) and says so:
 
 ```
-[INFO] GPU not set; detected MI325X from rocm-smi.
+[INFO] GPU not set; detected MI325X (AMD Instinct MI325X).
 ```
 
-Set it explicitly to benchmark one device's configs on another. When
-`rocm-smi` is unavailable the runner errors and lists the catalog keys rather
-than guessing.
+Set it explicitly to benchmark one device's configs on another. When neither
+tool is available the runner errors and lists the catalog keys rather than
+guessing.
 
 ### Extra environment variables
 
@@ -323,14 +336,76 @@ Check `hostname -I` and `ip -br addr` on the node you will run on. Do not
 unset these hoping RCCL will pick: Primus will fill them from `hostname -I`
 again, which is how `docker0` got selected in the first place.
 
+The runner now guards against this before the first run: an explicit
+`NCCL_SOCKET_IFNAME` or `GLOO_SOCKET_IFNAME` naming `lo`, `docker*`, `br-*`,
+`veth*` or another bridge is refused, and when they are unset and Primus's
+own pick would be such an interface, the default-route interface is exported
+instead (and logged in the summary).
+
 ### Multi-node extras
 
-Multi-node additionally honours `MAX_ATTEMPTS_PER_CONFIG`, `POLL_INTERVAL`,
-`MAX_RUN_SECONDS` and `FAIL_PATTERN` for its retry loop.
+Multi-node additionally honours `MAX_ATTEMPTS_PER_CONFIG` and `FAIL_PATTERN`
+for its retry loop: an attempt whose output matches `FAIL_PATTERN`, or that
+hits one of the run limits below, is stopped and retried.
 `run_batch_multinode.sh` defaults `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`
 to `eno0` (Fremont); override them the same way on any other site. The
 single-node `docker0` failure above applies here too if the wrong NIC is
 pinned.
+
+## Before each run
+
+These checks run on every node before the first run, and the GPU part again
+before every later run. A failed check at the start refuses the batch with
+exit code 2 before anything launches; a failed GPU check later stops the
+batch and leaves the remaining runs unstarted.
+
+- **Image present.** A missing image is pulled once, up front, so the pull
+  neither counts against the run limits nor leaves the image digest unknown.
+- **Leftover containers stopped.** Every container this tool starts carries
+  the label `primus.perf=<user>/<batch stamp>/<host>/<pid>`. Containers that
+  earlier batches of the same user left running (after a SIGKILL, a scheduler
+  time limit or a lost session) are stopped. Other users' containers, and
+  containers whose batch is still running on this host, are never touched.
+- **GPUs idle.** No GPU may have more than `GPU_BUSY_MIB` of memory in use
+  (idle MI355X GPUs show about 280 MiB). After `GPU_BUSY_WAIT_SECONDS` the
+  batch refuses and lists the busy GPUs and the running containers.
+  `ALLOW_BUSY_GPUS=1` overrides this. When neither `amd-smi` nor `rocm-smi`
+  gives readings (e.g. `PRIMUS_MODE=direct` inside a container) the check is
+  recorded as "not checked" and does not block.
+- **NCCL interface usable.** See the socket interface section above.
+
+The result of the GPU check is recorded in every run's banner (`GPU check`).
+
+## Time limits and failure reasons
+
+Every run is launched in the background, in its own process group, and its
+log is checked every `POLL_INTERVAL` seconds. A run is stopped when it is
+still going after `MAX_RUN_SECONDS` (default 1 hour), or when its log has not
+grown for `MAX_IDLE_SECONDS` (default 20 minutes), which is how a hang shows
+up. Both apply to single-node and multi-node runs; set either to `0` to
+disable it. Stopping a run kills its whole process group and then its
+containers.
+
+Every log ends with a footer that says why the run ended:
+
+```
+# Exit code        : 143
+# Elapsed (sec)    : 1206
+# Failure reason   : idle: no new output for MAX_IDLE_SECONDS=1200s
+```
+
+`Failure reason` is `none` for a successful run, otherwise `<category>:
+<detail>` with category `timeout`, `idle`, `fail_pattern` (multi-node),
+`signal` (e.g. `killed by SIGKILL`), `exit` or `interrupted`.
+
+Exit codes of both runners:
+
+| Code | Meaning |
+|---|---|
+| `0` | Every run passed. |
+| `1` | At least one run failed or was not started. |
+| `2` | Bad input or a failed pre-run check; nothing was launched. |
+| `130` | Interrupted. |
 
 ## What a batch writes
 
@@ -351,30 +426,25 @@ same directory accumulate instead of overwriting.
 
 ## Stopping a batch
 
-Ctrl+C stops the run in flight and abandons the rest of the batch instead of
-rolling on to the next config. It also stops the training container, which
-matters because `docker run` losing its client does not bring the container
-down on its own — without this you would be left holding the GPUs.
+Ctrl+C, `kill` (SIGTERM) or a closed terminal (SIGHUP) stops the run in
+flight and abandons the rest of the batch instead of rolling on to the next
+config. It also stops the training container, which matters because
+`docker run` losing its client does not bring the container down on its own —
+without this you would be left holding the GPUs.
 
-The in-flight log still gets its footer (exit code 130 and elapsed time) and
-the summary records where the batch stopped, so an interrupted batch is still
-readable by `extract_results.py`.
+The in-flight log still gets its footer (exit code 130, elapsed time and
+`Failure reason: interrupted`) and the summary records where the batch
+stopped, so an interrupted batch is still readable by `extract_results.py`.
 
-Only containers this batch started are stopped. primus-cli names them
-`primus-training-<SLURM_JOB_ID or pid>`, so there is no fixed name to match;
-the runner snapshots which `primus-training*` containers were already up
-before it launched anything and leaves those alone. On a shared node, a
-colleague's run — or your own earlier one — survives your Ctrl+C. The snapshot
-is echoed into the summary so you can see what was excluded.
+Only containers this batch started are stopped: cleanup matches this batch's
+`primus.perf` label exactly, on every allocated node for multi-node. The same
+cleanup runs when a run hits a limit or a multi-node attempt fails, so the
+GPUs are released before the next run starts.
 
-Multi-node cleanup works the same way, and runs on every allocated node. Under
-Slurm the container name is fully determined (`primus-training-$SLURM_JOB_ID`,
-identical across the allocation and unique per job), so cleanup targets that
-name exactly and can never touch another job's containers; the prefix-plus-
-snapshot path is only the fallback for running outside an allocation. The name
-being cleaned up is printed in the batch summary. The same cleanup runs on the
-retry paths, so a failed or hung attempt releases the GPUs before the next one
-starts.
+A SIGKILL (some schedulers send one at the time limit) cannot be handled.
+The batch summary still shows which runs started and finished, the
+interrupted log simply has no footer, and the container it leaves behind is
+stopped by the next batch on that node (see "Before each run").
 
 ## Provenance
 
@@ -424,21 +494,6 @@ Alongside the metrics, each row carries `world_size`, `docker_image`,
 `image_digest`, `primus_commit`, `submodule_pins`, `gpu_model`, `rocm_version`,
 `torch_version`/`jax_version` and, for multi-node, `slurm_job_id`/`nodelist`.
 Logs written before these fields existed simply leave the columns empty.
-
-## Diffusion and DLRM suite
-
-[`diffusion_bench/`](./diffusion_bench/README.md) benchmarks AMDiffusionBenchmark
-(FLUX.1-dev, Stable Diffusion XL, Mochi 1, HunyuanVideo, Wan 2.1 I2V) and
-DLRMBenchmark (TF32, FP32) in the CI image. It is a separate runner from
-`run_batch.sh`: it reads its own `diffusion_bench/config.yaml` rather than
-`configs.yaml`, and writes `summary.{md,csv,json}` per run rather than the
-per-run logs that `extract_results.py` reads.
-
-```bash
-export HF_TOKEN=hf_...
-bash tools/perf/diffusion_bench/run_benchmarks.sh --dry-run   # check the plan first
-bash tools/perf/diffusion_bench/run_benchmarks.sh
-```
 
 ## Relationship to the other benchmark tools
 
