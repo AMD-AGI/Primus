@@ -80,8 +80,9 @@
 #   stops this batch's training containers on every node.
 #
 # Before the first attempt (and the GPU part before every attempt), on every
-# node: the image is pulled if missing, containers that earlier batches of
-# this user left running are stopped, and the GPUs must be idle (GPU_BUSY_MIB,
+# node: the image is pulled if missing (always with PULL_IMAGE=1) and must be
+# the same image on every node, containers that earlier batches of this user
+# left running are stopped, and the GPUs must be idle (GPU_BUSY_MIB,
 # ALLOW_BUSY_GPUS=1 to override); NCCL/Gloo must not use a bridge interface.
 #
 # Exit codes: 0 every config reached NUM_REPS good runs, 1 some did not,
@@ -92,8 +93,11 @@
 #     batch_env_<stamp>.txt         - shell environment, secrets redacted.
 #     batch_submodules_<stamp>.txt  - `git submodule status` (what code ran).
 #     batch_gpu_<stamp>.txt         - GPU state of the node running this script.
-#     batch_stack_<stamp>.txt       - image digest + library versions from
-#                                     inside the container.
+#     batch_stack_<stamp>.txt       - image digest and ID, ROCm/HIP and library
+#                                     versions from inside the container.
+#     batch_host_<stamp>.txt        - every node's CPU governor, NUMA balancing,
+#                                     THP, IOMMU, amdgpu driver and interfaces.
+#     batch_manifest_<stamp>/       - the image's /workspace/.manifest, if any.
 #     run_batch_multinode_<stamp>.sh - a copy of THIS script as it was run.
 #     results.csv, results.json     - every log in RESULT_DIR parsed by
 #                                     extract_results.py, refreshed at the end
@@ -356,6 +360,7 @@ fi
     echo "# PRIMUS_MODE           : $PRIMUS_MODE"
     echo "# Docker image          : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
     echo "# Image digest          : $(perf_image_digest "${DOCKER_IMAGE:-}")"
+    echo "# Image ID              : $(perf_image_id "${DOCKER_IMAGE:-}")  (same on every node)"
     echo "# Launcher mode         : multi-node (primus-cli slurm srun -N $NNODES)"
     echo "# Container label       : ${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
     echo "# TRAIN_STEPS           : ${TRAIN_STEPS:-<unset; use YAML>}"
@@ -496,7 +501,7 @@ EXPECTED_GOOD=$(( ${#CONFIG_FILES[@]} * NUM_REPS ))
 # still has it; just report the artefacts here.
 echo "Saved batch driver -> $SCRIPT_COPY" | tee -a "$SUMMARY_FILE"
 echo "Saved env snapshot -> $ENV_FILE"    | tee -a "$SUMMARY_FILE"
-echo "Saved provenance   -> $RESULT_DIR/batch_{submodules,gpu,stack}_${BATCH_TS}.txt" | tee -a "$SUMMARY_FILE"
+echo "Saved provenance   -> $RESULT_DIR/batch_{submodules,gpu,stack,host}_${BATCH_TS}.txt" | tee -a "$SUMMARY_FILE"
 perf_extract_results
 echo "Saved summary      -> $SUMMARY_FILE"
 

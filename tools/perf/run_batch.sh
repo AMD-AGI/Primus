@@ -54,6 +54,8 @@
 #   GPU_BUSY_MIB     a GPU with more memory in use than this counts as busy,
 #                    and the run is refused (default 2048).
 #   ALLOW_BUSY_GPUS=1  run even when the GPUs are busy.
+#   PULL_IMAGE=1     pull DOCKER_IMAGE before the batch even if the tag is
+#                    present, replacing a stale or re-tagged local copy.
 #   EXTRACT=0        do not refresh results.csv / results.json at the end.
 #   EXTRA_ENV=...    space-separated KEY=VALUE pairs forwarded into the
 #                    container as explicit `--env` flags, e.g.
@@ -103,8 +105,12 @@
 #     batch_env_<stamp>.txt         - shell environment, secrets redacted.
 #     batch_submodules_<stamp>.txt  - `git submodule status` (what code ran).
 #     batch_gpu_<stamp>.txt         - rocm-smi / amd-smi clocks, power, topology.
-#     batch_stack_<stamp>.txt       - image digest + library versions from
-#                                     inside the container.
+#     batch_stack_<stamp>.txt       - image digest and ID, ROCm/HIP and library
+#                                     versions from inside the container.
+#     batch_host_<stamp>.txt        - CPU governor, NUMA balancing, THP, IOMMU,
+#                                     amdgpu driver, network interfaces.
+#     batch_manifest_<stamp>/       - the image's /workspace/.manifest (build
+#                                     recipe, dpkg and pip lists), if it has one.
 #     run_batch_<stamp>.sh          - a copy of THIS script as it was run,
 #                                     written before the first run starts.
 #     <framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>_<stamp>.log - per-run logs.
@@ -327,6 +333,7 @@ fi
     echo "# PRIMUS_MODE  : $PRIMUS_MODE"
     echo "# Docker image : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
     echo "# Image digest : $(perf_image_digest "${DOCKER_IMAGE:-}")"
+    echo "# Image ID     : $(perf_image_id "${DOCKER_IMAGE:-}")"
     echo "# Reps/config  : $NUM_REPS"
     echo "# TRAIN_STEPS  : ${TRAIN_STEPS:-<unset; use YAML>}"
     echo "# Run limits   : $(perf_run_limits_text)"
@@ -430,7 +437,7 @@ RUNS_NOT_STARTED=$((TOTAL_PLANNED - RUNS_STARTED))
 # still has it; just report the artefacts here.
 echo "Saved batch driver -> $SCRIPT_COPY" | tee -a "$SUMMARY_FILE"
 echo "Saved env snapshot -> $ENV_FILE"    | tee -a "$SUMMARY_FILE"
-echo "Saved provenance   -> $RESULT_DIR/batch_{submodules,gpu,stack}_${BATCH_TS}.txt" | tee -a "$SUMMARY_FILE"
+echo "Saved provenance   -> $RESULT_DIR/batch_{submodules,gpu,stack,host}_${BATCH_TS}.txt" | tee -a "$SUMMARY_FILE"
 perf_extract_results
 echo "Saved summary      -> $SUMMARY_FILE"
 

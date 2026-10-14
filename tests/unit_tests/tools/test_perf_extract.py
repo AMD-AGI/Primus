@@ -538,6 +538,35 @@ def test_banner_fields_reach_the_result(tmp_path):
     assert result["parser_version"] == extract.PARSER_VERSION
 
 
+def test_image_and_host_provenance_reach_the_result(tmp_path):
+    result = extract.parse_log_file(
+        str(
+            write_log(
+                tmp_path,
+                MEGATRON_AVG,
+                banner_extra=(
+                    "# Image ID         : sha256:fe8e1551d200\n"
+                    "# Container ROCm   : 10.1.0\n"
+                    "# Container HIP    : 7.16.26385-0000000\n"
+                    "# CPU governor     : schedutil x256\n"
+                    "# NUMA balancing   : 0\n"
+                    "# Transparent HP   : always\n"
+                    "# IOMMU            : amd_iommu=on iommu=pt\n"
+                    "# amdgpu driver    : 6.14.14\n"
+                ),
+            )
+        )
+    )
+    assert result["image_id"] == "sha256:fe8e1551d200"
+    assert result["container_rocm_version"] == "10.1.0"
+    assert result["container_hip_version"] == "7.16.26385-0000000"
+    assert result["cpu_governor"] == "schedutil x256"
+    assert result["numa_balancing"] == "0"
+    assert result["transparent_hugepages"] == "always"
+    assert result["iommu"] == "amd_iommu=on iommu=pt"
+    assert result["amdgpu_version"] == "6.14.14"
+
+
 def test_fractional_batch_size_is_kept(tmp_path):
     log = tmp_path / "frac.log"
     log.write_text(

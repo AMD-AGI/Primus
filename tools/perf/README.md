@@ -223,6 +223,7 @@ duplicate entries are reported before anything launches.
 | `GPU_BUSY_WAIT_SECONDS` | `60` | How long to wait for busy GPUs to free up before refusing. |
 | `ALLOW_BUSY_GPUS` | `0` | `1` runs even when the GPUs are busy. |
 | `EXTRACT` | `1` | `0` skips refreshing `results.csv` / `results.json` at the end of a batch. |
+| `PULL_IMAGE` | `0` | `1` pulls `DOCKER_IMAGE` on every node before the batch even if the tag is present. |
 | `RESULT_DIR` | `$PWD/primus-perf-<date>` | Where logs and snapshots go; created if missing. |
 | `CONFIG_FILE` | `tools/perf/configs.yaml` | Catalog to read. |
 | `CONFIG_DIR` | — | Switches to directory mode. |
@@ -360,8 +361,11 @@ before every later run. A failed check at the start refuses the batch with
 exit code 2 before anything launches; a failed GPU check later stops the
 batch and leaves the remaining runs unstarted.
 
-- **Image present.** A missing image is pulled once, up front, so the pull
-  neither counts against the run limits nor leaves the image digest unknown.
+- **Image present, and the same everywhere.** A missing image is pulled once,
+  up front, so the pull neither counts against the run limits nor leaves the
+  image digest unknown (`PULL_IMAGE=1` pulls even when the tag is present).
+  Multi-node batches refuse to start when the nodes hold different images
+  under the same tag.
 - **Leftover containers stopped.** Every container this tool starts carries
   the label `primus.perf=<user>/<batch stamp>/<host>/<pid>`. Containers that
   earlier batches of the same user left running (after a SIGKILL, a scheduler
@@ -418,8 +422,10 @@ Into `$RESULT_DIR`:
 | `batch_summary_<stamp>.txt` | System info, the resolved config list with content hashes, per-run status. |
 | `batch_env_<stamp>.txt` | Full environment, **secrets redacted**. |
 | `batch_submodules_<stamp>.txt` | `git submodule status` — which vendored code ran. |
-| `batch_gpu_<stamp>.txt` | `rocm-smi` clocks, power caps, topology. |
-| `batch_stack_<stamp>.txt` | Image digest plus library versions from inside the container. |
+| `batch_gpu_<stamp>.txt` | `rocm-smi` (or `amd-smi`) clocks, power caps, topology. |
+| `batch_stack_<stamp>.txt` | Image digest and ID, ROCm and HIP versions, library versions from inside the container. |
+| `batch_host_<stamp>.txt` | Every node's CPU governor, NUMA balancing, transparent huge pages, IOMMU, amdgpu driver, CPU, memory and network interfaces. |
+| `batch_manifest_<stamp>/` | The image's `/workspace/.manifest` (build recipe, dpkg and pip lists), when it has one. |
 | `run_batch_<stamp>.sh` | The driver as it was run, copied *before* the first run. |
 | `results.csv`, `results.json` | Every log in the directory parsed by `extract_results.py`; refreshed at the end of each batch. |
 
@@ -453,15 +459,23 @@ stopped by the next batch on that node (see "Before each run").
 The per-run banner carries the fields that explain a number:
 
 ```
-# Docker image     : unifiedtrainingdockers.azurecr.io/utd/ci:primus_the_rock_ci_b154fd0_20260903
-# Image digest     : unifiedtrainingdockers.azurecr.io/utd/ci@sha256:ec9992a8065d...
-# Primus commit    : 137d6c256119
-# Submodule pins   : 43f426fa
-# GPU model        : AMD Instinct MI325X
-# ROCm version     : 7.2.1
-# Torch version    : 2.12.0+rocm10.0.0
+# Docker image     : rocm/primus:v26.8
+# Image digest     : rocm/primus@sha256:79629b5e5ba4...
+# Image ID         : sha256:fe8e1551d200...
+# Primus commit    : 9a05d3fc9e5c-dirty
+# Submodule pins   : b2ceb2bd
+# GPU model        : AMD Instinct MI355X
+# ROCm version     : 10.1.0
+# Container ROCm   : 10.1.0
+# Container HIP    : 7.16.26385-0000000
+# Torch version    : 2.14.0+rocm10.1.0
 # World size       : 8  (NNODES=1 x GPUS_PER_NODE=8)
-# Perf environment :
+# CPU governor     : schedutil x256
+# NUMA balancing   : 0
+# Transparent HP   : always
+# IOMMU            : amd_iommu=on iommu=pt
+# amdgpu driver    : 6.14.14
+# Perf environment (host shell):
 #   HSA_NO_SCRATCH_RECLAIM=1
 #   NVTE_CK_IS_V3_ATOMIC_FP32=1
 #   ...
@@ -470,7 +484,27 @@ The per-run banner carries the fields that explain a number:
 A few notes on why these specific fields:
 
 - The **digest** is recorded alongside the tag because a tag can be re-pushed;
-  two runs with the same tag are not necessarily the same image.
+  two runs with the same tag are not necessarily the same image. The **image
+  ID** goes one step further: the repo digest depends on which registry the
+  image came from, so a CI image re-tagged locally as `rocm/primus:v26.8`
+  shows a different digest name but its own ID. Two runs used the same image
+  exactly when their IDs match. Multi-node batches refuse to start when the
+  nodes hold different images under the same tag; `PULL_IMAGE=1` pulls the
+  registry's copy on every node first.
+- **ROCm** is reported twice: the host's (driver side, from `ROCM_PATH` or
+  `amd-smi`) and the container's (the user space that actually ran; read
+  from `/opt/rocm` or, in TheRock images, from the pip `rocm` package). The
+  HIP version is a separate number.
+- **Host settings** (CPU frequency governor, NUMA balancing, transparent huge
+  pages, IOMMU mode, amdgpu driver) explain why one node is slower than
+  another with the same image and code. The banner carries the node running
+  the batch; `batch_host_<stamp>.txt` has every node.
+- The image's **build manifest** (`/workspace/.manifest`, including
+  `docker-build-recipe.txt`) is copied once per batch, so the result directory
+  says how its image was built.
+- The **perf environment** block is the runner's own shell. What the
+  container actually ran with, after Primus applied its GPU-specific defaults
+  and hooks, is printed by Primus at the start of the run output.
 - **Submodule pins** matter because Primus vendors ten submodules, and bumping
   one changes performance while leaving the Primus commit unchanged.
 - **Library versions are read from inside the container**, since the image
@@ -511,6 +545,8 @@ files keep working:
 | `tps_per_gpu_*`, `tflops_*` (`min`, `max`, `stdev`, `cv`) | Spread over the post-warmup steps; tells a few slow steps from a uniformly slow run. |
 | `version_warnings` | Distinct `... version mismatch ...` messages, e.g. aiter installed vs expected. |
 | `parser_version` | Bumped when columns change. |
+| `image_id`, `container_rocm_version`, `container_hip_version` | Exact image and the user-space ROCm/HIP inside it. |
+| `cpu_governor`, `numa_balancing`, `transparent_hugepages`, `iommu`, `amdgpu_version` | Host settings of the node that ran the batch. |
 
 `failure_reason` takes the runner's verdict from the footer when it is
 definitive (`timeout`, `idle`, `interrupted`). Otherwise the run output is

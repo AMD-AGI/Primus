@@ -450,6 +450,17 @@ perf_image_digest() {
     fi
 }
 
+# Local image ID. Unlike the repo digest it does not depend on which registry
+# the image was pulled from, so two runs (or two nodes) used the same image
+# exactly when their IDs match -- also for an image that was re-tagged locally.
+perf_image_id() {
+    local image="${1:-}" id
+    [ -n "$image" ] || { echo "unknown (DOCKER_IMAGE unset)"; return 0; }
+    command -v docker >/dev/null 2>&1 || { echo "unknown (docker not on PATH)"; return 0; }
+    id=$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)
+    echo "${id:-unknown (image not present locally)}"
+}
+
 # Primus HEAD, flagged when tracked files are modified. Untracked files are
 # ignored on purpose: a bench checkout is usually full of result directories,
 # and counting those would mark every run dirty.
@@ -558,9 +569,67 @@ perf_gpu_snapshot() {
         rocm-smi --showtopo 2>&1 || true
     elif command -v amd-smi >/dev/null 2>&1; then
         amd-smi static 2>&1 || true
+        echo
+        echo "== power / clocks / temperature at batch start =="
+        amd-smi metric --power --clock --temperature 2>&1 || amd-smi metric 2>&1 || true
     else
         echo "no rocm-smi / amd-smi on PATH"
     fi
+}
+
+# Host settings that change performance without showing up anywhere else,
+# one "key: value" per line. Shipped to remote nodes as source text for the
+# multi-node snapshot, so it must stay self-contained.
+perf_host_settings() {
+    local governors cmdline thp
+    governors=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null |
+        sort | uniq -c | awk '{ printf "%s%s x%s", sep, $2, $1; sep = ", " }')
+    cmdline=$(grep -oE '(amd_)?iommu=[^ ]+' /proc/cmdline 2>/dev/null | paste -sd ' ')
+    thp=$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)
+    echo "cpu_governor: ${governors:-unknown}"
+    echo "numa_balancing: $(cat /proc/sys/kernel/numa_balancing 2>/dev/null || echo unknown)"
+    echo "transparent_hugepages: ${thp:-unknown}"
+    echo "thp_defrag: $(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null)"
+    echo "iommu: ${cmdline:-not set on the kernel command line}"
+    echo "amdgpu_driver: $(cat /sys/module/amdgpu/version 2>/dev/null || echo unknown)"
+    echo "kernel: $(uname -r)"
+    echo "cpu_model: $(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo 2>/dev/null | head -1)"
+    echo "cpus: $(nproc 2>/dev/null)"
+    echo "memory: $(awk '/^MemTotal/ { printf "%.0f GiB", $2 / 1048576 }' /proc/meminfo 2>/dev/null)"
+}
+
+# One section per node, plus the network interfaces (which NIC NCCL can use).
+perf_host_snapshot() {
+    # shellcheck disable=SC2016
+    perf_on_nodes bash -c "$(declare -f perf_host_settings)"'
+        echo "== $(hostname) =="
+        perf_host_settings
+        echo "-- interfaces --"
+        ip -br addr 2>/dev/null || echo "(no ip command)"
+        echo
+    ' 2>&1
+}
+
+# The image's build manifest (build recipe, dpkg and pip lists), copied once
+# per batch so the result directory records how its image was built. Prints
+# what happened.
+perf_copy_image_manifest() {
+    local image="$1" dest="$2" cid
+    if [ -z "$image" ] || ! command -v docker >/dev/null 2>&1; then
+        echo "not copied (no image or no docker)"
+        return 0
+    fi
+    cid=$(docker create "$image" /bin/true 2>/dev/null)
+    if [ -z "$cid" ]; then
+        echo "not copied (cannot create a container from $image)"
+        return 0
+    fi
+    if docker cp "$cid:/workspace/.manifest" "$dest" >/dev/null 2>&1 && [ -d "$dest" ]; then
+        echo "$dest"
+    else
+        echo "none in the image (/workspace/.manifest)"
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1
 }
 
 # Library versions from inside the container. The image digest does not cover
@@ -573,18 +642,23 @@ perf_stack_snapshot() {
     echo "== image =="
     echo "tag    : $image"
     echo "digest : $(perf_image_digest "$image")"
+    echo "id     : $(perf_image_id "$image")"
     echo
     echo "== container libraries =="
     # Single quotes are deliberate: this script runs inside the container, so
-    # nothing may expand in the host shell.
+    # nothing may expand in the host shell. ROCm comes from /opt/rocm when the
+    # image has a classic install, otherwise from the pip-packaged ROCm SDK
+    # (TheRock images); hipconfig reports the HIP version, which differs.
     # shellcheck disable=SC2016
     timeout 180 docker run --rm --entrypoint /bin/bash "$image" -lc '
-        rocm=$(cat /opt/rocm/.info/version 2>/dev/null) ||
-            rocm=$(hipconfig --version 2>/dev/null) ||
-            rocm=$(basename "$(readlink -f /opt/rocm 2>/dev/null)" 2>/dev/null)
+        rocm=$(cat /opt/rocm/.info/version 2>/dev/null)
+        [ -n "$rocm" ] || rocm=$(python3 -m pip show rocm 2>/dev/null | awk "/^Version:/ { print \$2 }")
+        [ -n "$rocm" ] || rocm=$(python3 -m pip show rocm-sdk-core 2>/dev/null | awk "/^Version:/ { print \$2 }")
+        [ -n "$rocm" ] || rocm=$(basename "$(readlink -f /opt/rocm 2>/dev/null)" | sed -n "s/^rocm-//p")
         echo "rocm: ${rocm:-unknown}"
+        echo "hip: $(hipconfig --version 2>/dev/null || echo unknown)"
         python3 -m pip list 2>/dev/null |
-            grep -iE "^(torch|torchvision|torchaudio|jax|jaxlib|libtpu|transformer|transformers|primus|triton|flash|numpy|nvidia-|megatron)" ||
+            grep -iE "^(torch|torchvision|torchaudio|jax|jaxlib|libtpu|transformer|transformers|primus|triton|flash|numpy|nvidia-|megatron|rocm|hip-python|aiter|amd-aiter|apex)" ||
             echo "(pip list unavailable)"
     ' 2>&1 || echo "(container probe failed or timed out; image may need a runtime this host lacks)"
 }
@@ -594,15 +668,26 @@ perf_stack_snapshot() {
 # container once per batch rather than once per run.
 PERF_TORCH_VERSION=""
 PERF_JAX_VERSION=""
+PERF_CONTAINER_ROCM=""
+PERF_CONTAINER_HIP=""
+PERF_HOST_SETTINGS=""
 
 perf_load_stack_versions() {
     local stack_file="$1"
     [ -r "$stack_file" ] || return 0
     PERF_TORCH_VERSION=$(awk '$1 == "torch" { print $2; exit }' "$stack_file")
     PERF_JAX_VERSION=$(awk '$1 == "jax" { print $2; exit }' "$stack_file")
+    PERF_CONTAINER_ROCM=$(awk '$1 == "rocm:" { print $2; exit }' "$stack_file")
+    PERF_CONTAINER_HIP=$(awk '$1 == "hip:" { print $2; exit }' "$stack_file")
 }
 
-# Write the batch-level snapshots next to the logs.
+# Value of one perf_host_settings key on this node, for the banner.
+perf_host_setting() {
+    sed -n "s/^$1: //p" <<< "$PERF_HOST_SETTINGS" | head -1
+}
+
+# Write the batch-level snapshots next to the logs. Sets the PERF_* values
+# the banner prints, so it must not run in a pipeline.
 perf_write_batch_snapshots() {
     local result_dir="$1" stamp="$2" image="${3:-}"
 
@@ -610,8 +695,12 @@ perf_write_batch_snapshots() {
     perf_submodule_status            > "$result_dir/batch_submodules_${stamp}.txt"
     perf_gpu_snapshot                > "$result_dir/batch_gpu_${stamp}.txt"
     perf_stack_snapshot "$image"     > "$result_dir/batch_stack_${stamp}.txt"
+    perf_host_snapshot               > "$result_dir/batch_host_${stamp}.txt"
 
     perf_load_stack_versions "$result_dir/batch_stack_${stamp}.txt"
+    PERF_HOST_SETTINGS=$(perf_host_settings)
+
+    perf_log "Image manifest     -> $(perf_copy_image_manifest "$image" "$result_dir/batch_manifest_${stamp}")"
 }
 
 # Banner block shared by both runners. Printed inside the per-run banner, so
@@ -621,18 +710,31 @@ perf_print_provenance_banner() {
 
     echo "# Docker image     : ${image:-<unset; container mode uses runner/.primus.yaml>}"
     echo "# Image digest     : $(perf_image_digest "$image")"
+    echo "# Image ID         : $(perf_image_id "$image")"
     echo "# Primus commit    : $(perf_primus_commit)"
     echo "# Submodule pins   : $(perf_submodule_pins)"
     echo "# GPU model        : $(perf_gpu_model)"
     echo "# ROCm version     : $(perf_rocm_version)"
+    echo "# Container ROCm   : ${PERF_CONTAINER_ROCM:-unknown}"
+    echo "# Container HIP    : ${PERF_CONTAINER_HIP:-unknown}"
     echo "# Torch version    : ${PERF_TORCH_VERSION:-unknown}"
     echo "# JAX version      : ${PERF_JAX_VERSION:-unknown}"
     echo "# World size       : $(( ${NNODES:-1} * ${GPUS_PER_NODE:-8} ))  (NNODES=${NNODES:-1} x GPUS_PER_NODE=${GPUS_PER_NODE:-8})"
     echo "# --------------------------------------------------------------------------------"
+    # This node's settings; batch_host_<stamp>.txt has every node's.
+    echo "# CPU governor     : $(perf_host_setting cpu_governor)"
+    echo "# NUMA balancing   : $(perf_host_setting numa_balancing)"
+    echo "# Transparent HP   : $(perf_host_setting transparent_hugepages)"
+    echo "# IOMMU            : $(perf_host_setting iommu)"
+    echo "# amdgpu driver    : $(perf_host_setting amdgpu_driver)"
+    echo "# --------------------------------------------------------------------------------"
     # Distinguished from the block below because these are *guaranteed* to
     # reach the container, whereas a plain export may be filtered out.
     echo "# Extra env (--env): ${EXTRA_ENV:-<none>}"
-    echo "# Perf environment :"
+    # The runner's own shell. What the container actually ran with (after
+    # Primus's GPU-specific defaults and hooks) is logged by Primus at the
+    # start of the run output.
+    echo "# Perf environment (host shell):"
     local line
     while IFS= read -r line; do
         echo "#   $line"

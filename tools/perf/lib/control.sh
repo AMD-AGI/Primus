@@ -153,24 +153,44 @@ perf_stop_leftover_containers() {
 # Make sure every node has the image before the first run. Without this the
 # first `docker run` pulls it, which both counts against the run limits (a
 # silent multi-GB pull can trip MAX_IDLE_SECONDS) and leaves the image digest
-# unknown until then.
+# unknown until then. PULL_IMAGE=1 pulls even when the tag is present, to
+# replace a stale or locally re-tagged copy with the registry's.
+#
+# Every node must then hold the same image: the same tag can name different
+# images on different nodes, and a multi-node run mixing them measures
+# neither. Mismatching image IDs refuse the batch.
+PULL_IMAGE="${PULL_IMAGE:-0}"
+
 perf_ensure_image() {
+    local out rc ids
     perf_uses_containers || return 0
     [ -n "${DOCKER_IMAGE:-}" ] || return 0
     # shellcheck disable=SC2016
-    perf_on_nodes bash -c '
+    out=$(perf_on_nodes bash -c '
         if ! command -v docker >/dev/null 2>&1; then
             echo "[WARN] $(hostname): docker not found; image presence not checked."
             exit 0
         fi
-        docker image inspect "$1" >/dev/null 2>&1 && exit 0
-        echo "[INFO] $(hostname): $1 is not present locally; pulling it before the batch starts."
-        if ! docker pull -q "$1" >/dev/null; then
-            echo "[ERROR] $(hostname): docker pull $1 failed."
-            exit 1
+        if [ "$2" = 1 ] || ! docker image inspect "$1" >/dev/null 2>&1; then
+            echo "[INFO] $(hostname): pulling $1 before the batch starts."
+            if ! docker pull -q "$1" >/dev/null; then
+                echo "[ERROR] $(hostname): docker pull $1 failed."
+                exit 1
+            fi
         fi
-    ' _ "$DOCKER_IMAGE" 2>&1 | perf_log_stream
-    return "${PIPESTATUS[0]}"
+        echo "IMAGE_ID $(hostname) $(docker image inspect --format "{{.Id}}" "$1" 2>/dev/null)"
+    ' _ "$DOCKER_IMAGE" "$PULL_IMAGE" 2>&1)
+    rc=$?
+    grep -v '^IMAGE_ID ' <<< "$out" | sed '/^$/d' | perf_log_stream
+    [ "$rc" -eq 0 ] || return 1
+
+    ids=$(awk '$1 == "IMAGE_ID" { print $3 }' <<< "$out" | sort -u)
+    if [ "$(sed '/^$/d' <<< "$ids" | wc -l)" -gt 1 ]; then
+        perf_log "[ERROR] $DOCKER_IMAGE is a different image on different nodes:"
+        awk '$1 == "IMAGE_ID" { printf "          %s %s\n", $2, $3 }' <<< "$out" | perf_log_stream
+        perf_log "        Rerun with PULL_IMAGE=1 to pull the registry's copy on every node."
+        return 1
+    fi
 }
 
 # ---------------------------------------------------------------------------

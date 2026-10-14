@@ -99,7 +99,7 @@ import sys
 from datetime import datetime
 
 # Bumped whenever a column is added or its meaning changes.
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 BANNER_KV_RE = re.compile(r"^#\s*([^:]+?)\s*:\s*(.*?)\s*$")
@@ -651,6 +651,14 @@ def _populate_from_new_banner(result: dict, banner: dict, config_text: str) -> N
     result["jax_version"] = _banner_value(banner, "JAX version")
     result["slurm_job_id"] = _banner_value(banner, "SLURM job")
     result["nodelist"] = _banner_value(banner, "SLURM nodes")
+    result["image_id"] = _banner_value(banner, "Image ID")
+    result["container_rocm_version"] = _banner_value(banner, "Container ROCm")
+    result["container_hip_version"] = _banner_value(banner, "Container HIP")
+    result["cpu_governor"] = _banner_value(banner, "CPU governor")
+    result["numa_balancing"] = _banner_value(banner, "NUMA balancing")
+    result["transparent_hugepages"] = _banner_value(banner, "Transparent HP")
+    result["iommu"] = _banner_value(banner, "IOMMU")
+    result["amdgpu_version"] = _banner_value(banner, "amdgpu driver")
 
     # Cluster shape. "World size" is emitted as "8  (NNODES=1 x GPUS_PER_NODE=8)";
     # the Cluster line is the older format and is parsed as a fallback so
@@ -1089,6 +1097,14 @@ def parse_log_file(filepath: str) -> dict | None:
         "tflops_cv": None,
         "version_warnings": [],
         "parser_version": PARSER_VERSION,
+        "image_id": None,
+        "container_rocm_version": None,
+        "container_hip_version": None,
+        "cpu_governor": None,
+        "numa_balancing": None,
+        "transparent_hugepages": None,
+        "iommu": None,
+        "amdgpu_version": None,
     }
 
     config_text = parse_config_section(lines)
@@ -1262,6 +1278,15 @@ CSV_FIELDS = [
     "tflops_cv",
     "version_warnings",
     "parser_version",
+    # Added in parser version 3.
+    "image_id",
+    "container_rocm_version",
+    "container_hip_version",
+    "cpu_governor",
+    "numa_balancing",
+    "transparent_hugepages",
+    "iommu",
+    "amdgpu_version",
 ]
 
 
