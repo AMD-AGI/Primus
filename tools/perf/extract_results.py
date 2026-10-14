@@ -650,7 +650,9 @@ def _populate_from_new_banner(result: dict, banner: dict, config_text: str) -> N
     result["primus_commit"] = _banner_value(banner, "Primus commit")
     result["submodule_pins"] = _banner_value(banner, "Submodule pins")
     result["gpu_model"] = _banner_value(banner, "GPU model")
-    result["rocm_version"] = _banner_value(banner, "ROCm version")
+    # The host's ROCm; logs before the container's was recorded too called it
+    # "ROCm version".
+    result["rocm_version"] = _banner_value(banner, "ROCm (host)") or _banner_value(banner, "ROCm version")
     result["torch_version"] = _banner_value(banner, "Torch version")
     result["jax_version"] = _banner_value(banner, "JAX version")
     result["slurm_job_id"] = _banner_value(banner, "SLURM job")

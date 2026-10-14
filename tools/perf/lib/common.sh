@@ -730,6 +730,8 @@ perf_host_setting() {
 perf_write_batch_snapshots() {
     local result_dir="$1" stamp="$2" image="${3:-}"
 
+    perf_log "[INFO] Recording provenance: environment, submodules, GPU and host state, and ${image:-the image}'s ROCm/HIP and libraries (the container probe can take up to 3 min)."
+
     perf_env_redacted                > "$result_dir/batch_env_${stamp}.txt"
     perf_submodule_status            > "$result_dir/batch_submodules_${stamp}.txt"
     perf_gpu_snapshot                > "$result_dir/batch_gpu_${stamp}.txt"
@@ -753,7 +755,7 @@ perf_print_provenance_banner() {
     echo "# Primus commit    : $(perf_primus_commit)"
     echo "# Submodule pins   : $(perf_submodule_pins)"
     echo "# GPU model        : $(perf_gpu_model)"
-    echo "# ROCm version     : $(perf_rocm_version)"
+    echo "# ROCm (host)      : $(perf_rocm_version)"
     echo "# Container ROCm   : ${PERF_CONTAINER_ROCM:-unknown}"
     echo "# Container HIP    : ${PERF_CONTAINER_HIP:-unknown}"
     echo "# Torch version    : ${PERF_TORCH_VERSION:-unknown}"

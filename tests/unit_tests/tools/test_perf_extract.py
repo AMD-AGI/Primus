@@ -665,6 +665,15 @@ def test_image_and_host_provenance_reach_the_result(tmp_path):
     assert result["amdgpu_version"] == "6.14.14"
 
 
+def test_host_rocm_is_read_under_its_new_and_old_names(tmp_path):
+    old = extract.parse_log_file(str(write_log(tmp_path, MEGATRON_AVG, name="old.log")))
+    assert old["rocm_version"] == "7.2.1"
+    new_log = tmp_path / "new.log"
+    new_log.write_text((tmp_path / "old.log").read_text().replace("# ROCm version ", "# ROCm (host)  "))
+    assert "# ROCm (host)" in new_log.read_text()
+    assert extract.parse_log_file(str(new_log))["rocm_version"] == "7.2.1"
+
+
 def test_older_banner_leaves_new_fields_empty(tmp_path):
     result = extract.parse_log_file(str(write_log(tmp_path, MEGATRON_AVG)))
     for field in ("image_id", "container_rocm_version", "cpu_governor", "gpu_check", "batch_stamp"):

@@ -325,6 +325,11 @@ if ! perf_preflight; then
     exit "$PERF_EXIT_REFUSED"
 fi
 
+# Batch-level provenance: redacted env, submodule pins, GPU state, host
+# settings, and the library versions from inside the container. Taken before
+# the batch configuration below, which shows the container's ROCm and HIP.
+perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
+
 {
     echo ""
     echo "################################################################################"
@@ -338,6 +343,8 @@ fi
     echo "# Docker image : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
     echo "# Image digest : $(perf_image_digest "${DOCKER_IMAGE:-}")"
     echo "# Image ID     : $(perf_image_id "${DOCKER_IMAGE:-}")"
+    echo "# ROCm (host)  : $(perf_rocm_version)"
+    echo "# ROCm (image) : ${PERF_CONTAINER_ROCM:-unknown}  (HIP ${PERF_CONTAINER_HIP:-unknown})"
     echo "# Reps/config  : $NUM_REPS"
     echo "# TRAIN_STEPS  : ${TRAIN_STEPS:-<unset; use YAML>}"
     echo "# Run limits   : $(perf_run_limits_text)"
@@ -357,10 +364,6 @@ fi
     echo "################################################################################"
     echo ""
 } | tee -a "$SUMMARY_FILE"
-
-# Batch-level provenance: redacted env, submodule pins, GPU state, and the
-# library versions from inside the container.
-perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
 
 cd "$PRIMUS_PATH" || { echo "[ERROR] cannot cd into $PRIMUS_PATH" >&2; exit "$PERF_EXIT_REFUSED"; }
 

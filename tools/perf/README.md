@@ -474,7 +474,7 @@ The per-run banner carries the fields that explain a number:
 # Primus commit    : 9a05d3fc9e5c-dirty
 # Submodule pins   : b2ceb2bd
 # GPU model        : AMD Instinct MI355X
-# ROCm version     : 10.1.0
+# ROCm (host)      : 10.1.0
 # Container ROCm   : 10.1.0
 # Container HIP    : 7.16.26385-0000000
 # Torch version    : 2.14.0+rocm10.1.0
@@ -502,11 +502,14 @@ A few notes on why these specific fields:
   different IDs for the same image). Multi-node batches refuse to start when
   the nodes report different IDs under the same tag; `PULL_IMAGE=1` (or
   `true` / `yes`) pulls the registry's copy on every node first.
-- **ROCm** is reported twice: the host's user-space install (from `ROCM_PATH`
-  or `amd-smi`) and the container's, which is what the run actually used
-  (read from `/opt/rocm` or, in TheRock images, from the pip `rocm` package).
-  The HIP version is a separate number, and the kernel driver is the
-  `amdgpu driver` field.
+- **ROCm** is reported twice, in every run banner and in the batch summary:
+  the host's user-space install (`ROCm (host)`, from `ROCM_PATH` or
+  `amd-smi`) and the container's, which is what the run actually used
+  (`Container ROCm`, read from `/opt/rocm` or, in TheRock images, from the
+  pip `rocm` package). The HIP version is a separate number, and the kernel
+  driver is the `amdgpu driver` field. In the CSV they are `rocm_version`
+  and `container_rocm_version`. With `PRIMUS_MODE=direct` the run does not
+  use the image's ROCm, so `Container ROCm` only describes `DOCKER_IMAGE`.
 - **Host settings** (CPU frequency governor, NUMA balancing, transparent huge
   pages, IOMMU mode, amdgpu driver) explain why one node is slower than
   another with the same image and code. The banner carries the node running

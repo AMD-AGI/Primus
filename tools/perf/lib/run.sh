@@ -292,7 +292,8 @@ collect_system_info() {
             echo "# SLURM nnodes   : ${SLURM_NNODES:-<unknown>}"
             echo "# NNODES (script): $NNODES"
         fi
-        echo "# ROCm version  : $(perf_rocm_version)"
+        # The container's ROCm is in the batch configuration below.
+        echo "# ROCm (host)   : $(perf_rocm_version)"
         echo "# GPU model     : $(perf_gpu_model)"
         echo "# GPUs (local)  : $(perf_gpu_count)"
         echo "################################################################################"
