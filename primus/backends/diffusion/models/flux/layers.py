@@ -209,10 +209,16 @@ def _mlp_gelu_fused(mlp: nn.Sequential, norm: nn.LayerNorm, x: Tensor, mod: Modu
     gate = mod.gate
     if FUSED_DGELU_MLP and hasattr(mlp[0], "forward_gelu"):
         lazy = FWD_GELU_PACK and mlp[0].lazy_gelu_into(mlp[2], x, (mlp[2].in_features,))
+        fc1_gelu_dual = lazy and _lnmod_ok(mlp[0], x, mod) and mlp[0].fc1_gelu_dual_into(mlp[2], x)
         if _lnmod_ok(mlp[0], x, mod):
-            act = mlp[0].forward_lnmod(x, mod.shift, mod.scale, "gelu", lazy=lazy)
+            act = mlp[0].forward_lnmod(
+                x, mod.shift, mod.scale, "gelu", lazy=lazy, fc1_gelu_dual=fc1_gelu_dual
+            )
         else:
             act = mlp[0].forward_gelu((1 + mod.scale) * norm(x) + mod.shift, lazy=lazy)
+        if fc1_gelu_dual:
+            carrier, aq, sa, co, cs = act
+            return gate * mlp[2].forward_gelu_input(None, carrier, aq=aq, sa=sa, co=co, cs=cs)
         if lazy:
             # A6W4 fc1 returns its output without the bias (width 12288 is not in the bias
             # epilogue); the consumer's pack must add it ahead of the GELU. The gated Function
