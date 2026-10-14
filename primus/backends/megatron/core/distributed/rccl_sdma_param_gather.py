@@ -8,8 +8,9 @@
 
 Megatron's parameter buffer is allocated from PyTorch NCCL symmetric memory
 and gathered in place through a dedicated zero-CTA ProcessGroupNCCL
-communicator. Gradient ReduceScatter and all other collectives retain their
-original process groups.
+communicator. An explicitly selected gradient ReduceScatter path can reuse
+that communicator and pool; all other collectives retain their original
+process groups.
 """
 
 from __future__ import annotations

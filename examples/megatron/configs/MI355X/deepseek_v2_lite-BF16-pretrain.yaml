@@ -22,8 +22,8 @@ modules:
 
       # hyper parameters
       train_iters: 50
-      micro_batch_size: 12
-      global_batch_size: 768
+      micro_batch_size: 13
+      global_batch_size: 832
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
@@ -95,3 +95,4 @@ modules:
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
+      apply_rope_fusion: true

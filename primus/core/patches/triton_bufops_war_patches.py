@@ -150,6 +150,15 @@ def _break_inductor_caches() -> None:
 )
 def patch_triton_buffer_store_war(ctx: PatchContext) -> None:
     """Disable buffer ops for the individual kernels that hit the store WAR bug."""
+    if os.environ.get("PRIMUS_TRITON_BUFFER_STORE_WAR", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        _log("disabled by PRIMUS_TRITON_BUFFER_STORE_WAR")
+        return
+
     import triton.knobs as knobs
     from triton._C.libtriton import get_cache_invalidating_env_vars
     from triton.compiler import compiler as _cc

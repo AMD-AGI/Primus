@@ -3,6 +3,7 @@ extends:
 
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+vocab_size: 151936
 
 # DeepSeek-R1-Distill-Qwen-1.5B (Qwen2 architecture) specific parameters.
 # This is the exact model the ODC reference repo (sail-sg/odc) uses in its

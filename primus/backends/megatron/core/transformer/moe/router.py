@@ -120,15 +120,14 @@ class PrimusTopKRouter(TopKRouter):
         #   * "even"    -> deterministic round-robin so per-expert counts are
         #                  constant every step (constant M_total, no autotune/
         #                  recompile churn); handled by ``_force_even_routing``.
+        #                  This must run with DeepEP too: its "even" token_indices
+        #                  gather from ``scores``, which are zero off the real
+        #                  top-k, and MegaMoE re-derives its top-k from them.
         #   * "uniform" -> Megatron-LM original random-logits balancing (already
         #                  applied upstream in ``TopKRouter.forward``; nothing to
         #                  do here).
         force_load_balancing_type = getattr(args, "moe_router_force_load_balancing_type", "uniform")
-        if (
-            args.moe_router_force_load_balancing
-            and force_load_balancing_type == "even"
-            and not getattr(args, "moe_enable_deepep", False)
-        ):
+        if args.moe_router_force_load_balancing and force_load_balancing_type == "even":
             scores, routing_map = self._force_even_routing(scores, routing_map)
 
         return scores, routing_map

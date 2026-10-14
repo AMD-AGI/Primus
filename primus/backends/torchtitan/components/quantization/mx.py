@@ -31,7 +31,7 @@ def replace_turbo_mxlinear_modules(model: nn.Module, config: Float8QuantConfig):
             replace_turbo_mxlinear_modules(module, config)
 
 
-class PrimusTubroMXConverter(ModelConverter):
+class PrimusTurboMXConverter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = True
         self.config = Float8QuantConfig(
@@ -53,4 +53,4 @@ class PrimusTubroMXConverter(ModelConverter):
         return
 
 
-register_model_converter(PrimusTubroMXConverter, "primus_turbo_mx")
+register_model_converter(PrimusTurboMXConverter, "primus_turbo_mx")

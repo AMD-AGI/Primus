@@ -65,7 +65,11 @@ def _reference_local_shard(shard, shape, start, end, model_dtype):
         end_in_matrix = local_end - matrix_base
         tile_row_begin = (begin_in_matrix // cols // BLOCK) * BLOCK
         tile_row_end = ((end_in_matrix - 1) // cols // BLOCK + 1) * BLOCK
-        tile = torch.zeros((tile_row_end - tile_row_begin, cols), device=shard.device, dtype=model_dtype)
+        tile = torch.zeros(
+            (tile_row_end - tile_row_begin, cols),
+            device=shard.device,
+            dtype=model_dtype,
+        )
         tile_begin = begin_in_matrix - tile_row_begin * cols
         tile_end = end_in_matrix - tile_row_begin * cols
         tile.reshape(-1)[tile_begin:tile_end].copy_(local_model[local_begin - start : local_end - start])
@@ -119,3 +123,132 @@ def test_local_shard_qdq_matches_per_matrix_loop(start, end, scale_rounding_mode
     )
     assert torch.equal(model, shard.to(torch.bfloat16))
     assert torch.equal(q_local, _reference_local_shard(shard, _SHAPE, start, end, torch.bfloat16))
+
+
+@pytest.mark.parametrize("slabs", [False, True])
+def test_direct_runner_matches_reference_with_resume(monkeypatch, slabs):
+    from tests.unit_tests.backends.megatron.test_weight_deosc import _FakeDistOpt
+
+    assert weight_deosc._weight_deosc_qdq is not None
+    monkeypatch.setattr(weight_deosc, "_forward_scale_rounding_mode", lambda: 2)
+    model = torch.zeros((3, 128, 160), device="cuda", dtype=torch.bfloat16)
+    start, n = 37, 40013
+    gen = torch.Generator(device="cuda").manual_seed(91)
+    reference_main = torch.randn(n, device="cuda", generator=gen) * 0.03
+    fused_main = reference_main.clone()
+    reference_opt = _FakeDistOpt(model, reference_main, start, start + n)
+    fused_opt = _FakeDistOpt(model, fused_main, start, start + n)
+    reference = weight_deosc.WeightDeOscRunner(
+        weight_deosc.WeightDeOscConfig(
+            enable=True,
+            start_step=2,
+            period=3,
+        )
+    )
+    fused = weight_deosc.WeightDeOscRunner(
+        weight_deosc.WeightDeOscConfig(
+            enable=True,
+            start_step=2,
+            period=3,
+            fusion=True,
+            direct_qdq=True,
+            state_slabs=slabs,
+        )
+    )
+    reference._eligible_ids = fused._eligible_ids = {id(model)}
+    for step in range(11):
+        delta = torch.randn(n, device="cuda", generator=gen) * 0.0003
+        reference_main.add_(delta)
+        fused_main.add_(delta)
+        reference.run(reference_opt)
+        fused.run(fused_opt)
+        torch.testing.assert_close(fused_main, reference_main, rtol=0, atol=0)
+        assert fused._period_index == reference._period_index
+        assert fused._state.keys() == reference._state.keys()
+        for key in reference._state:
+            for field in ("prev", "prev_q", "dist_w", "dist_w_qdq"):
+                torch.testing.assert_close(
+                    getattr(fused._state[key], field),
+                    getattr(reference._state[key], field),
+                    rtol=0,
+                    atol=0,
+                )
+            assert fused._state[key].step == reference._state[key].step
+        if step == 6:
+            fused.load_state_dict(fused.state_dict())
+
+
+def test_fused_period_logging_is_deferred(monkeypatch):
+    from tests.unit_tests.backends.megatron.test_weight_deosc import _FakeDistOpt
+
+    messages = []
+    monkeypatch.setattr(weight_deosc, "log_rank_0", messages.append)
+    monkeypatch.setattr(weight_deosc, "_forward_scale_rounding_mode", lambda: 2)
+    model = torch.zeros((64, 64), device="cuda", dtype=torch.bfloat16)
+    main = torch.full((4096,), 0.01, device="cuda")
+    opt = _FakeDistOpt(model, main, 0, main.numel())
+    runner = weight_deosc.WeightDeOscRunner(
+        weight_deosc.WeightDeOscConfig(
+            enable=True,
+            period=1,
+            log_freq=1,
+            fusion=True,
+            direct_qdq=True,
+        )
+    )
+    runner._eligible_ids = {id(model)}
+    runner.run(opt)
+    main.add_(0.001)
+    runner.run(opt)
+    assert len(runner._pending_logs) == 1
+    assert not messages  # Closure enqueues diagnostics, never reads the GPU scalar.
+    torch.cuda.synchronize()
+    runner._drain_pending_logs()
+    assert not runner._pending_logs
+    assert len(messages) == 1 and "[deferred]" in messages[0]
+
+
+@pytest.mark.parametrize(
+    "shape,start,trim",
+    [
+        ((64, 64), 0, 0),
+        ((2, 64, 64), 0, 0),
+        ((2, 96, 64), 0, 0),  # Full experts fall back to the HIP quantizer.
+        ((3, 96, 64), 3, 7),  # Partial experts use padded batched quantization.
+    ],
+)
+@pytest.mark.parametrize("pattern", ["all_nan", "nan_row", "isolated_nan", "large_with_nan"])
+@pytest.mark.parametrize("mode", [0, 1, 2])
+def test_direct_qdq_preserves_backend_nan_semantics(monkeypatch, shape, start, trim, pattern, mode):
+    monkeypatch.setattr(weight_deosc, "_forward_scale_rounding_mode", lambda: mode)
+    full = torch.ones(shape, device="cuda")
+    if pattern == "all_nan":
+        full.fill_(float("nan"))
+    else:
+        matrices = full.view(-1, *shape[-2:])
+        if pattern == "large_with_nan":
+            full.fill_(1e38)
+        if pattern in ("nan_row", "large_with_nan"):
+            matrices[:, 3, :32] = float("nan")
+        else:
+            matrices[:, 3, 5] = float("nan")
+    end = full.numel() - trim
+    master = full.flatten()[start:end].clone()
+    expected = weight_deosc.qdq_mxfp4_local_shard(master, shape, start, end, torch.bfloat16)
+    previous = torch.empty_like(master, dtype=torch.bfloat16)
+    previous_q = torch.empty_like(previous)
+    distance, distance_q = torch.empty_like(master), torch.empty_like(master)
+    weight_deosc._weight_deosc_qdq(
+        master,
+        previous,
+        previous_q,
+        distance,
+        distance_q,
+        shape[-2],
+        shape[-1],
+        start,
+        seed=True,
+        scale_rounding_mode=mode,
+        grouped=len(shape) == 3,
+    )
+    torch.testing.assert_close(previous_q, expected, rtol=0, atol=0, equal_nan=True)

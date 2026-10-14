@@ -49,3 +49,18 @@ class TorchTitanPretrainTrainer(BaseTrainer):
             raise RuntimeError("init() must be called before train()")
 
         self._trainer.train()
+
+    def setup_model_only(self):
+        """Build the model and optimizer, skipping the training loop.
+
+        This is the hook projection's layer benchmark calls instead of
+        :meth:`init` + :meth:`train`: it wants a real model built the way
+        training builds it, but no tokenizer, dataset or step loop.  The model
+        is exposed as ``self.model`` and the optimizer as ``self.optimizer``,
+        the names the harness reads.
+        """
+        from primus.backends.torchtitan.model_builder import build_model_only
+
+        job_config = build_job_config_from_namespace(self.backend_args)
+        self.model, self.optimizer, self.parallel_dims = build_model_only(job_config)
+        return self.model

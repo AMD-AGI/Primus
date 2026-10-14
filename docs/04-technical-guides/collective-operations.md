@@ -204,11 +204,13 @@ The following appear in ROCm / AMD deployments and partner integrations; availab
 | **MSCCL++** | User-space collective paths aimed at **lower latency** for specific patterns and hardware. |
 | **ANP (AMD Network Plugin)** | Network backend integration (e.g. **AINIC**-oriented paths). Example: `NCCL_NET_PLUGIN` might point to `librccl-anp.so` or similar when installed (see Primus `runner/helpers/hooks/03_enable_ainic.sh`). |
 
-### Megatron distributed-optimizer parameter AllGather with RCCL DMA
+### Megatron distributed-optimizer AllGather and ReduceScatter with RCCL DMA
 
 Megatron can route distributed-optimizer parameter AllGather through a
-dedicated zero-CTA RCCL process group. Other communicators, including gradient
-ReduceScatter, keep their default CTA policy.
+dedicated zero-CTA RCCL process group backed by symmetric memory. Gradient
+ReduceScatter is a separate opt-in and can reuse that process group and memory
+pool. Other communicators, including gradient-norm AllReduce, keep their
+default CTA policy.
 
 For example, run the MLPerf GPT-OSS 20B configuration on one MI355X node
 through its Docker launcher:
@@ -220,6 +222,51 @@ unset NCCL_CTA_POLICY
 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
 ```
 
+To also enable CE gradient ReduceScatter with an RCCL build that contains the
+feature, add:
+
+```bash
+export MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma
+export RCCL_CE_REDUCESCATTER=1
+unset NCCL_CTA_POLICY
+
+bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
+```
+
+`MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma` requires the parameter-gather
+selector because both paths share the dedicated process group and symmetric
+pool. The Primus launcher hook supplies `NCCL_CUMEM_ENABLE=1` and forwards the
+selectors. It also supplies `RCCL_CE_REDUCESCATTER=1` when the gradient
+selector is set. Direct launchers that bypass the hook must set all three
+variables before RCCL initializes.
+
+For the large GPT-OSS 20B gradient bucket on one MI355X node, the tested tuning
+is:
+
+```bash
+export RCCL_FORCE_CE_REDUCESCATTER=1
+export RCCL_CE_REDUCE_PER_CHUNK=1
+export RCCL_CE_REDUCE_MAX_BLOCKS=64
+```
+
+These are workload-specific tuning values, not universal defaults.
+`RCCL_FORCE_CE_REDUCESCATTER=1` lets an oversized message use the staged CE
+path. `RCCL_CE_REDUCE_PER_CHUNK=1` launches a finite local reducer only after
+each copy-engine-staged chunk is ready instead of keeping a persistent grid
+resident. `RCCL_CE_REDUCE_MAX_BLOCKS=64` lets that finite reducer use up to 64
+compute blocks while it runs; the scatter movement itself remains on copy
+engines. The RCCL-wide default remains 46 blocks; 64 is the measured GPT-OSS
+20B tuning on one MI355X node.
+Per-chunk mode reserves 12 staging slots, so the default 256 MiB slot capacity
+uses about 3 GiB of additional HBM per rank.
+
+Leave `RCCL_DDA_ENABLE` unset (its default is enabled) or set it to `1` so the
+optimized parameter AllGather path remains available. Setting it to `0` is a
+profiling workaround that can disable DDA collectives and should not be used
+for the performance configuration. `RCCL_CE_COOP_LAUNCH=0` and
+`RCCL_CE_AR_STAGING_BYTES=268435456` are already RCCL defaults and do not need
+to be exported.
+
 The configuration must use Megatron's distributed optimizer. Do not set
 `NCCL_CTA_POLICY` process-wide for this backend. The adapter selects zero CTA
 only on its dedicated parameter-AllGather group and enables the required cuMem
@@ -230,6 +277,15 @@ pool and gathers directly into each bucket. Without an eager reservation, it
 first attempts allocation after Megatron calculates the exact buffer size. If
 that fails, rerun with the `MEGATRON_RCCL_SDMA_EAGER_PARAM_BYTES` value printed
 in the error so the same buffer is reserved before model construction.
+
+The gradient path is currently limited to the single-instance Megatron
+distributed optimizer with direct symmetric gradient buckets. It falls back
+to Megatron's native implementation for forced AllReduce, multiple distributed
+optimizer instances, and FP32 ReduceScatter accumulation. The dedicated group
+must contain the full world, so this integration is currently intended for a
+single-node data-parallel group. Models with large ReduceScatter buckets and
+useful backward overlap are the most likely to benefit; enabling it does not
+guarantee a gain for every model or topology.
 
 
 ### Environment variables

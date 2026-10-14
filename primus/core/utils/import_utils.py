@@ -70,6 +70,20 @@ def get_model_provider(model_type="gpt"):
         )
         return partial(inkling_module.model_provider, inkling_module.inkling_builder)
 
+    # Primus-owned: GLM-5.3 (KDA + DSA hybrid with mHC)
+    if model_type == "glm5_next":
+        glm5_next_module = importlib.import_module(
+            "primus.backends.megatron.core.models.glm5_next.glm5_next_builders"
+        )
+        log_rank_0(
+            "[Primus][MegatronCompat] Loaded GLM5-Next model_provider + builder "
+            f"from {glm5_next_module.__name__}"
+        )
+        return partial(
+            glm5_next_module.model_provider,
+            glm5_next_module.glm5_next_builder,
+        )
+
     # Primus-owned: DeepSeek-V4 (Phase 2 stub; full V4 wiring lands in Phase 3+)
     if model_type == "deepseek_v4":
         deepseek_v4_module = importlib.import_module(
