@@ -108,6 +108,19 @@ def validate_turbo_grouped_gemm_without_padding(args) -> None:
         raise ValueError(f"{option}=True requires moe_router_padding_for_quantization=False.")
 
 
+def validate_turbo_fp8_permute(args) -> None:
+    """The FP8 permute handoff only has one consumer: the fused grouped MLP behind Turbo DeepEP."""
+    option = "turbo_fp8_permute"
+    if not getattr(args, option, False):
+        return
+    for required in ("enable_primus_turbo", "use_turbo_deepep", "turbo_fused_grouped_gemm"):
+        if not getattr(args, required, False):
+            raise ValueError(f"{option}=True requires {required}=True.")
+    recompute_modules = getattr(args, "recompute_modules", None) or []
+    if getattr(args, "recompute_granularity", None) == "selective" and "moe_act" in recompute_modules:
+        raise ValueError(f"{option}=True does not support recompute of moe_act.")
+
+
 def validate_args_on_rocm(args):
     # Primus-Turbo auto-tuning
     use_turbo_autotune = getattr(args, "use_turbo_autotune", False)
@@ -216,6 +229,7 @@ def validate_args_on_rocm(args):
         )
 
     validate_turbo_grouped_gemm_without_padding(args)
+    validate_turbo_fp8_permute(args)
 
     # turbo deepep
     if args.use_turbo_deepep:

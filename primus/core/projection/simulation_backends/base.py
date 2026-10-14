@@ -61,6 +61,14 @@ class GEMMSimulationBackend(ABC):
         """
         return None
 
+    def vector_flops(self) -> Optional[float]:
+        """Full-chip fp32 vector (non-matrix) FLOP/s for the target GPU, or *None*.
+
+        Used to price non-GEMM compute against the actual architecture, e.g. the
+        HSTU attention epilogue.  Concrete backends override this when known.
+        """
+        return None
+
     @abstractmethod
     def simulate_gemm(
         self,

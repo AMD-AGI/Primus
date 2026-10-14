@@ -1,0 +1,77 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama2_7B-maxtext-convergence}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Llama-2-7B BF16 convergence test, MaxText backend, tokenised with the Llama-2
+# 32k vocab.
+#
+#   tools/convergence_test/run_convergence_test.sh --model maxtext/llama2_7B
+#   tools/convergence_test/run_convergence_test.sh --model maxtext/llama2_7B --source c4
+#
+# Same network, tokens and schedule as configs/megatron/llama2_7B: 1000 steps x
+# 128 sequences x 4096 = 524M token slots, lr 1.5e-4 cosine to 1.5e-5 after 100
+# warmup steps. See configs/maxtext/llama3.2_1B for why each non-model setting
+# differs from the perf configs.
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+    model: llama2_7B.yaml
+    overrides:
+      run_name: llama2_7B-maxtext-convergence
+      base_output_directory: ./output
+      enable_tensorboard: true
+      profiler: ""
+
+      steps: 1000
+      per_device_batch_size: 16
+      max_target_length: 4096
+
+      learning_rate: 1.5e-4
+      lr_schedule_type: cosine
+      learning_rate_final_fraction: 0.1
+      warmup_steps_fraction: 0.1
+      learning_rate_schedule_steps: -1
+      adam_b1: 0.9
+      adam_b2: 0.95
+      adam_eps: 1.0e-8
+      adam_weight_decay: 0.1
+      gradient_clipping_threshold: 1.0
+
+      # fp32 master weights and Adam moments; compute stays in bf16.
+      weight_dtype: float32
+      dtype: bfloat16
+
+      # parallel: FSDP across the node, data parallel across nodes
+      ici_fsdp_parallelism: -1
+      ici_data_parallelism: 1
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+      remat_policy: minimal_with_context
+
+      # data
+      dataset_type: grain
+      grain_file_type: parquet
+      grain_train_files: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-llama-2-7b-hf-maxtext-4096}/train-*.parquet
+      grain_eval_files: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-llama-2-7b-hf-maxtext-4096}/valid-*.parquet
+      train_data_columns: ["tokens"]
+      eval_data_columns: ["tokens"]
+      tokenize_train_data: false
+      tokenize_eval_data: false
+      tokenizer_type: huggingface
+      tokenizer_path: ${PRIMUS_CONVERGENCE_DATA:./data/convergence/fineweb-edu-llama-2-7b-hf-maxtext-4096}/tokenizer
+      packing: true
+      grain_worker_count: 4
+      enable_data_shuffling: true
+      data_shuffle_seed: 0
+      init_weights_seed: 0
+
+      # validation loss every 100 steps over 10 x 128 x 4096 = 5.2M tokens
+      eval_interval: 100
+      eval_steps: 10
+
+      # ckpt
+      enable_checkpointing: false
+      async_checkpointing: false

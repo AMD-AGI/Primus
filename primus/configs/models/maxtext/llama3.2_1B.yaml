@@ -1,0 +1,28 @@
+###############################################################################
+# Llama-3.2-1B model config for Primus MaxText
+#
+# MaxText has no built-in llama3.2-1b model config, so the architecture is
+# provided here and overrides base.yml defaults (model_name stays "default").
+# It matches the Megatron preset of the same name, including its untied output
+# layer, so the two backends train the same network.
+###############################################################################
+extends:
+  - model_base.yaml
+
+decoder_block: "llama2"
+base_emb_dim: 2048
+base_num_query_heads: 32
+base_num_kv_heads: 8
+base_num_decoder_layers: 16
+base_mlp_dim: 8192
+head_dim: 64
+mlp_activations: ["silu", "linear"]
+vocab_size: 128256
+rope_max_timescale: 500_000
+
+tokenizer_path: "meta-llama/Llama-3.2-1B"
+tokenizer_type: "huggingface"
+
+enable_dropout: false
+logits_via_embedding: false
+normalization_layer_epsilon: 1.0e-5
