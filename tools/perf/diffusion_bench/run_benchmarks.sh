@@ -65,14 +65,19 @@ start_container() {
     fi
 
     log "Starting container $CONTAINER from $image"
-    local extra=()
+    local extra=() label
     [[ -n "${HF_TOKEN:-}" ]] && extra+=(-e HF_TOKEN)
+    for label in "${LABELS[@]}"; do
+        extra+=(--label "$label")
+    done
     local hf_mount="$HF_CACHE_DIR:$HF_MOUNT_TARGET"
     if (( HF_READONLY )); then
         hf_mount+=":ro"
         extra+=(-e HF_HUB_OFFLINE=1)
     fi
-    docker run -d --name "$CONTAINER" \
+    # --rm: a container stopped from outside (e.g. by the perf batch runner's
+    # cleanup) is removed too, rather than left behind stopped.
+    docker run -d --rm --name "$CONTAINER" \
         --privileged --network host --ipc host \
         --device /dev/dri --device /dev/kfd \
         --cap-add SYS_PTRACE --security-opt seccomp=unconfined \

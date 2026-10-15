@@ -190,6 +190,14 @@ def parse_args(argv):
     p.add_argument("--timeout", type=int, help="Override step_timeout (seconds, 0 = none)")
     p.add_argument("--keep-container", action="store_true", help="Keep the container after the run")
     p.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Docker label for the benchmark containers; repeatable (the perf batch runner "
+        "finds and stops its containers by label)",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Start the container and run launcher.py with launcher.dry_run=true; "
@@ -316,6 +324,10 @@ def resolve(args):
 
     step_timeout = args.timeout if args.timeout is not None else int(cfg.get("step_timeout", 14400))
 
+    for label in args.label:
+        if "=" not in label or not label.split("=", 1)[0]:
+            raise ConfigError(f"--label expects KEY=VALUE, got '{label}'")
+
     return {
         "config_file": config_file,
         "gpu": gpu,
@@ -334,6 +346,7 @@ def resolve(args):
         "diffusion_runs": runs,
         "dlrm_precisions": precs,
         "dlrm_batch_size": dlrm_bs,
+        "labels": list(args.label),
     }
 
 
@@ -367,6 +380,7 @@ def emit_shell(plan):
         f"DLRM_PRECS={arr(plan['dlrm_precisions'])}",
         f"DLRM_BATCH_SIZE={q(plan['dlrm_batch_size'])}",
         f"DOWNLOAD_ALL={q(sorted(plan['diffusion_models']) == sorted(MODELS))}",
+        f"LABELS={arr(plan['labels'])}",
     ]
     return "\n".join(lines)
 
