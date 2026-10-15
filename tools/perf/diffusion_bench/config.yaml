@@ -1,0 +1,84 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Benchmark configuration for run_benchmarks.sh
+#
+# Per-GPU values: any batch_size / train_args value can be given either as a plain value
+# (used on every GPU) or as a mapping {mi300: ..., mi355: ...}.
+# Batch-size sweeps: give a list instead of a single number, e.g. batch_size: [8, 10, 12].
+# Paths support ~ and $ENV_VARS; relative paths are relative to this file.
+
+# Target GPU: auto | mi300 | mi355
+#   auto reads gfx_target_version from sysfs: gfx942 (MI300X/MI325X) -> mi300, gfx950 (MI350X/MI355X) -> mi355
+gpu: auto
+
+# Container image with /workspace/AMDiffusionBenchmark and /workspace/DLRMBenchmark
+image: unifiedtrainingdockers.azurecr.io/utd/ci:primus_ci_0ce782a_20261002
+
+# Hugging Face cache on the host, mounted into the container.
+#   null            -> $HF_HOME if set, otherwise ~/.cache/huggingface
+#   <HF home dir>   -> a directory containing hub/ (e.g. ~/.cache/huggingface)
+#   <hub dir>       -> a directory containing models--*/datasets--* entries (e.g. /shared/hf/hub)
+# Point this at an existing cache to reuse already downloaded models.
+hf_cache_dir: /tmp/huggingface
+
+# Mount the HF cache read-only (for shared caches you don't own). Implies download: false
+# and HF_HUB_OFFLINE=1, so every asset must already be present.
+hf_cache_readonly: false
+
+# Download / verify the Hugging Face assets before the diffusion runs. With a populated cache this
+# only verifies files; set to false to skip the step entirely.
+download: true
+
+# Where timestamped result directories are created
+output_dir: ./results
+
+# Per-step timeout in seconds (0 = none). Hung runs are killed and marked "timeout".
+step_timeout: 14400
+download_timeout: 0
+
+# Keep the container after the run (for debugging)
+keep_container: false
+
+diffusion:
+  enabled: true
+
+  # train_args.<key>=<value> hydra overrides applied to every model (per-model values win)
+  train_args: {}
+  #   num_iterations: 100
+
+  # Raw hydra overrides appended to every launcher.py call
+  hydra_overrides: []
+  #   - launcher.skip_larger_bs=false
+
+  models:
+    flux-dev:
+      enabled: true
+      batch_size: {mi300: 10, mi355: 16}
+    stable-diffusion-xl:
+      enabled: true
+      batch_size: {mi300: 20, mi355: 12}
+    mochi-1:
+      enabled: true
+      batch_size: {mi300: 1, mi355: 4}
+    hunyuan-video:
+      enabled: true
+      batch_size: {mi300: 1, mi355: 3}
+    wan2_1-i2v:
+      enabled: true
+      batch_size: {mi300: 1, mi355: 1}
+      # Per-model example:
+      # train_args:
+      #   num_iterations: 50
+      # hydra_overrides: []
+
+dlrm:
+  enabled: true
+  # Separate image for DLRM (null = same as `image`)
+  image: null
+  precisions: [TF32, FP32]
+  # Overrides BATCH_SIZE in DLRMBenchmark/training_config.sh (null = keep repo value, 32768)
+  batch_size: null
