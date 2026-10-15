@@ -1,13 +1,6 @@
 # Run SpecForge with Primus
 
 `primus-cli` is the entrypoint for SpecForge **capture** and **draft training**.
-SpecForge still owns data prep, draft configs, export, and SGLang serving —
-follow the
-[SpecForge AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md)
-for those steps.
-
-What SpecForge is, and how Primus launches it, is in the [introduction](introduction.md).
-YAML, env, and CLI keys are in [configuration](configuration.md).
 
 ## Intro
 
@@ -23,24 +16,17 @@ train is live Mooncake + SGLang capture plus `--role producer` / `--role
 consumer`. Capture is SpecForge `scripts/prepare_hidden_states.py`, not a
 train mode.
 
-## Runtime image
-
-Build and run: [runtime image](runtime-image.md). Inside the container,
+Build the image first: [runtime image](runtime-image.md). Inside the container,
 Primus is `/opt/primus` and SpecForge is `/workspace/SpecForge`.
 
 ## Launch with `primus-cli`
 
-| Workload | `direct` (inside the image) | `container` (from the host) | `slurm` |
-| --- | --- | --- | --- |
-| Capture / offline train | yes | yes | `-N` = nodes (homogeneous DP) |
-| Online train | no | no | `-N` = capture nodes + trainer nodes |
+- **Capture and offline train** use `direct` (inside the image), `container` (from the host), or `slurm`. On Slurm, `-N` is the node count for one SpecForge job: data parallel across nodes, the same command on every node, and a shared `OUTPUT_DIR` / `HIDDEN_STATES_PATH`.
+- **Online disaggregated train** is `slurm` only. `-N` is capture nodes plus trainer nodes, not a homogeneous DP job.
 
 `direct` is the in-image command. `container` starts this image from the host
 and runs the same command. `slurm` allocates nodes, then each node runs
-`container` or `direct`. Multi-GPU on one node is `NPROC_PER_NODE`. Capture
-and offline train on `-N` greater than 1 are **one** SpecForge job (DP across
-nodes): same command on every node, shared `OUTPUT_DIR` / `HIDDEN_STATES_PATH`.
-Online is a capture+trainer split, not that homogeneous job.
+`container` or `direct`. Multi-GPU on one node is `NPROC_PER_NODE`.
 
 Inside the image:
 
@@ -151,60 +137,9 @@ capture+train. SpecForge's own CLI will not start Mooncake/SGLang across
 nodes, so Primus does that and then launches `--role producer` /
 `--role consumer`.
 
-Run `./runner/primus-cli slurm` **outside** the image (login node, this
-checkout). Training runs **inside** the docker image, or a bind-mount of this tree
-at `/opt/primus`.
-
-Example:
+Run `./runner/primus-cli slurm` on a Slurm cluster. Training runs **inside**
+the docker image, or a bind-mount of this tree at `/opt/primus`. Example:
 [qwen3.5-4b-dflash-online.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/specforge/configs/qwen3.5-4b-dflash-online.yaml).
-Primus maps `specforge_online.run_root` / `consumer_state_dir` onto SpecForge
-`control_dir`, `output_dir`, and `consumer_state_dir`. After allocate it
-rewrites the SpecForge loopback endpoints to a routable capture-rank-0 IP.
-`PRIMUS_SPECFORGE_HEAD_IP` / `HEAD_IP` apply **only on capture rank 0**
-(Mooncake + producer). Capture replicas and trainers advertise
-`PRIMUS_SPECFORGE_LOCAL_IP` if set, else the IPv4 on
-`PRIMUS_SPECFORGE_BIND_IFACE`, else hostname. A job-wide `HEAD_IP` must not be
-the per-node Mooncake hostname. Shared vs local directories, empty
-control/SQLite trees, and the producer/consumer contract are SpecForge's — see
-[online disaggregated training](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md#4-online-disaggregated-training).
-
-One Slurm allocation, the same `primus-cli` command on every node. Shape is
-**C capture nodes + T trainer nodes** (`CAPTURE_NNODES` + `TRAINER_NNODES`,
-default 1+1 so `-N 2`):
-
-| Slurm `NODE_RANK` | Role |
-| --- | --- |
-| `0 .. C-1` | Capture: SGLang on GPU. Rank 0 also starts Mooncake and the SpecForge **producer** (CPU HTTP client to those servers). |
-| `C .. C+T-1` | Wait for `inference.ready` → `--role consumer` (`--node-rank` when `T>1`) |
-
-Rank 0 starts Mooncake, then local SGLang, collects every capture rank’s server
-URLs, rewrites loopback into the producer and consumer commands, writes
-`inference.ready`, and only then starts the producer. Other capture ranks start
-SGLang only. Trainer ranks wait for `inference.ready`. Teardown is producer,
-then SGLang, then Mooncake, after every `consumer.done`. When `C=1`, there are
-no other capture ranks. When `T>1`, each consumer gets `--node-rank` inside
-the trainer group.
-
-```mermaid
-sequenceDiagram
-    participant Cli as primus-cli slurm
-    participant Cap0 as Capture rank 0
-    participant CapN as Other capture ranks
-    participant Train as Trainer ranks
-    Cli->>Cap0: NODE_RANK 0
-    Cli->>CapN: NODE_RANK 1 to C-1
-    Cli->>Train: NODE_RANK C to C+T-1
-    Cap0->>Cap0: start Mooncake then local SGLang
-    CapN->>Cap0: wait for head.ip
-    CapN->>CapN: start SGLang only
-    Cap0->>Cap0: collect server URLs and rewrite loopback
-    Cap0->>Cap0: write inference.ready
-    Cap0->>Cap0: specforge train --role producer
-    Train->>Cap0: wait for inference.ready
-    Train->>Train: specforge train --role consumer
-    Train-->>Cap0: consumer.done
-    Cap0->>Cap0: stop producer then SGLang then Mooncake
-```
 
 ```yaml
 # examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
@@ -254,6 +189,57 @@ node, use SpecForge `managed_local` inside the image (see Launch above), not
 needs `SERVER_COUNT=8` and `NPROC_PER_NODE=8`. Set an explicit CSV to pin
 non-contiguous devices. Raise `-N` with `CAPTURE_NNODES` / `TRAINER_NNODES`
 for more nodes.
+
+### How it works
+
+One Slurm allocation, the same `primus-cli` command on every node. Shape is
+**C capture nodes + T trainer nodes** (`CAPTURE_NNODES` + `TRAINER_NNODES`,
+default 1+1 so `-N 2`):
+
+| Slurm `NODE_RANK` | Role |
+| --- | --- |
+| `0 .. C-1` | Capture: SGLang on GPU. Rank 0 also starts Mooncake and the SpecForge **producer** (CPU HTTP client to those servers). |
+| `C .. C+T-1` | Wait for `inference.ready` → `--role consumer` (`--node-rank` when `T>1`) |
+
+Rank 0 starts Mooncake, then local SGLang, collects every capture rank’s server
+URLs, rewrites loopback into the producer and consumer commands, writes
+`inference.ready`, and only then starts the producer. Other capture ranks start
+SGLang only. Trainer ranks wait for `inference.ready`. Teardown is producer,
+then SGLang, then Mooncake, after every `consumer.done`. When `C=1`, there are
+no other capture ranks. When `T>1`, each consumer gets `--node-rank` inside
+the trainer group.
+
+```mermaid
+sequenceDiagram
+    participant Cli as primus-cli slurm
+    participant Cap0 as Capture rank 0
+    participant CapN as Other capture ranks
+    participant Train as Trainer ranks
+    Cli->>Cap0: NODE_RANK 0
+    Cli->>CapN: NODE_RANK 1 to C-1
+    Cli->>Train: NODE_RANK C to C+T-1
+    Cap0->>Cap0: start Mooncake then local SGLang
+    CapN->>Cap0: wait for head.ip
+    CapN->>CapN: start SGLang only
+    Cap0->>Cap0: collect server URLs and rewrite loopback
+    Cap0->>Cap0: write inference.ready
+    Cap0->>Cap0: specforge train --role producer
+    Train->>Cap0: wait for inference.ready
+    Train->>Train: specforge train --role consumer
+    Train-->>Cap0: consumer.done
+    Cap0->>Cap0: stop producer then SGLang then Mooncake
+```
+
+Primus maps `specforge_online.run_root` / `consumer_state_dir` onto SpecForge
+`control_dir`, `output_dir`, and `consumer_state_dir`. After allocate it
+rewrites the SpecForge loopback endpoints to a routable capture-rank-0 IP.
+`PRIMUS_SPECFORGE_HEAD_IP` / `HEAD_IP` apply **only on capture rank 0**
+(Mooncake + producer). Capture replicas and trainers advertise
+`PRIMUS_SPECFORGE_LOCAL_IP` if set, else the IPv4 on
+`PRIMUS_SPECFORGE_BIND_IFACE`, else hostname. A job-wide `HEAD_IP` must not be
+the per-node Mooncake hostname. Shared vs local directories, empty
+control/SQLite trees, and the producer/consumer contract are SpecForge's — see
+[online disaggregated training](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md#4-online-disaggregated-training).
 
 ## Reference results on MI355X
 
