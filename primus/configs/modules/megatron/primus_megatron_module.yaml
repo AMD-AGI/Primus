@@ -87,6 +87,8 @@ patch_moe_overlap: false
 
 # perf
 pp_warmup: false # set to true to decrease iter-1 time when using pp
+# Opt-in Primus fusions (pinned Triton launch configs, no in-process autotune)
+use_primus_pinned_triton_configs: false # pin the autotuned kernels of apply_rope_fusion (MLA) and moe_permute_fusion
 
 # tool
 dump_pp_data: false
