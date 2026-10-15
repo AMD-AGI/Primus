@@ -895,20 +895,30 @@ def write_overview(
     row += 1
     notes = [
         "How to read the numbers:",
-        "- Performance has one row per config and image, and averages its successful runs (status ok), "
-        "replicates with different step counts included; failed runs and failed multi-node attempts are "
-        "left out before averaging and counted under Notes.",
+        (
+            "- Performance has one row per config and image, and averages its successful runs (status ok), "
+            "replicates with different step counts included; failed runs and failed multi-node attempts are "
+            "left out before averaging and counted under Notes."
+        ),
         "- Config hash: the first 8 hex digits of the config file's SHA-256, so an edited file shows up as a new row.",
-        "- Within a run, Primus throughput is the harmonic mean over the steps after warmup "
-        "(at least the first three logged steps are dropped).",
+        (
+            "- Within a run, Primus throughput is the harmonic mean over the steps after warmup "
+            "(at least the first three logged steps are dropped)."
+        ),
         "- Diffusion and DLRM numbers are diffusion_bench's own averages (they match its summary.md).",
-        "- Throughput is per GPU: tokens/s (language models), samples/s or frames/s (diffusion), "
-        "recommendations/s (DLRM). 'All GPUs' multiplies it by the GPU count.",
-        "- Run-to-run CV is the spread between repetitions (stdev / mean), shown from two successful runs; "
-        f"above {CV_WARN:.0%} it is highlighted. Step-to-step CV (Runs sheet) is the spread within one run.",
+        (
+            "- Throughput is per GPU: tokens/s (language models), samples/s or frames/s (diffusion), "
+            "recommendations/s (DLRM). 'All GPUs' multiplies it by the GPU count."
+        ),
+        (
+            "- Run-to-run CV is the spread between repetitions (stdev / mean), shown from two successful runs; "
+            f"above {CV_WARN:.0%} it is highlighted. Step-to-step CV (Runs sheet) is the spread within one run."
+        ),
         "- GPU memory is as the backend logs it: GB for Megatron, GiB for TorchTitan.",
-        "- Runs lists every run as an Excel table, with the failure reason and detail of those that did not "
-        "pass; Insert > PivotTable on it for other views.",
+        (
+            "- Runs lists every run as an Excel table, with the failure reason and detail of those that did not "
+            "pass; Insert > PivotTable on it for other views."
+        ),
     ]
     for line in notes:
         # Unwrapped, so the line runs on across the empty cells to its right.

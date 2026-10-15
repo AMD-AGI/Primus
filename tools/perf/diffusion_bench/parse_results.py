@@ -17,6 +17,7 @@ import ast
 import csv
 import glob
 import json
+import math
 import os
 import re
 import statistics
@@ -51,7 +52,7 @@ FIELDS = [
 def to_float(v):
     try:
         f = float(v)
-        return None if f != f else f
+        return None if math.isnan(f) else f
     except (TypeError, ValueError):
         return None
 

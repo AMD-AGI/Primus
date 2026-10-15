@@ -725,7 +725,8 @@ def test_outputs_have_fixed_names_and_keep_old_column_order(tmp_path):
     assert Path(csv_path).name == "results.csv"
     assert Path(json_path).name == "results.json"
 
-    header = next(csv.reader(open(csv_path)))
+    with open(csv_path, newline="") as f:
+        header = next(csv.reader(f))
     # The columns of parser version 1 keep their order; new ones come after.
     v1_columns = [
         "filename",
@@ -786,7 +787,9 @@ def test_fractional_batch_size_is_written_plainly(tmp_path):
     )
     (tmp_path / "tmp.log").unlink()
     csv_path, _ = extract.write_outputs([extract.parse_log_file(str(log))], str(tmp_path))
-    assert next(csv.DictReader(open(csv_path)))["micro_batch_size"] == "0.5"
+    with open(csv_path, newline="") as f:
+        row = next(csv.DictReader(f))
+    assert row["micro_batch_size"] == "0.5"
 
 
 # --------------------------------------------------------------------------
@@ -1159,9 +1162,11 @@ def test_diffusion_dlrm_rows_reach_the_outputs(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.argv", ["extract_results.py", "--quiet", str(tmp_path)])
     assert extract.main() == 0
 
-    rows = list(csv.DictReader(open(tmp_path / "results.csv")))
+    with open(tmp_path / "results.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
     assert sorted(r["backend"] for r in rows) == ["diffusion", "dlrm", "megatron"]
-    header = next(csv.reader(open(tmp_path / "results.csv")))
+    with open(tmp_path / "results.csv", newline="") as f:
+        header = next(csv.reader(f))
     assert header[-3:] == ["rec_per_s", "rec_per_s_cv", "step_log"]
     dlrm = next(r for r in rows if r["backend"] == "dlrm")
     assert dlrm["rec_per_s"] == "552606.4500"
