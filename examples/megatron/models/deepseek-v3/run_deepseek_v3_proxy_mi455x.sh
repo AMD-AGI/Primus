@@ -19,7 +19,7 @@ cd "$(dirname "$(realpath "$0")")/../../../.."
 
 # container: start a container from DOCKER_IMAGE; direct: run in this container
 export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-container}
-export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-mi455x-v1}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261015}
 export EXP=${EXP:-examples/megatron/configs/MI455X/deepseek_v3-BF16-pretrain.yaml}
 # Primus-Turbo checkout built by prepare_mi455x.sh; empty: the image's primus_turbo
 export TURBO_DIR=${TURBO_DIR:-}

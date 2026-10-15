@@ -10,7 +10,7 @@ recompute. Attention and the expert grouped GEMMs run on Primus-Turbo's FlyDSL k
 | `run_deepseek_v3_proxy_mi455x.sh` | Launcher. With `PRIMUS_LAUNCHER=container` (default) it runs from the host in a new container of `DOCKER_IMAGE`; with `PRIMUS_LAUNCHER=direct` it runs inside the current container. |
 | `prepare_mi455x.sh` | Optional host-side setup. `TURBO_DIR` builds a Primus-Turbo checkout for the image, and `CONTAINER` starts a container for direct runs. |
 
-The default image, `amdprimus/amdprimus:tas-mi455x-v1`, is `amdprimus/amdprimus:tas-20261011` with
+The default image, `amdprimus/amdprimus:tas-20261015`, is `amdprimus/amdprimus:tas-20261011` with
 Primus-Turbo `dev/mi455x_v1` (e1a967a0: FlyDSL MLA attention and the tuned gfx1250 BF16 grouped GEMM),
 flydsl 0.3.4.1 and aiter v0.1.24.post1.
 

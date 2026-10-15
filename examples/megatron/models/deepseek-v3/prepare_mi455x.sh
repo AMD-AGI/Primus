@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$(realpath "$0")")/../../../.." && pwd)"
-DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-mi455x-v1}
+DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261015}
 TURBO_DIR=${TURBO_DIR:+$(realpath -e "${TURBO_DIR}")}
 MOUNTS=(-v "${REPO}:${REPO}")
 if [[ -z "${TURBO_DIR}${CONTAINER:-}" ]]; then
