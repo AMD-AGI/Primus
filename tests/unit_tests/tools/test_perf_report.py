@@ -70,7 +70,10 @@ def test_throughput_is_the_metric_of_the_workload():
     assert report.throughput(run(hmean_tps_per_gpu=None, hmean_samples_per_gpu=8.7)) == (8.7, "samples/s")
     # MaxDiffusion video models report both; frames are the headline.
     assert report.throughput(run(hmean_samples_per_gpu=0.01, hmean_frames_per_gpu=1.0))[1] == "frames/s"
-    assert report.throughput(run(backend="dlrm", hmean_tps_per_gpu=None, rec_per_s=7.7e5)) == (7.7e5, "recommendations/s")
+    assert report.throughput(run(backend="dlrm", hmean_tps_per_gpu=None, rec_per_s=7.7e5)) == (
+        7.7e5,
+        "recommendations/s",
+    )
     assert report.throughput(run(hmean_tps_per_gpu=None)) == (None, None)
 
 
@@ -110,7 +113,9 @@ def test_replicates_with_different_step_counts_are_combined():
         run(repeat=1, total_steps=50, elapsed_sec=720, hmean_tflops=1100.0),
         run(repeat=2, total_steps=10, elapsed_sec=240, hmean_tflops=1120.0),
         # Failed: left out before averaging, whatever its numbers.
-        run(repeat=3, total_steps=20, elapsed_sec=60, hmean_tflops=5.0, status="failed", failure_reason="oom"),
+        run(
+            repeat=3, total_steps=20, elapsed_sec=60, hmean_tflops=5.0, status="failed", failure_reason="oom"
+        ),
     ]
     (entry,) = report.aggregate(report.sort_frame(report.runs_frame(runs)))
     assert (entry["runs_ok"], entry["runs_total"]) == (2, 3)
@@ -123,7 +128,14 @@ def test_replicates_with_different_step_counts_are_combined():
 
 def test_configs_split_by_config_file_and_image_and_sort_by_backend():
     runs = [
-        run(backend="dlrm", model_name="dlrm-v2", precision="TF32", hmean_tflops=None, rec_per_s=7e5, seq_len=None),
+        run(
+            backend="dlrm",
+            model_name="dlrm-v2",
+            precision="TF32",
+            hmean_tflops=None,
+            rec_per_s=7e5,
+            seq_len=None,
+        ),
         run(precision="FP8", config_hash="874ffa7b"),
         run(),
         run(config_hash="deadbeef"),
@@ -183,10 +195,14 @@ def test_baseline_prefers_the_same_config():
     assert (base["tflops"], how) == (1000.0, "same")
     assert report._change(current["tflops"], base["tflops"]) == pytest.approx(0.1)
 
-    other = report.aggregate(report.runs_frame([run(config_hash="older", micro_batch_size=2, hmean_tflops=900.0)]))
+    other = report.aggregate(
+        report.runs_frame([run(config_hash="older", micro_batch_size=2, hmean_tflops=900.0)])
+    )
     base, how = report.match_baseline(current, other)
     assert how == "changed (MBS 2, GBS 256)"
-    assert report.match_baseline(report.aggregate(report.runs_frame([run(model_name="other")]))[0], other) == (None, None)
+    assert report.match_baseline(
+        report.aggregate(report.runs_frame([run(model_name="other")]))[0], other
+    ) == (None, None)
 
 
 SINGLE_NODE_SUMMARY = """\
@@ -259,7 +275,9 @@ def test_interrupted_and_multinode_summaries(tmp_path):
     assert info["outcome"] == "STOPPED: GPUs busy"
     assert info["system"]["SLURM job"] == "1234"
     assert info["config"]["NUM_REPS (target)"] == "2"
-    rows = dict((label, value) for _, label, value in report.overview_rows("s", info, report.runs_frame([run()])))
+    rows = dict(
+        (label, value) for _, label, value in report.overview_rows("s", info, report.runs_frame([run()]))
+    )
     assert rows["Elapsed (h:mm:ss)"] == "0:01:40"
     assert rows["Repetitions per config"] == "2"
 
@@ -272,7 +290,9 @@ def test_refused_batch_shows_its_errors_and_lines_up_with_others(tmp_path):
     )
     complete = tmp_path / "complete.txt"
     complete.write_text(SINGLE_NODE_SUMMARY)
-    refused_info, complete_info = report.parse_batch_summary(str(refused)), report.parse_batch_summary(str(complete))
+    refused_info, complete_info = report.parse_batch_summary(str(refused)), report.parse_batch_summary(
+        str(complete)
+    )
     per_batch = [
         report.overview_rows("a", refused_info, report.runs_frame([run()]).iloc[0:0], keep_empty=True),
         report.overview_rows("b", complete_info, report.runs_frame([run()]), keep_empty=True),
@@ -316,8 +336,14 @@ def test_report_is_written(tmp_path, monkeypatch):
     results = tmp_path / "results"
     results.mkdir()
     (results / "x.log").write_text("log\n")
-    rows = [run(repeat=1), run(repeat=2, hmean_tflops=1200.0), run(repeat=3, status="failed", failure_reason="oom")]
-    (results / "results.json").write_text(json.dumps({"parser_version": report._extractor().PARSER_VERSION, "runs": rows}))
+    rows = [
+        run(repeat=1),
+        run(repeat=2, hmean_tflops=1200.0),
+        run(repeat=3, status="failed", failure_reason="oom"),
+    ]
+    (results / "results.json").write_text(
+        json.dumps({"parser_version": report._extractor().PARSER_VERSION, "runs": rows})
+    )
     (results / "batch_summary_20261015-002731.txt").write_text(SINGLE_NODE_SUMMARY)
 
     # Named twice: counted once.
@@ -343,5 +369,7 @@ def test_report_is_written(tmp_path, monkeypatch):
     other.mkdir()
     assert report.main([str(results), str(other)]) == report.EXIT_ERROR  # several inputs need -o
     assert report.main([str(results), "-o", str(tmp_path / "missing" / "r.xlsx")]) == report.EXIT_ERROR
-    (other / "results.json").write_text(json.dumps({"parser_version": report._extractor().PARSER_VERSION, "runs": []}))
+    (other / "results.json").write_text(
+        json.dumps({"parser_version": report._extractor().PARSER_VERSION, "runs": []})
+    )
     assert report.main([str(other)]) == report.EXIT_NO_RUNS

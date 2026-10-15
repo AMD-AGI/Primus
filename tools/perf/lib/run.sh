@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034  # variables are read by the sourcing runner and lib/control.sh
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #

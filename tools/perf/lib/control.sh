@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034,SC2154  # variables are shared with the sourcing runner and lib/run.sh
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -234,6 +235,7 @@ perf_ensure_image() {
     ids=$(awk '{ print $2 }' <<< "$reported" | sed '/^$/d' | sort -u)
     if [ "$(sed '/^$/d' <<< "$ids" | wc -l)" -gt 1 ]; then
         perf_log "[ERROR] $DOCKER_IMAGE is a different image on different nodes:"
+        # shellcheck disable=SC2001  # indents every line of a multi-line value
         sed 's/^/          /' <<< "$reported" | perf_log_stream
         perf_log "        Rerun with PULL_IMAGE=1 to pull the registry's copy on every node."
         return 1
@@ -356,12 +358,14 @@ perf_prepare_gpus() {
     until perf_check_gpus_idle_once; do
         if [ "$ALLOW_BUSY_GPUS" = 1 ]; then
             perf_log "[WARN] GPUs are in use, continuing because ALLOW_BUSY_GPUS=1:"
+            # shellcheck disable=SC2001  # indents every line of a multi-line value
             sed 's/^/         /' <<< "$PERF_GPU_BUSY_REPORT" | perf_log_stream
             PERF_GPU_CHECK="$PERF_GPU_CHECK; ALLOW_BUSY_GPUS=1"
             return 0
         fi
         if [ "$waited" -ge "$GPU_BUSY_WAIT_SECONDS" ]; then
             perf_log "[ERROR] GPUs are in use by something other than this batch:"
+            # shellcheck disable=SC2001  # indents every line of a multi-line value
             sed 's/^/          /' <<< "$PERF_GPU_BUSY_REPORT" | perf_log_stream
             perf_log "        Running containers:"
             # shellcheck disable=SC2016
@@ -504,7 +508,7 @@ perf_kill_run() {
     local pid="$1" i
     if [ -n "$pid" ]; then
         kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
-        for i in 1 2 3 4 5 6 7 8 9 10; do
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
             kill -0 -- "-$pid" 2>/dev/null || kill -0 "$pid" 2>/dev/null || break
             sleep 1
         done
@@ -524,6 +528,7 @@ perf_launch_with_watchdog() {
     # ends at EOF or with the final SIGKILL. PIPESTATUS[0] is the launcher's
     # exit code.
     local runner_cmd
+    # shellcheck disable=SC2016  # $@ expands in the launched shell, not here
     runner_cmd="$(declare -f perf_redact_stream)"'
         set -o pipefail
         "$@" 2>&1 | { trap "" TERM INT HUP; perf_redact_stream; } >> "$PERF_RUN_LOG"

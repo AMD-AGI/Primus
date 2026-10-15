@@ -480,7 +480,9 @@ def test_old_footers_still_get_the_right_reason(tmp_path):
 
     # The older multi-node runner flagged watchdog kills in its footer, even with exit 0.
     old_multinode = write_log(
-        tmp_path, ">>> [12:00:00] TIMEOUT — attempt exceeded MAX_RUN_SECONDS\n", exit_code=0,
+        tmp_path,
+        ">>> [12:00:00] TIMEOUT — attempt exceeded MAX_RUN_SECONDS\n",
+        exit_code=0,
         name="m-abcd1234-MBS2-GBS16-rep1-failed-attempt1_20261001-000000.log",
     )
     old_multinode.write_text(
@@ -519,7 +521,9 @@ def test_contention_reads_every_unit_and_counts_reserved_memory(tmp_path):
             "oom",
             id="upper-case-message-lower-case-units",
         ),
-        pytest.param("*** SIGSEGV (@0x0) received by PID 1234 (TID 0x7f) from PID 0\n", "segfault", id="glog-segv"),
+        pytest.param(
+            "*** SIGSEGV (@0x0) received by PID 1234 (TID 0x7f) from PID 0\n", "segfault", id="glog-segv"
+        ),
     ],
 )
 def test_failure_text_variants(tmp_path, body, expected):
@@ -584,7 +588,9 @@ def test_interrupted_and_incomplete_runs(tmp_path):
     assert interrupted["status"] == "interrupted"
     assert interrupted["failure_reason"] == "interrupted"
 
-    incomplete = extract.parse_log_file(str(write_log(tmp_path, MEGATRON_AVG, with_footer=False, name="b.log")))
+    incomplete = extract.parse_log_file(
+        str(write_log(tmp_path, MEGATRON_AVG, with_footer=False, name="b.log"))
+    )
     assert incomplete["status"] == "incomplete"
     assert incomplete["exit_code"] is None
     # The throughput up to the kill is still reported.
@@ -722,13 +728,42 @@ def test_outputs_have_fixed_names_and_keep_old_column_order(tmp_path):
     header = next(csv.reader(open(csv_path)))
     # The columns of parser version 1 keep their order; new ones come after.
     v1_columns = [
-        "filename", "backend", "model_name", "precision", "seq_len", "micro_batch_size",
-        "global_batch_size", "nnodes", "gpus_per_node", "world_size", "warmup_steps", "repeat",
-        "total_steps", "num_iterations", "num_post_warmup", "hmean_tps_per_gpu", "hmean_tflops",
-        "hmean_samples_per_gpu", "hmean_frames_per_gpu", "amean_memory_usage",
-        "amean_memory_usage_pct", "exit_code", "elapsed_sec", "docker_image", "image_digest",
-        "primus_commit", "submodule_pins", "gpu_model", "rocm_version", "torch_version",
-        "jax_version", "config_hash", "host", "slurm_job_id", "nodelist", "timestamp",
+        "filename",
+        "backend",
+        "model_name",
+        "precision",
+        "seq_len",
+        "micro_batch_size",
+        "global_batch_size",
+        "nnodes",
+        "gpus_per_node",
+        "world_size",
+        "warmup_steps",
+        "repeat",
+        "total_steps",
+        "num_iterations",
+        "num_post_warmup",
+        "hmean_tps_per_gpu",
+        "hmean_tflops",
+        "hmean_samples_per_gpu",
+        "hmean_frames_per_gpu",
+        "amean_memory_usage",
+        "amean_memory_usage_pct",
+        "exit_code",
+        "elapsed_sec",
+        "docker_image",
+        "image_digest",
+        "primus_commit",
+        "submodule_pins",
+        "gpu_model",
+        "rocm_version",
+        "torch_version",
+        "jax_version",
+        "config_hash",
+        "host",
+        "slurm_job_id",
+        "nodelist",
+        "timestamp",
     ]
     assert header[: len(v1_columns)] == v1_columns
 
@@ -939,7 +974,11 @@ def test_diffusion_dlrm_steps_without_a_folder_still_get_a_row(tmp_path):
     run_dir = make_diffusion_bench_run(tmp_path, diffusion=[("flux-dev", 16, "success", "success")])
     with open(run_dir / "status.tsv", "a") as f:
         f.write("dlrm_TF32\ttimeout\t124\t14400\tlogs/dlrm_TF32.log\n")
-    plan = ("Diffusion: flux-dev  batch size 16", "Diffusion: stable-diffusion-xl  batch size 12", "DLRM     : TF32")
+    plan = (
+        "Diffusion: flux-dev  batch size 16",
+        "Diffusion: stable-diffusion-xl  batch size 12",
+        "DLRM     : TF32",
+    )
     log = write_dd_log(tmp_path, str(run_dir), plan=plan, exit_code=1, failure_reason="steps: 1 of 4 ...")
     rows = extract.parse_log(str(log))
     assert [(r["backend"], r["model_name"], r["precision"]) for r in rows] == [
@@ -955,7 +994,11 @@ def test_diffusion_dlrm_steps_without_a_folder_still_get_a_row(tmp_path):
 
     # The same steps, had the batch been interrupted instead.
     log = write_dd_log(
-        tmp_path, str(run_dir), plan=plan, exit_code=130, failure_reason="interrupted: the batch was stopped by a signal"
+        tmp_path,
+        str(run_dir),
+        plan=plan,
+        exit_code=130,
+        failure_reason="interrupted: the batch was stopped by a signal",
     )
     sdxl = extract.parse_log(str(log))[1]
     assert (sdxl["status"], sdxl["failure_reason"]) == ("interrupted", "interrupted")
@@ -1027,7 +1070,11 @@ def test_diffusion_dlrm_failed_download_gets_a_row(tmp_path):
         f.write("download\terror\t1\t60\tlogs/download.log\n")
     log = write_dd_log(tmp_path, str(run_dir), exit_code=1, failure_reason="steps: 1 of 3 ...")
     download, flux = extract.parse_log(str(log))
-    assert (download["backend"], download["model_name"], download["status"]) == ("diffusion_dlrm", "download", "failed")
+    assert (download["backend"], download["model_name"], download["status"]) == (
+        "diffusion_dlrm",
+        "download",
+        "failed",
+    )
     assert download["failure_reason"] == "python_error"
     assert flux["status"] == "ok"
 
@@ -1040,7 +1087,11 @@ def test_diffusion_dlrm_incomplete_run_blames_each_step_for_its_own_log_only(tmp
         diffusion=[("flux-dev", 16, "oom", None), ("stable-diffusion-xl", 12, None, "not_run")],
         step_logs={"diffusion_flux-dev_bs16": oom, "diffusion_stable-diffusion-xl_bs12": "Step 3 ...\n"},
     )
-    plan = ("Diffusion: flux-dev  batch size 16", "Diffusion: stable-diffusion-xl  batch size 12", "DLRM     : TF32")
+    plan = (
+        "Diffusion: flux-dev  batch size 16",
+        "Diffusion: stable-diffusion-xl  batch size 12",
+        "DLRM     : TF32",
+    )
     log = write_dd_log(tmp_path, str(run_dir), plan=plan, with_footer=False)
     log.write_text(log.read_text() + oom)
     flux, sdxl, dlrm = extract.parse_log(str(log))
@@ -1089,9 +1140,7 @@ def test_diffusion_dlrm_separate_dlrm_image_is_reported(tmp_path):
     (run_dir / "run_info.txt").write_text("image: registry.example/ci:some-tag\ndlrm_image: rocm/dlrm:1.0\n")
     (run_dir / "env").mkdir()
     (run_dir / "env" / "image_id_dlrm.txt").write_text("sha256:0123abcd\n")
-    log = write_dd_log(
-        tmp_path, str(run_dir), banner_extra="# Image ID         : sha256:fe8e1551d200\n"
-    )
+    log = write_dd_log(tmp_path, str(run_dir), banner_extra="# Image ID         : sha256:fe8e1551d200\n")
     flux, dlrm = extract.parse_log(str(log))
     assert (flux["docker_image"], flux["image_id"]) == ("registry.example/ci:some-tag", "sha256:fe8e1551d200")
     assert (dlrm["docker_image"], dlrm["image_id"]) == ("rocm/dlrm:1.0", "sha256:0123abcd")

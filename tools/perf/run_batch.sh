@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034,SC2153,SC2154  # variables are read by the sourced lib/*.sh
 ###############################################################################
 # Primus Perf Batch Runner (single node)
 #

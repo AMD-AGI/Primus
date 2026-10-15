@@ -922,7 +922,9 @@ FAILURE_PATTERNS = (
     # applies its dataloader patch.
     (
         "segfault",
-        re.compile(r"Signal 11 \(SIGSEGV\)|Segmentation fault|signal SIGSEGV|SIGSEGV received|\*\*\* SIGSEGV"),
+        re.compile(
+            r"Signal 11 \(SIGSEGV\)|Segmentation fault|signal SIGSEGV|SIGSEGV received|\*\*\* SIGSEGV"
+        ),
     ),
     (
         "nccl_error",
@@ -1341,8 +1343,12 @@ DIFFUSION_DLRM_BACKEND = "diffusion_dlrm"
 #   [diffusion_bench 2026-10-14 18:24:21] Diffusion: flux-dev  batch size 16  ...
 #   [diffusion_bench 2026-10-14 18:24:21] DLRM     : TF32[  batch size 32768]
 DIFFUSION_BENCH_RESULTS_RE = re.compile(r"^\[diffusion_bench [^\]]*\] Results\s+:\s+(\S.*?)\s*$")
-DIFFUSION_BENCH_PLAN_DIFFUSION_RE = re.compile(r"^\[diffusion_bench [^\]]*\] Diffusion: (\S+)\s+batch size (\d+)")
-DIFFUSION_BENCH_PLAN_DLRM_RE = re.compile(r"^\[diffusion_bench [^\]]*\] DLRM\s+: (\S+)(?:\s+batch size (\d+))?")
+DIFFUSION_BENCH_PLAN_DIFFUSION_RE = re.compile(
+    r"^\[diffusion_bench [^\]]*\] Diffusion: (\S+)\s+batch size (\d+)"
+)
+DIFFUSION_BENCH_PLAN_DLRM_RE = re.compile(
+    r"^\[diffusion_bench [^\]]*\] DLRM\s+: (\S+)(?:\s+batch size (\d+))?"
+)
 DIFFUSION_BENCH_MODEL_STEPS = ("diffusion_", "dlrm_")
 _diffusion_bench_parser = None
 
@@ -1381,11 +1387,15 @@ def _diffusion_bench_plan(run_lines: list[str]) -> list[dict]:
         clean = strip_ansi(line).strip()
         m = DIFFUSION_BENCH_PLAN_DIFFUSION_RE.match(clean)
         if m:
-            plan.append({"suite": "diffusion", "benchmark": m.group(1), "batch_size": m.group(2), "precision": "bf16"})
+            plan.append(
+                {"suite": "diffusion", "benchmark": m.group(1), "batch_size": m.group(2), "precision": "bf16"}
+            )
             continue
         m = DIFFUSION_BENCH_PLAN_DLRM_RE.match(clean)
         if m:
-            plan.append({"suite": "dlrm", "benchmark": "dlrm-v2", "batch_size": m.group(2), "precision": m.group(1)})
+            plan.append(
+                {"suite": "dlrm", "benchmark": "dlrm-v2", "batch_size": m.group(2), "precision": m.group(1)}
+            )
     return plan
 
 
@@ -1401,7 +1411,12 @@ def _row_from_step_name(step: str) -> dict:
         # setup, setup_dlrm or download
         return {"suite": DIFFUSION_DLRM_BACKEND, "benchmark": step, "batch_size": None, "precision": None}
     if step.startswith("dlrm_"):
-        return {"suite": "dlrm", "benchmark": "dlrm-v2", "batch_size": None, "precision": step[len("dlrm_") :]}
+        return {
+            "suite": "dlrm",
+            "benchmark": "dlrm-v2",
+            "batch_size": None,
+            "precision": step[len("dlrm_") :],
+        }
     model, _, bs = step[len("diffusion_") :].rpartition("_bs")
     return {"suite": "diffusion", "benchmark": model, "batch_size": bs or None, "precision": "bf16"}
 
@@ -1505,7 +1520,9 @@ def _dlrm_image_fields(parser, run_dir: str, run: dict) -> dict:
     image_id = None
     for line in _read_lines(os.path.join(run_dir, "env", "image_id_dlrm.txt")):
         image_id = line.strip() or image_id
-    fields = dict.fromkeys(("image_digest", "container_rocm_version", "container_hip_version", "torch_version"))
+    fields = dict.fromkeys(
+        ("image_digest", "container_rocm_version", "container_hip_version", "torch_version")
+    )
     fields.update({"docker_image": dlrm_image, "image_id": image_id})
     return fields
 
@@ -1527,7 +1544,8 @@ def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict
     parser = _load_diffusion_bench_parser()
     steps = parser.read_status(run_dir)
     measured = {
-        _diffusion_bench_step(r): r for r in parser.parse_diffusion(run_dir, steps) + parser.parse_dlrm(run_dir, steps)
+        _diffusion_bench_step(r): r
+        for r in parser.parse_diffusion(run_dir, steps) + parser.parse_dlrm(run_dir, steps)
     }
     planned = {_diffusion_bench_step(r): r for r in _diffusion_bench_plan(run_lines)}
     failed_other = [
@@ -1692,7 +1710,15 @@ def tools_commit() -> str:
     """Commit of the checkout this parser runs from, for the JSON metadata."""
     try:
         out = subprocess.run(
-            ["git", "-C", os.path.dirname(os.path.abspath(__file__)), "describe", "--always", "--dirty", "--abbrev=12"],
+            [
+                "git",
+                "-C",
+                os.path.dirname(os.path.abspath(__file__)),
+                "describe",
+                "--always",
+                "--dirty",
+                "--abbrev=12",
+            ],
             capture_output=True,
             text=True,
             timeout=10,
@@ -1786,9 +1812,7 @@ def main() -> int:
         description="Extract benchmarking results from Primus training log files."
     )
     parser.add_argument("input_dir", help="Directory containing .txt / .log log files")
-    parser.add_argument(
-        "--quiet", action="store_true", help="Print only the totals and the output paths."
-    )
+    parser.add_argument("--quiet", action="store_true", help="Print only the totals and the output paths.")
     args = parser.parse_args()
 
     input_dir = os.path.abspath(args.input_dir)
