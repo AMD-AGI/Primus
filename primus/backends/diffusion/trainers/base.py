@@ -1114,7 +1114,16 @@ class BaseWanTrainer:
         self._start_profiler()
 
         if self.mlperf_enabled:
+            from primus.backends.diffusion.models.quantization import (
+                flux_fprop_switch,
+            )
+
+            fprop_switch_enabled = flux_fprop_switch.switch_step() is not None
+            if fprop_switch_enabled:
+                flux_fprop_switch.prepare(self.model)
             self._mlperf_warmup()
+            if fprop_switch_enabled:
+                flux_fprop_switch.precompile(self)
             self._mlperf_log_train_start()
             self._mlperf_log_block_start(self.global_step)
 
@@ -1217,6 +1226,26 @@ class BaseWanTrainer:
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
+                    fprop_switch_step = getattr(self, "_flux_fprop_switch", False)
+                    if fprop_switch_step is False:
+                        from primus.backends.diffusion.models.quantization.flux_fprop_switch import (
+                            switch_step,
+                        )
+
+                        fprop_switch_step = switch_step()
+                        self._flux_fprop_switch = fprop_switch_step
+                    if (
+                        fprop_switch_step is not None
+                        and self.global_step >= fprop_switch_step
+                    ):
+                        from primus.backends.diffusion.models.quantization.flux_fprop_switch import (
+                            guard_eval_scales,
+                            switch_fprop,
+                        )
+
+                        switch_fprop(self.model, self.global_step)
+                        guard_eval_scales(self)
+                        self._flux_fprop_switch = None
                     if _step_timer is not None:
                         _step_timer.finish(self.global_step)
                     self._step_profiler()

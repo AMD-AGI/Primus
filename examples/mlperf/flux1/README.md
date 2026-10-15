@@ -1,16 +1,29 @@
-# FLUX.1-Schnell FP8 MLPerf Training
+# FLUX.1-Schnell A6W4 MLPerf Training
 
 This recipe runs FLUX.1-Schnell on MI355X GPUs with the in-tree `diffusion`
-backend. The defaults enable tensorwise FP8 and target the MLPerf validation
-loss threshold of `0.586`.
+backend. The default four-node path uses A6W4 forward and MXFP4 backward,
+then switches the forward to precompiled FP8 after update 7325. It targets the
+MLPerf validation loss threshold of `0.586`. The low-precision paths remain
+opt-in at runtime; importing Primus without their environment flags preserves
+the native BF16/FP8 behavior.
 
 ## Docker image
 
-The launch scripts use `zirui3/primus-v26.3-flux:v0.4` by default.
+The launch scripts reuse the proven image by immutable digest (no rebuild):
+
+```text
+zirui3/primus-v26.7-flux:v0.1
+sha256:082afc328d867f79ab5c4a46bc29c909bd891e068a32506a10768e6a6cc7e7c8
+```
 
 ```bash
-docker pull zirui3/primus-v26.3-flux:v0.4
+docker pull zirui3/primus-v26.7-flux:v0.1@sha256:082afc328d867f79ab5c4a46bc29c909bd891e068a32506a10768e6a6cc7e7c8
 ```
+
+The launcher bind-mounts this checkout at `/workspace/Primus`; the A6W4
+integration and forward-switch hooks are normal in-tree Primus source. The
+image already packages Primus-Turbo revision
+`e031c5bb3746e8b667676bd20e2697d75fe9f2b2`.
 
 ## Prepare data
 
@@ -39,19 +52,21 @@ for details.
 
 ## Select a configuration
 
-Each `config_*.sh` sources `config_common.sh` and then exports its qualified
-shape-specific settings:
+Each `config_*.sh` combines `config_common.sh` with its qualified
+shape-specific settings. The four-node default selects the A6W4 recipe block;
+the existing slim profiles retain their prior FP8 defaults:
 
 | `FLUX_CONFIG` | Nodes | MBS | GA | GBS | FP8 GEMM | Compile mode |
 |---|---:|---:|---:|---:|---|---|
 | `config_1n_gbs512.sh` | 1 | 64 | 1 | 512 | TorchAO/Inductor | `max-autotune-no-cudagraphs` |
 | `config_1n_gbs1024.sh` | 1 | 32 | 4 | 1024 | selective FlyDSL | default |
 | `config_2n_gbs1024.sh` | 2 | 32 | 2 | 1024 | selective FlyDSL | default |
-| `config_4n_gbs1024.sh` (default) | 4 | 32 | 1 | 1024 | selective FlyDSL | default |
+| `config_4n_gbs1024.sh` (default) | 4 | 32 | 1 | 1024 | A6W4/MXFP4, then FP8 forward | `max-autotune-no-cudagraphs` |
 
-The MBS64 profile retains checkpoint ratio `0.25`. All MBS32 profiles use
-ratio `0`, forward-input FP8 reuse, the qualified natural-layout wgrads, and
-MBS32 Inductor fusion benchmarking.
+The default profile uses LR `0.00025`, 1600 warmup steps, SDMA only for
+`single_blocks`, the C++ Inductor wrapper, Kyle's FC1/GELU dual and double-pack
+candidate, and forward-switch precompile at step 7325. The MBS64 profile
+retains checkpoint ratio `0.25`.
 
 Inside an allocation, select a configuration and use the same launcher. The
 launcher invokes the diffusion backend directly with `torchrun`; it does not
@@ -65,7 +80,7 @@ bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
 Use `config_1n_gbs1024.sh` for single-node MBS32 kernel development. The
-4-node MLPerf target is the default, so it needs no `FLUX_CONFIG` override:
+4-node A6W4 MLPerf target is the default, so it needs no `FLUX_CONFIG` override:
 
 ```bash
 DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
@@ -77,9 +92,9 @@ For a short smoke test, append `MAX_STEPS=1 SAVE_STRATEGY=none` before `bash`.
 ## Submit the default four-node target
 
 ```bash
-REPO=/shared_nfs/zirui/code/primus-flux-slim
+REPO=/shared_nfs/zirui/code/Primus
 DATA_ROOT=/shared_nfs/zirui/data
-OUTPUT_ROOT=/shared_nfs/zirui/runs/flux-fp8-4n
+OUTPUT_ROOT=/shared_nfs/zirui/runs/flux-a6w4-4n
 
 sbatch -A amd-spur -p amd-spur --qos=amd-spur-qos \
   -N4 --ntasks-per-node=1 --exclusive --gpus-per-node=8 -t 04:00:00 \
