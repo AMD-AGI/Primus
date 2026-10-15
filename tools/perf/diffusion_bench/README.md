@@ -17,7 +17,9 @@ cd tools/perf/diffusion_bench       # from the Primus repo root
 The perf batch runner can also run it as part of a batch, after the Primus models:
 `BACKEND=...,diffusion_dlrm bash tools/perf/run_batch.sh` (see
 [`tools/perf/README.md`](../README.md#diffusion-and-dlrm-diffusion_dlrm)). It uses this folder's
-`config.yaml`, and passes the image, GPU type, output directory and a container label.
+`config.yaml` (or `DIFFUSION_DLRM_CONFIG`), and passes the image, GPU type, output directory, a
+container label, the runner's `EXTRA_ENV`, and `TRAIN_STEPS` as `--num-iterations`; the HF cache
+can be overridden with `DIFFUSION_DLRM_HF_CACHE`.
 
 ---
 
@@ -47,7 +49,7 @@ container yourself.
 |---|---|---|
 | 1 | `docker run ...` the benchmark image | `run_benchmarks.sh` starts a detached container |
 | 2 | `cd /workspace/AMDiffusionBenchmark` | done inside each step |
-| 3 | `sed` the Makefile to use `hf auth login` / `hf download` | `setup` step |
+| 3 | `sed` the Makefile to use `hf download`, with `HF_TOKEN` from the environment | `setup` step |
 | 4 | `make download_assets` (and log in to HF) | `download` step, using `HF_TOKEN` |
 | 5 | `python launcher.py train_args=<model> train_args.train_batch_size=<bs>` for each model | one `diffusion_<model>_bs<bs>` step per run |
 | 6 | `cd /workspace/DLRMBenchmark` | done inside each step |
@@ -136,7 +138,8 @@ directory contains a copy of the config used (`config.yaml`) and the fully resol
 gpu: auto                 # auto | mi300 | mi355
 image: unifiedtrainingdockers.azurecr.io/utd/ci:primus_ci_0ce782a_20261002
 
-hf_cache_dir: null        # null -> $HF_HOME or ~/.cache/huggingface (see the HF cache section)
+hf_cache_dir: null        # null -> $HF_HOME or ~/.cache/huggingface (see the HF cache section);
+                          # the shipped config.yaml sets /tmp/huggingface
 hf_cache_readonly: false  # mount read-only; implies download: false and HF_HUB_OFFLINE=1
 download: true            # run the download/verify step before the diffusion runs
 
@@ -271,7 +274,7 @@ list.
 | `--timeout SEC` | `step_timeout` |
 | `--keep-container` | `keep_container: true` |
 | `--label KEY=VALUE` | adds a docker label to the containers; repeatable (the perf batch runner finds and stops its containers by label) |
-| `--env KEY=VALUE` | sets an environment variable in the containers; repeatable (only the names are saved in `resolved_config.yaml`) |
+| `--env KEY[=VALUE]` | sets an environment variable in the containers; repeatable. A bare `KEY` passes this shell's value, which keeps a secret off the `docker run` command line. Only the names are saved in `resolved_config.yaml` |
 | `--dry-run` | starts the container and runs `launcher.py` with `launcher.dry_run=true`; skips downloads and DLRM; uses no GPU time |
 | `--parse-only RUN_DIR` | only regenerates the summary of an existing results directory |
 
@@ -280,9 +283,9 @@ Model aliases accepted on the command line: `flux`, `sdxl`, `mochi`, `hunyuan`, 
 `--num-iterations` wins over `num_iterations` set for a single model in the config.
 
 Environment variables: `HF_TOKEN` (required for downloads), `HF_HOME` (default cache location).
-The token is masked in every log written to the results directory, and the containers keep their
-`hf auth login` token file (`HF_TOKEN_PATH`) inside the container rather than in the mounted cache,
-which may be shared.
+The token only ever travels in the environment: it is masked in every log written to the results
+directory, never appears on a command line, and the containers keep any token file
+(`HF_TOKEN_PATH`) inside the container rather than in the mounted cache, which may be shared.
 
 ---
 
@@ -351,7 +354,8 @@ Each benchmark is a separate step, so one failure does not stop the others. Ever
 | `oom` | out of GPU memory (from `runs_summary.csv` status or the log) |
 | `failed` | the benchmark reported an error (e.g. Python traceback, `status=error`) |
 | `timeout` | exceeded `step_timeout`; processes were killed |
-| `not_run` | `--dry-run` |
+| `killed` | killed (SIGKILL) before `step_timeout`, e.g. by the host's OOM killer or `docker kill` |
+| `not_run` | `--dry-run`; outside a dry run, `launcher.py` died before training started |
 | `skipped` | DLRM in `--dry-run` |
 | `error` | any other non-zero exit |
 
@@ -367,8 +371,9 @@ Details:
 - The script exits non-zero if any step was not successful, so CI jobs can detect failures.
 
 **HF_TOKEN and the Makefile.** The Makefile includes `.env.example`, which sets `HF_TOKEN=` (empty)
-and would hide the exported token, so `make download_assets` would stop at an interactive login.
-The script logs in with `hf auth login --token` and passes `HF_TOKEN=...` on the `make` command line.
+and would hide the exported token. The script runs `make -e download_assets`, so the environment
+wins, and the setup step turns the Makefile's `--token` login into a no-op: `hf` reads `HF_TOKEN`
+from the environment, and on a command line the token would be visible in the host's `ps`.
 
 ---
 

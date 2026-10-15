@@ -40,9 +40,10 @@
 #
 # Diffusion and DLRM (BACKEND=...,diffusion_dlrm, catalog mode only):
 #   Not a catalog backend. Adding it to BACKEND runs diffusion_bench/
-#   run_benchmarks.sh once, after the catalog configs, for every diffusion and
-#   DLRM model its config enables (batch sizes, models and step_timeout come
-#   from that config; the runner sets no time limit on this run). It uses
+#   run_benchmarks.sh once per repetition (NUM_REPS), after the catalog
+#   configs, for every diffusion and DLRM model its config enables (batch
+#   sizes, models and step_timeout come from that config; the runner sets no
+#   time limit on this run). It uses
 #   DOCKER_IMAGE, which must contain /workspace/AMDiffusionBenchmark and
 #   /workspace/DLRMBenchmark (rocm/primus images do), and writes its results
 #   folder under $RESULT_DIR/diffusion_dlrm. For example, everything the
@@ -134,6 +135,9 @@
 #     run_batch_<stamp>.sh          - a copy of THIS script as it was run,
 #                                     written before the first run starts.
 #     <framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>_<stamp>.log - per-run logs.
+#     diffusion_dlrm-<config>-<hash>-rep<r>_<stamp>.log - the diffusion_dlrm
+#                                     run's log; diffusion_bench's own results
+#                                     folder is under diffusion_dlrm/.
 #     results.csv, results.json     - every log in RESULT_DIR parsed by
 #                                     extract_results.py, refreshed at the end.
 #   <stamp> is YYYYmmdd-HHMMSS, captured once when the script starts, so every
@@ -408,7 +412,7 @@ for config_file in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
             | tee -a "$SUMMARY_FILE"
         continue
     fi
-    launcher_cmd="${LAUNCH_ARGV[*]}"
+    launcher_cmd=$(perf_display_argv "${LAUNCH_ARGV[@]}")
 
     for rep in $(seq 1 "$NUM_REPS"); do
         # The first run was checked by perf_preflight a moment ago.
@@ -444,7 +448,7 @@ done
 # diffusion_dlrm: one diffusion_bench run per repetition, after everything else.
 if [ "$PERF_DD_RUNS" -gt 0 ]; then
     perf_dd_launch_argv
-    launcher_cmd="${LAUNCH_ARGV[*]}"
+    launcher_cmd=$(perf_display_argv "${LAUNCH_ARGV[@]}")
     dd_config_name=$(perf_dd_config_name)
     dd_config_hash=$(config_fingerprint "$DIFFUSION_DLRM_CONFIG")
     dd_models=$(perf_dd_summary)
@@ -458,11 +462,12 @@ if [ "$PERF_DD_RUNS" -gt 0 ]; then
 
         result_file=$(perf_dd_log_name "$rep")
 
-        echo "[$(date '+%H:%M:%S')] [run $((RUNS_STARTED + 1))/${TOTAL_PLANNED}] diffusion_dlrm/${dd_config_name} [${dd_config_hash}] ${dd_models} rep ${rep}/${NUM_REPS}" \
+        echo "[$(date '+%H:%M:%S')] [run $((RUNS_STARTED + 1))/${TOTAL_PLANNED}] diffusion_dlrm/${dd_config_name#/} [${dd_config_hash}] ${dd_models} rep ${rep}/${NUM_REPS}" \
             | tee -a "$SUMMARY_FILE"
         echo "                    -> $result_file" | tee -a "$SUMMARY_FILE"
 
         PERF_RUN_LIMITS_TEXT="$(perf_dd_limits_text)" \
+            PERF_ENV_NOTE="not passed to diffusion_bench's container; EXTRA_ENV is" \
             print_per_run_banner "$result_file" "$DIFFUSION_DLRM_CONFIG" "$dd_config_name" "$dd_config_hash" \
             "$PERF_DIFFUSION_DLRM_BACKEND" "$dd_models" "N/A" "N/A" "N/A" "${dd_steps:-per diffusion_bench config}" \
             "$rep" "$NUM_REPS" "$launcher_cmd" "diffusion_bench" ""

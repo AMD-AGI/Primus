@@ -252,18 +252,22 @@ perf_select_from_catalog() {
     fi
 
     # GPU: explicit wins, otherwise read it off the hardware. You already know
-    # which node you are on; the script can too.
+    # which node you are on; the script can too. Only the catalog backends
+    # need it to be a catalog key; diffusion_dlrm alone runs on any GPU that
+    # diffusion_bench knows (lib/diffusion_dlrm.sh).
+    local need_gpu_key=0
+    [ ${#PERF_CATALOG_BACKENDS[@]} -gt 0 ] && need_gpu_key=1
     if [ -z "${GPU:-}" ]; then
         GPU=$(perf_detect_gpu)
-        if [ -z "$GPU" ]; then
+        if [ -z "$GPU" ] && [ "$need_gpu_key" = 1 ]; then
             echo "[ERROR] GPU is not set and could not be detected from amd-smi or rocm-smi." >&2
             echo "        Set GPU=<key>, one of: $(yq -r 'keys | .[]' "$catalog" 2>/dev/null | tr '\n' ' ')" >&2
             return 1
         fi
-        echo "[INFO] GPU not set; detected $GPU ($(perf_gpu_model))." >&2
+        [ -n "$GPU" ] && echo "[INFO] GPU not set; detected $GPU ($(perf_gpu_model))." >&2
     fi
 
-    if [ "$(yq -r "has(\"$GPU\")" "$catalog" 2>/dev/null)" != "true" ]; then
+    if [ "$need_gpu_key" = 1 ] && [ "$(yq -r "has(\"$GPU\")" "$catalog" 2>/dev/null)" != "true" ]; then
         echo "[ERROR] GPU '$GPU' is not a key in $catalog" >&2
         echo "        Available: $(yq -r 'keys | .[]' "$catalog" 2>/dev/null | tr '\n' ' ')" >&2
         return 1
@@ -433,6 +437,20 @@ perf_env_redacted() {
 #
 # Values shorter than 8 characters are skipped -- masking those would riddle
 # the log with false positives.
+# A command line for display (banner, summary, DRY_RUN): the value of any
+# NAME=VALUE argument whose NAME looks like a secret is masked, as in the env
+# snapshot. EXTRA_ENV="WANDB_API_KEY=..." would otherwise be logged in clear.
+perf_display_argv() {
+    local arg shown=""
+    for arg in "$@"; do
+        if [[ "$arg" == *=* && "${arg%%=*}" =~ $PERF_SECRET_RE ]]; then
+            arg="${arg%%=*}=<redacted>"
+        fi
+        shown+="${shown:+ }$arg"
+    done
+    printf '%s\n' "$shown"
+}
+
 perf_redact_stream() {
     # awk reads the values straight out of ENVIRON, so no secret is ever passed
     # on a command line where `ps` could see it. Matching is literal
@@ -778,6 +796,9 @@ perf_write_batch_snapshots() {
 
 # Banner block shared by both runners. Printed inside the per-run banner, so
 # every field lands in the log the extractor reads.
+# Set for a run whose container does not inherit the runner's environment.
+PERF_ENV_NOTE=""
+
 perf_print_provenance_banner() {
     local image="${1:-}"
 
@@ -803,12 +824,18 @@ perf_print_provenance_banner() {
     echo "# --------------------------------------------------------------------------------"
     # Distinguished from the block below because these are *guaranteed* to
     # reach the container, whereas a plain export may be filtered out.
-    echo "# Extra env (--env): ${EXTRA_ENV:-<none>}"
+    local line extra_env=()
+    read -r -a extra_env <<< "${EXTRA_ENV:-}"
+    if [ ${#extra_env[@]} -gt 0 ]; then
+        echo "# Extra env (--env): $(perf_display_argv "${extra_env[@]}")"
+    else
+        echo "# Extra env (--env): <none>"
+    fi
     # The runner's own shell. Primus prints its main environment settings
     # (and each hook's exports) at the start of the run output; settings from
-    # runner/helpers/envs/<GPU>.sh are not all echoed there.
-    echo "# Perf environment (host shell):"
-    local line
+    # runner/helpers/envs/<GPU>.sh are not all echoed there. PERF_ENV_NOTE
+    # qualifies the block for a run that does not inherit it.
+    echo "# Perf environment (host shell${PERF_ENV_NOTE:+; $PERF_ENV_NOTE}):"
     while IFS= read -r line; do
         echo "#   $line"
     done < <(perf_env_lines)

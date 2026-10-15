@@ -33,12 +33,21 @@ PERF_DD_GPU=""
 PERF_DD_PLAN=""       # diffusion_bench's resolved plan (config.py --emit yaml)
 PERF_DD_ARGS=()
 
-# diffusion_bench's GPU setting (mi300 | mi355) for the runner's GPU key;
+# diffusion_bench's GPU setting (mi300 | mi355) for the runner's GPU key, or
+# else for the GPU architecture as diffusion_bench reads it (gfx942 / gfx950);
 # empty when unknown, which leaves it to diffusion_bench's config.
 perf_dd_gpu() {
+    local gfx
     case "${GPU:-$(perf_detect_gpu)}" in
-        MI300X|MI300|MI308X|MI308|MI325X|MI325) echo mi300 ;;
-        MI350X|MI350|MI355X|MI355) echo mi355 ;;
+        MI300X|MI300|MI308X|MI308|MI325X|MI325) echo mi300; return ;;
+        MI350X|MI350|MI355X|MI355) echo mi355; return ;;
+    esac
+    # </dev/null: with nullglob and no GPU nodes, grep would read stdin.
+    gfx=$(grep -h gfx_target_version /sys/class/kfd/kfd/topology/nodes/*/properties 2>/dev/null </dev/null |
+        awk '$2 > 0 { print $2; exit }')
+    case "$gfx" in
+        9040*) echo mi300 ;;
+        9050*) echo mi355 ;;
     esac
 }
 
@@ -73,7 +82,7 @@ perf_dd_config_name() {
 # Checked before anything launches, so a bad diffusion_bench config fails now
 # rather than after hours of catalog runs. Sets the PERF_DD_* globals.
 perf_dd_prepare() {
-    local out errors line
+    local out errors line kv env_args=()
     [ "$PERF_RUN_DIFFUSION_DLRM" = 1 ] || return 0
     # shellcheck disable=SC2034
     PERF_DD_RUNS=$NUM_REPS
@@ -102,11 +111,21 @@ perf_dd_prepare() {
     # HF_TOKEN reaches diffusion_bench through the environment; as an option
     # it would show in `ps` and in the logged launch command. EXTRA_ENV goes
     # into its container like into primus-cli's; the runner's own Primus
-    # defaults (HSA_NO_SCRATCH_RECLAIM, ...) do not.
+    # defaults (HSA_NO_SCRATCH_RECLAIM, ...) do not. A secret-looking entry
+    # goes by name only: perf_parse_extra_env exported it, and docker reads
+    # the value from there instead of its command line.
+    for kv in ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"}; do
+        [ "$kv" = --env ] && continue
+        if [[ "${kv%%=*}" =~ $PERF_SECRET_RE ]]; then
+            env_args+=( --env "${kv%%=*}" )
+        else
+            env_args+=( --env "$kv" )
+        fi
+    done
     PERF_DD_GPU=$(perf_dd_gpu)
     PERF_DD_ARGS=( -c "$DIFFUSION_DLRM_CONFIG" --output-dir "$PERF_DD_OUTPUT_DIR"
                    --label "${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
-                   ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} )
+                   ${env_args[@]+"${env_args[@]}"} )
     [ -n "$PERF_DD_GPU" ] && PERF_DD_ARGS+=( --gpu "$PERF_DD_GPU" )
     [ -n "${DOCKER_IMAGE:-}" ] && PERF_DD_ARGS+=( --image "$DOCKER_IMAGE" )
     [ -n "$DIFFUSION_DLRM_HF_CACHE" ] && PERF_DD_ARGS+=( --hf-cache "$DIFFUSION_DLRM_HF_CACHE" )
@@ -120,6 +139,10 @@ perf_dd_prepare() {
         while IFS= read -r line; do
             echo "        $line" >&2
         done < "$errors"
+        if [ -z "$PERF_DD_GPU" ]; then
+            echo "        The runner could not tell which GPU settings to use (GPU='${GPU:-}');" >&2
+            echo "        set GPU=MI300X / MI325X / MI355X, or gpu: mi300 | mi355 in $DIFFUSION_DLRM_CONFIG." >&2
+        fi
         rm -f "$errors"
         return 1
     fi
@@ -177,6 +200,7 @@ perf_dd_preflight() {
         fi
     elif ! mkdir -p "$hf" 2>/dev/null || [ ! -w "$hf" ]; then
         perf_log "[ERROR] diffusion_dlrm: the Hugging Face cache is not writable: $hf"
+        perf_log "        Point DIFFUSION_DLRM_HF_CACHE (or hf_cache_dir in $DIFFUSION_DLRM_CONFIG) at a cache you own."
         return 1
     fi
     perf_log "[INFO] diffusion_dlrm: $image has ${need[*]:-what the plan needs}; HF cache $hf"
@@ -258,5 +282,5 @@ perf_dd_print_plan() {
     echo "      gpu=$(perf_dd_plan '.gpu') reps=${NUM_REPS}; $(perf_dd_limits_text)"
     echo "      output: $PERF_DD_OUTPUT_DIR/<gpu>_<host>_<time>/"
     echo "      log: $(perf_dd_log_name 1)"
-    echo "      cmd: ${LAUNCH_ARGV[*]}"
+    echo "      cmd: $(perf_display_argv "${LAUNCH_ARGV[@]}")"
 }

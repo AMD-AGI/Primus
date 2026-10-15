@@ -99,7 +99,7 @@ start_container() {
         --device /dev/dri --device /dev/kfd \
         --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
         --group-add video --ulimit memlock=-1:-1 \
-        "${extra[@]}" \
+        ${extra[@]+"${extra[@]}"} \
         -v "$hf_mount" \
         -v "$RUN_DIR":/results \
         -v "$SCRIPT_DIR":/diffusion_bench:ro \
@@ -129,8 +129,9 @@ record_status() {
 run_step() {
     local name=$1 tmo=$2
     shift 2
-    local logf="$RUN_DIR/logs/${name}.log"
-    log "================ START ${name} (timeout: ${tmo}s) ================"
+    local logf="$RUN_DIR/logs/${name}.log" limit="no timeout"
+    (( tmo > 0 )) && limit="timeout: ${tmo}s"
+    log "================ START ${name} (${limit}) ================"
     local t0=$SECONDS
     docker exec "$CONTAINER" timeout -k 60 "$tmo" bash /diffusion_bench/in_container.sh "$@" 2>&1 | redact | tee "$logf"
     local rc=${PIPESTATUS[0]}
@@ -140,7 +141,10 @@ run_step() {
         2)       status=oom ;;
         3)       status=failed ;;
         4)       status=not_run ;;
-        124|137) status=timeout ;;
+        124)     status=timeout ;;
+        # timeout's SIGKILL after its grace period, unless the step was killed
+        # earlier from outside (host OOM killer, docker kill).
+        137)     if (( tmo > 0 && dur >= tmo )); then status=timeout; else status=killed; fi ;;
         *)       status=error ;;
     esac
     record_status "$name" "$status" "$rc" "$dur" "logs/${name}.log"
@@ -225,11 +229,13 @@ log "Results  : $RUN_DIR"
 log "GPU      : $GPU (detected: $DETECTED_GPU; $(gpu_product), ${NGPU} GPUs)"
 log "Image    : $IMAGE"
 log "HF cache : $HF_CACHE_DIR -> $HF_MOUNT_TARGET$( (( HF_READONLY )) && echo ' (read-only)')"
-for run in "${DIFF_RUNS[@]}"; do
+# Guarded expansions throughout: bash < 4.4 treats an empty array as unset
+# under set -u, and the plan arrays are empty when a suite is disabled.
+for run in ${DIFF_RUNS[@]+"${DIFF_RUNS[@]}"}; do
     IFS=$'\t' read -ra parts <<< "$run"
     log "Diffusion: ${parts[0]}  batch size ${parts[1]}  ${parts[*]:2}"
 done
-for p in "${DLRM_PRECS[@]}"; do log "DLRM     : $p${DLRM_BATCH_SIZE:+  batch size $DLRM_BATCH_SIZE}"; done
+for p in ${DLRM_PRECS[@]+"${DLRM_PRECS[@]}"}; do log "DLRM     : $p${DLRM_BATCH_SIZE:+  batch size $DLRM_BATCH_SIZE}"; done
 
 [[ "$DETECTED_GPU" != unknown && "$DETECTED_GPU" != "$GPU" ]] \
     && log "WARNING: config targets $GPU but this node has $DETECTED_GPU GPUs"
@@ -256,17 +262,17 @@ fi
 if (( ${#DIFF_RUNS[@]} > 0 )); then
     if (( DOWNLOAD )); then
         download_targets=(all)
-        (( DOWNLOAD_ALL )) || download_targets=("${DIFF_MODELS[@]}")
-        run_step download "$DOWNLOAD_TIMEOUT" download "${download_targets[@]}" \
+        (( DOWNLOAD_ALL )) || download_targets=(${DIFF_MODELS[@]+"${DIFF_MODELS[@]}"})
+        run_step download "$DOWNLOAD_TIMEOUT" download ${download_targets[@]+"${download_targets[@]}"} \
             || log "WARNING: asset download failed; continuing with whatever is cached"
     fi
 
-    for run in "${DIFF_RUNS[@]}"; do
+    for run in ${DIFF_RUNS[@]+"${DIFF_RUNS[@]}"}; do
         IFS=$'\t' read -ra parts <<< "$run"
         model=${parts[0]} bs=${parts[1]}
         overrides=("${parts[@]:2}")
         (( DRY_RUN )) && overrides+=("launcher.dry_run=true")
-        run_step "diffusion_${model}_bs${bs}" "$STEP_TIMEOUT" diffusion "$model" "$bs" "${overrides[@]}"
+        run_step "diffusion_${model}_bs${bs}" "$STEP_TIMEOUT" diffusion "$model" "$bs" ${overrides[@]+"${overrides[@]}"}
     done
 fi
 

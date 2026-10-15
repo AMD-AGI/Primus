@@ -84,12 +84,17 @@ lines, otherwise the lowest rank that does. Legacy logs that have no
 
 A ``diffusion_dlrm`` log (one diffusion_bench run covering several models)
 becomes one row per diffusion model and DLRM precision, with backend
-``diffusion`` or ``dlrm``. Their numbers come from diffusion_bench's own
+``diffusion`` or ``dlrm``, plus one per failed setup or download step, with
+backend ``diffusion_dlrm``. Their numbers come from diffusion_bench's own
 parser (``diffusion_bench/parse_results.py``), so they match its
 ``summary.md``: TFLOP/s and samples/s per GPU are AMDiffusionBenchmark's
 averages rather than this script's harmonic means, and ``rec_per_s`` is
 DLRMBenchmark's recommendations/s. ``exit_code``, ``elapsed_sec``, status and
-failure reason are the step's, and ``step_log`` points at its log.
+failure reason are the step's, and ``step_log`` points at its log. Besides
+the reasons above, a step can be ``timeout`` (diffusion_bench's
+step_timeout), ``killed`` (SIGKILL before it), ``no_metrics`` (succeeded
+without a throughput), ``config_error`` (Hydra rejected the overrides) or
+``not_run``; a diffusion_dlrm run that failed as a whole has ``steps``.
 """
 
 # Keeps the annotations below unevaluated, so the batch runners can call this
@@ -1338,6 +1343,7 @@ DIFFUSION_DLRM_BACKEND = "diffusion_dlrm"
 DIFFUSION_BENCH_RESULTS_RE = re.compile(r"^\[diffusion_bench [^\]]*\] Results\s+:\s+(\S.*?)\s*$")
 DIFFUSION_BENCH_PLAN_DIFFUSION_RE = re.compile(r"^\[diffusion_bench [^\]]*\] Diffusion: (\S+)\s+batch size (\d+)")
 DIFFUSION_BENCH_PLAN_DLRM_RE = re.compile(r"^\[diffusion_bench [^\]]*\] DLRM\s+: (\S+)(?:\s+batch size (\d+))?")
+DIFFUSION_BENCH_MODEL_STEPS = ("diffusion_", "dlrm_")
 _diffusion_bench_parser = None
 
 
@@ -1391,6 +1397,9 @@ def _diffusion_bench_step(r: dict) -> str:
 
 
 def _row_from_step_name(step: str) -> dict:
+    if not step.startswith(DIFFUSION_BENCH_MODEL_STEPS):
+        # setup, setup_dlrm or download
+        return {"suite": DIFFUSION_DLRM_BACKEND, "benchmark": step, "batch_size": None, "precision": None}
     if step.startswith("dlrm_"):
         return {"suite": "dlrm", "benchmark": "dlrm-v2", "batch_size": None, "precision": step[len("dlrm_") :]}
     model, _, bs = step[len("diffusion_") :].rpartition("_bs")
@@ -1415,16 +1424,54 @@ def _read_lines(path: str) -> list[str]:
         return []
 
 
+# diffusion_bench's own progress lines, which never name a failure's cause.
+DIFFUSION_BENCH_OWN_LINE_RE = re.compile(r"^\[(?:in_container|diffusion_bench) ")
+
+
+def _step_last_line(lines: list[str]) -> str | None:
+    for line in reversed(lines):
+        text = strip_ansi(line).strip()
+        if text and not DIFFUSION_BENCH_OWN_LINE_RE.match(text):
+            return _clean_detail(text)
+    return None
+
+
+def _hydra_error(lines: list[str]) -> str | None:
+    """The first line of Hydra's message when it rejected launcher.py's
+    overrides; Hydra ends it with a HYDRA_FULL_ERROR hint."""
+    if not any("HYDRA_FULL_ERROR" in line for line in lines):
+        return None
+    start = 0
+    for i, line in enumerate(lines):
+        if "] Running: " in line:
+            start = i + 1
+    for line in lines[start:]:
+        text = strip_ansi(line).strip()
+        if text and not DIFFUSION_BENCH_OWN_LINE_RE.match(text):
+            return _clean_detail(text)
+    return None
+
+
 def _diffusion_bench_outcome(
-    step_status: str | None, step_log: str, exit_code: int | None, run: dict
+    step_status: str | None, step_log: str, exit_code: int | None, run: dict, blocked_by: str | None
 ) -> tuple[str, str | None, str | None]:
-    """``(status, failure_reason, failure_detail)`` of one diffusion_bench step."""
+    """``(status, failure_reason, failure_detail)`` of one diffusion_bench step.
+
+    ``blocked_by`` names a setup or download step that failed, which is why a
+    later step may have no outcome.
+    """
     if step_status == "success":
         return "ok", None, None
     if step_status in (None, "", "unknown"):
         # No outcome recorded: in flight when the run ended, or never started.
-        if run["status"] in ("interrupted", "incomplete"):
+        if run["status"] == "interrupted":
             return run["status"], run["failure_reason"], run["failure_detail"]
+        if run["status"] == "incomplete":
+            # This step's own log only: an earlier step's error is not its cause.
+            category, detail = _scan_failure_text(_read_lines(step_log))
+            return "incomplete", category, detail
+        if blocked_by:
+            return "failed", "not_run", f"not run: diffusion_bench's {blocked_by} step failed"
         return "failed", "not_run", "diffusion_bench recorded no outcome for this step"
     if step_status == "timeout":
         return "failed", "timeout", "stopped by diffusion_bench's step_timeout"
@@ -1440,7 +1487,27 @@ def _diffusion_bench_outcome(
         return "failed", "oom", f"diffusion_bench reported {step_status}"
     if category:
         return "failed", category, detail
-    return "failed", "exit", _last_output_line(lines) or f"step exited with code {exit_code}"
+    if step_status == "killed":
+        return "failed", "killed", "SIGKILL before step_timeout: host out of memory, or killed from outside"
+    hydra = _hydra_error(lines)
+    if hydra:
+        return "failed", "config_error", hydra
+    return "failed", "exit", _step_last_line(lines) or f"step exited with code {exit_code}"
+
+
+def _dlrm_image_fields(parser, run_dir: str, run: dict) -> dict:
+    """Provenance for DLRM rows when the config gave DLRM its own image: the
+    banner describes the main image only."""
+    info = parser.read_kv(os.path.join(run_dir, "run_info.txt"))
+    image, dlrm_image = info.get("image"), info.get("dlrm_image")
+    if not dlrm_image or dlrm_image == image:
+        return {}
+    image_id = None
+    for line in _read_lines(os.path.join(run_dir, "env", "image_id_dlrm.txt")):
+        image_id = line.strip() or image_id
+    fields = dict.fromkeys(("image_digest", "container_rocm_version", "container_hip_version", "torch_version"))
+    fields.update({"docker_image": dlrm_image, "image_id": image_id})
+    return fields
 
 
 def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict]:
@@ -1450,6 +1517,7 @@ def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict
     Every step diffusion_bench planned, recorded in status.tsv or left a
     folder for gets a row, so a step that failed before writing its folder
     (a DLRM step stopped by step_timeout, say) or never started still shows.
+    So does a setup or download step that failed, as backend diffusion_dlrm.
     """
     log_dir = os.path.dirname(os.path.abspath(filepath))
     run_lines = run_output_lines(lines)
@@ -1462,10 +1530,17 @@ def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict
         _diffusion_bench_step(r): r for r in parser.parse_diffusion(run_dir, steps) + parser.parse_dlrm(run_dir, steps)
     }
     planned = {_diffusion_bench_step(r): r for r in _diffusion_bench_plan(run_lines)}
-    order = list(planned)
+    failed_other = [
+        step
+        for step, s in steps.items()
+        if not step.startswith(DIFFUSION_BENCH_MODEL_STEPS) and s.get("status") != "success"
+    ]
+    blocked_by = failed_other[0] if failed_other else None
+    order = failed_other + list(planned)
     for step in list(steps) + list(measured):
-        if step.startswith(("diffusion_", "dlrm_")) and step not in order:
+        if step.startswith(DIFFUSION_BENCH_MODEL_STEPS) and step not in order:
             order.append(step)
+    dlrm_image = _dlrm_image_fields(parser, run_dir, run)
 
     rows = []
     for step in order:
@@ -1479,6 +1554,8 @@ def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict
 
         row = dict(run)
         row["version_warnings"] = list(run["version_warnings"])
+        if suite == "dlrm":
+            row.update(dlrm_image)
         row.update(
             {
                 "backend": suite,
@@ -1502,7 +1579,7 @@ def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict
                 "rec_per_s_cv": r.get("rec_per_s_cv"),
                 "exit_code": _maybe_int(step_row.get("exit_code")),
                 "elapsed_sec": _maybe_int(step_row.get("duration_s")),
-                "step_log": os.path.relpath(step_log, log_dir),
+                "step_log": os.path.relpath(step_log, log_dir) if os.path.isfile(step_log) else None,
             }
         )
         # A step missing from status.tsv was in flight when the run ended, even
@@ -1515,7 +1592,7 @@ def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict
         else:
             step_status = step_row.get("status")
         row["status"], row["failure_reason"], row["failure_detail"] = _diffusion_bench_outcome(
-            step_status, step_log, row["exit_code"], run
+            step_status, step_log, row["exit_code"], run, blocked_by
         )
         rows.append(row)
     return rows or [run]

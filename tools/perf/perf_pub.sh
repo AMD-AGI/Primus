@@ -1,14 +1,14 @@
 #!/bin/bash
 
-GPU=mi325x # set to mi300x, mi325x, or mi355x
+gpu=mi325x # set to mi300x, mi325x, or mi355x; names the result directories only
 version=v26.8
-export HF_TOKEN="your_huggingface_token"
-export CONFIG_FILE=tools/perf/perf-config.yaml
+: "${HF_TOKEN:?export HF_TOKEN=hf_... before running this script}"
+export CONFIG_FILE=tools/perf/perf_configs.yaml
 export DOCKER_IMAGE=rocm/primus:$version   # required
 export BACKEND=megatron #,torchtitan                        # required
-export RESULT_DIR=~/primus-bench/${GPU}-primus-${version}-perf
+export RESULT_DIR=~/primus-bench/${gpu}-primus-${version}-perf
 
-# GPU is auto-detected from rocm-smi; set it to override.
+# GPU is auto-detected from amd-smi / rocm-smi; set it to override.
 # GPU=MI325X
 
 # RCCL still needs a real NIC on a single node.
@@ -28,7 +28,7 @@ TRAIN_STEPS=20 NUM_REPS=3 bash tools/perf/run_batch.sh                          
 
 export DOCKER_IMAGE=rocm/jax-training:maxtext-$version   # required
 export BACKEND=maxtext                        # required
-export RESULT_DIR=~/primus-bench/${GPU}-jax-${version}-perf
+export RESULT_DIR=~/primus-bench/${gpu}-jax-${version}-perf
 
 TRAIN_STEPS=20 NUM_REPS=3 bash tools/perf/run_batch.sh                              # single node
 

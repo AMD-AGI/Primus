@@ -413,7 +413,7 @@ for config_file in "${CONFIG_FILES[@]}"; do
             | tee -a "$SUMMARY_FILE"
         continue
     fi
-    launcher_cmd="${LAUNCH_ARGV[*]}"
+    launcher_cmd=$(perf_display_argv "${LAUNCH_ARGV[@]}")
 
     good_runs=0
     attempts=0

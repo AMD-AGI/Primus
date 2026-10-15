@@ -676,10 +676,6 @@ perf_on_interrupt() {
     else
         perf_stop_batch_containers
     fi
-    # Defined by lib/diffusion_dlrm.sh, which only run_batch.sh sources.
-    if [ "${PERF_DD_ACTIVE:-0}" = 1 ] && declare -F perf_dd_finalize >/dev/null; then
-        perf_dd_finalize "${PERF_DD_LOG:-}"
-    fi
 
     if [ -n "$CURRENT_RESULT_FILE" ]; then
         if [ "${PERF_RUN_DONE:-0}" = 1 ]; then
@@ -690,6 +686,11 @@ perf_on_interrupt() {
                 "$(( $(date +%s) - CURRENT_RUN_START ))" "interrupted: the batch was stopped by a signal"
         fi
         echo ">>> Interrupted run log: $CURRENT_RESULT_FILE" >&2
+    fi
+    # After the footer, as it can take a while. Defined by lib/diffusion_dlrm.sh,
+    # which only run_batch.sh sources.
+    if [ "${PERF_DD_ACTIVE:-0}" = 1 ] && declare -F perf_dd_finalize >/dev/null; then
+        perf_dd_finalize "${PERF_DD_LOG:-}"
     fi
 
     {
@@ -728,7 +729,7 @@ perf_print_plan() {
         echo "      MBS=${MBS} GBS=${GBS} seq=${SEQ_LEN} steps=${STEPS} reps=${NUM_REPS}"
         if build_launch_argv "$config_file" "$FRAMEWORK" "$TRAIN_SUITE" 2>/dev/null; then
             echo "      log: $(run_log_name 1)"
-            echo "      cmd: ${LAUNCH_ARGV[*]}"
+            echo "      cmd: $(perf_display_argv "${LAUNCH_ARGV[@]}")"
         else
             echo "      cannot build a launch command for this config (see the error when run)."
         fi

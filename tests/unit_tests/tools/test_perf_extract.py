@@ -799,6 +799,9 @@ def make_diffusion_bench_run(root: Path, diffusion=(), dlrm=(), step_logs=None) 
             step = f"dlrm_{precision}"
             status.append(f"{step}\t{step_status}\t{STEP_EXIT[step_status]}\t135\tlogs/{step}.log")
     (run_dir / "status.tsv").write_text("\n".join(status) + "\n")
+    # Every recorded step has a log, as in a real run.
+    for line in status[1:]:
+        (run_dir / "logs" / f"{line.split(chr(9))[0]}.log").write_text("")
     for name, text in (step_logs or {}).items():
         (run_dir / "logs" / f"{name}.log").write_text(text)
     return run_dir
@@ -991,17 +994,109 @@ def test_diffusion_dlrm_without_steps_keeps_the_runs_row(tmp_path):
     # It created the folder, but its setup step failed before any model ran.
     root = tmp_path / "b"
     root.mkdir()
-    run_dir = make_diffusion_bench_run(root)
+    run_dir = make_diffusion_bench_run(
+        root, step_logs={"setup": "sed: can't read Makefile: No such file or directory\n"}
+    )
+    status = run_dir / "status.tsv"
+    status.write_text(status.read_text().replace("setup\tsuccess\t0", "setup\terror\t1"))
     log = write_dd_log(
         root,
         str(run_dir),
+        plan=("Diffusion: flux-dev  batch size 16", "DLRM     : TF32"),
         exit_code=1,
-        failure_reason="steps: 1 of 1 diffusion_bench steps not successful: setup failed",
+        failure_reason="steps: 1 of 1 diffusion_bench steps not successful: setup error",
     )
+    setup, flux, dlrm = extract.parse_log(str(log))
+    assert (setup["backend"], setup["model_name"], setup["status"]) == ("diffusion_dlrm", "setup", "failed")
+    assert setup["failure_detail"].startswith("sed: can't read Makefile")
+    for row in (flux, dlrm):
+        assert (row["status"], row["failure_reason"]) == ("failed", "not_run")
+        assert row["failure_detail"] == "not run: diffusion_bench's setup step failed"
+        # Nothing ran, so there is no log to point at.
+        assert row["step_log"] is None
+
+
+def test_diffusion_dlrm_failed_download_gets_a_row(tmp_path):
+    # diffusion_bench carries on with the cached assets, and the run fails.
+    run_dir = make_diffusion_bench_run(
+        tmp_path,
+        diffusion=[("flux-dev", 16, "success", "success")],
+        step_logs={"download": "huggingface_hub.errors.HfHubHTTPError: 503 Server Error\n"},
+    )
+    with open(run_dir / "status.tsv", "a") as f:
+        f.write("download\terror\t1\t60\tlogs/download.log\n")
+    log = write_dd_log(tmp_path, str(run_dir), exit_code=1, failure_reason="steps: 1 of 3 ...")
+    download, flux = extract.parse_log(str(log))
+    assert (download["backend"], download["model_name"], download["status"]) == ("diffusion_dlrm", "download", "failed")
+    assert download["failure_reason"] == "python_error"
+    assert flux["status"] == "ok"
+
+
+def test_diffusion_dlrm_incomplete_run_blames_each_step_for_its_own_log_only(tmp_path):
+    # The batch was killed (no footer) while SDXL ran, after flux hit an OOM.
+    oom = "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB\n"
+    run_dir = make_diffusion_bench_run(
+        tmp_path,
+        diffusion=[("flux-dev", 16, "oom", None), ("stable-diffusion-xl", 12, None, "not_run")],
+        step_logs={"diffusion_flux-dev_bs16": oom, "diffusion_stable-diffusion-xl_bs12": "Step 3 ...\n"},
+    )
+    plan = ("Diffusion: flux-dev  batch size 16", "Diffusion: stable-diffusion-xl  batch size 12", "DLRM     : TF32")
+    log = write_dd_log(tmp_path, str(run_dir), plan=plan, with_footer=False)
+    log.write_text(log.read_text() + oom)
+    flux, sdxl, dlrm = extract.parse_log(str(log))
+    assert (flux["status"], flux["failure_reason"]) == ("failed", "oom")
+    assert (sdxl["status"], sdxl["failure_reason"]) == ("incomplete", None)
+    assert (dlrm["status"], dlrm["failure_reason"]) == ("incomplete", None)
+
+
+@pytest.mark.parametrize(
+    "status,text,reason,detail",
+    [
+        ("killed", "Step 1 ...\n", "killed", "SIGKILL before step_timeout"),
+        (
+            "failed",
+            "[in_container 2026-10-15 03:15:46] Running: python launcher.py train_args=flux-dev\n"
+            "Could not override 'train_args.no_such_option'.\n"
+            "To append to your config use +train_args.no_such_option=1\n"
+            "Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.\n"
+            "[in_container 2026-10-15 03:15:47] launcher exit code=1, run status=missing\n",
+            "config_error",
+            "Could not override 'train_args.no_such_option'.",
+        ),
+        (
+            "failed",
+            "something went wrong\n[in_container 2026-10-15 03:15:47] launcher exit code=1, run status=failed\n",
+            "exit",
+            "something went wrong",
+        ),
+    ],
+)
+def test_diffusion_dlrm_failure_details(tmp_path, status, text, reason, detail):
+    run_dir = make_diffusion_bench_run(tmp_path, diffusion=[("flux-dev", 16, None, None)])
+    with open(run_dir / "status.tsv", "a") as f:
+        f.write(f"diffusion_flux-dev_bs16\t{status}\t1\t30\tlogs/diffusion_flux-dev_bs16.log\n")
+    (run_dir / "logs" / "diffusion_flux-dev_bs16.log").write_text(text)
+    log = write_dd_log(tmp_path, str(run_dir), exit_code=1, failure_reason="steps: ...")
     (row,) = extract.parse_log(str(log))
-    assert row["backend"] == "diffusion_dlrm"
-    assert row["failure_reason"] == "steps"
-    assert row["failure_detail"].endswith("setup failed")
+    assert (row["status"], row["failure_reason"]) == ("failed", reason)
+    assert row["failure_detail"].startswith(detail)
+
+
+def test_diffusion_dlrm_separate_dlrm_image_is_reported(tmp_path):
+    run_dir = make_diffusion_bench_run(
+        tmp_path, diffusion=[("flux-dev", 16, "success", "success")], dlrm=[("TF32", "success", True)]
+    )
+    (run_dir / "run_info.txt").write_text("image: registry.example/ci:some-tag\ndlrm_image: rocm/dlrm:1.0\n")
+    (run_dir / "env").mkdir()
+    (run_dir / "env" / "image_id_dlrm.txt").write_text("sha256:0123abcd\n")
+    log = write_dd_log(
+        tmp_path, str(run_dir), banner_extra="# Image ID         : sha256:fe8e1551d200\n"
+    )
+    flux, dlrm = extract.parse_log(str(log))
+    assert (flux["docker_image"], flux["image_id"]) == ("registry.example/ci:some-tag", "sha256:fe8e1551d200")
+    assert (dlrm["docker_image"], dlrm["image_id"]) == ("rocm/dlrm:1.0", "sha256:0123abcd")
+    # The banner's container versions describe the main image only.
+    assert dlrm["torch_version"] is None and dlrm["image_digest"] is None
 
 
 def test_diffusion_dlrm_rows_reach_the_outputs(tmp_path, monkeypatch):

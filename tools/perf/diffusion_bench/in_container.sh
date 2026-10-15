@@ -29,7 +29,7 @@ log() { echo "[in_container $(date '+%F %T')] $*"; }
 
 retry() {
     local n=0 max=3 shown="$*"
-    # The make download passes the token as an argument.
+    # No caller passes the token as an argument; this keeps it so if one does.
     [[ -n "${HF_TOKEN:-}" ]] && shown=${shown//"$HF_TOKEN"/<redacted>}
     until "$@"; do
         n=$((n + 1))
@@ -45,8 +45,12 @@ retry() {
 step_setup() {
     local tag=${1:-main}
     cd "$DIFF_DIR" || exit 1
-    sed -i 's/huggingface-cli login/hf auth login/g; s/huggingface-cli download/hf download/g' Makefile
-    log "Makefile patched to use 'hf auth login' / 'hf download'"
+    # The token login becomes a no-op: hf reads HF_TOKEN from the environment,
+    # and on a command line the token would show in the host's `ps`.
+    # shellcheck disable=SC2016  # $(HF_TOKEN) is the Makefile's literal text
+    sed -i 's/huggingface-cli login/hf auth login/g; s/huggingface-cli download/hf download/g;
+            s/hf auth login --token \$(HF_TOKEN)/true/g' Makefile
+    log "Makefile patched to use 'hf download', with HF_TOKEN from the environment"
 
     mkdir -p "$RESULTS/env"
     {
@@ -70,14 +74,14 @@ yaml_value() {
 
 step_download() {
     cd "$DIFF_DIR" || exit 1
-    if [[ -n "${HF_TOKEN:-}" ]]; then
-        hf auth login --token "$HF_TOKEN" >/dev/null 2>&1 && log "Logged in to Hugging Face with HF_TOKEN"
-    fi
+    # hf uses HF_TOKEN from the environment; no login, which would put the
+    # token on a command line.
+    [[ -n "${HF_TOKEN:-}" ]] && log "Using HF_TOKEN from the environment"
 
     if [[ "${1:-all}" == "all" ]]; then
-        # The Makefile includes .env.example (HF_TOKEN=), which would mask the exported token,
-        # so it has to be passed on the command line.
-        retry make download_assets HF_TOKEN="${HF_TOKEN:-}" </dev/null
+        # The Makefile includes .env.example (HF_TOKEN=), which would mask the exported token;
+        # -e lets the environment win.
+        retry make -e download_assets </dev/null
         return
     fi
 

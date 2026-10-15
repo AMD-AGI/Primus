@@ -14,6 +14,7 @@ Used by run_benchmarks.sh:
 import argparse
 import difflib
 import os
+import re
 import shlex
 import sys
 
@@ -201,8 +202,9 @@ def parse_args(argv):
         "--env",
         action="append",
         default=[],
-        metavar="KEY=VALUE",
-        help="Environment variable for the benchmark containers; repeatable",
+        metavar="KEY[=VALUE]",
+        help="Environment variable for the benchmark containers; repeatable. A bare KEY "
+        "passes this shell's value, which keeps a secret off the docker command line",
     )
     p.add_argument(
         "--dry-run",
@@ -334,10 +336,12 @@ def resolve(args):
 
     step_timeout = args.timeout if args.timeout is not None else int(cfg.get("step_timeout", 14400))
 
-    for option, values in (("--label", args.label), ("--env", args.env)):
-        for value in values:
-            if "=" not in value or not value.split("=", 1)[0]:
-                raise ConfigError(f"{option} expects KEY=VALUE, got '{value}'")
+    for label in args.label:
+        if "=" not in label or not label.split("=", 1)[0]:
+            raise ConfigError(f"--label expects KEY=VALUE, got '{label}'")
+    for env in args.env:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*(=|$)", env):
+            raise ConfigError(f"--env expects KEY=VALUE or KEY, got '{env}'")
 
     return {
         "config_file": config_file,

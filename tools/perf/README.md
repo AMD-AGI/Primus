@@ -65,7 +65,8 @@ The runner can be invoked from any directory.
 
 [`yq`](https://github.com/mikefarah/yq) v4+ is the only external requirement.
 Everything else (`bash`, `docker`, `git`, `python3`, `amd-smi` or `rocm-smi`) is already
-present on a node that can run Primus.
+present on a node that can run Primus. `BACKEND=...,diffusion_dlrm` also needs PyYAML
+in the host's `python3` (`pip install --user pyyaml`), even for `DRY_RUN=1`.
 
 ### Automatic installation
 
@@ -224,8 +225,8 @@ duplicate entries are reported before anything launches.
 ### Diffusion and DLRM (`diffusion_dlrm`)
 
 `diffusion_dlrm` is a backend outside the catalog. Adding it to `BACKEND`
-runs [`diffusion_bench/run_benchmarks.sh`](./diffusion_bench/) once, after
-every other config of the batch, for the diffusion models (FLUX.1-dev, SDXL,
+runs [`diffusion_bench/run_benchmarks.sh`](./diffusion_bench/) once per
+repetition (`NUM_REPS`), after every other config of the batch, for the diffusion models (FLUX.1-dev, SDXL,
 Mochi, HunyuanVideo, Wan 2.1) and DLRM precisions its config enables. So
 everything a `rocm/primus` image can run is one command:
 
@@ -240,12 +241,14 @@ bash tools/perf/run_batch.sh
   batch sizes per GPU type, DLRM precisions and the Hugging Face cache.
   Point `DIFFUSION_DLRM_CONFIG` at a copy to change them without touching
   the shared file. The runner passes it `DOCKER_IMAGE`, the GPU type (`GPU`
-  MI300X/MI308X/MI325X → `mi300`, MI350X/MI355X → `mi355`), its container
-  label, `EXTRA_ENV`, and `TRAIN_STEPS` as every diffusion model's
-  `num_iterations` (DLRM keeps its own length). `HF_TOKEN` reaches it
-  through the environment. The runner's own Primus defaults
+  MI300X/MI308X/MI325X → `mi300`, MI350X/MI355X → `mi355`, otherwise read
+  from the GPU's gfx942 / gfx950 architecture), its container label,
+  `EXTRA_ENV`, and `TRAIN_STEPS` as every diffusion model's `num_iterations`
+  (DLRM keeps its own length). `HF_TOKEN` reaches it through the
+  environment, never a command line. The runner's own Primus defaults
   (`HSA_NO_SCRATCH_RECLAIM` and the two `*_ATOMIC_FP32` settings) are not
-  applied, so the numbers match a standalone diffusion_bench run.
+  applied, so the numbers match a standalone diffusion_bench run. `GPU`
+  need not be a catalog key when `diffusion_dlrm` is the only backend.
 - **No runner time limit.** `MAX_RUN_SECONDS` and `MAX_IDLE_SECONDS` do not
   apply to this run. diffusion_bench stops a step that exceeds its
   `step_timeout` (4 hours in the default config), marks it `timeout` and
@@ -645,7 +648,7 @@ files keep working:
 | `image_id`, `container_rocm_version`, `container_hip_version` | Exact image and the user-space ROCm/HIP inside it. |
 | `cpu_governor`, `numa_balancing`, `transparent_hugepages`, `iommu`, `amdgpu_version` | Host settings of the node that ran the batch. |
 | `rec_per_s`, `rec_per_s_cv` | DLRM recommendations/s and its std/mean, as DLRMBenchmark reports them (iterations/s × its per-GPU `BATCH_SIZE`). |
-| `step_log` | For `diffusion` / `dlrm` rows, the diffusion_bench step log, relative to the result directory. |
+| `step_log` | For `diffusion` / `dlrm` rows, the diffusion_bench step log, relative to the result directory; empty for a step that never ran. |
 
 A `diffusion_dlrm` log becomes one row per diffusion model and DLRM
 precision, with backend `diffusion` or `dlrm`. Those numbers come from
@@ -653,15 +656,27 @@ diffusion_bench's own parser, so they match its `summary.md`: TFLOP/s and
 samples/s per GPU are AMDiffusionBenchmark's averages, not this tool's
 harmonic means, and `micro_batch_size` is the batch size per GPU (DLRM's
 `BATCH_SIZE` is per GPU too). Their `exit_code`, `elapsed_sec`, `status` and
-`failure_reason` are the step's: a step diffusion_bench stopped is
-`timeout`, one that succeeded without reporting a throughput is
-`no_metrics`, one that never ran is `not_run` (or `interrupted` when the
-batch was), and otherwise the step log is searched as described below.
+`failure_reason` are the step's:
+
+- `timeout`: diffusion_bench stopped the step at its `step_timeout`;
+  `killed`: it got SIGKILL before that (host out of memory, `docker kill`).
+- `no_metrics`: the step succeeded without reporting a throughput. Such a
+  row is `failed` even though the batch summary shows the run as passed.
+- `config_error`: Hydra rejected `launcher.py`'s overrides; the detail is its
+  message.
+- `not_run`: the step never ran, e.g. because the setup step failed first
+  (`interrupted` or `incomplete` instead, when the batch was stopped).
+- Otherwise the step's own log is searched as described below.
+
 Every step diffusion_bench planned gets a row, including those that left no
-output folder.
+output folder, and a setup or download step that failed gets one too, with
+backend `diffusion_dlrm`. When the config gives DLRM its own image
+(`dlrm.image`), the DLRM rows name that image and leave the main image's
+container versions empty.
 
 `failure_reason` takes the runner's verdict from the footer when it is
-definitive (`timeout`, `idle`, `interrupted`). Otherwise the run output is
+definitive (`timeout`, `idle`, `interrupted`, and `steps` for a
+`diffusion_dlrm` run with no step rows). Otherwise the run output is
 searched, in this order, for `nic_error` (no usable socket interface), `oom`,
 `gpu_contended` (out of memory while this process held less than half the
 GPU, i.e. another process had it), `segfault`, `nccl_error` and
