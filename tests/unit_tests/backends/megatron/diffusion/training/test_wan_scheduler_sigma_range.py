@@ -38,6 +38,20 @@ def test_configured_range_bounds_noise_and_conditioning():
     assert torch.allclose(noised[:, 0], sigma)
 
 
+def test_inference_schedule_spans_the_configured_range():
+    """``set_timesteps`` shifts its endpoints, so the range must not reach it already shifted."""
+    scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=5.0, sigma_min=0.1, sigma_max=0.9)
+    scheduler.set_timesteps(num_inference_steps=10, device="cpu")
+
+    assert scheduler.sigmas[0].item() == pytest.approx(0.9, abs=1e-6)
+    assert scheduler.sigmas[-2].item() == pytest.approx(0.1, abs=1e-6)
+
+
+def test_a_configured_range_with_dynamic_shifting_is_rejected():
+    with pytest.raises(ValueError, match="static shift"):
+        WanFlowMatchScheduler(num_train_timesteps=N, sigma_min=0.1, sigma_max=0.9, use_dynamic_shifting=True)
+
+
 def test_noise_is_mixed_at_the_fp32_sigma_the_model_is_conditioned_on():
     """bf16 inputs are mixed in fp32 and only the result is rounded.
 

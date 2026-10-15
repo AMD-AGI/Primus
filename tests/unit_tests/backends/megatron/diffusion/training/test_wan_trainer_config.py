@@ -145,6 +145,40 @@ def test_an_unknown_sensitive_layer_precision_raises():
         resolve_diffusion_backend(config)
 
 
+@pytest.mark.parametrize(
+    "precision, missing",
+    [("tw_fp8", "PrimusTurboFloat8LocalSpecProvider"), ("bf16", "PrimusTurboLocalSpecProvider")],
+)
+def test_a_sensitive_layer_provider_that_failed_to_import_raises(precision, missing, monkeypatch):
+    pytest.importorskip("primus_turbo")
+    from primus.backends.megatron.core.models.diffusion.common import backend_resolution
+
+    config = _build(
+        fp4="mxfp4",
+        fp4_recipe="mxfp4",
+        num_dit_layers=4,
+        sensitive_layers_enabled=True,
+        sensitive_layers_start=1,
+        sensitive_layers_end=1,
+        sensitive_layer_precision=precision,
+    )
+    monkeypatch.setattr(backend_resolution, missing, None)
+    with pytest.raises(ImportError, match="sensitive_layer_precision"):
+        backend_resolution.resolve_diffusion_backend(config)
+
+
+def test_mxfp4_without_sensitive_layers_has_no_sensitive_provider():
+    pytest.importorskip("primus_turbo")
+    from primus.backends.megatron.core.models.diffusion.common.backend_resolution import (
+        resolve_diffusion_backend,
+    )
+
+    backend, sensitive_backend = resolve_diffusion_backend(_build(fp4="mxfp4", fp4_recipe="mxfp4"))
+
+    assert type(backend).__name__ == "PrimusTurboMXFP4LocalSpecProvider"
+    assert sensitive_backend is None
+
+
 def test_sensitive_layer_settings_reach_the_model_config():
     config = _build(
         fp4="mxfp4",

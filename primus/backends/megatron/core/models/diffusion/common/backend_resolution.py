@@ -54,8 +54,9 @@ def resolve_diffusion_backend(config) -> Tuple[object, Optional[object]]:
     unless the main backend is MXFP4 and ``sensitive_layer_precision`` names a
     higher-precision provider for the first/last layers.
 
-    Raises ``ImportError`` when ``fp4`` / ``fp8`` asks for a provider that did
-    not import, rather than building bf16 linears under a low-precision config.
+    Raises ``ImportError`` when ``fp4`` / ``fp8`` or the sensitive-layer
+    precision asks for a provider that did not import, rather than building
+    other linears than the config asks for.
     """
     sensitive_backend = None
 
@@ -68,16 +69,24 @@ def resolve_diffusion_backend(config) -> Tuple[object, Optional[object]]:
                 )
             backend = PrimusTurboMXFP4LocalSpecProvider()
 
-            sensitive_precision = getattr(config, "sensitive_layer_precision", "bf16")
-            if sensitive_precision == "tw_fp8":
-                sensitive_backend = PrimusTurboFloat8LocalSpecProvider()
-            elif sensitive_precision == "bf16":
-                sensitive_backend = PrimusTurboLocalSpecProvider()
-            elif getattr(config, "sensitive_layers_enabled", False):
-                raise ValueError(
-                    "sensitive_layer_precision must be 'bf16' or 'tw_fp8' with fp4, "
-                    f"got {sensitive_precision!r}"
-                )
+            if getattr(config, "sensitive_layers_enabled", False):
+                sensitive_precision = getattr(config, "sensitive_layer_precision", "bf16")
+                if sensitive_precision == "tw_fp8":
+                    sensitive_provider = PrimusTurboFloat8LocalSpecProvider
+                elif sensitive_precision == "bf16":
+                    sensitive_provider = PrimusTurboLocalSpecProvider
+                else:
+                    raise ValueError(
+                        "sensitive_layer_precision must be 'bf16' or 'tw_fp8' with fp4, "
+                        f"got {sensitive_precision!r}"
+                    )
+                if sensitive_provider is None:
+                    raise ImportError(
+                        f"sensitive_layer_precision={sensitive_precision!r} needs Primus-Turbo's "
+                        "local linears, which failed to import; install Primus-Turbo or disable "
+                        "sensitive_layers_enabled"
+                    )
+                sensitive_backend = sensitive_provider()
         elif config.fp8 is not None:
             if not HAVE_PRIMUS_TURBO_LOCAL or PrimusTurboFloat8LocalSpecProvider is None:
                 raise ImportError(

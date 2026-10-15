@@ -69,19 +69,29 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         if not 0.0 <= sigma_min < sigma_max <= 1.0:
             raise ValueError(f"need 0 <= sigma_min < sigma_max <= 1, got [{sigma_min}, {sigma_max}]")
 
-        # Clip sigmas to the Wan range. The Wan defaults already match [0, 1],
-        # so this is a no-op for the default config; the knob exists to support
-        # future variants. ``sigma_range`` is what training reads: the base
-        # class keeps its own ``sigma_min`` / ``sigma_max`` for inference.
+        # The range bounds the post-shift sigma. The Wan defaults [0, 1] leave
+        # everything as the base class built it. ``sigma_range`` is what
+        # training reads; the base class's ``sigma_min`` / ``sigma_max`` are the
+        # inference endpoints, which ``set_timesteps`` shifts again, so they
+        # get the pre-shift values that land on the range.
         self.sigma_range: Optional[Tuple[float, float]] = None
         if (sigma_min, sigma_max) != (0.0, 1.0):
+            if use_dynamic_shifting:
+                raise ValueError(
+                    "a sigma range other than [0, 1] needs the static shift; "
+                    "use_dynamic_shifting shifts by a per-call mu that cannot be inverted here"
+                )
             self.sigmas = self.sigmas.clamp(min=sigma_min, max=sigma_max)
-            self.sigma_min = sigma_min
-            self.sigma_max = sigma_max
+            self.sigma_min = self._unshift(sigma_min)
+            self.sigma_max = self._unshift(sigma_max)
             self.sigma_range = (float(sigma_min), float(sigma_max))
 
         self.training_weights = self._build_training_weights()
         self._timestep_bounds: Dict[Tuple[float, float, float], Tuple[int, int]] = {}
+
+    def _unshift(self, sigma: float) -> float:
+        """Base sigma whose static shift is ``sigma``: ``s / (shift - (shift - 1) * s)``."""
+        return float(sigma) / (self.shift - (self.shift - 1.0) * float(sigma))
 
     def _build_training_weights(self) -> torch.Tensor:
         """Precompute the per-timestep loss weight table.
