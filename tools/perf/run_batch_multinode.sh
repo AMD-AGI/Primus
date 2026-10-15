@@ -102,6 +102,9 @@
 #     results.csv, results.json     - every log in RESULT_DIR parsed by
 #                                     extract_results.py, refreshed at the end
 #                                     (EXTRACT=0 skips this).
+#     report.xlsx                   - the Excel report of RESULT_DIR (report.py),
+#                                     refreshed at the end when pandas and
+#                                     XlsxWriter are installed (REPORT=0 skips it).
 #   <stamp> is YYYYmmdd-HHMMSS, captured once when the script starts, so every
 #   artefact of one batch shares it and repeated runs in the same RESULT_DIR
 #   accumulate side by side instead of overwriting each other. Export BATCH_TS

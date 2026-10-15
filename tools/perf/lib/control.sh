@@ -641,9 +641,27 @@ perf_extract_results() {
     if [ "$rc" -eq 3 ]; then
         # The extractor's own code for "no run logs here yet".
         perf_log "[INFO] no run logs in $RESULT_DIR yet; results.csv / results.json not written."
+        return 0
     elif [ "$rc" -ne 0 ]; then
         perf_log "[WARN] result extraction reported errors (see above); rerun: python3 $SCRIPT_DIR/extract_results.py $RESULT_DIR"
     fi
+    perf_write_report
+}
+
+# report.xlsx from the results just extracted; REPORT=0 skips it. Never
+# installs pandas or XlsxWriter mid-batch: without them, says how to get them.
+perf_write_report() {
+    local out rc
+    [ "${REPORT:-1}" != 0 ] || return 0
+    out=$(trap - INT TERM HUP; timeout -k 10 300 python3 "$SCRIPT_DIR/report.py" --no-install "$RESULT_DIR" 2>&1)
+    rc=$?
+    case "$rc" in
+        0) perf_log "$out" ;;
+        3) ;;
+        4) perf_log "[INFO] report.xlsx not written: pandas or XlsxWriter is missing. Run python3 $SCRIPT_DIR/report.py $RESULT_DIR once to install them and write the report." ;;
+        *) perf_log "${out:+$out
+}[WARN] report.xlsx not written (exit $rc); rerun: python3 $SCRIPT_DIR/report.py $RESULT_DIR" ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------

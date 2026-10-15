@@ -78,6 +78,8 @@
 #   PULL_IMAGE=1     pull DOCKER_IMAGE before the batch even if the tag is
 #                    present, replacing a stale or re-tagged local copy.
 #   EXTRACT=0        do not refresh results.csv / results.json at the end.
+#   REPORT=0         do not write report.xlsx at the end (written only when
+#                    pandas and XlsxWriter are installed; see report.py).
 #   EXTRA_ENV=...    space-separated KEY=VALUE pairs forwarded into the
 #                    container as explicit `--env` flags, e.g.
 #                    EXTRA_ENV="DEBUG_HIP_DYNAMIC_QUEUES=0". A plain export is
@@ -140,6 +142,8 @@
 #                                     folder is under diffusion_dlrm/.
 #     results.csv, results.json     - every log in RESULT_DIR parsed by
 #                                     extract_results.py, refreshed at the end.
+#     report.xlsx                   - the Excel report of RESULT_DIR (report.py),
+#                                     refreshed at the end (REPORT=0 skips it).
 #   <stamp> is YYYYmmdd-HHMMSS, captured once when the script starts, so every
 #   artefact of one batch shares it and repeated runs in the same RESULT_DIR
 #   accumulate side by side instead of overwriting each other. Export BATCH_TS
