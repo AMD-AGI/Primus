@@ -91,7 +91,7 @@ The folder is mounted read-only into the container at `/diffusion_bench`.
 - A single node with 8 MI300-class or MI355-class GPUs (both benchmarks assume 8 GPUs).
 - Docker, with your user in the `docker` group (`docker info` must work without sudo).
 - The benchmark image available locally or pullable (default:
-  `unifiedtrainingdockers.azurecr.io/utd/ci:primus_ci_0ce782a_20261002`; run `docker login` for
+  `rocm/primus:v26.8`; run `docker login` for
   private registries). The image must contain `/workspace/AMDiffusionBenchmark` and
   `/workspace/DLRMBenchmark`.
 - `python3` with PyYAML on the host (`python3 -c "import yaml"`). Install with
@@ -136,7 +136,7 @@ directory contains a copy of the config used (`config.yaml`) and the fully resol
 
 ```yaml
 gpu: auto                 # auto | mi300 | mi355
-image: unifiedtrainingdockers.azurecr.io/utd/ci:primus_ci_0ce782a_20261002
+image: rocm/primus:v26.8
 
 hf_cache_dir: null        # null -> $HF_HOME or ~/.cache/huggingface (see the HF cache section);
                           # the shipped config.yaml sets /tmp/huggingface
@@ -417,7 +417,7 @@ from the environment, and on a command line the token would be visible in the ho
 **Dedicated experiment config** (`configs/mi355_sweep.yaml`):
 ```yaml
 gpu: mi355
-image: unifiedtrainingdockers.azurecr.io/utd/ci:primus_ci_3979e53_20260930
+image: rocm/primus:v26.8
 hf_cache_dir: /shared/huggingface
 download: false
 output_dir: ~/primus-bench/diffusion/mi355_sweep
@@ -489,7 +489,7 @@ outside (for example by the perf batch runner's cleanup) is removed as well.
 | `CONFIG ERROR: Unknown key ...` | Typo in the YAML; the message suggests the closest valid key. |
 | `HF_TOKEN is not set and no token found` | `export HF_TOKEN=hf_xxx`, or set `download: false` if the cache is already populated. |
 | Download fails with 401/403 for FLUX.1-dev | Accept the model license on Hugging Face with the account that owns the token. |
-| `Failed to pull <image>` | `docker login unifiedtrainingdockers.azurecr.io`, or pull the image manually. |
+| `Failed to pull <image>` | `docker login registry`, or pull the image manually. |
 | `PyYAML is required on the host` | `pip install --user pyyaml` or `sudo apt install python3-yaml`. |
 | `WARNING: other running containers may be using the GPUs` | Another container is running; make sure it isn't using the GPUs, or numbers will be wrong. |
 | A diffusion step shows `oom` | Batch size too large for this GPU; lower it in the config or with `--bs`. |

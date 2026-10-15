@@ -27,7 +27,7 @@ Two goals shape this tool:
 
 ```bash
 export HF_TOKEN=hf_...                                    # required
-export DOCKER_IMAGE=<tag>   # required
+export DOCKER_IMAGE=rocm/primus:<tag>   # required
 export BACKEND=maxtext,maxdiffusion                        # required
 export RESULT_DIR=~/primus-bench/mi325x-v26.7
 
