@@ -52,9 +52,9 @@ modules:
       valid_data_path: null
       test_data_path: null
 
-      moe_use_legacy_grouped_gemm: true
+      moe_use_legacy_grouped_gemm: false
       # MLA
-      multi_latent_attention: false
+      multi_latent_attention: true
 
       # ckpt
       finetune: false
@@ -73,7 +73,9 @@ modules:
       # Turbo
       enable_primus_turbo: true
       use_turbo_attention: true
-      use_turbo_grouped_gemm: false
+      use_turbo_grouped_gemm: true
+      turbo_grouped_gemm_backend: flydsl
+      use_turbo_fused_act_with_probs: true
 
       # deepep
       use_turbo_deepep: true
@@ -95,4 +97,5 @@ modules:
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
-      apply_rope_fusion: true
+      # rope fusion is not supported with MLA
+      apply_rope_fusion: false
