@@ -220,8 +220,16 @@ def test_disabled_residual_scaling_skips_both_affines():
     assert isinstance(stack.final_norm, RMSNorm)
 
 
-def test_tiny_model_wires_stages_and_forwards(parallel_state):
+def test_tiny_model_wires_stages_and_forwards(parallel_state, monkeypatch):
     del parallel_state
+    # This test builds Zaya1Model directly, so it hits stock LanguageModule.
+    # The before_train ROCm patch that overrides baked NVTE_*_ATTN is not
+    # applied. CI is one pytest process, and an earlier test can leave
+    # NVTE_UNFUSED_ATTN=1. fused requires 0 and will not override a leaked
+    # value. CCA does not use TE attention; clear the three vars so
+    # LanguageModule can set them, and let monkeypatch restore them after.
+    for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+        monkeypatch.delenv(name, raising=False)
     from megatron.training.global_vars import set_args
 
     config = _tiny_config()
