@@ -2,11 +2,7 @@
 
 `primus-cli` is the entrypoint for SpecForge **capture** and **draft training**.
 
-## Intro
-
-Two knobs:
-
-| Knob | Values | Meaning |
+| Mode | Values | Meaning |
 | --- | --- | --- |
 | `specforge_mode` | `train` \| `capture` | Which program Primus runs (`train` if omitted) |
 | `specforge_train_mode` | `online` \| `offline` | How train runs. **Required** when mode is `train` (no default). Ignored for capture. |
