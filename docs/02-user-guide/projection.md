@@ -19,6 +19,40 @@ Related: [Micro-benchmarking suite](./micro-benchmarking.md), [Preflight diagnos
 
 ---
 
+## Training backends
+
+Projection reads the `framework` field of your experiment's `pre_trainer` module and adapts that backend's own configuration into the shapes and parallel degrees it models. A Llama 3 8B runs the same GEMMs over the same tensors whichever backend trains it, so Megatron and TorchTitan share one profiler tree.
+
+| `framework` | Config it reads | Benchmark modes | Simulate mode |
+|-------------|-----------------|-----------------|---------------|
+| `megatron` | Megatron arguments directly | Yes | Yes |
+| `torchtitan` | `model.flavor`, `parallelism.*` degrees, `activation_checkpoint.mode`, model converters | Yes | Yes |
+| `torchrec_dlrm` | DLRM arguments | Yes | Yes |
+
+Benchmark-anchored projection runs the real trainer on one node to measure a representative layer, then scales that measurement analytically. Everything downstream of the measurement — pipeline scheduling, communication modeling, node-count scaling — is identical across backends, so the only thing a backend has to supply is the measurement itself.
+
+Megatron, TorchTitan and DLRM all share one harness, because they share torch: the projection builds the real model, walks to the layer it wants, and times it with CUDA events while reading the caching allocator. A backend joins that harness by saying where its layers live and what shape their forward wants — TorchTitan's blocks take `[batch, seq, hidden]` and a rope table where Megatron's take `[seq, batch, hidden]` and a mask, and that is most of the difference between them.
+
+Expert all-to-all is not timed on TorchTitan — it lives in TorchTitan's parallelization plan, so there is no dispatch/combine pair to measure — and the projection restores it analytically when it scales to the target topology.
+
+If you have no GPU, or want to skip measurement on a backend that supports it, pass `--memory-mode simulate` or `--profiling-mode simulate`.
+
+### Where the model architecture comes from
+
+TorchTitan keeps its architectures in a Python flavor table, so they are not spelled out in the experiment file. Projection resolves them in this order:
+
+1. Architecture keys set directly in the experiment YAML.
+2. The installed backend — TorchTitan's flavor table.
+3. A transcribed table in `primus/core/projection/frameworks/model_specs.py`, so sizing a cluster needs neither a GPU nor a training checkout.
+
+`tests/unit_tests/core/projection/test_projection_model_specs.py` re-checks the transcriptions against each backend whenever one is present, so a spec that drifts from upstream fails a test rather than quietly mis-sizing a cluster.
+
+### Adding another backend
+
+Backend selection is registry-driven. Out-of-tree code can add one by writing an adapter that rewrites its trainer namespace in the projection's field names and calling `primus.core.projection.frameworks.register_config_adapter(name, adapter)`. Adapters must normalize **in place** and be **idempotent**: the performance driver caps the layer stack, rescales EP onto the bench node and flattens PP on the normalized config, then converts it again.
+
+---
+
 ## Memory projection
 
 ### Quick start
@@ -162,7 +196,7 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 2. Always establish a **single-node** baseline before interpreting multi-node projections.
 3. **Data-parallel scaling** is bounded by batching: if you run out of microbatches (`global_batch_size` / `micro_batch_size`), adding nodes may not increase throughput.
 4. If the YAML **requires** multiple nodes (for example large PP), the performance path may automatically reduce parallelism for benchmarking and restore it analytically—read the console summary carefully.
-5. **No GPU available:** use `--profiling-mode simulate` for CPU-side analytical timing.
+5. **No GPU available:** use `--profiling-mode simulate` for CPU-side analytical timing, on any backend.
 6. **Validate models:** use `--profiling-mode both` to compare GPU benchmark timing with simulation on the same config.
 7. For **MoE** models, activation memory from MoE layers often dominates; memory projection highlights when recomputation is worth considering.
 

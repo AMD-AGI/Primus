@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from primus.core.launcher.parser import load_primus_config
 from primus.core.projection.config_validation import assert_recompute_pipeline_compat
+from primus.core.projection.frameworks import normalize_primus_config
 from primus.core.projection.memory_projection.extrapolation import (
     BenchMeasurement,
     extract_bench_measurement,
@@ -232,6 +233,9 @@ def launch_projection_from_cli(args, overrides):
         raise FileNotFoundError(f"[Primus:Memory Projection] Config file '{cfg_path}' not found.")
 
     primus_config, _unknown = load_primus_config(args, overrides or [])
+    # Normalize before the copies below fork: the target topology is read
+    # straight off the namespace, and the bench copy gets edited in place.
+    normalize_primus_config(primus_config)
     primus_config_original = copy.deepcopy(primus_config)
     primus_config_bench = copy.deepcopy(primus_config)
 

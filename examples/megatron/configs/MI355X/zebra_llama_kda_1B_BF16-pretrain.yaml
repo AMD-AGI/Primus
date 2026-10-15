@@ -3,6 +3,12 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:zebra_llama_kda_1B_BF16-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# Applied before the Triton patches run. Both recompile the KDA backward and
+# that backward NaNs on MI355X; the unpatched kernels match the old recipe.
+env:
+  PRIMUS_FLA_KDA_SAFE_AUTOTUNE: "0"
+  PRIMUS_TRITON_BUFFER_STORE_WAR: "0"
+
 modules:
   pre_trainer:
     framework: megatron

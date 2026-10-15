@@ -6,77 +6,27 @@
 
 """Route Megatron gradient ReduceScatter directly through RCCL CE.
 
-Campaign 20260922_200403, round 9 (R9). The step trace's §3 finding is that the
-gradient ReduceScatter runs on >=32 compute CTAs (``NCCL_MIN_CTAS=32``)
-concurrently with the backward pass and taxes every kernel it overlaps by
-1.17x-2.11x (~33 ms/step). The parameter AllGather already avoids this by
-running on a dedicated zero-CTA RCCL communicator backed by symmetric memory
-(``rccl_sdma_param_all_gather_patches.py``); this file extends the SAME
-mechanism, gated by the SAME ``MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma`` flag,
-to the gradient ReduceScatter.
+When ``MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma`` is explicitly selected, this
+patch allocates ``grad_data`` from the same symmetric-memory pool as the direct
+parameter buffer and routes distributed-optimizer ReduceScatter through the
+dedicated zero-CTA process group.
 
-Precondition, measured before writing this patch (not assumed): a standalone
-8-GPU probe at the real production bucket size (1,353,744,256 elements in /
-169,218,032 out -- the shard size the step trace's ``aten::copy_`` shows) found
-the CE-path ReduceScatter numerically CORRECT and only 1.116x the CTA path's
-ms/launch (6.79 vs 6.09 ms/launch) -- comfortably inside the ~2.9x kill
-threshold goal.md's R9 spec sets. See
-``campaigns/20260922_200403/../_container_logs/tools/rccl_cta_probe.py
---rs-ce-probe``.
+The allocation wrapper is deliberately ordered outside the parameter wrapper
+so each one intercepts only its own ``torch.zeros`` call. The collective
+wrapper reproduces Megatron's native ReduceScatter branch with one process-group
+substitution; changing only the inner collective would mismatch Megatron's
+coalescing-manager group.
 
-Two extensions over the existing param-gather patch:
-
-1. ``make_grad_and_param_buffer_init`` -- makes ``grad_data`` ALSO a direct
-   symmetric buffer, alongside the already-direct ``param_data``. This wraps
-   ``_ParamAndGradBuffer.__init__`` a SECOND time, composed as the OUTER layer
-   around the existing param-data wrap (guaranteed by an explicit priority
-   higher than the param patch's default, plus a defensive apply-if-missing
-   check -- never by import/registration order). Unlike the param path, this
-   does NOT use an eager pre-reservation: ``grad_data`` is allocated directly
-   from the pool at the exact point Megatron's constructor asks for it. An
-   eager reservation of identical byte size to param's would collide in
-   ``_DIRECT_EAGER_PARAM_BUFFERS`` (same dict key), and reusing the *captured*
-   ``original_zeros`` chain (like the param patch's own fallback branch does)
-   would recurse into the OTHER wrap's interceptor while still inside its
-   ``use_mem_pool`` scope ("beginAllocateToPool: already recording to
-   mempool_id" -- reproduced and confirmed in an isolated probe before this
-   file was written). Capturing the REAL ``torch.zeros`` at import time, before
-   any patch mocks it, avoids both problems. This is a one-time,
-   once-per-training-run allocation (not per-step), so the fragmentation risk
-   the param path's eager path guards against does not apply here: grad_data
-   is allocated immediately after its param_data sibling, from the same pool,
-   while the pool's address space is exactly as fragmented as when param_data
-   (a byte-identical-sized request) just succeeded. The inner parameter wrapper
-   calls its import-time real allocator for param_data, explicitly handing the
-   constructor's second ``torch.zeros`` call to this outer gradient wrapper.
-
-2. ``make_start_grad_sync`` -- replaces ``_ParamAndGradBucketGroup.start_grad_sync``
-   with a version that, ONLY for the single-DistOpt-instance, non-force-all-reduce,
-   non-fp32-accumulation, all-buckets-direct case, issues the coalesced
-   ReduceScatter over the dedicated zero-CTA group instead of the original
-   process group -- otherwise it falls back to Megatron's own implementation
-   completely unchanged, before any side effect (gradient scaling, handle
-   bookkeeping) runs. This is deliberately NOT a "swap the module-level
-   ``dist_reduce_scatter_func`` global" interception: that call happens INSIDE
-   Megatron's own ``_coalescing_manager(communication_group, ...)``, which is
-   opened on the ORIGINAL group; redirecting only the inner collective call to
-   a DIFFERENT group while the coalescing scope is opened on another one is an
-   unverified mismatch this file does not want to depend on. A full
-   reimplementation of the one relevant branch (mirroring how
-   ``make_start_param_sync`` already fully reimplements its function) keeps
-   every NCCL group consistent throughout.
-
-Gradient AllReduce (``force_all_reduce=True``, e.g. the gradient-norm path),
-the multi-DistOpt-instance inter-instance AllReduce, and
-``reduce_scatter_with_fp32_accumulation`` are all left to run through Megatron's
-original, untouched implementation -- exactly the scope the trace's 33 ms/step
-finding is about (the single-instance distributed-optimizer ReduceScatter).
+Gradient AllReduce, multiple distributed-optimizer instances, FP32
+ReduceScatter accumulation, and unsupported buffer layouts fall back to
+Megatron's original implementation.
 """
 
 from __future__ import annotations
 
 import functools
 import inspect
+import os
 import threading
 from unittest import mock
 
@@ -98,6 +48,30 @@ _REAL_TORCH_ZEROS = torch.zeros
 # Runs after the param-gather patch's default priority=50, guaranteeing this
 # file's __init__ wrap composes as the OUTER layer (see module docstring).
 _PRIORITY = 60
+
+BACKEND_ENV = "MEGATRON_GRAD_REDUCE_BACKEND"
+RCCL_SDMA_BACKEND = "rccl_sdma"
+
+
+def rccl_sdma_grad_reduce_enabled(_ctx: PatchContext | None = None) -> bool:
+    """Return whether the dedicated RCCL CE gradient path was selected."""
+    return os.getenv(BACKEND_ENV, "").strip().lower() == RCCL_SDMA_BACKEND
+
+
+def validate_grad_reduce_backend_config() -> None:
+    """Fail early when the gradient selector cannot reach RCCL CE."""
+    if not rccl_sdma_param_gather_enabled():
+        raise RuntimeError(
+            "MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma requires "
+            "MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma because gradient ReduceScatter "
+            "reuses the dedicated zero-CTA process group and symmetric-memory pool."
+        )
+    if os.getenv("RCCL_CE_REDUCESCATTER", "").strip() != "1":
+        raise RuntimeError(
+            "MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma requires "
+            "RCCL_CE_REDUCESCATTER=1 to be present before RCCL initializes. "
+            "Use the Primus launcher hook or export both variables before launch."
+        )
 
 
 def make_grad_and_param_buffer_init(original):
@@ -293,10 +267,12 @@ def make_start_grad_sync(original):
         "through the same dedicated zero-CTA RCCL copy-engine process group "
         "already used for the parameter AllGather."
     ),
-    condition=rccl_sdma_param_gather_enabled,
+    condition=rccl_sdma_grad_reduce_enabled,
     priority=_PRIORITY,
 )
 def patch_rccl_sdma_grad_reduce_scatter(ctx: PatchContext) -> None:
+    validate_grad_reduce_backend_config()
+
     # The param-gather patch validates NCCL_CTA_POLICY once; re-validating here
     # is cheap and keeps this file correct if it is ever registered/enabled on
     # its own condition in the future.
@@ -348,4 +324,9 @@ def patch_rccl_sdma_grad_reduce_scatter(ctx: PatchContext) -> None:
         bucket_group.start_grad_sync = make_start_grad_sync(bucket_group.start_grad_sync)
         setattr(bucket_group, grad_sync_marker, True)
 
-    log_rank_0("[Patch:megatron.distributed.rccl_sdma_grad_reduce_scatter] installed")
+    log_rank_0(
+        "[Patch:megatron.distributed.rccl_sdma_grad_reduce_scatter] installed "
+        f"(force={os.getenv('RCCL_FORCE_CE_REDUCESCATTER', '0')}, "
+        f"per_chunk={os.getenv('RCCL_CE_REDUCE_PER_CHUNK', '0')}, "
+        f"max_blocks={os.getenv('RCCL_CE_REDUCE_MAX_BLOCKS', '46')})"
+    )
