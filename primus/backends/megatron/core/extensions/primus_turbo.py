@@ -1097,15 +1097,16 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             # FlyDSL requires an FP32 sink and autograd propagates through this cast.
             sink_tensor = self.sinks.float()
 
-            # Apply sliding window based on layer pattern (gpt-oss: even layers only)
-            # gpt-oss pattern: self.sliding_window = config.sliding_window if layer_idx % 2 == 0 else 0
-            if self.sink_sliding_window > 0:
-                if self.sink_window_even_layers_only:
-                    # Only apply sliding window to even layers (layer_number is 1-indexed in Megatron)
-                    if (self.layer_number - 1) % 2 == 0:
-                        window_size = (self.sink_sliding_window, 0)
-                else:
+        # Window selection is independent of learned sinks; disabling sinks must
+        # preserve the GPT-OSS alternating sliding/full-attention pattern.
+        # gpt-oss pattern: self.sliding_window = config.sliding_window if layer_idx % 2 == 0 else 0
+        if self.sink_sliding_window > 0:
+            if self.sink_window_even_layers_only:
+                # Only apply sliding window to even layers (layer_number is 1-indexed in Megatron)
+                if (self.layer_number - 1) % 2 == 0:
                     window_size = (self.sink_sliding_window, 0)
+            else:
+                window_size = (self.sink_sliding_window, 0)
 
         if self.offload:
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_q", query)
