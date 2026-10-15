@@ -16,7 +16,7 @@
 gpu: auto
 
 # Container image with /workspace/AMDiffusionBenchmark and /workspace/DLRMBenchmark
-image: unifiedtrainingdockers.azurecr.io/utd/ci:primus_ci_0ce782a_20261002
+image: rocm/primus:v26.8
 
 # Hugging Face cache on the host, mounted into the container.
 #   null            -> $HF_HOME if set, otherwise ~/.cache/huggingface

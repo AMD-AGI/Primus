@@ -295,7 +295,7 @@ Each run creates `output_dir/<gpu>_<host>_<YYYYmmdd_HHMMSS>/`. The default `./re
 git-ignored, so runs never show up as untracked files in the repo.
 
 ```
-mi300_tus1-p3-g35_20261002_014509/
+mi300_<hostname>_20261002_014509/
 ├── summary.md               # human-readable tables (also printed at the end of the run)
 ├── summary.csv              # one row per benchmark run
 ├── summary.json             # run info + step status + results
@@ -438,7 +438,7 @@ dlrm:
 
 **Regenerate a summary:**
 ```bash
-./run_benchmarks.sh --parse-only results/mi300_tus1-p3-g35_20261002_014509
+./run_benchmarks.sh --parse-only results/mi300_<hostname>_20261002_014509
 ```
 
 **Debug a failing model interactively:**
