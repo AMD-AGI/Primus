@@ -3,6 +3,7 @@ extends:
 
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: Qwen/Qwen3-30B-A3B
+vocab_size: 151936
 
 # model
 num_layers: 48

@@ -7,23 +7,13 @@
 
 import os
 import re
-import socket
 import subprocess
 import sys
 import unittest
 
 import pytest
 
-from tests.utils import PrimusUT, run_training_script
-
-
-def _find_free_port() -> int:
-    """Ask the kernel for a free TCP port (bind to 0); avoids EADDRINUSE from
-    guessing a port that overlaps the ephemeral range or a not-yet-released one."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
+from tests.utils import PrimusUT, isolated_torchrun_env, run_training_script
 
 _GFX_TO_PLATFORM = {
     "gfx942": "MI300X",
@@ -531,8 +521,8 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
                 "--use_turbo_grouped_gemm",
                 "1",
-                # use_turbo_grouped_gemm is incompatible with the config's default
-                # moe_use_legacy_grouped_gemm=True, so disable the legacy path.
+                # use_turbo_grouped_gemm is incompatible with moe_use_legacy_grouped_gemm,
+                # so keep the legacy path off even if the config default changes.
                 "--moe_use_legacy_grouped_gemm",
                 "0",
             ],
@@ -1056,11 +1046,7 @@ class TestProjectionSimulate(PrimusUT):
             "--target-nodes",
             "2",
         ]
-        env = os.environ.copy()
-        # Kernel-assigned free port so back-to-back GPU benches don't hit
-        # EADDRINUSE (a fixed/random port can clash with a not-yet-released
-        # previous run or the ephemeral range).
-        env["MASTER_PORT"] = str(_find_free_port())
+        env = isolated_torchrun_env()
         return self._check(subprocess.run(cmd, capture_output=True, text=True, env=env))
 
     def test_performance_simulate_dense(self):
