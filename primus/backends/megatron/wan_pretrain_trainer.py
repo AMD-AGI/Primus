@@ -178,6 +178,32 @@ def check_dual_expert_data_parallel(config, data_parallel_size: int) -> None:
         )
 
 
+def check_dual_expert_grad_sync(num_transformers: int, params) -> None:
+    """Reject gradient-sync settings that fail when a step skips an expert.
+
+    A step whose samples all route to one expert leaves the other without
+    gradients. DDP's ``overlap_grad_reduce`` then never launches that expert's
+    reduce and asserts in ``finish_grad_sync``, and Megatron-FSDP buckets both
+    experts' non-layer parameters together and asserts on the half-ready
+    bucket, with or without overlap. On one data-parallel rank, which the
+    dual-expert model needs anyway, neither has anything to overlap or shard.
+    """
+    if num_transformers != 2:
+        return
+    offending = [
+        name
+        for name in ("use_megatron_fsdp", "use_torch_fsdp2", "overlap_grad_reduce")
+        if getattr(params, name, False)
+    ]
+    if offending:
+        raise ValueError(
+            "num_transformers: 2 skips an expert on steps where no sample routes to it, "
+            f"which {', '.join(offending)} cannot handle; set them to false (on one "
+            "data-parallel rank they have nothing to shard or overlap), or train each "
+            "expert as its own job (num_transformers: 1, stage: high_noise or low_noise)"
+        )
+
+
 class WanPretrainTrainer(DiffusionPretrainTrainer):
     """Trainer for WAN 2.1 / 2.2 video diffusion pre-training.
 
@@ -186,7 +212,8 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
           (default 5.0), ``scheduler_sigma_min`` / ``scheduler_sigma_max``.
         - ``loss_weighting``: ``diffsynth`` (default) or ``uniform``.
         - ``num_transformers`` (1 or 2) and ``boundary_ratio`` for WAN 2.2.
-          2 needs a data-parallel size of 1.
+          2 needs a data-parallel size of 1, plain DDP and no
+          ``overlap_grad_reduce``.
         - ``stage``: ``full`` / ``high_noise`` / ``low_noise``. Narrowing the
           stage derives the timestep window and the weight subfolder from
           ``boundary_ratio`` so the two cannot disagree.
@@ -499,6 +526,8 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
                     "fp8_recipe: tensorwise with fp8_scaling_strategy: dynamic, or "
                     "stop sharding the parameters"
                 )
+
+        check_dual_expert_grad_sync(cfg["num_transformers"], params)
 
         if getattr(params, "use_fsdp2_fp32_param_optimizer", False):
             cfg["params_dtype"] = torch.float32

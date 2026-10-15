@@ -32,7 +32,6 @@ import torch
 import torch.nn as nn
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.utils import sharded_state_dict_default
-from safetensors.torch import load_file as load_safetensors
 from torch import Tensor
 
 from primus.backends.megatron.core.transformer.diffusion_transformer_block import (
@@ -40,6 +39,7 @@ from primus.backends.megatron.core.transformer.diffusion_transformer_block impor
 )
 
 from ...common.diffusion_module.diffusion_module import DiffusionModule
+from .checkpoint_converter import load_checkpoint_state_dict
 from .config import WanConfig
 from .layer_spec import get_wan_layer_spec
 from .layers import WanConditionEmbedder, WanRotaryPosEmbed
@@ -186,8 +186,8 @@ def _load_backbone_checkpoint(
 ) -> None:
     """Load a fused-qkv WAN backbone checkpoint.
 
-    Accepts a ``.safetensors`` file, a ``.pt``/``.pth`` file, or a directory of
-    ``.safetensors`` shards, located by :func:`resolve_backbone_checkpoint`. The
+    Accepts a ``.safetensors`` or torch file, or a directory of either kind of
+    shard, located by :func:`resolve_backbone_checkpoint`. The
     checkpoint must already be in the fused ``linear_qkv`` layout produced by
     ``checkpoint_converter``; a raw diffusers checkpoint with split
     ``to_q``/``to_k``/``to_v`` will not load.
@@ -196,23 +196,7 @@ def _load_backbone_checkpoint(
     if not path.exists():
         raise FileNotFoundError(f"WAN backbone checkpoint not found: {path}")
 
-    state_dict: Dict[str, Tensor] = {}
-    if path.is_dir():
-        shards = sorted(path.glob("*.safetensors"))
-        if shards:
-            for shard in shards:
-                state_dict.update(load_safetensors(str(shard)))
-        else:
-            pt_files = sorted([*path.glob("*.pt"), *path.glob("*.pth")])
-            if not pt_files:
-                raise FileNotFoundError(f"No checkpoint files found under {path}")
-            loaded = torch.load(str(pt_files[0]), map_location="cpu", weights_only=True)
-            state_dict = loaded.get("state_dict", loaded)
-    elif path.suffix == ".safetensors":
-        state_dict = load_safetensors(str(path))
-    else:
-        loaded = torch.load(str(path), map_location="cpu", weights_only=True)
-        state_dict = loaded.get("state_dict", loaded)
+    state_dict = load_checkpoint_state_dict(path)
 
     missing, unexpected = backbone.load_state_dict(state_dict, strict=False)
     missing = [k for k in missing if not k.endswith("_extra_state")]
@@ -420,8 +404,9 @@ class Wan2_2(DiffusionModule):
                 return_dict=False,
             )
 
-        # Routing is per rank, so ranks may run different experts; the trainer
-        # rejects this model above one data-parallel rank.
+        # Routing is per rank, so ranks may run different experts, and a step
+        # may skip one; the trainer rejects this model above one data-parallel
+        # rank and with gradient sync that expects every parameter each step.
         if bool(torch.all(high_mask)):
             return run(self.transformer, hidden_states, timestep, encoder_hidden_states)
         if not bool(torch.any(high_mask)):

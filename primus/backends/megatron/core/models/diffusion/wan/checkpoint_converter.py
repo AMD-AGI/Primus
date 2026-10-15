@@ -373,7 +373,9 @@ def _finalize_report(
     return out
 
 
-def _convert_blocks(src: StateDict, config: WanConfig, to_primus: bool, out: StateDict, consumed: Set[str]) -> None:
+def _convert_blocks(
+    src: StateDict, config: WanConfig, to_primus: bool, out: StateDict, consumed: Set[str]
+) -> None:
     """Convert every DiT block's keys between the diffusers and Primus layouts."""
     heads = config.num_attention_heads
     renames = _RENAMED_BLOCK_SUFFIXES + _CROSS_ATTN_NORM_SUFFIXES
@@ -400,7 +402,9 @@ def _convert_blocks(src: StateDict, config: WanConfig, to_primus: bool, out: Sta
                     consumed.add(mcore_key)
 
 
-def _convert_backbone(src: StateDict, config: WanConfig, to_primus: bool, report: ConversionReport) -> StateDict:
+def _convert_backbone(
+    src: StateDict, config: WanConfig, to_primus: bool, report: ConversionReport
+) -> StateDict:
     out: StateDict = {}
     consumed: Set[str] = set()
     for key in _SHARED_ROOT_KEYS:
@@ -680,7 +684,7 @@ def convert_hf_checkpoint(
     resolved = _resolve_checkpoint_path(checkpoint_path)
 
     logger.info("Loading HuggingFace checkpoint from: %s", resolved)
-    hf_state_dict = _load_state_dict(resolved)
+    hf_state_dict = load_checkpoint_state_dict(resolved)
     logger.info("Loaded %d keys from HuggingFace checkpoint", len(hf_state_dict))
 
     primus_state_dict, _ = convert_hf_to_primus(hf_state_dict, wan_config, prefix=prefix, strict=strict)
@@ -796,8 +800,12 @@ def export_hf_directory(
 # ---------------------------------------------------------------------------
 
 
-def _load_state_dict(path: Path) -> StateDict:
-    """Load a state dict from .safetensors, a torch file, or a directory of shards."""
+def load_checkpoint_state_dict(path: Path) -> StateDict:
+    """Load a state dict from .safetensors, a torch file, or a directory of shards.
+
+    A directory's shards are all merged. Shared with the training loader, so
+    what converts is what trains.
+    """
     from safetensors.torch import load_file as load_safetensors
 
     if path.is_dir():
@@ -813,12 +821,12 @@ def _load_state_dict(path: Path) -> StateDict:
             raise FileNotFoundError(f"No checkpoint files under {path}")
         for f in pts:
             logger.info("  Loading %s...", f.name)
-            loaded = torch.load(str(f), map_location="cpu", weights_only=False)
+            loaded = torch.load(str(f), map_location="cpu", weights_only=True)
             sd.update(loaded.get("state_dict", loaded))
         return sd
     if path.suffix == ".safetensors":
         return load_safetensors(str(path))
-    loaded = torch.load(str(path), map_location="cpu", weights_only=False)
+    loaded = torch.load(str(path), map_location="cpu", weights_only=True)
     return loaded.get("state_dict", loaded)
 
 
@@ -916,7 +924,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         src = load_distcp_backbone_state_dict(input_path, config)
     else:
-        src = _load_state_dict(_resolve_checkpoint_path(input_path))
+        src = load_checkpoint_state_dict(_resolve_checkpoint_path(input_path))
 
     if args.hf_export_dir:
         report = export_hf_directory(

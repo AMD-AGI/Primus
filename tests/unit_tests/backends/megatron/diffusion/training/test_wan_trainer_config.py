@@ -109,6 +109,42 @@ def test_fp8_on_the_local_path_builds_the_turbo_float8_linears():
     assert sensitive_backend is None
 
 
+@pytest.mark.parametrize(
+    "precision, missing",
+    [
+        ({"fp4": "mxfp4", "fp4_recipe": "mxfp4"}, "PrimusTurboMXFP4LocalSpecProvider"),
+        ({"fp8": "e4m3", "fp8_recipe": "tensorwise"}, "PrimusTurboFloat8LocalSpecProvider"),
+    ],
+)
+def test_a_low_precision_provider_that_failed_to_import_raises(precision, missing, monkeypatch):
+    """Building bf16 linears under an fp4 / fp8 config would train the wrong recipe."""
+    pytest.importorskip("primus_turbo")
+    from primus.backends.megatron.core.models.diffusion.common import backend_resolution
+
+    monkeypatch.setattr(backend_resolution, missing, None)
+    with pytest.raises(ImportError, match="failed to import"):
+        backend_resolution.resolve_diffusion_backend(_build(**precision))
+
+
+def test_an_unknown_sensitive_layer_precision_raises():
+    pytest.importorskip("primus_turbo")
+    from primus.backends.megatron.core.models.diffusion.common.backend_resolution import (
+        resolve_diffusion_backend,
+    )
+
+    config = _build(
+        fp4="mxfp4",
+        fp4_recipe="mxfp4",
+        num_dit_layers=4,
+        sensitive_layers_enabled=True,
+        sensitive_layers_start=1,
+        sensitive_layers_end=1,
+        sensitive_layer_precision="mxfp8",
+    )
+    with pytest.raises(ValueError, match="sensitive_layer_precision must be"):
+        resolve_diffusion_backend(config)
+
+
 def test_sensitive_layer_settings_reach_the_model_config():
     config = _build(
         fp4="mxfp4",
@@ -185,6 +221,18 @@ def test_dual_expert_on_one_rank_and_single_expert_at_any_size_build(num_transfo
     config = SimpleNamespace(num_transformers=num_transformers)
 
     check_dual_expert_data_parallel(config, data_parallel_size=data_parallel_size)
+
+
+@pytest.mark.parametrize("setting", ["use_megatron_fsdp", "use_torch_fsdp2", "overlap_grad_reduce"])
+def test_dual_expert_rejects_grad_sync_that_needs_every_expert_each_step(setting):
+    """A step routed to one expert leaves the other without gradients."""
+    with pytest.raises(ValueError, match=f"which {setting} cannot handle"):
+        _build(num_transformers=2, boundary_ratio=0.875, **{setting: True})
+
+
+def test_dual_expert_with_plain_ddp_builds_and_one_expert_keeps_its_settings():
+    assert _build(num_transformers=2, boundary_ratio=0.875).num_transformers == 2
+    assert _build(**_PARAM_SHARDING, overlap_grad_reduce=True).num_transformers == 1
 
 
 def test_create_model_checks_the_data_parallel_size(monkeypatch):

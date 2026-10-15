@@ -55,6 +55,17 @@ def test_a_single_transformer_directory_loads_as_is(tmp_path):
     assert resolve_backbone_checkpoint(str(tmp_path), "transformer") == tmp_path
 
 
+def test_every_torch_shard_in_a_directory_is_loaded(tmp_path):
+    """Loading only the first shard left the rest of the weights at their init."""
+    torch.save({"weight": torch.ones(2, 2)}, tmp_path / "model-00001-of-00002.pt")
+    torch.save({"bias": torch.full((2,), 5.0)}, tmp_path / "model-00002-of-00002.pt")
+
+    module = nn.Linear(2, 2)
+    _load_backbone_checkpoint(module, str(tmp_path), subfolder="transformer")
+    assert torch.equal(module.weight, torch.ones(2, 2))
+    assert torch.equal(module.bias, torch.full((2,), 5.0))
+
+
 def test_a_missing_checkpoint_says_where_it_looked(tmp_path):
     with pytest.raises(FileNotFoundError, match="nope.safetensors"):
         _load_backbone_checkpoint(nn.Linear(2, 2), str(tmp_path / "nope.safetensors"), "transformer")

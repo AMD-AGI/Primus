@@ -53,11 +53,19 @@ def resolve_diffusion_backend(config) -> Tuple[object, Optional[object]]:
     Returns ``(backend, sensitive_backend)``. ``sensitive_backend`` is ``None``
     unless the main backend is MXFP4 and ``sensitive_layer_precision`` names a
     higher-precision provider for the first/last layers.
+
+    Raises ``ImportError`` when ``fp4`` / ``fp8`` asks for a provider that did
+    not import, rather than building bf16 linears under a low-precision config.
     """
     sensitive_backend = None
 
     if config.transformer_impl == "local":
-        if config.fp4 is not None and PrimusTurboMXFP4LocalSpecProvider is not None:
+        if config.fp4 is not None:
+            if PrimusTurboMXFP4LocalSpecProvider is None:
+                raise ImportError(
+                    f"fp4={config.fp4!r} needs Primus-Turbo's MXFP4 local linears, which "
+                    "failed to import; install a Primus-Turbo build with MXFP4 or unset fp4"
+                )
             backend = PrimusTurboMXFP4LocalSpecProvider()
 
             sensitive_precision = getattr(config, "sensitive_layer_precision", "bf16")
@@ -65,11 +73,17 @@ def resolve_diffusion_backend(config) -> Tuple[object, Optional[object]]:
                 sensitive_backend = PrimusTurboFloat8LocalSpecProvider()
             elif sensitive_precision == "bf16":
                 sensitive_backend = PrimusTurboLocalSpecProvider()
-        elif (
-            config.fp8 is not None
-            and HAVE_PRIMUS_TURBO_LOCAL
-            and PrimusTurboFloat8LocalSpecProvider is not None
-        ):
+            elif getattr(config, "sensitive_layers_enabled", False):
+                raise ValueError(
+                    "sensitive_layer_precision must be 'bf16' or 'tw_fp8' with fp4, "
+                    f"got {sensitive_precision!r}"
+                )
+        elif config.fp8 is not None:
+            if not HAVE_PRIMUS_TURBO_LOCAL or PrimusTurboFloat8LocalSpecProvider is None:
+                raise ImportError(
+                    f"fp8={config.fp8!r} needs Primus-Turbo's Float8 local linears, which "
+                    "failed to import; install Primus-Turbo or unset fp8"
+                )
             backend = PrimusTurboFloat8LocalSpecProvider()
         elif HAVE_PRIMUS_TURBO_LOCAL and PrimusTurboLocalSpecProvider is not None:
             backend = PrimusTurboLocalSpecProvider()
