@@ -177,6 +177,7 @@ def _build_wan_on_meta(**overrides):
         return WanTransformer3D(config)
 
 
+@pytest.mark.usefixtures("init_parallel_state")
 @pytest.mark.parametrize("overrides,expected", [({}, False), ({"local_thd_attention": True}, True)])
 def test_wan_local_thd_is_opt_in(overrides, expected):
     """The Wan blocks pack only when ``local_thd_attention`` asks them to.
@@ -184,16 +185,17 @@ def test_wan_local_thd_is_opt_in(overrides, expected):
     Packing swaps one aiter kernel family for another, so it is a deliberate
     choice rather than something a run should acquire by upgrading.
     """
-    block = _build_wan_on_meta(**overrides).blocks[0]
-    assert block.attn1.local_thd is expected
-    assert block.attn2.local_thd is expected
+    layer = _build_wan_on_meta(**overrides).decoder.layers[0]
+    assert layer.self_attention.local_thd is expected
+    assert layer.cross_attention.local_thd is expected
 
 
+@pytest.mark.usefixtures("init_parallel_state")
 def test_wan_local_thd_ignores_the_old_env_var(monkeypatch):
     """The layout is config, so an environment left over from a sweep cannot flip it."""
     monkeypatch.setenv("PRIMUS_WAN_THD_ATTN", "1")
 
-    assert _build_wan_on_meta().blocks[0].attn1.local_thd is False
+    assert _build_wan_on_meta().decoder.layers[0].self_attention.local_thd is False
 
 
 def test_local_thd_attention_needs_the_local_path():

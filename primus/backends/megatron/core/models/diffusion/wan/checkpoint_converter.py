@@ -11,10 +11,13 @@ Key Conversion:
     - Primus: fused ``linear_qkv`` (self-attention) / ``linear_kv`` (cross-attention)
       in Megatron's per-head interleaved layout, ``linear_proj``
 
-    Every other parameter keeps its diffusers name (patch embedding, condition
-    embedder, ``norm2``, ``scale_shift_table``, ``proj_out``); the feed-forward
-    network is a pure rename onto Megatron-Core's ``MLP``
-    (``ffn.net.0.proj`` -> ``ffn.linear_fc1``, ``ffn.net.2`` -> ``ffn.linear_fc2``).
+    DiT blocks move from ``blocks.N.`` to Megatron's ``decoder.layers.N.`` and take
+    ``TransformerLayer`` submodule names (``attn1`` -> ``self_attention``,
+    ``attn2`` -> ``cross_attention``, ``norm2`` -> ``pre_cross_attn_layernorm``);
+    the feed-forward network is a pure rename onto Megatron-Core's ``MLP``
+    (``ffn.net.0.proj`` -> ``mlp.linear_fc1``, ``ffn.net.2`` -> ``mlp.linear_fc2``).
+    Root parameters keep their diffusers names (patch embedding, condition
+    embedder, ``scale_shift_table``, ``proj_out``).
 
 WAN 2.2 dual-expert checkpoints are handled automatically: keys prefixed with
 ``transformer.`` and ``transformer_2.`` are each converted in place.
@@ -104,22 +107,24 @@ class ConversionReport:
 # ---------------------------------------------------------------------------
 # Expected key sets
 #
-# The Primus WAN backbone keeps most non-attention keys identical to diffusers
-# (patch_embedding, condition_embedder, norms, scale_shift_table, proj_out) and
-# differs in the attention submodules and the feed-forward network:
+# The Primus WAN backbone keeps its root keys identical to diffusers
+# (patch_embedding, condition_embedder, scale_shift_table, proj_out). Each DiT
+# block moves from ``blocks.N.`` to ``decoder.layers.N.`` and differs in the
+# attention submodules and the feed-forward network:
 #
-#   self-attn  (attn1):
+#   attn1 -> self_attention:
 #       to_q / to_k / to_v [inner, dim]  ->  linear_qkv [3*inner, dim]  (fused)
 #       to_out.0                         ->  linear_proj
 #       norm_q / norm_k                  ->  q_layernorm / k_layernorm
-#   cross-attn (attn2):
+#   attn2 -> cross_attention:
 #       to_q                             ->  linear_q
 #       to_k / to_v [inner, dim]         ->  linear_kv [2*inner, dim]   (fused)
 #       to_out.0                         ->  linear_proj
 #       norm_q / norm_k                  ->  q_layernorm / k_layernorm
-#   ffn (diffusers nn.Linear FeedForward -> mcore MLP; pure 1:1 rename):
+#   ffn -> mlp (diffusers nn.Linear FeedForward -> mcore MLP; pure 1:1 rename):
 #       net.0.proj [ffn_hidden, dim]     ->  linear_fc1
 #       net.2      [dim, ffn_hidden]     ->  linear_fc2
+#   norm2 -> pre_cross_attn_layernorm, scale_shift_table unchanged.
 #
 # The fused layout is Megatron's per-head interleave: rows are grouped by head as
 # ``[q_head0(hn), k_head0(hn), v_head0(hn), q_head1(hn), ...]``, matching the
@@ -146,64 +151,59 @@ _SHARED_ROOT_KEYS: Tuple[str, ...] = (
     "scale_shift_table",
 )
 
-_SHARED_BLOCK_SUFFIXES: Tuple[str, ...] = ("scale_shift_table",)
+_DIFFUSERS_BLOCK_PREFIX = "blocks.{n}."
+_MCORE_BLOCK_PREFIX = "decoder.layers.{n}."
 
-_MCORE_BLOCK_SUFFIXES: Tuple[str, ...] = (
-    "attn1.linear_qkv.weight",
-    "attn1.linear_qkv.bias",
-    "attn1.q_layernorm.weight",
-    "attn1.k_layernorm.weight",
-    "attn1.linear_proj.weight",
-    "attn1.linear_proj.bias",
-    "attn2.linear_q.weight",
-    "attn2.linear_q.bias",
-    "attn2.linear_kv.weight",
-    "attn2.linear_kv.bias",
-    "attn2.q_layernorm.weight",
-    "attn2.k_layernorm.weight",
-    "attn2.linear_proj.weight",
-    "attn2.linear_proj.bias",
-    "ffn.linear_fc1.weight",
-    "ffn.linear_fc1.bias",
-    "ffn.linear_fc2.weight",
-    "ffn.linear_fc2.bias",
+# (diffusers suffix, Primus suffix) pairs that are a pure rename.
+_RENAMED_BLOCK_SUFFIXES: Tuple[Tuple[str, str], ...] = (
+    ("attn1.norm_q.weight", "self_attention.q_layernorm.weight"),
+    ("attn1.norm_k.weight", "self_attention.k_layernorm.weight"),
+    ("attn1.to_out.0.weight", "self_attention.linear_proj.weight"),
+    ("attn1.to_out.0.bias", "self_attention.linear_proj.bias"),
+    ("attn2.to_q.weight", "cross_attention.linear_q.weight"),
+    ("attn2.to_q.bias", "cross_attention.linear_q.bias"),
+    ("attn2.norm_q.weight", "cross_attention.q_layernorm.weight"),
+    ("attn2.norm_k.weight", "cross_attention.k_layernorm.weight"),
+    ("attn2.to_out.0.weight", "cross_attention.linear_proj.weight"),
+    ("attn2.to_out.0.bias", "cross_attention.linear_proj.bias"),
+    ("ffn.net.0.proj.weight", "mlp.linear_fc1.weight"),
+    ("ffn.net.0.proj.bias", "mlp.linear_fc1.bias"),
+    ("ffn.net.2.weight", "mlp.linear_fc2.weight"),
+    ("ffn.net.2.bias", "mlp.linear_fc2.bias"),
+    ("scale_shift_table", "scale_shift_table"),
 )
 
-_DIFFUSERS_BLOCK_SUFFIXES: Tuple[str, ...] = (
-    "attn1.to_q.weight",
-    "attn1.to_q.bias",
-    "attn1.to_k.weight",
-    "attn1.to_k.bias",
-    "attn1.to_v.weight",
-    "attn1.to_v.bias",
-    "attn1.norm_q.weight",
-    "attn1.norm_k.weight",
-    "attn1.to_out.0.weight",
-    "attn1.to_out.0.bias",
-    "attn2.to_q.weight",
-    "attn2.to_q.bias",
-    "attn2.to_k.weight",
-    "attn2.to_k.bias",
-    "attn2.to_v.weight",
-    "attn2.to_v.bias",
-    "attn2.norm_q.weight",
-    "attn2.norm_k.weight",
-    "attn2.to_out.0.weight",
-    "attn2.to_out.0.bias",
-    "ffn.net.0.proj.weight",
-    "ffn.net.0.proj.bias",
-    "ffn.net.2.weight",
-    "ffn.net.2.bias",
+# Present only when ``config.cross_attn_norm`` is set.
+_CROSS_ATTN_NORM_SUFFIXES: Tuple[Tuple[str, str], ...] = (
+    ("norm2.weight", "pre_cross_attn_layernorm.weight"),
+    ("norm2.bias", "pre_cross_attn_layernorm.bias"),
+)
+
+# (diffusers module names, Primus module name) groups fused per head, for both
+# ``.weight`` and ``.bias``.
+_FUSED_BLOCK_MODULES: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+    (("attn1.to_q", "attn1.to_k", "attn1.to_v"), "self_attention.linear_qkv"),
+    (("attn2.to_k", "attn2.to_v"), "cross_attention.linear_kv"),
 )
 
 
-def _build_expected_keys(config: WanConfig, block_suffixes: Tuple[str, ...]) -> Set[str]:
+def _block_suffixes(config: WanConfig, side: int) -> List[str]:
+    """One block's key suffixes; ``side`` 0 is diffusers, 1 is Primus."""
+    pairs = _RENAMED_BLOCK_SUFFIXES + (_CROSS_ATTN_NORM_SUFFIXES if config.cross_attn_norm else ())
+    suffixes = [pair[side] for pair in pairs]
+    for hf_modules, mcore_module in _FUSED_BLOCK_MODULES:
+        modules = hf_modules if side == 0 else (mcore_module,)
+        suffixes.extend(f"{m}.{wb}" for m in modules for wb in ("weight", "bias"))
+    return suffixes
+
+
+def _build_expected_keys(config: WanConfig, side: int) -> Set[str]:
     keys: Set[str] = set(_SHARED_ROOT_KEYS)
-    cross_attn_norm_suffixes = ("norm2.weight", "norm2.bias") if config.cross_attn_norm else ()
+    block_prefix = (_DIFFUSERS_BLOCK_PREFIX, _MCORE_BLOCK_PREFIX)[side]
+    suffixes = _block_suffixes(config, side)
     for n in range(config.num_dit_layers):
-        prefix = f"blocks.{n}."
-        for suffix in block_suffixes + _SHARED_BLOCK_SUFFIXES + cross_attn_norm_suffixes:
-            keys.add(prefix + suffix)
+        prefix = block_prefix.format(n=n)
+        keys.update(prefix + suffix for suffix in suffixes)
     return keys
 
 
@@ -215,7 +215,7 @@ def expected_mcore_keys(config: WanConfig) -> Set[str]:
     cannot be built on the ``meta`` device. ``_extra_state`` keys are
     intentionally excluded (they are not real parameters).
     """
-    return _build_expected_keys(config, _MCORE_BLOCK_SUFFIXES)
+    return _build_expected_keys(config, side=1)
 
 
 def expected_diffusers_keys(config: WanConfig) -> Set[str]:
@@ -225,7 +225,7 @@ def expected_diffusers_keys(config: WanConfig) -> Set[str]:
     (``condition_embedder.image_embedder.*``, ``attn2.add_k_proj``,
     ``norm_added_k``) are deliberately excluded and are reported as dropped.
     """
-    return _build_expected_keys(config, _DIFFUSERS_BLOCK_SUFFIXES)
+    return _build_expected_keys(config, side=0)
 
 
 # ---------------------------------------------------------------------------
@@ -373,143 +373,53 @@ def _finalize_report(
     return out
 
 
-def _hf_to_primus_backbone(src: StateDict, config: WanConfig, report: ConversionReport) -> StateDict:
-    """Convert a bare diffusers WAN backbone state dict to the Primus fused layout."""
+def _convert_blocks(src: StateDict, config: WanConfig, to_primus: bool, out: StateDict, consumed: Set[str]) -> None:
+    """Convert every DiT block's keys between the diffusers and Primus layouts."""
     heads = config.num_attention_heads
+    renames = _RENAMED_BLOCK_SUFFIXES + _CROSS_ATTN_NORM_SUFFIXES
+    for n in range(config.num_dit_layers):
+        hb, pb = _DIFFUSERS_BLOCK_PREFIX.format(n=n), _MCORE_BLOCK_PREFIX.format(n=n)
+        src_b, dst_b = (hb, pb) if to_primus else (pb, hb)
+
+        for hf_suffix, mcore_suffix in renames:
+            src_name, dst_name = (hf_suffix, mcore_suffix) if to_primus else (mcore_suffix, hf_suffix)
+            if src_b + src_name in src:
+                out[dst_b + dst_name] = src[src_b + src_name].clone()
+                consumed.add(src_b + src_name)
+
+        for hf_modules, mcore_module in _FUSED_BLOCK_MODULES:
+            for wb in ("weight", "bias"):
+                hf_keys = [f"{hb}{m}.{wb}" for m in hf_modules]
+                mcore_key = f"{pb}{mcore_module}.{wb}"
+                if to_primus and all(k in src for k in hf_keys):
+                    out[mcore_key] = _fuse_heads([src[k] for k in hf_keys], heads)
+                    consumed.update(hf_keys)
+                elif not to_primus and mcore_key in src:
+                    for k, t in zip(hf_keys, _split_heads(src[mcore_key], heads, len(hf_keys))):
+                        out[k] = t
+                    consumed.add(mcore_key)
+
+
+def _convert_backbone(src: StateDict, config: WanConfig, to_primus: bool, report: ConversionReport) -> StateDict:
     out: StateDict = {}
     consumed: Set[str] = set()
-
-    def copy(key: str) -> None:
+    for key in _SHARED_ROOT_KEYS:
         if key in src:
             out[key] = src[key].clone()
             consumed.add(key)
+    _convert_blocks(src, config, to_primus, out, consumed)
+    expected = expected_mcore_keys(config) if to_primus else expected_diffusers_keys(config)
+    return _finalize_report(out, src, consumed, expected, report)
 
-    for key in _SHARED_ROOT_KEYS:
-        copy(key)
 
-    for n in range(config.num_dit_layers):
-        b = f"blocks.{n}."
-
-        for wb in ("weight", "bias"):
-            q, k, v = f"{b}attn1.to_q.{wb}", f"{b}attn1.to_k.{wb}", f"{b}attn1.to_v.{wb}"
-            if q in src and k in src and v in src:
-                out[f"{b}attn1.linear_qkv.{wb}"] = _fuse_heads([src[q], src[k], src[v]], heads)
-                consumed.update({q, k, v})
-        for src_name, dst_name in (
-            (f"{b}attn1.norm_q.weight", f"{b}attn1.q_layernorm.weight"),
-            (f"{b}attn1.norm_k.weight", f"{b}attn1.k_layernorm.weight"),
-            (f"{b}attn1.to_out.0.weight", f"{b}attn1.linear_proj.weight"),
-            (f"{b}attn1.to_out.0.bias", f"{b}attn1.linear_proj.bias"),
-        ):
-            if src_name in src:
-                out[dst_name] = src[src_name].clone()
-                consumed.add(src_name)
-
-        for wb in ("weight", "bias"):
-            q = f"{b}attn2.to_q.{wb}"
-            if q in src:
-                out[f"{b}attn2.linear_q.{wb}"] = src[q].clone()
-                consumed.add(q)
-            k, v = f"{b}attn2.to_k.{wb}", f"{b}attn2.to_v.{wb}"
-            if k in src and v in src:
-                out[f"{b}attn2.linear_kv.{wb}"] = _fuse_heads([src[k], src[v]], heads)
-                consumed.update({k, v})
-        for src_name, dst_name in (
-            (f"{b}attn2.norm_q.weight", f"{b}attn2.q_layernorm.weight"),
-            (f"{b}attn2.norm_k.weight", f"{b}attn2.k_layernorm.weight"),
-            (f"{b}attn2.to_out.0.weight", f"{b}attn2.linear_proj.weight"),
-            (f"{b}attn2.to_out.0.bias", f"{b}attn2.linear_proj.bias"),
-        ):
-            if src_name in src:
-                out[dst_name] = src[src_name].clone()
-                consumed.add(src_name)
-
-        for src_name, dst_name in (
-            (f"{b}ffn.net.0.proj.weight", f"{b}ffn.linear_fc1.weight"),
-            (f"{b}ffn.net.0.proj.bias", f"{b}ffn.linear_fc1.bias"),
-            (f"{b}ffn.net.2.weight", f"{b}ffn.linear_fc2.weight"),
-            (f"{b}ffn.net.2.bias", f"{b}ffn.linear_fc2.bias"),
-        ):
-            if src_name in src:
-                out[dst_name] = src[src_name].clone()
-                consumed.add(src_name)
-
-        for key in (f"{b}norm2.weight", f"{b}norm2.bias", f"{b}scale_shift_table"):
-            copy(key)
-
-    return _finalize_report(out, src, consumed, expected_mcore_keys(config), report)
+def _hf_to_primus_backbone(src: StateDict, config: WanConfig, report: ConversionReport) -> StateDict:
+    """Convert a bare diffusers WAN backbone state dict to the Primus fused layout."""
+    return _convert_backbone(src, config, True, report)
 
 
 def _primus_to_hf_backbone(src: StateDict, config: WanConfig, report: ConversionReport) -> StateDict:
     """Convert a bare Primus fused WAN backbone state dict back to diffusers layout."""
-    heads = config.num_attention_heads
-    out: StateDict = {}
-    consumed: Set[str] = set()
-
-    def copy(key: str) -> None:
-        if key in src:
-            out[key] = src[key].clone()
-            consumed.add(key)
-
-    for key in _SHARED_ROOT_KEYS:
-        copy(key)
-
-    for n in range(config.num_dit_layers):
-        b = f"blocks.{n}."
-
-        for wb in ("weight", "bias"):
-            qkv = f"{b}attn1.linear_qkv.{wb}"
-            if qkv in src:
-                q, k, v = _split_heads(src[qkv], heads, 3)
-                out[f"{b}attn1.to_q.{wb}"] = q
-                out[f"{b}attn1.to_k.{wb}"] = k
-                out[f"{b}attn1.to_v.{wb}"] = v
-                consumed.add(qkv)
-        for src_name, dst_name in (
-            (f"{b}attn1.q_layernorm.weight", f"{b}attn1.norm_q.weight"),
-            (f"{b}attn1.k_layernorm.weight", f"{b}attn1.norm_k.weight"),
-            (f"{b}attn1.linear_proj.weight", f"{b}attn1.to_out.0.weight"),
-            (f"{b}attn1.linear_proj.bias", f"{b}attn1.to_out.0.bias"),
-        ):
-            if src_name in src:
-                out[dst_name] = src[src_name].clone()
-                consumed.add(src_name)
-
-        for wb in ("weight", "bias"):
-            q = f"{b}attn2.linear_q.{wb}"
-            if q in src:
-                out[f"{b}attn2.to_q.{wb}"] = src[q].clone()
-                consumed.add(q)
-            kv = f"{b}attn2.linear_kv.{wb}"
-            if kv in src:
-                k, v = _split_heads(src[kv], heads, 2)
-                out[f"{b}attn2.to_k.{wb}"] = k
-                out[f"{b}attn2.to_v.{wb}"] = v
-                consumed.add(kv)
-        for src_name, dst_name in (
-            (f"{b}attn2.q_layernorm.weight", f"{b}attn2.norm_q.weight"),
-            (f"{b}attn2.k_layernorm.weight", f"{b}attn2.norm_k.weight"),
-            (f"{b}attn2.linear_proj.weight", f"{b}attn2.to_out.0.weight"),
-            (f"{b}attn2.linear_proj.bias", f"{b}attn2.to_out.0.bias"),
-        ):
-            if src_name in src:
-                out[dst_name] = src[src_name].clone()
-                consumed.add(src_name)
-
-        for src_name, dst_name in (
-            (f"{b}ffn.linear_fc1.weight", f"{b}ffn.net.0.proj.weight"),
-            (f"{b}ffn.linear_fc1.bias", f"{b}ffn.net.0.proj.bias"),
-            (f"{b}ffn.linear_fc2.weight", f"{b}ffn.net.2.weight"),
-            (f"{b}ffn.linear_fc2.bias", f"{b}ffn.net.2.bias"),
-        ):
-            if src_name in src:
-                out[dst_name] = src[src_name].clone()
-                consumed.add(src_name)
-
-        for key in (f"{b}norm2.weight", f"{b}norm2.bias", f"{b}scale_shift_table"):
-            copy(key)
-
-    return _finalize_report(out, src, consumed, expected_diffusers_keys(config), report)
+    return _convert_backbone(src, config, False, report)
 
 
 # ---------------------------------------------------------------------------

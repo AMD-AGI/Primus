@@ -5,7 +5,7 @@
 The WAN forward step must call the model outside autocast.
 
 Autocast's fp32 policy covers layer_norm and rms_norm, which is the whole of
-WanTransformerBlock's norm path, so wrapping the model call in
+WanLayer's norm path, so wrapping the model call in
 ``torch.amp.autocast("cuda", bfloat16)`` makes every norm return fp32 on a bf16
 input. The projection that consumes it narrows straight back to bf16, so the
 wider value never reaches a multiply, but it is saved for backward twice -- once

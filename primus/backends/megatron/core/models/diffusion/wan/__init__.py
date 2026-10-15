@@ -9,7 +9,7 @@ This module provides all components needed for the WAN 2.1 / 2.2 architecture:
 - Configuration: WanConfig
 - Layers: WanRotaryPosEmbed (3D RoPE), WanConditionEmbedder
 - Attention: WanSelfAttention, WanCrossAttention
-- Layer specs: get_wan_layer_spec
+- Layer specs: WanLayer (one DiT block), get_wan_layer_spec
 
 Quick Start - Model Creation:
     >>> from primus.backends.megatron.core.models.diffusion.wan import Wan, WanConfig
@@ -39,7 +39,7 @@ from primus.backends.megatron.core.models.diffusion.wan.attention import (
 )
 from primus.backends.megatron.core.models.diffusion.wan.config import WanConfig
 from primus.backends.megatron.core.models.diffusion.wan.layer_spec import (
-    WanLayerSpec,
+    WanLayer,
     get_wan_layer_spec,
     get_wan_transformer_spec_for_backend,
 )
@@ -104,7 +104,7 @@ __all__ = [
     "WanSelfAttentionSubmodules",
     "WanCrossAttentionSubmodules",
     # Layer specs
-    "WanLayerSpec",
+    "WanLayer",
     "get_wan_layer_spec",
     "get_wan_transformer_spec_for_backend",
     # Utils

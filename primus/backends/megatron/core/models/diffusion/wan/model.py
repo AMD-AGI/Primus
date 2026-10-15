@@ -13,8 +13,9 @@ Two model classes, selected by ``config.num_transformers``:
       boundary. Covers WAN 2.2 A14B.
 
 The backbone keeps the WAN scaffolding (Conv3d patch embed, time/text condition
-embedders, ``scale_shift_table`` AdaLN modulation, output head) and builds its
-attention and FFN from the backend-resolved specs in ``layer_spec.py``.
+embedders, ``scale_shift_table`` AdaLN modulation, output head) around a
+``DiffusionTransformerBlock`` of :class:`~.layer_spec.WanLayer` blocks built
+from the backend-resolved specs in ``layer_spec.py``, as Flux does.
 
 The transformer stack runs sequence-major ``[S, B, dim]`` end to end, matching
 Megatron-Bridge: AdaLN modulation, the LayerNorms, residuals, and the attention
@@ -29,141 +30,20 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.transformer.mlp import MLP
-from megatron.core.transformer.spec_utils import build_module
-from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.transformer.utils import sharded_state_dict_default
 from safetensors.torch import load_file as load_safetensors
 from torch import Tensor
 
+from primus.backends.megatron.core.transformer.diffusion_transformer_block import (
+    DiffusionTransformerBlock,
+)
+
 from ...common.diffusion_module.diffusion_module import DiffusionModule
 from .config import WanConfig
-from .layer_spec import WanLayerSpec, get_wan_layer_spec
+from .layer_spec import get_wan_layer_spec
 from .layers import WanConditionEmbedder, WanRotaryPosEmbed
 from .utils import fold_patches_into_batch, patch_grid, unpatchify
-
-
-class WanTransformerBlock(nn.Module):
-    """One WAN DiT block: gated self-attention, cross-attention, gated FFN.
-
-    AdaLN modulation, the LayerNorms, and the residual adds run in the tensor's
-    native dtype with plain ``nn.LayerNorm`` -- Megatron-Bridge's
-    normalize/modulate/scale-add math, not the diffusers explicit-fp32 path.
-    """
-
-    def __init__(self, config: WanConfig, spec: WanLayerSpec, layer_number: int):
-        super().__init__()
-        dim = config.hidden_size
-        eps = config.layernorm_epsilon
-
-        # Carried so the block satisfies the one TransformerLayer attribute
-        # Megatron reads off an FSDP unit (see the registration below).
-        self.layer_number = layer_number
-
-        self.norm1 = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
-        self.attn1 = build_module(
-            spec.self_attention,
-            config=spec.attention_config,
-            submodules=spec.self_attention.submodules,
-            layer_number=layer_number,
-            rope_config=spec.rope_config,
-            norm_config=spec.norm_config,
-        )
-        self.attn2 = build_module(
-            spec.cross_attention,
-            config=spec.attention_config,
-            submodules=spec.cross_attention.submodules,
-            layer_number=layer_number,
-            norm_config=spec.norm_config,
-        )
-        self.norm2 = (
-            nn.LayerNorm(dim, eps=eps, elementwise_affine=True) if config.cross_attn_norm else nn.Identity()
-        )
-        self.ffn = MLP(
-            config=spec.ffn_config,
-            submodules=spec.mlp,
-            ffn_hidden_size=config.ffn_hidden_size,
-        )
-        self.norm3 = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
-        self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
-
-    def forward(
-        self,
-        hidden_states: Tensor,
-        encoder_hidden_states: Tensor,
-        temb: Tensor,
-        rotary_freqs: Tensor,
-    ) -> Tensor:
-        # temb is [B, 6, dim]; transposing gives modulation terms of [1, B, dim]
-        # so they broadcast over the sequence-major activations.
-        mod = (self.scale_shift_table + temb).transpose(0, 1)
-        shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = mod.chunk(6, dim=0)
-
-        norm_h = self.norm1(hidden_states) * (1 + scale_msa) + shift_msa
-        attn_out, attn_bias = self.attn1(norm_h, rotary_freqs)
-        if attn_bias is not None:
-            attn_out = attn_out + attn_bias
-        hidden_states = hidden_states + gate_msa * attn_out
-
-        norm_h = self.norm2(hidden_states)
-        attn_out, attn_bias = self.attn2(norm_h, encoder_hidden_states)
-        if attn_bias is not None:
-            attn_out = attn_out + attn_bias
-        hidden_states = hidden_states + attn_out
-
-        norm_h = self.norm3(hidden_states) * (1 + c_scale_msa) + c_shift_msa
-        # The mcore MLP returns (output, fc2_bias) under skip_bias_add; diffusers
-        # folds that bias in before the gate scaling, so add it here.
-        ff_out, ff_bias = self.ffn(norm_h)
-        if ff_bias is not None:
-            ff_out = ff_out + ff_bias
-        return hidden_states + c_gate_msa * ff_out
-
-
-# Make the block a Megatron-FSDP sharding unit.
-#
-# Megatron-FSDP gathers and releases parameters at the granularity of its "FSDP
-# unit modules". When the caller passes none -- and ``megatron/training/
-# training.py`` never does, it builds the wrapper with no ``fsdp_unit_modules``
-# argument and ``DistributedDataParallelConfig`` has no field for one -- the
-# adapter falls back to ``[TransformerLayer]`` for the ``optim_grads_params``
-# strategy WAN runs under. ``WanTransformerBlock`` deliberately is not a
-# Megatron ``TransformerLayer`` (see ``layer_spec.py`` on why WAN does not build
-# on ``TransformerBlock``), so that default matched zero modules and left the
-# unit list empty.
-#
-# An empty unit list costs more than coarse sharding. The hook-registration loop
-# skips modules that live inside a registered unit; with nothing registered that
-# skip never fires, so every norm, linear and attention in all 30 blocks takes a
-# pre-forward unshard hook plus an fp8-transpose-cache post-hook that a bf16 run
-# has no use for. Any hook forces ``nn.Module._call_impl`` off its no-hook fast
-# path, so the Dynamo graph breaks at every submodule boundary inside a block
-# instead of only at the block boundary.
-#
-# Registering as a virtual subclass makes Megatron's own default match the
-# block. The alternatives were worse: Megatron-LM is an upstream submodule so
-# the argument cannot be plumbed through ``training.py``, and real inheritance
-# from ``TransformerLayer`` would change the checkpoint key layout.
-#
-# Eager trades a little step time for peak memory, because the per-block
-# all-gathers cost more collective time than one whole-model gather. Compiled
-# improves on both, as the de-fragmented graph lets Inductor drop casts it
-# previously could not elide across a break. Loss is unchanged.
-#
-# ``register`` only affects ``isinstance``. The other Megatron sites that test
-# for ``TransformerLayer`` are either unreachable for WAN (CUDA graphs, Mamba
-# and hybrid blocks, GPT callables) or keyed on ``layers.N`` parameter names,
-# and WAN's are ``blocks.N``; ``layer_number`` is set above for the one
-# attribute the FSDP-DTensor checkpoint path would read.
-#
-# One Primus site matches too: ``patches/sdma_symm_mem_collectives_patches.py``
-# attaches ``SymmMemAllGather`` to every ``TransformerLayer`` that torch FSDP2
-# shards. It only runs with ``SDMA_ALL_GATHER=1`` and ``use_torch_fsdp2: true``,
-# which no WAN recipe sets (they use Megatron-FSDP); when both are set, WAN
-# blocks get the same per-layer all-gather Megatron's own layers do.
-TransformerLayer.register(WanTransformerBlock)
 
 
 class WanTransformer3D(nn.Module):
@@ -196,24 +76,29 @@ class WanTransformer3D(nn.Module):
             text_embed_dim=config.text_embed_dim,
         )
 
-        layer_specs = get_wan_layer_spec(config)
-        self.blocks = nn.ModuleList(
-            [WanTransformerBlock(config, spec, layer_number=i + 1) for i, spec in enumerate(layer_specs)]
+        # Activation recompute follows Megatron's recompute_granularity /
+        # recompute_method / recompute_num_layers (and recompute_layer_ids) via
+        # the block's checkpointed path. Named ``decoder`` as in Megatron-Bridge's
+        # WAN: ``transformer.`` / ``transformer_2.`` already prefix the backbones.
+        self.decoder = DiffusionTransformerBlock(
+            config=config,
+            spec=get_wan_layer_spec(config),
+            post_layer_norm=False,
+            pre_process=True,
+            post_process=True,
         )
 
         self.norm_out = nn.LayerNorm(dim, eps=config.layernorm_epsilon, elementwise_affine=False)
         self.proj_out = nn.Linear(dim, self.out_channels * math.prod(self.patch_size_3d))
         self.scale_shift_table = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
 
-        self.gradient_checkpointing = getattr(config, "recompute_granularity", None) == "full"
-
         if config.adaln_zero_init:
             self._init_adaln_zero()
 
     def _init_adaln_zero(self) -> None:
         """AdaLN-zero init: identity blocks plus a zeroed output head."""
-        for block in self.blocks:
-            nn.init.zeros_(block.scale_shift_table)
+        for layer in self.decoder.layers:
+            nn.init.zeros_(layer.scale_shift_table)
         nn.init.zeros_(self.condition_embedder.time_proj.weight)
         if self.condition_embedder.time_proj.bias is not None:
             nn.init.zeros_(self.condition_embedder.time_proj.bias)
@@ -249,14 +134,17 @@ class WanTransformer3D(nn.Module):
         timestep_proj = timestep_proj.unflatten(1, (6, -1))
         enc = enc.transpose(0, 1).contiguous()
 
-        if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
-            for block in self.blocks:
-                hs = torch.utils.checkpoint.checkpoint(
-                    block, hs, enc, timestep_proj, rotary_freqs, use_reentrant=False
-                )
-        else:
-            for block in self.blocks:
-                hs = block(hs, enc, timestep_proj, rotary_freqs)
+        hs = self.decoder(
+            hidden_states=hs,
+            attention_mask=None,
+            context=enc,
+            rotary_pos_emb=rotary_freqs,
+            timestep_emb=timestep_proj,
+        )
+        # The checkpointed path returns hidden states alone; the plain path
+        # also returns the (unchanged) text context.
+        if isinstance(hs, tuple):
+            hs = hs[0]
 
         shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).transpose(0, 1).chunk(2, dim=0)
         hs = self.norm_out(hs) * (1 + scale) + shift
@@ -577,4 +465,4 @@ class Wan2_2(DiffusionModule):
         return sharded
 
 
-__all__ = ["Wan", "Wan2_2", "WanTransformer3D", "WanTransformerBlock", "build_wan_backbone"]
+__all__ = ["Wan", "Wan2_2", "WanTransformer3D", "build_wan_backbone"]
