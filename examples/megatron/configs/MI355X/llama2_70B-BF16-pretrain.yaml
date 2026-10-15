@@ -3,6 +3,11 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:llama2_70B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# FSDP2 + full recompute: with ROCm 10.1, base_env.sh's GPU_MAX_HW_QUEUES=2 plus
+# TORCH_NCCL_HIGH_PRIORITY=1 stalls compute behind all-gathers (~16% slower steps).
+env:
+  GPU_MAX_HW_QUEUES: "4"
+
 modules:
   pre_trainer:
     framework: megatron

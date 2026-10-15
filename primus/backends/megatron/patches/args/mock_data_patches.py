@@ -4,10 +4,32 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import json
+import os
+
 from primus.core.patches import PatchContext, register_patch
-from primus.core.utils.module_utils import log_kv_rank_0, log_rank_0
+from primus.core.utils.module_utils import log_kv_rank_0, log_rank_0, warning_rank_0
 
 DEFAULT_NULL_TOKENIZER_VOCAB_SIZE = 131072
+
+
+def _resolve_model_vocab_size(tokenizer_model):
+    """Vocab size from the HF config of ``tokenizer_model``, or None if it cannot be read."""
+    if not tokenizer_model:
+        return None
+    try:
+        if os.path.isdir(tokenizer_model):
+            config_path = os.path.join(tokenizer_model, "config.json")
+        else:
+            from huggingface_hub import hf_hub_download
+
+            config_path = hf_hub_download(tokenizer_model, "config.json")
+        with open(config_path) as f:
+            config = json.load(f)
+    except Exception as e:
+        warning_rank_0(f"[Patch:megatron.args.mock_data] Could not read HF config of {tokenizer_model}: {e}")
+        return None
+    return config.get("vocab_size") or config.get("text_config", {}).get("vocab_size")
 
 
 @register_patch(
@@ -39,8 +61,19 @@ def patch_mock_data(ctx: PatchContext):
 
         existing_vocab_size = getattr(args, "vocab_size", None)
         if existing_vocab_size is None:
-            args.vocab_size = DEFAULT_NULL_TOKENIZER_VOCAB_SIZE
-            vocab_size_log = f"defaulted vocab_size to {args.vocab_size}"
+            tokenizer_model = getattr(args, "tokenizer_model", None)
+            model_vocab_size = _resolve_model_vocab_size(tokenizer_model)
+            if model_vocab_size is not None:
+                # NullTokenizer appends an EOD token on top of vocab_size.
+                args.vocab_size = model_vocab_size - 1
+                vocab_size_log = f"vocab_size={model_vocab_size} from {tokenizer_model} config"
+            else:
+                args.vocab_size = DEFAULT_NULL_TOKENIZER_VOCAB_SIZE
+                vocab_size_log = f"defaulted vocab_size to {args.vocab_size}"
+                warning_rank_0(
+                    "[Patch:megatron.args.mock_data] Embedding/output layer sizes will not match the "
+                    f"real model; set vocab_size explicitly (tokenizer_model={tokenizer_model})."
+                )
         else:
             vocab_size_log = f"preserved vocab_size={existing_vocab_size}"
 

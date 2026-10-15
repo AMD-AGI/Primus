@@ -40,8 +40,8 @@
   "_rewrite_scope_why": [
     "The documentation surface this agent owns. Outside it, references are held",
     "rather than rewritten, because they pin an image on purpose: examples/mlperf/",
-    "records the image a submission was validated against, and examples/models/",
-    "and tools/docker/ launchers pin what their author tested. Verified against the",
+    "records the image a submission was validated against, and",
+    "examples/megatron/models/ and tools/docker/ launchers pin what their author tested. Verified against the",
     "v26.6 release, which left every one of those references on v26.5 while",
     "updating the docs."
   ],

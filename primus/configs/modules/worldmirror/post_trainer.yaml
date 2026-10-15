@@ -1,0 +1,5 @@
+extends:
+  - ../module_base.yaml
+
+trainable: true
+stage: posttrain
