@@ -7,7 +7,8 @@
 # DeepSeek-V3 MoE proxy pretraining on 1 node of 4x MI455X (gfx1250).
 #
 # Full DeepSeek-V3 layer shapes (MLA, hidden 7168), 4 MoE layers of 128 experts,
-# EP4, no MTP. DeepEP is off; experts run on the Primus-Turbo grouped GEMM.
+# EP4, no MTP. Attention and the expert grouped GEMMs run on Primus-Turbo's
+# FlyDSL kernels; DeepEP is off.
 ###############################################################################
 
 work_group: ${PRIMUS_TEAM:amd}
@@ -63,6 +64,7 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:4}
       overlap_grad_reduce: true
       overlap_param_gather: true
+      # the FlyDSL grouped GEMM's wgrad cannot accumulate into main_grad
       gradient_accumulation_fusion: false
       pp_warmup: true
 
@@ -86,7 +88,8 @@ modules:
       enable_experimental: true
       apply_rope_fusion: true
 
-      # recompute: off (fits in memory; ~13% faster than recomputing layers 0 and 3)
+      # recompute: off (fits in memory; with TE unfused attention and the Triton grouped GEMM it was
+      # ~13% faster than recomputing layers 0 and 3)
       recompute_granularity: null
       recompute_layer_ids: null
 
@@ -106,8 +109,11 @@ modules:
 
       # primus-turbo
       enable_primus_turbo: true
-      use_turbo_attention: false
+      # run_deepseek_v3_proxy_mi455x.sh pins the attention backend (PRIMUS_TURBO_ATTN_BACKEND=flydsl);
+      # without the pin, a call FlyDSL cannot take falls back to aiter/CK, which does not run it on gfx1250
+      use_turbo_attention: true
       use_turbo_grouped_gemm: true
+      turbo_grouped_gemm_backend: bf16:flydsl
       use_turbo_rms_norm: true
       use_turbo_deepep: false
       moe_shared_expert_overlap: false

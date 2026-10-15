@@ -2,13 +2,17 @@
 
 DeepSeek-V3 MoE proxy pretraining on one node of 4x MI455X (gfx1250): full DeepSeek-V3 layer shapes
 (MLA, hidden 7168), 4 MoE layers of 128 experts, EP4, seq 4096, BF16, mock data, no activation
-recompute. The config is
+recompute. Attention and the expert grouped GEMMs run on Primus-Turbo's FlyDSL kernels. The config is
 `examples/megatron/configs/MI455X/deepseek_v3-BF16-pretrain.yaml`.
 
 | File | Purpose |
 | --- | --- |
 | `run_deepseek_v3_proxy_mi455x.sh` | Launcher. With `PRIMUS_LAUNCHER=container` (default) it runs from the host in a new container of `DOCKER_IMAGE`; with `PRIMUS_LAUNCHER=direct` it runs inside the current container. |
 | `prepare_mi455x.sh` | Optional host-side setup. `TURBO_DIR` builds a Primus-Turbo checkout for the image, and `CONTAINER` starts a container for direct runs. |
+
+The default image, `amdprimus/amdprimus:tas-mi455x-v1`, is `amdprimus/amdprimus:tas-20261011` with
+Primus-Turbo `dev/mi455x_v1` (e1a967a0: FlyDSL MLA attention and the tuned gfx1250 BF16 grouped GEMM),
+flydsl 0.3.4.1 and aiter v0.1.24.post1.
 
 ## Run
 
@@ -33,6 +37,10 @@ PRIMUS_LAUNCHER=direct bash examples/megatron/models/deepseek-v3/run_deepseek_v3
 - Training: `TRAIN_ITERS`, `MBS`, `GBS`, `PRIMUS_RECOMPUTE_LAYER_IDS` (layers to recompute, e.g. `0,3`;
   empty, the default, disables recompute).
 - Feature switches: `USE_TURBO_ATTENTION`, `USE_TURBO_GROUPED_GEMM`, `USE_TURBO_DEEPEP`, `MOCK_DATA`.
+- Primus-Turbo backends: `PRIMUS_TURBO_ATTN_BACKEND` (`flydsl` or `triton`) and
+  `TURBO_GROUPED_GEMM_BACKEND` (`bf16:flydsl`, or `default` for Primus-Turbo's own choice: Triton, or
+  auto-tuning if `PRIMUS_TURBO_AUTO_TUNE=1` is exported). The script refuses Primus-Turbo's
+  `PRIMUS_TURBO_GROUPED_GEMM_BACKEND`, which Primus would overwrite from `TURBO_GROUPED_GEMM_BACKEND`.
 - `PROFILE=True` profiles iterations 6–7 (trace under `output/<team>/<user>/<exp>/tensorboard/`).
 
 The defaults are in the script. Arguments to the script are appended to the Primus command line. The
@@ -52,12 +60,19 @@ at random.
 
 ## Reference
 
-Measured on 4x MI455X with `amdprimus/amdprimus:tas-20261011`, running inside a container. Primus-Turbo
-`dev/mi455x_v1` (a1800137) and the image's Primus-Turbo gave identical results:
+Measured on 4x MI455X with `amdprimus/amdprimus:tas-20261011` and the previous defaults, TE
+`UnfusedDotProductAttention` and the Triton grouped GEMM, running inside a container. Primus-Turbo
+a1800137 (then the head of `dev/mi455x_v1`) and the image's Primus-Turbo gave identical results. To rerun
+the no-recompute row (add `PRIMUS_RECOMPUTE_LAYER_IDS=0,3` or the 1-GPU settings above for the others):
+
+```bash
+DOCKER_IMAGE=amdprimus/amdprimus:tas-20261011 USE_TURBO_ATTENTION=False TURBO_GROUPED_GEMM_BACKEND=default \
+    bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
+```
 
 | Variant | ms/iter | TFLOP/s/GPU | Peak VRAM/GPU | lm loss at iteration 10 |
 | --- | --- | --- | --- | --- |
-| Default (no recompute) | 2202 | 646 | 197–199 GiB | 5.57984 |
+| No recompute | 2202 | 646 | 197–199 GiB | 5.57984 |
 | `PRIMUS_RECOMPUTE_LAYER_IDS=0,3` | 2543 | 558 | 181–191 GiB | 5.57984 |
 | 1-GPU (one MI455X, another node) | 671 | 942 | - | 9.4595 |
 
@@ -65,10 +80,10 @@ Measured on 4x MI455X with `amdprimus/amdprimus:tas-20261011`, running inside a 
 
 | Variant | Grad norms, iterations 1–10 |
 | --- | --- |
-| Default | 3.790, 3.758, 3.795, 4.995, 9.034, 10.183, 7.921, 7.203, 6.827, 6.680 |
+| No recompute | 3.790, 3.758, 3.795, 4.995, 9.034, 10.183, 7.921, 7.203, 6.827, 6.680 |
 | 1-GPU | 3.193, 3.232, 3.314, 3.263, 3.210, 3.713, 3.362, 3.779, 3.329, 3.289 |
 
-**Profile of the default run, rank 0.**
+**Profile of the no-recompute run, rank 0.**
 
 - Shares of GPU compute time: TE unfused attention 45% (its softmax alone 24%), MoE grouped GEMMs
   22%, output layer 10%.
@@ -77,9 +92,27 @@ Measured on 4x MI455X with `amdprimus/amdprimus:tas-20261011`, running inside a 
 
 ## Known issues
 
-- **Attention backends.** On this image only two attention backends run MLA (q/k 192, v 128): TE
-  `UnfusedDotProductAttention` (default) and Primus-Turbo Triton (`USE_TURBO_ATTENTION=True`).
+- **Attention backends.** MLA (q/k 192, v 128) runs on Primus-Turbo FlyDSL (the default,
+  `PRIMUS_TURBO_ATTN_BACKEND=flydsl`), Primus-Turbo Triton (`PRIMUS_TURBO_ATTN_BACKEND=triton`) or TE
+  `UnfusedDotProductAttention` (`USE_TURBO_ATTENTION=False`). The FlyDSL kernels take BF16 causal MHA
+  with sequence lengths that are multiples of 64, fixed-length batches (no varlen) and a q tensor of at
+  most 1 GiB (`MBS` <= 5 at seq 4096 with 128 heads per GPU); with the backend set to `flydsl`, any other
+  call raises `ValueError`. A Primus-Turbo without the FlyDSL MLA package
+  `primus_turbo/flydsl/attention/gfx1250_mla/` (added to `dev/mi455x_v1` by e1a967a0, not on `main`
+  yet), such as the `tas-20261011` image, a container created by the previous `prepare_mi455x.sh` or a
+  `TURBO_DIR` checkout of `main`, raises that `ValueError` at the first attention call: set
+  `PRIMUS_TURBO_ATTN_BACKEND=triton` or `USE_TURBO_ATTENTION=False` there. Context parallelism (CP > 1)
+  goes through Primus-Turbo's `flash_attn_usp_func`, which ignores `PRIMUS_TURBO_ATTN_BACKEND` and always
+  uses aiter/CK, which has no gfx1250 kernels for these head dims, so CP > 1 does not run with
+  Primus-Turbo attention on gfx1250.
+- **FlyDSL grouped GEMM.** It needs `gradient_accumulation_fusion: false` and at most 64 local experts;
+  with the backend set to `bf16:flydsl`, other calls raise `ValueError`. Primus-Turbo documents a rare,
+  nondeterministic wrong result from these kernels, with no error or NaN: about 1 call in 130,000 in
+  steady state on the largest shape, and much more often over a process's first few hundred calls.
+  Compare grad norms against a reference run; `TURBO_GROUPED_GEMM_BACKEND=default` uses the Triton
+  grouped GEMM.
 - **Silent gradient corruption on one GPU.** 9 of 29 ten-iteration 1-GPU runs left the reference grad
-  norms at a random iteration (a wrong value, NaN or Inf). All of these runs used the same GPU and
-  covered both attention backends. Megatron aborts only on NaN/Inf, so compare grad norms against a
-  reference run. None of six default-variant runs on another node deviated.
+  norms at a random iteration (a wrong value, NaN or Inf). All of these runs used the same GPU, the
+  Triton grouped GEMM, and TE `UnfusedDotProductAttention` or Primus-Turbo Triton attention. Megatron
+  aborts only on NaN/Inf, so compare grad norms against a reference run. None of six 4-GPU runs on
+  another node (TE `UnfusedDotProductAttention`, Triton grouped GEMM) deviated.

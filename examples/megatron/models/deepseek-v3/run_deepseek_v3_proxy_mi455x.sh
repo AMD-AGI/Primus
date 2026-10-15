@@ -19,7 +19,7 @@ cd "$(dirname "$(realpath "$0")")/../../../.."
 
 # container: start a container from DOCKER_IMAGE; direct: run in this container
 export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-container}
-export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261011}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-mi455x-v1}
 export EXP=${EXP:-examples/megatron/configs/MI455X/deepseek_v3-BF16-pretrain.yaml}
 # Primus-Turbo checkout built by prepare_mi455x.sh; empty: the image's primus_turbo
 export TURBO_DIR=${TURBO_DIR:-}
@@ -37,9 +37,25 @@ export PRIMUS_NUM_EXPERTS=${PRIMUS_NUM_EXPERTS:-128}
 export PRIMUS_MOE_TOPK=${PRIMUS_MOE_TOPK:-8}
 # layers to recompute in full, e.g. 0,3; empty: no recompute
 export PRIMUS_RECOMPUTE_LAYER_IDS=${PRIMUS_RECOMPUTE_LAYER_IDS:-}
-export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
+export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-True}
 export USE_TURBO_GROUPED_GEMM=${USE_TURBO_GROUPED_GEMM:-True}
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-False}
+# Primus-Turbo backends. Attention: flydsl or triton; grouped GEMM: bf16:flydsl or default
+# (Primus-Turbo's choice: Triton, or auto-tuning with PRIMUS_TURBO_AUTO_TUNE=1)
+export PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-flydsl}
+export TURBO_GROUPED_GEMM_BACKEND=${TURBO_GROUPED_GEMM_BACKEND:-bf16:flydsl}
+case "${PRIMUS_TURBO_ATTN_BACKEND,,}" in
+    flydsl | triton) ;;
+    *)
+        echo "PRIMUS_TURBO_ATTN_BACKEND must be flydsl or triton, not '${PRIMUS_TURBO_ATTN_BACKEND}'" >&2
+        exit 2
+        ;;
+esac
+# Primus overwrites PRIMUS_TURBO_GROUPED_GEMM_BACKEND from TURBO_GROUPED_GEMM_BACKEND unless that is default
+if [[ -n "${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:-}" ]]; then
+    echo "set TURBO_GROUPED_GEMM_BACKEND instead of PRIMUS_TURBO_GROUPED_GEMM_BACKEND" >&2
+    exit 2
+fi
 export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
 
@@ -53,7 +69,7 @@ ENV_ARGS=(
     --env GPUS_PER_NODE="${GPUS_PER_NODE}"
     --env HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
     --env TRITON_HIP_USE_EXPERT_SCHEDULING=0
-    --env PRIMUS_TURBO_ATTN_BACKEND=triton
+    --env PRIMUS_TURBO_ATTN_BACKEND="${PRIMUS_TURBO_ATTN_BACKEND}"
     --env HSA_COREDUMP_PATTERN=/dev/null
 )
 if [[ -n "${TURBO_DIR}" ]]; then
@@ -104,6 +120,7 @@ mkdir -p "${LOG_DIR}"
     "${RECOMPUTE_ARGS[@]}" \
     --use_turbo_attention "${USE_TURBO_ATTENTION}" \
     --use_turbo_grouped_gemm "${USE_TURBO_GROUPED_GEMM}" \
+    --turbo_grouped_gemm_backend "${TURBO_GROUPED_GEMM_BACKEND}" \
     --use_turbo_deepep "${USE_TURBO_DEEPEP}" \
     --mock_data "${MOCK_DATA}" \
     --profile "${PROFILE}" \
