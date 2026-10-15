@@ -149,17 +149,25 @@ def test_unified_compile_breaks_at_grouped_experts_once(monkeypatch):
     monkeypatch.setattr(dsv3_patch.torch, "compile", fake_compile)
     monkeypatch.setattr(dsv3_patch.torch.compiler, "disable", fake_disable)
     monkeypatch.setattr(torch._dynamo.config, "capture_scalar_outputs", False)
-    with patch.object(moe_module.GroupedExperts, "forward", moe_module.GroupedExperts.forward):
+    original_forward = moe_module.GroupedExperts.forward
+    with patch.object(moe_module.GroupedExperts, "forward", original_forward):
         dsv3_patch._apply_unified_compile(
             first_model,
             SimpleNamespace(backend="inductor"),
             ep_enabled=True,
         )
+        installed = moe_module.GroupedExperts.forward
+        assert installed is not original_forward
+        assert installed._primus_graph_break is True
+
         dsv3_patch._apply_unified_compile(
             second_model,
             SimpleNamespace(backend="inductor"),
             ep_enabled=True,
         )
+        assert moe_module.GroupedExperts.forward is installed
+
+    assert moe_module.GroupedExperts.forward is original_forward
 
     assert compile_calls == [
         ("dense_block", "inductor", False),
@@ -168,8 +176,7 @@ def test_unified_compile_breaks_at_grouped_experts_once(monkeypatch):
         ("moe_block", "inductor", False),
     ]
     assert torch._dynamo.config.capture_scalar_outputs is True
-    assert len(disable_calls) == 1
-    assert disable_calls[0][1] is False
+    assert disable_calls == [(original_forward, False)]
 
 
 def test_compile_patch_rebinds_source_and_deepseek_alias(monkeypatch):
