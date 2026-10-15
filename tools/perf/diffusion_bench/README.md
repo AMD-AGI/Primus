@@ -14,6 +14,11 @@ cd tools/perf/diffusion_bench       # from the Primus repo root
 ./run_benchmarks.sh                 # uses config.yaml in this folder
 ```
 
+The perf batch runner can also run it as part of a batch, after the Primus models:
+`BACKEND=...,diffusion_dlrm bash tools/perf/run_batch.sh` (see
+[`tools/perf/README.md`](../README.md#diffusion-and-dlrm-diffusion_dlrm)). It uses this folder's
+`config.yaml`, and passes the image, GPU type, output directory and a container label.
+
 ---
 
 ## Contents
@@ -265,6 +270,7 @@ list.
 | `--output-dir DIR` | `output_dir` |
 | `--timeout SEC` | `step_timeout` |
 | `--keep-container` | `keep_container: true` |
+| `--label KEY=VALUE` | adds a docker label to the containers; repeatable (the perf batch runner finds and stops its containers by label) |
 | `--dry-run` | starts the container and runs `launcher.py` with `launcher.dry_run=true`; skips downloads and DLRM; uses no GPU time |
 | `--parse-only RUN_DIR` | only regenerates the summary of an existing results directory |
 
@@ -439,7 +445,7 @@ run_benchmarks.sh (host)
  ├─ detect GPU (sysfs gfx_target_version)
  ├─ config.py: YAML + CLI overrides -> run plan
  ├─ create results dir, save config + resolved plan
- ├─ docker run -d <image> sleep infinity
+ ├─ docker run -d --rm <image> sleep infinity
  │     mounts: HF cache -> /root/.cache/huggingface[/hub]
  │             results dir -> /results
  │             this folder -> /diffusion_bench (ro)
@@ -459,7 +465,8 @@ run_benchmarks.sh (host)
 
 The container uses the same flags as the manual procedure (`--privileged --network host --ipc host
 --device /dev/dri --device /dev/kfd --cap-add SYS_PTRACE --security-opt seccomp=unconfined
---group-add video`), plus `--ulimit memlock=-1:-1`.
+--group-add video`), plus `--ulimit memlock=-1:-1`. With `--rm`, a container that is stopped from
+outside (for example by the perf batch runner's cleanup) is removed as well.
 
 ---
 

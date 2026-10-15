@@ -286,6 +286,10 @@ shopt -s nullglob
 if ! check_batch_inputs || ! perf_check_run_limits; then
     exit "$PERF_EXIT_REFUSED"
 fi
+if [ "$PERF_RUN_DIFFUSION_DLRM" = 1 ]; then
+    echo "[ERROR] diffusion_dlrm runs single-node benchmarks; use run_batch.sh for it." >&2
+    exit "$PERF_EXIT_REFUSED"
+fi
 
 # ---------------------------- Helper functions -------------------------------
 

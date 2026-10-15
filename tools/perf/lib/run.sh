@@ -350,7 +350,11 @@ print_per_run_banner() {
         echo "# Config Name      : $config_name"
         echo "# Config Hash      : $config_hash  (sha256, first 8 hex chars)"
         echo "# Framework        : $framework"
-        echo "# Train Module     : $module  (CLI verb: train $suite)"
+        if [ -n "$suite" ]; then
+            echo "# Train Module     : $module  (CLI verb: train $suite)"
+        else
+            echo "# Train Module     : $module"
+        fi
         echo "# Model            : $model"
         echo "# Micro Batch Size : $mbs"
         echo "# Global Batch Size: $gbs"

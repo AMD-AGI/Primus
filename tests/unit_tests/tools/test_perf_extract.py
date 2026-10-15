@@ -752,3 +752,203 @@ def test_fractional_batch_size_is_written_plainly(tmp_path):
     (tmp_path / "tmp.log").unlink()
     csv_path, _ = extract.write_outputs([extract.parse_log_file(str(log))], str(tmp_path))
     assert next(csv.DictReader(open(csv_path)))["micro_batch_size"] == "0.5"
+
+
+# --------------------------------------------------------------------------
+# diffusion_dlrm runs (parser version 4)
+# --------------------------------------------------------------------------
+
+# Trimmed to the columns diffusion_bench/parse_results.py reads.
+RUNS_SUMMARY = "num_processes,avg_step_time_gpu,avg_fps_gpu,avg_tflops,status\n8,1.8466,8.6847,567.29,{status}\n"
+DLRM_RESULTS = (
+    "Time Stamp,Num. Nodes,Batch Size,Recommendations/s (mean),Recommendations/s (std/mean)\n"
+    "2026:10:14_23:26:30,1,32768,552606.45,0.01\n"
+)
+STEP_EXIT = {"success": 0, "oom": 2, "failed": 3, "timeout": 124}
+DD_RUN = "mi355_node_20261014_183231"
+
+
+def make_diffusion_bench_run(root: Path, diffusion=(), dlrm=(), step_logs=None) -> Path:
+    """A diffusion_bench results folder under ``root/diffusion_dlrm``.
+
+    diffusion: ``(model, batch_size, step_status, runs_summary_status)``;
+    dlrm: ``(precision, step_status, with_results_csv)``. A step_status of
+    None leaves the step out of status.tsv, as for one still in flight.
+    """
+    run_dir = root / "diffusion_dlrm" / DD_RUN
+    (run_dir / "logs").mkdir(parents=True)
+    status = ["step\tstatus\texit_code\tduration_s\tlog", "setup\tsuccess\t0\t2\tlogs/setup.log"]
+    for model, bs, step_status, summary_status in diffusion:
+        out = run_dir / "diffusion" / f"{model}_bs{bs}"
+        out.mkdir(parents=True)
+        if summary_status:
+            (out / "runs_summary.csv").write_text(RUNS_SUMMARY.format(status=summary_status))
+        if step_status:
+            step = f"diffusion_{model}_bs{bs}"
+            status.append(f"{step}\t{step_status}\t{STEP_EXIT[step_status]}\t479\tlogs/{step}.log")
+    for precision, step_status, with_results in dlrm:
+        out = run_dir / "dlrm" / precision
+        out.mkdir(parents=True)
+        (out / "training_config.sh").write_text("export BATCH_SIZE=32768\n")
+        if with_results:
+            (out / "results.csv").write_text(DLRM_RESULTS)
+        if step_status:
+            step = f"dlrm_{precision}"
+            status.append(f"{step}\t{step_status}\t{STEP_EXIT[step_status]}\t135\tlogs/{step}.log")
+    (run_dir / "status.tsv").write_text("\n".join(status) + "\n")
+    for name, text in (step_logs or {}).items():
+        (run_dir / "logs" / f"{name}.log").write_text(text)
+    return run_dir
+
+
+def write_dd_log(tmp_path: Path, results_line: str | None, **kwargs) -> Path:
+    body = "[diffusion_bench 2026-10-14 18:32:31] Config   : /repo/tools/perf/diffusion_bench/config.yaml\n"
+    if results_line is not None:
+        body += f"[diffusion_bench 2026-10-14 18:32:31] Results  : {results_line}\n"
+    body += "[diffusion_bench 2026-10-14 18:41:30] All steps finished.\n"
+    return write_log(
+        tmp_path,
+        body,
+        framework="diffusion_dlrm",
+        config_name="tools/perf/diffusion_bench/config",
+        config_body="gpu: auto\n",
+        name="diffusion_dlrm-config-222c8d07-rep1_20261014-214751.log",
+        **kwargs,
+    )
+
+
+def test_diffusion_dlrm_log_becomes_one_row_per_model(tmp_path):
+    run_dir = make_diffusion_bench_run(
+        tmp_path, diffusion=[("flux-dev", 16, "success", "success")], dlrm=[("FP32", "success", True)]
+    )
+    log = write_dd_log(tmp_path, str(run_dir))
+    flux, dlrm = extract.parse_log(str(log))
+
+    assert flux["backend"] == "diffusion"
+    assert flux["model_name"] == "flux-dev"
+    assert flux["precision"] == "BF16"
+    assert (flux["micro_batch_size"], flux["global_batch_size"], flux["world_size"]) == (16, 128, 8)
+    assert flux["hmean_tflops"] == pytest.approx(567.29)
+    assert flux["hmean_samples_per_gpu"] == pytest.approx(8.6847)
+    assert (flux["status"], flux["failure_reason"]) == ("ok", None)
+    assert (flux["exit_code"], flux["elapsed_sec"]) == (0, 479)
+    assert flux["step_log"] == f"diffusion_dlrm/{DD_RUN}/logs/diffusion_flux-dev_bs16.log"
+    # The banner's TRAIN_STEPS applies to the diffusion models only.
+    assert flux["total_steps"] == 10
+
+    assert dlrm["backend"] == "dlrm"
+    assert (dlrm["model_name"], dlrm["precision"]) == ("dlrm-v2", "FP32")
+    assert (dlrm["micro_batch_size"], dlrm["global_batch_size"]) == (32768, 262144)
+    assert dlrm["rec_per_s"] == pytest.approx(552606.45)
+    assert dlrm["rec_per_s_cv"] == pytest.approx(0.01)
+    assert dlrm["total_steps"] is None
+    assert dlrm["status"] == "ok"
+
+    for row in (flux, dlrm):
+        assert row["filename"] == log.name
+        assert row["docker_image"] == "registry.example/ci:some-tag"
+        assert row["config_hash"] == "abcd1234"
+
+
+def test_diffusion_dlrm_step_failures_get_their_own_reason(tmp_path):
+    run_dir = make_diffusion_bench_run(
+        tmp_path,
+        diffusion=[
+            ("flux-dev", 16, "oom", None),
+            ("stable-diffusion-xl", 12, "timeout", None),
+            ("mochi-1", 4, "failed", None),
+        ],
+        dlrm=[("TF32", "success", False)],
+        step_logs={
+            "diffusion_flux-dev_bs16": "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB\n",
+            "diffusion_mochi-1_bs4": (
+                "Traceback (most recent call last):\n"
+                '  File "launcher.py", line 1, in <module>\n'
+                "KeyError: 'mochi'\n"
+            ),
+        },
+    )
+    log = write_dd_log(
+        tmp_path,
+        str(run_dir),
+        exit_code=1,
+        failure_reason="steps: 4 of 5 diffusion_bench steps not successful: ...",
+    )
+    rows = {row["model_name"]: row for row in extract.parse_log(str(log))}
+
+    assert rows["flux-dev"]["status"] == "failed"
+    assert rows["flux-dev"]["failure_reason"] == "oom"
+    assert rows["flux-dev"]["exit_code"] == 2
+    assert rows["stable-diffusion-xl"]["failure_reason"] == "timeout"
+    assert rows["mochi-1"]["failure_reason"] == "python_error"
+    assert rows["mochi-1"]["failure_detail"].startswith("KeyError")
+    # Success without a throughput number is not a pass.
+    assert (rows["dlrm-v2"]["status"], rows["dlrm-v2"]["failure_reason"]) == ("failed", "no_metrics")
+
+
+def test_diffusion_dlrm_step_in_flight_takes_the_runs_outcome(tmp_path):
+    # AMDiffusionBenchmark writes runs_summary.csv with not_run when it starts.
+    run_dir = make_diffusion_bench_run(
+        tmp_path, diffusion=[("flux-dev", 16, "success", "success"), ("hunyuan-video", 3, None, "not_run")]
+    )
+    log = write_dd_log(
+        tmp_path, str(run_dir), exit_code=130, failure_reason="interrupted: the batch was stopped by a signal"
+    )
+    rows = {row["model_name"]: row for row in extract.parse_log(str(log))}
+    assert rows["flux-dev"]["status"] == "ok"
+    assert (rows["hunyuan-video"]["status"], rows["hunyuan-video"]["failure_reason"]) == (
+        "interrupted",
+        "interrupted",
+    )
+
+
+def test_diffusion_dlrm_results_are_found_after_the_folder_moved(tmp_path):
+    make_diffusion_bench_run(tmp_path, diffusion=[("flux-dev", 16, "success", "success")])
+    log = write_dd_log(tmp_path, f"/old/place/diffusion_dlrm/{DD_RUN}")
+    (row,) = extract.parse_log(str(log))
+    assert row["model_name"] == "flux-dev"
+    assert row["hmean_tflops"] == pytest.approx(567.29)
+
+
+def test_diffusion_dlrm_without_steps_keeps_the_runs_row(tmp_path):
+    # diffusion_bench stopped before creating its results folder.
+    root = tmp_path / "a"
+    root.mkdir()
+    log = write_dd_log(root, None, exit_code=1, failure_reason="exit: launcher exited with code 1")
+    (row,) = extract.parse_log(str(log))
+    assert (row["backend"], row["status"]) == ("diffusion_dlrm", "failed")
+
+    # It created the folder, but its setup step failed before any model ran.
+    root = tmp_path / "b"
+    root.mkdir()
+    run_dir = make_diffusion_bench_run(root)
+    log = write_dd_log(
+        root,
+        str(run_dir),
+        exit_code=1,
+        failure_reason="steps: 1 of 1 diffusion_bench steps not successful: setup failed",
+    )
+    (row,) = extract.parse_log(str(log))
+    assert row["backend"] == "diffusion_dlrm"
+    assert row["failure_reason"] == "steps"
+    assert row["failure_detail"].endswith("setup failed")
+
+
+def test_diffusion_dlrm_rows_reach_the_outputs(tmp_path, monkeypatch):
+    import csv
+
+    run_dir = make_diffusion_bench_run(
+        tmp_path, diffusion=[("flux-dev", 16, "success", "success")], dlrm=[("TF32", "success", True)]
+    )
+    write_dd_log(tmp_path, str(run_dir))
+    write_log(tmp_path, MEGATRON_AVG, name="megatron.log")
+    monkeypatch.setattr("sys.argv", ["extract_results.py", "--quiet", str(tmp_path)])
+    assert extract.main() == 0
+
+    rows = list(csv.DictReader(open(tmp_path / "results.csv")))
+    assert sorted(r["backend"] for r in rows) == ["diffusion", "dlrm", "megatron"]
+    header = next(csv.reader(open(tmp_path / "results.csv")))
+    assert header[-3:] == ["rec_per_s", "rec_per_s_cv", "step_log"]
+    dlrm = next(r for r in rows if r["backend"] == "dlrm")
+    assert dlrm["rec_per_s"] == "552606.4500"
+    assert dlrm["rec_per_s_cv"] == "0.01"

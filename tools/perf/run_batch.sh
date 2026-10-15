@@ -4,7 +4,8 @@
 #
 # Purpose:
 #   Run a batch of Primus training benchmarks (Megatron, Megatron Bridge,
-#   TorchTitan, MaxText, MaxDiffusion) and collect the results in a single
+#   TorchTitan, MaxText, MaxDiffusion), and optionally the diffusion and DLRM
+#   benchmarks of diffusion_bench/, and collect the results in a single
 #   directory with enough metadata that a reviewer can reproduce or audit each
 #   run from the logs alone.
 #
@@ -36,6 +37,22 @@
 #       how you resume a batch that died partway.
 #
 #   Missing paths and duplicate entries are reported before anything launches.
+#
+# Diffusion and DLRM (BACKEND=...,diffusion_dlrm):
+#   Not a catalog backend. Adding it to BACKEND runs diffusion_bench/
+#   run_benchmarks.sh once, after the catalog configs, for every diffusion and
+#   DLRM model its config enables (batch sizes, models and step_timeout come
+#   from that config; the runner sets no time limit on this run). It uses
+#   DOCKER_IMAGE, which must contain /workspace/AMDiffusionBenchmark and
+#   /workspace/DLRMBenchmark (rocm/primus images do), and writes its results
+#   folder under $RESULT_DIR/diffusion_dlrm. For example, everything the
+#   PyTorch image runs:
+#     BACKEND=megatron,torchtitan,megatron_bridge,diffusion_dlrm
+#   DIFFUSION_DLRM_CONFIG=<file>   diffusion_bench config to use instead of
+#                                  diffusion_bench/config.yaml
+#   DIFFUSION_DLRM_HF_CACHE=<dir>  Hugging Face cache for the diffusion models
+#                                  (default: hf_cache_dir in that config)
+#   TRAIN_STEPS sets the diffusion models' num_iterations; DLRM keeps its own.
 #
 # Optional knobs:
 #   DRY_RUN=1        print the selected configs and launch commands, then exit
@@ -205,6 +222,8 @@ PERF_MULTINODE=0
 source "$SCRIPT_DIR/lib/run.sh"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/lib/control.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/diffusion_dlrm.sh"
 
 # Absolute from here on. The batch later does `cd "$PRIMUS_PATH"`, so a
 # relative RESULT_DIR would put the summary and the per-run logs in two
@@ -256,7 +275,7 @@ shopt -s nullglob
 # Select the configs to run: catalog (default, filtered by GPU/BACKEND) or a
 # directory of YAMLs (CONFIG_DIR). EXTRA_ENV, missing paths and duplicates are
 # all reported here, before anything launches.
-if ! check_batch_inputs || ! perf_check_run_limits; then
+if ! check_batch_inputs || ! perf_check_run_limits || ! perf_dd_prepare; then
     exit "$PERF_EXIT_REFUSED"
 fi
 
@@ -312,9 +331,10 @@ cp -f "$SCRIPT_PATH" "$SCRIPT_COPY"
 : > "$SUMMARY_FILE"
 collect_system_info | tee -a "$SUMMARY_FILE"
 
-# Image, leftover containers, idle GPUs, NCCL interface. Done before the batch
-# configuration is written so the image digest below is already known.
-if ! perf_preflight; then
+# Image, leftover containers, idle GPUs, NCCL interface, and what diffusion_dlrm
+# needs. Done before the batch configuration is written so the image digest
+# below is already known.
+if ! perf_preflight || ! perf_dd_preflight; then
     {
         echo ""
         echo "################################################################################"
@@ -356,11 +376,14 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     # CONFIG_FILES is populated by perf_select_configs in lib/common.sh.
     # shellcheck disable=SC2153
     echo "# Total configs: ${#CONFIG_FILES[@]}"
-    echo "# Total runs   : $(( ${#CONFIG_FILES[@]} * NUM_REPS ))"
+    echo "# Total runs   : $(( ${#CONFIG_FILES[@]} * NUM_REPS + PERF_DD_RUNS ))"
     echo "# Configs to run (resolved path + content hash):"
-    for f in "${CONFIG_FILES[@]}"; do
+    for f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
         echo "#   - $(sha256sum "$f" | cut -c1-8)  $f"
     done
+    if [ "$PERF_DD_RUNS" -gt 0 ]; then
+        perf_dd_config_lines
+    fi
     echo "################################################################################"
     echo ""
 } | tee -a "$SUMMARY_FILE"
@@ -369,10 +392,10 @@ cd "$PRIMUS_PATH" || { echo "[ERROR] cannot cd into $PRIMUS_PATH" >&2; exit "$PE
 
 RUNS_STARTED=0
 RUNS_FAILED=0
-TOTAL_PLANNED=$(( ${#CONFIG_FILES[@]} * NUM_REPS ))
+TOTAL_PLANNED=$(( ${#CONFIG_FILES[@]} * NUM_REPS + PERF_DD_RUNS ))
 BATCH_STOPPED=""
 
-for config_file in "${CONFIG_FILES[@]}"; do
+for config_file in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
     [ -z "$BATCH_STOPPED" ] || break
 
     prepare_config "$config_file"
@@ -416,6 +439,56 @@ for config_file in "${CONFIG_FILES[@]}"; do
         fi
     done
 done
+
+# diffusion_dlrm: one diffusion_bench run per repetition, after everything else.
+if [ "$PERF_DD_RUNS" -gt 0 ]; then
+    perf_dd_launch_argv
+    launcher_cmd="${LAUNCH_ARGV[*]}"
+    dd_config_name=$(perf_dd_config_name)
+    dd_config_hash=$(config_fingerprint "$DIFFUSION_DLRM_CONFIG")
+    dd_models=$(perf_dd_summary)
+    dd_steps="${TRAIN_STEPS:+$TRAIN_STEPS (diffusion num_iterations; DLRM unchanged)}"
+    for rep in $(seq 1 "$NUM_REPS"); do
+        [ -z "$BATCH_STOPPED" ] || break
+        if [ "$RUNS_STARTED" -gt 0 ] && ! perf_prepare_gpus; then
+            BATCH_STOPPED="the GPUs were busy before run $((RUNS_STARTED + 1))"
+            break
+        fi
+
+        result_file=$(perf_dd_log_name "$rep")
+
+        echo "[$(date '+%H:%M:%S')] [run $((RUNS_STARTED + 1))/${TOTAL_PLANNED}] diffusion_dlrm/${dd_config_name} [${dd_config_hash}] ${dd_models} rep ${rep}/${NUM_REPS}" \
+            | tee -a "$SUMMARY_FILE"
+        echo "                    -> $result_file" | tee -a "$SUMMARY_FILE"
+
+        PERF_RUN_LIMITS_TEXT="$(perf_dd_limits_text)" \
+            print_per_run_banner "$result_file" "$DIFFUSION_DLRM_CONFIG" "$dd_config_name" "$dd_config_hash" \
+            "$PERF_DIFFUSION_DLRM_BACKEND" "$dd_models" "N/A" "N/A" "N/A" "${dd_steps:-per diffusion_bench config}" \
+            "$rep" "$NUM_REPS" "$launcher_cmd" "diffusion_bench" ""
+
+        RUNS_STARTED=$((RUNS_STARTED + 1))
+        # Read by the interrupt handler, which then also runs perf_dd_finalize.
+        # shellcheck disable=SC2034
+        PERF_DD_ACTIVE=1
+        # For this run only: no runner time limit, and a failure reason that
+        # names the steps that failed.
+        MAX_RUN_SECONDS=0 MAX_IDLE_SECONDS=0 PERF_REASON_FN=perf_dd_failure_reason \
+            perf_launch_with_watchdog "$result_file" "$(( $(wc -l < "$result_file") + 1 ))"
+        perf_dd_finalize
+        # shellcheck disable=SC2034
+        PERF_DD_ACTIVE=0
+
+        if [ "$RUN_FAILURE_REASON" != "none" ]; then
+            RUNS_FAILED=$((RUNS_FAILED + 1))
+            echo "                    [FAIL] ${RUN_FAILURE_REASON} exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
+                | tee -a "$SUMMARY_FILE"
+        else
+            echo "                    [ OK ] exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
+                | tee -a "$SUMMARY_FILE"
+        fi
+        perf_dd_report_steps "$result_file"
+    done
+fi
 
 BATCH_END=$(date '+%Y-%m-%d %H:%M:%S %Z')
 BATCH_END_TS=$(date +%s)

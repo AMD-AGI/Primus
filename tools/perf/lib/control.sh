@@ -65,8 +65,13 @@ perf_check_run_limits() {
     done
 }
 
+# PERF_RUN_LIMITS_TEXT replaces the text for a run with limits of its own.
 perf_run_limits_text() {
-    echo "max_run=${MAX_RUN_SECONDS}s max_idle=${MAX_IDLE_SECONDS}s poll=${POLL_INTERVAL}s (0 = no limit)"
+    if [ -n "${PERF_RUN_LIMITS_TEXT:-}" ]; then
+        echo "$PERF_RUN_LIMITS_TEXT"
+    else
+        echo "max_run=${MAX_RUN_SECONDS}s max_idle=${MAX_IDLE_SECONDS}s poll=${POLL_INTERVAL}s (0 = no limit)"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -466,7 +471,9 @@ perf_preflight() {
 #
 # Sets RUN_EXIT_CODE, RUN_ELAPSED and RUN_FAILURE_REASON ("none" on success,
 # otherwise "<category>: <detail>" with category timeout, idle, fail_pattern,
-# signal or exit).
+# signal or exit). When the run exits non-zero on its own and PERF_REASON_FN
+# names a function, that function gets the log path and may print a more
+# specific reason (diffusion_dlrm lists its failed steps this way).
 # ---------------------------------------------------------------------------
 
 RUN_PID=""
@@ -507,7 +514,7 @@ perf_kill_run() {
 # Also writes the run's footer, so a finished run always gets one.
 perf_launch_with_watchdog() {
     local result_file="$1" first_line="$2"
-    local start end now size last_size last_change tick=0 reason=""
+    local start end now size last_size last_change tick=0 reason="" refined=""
     # Run inside the new session: the launcher's output, with secret values
     # masked, appended to the log. The filter ignores the stop signals, so
     # what the launcher prints while shutting down still reaches the log; it
@@ -584,7 +591,10 @@ perf_launch_with_watchdog() {
     RUN_EXIT_CODE=$?
     end=$(date +%s)
     RUN_ELAPSED=$((end - start))
-    RUN_FAILURE_REASON="${reason:-$(perf_exit_reason "$RUN_EXIT_CODE")}"
+    if [ -z "$reason" ] && [ "$RUN_EXIT_CODE" -ne 0 ] && [ -n "${PERF_REASON_FN:-}" ]; then
+        refined=$("$PERF_REASON_FN" "$result_file" 2>/dev/null)
+    fi
+    RUN_FAILURE_REASON="${reason:-${refined:-$(perf_exit_reason "$RUN_EXIT_CODE")}}"
     # From here an interrupt records this result rather than "interrupted".
     PERF_RUN_DONE=1
     # A background child the launcher left behind must not outlive the run.
@@ -663,6 +673,10 @@ perf_on_interrupt() {
     else
         perf_stop_batch_containers
     fi
+    # Defined by lib/diffusion_dlrm.sh, which only run_batch.sh sources.
+    if [ "${PERF_DD_ACTIVE:-0}" = 1 ] && declare -F perf_dd_finalize >/dev/null; then
+        perf_dd_finalize
+    fi
 
     if [ -n "$CURRENT_RESULT_FILE" ]; then
         if [ "${PERF_RUN_DONE:-0}" = 1 ]; then
@@ -698,13 +712,13 @@ perf_on_interrupt() {
 
 perf_print_plan() {
     local config_file n=0 total
-    total=$(( ${#CONFIG_FILES[@]} * NUM_REPS ))
+    total=$(( ${#CONFIG_FILES[@]} * NUM_REPS + ${PERF_DD_RUNS:-0} ))
     echo "DRY RUN -- nothing is launched."
     echo "Config source: $CONFIG_SOURCE"
     echo "RESULT_DIR   : $RESULT_DIR"
     echo "Run limits   : $(perf_run_limits_text)"
     echo ""
-    for config_file in "${CONFIG_FILES[@]}"; do
+    for config_file in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
         n=$((n + 1))
         prepare_config "$config_file"
         echo "[$n/${#CONFIG_FILES[@]}] ${FRAMEWORK}/${TRAIN_SUITE:-?} ${config_name} [${config_hash}]"
@@ -716,6 +730,13 @@ perf_print_plan() {
             echo "      cannot build a launch command for this config (see the error when run)."
         fi
     done
+    if [ "${PERF_DD_RUNS:-0}" -gt 0 ] && declare -F perf_dd_print_plan >/dev/null; then
+        perf_dd_print_plan
+    fi
     echo ""
-    echo "${#CONFIG_FILES[@]} configs, $total runs."
+    if [ "${PERF_DD_RUNS:-0}" -gt 0 ]; then
+        echo "${#CONFIG_FILES[@]} configs + diffusion_dlrm, $total runs."
+    else
+        echo "${#CONFIG_FILES[@]} configs, $total runs."
+    fi
 }

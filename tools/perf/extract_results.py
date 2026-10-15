@@ -81,6 +81,15 @@ To keep ``num_iterations`` and the throughput aggregates honest, the
 parsers filter to a single rank: ``rank-0`` when it emits any iteration
 lines, otherwise the lowest rank that does. Legacy logs that have no
 ``[rank-N/M]`` tag are not filtered.
+
+A ``diffusion_dlrm`` log (one diffusion_bench run covering several models)
+becomes one row per diffusion model and DLRM precision, with backend
+``diffusion`` or ``dlrm``. Their numbers come from diffusion_bench's own
+parser (``diffusion_bench/parse_results.py``), so they match its
+``summary.md``: TFLOP/s and samples/s per GPU are AMDiffusionBenchmark's
+averages rather than this script's harmonic means, and ``rec_per_s`` is
+DLRMBenchmark's recommendations/s. ``exit_code``, ``elapsed_sec``, status and
+failure reason are the step's, and ``step_log`` points at its log.
 """
 
 # Keeps the annotations below unevaluated, so the batch runners can call this
@@ -90,6 +99,7 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import importlib.util
 import json
 import os
 import re
@@ -100,7 +110,7 @@ import sys
 from datetime import datetime
 
 # Bumped whenever a column is added or its meaning changes.
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 BANNER_KV_RE = re.compile(r"^#\s*([^:]+?)\s*:\s*(.*?)\s*$")
@@ -1075,7 +1085,8 @@ def classify_failure(
     footer_cat = footer_cat.strip()
     footer_detail = footer_detail.strip() or None
 
-    if footer_cat in ("timeout", "idle", "interrupted"):
+    # "steps": the diffusion_dlrm run listing the diffusion_bench steps that failed.
+    if footer_cat in ("timeout", "idle", "interrupted", "steps"):
         return footer_cat, footer_detail
     text_cat, text_detail = _scan_failure_text(run_lines)
     if text_cat:
@@ -1188,6 +1199,9 @@ def parse_log_file(filepath: str) -> dict | None:
         "transparent_hugepages": None,
         "iommu": None,
         "amdgpu_version": None,
+        "rec_per_s": None,
+        "rec_per_s_cv": None,
+        "step_log": None,
     }
 
     config_text = parse_config_section(lines)
@@ -1244,6 +1258,9 @@ def parse_log_file(filepath: str) -> dict | None:
     elif backend in ("maxtext", "maxdiffusion"):
         keep_rank = _detect_iter_logging_rank(lines, "TFLOP/s/device")
         iterations = parse_maxtext_iterations(lines, keep_rank=keep_rank)
+    elif backend == DIFFUSION_DLRM_BACKEND:
+        # Expanded into one row per model by parse_log.
+        return result
     else:
         return None
 
@@ -1307,6 +1324,147 @@ def parse_log_file(filepath: str) -> dict | None:
             result[f"{prefix}_{stat}"] = value
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# diffusion_dlrm: one run log, one row per diffusion model / DLRM precision
+# ---------------------------------------------------------------------------
+
+DIFFUSION_DLRM_BACKEND = "diffusion_dlrm"
+# run_benchmarks.sh logs the results folder it creates as
+#   [diffusion_bench 2026-10-14 18:24:21] Results  : /path/to/folder
+DIFFUSION_BENCH_RESULTS_RE = re.compile(r"^\[diffusion_bench [^\]]*\] Results\s+:\s+(\S.*?)\s*$")
+_diffusion_bench_parser = None
+
+
+def _load_diffusion_bench_parser():
+    """``diffusion_bench/parse_results.py``, which knows its folder layout."""
+    global _diffusion_bench_parser
+    if _diffusion_bench_parser is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diffusion_bench", "parse_results.py")
+        spec = importlib.util.spec_from_file_location("diffusion_bench_parse_results", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _diffusion_bench_parser = module
+    return _diffusion_bench_parser
+
+
+def _diffusion_bench_run_dir(run_lines: list[str], log_dir: str) -> str | None:
+    for line in run_lines:
+        m = DIFFUSION_BENCH_RESULTS_RE.match(strip_ansi(line).strip())
+        if not m:
+            continue
+        path = m.group(1)
+        if os.path.isdir(path):
+            return path
+        # The result directory was moved or copied since the run.
+        moved = os.path.join(log_dir, DIFFUSION_DLRM_BACKEND, os.path.basename(path.rstrip("/")))
+        return moved if os.path.isdir(moved) else None
+    return None
+
+
+def _read_lines(path: str) -> list[str]:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.readlines()
+    except OSError:
+        return []
+
+
+def _diffusion_bench_outcome(
+    step_status: str | None, step_log: str, exit_code: int | None, run: dict
+) -> tuple[str, str | None, str | None]:
+    """``(status, failure_reason, failure_detail)`` of one diffusion_bench step."""
+    if step_status == "success":
+        return "ok", None, None
+    if step_status in (None, "", "unknown"):
+        # No outcome recorded: the step was in flight when the run ended.
+        if run["status"] in ("interrupted", "incomplete"):
+            return run["status"], run["failure_reason"], run["failure_detail"]
+        return "failed", "unknown", "diffusion_bench recorded no outcome for this step"
+    if step_status == "not_run":
+        return "unknown", None, None
+    if step_status == "timeout":
+        return "failed", "timeout", "stopped by diffusion_bench's step_timeout"
+    if step_status == "no-metrics":
+        return "failed", "no_metrics", "the step succeeded but logged no throughput"
+    lines = _read_lines(step_log)
+    category, detail = _scan_failure_text(lines)
+    if step_status in ("oom", "oom-skipped"):
+        if category in ("oom", "gpu_contended"):
+            return "failed", category, detail
+        return "failed", "oom", f"diffusion_bench reported {step_status}"
+    if category:
+        return "failed", category, detail
+    return "failed", "exit", _last_output_line(lines) or f"step exited with code {exit_code}"
+
+
+def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict]:
+    """Rows for the steps of a diffusion_dlrm run; the run's own row when
+    diffusion_bench never got as far as creating its results folder."""
+    log_dir = os.path.dirname(os.path.abspath(filepath))
+    run_dir = _diffusion_bench_run_dir(run_output_lines(lines), log_dir)
+    if run_dir is None:
+        return [run]
+    parser = _load_diffusion_bench_parser()
+    steps = parser.read_status(run_dir)
+    rows = []
+    for r in parser.parse_diffusion(run_dir, steps) + parser.parse_dlrm(run_dir, steps):
+        suite = r["suite"]
+        if suite == "diffusion":
+            step = f"diffusion_{r['benchmark']}_bs{r['batch_size']}"
+        else:
+            step = f"dlrm_{r['precision']}"
+        step_row = steps.get(step, {})
+        step_log = os.path.join(run_dir, "logs", f"{step}.log")
+        bs = _maybe_int(str(r["batch_size"])) if r.get("batch_size") is not None else None
+        gpus = r.get("num_gpus")
+
+        row = dict(run)
+        row["version_warnings"] = list(run["version_warnings"])
+        row.update(
+            {
+                "backend": suite,
+                "model_name": r["benchmark"],
+                "precision": str(r.get("precision") or "").upper() or None,
+                "seq_len": None,
+                "micro_batch_size": bs,
+                "global_batch_size": bs * gpus if bs and gpus else None,
+                "nnodes": 1,
+                "gpus_per_node": gpus,
+                "world_size": gpus,
+                "warmup_steps": None,
+                # TRAIN_STEPS sets the diffusion models' num_iterations only.
+                "total_steps": run["total_steps"] if suite == "diffusion" else None,
+                "num_iterations": None,
+                "num_post_warmup": None,
+                "hmean_tflops": r.get("tflops_per_gpu"),
+                "hmean_samples_per_gpu": r.get("samples_per_s_per_gpu"),
+                "rec_per_s": r.get("rec_per_s"),
+                "rec_per_s_cv": r.get("rec_per_s_cv"),
+                "exit_code": _maybe_int(step_row.get("exit_code")),
+                "elapsed_sec": _maybe_int(step_row.get("duration_s")),
+                "step_log": os.path.relpath(step_log, log_dir),
+            }
+        )
+        # A step missing from status.tsv was in flight when the run ended, even
+        # though AMDiffusionBenchmark's runs_summary.csv already says not_run.
+        row["status"], row["failure_reason"], row["failure_detail"] = _diffusion_bench_outcome(
+            r.get("status") if step_row else None, step_log, row["exit_code"], run
+        )
+        rows.append(row)
+    return rows or [run]
+
+
+def parse_log(filepath: str) -> list[dict]:
+    """The result rows of one log: one for a Primus run, one per model for a
+    diffusion_dlrm run, none for a file that is not a run log."""
+    result = parse_log_file(filepath)
+    if result is None:
+        return []
+    if result["backend"] == DIFFUSION_DLRM_BACKEND:
+        return diffusion_dlrm_rows(result, filepath, _read_lines(filepath))
+    return [result]
 
 
 CSV_FIELDS = [
@@ -1377,6 +1535,10 @@ CSV_FIELDS = [
     "transparent_hugepages",
     "iommu",
     "amdgpu_version",
+    # Added in parser version 4, for diffusion_dlrm rows.
+    "rec_per_s",
+    "rec_per_s_cv",
+    "step_log",
 ]
 
 
@@ -1401,7 +1563,7 @@ def tools_commit() -> str:
 # Columns that predate parser version 2 keep their four-decimal format. A
 # coefficient of variation is often 0.002, and a fractional batch size is a
 # plain 0.5, so these use significant digits instead.
-SIG_DIGIT_FIELDS = {"micro_batch_size", "global_batch_size", "tps_per_gpu_cv", "tflops_cv"}
+SIG_DIGIT_FIELDS = {"micro_batch_size", "global_batch_size", "tps_per_gpu_cv", "tflops_cv", "rec_per_s_cv"}
 
 
 def _csv_cell(field: str, val):
@@ -1456,6 +1618,16 @@ def _describe(result: dict) -> str:
     )
     if result["failure_reason"]:
         text += f" ({result['failure_reason']})"
+    if result["backend"] == "dlrm":
+        rec = result["rec_per_s"]
+        return f"{text} | rec_per_s={f'{rec:.0f}' if rec else 'N/A'}"
+    if result["backend"] == "diffusion":
+        tflops = result["hmean_tflops"]
+        samples = result["hmean_samples_per_gpu"]
+        return (
+            f"{text} | tflops={f'{tflops:.2f}' if tflops else 'N/A'} | "
+            f"samples_per_gpu={f'{samples:.3f}' if samples else 'N/A'}"
+        )
     if result["num_iterations"] == 0:
         return text + " | no iteration metrics found"
     tflops = result["hmean_tflops"]
@@ -1497,15 +1669,17 @@ def main() -> int:
     for fpath in log_files:
         fname = os.path.basename(fpath)
         try:
-            result = parse_log_file(fpath)
+            rows = parse_log(fpath)
         except Exception as e:
             errors += 1
             print(f"Processing: {fname}\n  -> Error: {e}")
             continue
-        if result:
-            results.append(result)
+        if rows:
+            results.extend(rows)
             if not args.quiet:
-                print(f"Processing: {fname}\n  -> {_describe(result)}")
+                print(f"Processing: {fname}")
+                for row in rows:
+                    print(f"  -> {_describe(row)}")
         elif not args.quiet:
             print(f"Processing: {fname}\n  -> Skipped (not a Primus run log)")
 

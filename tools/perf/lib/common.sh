@@ -168,6 +168,7 @@ perf_resolve_path() {
 perf_select_configs() {
     CONFIG_FILES=()
     CONFIG_SOURCE=""
+    perf_split_backends
 
     if [ -n "${CONFIG_DIR:-}" ] && [ -n "${CONFIG_FILE:-}" ]; then
         echo "[ERROR] set either CONFIG_DIR or CONFIG_FILE, not both." >&2
@@ -183,6 +184,29 @@ perf_select_configs() {
     fi
 
     perf_validate_configs
+}
+
+# diffusion_dlrm is not a catalog backend: run_batch.sh runs diffusion_bench
+# for it after the catalog configs (lib/diffusion_dlrm.sh). Sets
+# PERF_RUN_DIFFUSION_DLRM and PERF_CATALOG_BACKENDS (BACKEND without it).
+PERF_DIFFUSION_DLRM_BACKEND="diffusion_dlrm"
+PERF_RUN_DIFFUSION_DLRM=0
+PERF_CATALOG_BACKENDS=()
+
+perf_split_backends() {
+    local backend backends=()
+    PERF_RUN_DIFFUSION_DLRM=0
+    PERF_CATALOG_BACKENDS=()
+    IFS=',' read -r -a backends <<< "${BACKEND:-}"
+    for backend in ${backends[@]+"${backends[@]}"}; do
+        backend="${backend// /}"
+        [ -n "$backend" ] || continue
+        if [ "$backend" = "$PERF_DIFFUSION_DLRM_BACKEND" ]; then
+            PERF_RUN_DIFFUSION_DLRM=1
+        else
+            PERF_CATALOG_BACKENDS+=("$backend")
+        fi
+    done
 }
 
 perf_select_from_dir() {
@@ -248,21 +272,18 @@ perf_select_from_catalog() {
     # ever queue runs with no framework to execute them.
     if [ -z "${BACKEND:-}" ]; then
         echo "[ERROR] BACKEND is required; each training image supports one framework stack." >&2
-        echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')" >&2
-        echo "        PyTorch image: BACKEND=megatron,torchtitan" >&2
+        echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')$PERF_DIFFUSION_DLRM_BACKEND" >&2
+        echo "        PyTorch image: BACKEND=megatron,torchtitan,megatron_bridge,$PERF_DIFFUSION_DLRM_BACKEND" >&2
         echo "        JAX image    : BACKEND=maxtext,maxdiffusion" >&2
         return 1
     fi
 
-    local backend entry backends=()
-    IFS=',' read -r -a backends <<< "$BACKEND"
+    local backend entry
 
-    for backend in "${backends[@]}"; do
-        backend="${backend// /}"
-        [ -n "$backend" ] || continue
+    for backend in ${PERF_CATALOG_BACKENDS[@]+"${PERF_CATALOG_BACKENDS[@]}"}; do
         if [ "$(yq -r ".[\"$GPU\"] | has(\"$backend\")" "$catalog" 2>/dev/null)" != "true" ]; then
             echo "[ERROR] backend '$backend' is not listed under $GPU in $catalog" >&2
-            echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')" >&2
+            echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')$PERF_DIFFUSION_DLRM_BACKEND" >&2
             return 1
         fi
         while IFS= read -r entry; do
@@ -275,7 +296,7 @@ perf_select_from_catalog() {
     # shellcheck disable=SC2034
     CONFIG_SOURCE="catalog $catalog (GPU=$GPU BACKEND=$BACKEND)"
 
-    if [ ${#CONFIG_FILES[@]} -eq 0 ]; then
+    if [ ${#CONFIG_FILES[@]} -eq 0 ] && [ "$PERF_RUN_DIFFUSION_DLRM" != 1 ]; then
         # yq returns empty with exit 0 for an all-commented list, a missing
         # key and a typo'd key alike, so say exactly what was looked for.
         echo "[ERROR] no configs selected from: $catalog" >&2
@@ -291,14 +312,16 @@ perf_select_from_catalog() {
 perf_validate_configs() {
     local bad=0 f seen_dupes
 
-    for f in "${CONFIG_FILES[@]}"; do
+    # Guarded expansions: with only diffusion_dlrm selected the list is empty,
+    # which bash < 4.4 treats as unset under set -u.
+    for f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
         if [ ! -f "$f" ]; then
             echo "[ERROR] config does not exist: $f" >&2
             bad=$((bad + 1))
         fi
     done
 
-    seen_dupes=$(printf '%s\n' "${CONFIG_FILES[@]}" | sort | uniq -d)
+    seen_dupes=$(printf '%s\n' ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"} | sort | uniq -d)
     if [ -n "$seen_dupes" ]; then
         echo "[ERROR] duplicate config entries (each would overwrite the other's log):" >&2
         while IFS= read -r f; do
