@@ -521,8 +521,8 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
                 "--use_turbo_grouped_gemm",
                 "1",
-                # use_turbo_grouped_gemm is incompatible with the config's default
-                # moe_use_legacy_grouped_gemm=True, so disable the legacy path.
+                # use_turbo_grouped_gemm is incompatible with moe_use_legacy_grouped_gemm,
+                # so keep the legacy path off even if the config default changes.
                 "--moe_use_legacy_grouped_gemm",
                 "0",
             ],

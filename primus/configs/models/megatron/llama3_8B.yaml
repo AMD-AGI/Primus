@@ -3,6 +3,7 @@ extends:
 
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Meta-Llama-3-8B
+vocab_size: 128256
 
 
 ffn_hidden_size: 14336
