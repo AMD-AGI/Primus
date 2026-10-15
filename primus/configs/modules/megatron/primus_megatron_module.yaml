@@ -91,6 +91,7 @@ pp_warmup: false # set to true to decrease iter-1 time when using pp
 use_primus_pinned_triton_configs: false # pin the autotuned kernels of apply_rope_fusion (MLA) and moe_permute_fusion
 use_primus_fused_lm_cross_entropy: false # fused LM cross entropy, tensor-parallel size 1
 use_primus_fused_swiglu: false # fused (prob-weighted) SwiGLU fwd/bwd for routed and shared experts
+use_primus_triton_router_gemm: false # MoE router gating linear (fp32 logits, no bias, 32 experts) fwd/dgrad/wgrad
 
 # tool
 dump_pp_data: false

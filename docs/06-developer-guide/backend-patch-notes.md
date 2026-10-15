@@ -81,6 +81,7 @@ These arguments are introduced in the Megatron module logic (e.g., training loop
 | `use_primus_pinned_triton_configs` | `false` | Pin the in-process Triton autotune of `apply_rope_fusion` (MLA) and `moe_permute_fusion` to one config per kernel. | `megatron.core.fusions.fused_mla_yarn_rope_apply`, Primus' and TE's `triton.permutation` autotuners | Only for the enabled fusions (`moe_permute_fusion` also via `turbo_sync_free_moe_stage >= 1`); aborts the run at `before_train` (nothing pinned) if a kernel cannot be pinned. |
 | `use_primus_fused_lm_cross_entropy` | `false` | Fused LM cross entropy (two pinned Triton kernels, grad written in place into the logits). | `megatron.core.models.common.language_module.language_module.LanguageModule.compute_language_model_loss` | Tensor-parallel size 1; other calls keep Megatron's CE. |
 | `use_primus_fused_swiglu` | `false` | Fused (prob-weighted) SwiGLU forward/backward, one pinned Triton kernel per direction. | `weighted_bias_swiglu_impl` / `bias_swiglu_impl` in `megatron.core.fusions.fused_bias_swiglu`, `megatron.core.transformer.mlp`, `megatron.core.transformer.moe.{experts,shared_experts}`, Primus' `fused_bias_swiglu` | No bias, clamp, fp8 input store or CPU offload. |
+| `use_primus_triton_router_gemm` | `false` | MoE router gating linear on pinned Triton fwd/dgrad/wgrad kernels with fp32 accumulation. | `megatron.core.transformer.moe.router.router_gating_linear` | `moe_router_dtype: fp32`, no router bias, 32 experts, tokens % 1024, hidden % 128. |
 
 ---
 
