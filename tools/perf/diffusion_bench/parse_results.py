@@ -87,6 +87,7 @@ def parse_diffusion_steps(log_path):
                 try:
                     rows.append((int(m.group(1)), ast.literal_eval(m.group(2))))
                 except (ValueError, SyntaxError):
+                    # Ignore malformed or partially written step payloads in logs; keep best-effort parsing.
                     pass
     rows = [r for s, r in rows if s > DIFFUSION_WARMUP_STEPS] or [r for _, r in rows]
 
