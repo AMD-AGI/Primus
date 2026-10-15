@@ -78,7 +78,9 @@ def _exact_interleaved_rotation(t, freqs, cu_seqlens):
 @pytest.mark.parametrize("transformer_impl,local_thd", PATHS)
 def test_self_attention_rotation_is_exact(transformer_impl, local_thd, monkeypatch):
     torch.manual_seed(0)
-    config = WanConfig.wan2_1_t2v_1_3b(**TINY, transformer_impl=transformer_impl, local_thd_attention=local_thd)
+    config = WanConfig.wan2_1_t2v_1_3b(
+        **TINY, transformer_impl=transformer_impl, local_thd_attention=local_thd
+    )
     model = WanTransformer3D(config).to(device="cuda", dtype=torch.bfloat16).eval()
 
     calls = []
@@ -86,7 +88,9 @@ def test_self_attention_rotation_is_exact(transformer_impl, local_thd, monkeypat
 
     def recording_rotary(t, freqs, *args, **kwargs):
         out = original(t, freqs, *args, **kwargs)
-        calls.append((t.detach().clone(), freqs.detach().clone(), kwargs.get("cu_seqlens"), out.detach().clone()))
+        calls.append(
+            (t.detach().clone(), freqs.detach().clone(), kwargs.get("cu_seqlens"), out.detach().clone())
+        )
         return out
 
     monkeypatch.setattr(wan_attention, "apply_rotary_pos_emb", recording_rotary)
@@ -102,3 +106,20 @@ def test_self_attention_rotation_is_exact(transformer_impl, local_thd, monkeypat
         expected = _exact_interleaved_rotation(t, freqs, cu_seqlens)
         error = ((out.double() - expected).norm() / expected.norm()).item()
         assert error < 1e-2, f"{transformer_impl} (thd={local_thd}): rotary error {error:.2e} vs exact"
+
+
+def test_rope_angles_stay_fp32_under_a_bf16_cast():
+    """Float16Module calls ``.bfloat16()``, which casts floating buffers too.
+
+    In bf16 the angles on the 52-wide axis are up to 0.11 rad off, so the table
+    is kept out of the module's buffers.
+    """
+    from primus.backends.megatron.core.models.diffusion.wan.layers import (
+        WanRotaryPosEmbed,
+    )
+
+    rope = WanRotaryPosEmbed(128).bfloat16().cuda()
+    angles = rope(7, 30, 52, torch.device("cuda"))
+
+    assert angles.dtype == torch.float32
+    assert torch.equal(angles, WanRotaryPosEmbed(128)(7, 30, 52, torch.device("cuda")))

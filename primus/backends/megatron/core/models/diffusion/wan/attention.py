@@ -234,7 +234,9 @@ class WanSelfAttention(WanAttentionBase):
                 cu_seqlens_q_padded=cu_seqlens,
                 cu_seqlens_kv_padded=cu_seqlens,
             )
-        query, key, value = (self._to_thd(t, s, b, self.num_heads, self.head_dim) for t in (query, key, value))
+        query, key, value = (
+            self._to_thd(t, s, b, self.num_heads, self.head_dim) for t in (query, key, value)
+        )
         core_out = self._core(query, key, value, packed_seq_params)
         core_out = core_out.reshape(b, s, -1).transpose(0, 1).contiguous()
         return self.linear_proj(core_out)

@@ -140,7 +140,9 @@ class WanLayer(TransformerLayer):
         layer_number: int = 1,
         **kwargs,
     ):
-        super().__init__(config=config, submodules=TransformerLayerSubmodules(), layer_number=layer_number, **kwargs)
+        super().__init__(
+            config=config, submodules=TransformerLayerSubmodules(), layer_number=layer_number, **kwargs
+        )
         dim = config.hidden_size
         eps = config.layernorm_epsilon
 
@@ -166,7 +168,9 @@ class WanLayer(TransformerLayer):
             norm_config=ncfg,
         )
         self.pre_mlp_layernorm = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
-        self.mlp = build_module(submodules.mlp, config=_ffn_config(config), ffn_hidden_size=config.ffn_hidden_size)
+        self.mlp = build_module(
+            submodules.mlp, config=_ffn_config(config), ffn_hidden_size=config.ffn_hidden_size
+        )
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
     def forward(

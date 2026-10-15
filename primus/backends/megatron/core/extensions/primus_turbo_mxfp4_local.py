@@ -191,29 +191,36 @@ def _gemm_fp4(a, a_scale, trans_a, b, b_scale, trans_b, out_dtype, trans_c, pres
 MXFP4_REDUCTION_ALIGN = 256
 
 
-def _aligned(d: int) -> int:
+def _aligned(d: int, multiple: int = 16) -> int:
     """Smallest size >= ``d`` that a reduction axis may safely take.
 
-    Two hazards force a reduction axis up to ``MXFP4_REDUCTION_ALIGN``:
+    Three hazards force a reduction axis up to ``MXFP4_REDUCTION_ALIGN``:
 
     - AITER's FP4 dispatcher rejects ``d % 16 != 0``.
+    - ``quantize_mxfp4_dual`` asserts that its input's last dimension is a
+      multiple of the 32-wide MX block. Callers pass ``multiple=32`` for an axis
+      that is some quantized tensor's last dimension.
     - A shuffled colwise scale buffer covers ``cdiv(cdiv(d, 32), 8) * 8`` E8M0
       blocks while the packed FP4 data covers only ``cdiv(d, 128) * 128``. When
-      ``cdiv(d, 128)`` is odd, four blocks per logical row have no backing data;
-      the quantizer never writes them and the wgrad GEMM then sums whatever the
-      allocator left behind. Training stays finite but the gradient norm jumps
-      to ~1e6 at the token counts that hit this, and varies run to run.
+      ``cdiv(d, 128)`` is odd, four blocks per logical row have no backing data.
+      On the Primus-Turbo build that WAN MXFP4 was first trained on, the
+      quantizer left them unwritten and the wgrad GEMM summed whatever the
+      allocator left behind: the gradient norm jumped to ~1e6 and varied run to
+      run. Turbo 0.4.1.dev26 and dev33 write every scale entry (the output is
+      byte-identical over zeroed and 0x7F-filled free memory at 427 and 683
+      blocks) and give bit-identical gradients without this padding; it stays
+      for older builds.
 
-    Rounding to 256 clears both: it is a multiple of 16, and ``cdiv(256t, 128)``
-    is ``2t``, so every block is backed. Padding is not free -- it costs a full
-    ``F.pad`` copy of the operand for every GEMM -- so an axis that already
-    violates neither rule is returned untouched: ``d`` passes when it is a
-    multiple of 16 and ``cdiv(d, 128)`` is even, i.e. when ``d % 256`` is 0 or
-    above 128. WAN 1.3B's hidden dims (1536, 4608, 8960) pass. Its token axis
-    is ``micro_batch_size * tokens_per_sample``, so whether it pads depends on
-    the micro-batch size, not on its parity.
+    Rounding to 256 clears all three: it is a multiple of 32, and
+    ``cdiv(256t, 128)`` is ``2t``, so every block is backed. Padding is not free
+    -- it costs a full ``F.pad`` copy of the operand for every GEMM -- so an
+    axis that already violates no rule is returned untouched: ``d`` passes when
+    it is a multiple of ``multiple`` and ``cdiv(d, 128)`` is even, i.e. when
+    ``d % 256`` is 0 or above 128. WAN 1.3B's hidden dims (1536, 4608, 8960)
+    pass. Its token axis is ``micro_batch_size * tokens_per_sample``, so whether
+    it pads depends on the micro-batch size, not on its parity.
     """
-    if d % 16 == 0 and _cdiv(d, MXFP4_PADDING_ALIGN_SIZE) % 2 == 0:
+    if d % multiple == 0 and _cdiv(d, MXFP4_PADDING_ALIGN_SIZE) % 2 == 0:
         return d
     return _cdiv(d, MXFP4_REDUCTION_ALIGN) * MXFP4_REDUCTION_ALIGN
 
@@ -223,15 +230,17 @@ def _aligned_gemm_dims(m: int, k: int, n: int) -> Tuple[int, int, int]:
 
     Each dim is the reduction axis of exactly one GEMM -- ``K`` for the forward,
     ``N`` for dgrad, ``M`` for wgrad -- so all three have to clear the
-    dispatcher, not just the token count.
+    dispatcher, not just the token count. ``K`` is the last dimension of the
+    quantized activation and weight and ``N`` that of the quantized gradient,
+    so those two also need the MX block; ``M`` never is a last dimension, so a
+    token count that is only a multiple of 16 is not padded.
     """
-    dims = (_aligned(m), _aligned(k), _aligned(n))
-    for label, aligned in zip(("M", "K", "N"), dims):
-        if aligned % 16:
+    dims = (_aligned(m), _aligned(k, MXFP4_BLOCK_SIZE), _aligned(n, MXFP4_BLOCK_SIZE))
+    for label, aligned, multiple in zip(("M", "K", "N"), dims, (16, MXFP4_BLOCK_SIZE, MXFP4_BLOCK_SIZE)):
+        if aligned % multiple:
             raise RuntimeError(
                 f"MXFP4 reduction axis {label} is misaligned after padding: "
-                f"{aligned} (from M={m}, K={k}, N={n}). AITER's FP4 dispatcher "
-                f"needs {label} % 16 == 0."
+                f"{aligned} (from M={m}, K={k}, N={n}); it needs {label} % {multiple} == 0."
             )
     return dims
 

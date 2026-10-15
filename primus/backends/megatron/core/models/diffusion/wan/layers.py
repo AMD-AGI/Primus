@@ -44,7 +44,9 @@ class WanRotaryPosEmbed(nn.Module):
             ],
             dim=1,
         )
-        self.register_buffer("freqs", freqs, persistent=False)
+        # A plain attribute, not a buffer: Float16Module casts floating buffers
+        # to bf16, which puts the angles up to 0.11 rad off on the 52-wide axis.
+        self.freqs = freqs
 
     @staticmethod
     def _rope_params(max_seq_len: int, dim: int, theta: float) -> Tensor:
@@ -57,7 +59,8 @@ class WanRotaryPosEmbed(nn.Module):
 
     def forward(self, num_frames: int, height: int, width: int, device: torch.device) -> Tensor:
         c = self.head_dim // 2
-        freqs = self.freqs.to(device).split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+        self.freqs = self.freqs.to(device)
+        freqs = self.freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
         f, hgt, wid = num_frames, height, width
         seq_len = f * hgt * wid

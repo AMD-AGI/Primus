@@ -216,11 +216,6 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
         if eval_iters > 0:
             raise ValueError(f"WAN has no validation path yet; set eval_iters: 0 (got {eval_iters})")
 
-        self.num_train_timesteps = getattr(params, "num_train_timesteps", 1000)
-        self.scheduler_shift = getattr(params, "scheduler_shift", 5.0)
-        self.scheduler_sigma_min = getattr(params, "scheduler_sigma_min", 0.0)
-        self.scheduler_sigma_max = getattr(params, "scheduler_sigma_max", 1.0)
-
         self.loss_weighting = getattr(params, "loss_weighting", "diffsynth")
 
         # Before the first forward, and re-read per call by both backends, so
@@ -232,6 +227,10 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
         # it rather than recomputing here and risking a disagreement.
         self.wan_config = self._build_wan_config_from_yaml()
         self.wan_config.validate()
+        self.num_train_timesteps = self.wan_config.num_train_timesteps
+        self.scheduler_shift = self.wan_config.scheduler_shift
+        self.scheduler_sigma_min = self.wan_config.scheduler_sigma_min
+        self.scheduler_sigma_max = self.wan_config.scheduler_sigma_max
         attention_path = describe_attention_path(
             self.wan_config, bool(getattr(params, "enable_turbo_attention_float8", False))
         )
@@ -382,6 +381,9 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
             "text_seq_len": getattr(params, "text_seq_len", 512),
             "freq_dim": getattr(params, "freq_dim", 256),
             "num_train_timesteps": getattr(params, "num_train_timesteps", 1000),
+            "scheduler_shift": getattr(params, "scheduler_shift", 5.0),
+            "scheduler_sigma_min": getattr(params, "scheduler_sigma_min", 0.0),
+            "scheduler_sigma_max": getattr(params, "scheduler_sigma_max", 1.0),
             "loss_weighting": getattr(params, "loss_weighting", "diffsynth"),
             "num_transformers": getattr(params, "num_transformers", 1),
             "boundary_ratio": getattr(params, "boundary_ratio", None),

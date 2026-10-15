@@ -107,6 +107,12 @@ class WanConfig(BaseDiffusionConfig):
     # ------------------------------------------------------------------
     num_train_timesteps: int = 1000
 
+    # Static schedule shift and sigma clamp of the training scheduler. Held here
+    # so validate() can check that the timestep window holds a timestep.
+    scheduler_shift: float = 5.0
+    scheduler_sigma_min: float = 0.0
+    scheduler_sigma_max: float = 1.0
+
     # Per-timestep weighting applied to the flow-matching loss.
     loss_weighting: str = "diffsynth"
 
@@ -241,6 +247,20 @@ class WanConfig(BaseDiffusionConfig):
                 "timestep_window must satisfy 0 <= min < max <= 1, got "
                 f"[{self.timestep_window_min}, {self.timestep_window_max}]"
             )
+
+        # A narrow window can hold no integer timestep under the shift; catch
+        # that here rather than on the first training step.
+        if self.timestep_window != (0.0, 1.0):
+            from primus.backends.megatron.training.diffusion.schedulers import (
+                WanFlowMatchScheduler,
+            )
+
+            WanFlowMatchScheduler(
+                num_train_timesteps=self.num_train_timesteps,
+                shift=self.scheduler_shift,
+                sigma_min=self.scheduler_sigma_min,
+                sigma_max=self.scheduler_sigma_max,
+            ).timestep_bounds(self.timestep_window)
 
         if self.loss_weighting not in WAN_LOSS_WEIGHTINGS:
             raise ValueError(

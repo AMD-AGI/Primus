@@ -46,9 +46,10 @@ def test_window_edge_is_the_routing_cut(shift):
     scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=shift)
     cut = scheduler.first_timestep_at_noise_level(BOUNDARY)
 
-    routes_high = _routes_high(scheduler, torch.arange(N))
-    assert not routes_high[:cut].any()
-    assert routes_high[cut:].all()
+    timesteps = torch.arange(1, N + 1)
+    routes_high = _routes_high(scheduler, timesteps)
+    assert not routes_high[timesteps < cut].any()
+    assert routes_high[timesteps >= cut].all()
 
 
 def test_edge_inverts_the_static_shift():
@@ -58,15 +59,24 @@ def test_edge_inverts_the_static_shift():
 
 
 def test_full_window_is_the_whole_schedule():
+    """Timesteps run 1..N; sigma 1 (t = N) is inside a window that ends at 1."""
     scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=5.0)
-    assert scheduler.first_timestep_at_noise_level(0.0) == 0
+    assert scheduler.first_timestep_at_noise_level(0.0) == 1
     assert scheduler.first_timestep_at_noise_level(1.0) == N
+    assert scheduler.timestep_bounds((0.0, 1.0)) == (1, N + 1)
+    assert scheduler.timestep_bounds((BOUNDARY, 1.0))[1] == N + 1
+
+
+def _expected_bounds(scheduler, window):
+    lo, hi = window
+    upper = N + 1 if hi >= 1.0 else scheduler.first_timestep_at_noise_level(hi)
+    return scheduler.first_timestep_at_noise_level(lo), upper
 
 
 @pytest.mark.parametrize("window", [(0.0, BOUNDARY), (BOUNDARY, 1.0), (0.2, 0.6)])
 def test_memoized_bounds_match_the_edges(window, monkeypatch):
     scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=5.0)
-    expected = tuple(scheduler.first_timestep_at_noise_level(edge) for edge in window)
+    expected = _expected_bounds(scheduler, window)
 
     assert scheduler.timestep_bounds(window) == expected
 
@@ -85,7 +95,7 @@ def test_memoized_bounds_follow_a_shift_change():
     scheduler.shift = 3.0
 
     assert scheduler.timestep_bounds((0.0, BOUNDARY)) == (
-        0,
+        1,
         scheduler.first_timestep_at_noise_level(BOUNDARY),
     )
     assert scheduler.timestep_bounds((0.0, BOUNDARY)) != at_five
@@ -96,6 +106,16 @@ def test_an_empty_window_is_rejected():
 
     with pytest.raises(ValueError, match="holds no integer timestep"):
         scheduler.timestep_bounds((0.5, 0.5))
+
+
+def test_validate_rejects_a_window_without_a_timestep():
+    """Caught at config time, not on the first training step.
+
+    At shift 5 the sigma gap between t = 999 and t = 1000 is ~2e-4, so a
+    window inside it is valid as a range but holds no integer timestep.
+    """
+    with pytest.raises(ValueError, match="holds no integer timestep"):
+        WanConfig.wan2_1_t2v_1_3b(timestep_window_min=0.99995, timestep_window_max=0.99999)
 
 
 @pytest.mark.parametrize("stage", ["high_noise", "low_noise"])
@@ -117,3 +137,22 @@ def test_per_expert_stage_on_one_transformer(stage, window, subfolder):
     config.validate()
     assert config.timestep_window == window
     assert config.backbone_subfolder == subfolder
+
+
+def test_unwindowed_draws_cover_one_to_n():
+    """Base sigma {1/N, ..., 1}: never a clean input, and pure noise is trained."""
+    scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=5.0)
+    torch.manual_seed(0)
+    draws = scheduler.sample_training_timesteps(200_000, torch.device("cpu"))
+
+    assert draws.min() == 1
+    assert draws.max() == N
+    assert scheduler.sigma_from_timestep(draws.max()).item() == 1.0
+
+
+def test_high_noise_expert_trains_pure_noise():
+    scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=5.0)
+    torch.manual_seed(0)
+    high = scheduler.sample_training_timesteps(200_000, torch.device("cpu"), (BOUNDARY, 1.0))
+
+    assert high.max() == N

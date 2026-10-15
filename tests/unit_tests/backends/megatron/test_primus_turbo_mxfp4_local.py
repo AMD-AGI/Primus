@@ -394,17 +394,37 @@ class TestMXFP4ReductionAlignment:
 
         assert module._aligned(dim) == expected
 
-    def test_padded_axis_always_satisfies_both_invariants(self):
-        """Whatever comes out clears AITER's dispatcher and backs every block."""
+    @pytest.mark.parametrize("dim", [240, 400, 1520])
+    def test_last_dim_axis_needs_the_mx_block(self, dim):
+        """16-aligned with an even 128-block count, but not a multiple of 32.
+
+        ``quantize_mxfp4_dual`` asserts on these as a last dimension, so K and N
+        pad; M is never a last dimension and keeps them.
+        """
+        module = _mxfp4_module()
+
+        assert module._aligned(dim) == dim
+        assert module._aligned(dim, module.MXFP4_BLOCK_SIZE) == module._cdiv(dim, 256) * 256
+
+    def test_padded_axis_meets_the_kernel_constraints(self):
+        """Whatever comes out clears the dispatcher, the quantizer, and backs every block.
+
+        The constraints are the kernels' own: AITER's FP4 dispatcher needs every
+        reduction axis % 16, ``quantize_mxfp4_dual`` needs its input's last
+        dimension % 32 (K and N), and an odd 128-block count leaves scale blocks
+        unbacked.
+        """
         module = _mxfp4_module()
         block = module.MXFP4_PADDING_ALIGN_SIZE
 
         for dim in range(1, 4097):
-            aligned = module._aligned(dim)
+            m, k, n = module._aligned_gemm_dims(dim, dim, dim)
 
-            assert aligned >= dim, dim
-            assert aligned % 16 == 0, dim
-            assert module._cdiv(aligned, block) % 2 == 0, dim
+            for aligned in (m, k, n):
+                assert aligned >= dim, dim
+                assert aligned % 16 == 0, dim
+                assert module._cdiv(aligned, block) % 2 == 0, dim
+            assert k % 32 == 0 and n % 32 == 0, dim
 
     def test_each_gemm_axis_is_aligned_independently(self):
         """M, K and N are each the reduction axis of one of the three GEMMs."""
@@ -416,6 +436,10 @@ class TestMXFP4ReductionAlignment:
         assert module._aligned_gemm_dims(256, 1536, 8960) == (256, 1536, 8960)
         # All three offend.
         assert module._aligned_gemm_dims(128, 384, 100) == (256, 512, 256)
+        # K and N miss the MX block; the same size on M is fine.
+        assert module._aligned_gemm_dims(240, 240, 1520) == (240, 256, 1536)
+        # WAN at micro-batch 10: 109,200 tokens is a multiple of 16 but not of 32.
+        assert module._aligned_gemm_dims(109200, 1536, 8960) == (109200, 1536, 8960)
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
     def test_pad2d_is_identity_at_the_requested_size(self):
@@ -507,3 +531,91 @@ class TestMXFP4UnpaddedShape(PrimusUT):
 
         assert output.shape == (128, 512)
         assert torch.isfinite(output.float()).all()
+
+
+def _mxfp4_step(x, w, m=None, n=None):
+    """One forward and backward through MXFP4LinearFunction (no SR, so deterministic).
+
+    The loss covers only the leading ``[m, n]`` block of the output, so a
+    zero-padded reference gets exactly the zero gradient padding the Function
+    applies internally.
+    """
+    from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+        MXFP4LinearFunction,
+        _enable_preshuffle,
+    )
+
+    x = x.detach().clone().requires_grad_(True)
+    w = w.detach().clone().requires_grad_(True)
+    out = MXFP4LinearFunction.apply(x, w, _enable_preshuffle(), False, None, 0, 0, False)[0]
+    m, n = m or out.shape[0], n or out.shape[1]
+    torch.manual_seed(7)
+    grad = torch.randn(m, n, dtype=out.dtype, device=out.device)
+    (out[:m, :n] * grad).sum().backward()
+    return out.detach(), x.grad, w.grad
+
+
+class TestMXFP4PaddedShapes:
+    """Forward and backward at shapes the Function pads, against explicit padding.
+
+    Zero padding is exact for the GEMMs, and the Function pads to exactly the
+    sizes ``_aligned_gemm_dims`` reports, so running the unpadded operands must
+    give bit for bit what the zero-padded operands give once sliced back. This
+    covers the slices of the output and of both gradients, and, for K / N that
+    are not a multiple of 32, that the quantizer accepts what it is handed.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup_parallel(self, init_parallel_state):
+        pass
+
+    @requires_mxfp4
+    @pytest.mark.parametrize(
+        "m,k,n",
+        [
+            (256, 240, 512),  # K % 32 == 16: padded to 256
+            (256, 256, 1520),  # N % 32 == 16: padded to 1536
+            (240, 256, 512),  # M % 32 == 16: not padded by the Function
+            (200, 240, 1520),  # all three padded
+        ],
+    )
+    def test_padded_step_matches_explicit_zero_padding(self, m, k, n):
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+            _aligned_gemm_dims,
+        )
+
+        _, k_a, n_a = _aligned_gemm_dims(m, k, n)
+        # M is padded here even where the Function leaves it alone, so the
+        # unpadded M = 240 case is checked against zero rows too.
+        m_a = -(-m // 256) * 256
+        torch.manual_seed(42)
+        x_pad = torch.zeros(m_a, k_a, dtype=torch.bfloat16, device="cuda")
+        w_pad = torch.zeros(n_a, k_a, dtype=torch.bfloat16, device="cuda")
+        x_pad[:m, :k] = torch.randn(m, k, dtype=torch.bfloat16, device="cuda")
+        w_pad[:n, :k] = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+
+        out, x_grad, w_grad = _mxfp4_step(x_pad[:m, :k], w_pad[:n, :k])
+        ref_out, ref_x_grad, ref_w_grad = _mxfp4_step(x_pad, w_pad, m=m, n=n)
+
+        assert out.shape == (m, n) and x_grad.shape == (m, k) and w_grad.shape == (n, k)
+        assert torch.equal(out, ref_out[:m, :n])
+        assert torch.equal(x_grad, ref_x_grad[:m, :k])
+        assert torch.equal(w_grad, ref_w_grad[:n, :k])
+
+    @requires_mxfp4
+    @pytest.mark.parametrize("input_dtype", [torch.float32, torch.bfloat16])
+    def test_gradient_dtypes_follow_input_and_weight(self, input_dtype):
+        """grad_input takes the input's dtype and grad_weight the weight's.
+
+        The output and both GEMMs run at the bf16 parameter dtype; an fp32
+        activation (as diffusion backbones feed) gets an fp32 gradient back.
+        """
+        torch.manual_seed(42)
+        x = torch.randn(256, 256, dtype=input_dtype, device="cuda")
+        w = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda")
+
+        out, x_grad, w_grad = _mxfp4_step(x, w)
+
+        assert out.dtype == torch.bfloat16
+        assert x_grad.dtype == input_dtype
+        assert w_grad.dtype == torch.bfloat16

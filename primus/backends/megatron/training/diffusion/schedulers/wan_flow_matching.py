@@ -160,13 +160,12 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         self,
         latents: torch.Tensor,
         noise: torch.Tensor,
-        timesteps: Union[int, float, torch.Tensor, None] = None,
-        sigma: Optional[torch.Tensor] = None,
+        timesteps: Union[int, float, torch.Tensor],
     ) -> torch.Tensor:
         """Forward process: ``x_t = sigma * noise + (1 - sigma) * latents``.
 
         Wan training samples integer timesteps uniformly over
-        ``[0, num_train_timesteps)``. Those integers are not present in
+        ``{1, ..., num_train_timesteps}``. Those integers are not present in
         ``self.timesteps`` (which holds the post-shift float schedule used at
         inference), so :meth:`scale_noise`'s schedule lookup cannot be reused.
         Sigma is instead computed directly from the timestep, which matches
@@ -174,72 +173,15 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         at any sampled timestep rather than only those that happen to coincide
         with the inference schedule.
 
-        ``sigma`` may be supplied directly to bypass the timestep->sigma
-        mapping. The Megatron-Bridge parity path uses this, since it computes
-        sigma with Bridge's continuous flow-shift formula rather than the Wan
-        static-shift schedule.
+        The mix runs in fp32 and only the result takes the latents' dtype: the
+        model is conditioned on the fp32 sigma, and a bf16 sigma would put the
+        actual noise level up to about two timestep units away from it.
         """
-        if sigma is None:
-            sigma = self.sigma_from_timestep(timesteps, device=latents.device)
-
-        sigmas = sigma.to(device=latents.device)
+        sigmas = self.sigma_from_timestep(timesteps, device=latents.device)
         while sigmas.dim() < latents.dim():
             sigmas = sigmas.unsqueeze(-1)
-        sigmas = sigmas.to(dtype=latents.dtype)
 
-        return sigmas * noise + (1.0 - sigmas) * latents
-
-    def sample_bridge_style_timesteps(
-        self,
-        batch_size: int,
-        device: torch.device,
-        generator: Optional[torch.Generator] = None,
-        flow_shift: float = 2.5,
-        sampling: str = "uniform",
-        logit_mean: float = 0.0,
-        logit_std: float = 1.5,
-        sigma_min: float = 0.0,
-        sigma_max: float = 1.0,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Sample ``(timesteps, sigma)`` the Megatron-Bridge way (parity path).
-
-        Mirrors ``FlowMatchingPipeline.sample_timesteps`` in Megatron-Bridge::
-
-            u     = rand(B)                        (sampling="uniform")
-                  = sigmoid(normal(mean, std, B))  (sampling="logit_normal")
-            sigma = flow_shift * u / (1 + (flow_shift - 1) * u)
-            sigma = clamp(sigma, sigma_min, sigma_max)
-            t     = sigma * num_train_timesteps
-
-        Unlike :meth:`sample_training_timesteps` (discrete ``randint`` plus the
-        static-shift schedule), this is a continuous draw using Bridge's
-        ``flow_shift``. The returned ``sigma`` goes straight to
-        :meth:`add_noise` so the forward process uses that exact value, and
-        ``timesteps`` is what the transformer is conditioned on.
-
-        A ``generator`` makes the draw reproducible. Element-wise agreement
-        with a specific Bridge run additionally requires Bridge to seed its own
-        timestep draw, which it currently takes from the ambient RNG; without
-        that this gives algorithmic and distributional parity plus reproducible
-        values on the Primus side.
-        """
-        if sampling == "logit_normal":
-            u = torch.normal(
-                mean=logit_mean,
-                std=logit_std,
-                size=(batch_size,),
-                device=device,
-                generator=generator,
-            )
-            u = torch.sigmoid(u)
-        else:  # "uniform"
-            u = torch.rand(size=(batch_size,), device=device, generator=generator)
-
-        u = torch.clamp(u, min=1e-5)
-        sigma = flow_shift / (flow_shift + (1.0 / u - 1.0))
-        sigma = torch.clamp(sigma, sigma_min, sigma_max)
-        timesteps = sigma * float(self.num_train_timesteps)
-        return timesteps, sigma
+        return (sigmas * noise.float() + (1.0 - sigmas) * latents.float()).to(latents.dtype)
 
     def training_target(
         self,
@@ -282,21 +224,26 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
     # ------------------------------------------------------------------
 
     def first_timestep_at_noise_level(self, noise_level: float) -> int:
-        """Smallest integer timestep whose post-shift sigma is ``>= noise_level``.
+        """Smallest timestep in ``{1, ..., N}`` whose post-shift sigma is ``>= noise_level``.
 
-        Analytically ``ceil(N * s / (shift - (shift - 1) * s))``, the inverse of
-        the static shift. It is evaluated through :meth:`conditioning_timestep`
-        and compared the way the WAN 2.2 router compares, ``timestep >=
+        Analytically ``max(1, ceil(N * s / (shift - (shift - 1) * s)))``, the
+        inverse of the static shift, or ``N + 1`` when no timestep reaches the
+        level. It is evaluated through :meth:`conditioning_timestep` and
+        compared the way the WAN 2.2 router compares, ``timestep >=
         boundary_ratio * N``, so a window edge at ``boundary_ratio`` splits the
         integer timesteps exactly where routing does.
         """
         n = self.num_train_timesteps
-        conditioned = self.conditioning_timestep(torch.arange(n, dtype=torch.long))
+        conditioned = self.conditioning_timestep(torch.arange(1, n + 1, dtype=torch.long))
         edge = torch.tensor(float(noise_level) * float(n), dtype=conditioned.dtype)
-        return int((conditioned < edge).sum())
+        return 1 + int((conditioned < edge).sum())
 
     def timestep_bounds(self, timestep_window: Tuple[float, float]) -> Tuple[int, int]:
         """``[lo, hi)``: the integer timesteps whose post-shift sigma is in the window.
+
+        The window is half-open like the router's split, except that an upper
+        edge of 1 is closed: ``t = N`` is pure noise, the first inference step,
+        and belongs to the full range and to the high-noise expert.
 
         Memoized, since each edge evaluates the whole schedule and the window
         is fixed for a run while this is asked for every step. ``shift`` is a
@@ -306,7 +253,7 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         bounds = self._timestep_bounds.get(key)
         if bounds is None:
             lo = self.first_timestep_at_noise_level(key[0])
-            hi = self.first_timestep_at_noise_level(key[1])
+            hi = self.num_train_timesteps + 1 if key[1] >= 1.0 else self.first_timestep_at_noise_level(key[1])
             if hi <= lo:
                 raise ValueError(
                     f"timestep_window {tuple(timestep_window)} holds no integer timestep "
@@ -323,7 +270,10 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
     ) -> torch.Tensor:
         """Sample ``[B]`` integer timesteps for training.
 
-        Without ``timestep_window``: uniform over ``[0, num_train_timesteps)``.
+        Without ``timestep_window``: uniform over ``{1, ..., num_train_timesteps}``,
+        i.e. base sigma ``{1/N, ..., 1}`` as in DiffSynth and the loss-weight
+        table. Sigma 0 would be a clean input with an unpredictable target, and
+        sigma 1 is the first inference step.
 
         With ``timestep_window=(lo, hi)``: uniform over the integer timesteps
         whose post-shift sigma lies in ``[lo, hi)``. The DiffSynth-style
@@ -337,7 +287,7 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         the high-noise one.
         """
         if timestep_window is None:
-            lo, hi = 0, self.num_train_timesteps
+            lo, hi = 1, self.num_train_timesteps + 1
         else:
             lo, hi = self.timestep_bounds(timestep_window)
 

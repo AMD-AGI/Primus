@@ -38,6 +38,26 @@ def test_configured_range_bounds_noise_and_conditioning():
     assert torch.allclose(noised[:, 0], sigma)
 
 
+def test_noise_is_mixed_at_the_fp32_sigma_the_model_is_conditioned_on():
+    """bf16 inputs are mixed in fp32 and only the result is rounded.
+
+    Rounding sigma to bf16 first moves the applied noise level by up to about
+    two timestep units for sigma >= 0.5, away from the fp32 conditioning value.
+    """
+    scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=5.0)
+    t = torch.arange(1, N + 1)
+    torch.manual_seed(0)
+    latents = torch.randn(N, 64).bfloat16()
+    noise = torch.randn(N, 64).bfloat16()
+
+    noised = scheduler.add_noise(latents, noise, t)
+
+    sigma = scheduler.sigma_from_timestep(t).unsqueeze(-1)
+    expected = (sigma * noise.float() + (1.0 - sigma) * latents.float()).bfloat16()
+    assert noised.dtype == torch.bfloat16
+    assert torch.equal(noised, expected)
+
+
 @pytest.mark.parametrize("sigma_min, sigma_max", [(0.5, 0.5), (0.9, 0.1), (-0.1, 1.0), (0.0, 1.5)])
 def test_invalid_range_is_rejected(sigma_min, sigma_max):
     with pytest.raises(ValueError, match="sigma_min"):
