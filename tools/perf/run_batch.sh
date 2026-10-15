@@ -77,7 +77,8 @@
 #   ALLOW_BUSY_GPUS=1  run even when the GPUs are busy.
 #   PULL_IMAGE=1     pull DOCKER_IMAGE before the batch even if the tag is
 #                    present, replacing a stale or re-tagged local copy.
-#   EXTRACT=0        do not refresh results.csv / results.json at the end.
+#   EXTRACT=0        do not refresh results.csv / results.json (or report.xlsx)
+#                    at the end.
 #   REPORT=0         do not write report.xlsx at the end (written only when
 #                    pandas and XlsxWriter are installed; see report.py).
 #   EXTRA_ENV=...    space-separated KEY=VALUE pairs forwarded into the

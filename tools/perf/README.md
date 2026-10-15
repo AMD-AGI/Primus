@@ -291,7 +291,7 @@ bash tools/perf/run_batch.sh
 | `GPU_BUSY_WAIT_SECONDS` | `60` | How long to wait for busy GPUs to free up before refusing. |
 | `ALLOW_BUSY_GPUS` | `0` | `1` runs even when the GPUs are busy. |
 | `EXTRACT` | `1` | `0` skips refreshing `results.csv` / `results.json` at the end of a batch. |
-| `REPORT` | `1` | `0` skips writing `report.xlsx` at the end of a batch (see "Excel report"). |
+| `REPORT` | `1` | `0` skips writing `report.xlsx` at the end of a batch (see "Excel report"); `EXTRACT=0` skips it too. |
 | `PULL_IMAGE` | `0` | `1` (or `true` / `yes`) pulls `DOCKER_IMAGE` on every node before the batch even if the tag is present. |
 | `RESULT_DIR` | `$PWD/primus-perf-<date>` | Where logs and snapshots go; created if missing. |
 | `CONFIG_FILE` | `tools/perf/configs.yaml` | Catalog to read. |
@@ -708,32 +708,39 @@ than `results.csv`:
 
 | Sheet | Contents |
 |---|---|
-| Overview | One column per batch: outcome and timing, image (tag, digest, ID), container ROCm/HIP and Torch, Primus commit and submodule pins, GPU model, nodes and GPUs, host settings, run settings (reps, `TRAIN_STEPS`, limits, the `diffusion_dlrm` config), and run counts. |
-| Performance | One row per config: backend, model, precision, config hash, sequence length, MBS, GBS, nodes, GPUs, runs ok / total, and the means over the successful runs of TFLOP/s per GPU and throughput (per GPU, and for all GPUs), with its unit: tokens/s, samples/s, frames/s or recommendations/s. Also run-to-run CV, GPU memory, steps, minutes per run, and notes on the runs that did not count. |
-| Pivot | Per backend, models down and precisions across, for TFLOP/s per GPU and throughput. |
-| Runs | Every run, with its status and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
-| Issues | The runs that did not pass, with failure reason, detail and log links, and library version warnings. |
+| Overview | One column per batch: outcome (with the errors of a refused batch), timing, image (tag, digest, ID), container ROCm/HIP and Torch, Primus commit and submodule pins, GPU model, nodes and GPUs, host settings, run settings (reps, `TRAIN_STEPS`, limits, the `diffusion_dlrm` config), and run counts (planned, started, failed, not started). With `--baseline`, each baseline's image, commit and batches. |
+| Performance | One row per config: backend, model, precision, config hash, sequence length, MBS, GBS, steps, nodes, GPUs, runs ok / total, and the means over the successful runs of TFLOP/s per GPU and throughput (per GPU, and for all GPUs), with its unit: tokens/s, samples/s, frames/s or recommendations/s. Also run-to-run CV, GPU memory, minutes per run, and notes on the runs that did not count. |
+| Pivot | Per backend (and per image, when there are several), models down and precisions across, for TFLOP/s per GPU and throughput. |
+| Runs | Every run, with its status, image, result directory and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
+| Issues | Batches that did not complete or left runs unstarted; the runs that did not pass, with failure reason, detail and log links; and library version warnings. |
 | Chart | TFLOP/s per GPU for each config (and the baseline). |
 
 - **Averages.** A config's numbers are the arithmetic mean over its
-  successful runs (`NUM_REPS` repetitions, possibly across batches with the
-  same image); failed runs and failed multi-node attempts are left out and
-  listed under Notes. Run-to-run CV above 3% is highlighted.
+  successful runs (`NUM_REPS` repetitions, possibly across batches); failed
+  runs and failed multi-node attempts are left out and listed under Notes.
+  Runs with another image or another step count are a separate row, and the
+  Image column appears when there are several images. Run-to-run CV above 3%
+  is highlighted; "runs ok / total" is red when runs failed, amber when only
+  retried multi-node attempts did. In the Pivot, an amber cell is the mean of
+  several Performance rows (e.g. two config files of one model).
 - **Baseline.** `--baseline DIR` (repeatable), e.g. the previous release,
   adds the baseline's TFLOP/s and throughput and the change, red or green
   past `--threshold` percent (default 5). Configs are matched by backend,
   model, precision and GPU count; the Baseline config column says whether
   the config file was the same.
-- **Inputs.** It reads `results.json`, rerunning `extract_results.py` first
-  when that is missing or older than the logs, and the batch summaries.
+- **Inputs.** It reads each directory's `results.json` when that is current
+  (newer than the logs, from this parser version), and otherwise parses the
+  logs itself; it never writes into the input or baseline directories.
 - **Automatic.** Both runners also write `report.xlsx` at the end of a
   batch, after `results.csv`, when its libraries are installed; `REPORT=0`
-  skips it.
-- **Dependencies.** pandas and XlsxWriter. The first `report.py` run
-  installs whichever is missing into `~/.cache/primus-perf/python<X.Y>`
-  (about 130 MB, no root, nothing else on the system changes); a batch never
-  installs them itself. `--no-install` turns this off; `python3 -m pip install
-  --user pandas XlsxWriter` works as well.
+  skips it, and so does `EXTRACT=0`.
+- **Dependencies.** pandas and XlsxWriter. A copy in
+  `~/.cache/primus-perf/python<X.Y>-<platform>` is used first; the first
+  `report.py` run installs whatever is missing or unusable there (about
+  130 MB, no root, nothing else on the system changes). A batch never
+  installs them itself, and `--no-install` turns this off. Without network
+  access, install them into a Python of your own (`python3 -m venv ~/venv-perf
+  && ~/venv-perf/bin/pip install pandas XlsxWriter`) and run `report.py` with it.
 
 ## Relationship to the other benchmark tools
 

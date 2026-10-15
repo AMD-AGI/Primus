@@ -659,7 +659,8 @@ perf_write_report() {
         0) perf_log "$out" ;;
         3) ;;
         4) perf_log "[INFO] report.xlsx not written: pandas or XlsxWriter is missing. Run python3 $SCRIPT_DIR/report.py $RESULT_DIR once to install them and write the report." ;;
-        *) perf_log "${out:+$out
+        # The last lines only, to keep a traceback from filling the summary.
+        *) perf_log "${out:+$(tail -n 5 <<< "$out")
 }[WARN] report.xlsx not written (exit $rc); rerun: python3 $SCRIPT_DIR/report.py $RESULT_DIR" ;;
     esac
 }

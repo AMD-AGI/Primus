@@ -12,27 +12,30 @@ Usage::
     python3 tools/perf/report.py RESULT_DIR [RESULT_DIR ...] [-o report.xlsx]
                                  [--baseline BASELINE_DIR ...] [--threshold 5]
 
-Reads ``results.json`` from each directory (written by extract_results.py,
-which is rerun when the file is missing or older than the logs) and the
+Reads each directory's ``results.json`` (or, when that is missing, older than
+the logs or from an older parser, parses the logs itself with
+extract_results.py, without writing anything) and its
 ``batch_summary_<stamp>.txt`` files, and writes ``report.xlsx`` (into the
 result directory when there is one) with these sheets:
 
-* Overview     per batch: image, code, hardware, host settings, run settings
-               and run counts.
+* Overview     per batch: outcome, image, code, hardware, host settings, run
+               settings and run counts.
 * Performance  one row per config: backend, model, precision, config hash,
-               sequence length, batch sizes, and the averages over its
+               sequence length, batch sizes, steps, and the averages over its
                successful runs of TFLOP/s per GPU and throughput (tokens,
                samples or frames per second, or DLRM recommendations).
                With --baseline, the baseline's numbers and the change.
-* Pivot        per backend, models down and precisions across: TFLOP/s per
-               GPU, then throughput per GPU.
+* Pivot        per backend (and image), models down and precisions across:
+               TFLOP/s per GPU, then throughput per GPU.
 * Runs         every run, as an Excel table: the source for PivotTables.
-* Issues       runs that did not pass, and library version warnings.
+* Issues       runs that did not pass, batches that did not complete, and
+               library version warnings.
 * Chart        TFLOP/s per GPU for each config.
 
-Needs pandas and XlsxWriter. Whichever is not importable is installed into
-~/.cache/primus-perf/python<X.Y> (no root needed, nothing else changes)
-unless --no-install is given.
+Needs pandas and XlsxWriter. A copy installed in ~/.cache/primus-perf/
+python<X.Y>-<platform> is used first; when one is missing or unusable, it is
+installed there (no root needed, nothing else changes) unless --no-install
+is given.
 
 Exit codes: 0 written, 1 error, 3 no runs to report, 4 pandas or XlsxWriter
 missing.
@@ -44,20 +47,29 @@ from __future__ import annotations
 import argparse
 import glob
 import importlib
+import importlib.util
 import json
 import math
 import os
 import re
 import subprocess
 import sys
+import sysconfig
 from datetime import datetime
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# Per Python version: pandas and numpy are compiled for one.
+# Per Python version and platform: pandas and numpy are compiled for one, and
+# a home directory can be shared by hosts of different kinds.
 PRIVATE_SITE = os.path.join(
-    os.path.expanduser("~"), ".cache", "primus-perf", f"python{sys.version_info[0]}.{sys.version_info[1]}"
+    os.path.expanduser("~"),
+    ".cache",
+    "primus-perf",
+    f"python{sys.version_info[0]}.{sys.version_info[1]}-{sysconfig.get_platform()}",
 )
 REQUIREMENTS = (("pandas", "pandas>=1.3"), ("xlsxwriter", "XlsxWriter>=3.0.2,<4"))
+MIN_PANDAS = (1, 3)
+# Set when the script re-runs itself after installing over a half-imported library.
+REEXEC_ENV = "PRIMUS_PERF_REPORT_REEXEC"
 
 EXIT_OK, EXIT_ERROR, EXIT_NO_RUNS, EXIT_NO_DEPENDENCIES = 0, 1, 3, 4
 
@@ -71,6 +83,7 @@ BACKEND_ORDER = (
     "dlrm",
 )
 PRECISION_ORDER = ("BF16", "FP16", "FP8", "NANOO_FP8", "MXFP8", "FP4", "MXFP4", "TF32", "FP32")
+SECTION_ORDER = ("Batch", "Image and code", "Hardware", "Run settings", "Runs")
 # Run-to-run variation above this is highlighted.
 CV_WARN = 0.03
 
@@ -84,14 +97,24 @@ xlsxwriter = None
 # ---------------------------------------------------------------------------
 
 
+def _version(text: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", text)[:2])
+
+
 def _import_all() -> list[str]:
-    """Import the requirements into the module globals; return the missing ones."""
+    """Import the requirements into the module globals; return the ones that
+    are missing, broken (e.g. pandas built against another numpy) or too old."""
     missing = []
     for module, requirement in REQUIREMENTS:
         try:
-            globals()[module if module != "pandas" else "pd"] = importlib.import_module(module)
-        except ImportError:
+            imported = importlib.import_module(module)
+        except Exception:
             missing.append(requirement)
+            continue
+        if module == "pandas" and _version(getattr(imported, "__version__", "0")) < MIN_PANDAS:
+            missing.append(requirement)
+            continue
+        globals()["pd" if module == "pandas" else module] = imported
     return missing
 
 
@@ -102,15 +125,14 @@ def _use_private_site():
 
 
 def load_dependencies(allow_install: bool) -> bool:
-    """Import pandas and XlsxWriter: as installed, else from the private site
-    directory, else installed there first when allowed."""
-    missing = _import_all()
-    if missing and os.path.isdir(PRIVATE_SITE):
+    """Import pandas and XlsxWriter, the private copy first, installing it
+    when something is missing and that is allowed."""
+    if os.path.isdir(PRIVATE_SITE):
         _use_private_site()
-        missing = _import_all()
+    missing = _import_all()
     if not missing:
         return True
-    if not allow_install:
+    if not allow_install or os.environ.get(REEXEC_ENV):
         return False
     print(f"[INFO] Installing {', '.join(missing)} into {PRIVATE_SITE}", file=sys.stderr)
     cmd = [
@@ -121,8 +143,22 @@ def load_dependencies(allow_install: bool) -> bool:
         subprocess.run(cmd, check=True, timeout=600)
     except (OSError, subprocess.SubprocessError) as e:
         print(f"[ERROR] could not install {', '.join(missing)} ({e}).", file=sys.stderr)
-        print(f"        Install them yourself: python3 -m pip install --user {' '.join(repr(m) for m in missing)}", file=sys.stderr)
+        print(
+            f"        Install them with pip ({' '.join(m.split('>')[0] for m in missing)}) into a Python of your own,\n"
+            "        e.g. python3 -m venv ~/venv-perf && ~/venv-perf/bin/pip install pandas XlsxWriter,\n"
+            "        then run this script with ~/venv-perf/bin/python.",
+            file=sys.stderr,
+        )
         return False
+    # A library half-imported before the install (an unusable system copy, and
+    # the numpy under it) cannot be unloaded; start again, so the fresh copy
+    # is the one imported.
+    stale = [module for module, requirement in REQUIREMENTS if requirement in missing and module in sys.modules]
+    if "pandas>=1.3" in missing and "numpy" in sys.modules:
+        stale.append("numpy")
+    if stale:
+        os.environ[REEXEC_ENV] = "1"
+        os.execv(sys.executable, [sys.executable] + sys.argv)
     _use_private_site()
     return not _import_all()
 
@@ -131,28 +167,61 @@ def load_dependencies(allow_install: bool) -> bool:
 # Inputs
 # ---------------------------------------------------------------------------
 
+_extract_module = None
 
-def _newest_log_mtime(result_dir: str) -> float:
-    # Run logs only: the batch summary is appended to after the extraction.
-    paths = glob.glob(os.path.join(result_dir, "*.log"))
+
+def _extractor():
+    """extract_results.py, loaded once for its parser."""
+    global _extract_module
+    if _extract_module is None:
+        spec = importlib.util.spec_from_file_location(
+            "perf_extract_results", os.path.join(SCRIPT_DIR, "extract_results.py")
+        )
+        _extract_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_extract_module)
+    return _extract_module
+
+
+def _log_files(result_dir: str) -> list[str]:
+    """What extract_results.py reads: every *.txt and *.log in the directory."""
+    return sorted(glob.glob(os.path.join(result_dir, "*.txt")) + glob.glob(os.path.join(result_dir, "*.log")))
+
+
+def _newest_run_log(result_dir: str) -> float:
+    # Not the batch_*.txt snapshots: the summary is appended to after extraction.
+    paths = [p for p in _log_files(result_dir) if not os.path.basename(p).startswith("batch_")]
     return max((os.path.getmtime(p) for p in paths), default=0.0)
 
 
 def load_runs(result_dir: str) -> list[dict]:
-    """The rows of results.json, refreshed by extract_results.py when the
-    file is missing or older than the logs. Each row gets ``result_dir``."""
+    """The result rows of a directory: results.json when it is current,
+    otherwise the logs parsed here, so nothing is written into the directory
+    (a baseline may not be yours). Each row gets ``result_dir``."""
     path = os.path.join(result_dir, "results.json")
-    if not os.path.isfile(path) or os.path.getmtime(path) < _newest_log_mtime(result_dir):
-        print(f"[INFO] Refreshing {path} with extract_results.py", file=sys.stderr)
-        subprocess.run(
-            [sys.executable, os.path.join(SCRIPT_DIR, "extract_results.py"), "--quiet", result_dir],
-            stdout=subprocess.DEVNULL,
-            check=False,
-        )
-    if not os.path.isfile(path):
-        return []
-    with open(path, encoding="utf-8") as f:
-        runs = json.load(f).get("runs", [])
+    runs = None
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        current = data.get("parser_version") == _extractor().PARSER_VERSION
+        if current and os.path.getmtime(path) >= _newest_run_log(result_dir):
+            runs = data.get("runs", [])
+    if runs is None:
+        logs = _log_files(result_dir)
+        if logs:
+            print(
+                f"[INFO] {result_dir}: results.json is missing, older than the logs or from an older "
+                "parser; parsing the logs",
+                file=sys.stderr,
+            )
+        extract = _extractor()
+        runs = []
+        for log in logs:
+            try:
+                rows = extract.parse_log(log)
+            except Exception as e:  # one bad log must not lose the others
+                print(f"[WARN] could not parse {log}: {e}", file=sys.stderr)
+                continue
+            runs += [{field: r.get(field) for field in extract.CSV_FIELDS} for r in rows]
     for run in runs:
         run["result_dir"] = result_dir
     return runs
@@ -168,13 +237,17 @@ OUTCOME_RE = re.compile(r"^# Primus (?:Multi-Node )?Benchmark Batch (.+?)\s*$")
 def parse_batch_summary(path: str) -> dict:
     """Fields of one batch summary, by section: ``system`` (the environment
     snapshot), ``config`` (the batch configuration) and ``final`` (the closing
-    block), plus ``outcome`` (Complete, STOPPED: ..., INTERRUPTED, REFUSED: ...)."""
-    info: dict = {"system": {}, "config": {}, "final": {}, "outcome": None}
+    block), plus ``outcome`` (Complete, STOPPED: ..., INTERRUPTED, REFUSED: ...)
+    and ``errors`` (its [ERROR] lines)."""
+    info: dict = {"system": {}, "config": {}, "final": {}, "outcome": None, "errors": []}
     section = "system"
     parent = None
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.rstrip("\n")
+            if line.startswith("[ERROR]"):
+                info["errors"].append(line[len("[ERROR]") :].strip())
+                continue
             if line.startswith("# Batch Configuration"):
                 section = "config"
                 continue
@@ -221,6 +294,8 @@ RUN_FIELDS = (
     "transparent_hugepages", "iommu", "amdgpu_version", "rec_per_s", "step_log", "result_dir",
 )
 
+# One Performance row per distinct combination. The image (its ID, else its
+# tag) and the step count keep different builds and run lengths apart.
 GROUP_FIELDS = (
     "backend",
     "model_name",
@@ -231,6 +306,7 @@ GROUP_FIELDS = (
     "global_batch_size",
     "nnodes",
     "world_size",
+    "total_steps",
     "image",
 )
 
@@ -246,6 +322,13 @@ def _missing(value) -> bool:
     return value is None or (isinstance(value, float) and math.isnan(value))
 
 
+def _plain(value) -> str:
+    """13.0 as 13, for text."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 def throughput(run: dict) -> tuple[float | None, str | None]:
     """Per-GPU throughput and its unit: recommendations (DLRM), frames (video
     diffusion), samples (image diffusion) or tokens (language models)."""
@@ -256,18 +339,32 @@ def throughput(run: dict) -> tuple[float | None, str | None]:
     return None, None
 
 
+def short_image(run_or_entry: dict) -> str:
+    """``tag (short id)``, readable where the full ID is 71 characters."""
+    tag = run_or_entry.get("docker_image") or ""
+    image_id = run_or_entry.get("image_id") or ""
+    short = image_id.split(":", 1)[-1][:12] if image_id else ""
+    if tag and short:
+        return f"{tag} ({short})"
+    return tag or short
+
+
 def runs_frame(runs: list[dict]):
     """One row per run, with the columns the report derives: throughput and
-    unit, image, and ``counts`` (whether the run enters the averages)."""
+    unit, image (key and display), and ``counts`` (whether the run enters the
+    averages)."""
     df = pd.DataFrame(runs)
     for field in RUN_FIELDS:
         if field not in df:
             df[field] = None
     df = df.astype(object).where(df.notna(), None)
-    pairs = [throughput(r) for r in df.to_dict("records")]
+    records = df.to_dict("records")
+    pairs = [throughput(r) for r in records]
     df["throughput"] = [p[0] for p in pairs]
     df["unit"] = [p[1] for p in pairs]
-    df["image"] = [r.get("image_id") or r.get("docker_image") or "" for r in df.to_dict("records")]
+    df["image"] = [r.get("image_id") or r.get("docker_image") or "" for r in records]
+    df["image_name"] = [short_image(r) for r in records]
+    df["result_dir_name"] = [os.path.basename(r.get("result_dir") or "") for r in records]
     # A failed multi-node attempt was retried; its log is kept for debugging only.
     df["counts"] = (df["status"] == "ok") & df["failed_attempt"].isna()
     return df
@@ -289,6 +386,7 @@ def sort_frame(df):
             "_gpus": pd.to_numeric(df["world_size"], errors="coerce").fillna(0),
             "_image": df["image"].fillna("").astype(str),
             "_hash": df["config_hash"].fillna("").astype(str),
+            "_steps": pd.to_numeric(df["total_steps"], errors="coerce").fillna(0),
         },
         index=df.index,
     )
@@ -309,7 +407,7 @@ def _common(values):
             distinct.append(v)
     if not distinct:
         return None
-    return distinct[0] if len(distinct) == 1 else "; ".join(str(v) for v in distinct)
+    return distinct[0] if len(distinct) == 1 else "; ".join(_plain(v) for v in distinct)
 
 
 def _cv(values) -> float | None:
@@ -319,21 +417,33 @@ def _cv(values) -> float | None:
     return float(values.std(ddof=1) / values.mean())
 
 
+def _not_counted_label(r) -> str:
+    if not _missing(r["failed_attempt"]):
+        label = "failed attempt"
+    else:
+        label = r["status"] or "unknown"
+    reason = r["failure_reason"]
+    return f"{label}: {reason}" if reason and reason != r["status"] else label
+
+
 def _summarize(group) -> dict:
     good = group[group["counts"]]
+    skipped = group[~group["counts"]]
     units = good["unit"].dropna()
     unit = units.iloc[0] if len(units) else None
     per_gpu = good.loc[good["unit"] == unit, "throughput"].astype(float) if unit else good["throughput"].iloc[0:0]
     tflops = pd.to_numeric(good["hmean_tflops"], errors="coerce")
-    labels = [
-        ("failed attempt" if not _missing(r["failed_attempt"]) else r["status"] or "unknown")
-        + (f": {r['failure_reason']}" if r["failure_reason"] else "")
-        for _, r in group[~group["counts"]].iterrows()
-    ]
-    notes = ", ".join(f"{n} {label}" for label, n in sorted(pd.Series(labels, dtype=object).value_counts().items()))
+    counts = pd.Series([_not_counted_label(r) for _, r in skipped.iterrows()], dtype=object).value_counts()
+    notes = []
+    for label, n in sorted(counts.items()):
+        noun, _, reason = label.partition(":")
+        if n > 1 and noun == "failed attempt":
+            noun = "failed attempts"
+        notes.append(f"{n} {noun}{':' + reason if reason else ''}")
     if good.empty:
-        notes = "no successful run" + (f" ({notes})" if notes else "")
-    minutes = pd.to_numeric(good["elapsed_sec"], errors="coerce") / 60
+        notes.insert(0, "no successful run")
+    elif unit is None:
+        notes.append("no throughput in the log")
 
     def mean(series):
         series = pd.to_numeric(series, errors="coerce").dropna()
@@ -342,6 +452,8 @@ def _summarize(group) -> dict:
     return {
         "runs_ok": int(len(good)),
         "runs_total": int(len(group)),
+        # Retries of multi-node attempts that then succeeded, and nothing else.
+        "only_retries": bool(len(good) and len(skipped) and skipped["failed_attempt"].notna().all()),
         "tflops": mean(tflops),
         "throughput": mean(per_gpu),
         "unit": unit,
@@ -349,10 +461,11 @@ def _summarize(group) -> dict:
         "cv": _cv(tflops) if tflops.notna().any() else _cv(per_gpu),
         "memory_gb": mean(good["amean_memory_usage"]),
         "memory_pct": mean(good["amean_memory_usage_pct"]),
-        "steps": _common(group["total_steps"]),
-        "minutes": mean(minutes),
+        "minutes": mean(pd.to_numeric(good["elapsed_sec"], errors="coerce") / 60),
         "config_path": _common(group["config_path"]),
-        "notes": notes,
+        "docker_image": _common(group["docker_image"]),
+        "image_name": _common(group["image_name"]),
+        "notes": "; ".join(notes),
     }
 
 
@@ -372,24 +485,28 @@ def aggregate(df) -> list[dict]:
             entry["throughput"] * world_size if entry["throughput"] is not None and world_size else None
         )
         entries.append(entry)
-    return sort_frame(pd.DataFrame(entries)).astype(object).pipe(lambda f: f.where(f.notna(), None)).to_dict("records")
+    frame = sort_frame(pd.DataFrame(entries)).astype(object)
+    return frame.where(frame.notna(), None).to_dict("records")
 
 
 def pivot(entries: list[dict], value: str):
-    """Models (and GPU counts) down, precisions across, for one value of one
-    backend's Performance rows; a model and precision that ran with several
-    configs shows their mean."""
+    """``(means, counts)``: models (and GPU counts) down, precisions across,
+    for one value of one backend and image. A cell that several Performance
+    rows fall into (other config files, batch sizes or step counts) shows
+    their mean; ``counts`` says how many."""
     frame = pd.DataFrame([e for e in entries if e[value] is not None])
     if frame.empty:
-        return frame
+        return frame, frame
     frame["gpus"] = frame["world_size"].fillna(0)
     # pivot_table drops rows whose keys are missing; a config may name no precision.
     frame["precision"] = frame["precision"].fillna("(none)")
     frame["model_name"] = frame["model_name"].fillna("")
-    table = pd.pivot_table(frame, index=["model_name", "gpus"], columns="precision", values=value, aggfunc="mean")
-    columns = sorted(table.columns, key=lambda p: (_rank(str(p).upper(), PRECISION_ORDER), str(p)))
-    rows = sorted(table.index, key=lambda k: (str(k[0]).lower(), k[1]))
-    return table.loc[rows, columns]
+    keys = dict(index=["model_name", "gpus"], columns="precision", values=value)
+    means = pd.pivot_table(frame, aggfunc="mean", **keys)
+    counts = pd.pivot_table(frame, aggfunc="count", **keys)
+    columns = sorted(means.columns, key=lambda p: (_rank(str(p).upper(), PRECISION_ORDER), str(p)))
+    rows = sorted(means.index, key=lambda k: (str(k[0]).lower(), k[1]))
+    return means.loc[rows, columns], counts.loc[rows, columns]
 
 
 def match_baseline(entry: dict, baseline: list[dict]) -> tuple[dict | None, str | None]:
@@ -417,13 +534,6 @@ def match_baseline(entry: dict, baseline: list[dict]) -> tuple[dict | None, str 
     return b, f"changed (MBS {_plain(b['micro_batch_size'])}, GBS {_plain(b['global_batch_size'])})"
 
 
-def _plain(value) -> str:
-    """13.0 as 13, for text."""
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
-
-
 def _change(current: float | None, base: float | None) -> float | None:
     if current is None or not base:
         return None
@@ -435,7 +545,7 @@ def _change(current: float | None, base: float | None) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def _hms(seconds: str | None) -> str | None:
+def _hms(seconds) -> str | None:
     try:
         s = int(float(seconds))
     except (TypeError, ValueError):
@@ -443,9 +553,19 @@ def _hms(seconds: str | None) -> str | None:
     return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
 
 
-def overview_rows(stamp: str, batch: dict, runs) -> list[tuple[str, str, object]]:
+def _seconds_between(start: str | None, end: str | None) -> float | None:
+    """Seconds between two summary times like ``2026-10-15 00:27:31 CDT``."""
+    try:
+        a, b = (datetime.strptime(t[:19], "%Y-%m-%d %H:%M:%S") for t in (start, end))
+    except (TypeError, ValueError):
+        return None
+    return (b - a).total_seconds()
+
+
+def overview_rows(stamp: str, batch: dict, runs, keep_empty: bool = False) -> list[tuple[str, str, object]]:
     """``(section, label, value)`` rows describing one batch; ``runs`` is the
-    batch's slice of the runs frame."""
+    batch's slice of the runs frame. Every batch yields the same rows in the
+    same order; ``keep_empty`` keeps those without a value."""
     system, config, final = batch.get("system", {}), batch.get("config", {}), batch.get("final", {})
 
     def from_runs(field: str):
@@ -459,12 +579,17 @@ def overview_rows(stamp: str, batch: dict, runs) -> list[tuple[str, str, object]
     if from_runs("container_hip_version"):
         container = f"{container}  (HIP {from_runs('container_hip_version')})"
     dd_config = config.get("diffusion_dlrm")
+    start = config.get("Start time") or system.get("Date")
+    end = final.get("End time") or final.get("Interrupted at")
+    elapsed = final.get("Elapsed (sec)") or _seconds_between(start, end)
+    good, target = final.get("Good runs"), final.get("Target good")
     rows = [
         ("Batch", "Batch stamp", stamp),
         ("Batch", "Outcome", batch.get("outcome") or "no closing block (still running, or killed)"),
-        ("Batch", "Start time", config.get("Start time") or system.get("Date")),
-        ("Batch", "End time", final.get("End time") or final.get("Interrupted at")),
-        ("Batch", "Elapsed (h:mm:ss)", _hms(final.get("Elapsed (sec)"))),
+        ("Batch", "Errors", "; ".join(batch.get("errors", [])[:5])),
+        ("Batch", "Start time", start),
+        ("Batch", "End time", end),
+        ("Batch", "Elapsed (h:mm:ss)", _hms(elapsed)),
         ("Batch", "Result directory", config.get("RESULT_DIR") or from_runs("result_dir")),
         ("Batch", "Config source", config.get("Config source")),
         ("Batch", "Runner host", system.get("Hostname") or from_runs("host")),
@@ -497,26 +622,72 @@ def overview_rows(stamp: str, batch: dict, runs) -> list[tuple[str, str, object]
         ("Run settings", "Repetitions per config", config.get("Reps/config") or config.get("NUM_REPS (target)")),
         ("Run settings", "TRAIN_STEPS", config.get("TRAIN_STEPS")),
         ("Run settings", "Run limits", config.get("Run limits")),
-        ("Run settings", "PRIMUS_MODE", config.get("PRIMUS_MODE")),
-    ]
-    if dd_config:
-        rows += [
-            ("Run settings", "diffusion_dlrm config", dd_config),
-            ("Run settings", "diffusion_dlrm models", config.get("diffusion_dlrm Models")),
-            ("Run settings", "diffusion_dlrm HF cache", config.get("diffusion_dlrm HF cache")),
-            ("Run settings", "diffusion_dlrm limits", config.get("diffusion_dlrm Run limits")),
-        ]
-    rows += [
+        ("Run settings", "Max attempts per config", config.get("MAX_ATTEMPTS_PER_CFG")),
+        ("Run settings", "FAIL_PATTERN", config.get("FAIL_PATTERN")),
+        ("Run settings", "Launcher", config.get("Launcher mode") or config.get("PRIMUS_MODE")),
+        ("Run settings", "diffusion_dlrm config", dd_config),
+        ("Run settings", "diffusion_dlrm models", config.get("diffusion_dlrm Models")),
+        ("Run settings", "diffusion_dlrm HF cache", config.get("diffusion_dlrm HF cache")),
+        ("Run settings", "diffusion_dlrm limits", config.get("diffusion_dlrm Run limits")),
         ("Runs", "Catalog configs", config.get("Total configs")),
-        ("Runs", "Runs planned" + (" (diffusion_dlrm is one)" if dd_config else ""), config.get("Total runs")),
-        ("Runs", "Result rows" + (" (one per diffusion/DLRM model)" if dd_config else ""), len(runs)),
+        (
+            "Runs",
+            "Runs planned",
+            f"{config['Total runs']} (diffusion_dlrm counts as one)" if dd_config and config.get("Total runs")
+            else config.get("Total runs"),
+        ),
+        ("Runs", "Runs started", final.get("Total runs") or final.get("Runs started")),
+        ("Runs", "Total attempts", final.get("Total attempts")),
+        ("Runs", "Good runs", f"{good} of {target}" if good and target else good),
+        ("Runs", "Failed runs", final.get("Failed runs") or final.get("Runs failed")),
+        ("Runs", "Runs not started", final.get("Not started") if final.get("Not started") != "0" else None),
+        ("Runs", "Configs skipped", final.get("Skipped cfgs") if final.get("Skipped cfgs") != "0" else None),
+        ("Runs", "In-flight run when stopped", os.path.basename(final["In-flight run"]) if final.get("In-flight run", "<none>") != "<none>" else None),
+        (
+            "Runs",
+            "Result rows",
+            f"{len(runs)} (one per diffusion/DLRM model)" if dd_config else len(runs),
+        ),
     ]
     for status in ("ok", "failed", "interrupted", "incomplete", "unknown"):
-        if statuses.get(status):
-            rows.append(("Runs", f"Rows {status}", int(statuses[status])))
-    if final.get("Not started") not in (None, "0"):
-        rows.append(("Runs", "Runs not started", final.get("Not started")))
+        rows.append(("Runs", f"Rows {status}", int(statuses[status]) if statuses.get(status) else None))
+    if keep_empty:
+        return rows
     return [(section, label, value) for section, label, value in rows if not _missing(value) and value != ""]
+
+
+def overview_labels(per_batch: list[list[tuple]]) -> list[tuple[str, str]]:
+    """The (section, label) rows to show for these batches (from
+    overview_rows with keep_empty): in overview_rows' order, so each section
+    is one block whatever fields each batch has, and only those some batch
+    has a value for."""
+    order: list[tuple[str, str]] = []
+    filled: set[tuple[str, str]] = set()
+    for rows in per_batch:
+        for section, label, value in rows:
+            if (section, label) not in order:
+                order.append((section, label))
+            if not _missing(value) and value != "":
+                filled.add((section, label))
+    return sorted(
+        (sl for sl in order if sl in filled), key=lambda sl: (_rank(sl[0], SECTION_ORDER), order.index(sl))
+    )
+
+
+def batch_problems(batches: list[tuple[str, dict, object]]) -> list[str]:
+    """One line per batch that did not complete, or left runs unstarted."""
+    lines = []
+    for label, info, _ in batches:
+        outcome = info.get("outcome")
+        final = info.get("final", {})
+        not_started = final.get("Not started")
+        if outcome and outcome != "Complete":
+            lines.append(f"Batch {label}: {outcome}")
+        elif info and not outcome:
+            lines.append(f"Batch {label}: no closing block (still running, or killed)")
+        if not_started not in (None, "0"):
+            lines.append(f"Batch {label}: {not_started} run(s) not started")
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +699,8 @@ class Formats:
     def __init__(self, wb, out_dir: str):
         # Logs are linked relative to the report, so they open wherever the folder goes.
         self.out_dir = out_dir
-        add = wb.add_format
+        self._add = add = wb.add_format
+        self._warn_numbers: dict[int, object] = {}
         self.title = add({"bold": True, "font_size": 16})
         self.subtitle = add({"italic": True, "font_color": "#595959"})
         self.header = add(
@@ -554,19 +726,22 @@ class Formats:
         self.good = add({"bg_color": "#C6EFCE", "font_color": "#006100"})
         self.warn = add({"bg_color": "#FFEB9C", "font_color": "#9C5700"})
         self.bad_cell = add({"bg_color": "#FFC7CE", "font_color": "#9C0006", "valign": "top"})
+        self.warn_cell = add({"bg_color": "#FFEB9C", "font_color": "#9C5700", "valign": "top"})
+        self.warn_tflops = add({"bg_color": "#FFEB9C", "num_format": "#,##0.0", "valign": "top"})
         self.note = add({"italic": True, "font_color": "#595959"})
         self.pivot_head = add({"bold": True, "bg_color": "#D9E1F2", "border": 1, "align": "center"})
         self.pivot_key = add({"bold": True, "border": 1})
 
-    def number(self, value: float):
+    def number(self, value: float, warn: bool = False):
         """A number format that suits the value: 38,414 tokens/s and 0.624 frames/s."""
-        if value >= 1000:
-            return self.by_magnitude[0]
-        if value >= 100:
-            return self.by_magnitude[1]
-        if value >= 1:
-            return self.by_magnitude[2]
-        return self.by_magnitude[3]
+        digits = 0 if value >= 1000 else 1 if value >= 100 else 2 if value >= 1 else 3
+        if not warn:
+            return self.by_magnitude[digits]
+        if digits not in self._warn_numbers:
+            self._warn_numbers[digits] = self._add(
+                {"bg_color": "#FFEB9C", "num_format": self.by_magnitude[digits].num_format, "valign": "top"}
+            )
+        return self._warn_numbers[digits]
 
 
 def _native(value):
@@ -604,7 +779,8 @@ def _link(ws, row: int, col: int, target: str | None, out_dir: str):
     ws.write_url(row, col, "external:" + rel, string=os.path.basename(target))
 
 
-def _table(ws, first_row: int, columns: list[dict], rows: list[list], fmts: Formats, name: str) -> int:
+def _table(ws, first_row: int, columns: list[dict], rows: list[list], fmts: Formats, name: str,
+           freeze_cols: int = 0) -> int:
     """An Excel table (filter buttons, banded rows) with per-cell formats.
     ``columns``: {"header", "width", "fmt" (a Formats attribute name), "link"
     (True to write the value as a log link)}. Returns the last row."""
@@ -629,33 +805,37 @@ def _table(ws, first_row: int, columns: list[dict], rows: list[list], fmts: Form
                 _link(ws, r, i, value, fmts.out_dir)
             else:
                 _write(ws, r, i, value, fmt, fmts)
-    ws.freeze_panes(first_row + 1, 0)
+    ws.freeze_panes(first_row + 1, freeze_cols)
     return last_row
 
 
-def write_overview(wb, fmts: Formats, title: str, inputs: list[str], baselines: list[str],
+def _print_setup(ws, title: str, context: str):
+    """Landscape, one page wide, with the title and the images in the page header."""
+    ws.set_landscape()
+    ws.fit_to_pages(1, 0)
+    ws.set_header(f"&L{title.replace('&', '&&')}&R{context.replace('&', '&&')}"[:250])
+
+
+def write_overview(wb, fmts: Formats, title: str, inputs: list[str], baselines: list[tuple[str, str]],
                    batches: list[tuple[str, dict, object]]):
     ws = wb.add_worksheet("Overview")
     ws.write(0, 0, title, fmts.title)
     ws.write(1, 0, f"Generated {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %Z')} by tools/perf/report.py", fmts.subtitle)
     row = 3
-    for label, values in (("Results", inputs), ("Baseline", baselines)):
-        for v in values:
-            ws.write(row, 0, label, fmts.label)
-            ws.write(row, 1, v, fmts.text)
-            row += 1
+    for v in inputs:
+        ws.write(row, 0, "Results", fmts.label)
+        ws.write(row, 1, v, fmts.text)
+        row += 1
+    for path, description in baselines:
+        ws.write(row, 0, "Baseline", fmts.label)
+        ws.write(row, 1, f"{path}\n{description}", fmts.text)
+        row += 1
     row += 1
 
-    per_batch = [overview_rows(stamp, info, runs) for stamp, info, runs in batches]
-    labels: list[tuple[str, str]] = []
-    for rows in per_batch:
-        for section, label, _ in rows:
-            if (section, label) not in labels:
-                labels.append((section, label))
+    per_batch = [overview_rows(label, info, runs, keep_empty=True) for label, info, runs in batches]
     values = [{(s, l): v for s, l, v in rows} for rows in per_batch]
-
     current_section = None
-    for section, label in labels:
+    for section, label in overview_labels(per_batch):
         if section != current_section:
             ws.write(row, 0, section, fmts.section)
             for i in range(len(batches)):
@@ -670,17 +850,19 @@ def write_overview(wb, fmts: Formats, title: str, inputs: list[str], baselines: 
     row += 1
     notes = [
         "How to read the numbers:",
-        "- Performance has one row per config and averages its successful runs (status ok); "
-        "failed runs and failed multi-node attempts are left out and counted under Notes.",
+        "- Performance has one row per config (and image and step count) and averages its successful runs "
+        "(status ok); failed runs and failed multi-node attempts are left out and counted under Notes.",
+        "- Config hash: the first 8 hex digits of the config file's SHA-256, so an edited file shows up as a new row.",
         "- Within a run, Primus throughput is the harmonic mean over the steps after warmup "
         "(at least the first three logged steps are dropped).",
         "- Diffusion and DLRM numbers are diffusion_bench's own averages (they match its summary.md).",
         "- Throughput is per GPU: tokens/s (language models), samples/s or frames/s (diffusion), "
         "recommendations/s (DLRM). 'All GPUs' multiplies it by the GPU count.",
         "- Run-to-run CV is the spread between repetitions (stdev / mean), shown from two successful runs; "
-        f"above {CV_WARN:.0%} it is highlighted.",
-        "- Pivot puts precisions side by side for each model; a model and precision run with several "
-        "configs shows their mean.",
+        f"above {CV_WARN:.0%} it is highlighted. Step-to-step CV (Runs sheet) is the spread within one run.",
+        "- GPU memory is as the backend logs it: GB for Megatron, GiB for TorchTitan.",
+        "- Pivot puts precisions side by side for each model; an amber cell is the mean of several "
+        "Performance rows (other configs or step counts).",
         "- Runs lists every run as an Excel table; Insert > PivotTable on it for other views.",
     ]
     for line in notes:
@@ -700,11 +882,12 @@ def performance_columns(with_image: bool, with_baseline: bool) -> list[dict]:
         {"header": "Seq len", "width": 8, "fmt": "int"},
         {"header": "MBS", "width": 7},
         {"header": "GBS", "width": 8},
+        {"header": "Steps", "width": 7},
         {"header": "Nodes", "width": 7, "fmt": "int"},
         {"header": "GPUs", "width": 6, "fmt": "int"},
     ]
     if with_image:
-        columns.append({"header": "Image", "width": 22})
+        columns.append({"header": "Image", "width": 34})
     columns += [
         {"header": "Runs ok / total", "width": 9},
         {"header": "TFLOP/s per GPU", "width": 10, "fmt": "tflops"},
@@ -712,9 +895,8 @@ def performance_columns(with_image: bool, with_baseline: bool) -> list[dict]:
         {"header": "Throughput unit", "width": 17},
         {"header": "Throughput, all GPUs", "width": 13},
         {"header": "Run-to-run CV", "width": 9, "fmt": "pct"},
-        {"header": "GPU memory (GB)", "width": 9, "fmt": "tflops"},
+        {"header": "GPU memory", "width": 9, "fmt": "tflops"},
         {"header": "GPU memory (%)", "width": 9, "fmt": "tflops"},
-        {"header": "Steps", "width": 7},
         {"header": "Minutes per run", "width": 9, "fmt": "minutes"},
     ]
     if with_baseline:
@@ -732,7 +914,8 @@ def performance_columns(with_image: bool, with_baseline: bool) -> list[dict]:
     return columns
 
 
-def write_performance(wb, fmts: Formats, entries: list[dict], baseline: list[dict] | None, threshold: float):
+def write_performance(wb, fmts: Formats, entries: list[dict], baseline: list[dict] | None, threshold: float,
+                      title: str, context: str):
     ws = wb.add_worksheet("Performance")
     with_image = len({e["image"] for e in entries}) > 1
     columns = performance_columns(with_image, baseline is not None)
@@ -740,13 +923,13 @@ def write_performance(wb, fmts: Formats, entries: list[dict], baseline: list[dic
     for e in entries:
         values = [
             e["backend"], e["model_name"], e["precision"], e["config_hash"], e["seq_len"],
-            e["micro_batch_size"], e["global_batch_size"], e["nnodes"], e["world_size"],
+            e["micro_batch_size"], e["global_batch_size"], e["total_steps"], e["nnodes"], e["world_size"],
         ]
         if with_image:
-            values.append(e["image"])
+            values.append(e["image_name"])
         values += [
             f"{e['runs_ok']} / {e['runs_total']}", e["tflops"], e["throughput"], e["unit"],
-            e["throughput_total"], e["cv"], e["memory_gb"], e["memory_pct"], e["steps"], e["minutes"],
+            e["throughput_total"], e["cv"], e["memory_gb"], e["memory_pct"], e["minutes"],
         ]
         if baseline is not None:
             base, how = match_baseline(e, baseline)
@@ -760,79 +943,95 @@ def write_performance(wb, fmts: Formats, entries: list[dict], baseline: list[dic
             ]
         values += [e["notes"], e["config_path"]]
         rows.append(values)
-    last = _table(ws, 0, columns, rows, fmts, "PerformanceTable")
+    last = _table(ws, 0, columns, rows, fmts, "PerformanceTable", freeze_cols=3)
 
     headers = [c["header"] for c in columns]
     col = headers.index("Run-to-run CV")
     ws.conditional_format(1, col, last, col, {"type": "cell", "criteria": ">", "value": CV_WARN, "format": fmts.warn})
-    # A config with runs that did not count: its runs cell stands out.
+    # A config with runs that did not count stands out: amber when they were
+    # multi-node attempts that a retry made good, red otherwise.
     col = headers.index("Runs ok / total")
     for r, e in enumerate(entries, start=1):
         if e["runs_ok"] < e["runs_total"]:
-            ws.write_string(r, col, f"{e['runs_ok']} / {e['runs_total']}", fmts.bad_cell)
+            fmt = fmts.warn_cell if e["only_retries"] else fmts.bad_cell
+            ws.write_string(r, col, f"{e['runs_ok']} / {e['runs_total']}", fmt)
     if baseline is not None:
         for name in ("TFLOP/s change", "Throughput change"):
             col = headers.index(name)
             ws.conditional_format(1, col, last, col, {"type": "cell", "criteria": "<", "value": -threshold, "format": fmts.bad})
             ws.conditional_format(1, col, last, col, {"type": "cell", "criteria": ">", "value": threshold, "format": fmts.good})
     ws.set_row(0, 45)
+    _print_setup(ws, title, context)
 
 
-def _write_pivot(ws, fmts: Formats, row: int, title: str, table, number_fmt=None, units: dict | None = None) -> int:
+def _write_pivot(ws, fmts: Formats, row: int, title: str, means, counts, number_fmt=None,
+                 units: dict | None = None) -> int:
     """One pivot block: model / GPUs rows by precision columns. ``units``
     adds a unit column, for a backend whose models report different ones."""
     ws.write(row, 0, title, fmts.section)
     row += 1
-    heads = ["Model", "GPUs"] + (["Unit"] if units is not None else []) + [str(p) for p in table.columns]
+    heads = ["Model", "GPUs"] + (["Unit"] if units is not None else []) + [str(p) for p in means.columns]
     for i, h in enumerate(heads):
         ws.write(row, i, h, fmts.pivot_head)
     row += 1
-    first = len(heads) - len(table.columns)
-    for (model, gpus), values in table.iterrows():
+    first = len(heads) - len(means.columns)
+    for (model, gpus), values in means.iterrows():
         ws.write(row, 0, model, fmts.pivot_key)
         _write(ws, row, 1, gpus, fmts.int, fmts)
         if units is not None:
             ws.write(row, 2, units.get(model) or "")
-        for i, value in enumerate(values):
-            _write(ws, row, first + i, value, number_fmt, fmts)
+        for i, (precision, value) in enumerate(values.items()):
+            value = _native(value)
+            several = value is not None and (_native(counts.loc[(model, gpus), precision]) or 0) > 1
+            if number_fmt is not None:
+                fmt = fmts.warn_tflops if several else number_fmt
+            else:
+                fmt = fmts.number(value, warn=several) if value is not None else None
+            _write(ws, row, first + i, value, fmt, fmts)
         row += 1
     return row + 1
 
 
-def write_pivot(wb, fmts: Formats, entries: list[dict]):
-    """Per backend, the TFLOP/s and throughput of each model by precision."""
-    backends = []
+def write_pivot(wb, fmts: Formats, entries: list[dict], title: str, context: str):
+    """Per backend (and image, when there are several), the TFLOP/s and
+    throughput of each model by precision."""
+    several_images = len({e["image"] for e in entries}) > 1
+    groups: list[tuple[str, str]] = []
     for e in entries:
-        if e["backend"] not in backends:
-            backends.append(e["backend"])
+        key = (e["backend"], e["image"] if several_images else "")
+        if key not in groups:
+            groups.append(key)
     blocks = []
-    for backend in backends:
-        sub = [e for e in entries if e["backend"] == backend]
-        tflops, tput = pivot(sub, "tflops"), pivot(sub, "throughput")
+    for backend, image in groups:
+        sub = [e for e in entries if e["backend"] == backend and (not several_images or e["image"] == image)]
+        (tflops, tflops_n), (tput, tput_n) = pivot(sub, "tflops"), pivot(sub, "throughput")
         if tflops.empty and tput.empty:
             continue
         units = sorted({e["unit"] for e in sub if e["unit"]})
         model_units = {e["model_name"]: e["unit"] for e in sub if e["unit"]}
-        blocks.append((backend, tflops, tput, units, model_units))
+        heading = backend + (f"  -  {sub[0]['image_name']}" if several_images else "")
+        blocks.append((heading, tflops, tflops_n, tput, tput_n, units, model_units))
     if not blocks:
         return
     ws = wb.add_worksheet("Pivot")
-    ws.write(0, 0, "Mean over successful runs; precisions side by side", fmts.subtitle)
+    ws.write(0, 0, "Mean over successful runs; precisions side by side. Amber: the mean of several "
+                   "Performance rows (other configs or step counts).", fmts.subtitle)
     row = 2
-    for backend, tflops, tput, units, model_units in blocks:
-        ws.write(row, 0, backend, fmts.title)
+    for heading, tflops, tflops_n, tput, tput_n, units, model_units in blocks:
+        ws.write(row, 0, heading, fmts.title)
         row += 1
         if not tflops.empty:
-            row = _write_pivot(ws, fmts, row, "TFLOP/s per GPU", tflops, fmts.tflops)
+            row = _write_pivot(ws, fmts, row, "TFLOP/s per GPU", tflops, tflops_n, fmts.tflops)
         if not tput.empty:
             if len(units) == 1:
-                row = _write_pivot(ws, fmts, row, f"Throughput per GPU ({units[0]})", tput)
+                row = _write_pivot(ws, fmts, row, f"Throughput per GPU ({units[0]})", tput, tput_n)
             else:
-                row = _write_pivot(ws, fmts, row, "Throughput per GPU", tput, None, model_units)
+                row = _write_pivot(ws, fmts, row, "Throughput per GPU", tput, tput_n, None, model_units)
         row += 1
     ws.set_column(0, 0, 26)
     ws.set_column(1, 1, 6)
     ws.set_column(2, 12, 13)
+    _print_setup(ws, title, context)
 
 
 RUN_COLUMNS = [
@@ -856,11 +1055,13 @@ RUN_COLUMNS = [
     {"header": "Steps", "width": 7, "key": "total_steps", "fmt": "int"},
     {"header": "Steps measured", "width": 9, "key": "num_post_warmup", "fmt": "int"},
     {"header": "Step-to-step CV", "width": 9, "key": "tflops_cv", "fmt": "pct"},
-    {"header": "GPU memory (GB)", "width": 9, "key": "amean_memory_usage", "fmt": "tflops"},
+    {"header": "GPU memory", "width": 9, "key": "amean_memory_usage", "fmt": "tflops"},
     {"header": "Elapsed (s)", "width": 9, "key": "elapsed_sec", "fmt": "int"},
     {"header": "Exit code", "width": 6, "key": "exit_code", "fmt": "int"},
+    {"header": "Image", "width": 34, "key": "image_name"},
     {"header": "Host", "width": 16, "key": "host"},
     {"header": "Started", "width": 22, "key": "timestamp"},
+    {"header": "Result dir", "width": 24, "key": "result_dir_name"},
     {"header": "Log", "width": 40, "key": "_log", "link": True},
     {"header": "Step log", "width": 30, "key": "_step_log", "link": True},
     {"header": "Config", "width": 60, "key": "config_path"},
@@ -877,7 +1078,7 @@ def _run_values(run: dict, columns: list[dict]) -> list:
 
 def write_runs(wb, fmts: Formats, runs: list[dict]):
     ws = wb.add_worksheet("Runs")
-    last = _table(ws, 0, RUN_COLUMNS, [_run_values(r, RUN_COLUMNS) for r in runs], fmts, "RunsTable")
+    last = _table(ws, 0, RUN_COLUMNS, [_run_values(r, RUN_COLUMNS) for r in runs], fmts, "RunsTable", freeze_cols=4)
     col = [c["header"] for c in RUN_COLUMNS].index("Status")
     ws.conditional_format(1, col, last, col, {"type": "cell", "criteria": "!=", "value": '"ok"', "format": fmts.bad})
     ws.set_row(0, 30)
@@ -900,17 +1101,25 @@ ISSUE_COLUMNS = [
 ]
 
 
-def write_issues(wb, fmts: Formats, runs: list[dict]):
+def write_issues(wb, fmts: Formats, runs: list[dict], problems: list[str]):
     ws = wb.add_worksheet("Issues")
     failed = [r for r in runs if not r["counts"]]
+    row = 0
+    if problems:
+        ws.write(row, 0, "Batches", fmts.section)
+        row += 1
+        for line in problems:
+            ws.write(row, 0, line)
+            row += 1
+        row += 1
     if failed:
-        last = _table(ws, 0, ISSUE_COLUMNS, [_run_values(r, ISSUE_COLUMNS) for r in failed], fmts, "IssuesTable")
-        ws.set_row(0, 30)
+        last = _table(ws, row, ISSUE_COLUMNS, [_run_values(r, ISSUE_COLUMNS) for r in failed], fmts, "IssuesTable")
+        ws.set_row(row, 30)
     else:
-        ws.write(0, 0, f"All {len(runs)} runs passed.", fmts.title)
+        ws.write(row, 0, f"All {len(runs)} result rows passed.", fmts.title)
         ws.set_column(0, 0, 90)
         ws.set_column(1, 1, 60)
-        last = 0
+        last = row
 
     warnings: dict[str, list[str]] = {}
     for r in runs:
@@ -931,18 +1140,33 @@ def write_issues(wb, fmts: Formats, runs: list[dict]):
             row += 1
 
 
-def write_chart(wb, fmts: Formats, entries: list[dict], baseline: list[dict] | None):
-    data = []
+def chart_labels(entries: list[dict]) -> list[str]:
+    """``backend: model precision``, with the GPU count when not 8, the image
+    when there are several, and the config hash when that still repeats."""
+    several_images = len({e["image"] for e in entries}) > 1
+    labels = []
     for e in entries:
-        if e["tflops"] is None:
-            continue
-        label = " ".join(str(v) for v in (e["model_name"], e["precision"]) if v)
+        label = f"{e['backend']}: " + " ".join(str(v) for v in (e["model_name"], e["precision"]) if v)
         if e["world_size"] and e["world_size"] != 8:
-            label += f" ({e['world_size']} GPUs)"
-        base = match_baseline(e, baseline)[0] if baseline is not None else None
-        data.append((f"{e['backend']}: {label}", e["tflops"], base["tflops"] if base else None))
-    if not data:
+            label += f" ({_plain(e['world_size'])} GPUs)"
+        if several_images:
+            label += f" [{e['docker_image'] or e['image_name']}]"
+        labels.append(label)
+    repeated = {l for l in labels if labels.count(l) > 1}
+    return [
+        f"{l} #{e['config_hash']}" + (f" {_plain(e['total_steps'])} steps" if e["total_steps"] else "") if l in repeated else l
+        for l, e in zip(labels, entries)
+    ]
+
+
+def write_chart(wb, fmts: Formats, entries: list[dict], baseline: list[dict] | None):
+    plotted = [e for e in entries if e["tflops"] is not None]
+    if not plotted:
         return
+    data = []
+    for label, e in zip(chart_labels(plotted), plotted):
+        base = match_baseline(e, baseline)[0] if baseline is not None else None
+        data.append((label, e["tflops"], base["tflops"] if base else None))
     ws = wb.add_worksheet("Chart")
     ws.write_row(0, 0, ["Config", "TFLOP/s per GPU"] + (["Baseline"] if baseline is not None else []), fmts.header)
     for i, (label, value, base) in enumerate(data, start=1):
@@ -950,7 +1174,7 @@ def write_chart(wb, fmts: Formats, entries: list[dict], baseline: list[dict] | N
         ws.write_number(i, 1, value, fmts.tflops)
         if baseline is not None:
             _write(ws, i, 2, base, fmts.tflops)
-    ws.set_column(0, 0, 42)
+    ws.set_column(0, 0, 48)
     ws.set_column(1, 2, 14)
 
     chart = wb.add_chart({"type": "bar"})
@@ -989,47 +1213,81 @@ def write_chart(wb, fmts: Formats, entries: list[dict], baseline: list[dict] | N
 # ---------------------------------------------------------------------------
 
 
+def _describe_baseline(runs: list[dict]) -> str:
+    """Image, code and batches of a baseline, which the change columns depend on."""
+    images = _common(short_image(r) for r in runs) or "image unknown"
+    commits = _common(r.get("primus_commit") for r in runs) or "commit unknown"
+    stamps = _common(r.get("batch_stamp") for r in runs) or "no batch stamp"
+    return f"{images}; Primus {commits}; batch {stamps}"
+
+
+def _unique(paths: list[str]) -> list[str]:
+    out = []
+    for p in paths:
+        p = os.path.realpath(p)
+        if p not in out:
+            out.append(p)
+    return out
+
+
 def build_report(out_path: str, inputs: list[str], baselines: list[str], threshold: float,
                  title: str | None) -> tuple[int, int]:
     all_runs: list[dict] = []
-    summaries: dict[str, dict] = {}
+    batches = []
     for d in inputs:
-        all_runs += load_runs(d)
-        summaries.update(load_batches(d))
+        dir_runs = load_runs(d)
+        all_runs += dir_runs
+        summaries = load_batches(d)
+        stamps = list(summaries) + sorted({r.get("batch_stamp") for r in dir_runs if r.get("batch_stamp")} - set(summaries))
+        for stamp in stamps:
+            label = stamp if len(inputs) == 1 else f"{stamp}  ({os.path.basename(d)})"
+            batches.append((label, summaries.get(stamp, {}), d, stamp))
     if not all_runs:
         return 0, 0
     df = sort_frame(runs_frame(all_runs))
-
-    batches = []
-    stamps = list(summaries) + sorted(set(df["batch_stamp"].dropna()) - set(summaries))
-    for stamp in stamps:
-        batches.append((stamp, summaries.get(stamp, {}), df[df["batch_stamp"] == stamp]))
-    if df["batch_stamp"].isna().any():
-        batches.append(("(no batch stamp)", {}, df[df["batch_stamp"].isna()]))
+    batch_rows = []
+    for label, info, d, stamp in batches:
+        batch_rows.append((label, info, df[(df["result_dir"] == d) & (df["batch_stamp"] == stamp)]))
+    orphans = df[df["batch_stamp"].isna()]
+    if len(orphans):
+        batch_rows.append(("(no batch stamp)", {}, orphans))
 
     baseline_entries = None
+    baseline_notes = []
     if baselines:
         baseline_runs = []
         for d in baselines:
-            baseline_runs += load_runs(d)
+            runs = load_runs(d)
+            baseline_runs += runs
+            baseline_notes.append((d, _describe_baseline(runs) if runs else "no runs found"))
         baseline_entries = aggregate(runs_frame(baseline_runs)) if baseline_runs else []
     entries = aggregate(df)
     runs = df.to_dict("records")
+    title = title or "Primus performance report"
+    context = _common(df["image_name"]) or ""
 
     # Written beside the final name and renamed over it, so an interrupted
     # run never leaves a truncated report in place of the previous one.
     tmp = out_path + ".tmp.xlsx"
     wb = xlsxwriter.Workbook(tmp)
-    fmts = Formats(wb, os.path.dirname(os.path.abspath(out_path)))
-    write_overview(wb, fmts, title or "Primus performance report", inputs, baselines, batches)
-    write_performance(wb, fmts, entries, baseline_entries, threshold)
-    write_pivot(wb, fmts, entries)
-    write_runs(wb, fmts, runs)
-    write_issues(wb, fmts, runs)
-    write_chart(wb, fmts, entries, baseline_entries)
-    wb.close()
-    os.replace(tmp, out_path)
+    fmts = Formats(wb, os.path.dirname(out_path))
+    try:
+        write_overview(wb, fmts, title, inputs, baseline_notes, batch_rows)
+        write_performance(wb, fmts, entries, baseline_entries, threshold, title, str(context))
+        write_pivot(wb, fmts, entries, title, str(context))
+        write_runs(wb, fmts, runs)
+        write_issues(wb, fmts, runs, batch_problems(batch_rows))
+        write_chart(wb, fmts, entries, baseline_entries)
+        wb.close()
+        os.replace(tmp, out_path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     return len(entries), len(runs)
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1050,8 +1308,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    inputs = [os.path.abspath(d) for d in args.result_dirs]
-    baselines = [os.path.abspath(d) for d in args.baseline]
+    inputs = _unique(args.result_dirs)
+    baselines = _unique(args.baseline)
     for d in inputs + baselines:
         if not os.path.isdir(d):
             print(f"[ERROR] not a directory: {d}", file=sys.stderr)
@@ -1063,24 +1321,32 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("[ERROR] with several result directories, name the report with -o FILE.xlsx", file=sys.stderr)
         return EXIT_ERROR
+    if not os.path.isdir(os.path.dirname(out_path)):
+        print(f"[ERROR] the report's directory does not exist: {os.path.dirname(out_path)}", file=sys.stderr)
+        return EXIT_ERROR
 
     if not load_dependencies(allow_install=not args.no_install):
         print(
-            f"[INFO] pandas or XlsxWriter is not installed; run python3 {os.path.relpath(__file__)} "
-            f"{args.result_dirs[0]} once to install them into {PRIVATE_SITE}.",
+            f"[INFO] pandas or XlsxWriter is missing or unusable; run report.py once without --no-install "
+            f"to install them into {PRIVATE_SITE}.",
             file=sys.stderr,
         )
         return EXIT_NO_DEPENDENCIES
 
+    # XlsxWriter reports an unwritable file with its own exception, not OSError.
+    write_errors = (OSError,)
+    exceptions = getattr(xlsxwriter, "exceptions", None)
+    if exceptions is not None and hasattr(exceptions, "XlsxWriterException"):
+        write_errors += (exceptions.XlsxWriterException,)
     try:
-        configs, runs = build_report(out_path, inputs, baselines, args.threshold / 100, args.title)
-    except OSError as e:
+        configs, rows = build_report(out_path, inputs, baselines, args.threshold / 100, args.title)
+    except write_errors as e:
         print(f"[ERROR] could not write {out_path}: {e}", file=sys.stderr)
         return EXIT_ERROR
-    if not runs:
+    if not rows:
         print(f"No runs to report in {', '.join(inputs)}")
         return EXIT_NO_RUNS
-    print(f"Report written to: {out_path}  ({configs} configs, {runs} runs)")
+    print(f"Report written to: {out_path}  ({_plural(configs, 'config')}, {_plural(rows, 'result row')})")
     return EXIT_OK
 
 

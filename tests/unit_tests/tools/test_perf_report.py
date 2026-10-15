@@ -91,12 +91,24 @@ def test_repetitions_are_averaged_over_successful_runs_only():
 
 
 def test_failed_multinode_attempts_do_not_count():
-    runs = [run(), run(repeat=1, attempt=1, failed_attempt=1, status="failed", failure_reason="timeout")]
+    runs = [
+        run(),
+        run(repeat=1, attempt=1, failed_attempt=1, status="failed", failure_reason="timeout"),
+        run(repeat=1, attempt=2, failed_attempt=2, status="failed", failure_reason="timeout"),
+    ]
     (entry,) = report.aggregate(report.runs_frame(runs))
-    assert (entry["runs_ok"], entry["runs_total"]) == (1, 2)
-    assert entry["notes"] == "1 failed attempt: timeout"
+    assert (entry["runs_ok"], entry["runs_total"]) == (1, 3)
+    assert entry["notes"] == "2 failed attempts: timeout"
+    # Only retries were lost, so the runs cell is amber rather than red.
+    assert entry["only_retries"] is True
     # One successful run: no run-to-run spread to show.
     assert entry["cv"] is None
+
+
+def test_runs_of_different_lengths_are_separate_configs():
+    runs = [run(total_steps=50, elapsed_sec=720), run(total_steps=10, elapsed_sec=240)]
+    entries = report.aggregate(report.runs_frame(runs))
+    assert [(e["total_steps"], e["minutes"]) for e in entries] == [(10, 4.0), (50, 12.0)]
 
 
 def test_configs_split_by_config_file_and_image_and_sort_by_backend():
@@ -123,7 +135,14 @@ def test_configs_split_by_config_file_and_image_and_sort_by_backend():
 def test_config_without_successful_runs_says_so():
     (entry,) = report.aggregate(report.runs_frame([run(status="interrupted", failure_reason="interrupted")]))
     assert entry["tflops"] is None
-    assert entry["notes"] == "no successful run (1 interrupted: interrupted)"
+    # The reason is not repeated when it is the status.
+    assert entry["notes"] == "no successful run; 1 interrupted"
+
+
+def test_backend_without_throughput_says_so():
+    (entry,) = report.aggregate(report.runs_frame([run(backend="megatron_bridge", hmean_tps_per_gpu=None)]))
+    assert entry["unit"] is None
+    assert entry["notes"] == "no throughput in the log"
 
 
 def test_pivot_puts_precisions_side_by_side():
@@ -132,15 +151,38 @@ def test_pivot_puts_precisions_side_by_side():
             [
                 run(precision="FP8", config_hash="b", hmean_tflops=1500.0),
                 run(precision="BF16", hmean_tflops=1100.0),
+                run(precision="BF16", config_hash="edited", hmean_tflops=1000.0),
                 run(model_name="mamba_370M", precision=None, config_hash="c", hmean_tflops=300.0),
             ]
         )
     )
-    table = report.pivot(entries, "tflops")
-    assert list(table.columns) == ["BF16", "FP8", "(none)"]
-    assert table.loc[("llama3.1_8B", 8), "FP8"] == pytest.approx(1500.0)
+    means, counts = report.pivot(entries, "tflops")
+    assert list(means.columns) == ["BF16", "FP8", "(none)"]
+    assert means.loc[("llama3.1_8B", 8), "FP8"] == pytest.approx(1500.0)
+    # Two Performance rows fall into one cell: their mean, and the count to flag it.
+    assert means.loc[("llama3.1_8B", 8), "BF16"] == pytest.approx(1050.0)
+    assert counts.loc[("llama3.1_8B", 8), "BF16"] == 2
     # A model with no precision in its name still appears.
-    assert table.loc[("mamba_370M", 8), "(none)"] == pytest.approx(300.0)
+    assert means.loc[("mamba_370M", 8), "(none)"] == pytest.approx(300.0)
+
+
+def test_chart_labels_tell_images_and_configs_apart():
+    entries = report.aggregate(
+        report.runs_frame(
+            [
+                run(),
+                run(docker_image="rocm/primus:v26.7", image_id="sha256:old"),
+                run(config_hash="edited"),
+                run(world_size=16, nnodes=2),
+            ]
+        )
+    )
+    labels = report.chart_labels(entries)
+    assert "megatron: llama3.1_8B BF16 [rocm/primus:v26.7]" in labels
+    assert "megatron: llama3.1_8B BF16 (16 GPUs) [rocm/primus:v26.8]" in labels
+    # Same model, precision and image: the config hash tells them apart.
+    assert sum(label.startswith("megatron: llama3.1_8B BF16 [rocm/primus:v26.8] #") for label in labels) == 2
+    assert len(set(labels)) == len(labels)
 
 
 def test_baseline_prefers_the_same_config():
@@ -233,6 +275,53 @@ def test_interrupted_and_multinode_summaries(tmp_path):
     assert rows["Repetitions per config"] == "2"
 
 
+def test_refused_batch_shows_its_errors_and_lines_up_with_others(tmp_path):
+    refused = tmp_path / "refused.txt"
+    refused.write_text(
+        "# Hostname       : node-1\n[ERROR] GPU 3 is busy (61000 MiB in use)\n"
+        "# Primus Benchmark Batch REFUSED: a pre-run check failed (see above)\n"
+    )
+    complete = tmp_path / "complete.txt"
+    complete.write_text(SINGLE_NODE_SUMMARY)
+    refused_info, complete_info = report.parse_batch_summary(str(refused)), report.parse_batch_summary(str(complete))
+    per_batch = [
+        report.overview_rows("a", refused_info, report.runs_frame([run()]).iloc[0:0], keep_empty=True),
+        report.overview_rows("b", complete_info, report.runs_frame([run()]), keep_empty=True),
+    ]
+    assert dict((l, v) for _, l, v in per_batch[0])["Errors"] == "GPU 3 is busy (61000 MiB in use)"
+    # One block per section and rows in one order, whichever batch has which fields.
+    labels = report.overview_labels(per_batch)
+    sections = [section for section, _ in labels]
+    assert sections == sorted(sections, key=report.SECTION_ORDER.index)
+    runs_rows = [label for section, label in labels if section == "Runs"]
+    assert runs_rows.index("Runs planned") < runs_rows.index("Result rows")
+    # A row no batch has a value for is left out.
+    assert ("Run settings", "FAIL_PATTERN") not in labels
+    problems = report.batch_problems([("a", refused_info, None), ("b", complete_info, None)])
+    assert problems == ["Batch a: REFUSED: a pre-run check failed (see above)"]
+
+
+def test_stale_results_are_parsed_without_writing(tmp_path, monkeypatch):
+    class FakeExtractor:
+        PARSER_VERSION = 4
+        CSV_FIELDS = ("filename", "backend", "status")
+
+        @staticmethod
+        def parse_log(path):
+            return [{"filename": Path(path).name, "backend": "megatron", "status": "ok", "extra": 1}]
+
+    monkeypatch.setattr(report, "_extractor", lambda: FakeExtractor)
+    (tmp_path / "results.json").write_text(json.dumps({"parser_version": 3, "runs": [{"filename": "old"}]}))
+    (tmp_path / "a.log").write_text("log\n")
+    before = (tmp_path / "results.json").read_text()
+    runs = report.load_runs(str(tmp_path))
+    # An older parser's results are not trusted; the logs are parsed again ...
+    assert [r["filename"] for r in runs] == ["a.log"]
+    assert set(runs[0]) == {"filename", "backend", "status", "result_dir"}
+    # ... and nothing is written into the directory.
+    assert (tmp_path / "results.json").read_text() == before
+
+
 def test_report_is_written(tmp_path, monkeypatch):
     xlsxwriter = pytest.importorskip("xlsxwriter")
     monkeypatch.setattr(report, "xlsxwriter", xlsxwriter, raising=False)
@@ -241,10 +330,11 @@ def test_report_is_written(tmp_path, monkeypatch):
     results.mkdir()
     (results / "x.log").write_text("log\n")
     rows = [run(repeat=1), run(repeat=2, hmean_tflops=1200.0), run(repeat=3, status="failed", failure_reason="oom")]
-    (results / "results.json").write_text(json.dumps({"parser_version": 4, "runs": rows}))
+    (results / "results.json").write_text(json.dumps({"parser_version": report._extractor().PARSER_VERSION, "runs": rows}))
     (results / "batch_summary_20261015-002731.txt").write_text(SINGLE_NODE_SUMMARY)
 
-    assert report.main([str(results), "--baseline", str(results)]) == report.EXIT_OK
+    # Named twice: counted once.
+    assert report.main([str(results), str(results), "--baseline", str(results)]) == report.EXIT_OK
     out = results / "report.xlsx"
     with zipfile.ZipFile(out) as z:
         workbook = z.read("xl/workbook.xml").decode()
@@ -260,8 +350,9 @@ def test_report_is_written(tmp_path, monkeypatch):
     assert first["Baseline config"] == "same"
     assert not list(results.glob("*.tmp.xlsx"))
 
-    assert report.main([str(results), str(results)]) == report.EXIT_ERROR  # several inputs need -o
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    (empty / "results.json").write_text(json.dumps({"runs": []}))
-    assert report.main([str(empty)]) == report.EXIT_NO_RUNS
+    other = tmp_path / "other"
+    other.mkdir()
+    assert report.main([str(results), str(other)]) == report.EXIT_ERROR  # several inputs need -o
+    assert report.main([str(results), "-o", str(tmp_path / "missing" / "r.xlsx")]) == report.EXIT_ERROR
+    (other / "results.json").write_text(json.dumps({"parser_version": report._extractor().PARSER_VERSION, "runs": []}))
+    assert report.main([str(other)]) == report.EXIT_NO_RUNS
