@@ -20,16 +20,13 @@ result directory when there is one) with these sheets:
 
 * Overview     per batch: outcome, image, code, hardware, host settings, run
                settings and run counts.
-* Performance  one row per config: backend, model, precision, config hash,
-               sequence length, batch sizes, steps, and the averages over its
-               successful runs of TFLOP/s per GPU and throughput (tokens,
-               samples or frames per second, or DLRM recommendations).
-               With --baseline, the baseline's numbers and the change.
-* Pivot        per backend (and image), models down and precisions across:
-               TFLOP/s per GPU, then throughput per GPU.
+* Performance  one row per config (backend, model, precision, config hash,
+               sequence length, MBS, GBS, nodes, GPUs, image), with the
+               averages over its successful runs of TFLOP/s per GPU and
+               throughput (tokens, samples or frames per second, or DLRM
+               recommendations). With --baseline, the baseline's numbers and
+               the change.
 * Runs         every run, as an Excel table: the source for PivotTables.
-* Issues       runs that did not pass, batches that did not complete, and
-               library version warnings.
 * Chart        TFLOP/s per GPU for each config.
 
 Needs pandas and XlsxWriter. A copy installed in ~/.cache/primus-perf/
@@ -294,8 +291,9 @@ RUN_FIELDS = (
     "transparent_hugepages", "iommu", "amdgpu_version", "rec_per_s", "step_log", "result_dir",
 )
 
-# One Performance row per distinct combination. The image (its ID, else its
-# tag) and the step count keep different builds and run lengths apart.
+# One Performance row per distinct combination; the image is its ID (its tag
+# when the ID is unknown). Replicates with different step counts still share
+# a row.
 GROUP_FIELDS = (
     "backend",
     "model_name",
@@ -306,7 +304,6 @@ GROUP_FIELDS = (
     "global_batch_size",
     "nnodes",
     "world_size",
-    "total_steps",
     "image",
 )
 
@@ -462,6 +459,8 @@ def _summarize(group) -> dict:
         "memory_gb": mean(good["amean_memory_usage"]),
         "memory_pct": mean(good["amean_memory_usage_pct"]),
         "minutes": mean(pd.to_numeric(good["elapsed_sec"], errors="coerce") / 60),
+        # Every step count the replicates ran, e.g. "10; 50".
+        "total_steps": _common(group["total_steps"]),
         "config_path": _common(group["config_path"]),
         "docker_image": _common(group["docker_image"]),
         "image_name": _common(group["image_name"]),
@@ -471,8 +470,9 @@ def _summarize(group) -> dict:
 
 def aggregate(df) -> list[dict]:
     """One entry per config (GROUP_FIELDS), with the means over its
-    successful runs. Setup and download rows of a diffusion_dlrm run (backend
-    diffusion_dlrm) are not configs and only appear under Issues."""
+    successful runs only; the others are counted and named in the notes.
+    Setup and download rows of a diffusion_dlrm run (backend diffusion_dlrm)
+    are not configs and only appear in Runs."""
     configs = df[df["backend"].notna() & (df["backend"] != "diffusion_dlrm")]
     if configs.empty:
         return []
@@ -487,26 +487,6 @@ def aggregate(df) -> list[dict]:
         entries.append(entry)
     frame = sort_frame(pd.DataFrame(entries)).astype(object)
     return frame.where(frame.notna(), None).to_dict("records")
-
-
-def pivot(entries: list[dict], value: str):
-    """``(means, counts)``: models (and GPU counts) down, precisions across,
-    for one value of one backend and image. A cell that several Performance
-    rows fall into (other config files, batch sizes or step counts) shows
-    their mean; ``counts`` says how many."""
-    frame = pd.DataFrame([e for e in entries if e[value] is not None])
-    if frame.empty:
-        return frame, frame
-    frame["gpus"] = frame["world_size"].fillna(0)
-    # pivot_table drops rows whose keys are missing; a config may name no precision.
-    frame["precision"] = frame["precision"].fillna("(none)")
-    frame["model_name"] = frame["model_name"].fillna("")
-    keys = dict(index=["model_name", "gpus"], columns="precision", values=value)
-    means = pd.pivot_table(frame, aggfunc="mean", **keys)
-    counts = pd.pivot_table(frame, aggfunc="count", **keys)
-    columns = sorted(means.columns, key=lambda p: (_rank(str(p).upper(), PRECISION_ORDER), str(p)))
-    rows = sorted(means.index, key=lambda k: (str(k[0]).lower(), k[1]))
-    return means.loc[rows, columns], counts.loc[rows, columns]
 
 
 def match_baseline(entry: dict, baseline: list[dict]) -> tuple[dict | None, str | None]:
@@ -674,22 +654,6 @@ def overview_labels(per_batch: list[list[tuple]]) -> list[tuple[str, str]]:
     )
 
 
-def batch_problems(batches: list[tuple[str, dict, object]]) -> list[str]:
-    """One line per batch that did not complete, or left runs unstarted."""
-    lines = []
-    for label, info, _ in batches:
-        outcome = info.get("outcome")
-        final = info.get("final", {})
-        not_started = final.get("Not started")
-        if outcome and outcome != "Complete":
-            lines.append(f"Batch {label}: {outcome}")
-        elif info and not outcome:
-            lines.append(f"Batch {label}: no closing block (still running, or killed)")
-        if not_started not in (None, "0"):
-            lines.append(f"Batch {label}: {not_started} run(s) not started")
-    return lines
-
-
 # ---------------------------------------------------------------------------
 # Workbook (XlsxWriter)
 # ---------------------------------------------------------------------------
@@ -699,8 +663,7 @@ class Formats:
     def __init__(self, wb, out_dir: str):
         # Logs are linked relative to the report, so they open wherever the folder goes.
         self.out_dir = out_dir
-        self._add = add = wb.add_format
-        self._warn_numbers: dict[int, object] = {}
+        add = wb.add_format
         self.title = add({"bold": True, "font_size": 16})
         self.subtitle = add({"italic": True, "font_color": "#595959"})
         self.header = add(
@@ -727,21 +690,11 @@ class Formats:
         self.warn = add({"bg_color": "#FFEB9C", "font_color": "#9C5700"})
         self.bad_cell = add({"bg_color": "#FFC7CE", "font_color": "#9C0006", "valign": "top"})
         self.warn_cell = add({"bg_color": "#FFEB9C", "font_color": "#9C5700", "valign": "top"})
-        self.warn_tflops = add({"bg_color": "#FFEB9C", "num_format": "#,##0.0", "valign": "top"})
         self.note = add({"italic": True, "font_color": "#595959"})
-        self.pivot_head = add({"bold": True, "bg_color": "#D9E1F2", "border": 1, "align": "center"})
-        self.pivot_key = add({"bold": True, "border": 1})
 
-    def number(self, value: float, warn: bool = False):
+    def number(self, value: float):
         """A number format that suits the value: 38,414 tokens/s and 0.624 frames/s."""
-        digits = 0 if value >= 1000 else 1 if value >= 100 else 2 if value >= 1 else 3
-        if not warn:
-            return self.by_magnitude[digits]
-        if digits not in self._warn_numbers:
-            self._warn_numbers[digits] = self._add(
-                {"bg_color": "#FFEB9C", "num_format": self.by_magnitude[digits].num_format, "valign": "top"}
-            )
-        return self._warn_numbers[digits]
+        return self.by_magnitude[0 if value >= 1000 else 1 if value >= 100 else 2 if value >= 1 else 3]
 
 
 def _native(value):
@@ -850,8 +803,9 @@ def write_overview(wb, fmts: Formats, title: str, inputs: list[str], baselines: 
     row += 1
     notes = [
         "How to read the numbers:",
-        "- Performance has one row per config (and image and step count) and averages its successful runs "
-        "(status ok); failed runs and failed multi-node attempts are left out and counted under Notes.",
+        "- Performance has one row per config and image, and averages its successful runs (status ok), "
+        "replicates with different step counts included; failed runs and failed multi-node attempts are "
+        "left out before averaging and counted under Notes.",
         "- Config hash: the first 8 hex digits of the config file's SHA-256, so an edited file shows up as a new row.",
         "- Within a run, Primus throughput is the harmonic mean over the steps after warmup "
         "(at least the first three logged steps are dropped).",
@@ -861,9 +815,8 @@ def write_overview(wb, fmts: Formats, title: str, inputs: list[str], baselines: 
         "- Run-to-run CV is the spread between repetitions (stdev / mean), shown from two successful runs; "
         f"above {CV_WARN:.0%} it is highlighted. Step-to-step CV (Runs sheet) is the spread within one run.",
         "- GPU memory is as the backend logs it: GB for Megatron, GiB for TorchTitan.",
-        "- Pivot puts precisions side by side for each model; an amber cell is the mean of several "
-        "Performance rows (other configs or step counts).",
-        "- Runs lists every run as an Excel table; Insert > PivotTable on it for other views.",
+        "- Runs lists every run as an Excel table, with the failure reason and detail of those that did not "
+        "pass; Insert > PivotTable on it for other views.",
     ]
     for line in notes:
         # Unwrapped, so the line runs on across the empty cells to its right.
@@ -964,76 +917,6 @@ def write_performance(wb, fmts: Formats, entries: list[dict], baseline: list[dic
     _print_setup(ws, title, context)
 
 
-def _write_pivot(ws, fmts: Formats, row: int, title: str, means, counts, number_fmt=None,
-                 units: dict | None = None) -> int:
-    """One pivot block: model / GPUs rows by precision columns. ``units``
-    adds a unit column, for a backend whose models report different ones."""
-    ws.write(row, 0, title, fmts.section)
-    row += 1
-    heads = ["Model", "GPUs"] + (["Unit"] if units is not None else []) + [str(p) for p in means.columns]
-    for i, h in enumerate(heads):
-        ws.write(row, i, h, fmts.pivot_head)
-    row += 1
-    first = len(heads) - len(means.columns)
-    for (model, gpus), values in means.iterrows():
-        ws.write(row, 0, model, fmts.pivot_key)
-        _write(ws, row, 1, gpus, fmts.int, fmts)
-        if units is not None:
-            ws.write(row, 2, units.get(model) or "")
-        for i, (precision, value) in enumerate(values.items()):
-            value = _native(value)
-            several = value is not None and (_native(counts.loc[(model, gpus), precision]) or 0) > 1
-            if number_fmt is not None:
-                fmt = fmts.warn_tflops if several else number_fmt
-            else:
-                fmt = fmts.number(value, warn=several) if value is not None else None
-            _write(ws, row, first + i, value, fmt, fmts)
-        row += 1
-    return row + 1
-
-
-def write_pivot(wb, fmts: Formats, entries: list[dict], title: str, context: str):
-    """Per backend (and image, when there are several), the TFLOP/s and
-    throughput of each model by precision."""
-    several_images = len({e["image"] for e in entries}) > 1
-    groups: list[tuple[str, str]] = []
-    for e in entries:
-        key = (e["backend"], e["image"] if several_images else "")
-        if key not in groups:
-            groups.append(key)
-    blocks = []
-    for backend, image in groups:
-        sub = [e for e in entries if e["backend"] == backend and (not several_images or e["image"] == image)]
-        (tflops, tflops_n), (tput, tput_n) = pivot(sub, "tflops"), pivot(sub, "throughput")
-        if tflops.empty and tput.empty:
-            continue
-        units = sorted({e["unit"] for e in sub if e["unit"]})
-        model_units = {e["model_name"]: e["unit"] for e in sub if e["unit"]}
-        heading = backend + (f"  -  {sub[0]['image_name']}" if several_images else "")
-        blocks.append((heading, tflops, tflops_n, tput, tput_n, units, model_units))
-    if not blocks:
-        return
-    ws = wb.add_worksheet("Pivot")
-    ws.write(0, 0, "Mean over successful runs; precisions side by side. Amber: the mean of several "
-                   "Performance rows (other configs or step counts).", fmts.subtitle)
-    row = 2
-    for heading, tflops, tflops_n, tput, tput_n, units, model_units in blocks:
-        ws.write(row, 0, heading, fmts.title)
-        row += 1
-        if not tflops.empty:
-            row = _write_pivot(ws, fmts, row, "TFLOP/s per GPU", tflops, tflops_n, fmts.tflops)
-        if not tput.empty:
-            if len(units) == 1:
-                row = _write_pivot(ws, fmts, row, f"Throughput per GPU ({units[0]})", tput, tput_n)
-            else:
-                row = _write_pivot(ws, fmts, row, "Throughput per GPU", tput, tput_n, None, model_units)
-        row += 1
-    ws.set_column(0, 0, 26)
-    ws.set_column(1, 1, 6)
-    ws.set_column(2, 12, 13)
-    _print_setup(ws, title, context)
-
-
 RUN_COLUMNS = [
     {"header": "Batch", "width": 16, "key": "batch_stamp"},
     {"header": "Backend", "width": 14, "key": "backend"},
@@ -1044,6 +927,7 @@ RUN_COLUMNS = [
     {"header": "Attempt", "width": 7, "key": "attempt", "fmt": "int"},
     {"header": "Status", "width": 11, "key": "status"},
     {"header": "Failure reason", "width": 14, "key": "failure_reason"},
+    {"header": "Failure detail", "width": 40, "key": "failure_detail"},
     {"header": "TFLOP/s per GPU", "width": 10, "key": "hmean_tflops", "fmt": "tflops"},
     {"header": "Throughput per GPU", "width": 12, "key": "throughput"},
     {"header": "Throughput unit", "width": 17, "key": "unit"},
@@ -1082,62 +966,6 @@ def write_runs(wb, fmts: Formats, runs: list[dict]):
     col = [c["header"] for c in RUN_COLUMNS].index("Status")
     ws.conditional_format(1, col, last, col, {"type": "cell", "criteria": "!=", "value": '"ok"', "format": fmts.bad})
     ws.set_row(0, 30)
-
-
-ISSUE_COLUMNS = [
-    {"header": "Batch", "width": 16, "key": "batch_stamp"},
-    {"header": "Backend", "width": 14, "key": "backend"},
-    {"header": "Model", "width": 22, "key": "model_name"},
-    {"header": "Precision", "width": 10, "key": "precision"},
-    {"header": "Rep", "width": 5, "key": "repeat", "fmt": "int"},
-    {"header": "Attempt", "width": 7, "key": "attempt", "fmt": "int"},
-    {"header": "Status", "width": 11, "key": "status"},
-    {"header": "Failure reason", "width": 14, "key": "failure_reason"},
-    {"header": "Detail", "width": 70, "key": "failure_detail", "fmt": "wrap"},
-    {"header": "Exit code", "width": 6, "key": "exit_code", "fmt": "int"},
-    {"header": "Elapsed (s)", "width": 9, "key": "elapsed_sec", "fmt": "int"},
-    {"header": "Log", "width": 40, "key": "_log", "link": True},
-    {"header": "Step log", "width": 30, "key": "_step_log", "link": True},
-]
-
-
-def write_issues(wb, fmts: Formats, runs: list[dict], problems: list[str]):
-    ws = wb.add_worksheet("Issues")
-    failed = [r for r in runs if not r["counts"]]
-    row = 0
-    if problems:
-        ws.write(row, 0, "Batches", fmts.section)
-        row += 1
-        for line in problems:
-            ws.write(row, 0, line)
-            row += 1
-        row += 1
-    if failed:
-        last = _table(ws, row, ISSUE_COLUMNS, [_run_values(r, ISSUE_COLUMNS) for r in failed], fmts, "IssuesTable")
-        ws.set_row(row, 30)
-    else:
-        ws.write(row, 0, f"All {len(runs)} result rows passed.", fmts.title)
-        ws.set_column(0, 0, 90)
-        ws.set_column(1, 1, 60)
-        last = row
-
-    warnings: dict[str, list[str]] = {}
-    for r in runs:
-        for w in r.get("version_warnings") or []:
-            label = " ".join(str(v) for v in (r.get("backend"), r.get("model_name"), r.get("precision")) if v)
-            if label not in warnings.setdefault(w, []):
-                warnings[w].append(label)
-    if warnings:
-        # Below the failures, in the table's first and detail columns when there is one.
-        where_col = [c["header"] for c in ISSUE_COLUMNS].index("Detail") if failed else 1
-        row = last + 3
-        ws.write(row, 0, "Library version warnings (can affect performance; never fail a run)", fmts.section)
-        ws.write(row, where_col, "Seen in", fmts.section)
-        row += 1
-        for w, where in sorted(warnings.items()):
-            ws.write(row, 0, w)
-            ws.write(row, where_col, ", ".join(where), fmts.wrap)
-            row += 1
 
 
 def chart_labels(entries: list[dict]) -> list[str]:
@@ -1274,9 +1102,7 @@ def build_report(out_path: str, inputs: list[str], baselines: list[str], thresho
     try:
         write_overview(wb, fmts, title, inputs, baseline_notes, batch_rows)
         write_performance(wb, fmts, entries, baseline_entries, threshold, title, str(context))
-        write_pivot(wb, fmts, entries, title, str(context))
         write_runs(wb, fmts, runs)
-        write_issues(wb, fmts, runs, batch_problems(batch_rows))
         write_chart(wb, fmts, entries, baseline_entries)
         wb.close()
         os.replace(tmp, out_path)

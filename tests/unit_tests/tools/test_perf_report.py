@@ -105,10 +105,20 @@ def test_failed_multinode_attempts_do_not_count():
     assert entry["cv"] is None
 
 
-def test_runs_of_different_lengths_are_separate_configs():
-    runs = [run(total_steps=50, elapsed_sec=720), run(total_steps=10, elapsed_sec=240)]
-    entries = report.aggregate(report.runs_frame(runs))
-    assert [(e["total_steps"], e["minutes"]) for e in entries] == [(10, 4.0), (50, 12.0)]
+def test_replicates_with_different_step_counts_are_combined():
+    runs = [
+        run(repeat=1, total_steps=50, elapsed_sec=720, hmean_tflops=1100.0),
+        run(repeat=2, total_steps=10, elapsed_sec=240, hmean_tflops=1120.0),
+        # Failed: left out before averaging, whatever its numbers.
+        run(repeat=3, total_steps=20, elapsed_sec=60, hmean_tflops=5.0, status="failed", failure_reason="oom"),
+    ]
+    (entry,) = report.aggregate(report.sort_frame(report.runs_frame(runs)))
+    assert (entry["runs_ok"], entry["runs_total"]) == (2, 3)
+    assert entry["tflops"] == pytest.approx(1110.0)
+    assert entry["minutes"] == pytest.approx(8.0)
+    # Every step count the replicates ran.
+    assert entry["total_steps"] == "10; 20; 50"
+    assert entry["notes"] == "1 failed: oom"
 
 
 def test_configs_split_by_config_file_and_image_and_sort_by_backend():
@@ -143,27 +153,6 @@ def test_backend_without_throughput_says_so():
     (entry,) = report.aggregate(report.runs_frame([run(backend="megatron_bridge", hmean_tps_per_gpu=None)]))
     assert entry["unit"] is None
     assert entry["notes"] == "no throughput in the log"
-
-
-def test_pivot_puts_precisions_side_by_side():
-    entries = report.aggregate(
-        report.runs_frame(
-            [
-                run(precision="FP8", config_hash="b", hmean_tflops=1500.0),
-                run(precision="BF16", hmean_tflops=1100.0),
-                run(precision="BF16", config_hash="edited", hmean_tflops=1000.0),
-                run(model_name="mamba_370M", precision=None, config_hash="c", hmean_tflops=300.0),
-            ]
-        )
-    )
-    means, counts = report.pivot(entries, "tflops")
-    assert list(means.columns) == ["BF16", "FP8", "(none)"]
-    assert means.loc[("llama3.1_8B", 8), "FP8"] == pytest.approx(1500.0)
-    # Two Performance rows fall into one cell: their mean, and the count to flag it.
-    assert means.loc[("llama3.1_8B", 8), "BF16"] == pytest.approx(1050.0)
-    assert counts.loc[("llama3.1_8B", 8), "BF16"] == 2
-    # A model with no precision in its name still appears.
-    assert means.loc[("mamba_370M", 8), "(none)"] == pytest.approx(300.0)
 
 
 def test_chart_labels_tell_images_and_configs_apart():
@@ -297,8 +286,6 @@ def test_refused_batch_shows_its_errors_and_lines_up_with_others(tmp_path):
     assert runs_rows.index("Runs planned") < runs_rows.index("Result rows")
     # A row no batch has a value for is left out.
     assert ("Run settings", "FAIL_PATTERN") not in labels
-    problems = report.batch_problems([("a", refused_info, None), ("b", complete_info, None)])
-    assert problems == ["Batch a: REFUSED: a pre-run check failed (see above)"]
 
 
 def test_stale_results_are_parsed_without_writing(tmp_path, monkeypatch):
@@ -338,8 +325,10 @@ def test_report_is_written(tmp_path, monkeypatch):
     out = results / "report.xlsx"
     with zipfile.ZipFile(out) as z:
         workbook = z.read("xl/workbook.xml").decode()
-        for sheet in ("Overview", "Performance", "Pivot", "Runs", "Issues", "Chart"):
+        for sheet in ("Overview", "Performance", "Runs", "Chart"):
             assert f'name="{sheet}"' in workbook
+        for sheet in ("Pivot", "Issues"):
+            assert f'name="{sheet}"' not in workbook
     openpyxl = pytest.importorskip("openpyxl")
     ws = openpyxl.load_workbook(out)["Performance"]
     header = [c.value for c in ws[1]]

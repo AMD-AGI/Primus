@@ -709,20 +709,18 @@ than `results.csv`:
 | Sheet | Contents |
 |---|---|
 | Overview | One column per batch: outcome (with the errors of a refused batch), timing, image (tag, digest, ID), container ROCm/HIP and Torch, Primus commit and submodule pins, GPU model, nodes and GPUs, host settings, run settings (reps, `TRAIN_STEPS`, limits, the `diffusion_dlrm` config), and run counts (planned, started, failed, not started). With `--baseline`, each baseline's image, commit and batches. |
-| Performance | One row per config: backend, model, precision, config hash, sequence length, MBS, GBS, steps, nodes, GPUs, runs ok / total, and the means over the successful runs of TFLOP/s per GPU and throughput (per GPU, and for all GPUs), with its unit: tokens/s, samples/s, frames/s or recommendations/s. Also run-to-run CV, GPU memory, minutes per run, and notes on the runs that did not count. |
-| Pivot | Per backend (and per image, when there are several), models down and precisions across, for TFLOP/s per GPU and throughput. |
-| Runs | Every run, with its status, image, result directory and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
-| Issues | Batches that did not complete or left runs unstarted; the runs that did not pass, with failure reason, detail and log links; and library version warnings. |
+| Performance | One row per unique backend, model, precision, config hash, sequence length, MBS, GBS, nodes, GPUs and image ID, with runs ok / total and the means over the successful runs of TFLOP/s per GPU and throughput (per GPU, and for all GPUs), with its unit: tokens/s, samples/s, frames/s or recommendations/s. Also the step counts run, run-to-run CV, GPU memory, minutes per run, and notes on the runs that did not count. |
+| Runs | Every run, with its status, failure reason and detail, image, result directory and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
 | Chart | TFLOP/s per GPU for each config (and the baseline). |
 
 - **Averages.** A config's numbers are the arithmetic mean over its
-  successful runs (`NUM_REPS` repetitions, possibly across batches); failed
-  runs and failed multi-node attempts are left out and listed under Notes.
-  Runs with another image or another step count are a separate row, and the
-  Image column appears when there are several images. Run-to-run CV above 3%
-  is highlighted; "runs ok / total" is red when runs failed, amber when only
-  retried multi-node attempts did. In the Pivot, an amber cell is the mean of
-  several Performance rows (e.g. two config files of one model).
+  successful runs (`NUM_REPS` repetitions, possibly across batches, and
+  whatever step count each ran; the Steps column lists them, e.g. `10; 50`).
+  Failed runs and failed multi-node attempts are removed before averaging
+  and listed under Notes. Runs with another image are a separate row, and
+  the Image column appears when there are several images. Run-to-run CV
+  above 3% is highlighted; "runs ok / total" is red when runs failed, amber
+  when only retried multi-node attempts did.
 - **Baseline.** `--baseline DIR` (repeatable), e.g. the previous release,
   adds the baseline's TFLOP/s and throughput and the change, red or green
   past `--threshold` percent (default 5). Configs are matched by backend,
