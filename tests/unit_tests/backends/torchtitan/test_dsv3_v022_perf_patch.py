@@ -24,14 +24,13 @@ COMBINE_PATCH_ID = "torchtitan.dsv3.moe_bf16_combine"
 COMPILE_PATCH_ID = "torchtitan.dsv3.whole_block_compile"
 
 
-def _ctx(model_name, compile_enable=True, backend_version="0.2.2"):
+def _ctx(model_name, compile_enable=True):
     params = SimpleNamespace(compile=SimpleNamespace(enable=compile_enable))
     module_config = SimpleNamespace(params=params)
     return PatchContext(
         backend="torchtitan",
         phase="setup",
         model_name=model_name,
-        backend_version=backend_version,
         extra={"module_config": module_config},
     )
 
@@ -41,14 +40,12 @@ class TestDsv3V022PatchRegistration:
         patch = PatchRegistry.get(COMPILE_PATCH_ID)
         assert patch is not None
         assert patch.backend == "torchtitan"
-        assert patch.backend_version_patterns == ["0.2.2"]
         assert patch.phase == "setup"
 
     def test_bf16_combine_remains_registered(self):
         patch = PatchRegistry.get(COMBINE_PATCH_ID)
         assert patch is not None
         assert patch.backend == "torchtitan"
-        assert patch.backend_version_patterns == ["0.2.2"]
         assert patch.phase == "setup"
 
 
@@ -71,14 +68,6 @@ class TestDsv3V022PatchCondition:
         assert patch is not None
         assert patch.condition(_ctx("llama3")) is False
         assert patch.condition(_ctx(None)) is False
-
-    def test_patches_only_apply_to_torchtitan_v022(self):
-        for patch_id in (COMPILE_PATCH_ID, COMBINE_PATCH_ID):
-            patch = PatchRegistry.get(patch_id)
-            assert patch is not None
-            assert patch.applies_to(_ctx("deepseek_v3", backend_version="0.2.2"))
-            assert not patch.applies_to(_ctx("deepseek_v3", backend_version="0.2.3"))
-
 
 class _Leaf(nn.Module):
     def __init__(self, name):

@@ -86,7 +86,6 @@ def _apply_unified_compile(model: nn.Module, compile_config: Any, ep_enabled: bo
 @register_patch(
     "torchtitan.dsv3.whole_block_compile",
     backend="torchtitan",
-    backend_versions=["0.2.2"],
     phase="setup",
     description="Compile whole blocks with an eager GroupedExperts boundary",
     condition=lambda ctx: _is_deepseek_model(ctx) and _compile_enabled(ctx),
@@ -156,7 +155,6 @@ def _moe_forward_bf16_combine(self: Any, x: torch.Tensor) -> torch.Tensor:
 @register_patch(
     "torchtitan.dsv3.moe_bf16_combine",
     backend="torchtitan",
-    backend_versions=["0.2.2"],
     phase="setup",
     description="MoE expert combine in bf16 (avoid fp32 bmm activation retention)",
     condition=lambda ctx: _is_deepseek_model(ctx),
