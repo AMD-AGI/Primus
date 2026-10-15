@@ -14,10 +14,6 @@ import torch
 from torch import Tensor, nn
 
 from primus.backends.diffusion.models.flux import layers
-from primus.backends.diffusion.models.flux.fused_norm_rope import (
-    RopeTables,
-    rope_tables,
-)
 from primus.backends.diffusion.models.flux.layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -26,6 +22,12 @@ from primus.backends.diffusion.models.flux.layers import (
     SingleStreamBlock,
     timestep_embedding,
 )
+
+if layers.FUSED_NORM_ROPE:
+    from primus.backends.diffusion.models.flux.fused_norm_rope import (
+        RopeTables,
+        rope_tables,
+    )
 
 
 def build_rope_tables(pe, txt_len: int, img_len: int) -> RopeTables:

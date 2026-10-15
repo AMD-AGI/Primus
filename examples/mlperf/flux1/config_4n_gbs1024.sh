@@ -4,7 +4,7 @@
 # may override the tunable entries while the fixed topology remains explicit.
 export FLUX_A6W4_RECIPE=1
 export NNODES=4
-export DP_REPLICATE=4
+export DP_REPLICATE=1
 export LOCAL_BATCH_SIZE=32
 export GRADIENT_ACCUMULATION_STEPS=1
 export EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-$LOCAL_BATCH_SIZE}

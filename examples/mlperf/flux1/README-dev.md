@@ -229,7 +229,7 @@ docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
   -e PRIMUS_FLUX_REUSE_FP8_INPUT=1 \
   -e PRIMUS_FLUX_AITER_ATOMIC_FP32=0 \
   -v "$REPO:/workspace/Primus" -v /shared_nfs:/shared_nfs \
-  -w /workspace/Primus zirui3/primus-v26.3-flux:v0.4 \
+  -w /workspace/Primus zirui3/primus-v26.7-flux:v0.1@sha256:082afc328d867f79ab5c4a46bc29c909bd891e068a32506a10768e6a6cc7e7c8 \
   python examples/mlperf/flux1/prewarm_inductor_cache.py
 ```
 

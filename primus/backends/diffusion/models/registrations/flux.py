@@ -395,14 +395,17 @@ def build_flux_model(model_config: dict[str, Any]):
 
     # MXFP4 replaces the FP8 GEMMs on the same modules, so the two recipes are
     # mutually exclusive and FLUX_FP4_PASSES wins when both are configured.
-    from primus.backends.diffusion.models.quantization.mxfp4_linear import (
-        config_from_env as _mxfp4_config_from_env,
-    )
+    # Do not import the broad MXFP4/Turbo integration for native/FP8-only runs.
+    fp4_passes = os.getenv("FLUX_FP4_PASSES", "").strip().lower()
+    if fp4_passes not in {"", "0", "off", "none"}:
+        from primus.backends.diffusion.models.quantization.mxfp4_linear import (
+            config_from_env as _mxfp4_config_from_env,
+        )
 
-    mxfp4_config = _mxfp4_config_from_env()
-    if mxfp4_config is not None:
-        dit = _apply_flux_mxfp4(dit, mxfp4_config)
-        float8_recipe = ""
+        mxfp4_config = _mxfp4_config_from_env()
+        if mxfp4_config is not None:
+            dit = _apply_flux_mxfp4(dit, mxfp4_config)
+            float8_recipe = ""
 
     if float8_recipe:
         try:

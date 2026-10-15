@@ -72,21 +72,20 @@ def _resolve_fp4_dispatch() -> str:
     ``FLUX_FP4_MXFP4_MM``, ``FLUX_FP4_HOST_DISPATCH``, ``FLUX_FP4_FUSED_H16_QUANT``.
     Unset or empty selects the launch recipe default, fusion.
     """
-    explicit = (os.getenv("FLUX_FP4_DISPATCH") or "fusion").strip().lower()
-    if explicit in ("fusion", "host_dispatch", "mxfp4_mm"):
-        return explicit
-    if explicit:
-        raise ValueError(
-            f"FLUX_FP4_DISPATCH={explicit!r} is invalid; expected fusion, "
-            "host_dispatch, mxfp4_mm, or empty"
-        )
+    explicit = os.getenv("FLUX_FP4_DISPATCH")
+    if explicit is not None and explicit.strip():
+        dispatch = explicit.strip().lower()
+        if dispatch not in ("fusion", "host_dispatch", "mxfp4_mm"):
+            raise ValueError(
+                f"FLUX_FP4_DISPATCH={dispatch!r} is invalid; expected fusion, "
+                "host_dispatch, mxfp4_mm, or empty"
+            )
+        return dispatch
     if os.getenv("FLUX_FP4_MXFP4_MM", "0") == "1":
         return "mxfp4_mm"
     if os.getenv("FLUX_FP4_HOST_DISPATCH", "0") == "1":
         return "host_dispatch"
-    if os.getenv("FLUX_FP4_FUSED_H16_QUANT", "0") == "1":
-        return "fusion"
-    return ""
+    return "fusion"
 
 
 _FP4_DISPATCH = _resolve_fp4_dispatch()

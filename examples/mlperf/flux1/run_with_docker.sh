@@ -84,8 +84,12 @@ fi
 # values are appended explicitly; arbitrary host variables are not forwarded.
 mapfile -t env_names < <(
     env -i PATH="$PATH" bash -c 'source "$1"; compgen -e' bash "$SCRIPT_DIR/$FLUX_CONFIG" |
-        grep -Ev '^(PWD|SHLVL|_)$'
+        grep -Ev '^(PATH|PWD|SHLVL|_)$'
 )
+# Include bounded recipe variables created only under the caller's overrides
+# (for example FLUX_FP4_ALL_GATHER=0 when switch precompile is disabled).
+mapfile -t current_flux_env < <(compgen -e | grep '^FLUX_' || true)
+env_names+=("${current_flux_env[@]}")
 env_names+=(
     FLUX_CONFIG LAUNCH_MODE NODE_RANK MASTER_ADDR MASTER_PORT CONFIG
     PRIMUS_WORKSPACE DATASET_PATH EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR

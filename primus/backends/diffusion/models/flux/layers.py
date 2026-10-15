@@ -16,7 +16,6 @@ import torch
 from einops import rearrange
 from torch import Tensor, nn
 
-from primus.backends.diffusion.models.flux.fused_norm_rope import fused_qkv_norm_rope
 from primus.backends.diffusion.models.flux.math import attention, rope
 
 # Read once at import so it is a Python constant when Dynamo traces a block.
@@ -25,6 +24,10 @@ FUSED_NORM_ROPE = os.environ.get("FLUX_FUSED_NORM_ROPE", "0").lower() in (
     "true",
     "on",
 )
+if FUSED_NORM_ROPE:
+    from primus.backends.diffusion.models.flux.fused_norm_rope import (
+        fused_qkv_norm_rope,
+    )
 
 FUSED_DGELU_LEGPACK = os.getenv("FLUX_FUSED_DGELU_LEGPACK", "0") == "1"
 FUSED_DGELU_MLP = os.getenv("FLUX_FUSED_DGELU_MLP", "0") == "1"

@@ -63,9 +63,10 @@ the existing slim profiles retain their prior FP8 defaults:
 | `config_2n_gbs1024.sh` | 2 | 32 | 2 | 1024 | selective FlyDSL | default |
 | `config_4n_gbs1024.sh` (default) | 4 | 32 | 1 | 1024 | A6W4/MXFP4, then FP8 forward | `max-autotune-no-cudagraphs` |
 
-The default profile uses LR `0.00025`, 1600 warmup steps, SDMA only for
-`single_blocks`, the C++ Inductor wrapper, Kyle's FC1/GELU dual and double-pack
-candidate, and forward-switch precompile at step 7325. The MBS64 profile
+The default profile uses 32-rank pure FSDP (`DP_REPLICATE=1`), LR `0.00025`,
+1600 warmup steps, SDMA only for `single_blocks`, the C++ Inductor wrapper,
+Kyle's FC1/GELU dual and double-pack candidate, and forward-switch precompile
+at step 7325. The MBS64 profile
 retains checkpoint ratio `0.25`.
 
 Inside an allocation, select a configuration and use the same launcher. The

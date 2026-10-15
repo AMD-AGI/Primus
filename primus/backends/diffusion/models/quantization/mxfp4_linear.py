@@ -8,7 +8,25 @@
 
 import os
 
-_dispatch = (os.getenv("FLUX_FP4_DISPATCH") or "fusion").lower()
+
+def _resolve_fp4_dispatch() -> str:
+    explicit = os.getenv("FLUX_FP4_DISPATCH")
+    if explicit is not None and explicit.strip():
+        dispatch = explicit.strip().lower()
+        if dispatch not in ("fusion", "host_dispatch", "mxfp4_mm"):
+            raise ValueError(
+                f"FLUX_FP4_DISPATCH={dispatch!r} is invalid; expected fusion, "
+                "host_dispatch, mxfp4_mm, or empty"
+            )
+        return dispatch
+    if os.getenv("FLUX_FP4_MXFP4_MM", "0") == "1":
+        return "mxfp4_mm"
+    if os.getenv("FLUX_FP4_HOST_DISPATCH", "0") == "1":
+        return "host_dispatch"
+    return "fusion"
+
+
+_dispatch = _resolve_fp4_dispatch()
 _fused = _dispatch in ("fusion", "host_dispatch", "mxfp4_mm") or any(
     os.getenv(name, "0") == "1"
     for name in ("FLUX_FP4_FUSED_H16_QUANT", "FLUX_FP4_HOST_DISPATCH", "FLUX_FP4_MXFP4_MM")

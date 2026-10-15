@@ -235,6 +235,15 @@ def switch_fprop(model, global_step, target="fp8"):
     return switched
 
 
+def switch_if_due(trainer, step):
+    """Activate the precompiled FP8 forward when a fresh or resumed run is due."""
+    if step is None or trainer.global_step < step:
+        return step
+    switch_fprop(trainer.model, trainer.global_step)
+    guard_eval_scales(trainer)
+    return None
+
+
 def guard_eval_scales(trainer):
     """Do not let FP8 delayed scales derived from eval enter a training step."""
     validate = trainer.validate_loss
