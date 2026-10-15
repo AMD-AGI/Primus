@@ -169,6 +169,11 @@ perf_select_configs() {
     CONFIG_FILES=()
     CONFIG_SOURCE=""
     perf_split_backends
+    # BACKEND only filters the catalog; directory mode has always ignored it.
+    if [ -n "${CONFIG_DIR:-}" ] && [ "$PERF_RUN_DIFFUSION_DLRM" = 1 ]; then
+        echo "[WARN] CONFIG_DIR is set, so BACKEND is ignored and $PERF_DIFFUSION_DLRM_BACKEND does not run." >&2
+        PERF_RUN_DIFFUSION_DLRM=0
+    fi
 
     if [ -n "${CONFIG_DIR:-}" ] && [ -n "${CONFIG_FILE:-}" ]; then
         echo "[ERROR] set either CONFIG_DIR or CONFIG_FILE, not both." >&2
@@ -270,10 +275,14 @@ perf_select_from_catalog() {
     #   jax_the_rock_ci_*    (JAX)     -> maxtext, maxdiffusion
     # There is no image for which "all" is correct, so a default would only
     # ever queue runs with no framework to execute them.
+    # diffusion_dlrm is offered by the single-node runner only.
+    local extra_backend=""
+    [ "${PERF_MULTINODE:-0}" = 1 ] || extra_backend="$PERF_DIFFUSION_DLRM_BACKEND"
+
     if [ -z "${BACKEND:-}" ]; then
         echo "[ERROR] BACKEND is required; each training image supports one framework stack." >&2
-        echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')$PERF_DIFFUSION_DLRM_BACKEND" >&2
-        echo "        PyTorch image: BACKEND=megatron,torchtitan,megatron_bridge,$PERF_DIFFUSION_DLRM_BACKEND" >&2
+        echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')$extra_backend" >&2
+        echo "        PyTorch image: BACKEND=megatron,torchtitan,megatron_bridge${extra_backend:+,$extra_backend}" >&2
         echo "        JAX image    : BACKEND=maxtext,maxdiffusion" >&2
         return 1
     fi
@@ -283,7 +292,7 @@ perf_select_from_catalog() {
     for backend in ${PERF_CATALOG_BACKENDS[@]+"${PERF_CATALOG_BACKENDS[@]}"}; do
         if [ "$(yq -r ".[\"$GPU\"] | has(\"$backend\")" "$catalog" 2>/dev/null)" != "true" ]; then
             echo "[ERROR] backend '$backend' is not listed under $GPU in $catalog" >&2
-            echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')$PERF_DIFFUSION_DLRM_BACKEND" >&2
+            echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')$extra_backend" >&2
             return 1
         fi
         while IFS= read -r entry; do

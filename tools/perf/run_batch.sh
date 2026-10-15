@@ -38,7 +38,7 @@
 #
 #   Missing paths and duplicate entries are reported before anything launches.
 #
-# Diffusion and DLRM (BACKEND=...,diffusion_dlrm):
+# Diffusion and DLRM (BACKEND=...,diffusion_dlrm, catalog mode only):
 #   Not a catalog backend. Adding it to BACKEND runs diffusion_bench/
 #   run_benchmarks.sh once, after the catalog configs, for every diffusion and
 #   DLRM model its config enables (batch sizes, models and step_timeout come
@@ -53,6 +53,7 @@
 #   DIFFUSION_DLRM_HF_CACHE=<dir>  Hugging Face cache for the diffusion models
 #                                  (default: hf_cache_dir in that config)
 #   TRAIN_STEPS sets the diffusion models' num_iterations; DLRM keeps its own.
+#   EXTRA_ENV reaches its container too; the Primus defaults below do not.
 #
 # Optional knobs:
 #   DRY_RUN=1        print the selected configs and launch commands, then exit
@@ -469,12 +470,14 @@ if [ "$PERF_DD_RUNS" -gt 0 ]; then
         RUNS_STARTED=$((RUNS_STARTED + 1))
         # Read by the interrupt handler, which then also runs perf_dd_finalize.
         # shellcheck disable=SC2034
+        PERF_DD_LOG="$result_file"
+        # shellcheck disable=SC2034
         PERF_DD_ACTIVE=1
         # For this run only: no runner time limit, and a failure reason that
         # names the steps that failed.
         MAX_RUN_SECONDS=0 MAX_IDLE_SECONDS=0 PERF_REASON_FN=perf_dd_failure_reason \
             perf_launch_with_watchdog "$result_file" "$(( $(wc -l < "$result_file") + 1 ))"
-        perf_dd_finalize
+        perf_dd_finalize "$result_file"
         # shellcheck disable=SC2034
         PERF_DD_ACTIVE=0
 

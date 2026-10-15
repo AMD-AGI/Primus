@@ -28,14 +28,16 @@ HF_CACHE=/root/.cache/huggingface
 log() { echo "[in_container $(date '+%F %T')] $*"; }
 
 retry() {
-    local n=0 max=3
+    local n=0 max=3 shown="$*"
+    # The make download passes the token as an argument.
+    [[ -n "${HF_TOKEN:-}" ]] && shown=${shown//"$HF_TOKEN"/<redacted>}
     until "$@"; do
         n=$((n + 1))
         if (( n >= max )); then
-            log "FAILED after ${max} attempts: $*"
+            log "FAILED after ${max} attempts: $shown"
             return 1
         fi
-        log "Retry ${n}/${max}: $*"
+        log "Retry ${n}/${max}: $shown"
         sleep 10
     done
 }

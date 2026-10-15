@@ -63,6 +63,15 @@ def test_catalog_is_not_empty_after_flattening():
     assert _entries(), "no enabled configs in the catalog; is everything commented out?"
 
 
+def test_catalog_has_no_diffusion_dlrm_key():
+    # BACKEND=diffusion_dlrm runs diffusion_bench, whose own config picks the
+    # models; entries under such a key would be silently ignored.
+    for gpu, backends in _catalog().items():
+        assert "diffusion_dlrm" not in (backends or {}), (
+            f"{gpu}: diffusion_dlrm is not a catalog backend; configure it in tools/perf/diffusion_bench/config.yaml"
+        )
+
+
 @pytest.mark.parametrize("gpu,backend,rel_path", _entries())
 def test_catalog_path_exists(gpu: str, backend: str, rel_path: str):
     assert (REPO_ROOT / rel_path).is_file(), f"{gpu}.{backend}: config not found: {rel_path}"

@@ -198,6 +198,13 @@ def parse_args(argv):
         "finds and stops its containers by label)",
     )
     p.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Environment variable for the benchmark containers; repeatable",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Start the container and run launcher.py with launcher.dry_run=true; "
@@ -283,6 +290,9 @@ def resolve(args):
         train_args.update(
             train_args_overrides(mcfg.get("train_args"), gpu, f"diffusion.models.{m}.train_args")
         )
+        # The command line wins over a per-model value too.
+        if args.num_iterations:
+            train_args["num_iterations"] = args.num_iterations
         overrides = [f"train_args.{k}={v}" for k, v in train_args.items()]
         overrides += global_hydra
         overrides += as_str_list(mcfg.get("hydra_overrides"), f"diffusion.models.{m}.hydra_overrides")
@@ -324,9 +334,10 @@ def resolve(args):
 
     step_timeout = args.timeout if args.timeout is not None else int(cfg.get("step_timeout", 14400))
 
-    for label in args.label:
-        if "=" not in label or not label.split("=", 1)[0]:
-            raise ConfigError(f"--label expects KEY=VALUE, got '{label}'")
+    for option, values in (("--label", args.label), ("--env", args.env)):
+        for value in values:
+            if "=" not in value or not value.split("=", 1)[0]:
+                raise ConfigError(f"{option} expects KEY=VALUE, got '{value}'")
 
     return {
         "config_file": config_file,
@@ -347,10 +358,12 @@ def resolve(args):
         "dlrm_precisions": precs,
         "dlrm_batch_size": dlrm_bs,
         "labels": list(args.label),
+        # Names only: the values may be secrets, and the plan is saved with the results.
+        "env": [e.split("=", 1)[0] for e in args.env],
     }
 
 
-def emit_shell(plan):
+def emit_shell(plan, args):
     def q(v):
         if isinstance(v, bool):
             v = int(v)
@@ -381,6 +394,7 @@ def emit_shell(plan):
         f"DLRM_BATCH_SIZE={q(plan['dlrm_batch_size'])}",
         f"DOWNLOAD_ALL={q(sorted(plan['diffusion_models']) == sorted(MODELS))}",
         f"LABELS={arr(plan['labels'])}",
+        f"ENVS={arr(args.env)}",
     ]
     return "\n".join(lines)
 
@@ -397,7 +411,7 @@ def main():
     if args.emit == "yaml":
         print(yaml.safe_dump(plan, sort_keys=False), end="")
     else:
-        print(emit_shell(plan))
+        print(emit_shell(plan, args))
 
 
 if __name__ == "__main__":

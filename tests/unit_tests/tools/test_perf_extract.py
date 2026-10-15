@@ -758,8 +758,11 @@ def test_fractional_batch_size_is_written_plainly(tmp_path):
 # diffusion_dlrm runs (parser version 4)
 # --------------------------------------------------------------------------
 
-# Trimmed to the columns diffusion_bench/parse_results.py reads.
-RUNS_SUMMARY = "num_processes,avg_step_time_gpu,avg_fps_gpu,avg_tflops,status\n8,1.8466,8.6847,567.29,{status}\n"
+# Trimmed to the columns diffusion_bench/parse_results.py and the extractor read.
+RUNS_SUMMARY = (
+    "num_processes,num_iterations,avg_step_time_gpu,avg_fps_gpu,avg_tflops,status\n"
+    "8,100,1.8466,8.6847,567.29,{status}\n"
+)
 DLRM_RESULTS = (
     "Time Stamp,Num. Nodes,Batch Size,Recommendations/s (mean),Recommendations/s (std/mean)\n"
     "2026:10:14_23:26:30,1,32768,552606.45,0.01\n"
@@ -801,10 +804,14 @@ def make_diffusion_bench_run(root: Path, diffusion=(), dlrm=(), step_logs=None) 
     return run_dir
 
 
-def write_dd_log(tmp_path: Path, results_line: str | None, **kwargs) -> Path:
+def write_dd_log(tmp_path: Path, results_line: str | None, plan=(), **kwargs) -> Path:
+    """A diffusion_dlrm run log; ``plan`` holds diffusion_bench's announced
+    steps, e.g. "Diffusion: flux-dev  batch size 16" or "DLRM     : TF32"."""
     body = "[diffusion_bench 2026-10-14 18:32:31] Config   : /repo/tools/perf/diffusion_bench/config.yaml\n"
     if results_line is not None:
         body += f"[diffusion_bench 2026-10-14 18:32:31] Results  : {results_line}\n"
+    for step in plan:
+        body += f"[diffusion_bench 2026-10-14 18:32:31] {step}\n"
     body += "[diffusion_bench 2026-10-14 18:41:30] All steps finished.\n"
     return write_log(
         tmp_path,
@@ -833,8 +840,8 @@ def test_diffusion_dlrm_log_becomes_one_row_per_model(tmp_path):
     assert (flux["status"], flux["failure_reason"]) == ("ok", None)
     assert (flux["exit_code"], flux["elapsed_sec"]) == (0, 479)
     assert flux["step_log"] == f"diffusion_dlrm/{DD_RUN}/logs/diffusion_flux-dev_bs16.log"
-    # The banner's TRAIN_STEPS applies to the diffusion models only.
-    assert flux["total_steps"] == 10
+    # The iterations AMDiffusionBenchmark actually ran.
+    assert flux["total_steps"] == 100
 
     assert dlrm["backend"] == "dlrm"
     assert (dlrm["model_name"], dlrm["precision"]) == ("dlrm-v2", "FP32")
@@ -908,6 +915,69 @@ def test_diffusion_dlrm_results_are_found_after_the_folder_moved(tmp_path):
     (row,) = extract.parse_log(str(log))
     assert row["model_name"] == "flux-dev"
     assert row["hmean_tflops"] == pytest.approx(567.29)
+
+
+def test_diffusion_dlrm_copy_reads_its_own_folder(tmp_path):
+    original = tmp_path / "original"
+    copy = tmp_path / "copy"
+    original_run = make_diffusion_bench_run(original, diffusion=[("flux-dev", 16, "success", "success")])
+    copy_run = make_diffusion_bench_run(copy, diffusion=[("flux-dev", 16, "oom", None)])
+    # The copy's log still names the original's folder.
+    log = write_dd_log(copy, str(original_run))
+    (row,) = extract.parse_log(str(log))
+    assert row["failure_reason"] == "oom"
+    assert row["step_log"] == f"diffusion_dlrm/{copy_run.name}/logs/diffusion_flux-dev_bs16.log"
+
+
+def test_diffusion_dlrm_steps_without_a_folder_still_get_a_row(tmp_path):
+    # DLRM writes its folder only after training returns, so a DLRM step
+    # stopped by step_timeout has a status.tsv entry and nothing else; SDXL
+    # never started because the batch was stopped by a signal.
+    run_dir = make_diffusion_bench_run(tmp_path, diffusion=[("flux-dev", 16, "success", "success")])
+    with open(run_dir / "status.tsv", "a") as f:
+        f.write("dlrm_TF32\ttimeout\t124\t14400\tlogs/dlrm_TF32.log\n")
+    plan = ("Diffusion: flux-dev  batch size 16", "Diffusion: stable-diffusion-xl  batch size 12", "DLRM     : TF32")
+    log = write_dd_log(tmp_path, str(run_dir), plan=plan, exit_code=1, failure_reason="steps: 1 of 4 ...")
+    rows = extract.parse_log(str(log))
+    assert [(r["backend"], r["model_name"], r["precision"]) for r in rows] == [
+        ("diffusion", "flux-dev", "BF16"),
+        ("diffusion", "stable-diffusion-xl", "BF16"),
+        ("dlrm", "dlrm-v2", "TF32"),
+    ]
+    flux, sdxl, dlrm = rows
+    assert flux["status"] == "ok"
+    assert (sdxl["status"], sdxl["failure_reason"]) == ("failed", "not_run")
+    assert (sdxl["micro_batch_size"], sdxl["global_batch_size"]) == (12, 96)
+    assert (dlrm["status"], dlrm["failure_reason"], dlrm["exit_code"]) == ("failed", "timeout", 124)
+
+    # The same steps, had the batch been interrupted instead.
+    log = write_dd_log(
+        tmp_path, str(run_dir), plan=plan, exit_code=130, failure_reason="interrupted: the batch was stopped by a signal"
+    )
+    sdxl = extract.parse_log(str(log))[1]
+    assert (sdxl["status"], sdxl["failure_reason"]) == ("interrupted", "interrupted")
+
+
+def test_diffusion_dlrm_crashed_launcher_is_a_failure(tmp_path):
+    # in_container.sh records not_run when runs_summary.csv still says so,
+    # which outside a dry run means launcher.py died before training.
+    run_dir = make_diffusion_bench_run(
+        tmp_path,
+        diffusion=[("wan2_1-i2v", 1, None, "not_run")],
+        step_logs={
+            "diffusion_wan2_1-i2v_bs1": (
+                "Traceback (most recent call last):\n"
+                '  File "launcher.py", line 1, in <module>\n'
+                "RuntimeError: HIP error: invalid device function\n"
+            )
+        },
+    )
+    with open(run_dir / "status.tsv", "a") as f:
+        f.write("diffusion_wan2_1-i2v_bs1\tnot_run\t4\t30\tlogs/diffusion_wan2_1-i2v_bs1.log\n")
+    log = write_dd_log(tmp_path, str(run_dir), exit_code=1, failure_reason="steps: ...")
+    (row,) = extract.parse_log(str(log))
+    assert (row["status"], row["failure_reason"]) == ("failed", "python_error")
+    assert row["failure_detail"].startswith("RuntimeError")
 
 
 def test_diffusion_dlrm_without_steps_keeps_the_runs_row(tmp_path):

@@ -27,6 +27,18 @@ FAILED_STEPS=0
 log() { echo "[diffusion_bench $(date '+%F %T')] $*"; }
 die() { log "ERROR: $*"; exit 1; }
 
+# Everything written to the results folder passes through this, so HF_TOKEN
+# never lands in a log there.
+redact() {
+    if [[ -n "${HF_TOKEN:-}" ]]; then
+        DIFFBENCH_SECRET="$HF_TOKEN" awk 'BEGIN { s = ENVIRON["DIFFBENCH_SECRET"]; n = length(s) }
+            { while ((i = index($0, s)) > 0) $0 = substr($0, 1, i - 1) "<redacted>" substr($0, i + n)
+              print; fflush() }'
+    else
+        cat
+    fi
+}
+
 for arg in "$@"; do
     if [[ "$arg" == -h || "$arg" == --help ]]; then
         exec python3 "$SCRIPT_DIR/config.py" --help
@@ -65,10 +77,15 @@ start_container() {
     fi
 
     log "Starting container $CONTAINER from $image"
-    local extra=() label
-    [[ -n "${HF_TOKEN:-}" ]] && extra+=(-e HF_TOKEN)
-    for label in "${LABELS[@]}"; do
+    local extra=() label env
+    # HF_TOKEN_PATH keeps `hf auth login` from writing the token into the
+    # mounted cache, which may be shared (the default is under /tmp).
+    [[ -n "${HF_TOKEN:-}" ]] && extra+=(-e HF_TOKEN -e HF_TOKEN_PATH=/root/.hf_token)
+    for label in ${LABELS[@]+"${LABELS[@]}"}; do
         extra+=(--label "$label")
+    done
+    for env in ${ENVS[@]+"${ENVS[@]}"}; do
+        extra+=(-e "$env")
     done
     local hf_mount="$HF_CACHE_DIR:$HF_MOUNT_TARGET"
     if (( HF_READONLY )); then
@@ -115,7 +132,7 @@ run_step() {
     local logf="$RUN_DIR/logs/${name}.log"
     log "================ START ${name} (timeout: ${tmo}s) ================"
     local t0=$SECONDS
-    docker exec "$CONTAINER" timeout -k 60 "$tmo" bash /diffusion_bench/in_container.sh "$@" 2>&1 | tee "$logf"
+    docker exec "$CONTAINER" timeout -k 60 "$tmo" bash /diffusion_bench/in_container.sh "$@" 2>&1 | redact | tee "$logf"
     local rc=${PIPESTATUS[0]}
     local dur=$((SECONDS - t0)) status
     case $rc in
@@ -180,7 +197,9 @@ printf 'step\tstatus\texit_code\tduration_s\tlog\n' > "$RUN_DIR/status.tsv"
 cp "$CONFIG_FILE" "$RUN_DIR/config.yaml"
 python3 "$SCRIPT_DIR/config.py" "$@" --detected-gpu "$DETECTED_GPU" --emit yaml > "$RUN_DIR/resolved_config.yaml"
 
-exec > >(tee -a "$RUN_DIR/run.log") 2>&1
+# The logger ignores INT/TERM, so cleanup after a signal can still be logged;
+# it ends when the script's output closes.
+exec > >(trap '' INT TERM; redact | tee -a "$RUN_DIR/run.log") 2>&1
 trap finish EXIT
 trap 'log "Interrupted, cleaning up..."; exit 130' INT TERM
 

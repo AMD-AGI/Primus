@@ -240,24 +240,36 @@ bash tools/perf/run_batch.sh
   batch sizes per GPU type, DLRM precisions and the Hugging Face cache.
   Point `DIFFUSION_DLRM_CONFIG` at a copy to change them without touching
   the shared file. The runner passes it `DOCKER_IMAGE`, the GPU type (`GPU`
-  MI300X/MI325X → `mi300`, MI355X → `mi355`), its container label, and
-  `TRAIN_STEPS` as the diffusion models' `num_iterations` (DLRM keeps its
-  own length). `HF_TOKEN` reaches it through the environment.
+  MI300X/MI308X/MI325X → `mi300`, MI350X/MI355X → `mi355`), its container
+  label, `EXTRA_ENV`, and `TRAIN_STEPS` as every diffusion model's
+  `num_iterations` (DLRM keeps its own length). `HF_TOKEN` reaches it
+  through the environment. The runner's own Primus defaults
+  (`HSA_NO_SCRATCH_RECLAIM` and the two `*_ATOMIC_FP32` settings) are not
+  applied, so the numbers match a standalone diffusion_bench run.
 - **No runner time limit.** `MAX_RUN_SECONDS` and `MAX_IDLE_SECONDS` do not
   apply to this run. diffusion_bench stops a step that exceeds its
   `step_timeout` (4 hours in the default config), marks it `timeout` and
-  moves on to the next model.
+  moves on to the next model. Its asset download has a separate
+  `download_timeout`, which is 0 (none) by default, so a stalled first
+  download can hold the batch until it is stopped.
+- **Hugging Face cache.** The default config caches under `/tmp/huggingface`
+  on the node; a full first download is about 370 GB. Set
+  `DIFFUSION_DLRM_HF_CACHE` (or `hf_cache_dir` in the config) to reuse a
+  cache that is already populated.
 - **Results.** diffusion_bench writes its usual folder,
   `$RESULT_DIR/diffusion_dlrm/<gpu>_<host>_<time>/` (per-step logs,
   `status.tsv`, `summary.md`), and the runner keeps its own log next to the
   others, `diffusion_dlrm-<config>-<hash>-rep<r>_<stamp>.log`. The batch
   summary lists each step's outcome, and `results.csv` gets a row per model
-  (see "Extracting results").
+  (see "Extracting results"). The run counts as failed when any step did,
+  the setup and download steps included, even if every model then ran.
 - **Image.** `DOCKER_IMAGE` must contain `/workspace/AMDiffusionBenchmark`
   and `/workspace/DLRMBenchmark`, as `rocm/primus` images do; this is checked
   before the batch starts.
-- Single node only: `run_batch_multinode.sh` refuses it. It also needs
-  `PRIMUS_MODE=container`, since diffusion_bench starts its own container.
+- Catalog mode, single node only. With `CONFIG_DIR`, `BACKEND` is ignored and
+  so is `diffusion_dlrm` (the runner warns); `run_batch_multinode.sh` refuses
+  it. It also needs `PRIMUS_MODE=container`, since diffusion_bench starts its
+  own container.
 
 ## Environment variables
 
@@ -523,8 +535,9 @@ GPUs are released before the next run starts.
 
 diffusion_bench's container runs as root, so the files it writes are
 root-owned until it hands them back at the end of its run. When the runner
-stopped it first, the runner does that hand-back itself, so you can still
-delete the results folder.
+stopped it first, the runner does that hand-back itself for the run's folder
+and the root-owned files in the Hugging Face cache, so you can still delete
+the results folder.
 
 A SIGKILL (some schedulers send one at the time limit) cannot be handled.
 The batch summary still shows which runs started and finished, the
@@ -631,18 +644,21 @@ files keep working:
 | `parser_version` | Bumped when columns change. |
 | `image_id`, `container_rocm_version`, `container_hip_version` | Exact image and the user-space ROCm/HIP inside it. |
 | `cpu_governor`, `numa_balancing`, `transparent_hugepages`, `iommu`, `amdgpu_version` | Host settings of the node that ran the batch. |
-| `rec_per_s`, `rec_per_s_cv` | DLRM recommendations/s and its std/mean, as DLRMBenchmark reports them. |
+| `rec_per_s`, `rec_per_s_cv` | DLRM recommendations/s and its std/mean, as DLRMBenchmark reports them (iterations/s × its per-GPU `BATCH_SIZE`). |
 | `step_log` | For `diffusion` / `dlrm` rows, the diffusion_bench step log, relative to the result directory. |
 
 A `diffusion_dlrm` log becomes one row per diffusion model and DLRM
 precision, with backend `diffusion` or `dlrm`. Those numbers come from
 diffusion_bench's own parser, so they match its `summary.md`: TFLOP/s and
 samples/s per GPU are AMDiffusionBenchmark's averages, not this tool's
-harmonic means, and `micro_batch_size` is the batch size per GPU. Their
-`exit_code`, `elapsed_sec`, `status` and `failure_reason` are the step's: a
-step diffusion_bench stopped is `timeout`, one that succeeded without
-reporting a throughput is `no_metrics`, and otherwise the step log is
-searched as described below.
+harmonic means, and `micro_batch_size` is the batch size per GPU (DLRM's
+`BATCH_SIZE` is per GPU too). Their `exit_code`, `elapsed_sec`, `status` and
+`failure_reason` are the step's: a step diffusion_bench stopped is
+`timeout`, one that succeeded without reporting a throughput is
+`no_metrics`, one that never ran is `not_run` (or `interrupted` when the
+batch was), and otherwise the step log is searched as described below.
+Every step diffusion_bench planned gets a row, including those that left no
+output folder.
 
 `failure_reason` takes the runner's verdict from the footer when it is
 definitive (`timeout`, `idle`, `interrupted`). Otherwise the run output is

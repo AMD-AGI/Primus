@@ -66,6 +66,8 @@ perf_check_run_limits() {
 }
 
 # PERF_RUN_LIMITS_TEXT replaces the text for a run with limits of its own.
+PERF_RUN_LIMITS_TEXT=""
+
 perf_run_limits_text() {
     if [ -n "${PERF_RUN_LIMITS_TEXT:-}" ]; then
         echo "$PERF_RUN_LIMITS_TEXT"
@@ -481,6 +483,7 @@ TAIL_PID=""
 CURRENT_RESULT_FILE=""
 CURRENT_RUN_START=0
 FAIL_PATTERN="${FAIL_PATTERN:-}"
+PERF_REASON_FN=""
 
 perf_exit_reason() {
     local code="$1" sig
@@ -675,7 +678,7 @@ perf_on_interrupt() {
     fi
     # Defined by lib/diffusion_dlrm.sh, which only run_batch.sh sources.
     if [ "${PERF_DD_ACTIVE:-0}" = 1 ] && declare -F perf_dd_finalize >/dev/null; then
-        perf_dd_finalize
+        perf_dd_finalize "${PERF_DD_LOG:-}"
     fi
 
     if [ -n "$CURRENT_RESULT_FILE" ]; then

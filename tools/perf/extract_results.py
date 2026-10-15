@@ -1331,9 +1331,13 @@ def parse_log_file(filepath: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 DIFFUSION_DLRM_BACKEND = "diffusion_dlrm"
-# run_benchmarks.sh logs the results folder it creates as
+# run_benchmarks.sh logs the results folder it creates, then its plan:
 #   [diffusion_bench 2026-10-14 18:24:21] Results  : /path/to/folder
+#   [diffusion_bench 2026-10-14 18:24:21] Diffusion: flux-dev  batch size 16  ...
+#   [diffusion_bench 2026-10-14 18:24:21] DLRM     : TF32[  batch size 32768]
 DIFFUSION_BENCH_RESULTS_RE = re.compile(r"^\[diffusion_bench [^\]]*\] Results\s+:\s+(\S.*?)\s*$")
+DIFFUSION_BENCH_PLAN_DIFFUSION_RE = re.compile(r"^\[diffusion_bench [^\]]*\] Diffusion: (\S+)\s+batch size (\d+)")
+DIFFUSION_BENCH_PLAN_DLRM_RE = re.compile(r"^\[diffusion_bench [^\]]*\] DLRM\s+: (\S+)(?:\s+batch size (\d+))?")
 _diffusion_bench_parser = None
 
 
@@ -1355,12 +1359,52 @@ def _diffusion_bench_run_dir(run_lines: list[str], log_dir: str) -> str | None:
         if not m:
             continue
         path = m.group(1)
-        if os.path.isdir(path):
-            return path
-        # The result directory was moved or copied since the run.
-        moved = os.path.join(log_dir, DIFFUSION_DLRM_BACKEND, os.path.basename(path.rstrip("/")))
-        return moved if os.path.isdir(moved) else None
+        # Next to the log first, so a moved or copied result directory reads
+        # its own folder rather than the original's.
+        local = os.path.join(log_dir, DIFFUSION_DLRM_BACKEND, os.path.basename(path.rstrip("/")))
+        if os.path.isdir(local):
+            return local
+        return path if os.path.isdir(path) else None
     return None
+
+
+def _diffusion_bench_plan(run_lines: list[str]) -> list[dict]:
+    """The steps diffusion_bench announced, in order, as parse_results-style rows."""
+    plan = []
+    for line in run_lines:
+        clean = strip_ansi(line).strip()
+        m = DIFFUSION_BENCH_PLAN_DIFFUSION_RE.match(clean)
+        if m:
+            plan.append({"suite": "diffusion", "benchmark": m.group(1), "batch_size": m.group(2), "precision": "bf16"})
+            continue
+        m = DIFFUSION_BENCH_PLAN_DLRM_RE.match(clean)
+        if m:
+            plan.append({"suite": "dlrm", "benchmark": "dlrm-v2", "batch_size": m.group(2), "precision": m.group(1)})
+    return plan
+
+
+def _diffusion_bench_step(r: dict) -> str:
+    """diffusion_bench's step name (status.tsv, logs/) for a result row."""
+    if r["suite"] == "diffusion":
+        return f"diffusion_{r['benchmark']}_bs{r['batch_size']}"
+    return f"dlrm_{r['precision']}"
+
+
+def _row_from_step_name(step: str) -> dict:
+    if step.startswith("dlrm_"):
+        return {"suite": "dlrm", "benchmark": "dlrm-v2", "batch_size": None, "precision": step[len("dlrm_") :]}
+    model, _, bs = step[len("diffusion_") :].rpartition("_bs")
+    return {"suite": "diffusion", "benchmark": model, "batch_size": bs or None, "precision": "bf16"}
+
+
+def _runs_summary_iterations(run_dir: str, r: dict) -> int | None:
+    path = os.path.join(run_dir, "diffusion", f"{r['benchmark']}_bs{r['batch_size']}", "runs_summary.csv")
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+    except OSError:
+        return None
+    return _maybe_int(rows[-1].get("num_iterations")) if rows else None
 
 
 def _read_lines(path: str) -> list[str]:
@@ -1378,16 +1422,16 @@ def _diffusion_bench_outcome(
     if step_status == "success":
         return "ok", None, None
     if step_status in (None, "", "unknown"):
-        # No outcome recorded: the step was in flight when the run ended.
+        # No outcome recorded: in flight when the run ended, or never started.
         if run["status"] in ("interrupted", "incomplete"):
             return run["status"], run["failure_reason"], run["failure_detail"]
-        return "failed", "unknown", "diffusion_bench recorded no outcome for this step"
-    if step_status == "not_run":
-        return "unknown", None, None
+        return "failed", "not_run", "diffusion_bench recorded no outcome for this step"
     if step_status == "timeout":
         return "failed", "timeout", "stopped by diffusion_bench's step_timeout"
     if step_status == "no-metrics":
         return "failed", "no_metrics", "the step succeeded but logged no throughput"
+    # Everything else failed, including not_run: the runner never asks for a
+    # dry run, so a launcher still at not_run crashed before training.
     lines = _read_lines(step_log)
     category, detail = _scan_failure_text(lines)
     if step_status in ("oom", "oom-skipped"):
@@ -1401,24 +1445,37 @@ def _diffusion_bench_outcome(
 
 def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict]:
     """Rows for the steps of a diffusion_dlrm run; the run's own row when
-    diffusion_bench never got as far as creating its results folder."""
+    diffusion_bench never got as far as creating its results folder.
+
+    Every step diffusion_bench planned, recorded in status.tsv or left a
+    folder for gets a row, so a step that failed before writing its folder
+    (a DLRM step stopped by step_timeout, say) or never started still shows.
+    """
     log_dir = os.path.dirname(os.path.abspath(filepath))
-    run_dir = _diffusion_bench_run_dir(run_output_lines(lines), log_dir)
+    run_lines = run_output_lines(lines)
+    run_dir = _diffusion_bench_run_dir(run_lines, log_dir)
     if run_dir is None:
         return [run]
     parser = _load_diffusion_bench_parser()
     steps = parser.read_status(run_dir)
+    measured = {
+        _diffusion_bench_step(r): r for r in parser.parse_diffusion(run_dir, steps) + parser.parse_dlrm(run_dir, steps)
+    }
+    planned = {_diffusion_bench_step(r): r for r in _diffusion_bench_plan(run_lines)}
+    order = list(planned)
+    for step in list(steps) + list(measured):
+        if step.startswith(("diffusion_", "dlrm_")) and step not in order:
+            order.append(step)
+
     rows = []
-    for r in parser.parse_diffusion(run_dir, steps) + parser.parse_dlrm(run_dir, steps):
-        suite = r["suite"]
-        if suite == "diffusion":
-            step = f"diffusion_{r['benchmark']}_bs{r['batch_size']}"
-        else:
-            step = f"dlrm_{r['precision']}"
+    for step in order:
         step_row = steps.get(step, {})
+        r = measured.get(step) or planned.get(step) or _row_from_step_name(step)
+        suite = r["suite"]
         step_log = os.path.join(run_dir, "logs", f"{step}.log")
         bs = _maybe_int(str(r["batch_size"])) if r.get("batch_size") is not None else None
-        gpus = r.get("num_gpus")
+        gpus = r.get("num_gpus") or run["gpus_per_node"]
+        iterations = _runs_summary_iterations(run_dir, r) if suite == "diffusion" else None
 
         row = dict(run)
         row["version_warnings"] = list(run["version_warnings"])
@@ -1435,11 +1492,12 @@ def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict
                 "world_size": gpus,
                 "warmup_steps": None,
                 # TRAIN_STEPS sets the diffusion models' num_iterations only.
-                "total_steps": run["total_steps"] if suite == "diffusion" else None,
+                "total_steps": iterations or (run["total_steps"] if suite == "diffusion" else None),
                 "num_iterations": None,
                 "num_post_warmup": None,
                 "hmean_tflops": r.get("tflops_per_gpu"),
                 "hmean_samples_per_gpu": r.get("samples_per_s_per_gpu"),
+                # DLRMBenchmark's figure: iterations/s x the per-GPU BATCH_SIZE.
                 "rec_per_s": r.get("rec_per_s"),
                 "rec_per_s_cv": r.get("rec_per_s_cv"),
                 "exit_code": _maybe_int(step_row.get("exit_code")),
@@ -1449,8 +1507,15 @@ def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict
         )
         # A step missing from status.tsv was in flight when the run ended, even
         # though AMDiffusionBenchmark's runs_summary.csv already says not_run.
+        # parse_results refines a recorded status from that file.
+        if not step_row:
+            step_status = None
+        elif step in measured:
+            step_status = r.get("status")
+        else:
+            step_status = step_row.get("status")
         row["status"], row["failure_reason"], row["failure_detail"] = _diffusion_bench_outcome(
-            r.get("status") if step_row else None, step_log, row["exit_code"], run
+            step_status, step_log, row["exit_code"], run
         )
         rows.append(row)
     return rows or [run]

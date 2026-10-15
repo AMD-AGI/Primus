@@ -26,6 +26,8 @@ DIFFUSION_DLRM_HF_CACHE="${DIFFUSION_DLRM_HF_CACHE:-}"
 PERF_DD_RUNS=0        # runs this backend adds to the batch: NUM_REPS, or 0
 # shellcheck disable=SC2034
 PERF_DD_ACTIVE=0      # 1 while its run is in flight
+# shellcheck disable=SC2034
+PERF_DD_LOG=""        # that run's log, for the interrupt handler
 PERF_DD_OUTPUT_DIR=""
 PERF_DD_GPU=""
 PERF_DD_PLAN=""       # diffusion_bench's resolved plan (config.py --emit yaml)
@@ -35,7 +37,7 @@ PERF_DD_ARGS=()
 # empty when unknown, which leaves it to diffusion_bench's config.
 perf_dd_gpu() {
     case "${GPU:-$(perf_detect_gpu)}" in
-        MI300X|MI300|MI325X|MI325) echo mi300 ;;
+        MI300X|MI300|MI308X|MI308|MI325X|MI325) echo mi300 ;;
         MI350X|MI350|MI355X|MI355) echo mi355 ;;
     esac
 }
@@ -71,7 +73,7 @@ perf_dd_config_name() {
 # Checked before anything launches, so a bad diffusion_bench config fails now
 # rather than after hours of catalog runs. Sets the PERF_DD_* globals.
 perf_dd_prepare() {
-    local out line
+    local out errors line
     [ "$PERF_RUN_DIFFUSION_DLRM" = 1 ] || return 0
     # shellcheck disable=SC2034
     PERF_DD_RUNS=$NUM_REPS
@@ -98,23 +100,30 @@ perf_dd_prepare() {
     [ -z "$DIFFUSION_DLRM_HF_CACHE" ] || DIFFUSION_DLRM_HF_CACHE=$(realpath -m "$DIFFUSION_DLRM_HF_CACHE")
 
     # HF_TOKEN reaches diffusion_bench through the environment; as an option
-    # it would show in `ps` and in the logged launch command.
+    # it would show in `ps` and in the logged launch command. EXTRA_ENV goes
+    # into its container like into primus-cli's; the runner's own Primus
+    # defaults (HSA_NO_SCRATCH_RECLAIM, ...) do not.
     PERF_DD_GPU=$(perf_dd_gpu)
     PERF_DD_ARGS=( -c "$DIFFUSION_DLRM_CONFIG" --output-dir "$PERF_DD_OUTPUT_DIR"
-                   --label "${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}" )
+                   --label "${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
+                   ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} )
     [ -n "$PERF_DD_GPU" ] && PERF_DD_ARGS+=( --gpu "$PERF_DD_GPU" )
     [ -n "${DOCKER_IMAGE:-}" ] && PERF_DD_ARGS+=( --image "$DOCKER_IMAGE" )
     [ -n "$DIFFUSION_DLRM_HF_CACHE" ] && PERF_DD_ARGS+=( --hf-cache "$DIFFUSION_DLRM_HF_CACHE" )
     [ -n "$TRAIN_STEPS" ] && PERF_DD_ARGS+=( --num-iterations "$TRAIN_STEPS" )
 
+    # stdout is the plan; a warning on stderr must not end up in it.
+    errors=$(mktemp)
     if ! out=$(python3 "$PERF_DD_DIR/config.py" "${PERF_DD_ARGS[@]}" \
-            --detected-gpu "${PERF_DD_GPU:-unknown}" --emit yaml 2>&1); then
+            --detected-gpu "${PERF_DD_GPU:-unknown}" --emit yaml 2>"$errors"); then
         echo "[ERROR] diffusion_dlrm: diffusion_bench rejected its settings:" >&2
         while IFS= read -r line; do
             echo "        $line" >&2
-        done <<< "$out"
+        done < "$errors"
+        rm -f "$errors"
         return 1
     fi
+    rm -f "$errors"
     PERF_DD_PLAN="$out"
 }
 
@@ -179,7 +188,7 @@ perf_dd_run_dir() {
 }
 
 # PERF_REASON_FN for this run: the steps that did not succeed, e.g.
-#   steps: 2 of 7 diffusion_bench steps not successful: hunyuan-video_bs3 oom, ...
+#   steps: 2 of 7 diffusion_bench steps not successful: diffusion_hunyuan-video_bs3 oom, ...
 perf_dd_failure_reason() {
     local dir
     dir=$(perf_dd_run_dir "$1")
@@ -198,7 +207,7 @@ perf_dd_report_steps() {
             echo "                    diffusion_bench recorded no steps (see the run log)"
         else
             echo "                    diffusion_bench results: $dir"
-            awk -F'\t' 'NR > 1 { printf "                      %s %-32s %-9s exit=%s %ss\n",
+            awk -F'\t' 'NR > 1 { printf "                      %s %-36s %-9s exit=%s %ss\n",
                 ($2 == "success" ? "[ OK ]" : "[FAIL]"), $1, $2, $3, $4 }' "$dir/status.tsv"
         fi
     } | perf_log_stream
@@ -206,22 +215,28 @@ perf_dd_report_steps() {
 
 # diffusion_bench's root-running container writes the results (and new HF
 # cache files) as root, and hands them back to the user when it finishes.
-# When it was stopped first, run its finalize step here, or the user cannot
-# delete those files.
+# When it was stopped first, run its finalize step here for the run logged in
+# <log>, or the user cannot delete those files. Only root-owned files change
+# hands, as in diffusion_bench, so a shared directory's other files are kept.
 perf_dd_finalize() {
-    local dir="$PERF_DD_OUTPUT_DIR" hf mounts=()
-    [ -n "$dir" ] && [ -d "$dir" ] || return 0
-    [ -n "$(find "$dir" ! -user "$(id -u)" -print -quit 2>/dev/null)" ] || return 0
+    local dir hf mounts=() root_owned=""
+    dir=$(perf_dd_run_dir "${1:-}")
     hf=$(perf_dd_plan '.hf_cache_dir')
-    if [ -d "$hf" ] && [ "$(perf_dd_plan '.hf_cache_readonly')" != true ]; then
-        mounts=( -v "$hf:$(perf_dd_plan '.hf_mount_target')" )
+    [ "$(perf_dd_plan '.hf_cache_readonly')" = true ] && hf=""
+    [ -n "$dir" ] && [ -d "$dir" ] && root_owned=$(find "$dir" -user 0 -print -quit 2>/dev/null)
+    [ -z "$root_owned" ] && [ -n "$hf" ] && [ -d "$hf" ] && root_owned=$(find "$hf" -user 0 -print -quit 2>/dev/null)
+    [ -n "$root_owned" ] || return 0
+    if [ -n "$dir" ] && [ -d "$dir" ]; then
+        mounts+=( -v "$dir:/results" )
     fi
-    perf_log "[INFO] diffusion_dlrm: handing root-owned files under $dir back to $(id -un)."
+    if [ -n "$hf" ] && [ -d "$hf" ]; then
+        mounts+=( -v "$hf:$(perf_dd_plan '.hf_mount_target')" )
+    fi
+    perf_log "[INFO] diffusion_dlrm: handing root-owned files of ${dir:-the run} and the HF cache back to $(id -un)."
     if ! timeout -k 10 120 docker run --rm --label "${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}" \
-            --entrypoint /bin/bash -v "$dir:/results" ${mounts[@]+"${mounts[@]}"} \
-            -v "$PERF_DD_DIR:/diffusion_bench:ro" "$(perf_dd_plan '.image')" \
+            --entrypoint /bin/bash "${mounts[@]}" -v "$PERF_DD_DIR:/diffusion_bench:ro" "$(perf_dd_plan '.image')" \
             /diffusion_bench/in_container.sh finalize "$(id -u)" "$(id -g)" >/dev/null 2>&1; then
-        perf_log "[WARN] diffusion_dlrm: could not do it; some files under $dir stay root-owned."
+        perf_log "[WARN] diffusion_dlrm: could not do it; some files stay root-owned."
     fi
 }
 

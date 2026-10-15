@@ -271,12 +271,18 @@ list.
 | `--timeout SEC` | `step_timeout` |
 | `--keep-container` | `keep_container: true` |
 | `--label KEY=VALUE` | adds a docker label to the containers; repeatable (the perf batch runner finds and stops its containers by label) |
+| `--env KEY=VALUE` | sets an environment variable in the containers; repeatable (only the names are saved in `resolved_config.yaml`) |
 | `--dry-run` | starts the container and runs `launcher.py` with `launcher.dry_run=true`; skips downloads and DLRM; uses no GPU time |
 | `--parse-only RUN_DIR` | only regenerates the summary of an existing results directory |
 
 Model aliases accepted on the command line: `flux`, `sdxl`, `mochi`, `hunyuan`, `wan`.
 
+`--num-iterations` wins over `num_iterations` set for a single model in the config.
+
 Environment variables: `HF_TOKEN` (required for downloads), `HF_HOME` (default cache location).
+The token is masked in every log written to the results directory, and the containers keep their
+`hf auth login` token file (`HF_TOKEN_PATH`) inside the container rather than in the mounted cache,
+which may be shared.
 
 ---
 
