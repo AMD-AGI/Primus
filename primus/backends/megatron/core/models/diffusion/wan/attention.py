@@ -15,9 +15,9 @@ Both modules run sequence-major ``[S, B, dim]`` end to end, matching
 Megatron-Bridge, so AdaLN modulation, the LayerNorms, residuals, and the
 attention core all operate on the same layout and dispatch the same kernels.
 
-TE path: q/k/v are packed into the ``thd`` layout with ``cu_seqlens`` and rotated
-with the fused RoPE kernel, matching Megatron-Bridge's WAN attention exactly.
-Local path: q/k/v stay in SBHD and use unfused interleaved RoPE plus
+TE path: q/k are rotated in SBHD with TE's fused interleaved RoPE, then q/k/v
+are packed into the ``thd`` layout with ``cu_seqlens`` for the fused attention
+kernel. Local path: q/k/v stay in SBHD and use unfused interleaved RoPE plus
 ``PrimusTurboLocalAttention``; ``local_thd_attention`` packs them into ``thd``
 for Turbo's varlen kernel instead.
 """
@@ -212,43 +212,29 @@ class WanSelfAttention(WanAttentionBase):
     ) -> Tuple[Tensor, Optional[Tensor]]:
         query, key, value, s, b = self._split_qkv(hidden_states)
 
-        if self.local:
-            # RoPE runs in SBHD with the unfused interleaved kernel either way,
-            # so packing changes which attention kernel runs and nothing about
-            # the rotary math.
-            if rotary_freqs is not None:
-                query = apply_rotary_pos_emb(query, rotary_freqs, config=self.rope_config)
-                key = apply_rotary_pos_emb(key, rotary_freqs, config=self.rope_config)
-            if not self.local_thd:
-                return self.linear_proj(self._core(query, key, value))
-
-            cu_seqlens = thd_cu_seqlens(s, b, hidden_states.device)
-            packed_seq_params = self._thd_packing(cu_seqlens, cu_seqlens, s, s)
-            query, key, value = (
-                self._to_thd(t, s, b, self.num_heads, self.head_dim) for t in (query, key, value)
-            )
-            core_out = self._core(query, key, value, packed_seq_params)
-            core_out = core_out.reshape(b, s, -1).transpose(0, 1).contiguous()
-            return self.linear_proj(core_out)
-
-        # Pack the batch into the token dim BEFORE RoPE so the fused thd rotary
-        # and the fused attention kernel see Megatron-Bridge's exact layout.
-        cu_seqlens = thd_cu_seqlens(s, b, hidden_states.device)
-        packed_seq_params = PackedSeqParams(
-            qkv_format="thd",
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_kv=cu_seqlens,
-            cu_seqlens_q_padded=cu_seqlens,
-            cu_seqlens_kv_padded=cu_seqlens,
-        )
-        query = query.transpose(0, 1).reshape(b * s, self.num_heads, self.head_dim).contiguous()
-        key = key.transpose(0, 1).reshape(b * s, self.num_heads, self.head_dim).contiguous()
-        value = value.transpose(0, 1).reshape(b * s, self.num_heads, self.head_dim).contiguous()
-
+        # Rotate before packing: Megatron's fused thd rotary does not pass
+        # rotary_interleaved to TE, so it would treat WAN's interleaved angles
+        # as half-split. Every sample spans the whole [S, 1, 1, D] angle table,
+        # so packing after the rotation is exact.
         if rotary_freqs is not None:
-            query = apply_rotary_pos_emb(query, rotary_freqs, config=self.config, cu_seqlens=cu_seqlens)
-            key = apply_rotary_pos_emb(key, rotary_freqs, config=self.config, cu_seqlens=cu_seqlens)
+            query = apply_rotary_pos_emb(query, rotary_freqs, config=self.rope_config)
+            key = apply_rotary_pos_emb(key, rotary_freqs, config=self.rope_config)
 
+        if self.local and not self.local_thd:
+            return self.linear_proj(self._core(query, key, value))
+
+        cu_seqlens = thd_cu_seqlens(s, b, hidden_states.device)
+        if self.local:
+            packed_seq_params = self._thd_packing(cu_seqlens, cu_seqlens, s, s)
+        else:
+            packed_seq_params = PackedSeqParams(
+                qkv_format="thd",
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_kv=cu_seqlens,
+                cu_seqlens_q_padded=cu_seqlens,
+                cu_seqlens_kv_padded=cu_seqlens,
+            )
+        query, key, value = (self._to_thd(t, s, b, self.num_heads, self.head_dim) for t in (query, key, value))
         core_out = self._core(query, key, value, packed_seq_params)
         core_out = core_out.reshape(b, s, -1).transpose(0, 1).contiguous()
         return self.linear_proj(core_out)

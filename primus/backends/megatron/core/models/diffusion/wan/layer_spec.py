@@ -62,11 +62,13 @@ class WanLayerSpec:
 def _attention_config(config):
     """Config clone tuned for the WAN attention modules.
 
-    ``apply_rope_fusion`` and ``qkv_format='thd'`` match Megatron-Bridge's WAN
-    provider: it rotates q/k with the fused kernel and dispatches attention
-    through the packed thd path. The SBHD/no-mask path selects a different
-    fused-attention variant and leaves a residual per-layer gap, so the packed
-    layout is not optional for parity.
+    ``qkv_format='thd'`` matches Megatron-Bridge's WAN provider, which
+    dispatches attention through the packed thd path. The SBHD/no-mask path
+    selects a different fused-attention variant and leaves a residual per-layer
+    gap, so the packed layout is not optional for parity. ``apply_rope_fusion``
+    selects TE's fused rotary, which the TE path applies in SBHD before packing:
+    the fused thd rotary ignores ``rotary_interleaved`` (see
+    ``WanSelfAttention.forward``).
     """
     acfg = copy.copy(config)
     head_dim = config.hidden_size // config.num_attention_heads
@@ -169,7 +171,7 @@ def get_wan_transformer_spec_for_backend(config, backend) -> WanLayerSpec:
         mlp=MLPSubmodules(linear_fc1=column_linear, linear_fc2=row_linear),
         attention_config=acfg,
         ffn_config=_ffn_config(config),
-        rope_config=_rope_config(acfg),
+        rope_config=_rope_config(acfg) if config.transformer_impl == "local" else acfg,
         norm_config=ncfg,
     )
 
