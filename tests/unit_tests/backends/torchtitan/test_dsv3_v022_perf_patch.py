@@ -69,6 +69,7 @@ class TestDsv3V022PatchCondition:
         assert patch.condition(_ctx("llama3")) is False
         assert patch.condition(_ctx(None)) is False
 
+
 class _Leaf(nn.Module):
     def __init__(self, name):
         super().__init__()
