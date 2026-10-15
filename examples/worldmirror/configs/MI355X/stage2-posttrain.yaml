@@ -1,0 +1,25 @@
+work_group: ${PRIMUS_TEAM:local}
+user_name: ${PRIMUS_USER:local}
+exp_name: ${PRIMUS_EXP_NAME:worldmirror-stage2}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+platform:
+  config: platform_local.yaml
+
+modules:
+  post_trainer:
+    framework: worldmirror
+    config: post_trainer.yaml
+    model: stage2.yaml
+    overrides:
+      sink_level: null
+      file_sink_level: INFO
+      stderr_sink_level: INFO
+
+      worldmirror:
+        attention_backend: aiter
+        hypersim_dir: ${HYPERSIM_DIR:/shared_nfs/3dwm/hywm-3dwm-sub20/hypersim}
+        max_steps: ${MAX_STEPS:100000}
+        max_images_per_gpu: ${MAX_IMAGES_PER_GPU:24}
+        pretrained: ${PRETRAINED_CKPT:}
+        output_dir: ${OUTPUT_DIR:./output/worldmirror-stage2}
