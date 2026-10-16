@@ -13,6 +13,10 @@ internal cache. Because the precision-aware optimizer may not bump ``w._version`
 advances a separate generation counter (``advance_weight_generation()``) at the optimizer-step
 boundary to invalidate that cache, so initialization, checkpointing and the optimizer remain
 unchanged.
+
+The expert activation is SiLU-SwiGLU or Megatron's ``quick_geglu`` (``activation_func =
+quick_gelu`` with ``glu_linear_offset`` / ``activation_func_clamp_value``, i.e. MiniMax-M3's
+``swigluoai``); see :func:`mega_moe_activation`.
 """
 
 import contextlib
@@ -22,6 +26,7 @@ import torch
 import torch.nn.functional as F
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.mapping import ShardedTensor
+from megatron.core.fusions.fused_bias_geglu import quick_gelu
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import (
     get_cuda_rng_tracker,
@@ -32,6 +37,7 @@ from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
 from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
+    GLUActivation,
     fused_mega_moe_stage1,
     fused_mega_moe_stage2,
 )
@@ -39,6 +45,36 @@ from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8 import (
     fused_mega_moe_fp8_stage1,
     fused_mega_moe_fp8_stage2,
 )
+
+# Megatron's quick_gelu hardcodes its sigmoid scale.
+_QUICK_GELU_ALPHA = 1.702
+
+
+def _is_silu(activation_func) -> bool:
+    return activation_func in (F.silu, torch.nn.SiLU)
+
+
+def mega_moe_activation(config: TransformerConfig) -> Optional[GLUActivation]:
+    """The MegaMoE kernel activation for ``config``; ``None`` keeps the kernels' SiLU default.
+
+    ``quick_gelu`` is Megatron's ``quick_geglu``: ``g * sigmoid(1.702 g) * (u + glu_linear_offset)``
+    with the gate clamped from above only and ``up`` on both sides by ``activation_func_clamp_value``
+    (``moe/experts.py``), which is MiniMax-M3's ``swigluoai``.
+
+    SiLU always gets the default, whatever ``activation_func_clamp_value`` says: DeepSeek-V4 runs
+    MegaMoE with a SiLU config that sets it, and honouring it would change that model's numerics.
+    """
+    if _is_silu(config.activation_func):
+        return None
+    assert config.activation_func is quick_gelu, f"no MegaMoE activation for {config.activation_func!r}"
+    limit = config.activation_func_clamp_value
+    return GLUActivation(
+        alpha=_QUICK_GELU_ALPHA,
+        glu_offset=float(config.glu_linear_offset),
+        gate_clamp_lo=None,
+        gate_clamp_hi=limit,
+        up_clamp=limit,
+    )
 
 
 def mega_moe_precision() -> str:
@@ -81,6 +117,7 @@ class MegaMoEExperts(MegatronModule):
         super().__init__(config)
         self.ep_group = ep_group
         self.experts_per_rank = experts_per_rank
+        self.activation = mega_moe_activation(config)
         # w1 [g, 2I, H] gate+up; w2 [g, H, I] down
         self.fc1_weight = MegaMoEWeightModule(config, (experts_per_rank, 2 * intermediate_size, hidden_size))
         self.fc2_weight = MegaMoEWeightModule(config, (experts_per_rank, hidden_size, intermediate_size))
@@ -129,7 +166,9 @@ class MegaMoEExperts(MegatronModule):
         w1 = self.fc1_weight()
         l1_out, dwib, handle = fused_mega_moe_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
         w2 = self.fc2_weight()
-        return fused_mega_moe_stage2(l1_out, dwib, handle, topk_idx, topk_weights, w2, self.ep_group)
+        return fused_mega_moe_stage2(
+            l1_out, dwib, handle, topk_idx, topk_weights, w2, self.ep_group, self.activation
+        )
 
     def backward_dw(self) -> None:
         # match native fc2-then-fc1 order
@@ -153,7 +192,7 @@ class MegaMoEFP8Experts(MegaMoEExperts):
         l1_out, dwib, handle, state = fused_mega_moe_fp8_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
         w2 = self.fc2_weight()
         return fused_mega_moe_fp8_stage2(
-            l1_out, dwib, handle, state, topk_idx, topk_weights, w2, self.ep_group
+            l1_out, dwib, handle, state, topk_idx, topk_weights, w2, self.ep_group, self.activation
         )
 
 
@@ -227,8 +266,12 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         assert config.tensor_model_parallel_size == 1, "MegaMoE is EP-only (TP==1)"
         # Holds for the fp8 path too: fp8 is internal to the op, the parameters stay bf16.
         assert config.params_dtype == torch.bfloat16, "MegaMoE only supports bf16 params"
-        assert config.gated_linear_unit, "MegaMoE hardcodes a gated SwiGLU MLP"
-        assert config.activation_func in (F.silu, torch.nn.SiLU), "MegaMoE hardcodes SiLU"
+        assert config.gated_linear_unit, "MegaMoE fuses a gated (GLU) MLP only"
+        # `is`, not ==: Megatron defines quick_gelu twice, and configs carry the fusions one.
+        assert _is_silu(config.activation_func) or config.activation_func is quick_gelu, (
+            "MegaMoE supports SiLU-SwiGLU and quick_geglu (swigluoai) only, got "
+            f"{config.activation_func!r}"
+        )
         assert (
             config.moe_expert_capacity_factor is None
         ), "MegaMoE is dropless; moe_expert_capacity_factor must be None"

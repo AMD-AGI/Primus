@@ -3,6 +3,7 @@ extends:
 
 tokenizer_type: DeepSeekV2Tokenizer
 tokenizer_model: deepseek-ai/DeepSeek-V2-Lite
+vocab_size: 201088  # openai/gpt-oss-20b (the tokenizer above is a stand-in)
 
 # model
 num_layers: 24

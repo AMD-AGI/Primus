@@ -47,12 +47,41 @@ __all__ = [
     "LayerParts",
     "ModelParts",
     "available_bench_frameworks",
+    "get_bench_runner",
     "get_model_adapter",
+    "register_bench_runner",
     "register_model_adapter",
     "resolve_model_adapter",
 ]
 
 _MODEL_ADAPTER_REGISTRY: "dict[str, BenchModelAdapter]" = {}
+
+# Backends that run their own measurement instead of driving torch modules
+# through the profiler tree.  MaxText is one: its layers are Flax modules with
+# no autograd to hook and no caching allocator to read, so it times a compiled
+# vjp and emits the artifact directly.
+_BENCH_RUNNER_REGISTRY: "dict[str, object]" = {}
+
+
+def register_bench_runner(name: str, runner) -> None:
+    """Register a backend that owns its whole layer benchmark."""
+    if not name or not isinstance(name, str):
+        raise ValueError(f"Framework name must be a non-empty string, got {name!r}")
+    if not hasattr(runner, "run"):
+        raise TypeError(f"Bench runner for '{name}' must expose run(), got {runner!r}")
+    _BENCH_RUNNER_REGISTRY[name.lower().strip()] = runner
+
+
+def get_bench_runner(name: str):
+    """Return the self-contained bench runner for *name*, or ``None``.
+
+    ``None`` means this backend is measured the standard way: real torch modules
+    driven through the profiler tree via a :class:`BenchModelAdapter`.
+    """
+    if not name:
+        return None
+    _ensure_builtins_registered()
+    return _BENCH_RUNNER_REGISTRY.get(name.lower().strip())
 
 
 def register_model_adapter(name: str, adapter: BenchModelAdapter) -> None:
@@ -73,9 +102,14 @@ def get_model_adapter(name: str) -> Optional[BenchModelAdapter]:
 
 
 def available_bench_frameworks() -> Tuple[str, ...]:
-    """Return the sorted names of every backend the projection can benchmark."""
+    """Return the sorted names of every backend the projection can benchmark.
+
+    Both kinds count: backends measured through the shared torch harness via a
+    :class:`BenchModelAdapter`, and backends that run their own measurement via
+    a registered bench runner.
+    """
     _ensure_builtins_registered()
-    return tuple(sorted(_MODEL_ADAPTER_REGISTRY))
+    return tuple(sorted(set(_MODEL_ADAPTER_REGISTRY) | set(_BENCH_RUNNER_REGISTRY)))
 
 
 def _ensure_builtins_registered() -> None:
@@ -84,11 +118,19 @@ def _ensure_builtins_registered() -> None:
         return
     _ensure_builtins_registered._done = True
 
+    from primus.core.projection.bench_harness.maxtext import MaxTextLayerBench
     from primus.core.projection.bench_harness.megatron import MegatronBenchAdapter
     from primus.core.projection.bench_harness.torchtitan import TorchTitanBenchAdapter
 
     register_model_adapter("megatron", MegatronBenchAdapter())
     register_model_adapter("torchtitan", TorchTitanBenchAdapter())
+
+    # MaxText is the JAX pretraining backend Primus ships; 'jax' is accepted as
+    # the name users reach for when they mean "the JAX one", matching the config
+    # adapter registry.
+    maxtext_bench = MaxTextLayerBench()
+    for alias in ("maxtext", "jax"):
+        register_bench_runner(alias, maxtext_bench)
 
 
 def resolve_model_adapter(name: str) -> BenchModelAdapter:
