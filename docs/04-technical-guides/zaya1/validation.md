@@ -1,6 +1,10 @@
 # ZAYA1-8B validation
 
-The checked-in recipes are `examples/megatron/configs/MI300X/zaya1_8B-BF16-pretrain.yaml` and `examples/megatron/configs/MI355X/zaya1_8B-BF16-pretrain.yaml`. Those two files are the same recipe. The run below used that recipe with `train_iters: 30000` on GSM8K.
+The checked-in BF16 recipes are `examples/megatron/configs/MI300X/zaya1_8B-BF16-pretrain.yaml` and `examples/megatron/configs/MI355X/zaya1_8B-BF16-pretrain.yaml`. Those two files are the same recipe. They train on mock data (`mock_data: true`), so they need no dataset mount. The run below used the same settings with `train_iters: 30000` on GSM8K instead of mock data.
+
+The FP8 recipes are `zaya1_8B-FP8-pretrain.yaml` in the same two directories, also on mock data. They set `fp8: hybrid` with `fp8_recipe: tensorwise`. CCA Q/K/V/O projections and expert SwiGLU GEMMs are Transformer Engine FP8 linears. The router, depthwise convolutions, RMSNorm, attention, embeddings, and the tied logits projection stay in BF16. The numbers in this note are from the BF16 run.
+
+Tensorwise (current) scaling takes each FP8 scale from the tensor being cast, so FP8 is accurate from the first step of a cold start. Delayed scaling starts with an empty amax history. On the released checkpoint, a cold delayed-scaling forward scored SGLang's greedy GSM8K rollouts at Pearson r 0.72 (BF16 gives 0.98) and stayed there until training-style backward passes filled the amax history. Keep `fp8_recipe: delayed` only for runs that warm the history before the steps that matter.
 
 ## Hardware and software
 
@@ -52,4 +56,4 @@ A separate prefill comparison scored Primus ZAYA1 log probabilities against an S
 | RMSE of logprob | 0.0732 |
 | Mean rollout probability difference | -0.000144 |
 
-That comparison checks the loaded checkpoint forward (CCA, router, residual scaling, RMSNorm). It is not a second training run. The unit tests in `tests/unit_tests/megatron/transformer/zaya1/` lock the same formulas on a tiny config: residual affine `(x + bias) * scale`, raw key temperature, vector EDA, mixture-of-depths skip, RMSNorm, builder wiring, and one forward/backward.
+That comparison checks the loaded checkpoint forward (CCA, router, residual scaling, RMSNorm). It is not a second training run. The unit tests in `tests/unit_tests/megatron/transformer/zaya1/` lock the same formulas on a tiny config: residual affine `(x + bias) * scale`, raw key temperature, vector EDA, mixture-of-depths skip, RMSNorm, builder wiring, one forward/backward, and a cold tensorwise FP8 forward checked against the same weights in high precision.
