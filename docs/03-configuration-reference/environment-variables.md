@@ -34,6 +34,7 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
 | `PRIMUS_PATCHES` | `""` / `"all"` | User | `primus/core/patches/patch_runner.py` | `"all"` or empty enables all patches; `"none"` disables; comma list enables subset. |
+| `PRIMUS_TP_GROUP_TRACE_FIX` | `1` | User | `primus/backends/megatron/patches/tp_group_trace_warning_patches.py` | Skips Megatron's `tp_group is None` deprecation warning while Dynamo traces, which otherwise breaks the graph in every `RowParallelLinear` forward. `0` restores the unpatched shim, for A/B measurement of the breaks. |
 | `PRIMUS_LOG_LEVEL` | `INFO` | User; debug paths in `runner/primus-cli-*.sh` set `DEBUG` | `runner/lib/common.sh` | Log verbosity: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `PRIMUS_LOG_TIMESTAMP` | `1` | User | `runner/lib/common.sh` | `1` prefixes logs with timestamps; `0` disables. |
 | `PRIMUS_LOG_COLOR` | `1` (auto-off if not a TTY) | User; tests may set `0` | `runner/lib/common.sh` | ANSI colors in runner logs. |
