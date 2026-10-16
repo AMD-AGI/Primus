@@ -23,10 +23,11 @@ component escapes it entirely, so its logit contribution grows without bound
 and detonates the deep residual stream.
 
 Fix: apply a **parameter-free RMSNorm** (unit RMS over ``qk_pos_emb_head_dim``)
-to ``q_pos_emb`` and ``k_pos_emb`` before the rotary embedding. Since rotary is
-norm-preserving, this caps the rotary logit contribution to
-``<= qk_pos_emb_head_dim`` regardless of projection-weight growth -- the real,
-architectural fix rather than another logit-threshold band-aid.
+to ``q_pos_emb`` and ``k_pos_emb`` before the rotary embedding. Rotary is a
+rotation, so this caps the rotary logit contribution at
+``qk_pos_emb_head_dim`` (``mscale**2 * qk_pos_emb_head_dim`` with YaRN, whose
+cos/sin carry the ``mscale`` factor) regardless of projection-weight growth --
+the real, architectural fix rather than another logit-threshold band-aid.
 
 Why parameter-free (no learnable gain): the run resumes mid-training from an
 existing checkpoint. A learnable RMSNorm gain would add new parameters and
@@ -88,10 +89,10 @@ _NEW = """\
                 # The rotary q/k parts bypass q_layernorm/kv_layernorm and also
                 # escape qk_clip, so their magnitude can grow unbounded and drive
                 # the attention-logit / deep-residual explosion. Normalize each
-                # head's rotary vector to unit RMS (rotary is norm-preserving, so
-                # this bounds the rotary logit contribution to qk_pos_emb_head_dim)
-                # without adding parameters -- keeps the checkpoint/optimizer
-                # layout identical for a clean mid-training resume.
+                # head's rotary vector to unit RMS (rotary is a rotation, so this
+                # bounds the rotary logit contribution at qk_pos_emb_head_dim,
+                # times mscale**2 under YaRN) without adding parameters -- keeps
+                # the checkpoint/optimizer layout identical for a clean resume.
                 _qkn_eps = self.config.layernorm_epsilon
                 q_pos_emb = q_pos_emb * torch.rsqrt(
                     q_pos_emb.float().pow(2).mean(-1, keepdim=True) + _qkn_eps
@@ -177,4 +178,13 @@ def _enabled(ctx: PatchContext) -> bool:
     condition=_enabled,
 )
 def patch_mla_rope_qk_norm(ctx: PatchContext) -> None:
-    _install_mla_rope_qk_norm_patch()
+    # ``run_patches`` swallows exceptions (stop_on_error=False) and continues with
+    # the upstream method, which would silently train without a stabilizer the
+    # user explicitly enabled (e.g. after upstream source drift breaks the
+    # anchor). Escalate to a hard abort; ``SystemExit`` is a ``BaseException``
+    # and is not caught by ``run_patches``.
+    try:
+        _install_mla_rope_qk_norm_patch()
+    except Exception as exc:
+        log_rank_0(f"[Patch:{_PATCH_KEY}] FATAL: {exc}")
+        raise SystemExit(f"[{_PATCH_KEY}] QK-Norm patch installation failed: {exc}") from exc
