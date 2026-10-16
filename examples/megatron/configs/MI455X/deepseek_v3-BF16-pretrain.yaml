@@ -125,3 +125,5 @@ modules:
       # cross entropy
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
+      # attention takes attn_mask_type=causal; a [b,1,s,s] mask copied per micro-batch is unused
+      create_attention_mask_in_dataloader: false

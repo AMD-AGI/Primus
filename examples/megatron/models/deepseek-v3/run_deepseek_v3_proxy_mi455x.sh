@@ -56,6 +56,13 @@ if [[ -n "${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:-}" ]]; then
     echo "set TURBO_GROUPED_GEMM_BACKEND instead of PRIMUS_TURBO_GROUPED_GEMM_BACKEND" >&2
     exit 2
 fi
+# Primus opt-ins (all bit-identical or FP32-equivalent; set to 0 for the previous behaviour):
+# MoE all-to-all without the self round, no blocking host copies in get_batch/TE CE backward,
+# Primus-Turbo cross entropy, Triton GEMMs for the FP32 router
+export PRIMUS_MOE_A2A_SKIP_SELF=${PRIMUS_MOE_A2A_SKIP_SELF:-1}
+export PRIMUS_NO_HOST_SYNC=${PRIMUS_NO_HOST_SYNC:-1}
+export PRIMUS_TURBO_CROSS_ENTROPY=${PRIMUS_TURBO_CROSS_ENTROPY:-1}
+export PRIMUS_ROUTER_TRITON_GEMM=${PRIMUS_ROUTER_TRITON_GEMM:-1}
 export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
 
