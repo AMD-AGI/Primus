@@ -18,6 +18,8 @@ peer), each about as long as the whole exchange could take.
 With ``PRIMUS_MOE_A2A_SKIP_SELF=1`` the rank's own chunk is copied locally and
 RCCL gets a list all-to-all whose self entry is empty, so the 3 remote peers fit
 one kernel. Outputs are bit-identical.
+The patch replaces ``_AllToAll`` for every caller (MoE dispatch/combine, and the SP/CP helpers that use it);
+equal (None) and unequal splits keep ``all_to_all_single`` semantics.
 """
 
 import os
@@ -36,12 +38,15 @@ def _all_to_all_skip_self(group, input, output_split_sizes, input_split_sizes):
     world = group.size()
     rank = group.rank()
     rest = list(input.size()[1:])
+    # a None split means equal chunks (all_to_all_single semantics), for either side independently
+    if input_split_sizes is None:
+        input_split_sizes = [input.size(0) // world] * world
+    else:
+        input_split_sizes = [int(x) for x in input_split_sizes]
     if output_split_sizes is None:
-        n = input.size(0) // world
-        input_split_sizes = output_split_sizes = [n] * world
+        output_split_sizes = [input.size(0) // world] * world
     else:
         output_split_sizes = [int(x) for x in output_split_sizes]
-        input_split_sizes = [int(x) for x in input_split_sizes]
     output = input.new_empty(
         size=[sum(output_split_sizes)] + rest, dtype=input.dtype, device=torch.cuda.current_device()
     )

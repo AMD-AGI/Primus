@@ -42,14 +42,16 @@ PRIMUS_LAUNCHER=direct bash examples/megatron/models/deepseek-v3/run_deepseek_v3
   auto-tuning if `PRIMUS_TURBO_AUTO_TUNE=1` is exported). The script refuses Primus-Turbo's
   `PRIMUS_TURBO_GROUPED_GEMM_BACKEND`, which Primus would overwrite from `TURBO_GROUPED_GEMM_BACKEND`.
 - `PROFILE=True` profiles iterations 6–7 (trace under `output/<team>/<user>/<exp>/tensorboard/`).
-- Primus opt-ins, all on by default; set to `0` for the previous behaviour:
+- Primus opt-ins, all on by default; set them to `0` and pass `--create_attention_mask_in_dataloader True` for
+  the previous behaviour:
   - `PRIMUS_MOE_A2A_SKIP_SELF`: the MoE all-to-all copies the rank's own chunk locally and gives RCCL a list
     all-to-all without it, so the 3 peers fit one RCCL kernel instead of two (bit-identical).
   - `PRIMUS_NO_HOST_SYNC`: with TP=1, `get_batch` and TE's cross-entropy backward skip their blocking
     host-to-device copies (bit-identical).
   - `PRIMUS_TURBO_CROSS_ENTROPY`: the LM loss uses Primus-Turbo's cross entropy (TP=1; FP32 gradient
     arithmetic as current TE).
-  - `PRIMUS_ROUTER_TRITON_GEMM`: Triton GEMMs for the FP32 router; the backward keeps FP32 accuracy.
+  - `PRIMUS_ROUTER_TRITON_GEMM`: Triton GEMMs for the FP32 router; the backward keeps FP32 accuracy. Not
+    installed when `moe_router_bwd_bf16` is set (mutually exclusive).
 - `EXTRA_ENV`: extra environment for the training processes, e.g. `EXTRA_ENV="GPU_MAX_HW_QUEUES=4"`.
 
 The defaults are in the script. Arguments to the script are appended to the Primus command line. The
@@ -76,7 +78,8 @@ the no-recompute row (add `PRIMUS_RECOMPUTE_LAYER_IDS=0,3` or the 1-GPU settings
 
 ```bash
 DOCKER_IMAGE=amdprimus/amdprimus:tas-20261011 USE_TURBO_ATTENTION=False TURBO_GROUPED_GEMM_BACKEND=default \
-    bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
+    PRIMUS_MOE_A2A_SKIP_SELF=0 PRIMUS_NO_HOST_SYNC=0 PRIMUS_TURBO_CROSS_ENTROPY=0 PRIMUS_ROUTER_TRITON_GEMM=0 \
+    bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh --create_attention_mask_in_dataloader True
 ```
 
 | Variant | ms/iter | TFLOP/s/GPU | Peak VRAM/GPU | lm loss at iteration 10 |
@@ -102,7 +105,8 @@ DOCKER_IMAGE=amdprimus/amdprimus:tas-20261011 USE_TURBO_ATTENTION=False TURBO_GR
 ## Optimizations on top of FlyDSL attention and grouped GEMM
 
 Measured on 4x MI455X with `amdprimus/amdprimus:tas-20261015` (one host, 2026-10-16; ms/iter over
-iterations 3-10 without profiled iterations). Each row adds one change to the row above.
+iterations 3-10 without profiled iterations, and without iterations at or after a grad-norm deviation from
+the reference, which this host causes now and then). Each row adds one change to the row above.
 
 | Configuration | ms/iter | TFLOP/s/GPU | tokens/s/GPU |
 | --- | --- | --- | --- |
@@ -110,18 +114,20 @@ iterations 3-10 without profiled iterations). Each row adds one change to the ro
 | + `PRIMUS_MOE_A2A_SKIP_SELF` | 1154 | 1230 | 56.8k |
 | + `PRIMUS_NO_HOST_SYNC`, no dataloader attention mask | 1133 | 1253 | 57.8k |
 | + `PRIMUS_TURBO_CROSS_ENTROPY` | 1119 | 1269 | 58.6k |
-| + `PRIMUS_ROUTER_TRITON_GEMM` (the defaults) | 1089-1096 | 1295-1303 | 59.8-60.2k |
+| + `PRIMUS_ROUTER_TRITON_GEMM` (the defaults) | 1089-1092 | 1300-1304 | 60.0-60.2k |
 
 Per iteration on rank 0, the profile moves as follows. Exposed MoE all-to-all drops from 157 to 92 ms, at a cost of
-10 ms for the local self copy. GPU idle drops from 79 to 41 ms. Cross entropy drops from 19 to 7 ms. The router GEMMs and
-their casts drop from 34.5 to 8.7 ms (router module 52 to 25 ms). The profiled step drops from 1256 to 1118 ms.
+10 ms for the local self copy. GPU idle drops from 79 to 41 ms. Cross entropy drops from 19 to 7 ms. The router GEMMs
+drop from 33.4 to 8.7 ms (router module 52 to 25 ms). The profiled step drops from 1256 to 1118 ms.
 
 Tried and not kept on this host:
 - `moe_shared_expert_overlap: true`: hangs at iteration 3.
-- `--overlap_moe_expert_parallel_comm True` (combined 1F1B): 1117 ms/iter, but NaN/Inf within 2-8 iterations in all
-  3 runs.
-- `use_turbo_fused_act_with_probs: true`: NaN on all ranks in both runs.
-- `moe_router_bwd_bf16: true`: -7 ms, BF16 rounding of the router gradient.
+- `--overlap_moe_expert_parallel_comm True` (combined 1F1B, run with `EXTRA_ENV=GPU_MAX_HW_QUEUES=4`): 1117 ms/iter
+  on the baseline, but NaN/Inf after 2-8 iterations in all 3 runs, with MES queue-removal failures in dmesg; cause
+  not established on this host.
+- `use_turbo_fused_act_with_probs: true`: about -10 ms, but both runs stopped on NaN by iteration 5; inconclusive
+  on this host.
+- `moe_router_bwd_bf16: true`: -7 ms on the baseline (one run), BF16 rounding of the router gradient.
 - RCCL channel/chunk/buffer environment variables: no gain.
 
 ## Known issues

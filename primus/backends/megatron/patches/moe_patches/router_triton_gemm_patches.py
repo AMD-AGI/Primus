@@ -28,7 +28,7 @@ import torch
 import triton
 import triton.language as tl
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _FWD_BLOCK_M, _FWD_BLOCK_K = 32, 64
@@ -105,11 +105,13 @@ def _supported(inp: torch.Tensor, weight: torch.Tensor, bias, router_dtype) -> b
         and inp.is_cuda
         and weight.is_contiguous()
         and inp.shape[-1] == k
-        and n >= 16
+        and 16 <= n <= 256
         and n & (n - 1) == 0
         and k % _FWD_BLOCK_K == 0
         and k % _DX_BLOCK_H == 0
         and k % _DW_BLOCK_H == 0
+        # the kernels index with int32 offsets
+        and inp.numel() < 2**31
     )
 
 
@@ -188,6 +190,16 @@ def patch_router_triton_gemm(ctx: PatchContext) -> None:
 
     fn = moe_utils.RouterGatingLinearFunction
     if getattr(fn, "_primus_router_triton_gemm_patched", False):
+        return
+    try:
+        bwd_bf16 = bool(getattr(get_args(ctx), "moe_router_bwd_bf16", False))
+    except Exception:
+        bwd_bf16 = False
+    if bwd_bf16:
+        log_rank_0(
+            "[Patch:megatron.moe.router_triton_gemm] not installed: moe_router_bwd_bf16 is set "
+            "(the two options are mutually exclusive)"
+        )
         return
     orig_forward, orig_backward = fn.forward, fn.backward
 

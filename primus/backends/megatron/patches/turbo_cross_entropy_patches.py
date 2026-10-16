@@ -10,12 +10,14 @@ Primus-Turbo cross entropy for the LM loss (opt-in, ``PRIMUS_TURBO_CROSS_ENTROPY
 ``primus_turbo.pytorch.ops.cross_entropy`` reads the logits once in forward (keeping two fp32
 statistics per token) and once in backward, where it writes the logits gradient in place and
 applies grad_output in fp32. TE's Triton cross entropy makes more passes over the [s, b, vocab]
-logits and syncs the host at the start of backward. Only the single-rank vocabulary (TP=1) case is
-handled; anything else keeps Megatron's path. The gradient follows current TE arithmetic (fp32
+logits and syncs the host at the start of backward. Only the single-rank vocabulary (TP=1), TE-fused
+(``cross_entropy_fusion_impl: te``), int64-label case is handled; anything else keeps Megatron's path. The gradient follows current TE arithmetic (fp32
 probabilities), so results match TE's to rounding.
 """
 
 import os
+
+import torch
 
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
@@ -44,7 +46,12 @@ def patch_turbo_cross_entropy(ctx: PatchContext):
     def compute_language_model_loss(self, labels, logits):
         tp = getattr(self, "pg_collection", None)
         tp_size = tp.tp.size() if tp is not None and getattr(tp, "tp", None) is not None else 1
-        if tp_size != 1 or not self.config.cross_entropy_loss_fusion:
+        if (
+            tp_size != 1
+            or not self.config.cross_entropy_loss_fusion
+            or getattr(self.config, "cross_entropy_fusion_impl", "te") != "te"
+            or labels.dtype != torch.int64
+        ):
             return orig(self, labels, logits)
         # [b s] => [s b], logits [s b vocab]
         labels = labels.transpose(0, 1).contiguous()
