@@ -186,6 +186,14 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
             log_rank_0("Using Kimi-K3 model provider; reusing pretrain_gpt forward_step + datasets")
             train_valid_test_datasets_provider.is_distributed = True
+        elif model_type == "olmo3":
+            from pretrain_gpt import (  # type: ignore
+                forward_step,
+                train_valid_test_datasets_provider,
+            )
+
+            log_rank_0("Using OLMo-3 model provider; reusing pretrain_gpt forward_step + datasets")
+            train_valid_test_datasets_provider.is_distributed = True
         elif model_type == "glm5_next":
             from pretrain_gpt import (  # type: ignore
                 forward_step,
