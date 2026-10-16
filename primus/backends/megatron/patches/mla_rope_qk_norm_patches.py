@@ -43,9 +43,10 @@ hybrid uses. The patch logs a warning and no-ops when RoPE fusion is in effect
 (the fused kernel applies rotary internally; the hybrids' inherited
 ``apply_rope_fusion: true`` does not count, since Megatron drops it for
 ``position_embedding_type: none``), when MLA latents are cached (a
-different q/k path this anchor was not written for), and for NoPE MLA
+different q/k path this anchor was not written for), for NoPE MLA
 (``mla_use_nope``, the Kimi K3 default), whose 64 positional dims are an
-unrotated pass-through that must stay bit-exact.
+unrotated pass-through that must stay bit-exact, and when
+``qk_pos_emb_head_dim`` is 0 (nothing to normalize).
 
 This is a "source-string rewrite" patch (see ``_source_patch_utils``): the edit
 sits in the middle of ``MLASelfAttention.get_query_key_value_tensors``'s nested
@@ -171,6 +172,13 @@ def _enabled(ctx: PatchContext) -> bool:
         log_rank_0(
             f"[Patch:{_PATCH_KEY}] mla_use_nope=True; there is no rotary component "
             "to normalize -- skipping."
+        )
+        return False
+    pos_dim = getattr(args, "qk_pos_emb_head_dim", None)
+    if pos_dim is not None and pos_dim <= 0:
+        log_rank_0(
+            f"[Patch:{_PATCH_KEY}] qk_pos_emb_head_dim={pos_dim}; there is no rotary "
+            "component to normalize -- skipping."
         )
         return False
     return True

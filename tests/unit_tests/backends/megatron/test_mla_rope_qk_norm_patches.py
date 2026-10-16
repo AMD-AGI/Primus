@@ -11,7 +11,7 @@ Verifies:
   2. The patch rewrites the method body (on the defining base class, even when
      the module attribute is rebound to a subclass) and is idempotent.
   3. The enable condition honors the flag/env var and the fused-RoPE,
-     cached-latent and NoPE-MLA guards, and the YAML flag turns it on for the
+     cached-latent, NoPE-MLA and zero-width-rotary guards, and the YAML flag turns it on for the
      shipped KDA MLA hybrid config through the runtime's arg build + merge.
   4. An install failure aborts the run instead of silently training without QK-Norm.
   5. On a real (tiny) MLA module, the patched method feeds unit-RMS q/k into
@@ -120,6 +120,8 @@ def _ctx(**args):
         ("1", {"model_type": "kimi_k3"}, False),  # K3 defaults to NoPE -> skip
         ("1", {"model_type": "kimi_k3", "mla_use_nope": False}, True),  # K3 with RoPE
         ("1", {"model_type": "gpt", "mla_use_nope": False}, True),
+        ("1", {"qk_pos_emb_head_dim": 0}, False),  # zero-width rotary -> skip
+        ("1", {"qk_pos_emb_head_dim": 64}, True),
     ],
 )
 def test_enabled_condition(env, args, expected, monkeypatch):
