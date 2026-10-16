@@ -8,7 +8,8 @@
 
 Verifies:
   1. The source anchor still matches upstream ``get_query_key_value_tensors``.
-  2. The patch rewrites the method body (on the defining base class) and is idempotent.
+  2. The patch rewrites the method body (on the defining base class, even when
+     the module attribute is rebound to a subclass) and is idempotent.
   3. The enable condition honors the flag/env var and the fused-RoPE,
      cached-latent and NoPE-MLA guards, and the YAML flag turns it on for the
      shipped KDA MLA hybrid config through the runtime's arg build + merge.
@@ -76,6 +77,24 @@ def test_install_rewrites_and_is_idempotent(pristine_method, monkeypatch):
 
     patch_mod._install_mla_rope_qk_norm_patch()  # idempotent
     assert cls.__dict__[_METHOD] is first
+
+
+def test_install_patches_base_when_module_attr_is_rebound(pristine_method, monkeypatch):
+    """mla_patches may rebind the module attribute to a subclass
+    (PrimusMLASelfAttention) while prebuilt layers are base instances."""
+    monkeypatch.setattr(patch_mod, "log_rank_0", lambda *a, **k: None)
+
+    class _Rebound(MLASelfAttention):
+        pass
+
+    monkeypatch.setattr(mla_mod, "MLASelfAttention", _Rebound)
+    base = _defining_cls()
+    original = base.__dict__[_METHOD]
+
+    patch_mod._install_mla_rope_qk_norm_patch()
+    assert is_patched(base, patch_mod._PATCH_KEY)
+    assert base.__dict__[_METHOD] is not original
+    assert _METHOD not in _Rebound.__dict__
 
 
 def _ctx(**args):

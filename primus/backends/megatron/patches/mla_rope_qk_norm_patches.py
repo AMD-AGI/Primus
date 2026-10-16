@@ -17,10 +17,12 @@ projected, split off, and fed straight into ``apply_rotary_pos_emb``.
 For the 3B KDA-RoPE hybrid this is the divergence mechanism. Per-layer
 instrumentation showed that around iter ~22k the deepest ~7 residual layers
 (L49-L55) blow up *together* while the attention logits shoot to 16k-37k --
-far past the ``qk_clip`` threshold (5500). ``qk_clip`` cannot hold them because
-it only rescales the (normalized) content projections; the unnormalized rotary
-component escapes it entirely, so its logit contribution grows without bound
-and detonates the deep residual stream.
+far past the ``qk_clip`` threshold (5500). ``qk_clip`` cannot hold them: it
+rescales the per-head weights (content q/k and the rotary q rows of
+``linear_q_(up_)proj``), but the rotary key ``k_pos_emb`` comes straight out of
+``linear_kv_down_proj``, is shared by all heads, and is never rescaled or
+normalized, so the rotary logit term grows through it without bound and
+detonates the deep residual stream.
 
 Fix: apply a **parameter-free RMSNorm** (unit RMS over ``qk_pos_emb_head_dim``)
 to ``q_pos_emb`` and ``k_pos_emb`` before the rotary embedding. Rotary is a
