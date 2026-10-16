@@ -72,6 +72,10 @@ ENV_ARGS=(
     --env PRIMUS_TURBO_ATTN_BACKEND="${PRIMUS_TURBO_ATTN_BACKEND}"
     --env HSA_COREDUMP_PATTERN=/dev/null
 )
+# extra environment for the training processes, e.g. EXTRA_ENV="GPU_MAX_HW_QUEUES=4 CUDA_DEVICE_MAX_CONNECTIONS=8"
+for kv in ${EXTRA_ENV:-}; do
+    ENV_ARGS+=(--env "${kv}")
+done
 if [[ -n "${TURBO_DIR}" ]]; then
     TURBO_DIR=$(realpath -e "${TURBO_DIR}")
     # --env is applied after Primus builds PYTHONPATH, so this checkout comes first.
