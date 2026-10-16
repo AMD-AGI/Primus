@@ -36,8 +36,11 @@ shards byte-compatible while still capping the runaway.
 
 Scope: this rewrites the non-fused training/eval path
 (``apply_rope_fusion: false``, ``cache_mla_latents: false``), which is what the
-hybrid uses. If RoPE fusion is enabled the patch logs a warning and no-ops,
-since the fused kernel applies rotary internally.
+hybrid uses. The patch logs a warning and no-ops when RoPE fusion is enabled
+(the fused kernel applies rotary internally), when MLA latents are cached (a
+different q/k path this anchor was not written for), and for NoPE MLA
+(``mla_use_nope``, the Kimi K3 default), whose 64 positional dims are an
+unrotated pass-through that must stay bit-exact.
 
 This is a "source-string rewrite" patch (see ``_source_patch_utils``): the edit
 sits in the middle of ``MLASelfAttention.get_query_key_value_tensors``'s nested
@@ -136,6 +139,25 @@ def _enabled(ctx: PatchContext) -> bool:
         log_rank_0(
             f"[Patch:{_PATCH_KEY}] apply_rope_fusion=True; QK-Norm patch only "
             "supports the non-fused path -- skipping (rotary q/k stay unnormalized)."
+        )
+        return False
+    if getattr(args, "cache_mla_latents", False):
+        log_rank_0(
+            f"[Patch:{_PATCH_KEY}] cache_mla_latents=True; QK-Norm patch only "
+            "supports the non-cached path -- skipping (rotary q/k stay unnormalized)."
+        )
+        return False
+    # NoPE MLA (Kimi K3) still routes its positional dims through this block but
+    # relies on a zero-width rotary table being a bit-exact pass-through, so
+    # normalizing them would change the model. KimiK3TransformerConfig defaults
+    # mla_use_nope to True, so a K3 run without the arg is NoPE too.
+    use_nope = getattr(args, "mla_use_nope", None)
+    if use_nope is None:
+        use_nope = getattr(args, "model_type", None) == "kimi_k3"
+    if use_nope:
+        log_rank_0(
+            f"[Patch:{_PATCH_KEY}] mla_use_nope=True; there is no rotary component "
+            "to normalize -- skipping."
         )
         return False
     return True

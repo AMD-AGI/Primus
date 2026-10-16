@@ -9,7 +9,8 @@
 Verifies:
   1. The source anchor still matches upstream ``get_query_key_value_tensors``.
   2. The patch rewrites the method body (on the defining base class) and is idempotent.
-  3. The enable condition honors the flag/env var and the fused-RoPE guard.
+  3. The enable condition honors the flag/env var and the fused-RoPE,
+     cached-latent and NoPE-MLA guards.
 """
 
 import inspect
@@ -79,21 +80,26 @@ def _ctx(**args):
 
 
 @pytest.mark.parametrize(
-    "env, flag, fusion, expected",
+    "env, args, expected",
     [
-        ("1", False, False, True),  # env var enables
-        (None, True, False, True),  # config flag enables
-        (None, False, False, False),  # off by default
-        ("1", False, True, False),  # fused RoPE -> skip (guarded)
+        ("1", {}, True),  # env var enables
+        (None, {"mla_rope_qk_norm": True}, True),  # config flag enables
+        (None, {}, False),  # off by default
+        ("1", {"apply_rope_fusion": True}, False),  # fused RoPE -> skip
+        ("1", {"cache_mla_latents": True}, False),  # cached latents -> skip
+        ("1", {"mla_use_nope": True}, False),  # NoPE MLA -> skip
+        ("1", {"model_type": "kimi_k3"}, False),  # K3 defaults to NoPE -> skip
+        ("1", {"model_type": "kimi_k3", "mla_use_nope": False}, True),  # K3 with RoPE
+        ("1", {"model_type": "gpt", "mla_use_nope": False}, True),
     ],
 )
-def test_enabled_condition(env, flag, fusion, expected, monkeypatch):
+def test_enabled_condition(env, args, expected, monkeypatch):
     monkeypatch.setattr(patch_mod, "log_rank_0", lambda *a, **k: None)
     if env is None:
         monkeypatch.delenv("PRIMUS_MLA_ROPE_QK_NORM", raising=False)
     else:
         monkeypatch.setenv("PRIMUS_MLA_ROPE_QK_NORM", env)
-    ctx = _ctx(mla_rope_qk_norm=flag, apply_rope_fusion=fusion)
+    ctx = _ctx(**{"mla_rope_qk_norm": False, "apply_rope_fusion": False, **args})
     assert patch_mod._enabled(ctx) is expected
 
 
