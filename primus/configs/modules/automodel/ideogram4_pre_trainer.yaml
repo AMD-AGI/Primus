@@ -92,6 +92,9 @@ flow_matching:
 
 fsdp:
   tp_size: 1
+  # Context parallelism. A degree above 1 needs the Ideogram-4 CP plan, which is
+  # installed automatically, and must divide both the world size and the attention
+  # head count. It cannot be combined with primus_ideogram4.varlen_attention.
   cp_size: 1
   pp_size: 1
   dp_replicate_size: 1

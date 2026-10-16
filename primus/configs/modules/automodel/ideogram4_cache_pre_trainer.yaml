@@ -88,6 +88,7 @@ flow_matching:
 
 fsdp:
   tp_size: 1
+  # See `ideogram4_pre_trainer.yaml` for the constraints on a degree above 1.
   cp_size: 1
   pp_size: 1
   dp_replicate_size: 1
