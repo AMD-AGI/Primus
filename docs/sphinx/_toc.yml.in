@@ -90,6 +90,8 @@ subtrees:
         title: Data preparation
       - file: 04-technical-guides/checkpoint-management.md
         title: Checkpoint management
+      - file: features/turbo_cross_entropy.md
+        title: Turbo cross entropy
       - file: 04-technical-guides/moe-training.md
         title: MoE training
       - file: 04-technical-guides/mega-moe.md
