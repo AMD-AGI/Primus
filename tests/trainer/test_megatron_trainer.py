@@ -162,6 +162,15 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_olmo_3_1025_7B(self):
+        run_script(
+            self.__class__.__name__,
+            "olmo_3_1025_7B",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/olmo_3_1025_7B-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=["--num_layers", "4", "--train_iters", "3"],
+        )
+
     # The only dense FP8 case; every other FP8 case here is MoE.
     @pytest.mark.weekly
     def test_llama3_8B_fp8(self):
