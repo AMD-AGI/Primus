@@ -37,8 +37,10 @@ shards byte-compatible while still capping the runaway.
 
 Scope: this rewrites the non-fused training/eval path
 (``apply_rope_fusion: false``, ``cache_mla_latents: false``), which is what the
-hybrid uses. The patch logs a warning and no-ops when RoPE fusion is enabled
-(the fused kernel applies rotary internally), when MLA latents are cached (a
+hybrid uses. The patch logs a warning and no-ops when RoPE fusion is in effect
+(the fused kernel applies rotary internally; the hybrids' inherited
+``apply_rope_fusion: true`` does not count, since Megatron drops it for
+``position_embedding_type: none``), when MLA latents are cached (a
 different q/k path this anchor was not written for), and for NoPE MLA
 (``mla_use_nope``, the Kimi K3 default), whose 64 positional dims are an
 unrotated pass-through that must stay bit-exact.
@@ -136,7 +138,15 @@ def _enabled(ctx: PatchContext) -> bool:
         return False
     # The fused RoPE kernel applies rotary internally; this source patch only
     # covers the explicit non-fused split path. Warn + no-op if fusion is on.
-    if getattr(args, "apply_rope_fusion", False):
+    # This runs before Megatron's validate_args (called inside pretrain), which
+    # forces apply_rope_fusion off unless position_embedding_type == "rope". The
+    # MLA hybrids inherit apply_rope_fusion: true with position_embedding_type:
+    # none and still run the non-fused MLA rotary path, so judge the effective value.
+    rope_fused = (
+        getattr(args, "apply_rope_fusion", False)
+        and getattr(args, "position_embedding_type", "rope") == "rope"
+    )
+    if rope_fused:
         log_rank_0(
             f"[Patch:{_PATCH_KEY}] apply_rope_fusion=True; QK-Norm patch only "
             "supports the non-fused path -- skipping (rotary q/k stay unnormalized)."

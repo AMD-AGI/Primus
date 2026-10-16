@@ -10,13 +10,15 @@ Verifies:
   1. The source anchor still matches upstream ``get_query_key_value_tensors``.
   2. The patch rewrites the method body (on the defining base class) and is idempotent.
   3. The enable condition honors the flag/env var and the fused-RoPE,
-     cached-latent and NoPE-MLA guards.
+     cached-latent and NoPE-MLA guards, and the YAML flag turns it on for the
+     shipped KDA MLA hybrid config through the runtime's arg build + merge.
   4. An install failure aborts the run instead of silently training without QK-Norm.
   5. On a real (tiny) MLA module, the patched method feeds unit-RMS q/k into
      the rotary embedding and leaves the content q/k and the value unchanged.
 """
 
 import inspect
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -91,6 +93,9 @@ def _ctx(**args):
         (None, {"mla_rope_qk_norm": True}, True),  # config flag enables
         (None, {}, False),  # off by default
         ("1", {"apply_rope_fusion": True}, False),  # fused RoPE -> skip
+        ("1", {"apply_rope_fusion": True, "position_embedding_type": "rope"}, False),
+        # validate_args later drops fusion for non-"rope" models (the MLA hybrids)
+        ("1", {"apply_rope_fusion": True, "position_embedding_type": "none"}, True),
         ("1", {"cache_mla_latents": True}, False),  # cached latents -> skip
         ("1", {"mla_use_nope": True}, False),  # NoPE MLA -> skip
         ("1", {"model_type": "kimi_k3"}, False),  # K3 defaults to NoPE -> skip
@@ -106,6 +111,33 @@ def test_enabled_condition(env, args, expected, monkeypatch):
         monkeypatch.setenv("PRIMUS_MLA_ROPE_QK_NORM", env)
     ctx = _ctx(**{"mla_rope_qk_norm": False, "apply_rope_fusion": False, **args})
     assert patch_mod._enabled(ctx) is expected
+
+
+def test_yaml_flag_enables_on_shipped_hybrid_config(monkeypatch):
+    """Mirror ``PrimusRuntime._initialize_trainer`` on the KDA MLA hybrid config:
+    the builder drops the Primus-only key, the params merge puts it back, and the
+    inherited ``apply_rope_fusion: true`` must not skip the patch."""
+    from primus.backends.megatron.argument_builder import MegatronArgBuilder
+    from primus.core.config.yaml_loader import parse_yaml
+    from primus.core.utils.yaml_utils import merge_namespace
+
+    monkeypatch.setattr(patch_mod, "log_rank_0", lambda *a, **k: None)
+    monkeypatch.delenv("PRIMUS_MLA_ROPE_QK_NORM", raising=False)
+    repo = Path(__file__).resolve().parents[4]
+    model = parse_yaml(str(repo / "primus/configs/models/megatron/zebra_kda_1B_hybrid.yaml"))
+    assert model["multi_latent_attention"] and model["qk_pos_emb_head_dim"] > 0
+    params = SimpleNamespace(**model, mla_rope_qk_norm=True)
+
+    backend_args = MegatronArgBuilder().update(params).finalize()
+    assert not hasattr(backend_args, "mla_rope_qk_norm")
+    merge_namespace(backend_args, params, allow_override=False, excepts=[])
+
+    ctx = PatchContext(
+        backend="megatron",
+        phase="before_train",
+        extra={"module_config": SimpleNamespace(params=backend_args)},
+    )
+    assert patch_mod._enabled(ctx) is True
 
 
 def test_install_failure_is_fatal(pristine_method, monkeypatch):
