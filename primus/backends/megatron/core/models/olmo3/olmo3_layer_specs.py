@@ -15,14 +15,16 @@ from megatron.core.extensions.transformer_engine import (
     TERowParallelLinear,
 )
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
+from megatron.core.transformer.attention import SelfAttentionSubmodules
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.identity_op import IdentityOp
-from megatron.core.transformer.attention import SelfAttentionSubmodules
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_layer import TransformerLayerSubmodules
 
-from primus.backends.megatron.core.models.olmo3.olmo3_attention import Olmo3SelfAttention
+from primus.backends.megatron.core.models.olmo3.olmo3_attention import (
+    Olmo3SelfAttention,
+)
 from primus.backends.megatron.core.models.olmo3.olmo3_layer import Olmo3TransformerLayer
 
 

@@ -22,8 +22,13 @@ class Olmo3TransformerLayer(TransformerLayer):
     """
 
     def __init__(self, config, submodules, layer_number=1, hidden_dropout=None, post_norm=None, **kwargs):
-        super().__init__(config=config, submodules=submodules, layer_number=layer_number,
-                         hidden_dropout=hidden_dropout, **kwargs)
+        super().__init__(
+            config=config,
+            submodules=submodules,
+            layer_number=layer_number,
+            hidden_dropout=hidden_dropout,
+            **kwargs,
+        )
         assert post_norm is not None, "Olmo3TransformerLayer needs a post_norm builder"
         self.post_attention_layernorm = post_norm(
             config=self.config, hidden_size=self.config.hidden_size, eps=self.config.layernorm_epsilon

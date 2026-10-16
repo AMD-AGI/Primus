@@ -12,7 +12,9 @@ from megatron.core.models.gpt import GPTModel
 from megatron.training import get_args, print_rank_0
 from megatron.training.arguments import core_transformer_config_from_args
 
-from primus.backends.megatron.core.models.olmo3.olmo3_layer_specs import get_olmo3_layer_spec
+from primus.backends.megatron.core.models.olmo3.olmo3_layer_specs import (
+    get_olmo3_layer_spec,
+)
 from primus.backends.megatron.core.models.olmo3.olmo3_transformer_config import (
     Olmo3TransformerConfig,
 )
@@ -70,4 +72,6 @@ def model_provider(
         torch.cuda.memory._record_memory_history(
             True, trace_alloc_max_entries=100000, trace_alloc_record_context=True
         )
-    return model_builder(args, pre_process, post_process, vp_stage, config=config, pg_collection=pg_collection)
+    return model_builder(
+        args, pre_process, post_process, vp_stage, config=config, pg_collection=pg_collection
+    )

@@ -147,9 +147,9 @@ def build_margs(cfg_fields, args):
             import math
 
             want = 0.1 * math.log(y["factor"]) + 1.0
-            assert abs(float(y["attention_factor"]) - want) < 1e-6, (
-                f"YaRN attention_factor {y['attention_factor']} != 0.1*ln(factor)+1 = {want}"
-            )
+            assert (
+                abs(float(y["attention_factor"]) - want) < 1e-6
+            ), f"YaRN attention_factor {y['attention_factor']} != 0.1*ln(factor)+1 = {want}"
 
     # Sliding window: window_size[0] in HF sliding_window units (Olmo3TransformerConfig converts for TE).
     if cfg_fields.get("sliding_window"):

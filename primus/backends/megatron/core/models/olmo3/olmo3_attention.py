@@ -32,8 +32,11 @@ class Olmo3FullWidthRMSNorm(MegatronModule):
         self.local_heads, self.head_dim, self.total_width, self.eps = local_heads, head_dim, total_width, eps
         self.tp_group = tp_group
         self.weight = torch.nn.Parameter(
-            torch.ones(local_heads * head_dim, dtype=config.params_dtype,
-                       device="cpu" if config.use_cpu_initialization else torch.cuda.current_device())
+            torch.ones(
+                local_heads * head_dim,
+                dtype=config.params_dtype,
+                device="cpu" if config.use_cpu_initialization else torch.cuda.current_device(),
+            )
         )
         set_tensor_model_parallel_attributes(self.weight, is_parallel=True, dim=0, stride=1)
         setattr(self.weight, "sequence_parallel", False)
@@ -61,17 +64,31 @@ class Olmo3SelfAttention(SelfAttention):
         tp_group = self.pg_collection.tp
         hd = self.hidden_size_per_attention_head
         self.q_norm = Olmo3FullWidthRMSNorm(
-            config, self.num_attention_heads_per_partition, hd,
-            config.num_attention_heads * hd, config.layernorm_epsilon, tp_group,
+            config,
+            self.num_attention_heads_per_partition,
+            hd,
+            config.num_attention_heads * hd,
+            config.layernorm_epsilon,
+            tp_group,
         )
         self.k_norm = Olmo3FullWidthRMSNorm(
-            config, self.num_query_groups_per_partition, hd,
-            config.num_query_groups * hd, config.layernorm_epsilon, tp_group,
+            config,
+            self.num_query_groups_per_partition,
+            hd,
+            config.num_query_groups * hd,
+            config.layernorm_epsilon,
+            tp_group,
         )
 
-    def get_query_key_value_tensors(self, hidden_states, key_value_states=None, output_gate=False, split_qkv=True):
-        assert split_qkv and not output_gate, "OLMo-3 attention needs split q/k/v (no fused qkv-rope, no gate)"
-        assert self.config.num_query_groups >= self.world_size, "OLMo-3 full-width QK norm needs tp <= kv heads"
+    def get_query_key_value_tensors(
+        self, hidden_states, key_value_states=None, output_gate=False, split_qkv=True
+    ):
+        assert (
+            split_qkv and not output_gate
+        ), "OLMo-3 attention needs split q/k/v (no fused qkv-rope, no gate)"
+        assert (
+            self.config.num_query_groups >= self.world_size
+        ), "OLMo-3 full-width QK norm needs tp <= kv heads"
         query, key, value = super().get_query_key_value_tensors(
             hidden_states, key_value_states, output_gate=False, split_qkv=True
         )
