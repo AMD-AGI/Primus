@@ -35,7 +35,7 @@ Primus supports multiple backends.
 | -------------- | ------------------------------------------------------------ |
 | Megatron       | Open-source framework for large-scale transformer training   |
 | TorchTitan     | PyTorch-compatible framework developed for training at scale |
-| NeMo AutoModel | NVIDIA-NeMo AutoModel (diffusion: Wan 2.2 T2V); `third_party/Automodel` submodule, installed editable on first run |
+| AutoModel | [AutoModel](https://github.com/NVIDIA-NeMo/Automodel) diffusion training; `third_party/Automodel` submodule, installed editable on first run |
 
 ## 📂 Directory Layout
 
@@ -62,7 +62,7 @@ examples/
 ├── megatron_bridge/       # framework: megatron_bridge
 ├── diffusion/             # framework: diffusion
 ├── maxdiffusion/          # framework: maxdiffusion
-├── nemo_automodel/        # framework: nemo_automodel
+├── automodel/             # framework: automodel
 ├── hummingbirdxt/         # framework: hummingbirdxt
 ├── specforge/             # framework: specforge
 ├── mlperf/                # MLPerf submissions; spans several backends

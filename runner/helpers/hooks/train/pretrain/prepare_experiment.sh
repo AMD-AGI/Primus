@@ -121,6 +121,15 @@ _dbg(f'pre_trainer.framework: {pre_trainer.framework}')
 print(pre_trainer.framework)
 " | tail -n 1 | tr -d '\r' || true)"
 
+# Renamed frameworks; keep in sync with DEPRECATED_FRAMEWORK_ALIASES in primus/core/launcher/parser.py.
+# The config route above is already mapped by the parser.
+case "$BACKEND_OVERRIDE" in
+    nemo_automodel)
+        LOG_WARN "prepare_experiment.sh: --backend nemo_automodel is deprecated; use --backend automodel"
+        BACKEND_OVERRIDE="automodel"
+        ;;
+esac
+
 if [[ -n "$BACKEND_OVERRIDE" ]]; then
     FRAMEWORK="$BACKEND_OVERRIDE"
     if [[ -n "$FRAMEWORK_FROM_CONFIG" ]]; then
