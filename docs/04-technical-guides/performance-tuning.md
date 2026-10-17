@@ -72,7 +72,7 @@ export HIPBLASLT_TUNING_OVERRIDE_FILE=/path/to/tune_hipblas_gemm_results.txt
 
 ### Standalone offline tool
 
-For manual HipBLASLt bench workflows, see `examples/offline_tune/offline_tune_gemm.py` and `examples/offline_tune/README.md` (hipblaslt-bench integration and `HIPBLASLT_TUNING_OVERRIDE_FILE` usage).
+For manual HipBLASLt bench workflows, see `examples/megatron/guides/offline_tune/offline_tune_gemm.py` and `examples/megatron/guides/offline_tune/README.md` (hipblaslt-bench integration and `HIPBLASLT_TUNING_OVERRIDE_FILE` usage).
 
 ---
 

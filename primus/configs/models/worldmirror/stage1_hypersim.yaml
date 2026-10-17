@@ -1,0 +1,12 @@
+# Stage 1: train the geometry transformer and the camera, point, depth, and
+# normal heads. The Gaussian head stays off. Attention uses aiter when the
+# package is installed; otherwise World Mirror falls back to PyTorch SDPA.
+worldmirror:
+  repo_path: ${WORLD_MIRROR_PATH:}
+  hydra_config: stage1_hypersim.yaml
+  attention_backend: aiter
+  hypersim_dir: ${HYPERSIM_DIR:/shared_nfs/3dwm/hywm-3dwm-sub20/hypersim}
+  max_steps: ${MAX_STEPS:100000}
+  max_images_per_gpu: ${MAX_IMAGES_PER_GPU:24}
+  pretrained: ""
+  output_dir: ${OUTPUT_DIR:./output/worldmirror-stage1}
