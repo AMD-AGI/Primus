@@ -345,6 +345,89 @@ def test_torchtitan_reads_numbers_with_thousands_separators(tmp_path):
     assert result["tflops_min"] == pytest.approx(1309.82)
 
 
+def bridge_log(tmp_path, *, module="post_trainer", resolved_packed=None, yaml_packed=None, name="bridge.log"):
+    """A Megatron-Bridge run: rank 0 prints the MODEL_TFLOP estimate, the last
+    rank the iteration line; GBS 8 on 8 GPUs."""
+    lines = []
+    if resolved_packed is not None:
+        lines.append(
+            "[20261016 13:53:30][rank-0/8][INFO]     [------------module_utils.py:256] :   "
+            f"packed_sequence                      : {resolved_packed} (bool)"
+        )
+    for step, ms in enumerate([25241.4, 19615.4, 1976.7, 800.0, 1000.0], start=1):
+        lines.append(
+            "[20261016 13:55:59][rank-0/8][DEBUG]    [------------------------common_utils.py:179] : "
+            f"Step Time : {ms / 1000:.2f}s GPU utilization: 900.0MODEL_TFLOP/s/GPU"
+        )
+        lines.append(
+            "[20261016 13:55:59][rank-7/8][DEBUG]    [--------common_utils.py:198] :  [2026-10-16 13:55:59] "
+            f"iteration {step:8d}/     200 | consumed samples: {8 * step:12d} | "
+            f"elapsed time per iteration (ms): {ms} | learning rate: 3.000000E-07 | "
+            "global batch size:     8 | lm loss: 3.752264E+00 |"
+        )
+    config = f"modules:\n  {module}:\n    framework: megatron_bridge\n    overrides:\n"
+    if yaml_packed is not None:
+        config += f"      packed_sequence: {yaml_packed}\n"
+    suite = "posttrain" if module == "post_trainer" else "pretrain"
+    return extract.parse_log_file(
+        str(
+            write_log(
+                tmp_path,
+                "\n".join(lines) + "\n",
+                framework="megatron_bridge",
+                config_name=f"qwen3_32b_sft_{suite}",
+                config_body=config,
+                name=name,
+                banner_extra=f"# Train Module     : {module}  (CLI verb: train {suite})\n",
+            )
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "resolved_packed,yaml_packed",
+    [
+        ("False", "false"),
+        # Megatron-Bridge does not pack unless told to.
+        (None, None),
+        # The resolved value is what ran.
+        ("False", "true"),
+    ],
+)
+def test_bridge_post_training_without_packing_reports_samples_not_tflops(
+    tmp_path, resolved_packed, yaml_packed
+):
+    result = bridge_log(tmp_path, resolved_packed=resolved_packed, yaml_packed=yaml_packed)
+    assert result["hmean_tflops"] is None
+    assert result["tflops_cv"] is None
+    # The estimate is kept, under its own name.
+    assert result["hmean_nominal_tflops"] == pytest.approx(900.0)
+    assert result["throughput_note"].startswith("nominal TFLOP/s, not TFLOP/s")
+    # Steps 4 and 5: 8 samples in 0.8 s and in 1.0 s, on 8 GPUs.
+    assert result["num_post_warmup"] == 2
+    assert result["hmean_samples_per_gpu"] == pytest.approx(2 / (1 / 1.25 + 1 / 1.0))
+    assert "8192 tokens" in result["throughput_note"]
+    assert result["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    "module,resolved_packed,yaml_packed",
+    [
+        ("post_trainer", "True", None),
+        ("post_trainer", None, "true"),
+        ("pre_trainer", None, None),
+    ],
+)
+def test_bridge_tflops_estimate_is_kept_where_sequences_are_full(
+    tmp_path, module, resolved_packed, yaml_packed
+):
+    result = bridge_log(tmp_path, module=module, resolved_packed=resolved_packed, yaml_packed=yaml_packed)
+    assert result["hmean_tflops"] == pytest.approx(900.0)
+    assert result["hmean_nominal_tflops"] is None
+    assert result["hmean_samples_per_gpu"] is None
+    assert result["throughput_note"] is None
+
+
 # --------------------------------------------------------------------------
 # Provenance plumbed through to the CSV row
 # --------------------------------------------------------------------------
@@ -741,7 +824,8 @@ def test_platform_reaches_the_result(tmp_path):
     csv_path, _ = extract.write_outputs([result], str(tmp_path))
     header = Path(csv_path).read_text().splitlines()[0].split(",")
     # Appended after the parser version 4 columns.
-    assert header[header.index("step_log") + 1 :] == list(extract.PLATFORM_BANNER_KEYS)
+    v5 = header.index("step_log") + 1
+    assert header[v5 : v5 + len(extract.PLATFORM_BANNER_KEYS)] == list(extract.PLATFORM_BANNER_KEYS)
 
 
 def test_host_rocm_is_read_under_its_new_and_old_names(tmp_path):

@@ -366,6 +366,8 @@ RUN_FIELDS = (
     "gpu_vbios",
     "gpu_driver",
     "rdma_nics",
+    "hmean_nominal_tflops",
+    "throughput_note",
 )
 
 # One Performance row per distinct combination; the image is its ID (its tag
@@ -491,15 +493,6 @@ def _cv(values) -> float | None:
     return float(values.std(ddof=1) / values.mean())
 
 
-def _not_counted_label(r) -> str:
-    if not _missing(r["failed_attempt"]):
-        label = "failed attempt"
-    else:
-        label = r["status"] or "unknown"
-    reason = r["failure_reason"]
-    return f"{label}: {reason}" if reason and reason != r["status"] else label
-
-
 def _summarize(group) -> dict:
     good = group[group["counts"]]
     skipped = group[~group["counts"]]
@@ -509,17 +502,6 @@ def _summarize(group) -> dict:
         good.loc[good["unit"] == unit, "throughput"].astype(float) if unit else good["throughput"].iloc[0:0]
     )
     tflops = pd.to_numeric(good["hmean_tflops"], errors="coerce")
-    counts = pd.Series([_not_counted_label(r) for _, r in skipped.iterrows()], dtype=object).value_counts()
-    notes = []
-    for label, n in sorted(counts.items()):
-        noun, _, reason = label.partition(":")
-        if n > 1 and noun == "failed attempt":
-            noun = "failed attempts"
-        notes.append(f"{n} {noun}{':' + reason if reason else ''}")
-    if good.empty:
-        notes.insert(0, "no successful run")
-    elif unit is None:
-        notes.append("no throughput in the log")
 
     def mean(series):
         series = pd.to_numeric(series, errors="coerce").dropna()
@@ -531,6 +513,7 @@ def _summarize(group) -> dict:
         # Retries of multi-node attempts that then succeeded, and nothing else.
         "only_retries": bool(len(good) and len(skipped) and skipped["failed_attempt"].notna().all()),
         "tflops": mean(tflops),
+        "nominal_tflops": mean(good["hmean_nominal_tflops"]),
         "throughput": mean(per_gpu),
         "unit": unit,
         # Spread between repetitions; of TFLOP/s where there is one.
@@ -543,13 +526,12 @@ def _summarize(group) -> dict:
         "config_path": _common(group["config_path"]),
         "docker_image": _common(group["docker_image"]),
         "image_name": _common(group["image_name"]),
-        "notes": "; ".join(notes),
     }
 
 
 def aggregate(df) -> list[dict]:
     """One entry per config (GROUP_FIELDS), with the means over its
-    successful runs only; the others are counted and named in the notes.
+    successful runs only; the others are only counted.
     Setup and download rows of a diffusion_dlrm run (backend diffusion_dlrm)
     are not configs and only appear in Runs."""
     configs = df[df["backend"].notna() & (df["backend"] != "diffusion_dlrm")]
@@ -935,7 +917,7 @@ def write_overview(
         (
             "- Performance has one row per config and image, and averages its successful runs (status ok), "
             "replicates with different step counts included; failed runs and failed multi-node attempts are "
-            "left out before averaging and counted under Notes."
+            "left out before averaging and counted in 'Runs ok / total' (the Runs sheet says why)."
         ),
         "- Config hash: the first 8 hex digits of the config file's SHA-256, so an edited file shows up as a new row.",
         (
@@ -965,7 +947,7 @@ def write_overview(
     ws.set_column(1, max(len(batches), 1), 70)
 
 
-def performance_columns(with_image: bool, with_baseline: bool) -> list[dict]:
+def performance_columns(with_image: bool, with_baseline: bool, with_nominal: bool = False) -> list[dict]:
     columns = [
         {"header": "Backend", "width": 14},
         {"header": "Model", "width": 22},
@@ -983,6 +965,10 @@ def performance_columns(with_image: bool, with_baseline: bool) -> list[dict]:
     columns += [
         {"header": "Runs ok / total", "width": 9},
         {"header": "TFLOP/s per GPU", "width": 10, "fmt": "tflops"},
+    ]
+    if with_nominal:
+        columns.append({"header": "Nominal TFLOP/s per GPU", "width": 11, "fmt": "tflops"})
+    columns += [
         {"header": "Throughput per GPU", "width": 12},
         {"header": "Throughput unit", "width": 17},
         {"header": "Throughput, all GPUs", "width": 13},
@@ -999,10 +985,7 @@ def performance_columns(with_image: bool, with_baseline: bool) -> list[dict]:
             {"header": "Throughput change", "width": 10, "fmt": "change"},
             {"header": "Baseline config", "width": 22},
         ]
-    columns += [
-        {"header": "Notes", "width": 30, "fmt": "wrap"},
-        {"header": "Config", "width": 60},
-    ]
+    columns.append({"header": "Config", "width": 60})
     return columns
 
 
@@ -1017,7 +1000,8 @@ def write_performance(
 ):
     ws = wb.add_worksheet("Performance")
     with_image = len({e["image"] for e in entries}) > 1
-    columns = performance_columns(with_image, baseline is not None)
+    with_nominal = any(e["nominal_tflops"] is not None for e in entries)
+    columns = performance_columns(with_image, baseline is not None, with_nominal)
     rows = []
     for e in entries:
         values = [
@@ -1034,9 +1018,10 @@ def write_performance(
         ]
         if with_image:
             values.append(e["image_name"])
+        values += [f"{e['runs_ok']} / {e['runs_total']}", e["tflops"]]
+        if with_nominal:
+            values.append(e["nominal_tflops"])
         values += [
-            f"{e['runs_ok']} / {e['runs_total']}",
-            e["tflops"],
             e["throughput"],
             e["unit"],
             e["throughput_total"],
@@ -1055,7 +1040,7 @@ def write_performance(
                 _change(e["throughput"], base["throughput"]) if same_unit else None,
                 how or "not in baseline",
             ]
-        values += [e["notes"], e["config_path"]]
+        values.append(e["config_path"])
         rows.append(values)
     last = _table(ws, 0, columns, rows, fmts, "PerformanceTable", freeze_cols=3)
 
@@ -1096,8 +1081,10 @@ RUN_COLUMNS = [
     {"header": "Failure reason", "width": 14, "key": "failure_reason"},
     {"header": "Failure detail", "width": 40, "key": "failure_detail"},
     {"header": "TFLOP/s per GPU", "width": 10, "key": "hmean_tflops", "fmt": "tflops"},
+    {"header": "Nominal TFLOP/s per GPU", "width": 11, "key": "hmean_nominal_tflops", "fmt": "tflops"},
     {"header": "Throughput per GPU", "width": 12, "key": "throughput"},
     {"header": "Throughput unit", "width": 17, "key": "unit"},
+    {"header": "Throughput note", "width": 30, "key": "throughput_note"},
     {"header": "Seq len", "width": 8, "key": "seq_len", "fmt": "int"},
     {"header": "MBS", "width": 7, "key": "micro_batch_size"},
     {"header": "GBS", "width": 8, "key": "global_batch_size"},

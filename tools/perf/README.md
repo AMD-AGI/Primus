@@ -712,6 +712,27 @@ files keep working:
 | `server`, `bios`, `os`, `kernel`, `kernel_cmdline` | Server vendor and model, BIOS version (date, vendor), OS, kernel and its command line. |
 | `cpu_model`, `cpu_topology`, `cpu_frequency`, `cpu_idle`, `host_memory` | CPU model; sockets, cores, threads and NUMA nodes; frequency driver, boost, max clock and EPP; idle states; usable and installed memory and DIMMs. |
 | `gpu_vram`, `gpu_power_cap`, `gpu_partition`, `gpu_clocks`, `gpu_vbios`, `gpu_driver`, `rdma_nics` | Per-GPU memory, power cap, compute/memory partition, perf level and max clock, VBIOS, the host GPU driver release, and the active RDMA ports. |
+| `hmean_nominal_tflops`, `throughput_note` | Megatron-Bridge post-training without packed sequences: its `MODEL_TFLOP/s/GPU` estimate, kept under this name instead of `hmean_tflops`, and why (see below). |
+
+Megatron-Bridge's `MODEL_TFLOP/s/GPU` is an estimate, not a measurement:
+global batch × `seq_length` × the FLOPs of one training token, divided by the
+step time, so it counts every sample as `seq_length` tokens. That holds for
+pretraining and for post-training with `packed_sequence: true`. Without
+packed sequences, post-training pads each micro-batch only to its longest
+sample: SQuAD samples are a few hundred tokens against a `seq_length` of
+8192, and the estimate exceeds the GPU's peak (about 14,000 TFLOP/s per GPU
+for the Qwen3-32B LoRA recipe on MI355X). Those rows (`Train Module` is
+`post_trainer` and the resolved `packed_sequence` is false, Megatron-Bridge's
+default) therefore keep the estimate as *nominal* TFLOP/s
+(`hmean_nominal_tflops`, "Nominal TFLOP/s per GPU" in the report: the rate
+the step would reach if every sample were `seq_length` tokens) and leave the
+TFLOP/s columns empty. Their throughput is samples/s per GPU, from each
+iteration's global batch size and step time, and `throughput_note` says why.
+Because the estimate is a fixed amount of work divided by the step time,
+nominal TFLOP/s still compares runs of one config (same model, dataset,
+batch size and `seq_length`). LoRA's estimate also counts the weight gradients its
+frozen base weights never compute, so treat a packed LoRA run's TFLOP/s as
+an upper bound.
 
 A `diffusion_dlrm` log becomes one row per diffusion model and DLRM
 precision, with backend `diffusion` or `dlrm`. Those numbers come from
@@ -769,15 +790,16 @@ than `results.csv`:
 | Sheet | Contents |
 |---|---|
 | Overview | One column per batch: outcome (with the errors of a refused batch), timing, image (tag, digest, ID), container ROCm/HIP and Torch, Primus commit and submodule pins, the platform (system description, GPU model, nodes and GPUs, server, BIOS, CPU, memory, GPU settings, host GPU driver, NICs, OS), host settings, run settings (reps, `TRAIN_STEPS`, limits, the `diffusion_dlrm` config), and run counts (planned, started, failed, not started). With `--baseline`, each baseline's image, commit and batches. |
-| Performance | One row per unique backend, model, precision, config hash, sequence length, MBS, GBS, nodes, GPUs and image ID, with runs ok / total and the means over the successful runs of TFLOP/s per GPU and throughput (per GPU, and for all GPUs), with its unit: tokens/s, samples/s, frames/s or recommendations/s. Also the step counts run, run-to-run CV, GPU memory, minutes per run, and notes on the runs that did not count. |
-| Runs | Every run, with its status, failure reason and detail, image, result directory and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
+| Performance | One row per unique backend, model, precision, config hash, sequence length, MBS, GBS, nodes, GPUs and image ID, with runs ok / total and the means over the successful runs of TFLOP/s per GPU and throughput (per GPU, and for all GPUs), with its unit: tokens/s, samples/s, frames/s or recommendations/s. Megatron-Bridge post-training without packed sequences shows nominal TFLOP/s instead of TFLOP/s, in its own column (see "Extracting results"). Also the step counts run, run-to-run CV, GPU memory and minutes per run. |
+| Runs | Every run, with its status, failure reason and detail, throughput note, image, result directory and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
 | Chart | TFLOP/s per GPU for each config (and the baseline). |
 
 - **Averages.** A config's numbers are the arithmetic mean over its
   successful runs (`NUM_REPS` repetitions, possibly across batches, and
   whatever step count each ran; the Steps column lists them, e.g. `10; 50`).
-  Failed runs and failed multi-node attempts are removed before averaging
-  and listed under Notes. Runs with another image are a separate row, and
+  Failed runs and failed multi-node attempts are removed before averaging;
+  "runs ok / total" counts them and the Runs sheet says why each one
+  failed. Runs with another image are a separate row, and
   the Image column appears when there are several images. Run-to-run CV
   above 3% is highlighted; "runs ok / total" is red when runs failed, amber
   when only retried multi-node attempts did.

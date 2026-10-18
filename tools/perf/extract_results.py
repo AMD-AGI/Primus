@@ -57,9 +57,14 @@ post-warmup window.
 Per-iteration metrics are parsed for megatron, megatron_bridge, torchtitan,
 maxtext and maxdiffusion backends. Megatron-Bridge only logs TFLOP/s/GPU,
 as the number immediately before ``MODEL_TFLOP/s/GPU`` (no space between
-the value and the unit). At least the first three unique logged steps are
-always dropped before aggregates (compile / autotune / ramp); a larger
-configured warmup is still honored when it leaves some steps behind. For
+the value and the unit). That number is an estimate that counts every sample
+as ``seq_length`` tokens, which post-training without packed sequences does
+not process, so for those runs it is kept as ``hmean_nominal_tflops``
+rather than TFLOP/s, with samples/s/GPU from the iteration lines and a
+``throughput_note`` saying why. At least the
+first three unique logged steps are always dropped before aggregates
+(compile / autotune / ramp); a larger configured warmup is still honored
+when it leaves some steps behind. For
 megatron the warmup prefers ``log_avg_skip_iterations`` (the steps the
 throughput patch itself skips) over ``lr_warmup_iters``. Throughput metrics
 use the harmonic mean, and memory metrics use the arithmetic mean. Results
@@ -115,7 +120,7 @@ import sys
 from datetime import datetime
 
 # Bumped whenever a column is added or its meaning changes.
-PARSER_VERSION = 5
+PARSER_VERSION = 6
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 BANNER_KV_RE = re.compile(r"^#\s*([^:]+?)\s*:\s*(.*?)\s*$")
@@ -462,6 +467,67 @@ def parse_megatron_bridge_iterations(lines: list[str], keep_rank: int | None = N
         step += 1
         iterations.append({"step": step, "tflops": float(m.group(1))})
     return iterations
+
+
+def parse_megatron_bridge_sample_rates(
+    lines: list[str], world_size: int | None, keep_rank: int | None = None
+) -> list[dict]:
+    """Samples/s per GPU of each Megatron-Bridge step, from its iteration lines::
+
+        iteration        3/     200 | consumed samples:           24 | elapsed time
+            per iteration (ms): 1976.7 | ... | global batch size:     8 | ...
+
+    Used where its MODEL_TFLOP/s/GPU estimate does not describe the run (see
+    _bridge_tflops_apply).
+    """
+    iterations = []
+    if not world_size:
+        return iterations
+    for line in lines:
+        clean = strip_ansi(line)
+        if "elapsed time per iteration" not in clean or not _line_matches_rank(clean, keep_rank):
+            continue
+        step = re.search(r"iteration\s+(\d+)/", clean)
+        ms = re.search(r"elapsed time per iteration \(ms\):\s*([\d.]+)", clean)
+        gbs = re.search(r"global batch size:\s*(\d+)", clean)
+        if step and ms and gbs and float(ms.group(1)) > 0:
+            iterations.append(
+                {
+                    "step": int(step.group(1)),
+                    "samples_per_gpu": int(gbs.group(1)) / (float(ms.group(1)) / 1000) / world_size,
+                }
+            )
+    return iterations
+
+
+# Primus prints the resolved module config at start-up: "packed_sequence : False (bool)".
+_RESOLVED_PACKED_RE = re.compile(r"\bpacked_sequence\s+:\s*(True|False)\b")
+_CONFIG_PACKED_RE = re.compile(r"^\s*packed_sequence:\s*(\w+)", re.MULTILINE)
+
+
+def _bridge_tflops_apply(banner: dict | None, config_text: str, run_lines: list[str]) -> bool:
+    """Whether Megatron-Bridge's MODEL_TFLOP/s/GPU describes the run.
+
+    It is not measured: global batch x seq_length x the FLOPs of one training
+    token, divided by the step time, so it counts every sample as seq_length
+    tokens. Pretraining and packed post-training fill their sequences. Without
+    packed sequences, post-training pads each micro-batch only to its longest
+    sample (a few hundred tokens for SQuAD), and the estimate overstates the
+    work many times over. Megatron-Bridge does not pack by default.
+    """
+    module = (banner or {}).get("Train Module", "")
+    if module:
+        post_training = module.startswith("post_trainer")
+    else:
+        post_training = bool(re.search(r"^\s*post_trainer:", config_text, re.MULTILINE))
+    if not post_training:
+        return True
+    for line in run_lines:
+        m = _RESOLVED_PACKED_RE.search(strip_ansi(line))
+        if m:
+            return m.group(1) == "True"
+    m = _CONFIG_PACKED_RE.search(config_text)
+    return bool(m) and m.group(1).lower() == "true"
 
 
 def parse_torchtitan_iterations(lines: list[str], keep_rank: int | None = None) -> list[dict]:
@@ -1240,6 +1306,8 @@ def parse_log_file(filepath: str) -> dict | None:
         "rec_per_s_cv": None,
         "step_log": None,
         **{field: None for field in PLATFORM_BANNER_KEYS},
+        "hmean_nominal_tflops": None,
+        "throughput_note": None,
     }
 
     config_text = parse_config_section(lines)
@@ -1288,8 +1356,24 @@ def parse_log_file(filepath: str) -> dict | None:
         keep_rank = _detect_iter_logging_rank(lines, "elapsed time per iteration")
         iterations = parse_megatron_iterations(lines, keep_rank=keep_rank)
     elif backend == "megatron_bridge":
-        keep_rank = _detect_iter_logging_rank(lines, "MODEL_TFLOP/s/GPU")
-        iterations = parse_megatron_bridge_iterations(lines, keep_rank=keep_rank)
+        if _bridge_tflops_apply(banner, config_text, run_lines):
+            keep_rank = _detect_iter_logging_rank(lines, "MODEL_TFLOP/s/GPU")
+            iterations = parse_megatron_bridge_iterations(lines, keep_rank=keep_rank)
+        else:
+            keep_rank = _detect_iter_logging_rank(lines, "elapsed time per iteration")
+            iterations = parse_megatron_bridge_sample_rates(lines, result["world_size"], keep_rank=keep_rank)
+            # The estimate is printed with every iteration line, so the two
+            # pair up in log order.
+            estimates = parse_megatron_bridge_iterations(
+                lines, keep_rank=_detect_iter_logging_rank(lines, "MODEL_TFLOP/s/GPU")
+            )
+            for it, estimate in zip(iterations, estimates):
+                it["nominal_tflops"] = estimate["tflops"]
+            result["throughput_note"] = (
+                f"nominal TFLOP/s, not TFLOP/s: Megatron-Bridge's estimate counts every sample as "
+                f"{result['seq_len'] or 'seq_length'} tokens, which post-training without "
+                "packed sequences does not process"
+            )
     elif backend == "torchtitan":
         keep_rank = _detect_iter_logging_rank(lines, "tflops:")
         iterations = parse_torchtitan_iterations(lines, keep_rank=keep_rank)
@@ -1344,6 +1428,7 @@ def parse_log_file(filepath: str) -> dict | None:
     tflops_vals = [it["tflops"] for it in post_warmup if it.get("tflops", 0) > 0]
     samples_vals = [it["samples_per_gpu"] for it in post_warmup if it.get("samples_per_gpu", 0) > 0]
     frames_vals = [it["frames_per_gpu"] for it in post_warmup if it.get("frames_per_gpu", 0) > 0]
+    nominal_vals = [it["nominal_tflops"] for it in post_warmup if it.get("nominal_tflops", 0) > 0]
     mem_vals = [it["memory_usage"] for it in post_warmup if "memory_usage" in it]
     mem_pct_vals = [it["memory_usage_pct"] for it in post_warmup if "memory_usage_pct" in it]
 
@@ -1352,6 +1437,7 @@ def parse_log_file(filepath: str) -> dict | None:
     result["hmean_tflops"] = harmonic_mean(tflops_vals)
     result["hmean_samples_per_gpu"] = harmonic_mean(samples_vals)
     result["hmean_frames_per_gpu"] = harmonic_mean(frames_vals)
+    result["hmean_nominal_tflops"] = harmonic_mean(nominal_vals)
     result["amean_memory_usage"] = arithmetic_mean(mem_vals)
     result["amean_memory_usage_pct"] = arithmetic_mean(mem_pct_vals)
 
@@ -1732,6 +1818,9 @@ CSV_FIELDS = [
     "step_log",
     # Added in parser version 5: the platform.
     *PLATFORM_BANNER_KEYS,
+    # Added in parser version 6.
+    "hmean_nominal_tflops",
+    "throughput_note",
 ]
 
 
@@ -1831,6 +1920,14 @@ def _describe(result: dict) -> str:
         )
     if result["num_iterations"] == 0:
         return text + " | no iteration metrics found"
+    if result["throughput_note"]:
+        samples = result["hmean_samples_per_gpu"]
+        nominal = result["hmean_nominal_tflops"]
+        return (
+            f"{text} | warmup={result['warmup_steps']} | "
+            f"hmean_nominal_tflops={f'{nominal:.2f}' if nominal else 'N/A'} | "
+            f"hmean_samples_per_gpu={f'{samples:.3f}' if samples else 'N/A'}"
+        )
     tflops = result["hmean_tflops"]
     tps = result["hmean_tps_per_gpu"]
     return (
