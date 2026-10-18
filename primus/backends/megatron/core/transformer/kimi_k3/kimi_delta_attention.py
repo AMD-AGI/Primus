@@ -201,6 +201,51 @@ class KimiDeltaAttentionSubmodules:
     o_proj: Union[ModuleSpec, type] = IdentityOp
 
 
+def _kda_cp_state():
+    """``(cp_size, cp_rank, cp_group)``. Size 1 when Megatron CP is off."""
+    from megatron.core import parallel_state
+
+    if not parallel_state.model_parallel_is_initialized():
+        return 1, 0, None
+    size = int(parallel_state.get_context_parallel_world_size() or 1)
+    if size <= 1:
+        return 1, 0, None
+    return size, int(parallel_state.get_context_parallel_rank()), parallel_state.get_context_parallel_group()
+
+
+def _kda_cp_context(cu_seqlens: Tensor, cp_group, kernel_size: int, device) -> Any:
+    try:
+        from fla.ops.cp import build_cp_context
+    except ImportError as exc:
+        raise RuntimeError("KDA context parallel requires fla.ops.cp (flash-linear-attention >= 0.4).") from exc
+    return build_cp_context(
+        cu_seqlens=cu_seqlens.to(device=device, dtype=torch.int32),
+        group=cp_group,
+        conv1d_kernel_size=int(kernel_size),
+    )
+
+
+def _kda_forward_segments(module, hidden_states: Tensor, packed_seq_params) -> Tuple[Tensor, Optional[Tensor]]:
+    """Run one unpadded forward per sample and concatenate. CP=1 only."""
+    if hidden_states.shape[1] != 1:
+        raise NotImplementedError("Packed KDA expects batch size 1 (THD).")
+    cu = [int(v) for v in packed_seq_params.cu_seqlens_q.detach().to("cpu").tolist()]
+    if cu[-1] != hidden_states.shape[0]:
+        raise RuntimeError(
+            f"cu_seqlens ends at {cu[-1]} but the token axis is {hidden_states.shape[0]}."
+        )
+    pieces = []
+    bias = None
+    for start, end in zip(cu[:-1], cu[1:]):
+        if end <= start:
+            continue
+        out, bias = module.forward(hidden_states[start:end], packed_seq_params=None)
+        pieces.append(out)
+    if not pieces:
+        raise RuntimeError("Packed KDA received no tokens.")
+    return torch.cat(pieces, dim=0), bias
+
+
 class KimiDeltaAttention(MegatronModule):
     """Kimi Delta Attention layer.
 
@@ -630,16 +675,27 @@ class KimiDeltaAttention(MegatronModule):
     # Forward
     # ------------------------------------------------------------------
 
-    def _short_conv(self, x: Tensor, conv: nn.Conv1d, seq_len: int) -> Tensor:
+    def _short_conv(
+        self,
+        x: Tensor,
+        conv: nn.Conv1d,
+        seq_len: int,
+        cu_seqlens: Optional[Tensor] = None,
+        cp_context: Optional[Any] = None,
+    ) -> Tensor:
         """Causal depthwise conv + SiLU on a ``[b, s, d]`` tensor."""
         import os
 
         # Priority: the yaml-level use_kimi_k3_attention_backend (resolved to
         # self._kda_conv_use_fla in __init__) wins; when it is None the legacy
         # K3P_KDA_CONV env decides (default "default" = torch nn.Conv1d).
+        # Packed sequences must reset the conv at each cu_seqlens boundary, which
+        # only the fla kernel does.
         use_fla_conv = self._kda_conv_use_fla
         if use_fla_conv is None:
             use_fla_conv = os.environ.get("K3P_KDA_CONV", "default") == "fla"
+        if cu_seqlens is not None or cp_context is not None:
+            use_fla_conv = True
 
         if use_fla_conv:
             import fla.modules.convolution as fc  # type: ignore
@@ -649,11 +705,17 @@ class KimiDeltaAttention(MegatronModule):
                 raise RuntimeError("K3P_KDA_CONV=fla but fla.modules.convolution has no causal conv")
             channels = conv.weight.shape[0]
             kernel = conv.weight.shape[-1]
+            packed = {}
+            if cu_seqlens is not None:
+                packed["cu_seqlens"] = cu_seqlens
+            if cp_context is not None:
+                packed["cp_context"] = cp_context
             out = fn(
                 x.contiguous(),
                 conv.weight.view(channels, kernel),
                 bias=conv.bias,
                 activation="silu",
+                **packed,
             )
             if isinstance(out, tuple):
                 out = out[0]
@@ -677,8 +739,9 @@ class KimiDeltaAttention(MegatronModule):
 
         Args:
             hidden_states: ``[s, b, h]``.
-            attention_mask: unused — KDA is intrinsically causal and this
-                module does not support padded or packed batches.
+            attention_mask: unused. Packed THD uses ``packed_seq_params.cu_seqlens_q``
+                so the conv and the delta state reset at each sample. Context
+                parallel consumes contiguous allgather-cp shards (not zigzag).
 
         Returns:
             ``(output, bias)`` with ``output`` of shape ``[s, b, h]``.
@@ -686,8 +749,32 @@ class KimiDeltaAttention(MegatronModule):
         del attention_mask, key_value_states, attention_bias, sequence_len_offset
         if inference_context is not None:
             raise NotImplementedError("KimiDeltaAttention does not support inference caching yet.")
+
+        cp_size, cp_rank, cp_group = _kda_cp_state()
+        if packed_seq_params is not None and cp_size == 1:
+            return _kda_forward_segments(self, hidden_states, packed_seq_params)
+        conv_cu = None
+        kda_cu = None
+        cp_context = None
         if packed_seq_params is not None:
-            raise NotImplementedError("KimiDeltaAttention does not support packed sequences yet.")
+            if hidden_states.shape[1] != 1:
+                raise NotImplementedError("Packed KDA expects batch size 1 (THD).")
+            if self.backend_name != "fla":
+                raise NotImplementedError("KDA context parallel requires kda_backend='fla'.")
+            cu = packed_seq_params.cu_seqlens_q
+            global_len = int(cu[-1].item())
+            if hidden_states.shape[0] * cp_size != global_len:
+                raise RuntimeError(
+                    "KDA packed CP expects contiguous allgather-cp shards: "
+                    f"local {hidden_states.shape[0]} * cp {cp_size} != global {global_len}."
+                )
+            cp_context = _kda_cp_context(cu, cp_group, self.conv_kernel_dim, hidden_states.device)
+            conv_cu = cp_context.cu_seqlens
+            kda_cu = cp_context.cu_seqlens
+        elif cp_size > 1:
+            raise NotImplementedError(
+                "KDA context parallel requires packed THD (--qkv-format thd --allgather-cp)."
+            )
 
         seq_len, batch, _ = hidden_states.shape
         seq_len = seq_len * self.sp_size
@@ -702,9 +789,9 @@ class KimiDeltaAttention(MegatronModule):
         nvtx_range_pop(suffix="kda_in_proj")
 
         nvtx_range_push(suffix="kda_conv1d")
-        q = self._short_conv(q, self.q_conv1d, seq_len)
-        k = self._short_conv(k, self.k_conv1d, seq_len)
-        v = self._short_conv(v, self.v_conv1d, seq_len)
+        q = self._short_conv(q, self.q_conv1d, seq_len, conv_cu, cp_context)
+        k = self._short_conv(k, self.k_conv1d, seq_len, conv_cu, cp_context)
+        v = self._short_conv(v, self.v_conv1d, seq_len, conv_cu, cp_context)
         nvtx_range_pop(suffix="kda_conv1d")
 
         q = q.reshape(batch, seq_len, self.num_heads_local_tp, self.key_head_dim)
@@ -725,6 +812,11 @@ class KimiDeltaAttention(MegatronModule):
 
         # --- the delta-rule recurrence ----------------------------------
         nvtx_range_push(suffix="kda_delta_rule")
+        backend_packed = {}
+        if kda_cu is not None:
+            backend_packed["cu_seqlens"] = kda_cu
+        if cp_context is not None:
+            backend_packed["cp_context"] = cp_context
         core_out, _ = self.kda_backend(
             q.contiguous(),
             k.contiguous(),
@@ -736,6 +828,7 @@ class KimiDeltaAttention(MegatronModule):
             output_final_state=False,
             use_qk_l2norm_in_kernel=False,
             chunk_size=self.chunk_size,
+            **backend_packed,
         )
         nvtx_range_pop(suffix="kda_delta_rule")
 
