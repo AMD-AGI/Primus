@@ -4,62 +4,61 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Triton kernels for the MoE router gating linear (Megatron ``router_gating_linear``), one pinned config each.
+"""Triton kernels for the MoE router gating linear (Megatron's ``router_gating_linear`` with fp32 logits),
+and a drop-in for it.
 
 With ``moe_router_dtype: fp32`` Megatron computes, per micro-batch (M tokens, K hidden, E experts):
   fwd    logits[M,E] fp32 = x[M,K] bf16 @ W[E,K]^T bf16            TE general_gemm TN, fp32 out
   dgrad  dx[M,K] bf16     = bf16(g[M,E] fp32 @ fp32(W)[E,K])        fp32 GEMM NN + 2 casts
   wgrad  dW[E,K] bf16     = bf16(g^T[E,M] fp32 @ fp32(x)[M,K])      fp32 GEMM NT + 2 casts (fp32 copy of x)
-For E = 32 these skinny shapes land on large generic hipBLASLt tiles.
 
 Here:
-  fwd    tl.dot on the bf16 operands with fp32 accumulation (the same math as the TN GEMM, other summation order)
+  fwd    tl.dot on the bf16 operands, fp32 accumulation (the same math as the TN GEMM, other summation order)
   dgrad / wgrad  the fp32 gradient is split exactly into three bf16 terms g = g1 + g2 + g3 (each split removes
          8 significant bits of the 24; the residual is exact in fp32), W and x are bf16 already, so every
-         product g_i * w is exact in fp32 and the fp32 accumulation is the only rounding, as in the fp32 GEMM.
+         product g_i * w is exact in fp32 and the fp32 accumulation is the only rounding, as in the fp32 GEMM,
+         without fp32 copies of x and W.
   wgrad reduces over M in SPLIT_M row slices into an fp32 partial buffer [SPLIT_M, E, K]; torch.sum over the
          split dim (fixed order, deterministic) and one cast give dW. No atomics anywhere.
-
-One pinned config per kernel (constants below), no autotune, num_warps 4. No masks are needed: every launch is
-guarded by ``eligible()`` (M % 1024 == 0, K % 128 == 0, E == 32, contiguous operands), which keeps every
-program's tile inside its tensors (the unit tests check this bound for every admitted launch).
-
-The autograd function and the drop-in for ``router_gating_linear`` are at the end of this file.
 """
+
+import functools
+import math
 
 import torch
 import triton
 import triton.language as tl
 
-# ---- pinned configs (do not tune in process) ----
+from primus.backends.megatron.core.fusions._notices import warn_fallback_once
+
+# Tile sizes chosen on gfx1250 (MI455X) for E = 32, K = 7168. The kernels have no masks, so these sizes also
+# define the shape contract (M_MULTIPLE / K_MULTIPLE, checked by ineligible_reason()). No in-process autotune.
 FWD_BM, FWD_BK, FWD_WARPS, FWD_STAGES = 32, 128, 4, 2
 DG_BM, DG_BN, DG_WARPS, DG_STAGES = 64, 128, 4, 1
 WG_BM, WG_BN, WG_SPLIT_M, WG_WARPS, WG_STAGES = 64, 128, 16, 4, 2
+M_MULTIPLE = math.lcm(FWD_BM, DG_BM, WG_SPLIT_M * WG_BM)
+K_MULTIPLE = math.lcm(FWD_BK, DG_BN, WG_BN)
+# E is a tile dimension of every kernel; 32 is the only expert count validated so far.
 E_SUPPORTED = (32,)
-M_MULTIPLE = 1024  # lcm(FWD_BM, DG_BM, WG_SPLIT_M * WG_BM)
-K_MULTIPLE = 128  # lcm(FWD_BK, DG_BN, WG_BN)
 
 
 @triton.jit
-def _router_fwd_kernel(x_ptr, w_ptr, y_ptr, M, K, k_len, E: tl.constexpr, BM: tl.constexpr, BK: tl.constexpr):
-    # y[pid_k, m, e] (fp32) = sum_{k in split pid_k} x[m, k] * w[e, k]
+def _router_fwd_kernel(x_ptr, w_ptr, y_ptr, K, E: tl.constexpr, BM: tl.constexpr, BK: tl.constexpr):
+    # y[m, e] (fp32) = sum_k x[m, k] * w[e, k]
     pid_m = tl.program_id(0)
-    pid_k = tl.program_id(1)
     offs_m = (pid_m * BM + tl.arange(0, BM)).to(tl.int64)
     offs_e = tl.arange(0, E)
     offs_k = tl.arange(0, BK)
-    k0 = pid_k * k_len
-    x_ptrs = x_ptr + offs_m[:, None] * K + (k0 + offs_k)[None, :]
-    w_ptrs = w_ptr + offs_e[:, None] * K + (k0 + offs_k)[None, :]
+    x_ptrs = x_ptr + offs_m[:, None] * K + offs_k[None, :]
+    w_ptrs = w_ptr + offs_e[:, None] * K + offs_k[None, :]
     acc = tl.zeros((BM, E), dtype=tl.float32)
-    for _ in range(0, k_len, BK):
+    for _ in range(0, K, BK):
         x = tl.load(x_ptrs)
         w = tl.load(w_ptrs)
         acc = tl.dot(x, tl.trans(w), acc)
         x_ptrs += BK
         w_ptrs += BK
-    y_ptrs = y_ptr + pid_k.to(tl.int64) * M * E + offs_m[:, None] * E + offs_e[None, :]
-    tl.store(y_ptrs, acc)
+    tl.store(y_ptr + offs_m[:, None] * E + offs_e[None, :], acc)
 
 
 @triton.jit
@@ -114,15 +113,31 @@ def _router_wgrad_kernel(
     tl.store(p_ptrs, acc)
 
 
-def eligible(x2d, weight):
-    """True when the pinned kernels cover the call exactly (else the caller keeps Megatron's path)."""
+def ineligible_reason(inp, weight, bias, router_dtype):
+    """Why ``router_gating_linear(inp, weight, bias, router_dtype)`` must keep the original path (None = the
+    pinned kernels cover it exactly)."""
+    if bias is not None:
+        return "router bias"
+    if router_dtype != torch.float32:
+        return f"router dtype {router_dtype}"
+    if not inp.is_contiguous():
+        return "non-contiguous input"
+    x2d = inp.view(-1, inp.shape[-1])
     if not (x2d.is_cuda and x2d.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16):
-        return False
-    if x2d.dim() != 2 or weight.dim() != 2 or not x2d.is_contiguous() or not weight.is_contiguous():
-        return False
+        return "input / weight not bf16 CUDA tensors"
+    if weight.dim() != 2 or not weight.is_contiguous():
+        return "weight not 2-D contiguous"
     M, K = x2d.shape
     E, K2 = weight.shape
-    return K2 == K and E in E_SUPPORTED and M > 0 and M % M_MULTIPLE == 0 and K % K_MULTIPLE == 0
+    if K2 != K:
+        return "weight / input hidden size mismatch"
+    if E not in E_SUPPORTED:
+        return f"{E} experts (supported: {E_SUPPORTED})"
+    if M == 0 or M % M_MULTIPLE != 0:
+        return f"tokens not a positive multiple of {M_MULTIPLE}"
+    if K % K_MULTIPLE != 0:
+        return f"hidden size not a multiple of {K_MULTIPLE}"
+    return None
 
 
 def router_fwd(x2d, weight):
@@ -131,9 +146,8 @@ def router_fwd(x2d, weight):
     E = weight.shape[0]
     assert K % FWD_BK == 0 and M % FWD_BM == 0
     y = torch.empty((M, E), device=x2d.device, dtype=torch.float32)
-    # One K split (grid dim 1 == 1): the kernel's partial-sum layout [split, M, E] is then y itself.
-    _router_fwd_kernel[(M // FWD_BM, 1)](
-        x2d, weight, y, M, K, K, E=E, BM=FWD_BM, BK=FWD_BK, num_warps=FWD_WARPS, num_stages=FWD_STAGES
+    _router_fwd_kernel[(M // FWD_BM,)](
+        x2d, weight, y, K, E=E, BM=FWD_BM, BK=FWD_BK, num_warps=FWD_WARPS, num_stages=FWD_STAGES
     )
     return y
 
@@ -172,11 +186,6 @@ def router_wgrad(g2d, x2d, out_dtype=torch.bfloat16):
     return part.sum(dim=0).to(out_dtype)
 
 
-# ---------------------------------------------------------------- autograd + drop-in
-
-ORIGINAL_ATTR = "__primus_triton_router_gemm_orig__"
-
-
 class RouterGatingLinearTriton(torch.autograd.Function):
     """logits = inp @ weight^T in fp32 (bias None, router dtype fp32); backward through the Triton kernels."""
 
@@ -201,23 +210,16 @@ class RouterGatingLinearTriton(torch.autograd.Function):
         return dx, dw
 
 
-def make_router_gating_linear(orig):
-    """Drop-in for megatron.core.transformer.moe.moe_utils.router_gating_linear(inp, weight, bias, router_dtype).
+def make_router_gating_linear(orig, key: str):
+    """Drop-in for ``megatron.core.transformer.moe.moe_utils.router_gating_linear``: the Triton path for the
+    calls ``ineligible_reason`` accepts, ``orig`` otherwise (the reason logged once under the patch key)."""
 
-    Calls the Triton path when bias is None, router_dtype is fp32 and ``eligible()`` accepts the flattened input
-    and the weight; every other call goes to ``orig`` unchanged.
-    """
-
+    @functools.wraps(orig)
     def router_gating_linear(inp, weight, bias, router_dtype):
-        if (
-            bias is None
-            and router_dtype == torch.float32
-            and inp.is_contiguous()
-            and eligible(inp.view(-1, inp.shape[-1]), weight)
-        ):
+        why = ineligible_reason(inp, weight, bias, router_dtype)
+        if why is None:
             return RouterGatingLinearTriton.apply(inp, weight)
+        warn_fallback_once(key, why)
         return orig(inp, weight, bias, router_dtype)
 
-    router_gating_linear.__wrapped__ = orig
-    setattr(router_gating_linear, ORIGINAL_ATTR, orig)
     return router_gating_linear

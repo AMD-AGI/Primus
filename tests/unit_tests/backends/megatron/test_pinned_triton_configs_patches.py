@@ -4,20 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the pinned-config patch (MLA YaRN RoPE fusion, MoE permutation fusion).
-
-Covered:
-  1. Gating: only with use_primus_pinned_triton_configs, only for the enabled fusions (moe_permute_fusion also
-     through turbo_sync_free_moe_stage >= 1, which validate_args applies after the patches run).
-  2. Surgery on real ``triton.autotune`` objects: one config left, tuning cache dropped, every
-     ``from ... import`` binding sees the pin.
-  3. The real kernels: Megatron's four MLA RoPE autotuners and the four permutation autotuners (Primus' copy
-     and TE's) end up with exactly the pinned config.
-  4. A requested kernel that cannot be pinned raises before any autotuner is changed, and the registered
-     patch aborts the run (SystemExit, which run_patches does not swallow); TE's optional module is skipped
-     when absent.
-None of this launches a kernel, so it runs without a GPU.
-"""
+"""Pinned Triton configs patch: gating, pinning real ``triton.autotune`` objects (stand-ins and the real MLA
+RoPE and permutation kernels) and all-or-nothing aborts. No kernel is launched."""
 
 import importlib
 import sys
@@ -30,10 +18,12 @@ pytest.importorskip("megatron")
 triton = pytest.importorskip("triton")
 import triton.language as tl  # noqa: E402
 
-import primus.backends.megatron.patches.triton_pinned_config_patches as P  # noqa: E402
-from primus.core.patches.context import PatchContext  # noqa: E402
-from primus.core.patches.patch_registry import PatchRegistry  # noqa: E402
+import primus.backends.megatron.patches.pinned_triton_configs_patches as P  # noqa: E402
 from primus.core.patches.patch_runner import run_patches  # noqa: E402
+from tests.unit_tests.backends.megatron.conftest import (  # noqa: E402
+    patch_ctx,
+    registered_patch,
+)
 
 
 def _args(**kw):
@@ -47,24 +37,26 @@ def _args(**kw):
     return SimpleNamespace(**base)
 
 
-def _ctx(args):
-    return PatchContext(
-        backend="megatron", phase="before_train", extra={"module_config": SimpleNamespace(params=args)}
-    )
+def _condition(args):
+    return P._condition(patch_ctx(**vars(args)))
 
 
 def _labels(args):
-    return [label for label, _ in P.wanted_groups(args)]
+    return [label for label, _ in P._wanted_groups(args)]
+
+
+def _pin_group(group):
+    return list(P._pin(group, P._resolve_group(group)))
 
 
 def test_condition_requires_the_flag():
-    assert P._condition(_ctx(_args())) is True
-    assert P._condition(_ctx(_args(use_primus_pinned_triton_configs=False))) is False
+    assert _condition(_args()) is True
+    assert _condition(_args(use_primus_pinned_triton_configs=False)) is False
 
 
 def test_condition_requires_an_enabled_fusion():
-    assert P._condition(_ctx(_args(apply_rope_fusion=False, moe_permute_fusion=False))) is False
-    assert P._condition(_ctx(_args(multi_latent_attention=False, moe_permute_fusion=False))) is False
+    assert _condition(_args(apply_rope_fusion=False, moe_permute_fusion=False)) is False
+    assert _condition(_args(multi_latent_attention=False, moe_permute_fusion=False)) is False
     assert _labels(_args(apply_rope_fusion=False)) == ["moe_permute"]
     assert _labels(_args(moe_permute_fusion=False)) == ["mla_rope"]
     assert _labels(_args(multi_latent_attention=False)) == ["moe_permute"]
@@ -78,7 +70,7 @@ def test_sync_free_moe_stage_counts_as_permute_fusion():
     assert _labels(_args(turbo_sync_free_moe_stage=3, **no_rope)) == ["moe_permute"]
     assert _labels(_args(turbo_sync_free_moe_stage=0, **no_rope)) == []
     assert _labels(_args(turbo_sync_free_moe_stage=None, **no_rope)) == []
-    assert P._condition(_ctx(_args(turbo_sync_free_moe_stage=1, **no_rope))) is True
+    assert _condition(_args(turbo_sync_free_moe_stage=1, **no_rope)) is True
 
 
 def _fake_module(name):
@@ -108,12 +100,14 @@ def fake_module():
         sys.modules.pop(name, None)
 
 
-def test_pin_group_on_real_autotuner(fake_module):
+def test_pin_on_real_autotuner(fake_module):
     mod = fake_module("_primus_test_pin_mod")
     alias = mod.kern  # a launcher module's `from ... import kern` binding
     mod.kern.cache[("k",)] = mod.kern.configs[2]
-    pinned = P.pin_group(("_primus_test_pin_mod", ("kern", "plain"), {"BLOCK": 128}, 4, 3))
-    assert pinned == ["kern"]  # "plain" is not autotuned: left alone
+    assert _pin_group(P._PinGroup("_primus_test_pin_mod", ("kern", "plain"), {"BLOCK": 128}, 4, 3)) == [
+        "kern"
+    ]
+    # "plain" is not autotuned: left alone
     assert len(alias.configs) == 1
     cfg = alias.configs[0]
     assert cfg.kwargs == {"BLOCK": 128} and cfg.num_warps == 4 and cfg.num_stages == 3
@@ -121,16 +115,12 @@ def test_pin_group_on_real_autotuner(fake_module):
     assert alias.cache == {}
 
 
-def test_pin_group_rejects_unknown_meta(fake_module):
+def test_resolve_rejects_unknown_meta_and_missing_kernels(fake_module):
     fake_module("_primus_test_pin_mod2")
-    with pytest.raises(RuntimeError):
-        P.pin_group(("_primus_test_pin_mod2", ("kern",), {"BLOCK_SIZE": 1024}, 4, 3))
-
-
-def test_pin_group_missing_kernel_raises(fake_module):
-    fake_module("_primus_test_pin_mod3")
-    with pytest.raises(RuntimeError):
-        P.pin_group(("_primus_test_pin_mod3", ("nope",), {"BLOCK": 64}, 4, 3))
+    with pytest.raises(RuntimeError, match="no argument"):
+        P._resolve_group(P._PinGroup("_primus_test_pin_mod2", ("kern",), {"BLOCK_SIZE": 1024}, 4, 3))
+    with pytest.raises(RuntimeError, match="not found"):
+        P._resolve_group(P._PinGroup("_primus_test_pin_mod2", ("nope",), {"BLOCK": 64}, 4, 3))
 
 
 @pytest.fixture
@@ -139,10 +129,10 @@ def restore_real_autotuners():
     saved = []
     for group in (P._ROPE_GROUP, *P._PERMUTE_GROUPS):
         try:
-            mod = importlib.import_module(group[0])
+            mod = importlib.import_module(group.module)
         except Exception:  # noqa: BLE001 - not importable here: nothing to restore
             continue
-        for name in group[1]:
+        for name in group.kernels:
             tuner = P._find_autotuner(getattr(mod, name, None))
             if tuner is not None:
                 saved.append((tuner, list(tuner.configs), dict(tuner.cache)))
@@ -157,32 +147,30 @@ def test_real_mla_rope_kernels_pinned(restore_real_autotuners):
     F = pytest.importorskip("megatron.core.fusions.fused_mla_yarn_rope_apply")
     if not getattr(F, "HAVE_TRITON", False):
         pytest.skip("Megatron MLA RoPE fusion has no Triton")
-    pinned = P.pin_group(P._ROPE_GROUP)
-    assert sorted(pinned) == sorted(P._ROPE_GROUP[1])
-    for name in P._ROPE_GROUP[1]:
+    assert sorted(_pin_group(P._ROPE_GROUP)) == sorted(P._ROPE_GROUP.kernels)
+    for name in P._ROPE_GROUP.kernels:
         tuner = P._find_autotuner(getattr(F, name))
         assert len(tuner.configs) == 1
         c = tuner.configs[0]
         assert c.kwargs == {"BLOCK_H": 32} and c.num_warps == 4 and c.num_stages == 3
 
 
-@pytest.mark.parametrize("group", P._PERMUTE_GROUPS, ids=lambda g: g[0])
+@pytest.mark.parametrize("group", P._PERMUTE_GROUPS, ids=lambda g: g.module)
 def test_real_permutation_kernels_pinned(group, restore_real_autotuners):
     pytest.importorskip("transformer_engine")
     try:
-        mod = __import__(group[0], fromlist=["_"])
+        mod = importlib.import_module(group.module)
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"{group[0]} not importable: {exc!r}")
-    pinned = P.pin_group(group)
-    assert sorted(pinned) == sorted(group[1])
-    for name in group[1]:
+        pytest.skip(f"{group.module} not importable: {exc!r}")
+    assert sorted(_pin_group(group)) == sorted(group.kernels)
+    for name in group.kernels:
         tuner = P._find_autotuner(getattr(mod, name))
         assert len(tuner.configs) == 1
         c = tuner.configs[0]
         assert c.kwargs == {"BLOCK_SIZE": 1024} and c.num_warps == 4 and c.num_stages == 3
-    if group[0].startswith("primus."):
+    if group.module.startswith("primus."):
         # The launch wrappers import the kernels by name: they must see the same pinned object.
-        launch = __import__("primus.backends.transformer_engine.pytorch.triton.permutation", fromlist=["_"])
+        launch = importlib.import_module("primus.backends.transformer_engine.pytorch.triton.permutation")
         assert (
             P._find_autotuner(launch._permute_kernel).configs
             == P._find_autotuner(mod._permute_kernel).configs
@@ -190,22 +178,20 @@ def test_real_permutation_kernels_pinned(group, restore_real_autotuners):
 
 
 def test_apply_raises_when_unpinnable(monkeypatch):
-    monkeypatch.setattr(
-        P, "wanted_groups", lambda args: [("mla_rope", (("_no_such_module_xyz", ("k",), {}, 4, 3),))]
-    )
+    group = P._PinGroup("_no_such_module_xyz", ("k",), {}, 4, 3)
+    monkeypatch.setattr(P, "_wanted_groups", lambda args: [("mla_rope", (group,))])
     with pytest.raises(RuntimeError, match="cannot pin the mla_rope"):
-        P.apply_pinned_configs(_args())
+        P._apply_pinned_configs(_args())
 
 
-def test_apply_skips_missing_optional_te_module(monkeypatch, fake_module):
+def test_apply_skips_the_optional_te_module(monkeypatch, fake_module):
     fake_module("_primus_test_pin_mod4")
-    groups = (
-        ("_primus_test_pin_mod4", ("kern",), {"BLOCK": 256}, 4, 3),
-        (P._TE_PERMUTE_MODULE, P._PERMUTE_KERNELS, {"BLOCK_SIZE": 1024}, 4, 3),
-    )
-    monkeypatch.setattr(P, "wanted_groups", lambda args: [("moe_permute", groups)])
-    monkeypatch.setitem(sys.modules, P._TE_PERMUTE_MODULE, None)  # import raises ModuleNotFoundError
-    done = P.apply_pinned_configs(_args())
+    te_group = P._PERMUTE_GROUPS[1]
+    assert te_group.optional
+    groups = (P._PinGroup("_primus_test_pin_mod4", ("kern",), {"BLOCK": 256}, 4, 3), te_group)
+    monkeypatch.setattr(P, "_wanted_groups", lambda args: [("moe_permute", groups)])
+    monkeypatch.setitem(sys.modules, te_group.module, None)  # import raises ModuleNotFoundError
+    done = P._apply_pinned_configs(_args())
     assert list(done) == ["_primus_test_pin_mod4"]
     assert len(done["_primus_test_pin_mod4"]["kern"]) == 1
 
@@ -213,28 +199,25 @@ def test_apply_skips_missing_optional_te_module(monkeypatch, fake_module):
 def test_unpinnable_group_changes_nothing(monkeypatch, fake_module):
     mod = fake_module("_primus_test_pin_mod5")
     fake_module("_primus_test_pin_mod6")
-    good = ("_primus_test_pin_mod5", ("kern",), {"BLOCK": 128}, 4, 3)
-    bad = ("_primus_test_pin_mod6", ("kern", "nope"), {"BLOCK": 128}, 4, 3)  # second kernel missing
-    monkeypatch.setattr(P, "wanted_groups", lambda args: [("mla_rope", (good,)), ("moe_permute", (bad,))])
+    good = P._PinGroup("_primus_test_pin_mod5", ("kern",), {"BLOCK": 128}, 4, 3)
+    bad = P._PinGroup(
+        "_primus_test_pin_mod6", ("kern", "nope"), {"BLOCK": 128}, 4, 3
+    )  # second kernel missing
+    monkeypatch.setattr(P, "_wanted_groups", lambda args: [("mla_rope", (good,)), ("moe_permute", (bad,))])
     with pytest.raises(RuntimeError, match="cannot pin the moe_permute"):
-        P.apply_pinned_configs(_args())
+        P._apply_pinned_configs(_args())
     assert len(mod.kern.configs) == 4  # the valid group, resolved first, was not pinned either
     assert len(sys.modules["_primus_test_pin_mod6"].kern.configs) == 4
 
 
-def _registered(patch_id):
-    # Some suites clear the global registry; re-import the patch module to register it again.
-    if PatchRegistry.get(patch_id) is None:
-        importlib.reload(P)
-    assert PatchRegistry.get(patch_id) is not None
-
-
 def test_registered_patch_aborts_the_run_when_unpinnable(monkeypatch, fake_module):
-    _registered(P._PATCH_KEY)
+    registered_patch(P._PATCH_KEY, P)
     mod = fake_module("_primus_test_pin_mod7")
-    good = ("_primus_test_pin_mod7", ("kern",), {"BLOCK": 128}, 4, 3)
-    bad = ("_primus_test_pin_mod7", ("kern",), {"BLOCK_SIZE": 1024}, 4, 3)  # no such meta-parameter
-    monkeypatch.setattr(P, "wanted_groups", lambda args: [("mla_rope", (good,)), ("moe_permute", (bad,))])
+    good = P._PinGroup("_primus_test_pin_mod7", ("kern",), {"BLOCK": 128}, 4, 3)
+    bad = P._PinGroup(
+        "_primus_test_pin_mod7", ("kern",), {"BLOCK_SIZE": 1024}, 4, 3
+    )  # no such meta-parameter
+    monkeypatch.setattr(P, "_wanted_groups", lambda args: [("mla_rope", (good,)), ("moe_permute", (bad,))])
     with pytest.raises(SystemExit, match="cannot pin the moe_permute"):
         run_patches(
             backend="megatron",

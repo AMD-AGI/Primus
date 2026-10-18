@@ -4,28 +4,30 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Fused language-model cross entropy (tensor-parallel size 1), one pinned Triton config.
+"""Fused language-model cross entropy for tensor-parallel size 1 (Triton, one pinned launch config).
 
-"Deferred grad" scheme, bf16/fp16/fp32 logits in, logits-dtype grad out, fp32 math, no fp32 copy of the
-logits:
+Logits [s, b, V] in bf16 / fp16 / fp32, labels [b, s], loss [b, s] in fp32 (Megatron's layout), fp32 math:
 
-  forward   ONE pass per row: online max / sum-exp -> lse (fp32, saved), loss = lse - x[label].
-  backward  ONE pass per row writing (exp(x - lse) - [i == label]) * g straight into the saved logits
-            buffer (in place: the logits are dead after the loss, as in Transformer Engine's CE).
+  forward   one pass per row: online max / sum-exp -> lse (saved), loss = lse - x[label].
+  backward  one pass per row writing (exp(x - lse) - [i == label]) * g into the saved logits buffer, in place
+            (the logits are dead after the loss, as in Transformer Engine's CE): no fp32 copy of the logits.
 
-HBM traffic is 3 x |logits| per microbatch (read, read, write); Megatron's unfused path makes an fp32 copy
-and several elementwise passes. Semantics follow Megatron's vocab-parallel CE at TP = 1: a label outside
-[0, V) contributes ``lse - max`` and no target term (the target-mask path), never an out-of-bounds read.
-
-Pinned launch: BLOCK 8192, num_warps 8, one program per row. No autotune, no in-process benchmarking.
+A label outside [0, V) contributes ``lse - max`` and no target term, like the target mask of Megatron's
+vocab-parallel CE at TP = 1; it is never read out of bounds.
 """
 
 from __future__ import annotations
+
+import functools
 
 import torch
 import triton
 import triton.language as tl
 
+from primus.backends.megatron.core.fusions._notices import warn_fallback_once
+
+# Launch config chosen on gfx1250 (MI455X) at the DeepSeek-V3 vocabulary (129280). Any value is correct (the
+# column loop is masked); only speed depends on it. No in-process autotune.
 BLOCK = 8192
 NUM_WARPS = 8
 
@@ -79,16 +81,16 @@ def ce_bwd_kernel(
 
 
 def ineligible_reason(logits, labels) -> str | None:
-    """Why the fused kernel must not run on these tensors (None = eligible). TP size is checked by the caller."""
+    """Why the fused kernel must not run on these tensors (None = eligible); the caller checks the TP size."""
     if not (torch.is_tensor(logits) and logits.is_cuda):
         return "logits not a CUDA tensor"
     if logits.dim() != 3 or labels is None or labels.dim() != 2:
-        return f"shape logits {tuple(logits.shape)} labels {None if labels is None else tuple(labels.shape)}"
+        return "logits / labels shape (want [s, b, V] / [b, s])"
     S, B, _ = logits.shape
     if tuple(labels.shape) != (B, S):
-        return f"labels {tuple(labels.shape)} != (b, s) = {(B, S)}"
+        return "labels shape != (b, s) of the logits"
     if logits.dtype not in (torch.bfloat16, torch.float16, torch.float32):
-        return f"dtype {logits.dtype}"
+        return f"logits dtype {logits.dtype}"
     if not logits.is_contiguous():
         return "non-contiguous logits"
     if labels.dtype not in (torch.int64, torch.int32):
@@ -152,5 +154,36 @@ class DeferredGradCrossEntropy(torch.autograd.Function):
 
 
 def fused_lm_cross_entropy(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """[s, b, V] logits x [b, s] labels -> [b, s] fp32 per-token loss (TP = 1). The backward overwrites logits."""
+    """[s, b, V] logits x [b, s] labels -> [b, s] fp32 loss (TP = 1); the backward overwrites logits."""
     return DeferredGradCrossEntropy.apply(logits, labels)
+
+
+def _tp_size(module) -> int | None:
+    tp = getattr(getattr(module, "pg_collection", None), "tp", None)
+    if tp is not None:
+        return tp.size()
+    try:
+        from megatron.core import parallel_state
+
+        return parallel_state.get_tensor_model_parallel_world_size()
+    except Exception:  # noqa: BLE001 - no parallel state: not eligible
+        return None
+
+
+def make_compute_language_model_loss(orig, key: str):
+    """Drop-in for ``LanguageModule.compute_language_model_loss``: the fused CE for eligible calls, ``orig``
+    otherwise (the reason logged once under the patch ``key``)."""
+
+    @functools.wraps(orig)
+    def compute_language_model_loss(self, labels, logits):
+        why = ineligible_reason(logits, labels)
+        if why is None:
+            tp = _tp_size(self)
+            if tp != 1:
+                why = f"tensor-parallel size {tp}"
+        if why is None:
+            return fused_lm_cross_entropy(logits, labels)
+        warn_fallback_once(key, why)
+        return orig(self, labels, logits)
+
+    return compute_language_model_loss

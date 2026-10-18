@@ -59,6 +59,58 @@ requires_mxfp4 = pytest.mark.skipif(
     reason="Requires gfx950+ (MI355X) for MXFP4 support",
 )
 
+requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+
+
+class CudaLike(torch.Tensor):
+    """CPU tensor that reports ``is_cuda``: runs the host-side checks of device code on CPU."""
+
+    @property
+    def is_cuda(self):
+        return True
+
+
+def cuda_like(t):
+    return t.as_subclass(CudaLike)
+
+
+def patch_ctx(**params):
+    """PatchContext of a Megatron ``before_train`` patch whose args are ``params``."""
+    from primus.core.patches.context import PatchContext
+
+    return PatchContext(
+        backend="megatron",
+        phase="before_train",
+        extra={"module_config": SimpleNamespace(params=SimpleNamespace(**params))},
+    )
+
+
+def registered_patch(patch_id, module):
+    """The registered patch ``patch_id``; re-imports ``module`` if another suite cleared the registry."""
+    import importlib
+
+    from primus.core.patches.patch_registry import PatchRegistry
+
+    if PatchRegistry.get(patch_id) is None:
+        importlib.reload(module)
+    patch = PatchRegistry.get(patch_id)
+    assert patch is not None, patch_id
+    return patch
+
+
+@pytest.fixture
+def restore_patched(monkeypatch):
+    """``restore_patched(owner, *attrs)``: give ``owner`` fresh _patch_guard marks and put them and ``attrs``
+    back after the test."""
+    from primus.backends.megatron.patches._patch_guard import _SENTINEL_ATTR
+
+    def save(owner, *attrs):
+        for attr in attrs:
+            monkeypatch.setattr(owner, attr, getattr(owner, attr))
+        monkeypatch.setattr(owner, _SENTINEL_ATTR, set(), raising=False)
+
+    return save
+
 
 @pytest.fixture(scope="function")
 def init_parallel_state():

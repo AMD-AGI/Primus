@@ -4,27 +4,18 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Fused grad-clip + AdamW + bf16 param write for fp32 master params (one pass over HBM), pinned Triton.
+"""Triton kernel for one fused optimizer step per fp32 main param: grad clip + AdamW + model-param write.
 
-Replaces three passes of Megatron's DistributedOptimizer step (bf16 params, fp32 main params,
-fp32 main grads, fp32 exp_avg / exp_avg_sq):
-  TE multi_tensor_scale (clip, in place on the grads)  8 B/param
-  TE multi_tensor_adam (custom ROCm kernel, AdamW)      28 B/param
-  torch copy_ fp32 main param -> bf16 model param        6 B/param
-by one Triton kernel that reads g, p, m, v and writes p, m, v and the bf16 copy (30 B/param);
-the clip coefficient is applied in registers, the grads are left unscaled (Megatron zeroes them
-before the next backward and reads nothing from them after the step).
+One pass over g, p, m, v instead of three (TE ``multi_tensor_scale`` clip, TE ``multi_tensor_adam``, the
+main -> model param copy). The clip coefficient is applied in registers; the grads are read, never written.
 
 Math mirrors Transformer Engine's ROCm ``custom_adam_kernel`` (ADAM_MODE_1, HAS_MASTER=false):
   m = beta1*m + (1-beta1)*g ; v = beta2*v + (1-beta2)*g*g
   denom = sqrt(v * beta2_corr_inv) + eps
   p = p - step_size*(m/denom) - lr*decay*p
-with step_size = lr/bias_correction1 and beta2_corr_inv = 1/bias_correction2 in fp32, computed on
-the host exactly as TE does. Contractions are pinned with explicit fma (M_FIRST / V_FIRST select
-which product feeds the fma, matching hipcc's choice), division and sqrt are correctly rounded.
-
-One pinned launch config (BLOCK 2048, num_warps 8), no autotune. Large tensors are cut into slices of at
-most SLICE elements on the host, so every in-kernel offset fits in int32 with a byte offset below 2^31.
+with step_size = lr/bias_correction1 and beta2_corr_inv = 1/bias_correction2 in fp32, computed on the host
+exactly as TE does (``te_scalars``). Contractions use explicit fma at the same places as TE's kernel; division
+and sqrt are correctly rounded.
 """
 
 from __future__ import annotations
@@ -34,15 +25,13 @@ import torch
 import triton
 import triton.language as tl
 
-# Pinned launch config (never tuned in process).
+# Launch config chosen on gfx1250 (MI455X). Any value is correct (masked); only speed depends on it. No
+# in-process autotune.
 BLOCK = 2048
 NUM_WARPS = 8
-SLICE = 1 << 28  # elements per launch: fp32 byte offsets < 2^30
-# Contraction pattern that reproduces TE's kernel bit for bit: m = fma(1-b1, g, b1*m),
-# v = fma((1-b2)*g, g, b2*v). The other fma placements and the no-fma form (PLAIN) differ from TE in the
-# last bits of a fraction of the params.
-M_FIRST = False
-V_FIRST = False
+# Elements per launch: the host cuts larger tensors so that in-kernel offsets fit in int32 (fp32 byte offsets
+# < 2^30).
+SLICE = 1 << 28
 
 
 @triton.jit
@@ -63,9 +52,6 @@ def _adamw_clip_kernel(
     bc2_inv,
     lr_decay,
     WRITE_OUT: tl.constexpr,
-    M_FIRST: tl.constexpr,
-    V_FIRST: tl.constexpr,
-    PLAIN: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -76,25 +62,13 @@ def _adamw_clip_kernel(
     m = tl.load(m_ptr + offs, mask=mask, other=0.0)
     v = tl.load(v_ptr + offs, mask=mask, other=0.0)
     g = g * clip
-    if PLAIN:  # no fma at all (launched with enable_fp_fusion=False); diagnostic only
-        m = beta1 * m + omb1 * g
-        v = beta2 * v + omb2 * g * g
-        denom = tl.sqrt_rn(v * bc2_inv) + eps
-        q = tl.div_rn(m, denom)
-        pn = p - step_size * q - lr_decay * p
-    else:
-        if M_FIRST:
-            m = tl.fma(beta1, m, omb1 * g)
-        else:
-            m = tl.fma(omb1, g, beta1 * m)
-        if V_FIRST:
-            v = tl.fma(beta2, v, (omb2 * g) * g)
-        else:
-            v = tl.fma(omb2 * g, g, beta2 * v)
-        denom = tl.sqrt_rn(v * bc2_inv) + eps
-        q = tl.div_rn(m, denom)
-        pn = tl.fma(-step_size, q, p)
-        pn = tl.fma(-lr_decay, p, pn)
+    # Explicit fma placement reproduces TE's ROCm Adam kernel bit for bit.
+    m = tl.fma(omb1, g, beta1 * m)
+    v = tl.fma(omb2 * g, g, beta2 * v)
+    denom = tl.sqrt_rn(v * bc2_inv) + eps
+    q = tl.div_rn(m, denom)
+    pn = tl.fma(-step_size, q, p)
+    pn = tl.fma(-lr_decay, p, pn)
     tl.store(p_ptr + offs, pn, mask=mask)
     tl.store(m_ptr + offs, m, mask=mask)
     tl.store(v_ptr + offs, v, mask=mask)
@@ -138,9 +112,9 @@ def _check(p, g, m, v, out):
 
 
 def adamw_clip_(p, g, m, v, out, *, clip, scalars, check=True):
-    """In place: p, m, v updated with g * clip; out (or None) gets p cast to its dtype. g is read, never written.
+    """In place: p, m, v updated with g * clip; out (or None) gets p cast to its dtype. g is only read.
 
-    ``scalars`` comes from ``te_scalars``; ``check=False`` skips the tensor validation (caller already did it).
+    ``scalars`` comes from ``te_scalars``; ``check=False`` skips the tensor validation (done by the caller).
     """
     if check:
         _check(p, g, m, v, out)
@@ -168,9 +142,6 @@ def adamw_clip_(p, g, m, v, out, *, clip, scalars, check=True):
             scalars["bc2_inv"],
             scalars["lr_decay"],
             WRITE_OUT=out is not None,
-            M_FIRST=M_FIRST,
-            V_FIRST=V_FIRST,
-            PLAIN=False,
             BLOCK=BLOCK,
             num_warps=NUM_WARPS,
         )

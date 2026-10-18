@@ -4,35 +4,33 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Fused clip + AdamW + bf16 param write step, and a global-norm NaN check, for Megatron's DistributedOptimizer.
+"""Hooks for Megatron's optimizer step: grad clip + AdamW + model-param write in one Triton pass per main
+param, and a global-norm grad NaN check.
 
-Two independent switches (module state, read at every call), enabled by the patches in
-``primus/backends/megatron/patches/fused_adamw_clip_patches.py``:
+Two switches (module state, read at every call), set by ``primus/backends/megatron/patches/
+triton_adamw_step_patches.py``, which installs the hooks built here; the hooks are inert while both are off.
 
-``set_fused(True)``   (patch ``megatron.optimizer.fused_adamw_clip``)
+``set_fused(True)``
     ``clip_grad_by_total_norm_fp32`` defers the clip coefficient instead of scaling the main grads in place;
-    ``MixedPrecisionOptimizer.step_with_ready_grads`` (reached by ``DistributedOptimizer`` through ``super()``)
-    then runs one Triton pass per main param (``triton_fused_adamw.adamw_clip_``, largest first) that applies the
-    coefficient in registers, updates the fp32 main param / exp_avg / exp_avg_sq exactly like Transformer
-    Engine's FusedAdam (bitwise) and writes the bf16 model param slice in the same pass. The grad norm is
-    unchanged. Replaces TE ``multi_tensor_scale`` (clip) + TE ``multi_tensor_adam`` + the per-param main ->
-    model copy. Any ineligible optimizer or tensor (precision-aware optimizer, FSDP, fp8 params, capturable /
-    master-weight / non-AdamW FusedAdam, non-fp32 states, DTensor or non-contiguous tensors, tensor lr) runs
-    the original step for that step, after applying any deferred clip with TE ``multi_tensor_scale`` exactly
-    like the original clip; nothing is partially updated. ``FP32Optimizer.step_with_ready_grads`` (fp32
-    training, alone or inside a ``ChainedOptimizer``) is hooked to apply any deferred clip the same way before
-    its own step, so no deferral outlives the step of the optimizer that owns the params.
+    ``MixedPrecisionOptimizer.step_with_ready_grads`` (reached by ``DistributedOptimizer`` via ``super()``)
+    then runs ``triton_adamw_kernel.adamw_clip_`` once per main param (largest first): the coefficient applied
+    in registers, the fp32 main param / exp_avg / exp_avg_sq updated exactly like Transformer Engine's
+    FusedAdam (bitwise on gfx1250) and the bf16 model param slice written in the same pass. The grad norm is
+    unchanged. Any ineligible optimizer or tensor (``ineligible_reason``; ``fused_step`` raises ``_Fallback``)
+    runs the original step for that step, after applying any deferred clip with TE ``multi_tensor_scale``
+    exactly like the original clip; nothing is partially updated. ``FP32Optimizer.step_with_ready_grads``
+    (fp32 training, alone or inside a ``ChainedOptimizer``) applies any deferred clip the same way before its
+    own step, so no deferral outlives the step of the optimizer that owns the params.
 
-``set_nancheck(True)``   (patch ``megatron.ddp.global_grad_nan_check``)
+``set_nancheck(True)``
     DDP's per-bucket NaN/Inf check (``_ParamAndGradBucketGroup.check_grads`` with ``check_for_nan_or_inf``:
     one norm kernel and two host syncs per bucket, inside the last micro-batch's backward) is skipped and the
     global grad norm, which the optimizer computes anyway, is checked instead inside the clip call, before any
-    parameter update (fatal RuntimeError). Needs ``clip_grad > 0`` (otherwise the clip, and with it the check,
-    is not called) and ``rerun_mode: disabled`` (otherwise the bucket check feeds Megatron's rerun state
-    machine). ``check_for_large_grads`` is never skipped. The final ``check_for_nan_in_loss_and_grad`` (after
-    ``validate_args``) is re-read on first use. Narrower than the bucket check in two ways: grads left out of
-    the norm (TP-duplicate params on tp_rank > 0, e.g. LayerNorm weights with TP > 1 and no sequence
-    parallel) are not checked, and a rank whose optimizer has no params does not raise (the others do).
+    parameter update (fatal RuntimeError). ``check_for_large_grads`` is never skipped. The final
+    ``check_for_nan_in_loss_and_grad`` (after ``validate_args``) is re-read on first use. Narrower than the
+    bucket check in two ways: grads left out of the norm (TP-duplicate params on tp_rank > 0, e.g. LayerNorm
+    weights with TP > 1 and no sequence parallel) are not checked, and a rank whose optimizer has no params
+    does not raise (the others do).
 
 After a fused step the main grads hold the unclipped values; nothing reads them before the next backward
 zeroes them.
@@ -40,15 +38,21 @@ zeroes them.
 
 from __future__ import annotations
 
+import functools
 import math
 import weakref
 
-from primus.core.utils.module_utils import warning_rank_0
+import torch
+from megatron.core.fp8_utils import is_float8tensor
+from megatron.core.optimizer import clip_grads
+from megatron.core.utils import to_local_if_dtensor
+from torch.distributed._tensor import DTensor
 
-_STATE = {"fused": False, "nancheck": False, "nan_final": None, "last_fallback": None}
+from primus.backends.megatron.core.fusions._notices import warn_fallback_once
+
+_STATE = {"fused": False, "nancheck": False, "nan_final": None}
 _PENDING = {}  # id(main param) -> (param, clip coeff) deferred by the clip wrapper
-_DST_CACHE = weakref.WeakKeyDictionary()  # optimizer -> (param buffer signature, dst map)
-HOOKED_ATTR = "__primus_fused_adamw_clip_orig__"
+_DST_CACHE = weakref.WeakKeyDictionary()  # optimizer -> (param buffer + main param signature, dst map)
 
 
 def set_fused(on: bool) -> None:
@@ -82,19 +86,17 @@ class _Fallback(Exception):
 
 
 def _flush_pending(params):
-    """Apply deferred clip scales with TE multi_tensor_scale, exactly like the original clip."""
-    import torch
-    from megatron.core.optimizer import clip_grads as cg
-    from megatron.core.utils import to_local_if_dtensor
-
+    """Apply deferred clip coefficients with TE multi_tensor_scale, exactly like the original clip."""
     by_coeff = {}
     for p in params:
         ent = _PENDING.pop(id(p), None)
         if ent is not None and p.grad is not None:
             by_coeff.setdefault(ent[1], []).append(to_local_if_dtensor(p.grad).detach())
     for coeff, grads in by_coeff.items():
-        dummy = torch.zeros(1, dtype=torch.int, device="cuda")
-        cg.multi_tensor_applier(cg.multi_tensor_scale_impl, dummy, [grads, grads], coeff)
+        dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=grads[0].device)
+        clip_grads.multi_tensor_applier(
+            clip_grads.multi_tensor_scale_impl, dummy_overflow_buf, [grads, grads], coeff
+        )
 
 
 def _inner_params(opt):
@@ -124,8 +126,6 @@ def ineligible_reason(self, dm):
         return "capturable / master-weight FusedAdam"
     if getattr(inner, "adam_w_mode", None) != 1:
         return "not AdamW mode"
-    import torch
-
     if (
         getattr(inner, "exp_avg_dtype", torch.float32) != torch.float32
         or getattr(inner, "exp_avg_sq_dtype", torch.float32) != torch.float32
@@ -140,8 +140,6 @@ def dst_map(self):
     """id(shard main param) -> its slice of the model param buffer (DistributedOptimizer copy_group_params).
     Cached per optimizer while every bucket's param buffer and every shard main param stay the same objects.
     """
-    from megatron.core.fp8_utils import is_float8tensor
-
     sig = tuple(
         b.param_data.data_ptr() if b.param_data is not None else 0
         for buf in self.buffers
@@ -178,12 +176,10 @@ def dst_map(self):
     return dst
 
 
-def fused_step(self):
-    """Clip (deferred coefficient) + AdamW + bf16 write for every main param; raises _Fallback before any update."""
-    import torch
-    from torch.distributed._tensor import DTensor
-
-    from primus.backends.megatron.core.optimizer import triton_fused_adamw as fa
+def fused_step(self) -> None:
+    """Clip (deferred coefficient) + AdamW + model-param write for every main param; raises _Fallback
+    before any update."""
+    from primus.backends.megatron.core.optimizer import triton_adamw_kernel as kernel
 
     inner = self.optimizer
     dst = dst_map(self)
@@ -224,7 +220,7 @@ def fused_step(self):
     for group, items in work:
         group["step"] = group["step"] + 1 if "step" in group else 1
         beta1, beta2 = group["betas"]
-        sc = fa.te_scalars(
+        sc = kernel.te_scalars(
             group["lr"],
             beta1,
             beta2,
@@ -238,25 +234,24 @@ def fused_step(self):
     for sc, (p, g, m, v, d) in launches:
         ent = _PENDING.pop(id(p), None)
         coeff = ent[1] if ent is not None else 1.0
+        # An fp32 model param shares its main param's storage: copy it as Megatron does (a self-copy) rather
+        # than add a kernel variant that stores twice to the same address.
         out = d if d.dtype in (torch.bfloat16, torch.float16) else None
-        fa.adamw_clip_(p, g, m, v, out, clip=coeff, scalars=sc, check=False)
+        kernel.adamw_clip_(p, g, m, v, out, clip=coeff, scalars=sc, check=False)
         if out is None:
             d.data.copy_(p)
-    return True
 
 
 def make_clip_grad_by_total_norm_fp32(orig):
     """Wrap Megatron's clip: global-norm NaN check, then defer (fused on) or apply (fused off) the clip."""
 
+    @functools.wraps(orig)
     def clip_grad_by_total_norm_fp32(parameters, max_norm, total_norm, use_decoupled_grad=False):
-        import torch
-
-        if nancheck_enabled():
-            if not math.isfinite(total_norm):
-                raise RuntimeError(
-                    f"[fused_adamw_clip] non-finite global grad norm {total_norm} (per-bucket NaN check "
-                    "replaced by the global-norm check); no parameter was updated"
-                )
+        if nancheck_enabled() and not math.isfinite(total_norm):
+            raise RuntimeError(
+                f"non-finite global grad norm {total_norm} (use_primus_global_grad_nan_check checks it "
+                "instead of every DDP bucket); no parameter was updated"
+            )
         # A list: the parameters are walked twice below, and the replaced function accepts any iterable.
         parameters = [parameters] if isinstance(parameters, torch.Tensor) else list(parameters)
         for p in parameters:  # a new clip decision supersedes any stale deferral
@@ -267,17 +262,17 @@ def make_clip_grad_by_total_norm_fp32(orig):
         if clip_coeff < 1.0:
             for p in parameters:
                 if p.grad is not None:
-                    assert p.grad.type() == "torch.cuda.FloatTensor"
+                    assert p.grad.dtype == torch.float32
                     _PENDING[id(p)] = (p, clip_coeff)
 
-    clip_grad_by_total_norm_fp32.__wrapped__ = orig
-    setattr(clip_grad_by_total_norm_fp32, HOOKED_ATTR, orig)
     return clip_grad_by_total_norm_fp32
 
 
-def make_step_with_ready_grads(orig, dm):
-    """Wrap ``MixedPrecisionOptimizer.step_with_ready_grads``: fused step when eligible, else the original."""
+def make_step_with_ready_grads(orig, dm, key: str):
+    """Wrap ``MixedPrecisionOptimizer.step_with_ready_grads``: the fused step when eligible, else the original
+    step (the reason logged once under the patch ``key``)."""
 
+    @functools.wraps(orig)
     def step_with_ready_grads(self):
         why = ineligible_reason(self, dm)
         if why is None:
@@ -285,7 +280,7 @@ def make_step_with_ready_grads(orig, dm):
             if timers is not None:
                 timers("optimizer-inner-step", log_level=1).start(barrier=self.config.barrier_with_L1_time)
             try:
-                ok = fused_step(self)
+                fused_step(self)
             except _Fallback as exc:
                 why = f"fallback: {exc}"
             if timers is not None:
@@ -296,80 +291,34 @@ def make_step_with_ready_grads(orig, dm):
                         barrier=self.config.barrier_with_L1_time
                     )
                     timers("optimizer-copy-main-to-model-params").stop()
-                return ok
-        if why != "off" and _STATE["last_fallback"] != why:
-            warning_rank_0(f"[fused_adamw_clip] original optimizer step ({why})")
-            _STATE["last_fallback"] = why
+                return True
+        if why != "off":
+            warn_fallback_once(key, why)
         _flush_pending(_inner_params(self))
         return orig(self)
 
-    step_with_ready_grads.__wrapped__ = orig
-    setattr(step_with_ready_grads, HOOKED_ATTR, orig)
     return step_with_ready_grads
 
 
 def make_flush_then_step(orig):
-    """Wrap ``FP32Optimizer.step_with_ready_grads``: apply any deferred clip (as the original clip), then step."""
+    """Wrap ``FP32Optimizer.step_with_ready_grads``: apply a deferred clip (as the clip would), then step."""
 
+    @functools.wraps(orig)
     def step_with_ready_grads(self):
         if not getattr(self, "is_stub_optimizer", False) and getattr(self, "optimizer", None) is not None:
             _flush_pending(_inner_params(self))
         return orig(self)
 
-    step_with_ready_grads.__wrapped__ = orig
-    setattr(step_with_ready_grads, HOOKED_ATTR, orig)
     return step_with_ready_grads
 
 
 def make_check_grads(orig):
-    """Wrap ``_ParamAndGradBucketGroup.check_grads``: skip the NaN/Inf-only check while the global check is on."""
+    """Wrap ``_ParamAndGradBucketGroup.check_grads``: no NaN/Inf-only check while the global check is on."""
 
+    @functools.wraps(orig)
     def check_grads(self, check_for_nan_or_inf, check_for_large):
         if nancheck_enabled() and not check_for_large:
             return None
         return orig(self, check_for_nan_or_inf, check_for_large)
 
-    check_grads.__wrapped__ = orig
-    setattr(check_grads, HOOKED_ATTR, orig)
     return check_grads
-
-
-def install_hooks() -> dict:
-    """Hook Megatron's clip, the step_with_ready_grads of MixedPrecisionOptimizer and FP32Optimizer and the DDP
-    bucket check (idempotent). The hooks are inert while both switches are off.
-    Returns {hook name: "patched" | "already" | "absent"}."""
-    import importlib
-
-    om = importlib.import_module("megatron.core.optimizer.optimizer")
-    dm = importlib.import_module("megatron.core.optimizer.distrib_optimizer")
-    pb = importlib.import_module("megatron.core.distributed.param_and_grad_buffer")
-    res = {}
-    cur = om.clip_grad_by_total_norm_fp32
-    if getattr(cur, HOOKED_ATTR, None) is None:
-        om.clip_grad_by_total_norm_fp32 = make_clip_grad_by_total_norm_fp32(cur)
-        res["clip_grad_by_total_norm_fp32"] = "patched"
-    else:
-        res["clip_grad_by_total_norm_fp32"] = "already"
-    mpo = om.MixedPrecisionOptimizer
-    cur = mpo.step_with_ready_grads
-    if getattr(cur, HOOKED_ATTR, None) is None:
-        mpo.step_with_ready_grads = make_step_with_ready_grads(cur, dm)
-        res["MixedPrecisionOptimizer.step_with_ready_grads"] = "patched"
-    else:
-        res["MixedPrecisionOptimizer.step_with_ready_grads"] = "already"
-    fpo = om.FP32Optimizer
-    cur = fpo.step_with_ready_grads
-    if getattr(cur, HOOKED_ATTR, None) is None:
-        fpo.step_with_ready_grads = make_flush_then_step(cur)
-        res["FP32Optimizer.step_with_ready_grads"] = "patched"
-    else:
-        res["FP32Optimizer.step_with_ready_grads"] = "already"
-    group_cls = getattr(pb, "_ParamAndGradBucketGroup", None)
-    if group_cls is None or not hasattr(group_cls, "check_grads"):
-        res["_ParamAndGradBucketGroup.check_grads"] = "absent"
-    elif getattr(group_cls.check_grads, HOOKED_ATTR, None) is None:
-        group_cls.check_grads = make_check_grads(group_cls.check_grads)
-        res["_ParamAndGradBucketGroup.check_grads"] = "patched"
-    else:
-        res["_ParamAndGradBucketGroup.check_grads"] = "already"
-    return res

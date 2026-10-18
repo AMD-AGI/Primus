@@ -4,11 +4,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Notice for the opt-in switches whose pinned Triton configs were chosen and validated on gfx1250 (MI455X)."""
+"""Log helpers shared by the opt-in Primus fusion and optimizer-step patches."""
 
 import functools
 
 from primus.core.utils.module_utils import warning_rank_0
+
+
+@functools.lru_cache(maxsize=None)
+def warn_fallback_once(key: str, reason: str) -> None:
+    """Log once per (patch key, reason) that a call took the original path."""
+    warning_rank_0(f"[Patch:{key}] original path: {reason}")
 
 
 @functools.lru_cache(maxsize=None)

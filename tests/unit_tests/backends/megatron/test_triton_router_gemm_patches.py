@@ -4,18 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the pinned-Triton MoE router gating GEMM patch.
-
-CPU part (always): bounds proof of every launch the eligibility contract admits (the kernels' index arithmetic
-at the pinned tile sizes), the contract itself (device, dtypes, contiguity, shapes, experts), the drop-in's
-fallbacks (CPU tensors, bias, non-fp32 router dtype, non-contiguous 2-D / 3-D input), the autograd plumbing with CPU
-stand-ins for the three kernels (2-D and 3-D input, dtypes of the returned grads), and the patch installing
-once on Megatron's router module.
-GPU part (skipped without a device): the Triton kernels against an fp64 reference and against Megatron's
-original router_gating_linear, through autograd.
-"""
-
-from types import SimpleNamespace
+"""Triton MoE router gating GEMM patch: plumbing on CPU (is_cuda stand-ins), numerics on a GPU."""
 
 import pytest
 import torch
@@ -25,107 +14,81 @@ pytest.importorskip("triton")
 
 import primus.backends.megatron.patches.triton_router_gemm_patches as RGP  # noqa: E402
 from primus.backends.megatron.core.fusions import triton_router_gemm as R  # noqa: E402
-from primus.core.patches.context import PatchContext  # noqa: E402
-
-cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
-
-
-class _CudaLike(torch.Tensor):
-    """CPU tensor that reports is_cuda (exercises the shape / dtype part of the contract on CPU)."""
-
-    @property
-    def is_cuda(self):
-        return True
+from tests.unit_tests.backends.megatron.conftest import (  # noqa: E402
+    cuda_like,
+    patch_ctx,
+    requires_gpu,
+)
 
 
-def _cl(t):
-    return t.as_subclass(_CudaLike)
+def test_tile_sizes_divide_the_eligibility_multiples():
+    # No masks in the kernels: ineligible_reason() admits only shapes that every tile divides exactly.
+    for bm in (R.FWD_BM, R.DG_BM, R.WG_SPLIT_M * R.WG_BM):
+        assert R.M_MULTIPLE % bm == 0
+    for bk in (R.FWD_BK, R.DG_BN, R.WG_BN):
+        assert R.K_MULTIPLE % bk == 0
 
 
-def _launch_extents(M, K, E=32):
-    """Every (tensor, max element offset touched + 1, numel) of one fwd/dgrad/wgrad call, from the kernels'
-    index arithmetic at the pinned tile sizes."""
-    rows = []
-    # fwd: pid_m < M/BM, one K split of length K
-    pm = M // R.FWD_BM - 1
-    rows.append(("fwd.x", (pm * R.FWD_BM + R.FWD_BM - 1) * K + (K - R.FWD_BK) + R.FWD_BK - 1 + 1, M * K))
-    rows.append(("fwd.w", (E - 1) * K + (K - R.FWD_BK) + R.FWD_BK - 1 + 1, E * K))
-    rows.append(("fwd.y", (pm * R.FWD_BM + R.FWD_BM - 1) * E + E - 1 + 1, M * E))
-    pm, pn = M // R.DG_BM - 1, K // R.DG_BN - 1
-    rows.append(("dgrad.g", (pm * R.DG_BM + R.DG_BM - 1) * E + E - 1 + 1, M * E))
-    rows.append(("dgrad.w", (E - 1) * K + pn * R.DG_BN + R.DG_BN - 1 + 1, E * K))
-    rows.append(("dgrad.dx", (pm * R.DG_BM + R.DG_BM - 1) * K + pn * R.DG_BN + R.DG_BN - 1 + 1, M * K))
-    rps = M // R.WG_SPLIT_M
-    pn, ps = K // R.WG_BN - 1, R.WG_SPLIT_M - 1
-    last_m = ps * rps + (rps - R.WG_BM) + R.WG_BM - 1
-    rows.append(("wgrad.g", last_m * E + E - 1 + 1, M * E))
-    rows.append(("wgrad.x", last_m * K + pn * R.WG_BN + R.WG_BN - 1 + 1, M * K))
-    rows.append(
-        ("wgrad.part", ps * E * K + (E - 1) * K + pn * R.WG_BN + R.WG_BN - 1 + 1, R.WG_SPLIT_M * E * K)
-    )
-    return rows
+def _bf16(*shape):
+    return cuda_like(torch.zeros(*shape, dtype=torch.bfloat16))
 
 
-@pytest.mark.parametrize("M,K", [(1024, 128), (8192, 7168), (4096, 2048), (16384, 7168)])
-def test_launch_extents_stay_inside_tensors(M, K):
-    for name, hi, numel in _launch_extents(M, K):
-        assert 0 < hi <= numel, (name, hi, numel)
+def test_ineligible_reasons():
+    def reason(x, w, bias=None, router_dtype=torch.float32):
+        return R.ineligible_reason(x, w, bias, router_dtype)
+
+    x, w = _bf16(2048, 256), _bf16(32, 256)
+    assert reason(x, w) is None
+    assert reason(_bf16(4, 512, 256), w) is None  # 3-D [s, b, h]
+    assert reason(x, w, bias=cuda_like(torch.zeros(32))) == "router bias"
+    assert reason(x, w, router_dtype=torch.bfloat16) == "router dtype torch.bfloat16"
+    assert reason(_bf16(256, 2048).t(), w) == "non-contiguous input"
+    assert reason(_bf16(4, 256, 256).permute(1, 0, 2), w) == "non-contiguous input"  # [s, b, h] view
+    assert "CUDA" in reason(torch.zeros(2048, 256, dtype=torch.bfloat16), w)
+    assert "bf16" in reason(cuda_like(torch.zeros(2048, 256)), w)  # fp32 input
+    assert "bf16" in reason(x, cuda_like(torch.zeros(32, 256)))  # fp32 weight
+    assert reason(x, _bf16(256, 32).t()) == "weight not 2-D contiguous"
+    assert "hidden size" in reason(x, _bf16(32, 384))
+    assert reason(x, _bf16(64, 256)) == "64 experts (supported: (32,))"
+    assert "tokens" in reason(_bf16(2000, 256), w)
+    assert "tokens" in reason(_bf16(0, 256), w)
+    assert "hidden size not a multiple" in reason(_bf16(2048, 200), _bf16(32, 200))
 
 
-def test_eligibility_contract():
-    x = _cl(torch.zeros(2048, 256, dtype=torch.bfloat16))
-    w = _cl(torch.zeros(32, 256, dtype=torch.bfloat16))
-    assert R.eligible(x, w)
-    assert not R.eligible(torch.zeros(2048, 256, dtype=torch.bfloat16), w)  # CPU
-    assert not R.eligible(_cl(torch.zeros(2000, 256, dtype=torch.bfloat16)), w)  # tokens % 1024
-    assert not R.eligible(
-        _cl(torch.zeros(2048, 200, dtype=torch.bfloat16)), _cl(torch.zeros(32, 200).bfloat16())
-    )
-    assert not R.eligible(x, _cl(torch.zeros(64, 256, dtype=torch.bfloat16)))  # 64 experts
-    assert not R.eligible(_cl(torch.zeros(2048, 256)), w)  # fp32 input
-    assert not R.eligible(_cl(torch.zeros(256, 2048, dtype=torch.bfloat16).t()), w)  # non-contiguous
-    assert not R.eligible(_cl(torch.zeros(0, 256, dtype=torch.bfloat16)), w)  # no tokens
-    assert not R.eligible(x, _cl(torch.zeros(32, 256)))  # fp32 weight
-    assert not R.eligible(x, _cl(torch.zeros(256, 32, dtype=torch.bfloat16).t()))  # non-contiguous weight
-    assert not R.eligible(x, _cl(torch.zeros(32, 384, dtype=torch.bfloat16)))  # weight K != input K
-
-
-def test_drop_in_falls_back_to_original():
-    calls = []
+def test_drop_in_falls_back_to_original(monkeypatch):
+    warned = []
+    monkeypatch.setattr(R, "warn_fallback_once", lambda key, why: warned.append((key, why)))
 
     def orig(inp, weight, bias, router_dtype):
-        calls.append(router_dtype)
         return "orig"
 
-    f = R.make_router_gating_linear(orig)
-    assert f.__wrapped__ is orig and getattr(f, R.ORIGINAL_ATTR) is orig
-    x = torch.zeros(1024, 128, dtype=torch.bfloat16)
-    w = torch.zeros(32, 128, dtype=torch.bfloat16)
-    assert f(x, w, None, torch.float32) == "orig"  # CPU tensors
-    xc, wc = _cl(x), _cl(w)
-    assert f(xc, wc, _cl(torch.zeros(32)), torch.float32) == "orig"  # bias
-    assert f(xc, wc, None, torch.bfloat16) == "orig"  # router dtype
-    xt = _cl(torch.zeros(128, 1024, dtype=torch.bfloat16).t())
-    assert f(xt, wc, None, torch.float32) == "orig"  # non-contiguous input
-    x3 = _cl(torch.zeros(4, 256, 128, dtype=torch.bfloat16).permute(1, 0, 2))  # non-contiguous [s, b, h] view
-    assert f(x3, wc, None, torch.float32) == "orig"  # non-contiguous 3-D input
-    assert len(calls) == 5
+    f = R.make_router_gating_linear(orig, "key")
+    assert f.__wrapped__ is orig
+    assert f(_bf16(1024, 128), _bf16(32, 128), None, torch.bfloat16) == "orig"
+    assert warned == [("key", "router dtype torch.bfloat16")]
 
 
 def test_autograd_plumbing_with_cpu_stand_ins(monkeypatch):
     """The drop-in + RouterGatingLinearTriton with CPU stand-ins for the kernels == an fp32 reference."""
     seen = []
-    monkeypatch.setattr(R, "eligible", lambda x2d, w: True)
-    monkeypatch.setattr(R, "router_fwd", lambda x2d, w: (seen.append("fwd"), x2d.float() @ w.float().t())[1])
-    monkeypatch.setattr(R, "router_dgrad", lambda g, w: (seen.append("dgrad"), (g @ w.float()).bfloat16())[1])
-    monkeypatch.setattr(
-        R,
-        "router_wgrad",
-        lambda g, x2d, out_dtype=torch.bfloat16: (seen.append("wgrad"), (g.t() @ x2d.float()).to(out_dtype))[
-            1
-        ],
-    )
-    f = R.make_router_gating_linear(lambda *a: pytest.fail("original path taken"))
+
+    def fwd(x2d, w):
+        seen.append("fwd")
+        return x2d.float() @ w.float().t()
+
+    def dgrad(g, w):
+        seen.append("dgrad")
+        return (g @ w.float()).bfloat16()
+
+    def wgrad(g, x2d, out_dtype=torch.bfloat16):
+        seen.append("wgrad")
+        return (g.t() @ x2d.float()).to(out_dtype)
+
+    monkeypatch.setattr(R, "ineligible_reason", lambda *a: None)
+    monkeypatch.setattr(R, "router_fwd", fwd)
+    monkeypatch.setattr(R, "router_dgrad", dgrad)
+    monkeypatch.setattr(R, "router_wgrad", wgrad)
+    f = R.make_router_gating_linear(lambda *a: pytest.fail("original path taken"), "key")
     gen = torch.Generator().manual_seed(0)
     for shape in ((64, 48), (8, 4, 48)):
         x = torch.randn(*shape, generator=gen).bfloat16().requires_grad_()
@@ -145,29 +108,17 @@ def test_autograd_plumbing_with_cpu_stand_ins(monkeypatch):
     assert seen == ["fwd", "dgrad", "wgrad"] * 2
 
 
-def _ctx(**args):
-    return PatchContext(
-        backend="megatron",
-        phase="before_train",
-        extra={"module_config": SimpleNamespace(params=SimpleNamespace(**args))},
-    )
-
-
-def test_patch_installs_once_on_megatron_router_module():
+def test_patch_installs_once_on_megatron_router_module(restore_patched):
     from megatron.core.transformer.moe import router
 
+    restore_patched(router, "router_gating_linear")
     before = router.router_gating_linear
-    try:
-        RGP.patch_triton_router_gemm(_ctx(use_primus_triton_router_gemm=True, moe_router_dtype="fp32"))
-        first = router.router_gating_linear
-        assert getattr(first, R.ORIGINAL_ATTR) is before
-        RGP.patch_triton_router_gemm(_ctx(use_primus_triton_router_gemm=True, moe_router_dtype="fp32"))
-        assert router.router_gating_linear is first  # idempotent
-    finally:
-        router.router_gating_linear = before
-
-
-# ---------------------------------------------------------------- GPU
+    ctx = patch_ctx(use_primus_triton_router_gemm=True, moe_router_dtype="fp32")
+    RGP.patch_triton_router_gemm(ctx)
+    first = router.router_gating_linear
+    assert first is not before and first.__wrapped__ is before
+    RGP.patch_triton_router_gemm(ctx)
+    assert router.router_gating_linear is first  # idempotent
 
 
 def _sqnr_db(x, ref):
@@ -175,7 +126,7 @@ def _sqnr_db(x, ref):
     return (10 * torch.log10(ref.square().sum() / (x - ref).square().sum().clamp_min(1e-300))).item()
 
 
-@cuda
+@requires_gpu
 @pytest.mark.parametrize("shape,K", [((1024,), 128), ((1024, 2), 1024), ((4096,), 7168)])
 def test_triton_router_gemm_matches_reference(shape, K):
     from megatron.core.transformer.moe.moe_utils import router_gating_linear as orig
@@ -183,9 +134,10 @@ def test_triton_router_gemm_matches_reference(shape, K):
     dev = torch.device("cuda")
     gen = torch.Generator(device=dev).manual_seed(1)
     x = torch.randn(*shape, K, generator=gen, device=dev).bfloat16()
+    # Router-like scales: weights ~ a small init std, logits grads ~ an aux-loss-sized gradient.
     w = (0.008 * torch.randn(32, K, generator=gen, device=dev)).bfloat16()
     g = 1e-4 * torch.randn(*shape, 32, generator=gen, device=dev)
-    f = R.make_router_gating_linear(lambda *a: pytest.fail("original path taken"))
+    f = R.make_router_gating_linear(lambda *a: pytest.fail("original path taken"), "key")
 
     def run(fn):
         xi = x.clone().requires_grad_()
@@ -201,7 +153,7 @@ def test_triton_router_gemm_matches_reference(shape, K):
     dx_r = (gd @ wd).reshape(x.shape)
     dw_r = gd.t() @ xd.reshape(-1, K)
     assert torch.isfinite(dx_t).all() and torch.isfinite(dw_t).all()
-    assert _sqnr_db(y_t, y_r) > 100
+    assert _sqnr_db(y_t, y_r) > 100  # fp32 accumulation of exact bf16 products
     torch.testing.assert_close(y_t, y_o, rtol=1e-5, atol=1e-5)
     for t, o, r in ((dx_t, dx_o, dx_r), (dw_t, dw_o, dw_r)):
         assert t.dtype == torch.bfloat16
