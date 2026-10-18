@@ -483,13 +483,14 @@ def parse_torchtitan_iterations(lines: list[str], keep_rank: int | None = None) 
             it["memory_usage"] = float(m.group(1))
             it["memory_usage_pct"] = float(m.group(2))
 
+        # Both carry a thousands separator: "tps: 12,345  tflops: 1,293.62".
         m = re.search(r"tps:\s*([\d,]+)", clean)
         if m:
             it["tps_per_gpu"] = float(m.group(1).replace(",", ""))
 
-        m = re.search(r"tflops:\s*([\d.]+)", clean)
+        m = re.search(r"tflops:\s*([\d,.]+)", clean)
         if m:
-            it["tflops"] = float(m.group(1))
+            it["tflops"] = float(m.group(1).replace(",", ""))
 
         if "step" in it:
             iterations.append(it)

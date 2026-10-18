@@ -320,6 +320,31 @@ def test_torchtitan_parses_memory(tmp_path):
     assert result["hmean_tps_per_gpu"] == pytest.approx(1000.0)
 
 
+def test_torchtitan_reads_numbers_with_thousands_separators(tmp_path):
+    # TorchTitan's own step line (tflops:,.2f), colours included; a value of
+    # 1,293.62 used to be read as 1.
+    body = "\n".join(
+        f"[\x1b[32m20261015 20:10:50\x1b[0m][\x1b[36mrank-0/16\x1b[0m][\x1b[1m[INFO]     \x1b[0m"
+        f"\x1b[1m\x1b[31mstep: {s:2}  \x1b[32mloss: 27.72860  \x1b[38;2;180;60;0mgrad_norm: 130.8515  "
+        f"\x1b[38;2;54;234;195mmemory: 281.23GiB(97.65%)  \x1b[34mtps: {tps}  "
+        f"\x1b[36mtflops: {tflops}  \x1b[35mmfu: 51.74%\x1b[39m\x1b[0m"
+        for s, tps, tflops in [
+            (1, "218", "310.71"),
+            (2, "1,909", "1,293.62"),
+            (3, "1,923", "1,313.57"),
+            (4, "1,921", "1,309.82"),
+            (5, "1,921", "1,309.82"),
+        ]
+    )
+    result = extract.parse_log_file(
+        str(write_log(tmp_path, body + "\n", framework="torchtitan", config_name="llama3.1_8B-BF16-pretrain"))
+    )
+    # Steps 4 and 5 remain after the warmup skip.
+    assert result["hmean_tflops"] == pytest.approx(1309.82)
+    assert result["hmean_tps_per_gpu"] == pytest.approx(1921.0)
+    assert result["tflops_min"] == pytest.approx(1309.82)
+
+
 # --------------------------------------------------------------------------
 # Provenance plumbed through to the CSV row
 # --------------------------------------------------------------------------
