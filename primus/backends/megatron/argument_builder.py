@@ -15,6 +15,19 @@ from typing import Any, Callable, Dict, Mapping, Union
 from primus.core.utils.env import get_torchrun_env
 from primus.core.utils.module_utils import warning_rank_0
 
+_PRIMUS_MEGATRON_DEFAULTS = {
+    # Native HyLo distillation. These are Primus-owned arguments rather than
+    # upstream Megatron CLI flags, but they must survive the same config merge.
+    "hylo_distill_stage": None,
+    "hylo_teacher_checkpoint": None,
+    "hylo_teacher_num_layers": None,
+    "hylo_linear_ild_checkpoint": None,
+    "hylo_mla_ild_checkpoint": None,
+    "hylo_kl_weight": 1.0,
+    "hylo_ce_weight": 0.0,
+    "hylo_kl_chunk_size": 4096,
+}
+
 
 # ------------------------------------------------------------
 # Build the original Megatron argument parser
@@ -51,7 +64,9 @@ def _load_megatron_defaults() -> Dict[str, Any]:
     """
     parser = _build_megatron_parser()
     args = parser.parse_args([])  # Parse an empty list → only defaults
-    return vars(args).copy()  # Convert Namespace → dict and cache
+    defaults = vars(args).copy()
+    defaults.update(_PRIMUS_MEGATRON_DEFAULTS)
+    return defaults  # Convert Namespace → dict and cache
 
 
 # ------------------------------------------------------------
