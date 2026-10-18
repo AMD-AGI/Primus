@@ -99,6 +99,52 @@ Browse `examples/maxtext/configs/` for the authoritative list — it tracks what
 
 ---
 
+## Primus-Turbo grouped GEMM for MoE (experimental)
+
+MaxText's dropless MoE path (`sparse_matmul: true`, `megablox: false`) multiplies each expert's tokens with `jax.lax.ragged_dot`. With `use_turbo_grouped_gemm: true` it calls the [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) grouped GEMM instead. The flag lives in the MaxText config, so you pass it as an override like any other MaxText key:
+
+```bash
+./primus-cli direct -- train pretrain \
+  --config examples/maxtext/configs/MI325X/mixtral_8x7B-bf16-pretrain.yaml \
+  --sparse_matmul True --megablox False --capacity_factor -1 \
+  --use_turbo_grouped_gemm True --turbo_grouped_gemm_backend hipblaslt
+```
+
+`examples/maxtext/configs/MI325X/*-bf16-dropless_turbo_gmm-pretrain.yaml` package the measured recipes below (Mixtral 8x7B, Mixtral 8x22B, Qwen3-30B-A3B, DeepSeek-V2-16B, Gemma4-26B).
+
+**Requirements.** The image must have Primus-Turbo built for JAX (`PRIMUS_TURBO_FRAMEWORK=JAX`). The `hipblaslt` backend also needs a Primus-Turbo build that provides `primus_turbo.jax.lax.grouped_gemm_hipblaslt`. MaxText rejects the flag unless `sparse_matmul=True`, `megablox=False`, `use_tokamax_gmm=False`, the dtype is bf16 or fp16, and quantization is off.
+
+**Backends** (`turbo_grouped_gemm_backend`):
+
+| Backend | What it runs | Notes |
+| ------- | ------------ | ----- |
+| `hipblaslt` | One hipBLASLt grouped GEMM launch for all experts; group sizes stay on the GPU | The fastest dropless option measured, for both few large and many small experts. The kernel is chosen by timing up to 256 candidates on random data at the real size, once per shape at trace time (about 40 s per shape, in a subprocess), and cached on disk (`PRIMUS_TURBO_HB_GG_TUNE_CACHE`, default `~/.cache/primus_turbo/hipblaslt_grouped_gemm_tune.json`), so later runs start immediately. `PRIMUS_TURBO_HB_GG_TUNE=0` falls back to hipBLASLt's heuristic, which picks much slower kernels. |
+| `ck` (default) | Primus-Turbo CK grouped GEMM kernels | Needs a Primus-Turbo with the gfx942 BF16/FP16 tile fix: before it, a 256x256x64 tile spilled registers on MI325X (340 TFLOPS forward, about 95 backward, and a Mixtral loss drift). With the fix (128x128x64 and 128x256x32 tiles, no spills): 440–560 TFLOPS at Mixtral shapes and loss curves identical to `ragged_dot`, but still about 1.4x slower than `hipblaslt` end to end. |
+
+**Measured on 8x MI325X** (bf16, synthetic data, `XLA_GPU_AUTOTUNE_LEVEL=1`):
+
+Each Turbo recipe (the `*-dropless_turbo_gmm-pretrain.yaml` configs) against the model's shipped recipe, which uses EP 8, dense dispatch and a capacity factor (so it drops tokens). The last column applies the Turbo recipes' non-Turbo changes (remat policy, combine thresholds) to the shipped recipe as well:
+
+| Model | Shipped recipe, tokens/s/device | Turbo dropless recipe | Tokens/s/device | vs shipped | Shipped recipe re-tuned the same way |
+| ----- | ------------------------------- | --------------------- | --------------- | ---------- | ------------------------------------ |
+| Mixtral 8x7B | 6076 (batch 27) | FSDP 8, batch 32, remat keeps context + expert down-projection output | 6229 | +2.5% | 6335 |
+| Mixtral 8x22B | 1752 (batch 6) | FSDP 8, batch 6, remat keeps the expert down-projection output | 1784 | +1.8% | 1910 |
+| Qwen3-30B-A3B | 7470 (batch 10) | FSDP 8, batch 10 | 11776 | +58% | 7808 |
+| DeepSeek-V2-16B | 12410 (batch 14, capacity factor 1.25) | FSDP 8, batch 14 | 18408 | +48% | 12426 |
+| Gemma4-26B | 6789 (batch 16) | FSDP 8, batch 16 | 10554 | +55% | 6838 |
+
+The dropless runs match `ragged_dot`'s loss curves exactly, and land within a few thousandths of the token-dropping recipes after 15 steps. All Turbo configs lower XLA's all-gather / reduce-scatter combine thresholds from Primus's 8 GB to 256 MB (1 byte for Mixtral 8x22B) through `XLA_FLAGS_APPEND` in their `env:` block, so FSDP gathers each weight separately; that is worth 2–7% for these FSDP runs. Setting `JAX_ENABLE_PGLE=true` (profile-guided scheduling: 3 profiling steps and a recompile at start) adds another 1–2% for Mixtral in long runs.
+
+**When it helps, and when it doesn't:**
+
+- **Many small experts (Qwen3-30B-A3B, DeepSeek-V2-16B, Gemma4-26B):** switch to dropless FSDP + Turbo. Most of the gain comes from avoiding the dense dispatch over 64–128 experts, and Turbo is 4–6% faster than `ragged_dot` on top (tokens/s before the threshold change: Qwen3 11330 vs 10698, DeepSeek-V2-16B 17808 vs 16867, Gemma4-26B 10268 vs 9905). The grouped GEMM's launch grid is sized for the real token count plus one tile per expert (`PRIMUS_TURBO_HB_GG_HOST_ROWS=auto`, the default); `max` sizes it for every token landing on one expert, which is 2.4–9x slower here.
+- **Few, large experts (Mixtral):** dropless FSDP + Turbo is slightly faster than the shipped token-dropping recipes once the remat policy keeps the expert down-projection output (`remat_policy: custom`, `moe_mlpwo: device`) instead of the q/k/v and output projections; that uses less memory per token and allows a larger batch. The same changes speed up the token-dropping recipes even more, so a re-tuned token-dropping recipe stays 2–7% ahead: hipBLASLt's grouped kernels are 5–10% slower than XLA's dense batched GEMM at these shapes, and FSDP's expert-weight all-gathers don't overlap the grouped GEMMs. Choose Turbo here when you want dropless training at the shipped recipe's speed.
+- **`prefuse_moe_weights: true`** (one up-projection GEMM instead of two) made the Mixtral Turbo run about 2% slower, and it changes the parameter layout, so it isn't recommended here.
+- **Expert parallelism:** the dropless path exchanges tokens with XLA's `ragged_all_to_all`. On ROCm that takes about 68% of the step for Mixtral EP 8, so the GEMM backend barely matters there. Dropless mode also sizes the receive buffer for the worst case (4x the balanced token count for Mixtral), so it needs a smaller batch than the dense recipe.
+- **XLA autotuning:** with the image's ROCm nightly, XLA's GEMM autotuner at level 4 (the Primus default) sometimes crashes with a GPU memory access fault while compiling. Set `XLA_GPU_AUTOTUNE_LEVEL=1` for bf16 runs.
+
+---
+
 ## System validation
 
 If you have already validated your system, skip this step. Otherwise, complete the [system validation and optimization steps](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/system-setup/prerequisite-system-validation.html#prerequisite-system-validation-before-running-ai-workloads) to set up your system before starting training.
