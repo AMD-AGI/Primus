@@ -47,17 +47,49 @@ __all__ = ["fla_chunk_kda"]
 
 logger = logging.getLogger(__name__)
 
-# MI300X (gfx942) has 64 KB of LDS. FLA's CP kernels autotune num_stages in
-# {2, 3, 4} and BV in {32, 64}, and the first of those asks for 80 KB.
+# FLA's CP kernels autotune num_stages in {2, 3, 4} and BV in {32, 64}; the
+# richest of those (num_stages=2, BV=32, measured) asks for 80 KB of shared
+# memory. LDS capacity is a hardware fact that genuinely differs by chip --
+# 64 KB on CDNA3 (gfx942, MI300X) vs. 160 KB on CDNA4 (gfx950, MI350X/MI355X)
+# -- so this queries the device instead of assuming the smaller number
+# everywhere: MI300X still needs the narrow, safe configs, while MI350X/
+# MI355X (and anything else with enough LDS) keep FLA's own, faster defaults.
 _CP_LDS_PATCHED = False
+
+# The worst default config observed to require 80 KB; anything at or above
+# this is trusted to fit the full autotune space without narrowing it.
+_CP_LDS_SAFE_THRESHOLD = 96 * 1024
+
+
+def _device_max_shared_mem() -> Optional[int]:
+    """Bytes of shared memory (LDS) per block on the current device, or None."""
+    try:
+        from triton.runtime import driver
+
+        device = driver.active.get_current_device()
+        props = driver.active.utils.get_device_properties(device)
+        value = props.get("max_shared_mem")
+        return int(value) if value else None
+    except Exception:  # noqa: BLE001 - best-effort; fall back to narrowing
+        return None
 
 
 def _clamp_fla_cp_lds() -> None:
-    """Keep FLA context-parallel kernels inside 64 KB of shared memory."""
+    """Narrow FLA's CP autotune space only on chips too small to fit it."""
     global _CP_LDS_PATCHED
     if _CP_LDS_PATCHED:
         return
     _CP_LDS_PATCHED = True
+
+    max_shared_mem = _device_max_shared_mem()
+    if max_shared_mem is not None and max_shared_mem >= _CP_LDS_SAFE_THRESHOLD:
+        logger.info(
+            "FLA CP kernels: device has %d KB of LDS (>= %d KB); leaving the autotune "
+            "space untouched.",
+            max_shared_mem // 1024,
+            _CP_LDS_SAFE_THRESHOLD // 1024,
+        )
+        return
 
     import triton
     from fla.ops.cp import chunk_delta_h
@@ -100,7 +132,8 @@ def _clamp_fla_cp_lds() -> None:
             cache.clear()
         clamped.append(name)
     if clamped:
-        logger.info("Clamped FLA CP kernels to 64 KB LDS: %s", ", ".join(sorted(clamped)))
+        limit = f"{max_shared_mem // 1024} KB" if max_shared_mem else "its"
+        logger.info("Clamped FLA CP kernels to fit %s LDS: %s", limit, ", ".join(sorted(clamped)))
 
 
 def fla_chunk_kda(
