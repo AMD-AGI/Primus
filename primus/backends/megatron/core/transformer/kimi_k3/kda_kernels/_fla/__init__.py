@@ -84,8 +84,7 @@ def _clamp_fla_cp_lds() -> None:
     max_shared_mem = _device_max_shared_mem()
     if max_shared_mem is not None and max_shared_mem >= _CP_LDS_SAFE_THRESHOLD:
         logger.info(
-            "FLA CP kernels: device has %d KB of LDS (>= %d KB); leaving the autotune "
-            "space untouched.",
+            "FLA CP kernels: device has %d KB of LDS (>= %d KB); leaving the autotune " "space untouched.",
             max_shared_mem // 1024,
             _CP_LDS_SAFE_THRESHOLD // 1024,
         )

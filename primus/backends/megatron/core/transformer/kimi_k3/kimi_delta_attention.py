@@ -217,7 +217,9 @@ def _kda_cp_context(cu_seqlens: Tensor, cp_group, kernel_size: int, device) -> A
     try:
         from fla.ops.cp import build_cp_context
     except ImportError as exc:
-        raise RuntimeError("KDA context parallel requires fla.ops.cp (flash-linear-attention >= 0.4).") from exc
+        raise RuntimeError(
+            "KDA context parallel requires fla.ops.cp (flash-linear-attention >= 0.4)."
+        ) from exc
     return build_cp_context(
         cu_seqlens=cu_seqlens.to(device=device, dtype=torch.int32),
         group=cp_group,
@@ -225,15 +227,15 @@ def _kda_cp_context(cu_seqlens: Tensor, cp_group, kernel_size: int, device) -> A
     )
 
 
-def _kda_forward_segments(module, hidden_states: Tensor, packed_seq_params) -> Tuple[Tensor, Optional[Tensor]]:
+def _kda_forward_segments(
+    module, hidden_states: Tensor, packed_seq_params
+) -> Tuple[Tensor, Optional[Tensor]]:
     """Run one unpadded forward per sample and concatenate. CP=1 only."""
     if hidden_states.shape[1] != 1:
         raise NotImplementedError("Packed KDA expects batch size 1 (THD).")
     cu = [int(v) for v in packed_seq_params.cu_seqlens_q.detach().to("cpu").tolist()]
     if cu[-1] != hidden_states.shape[0]:
-        raise RuntimeError(
-            f"cu_seqlens ends at {cu[-1]} but the token axis is {hidden_states.shape[0]}."
-        )
+        raise RuntimeError(f"cu_seqlens ends at {cu[-1]} but the token axis is {hidden_states.shape[0]}.")
     pieces = []
     bias = None
     for start, end in zip(cu[:-1], cu[1:]):

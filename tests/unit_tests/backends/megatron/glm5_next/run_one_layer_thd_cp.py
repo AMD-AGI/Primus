@@ -29,7 +29,9 @@ from primus.backends.megatron.core.transformer.glm5_next.dsa_attention import (
     Glm5NextDSAAttention,
     Glm5NextDSASubmodules,
 )
-from primus.backends.megatron.core.transformer.glm5_next.kda import Glm5NextKimiDeltaAttention
+from primus.backends.megatron.core.transformer.glm5_next.kda import (
+    Glm5NextKimiDeltaAttention,
+)
 from primus.backends.megatron.core.transformer.kimi_k3.kimi_delta_attention import (
     KimiDeltaAttentionSubmodules,
 )
@@ -206,11 +208,7 @@ def _run_cp1(layer, kind: str, path: str) -> None:
     if dist.get_rank() == 0:
         torch.save(
             {
-                "state": {
-                    k: v.detach().cpu()
-                    for k, v in layer.state_dict().items()
-                    if torch.is_tensor(v)
-                },
+                "state": {k: v.detach().cpu() for k, v in layer.state_dict().items() if torch.is_tensor(v)},
                 "hidden": packed_h.detach().cpu(),
                 "out": packed_out.cpu(),
                 "grad": packed_grad.cpu(),
