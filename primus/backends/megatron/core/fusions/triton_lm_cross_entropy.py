@@ -123,7 +123,6 @@ class DeferredGradCrossEntropy(torch.autograd.Function):
             num_warps=NUM_WARPS,
         )
         ctx.save_for_backward(logits, labels, lse)
-        ctx.mark_non_differentiable(labels)
         return loss
 
     @staticmethod
@@ -146,6 +145,9 @@ class DeferredGradCrossEntropy(torch.autograd.Function):
             BLOCK=BLOCK,
             num_warps=NUM_WARPS,
         )
+        # The kernel overwrote logits through a raw pointer: bump its version so any other autograd node that
+        # saved logits raises instead of reading the gradient.
+        torch.autograd.graph.increment_version(logits)
         return logits, None
 
 

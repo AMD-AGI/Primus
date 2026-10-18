@@ -29,7 +29,10 @@ Two independent switches (module state, read at every call), enabled by the patc
     global grad norm, which the optimizer computes anyway, is checked instead inside the clip call, before any
     parameter update (fatal RuntimeError). Needs ``clip_grad > 0`` (otherwise the clip, and with it the check,
     is not called) and ``rerun_mode: disabled`` (otherwise the bucket check feeds Megatron's rerun state
-    machine). ``check_for_large_grads`` is never skipped.
+    machine). ``check_for_large_grads`` is never skipped. The final ``check_for_nan_in_loss_and_grad`` (after
+    ``validate_args``) is re-read on first use. Narrower than the bucket check in two ways: grads left out of
+    the norm (TP-duplicate params on tp_rank > 0, e.g. LayerNorm weights with TP > 1 and no sequence
+    parallel) are not checked, and a rank whose optimizer has no params does not raise (the others do).
 
 After a fused step the main grads hold the unclipped values; nothing reads them before the next backward
 zeroes them.
@@ -42,7 +45,7 @@ import weakref
 
 from primus.core.utils.module_utils import warning_rank_0
 
-_STATE = {"fused": False, "nancheck": False, "last_fallback": None}
+_STATE = {"fused": False, "nancheck": False, "nan_final": None, "last_fallback": None}
 _PENDING = {}  # id(main param) -> (param, clip coeff) deferred by the clip wrapper
 _DST_CACHE = weakref.WeakKeyDictionary()  # optimizer -> (param buffer signature, dst map)
 HOOKED_ATTR = "__primus_fused_adamw_clip_orig__"
@@ -54,6 +57,7 @@ def set_fused(on: bool) -> None:
 
 def set_nancheck(on: bool) -> None:
     _STATE["nancheck"] = bool(on)
+    _STATE["nan_final"] = None
 
 
 def fused_enabled() -> bool:
@@ -61,7 +65,16 @@ def fused_enabled() -> bool:
 
 
 def nancheck_enabled() -> bool:
-    return _STATE["nancheck"]
+    if not _STATE["nancheck"]:
+        return False
+    if _STATE["nan_final"] is None:  # the patch gate saw the args before validate_args
+        try:
+            from megatron.training import get_args
+
+            _STATE["nan_final"] = bool(getattr(get_args(), "check_for_nan_in_loss_and_grad", True))
+        except Exception:  # noqa: BLE001 - no global args (unit tests): keep the switch
+            _STATE["nan_final"] = True
+    return _STATE["nan_final"]
 
 
 class _Fallback(Exception):
@@ -125,13 +138,19 @@ def ineligible_reason(self, dm):
 
 def dst_map(self):
     """id(shard main param) -> its slice of the model param buffer (DistributedOptimizer copy_group_params).
-    Cached per optimizer while every bucket's param buffer stays at the same address."""
+    Cached per optimizer while every bucket's param buffer and every shard main param stay the same objects.
+    """
     from megatron.core.fp8_utils import is_float8tensor
 
     sig = tuple(
         b.param_data.data_ptr() if b.param_data is not None else 0
         for buf in self.buffers
         for b in buf.buckets
+    ) + tuple(
+        id(p)
+        for groups in (self.shard_fp32_from_float16_groups, self.shard_fp32_groups)
+        for g in groups
+        for p in g
     )
     ent = _DST_CACHE.get(self)
     if ent is not None and ent[0] == sig:
@@ -174,12 +193,12 @@ def fused_step(self):
             continue
         items = []
         for p in group["params"]:
+            st = inner.state[p]
+            if len(st) == 0:  # first step: TE's own zero init, before the grad check, as FusedAdam.step does
+                inner.initialize_state(p, False)
             g = p.grad
             if g is None:
                 continue
-            st = inner.state[p]
-            if len(st) == 0:  # first step: TE's own zero init, as FusedAdam.step does
-                inner.initialize_state(p, False)
             if "exp_avg" not in st or "exp_avg_sq" not in st:
                 raise _Fallback("optimizer state not initialised")
             m, v = st["exp_avg"], st["exp_avg_sq"]
@@ -238,8 +257,8 @@ def make_clip_grad_by_total_norm_fp32(orig):
                     f"[fused_adamw_clip] non-finite global grad norm {total_norm} (per-bucket NaN check "
                     "replaced by the global-norm check); no parameter was updated"
                 )
-        if isinstance(parameters, torch.Tensor):
-            parameters = [parameters]
+        # A list: the parameters are walked twice below, and the replaced function accepts any iterable.
+        parameters = [parameters] if isinstance(parameters, torch.Tensor) else list(parameters)
         for p in parameters:  # a new clip decision supersedes any stale deferral
             _PENDING.pop(id(p), None)
         if not fused_enabled() or use_decoupled_grad:

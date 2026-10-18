@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import importlib
 
+from primus.backends.megatron.patches._gfx1250_notice import warn_if_not_gfx1250
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
@@ -64,6 +65,7 @@ def patch_router_module() -> bool:
     tags=["moe", "router", "triton"],
 )
 def patch_triton_router_gemm(ctx: PatchContext) -> None:
+    warn_if_not_gfx1250(_PATCH_KEY, _ARG)
     from primus.backends.megatron.core.fusions.triton_router_gemm import E_SUPPORTED
 
     args = get_args(ctx)

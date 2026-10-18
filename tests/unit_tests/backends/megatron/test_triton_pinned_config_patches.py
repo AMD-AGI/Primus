@@ -133,7 +133,27 @@ def test_pin_group_missing_kernel_raises(fake_module):
         P.pin_group(("_primus_test_pin_mod3", ("nope",), {"BLOCK": 64}, 4, 3))
 
 
-def test_real_mla_rope_kernels_pinned():
+@pytest.fixture
+def restore_real_autotuners():
+    """Pinning mutates the real module-global autotuners; put their configs back for later tests."""
+    saved = []
+    for group in (P._ROPE_GROUP, *P._PERMUTE_GROUPS):
+        try:
+            mod = importlib.import_module(group[0])
+        except Exception:  # noqa: BLE001 - not importable here: nothing to restore
+            continue
+        for name in group[1]:
+            tuner = P._find_autotuner(getattr(mod, name, None))
+            if tuner is not None:
+                saved.append((tuner, list(tuner.configs), dict(tuner.cache)))
+    yield
+    for tuner, configs, cache in saved:
+        tuner.configs = configs
+        tuner.cache.clear()
+        tuner.cache.update(cache)
+
+
+def test_real_mla_rope_kernels_pinned(restore_real_autotuners):
     F = pytest.importorskip("megatron.core.fusions.fused_mla_yarn_rope_apply")
     if not getattr(F, "HAVE_TRITON", False):
         pytest.skip("Megatron MLA RoPE fusion has no Triton")
@@ -147,7 +167,7 @@ def test_real_mla_rope_kernels_pinned():
 
 
 @pytest.mark.parametrize("group", P._PERMUTE_GROUPS, ids=lambda g: g[0])
-def test_real_permutation_kernels_pinned(group):
+def test_real_permutation_kernels_pinned(group, restore_real_autotuners):
     pytest.importorskip("transformer_engine")
     try:
         mod = __import__(group[0], fromlist=["_"])
@@ -173,7 +193,7 @@ def test_apply_raises_when_unpinnable(monkeypatch):
     monkeypatch.setattr(
         P, "wanted_groups", lambda args: [("mla_rope", (("_no_such_module_xyz", ("k",), {}, 4, 3),))]
     )
-    with pytest.raises(RuntimeError, match="cannot pin mla_rope"):
+    with pytest.raises(RuntimeError, match="cannot pin the mla_rope"):
         P.apply_pinned_configs(_args())
 
 

@@ -50,6 +50,7 @@ from __future__ import annotations
 import importlib
 from typing import Any, Dict, List, Tuple
 
+from primus.backends.megatron.patches._gfx1250_notice import warn_if_not_gfx1250
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -185,13 +186,14 @@ def apply_pinned_configs(args) -> Dict[str, Dict[str, List[str]]]:
             modname = group[0]
             try:
                 found = resolve_group(group)
-            except ModuleNotFoundError as exc:
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - optional module skipped, others re-raised with the reason
                 if modname == _TE_PERMUTE_MODULE:
-                    # Optional: moe_permute_fusion goes through Primus' copy.
-                    log_rank_0(f"[Patch:{_PATCH_KEY}] {modname} not importable ({exc}); skipping it.")
+                    # Optional: moe_permute_fusion launches Primus' copy, so a missing or changed TE module
+                    # (import error, renamed kernel) is skipped rather than aborting the run.
+                    log_rank_0(f"[Patch:{_PATCH_KEY}] {modname} not pinnable ({exc!r}); skipping it.")
                     continue
-                raise RuntimeError(f"[Patch:{_PATCH_KEY}] cannot pin {label}: {exc!r}") from exc
-            except Exception as exc:  # noqa: BLE001 - re-raised with the reason
                 raise RuntimeError(
                     f"[Patch:{_PATCH_KEY}] cannot pin the {label} Triton kernels in {modname} ({exc!r}); "
                     f"their first launch would autotune in process. Turn the fusion or {_ARG} off."
@@ -237,6 +239,7 @@ def _condition(ctx: PatchContext) -> bool:
     tags=["triton", "rope", "moe"],
 )
 def patch_triton_pinned_configs(ctx: PatchContext) -> None:
+    warn_if_not_gfx1250(_PATCH_KEY, _ARG)
     # run_patches logs and swallows Exception, and an unpinned kernel would autotune in process on its first
     # launch, so abort the run instead. SystemExit is a BaseException and is not caught by run_patches.
     try:

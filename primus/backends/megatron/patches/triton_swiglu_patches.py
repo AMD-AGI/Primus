@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import importlib
 
+from primus.backends.megatron.patches._gfx1250_notice import warn_if_not_gfx1250
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
@@ -96,6 +97,7 @@ def patch_sites() -> dict:
     tags=["activation", "moe", "triton"],
 )
 def patch_fused_swiglu(ctx: PatchContext) -> None:
+    warn_if_not_gfx1250(_PATCH_KEY, _ARG)
     args = get_args(ctx)
     # turbo_sync_free_moe_stage 3 turns use_turbo_fused_act_with_probs on later, in validate_args.
     if (

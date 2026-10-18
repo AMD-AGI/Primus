@@ -167,6 +167,39 @@ def test_ce_fused_matches_reference(S, B, V):
     torch.testing.assert_close(x.grad.float(), ref_in.grad, atol=2e-3, rtol=2e-2)
 
 
+@cuda
+def test_fused_ce_grad_through_a_linear_producer():
+    # A non-leaf input: the gradient written into the logits buffer must flow into the producer.
+    from primus.backends.megatron.core.fusions.triton_lm_cross_entropy import (
+        fused_lm_cross_entropy,
+    )
+
+    torch.manual_seed(1)
+    S, B, H, V = 16, 2, 64, 1000
+    h = torch.randn(S, B, H, device="cuda", dtype=torch.bfloat16)
+    lin = torch.nn.Linear(H, V, bias=False, device="cuda", dtype=torch.bfloat16)
+    labels = torch.randint(0, V, (B, S), device="cuda")
+    fused_lm_cross_entropy(lin(h), labels).sum().backward()
+    w_fused = lin.weight.grad.float()
+    lin.weight.grad = None
+    _ce_reference(lin(h).float(), labels).sum().backward()
+    torch.testing.assert_close(w_fused, lin.weight.grad.float(), atol=2e-2, rtol=2e-2)
+
+
+@cuda
+def test_fused_ce_inplace_grad_is_detected_by_autograd():
+    # tanh saves its output (the logits): the in-place grad write must raise, not corrupt tanh's backward.
+    from primus.backends.megatron.core.fusions.triton_lm_cross_entropy import (
+        fused_lm_cross_entropy,
+    )
+
+    x = torch.randn(8, 2, 512, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    labels = torch.randint(0, 512, (2, 8), device="cuda")
+    loss = fused_lm_cross_entropy(torch.tanh(x), labels).sum()
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        loss.backward()
+
+
 # ---------------------------------------------------------------------- SwiGLU
 
 

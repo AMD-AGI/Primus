@@ -29,6 +29,7 @@ patch takes precedence for the calls it covers.
 
 from __future__ import annotations
 
+from primus.backends.megatron.patches._gfx1250_notice import warn_if_not_gfx1250
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
@@ -88,6 +89,7 @@ def make_compute_language_model_loss(orig):
     tags=["loss", "triton"],
 )
 def patch_fused_lm_cross_entropy(ctx: PatchContext) -> None:
+    warn_if_not_gfx1250(_PATCH_KEY, _ARG)
     from megatron.core.models.common.language_module import language_module
 
     cls = language_module.LanguageModule

@@ -45,8 +45,10 @@ and the global NaN check would never run. Setting both aborts the run
 
 from __future__ import annotations
 
+import importlib
 import os
 
+from primus.backends.megatron.patches._gfx1250_notice import warn_if_not_gfx1250
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
@@ -89,6 +91,7 @@ def _hooks(key: str) -> None:
     tags=["optimizer", "triton"],
 )
 def patch_fused_adamw_clip(ctx: PatchContext) -> None:
+    warn_if_not_gfx1250(_FUSED_KEY, _FUSED_ARG)
     from primus.backends.megatron.core.optimizer import fused_adamw_clip as F
 
     _check_exclusive(_FUSED_KEY, _FUSED_ARG)
@@ -107,6 +110,8 @@ def patch_fused_adamw_clip(ctx: PatchContext) -> None:
             f"[Patch:{_FUSED_KEY}] {', '.join(uncovered)}: the fused step does not cover this setup; not enabled"
         )
         return
+    # Import the Triton kernel now: a missing or broken Triton fails at startup instead of at the first step.
+    importlib.import_module("primus.backends.megatron.core.optimizer.triton_fused_adamw")
     _hooks(_FUSED_KEY)
     F.set_fused(True)
     log_rank_0(f"[Patch:{_FUSED_KEY}] fused clip + AdamW + bf16 write enabled")
@@ -121,6 +126,7 @@ def patch_fused_adamw_clip(ctx: PatchContext) -> None:
     tags=["optimizer", "ddp", "sync"],
 )
 def patch_global_grad_nan_check(ctx: PatchContext) -> None:
+    warn_if_not_gfx1250(_NAN_KEY, _NAN_ARG)
     from primus.backends.megatron.core.optimizer import fused_adamw_clip as F
 
     _check_exclusive(_NAN_KEY, _NAN_ARG)
