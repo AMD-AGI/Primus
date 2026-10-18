@@ -17,8 +17,10 @@ Two goals shape this tool:
   the only case where a path gets typed.
 - **Every number is attributable.** Each log carries the image digest and ID,
   submodule pins, GPU model, host and container ROCm, framework versions,
-  host settings, world size and the full perf-relevant environment, and those
-  land in the CSV as columns.
+  the platform it ran on (server, BIOS, CPU, memory, GPU settings, host GPU
+  driver, NICs, OS) with a one-line system description, host settings, world
+  size and the full perf-relevant environment, and those land in the CSV as
+  columns.
 - **Every run ends with a verdict.** Runs are stopped when they hang or run
   too long, nothing starts on busy GPUs, and each log and CSV row says why a
   run ended.
@@ -512,7 +514,7 @@ Into `$RESULT_DIR`:
 | `batch_submodules_<stamp>.txt` | `git submodule status` — which vendored code ran. |
 | `batch_gpu_<stamp>.txt` | `rocm-smi` (or `amd-smi`) clocks, power caps, topology. |
 | `batch_stack_<stamp>.txt` | Image digest and ID, ROCm and HIP versions, library versions from inside the container. |
-| `batch_host_<stamp>.txt` | Every node's CPU governor, NUMA balancing, transparent huge pages, IOMMU, amdgpu driver, CPU, memory and network interfaces. |
+| `batch_host_<stamp>.txt` | Every node's platform as `key: value` lines (see "Platform" below), then the raw data behind them: `lscpu`, `numactl -H`, idle states, DIMMs, each GPU's sysfs values, RDMA ports, amdgpu module parameters, driver packages and repositories, Docker and network interfaces. Multi-node adds the settings that differ between nodes. |
 | `batch_manifest_<stamp>/` | The image's `/workspace/.manifest` (build recipe, dpkg and pip lists), when it has one. |
 | `run_batch_<stamp>.sh` | The driver as it was run, copied *before* the first run. |
 | `results.csv`, `results.json` | Every log in the directory parsed by `extract_results.py`; refreshed at the end of each batch. |
@@ -566,11 +568,31 @@ The per-run banner carries the fields that explain a number:
 # Container HIP    : 7.16.26385-0000000
 # Torch version    : 2.14.0+rocm10.1.0
 # World size       : 8  (NNODES=1 x GPUS_PER_NODE=8)
+# System           : Dual AMD EPYC 9575F 64-Core Processor-based Supermicro AS -4126GS-NMR-LCC server with 8x AMD Instinct MI355X (288GB HBM3E 1400W) GPUs, 1 NUMA node per socket, System BIOS 1.7, Ubuntu 22.04.5 LTS, Host GPU driver amdgpu 30.10.1 (ROCm 7.0.1)
+# Server           : Supermicro AS -4126GS-NMR-LCC
+# BIOS             : 1.7 (09/12/2025, American Megatrends International, LLC.)
+# OS               : Ubuntu 22.04.5 LTS
+# Kernel           : 6.8.0-65-generic
+# Kernel cmdline   : ro panic=0 nowatchdog ... amd_iommu=on iommu=pt amdgpu.noretry=1 ...
+# CPU              : AMD EPYC 9575F 64-Core Processor
+# CPU topology     : 2 sockets x 64 cores x 2 threads (256 CPUs), 2 NUMA nodes
+# CPU frequency    : acpi-cpufreq, boost on, max 3300 MHz
 # CPU governor     : schedutil x256
+# CPU idle states  : acpi_idle (menu): POLL C1 C2
 # NUMA balancing   : 0
+# Host memory      : 3023 GiB usable; installed 3072 GiB Registered-DDR5, 24 channels; DIMMs 128 GiB Samsung M321RAJA0MB2-CCPWF, 6400 MT/s, configured 6000 MT/s
 # Transparent HP   : always
-# IOMMU            : amd_iommu=on iommu=pt
+# IOMMU            : amd_iommu=on iommu=pt (default domain: identity)
+# GPU VRAM         : 288 GiB
+# GPU power cap    : 1400 W
+# GPU partition    : SPX/NPS1
+# GPU clocks       : perf level auto, max sclk 2400 MHz
+# GPU VBIOS        : 113-M355-01-1K1-040C
+# GPU PCIe         : 32.0 GT/s PCIe x16
+# Host GPU driver  : amdgpu 30.10.1 (ROCm 7.0.1)
+# Driver package   : amdgpu-dkms 1:6.14.14.30100100-2212064.22.04
 # amdgpu driver    : 6.14.14
+# RDMA NICs        : 8x ionic 400 Gb/sec (fw 1.117.5-a-147), 2x bnxt_en 200 Gb/sec (fw 233.0.207.0)
 # Perf environment (host shell):
 #   HSA_NO_SCRATCH_RECLAIM=1
 #   NVTE_CK_IS_V3_ATOMIC_FP32=1
@@ -601,6 +623,39 @@ A few notes on why these specific fields:
   pages, IOMMU mode, amdgpu driver) explain why one node is slower than
   another with the same image and code. The banner carries the node running
   the batch; `batch_host_<stamp>.txt` has every node.
+- The **platform** is what a published number is quoted with. `System` is
+  that sentence, written the way performance footnotes give it (CPUs and
+  server, GPUs with their memory and power cap, NUMA nodes per socket, BIOS,
+  OS, host GPU driver); the batch summary and the Excel Overview carry it
+  too. The lines below it are the details that can move a number on their
+  own: DIMM speed (the example's DIMMs are rated 6400 MT/s but run at 6000),
+  boost and idle states, GPU power cap, compute and memory partition, clock
+  limits, VBIOS and PCIe link, and the scale-out NICs and their firmware.
+  Everything is read without root:
+  - server, board and BIOS from DMI (`/sys/class/dmi/id`), placeholders
+    such as "To Be Filled By O.E.M." left out;
+  - CPU topology from `lscpu`, frequency driver, boost, EPP and idle states
+    from `/sys/devices/system/cpu`;
+  - installed memory and populated channels from EDAC, DIMM model and
+    speeds from udev's copy of the DMI tables (which can miss some DIMMs,
+    so they are named but not counted);
+  - GPU memory, power cap, partition, clocks, VBIOS and PCIe link from the
+    amdgpu driver's sysfs files, which every Slurm job step can read (amd-smi
+    only sees the GPUs a step was given). The GPU's marketing name and
+    memory type come from amd-smi on the node running the batch;
+  - `Host GPU driver` from the `amdgpu-dkms` package (deb or rpm), whose
+    version ends in the driver release (`...30100100` is amdgpu 30.10.1),
+    and the ROCm release of the host's repo.radeon.com repository, which
+    amdgpu-install points at the ROCm release that ships that driver. Older
+    packages numbered the driver by ROCm release and show as `ROCm 6.4.1`.
+    Without the package, it is the loaded module's version;
+  - RDMA NICs from `/sys/class/infiniband`, active ports only.
+
+  A value the GPUs or CPUs disagree on is a tally, e.g. `1400 W x7, 1000 W x1`.
+  For multi-node, `Host check` says whether every node reported the same
+  platform; when one does not, the batch summary warns with the keys that
+  differ, and the end of `batch_host_<stamp>.txt` lists each of their values
+  with the number of nodes that had it (the node sections above show which).
 - The image's **build manifest** (`/workspace/.manifest`, including
   `docker-build-recipe.txt`) is copied once per batch, so the result directory
   says how its image was built.
@@ -652,6 +707,11 @@ files keep working:
 | `cpu_governor`, `numa_balancing`, `transparent_hugepages`, `iommu`, `amdgpu_version` | Host settings of the node that ran the batch. |
 | `rec_per_s`, `rec_per_s_cv` | DLRM recommendations/s and its std/mean, as DLRMBenchmark reports them (iterations/s × its per-GPU `BATCH_SIZE`). |
 | `step_log` | For `diffusion` / `dlrm` rows, the diffusion_bench step log, relative to the result directory; empty for a step that never ran. |
+| `system_description` | The one-line platform description (see "Provenance"). |
+| `host_check` | Multi-node: whether every node reported the same platform. |
+| `server`, `bios`, `os`, `kernel`, `kernel_cmdline` | Server vendor and model, BIOS version (date, vendor), OS, kernel and its command line. |
+| `cpu_model`, `cpu_topology`, `cpu_frequency`, `cpu_idle`, `host_memory` | CPU model; sockets, cores, threads and NUMA nodes; frequency driver, boost, max clock and EPP; idle states; usable and installed memory and DIMMs. |
+| `gpu_vram`, `gpu_power_cap`, `gpu_partition`, `gpu_clocks`, `gpu_vbios`, `gpu_driver`, `rdma_nics` | Per-GPU memory, power cap, compute/memory partition, perf level and max clock, VBIOS, the host GPU driver release, and the active RDMA ports. |
 
 A `diffusion_dlrm` log becomes one row per diffusion model and DLRM
 precision, with backend `diffusion` or `dlrm`. Those numbers come from
@@ -708,7 +768,7 @@ than `results.csv`:
 
 | Sheet | Contents |
 |---|---|
-| Overview | One column per batch: outcome (with the errors of a refused batch), timing, image (tag, digest, ID), container ROCm/HIP and Torch, Primus commit and submodule pins, GPU model, nodes and GPUs, host settings, run settings (reps, `TRAIN_STEPS`, limits, the `diffusion_dlrm` config), and run counts (planned, started, failed, not started). With `--baseline`, each baseline's image, commit and batches. |
+| Overview | One column per batch: outcome (with the errors of a refused batch), timing, image (tag, digest, ID), container ROCm/HIP and Torch, Primus commit and submodule pins, the platform (system description, GPU model, nodes and GPUs, server, BIOS, CPU, memory, GPU settings, host GPU driver, NICs, OS), host settings, run settings (reps, `TRAIN_STEPS`, limits, the `diffusion_dlrm` config), and run counts (planned, started, failed, not started). With `--baseline`, each baseline's image, commit and batches. |
 | Performance | One row per unique backend, model, precision, config hash, sequence length, MBS, GBS, nodes, GPUs and image ID, with runs ok / total and the means over the successful runs of TFLOP/s per GPU and throughput (per GPU, and for all GPUs), with its unit: tokens/s, samples/s, frames/s or recommendations/s. Also the step counts run, run-to-run CV, GPU memory, minutes per run, and notes on the runs that did not count. |
 | Runs | Every run, with its status, failure reason and detail, image, result directory and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
 | Chart | TFLOP/s per GPU for each config (and the baseline). |

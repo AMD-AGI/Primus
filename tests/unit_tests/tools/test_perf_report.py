@@ -282,6 +282,35 @@ def test_interrupted_and_multinode_summaries(tmp_path):
     assert rows["Repetitions per config"] == "2"
 
 
+def test_overview_shows_the_platform(tmp_path):
+    path = tmp_path / "batch_summary_20261015-002731.txt"
+    path.write_text(
+        SINGLE_NODE_SUMMARY.replace(
+            "# Reps/config  : 3\n", "# System       : Dual AMD EPYC 9575F-based server\n# Reps/config  : 3\n"
+        )
+    )
+    info = report.parse_batch_summary(str(path))
+    assert info["config"]["System"] == "Dual AMD EPYC 9575F-based server"
+
+    # A refused batch has no runs: the summary's description is used.
+    no_runs = report.runs_frame([run()]).iloc[0:0]
+    rows = {label: value for section, label, value in report.overview_rows("s", info, no_runs)}
+    assert rows["System"] == "Dual AMD EPYC 9575F-based server"
+
+    # Otherwise the runs' own; two batches on different BIOSes show both.
+    runs = report.runs_frame(
+        [
+            run(system_description="Dual EPYC, BIOS 1.7", bios="1.7", gpu_power_cap="1400 W"),
+            run(repeat=2, system_description="Dual EPYC, BIOS 1.8", bios="1.8", gpu_power_cap="1400 W"),
+        ]
+    )
+    rows = {(section, label): value for section, label, value in report.overview_rows("s", info, runs)}
+    assert rows[("Hardware", "System")] == "Dual EPYC, BIOS 1.7; Dual EPYC, BIOS 1.8"
+    assert rows[("Hardware", "BIOS")] == "1.7; 1.8"
+    assert rows[("Hardware", "GPU power cap")] == "1400 W"
+    assert "System" in [c["header"] for c in report.RUN_COLUMNS]
+
+
 def test_refused_batch_shows_its_errors_and_lines_up_with_others(tmp_path):
     refused = tmp_path / "refused.txt"
     refused.write_text(

@@ -115,7 +115,7 @@ import sys
 from datetime import datetime
 
 # Bumped whenever a column is added or its meaning changes.
-PARSER_VERSION = 4
+PARSER_VERSION = 5
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 BANNER_KV_RE = re.compile(r"^#\s*([^:]+?)\s*:\s*(.*?)\s*$")
@@ -641,6 +641,33 @@ def _banner_value(banner: dict, key: str) -> str | None:
     return value
 
 
+# The platform of the node that ran the batch (tools/perf/lib/common.sh):
+# column -> banner key. "system_description" is the one-sentence summary that
+# results are quoted with; "host_check" says whether every node of a
+# multi-node batch reported the same platform.
+PLATFORM_BANNER_KEYS = {
+    "system_description": "System",
+    "host_check": "Host check",
+    "server": "Server",
+    "bios": "BIOS",
+    "os": "OS",
+    "kernel": "Kernel",
+    "kernel_cmdline": "Kernel cmdline",
+    "cpu_model": "CPU",
+    "cpu_topology": "CPU topology",
+    "cpu_frequency": "CPU frequency",
+    "cpu_idle": "CPU idle states",
+    "host_memory": "Host memory",
+    "gpu_vram": "GPU VRAM",
+    "gpu_power_cap": "GPU power cap",
+    "gpu_partition": "GPU partition",
+    "gpu_clocks": "GPU clocks",
+    "gpu_vbios": "GPU VBIOS",
+    "gpu_driver": "Host GPU driver",
+    "rdma_nics": "RDMA NICs",
+}
+
+
 def _populate_from_new_banner(result: dict, banner: dict, config_text: str) -> None:
     """Fill ``result`` from a parsed new-format banner + YAML dump fallback."""
     result["backend"] = banner.get("Framework") or None
@@ -680,6 +707,8 @@ def _populate_from_new_banner(result: dict, banner: dict, config_text: str) -> N
     result["transparent_hugepages"] = _banner_value(banner, "Transparent HP")
     result["iommu"] = _banner_value(banner, "IOMMU")
     result["amdgpu_version"] = _banner_value(banner, "amdgpu driver")
+    for field, key in PLATFORM_BANNER_KEYS.items():
+        result[field] = _banner_value(banner, key)
 
     # Cluster shape. "World size" is emitted as "8  (NNODES=1 x GPUS_PER_NODE=8)";
     # the Cluster line is the older format and is parsed as a fallback so
@@ -1209,6 +1238,7 @@ def parse_log_file(filepath: str) -> dict | None:
         "rec_per_s": None,
         "rec_per_s_cv": None,
         "step_log": None,
+        **{field: None for field in PLATFORM_BANNER_KEYS},
     }
 
     config_text = parse_config_section(lines)
@@ -1699,6 +1729,8 @@ CSV_FIELDS = [
     "rec_per_s",
     "rec_per_s_cv",
     "step_log",
+    # Added in parser version 5: the platform.
+    *PLATFORM_BANNER_KEYS,
 ]
 
 

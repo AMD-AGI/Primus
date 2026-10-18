@@ -18,8 +18,9 @@ extract_results.py, without writing anything) and its
 ``batch_summary_<stamp>.txt`` files, and writes ``report.xlsx`` (into the
 result directory when there is one) with these sheets:
 
-* Overview     per batch: outcome, image, code, hardware, host settings, run
-               settings and run counts.
+* Overview     per batch: outcome, image, code, the platform (a one-line
+               system description, then server, BIOS, CPU, memory, GPU and
+               driver details), host settings, run settings and run counts.
 * Performance  one row per config (backend, model, precision, config hash,
                sequence length, MBS, GBS, nodes, GPUs, image), with the
                averages over its successful runs of TFLOP/s per GPU and
@@ -346,6 +347,25 @@ RUN_FIELDS = (
     "rec_per_s",
     "step_log",
     "result_dir",
+    "system_description",
+    "host_check",
+    "server",
+    "bios",
+    "os",
+    "kernel",
+    "kernel_cmdline",
+    "cpu_model",
+    "cpu_topology",
+    "cpu_frequency",
+    "cpu_idle",
+    "host_memory",
+    "gpu_vram",
+    "gpu_power_cap",
+    "gpu_partition",
+    "gpu_clocks",
+    "gpu_vbios",
+    "gpu_driver",
+    "rdma_nics",
 )
 
 # One Performance row per distinct combination; the image is its ID (its tag
@@ -644,18 +664,35 @@ def overview_rows(stamp: str, batch: dict, runs, keep_empty: bool = False) -> li
         ("Image and code", "Primus commit", from_runs("primus_commit") or git),
         ("Image and code", "Git branch", system.get("Git branch")),
         ("Image and code", "Submodule pins", from_runs("submodule_pins")),
+        ("Hardware", "System", from_runs("system_description") or config.get("System")),
+        ("Hardware", "Host check", from_runs("host_check") or config.get("Host check")),
         ("Hardware", "GPU model", from_runs("gpu_model") or system.get("GPU model")),
         ("Hardware", "Nodes", from_runs("nnodes")),
         ("Hardware", "GPUs per node", from_runs("gpus_per_node")),
         ("Hardware", "World size (GPUs)", from_runs("world_size")),
-        ("Hardware", "ROCm (host)", from_runs("rocm_version") or system.get("ROCm (host)")),
-        ("Hardware", "amdgpu driver", from_runs("amdgpu_version")),
-        ("Hardware", "Kernel", system.get("Kernel")),
-        ("Hardware", "OS", system.get("OS")),
+        ("Hardware", "Server", from_runs("server")),
+        ("Hardware", "BIOS", from_runs("bios")),
+        ("Hardware", "CPU", from_runs("cpu_model")),
+        ("Hardware", "CPU topology", from_runs("cpu_topology")),
+        ("Hardware", "CPU frequency", from_runs("cpu_frequency")),
         ("Hardware", "CPU governor", from_runs("cpu_governor")),
+        ("Hardware", "CPU idle states", from_runs("cpu_idle")),
+        ("Hardware", "Host memory", from_runs("host_memory")),
         ("Hardware", "NUMA balancing", from_runs("numa_balancing")),
         ("Hardware", "Transparent huge pages", from_runs("transparent_hugepages")),
         ("Hardware", "IOMMU", from_runs("iommu")),
+        ("Hardware", "GPU VRAM", from_runs("gpu_vram")),
+        ("Hardware", "GPU power cap", from_runs("gpu_power_cap")),
+        ("Hardware", "GPU partition", from_runs("gpu_partition")),
+        ("Hardware", "GPU clocks", from_runs("gpu_clocks")),
+        ("Hardware", "GPU VBIOS", from_runs("gpu_vbios")),
+        ("Hardware", "Host GPU driver", from_runs("gpu_driver")),
+        ("Hardware", "amdgpu driver", from_runs("amdgpu_version")),
+        ("Hardware", "ROCm (host)", from_runs("rocm_version") or system.get("ROCm (host)")),
+        ("Hardware", "RDMA NICs", from_runs("rdma_nics")),
+        ("Hardware", "OS", system.get("OS") or from_runs("os")),
+        ("Hardware", "Kernel", system.get("Kernel") or from_runs("kernel")),
+        ("Hardware", "Kernel cmdline", from_runs("kernel_cmdline")),
         ("Hardware", "GPU check", config.get("GPU check") or from_runs("gpu_check")),
         ("Hardware", "NCCL interface", config.get("NCCL iface")),
         (
@@ -1074,6 +1111,7 @@ RUN_COLUMNS = [
     {"header": "Exit code", "width": 6, "key": "exit_code", "fmt": "int"},
     {"header": "Image", "width": 34, "key": "image_name"},
     {"header": "Host", "width": 16, "key": "host"},
+    {"header": "System", "width": 40, "key": "system_description"},
     {"header": "Started", "width": 22, "key": "timestamp"},
     {"header": "Result dir", "width": 24, "key": "result_dir_name"},
     {"header": "Log", "width": 40, "key": "_log", "link": True},

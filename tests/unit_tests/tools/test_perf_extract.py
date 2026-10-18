@@ -671,6 +671,54 @@ def test_image_and_host_provenance_reach_the_result(tmp_path):
     assert result["amdgpu_version"] == "6.14.14"
 
 
+def test_platform_reaches_the_result(tmp_path):
+    system = (
+        "Dual AMD EPYC 9575F 64-Core Processor-based Supermicro AS -4126GS-NMR-LCC server with "
+        "8x AMD Instinct MI355X (288GB HBM3E 1400W) GPUs, 1 NUMA node per socket, System BIOS 1.7, "
+        "Ubuntu 22.04.5 LTS, Host GPU driver amdgpu 30.10.1 (ROCm 7.0.1)"
+    )
+    result = extract.parse_log_file(
+        str(
+            write_log(
+                tmp_path,
+                MEGATRON_AVG,
+                banner_extra=(
+                    f"# System           : {system}\n"
+                    "# Host check       : same on all 2 nodes\n"
+                    "# Server           : Supermicro AS -4126GS-NMR-LCC\n"
+                    "# BIOS             : 1.7 (09/12/2025, American Megatrends International, LLC.)\n"
+                    "# Kernel cmdline   : ro amd_iommu=on iommu=pt amdgpu.noretry=1\n"
+                    "# CPU topology     : 2 sockets x 64 cores x 2 threads (256 CPUs), 2 NUMA nodes\n"
+                    "# CPU idle states  : acpi_idle (menu): POLL C1 C2\n"
+                    "# GPU power cap    : 1400 W x7, 1000 W x1\n"
+                    "# GPU partition    : SPX/NPS1\n"
+                    "# Host GPU driver  : amdgpu 30.10.1 (ROCm 7.0.1)\n"
+                    "# RDMA NICs        : none\n"
+                ),
+            )
+        )
+    )
+    assert result["system_description"] == system
+    assert result["host_check"] == "same on all 2 nodes"
+    assert result["server"] == "Supermicro AS -4126GS-NMR-LCC"
+    assert result["bios"].startswith("1.7 (09/12/2025")
+    # Only the first colon separates the key from the value.
+    assert result["kernel_cmdline"] == "ro amd_iommu=on iommu=pt amdgpu.noretry=1"
+    assert result["cpu_topology"].startswith("2 sockets x 64 cores")
+    assert result["cpu_idle"] == "acpi_idle (menu): POLL C1 C2"
+    assert result["gpu_power_cap"] == "1400 W x7, 1000 W x1"
+    assert result["gpu_partition"] == "SPX/NPS1"
+    assert result["gpu_driver"] == "amdgpu 30.10.1 (ROCm 7.0.1)"
+    # "none" and "unknown" are left empty, like every other provenance field.
+    assert result["rdma_nics"] is None
+    assert result["gpu_vram"] is None
+
+    csv_path, _ = extract.write_outputs([result], str(tmp_path))
+    header = Path(csv_path).read_text().splitlines()[0].split(",")
+    # Appended after the parser version 4 columns.
+    assert header[header.index("step_log") + 1 :] == list(extract.PLATFORM_BANNER_KEYS)
+
+
 def test_host_rocm_is_read_under_its_new_and_old_names(tmp_path):
     old = extract.parse_log_file(str(write_log(tmp_path, MEGATRON_AVG, name="old.log")))
     assert old["rocm_version"] == "7.2.1"
@@ -682,7 +730,15 @@ def test_host_rocm_is_read_under_its_new_and_old_names(tmp_path):
 
 def test_older_banner_leaves_new_fields_empty(tmp_path):
     result = extract.parse_log_file(str(write_log(tmp_path, MEGATRON_AVG)))
-    for field in ("image_id", "container_rocm_version", "cpu_governor", "gpu_check", "batch_stamp"):
+    for field in (
+        "image_id",
+        "container_rocm_version",
+        "cpu_governor",
+        "gpu_check",
+        "batch_stamp",
+        "system_description",
+        "gpu_driver",
+    ):
         assert result[field] is None, field
 
 
@@ -1167,7 +1223,9 @@ def test_diffusion_dlrm_rows_reach_the_outputs(tmp_path, monkeypatch):
     assert sorted(r["backend"] for r in rows) == ["diffusion", "dlrm", "megatron"]
     with open(tmp_path / "results.csv", newline="") as f:
         header = next(csv.reader(f))
-    assert header[-3:] == ["rec_per_s", "rec_per_s_cv", "step_log"]
+    # The parser version 4 columns follow version 3's last one.
+    v4 = header.index("amdgpu_version") + 1
+    assert header[v4 : v4 + 3] == ["rec_per_s", "rec_per_s_cv", "step_log"]
     dlrm = next(r for r in rows if r["backend"] == "dlrm")
     assert dlrm["rec_per_s"] == "552606.4500"
     assert dlrm["rec_per_s_cv"] == "0.01"
