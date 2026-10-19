@@ -40,7 +40,7 @@ def get_model_provider(model_type="gpt"):
 
     Args:
         model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4',
-            'kimi_k3' or 'inkling'. Defaults to 'gpt'.
+            'kimi_k3', 'glm5_next', 'zaya1' or 'inkling'. Defaults to 'gpt'.
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
@@ -82,6 +82,17 @@ def get_model_provider(model_type="gpt"):
         return partial(
             glm5_next_module.model_provider,
             glm5_next_module.glm5_next_builder,
+        )
+
+    # Primus-owned: ZAYA1 (data parallel only)
+    if model_type == "zaya1":
+        zaya1_module = importlib.import_module("primus.backends.megatron.core.models.zaya1.zaya1_builders")
+        log_rank_0(
+            "[Primus][MegatronCompat] Loaded ZAYA1 model_provider + builder " f"from {zaya1_module.__name__}"
+        )
+        return partial(
+            zaya1_module.model_provider,
+            zaya1_module.zaya1_builder,
         )
 
     # Primus-owned: DeepSeek-V4 (Phase 2 stub; full V4 wiring lands in Phase 3+)
