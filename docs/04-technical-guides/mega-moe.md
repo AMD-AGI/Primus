@@ -109,7 +109,8 @@ key alone is not enough, because the precision-aware optimizer updates the weigh
 bumping `_version`.
 
 Not supported on the fp8 path: CUDA-graph capture, which the op itself rejects — the replayed
-forward runs while the op still holds a live symmetric buffer and a cross-rank spin-wait handshake.
+forward runs while the op still holds a live symmetric buffer and a cross-rank spin-wait handshake,
+and every forward reads its dispatched row counts back to the host (below).
 
 The following model settings are **required** — MegaMoE asserts on anything else:
 
@@ -122,6 +123,21 @@ add_bias_linear: false                  # no bias in linear layers
 Unsupported (each raises an error): sequence-level / global aux loss, z-loss, sinkhorn, and input
 jitter (only the standard `aux_loss` is supported); aux-loss-free expert bias
 (`enable_expert_bias=True` raises `NotImplementedError`).
+
+#### MXFP8 memory and routing imbalance
+
+Each mxfp8 layer's forward reads the number of rows dispatched to every rank back to the host once,
+right after its routing prologue (one small device-to-host copy, overlapped with the token
+quantization), and sizes everything it allocates — the fc1 output, the activations saved for the
+backward, the routing maps — to the rows this rank actually received. The only memory sized ahead
+of time is one symmetric buffer that all MegaMoE layers share: the cross-rank receive pool and the
+combine buffer.
+
+The receive pool holds the most rows any rank can receive, capped where a per-row tensor would
+reach 2 GiB (the kernels index with int32). For Qwen3-30B-A3B at EP8 with `seq_length=4096` and
+`micro_batch_size=8` that is 698,880 rows — 2.67x the 262,144 a rank receives under even routing —
+in a 2.07 GiB buffer. A layer whose routing sends one rank more rows than that raises a
+`RuntimeError` on every rank; it does not drop tokens or hang.
 
 ### Router force load balancing (`moe_router_force_load_balancing_type`)
 
@@ -185,9 +201,9 @@ export GPU_ARCHS=gfx950
 
 Same geometry as Example 1, plus TE full-scope CUDA graph capture
 (`--external_cuda_graph True` maps to `cuda_graph_impl="transformer_engine"`; scope `full` is
-normalized to `[]` by Megatron, i.e. capture the whole layer). MegaMoE is fully sync-free — no
-device-to-host sync or CPU-side wait in the expert path — so it captures cleanly and is
-`torch.compile`-friendly.
+normalized to `[]` by Megatron, i.e. capture the whole layer). With bf16 experts MegaMoE is fully
+sync-free — no device-to-host sync or CPU-side wait in the expert path — so it captures cleanly and
+is `torch.compile`-friendly. The mxfp8 experts are not; see [Expert precision](#expert-precision).
 
 ```bash
 #!/bin/bash
