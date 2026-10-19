@@ -1,10 +1,11 @@
 # Inkling on Megatron (Primus): P0–P2 status
 
-Status as of Wednesday Oct 14, 2026, on branch `feat/inkling-megatron` (merged
-with `main` at `e5b9fe59`). Phases follow the plan (P0 scaffolding, P1
-components on one GPU, P2 training loop and recipe). The numerical reference
-is the official transformers `models/inkling` code; Miles is the design
-reference. Usage is in [README.md](README.md).
+Status as of Monday Oct 19, 2026, on branch `feat/inkling-megatron` (merged
+with `main` at `8e7a2406`; draft PR
+[#1256](https://github.com/AMD-AGI/Primus/pull/1256)). Phases follow the plan
+(P0 scaffolding, P1 components on one GPU, P2 training loop and recipe). The
+numerical reference is the official transformers `models/inkling` code; Miles
+is the design reference. Usage is in [README.md](README.md).
 
 **Summary.** P0 and P1 are complete: every Inkling layer matches the
 reference, and real checkpoint layers 0–5 import and match. P2 is partly
@@ -25,29 +26,32 @@ fully built), **Missing** (not started).
 | `inkling` model type, config class with every Inkling setting | Done | `InklingTransformerConfig`; `model_type: inkling` in `import_utils.get_model_provider` and in `megatron_pretrain_trainer.py` (reuses `pretrain_gpt` forward step and datasets) |
 | Model presets | Done | `inkling_small_tiny` (2 layers), `inkling_small_12L`, `inkling_small`; added later: `inkling_large` (66 layers) and `inkling_large_6L` |
 | Comparison harness against the official model | Done | `tests/.../inkling/inkling_reference.py`, `test_inkling_reference.py`; pinned transformers 5.19.0.dev0 at `263c5eb9` |
-| Hugging Face → Megatron weight importer | Done | `tools/checkpoint_conversion/convert_inkling_hf_megatron.py`: router split into routed + shared gates, fused q/k/v (`linear_qkv`) with r kept separate (`linear_rel`), ShortConv, grouped-GEMM experts, vocab trim/pad; MTP, vision and audio skipped |
+| Hugging Face → Megatron weight importer | Done | `tools/checkpoint_conversion/convert_inkling_hf_megatron.py`: router split into routed + shared gates, fused q/k/v (`linear_qkv`) with r kept separate (`linear_rel`), ShortConv, grouped-GEMM experts; embedding and LM head trimmed or zero-padded to the vocabulary training builds (200,058 rounded up to `make_vocab_size_divisible_by` × TP, 200,064 by default; the release has 201,024 rows); MTP, vision and audio skipped |
 | Done when: full model builds without memory; every parameter maps 1:1 onto the release | Done | meta-device builds in `test_inkling_model.py`; `test_full_checkpoint_maps_one_to_one` and `test_release_schema_matches_checkpoint_headers` against the real Inkling-Small headers |
 
 ## P1 — Model components on one GPU
 
 | Item | Status | Evidence / notes |
 | --- | --- | --- |
-| Attention with the learned relative-position bias | Done | `attention.py`, two backends: `eager` (dense bias, the reference) and `flex` (FlexAttention `score_mod` + cached block mask, trainable `rel_proj`) |
+| Attention with the learned relative-position bias | Done | `attention.py`, two backends: `eager` (dense bias, the reference) and `flex` (FlexAttention `score_mod` + cached block mask, trainable `rel_proj`). A query with no allowed key gets an all-zero output in both |
 | Sliding (512) and global layers; log scaling on global layers | Done | Per-layer head counts and masks via `attention_config(layer)`; log scaling covered by the tiny model (floor 64 tokens) |
 | ShortConv (4 per layer, fp32, plain PyTorch) | Done | `short_conv.py`; on K, V, attention output and MLP output |
 | MoE router with the shared-expert sink, shared experts, dense layers | Done | `router.py`, `moe.py`, `mlp.py`; dense → MoE via `moe_layer_freq` |
 | Embedding RMSNorm, muP-scaled untied head, init matching the reference | Done | `inkling_model.py`; `test_init_matches_reference_statistics` |
 | fp32 SwiGLU / combine / `global_scale` (Miles numerics) | Done, opt-in | `inkling_fp32_activations` (default off = transformers numerics); needs TE grouped experts, not Primus-Turbo |
 | Done when: tiny fp32 outputs and every gradient match to 1e-5 | Done | `test_tiny_fp32_forward_backward_matches_reference`, both backends, flag on and off |
-| Done when: real checkpoint layers give the reference outputs | Done | Extended from 2 to 6 layers (0–5: sliding 0–4, global 5, dense 0–1, MoE 2–5); max error 1.49e-6 with eager and flex |
+| Done when: real checkpoint layers give the reference outputs | Done | Extended from 2 to 6 layers (0–5: sliding 0–4, global 5, dense 0–1, MoE 2–5); max logits error 1.49e-6 (eager) and 1.53e-6 (flex), top token identical everywhere (Oct 19) |
 | bf16 numerics | Done | Megatron bf16 stays as close to fp32 as transformers' own bf16 (median token error 6.2–7.0e-3 vs 7.0–8.0e-3) |
 
-Test totals: 57 tests. On the merged branch (Oct 14, `rocm/primus:v26.8`, with
-the reference installed): 56 passed, 1 skipped. The skip is the real-layer
-test, because layers 0–5 were not fetched into that container; it last passed
-in the full run after r was split out of `linear_qkv` (52 passed, Oct 8,
-`primus_v26.8rc_rocm10.1`). In that run the tiny fp32 model's worst errors
-were 4.6e-7 (eager logits), 5.2e-7 (flex logits) and 1.6e-6 (gradients).
+Test totals: 64 tests, all passing on the merged branch (Oct 19, job 225454,
+`rocm/primus:v26.8`). Three things must be in place, or those tests skip:
+- the pinned transformers reference on `PYTHONPATH`, for 10 tests;
+- Inkling-Small layers 0–5 fetched with `fetch_release_layers.py` (56.6 GB),
+  for the real-layer test;
+- Emerging-Optimizers at `93d9eb3a`, for the 5 Muon tests.
+
+After r was split out of `linear_qkv`, the tiny fp32 model's worst errors were
+4.6e-7 (eager logits), 5.2e-7 (flex logits) and 1.6e-6 (gradients).
 
 Known P1 performance gap, not a correctness issue: flex global layers are
 about 10× slower than plain causal attention (8k tokens: 61 ms vs 5.6 ms per
@@ -62,7 +66,7 @@ measured 2.4× faster at 8k but is not implemented. See O1.
 | Launch fix: `position_embedding_type` | Done | Megatron rejects `none`; `inkling_base.yaml` now uses `rope` at the args level (the model hard-codes none) |
 | Masking: fixed causal + 512 window, packed rows without document boundaries | Done | Megatron default (`reset_attention_mask: false`); packed sequences raise `NotImplementedError` and `reset_attention_mask: true` is rejected by the builder, because the ShortConvs ignore the attention mask and would mix tokens across documents (O8). Padded rows are unsupported for the same reason |
 | Data loading and tokenizer | Partial | Mock data works via `NullTokenizer` with `vocab_size: 200057` (+ eod = the 200,058 real tokens). The real HF tokenizer leaves `eod` as None (no eos/bos/pad token), so real data and mock data with the HF tokenizer would break. Need an explicit eod (`<\|endoftext\|>` = 199999, or 200006 = config `eos_token_id`). A real tokenized dataset has not been run |
-| Checkpoint save and restore | Missing | No `sharded_state_dict` for the fused q/k/v/r, the TP-split K/V ShortConv weights, `shared_weight`, `global_scale`. Save → restore → same next-step loss is not tested. The converter writes only a single-rank `torch` checkpoint |
+| Checkpoint save and restore | Missing | No `sharded_state_dict` for `linear_qkv` / `linear_rel`, the TP-split K/V ShortConv weights, `shared_weight`, `global_scale`. Save → restore → same next-step loss is not tested. The converter writes only a single-rank `torch` checkpoint |
 | Activation recompute | Missing (untested) | Megatron's recompute hooks are inherited (MoE and shared-expert recompute in `moe.py`); full or selective recompute with Inkling layers has never been run. Runs so far used `recompute_granularity: null` |
 | FLOPs reporting | Missing | No Inkling FLOPs patch; Megatron's GPT formula is used. Logged 188 TFLOP/s/GPU vs about 210 by hand (Small 12L); 259 vs about 285 (large 6L) |
 | Comparison with the official implementation (200-step loss curve) | Missing | Only proxies so far: step-1 loss = ln(200058); flex vs eager curves within about 0.15% (a few × run-to-run noise, consistent with bf16 rounding in eager); fp32 parity tests |
@@ -103,7 +107,8 @@ Muon runs set `--use_distributed_optimizer false` (plain `muon` only) and
 
 ## Outside P0–P2, for reference
 
-- Parallel layouts on 8 GPUs (Oct 14):
+- Parallel layouts on 8 GPUs (Oct 14, rerun Oct 19 after the review fixes and
+  the merge with the same result):
   `tests/.../inkling/parallel_reference_check.py` trains one step of an
   8-layer fp32 Inkling under DP 8, EP 8, PP 2 / 4 / 8 (with EP 4 / 2 / 1) and
   interleaved PP 2 and PP 4 (2 virtual stages each). It compares the global
