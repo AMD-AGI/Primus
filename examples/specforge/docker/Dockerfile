@@ -2,7 +2,7 @@
 # + SpecForge (editable, --no-deps) + this Primus checkout (editable, --no-deps).
 # Do not install Primus's full dependency tree or run primus-cli deps sync.
 #
-# Build, ownership, and docker run: examples/specforge/docker/README.md
+# Build, ownership, and docker run: docs/04-technical-guides/specforge/runtime-image.md
 # Build from the Primus repository root:
 #   docker build -f examples/specforge/docker/Dockerfile \
 #     -t primus-specforge:v0.5.14-rocm700-mi35x .
