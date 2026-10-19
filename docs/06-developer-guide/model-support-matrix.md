@@ -28,7 +28,7 @@ The following aligns with the backend overview and the configs present in this t
 
 Model presets live in `primus/configs/models/megatron/`. Example experiments that reference those presets appear under `examples/megatron/configs/MI300X/`, `MI325X/`, and `MI355X/`.
 
-For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (25 configs each). For **Megatron** (as of v26.8), MI300X has 81 example configs and MI325X 68: MI325X has everything MI300X has except the pure GDN/KDA and the GDN/KDA/300M Zebra LLaMA hybrid recipes, `qwen3_5_35B_A3B` (BF16 and FP8), and `zaya1_8B` (BF16 and FP8). **MI355X** has 120, adding models such as `glm5`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, `minimax_m2.5` and `minimax_m3`. **MI455X** (gfx1250) has four single-GPU LoRA-SFT proxies. Each row's SKU list below reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
+For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (25 configs each). For **Megatron**, MI300X has 82 example configs and MI325X 70: MI325X has everything MI300X has except the pure GDN/KDA and the GDN/KDA/300M Zebra LLaMA hybrid recipes, and `qwen3_5_35B_A3B` (BF16 and FP8). **MI355X** has 122, adding models such as `glm5`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, `minimax_m2.5` and `minimax_m3`. **MI455X** (gfx1250) has four single-GPU LoRA-SFT proxies. Each row's SKU list below reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
 
 | Model name (file) | Preset path | Role | Example experiment dirs | Precision in examples |
 | ----------------- | ----------- | ---- | ----------------------- | ---------------------- |
@@ -99,7 +99,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `qwen3_5_35B_A3B.yaml` | `primus/configs/models/megatron/qwen3_5_35B_A3B.yaml` | MoE model preset | MI300X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B_4layer_proxy.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B_4layer_proxy.yaml` | 4-layer single-GPU MoE proxy | MI455X (LoRA SFT) | BF16 |
-| `zaya1.yaml` | `primus/configs/models/megatron/zaya1.yaml` | MoE model preset (ZAYA1-8B, CCA + MoE) | MI300X, MI355X | BF16, FP8 |
+| `zaya1.yaml` | `primus/configs/models/megatron/zaya1.yaml` | MoE model preset (ZAYA1-8B, CCA + MoE) | MI300X, MI325X, MI355X | BF16, FP8 |
 | `zaya1_base.yaml` | `primus/configs/models/megatron/zaya1_base.yaml` | Base fragment | — | — |
 | `zebra_mamba_1B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_1B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
 | `zebra_mamba_3B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_3B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
@@ -113,7 +113,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `gdn_1B.yaml` | `primus/configs/models/megatron/gdn_1B.yaml` | Pure GDN preset | MI300X, MI355X | `gdn_1B_BF16-pretrain.yaml` |
 | `gdn_300M.yaml` | `primus/configs/models/megatron/gdn_300M.yaml` | Pure GDN preset | MI300X | `gdn_300M_BF16-pretrain.yaml` |
 
-**ZAYA1-8B:** `zaya1.yaml` follows the released Zyphra/ZAYA1-base checkpoint (80 decoder stages alternating CCA attention and MoE). The MI300X and MI355X BF16 and FP8 examples are 30-iteration mock-data runs. The `zaya1_8B-FP8-pretrain.yaml` recipes set `fp8: hybrid` with tensorwise scaling, so FP8 is accurate from a cold start: CCA projections and expert SwiGLU GEMMs run as Transformer Engine FP8 linears, and the router, convolutions, norms, attention, embeddings, and tied logits stay in BF16. The BF16 port landed on `main` in [#1199](https://github.com/AMD-AGI/Primus/pull/1199).
+**ZAYA1-8B:** `zaya1.yaml` follows the released Zyphra/ZAYA1-base checkpoint (80 decoder stages alternating CCA attention and MoE). The MI300X, MI325X, and MI355X BF16 and FP8 examples are 30-iteration mock-data runs. On MI300X and MI325X the micro-batch size is the largest that completes on one 8-GPU node with `rocm/primus:v26.8`; MI355X still uses micro-batch 1. The `zaya1_8B-FP8-pretrain.yaml` recipes set `fp8: hybrid` with tensorwise scaling, so FP8 is accurate from a cold start: CCA projections and expert SwiGLU GEMMs run as Transformer Engine FP8 linears, and the router, convolutions, norms, attention, embeddings, and tied logits stay in BF16. They also set `NVTE_USE_CAST_TRANSPOSE_TRITON=0`, because the Triton cast kernel autotunes for every new expert token count. The BF16 port landed on `main` in [#1199](https://github.com/AMD-AGI/Primus/pull/1199).
 
 **MiniMax M3:** `minimax_m3.yaml` covers the text tower only. The `swigluoai` activation and Gemma-style RMSNorm map onto existing Megatron options, and MiniMax Sparse Attention (MSA) runs on FlyDSL kernels on MI355X by default (`msa_backend: flydsl`), with a plain-PyTorch reference backend (`msa_backend: eager`) for other GPUs. Tensor, context and sequence parallelism for MSA, MTP, and the vision tower are not supported yet. The preset records the unmapped `config.json` values as comments.
 

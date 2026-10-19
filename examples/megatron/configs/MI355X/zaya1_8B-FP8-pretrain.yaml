@@ -3,6 +3,13 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:zaya1-fp8-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# The runner enables Transformer Engine's Triton FP8 cast-transpose, which
+# autotunes once per new tensor shape. Expert token counts change every step,
+# so it keeps retuning and FP8 steps stall. The HIP cast kernel has no
+# per-shape cost.
+env:
+  NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
+
 modules:
   pre_trainer:
     framework: megatron
