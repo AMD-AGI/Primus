@@ -12,12 +12,16 @@ upstream submodule. The balanced-routing field migration
 (``training.debug_moe_force_load_balance`` -> ``debug.moe_force_load_balance``)
 is already handled in the DeepSeek configs on main.
 
-Compile whole TransformerBlocks with graph breaks enabled, while explicitly
-keeping GroupedExperts eager. This places the graph break at the routed-expert
-EP/FSDP boundary: surrounding attention, routing, combine, residual, and dense
-compute can still be captured without pulling expert communication and FSDP
-hooks into the same graph. It avoids the BF16 HBM regression from separately
-compiled MoE children and the FP8 NaNs from compiling GroupedExperts.
+Compile whole TransformerBlocks with graph breaks enabled, while keeping
+``GroupedExperts.forward`` (the routed-expert grouped GEMMs) eager. ExpertParallel
+installs token dispatch/combine as forward hooks on GroupedExperts, so those
+hooks (all-to-alls, permute/unpermute) remain inside the compiled block together
+with attention, routing, shared experts, unsort, and residuals. Keeping dispatch
+and combine compiled is intentional: making the whole experts call eager raises
+DSv3-16B BF16 peak HBM by ~17 GiB (OOM at local_batch_size 13) and lowers FP8
+throughput by ~7%, with identical losses. This avoids the BF16 HBM regression
+from separately compiled MoE children and the FP8 NaNs from compiling
+GroupedExperts.
 
 The MoE forward replacement also changes its fp32 ``bmm`` combine into a bf16
 weighted sum, dropping the fp32 activation copy retained across MoE layers.
@@ -78,8 +82,8 @@ def _apply_unified_compile(model: nn.Module, compile_config: Any, ep_enabled: bo
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info(
-        "Compiling whole TransformerBlocks with an eager GroupedExperts "
-        "EP/FSDP boundary (Primus unified policy)"
+        "Compiling whole TransformerBlocks with eager GroupedExperts.forward; "
+        "EP dispatch/combine hooks stay compiled (Primus unified policy)"
     )
 
 
@@ -164,6 +168,7 @@ def patch_moe_bf16_combine(ctx: PatchContext) -> None:
     import torchtitan.models.moe.moe as moe_module
 
     # Keep MoE.forward compilable as part of the outer TransformerBlock.
-    # GroupedExperts.forward is the only explicit eager EP/FSDP boundary.
+    # GroupedExperts.forward is the only explicit eager region; its EP
+    # dispatch/combine hooks run outside forward and stay compiled.
     moe_module.MoE.forward = _moe_forward_bf16_combine
     log_rank_0("[Patch:torchtitan.dsv3.moe_bf16_combine] Patched MoE.forward with bf16 weighted combine")

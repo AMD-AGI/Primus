@@ -6,8 +6,8 @@
 
 """Regression tests for the TorchTitan v0.2.2 DeepSeek memory patch.
 
-DeepSeek uses whole-block compilation with an explicit graph break around
-GroupedExperts so EP/FSDP hooks remain eager.
+DeepSeek uses whole-block compilation with an explicit graph break at
+GroupedExperts.forward; EP dispatch/combine hooks stay in the compiled block.
 """
 
 from types import SimpleNamespace
