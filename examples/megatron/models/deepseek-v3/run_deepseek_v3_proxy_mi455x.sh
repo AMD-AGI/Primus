@@ -19,9 +19,9 @@ cd "$(dirname "$(realpath "$0")")/../../../.."
 
 # container: start a container from DOCKER_IMAGE; direct: run in this container
 export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-container}
-export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261015}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261019}
 export EXP=${EXP:-examples/megatron/configs/MI455X/deepseek_v3-BF16-pretrain.yaml}
-# Primus-Turbo checkout built by prepare_mi455x.sh; empty: the image's primus_turbo
+# Primus-Turbo checkout built in place for DOCKER_IMAGE (see README.md); empty: the image's primus_turbo
 export TURBO_DIR=${TURBO_DIR:-}
 
 export GPUS_PER_NODE=${GPUS_PER_NODE:-4}
@@ -43,7 +43,9 @@ export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-False}
 # Primus-Turbo backends. Attention: flydsl or triton; grouped GEMM: bf16:flydsl or default
 # (Primus-Turbo's choice: Triton, or auto-tuning with PRIMUS_TURBO_AUTO_TUNE=1)
 export PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-flydsl}
+# lower case: Primus compares the value with "default", Primus-Turbo ignores case
 export TURBO_GROUPED_GEMM_BACKEND=${TURBO_GROUPED_GEMM_BACKEND:-bf16:flydsl}
+TURBO_GROUPED_GEMM_BACKEND=${TURBO_GROUPED_GEMM_BACKEND,,}
 case "${PRIMUS_TURBO_ATTN_BACKEND,,}" in
     flydsl | triton) ;;
     *)
