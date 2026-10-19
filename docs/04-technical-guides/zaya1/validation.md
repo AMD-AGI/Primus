@@ -1,6 +1,6 @@
 # ZAYA1-8B validation
 
-The checked-in BF16 recipes are `zaya1_8B-BF16-pretrain.yaml` under `examples/megatron/configs/MI300X`, `MI325X`, and `MI355X`. They train on mock data (`mock_data: true`), so they need no dataset mount. They differ only in batch size: the MI300X and MI325X recipes fill GPU memory (see [Throughput](#throughput)), and MI355X keeps micro-batch 1 and global batch 8. The run below used micro-batch 1 and global batch 8 with `train_iters: 30000` on GSM8K instead of mock data.
+The checked-in BF16 recipes are `zaya1_8B-BF16-pretrain.yaml` under `examples/megatron/configs/MI300X`, `MI325X`, and `MI355X`. They train on mock data (`mock_data: true`), so they need no dataset mount. They differ only in batch size: the MI300X and MI325X recipes fill GPU memory (see [Throughput](#throughput)), and MI355X reuses the MI300X batch sizes without having been run on MI355X. The run below used micro-batch 1 and global batch 8 with `train_iters: 30000` on GSM8K instead of mock data.
 
 The FP8 recipes are `zaya1_8B-FP8-pretrain.yaml` in the same three directories, also on mock data. They set `fp8: hybrid` with `fp8_recipe: tensorwise`. CCA Q/K/V/O projections and expert SwiGLU GEMMs are Transformer Engine FP8 linears. The router, depthwise convolutions, RMSNorm, attention, embeddings, and the tied logits projection stay in BF16. The training and parity numbers in this note are from the BF16 run.
 

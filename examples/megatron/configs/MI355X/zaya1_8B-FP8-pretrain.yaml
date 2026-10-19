@@ -24,15 +24,17 @@ modules:
       log_avg_skip_iterations: 1
       log_avg_reset_interval: 10
 
-      # Smoke schedule. FP8 keeps BF16 master weights, so the footprint is
-      # the BF16 stack (about 16 GB) plus the tied vocabulary. Drop num_layers
-      # here (keep it even) if the node cannot hold that. Do not edit the
-      # model yaml to shrink the architecture.
+      # 30-step mock-data run for one 8-GPU node (DP=8). FP8 keeps BF16 master
+      # weights and adds cached FP8 weight copies, so it fits fewer samples
+      # than BF16. Same batch as the MI300X recipe, which peaks at 187 GB per
+      # GPU there. It has not been run on MI355X; the 288 GB per GPU leaves
+      # headroom. On fewer GPUs, lower micro_batch_size or num_layers (keep it
+      # even). Do not edit the model yaml to shrink the architecture.
       train_iters: 30
-      micro_batch_size: 1
+      micro_batch_size: 120
+      # One micro batch per GPU per step at DP=8.
       # Must be divisible by micro_batch_size * data_parallel_size.
-      # 8 covers a full MI300X/MI355X node (DP=8) and a single GPU (DP=1).
-      global_batch_size: 8
+      global_batch_size: 960
       seq_length: 128
       max_position_embeddings: 4096
 
