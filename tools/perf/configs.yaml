@@ -99,6 +99,14 @@ MI300X:
     - examples/megatron/configs/MI300X/qwen2.5_72B-BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/qwen3_30B_A3B-BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/qwen3_30B_A3B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI300X/mamba_370M-pretrain.yaml
+    - examples/megatron/configs/MI300X/zebra_llama_mamba_1B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/zebra_llama_mamba_3B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/zebra_llama_mamba_8B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/gdn_1B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/kda_1B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/zebra_llama_gdn_1B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/zebra_llama_kda_1B_BF16-pretrain.yaml
 
   torchtitan:
     - examples/torchtitan/configs/MI300X/deepseek_v3_16b-BF16-pretrain.yaml
@@ -106,6 +114,10 @@ MI300X:
     - examples/torchtitan/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml
     - examples/torchtitan/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml
     - examples/torchtitan/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml
+
+  megatron_bridge:
+    - examples/megatron_bridge/configs/MI300X/qwen3_32b_lora_posttrain.yaml
+    - examples/megatron_bridge/configs/MI300X/qwen3_32b_sft_posttrain.yaml
 
   maxtext:
     - examples/maxtext/configs/MI300X/deepseek_v2_16B-bf16-pretrain.yaml
@@ -214,6 +226,8 @@ MI355X:
     - examples/megatron/configs/MI355X/gpt_oss_20B-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/llama3.1_8B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.1_8B-MXFP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/llama3.1_8B-MXFP4-pretrain.yaml
     - examples/megatron/configs/MI355X/llama3.1_70B-BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/llama3.1_70B-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/llama3.3_70B-BF16-pretrain.yaml
@@ -224,6 +238,14 @@ MI355X:
     - examples/megatron/configs/MI355X/qwen2.5_72B-BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/qwen3_30B_A3B-BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/qwen3_30B_A3B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/mamba_370M-pretrain.yaml
+    - examples/megatron/configs/MI355X/zebra_llama_mamba_1B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/zebra_llama_mamba_3B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/zebra_llama_mamba_8B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/gdn_1B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/kda_1B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/zebra_llama_gdn_1B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/zebra_llama_kda_1B_BF16-pretrain.yaml
 
   torchtitan:
     - examples/torchtitan/configs/MI355X/deepseek_v3_16b-BF16-pretrain.yaml
@@ -231,6 +253,10 @@ MI355X:
     - examples/torchtitan/configs/MI355X/llama3.1_8B-FP8-pretrain.yaml
     - examples/torchtitan/configs/MI355X/llama3.1_70B-BF16-pretrain.yaml
     - examples/torchtitan/configs/MI355X/llama3.1_70B-FP8-pretrain.yaml
+
+  megatron_bridge:
+    - examples/megatron_bridge/configs/MI355X/qwen3_32b_lora_posttrain.yaml
+    - examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_posttrain.yaml
 
   # MI355X (gfx950) has native FP8, so the FP8 variants are named `fp8` here
   # where MI300X / MI325X (gfx942) use `nanoo_fp8`.
