@@ -6,8 +6,7 @@ as `model_type: inkling`. The numerical reference is the official
 transformers `models/inkling` code (commit `263c5eb9`); Miles is the design
 reference. Multi-token prediction, vision and audio are not included.
 
-What works today, and what doesn't, is tracked in [STATUS.md](STATUS.md). How
-the single-GPU parity tests are run, and their last results, are in
+How the single-GPU parity tests are run, and their last results, are in
 [tests/unit_tests/backends/megatron/inkling/README.md](../../../../../../tests/unit_tests/backends/megatron/inkling/README.md).
 
 ## The model
@@ -96,7 +95,7 @@ Other Megatron arguments can be appended after `--config` (for example
 Mock data uses `NullTokenizer` with `vocab_size: 200057`, whose end-of-document
 token lands on id 200057, giving the 200,058 real Inkling tokens. The HF
 tokenizer has no eos/bos/pad token, so real data needs an explicit
-end-of-document id first (see STATUS.md).
+end-of-document id first.
 
 ### Parallelism
 
