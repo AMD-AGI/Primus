@@ -17,6 +17,7 @@ extends:
 
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: MiniMaxAI/MiniMax-M3
+vocab_size: 200064
 
 # model architecture
 num_layers: 60

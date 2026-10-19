@@ -5,13 +5,13 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Shared helpers for the Primus perf batch runners.
+# Shared helpers for the Primus perf batch runners: yq bootstrap, config
+# selection, EXTRA_ENV and provenance capture. Per-run helpers (config fields,
+# banner, footer) live in lib/run.sh.
 #
-# This file holds only code that is new to tools/perf (config selection and
-# provenance capture). The runners keep their own copies of the pre-existing
-# helpers; nothing that already worked was moved here.
-#
-# Callers must set PRIMUS_PATH (repo root) before sourcing.
+# Callers must set PRIMUS_PATH (repo root) before sourcing, and also source
+# lib/control.sh before taking the batch snapshots: those use its perf_log
+# and perf_on_nodes.
 ###############################################################################
 
 # ---------------------------------------------------------------------------
@@ -168,6 +168,12 @@ perf_resolve_path() {
 perf_select_configs() {
     CONFIG_FILES=()
     CONFIG_SOURCE=""
+    perf_split_backends
+    # BACKEND only filters the catalog; directory mode has always ignored it.
+    if [ -n "${CONFIG_DIR:-}" ] && [ "$PERF_RUN_DIFFUSION_DLRM" = 1 ]; then
+        echo "[WARN] CONFIG_DIR is set, so BACKEND is ignored and $PERF_DIFFUSION_DLRM_BACKEND does not run." >&2
+        PERF_RUN_DIFFUSION_DLRM=0
+    fi
 
     if [ -n "${CONFIG_DIR:-}" ] && [ -n "${CONFIG_FILE:-}" ]; then
         echo "[ERROR] set either CONFIG_DIR or CONFIG_FILE, not both." >&2
@@ -183,6 +189,29 @@ perf_select_configs() {
     fi
 
     perf_validate_configs
+}
+
+# diffusion_dlrm is not a catalog backend: run_batch.sh runs diffusion_bench
+# for it after the catalog configs (lib/diffusion_dlrm.sh). Sets
+# PERF_RUN_DIFFUSION_DLRM and PERF_CATALOG_BACKENDS (BACKEND without it).
+PERF_DIFFUSION_DLRM_BACKEND="diffusion_dlrm"
+PERF_RUN_DIFFUSION_DLRM=0
+PERF_CATALOG_BACKENDS=()
+
+perf_split_backends() {
+    local backend backends=()
+    PERF_RUN_DIFFUSION_DLRM=0
+    PERF_CATALOG_BACKENDS=()
+    IFS=',' read -r -a backends <<< "${BACKEND:-}"
+    for backend in ${backends[@]+"${backends[@]}"}; do
+        backend="${backend// /}"
+        [ -n "$backend" ] || continue
+        if [ "$backend" = "$PERF_DIFFUSION_DLRM_BACKEND" ]; then
+            PERF_RUN_DIFFUSION_DLRM=1
+        else
+            PERF_CATALOG_BACKENDS+=("$backend")
+        fi
+    done
 }
 
 perf_select_from_dir() {
@@ -223,18 +252,22 @@ perf_select_from_catalog() {
     fi
 
     # GPU: explicit wins, otherwise read it off the hardware. You already know
-    # which node you are on; the script can too.
+    # which node you are on; the script can too. Only the catalog backends
+    # need it to be a catalog key; diffusion_dlrm alone runs on any GPU that
+    # diffusion_bench knows (lib/diffusion_dlrm.sh).
+    local need_gpu_key=0
+    [ ${#PERF_CATALOG_BACKENDS[@]} -gt 0 ] && need_gpu_key=1
     if [ -z "${GPU:-}" ]; then
         GPU=$(perf_detect_gpu)
-        if [ -z "$GPU" ]; then
-            echo "[ERROR] GPU is not set and could not be detected from rocm-smi." >&2
+        if [ -z "$GPU" ] && [ "$need_gpu_key" = 1 ]; then
+            echo "[ERROR] GPU is not set and could not be detected from amd-smi or rocm-smi." >&2
             echo "        Set GPU=<key>, one of: $(yq -r 'keys | .[]' "$catalog" 2>/dev/null | tr '\n' ' ')" >&2
             return 1
         fi
-        echo "[INFO] GPU not set; detected $GPU from rocm-smi." >&2
+        [ -n "$GPU" ] && echo "[INFO] GPU not set; detected $GPU ($(perf_gpu_model))." >&2
     fi
 
-    if [ "$(yq -r "has(\"$GPU\")" "$catalog" 2>/dev/null)" != "true" ]; then
+    if [ "$need_gpu_key" = 1 ] && [ "$(yq -r "has(\"$GPU\")" "$catalog" 2>/dev/null)" != "true" ]; then
         echo "[ERROR] GPU '$GPU' is not a key in $catalog" >&2
         echo "        Available: $(yq -r 'keys | .[]' "$catalog" 2>/dev/null | tr '\n' ' ')" >&2
         return 1
@@ -246,23 +279,24 @@ perf_select_from_catalog() {
     #   jax_the_rock_ci_*    (JAX)     -> maxtext, maxdiffusion
     # There is no image for which "all" is correct, so a default would only
     # ever queue runs with no framework to execute them.
+    # diffusion_dlrm is offered by the single-node runner only.
+    local extra_backend=""
+    [ "${PERF_MULTINODE:-0}" = 1 ] || extra_backend="$PERF_DIFFUSION_DLRM_BACKEND"
+
     if [ -z "${BACKEND:-}" ]; then
         echo "[ERROR] BACKEND is required; each training image supports one framework stack." >&2
-        echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')" >&2
-        echo "        PyTorch image: BACKEND=megatron,torchtitan" >&2
+        echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')$extra_backend" >&2
+        echo "        PyTorch image: BACKEND=megatron,torchtitan,megatron_bridge${extra_backend:+,$extra_backend}" >&2
         echo "        JAX image    : BACKEND=maxtext,maxdiffusion" >&2
         return 1
     fi
 
-    local backend entry backends=()
-    IFS=',' read -r -a backends <<< "$BACKEND"
+    local backend entry
 
-    for backend in "${backends[@]}"; do
-        backend="${backend// /}"
-        [ -n "$backend" ] || continue
+    for backend in ${PERF_CATALOG_BACKENDS[@]+"${PERF_CATALOG_BACKENDS[@]}"}; do
         if [ "$(yq -r ".[\"$GPU\"] | has(\"$backend\")" "$catalog" 2>/dev/null)" != "true" ]; then
             echo "[ERROR] backend '$backend' is not listed under $GPU in $catalog" >&2
-            echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')" >&2
+            echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')$extra_backend" >&2
             return 1
         fi
         while IFS= read -r entry; do
@@ -275,7 +309,7 @@ perf_select_from_catalog() {
     # shellcheck disable=SC2034
     CONFIG_SOURCE="catalog $catalog (GPU=$GPU BACKEND=$BACKEND)"
 
-    if [ ${#CONFIG_FILES[@]} -eq 0 ]; then
+    if [ ${#CONFIG_FILES[@]} -eq 0 ] && [ "$PERF_RUN_DIFFUSION_DLRM" != 1 ]; then
         # yq returns empty with exit 0 for an all-commented list, a missing
         # key and a typo'd key alike, so say exactly what was looked for.
         echo "[ERROR] no configs selected from: $catalog" >&2
@@ -291,14 +325,16 @@ perf_select_from_catalog() {
 perf_validate_configs() {
     local bad=0 f seen_dupes
 
-    for f in "${CONFIG_FILES[@]}"; do
+    # Guarded expansions: with only diffusion_dlrm selected the list is empty,
+    # which bash < 4.4 treats as unset under set -u.
+    for f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
         if [ ! -f "$f" ]; then
             echo "[ERROR] config does not exist: $f" >&2
             bad=$((bad + 1))
         fi
     done
 
-    seen_dupes=$(printf '%s\n' "${CONFIG_FILES[@]}" | sort | uniq -d)
+    seen_dupes=$(printf '%s\n' ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"} | sort | uniq -d)
     if [ -n "$seen_dupes" ]; then
         echo "[ERROR] duplicate config entries (each would overwrite the other's log):" >&2
         while IFS= read -r f; do
@@ -335,12 +371,21 @@ PERF_EXTRA_ENV_ARGS=()
 
 perf_parse_extra_env() {
     PERF_EXTRA_ENV_ARGS=()
-    local kv
+    local kv kvs=()
 
-    for kv in ${EXTRA_ENV:-}; do
+    # read -a splits on whitespace without glob expansion, so a value such as
+    # `FOO=a*` is kept as typed rather than matched against files.
+    read -r -a kvs <<< "${EXTRA_ENV:-}"
+    for kv in ${kvs[@]+"${kvs[@]}"}; do
         if [[ "$kv" != *=* ]] || [[ "$kv" != [A-Za-z_]* ]]; then
             echo "[ERROR] EXTRA_ENV entries must look like KEY=VALUE, got: '$kv'" >&2
             echo "        Example: EXTRA_ENV=\"DEBUG_HIP_DYNAMIC_QUEUES=0 GPU_MAX_HW_QUEUES=2\"" >&2
+            return 1
+        fi
+        # Each entry is also exported here, so PERF_* would rewrite the
+        # runner's own state (e.g. PERF_MULTINODE) rather than the container's.
+        if [[ "$kv" == PERF_* ]]; then
+            echo "[ERROR] EXTRA_ENV must not set the runner's internal PERF_* variables, got: '$kv'" >&2
             return 1
         fi
         PERF_EXTRA_ENV_ARGS+=(--env "$kv")
@@ -392,6 +437,20 @@ perf_env_redacted() {
 #
 # Values shorter than 8 characters are skipped -- masking those would riddle
 # the log with false positives.
+# A command line for display (banner, summary, DRY_RUN): the value of any
+# NAME=VALUE argument whose NAME looks like a secret is masked, as in the env
+# snapshot. EXTRA_ENV="WANDB_API_KEY=..." would otherwise be logged in clear.
+perf_display_argv() {
+    local arg shown=""
+    for arg in "$@"; do
+        if [[ "$arg" == *=* && "${arg%%=*}" =~ $PERF_SECRET_RE ]]; then
+            arg="${arg%%=*}=<redacted>"
+        fi
+        shown+="${shown:+ }$arg"
+    done
+    printf '%s\n' "$shown"
+}
+
 perf_redact_stream() {
     # awk reads the values straight out of ENVIRON, so no secret is ever passed
     # on a command line where `ps` could see it. Matching is literal
@@ -443,6 +502,17 @@ perf_image_digest() {
     fi
 }
 
+# Local image ID. Unlike the repo digest it does not depend on which registry
+# the image was pulled from, so two runs (or two nodes) used the same image
+# exactly when their IDs match -- also for an image that was re-tagged locally.
+perf_image_id() {
+    local image="${1:-}" id
+    [ -n "$image" ] || { echo "unknown (DOCKER_IMAGE unset)"; return 0; }
+    command -v docker >/dev/null 2>&1 || { echo "unknown (docker not on PATH)"; return 0; }
+    id=$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)
+    echo "${id:-unknown (image not present locally)}"
+}
+
 # Primus HEAD, flagged when tracked files are modified. Untracked files are
 # ignored on purpose: a bench checkout is usually full of result directories,
 # and counting those would mark every run dirty.
@@ -474,13 +544,41 @@ perf_submodule_pins() {
     printf '%s' "$status" | sha256sum | cut -c1-8
 }
 
+# Marketing name of the first GPU, e.g. "AMD Instinct MI355X". amd-smi first:
+# some nodes ship only amd-smi. Its PRODUCT_NAME drops the suffix
+# ("AMD Instinct MI355 OAM"), so MARKET_NAME is the field to read.
 perf_gpu_model() {
-    command -v rocm-smi >/dev/null 2>&1 || { echo "unknown"; return 0; }
-    local model
-    model=$(rocm-smi --showproductname 2>/dev/null |
-        sed -n 's/.*Card Series:[[:space:]]*//p' | head -1 |
-        sed 's/[[:space:]]*$//')
-    [ -n "$model" ] && echo "$model" || echo "unknown"
+    local model=""
+    if command -v amd-smi >/dev/null 2>&1; then
+        model=$(amd-smi static --asic 2>/dev/null |
+            sed -n 's/.*MARKET_NAME:[[:space:]]*//p' | head -1 |
+            sed 's/[[:space:]]*$//')
+    fi
+    if { [ -z "$model" ] || [ "$model" = "N/A" ]; } && command -v rocm-smi >/dev/null 2>&1; then
+        model=$(rocm-smi --showproductname 2>/dev/null |
+            sed -n 's/.*Card Series:[[:space:]]*//p' | head -1 |
+            sed 's/[[:space:]]*$//')
+    fi
+    if [ -n "$model" ] && [ "$model" != "N/A" ]; then
+        echo "$model"
+    else
+        echo "unknown"
+    fi
+}
+
+perf_gpu_count() {
+    local n=0
+    if command -v amd-smi >/dev/null 2>&1; then
+        n=$(amd-smi list 2>/dev/null | grep -c '^GPU:')
+    fi
+    if [ "$n" -eq 0 ] && command -v rocm-smi >/dev/null 2>&1; then
+        n=$(rocm-smi --showid 2>/dev/null | grep -c '^GPU\[')
+    fi
+    if [ "$n" -gt 0 ]; then
+        echo "$n"
+    else
+        echo "unknown"
+    fi
 }
 
 # Catalog key for the hardware this node actually has, e.g. "MI325X".
@@ -501,14 +599,23 @@ perf_detect_gpu() {
     echo "$key"
 }
 
+# Host ROCm version. ROCm is not always under /opt/rocm (some clusters load it
+# as a module and set ROCM_PATH), and recent rocminfo no longer prints it.
 perf_rocm_version() {
-    if [ -r /opt/rocm/.info/version ]; then
-        head -1 /opt/rocm/.info/version
-    elif command -v rocminfo >/dev/null 2>&1; then
-        rocminfo 2>/dev/null | awk '/ROCm Version/ {print $3; exit}'
-    else
-        echo "unknown"
+    local v="" f
+    for f in "${ROCM_PATH:+$ROCM_PATH/.info/version}" /opt/rocm/.info/version; do
+        if [ -n "$f" ] && [ -r "$f" ]; then
+            v=$(head -1 "$f")
+            [ -n "$v" ] && break
+        fi
+    done
+    if [ -z "$v" ] && command -v amd-smi >/dev/null 2>&1; then
+        v=$(amd-smi version 2>/dev/null | sed -n 's/.*ROCm version: *\([^ |]*\).*/\1/p' | head -1)
     fi
+    if [ -z "$v" ] && command -v rocminfo >/dev/null 2>&1; then
+        v=$(rocminfo 2>/dev/null | awk '/ROCm Version/ {print $3; exit}')
+    fi
+    echo "${v:-unknown}"
 }
 
 perf_gpu_snapshot() {
@@ -519,9 +626,99 @@ perf_gpu_snapshot() {
         rocm-smi --showtopo 2>&1 || true
     elif command -v amd-smi >/dev/null 2>&1; then
         amd-smi static 2>&1 || true
+        echo
+        echo "== power / clocks / temperature at batch start =="
+        amd-smi metric --power --clock --temperature 2>&1 || amd-smi metric 2>&1 || true
     else
         echo "no rocm-smi / amd-smi on PATH"
     fi
+}
+
+# Host settings that change performance without showing up anywhere else,
+# one "key: value" per line. Shipped to remote nodes as source text for the
+# multi-node snapshot, so it must stay self-contained.
+perf_host_settings() {
+    local f governors cmdline iommu_type thp defrag driver
+    # A loop rather than `cat <glob>`: under the runners' nullglob an
+    # unmatched glob would leave cat reading stdin, and the batch would hang.
+    governors=$(for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [ -r "$f" ] && cat "$f"
+    done | sort | uniq -c | awk '{ printf "%s%s x%s", sep, $2, $1; sep = ", " }')
+    cmdline=$(grep -oE '(^| )(amd_|intel_)?iommu=[^ ]+' /proc/cmdline 2>/dev/null | sed 's/^ //' | paste -sd ' ')
+    iommu_type=$(cat /sys/kernel/iommu_groups/0/type 2>/dev/null </dev/null)
+    thp=$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)
+    defrag=$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null)
+    # The DKMS driver reports a version; the in-kernel one does not.
+    if [ -r /sys/module/amdgpu/version ]; then
+        driver=$(cat /sys/module/amdgpu/version </dev/null)
+    elif [ -d /sys/module/amdgpu ]; then
+        driver="inbox (kernel $(uname -r))"
+    else
+        driver="not loaded"
+    fi
+    echo "cpu_governor: ${governors:-unknown}"
+    echo "numa_balancing: $(cat /proc/sys/kernel/numa_balancing 2>/dev/null </dev/null || echo unknown)"
+    echo "transparent_hugepages: ${thp:-unknown}"
+    echo "thp_defrag: ${defrag:-unknown}"
+    echo "iommu: ${cmdline:-not set on the kernel command line}${iommu_type:+ (default domain: $iommu_type)}"
+    echo "amdgpu_driver: $driver"
+    echo "kernel: $(uname -r)"
+    echo "cpu_model: $(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo 2>/dev/null | head -1)"
+    # --all: inside an srun step plain nproc counts only the step's CPUs.
+    echo "cpus: $(nproc --all 2>/dev/null)"
+    echo "memory: $(awk '/^MemTotal/ { printf "%.0f GiB", $2 / 1048576 }' /proc/meminfo 2>/dev/null)"
+}
+
+# One section per node, plus the network interfaces (which NIC NCCL can use).
+# srun interleaves the nodes' output line by line, so every line carries its
+# host and the sections are put back together here.
+perf_host_snapshot() {
+    # shellcheck disable=SC2016
+    perf_on_nodes bash -c "$(declare -f perf_host_settings)"'
+        h=$(hostname)
+        {
+            perf_host_settings
+            echo "-- interfaces --"
+            ip -br addr 2>/dev/null || echo "(no ip command)"
+        } | sed "s/^/$h\t/"
+    ' 2>&1 | sort -s -t $'\t' -k1,1 |
+        awk -F '\t' '
+            # Untagged lines are messages from srun itself, not node settings.
+            NF < 2 { other = other $0 "\n"; next }
+            $1 != host { if (host != "") print ""; print "== " $1 " =="; host = $1 }
+            { sub(/^[^\t]*\t/, ""); print }
+            END { if (other != "") printf "\n== other output ==\n%s", other }'
+}
+
+# The image's build manifest (build recipe, dpkg and pip lists), copied once
+# per batch so the result directory records how its image was built. Prints
+# what happened.
+perf_copy_image_manifest() {
+    local image="$1" dest="$2" cid err
+    if [ -z "$image" ] || ! command -v docker >/dev/null 2>&1; then
+        echo "not copied (no image or no docker)"
+        return 0
+    fi
+    # --pull=never: never start an unbounded pull just for the manifest.
+    # Docker before 20.10 lacks the flag; with the image present locally a
+    # plain create cannot pull either.
+    cid=$(docker create --pull=never "$image" /bin/true 2>/dev/null)
+    if [ -z "$cid" ] && docker image inspect "$image" >/dev/null 2>&1; then
+        cid=$(docker create "$image" /bin/true 2>/dev/null)
+    fi
+    if [ -z "$cid" ]; then
+        echo "not copied (cannot create a container from $image; is it present locally?)"
+        return 0
+    fi
+    # "/." copies the contents, so an existing directory is not nested into.
+    if err=$(docker cp "$cid:/workspace/.manifest/." "$dest" 2>&1) && [ -d "$dest" ]; then
+        echo "$dest"
+    elif [[ "$err" == *"Could not find"* || "$err" == *"No such"* ]]; then
+        echo "none in the image (/workspace/.manifest)"
+    else
+        echo "copy failed: ${err:0:200}"
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1
 }
 
 # Library versions from inside the container. The image digest does not cover
@@ -534,18 +731,23 @@ perf_stack_snapshot() {
     echo "== image =="
     echo "tag    : $image"
     echo "digest : $(perf_image_digest "$image")"
+    echo "id     : $(perf_image_id "$image")"
     echo
     echo "== container libraries =="
     # Single quotes are deliberate: this script runs inside the container, so
-    # nothing may expand in the host shell.
+    # nothing may expand in the host shell. ROCm comes from /opt/rocm when the
+    # image has a classic install, otherwise from the pip-packaged ROCm SDK
+    # (TheRock images); hipconfig reports the HIP version, which differs.
     # shellcheck disable=SC2016
     timeout 180 docker run --rm --entrypoint /bin/bash "$image" -lc '
-        rocm=$(cat /opt/rocm/.info/version 2>/dev/null) ||
-            rocm=$(hipconfig --version 2>/dev/null) ||
-            rocm=$(basename "$(readlink -f /opt/rocm 2>/dev/null)" 2>/dev/null)
+        rocm=$(cat /opt/rocm/.info/version 2>/dev/null)
+        [ -n "$rocm" ] || rocm=$(python3 -m pip show rocm 2>/dev/null | awk "/^Version:/ { print \$2 }")
+        [ -n "$rocm" ] || rocm=$(python3 -m pip show rocm-sdk-core 2>/dev/null | awk "/^Version:/ { print \$2 }")
+        [ -n "$rocm" ] || rocm=$(basename "$(readlink -f /opt/rocm 2>/dev/null)" | sed -n "s/^rocm-//p")
         echo "rocm: ${rocm:-unknown}"
+        echo "hip: $(hipconfig --version 2>/dev/null || echo unknown)"
         python3 -m pip list 2>/dev/null |
-            grep -iE "^(torch|torchvision|torchaudio|jax|jaxlib|libtpu|transformer|transformers|primus|triton|flash|numpy|nvidia-|megatron)" ||
+            grep -iE "^(torch|torchvision|torchaudio|jax|jaxlib|libtpu|transformer|transformers|primus|triton|flash|numpy|nvidia-|megatron|rocm|hip-python|aiter|amd-aiter|apex)" ||
             echo "(pip list unavailable)"
     ' 2>&1 || echo "(container probe failed or timed out; image may need a runtime this host lacks)"
 }
@@ -555,46 +757,85 @@ perf_stack_snapshot() {
 # container once per batch rather than once per run.
 PERF_TORCH_VERSION=""
 PERF_JAX_VERSION=""
+PERF_CONTAINER_ROCM=""
+PERF_CONTAINER_HIP=""
+PERF_HOST_SETTINGS=""
 
 perf_load_stack_versions() {
     local stack_file="$1"
     [ -r "$stack_file" ] || return 0
     PERF_TORCH_VERSION=$(awk '$1 == "torch" { print $2; exit }' "$stack_file")
     PERF_JAX_VERSION=$(awk '$1 == "jax" { print $2; exit }' "$stack_file")
+    PERF_CONTAINER_ROCM=$(awk '$1 == "rocm:" { print $2; exit }' "$stack_file")
+    PERF_CONTAINER_HIP=$(awk '$1 == "hip:" { print $2; exit }' "$stack_file")
 }
 
-# Write the batch-level snapshots next to the logs.
+# Value of one perf_host_settings key on this node, for the banner.
+perf_host_setting() {
+    sed -n "s/^$1: //p" <<< "$PERF_HOST_SETTINGS" | head -1
+}
+
+# Write the batch-level snapshots next to the logs. Sets the PERF_* values
+# the banner prints, so it must not run in a pipeline.
 perf_write_batch_snapshots() {
     local result_dir="$1" stamp="$2" image="${3:-}"
+
+    perf_log "[INFO] Recording provenance: environment, submodules, GPU and host state, and ${image:-the image}'s ROCm/HIP and libraries (the container probe can take up to 3 min)."
 
     perf_env_redacted                > "$result_dir/batch_env_${stamp}.txt"
     perf_submodule_status            > "$result_dir/batch_submodules_${stamp}.txt"
     perf_gpu_snapshot                > "$result_dir/batch_gpu_${stamp}.txt"
     perf_stack_snapshot "$image"     > "$result_dir/batch_stack_${stamp}.txt"
+    perf_host_snapshot               > "$result_dir/batch_host_${stamp}.txt"
 
     perf_load_stack_versions "$result_dir/batch_stack_${stamp}.txt"
+    PERF_HOST_SETTINGS=$(perf_host_settings)
+
+    perf_log "Image manifest     -> $(perf_copy_image_manifest "$image" "$result_dir/batch_manifest_${stamp}")"
 }
 
 # Banner block shared by both runners. Printed inside the per-run banner, so
 # every field lands in the log the extractor reads.
+# Set for a run whose container does not inherit the runner's environment.
+PERF_ENV_NOTE=""
+
 perf_print_provenance_banner() {
     local image="${1:-}"
 
     echo "# Docker image     : ${image:-<unset; container mode uses runner/.primus.yaml>}"
     echo "# Image digest     : $(perf_image_digest "$image")"
+    echo "# Image ID         : $(perf_image_id "$image")"
     echo "# Primus commit    : $(perf_primus_commit)"
     echo "# Submodule pins   : $(perf_submodule_pins)"
     echo "# GPU model        : $(perf_gpu_model)"
-    echo "# ROCm version     : $(perf_rocm_version)"
+    echo "# ROCm (host)      : $(perf_rocm_version)"
+    echo "# Container ROCm   : ${PERF_CONTAINER_ROCM:-unknown}"
+    echo "# Container HIP    : ${PERF_CONTAINER_HIP:-unknown}"
     echo "# Torch version    : ${PERF_TORCH_VERSION:-unknown}"
     echo "# JAX version      : ${PERF_JAX_VERSION:-unknown}"
     echo "# World size       : $(( ${NNODES:-1} * ${GPUS_PER_NODE:-8} ))  (NNODES=${NNODES:-1} x GPUS_PER_NODE=${GPUS_PER_NODE:-8})"
     echo "# --------------------------------------------------------------------------------"
+    # This node's settings; batch_host_<stamp>.txt has every node's.
+    echo "# CPU governor     : $(perf_host_setting cpu_governor)"
+    echo "# NUMA balancing   : $(perf_host_setting numa_balancing)"
+    echo "# Transparent HP   : $(perf_host_setting transparent_hugepages)"
+    echo "# IOMMU            : $(perf_host_setting iommu)"
+    echo "# amdgpu driver    : $(perf_host_setting amdgpu_driver)"
+    echo "# --------------------------------------------------------------------------------"
     # Distinguished from the block below because these are *guaranteed* to
     # reach the container, whereas a plain export may be filtered out.
-    echo "# Extra env (--env): ${EXTRA_ENV:-<none>}"
-    echo "# Perf environment :"
-    local line
+    local line extra_env=()
+    read -r -a extra_env <<< "${EXTRA_ENV:-}"
+    if [ ${#extra_env[@]} -gt 0 ]; then
+        echo "# Extra env (--env): $(perf_display_argv "${extra_env[@]}")"
+    else
+        echo "# Extra env (--env): <none>"
+    fi
+    # The runner's own shell. Primus prints its main environment settings
+    # (and each hook's exports) at the start of the run output; settings from
+    # runner/helpers/envs/<GPU>.sh are not all echoed there. PERF_ENV_NOTE
+    # qualifies the block for a run that does not inherit it.
+    echo "# Perf environment (host shell${PERF_ENV_NOTE:+; $PERF_ENV_NOTE}):"
     while IFS= read -r line; do
         echo "#   $line"
     done < <(perf_env_lines)

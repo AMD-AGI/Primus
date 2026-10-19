@@ -66,6 +66,99 @@ def _param_device() -> Optional[torch.device]:
     return torch.cuda.current_device() if torch.cuda.is_available() else None
 
 
+def _dsa_cp_state():
+    from megatron.core import parallel_state
+
+    if not parallel_state.model_parallel_is_initialized():
+        return 1, 0, None
+    size = int(parallel_state.get_context_parallel_world_size() or 1)
+    if size <= 1:
+        return 1, 0, None
+    return size, int(parallel_state.get_context_parallel_rank()), parallel_state.get_context_parallel_group()
+
+
+class _AllGatherSequence(torch.autograd.Function):
+    """Concatenate equal sequence shards. Backward reduce-scatters the token axis."""
+
+    @staticmethod
+    def forward(ctx, x: Tensor, group) -> Tensor:
+        import torch.distributed as dist
+
+        ctx.group = group
+        world = dist.get_world_size(group)
+        shards = [torch.empty_like(x) for _ in range(world)]
+        dist.all_gather(shards, x.contiguous(), group=group)
+        return torch.cat(shards, dim=0)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        import torch.distributed as dist
+
+        world = dist.get_world_size(ctx.group)
+        chunks = list(grad.contiguous().chunk(world, dim=0))
+        out = torch.empty_like(chunks[0])
+        dist.reduce_scatter(out, chunks, op=dist.ReduceOp.SUM, group=ctx.group)
+        return out, None
+
+
+def _gather_sequence(x: Tensor, group, *, grad: bool) -> Tensor:
+    if group is None:
+        return x
+    if grad:
+        return _AllGatherSequence.apply(x, group)
+    import torch.distributed as dist
+
+    shards = [torch.empty_like(x) for _ in range(dist.get_world_size(group))]
+    dist.all_gather(shards, x.contiguous(), group=group)
+    return torch.cat(shards, dim=0)
+
+
+def _cu_list(cu: Tensor) -> list:
+    return [int(v) for v in cu.detach().to("cpu").tolist()]
+
+
+def _forward_dsa_segments(module, hidden_states: Tensor, packed_seq_params):
+    if hidden_states.shape[1] != 1:
+        raise NotImplementedError("Packed DSA expects batch size 1 (THD).")
+    cu = _cu_list(packed_seq_params.cu_seqlens_q)
+    if cu[-1] != hidden_states.shape[0]:
+        raise RuntimeError(f"cu_seqlens ends at {cu[-1]} but the token axis is {hidden_states.shape[0]}.")
+    pieces = []
+    bias = None
+    for start, end in zip(cu[:-1], cu[1:]):
+        if end <= start:
+            continue
+        out, bias = module.forward(hidden_states[start:end], packed_seq_params=None)
+        pieces.append(out)
+    if not pieces:
+        raise RuntimeError("Packed DSA received no tokens.")
+    return torch.cat(pieces, dim=0), bias
+
+
+def _packed_indices(indexer, x: Tensor, q_lora: Tensor, cu: Tensor) -> Tensor:
+    """Per-sample kpool indices into the packed token axis. ``x`` is ``[S, B, H]``."""
+    bounds = _cu_list(cu)
+    chunks = []
+    width = 0
+    for start, end in zip(bounds[:-1], bounds[1:]):
+        if end <= start:
+            continue
+        idx = indexer(x[start:end], q_lora[start:end], 1, end - start)
+        idx = torch.where(idx >= 0, idx + start, idx)
+        chunks.append(idx)
+        width = max(width, idx.shape[1])
+    total = bounds[-1]
+    out = torch.full((total, width), -1, dtype=torch.int32, device=x.device)
+    cursor = 0
+    for start, end in zip(bounds[:-1], bounds[1:]):
+        if end <= start:
+            continue
+        idx = chunks[cursor]
+        cursor += 1
+        out[start:end, : idx.shape[1]] = idx
+    return out
+
+
 @dataclass
 class Glm5NextDSASubmodules:
     linear_q_down_proj: Union[ModuleSpec, type] = IdentityOp
@@ -274,14 +367,30 @@ class Glm5NextDSAAttention(MegatronModule):
     ) -> Tuple[Tensor, Optional[Tensor]]:
         if inference_context is not None:
             raise NotImplementedError("Glm5NextDSAAttention has no inference cache.")
-        if packed_seq_params is not None:
-            raise NotImplementedError("Glm5NextDSAAttention does not support packed sequences yet.")
+
+        cp_size, cp_rank, cp_group = _dsa_cp_state()
+        if packed_seq_params is not None and cp_size == 1:
+            return _forward_dsa_segments(self, hidden_states, packed_seq_params)
+        if cp_size > 1 and packed_seq_params is None:
+            raise NotImplementedError(
+                "DSA context parallel requires packed THD (--qkv-format thd --allgather-cp)."
+            )
 
         # ---- low-rank q / kv (on the sequence shard under SP) ----------
         q_c, _ = self.linear_q_down_proj(hidden_states)
         q_c = self.q_layernorm(q_c)
         q, _ = self.linear_q_up_proj(q_c)  # [S, B, Hl * qk] (column-parallel gathers under SP)
         S, B = q.shape[0], q.shape[1]
+        packed_cp = packed_seq_params is not None and cp_size > 1
+        if packed_cp:
+            if B != 1:
+                raise NotImplementedError("Packed DSA expects batch size 1 (THD).")
+            global_len = int(packed_seq_params.cu_seqlens_q[-1].item())
+            if S * cp_size != global_len:
+                raise RuntimeError(
+                    "DSA packed CP expects contiguous allgather-cp shards: "
+                    f"local {S} * cp {cp_size} != global {global_len}."
+                )
 
         kv_c, _ = self.linear_kv_down_proj(hidden_states)
         kv_c = self._gather_seq(kv_c)
@@ -297,7 +406,16 @@ class Glm5NextDSAAttention(MegatronModule):
             if self.config.sequence_parallel and self.tp_size > 1:
                 x_full = gather_from_sequence_parallel_region(x_full, group=self.pg_collection.tp)
                 q_lora_full = gather_from_sequence_parallel_region(q_lora_full, group=self.pg_collection.tp)
-            indices = self.indexer(x_full, q_lora_full, B, S)
+            if packed_cp:
+                x_full = _gather_sequence(x_full, cp_group, grad=False)
+                q_lora_full = _gather_sequence(q_lora_full, cp_group, grad=False)
+                indices = _packed_indices(self.indexer, x_full, q_lora_full, packed_seq_params.cu_seqlens_q)
+                indices = indices[cp_rank * S : (cp_rank + 1) * S]
+            else:
+                indices = self.indexer(x_full, q_lora_full, B, S)
+
+        if packed_cp:
+            latent = _gather_sequence(latent, cp_group, grad=True)
 
         # ---- absorbed sparse MLA ---------------------------------------
         w = self.linear_kv_up_proj.weight.view(
@@ -310,7 +428,8 @@ class Glm5NextDSAAttention(MegatronModule):
             .reshape(B * S, self.num_heads_local, self.qk_head_dim)
         )
         query = torch.einsum("thd,hdm->thm", q, w_kc)  # [T, Hl, kv_lora]
-        key = latent.transpose(0, 1).reshape(B * S, self.kv_lora_rank)
+        key_len = latent.shape[0] * latent.shape[1]
+        key = latent.transpose(0, 1).reshape(key_len, self.kv_lora_rank)
         attn_fn = sparse_mla if self.backend == "triton" else sparse_mla_torch
         o = attn_fn(query.contiguous(), key.contiguous(), indices, self.softmax_scale)
         o = torch.einsum("thm,hdm->thd", o, w_vc)  # [T, Hl, v]

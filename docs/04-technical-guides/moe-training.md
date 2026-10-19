@@ -1,8 +1,8 @@
 # MoE training deep-dive
 
-This guide covers Mixture-of-Experts (MoE) training in Primus on AMD Instinct GPUs: the bottlenecks unique to sparse models, the Primus/Primus-Turbo optimizations that address them, and a model-by-model tuning walkthrough. It is adapted from the AMD blog [MoE Training Best Practices on AMD GPU](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html) (`examples/moe_package/README.md`) and grounded in the actual Primus configs and run scripts.
+This guide covers Mixture-of-Experts (MoE) training in Primus on AMD Instinct GPUs: the bottlenecks unique to sparse models, the Primus/Primus-Turbo optimizations that address them, and a model-by-model tuning walkthrough. It is adapted from the AMD blog [MoE Training Best Practices on AMD GPU](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html) (`examples/megatron/guides/moe_package/README.md`) and grounded in the actual Primus configs and run scripts.
 
-All flags shown here are the **real CLI/YAML keys** used by `examples/moe_package/run_*_pretrain_mi355x.sh` and the Megatron module configs (`primus/configs/modules/megatron/`). The Primus-Turbo MoE optimizations in this guide (DeepEP, sync-free MoE, Turbo grouped GEMM) are **Megatron-backend** features. TorchTitan also supports MoE via expert parallelism (`expert_parallel_degree`, `expert_tensor_parallel_degree`), but its tuning is out of scope here.
+All flags shown here are the **real CLI/YAML keys** used by `examples/megatron/guides/moe_package/run_*_pretrain_mi355x.sh` and the Megatron module configs (`primus/configs/modules/megatron/`). The Primus-Turbo MoE optimizations in this guide (DeepEP, sync-free MoE, Turbo grouped GEMM) are **Megatron-backend** features. TorchTitan also supports MoE via expert parallelism (`expert_parallel_degree`, `expert_tensor_parallel_degree`), but its tuning is out of scope here.
 
 ---
 
@@ -33,19 +33,19 @@ Primus ships Megatron model presets for DeepSeek-style MoE models plus two ultra
 | MoE-1T | 1T / 44B | `moe_1T.yaml` |
 | MoE-2T | 2T / 80B | `moe_2T.yaml` |
 
-Ready-to-run pretrain scripts live in `examples/moe_package/`, e.g.:
+Ready-to-run pretrain scripts live in `examples/megatron/guides/moe_package/`, e.g.:
 
-- `examples/moe_package/run_deepseek_v2_lite_pretrain_mi355x.sh`
-- `examples/moe_package/run_deepseek_v2_pretrain_mi355x.sh`
-- `examples/moe_package/run_deepseek_v3_pretrain_mi355x.sh`
+- `examples/megatron/guides/moe_package/run_deepseek_v2_lite_pretrain_mi355x.sh`
+- `examples/megatron/guides/moe_package/run_deepseek_v2_pretrain_mi355x.sh`
+- `examples/megatron/guides/moe_package/run_deepseek_v3_pretrain_mi355x.sh`
 
-Each example script is a convenience wrapper: it sets environment + parallelism and selects an experiment YAML under `examples/moe_package/configs/`, then launches training. You can run the same training directly with the unified CLI, passing the experiment YAML with `--config` and the MoE feature toggles (Section 4) as overrides:
+Each example script is a convenience wrapper: it sets environment + parallelism and selects an experiment YAML under `examples/megatron/guides/moe_package/configs/`, then launches training. You can run the same training directly with the unified CLI, passing the experiment YAML with `--config` and the MoE feature toggles (Section 4) as overrides:
 
 ```bash
 # DeepSeek-V2-Lite baseline + DeepEP + sync-free + loss fusion + manual GC, via primus-cli
 export ENABLE_NUMA_BINDING=1 HSA_KERNARG_POOL_SIZE=12582912   # feature 6 (env, not CLI flags)
 ./runner/primus-cli direct -- train pretrain \
-  --config examples/moe_package/configs/MI355X/deepseek_v2_lite-pretrain-baseline.yaml \
+  --config examples/megatron/guides/moe_package/configs/MI355X/deepseek_v2_lite-pretrain-baseline.yaml \
   --enable_primus_turbo True \
   --use_turbo_deepep True --turbo_deepep_num_cu 64 --moe_router_dtype fp32 \
   --turbo_sync_free_moe_stage 1 \
@@ -70,7 +70,7 @@ Diagnose before optimizing. The recommended order:
 
 ## 4. Primus MoE optimizations
 
-The `examples/moe_package/run_*` scripts expose these as composable "MoE features." The table maps each feature to the **actual `--flags` (or environment variables)** you pass to `train pretrain`—the same toggles the example scripts set.
+The `examples/megatron/guides/moe_package/run_*` scripts expose these as composable "MoE features." The table maps each feature to the **actual `--flags` (or environment variables)** you pass to `train pretrain`—the same toggles the example scripts set.
 
 | Feature | Flags (real keys) | What it does |
 |---------|-------------------|--------------|
@@ -190,4 +190,4 @@ For PP=16, GA=16: VPP=1 gives ~48% bubble; VPP=6 gives ~14%—a large efficiency
 - [Parallelism strategies](./parallelism-strategies.md) and [Parallelism configuration](./parallelism-configuration.md)—EP, PP, CP, VPP.
 - [Collective operations](./collective-operations.md)—A2A and DeepEP context.
 - [Profiling & observability](./profiling-and-observability.md) and [Projection](../02-user-guide/projection.md).
-- Source blog: `examples/moe_package/README.md`.
+- Source blog: `examples/megatron/guides/moe_package/README.md`.
