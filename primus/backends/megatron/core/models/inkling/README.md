@@ -86,7 +86,7 @@ The recipe takes these environment overrides:
 | --- | --- | --- |
 | `PRIMUS_MODEL` | `inkling_small_12L` | Model preset, e.g. `inkling_large_6L` |
 | `PRIMUS_INKLING_ATTN` | `flex` | `flex` or `eager` (dense bias; slower, about 2x the step time and more memory) |
-| `PRIMUS_TRAIN_ITERS` | `50` | Training steps |
+| `PRIMUS_TRAIN_ITERS` | `50` | Training steps; must be more than the 5 warmup steps |
 | `PRIMUS_SEQ_LENGTH`, `PRIMUS_GBS`, `PRIMUS_MBS`, `PRIMUS_EP` | 4096, 64, 1, 8 | Sequence length, global and micro batch, expert parallelism |
 
 Other Megatron arguments can be appended after `--config` (for example
@@ -96,6 +96,80 @@ Mock data uses `NullTokenizer` with `vocab_size: 200057`, whose end-of-document
 token lands on id 200057, giving the 200,058 real Inkling tokens. The HF
 tokenizer has no eos/bos/pad token, so real data needs an explicit
 end-of-document id first.
+
+### Reproducing the proxy runs
+
+Needs one node with 8 MI355X GPUs, Docker and internet access. Training uses
+only what the `rocm/primus:v26.8` image ships (torch 2.14.0+rocm10.1,
+TE 2.17.1, transformers 5.10.0): nothing in the training path imports
+transformers, and mock data needs no Hugging Face token. The pinned
+transformers build (`263c5eb9`) is only for the reference tests.
+
+On the host, clone the branch with its Megatron-LM submodule. The image's own
+`/workspace/Primus` has no Inkling code.
+
+```bash
+cd $HOME
+git clone -b feat/inkling-megatron https://github.com/AMD-AGI/Primus.git Primus-inkling
+cd Primus-inkling
+git submodule update --init third_party/Megatron-LM
+```
+
+Start the container on the GPU node and open a shell in it. Stay root:
+as a normal user, aiter's GPU probe fails.
+
+```bash
+docker run -d --name primus_v26.8 \
+    --device /dev/dri --device /dev/kfd --network host --ipc host \
+    --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+    --privileged --shm-size 64G -v $HOME:$HOME \
+    rocm/primus:v26.8 sleep infinity
+docker exec -it primus_v26.8 bash
+```
+
+Inside the container:
+
+```bash
+cd $HOME/Primus-inkling
+export PYTHONDONTWRITEBYTECODE=1        # no root-owned __pycache__ in the checkout
+export PRIMUS_WORKSPACE=/tmp/inkling_out
+CFG=examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml
+LOGS=$HOME/inkling_logs; mkdir -p $LOGS
+MUON="--use_distributed_optimizer false --overlap_param_gather false --muon_extra_scale_factor 1.0"
+
+# Small 12-layer proxy (67.5B)
+./runner/primus-cli direct --log_file $LOGS/small_adamw.log -- train pretrain --config $CFG
+PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
+./runner/primus-cli direct --log_file $LOGS/small_muon.log -- train pretrain --config $CFG \
+    --optimizer muon --overlap_grad_reduce false $MUON
+
+# Large 6-layer proxy (62.6B)
+export PRIMUS_MODEL=inkling_large_6L PRIMUS_EXP_NAME=inkling_large_6L-pretrain
+./runner/primus-cli direct --log_file $LOGS/large_adamw.log -- train pretrain --config $CFG
+PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
+./runner/primus-cli direct --log_file $LOGS/large_muon.log -- train pretrain --config $CFG \
+    --optimizer muon --overlap_grad_reduce false $MUON
+PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
+./runner/primus-cli direct --log_file $LOGS/large_dist_muon.log -- train pretrain --config $CFG \
+    --optimizer dist_muon --overlap_grad_reduce true $MUON
+```
+
+`PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1` makes the launcher install the pinned
+Emerging-Optimizers, which Megatron's Muon needs and the image doesn't ship.
+Each run is 50 steps of 64 × 4096 tokens with EP 8 × DP 8, flex attention,
+bf16, random initialisation and Primus-Turbo off; it takes 4–5 minutes after
+the first flex compilation. Read step 50 with
+`grep -a "iteration  *50/" $LOGS/<run>.log | tail -1`.
+
+Results on Oct 19, 2026 (no NaN or skipped steps in any run):
+
+| Run | Loss at step 50 | Step time | `hip mem usage` |
+| --- | --- | --- | --- |
+| Small, AdamW | 5.762 | 3.55 s | 206 GB |
+| Small, `muon` | 5.846 | 4.47 s | 201 GB |
+| Large, AdamW | 5.747 | 3.29 s | 202 GB |
+| Large, `muon` | 5.902 | 4.51 s | 213 GB |
+| Large, `dist_muon` | 5.902 | 4.27 s | 167 GB |
 
 ### Parallelism
 
@@ -141,6 +215,7 @@ export PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1   # the v26.8 image doesn't ship Eme
 ./runner/primus-cli direct -- train pretrain \
     --config examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml \
     --optimizer dist_muon --muon_extra_scale_factor 1.0 \
+    --use_distributed_optimizer false \
     --overlap_grad_reduce true --overlap_param_gather false
 ```
 
