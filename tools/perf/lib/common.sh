@@ -898,7 +898,8 @@ perf_host_gpu_settings() {
         mp=$(perf_host_read "$d/current_memory_partition")
         [ -n "$cp$mp" ] && partitions+="${cp:-?}/${mp:-?}"$'\n'
         # A lowered top level is how a clock limit (e.g. perf determinism) shows.
-        sclk=$(grep -oE '[0-9]+ ?[Mm][Hh]z' "$d/pp_dpm_sclk" 2>/dev/null | grep -oE '[0-9]+' | sort -n | tail -n 1)
+        # Only the numbered levels count: the "S:" line is the live clock and moves between reads.
+        sclk=$(grep -E '^[0-9]+:' "$d/pp_dpm_sclk" 2>/dev/null | grep -oE '[0-9]+ ?[Mm][Hh]z' | grep -oE '[0-9]+' | sort -n | tail -n 1)
         clocks+="perf level $(perf_host_read "$d/power_dpm_force_performance_level" | grep . || echo unknown)${sclk:+, max sclk $sclk MHz}"$'\n'
         vbios+="$(perf_host_read "$d/vbios_version")"$'\n'
         if [ -r "$d/current_link_speed" ]; then
