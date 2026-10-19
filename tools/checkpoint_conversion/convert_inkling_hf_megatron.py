@@ -24,6 +24,12 @@ What it does:
    ``<output>/release/mp_rank_00/model_optim_rng.pt``; load it with
    ``--load <output> --ckpt-format torch --finetune --no-load-optim --no-load-rng``.
 
+The embedding and LM head are trimmed or zero-padded to the vocabulary size
+training builds: ``unpadded_vocab_size`` rounded up to a multiple of
+``--make-vocab-size-divisible-by`` x ``--tensor-model-parallel-size`` (128 x 1
+by default, matching ``trainer_base.yaml``). Pass the training run's values,
+or ``--target-vocab-size``, if they differ.
+
 ``--dry-run`` stops after step 3, reading only the safetensors headers, so the
 full mapping can be validated on a login node. Writing a resharded
 ``torch_dist`` checkpoint for multi-node runs is P3 work.
@@ -108,8 +114,13 @@ def main(argv=None) -> int:
     p.add_argument("--model-yaml", required=True, type=Path)
     p.add_argument("--output", type=Path)
     p.add_argument(
-        "--target-vocab-size", type=int, default=None, help="Megatron padded vocab (default: checkpoint rows)"
+        "--target-vocab-size",
+        type=int,
+        default=None,
+        help="Megatron padded vocab (default: unpadded_vocab_size padded the way training pads it)",
     )
+    p.add_argument("--make-vocab-size-divisible-by", type=int, default=128)
+    p.add_argument("--tensor-model-parallel-size", type=int, default=1)
     p.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
     p.add_argument("--dry-run", action="store_true", help="map shapes from the headers only; write nothing")
     args = p.parse_args(argv)
@@ -139,10 +150,12 @@ def main(argv=None) -> int:
     for shard in sorted(set(weight_map.values())):
         headers.update(read_safetensors_header(args.hf_dir / shard))
     vocab_rows = headers["model.llm.embed.weight"][1][0]
-    target_vocab = args.target_vocab_size or vocab_rows
     unpadded = config.unpadded_vocab_size or vocab_rows
+    multiple = args.make_vocab_size_divisible_by * args.tensor_model_parallel_size
+    target_vocab = args.target_vocab_size or -(-unpadded // multiple) * multiple
     if target_vocab < unpadded:
         raise SystemExit(f"--target-vocab-size {target_vocab} would drop real tokens (unpadded {unpadded})")
+    print(f"[inkling-convert] vocab: {vocab_rows} checkpoint rows -> {target_vocab} (unpadded {unpadded})")
 
     model = build_inkling_model(config, vocab_size=target_vocab, max_sequence_length=4096, meta=True)
     expected = module_tensor_shapes(model)

@@ -118,6 +118,14 @@ python tools/checkpoint_conversion/convert_inkling_hf_megatron.py \
     --output /data/inkling_small_megatron
 ```
 
+The embedding and LM head are resized to the vocabulary that training builds:
+the 200,058 real tokens rounded up to a multiple of
+`make_vocab_size_divisible_by` × TP, which is 200,064 with the defaults (128 × 1).
+If the training run uses other values, pass the same ones with
+`--make-vocab-size-divisible-by` and `--tensor-model-parallel-size`, or set
+`--target-vocab-size` directly; otherwise loading fails on the embedding and
+LM-head shapes.
+
 `--dry-run` maps every tensor from the safetensors headers alone and writes
 nothing. The output is a single-rank (TP = PP = EP = 1) `torch` checkpoint; load
 it with `--load <output> --ckpt-format torch --finetune --no-load-optim

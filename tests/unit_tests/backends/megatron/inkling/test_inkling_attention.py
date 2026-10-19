@@ -55,9 +55,11 @@ def _run(attention, backend, inputs, attention_mask=None):
 
 
 @pytest.mark.parametrize("layer_idx", [0, 1], ids=["sliding", "global"])
-@pytest.mark.parametrize("padding", [False, True], ids=["no_mask", "padding_mask"])
+@pytest.mark.parametrize(
+    "masking", [None, "padding", "fully_masked_rows"], ids=["no_mask", "padding_mask", "fully_masked_rows"]
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_flex_matches_eager(layer_idx, padding, dtype):
+def test_flex_matches_eager(layer_idx, masking, dtype):
     config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), params_dtype=dtype)
     attention = InklingCoreAttention(
         config.attention_config(layer_idx), layer_number=layer_idx + 1, attn_mask_type=AttnMaskType.causal
@@ -66,17 +68,22 @@ def test_flex_matches_eager(layer_idx, padding, dtype):
     inputs = _inputs(config, layer_idx, dtype)
 
     mask = None
-    if padding:
-        # The second row hides keys 10-29 from every later query; no row is fully masked.
+    if masking is not None:
         mask = torch.zeros(BATCH, 1, SEQ, SEQ, dtype=torch.bool, device="cuda")
+        # The second row hides keys 10-29 from every later query.
         mask[1, :, 30:, 10:30] = True
+    if masking == "fully_masked_rows":
+        # Queries 0-7 of the second row (padding) see no key at all.
+        mask[1, :, :8, :] = True
 
     eager, eager_grads = _run(attention, "eager", inputs, mask)
     flex, flex_grads = _run(attention, "flex", inputs, mask)
-    if padding:
+    if masking is not None:
         assert not torch.allclose(
             eager, _run(attention, "eager", inputs)[0]
         ), "the padding mask changed nothing"
+    if masking == "fully_masked_rows":
+        assert eager[:8, 1].abs().max() == 0, "a fully masked query must attend to nothing"
 
     tol = 2e-5 if dtype == torch.float32 else 2e-2
     scale = eager.float().abs().max()

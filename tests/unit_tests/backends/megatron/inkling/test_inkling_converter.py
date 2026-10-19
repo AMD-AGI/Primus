@@ -26,7 +26,7 @@ from tests.unit_tests.backends.megatron.inkling.inkling_test_utils import (
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="TE modules need a GPU")
 
-VOCAB = 640  # checkpoint rows; the test preset sets unpadded_vocab_size: 600
+VOCAB = 640  # checkpoint rows; the test preset sets unpadded_vocab_size: 600, padded by 128 to 640
 
 
 @pytest.fixture
@@ -69,6 +69,21 @@ def test_convert_and_load(tiny_checkpoint):
     model = build_inkling_model(config, vocab_size=VOCAB, max_sequence_length=4096)
     model.load_state_dict(ckpt["model"], strict=True)
     assert ckpt["model"]["decoder.layers.1.mlp.router.expert_bias"].dtype == torch.float32
+
+
+@pytest.mark.parametrize(
+    "flags, rows",
+    [([], 640), (["--make-vocab-size-divisible-by", "8"], 600), (["--tensor-model-parallel-size", "2"], 768)],
+    ids=["default", "trim", "pad"],
+)
+def test_vocab_follows_training_padding(tiny_checkpoint, flags, rows):
+    hf_dir, yaml, _ = tiny_checkpoint
+    out_dir = hf_dir / "megatron"
+    argv = ["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--output", str(out_dir), *flags]
+    assert load_converter().main(argv) == 0
+    ckpt = torch.load(out_dir / "release" / "mp_rank_00" / "model_optim_rng.pt", weights_only=False)
+    for key in ("embedding.word_embeddings.weight", "output_layer.weight"):
+        assert ckpt["model"][key].shape[0] == rows, key
 
 
 def test_preset_mismatch_is_rejected(tiny_checkpoint):

@@ -56,7 +56,12 @@ class InklingShortConv(MegatronModule):
             self.config.init_method(self.weight)
 
     def forward(self, x: torch.Tensor, seq_lengths: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """``x``: ``[s, b, c]``. Packed sequences (``seq_lengths``) are optional item O8."""
+        """``x``: ``[s, b, c]``. Packed sequences (``seq_lengths``) are optional item O8.
+
+        The conv runs over the whole row and ignores the attention mask, so
+        padded rows and per-document masking (``reset_attention_mask``) are
+        unsupported; the builder rejects the latter.
+        """
         if seq_lengths is not None:
             raise NotImplementedError("Packed-sequence short convolution is optional item O8")
         in_dtype = x.dtype

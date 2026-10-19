@@ -28,6 +28,7 @@ many microbatches are accumulated (the reference's own fp32 run is off by
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import sys
@@ -221,10 +222,12 @@ def _run_layout(name, pp, vpp, ep, backend, ids, ref_loss, ref_grads, ref32_erro
     dist.all_gather_object(gathered, errors)
     errors = {k: v for part in gathered for k, v in part.items()}
     scalar = {k for k in errors if ref_grads[k].numel() == 1}
-    failing = {k: v for k, v in errors.items() if v >= (SCALAR_TOLERANCE if k in scalar else TOLERANCE)}
+    # "not <" so that NaN errors fail too.
+    failing = {k: v for k, v in errors.items() if not v < (SCALAR_TOLERANCE if k in scalar else TOLERANCE)}
     missing = {k for k in ref_grads if k not in errors and not k.endswith("expert_bias")}
     loss_err = abs(loss.item() - ref_loss.item())
-    ok = not failing and not missing and loss_err <= 1e-6 + 1e-5 * abs(ref_loss.item())
+    loss_ok = math.isfinite(loss.item()) and loss_err <= 1e-6 + 1e-5 * abs(ref_loss.item())
+    ok = not failing and not missing and loss_ok
     if dist.get_rank() == 0:
         print(
             f"[{'PASS' if ok else 'FAIL'}] {backend:5s} {name:13s} pp={pp} vpp={vpp or 1} ep={ep} dp={dp} "

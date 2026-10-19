@@ -138,6 +138,10 @@ def inkling_builder(
     )
     assert not args.use_legacy_models, "Inkling requires use_legacy_models=False (Mcore-only)."
     assert args.untie_embeddings_and_output_weights, "Inkling's embedding and LM head are untied"
+    assert not getattr(args, "reset_attention_mask", False), (
+        "Inkling does not support reset_attention_mask: the ShortConvs would mix tokens across "
+        "document boundaries that the attention mask hides (per-document masking is item O8)"
+    )
 
     decoder_spec = import_module(args.spec) if args.spec is not None else None
     return build_inkling_model(

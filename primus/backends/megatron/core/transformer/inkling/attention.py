@@ -220,7 +220,9 @@ class InklingCoreAttention(MegatronModule):
             allowed = allowed & ~attention_mask.bool()
         scores = scores.masked_fill(~allowed, torch.finfo(scores.dtype).min)
 
-        probs = F.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
+        # A query with no allowed key attends to nothing (as in flex), not uniformly to every key.
+        probs = F.softmax(scores, dim=-1, dtype=torch.float32)
+        probs = probs.masked_fill(~allowed.any(dim=-1, keepdim=True), 0.0).to(q.dtype)
         if self.training and self.dropout_p > 0:
             with tensor_parallel.get_cuda_rng_tracker().fork():
                 probs = F.dropout(probs, p=self.dropout_p)
