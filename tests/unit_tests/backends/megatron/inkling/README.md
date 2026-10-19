@@ -17,20 +17,21 @@ suite covers:
 
 ## Last run
 
-Tuesday Oct 6, 2026, on one MI355X GPU (`HIP_VISIBLE_DEVICES=0`), spur job
-195681 on `crsuse2-m2m-031`.
+Monday Oct 19, 2026, on one MI355X GPU (`HIP_VISIBLE_DEVICES=0`), spur job
+225454 on `crsuse2-m2m-095`.
 
 | Item | Value |
 | --- | --- |
-| Docker image | `unifiedtrainingdockers.azurecr.io/utd/ci:primus_ci_ac8b18c_20261005` (container `primus_v26.8rc_rocm10.1`) |
-| torch | `2.14.0+rocm10.1.0rc3` |
+| Docker image | `rocm/primus:v26.8` (container `primus_v26.8`) |
+| torch | `2.14.0+rocm10.1.0` |
 | Container transformers | 5.10.0 (has no Inkling) |
 | Reference transformers | 5.19.0.dev0 at commit `263c5eb913849847dcff1885b7b5e387c483f844` |
-| Primus base commit | `bc8fd627`, with the Inkling files uncommitted |
+| Emerging-Optimizers | commit `93d9eb3a6c899b50de73992826451fba3ab6adfb` |
+| Primus | branch `feat/inkling-megatron`, `main` merged at `8e7a2406` |
 
 ### pytest
 
-`50 passed in 100.38s`, with nothing skipped. The slowest tests are
+`64 passed in 97.27s`, with nothing skipped. The slowest tests are
 `test_inkling_small_first_layers_match_reference` (69 s, both backends) and
 `test_tiny_bf16_training_step_tracks_fp32` (7 s). Expect another 1–2 minutes
 on a fresh container while aiter JIT-builds its kernels, plus a few seconds
@@ -40,16 +41,20 @@ The real-layer test needs about 110 GB of GPU memory and about 60 GB of host
 memory. Each fp32 copy of layers 0–5 is about 110 GB, so the test runs the
 reference first, frees it, then builds the Megatron model.
 
-| File | Tests | Needs the reference |
+| File | Tests | Needs |
 | --- | --- | --- |
-| `test_inkling_config.py` | 11 | no |
-| `test_inkling_converter.py` | 3 | no |
-| `test_inkling_hf_mapping.py` | 9 | no |
-| `test_inkling_model.py` | 8 | no |
-| `test_inkling_attention.py` | 9 | no |
-| `test_inkling_reference.py` | 10 | yes (skips without it) |
+| `test_inkling_config.py` | 12 | nothing extra |
+| `test_inkling_converter.py` | 6 | nothing extra |
+| `test_inkling_hf_mapping.py` | 10 | nothing extra |
+| `test_inkling_model.py` | 8 | nothing extra |
+| `test_inkling_attention.py` | 13 | nothing extra |
+| `test_inkling_muon.py` | 5 | Emerging-Optimizers (skips without it) |
+| `test_inkling_reference.py` | 10 | the reference (skips without it); the released-layers test also needs the fetched layers |
 
 ### Margin and sensitivity checks
+
+These numbers are from the Oct 6 run, except the released-layer rows, which are
+from Oct 19.
 
 | Check | Result |
 | --- | --- |
@@ -57,7 +62,7 @@ reference first, frees it, then builds the Megatron model.
 | Tiny fp32 logits max abs diff | 1.30e-07 (max abs ref 0.246) |
 | Worst gradient relative error | 1.33e-06 (`decoder.layers.1.self_attention.rel_proj`) |
 | Router top-k choice per token | identical |
-| Inkling-Small layers 0–5 (1536 tokens), logits max abs diff / max abs ref | 1.49e-06 (eager and flex) |
+| Inkling-Small layers 0–5 (1536 tokens), logits max abs diff / max abs ref | 1.49e-06 (eager), 1.53e-06 (flex) |
 | Inkling-Small layers 0–5, argmax agreement | 1.00000 (eager and flex) |
 
 Zeroing or perturbing one feature must move the tiny model's logits by far more
@@ -151,8 +156,8 @@ srun --pty /bin/bash        # now on the compute node
 docker run -it --device /dev/dri --device /dev/kfd --network host --ipc host \
     --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
     --privileged -v $HOME:$HOME --shm-size 64G \
-    --name primus_v26.8rc_rocm10.1 \
-    unifiedtrainingdockers.azurecr.io/utd/ci:primus_ci_ac8b18c_20261005
+    --name primus_v26.8 \
+    rocm/primus:v26.8
 ```
 
 Run from your checkout under `$HOME` (`/home/<user>/Primus`), not from the
@@ -161,11 +166,12 @@ root inside the container: as a normal user, aiter's `rocminfo` probe fails.
 Set `PYTHONDONTWRITEBYTECODE=1` so no root-owned `__pycache__` ends up in the
 NFS checkout.
 
-### 2. Install the reference and fetch the real layers (once per container)
+### 2. Install the reference and Emerging-Optimizers, fetch the real layers (once per container)
 
-Both go to the container's `/tmp`, so `/home` (NFS) stays untouched. The
+All three go to the container's `/tmp`, so `/home` (NFS) stays untouched. The
 container's transformers stays at 5.10; the pinned build is only added through
-`PYTHONPATH`.
+`PYTHONPATH`. The image doesn't ship Emerging-Optimizers, which Megatron's Muon
+needs; the commit is the one the Muon install hook pins.
 
 ```bash
 export PYTHONDONTWRITEBYTECODE=1
@@ -176,6 +182,9 @@ pip install --no-deps --no-cache-dir -q --target /tmp/inkling_ref/site \
 PYTHONPATH=/tmp/inkling_ref/site python -c \
     "import transformers; from transformers.models.inkling import modeling_inkling; print(transformers.__version__)"
 # -> 5.19.0.dev0
+
+pip install --no-deps --no-cache-dir -q --target /tmp/eo \
+    https://github.com/NVIDIA-NeMo/Emerging-Optimizers/archive/93d9eb3a6c899b50de73992826451fba3ab6adfb.zip
 
 # Ranged download of the layer 0-5, embedding and unembedding tensors from
 # thinkingmachines/Inkling-Small: 122 tensors, 56.6 GB, about 3.5 min.
@@ -191,13 +200,15 @@ an older 2-layer fetch fails with a clear message rather than skipping.
 ### 3. Run the suite
 
 ```bash
-HIP_VISIBLE_DEVICES=0 PYTHONPATH=/tmp/inkling_ref/site \
+HIP_VISIBLE_DEVICES=0 PYTHONPATH=/tmp/eo:/tmp/inkling_ref/site \
     python -m pytest -q -p no:cacheprovider -W ignore -rs --durations=8 \
     tests/unit_tests/backends/megatron/inkling
 ```
 
-Without `PYTHONPATH=/tmp/inkling_ref/site`, 40 tests pass and the 10 reference
-tests skip.
+With everything from step 2 in place, all 64 tests pass. Each missing piece
+skips its tests: without `/tmp/inkling_ref/site` the 10 reference tests skip,
+without `/tmp/eo` the 5 Muon tests skip, and without the fetched layers the
+released-layers test skips.
 
 ### 4. Margin and sensitivity scripts (optional)
 
@@ -218,8 +229,8 @@ Every step above can also be run without attaching to the container by
 wrapping it in `spur exec` and `docker exec`:
 
 ```bash
-spur exec <jobid> bash -lc 'docker exec -e PYTHONDONTWRITEBYTECODE=1 primus_v26.8rc_rocm10.1 \
-    bash -lc "cd /home/<user>/Primus && HIP_VISIBLE_DEVICES=0 PYTHONPATH=/tmp/inkling_ref/site \
+spur exec <jobid> bash -lc 'docker exec -e PYTHONDONTWRITEBYTECODE=1 primus_v26.8 \
+    bash -lc "cd /home/<user>/Primus && HIP_VISIBLE_DEVICES=0 PYTHONPATH=/tmp/eo:/tmp/inkling_ref/site \
     python -m pytest -q -p no:cacheprovider -W ignore tests/unit_tests/backends/megatron/inkling"'
 ```
 
@@ -236,7 +247,7 @@ PYTHONPATH=/tmp/inkling_ref/site torchrun --nproc-per-node 8 \
 ```
 
 It takes about 5 minutes on 8 MI355X GPUs, most of it FlexAttention and
-aiter compilation. Last run: Oct 14, 2026, `rocm/primus:v26.8`, 14 of 14
+aiter compilation. Last run: Oct 19, 2026, `rocm/primus:v26.8`, 14 of 14
 layouts passed.
 
 ## Not covered by P1 yet

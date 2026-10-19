@@ -164,14 +164,14 @@ export PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1   # the v26.8 image doesn't ship Eme
 ### Single GPU
 
 ```bash
-HIP_VISIBLE_DEVICES=0 PYTHONPATH=/tmp/inkling_ref/site \
+HIP_VISIBLE_DEVICES=0 PYTHONPATH=/tmp/eo:/tmp/inkling_ref/site \
     python -m pytest -q tests/unit_tests/backends/megatron/inkling
 ```
 
 The tests that compare against transformers skip unless the pinned
-transformers build is on `PYTHONPATH`; installing it, and fetching the real
-Inkling-Small layers for the real-weight test, are described in the tests
-README. With the reference, the fp32 tiny model must match its logits and loss
+transformers build is on `PYTHONPATH`, and the Muon tests skip without
+Emerging-Optimizers. Installing both, and fetching the real Inkling-Small
+layers for the real-weight test, are described in the tests README. With the reference, the fp32 tiny model must match its logits and loss
 to 1e-5, and every gradient to 1e-5 of that tensor's largest value. That is
 checked on both attention backends, and on the released layers 0–5 of
 Inkling-Small. bf16 must stay as close to the fp32 reference as transformers'
