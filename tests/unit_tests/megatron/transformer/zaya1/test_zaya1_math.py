@@ -7,6 +7,7 @@
 """CPU checks that the ZAYA1 mixer uses the implemented affine, not the paper affine."""
 
 import math
+import sys
 
 import pytest
 import torch
@@ -251,7 +252,7 @@ def test_explicit_zaya_layers_override_the_alternation():
 
 
 def test_fp8_uses_te_linears_for_cca_and_experts_only(monkeypatch):
-    import primus.backends.megatron.core.models.zaya1.zaya1_modules as zaya_modules
+    zaya_modules = sys.modules["primus.backends.megatron.core.models.zaya1.zaya1_modules"]
 
     class FakeFp8(nn.Linear):
         def __init__(self, in_features, out_features, bias, config):
