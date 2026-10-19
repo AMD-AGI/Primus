@@ -898,7 +898,9 @@ def _make_k3_num_floating_point_operations(original_fn):
     for comparison.
     """
 
-    def wrapped(args, batch_size):
+    # *extra/**extra_kwargs: Megatron-LM main passes seqlen_squared_sum_in_batch /
+    # total_real_tokens_in_batch; the K3 formula is dense-sequence and ignores them.
+    def wrapped(args, batch_size, *extra, **extra_kwargs):
         total_flops, breakdown = compute_kimi_k3_flops(args, batch_size)
 
         global _BREAKDOWN_LOGGED

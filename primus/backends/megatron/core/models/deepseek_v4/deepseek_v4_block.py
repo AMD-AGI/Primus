@@ -58,6 +58,7 @@ Forward shape contract:
 from __future__ import annotations
 
 import ast
+import inspect
 import logging
 from contextlib import nullcontext
 
@@ -870,13 +871,19 @@ class DeepseekV4TransformerBlock(TransformerBlock):
         # offloading is opt-out (`mark_not_offload`) rather than opt-in.
         self.offload_context, self.group_prefetch_offload_commit_async = nullcontext(), None
         if _get_cpu_offload_context is not None:
-            self.offload_context, self.group_prefetch_offload_commit_async = _get_cpu_offload_context(
+            offload_args = [
                 config.cpu_offloading,
                 config.cpu_offloading_num_layers,
                 config.num_layers,
                 config.cpu_offloading_activations,
                 config.cpu_offloading_weights,
                 config.cpu_offloading_double_buffering,
+            ]
+            # Megatron-LM main added a required retain_pinned_cpu_buffers argument.
+            if "retain_pinned_cpu_buffers" in inspect.signature(_get_cpu_offload_context).parameters:
+                offload_args.append(config.cpu_offloading_retain_pinned_cpu_buffers)
+            self.offload_context, self.group_prefetch_offload_commit_async = _get_cpu_offload_context(
+                *offload_args
             )
             config._cpu_offloading_context = self.offload_context if config.cpu_offloading else None
         elif getattr(config, "cpu_offloading", False):

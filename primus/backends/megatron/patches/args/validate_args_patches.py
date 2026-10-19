@@ -117,3 +117,57 @@ def patch_validate_args_fp4(ctx: PatchContext):
         "[Patch:megatron.validate_args.fp4_te_version] "
         "Patched validate_args to suppress FP4 TE version check"
     )
+
+
+def _te_cross_entropy_has_fp32_grad() -> bool:
+    """Whether TE's fused cross entropy keeps the input gradient in FP32 (TE PR #3193).
+
+    The fix renames ``cross_entropy_backward``'s first parameter from ``_input`` to
+    ``grad_input``; ROCm TE builds report versions that do not track when it landed.
+    """
+    try:
+        from transformer_engine.pytorch.triton import cross_entropy as te_triton_ce
+    except ImportError:
+        return False
+    return next(iter(inspect.signature(te_triton_ce.cross_entropy_backward).parameters), None) == "grad_input"
+
+
+@register_patch(
+    "megatron.validate_args.te_cross_entropy_version",
+    backend="megatron",
+    phase="before_train",
+    description="Keep TE cross-entropy fusion on Megatron-LM main below TE 2.19, as on the pinned Megatron",
+    condition=lambda ctx: getattr(get_args(ctx), "cross_entropy_loss_fusion", False)
+    and getattr(get_args(ctx), "cross_entropy_fusion_impl", None) == "te",
+)
+def patch_validate_args_te_cross_entropy(ctx: PatchContext):
+    """
+    Megatron-core 0.17-0.19 reject ``cross_entropy_fusion_impl='te'`` outright, and
+    Megatron-LM main rejects it below TE 2.19, because older TE kept the input gradient in
+    BF16 (TE PR #3193). ROCm TE versions do not track the fix (IFU-release_v2.18 has it;
+    2.15 / 2.17.1 do not). Drop the check either way: the native fusion materialises FP32
+    logits and runs out of memory on Llama-3.1-70B (TP1, seq 8192), and the kernel without
+    the fix is what the pinned Megatron already runs. Older Megatron has no such check.
+    """
+    import megatron.training.arguments as megatron_args
+
+    # validate_args can only be source-patched once, so pick the form that is present.
+    source = inspect.getsource(megatron_args._primus_original_validate_args)
+    for ori_code, new_code in (
+        ('and not is_te_min_version("2.19.0")', "and False"),
+        ("args.cross_entropy_loss_fusion and args.cross_entropy_fusion_impl == 'te'\n", "False\n"),
+    ):
+        if ori_code in source:
+            _patch_validate_args_source(ori_code, new_code)
+            break
+    if _te_cross_entropy_has_fp32_grad():
+        log_rank_0(
+            "[Patch:megatron.validate_args.te_cross_entropy_version] "
+            "TE fused cross entropy has the FP32-gradient fix; patched validate_args version check"
+        )
+    else:
+        log_rank_0(
+            "[Patch:megatron.validate_args.te_cross_entropy_version] WARNING: "
+            "TE fused cross entropy lacks the FP32-gradient fix (TE PR #3193); keeping it as on "
+            "the pinned Megatron. Use ROCm TE >= 2.18 for FP32 input gradients."
+        )

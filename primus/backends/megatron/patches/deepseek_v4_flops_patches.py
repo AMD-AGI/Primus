@@ -802,9 +802,11 @@ def _make_v4_num_floating_point_operations(original_fn, *, dispatch_v4: bool):
     silently fall through to the upstream formula.
     """
 
-    def wrapped(args, batch_size):
+    # *extra/**extra_kwargs: Megatron-LM main passes seqlen_squared_sum_in_batch /
+    # total_real_tokens_in_batch; the V4 formula is dense-sequence and ignores them.
+    def wrapped(args, batch_size, *extra, **extra_kwargs):
         if not dispatch_v4:
-            return original_fn(args, batch_size)
+            return original_fn(args, batch_size, *extra, **extra_kwargs)
 
         total_flops, breakdown = compute_v4_flops(args, batch_size)
 

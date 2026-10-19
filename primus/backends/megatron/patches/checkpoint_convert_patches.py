@@ -59,7 +59,15 @@ def patch_fused_kernels_noop_on_rocm(ctx: PatchContext):
     HIP/ROCm torch build we short-circuit the build; on CUDA the original build
     still runs.
     """
-    import megatron.legacy.fused_kernels as fk
+    try:
+        import megatron.legacy.fused_kernels as fk
+    except ModuleNotFoundError:
+        # megatron.legacy is gone in Megatron-LM main (core 0.20); nothing builds these kernels.
+        log_rank_0(
+            "[Patch:megatron.checkpoint_convert.fused_kernels_rocm_noop]   "
+            "megatron.legacy not present; skipping"
+        )
+        return
 
     if getattr(fk.load, "_primus_rocm_wrapped", False):
         log_rank_0(

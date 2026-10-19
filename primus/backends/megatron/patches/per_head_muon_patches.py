@@ -100,7 +100,11 @@ def patch_per_head_muon(ctx: PatchContext):
         return
 
     import megatron.core.optimizer.muon as muon_module
-    from megatron.core.optimizer.muon import TensorParallelMuon
+
+    try:
+        from megatron.core.optimizer.muon import TensorParallelMuon
+    except ImportError:  # moved in Megatron-LM main
+        from megatron.core.optimizer.emerging_optimizers import TensorParallelMuon
 
     if per_head_config.impl == "batched":
         # Fail here rather than on the first optimizer step: the batched path needs a

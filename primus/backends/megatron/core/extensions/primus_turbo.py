@@ -1186,6 +1186,7 @@ class PrimusTurboLinear(TELinear):
         is_expert: bool = False,
         symmetric_ar_type: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        name: Optional[str] = None,  # passed by Megatron-LM main; unused
     ):
         _apply_turbo_gemm_backend_env()
 
@@ -1393,6 +1394,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        name: Optional[str] = None,  # passed by Megatron-LM main; unused
     ):
         if not input_is_parallel:
             raise ValueError(f"{__class__.__name__} layers do not support input_is_parallel = False")
@@ -1603,6 +1605,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
+        name: Optional[str] = None,  # passed by Megatron-LM main; unused
     ):
         _apply_turbo_gemm_backend_env()
 
@@ -1829,6 +1832,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,
+        name: Optional[str] = None,  # passed by Megatron-LM main; unused
     ):
         _apply_turbo_gemm_backend_env()
 
@@ -2248,6 +2252,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         is_expert: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: Optional[str] = None,  # passed by Megatron-LM main; unused
     ):
         _apply_turbo_grouped_gemm_backend_env()
 
@@ -2483,6 +2488,7 @@ class PrimusTurboColumnParallelGroupedLinear(PrimusTurboGroupedLinear):
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: Optional[str] = None,  # passed by Megatron-LM main; unused
     ):
         super().__init__(
             num_gemms=num_gemms,
@@ -2528,6 +2534,7 @@ class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: Optional[str] = None,  # passed by Megatron-LM main; unused
     ):
         super().__init__(
             num_gemms=num_gemms,
@@ -2659,9 +2666,16 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         return _get_fp8_dtype(fmt, True), _get_fp8_dtype(fmt, False)
 
     def dispatch_preprocess(
-        self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        routing_map: torch.Tensor,
+        probs: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
     ):
         """Initializes routing metadata and prepares tensors for fused dispatch.
+
+        ``padding_mask`` is what Megatron-LM main passes to flex dispatchers. Upstream only
+        consumes it on the HybridEP backend; DeepEP ignores it, and so does this dispatcher.
 
         This method reshapes input tensors and processes routing information into a
         unified format, where the routing map is expanded to cover the TPxEP communication domain,

@@ -32,6 +32,21 @@ def _resolve_model_vocab_size(tokenizer_model):
     return config.get("vocab_size") or config.get("text_config", {}).get("vocab_size")
 
 
+def _null_tokenizer_vocab_includes_eod():
+    """Whether Megatron's NullTokenizer counts the EOD token inside ``vocab_size``.
+
+    Older Megatron builds ``vocab_size + 1`` ids with EOD last; Megatron-LM main takes
+    the total and puts EOD at ``vocab_size - 1`` (``eod_id`` defaults to that).
+    """
+    import inspect
+
+    try:
+        from megatron.core.tokenizers.text.libraries.null_tokenizer import NullTokenizer
+    except ImportError:
+        return False
+    return "eod_id" in inspect.signature(NullTokenizer.__init__).parameters
+
+
 @register_patch(
     "megatron.args.mock_data",
     backend="megatron",
@@ -59,12 +74,12 @@ def patch_mock_data(ctx: PatchContext):
         args.test_data_path = None
         args.tokenizer_type = "NullTokenizer"
 
+        # vocab_size below follows older Megatron's NullTokenizer: EOD comes on top of it.
         existing_vocab_size = getattr(args, "vocab_size", None)
         if existing_vocab_size is None:
             tokenizer_model = getattr(args, "tokenizer_model", None)
             model_vocab_size = _resolve_model_vocab_size(tokenizer_model)
             if model_vocab_size is not None:
-                # NullTokenizer appends an EOD token on top of vocab_size.
                 args.vocab_size = model_vocab_size - 1
                 vocab_size_log = f"vocab_size={model_vocab_size} from {tokenizer_model} config"
             else:
@@ -76,6 +91,11 @@ def patch_mock_data(ctx: PatchContext):
                 )
         else:
             vocab_size_log = f"preserved vocab_size={existing_vocab_size}"
+        # Megatron-LM main counts EOD inside vocab_size (EOD = vocab_size - 1); add it back
+        # so both versions build the same ids, EOD id and padded embedding.
+        if _null_tokenizer_vocab_includes_eod():
+            args.vocab_size += 1
+            vocab_size_log += " (+1 EOD for Megatron-LM main's NullTokenizer)"
 
         log_rank_0(
             "[Patch:megatron.args.mock_data] Mock data enabled; "

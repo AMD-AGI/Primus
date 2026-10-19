@@ -125,6 +125,42 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         provider.is_distributed = True  # Always True to match Megatron's behavior
         return provider
 
+    @staticmethod
+    def _uses_cfg_container_api(pretrain_fn) -> bool:
+        """Megatron-LM main: ``pretrain(cfg_container, datasets_provider, model_type, ...)``."""
+        import inspect
+
+        params = list(inspect.signature(pretrain_fn).parameters)
+        return bool(params) and params[0] == "cfg_container"
+
+    def _build_run_config(self):
+        """Prepare args, run config and runtime services for the cfg-container ``pretrain``.
+
+        On that API ``initialize_megatron`` no longer parses / validates args or builds the
+        tokenizer; the entry script does, so Primus has to as well. ``parse_and_validate_args``
+        resolves ``parse_args`` / ``validate_args`` through module globals, so the Primus
+        patches on both still apply.
+
+        The container's ``model`` is left as None: with a model config set, Megatron builds the
+        model from it and ignores ``model_provider``, which would bypass the Primus providers
+        (DeepSeek-V4, Kimi-K3, Mamba, ...).
+        """
+        import megatron.training.argument_utils as argument_utils
+        import megatron.training.arguments as megatron_args
+        from megatron.training import global_vars
+
+        args = megatron_args.parse_and_validate_args(args_defaults={"tokenizer_type": "GPT2BPETokenizer"})
+        run_config = argument_utils.pretrain_cfg_container_from_args(args, model_cfg=None)
+        # Megatron-LM main moved these out of pretrain() into the entry script; core 0.19
+        # still does them inside pretrain() and does not have the helpers.
+        if hasattr(global_vars, "set_run_config"):
+            global_vars.set_run_config(run_config)
+        if hasattr(global_vars, "initialize_runtime_services"):
+            global_vars.initialize_runtime_services(args, training=True)
+        if hasattr(argument_utils, "resolve_tokenizer_vocab_size"):
+            argument_utils.resolve_tokenizer_vocab_size(run_config, args.padded_vocab_size)
+        return run_config
+
     def train(self):
         """Execute Megatron pre-training."""
         log_rank_0("Executing Megatron pretrain...")
@@ -163,10 +199,16 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         # overrides get_datasets_provider() and sets `is_distributed` from its own
         # data provider, where False is a legitimate choice (dataset_provider.py:55).
         if model_type == "mamba":
-            from pretrain_mamba import (  # type: ignore
-                forward_step,
-                train_valid_test_datasets_provider,
-            )
+            try:
+                from pretrain_mamba import (  # type: ignore
+                    forward_step,
+                    train_valid_test_datasets_provider,
+                )
+            except ImportError:  # Megatron-LM main: pretrain_mamba.py only forwards to pretrain_hybrid.py
+                from pretrain_hybrid import (  # type: ignore
+                    forward_step,
+                    train_valid_test_datasets_provider,
+                )
 
             log_rank_0("Using Mamba model provider and training components")
             train_valid_test_datasets_provider.is_distributed = True
@@ -267,13 +309,23 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             mt_training.get_forward_backward_func = patched_get_forward_backward_func
 
         try:
-            wrapped_pretrain(
-                train_valid_test_datasets_provider,
-                model_provider,
-                ModelType.encoder_or_decoder,
-                forward_step,
-                **kwargs,
-            )
+            if self._uses_cfg_container_api(pretrain):
+                wrapped_pretrain(
+                    self._build_run_config(),
+                    train_valid_test_datasets_provider,
+                    ModelType.encoder_or_decoder,
+                    forward_step,
+                    model_provider=model_provider,
+                    **kwargs,
+                )
+            else:
+                wrapped_pretrain(
+                    train_valid_test_datasets_provider,
+                    model_provider,
+                    ModelType.encoder_or_decoder,
+                    forward_step,
+                    **kwargs,
+                )
             log_rank_0("[MegatronPretrainTrainer] pretrain() completed successfully")
         except Exception as e:
             log_rank_0(f"[MegatronPretrainTrainer] ERROR in pretrain(): {type(e).__name__}: {e}")

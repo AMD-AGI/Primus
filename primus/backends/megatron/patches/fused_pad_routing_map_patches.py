@@ -57,7 +57,9 @@ def patch_fused_pad_routing_map(ctx: PatchContext):
         for mod_name, module in list(sys.modules.items()):
             if module is None or module is meg_mod:
                 continue
-            if getattr(module, "fused_pad_routing_map", None) is orig_fn:
+            # Read __dict__ directly: getattr() would run lazy-module __getattr__ hooks
+            # (e.g. apex's amp_C / fused_weight_gradient_mlp_cuda JIT-build their extension).
+            if getattr(module, "__dict__", {}).get("fused_pad_routing_map") is orig_fn:
                 setattr(module, "fused_pad_routing_map", primus_fused_pad_routing_map)
                 patched_modules.append(mod_name)
 

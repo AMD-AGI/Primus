@@ -12,6 +12,8 @@ This module patches ``megatron.training.training.train`` so that when
 PP warmup runs once immediately before the first call to ``train()``.
 """
 
+import inspect
+
 import torch
 
 from primus.core.patches import PatchContext, register_patch
@@ -224,12 +226,16 @@ def run_pp_warmup(forward_step_func, model, optimizer, config):
         # throw away the grads immediately afterwards.
         nosync_ctx = model_chunk.no_sync() if hasattr(model_chunk, "no_sync") else contextlib.nullcontext()
         with nosync_ctx:
+            backward_kwargs = {}
+            # Megatron-LM main dropped model_type from backward_step.
+            if "model_type" in inspect.signature(_schedule_backward_step).parameters:
+                backward_kwargs["model_type"] = getattr(config, "model_type", None)
             _schedule_backward_step(
                 input_tensor=input_tensor,
                 output_tensor=output_tensor,
                 output_tensor_grad=output_tensor_grad,
-                model_type=getattr(config, "model_type", None),
                 config=config,
+                **backward_kwargs,
             )
 
         # Free fabricated tensors eagerly before moving on.
@@ -301,35 +307,16 @@ def patch_train_with_pp_warmup(ctx: PatchContext) -> None:
     if getattr(original_train, "_primus_pp_warmup_wrapped", False):
         return
 
-    def _train_with_pp_warmup(
-        forward_step_func,
-        model,
-        optimizer,
-        opt_param_scheduler,
-        train_data_iterator,
-        valid_data_iterator,
-        process_non_loss_data_func,
-        config,
-        checkpointing_context,
-        non_loss_data_func,
-        inference_model=None,
-    ):
+    train_signature = inspect.signature(original_train)
+
+    # Pass-through so new keyword parameters on train() (e.g. p2p_communicator on
+    # Megatron-LM main) keep working.
+    def _train_with_pp_warmup(*train_args, **train_kwargs):
         args = get_megatron_args()
         if getattr(args, "pp_warmup", False):
-            run_pp_warmup(forward_step_func, model, optimizer, config)
-        return original_train(
-            forward_step_func,
-            model,
-            optimizer,
-            opt_param_scheduler,
-            train_data_iterator,
-            valid_data_iterator,
-            process_non_loss_data_func,
-            config,
-            checkpointing_context,
-            non_loss_data_func,
-            inference_model,
-        )
+            bound = train_signature.bind(*train_args, **train_kwargs).arguments
+            run_pp_warmup(bound["forward_step_func"], bound["model"], bound["optimizer"], bound["config"])
+        return original_train(*train_args, **train_kwargs)
 
     setattr(_train_with_pp_warmup, "_primus_pp_warmup_wrapped", True)
     training.train = _train_with_pp_warmup

@@ -99,8 +99,10 @@ def patch_te_delayed_scaling_save_original_input(ctx: PatchContext):
 
     original_init = shared_experts.SharedExpertMLP.__init__
 
-    def patched_init(self, config, submodules=None, gate=False, pg_collection=None):
-        original_init(self, config, submodules, gate, pg_collection)
+    # Pass-through: Megatron-LM main adds name= to SharedExpertMLP.__init__.
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        config = self.config
 
         if hasattr(self.linear_fc1, "save_original_input"):
             if config.fp8 and config.fp8_recipe == "delayed":

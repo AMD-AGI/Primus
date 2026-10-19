@@ -48,10 +48,11 @@ def _is_pure_dp(ctx: PatchContext) -> bool:
 def patch_skip_redundant_mp_sync(ctx: PatchContext):
     import megatron.training.training as megatron_training
 
-    def _passthrough_logical_and(val):
+    # Extra *args/**kwargs absorb parameters added upstream (e.g. group= on Megatron-LM main).
+    def _passthrough_logical_and(val, *args, **kwargs):
         return val
 
-    def _passthrough_reduce_max(val):
+    def _passthrough_reduce_max(val, *args, **kwargs):
         if val is None:
             return None
         if isinstance(val, torch.Tensor):

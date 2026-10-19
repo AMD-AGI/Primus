@@ -47,6 +47,8 @@ def patch_train_step_seq_split(ctx: PatchContext):
         opt_param_scheduler,
         config,
         forward_backward_func,
+        *train_args,
+        **train_kwargs,  # iteration, and pg_collection / p2p_communicator on Megatron-LM main
     ):
         args = get_args(ctx)
         num_seq_splits = getattr(args, "num_seq_splits", 1)
@@ -70,6 +72,8 @@ def patch_train_step_seq_split(ctx: PatchContext):
             opt_param_scheduler,
             config,
             forward_backward_func,
+            *train_args,
+            **train_kwargs,
         )
 
     megatron_training.train_step = _patched_train_step

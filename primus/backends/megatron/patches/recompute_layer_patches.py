@@ -46,8 +46,45 @@ MTP:
 
 from contextlib import nullcontext
 
+from primus.backends.megatron.patches._source_patch_utils import patch_function_source
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+# Megatron-LM main moved ``TransformerBlock._checkpointed_forward`` into the free
+# function ``megatron.core.recompute.checkpointed_forward(block, ...)``, imported by
+# name into ``transformer_block``. Its ``block`` branch already decides per layer
+# whether to checkpoint through ``chunk_runner``, so ``recompute_layer_ids`` becomes
+# one more branch in front of ``uniform`` / ``block`` that picks by global layer id.
+_MAIN_RECOMPUTE_ORI = "    if self.config.recompute_method == 'uniform':\n"
+_MAIN_RECOMPUTE_NEW = (
+    "    if getattr(self.config, 'recompute_layer_ids', None) is not None:\n"
+    "        _primus_recompute_ids = set(self.config.recompute_layer_ids)\n"
+    "        for layer_idx in range(self.num_layers_per_pipeline_rank):\n"
+    # Same fp8/fp4 rule as the block branch: re-entrant checkpointing needs an
+    # input that requires grad.
+    "            use_checkpoint = (layer_idx + layer_offset) in _primus_recompute_ids and not (\n"
+    "                (self.config.fp8 or self.config.fp4) and not hidden_states.requires_grad\n"
+    "            )\n"
+    "            chunk_runner(layer_idx, layer_idx + 1, use_checkpoint)\n"
+    "    elif self.config.recompute_method == 'uniform':\n"
+)
+
+
+def _install_main_recompute_layer_ids():
+    """Megatron-LM main: add the ``recompute_layer_ids`` branch to ``checkpointed_forward``."""
+    import megatron.core.recompute as recompute_mod
+    import megatron.core.transformer.transformer_block as transformer_block_mod
+
+    original = recompute_mod.checkpointed_forward
+    if getattr(original, "_primus_patched", False):
+        return
+    patched = patch_function_source(
+        recompute_mod, "checkpointed_forward", _MAIN_RECOMPUTE_ORI, _MAIN_RECOMPUTE_NEW
+    )
+    patched._primus_patched = True
+    patched._primus_original = original
+    if getattr(transformer_block_mod, "checkpointed_forward", None) is original:
+        transformer_block_mod.checkpointed_forward = patched
 
 
 def _mtp_num_layers(args) -> int:
@@ -277,13 +314,24 @@ def _make_mtp_checkpointed_forward_wrapper(original_fn, args):
     the same "exactly these layers, nothing more" contract the decoder block
     already honors.
     """
+    import inspect
+
     import torch
     from megatron.core import parallel_state, tensor_parallel
 
-    def _checkpointed_forward(self, forward_func, *fwd_args, **fwd_kwargs):
+    # Older Megatron passes the callable to checkpoint first; Megatron-LM main drops it
+    # and always runs the layer's own ``_proj_and_transformer_layer`` (all keywords).
+    takes_forward_func = "forward_func" in inspect.signature(original_fn).parameters
+
+    def _checkpointed_forward(self, *fwd_args, **fwd_kwargs):
         recompute_layer_ids = getattr(self.config, "recompute_layer_ids", None)
         if recompute_layer_ids is None:
-            return original_fn(self, forward_func, *fwd_args, **fwd_kwargs)
+            return original_fn(self, *fwd_args, **fwd_kwargs)
+
+        if takes_forward_func:
+            forward_func, *fwd_args = fwd_args
+        else:
+            forward_func = self._proj_and_transformer_layer
 
         # ``layer_number`` is 1-based and already carries the pipeline layout's
         # MTP offset, so ``layer_number - 1`` is the global MTP depth.
@@ -363,7 +411,13 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
         new_post_init._primus_original = orig_post_init
         TransformerConfig.__post_init__ = new_post_init
 
-    if not getattr(TransformerBlock._checkpointed_forward, "_primus_patched", False):
+    if not hasattr(TransformerBlock, "_checkpointed_forward"):
+        _install_main_recompute_layer_ids()
+        log_rank_0(
+            "[Patch:megatron.transformer.recompute_layer_ids] added a recompute_layer_ids "
+            "branch to megatron.core.recompute.checkpointed_forward."
+        )
+    elif not getattr(TransformerBlock._checkpointed_forward, "_primus_patched", False):
         original_fn = TransformerBlock._checkpointed_forward
         TransformerBlock._checkpointed_forward = _make_checkpointed_forward_wrapper(original_fn)
         log_rank_0(
