@@ -245,6 +245,9 @@ def setup_logger(
 
     logging.root.handlers = [InterceptHandler()]
     logging.root.setLevel(logging.NOTSET)
+    # filelock logs every 0.05 s poll at DEBUG, e.g. while another rank JIT-builds a
+    # torch extension under the same TORCH_EXTENSIONS_DIR lock.
+    logging.getLogger("filelock").setLevel(logging.INFO)
 
     global _logger
     checker.check_true(_logger is None, "logger Must be None at first logger setup.")

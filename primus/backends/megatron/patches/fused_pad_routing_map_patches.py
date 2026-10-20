@@ -52,12 +52,15 @@ def patch_fused_pad_routing_map(ctx: PatchContext):
 
     # 2) Replace references already bound into other modules that imported the symbol
     #    at top level before this patch ran (precise: only objects that `is orig_fn`).
+    #    Look in the module __dict__ rather than getattr(): a module-level __getattr__
+    #    runs on a miss, and apex's JIT op proxies (amp_C, syncbn, ...) build their
+    #    extension there, while transformers' lazy modules print an alias warning.
     patched_modules = []
     if orig_fn is not None:
         for mod_name, module in list(sys.modules.items()):
             if module is None or module is meg_mod:
                 continue
-            if getattr(module, "fused_pad_routing_map", None) is orig_fn:
+            if getattr(module, "__dict__", {}).get("fused_pad_routing_map") is orig_fn:
                 setattr(module, "fused_pad_routing_map", primus_fused_pad_routing_map)
                 patched_modules.append(mod_name)
 

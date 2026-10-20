@@ -82,6 +82,28 @@ def test_survives_modules_that_raise_on_getattr(defining_module, importer):
     assert importer.target() == "patched"
 
 
+def test_does_not_call_module_getattr(defining_module, importer):
+    """apex's JIT op proxies (amp_C, ...) build their extension in __getattr__,
+    so probing them for the symbol must not fall through to it."""
+    probed = []
+
+    class LazyProxy(ModuleType):
+        def __getattr__(self, name):
+            probed.append(name)
+            raise AttributeError(name)
+
+    proxy = LazyProxy("_primus_rebind_proxy")
+    sys.modules[proxy.__name__] = proxy
+
+    try:
+        rebind_everywhere(defining_module, "target", lambda: "patched")
+    finally:
+        sys.modules.pop(proxy.__name__, None)
+
+    assert probed == []
+    assert importer.target() == "patched"
+
+
 def test_noop_when_already_pointing_at_the_replacement(defining_module, importer):
     replacement = defining_module.target
 

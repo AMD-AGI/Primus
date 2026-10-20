@@ -47,11 +47,15 @@ def rebind_everywhere(module: Any, name: str, new_value: Any) -> List[str]:
         return rebound
 
     # list(...) because importing inside the loop would mutate sys.modules.
+    # Look in each module's __dict__ rather than getattr(): a module-level
+    # __getattr__ runs on a miss, and apex's JIT op proxies (amp_C, syncbn, ...)
+    # build their extension there, while transformers' lazy modules print an
+    # alias warning.
     for mod_name, mod in list(sys.modules.items()):
         if mod is None or mod is module:
             continue
         try:
-            if getattr(mod, name, None) is old_value:
+            if getattr(mod, "__dict__", {}).get(name) is old_value:
                 setattr(mod, name, new_value)
                 rebound.append(mod_name)
         except Exception:  # noqa: BLE001 - lazy/proxy modules can raise on getattr
