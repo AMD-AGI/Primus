@@ -1,7 +1,8 @@
-# Configuration reference
+# SpecForge configuration
 
-YAML, env, and CLI for [SpecForge on Primus](README.md). Copy a recipe under
-[`configs/`](configs/) and change the fields below. Draft architecture, data
+YAML, env, and CLI for [Run SpecForge with Primus](running.md). Copy a recipe under
+[`examples/specforge/configs/`](https://github.com/AMD-AGI/Primus/tree/main/examples/specforge/configs)
+and change the fields below. Draft architecture, data
 format, optimizer, export, and SGLang serving are SpecForge's — see the
 [AMD ROCm tutorial](https://github.com/sgl-project/SpecForge/blob/main/docs/sections/basic_usage/AMD/amd_rocm.md)
 (§4 for online disaggregated). SpecForge Hydra keys (`specforge_overrides`)
@@ -35,7 +36,7 @@ Do not pass `--role` on `primus-cli`.
 ## Capture
 
 Example config and usage:
-[`configs/qwen3.5-4b-dflash-offline-capture.yaml`](configs/qwen3.5-4b-dflash-offline-capture.yaml)
+[qwen3.5-4b-dflash-offline-capture.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml)
 
 ```bash
 export CAPTURE_DATA_PATH=/data/sharegpt.jsonl
@@ -85,13 +86,16 @@ modules:
         sglang_context_length: 2560      # SGLang context length
 ```
 
-Train later with `data.hidden_states_path` pointing at `filter_output_path`
-(the filtered shards), not `output_path`.
+If both `output_path` and `filter_output_path` are set, Primus runs a
+block-size keep filter (`filter_block_size`; 16 in the DFlash example). Omit
+`filter_output_path` when a method should not use that rule. When the filter
+ran, train later with `data.hidden_states_path` pointing at
+`filter_output_path`, not `output_path`.
 
 ## Offline train
 
 Example config and usage:
-[`configs/qwen3.5-4b-dflash-offline.yaml`](configs/qwen3.5-4b-dflash-offline.yaml)
+[qwen3.5-4b-dflash-offline.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml)
 
 ```bash
 export HIDDEN_STATES_PATH=/data/runs/capture/hidden_states
@@ -137,7 +141,7 @@ modules:
 ## Online train
 
 Example config and usage:
-[`configs/qwen3.5-4b-dflash-online.yaml`](configs/qwen3.5-4b-dflash-online.yaml)
+[qwen3.5-4b-dflash-online.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/specforge/configs/qwen3.5-4b-dflash-online.yaml)
 
 ```bash
 export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
@@ -301,4 +305,4 @@ Dotted keys match the YAML (`specforge_overrides.training.max_steps=1000`,
 a SpecForge checkout if it is not `/workspace/SpecForge`.
 
 Slurm `-p`, `-t`, `-o`, `--exclude` and launcher `--debug` / `--dry-run` are
-in the [CLI reference](../../docs/02-user-guide/cli-reference.md).
+in the [CLI reference](../../02-user-guide/cli-reference.md).
