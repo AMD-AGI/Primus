@@ -51,6 +51,7 @@ examples/
 │   │   ├── deepseek-v3/
 │   │   ├── deepseek-v4/
 │   │   ├── glm5-3-flash/
+│   │   ├── gpt-oss/
 │   │   └── kimi-k3/
 │   └── guides/            #   walkthroughs and packaged workflows
 │       ├── customer_package/

@@ -15,9 +15,14 @@
 ###############################################################################
 set -euo pipefail
 
-cd "$(dirname "$(realpath "$0")")/../../../.."
+SCRIPT=$(realpath "$0")
+# relative to the caller's directory
+if [[ -n "${TURBO_DIR:-}" ]]; then
+    TURBO_DIR=$(realpath -e "${TURBO_DIR}")
+fi
+cd "$(dirname "${SCRIPT}")/../../../.."
 
-# container: start a container from DOCKER_IMAGE; direct: run in this container
+# container: re-run this script in a new container of DOCKER_IMAGE; direct: run in this container
 export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-container}
 export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261019}
 export EXP=${EXP:-examples/megatron/configs/MI455X/deepseek_v3-BF16-pretrain.yaml}
@@ -60,10 +65,66 @@ if [[ -n "${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:-}" ]]; then
 fi
 export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
+# 1: switch Triton's gfx1250 expert scheduling off in the container's Triton (needs root), see below
+export PATCH_TRITON_EXPERT_SCHEDULING=${PATCH_TRITON_EXPERT_SCHEDULING:-1}
 
 export PRIMUS_TEAM=${PRIMUS_TEAM:-amd}
 export PRIMUS_USER=${PRIMUS_USER:-$(id -un)}
 export PRIMUS_EXP_NAME=${PRIMUS_EXP_NAME:-deepseek_v3_proxy_${GPUS_PER_NODE}gpu_$(date +%Y%m%d_%H%M%S)}
+
+case "${PRIMUS_LAUNCHER}" in
+    container)
+        # The settings above, plus the single-node variables `primus-cli container` passes through
+        ENV_ARGS=(-e PRIMUS_LAUNCHER=direct)
+        while IFS= read -r v; do
+            case "${v}" in
+                PRIMUS_LAUNCHER) ;;
+                EXP | TURBO_DIR | GPUS_PER_NODE | HIP_VISIBLE_DEVICES | TRAIN_ITERS | MBS | GBS | USE_TURBO_* | \
+                    TURBO_GROUPED_GEMM_BACKEND | MOCK_DATA | PROFILE | PATCH_TRITON_EXPERT_SCHEDULING | \
+                    MASTER_ADDR | MASTER_PORT | HF_TOKEN | WANDB_API_KEY | ENABLE_NUMA_BINDING | GPU_MAX_HW_QUEUES | \
+                    HSA_* | NVTE_* | PRIMUS_* | NCCL_* | RCCL_* | GLOO_* | IONIC_* | HIPBLASLT_*)
+                    ENV_ARGS+=(-e "${v}")
+                    ;;
+            esac
+        done < <(compgen -e)
+        DOCKER_ARGS=(--device /dev/kfd --device /dev/dri -v "${PWD}:${PWD}")
+        if [[ -e /dev/infiniband ]]; then
+            DOCKER_ARGS+=(--device /dev/infiniband)
+        fi
+        if [[ -n "${TURBO_DIR}" ]]; then
+            DOCKER_ARGS+=(-v "${TURBO_DIR}:${TURBO_DIR}")
+        fi
+        # Same runtime options as `primus-cli container` (runner/.primus.yaml)
+        exec docker run --rm --name "deepseek-v3-mi455x-$$" \
+            --ipc host --network host --privileged --group-add video \
+            --cap-add SYS_PTRACE --cap-add CAP_SYS_ADMIN --security-opt seccomp=unconfined \
+            --ulimit nofile=1048576:1048576 "${DOCKER_ARGS[@]}" -w "${PWD}" "${ENV_ARGS[@]}" \
+            "${DOCKER_IMAGE}" bash "${SCRIPT}" "$@"
+        ;;
+    direct) ;;
+    *)
+        echo "PRIMUS_LAUNCHER must be container or direct, not '${PRIMUS_LAUNCHER}'" >&2
+        exit 2
+        ;;
+esac
+
+# Triton 3.8 turns on AMDGPU expert scheduling for gfx1250, which makes Triton kernels fault or
+# return NaN at random. TRITON_HIP_USE_EXPERT_SCHEDULING=0 (below) turns it off when a kernel is
+# compiled, but Inductor loads kernels from its own cache without compiling them; changing Triton's
+# default also invalidates that cache.
+if [[ "${PATCH_TRITON_EXPERT_SCHEDULING}" == 1 ]]; then
+    TRITON_AMD_COMPILER=$(python3 -c 'import os, triton; print(os.path.join(os.path.dirname(triton.__file__), "backends", "amd", "compiler.py"))')
+    if ! grep -q '^def is_expert_scheduling_enabled(arch):' "${TRITON_AMD_COMPILER}"; then
+        echo "no is_expert_scheduling_enabled(arch) in ${TRITON_AMD_COMPILER}; Triton not patched" >&2
+    elif ! grep -A1 '^def is_expert_scheduling_enabled(arch):' "${TRITON_AMD_COMPILER}" | grep -q '^    return False$'; then
+        if [[ ! -w "$(dirname "${TRITON_AMD_COMPILER}")" ]]; then
+            echo "cannot patch ${TRITON_AMD_COMPILER} as uid $(id -u); run as root or set PATCH_TRITON_EXPERT_SCHEDULING=0" >&2
+            exit 2
+        fi
+        sed -i '/^def is_expert_scheduling_enabled(arch):/a\    return False' "${TRITON_AMD_COMPILER}"
+        echo "patched ${TRITON_AMD_COMPILER}: is_expert_scheduling_enabled() -> False"
+    fi
+fi
 
 ENV_ARGS=(
     --env PRIMUS_GPU_MODEL=MI455X
@@ -75,41 +136,23 @@ ENV_ARGS=(
     --env HSA_COREDUMP_PATTERN=/dev/null
 )
 if [[ -n "${TURBO_DIR}" ]]; then
-    TURBO_DIR=$(realpath -e "${TURBO_DIR}")
     # --env is applied after Primus builds PYTHONPATH, so this checkout comes first.
     ENV_ARGS+=(
         --env "PYTHONPATH=${TURBO_DIR}:${TURBO_DIR}/build/pydeps:${PWD}:${PWD}/third_party/Megatron-LM"
         --env PYTHONDONTWRITEBYTECODE=1
     )
 fi
-PATCH_ARGS=(--patch runner/helpers/patches/12_fix_triton_expert_scheduling.sh)
-
-case "${PRIMUS_LAUNCHER}" in
-    container)
-        LAUNCHER_ARGS=(container --image "${DOCKER_IMAGE}" "${ENV_ARGS[@]}")
-        if [[ -n "${TURBO_DIR}" ]]; then
-            LAUNCHER_ARGS+=(--volume "${TURBO_DIR}:${TURBO_DIR}")
-        fi
-        LAUNCHER_ARGS+=(-- "${PATCH_ARGS[@]}")
-        ;;
-    direct)
-        LAUNCHER_ARGS=(direct "${ENV_ARGS[@]}" "${PATCH_ARGS[@]}")
-        ;;
-    *)
-        echo "PRIMUS_LAUNCHER must be container or direct, not '${PRIMUS_LAUNCHER}'" >&2
-        exit 2
-        ;;
-esac
 
 if [[ -n "${PRIMUS_RECOMPUTE_LAYER_IDS}" ]]; then
-    RECOMPUTE_ARGS=(--recompute_granularity full --recompute_layer_ids "${PRIMUS_RECOMPUTE_LAYER_IDS}")
+    # as a list: Primus reads a single id as an int
+    RECOMPUTE_ARGS=(--recompute_granularity full --recompute_layer_ids "[${PRIMUS_RECOMPUTE_LAYER_IDS//[][]/}]")
 else
     RECOMPUTE_ARGS=(--recompute_granularity null --recompute_layer_ids null)
 fi
 
 LOG_DIR="${PRIMUS_WORKSPACE:-output}/${PRIMUS_TEAM}/${PRIMUS_USER}/${PRIMUS_EXP_NAME}"
 mkdir -p "${LOG_DIR}"
-./primus-cli "${LAUNCHER_ARGS[@]}" -- train pretrain --config "${EXP}" \
+./primus-cli direct "${ENV_ARGS[@]}" -- train pretrain --config "${EXP}" \
     --train_iters "${TRAIN_ITERS}" \
     --micro_batch_size "${MBS}" \
     --global_batch_size "${GBS}" \

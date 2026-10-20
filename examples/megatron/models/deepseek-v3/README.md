@@ -4,8 +4,9 @@ DeepSeek-V3 MoE proxy pretraining on one node of 4x MI455X (gfx1250): full DeepS
 (MLA, hidden 7168), 4 MoE layers of 128 experts, EP4, seq 4096, BF16, mock data, no activation
 recompute. Attention and the expert grouped GEMMs run on Primus-Turbo's FlyDSL kernels. The config is
 `examples/megatron/configs/MI455X/deepseek_v3-BF16-pretrain.yaml` and the launcher is
-`run_deepseek_v3_proxy_mi455x.sh`: with `PRIMUS_LAUNCHER=container` (default) it runs from the host in a
-new container of `DOCKER_IMAGE`; with `PRIMUS_LAUNCHER=direct` it runs inside the current container.
+`run_deepseek_v3_proxy_mi455x.sh`: with `PRIMUS_LAUNCHER=container` (default) it starts a new container
+of `DOCKER_IMAGE` from the host and re-runs itself inside it; with `PRIMUS_LAUNCHER=direct` it runs inside
+the current container.
 
 The default image, `amdprimus/amdprimus:tas-20261019`, is `amdprimus/amdprimus:tas-20261015` (ROCm
 10.2.0a20261011, PyTorch 2.14.0, FlyDSL 0.3.4.1, aiter 0.1.24.post1) with hipBLASLt built from
@@ -38,15 +39,15 @@ PRIMUS_LAUNCHER=direct bash examples/megatron/models/deepseek-v3/run_deepseek_v3
   from `TURBO_GROUPED_GEMM_BACKEND` unless that is `default`, so the script refuses an exported
   `PRIMUS_TURBO_GROUPED_GEMM_BACKEND`.
 - `PROFILE=True` profiles iterations 6–7 (trace under `output/<team>/<user>/<exp>/tensorboard/`).
+- `PATCH_TRITON_EXPERT_SCHEDULING` (default `1`): see Triton expert scheduling below.
+- Config and output: `EXP` (the experiment yaml), and `PRIMUS_WORKSPACE` (default `output`), `PRIMUS_TEAM`,
+  `PRIMUS_USER`, `PRIMUS_EXP_NAME`, which make up the output directory `<workspace>/<team>/<user>/<exp>`.
 
-The defaults are in the script. Arguments to the script are appended to the Primus command line. Two
-1-GPU variants: the first has the per-GPU shape of the 4-GPU run (4 layers, 32 experts, 8 micro-batches
-of 2); the second is a quick 1-layer check whose time is dominated by the output layer.
+The defaults are in the script. Arguments to the script are appended to the Primus command line. The
+1-GPU variant has the per-GPU shape of the 4-GPU run (4 layers, 32 experts, 8 micro-batches of 2):
 
 ```bash
 GPUS_PER_NODE=1 PRIMUS_EP=1 PRIMUS_NUM_EXPERTS=32 GBS=16 \
-    bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
-GPUS_PER_NODE=1 PRIMUS_EP=1 PRIMUS_TOTAL_LAYERS=1 PRIMUS_NUM_EXPERTS=32 GBS=16 \
     bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
 ```
 
@@ -64,46 +65,47 @@ If that checkout pins a FlyDSL version other than the image's, install it with
 `pip install --no-deps --target build/pydeps flydsl==<version>` in the checkout; `build/pydeps` is on the
 `PYTHONPATH` as well.
 
-**Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. Training runs as
-root in both modes (the Triton patch needs it), so the files it creates are owned by root. After a run
-inside a container has created `output/`, a run from the host cannot create its log directory there until
-the owner is changed back (e.g. `sudo chown -R "$(id -u):$(id -g)" output`).
+**Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. From the host,
+training runs as root in the new container, so the files it creates are owned by root. Inside a
+container it runs as the container's user, which has to be root for the Triton patch.
 
-**Triton patch.** Every run applies `runner/helpers/patches/12_fix_triton_expert_scheduling.sh`. It
-turns off Triton's gfx1250 expert scheduling, which otherwise makes Triton kernels fault or return NaN
-at random.
+**Triton expert scheduling.** Triton 3.8 turns on AMDGPU expert scheduling for gfx1250, which makes
+Triton kernels fault or return NaN at random. The launcher sets `TRITON_HIP_USE_EXPERT_SCHEDULING=0`,
+which Triton applies whenever it compiles a kernel. Inductor, however, also loads kernels from its own
+cache without compiling them, so a container that ran without the variable can keep expert-mode kernels.
+With `PATCH_TRITON_EXPERT_SCHEDULING=1` (the default) the launcher therefore also makes
+`is_expert_scheduling_enabled()` in the container's Triton return `False`, like the GPT-OSS example; that
+also invalidates Inductor's cache. The patch needs root and stays in a long-lived container; set
+`PATCH_TRITON_EXPERT_SCHEDULING=0` to skip it.
 
 ## Reference
 
 Measured on one node of 4x MI455X with `amdprimus/amdprimus:tas-20261019` and the image's Primus-Turbo,
-the 4-GPU rows from the host and the 1-GPU rows (the two variants above) on one GPU inside a container.
-ms/iter is Primus's average over iterations 3–10, the mean of 2–3 runs; runs that stopped on NaN/Inf
-(see Known issues) count with their iterations before the stop. Peak VRAM is the largest
+the 4-GPU rows from the host and the 1-GPU row (the variant above) on one GPU inside a container. ms/iter
+is Primus's average over iterations 3–10, the mean of 2–3 runs. Peak VRAM is the largest
 `mem_info_vram_used` sampled every second.
 
 | Variant | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Peak VRAM/GPU | lm loss at iteration 10 |
 | --- | --- | --- | --- | --- | --- |
-| 4-GPU | 1227 | 53,400 | 1157 | 152.5–154.7 GiB | 5.57972 |
-| 1-GPU, 4 layers | 1014 | 64,600 | 1400 | 119.0 GiB | 5.4998–5.4999 |
-| 1-GPU, 1 layer | 443 | 147,900 | 1427 | 62.7 GiB | 9.45946 |
-| 4-GPU, TE unfused attention and Triton grouped GEMM | 2179 | 30,100 | 652 | 196.9–199.1 GiB | 5.57987 |
+| 4-GPU | 1195 | 54,800 | 1184 | 152.2–154.5 GiB | 5.56274 |
+| 1-GPU, 4 layers | 1005 | 65,200 | 1407 | 118.7 GiB | 5.49483 |
+| 4-GPU, TE unfused attention and Triton grouped GEMM | 2153 | 30,400 | 657 | 196.8–198.9 GiB | 5.56295 |
 
-The last row, the previous defaults (`USE_TURBO_ATTENTION=False TURBO_GROUPED_GEMM_BACKEND=default`), is
-1.78x slower than the FlyDSL defaults.
+The last row (`USE_TURBO_ATTENTION=False TURBO_GROUPED_GEMM_BACKEND=default`: TE's unfused attention and
+Primus-Turbo's Triton grouped GEMM) is 1.80x slower than the FlyDSL defaults.
 
-**Grad norms per iteration.** Complete runs agree to within 0.003.
+**Grad norms per iteration.** Repeated runs of a variant gave the same values.
 
 | Variant | Grad norms, iterations 1–10 |
 | --- | --- |
-| 4-GPU | 3.790, 3.758, 3.795, 4.995, 9.031, 10.179, 7.921, 7.203, 6.828, 6.681 |
-| 1-GPU, 4 layers | 5.256, 5.309, 5.541, 7.045, 13.028, 14.245, 13.707, 15.155, 13.394, 13.587 |
-| 1-GPU, 1 layer | 3.193, 3.232, 3.314, 3.263, 3.210, 3.713, 3.362, 3.779, 3.329, 3.289 |
+| 4-GPU | 3.810, 3.777, 3.815, 5.138, 8.841, 10.091, 7.848, 7.168, 6.820, 6.649 |
+| 1-GPU, 4 layers | 5.292, 5.326, 5.587, 7.070, 12.976, 14.045, 13.664, 15.002, 13.477, 14.193 |
 
 **Profile of the 4-GPU run, rank 0** (`PROFILE=True`, iterations 6–7).
 
-- About 1026 ms of compute kernels per iteration: MoE 41% (expert grouped GEMMs 27%), output layer
+- About 1018 ms of compute kernels per iteration: MoE 41% (expert grouped GEMMs 27%), output layer
   and loss 19%, attention projections 16%, core attention 14%, the rest 10%.
-- About 158 ms per iteration of MoE all-to-all is not overlapped with compute.
+- About 144 ms per iteration of MoE all-to-all is not overlapped with compute.
 
 ## Known issues
 
@@ -124,10 +126,7 @@ The last row, the previous defaults (`USE_TURBO_ATTENTION=False TURBO_GROUPED_GE
   nondeterministic wrong result from these kernels, with no error or NaN: about 1 call in 130,000 in
   steady state on the largest shape, and much more often over a process's first few hundred calls.
   `TURBO_GROUPED_GEMM_BACKEND=default` uses the Triton grouped GEMM.
-- **Wrong gradients and NaN/Inf stops.** On the node used for the numbers above, some runs leave the
-  reference grad norms at a random iteration (a wrong value, NaN or Inf), with every attention and grouped
-  GEMM backend, including the FlyDSL default; the same node also returns wrong results from plain
-  hipBLASLt GEMMs. Megatron aborts only on NaN/Inf, so compare grad norms against the tables above.
-- **Vocabulary on Primus `main`.** The numbers above use the mock-data vocabulary of 131072 tokens. Primus
-  `main` (#1249) sets DeepSeek-V3's own vocabulary, 129280, which changes the output layer slightly and
-  the lm loss and grad norms.
+- **Expandable segments.** Primus warns that `use_turbo_grouped_gemm=True` runs without
+  `PYTORCH_HIP_ALLOC_CONF=expandable_segments:True`. Here that setting (in the yaml's `env:`) lowers the
+  peak VRAM by only 1–3 GiB per GPU, makes the 4-GPU run 0.6% slower and the TE/Triton row 4% slower, and
+  leaves the loss and grad norms unchanged, so the example does not set it.
