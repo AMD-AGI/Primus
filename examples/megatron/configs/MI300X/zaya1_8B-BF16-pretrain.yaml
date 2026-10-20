@@ -17,14 +17,18 @@ modules:
       log_avg_skip_iterations: 1
       log_avg_reset_interval: 10
 
-      # Smoke schedule. The full stack is about 16 GB of bf16 weights plus
-      # the tied vocabulary. Drop num_layers here (keep it even) if the node
-      # cannot hold that. Do not edit the model yaml to shrink the architecture.
+      # 30-step mock-data run for one 8-GPU node (DP=8). micro_batch_size 128
+      # is the largest multiple of 8 that completes on MI300X with
+      # rocm/primus:v26.8: it peaks at 181 of 192 GB per GPU, and 136 stalls
+      # in the end-of-training evaluation. Each sample costs about 0.8 GB,
+      # mostly fp32 logits over the 262k vocabulary. On fewer GPUs, lower
+      # micro_batch_size or num_layers (keep it even). Do not edit the model
+      # yaml to shrink the architecture.
       train_iters: 30
-      micro_batch_size: 1
+      micro_batch_size: 128
+      # One micro batch per GPU per step at DP=8.
       # Must be divisible by micro_batch_size * data_parallel_size.
-      # 8 covers a full MI300X/MI355X node (DP=8) and a single GPU (DP=1).
-      global_batch_size: 8
+      global_batch_size: 1024
       seq_length: 128
       max_position_embeddings: 4096
 
