@@ -89,7 +89,6 @@ def test_repetitions_are_averaged_over_successful_runs_only():
     assert entry["throughput"] == pytest.approx(21000.0)
     assert entry["throughput_total"] == pytest.approx(21000.0 * 8)
     assert entry["cv"] == pytest.approx(70.71067 / 1050.0, rel=1e-4)
-    assert entry["notes"] == "1 failed: oom"
     assert entry["minutes"] == pytest.approx(10.0)
 
 
@@ -101,7 +100,6 @@ def test_failed_multinode_attempts_do_not_count():
     ]
     (entry,) = report.aggregate(report.runs_frame(runs))
     assert (entry["runs_ok"], entry["runs_total"]) == (1, 3)
-    assert entry["notes"] == "2 failed attempts: timeout"
     # Only retries were lost, so the runs cell is amber rather than red.
     assert entry["only_retries"] is True
     # One successful run: no run-to-run spread to show.
@@ -123,7 +121,6 @@ def test_replicates_with_different_step_counts_are_combined():
     assert entry["minutes"] == pytest.approx(8.0)
     # Every step count the replicates ran.
     assert entry["total_steps"] == "10; 20; 50"
-    assert entry["notes"] == "1 failed: oom"
 
 
 def test_configs_split_by_config_file_and_image_and_sort_by_backend():
@@ -154,17 +151,39 @@ def test_configs_split_by_config_file_and_image_and_sort_by_backend():
     ]
 
 
-def test_config_without_successful_runs_says_so():
+def test_config_without_successful_runs_has_no_averages():
     (entry,) = report.aggregate(report.runs_frame([run(status="interrupted", failure_reason="interrupted")]))
+    assert (entry["runs_ok"], entry["runs_total"]) == (0, 1)
     assert entry["tflops"] is None
-    # The reason is not repeated when it is the status.
-    assert entry["notes"] == "no successful run; 1 interrupted"
+    assert entry["throughput"] is None
 
 
-def test_backend_without_throughput_says_so():
+def test_backend_without_throughput_has_no_unit():
     (entry,) = report.aggregate(report.runs_frame([run(backend="megatron_bridge", hmean_tps_per_gpu=None)]))
     assert entry["unit"] is None
-    assert entry["notes"] == "no throughput in the log"
+    assert entry["throughput"] is None
+
+
+def test_bridge_post_training_shows_nominal_tflops_apart_from_tflops():
+    note = "nominal TFLOP/s, not TFLOP/s: Megatron-Bridge's estimate counts every sample as 8192 tokens, ..."
+    bridge = run(
+        backend="megatron_bridge",
+        hmean_tflops=None,
+        hmean_nominal_tflops=2199.4,
+        hmean_tps_per_gpu=None,
+        hmean_samples_per_gpu=1.27,
+        throughput_note=note,
+    )
+    (entry,) = report.aggregate(report.runs_frame([bridge]))
+    assert entry["tflops"] is None
+    assert entry["nominal_tflops"] == pytest.approx(2199.4)
+    assert (entry["throughput"], entry["unit"]) == (pytest.approx(1.27), "samples/s")
+    # The Performance sheet has the column only when a config has a value.
+    headers = [c["header"] for c in report.performance_columns(False, False, True)]
+    assert headers.index("Nominal TFLOP/s per GPU") == headers.index("TFLOP/s per GPU") + 1
+    assert "Nominal TFLOP/s per GPU" not in [c["header"] for c in report.performance_columns(False, False)]
+    (plain,) = report.aggregate(report.runs_frame([run()]))
+    assert plain["nominal_tflops"] is None
 
 
 def test_chart_labels_tell_images_and_configs_apart():
@@ -282,6 +301,35 @@ def test_interrupted_and_multinode_summaries(tmp_path):
     assert rows["Repetitions per config"] == "2"
 
 
+def test_overview_shows_the_platform(tmp_path):
+    path = tmp_path / "batch_summary_20261015-002731.txt"
+    path.write_text(
+        SINGLE_NODE_SUMMARY.replace(
+            "# Reps/config  : 3\n", "# System       : Dual AMD EPYC 9575F-based server\n# Reps/config  : 3\n"
+        )
+    )
+    info = report.parse_batch_summary(str(path))
+    assert info["config"]["System"] == "Dual AMD EPYC 9575F-based server"
+
+    # A refused batch has no runs: the summary's description is used.
+    no_runs = report.runs_frame([run()]).iloc[0:0]
+    rows = {label: value for section, label, value in report.overview_rows("s", info, no_runs)}
+    assert rows["System"] == "Dual AMD EPYC 9575F-based server"
+
+    # Otherwise the runs' own; two batches on different BIOSes show both.
+    runs = report.runs_frame(
+        [
+            run(system_description="Dual EPYC, BIOS 1.7", bios="1.7", gpu_power_cap="1400 W"),
+            run(repeat=2, system_description="Dual EPYC, BIOS 1.8", bios="1.8", gpu_power_cap="1400 W"),
+        ]
+    )
+    rows = {(section, label): value for section, label, value in report.overview_rows("s", info, runs)}
+    assert rows[("Hardware", "System")] == "Dual EPYC, BIOS 1.7; Dual EPYC, BIOS 1.8"
+    assert rows[("Hardware", "BIOS")] == "1.7; 1.8"
+    assert rows[("Hardware", "GPU power cap")] == "1400 W"
+    assert "System" in [c["header"] for c in report.RUN_COLUMNS]
+
+
 def test_refused_batch_shows_its_errors_and_lines_up_with_others(tmp_path):
     refused = tmp_path / "refused.txt"
     refused.write_text(
@@ -358,6 +406,7 @@ def test_report_is_written(tmp_path, monkeypatch):
     openpyxl = pytest.importorskip("openpyxl")
     ws = openpyxl.load_workbook(out)["Performance"]
     header = [c.value for c in ws[1]]
+    assert "Notes" not in header
     first = {h: c.value for h, c in zip(header, ws[2])}
     assert first["Runs ok / total"] == "2 / 3"
     assert first["TFLOP/s per GPU"] == pytest.approx(1150.0)

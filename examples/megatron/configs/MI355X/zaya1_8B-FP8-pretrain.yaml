@@ -1,0 +1,96 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:zaya1-fp8-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# The runner enables Transformer Engine's Triton FP8 cast-transpose, which
+# autotunes once per new tensor shape. Expert token counts change every step,
+# so it keeps retuning and FP8 steps stall. The HIP cast kernel has no
+# per-shape cost.
+env:
+  NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # Full ZAYA1-base shape lives in zaya1.yaml (80 stages, hidden 2048).
+    model: zaya1.yaml
+    overrides:
+      wandb_project: "Primus_Pretrain"
+      stderr_sink_level: DEBUG
+
+      log_avg_skip_iterations: 1
+      log_avg_reset_interval: 10
+
+      # 30-step mock-data run for one 8-GPU node (DP=8). FP8 keeps BF16 master
+      # weights and adds cached FP8 weight copies, so it fits fewer samples
+      # than BF16. Same batch as the MI300X recipe, which peaks at 187 GB per
+      # GPU there. It has not been run on MI355X; the 288 GB per GPU leaves
+      # headroom. On fewer GPUs, lower micro_batch_size or num_layers (keep it
+      # even). Do not edit the model yaml to shrink the architecture.
+      train_iters: 30
+      micro_batch_size: 120
+      # One micro batch per GPU per step at DP=8.
+      # Must be divisible by micro_batch_size * data_parallel_size.
+      global_batch_size: 960
+      seq_length: 128
+      max_position_embeddings: 4096
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 1
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+
+      # Data parallel only. TP, PP, CP, EP and sequence parallel are rejected
+      # by zaya1_builder.
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 1
+      sequence_parallel: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      # Synthetic tokens. The mock-data patch forces NullTokenizer and
+      # clears these paths; vocab_size stays 262272 from zaya1.yaml.
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+      eval_interval: 100
+      eval_iters: 8
+
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+
+      # Hybrid FP8: E4M3 forward, E5M2 backward. CCA Q/K/V/O and expert
+      # SwiGLU run as TE GEMMs. Router, conv, RMSNorm, attention, embeddings,
+      # and the tied logits projection stay in BF16.
+      # Tensorwise (current) scaling takes each scale from the tensor being
+      # cast, so FP8 is correct from the first step, including a cold start
+      # from a fresh or loaded checkpoint. Delayed scaling starts with an
+      # empty amax history and quantizes the first steps with scale 1.
+      fp8: hybrid
+      fp8_recipe: tensorwise
