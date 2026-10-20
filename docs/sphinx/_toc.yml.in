@@ -142,6 +142,16 @@ subtrees:
                 title: Adding new models
               - file: 04-technical-guides/diffusion-models/api_reference.md
                 title: API reference
+      - file: 04-technical-guides/specforge/introduction.md
+        title: SpecForge
+        subtrees:
+          - entries:
+              - file: 04-technical-guides/specforge/running.md
+                title: Run SpecForge with Primus
+              - file: 04-technical-guides/specforge/configuration.md
+                title: Configuration
+              - file: 04-technical-guides/specforge/runtime-image.md
+                title: Runtime image
 
   - caption: Operations
     entries:

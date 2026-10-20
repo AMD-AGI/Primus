@@ -29,7 +29,8 @@ tools/convergence_test/run_convergence_test.sh --model megatron/mixtral_8x7B_v0.
 # MaxText, rocm/jax-training image
 tools/convergence_test/run_convergence_test.sh --model maxtext/llama3.2_1B        # ~45 min
 tools/convergence_test/run_convergence_test.sh --model maxtext/llama2_7B          # ~85 min
-tools/convergence_test/run_convergence_test.sh --model maxtext/llama2_7B-nanoo_fp8
+tools/convergence_test/run_convergence_test.sh --model maxtext/llama2_7B-nanoo_fp8 # CDNA3
+tools/convergence_test/run_convergence_test.sh --model maxtext/llama2_7B-fp8       # CDNA4
 tools/convergence_test/run_convergence_test.sh --model maxtext/mixtral_8x7B       # ~75 min
 
 # Another corpus, and results kept somewhere else
