@@ -26,6 +26,7 @@ This guide covers the complete workflow: environment setup, data preparation, pr
   - [Multi-Node (Slurm)](#multi-node-slurm)
   - [Mock Data (Smoke Test)](#mock-data-smoke-test)
 - [Upcycling a dense checkpoint](#upcycling-a-dense-checkpoint)
+- [Native HyLo training](#native-hylo-training)
 - [Step 4: Checkpoint Conversion to HuggingFace](#step-4-checkpoint-conversion-to-huggingface)
 - [Step 5: Evaluation with lm-eval-harness](#step-5-evaluation-with-lm-eval-harness)
 - [Configuration Reference](#configuration-reference)
@@ -436,7 +437,48 @@ no_load_rng: true
 auto_continue_train: false
 ```
 
-The checkpoint `args` must carry the HyLo widths (`q_lora_rank`, `kv_lora_rank`, `qk_head_dim`, `v_head_dim`, and for GDN the `linear_num_*` / `linear_*_head_dim` fields). `upcycle_report.json` lists tensors that were copied and `hylo_partial` lists slices that were only partly filled, including MLA RoPE rows. Start the continued run from a learning rate several times below the dense model's peak, with a short warmup. The mapping and the differences from the earlier exact-shape copy are in [upcycling-changes.md](upcycling-changes.md).
+The checkpoint `args` must carry the HyLo widths (`q_lora_rank`, `kv_lora_rank`, `qk_head_dim`, `v_head_dim`, and for GDN the `linear_num_*` / `linear_*_head_dim` fields). `upcycle_report.json` lists tensors that were copied, and `hylo_partial` lists GDN slices that were only partly filled. Start the continued run from a learning rate several times below the dense model's peak, with a short warmup. The mapping and the differences from the earlier exact-shape copy are in [upcycling-changes.md](upcycling-changes.md).
+
+---
+
+## Native HyLo training
+
+Primus trains the public 1B 4MLA12GDN model natively. Tensor, pipeline, and context parallelism must stay at 1. Data parallelism can use all eight GPUs on one MI300X node. The runtime image is `rocm/primus:v26.8`.
+
+Stage 1 is Enhanced-ILD at 4K. It trains an all-GDN student and an all-MLA student from `meta-llama/Llama-3.2-1B-Instruct`. The public HyLo configs use 2K for this stage; these recipes start at 4K. Stage 2 is pure `KL(teacher || student)` at 8K against `meta-llama/Llama-3.1-8B-Instruct`, with KL weight 1 and CE weight 0. The released stage-2 mixture also used four AMD-preprocessed datasets that are not public, so `JunxiongWang/sftdatasetv3` reproduces the code path without reproducing the released weights.
+
+Prepare the gated teachers once, then run both stages:
+
+```bash
+export HF_TOKEN=...
+python tools/hybrid/prepare_hylo_assets.py --root "$PWD/data/hylo"
+
+export HYLO_LLAMA32_1B_MEGATRON_CKPT="$PWD/data/hylo/megatron/llama32-1b"
+export HYLO_LLAMA31_8B_MEGATRON_CKPT="$PWD/data/hylo/megatron/llama31-8b"
+export HYLO_SFT_DATASET=JunxiongWang/sftdatasetv3
+export HYLO_OUTPUT_ROOT="$PWD/output/hylo-native"
+export PRIMUS_IMAGE=rocm/primus:v26.8
+
+tools/hybrid/run_hylo_1b_4mla12gdn.sh
+```
+
+`HYLO_ILD_SEQ_LENGTH` overrides the 4K stage, and `HYLO_SFT_SEQ_LENGTH` overrides the 8K stage. A one-step check uses `HYLO_ILD_TRAIN_ITERS=1`, `HYLO_SFT_TRAIN_ITERS=1`, micro-batch 1, and global batch 1.
+
+On one MI300X GPU in `rocm/primus:v26.8`, that check logged all-GDN Enhanced-ILD 360.000000 at 4K (hidden 168.000000, mixer 192.000000) and summed masked KL 73.920868 at 8K. Both saved iteration 1 reloaded with every tensor finite.
+
+The script writes:
+
+| Output | Contents |
+| --- | --- |
+| `$HYLO_OUTPUT_ROOT/gdn-upcycled` | all-GDN initialization |
+| `$HYLO_OUTPUT_ROOT/mla-upcycled` | all-MLA initialization |
+| `$HYLO_OUTPUT_ROOT/4mla12gdn-upcycled` | target-layout initialization |
+| `$HYLO_OUTPUT_ROOT/amd/root/gdn-ild/checkpoints` | stage-1 all-GDN student |
+| `$HYLO_OUTPUT_ROOT/amd/root/mla-ild/checkpoints` | stage-1 all-MLA student |
+| `$HYLO_OUTPUT_ROOT/stage2-init` | assembled MLA blocks 1, 5, 10, and 14 |
+| `$HYLO_OUTPUT_ROOT/amd/root/4mla12gdn-8k-sft/checkpoints` | final pure-KL student |
+
+The artifact order is in [hylo-stage-workflow.md](hylo-stage-workflow.md). File-level notes are in [hylo-native-training-changes.md](hylo-native-training-changes.md).
 
 ---
 

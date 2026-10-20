@@ -33,6 +33,20 @@ export HYLO_SFT_OUTPUT="${OUT}/${RUN_GROUP}/${RUN_USER}/4mla12gdn-8k-sft/checkpo
 run_primus() {
   local config="$1"
   local exp_name="$2"
+  local seq_length="${3:-}"
+  local optional_env=()
+  local name
+  for name in \
+    GPUS_PER_NODE HIP_VISIBLE_DEVICES \
+    HYLO_MICRO_BATCH_SIZE HYLO_GLOBAL_BATCH_SIZE \
+    HYLO_DISABLE_LAST_SAVING; do
+    if [[ -n "${!name:-}" ]]; then
+      optional_env+=(--env "${name}=${!name}")
+    fi
+  done
+  if [[ -n "${seq_length}" ]]; then
+    optional_env+=(--env "HYLO_SEQ_LENGTH=${seq_length}")
+  fi
   "${ROOT}/primus-cli" container \
     --image "${IMAGE}" \
     --volume "${ROOT}:${ROOT}" \
@@ -50,6 +64,7 @@ run_primus() {
     --env "HYLO_SFT_OUTPUT=${HYLO_SFT_OUTPUT}" \
     --env "HYLO_ILD_TRAIN_ITERS=${HYLO_ILD_TRAIN_ITERS:-1000}" \
     --env "HYLO_SFT_TRAIN_ITERS=${HYLO_SFT_TRAIN_ITERS:-1000}" \
+    "${optional_env[@]}" \
     -- \
     train posttrain --config "${config}"
 }
@@ -57,6 +72,13 @@ run_primus() {
 run_constructor() {
   local pattern="$1"
   local exp_name="$2"
+  local optional_env=()
+  local name
+  for name in GPUS_PER_NODE HIP_VISIBLE_DEVICES HYLO_DISABLE_LAST_SAVING; do
+    if [[ -n "${!name:-}" ]]; then
+      optional_env+=(--env "${name}=${!name}")
+    fi
+  done
   "${ROOT}/primus-cli" container \
     --image "${IMAGE}" \
     --volume "${ROOT}:${ROOT}" \
@@ -64,6 +86,7 @@ run_constructor() {
     --env "PRIMUS_EXP_NAME=${exp_name}" \
     --env "HYLO_CONSTRUCTOR_PATTERN=${pattern}" \
     --env "HYLO_TOKENIZER_MODEL=${HYLO_TOKENIZER_MODEL:-meta-llama/Llama-3.2-1B-Instruct}" \
+    "${optional_env[@]}" \
     -- \
     train pretrain --config \
     "${ROOT}/examples/megatron/configs/MI300X/hylo_1B-constructor.yaml"
@@ -103,8 +126,10 @@ if [[ ! -f "${HYLO_STAGE2_BASE_CKPT}/latest_checkpointed_iteration.txt" ]]; then
     "${TARGET_PATTERN}" "${HYLO_STAGE2_BASE_CKPT}"
 fi
 
-run_primus "${ROOT}/examples/megatron/configs/MI300X/hylo_gdn_1B-enhanced-ild.yaml" "gdn-ild"
-run_primus "${ROOT}/examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild.yaml" "mla-ild"
+run_primus "${ROOT}/examples/megatron/configs/MI300X/hylo_gdn_1B-enhanced-ild.yaml" \
+  "gdn-ild" "${HYLO_ILD_SEQ_LENGTH:-${HYLO_SEQ_LENGTH:-}}"
+run_primus "${ROOT}/examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild.yaml" \
+  "mla-ild" "${HYLO_ILD_SEQ_LENGTH:-${HYLO_SEQ_LENGTH:-}}"
 
 docker run --rm \
   -v "${ROOT}:${ROOT}" -w "${ROOT}" \
@@ -116,4 +141,4 @@ docker run --rm \
     --output-dir "${HYLO_STAGE2_INIT_CKPT}"
 
 run_primus "${ROOT}/examples/megatron/configs/MI300X/hylo_4MLA12GDN_1B-8K-sft.yaml" \
-  "4mla12gdn-8k-sft"
+  "4mla12gdn-8k-sft" "${HYLO_SFT_SEQ_LENGTH:-${HYLO_SEQ_LENGTH:-}}"

@@ -679,7 +679,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
             base_model_provider = wrap_model_provider(base_model_provider, self.backend_args)
             forward_step = create_sft_forward_step()
             log_rank_0(
-                "Using native HyLo pure-KL SFT with teacher "
+                f"Using native HyLo {hylo_stage} forward step with teacher "
                 f"{self.backend_args.hylo_teacher_checkpoint}"
             )
 

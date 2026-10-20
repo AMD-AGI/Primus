@@ -6,6 +6,7 @@
 
 from argparse import Namespace
 
+import pytest
 import torch
 
 from primus.backends.megatron.checkpoint.hybrid_upcycle import (
@@ -321,3 +322,18 @@ def test_assemble_ild_state_dict_selects_complete_layer_pairs():
             assert torch.all(value == 3.0)
         elif not key.startswith("decoder.layers."):
             assert torch.equal(value, base[key])
+
+
+def test_assemble_ild_rejects_count_and_shape_mismatches():
+    pattern = "*-M-"
+    base = _hybrid_state(pattern)
+    gdn = {key: value.clone() for key, value in base.items()}
+    mla = {key: value.clone() for key, value in base.items()}
+    short = {key: value for key, value in gdn.items() if not key.startswith("decoder.layers.3.")}
+    with pytest.raises(ValueError, match="GDN ILD checkpoint"):
+        assemble_ild_state_dict(base, short, mla, pattern)
+
+    bad_shape = {key: value.clone() for key, value in gdn.items()}
+    bad_shape["decoder.layers.2.mixer.in_proj.weight"] = torch.zeros(1, 1)
+    with pytest.raises(ValueError, match="ILD tensor"):
+        assemble_ild_state_dict(base, bad_shape, mla, pattern)

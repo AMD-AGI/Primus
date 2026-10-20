@@ -57,7 +57,7 @@ These values follow `configs/llama3.2_1B/`:
 
 | | Enhanced-ILD | 8K stage 2 |
 | --- | --- | --- |
-| Context | 2048 | 8192 |
+| Context | 4096 | 8192 |
 | Learning rate | 2e-4 | 6e-5 |
 | Warmup | 0.01 | 0.01 |
 | Schedule | cosine | cosine |
@@ -83,5 +83,15 @@ On `rocm/primus:v26.8`, branch `dev/clairlee/hybrid-model-upcycling`:
 - One all-GDN constructor step, its upcycle, one Enhanced-ILD step, and one
   pure-KL stage-2 step completed on one GPU at sequence length 128.
 
-The all-MLA ILD stage and `run_hylo_1b_4mla12gdn.sh` were not executed as a
-full training job.
+On `useocpm2m-097-017` (the jump host for `tw044` did not accept SSH), one-step
+smokes at the recipe context lengths also completed in `rocm/primus:v26.8`:
+
+| Step | Context | Loss | Checkpoint reload |
+| --- | --- | --- | --- |
+| all-GDN Enhanced-ILD | 4096 | total 360.000000, hidden 168.000000, mixer 192.000000 | iteration 1, 243 tensors, all finite |
+| 4MLA12GDN pure KL | 8192 | summed masked KL 73.920868 | iteration 1, 251 tensors, all finite |
+
+Both used micro-batch 1, global batch 1, and one optimizer step. The 4K student
+started from the all-GDN upcycle. The 8K student started from the target
+4MLA12GDN upcycle, with the frozen Llama-3.1-8B teacher. The all-MLA ILD stage
+and `run_hylo_1b_4mla12gdn.sh` were not executed as a full training job.

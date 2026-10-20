@@ -4,7 +4,8 @@ Primus can reproduce the public HyLo two-stage training procedure without the
 reference TRL trainer:
 
 1. Enhanced-ILD trains an all-GDN student and an all-MLA student from
-   `meta-llama/Llama-3.2-1B-Instruct` at 2K context.
+   `meta-llama/Llama-3.2-1B-Instruct` at 4K context. The public reference
+   config uses 2K; this recipe starts at 4K.
 2. ILD weights are assembled into the exact published block layout (MLA blocks
    1, 5, 10, and 14).
 3. The assembled 4MLA12GDN student is trained at 8K against
@@ -75,3 +76,5 @@ The stage recipes are under `examples/megatron/configs/MI300X/`. Set
 
 File-by-file notes for this change are in
 [hylo-native-training-changes.md](hylo-native-training-changes.md).
+The artifact flow and execution order are summarized separately in
+[hylo-stage-workflow.md](hylo-stage-workflow.md).

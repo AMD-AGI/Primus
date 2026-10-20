@@ -332,7 +332,15 @@ def validate_hylo_args(args: Any) -> None:
         raise ValueError("the native 4MLA12GDN recipe requires hylo_ce_weight=0")
 
 
+def _log_loss(metrics: dict[str, torch.Tensor]) -> None:
+    from primus.core.utils.module_utils import log_rank_0
+
+    parts = ", ".join(f"{name}={value.detach().float().item():.6f}" for name, value in metrics.items())
+    log_rank_0(f"[HyLo] {parts}")
+
+
 def _loss_result(loss: torch.Tensor, tokens: torch.Tensor, metrics: dict[str, torch.Tensor]):
+    _log_loss(metrics)
     report = {
         name: torch.cat([value.detach().float().view(1), tokens.detach().float().view(1)])
         for name, value in metrics.items()

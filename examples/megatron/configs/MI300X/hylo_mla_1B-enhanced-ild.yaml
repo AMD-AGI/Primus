@@ -33,7 +33,7 @@ modules:
       tokenizer_model: ${HYLO_TOKENIZER_MODEL:meta-llama/Llama-3.2-1B-Instruct}
       sft_dataset_name: ${HYLO_SFT_DATASET:JunxiongWang/sftdatasetv3}
       sft_conversation_format: openai
-      seq_length: ${HYLO_SEQ_LENGTH:2048}
+      seq_length: ${HYLO_SEQ_LENGTH:4096}
       max_position_embeddings: 131072
       original_max_position_embeddings: 8192
       rotary_scaling_factor: 32.0
@@ -54,5 +54,7 @@ modules:
       overlap_param_gather: false
       fused_ce_mode: 0
       bf16: true
+      log_interval: 1
+      log_avg_skip_iterations: 0
       eval_iters: 0
       lora: {enabled: false}

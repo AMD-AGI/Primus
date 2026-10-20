@@ -56,5 +56,7 @@ modules:
       overlap_param_gather: false
       fused_ce_mode: 0
       bf16: true
+      log_interval: 1
+      log_avg_skip_iterations: 0
       eval_iters: 0
       lora: {enabled: false}

@@ -5,16 +5,23 @@
 ###############################################################################
 
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from primus.backends.megatron.training.hylo_distillation import (
+    HyLoRuntime,
     enhanced_ild_loss,
     masked_chunked_kl,
     validate_hylo_args,
 )
+from primus.core.config.primus_config import load_primus_config
+from primus.core.utils import file_utils
+
+ROOT = Path(__file__).resolve().parents[4]
 
 
 def test_enhanced_ild_matches_hylo_equation():
@@ -72,3 +79,110 @@ def test_validate_hylo_args_rejects_unsupported_parallelism():
         validate_hylo_args(Namespace(**{**base, "pipeline_model_parallel_size": 2}))
     with pytest.raises(ValueError, match="hylo_ce_weight=0"):
         validate_hylo_args(Namespace(**{**base, "hylo_ce_weight": 1.0}))
+    with pytest.raises(ValueError, match="hylo_distill_stage"):
+        validate_hylo_args(Namespace(**{**base, "hylo_distill_stage": "pretrain"}))
+    with pytest.raises(ValueError, match="hylo_teacher_checkpoint"):
+        validate_hylo_args(Namespace(**{**base, "hylo_teacher_checkpoint": None}))
+
+
+def test_enhanced_ild_rejects_mismatched_captures():
+    hidden = [torch.zeros(1, 2)]
+    with pytest.raises(RuntimeError, match="capture mismatch"):
+        enhanced_ild_loss(hidden, [], hidden, hidden)
+
+
+def test_masked_chunked_kl_rejects_shape_mismatch():
+    student = torch.zeros(2, 3)
+    teacher = torch.zeros(2, 4)
+    with pytest.raises(ValueError, match="student logits"):
+        masked_chunked_kl(student, teacher)
+
+
+class _Symbol:
+    def __init__(self, value):
+        self.value = value
+
+
+class _Attention(nn.Module):
+    def forward(self, hidden_states):
+        return hidden_states
+
+
+class _TeacherLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.self_attention = _Attention()
+
+    def forward(self, hidden_states):
+        return hidden_states
+
+
+class _Teacher(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.decoder = nn.Module()
+        self.decoder.layers = nn.ModuleList([_TeacherLayer()])
+
+
+class _Mixer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mixer = nn.Identity()
+        self.seen = None
+
+    def forward(self, hidden_states=None):
+        self.seen = hidden_states.detach().clone()
+        return hidden_states
+
+
+class _MLP(nn.Module):
+    def forward(self, hidden_states=None):
+        return hidden_states
+
+
+class _Student(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.decoder = nn.Module()
+        self.decoder.mixer = _Mixer()
+        self.decoder.mlp = _MLP()
+        self.decoder.layer_type_list = [_Symbol("M"), _Symbol("-")]
+        self.decoder.layers = nn.ModuleList([self.decoder.mixer, self.decoder.mlp])
+
+
+def test_teacher_forcing_replaces_only_ild_mixer_inputs():
+    runtime = HyLoRuntime(_Teacher(), "ild")
+    forced = torch.arange(4, dtype=torch.float32).view(1, 1, 4)
+    runtime.teacher_capture.layer_inputs.append(forced)
+    student = _Student()
+    runtime.install_student_hooks(student)
+    original = torch.zeros(1, 1, 4)
+
+    student.decoder.layers[0](hidden_states=original)
+    assert torch.equal(student.decoder.mixer.seen, forced)
+
+    runtime.stage = "sft"
+    student.decoder.layers[0](hidden_states=original)
+    assert torch.equal(student.decoder.mixer.seen, original)
+
+
+def test_hylo_recipes_match_stage_contract(monkeypatch):
+    monkeypatch.setattr(file_utils, "create_path_if_not_exists", lambda *args, **kwargs: None)
+    recipes = {
+        "examples/megatron/configs/MI300X/hylo_gdn_1B-enhanced-ild.yaml": ("ild", 4096, 0.0),
+        "examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild.yaml": ("ild", 4096, 1.0),
+        "examples/megatron/configs/MI300X/hylo_4MLA12GDN_1B-8K-sft.yaml": ("sft", 8192, 0.25),
+    }
+    for relative, (stage, seq_length, attention_ratio) in recipes.items():
+        module = load_primus_config(ROOT / relative, None).modules[0]
+        params = module.params
+        assert params.hylo_distill_stage == stage
+        assert params.hylo_kl_weight == 1.0
+        assert params.hylo_ce_weight == 0.0
+        assert params.seq_length == seq_length
+        assert params.tensor_model_parallel_size == 1
+        assert params.pipeline_model_parallel_size == 1
+        assert params.hybrid_attention_ratio == attention_ratio
+        assert params.finetune is True
+        assert params.no_load_optim is True
+        assert params.no_load_rng is True
