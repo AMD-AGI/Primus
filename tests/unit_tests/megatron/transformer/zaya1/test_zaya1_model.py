@@ -16,6 +16,7 @@ import socket
 
 import pytest
 import torch
+import torch.nn.functional as F
 from megatron.core.transformer.enums import AttnBackend
 from torch import nn
 
@@ -264,3 +265,61 @@ def test_tiny_model_wires_stages_and_forwards(parallel_state, monkeypatch):
 
     with pytest.raises(NotImplementedError, match="Packed document"):
         model(input_ids, position_ids, None, packed_seq_params=object())
+
+
+def test_cold_tensorwise_fp8_matches_high_precision(parallel_state, monkeypatch):
+    """A fresh FP8 model is accurate on its first step, with no amax history.
+
+    Delayed scaling would quantize this forward with scale 1. Tensorwise
+    (current) scaling takes the scale from each tensor, so the first FP8
+    forward must track the same weights run outside the FP8 autocast.
+    """
+    del parallel_state
+    for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+        monkeypatch.delenv(name, raising=False)
+    pytest.importorskip("transformer_engine")
+    from megatron.core.utils import is_te_min_version
+    from megatron.training.global_vars import set_args
+
+    if not is_te_min_version("2.2.0.dev0"):
+        pytest.skip("Float8CurrentScaling needs Transformer Engine >= 2.2.")
+
+    from primus.backends.megatron.core.models.zaya1.zaya1_modules import _Fp8Linear
+
+    # Every FP8 GEMM needs in and out features divisible by 16.
+    config = _tiny_config(
+        num_attention_heads=2,
+        kv_channels=16,
+        ffn_hidden_size=32,
+        moe_ffn_hidden_size=32,
+        zaya_mlp_expansion=16,
+        zaya_balance_lr=0.0,
+        fp8="hybrid",
+        fp8_recipe="tensorwise",
+    )
+    set_args(_args())
+    model = get_model_provider("zaya1")(pre_process=True, post_process=True, config=config)
+    cca = model.decoder.layers[0].self_attn
+    assert isinstance(cca.linear_q, _Fp8Linear)
+    assert isinstance(model.decoder.layers[1].zaya_block.local_experts[0].linear_fc1, _Fp8Linear)
+
+    device = torch.device("cuda")
+    model.to(device).eval()
+    batch, seq, vocab = 2, 16, 64
+    input_ids = torch.randint(0, vocab, (batch, seq), device=device)
+    position_ids = torch.arange(seq, device=device).unsqueeze(0).expand(batch, -1)
+    with torch.no_grad():
+        fp8_logits = model(input_ids, position_ids, attention_mask=None).float()
+        config.fp8 = None
+        ref_logits = model(input_ids, position_ids, attention_mask=None).float()
+        config.fp8 = "hybrid"
+    assert torch.isfinite(fp8_logits).all()
+    cosine = F.cosine_similarity(fp8_logits.flatten(), ref_logits.flatten(), dim=0)
+    assert cosine > 0.99, f"cold FP8 logits drifted from high precision: cosine={cosine:.4f}"
+
+    model.train()
+    labels = torch.randint(0, vocab, (batch, seq), device=device)
+    loss = model(input_ids, position_ids, attention_mask=None, labels=labels)
+    assert torch.isfinite(loss).all()
+    loss.sum().backward()
+    assert torch.isfinite(cca.linear_q.linear.weight.grad).all()
