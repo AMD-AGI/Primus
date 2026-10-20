@@ -58,9 +58,49 @@ Inside an already running container, add `PRIMUS_LAUNCHER=direct`. The log is wr
 - Every run finished 10/10 iterations with 0 NaN and `check_for_nan_in_loss_and_grad` on.
 - 20B with `EXTRA_ARGS="--overlap_moe_expert_parallel_comm True"`: 2177 ms/iter and 385 GB (89%),
   same lm loss.
+- 20B at `MBS=4 GBS=64`: 2365 ms/iter, 766 TFLOP/s/GPU (7% below MBS 8), 259 GB (60%).
+- 20B with `EXTRA_ARGS="--use_turbo_grouped_gemm True --turbo_grouped_gemm_backend bf16:flydsl"`:
+  2115.8 and 2119.9 ms/iter (4% faster), 855 TFLOP/s/GPU, 30,940 tokens/s/GPU, same peak memory,
+  lm loss 11.50695.
 
 Shape: hidden 2880, 64 heads / 8 KV groups, 32 experts / top-4 for 20B (128 experts for 120B),
 vocab 201088. Routing uses the yamls' `moe_router_force_load_balancing: true`.
+
+### 120B tuning
+
+The 120B yaml keeps the gfx1250 runbook's proxy settings. These overrides run the same proxy at
+4.2x the tokens/s:
+
+```bash
+MODEL=120B MBS=8 GBS=64 CE_IMPL=te EXTRA_ARGS="--sink_sliding_window 128 \
+  --recompute_granularity null --recompute_method null --recompute_num_layers null \
+  --use_turbo_grouped_gemm True --turbo_grouped_gemm_backend bf16:flydsl \
+  --overlap_moe_expert_parallel_comm True --use_turbo_fused_qk_rmsnorm_rope True \
+  --use_turbo_norm_te_linear True --use_turbo_rms_norm True --moe_permute_fusion True \
+  --moe_use_fused_router_with_aux_score True --moe_router_fusion True --moe_router_dtype fp32 \
+  --moe_shared_expert_overlap False --ddp_num_buckets 24 --ddp_average_in_collective True" \
+  bash examples/megatron/models/gpt-oss/run_gpt_oss_mi455x.sh
+```
+
+This runs at 850 ms/iter, 889 TFLOP/s/GPU, 77,070 tokens/s/GPU and 302 GB (70%). The table builds it
+up one change per row, one run each. Rows after the first also set `expandable_segments:True`, which
+saves about 7 GB of peak memory at the same speed:
+
+| change | MBS / GBS | ms/iter | TFLOP/s/GPU | tokens/s/GPU | peak memory |
+|---|---|---|---|---|---|
+| the 120B yaml | 1 / 8 | 449 | 211 | 18,245 | 207 GB (48%) |
+| 20B yaml settings (sliding window, fused QK RMSNorm and RoPE, TE CE, Turbo RMSNorm, fused router and permute) | 1 / 8 | 396 | 239 | 20,696 | 197 GB (46%) |
+| no recompute | 1 / 8 | 323 | 293 | 25,382 | 202 GB (47%) |
+| larger batch | 8 / 64 | 947 | 798 | 69,204 | 276 GB (64%) |
+| Turbo FlyDSL grouped GEMM | 8 / 64 | 869 | 869 | 75,410 | 277 GB (64%) |
+| all-to-all overlap | 8 / 64 | 853 | 885 | 76,782 | 294 GB (68%) |
+
+- With 128 experts, top-4 and EP4, each expert receives about 512 x MBS tokens per micro batch, too
+  few to fill the GPU at MBS 1; throughput keeps rising with MBS.
+- Without grouped GEMM: MBS 2 / 4 / 16 run at 41,785 / 57,717 / 73,939 tokens/s/GPU.
+  MBS 16 / GBS 128 with grouped GEMM: 1683 ms, 898 TFLOP/s/GPU, 77,890 tokens/s/GPU, 361 GB (84%).
+- The 20B yaml settings move lm loss at iteration 10 from 11.8436 to 11.5905 at MBS 1. Recompute,
+  grouped GEMM and all-to-all overlap leave it unchanged to 6 digits.
 
 ## Known issues
 
@@ -71,7 +111,13 @@ vocab 201088. Routing uses the yamls' `moe_router_force_load_balancing: true`.
   `is_expert_scheduling_enabled()` in Triton's AMD backend.
 - **Turbo DeepEP.** With `use_turbo_deepep: true` (the MI355X 20B yaml) the first dispatch on gfx1250
   times out (`DeepEP error: CPU recv timeout`) and the ranks keep the GPUs busy until they are
-  killed. The MI455X yamls turn DeepEP off.
+  killed. The MI455X yamls turn DeepEP off. Turbo DeepEP assumes 64-lane wavefronts
+  (`kWarpSize = 64` in `csrc/include/primus_turbo/deep_ep/configs.h`); gfx1250 runs 32-lane waves.
+  On gfx1250, `__ballot` returns only 32 bits, so `__all_sync(kFullWarpMask, ...)` is never true
+  and `barrier_block`, which `notify_dispatch` calls first, never returns. `warp_reduce_sum` also
+  returns twice the sum of the first 32 of the 64 logical lanes. A 4-rank standalone run (GPT-OSS
+  120B MoE shape) gets a correct `get_dispatch_layout`, then `dispatch` raises `CPU recv timeout`
+  after `PRIMUS_TURBO_DEEPEP_CPU_TIMEOUT`. Turbo's own test suite skips DeepEP on gfx1250.
 - **20B native fused cross entropy fails at step 1** with `CUDA error: out of memory`. Inductor
   compiles Megatron's native CE, and its autotuner backs up the 8x4096x201088 fp32 logits (about
   26 GB per rank) into pinned host memory. Four ranks exceed the amdgpu pinned-memory limit. The
