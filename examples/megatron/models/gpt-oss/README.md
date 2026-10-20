@@ -114,10 +114,12 @@ saves about 7 GB of peak memory at the same speed:
   killed. The MI455X yamls turn DeepEP off. Turbo DeepEP assumes 64-lane wavefronts
   (`kWarpSize = 64` in `csrc/include/primus_turbo/deep_ep/configs.h`); gfx1250 runs 32-lane waves.
   On gfx1250, `__ballot` returns only 32 bits, so `__all_sync(kFullWarpMask, ...)` is never true
-  and `barrier_block`, which `notify_dispatch` calls first, never returns. `warp_reduce_sum` also
-  returns twice the sum of the first 32 of the 64 logical lanes. A 4-rank standalone run (GPT-OSS
-  120B MoE shape) gets a correct `get_dispatch_layout`, then `dispatch` raises `CPU recv timeout`
-  after `PRIMUS_TURBO_DEEPEP_CPU_TIMEOUT`. Turbo's own test suite skips DeepEP on gfx1250.
+  and `barrier_block`, which `notify_dispatch` calls first, never returns: on 4 GPUs Turbo's barrier
+  spins for more than 20 s, and with only that mask changed to 32 bits it returns in under 0.1 s.
+  `warp_reduce_sum` also returns twice the sum of the first 32 of the 64 logical lanes, so the mask
+  change alone does not fix DeepEP. A 4-rank standalone run (GPT-OSS 120B MoE shape) gets a correct
+  `get_dispatch_layout`, then `dispatch` raises `CPU recv timeout` after
+  `PRIMUS_TURBO_DEEPEP_CPU_TIMEOUT`. Turbo's own test suite skips DeepEP on gfx1250.
 - **20B native fused cross entropy fails at step 1** with `CUDA error: out of memory`. Inductor
   compiles Megatron's native CE, and its autotuner backs up the 8x4096x201088 fp32 logits (about
   26 GB per rank) into pinned host memory. Four ranks exceed the amdgpu pinned-memory limit. The
