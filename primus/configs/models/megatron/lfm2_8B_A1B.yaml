@@ -4,6 +4,7 @@ extends:
 # https://huggingface.co/LiquidAI/LFM2-8B-A1B
 tokenizer_type: Lfm2Tokenizer
 tokenizer_model: LiquidAI/LFM2-8B-A1B
+vocab_size: 65536
 
 # model
 num_layers: 24

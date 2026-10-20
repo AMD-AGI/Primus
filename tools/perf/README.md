@@ -1,8 +1,10 @@
 # Primus Perf Batch Runner
 
 Batch-runs Primus training benchmarks across Megatron, Megatron-Bridge,
-TorchTitan, MaxText and MaxDiffusion, and extracts the results into a CSV that
-records not just the throughput but the settings that produced it.
+TorchTitan, MaxText and MaxDiffusion, plus the diffusion and DLRM benchmarks
+of [`diffusion_bench/`](./diffusion_bench/), and extracts the results into
+`results.csv` / `results.json`, which record not just the throughput but the
+settings that produced it and, for a run that failed, why.
 
 Two goals shape this tool:
 
@@ -13,19 +15,25 @@ Two goals shape this tool:
   that — in the catalog itself, or in a copy. Running something outside the
   curated suite means adding its `examples/...` path to the catalog, which is
   the only case where a path gets typed.
-- **Every number is attributable.** Each log carries the image digest,
-  submodule pins, GPU model, ROCm and framework versions, world size and the
-  full perf-relevant environment, and those land in the CSV as columns.
+- **Every number is attributable.** Each log carries the image digest and ID,
+  submodule pins, GPU model, host and container ROCm, framework versions,
+  the platform it ran on (server, BIOS, CPU, memory, GPU settings, host GPU
+  driver, NICs, OS) with a one-line system description, host settings, world
+  size and the full perf-relevant environment, and those land in the CSV as
+  columns.
+- **Every run ends with a verdict.** Runs are stopped when they hang or run
+  too long, nothing starts on busy GPUs, and each log and CSV row says why a
+  run ended.
 
 ## Quick start
 
 ```bash
 export HF_TOKEN=hf_...                                    # required
-export DOCKER_IMAGE=unifiedtrainingdockers.azurecr.io/utd/ci:<tag>   # required
+export DOCKER_IMAGE=rocm/primus:<tag>   # required
 export BACKEND=maxtext,maxdiffusion                        # required
 export RESULT_DIR=~/primus-bench/mi325x-v26.7
 
-# GPU is auto-detected from rocm-smi; set it to override.
+# GPU is auto-detected from amd-smi / rocm-smi; set it to override.
 # GPU=MI325X
 
 # RCCL still needs a real NIC on a single node.
@@ -37,9 +45,15 @@ export RESULT_DIR=~/primus-bench/mi325x-v26.7
 # export NCCL_SOCKET_IFNAME=eno0                            # e.g. eno0 / ibp...
 # export GLOO_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME
 
+DRY_RUN=1 bash tools/perf/run_batch.sh                    # check the plan first
 bash tools/perf/run_batch.sh                              # single node
-python3 tools/perf/extract_results.py "$RESULT_DIR"       # logs -> CSV
+python3 tools/perf/extract_results.py "$RESULT_DIR"       # optional: already run at the end of a batch
 ```
+
+`DRY_RUN=1` prints every selected config with its batch size, steps, log
+filename and exact launch command, then exits without touching docker or the
+GPUs. It does not need `HF_TOKEN` or `DOCKER_IMAGE`, so it also works on a
+login node (set `GPU` there, since there is no GPU to detect it from).
 
 Multi-node, from inside a Slurm allocation (`salloc -N 8 -p mi325x`):
 
@@ -52,8 +66,10 @@ The runner can be invoked from any directory.
 ## Dependencies
 
 [`yq`](https://github.com/mikefarah/yq) v4+ is the only external requirement.
-Everything else (`bash`, `docker`, `git`, `python3`, `rocm-smi`) is already
-present on a node that can run Primus.
+Everything else (`bash`, `docker`, `git`, `python3`, `amd-smi` or `rocm-smi`) is already
+present on a node that can run Primus. `BACKEND=...,diffusion_dlrm` also needs PyYAML
+in the host's `python3` (`pip install --user pyyaml`), even for `DRY_RUN=1`. The Excel
+report needs pandas and XlsxWriter, which `report.py` installs for you (see "Excel report").
 
 ### Automatic installation
 
@@ -177,6 +193,14 @@ $EDITOR "$RESULT_DIR/configs.yaml"
 CONFIG_FILE="$RESULT_DIR/configs.yaml" bash tools/perf/run_batch.sh
 ```
 
+[`perf_configs.yaml`](./perf_configs.yaml) is a second catalog in the same
+format: the models published in the AI Training section of AMD's
+[performance results page](https://www.amd.com/en/developer/resources/rocm-hub/ai-cloud-development/performance-results.html#ai-training),
+for MI355X, MI325X and MI300X. Its header notes where a config's batch size
+differs from the published number. Run it with
+`CONFIG_FILE=tools/perf/perf_configs.yaml`. The catalog test does not cover
+this file.
+
 Editing `tools/perf/configs.yaml` directly is the right move when the change
 really is a change to the release suite: it is reviewed like any other file,
 and [`tests/unit_tests/tools/test_perf_catalog.py`](../../tests/unit_tests/tools/test_perf_catalog.py)
@@ -201,14 +225,76 @@ partway, mark the ones that finished and re-run.
 Setting both `CONFIG_DIR` and `CONFIG_FILE` is an error. Missing paths and
 duplicate entries are reported before anything launches.
 
+### Diffusion and DLRM (`diffusion_dlrm`)
+
+`diffusion_dlrm` is a backend outside the catalog. Adding it to `BACKEND`
+runs [`diffusion_bench/run_benchmarks.sh`](./diffusion_bench/) once per
+repetition (`NUM_REPS`), after every other config of the batch, for the diffusion models (FLUX.1-dev, SDXL,
+Mochi, HunyuanVideo, Wan 2.1) and DLRM precisions its config enables. So
+everything a `rocm/primus` image can run is one command:
+
+```bash
+GPU=MI355X BACKEND=megatron,torchtitan,megatron_bridge,diffusion_dlrm \
+DOCKER_IMAGE=rocm/primus:v26.8 RESULT_DIR=~/primus-bench/mi355x-v26.8 \
+bash tools/perf/run_batch.sh
+```
+
+- **What runs** comes from diffusion_bench's own config,
+  [`diffusion_bench/config.yaml`](./diffusion_bench/config.yaml): models,
+  batch sizes per GPU type, DLRM precisions and the Hugging Face cache.
+  Point `DIFFUSION_DLRM_CONFIG` at a copy to change them without touching
+  the shared file. The runner passes it `DOCKER_IMAGE`, the GPU type (`GPU`
+  MI300X/MI308X/MI325X → `mi300`, MI350X/MI355X → `mi355`, otherwise read
+  from the GPU's gfx942 / gfx950 architecture), its container label,
+  `EXTRA_ENV`, and `TRAIN_STEPS` as every diffusion model's `num_iterations`
+  (DLRM keeps its own length). `HF_TOKEN` reaches it through the
+  environment, never a command line. The runner's own Primus defaults
+  (`HSA_NO_SCRATCH_RECLAIM` and the two `*_ATOMIC_FP32` settings) are not
+  applied, so the numbers match a standalone diffusion_bench run. `GPU`
+  need not be a catalog key when `diffusion_dlrm` is the only backend.
+- **No runner time limit.** `MAX_RUN_SECONDS` and `MAX_IDLE_SECONDS` do not
+  apply to this run. diffusion_bench stops a step that exceeds its
+  `step_timeout` (4 hours in the default config), marks it `timeout` and
+  moves on to the next model. Its asset download has a separate
+  `download_timeout`, which is 0 (none) by default, so a stalled first
+  download can hold the batch until it is stopped.
+- **Hugging Face cache.** The default config caches under `/tmp/huggingface`
+  on the node; a full first download is about 370 GB. Set
+  `DIFFUSION_DLRM_HF_CACHE` (or `hf_cache_dir` in the config) to reuse a
+  cache that is already populated.
+- **Results.** diffusion_bench writes its usual folder,
+  `$RESULT_DIR/diffusion_dlrm/<gpu>_<host>_<time>/` (per-step logs,
+  `status.tsv`, `summary.md`), and the runner keeps its own log next to the
+  others, `diffusion_dlrm-<config>-<hash>-rep<r>_<stamp>.log`. The batch
+  summary lists each step's outcome, and `results.csv` gets a row per model
+  (see "Extracting results"). The run counts as failed when any step did,
+  the setup and download steps included, even if every model then ran.
+- **Image.** `DOCKER_IMAGE` must contain `/workspace/AMDiffusionBenchmark`
+  and `/workspace/DLRMBenchmark`, as `rocm/primus` images do; this is checked
+  before the batch starts.
+- Catalog mode, single node only. With `CONFIG_DIR`, `BACKEND` is ignored and
+  so is `diffusion_dlrm` (the runner warns); `run_batch_multinode.sh` refuses
+  it. It also needs `PRIMUS_MODE=container`, since diffusion_bench starts its
+  own container.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `HF_TOKEN` | — | **Required.** Never defaulted, so it cannot be baked into a shared script. |
 | `DOCKER_IMAGE` | — | **Required.** Which build to benchmark; a stale default would silently measure the wrong one. |
-| `BACKEND` | — | **Required.** Comma-separated backends, e.g. `megatron,torchtitan`. |
-| `GPU` | auto-detected | Catalog top-level key, e.g. `MI325X`. Read from `rocm-smi` when unset. |
+| `BACKEND` | — | **Required.** Comma-separated backends, e.g. `megatron,torchtitan`; `diffusion_dlrm` adds the diffusion and DLRM benchmarks. |
+| `GPU` | auto-detected | Catalog top-level key, e.g. `MI325X`. Read from `amd-smi` or `rocm-smi` when unset. |
+| `DRY_RUN` | `0` | `1` prints the plan and exits. |
+| `MAX_RUN_SECONDS` | `3600` | Stop a run still going after this long. `0` = no limit. |
+| `MAX_IDLE_SECONDS` | `1200` | Stop a run whose log has not grown for this long. `0` = no limit. |
+| `POLL_INTERVAL` | `15` | Seconds between checks of the run log. |
+| `GPU_BUSY_MIB` | `2048` | A GPU with more memory in use than this counts as busy. |
+| `GPU_BUSY_WAIT_SECONDS` | `60` | How long to wait for busy GPUs to free up before refusing. |
+| `ALLOW_BUSY_GPUS` | `0` | `1` runs even when the GPUs are busy. |
+| `EXTRACT` | `1` | `0` skips refreshing `results.csv` / `results.json` at the end of a batch. |
+| `REPORT` | `1` | `0` skips writing `report.xlsx` at the end of a batch (see "Excel report"); `EXTRACT=0` skips it too. |
+| `PULL_IMAGE` | `0` | `1` (or `true` / `yes`) pulls `DOCKER_IMAGE` on every node before the batch even if the tag is present. |
 | `RESULT_DIR` | `$PWD/primus-perf-<date>` | Where logs and snapshots go; created if missing. |
 | `CONFIG_FILE` | `tools/perf/configs.yaml` | Catalog to read. |
 | `CONFIG_DIR` | — | Switches to directory mode. |
@@ -218,6 +304,8 @@ duplicate entries are reported before anything launches.
 | `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` | auto (single node); `eno0` (multi-node) | RCCL/Gloo bootstrap NIC. Set even for 1-node 8-GPU; must not be `docker0`. See below. |
 | `NNODES`, `GPUS_PER_NODE` | `1`, `8` | Cluster topology. |
 | `PRIMUS_MODE` | `container` / `slurm srun` | Launcher mode. |
+| `DIFFUSION_DLRM_CONFIG` | `tools/perf/diffusion_bench/config.yaml` | diffusion_bench config for `diffusion_dlrm`. |
+| `DIFFUSION_DLRM_HF_CACHE` | `hf_cache_dir` of that config | Hugging Face cache for the diffusion models. |
 
 ### Which backends go with which image
 
@@ -231,23 +319,24 @@ Training runs on one of two images, and each carries only one framework stack:
 So `BACKEND=megatron,torchtitan` and `BACKEND=maxtext,maxdiffusion` are the
 two valid groupings. Mixing across the split — `BACKEND=megatron,maxtext` —
 cannot work whichever image you pick, because half the runs have no framework
-to execute.
+to execute. `megatron_bridge` and `diffusion_dlrm` go with the PyTorch side,
+on an image that carries them, such as `rocm/primus:v26.8`.
 
 This is why `BACKEND` is required rather than defaulting to every backend
 listed for the GPU: there is no image for which "all" is correct, so a default
 would only ever queue runs doomed to fail.
 
 `GPU` is the opposite case: the node already knows what it is, so when unset
-the runner reads the part number out of the `rocm-smi` product name
-(`AMD Instinct MI325X` → `MI325X`) and says so:
+the runner reads the part number out of the GPU's marketing name from
+`amd-smi` (or `rocm-smi`) (`AMD Instinct MI325X` → `MI325X`) and says so:
 
 ```
-[INFO] GPU not set; detected MI325X from rocm-smi.
+[INFO] GPU not set; detected MI325X (AMD Instinct MI325X).
 ```
 
-Set it explicitly to benchmark one device's configs on another. When
-`rocm-smi` is unavailable the runner errors and lists the catalog keys rather
-than guessing.
+Set it explicitly to benchmark one device's configs on another. When neither
+tool is available the runner errors and lists the catalog keys rather than
+guessing.
 
 ### Extra environment variables
 
@@ -310,8 +399,16 @@ address belongs to **docker0**.
 skip `docker0` / `lo` / `veth*`, but it never runs once `base_env.sh` has
 already set the variables.
 
-Export a real NIC before `run_batch.sh`. `NCCL_*` and `GLOO_*` are
-prefix-forwarded into the container, so a plain export is enough:
+The runner guards against this before the first run. An explicit
+`NCCL_SOCKET_IFNAME` or `GLOO_SOCKET_IFNAME` that selects `lo`, `docker*`,
+`br-*`, `veth*` or another bridge is refused (comma lists are checked entry
+by entry; a `^` exclusion list is accepted). When they are unset and Primus's
+own pick would be such an interface, the runner exports the default-route
+interface instead and logs it in the summary.
+
+To choose the interface yourself, export it before `run_batch.sh`. `NCCL_*`
+and `GLOO_*` are prefix-forwarded into the container, so a plain export is
+enough:
 
 ```bash
 export NCCL_SOCKET_IFNAME=eno0          # whatever `ip -br addr` shows, not docker0
@@ -319,18 +416,90 @@ export GLOO_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME
 export NCCL_DEBUG=WARN                  # optional: confirm UniqueId / bootstrap
 ```
 
-Check `hostname -I` and `ip -br addr` on the node you will run on. Do not
-unset these hoping RCCL will pick: Primus will fill them from `hostname -I`
-again, which is how `docker0` got selected in the first place.
-
 ### Multi-node extras
 
-Multi-node additionally honours `MAX_ATTEMPTS_PER_CONFIG`, `POLL_INTERVAL`,
-`MAX_RUN_SECONDS` and `FAIL_PATTERN` for its retry loop.
+Multi-node additionally honours `MAX_ATTEMPTS_PER_CONFIG` and `FAIL_PATTERN`
+for its retry loop: an attempt whose output matches `FAIL_PATTERN`, or that
+hits one of the run limits below, is stopped and retried.
 `run_batch_multinode.sh` defaults `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`
 to `eno0` (Fremont); override them the same way on any other site. The
 single-node `docker0` failure above applies here too if the wrong NIC is
 pinned.
+
+## Before each run
+
+These checks run on every node before the first run, and the GPU part again
+before every later run. A failed check at the start refuses the batch with
+exit code 2 before anything launches; a failed GPU check later stops the
+batch and leaves the remaining runs unstarted.
+
+- **Image present, and the same everywhere.** A missing image is pulled once,
+  up front, so the pull neither counts against the run limits nor leaves the
+  image digest unknown (`PULL_IMAGE=1` pulls even when the tag is present).
+  For a private image, export `DOCKER_LOGIN_USER` and `DOCKER_LOGIN_KEY` (and
+  `DOCKER_LOGIN_REGISTRY` if not Docker Hub), as for `primus-cli`; the runner
+  logs in before pulling.
+  Multi-node batches refuse to start when the nodes hold different images
+  under the same tag.
+- **Leftover containers stopped.** Every container this tool starts carries
+  the label `primus.perf=<user>/<batch stamp>/<host>/<pid>`. Containers that
+  earlier batches of the same user left running (after a SIGKILL, a scheduler
+  time limit or a lost session) are stopped. Other users' containers, and
+  containers whose batch is still running on this host, are never touched.
+  "Still running" can only be checked on the host that ran the batch: on the
+  other nodes of a multi-node batch, any earlier batch of yours counts as
+  left over.
+- **GPUs idle.** No GPU may have more than `GPU_BUSY_MIB` of memory in use
+  (idle MI355X GPUs show about 280 MiB). After `GPU_BUSY_WAIT_SECONDS` the
+  batch refuses and lists the busy GPUs and the running containers.
+  `ALLOW_BUSY_GPUS=1` overrides this. Memory is read with `amd-smi` (or
+  `rocm-smi`), which only sees the GPUs this job was given. A Slurm job step
+  that was not given the GPUs (how the multi-node check reaches the other
+  nodes) sees none that way, so the amdgpu driver's counters in sysfs are the
+  fallback; those cover every GPU on the node, so on a node shared with
+  another job, its GPUs count too. When nothing is readable the check is
+  recorded as "not checked" and does not block.
+- **NCCL interface usable.** See the socket interface section above.
+- **diffusion_dlrm ready**, when selected. Its config is validated before
+  anything else (exit 2 on a bad key or model name), the image must carry
+  the benchmark repos it needs, and the Hugging Face cache must be writable.
+
+The result of the GPU check is recorded in every run's banner (`GPU check`).
+
+## Time limits and failure reasons
+
+Every run is launched in the background, in its own process group, and its
+log is checked every `POLL_INTERVAL` seconds. A run is stopped when it is
+still going after `MAX_RUN_SECONDS` (default 1 hour), or when its log has not
+grown for `MAX_IDLE_SECONDS` (default 20 minutes), which is how a hang shows
+up. Both apply to single-node and multi-node runs; set either to `0` to
+disable it. Stopping a run kills its whole process group and then its
+containers.
+
+Every log ends with a footer that says why the run ended:
+
+```
+# Exit code        : 143
+# Elapsed (sec)    : 1206
+# Failure reason   : idle: no new output for MAX_IDLE_SECONDS=1200s
+```
+
+`Failure reason` is `none` for a successful run, otherwise `<category>:
+<detail>` with category `timeout`, `idle`, `fail_pattern` (multi-node),
+`signal` (e.g. `killed by SIGKILL`), `exit` or `interrupted`. A
+`diffusion_dlrm` run has none of the runner's limits (diffusion_bench times
+out each step itself) and, when some of its steps failed, the category
+`steps`, e.g. `steps: 2 of 8 diffusion_bench steps not successful:
+diffusion_hunyuan-video_bs3 oom, dlrm_FP32 timeout`.
+
+Exit codes of both runners:
+
+| Code | Meaning |
+|---|---|
+| `0` | Every run passed. |
+| `1` | At least one run failed or was not started. |
+| `2` | Bad input or a failed pre-run check; nothing was launched. |
+| `130` | Interrupted. |
 
 ## What a batch writes
 
@@ -338,58 +507,93 @@ Into `$RESULT_DIR`:
 
 | File | Contents |
 |---|---|
-| `<framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>_<stamp>.log` | Banner, full config dump, raw output, exit code and elapsed time. |
+| `<framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>_<stamp>.log` | Banner, full config dump, raw output, exit code, elapsed time and failure reason. |
+| `diffusion_dlrm-<config>-<hash>-rep<r>_<stamp>.log`, `diffusion_dlrm/<gpu>_<host>_<time>/` | The `diffusion_dlrm` run: the same log layout, and diffusion_bench's results folder (per-step logs, `status.tsv`, `summary.md`). |
 | `batch_summary_<stamp>.txt` | System info, the resolved config list with content hashes, per-run status. |
 | `batch_env_<stamp>.txt` | Full environment, **secrets redacted**. |
 | `batch_submodules_<stamp>.txt` | `git submodule status` — which vendored code ran. |
-| `batch_gpu_<stamp>.txt` | `rocm-smi` clocks, power caps, topology. |
-| `batch_stack_<stamp>.txt` | Image digest plus library versions from inside the container. |
+| `batch_gpu_<stamp>.txt` | `rocm-smi` (or `amd-smi`) clocks, power caps, topology. |
+| `batch_stack_<stamp>.txt` | Image digest and ID, ROCm and HIP versions, library versions from inside the container. |
+| `batch_host_<stamp>.txt` | Every node's platform as `key: value` lines (see "Platform" below), then the raw data behind them: `lscpu`, `numactl -H`, idle states, DIMMs, each GPU's sysfs values, RDMA ports, amdgpu module parameters, driver packages and repositories, Docker and network interfaces. Multi-node adds the settings that differ between nodes. |
+| `batch_manifest_<stamp>/` | The image's `/workspace/.manifest` (build recipe, dpkg and pip lists), when it has one. |
 | `run_batch_<stamp>.sh` | The driver as it was run, copied *before* the first run. |
+| `results.csv`, `results.json` | Every log in the directory parsed by `extract_results.py`; refreshed at the end of each batch. |
+| `report.xlsx` | The Excel report of the directory (see "Excel report"), when pandas and XlsxWriter are installed. |
 
 `<stamp>` is shared by every artefact of one batch, so repeated batches in the
-same directory accumulate instead of overwriting.
+same directory accumulate instead of overwriting. Only `results.csv` and
+`results.json` are rewritten each time, from all the logs together.
 
 ## Stopping a batch
 
-Ctrl+C stops the run in flight and abandons the rest of the batch instead of
-rolling on to the next config. It also stops the training container, which
-matters because `docker run` losing its client does not bring the container
-down on its own — without this you would be left holding the GPUs.
+Ctrl+C, `kill` (SIGTERM) or a closed terminal (SIGHUP) stops the run in
+flight and abandons the rest of the batch instead of rolling on to the next
+config. It also stops the training container, which matters because
+`docker run` losing its client does not bring the container down on its own —
+without this you would be left holding the GPUs.
 
-The in-flight log still gets its footer (exit code 130 and elapsed time) and
-the summary records where the batch stopped, so an interrupted batch is still
-readable by `extract_results.py`.
+The in-flight log still gets its footer (exit code 130, elapsed time and
+`Failure reason: interrupted`) and the summary records where the batch
+stopped, so an interrupted batch is still readable by `extract_results.py`.
 
-Only containers this batch started are stopped. primus-cli names them
-`primus-training-<SLURM_JOB_ID or pid>`, so there is no fixed name to match;
-the runner snapshots which `primus-training*` containers were already up
-before it launched anything and leaves those alone. On a shared node, a
-colleague's run — or your own earlier one — survives your Ctrl+C. The snapshot
-is echoed into the summary so you can see what was excluded.
+Only containers this batch started are stopped: cleanup matches this batch's
+`primus.perf` label exactly, on every allocated node for multi-node. The same
+cleanup runs when a run hits a limit or a multi-node attempt fails, so the
+GPUs are released before the next run starts.
 
-Multi-node cleanup works the same way, and runs on every allocated node. Under
-Slurm the container name is fully determined (`primus-training-$SLURM_JOB_ID`,
-identical across the allocation and unique per job), so cleanup targets that
-name exactly and can never touch another job's containers; the prefix-plus-
-snapshot path is only the fallback for running outside an allocation. The name
-being cleaned up is printed in the batch summary. The same cleanup runs on the
-retry paths, so a failed or hung attempt releases the GPUs before the next one
-starts.
+diffusion_bench's container runs as root, so the files it writes are
+root-owned until it hands them back at the end of its run. When the runner
+stopped it first, the runner does that hand-back itself for the run's folder
+and the root-owned files in the Hugging Face cache, so you can still delete
+the results folder.
+
+A SIGKILL (some schedulers send one at the time limit) cannot be handled.
+The batch summary still shows which runs started and finished, the
+interrupted log simply has no footer, and the container it leaves behind is
+stopped by the next batch on that node (see "Before each run").
 
 ## Provenance
 
 The per-run banner carries the fields that explain a number:
 
 ```
-# Docker image     : unifiedtrainingdockers.azurecr.io/utd/ci:primus_the_rock_ci_b154fd0_20260903
-# Image digest     : unifiedtrainingdockers.azurecr.io/utd/ci@sha256:ec9992a8065d...
-# Primus commit    : 137d6c256119
-# Submodule pins   : 43f426fa
-# GPU model        : AMD Instinct MI325X
-# ROCm version     : 7.2.1
-# Torch version    : 2.12.0+rocm10.0.0
+# Docker image     : rocm/primus:v26.8
+# Image digest     : rocm/primus@sha256:79629b5e5ba4...
+# Image ID         : sha256:fe8e1551d200...
+# Primus commit    : 9a05d3fc9e5c-dirty
+# Submodule pins   : b2ceb2bd
+# GPU model        : AMD Instinct MI355X
+# ROCm (host)      : 10.1.0
+# Container ROCm   : 10.1.0
+# Container HIP    : 7.16.26385-0000000
+# Torch version    : 2.14.0+rocm10.1.0
 # World size       : 8  (NNODES=1 x GPUS_PER_NODE=8)
-# Perf environment :
+# System           : Dual AMD EPYC 9575F 64-Core Processor-based Supermicro AS -4126GS-NMR-LCC server with 8x AMD Instinct MI355X (288GB HBM3E 1400W) GPUs, 1 NUMA node per socket, System BIOS 1.7, Ubuntu 22.04.5 LTS, Host GPU driver amdgpu 30.10.1 (ROCm 7.0.1)
+# Server           : Supermicro AS -4126GS-NMR-LCC
+# BIOS             : 1.7 (09/12/2025, American Megatrends International, LLC.)
+# OS               : Ubuntu 22.04.5 LTS
+# Kernel           : 6.8.0-65-generic
+# Kernel cmdline   : ro panic=0 nowatchdog ... amd_iommu=on iommu=pt amdgpu.noretry=1 ...
+# CPU              : AMD EPYC 9575F 64-Core Processor
+# CPU topology     : 2 sockets x 64 cores x 2 threads (256 CPUs), 2 NUMA nodes
+# CPU frequency    : acpi-cpufreq, boost on, max 3300 MHz
+# CPU governor     : schedutil x256
+# CPU idle states  : acpi_idle (menu): POLL C1 C2
+# NUMA balancing   : 0
+# Host memory      : 3023 GiB usable; installed 3072 GiB Registered-DDR5, 24 channels; DIMMs 128 GiB Samsung M321RAJA0MB2-CCPWF, 6400 MT/s, configured 6000 MT/s
+# Transparent HP   : always
+# IOMMU            : amd_iommu=on iommu=pt (default domain: identity)
+# GPU VRAM         : 288 GiB
+# GPU power cap    : 1400 W
+# GPU partition    : SPX/NPS1
+# GPU clocks       : perf level auto, max sclk 2400 MHz
+# GPU VBIOS        : 113-M355-01-1K1-040C
+# GPU PCIe         : 32.0 GT/s PCIe x16
+# Host GPU driver  : amdgpu 30.10.1 (ROCm 7.0.1)
+# Driver package   : amdgpu-dkms 1:6.14.14.30100100-2212064.22.04
+# amdgpu driver    : 6.14.14
+# RDMA NICs        : 8x ionic 400 Gb/sec (fw 1.117.5-a-147), 2x bnxt_en 200 Gb/sec (fw 233.0.207.0)
+# Perf environment (host shell):
 #   HSA_NO_SCRATCH_RECLAIM=1
 #   NVTE_CK_IS_V3_ATOMIC_FP32=1
 #   ...
@@ -398,15 +602,75 @@ The per-run banner carries the fields that explain a number:
 A few notes on why these specific fields:
 
 - The **digest** is recorded alongside the tag because a tag can be re-pushed;
-  two runs with the same tag are not necessarily the same image.
+  two runs with the same tag are not necessarily the same image. The **image
+  ID** covers the case the digest misses: a CI image re-tagged locally as
+  `rocm/primus:v26.8` still reports the CI repository's digest, which says
+  nothing about the tag it ran under, but its ID identifies it. On nodes
+  using the same docker image store, two runs used the same image exactly
+  when their IDs match (docker's classic and containerd stores report
+  different IDs for the same image). Multi-node batches refuse to start when
+  the nodes report different IDs under the same tag; `PULL_IMAGE=1` (or
+  `true` / `yes`) pulls the registry's copy on every node first.
+- **ROCm** is reported twice, in every run banner and in the batch summary:
+  the host's user-space install (`ROCm (host)`, from `ROCM_PATH` or
+  `amd-smi`) and the container's, which is what the run actually used
+  (`Container ROCm`, read from `/opt/rocm` or, in TheRock images, from the
+  pip `rocm` package). The HIP version is a separate number, and the kernel
+  driver is the `amdgpu driver` field. In the CSV they are `rocm_version`
+  and `container_rocm_version`. With `PRIMUS_MODE=direct` the run does not
+  use the image's ROCm, so `Container ROCm` only describes `DOCKER_IMAGE`.
+- **Host settings** (CPU frequency governor, NUMA balancing, transparent huge
+  pages, IOMMU mode, amdgpu driver) explain why one node is slower than
+  another with the same image and code. The banner carries the node running
+  the batch; `batch_host_<stamp>.txt` has every node.
+- The **platform** is what a published number is quoted with. `System` is
+  that sentence, written the way performance footnotes give it (CPUs and
+  server, GPUs with their memory and power cap, NUMA nodes per socket, BIOS,
+  OS, host GPU driver); the batch summary and the Excel Overview carry it
+  too. The lines below it are the details that can move a number on their
+  own: DIMM speed (the example's DIMMs are rated 6400 MT/s but run at 6000),
+  boost and idle states, GPU power cap, compute and memory partition, clock
+  limits, VBIOS and PCIe link, and the scale-out NICs and their firmware.
+  Everything is read without root:
+  - server, board and BIOS from DMI (`/sys/class/dmi/id`), placeholders
+    such as "To Be Filled By O.E.M." left out;
+  - CPU topology from `lscpu`, frequency driver, boost, EPP and idle states
+    from `/sys/devices/system/cpu`;
+  - installed memory and populated channels from EDAC, DIMM model and
+    speeds from udev's copy of the DMI tables (which can miss some DIMMs,
+    so they are named but not counted);
+  - GPU memory, power cap, partition, clocks, VBIOS and PCIe link from the
+    amdgpu driver's sysfs files, which every Slurm job step can read (amd-smi
+    only sees the GPUs a step was given). The GPU's marketing name and
+    memory type come from amd-smi on the node running the batch;
+  - `Host GPU driver` from the `amdgpu-dkms` package (deb or rpm), whose
+    version ends in the driver release (`...30100100` is amdgpu 30.10.1),
+    and the ROCm release of the host's repo.radeon.com repository, which
+    amdgpu-install points at the ROCm release that ships that driver. Older
+    packages numbered the driver by ROCm release and show as `ROCm 6.4.1`.
+    Without the package, it is the loaded module's version;
+  - RDMA NICs from `/sys/class/infiniband`, active ports only.
+
+  A value the GPUs or CPUs disagree on is a tally, e.g. `1400 W x7, 1000 W x1`.
+  For multi-node, `Host check` says whether every node reported the same
+  platform; when one does not, the batch summary warns with the keys that
+  differ, and the end of `batch_host_<stamp>.txt` lists each of their values
+  with the number of nodes that had it (the node sections above show which).
+- The image's **build manifest** (`/workspace/.manifest`, including
+  `docker-build-recipe.txt`) is copied once per batch, so the result directory
+  says how its image was built.
 - **Submodule pins** matter because Primus vendors ten submodules, and bumping
   one changes performance while leaving the Primus commit unchanged.
 - **Library versions are read from inside the container**, since the image
   digest does not cover packages installed at runtime.
-- The **perf environment** is captured by prefix (`HSA_*`, `NCCL_*`, `XLA_*`,
-  `TORCH_*`, `NVTE_*`, and so on) rather than as a hand-maintained list, which
-  is always out of date. Anything matching `*TOKEN*`, `*SECRET*`, `*PASSWORD*`,
-  `*_KEY` or `AWS_*` is redacted.
+- The **perf environment** block is the runner's own shell, captured by
+  prefix (`HSA_*`, `NCCL_*`, `XLA_*`, `TORCH_*`, `NVTE_*`, and so on) rather
+  than as a hand-maintained list, which is always out of date. Anything
+  matching `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*_KEY` or `AWS_*` is
+  redacted. Inside the container, Primus prints its main environment
+  settings, and each hook's exports, at the start of the run output; the
+  GPU-specific file (`runner/helpers/envs/<GPU>.sh`) may set more than is
+  echoed there.
 
 ## Extracting results
 
@@ -414,15 +678,149 @@ A few notes on why these specific fields:
 python3 tools/perf/extract_results.py "$RESULT_DIR"
 ```
 
-Writes `benchmark_results_<timestamp>.csv` into that directory. Throughput uses
-the harmonic mean over post-warmup steps, memory the arithmetic mean; at least
-the first three logged steps are always dropped as compile/autotune. Multi-rank
-logs are filtered to a single rank so the iteration count stays honest.
+Both runners do this automatically at the end of every batch (also after an
+interrupt; `EXTRACT=0` skips it). It writes `results.csv` and `results.json`
+into the directory, replacing the previous ones: they are derived from every
+log there, including earlier batches, so re-running is always safe. The JSON
+holds the same rows plus `parser_version`, the tools commit and the time it
+was generated. Throughput uses the harmonic mean over post-warmup steps,
+memory the arithmetic mean; at least the first three logged steps are always
+dropped as compile/autotune. Multi-rank logs are filtered to a single rank so
+the iteration count stays honest.
 
 Alongside the metrics, each row carries `world_size`, `docker_image`,
 `image_digest`, `primus_commit`, `submodule_pins`, `gpu_model`, `rocm_version`,
 `torch_version`/`jax_version` and, for multi-node, `slurm_job_id`/`nodelist`.
+Columns added later sit at the end of the CSV, so positional readers of older
+files keep working:
+
+| Column | Meaning |
+|---|---|
+| `status` | `ok`, `failed`, `interrupted`, `incomplete` (no footer: still running or killed), `unknown` (legacy log). |
+| `failure_reason`, `failure_detail` | Why a non-`ok` run ended, and the log line behind it (see below). |
+| `attempt`, `failed_attempt` | Multi-node attempt number; set on `-failed-attempt<n>` logs. Filter these out for performance numbers. |
+| `config_path`, `batch_stamp`, `num_reps`, `gpu_check` | From the run banner. |
+| `tps_per_gpu_*`, `tflops_*` (`min`, `max`, `stdev`, `cv`) | Spread over the post-warmup steps; tells a few slow steps from a uniformly slow run. |
+| `version_warnings` | Distinct `... version mismatch ...` messages, e.g. aiter installed vs expected. |
+| `parser_version` | Bumped when columns change. |
+| `image_id`, `container_rocm_version`, `container_hip_version` | Exact image and the user-space ROCm/HIP inside it. |
+| `cpu_governor`, `numa_balancing`, `transparent_hugepages`, `iommu`, `amdgpu_version` | Host settings of the node that ran the batch. |
+| `rec_per_s`, `rec_per_s_cv` | DLRM recommendations/s and its std/mean, as DLRMBenchmark reports them (iterations/s × its per-GPU `BATCH_SIZE`). |
+| `step_log` | For `diffusion` / `dlrm` rows, the diffusion_bench step log, relative to the result directory; empty for a step that never ran. |
+| `system_description` | The one-line platform description (see "Provenance"). |
+| `host_check` | Multi-node: whether every node reported the same platform. |
+| `server`, `bios`, `os`, `kernel`, `kernel_cmdline` | Server vendor and model, BIOS version (date, vendor), OS, kernel and its command line. |
+| `cpu_model`, `cpu_topology`, `cpu_frequency`, `cpu_idle`, `host_memory` | CPU model; sockets, cores, threads and NUMA nodes; frequency driver, boost, max clock and EPP; idle states; usable and installed memory and DIMMs. |
+| `gpu_vram`, `gpu_power_cap`, `gpu_partition`, `gpu_clocks`, `gpu_vbios`, `gpu_driver`, `rdma_nics` | Per-GPU memory, power cap, compute/memory partition, perf level and max clock, VBIOS, the host GPU driver release, and the active RDMA ports. |
+| `hmean_nominal_tflops`, `throughput_note` | Megatron-Bridge post-training without packed sequences: its `MODEL_TFLOP/s/GPU` estimate, kept under this name instead of `hmean_tflops`, and why (see below). |
+
+Megatron-Bridge's `MODEL_TFLOP/s/GPU` is an estimate, not a measurement:
+global batch × `seq_length` × the FLOPs of one training token, divided by the
+step time, so it counts every sample as `seq_length` tokens. That holds for
+pretraining and for post-training with `packed_sequence: true`. Without
+packed sequences, post-training pads each micro-batch only to its longest
+sample: SQuAD samples are a few hundred tokens against a `seq_length` of
+8192, and the estimate exceeds the GPU's peak (about 14,000 TFLOP/s per GPU
+for the Qwen3-32B LoRA recipe on MI355X). Those rows (`Train Module` is
+`post_trainer` and the resolved `packed_sequence` is false, Megatron-Bridge's
+default) therefore keep the estimate as *nominal* TFLOP/s
+(`hmean_nominal_tflops`, "Nominal TFLOP/s per GPU" in the report: the rate
+the step would reach if every sample were `seq_length` tokens) and leave the
+TFLOP/s columns empty. Their throughput is samples/s per GPU, from each
+iteration's global batch size and step time, and `throughput_note` says why.
+Because the estimate is a fixed amount of work divided by the step time,
+nominal TFLOP/s still compares runs of one config (same model, dataset,
+batch size and `seq_length`). LoRA's estimate also counts the weight gradients its
+frozen base weights never compute, so treat a packed LoRA run's TFLOP/s as
+an upper bound.
+
+A `diffusion_dlrm` log becomes one row per diffusion model and DLRM
+precision, with backend `diffusion` or `dlrm`. Those numbers come from
+diffusion_bench's own parser, so they match its `summary.md`: TFLOP/s and
+samples/s per GPU are AMDiffusionBenchmark's averages, not this tool's
+harmonic means, and `micro_batch_size` is the batch size per GPU (DLRM's
+`BATCH_SIZE` is per GPU too). Their `exit_code`, `elapsed_sec`, `status` and
+`failure_reason` are the step's:
+
+- `timeout`: diffusion_bench stopped the step at its `step_timeout`;
+  `killed`: it got SIGKILL before that (host out of memory, `docker kill`).
+- `no_metrics`: the step succeeded without reporting a throughput. Such a
+  row is `failed` even though the batch summary shows the run as passed.
+- `config_error`: Hydra rejected `launcher.py`'s overrides; the detail is its
+  message.
+- `not_run`: the step never ran, e.g. because the setup step failed first
+  (`interrupted` or `incomplete` instead, when the batch was stopped).
+- Otherwise the step's own log is searched as described below.
+
+Every step diffusion_bench planned gets a row, including those that left no
+output folder, and a setup or download step that failed gets one too, with
+backend `diffusion_dlrm`. When the config gives DLRM its own image
+(`dlrm.image`), the DLRM rows name that image and leave the main image's
+container versions empty.
+
+`failure_reason` takes the runner's verdict from the footer when it is
+definitive (`timeout`, `idle`, `interrupted`, and `steps` for a
+`diffusion_dlrm` run with no step rows). Otherwise the run output is
+searched, in this order, for `nic_error` (no usable socket interface), `oom`,
+`gpu_contended` (out of memory while this process held less than half the
+GPU, i.e. another process had it), `segfault`, `nccl_error` and
+`python_error` (the exception at the end of the first traceback, other than
+torchrun's `ChildFailedError`). Primus's own `[Patch]` log lines are ignored.
+Failing that it is `killed` (SIGKILL with no error in the log, e.g. the host
+OOM killer), `signal`, `fail_pattern`, `exit`, or `unknown`; a failed run
+always has a reason. `incomplete` rows only get one when the output shows a
+cause.
+
 Logs written before these fields existed simply leave the columns empty.
+Older logs still get a `status` and a `failure_reason`: from their exit code
+(130 counts as `interrupted`), from the older multi-node footer
+(`Failure pattern? : true`), and from their output.
+
+## Excel report
+
+```bash
+python3 tools/perf/report.py "$RESULT_DIR"                       # -> $RESULT_DIR/report.xlsx
+python3 tools/perf/report.py "$RESULT_DIR" --baseline ~/primus-bench/mi355x-v26.7
+python3 tools/perf/report.py dir_a dir_b -o release.xlsx         # several batches in one report
+```
+
+`report.py` turns a result directory into a workbook that is easier to read
+than `results.csv`:
+
+| Sheet | Contents |
+|---|---|
+| Overview | One column per batch: outcome (with the errors of a refused batch), timing, image (tag, digest, ID), container ROCm/HIP and Torch, Primus commit and submodule pins, the platform (system description, GPU model, nodes and GPUs, server, BIOS, CPU, memory, GPU settings, host GPU driver, NICs, OS), host settings, run settings (reps, `TRAIN_STEPS`, limits, the `diffusion_dlrm` config), and run counts (planned, started, failed, not started). With `--baseline`, each baseline's image, commit and batches. |
+| Performance | One row per unique backend, model, precision, config hash, sequence length, MBS, GBS, nodes, GPUs and image ID, with runs ok / total and the means over the successful runs of TFLOP/s per GPU and throughput (per GPU, and for all GPUs), with its unit: tokens/s, samples/s, frames/s or recommendations/s. Megatron-Bridge post-training without packed sequences shows nominal TFLOP/s instead of TFLOP/s, in its own column (see "Extracting results"). Also the step counts run, run-to-run CV, GPU memory and minutes per run. |
+| Runs | Every run, with its status, failure reason and detail, throughput note, image, result directory and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
+| Chart | TFLOP/s per GPU for each config (and the baseline). |
+
+- **Averages.** A config's numbers are the arithmetic mean over its
+  successful runs (`NUM_REPS` repetitions, possibly across batches, and
+  whatever step count each ran; the Steps column lists them, e.g. `10; 50`).
+  Failed runs and failed multi-node attempts are removed before averaging;
+  "runs ok / total" counts them and the Runs sheet says why each one
+  failed. Runs with another image are a separate row, and
+  the Image column appears when there are several images. Run-to-run CV
+  above 3% is highlighted; "runs ok / total" is red when runs failed, amber
+  when only retried multi-node attempts did.
+- **Baseline.** `--baseline DIR` (repeatable), e.g. the previous release,
+  adds the baseline's TFLOP/s and throughput and the change, red or green
+  past `--threshold` percent (default 5). Configs are matched by backend,
+  model, precision and GPU count; the Baseline config column says whether
+  the config file was the same.
+- **Inputs.** It reads each directory's `results.json` when that is current
+  (newer than the logs, from this parser version), and otherwise parses the
+  logs itself; it never writes into the input or baseline directories.
+- **Automatic.** Both runners also write `report.xlsx` at the end of a
+  batch, after `results.csv`, when its libraries are installed; `REPORT=0`
+  skips it, and so does `EXTRACT=0`.
+- **Dependencies.** pandas and XlsxWriter. A copy in
+  `~/.cache/primus-perf/python<X.Y>-<platform>` is used first; the first
+  `report.py` run installs whatever is missing or unusable there (about
+  130 MB, no root, nothing else on the system changes). A batch never
+  installs them itself, and `--no-install` turns this off. Without network
+  access, install them into a Python of your own (`python3 -m venv ~/venv-perf
+  && ~/venv-perf/bin/pip install pandas XlsxWriter`) and run `report.py` with it.
 
 ## Relationship to the other benchmark tools
 
@@ -433,3 +831,6 @@ Logs written before these fields existed simply leave the columns empty.
   dimensions from a fixed `{date}/{gpu}/{framework}/` path layout.
 - This tool is the non-interactive batch runner: five frameworks, pre- and
   post-training, container and Slurm, with provenance carried in the logs.
+  [`diffusion_bench/`](./diffusion_bench/) runs the diffusion and DLRM
+  benchmarks on its own too; `BACKEND=...,diffusion_dlrm` runs it as part of
+  a batch.

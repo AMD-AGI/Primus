@@ -219,6 +219,28 @@ class PrimusGroupedMLP(TEGroupedMLP):
             # use the original bias_act_func from TEGroupedMLP, ignore the tokens_per_experts
             return self.bias_act_func(intermediate_parallel, bias_parallel, permuted_probs)
 
+    def _prepare_fused_grouped_mlp_weights(self, x: torch.Tensor):
+        """Resolve fc1/fc2 weights for the fused grouped MLP op.
+
+        The fused op never calls ``linear_fc1`` / ``linear_fc2``.forward, so their
+        forward-pre-hooks must run here. With ``overlap_param_gather`` those hooks
+        wait on the expert weights' distributed-optimizer all-gather; skipping them
+        lets the op read stale shards whenever expert data parallelism exceeds one.
+        """
+        from primus.backends.megatron.patches.turbo.dense_mlp_fp4_patches import (
+            _run_module_forward_pre_hooks,
+        )
+
+        _run_module_forward_pre_hooks(self.linear_fc1, (x,))
+        _run_module_forward_pre_hooks(self.linear_fc2, (x,))
+        x, w1, fuse_w1_grad_accum = self.linear_fc1.prepare_weights(x)
+        x, w2, fuse_w2_grad_accum = self.linear_fc2.prepare_weights(x)
+        assert fuse_w1_grad_accum == fuse_w2_grad_accum, (
+            "fc1 and fc2 resolved different fuse_wgrad_accum_pattern values: "
+            f"fc1={fuse_w1_grad_accum!r}, fc2={fuse_w2_grad_accum!r}"
+        )
+        return x, w1, w2, fuse_w1_grad_accum
+
     def _forward_with_turbo_fused_grouped_mlp(
         self,
         permuted_local_hidden_states: torch.Tensor,
@@ -242,13 +264,9 @@ class PrimusGroupedMLP(TEGroupedMLP):
                 "Only support fusion of silu and gelu in PrimusGroupedMLP when `turbo_fused_grouped_gemm` is True."
             )
 
-        x, w1, fuse_w1_grad_accum = self.linear_fc1.prepare_weights(permuted_local_hidden_states)
-        x, w2, fuse_w2_grad_accum = self.linear_fc2.prepare_weights(x)
-        assert fuse_w1_grad_accum == fuse_w2_grad_accum, (
-            "fc1 and fc2 resolved different fuse_wgrad_accum_pattern values: "
-            f"fc1={fuse_w1_grad_accum!r}, fc2={fuse_w2_grad_accum!r}"
+        x, w1, w2, fuse_wgrad_accum_pattern = self._prepare_fused_grouped_mlp_weights(
+            permuted_local_hidden_states
         )
-        fuse_wgrad_accum_pattern = fuse_w1_grad_accum
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             from primus_turbo.pytorch.ops.grouped_mlp_fp8 import grouped_mlp_fp8
