@@ -10,7 +10,7 @@
       "name": "Megatron-LM",
       "path": "third_party/Megatron-LM",
       "url": "https://github.com/NVIDIA/Megatron-LM.git",
-      "commit": "d3528a21301db2d12e92912b3ec025dc8a2ed4d6"
+      "commit": "4b4acac9a1d28ea6829c8d4f566d75698a21249d"
     },
     {
       "name": "maxtext",
