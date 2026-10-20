@@ -10,6 +10,7 @@
 that did ``from module import attr`` before the patch ran.
 """
 
+import importlib.util
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -66,42 +67,93 @@ def test_leaves_unrelated_same_named_attributes_alone(defining_module):
     assert "_primus_rebind_bystander" not in rebound
 
 
-def test_survives_modules_that_raise_on_getattr(defining_module, importer):
-    class Hostile(ModuleType):
-        def __getattr__(self, name):
-            raise RuntimeError("lazy import boom")
+def test_survives_modules_that_cannot_be_probed_or_rebound(defining_module, importer):
+    class ReadOnly(ModuleType):
+        def __setattr__(self, name, value):
+            raise RuntimeError("read-only module")
 
-    hostile = Hostile("_primus_rebind_hostile")
-    sys.modules[hostile.__name__] = hostile
+    read_only = ReadOnly("_primus_rebind_read_only")
+    read_only.__dict__["target"] = defining_module.target
+
+    class Slotted:
+        __slots__ = ()
+
+    sys.modules[read_only.__name__] = read_only
+    sys.modules["_primus_rebind_slotted"] = Slotted()
+
+    try:
+        rebound = rebind_everywhere(defining_module, "target", lambda: "patched")
+    finally:
+        sys.modules.pop(read_only.__name__, None)
+        sys.modules.pop("_primus_rebind_slotted", None)
+
+    assert importer.target() == "patched"
+    assert "_primus_rebind_read_only" not in rebound
+
+
+class _ModuleProxy(ModuleType):
+    def __getattr__(self, name):
+        self.__dict__.setdefault("probed", []).append(name)
+        raise AttributeError(name)
+
+
+class _ObjectProxy:
+    """Shaped like apex's JIT op proxies (amp_C, ...): a plain object in
+    sys.modules that builds the extension in __getattr__."""
+
+    def __getattr__(self, name):
+        self.__dict__.setdefault("probed", []).append(name)
+        raise AttributeError(name)
+
+
+@pytest.mark.parametrize(
+    "make_proxy", [lambda: _ModuleProxy("_primus_rebind_proxy"), _ObjectProxy], ids=["module", "object"]
+)
+def test_does_not_call_module_getattr(defining_module, importer, make_proxy):
+    proxy = make_proxy()
+    sys.modules["_primus_rebind_proxy"] = proxy
 
     try:
         rebind_everywhere(defining_module, "target", lambda: "patched")
     finally:
-        sys.modules.pop(hostile.__name__, None)
+        sys.modules.pop("_primus_rebind_proxy", None)
 
+    assert "probed" not in proxy.__dict__
     assert importer.target() == "patched"
 
 
-def test_does_not_call_module_getattr(defining_module, importer):
-    """apex's JIT op proxies (amp_C, ...) build their extension in __getattr__,
-    so probing them for the symbol must not fall through to it."""
-    probed = []
+def test_does_not_load_lazy_modules(defining_module, importer, tmp_path, monkeypatch):
+    executed = tmp_path / "executed"
+    (tmp_path / "_primus_rebind_lazy.py").write_text(f"open({str(executed)!r}, 'w').close()\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    spec = importlib.util.find_spec("_primus_rebind_lazy")
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    lazy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lazy)
+    monkeypatch.setitem(sys.modules, "_primus_rebind_lazy", lazy)
 
-    class LazyProxy(ModuleType):
-        def __getattr__(self, name):
-            probed.append(name)
-            raise AttributeError(name)
+    rebind_everywhere(defining_module, "target", lambda: "patched")
 
-    proxy = LazyProxy("_primus_rebind_proxy")
-    sys.modules[proxy.__name__] = proxy
+    assert importer.target() == "patched"
+    assert not executed.exists()
+
+
+def test_none_placeholder_is_not_rebound_everywhere(defining_module):
+    """`except ImportError: target = None` placeholders are all the same None,
+    so identity says nothing about who imported this one."""
+    defining_module.target = None
+    bystander = ModuleType("_primus_rebind_bystander")
+    sys.modules[bystander.__name__] = bystander
+    replacement = lambda: "patched"
 
     try:
-        rebind_everywhere(defining_module, "target", lambda: "patched")
+        rebound = rebind_everywhere(defining_module, "target", replacement)
     finally:
-        sys.modules.pop(proxy.__name__, None)
+        sys.modules.pop(bystander.__name__, None)
 
-    assert probed == []
-    assert importer.target() == "patched"
+    assert defining_module.target is replacement
+    assert rebound == ["_primus_rebind_owner"]
+    assert not hasattr(bystander, "target")
 
 
 def test_noop_when_already_pointing_at_the_replacement(defining_module, importer):

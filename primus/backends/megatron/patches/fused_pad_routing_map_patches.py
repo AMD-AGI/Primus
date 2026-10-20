@@ -17,8 +17,7 @@ The Primus version rewrites the kernel to operate directly on the native
 functionalization failure seen on some torch/triton combos.
 """
 
-import sys
-
+from primus.backends.megatron.patches._rebind import rebind_everywhere
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -39,33 +38,17 @@ def patch_fused_pad_routing_map(ctx: PatchContext):
 
     log_rank_0("[Patch:megatron.fused_pad_routing_map] Patching fused_pad_routing_map...")
 
-    # Original function object; used to precisely locate stale references.
-    orig_fn = getattr(meg_mod, "fused_pad_routing_map", None)
-    if orig_fn is primus_fused_pad_routing_map:
+    if getattr(meg_mod, "fused_pad_routing_map", None) is primus_fused_pad_routing_map:
         log_rank_0("[Patch:megatron.fused_pad_routing_map]   Already patched; skipping.")
         return
 
-    # 1) Replace on the source module so all *future* (incl. lazy) imports resolve
-    #    to the Primus version. This alone covers the common case, since this patch
-    #    runs before token_dispatcher is imported.
-    meg_mod.fused_pad_routing_map = primus_fused_pad_routing_map
-
-    # 2) Replace references already bound into other modules that imported the symbol
-    #    at top level before this patch ran (precise: only objects that `is orig_fn`).
-    #    Look in the module __dict__ rather than getattr(): a module-level __getattr__
-    #    runs on a miss, and apex's JIT op proxies (amp_C, syncbn, ...) build their
-    #    extension there, while transformers' lazy modules print an alias warning.
-    patched_modules = []
-    if orig_fn is not None:
-        for mod_name, module in list(sys.modules.items()):
-            if module is None or module is meg_mod:
-                continue
-            if getattr(module, "__dict__", {}).get("fused_pad_routing_map") is orig_fn:
-                setattr(module, "fused_pad_routing_map", primus_fused_pad_routing_map)
-                patched_modules.append(mod_name)
+    # Replace on the source module so all *future* (incl. lazy) imports resolve to the
+    # Primus version, and in every module that imported the symbol at top level before
+    # this patch ran (precise: only objects that `is` the original).
+    rebound = rebind_everywhere(meg_mod, "fused_pad_routing_map", primus_fused_pad_routing_map)
 
     log_rank_0(
         "[Patch:megatron.fused_pad_routing_map]   Patched "
         "megatron.core.fusions.fused_pad_routing_map.fused_pad_routing_map "
-        f"-> primus (also updated already-imported refs: {patched_modules or 'none'})"
+        f"-> primus (also updated already-imported refs: {rebound[1:] or 'none'})"
     )
