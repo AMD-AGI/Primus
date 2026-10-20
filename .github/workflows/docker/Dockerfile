@@ -36,7 +36,12 @@ ENV HCC_AMDGPU_TARGET="gfx942,gfx950"
 # Install Primus-Turbo
 # ---------------------------------------------------------------------------
 
+# pip uninstall leaves the modules aiter JIT-built into its package directory, and
+# aiter loads an existing module without checking which version built it, so the
+# base image's leftovers are removed before the pinned version goes in.
 RUN pip3 uninstall aiter amd-aiter -y || true && \
+    SITE_PACKAGES=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])") && \
+    rm -rf "${SITE_PACKAGES}/aiter" "${SITE_PACKAGES}/aiter_meta" && \
     cd /opt && \
     git clone --filter=blob:none https://github.com/ROCm/aiter.git && \
     cd aiter && \
