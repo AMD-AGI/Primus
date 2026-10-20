@@ -191,27 +191,29 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          # Primus v26.8 already includes AINIC (libionic from the 1.117.5-a-77 bundle). Re-enable this
-          # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
-          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
-          start_time=$(date +%s)
-          mkdir -p $CWS/.github/workflows/docker/ainic
-          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-77.tar.gz $CWS/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          # cp /shared_nfs/tas/primus_github_runner/build-docker/ainic/ainic_bundle_1.117.5-a-77.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          docker build -f $CWS/.github/workflows/docker/Dockerfile.ainic \
-               --network=host \
-               -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
-               --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
-               --build-arg AINIC_BUNDLE_PATH=ainic \
-               $CWS/.github/workflows/docker
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
-
-          docker tag tasimage/primus:${{env.IMAGE_TAG}}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
-          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          # Primus v26.8 already carries the AINIC stack its release Dockerfile installs
+          # (libionic-dev from the 1.117.5-a-77 bundle, UCX 1.18.0, OpenMPI 4.1.6) on the
+          # ROCm SDK's RCCL, so the -ainic tag is the same image. Dockerfile.ainic's
+          # rccl rocm-7.1.0 build needs rocm_smi, which the ROCm 10.1 SDK no longer
+          # ships; its build stays below, commented out, for when it is needed again.
+          echo "> Tag Docker Image as: ${{ env.IMAGE_TAG }}-ainic"
+          docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
-          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
+          # start_time=$(date +%s)
+          # mkdir -p $CWS/.github/workflows/docker/ainic
+          # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-77.tar.gz $CWS/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          # docker build -f $CWS/.github/workflows/docker/Dockerfile.ainic \
+          #      --network=host \
+          #      -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
+          #      --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
+          #      --build-arg AINIC_BUNDLE_PATH=ainic \
+          #      $CWS/.github/workflows/docker
+          # end_time=$(date +%s)
+          # elapsed=$((end_time - start_time))
+          # echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
+          # docker tag tasimage/primus:${{env.IMAGE_TAG}}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
+          # docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
 
           # echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
           # start_time=$(date +%s)
