@@ -53,6 +53,8 @@ Inside an already running container, add `PRIMUS_LAUNCHER=direct`. The log is wr
   - 20B: 2204.8 and 2212.0 ms; on `tas-20261011` 2216.3 and 2219.8 ms.
   - 120B proxy: 445.4 and 447.9 ms; on `tas-20261011` 442.8 and 448.6 ms.
   - Runs of a model gave the same lm loss and grad norms.
+  - With the `MI455X` yamls, one run each: 20B 2202.3 ms, 120B proxy 449.0 ms, same lm loss and
+    peak memory.
 - Every run finished 10/10 iterations with 0 NaN and `check_for_nan_in_loss_and_grad` on.
 - 20B with `EXTRA_ARGS="--overlap_moe_expert_parallel_comm True"`: 2177 ms/iter and 385 GB (89%),
   same lm loss.
