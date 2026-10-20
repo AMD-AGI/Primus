@@ -102,10 +102,14 @@ export HYLO_GLOBAL_BATCH_SIZE=1
 
 The full script still runs both Enhanced-ILD branches, assembles the target
 checkpoint, and then runs pure KL. A one-GPU check on `useocpm2m-097-017` in
-`rocm/primus:v26.8` completed the all-GDN 4K step and one 8K pure-KL step.
-`tw044` was not used: SSH to the jump host timed out. The 4K step logged
-Enhanced-ILD 360.000000 (hidden 168.000000, mixer 192.000000). The 8K step
-logged summed masked KL 73.920868. Both checkpoints reloaded at iteration 1
-with every tensor finite (243 tensors for the 4K student, 251 for the 8K
-student). The all-MLA branch and the assembler were not part of that check.
+`rocm/primus:v26.8` completed both 4K ILD steps, assembled them, and finished
+one 8K pure-KL step from that checkpoint. `tw044` was not used: SSH to the
+jump host timed out.
+
+| Step | Result |
+| --- | --- |
+| all-GDN Enhanced-ILD, 4K | 360.000000 (hidden 168.000000, mixer 192.000000); iteration 1, 243 tensors, all finite |
+| all-MLA Enhanced-ILD, 4K | 169.000000 (hidden 66.000000, mixer 103.000000); iteration 1, 275 tensors, all finite |
+| assemble | every mixer/MLP pair matches its ILD source; 251 tensors, all finite |
+| pure KL from the assembly, 8K | summed masked KL 72.599213; iteration 1, reload finite |
 

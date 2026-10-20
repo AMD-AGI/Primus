@@ -464,7 +464,7 @@ tools/hybrid/run_hylo_1b_4mla12gdn.sh
 
 `HYLO_ILD_SEQ_LENGTH` overrides the 4K stage, and `HYLO_SFT_SEQ_LENGTH` overrides the 8K stage. A one-step check uses `HYLO_ILD_TRAIN_ITERS=1`, `HYLO_SFT_TRAIN_ITERS=1`, micro-batch 1, and global batch 1.
 
-On one MI300X GPU in `rocm/primus:v26.8`, that check logged all-GDN Enhanced-ILD 360.000000 at 4K (hidden 168.000000, mixer 192.000000) and summed masked KL 73.920868 at 8K. Both saved iteration 1 reloaded with every tensor finite.
+On one MI300X GPU in `rocm/primus:v26.8`, that check logged all-GDN Enhanced-ILD 360.000000 and all-MLA Enhanced-ILD 169.000000 at 4K. Assembly kept each mixer/MLP pair from the matching ILD checkpoint. The following 8K step, started from that assembly, logged summed masked KL 72.599213. Each saved iteration 1 reloaded with every tensor finite.
 
 The script writes:
 

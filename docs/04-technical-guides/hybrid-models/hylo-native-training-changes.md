@@ -89,9 +89,9 @@ smokes at the recipe context lengths also completed in `rocm/primus:v26.8`:
 | Step | Context | Loss | Checkpoint reload |
 | --- | --- | --- | --- |
 | all-GDN Enhanced-ILD | 4096 | total 360.000000, hidden 168.000000, mixer 192.000000 | iteration 1, 243 tensors, all finite |
-| 4MLA12GDN pure KL | 8192 | summed masked KL 73.920868 | iteration 1, 251 tensors, all finite |
+| all-MLA Enhanced-ILD | 4096 | total 169.000000, hidden 66.000000, mixer 103.000000 | iteration 1, 275 tensors, all finite |
+| assembled 4MLA12GDN pure KL | 8192 | summed masked KL 72.599213 | iteration 1, 251 tensors, all finite |
 
-Both used micro-batch 1, global batch 1, and one optimizer step. The 4K student
-started from the all-GDN upcycle. The 8K student started from the target
-4MLA12GDN upcycle, with the frozen Llama-3.1-8B teacher. The all-MLA ILD stage
-and `run_hylo_1b_4mla12gdn.sh` were not executed as a full training job.
+Each step used micro-batch 1, global batch 1, and one optimizer step. Assembly
+checked that every mixer/MLP pair came from the matching ILD checkpoint.
+`run_hylo_1b_4mla12gdn.sh` was not executed as a full 1000-iteration job.
