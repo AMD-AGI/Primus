@@ -107,9 +107,10 @@ moe_router_force_load_balancing_type: "even"
 
 # ===== TE cross entropy =====
 # Pass overwrite_input=True to TE parallel_cross_entropy (cross_entropy_fusion_impl: te)
-# so its backward reuses the logits buffer instead of saving a logits-sized copy.
-# Only enable when nothing reads the logits after the loss backward.
-te_ce_overwrite_input: false
+# so its backward reuses the logits buffer instead of saving a logits-sized copy
+# (TE <= 2.17 behavior; a no-op on TE without the flag). Set to false when something
+# reads the logits after the loss backward: they hold the gradient by then.
+te_ce_overwrite_input: true
 
 # ===== MXFP4 Weight De-oscillation =====
 # Snap weight elements whose MXFP4-quantized value oscillates while the fp32
