@@ -39,11 +39,12 @@ import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, range_constexpr
+from flydsl.expr import arith, range_constexpr
+from primus_turbo.flydsl.utils import buffer_ops
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.numeric import Float32
 from flydsl.expr.typing import Int32, T
-from flydsl.expr.vector import ReductionOp
+from flydsl.expr.typing import ReductionOp
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.kernels_common import dtype_to_elem_type
 

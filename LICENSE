@@ -45,6 +45,13 @@ Primus uses or references the following third-party projects:
    - License: MIT License (Sea AI Lab)
    - Repository: https://github.com/sail-sg/odc
 
+6. FlyDSL
+   - License: Apache License 2.0 (full text in LICENSE-APACHE)
+   - Repository: https://github.com/ROCm/FlyDSL.git
+   - Note: the following file is adapted from FlyDSL 0.2.4 and remains licensed
+     under Apache-2.0 rather than the MIT license above:
+       primus/backends/megatron/core/transformer/flydsl_compat/vector.py
+
 User must comply with the respective licenses of these third-party projects when using or distributing Primus.
 
 --------------------------------------------------------------------------------
