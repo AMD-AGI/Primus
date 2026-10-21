@@ -81,13 +81,13 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import math as math_dialect
+from flydsl._mlir.dialects import vector
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-from primus.backends.megatron.core.transformer.flydsl_compat import vector
 from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_v1._lld_shim import (
     ensure_usable_lld,
 )
@@ -341,7 +341,7 @@ def build_attn_res_mixer_fwd(
         store_elem = {"f32": store_f32, "bf16": _store_elem_f32}[elem_dtype]
 
         def lds_get(elem_idx):
-            v = vector.load_op(vec1_f32, lds_red, [elem_idx])
+            v = vector.load(vec1_f32, lds_red, [elem_idx])
             return vector.extract(v, static_position=[0], dynamic_position=[])
 
         def lds_put(elem_idx, val):

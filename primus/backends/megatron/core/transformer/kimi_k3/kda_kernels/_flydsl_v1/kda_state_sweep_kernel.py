@@ -96,14 +96,13 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import math as math_dialect
-from flydsl._mlir.dialects import scf
+from flydsl._mlir.dialects import scf, vector
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-from primus.backends.megatron.core.transformer.flydsl_compat import vector
 from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1._lld_shim import (
     ensure_usable_lld,
 )
@@ -306,7 +305,7 @@ def build_kda_state_sweep(
             return _llvm.LoadOp(vecv_f32, gep(bptr, elem_idx, f32)).result
 
         def lds_get(lds, elem_idx):
-            v = vector.load_op(vec1_f32, lds, [elem_idx])
+            v = vector.load(vec1_f32, lds, [elem_idx])
             return vector.extract(v, static_position=[0], dynamic_position=[])
 
         def lds_put(lds, elem_idx, val):
@@ -418,7 +417,7 @@ def build_kda_state_sweep(
             for k4 in range_constexpr(klen // VPT):
                 a4 = {key: load_vec4(ap, a_base[key] + arith.index(k4 * VPT)) for key in keys}
                 for jj in range_constexpr(VPT):
-                    s4 = vector.load_op(vecv_f32, lds_src, [arith.index((k4 * VPT + jj) * BV) + v_lo])
+                    s4 = vector.load(vecv_f32, lds_src, [arith.index((k4 * VPT + jj) * BV) + v_lo])
                     sv = [vector.extract(s4, static_position=[j], dynamic_position=[]) for j in range(VPT)]
                     for key in keys:
                         a_v = vector.extract(a4[key], static_position=[jj], dynamic_position=[])

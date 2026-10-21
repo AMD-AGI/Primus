@@ -43,7 +43,7 @@ from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import math as math_dialect
 from flydsl._mlir.dialects import memref as _memref
-from flydsl._mlir.dialects import scf
+from flydsl._mlir.dialects import scf, vector
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
@@ -51,8 +51,6 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import dtype_to_elem_type
 from primus_turbo.flydsl.utils import buffer_ops
-
-from primus.backends.megatron.core.transformer.flydsl_compat import vector
 
 KERNEL_NAME = "v4_hca_bwd_dkv_pool_kernel"
 
@@ -529,7 +527,7 @@ def build_v4_hca_bwd_dkv_pool_module(
                         m_row = arith.index(mt * 16) + lane_mod_16
                         d_col = arith.index(ks * K_STEP_QK) + lane_div_16 * MFMA_LANE_K
                         lds_idx = m_row * arith.index(LDS_Q_STRIDE) + d_col
-                        pack = vector.load_op(mfma_pack_type, lds_q, [lds_idx])
+                        pack = vector.load(mfma_pack_type, lds_q, [lds_idx])
                         q_b_packs[mt][ks] = pack
 
                 # R6d-A: B-frag for GEMM3 (dp = V @ DO^T) per m-tile mt.
@@ -539,7 +537,7 @@ def build_v4_hca_bwd_dkv_pool_module(
                         m_row = arith.index(mt * 16) + lane_mod_16
                         d_col = arith.index(ks * K_STEP_QK) + lane_div_16 * MFMA_LANE_K
                         lds_idx = m_row * arith.index(LDS_DO_STRIDE) + d_col
-                        pack = vector.load_op(mfma_pack_type, lds_do, [lds_idx])
+                        pack = vector.load(mfma_pack_type, lds_do, [lds_idx])
                         do_b_packs_gemm3[mt][ks] = pack
             else:
                 # R6d-A fallback: HBM-direct B-frag per m-tile. row = m_start + mt*16 + lane_mod_16.
@@ -560,7 +558,7 @@ def build_v4_hca_bwd_dkv_pool_module(
             # ---- GEMM1: qkT = K @ Q^T (MFMA 16x16x32, one tile per m-tile mt) ----
             s_accs = [v4f32_zero for _ in range(M_TILES)]
             for ks in range_constexpr(K_STEPS_QK):
-                k_pack = vector.load_op(mfma_pack_type, lds_kv, [_k_idx_wave(ks)])
+                k_pack = vector.load(mfma_pack_type, lds_kv, [_k_idx_wave(ks)])
                 for mt in range_constexpr(M_TILES):
                     s_accs[mt] = mfma_acc(k_pack, q_b_packs[mt][ks], s_accs[mt])
 
@@ -631,7 +629,7 @@ def build_v4_hca_bwd_dkv_pool_module(
                 kv_row_a = wave_n_offset + lane_mod_16
                 m_col_a = arith.index(m_step * K_STEP_QK) + lane_div_16 * MFMA_LANE_K
                 lds_idx = kv_row_a * arith.index(LDS_PT_STRIDE) + m_col_a
-                pack = vector.load_op(mfma_pack_type, lds_pt, [lds_idx])
+                pack = vector.load(mfma_pack_type, lds_pt, [lds_idx])
                 pt_a_packs.append(pack)
 
             # ---- GEMM2: dV += pT @ DO ----
@@ -676,7 +674,7 @@ def build_v4_hca_bwd_dkv_pool_module(
             # ---- GEMM3: dp = V @ DO^T (MFMA 16x16x32, one tile per m-tile mt) ----
             dp_accs = [v4f32_zero for _ in range(M_TILES)]
             for ks in range_constexpr(K_STEPS_QK):
-                v_pack = vector.load_op(mfma_pack_type, lds_kv, [_v_idx_wave(ks)])
+                v_pack = vector.load(mfma_pack_type, lds_kv, [_v_idx_wave(ks)])
                 for mt in range_constexpr(M_TILES):
                     dp_accs[mt] = mfma_acc(v_pack, do_b_packs_gemm3[mt][ks], dp_accs[mt])
 
@@ -708,7 +706,7 @@ def build_v4_hca_bwd_dkv_pool_module(
                 kv_row_a = wave_n_offset + lane_mod_16
                 m_col_a = arith.index(m_step * K_STEP_QK) + lane_div_16 * MFMA_LANE_K
                 lds_idx = kv_row_a * arith.index(LDS_PT_STRIDE) + m_col_a
-                pack = vector.load_op(mfma_pack_type, lds_pt, [lds_idx])
+                pack = vector.load(mfma_pack_type, lds_pt, [lds_idx])
                 ds_a_packs.append(pack)
 
             # ---- GEMM4: dK += dsT @ Q  (MFMA 16x16x32) ----

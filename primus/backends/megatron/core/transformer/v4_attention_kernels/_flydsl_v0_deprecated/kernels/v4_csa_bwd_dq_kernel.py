@@ -39,7 +39,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import math as math_dialect
-from flydsl._mlir.dialects import scf
+from flydsl._mlir.dialects import scf, vector
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
@@ -47,8 +47,6 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator
 from kernels.kernels_common import dtype_to_elem_type
 from primus_turbo.flydsl.utils import buffer_ops
-
-from primus.backends.megatron.core.transformer.flydsl_compat import vector
 
 KERNEL_NAME = "v4_csa_bwd_dq_kernel"
 _LOG2E = math.log2(math.e)

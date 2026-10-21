@@ -113,13 +113,13 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import math as math_dialect
+from flydsl._mlir.dialects import vector
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-from primus.backends.megatron.core.transformer.flydsl_compat import vector
 from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1._lld_shim import (
     ensure_usable_lld,
 )
@@ -283,7 +283,7 @@ def build_kda_decay_scores_bwd(
             _llvm.StoreOp(val, gep(bptr, elem_idx))
 
         def lds_read(lds, elem_idx):
-            v = vector.load_op(vec1_f32, lds, [elem_idx])
+            v = vector.load(vec1_f32, lds, [elem_idx])
             return vector.extract(v, static_position=[0], dynamic_position=[])
 
         def lds_write(lds, elem_idx, val):

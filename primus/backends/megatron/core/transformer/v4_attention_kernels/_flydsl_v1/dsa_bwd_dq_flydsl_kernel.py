@@ -47,15 +47,13 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import math as math_dialect
-from flydsl._mlir.dialects import scf
+from flydsl._mlir.dialects import scf, vector
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from primus_turbo.flydsl.utils import buffer_ops
-
-from primus.backends.megatron.core.transformer.flydsl_compat import vector
 
 _LOG2E = math.log2(math.e)  # 1.4426950408889634
 _LLVM_GEP_DYNAMIC = -2147483648  # LLVM kDynamicIndex sentinel
@@ -420,9 +418,9 @@ def build_dsa_bwd_dq_module(
             k_packs_lo = [None] * K_STEPS_QK
             k_packs_hi = [None] * K_STEPS_QK
             for p in range_constexpr(_QK_PREFETCH_DEPTH):
-                k_packs_lo[p] = vector.load_op(mfma_pack_type, lds, [_k_idx_lo(p)])
+                k_packs_lo[p] = vector.load(mfma_pack_type, lds, [_k_idx_lo(p)])
                 if N_HALVES == 2:
-                    k_packs_hi[p] = vector.load_op(mfma_pack_type, lds, [_k_idx_hi(p)])
+                    k_packs_hi[p] = vector.load(mfma_pack_type, lds, [_k_idx_hi(p)])
 
             s_acc_lo = c_zero_v16f32
             s_acc_hi = c_zero_v16f32
@@ -435,11 +433,11 @@ def build_dsa_bwd_dq_module(
                     s_acc_hi = mfma_acc(k_packs_hi[ks], q_b_packs[ks], s_acc_hi)
                     dp_acc_hi = mfma_acc(k_packs_hi[ks], do_b_packs[ks], dp_acc_hi)
                 if ks + _QK_PREFETCH_DEPTH < K_STEPS_QK:
-                    k_packs_lo[ks + _QK_PREFETCH_DEPTH] = vector.load_op(
+                    k_packs_lo[ks + _QK_PREFETCH_DEPTH] = vector.load(
                         mfma_pack_type, lds, [_k_idx_lo(ks + _QK_PREFETCH_DEPTH)]
                     )
                     if N_HALVES == 2:
-                        k_packs_hi[ks + _QK_PREFETCH_DEPTH] = vector.load_op(
+                        k_packs_hi[ks + _QK_PREFETCH_DEPTH] = vector.load(
                             mfma_pack_type, lds, [_k_idx_hi(ks + _QK_PREFETCH_DEPTH)]
                         )
 
@@ -455,7 +453,7 @@ def build_dsa_bwd_dq_module(
                     dp_r = vector.extract(dp_acc, static_position=[r], dynamic_position=[])
                     col = lane_off + arith.index((r % 4) + (r // 4) * 8 + half * K_SUB_N)
                     mv = vector.extract(
-                        vector.load_op(T.vec(1, compute_type), lds_valid, [col]),
+                        vector.load(T.vec(1, compute_type), lds_valid, [col]),
                         static_position=[0],
                         dynamic_position=[],
                     )
