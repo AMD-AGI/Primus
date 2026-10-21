@@ -386,6 +386,4 @@ class TestTEvsLocalSpecAttention(PrimusUT):
 
         final_rel = abs(losses_te[-1] - losses_local[-1]) / max(abs(losses_te[-1]), 1e-12)
         print(f"\n  Final loss relative diff: {final_rel:.6f}")
-        # Same 0.03 budget as test_eager_te_vs_local: TE a32 vs local a16 on
-        # gfx942 can accumulate ~0.02–0.03 over 100 steps.
-        assert final_rel < 0.03, f"Diverged: {final_rel:.6f}"
+        assert final_rel < 0.02, f"Diverged: {final_rel:.6f}"
