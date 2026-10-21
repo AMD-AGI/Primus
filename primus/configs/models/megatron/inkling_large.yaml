@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Inkling (thinkingmachines/Inkling): 66 layers, 975B total / 41B active.
+# Inkling (thinkingmachines/Inkling): 66 layers, 947.0B total / 41.1B active.
 # Values from the release config.json text_config. Differences from Small:
 # hidden 6144, 64 heads, sliding layers with 16 KV heads (global layers keep
 # 8), dense 24576, experts 3072, muP width multiplier 24.
