@@ -45,7 +45,7 @@ a Megatron GPT layer:
 | `primus/backends/megatron/core/transformer/inkling/` | Attention (eager and FlexAttention backends), ShortConv, router, MoE layer and shared experts, dense MLP, decoder layer |
 | `primus/backends/megatron/patches/inkling_muon_qkv_patches.py` | Per-layer q/k/v split for Megatron's Muon (see [Muon](#muon)) |
 | `primus/configs/models/megatron/inkling_*.yaml` | Presets: `inkling_small`, `inkling_large`, the proxies `inkling_small_12L` and `inkling_large_6L` (released widths, fewer layers), and `inkling_small_tiny` for tests |
-| `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml` | Single-node pretraining recipe (EP 8, AdamW, mock data) |
+| `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml`, `inkling_large_6L-BF16-pretrain.yaml` | Single-node pretraining recipes for the Small and Large proxies (EP 8, AdamW, mock data); they differ only in the model |
 | `tools/checkpoint_conversion/convert_inkling_hf_megatron.py` | Hugging Face → Megatron checkpoint converter |
 | `tests/unit_tests/backends/megatron/inkling/` | Unit tests, the transformers reference harness, and the 8-GPU parallel check |
 
@@ -71,20 +71,22 @@ converter and the tests both use it.
 
 ## Running
 
-Pretraining on one MI355X node with the 12-layer Small proxy, mock data and
-AdamW:
+Pretraining on one MI355X node with mock data and AdamW, on the 12-layer Small
+proxy or the 6-layer Large proxy:
 
 ```bash
 export PYTHONDONTWRITEBYTECODE=1
 ./runner/primus-cli direct -- train pretrain \
     --config examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml
+./runner/primus-cli direct -- train pretrain \
+    --config examples/megatron/configs/MI355X/inkling_large_6L-BF16-pretrain.yaml
 ```
 
-The recipe takes these environment overrides:
+The recipes take these environment overrides:
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `PRIMUS_MODEL` | `inkling_small_12L` | Model preset, e.g. `inkling_large_6L` |
+| `PRIMUS_MODEL` | `inkling_small_12L` or `inkling_large_6L` | Model preset |
 | `PRIMUS_INKLING_ATTN` | `flex` | `flex` or `eager` (dense bias; slower, about 2x the step time and more memory) |
 | `PRIMUS_TRAIN_ITERS` | `50` | Training steps; must be more than the 5 warmup steps |
 | `PRIMUS_SEQ_LENGTH`, `PRIMUS_GBS`, `PRIMUS_MBS`, `PRIMUS_EP` | 4096, 64, 1, 8 | Sequence length, global and micro batch, expert parallelism |
@@ -156,24 +158,24 @@ Inside the container:
 cd $HOME/Primus-inkling
 export PYTHONDONTWRITEBYTECODE=1        # no root-owned __pycache__ in the checkout
 export PRIMUS_WORKSPACE=/tmp/inkling_out
-CFG=examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml
+SMALL=examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml
+LARGE=examples/megatron/configs/MI355X/inkling_large_6L-BF16-pretrain.yaml
 LOGS=$HOME/inkling_logs; mkdir -p $LOGS
 MUON="--use_distributed_optimizer false --overlap_param_gather false --muon_extra_scale_factor 1.0"
 
 # Small 12-layer proxy (67.5B)
-./runner/primus-cli direct --log_file $LOGS/small_adamw.log -- train pretrain --config $CFG
+./runner/primus-cli direct --log_file $LOGS/small_adamw.log -- train pretrain --config $SMALL
 PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
-./runner/primus-cli direct --log_file $LOGS/small_muon.log -- train pretrain --config $CFG \
+./runner/primus-cli direct --log_file $LOGS/small_muon.log -- train pretrain --config $SMALL \
     --optimizer muon --overlap_grad_reduce false $MUON
 
 # Large 6-layer proxy (62.6B)
-export PRIMUS_MODEL=inkling_large_6L PRIMUS_EXP_NAME=inkling_large_6L-pretrain
-./runner/primus-cli direct --log_file $LOGS/large_adamw.log -- train pretrain --config $CFG
+./runner/primus-cli direct --log_file $LOGS/large_adamw.log -- train pretrain --config $LARGE
 PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
-./runner/primus-cli direct --log_file $LOGS/large_muon.log -- train pretrain --config $CFG \
+./runner/primus-cli direct --log_file $LOGS/large_muon.log -- train pretrain --config $LARGE \
     --optimizer muon --overlap_grad_reduce false $MUON
 PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
-./runner/primus-cli direct --log_file $LOGS/large_dist_muon.log -- train pretrain --config $CFG \
+./runner/primus-cli direct --log_file $LOGS/large_dist_muon.log -- train pretrain --config $LARGE \
     --optimizer dist_muon --overlap_grad_reduce true $MUON
 ```
 
