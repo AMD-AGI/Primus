@@ -800,11 +800,23 @@ def export_hf_directory(
 # ---------------------------------------------------------------------------
 
 
+def _merge_shard(sd: StateDict, shard: StateDict, name: str) -> None:
+    # A key in two shards means the directory holds more than one checkpoint;
+    # merging would keep whichever file sorts last.
+    duplicates = sd.keys() & shard.keys()
+    if duplicates:
+        raise ValueError(
+            f"{name} repeats {len(duplicates)} key(s) from an earlier shard, e.g. "
+            f"{sorted(duplicates)[:3]}; point at a directory holding one checkpoint"
+        )
+    sd.update(shard)
+
+
 def load_checkpoint_state_dict(path: Path) -> StateDict:
     """Load a state dict from .safetensors, a torch file, or a directory of shards.
 
-    A directory's shards are all merged. Shared with the training loader, so
-    what converts is what trains.
+    A directory's shards are all merged, and a key in more than one shard is an
+    error. Shared with the training loader, so what converts is what trains.
     """
     from safetensors.torch import load_file as load_safetensors
 
@@ -814,7 +826,7 @@ def load_checkpoint_state_dict(path: Path) -> StateDict:
         if safes:
             for f in safes:
                 logger.info("  Loading %s...", f.name)
-                sd.update(load_safetensors(str(f)))
+                _merge_shard(sd, load_safetensors(str(f)), f.name)
             return sd
         pts = sorted([*path.glob("*.pt"), *path.glob("*.pth"), *path.glob("*.bin")])
         if not pts:
@@ -822,7 +834,7 @@ def load_checkpoint_state_dict(path: Path) -> StateDict:
         for f in pts:
             logger.info("  Loading %s...", f.name)
             loaded = torch.load(str(f), map_location="cpu", weights_only=True)
-            sd.update(loaded.get("state_dict", loaded))
+            _merge_shard(sd, loaded.get("state_dict", loaded), f.name)
         return sd
     if path.suffix == ".safetensors":
         return load_safetensors(str(path))

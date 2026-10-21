@@ -151,6 +151,9 @@ class PrimusTurboLocalAttention(MegatronModule):
 
         # Select Primus Turbo flash attention variant
         args = get_args()
+        # As in PrimusTurboAttention: without it the backward accumulates dQ
+        # with atomics, whose order varies run to run.
+        self.deterministic = bool(getattr(args, "deterministic_mode", False))
         if args.enable_turbo_attention_float8:
             self.attn_func = (
                 pt.ops.flash_attn_fp8_usp_func
@@ -237,7 +240,7 @@ class PrimusTurboLocalAttention(MegatronModule):
             window_size=(-1, -1),
             bias=None,
             alibi_slopes=None,
-            deterministic=False,
+            deterministic=self.deterministic,
             return_lse=False,
             return_attn_probs=False,
             **self.attn_kwargs,
@@ -300,7 +303,7 @@ class PrimusTurboLocalAttention(MegatronModule):
             window_size=(-1, -1),
             bias=None,
             alibi_slopes=None,
-            deterministic=False,
+            deterministic=self.deterministic,
             return_lse=False,
             return_attn_probs=False,
             **self.attn_kwargs,

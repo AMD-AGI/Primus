@@ -82,8 +82,11 @@ def _apply_atomic_fp32_backward(enabled: bool) -> None:
     the launchers and the image export those unconditionally and so every WAN run
     arrives here with them already set to "0". Reading them back could not tell a
     deliberate choice apart from that blanket default, which is the bug this
-    works around. Set ``attn_atomic_fp32: false`` to get the deterministic
-    split-dQ path back.
+    works around.
+
+    ``attn_atomic_fp32: false`` does not make the backward deterministic: on
+    the local spec it selects aiter's bf16-atomic kernel, which is just as
+    order-dependent. ``deterministic_mode: true`` is what does, on both specs.
     """
     value = "1" if enabled else "0"
     previous = {name: os.environ.get(name) for name in ATTN_ATOMIC_FP32_ENVS}
@@ -187,6 +190,9 @@ def check_dual_expert_grad_sync(num_transformers: int, params) -> None:
     experts' non-layer parameters together and asserts on the half-ready
     bucket, with or without overlap. On one data-parallel rank, which the
     dual-expert model needs anyway, neither has anything to overlap or shard.
+
+    The skipped expert still takes the optimizer step, with a zero gradient:
+    Adam's momentum and any weight decay still move its weights.
     """
     if num_transformers != 2:
         return
@@ -225,7 +231,10 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
           ``backbone_subfolder_2``.
         - ``attn_atomic_fp32`` (default true): let the attention backward use
           the fp32-atomic ASM kernels, on both the local spec (Primus-Turbo) and
-          te_spec (TE / CK v3). Set false for a deterministic backward.
+          te_spec (TE / CK v3). Either way the accumulation order varies run
+          to run; ``deterministic_mode: true`` gives a deterministic backward.
+          On the local spec its dQ workspace grows with the square of the
+          sequence length (about 43 GiB per sample at 10,920 tokens).
         - ``local_thd_attention`` (default false): on ``transformer_impl:
           local``, pack attention into thd for Primus-Turbo's varlen kernel.
     """
@@ -444,6 +453,9 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
                 "bf16": getattr(params, "bf16", True),
                 "fp16": getattr(params, "fp16", False),
                 "params_dtype": getattr(params, "params_dtype", torch.float32),
+                # TE's attention reads it off the config; the local attention
+                # reads Megatron's args, which carry the same value.
+                "deterministic_mode": getattr(params, "deterministic_mode", False),
             }
         )
 

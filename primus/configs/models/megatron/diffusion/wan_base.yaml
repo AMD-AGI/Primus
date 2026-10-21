@@ -66,8 +66,13 @@ local_thd_attention: false
 # is not divisible by 64, so with this off no ASM backward is reachable on either
 # spec and dispatch falls silently through to the slower ck_tile path, and on
 # te_spec the CK v3 backward is unreachable because the image pins the gfx950
-# value of NVTE_CK_IS_V3_ATOMIC_FP32. Set false for a deterministic backward;
-# accumulation order is non-deterministic when this is on.
+# value of NVTE_CK_IS_V3_ATOMIC_FP32. Atomic accumulation is order-dependent
+# whether this is on or off; set deterministic_mode: true for a deterministic
+# attention backward. A deterministic run also needs use_flash_attn: false and
+# PRIMUS_DETERMINISTIC=1 in the environment. On the local spec, aiter's
+# deterministic backward needs a dQ workspace that grows with the square of the
+# sequence length, about 43 GiB per sample at 10,920 tokens, so keep the
+# micro-batch small.
 attn_atomic_fp32: true
 
 # ==============================================================================

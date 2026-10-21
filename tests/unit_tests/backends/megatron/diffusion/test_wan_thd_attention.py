@@ -52,9 +52,9 @@ _SEQ = 256
 _BATCH = 2
 
 
-def _build_attention() -> PrimusTurboLocalAttention:
+def _build_attention(deterministic_mode=False) -> PrimusTurboLocalAttention:
     """The production module, wired the way Megatron's attention.py wires it."""
-    set_args(argparse.Namespace(enable_turbo_attention_float8=False))
+    set_args(argparse.Namespace(enable_turbo_attention_float8=False, deterministic_mode=deterministic_mode))
     config = TransformerConfig(
         num_layers=1,
         hidden_size=_DIM,
@@ -162,6 +162,62 @@ def test_thd_requires_max_seqlen(missing):
 
     with pytest.raises(ValueError, match=missing):
         attention(query, key, value, None, AttnMaskType.no_mask, packed_seq_params=packing)
+
+
+def _attend(attention, query, key, value, packed):
+    if not packed:
+        return attention(query, key, value, None, AttnMaskType.no_mask)
+    seq_len, batch = query.shape[:2]
+    thd = [t.transpose(0, 1).reshape(batch * seq_len, *t.shape[2:]).contiguous() for t in (query, key, value)]
+    return attention(*thd, None, AttnMaskType.no_mask, packed_seq_params=_packing(seq_len, batch))
+
+
+def _to_thd_grad(tensor):
+    """``[S, B, H, D]`` -> the ``[B*S, H*D]`` the thd output has."""
+    seq_len, batch = tensor.shape[:2]
+    return tensor.transpose(0, 1).reshape(batch * seq_len, -1).contiguous()
+
+
+@pytest.mark.parametrize("packed", [False, True], ids=["dense", "thd"])
+@pytest.mark.parametrize("deterministic_mode", [False, True])
+def test_deterministic_mode_reaches_the_kernel(packed, deterministic_mode):
+    """Megatron's ``deterministic_mode`` is what selects the non-atomic backward."""
+    attention = _build_attention(deterministic_mode)
+    name = "attn_varlen_func" if packed else "attn_func"
+    kernel = getattr(attention, name)
+    seen = []
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["deterministic"])
+        return kernel(*args, **kwargs)
+
+    setattr(attention, name, spy)
+    _attend(attention, *_sbhd_inputs(), packed)
+
+    assert seen == [deterministic_mode]
+
+
+@pytest.mark.parametrize("packed", [False, True], ids=["dense", "thd"])
+def test_deterministic_backward_repeats_bit_for_bit(packed):
+    """Long enough that many workgroups accumulate each dQ row, as at WAN's length."""
+    attention = _build_attention(deterministic_mode=True)
+    generator = torch.Generator(device="cpu").manual_seed(0)
+    seq_len = 4096
+    inputs = [
+        torch.randn(seq_len, _BATCH, _HEADS, _HEAD_DIM, dtype=torch.bfloat16, generator=generator).cuda()
+        for _ in range(4)
+    ]
+
+    grads = []
+    for _ in range(3):
+        query, key, value = (t.clone().requires_grad_() for t in inputs[:3])
+        output = _attend(attention, query, key, value, packed)
+        output.backward(inputs[3].reshape(output.shape) if not packed else _to_thd_grad(inputs[3]))
+        grads.append([t.grad for t in (query, key, value)])
+
+    for repeat in grads[1:]:
+        for first, again in zip(grads[0], repeat):
+            assert torch.equal(first, again)
 
 
 def _build_wan_on_meta(**overrides):

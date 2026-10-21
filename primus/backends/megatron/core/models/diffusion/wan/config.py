@@ -307,6 +307,24 @@ class WanConfig(BaseDiffusionConfig):
                 f"set context_parallel_size: 1 (got {self.context_parallel_size})"
             )
 
+        # WanLayer and the WAN attention read neither recompute_mlp nor
+        # checkpoint_core_attention, so selective recompute would save nothing.
+        if self.recompute_granularity == "selective":
+            raise ValueError(
+                "recompute_granularity: selective is not implemented for WAN; use full with "
+                "recompute_method uniform or block"
+            )
+        if (
+            self.recompute_granularity == "full"
+            and self.recompute_method == "uniform"
+            and self.recompute_num_layers
+            and self.num_dit_layers % self.recompute_num_layers
+        ):
+            raise ValueError(
+                f"recompute_method: uniform checkpoints groups of recompute_num_layers, which must "
+                f"divide num_dit_layers ({self.num_dit_layers}); got {self.recompute_num_layers}"
+            )
+
     def get_num_layers(self) -> int:
         """Number of DiT blocks in one transformer."""
         return self.num_dit_layers

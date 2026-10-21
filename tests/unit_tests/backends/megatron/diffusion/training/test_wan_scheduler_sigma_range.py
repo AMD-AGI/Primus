@@ -47,6 +47,16 @@ def test_inference_schedule_spans_the_configured_range():
     assert scheduler.sigmas[-2].item() == pytest.approx(0.1, abs=1e-6)
 
 
+def test_inference_schedule_spans_the_default_training_schedule():
+    """The default range takes the same pre-shift endpoints, so its low end is not shifted twice."""
+    training_sigmas = WanFlowMatchScheduler(num_train_timesteps=N, shift=5.0).sigmas
+    scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=5.0)
+    scheduler.set_timesteps(num_inference_steps=10, device="cpu")
+
+    assert scheduler.sigmas[0].item() == pytest.approx(training_sigmas[0].item(), abs=1e-6)
+    assert scheduler.sigmas[-2].item() == pytest.approx(training_sigmas[-1].item(), abs=1e-6)
+
+
 def test_a_configured_range_with_dynamic_shifting_is_rejected():
     with pytest.raises(ValueError, match="static shift"):
         WanFlowMatchScheduler(num_train_timesteps=N, sigma_min=0.1, sigma_max=0.9, use_dynamic_shifting=True)

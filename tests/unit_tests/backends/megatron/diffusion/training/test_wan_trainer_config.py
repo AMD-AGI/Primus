@@ -45,6 +45,12 @@ def test_fp4_unset_leaves_the_model_config_without_fp4():
     assert config.fp4 is None
 
 
+def test_deterministic_mode_reaches_the_model_config():
+    """TE's attention reads it off the model config rather than Megatron's args."""
+    assert _build(deterministic_mode=True).deterministic_mode is True
+    assert _build().deterministic_mode is False
+
+
 def test_fp8_settings_reach_the_model_config():
     config = _build(
         fp8="e4m3",
@@ -240,6 +246,24 @@ def test_context_parallelism_is_rejected():
 
 def test_context_parallel_size_one_builds():
     assert _build(context_parallel_size=1).context_parallel_size == 1
+
+
+def test_selective_recompute_is_rejected():
+    """WanLayer reads none of the selective-recompute switches, so it would save nothing."""
+    with pytest.raises(ValueError, match="selective is not implemented for WAN"):
+        _build(recompute_granularity="selective")
+
+
+def test_uniform_recompute_needs_a_group_size_that_divides_the_depth():
+    with pytest.raises(ValueError, match="must divide num_dit_layers"):
+        _build(recompute_granularity="full", recompute_method="uniform", recompute_num_layers=7)
+
+
+@pytest.mark.parametrize("method,num_layers", [("uniform", 1), ("uniform", 6), ("block", 7)])
+def test_full_recompute_that_covers_the_depth_builds(method, num_layers):
+    config = _build(recompute_granularity="full", recompute_method=method, recompute_num_layers=num_layers)
+
+    assert config.recompute_num_layers == num_layers
 
 
 def test_dual_expert_is_rejected_above_one_data_parallel_rank():

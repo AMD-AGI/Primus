@@ -74,7 +74,7 @@ class DiffusionTransformerBlock(TransformerBlock):
             stored as instance attributes. All conditioning flows through function arguments.
         """
         # Validate diffusion parameters if model type requires them
-        if hasattr(self.config, "model_type") and self.config.model_type in ["flux", "diffusion"]:
+        if hasattr(self.config, "model_type") and self.config.model_type in ["flux", "wan", "diffusion"]:
             if timestep_emb is None:
                 raise ValueError(
                     f"DiffusionTransformerBlock requires timestep_emb for model_type={self.config.model_type}"

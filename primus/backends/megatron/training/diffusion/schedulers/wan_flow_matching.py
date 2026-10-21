@@ -69,11 +69,9 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         if not 0.0 <= sigma_min < sigma_max <= 1.0:
             raise ValueError(f"need 0 <= sigma_min < sigma_max <= 1, got [{sigma_min}, {sigma_max}]")
 
-        # The range bounds the post-shift sigma. The Wan defaults [0, 1] leave
-        # everything as the base class built it. ``sigma_range`` is what
-        # training reads; the base class's ``sigma_min`` / ``sigma_max`` are the
-        # inference endpoints, which ``set_timesteps`` shifts again, so they
-        # get the pre-shift values that land on the range.
+        # The range bounds the post-shift sigma; the Wan defaults [0, 1] leave
+        # the schedule as the base class built it. ``sigma_range`` is what
+        # training reads.
         self.sigma_range: Optional[Tuple[float, float]] = None
         if (sigma_min, sigma_max) != (0.0, 1.0):
             if use_dynamic_shifting:
@@ -82,9 +80,16 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
                     "use_dynamic_shifting shifts by a per-call mu that cannot be inverted here"
                 )
             self.sigmas = self.sigmas.clamp(min=sigma_min, max=sigma_max)
-            self.sigma_min = self._unshift(sigma_min)
-            self.sigma_max = self._unshift(sigma_max)
             self.sigma_range = (float(sigma_min), float(sigma_max))
+
+        # The base class's ``sigma_min`` / ``sigma_max`` are the inference
+        # endpoints, which ``set_timesteps`` shifts again, so under the static
+        # shift they get the pre-shift values of the schedule's two ends. (The
+        # base class stores the shifted ends, so its default schedule would be
+        # shifted twice at the low-noise end.)
+        if not use_dynamic_shifting:
+            self.sigma_min = self._unshift(self.sigmas[-1].item())
+            self.sigma_max = self._unshift(self.sigmas[0].item())
 
         self.training_weights = self._build_training_weights()
         self._timestep_bounds: Dict[Tuple[float, float, float], Tuple[int, int]] = {}
@@ -103,8 +108,9 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
             w = y * (N / y.sum())
 
         The subtraction makes the weight vanish at the schedule endpoint that
-        is furthest from the center, and the final scaling normalizes the table
-        to mean 1. Normalization is what keeps the weighted objective on the
+        is furthest from the center, which is t = N (pure noise) for any
+        shift of at least 1, so samples drawn there train with zero weight.
+        The final scaling normalizes the table to mean 1. Normalization is what keeps the weighted objective on the
         same scale as the unweighted one, so enabling weighting does not shift
         the loss magnitude or require re-tuning the learning rate.
         """
