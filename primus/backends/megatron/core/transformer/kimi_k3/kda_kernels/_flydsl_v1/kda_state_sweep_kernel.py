@@ -99,11 +99,11 @@ from flydsl._mlir.dialects import math as math_dialect
 from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr, rocdl
-from primus.backends.megatron.core.transformer.flydsl_compat import vector
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
+from primus.backends.megatron.core.transformer.flydsl_compat import vector
 from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1._lld_shim import (
     ensure_usable_lld,
 )

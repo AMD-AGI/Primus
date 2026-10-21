@@ -40,13 +40,12 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, range_constexpr
-from primus_turbo.flydsl.utils import buffer_ops
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.numeric import Float32
-from flydsl.expr.typing import Int32, T
-from flydsl.expr.typing import ReductionOp
+from flydsl.expr.typing import Int32, ReductionOp, T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.kernels_common import dtype_to_elem_type
+from primus_turbo.flydsl.utils import buffer_ops
 
 KERNEL_NAME_PRE = "v4_swa_bwd_preprocess_kernel"
 

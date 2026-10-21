@@ -41,12 +41,13 @@ from flydsl._mlir.dialects import memref as _memref
 from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr, rocdl
-from primus_turbo.flydsl.utils import buffer_ops
-from primus.backends.megatron.core.transformer.flydsl_compat import vector
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import dtype_to_elem_type
+from primus_turbo.flydsl.utils import buffer_ops
+
+from primus.backends.megatron.core.transformer.flydsl_compat import vector
 
 # ---- Module-level constants ----
 

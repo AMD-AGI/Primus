@@ -50,11 +50,12 @@ from flydsl._mlir.dialects import math as math_dialect
 from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr, rocdl
-from primus_turbo.flydsl.utils import buffer_ops
-from primus.backends.megatron.core.transformer.flydsl_compat import vector
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from primus_turbo.flydsl.utils import buffer_ops
+
+from primus.backends.megatron.core.transformer.flydsl_compat import vector
 
 _LOG2E = math.log2(math.e)  # 1.4426950408889634
 _LLVM_GEP_DYNAMIC = -2147483648  # LLVM kDynamicIndex sentinel
