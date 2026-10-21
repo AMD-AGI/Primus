@@ -38,13 +38,14 @@ from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import math as math_dialect
 from flydsl._mlir.dialects import memref as _memref
-from flydsl._mlir.dialects import scf
+from flydsl._mlir.dialects import scf, vector
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import arith, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import dtype_to_elem_type
+from primus_turbo.flydsl.utils import buffer_ops
 
 # ---- Module-level constants ----
 
@@ -929,8 +930,8 @@ def build_v4_swa_bwd_dq_module(
             s_acc_lo = c_zero_v16f32
             s_acc_hi = c_zero_v16f32
             for ks in range_constexpr(K_STEPS_QK):
-                k_pack_lo = vector.load_op(mfma_pack_type, lds_kv, [_k_idx_lo(ks)])
-                k_pack_hi = vector.load_op(mfma_pack_type, lds_kv, [_k_idx_hi(ks)])
+                k_pack_lo = vector.load(mfma_pack_type, lds_kv, [_k_idx_lo(ks)])
+                k_pack_hi = vector.load(mfma_pack_type, lds_kv, [_k_idx_hi(ks)])
                 s_acc_lo = mfma_acc(k_pack_lo, q_b_packs[ks], s_acc_lo)
                 s_acc_hi = mfma_acc(k_pack_hi, q_b_packs[ks], s_acc_hi)
 
@@ -1020,8 +1021,8 @@ def build_v4_swa_bwd_dq_module(
             dp_acc_lo = c_zero_v16f32
             dp_acc_hi = c_zero_v16f32
             for ks in range_constexpr(K_STEPS_QK):
-                v_pack_lo = vector.load_op(mfma_pack_type, lds_kv, [_k_idx_lo(ks)])
-                v_pack_hi = vector.load_op(mfma_pack_type, lds_kv, [_k_idx_hi(ks)])
+                v_pack_lo = vector.load(mfma_pack_type, lds_kv, [_k_idx_lo(ks)])
+                v_pack_hi = vector.load(mfma_pack_type, lds_kv, [_k_idx_hi(ks)])
                 dp_acc_lo = mfma_acc(v_pack_lo, do_b_packs[ks], dp_acc_lo)
                 dp_acc_hi = mfma_acc(v_pack_hi, do_b_packs[ks], dp_acc_hi)
 
