@@ -48,8 +48,10 @@ examples/
 ├── megatron/              # framework: megatron
 │   ├── configs/           #   experiment YAMLs, grouped by GPU (MI300X, MI355X, …)
 │   ├── models/            #   model-specific launchers and studies
+│   │   ├── deepseek-v3/
 │   │   ├── deepseek-v4/
 │   │   ├── glm5-3-flash/
+│   │   ├── gpt-oss/
 │   │   └── kimi-k3/
 │   └── guides/            #   walkthroughs and packaged workflows
 │       ├── customer_package/
