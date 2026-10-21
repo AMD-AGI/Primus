@@ -15,8 +15,12 @@ boundary to invalidate that cache, so initialization, checkpointing and the opti
 unchanged.
 
 The expert activation is SiLU-SwiGLU or Megatron's ``quick_geglu`` (``activation_func =
-quick_gelu`` with ``glu_linear_offset`` / ``activation_func_clamp_value``, i.e. MiniMax-M3's
-``swigluoai``); see :func:`mega_moe_activation`.
+quick_gelu`` with ``glu_linear_offset`` / ``activation_func_clamp_value``, i.e. MiniMax-M3's and
+GPT-OSS's ``swigluoai``); see :func:`mega_moe_activation`.
+
+``add_bias_linear`` gives every expert an fc1 and an fc2 bias (GPT-OSS), applied the way Megatron's
+grouped experts do: the fc1 bias before the activation and its clamp, the fc2 bias scaled by the
+routing weight. Both flavours take them; the ops own how each is applied.
 """
 
 import contextlib
@@ -88,15 +92,23 @@ def mega_moe_precision() -> str:
 
 
 class MegaMoEWeightModule(MegatronModule):
-    """Callable expert-weight module used as a DDP overlap boundary."""
+    """Callable expert-weight module used as a DDP overlap boundary.
 
-    def __init__(self, config: TransformerConfig, weight_shape) -> None:
+    ``forward`` returns ``(weight, bias)``; ``bias`` is None unless ``bias_shape`` is given."""
+
+    def __init__(self, config: TransformerConfig, weight_shape, bias_shape=None) -> None:
         super().__init__(config)
         device = torch.device("cpu") if config.use_cpu_initialization else torch.cuda.current_device()
         self.weight = torch.nn.Parameter(torch.empty(weight_shape, device=device, dtype=config.params_dtype))
+        # zeros, like the bias of Megatron's grouped expert linears
+        self.bias = (
+            torch.nn.Parameter(torch.zeros(bias_shape, device=device, dtype=config.params_dtype))
+            if bias_shape is not None
+            else None
+        )
 
-    def forward(self) -> torch.Tensor:
-        return self.weight
+    def forward(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return self.weight, self.bias
 
     def backward_dw(self) -> None:
         # wgrad produced in custom autograd backward
@@ -118,13 +130,22 @@ class MegaMoEExperts(MegatronModule):
         self.ep_group = ep_group
         self.experts_per_rank = experts_per_rank
         self.activation = mega_moe_activation(config)
-        # w1 [g, 2I, H] gate+up; w2 [g, H, I] down
-        self.fc1_weight = MegaMoEWeightModule(config, (experts_per_rank, 2 * intermediate_size, hidden_size))
-        self.fc2_weight = MegaMoEWeightModule(config, (experts_per_rank, hidden_size, intermediate_size))
+        bias = config.add_bias_linear
+        # w1 [g, 2I, H] gate+up; w2 [g, H, I] down; biases b1 [g, 2I], b2 [g, H]
+        self.fc1_weight = MegaMoEWeightModule(
+            config,
+            (experts_per_rank, 2 * intermediate_size, hidden_size),
+            (experts_per_rank, 2 * intermediate_size) if bias else None,
+        )
+        self.fc2_weight = MegaMoEWeightModule(
+            config,
+            (experts_per_rank, hidden_size, intermediate_size),
+            (experts_per_rank, hidden_size) if bias else None,
+        )
         # Expert weights are already EP-sharded, so the DP allreduce hook must
         # not touch them.
         expert_parallel = config.expert_model_parallel_size > 1
-        for p in (self.fc1_weight.weight, self.fc2_weight.weight):
+        for p in self.parameters():
             setattr(p, "allreduce", not expert_parallel)
 
     def reset_parameters(self, ep_rank: int) -> None:
@@ -137,6 +158,9 @@ class MegaMoEExperts(MegatronModule):
             (self.fc1_weight.weight, init_fc1),
             (self.fc2_weight.weight, init_fc2),
         )
+        for module in (self.fc1_weight, self.fc2_weight):
+            if module.bias is not None:
+                module.bias.data.zero_()
 
         if self.config.use_cpu_initialization:
             # cpu rng is rank-identical: draw all experts, keep this rank's shard
@@ -163,11 +187,21 @@ class MegaMoEExperts(MegatronModule):
 
     def forward(self, x, topk_idx, topk_weights):
         # w2 is fetched only after stage1 so the two weight modules keep their fc1-then-fc2 order.
-        w1 = self.fc1_weight()
+        w1, b1 = self.fc1_weight()
         l1_out, dwib, handle = fused_mega_moe_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
-        w2 = self.fc2_weight()
+        w2, b2 = self.fc2_weight()
+        # stage2 owns the activation, so fc1's bias, which sits in front of it, is applied there
         return fused_mega_moe_stage2(
-            l1_out, dwib, handle, topk_idx, topk_weights, w2, self.ep_group, self.activation
+            l1_out,
+            dwib,
+            handle,
+            topk_idx,
+            topk_weights,
+            w2,
+            self.ep_group,
+            self.activation,
+            fc1_bias=b1,
+            fc2_bias=b2,
         )
 
     def backward_dw(self) -> None:
@@ -188,11 +222,21 @@ class MegaMoEFP8Experts(MegaMoEExperts):
     # here keeps the refresh tied to the weights actually moving, not to how often this layer
     # happens to run a forward.
     def forward(self, x, topk_idx, topk_weights):
-        w1 = self.fc1_weight()
+        w1, b1 = self.fc1_weight()
         l1_out, dwib, handle, state = fused_mega_moe_fp8_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
-        w2 = self.fc2_weight()
+        w2, b2 = self.fc2_weight()
         return fused_mega_moe_fp8_stage2(
-            l1_out, dwib, handle, state, topk_idx, topk_weights, w2, self.ep_group, self.activation
+            l1_out,
+            dwib,
+            handle,
+            state,
+            topk_idx,
+            topk_weights,
+            w2,
+            self.ep_group,
+            self.activation,
+            fc1_bias=b1,
+            fc2_bias=b2,
         )
 
 
@@ -275,7 +319,6 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         assert (
             config.moe_expert_capacity_factor is None
         ), "MegaMoE is dropless; moe_expert_capacity_factor must be None"
-        assert not config.add_bias_linear, "MegaMoE fused expert has no bias; set add_bias_linear=False"
         assert not config.init_model_with_meta_device, "MegaMoE does not support meta-device init"
         load_balancing_type = config.moe_router_load_balancing_type
         load_balancing_types = (
@@ -325,20 +368,22 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         expert_replica_id = (0, 0, edp_rank)
 
         sharded_sd: dict = {}
-        # expert weights: EP-sharded on axis 0
-        for name, weight in (
-            ("fc1_weight", self.experts.fc1_weight.weight),
-            ("fc2_weight", self.experts.fc2_weight.weight),
-        ):
-            key = f"{prefix}experts.{name}.weight"
-            sharded_sd[key] = ShardedTensor.from_rank_offsets(
-                key,
-                weight,
-                *sharded_offsets,
-                (prepend_axis_num, self.ep_rank, self.ep_size),
-                replica_id=expert_replica_id,
-                prepend_axis_num=prepend_axis_num,
-            )
+        # expert weights and biases: EP-sharded on axis 0
+        for module_name in ("fc1_weight", "fc2_weight"):
+            module = getattr(self.experts, module_name)
+            for param_name in ("weight", "bias"):
+                param = getattr(module, param_name)
+                if param is None:
+                    continue
+                key = f"{prefix}experts.{module_name}.{param_name}"
+                sharded_sd[key] = ShardedTensor.from_rank_offsets(
+                    key,
+                    param,
+                    *sharded_offsets,
+                    (prepend_axis_num, self.ep_rank, self.ep_size),
+                    replica_id=expert_replica_id,
+                    prepend_axis_num=prepend_axis_num,
+                )
         # router + shared expert: delegate to their own sharded_state_dict
         sharded_sd.update(self.router.sharded_state_dict(f"{prefix}router.", sharded_offsets, metadata))
         if self.shared_experts is not None:
