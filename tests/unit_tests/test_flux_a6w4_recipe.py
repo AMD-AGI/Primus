@@ -16,7 +16,7 @@ IMAGE = (
 )
 
 
-def _profile_env() -> dict[str, str]:
+def _profile_env(cluster: str = "") -> dict[str, str]:
     command = (
         "source examples/mlperf/flux1/config_4n_gbs1024.sh; "
         "env -0"
@@ -24,7 +24,7 @@ def _profile_env() -> dict[str, str]:
     result = subprocess.run(
         ["bash", "-c", command],
         cwd=ROOT,
-        env={"PATH": os.environ["PATH"]},
+        env={"PATH": os.environ["PATH"], "FLUX_CLUSTER": cluster},
         check=True,
         capture_output=True,
     )
@@ -55,6 +55,35 @@ def test_four_node_handoff_defaults():
     assert {name: env[name] for name in expected} == expected
 
 
+def test_cluster_network_profiles():
+    dccs = _profile_env("dccs")
+    assert {
+        "NCCL_SOCKET_IFNAME": dccs["NCCL_SOCKET_IFNAME"],
+        "GLOO_SOCKET_IFNAME": dccs["GLOO_SOCKET_IFNAME"],
+        "NCCL_NET_PLUGIN": dccs["NCCL_NET_PLUGIN"],
+        "NCCL_RMA_DISABLE": dccs["NCCL_RMA_DISABLE"],
+    } == {
+        "NCCL_SOCKET_IFNAME": "fenic",
+        "GLOO_SOCKET_IFNAME": "fenic",
+        "NCCL_NET_PLUGIN": "none",
+        "NCCL_RMA_DISABLE": "0",
+    }
+    crusoe = _profile_env("crusoe")
+    assert {
+        "NCCL_SOCKET_IFNAME": crusoe["NCCL_SOCKET_IFNAME"],
+        "GLOO_SOCKET_IFNAME": crusoe["GLOO_SOCKET_IFNAME"],
+        "NCCL_NET_PLUGIN": crusoe["NCCL_NET_PLUGIN"],
+        "NCCL_RMA_DISABLE": crusoe["NCCL_RMA_DISABLE"],
+        "NCCL_IB_HCA": crusoe["NCCL_IB_HCA"],
+    } == {
+        "NCCL_SOCKET_IFNAME": "ens3",
+        "GLOO_SOCKET_IFNAME": "ens3",
+        "NCCL_NET_PLUGIN": "librccl-anp.so",
+        "NCCL_RMA_DISABLE": "1",
+        "NCCL_IB_HCA": "ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7",
+    }
+
+
 def test_image_defaults_agree_by_digest():
     for name in ("Dockerfile", "README.md", "README-dev.md", "run_with_docker.sh"):
         assert IMAGE in (RECIPE / name).read_text()
@@ -75,6 +104,7 @@ def _fake_launcher(script: str, tmp_path: Path) -> list[str]:
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "DATA_ROOT": str(data),
         "OUTPUT_ROOT": str(output),
+        "FLUX_CLUSTER": "crusoe",
         "FLUX_FPROP_SWITCH_PRECOMPILE": "0",
         "NCCL_IB_DISABLE": "1",
         "MASTER_ADDR": "127.0.0.1",
@@ -104,6 +134,8 @@ def test_launchers_forward_conditional_flux_vars_but_not_path(script, tmp_path):
         arg == "FLUX_FP4_ALL_GATHER" or arg == "FLUX_FP4_ALL_GATHER=0"
         for arg in args
     )
+    for name in ("NCCL_NET_PLUGIN", "NCCL_RMA_DISABLE", "NCCL_IB_HCA"):
+        assert any(arg == name or arg.startswith(f"{name}=") for arg in args)
 
 
 def test_fprop_switch_hooks_cover_resume_and_require_mlperf():

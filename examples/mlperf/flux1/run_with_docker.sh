@@ -83,7 +83,8 @@ fi
 # its growing flag surface into a second hand-maintained list. Launcher-only
 # values are appended explicitly; arbitrary host variables are not forwarded.
 mapfile -t env_names < <(
-    env -i PATH="$PATH" bash -c 'source "$1"; compgen -e' bash "$SCRIPT_DIR/$FLUX_CONFIG" |
+    env -i PATH="$PATH" FLUX_CLUSTER="${FLUX_CLUSTER:-}" \
+        bash -c 'source "$1"; compgen -e' bash "$SCRIPT_DIR/$FLUX_CONFIG" |
         grep -Ev '^(PATH|PWD|SHLVL|_)$'
 )
 # Include bounded recipe variables created only under the caller's overrides

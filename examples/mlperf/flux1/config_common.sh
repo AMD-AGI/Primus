@@ -1,5 +1,27 @@
 #!/usr/bin/env bash
 
+export FLUX_CLUSTER=${FLUX_CLUSTER:-}
+case "$FLUX_CLUSTER" in
+    dccs)
+        export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-fenic}
+        export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-fenic}
+        export NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN:-none}
+        export NCCL_RMA_DISABLE=${NCCL_RMA_DISABLE:-0}
+        export NCCL_IB_HCA=${NCCL_IB_HCA:-ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7}
+        ;;
+    crusoe)
+        export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ens3}
+        export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-ens3}
+        # The requested plugin is absent in the image, selecting regular IB
+        # instead of the IB-CAST path used by NCCL_NET_PLUGIN=none.
+        export NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN:-librccl-anp.so}
+        export NCCL_RMA_DISABLE=${NCCL_RMA_DISABLE:-1}
+        export NCCL_IB_HCA=${NCCL_IB_HCA:-ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7}
+        ;;
+    "") ;;
+    *) echo "Unsupported FLUX_CLUSTER=$FLUX_CLUSTER; expected dccs or crusoe" >&2; return 2 ;;
+esac
+
 # Existing slim profiles retain their qualified FP8 defaults. The default
 # four-node profile selects the proven MLPerf A6W4 environment below.
 if [[ "${FLUX_A6W4_RECIPE:-0}" != "1" ]]; then

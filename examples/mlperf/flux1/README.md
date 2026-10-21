@@ -23,7 +23,8 @@ docker pull zirui3/primus-v26.7-flux:v0.1@sha256:082afc328d867f79ab5c4a46bc29c90
 The launcher bind-mounts this checkout at `/workspace/Primus`; the A6W4
 integration and forward-switch hooks are normal in-tree Primus source. The
 image already packages Primus-Turbo revision
-`e031c5bb3746e8b667676bd20e2697d75fe9f2b2`.
+`e031c5bb3746e8b667676bd20e2697d75fe9f2b2`. DCCS and Crusoe use this same
+digest; `FLUX_CLUSTER` changes runtime networking only, never the image.
 
 ## Prepare data
 
@@ -84,13 +85,14 @@ Use `config_1n_gbs1024.sh` for single-node MBS32 kernel development. The
 4-node A6W4 MLPerf target is the default, so it needs no `FLUX_CONFIG` override:
 
 ```bash
+FLUX_CLUSTER=crusoe \
 DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
 For a short smoke test, append `MAX_STEPS=1 SAVE_STRATEGY=none` before `bash`.
 
-## Submit the default four-node target
+## Submit the default four-node target on Crusoe
 
 ```bash
 REPO=/shared_nfs/zirui/code/Primus
@@ -100,7 +102,7 @@ OUTPUT_ROOT=/shared_nfs/zirui/runs/flux-a6w4-4n
 sbatch -A amd-spur -p amd-spur --qos=amd-spur-qos \
   -N4 --ntasks-per-node=1 --exclusive --gpus-per-node=8 -t 04:00:00 \
   --output="$OUTPUT_ROOT-%j.slurm.log" \
-  --wrap="cd '$REPO' && DATA_ROOT='$DATA_ROOT' \
+  --wrap="cd '$REPO' && FLUX_CLUSTER=crusoe DATA_ROOT='$DATA_ROOT' \
     OUTPUT_ROOT='$OUTPUT_ROOT'-\$SLURM_JOB_ID \
     bash examples/mlperf/flux1/run_with_docker_slurm.sh"
 ```
@@ -115,12 +117,37 @@ Evaluation throughput can be tuned independently with `EVAL_BATCH_SIZE`,
 defaults are the training local batch size, the training worker count (`4`),
 and `4`. These knobs do not change the required full 29,696-sample evaluation
 or its 262,144-training-sample cadence.
-The same launcher supports Crusoe and DCCS; only the Slurm submission options
-and host network settings differ. On DCCS, use
-`NCCL_SOCKET_IFNAME=fenic GLOO_SOCKET_IFNAME=fenic`. The launcher uses the
-host's generic `/usr/lib/x86_64-linux-gnu/libionic.so` symlink by default; set
-`LIBIONIC_ABI4_PATH` only when libionic is installed elsewhere, or set
-`NCCL_IB_DISABLE=1` when the selected nodes do not have AINIC routes.
+## DCCS and Crusoe networking
+
+Set one site profile on every launch. Explicit environment overrides still win.
+
+| Variable | `FLUX_CLUSTER=dccs` | `FLUX_CLUSTER=crusoe` |
+|---|---|---|
+| `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` | `fenic` | `ens3` |
+| `NCCL_NET_PLUGIN` | `none` | `librccl-anp.so` |
+| `NCCL_RMA_DISABLE` | `0` | `1` |
+| `NCCL_IB_HCA` | `ionic_0,...,ionic_7` | `ionic_1,...,ionic_7` |
+
+Both profiles retain DMA-BUF, `NCCL_CROSS_NIC=2`, symmetric GIN disabled, and
+one hierarchical CE context for the SDMA path. On the pinned image the Crusoe
+plugin name is intentionally unavailable, which makes RCCL use regular built-in
+IB; `NCCL_NET_PLUGIN=none` selects IB-CAST there and fails with Ionic local
+access errors. Crusoe excludes rail 0 because it is degraded on a qualified
+node pair; override `NCCL_IB_HCA` to restore it only after validating the
+selected nodes.
+
+DCCS launch inside an existing allocation:
+
+```bash
+FLUX_CLUSTER=dccs \
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
+```
+
+The launcher uses the host's generic `/usr/lib/x86_64-linux-gnu/libionic.so`
+symlink by default. Set `LIBIONIC_ABI4_PATH` only when libionic is installed
+elsewhere, or set `NCCL_IB_DISABLE=1` when the selected nodes have no AINIC
+routes.
 
 ## Files
 

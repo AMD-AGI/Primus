@@ -33,7 +33,8 @@ command -v spur >/dev/null && srun_args+=(--jobid="$SLURM_JOB_ID" --overlap)
 
 # Forward the selected recipe's exported surface without duplicating it here.
 mapfile -t forward_vars < <(
-    env -i PATH="$PATH" bash -c 'source "$1"; compgen -e' bash "$SCRIPT_DIR/$FLUX_CONFIG" |
+    env -i PATH="$PATH" FLUX_CLUSTER="${FLUX_CLUSTER:-}" \
+        bash -c 'source "$1"; compgen -e' bash "$SCRIPT_DIR/$FLUX_CONFIG" |
         grep -Ev '^(PATH|PWD|SHLVL|_)$'
 )
 # Preserve bounded recipe variables created only by the current overrides.
