@@ -10,11 +10,12 @@ TE <= 2.17 always wrote the input gradient into the logits in place. Newer TE
 saves a copy of the logits for backward unless ``overwrite_input=True``, which
 costs one extra logits-sized buffer per in-flight micro-batch (b * s * vocab *
 2 bytes in BF16, ~18 GB for gpt-oss-20B at mbs 12). Megatron's wrapper does not
-pass the flag, so this patch does when ``te_ce_overwrite_input`` is set.
+pass the flag, so this patch does when ``te_ce_overwrite_input`` is set (the
+default), restoring the TE <= 2.17 memory behavior.
 
-With the flag, the logits hold the gradient after the loss backward. Only
-enable it when nothing reads the logits after backward (distillation, RL
-log-prob reuse, logit logging hooks would see the gradient).
+With the flag, the logits hold the gradient after the loss backward. Set
+``te_ce_overwrite_input: false`` when something reads the logits after backward
+(distillation, RL log-prob reuse, logit logging hooks would see the gradient).
 """
 
 import inspect
