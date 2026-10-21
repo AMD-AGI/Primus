@@ -55,14 +55,16 @@ sits in the middle of ``MLASelfAttention.get_query_key_value_tensors``'s nested
 ``MLASelfAttention`` covers the hybrid too.
 
 Enabled via the ``mla_rope_qk_norm`` config flag, or the
-``PRIMUS_MLA_ROPE_QK_NORM=1`` env var (so it needs no config-schema change); a
-no-op otherwise.
+``PRIMUS_MLA_ROPE_QK_NORM=1`` env var (so it needs no config-schema change), on
+MLA models (``multi_latent_attention``); a no-op otherwise.
 """
 
 import os
 
 from primus.backends.megatron.patches._patch_guard import is_patched, mark_patched
-from primus.backends.megatron.patches._source_patch_utils import patch_method_source
+from primus.backends.megatron.patches._source_patch_utils import (
+    patch_method_source_multi,
+)
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -71,8 +73,8 @@ _PATCH_KEY = "megatron.transformer.mla_rope_qk_norm"
 # Anchor: the non-fused q/k split immediately followed by the rotary apply on
 # the query. We insert a parameter-free RMSNorm on the decoupled-RoPE q/k parts
 # between the split and the rotary embedding. Written at the upstream file's
-# absolute (16-space) indentation -- patch_method_source replaces on the raw,
-# non-dedented source.
+# absolute (16-space) indentation -- patch_method_source_multi replaces on the
+# raw, non-dedented source.
 _ORI = """\
                 # k_no_pe: [num_tokens, n, qk_head_dim]
                 # value: [num_tokens, n, v_head_dim]
@@ -99,11 +101,13 @@ _NEW = """\
                 # times mscale**2 under YaRN) without adding parameters -- keeps
                 # the checkpoint/optimizer layout identical for a clean resume.
                 _qkn_eps = self.config.layernorm_epsilon
-                q_pos_emb = q_pos_emb * torch.rsqrt(
-                    q_pos_emb.float().pow(2).mean(-1, keepdim=True) + _qkn_eps
+                _q32 = q_pos_emb.float()
+                q_pos_emb = (
+                    _q32 * torch.rsqrt(_q32.pow(2).mean(-1, keepdim=True) + _qkn_eps)
                 ).to(q_pos_emb.dtype)
-                k_pos_emb = k_pos_emb * torch.rsqrt(
-                    k_pos_emb.float().pow(2).mean(-1, keepdim=True) + _qkn_eps
+                _k32 = k_pos_emb.float()
+                k_pos_emb = (
+                    _k32 * torch.rsqrt(_k32.pow(2).mean(-1, keepdim=True) + _qkn_eps)
                 ).to(k_pos_emb.dtype)
 
                 # q_pos_emb: [num_tokens, n, qk_pos_emb_head_dim]
@@ -124,7 +128,9 @@ def _install_mla_rope_qk_norm_patch() -> None:
         log_rank_0(f"[Patch:{_PATCH_KEY}] already applied; skipping.")
         return
 
-    patch_method_source(target, "get_query_key_value_tensors", _ORI, _NEW)
+    # The _multi variant raises (rather than asserts) on a missing or ambiguous
+    # anchor, so source drift still aborts under ``python -O``.
+    patch_method_source_multi(target, "get_query_key_value_tensors", [(_ORI, _NEW)])
 
     mark_patched(target, _PATCH_KEY)
     log_rank_0(
@@ -138,6 +144,11 @@ def _enabled(ctx: PatchContext) -> bool:
     # Enable via the ``mla_rope_qk_norm`` config flag if present, or the
     # ``PRIMUS_MLA_ROPE_QK_NORM=1`` env var (works without a config-schema change).
     if not getattr(args, "mla_rope_qk_norm", False) and os.environ.get("PRIMUS_MLA_ROPE_QK_NORM", "0") != "1":
+        return False
+    # The rewrite is global to MLASelfAttention; leave non-MLA jobs untouched so
+    # an anchor mismatch cannot abort a model that never builds MLA.
+    if not getattr(args, "multi_latent_attention", False):
+        log_rank_0(f"[Patch:{_PATCH_KEY}] multi_latent_attention=False; QK-Norm is MLA-only -- skipping.")
         return False
     # The fused RoPE kernel applies rotary internally; this source patch only
     # covers the explicit non-fused split path. Warn + no-op if fusion is on.

@@ -10,12 +10,15 @@ Verifies:
   1. The source anchor still matches upstream ``get_query_key_value_tensors``.
   2. The patch rewrites the method body (on the defining base class, even when
      the module attribute is rebound to a subclass) and is idempotent.
-  3. The enable condition honors the flag/env var and the fused-RoPE,
-     cached-latent, NoPE-MLA and zero-width-rotary guards, and the YAML flag turns it on for the
-     shipped KDA MLA hybrid config through the runtime's arg build + merge.
-  4. An install failure aborts the run instead of silently training without QK-Norm.
-  5. On a real (tiny) MLA module, the patched method feeds unit-RMS q/k into
-     the rotary embedding and leaves the content q/k and the value unchanged.
+  3. The enable condition honors the flag/env var and the non-MLA, fused-RoPE,
+     cached-latent, NoPE-MLA and zero-width-rotary guards, and the YAML flag
+     turns it on for the shipped KDA MLA hybrid config through the runtime's
+     arg build + merge.
+  4. An install failure aborts the run (via an explicit raise, so also under
+     ``python -O``) instead of silently training without QK-Norm.
+  5. On a real (tiny) MLA module, with and without q-LoRA, the patched method
+     feeds unit-RMS q/k into the rotary embedding and leaves the content q/k
+     and the value unchanged.
 """
 
 import inspect
@@ -122,6 +125,8 @@ def _ctx(**args):
         ("1", {"model_type": "gpt", "mla_use_nope": False}, True),
         ("1", {"qk_pos_emb_head_dim": 0}, False),  # zero-width rotary -> skip
         ("1", {"qk_pos_emb_head_dim": 64}, True),
+        ("1", {"multi_latent_attention": False}, False),  # non-MLA job -> skip
+        (None, {"mla_rope_qk_norm": True, "multi_latent_attention": False}, False),
     ],
 )
 def test_enabled_condition(env, args, expected, monkeypatch):
@@ -130,7 +135,9 @@ def test_enabled_condition(env, args, expected, monkeypatch):
         monkeypatch.delenv("PRIMUS_MLA_ROPE_QK_NORM", raising=False)
     else:
         monkeypatch.setenv("PRIMUS_MLA_ROPE_QK_NORM", env)
-    ctx = _ctx(**{"mla_rope_qk_norm": False, "apply_rope_fusion": False, **args})
+    ctx = _ctx(
+        **{"mla_rope_qk_norm": False, "apply_rope_fusion": False, "multi_latent_attention": True, **args}
+    )
     assert patch_mod._enabled(ctx) is expected
 
 
@@ -164,8 +171,10 @@ def test_yaml_flag_enables_on_shipped_hybrid_config(monkeypatch):
 def test_install_failure_is_fatal(pristine_method, monkeypatch):
     monkeypatch.setattr(patch_mod, "log_rank_0", lambda *a, **k: None)
     monkeypatch.setattr(patch_mod, "_ORI", "# anchor that is not in the upstream source\n")
-    with pytest.raises(SystemExit, match="QK-Norm patch installation failed"):
+    with pytest.raises(SystemExit, match="QK-Norm patch installation failed") as excinfo:
         patch_mod.patch_mla_rope_qk_norm(_ctx(mla_rope_qk_norm=True))
+    # An explicit raise, not an assert, so the abort survives ``python -O``.
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
     assert not is_patched(_defining_cls(), patch_mod._PATCH_KEY)
 
 
@@ -176,7 +185,7 @@ class _UnusedCoreAttention(torch.nn.Module):
         super().__init__()
 
 
-def _tiny_mla():
+def _tiny_mla(q_lora_rank):
     import dataclasses
 
     from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
@@ -187,7 +196,7 @@ def _tiny_mla():
         num_layers=1,
         hidden_size=64,
         num_attention_heads=4,
-        q_lora_rank=None,
+        q_lora_rank=q_lora_rank,
         kv_lora_rank=32,
         qk_head_dim=16,
         qk_pos_emb_head_dim=8,
@@ -202,17 +211,21 @@ def _tiny_mla():
     attn = MLASelfAttention(config, submodules, layer_number=1, attn_mask_type=AttnMaskType.causal)
     with torch.no_grad():
         # Inflate the projections so the unpatched rotary q/k are far from unit RMS.
-        attn.linear_q_proj.weight.mul_(20)
+        q_proj = attn.linear_q_proj if q_lora_rank is None else attn.linear_q_up_proj
+        q_proj.weight.mul_(20)
         attn.linear_kv_down_proj.weight.mul_(20)
     return attn
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="MLA builds its rotary embedding on the GPU")
-def test_patched_forward_normalizes_only_rotary(init_parallel_state, pristine_method, monkeypatch):
+@pytest.mark.parametrize("q_lora_rank", [None, 16], ids=["direct_q", "q_lora"])
+def test_patched_forward_normalizes_only_rotary(
+    init_parallel_state, pristine_method, monkeypatch, q_lora_rank
+):
     monkeypatch.setattr(patch_mod, "log_rank_0", lambda *a, **k: None)
     torch.manual_seed(0)
-    attn = _tiny_mla()
-    device = attn.linear_q_proj.weight.device
+    attn = _tiny_mla(q_lora_rank)
+    device = attn.linear_kv_down_proj.weight.device
     hidden = torch.randn(6, 2, attn.config.hidden_size, device=device)
     d_nope = attn.config.qk_head_dim
 
