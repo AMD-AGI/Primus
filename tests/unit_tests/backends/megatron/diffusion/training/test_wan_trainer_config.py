@@ -248,6 +248,18 @@ def test_context_parallel_size_one_builds():
     assert _build(context_parallel_size=1).context_parallel_size == 1
 
 
+def test_layernorm_epsilon_reaches_the_model_config():
+    assert _build(layernorm_epsilon=1e-5).layernorm_epsilon == 1e-5
+    assert _build().layernorm_epsilon == 1e-6
+
+
+@pytest.mark.parametrize("key", ["hidden_dropout", "attention_dropout"])
+def test_nonzero_dropout_is_rejected(key):
+    """The WAN block has no dropout, so a nonzero value would otherwise be ignored."""
+    with pytest.raises(ValueError, match="WAN has no dropout"):
+        _build(**{key: 0.1})
+
+
 def test_selective_recompute_is_rejected():
     """WanLayer reads none of the selective-recompute switches, so it would save nothing."""
     with pytest.raises(ValueError, match="selective is not implemented for WAN"):

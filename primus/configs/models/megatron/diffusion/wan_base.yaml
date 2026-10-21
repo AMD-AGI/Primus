@@ -110,5 +110,6 @@ backbone_subfolder_2: transformer_2
 # ==============================================================================
 
 layernorm_epsilon: 1.0e-6
+# The WAN block has no dropout; WanConfig rejects nonzero values.
 hidden_dropout: 0.0
 attention_dropout: 0.0

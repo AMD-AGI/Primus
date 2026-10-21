@@ -307,6 +307,14 @@ class WanConfig(BaseDiffusionConfig):
                 f"set context_parallel_size: 1 (got {self.context_parallel_size})"
             )
 
+        # The WAN block has no dropout, as in diffusers, and its attention forces
+        # attention_dropout to 0, so a nonzero value would be ignored.
+        if self.hidden_dropout or self.attention_dropout:
+            raise ValueError(
+                "WAN has no dropout; set hidden_dropout and attention_dropout to 0 (got "
+                f"{self.hidden_dropout} and {self.attention_dropout})"
+            )
+
         # WanLayer and the WAN attention read neither recompute_mlp nor
         # checkpoint_core_attention, so selective recompute would save nothing.
         if self.recompute_granularity == "selective":
