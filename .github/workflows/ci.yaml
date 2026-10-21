@@ -42,13 +42,15 @@ env:
   # Includes fused expert wgrad output overwrite support (#534), MegaMoE-owned FlyDSL
   # kernels (#525), the repaired DeepEP intranode cheap fence, on by default (#539),
   # MegaMoE SwiGLU-OAI activations (#538), MXFP4 gather fusion (#546), tensorwise FP8
-  # from the TURBO permute (#555) and head_dim 128 fused QK RMSNorm + RoPE (#556).
-  PRIMUS_TURBO_COMMIT: 67b8e0930e38f837d145ee89d44dedda034838fa
-  PRIMUS_TURBO_AITER_COMMIT: 0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e # AITER v0.1.14.post1 (tag commit) — required by Primus-Turbo main aiter_utils.py
+  # from the TURBO permute (#555), head_dim 128 fused QK RMSNorm + RoPE (#556), the
+  # FlyDSL 0.3.4.1 / AITER v0.1.24.post1 upgrade (#544), MI455X optimization v1 (#567)
+  # and the MXFP8 and bf16 MegaMoE buffers sized to the dispatched rows (#566, #568).
+  PRIMUS_TURBO_COMMIT: de8fa6ca7f4986334070d5ee62beee07552f8ad8
+  PRIMUS_TURBO_AITER_COMMIT: 04896172e283ecc389f0dfff6479c3379ed63fa1 # AITER v0.1.24.post1 (tag commit) — required by Primus-Turbo main aiter_utils.py
   #ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
-  TRITON_COMMIT: 09500db9f0fe66fd176d1f080e2017b37e7e995d # pinned triton-lang/triton commit built from source in Dockerfile
-  BASE_IMAGE: docker.io/rocm/primus:v26.5
+  TRITON_COMMIT: fc8d31a5439ec9842557a284dc7ca61aee69246b # triton-lang/triton release/3.9.x (3.9.0), built from source in Dockerfile
+  BASE_IMAGE: docker.io/rocm/primus:v26.8
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.2
 
 jobs:
@@ -189,27 +191,29 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          # Primus v26.5 already includes AINIC under /workspace. Re-enable this
-          # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
-          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
-          start_time=$(date +%s)
-          mkdir -p $CWS/.github/workflows/docker/ainic
-          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-77.tar.gz $CWS/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          # cp /shared_nfs/tas/primus_github_runner/build-docker/ainic/ainic_bundle_1.117.5-a-77.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          docker build -f $CWS/.github/workflows/docker/Dockerfile.ainic \
-               --network=host \
-               -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
-               --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
-               --build-arg AINIC_BUNDLE_PATH=ainic \
-               $CWS/.github/workflows/docker
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
-
-          docker tag tasimage/primus:${{env.IMAGE_TAG}}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
-          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          # Primus v26.8 already carries the AINIC stack its release Dockerfile installs
+          # (libionic-dev from the 1.117.5-a-77 bundle, UCX 1.18.0, OpenMPI 4.1.6) on the
+          # ROCm SDK's RCCL, so the -ainic tag is the same image. Dockerfile.ainic's
+          # rccl rocm-7.1.0 build needs rocm_smi, which the ROCm 10.1 SDK no longer
+          # ships; its build stays below, commented out, for when it is needed again.
+          echo "> Tag Docker Image as: ${{ env.IMAGE_TAG }}-ainic"
+          docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
-          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
+          # start_time=$(date +%s)
+          # mkdir -p $CWS/.github/workflows/docker/ainic
+          # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-77.tar.gz $CWS/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          # docker build -f $CWS/.github/workflows/docker/Dockerfile.ainic \
+          #      --network=host \
+          #      -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
+          #      --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
+          #      --build-arg AINIC_BUNDLE_PATH=ainic \
+          #      $CWS/.github/workflows/docker
+          # end_time=$(date +%s)
+          # elapsed=$((end_time - start_time))
+          # echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
+          # docker tag tasimage/primus:${{env.IMAGE_TAG}}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
+          # docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
 
           # echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
           # start_time=$(date +%s)
@@ -267,6 +271,11 @@ jobs:
       PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_ci/actions-runner-torch
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: 1
+      # Base image defaults NVTE_CK_IS_V3_ATOMIC_FP32=0 (gfx950). This runner is
+      # gfx942: without fp32 atomics TE/CK v3 a16 bwd faults on strided qkv
+      # (test_eager_te_vs_local). Must also be passed into docker exec below —
+      # job env alone does not enter the UT container.
+      NVTE_CK_IS_V3_ATOMIC_FP32: 1
       # All test steps run inside a sibling container launched from the image that
       # build-docker built+pushed (docker.io/tasimage/primus:${IMAGE_TAG}). That
       # image already bundles turbo / aiter / triton / rocSHMEM / uccl / origami,
@@ -421,6 +430,7 @@ jobs:
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
           docker exec -i \
             -e GITHUB_WORKSPACE="${CWS}" -e HSA_NO_SCRATCH_RECLAIM=1 -e PRIMUS_CI_FULL \
+            -e NVTE_CK_IS_V3_ATOMIC_FP32 -e PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32 \
             -w "${CWS}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           echo "Running Primus Core tests..."

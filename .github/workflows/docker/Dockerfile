@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=docker.io/rocm/primus:v26.5
+ARG BASE_IMAGE=docker.io/rocm/primus:v26.8
 FROM ${BASE_IMAGE}
 
 ARG PRIMUS_TURBO_COMMIT
@@ -26,24 +26,31 @@ ENV GPU_ARCHS="gfx942;gfx950"
 ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
 ENV HCC_AMDGPU_TARGET="gfx942,gfx950"
 
-# v26.5 exposes rocSHMEM through the pip-installed ROCm SDK under $ROCM_PATH
-# instead of exporting a standalone $ROCSHMEM_HOME. Primus-Turbo auto-detects
-# that library and builds its optional odc_rocshmem_* extensions. The v26.4
-# team-symbol shim is no longer needed: the v26.5 static library links and
+# v26.8, like v26.5, exposes rocSHMEM through the pip-installed ROCm SDK under
+# $ROCM_PATH instead of exporting a standalone $ROCSHMEM_HOME. Primus-Turbo
+# auto-detects that library and builds its optional odc_rocshmem_* extensions.
+# The v26.4 team-symbol shim is no longer needed: the static library links and
 # imports cleanly.
 
 # ---------------------------------------------------------------------------
 # Install Primus-Turbo
 # ---------------------------------------------------------------------------
 
+# pip uninstall leaves the modules aiter JIT-built into its package directory, and
+# aiter loads an existing module without checking which version built it, so the
+# base image's leftovers are removed before the pinned version goes in.
+# AITER_USE_SYSTEM_TRITON=1: with torch >= 2.9.1, aiter's setup.py otherwise
+# replaces the installed Triton with its own build; Triton is pinned below.
 RUN pip3 uninstall aiter amd-aiter -y || true && \
+    SITE_PACKAGES=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])") && \
+    rm -rf "${SITE_PACKAGES}/aiter" "${SITE_PACKAGES}/aiter_meta" && \
     cd /opt && \
     git clone --filter=blob:none https://github.com/ROCm/aiter.git && \
     cd aiter && \
     git checkout -f ${PRIMUS_TURBO_AITER_COMMIT} && \
     git submodule sync && \
     git submodule update --init --recursive --depth 1 --filter=blob:none && \
-    PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .
+    AITER_USE_SYSTEM_TRITON=1 PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .
 
 RUN cd /opt && \
     git clone --filter=blob:none https://github.com/AMD-AGI/Primus-Turbo.git && \
@@ -102,7 +109,7 @@ RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     rm -rf /opt/uccl; \
     fi
 
-# Install origami (rocm-libraries@223648a). The v26.5 base image ships no
+# Install origami (rocm-libraries@223648a). The v26.8 base image ships no
 # origami at all. primus_turbo's MoE grouped-gemm kernel selection tolerates
 # its absence (falls back to a heuristic, no measurable perf loss on gfx942),
 # but Primus's performance-projection tool (primus projection performance)
