@@ -1,4 +1,0 @@
-# GPT-OSS-120B with its released MLP / MoE; see gpt_oss_hf_base.yaml.
-extends:
-  - gpt_oss_120B.yaml
-  - gpt_oss_hf_base.yaml
