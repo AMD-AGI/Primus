@@ -12,11 +12,10 @@ that did ``from module import attr`` before the patch ran.
 
 import importlib.util
 import sys
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 
 import pytest
 
-import primus.backends.megatron.patches._rebind as rebind_mod
 from primus.backends.megatron.patches._rebind import rebind_everywhere
 
 
@@ -70,7 +69,7 @@ def test_leaves_unrelated_same_named_attributes_alone(defining_module):
 
 def test_warns_when_a_holder_refuses_setattr(defining_module, importer, monkeypatch):
     warnings = []
-    monkeypatch.setattr(rebind_mod, "warning_rank_0", warnings.append)
+    monkeypatch.setattr("primus.backends.megatron.patches._rebind.warning_rank_0", warnings.append)
 
     class ReadOnly(ModuleType):
         def __setattr__(self, name, value):
@@ -218,13 +217,7 @@ def test_ignores_none_entries_in_sys_modules(defining_module, importer):
     assert importer.target() == "patched"
 
 
-def test_returns_owner_first(defining_module):
-    holder = SimpleNamespace(target=defining_module.target)
-    sys.modules["_primus_rebind_ns"] = holder
+def test_returns_owner_first(defining_module, importer):
+    rebound = rebind_everywhere(defining_module, "target", lambda: "patched")
 
-    try:
-        rebound = rebind_everywhere(defining_module, "target", lambda: "patched")
-    finally:
-        sys.modules.pop("_primus_rebind_ns", None)
-
-    assert rebound[0] == "_primus_rebind_owner"
+    assert rebound == ["_primus_rebind_owner", "_primus_rebind_importer"]

@@ -53,7 +53,9 @@ def test_setup_logger_quiets_filelock(tmp_path):
         f"logger.setup_logger(logger.LoggerConfig({str(tmp_path)!r}, 'ut', 'ut', 'ut', 'ut'))\n"
         "print(logging.getLogger('filelock').level)\n"
     )
-    env = dict(os.environ, PYTHONPATH=str(Path(primus.__file__).resolve().parents[1]))
+    pythonpath = [str(Path(primus.__file__).resolve().parents[1]), os.environ.get("PYTHONPATH", "")]
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in pythonpath if p))
     env.pop("PRIMUS_VERBOSE_FILELOCK", None)
-    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
     assert out.stdout.split()[-1] == str(logging.INFO)
