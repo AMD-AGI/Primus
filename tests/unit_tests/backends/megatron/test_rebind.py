@@ -138,6 +138,25 @@ def test_does_not_load_lazy_modules(defining_module, importer, tmp_path, monkeyp
     assert not executed.exists()
 
 
+def test_does_not_read_a_dict_property(defining_module, importer, monkeypatch):
+    """apipkg's ApiModule defines __dict__ as a property that imports every lazy
+    export when read."""
+    reads = []
+
+    class EagerDict(ModuleType):
+        @property
+        def __dict__(self):
+            reads.append(True)
+            return ModuleType.__dict__["__dict__"].__get__(self)
+
+    monkeypatch.setitem(sys.modules, "_primus_rebind_eager_dict", EagerDict("_primus_rebind_eager_dict"))
+
+    rebind_everywhere(defining_module, "target", lambda: "patched")
+
+    assert reads == []
+    assert importer.target() == "patched"
+
+
 def test_none_placeholder_is_not_rebound_everywhere(defining_module):
     """`except ImportError: target = None` placeholders are all the same None,
     so identity says nothing about who imported this one."""

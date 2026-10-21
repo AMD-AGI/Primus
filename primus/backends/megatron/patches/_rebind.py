@@ -26,9 +26,29 @@ keeps whatever that module holds.
 """
 
 import sys
-from typing import Any, List
+from types import ModuleType
+from typing import Any, List, Mapping
 
 __all__ = ["rebind_everywhere"]
+
+_module_dict = ModuleType.__dict__["__dict__"].__get__
+
+
+def _namespace(obj: Any) -> Mapping[str, Any]:
+    """``obj``'s own attribute dict, read without running its attribute hooks.
+
+    getattr() runs an entry's ``__getattr__`` on a miss, where apex's JIT op proxies
+    (amp_C, syncbn, ...) build their extension and transformers' lazy modules print
+    an alias warning, and any attribute access executes an importlib LazyLoader
+    module. object.__getattribute__ skips both but still calls a ``__dict__``
+    property defined on the class, and apipkg's ApiModule has one that imports
+    every lazy export. ModuleType's own ``__dict__`` descriptor skips that too;
+    entries that are not modules (apex's proxies are plain objects) fall back to
+    object.__getattribute__.
+    """
+    if isinstance(obj, ModuleType):
+        return _module_dict(obj)
+    return object.__getattribute__(obj, "__dict__")
 
 
 def rebind_everywhere(module: Any, name: str, new_value: Any) -> List[str]:
@@ -53,16 +73,12 @@ def rebind_everywhere(module: Any, name: str, new_value: Any) -> List[str]:
         return rebound
 
     # list(...) because importing inside the loop would mutate sys.modules.
-    # Read each module's own namespace, where `from x import name` binds it, with
-    # object.__getattribute__: getattr() would run the module's __getattr__ on a
-    # miss, where apex's JIT op proxies (amp_C, syncbn, ...) build their extension
-    # and transformers' lazy modules print an alias warning, and any attribute
-    # access executes an importlib LazyLoader module.
+    # `from x import name` binds the name in the importer's own namespace.
     for mod_name, mod in list(sys.modules.items()):
         if mod is None or mod is module:
             continue
         try:
-            if object.__getattribute__(mod, "__dict__").get(name) is old_value:
+            if _namespace(mod).get(name) is old_value:
                 setattr(mod, name, new_value)
                 rebound.append(mod_name)
         except Exception:  # noqa: BLE001 - no __dict__ (__slots__), or setattr refused
