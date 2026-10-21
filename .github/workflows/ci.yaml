@@ -271,6 +271,11 @@ jobs:
       PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_ci/actions-runner-torch
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: 1
+      # Base image defaults NVTE_CK_IS_V3_ATOMIC_FP32=0 (gfx950). This runner is
+      # gfx942: without fp32 atomics TE/CK v3 a16 bwd faults on strided qkv
+      # (test_eager_te_vs_local). Must also be passed into docker exec below —
+      # job env alone does not enter the UT container.
+      NVTE_CK_IS_V3_ATOMIC_FP32: 1
       # All test steps run inside a sibling container launched from the image that
       # build-docker built+pushed (docker.io/tasimage/primus:${IMAGE_TAG}). That
       # image already bundles turbo / aiter / triton / rocSHMEM / uccl / origami,
@@ -425,6 +430,7 @@ jobs:
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
           docker exec -i \
             -e GITHUB_WORKSPACE="${CWS}" -e HSA_NO_SCRATCH_RECLAIM=1 -e PRIMUS_CI_FULL \
+            -e NVTE_CK_IS_V3_ATOMIC_FP32 -e PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32 \
             -w "${CWS}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           echo "Running Primus Core tests..."

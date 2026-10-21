@@ -35,6 +35,11 @@ os.environ["NVTE_FUSED_ATTN"] = "1"
 os.environ["NVTE_FUSED_ATTN_CK"] = "1"
 os.environ["NVTE_CK_USES_FWD_V3"] = "1"
 os.environ["NVTE_CK_USES_BWD_V3"] = "1"
+# Base images set NVTE_CK_IS_V3_ATOMIC_FP32=0 (correct for gfx950). On gfx942 the
+# TE/CK v3 a16 bwd kernel (fmha_bwd_hd128_bf16_a16_rtz) memory-faults on
+# non-contiguous SBHD q/k/v views from interleaved qkv; fp32 atomics select the
+# a32 path instead. Matches tools/installation/env.sh and the MI300X recipes.
+os.environ["NVTE_CK_IS_V3_ATOMIC_FP32"] = "1"
 
 import pytest
 import torch
@@ -298,7 +303,10 @@ class TestTEvsLocalSpecAttention(PrimusUT):
 
         final_rel = abs(losses_te[-1] - losses_local[-1]) / max(abs(losses_te[-1]), 1e-12)
         print(f"\n  Final loss relative diff: {final_rel:.6f}")
-        assert final_rel < 0.02, (
+        # 0.03 (not 0.02): with NVTE_CK_IS_V3_ATOMIC_FP32=1 TE uses the a32 bwd
+        # kernel while local-spec still takes Primus-Turbo's a16 path, so 100-step
+        # accumulated drift on gfx942 sits near ~0.02 and occasionally overshoots.
+        assert final_rel < 0.03, (
             f"TE vs Local eager: final loss diverged: "
             f"te={losses_te[-1]:.6f}, local={losses_local[-1]:.6f}, rel={final_rel:.6f}"
         )
