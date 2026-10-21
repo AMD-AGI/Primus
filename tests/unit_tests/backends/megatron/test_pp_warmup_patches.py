@@ -202,13 +202,6 @@ def _build_training_cmd(
         "False",
         "--use_turbo_deepep",
         "False",
-        # MI300X DeepSeek-V2-Lite recipes pin turbo_sync_free_moe_stage=2, which
-        # re-enables use_turbo_deepep / use_turbo_grouped_gemm after the False
-        # overrides above. Keep stage 0 so this test measures pp_warmup alone.
-        "--turbo_sync_free_moe_stage",
-        "0",
-        "--use_turbo_grouped_gemm",
-        "False",
         "--mtp_num_layers",
         str(_MTP_NUM_LAYERS),
         "--deterministic_mode",
