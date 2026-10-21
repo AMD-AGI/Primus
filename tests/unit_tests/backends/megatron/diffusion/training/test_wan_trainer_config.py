@@ -266,6 +266,27 @@ def test_full_recompute_that_covers_the_depth_builds(method, num_layers):
     assert config.recompute_num_layers == num_layers
 
 
+def test_bf16_forward_reaches_the_model_config_and_the_log():
+    config = _build(fp4="mxfp4", fp4_recipe="mxfp4", mxfp4_forward_precision="bf16")
+
+    assert config.mxfp4_forward_precision == "bf16"
+    assert describe_linear_precision(config) == "bf16 forward, MXFP4 (mxfp4) backward"
+
+
+@pytest.mark.parametrize(
+    "forward,backward,match",
+    [("bf16", "fp8", "needs mxfp4_backward_precision: mxfp4"), ("fp4", "mxfp4", "must be 'mxfp4' or 'bf16'")],
+)
+def test_unsupported_mxfp4_precision_pairs_are_rejected(forward, backward, match):
+    with pytest.raises(ValueError, match=match):
+        _build(
+            fp4="mxfp4",
+            fp4_recipe="mxfp4",
+            mxfp4_forward_precision=forward,
+            mxfp4_backward_precision=backward,
+        )
+
+
 def test_dual_expert_is_rejected_above_one_data_parallel_rank():
     """Ranks that route apart would issue different expert gathers."""
     config = SimpleNamespace(num_transformers=2)

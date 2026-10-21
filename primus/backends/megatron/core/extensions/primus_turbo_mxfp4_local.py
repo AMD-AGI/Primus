@@ -435,6 +435,103 @@ def _quantize_grad_dual(grad_2d, preshuffle, use_sr=True):
     )
 
 
+# (2d block, stochastic rounding, RHT) per (rowwise, colwise) copy for the
+# bf16-forward mode; sr None takes mxfp4_gradient_stochastic_rounding. RHT on
+# every copy and 1x32 weight blocks is the recipe WAN's bf16-forward runs were
+# measured with. Only the colwise copies of the activation and weight and both
+# gradient copies reach a GEMM; the forward copies are made and dropped.
+_BF16_FWD_RECIPE = {
+    "act": ((False, False, True), (False, False, True)),
+    "w": ((False, False, True), (False, False, True)),
+    "grad": ((False, None, True), (False, None, True)),
+}
+
+
+def _quantize_dual(x, recipe, shuffle, use_sr=False):
+    """quantize_mxfp4_dual with one ``_BF16_FWD_RECIPE`` entry and shuffle flags."""
+    row, col = recipe
+    return _quantize_mxfp4_dual_op(
+        x,
+        _FP4_DTYPE,
+        MXFP4_PADDING_ALIGN_SIZE,
+        row[0],
+        use_sr if row[1] is None else row[1],
+        row[2],
+        col[0],
+        use_sr if col[1] is None else col[1],
+        col[2],
+        *shuffle,
+    )
+
+
+class MXFP4BackwardLinearFunction(torch.autograd.Function):
+    """Linear with a bf16 forward GEMM and MXFP4 dgrad and wgrad.
+
+    The output is the bf16 GEMM of the unquantized operands. The forward also
+    quantizes the padded activation and weight, as MXFP4LinearFunction does, and
+    keeps only the colwise FP4 copies the backward reduces over.
+    """
+
+    @staticmethod
+    def forward(ctx, input, weight, preshuffle, use_gradient_sr):
+        gemm_out_dtype = _gemm_out_dtype(weight.dtype)
+        orig_shape = input.shape
+        input_2d = input.reshape(-1, input.shape[-1])
+        m, k = input_2d.shape
+        n = weight.shape[0]
+        m_a, k_a, n_a = _aligned_gemm_dims(m, k, n)
+
+        _, _, a_t_fp4, a_t_scale = _quantize_dual(
+            _pad2d(_to_quantizable(input_2d), m_a, k_a),
+            _BF16_FWD_RECIPE["act"],
+            (preshuffle, False, preshuffle, preshuffle),
+        )
+        _, _, b_t_fp4, b_t_scale = _quantize_dual(
+            _pad2d(_to_quantizable(weight), n_a, k_a),
+            _BF16_FWD_RECIPE["w"],
+            (preshuffle, preshuffle, preshuffle, preshuffle),
+        )
+        output = torch.nn.functional.linear(input_2d.to(gemm_out_dtype), weight.to(gemm_out_dtype))
+
+        ctx.save_for_backward(a_t_fp4, a_t_scale, b_t_fp4, b_t_scale)
+        ctx.preshuffle = preshuffle
+        ctx.use_gradient_sr = use_gradient_sr
+        ctx.input_dtype = input.dtype
+        ctx.weight_dtype = weight.dtype
+        ctx.orig_shape = orig_shape
+        ctx.m, ctx.k, ctx.n = m, k, n
+        ctx.m_a, ctx.k_a, ctx.n_a = m_a, k_a, n_a
+        return output.reshape(*orig_shape[:-1], n)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_2d = grad_output.contiguous().reshape(-1, grad_output.shape[-1])
+        a_t_fp4, a_t_scale, b_t_fp4, b_t_scale = ctx.saved_tensors
+        preshuffle = ctx.preshuffle
+        gemm_out_dtype = _gemm_out_dtype(ctx.weight_dtype)
+
+        g_fp4, g_scale, g_t_fp4, g_t_scale = _quantize_dual(
+            _pad2d(_to_quantizable(grad_2d), ctx.m_a, ctx.n_a),
+            _BF16_FWD_RECIPE["grad"],
+            (preshuffle, False, preshuffle, False),
+            use_sr=ctx.use_gradient_sr,
+        )
+        grad_input = _gemm_fp4(
+            g_fp4, g_scale, False, b_t_fp4, b_t_scale, True, gemm_out_dtype, False, preshuffle
+        )
+        if ctx.m_a != ctx.m or ctx.k_a != ctx.k:
+            grad_input = grad_input[: ctx.m, : ctx.k]
+        grad_input = grad_input.to(ctx.input_dtype).reshape(ctx.orig_shape)
+
+        grad_weight = _gemm_fp4(
+            g_t_fp4, g_t_scale, False, a_t_fp4, a_t_scale, True, gemm_out_dtype, False, preshuffle
+        )
+        if ctx.n_a != ctx.n or ctx.k_a != ctx.k:
+            grad_weight = grad_weight[: ctx.n, : ctx.k].contiguous()
+        grad_weight = grad_weight.to(ctx.weight_dtype)
+        return grad_input, grad_weight, None, None
+
+
 class MXFP4LinearFunction(torch.autograd.Function):
     """MXFP4 linear (Y = X @ W^T) with MX block-of-32 scaling.
 
@@ -652,6 +749,16 @@ class MXFP4LinearFunction(torch.autograd.Function):
 # ---------------------------------------------------------------------------
 
 
+def _forward_is_bf16(config) -> bool:
+    """Read ``mxfp4_forward_precision``; the bf16 forward has only an MXFP4 backward."""
+    forward = getattr(config, "mxfp4_forward_precision", "mxfp4")
+    if forward not in ("mxfp4", "bf16"):
+        raise ValueError(f"mxfp4_forward_precision must be 'mxfp4' or 'bf16', got {forward!r}")
+    if forward == "bf16" and getattr(config, "mxfp4_backward_precision", "mxfp4") != "mxfp4":
+        raise ValueError("mxfp4_forward_precision='bf16' needs mxfp4_backward_precision='mxfp4'")
+    return forward == "bf16"
+
+
 class MXFP4ColumnParallelLinear(ColumnParallelLinear):
     """ColumnParallelLinear with per-module MXFP4. torch.compile friendly.
 
@@ -680,6 +787,7 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
         _assert_preshuffle_contract(self.config, self._preshuffle)
         self._backward_is_fp8 = getattr(self.config, "mxfp4_backward_precision", "mxfp4") == "fp8"
         self._use_gradient_sr = getattr(self.config, "mxfp4_gradient_stochastic_rounding", False)
+        self._forward_is_bf16 = _forward_is_bf16(self.config)
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -694,6 +802,10 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
 
     def _forward_impl(self, input, weight, *args, **kwargs):
         bias = kwargs.get("bias", None)
+
+        if self._forward_is_bf16:
+            output = MXFP4BackwardLinearFunction.apply(input, weight, self._preshuffle, self._use_gradient_sr)
+            return output if bias is None else output + bias
 
         result = MXFP4LinearFunction.apply(
             input,
@@ -740,6 +852,7 @@ class MXFP4RowParallelLinear(RowParallelLinear):
         _assert_preshuffle_contract(self.config, self._preshuffle)
         self._backward_is_fp8 = getattr(self.config, "mxfp4_backward_precision", "mxfp4") == "fp8"
         self._use_gradient_sr = getattr(self.config, "mxfp4_gradient_stochastic_rounding", False)
+        self._forward_is_bf16 = _forward_is_bf16(self.config)
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -754,6 +867,10 @@ class MXFP4RowParallelLinear(RowParallelLinear):
 
     def _forward_impl(self, input, weight, *args, **kwargs):
         bias = kwargs.get("bias", None)
+
+        if self._forward_is_bf16:
+            output = MXFP4BackwardLinearFunction.apply(input, weight, self._preshuffle, self._use_gradient_sr)
+            return output if bias is None else output + bias
 
         result = MXFP4LinearFunction.apply(
             input,

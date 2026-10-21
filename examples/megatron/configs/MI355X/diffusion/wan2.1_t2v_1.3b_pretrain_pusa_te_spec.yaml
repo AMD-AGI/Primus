@@ -8,7 +8,7 @@
 # Megatron-Core / TE stack (TEColumnParallelLinear / TERowParallelLinear /
 # TEDotProductAttention), the same knob Flux uses for its te_spec configs.
 #
-# This config and its local_spec / local_spec_mxfp4 siblings differ ONLY in the
+# This config and its local_spec / local_spec_mxfp4_bwd siblings differ ONLY in the
 # implementation and precision knobs, so their losses are directly comparable.
 #
 # Usage:

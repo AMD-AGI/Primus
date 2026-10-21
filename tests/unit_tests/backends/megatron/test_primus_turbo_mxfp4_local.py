@@ -58,8 +58,36 @@ def _pin_fp4_aiter(monkeypatch):
 
     if os.environ.get("PRIMUS_TURBO_GEMM_BACKEND", None) == "":
         monkeypatch.delenv("PRIMUS_TURBO_GEMM_BACKEND", raising=False)
-    monkeypatch.setattr(GlobalBackendManager, "_gemm_backend", {PrecisionType.FP4: BackendType.AITER})
+    # set_gemm_backend builds the table entries the GEMM dispatcher reads too;
+    # the setattr before it puts the original table back on teardown.
+    monkeypatch.setattr(GlobalBackendManager, "_gemm_backend", None)
+    GlobalBackendManager.set_gemm_backend(BackendType.AITER, PrecisionType.FP4)
     monkeypatch.setattr(GlobalBackendManager, "_auto_tune", False)
+
+
+def _set_linear_args(monkeypatch):
+    """The Megatron args an MXFP4 linear's construction reads, plus the AITER pin."""
+    import megatron.training.global_vars as gvars
+
+    dummy_args = SimpleNamespace(
+        rank=0,
+        world_size=1,
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        offload=False,
+        offload_ops=[],
+        patch_primus_pipeline=False,
+        pp_algorithm=None,
+        patch_zero_bubble=False,
+        enable_zero_bubble=False,
+        rampup_batch_size=None,
+        global_batch_size=1,
+        micro_batch_size=1,
+        data_parallel_size=1,
+        decrease_batch_size_if_needed=False,
+    )
+    monkeypatch.setattr(gvars, "_GLOBAL_ARGS", dummy_args)
+    _pin_fp4_aiter(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -297,28 +325,7 @@ class TestMXFP4LinearGuard(PrimusUT):
 
     @pytest.fixture(autouse=True)
     def setup_parallel(self, init_parallel_state, monkeypatch):
-        dummy_args = SimpleNamespace(
-            rank=0,
-            world_size=1,
-            tensor_model_parallel_size=1,
-            pipeline_model_parallel_size=1,
-            offload=False,
-            offload_ops=[],
-            patch_primus_pipeline=False,
-            pp_algorithm=None,
-            patch_zero_bubble=False,
-            enable_zero_bubble=False,
-            rampup_batch_size=None,
-            global_batch_size=1,
-            micro_batch_size=1,
-            data_parallel_size=1,
-            decrease_batch_size_if_needed=False,
-        )
-        import megatron.training.global_vars as gvars
-
-        monkeypatch.setattr(gvars, "_GLOBAL_ARGS", dummy_args)
-
-        _pin_fp4_aiter(monkeypatch)
+        _set_linear_args(monkeypatch)
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
     def test_column_parallel_rejects_tp_gt_1(self):
@@ -619,3 +626,92 @@ class TestMXFP4PaddedShapes:
         assert out.dtype == torch.bfloat16
         assert x_grad.dtype == input_dtype
         assert w_grad.dtype == torch.bfloat16
+
+
+class TestMXFP4BF16Forward:
+    """``mxfp4_forward_precision: bf16``: bf16 forward GEMM, MXFP4 dgrad and wgrad."""
+
+    @pytest.fixture(autouse=True)
+    def setup_parallel(self, init_parallel_state):
+        pass
+
+    @staticmethod
+    def _step(function, x, w, *args):
+        x = x.detach().clone().requires_grad_(True)
+        w = w.detach().clone().requires_grad_(True)
+        out = function.apply(x, w, *args)
+        out = out[0] if isinstance(out, tuple) else out
+        torch.manual_seed(7)
+        grad = torch.randn_like(out)
+        out.backward(grad)
+        return out.detach(), x.grad, w.grad, grad
+
+    @requires_mxfp4
+    @pytest.mark.parametrize("m,k,n", [(256, 256, 512), (200, 240, 1520)], ids=["unpadded", "padded"])
+    def test_forward_is_the_bf16_linear_and_backward_is_mxfp4(self, m, k, n):
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+            MXFP4BackwardLinearFunction,
+            MXFP4LinearFunction,
+            _enable_preshuffle,
+        )
+
+        torch.manual_seed(42)
+        x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda")
+        w = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+        preshuffle = _enable_preshuffle()
+
+        out, x_grad, w_grad, grad = self._step(MXFP4BackwardLinearFunction, x, w, preshuffle, False)
+        _, _, pure_w_grad, _ = self._step(MXFP4LinearFunction, x, w, preshuffle, False, None, 0, 0, False)
+
+        assert torch.equal(out, torch.nn.functional.linear(x, w))
+        # wgrad's operands (colwise activation, colwise gradient) carry the
+        # pure recipe's RHT flags, so it is the pure MXFP4 wgrad exactly.
+        assert torch.equal(w_grad, pure_w_grad)
+        # dgrad differs from the pure path only in RHT and the weight block
+        # shape, so check it against the bf16 gradient: close, but quantized.
+        bf16_x_grad = grad.float() @ w.float()
+        snr_db = 10 * torch.log10((bf16_x_grad**2).mean() / ((x_grad.float() - bf16_x_grad) ** 2).mean())
+        assert snr_db.item() > 10
+        assert not torch.equal(x_grad, bf16_x_grad.to(x_grad.dtype))
+        assert x_grad.shape == (m, k) and w_grad.shape == (n, k)
+
+    @pytest.mark.parametrize(
+        "forward,backward,match",
+        [("bf16", "fp8", "needs mxfp4_backward_precision"), ("fp8", "mxfp4", "must be 'mxfp4' or 'bf16'")],
+    )
+    def test_unsupported_combinations_are_rejected(self, forward, backward, match):
+        module = _mxfp4_module()
+        config = SimpleNamespace(mxfp4_forward_precision=forward, mxfp4_backward_precision=backward)
+
+        with pytest.raises(ValueError, match=match):
+            module._forward_is_bf16(config)
+
+    def test_default_is_the_mxfp4_forward(self):
+        assert _mxfp4_module()._forward_is_bf16(SimpleNamespace()) is False
+
+    @requires_mxfp4
+    def test_linear_module_routes_to_the_bf16_forward(self, monkeypatch):
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+            MXFP4ColumnParallelLinear,
+        )
+
+        _set_linear_args(monkeypatch)
+        config = _make_mxfp4_transformer_config()
+        config.mxfp4_forward_precision = "bf16"
+        linear = MXFP4ColumnParallelLinear(
+            input_size=256,
+            output_size=512,
+            config=config,
+            init_method=_init_method(),
+            bias=True,
+            gather_output=False,
+            skip_bias_add=False,
+            is_expert=False,
+        ).cuda()
+        torch.manual_seed(42)
+        x = torch.randn(256, 1, 256, dtype=torch.bfloat16, device="cuda")
+
+        output, _ = linear(x)
+
+        expected = torch.nn.functional.linear(x, linear.weight) + linear.bias
+        assert torch.equal(output, expected)

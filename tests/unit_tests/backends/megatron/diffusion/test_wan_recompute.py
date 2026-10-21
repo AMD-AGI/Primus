@@ -33,6 +33,7 @@ from primus.backends.megatron.core.models.diffusion.wan.config import (  # noqa:
 from primus.backends.megatron.core.models.diffusion.wan.model import (  # noqa: E402
     WanTransformer3D,
 )
+from tests.unit_tests.backends.megatron.conftest import requires_mxfp4  # noqa: E402
 
 TINY = dict(
     hidden_size=256,
@@ -64,14 +65,13 @@ def _train_step(model, inputs):
     return out.detach(), {n: p.grad.detach().float() for n, p in model.named_parameters()}
 
 
-@pytest.mark.parametrize("transformer_impl", ["local", "transformer_engine"])
-@pytest.mark.parametrize("method,num_layers,expected_calls", RECOMPUTE)
-def test_recompute_matches_plain_forward(transformer_impl, method, num_layers, expected_calls, monkeypatch):
+def _check_recompute(monkeypatch, checkpoint_owner, method, num_layers, expected_calls, **model):
+    """Train one step with and without recompute; ``checkpoint_owner.*checkpoint`` is counted."""
     torch.manual_seed(0)
-    plain_config = WanConfig.wan2_1_t2v_1_3b(**TINY, transformer_impl=transformer_impl)
+    plain_config = WanConfig.wan2_1_t2v_1_3b(**TINY, **model)
     recompute_config = WanConfig.wan2_1_t2v_1_3b(
         **TINY,
-        transformer_impl=transformer_impl,
+        **model,
         recompute_granularity="full",
         recompute_method=method,
         recompute_num_layers=num_layers,
@@ -87,13 +87,14 @@ def test_recompute_matches_plain_forward(transformer_impl, method, num_layers, e
     )
 
     calls = []
-    checkpoint = tensor_parallel.checkpoint
+    owner, name = checkpoint_owner
+    checkpoint = getattr(owner, name)
 
     def counting_checkpoint(*args, **kwargs):
         calls.append(1)
         return checkpoint(*args, **kwargs)
 
-    monkeypatch.setattr(tensor_parallel, "checkpoint", counting_checkpoint)
+    monkeypatch.setattr(owner, name, counting_checkpoint)
 
     expected_out, expected_grads = _train_step(plain, inputs)
     assert not calls
@@ -106,3 +107,61 @@ def test_recompute_matches_plain_forward(transformer_impl, method, num_layers, e
         reference = expected_grads[name]
         error = ((grad - reference).norm() / reference.norm().clamp_min(1e-12)).item()
         assert error < 1e-2, f"{name}: relative gradient error {error:.2e}"
+
+
+@pytest.mark.parametrize("transformer_impl", ["local", "transformer_engine"])
+@pytest.mark.parametrize("method,num_layers,expected_calls", RECOMPUTE)
+def test_recompute_matches_plain_forward(transformer_impl, method, num_layers, expected_calls, monkeypatch):
+    _check_recompute(
+        monkeypatch,
+        (tensor_parallel, "checkpoint"),
+        method,
+        num_layers,
+        expected_calls,
+        transformer_impl=transformer_impl,
+    )
+
+
+@requires_mxfp4
+@pytest.mark.parametrize("forward_precision", ["mxfp4", "bf16"])
+@pytest.mark.parametrize("method,num_layers,expected_calls", RECOMPUTE)
+def test_recompute_matches_plain_forward_under_mxfp4(
+    forward_precision, method, num_layers, expected_calls, monkeypatch
+):
+    """Under fp4 the block checkpoints through te_checkpoint inside an fp4 context.
+
+    The launcher swaps Primus's get_fp4_context into Megatron, as here; upstream
+    Megatron's raises on the mxfp4 recipe. The quantization repeats exactly on
+    the recomputed forward, so the output is still bit-identical.
+    """
+    from megatron.core import fp4_utils
+    from megatron.core.extensions import transformer_engine
+    from megatron.core.transformer import transformer_block
+    from primus_turbo.pytorch.core.backend import (
+        BackendType,
+        GlobalBackendManager,
+        PrecisionType,
+    )
+
+    from primus.backends.megatron.core.fp4_utils import get_fp4_context
+
+    for module in (fp4_utils, transformer_block):
+        monkeypatch.setattr(module, "get_fp4_context", get_fp4_context)
+    # The MXFP4 linears' preshuffle contract needs the FP4 GEMM on AITER.
+    monkeypatch.delenv("PRIMUS_TURBO_GEMM_BACKEND", raising=False)
+    monkeypatch.setattr(GlobalBackendManager, "_gemm_backend", None)
+    GlobalBackendManager.set_gemm_backend(BackendType.AITER, PrecisionType.FP4)
+    monkeypatch.setattr(GlobalBackendManager, "_auto_tune", False)
+
+    _check_recompute(
+        monkeypatch,
+        (transformer_engine, "te_checkpoint"),
+        method,
+        num_layers,
+        expected_calls,
+        transformer_impl="local",
+        fp4="mxfp4",
+        fp4_recipe="mxfp4",
+        mxfp4_forward_precision=forward_precision,
+        gradient_accumulation_fusion=False,
+    )

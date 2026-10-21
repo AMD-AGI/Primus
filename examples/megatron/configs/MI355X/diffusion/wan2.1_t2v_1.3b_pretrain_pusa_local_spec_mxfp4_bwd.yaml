@@ -2,28 +2,35 @@
 # Licensed under the Apache License, Version 2.0.
 
 # WAN 2.1 T2V-1.3B pretraining (from scratch) on the pre-encoded PusaV1 480p
-# dataset, LOCAL spec (TE-free) + Megatron-FSDP + MXFP4.
+# dataset, LOCAL spec (TE-free) + Megatron-FSDP, bf16 forward and MXFP4
+# backward GEMMs.
 #
 # transformer_impl: "local" builds WAN attention and FFN on native Megatron
 # parallel linears plus torch nn.RMSNorm q/k norm and PrimusTurboLocalAttention
 # with unfused interleaved RoPE. No TransformerEngine required. This is the
 # WAN counterpart of Flux's transformer_impl="local".
 #
-# On top of that, the attention and FFN GEMMs are swapped to per-module MXFP4
-# (Primus-Turbo): the native Megatron linears are replaced by
-# MXFP4ColumnParallelLinear / MXFP4RowParallelLinear (block-of-32 MX scaling,
-# gemm_fp4_impl). Attention itself stays BF16 flash-attn; only the linears go
-# FP4.
+# On top of that, the attention and FFN linears are swapped to the Primus-Turbo
+# MXFP4ColumnParallelLinear / MXFP4RowParallelLinear, with
+# mxfp4_forward_precision: bf16. Their forward GEMM runs in bf16 on the
+# unquantized operands; dgrad and wgrad run in MXFP4 (block-of-32 MX scaling,
+# gemm_fp4_impl) on FP4 copies made in the forward, with a random Hadamard
+# transform on every operand. Attention itself stays BF16 flash-attn.
+#
+# Why not MXFP4 forward as well: in WAN fine-tunes the quantized forward GEMMs
+# account for nearly all of the loss gap between MXFP4 and bf16, while this
+# bf16-forward recipe tracks the bf16 loss. Set mxfp4_forward_precision: mxfp4
+# for the pure MXFP4 recipe.
 #
 # Requires PRIMUS_TURBO_GEMM_BACKEND=fp4:AITER, set in the env: block below;
 # otherwise the MXFP4 linears raise on the preshuffle contract check.
 #
-# This config and its local_spec / local_spec_mxfp4 siblings differ ONLY in the
+# This config and its te_spec / local_spec siblings differ ONLY in the
 # implementation and precision knobs, so their losses are directly comparable.
 #
 # Usage:
 #   ./primus-cli direct -- train pretrain \
-#     --config examples/megatron/configs/MI355X/diffusion/wan2.1_t2v_1.3b_pretrain_pusa_local_spec_mxfp4.yaml
+#     --config examples/megatron/configs/MI355X/diffusion/wan2.1_t2v_1.3b_pretrain_pusa_local_spec_mxfp4_bwd.yaml
 #
 # Set PRIMUS_DIFFUSION_DATA_PATH to an Energon dataset of pre-encoded WAN
 # latents whose subflavor is encoding: wan_preencoded; see
@@ -37,7 +44,7 @@
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: wan2.1_t2v_1.3b_pretrain_pusa_local_spec_mxfp4
+exp_name: wan2.1_t2v_1.3b_pretrain_pusa_local_spec_mxfp4_bwd
 workspace: ./output
 
 env:
@@ -93,6 +100,7 @@ modules:
       # fields; the mxfp4_* knobs are read by the MXFP4 local linears.
       fp4: "mxfp4"
       fp4_recipe: "mxfp4"
+      mxfp4_forward_precision: "bf16"
       mxfp4_backward_precision: "mxfp4"
       mxfp4_gradient_stochastic_rounding: false
       # The MXFP4 linears subclass the native Megatron linears, which reject
@@ -127,7 +135,7 @@ modules:
       eval_iters: 0
 
       log_interval: 1
-      tensorboard_dir: output/tensorboard/wan2.1_t2v_1.3b_pusa_local_spec_mxfp4
+      tensorboard_dir: output/tensorboard/wan2.1_t2v_1.3b_pusa_local_spec_mxfp4_bwd
       log_throughput: true
       log_timers_to_tensorboard: true
       log_learning_rate_to_tensorboard: true
@@ -136,7 +144,7 @@ modules:
       # Checkpointing
       # ----------------------------------------------------------------------
       save_interval: 1000
-      save: output/checkpoints/wan2.1_t2v_1.3b_pusa_local_spec_mxfp4
+      save: output/checkpoints/wan2.1_t2v_1.3b_pusa_local_spec_mxfp4_bwd
       load: null
       finetune: false
       auto_continue_train: false
@@ -205,4 +213,4 @@ modules:
       seed: 42
 
       wandb_project: wan-pretrain
-      wandb_exp_name: wan2.1_t2v_1.3b_pusa_local_spec_mxfp4
+      wandb_exp_name: wan2.1_t2v_1.3b_pusa_local_spec_mxfp4_bwd

@@ -325,6 +325,16 @@ class WanConfig(BaseDiffusionConfig):
                 f"divide num_dit_layers ({self.num_dit_layers}); got {self.recompute_num_layers}"
             )
 
+        if self.mxfp4_forward_precision not in ("mxfp4", "bf16"):
+            raise ValueError(
+                f"mxfp4_forward_precision must be 'mxfp4' or 'bf16', got {self.mxfp4_forward_precision!r}"
+            )
+        if self.mxfp4_forward_precision == "bf16" and self.mxfp4_backward_precision != "mxfp4":
+            raise ValueError(
+                "mxfp4_forward_precision: bf16 keeps only the MXFP4 backward, so it needs "
+                f"mxfp4_backward_precision: mxfp4 (got {self.mxfp4_backward_precision!r})"
+            )
+
     def get_num_layers(self) -> int:
         """Number of DiT blocks in one transformer."""
         return self.num_dit_layers

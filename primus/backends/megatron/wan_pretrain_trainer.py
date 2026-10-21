@@ -131,6 +131,10 @@ def describe_linear_precision(config) -> str:
     """Name the precision the WAN block linears will run in."""
     if getattr(config, "fp4", None):
         precision = f"MXFP4 ({config.fp4_recipe})"
+        if getattr(config, "mxfp4_forward_precision", "mxfp4") == "bf16":
+            precision = f"bf16 forward, MXFP4 ({config.fp4_recipe}) backward"
+        elif getattr(config, "mxfp4_backward_precision", "mxfp4") == "fp8":
+            precision += " forward, FP8 backward"
     elif getattr(config, "fp8", None):
         precision = f"FP8 {config.fp8} ({getattr(config.fp8_recipe, 'value', config.fp8_recipe)} recipe)"
     else:
@@ -495,6 +499,7 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
                     "fp4": fp4,
                     "fp4_recipe": fp4_recipe,
                     "mxfp4_backward_precision": getattr(params, "mxfp4_backward_precision", "mxfp4"),
+                    "mxfp4_forward_precision": getattr(params, "mxfp4_forward_precision", "mxfp4"),
                     "mxfp4_gradient_stochastic_rounding": getattr(
                         params, "mxfp4_gradient_stochastic_rounding", False
                     ),
