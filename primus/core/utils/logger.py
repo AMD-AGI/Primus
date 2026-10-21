@@ -258,8 +258,9 @@ def quiet_filelock_logger():
     filelock logs every 0.05 s poll at DEBUG, e.g. while another rank JIT-builds
     a torch extension under the same TORCH_EXTENSIONS_DIR lock, and the root
     logger above forwards it to every sink. A stricter level set earlier (MLPerf
-    quiet mode sets ERROR) is kept. Set ``PRIMUS_VERBOSE_FILELOCK=1`` to keep the
-    DEBUG lines, e.g. to see which lock a rank is waiting on.
+    quiet mode sets ERROR) is kept. Set ``PRIMUS_VERBOSE_FILELOCK=1`` to leave the
+    level alone and keep the DEBUG lines, e.g. to see which lock a rank is waiting
+    on; it does not undo such a stricter level.
     """
     import logging
 

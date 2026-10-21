@@ -16,6 +16,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+import primus.backends.megatron.patches._rebind as rebind_mod
 from primus.backends.megatron.patches._rebind import rebind_everywhere
 
 
@@ -67,28 +68,48 @@ def test_leaves_unrelated_same_named_attributes_alone(defining_module):
     assert "_primus_rebind_bystander" not in rebound
 
 
-def test_survives_modules_that_cannot_be_probed_or_rebound(defining_module, importer):
+def test_warns_when_a_holder_refuses_setattr(defining_module, importer, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(rebind_mod, "warning_rank_0", warnings.append)
+
     class ReadOnly(ModuleType):
         def __setattr__(self, name, value):
             raise RuntimeError("read-only module")
 
     read_only = ReadOnly("_primus_rebind_read_only")
     read_only.__dict__["target"] = defining_module.target
+    monkeypatch.setitem(sys.modules, read_only.__name__, read_only)
 
-    class Slotted:
-        __slots__ = ()
-
-    sys.modules[read_only.__name__] = read_only
-    sys.modules["_primus_rebind_slotted"] = Slotted()
-
-    try:
-        rebound = rebind_everywhere(defining_module, "target", lambda: "patched")
-    finally:
-        sys.modules.pop(read_only.__name__, None)
-        sys.modules.pop("_primus_rebind_slotted", None)
+    rebound = rebind_everywhere(defining_module, "target", lambda: "patched")
 
     assert importer.target() == "patched"
     assert "_primus_rebind_read_only" not in rebound
+    assert len(warnings) == 1 and "_primus_rebind_read_only.target" in warnings[0]
+
+
+class _HookedEntry:
+    """A non-module sys.modules entry whose every attribute read is a hook: a lazy
+    object proxy resolves its target there, and cffi's Lib reports ModuleType as
+    its __class__."""
+
+    def __init__(self, target):
+        object.__setattr__(self, "target", target)
+        object.__setattr__(self, "reads", [])
+
+    def __getattribute__(self, name):
+        object.__getattribute__(self, "reads").append(name)
+        return ModuleType if name == "__class__" else object.__getattribute__(self, name)
+
+
+def test_leaves_non_module_entries_untouched(defining_module, importer, monkeypatch):
+    entry = _HookedEntry(defining_module.target)
+    monkeypatch.setitem(sys.modules, "_primus_rebind_hooked", entry)
+
+    rebound = rebind_everywhere(defining_module, "target", lambda: "patched")
+
+    assert object.__getattribute__(entry, "reads") == []
+    assert "_primus_rebind_hooked" not in rebound
+    assert importer.target() == "patched"
 
 
 class _ModuleProxy(ModuleType):

@@ -37,7 +37,7 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 | `PRIMUS_LOG_LEVEL` | `INFO` | User; debug paths in `runner/primus-cli-*.sh` set `DEBUG` | `runner/lib/common.sh` | Log verbosity: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `PRIMUS_LOG_TIMESTAMP` | `1` | User | `runner/lib/common.sh` | `1` prefixes logs with timestamps; `0` disables. |
 | `PRIMUS_LOG_COLOR` | `1` (auto-off if not a TTY) | User; tests may set `0` | `runner/lib/common.sh` | ANSI colors in runner logs. |
-| `PRIMUS_VERBOSE_FILELOCK` | `0` | User | `primus/core/utils/logger.py` | `1` keeps the `filelock` library's DEBUG lines (one per 0.05 s poll while a rank waits on a lock, e.g. during a torch extension build), which Primus otherwise hides by raising that logger to INFO; `PRIMUS_LOG_LEVEL` does not bring them back. |
+| `PRIMUS_VERBOSE_FILELOCK` | `0` | User | `primus/core/utils/logger.py` | `1` keeps the `filelock` library's DEBUG lines (one per 0.05 s poll while a rank waits on a lock, e.g. during a torch extension build), which Primus otherwise hides by raising that logger to INFO. Only `1` is honored; it does not lower a stricter level set elsewhere (MLPerf quiet mode, `PRIMUS_LOG_SUPPRESSION=1`, sets ERROR). `PRIMUS_LOG_LEVEL` and `stderr_sink_level` do not bring the lines back. |
 | `PRIMUS_DEBUG` | `0` | User | `runner/helpers/envs/primus-env.sh` | `1` enables `set -x` in the env loader for shell tracing. |
 | `PRIMUS_SKIP_VALIDATION` | `0` | User / tests | `runner/helpers/envs/primus-env.sh` | `1` skips `validate_distributed_params` (not recommended). |
 | `PRIMUS_EXPECT_IB` | (unset) | User | `primus/tools/preflight/network/network_standard.py` | When `1`, preflight treats InfiniBand as expected for validation. |

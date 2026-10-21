@@ -19,7 +19,7 @@ functionalization failure seen on some torch/triton combos.
 
 from primus.backends.megatron.patches._rebind import rebind_everywhere
 from primus.core.patches import PatchContext, register_patch
-from primus.core.utils.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 
 @register_patch(
@@ -38,8 +38,15 @@ def patch_fused_pad_routing_map(ctx: PatchContext):
 
     log_rank_0("[Patch:megatron.fused_pad_routing_map] Patching fused_pad_routing_map...")
 
-    if getattr(meg_mod, "fused_pad_routing_map", None) is primus_fused_pad_routing_map:
+    current = getattr(meg_mod, "fused_pad_routing_map", None)
+    if current is primus_fused_pad_routing_map:
         log_rank_0("[Patch:megatron.fused_pad_routing_map]   Already patched; skipping.")
+        return
+    if current is None:
+        warning_rank_0(
+            "[Patch:megatron.fused_pad_routing_map]   Megatron no longer defines "
+            "megatron.core.fusions.fused_pad_routing_map.fused_pad_routing_map; skipping."
+        )
         return
 
     # Replace on the source module so all *future* (incl. lazy) imports resolve to the

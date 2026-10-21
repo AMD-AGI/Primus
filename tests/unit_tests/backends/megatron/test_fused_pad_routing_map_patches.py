@@ -50,3 +50,11 @@ def test_rebinds_importers_without_probing_proxies(monkeypatch):
     assert meg_mod.fused_pad_routing_map is primus_fused_pad_routing_map
     assert importer.fused_pad_routing_map is primus_fused_pad_routing_map
     assert "probed" not in proxy.__dict__
+
+
+def test_skips_when_megatron_drops_the_symbol(monkeypatch):
+    monkeypatch.delattr(meg_mod, "fused_pad_routing_map")
+
+    patch_fused_pad_routing_map(None)
+
+    assert not hasattr(meg_mod, "fused_pad_routing_map")
