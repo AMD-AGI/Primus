@@ -92,10 +92,33 @@ The recipe takes these environment overrides:
 Other Megatron arguments can be appended after `--config` (for example
 `--optimizer muon`); later ones win.
 
-Mock data uses `NullTokenizer` with `vocab_size: 200057`, whose end-of-document
-token lands on id 200057, giving the 200,058 real Inkling tokens. The HF
-tokenizer has no eos/bos/pad token, so real data needs an explicit
-end-of-document id first.
+With `mock_data: true` Primus replaces the tokenizer with `NullTokenizer`;
+`vocab_size: 200057` plus its end-of-document token gives the 200,058 real
+Inkling tokens. Mock data is random tokens, so use it for throughput only.
+
+Real data needs the real tokenizer, with an end-of-document token set. The
+released tokenizer defines no eos, bos or pad token, so loaded from
+`thinkingmachines/Inkling-Small` it gives Megatron no end-of-document id.
+Tokenize with `<|endoftext|>` (id 199999) as the separator; this also saves a
+copy of the tokenizer with that token as its `eos_token`:
+
+```bash
+python tools/convergence_test/prepare_dataset.py --model inkling_small.yaml \
+    --eod-token '<|endoftext|>' --out-dir /data/inkling_fineweb
+```
+
+Then train from that directory instead of mock data:
+
+```yaml
+      mock_data: false
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: /data/inkling_fineweb/tokenizer
+      train_data_path: ["/data/inkling_fineweb/train_text_document"]
+      valid_data_path: ["/data/inkling_fineweb/valid_text_document"]
+```
+
+Megatron then reports the 200,058-token vocabulary (padded to 200,064) and
+end-of-document id 199999, the id that ends every document in the data.
 
 ### Reproducing the proxy runs
 
