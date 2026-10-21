@@ -116,7 +116,8 @@ RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
 # hard-depends on origami as its only supported GEMM simulation backend and
 # has no fallback (see primus/core/projection/simulation_backends/factory.py)
 # — dropping this install broke TestProjectionSimulate::* outright. Skipped
-# for JAX, where the projection tool isn't used.
+# for JAX, where the projection tool isn't used. -Bsymbolic keeps the extension
+# off ROCm 10.1's ABI-incompatible liborigami.so.1 (SIGFPE in rank_configs).
 RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     rm -rf /tmp/rocm-libraries && \
     git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git /tmp/rocm-libraries && \
@@ -125,7 +126,7 @@ RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     git sparse-checkout set shared/origami && \
     git checkout 223648a26928ebed7f3dd0ccdc044c09f1dccf9b && \
     (pip uninstall -y origami || true) && \
-    pip install --no-cache-dir ./shared/origami/python && \
+    LDFLAGS="-Wl,-Bsymbolic" pip install --no-cache-dir ./shared/origami/python && \
     rm -rf /tmp/rocm-libraries; \
     fi
 

@@ -83,7 +83,7 @@ We recommend using the official [rocm/megatron-lm Docker image](https://hub.dock
 
 ```bash
 # Pull the latest Docker image
-docker pull docker.io/rocm/primus:v26.5
+docker pull docker.io/rocm/primus:v26.8
 
 ```
 
@@ -202,7 +202,7 @@ Multi-node training is launched via **SLURM**.
 Specify the number of nodes and the model config:
 
 ```bash
-export DOCKER_IMAGE="docker.io/rocm/primus:v26.5"
+export DOCKER_IMAGE="docker.io/rocm/primus:v26.8"
 export NNODES=8
 
 # Example for megatron llama3.1_8B
