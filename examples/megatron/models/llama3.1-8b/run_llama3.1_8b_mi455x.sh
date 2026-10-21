@@ -54,6 +54,9 @@ export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
 # 1: switch Triton's gfx1250 expert scheduling off in the container's Triton (needs root), see below
 export PATCH_TRITON_EXPERT_SCHEDULING=${PATCH_TRITON_EXPERT_SCHEDULING:-1}
+# hipBLASLt kernels tuned for this example's GEMMs (README.md); empty: hipBLASLt's own choice. hipBLASLt
+# uses a row only while its solution index still names the kernel it was tuned with.
+export HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE-$(dirname "${SCRIPT}")/hipblaslt_tuning/llama3.1_8b-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt}
 
 export PRIMUS_TEAM=${PRIMUS_TEAM:-amd}
 export PRIMUS_USER=${PRIMUS_USER:-$(id -un)}
