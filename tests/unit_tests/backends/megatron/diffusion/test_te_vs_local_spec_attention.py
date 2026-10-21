@@ -40,6 +40,9 @@ os.environ["NVTE_CK_USES_BWD_V3"] = "1"
 # non-contiguous SBHD q/k/v views from interleaved qkv; fp32 atomics select the
 # a32 path instead. Matches tools/installation/env.sh and the MI300X recipes.
 os.environ["NVTE_CK_IS_V3_ATOMIC_FP32"] = "1"
+# Round like Primus-Turbo (rtna) rather than the images' rtz; otherwise the two
+# specs drift by ~2-3% over 100 steps.
+os.environ["NVTE_CK_HOW_V3_BF16_CVT"] = "1"
 
 import pytest
 import torch
@@ -303,10 +306,7 @@ class TestTEvsLocalSpecAttention(PrimusUT):
 
         final_rel = abs(losses_te[-1] - losses_local[-1]) / max(abs(losses_te[-1]), 1e-12)
         print(f"\n  Final loss relative diff: {final_rel:.6f}")
-        # 0.03 (not 0.02): with NVTE_CK_IS_V3_ATOMIC_FP32=1 TE uses the a32 bwd
-        # kernel while local-spec still takes Primus-Turbo's a16 path, so 100-step
-        # accumulated drift on gfx942 sits near ~0.02 and occasionally overshoots.
-        assert final_rel < 0.03, (
+        assert final_rel < 0.02, (
             f"TE vs Local eager: final loss diverged: "
             f"te={losses_te[-1]:.6f}, local={losses_local[-1]:.6f}, rel={final_rel:.6f}"
         )
