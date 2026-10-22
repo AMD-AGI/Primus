@@ -77,6 +77,8 @@ Recurrent mixer (Mamba2, KDA, or GDN) interleaved with MLA attention and SwiGLU 
 
 Bridge SFT (Mamba hybrids): `examples/megatron_bridge/configs/MI300X/zebra_mamba_{1B,3B,8B}_hybrid_sft_posttrain.yaml`
 
+The hybrid layers read their FLA switches (`use_fla_fused_rmsnorm`, `use_fla_fused_gated_norm`, `use_fla_short_conv`, `fla_mla_attn`) from Megatron-LM's global args. Megatron-Bridge does not set those args, so under Bridge the switches keep their defaults: the FLA kernels stay off, and MLA still moves to the direct flash-attn path on its own when the installed flash-attn is newer than Transformer Engine supports.
+
 ### Pretrain configs on MI300X (hybrid + pure)
 
 | Config | Model | Recurrent Type | Seq Length | Params | Tokenizer |
