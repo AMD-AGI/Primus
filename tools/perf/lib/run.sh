@@ -262,6 +262,61 @@ train_steps_text() {
     echo "$TRAIN_STEPS${skipped:+ (not applied to $skipped)}"
 }
 
+# TRAIN_STEPS against a Megatron config's learning-rate schedule: with
+# lr_decay_iters unset Megatron decays over train_iters and asserts
+# lr_warmup_steps < lr_decay_steps, so a TRAIN_STEPS no longer than
+# lr_warmup_iters fails during setup. Returns 1 for such a config, with the
+# reason in TRAIN_STEPS_CONFLICT. Each value comes from the experiment's
+# overrides, else from its module config file (not the files either
+# `extends`); a schedule set by fraction or by samples, or a value neither
+# sets, is not checked. CHECK_TRAIN_STEPS=0 turns this off.
+CHECK_TRAIN_STEPS="${CHECK_TRAIN_STEPS:-1}"
+TRAIN_STEPS_CONFLICT=""
+
+schedule_value() {
+    local key="$1" config_file="$2" module="$3" base="$4" value
+    value=$(yq -r ".modules.$module.overrides.$key // \"\"" "$config_file" 2>/dev/null)
+    if [ -z "$value" ] && [ -f "$base" ]; then
+        value=$(yq -r ".$key // \"\"" "$base" 2>/dev/null)
+    fi
+    # ${VAR:default}: the default, as the container sees it unless VAR is set there.
+    if [[ "$value" =~ ^\$\{[^:}]+:([^}]*)\}$ ]]; then
+        value="${BASH_REMATCH[1]}"
+    fi
+    [ "$value" = "null" ] && value=""
+    printf '%s' "$value"
+}
+
+train_steps_conflict() {
+    local config_file="$1" framework="$2" module="$3" base warmup key
+    TRAIN_STEPS_CONFLICT=""
+    [ -n "$TRAIN_STEPS" ] && [ "$CHECK_TRAIN_STEPS" = 1 ] || return 0
+    case "$framework" in megatron|megatron_bridge) ;; *) return 0 ;; esac
+    train_steps_ignored "$framework" && return 0
+    base="$PRIMUS_PATH/primus/configs/modules/$framework/$(yq_or_na ".modules.$module.config" "$config_file")"
+    for key in lr_decay_iters lr_warmup_fraction lr_decay_samples train_samples; do
+        [ -z "$(schedule_value "$key" "$config_file" "$module" "$base")" ] || return 0
+    done
+    warmup=$(schedule_value lr_warmup_iters "$config_file" "$module" "$base")
+    [[ "$warmup" =~ ^[0-9]+$ ]] && [ "$TRAIN_STEPS" -le "$warmup" ] || return 0
+    TRAIN_STEPS_CONFLICT="TRAIN_STEPS=$TRAIN_STEPS is not more than lr_warmup_iters=$warmup, and with lr_decay_iters unset Megatron's lr_warmup_steps < lr_decay_steps check fails during setup; raise TRAIN_STEPS above $warmup or set lr_decay_iters"
+    return 1
+}
+
+# A config that is not launched still gets a log for each repetition, so it
+# has results rows: the banner, and a footer with exit code 2 and
+# "not_run: <why>". Uses the config prepare_config and build_launch_argv set up.
+perf_log_not_run() {
+    local why="$1" rep result_file
+    for rep in $(seq 1 "$NUM_REPS"); do
+        result_file=$(run_log_name "$rep")
+        print_per_run_banner "$result_file" "$config_file" "$config_name" "$config_hash" \
+            "$FRAMEWORK" "$MODEL" "$MBS" "$GBS" "$SEQ_LEN" "$STEPS" "$rep" "$NUM_REPS" \
+            "$launcher_cmd" "$MODULE" "$TRAIN_SUITE" 0 "${MAX_ATTEMPTS_PER_CONFIG:-1}"
+        print_per_run_footer "$result_file" 2 0 "not_run: $why"
+    done
+}
+
 # Primus CLI override flag that sets training length for a given framework.
 # These names come from trainer tests / user-guide examples, not from the
 # backend's native argparse (e.g. TorchTitan is --training.steps, not --steps).
