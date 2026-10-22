@@ -43,9 +43,11 @@ env:
   # kernels (#525), the repaired DeepEP intranode cheap fence, on by default (#539),
   # MegaMoE SwiGLU-OAI activations (#538), MXFP4 gather fusion (#546), tensorwise FP8
   # from the TURBO permute (#555), head_dim 128 fused QK RMSNorm + RoPE (#556), the
-  # FlyDSL 0.3.4.1 / AITER v0.1.24.post1 upgrade (#544), MI455X optimization v1 (#567)
-  # and the MXFP8 and bf16 MegaMoE buffers sized to the dispatched rows (#566, #568).
-  PRIMUS_TURBO_COMMIT: de8fa6ca7f4986334070d5ee62beee07552f8ad8
+  # FlyDSL 0.3.4.1 / AITER v0.1.24.post1 upgrade (#544), MI455X optimization v1 (#567),
+  # the MXFP8 and bf16 MegaMoE buffers sized to the dispatched rows (#566, #568),
+  # MegaMoE at GPT-OSS's 2880-wide experts with per-expert biases (#571) and the
+  # FlyDSL dense GEMM race fixes on gfx950 (#570).
+  PRIMUS_TURBO_COMMIT: d04ffd9b4476f1691b67e3f589d257175d1a87a0
   PRIMUS_TURBO_AITER_COMMIT: 04896172e283ecc389f0dfff6479c3379ed63fa1 # AITER v0.1.24.post1 (tag commit) — required by Primus-Turbo main aiter_utils.py
   #ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
