@@ -139,7 +139,7 @@ failure = _load_failure_module()
 strip_ansi = failure.strip_ansi
 
 # Bumped whenever a column is added or its meaning changes.
-PARSER_VERSION = 7
+PARSER_VERSION = 8
 
 BANNER_KV_RE = re.compile(r"^#\s*([^:]+?)\s*:\s*(.*?)\s*$")
 PLACEHOLDER_RE = re.compile(r"^\$\{[^:}]+:([^}]*)\}$")
@@ -1147,6 +1147,8 @@ def parse_log_file(filepath: str) -> dict | None:
         "hmean_nominal_tflops": None,
         "throughput_note": None,
         "failed_at": None,
+        "failing_rank": None,
+        "failing_host": None,
     }
 
     config_text = parse_config_section(lines)
@@ -1179,9 +1181,15 @@ def parse_log_file(filepath: str) -> dict | None:
         result["status"] = "ok"
     else:
         result["status"] = "failed"
+    rank_output = failure.failing_rank_output(lines)
+    if rank_output:
+        result["failing_rank"], result["failing_host"] = rank_output["rank"], rank_output["host"]
+        # Its debug.log lines can be another rank's iteration lines.
+        first, last = rank_output["span"]
+        lines = lines[:first] + lines[last + 1 :]
     if result["status"] in ("failed", "interrupted"):
         result["failure_reason"], result["failure_detail"] = failure.classify_failure(
-            run_lines, footer_reason, exit_code
+            run_lines, footer_reason, exit_code, rank_output["lines"] if rank_output else None
         )
     elif result["status"] == "incomplete":
         # Still running, or the batch was killed: only a cause visible in the
@@ -1664,6 +1672,9 @@ CSV_FIELDS = [
     "throughput_note",
     # Added in parser version 7.
     "failed_at",
+    # Added in parser version 8.
+    "failing_rank",
+    "failing_host",
 ]
 
 

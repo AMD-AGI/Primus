@@ -446,19 +446,21 @@ print_per_run_banner() {
 # Footer appended once the run has ended (or been interrupted). The extractor
 # reads `Exit code` and `Elapsed (sec)` from the last lines of the log;
 # `Failure reason` is "none" or "<category>: <detail>" (see
-# perf_launch_with_watchdog).
+# perf_launch_with_watchdog). <section>, when given, goes between the run
+# output and the footer (the failing rank's own log, see lib/control.sh).
 print_per_run_footer() {
     local result_file="$1"
     local exit_code="$2"
     local run_elapsed="$3"
     local failure_reason="$4"
+    local section="${5:+$5$'\n\n'}"
     local rule="################################################################################"
     local footer
     # Built first and written with one printf: a signal can then not land
     # between its lines, nor run the interrupt handler with stdout still
     # pointing into the log.
-    printf -v footer '\n%s\n\n%s\n# Run finished at  : %s\n# Exit code        : %s\n# Elapsed (sec)    : %s\n# Failure reason   : %s\n%s\n' \
-        "############################### End Run Output #################################" "$rule" \
+    printf -v footer '\n%s\n\n%s%s\n# Run finished at  : %s\n# Exit code        : %s\n# Elapsed (sec)    : %s\n# Failure reason   : %s\n%s\n' \
+        "############################### End Run Output #################################" "$section" "$rule" \
         "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$exit_code" "$run_elapsed" "$failure_reason" "$rule"
     printf '%s' "$footer" >> "$result_file"
 }
