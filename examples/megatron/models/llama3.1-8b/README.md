@@ -73,25 +73,36 @@ variable. The patch needs root and stays in a long-lived container; set
 
 ## Reference
 
-Measured on one MI455X inside a container (`GPUS_PER_NODE=1`, so `GBS=4`: one micro-batch of 4 x 8192
-tokens per iteration) with `amdprimus/amdprimus:tas-20261019` and Primus-Turbo
-`dev/lhz/llama31_8b_opt` 62a3fcca. ms/iter is Primus's average over iterations 3–10 (FlyDSL: the mean of
-2 runs). Peak memory is the largest `hip mem usage` in the log, which Primus prints in GiB (labelled
-GB) as the device's total minus free memory. The 4-GPU default was not measured.
+Measured on one node of 4x MI455X with `amdprimus/amdprimus:tas-20261019` and Primus-Turbo 62a3fcca
+(`dev/lhz/llama31_8b_opt`), no hipBLASLt tuning, MBS 4 (one micro-batch of 4 x 8192 tokens per GPU and
+iteration). The 4-GPU rows are the launcher's defaults (DP4, GBS 16) started from the host; the 1-GPU rows
+(`GPUS_PER_NODE=1`, GBS 4) ran inside a container, and a 1-GPU run from the host gave the same 1083 ms/iter.
+ms/iter is Primus's average over iterations 3–10 (FlyDSL: the mean of 2 runs). Peak memory is the largest
+`hip mem usage` in the log, which Primus prints for the last rank in GiB (labelled GB) as the device's
+total minus free memory.
 
-| Attention | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
-| --- | --- | --- | --- | --- | --- |
-| Primus-Turbo FlyDSL (default) | 1084 | 30,200 | 1556 | 344.75 GiB | 10.1895–10.1913 |
-| Primus-Turbo Triton (`PRIMUS_TURBO_ATTN_BACKEND=triton`) | 1924 | 17,000 | 876 | 344.99 GiB | 10.1909 |
-| TE unfused (`USE_TURBO_ATTENTION=False`), `--recompute_granularity selective` | 5027 | 6,500 | 335 | 354.22 GiB | 10.1922 |
+| GPUs | Attention | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4 | Primus-Turbo FlyDSL (default) | 1113 | 29,400 | 1515 | 276.08 GiB | 8.9716–8.9748 |
+| 4 | Primus-Turbo Triton (`PRIMUS_TURBO_ATTN_BACKEND=triton`) | 1971 | 16,600 | 856 | 276.08 GiB | 8.9728 |
+| 4 | TE unfused (`USE_TURBO_ATTENTION=False`), `--recompute_granularity selective` | 5037 | 6,500 | 335 | 303.05 GiB | 8.9688 |
+| 1 | Primus-Turbo FlyDSL (default) | 1084 | 30,200 | 1556 | 344.75 GiB | 10.1895–10.1913 |
+| 1 | Primus-Turbo Triton | 1924 | 17,000 | 876 | 344.99 GiB | 10.1909 |
+| 1 | TE unfused, `--recompute_granularity selective` | 5027 | 6,500 | 335 | 354.22 GiB | 10.1922 |
 
-FlyDSL is 1.77x faster than Triton and 4.6x faster than TE. Without recompute, the TE row runs out of
-memory in the first iteration (see Attention backends below).
+FlyDSL is 1.77x faster than Triton and 4.5x faster than TE on 4 GPUs (1.77x and 4.6x on 1 GPU). Without
+recompute, TE runs out of memory in the first iteration on 1 and on 4 GPUs (see Attention backends below).
+On 4 GPUs an iteration takes 2.7% longer than on 1 GPU with FlyDSL (the data-parallel gradient
+reduce-scatter and parameter all-gather are not fully hidden), and the distributed optimizer's sharding
+lowers the peak memory per GPU by about 69 GiB. The loss differs from 1 GPU because the global batch does
+(16 vs 4 sequences). With `PRIMUS_SEQ_LENGTH=16384` and `MBS=2` (the same tokens per iteration), one GPU
+runs 1231 ms/iter.
 
-The first run in a new container takes about 110 s from launch to exit (the Triton patch invalidates
-Inductor's cache, and the FlyDSL kernels are compiled once); a repeat run takes about 46 s.
+From the host every run starts a new container and takes about 115 s from launch to exit on 1 or 4 GPUs
+(the Triton patch invalidates Inductor's cache, and the FlyDSL kernels are compiled once); a repeat run in
+a long-lived container takes about 46 s.
 
-**Profile** (`PROFILE=True`, iterations 6–7): about 1042 ms of compute kernels per iteration, and about
+**Profile** (1 GPU, `PROFILE=True`, iterations 6–7): about 1042 ms of compute kernels per iteration, and about
 70 ms with no kernel running. hipBLASLt GEMMs 66%, attention 16% (forward 4%, backward 12%), SwiGLU 4%,
 optimizer 3.5%, RoPE, RMSNorm and loss 3%, copies and other elementwise kernels 7%.
 
