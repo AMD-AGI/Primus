@@ -88,6 +88,10 @@ The loss is already a per-token mean, so each micro-batch counts once and
 Megatron does not divide it by the token count again. The logged `hylo ild`
 is the mean over data-parallel ranks, the value the reference logs.
 
+The SFT recipes pad every sample to `seq_length`, so their means cover only each
+sample's real tokens, the positions through its last supervised token. The
+packed recipes below have no padding, and every position counts.
+
 ## All-MLA Enhanced-ILD
 
 `hylo_mla_1B-enhanced-ild.yaml` follows Zebra-Llama's
@@ -167,6 +171,98 @@ HYLO_M2_UPCYCLED_CKPT=/path/to/all-m2-upcycled ./primus-cli direct -- train post
 
 The mixer needs `mamba-ssm`, uses `causal-conv1d` when it is installed, and
 supports training with TP=1 and CP=1 only.
+
+## Reproduce the reference stage-1 checkpoints
+
+The recipes above train on the public SFT set at 4K. The Zebra-Llama stage-1
+checkpoints were trained differently: TRL packed a 20% selection of
+`JunxiongWang/sftdatasetv3` into 2048-token windows, with attention across
+conversations and no padding, for one epoch of 6934 steps of 96 windows.
+`hylo_m2_1B-enhanced-ild-packed.yaml` and `hylo_mla_1B-enhanced-ild-packed.yaml`
+keep the model, teacher, and optimizer of the recipes above and train on that
+data and schedule through the pretrain data path. With them the trained students
+match the reference checkpoints; the numbers are in
+[hylo-native-training-changes.md](hylo-native-training-changes.md#what-was-run).
+
+1. Build the packed training and test text. Each conversation becomes one
+   document; `<out>-stats.json` records the counts, and the training split's
+   `trl_steps` is the reference's step count, 6934.
+
+   ```bash
+   python tools/hybrid/prepare_hylo_packed_data.py --split train --ratio 0.2 \
+     --tokenizer /path/to/Llama-3.2-1B-Instruct --out data/hylo/packed/train
+   python tools/hybrid/prepare_hylo_packed_data.py --split test \
+     --tokenizer /path/to/Llama-3.2-1B-Instruct --out data/hylo/packed/test
+   ```
+
+2. Build each upcycled init as in the sections above. For all-Mamba-2, also
+   rebuild the reference's random draw. The from-teacher init leaves the z and dt
+   rows of `in_proj`, the convolution, `A_log`, and `dt_bias` at random values,
+   and they barely move in Enhanced-ILD, so a run from another draw ends far from
+   the reference in every tensor that adapts to them. The reference drew them
+   with seed 42 on a GPU, and PyTorch's GPU generator orders its stream by the
+   compute-unit count of the GPU it runs on, so the draw depends on the GPU the
+   reference was initialized on. The scan finds that count on the CPU by
+   rebuilding the draw for each candidate count and matching it against the
+   reference's tensors; the writer then puts that draw into a copy of the
+   upcycled checkpoint:
+
+   ```bash
+   python tools/hybrid/scan_mamba2_reference_draw.py \
+     --reference /path/to/reference-m2/model.safetensors
+   python tools/hybrid/write_mamba2_reference_init.py \
+     --reference /path/to/reference-m2/model.safetensors \
+     --template /path/to/all-m2-upcycled --compute-units <count from the scan> \
+     --output-dir /path/to/all-m2-reference-init
+   ```
+
+   The all-MLA init is a deterministic factorization of the teacher and needs no
+   such step.
+
+3. Train each student on eight GPUs:
+
+   ```bash
+   export HYLO_PACKED_TRAIN_DATA="$PWD/data/hylo/packed/train"
+   export HYLO_LLAMA32_1B_MEGATRON_CKPT="$PWD/data/hylo/megatron/llama32-1b"
+   export HYLO_TOKENIZER_MODEL=/path/to/Llama-3.2-1B-Instruct
+   HYLO_M2_UPCYCLED_CKPT=/path/to/all-m2-reference-init HYLO_M2_ILD_OUTPUT=/path/to/m2-ild \
+     ./primus-cli direct -- train pretrain \
+     --config examples/megatron/configs/MI300X/hylo_m2_1B-enhanced-ild-packed.yaml
+   HYLO_MLA_UPCYCLED_CKPT=/path/to/all-mla-upcycled HYLO_MLA_ILD_OUTPUT=/path/to/mla-ild \
+     ./primus-cli direct -- train pretrain \
+     --config examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild-packed.yaml
+   ```
+
+4. Compare with the reference:
+
+   - Training loss: `summarize_hylo_ild_loss.py` reads the log of the rank that
+     prints iteration lines and reports 10-step means. The reference logs every
+     10 steps, so its final training loss is the last such mean.
+   - Test-split Enhanced-ILD: write the reference as a Megatron checkpoint, score
+     the init, the run's checkpoints, and the reference with
+     `run_hylo_ild_eval.sh` against the same teacher, and summarize the logs.
+     Each evaluation step scores two windows, so set `HYLO_EVAL_ITERS` to half the
+     test split's `windows` count (348 for the public test split).
+   - Weights: `compare_hylo_ild_to_reference.py` reports, per tensor group, the
+     cosine and relative distance to the reference, and the cosine and norm ratio
+     of the student's and the reference's updates from the init. Pass
+     `--shared-random-init` for an all-Mamba-2 run from the rebuilt draw, so the
+     random tensors are compared too.
+
+   ```bash
+   python tools/hybrid/summarize_hylo_ild_loss.py /path/to/m2-run/logs/<rank>/debug.log
+   python tools/hybrid/convert_hylo_reference_to_megatron.py --kind m2 \
+     --template /path/to/all-m2-reference-init \
+     --reference /path/to/reference-m2/model.safetensors --output-dir /path/to/reference-m2-megatron
+   tools/hybrid/run_hylo_ild_eval.sh m2 reference /path/to/reference-m2-megatron data/hylo/packed/test \
+     > eval-reference.log 2>&1
+   tools/hybrid/run_hylo_ild_eval.sh m2 final /path/to/m2-ild data/hylo/packed/test > eval-final.log 2>&1
+   python tools/hybrid/summarize_hylo_ild_eval.py final=eval-final.log reference=eval-reference.log
+   python tools/hybrid/compare_hylo_ild_to_reference.py --kind m2 --shared-random-init \
+     --ours /path/to/m2-ild --init /path/to/all-m2-reference-init \
+     --reference /path/to/reference-m2/model.safetensors \
+     --dense /path/to/Llama-3.2-1B-Instruct/model.safetensors
+   ```
 
 File-by-file notes for this change are in
 [hylo-native-training-changes.md](hylo-native-training-changes.md).

@@ -14,7 +14,7 @@ not vendored. Distillation is a Primus forward step behind
 
 | File | Why it is here |
 | --- | --- |
-| `primus/backends/megatron/training/hylo_distillation.py` | Frozen dense teacher, Enhanced-ILD, and masked chunked `KL(teacher \|\| student)`. Optional Hugging Face YaRN for the teacher. |
+| `primus/backends/megatron/training/hylo_distillation.py` | Frozen dense teacher, Enhanced-ILD (over real tokens only on the padded SFT path), and masked chunked `KL(teacher \|\| student)`. Optional Hugging Face YaRN for the teacher. |
 | `primus/backends/megatron/megatron_sft_trainer.py` | Enables that forward step for both training stages. |
 | `primus/backends/megatron/megatron_pretrain_trainer.py` | Same hook, used by the zero-learning-rate constructor. |
 | `primus/backends/megatron/argument_builder.py` | Keeps the `hylo_*` recipe fields (including `hylo_teacher_yarn_*` and `hylo_mla_kv_heads`), `hybrid_linear_type`, `mamba_expand`, and `mamba_d_xb` through Megatron argument merge, so they reach the saved checkpoint args the upcycler reads. |
@@ -31,11 +31,24 @@ not vendored. Distillation is a Primus forward step behind
 | `examples/megatron/configs/MI300X/hylo_gdn_1B-enhanced-ild.yaml` | All-GDN Enhanced-ILD. |
 | `examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild.yaml` | All-MLA Enhanced-ILD, from Zebra-Llama `zebra_MLA_ILD.yaml`. |
 | `examples/megatron/configs/MI300X/hylo_m2_1B-enhanced-ild.yaml` | All-Mamba-2 Enhanced-ILD, from Zebra-Llama `zebra_M2_ILD.yaml`. |
+| `examples/megatron/configs/MI300X/hylo_m2_1B-enhanced-ild-packed.yaml`, `hylo_mla_1B-enhanced-ild-packed.yaml` | The same students on the reference's packed 2048-token data and schedule, 6934 steps of 96 windows: the recipes that reproduce the reference stage-1 checkpoints. |
+| `examples/megatron/configs/MI300X/hylo_m2_1B-ild-eval.yaml`, `hylo_mla_1B-ild-eval.yaml` | Enhanced-ILD of fixed weights (learning rate 0) on the packed test split. |
 | `examples/megatron/configs/MI300X/hylo_4MLA12GDN_1B-8K-sft.yaml` | 8K pure-KL stage 2. |
 | `tools/hybrid/prepare_hylo_assets.py` | Downloads and converts the gated Llama teachers and exports the public SFT set. |
 | `tools/hybrid/assemble_hylo_ild.py` | Copies trained GDN and MLA blocks into the target layout. |
 | `tools/hybrid/run_hylo_1b_4mla12gdn.sh` | Constructor, upcycle, both ILD stages, assembly, then stage 2. |
-| `tests/unit_tests/backends/megatron/test_hylo_distillation.py` | Loss, mask, and argument checks; the ILD step's final-norm pair and per-micro-batch count; the teacher attention capture under an in-place residual add; teacher YaRN against Hugging Face (GPU). |
+| `tools/hybrid/prepare_hylo_packed_data.py` | The reference's training and test text as Megatron datasets: the 20% selection, the recipe's Llama-3 template, HumanEval decontamination, and TRL's tokenization. |
+| `primus/backends/megatron/checkpoint/philox_uniform.py` | NumPy model of PyTorch's GPU `uniform_` stream: Philox4x32-10 draws, ordered by the GPU's compute-unit count. |
+| `primus/backends/megatron/checkpoint/mamba2_reference_draw.py`, `tools/hybrid/scan_mamba2_reference_draw.py`, `tools/hybrid/write_mamba2_reference_init.py` | Find the compute-unit count that rebuilds a reference all-Mamba-2 student's random init, then write that init into an upcycled checkpoint. |
+| `primus/backends/megatron/checkpoint/hylo_reference_compare.py`, `tools/hybrid/compare_hylo_ild_to_reference.py`, `tools/hybrid/convert_hylo_reference_to_megatron.py` | Compare a student with its reference tensor by tensor; write the reference as a Megatron checkpoint for evaluation. |
+| `tools/hybrid/run_hylo_ild_eval.sh`, `tools/hybrid/summarize_hylo_ild_eval.py`, `tools/hybrid/summarize_hylo_ild_loss.py` | Test-split Enhanced-ILD of a checkpoint, and summaries of evaluation and training logs. |
+| `tests/unit_tests/backends/megatron/test_hylo_distillation.py` | Loss, mask, and argument checks; the ILD step's final-norm pair and per-micro-batch count; the real-token mask on the SFT path; the teacher attention capture under an in-place residual add; teacher YaRN against Hugging Face (GPU). |
+| `tests/unit_tests/backends/megatron/test_hylo_packed_recipes.py` | The packed recipes keep the SFT recipes' model, teacher, and optimizer on the reference's schedule. |
+| `tests/unit_tests/backends/megatron/test_philox_uniform.py` | Philox4x32-10 known answers, the kernel's element order and offsets, and the model against the local GPU's `uniform_` (GPU). |
+| `tests/unit_tests/backends/megatron/test_mamba2_reference_draw.py` | The scan recovers a planted compute-unit count; the writer replaces only the random tensors. |
+| `tests/unit_tests/backends/megatron/test_hylo_reference_compare.py` | Name mapping, the reference-to-Megatron round trip, comparison statistics, and MLA sign alignment. |
+| `tests/unit_tests/tools/test_prepare_hylo_packed_data.py` | Selection, decontamination, and TRL's sequence count. |
+| `tests/unit_tests/tools/test_hylo_ild_eval.py` | Evaluation and training-loss summaries, and the evaluation configs. |
 | `tests/unit_tests/backends/megatron/test_grouped_kv_mla.py` | Grouped MLA key/value heads against Llama's `repeat_kv`. |
 | `tests/unit_tests/backends/megatron/test_hybrid_upcycle.py` | Upcycle and assembly rules. |
 | `tests/unit_tests/backends/megatron/test_hybrid_upcycle_hylo_reference.py` | Exact match against HyLo `re_init_q`, `re_init_kv`, and `_copy_llama_attn_to_gdn`. |
@@ -48,7 +61,10 @@ not vendored. Distillation is a Primus forward step behind
 
 Enhanced-ILD sums per-layer hidden L2 and token-mixer-output L2, with the last
 layer compared after each model's final norm. Each micro-batch's loss counts
-once. During that stage each student mixer is forced to the matching teacher
+once. Each term is a mean over tokens: on the SFT path every sample is padded to
+`seq_length`, so the mean covers each sample's real tokens, the positions through
+its last supervised token; packed data has no padding and every position counts.
+During that stage each student mixer is forced to the matching teacher
 layer input. The teacher's mixer target is a copy of its self-attention output:
 in eval mode without grad, Megatron's bias-dropout-add adds the residual into
 that tensor in place, which would turn the target into the post-attention
@@ -70,7 +86,7 @@ These values follow `configs/llama3.2_1B/`:
 
 | | Enhanced-ILD | 8K stage 2 |
 | --- | --- | --- |
-| Context | 4096 | 8192 |
+| Context | 2048 in the packed recipes, as the reference; the SFT recipes use 4096 | 8192 |
 | Learning rate | 2e-4 | 6e-5 |
 | Warmup | 0.01 | 0.01 |
 | Schedule | cosine | cosine |
@@ -81,9 +97,10 @@ These values follow `configs/llama3.2_1B/`:
 | Save interval | 2000 | 1000 |
 
 The reference stage-1 configs also set `data_ratio: 0.2` and
-`num_train_epochs: 1`. The Primus recipes default to the full public dataset
+`num_train_epochs: 1`. The SFT recipes default to the full public dataset
 for `train_iters: 1000`, so they exercise the same objective without consuming
-one epoch of a 20% subset. Stage 2 in the reference is also one epoch, and its
+one epoch of a 20% subset. The packed recipes train on that subset, packed into
+2048-token windows, for its one epoch of 6934 steps. Stage 2 in the reference is also one epoch, and its
 released run used four AMD-preprocessed datasets that are not in the public
 repository. `sftdatasetv3` alone cannot reproduce those weights.
 
@@ -111,26 +128,33 @@ checked that every mixer/MLP pair came from the matching ILD checkpoint.
 These smokes predate the fix to the teacher's attention capture, so their
 mixer terms include the residual stream.
 
-In October 2026 the all-MLA and all-Mamba-2 Enhanced-ILD settings (model,
-teacher, and optimizer) ran the reference's full schedule, 6934 steps of 96
-sequences at its 2048-token context, on the reference's packed 20% selection.
-The final checkpoints were then scored next to the reference stage-1
-checkpoints on 348 held-out packed batches against the same teacher:
+In October 2026 the packed all-MLA and all-Mamba-2 recipes ran the reference's
+full schedule, 6934 steps of 96 sequences of 2048 tokens, on the reference's
+packed 20% selection. The final checkpoints were then scored next to the
+reference stage-1 checkpoints on 348 held-out packed batches against the same
+teacher:
 
 | Run | Enhanced-ILD, ours | Enhanced-ILD, reference | Weight updates against the reference's |
 | --- | --- | --- | --- |
-| all-MLA | 28.75 | 28.76 | cosine 0.996 to 0.999, norms within 0.3% |
+| all-MLA | 28.75 | 28.76 | cosine 0.996 to 0.999, norms within 0.3%, except the final norm |
 | all-Mamba-2, our random draw | 34.84 | 35.22 | MLP cosine 0.75 to 0.81, Mamba `in_proj` 0.01 to 0.17 |
-| all-Mamba-2, the reference's random draw | 35.25 | 35.22 | cosine 0.98 to 0.9995, norms within 1% |
+| all-Mamba-2, the reference's random draw | 35.25 | 35.22 | cosine 0.98 to 0.9995, norms within 1%, except the final norm and `dt_bias` |
+
+The exceptions move least, by under 1% of their size, so the direction of their
+update is mostly noise: the final norm's update has cosine 0.92 and norm ratio
+0.94 for all-MLA and 0.89 and 0.89 for all-Mamba-2, and the all-Mamba-2
+`dt_bias` update 0.96 and 0.96.
 
 The Mamba-2 convolution, `A_log`, `dt_bias`, and the z and dt rows of
 `in_proj` start from random values and barely move in training, so the rest of
 each run's mixer adapts to its own draw. The reference drew them with seed 42
-on the GPU while building each layer. PyTorch's GPU `uniform_` assigns its
-Philox stream to elements by the device's compute-unit count, and the
-reference's values match a 304-CU device (MI300X), not the 256-CU MI355X these
-runs used. Rebuilding those tensors for 304 compute units and running the same
-schedule from them reproduces the reference: the final weights of every
-tensor group have a median cosine of 0.994 or more with the reference's. The
-MLA init is a deterministic factorization of the teacher, so it needs no such
-step.
+on a GPU while building each layer. PyTorch's GPU `uniform_` assigns its
+Philox stream to elements by the GPU's compute-unit count, so the same seed
+gives other values on a GPU with another count, and these runs used a GPU whose
+count differs from the one the reference was initialized on.
+`scan_mamba2_reference_draw.py` finds that count by matching rebuilt tensors
+against the reference's, and `write_mamba2_reference_init.py` writes the
+rebuilt draw into the upcycled checkpoint. Running the same schedule from it
+reproduces the reference: the final weights of every tensor group have a median
+cosine of 0.993 or more with the reference's. The MLA init is a deterministic
+factorization of the teacher, so it needs no such step.

@@ -478,6 +478,8 @@ The script writes:
 | `$HYLO_OUTPUT_ROOT/stage2-init` | assembled MLA blocks 1, 5, 10, and 14 |
 | `$HYLO_OUTPUT_ROOT/amd/root/4mla12gdn-8k-sft/checkpoints` | final pure-KL student |
 
+To reproduce the Zebra-Llama stage-1 checkpoints themselves, train the all-Mamba-2 and all-MLA students on the reference's packed 2048-token data with `hylo_m2_1B-enhanced-ild-packed.yaml` and `hylo_mla_1B-enhanced-ild-packed.yaml`. [Reproduce the reference stage-1 checkpoints](hylo-native-training.md#reproduce-the-reference-stage-1-checkpoints) covers the data preparation, the all-Mamba-2 random init, and the evaluation and comparison tools.
+
 The artifact order is in [hylo-stage-workflow.md](hylo-stage-workflow.md). File-level notes are in [hylo-native-training-changes.md](hylo-native-training-changes.md).
 
 ---
