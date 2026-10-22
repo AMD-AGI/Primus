@@ -18,6 +18,7 @@ from primus.backends.megatron.checkpoint.hybrid_upcycle import (
     hybrid_pattern_from_ratio,
     hylo_reinit_kv,
     hylo_reinit_q,
+    layout_from_args,
     load_checkpoint,
     main,
     resolve_checkpoint_file,
@@ -221,10 +222,12 @@ def test_gdn_mixer_copies_hylo_qkv_slices():
     dense = _dense_state(num_layers=1, hidden=hidden, ffn=8, attn_out=1)
     dense["decoder.layers.0.self_attention.linear_qkv.weight"] = _fuse_qkv(q, k, v, heads, kv_heads, head_dim)
     dense["decoder.layers.0.self_attention.linear_proj.weight"] = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+    _fuse_input_norm(dense, 0)
 
     in_rows = key_dim * 2 + value_dim * 2 + value_heads * 2
     hybrid = _hybrid_state("M-", hidden=hidden, ffn=8)
     hybrid["decoder.layers.0.mixer.in_proj.weight"] = torch.full((in_rows, hidden), -1.0)
+    hybrid["decoder.layers.0.mixer.in_proj.layer_norm_weight"] = torch.ones(hidden)
     hybrid["decoder.layers.0.mixer.out_proj.weight"] = torch.zeros(hidden, value_dim)
     hybrid["decoder.layers.0.mixer.A_log"] = torch.full((2,), -2.0)
     layout = UpcycleLayout(
@@ -251,6 +254,74 @@ def test_gdn_mixer_copies_hylo_qkv_slices():
         upcycled["decoder.layers.0.mixer.out_proj.weight"],
         dense["decoder.layers.0.self_attention.linear_proj.weight"],
     )
+    assert torch.equal(
+        upcycled["decoder.layers.0.mixer.in_proj.layer_norm_weight"],
+        dense["decoder.layers.0.self_attention.linear_qkv.layer_norm_weight"],
+    )
+    assert report.mixer_layers_left_initialized == []
+
+
+def _fuse_input_norm(dense, index):
+    """Store the input norm the way a TE Llama checkpoint does, inside linear_qkv."""
+    prefix = f"decoder.layers.{index}"
+    norm = dense.pop(f"{prefix}.input_layernorm.weight")
+    dense[f"{prefix}.self_attention.linear_qkv.layer_norm_weight"] = norm + torch.arange(norm.numel()) + 2.0
+
+
+def test_mamba2_mixer_copies_hylo_kqvo_rows():
+    hidden, heads, kv_heads, head_dim = 4, 2, 1, 2
+    d_inner, d_xb, nheads = heads * head_dim, kv_heads * head_dim, heads
+    q = torch.arange(d_inner * hidden, dtype=torch.float32).reshape(d_inner, hidden)
+    k = torch.arange(d_xb * hidden, dtype=torch.float32).reshape(d_xb, hidden) + 100
+    v = torch.arange(d_xb * hidden, dtype=torch.float32).reshape(d_xb, hidden) + 200
+    dense = _dense_state(num_layers=1, hidden=hidden, ffn=8, attn_out=1)
+    dense["decoder.layers.0.self_attention.linear_qkv.weight"] = _fuse_qkv(q, k, v, heads, kv_heads, head_dim)
+    dense["decoder.layers.0.self_attention.linear_proj.weight"] = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+    _fuse_input_norm(dense, 0)
+
+    in_rows = 2 * d_inner + 2 * d_xb + nheads
+    hybrid = _hybrid_state("M-", hidden=hidden, ffn=8)
+    hybrid["decoder.layers.0.mixer.in_proj.weight"] = torch.full((in_rows, hidden), -1.0)
+    hybrid["decoder.layers.0.mixer.in_proj.layer_norm_weight"] = torch.ones(hidden)
+    hybrid["decoder.layers.0.mixer.out_proj.weight"] = torch.zeros(hidden, d_inner)
+    # Megatron gives every checkpoint non-null GDN head counts, so only
+    # hybrid_linear_type tells the two layouts apart.
+    layout = layout_from_args(
+        Namespace(
+            num_attention_heads=heads, num_query_groups=kv_heads, hidden_size=hidden, kv_channels=head_dim
+        ),
+        Namespace(
+            hybrid_linear_type="mamba",
+            linear_num_key_heads=16,
+            mamba_expand=1,
+            mamba_d_xb=d_xb,
+            mamba_head_dim=head_dim,
+        ),
+    )
+    assert (layout.linear_type, layout.mamba_d_inner, layout.mamba_d_xb, layout.mamba_nheads) == (
+        "mamba",
+        d_inner,
+        d_xb,
+        nheads,
+    )
+
+    upcycled, report = upcycle_state_dict(dense, hybrid, "M-", layout)
+    rows = upcycled["decoder.layers.0.mixer.in_proj.weight"]
+    init = hybrid["decoder.layers.0.mixer.in_proj.weight"]
+    assert torch.equal(rows[:d_inner], init[:d_inner])
+    assert torch.equal(rows[d_inner : d_inner + d_xb], v)
+    assert torch.equal(rows[d_inner + d_xb : d_inner + 2 * d_xb], k)
+    assert torch.equal(rows[d_inner + 2 * d_xb : 2 * d_inner + 2 * d_xb], q)
+    assert torch.equal(rows[2 * d_inner + 2 * d_xb :], init[2 * d_inner + 2 * d_xb :])
+    assert torch.equal(
+        upcycled["decoder.layers.0.mixer.in_proj.layer_norm_weight"],
+        dense["decoder.layers.0.self_attention.linear_qkv.layer_norm_weight"],
+    )
+    assert torch.equal(
+        upcycled["decoder.layers.0.mixer.out_proj.weight"],
+        dense["decoder.layers.0.self_attention.linear_proj.weight"],
+    )
+    assert torch.equal(upcycled["decoder.layers.0.mixer.A_log"], hybrid["decoder.layers.0.mixer.A_log"])
     assert report.mixer_layers_left_initialized == []
 
 

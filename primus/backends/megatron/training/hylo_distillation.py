@@ -98,11 +98,19 @@ class _Capture:
     layer_inputs: list[torch.Tensor] = field(default_factory=list)
     hidden: list[torch.Tensor] = field(default_factory=list)
     mixer: list[torch.Tensor] = field(default_factory=list)
+    final: list[torch.Tensor] = field(default_factory=list)
 
     def clear(self) -> None:
         self.layer_inputs.clear()
         self.hidden.clear()
         self.mixer.clear()
+        self.final.clear()
+
+    def ild_hidden(self) -> list[torch.Tensor]:
+        """Layer outputs, the last after the final norm, like Hugging Face ``hidden_states[1:]``."""
+        if not self.final:
+            return list(self.hidden)
+        return [*self.hidden[:-1], self.final[-1]]
 
 
 class HyLoRuntime:
@@ -118,8 +126,9 @@ class HyLoRuntime:
         self._install_teacher_hooks()
 
     def _install_teacher_hooks(self) -> None:
-        layers = list(_unwrap(self.teacher).decoder.layers)
-        for layer in layers:
+        decoder = _unwrap(self.teacher).decoder
+        self._hook_final(getattr(decoder, "final_layernorm", None), self.teacher_capture)
+        for layer in decoder.layers:
             self._handles.append(
                 layer.register_forward_pre_hook(
                     lambda _m, args, kwargs, cap=self.teacher_capture: self._capture_input(cap, args, kwargs),
@@ -131,9 +140,11 @@ class HyLoRuntime:
                     lambda _m, _args, out, cap=self.teacher_capture: cap.hidden.append(_tensor(out))
                 )
             )
+            # Without grad and in eval mode, Megatron's bias-dropout-add adds the residual into
+            # the attention output in place, so keep a copy of the attention output alone.
             self._handles.append(
                 layer.self_attention.register_forward_hook(
-                    lambda _m, _args, out, cap=self.teacher_capture: cap.mixer.append(_tensor(out))
+                    lambda _m, _args, out, cap=self.teacher_capture: cap.mixer.append(_tensor(out).clone())
                 )
             )
 
@@ -144,12 +155,33 @@ class HyLoRuntime:
             cap.layer_inputs.append(value)
         return args, kwargs
 
+    def _hook_final(self, norm: Optional[torch.nn.Module], cap: _Capture) -> None:
+        if norm is not None:
+            self._handles.append(
+                norm.register_forward_hook(lambda _m, _args, out: cap.final.append(_tensor(out)))
+            )
+
+    def ild_captures(self) -> tuple[list, list, list, list]:
+        """``enhanced_ild_loss`` arguments: student and teacher hidden, then mixer outputs."""
+        if bool(self.student_capture.final) != bool(self.teacher_capture.final):
+            raise RuntimeError(
+                "Enhanced-ILD needs the final norm output of both models or neither, got "
+                f"student={len(self.student_capture.final)}, teacher={len(self.teacher_capture.final)}"
+            )
+        return (
+            self.student_capture.ild_hidden(),
+            self.teacher_capture.ild_hidden(),
+            self.student_capture.mixer,
+            self.teacher_capture.mixer,
+        )
+
     def install_student_hooks(self, model: torch.nn.Module) -> None:
         base = _unwrap(model)
         if id(base) in self._student_hooked:
             return
         self._student_hooked.add(id(base))
         stack = base.decoder
+        self._hook_final(getattr(stack, "final_norm", None), self.student_capture)
         mixer_slots = []
         mlp_slots = []
         for idx, (symbol, layer) in enumerate(zip(stack.layer_type_list, stack.layers)):
@@ -242,6 +274,21 @@ def _load_teacher_state(teacher: torch.nn.Module, envelope: dict) -> None:
         )
 
 
+def set_teacher_yarn(config: Any, factor: float, original_max_position_embeddings: int) -> None:
+    """Hugging Face ``rope_type: yarn``, which HyLo's ``train_distill.py`` gives the teacher.
+
+    With ``yarn_mscale`` 1 and ``yarn_mscale_all_dim`` 0, Megatron's attention
+    scales cos and sin by ``0.1 * ln(factor) + 1``, Hugging Face's attention factor.
+    """
+    config.yarn_rotary_scaling_factor = factor
+    config.yarn_original_max_position_embeddings = original_max_position_embeddings
+    config.yarn_beta_fast = 32.0
+    config.yarn_beta_slow = 1.0
+    config.yarn_mscale = 1.0
+    config.yarn_mscale_all_dim = 0.0
+    config.yarn_correction_range_round_to_int = True
+
+
 def _build_teacher(args, pre_process, post_process, config, pg_collection):
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
@@ -260,6 +307,18 @@ def _build_teacher(args, pre_process, post_process, config, pg_collection):
             f"recipe requests {requested_layers}"
         )
     teacher_config.multi_latent_attention = False
+    rope_scaling = getattr(args, "hylo_teacher_use_rope_scaling", None)
+    if rope_scaling is None:
+        rope_scaling = teacher_args.use_rope_scaling
+    position_embedding_type = teacher_args.position_embedding_type
+    yarn_factor = getattr(args, "hylo_teacher_yarn_factor", None)
+    if yarn_factor is not None:
+        set_teacher_yarn(
+            teacher_config,
+            float(yarn_factor),
+            int(args.hylo_teacher_yarn_original_max_position_embeddings),
+        )
+        position_embedding_type, rope_scaling = "yarn", False
     spec = get_gpt_layer_with_transformer_engine_spec(
         num_experts=None,
         moe_grouped_gemm=False,
@@ -276,10 +335,10 @@ def _build_teacher(args, pre_process, post_process, config, pg_collection):
         fp16_lm_cross_entropy=teacher_args.fp16_lm_cross_entropy,
         parallel_output=False,
         share_embeddings_and_output_weights=not teacher_args.untie_embeddings_and_output_weights,
-        position_embedding_type=teacher_args.position_embedding_type,
+        position_embedding_type=position_embedding_type,
         rotary_percent=teacher_args.rotary_percent,
         rotary_base=teacher_args.rotary_base,
-        rope_scaling=teacher_args.use_rope_scaling,
+        rope_scaling=bool(rope_scaling),
         rope_scaling_factor=getattr(teacher_args, "rope_scaling_factor", 8.0),
         pg_collection=pg_collection,
     )
@@ -328,6 +387,10 @@ def validate_hylo_args(args: Any) -> None:
         raise ValueError("hylo_distill_stage must be 'ild' or 'sft'")
     if not getattr(args, "hylo_teacher_checkpoint", None):
         raise ValueError("hylo_teacher_checkpoint is required")
+    if getattr(args, "hylo_teacher_yarn_factor", None) is not None and not getattr(
+        args, "hylo_teacher_yarn_original_max_position_embeddings", None
+    ):
+        raise ValueError("hylo_teacher_yarn_factor needs hylo_teacher_yarn_original_max_position_embeddings")
     if stage == "sft" and float(getattr(args, "hylo_ce_weight", 0.0)) != 0.0:
         raise ValueError("the native 4MLA12GDN recipe requires hylo_ce_weight=0")
 
@@ -337,6 +400,12 @@ def _log_loss(metrics: dict[str, torch.Tensor]) -> None:
 
     parts = ", ".join(f"{name}={value.detach().float().item():.6f}" for name, value in metrics.items())
     log_rank_0(f"[HyLo] {parts}")
+
+
+def _ild_count(loss: torch.Tensor) -> torch.Tensor:
+    # Enhanced-ILD is already a per-token mean, and Megatron divides each
+    # micro-batch loss by this count, so one micro-batch counts once.
+    return torch.ones((), dtype=torch.int, device=loss.device)
 
 
 def _loss_result(loss: torch.Tensor, tokens: torch.Tensor, metrics: dict[str, torch.Tensor]):
@@ -365,14 +434,8 @@ def create_pretrain_forward_step():
 
         def loss_func(_output):
             if _RUNTIME.stage == "ild":
-                loss, parts = enhanced_ild_loss(
-                    _RUNTIME.student_capture.hidden,
-                    _RUNTIME.teacher_capture.hidden,
-                    _RUNTIME.student_capture.mixer,
-                    _RUNTIME.teacher_capture.mixer,
-                )
-                tokens_count = loss_mask.sum().detach().to(torch.int)
-                return _loss_result(loss, tokens_count, {"hylo ild": loss.detach(), **parts})
+                loss, parts = enhanced_ild_loss(*_RUNTIME.ild_captures())
+                return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
             loss, tokens_count = masked_chunked_kl(
                 student_logits, teacher_logits.detach(), loss_mask,
                 chunk_size=int(getattr(get_args(), "hylo_kl_chunk_size", _KL_CHUNK)),
@@ -416,17 +479,11 @@ def create_sft_forward_step():
         student_logits = model(tokens, position_ids, None, labels=None)
 
         def loss_func(_output):
+            if _RUNTIME.stage == "ild":
+                loss, parts = enhanced_ild_loss(*_RUNTIME.ild_captures())
+                return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
             from megatron.training import get_args
 
-            if _RUNTIME.stage == "ild":
-                loss, parts = enhanced_ild_loss(
-                    _RUNTIME.student_capture.hidden,
-                    _RUNTIME.teacher_capture.hidden,
-                    _RUNTIME.student_capture.mixer,
-                    _RUNTIME.teacher_capture.mixer,
-                )
-                count = loss_mask.sum().detach().to(torch.int)
-                return _loss_result(loss, count, {"hylo ild": loss.detach(), **parts})
             loss, count = masked_chunked_kl(
                 student_logits,
                 teacher_logits.detach(),

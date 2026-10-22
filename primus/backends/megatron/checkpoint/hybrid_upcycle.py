@@ -60,6 +60,12 @@ _ATTN_NORM_ALIASES = (
     ("input_layernorm.weight", "self_attention.linear_qkv.layer_norm_weight"),
     ("input_layernorm.bias", "self_attention.linear_qkv.layer_norm_bias"),
 )
+# A recurrent mixer's fused input norm takes the dense attention input norm,
+# which a TE Llama checkpoint stores inside linear_qkv.
+_MIXER_NORM_ALIASES = (
+    ("mixer.in_proj.layer_norm_weight", "input_layernorm.weight"),
+    ("mixer.in_proj.layer_norm_weight", "self_attention.linear_qkv.layer_norm_weight"),
+)
 _FINAL_NORM_ALIASES = (
     "decoder.final_norm.weight",
     "decoder.final_layernorm.weight",
@@ -737,13 +743,7 @@ def _copy_gdn_hylo(
     if partial:
         report.hylo_partial.append(in_proj_key)
     _copy_norm_alias(
-        dense,
-        hybrid,
-        source,
-        target,
-        "mixer.in_proj.layer_norm_weight",
-        (("mixer.in_proj.layer_norm_weight", "input_layernorm.weight"),),
-        report,
+        dense, hybrid, source, target, "mixer.in_proj.layer_norm_weight", _MIXER_NORM_ALIASES, report
     )
     if "mixer.out_proj.weight" in target:
         dense_proj = _dense_proj_key(source)
@@ -763,9 +763,10 @@ def _copy_mamba_hylo(
     """Port of HyLo's Mamba ``init_with_kqvo`` slice copy.
 
     HyLo writes V into ``x``, K into ``B``, and Q into ``C`` of an ``in_proj``
-    whose width is ``2 * d_inner + 2 * d_xb + nheads``. Primus Mamba2 checkpoints
-    use that width only when ``d_xb == d_inner == n_groups * d_state``. Any other
-    width is left untouched.
+    whose width is ``2 * d_inner + 2 * d_xb + nheads``, and copies ``o_proj``
+    and the attention input norm. ``Mamba2DxbMixer`` has that width; Megatron's
+    ``MambaMixer`` has it only when ``d_xb == d_inner == n_groups * d_state``.
+    Any other width is left untouched.
     """
     if layout.mamba_d_inner is None or layout.mamba_d_xb is None or layout.mamba_nheads is None:
         return False
@@ -785,6 +786,9 @@ def _copy_mamba_hylo(
     report.copied.append(in_proj_key)
     if partial:
         report.hylo_partial.append(in_proj_key)
+    _copy_norm_alias(
+        dense, hybrid, source, target, "mixer.in_proj.layer_norm_weight", _MIXER_NORM_ALIASES, report
+    )
     if "mixer.out_proj.weight" in target:
         dense_proj = _dense_proj_key(source)
         if dense_proj is not None and _same_shape(dense[dense_proj], hybrid[target["mixer.out_proj.weight"]]):

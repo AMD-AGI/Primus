@@ -3,6 +3,8 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:hylo-mla-1b-enhanced-ild}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# Zebra-Llama configs/llama3.2_1B/zebra_MLA_ILD.yaml (AMD-Hybrid-Models, feat/HyLo)
+# at 4K context instead of the reference's 2K.
 modules:
   post_trainer:
     framework: megatron
@@ -10,13 +12,18 @@ modules:
     model: hylo_gdn_1B_hybrid.yaml
     overrides:
       stage: sft
-      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hylo_gdn_hybrid_stack_spec']
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hylo_grouped_mla_hybrid_stack_spec']
       hybrid_attention_ratio: 1.0
       hybrid_override_pattern: "*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-"
+      # use_full_kv_head: false keeps Llama's 8 key/value heads.
+      hylo_mla_kv_heads: 8
 
       hylo_distill_stage: ild
       hylo_teacher_checkpoint: ${HYLO_LLAMA32_1B_MEGATRON_CKPT:./data/checkpoints/llama32-1b-megatron}
       hylo_teacher_num_layers: 16
+      # Zebra-Llama's train_distill.py builds the teacher from its own config, so the
+      # teacher keeps Llama-3's rope scaling while the student runs YaRN.
+      hylo_teacher_use_rope_scaling: true
       hylo_kl_weight: 1.0
       hylo_ce_weight: 0.0
 
@@ -45,6 +52,15 @@ modules:
       lr_decay_style: cosine
       lr_warmup_iters: 0
       lr_warmup_fraction: 0.01
+
+      # Hugging Face Trainer values used by the reference, in place of the
+      # SFT trainer's seed 1234, weight decay 0.1, and beta2 0.95.
+      seed: 42
+      weight_decay: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+      clip_grad: 1.0
 
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1

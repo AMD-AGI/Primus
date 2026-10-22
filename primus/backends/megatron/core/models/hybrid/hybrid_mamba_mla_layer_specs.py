@@ -27,6 +27,9 @@ from primus.backends.megatron.core.models.hybrid.gated_delta_net_layer import (
     GatedDeltaNetLayer,
     GatedDeltaNetLayerSubmodules,
 )
+from primus.backends.megatron.core.models.hybrid.grouped_kv_mla import (
+    GroupedKVUpProjection,
+)
 from primus.backends.megatron.core.models.hybrid.hybrid_block import (
     HybridStack,
     HybridStackSubmodules,
@@ -38,6 +41,10 @@ from primus.backends.megatron.core.models.hybrid.kimi_delta_attention import (
 from primus.backends.megatron.core.models.hybrid.kimi_delta_attention_layer import (
     KimiDeltaAttentionLayer,
     KimiDeltaAttentionLayerSubmodules,
+)
+from primus.backends.megatron.core.models.hybrid.mamba2_dxb_mixer import (
+    Mamba2DxbMixer,
+    Mamba2DxbMixerSubmodules,
 )
 from primus.backends.megatron.core.models.hybrid.mamba_layer_adapter import (
     Mamba2HybridLayer,
@@ -298,6 +305,65 @@ hylo_gdn_hybrid_stack_spec = ModuleSpec(
                 mlp_bda=get_bias_dropout_add,
             ),
         ),
+        moe_layer=moe,
+    ),
+)
+
+
+# Zebra-Llama's all-Mamba-2 stage-1 layout: MambaInLlama's grouped Mamba-2 in
+# the recurrent slot, with the attention and MLP layers of the HyLo GDN spec.
+hylo_m2_hybrid_stack_spec = ModuleSpec(
+    module=HybridStack,
+    submodules=HybridStackSubmodules(
+        mamba_layer=ModuleSpec(
+            module=MambaLayer,
+            submodules=MambaLayerSubmodules(
+                mixer=ModuleSpec(
+                    module=Mamba2DxbMixer,
+                    submodules=Mamba2DxbMixerSubmodules(
+                        in_proj=TELayerNormColumnParallelLinear,
+                        out_proj=TERowParallelLinear,
+                    ),
+                ),
+                mamba_bda=get_bias_dropout_add,
+            ),
+        ),
+        attention_layer=hylo_gdn_hybrid_stack_spec.submodules.attention_layer,
+        mlp_layer=hylo_gdn_hybrid_stack_spec.submodules.mlp_layer,
+        moe_layer=moe,
+    ),
+)
+
+
+# The HyLo GDN spec with Zebra-Llama's MLA, which keeps the teacher's
+# hylo_mla_kv_heads key/value heads (use_full_kv_head: false).
+hylo_grouped_mla_hybrid_stack_spec = ModuleSpec(
+    module=HybridStack,
+    submodules=HybridStackSubmodules(
+        mamba_layer=hylo_gdn_hybrid_stack_spec.submodules.mamba_layer,
+        attention_layer=ModuleSpec(
+            module=TransformerLayer,
+            submodules=TransformerLayerSubmodules(
+                input_layernorm=TENorm,
+                self_attention=ModuleSpec(
+                    module=MLASelfAttention,
+                    params={"attn_mask_type": AttnMaskType.causal},
+                    submodules=MLASelfAttentionSubmodules(
+                        linear_q_proj=TEColumnParallelLinear,
+                        linear_q_down_proj=TELinear,
+                        linear_q_up_proj=TEColumnParallelLinear,
+                        linear_kv_down_proj=TELinear,
+                        linear_kv_up_proj=GroupedKVUpProjection,
+                        core_attention=_MLA_CORE_ATTENTION,
+                        linear_proj=TERowParallelLinear,
+                        q_layernorm=IdentityOp,
+                        kv_layernorm=IdentityOp,
+                    ),
+                ),
+                self_attn_bda=get_bias_dropout_add,
+            ),
+        ),
+        mlp_layer=hylo_gdn_hybrid_stack_spec.submodules.mlp_layer,
         moe_layer=moe,
     ),
 )

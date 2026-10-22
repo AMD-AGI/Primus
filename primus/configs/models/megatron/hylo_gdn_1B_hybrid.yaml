@@ -45,4 +45,10 @@ use_rotary_position_embeddings: false
 max_position_embeddings: 131072
 original_max_position_embeddings: 2048
 rotary_scaling_factor: 4.0
+# HyLo's MLA rope_scaling sets no mscale_all_dim: the softmax scale stays
+# 1/sqrt(q_head_dim) and YaRN scales cos and sin by 0.1 * ln(factor) + 1.
+# language_model.yaml's mscale_all_dim 1.0 would move that factor, squared,
+# onto every query-key product.
+mscale: 1.0
+mscale_all_dim: 0.0
 norm_epsilon: 1.0e-5
