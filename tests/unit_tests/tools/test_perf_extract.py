@@ -668,6 +668,313 @@ def test_primus_patch_lines_and_benign_exceptions_are_not_the_cause(tmp_path):
     assert result["version_warnings"] == []
 
 
+def primus_record(level: str, where: str, message: str) -> str:
+    """A record of Primus's console logger, colour codes included: a multi-line
+    message runs on unprefixed lines up to the reset."""
+    return (
+        f"[\x1b[32m20261021 05:06:54\x1b[0m][\x1b[36mrank-0/8\x1b[0m]\x1b[1m{f'[{level}]':<11}\x1b[0m"
+        f"\x1b[1m[-------{where}] : {message}\x1b[0m\n"
+    )
+
+
+# Trimmed from a v26.9 rc1 Megatron-Bridge failure: a patch skipped for a
+# missing dependency logs an ImportError traceback first; the run then stops
+# on a bare AssertionError, which Primus wraps and torchrun summarizes.
+RC1_BRIDGE_FAILURE = (
+    primus_record(
+        "ERROR",
+        "patch_runner.py:132",
+        "[Patch] ✗ Patch 'megatron.turbo.te_spec_provider' failed due to missing dependency: "
+        "cannot import name 'TEGroupedMLPSubmodules' from 'megatron.core.transformer.moe.experts'\n"
+        "Traceback (most recent call last):\n"
+        '  File "/primus/core/patches/patch_runner.py", line 127, in run_patches\n'
+        "    patch.apply(ctx)\n"
+        "ImportError: cannot import name 'TEGroupedMLPSubmodules' from 'megatron.core.transformer.moe.experts'\n",
+    )
+    + primus_record("INFO", "train_runtime.py:559", "Python GC re-enabled after training")
+    + primus_record("ERROR", "traceback.py:1050", "Traceback (most recent call last):\n")
+    + primus_record(
+        "ERROR",
+        "traceback.py:1050",
+        '  File "/primus/core/runtime/train_runtime.py", line 108, in run_train_module\n'
+        "    self._initialize_backend_and_execute()\n",
+    )
+    + primus_record(
+        "ERROR",
+        "traceback.py:1050",
+        '  File "/Megatron-LM/megatron/core/optimizer_param_scheduler.py", line 74, in __init__\n'
+        "    assert self.lr_warmup_steps < self.lr_decay_steps\n"
+        "           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n",
+    )
+    + primus_record("ERROR", "traceback.py:1050", "AssertionError\n")
+    + primus_record(
+        "ERROR",
+        "traceback.py:1050",
+        "\nThe above exception was the direct cause of the following exception:\n\n",
+    )
+    + primus_record("ERROR", "traceback.py:1050", "Traceback (most recent call last):\n")
+    + primus_record(
+        "ERROR",
+        "traceback.py:1050",
+        '  File "/primus/core/runtime/train_runtime.py", line 121, in run_train_module\n'
+        '    raise RuntimeError(f"Training execution failed: {e}") from e\n',
+    )
+    + primus_record("ERROR", "traceback.py:1050", "RuntimeError: Training execution failed: \n")
+    + primus_record(
+        "ERROR",
+        "__main__.py:220",
+        "[Primus] Error: RuntimeError: Training execution failed:  (/primus/core/runtime/train_runtime.py:121)",
+    )
+    + "E1021 05:06:59.430000 1586 torch/distributed/elastic/multiprocessing/api.py:1007] failed (exitcode: 1) "
+    "local_rank: 5 (pid: 1758) of binary: /opt/venv/bin/python3\n"
+    "Traceback (most recent call last):\n"
+    '  File "/opt/venv/bin/torchrun", line 10, in <module>\n'
+    "    sys.exit(main())\n"
+    "torch.distributed.elastic.multiprocessing.errors.ChildFailedError: \n"
+    "============================================================\n"
+    "primus/cli/main.py FAILED\n"
+    "[2026-10-21 05:06:59] [NODE-0(node)] [ERROR] [direct] torchrun exited with code 1\n"
+)
+
+
+@pytest.mark.parametrize("colored", [True, False], ids=["colored", "no-colors"])
+def test_the_exception_that_stopped_the_run_is_the_detail(tmp_path, colored):
+    body = RC1_BRIDGE_FAILURE if colored else extract.strip_ansi(RC1_BRIDGE_FAILURE)
+    result = extract.parse_log_file(
+        str(write_log(tmp_path, body, exit_code=1, failure_reason="exit: launcher exited with code 1"))
+    )
+    assert (result["status"], result["failure_reason"]) == ("failed", "python_error")
+    assert result["failure_detail"] == (
+        "AssertionError: assert self.lr_warmup_steps < self.lr_decay_steps (optimizer_param_scheduler.py:74)"
+    )
+    assert result["failed_at"] == "setup"
+
+
+def _traceback(*frames_then_exception: str) -> str:
+    *frames, exception = frames_then_exception
+    lines = ["Traceback (most recent call last):"]
+    for frame in frames:
+        lines += [f'  File "/src/{frame}.py", line 7, in {frame}', f"    {frame}()"]
+    return "\n".join(lines + [exception]) + "\n"
+
+
+CAUSE = "\nThe above exception was the direct cause of the following exception:\n\n"
+CONTEXT = "\nDuring handling of the above exception, another exception occurred:\n\n"
+
+
+@pytest.mark.parametrize(
+    "body,reason,detail",
+    [
+        pytest.param(
+            _traceback("load", "KeyError: 'lr'")
+            + CAUSE
+            + _traceback("setup", "ValueError: the config has no lr"),
+            "python_error",
+            "KeyError: 'lr'",
+            id="raise-from-goes-to-the-cause",
+        ),
+        pytest.param(
+            _traceback("load", "KeyError: 'lr'")
+            + CONTEXT
+            + _traceback("setup", "ValueError: the config has no lr"),
+            "python_error",
+            "ValueError: the config has no lr",
+            id="an-error-while-handling-one-is-the-new-error",
+        ),
+        pytest.param(
+            _traceback("probe", "ImportError: optional apex")
+            + "training...\n"
+            + _traceback("step", "ValueError: bad"),
+            "python_error",
+            "ValueError: bad",
+            id="a-logged-traceback-before-the-fatal-one",
+        ),
+        pytest.param(
+            _traceback("step", "torch.distributed.DistBackendError: NCCL error in: ProcessGroupNCCL.cpp:1234")
+            + CAUSE
+            + _traceback(
+                "train", "RuntimeError: Training execution failed: NCCL error in: ProcessGroupNCCL.cpp:1234"
+            ),
+            "nccl_error",
+            "torch.distributed.DistBackendError: NCCL error in: ProcessGroupNCCL.cpp:1234",
+            id="an-nccl-root-cause",
+        ),
+        pytest.param(
+            _traceback("step", "ValueError: bad") + _traceback("main", "ChildFailedError: "),
+            "python_error",
+            "ValueError: bad",
+            id="torchrun-summary-is-not-the-cause",
+        ),
+        pytest.param(
+            "".join(f"[rank3]: {line}\n" for line in _traceback("step", "ValueError: bad").splitlines()),
+            "python_error",
+            "ValueError: bad",
+            id="torch-rank-prefix",
+        ),
+        pytest.param(
+            _traceback("load", "KeyError: 'lr'\nsee the recipe's optimizer section")
+            + CAUSE
+            + _traceback("setup", "ValueError: the config has no lr"),
+            "python_error",
+            "KeyError: 'lr'",
+            id="multi-line-message-before-the-link",
+        ),
+        pytest.param(
+            "Root Cause (first observed failure):\n[0]:\n  rank      : 5 (local_rank: 5)\n"
+            "  traceback : Traceback (most recent call last):\n"
+            '    File "/src/sched.py", line 74, in __init__\n'
+            "      assert self.lr_warmup_steps < self.lr_decay_steps\n"
+            "  AssertionError\n"
+            "============================================================\n",
+            "python_error",
+            "AssertionError: assert self.lr_warmup_steps < self.lr_decay_steps (sched.py:74)",
+            id="torchrun-summary-with-an-error-file",
+        ),
+    ],
+)
+def test_traceback_chains(tmp_path, body, reason, detail):
+    result = extract.parse_log_file(str(write_log(tmp_path, body, exit_code=1)))
+    assert (result["failure_reason"], result["failure_detail"]) == (reason, detail)
+
+
+def test_another_ranks_lines_inside_a_traceback_are_skipped(tmp_path):
+    body = (
+        primus_record("ERROR", "traceback.py:1050", "Traceback (most recent call last):\n")
+        + primus_record("ERROR", "traceback.py:1050", '  File "/src/a.py", line 3, in f\n    g()\n')
+        + primus_record("INFO", "training.py:9", "iteration 3/20").replace("rank-0/8", "rank-7/8")
+        + "W1021 05:06:58.801000 1586 torch/distributed/elastic/multiprocessing/api.py:1033] Sending process 17 closing signal SIGTERM\n"
+        + primus_record("ERROR", "traceback.py:1050", "ValueError: bad shard\n")
+        + primus_record("ERROR", "__main__.py:220", "[Primus] Error: ValueError: bad shard (/src/a.py:3)")
+    )
+    result = extract.parse_log_file(str(write_log(tmp_path, body, exit_code=1)))
+    assert (result["failure_reason"], result["failure_detail"]) == ("python_error", "ValueError: bad shard")
+
+
+def test_an_uncoloured_patch_message_does_not_hide_what_follows(tmp_path):
+    body = extract.strip_ansi(
+        primus_record("INFO", "patch_runner.py:126", "[Patch] Applying maxdiffusion.te_preload: preload TF")
+    ) + ("Fatal Python error: Segmentation fault\n" + _traceback("load", "RuntimeError: died"))
+    result = extract.parse_log_file(str(write_log(tmp_path, body, exit_code=139)))
+    assert result["failure_reason"] == "segfault"
+
+
+def test_a_loguru_traceback_is_read(tmp_path):
+    body = (
+        "Traceback (most recent call last):\n"
+        '> File "/src/train.py", line 12, in <module>\n'
+        "    main()\n"
+        '  File "/src/train.py", line 9, in main\n'
+        "    step()\n"
+        "ValueError: loss is NaN\n"
+    )
+    result = extract.parse_log_file(
+        str(write_log(tmp_path, "ModuleNotFoundError: No module named 'apex'\n" + body, exit_code=1))
+    )
+    assert (result["failure_reason"], result["failure_detail"]) == ("python_error", "ValueError: loss is NaN")
+
+
+def test_nccl_text_still_beats_a_generic_exception(tmp_path):
+    body = "[Rank 0] Watchdog caught collective operation timeout: WorkNCCL(OpType=ALLREDUCE)\n" + _traceback(
+        "step", "RuntimeError: Rank 0 received an exception from rank 7"
+    )
+    result = extract.parse_log_file(str(write_log(tmp_path, body, exit_code=1)))
+    assert result["failure_reason"] == "nccl_error"
+    assert result["failure_detail"].startswith("Watchdog caught collective operation timeout")
+
+
+def test_a_bare_exception_other_than_assert_gets_its_location_only(tmp_path):
+    result = extract.parse_log_file(
+        str(write_log(tmp_path, _traceback("next_batch", "StopIteration"), exit_code=1))
+    )
+    assert result["failure_detail"] == "StopIteration (next_batch.py:7)"
+
+
+@pytest.mark.parametrize("colored", [True, False], ids=["colored", "no-colors"])
+def test_a_patch_messages_chained_traceback_is_noise_too(tmp_path, colored):
+    patch = primus_record(
+        "ERROR",
+        "patch_runner.py:132",
+        "[Patch] ✗ Patch 'x' failed due to missing dependency: need triton\n"
+        + _traceback("probe", "ModuleNotFoundError: No module named 'triton'")
+        + CAUSE
+        + _traceback("patch", "ImportError: need triton"),
+    )
+    body = (patch if colored else extract.strip_ansi(patch)) + _traceback("step", "ValueError: bad shard")
+    result = extract.parse_log_file(str(write_log(tmp_path, body, exit_code=1)))
+    assert result["failure_detail"] == "ValueError: bad shard"
+
+
+def test_a_link_line_only_joins_the_traceback_right_after_it(tmp_path):
+    body = (
+        _traceback("probe", "ValueError: caught and logged")
+        + CAUSE
+        + "training resumed\n"
+        + _traceback("step", "RuntimeError: the real crash")
+    )
+    result = extract.parse_log_file(str(write_log(tmp_path, body, exit_code=1)))
+    assert result["failure_detail"] == "RuntimeError: the real crash"
+
+
+def test_a_c10_warning_inside_a_rank_traceback_is_skipped(tmp_path):
+    lines = [
+        "Traceback (most recent call last):",
+        '  File "/src/sched.py", line 74, in __init__',
+        "[W1021 05:04:29.512 ProcessGroupNCCL.cpp:1250] Warning: destroy_process_group() was not called",
+        "    assert self.lr_warmup_steps < self.lr_decay_steps",
+        "AssertionError",
+    ]
+    body = "".join(f"[rank3]: {line}\n" for line in lines)
+    result = extract.parse_log_file(str(write_log(tmp_path, body, exit_code=1)))
+    assert (
+        result["failure_detail"]
+        == "AssertionError: assert self.lr_warmup_steps < self.lr_decay_steps (sched.py:74)"
+    )
+
+
+def test_an_interrupt_with_a_stray_exception_line_keeps_the_signal(tmp_path):
+    body = "[WARNING] ImportError: optional apex missing\n" + _traceback("train", "KeyboardInterrupt")
+    result = extract.parse_log_file(
+        str(
+            write_log(
+                tmp_path, body, exit_code=130 + 13, failure_reason="signal: killed by SIGTERM (exit 143)"
+            )
+        )
+    )
+    assert result["failure_reason"] == "signal"
+
+
+def test_an_interrupt_traceback_leaves_the_runners_verdict(tmp_path):
+    body = _traceback("train", "KeyboardInterrupt")
+    result = extract.parse_log_file(
+        str(write_log(tmp_path, body, exit_code=143, failure_reason="signal: killed by SIGTERM (exit 143)"))
+    )
+    assert result["failure_reason"] == "signal"
+
+
+def test_exit_zero_without_a_training_step_is_no_metrics(tmp_path):
+    result = extract.parse_log_file(str(write_log(tmp_path, "training finished\n", failure_reason="none")))
+    assert (result["status"], result["failure_reason"], result["failed_at"]) == ("failed", "no_metrics", None)
+
+
+def test_failed_at_tells_setup_from_training(tmp_path):
+    crashed = extract.parse_log_file(
+        str(write_log(tmp_path, MEGATRON_AVG + "RuntimeError: boom\n", exit_code=1, name="a.log"))
+    )
+    hung = extract.parse_log_file(
+        str(
+            write_log(
+                tmp_path,
+                "compiling...\n",
+                exit_code=143,
+                failure_reason="idle: no new output for MAX_IDLE_SECONDS=1200s",
+                name="b.log",
+            )
+        )
+    )
+    ok = extract.parse_log_file(str(write_log(tmp_path, MEGATRON_AVG, failure_reason="none", name="c.log")))
+    assert (crashed["failed_at"], hung["failed_at"], ok["failed_at"]) == ("after step 5", "setup", None)
+
+
 def test_legacy_log_without_footer_is_not_guessed(tmp_path):
     log = tmp_path / "legacy_exp.log"
     log.write_text(
