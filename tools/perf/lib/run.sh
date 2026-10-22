@@ -206,7 +206,11 @@ prepare_config() {
     extract_config_fields "$config_file"
     YAML_STEPS="$STEPS"
     if [ -n "$TRAIN_STEPS" ]; then
-        STEPS="$TRAIN_STEPS (CLI override; yaml=$YAML_STEPS)"
+        if train_steps_ignored "$FRAMEWORK"; then
+            STEPS="$YAML_STEPS (TRAIN_STEPS=$TRAIN_STEPS not applied to $FRAMEWORK)"
+        else
+            STEPS="$TRAIN_STEPS (CLI override; yaml=$YAML_STEPS)"
+        fi
     fi
 
     fw_safe=$(sanitize "$FRAMEWORK")
@@ -221,6 +225,41 @@ prepare_config() {
 run_log_name() {
     local rep="$1" suffix="${2:-}"
     echo "${RESULT_DIR}/${fw_safe}-${name_safe}-${config_hash}-MBS${mbs_safe}-GBS${gbs_safe}-rep${rep}${suffix}_${BATCH_TS}.log"
+}
+
+# Backends whose configs keep their own training length when TRAIN_STEPS is
+# set, separated by spaces (not commas as in BACKEND). The Megatron-Bridge
+# recipes warm the learning rate up for a fixed number of iterations and, with
+# lr_decay_iters unset, decay it over train_iters, so an override no longer
+# than the warmup fails Megatron's lr_warmup_steps < lr_decay_steps assertion
+# before the first step. diffusion_dlrm's models keep the num_iterations of its
+# diffusion_bench config.
+PERF_TRAIN_STEPS_IGNORED="megatron_bridge diffusion_dlrm"
+
+train_steps_ignored() {
+    [[ " $PERF_TRAIN_STEPS_IGNORED " == *" $1 "* ]]
+}
+
+# TRAIN_STEPS as the batch configuration shows it, naming the backends of this
+# batch (CONFIG_FILES, and diffusion_dlrm when it runs) that it does not reach.
+train_steps_text() {
+    local f name present=" " skipped=""
+    if [ -z "$TRAIN_STEPS" ]; then
+        echo "<unset; use YAML>"
+        return 0
+    fi
+    for f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
+        present+="$(yq -r '.modules.pre_trainer.framework // .modules.post_trainer.framework // ""' "$f" 2>/dev/null) "
+    done
+    if [ "${PERF_RUN_DIFFUSION_DLRM:-0}" = 1 ]; then
+        present+="$PERF_DIFFUSION_DLRM_BACKEND "
+    fi
+    for name in $PERF_TRAIN_STEPS_IGNORED; do
+        if [[ "$present" == *" $name "* ]]; then
+            skipped+="${skipped:+, }$name"
+        fi
+    done
+    echo "$TRAIN_STEPS${skipped:+ (not applied to $skipped)}"
 }
 
 # Primus CLI override flag that sets training length for a given framework.
@@ -239,13 +278,14 @@ train_step_override_flag() {
 
 # Append the TRAIN_STEPS override to LAUNCH_ARGV with the flag the config's
 # framework understands. Extra tokens after --config are deep-merged into the
-# overrides of the module being trained (CLI > YAML). No-op when unset.
+# overrides of the module being trained (CLI > YAML). No-op when unset, and for
+# the backends in PERF_TRAIN_STEPS_IGNORED.
 append_train_steps_override() {
     local config_file="$1"
     local framework="$2"
     local flag
 
-    if [ -z "$TRAIN_STEPS" ]; then
+    if [ -z "$TRAIN_STEPS" ] || train_steps_ignored "$framework"; then
         return 0
     fi
 

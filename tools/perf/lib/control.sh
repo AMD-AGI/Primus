@@ -745,6 +745,7 @@ perf_print_plan() {
     echo "Config source: $CONFIG_SOURCE"
     echo "RESULT_DIR   : $RESULT_DIR"
     echo "Run limits   : $(perf_run_limits_text)"
+    echo "TRAIN_STEPS  : $(train_steps_text)"
     echo ""
     for config_file in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
         n=$((n + 1))

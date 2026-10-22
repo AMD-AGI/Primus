@@ -54,8 +54,9 @@
 #                                  diffusion_bench/config.yaml
 #   DIFFUSION_DLRM_HF_CACHE=<dir>  Hugging Face cache for the diffusion models
 #                                  (default: hf_cache_dir in that config)
-#   TRAIN_STEPS sets the diffusion models' num_iterations; DLRM keeps its own.
-#   EXTRA_ENV reaches its container too; the Primus defaults below do not.
+#   TRAIN_STEPS is not applied: the models keep the num_iterations of that
+#   config. EXTRA_ENV reaches its container too; the Primus defaults below
+#   do not.
 #
 # Optional knobs:
 #   DRY_RUN=1        print the selected configs and launch commands, then exit
@@ -64,7 +65,10 @@
 #   TRAIN_STEPS=20   cap training length for the whole batch (smoke / short
 #                    bench). The CLI override flag is chosen from the config's
 #                    framework (see below). Unset -- the default -- keeps
-#                    whatever the YAML specifies.
+#                    whatever the YAML specifies. megatron_bridge configs always
+#                    keep their YAML train_iters (their LR schedule is sized
+#                    to it), and diffusion_dlrm its own num_iterations; the
+#                    list is PERF_TRAIN_STEPS_IGNORED in lib/run.sh.
 #   NUM_REPS=3       repetitions per config (default 1).
 #   MAX_RUN_SECONDS  stop a run that is still going after this long
 #                    (default 3600; 0 = no limit).
@@ -109,7 +113,8 @@
 #   The module is detected per config, so a single batch can mix both.
 #
 # TRAIN_STEPS CLI flags (Primus deep-merges unknown tokens after the train verb):
-#   megatron / megatron_bridge : --train_iters N
+#   megatron                   : --train_iters N
+#   megatron_bridge            : none; TRAIN_STEPS is not applied
 #   torchtitan                 : --training.steps N   (NOT --steps)
 #   maxtext                    : --steps N
 #   maxdiffusion               : --max_train_steps N  (NOT --steps; ignored if used)
@@ -384,7 +389,7 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# ROCm (image) : ${PERF_CONTAINER_ROCM:-unknown}  (HIP ${PERF_CONTAINER_HIP:-unknown})"
     echo "# System       : ${PERF_SYSTEM_DESCRIPTION:-unknown}"
     echo "# Reps/config  : $NUM_REPS"
-    echo "# TRAIN_STEPS  : ${TRAIN_STEPS:-<unset; use YAML>}"
+    echo "# TRAIN_STEPS  : $(train_steps_text)"
     echo "# Run limits   : $(perf_run_limits_text)"
     echo "# GPU check    : $PERF_GPU_CHECK"
     echo "# NCCL iface   : $PERF_NIC_CHECK"
@@ -465,7 +470,7 @@ if [ "$PERF_DD_RUNS" -gt 0 ]; then
     dd_config_name=$(perf_dd_config_name)
     dd_config_hash=$(config_fingerprint "$DIFFUSION_DLRM_CONFIG")
     dd_models=$(perf_dd_summary)
-    dd_steps="${TRAIN_STEPS:+$TRAIN_STEPS (diffusion num_iterations; DLRM unchanged)}"
+    dd_steps=$(perf_dd_steps_text)
     for rep in $(seq 1 "$NUM_REPS"); do
         [ -z "$BATCH_STOPPED" ] || break
         if [ "$RUNS_STARTED" -gt 0 ] && ! perf_prepare_gpus; then
@@ -482,7 +487,7 @@ if [ "$PERF_DD_RUNS" -gt 0 ]; then
         PERF_RUN_LIMITS_TEXT="$(perf_dd_limits_text)" \
             PERF_ENV_NOTE="not passed to diffusion_bench's container; EXTRA_ENV is" \
             print_per_run_banner "$result_file" "$DIFFUSION_DLRM_CONFIG" "$dd_config_name" "$dd_config_hash" \
-            "$PERF_DIFFUSION_DLRM_BACKEND" "$dd_models" "N/A" "N/A" "N/A" "${dd_steps:-per diffusion_bench config}" \
+            "$PERF_DIFFUSION_DLRM_BACKEND" "$dd_models" "N/A" "N/A" "N/A" "$dd_steps" \
             "$rep" "$NUM_REPS" "$launcher_cmd" "diffusion_bench" ""
 
         RUNS_STARTED=$((RUNS_STARTED + 1))

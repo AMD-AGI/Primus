@@ -46,6 +46,8 @@
 # exits without touching docker, srun or the GPUs. TRAIN_STEPS=20 caps
 # training length for the whole batch; the CLI override flag is chosen from
 # the config's framework (see below). Unset keeps whatever the YAML specifies.
+# megatron_bridge configs always keep their YAML train_iters, since their LR
+# schedule is sized to it.
 # NUM_REPS defaults to 1.
 #
 # EXTRA_ENV="KEY=VALUE KEY2=VALUE2" forwards variables into the container as
@@ -55,7 +57,8 @@
 # rest -- which is why an exported DEBUG_HIP_DYNAMIC_QUEUES never arrived.
 #
 # TRAIN_STEPS CLI flags (Primus deep-merges unknown tokens after the train verb):
-#   megatron / megatron_bridge : --train_iters N
+#   megatron                   : --train_iters N
+#   megatron_bridge            : none; TRAIN_STEPS is not applied
 #   torchtitan                 : --training.steps N   (NOT --steps)
 #   maxtext                    : --steps N
 #   maxdiffusion               : --max_train_steps N  (NOT --steps; ignored if used)
@@ -385,7 +388,7 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# Host check            : ${PERF_HOST_CHECK:-not checked}"
     echo "# Launcher mode         : multi-node (primus-cli slurm srun -N $NNODES)"
     echo "# Container label       : ${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
-    echo "# TRAIN_STEPS           : ${TRAIN_STEPS:-<unset; use YAML>}"
+    echo "# TRAIN_STEPS           : $(train_steps_text)"
     echo "# NUM_REPS (target)     : $NUM_REPS"
     echo "# MAX_ATTEMPTS_PER_CFG  : $MAX_ATTEMPTS_PER_CONFIG"
     echo "# Run limits            : $(perf_run_limits_text)"

@@ -246,9 +246,9 @@ bash tools/perf/run_batch.sh
   the shared file. The runner passes it `DOCKER_IMAGE`, the GPU type (`GPU`
   MI300X/MI308X/MI325X → `mi300`, MI350X/MI355X → `mi355`, otherwise read
   from the GPU's gfx942 / gfx950 architecture), its container label,
-  `EXTRA_ENV`, and `TRAIN_STEPS` as every diffusion model's `num_iterations`
-  (DLRM keeps its own length). `HF_TOKEN` reaches it through the
-  environment, never a command line. The runner's own Primus defaults
+  and `EXTRA_ENV`. `TRAIN_STEPS` is not applied: every model keeps the
+  `num_iterations` of that config, and DLRM its own length. `HF_TOKEN`
+  reaches it through the environment, never a command line. The runner's own Primus defaults
   (`HSA_NO_SCRATCH_RECLAIM` and the two `*_ATOMIC_FP32` settings) are not
   applied, so the numbers match a standalone diffusion_bench run. `GPU`
   need not be a catalog key when `diffusion_dlrm` is the only backend.
@@ -299,7 +299,7 @@ bash tools/perf/run_batch.sh
 | `CONFIG_FILE` | `tools/perf/configs.yaml` | Catalog to read. |
 | `CONFIG_DIR` | — | Switches to directory mode. |
 | `NUM_REPS` | `1` | Repetitions per config. |
-| `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. |
+| `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. Not applied to `megatron_bridge`, whose configs keep their own `train_iters` (their learning-rate warmup and decay are sized to it, and a run no longer than the warmup fails Megatron's `lr_warmup_steps < lr_decay_steps` check), nor to `diffusion_dlrm`, which keeps diffusion_bench's `num_iterations`. |
 | `EXTRA_ENV` | — | Space-separated `KEY=VALUE` pairs forwarded into the container as `--env`. See below. |
 | `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` | auto (single node); `eno0` (multi-node) | RCCL/Gloo bootstrap NIC. Set even for 1-node 8-GPU; must not be `docker0`. See below. |
 | `NNODES`, `GPUS_PER_NODE` | `1`, `8` | Cluster topology. |
