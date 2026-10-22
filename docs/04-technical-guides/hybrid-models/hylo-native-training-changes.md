@@ -14,32 +14,45 @@ not vendored. Distillation is a Primus forward step behind
 
 | File | Why it is here |
 | --- | --- |
-| `primus/backends/megatron/training/hylo_distillation.py` | Frozen dense teacher, Enhanced-ILD, and masked chunked `KL(teacher \|\| student)`. |
+| `primus/backends/megatron/training/hylo_distillation.py` | Frozen dense teacher, Enhanced-ILD, and masked chunked `KL(teacher \|\| student)`. Optional Hugging Face YaRN for the teacher. |
 | `primus/backends/megatron/megatron_sft_trainer.py` | Enables that forward step for both training stages. |
 | `primus/backends/megatron/megatron_pretrain_trainer.py` | Same hook, used by the zero-learning-rate constructor. |
-| `primus/backends/megatron/argument_builder.py` | Keeps the `hylo_*` recipe fields through Megatron argument merge. |
-| `primus/backends/megatron/checkpoint/hybrid_upcycle.py` | From-teacher MLA and GDN init, plus stage-1 checkpoint assembly. |
+| `primus/backends/megatron/argument_builder.py` | Keeps the `hylo_*` recipe fields (including `hylo_teacher_yarn_*` and `hylo_mla_kv_heads`), `hybrid_linear_type`, `mamba_expand`, and `mamba_d_xb` through Megatron argument merge, so they reach the saved checkpoint args the upcycler reads. |
+| `primus/backends/megatron/checkpoint/hybrid_upcycle.py` | From-teacher MLA, GDN, and Mamba-2 init, plus stage-1 checkpoint assembly. The recurrent mixer's input norm also accepts the TE-fused `linear_qkv.layer_norm_weight` of a converted Llama. |
 | `primus/backends/megatron/checkpoint/native_loader_llama.py` | Preserves Llama-3 `rope_scaling` when converting the teachers. |
-| `primus/backends/megatron/core/models/hybrid/hybrid_mamba_mla_layer_specs.py` | `hylo_gdn_hybrid_stack_spec`: RMSNorm, with MLA LoRA latent norms off. |
-| `primus/configs/models/megatron/hylo_gdn_1B_hybrid.yaml` | 1B 4MLA12GDN widths. MLA blocks are 1, 5, 10, and 14. |
+| `primus/backends/megatron/core/models/hybrid/hybrid_mamba_mla_layer_specs.py` | `hylo_gdn_hybrid_stack_spec`: RMSNorm, with MLA LoRA latent norms off. `hylo_m2_hybrid_stack_spec`: the same with the grouped Mamba-2 mixer. `hylo_grouped_mla_hybrid_stack_spec`: the same with 8 MLA key/value heads. |
+| `primus/backends/megatron/core/models/hybrid/mamba2_dxb_mixer.py` | MambaInLlama's Mamba-2 with x and B on the key/value groups (`d_xb`). |
+| `primus/backends/megatron/core/models/hybrid/grouped_kv_mla.py` | MLA `linear_kv_up_proj` with one block per key/value head, repeated for its query heads. |
+| `primus/configs/models/megatron/hylo_gdn_1B_hybrid.yaml` | 1B 4MLA12GDN widths. MLA blocks are 1, 5, 10, and 14. MLA YaRN uses `mscale: 1.0` and `mscale_all_dim: 0.0`, as HyLo's `rope_scaling` sets neither: the softmax scale stays `1/sqrt(q_head_dim)` and cos and sin are scaled by `0.1 ln(factor) + 1`. |
+| `primus/configs/models/megatron/hylo_m2_1B_hybrid.yaml` | 1B all-Mamba-2 widths. |
 | `examples/megatron/configs/MI300X/hylo_1B-constructor.yaml` | One mock step that saves a hybrid init checkpoint. |
+| `examples/megatron/configs/MI300X/hylo_m2_1B-constructor.yaml` | The same for the all-Mamba-2 layout. |
+| `examples/megatron/configs/MI300X/hylo_mla_1B-constructor.yaml` | The same for the all-MLA layout with grouped key/value heads. |
 | `examples/megatron/configs/MI300X/hylo_gdn_1B-enhanced-ild.yaml` | All-GDN Enhanced-ILD. |
-| `examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild.yaml` | All-MLA Enhanced-ILD. |
+| `examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild.yaml` | All-MLA Enhanced-ILD, from Zebra-Llama `zebra_MLA_ILD.yaml`. |
+| `examples/megatron/configs/MI300X/hylo_m2_1B-enhanced-ild.yaml` | All-Mamba-2 Enhanced-ILD, from Zebra-Llama `zebra_M2_ILD.yaml`. |
 | `examples/megatron/configs/MI300X/hylo_4MLA12GDN_1B-8K-sft.yaml` | 8K pure-KL stage 2. |
 | `tools/hybrid/prepare_hylo_assets.py` | Downloads and converts the gated Llama teachers and exports the public SFT set. |
 | `tools/hybrid/assemble_hylo_ild.py` | Copies trained GDN and MLA blocks into the target layout. |
 | `tools/hybrid/run_hylo_1b_4mla12gdn.sh` | Constructor, upcycle, both ILD stages, assembly, then stage 2. |
-| `tests/unit_tests/backends/megatron/test_hylo_distillation.py` | Loss, mask, and argument checks. |
+| `tests/unit_tests/backends/megatron/test_hylo_distillation.py` | Loss, mask, and argument checks; the ILD step's final-norm pair and per-micro-batch count; the teacher attention capture under an in-place residual add; teacher YaRN against Hugging Face (GPU). |
+| `tests/unit_tests/backends/megatron/test_grouped_kv_mla.py` | Grouped MLA key/value heads against Llama's `repeat_kv`. |
 | `tests/unit_tests/backends/megatron/test_hybrid_upcycle.py` | Upcycle and assembly rules. |
 | `tests/unit_tests/backends/megatron/test_hybrid_upcycle_hylo_reference.py` | Exact match against HyLo `re_init_q`, `re_init_kv`, and `_copy_llama_attn_to_gdn`. |
 | `tests/unit_tests/backends/megatron/test_native_loader_llama_rope.py` | Llama-3 rope-scaling conversion. |
+| `tests/unit_tests/backends/megatron/test_mamba2_dxb_mixer.py` | Grouped Mamba-2 head mapping, and the mixer against a token-by-token recurrence (GPU). |
 | `tests/fixtures/hylo_smoke.jsonl` | One chat example for a one-step container run. |
 | `docs/04-technical-guides/hybrid-models/upcycling-changes.md` | Corrects the MLA RoPE copy: those rows are a full replace. |
 
 ## What the runtime does
 
-Enhanced-ILD sums per-layer hidden L2 and token-mixer-output L2. During that
-stage each student mixer is forced to the matching teacher layer input. Stage 2
+Enhanced-ILD sums per-layer hidden L2 and token-mixer-output L2, with the last
+layer compared after each model's final norm. Each micro-batch's loss counts
+once. During that stage each student mixer is forced to the matching teacher
+layer input. The teacher's mixer target is a copy of its self-attention output:
+in eval mode without grad, Megatron's bias-dropout-add adds the residual into
+that tensor in place, which would turn the target into the post-attention
+residual stream. Stage 2
 uses pure KL with `hylo_kl_weight: 1.0` and `hylo_ce_weight: 0.0`. The KL is
 chunked at 4096 tokens and masked.
 
@@ -76,15 +89,15 @@ repository. `sftdatasetv3` alone cannot reproduce those weights.
 
 ## What was run
 
-On `rocm/primus:v26.8`, branch `dev/clairlee/hybrid-model-upcycling`:
+On `rocm/primus:v26.8`:
 
 - Real Llama-3.2-1B-Instruct tensors match the HyLo from-teacher init.
 - Unit and config checks passed, including 519 example-config tests.
 - One all-GDN constructor step, its upcycle, one Enhanced-ILD step, and one
   pure-KL stage-2 step completed on one GPU at sequence length 128.
 
-On `useocpm2m-097-017` (the jump host for `tw044` did not accept SSH), one-step
-smokes at the recipe context lengths also completed in `rocm/primus:v26.8`:
+One-step smokes at the recipe context lengths also completed in
+`rocm/primus:v26.8`:
 
 | Step | Context | Loss | Checkpoint reload |
 | --- | --- | --- | --- |
@@ -95,3 +108,21 @@ smokes at the recipe context lengths also completed in `rocm/primus:v26.8`:
 Each step used micro-batch 1, global batch 1, and one optimizer step. Assembly
 checked that every mixer/MLP pair came from the matching ILD checkpoint.
 `run_hylo_1b_4mla12gdn.sh` was not executed as a full 1000-iteration job.
+These smokes predate the fix to the teacher's attention capture, so their
+mixer terms include the residual stream.
+
+In October 2026 the all-MLA and all-Mamba-2 Enhanced-ILD settings (model,
+teacher, and optimizer) ran the reference's full schedule, 6934 steps of 96
+sequences at its 2048-token context, on the reference's packed 20% selection.
+The final checkpoints were then scored next to the reference stage-1
+checkpoints on 348 held-out packed batches against the same teacher:
+
+| Run | Enhanced-ILD, ours | Enhanced-ILD, reference | Weight updates against the reference's |
+| --- | --- | --- | --- |
+| all-MLA | 28.75 | 28.76 | cosine 0.996 to 0.999, norms within 0.3% |
+| all-Mamba-2 | 34.84 | 35.22 | MLP cosine 0.75 to 0.81, Mamba `in_proj` 0.01 to 0.17 |
+
+The Mamba-2 convolution, `A_log`, `dt_bias`, and the z and dt rows of
+`in_proj` start from random values and barely move in training, so the rest of
+each run's mixer adapts to its own draw. The MLA init is a deterministic
+factorization of the teacher.
