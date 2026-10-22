@@ -90,7 +90,13 @@ def _mxfp8_quant_config():
         (_tensorwise_quant_config, "fc2", (2, 192, 192), (2, 256, 256)),
         (_tensorwise_quant_config, "fc2", (2, 256, 128), (2, 256, 128)),
         # None: the cache create_quantized_weight builds (Turbo pads MXFP8 storage itself).
-        (_mxfp8_quant_config, "fc2", (2, 192, 192), None),
+        pytest.param(
+            _mxfp8_quant_config,
+            "fc2",
+            (2, 192, 192),
+            None,
+            marks=pytest.mark.skipif(not pt.check_mxfp8_support()[0], reason="Requires MXFP8 support"),
+        ),
     ],
 )
 def test_prepare_weights_caches_in_the_ops_layout(monkeypatch, quant_config, role, shape, qdata_shape):
