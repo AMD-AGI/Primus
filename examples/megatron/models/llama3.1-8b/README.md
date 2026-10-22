@@ -27,15 +27,15 @@ docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v /path/to/Primus-Turbo:/pa
     -w /path/to/Primus-Turbo amdprimus/amdprimus:tas-20261019 bash -c \
     'PATH=$(tr : "\n" <<< "$PATH" | grep -v openmpi | paste -sd:) GPU_ARCHS=gfx1250 python3 setup.py build_ext --inplace'
 
-# On the host
+# On the host, 4 GPUs (the default: GPUS_PER_NODE=4, DP4, GBS 16)
 TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh
 
-# Inside a container (mount the Primus-Turbo checkout too)
+# On the host, 1 GPU (GBS 4)
+GPUS_PER_NODE=1 TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh
+
+# Inside a container (mount the Primus-Turbo checkout too); GPUS_PER_NODE works the same way
 PRIMUS_LAUNCHER=direct TURBO_DIR=/path/to/Primus-Turbo \
     bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh
-
-# One GPU
-GPUS_PER_NODE=1 TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh
 ```
 
 **Settings** are environment variables:
