@@ -36,6 +36,9 @@ export MBS=${MBS:-4}
 export GBS=${GBS:-$((MBS * GPUS_PER_NODE))}
 export PRIMUS_TP=${PRIMUS_TP:-1}
 export PRIMUS_PP=${PRIMUS_PP:-1}
+# max_position_embeddings follows the sequence length unless set: Megatron needs it >= seq_length
+export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-8192}
+export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS_SEQ_LENGTH}}
 # layers to recompute in full, e.g. 0,3; empty: no recompute
 export PRIMUS_RECOMPUTE_LAYER_IDS=${PRIMUS_RECOMPUTE_LAYER_IDS:-}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-True}
@@ -94,6 +97,22 @@ case "${PRIMUS_LAUNCHER}" in
         exit 2
         ;;
 esac
+
+# The flydsl backend needs Primus-Turbo's gfx1250 head-dim-128 kernels (README.md). Without them the
+# first attention call raises ValueError, after the model and optimizer are built; stop here instead.
+if [[ "${USE_TURBO_ATTENTION,,}" =~ ^(true|1|yes)$ && "${PRIMUS_TURBO_ATTN_BACKEND,,}" == flydsl ]]; then
+    if [[ -n "${TURBO_DIR}" ]]; then
+        TURBO_PKG=${TURBO_DIR}/primus_turbo
+    else
+        TURBO_PKG=$(python3 -c 'import importlib.util, os; s = importlib.util.find_spec("primus_turbo"); print(os.path.dirname(s.origin) if s and s.origin else "")')
+    fi
+    if [[ ! -d "${TURBO_PKG}/flydsl/attention/gfx1250" ]]; then
+        echo "PRIMUS_TURBO_ATTN_BACKEND=flydsl needs a Primus-Turbo with primus_turbo/flydsl/attention/gfx1250/," \
+            "which ${TURBO_PKG:-this Python environment} lacks. Set TURBO_DIR to such a checkout (README.md)" \
+            "or PRIMUS_TURBO_ATTN_BACKEND=triton." >&2
+        exit 2
+    fi
+fi
 
 # Triton 3.8 turns on AMDGPU expert scheduling for gfx1250, which makes Triton kernels fault or
 # return NaN at random. TRITON_HIP_USE_EXPERT_SCHEDULING=0 (below) turns it off when a kernel is
