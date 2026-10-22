@@ -40,13 +40,31 @@ def _tensor(output: Any) -> torch.Tensor:
     raise TypeError(f"cannot extract tensor from {type(output).__name__}")
 
 
+def _token_mean(distance: torch.Tensor, token_mask: Optional[torch.Tensor]) -> torch.Tensor:
+    if token_mask is None:
+        return distance.mean()
+    if tuple(token_mask.shape) != tuple(distance.shape):
+        raise ValueError(
+            f"token_mask {tuple(token_mask.shape)} does not match the per-token distances "
+            f"{tuple(distance.shape)} (sequence, batch)"
+        )
+    weights = token_mask.to(device=distance.device, dtype=torch.float32)
+    total = (distance.float() * weights).sum()
+    return (total / weights.sum().clamp_min(1.0)).to(distance.dtype)
+
+
 def enhanced_ild_loss(
     student_hidden: Iterable[torch.Tensor],
     teacher_hidden: Iterable[torch.Tensor],
     student_mixer: Iterable[torch.Tensor],
     teacher_mixer: Iterable[torch.Tensor],
+    token_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """HyLo Enhanced-ILD: sum layer hidden L2 and token-mixer-output L2."""
+    """HyLo Enhanced-ILD: sum layer hidden L2 and token-mixer-output L2.
+
+    Each term is a mean over tokens. ``token_mask`` (sequence, batch) limits those means to real
+    tokens; without it every position counts, as on packed data.
+    """
     sh, th = list(student_hidden), list(teacher_hidden)
     sm, tm = list(student_mixer), list(teacher_mixer)
     if not sh or len(sh) != len(th) or len(sm) != len(tm) or len(sh) != len(sm):
@@ -55,8 +73,10 @@ def enhanced_ild_loss(
             f"student_hidden={len(sh)}, teacher_hidden={len(th)}, "
             f"student_mixer={len(sm)}, teacher_mixer={len(tm)}"
         )
-    hidden_loss = sum(torch.norm(a - b.detach(), p=2, dim=-1).mean() for a, b in zip(sh, th))
-    mixer_loss = sum(torch.norm(a - b.detach(), p=2, dim=-1).mean() for a, b in zip(sm, tm))
+    hidden_loss = sum(
+        _token_mean(torch.norm(a - b.detach(), p=2, dim=-1), token_mask) for a, b in zip(sh, th)
+    )
+    mixer_loss = sum(_token_mean(torch.norm(a - b.detach(), p=2, dim=-1), token_mask) for a, b in zip(sm, tm))
     return hidden_loss + mixer_loss, {
         "hylo hidden ild": hidden_loss.detach(),
         "hylo mixer ild": mixer_loss.detach(),
@@ -398,6 +418,17 @@ def _log_loss(metrics: dict[str, torch.Tensor]) -> None:
     log_rank_0(f"[HyLo] {parts}")
 
 
+def sft_real_tokens(loss_mask: torch.Tensor) -> torch.Tensor:
+    """Real-token mask, (sequence, batch), of an SFT micro-batch's ``loss_mask`` (batch, sequence).
+
+    The SFT dataset pads each sample at its end and supervises it through its last real token, so
+    a position is real when it is at or before the sample's last supervised position. Prompt
+    tokens count, as they do on packed data.
+    """
+    supervised_from_here = torch.flip(torch.cumsum(torch.flip(loss_mask, dims=[-1]), dim=-1), dims=[-1])
+    return (supervised_from_here > 0).transpose(0, 1)
+
+
 def _ild_count(loss: torch.Tensor) -> torch.Tensor:
     # Enhanced-ILD is already a per-token mean, and Megatron divides each
     # micro-batch loss by this count, so one micro-batch counts once.
@@ -474,7 +505,9 @@ def create_sft_forward_step():
 
         def loss_func(_output):
             if _RUNTIME.stage == "ild":
-                loss, parts = enhanced_ild_loss(*_RUNTIME.ild_captures())
+                loss, parts = enhanced_ild_loss(
+                    *_RUNTIME.ild_captures(), token_mask=sft_real_tokens(loss_mask)
+                )
                 return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
             from megatron.training import get_args
 

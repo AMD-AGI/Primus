@@ -20,6 +20,7 @@ from primus.backends.megatron.training.hylo_distillation import (
     enhanced_ild_loss,
     masked_chunked_kl,
     set_teacher_yarn,
+    sft_real_tokens,
     validate_hylo_args,
 )
 from primus.core.config.primus_config import load_primus_config
@@ -41,6 +42,54 @@ def test_enhanced_ild_matches_hylo_equation():
     assert torch.equal(loss, expected_hidden + expected_mixer)
     assert torch.equal(parts["hylo hidden ild"], expected_hidden)
     assert torch.equal(parts["hylo mixer ild"], expected_mixer)
+
+
+def _ild_inputs(dtype=torch.float32):
+    gen = torch.Generator().manual_seed(0)
+    shape = (5, 2, 3)  # sequence, batch, hidden, as Megatron lays out activations
+    return [[torch.randn(shape, generator=gen).to(dtype) for _ in range(2)] for _ in range(4)]
+
+
+def test_enhanced_ild_without_a_mask_is_the_mean_over_every_position():
+    # The packed path passes no mask; its loss must stay the plain per-token mean.
+    for dtype in (torch.float32, torch.bfloat16):
+        sh, th, sm, tm = _ild_inputs(dtype)
+        loss, _ = enhanced_ild_loss(sh, th, sm, tm)
+        expected = sum(torch.norm(s - t, p=2, dim=-1).mean() for s, t in zip(sh, th)) + sum(
+            torch.norm(s - t, p=2, dim=-1).mean() for s, t in zip(sm, tm)
+        )
+        assert torch.equal(loss, expected)
+        all_real, _ = enhanced_ild_loss(sh, th, sm, tm, token_mask=torch.ones(5, 2, dtype=torch.bool))
+        torch.testing.assert_close(all_real, loss)
+
+
+def test_enhanced_ild_with_a_mask_averages_over_real_tokens_only():
+    sh, th, sm, tm = _ild_inputs()
+    real = torch.ones(5, 2, dtype=torch.bool)
+    real[3:, 1] = False  # the second sample ends after three tokens
+    padded = [[t.clone() for t in group] for group in (sh, th, sm, tm)]
+    for t in padded[0] + padded[2]:
+        t[3:, 1] = 1e4  # padding values must not matter
+    loss, parts = enhanced_ild_loss(*padded, token_mask=real)
+
+    def masked(students, teachers):
+        return sum(torch.norm(s - t, p=2, dim=-1)[real].mean() for s, t in zip(students, teachers))
+
+    torch.testing.assert_close(parts["hylo hidden ild"], masked(sh, th))
+    torch.testing.assert_close(parts["hylo mixer ild"], masked(sm, tm))
+    torch.testing.assert_close(loss, masked(sh, th) + masked(sm, tm))
+
+
+def test_enhanced_ild_rejects_a_mask_of_another_shape():
+    sh, th, sm, tm = _ild_inputs()
+    with pytest.raises(ValueError, match="token_mask"):
+        enhanced_ild_loss(sh, th, sm, tm, token_mask=torch.ones(2, 5))
+
+
+def test_sft_real_tokens_keep_the_prompt_and_drop_the_padding():
+    loss_mask = torch.tensor([[0.0, 1.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 1.0, 0.0]])
+    expected = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 0]], dtype=torch.bool).t()
+    assert torch.equal(sft_real_tokens(loss_mask), expected)
 
 
 def test_masked_chunked_kl_matches_dense_reference_and_has_grad():
@@ -192,7 +241,8 @@ class _TeacherGPT(nn.Module):
         self.decoder.final_layernorm = _Scale(3.0)
 
     def forward(self, tokens, position_ids, attention_mask, labels=None):
-        hidden = tokens.float().unsqueeze(-1).repeat(1, 1, 4)
+        # Sequence first, as Megatron lays out activations.
+        hidden = tokens.t().float().unsqueeze(-1).repeat(1, 1, 4)
         for layer in self.decoder.layers:
             hidden = layer(hidden)
         return self.decoder.final_layernorm(hidden)
@@ -216,7 +266,7 @@ class _StudentHybrid(nn.Module):
         self.decoder.final_norm = _Scale(7.0)
 
     def forward(self, tokens, position_ids, attention_mask, labels=None):
-        hidden = torch.zeros(*tokens.shape, 4)
+        hidden = torch.zeros(*tokens.t().shape, 4)
         for layer in self.decoder.layers:
             hidden = layer(hidden_states=hidden)
         return self.decoder.final_norm(hidden)
@@ -238,6 +288,17 @@ def test_ild_step_scores_last_layer_after_final_norm_once_per_micro_batch(monkey
     torch.testing.assert_close(loss.cpu(), 40 * width)
     assert count.item() == 1
     assert report["hylo ild"][1].item() == 1
+
+
+def test_sft_ild_step_ignores_padding(monkeypatch):
+    monkeypatch.setattr(hylo_distillation, "_RUNTIME", HyLoRuntime(_TeacherGPT(), "ild"))
+    monkeypatch.setattr(hylo_distillation, "_log_loss", lambda metrics: None)
+    # The third position is padding: its token value would raise the loss if it counted.
+    batch = {"input_ids": torch.tensor([[1, 2, 9]]), "loss_mask": torch.tensor([[0.0, 1.0, 0.0]])}
+    _output, loss_func = create_sft_forward_step()(iter([batch]), _StudentHybrid())
+    loss, _count, _report = loss_func(_output)
+    width = torch.norm(torch.ones(4)) * torch.tensor([1.0, 2.0]).mean()
+    torch.testing.assert_close(loss.cpu(), 40 * width)
 
 
 def test_ild_requires_final_norm_on_both_models():
