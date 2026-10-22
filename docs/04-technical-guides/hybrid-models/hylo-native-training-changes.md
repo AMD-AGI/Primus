@@ -120,9 +120,17 @@ checkpoints on 348 held-out packed batches against the same teacher:
 | Run | Enhanced-ILD, ours | Enhanced-ILD, reference | Weight updates against the reference's |
 | --- | --- | --- | --- |
 | all-MLA | 28.75 | 28.76 | cosine 0.996 to 0.999, norms within 0.3% |
-| all-Mamba-2 | 34.84 | 35.22 | MLP cosine 0.75 to 0.81, Mamba `in_proj` 0.01 to 0.17 |
+| all-Mamba-2, our random draw | 34.84 | 35.22 | MLP cosine 0.75 to 0.81, Mamba `in_proj` 0.01 to 0.17 |
+| all-Mamba-2, the reference's random draw | 35.25 | 35.22 | cosine 0.98 to 0.9995, norms within 1% |
 
 The Mamba-2 convolution, `A_log`, `dt_bias`, and the z and dt rows of
 `in_proj` start from random values and barely move in training, so the rest of
-each run's mixer adapts to its own draw. The MLA init is a deterministic
-factorization of the teacher.
+each run's mixer adapts to its own draw. The reference drew them with seed 42
+on the GPU while building each layer. PyTorch's GPU `uniform_` assigns its
+Philox stream to elements by the device's compute-unit count, and the
+reference's values match a 304-CU device (MI300X), not the 256-CU MI355X these
+runs used. Rebuilding those tensors for 304 compute units and running the same
+schedule from them reproduces the reference: the final weights of every
+tensor group have a median cosine of 0.994 or more with the reference's. The
+MLA init is a deterministic factorization of the teacher, so it needs no such
+step.
