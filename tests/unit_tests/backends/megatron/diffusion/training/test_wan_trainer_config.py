@@ -1,0 +1,364 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+"""
+The WAN trainer has to hand the model config the precision recipe it was given.
+
+The MXFP4 local linears run their preshuffle-contract check only when
+``config.fp4 == "mxfp4"``, so collapsing the YAML value to ``True`` turned the
+check off for every WAN MXFP4 run.
+
+The attention layout is threaded the same way, and the trainer logs which
+attention kernels the resulting config will run.
+"""
+
+from types import SimpleNamespace
+
+import pytest
+import torch.nn as nn
+
+from primus.backends.megatron.wan_pretrain_trainer import (
+    WanPretrainTrainer,
+    block_linear_types,
+    check_dual_expert_data_parallel,
+    describe_attention_path,
+    describe_linear_precision,
+)
+
+
+def _build(**params):
+    params.setdefault("transformer_impl", "local")
+    trainer = SimpleNamespace(backend_args=SimpleNamespace(**params))
+    return WanPretrainTrainer._build_wan_config_from_yaml(trainer)
+
+
+def test_fp4_recipe_value_reaches_the_model_config():
+    config = _build(fp4="mxfp4", fp4_recipe="mxfp4")
+
+    assert config.fp4 == "mxfp4"
+    assert config.fp4_recipe == "mxfp4"
+
+
+def test_fp4_unset_leaves_the_model_config_without_fp4():
+    config = _build()
+
+    assert config.fp4 is None
+
+
+def test_deterministic_mode_reaches_the_model_config():
+    """TE's attention reads it off the model config rather than Megatron's args."""
+    assert _build(deterministic_mode=True).deterministic_mode is True
+    assert _build().deterministic_mode is False
+
+
+def test_fp8_settings_reach_the_model_config():
+    config = _build(
+        fp8="e4m3",
+        fp8_recipe="tensorwise",
+        fp8_amax_history_len=16,
+        fp8_amax_compute_algo="max",
+        fp8_scaling_strategy="delayed",
+        fp8_force_nt_layout=True,
+        fp8_reduce_amax=True,
+    )
+
+    assert config.fp8 == "e4m3"
+    assert config.fp8_recipe == "tensorwise"
+    assert config.fp8_amax_history_len == 16
+    assert config.fp8_amax_compute_algo == "max"
+    assert config.fp8_scaling_strategy == "delayed"
+    assert config.fp8_force_nt_layout is True
+    assert config.fp8_reduce_amax is True
+    # The Float8 local linears raise at construction if it is on.
+    assert config.gradient_accumulation_fusion is False
+
+
+def test_fp8_unset_leaves_the_model_config_in_bf16():
+    config = _build()
+
+    assert config.fp8 is None
+    assert describe_linear_precision(config) == "bf16"
+
+
+def test_fp8_on_the_te_path_is_rejected():
+    """The TE linears would need an FP8 autocast the WAN forward never enters."""
+    with pytest.raises(ValueError, match="fp8 on WAN requires transformer_impl='local'"):
+        _build(transformer_impl="transformer_engine", fp8="e4m3", fp8_recipe="tensorwise")
+
+
+_PARAM_SHARDING = {"use_megatron_fsdp": True, "data_parallel_sharding_strategy": "optim_grads_params"}
+
+
+@pytest.mark.parametrize(
+    "scaling", [{"fp8_recipe": "delayed"}, {"fp8_recipe": "tensorwise", "fp8_scaling_strategy": "delayed"}]
+)
+def test_delayed_fp8_with_megatron_fsdp_param_sharding_is_rejected(scaling):
+    """The delayed-scaling update reads weights that the sharding has emptied."""
+    with pytest.raises(ValueError, match="delayed FP8 scaling does not work with Megatron-FSDP"):
+        _build(fp8="hybrid", **scaling, **_PARAM_SHARDING)
+
+
+def test_fp8_that_avoids_delayed_scaling_or_param_sharding_builds():
+    assert _build(fp8="hybrid", fp8_recipe="tensorwise", **_PARAM_SHARDING).fp8 == "hybrid"
+    assert _build(fp8="hybrid", fp8_recipe="delayed", use_megatron_fsdp=False).fp8 == "hybrid"
+
+
+def test_fp8_on_the_local_path_builds_the_turbo_float8_linears():
+    pytest.importorskip("primus_turbo")
+    from primus.backends.megatron.core.models.diffusion.common.backend_resolution import (
+        resolve_diffusion_backend,
+    )
+
+    backend, sensitive_backend = resolve_diffusion_backend(_build(fp8="e4m3", fp8_recipe="tensorwise"))
+
+    assert type(backend).__name__ == "PrimusTurboFloat8LocalSpecProvider"
+    assert sensitive_backend is None
+
+
+@pytest.mark.parametrize(
+    "precision, missing",
+    [
+        ({"fp4": "mxfp4", "fp4_recipe": "mxfp4"}, "PrimusTurboMXFP4LocalSpecProvider"),
+        ({"fp8": "e4m3", "fp8_recipe": "tensorwise"}, "PrimusTurboFloat8LocalSpecProvider"),
+    ],
+)
+def test_a_low_precision_provider_that_failed_to_import_raises(precision, missing, monkeypatch):
+    """Building bf16 linears under an fp4 / fp8 config would train the wrong recipe."""
+    pytest.importorskip("primus_turbo")
+    from primus.backends.megatron.core.models.diffusion.common import backend_resolution
+
+    monkeypatch.setattr(backend_resolution, missing, None)
+    with pytest.raises(ImportError, match="failed to import"):
+        backend_resolution.resolve_diffusion_backend(_build(**precision))
+
+
+def test_an_unknown_sensitive_layer_precision_raises():
+    pytest.importorskip("primus_turbo")
+    from primus.backends.megatron.core.models.diffusion.common.backend_resolution import (
+        resolve_diffusion_backend,
+    )
+
+    config = _build(
+        fp4="mxfp4",
+        fp4_recipe="mxfp4",
+        num_dit_layers=4,
+        sensitive_layers_enabled=True,
+        sensitive_layers_start=1,
+        sensitive_layers_end=1,
+        sensitive_layer_precision="mxfp8",
+    )
+    with pytest.raises(ValueError, match="sensitive_layer_precision must be"):
+        resolve_diffusion_backend(config)
+
+
+@pytest.mark.parametrize(
+    "precision, missing",
+    [("tw_fp8", "PrimusTurboFloat8LocalSpecProvider"), ("bf16", "PrimusTurboLocalSpecProvider")],
+)
+def test_a_sensitive_layer_provider_that_failed_to_import_raises(precision, missing, monkeypatch):
+    pytest.importorskip("primus_turbo")
+    from primus.backends.megatron.core.models.diffusion.common import backend_resolution
+
+    config = _build(
+        fp4="mxfp4",
+        fp4_recipe="mxfp4",
+        num_dit_layers=4,
+        sensitive_layers_enabled=True,
+        sensitive_layers_start=1,
+        sensitive_layers_end=1,
+        sensitive_layer_precision=precision,
+    )
+    monkeypatch.setattr(backend_resolution, missing, None)
+    with pytest.raises(ImportError, match="sensitive_layer_precision"):
+        backend_resolution.resolve_diffusion_backend(config)
+
+
+def test_mxfp4_without_sensitive_layers_has_no_sensitive_provider():
+    pytest.importorskip("primus_turbo")
+    from primus.backends.megatron.core.models.diffusion.common.backend_resolution import (
+        resolve_diffusion_backend,
+    )
+
+    backend, sensitive_backend = resolve_diffusion_backend(_build(fp4="mxfp4", fp4_recipe="mxfp4"))
+
+    assert type(backend).__name__ == "PrimusTurboMXFP4LocalSpecProvider"
+    assert sensitive_backend is None
+
+
+def test_sensitive_layer_settings_reach_the_model_config():
+    config = _build(
+        fp4="mxfp4",
+        fp4_recipe="mxfp4",
+        num_dit_layers=4,
+        sensitive_layers_enabled=True,
+        sensitive_layers_start=1,
+        sensitive_layers_end=2,
+        sensitive_layer_precision="bf16",
+    )
+
+    assert config.sensitive_layers_enabled is True
+    assert (config.sensitive_layers_start, config.sensitive_layers_end) == (1, 2)
+    assert config.sensitive_layer_precision == "bf16"
+    assert describe_linear_precision(config) == "MXFP4 (mxfp4), first 1 / last 2 blocks in bf16"
+
+
+def test_sensitive_layers_without_fp4_are_rejected():
+    """Only the MXFP4 backend builds the first/last blocks at another precision."""
+    with pytest.raises(ValueError, match="needs fp4 set"):
+        _build(
+            fp8="e4m3",
+            fp8_recipe="tensorwise",
+            num_dit_layers=4,
+            sensitive_layers_enabled=True,
+            sensitive_layers_start=1,
+            sensitive_layers_end=1,
+        )
+
+
+def test_the_linear_precision_names_the_fp8_recipe():
+    config = _build(fp8="e4m3", fp8_recipe="tensorwise")
+
+    assert describe_linear_precision(config) == "FP8 e4m3 (tensorwise recipe)"
+
+
+def test_block_linear_types_lists_the_built_linear_classes():
+    class Float8ColumnParallelLinear(nn.Linear):
+        pass
+
+    class Float8RowParallelLinear(nn.Linear):
+        pass
+
+    model = nn.Sequential(
+        Float8ColumnParallelLinear(4, 4),
+        Float8RowParallelLinear(4, 4),
+        Float8ColumnParallelLinear(4, 4),
+        nn.Linear(4, 4),
+    )
+
+    assert block_linear_types(model) == ["Float8ColumnParallelLinear", "Float8RowParallelLinear"]
+
+
+def test_context_parallelism_is_rejected():
+    """Nothing splits the sequence, yet the local attention would switch to its CP kernel."""
+    with pytest.raises(ValueError, match="set context_parallel_size: 1"):
+        _build(context_parallel_size=2)
+
+
+def test_context_parallel_size_one_builds():
+    assert _build(context_parallel_size=1).context_parallel_size == 1
+
+
+def test_layernorm_epsilon_reaches_the_model_config():
+    assert _build(layernorm_epsilon=1e-5).layernorm_epsilon == 1e-5
+    assert _build().layernorm_epsilon == 1e-6
+
+
+@pytest.mark.parametrize("key", ["hidden_dropout", "attention_dropout"])
+def test_nonzero_dropout_is_rejected(key):
+    """The WAN block has no dropout, so a nonzero value would otherwise be ignored."""
+    with pytest.raises(ValueError, match="WAN has no dropout"):
+        _build(**{key: 0.1})
+
+
+def test_selective_recompute_is_rejected():
+    """WanLayer reads none of the selective-recompute switches, so it would save nothing."""
+    with pytest.raises(ValueError, match="selective is not implemented for WAN"):
+        _build(recompute_granularity="selective")
+
+
+def test_uniform_recompute_needs_a_group_size_that_divides_the_depth():
+    with pytest.raises(ValueError, match="must divide num_dit_layers"):
+        _build(recompute_granularity="full", recompute_method="uniform", recompute_num_layers=7)
+
+
+@pytest.mark.parametrize("method,num_layers", [("uniform", 1), ("uniform", 6), ("block", 7)])
+def test_full_recompute_that_covers_the_depth_builds(method, num_layers):
+    config = _build(recompute_granularity="full", recompute_method=method, recompute_num_layers=num_layers)
+
+    assert config.recompute_num_layers == num_layers
+
+
+def test_bf16_forward_reaches_the_model_config_and_the_log():
+    config = _build(fp4="mxfp4", fp4_recipe="mxfp4", mxfp4_forward_precision="bf16")
+
+    assert config.mxfp4_forward_precision == "bf16"
+    assert describe_linear_precision(config) == "bf16 forward, MXFP4 (mxfp4) backward"
+
+
+@pytest.mark.parametrize(
+    "forward,backward,match",
+    [("bf16", "fp8", "needs mxfp4_backward_precision: mxfp4"), ("fp4", "mxfp4", "must be 'mxfp4' or 'bf16'")],
+)
+def test_unsupported_mxfp4_precision_pairs_are_rejected(forward, backward, match):
+    with pytest.raises(ValueError, match=match):
+        _build(
+            fp4="mxfp4",
+            fp4_recipe="mxfp4",
+            mxfp4_forward_precision=forward,
+            mxfp4_backward_precision=backward,
+        )
+
+
+def test_dual_expert_is_rejected_above_one_data_parallel_rank():
+    """Ranks that route apart would issue different expert gathers."""
+    config = SimpleNamespace(num_transformers=2)
+
+    with pytest.raises(ValueError, match="Train each WAN 2.2 expert as its own job"):
+        check_dual_expert_data_parallel(config, data_parallel_size=2)
+
+
+@pytest.mark.parametrize("num_transformers,data_parallel_size", [(2, 1), (1, 1), (1, 8)])
+def test_dual_expert_on_one_rank_and_single_expert_at_any_size_build(num_transformers, data_parallel_size):
+    config = SimpleNamespace(num_transformers=num_transformers)
+
+    check_dual_expert_data_parallel(config, data_parallel_size=data_parallel_size)
+
+
+@pytest.mark.parametrize("setting", ["use_megatron_fsdp", "use_torch_fsdp2", "overlap_grad_reduce"])
+def test_dual_expert_rejects_grad_sync_that_needs_every_expert_each_step(setting):
+    """A step routed to one expert leaves the other without gradients."""
+    with pytest.raises(ValueError, match=f"which {setting} cannot handle"):
+        _build(num_transformers=2, boundary_ratio=0.875, **{setting: True})
+
+
+def test_dual_expert_with_plain_ddp_builds_and_one_expert_keeps_its_settings():
+    assert _build(num_transformers=2, boundary_ratio=0.875).num_transformers == 2
+    assert _build(**_PARAM_SHARDING, overlap_grad_reduce=True).num_transformers == 1
+
+
+def test_create_model_checks_the_data_parallel_size(monkeypatch):
+    from megatron.core import parallel_state
+
+    monkeypatch.setattr(parallel_state, "get_data_parallel_world_size", lambda: 4)
+    trainer = SimpleNamespace(wan_config=SimpleNamespace(num_transformers=2))
+
+    with pytest.raises(ValueError, match=r"got 4\)"):
+        WanPretrainTrainer.create_model(trainer)
+
+
+def test_local_thd_attention_reaches_the_model_config():
+    assert _build(local_thd_attention=True).local_thd_attention is True
+    assert _build().local_thd_attention is False
+
+
+@pytest.mark.parametrize(
+    "transformer_impl,local_thd,fp8,expected",
+    [
+        ("transformer_engine", False, False, "TEDotProductAttention"),
+        ("local", False, False, "flash_attn_func"),
+        ("local", False, True, "flash_attn_fp8_func"),
+        ("local", True, False, "flash_attn_varlen_func"),
+    ],
+)
+def test_the_attention_path_names_its_kernel(transformer_impl, local_thd, fp8, expected):
+    config = SimpleNamespace(transformer_impl=transformer_impl, local_thd_attention=local_thd)
+
+    assert expected in describe_attention_path(config, fp8_attention=fp8)
+
+
+def test_local_thd_attention_rejects_fp8_attention():
+    """Turbo has no fp8 varlen kernel, so this would otherwise fail on the first forward."""
+    config = SimpleNamespace(transformer_impl="local", local_thd_attention=True)
+
+    with pytest.raises(ValueError, match="fp8"):
+        describe_attention_path(config, fp8_attention=True)

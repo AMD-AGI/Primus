@@ -109,6 +109,13 @@ class EnergonDatasetProvider(DatasetProvider):
             virtual_epoch_length=getattr(args, "virtual_epoch_length", 1_000_000_000),
             max_samples_per_sequence=getattr(args, "max_samples_per_sequence", 100),
             shuffle_buffer_size=getattr(args, "shuffle_buffer_size", None),
+            # Defaults match Energon's own defaults. A fully deterministic sample
+            # order (WAN cross-implementation parity runs) needs all four shuffle
+            # knobs off together: max_samples_per_sequence=null, shuffle_buffer_size=null,
+            # shuffle_over_epochs_multiplier=null and parallel_shard_iters=1, the
+            # last being required once shard shuffling is disabled.
+            shuffle_over_epochs_multiplier=getattr(args, "shuffle_over_epochs_multiplier", 1),
+            parallel_shard_iters=getattr(args, "parallel_shard_iters", None),
             handler=lambda *args: None,  # Error handler (print errors but continue)
         )
 
