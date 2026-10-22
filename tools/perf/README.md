@@ -759,6 +759,8 @@ backend `diffusion_dlrm`. When the config gives DLRM its own image
 (`dlrm.image`), the DLRM rows name that image and leave the main image's
 container versions empty.
 
+The rules below live in [`failure.py`](./failure.py).
+
 `failure_reason` takes the runner's verdict from the footer when it is
 definitive (`timeout`, `idle`, `interrupted`, and `steps` for a
 `diffusion_dlrm` run with no step rows). Otherwise the run output is
