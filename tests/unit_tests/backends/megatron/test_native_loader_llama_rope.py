@@ -4,7 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from primus.backends.megatron.checkpoint.native_loader_llama import derive_megatron_fields
+from primus.backends.megatron.checkpoint.native_loader_llama import (
+    derive_megatron_fields,
+)
 
 
 def test_llama3_rope_scaling_is_preserved_for_teacher_conversion():

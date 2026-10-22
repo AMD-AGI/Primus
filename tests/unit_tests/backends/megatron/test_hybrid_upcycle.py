@@ -217,11 +217,19 @@ def test_gdn_mixer_copies_hylo_qkv_slices():
     hidden, heads, kv_heads, head_dim = 4, 2, 2, 2
     key_dim, value_dim, value_heads = 4, 4, 2
     q = torch.arange(heads * head_dim * hidden, dtype=torch.float32).reshape(heads * head_dim, hidden)
-    k = torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden) + 3
-    v = torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden) + 5
+    k = (
+        torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden)
+        + 3
+    )
+    v = (
+        torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden)
+        + 5
+    )
     dense = _dense_state(num_layers=1, hidden=hidden, ffn=8, attn_out=1)
     dense["decoder.layers.0.self_attention.linear_qkv.weight"] = _fuse_qkv(q, k, v, heads, kv_heads, head_dim)
-    dense["decoder.layers.0.self_attention.linear_proj.weight"] = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+    dense["decoder.layers.0.self_attention.linear_proj.weight"] = torch.arange(
+        16, dtype=torch.float32
+    ).reshape(4, 4)
     _fuse_input_norm(dense, 0)
 
     in_rows = key_dim * 2 + value_dim * 2 + value_heads * 2
@@ -248,7 +256,10 @@ def test_gdn_mixer_copies_hylo_qkv_slices():
     assert torch.equal(copied[:key_dim], split_q[:key_dim])
     assert torch.equal(copied[key_dim : key_dim * 2], split_k[:key_dim])
     assert torch.equal(copied[key_dim * 2 : key_dim * 2 + value_dim], split_v[:value_dim])
-    assert torch.equal(copied[key_dim * 2 + value_dim :], hybrid["decoder.layers.0.mixer.in_proj.weight"][key_dim * 2 + value_dim :])
+    assert torch.equal(
+        copied[key_dim * 2 + value_dim :],
+        hybrid["decoder.layers.0.mixer.in_proj.weight"][key_dim * 2 + value_dim :],
+    )
     assert torch.equal(upcycled["decoder.layers.0.mixer.A_log"], hybrid["decoder.layers.0.mixer.A_log"])
     assert torch.equal(
         upcycled["decoder.layers.0.mixer.out_proj.weight"],
@@ -276,7 +287,9 @@ def test_mamba2_mixer_copies_hylo_kqvo_rows():
     v = torch.arange(d_xb * hidden, dtype=torch.float32).reshape(d_xb, hidden) + 200
     dense = _dense_state(num_layers=1, hidden=hidden, ffn=8, attn_out=1)
     dense["decoder.layers.0.self_attention.linear_qkv.weight"] = _fuse_qkv(q, k, v, heads, kv_heads, head_dim)
-    dense["decoder.layers.0.self_attention.linear_proj.weight"] = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+    dense["decoder.layers.0.self_attention.linear_proj.weight"] = torch.arange(
+        16, dtype=torch.float32
+    ).reshape(4, 4)
     _fuse_input_norm(dense, 0)
 
     in_rows = 2 * d_inner + 2 * d_xb + nheads
@@ -329,11 +342,19 @@ def test_mla_slot_matches_hylo_svd_including_rope_rows():
     hidden, heads, kv_heads, head_dim = 4, 2, 2, 2
     nope, rope, v_head, q_rank, kv_rank = 1, 1, 1, 2, 2
     q = torch.arange(heads * head_dim * hidden, dtype=torch.float32).reshape(heads * head_dim, hidden) + 1
-    k = torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden) + 2
-    v = torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden) + 3
+    k = (
+        torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden)
+        + 2
+    )
+    v = (
+        torch.arange(kv_heads * head_dim * hidden, dtype=torch.float32).reshape(kv_heads * head_dim, hidden)
+        + 3
+    )
     dense = _dense_state(num_layers=1, hidden=hidden, ffn=8)
     dense["decoder.layers.0.self_attention.linear_qkv.weight"] = _fuse_qkv(q, k, v, heads, kv_heads, head_dim)
-    dense["decoder.layers.0.self_attention.linear_proj.weight"] = torch.arange(16, dtype=torch.float32).reshape(hidden, hidden)
+    dense["decoder.layers.0.self_attention.linear_proj.weight"] = torch.arange(
+        16, dtype=torch.float32
+    ).reshape(hidden, hidden)
 
     hybrid = {
         "embedding.word_embeddings.weight": torch.zeros(3, 2),
@@ -342,7 +363,9 @@ def test_mla_slot_matches_hylo_svd_including_rope_rows():
         "decoder.layers.0.self_attention.linear_q_down_proj.weight": torch.zeros(q_rank, hidden),
         "decoder.layers.0.self_attention.linear_q_up_proj.weight": torch.zeros(heads * (nope + rope), q_rank),
         "decoder.layers.0.self_attention.linear_kv_down_proj.weight": torch.zeros(kv_rank + rope, hidden),
-        "decoder.layers.0.self_attention.linear_kv_up_proj.weight": torch.zeros(heads * (nope + v_head), kv_rank),
+        "decoder.layers.0.self_attention.linear_kv_up_proj.weight": torch.zeros(
+            heads * (nope + v_head), kv_rank
+        ),
         "decoder.layers.0.self_attention.linear_proj.weight": torch.zeros(hidden, heads * v_head),
         "decoder.layers.1.pre_mlp_layernorm.weight": torch.zeros(hidden),
         "decoder.layers.1.mlp.linear_fc1.weight": torch.zeros(8, hidden),
@@ -363,7 +386,9 @@ def test_mla_slot_matches_hylo_svd_including_rope_rows():
         dense["decoder.layers.0.self_attention.linear_qkv.weight"], heads, kv_heads, head_dim
     )
     q_down, q_up = hylo_reinit_q(split_q, q_rank, heads, head_dim, nope, rope)
-    kv_down, kv_up = hylo_reinit_kv(split_k, split_v, kv_heads, head_dim, kv_heads, kv_rank, nope, rope, v_head)
+    kv_down, kv_up = hylo_reinit_kv(
+        split_k, split_v, kv_heads, head_dim, kv_heads, kv_rank, nope, rope, v_head
+    )
     assert torch.equal(upcycled["decoder.layers.0.self_attention.linear_q_down_proj.weight"], q_down)
     assert torch.equal(upcycled["decoder.layers.0.self_attention.linear_q_up_proj.weight"], q_up)
     assert torch.equal(upcycled["decoder.layers.0.self_attention.linear_kv_down_proj.weight"], kv_down)

@@ -190,14 +190,18 @@ def _check_layer(q, k, v, o, attention_cls, copy_gdn):
     v_rows = min(HEADS * HEAD_DIM, value_dim)
     v_start = key_dim * 2
     _assert_close("gdn.v_proj", copied[v_start : v_start + v_rows], gdn.v_proj.weight.data[:v_rows])
-    assert torch.equal(copied[v_start + v_rows : v_start + value_dim], init_in[v_start + v_rows : v_start + value_dim])
+    assert torch.equal(
+        copied[v_start + v_rows : v_start + value_dim], init_in[v_start + v_rows : v_start + value_dim]
+    )
     tail = copied[v_start + value_dim :]
     assert torch.equal(tail, init_in[v_start + value_dim :])
     copied_cols = min(o.shape[1], value_dim)
     out = upcycled["decoder.layers.0.mixer.out_proj.weight"]
     _assert_close("gdn.o_proj", out[:, :copied_cols], gdn.o_proj.weight.data[:, :copied_cols])
     if out.shape[1] > copied_cols:
-        assert torch.equal(out[:, copied_cols:], hybrid["decoder.layers.0.mixer.out_proj.weight"][:, copied_cols:])
+        assert torch.equal(
+            out[:, copied_cols:], hybrid["decoder.layers.0.mixer.out_proj.weight"][:, copied_cols:]
+        )
 
 
 def test_primus_matches_hylo_training_init_on_4mla12gdn_shapes():
@@ -213,7 +217,9 @@ def _llama_layer_weights(layer: int):
 
     prefix = f"model.layers.{layer}.self_attn"
     with safe_open(weight, framework="pt") as handle:
-        return tuple(handle.get_tensor(f"{prefix}.{name}.weight") for name in ("q_proj", "k_proj", "v_proj", "o_proj"))
+        return tuple(
+            handle.get_tensor(f"{prefix}.{name}.weight") for name in ("q_proj", "k_proj", "v_proj", "o_proj")
+        )
 
 
 def test_primus_matches_hylo_training_init_on_llama32_1b_instruct():

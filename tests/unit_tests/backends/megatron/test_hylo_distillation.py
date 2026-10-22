@@ -33,17 +33,11 @@ def test_enhanced_ild_matches_hylo_equation():
     student_hidden = [torch.ones(2, 3, 4), torch.full((2, 3, 4), 3.0)]
     teacher_mixer = [torch.full((2, 3, 4), 2.0), torch.full((2, 3, 4), 4.0)]
     student_mixer = [torch.full((2, 3, 4), 5.0), torch.full((2, 3, 4), 8.0)]
-    loss, parts = enhanced_ild_loss(
-        student_hidden, teacher_hidden, student_mixer, teacher_mixer
-    )
+    loss, parts = enhanced_ild_loss(student_hidden, teacher_hidden, student_mixer, teacher_mixer)
     expected_hidden = sum(
-        torch.norm(s - t, p=2, dim=-1).mean()
-        for s, t in zip(student_hidden, teacher_hidden)
+        torch.norm(s - t, p=2, dim=-1).mean() for s, t in zip(student_hidden, teacher_hidden)
     )
-    expected_mixer = sum(
-        torch.norm(s - t, p=2, dim=-1).mean()
-        for s, t in zip(student_mixer, teacher_mixer)
-    )
+    expected_mixer = sum(torch.norm(s - t, p=2, dim=-1).mean() for s, t in zip(student_mixer, teacher_mixer))
     assert torch.equal(loss, expected_hidden + expected_mixer)
     assert torch.equal(parts["hylo hidden ild"], expected_hidden)
     assert torch.equal(parts["hylo mixer ild"], expected_mixer)

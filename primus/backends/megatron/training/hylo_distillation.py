@@ -196,9 +196,7 @@ class HyLoRuntime:
             )
         for dense_idx, (_idx, layer, value) in enumerate(mixer_slots):
             self._handles.append(
-                layer.register_forward_pre_hook(
-                    self._student_teacher_force_hook(dense_idx), with_kwargs=True
-                )
+                layer.register_forward_pre_hook(self._student_teacher_force_hook(dense_idx), with_kwargs=True)
             )
             mixer_module = layer.self_attention if value == "*" else getattr(layer, "mixer", layer)
             self._handles.append(
@@ -255,9 +253,7 @@ def _resolve_legacy_checkpoint(path: str) -> str:
 
 
 def _load_teacher_envelope(checkpoint: str) -> dict:
-    envelope = torch.load(
-        _resolve_legacy_checkpoint(checkpoint), map_location="cpu", weights_only=False
-    )
+    envelope = torch.load(_resolve_legacy_checkpoint(checkpoint), map_location="cpu", weights_only=False)
     if not isinstance(envelope, dict):
         raise ValueError(f"teacher checkpoint {checkpoint} is not a mapping")
     return envelope
@@ -291,7 +287,9 @@ def set_teacher_yarn(config: Any, factor: float, original_max_position_embedding
 
 def _build_teacher(args, pre_process, post_process, config, pg_collection):
     from megatron.core.models.gpt import GPTModel
-    from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
+    from megatron.core.models.gpt.gpt_layer_specs import (
+        get_gpt_layer_with_transformer_engine_spec,
+    )
     from megatron.core.transformer.module import Float16Module
     from megatron.training.arguments import core_transformer_config_from_args
 
@@ -362,9 +360,7 @@ def wrap_model_provider(base_provider: Callable, args: Any) -> Callable:
             config = provider_kwargs.get("config") or getattr(student, "config", None)
             if config is None:
                 raise RuntimeError("HyLo could not resolve the student TransformerConfig")
-            pre_process = provider_kwargs.get(
-                "pre_process", provider_args[0] if provider_args else True
-            )
+            pre_process = provider_kwargs.get("pre_process", provider_args[0] if provider_args else True)
             post_process = provider_kwargs.get(
                 "post_process", provider_args[1] if len(provider_args) > 1 else True
             )
@@ -418,8 +414,8 @@ def _loss_result(loss: torch.Tensor, tokens: torch.Tensor, metrics: dict[str, to
 
 
 def create_pretrain_forward_step():
-    from pretrain_mamba import get_batch
     from megatron.training import get_args
+    from pretrain_mamba import get_batch
 
     def forward_step(data_iterator, model, return_schedule_plan=False):
         if return_schedule_plan:
@@ -437,7 +433,9 @@ def create_pretrain_forward_step():
                 loss, parts = enhanced_ild_loss(*_RUNTIME.ild_captures())
                 return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
             loss, tokens_count = masked_chunked_kl(
-                student_logits, teacher_logits.detach(), loss_mask,
+                student_logits,
+                teacher_logits.detach(),
+                loss_mask,
                 chunk_size=int(getattr(get_args(), "hylo_kl_chunk_size", _KL_CHUNK)),
             )
             weighted_loss = loss * float(getattr(get_args(), "hylo_kl_weight", 1.0))
@@ -456,15 +454,11 @@ def create_sft_forward_step():
             raise NotImplementedError("HyLo SFT does not support schedule plans")
         assert _RUNTIME is not None
         if data_iterator is None:
-            return None, lambda _output: _loss_result(
-                torch.tensor(0.0), torch.tensor(0, dtype=torch.int), {}
-            )
+            return None, lambda _output: _loss_result(torch.tensor(0.0), torch.tensor(0, dtype=torch.int), {})
         try:
             batch = next(data_iterator)
         except StopIteration:
-            return None, lambda _output: _loss_result(
-                torch.tensor(0.0), torch.tensor(0, dtype=torch.int), {}
-            )
+            return None, lambda _output: _loss_result(torch.tensor(0.0), torch.tensor(0, dtype=torch.int), {})
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         tokens = batch["input_ids"].to(device=device, dtype=torch.long)
         loss_mask = batch["loss_mask"].to(device=device, dtype=torch.float32)

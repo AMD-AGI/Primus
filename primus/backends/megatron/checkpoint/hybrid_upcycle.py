@@ -278,9 +278,7 @@ def upcycle_state_dict(
     pattern = validate_upcycle_pattern(pattern, num_dense)
     num_hybrid = count_decoder_layers(hybrid_state)
     if num_hybrid != len(pattern):
-        raise ValueError(
-            f"hybrid checkpoint has {num_hybrid} decoder sublayers, pattern has {len(pattern)}"
-        )
+        raise ValueError(f"hybrid checkpoint has {num_hybrid} decoder sublayers, pattern has {len(pattern)}")
 
     upcycled = {key: value for key, value in hybrid_state.items()}
     report = UpcycleReport(pattern=pattern, num_dense_layers=num_dense)
@@ -333,8 +331,7 @@ def assemble_ild_state_dict(
                 missing = sorted(target_keys - source_keys)
                 extra = sorted(source_keys - target_keys)
                 raise ValueError(
-                    f"ILD layer {layer_index} layout mismatch; "
-                    f"missing={missing[:5]}, extra={extra[:5]}"
+                    f"ILD layer {layer_index} layout mismatch; " f"missing={missing[:5]}, extra={extra[:5]}"
                 )
             for key in target_keys:
                 if tuple(assembled[key].shape) != tuple(source[key].shape):
@@ -425,7 +422,9 @@ def load_checkpoint(path: Path) -> tuple[dict[str, torch.Tensor], dict]:
     """Load a legacy torch checkpoint and return ``(model state, envelope)``."""
     # Checkpoint args unpickle Megatron classes. Training adds Megatron to
     # PYTHONPATH; a standalone conversion does not.
-    from primus.backends.megatron.checkpoint.native_convert_common import ensure_megatron_on_path
+    from primus.backends.megatron.checkpoint.native_convert_common import (
+        ensure_megatron_on_path,
+    )
 
     ensure_megatron_on_path()
     ckpt_file = resolve_checkpoint_file(path)
@@ -641,7 +640,9 @@ def _copy_mla_hylo(
     _copy_norm_alias(dense, hybrid, source, target, "input_layernorm.weight", _ATTN_NORM_ALIASES, report)
     if not _mla_ranks_ready(layout) or not layout.qk_rope_head_dim:
         for relative, target_key in sorted(target.items()):
-            if relative.startswith("self_attention.linear_q_") or relative.startswith("self_attention.linear_kv_"):
+            if relative.startswith("self_attention.linear_q_") or relative.startswith(
+                "self_attention.linear_kv_"
+            ):
                 report.attention_left_initialized.append(target_key)
         return
 
@@ -668,7 +669,9 @@ def _copy_mla_hylo(
         layout.qk_rope_head_dim,
         layout.v_head_dim,
     )
-    _assign_tensor(hybrid, target["self_attention.linear_kv_down_proj.weight"], kv_down, report, partial=False)
+    _assign_tensor(
+        hybrid, target["self_attention.linear_kv_down_proj.weight"], kv_down, report, partial=False
+    )
     _assign_tensor(hybrid, target["self_attention.linear_kv_up_proj.weight"], kv_up, report, partial=False)
 
     if "self_attention.linear_proj.weight" in target:
@@ -856,7 +859,9 @@ def hylo_reinit_kv(
     k_new = k_new.view(num_kv_heads, head_dim, kv_lora_rank)[:, :qk_nope_head_dim, :]
     v_new = u_kv[:, :kv_lora_rank][num_kv_heads * head_dim :, :]
     v_new = v_new.view(num_kv_heads, head_dim, kv_lora_rank)[:, :v_head_dim, :]
-    kv_up = torch.cat((k_new, v_new), dim=1).reshape(num_kv_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank)
+    kv_up = torch.cat((k_new, v_new), dim=1).reshape(
+        num_kv_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank
+    )
     return kv_down.contiguous(), kv_up.to(dtype=k_matrix.dtype).contiguous()
 
 
@@ -997,7 +1002,11 @@ def _copy_overlapping_columns(
     current[:rows, :cols] = dense_weight[:rows, :cols].to(dtype=current.dtype)
     hybrid[key] = current.contiguous()
     report.copied.append(key)
-    if rows != dense_weight.shape[0] or cols != dense_weight.shape[1] or tuple(current.shape) != tuple(dense_weight.shape):
+    if (
+        rows != dense_weight.shape[0]
+        or cols != dense_weight.shape[1]
+        or tuple(current.shape) != tuple(dense_weight.shape)
+    ):
         report.hylo_partial.append(key)
 
 
