@@ -66,7 +66,12 @@
 # Per-config behaviour:
 #   We keep launching the config until NUM_REPS successful runs are
 #   collected, or until MAX_ATTEMPTS_PER_CONFIG total attempts have been
-#   spent. Each *successful* attempt produces a log file in $RESULT_DIR:
+#   spent. A config that has not succeeded yet stops at the first failure
+#   that would recur: a config error during setup (AssertionError,
+#   ValueError, KeyError, ...; see PERF_CONFIG_ERRORS in lib/control.sh), an
+#   unusable NIC, or a second out-of-memory in a row (RETRY_ALL_FAILURES=1
+#   retries those too).
+#   Each *successful* attempt produces a log file in $RESULT_DIR:
 #       <framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>_<stamp>.log
 #   Each *failed* attempt is preserved as
 #       <framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>-failed-attempt<n>_<stamp>.log
@@ -429,6 +434,8 @@ for config_file in "${CONFIG_FILES[@]}"; do
 
     good_runs=0
     attempts=0
+    last_reason=""
+    not_retried=0
 
     echo "" | tee -a "$SUMMARY_FILE"
     echo "==============================================================" | tee -a "$SUMMARY_FILE"
@@ -472,6 +479,21 @@ for config_file in "${CONFIG_FILES[@]}"; do
             echo "                    [FAIL] ${RUN_FAILURE_REASON} exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
                 | tee -a "$SUMMARY_FILE"
             echo "                           -> $failed_file" | tee -a "$SUMMARY_FILE"
+            perf_print_cause "$failed_file" "$RUN_FAILURE_REASON"
+            # A config that has not run once yet and fails like this would fail
+            # every attempt the same way. One OOM can be another process's or
+            # fragmentation's doing; two in a row are the config's.
+            recurs=$PERF_VERDICT_RECURS
+            if [ "$PERF_VERDICT_REASON" = oom ] && [ "$last_reason" = oom ]; then
+                recurs=1
+            fi
+            last_reason=$PERF_VERDICT_REASON
+            if [ "$recurs" = 1 ] && [ "$good_runs" -eq 0 ] && [ "$RETRY_ALL_FAILURES" != 1 ]; then
+                not_retried=1
+                echo "                           not retried: another attempt would fail the same way (RETRY_ALL_FAILURES=1 retries it)" \
+                    | tee -a "$SUMMARY_FILE"
+                break
+            fi
         else
             good_runs=$((good_runs + 1))
             RUNS_GOOD=$((RUNS_GOOD + 1))
@@ -486,8 +508,9 @@ for config_file in "${CONFIG_FILES[@]}"; do
         echo "[${FRAMEWORK}/${config_name}] COMPLETE — $good_runs successful runs in $attempts attempts" \
             | tee -a "$SUMMARY_FILE"
     else
-        echo "[${FRAMEWORK}/${config_name}] GAVE UP — only $good_runs/$NUM_REPS successful runs after $attempts attempts" \
-            | tee -a "$SUMMARY_FILE"
+        gave_up="GAVE UP — only $good_runs/$NUM_REPS successful runs after $attempts attempts"
+        [ "$not_retried" = 1 ] && gave_up="$gave_up (not retried: the failure would recur)"
+        echo "[${FRAMEWORK}/${config_name}] $gave_up" | tee -a "$SUMMARY_FILE"
     fi
 done
 

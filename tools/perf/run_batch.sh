@@ -456,6 +456,7 @@ for config_file in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
             RUNS_FAILED=$((RUNS_FAILED + 1))
             echo "                    [FAIL] ${RUN_FAILURE_REASON} exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
                 | tee -a "$SUMMARY_FILE"
+            perf_print_cause "$result_file" "$RUN_FAILURE_REASON"
         else
             echo "                    [ OK ] exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
                 | tee -a "$SUMMARY_FILE"

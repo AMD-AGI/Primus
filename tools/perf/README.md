@@ -419,10 +419,23 @@ export NCCL_DEBUG=WARN                  # optional: confirm UniqueId / bootstrap
 
 ### Multi-node extras
 
-Multi-node additionally honours `MAX_ATTEMPTS_PER_CONFIG` and `FAIL_PATTERN`
-for its retry loop: an attempt whose output matches `FAIL_PATTERN`, or that
-hits one of the run limits below, is stopped and retried.
-`run_batch_multinode.sh` defaults `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`
+Multi-node additionally honours `MAX_ATTEMPTS_PER_CONFIG` (default 6) and
+`FAIL_PATTERN` for its retry loop: an attempt whose output matches
+`FAIL_PATTERN`, or that hits one of the run limits below, is stopped and
+retried. A config that has not succeeded yet is not retried after a failure
+that would recur, so it does not spend all its attempts on it: a
+`python_error` during setup whose exception, as the traceback that stopped
+the run shows it, comes from the config or the code (`AssertionError`,
+`ValueError`, `KeyError`, `TypeError`, `AttributeError`, `IndexError`,
+`ZeroDivisionError`, `NotImplementedError`, `ModuleNotFoundError`, or an
+omegaconf, hydra or yaml error), a `nic_error`, or a second `oom` in a row
+(see "Extracting results"). A `RuntimeError`, `OSError`, `ImportError` or
+distributed error during setup is still retried, as a port, rendezvous,
+network or file system hiccup raises those too, and so is any error whose
+message mentions a connection, a timeout or an unavailable service. The summary then
+says `not retried: another attempt would fail the same way`, and the
+config's `GAVE UP` line `(not retried: the failure would recur)`.
+`RETRY_ALL_FAILURES=1` retries those too. `run_batch_multinode.sh` defaults `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`
 to `eno0` (Fremont); override them the same way on any other site. The
 single-node `docker0` failure above applies here too if the wrong NIC is
 pinned.
@@ -521,6 +534,21 @@ written during the run, it says where it looked. The records are the last
 200 lines at most. Multi-node, each node looks for the file. This usually
 takes under a second, and at most two minutes (three multi-node).
 `FAILING_RANK_OUTPUT=0` turns it off.
+
+The batch summary gives each failed run's cause under its `[FAIL]` line,
+as `results.csv` will have it (unless it only repeats the `[FAIL]` line, as
+for a timeout):
+
+```
+[20:22:04] [run 1/2] megatron/pretrain/.../fail_gbs_assert [7891462e] MBS=4 GBS=130 steps=10 ...
+                    [FAIL] exit: launcher exited with code 1 exit=1 elapsed=36s
+                           cause: python_error at setup: AssertionError: global batch size (130) is not divisible by ...
+```
+
+`python3 tools/perf/extract_results.py --verdict <log>` prints the same for
+one log: its `status`, `failure_reason`, `failed_at`, `from_traceback`
+(`yes` when the detail is the exception a traceback shows stopping the run)
+and `failure_detail`, separated by `\x1f`.
 
 Exit codes of both runners:
 

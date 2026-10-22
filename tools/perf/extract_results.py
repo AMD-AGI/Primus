@@ -1791,13 +1791,48 @@ def _describe(result: dict) -> str:
     )
 
 
+VERDICT_FIELDS = ("status", "failure_reason", "failed_at", "from_traceback", "failure_detail")
+# Not a tab: bash's read merges consecutive tabs, so an empty field would vanish.
+VERDICT_SEPARATOR = "\x1f"
+
+
+def print_verdict(log_path: str) -> int:
+    """One run log's VERDICT_FIELDS on one line, for the batch runners.
+    ``from_traceback`` is "yes" when the detail is the exception that stopped
+    the run, as a traceback shows it, rather than a line found elsewhere."""
+    rows = parse_log(log_path)
+    if not rows:
+        return 3
+    row = dict(rows[0])
+    lines = _read_lines(log_path)
+    rank_output = failure.failing_rank_output(lines)
+    sources = [run_output_lines(lines)] + (
+        [rank_output["lines"]] if rank_output and rank_output["lines"] else []
+    )
+    details = {failure.fatal_exception_detail(source) for source in sources} - {None}
+    row["from_traceback"] = "yes" if row.get("failure_detail") in details else ""
+    values = (str(row.get(field) or "") for field in VERDICT_FIELDS)
+    print(VERDICT_SEPARATOR.join(" ".join(value.split()) for value in values))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Extract benchmarking results from Primus training log files."
     )
-    parser.add_argument("input_dir", help="Directory containing .txt / .log log files")
+    parser.add_argument("input_dir", nargs="?", help="Directory containing .txt / .log log files")
     parser.add_argument("--quiet", action="store_true", help="Print only the totals and the output paths.")
+    parser.add_argument(
+        "--verdict",
+        metavar="LOG",
+        help="Print one run log's status, failure_reason, failed_at and failure_detail, "
+        "separated by \\x1f, and write nothing.",
+    )
     args = parser.parse_args()
+    if args.verdict:
+        return print_verdict(args.verdict)
+    if not args.input_dir:
+        parser.error("input_dir is required")
 
     input_dir = os.path.abspath(args.input_dir)
     if not os.path.isdir(input_dir):

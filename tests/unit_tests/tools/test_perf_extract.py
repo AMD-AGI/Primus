@@ -1205,6 +1205,119 @@ def test_the_runner_writes_the_section_before_the_footer(tmp_path):
     assert extract.parse_log_file(str(log))["failure_detail"].startswith("AssertionError: assert")
 
 
+# --------------------------------------------------------------------------
+# --verdict, and whether another attempt can help
+# --------------------------------------------------------------------------
+
+
+def test_verdict_prints_one_logs_outcome(tmp_path):
+    log = write_log(tmp_path, _traceback("setup", "ValueError: bad config"), exit_code=1)
+    out = subprocess.run(
+        ["python3", str(MODULE_PATH), "--verdict", str(log)], capture_output=True, text=True, check=False
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.rstrip("\n").split("\x1f") == [
+        "failed",
+        "python_error",
+        "setup",
+        "yes",
+        "ValueError: bad config",
+    ]
+
+
+@pytest.mark.parametrize(
+    "body,exit_code,footer,recurs",
+    [
+        pytest.param(_traceback("setup", "ValueError: bad config"), 1, None, "1", id="config-error-at-setup"),
+        pytest.param(
+            _traceback("setup", "omegaconf.errors.ConfigKeyError: Key 'x' is not in struct"),
+            1,
+            None,
+            "1",
+            id="omegaconf-error-at-setup",
+        ),
+        pytest.param(
+            MEGATRON_AVG + _traceback("step", "ValueError: bad batch"), 1, None, "0", id="config-error-later"
+        ),
+        pytest.param(
+            _traceback(
+                "init",
+                "torch.distributed.DistNetworkError: The server socket has failed to listen (EADDRINUSE)",
+            ),
+            1,
+            None,
+            "0",
+            id="port-in-use-at-setup",
+        ),
+        pytest.param(
+            _traceback("load", "OSError: [Errno 116] Stale file handle"),
+            1,
+            None,
+            "0",
+            id="stale-nfs-at-setup",
+        ),
+        pytest.param(
+            _traceback("init", "RuntimeError: HIP error: hipErrorNoDevice"), 1, None, "0", id="runtime-error"
+        ),
+        pytest.param(
+            "[WARNING] caught KeyError: 'foo' while probing, ignoring\n"
+            "torch.distributed.DistStoreError: Timed out after 900 seconds waiting for clients\n",
+            1,
+            None,
+            "0",
+            id="a-warning-line-is-not-the-cause",
+        ),
+        pytest.param(
+            _traceback(
+                "load", "ValueError: Connection error, and we cannot find the requested files in the cache"
+            ),
+            1,
+            None,
+            "0",
+            id="connection-error-as-a-value-error",
+        ),
+        pytest.param(
+            _traceback("load", "ImportError: /nfs/x/_C.so: file too short"), 1, None, "0", id="import-error"
+        ),
+        pytest.param(
+            _traceback("load", "ModuleNotFoundError: No module named 'flash_attn'"),
+            1,
+            None,
+            "1",
+            id="missing-module",
+        ),
+        pytest.param("torch.OutOfMemoryError: HIP out of memory.\n", 1, None, "0", id="one-oom"),
+        pytest.param("Last RCCL warning: 'Bootstrap : no socket interface found'\n", 1, None, "1", id="nic"),
+        pytest.param("RuntimeError: ncclRemoteError: remote process exited\n", 1, None, "0", id="nccl"),
+        pytest.param(
+            MEGATRON_AVG, 143, "timeout: still running after MAX_RUN_SECONDS=60s", "0", id="timeout"
+        ),
+    ],
+)
+def test_which_failures_another_attempt_would_repeat(tmp_path, body, exit_code, footer, recurs):
+    log = write_log(tmp_path, body, exit_code=exit_code, failure_reason=footer)
+    script = (
+        f"set -uo pipefail\nSCRIPT_DIR={MODULE_PATH.parent}\nPERF_MULTINODE=1\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/control.sh\n"
+        f'perf_failure_verdict {log}; echo "$PERF_VERDICT_RECURS"; echo "$PERF_VERDICT"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    got, verdict = out.stdout.split("\n")[:2]
+    assert got == recurs, verdict
+    assert verdict
+
+
+def test_without_a_verdict_the_attempt_is_retried(tmp_path):
+    script = (
+        f"set -uo pipefail\nSCRIPT_DIR={tmp_path}\nPERF_MULTINODE=1\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/control.sh\n"
+        f'perf_failure_verdict {tmp_path}/missing.log; echo "$PERF_VERDICT_RECURS|$PERF_VERDICT"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert (out.returncode, out.stdout.strip()) == (0, "0|")
+
+
 def test_legacy_log_without_footer_is_not_guessed(tmp_path):
     log = tmp_path / "legacy_exp.log"
     log.write_text(
