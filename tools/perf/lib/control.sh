@@ -851,6 +851,9 @@ perf_print_plan() {
         if build_launch_argv "$config_file" "$FRAMEWORK" "$TRAIN_SUITE" 2>/dev/null; then
             echo "      log: $(run_log_name 1)"
             echo "      cmd: $(perf_display_argv "${LAUNCH_ARGV[@]}")"
+            if ! train_steps_conflict "$config_file" "$FRAMEWORK" "$MODULE"; then
+                echo "      NOT RUN: $TRAIN_STEPS_CONFLICT"
+            fi
         else
             echo "      cannot build a launch command for this config (see the error when run)."
         fi

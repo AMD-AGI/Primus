@@ -1318,6 +1318,73 @@ def test_without_a_verdict_the_attempt_is_retried(tmp_path):
     assert (out.returncode, out.stdout.strip()) == (0, "0|")
 
 
+# --------------------------------------------------------------------------
+# TRAIN_STEPS against the learning-rate schedule
+# --------------------------------------------------------------------------
+
+
+def test_a_config_that_was_not_run_has_its_reason(tmp_path):
+    why = "TRAIN_STEPS=10 is not more than lr_warmup_iters=50, and with lr_decay_iters unset ..."
+    log = write_log(tmp_path, "", exit_code=2, failure_reason=f"not_run: {why}")
+    result = extract.parse_log_file(str(log))
+    assert (result["status"], result["failure_reason"], result["failure_detail"], result["failed_at"]) == (
+        "failed",
+        "not_run",
+        why,
+        None,
+    )
+
+
+def _mikefarah_yq() -> bool:
+    import shutil
+
+    if shutil.which("yq") is None:
+        return False
+    out = subprocess.run(["yq", "--version"], capture_output=True, text=True, check=False)
+    return "mikefarah" in out.stdout + out.stderr
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "framework,overrides,train_steps,warmup",
+    [
+        pytest.param("megatron", {"lr_warmup_iters": 50}, 10, "50", id="warmup-longer"),
+        pytest.param("megatron", {"lr_warmup_iters": 50}, 50, "50", id="warmup-as-long"),
+        pytest.param("megatron", {}, 10, "40", id="module-default-warmup"),
+        pytest.param("megatron", {"lr_warmup_iters": "${PRIMUS_WARMUP:50}"}, 10, "50", id="placeholder"),
+        pytest.param("megatron", {"lr_warmup_iters": 50}, 51, None, id="longer-run"),
+        pytest.param("megatron", {"lr_warmup_iters": 50, "lr_decay_iters": 1000}, 10, None, id="decay-set"),
+        pytest.param("megatron", {"lr_warmup_iters": 50, "lr_warmup_fraction": 0.1}, 10, None, id="fraction"),
+        pytest.param("megatron", {"lr_warmup_iters": 50, "train_samples": 1000}, 10, None, id="sample-based"),
+        pytest.param("megatron_bridge", {"lr_warmup_iters": 50}, 10, None, id="ignored-backend"),
+        pytest.param("torchtitan", {"lr_warmup_iters": 50}, 10, None, id="not-megatron"),
+    ],
+)
+def test_train_steps_that_megatrons_schedule_rejects(tmp_path, framework, overrides, train_steps, warmup):
+    lines = [
+        f"modules:\n  pre_trainer:\n    framework: {framework}\n    config: pre_trainer.yaml\n    overrides:"
+    ]
+    lines += [
+        f'      {key}: "{value}"' if isinstance(value, str) else f"      {key}: {value}"
+        for key, value in overrides.items()
+    ]
+    config = tmp_path / "exp.yaml"
+    config.write_text("\n".join(lines + ["      micro_batch_size: 1", ""]))
+    script = (
+        f"set -uo pipefail\nPRIMUS_PATH={REPO_ROOT}\nTRAIN_STEPS={train_steps}\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/run.sh\n"
+        f'train_steps_conflict {config} {framework} pre_trainer; echo "$?|$TRAIN_STEPS_CONFLICT"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    code, why = out.stdout.strip().split("|", 1)
+    if warmup is None:
+        assert (code, why) == ("0", "")
+    else:
+        assert code == "1"
+        assert why.startswith(f"TRAIN_STEPS={train_steps} is not more than lr_warmup_iters={warmup},")
+
+
 def test_legacy_log_without_footer_is_not_guessed(tmp_path):
     log = tmp_path / "legacy_exp.log"
     log.write_text(

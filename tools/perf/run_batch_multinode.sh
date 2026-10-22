@@ -424,13 +424,26 @@ for config_file in "${CONFIG_FILES[@]}"; do
 
     prepare_config "$config_file"
 
-    if ! build_launch_argv "$config_file" "$FRAMEWORK" "$TRAIN_SUITE"; then
+    if ! build_launch_argv "$config_file" "$FRAMEWORK" "$TRAIN_SUITE" 2>"$RESULT_DIR/.build_errors"; then
+        cat "$RESULT_DIR/.build_errors" >&2
         CONFIGS_SKIPPED=$((CONFIGS_SKIPPED + 1))
+        launcher_cmd="<none>"
+        perf_log_not_run "cannot build a launch command: $(sed -n '1s/^\[ERROR\] //p' "$RESULT_DIR/.build_errors")"
+        rm -f "$RESULT_DIR/.build_errors"
         echo "[SKIP/FAIL] ${FRAMEWORK}/${config_name}: cannot build launch command" \
             | tee -a "$SUMMARY_FILE"
         continue
     fi
+    cat "$RESULT_DIR/.build_errors" >&2
+    rm -f "$RESULT_DIR/.build_errors"
     launcher_cmd=$(perf_display_argv "${LAUNCH_ARGV[@]}")
+    if ! train_steps_conflict "$config_file" "$FRAMEWORK" "$MODULE"; then
+        CONFIGS_SKIPPED=$((CONFIGS_SKIPPED + 1))
+        perf_log_not_run "$TRAIN_STEPS_CONFLICT"
+        echo "[NOT RUN] ${FRAMEWORK}/${config_name}: $TRAIN_STEPS_CONFLICT" | tee -a "$SUMMARY_FILE"
+        echo "                    -> $(run_log_name 1)" | tee -a "$SUMMARY_FILE"
+        continue
+    fi
 
     good_runs=0
     attempts=0

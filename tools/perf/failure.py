@@ -452,8 +452,9 @@ def classify_failure(
     footer_cat = footer_cat.strip()
     footer_detail = footer_detail.strip() or None
 
-    # "steps": the diffusion_dlrm run listing the diffusion_bench steps that failed.
-    if footer_cat in ("timeout", "idle", "interrupted", "steps"):
+    # "steps": the diffusion_dlrm run listing the diffusion_bench steps that
+    # failed; "not_run": a config the runner did not launch, and why.
+    if footer_cat in ("timeout", "idle", "interrupted", "steps", "not_run"):
         return footer_cat, footer_detail
     rank = scan_failure_text(rank_lines) if rank_lines else (None, None)
     output = scan_failure_text(run_lines)
@@ -481,7 +482,9 @@ def settle_outcome(result: dict, iterations: list[dict]) -> None:
         result["status"] = "failed"
         result["failure_reason"] = "no_metrics"
         result["failure_detail"] = "the run exited 0 but logged no training step"
-    elif result["status"] in ("failed", "interrupted", "incomplete"):
+    elif (
+        result["status"] in ("failed", "interrupted", "incomplete") and result["failure_reason"] != "not_run"
+    ):
         result["failed_at"] = (
             f"after step {max(it.get('step', 0) for it in iterations)}" if iterations else "setup"
         )

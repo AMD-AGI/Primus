@@ -300,7 +300,8 @@ bash tools/perf/run_batch.sh
 | `CONFIG_FILE` | `tools/perf/configs.yaml` | Catalog to read. |
 | `CONFIG_DIR` | — | Switches to directory mode. |
 | `NUM_REPS` | `1` | Repetitions per config. |
-| `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. Not applied to `megatron_bridge`, whose configs keep their own `train_iters` (their learning-rate warmup and decay are sized to it, and a run no longer than the warmup fails Megatron's `lr_warmup_steps < lr_decay_steps` check), nor to `diffusion_dlrm`, which keeps diffusion_bench's `num_iterations`. |
+| `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. Not applied to `megatron_bridge`, whose configs keep their own `train_iters` (their learning-rate warmup and decay are sized to it, and a run no longer than the warmup fails Megatron's `lr_warmup_steps < lr_decay_steps` check), nor to `diffusion_dlrm`, which keeps diffusion_bench's `num_iterations`. A Megatron config for which it is not longer than the warmup is not run (see "Before each run"). |
+| `CHECK_TRAIN_STEPS` | `1` | `0` runs a Megatron config even when `TRAIN_STEPS` is not longer than its warmup. |
 | `EXTRA_ENV` | — | Space-separated `KEY=VALUE` pairs forwarded into the container as `--env`. See below. |
 | `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` | auto (single node); `eno0` (multi-node) | RCCL/Gloo bootstrap NIC. Set even for 1-node 8-GPU; must not be `docker0`. See below. |
 | `NNODES`, `GPUS_PER_NODE` | `1`, `8` | Cluster topology. |
@@ -479,6 +480,20 @@ batch and leaves the remaining runs unstarted.
   the benchmark repos it needs, and the Hugging Face cache must be writable.
 
 The result of the GPU check is recorded in every run's banner (`GPU check`).
+
+Before each config, its `TRAIN_STEPS` is checked against its learning-rate
+schedule. With `lr_decay_iters` unset, Megatron decays over `train_iters`
+and asserts `lr_warmup_steps < lr_decay_steps`, so a `TRAIN_STEPS` no longer
+than `lr_warmup_iters` fails during setup: the catalog's Megatron configs
+warm up for 2 iterations, and a config that does not set it gets Primus's
+default of 40. Such a config is not launched. It still gets a log for each
+repetition, with exit code 2 and the failure reason `not_run: TRAIN_STEPS=10
+is not more than lr_warmup_iters=40, ...`, and the summary a `[NOT RUN]`
+line; `DRY_RUN=1` shows it too. Each value comes from the config's
+overrides, else from its module config (`primus/configs/modules/...`); a
+schedule set by `lr_warmup_fraction` or by samples is not checked.
+`CHECK_TRAIN_STEPS=0` runs such a config anyway. A config whose launch
+command cannot be built gets a `not_run` log the same way.
 
 ## Time limits and failure reasons
 
@@ -821,8 +836,9 @@ container versions empty.
 The rules below live in [`failure.py`](./failure.py).
 
 `failure_reason` takes the runner's verdict from the footer when it is
-definitive (`timeout`, `idle`, `interrupted`, and `steps` for a
-`diffusion_dlrm` run with no step rows). Otherwise the run output is
+definitive (`timeout`, `idle`, `interrupted`, `not_run` for a config the
+runner did not launch, and `steps` for a `diffusion_dlrm` run with no step
+rows). Otherwise the run output is
 searched, in this order, for `nic_error` (no usable socket interface), `oom`,
 `gpu_contended` (out of memory while this process held less than half the
 GPU, i.e. another process had it), `segfault`, `nccl_error` and
