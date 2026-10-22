@@ -25,8 +25,13 @@ runner's own verdict (``timeout``, ``idle``, ``interrupted``) is taken from
 the log footer; otherwise the run output is searched for the cause:
 ``nic_error``, ``oom``, ``gpu_contended`` (an out-of-memory error while
 PyTorch itself held less than half the GPU, i.e. another process had it),
-``segfault``, ``nccl_error`` or ``python_error``; failing that ``killed``
-(SIGKILL with no error in the log), ``signal``, ``fail_pattern`` or ``exit``.
+``segfault``, ``nccl_error`` or ``python_error``, whose detail is the exception
+that stopped the run when there is one (the root of the traceback chain
+before ``[Primus] Error:``, see _fatal_exception), else an NCCL line or an
+exception line; failing that ``killed`` (SIGKILL with no error in the log),
+``signal``, ``fail_pattern`` or ``exit``. A training run that exited 0
+without logging a step is ``failed`` with ``no_metrics``, and ``failed_at``
+says whether a run that failed got past setup.
 
 Supported header formats:
 
@@ -120,7 +125,7 @@ import sys
 from datetime import datetime
 
 # Bumped whenever a column is added or its meaning changes.
-PARSER_VERSION = 6
+PARSER_VERSION = 7
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 BANNER_KV_RE = re.compile(r"^#\s*([^:]+?)\s*:\s*(.*?)\s*$")
@@ -1011,7 +1016,9 @@ def _int_from_cmd_or_config(
 
 # Searched in this order; the first category found anywhere in the run output
 # wins. A bad NIC or an OOM usually also produces NCCL errors and tracebacks
-# further down, so the specific causes come before the generic ones.
+# further down, so the specific causes come before the generic ones. The
+# detail of nccl_error and python_error is the exception that stopped the run
+# (see _fatal_exception) when there is one.
 FAILURE_PATTERNS = (
     ("nic_error", re.compile(r"no socket interface found", re.IGNORECASE)),
     ("oom", re.compile(r"out of memory|OutOfMemoryError|RESOURCE_EXHAUSTED", re.IGNORECASE)),
@@ -1031,6 +1038,7 @@ FAILURE_PATTERNS = (
         ),
     ),
 )
+NCCL_ERROR_RE = dict(FAILURE_PATTERNS)["nccl_error"]
 # Cheap first pass, so a multi-million-line log only pays for the regexes
 # above on the few lines that can match.
 # Applied to the lower-cased line: re.IGNORECASE over these alternatives is
@@ -1040,13 +1048,48 @@ FAILURE_PREFILTER_RE = re.compile(
     r"segmentation fault|nccl|rccl|watchdog caught|traceback|error|exception"
 )
 # Primus's own patch log lines quote error and version strings they guard
-# against; they are never the failure.
+# against, and a patch skipped for a missing dependency logs its ImportError's
+# traceback; they are never the failure.
 PRIMUS_NOISE = "[Patch"
-TRACEBACK_MARKER = "Traceback (most recent call last)"
-# An exception line once its log prefix is stripped, e.g. "ValueError: bad".
+# Primus's log prefix: "[20261021 05:06:54][rank-0/8][ERROR]    [---file.py:12] : "
+# on the console ("(PrimusMaster  pid=N) " and node-<n> on the master), and
+# "[20261021 05:06:54][root/amd][pre_trainer][ip-...][rank-0/8][ERROR] ..." in
+# its per-rank log files. A multi-line message continues on unprefixed lines.
+PRIMUS_RECORD_RE = re.compile(
+    r"^(?:\(PrimusMaster[^)]*\)\s*)?\[\d{8} \d{2}:\d{2}:\d{2}\](?:\[[^\]]*\])*?"
+    r"\[(?:rank|node)-(\d+)/\d+\]\[([A-Z]+)\]\s*(?:\[-*[^\]\s]+:\d+\] : )?"
+)
+ANSI_RESET = "\x1b[0m"
+PATCH_SKIPPED = "failed due to missing dependency"
+# PyTorch prefixes each line of an uncaught exception with "[rank3]: ".
+TORCH_RANK_PREFIX_RE = re.compile(r"^\[rank\d+\]: ?")
+# Lines another process can put in the middle of a traceback: torchrun's glog
+# lines and the launcher's own log lines.
+FOREIGN_LINE_RE = re.compile(
+    r"^(?:\[?[IWEF]\d{4} \d{2}:\d{2}:\d{2}|\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[)"
+)
+TRACEBACK_MARKER = "Traceback (most recent call last):"
+MAX_TRACEBACK_LINES = 2000
+CHAIN_LINKS = {
+    "The above exception was the direct cause of the following exception:": "cause",
+    "During handling of the above exception, another exception occurred:": "context",
+}
+# loguru marks the frame that caught the exception with ">".
+FRAME_RE = re.compile(r'^\s*>?\s*File "([^"]+)", line (\d+), in ')
+CARET_RE = re.compile(r"^\s*[\^~]+\s*$")
+# The last line of a traceback, e.g. "ValueError: bad" or a bare "AssertionError".
+EXCEPTION_RE = re.compile(r"^((?:[A-Za-z_]\w*\.)*[A-Z]\w*)(?::(.*))?$")
+# An exception line once its log prefix is stripped, for tracebacks too
+# mangled to parse.
 PY_EXCEPTION_LINE_RE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception))(?::|$)")
 PY_EXCEPTION_RE = re.compile(r"\b([A-Za-z_][\w.]*(?:Error|Exception)):\s")
+# torchrun's summary, and Primus's wrapper around the training error.
 GENERIC_EXCEPTIONS = ("ChildFailedError",)
+TRAINING_WRAPPER = "RuntimeError: Training execution failed"
+# A chain ending in one of these was stopped from outside (a signal, an exit
+# call); the runner's verdict says more than the traceback.
+NOT_A_FAILURE = ("KeyboardInterrupt", "SystemExit", "GeneratorExit")
+PRIMUS_ERROR = "[Primus] Error:"
 # PyTorch's OOM message says how much of the GPU this process held. When that
 # is a small part of the capacity, something else was occupying the GPU.
 _SIZE = r"([\d.]+) (bytes|B|KiB|MiB|GiB)"
@@ -1102,44 +1145,243 @@ def _oom_is_contended(oom_lines: list[str]) -> bool:
     return False
 
 
+class _OutputTexts:
+    """The run output as failure analysis reads it: ``texts[i]`` is line ``i``
+    without colour codes or a log prefix, None for the lines of a [Patch]
+    message (with the traceback a patch logs when it is skipped for a missing
+    dependency). Made on demand, since a log can have millions of lines; ``raw``
+    is there for cheap substring checks."""
+
+    def __init__(self, run_lines: list[str]):
+        self.raw = run_lines
+        self.noise: set[int] = set()
+        for i, line in enumerate(run_lines):
+            if PRIMUS_NOISE in line and i not in self.noise:
+                self.noise.update(range(i, self._patch_message_end(i) + 1))
+
+    def __len__(self) -> int:
+        return len(self.raw)
+
+    def _clean(self, i: int) -> str:
+        line = self.raw[i].rstrip("\r\n")
+        return strip_ansi(line) if "\x1b" in line else line
+
+    def _patch_message_end(self, start: int) -> int:
+        """Last line of the [Patch] message on line ``start``. Only a message
+        that goes on to the traceback of a patch skipped for a missing
+        dependency has more: with colours, up to the line with its colour
+        reset; without, through that traceback (chained ones included)."""
+        n = len(self.raw)
+        end = min(n, start + MAX_TRACEBACK_LINES)
+        line = self.raw[start].rstrip("\r\n")
+        if "\x1b" in line:
+            if line.endswith(ANSI_RESET):
+                return start
+            for j in range(start + 1, end):
+                if self.raw[j].rstrip("\r\n").endswith(ANSI_RESET):
+                    return j
+            return start
+        if PATCH_SKIPPED not in line:
+            return start
+        last, j = start, start + 1
+        while j < end and self._clean(j).strip() == TRACEBACK_MARKER:
+            j += 1
+            while j < end and (not self._clean(j).strip() or self._clean(j)[0].isspace()):
+                j += 1
+            last = j  # the exception line
+            j += 1
+            while j < end and (not self._clean(j).strip() or self._clean(j).strip() in CHAIN_LINKS):
+                j += 1
+        return min(last, n - 1)
+
+    def __getitem__(self, i: int) -> str | None:
+        if i in self.noise:
+            return None
+        clean = self._clean(i)
+        if clean.startswith(("[", "(")):
+            m = PRIMUS_RECORD_RE.match(clean) or TORCH_RANK_PREFIX_RE.match(clean)
+            if m:
+                return clean[m.end() :]
+        return clean
+
+    def tag(self, i: int) -> tuple[str, str] | None:
+        """``(rank, level)`` of a Primus record line, None for any other line."""
+        clean = self._clean(i)
+        m = PRIMUS_RECORD_RE.match(clean) if clean.startswith(("[", "(")) else None
+        return (m.group(1), m.group(2)) if m else None
+
+
+def _read_traceback(texts: _OutputTexts, start: int) -> tuple[dict | None, int]:
+    """The traceback whose header is on line ``start``, and the index after it.
+    The exception is None when the block does not end in an exception line.
+    Indentation counts from the header's, as torchrun's summary indents the
+    traceback it got from a rank's error file. Records of another rank or log
+    level, and torchrun's and the launcher's own lines, are skipped."""
+    frames: list[dict] = []
+    header = texts[start] or ""
+    base = len(header) - len(header.lstrip())
+    owner = texts.tag(start)
+    i = start + 1
+    end = min(len(texts), start + MAX_TRACEBACK_LINES)
+    while i < end:
+        text = texts[i]
+        i += 1
+        if text is None or not text.strip() or CARET_RE.match(text) or FOREIGN_LINE_RE.match(text):
+            continue
+        tag = texts.tag(i - 1)
+        if tag is not None and tag != owner:
+            continue
+        frame = FRAME_RE.match(text)
+        if frame:
+            frames.append({"file": frame.group(1), "line": int(frame.group(2)), "source": None})
+        elif len(text) - len(text.lstrip()) > base:
+            if frames and frames[-1]["source"] is None:
+                frames[-1]["source"] = text.strip()
+        else:
+            m = EXCEPTION_RE.match(text.strip())
+            if not m:
+                return None, i - 1
+            exception = {
+                "type": m.group(1),
+                "message": (m.group(2) or "").strip(),
+                "text": text.strip(),
+                "frames": frames,
+                "index": i - 1,
+            }
+            return exception, i
+    return None, i
+
+
+def _traceback_chains(texts: _OutputTexts) -> list[list[dict]]:
+    """Every traceback in the output, chained as Python prints them: each chain
+    lists its exceptions cause first, and an exception's ``link`` ("cause" or
+    "context") says how it relates to the one before it."""
+    chains: list[list[dict]] = []
+    linkable = False  # an exception was read, so a link line can follow it
+    link = None
+    i = 0
+    while i < len(texts):
+        if TRACEBACK_MARKER in texts.raw[i] and (texts[i] or "").strip().endswith(TRACEBACK_MARKER):
+            exception, i = _read_traceback(texts, i)
+            if exception is None:
+                linkable, link = False, None
+                continue
+            exception["link"] = link
+            if link and chains:
+                chains[-1].append(exception)
+            else:
+                chains.append([exception])
+            linkable, link = True, None
+            continue
+        # The rest of a multi-line exception message may come before the link
+        # line; after it, only blank lines before the next traceback.
+        if linkable:
+            if link is None:
+                if "exception" in texts.raw[i]:
+                    link = CHAIN_LINKS.get((texts[i] or "").strip())
+            elif (texts[i] or "").strip():
+                linkable, link = False, None
+        i += 1
+    return chains
+
+
+def _is_wrapper(exception: dict) -> bool:
+    return exception["type"].endswith(GENERIC_EXCEPTIONS) or exception["text"].startswith(TRAINING_WRAPPER)
+
+
+def _root_exception(chain: list[dict]) -> dict | None:
+    """The exception a chain started from: back along "raise ... from" links and
+    past wrappers. None for a chain of torchrun's summary alone."""
+    i = len(chain) - 1
+    while i > 0 and (chain[i]["link"] == "cause" or _is_wrapper(chain[i])):
+        i -= 1
+    return None if chain[i]["type"].endswith(GENERIC_EXCEPTIONS) else chain[i]
+
+
+def _fatal_exception(texts: _OutputTexts) -> tuple[dict | None, bool]:
+    """The exception that stopped the run: the root of the last chain printed
+    before Primus's first "[Primus] Error:" line, else of the last chain. An
+    earlier traceback is usually one that was caught and logged. Also whether
+    the run was stopped from outside: that chain ends in an interrupt or exit."""
+    chains = _traceback_chains(texts)
+    anchor = next(
+        (
+            i
+            for i, line in enumerate(texts.raw)
+            if PRIMUS_ERROR in line and (texts[i] or "").lstrip().startswith(PRIMUS_ERROR)
+        ),
+        None,
+    )
+    if anchor is not None and any(chain[-1]["index"] < anchor for chain in chains):
+        chains = [chain for chain in chains if chain[-1]["index"] < anchor]
+    for chain in reversed(chains):
+        if chain[-1]["type"].endswith(NOT_A_FAILURE):
+            return None, True
+        root = _root_exception(chain)
+        if root is not None:
+            return root, False
+    return None, False
+
+
+def _exception_detail(exception: dict) -> str:
+    """The exception line. A bare one gets the location of the frame that
+    raised it, and a bare AssertionError the failed assert as well."""
+    text = exception["text"]
+    if not exception["message"] and exception["frames"]:
+        frame = exception["frames"][-1]
+        where = f"{os.path.basename(frame['file'])}:{frame['line']}"
+        if frame["source"] and exception["type"].endswith("AssertionError"):
+            text = f"{exception['type']}: {frame['source']} ({where})"
+        else:
+            text = f"{exception['type']} ({where})"
+    return text[:MAX_DETAIL_CHARS]
+
+
 def _scan_failure_text(run_lines: list[str]) -> tuple[str | None, str | None]:
+    texts = _OutputTexts(run_lines)
     first: dict[str, str] = {}
     oom_lines: list[str] = []
     traceback_seen = False
-    loose_exception = None
-    for line in run_lines:
-        if not FAILURE_PREFILTER_RE.search(line.lower()) or PRIMUS_NOISE in line:
+    tail_exception = None  # last exception line after a traceback header
+    loose_exception = None  # first "XError: ..." anywhere
+    for i, line in enumerate(run_lines):
+        if not FAILURE_PREFILTER_RE.search(line.lower()):
             continue
-        clean = strip_ansi(line)
+        text = texts[i]
+        if text is None:
+            continue
         for category, pattern in FAILURE_PATTERNS:
-            if pattern.search(clean):
-                if category not in first:
-                    first[category] = clean
+            if pattern.search(text):
+                first.setdefault(category, text)
                 if category == "oom":
-                    oom_lines.append(clean)
-        # The root-cause exception is the last line of the first traceback,
-        # not whichever "XError:" happens to be logged first (a benign import
-        # warning, for instance).
-        if "python_error" not in first:
-            if TRACEBACK_MARKER in clean:
-                traceback_seen = True
-            elif traceback_seen:
-                m = PY_EXCEPTION_LINE_RE.match(_clean_detail(clean))
-                if m and not m.group(1).endswith(GENERIC_EXCEPTIONS):
-                    first["python_error"] = clean
-            elif loose_exception is None:
-                m = PY_EXCEPTION_RE.search(clean)
-                if m and not m.group(1).endswith(GENERIC_EXCEPTIONS):
-                    loose_exception = clean[m.start() :]
-    if "python_error" not in first and loose_exception:
-        first["python_error"] = loose_exception
-    for category in [c for c, _ in FAILURE_PATTERNS] + ["python_error"]:
+                    oom_lines.append(text)
+        if TRACEBACK_MARKER in text:
+            traceback_seen = True
+        elif traceback_seen:
+            m = PY_EXCEPTION_LINE_RE.match(text.strip())
+            if m and not m.group(1).endswith(GENERIC_EXCEPTIONS):
+                tail_exception = text
+        if loose_exception is None:
+            m = PY_EXCEPTION_RE.search(text)
+            if m and not m.group(1).endswith(GENERIC_EXCEPTIONS):
+                loose_exception = text[m.start() :]
+    for category in ("nic_error", "oom", "segfault"):
         if category not in first:
             continue
         if category == "oom" and _oom_is_contended(oom_lines):
-            category = "gpu_contended"
-            return category, _clean_detail(next(l for l in oom_lines if OOM_TOTAL_RE.search(l)))
+            return "gpu_contended", _clean_detail(next(l for l in oom_lines if OOM_TOTAL_RE.search(l)))
         return category, _clean_detail(first[category])
+    fatal, stopped = _fatal_exception(texts)
+    if "nccl_error" in first:
+        if fatal is not None and NCCL_ERROR_RE.search(fatal["text"]):
+            return "nccl_error", _exception_detail(fatal)
+        return "nccl_error", _clean_detail(first["nccl_error"])
+    if fatal is not None:
+        return "python_error", _exception_detail(fatal)
+    # Stopped by a signal or an exit call: an exception line elsewhere is not why.
+    for exception in () if stopped else (tail_exception, loose_exception):
+        if exception:
+            return "python_error", _clean_detail(exception)
     return None, None
 
 
@@ -1228,6 +1470,20 @@ def _spread(values: list[float]) -> dict:
     return {"min": min(values), "max": max(values), "stdev": stdev, "cv": stdev / mean if mean else None}
 
 
+def _settle_outcome(result: dict, iterations: list[dict]) -> None:
+    """What only the parsed steps of a training run tell: a run that exited 0
+    without logging a step failed (no_metrics), and how far a run that did not
+    pass got. A no_metrics run finished, so it has no failed_at."""
+    if result["status"] == "ok" and not iterations:
+        result["status"] = "failed"
+        result["failure_reason"] = "no_metrics"
+        result["failure_detail"] = "the run exited 0 but logged no training step"
+    elif result["status"] in ("failed", "interrupted", "incomplete"):
+        result["failed_at"] = (
+            f"after step {max(it.get('step', 0) for it in iterations)}" if iterations else "setup"
+        )
+
+
 FAILED_ATTEMPT_RE = re.compile(r"-failed-attempt(\d+)_")
 
 
@@ -1309,6 +1565,7 @@ def parse_log_file(filepath: str) -> dict | None:
         **{field: None for field in PLATFORM_BANNER_KEYS},
         "hmean_nominal_tflops": None,
         "throughput_note": None,
+        "failed_at": None,
     }
 
     config_text = parse_config_section(lines)
@@ -1388,6 +1645,7 @@ def parse_log_file(filepath: str) -> dict | None:
         return None
 
     result["num_iterations"] = len(iterations)
+    _settle_outcome(result, iterations)
     if not iterations:
         return result
 
@@ -1823,6 +2081,8 @@ CSV_FIELDS = [
     # Added in parser version 6.
     "hmean_nominal_tflops",
     "throughput_note",
+    # Added in parser version 7.
+    "failed_at",
 ]
 
 

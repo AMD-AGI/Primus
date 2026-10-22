@@ -713,6 +713,7 @@ files keep working:
 | `cpu_model`, `cpu_topology`, `cpu_frequency`, `cpu_idle`, `host_memory` | CPU model; sockets, cores, threads and NUMA nodes; frequency driver, boost, max clock and EPP; idle states; usable and installed memory and DIMMs. |
 | `gpu_vram`, `gpu_power_cap`, `gpu_partition`, `gpu_clocks`, `gpu_vbios`, `gpu_driver`, `rdma_nics` | Per-GPU memory, power cap, compute/memory partition, perf level and max clock, VBIOS, the host GPU driver release, and the active RDMA ports. |
 | `hmean_nominal_tflops`, `throughput_note` | Megatron-Bridge post-training without packed sequences: its `MODEL_TFLOP/s/GPU` estimate, kept under this name instead of `hmean_tflops`, and why (see below). |
+| `failed_at` | For a training run that failed, was interrupted or is incomplete: `setup` when it logged no training step, otherwise `after step N`, the last step it logged, numbered as the backend numbers them (MaxText from 0). Empty for `no_metrics`, which finished. Empty for `diffusion_dlrm` runs and their `diffusion` / `dlrm` rows. |
 
 Megatron-Bridge's `MODEL_TFLOP/s/GPU` is an estimate, not a measurement:
 global batch × `seq_length` × the FLOPs of one training token, divided by the
@@ -764,12 +765,33 @@ definitive (`timeout`, `idle`, `interrupted`, and `steps` for a
 searched, in this order, for `nic_error` (no usable socket interface), `oom`,
 `gpu_contended` (out of memory while this process held less than half the
 GPU, i.e. another process had it), `segfault`, `nccl_error` and
-`python_error` (the exception at the end of the first traceback, other than
-torchrun's `ChildFailedError`). Primus's own `[Patch]` log lines are ignored.
-Failing that it is `killed` (SIGKILL with no error in the log, e.g. the host
-OOM killer), `signal`, `fail_pattern`, `exit`, or `unknown`; a failed run
-always has a reason. `incomplete` rows only get one when the output shows a
-cause.
+`python_error`.
+
+The detail of `nccl_error` and `python_error` is the exception that stopped
+the run, when the output has one (an NCCL one for `nccl_error`): the root of
+the traceback chain printed just before Primus's `[Primus] Error:` line, or
+of the last chain. That is back along `raise ... from` to the original
+error, past Primus's `RuntimeError: Training execution failed` and torchrun's
+`ChildFailedError`; a chain that ends in `KeyboardInterrupt` or `SystemExit`
+does not count. A bare exception gets the location it was raised at, and a
+bare `AssertionError` the failed assert too, e.g.
+`AssertionError: assert self.lr_warmup_steps < self.lr_decay_steps
+(optimizer_param_scheduler.py:74)`. Otherwise the detail is the first NCCL
+line, or an exception line. Primus's own `[Patch]` messages are ignored,
+along with the traceback a patch logs when it is skipped for a missing
+dependency.
+
+Failing all that, the reason is `killed` (SIGKILL with no error in the log,
+e.g. the host OOM killer), `signal`, `fail_pattern`, `exit`, or `unknown`; a
+failed run always has a reason. `incomplete` rows only get one when the
+output shows a cause. A training run that exited 0 without logging a
+training step is `failed` with `no_metrics`, even though the batch summary
+shows it as passed.
+
+For the PyTorch backends, Primus's launcher passes on torchrun's output only
+for local rank 0 (and, on a multi-node run, the last local rank of the last
+node), so when another rank failed first, the detail is that rank's view of
+the failure.
 
 Logs written before these fields existed simply leave the columns empty.
 Older logs still get a `status` and a `failure_reason`: from their exit code
@@ -791,7 +813,7 @@ than `results.csv`:
 |---|---|
 | Overview | One column per batch: outcome (with the errors of a refused batch), timing, image (tag, digest, ID), container ROCm/HIP and Torch, Primus commit and submodule pins, the platform (system description, GPU model, nodes and GPUs, server, BIOS, CPU, memory, GPU settings, host GPU driver, NICs, OS), host settings, run settings (reps, `TRAIN_STEPS`, limits, the `diffusion_dlrm` config), and run counts (planned, started, failed, not started). With `--baseline`, each baseline's image, commit and batches. |
 | Performance | One row per unique backend, model, precision, config hash, sequence length, MBS, GBS, nodes, GPUs and image ID, with runs ok / total and the means over the successful runs of TFLOP/s per GPU and throughput (per GPU, and for all GPUs), with its unit: tokens/s, samples/s, frames/s or recommendations/s. Megatron-Bridge post-training without packed sequences shows nominal TFLOP/s instead of TFLOP/s, in its own column (see "Extracting results"). Also the step counts run, run-to-run CV, GPU memory and minutes per run. |
-| Runs | Every run, with its status, failure reason and detail, throughput note, image, result directory and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
+| Runs | Every run, with its status, failure reason, where it failed and the detail, throughput note, image, result directory and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
 | Chart | TFLOP/s per GPU for each config (and the baseline). |
 
 - **Averages.** A config's numbers are the arithmetic mean over its
