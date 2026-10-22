@@ -662,6 +662,64 @@ perf_failing_rank_section() {
 }
 
 # ---------------------------------------------------------------------------
+# Why a run failed, and whether another attempt can help
+# ---------------------------------------------------------------------------
+
+RETRY_ALL_FAILURES="${RETRY_ALL_FAILURES:-0}"
+PERF_VERDICT=""
+PERF_VERDICT_REASON=""
+PERF_VERDICT_RECURS=0
+
+# Exceptions a config or the code raises, not the cluster: during setup they
+# recur on every attempt. RuntimeError, OSError, ImportError (a half-synced
+# checkout, a shared library) and the distributed errors are left out, as a
+# rendezvous, network or file system hiccup raises those too, and so is any
+# message that reads like one.
+PERF_CONFIG_ERRORS="AssertionError ValueError KeyError TypeError AttributeError IndexError ZeroDivisionError NotImplementedError ModuleNotFoundError"
+PERF_TRANSIENT_WORDS_RE='connection|timed out|timeout|temporarily|unavailable|address already in use|eaddrinuse|stale file handle|broken pipe'
+
+# perf_failure_verdict <log>: PERF_VERDICT is the extractor's reading of a
+# failed run, e.g. "python_error at setup: AssertionError: ...", empty when it
+# cannot tell, and PERF_VERDICT_REASON its failure_reason. PERF_VERDICT_RECURS
+# is 1 when another attempt would fail the same way: a config error during
+# setup (PERF_CONFIG_ERRORS, or an omegaconf, hydra or yaml one) that a
+# traceback shows as the exception that stopped the run, or an unusable NIC.
+perf_failure_verdict() {
+    local log="$1" status="" reason="" failed_at="" from_traceback="" detail="" exception
+    PERF_VERDICT=""
+    PERF_VERDICT_REASON=""
+    PERF_VERDICT_RECURS=0
+    command -v python3 >/dev/null 2>&1 || return 0
+    IFS=$'\x1f' read -r status reason failed_at from_traceback detail < <(
+        timeout -k 5 120 python3 "$SCRIPT_DIR/extract_results.py" --verdict "$log" 2>/dev/null
+    )
+    [ -n "$reason" ] || return 0
+    PERF_VERDICT="${reason}${failed_at:+ at $failed_at}${detail:+: $detail}"
+    PERF_VERDICT_REASON="$reason"
+    case "$reason" in
+        nic_error) PERF_VERDICT_RECURS=1 ;;
+        python_error)
+            exception="${detail%%[: (]*}"
+            if [ "$failed_at" = setup ] && [ "$from_traceback" = yes ] && ! [[ "${detail,,}" =~ $PERF_TRANSIENT_WORDS_RE ]] &&
+                { [[ " $PERF_CONFIG_ERRORS " == *" ${exception##*.} "* ]] ||
+                [[ "$exception" == omegaconf.* || "$exception" == hydra.* || "$exception" == yaml.* ]]; }; then
+                PERF_VERDICT_RECURS=1
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# perf_print_cause <log> <runner's failure reason>: the cause line under a
+# [FAIL] line, unless it would only repeat the runner's own verdict.
+perf_print_cause() {
+    perf_failure_verdict "$1"
+    if [ -n "$PERF_VERDICT" ] && [ "$PERF_VERDICT_REASON" != "${2%%:*}" ]; then
+        echo "                           cause: $PERF_VERDICT" | tee -a "$SUMMARY_FILE"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
 

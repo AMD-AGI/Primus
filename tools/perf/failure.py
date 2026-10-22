@@ -395,6 +395,13 @@ def scan_failure_text(run_lines: list[str]) -> tuple[str | None, str | None]:
     return None, None
 
 
+def fatal_exception_detail(lines: list[str]) -> str | None:
+    """The detail scan_failure_text gives the exception that stopped the run,
+    when ``lines`` hold one in a traceback it could read."""
+    fatal, _ = _fatal_exception(_OutputTexts(lines))
+    return _exception_detail(fatal) if fatal is not None else None
+
+
 def last_output_line(run_lines: list[str]) -> str | None:
     for line in reversed(run_lines):
         text = clean_detail(line)
