@@ -292,6 +292,7 @@ bash tools/perf/run_batch.sh
 | `GPU_BUSY_MIB` | `2048` | A GPU with more memory in use than this counts as busy. |
 | `GPU_BUSY_WAIT_SECONDS` | `60` | How long to wait for busy GPUs to free up before refusing. |
 | `ALLOW_BUSY_GPUS` | `0` | `1` runs even when the GPUs are busy. |
+| `FAILING_RANK_OUTPUT` | `1` | `0` does not copy the failing rank's own log into the log of a failed run (see "Time limits and failure reasons"). |
 | `EXTRACT` | `1` | `0` skips refreshing `results.csv` / `results.json` at the end of a batch. |
 | `REPORT` | `1` | `0` skips writing `report.xlsx` at the end of a batch (see "Excel report"); `EXTRACT=0` skips it too. |
 | `PULL_IMAGE` | `0` | `1` (or `true` / `yes`) pulls `DOCKER_IMAGE` on every node before the batch even if the tag is present. |
@@ -491,6 +492,35 @@ Every log ends with a footer that says why the run ended:
 out each step itself) and, when some of its steps failed, the category
 `steps`, e.g. `steps: 2 of 8 diffusion_bench steps not successful:
 diffusion_hunyuan-video_bs3 oom, dlrm_FP32 timeout`.
+
+The run output only has local rank 0's console (and, multi-node, the last
+local rank of the last node's), so when another rank fails first, its error
+is not there. When torchrun's summary names that rank (`Root Cause (first
+observed failure)`), the runner copies its ERROR records from this run out
+of Primus's own per-rank log,
+`<workspace>/<team>/<user>/<exp>/logs/<module>/rank-<N>/error.log`, into the
+log, between the run output and the footer:
+
+```
+########################## Begin Failing Rank Output ###########################
+# Failing rank     : 2 (local rank 2) on node-1.cluster.local, exit code 1
+# Source           : .../output/amd/root/llama3.1_8B-pretrain/logs/pre_trainer/rank-2/error.log (its ERROR records from this run)
+[20261022 18:52:27][root/amd][pre_trainer][ip-localhost][rank-2/8][ERROR]    [---traceback.py:1050] : Traceback (most recent call last):
+...
+########################### End Failing Rank Output ############################
+```
+
+The workspace is the config's `workspace` as the container saw it, with
+`EXTRA_ENV` and the runner's `PRIMUS_*` variables (`PRIMUS_WORKSPACE`, say)
+applied, and the experiment is the run's own. Primus appends every run of an
+experiment to the same files, so only records stamped after the run started
+are copied. When that rank logged no ERROR record, the section has the last
+lines of its `debug.log` instead (a native crash, for one, leaves no Python
+error), which are not read as the cause; when no log of that rank was
+written during the run, it says where it looked. The records are the last
+200 lines at most. Multi-node, each node looks for the file. This usually
+takes under a second, and at most two minutes (three multi-node).
+`FAILING_RANK_OUTPUT=0` turns it off.
 
 Exit codes of both runners:
 
@@ -714,6 +744,7 @@ files keep working:
 | `gpu_vram`, `gpu_power_cap`, `gpu_partition`, `gpu_clocks`, `gpu_vbios`, `gpu_driver`, `rdma_nics` | Per-GPU memory, power cap, compute/memory partition, perf level and max clock, VBIOS, the host GPU driver release, and the active RDMA ports. |
 | `hmean_nominal_tflops`, `throughput_note` | Megatron-Bridge post-training without packed sequences: its `MODEL_TFLOP/s/GPU` estimate, kept under this name instead of `hmean_tflops`, and why (see below). |
 | `failed_at` | For a training run that failed, was interrupted or is incomplete: `setup` when it logged no training step, otherwise `after step N`, the last step it logged, numbered as the backend numbers them (MaxText from 0). Empty for `no_metrics`, which finished. Empty for `diffusion_dlrm` runs and their `diffusion` / `dlrm` rows. |
+| `failing_rank`, `failing_host` | The rank torchrun named as the first to fail, and its node, when the log has its section (see "Time limits and failure reasons"). |
 
 Megatron-Bridge's `MODEL_TFLOP/s/GPU` is an estimate, not a measurement:
 global batch × `seq_length` × the FLOPs of one training token, divided by the
@@ -790,10 +821,11 @@ output shows a cause. A training run that exited 0 without logging a
 training step is `failed` with `no_metrics`, even though the batch summary
 shows it as passed.
 
-For the PyTorch backends, Primus's launcher passes on torchrun's output only
-for local rank 0 (and, on a multi-node run, the last local rank of the last
-node), so when another rank failed first, the detail is that rank's view of
-the failure.
+When the log has the failing rank's own records (see "Time limits and
+failure reasons"), they are searched first, and `failing_rank` and
+`failing_host` say which rank that was. Without them the detail is local
+rank 0's view of the failure, as the PyTorch backends' console shows no
+other rank (but the last local rank of the last node, multi-node).
 
 Logs written before these fields existed simply leave the columns empty.
 Older logs still get a `status` and a `failure_reason`: from their exit code

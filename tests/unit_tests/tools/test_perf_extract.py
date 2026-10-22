@@ -19,6 +19,8 @@ Pure CPU; no GPU, no yq, no Primus import required.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -973,6 +975,234 @@ def test_failed_at_tells_setup_from_training(tmp_path):
     )
     ok = extract.parse_log_file(str(write_log(tmp_path, MEGATRON_AVG, failure_reason="none", name="c.log")))
     assert (crashed["failed_at"], hung["failed_at"], ok["failed_at"]) == ("after step 5", "setup", None)
+
+
+# --------------------------------------------------------------------------
+# The failing rank's own log
+# --------------------------------------------------------------------------
+
+failure = extract.failure
+
+
+def torchrun_summary(
+    rank: int, local_rank: int, exitcode: int, time: str, host: str = "node-1.cluster"
+) -> str:
+    return (
+        "Root Cause (first observed failure):\n[0]:\n"
+        f"  time      : {time}\n  host      : {host}\n"
+        f"  rank      : {rank} (local_rank: {local_rank})\n  exitcode  : {exitcode} (pid: 1758)\n"
+        "  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n"
+        "============================================================\n"
+    )
+
+
+def test_failing_rank_is_the_earliest_root_cause():
+    lines = (
+        torchrun_summary(9, 1, -15, "2026-10-22_18:53:20", "node-2")
+        + torchrun_summary(3, 3, 1, "2026-10-22_18:53:14", "node-1")
+    ).splitlines(keepends=True)
+    assert failure.failing_rank(lines) == {
+        "rank": 3,
+        "local_rank": 3,
+        "host": "node-1",
+        "exitcode": 1,
+        "time": "2026-10-22_18:53:14",
+    }
+    assert failure.failing_rank(["training...\n"]) is None
+
+
+def rank_record(time: str, level: str, message: str) -> str:
+    """A record of Primus's per-rank log files (no colours)."""
+    return f"[{time}][root/amd][pre_trainer][ip-localhost][rank-3/8]{f'[{level}]':<11}[-----traceback.py:1050] : {message}\n"
+
+
+def failing_rank_run(tmp_path, with_rank_log: bool = True) -> Path:
+    """A log whose rank 3 failed first, with rank 3's error.log in a workspace
+    given through EXTRA_ENV; the log has no section yet."""
+    workspace = tmp_path / "ws"
+    rank_dir = workspace / "amd" / "root" / "exp1" / "logs" / "pre_trainer" / "rank-3"
+    if with_rank_log:
+        rank_dir.mkdir(parents=True)
+        (rank_dir / "error.log").write_text(
+            rank_record("20261021 09:00:00", "ERROR", "ValueError: an earlier run of this experiment")
+            + rank_record(
+                "20261022 18:52:05",
+                "ERROR",
+                "[Patch] ✗ Patch 'x' failed due to missing dependency: no triton",
+            )
+            + "Traceback (most recent call last):\n"
+            + '  File "/primus/core/patches/patch_runner.py", line 127, in run_patches\n'
+            + "ModuleNotFoundError: No module named 'triton'\n"
+            + rank_record("20261022 18:52:27", "ERROR", "Traceback (most recent call last):")
+            + rank_record("20261022 18:52:27", "ERROR", '  File "/Megatron-LM/x.py", line 74, in __init__')
+            + "    assert self.lr_warmup_steps < self.lr_decay_steps\n"
+            + rank_record("20261022 18:52:27", "ERROR", "AssertionError")
+            + rank_record(
+                "20261022 18:52:27",
+                "ERROR",
+                "[Primus] Error: RuntimeError: Training execution failed:  (x.py:121)",
+            )
+        )
+    body = (
+        primus_record("INFO", "train_runtime.py:90", "starting").replace(
+            "20261021 05:06:54", "20261022 18:52:00"
+        )
+        + "torch.distributed.elastic.multiprocessing.errors.ChildFailedError: \n"
+        + torchrun_summary(3, 3, 1, "2026-10-22_18:52:29")
+    )
+    log = write_log(
+        tmp_path,
+        body,
+        exit_code=1,
+        failure_reason="exit: launcher exited with code 1",
+        with_footer=False,
+        config_body="workspace: ${PRIMUS_WORKSPACE:./output}\nexp_name: ${PRIMUS_EXP_NAME:exp1}\nmodules:\n  pre_trainer:\n    framework: megatron\n",
+        banner_extra=f"# Train Module     : pre_trainer  (CLI verb: train pretrain)\n# Extra env (--env): PRIMUS_WORKSPACE={workspace}\n",
+    )
+    return log
+
+
+def finish_log(log: Path, section: list[str] | None) -> None:
+    """End the log the way the runner does: section, then footer."""
+    footer = FOOTER_TEMPLATE.format(
+        exit_code=1, failure_line="# Failure reason   : exit: launcher exited with code 1\n"
+    )
+    head, _, tail = footer.partition("\n\n")
+    log.write_text(log.read_text() + head + "\n\n" + ("\n".join(section) + "\n\n" if section else "") + tail)
+
+
+def test_the_failing_ranks_own_records_are_the_cause(tmp_path):
+    log = failing_rank_run(tmp_path)
+    spec = failure.failing_rank_spec(str(log), str(tmp_path), since=0)
+    assert (spec["rank"], spec["workspace"], spec["exp_name"], spec["module"]) == (
+        3,
+        str(tmp_path / "ws"),
+        "exp1",
+        "pre_trainer",
+    )
+    section = failure.failing_rank_section(spec)
+    assert section[1] == "# Failing rank     : 3 (local rank 3) on node-1.cluster, exit code 1"
+    assert "an earlier run" not in "\n".join(section)
+    finish_log(log, section)
+
+    result = extract.parse_log_file(str(log))
+    assert (result["failing_rank"], result["failing_host"]) == (3, "node-1.cluster")
+    assert (result["failure_reason"], result["failure_detail"]) == (
+        "python_error",
+        "AssertionError: assert self.lr_warmup_steps < self.lr_decay_steps (x.py:74)",
+    )
+
+
+def test_a_missing_rank_log_still_names_the_rank(tmp_path):
+    log = failing_rank_run(tmp_path, with_rank_log=False)
+    section = failure.failing_rank_section(failure.failing_rank_spec(str(log), str(tmp_path)))
+    assert section[2].startswith("# Source           : no rank-3 log under")
+    finish_log(log, section)
+    result = extract.parse_log_file(str(log))
+    assert result["failing_rank"] == 3
+    assert result["failure_reason"] == "exit"
+
+
+def test_a_back_to_back_run_of_the_same_experiment_is_left_out(tmp_path):
+    log = failing_rank_run(tmp_path)
+    error_log = tmp_path / "ws" / "amd" / "root" / "exp1" / "logs" / "pre_trainer" / "rank-3" / "error.log"
+    previous = rank_record("20261022 18:51:50", "ERROR", "ValueError: the previous run's error")
+    error_log.write_text(previous + error_log.read_text())
+    # The run started at 18:51:58 UTC; its first Primus line is at 18:52:00.
+    since = datetime(2026, 10, 22, 18, 51, 58, tzinfo=timezone.utc).timestamp()
+    section = failure.failing_rank_section(failure.failing_rank_spec(str(log), str(tmp_path), since=since))
+    assert "previous run" not in "\n".join(section)
+    assert any("AssertionError" in line for line in section)
+
+
+def test_a_specific_cause_in_rank_0s_output_beats_the_sections(tmp_path):
+    section = [
+        "#### Begin Failing Rank Output ####",
+        "# Failing rank     : 3 (local rank 3) on node-1, exit code 1",
+        f"# Source           : /x/rank-3/error.log ({failure.OWN_RECORDS})",
+        rank_record(
+            "20261022 18:52:27",
+            "ERROR",
+            "RuntimeError: NCCL error in: ProcessGroupNCCL.cpp:1 ncclSystemError",
+        ).rstrip(),
+        "#### End Failing Rank Output ####",
+    ]
+    log = write_log(
+        tmp_path,
+        "Last RCCL warning: 'Bootstrap : no socket interface found'\n",
+        exit_code=1,
+        with_footer=False,
+    )
+    finish_log(log, section)
+    assert extract.parse_log_file(str(log))["failure_reason"] == "nic_error"
+
+
+def test_the_failing_ranks_exception_beats_the_nccl_errors_it_left_behind(tmp_path):
+    section = [
+        "#### Begin Failing Rank Output ####",
+        "# Failing rank     : 3 (local rank 3) on node-1, exit code 1",
+        f"# Source           : /x/rank-3/error.log ({failure.OWN_RECORDS})",
+        rank_record("20261022 18:52:27", "ERROR", "ValueError: bad shard").rstrip(),
+        "#### End Failing Rank Output ####",
+    ]
+    log = write_log(
+        tmp_path,
+        "RuntimeError: NCCL error in: ProcessGroupNCCL.cpp:1 ncclRemoteError\n",
+        exit_code=1,
+        with_footer=False,
+    )
+    finish_log(log, section)
+    result = extract.parse_log_file(str(log))
+    assert (result["failure_reason"], result["failure_detail"]) == ("python_error", "ValueError: bad shard")
+
+
+def test_debug_log_lines_in_the_section_are_not_classified(tmp_path):
+    section = [
+        "#### Begin Failing Rank Output ####",
+        "# Failing rank     : 3 (local rank 3) on node-1, exit code -11",
+        "# Source           : /x/rank-3/error.log has no ERROR records from this run; the last lines of /x/rank-3/debug.log",
+        rank_record("20261022 18:52:27", "DEBUG", "ValueError: handled and retried").rstrip(),
+        "#### End Failing Rank Output ####",
+    ]
+    log = write_log(
+        tmp_path, "[rank-3/8] Signal 11 (SIGSEGV) received by PID 1234\n", exit_code=1, with_footer=False
+    )
+    finish_log(log, section)
+    result = extract.parse_log_file(str(log))
+    assert (result["failure_reason"], result["failing_rank"]) == ("segfault", 3)
+
+
+def test_another_experiments_rank_log_is_not_used(tmp_path):
+    log = failing_rank_run(tmp_path, with_rank_log=False)
+    other = tmp_path / "ws" / "amd" / "root" / "other_exp" / "logs" / "pre_trainer" / "rank-3"
+    other.mkdir(parents=True)
+    (other / "error.log").write_text(rank_record("20261022 18:52:30", "ERROR", "ValueError: not this run"))
+    section = failure.failing_rank_section(failure.failing_rank_spec(str(log), str(tmp_path)))
+    assert section[2].startswith("# Source           : no rank-3 log under")
+
+
+def test_without_a_time_window_no_records_are_copied(tmp_path):
+    log = failing_rank_run(tmp_path)
+    log.write_text(log.read_text().replace("[\x1b[32m20261022 18:52:00\x1b[0m]", "[no timestamp]"))
+    spec = failure.failing_rank_spec(str(log), str(tmp_path), since=0)
+    assert spec["window_start"] is None
+    section = failure.failing_rank_section(spec)
+    assert len(section) == 4 and "no time to tell" in section[2]
+
+
+def test_the_runner_writes_the_section_before_the_footer(tmp_path):
+    log = failing_rank_run(tmp_path)
+    script = (
+        f"set -uo pipefail\nSCRIPT_DIR={MODULE_PATH.parent}\nPRIMUS_PATH={tmp_path}\nPERF_MULTINODE=0\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/run.sh\n"
+        f"source {MODULE_PATH.parent}/lib/control.sh\n"
+        f'print_per_run_footer {log} 1 30 "exit: launcher exited with code 1" "$(perf_failing_rank_section {log} 0)"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    text = log.read_text()
+    assert text.index("End Run Output") < text.index("Begin Failing Rank Output") < text.index("# Exit code")
+    assert extract.parse_log_file(str(log))["failure_detail"].startswith("AssertionError: assert")
 
 
 def test_legacy_log_without_footer_is_not_guessed(tmp_path):

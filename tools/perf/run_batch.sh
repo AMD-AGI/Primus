@@ -496,9 +496,9 @@ if [ "$PERF_DD_RUNS" -gt 0 ]; then
         PERF_DD_LOG="$result_file"
         # shellcheck disable=SC2034
         PERF_DD_ACTIVE=1
-        # For this run only: no runner time limit, and a failure reason that
-        # names the steps that failed.
-        MAX_RUN_SECONDS=0 MAX_IDLE_SECONDS=0 PERF_REASON_FN=perf_dd_failure_reason \
+        # For this run only: no runner time limit, a failure reason that names
+        # the steps that failed, and no Primus ranks to look up.
+        MAX_RUN_SECONDS=0 MAX_IDLE_SECONDS=0 PERF_REASON_FN=perf_dd_failure_reason FAILING_RANK_OUTPUT=0 \
             perf_launch_with_watchdog "$result_file" "$(( $(wc -l < "$result_file") + 1 ))"
         perf_dd_finalize "$result_file"
         # shellcheck disable=SC2034

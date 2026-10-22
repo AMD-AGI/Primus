@@ -20,9 +20,16 @@ Callers pass the run output (the lines between ``Begin Run Output`` and
 # on hosts whose python3 predates 3.10.
 from __future__ import annotations
 
+import argparse
+import glob
+import json
 import os
 import re
+import shlex
 import signal
+import socket
+import sys
+from datetime import datetime, timedelta, timezone
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -421,14 +428,18 @@ def legacy_footer_reason(footer: dict, run_lines: list[str], exit_code: int | No
 
 
 def classify_failure(
-    run_lines: list[str], footer_reason: str | None, exit_code: int | None
+    run_lines: list[str],
+    footer_reason: str | None,
+    exit_code: int | None,
+    rank_lines: list[str] | None = None,
 ) -> tuple[str | None, str | None]:
     """Return ``(failure_reason, failure_detail)`` for a run that did not pass.
 
     The runner's own verdict wins when it is definitive (it stopped a hang,
-    or the batch was interrupted). Otherwise the cause in the output is more
-    useful than the bare exit status, which comes last. A failed run always
-    gets a reason, ``unknown`` at worst.
+    or the batch was interrupted). Otherwise the cause in the failing rank's
+    own log (``rank_lines``, see failing_rank_output), then in the output, is
+    more useful than the bare exit status, which comes last. A failed run
+    always gets a reason, ``unknown`` at worst.
     """
     footer_cat, _, footer_detail = (footer_reason or "").partition(":")
     footer_cat = footer_cat.strip()
@@ -437,9 +448,17 @@ def classify_failure(
     # "steps": the diffusion_dlrm run listing the diffusion_bench steps that failed.
     if footer_cat in ("timeout", "idle", "interrupted", "steps"):
         return footer_cat, footer_detail
-    text_cat, text_detail = scan_failure_text(run_lines)
-    if text_cat:
-        return text_cat, text_detail
+    rank = scan_failure_text(rank_lines) if rank_lines else (None, None)
+    output = scan_failure_text(run_lines)
+    # Only a specific cause in the output outranks the failing rank's own: the
+    # NCCL errors of the ranks it left behind are what the output usually has.
+    if output[0] in SPECIFIC_REASONS and (
+        rank[0] not in SPECIFIC_REASONS or SPECIFIC_REASONS.index(output[0]) < SPECIFIC_REASONS.index(rank[0])
+    ):
+        return output
+    for text_cat, text_detail in (rank, output):
+        if text_cat:
+            return text_cat, text_detail
     if footer_cat == "signal":
         return ("killed" if "SIGKILL" in (footer_detail or "") else "signal"), footer_detail
     if footer_cat in ("fail_pattern", "exit"):
@@ -459,3 +478,305 @@ def settle_outcome(result: dict, iterations: list[dict]) -> None:
         result["failed_at"] = (
             f"after step {max(it.get('step', 0) for it in iterations)}" if iterations else "setup"
         )
+
+
+# --------------------------------------------------------------------------
+# The failing rank's own log
+#
+# For the PyTorch backends the console shows local rank 0 only (and the last
+# local rank of the last node), so when another rank fails first, its error is
+# not in the run log. torchrun's summary names that rank ("Root Cause (first
+# observed failure)"), and Primus writes every rank's ERROR records to
+# <workspace>/<team>/<user>/<exp>/logs/<module>/rank-<N>/error.log. After a
+# failed run, the runner copies that rank's records from this run into the
+# log, between "End Run Output" and the footer.
+# --------------------------------------------------------------------------
+
+ROOT_CAUSE_MARKER = "Root Cause (first observed failure):"
+SUMMARY_FIELD_RE = re.compile(r"^\s*(time|host|rank|exitcode)\s*:\s*(.*?)\s*$")
+SUMMARY_RANK_RE = re.compile(r"^(\d+)(?:\s*\(local_rank:\s*(\d+)\))?")
+PRIMUS_TIMESTAMP_RE = re.compile(r"^\[(\d{8} \d{2}:\d{2}:\d{2})\]")
+PRIMUS_TIMESTAMP_FORMAT = "%Y%m%d %H:%M:%S"
+PLACEHOLDER_RE = re.compile(r"^\$\{([^:}]+):([^}]*)\}$")
+# Of the runner's own environment, these reach the container without EXTRA_ENV.
+FORWARDED_PREFIXES = ("PRIMUS_",)
+FAILING_RANK_BEGIN = "Begin Failing Rank Output"
+FAILING_RANK_END = "End Failing Rank Output"
+FAILING_RANK_FIELD_RE = re.compile(
+    r"^# Failing rank\s*:\s*(\d+)(?: \(local rank (\d+)\))?(?: on ([^\s,]+))?(?:, exit code (-?\d+))?"
+)
+MAX_SECTION_LINES = 200
+MAX_TAIL_BYTES = 4 << 20
+# Before the run's start, for other nodes' clocks; a run of the same
+# experiment just before this one is further back than that.
+CLOCK_SLACK = timedelta(seconds=5)
+OWN_RECORDS = "its ERROR records from this run"
+# Most specific first. Of the run output's reasons, only these outrank the
+# failing rank's own.
+SPECIFIC_REASONS = ("nic_error", "oom", "gpu_contended", "segfault")
+
+
+def failing_rank(run_lines: list[str]) -> dict | None:
+    """The rank torchrun's summary names as the first to fail, as
+    ``{"rank", "local_rank", "host", "exitcode", "time"}``: the earliest when
+    several nodes print one. None when there is no summary."""
+    found = []
+    for i, line in enumerate(run_lines):
+        if ROOT_CAUSE_MARKER not in line:
+            continue
+        fields: dict[str, str] = {}
+        for follow in run_lines[i + 1 : i + 12]:
+            clean = strip_ansi(follow)
+            if clean.startswith("====="):
+                break
+            m = SUMMARY_FIELD_RE.match(clean)
+            if m:
+                fields.setdefault(m.group(1), m.group(2))
+        rank = SUMMARY_RANK_RE.match(fields.get("rank", ""))
+        if not rank:
+            continue
+        code = re.match(r"-?\d+", fields.get("exitcode", ""))
+        found.append(
+            {
+                "rank": int(rank.group(1)),
+                "local_rank": int(rank.group(2)) if rank.group(2) else None,
+                "host": fields.get("host") or None,
+                "exitcode": int(code.group(0)) if code else None,
+                "time": fields.get("time", ""),
+            }
+        )
+    if not found:
+        return None
+    # torchrun stops the other ranks with a signal (a negative exit code).
+    return min(found, key=lambda f: (f["time"], (f["exitcode"] or 0) < 0))
+
+
+def _between(lines: list[str], begin: str, end: str) -> list[str]:
+    start = next((i for i, line in enumerate(lines) if begin in line), None)
+    if start is None:
+        return []
+    stop = next((i for i in range(start + 1, len(lines)) if end in lines[i]), len(lines))
+    return lines[start + 1 : stop]
+
+
+def _resolve(value: str, env: dict[str, str]) -> str:
+    """A config value with its ``${VAR:default}`` placeholder resolved."""
+    value = value.strip().strip("'\"")
+    m = PLACEHOLDER_RE.match(value)
+    return (env.get(m.group(1)) or m.group(2)) if m else value
+
+
+def failing_rank_spec(log_path: str, primus_path: str, since: float = 0) -> dict | None:
+    """Where to look for the failing rank's log of the run in ``log_path``,
+    with the rank as failing_rank gives it; None when torchrun named none.
+    ``since`` is the run's start (epoch seconds, the runner's clock)."""
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+    run_lines = _between(lines, "Begin Run Output", "End Run Output") or lines
+    who = failing_rank(run_lines)
+    if who is None:
+        return None
+    banner: dict[str, str] = {}
+    for line in lines:
+        if "Begin Config File Dump" in line:
+            break
+        m = re.match(r"^#\s*([^:]+?)\s*:\s*(.*?)\s*$", line)
+        if m:
+            banner.setdefault(m.group(1), m.group(2))
+    config = "".join(_between(lines, "Begin Config File Dump", "End Config File Dump"))
+
+    # The container's view: EXTRA_ENV, then the runner's forwarded variables.
+    env = {k: v for k, v in os.environ.items() if k.startswith(FORWARDED_PREFIXES)}
+    extra = banner.get("Extra env (--env)", "")
+    if extra and extra != "<none>":
+        for token in shlex.split(extra):
+            key, sep, value = token.partition("=")
+            if sep:
+                env[key] = value
+
+    def top_level(key: str, default: str) -> str:
+        m = re.search(rf"^{key}:\s*(.+?)\s*$", config, re.MULTILINE)
+        return _resolve(m.group(1), env) if m else default
+
+    workspace = top_level("workspace", "./output")
+    if not os.path.isabs(workspace):
+        workspace = os.path.normpath(os.path.join(primus_path, workspace))
+    first = next((m.group(1) for m in map(PRIMUS_TIMESTAMP_RE.match, map(strip_ansi, run_lines)) if m), None)
+    return {
+        **who,
+        "workspace": workspace,
+        "exp_name": top_level("exp_name", ""),
+        "module": (banner.get("Train Module") or "").split(" ")[0],
+        "since": since,
+        "window_start": first,
+    }
+
+
+def _find_rank_dir(spec: dict) -> str | None:
+    """The directory of the rank's logs for this run's experiment, written to
+    during the run; any experiment's only when the run's is not known."""
+    rank = f"rank-{spec['rank']}"
+    exp = glob.escape(spec["exp_name"]) if spec.get("exp_name") else "*"
+    module = glob.escape(spec["module"]) if spec.get("module") else "*"
+    since = float(spec.get("since") or 0) - CLOCK_SLACK.total_seconds()
+
+    def written(path: str) -> float:
+        files = [os.path.join(path, name) for name in ("error.log", "debug.log")]
+        return max((os.path.getmtime(f) for f in files if os.path.isfile(f)), default=0)
+
+    for pattern in ((exp, module), (exp, "*")):
+        dirs = [
+            d
+            for d in glob.glob(
+                os.path.join(spec["workspace"], "*", "*", pattern[0], "logs", pattern[1], rank)
+            )
+        ]
+        dirs = [d for d in dirs if written(d) >= since]
+        if dirs:
+            return max(dirs, key=written)
+    return None
+
+
+def _run_cut(spec: dict) -> str | None:
+    """The time of this run's first possible record, in the container's clock
+    as Primus writes it: the run's start (epoch seconds) moved by the
+    container's time zone. The output's first Primus record, shortly after the
+    start, gives that zone to the quarter hour, rounded down (with two minutes
+    of slack for another node's clock), so the cut stays before that record
+    even when it comes late."""
+    since = float(spec.get("since") or 0)
+    first = spec.get("window_start")
+    if since <= 0:
+        if first is None:
+            return None
+        return (datetime.strptime(first, PRIMUS_TIMESTAMP_FORMAT) - CLOCK_SLACK).strftime(
+            PRIMUS_TIMESTAMP_FORMAT
+        )
+    start = datetime.fromtimestamp(since, timezone.utc).replace(tzinfo=None)
+    if first:
+        quarter = 15 * 60
+        seen = (datetime.strptime(first, PRIMUS_TIMESTAMP_FORMAT) - start).total_seconds()
+        start += timedelta(seconds=((seen + 120) // quarter) * quarter)
+    # With no Primus record to tell the zone from, containers run in UTC.
+    return (start - CLOCK_SLACK).strftime(PRIMUS_TIMESTAMP_FORMAT)
+
+
+def _records_from_run(path: str, cut: str | None) -> list[str]:
+    """The records of ``path`` from ``cut`` on: Primus appends every run of an
+    experiment to the same files. Read from the end, as they can be large."""
+    if cut is None or not os.path.isfile(path):
+        return []
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - MAX_TAIL_BYTES))
+        lines = f.read().decode("utf-8", errors="replace").splitlines()
+    kept, keep = [], False
+    for line in lines:
+        m = PRIMUS_TIMESTAMP_RE.match(line)
+        if m:
+            keep = m.group(1) >= cut
+        if keep and line.strip():
+            kept.append(line)
+    return kept
+
+
+def _short_host(host: str) -> str:
+    return host.split(".")[0]
+
+
+def failing_rank_section(spec: dict, this_host_only: bool = False) -> list[str] | None:
+    """The lines that go into the run log: the failing rank, where its records
+    come from, and the records. None when ``this_host_only`` and the rank ran
+    on another node."""
+    host = spec.get("host") or ""
+    if this_host_only and _short_host(host) != _short_host(socket.gethostname()):
+        return None
+    who = f"{spec['rank']}"
+    if spec.get("local_rank") is not None:
+        who += f" (local rank {spec['local_rank']})"
+    if host:
+        who += f" on {host}"
+    if spec.get("exitcode") is not None:
+        who += f", exit code {spec['exitcode']}"
+    body: list[str] = []
+    rank_dir = _find_rank_dir(spec)
+    cut = _run_cut(spec)
+    if rank_dir is None:
+        source = f"no rank-{spec['rank']} log under {spec['workspace']} written during this run"
+    elif cut is None:
+        source = f"{rank_dir}: no time to tell this run's records from earlier runs' by"
+    else:
+        error_log, debug_log = (os.path.join(rank_dir, name) for name in ("error.log", "debug.log"))
+        body = _records_from_run(error_log, cut)
+        source = f"{error_log} ({OWN_RECORDS})"
+        if not body:
+            body = _records_from_run(debug_log, cut)[-40:]
+            source = f"{error_log} has no ERROR records from this run; the last lines of {debug_log}"
+    if len(body) > MAX_SECTION_LINES:
+        source += f", the last {MAX_SECTION_LINES} of {len(body)} lines"
+        body = body[-MAX_SECTION_LINES:]
+    return (
+        [
+            f" {FAILING_RANK_BEGIN} ".center(80, "#"),
+            f"# Failing rank     : {who}",
+            f"# Source           : {source}",
+        ]
+        + body
+        + [f" {FAILING_RANK_END} ".center(80, "#")]
+    )
+
+
+def failing_rank_output(lines: list[str]) -> dict | None:
+    """The failing-rank section of a log as ``{"rank", "local_rank", "host",
+    "exitcode", "lines", "span"}``: ``lines`` are its ERROR records (none when
+    it shows debug.log lines instead, which are not errors), ``span`` the first
+    and last line index of the section. None when the log has none."""
+    start = next((i for i, line in enumerate(lines) if FAILING_RANK_BEGIN in line), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if FAILING_RANK_END in lines[i]), len(lines) - 1)
+    section = lines[start + 1 : end]
+    m = next(
+        (FAILING_RANK_FIELD_RE.match(strip_ansi(line)) for line in section[:2] if "Failing rank" in line),
+        None,
+    )
+    if not m:
+        return None
+    source = next((line for line in section[:3] if line.startswith("# Source")), "")
+    records = [line for line in section if not line.startswith(("# Failing rank", "# Source"))]
+    return {
+        "rank": int(m.group(1)),
+        "local_rank": int(m.group(2)) if m.group(2) else None,
+        "host": m.group(3),
+        "exitcode": int(m.group(4)) if m.group(4) else None,
+        "lines": records if OWN_RECORDS in source else [],
+        "span": (start, end),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="The failing rank's own log, for the batch runners.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    spec_cmd = sub.add_parser("failing-rank", help="Print where the failing rank of a run logged, as JSON.")
+    spec_cmd.add_argument("--log", required=True, help="The run's log.")
+    spec_cmd.add_argument("--primus-path", required=True, help="The Primus checkout the run used.")
+    spec_cmd.add_argument("--since", type=float, default=0, help="When the run started, in epoch seconds.")
+    section_cmd = sub.add_parser("rank-log", help="Print the failing-rank section for a failing-rank spec.")
+    section_cmd.add_argument("--spec", required=True, help="The JSON failing-rank printed.")
+    section_cmd.add_argument(
+        "--this-host-only", action="store_true", help="Print nothing unless the rank ran on this node."
+    )
+    args = parser.parse_args(argv)
+    if args.command == "failing-rank":
+        spec = failing_rank_spec(args.log, args.primus_path, args.since)
+        if spec:
+            print(json.dumps(spec))
+    else:
+        lines = failing_rank_section(json.loads(args.spec), args.this_host_only)
+        if lines:
+            print("\n".join(lines))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

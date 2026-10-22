@@ -610,7 +610,11 @@ perf_launch_with_watchdog() {
     kill -TERM -- "-$group" 2>/dev/null
     RUN_PID=""
 
-    print_per_run_footer "$result_file" "$RUN_EXIT_CODE" "$RUN_ELAPSED" "$RUN_FAILURE_REASON"
+    local section=""
+    if [ "$RUN_FAILURE_REASON" != "none" ]; then
+        section=$(perf_failing_rank_section "$result_file" "$start")
+    fi
+    print_per_run_footer "$result_file" "$RUN_EXIT_CODE" "$RUN_ELAPSED" "$RUN_FAILURE_REASON" "$section"
     CURRENT_RESULT_FILE=""
     PERF_RUN_DONE=0
 
@@ -621,6 +625,40 @@ perf_launch_with_watchdog() {
     kill "$TAIL_PID" 2>/dev/null
     wait "$TAIL_PID" 2>/dev/null
     TAIL_PID=""
+}
+
+# ---------------------------------------------------------------------------
+# The failing rank's own log
+#
+# torchrun passes on the output of local rank 0 only (and the last local rank
+# of the last node), so when another rank fails first, its error is not in
+# the run log. torchrun's summary names that rank, and Primus writes each
+# rank's ERROR records to <workspace>/.../rank-<N>/error.log; failure.py finds
+# that file and prints this run's records as a section for the log.
+# FAILING_RANK_OUTPUT=0 turns this off.
+# ---------------------------------------------------------------------------
+
+FAILING_RANK_OUTPUT="${FAILING_RANK_OUTPUT:-1}"
+
+# perf_failing_rank_section <log> <run start, epoch seconds>
+perf_failing_rank_section() {
+    local result_file="$1" since="$2" spec out=""
+    [ "$FAILING_RANK_OUTPUT" = 1 ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    spec=$(timeout -k 5 60 python3 "$SCRIPT_DIR/failure.py" failing-rank \
+        --log "$result_file" --primus-path "$PRIMUS_PATH" --since "$since" 2>/dev/null)
+    [ -n "$spec" ] || return 0
+    # The file is on the node the rank ran on, unless the workspace is shared;
+    # each node looks, and the first section printed wins.
+    if [ "${PERF_MULTINODE:-0}" = 1 ]; then
+        out=$(PERF_ON_NODES_TIMEOUT=90 perf_on_nodes python3 "$SCRIPT_DIR/failure.py" rank-log \
+            --spec "$spec" --this-host-only 2>/dev/null |
+            awk '/Begin Failing Rank Output/ { n++ } n == 1 { print } /End Failing Rank Output/ && n == 1 { exit }')
+    fi
+    if [ -z "$out" ]; then
+        out=$(timeout -k 5 60 python3 "$SCRIPT_DIR/failure.py" rank-log --spec "$spec" 2>/dev/null)
+    fi
+    printf '%s' "$out"
 }
 
 # ---------------------------------------------------------------------------
