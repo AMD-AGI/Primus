@@ -42,7 +42,11 @@ GPUS_PER_NODE=1 TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/ll
   `PRIMUS_RECOMPUTE_LAYER_IDS` (layers to recompute, e.g. `0,3`; empty, the default, disables
   recompute), `PRIMUS_SEQ_LENGTH` (default 8192).
 - Feature switches: `USE_TURBO_ATTENTION`, `USE_TURBO_RMS_NORM`, `MOCK_DATA`.
-- `PRIMUS_TURBO_ATTN_BACKEND`: `flydsl` (default) or `triton`, see Attention backends below.
+- `PRIMUS_TURBO_ATTN_BACKEND`: `flydsl` (default), `hipkittens` or `triton`, see Attention backends below.
+  With `hipkittens`, `PRIMUS_TURBO_HK_FWD` (`v0`, the default, `pp` or `flydsl`) and `PRIMUS_TURBO_HK_BWD`
+  (`v0`, the default, or `flydsl`) pick the HipKittens kernels per direction, and `HK_HSACO_DIR` loads
+  unpinned code objects from a directory (or several joined by `:`) instead of the checkout's pinned
+  `bin/` (development only). `PRIMUS_TURBO_LOG_LEVEL=INFO` logs which kernels each direction runs.
 - `PROFILE=True` profiles iterations 6–7 (trace under `output/<team>/<user>/<exp>/tensorboard/`).
 - `PATCH_TRITON_EXPERT_SCHEDULING` (default `1`): see Triton expert scheduling below.
 - `HIPBLASLT_TUNING_OVERRIDE_FILE` (default: the file in `hipblaslt_tuning/`; empty: hipBLASLt's own
@@ -138,9 +142,17 @@ Attention alone at this shape (b 4, seq 8192, 32/8 heads, causal; mean of 100 ca
   `flydsl`, any other call raises `ValueError`. The fused backward measured here needs causal attention
   and lengths that are multiples of 128; other shapes use the deterministic two-kernel backward. With a
   Primus-Turbo that lacks `primus_turbo/flydsl/attention/gfx1250/` (e.g. the image's own), every call
-  raises that `ValueError`. Primus-Turbo's Triton attention (`PRIMUS_TURBO_ATTN_BACKEND=triton`) needs
-  Triton's expert scheduling off (see Triton expert scheduling above): with it on, the Triton attention
-  forward made illegal memory accesses or gave NaN at this shape. `USE_TURBO_ATTENTION=False` runs TE's
+  raises that `ValueError`. `PRIMUS_TURBO_ATTN_BACKEND=hipkittens` runs the HipKittens kernels of the
+  Primus-Turbo checkout (`primus_turbo/hipkittens/gfx1250_attn`, branch `dev/lhz/llama31_8b_hk`) where
+  they apply (causal, 4 query heads per KV head for the backward, lengths that are multiples of 64 / 128,
+  code objects built by `setup.py` and pinned by its `manifest.json`); every other call, a
+  `deterministic_mode` backward, tensors that do not start on a 16-byte boundary and any direction whose
+  code objects are missing run on the FlyDSL kernels, with one warning per reason, so it takes exactly
+  the head-dim-128 calls `flydsl` takes. Other head dims (e.g. DeepSeek-V3's MLA) raise the `ValueError`
+  above with `hipkittens` selected: keep `flydsl` for those models. Primus-Turbo's
+  Triton attention (`PRIMUS_TURBO_ATTN_BACKEND=triton`) needs Triton's expert scheduling off (see Triton
+  expert scheduling above): with it on, the Triton attention forward made illegal memory accesses or gave
+  NaN at this shape. `USE_TURBO_ATTENTION=False` runs TE's
   `DotProductAttention`, not PyTorch SDPA. On gfx1250 TE has neither of its fused attention backends for
   this input, and the image has no `flash_attn` package, so TE uses `UnfusedDotProductAttention`. That
   keeps the 8192 x 8192 attention probabilities of every layer for the backward pass, and at `MBS` 4 the

@@ -20,6 +20,18 @@ SCRIPT=$(realpath "$0")
 if [[ -n "${TURBO_DIR:-}" ]]; then
     TURBO_DIR=$(realpath -e "${TURBO_DIR}")
 fi
+if [[ -n "${HK_HSACO_DIR:-}" ]]; then
+    # a directory, or several joined by ':' (e.g. one per kernel): each made absolute
+    HK_HSACO_DIRS=()
+    IFS=: read -r -a HK_PARTS <<< "${HK_HSACO_DIR}"
+    for d in "${HK_PARTS[@]}"; do
+        if [[ -n "${d}" ]]; then
+            d=$(realpath -e "${d}")
+            HK_HSACO_DIRS+=("${d}")
+        fi
+    done
+    HK_HSACO_DIR=$(IFS=:; echo "${HK_HSACO_DIRS[*]}")
+fi
 cd "$(dirname "${SCRIPT}")/../../../.."
 
 # container: re-run this script in a new container of DOCKER_IMAGE; direct: run in this container
@@ -40,16 +52,23 @@ export PRIMUS_PP=${PRIMUS_PP:-1}
 export PRIMUS_RECOMPUTE_LAYER_IDS=${PRIMUS_RECOMPUTE_LAYER_IDS:-}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-True}
 export USE_TURBO_RMS_NORM=${USE_TURBO_RMS_NORM:-True}
-# Primus-Turbo attention backend: flydsl (needs the gfx1250 head-dim-128 kernels, see README.md)
-# or triton
+# Primus-Turbo attention backend: flydsl (needs the gfx1250 head-dim-128 kernels, see README.md),
+# hipkittens (the gfx1250 HipKittens kernels; per direction and call, what they cannot run goes to the
+# FlyDSL kernels) or triton
 export PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-flydsl}
 case "${PRIMUS_TURBO_ATTN_BACKEND,,}" in
-    flydsl | triton) ;;
+    flydsl | hipkittens | triton) ;;
     *)
-        echo "PRIMUS_TURBO_ATTN_BACKEND must be flydsl or triton, not '${PRIMUS_TURBO_ATTN_BACKEND}'" >&2
+        echo "PRIMUS_TURBO_ATTN_BACKEND must be flydsl, hipkittens or triton, not '${PRIMUS_TURBO_ATTN_BACKEND}'" >&2
         exit 2
         ;;
 esac
+# hipkittens only: forward kernels pp (default) / v0 / flydsl, backward v0 (default) / flydsl, and
+# directories (':'-joined) of unpinned code objects to load instead of the checkout's pinned bin/
+# (development). PRIMUS_TURBO_LOG_LEVEL=INFO logs which kernels each direction runs.
+export PRIMUS_TURBO_HK_FWD=${PRIMUS_TURBO_HK_FWD:-}
+export PRIMUS_TURBO_HK_BWD=${PRIMUS_TURBO_HK_BWD:-}
+export HK_HSACO_DIR=${HK_HSACO_DIR:-}
 export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
 # 1: switch Triton's gfx1250 expert scheduling off in the container's Triton (needs root), see below
@@ -70,7 +89,7 @@ case "${PRIMUS_LAUNCHER}" in
             case "${v}" in
                 PRIMUS_LAUNCHER) ;;
                 EXP | TURBO_DIR | GPUS_PER_NODE | HIP_VISIBLE_DEVICES | TRAIN_ITERS | MBS | GBS | USE_TURBO_* | \
-                    MOCK_DATA | PROFILE | PATCH_TRITON_EXPERT_SCHEDULING | \
+                    MOCK_DATA | PROFILE | PATCH_TRITON_EXPERT_SCHEDULING | HK_HSACO_DIR | \
                     MASTER_ADDR | MASTER_PORT | HF_TOKEN | WANDB_API_KEY | ENABLE_NUMA_BINDING | GPU_MAX_HW_QUEUES | \
                     HSA_* | NVTE_* | PRIMUS_* | NCCL_* | RCCL_* | GLOO_* | IONIC_* | HIPBLASLT_*)
                     ENV_ARGS+=(-e "${v}")
@@ -83,6 +102,11 @@ case "${PRIMUS_LAUNCHER}" in
         fi
         if [[ -n "${TURBO_DIR}" ]]; then
             DOCKER_ARGS+=(-v "${TURBO_DIR}:${TURBO_DIR}")
+        fi
+        if [[ -n "${HK_HSACO_DIR}" ]]; then
+            for d in "${HK_HSACO_DIRS[@]}"; do
+                DOCKER_ARGS+=(-v "${d}:${d}")
+            done
         fi
         # Same runtime options as `primus-cli container` (runner/.primus.yaml)
         exec docker run --rm --name "llama3.1-8b-mi455x-$$" \
@@ -125,6 +149,11 @@ ENV_ARGS=(
     --env PRIMUS_TURBO_ATTN_BACKEND="${PRIMUS_TURBO_ATTN_BACKEND}"
     --env HSA_COREDUMP_PATTERN=/dev/null
 )
+for v in PRIMUS_TURBO_HK_FWD PRIMUS_TURBO_HK_BWD HK_HSACO_DIR PRIMUS_TURBO_LOG_LEVEL; do
+    if [[ -n "${!v:-}" ]]; then
+        ENV_ARGS+=(--env "${v}=${!v}")
+    fi
+done
 if [[ -n "${TURBO_DIR}" ]]; then
     # --env is applied after Primus builds PYTHONPATH, so this checkout comes first.
     ENV_ARGS+=(
