@@ -221,8 +221,9 @@ def _maybe_int(value: str | None) -> int | None:
     try:
         return int(resolved)
     except (TypeError, ValueError):
-        # Banner fields often look like ``20 (CLI override; yaml=50)``.
-        m = re.match(r"^\s*(-?\d+)", resolved)
+        # Banner fields often look like ``20 (CLI override; yaml=50)``, or
+        # ``${PRIMUS_TRAIN_ITERS:200} (TRAIN_STEPS=20 not applied to ...)``.
+        m = re.match(r"^\s*(?:\$\{[^:}]+:)?(-?\d+)", resolved)
         if m:
             return int(m.group(1))
         return None
@@ -1703,7 +1704,8 @@ def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict
                 "gpus_per_node": gpus,
                 "world_size": gpus,
                 "warmup_steps": None,
-                # TRAIN_STEPS sets the diffusion models' num_iterations only.
+                # A banner step count (TRAIN_STEPS, when it reached diffusion_bench)
+                # is the diffusion models' num_iterations only.
                 "total_steps": iterations or (run["total_steps"] if suite == "diffusion" else None),
                 "num_iterations": None,
                 "num_post_warmup": None,
