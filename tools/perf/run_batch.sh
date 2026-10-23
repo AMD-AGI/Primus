@@ -93,6 +93,9 @@
 #                    runner/.primus.yaml's container.options.env plus the
 #                    PRIMUS_/NCCL_/RCCL_/GLOO_/IONIC_/HIPBLASLT_ prefixes, and
 #                    drops everything else without warning.
+#   DATA_PATH=...    where Primus keeps its Hugging Face downloads (models,
+#                    datasets); <checkout>/data when unset. The runner
+#                    creates it, mounts it and passes it into the container.
 #   PRIMUS_MODE      launcher mode, "container" (default) or "direct" when the
 #                    runner itself already runs inside a container.
 #
@@ -297,7 +300,7 @@ shopt -s nullglob
 # Select the configs to run: catalog (default, filtered by GPU/BACKEND) or a
 # directory of YAMLs (CONFIG_DIR). EXTRA_ENV, missing paths and duplicates are
 # all reported here, before anything launches.
-if ! check_batch_inputs || ! perf_check_run_limits || ! perf_dd_prepare; then
+if ! check_batch_inputs || ! perf_check_run_limits || ! perf_prepare_data_path || ! perf_dd_prepare; then
     exit "$PERF_EXIT_REFUSED"
 fi
 
@@ -327,7 +330,7 @@ build_launch_argv() {
     # EXTRA_ENV becomes explicit `--env KEY=VALUE` flags before the `--`, which
     # is the only way to be sure a variable reaches the container.
     # shellcheck disable=SC2206
-    LAUNCH_ARGV=( "$PRIMUS_CLI" $PRIMUS_MODE ${label_args[@]+"${label_args[@]}"} ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} -- train "$suite" --config "$config_file" )
+    LAUNCH_ARGV=( "$PRIMUS_CLI" $PRIMUS_MODE ${label_args[@]+"${label_args[@]}"} ${PERF_DATA_ARGS[@]+"${PERF_DATA_ARGS[@]}"} ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} -- train "$suite" --config "$config_file" )
 
     append_train_steps_override "$config_file" "$framework"
 }
@@ -393,6 +396,7 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# Run limits   : $(perf_run_limits_text)"
     echo "# GPU check    : $PERF_GPU_CHECK"
     echo "# NCCL iface   : $PERF_NIC_CHECK"
+    echo "# DATA_PATH    : $PERF_DATA_CHECK"
     if perf_uses_containers; then
         echo "# Label        : ${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
     fi
