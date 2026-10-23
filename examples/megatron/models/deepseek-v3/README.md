@@ -130,10 +130,12 @@ values; on 4 GPUs they differed by up to 0.003.
 
 **Profile of the 4-GPU run, rank 0** (`PROFILE=True`, iterations 6–7).
 
-- About 952 ms of compute kernels per iteration: MoE 42% (expert grouped GEMMs 29%), output layer
-  and loss 18%, attention projections 15%, core attention 15%, the rest 10%. The hipBLASLt GEMMs take
-  348 ms (36%); with hipBLASLt's own kernel choice they take 412 ms, 1017 ms of compute in all.
-- About 141 ms per iteration of MoE all-to-all is not overlapped with compute.
+- About 899 ms of compute kernels per iteration: MoE 43% (expert grouped GEMMs 29%), output layer and
+  loss 16%, attention projections 15%, core attention 15%, the rest 11% (4% for adding gradients into
+  `main_grad`, as `gradient_accumulation_fusion` is off). The hipBLASLt GEMMs take 320 ms (36%); with
+  hipBLASLt's own kernel choice they take 375 ms, 961 ms of compute in all.
+- The MoE all-to-all kernels take about 144 ms per iteration, and the 4-GPU run takes 144 ms longer than the
+  1-GPU variant with the same per-GPU work (1100 vs 956 ms/iter), so compute hides little of the all-to-all.
 
 ## Known issues
 
