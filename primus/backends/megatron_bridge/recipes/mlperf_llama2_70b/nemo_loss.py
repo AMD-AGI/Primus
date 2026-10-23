@@ -535,12 +535,13 @@ def install_nemo_loss_if_enabled() -> bool:
     Affected bindings:
 
     * ``megatron.bridge.training.vlm_step._create_loss_function`` ->
-      ``create_nemo_masked_next_token_loss_function`` (used by
-      ``MegatronBridgePosttrainTrainer.train()`` -> ``finetune(...,
-      forward_step_func=vlm_step.forward_step)``).
+      ``create_nemo_masked_next_token_loss_function`` (used when
+      ``MegatronBridgePosttrainTrainer.train()`` fine-tunes a VLM with
+      ``vlm_step.forward_step``).
     * ``megatron.bridge.training.gpt_step.masked_next_token_loss`` ->
-      ``nemo_masked_next_token_loss`` (used by other gpt_step-based recipes
-      and any test callers).
+      ``nemo_masked_next_token_loss`` (used for text-only models, including
+      this recipe, which ``MegatronBridgePosttrainTrainer.train()`` fine-tunes
+      with ``gpt_step.forward_step``).
 
     Idempotent. Gated by env var ``PRIMUS_NEMO_LOSS`` (default: enabled;
     disable with ``PRIMUS_NEMO_LOSS=0``).
