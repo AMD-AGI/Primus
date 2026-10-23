@@ -25,6 +25,30 @@ from primus.backends.megatron_bridge.megatron_bridge_base_trainer import (
 from primus.core.utils.module_utils import log_dict_aligned, log_rank_0
 
 
+def _is_vlm_model(model_cfg: Any) -> bool:
+    """Return True if the Megatron-Bridge model provider is a vision-language model.
+
+    Most VLM providers carry a ``vision_config``; Ministral3 and Nemotron-VL do
+    not, but every VLM provider (and no text-only one) defines
+    ``freeze_vision_model``.
+    """
+    return getattr(model_cfg, "vision_config", None) is not None or hasattr(model_cfg, "freeze_vision_model")
+
+
+def _select_forward_step(model_cfg: Any):
+    """Pick the Megatron-Bridge forward step function for ``model_cfg``.
+
+    ``vlm_step`` pads tokens to a multiple of 128 without updating
+    ``cu_seqlens``, which breaks packed (THD) text-only batches, so it is only
+    used for VLMs.
+    """
+    if _is_vlm_model(model_cfg):
+        from megatron.bridge.training.vlm_step import forward_step
+    else:
+        from megatron.bridge.training.gpt_step import forward_step
+    return forward_step
+
+
 class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
     """
     Trainer class for Megatron-Bridge post-training (SFT, instruction tuning, etc.).
@@ -103,7 +127,9 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
             # Execute post-training based on configuration
             from megatron.bridge.training.config import runtime_config_update
             from megatron.bridge.training.finetune import finetune
-            from megatron.bridge.training.vlm_step import forward_step
+
+            forward_step = _select_forward_step(self.cfg_container.model)
+            log_rank_0(f"Using forward step: {forward_step.__module__}.forward_step")
 
             # log_rank_0(f"ConfigContainer: {self.cfg_container}")
             runtime_config_update(self.cfg_container)
