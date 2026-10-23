@@ -94,9 +94,10 @@ through `HIPBLASLT_TUNING_OVERRIDE_FILE`.
 ## Reference
 
 Measured with `amdprimus/amdprimus:tas-20261019` and the image's Primus-Turbo, started from the host.
-ms/iter is Primus's average over iterations 3–10, the mean of 3 runs that alternated between the rows;
-speedup is against the first row. Peak memory is the largest `hip mem usage` in the log, which Primus prints
-for the last rank in GiB (labelled GB) as the device's total minus free memory. Each row adds one step:
+ms/iter is Primus's average over iterations 3–10. The FlyDSL and hipBLASLt tuning rows are the mean of 2 runs
+that alternated between the two rows; the baseline rows are the mean of 3 runs from an earlier set, and the
+speedup is against them. Peak memory is the largest `hip mem usage` in the log, which Primus prints for the
+last rank in GiB (labelled GB) as the device's total minus free memory. Each row adds one step:
 
 - Baseline: TE's unfused attention and Primus-Turbo's Triton grouped GEMM
   (`USE_TURBO_ATTENTION=False TURBO_GROUPED_GEMM_BACKEND=default`), hipBLASLt's own GEMM kernels
@@ -109,24 +110,24 @@ for the last rank in GiB (labelled GB) as the device's total minus free memory. 
 | Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
 | --- | --- | --- | --- | --- | --- | --- |
 | Baseline | 1967 | 1.00x | 33,300 | 719 | 174.15 GiB | 5.49455 |
-| + FlyDSL | 1005 | 1.96x | 65,200 | 1407 | 130.62 GiB | 5.49483 |
-| + hipBLASLt tuning (default) | 956 | 2.06x | 68,600 | 1480 | 130.63 GiB | 5.49473 |
+| + FlyDSL | 1010 | 1.95x | 64,900 | 1400 | 130.52 GiB | 5.49483 |
+| + hipBLASLt tuning (default) | 960 | 2.05x | 68,200 | 1473 | 130.53 GiB | 5.49473 |
 
 **4 GPUs** (the launcher's defaults: EP4, 128 experts, GBS 64)
 
 | Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
 | --- | --- | --- | --- | --- | --- | --- |
 | Baseline | 2139 | 1.00x | 30,600 | 661 | 215.21 GiB | 5.56290–5.56295 |
-| + FlyDSL | 1157 | 1.85x | 56,600 | 1223 | 170.81 GiB | 5.56302–5.56314 |
-| + hipBLASLt tuning (default) | 1100 | 1.94x | 59,600 | 1285 | 170.81 GiB | 5.56288–5.56301 |
+| + FlyDSL | 1200 | 1.78x | 54,600 | 1179 | 170.71 GiB | 5.56274 |
+| + hipBLASLt tuning (default) | 1132 | 1.89x | 57,900 | 1249 | 170.71 GiB | 5.56307 |
 
-**Grad norms per iteration** of the default, from one run. Repeated runs on 1 GPU usually gave the same
-values; on 4 GPUs they differed by up to 0.003.
+**Grad norms per iteration** of the default. Its two runs gave the same values on 1 and on 4 GPUs; an earlier
+set of 4-GPU runs differed from them by up to 0.004.
 
 | GPUs | Grad norms, iterations 1–10 |
 | --- | --- |
 | 1 | 5.292, 5.326, 5.587, 7.070, 12.976, 14.047, 13.659, 15.001, 13.475, 14.192 |
-| 4 | 3.810, 3.778, 3.815, 5.139, 8.842, 10.091, 7.849, 7.168, 6.820, 6.649 |
+| 4 | 3.810, 3.778, 3.815, 5.138, 8.845, 10.095, 7.851, 7.169, 6.821, 6.650 |
 
 **Profile of the 4-GPU run, rank 0** (`PROFILE=True`, iterations 6–7).
 
@@ -134,8 +135,8 @@ values; on 4 GPUs they differed by up to 0.003.
   loss 16%, attention projections 15%, core attention 15%, the rest 11% (4% for adding gradients into
   `main_grad`, as `gradient_accumulation_fusion` is off). The hipBLASLt GEMMs take 320 ms (36%); with
   hipBLASLt's own kernel choice they take 375 ms, 961 ms of compute in all.
-- The MoE all-to-all kernels take about 144 ms per iteration, and the 4-GPU run takes 144 ms longer than the
-  1-GPU variant with the same per-GPU work (1100 vs 956 ms/iter), so compute hides little of the all-to-all.
+- The MoE all-to-all kernels take about 144 ms per iteration, and the 4-GPU run takes 172 ms longer than the
+  1-GPU variant with the same per-GPU work (1132 vs 960 ms/iter), so compute hides little of the all-to-all.
 
 ## Known issues
 

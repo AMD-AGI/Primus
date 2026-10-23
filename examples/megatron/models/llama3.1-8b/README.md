@@ -84,7 +84,8 @@ like the DeepSeek-V3 example's; see hipBLASLt tuning in its README.
 
 Measured with `amdprimus/amdprimus:tas-20261019` and Primus-Turbo 85e85e70, MBS 4 (one micro-batch of
 4 x 8192 tokens per GPU and iteration), started from the host. ms/iter is Primus's average over iterations
-3–10, the mean of 3 runs that alternated between the rows; speedup is against the first row. Peak memory is
+3–10. The FlyDSL and hipBLASLt tuning rows are the mean of 2 runs that alternated between the two rows; the
+baseline rows are the mean of 3 runs from an earlier set, and the speedup is against them. Peak memory is
 the largest `hip mem usage` in the log, which Primus prints for the last rank in GiB (labelled GB) as the
 device's total minus free memory. Each row adds one step:
 
@@ -98,21 +99,21 @@ device's total minus free memory. Each row adds one step:
 | Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
 | --- | --- | --- | --- | --- | --- | --- |
 | Baseline | 1938 | 1.00x | 16,900 | 870 | 345.02 GiB | 10.1909 |
-| + FlyDSL | 1116 | 1.74x | 29,400 | 1511 | 344.77 GiB | 10.1911–10.1919 |
-| + hipBLASLt tuning (default) | 1024 | 1.89x | 32,000 | 1647 | 344.72 GiB | 10.1881–10.1894 |
+| + FlyDSL | 1080 | 1.79x | 30,300 | 1562 | 344.74 GiB | 10.1904 |
+| + hipBLASLt tuning (default) | 983 | 1.97x | 33,300 | 1716 | 344.69 GiB | 10.1902–10.1903 |
 
 **4 GPUs** (the launcher's defaults: DP4, GBS 16)
 
 | Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
 | --- | --- | --- | --- | --- | --- | --- |
 | Baseline | 1943 | 1.00x | 16,900 | 868 | 276.18 GiB | 8.9728 |
-| + FlyDSL | 1138 | 1.71x | 28,800 | 1483 | 276.18 GiB | 8.9695–8.9717 |
-| + hipBLASLt tuning (default) | 1047 | 1.86x | 31,300 | 1611 | 276.12 GiB | 8.9704–8.9784 |
+| + FlyDSL | 1117 | 1.74x | 29,300 | 1509 | 276.08 GiB | 8.9683–8.9709 |
+| + hipBLASLt tuning (default) | 1023 | 1.90x | 32,000 | 1649 | 276.03 GiB | 8.9698–8.9745 |
 
 TE's unfused attention (`USE_TURBO_ATTENTION=False`) is not in the tables: without recompute it runs out of
 memory in the first iteration, and with `--recompute_granularity selective` it was about 4.5x slower than
 FlyDSL (both without the tuning file; see Attention backends below). With the defaults, an iteration on
-4 GPUs takes 2.2% longer than on 1 GPU (the data-parallel gradient reduce-scatter and parameter all-gather
+4 GPUs takes 4.0% longer than on 1 GPU (the data-parallel gradient reduce-scatter and parameter all-gather
 are not fully hidden), and the distributed optimizer's sharding lowers the peak memory per GPU by about
 69 GiB. The loss differs between 1 and 4 GPUs because the global batch does (4 vs 16 sequences). Without the
 tuning file, `PRIMUS_SEQ_LENGTH=16384` with `MBS=2` (the same tokens per iteration) ran 1231 ms/iter on one
