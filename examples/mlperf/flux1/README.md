@@ -129,9 +129,12 @@ Set one site profile on every launch. Explicit environment overrides still win.
 | `NCCL_IB_HCA` | `ionic_0,...,ionic_7` | `ionic_1,...,ionic_7` |
 
 Both profiles retain DMA-BUF, `NCCL_CROSS_NIC=2`, symmetric GIN disabled, and
-one hierarchical CE context for the SDMA path. On the pinned image the Crusoe
-plugin name is intentionally unavailable, which makes RCCL use regular built-in
-IB; `NCCL_NET_PLUGIN=none` selects IB-CAST there and fails with Ionic local
+one hierarchical CE context for the SDMA path. DCCS defaults to four training
+data workers, matching the qualified pane recipe and avoiding the small
+host-side variance observed with eight; callers may still override it. On the
+pinned image the Crusoe plugin name is intentionally unavailable, which makes
+RCCL use regular built-in IB; `NCCL_NET_PLUGIN=none` selects IB-CAST there and
+fails with Ionic local
 access errors. Crusoe excludes rail 0 because it is degraded on a qualified
 node pair; override `NCCL_IB_HCA` to restore it only after validating the
 selected nodes.

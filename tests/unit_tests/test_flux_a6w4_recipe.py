@@ -62,11 +62,13 @@ def test_cluster_network_profiles():
         "GLOO_SOCKET_IFNAME": dccs["GLOO_SOCKET_IFNAME"],
         "NCCL_NET_PLUGIN": dccs["NCCL_NET_PLUGIN"],
         "NCCL_RMA_DISABLE": dccs["NCCL_RMA_DISABLE"],
+        "DATALOADER_NUM_WORKERS": dccs["DATALOADER_NUM_WORKERS"],
     } == {
         "NCCL_SOCKET_IFNAME": "fenic",
         "GLOO_SOCKET_IFNAME": "fenic",
         "NCCL_NET_PLUGIN": "none",
         "NCCL_RMA_DISABLE": "0",
+        "DATALOADER_NUM_WORKERS": "4",
     }
     crusoe = _profile_env("crusoe")
     assert {

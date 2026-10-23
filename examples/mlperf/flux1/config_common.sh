@@ -8,6 +8,7 @@ case "$FLUX_CLUSTER" in
         export NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN:-none}
         export NCCL_RMA_DISABLE=${NCCL_RMA_DISABLE:-0}
         export NCCL_IB_HCA=${NCCL_IB_HCA:-ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7}
+        export DATALOADER_NUM_WORKERS=${DATALOADER_NUM_WORKERS:-4}
         ;;
     crusoe)
         export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ens3}
