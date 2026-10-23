@@ -170,6 +170,10 @@ class TestEnableGate:
         monkeypatch.setitem(sys.modules, "torch", None)
         assert not war._on_rocm()
 
+    def test_disabled_when_triton_is_missing(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "triton", None)
+        assert not war._has_triton()
+
     def test_gate_does_not_inspect_the_architecture_name(self):
         """A gate reading gcnArchName is how the gfx950 blind spot happened."""
         assert "gcnArchName" not in inspect.getsource(war._on_rocm)

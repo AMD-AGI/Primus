@@ -7,23 +7,13 @@
 
 import os
 import re
-import socket
 import subprocess
 import sys
 import unittest
 
 import pytest
 
-from tests.utils import PrimusUT, run_training_script
-
-
-def _find_free_port() -> int:
-    """Ask the kernel for a free TCP port (bind to 0); avoids EADDRINUSE from
-    guessing a port that overlaps the ephemeral range or a not-yet-released one."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
+from tests.utils import PrimusUT, isolated_torchrun_env, run_training_script
 
 _GFX_TO_PLATFORM = {
     "gfx942": "MI300X",
@@ -531,8 +521,8 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
                 "--use_turbo_grouped_gemm",
                 "1",
-                # use_turbo_grouped_gemm is incompatible with the config's default
-                # moe_use_legacy_grouped_gemm=True, so disable the legacy path.
+                # use_turbo_grouped_gemm is incompatible with moe_use_legacy_grouped_gemm,
+                # so keep the legacy path off even if the config default changes.
                 "--moe_use_legacy_grouped_gemm",
                 "0",
             ],
@@ -692,6 +682,51 @@ class TestMegatronTrainer(PrimusUT):
                 "2",
                 "--global_batch_size",
                 "16",
+            ],
+        )
+
+    def test_zaya1_8B_bf16(self):
+        # Own architecture: alternating CCA and a nonlinear MoE router.
+        # The tag includes the platform so the MI300X and MI355X logs stay
+        # distinct. Depth is cut to 4 stages. The recipe trains on mock data,
+        # so CI does not need /data/zaya1. The full 80-stage BF16 run is in
+        # docs/04-technical-guides/zaya1/validation.md.
+        run_script(
+            self.__class__.__name__,
+            f"zaya1_8b_{GPU_PLATFORM.lower()}_bf16",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/zaya1_8B-BF16-pretrain.yaml",
+            env_override={"GPUS_PER_NODE": "1"},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "1",
+            ],
+        )
+
+    def test_zaya1_8B_fp8(self):
+        # Same shrink as the BF16 test. The recipe sets fp8: hybrid with
+        # tensorwise scaling, so step 1 runs FP8 without an amax history.
+        # CCA and expert GEMMs are Transformer Engine linears; the router stays
+        # BF16. Hidden size stays 2048 so every FP8 GEMM is a multiple of 16.
+        run_script(
+            self.__class__.__name__,
+            f"zaya1_8b_{GPU_PLATFORM.lower()}_fp8",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/zaya1_8B-FP8-pretrain.yaml",
+            env_override={"GPUS_PER_NODE": "1"},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "1",
             ],
         )
 
@@ -1031,11 +1066,7 @@ class TestProjectionSimulate(PrimusUT):
             "--target-nodes",
             "2",
         ]
-        env = os.environ.copy()
-        # Kernel-assigned free port so back-to-back GPU benches don't hit
-        # EADDRINUSE (a fixed/random port can clash with a not-yet-released
-        # previous run or the ephemeral range).
-        env["MASTER_PORT"] = str(_find_free_port())
+        env = isolated_torchrun_env()
         return self._check(subprocess.run(cmd, capture_output=True, text=True, env=env))
 
     def test_performance_simulate_dense(self):

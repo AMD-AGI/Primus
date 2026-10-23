@@ -1,7 +1,7 @@
 # Qwen3.5-4B DFlash draft training on pre-captured hidden states (offline).
 #
-# Image: examples/specforge/docker/README.md
-# primus-cli sketch: examples/specforge/README.md
+# Image: docs/04-technical-guides/specforge/runtime-image.md
+# primus-cli sketch: docs/04-technical-guides/specforge/running.md
 #
 #   export HIDDEN_STATES_PATH=/path/to/hidden_states
 #   export OUTPUT_DIR=/path/to/out
@@ -38,4 +38,6 @@ modules:
         model.use_liger_kernel: false
         data.hidden_states_path: ${HIDDEN_STATES_PATH}
         # AMD recipe defaults to 1. Set NPROC_PER_NODE to self-launch more ranks.
+        # slurm -N K sets NNODES; Primus injects master_addr after allocate.
         deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}
+        deployment.trainer.nnodes: ${NNODES:1}

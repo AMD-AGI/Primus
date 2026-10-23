@@ -181,10 +181,16 @@ if [[ -n "${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING:-}" ]]; then
 fi
 for _sdma_env in \
     MEGATRON_PARAM_GATHER_BACKEND \
+    MEGATRON_GRAD_REDUCE_BACKEND \
     MEGATRON_RCCL_SDMA_CTA_POLICY \
     MEGATRON_RCCL_SDMA_EAGER_INIT \
     MEGATRON_RCCL_SDMA_EAGER_PARAM_BYTES \
-    MEGATRON_RCCL_SDMA_LOG; do
+    MEGATRON_RCCL_SDMA_LOG \
+    RCCL_CE_REDUCESCATTER \
+    RCCL_FORCE_CE_REDUCESCATTER \
+    RCCL_CE_REDUCE_PER_CHUNK \
+    RCCL_CE_REDUCE_MAX_BLOCKS \
+    RCCL_CE_AR_STAGING_BYTES; do
     if [[ -n "${!_sdma_env:-}" ]]; then
         _extra_env+=("--env=${_sdma_env}=${!_sdma_env}")
     fi

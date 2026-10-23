@@ -56,7 +56,7 @@ def replace_turbo_fp8linear_modules(model: nn.Module, config: Float8QuantConfig)
             replace_turbo_fp8linear_modules(module, config)
 
 
-class PrimusTubroFP8Converter(ModelConverter):
+class PrimusTurboFP8Converter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = True
         self.config = Float8QuantConfig(granularity=ScalingGranularity.TENSORWISE)
@@ -76,4 +76,4 @@ class PrimusTubroFP8Converter(ModelConverter):
         return
 
 
-register_model_converter(PrimusTubroFP8Converter, "primus_turbo_fp8")
+register_model_converter(PrimusTurboFP8Converter, "primus_turbo_fp8")

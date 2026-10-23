@@ -1,10 +1,12 @@
 #!/bin/bash
+# shellcheck disable=SC2034,SC2153,SC2154  # variables are read by the sourced lib/*.sh
 ###############################################################################
 # Primus Perf Batch Runner (single node)
 #
 # Purpose:
 #   Run a batch of Primus training benchmarks (Megatron, Megatron Bridge,
-#   TorchTitan, MaxText, MaxDiffusion) and collect the results in a single
+#   TorchTitan, MaxText, MaxDiffusion), and optionally the diffusion and DLRM
+#   benchmarks of diffusion_bench/, and collect the results in a single
 #   directory with enough metadata that a reviewer can reproduce or audit each
 #   run from the logs alone.
 #
@@ -18,11 +20,11 @@
 #   Nothing in this file needs editing: every setting below reads from the
 #   environment. The script can be invoked from any directory.
 #
-#   GPU is optional: when unset it is read from the rocm-smi product name
-#   ("AMD Instinct MI325X" -> MI325X). Set it to run another device's configs.
-#   BACKEND is required because an image only supports some backends -- a
-#   torch image has no JAX -- so defaulting to "all" would queue impossible
-#   runs.
+#   GPU is optional: when unset it is read from the amd-smi / rocm-smi product
+#   name ("AMD Instinct MI325X" -> MI325X). Set it to run another device's
+#   configs. BACKEND is required because an image only supports some
+#   backends -- a torch image has no JAX -- so defaulting to "all" would queue
+#   impossible runs.
 #
 # Choosing configs -- two modes, no paths to type:
 #   Catalog mode (default)
@@ -37,12 +39,49 @@
 #
 #   Missing paths and duplicate entries are reported before anything launches.
 #
+# Diffusion and DLRM (BACKEND=...,diffusion_dlrm, catalog mode only):
+#   Not a catalog backend. Adding it to BACKEND runs diffusion_bench/
+#   run_benchmarks.sh once per repetition (NUM_REPS), after the catalog
+#   configs, for every diffusion and DLRM model its config enables (batch
+#   sizes, models and step_timeout come from that config; the runner sets no
+#   time limit on this run). It uses
+#   DOCKER_IMAGE, which must contain /workspace/AMDiffusionBenchmark and
+#   /workspace/DLRMBenchmark (rocm/primus images do), and writes its results
+#   folder under $RESULT_DIR/diffusion_dlrm. For example, everything the
+#   PyTorch image runs:
+#     BACKEND=megatron,torchtitan,megatron_bridge,diffusion_dlrm
+#   DIFFUSION_DLRM_CONFIG=<file>   diffusion_bench config to use instead of
+#                                  diffusion_bench/config.yaml
+#   DIFFUSION_DLRM_HF_CACHE=<dir>  Hugging Face cache for the diffusion models
+#                                  (default: hf_cache_dir in that config)
+#   TRAIN_STEPS sets the diffusion models' num_iterations; DLRM keeps its own.
+#   EXTRA_ENV reaches its container too; the Primus defaults below do not.
+#
 # Optional knobs:
+#   DRY_RUN=1        print the selected configs and launch commands, then exit
+#                    without touching docker or the GPUs. HF_TOKEN and
+#                    DOCKER_IMAGE are not required.
 #   TRAIN_STEPS=20   cap training length for the whole batch (smoke / short
 #                    bench). The CLI override flag is chosen from the config's
 #                    framework (see below). Unset -- the default -- keeps
 #                    whatever the YAML specifies.
 #   NUM_REPS=3       repetitions per config (default 1).
+#   MAX_RUN_SECONDS  stop a run that is still going after this long
+#                    (default 3600; 0 = no limit).
+#   MAX_IDLE_SECONDS stop a run whose log has not grown for this long, which
+#                    is how a hang shows up (default 1200; 0 = no limit).
+#   POLL_INTERVAL    how often the log is checked, in seconds (default 15).
+#   GPU_BUSY_MIB     a GPU with more memory in use than this counts as busy,
+#                    and the run is refused (default 2048).
+#   GPU_BUSY_WAIT_SECONDS  how long busy GPUs may take to free up before the
+#                    run is refused (default 60).
+#   ALLOW_BUSY_GPUS=1  run even when the GPUs are busy.
+#   PULL_IMAGE=1     pull DOCKER_IMAGE before the batch even if the tag is
+#                    present, replacing a stale or re-tagged local copy.
+#   EXTRACT=0        do not refresh results.csv / results.json (or report.xlsx)
+#                    at the end.
+#   REPORT=0         do not write report.xlsx at the end (written only when
+#                    pandas and XlsxWriter are installed; see report.py).
 #   EXTRA_ENV=...    space-separated KEY=VALUE pairs forwarded into the
 #                    container as explicit `--env` flags, e.g.
 #                    EXTRA_ENV="DEBUG_HIP_DYNAMIC_QUEUES=0". A plain export is
@@ -50,6 +89,15 @@
 #                    runner/.primus.yaml's container.options.env plus the
 #                    PRIMUS_/NCCL_/RCCL_/GLOO_/IONIC_/HIPBLASLT_ prefixes, and
 #                    drops everything else without warning.
+#   PRIMUS_MODE      launcher mode, "container" (default) or "direct" when the
+#                    runner itself already runs inside a container.
+#
+# Before the first run (and the GPU part before every run):
+#   * the image is pulled if it is not present locally;
+#   * containers that earlier batches of this user left running are stopped
+#     (only ones this tool labelled; see lib/control.sh);
+#   * the GPUs must be idle, or the batch refuses to start or stops;
+#   * NCCL/Gloo must not bootstrap over docker0 or another bridge.
 #
 # Pre-training vs post-training:
 #   A Primus experiment YAML declares exactly one training module, and the
@@ -72,18 +120,38 @@
 #     * A structured info banner (timestamp, host, framework, MBS/GBS, etc.).
 #     * The full YAML config used, dumped verbatim.
 #     * The raw stdout/stderr of the primus-cli invocation.
-#     * A footer with exit code and elapsed seconds.
+#     * A footer with exit code, elapsed seconds and the failure reason.
+#
+# Exit codes: 0 every run passed, 1 a run failed or was not started, 2 bad
+# input or a failed pre-run check (nothing launched), 130 interrupted.
 #
 # Batch-level outputs in $RESULT_DIR:
 #     batch_summary_<stamp>.txt     - rolling summary, system info, per-run status.
 #     batch_env_<stamp>.txt         - shell environment, secrets redacted.
 #     batch_submodules_<stamp>.txt  - `git submodule status` (what code ran).
-#     batch_gpu_<stamp>.txt         - rocm-smi clocks / power / topology.
-#     batch_stack_<stamp>.txt       - image digest + library versions from
-#                                     inside the container.
+#     batch_gpu_<stamp>.txt         - rocm-smi / amd-smi clocks, power, topology.
+#     batch_stack_<stamp>.txt       - image digest and ID, ROCm/HIP and library
+#                                     versions from inside the container.
+#     batch_host_<stamp>.txt        - the platform: server model and BIOS, CPU
+#                                     topology, frequency and idle states,
+#                                     memory and DIMMs, GPU memory, power cap,
+#                                     partition, clocks and VBIOS, host GPU
+#                                     driver, RDMA NICs, OS, kernel command
+#                                     line, NUMA balancing, THP, IOMMU and the
+#                                     network interfaces; the raw lscpu,
+#                                     numactl and sysfs data behind them.
+#     batch_manifest_<stamp>/       - the image's /workspace/.manifest (build
+#                                     recipe, dpkg and pip lists), if it has one.
 #     run_batch_<stamp>.sh          - a copy of THIS script as it was run,
 #                                     written before the first run starts.
 #     <framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>_<stamp>.log - per-run logs.
+#     diffusion_dlrm-<config>-<hash>-rep<r>_<stamp>.log - the diffusion_dlrm
+#                                     run's log; diffusion_bench's own results
+#                                     folder is under diffusion_dlrm/.
+#     results.csv, results.json     - every log in RESULT_DIR parsed by
+#                                     extract_results.py, refreshed at the end.
+#     report.xlsx                   - the Excel report of RESULT_DIR (report.py),
+#                                     refreshed at the end (REPORT=0 skips it).
 #   <stamp> is YYYYmmdd-HHMMSS, captured once when the script starts, so every
 #   artefact of one batch shares it and repeated runs in the same RESULT_DIR
 #   accumulate side by side instead of overwriting each other. Export BATCH_TS
@@ -92,8 +160,10 @@
 
 # Strict-ish mode: catch typos / unset vars, keep pipe exit codes accurate.
 # We intentionally do NOT use `set -e`: a single failing benchmark must not
-# abort the rest of the batch.
+# abort the rest of the batch. No job control (+m): under it a background
+# setsid forks, and the launcher's PID would no longer be its process group.
 set -uo pipefail
+set +m
 
 # ----------------------------- User Settings ---------------------------------
 # Every knob below is overridable from the environment, so a run never needs
@@ -133,6 +203,15 @@ NUM_REPS=${NUM_REPS:-1}
 # framework (see header).
 TRAIN_STEPS="${TRAIN_STEPS:-}"
 
+DRY_RUN="${DRY_RUN:-0}"
+
+# Run limits (see header). A single-node run that fails exits on its own, so
+# unlike the multi-node runner there is no FAIL_PATTERN here.
+MAX_RUN_SECONDS="${MAX_RUN_SECONDS:-3600}"
+MAX_IDLE_SECONDS="${MAX_IDLE_SECONDS:-1200}"
+POLL_INTERVAL="${POLL_INTERVAL:-15}"
+FAIL_PATTERN=""
+
 # Cluster topology (forwarded to the Primus launcher via env).
 export NNODES=${NNODES:-1}
 export NODE_RANK=${NODE_RANK:-0}
@@ -151,15 +230,23 @@ PRIMUS_PATH=${PRIMUS_PATH:-"$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/
 PRIMUS_CLI=${PRIMUS_CLI:-"./primus-cli"}
 
 # Sourced at runtime from the script's own directory; shellcheck cannot
-# resolve the path statically.
+# resolve the paths statically.
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/lib/common.sh"
+# Single-node layout for the shared banner and system snapshot.
+PERF_MULTINODE=0
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/run.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/control.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/diffusion_dlrm.sh"
 
 # Absolute from here on. The batch later does `cd "$PRIMUS_PATH"`, so a
 # relative RESULT_DIR would put the summary and the per-run logs in two
 # different directories depending on where the script was invoked from.
-mkdir -p "$RESULT_DIR" 2>/dev/null || true
-RESULT_DIR="$(realpath "$RESULT_DIR" 2>/dev/null || echo "$RESULT_DIR")"
+# The directory itself is only created once DRY_RUN is ruled out.
+RESULT_DIR="$(realpath -m "$RESULT_DIR")"
 
 # Every artefact this batch writes is stamped with one timestamp captured here at
 # start-up, so a second batch in the same RESULT_DIR cannot overwrite the first
@@ -173,25 +260,23 @@ SUMMARY_FILE="$RESULT_DIR/batch_summary_${BATCH_TS}.txt"
 ENV_FILE="$RESULT_DIR/batch_env_${BATCH_TS}.txt"
 SCRIPT_COPY="$RESULT_DIR/${SCRIPT_NAME%.sh}_${BATCH_TS}.sh"
 
+perf_init_container_label
+
 # ----------------------------- Sanity Checks ---------------------------------
-if [ -z "$RESULT_DIR" ]; then
-    echo "[ERROR] RESULT_DIR is not set. Export RESULT_DIR before running." >&2
-    exit 1
-fi
-
-if [ ! -d "$RESULT_DIR" ]; then
-    echo "[ERROR] RESULT_DIR does not exist and could not be created: $RESULT_DIR" >&2
-    exit 1
-fi
-
 # Required, never defaulted: a token baked into a shared script leaks the
 # moment the script is copied next to the results.
-: "${HF_TOKEN:?HF_TOKEN is required; export your Hugging Face token before running}"
-export HF_TOKEN
+if [ -z "${HF_TOKEN:-}" ] && [ "$DRY_RUN" != 1 ]; then
+    echo "[ERROR] HF_TOKEN is required; export your Hugging Face token before running." >&2
+    exit "$PERF_EXIT_REFUSED"
+fi
+export HF_TOKEN="${HF_TOKEN:-}"
 
 # Required: benchmarking the wrong build because a default went stale is worse
 # than being told to name the image.
-: "${DOCKER_IMAGE:?DOCKER_IMAGE is required; export the image:tag to benchmark}"
+if [ -z "$DOCKER_IMAGE" ] && [ "$DRY_RUN" != 1 ]; then
+    echo "[ERROR] DOCKER_IMAGE is required; export the image:tag to benchmark." >&2
+    exit "$PERF_EXIT_REFUSED"
+fi
 
 # yq is required. When it is missing (or is the unrelated Python `yq`), a
 # private copy is fetched into ~/.cache/primus-perf/bin -- no root needed and
@@ -199,177 +284,19 @@ export HF_TOKEN
 if ! perf_ensure_yq; then
     echo "[ERROR] 'yq' is required and could not be installed automatically." >&2
     echo "        See https://github.com/mikefarah/yq for manual installation." >&2
-    exit 1
+    exit "$PERF_EXIT_REFUSED"
 fi
 
 shopt -s nullglob
 
 # Select the configs to run: catalog (default, filtered by GPU/BACKEND) or a
-# directory of YAMLs (CONFIG_DIR). Missing paths and duplicates are reported
-# here, before anything launches.
-# EXTRA_ENV -> explicit --env flags, validated before anything launches.
-if ! perf_parse_extra_env; then
-    exit 1
-fi
-
-if ! perf_select_configs; then
-    exit 1
-fi
-
-if [ ! -d "$PRIMUS_PATH" ]; then
-    echo "[ERROR] PRIMUS_PATH does not exist: $PRIMUS_PATH" >&2
-    exit 1
-fi
-
-# Resolve absolute path of the CLI (handles default './primus-cli').
-PRIMUS_CLI_ABS="$PRIMUS_PATH/${PRIMUS_CLI#./}"
-if [ ! -x "$PRIMUS_CLI_ABS" ]; then
-    echo "[ERROR] primus-cli not found or not executable at: $PRIMUS_CLI_ABS" >&2
-    exit 1
-fi
-
-if [ -n "$TRAIN_STEPS" ]; then
-    if ! [[ "$TRAIN_STEPS" =~ ^[1-9][0-9]*$ ]]; then
-        echo "[ERROR] TRAIN_STEPS must be a positive integer, got: '$TRAIN_STEPS'" >&2
-        exit 1
-    fi
+# directory of YAMLs (CONFIG_DIR). EXTRA_ENV, missing paths and duplicates are
+# all reported here, before anything launches.
+if ! check_batch_inputs || ! perf_check_run_limits || ! perf_dd_prepare; then
+    exit "$PERF_EXIT_REFUSED"
 fi
 
 # ---------------------------- Helper functions -------------------------------
-
-# Read a YAML field with yq. Returns "N/A" if absent/null/empty.
-yq_or_na() {
-    local expr="$1"
-    local file="$2"
-    local val
-    val=$(yq -r "$expr" "$file" 2>/dev/null)
-    if [ -z "$val" ] || [ "$val" = "null" ]; then
-        echo "N/A"
-    else
-        echo "$val"
-    fi
-}
-
-# Make a string safe to use in a filename (no slashes, no spaces).
-sanitize() {
-    local v="$1"
-    v="${v//\//_}"
-    v="${v// /_}"
-    echo "$v"
-}
-
-# 8-char SHA-256 fingerprint of the config file contents. Lets the filename
-# disambiguate two runs of "the same" config when its contents change between
-# batches (or when the same config name is reused with edits).
-config_fingerprint() {
-    local file="$1"
-    sha256sum "$file" | cut -c1-8
-}
-
-# Which training module a config declares. Primus experiment YAMLs carry
-# exactly one: `pre_trainer` for pretraining, `post_trainer` for the Megatron
-# Bridge SFT/LoRA recipes. Everything else in this script keys off the answer,
-# because the module fixes both the CLI verb and the overrides path.
-detect_train_module() {
-    local config_file="$1"
-    if [ "$(yq -r '.modules | has("pre_trainer")' "$config_file" 2>/dev/null)" = "true" ]; then
-        echo "pre_trainer"
-    elif [ "$(yq -r '.modules | has("post_trainer")' "$config_file" 2>/dev/null)" = "true" ]; then
-        echo "post_trainer"
-    else
-        echo "N/A"
-    fi
-}
-
-# `train <suite>` verb that drives a given module (primus/cli/subcommands/train.py).
-train_suite_for_module() {
-    case "$1" in
-        pre_trainer)  echo "pretrain"  ;;
-        post_trainer) echo "posttrain" ;;
-        *)            echo ""          ;;
-    esac
-}
-
-# Extract per-framework key fields from a config file. Sets globals
-# MODULE, TRAIN_SUITE, FRAMEWORK, MODEL, MBS, GBS, SEQ_LEN, STEPS for the caller.
-extract_config_fields() {
-    local config_file="$1"
-
-    MODULE=$(detect_train_module "$config_file")
-    TRAIN_SUITE=$(train_suite_for_module "$MODULE")
-
-    FRAMEWORK=$(yq_or_na ".modules.$MODULE.framework" "$config_file")
-    MODEL=$(yq_or_na ".modules.$MODULE.model" "$config_file")
-
-    case "$FRAMEWORK" in
-        megatron)
-            MBS=$(yq_or_na ".modules.$MODULE.overrides.micro_batch_size" "$config_file")
-            GBS=$(yq_or_na ".modules.$MODULE.overrides.global_batch_size" "$config_file")
-            SEQ_LEN=$(yq_or_na ".modules.$MODULE.overrides.seq_length" "$config_file")
-            STEPS=$(yq_or_na ".modules.$MODULE.overrides.train_iters" "$config_file")
-            ;;
-        torchtitan)
-            MBS=$(yq_or_na ".modules.$MODULE.overrides.training.local_batch_size" "$config_file")
-            GBS=$(yq_or_na ".modules.$MODULE.overrides.training.global_batch_size" "$config_file")
-            SEQ_LEN=$(yq_or_na ".modules.$MODULE.overrides.training.seq_len" "$config_file")
-            STEPS=$(yq_or_na ".modules.$MODULE.overrides.training.steps" "$config_file")
-            ;;
-        maxtext)
-            # MaxText (JAX) uses per_device_batch_size; the effective global
-            # batch is per_device_batch_size * total_devices. The "MBS"/"GBS"
-            # columns are reused here so logs/summary stay aligned with the
-            # other frameworks; MBS == per-device batch, GBS == global batch.
-            MBS=$(yq_or_na ".modules.$MODULE.overrides.per_device_batch_size" "$config_file")
-            SEQ_LEN=$(yq_or_na ".modules.$MODULE.overrides.max_target_length" "$config_file")
-            STEPS=$(yq_or_na ".modules.$MODULE.overrides.steps" "$config_file")
-            if [ "$MBS" != "N/A" ]; then
-                # Float-safe multiply via awk; per_device_batch_size can be
-                # fractional in MaxText (e.g. 0.5). Print as int when whole.
-                GBS=$(awk -v m="$MBS" -v n="$NNODES" -v g="$GPUS_PER_NODE" 'BEGIN {
-                    v = m * n * g
-                    if (v == int(v)) printf "%d", v; else printf "%g", v
-                }')
-                [ -z "$GBS" ] && GBS="N/A"
-            else
-                GBS="N/A"
-            fi
-            ;;
-        maxdiffusion)
-            MBS=$(yq_or_na ".modules.$MODULE.overrides.per_device_batch_size" "$config_file")
-            GBS=$(yq_or_na ".modules.$MODULE.overrides.global_batch_size" "$config_file")
-            SEQ_LEN="N/A"
-            STEPS=$(yq_or_na ".modules.$MODULE.overrides.max_train_steps" "$config_file")
-            ;;
-        megatron_bridge)
-            # Same override names for pretrain and for the SFT/LoRA posttrain
-            # recipes; only the module they live under differs.
-            MBS=$(yq_or_na ".modules.$MODULE.overrides.micro_batch_size" "$config_file")
-            GBS=$(yq_or_na ".modules.$MODULE.overrides.global_batch_size" "$config_file")
-            SEQ_LEN=$(yq_or_na ".modules.$MODULE.overrides.seq_length" "$config_file")
-            STEPS=$(yq_or_na ".modules.$MODULE.overrides.train_iters" "$config_file")
-            ;;
-        *)
-            MBS=$(yq_or_na ".modules.$MODULE.overrides.micro_batch_size" "$config_file")
-            GBS=$(yq_or_na ".modules.$MODULE.overrides.global_batch_size" "$config_file")
-            SEQ_LEN="N/A"
-            STEPS="N/A"
-            ;;
-    esac
-}
-
-# Primus CLI override flag that sets training length for a given framework.
-# These names come from trainer tests / user-guide examples, not from the
-# backend's native argparse (e.g. TorchTitan is --training.steps, not --steps).
-train_step_override_flag() {
-    local framework="$1"
-    case "$framework" in
-        megatron|megatron_bridge) echo "--train_iters" ;;
-        torchtitan)               echo "--training.steps" ;;
-        maxtext)                  echo "--steps" ;;
-        maxdiffusion)             echo "--max_train_steps" ;;
-        *)                        echo "" ;;
-    esac
-}
 
 # Build the primus-cli argv for one config. Extra tokens after --config are
 # deep-merged into the overrides of the module being trained (CLI > YAML).
@@ -377,7 +304,7 @@ build_launch_argv() {
     local config_file="$1"
     local framework="$2"
     local suite="$3"
-    local flag
+    local label_args=()
 
     if [ -z "$suite" ]; then
         echo "[ERROR] no modules.pre_trainer or modules.post_trainer found in: $config_file" >&2
@@ -385,234 +312,32 @@ build_launch_argv() {
         return 1
     fi
 
+    # The label lets cleanup find exactly this batch's container.
+    if perf_uses_containers; then
+        label_args=( --label "${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}" )
+    fi
+
     # $PRIMUS_MODE is intentionally unquoted so a value like "container" or
     # "direct" (or a short extra mode flag string) still splits as intended.
     # EXTRA_ENV becomes explicit `--env KEY=VALUE` flags before the `--`, which
     # is the only way to be sure a variable reaches the container.
     # shellcheck disable=SC2206
-    LAUNCH_ARGV=( "$PRIMUS_CLI" $PRIMUS_MODE ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} -- train "$suite" --config "$config_file" )
+    LAUNCH_ARGV=( "$PRIMUS_CLI" $PRIMUS_MODE ${label_args[@]+"${label_args[@]}"} ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} -- train "$suite" --config "$config_file" )
 
-    if [ -z "$TRAIN_STEPS" ]; then
-        return 0
-    fi
-
-    flag=$(train_step_override_flag "$framework")
-    if [ -z "$flag" ]; then
-        echo "[ERROR] TRAIN_STEPS=$TRAIN_STEPS but no step-override flag for framework '$framework' (config: $config_file)" >&2
-        echo "        Known: megatron, megatron_bridge, torchtitan, maxtext, maxdiffusion." >&2
-        return 1
-    fi
-    LAUNCH_ARGV+=( "$flag" "$TRAIN_STEPS" )
+    append_train_steps_override "$config_file" "$framework"
 }
 
-# Collect host / git / GPU info that helps reviewers understand the run.
-collect_system_info() {
-    {
-        echo "################################################################################"
-        echo "# System / Environment Snapshot"
-        echo "################################################################################"
-        echo "# Date           : $(date '+%Y-%m-%d %H:%M:%S %Z')"
-        echo "# Hostname       : $(hostname)"
-        echo "# Kernel         : $(uname -srm)"
-        echo "# OS             : $(grep ^PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '\"' || echo 'unknown')"
-        echo "# User           : $(whoami)"
-        echo "# CWD            : $(pwd)"
-        echo "# PRIMUS_PATH    : $PRIMUS_PATH"
-        echo "# PRIMUS_MODE    : $PRIMUS_MODE"
-        echo "# Docker image   : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
-        echo "# Script         : $SCRIPT_PATH"
-        echo "# Bash           : $BASH_VERSION"
-        echo "# Python         : $(command -v python3 >/dev/null && python3 --version 2>&1 || echo 'not found')"
-        echo "# yq             : $(yq --version 2>&1 | head -1)"
-        if command -v git >/dev/null 2>&1 && git -C "$PRIMUS_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            echo "# Git branch     : $(git -C "$PRIMUS_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-            echo "# Git commit    : $(git -C "$PRIMUS_PATH" rev-parse HEAD 2>/dev/null)"
-            local dirty
-            dirty=$(git -C "$PRIMUS_PATH" status --porcelain 2>/dev/null | wc -l)
-            echo "# Git dirty?    : $([ "$dirty" -eq 0 ] && echo no || echo "yes ($dirty files modified)")"
-        else
-            echo "# Git           : not a git checkout"
-        fi
-        if command -v rocminfo >/dev/null 2>&1; then
-            local rocm_ver
-            rocm_ver=$(rocminfo 2>/dev/null | awk '/ROCm Version/ {print $3; exit}')
-            echo "# ROCm version  : ${rocm_ver:-unknown}"
-        fi
-        if command -v rocm-smi >/dev/null 2>&1; then
-            local gpu_count
-            gpu_count=$(rocm-smi --showid 2>/dev/null | grep -c '^GPU\[' || echo "?")
-            echo "# ROCm GPUs     : $gpu_count"
-        fi
-        echo "################################################################################"
-    }
-}
+if [ "$DRY_RUN" = 1 ]; then
+    perf_print_plan
+    exit "$PERF_EXIT_OK"
+fi
 
-print_per_run_banner() {
-    local result_file="$1"
-    local config_file="$2"
-    local config_name="$3"
-    local config_hash="$4"
-    local framework="$5"
-    local model="$6"
-    local mbs="$7"
-    local gbs="$8"
-    local seq_len="$9"
-    local steps="${10}"
-    local rep="${11}"
-    local total_reps="${12}"
-    local launcher_cmd="${13}"
-    local module="${14}"
-    local suite="${15}"
+if ! mkdir -p "$RESULT_DIR" 2>/dev/null; then
+    echo "[ERROR] RESULT_DIR does not exist and could not be created: $RESULT_DIR" >&2
+    exit "$PERF_EXIT_REFUSED"
+fi
 
-    {
-        echo "################################################################################"
-        echo "# Primus Benchmark Run"
-        echo "################################################################################"
-        echo "# Timestamp        : $(date '+%Y-%m-%d %H:%M:%S %Z')"
-        echo "# Hostname         : $(hostname)"
-        echo "# Result Dir       : $RESULT_DIR"
-        echo "# Result File      : $result_file"
-        echo "# Batch Stamp      : $BATCH_TS"
-        echo "# --------------------------------------------------------------------------------"
-        echo "# Config File      : $config_file"
-        echo "# Config Name      : $config_name"
-        echo "# Config Hash      : $config_hash  (sha256, first 8 hex chars)"
-        echo "# Framework        : $framework"
-        echo "# Train Module     : $module  (CLI verb: train $suite)"
-        echo "# Model            : $model"
-        echo "# Micro Batch Size : $mbs"
-        echo "# Global Batch Size: $gbs"
-        echo "# Sequence Length  : $seq_len"
-        echo "# Train Steps/Iters: $steps"
-        echo "# Repetition       : $rep / $total_reps"
-        echo "# --------------------------------------------------------------------------------"
-        echo "# Cluster          : NNODES=$NNODES GPUS_PER_NODE=$GPUS_PER_NODE NODE_RANK=$NODE_RANK"
-        echo "# Master           : $MASTER_ADDR:$MASTER_PORT"
-        echo "# PRIMUS_MODE      : $PRIMUS_MODE"
-        echo "# Launcher command : $launcher_cmd"
-        echo "# --------------------------------------------------------------------------------"
-        echo "# HF_TOKEN         : $([ -n "$HF_TOKEN" ] && echo '<set>' || echo '<unset>')"
-        perf_print_provenance_banner "${DOCKER_IMAGE:-}"
-        echo "################################################################################"
-        echo ""
-        echo "########################## Begin Config File Dump ##############################"
-        cat "$config_file"
-        # Some YAML files don't end with a newline; force one so the End marker
-        # below lands on its own line instead of being appended to the last
-        # config line.
-        [ -n "$(tail -c1 "$config_file")" ] && echo
-        echo "########################### End Config File Dump ###############################"
-        echo ""
-        echo "############################## Begin Run Output ################################"
-    } > "$result_file"
-}
-
-print_per_run_footer() {
-    local result_file="$1"
-    local exit_code="$2"
-    local run_elapsed="$3"
-    {
-        echo "############################### End Run Output #################################"
-        echo ""
-        echo "################################################################################"
-        echo "# Run finished at : $(date '+%Y-%m-%d %H:%M:%S %Z')"
-        echo "# Exit code       : $exit_code"
-        echo "# Elapsed (sec)   : $run_elapsed"
-        echo "################################################################################"
-    } >> "$result_file"
-}
-
-# --------------------------- Interrupt handling ------------------------------
-# Ctrl+C should stop the run that is in flight, tear down its container, and
-# abandon the rest of the batch rather than rolling on to the next config.
-#
-# The terminal already delivers SIGINT to the foreground process group, so the
-# launcher itself goes down on its own. What does not go down is the training
-# container: `docker run` losing its client does not stop the container, so we
-# have to stop it explicitly.
-
-# primus-cli names containers "<base>-<SLURM_JOB_ID or pid>" (the base comes
-# from runner/.primus.yaml, the suffix is appended by
-# runner/primus-cli-container.sh), so there is no fixed name to stop -- match
-# on the prefix instead.
-PRIMUS_CONTAINER_PREFIX="${PRIMUS_CONTAINER_PREFIX:-primus-training}"
-
-# Containers matching that prefix that were already up before this batch
-# started. Nodes get shared, and a previous or concurrent job's container must
-# survive our Ctrl+C, so only containers absent from this list are ours to stop.
-PREEXISTING_CONTAINERS=""
-
-CURRENT_RESULT_FILE=""
-CURRENT_RUN_START=0
-
-primus_container_ids() {
-    command -v docker >/dev/null 2>&1 || return 0
-    docker ps -q --filter "name=^/${PRIMUS_CONTAINER_PREFIX}" 2>/dev/null
-}
-
-snapshot_preexisting_containers() {
-    PREEXISTING_CONTAINERS="$(primus_container_ids)"
-    if [ -n "$PREEXISTING_CONTAINERS" ]; then
-        echo "[INFO] pre-existing ${PRIMUS_CONTAINER_PREFIX}* containers will be left alone on interrupt:" \
-            | tee -a "$SUMMARY_FILE"
-        local id
-        for id in $PREEXISTING_CONTAINERS; do
-            echo "         $id  $(docker inspect --format '{{.Name}}' "$id" 2>/dev/null)" \
-                | tee -a "$SUMMARY_FILE"
-        done
-    fi
-}
-
-# Invoked from on_interrupt, which itself runs via trap, so shellcheck sees no
-# call site and reports the whole body as unreachable.
-# shellcheck disable=SC2317,SC2329
-stop_our_containers() {
-    local id name
-    for id in $(primus_container_ids); do
-        case " $PREEXISTING_CONTAINERS " in
-            *" $id "*) continue ;;
-        esac
-        name=$(docker inspect --format '{{.Name}}' "$id" 2>/dev/null || echo "$id")
-        echo ">>> Stopping container ${name#/} ..." >&2
-        docker stop -t 20 "$id" >/dev/null 2>&1 || true
-    done
-}
-
-# shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
-on_interrupt() {
-    # A second Ctrl+C should not re-enter this handler mid-cleanup.
-    trap '' INT TERM
-
-    echo "" >&2
-    echo ">>> Interrupted. Stopping the current run; the rest of the batch is abandoned." >&2
-
-    # The launcher has already been signalled by the terminal; give it a moment
-    # to unwind before we force the container down.
-    sleep 3
-    stop_our_containers
-
-    if [ -n "$CURRENT_RESULT_FILE" ]; then
-        print_per_run_footer "$CURRENT_RESULT_FILE" 130 "$(( $(date +%s) - CURRENT_RUN_START ))"
-        echo ">>> Interrupted run log: $CURRENT_RESULT_FILE" >&2
-    fi
-
-    {
-        echo ""
-        echo "################################################################################"
-        echo "# Primus Benchmark Batch INTERRUPTED"
-        echo "################################################################################"
-        echo "# Interrupted at: $(date '+%Y-%m-%d %H:%M:%S %Z')"
-        # Defaulted because an interrupt can land before the run loop starts,
-        # e.g. during the container probe, and `set -u` is on.
-        echo "# Runs started  : ${TOTAL_RUNS:-0}"
-        echo "# Runs failed   : ${FAILED_RUNS:-0}"
-        echo "# In-flight run : ${CURRENT_RESULT_FILE:-<none>}"
-        echo "################################################################################"
-    } | tee -a "$SUMMARY_FILE"
-
-    exit 130
-}
-trap on_interrupt INT TERM
+trap perf_on_interrupt INT TERM HUP
 
 # ---------------------------- Batch Execution --------------------------------
 # Preserve the exact script that drove this batch before running anything, so
@@ -622,6 +347,25 @@ cp -f "$SCRIPT_PATH" "$SCRIPT_COPY"
 # Initialise summary and env files.
 : > "$SUMMARY_FILE"
 collect_system_info | tee -a "$SUMMARY_FILE"
+
+# Image, leftover containers, idle GPUs, NCCL interface, and what diffusion_dlrm
+# needs. Done before the batch configuration is written so the image digest
+# below is already known.
+if ! perf_preflight || ! perf_dd_preflight; then
+    {
+        echo ""
+        echo "################################################################################"
+        echo "# Primus Benchmark Batch REFUSED: a pre-run check failed (see above)"
+        echo "# Nothing was launched."
+        echo "################################################################################"
+    } | tee -a "$SUMMARY_FILE"
+    exit "$PERF_EXIT_REFUSED"
+fi
+
+# Batch-level provenance: redacted env, submodule pins, GPU state, host
+# settings, and the library versions from inside the container. Taken before
+# the batch configuration below, which shows the container's ROCm and HIP.
+perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
 
 {
     echo ""
@@ -635,77 +379,64 @@ collect_system_info | tee -a "$SUMMARY_FILE"
     echo "# PRIMUS_MODE  : $PRIMUS_MODE"
     echo "# Docker image : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
     echo "# Image digest : $(perf_image_digest "${DOCKER_IMAGE:-}")"
+    echo "# Image ID     : $(perf_image_id "${DOCKER_IMAGE:-}")"
+    echo "# ROCm (host)  : $(perf_rocm_version)"
+    echo "# ROCm (image) : ${PERF_CONTAINER_ROCM:-unknown}  (HIP ${PERF_CONTAINER_HIP:-unknown})"
+    echo "# System       : ${PERF_SYSTEM_DESCRIPTION:-unknown}"
     echo "# Reps/config  : $NUM_REPS"
     echo "# TRAIN_STEPS  : ${TRAIN_STEPS:-<unset; use YAML>}"
+    echo "# Run limits   : $(perf_run_limits_text)"
+    echo "# GPU check    : $PERF_GPU_CHECK"
+    echo "# NCCL iface   : $PERF_NIC_CHECK"
+    if perf_uses_containers; then
+        echo "# Label        : ${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
+    fi
     # CONFIG_FILES is populated by perf_select_configs in lib/common.sh.
     # shellcheck disable=SC2153
     echo "# Total configs: ${#CONFIG_FILES[@]}"
-    echo "# Total runs   : $(( ${#CONFIG_FILES[@]} * NUM_REPS ))"
+    echo "# Total runs   : $(( ${#CONFIG_FILES[@]} * NUM_REPS + PERF_DD_RUNS ))"
     echo "# Configs to run (resolved path + content hash):"
-    for f in "${CONFIG_FILES[@]}"; do
+    for f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
         echo "#   - $(sha256sum "$f" | cut -c1-8)  $f"
     done
+    if [ "$PERF_DD_RUNS" -gt 0 ]; then
+        perf_dd_config_lines
+    fi
     echo "################################################################################"
     echo ""
 } | tee -a "$SUMMARY_FILE"
 
-# Batch-level provenance: redacted env, submodule pins, GPU state, and the
-# library versions from inside the container.
-perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
+cd "$PRIMUS_PATH" || { echo "[ERROR] cannot cd into $PRIMUS_PATH" >&2; exit "$PERF_EXIT_REFUSED"; }
 
-# Record which training containers are already up, so an interrupt only stops
-# the ones this batch starts.
-snapshot_preexisting_containers
+RUNS_STARTED=0
+RUNS_FAILED=0
+TOTAL_PLANNED=$(( ${#CONFIG_FILES[@]} * NUM_REPS + PERF_DD_RUNS ))
+BATCH_STOPPED=""
 
-cd "$PRIMUS_PATH" || { echo "[ERROR] cannot cd into $PRIMUS_PATH" >&2; exit 1; }
+for config_file in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
+    [ -z "$BATCH_STOPPED" ] || break
 
-TOTAL_RUNS=0
-FAILED_RUNS=0
-
-for config_file in "${CONFIG_FILES[@]}"; do
-    # `config_name` keeps the path relative to the repo root, so the banner and
-    # summary show where the config came from (examples/megatron/configs/... )
-    # rather than a bare basename that is ambiguous across framework folders.
-    # The extractor tolerates a path here: `_split_model_precision` takes the
-    # last segment before parsing the model name.
-    config_rel="${config_file#"$PRIMUS_PATH"/}"
-    config_name="${config_rel%.yaml}"
-    config_name="${config_name%.yml}"
-
-    # For the on-disk log filename we use only the basename (no subfolder),
-    # since the `${fw_safe}-` prefix already disambiguates same-named YAMLs
-    # that live under different framework folders. Including the subfolder
-    # here produced redundant names like `megatron-megatron_<config>-...log`.
-    config_basename=$(basename "$config_file")
-    config_basename="${config_basename%.yaml}"
-    config_basename="${config_basename%.yml}"
-
-    extract_config_fields "$config_file"
-    YAML_STEPS="$STEPS"
-    if [ -n "$TRAIN_STEPS" ]; then
-        STEPS="$TRAIN_STEPS (CLI override; yaml=$YAML_STEPS)"
-    fi
+    prepare_config "$config_file"
 
     if ! build_launch_argv "$config_file" "$FRAMEWORK" "$TRAIN_SUITE"; then
-        TOTAL_RUNS=$((TOTAL_RUNS + NUM_REPS))
-        FAILED_RUNS=$((FAILED_RUNS + NUM_REPS))
+        RUNS_STARTED=$((RUNS_STARTED + NUM_REPS))
+        RUNS_FAILED=$((RUNS_FAILED + NUM_REPS))
         echo "[SKIP/FAIL] ${FRAMEWORK}/${config_name}: cannot build launch command" \
             | tee -a "$SUMMARY_FILE"
         continue
     fi
-    launcher_cmd="${LAUNCH_ARGV[*]}"
-
-    fw_safe=$(sanitize "$FRAMEWORK")
-    name_safe=$(sanitize "$config_basename")
-    mbs_safe=$(sanitize "$MBS")
-    gbs_safe=$(sanitize "$GBS")
-    config_hash=$(config_fingerprint "$config_file")
+    launcher_cmd=$(perf_display_argv "${LAUNCH_ARGV[@]}")
 
     for rep in $(seq 1 "$NUM_REPS"); do
-        TOTAL_RUNS=$((TOTAL_RUNS + 1))
-        result_file="${RESULT_DIR}/${fw_safe}-${name_safe}-${config_hash}-MBS${mbs_safe}-GBS${gbs_safe}-rep${rep}_${BATCH_TS}.log"
+        # The first run was checked by perf_preflight a moment ago.
+        if [ "$RUNS_STARTED" -gt 0 ] && ! perf_prepare_gpus; then
+            BATCH_STOPPED="the GPUs were busy before run $((RUNS_STARTED + 1))"
+            break
+        fi
 
-        echo "[$(date '+%H:%M:%S')] [run ${TOTAL_RUNS}/$(( ${#CONFIG_FILES[@]} * NUM_REPS ))] ${FRAMEWORK}/${TRAIN_SUITE}/${config_name} [${config_hash}] MBS=${MBS} GBS=${GBS} steps=${STEPS} rep ${rep}/${NUM_REPS}" \
+        result_file=$(run_log_name "$rep")
+
+        echo "[$(date '+%H:%M:%S')] [run $((RUNS_STARTED + 1))/${TOTAL_PLANNED}] ${FRAMEWORK}/${TRAIN_SUITE}/${config_name} [${config_hash}] MBS=${MBS} GBS=${GBS} steps=${STEPS} rep ${rep}/${NUM_REPS}" \
             | tee -a "$SUMMARY_FILE"
         echo "                    -> $result_file" | tee -a "$SUMMARY_FILE"
 
@@ -713,52 +444,92 @@ for config_file in "${CONFIG_FILES[@]}"; do
             "$FRAMEWORK" "$MODEL" "$MBS" "$GBS" "$SEQ_LEN" "$STEPS" "$rep" "$NUM_REPS" \
             "$launcher_cmd" "$MODULE" "$TRAIN_SUITE"
 
-        run_start_ts=$(date +%s)
+        RUNS_STARTED=$((RUNS_STARTED + 1))
+        perf_launch_with_watchdog "$result_file" "$(( $(wc -l < "$result_file") + 1 ))"
 
-        # Published for on_interrupt, so a Ctrl+C can close out the log of
-        # whichever run was in flight.
-        CURRENT_RESULT_FILE="$result_file"
-        CURRENT_RUN_START="$run_start_ts"
-
-        # The actual benchmark invocation. Stdout+stderr are appended to the
-        # per-run log so we capture everything Primus prints -- with secret
-        # values masked on the way, because primus-cli logs the container
-        # command it runs, `--env HF_TOKEN=<value>` included.
-        # PIPESTATUS[0] is still the launcher's exit code.
-        "${LAUNCH_ARGV[@]}" 2>&1 | perf_redact_stream | tee -a "$result_file"
-        exit_code=${PIPESTATUS[0]}
-
-        run_end_ts=$(date +%s)
-        run_elapsed=$((run_end_ts - run_start_ts))
-
-        CURRENT_RESULT_FILE=""
-
-        print_per_run_footer "$result_file" "$exit_code" "$run_elapsed"
-
-        if [ "$exit_code" -ne 0 ]; then
-            FAILED_RUNS=$((FAILED_RUNS + 1))
-            echo "                    [FAIL] exit=$exit_code elapsed=${run_elapsed}s" \
+        if [ "$RUN_FAILURE_REASON" != "none" ]; then
+            RUNS_FAILED=$((RUNS_FAILED + 1))
+            echo "                    [FAIL] ${RUN_FAILURE_REASON} exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
                 | tee -a "$SUMMARY_FILE"
         else
-            echo "                    [ OK ] exit=$exit_code elapsed=${run_elapsed}s" \
+            echo "                    [ OK ] exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
                 | tee -a "$SUMMARY_FILE"
         fi
     done
 done
 
+# diffusion_dlrm: one diffusion_bench run per repetition, after everything else.
+if [ "$PERF_DD_RUNS" -gt 0 ]; then
+    perf_dd_launch_argv
+    launcher_cmd=$(perf_display_argv "${LAUNCH_ARGV[@]}")
+    dd_config_name=$(perf_dd_config_name)
+    dd_config_hash=$(config_fingerprint "$DIFFUSION_DLRM_CONFIG")
+    dd_models=$(perf_dd_summary)
+    dd_steps="${TRAIN_STEPS:+$TRAIN_STEPS (diffusion num_iterations; DLRM unchanged)}"
+    for rep in $(seq 1 "$NUM_REPS"); do
+        [ -z "$BATCH_STOPPED" ] || break
+        if [ "$RUNS_STARTED" -gt 0 ] && ! perf_prepare_gpus; then
+            BATCH_STOPPED="the GPUs were busy before run $((RUNS_STARTED + 1))"
+            break
+        fi
+
+        result_file=$(perf_dd_log_name "$rep")
+
+        echo "[$(date '+%H:%M:%S')] [run $((RUNS_STARTED + 1))/${TOTAL_PLANNED}] diffusion_dlrm/${dd_config_name#/} [${dd_config_hash}] ${dd_models} rep ${rep}/${NUM_REPS}" \
+            | tee -a "$SUMMARY_FILE"
+        echo "                    -> $result_file" | tee -a "$SUMMARY_FILE"
+
+        PERF_RUN_LIMITS_TEXT="$(perf_dd_limits_text)" \
+            PERF_ENV_NOTE="not passed to diffusion_bench's container; EXTRA_ENV is" \
+            print_per_run_banner "$result_file" "$DIFFUSION_DLRM_CONFIG" "$dd_config_name" "$dd_config_hash" \
+            "$PERF_DIFFUSION_DLRM_BACKEND" "$dd_models" "N/A" "N/A" "N/A" "${dd_steps:-per diffusion_bench config}" \
+            "$rep" "$NUM_REPS" "$launcher_cmd" "diffusion_bench" ""
+
+        RUNS_STARTED=$((RUNS_STARTED + 1))
+        # Read by the interrupt handler, which then also runs perf_dd_finalize.
+        # shellcheck disable=SC2034
+        PERF_DD_LOG="$result_file"
+        # shellcheck disable=SC2034
+        PERF_DD_ACTIVE=1
+        # For this run only: no runner time limit, and a failure reason that
+        # names the steps that failed.
+        MAX_RUN_SECONDS=0 MAX_IDLE_SECONDS=0 PERF_REASON_FN=perf_dd_failure_reason \
+            perf_launch_with_watchdog "$result_file" "$(( $(wc -l < "$result_file") + 1 ))"
+        perf_dd_finalize "$result_file"
+        # shellcheck disable=SC2034
+        PERF_DD_ACTIVE=0
+
+        if [ "$RUN_FAILURE_REASON" != "none" ]; then
+            RUNS_FAILED=$((RUNS_FAILED + 1))
+            echo "                    [FAIL] ${RUN_FAILURE_REASON} exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
+                | tee -a "$SUMMARY_FILE"
+        else
+            echo "                    [ OK ] exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
+                | tee -a "$SUMMARY_FILE"
+        fi
+        perf_dd_report_steps "$result_file"
+    done
+fi
+
 BATCH_END=$(date '+%Y-%m-%d %H:%M:%S %Z')
 BATCH_END_TS=$(date +%s)
 BATCH_ELAPSED=$((BATCH_END_TS - BATCH_START_TS))
+RUNS_NOT_STARTED=$((TOTAL_PLANNED - RUNS_STARTED))
 
 {
     echo ""
     echo "################################################################################"
-    echo "# Primus Benchmark Batch Complete"
+    if [ -n "$BATCH_STOPPED" ]; then
+        echo "# Primus Benchmark Batch STOPPED: $BATCH_STOPPED"
+    else
+        echo "# Primus Benchmark Batch Complete"
+    fi
     echo "################################################################################"
     echo "# End time     : $BATCH_END"
     echo "# Elapsed (sec): $BATCH_ELAPSED"
-    echo "# Total runs   : $TOTAL_RUNS"
-    echo "# Failed runs  : $FAILED_RUNS"
+    echo "# Total runs   : $RUNS_STARTED"
+    echo "# Failed runs  : $RUNS_FAILED"
+    echo "# Not started  : $RUNS_NOT_STARTED"
     echo "################################################################################"
 } | tee -a "$SUMMARY_FILE"
 
@@ -766,11 +537,12 @@ BATCH_ELAPSED=$((BATCH_END_TS - BATCH_START_TS))
 # still has it; just report the artefacts here.
 echo "Saved batch driver -> $SCRIPT_COPY" | tee -a "$SUMMARY_FILE"
 echo "Saved env snapshot -> $ENV_FILE"    | tee -a "$SUMMARY_FILE"
-echo "Saved provenance   -> $RESULT_DIR/batch_{submodules,gpu,stack}_${BATCH_TS}.txt" | tee -a "$SUMMARY_FILE"
+echo "Saved provenance   -> $RESULT_DIR/batch_{submodules,gpu,stack,host}_${BATCH_TS}.txt" | tee -a "$SUMMARY_FILE"
+perf_extract_results
 echo "Saved summary      -> $SUMMARY_FILE"
 
-if [ "$FAILED_RUNS" -eq 0 ]; then
-    exit 0
+if [ "$RUNS_FAILED" -eq 0 ] && [ "$RUNS_NOT_STARTED" -eq 0 ]; then
+    exit "$PERF_EXIT_OK"
 else
-    exit 1
+    exit "$PERF_EXIT_RUN_FAILED"
 fi

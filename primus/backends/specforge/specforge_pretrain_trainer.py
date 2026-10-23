@@ -26,7 +26,10 @@ from primus.backends.specforge.argument_builder import (
     build_capture_argv,
     build_specforge_argv,
     flatten_overrides,
+    homogeneous_nnodes,
+    homogeneous_rendezvous_dir,
     is_online_train,
+    offline_multinode_overrides,
     specforge_mode,
 )
 from primus.backends.specforge.stack_preflight import raise_if_issues
@@ -84,6 +87,14 @@ def resolve_filter_min_kept(capture: Optional[dict] = None) -> int:
     return max(1, int(raw))
 
 
+def should_filter_capture(env=None) -> bool:
+    """Hidden-state filter runs once, on node rank 0, after torchrun returns."""
+
+    from primus.backends.specforge.online_launch import node_rank
+
+    return node_rank(env) == 0
+
+
 def clear_partial_distributed_env(env=None) -> list:
     """Hand SpecForge either a complete torchrun environment or none at all.
 
@@ -119,18 +130,44 @@ class SpecForgePretrainTrainer(BaseTrainer):
     def setup(self):
         log_rank_0("SpecForgePretrainTrainer.setup()")
 
+    def _homogeneous_argv(self) -> list[str]:
+        """Capture or offline train argv, with multi-node rendezvous when ``NNODES>1``."""
+
+        from primus.backends.specforge.online_launch import (
+            node_rank,
+            rendezvous_head_ip,
+        )
+
+        nodes = homogeneous_nnodes(self.backend_args)
+        rank = node_rank()
+        master = None
+        if nodes > 1:
+            shared = homogeneous_rendezvous_dir(self.backend_args)
+            master = rendezvous_head_ip(shared)
+            log_rank_0(f"Multi-node rendezvous nnodes={nodes} node_rank={rank} master_addr={master}")
+        if self.mode == "capture":
+            return build_capture_argv(self.backend_args, nnodes=nodes, node_rank=rank, master_addr=master)
+        extra = (
+            offline_multinode_overrides(self.backend_args, master_addr=master, nnodes=nodes)
+            if nodes > 1 and master
+            else []
+        )
+        return build_specforge_argv(
+            self.backend_args,
+            extra_overrides=extra or None,
+            node_rank=rank if nodes > 1 else None,
+        )
+
     def init(self):
         """Build the SpecForge argv and validate the entrypoint is reachable."""
 
         raise_if_issues(self.backend_args)
         self.mode = specforge_mode(self.backend_args)
-        if self.mode == "capture":
-            self.argv = build_capture_argv(self.backend_args)
-        elif is_online_train(self.backend_args):
+        if is_online_train(self.backend_args):
             # Capture/trainer ranks supervise sidecars; argv is built per-role later.
             self.argv = None
         else:
-            self.argv = build_specforge_argv(self.backend_args)
+            self.argv = self._homogeneous_argv()
         self.workdir = getattr(self.backend_args, "specforge_root", None)
 
         entry = (
@@ -189,6 +226,9 @@ class SpecForgePretrainTrainer(BaseTrainer):
             completed = subprocess.run(self.argv, check=False)
             if completed.returncode != 0:
                 raise SystemExit(completed.returncode)
+            if not should_filter_capture():
+                log_rank_0("Skipping hidden-state filter on non-zero node rank")
+                return
             capture = flatten_overrides(getattr(self.backend_args, "specforge_capture", None))
             filter_out = capture.get("filter_output_path")
             raw = capture.get("output_path")

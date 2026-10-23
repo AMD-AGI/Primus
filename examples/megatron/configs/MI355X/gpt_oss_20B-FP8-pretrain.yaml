@@ -3,6 +3,10 @@ user_name: ${PRIMUS_USER:qyy}
 exp_name: ${PRIMUS_EXP_NAME:gpt_oss_20B-pretrain}
 workspace: ./output
 
+# expandable segments are both faster and lower-peak with the real 201088-token vocab
+env:
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
 modules:
   pre_trainer:
     framework: megatron
@@ -27,14 +31,27 @@ modules:
 
       enable_primus_turbo: true
       use_turbo_attention: true
-      use_turbo_grouped_gemm: false
+      use_turbo_grouped_gemm: true
+      use_turbo_fused_qk_rmsnorm_rope: true
+      # fused grouped MLP and fused act require fp32 router probs
+      turbo_fused_grouped_gemm: true
+      use_turbo_fused_act_with_probs: true
+      moe_router_dtype: fp32
+      # turbo_fp8_permute requires deepep, fused grouped gemm and tensorwise scaling
+      turbo_fp8_permute: true
+
+      # deepep
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      turbo_deepep_num_cu: 160
+      turbo_deepep_use_comm_stream: false
+      turbo_sync_free_moe_stage: 1
 
       # Sink attention (PR 208) - GPT-OSS style learned sinks
       # Reference: gpt-oss/gpt_oss/triton/attention.py
       use_sink_attention: true
-      # Note: sliding window not yet supported by aiter Triton backend
-      # Set to 0 to disable, or wait for backend support
-      sink_sliding_window: 0  # gpt-oss default is 128, but disabled for now
+      # Set to 0 to disable the sliding window
+      sink_sliding_window: 128  # gpt-oss default
       sink_window_even_layers_only: true  # apply sliding window only to even layers
 
       apply_rope_fusion: true
@@ -47,8 +64,8 @@ modules:
 
       # hyper parameters
       train_iters: 50
-      micro_batch_size: 10
-      global_batch_size: 80
+      micro_batch_size: 12
+      global_batch_size: 96
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
@@ -69,6 +86,8 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
       overlap_param_gather: true
+      ddp_num_buckets: 24
+      ddp_average_in_collective: true
 
       # data
       mock_data: true
@@ -78,8 +97,7 @@ modules:
       test_data_path: null
 
       # fusion
-      # 20250321: need latest megatron docker image
-      moe_permute_fusion: false
+      moe_permute_fusion: true
       # fused wgrad gemm and accumulation
       gradient_accumulation_fusion: false
       # recommend set `false` in fp8
@@ -109,9 +127,10 @@ modules:
       cross_entropy_fusion_impl: "te"
 
       fp8: hybrid
-      # enable_primus_turbo: true
-      # use_turbo_attention: true
-      # use_turbo_grouped_gemm: false
-      # enable_primus_turbo: false
-      # enable_turbo_attention_float8 : false
-      # enable_turbo_gemm_float8 : false
+      fp8_recipe: tensorwise
+      use_turbo_norm_te_linear: true
+      moe_router_fusion: true
+      use_turbo_rms_norm: true
+      # first run spends ~10 min compiling FlyDSL kernels; later runs reuse the cache
+      use_turbo_gemm: true
+      turbo_gemm_backend: "fp8:flydsl,fp4:flydsl,other:hipblaslt"

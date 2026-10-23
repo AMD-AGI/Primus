@@ -111,6 +111,16 @@ class MaxTextPretrainTrainer(BaseTrainer):
         """
         log_rank_0("MaxTextPretrainTrainer.init() - initializing MaxText training")
 
+        # MaxText normally starts under absl.app.run, which parses absl flags.
+        # Primus calls initialize()/run() directly, and grain reads absl flags when
+        # it starts worker processes (grain_worker_count > 0): unparsed, the first
+        # batch raises UnparsedFlagAccessError, which MaxText's training loop then
+        # reports as a graceful stop after zero steps. Keep the flag defaults.
+        from absl import flags
+
+        if not flags.FLAGS.is_parsed():
+            flags.FLAGS.mark_as_parsed()
+
         initialize, _, module_name = _resolve_maxtext_train()
 
         from primus.backends.maxtext.argument_builder import (
@@ -211,6 +221,20 @@ class MaxTextPretrainTrainer(BaseTrainer):
             flat_overrides[k] = v
 
         return flat_overrides
+
+    def setup_model_only(self):
+        """Resolve the config and bring up JAX, without training.
+
+        This is the hook projection's layer benchmark calls instead of
+        :meth:`init` + :meth:`train`.  For MaxText the two coincide: its
+        ``initialize()`` resolves hyperparameters and initializes the JAX
+        distributed runtime but builds no model and reads no data -- the model
+        is only constructed inside the training loop.  The benchmark builds the
+        layers it needs itself, from ``self.train_config``.
+        """
+        if self.train_config is None:
+            self.init()
+        return self.train_config
 
     # --------------------------------------------------------------------- #
     # Training entrypoint

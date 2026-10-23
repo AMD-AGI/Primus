@@ -38,6 +38,7 @@ from primus.core.utils.yaml_utils import nested_namespace_to_dict
 
 DEFAULT_ENTRYPOINT = "specforge"
 DEFAULT_CAPTURE_SCRIPT = "scripts/prepare_hidden_states.py"
+DEFAULT_TORCHRUN_MASTER_PORT = "29500"
 CAPTURE_STORE_TRUE = frozenset(
     {
         "trust_remote_code",
@@ -54,6 +55,10 @@ CAPTURE_STORE_TRUE = frozenset(
 CAPTURE_SKIP_KEYS = frozenset(
     {
         "nproc_per_node",
+        "nnodes",
+        "node_rank",
+        "master_addr",
+        "master_port",
         "filter_output_path",
         "filter_block_size",
         "filter_min_kept",
@@ -156,6 +161,57 @@ def flatten_overrides(obj: Any, prefix: str = "") -> dict[str, str]:
     return flat
 
 
+def homogeneous_nnodes(params: Any, env: Optional[Mapping[str, str]] = None) -> int:
+    """Node count for homogeneous capture / offline train (not online C+T).
+
+    YAML ``specforge_capture.nnodes`` or ``deployment.trainer.nnodes`` wins;
+    otherwise ``NNODES`` / Slurm.
+    """
+
+    capture = flatten_overrides(getattr(params, "specforge_capture", None))
+    raw = capture.get("nnodes")
+    if raw not in (None, "", "null"):
+        return max(1, int(raw))
+    overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
+    raw = overrides.get("deployment.trainer.nnodes")
+    if raw not in (None, "", "null"):
+        return max(1, int(raw))
+    environ = os.environ if env is None else env
+    raw = environ.get("NNODES") or environ.get("SLURM_NNODES") or environ.get("SLURM_JOB_NUM_NODES") or "1"
+    return max(1, int(str(raw).strip()))
+
+
+def homogeneous_rendezvous_dir(params: Any) -> Path:
+    """Shared directory for ``head.ip`` (parent of capture shards, or ``output_dir``)."""
+
+    if specforge_mode(params) == "capture":
+        capture = flatten_overrides(getattr(params, "specforge_capture", None))
+        raw = capture.get("output_path") or getattr(params, "output_dir", None)
+        if not raw:
+            raise ValueError(
+                "[Primus:specforge] multi-node capture needs specforge_capture.output_path "
+                "or output_dir on shared storage"
+            )
+        return Path(str(raw)).parent
+    overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
+    raw = getattr(params, "output_dir", None) or overrides.get("output_dir")
+    if not raw:
+        raise ValueError("[Primus:specforge] multi-node offline train needs output_dir on shared storage")
+    return Path(str(raw))
+
+
+def offline_multinode_overrides(params: Any, *, master_addr: str, nnodes: int) -> list[str]:
+    """Hydra keys SpecForge needs when ``deployment.trainer.nnodes > 1``."""
+
+    overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
+    extra: list[str] = []
+    if "deployment.trainer.nnodes" not in overrides:
+        extra.append(f"deployment.trainer.nnodes={int(nnodes)}")
+    if "deployment.trainer.master_addr" not in overrides:
+        extra.append(f"deployment.trainer.master_addr={master_addr}")
+    return extra
+
+
 def build_specforge_argv(
     params: Any,
     extra_overrides: Optional[list[str]] = None,
@@ -211,9 +267,19 @@ def _is_true_flag(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def build_capture_argv(params: Any, extra_args: Optional[list[str]] = None) -> list[str]:
+def build_capture_argv(
+    params: Any,
+    extra_args: Optional[list[str]] = None,
+    *,
+    nnodes: Optional[int] = None,
+    node_rank: Optional[int] = None,
+    master_addr: Optional[str] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> list[str]:
     """Build ``torchrun … scripts/prepare_hidden_states.py`` for offline capture.
 
+    ``nnodes=1`` (the default when the kwargs are omitted) uses ``--standalone``.
+    Multi-node matches SpecForge train: ``--nnodes/--node_rank/--master_addr/--master_port``.
     AITER and ``--sglang-disable-radix-cache`` are injected when omitted so
     recipes do not expose those knobs.
     """
@@ -222,12 +288,33 @@ def build_capture_argv(params: Any, extra_args: Optional[list[str]] = None) -> l
     nproc = capture.get("nproc_per_node") or os.environ.get("NPROC_PER_NODE") or "1"
     torchrun = capture.get("torchrun") or "torchrun"
     script = capture.get("script") or DEFAULT_CAPTURE_SCRIPT
+    environ = os.environ if env is None else env
+    nodes = int(nnodes) if nnodes is not None else 1
+    rank = int(node_rank) if node_rank is not None else 0
+    addr = master_addr or capture.get("master_addr")
+    port = capture.get("master_port") or environ.get("SPECFORGE_MASTER_PORT") or DEFAULT_TORCHRUN_MASTER_PORT
+
+    if nodes <= 1:
+        launch = [str(torchrun), "--standalone", "--nproc_per_node", str(nproc)]
+    else:
+        if not addr:
+            raise ValueError("[Primus:specforge] multi-node capture requires master_addr")
+        launch = [
+            str(torchrun),
+            "--nnodes",
+            str(nodes),
+            "--node_rank",
+            str(rank),
+            "--master_addr",
+            str(addr),
+            "--master_port",
+            str(port),
+            "--nproc_per_node",
+            str(nproc),
+        ]
 
     argv = [
-        str(torchrun),
-        "--standalone",
-        "--nproc_per_node",
-        str(nproc),
+        *launch,
         str(script),
     ]
     if capture.get("sglang_attention_backend") in (None, "", "null"):

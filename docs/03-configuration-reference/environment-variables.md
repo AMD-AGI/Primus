@@ -37,6 +37,7 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 | `PRIMUS_LOG_LEVEL` | `INFO` | User; debug paths in `runner/primus-cli-*.sh` set `DEBUG` | `runner/lib/common.sh` | Log verbosity: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `PRIMUS_LOG_TIMESTAMP` | `1` | User | `runner/lib/common.sh` | `1` prefixes logs with timestamps; `0` disables. |
 | `PRIMUS_LOG_COLOR` | `1` (auto-off if not a TTY) | User; tests may set `0` | `runner/lib/common.sh` | ANSI colors in runner logs. |
+| `PRIMUS_VERBOSE_FILELOCK` | `0` | User | `primus/core/utils/logger.py` | `1` keeps the `filelock` library's DEBUG lines (one per 0.05 s poll while a rank waits on a lock, e.g. during a torch extension build), which Primus otherwise hides by raising that logger to INFO. Only `1` is honored; it does not lower a stricter level set elsewhere (MLPerf quiet mode, `PRIMUS_LOG_SUPPRESSION=1`, sets ERROR). `PRIMUS_LOG_LEVEL` and `stderr_sink_level` do not bring the lines back. |
 | `PRIMUS_DEBUG` | `0` | User | `runner/helpers/envs/primus-env.sh` | `1` enables `set -x` in the env loader for shell tracing. |
 | `PRIMUS_SKIP_VALIDATION` | `0` | User / tests | `runner/helpers/envs/primus-env.sh` | `1` skips `validate_distributed_params` (not recommended). |
 | `PRIMUS_EXPECT_IB` | (unset) | User | `primus/tools/preflight/network/network_standard.py` | When `1`, preflight treats InfiniBand as expected for validation. |
@@ -108,6 +109,14 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `RCCL_MSCCL_ENABLE` | `0` | `base_env.sh` | RCCL | Enable MSCCL algorithms. |
 | `RCCL_MSCCLPP_THRESHOLD` | `1GiB` default | `base_env.sh` | RCCL | MSCCL++ message-size threshold. |
 | `RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING` | `0` in hooks | `runner/helpers/hooks/03_enable_ainic.sh` | RCCL | Stricter GDR flush memory ordering; relevant for some NIC/GPU combos. |
+| `MEGATRON_PARAM_GATHER_BACKEND` | unset | User; `06_enable_sdma_all_gather.sh` forwards it | Megatron Primus patch | Set to `rccl_sdma` to allocate distributed-optimizer parameter buffers from symmetric memory and use the dedicated zero-CTA process group for parameter AllGather. Requires `NCCL_CTA_POLICY` to be unset. |
+| `MEGATRON_GRAD_REDUCE_BACKEND` | unset | User; `06_enable_sdma_all_gather.sh` forwards it | Megatron Primus patch | Set to `rccl_sdma` to opt gradient ReduceScatter into the same group. Requires `MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma` and `RCCL_CE_REDUCESCATTER=1`. |
+| `RCCL_CE_REDUCESCATTER` | `0` in RCCL | Primus hook sets `1` for the gradient selector | RCCL | Enables CE ReduceScatter, subject to RCCL eligibility checks. |
+| `RCCL_FORCE_CE_REDUCESCATTER` | `0` in RCCL | User | RCCL | Bypasses the zero-CTA, registered-user-buffer, and tuned-size gates; useful for staged large-message testing. Still requires `RCCL_CE_REDUCESCATTER=1`. |
+| `RCCL_CE_REDUCE_PER_CHUNK` | `0` in RCCL | User | RCCL | Uses a finite reducer after each staged chunk instead of a persistent reduction grid. This mode uses 12 staging slots. |
+| `RCCL_CE_REDUCE_MAX_BLOCKS` | `46` in RCCL | User | RCCL | Caps the local CE reduction kernel from 1 through 92 blocks. This affects the reduction phase, not copy-engine scatter movement. |
+| `RCCL_CE_AR_STAGING_BYTES` | `268435456` in RCCL | User | RCCL | Per-slot staging capacity shared by CE AllReduce and CE ReduceScatter. Increasing it raises per-rank HBM use. |
+| `RCCL_DDA_ENABLE` | `1` in RCCL | User | RCCL | Enables DDA collectives. Keep enabled for the optimized AllGather path; disabling it is mainly useful when a profiler cannot observe DDA operations. |
 | `TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK` | `0` | `base_env.sh` | PyTorch + RCCL | Tensor allocator hook for NCCL registration. |
 | `TORCH_NCCL_HIGH_PRIORITY` | `1` | `base_env.sh` | PyTorch | High-priority NCCL streams. |
 
@@ -257,4 +266,4 @@ Primus owns these defaults in one place per backend: `primus/backends/<backend>/
 
 ## 15. SpecForge (ROCm overlay)
 
-SpecForge env, YAML, and CLI live in the [SpecForge configuration reference](../../examples/specforge/CONFIGURATION.md). That page lists Primus-owned names (`RUN_ID`, `CONSUMER_STATE_DIR`, `PRIMUS_SPECFORGE_*`, …) and points SpecForge Hydra keys at the SpecForge AMD ROCm tutorial.
+SpecForge env, YAML, and CLI live in the [SpecForge configuration reference](../04-technical-guides/specforge/configuration.md). That page lists Primus-owned names (`RUN_ID`, `CONSUMER_STATE_DIR`, `PRIMUS_SPECFORGE_*`, …) and points SpecForge Hydra keys at the SpecForge AMD ROCm tutorial.
