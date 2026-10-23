@@ -18,8 +18,9 @@ The perf batch runner can also run it as part of a batch, after the Primus model
 `BACKEND=...,diffusion_dlrm bash tools/perf/run_batch.sh` (see
 [`tools/perf/README.md`](../README.md#diffusion-and-dlrm-diffusion_dlrm)). It uses this folder's
 `config.yaml` (or `DIFFUSION_DLRM_CONFIG`), and passes the image, GPU type, output directory, a
-container label, the runner's `EXTRA_ENV`, and `TRAIN_STEPS` as `--num-iterations`; the HF cache
-can be overridden with `DIFFUSION_DLRM_HF_CACHE`.
+container label and the runner's `EXTRA_ENV`; the HF cache can be overridden with
+`DIFFUSION_DLRM_HF_CACHE`. The runner's `TRAIN_STEPS` is not passed on, so every model keeps the
+`num_iterations` of this config.
 
 ---
 
