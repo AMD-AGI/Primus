@@ -6,6 +6,7 @@
 
 """Unit tests for Megatron-Bridge transformers rope_theta compatibility."""
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -27,6 +28,31 @@ class TestResolveRopeTheta:
         cfg.default_theta = None
         cfg.rope_parameters = {"rope_theta": 750000.0}
         assert resolve_rope_theta(cfg) == 750000.0
+
+    def test_rope_parameters_object(self):
+        cfg = Mock(spec=[])
+        cfg.rope_parameters = SimpleNamespace(rope_theta=750000.0)
+        assert resolve_rope_theta(cfg) == 750000.0
+
+    def test_rope_parameters_dict_wins_over_default_theta(self):
+        # transformers 5.x: Qwen3 keeps the class default 10000 in default_theta
+        # while the checkpoint value lives in rope_parameters.
+        cfg = Mock(spec=[])
+        cfg.default_theta = 10000.0
+        cfg.rope_parameters = {"rope_type": "default", "rope_theta": 1000000.0}
+        assert resolve_rope_theta(cfg) == 1000000.0
+
+    def test_rope_parameters_object_wins_over_default_theta(self):
+        cfg = Mock(spec=[])
+        cfg.default_theta = 10000.0
+        cfg.rope_parameters = SimpleNamespace(rope_type="default", rope_theta=1000000.0)
+        assert resolve_rope_theta(cfg) == 1000000.0
+
+    def test_falls_back_to_default_theta_without_rope_parameters_theta(self):
+        cfg = Mock(spec=[])
+        cfg.default_theta = 10000.0
+        cfg.rope_parameters = {"rope_type": "default"}
+        assert resolve_rope_theta(cfg) == 10000.0
 
     def test_missing_raises(self):
         cfg = Mock(spec=[])
