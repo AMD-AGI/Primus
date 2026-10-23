@@ -10,10 +10,10 @@ the current container.
 
 The default image is `amdprimus/amdprimus:tas-20261019` (see the DeepSeek-V3 example's README). Its
 Primus-Turbo has no gfx1250 FlyDSL attention for head dim 128 (only the MLA one), so this example needs a
-Primus-Turbo checkout that has it (`primus_turbo/flydsl/attention/gfx1250/`), passed as `TURBO_DIR`. The
-numbers below were measured with Primus-Turbo 62a3fcca (branch `dev/lhz/llama31_8b_opt`, Primus-Turbo
-PR #574 into `dev/mi455x_v2`). With the backend left at `flydsl`, the launcher stops before training when
-the Primus-Turbo it would use lacks that directory.
+Primus-Turbo checkout that has it (`primus_turbo/flydsl/attention/gfx1250/`, on `dev/mi455x_v2` since
+Primus-Turbo PR #574), passed as `TURBO_DIR`. The numbers below were measured with Primus-Turbo
+`dev/mi455x_v2` 85e85e70. With the backend left at `flydsl`, the launcher stops before training when the
+Primus-Turbo it would use lacks that directory.
 
 ## Run
 
@@ -22,7 +22,7 @@ rocSHMEM is not linked), then pass it as `TURBO_DIR`; the launcher puts it first
 
 ```bash
 git clone https://github.com/AMD-AGI/Primus-Turbo.git /path/to/Primus-Turbo
-git -C /path/to/Primus-Turbo checkout 62a3fcca  # the commit measured below (Primus-Turbo PR #574)
+git -C /path/to/Primus-Turbo checkout 85e85e70  # dev/mi455x_v2 with PR #574, the commit measured below
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v /path/to/Primus-Turbo:/path/to/Primus-Turbo \
     -w /path/to/Primus-Turbo amdprimus/amdprimus:tas-20261019 bash -c \
     'PATH=$(tr : "\n" <<< "$PATH" | grep -v openmpi | paste -sd:) GPU_ARCHS=gfx1250 python3 setup.py build_ext --inplace'
@@ -82,11 +82,11 @@ like the DeepSeek-V3 example's; see hipBLASLt tuning in its README.
 
 ## Reference
 
-Measured with `amdprimus/amdprimus:tas-20261019` and Primus-Turbo 62a3fcca (`dev/lhz/llama31_8b_opt`), MBS 4
-(one micro-batch of 4 x 8192 tokens per GPU and iteration), started from the host. ms/iter is Primus's
-average over iterations 3–10, the mean of 3 runs that alternated between the rows; speedup is against the
-first row. Peak memory is the largest `hip mem usage` in the log, which Primus prints for the last rank in
-GiB (labelled GB) as the device's total minus free memory. Each row adds one step:
+Measured with `amdprimus/amdprimus:tas-20261019` and Primus-Turbo 85e85e70, MBS 4 (one micro-batch of
+4 x 8192 tokens per GPU and iteration), started from the host. ms/iter is Primus's average over iterations
+3–10, the mean of 3 runs that alternated between the rows; speedup is against the first row. Peak memory is
+the largest `hip mem usage` in the log, which Primus prints for the last rank in GiB (labelled GB) as the
+device's total minus free memory. Each row adds one step:
 
 - Baseline: Primus-Turbo's Triton attention (`PRIMUS_TURBO_ATTN_BACKEND=triton`), hipBLASLt's own GEMM
   kernels (`HIPBLASLT_TUNING_OVERRIDE_FILE=`).
@@ -97,27 +97,30 @@ GiB (labelled GB) as the device's total minus free memory. Each row adds one ste
 
 | Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Baseline | 1927 | 1.00x | 17,000 | 875 | 345.09 GiB | 10.1909 |
-| + FlyDSL | 1116 | 1.73x | 29,400 | 1511 | 344.84 GiB | 10.1895–10.1905 |
-| + hipBLASLt tuning (default) | 1022 | 1.88x | 32,100 | 1650 | 344.73 GiB | 10.1900–10.1907 |
+| Baseline | 1938 | 1.00x | 16,900 | 870 | 345.02 GiB | 10.1909 |
+| + FlyDSL | 1116 | 1.74x | 29,400 | 1511 | 344.77 GiB | 10.1911–10.1919 |
+| + hipBLASLt tuning (default) | 1024 | 1.89x | 32,000 | 1647 | 344.72 GiB | 10.1881–10.1894 |
 
-**4 GPUs** (the launcher's defaults: DP4, GBS 16), to be measured
+**4 GPUs** (the launcher's defaults: DP4, GBS 16)
 
 | Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Baseline | TBD | | | | | |
-| + FlyDSL | TBD | | | | | |
-| + hipBLASLt tuning (default) | TBD | | | | | |
+| Baseline | 1943 | 1.00x | 16,900 | 868 | 276.18 GiB | 8.9728 |
+| + FlyDSL | 1138 | 1.71x | 28,800 | 1483 | 276.18 GiB | 8.9695–8.9717 |
+| + hipBLASLt tuning (default) | 1047 | 1.86x | 31,300 | 1611 | 276.12 GiB | 8.9704–8.9784 |
 
 TE's unfused attention (`USE_TURBO_ATTENTION=False`) is not in the tables: without recompute it runs out of
 memory in the first iteration, and with `--recompute_granularity selective` it was about 4.5x slower than
-FlyDSL (both without the tuning file; see Attention backends below). The loss differs between 1 and 4 GPUs
-because the global batch does (4 vs 16 sequences). Without the tuning file, `PRIMUS_SEQ_LENGTH=16384` with
-`MBS=2` (the same tokens per iteration) ran 1231 ms/iter on one GPU.
+FlyDSL (both without the tuning file; see Attention backends below). With the defaults, an iteration on
+4 GPUs takes 2.2% longer than on 1 GPU (the data-parallel gradient reduce-scatter and parameter all-gather
+are not fully hidden), and the distributed optimizer's sharding lowers the peak memory per GPU by about
+69 GiB. The loss differs between 1 and 4 GPUs because the global batch does (4 vs 16 sequences). Without the
+tuning file, `PRIMUS_SEQ_LENGTH=16384` with `MBS=2` (the same tokens per iteration) ran 1231 ms/iter on one
+GPU.
 
-From the host every run starts a new container and takes about 115 s from launch to exit on 1 or 4 GPUs
-(the Triton patch invalidates Inductor's cache, and the FlyDSL kernels are compiled once); a repeat run in
-a long-lived container takes about 46 s.
+From the host every run starts a new container and takes about 60 s from launch to exit on 1 or 4 GPUs
+(the Triton patch invalidates Inductor's cache, and the FlyDSL kernels are compiled once); a repeat run on
+one GPU in a long-lived container takes about 40 s.
 
 **Profile** (1 GPU, `PROFILE=True`, iterations 6–7, without the tuning file): about 1042 ms of compute
 kernels per iteration, and about 70 ms with no kernel running. hipBLASLt GEMMs 66%, attention 16% (forward

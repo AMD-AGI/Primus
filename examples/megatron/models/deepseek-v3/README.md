@@ -112,21 +112,21 @@ for the last rank in GiB (labelled GB) as the device's total minus free memory. 
 | + FlyDSL | 1005 | 1.96x | 65,200 | 1407 | 130.62 GiB | 5.49483 |
 | + hipBLASLt tuning (default) | 956 | 2.06x | 68,600 | 1480 | 130.63 GiB | 5.49473 |
 
-**4 GPUs** (the launcher's defaults: EP4, 128 experts, GBS 64), to be measured
+**4 GPUs** (the launcher's defaults: EP4, 128 experts, GBS 64)
 
 | Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Baseline | TBD | | | | | |
-| + FlyDSL | TBD | | | | | |
-| + hipBLASLt tuning (default) | TBD | | | | | |
+| Baseline | 2139 | 1.00x | 30,600 | 661 | 215.21 GiB | 5.56290–5.56295 |
+| + FlyDSL | 1157 | 1.85x | 56,600 | 1223 | 170.81 GiB | 5.56302–5.56314 |
+| + hipBLASLt tuning (default) | 1100 | 1.94x | 59,600 | 1285 | 170.81 GiB | 5.56288–5.56301 |
 
-**Grad norms per iteration** of the default. Repeated runs usually gave the same values (see FlyDSL grouped
-GEMM below).
+**Grad norms per iteration** of the default, from one run. Repeated runs on 1 GPU usually gave the same
+values; on 4 GPUs they differed by up to 0.003.
 
 | GPUs | Grad norms, iterations 1–10 |
 | --- | --- |
 | 1 | 5.292, 5.326, 5.587, 7.070, 12.976, 14.047, 13.659, 15.001, 13.475, 14.192 |
-| 4 | TBD |
+| 4 | 3.810, 3.778, 3.815, 5.139, 8.842, 10.091, 7.849, 7.168, 6.820, 6.649 |
 
 **Profile of the 4-GPU run, rank 0** (`PROFILE=True`, iterations 6–7).
 
