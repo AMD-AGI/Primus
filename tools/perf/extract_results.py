@@ -139,7 +139,7 @@ failure = _load_failure_module()
 strip_ansi = failure.strip_ansi
 
 # Bumped whenever a column is added or its meaning changes.
-PARSER_VERSION = 8
+PARSER_VERSION = 9
 
 BANNER_KV_RE = re.compile(r"^#\s*([^:]+?)\s*:\s*(.*?)\s*$")
 PLACEHOLDER_RE = re.compile(r"^\$\{[^:}]+:([^}]*)\}$")
