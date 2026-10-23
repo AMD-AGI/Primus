@@ -368,6 +368,9 @@ RUN_FIELDS = (
     "rdma_nics",
     "hmean_nominal_tflops",
     "throughput_note",
+    "failed_at",
+    "failing_rank",
+    "failing_host",
 )
 
 # One Performance row per distinct combination; the image is its ID (its tag
@@ -1079,6 +1082,8 @@ RUN_COLUMNS = [
     {"header": "Attempt", "width": 7, "key": "attempt", "fmt": "int"},
     {"header": "Status", "width": 11, "key": "status"},
     {"header": "Failure reason", "width": 14, "key": "failure_reason"},
+    {"header": "Failed at", "width": 12, "key": "failed_at"},
+    {"header": "Failing rank", "width": 8, "key": "failing_rank", "fmt": "int"},
     {"header": "Failure detail", "width": 40, "key": "failure_detail"},
     {"header": "TFLOP/s per GPU", "width": 10, "key": "hmean_tflops", "fmt": "tflops"},
     {"header": "Nominal TFLOP/s per GPU", "width": 11, "key": "hmean_nominal_tflops", "fmt": "tflops"},
