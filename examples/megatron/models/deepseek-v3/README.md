@@ -80,53 +80,53 @@ With `PATCH_TRITON_EXPERT_SCHEDULING=1` (the default) the launcher therefore als
 also invalidates Inductor's cache. The patch needs root and stays in a long-lived container; set
 `PATCH_TRITON_EXPERT_SCHEDULING=0` to skip it.
 
-**hipBLASLt tuning.** For 17 of the 27 GEMM shapes this example runs on hipBLASLt (the Transformer Engine
-linear layers, the output layer and the router; batch 2 x 4096 tokens), hipBLASLt's default kernel was
-slower than another kernel in its library. The launcher sets `HIPBLASLT_TUNING_OVERRIDE_FILE` to
-`hipblaslt_tuning/deepseek_v3_proxy-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt`, which names
-those kernels; hipBLASLt then picks them instead of its default. A row is used only while its solution
-index still names the kernel it was tuned with, so with another hipBLASLt build, or other shapes (another
-`MBS` or sequence length), hipBLASLt falls back to its own choice for that row. The file name gives the
-hipBLASLt commit and the ROCm version it was tuned on (the default image's). It was made with
-`hipblaslt-bench`, which the image does not ship (build it from the same rocm-libraries commit):
-
-1. Run the example with `HIPBLASLT_LOG_MASK=32 HIPBLASLT_LOG_FILE=<dir>/hipblaslt_%i.log`; every
-   hipBLASLt call is logged as a `hipblaslt-bench` command line.
-2. Run each distinct command with `HIPBLASLT_TUNING_FILE=<file>`,
-   `HIPBLASLT_TUNING_USER_MAX_WORKSPACE=33554432` (Transformer Engine's hipBLASLt workspace on gfx1250),
-   `--algo_method heuristic --requested_solution -1 --rotating 512 --flush`; hipblaslt-bench times every
-   kernel of the library for the problem and appends the fastest to the file.
-3. Time each problem with `--requested_solution 1` with and without
-   `HIPBLASLT_TUNING_OVERRIDE_FILE=<file>`, alternately, and keep the rows that are at least 3% faster.
-
-Primus's `PRIMUS_HIPBLASLT_TUNING` stages 1–2 (docs/04-technical-guides/performance-tuning.md) do steps 1–2
-with `/opt/rocm/bin/hipblaslt-bench`, without the workspace limit and without step 3. Step 3 matters: for
-short GEMMs the search's own timings named winners that were no faster, or slower, when timed again.
+**hipBLASLt tuning.** The launcher sets `HIPBLASLT_TUNING_OVERRIDE_FILE` to
+`hipblaslt_tuning/deepseek_v3_proxy-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt` (empty:
+hipBLASLt's own choice), which gives 17 of the 27 hipBLASLt GEMM shapes of the 4-GPU run a faster kernel of
+hipBLASLt's library. hipBLASLt uses a row only while its solution index still names the kernel it was tuned
+with (the file name gives the hipBLASLt commit and ROCm version), so other builds and shapes fall back to its
+default. To remake the file with `hipblaslt-bench` (not in the image; build it from the same rocm-libraries
+commit): log the example's GEMMs with `HIPBLASLT_LOG_MASK=32`, search each with
+`HIPBLASLT_TUNING_FILE=<file> HIPBLASLT_TUNING_USER_MAX_WORKSPACE=33554432` and `--algo_method heuristic
+--requested_solution -1 --rotating 512 --flush`, and keep the rows that are at least 3% faster when replayed
+through `HIPBLASLT_TUNING_OVERRIDE_FILE`.
 
 ## Reference
 
-Measured on one node of 4x MI455X with `amdprimus/amdprimus:tas-20261019` and the image's Primus-Turbo,
-the 4-GPU rows from the host and the 1-GPU row (the variant above) on one GPU inside a container. ms/iter
-is Primus's average over iterations 3–10, the mean of 2–3 runs. Peak VRAM is the largest
-`mem_info_vram_used` sampled every second.
+Measured with `amdprimus/amdprimus:tas-20261019` and the image's Primus-Turbo, started from the host.
+ms/iter is Primus's average over iterations 3–10, the mean of 3 runs that alternated between the rows;
+speedup is against the first row. Peak memory is the largest `hip mem usage` in the log, which Primus prints
+for the last rank in GiB (labelled GB) as the device's total minus free memory. Each row adds one step:
 
-| Variant | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Peak VRAM/GPU | lm loss at iteration 10 |
-| --- | --- | --- | --- | --- | --- |
-| 4-GPU | 1131 | 58,000 | 1251 | 152.2–154.5 GiB | 5.56307 |
-| 1-GPU, 4 layers | 958 | 68,400 | 1477 | 118.7 GiB | 5.49473 |
-| 4-GPU, TE unfused attention and Triton grouped GEMM | 2090 | 31,400 | 677 | 196.8–198.9 GiB | 5.56296 |
+- Baseline: TE's unfused attention and Primus-Turbo's Triton grouped GEMM
+  (`USE_TURBO_ATTENTION=False TURBO_GROUPED_GEMM_BACKEND=default`), hipBLASLt's own GEMM kernels
+  (`HIPBLASLT_TUNING_OVERRIDE_FILE=`).
+- FlyDSL: Primus-Turbo's FlyDSL attention and grouped GEMM.
+- hipBLASLt tuning: the tuning file above. This row is the launcher's defaults.
 
-The last row (`USE_TURBO_ATTENTION=False TURBO_GROUPED_GEMM_BACKEND=default`: TE's unfused attention and
-Primus-Turbo's Triton grouped GEMM) is 1.85x slower than the FlyDSL defaults. Without the hipBLASLt tuning
-file (`HIPBLASLT_TUNING_OVERRIDE_FILE=`) the 4-GPU run takes 1198 ms/iter (loss 5.56274) and the 1-GPU run
-1007 ms/iter (loss 5.49483).
+**1 GPU** (the 1-GPU variant above: 4 layers, 32 experts, GBS 16)
 
-**Grad norms per iteration.** Repeated runs of a variant gave the same values.
+| Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Baseline | 1967 | 1.00x | 33,300 | 719 | 174.15 GiB | 5.49455 |
+| + FlyDSL | 1005 | 1.96x | 65,200 | 1407 | 130.62 GiB | 5.49483 |
+| + hipBLASLt tuning (default) | 956 | 2.06x | 68,600 | 1480 | 130.63 GiB | 5.49473 |
 
-| Variant | Grad norms, iterations 1–10 |
+**4 GPUs** (the launcher's defaults: EP4, 128 experts, GBS 64), to be measured
+
+| Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Baseline | TBD | | | | | |
+| + FlyDSL | TBD | | | | | |
+| + hipBLASLt tuning (default) | TBD | | | | | |
+
+**Grad norms per iteration** of the default. Repeated runs usually gave the same values (see FlyDSL grouped
+GEMM below).
+
+| GPUs | Grad norms, iterations 1–10 |
 | --- | --- |
-| 4-GPU | 3.810, 3.778, 3.815, 5.138, 8.845, 10.095, 7.851, 7.169, 6.821, 6.650 |
-| 1-GPU, 4 layers | 5.292, 5.326, 5.587, 7.070, 12.976, 14.047, 13.659, 15.001, 13.475, 14.192 |
+| 1 | 5.292, 5.326, 5.587, 7.070, 12.976, 14.047, 13.659, 15.001, 13.475, 14.192 |
+| 4 | TBD |
 
 **Profile of the 4-GPU run, rank 0** (`PROFILE=True`, iterations 6–7).
 
@@ -156,5 +156,5 @@ file (`HIPBLASLT_TUNING_OVERRIDE_FILE=`) the 4-GPU run takes 1198 ms/iter (loss 
   `TURBO_GROUPED_GEMM_BACKEND=default` uses the Triton grouped GEMM.
 - **Expandable segments.** Primus warns that `use_turbo_grouped_gemm=True` runs without
   `PYTORCH_HIP_ALLOC_CONF=expandable_segments:True`. Here that setting (in the yaml's `env:`) lowers the
-  peak VRAM by only 1–3 GiB per GPU, makes the 4-GPU run 0.6% slower and the TE/Triton row 4% slower, and
+  peak VRAM by only 1–3 GiB per GPU, makes the 4-GPU run 0.6% slower and the 4-GPU baseline 4% slower, and
   leaves the loss and grad norms unchanged, so the example does not set it.

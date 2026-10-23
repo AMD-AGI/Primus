@@ -73,60 +73,47 @@ container's Triton return `False`, which invalidates Inductor's cache of kernels
 variable. The patch needs root and stays in a long-lived container; set
 `PATCH_TRITON_EXPERT_SCHEDULING=0` to skip it.
 
-**hipBLASLt tuning.** The example runs 15 GEMM shapes on hipBLASLt: forward, dgrad and wgrad of the
-QKV, output projection, FC1, FC2 and output-layer linears, for 4 x 8192 tokens per micro-batch. For 11 of them
-hipBLASLt's default kernel was slower than another kernel in its library, e.g. FC1 forward/dgrad 1.32x/1.28x,
-FC2 wgrad 1.22x, QKV forward 1.22x and the output layer forward 1.36x. The launcher sets
-`HIPBLASLT_TUNING_OVERRIDE_FILE` to
-`hipblaslt_tuning/llama3.1_8b-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt`, which names those
-kernels; hipBLASLt then picks them instead of its default. A row is used only while its solution index
-still names the kernel it was tuned with, so with another hipBLASLt build, or other shapes (another `MBS`,
-sequence length or `PRIMUS_TP`), hipBLASLt falls back to its own choice for that row. The file name gives the
-hipBLASLt commit and the ROCm version it was tuned on (the default image's). It was made with
-`hipblaslt-bench`, which the image does not ship (build it from the same rocm-libraries commit):
-
-1. Run the example with `HIPBLASLT_LOG_MASK=32 HIPBLASLT_LOG_FILE=<dir>/hipblaslt_%i.log`; every
-   hipBLASLt call is logged as a `hipblaslt-bench` command line.
-2. Run each distinct command with `HIPBLASLT_TUNING_FILE=<file>`,
-   `HIPBLASLT_TUNING_USER_MAX_WORKSPACE=33554432` (Transformer Engine's hipBLASLt workspace on gfx1250),
-   `--algo_method heuristic --requested_solution -1 --rotating 512 --flush`; hipblaslt-bench times every
-   kernel of the library for the problem and appends the fastest to the file.
-3. Time each problem with `--requested_solution 1` with and without
-   `HIPBLASLT_TUNING_OVERRIDE_FILE=<file>`, alternately, and keep the rows that are at least 3% faster.
-   Two of the 13 rows the search proposed failed this check (QKV dgrad 2.6% faster, QKV wgrad 1.6% slower).
-
-Timed alone with `hipblaslt-bench`, the 15 GEMMs take 701 ms per iteration with hipBLASLt's choice and
-605 ms with the file. On one GPU (`GPUS_PER_NODE=1`), runs from the host that alternated with and without
-the file took 1022 and 1114 ms/iter (-8.3%, 3 runs each, on another GPU of the node than the Reference
-below).
+**hipBLASLt tuning.** The launcher sets `HIPBLASLT_TUNING_OVERRIDE_FILE` to
+`hipblaslt_tuning/llama3.1_8b-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt` (empty: hipBLASLt's own
+choice), which gives 11 of the 15 hipBLASLt GEMM shapes (4 x 8192 tokens per micro-batch) a faster kernel of
+hipBLASLt's library, e.g. FC1 forward 1.32x and the output layer forward 1.36x. Other hipBLASLt builds and
+shapes (another `MBS` x sequence length, or `PRIMUS_TP`) fall back to hipBLASLt's default. The file was made
+like the DeepSeek-V3 example's; see hipBLASLt tuning in its README.
 
 ## Reference
 
-Measured on one node of 4x MI455X with `amdprimus/amdprimus:tas-20261019` and Primus-Turbo 62a3fcca
-(`dev/lhz/llama31_8b_opt`), MBS 4 (one micro-batch of 4 x 8192 tokens per GPU and iteration), without the
-hipBLASLt tuning file, as with `HIPBLASLT_TUNING_OVERRIDE_FILE=` (the launcher now uses the file by default;
-see hipBLASLt tuning above). The 4-GPU rows are the launcher's defaults (DP4, GBS 16) started from the host;
-the 1-GPU rows (`GPUS_PER_NODE=1`, GBS 4) ran inside a container, and a 1-GPU run from the host gave the same
-1083 ms/iter. ms/iter is Primus's average over iterations 3–10 (FlyDSL: the mean of 2 runs). Peak memory is
-the largest `hip mem usage` in the log, which Primus prints for the last rank in GiB (labelled GB) as the
-device's total minus free memory.
+Measured with `amdprimus/amdprimus:tas-20261019` and Primus-Turbo 62a3fcca (`dev/lhz/llama31_8b_opt`), MBS 4
+(one micro-batch of 4 x 8192 tokens per GPU and iteration), started from the host. ms/iter is Primus's
+average over iterations 3–10, the mean of 3 runs that alternated between the rows; speedup is against the
+first row. Peak memory is the largest `hip mem usage` in the log, which Primus prints for the last rank in
+GiB (labelled GB) as the device's total minus free memory. Each row adds one step:
 
-| GPUs | Attention | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
+- Baseline: Primus-Turbo's Triton attention (`PRIMUS_TURBO_ATTN_BACKEND=triton`), hipBLASLt's own GEMM
+  kernels (`HIPBLASLT_TUNING_OVERRIDE_FILE=`).
+- FlyDSL: Primus-Turbo's FlyDSL attention.
+- hipBLASLt tuning: the tuning file above. This row is the launcher's defaults.
+
+**1 GPU** (`GPUS_PER_NODE=1`, GBS 4)
+
+| Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 4 | Primus-Turbo FlyDSL (default) | 1113 | 29,400 | 1515 | 276.08 GiB | 8.9716–8.9748 |
-| 4 | Primus-Turbo Triton (`PRIMUS_TURBO_ATTN_BACKEND=triton`) | 1971 | 16,600 | 856 | 276.08 GiB | 8.9728 |
-| 4 | TE unfused (`USE_TURBO_ATTENTION=False`), `--recompute_granularity selective` | 5037 | 6,500 | 335 | 303.05 GiB | 8.9688 |
-| 1 | Primus-Turbo FlyDSL (default) | 1084 | 30,200 | 1556 | 344.75 GiB | 10.1895–10.1913 |
-| 1 | Primus-Turbo Triton | 1924 | 17,000 | 876 | 344.99 GiB | 10.1909 |
-| 1 | TE unfused, `--recompute_granularity selective` | 5027 | 6,500 | 335 | 354.22 GiB | 10.1922 |
+| Baseline | 1927 | 1.00x | 17,000 | 875 | 345.09 GiB | 10.1909 |
+| + FlyDSL | 1116 | 1.73x | 29,400 | 1511 | 344.84 GiB | 10.1895–10.1905 |
+| + hipBLASLt tuning (default) | 1022 | 1.88x | 32,100 | 1650 | 344.73 GiB | 10.1900–10.1907 |
 
-FlyDSL is 1.77x faster than Triton and 4.5x faster than TE on 4 GPUs (1.77x and 4.6x on 1 GPU). Without
-recompute, TE runs out of memory in the first iteration on 1 and on 4 GPUs (see Attention backends below).
-On 4 GPUs an iteration takes 2.7% longer than on 1 GPU with FlyDSL (the data-parallel gradient
-reduce-scatter and parameter all-gather are not fully hidden), and the distributed optimizer's sharding
-lowers the peak memory per GPU by about 69 GiB. The loss differs from 1 GPU because the global batch does
-(16 vs 4 sequences). With `PRIMUS_SEQ_LENGTH=16384` and `MBS=2` (the same tokens per iteration), one GPU
-runs 1231 ms/iter.
+**4 GPUs** (the launcher's defaults: DP4, GBS 16), to be measured
+
+| Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Baseline | TBD | | | | | |
+| + FlyDSL | TBD | | | | | |
+| + hipBLASLt tuning (default) | TBD | | | | | |
+
+TE's unfused attention (`USE_TURBO_ATTENTION=False`) is not in the tables: without recompute it runs out of
+memory in the first iteration, and with `--recompute_granularity selective` it was about 4.5x slower than
+FlyDSL (both without the tuning file; see Attention backends below). The loss differs between 1 and 4 GPUs
+because the global batch does (4 vs 16 sequences). Without the tuning file, `PRIMUS_SEQ_LENGTH=16384` with
+`MBS=2` (the same tokens per iteration) ran 1231 ms/iter on one GPU.
 
 From the host every run starts a new container and takes about 115 s from launch to exit on 1 or 4 GPUs
 (the Triton patch invalidates Inductor's cache, and the FlyDSL kernels are compiled once); a repeat run in
