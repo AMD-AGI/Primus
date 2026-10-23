@@ -77,7 +77,10 @@ variable. The patch needs root and stays in a long-lived container; set
 `hipblaslt_tuning/llama3.1_8b-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt` (empty: hipBLASLt's own
 choice), which gives 11 of the 15 hipBLASLt GEMM shapes (4 x 8192 tokens per micro-batch) a faster kernel of
 hipBLASLt's library, e.g. FC1 forward 1.32x and the output layer forward 1.36x. Other hipBLASLt builds and
-shapes (another `MBS` x sequence length, or `PRIMUS_TP`) fall back to hipBLASLt's default. The file was made
+shapes (another `MBS` x sequence length, or `PRIMUS_TP`) fall back to hipBLASLt's default. A file of your own
+may be given relative to the current directory; the launcher checks that it can be read and mounts it into
+the container. With Primus's own tuning flow (`PRIMUS_HIPBLASLT_TUNING=1`, see `examples/README.md`) the
+launcher sets no default, so its stage 3 uses the stage-2 result unless the variable is set. The file was made
 like the DeepSeek-V3 example's; see hipBLASLt tuning in its README.
 
 ## Reference
@@ -123,11 +126,6 @@ From the host every run starts a new container and takes about 60 s from launch 
 (the Triton patch invalidates Inductor's cache, and the FlyDSL kernels are compiled once); a repeat run on
 one GPU in a long-lived container takes about 40 s.
 
-**Profile** (1 GPU, `PROFILE=True`, iterations 6–7, without the tuning file): about 1042 ms of compute
-kernels per iteration, and about 70 ms with no kernel running. hipBLASLt GEMMs 66%, attention 16% (forward
-4%, backward 12%), SwiGLU 4%, optimizer 3.5%, RoPE, RMSNorm and loss 3%, copies and other elementwise
-kernels 7%.
-
 Attention alone at this shape (b 4, seq 8192, 32/8 heads, causal; mean of 100 calls after 20 warmups):
 
 | Attention | Forward ms | Backward ms |
@@ -155,9 +153,9 @@ Attention alone at this shape (b 4, seq 8192, 32/8 heads, causal; mean of 100 ca
   first iteration runs out of memory; `--recompute_granularity selective` (recompute the core attention
   in the backward pass) makes it fit.
 - **Determinism.** The fused FlyDSL backward adds dQ with atomics, so dQ (and from there the loss) can
-  differ between runs in the last bits (lm loss 10.1913 and 10.1895 at iteration 10); dK and dV are
-  reproducible. Primus passes Megatron's `deterministic_mode` to Primus-Turbo, which then runs the
-  deterministic two-kernel backward instead. Megatron's deterministic mode is not set up by this example
+  differ between runs in the last bits (lm loss 10.1902 and 10.1903 at iteration 10 in the 1-GPU table); dK
+  and dV are reproducible. Primus passes Megatron's `deterministic_mode` to Primus-Turbo, which then runs
+  the deterministic two-kernel backward instead. Megatron's deterministic mode is not set up by this example
   and was not measured: it needs `--deterministic_mode True --cross_entropy_loss_fusion False`, `NCCL_ALGO`
   set to one of Megatron's all-reduce algorithms (e.g. `Ring`), and, checked by Primus on ROCm,
   `PRIMUS_DETERMINISTIC=1`, `TORCH_COMPILE_DISABLE=1` (which also turns off the compiled SwiGLU),

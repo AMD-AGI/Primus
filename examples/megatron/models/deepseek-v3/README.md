@@ -85,8 +85,11 @@ also invalidates Inductor's cache. The patch needs root and stays in a long-live
 hipBLASLt's own choice), which gives 17 of the 27 hipBLASLt GEMM shapes of the 4-GPU run a faster kernel of
 hipBLASLt's library. hipBLASLt uses a row only while its solution index still names the kernel it was tuned
 with (the file name gives the hipBLASLt commit and ROCm version), so other builds and shapes fall back to its
-default. To remake the file with `hipblaslt-bench` (not in the image; build it from the same rocm-libraries
-commit): log the example's GEMMs with `HIPBLASLT_LOG_MASK=32`, search each with
+default. A file of your own may be given relative to the current directory; the launcher checks that it can
+be read and mounts it into the container. With Primus's own tuning flow (`PRIMUS_HIPBLASLT_TUNING=1`, see
+`examples/README.md`) the launcher sets no default, so its stage 3 uses the stage-2 result unless the
+variable is set. To remake the file with `hipblaslt-bench` (not in the image; build it from the same
+rocm-libraries commit): log the example's GEMMs with `HIPBLASLT_LOG_MASK=32`, search each with
 `HIPBLASLT_TUNING_FILE=<file> HIPBLASLT_TUNING_USER_MAX_WORKSPACE=33554432` and `--algo_method heuristic
 --requested_solution -1 --rotating 512 --flush`, and keep the rows that are at least 3% faster when replayed
 through `HIPBLASLT_TUNING_OVERRIDE_FILE`.
@@ -129,15 +132,6 @@ set of 4-GPU runs differed from them by up to 0.004.
 | 1 | 5.292, 5.326, 5.587, 7.070, 12.976, 14.047, 13.659, 15.001, 13.475, 14.192 |
 | 4 | 3.810, 3.778, 3.815, 5.138, 8.845, 10.095, 7.851, 7.169, 6.821, 6.650 |
 
-**Profile of the 4-GPU run, rank 0** (`PROFILE=True`, iterations 6–7).
-
-- About 899 ms of compute kernels per iteration: MoE 43% (expert grouped GEMMs 29%), output layer and
-  loss 16%, attention projections 15%, core attention 15%, the rest 11% (4% for adding gradients into
-  `main_grad`, as `gradient_accumulation_fusion` is off). The hipBLASLt GEMMs take 320 ms (36%); with
-  hipBLASLt's own kernel choice they take 375 ms, 961 ms of compute in all.
-- The MoE all-to-all kernels take about 144 ms per iteration, and the 4-GPU run takes 172 ms longer than the
-  1-GPU variant with the same per-GPU work (1132 vs 960 ms/iter), so compute hides little of the all-to-all.
-
 ## Known issues
 
 - **Attention backends.** MLA (q/k 192, v 128) runs on Primus-Turbo FlyDSL (the default,
@@ -158,6 +152,7 @@ set of 4-GPU runs differed from them by up to 0.004.
   steady state on the largest shape, and much more often over a process's first few hundred calls.
   `TURBO_GROUPED_GEMM_BACKEND=default` uses the Triton grouped GEMM.
 - **Expandable segments.** Primus warns that `use_turbo_grouped_gemm=True` runs without
-  `PYTORCH_HIP_ALLOC_CONF=expandable_segments:True`. Here that setting (in the yaml's `env:`) lowers the
-  peak VRAM by only 1–3 GiB per GPU, makes the 4-GPU run 0.6% slower and the 4-GPU baseline 4% slower, and
-  leaves the loss and grad norms unchanged, so the example does not set it.
+  `PYTORCH_HIP_ALLOC_CONF=expandable_segments:True`. Here that setting (in the yaml's `env:`) lowered the
+  peak device memory in use (`mem_info_vram_used`, sampled every second) by only 1–3 GiB per GPU, made the
+  4-GPU FlyDSL run 0.6% slower and the 4-GPU baseline 4% slower (both without the tuning file), and left the
+  loss and grad norms unchanged, so the example does not set it.

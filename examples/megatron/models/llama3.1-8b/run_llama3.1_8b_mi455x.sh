@@ -20,6 +20,9 @@ SCRIPT=$(realpath "$0")
 if [[ -n "${TURBO_DIR:-}" ]]; then
     TURBO_DIR=$(realpath -e "${TURBO_DIR}")
 fi
+if [[ -n "${HIPBLASLT_TUNING_OVERRIDE_FILE:-}" ]]; then
+    HIPBLASLT_TUNING_OVERRIDE_FILE=$(realpath -e "${HIPBLASLT_TUNING_OVERRIDE_FILE}")
+fi
 cd "$(dirname "${SCRIPT}")/../../../.."
 
 # container: re-run this script in a new container of DOCKER_IMAGE; direct: run in this container
@@ -58,8 +61,17 @@ export PROFILE=${PROFILE:-False}
 # 1: switch Triton's gfx1250 expert scheduling off in the container's Triton (needs root), see below
 export PATCH_TRITON_EXPERT_SCHEDULING=${PATCH_TRITON_EXPERT_SCHEDULING:-1}
 # hipBLASLt kernels tuned for this example's GEMMs (README.md); empty: hipBLASLt's own choice. hipBLASLt
-# uses a row only while its solution index still names the kernel it was tuned with.
-export HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE-$(dirname "${SCRIPT}")/hipblaslt_tuning/llama3.1_8b-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt}
+# uses a row only while its solution index still names the kernel it was tuned with. No default with
+# PRIMUS_HIPBLASLT_TUNING=1: its stage 3 would take this file instead of the stage-2 result.
+if [[ "${PRIMUS_HIPBLASLT_TUNING:-0}" == 1 ]]; then
+    export HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE-}
+else
+    export HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE-$(dirname "${SCRIPT}")/hipblaslt_tuning/llama3.1_8b-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt}
+fi
+if [[ -n "${HIPBLASLT_TUNING_OVERRIDE_FILE}" && ! -r "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ]]; then
+    echo "cannot read HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE}" >&2
+    exit 2
+fi
 
 export PRIMUS_TEAM=${PRIMUS_TEAM:-amd}
 export PRIMUS_USER=${PRIMUS_USER:-$(id -un)}
@@ -86,6 +98,9 @@ case "${PRIMUS_LAUNCHER}" in
         fi
         if [[ -n "${TURBO_DIR}" ]]; then
             DOCKER_ARGS+=(-v "${TURBO_DIR}:${TURBO_DIR}")
+        fi
+        if [[ -n "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ]]; then
+            DOCKER_ARGS+=(-v "${HIPBLASLT_TUNING_OVERRIDE_FILE}:${HIPBLASLT_TUNING_OVERRIDE_FILE}:ro")
         fi
         # Same runtime options as `primus-cli container` (runner/.primus.yaml)
         exec docker run --rm --name "llama3.1-8b-mi455x-$$" \
@@ -133,6 +148,11 @@ if [[ "${PATCH_TRITON_EXPERT_SCHEDULING}" == 1 ]]; then
         sed -i '/^def is_expert_scheduling_enabled(arch):/a\    return False' "${TRITON_AMD_COMPILER}"
         echo "patched ${TRITON_AMD_COMPILER}: is_expert_scheduling_enabled() -> False"
     fi
+fi
+
+# hipBLASLt takes a set but empty HIPBLASLT_TUNING_OVERRIDE_FILE as an override file named ""
+if [[ -z "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ]]; then
+    unset HIPBLASLT_TUNING_OVERRIDE_FILE
 fi
 
 ENV_ARGS=(
