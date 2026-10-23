@@ -1,0 +1,34 @@
+extends:
+  - mamba_base.yaml
+
+# Llama-3.2-1B as 16 MambaInLlama Mamba-2 mixer/MLP blocks, represented as 32
+# flat HybridStack sublayers (Zebra-Llama configs/llama3.2_1B/zebra_M2_ILD.yaml).
+# x and B are projected to the 8 key/value groups (mamba_d_xb = 8 * 64) and
+# each group feeds 4 heads; C, the SSM, and the gated norm use 32 heads of 64.
+model_type: mamba
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: meta-llama/Llama-3.2-1B-Instruct
+
+num_layers: 32
+hidden_size: 2048
+ffn_hidden_size: 8192
+num_attention_heads: 32
+
+is_hybrid_model: true
+hybrid_attention_ratio: 0.0
+hybrid_override_pattern: "M-M-M-M-M-M-M-M-M-M-M-M-M-M-M-M-"
+
+hybrid_linear_type: mamba
+mamba_expand: 1
+mamba_d_xb: 512
+mamba_state_dim: 64
+mamba_head_dim: 64
+mamba_num_groups: 32
+
+swiglu: true
+normalization: RMSNorm
+position_embedding_type: none
+add_position_embedding: true
+use_rotary_position_embeddings: false
+max_position_embeddings: 131072
+norm_epsilon: 1.0e-5

@@ -1,0 +1,84 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:hylo-mla-1b-enhanced-ild-packed}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# All-MLA Enhanced-ILD on the reference's data, as the Zebra-Llama stage-1 checkpoint was
+# trained: 2048-token windows packed over the templated, decontaminated 20% selection
+# (tools/hybrid/prepare_hylo_packed_data.py), 6934 steps of 96 windows, no padding. The model,
+# teacher, and optimizer match hylo_mla_1B-enhanced-ild.yaml.
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: hylo_gdn_1B_hybrid.yaml
+    overrides:
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hylo_grouped_mla_hybrid_stack_spec']
+      hybrid_attention_ratio: 1.0
+      hybrid_override_pattern: "*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-"
+      # use_full_kv_head: false keeps Llama's 8 key/value heads.
+      hylo_mla_kv_heads: 8
+
+      hylo_distill_stage: ild
+      hylo_teacher_checkpoint: ${HYLO_LLAMA32_1B_MEGATRON_CKPT:./data/checkpoints/llama32-1b-megatron}
+      hylo_teacher_num_layers: 16
+      # The teacher keeps Llama-3's rope scaling while the student runs YaRN.
+      hylo_teacher_use_rope_scaling: true
+      hylo_kl_weight: 1.0
+      hylo_ce_weight: 0.0
+
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: ${HYLO_TOKENIZER_MODEL:meta-llama/Llama-3.2-1B-Instruct}
+      mock_data: false
+      train_data_path: ${HYLO_PACKED_TRAIN_DATA:./data/hylo/packed/train}
+      valid_data_path: null
+      test_data_path: null
+      num_workers: 2
+      create_attention_mask_in_dataloader: false
+
+      seq_length: 2048
+      max_position_embeddings: 131072
+      original_max_position_embeddings: 8192
+      rotary_scaling_factor: 32.0
+      micro_batch_size: ${HYLO_MICRO_BATCH_SIZE:12}
+      global_batch_size: ${HYLO_GLOBAL_BATCH_SIZE:96}
+      train_iters: ${HYLO_ILD_TRAIN_ITERS:6934}
+      eval_iters: 0
+      lr: 2.0e-4
+      min_lr: 0.0
+      lr_decay_style: cosine
+      lr_warmup_iters: 0
+      lr_warmup_fraction: 0.01
+
+      # Hugging Face Trainer values used by the reference.
+      seed: 42
+      weight_decay: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+      clip_grad: 1.0
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      load: ${HYLO_MLA_UPCYCLED_CKPT:./data/checkpoints/hylo-mla-1b-upcycled}
+      save: ${HYLO_MLA_ILD_OUTPUT:./output/hylo-mla-1b-ild-packed}
+      finetune: true
+      no_load_optim: true
+      no_load_rng: true
+      auto_continue_train: false
+      ckpt_format: torch
+      save_interval: 2000
+      disable_last_saving: ${HYLO_DISABLE_LAST_SAVING:false}
+      bf16: true
+      log_interval: 1
+      log_avg_skip_iterations: 0
+
+      enable_primus_turbo: false
+      use_turbo_attention: false

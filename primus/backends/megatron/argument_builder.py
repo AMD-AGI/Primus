@@ -15,6 +15,31 @@ from typing import Any, Callable, Dict, Mapping, Union
 from primus.core.utils.env import get_torchrun_env
 from primus.core.utils.module_utils import warning_rank_0
 
+_PRIMUS_MEGATRON_DEFAULTS = {
+    # Native HyLo distillation. These are Primus-owned arguments rather than
+    # upstream Megatron CLI flags, but they must survive the same config merge.
+    "hylo_distill_stage": None,
+    "hylo_teacher_checkpoint": None,
+    "hylo_teacher_num_layers": None,
+    # None keeps the teacher checkpoint's own use_rope_scaling.
+    "hylo_teacher_use_rope_scaling": None,
+    # Hugging Face YaRN for the teacher; None keeps its own position embedding.
+    "hylo_teacher_yarn_factor": None,
+    "hylo_teacher_yarn_original_max_position_embeddings": None,
+    # Key/value heads of the grouped MLA up-projection (GroupedKVUpProjection).
+    "hylo_mla_kv_heads": None,
+    "hylo_linear_ild_checkpoint": None,
+    "hylo_mla_ild_checkpoint": None,
+    "hylo_kl_weight": 1.0,
+    "hylo_ce_weight": 0.0,
+    "hylo_kl_chunk_size": 4096,
+    # Saved for the upcycler, which otherwise reads Megatron's non-null GDN
+    # head defaults as a GDN layout. mamba_d_xb also sizes the grouped Mamba-2 mixer.
+    "hybrid_linear_type": None,
+    "mamba_expand": None,
+    "mamba_d_xb": None,
+}
+
 
 # ------------------------------------------------------------
 # Build the original Megatron argument parser
@@ -51,7 +76,9 @@ def _load_megatron_defaults() -> Dict[str, Any]:
     """
     parser = _build_megatron_parser()
     args = parser.parse_args([])  # Parse an empty list → only defaults
-    return vars(args).copy()  # Convert Namespace → dict and cache
+    defaults = vars(args).copy()
+    defaults.update(_PRIMUS_MEGATRON_DEFAULTS)
+    return defaults  # Convert Namespace → dict and cache
 
 
 # ------------------------------------------------------------
