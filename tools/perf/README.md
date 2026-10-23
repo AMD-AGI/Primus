@@ -885,10 +885,12 @@ The rules below live in [`failure.py`](./failure.py).
 definitive (`timeout`, `idle`, `interrupted`, `not_run` for a config the
 runner did not launch, and `steps` for a `diffusion_dlrm` run with no step
 rows). Otherwise the run output is
-searched, in this order, for `nic_error` (no usable socket interface), `oom`,
-`gpu_contended` (out of memory while this process held less than half the
-GPU, i.e. another process had it), `segfault`, `nccl_error` and
-`python_error`.
+searched, in this order, for `nic_error` (no usable socket interface), `oom`
+(including RCCL's `Failed to CUDA calloc 536870912 bytes`, which PyTorch
+reports as an "unhandled cuda error", unless the output shows the GPU had
+faulted first), `gpu_contended` (out of memory while
+this process held less than half the GPU, i.e. another process had it),
+`segfault`, `nccl_error` and `python_error`.
 
 The detail of `nccl_error` and `python_error` is the exception that stopped
 the run, when the output has one (an NCCL one for `nccl_error`): the root of
@@ -900,7 +902,12 @@ does not count. A bare exception gets the location it was raised at, and a
 bare `AssertionError` the failed assert too, e.g.
 `AssertionError: assert self.lr_warmup_steps < self.lr_decay_steps
 (optimizer_param_scheduler.py:74)`. Otherwise the detail is the first NCCL
-line, or an exception line. Primus's own `[Patch]` messages are ignored,
+line, or an exception line. An NCCL error's detail ends with the
+`Last error:` that PyTorch quotes from NCCL, which says what failed, with
+PyTorch's source location dropped to make room:
+`torch.distributed.DistBackendError: NCCL error: unhandled system error,
+NCCL version 2.27.7 | Last error: Call to ibv_modify_qp failed with 110
+Connection timed out, on dev rdma4:1, ...`. Primus's own `[Patch]` messages are ignored,
 along with the traceback a patch logs when it is skipped for a missing
 dependency.
 

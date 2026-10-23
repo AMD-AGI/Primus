@@ -1156,6 +1156,113 @@ def test_the_failing_ranks_exception_beats_the_nccl_errors_it_left_behind(tmp_pa
     assert (result["failure_reason"], result["failure_detail"]) == ("python_error", "ValueError: bad shard")
 
 
+def nccl_error(name: str, last_error: str) -> str:
+    """PyTorch's DistBackendError message, as v26.9 rc2 prints it."""
+    return (
+        "torch.distributed.DistBackendError: NCCL error in: /__w/pytorch/torch/csrc/distributed/c10d/"
+        f"NCCLUtils.cpp:91, unhandled {name} error (run with NCCL_DEBUG=INFO for details), NCCL version 2.32.3\n"
+        f"ncclUnhandledCudaError: Call to CUDA function failed.\nLast error:\n{last_error}"
+    )
+
+
+def test_rccls_failed_allocation_on_the_failing_rank_is_an_oom(tmp_path):
+    # Trimmed from zaya1_8B-FP8 on v26.9 rc2: rank 7 could not get NCCL a
+    # buffer for the evaluation all_reduce; rank 0 was only sent SIGTERM.
+    records = [
+        rank_record("20261022 18:52:27", "ERROR", "Traceback (most recent call last):"),
+        rank_record(
+            "20261022 18:52:27",
+            "ERROR",
+            '  File "/src/evaluator.py", line 168, in primus_evaluate\n    torch.distributed.all_reduce(',
+        ),
+        rank_record(
+            "20261022 18:52:27", "ERROR", nccl_error("cuda", "Failed to CUDA calloc 536870912 bytes")
+        ),
+        rank_record("20261022 18:52:27", "ERROR", "[Primus] Error: Failed to CUDA calloc 536870912 bytes"),
+    ]
+    section = [
+        "#### Begin Failing Rank Output ####",
+        "# Failing rank     : 3 (local rank 3) on node-1, exit code 1",
+        f"# Source           : /x/rank-3/error.log ({failure.OWN_RECORDS})",
+        *"".join(records).splitlines(),
+        "#### End Failing Rank Output ####",
+    ]
+    log = write_log(
+        tmp_path, torchrun_summary(3, 3, 1, "2026-10-22_18:52:28"), exit_code=1, with_footer=False
+    )
+    finish_log(log, section)
+    result = extract.parse_log_file(str(log))
+    assert (result["failure_reason"], result["failure_detail"]) == (
+        "oom",
+        "Failed to CUDA calloc 536870912 bytes",
+    )
+
+
+SHORT_NCCL = "torch.distributed.DistBackendError: NCCL error: unhandled system error, NCCL version 2.32.3"
+IB_TIMEOUT = "Call to ibv_modify_qp failed with 110 Connection timed out, on dev rdma4:1"
+
+
+def torch_rank_lines(rank: int, text: str) -> str:
+    return "".join(f"[rank{rank}]: {line}\n" for line in text.splitlines())
+
+
+@pytest.mark.parametrize(
+    "body,detail",
+    [
+        pytest.param(
+            _traceback("step", nccl_error("system", IB_TIMEOUT)),
+            f"{SHORT_NCCL} | Last error: {IB_TIMEOUT}",
+            id="last-error",
+        ),
+        pytest.param(
+            _traceback("step", nccl_error("system", ""))
+            + CAUSE
+            + _traceback("main", "RuntimeError: Training execution failed: NCCL error"),
+            nccl_error("system", "").splitlines()[0],
+            id="empty-last-error",
+        ),
+        pytest.param(
+            torch_rank_lines(3, _traceback("step", nccl_error("system", IB_TIMEOUT).split("\nLast")[0]))
+            + torch_rank_lines(5, "Last error:\nsocket timeout on rank 5")
+            + torch_rank_lines(3, f"Last error:\n{IB_TIMEOUT}"),
+            f"{SHORT_NCCL} | Last error: {IB_TIMEOUT}",
+            id="interleaved-ranks",
+        ),
+        pytest.param(
+            torch_rank_lines(3, nccl_error("system", IB_TIMEOUT)),
+            f"{SHORT_NCCL} | Last error: {IB_TIMEOUT}",
+            id="no-traceback",
+        ),
+        pytest.param(
+            _traceback("step", nccl_error("system", "x" * 400)),
+            (f"{SHORT_NCCL} | Last error: " + "x" * 400)[:300],
+            id="long-last-error",
+        ),
+    ],
+)
+def test_an_nccl_errors_detail_keeps_nccls_last_error(tmp_path, body, detail):
+    result = extract.parse_log_file(str(write_log(tmp_path, body, exit_code=1)))
+    assert (result["failure_reason"], result["failure_detail"]) == ("nccl_error", detail)
+
+
+@pytest.mark.parametrize(
+    "first_line,last_error",
+    [
+        pytest.param("", "Failed to CUDA host alloc 1024 bytes", id="host-memory"),
+        pytest.param(
+            "Memory access fault by GPU node-2 (Agent handle: 0x1) on address 0x7f. Reason: Unknown.\n",
+            "Failed to CUDA calloc 6291456 bytes",
+            id="after-a-gpu-fault",
+        ),
+    ],
+)
+def test_a_failed_rccl_allocation_that_is_not_an_oom(tmp_path, first_line, last_error):
+    body = first_line + _traceback("step", nccl_error("cuda", last_error))
+    assert (
+        extract.parse_log_file(str(write_log(tmp_path, body, exit_code=1)))["failure_reason"] == "nccl_error"
+    )
+
+
 def test_debug_log_lines_in_the_section_are_not_classified(tmp_path):
     section = [
         "#### Begin Failing Rank Output ####",

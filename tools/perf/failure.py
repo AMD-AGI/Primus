@@ -45,7 +45,14 @@ def strip_ansi(text: str) -> str:
 # (see _fatal_exception) when there is one.
 FAILURE_PATTERNS = (
     ("nic_error", re.compile(r"no socket interface found", re.IGNORECASE)),
-    ("oom", re.compile(r"out of memory|OutOfMemoryError|RESOURCE_EXHAUSTED", re.IGNORECASE)),
+    # RCCL words a failed GPU allocation "Failed to CUDA calloc 536870912
+    # bytes", under a generic "unhandled cuda error" (see RCCL_ALLOC_RE).
+    (
+        "oom",
+        re.compile(
+            r"out of memory|OutOfMemoryError|RESOURCE_EXHAUSTED|Failed to CUDA [cm]alloc", re.IGNORECASE
+        ),
+    ),
     # Not a bare "SIGSEGV": Primus logs "... to avoid SIGSEGV ..." when it
     # applies its dataloader patch.
     (
@@ -68,9 +75,25 @@ NCCL_ERROR_RE = dict(FAILURE_PATTERNS)["nccl_error"]
 # Applied to the lower-cased line: re.IGNORECASE over these alternatives is
 # several times slower than lower() plus a case-sensitive search.
 FAILURE_PREFILTER_RE = re.compile(
-    r"socket interface|out of memory|outofmemory|resource_exhausted|sigsegv|"
-    r"segmentation fault|nccl|rccl|watchdog caught|traceback|error|exception"
+    r"socket interface|out of memory|outofmemory|resource_exhausted|failed to cuda|sigsegv|"
+    r"segmentation fault|memory access fault|nccl|rccl|watchdog caught|traceback|error|exception"
 )
+# RCCL's failed allocation is an OOM unless the GPU had already faulted: a
+# sticky error fails every later allocation too.
+RCCL_ALLOC_RE = re.compile(r"Failed to CUDA [cm]alloc", re.IGNORECASE)
+GPU_FAULT_RE = re.compile(
+    r"Memory access fault by GPU|illegal memory access|(?:Cuda|HIP) failure \d*\s*'(?!out of memory)",
+    re.IGNORECASE,
+)
+# PyTorch ends an NCCL error's message with the warning NCCL logged last, on
+# the lines after "Last error:"; NCCL's own wording is generic.
+NCCL_LAST_ERROR = "Last error:"
+MAX_LAST_ERROR_LINES = 8
+# Dropped from the exception when the last error is added, to make room: the
+# PyTorch source location ("NCCL error in: /…/NCCLUtils.cpp:91, unhandled
+# cuda error") and its NCCL_DEBUG hint.
+NCCL_LOCATION_RE = re.compile(r" in: \S+:\d+,")
+NCCL_DEBUG_HINT = " (run with NCCL_DEBUG=INFO for details)"
 # Primus's own patch log lines quote error and version strings they guard
 # against, and a patch skipped for a missing dependency logs its ImportError's
 # traceback; they are never the failure.
@@ -347,10 +370,72 @@ def _exception_detail(exception: dict) -> str:
     return text[:MAX_DETAIL_CHARS]
 
 
+def _line_owner(texts: _OutputTexts, i: int) -> tuple[str, str] | str | None:
+    """Who wrote line ``i``: a Primus record's ``(rank, level)``, PyTorch's
+    "[rankN]:" prefix, or None for a line with neither."""
+    tag = texts.tag(i)
+    if tag is not None:
+        return tag
+    m = TORCH_RANK_PREFIX_RE.match(texts._clean(i))
+    return m.group(0).strip() if m else None
+
+
+def _nccl_last_error(texts: _OutputTexts, index: int) -> str | None:
+    """The "Last error:" of the NCCL error message on line ``index``. The
+    message goes on in its writer's lines: those with the same "[rankN]:"
+    prefix, else unprefixed ones up to that rank's next record; other ranks'
+    lines in between are skipped."""
+    owner = _line_owner(texts, index)
+    message: list[str] = []
+    for i in range(index + 1, min(len(texts), index + MAX_LAST_ERROR_LINES)):
+        who = _line_owner(texts, i)
+        if isinstance(owner, str):
+            if who != owner:
+                continue
+        elif who is not None:
+            if isinstance(who, tuple) and isinstance(owner, tuple) and who[0] == owner[0]:
+                break
+            continue
+        text = (texts[i] or "").strip()
+        if text == TRACEBACK_MARKER or text in CHAIN_LINKS or FOREIGN_LINE_RE.match(text):
+            break
+        message.append(text)
+    for j, text in enumerate(message):
+        if not text.startswith(NCCL_LAST_ERROR):
+            continue
+        rest = text[len(NCCL_LAST_ERROR) :].strip()
+        if rest:
+            return rest
+        following = next((t for t in message[j + 1 :] if t), None)
+        if following and not following.startswith((PRIMUS_ERROR, "Exception raised from")):
+            return following
+        return None
+    return None
+
+
+def _with_last_error(detail: str, texts: _OutputTexts, index: int) -> str:
+    """``detail`` with NCCL's last error, which says what failed, kept within
+    MAX_DETAIL_CHARS."""
+    last_error = _nccl_last_error(texts, index)
+    if not last_error:
+        return detail
+    detail = NCCL_LOCATION_RE.sub(":", detail, count=1).replace(NCCL_DEBUG_HINT, "")
+    suffix = f" | {NCCL_LAST_ERROR} {strip_ansi(last_error).strip()}"
+    room = max(MAX_DETAIL_CHARS // 2, MAX_DETAIL_CHARS - len(suffix))
+    return (detail[:room] + suffix)[:MAX_DETAIL_CHARS]
+
+
+def _fatal_detail(texts: _OutputTexts, fatal: dict) -> str:
+    detail = _exception_detail(fatal)
+    return _with_last_error(detail, texts, fatal["index"]) if NCCL_ERROR_RE.search(fatal["text"]) else detail
+
+
 def scan_failure_text(run_lines: list[str]) -> tuple[str | None, str | None]:
     texts = _OutputTexts(run_lines)
     first: dict[str, str] = {}
+    first_index: dict[str, int] = {}
     oom_lines: list[str] = []
+    gpu_fault = False
     traceback_seen = False
     tail_exception = None  # last exception line after a traceback header
     loose_exception = None  # first "XError: ..." anywhere
@@ -363,8 +448,11 @@ def scan_failure_text(run_lines: list[str]) -> tuple[str | None, str | None]:
         for category, pattern in FAILURE_PATTERNS:
             if pattern.search(text):
                 first.setdefault(category, text)
+                first_index.setdefault(category, i)
                 if category == "oom":
                     oom_lines.append(text)
+        if not gpu_fault and GPU_FAULT_RE.search(text):
+            gpu_fault = True
         if TRACEBACK_MARKER in text:
             traceback_seen = True
         elif traceback_seen:
@@ -375,6 +463,8 @@ def scan_failure_text(run_lines: list[str]) -> tuple[str | None, str | None]:
             m = PY_EXCEPTION_RE.search(text)
             if m and not m.group(1).endswith(GENERIC_EXCEPTIONS):
                 loose_exception = text[m.start() :]
+    if gpu_fault and oom_lines and all(RCCL_ALLOC_RE.search(line) for line in oom_lines):
+        del first["oom"]
     for category in ("nic_error", "oom", "segfault"):
         if category not in first:
             continue
@@ -384,10 +474,12 @@ def scan_failure_text(run_lines: list[str]) -> tuple[str | None, str | None]:
     fatal, stopped = _fatal_exception(texts)
     if "nccl_error" in first:
         if fatal is not None and NCCL_ERROR_RE.search(fatal["text"]):
-            return "nccl_error", _exception_detail(fatal)
-        return "nccl_error", clean_detail(first["nccl_error"])
+            return "nccl_error", _fatal_detail(texts, fatal)
+        return "nccl_error", _with_last_error(
+            clean_detail(first["nccl_error"]), texts, first_index["nccl_error"]
+        )
     if fatal is not None:
-        return "python_error", _exception_detail(fatal)
+        return "python_error", _fatal_detail(texts, fatal)
     # Stopped by a signal or an exit call: an exception line elsewhere is not why.
     for exception in () if stopped else (tail_exception, loose_exception):
         if exception:
@@ -398,8 +490,9 @@ def scan_failure_text(run_lines: list[str]) -> tuple[str | None, str | None]:
 def fatal_exception_detail(lines: list[str]) -> str | None:
     """The detail scan_failure_text gives the exception that stopped the run,
     when ``lines`` hold one in a traceback it could read."""
-    fatal, _ = _fatal_exception(_OutputTexts(lines))
-    return _exception_detail(fatal) if fatal is not None else None
+    texts = _OutputTexts(lines)
+    fatal, _ = _fatal_exception(texts)
+    return _fatal_detail(texts, fatal) if fatal is not None else None
 
 
 def last_output_line(run_lines: list[str]) -> str | None:
