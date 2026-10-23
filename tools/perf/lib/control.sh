@@ -178,6 +178,121 @@ perf_stop_leftover_containers() {
     ' _ "$PERF_LABEL_KEY" "$(id -un)" "$PERF_LABEL_VALUE" 2>/dev/null | perf_log_stream
 }
 
+# DATA_PATH: where Primus keeps what it downloads (HF_HOME is
+# $DATA_PATH/huggingface: models, datasets), <checkout>/data when unset.
+# runner/.primus.yaml does not forward it into the container, nor mount a path
+# outside the checkout, so the runner does both. The mount is left out when
+# the path is inside the checkout (mounted already) or a volume of the config
+# file primus-cli loads: docker refuses the same mount point twice.
+#
+# PERF_DATA_PATH is the value the runner was given. check_batch_inputs later
+# exports EXTRA_ENV's pairs, so DATA_PATH itself may then come from EXTRA_ENV;
+# that one is passed on by EXTRA_ENV as before, and mounting it is up to the
+# caller.
+DATA_PATH="${DATA_PATH:-}"
+PERF_DATA_PATH="$DATA_PATH"
+PERF_DATA_ARGS=()
+PERF_DATA_MOUNT=""
+PERF_DATA_CHECK="<unset; Primus uses <checkout>/data>"
+
+# The container volumes of the one config file primus-cli loads (~/.primus.yaml
+# if it exists, else runner/.primus.yaml), read with primus-cli's own parser.
+# Its "already sourced" guards are cleared, or an exported one would skip the
+# definitions.
+perf_config_volumes() {
+    # shellcheck disable=SC2016
+    env -u __PRIMUS_COMMON_SOURCED -u __PRIMUS_CONFIG_SOURCED bash -c 'PRIMUS_RUNNER_DIR=$1/runner
+        source "$1/runner/lib/common.sh" && source "$1/runner/lib/config.sh" &&
+            load_config_auto "" perf >/dev/null 2>&1 &&
+            printf "%s\n" "${PRIMUS_CONFIG[container.options.volume]:-}"' _ "$PRIMUS_PATH" 2>/dev/null
+}
+
+# True when the container already gets PERF_DATA_PATH at the same path.
+perf_data_path_mounted() {
+    local volumes entry host dest
+    case "$PERF_DATA_PATH/" in "${PRIMUS_PATH%/}"/*) return 0 ;; esac
+    if ! volumes=$(perf_config_volumes); then
+        echo "[WARN] Could not read primus-cli's config file; assuming it does not mount DATA_PATH." >&2
+        return 1
+    fi
+    while IFS= read -r entry; do
+        IFS=: read -r host dest _ <<< "$entry"
+        dest="${dest:-$host}"
+        [ "${dest%/}" = "$PERF_DATA_PATH" ] && return 0
+    done <<< "$volumes"
+    return 1
+}
+
+# Prints the DATA_PATH value EXTRA_ENV sets (PERF_EXTRA_ENV_ARGS is parsed);
+# returns 1 when it sets none.
+perf_extra_env_data_path() {
+    local arg value="" found=1
+    for arg in ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"}; do
+        if [[ "$arg" == DATA_PATH=* ]]; then
+            value="${arg#DATA_PATH=}"
+            found=0
+        fi
+    done
+    printf '%s' "$value"
+    return "$found"
+}
+
+# Checks DATA_PATH and sets PERF_DATA_ARGS, the launcher's --volume/--env for
+# it. No side effects, so DRY_RUN can show them. Returns 1 to refuse.
+perf_prepare_data_path() {
+    local given="$PERF_DATA_PATH" extra in_extra=0
+    PERF_DATA_ARGS=()
+    extra=$(perf_extra_env_data_path) && in_extra=1
+    if [ -z "$given" ]; then
+        [ "$in_extra" = 1 ] && PERF_DATA_CHECK="${extra:-<empty>} (from EXTRA_ENV; not mounted by the runner)"
+        return 0
+    fi
+    PERF_DATA_PATH="${given%/}"
+    case "$PERF_DATA_PATH" in
+        *:*)
+            echo "[ERROR] DATA_PATH cannot contain ':', which separates docker volume fields: '$given'" >&2
+            return 1
+            ;;
+        /?*) ;;
+        *)
+            echo "[ERROR] DATA_PATH must be an absolute path below /, got: '$given'" >&2
+            return 1
+            ;;
+    esac
+    if [ "$in_extra" = 1 ] && [ "${extra%/}" != "$PERF_DATA_PATH" ]; then
+        echo "[ERROR] DATA_PATH=$given but EXTRA_ENV sets DATA_PATH=$extra; set it once." >&2
+        return 1
+    fi
+    export DATA_PATH="$PERF_DATA_PATH"
+    # Direct mode runs in this shell's environment; there is no container.
+    PERF_DATA_MOUNT="no container"
+    perf_uses_containers || return 0
+    PERF_DATA_ARGS=(--env "DATA_PATH=$PERF_DATA_PATH")
+    PERF_DATA_MOUNT="already mounted"
+    if ! perf_data_path_mounted; then
+        PERF_DATA_ARGS=(--volume "$PERF_DATA_PATH:$PERF_DATA_PATH" "${PERF_DATA_ARGS[@]}")
+        PERF_DATA_MOUNT="mounted by the runner"
+    fi
+}
+
+# Before the first run: PERF_DATA_PATH exists on every node, owned by the user
+# (docker would create a missing one as root), and PERF_DATA_CHECK says where
+# it is and how much room it has (a quota shows in df too). Returns 1 to refuse.
+perf_ensure_data_path() {
+    local free err rc=0
+    [ -n "$PERF_DATA_PATH" ] || return 0
+    # shellcheck disable=SC2016
+    err=$(PERF_ON_NODES_TIMEOUT=120 perf_on_nodes bash -c 'mkdir -p "$1"' _ "$PERF_DATA_PATH" 2>&1 >/dev/null) || rc=$?
+    if [ "$rc" != 0 ]; then
+        [ "$rc" = 124 ] && err="timed out after 120 s"
+        perf_log "[ERROR] DATA_PATH=$PERF_DATA_PATH cannot be created on every node: ${err:-exit code $rc}"
+        return 1
+    fi
+    free=$(timeout -k 5 10 df -Ph "$PERF_DATA_PATH" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    PERF_DATA_CHECK="$PERF_DATA_PATH (${free:-?} free on $(hostname -s); $PERF_DATA_MOUNT)"
+    perf_log "[INFO] DATA_PATH: $PERF_DATA_CHECK"
+}
+
 # Make sure every node has the image before the first run. Without this the
 # first `docker run` pulls it, which both counts against the run limits (a
 # silent multi-GB pull can trip MAX_IDLE_SECONDS) and leaves the image digest
@@ -456,7 +571,8 @@ perf_check_socket_ifname() {
 # ---------------------------------------------------------------------------
 
 perf_preflight() {
-    perf_log "[INFO] Pre-run checks: image, leftover containers, GPU memory, NCCL interface."
+    perf_log "[INFO] Pre-run checks: DATA_PATH, image, leftover containers, GPU memory, NCCL interface."
+    perf_ensure_data_path || return 1
     if ! perf_ensure_image; then
         perf_log "[ERROR] the image check failed (see above)."
         return 1

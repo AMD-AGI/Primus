@@ -303,6 +303,7 @@ bash tools/perf/run_batch.sh
 | `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. Not applied to `megatron_bridge`, whose configs keep their own `train_iters` (their learning-rate warmup and decay are sized to it, and a run no longer than the warmup fails Megatron's `lr_warmup_steps < lr_decay_steps` check), nor to `diffusion_dlrm`, which keeps diffusion_bench's `num_iterations`. A Megatron config for which it is not longer than the warmup is not run (see "Before each run"). |
 | `CHECK_TRAIN_STEPS` | `1` | `0` runs a Megatron config even when `TRAIN_STEPS` is not longer than its warmup. |
 | `EXTRA_ENV` | — | Space-separated `KEY=VALUE` pairs forwarded into the container as `--env`. See below. |
+| `DATA_PATH` | `<checkout>/data` | Where Primus keeps its Hugging Face downloads (models, datasets). Set it to keep them out of the checkout; the runner creates it, mounts it and passes it into the container. See below. |
 | `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` | auto (single node); `eno0` (multi-node) | RCCL/Gloo bootstrap NIC. Set even for 1-node 8-GPU; must not be `docker0`. See below. |
 | `NNODES`, `GPUS_PER_NODE` | `1`, `8` | Cluster topology. |
 | `PRIMUS_MODE` | `container` / `slurm srun` | Launcher mode. |
@@ -379,6 +380,51 @@ were merely present on the host.
 The alternative — adding a name to `container.options.env` in
 `runner/.primus.yaml` — is the right move when a variable should always be
 forwarded for everyone, rather than for one batch.
+
+### Where downloads go (`DATA_PATH`)
+
+Primus downloads Hugging Face models and datasets into
+`$DATA_PATH/huggingface` (its `HF_HOME`). Unset, `DATA_PATH` is
+`<checkout>/data`, which fills a home directory with a quota quickly: the
+Qwen3-32B checkpoint the `megatron_bridge` configs load is 62 GB. Point it
+somewhere bigger:
+
+```bash
+DATA_PATH=/tmp/primus-data bash tools/perf/run_batch.sh
+```
+
+The container sees only the checkout, and primus-cli does not forward
+`DATA_PATH`, so the runner adds `--volume $DATA_PATH:$DATA_PATH` and
+`--env DATA_PATH=$DATA_PATH` to every training launch (`diffusion_dlrm` runs
+keep their own container and cache, `DIFFUSION_DLRM_HF_CACHE`). It leaves the
+mount out when the path is inside the checkout or already a volume of the
+config file primus-cli loads (`~/.primus.yaml` if it exists, otherwise
+`runner/.primus.yaml`), since docker refuses the same mount twice. Before the
+first run it creates the directory on every node, so it belongs to you
+rather than to root, and the batch configuration records the free space:
+
+```
+# DATA_PATH    : /tmp/primus-data (4.4T free on node-1; mounted by the runner)
+```
+
+On a multi-node batch the path is the same on every node. A node-local path
+(`/tmp/...`) means each node downloads its own copy; a shared filesystem
+downloads once, provided root can write there (the container runs as root,
+so the files it writes are owned by root). Run logs stay in the checkout
+(`PRIMUS_WORKSPACE`, `output/` by default); they are small.
+
+A `DATA_PATH` that `EXTRA_ENV` sets is passed in as before but not mounted:
+mount it yourself, as a volume in `.primus.yaml`. Setting it both ways is
+refused unless the two agree. A `DATA_PATH` exported in your shell for some
+other reason now takes effect too: in container mode primus-cli used to drop
+it.
+
+Some small files stay in `<checkout>/data` regardless:
+`runner/helpers/hooks/train/pretrain/prepare_experiment.sh` hands the
+pre-train hooks `./data/` rather than `DATA_PATH`, so their pip cache,
+torchtitan's tokenizer files and any dataset they build (none in the catalog:
+its Megatron configs use mock data and its MaxText and MaxDiffusion configs
+synthetic data) land there. Their downloads through `HF_HOME` do not.
 
 ### RCCL socket interface (single node included)
 

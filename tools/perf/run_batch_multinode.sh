@@ -56,6 +56,11 @@
 # PRIMUS_/NCCL_/RCCL_/GLOO_/IONIC_/HIPBLASLT_ prefixes, and silently drops the
 # rest -- which is why an exported DEBUG_HIP_DYNAMIC_QUEUES never arrived.
 #
+# DATA_PATH=/dir puts Primus's Hugging Face downloads (models, datasets)
+# there instead of <checkout>/data. The runner creates it on every
+# node, mounts it and passes it into the container; a node-local path means
+# one copy per node.
+#
 # TRAIN_STEPS CLI flags (Primus deep-merges unknown tokens after the train verb):
 #   megatron                   : --train_iters N
 #   megatron_bridge            : none; TRAIN_STEPS is not applied
@@ -298,7 +303,7 @@ shopt -s nullglob
 # Select the configs to run: catalog (default, filtered by GPU/BACKEND) or a
 # directory of YAMLs (CONFIG_DIR). EXTRA_ENV, missing paths and duplicates are
 # all reported here, before anything launches.
-if ! check_batch_inputs || ! perf_check_run_limits; then
+if ! check_batch_inputs || ! perf_check_run_limits || ! perf_prepare_data_path; then
     exit "$PERF_EXIT_REFUSED"
 fi
 if [ "$PERF_RUN_DIFFUSION_DLRM" = 1 ]; then
@@ -327,6 +332,7 @@ build_launch_argv() {
     LAUNCH_ARGV=(
         "$PRIMUS_CLI" slurm srun -N "$NNODES"
         -- container --label "${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
+        ${PERF_DATA_ARGS[@]+"${PERF_DATA_ARGS[@]}"}
         ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"}
         -- train "$suite" --config "$config_file"
     )
@@ -400,6 +406,7 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# FAIL_PATTERN          : ${FAIL_PATTERN:-<none>}"
     echo "# GPU check             : $PERF_GPU_CHECK"
     echo "# NCCL iface            : $PERF_NIC_CHECK"
+    echo "# DATA_PATH             : $PERF_DATA_CHECK"
     # CONFIG_FILES is populated by perf_select_configs in lib/common.sh.
     # shellcheck disable=SC2153
     echo "# Total configs         : ${#CONFIG_FILES[@]}"

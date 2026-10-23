@@ -1385,6 +1385,121 @@ def test_train_steps_that_megatrons_schedule_rejects(tmp_path, framework, overri
         assert why.startswith(f"TRAIN_STEPS={train_steps} is not more than lr_warmup_iters={warmup},")
 
 
+def _volume_yaml(volume):
+    return f'\n      - "{volume}"' if volume else " []"
+
+
+MOUNTED = "--volume /scratch/data:/scratch/data --env DATA_PATH=/scratch/data"
+PASSED_ONLY = "--env DATA_PATH=/scratch/data"
+
+
+@pytest.mark.parametrize(
+    "data_path,mode,home_volume,runner_volume,extra_env,expected",
+    [
+        pytest.param("/scratch/data/", "container", None, None, "", (0, MOUNTED), id="mounted"),
+        pytest.param(
+            "{checkout}/data",
+            "container",
+            None,
+            None,
+            "",
+            (0, "--env DATA_PATH={checkout}/data"),
+            id="in-checkout",
+        ),
+        pytest.param(
+            "{checkout}", "container", None, None, "", (0, "--env DATA_PATH={checkout}"), id="checkout"
+        ),
+        pytest.param(
+            "/scratch/data",
+            "container",
+            "/nfs/d:/scratch/data/:ro",
+            None,
+            "",
+            (0, PASSED_ONLY),
+            id="home-volume",
+        ),
+        pytest.param(
+            "/scratch/data", "container", None, "/scratch/data", "", (0, PASSED_ONLY), id="runner-volume"
+        ),
+        pytest.param(
+            "/scratch/data",
+            "container",
+            "/other",
+            "/scratch/data",
+            "",
+            (0, MOUNTED),
+            id="runner-volume-not-loaded",
+        ),
+        pytest.param(
+            "/scratch/data", "container", "/scratch/data2", None, "", (0, MOUNTED), id="other-volume"
+        ),
+        pytest.param("/scratch/data", "direct", None, None, "", (0, ""), id="direct-mode"),
+        pytest.param("", "container", None, None, "", (0, ""), id="unset"),
+        pytest.param("data", "container", None, None, "", (1, ""), id="relative"),
+        pytest.param("/", "container", None, None, "", (1, ""), id="root"),
+        pytest.param("/scratch/a:b", "container", None, None, "", (1, ""), id="colon"),
+        pytest.param("", "container", None, None, "A=1 DATA_PATH=/x", (0, ""), id="only-in-extra-env"),
+        pytest.param(
+            "/scratch/data",
+            "container",
+            None,
+            None,
+            "DATA_PATH=/scratch/data/",
+            (0, MOUNTED),
+            id="both-agree",
+        ),
+        pytest.param("/scratch/data", "container", None, None, "DATA_PATH=/x", (1, ""), id="both-differ"),
+        pytest.param("/scratch/data", "container", None, None, "DATA_PATH=", (1, ""), id="extra-env-empty"),
+    ],
+)
+def test_data_path_reaches_the_container(
+    tmp_path, data_path, mode, home_volume, runner_volume, extra_env, expected
+):
+    checkout = tmp_path / "checkout"
+    (checkout / "runner").mkdir(parents=True)
+    (checkout / "runner" / "lib").symlink_to(REPO_ROOT / "runner" / "lib")
+    (checkout / "runner" / ".primus.yaml").write_text(
+        f"container:\n  options:\n    volume:{_volume_yaml(runner_volume)}\n"
+    )
+    if home_volume:
+        (tmp_path / ".primus.yaml").write_text(
+            f"container:\n  options:\n    volume:{_volume_yaml(home_volume)}\n"
+        )
+    guards = "export __PRIMUS_COMMON_SOURCED=1 __PRIMUS_CONFIG_SOURCED=1\n"
+    script = (
+        f"set -uo pipefail\n{guards}HOME={tmp_path}\nPRIMUS_PATH={checkout}\nPRIMUS_MODE={mode}\n"
+        f"DATA_PATH='{data_path.format(checkout=checkout)}'\nEXTRA_ENV='{extra_env}'\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/control.sh\n"
+        "perf_parse_extra_env || exit 9\n"
+        'perf_prepare_data_path 2>/dev/null; echo "$?|${PERF_DATA_ARGS[*]}|$PERF_DATA_CHECK"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    code, args, check = out.stdout.strip().split("|", 2)
+    assert (int(code), args) == (expected[0], expected[1].format(checkout=checkout))
+    if extra_env and not data_path:
+        assert check == "/x (from EXTRA_ENV; not mounted by the runner)"
+
+
+def test_data_path_is_created_before_the_first_run(tmp_path):
+    target = tmp_path / "new" / "data"
+    (tmp_path / "file").write_text("")
+    script = (
+        f"set -uo pipefail\nHOME={tmp_path}\nPRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE=container\n"
+        f"DATA_PATH={target}\nsource {MODULE_PATH.parent}/lib/common.sh\n"
+        f"source {MODULE_PATH.parent}/lib/control.sh\n"
+        'perf_prepare_data_path && perf_ensure_data_path >/dev/null; echo "rc=$? $PERF_DATA_CHECK"\n'
+        f'PERF_DATA_PATH={tmp_path}/file/data; perf_ensure_data_path; echo "rc=$?"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    created, error, refused = out.stdout.strip().splitlines()
+    assert target.is_dir()
+    assert created.startswith(f"rc=0 {target} (") and created.endswith("; mounted by the runner)")
+    assert error.startswith(f"[ERROR] DATA_PATH={tmp_path}/file/data cannot be created on every node: mkdir:")
+    assert refused == "rc=1"
+
+
 def test_legacy_log_without_footer_is_not_guessed(tmp_path):
     log = tmp_path / "legacy_exp.log"
     log.write_text(
