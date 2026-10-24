@@ -1,0 +1,41 @@
+# OLMo-3 7B (allenai/Olmo-3-1025-7B, HF model_type olmo3).
+#
+# Differences from Llama-3 that this preset selects (built by primus/backends/megatron/core/models/olmo3):
+#   * model_type olmo3: post-sublayer RMSNorms (no input / pre-MLP norm) and QK RMSNorm over the
+#     full projection width (all heads); keep qk_layernorm false (that is Megatron's per-head norm).
+#   * YaRN RoPE on every layer (factor 8, original 8192, beta_fast 32, beta_slow 1,
+#     attention factor 0.1*ln(8)+1); position_embedding_type stays `rope` for Megatron's CLI.
+#   * sliding window 4096 keys (HF units; the model converts to TE's (4095, 0)) on 3 of every
+#     4 layers; window_attn_skip_freq 4 keeps 1-indexed layers 4, 8, ... global.
+extends:
+  - llama3_base.yaml
+
+model_type: olmo3
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: allenai/Olmo-3-1025-7B
+
+num_layers: 32
+hidden_size: 4096
+ffn_hidden_size: 11008
+num_attention_heads: 32
+group_query_attention: true
+num_query_groups: 32
+kv_channels: 128
+
+# Megatron's TransformerConfig field is layernorm_epsilon; norm_epsilon is kept for the config report.
+norm_epsilon: 1.0e-06
+layernorm_epsilon: 1.0e-06
+
+max_position_embeddings: 65536
+rotary_base: 500000
+apply_rope_fusion: false
+
+yarn_rotary_scaling_factor: 8.0
+yarn_original_max_position_embeddings: 8192
+yarn_beta_fast: 32.0
+yarn_beta_slow: 1.0
+yarn_correction_range_round_to_int: true
+
+window_size: [4096, 0]
+window_attn_skip_freq: 4
