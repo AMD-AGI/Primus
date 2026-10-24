@@ -60,6 +60,17 @@ def get_model_provider(model_type="gpt"):
             kimi_k3_module.kimi_k3_builder,
         )
 
+    # Primus-owned: Inkling (thinkingmachines/Inkling text backbone)
+    if model_type == "inkling":
+        inkling_module = importlib.import_module("primus.backends.megatron.core.models.inkling.inkling_builders")
+        log_rank_0(
+            "[Primus][MegatronCompat] Loaded Inkling model_provider + builder " f"from {inkling_module.__name__}"
+        )
+        return partial(
+            inkling_module.model_provider,
+            inkling_module.inkling_builder,
+        )
+
     # Primus-owned: GLM-5.3 (KDA + DSA hybrid with mHC)
     if model_type == "glm5_next":
         glm5_next_module = importlib.import_module(

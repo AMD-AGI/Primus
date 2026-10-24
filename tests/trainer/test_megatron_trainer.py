@@ -234,6 +234,20 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_inkling(self):
+        run_script(
+            self.__class__.__name__,
+            "inkling",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/inkling-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+            ],
+        )
+
     def test_qwen3_30B_A3B(self):
         run_script(
             self.__class__.__name__,
