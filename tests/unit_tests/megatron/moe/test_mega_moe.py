@@ -13,6 +13,7 @@ import pytest
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state
+from megatron.core.fusions.fused_bias_geglu import quick_gelu
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.moe.moe_layer import MoELayer
@@ -32,9 +33,12 @@ from torch.testing._internal.common_utils import (
 if not torch.cuda.is_available() or torch.version.hip is None or torch.cuda.get_device_capability() != (9, 5):
     pytest.skip("MegaMoE only supports gfx950", allow_module_level=True)
 
+from primus_turbo.pytorch.ops.moe.fused_mega_moe import GLUActivation
+
 from primus.backends.megatron.core.extensions.mega_moe import (
     MegaMoEFP8Experts,
     PrimusTurboMegaMoELayer,
+    mega_moe_activation,
 )
 
 
@@ -59,7 +63,49 @@ def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
     return (a @ b / (a.norm() * b.norm() + 1e-12)).item()
 
 
-def _build_config(ep_size, num_moe_experts, moe_router_topk):
+def _activation_config(activation):
+    if activation == "silu":
+        return dict(activation_func=torch.nn.functional.silu)
+    # MiniMax-M3's swigluoai, spelled the way Megatron does: quick_geglu with the +1 offset and limit.
+    assert activation == "swigluoai", activation
+    return dict(activation_func=quick_gelu, glu_linear_offset=1.0, activation_func_clamp_value=7.0)
+
+
+def _activation_fields(activation_func, glu_linear_offset=0.0, activation_func_clamp_value=None):
+    return SimpleNamespace(
+        activation_func=activation_func,
+        glu_linear_offset=glu_linear_offset,
+        activation_func_clamp_value=activation_func_clamp_value,
+    )
+
+
+@pytest.mark.parametrize("silu", [torch.nn.functional.silu, torch.nn.SiLU])
+@pytest.mark.parametrize("clamp", [None, 10.0])
+def test_mega_moe_activation_silu_keeps_kernel_default(silu, clamp):
+    # DeepSeek-V4 sets activation_func_clamp_value on a SiLU config; forwarding it would change its numerics.
+    assert mega_moe_activation(_activation_fields(silu, activation_func_clamp_value=clamp)) is None
+
+
+def test_mega_moe_activation_quick_geglu_bounds():
+    act = mega_moe_activation(_activation_fields(quick_gelu, 1.0, 7.0))
+    # Megatron's quick_geglu clamps the gate from above only and the linear half on both sides.
+    assert act == GLUActivation(
+        alpha=1.702, glu_offset=1.0, gate_clamp_lo=None, gate_clamp_hi=7.0, up_clamp=7.0
+    )
+    assert act == GLUActivation.swigluoai()
+
+    unclamped = mega_moe_activation(_activation_fields(quick_gelu, 0.5, None))
+    assert unclamped == GLUActivation(
+        alpha=1.702, glu_offset=0.5, gate_clamp_lo=None, gate_clamp_hi=None, up_clamp=None
+    )
+
+
+def test_mega_moe_activation_rejects_other_activations():
+    with pytest.raises(AssertionError):
+        mega_moe_activation(_activation_fields(torch.nn.functional.gelu))
+
+
+def _build_config(ep_size, num_moe_experts, moe_router_topk, activation="silu"):
     """DeepSeek-V3 MoE config: sigmoid group-limited routing + shared expert."""
     return TransformerConfig(
         num_layers=1,
@@ -91,8 +137,38 @@ def _build_config(ep_size, num_moe_experts, moe_router_topk):
         moe_router_dtype="fp64",
         moe_grouped_gemm=False,
         gated_linear_unit=True,
-        activation_func=torch.nn.functional.silu,  # MegaMoE hardcodes SwiGLU/SiLU
+        **_activation_config(activation),
         add_bias_linear=False,
+        # unfused: Megatron's reference MLP then applies glu_linear_offset and the clamp itself
+        bias_activation_fusion=False,
+        use_cpu_initialization=True,
+        params_dtype=torch.bfloat16,
+        bf16=True,
+    )
+
+
+def _build_gptoss_config(ep_size, num_moe_experts):
+    """GPT-OSS MoE config: softmax over the top-4 logits, biased experts, swigluoai, no shared expert."""
+    return TransformerConfig(
+        num_layers=1,
+        hidden_size=2880,
+        num_attention_heads=8,
+        tensor_model_parallel_size=1,
+        expert_model_parallel_size=ep_size,
+        pipeline_model_parallel_size=1,
+        num_moe_experts=num_moe_experts,
+        moe_ffn_hidden_size=2880,
+        moe_router_topk=4,
+        moe_router_score_function="softmax",
+        moe_router_pre_softmax=False,
+        moe_router_load_balancing_type="aux_loss",
+        moe_aux_loss_coeff=0.0,
+        moe_token_dispatcher_type="alltoall",
+        moe_router_dtype="fp64",
+        moe_grouped_gemm=False,
+        gated_linear_unit=True,
+        **_activation_config("swigluoai"),
+        add_bias_linear=True,
         bias_activation_fusion=False,
         use_cpu_initialization=True,
         params_dtype=torch.bfloat16,
@@ -140,6 +216,14 @@ def _build_layers(config, num_moe_experts, num_layers):
                 assert expert.linear_fc2.weight.shape == mega_w2[i].shape
                 mega_w1[i].copy_(expert.linear_fc1.weight.to(torch.bfloat16))
                 mega_w2[i].copy_(expert.linear_fc2.weight.to(torch.bfloat16))
+            if config.add_bias_linear:
+                # both sides zero-init their biases; draw them so the bias paths are exercised
+                for name in ("linear_fc1", "linear_fc2"):
+                    mega_b = getattr(mega_layer.experts, name.replace("linear_", "") + "_weight").bias
+                    for i, expert in enumerate(experts):
+                        bias = getattr(expert, name).bias
+                        bias.normal_(0.0, 1.0)
+                        mega_b[i].copy_(bias.to(torch.bfloat16))
             # shared expert: same SharedExpertMLP module, copy fc1/fc2
             if mega_layer.shared_experts is not None:
                 se_ref, se_mega = moe_layer.shared_experts, mega_layer.shared_experts
@@ -197,7 +281,8 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
     @parametrize("moe_router_topk", [8])
     @parametrize("num_ga", [4])
     @parametrize("precision", ["bf16", "mxfp8"])
-    def test_forward_backward(self, moe_router_topk, num_ga, precision):
+    @parametrize("activation", ["silu", "swigluoai"])
+    def test_forward_backward(self, moe_router_topk, num_ga, precision, activation):
         # DeepSeek-V3 EP8 shapes: 256 experts, top-8, hidden 7168.
         # Single MoE layer, num_ga gradient-accumulation microbatches: forward +
         # backward num_ga times without zeroing grads (mirrors real GA training).
@@ -205,82 +290,115 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
         # precision="mxfp8" flips the experts while the reference stays bf16 Megatron, so its floor
         # also absorbs the fp8 quantization error -- it is a functional check of the fp8 wiring
         # (state threading, GA-safe weight-quant cache), not a precision measurement.
-        num_moe_experts, hidden_size = 256, 7168
+        # activation="swigluoai" checks the MegaMoE kernels' activation against Megatron's own
+        # quick_geglu; x is scaled so the L1 output (std ~1.7 at unit x) crosses the 7.0 clamp.
+        num_moe_experts = 256
+        x_gain = 3.0 if activation == "swigluoai" else 1.0
         self._init_process(precision=precision)
         self._setup_ep()
         try:
-            config = _build_config(self.world_size, num_moe_experts, moe_router_topk)
-            moe_layers, mega_layers = _build_layers(config, num_moe_experts, 1)
-            moe_layer, mega_layer = moe_layers[0], mega_layers[0]
-            self.assertEqual(isinstance(mega_layer.experts, MegaMoEFP8Experts), precision == "mxfp8")
-            moe_layer.train(True)
-            mega_layer.train(True)
-            experts = moe_layer.experts.local_experts
-            se = moe_layer.shared_experts
-            seq, batch = 8192, 1
+            config = _build_config(self.world_size, num_moe_experts, moe_router_topk, activation)
+            self._check_parity(config, num_moe_experts, precision, num_ga, x_gain)
+        finally:
+            parallel_state.destroy_model_parallel()
+            dist.destroy_process_group()
 
-            fwd_cos, dx_cos = [], []
-            # GA loop: accumulate grads over num_ga microbatches, compare each fwd/dx
-            for step in range(num_ga):
-                torch.manual_seed(1000 + self.rank + step * 97)
-                x = torch.randn((seq, batch, hidden_size), dtype=torch.bfloat16, device=self.device)
-                g = torch.randn((seq, batch, hidden_size), dtype=torch.bfloat16, device=self.device)
+    @skip_if_lt_x_gpu(8)
+    @parametrize("num_moe_experts", [32, 128])
+    @parametrize("precision", ["bf16", "mxfp8"])
+    def test_forward_backward_gptoss(self, num_moe_experts, precision):
+        # GPT-OSS-20B / -120B experts at EP8: hidden = ffn = 2880 (not a multiple of the 256-wide
+        # GEMM tile; mxfp8 runs it zero-padded to 3072), expert fc1/fc2 biases, swigluoai, no
+        # shared expert. x_gain as for swigluoai.
+        self._init_process(precision=precision)
+        self._setup_ep()
+        try:
+            config = _build_gptoss_config(self.world_size, num_moe_experts)
+            self._check_parity(config, num_moe_experts, precision, num_ga=2, x_gain=3.0)
+        finally:
+            parallel_state.destroy_model_parallel()
+            dist.destroy_process_group()
 
-                x_ref = x.clone().requires_grad_(True)
-                ref, _ = moe_layer(x_ref)
-                ref.backward(g)
-                x_meg = x.clone().requires_grad_(True)
-                out, _ = mega_layer(x_meg)
-                out.backward(g)
+    def _check_parity(self, config, num_moe_experts, precision, num_ga, x_gain):
+        hidden_size = config.hidden_size
+        moe_layers, mega_layers = _build_layers(config, num_moe_experts, 1)
+        moe_layer, mega_layer = moe_layers[0], mega_layers[0]
+        self.assertEqual(isinstance(mega_layer.experts, MegaMoEFP8Experts), precision == "mxfp8")
+        moe_layer.train(True)
+        mega_layer.train(True)
+        experts = moe_layer.experts.local_experts
+        se = moe_layer.shared_experts
+        seq, batch = 8192, 1
 
-                fwd_cos.append(_cosine(out, ref))
-                dx_cos.append(_cosine(x_meg.grad, x_ref.grad))
-                self._rank0(
-                    f"[ga {step}] fwd cos={fwd_cos[-1]:.6f} dx cos={dx_cos[-1]:.6f} "
-                    f"max_abs_diff={(out.float()-ref.float()).abs().max().item():.3e}"
-                )
+        fwd_cos, dx_cos = [], []
+        # GA loop: accumulate grads over num_ga microbatches, compare each fwd/dx
+        for step in range(num_ga):
+            torch.manual_seed(1000 + self.rank + step * 97)
+            x = torch.randn((seq, batch, hidden_size), dtype=torch.bfloat16, device=self.device)
+            if x_gain != 1.0:
+                x = x * x_gain
+            g = torch.randn((seq, batch, hidden_size), dtype=torch.bfloat16, device=self.device)
 
-            GRAD_FLOOR = 0.90 if precision == "mxfp8" else 0.95
-            failures = []
+            x_ref = x.clone().requires_grad_(True)
+            ref, _ = moe_layer(x_ref)
+            ref.backward(g)
+            x_meg = x.clone().requires_grad_(True)
+            out, _ = mega_layer(x_meg)
+            out.backward(g)
 
-            def check_accuracy(tag, cos):
-                # negated compare so a NaN cosine fails instead of slipping through
-                if not cos > GRAD_FLOOR:
-                    failures.append(f"{tag} cosine {cos:.6f} < {GRAD_FLOOR}")
+            fwd_cos.append(_cosine(out, ref))
+            dx_cos.append(_cosine(x_meg.grad, x_ref.grad))
+            self._rank0(
+                f"[ga {step}] fwd cos={fwd_cos[-1]:.6f} dx cos={dx_cos[-1]:.6f} "
+                f"max_abs_diff={(out.float()-ref.float()).abs().max().item():.3e}"
+            )
 
-            # forward + dx parity: every microbatch
-            for step in range(num_ga):
-                check_accuracy(f"ga{step} fwd", fwd_cos[step])
-                check_accuracy(f"ga{step} dx", dx_cos[step])
+        GRAD_FLOOR = 0.90 if precision == "mxfp8" else 0.95
+        failures = []
 
-            # accumulated per-weight grad parity: every trainable weight
-            dgate = _cosine(mega_layer.router.weight.grad, moe_layer.router.weight.grad)
-            check_accuracy("router", dgate)
+        def check_accuracy(tag, cos):
+            # negated compare so a NaN cosine fails instead of slipping through
+            if not cos > GRAD_FLOOR:
+                failures.append(f"{tag} cosine {cos:.6f} < {GRAD_FLOOR}")
+
+        # forward + dx parity: every microbatch
+        for step in range(num_ga):
+            check_accuracy(f"ga{step} fwd", fwd_cos[step])
+            check_accuracy(f"ga{step} dx", dx_cos[step])
+
+        # accumulated per-weight grad parity: every trainable weight
+        dgate = _cosine(mega_layer.router.weight.grad, moe_layer.router.weight.grad)
+        check_accuracy("router", dgate)
+        dsw1 = dsw2 = float("nan")
+        if se is not None:
             dsw1 = _cosine(mega_layer.shared_experts.linear_fc1.weight.grad, se.linear_fc1.weight.grad)
             dsw2 = _cosine(mega_layer.shared_experts.linear_fc2.weight.grad, se.linear_fc2.weight.grad)
             check_accuracy("shared dW1", dsw1)
             check_accuracy("shared dW2", dsw2)
-            # routed experts: full w1/w2 grad tensors (norm-weighted over all local
-            # experts); per-expert min is thin-token bf16 noise, informational only.
-            ref_dw1 = torch.stack([e.linear_fc1.weight.grad for e in experts])
-            ref_dw2 = torch.stack([e.linear_fc2.weight.grad for e in experts])
-            mega_w1_grad = mega_layer.experts.fc1_weight.weight.grad
-            mega_w2_grad = mega_layer.experts.fc2_weight.weight.grad
-            dW1 = _cosine(mega_w1_grad, ref_dw1)
-            dW2 = _cosine(mega_w2_grad, ref_dw2)
-            check_accuracy("experts dW1", dW1)
-            check_accuracy("experts dW2", dW2)
-            dw1_min = min(_cosine(mega_w1_grad[i], e.linear_fc1.weight.grad) for i, e in enumerate(experts))
-            dw2_min = min(_cosine(mega_w2_grad[i], e.linear_fc2.weight.grad) for i, e in enumerate(experts))
-            self._rank0(
-                f"[grad accum over {num_ga} ga] dgate={dgate:.6f} dSharedW1={dsw1:.6f} "
-                f"dSharedW2={dsw2:.6f} experts dW1={dW1:.6f} dW2={dW2:.6f} "
-                f"(per-expert min {dw1_min:.4f}/{dw2_min:.4f})"
-            )
-            self.assertEqual(failures, [], f"parity below {GRAD_FLOOR}: {failures}")
-        finally:
-            parallel_state.destroy_model_parallel()
-            dist.destroy_process_group()
+        if config.add_bias_linear:
+            for name, module in (("db1", "fc1"), ("db2", "fc2")):
+                ref_db = torch.stack([getattr(e, f"linear_{module}").bias.grad for e in experts])
+                db = _cosine(getattr(mega_layer.experts, f"{module}_weight").bias.grad, ref_db)
+                self._rank0(f"[grad accum over {num_ga} ga] experts {name}={db:.6f}")
+                check_accuracy(f"experts {name}", db)
+        # routed experts: full w1/w2 grad tensors (norm-weighted over all local
+        # experts); per-expert min is thin-token bf16 noise, informational only.
+        ref_dw1 = torch.stack([e.linear_fc1.weight.grad for e in experts])
+        ref_dw2 = torch.stack([e.linear_fc2.weight.grad for e in experts])
+        mega_w1_grad = mega_layer.experts.fc1_weight.weight.grad
+        mega_w2_grad = mega_layer.experts.fc2_weight.weight.grad
+        dW1 = _cosine(mega_w1_grad, ref_dw1)
+        dW2 = _cosine(mega_w2_grad, ref_dw2)
+        check_accuracy("experts dW1", dW1)
+        check_accuracy("experts dW2", dW2)
+        dw1_min = min(_cosine(mega_w1_grad[i], e.linear_fc1.weight.grad) for i, e in enumerate(experts))
+        dw2_min = min(_cosine(mega_w2_grad[i], e.linear_fc2.weight.grad) for i, e in enumerate(experts))
+        self._rank0(
+            f"[grad accum over {num_ga} ga] dgate={dgate:.6f} dSharedW1={dsw1:.6f} "
+            f"dSharedW2={dsw2:.6f} experts dW1={dW1:.6f} dW2={dW2:.6f} "
+            f"(per-expert min {dw1_min:.4f}/{dw2_min:.4f})"
+        )
+        self.assertEqual(failures, [], f"parity below {GRAD_FLOOR}: {failures}")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,8 @@
 
 Online, per rank: every rank reads only the slices of the safetensors shards
 its local parameters need, so any TP / EP / PP layout works without an offline
-conversion step. Name mapping (HF prefix ``model.language_model.``)::
+conversion step. Name mapping (HF prefix ``model.language_model.`` in the released
+checkpoint, ``model.`` in text-only exports such as Miles' Megatron -> HF export)::
 
     embed_tokens / norm / lm_head      -> embedding.word_embeddings / decoder.final_layernorm / output_layer
     layers.i.input_layernorm           -> decoder.layers.*.input_layernorm
@@ -42,7 +43,7 @@ from megatron.core import parallel_state
 
 __all__ = ["load_glm5_next_hf_checkpoint"]
 
-_HF_PREFIX = "model.language_model."
+_HF_PREFIXES = ("model.language_model.", "model.")
 
 _DSA_MAP = {
     "linear_q_down_proj": "q_a_proj",
@@ -64,6 +65,12 @@ class _HFReader:
         with open(os.path.join(path, "model.safetensors.index.json")) as f:
             self.weight_map: Dict[str, str] = json.load(f)["weight_map"]
         self._handles = {}
+        found = [p for p in _HF_PREFIXES if f"{p}embed_tokens.weight" in self.weight_map]
+        if not found:
+            raise KeyError(
+                f"GLM5-Next HF loader: no embed_tokens.weight under any of {_HF_PREFIXES} in {path}"
+            )
+        self.prefix = found[0]
 
     def get(self, key: str) -> torch.Tensor:
         fname = self.weight_map[key]
@@ -186,7 +193,7 @@ def load_glm5_next_hf_checkpoint(model_chunks, hf_path: str) -> int:
         if getattr(model, "pre_process", False):
             _copy_vocab(
                 params["embedding.word_embeddings.weight"],
-                reader.get(_HF_PREFIX + "embed_tokens.weight"),
+                reader.get(reader.prefix + "embed_tokens.weight"),
                 tp_rank,
             )
             loaded += 1
@@ -194,11 +201,11 @@ def load_glm5_next_hf_checkpoint(model_chunks, hf_path: str) -> int:
             if "output_layer.weight" in params:
                 _copy_vocab(params["output_layer.weight"], reader.get("lm_head.weight"), tp_rank)
                 loaded += 1
-            _copy("decoder.final_layernorm.weight", _HF_PREFIX + "norm.weight")
+            _copy("decoder.final_layernorm.weight", reader.prefix + "norm.weight")
 
         for local_idx, layer in enumerate(model.decoder.layers):
             prefix = f"decoder.layers.{local_idx}."
-            hf_layer = f"{_HF_PREFIX}layers.{layer.layer_idx}."
+            hf_layer = f"{reader.prefix}layers.{layer.layer_idx}."
             num_local_experts = 0
             if layer.is_moe_layer:
                 num_local_experts = layer.mlp.num_local_experts

@@ -1,0 +1,30 @@
+###############################################################################
+# ZAYA1-base shape.
+#
+# 80 decoder stages = 40 CCA + 40 MoE (even CCA, odd MoE). The checkpoint
+# scalar num_hidden_layers: 120 is stale; zaya_layers is the source of truth
+# and this port alternates when that list is omitted.
+#
+# num_attention_heads: 8 is the computed query-head count (cca_num_q_heads).
+# The paper's uncompressed head count a=16 is not this field.
+# num_query_groups: 2 is the KV-head count.
+#
+# ffn_hidden_size / moe_ffn_hidden_size: 2048 is one SwiGLU side. The
+# checkpoint's 4096 is the concatenated gate+up projection.
+#
+# vocab_size 262272 matches Zyphra/ZAYA1-base. Embeddings are tied.
+###############################################################################
+
+extends:
+  - zaya1_base.yaml
+
+hidden_size: 2048
+num_layers: 80
+num_attention_heads: 8
+num_query_groups: 2
+kv_channels: 128
+ffn_hidden_size: 2048
+moe_ffn_hidden_size: 2048
+vocab_size: 262272
+seq_length: 4096
+max_position_embeddings: 4096

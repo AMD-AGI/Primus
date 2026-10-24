@@ -625,3 +625,40 @@ try:
     )(_sort_chunks_by_map_kernel)
 except RuntimeError:
     pass
+
+
+@triton.jit
+def _row_id_map_compact_gather_kernel(
+    row_id_map_ptr,
+    dest2src_ptr,
+    permuted_probs_ptr,
+    probs_ptr,
+    num_tokens,
+    stride_token,
+    stride_expert,
+    stride_probs_token,
+    stride_probs_expert,
+    NUM_EXPERTS: tl.constexpr,
+    LOAD_SIZE: tl.constexpr,
+    ROWS: tl.constexpr,
+):
+    tokens = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+    experts = tl.arange(0, LOAD_SIZE)
+    ptrs = row_id_map_ptr + tokens[:, None] * stride_token + experts[None, :] * stride_expert
+    values = tl.load(ptrs, (tokens[:, None] < num_tokens) & (experts[None, :] < NUM_EXPERTS), other=-1)
+    valid = values != -1
+    counts = tl.sum(valid.to(tl.int32), axis=1)
+    slots = counts[:, None] - tl.cumsum(valid.to(tl.int32), axis=1)
+    dst = row_id_map_ptr + tokens[:, None] * stride_token + slots * stride_expert
+    tl.store(dst, values, valid)
+    tl.store(dst + NUM_EXPERTS * stride_expert, tl.broadcast_to(experts[None, :], (ROWS, LOAD_SIZE)), valid)
+    tl.store(
+        row_id_map_ptr + tokens * stride_token + 2 * NUM_EXPERTS * stride_expert, counts, tokens < num_tokens
+    )
+    tl.store(dest2src_ptr + values, tl.broadcast_to(tokens[:, None], (ROWS, LOAD_SIZE)), valid)
+    probs = tl.load(
+        probs_ptr + tokens[:, None] * stride_probs_token + experts[None, :] * stride_probs_expert,
+        valid,
+        other=0.0,
+    )
+    tl.store(permuted_probs_ptr + values, probs, valid)

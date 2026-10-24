@@ -1,0 +1,128 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# GPT-OSS 20B BF16 pretraining on 1 node of 4x MI455X (gfx1250).
+#
+# Full 24-layer model, EP4. Turbo Triton attention with learned sinks and a
+# 128-token sliding window on even layers; DeepEP is off.
+# Launcher, baseline and known issues: examples/megatron/models/gpt-oss/.
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:gpt_oss_20B-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+env:
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:gpt_oss_20B}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_GPT_OSS_20B_Pretrain"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # balanced expert load for benchmarking
+      moe_router_force_load_balancing: true
+
+      # Sink attention (PR 208) - GPT-OSS style learned sinks
+      # Reference: gpt-oss/gpt_oss/triton/attention.py
+      use_sink_attention: true
+      # Set to 0 to disable the sliding window
+      sink_sliding_window: 128  # gpt-oss default
+      sink_window_even_layers_only: true  # apply sliding window only to even layers
+
+      apply_rope_fusion: true
+      multi_latent_attention: false
+
+      # profile
+      profile: false
+      use_pytorch_profiler: true
+      profile_step_end: 7
+      profile_step_start: 6
+
+      # hyper parameters
+      train_iters: 10
+      micro_batch_size: 8
+      global_batch_size: 64
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:4}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      ddp_num_buckets: 24
+      ddp_average_in_collective: true
+      # all-to-all overlap is ~1.4% faster but peaks at 89% instead of 80% of HBM
+      overlap_moe_expert_parallel_comm: false
+
+      # data
+      mock_data: true
+      train_data_path: ${TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+
+      # fusion
+      moe_permute_fusion: true
+      gradient_accumulation_fusion: false
+      moe_use_legacy_grouped_gemm: false
+      moe_use_fused_router_with_aux_score: true
+      moe_router_fusion: true
+      moe_router_dtype: fp32
+      moe_shared_expert_overlap: false
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # cross entropy
+      # Inductor compiles the native fused CE, and its autotuner backs up the
+      # 8x4096x201088 fp32 logits (~26 GB per rank) into pinned host memory; four
+      # ranks exceed the amdgpu pinned-memory limit and step 1 runs out of memory.
+      cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+
+      # primus-turbo
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_gemm: false
+      use_turbo_fused_qk_rmsnorm_rope: true
+      use_turbo_norm_te_linear: true
+      use_turbo_rms_norm: true
+      # the first dispatch times out on gfx1250 ("DeepEP error: CPU recv timeout")
+      use_turbo_deepep: false

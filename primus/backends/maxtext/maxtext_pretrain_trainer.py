@@ -222,6 +222,20 @@ class MaxTextPretrainTrainer(BaseTrainer):
 
         return flat_overrides
 
+    def setup_model_only(self):
+        """Resolve the config and bring up JAX, without training.
+
+        This is the hook projection's layer benchmark calls instead of
+        :meth:`init` + :meth:`train`.  For MaxText the two coincide: its
+        ``initialize()`` resolves hyperparameters and initializes the JAX
+        distributed runtime but builds no model and reads no data -- the model
+        is only constructed inside the training loop.  The benchmark builds the
+        layers it needs itself, from ``self.train_config``.
+        """
+        if self.train_config is None:
+            self.init()
+        return self.train_config
+
     # --------------------------------------------------------------------- #
     # Training entrypoint
     # --------------------------------------------------------------------- #
