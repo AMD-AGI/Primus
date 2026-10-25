@@ -1,0 +1,48 @@
+work_group: ${PRIMUS_TEAM:local}
+user_name: ${PRIMUS_USER:local}
+exp_name: ${PRIMUS_EXP_NAME:benchmark-wan2.1-i2v-posttrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# MIOpen's own default (dynamic hybrid). The runner exports FAST (2), which
+# skips the solver search and picks slower VAE and UNet convolutions.
+env:
+  MIOPEN_FIND_MODE: "5"
+
+platform:
+  config: platform_local.yaml
+
+modules:
+  post_trainer:
+    framework: diffusion
+    config: post_trainer.yaml
+
+    model: benchmark_wan2_1_i2v.yaml
+    overrides:
+      sink_level: null
+      file_sink_level: INFO
+      stderr_sink_level: INFO
+
+      metrics:
+        log_freq: 1
+        enable_wandb: false
+
+      training:
+        local_batch_size: ${LOCAL_BATCH_SIZE:1}
+        steps: ${MAX_STEPS:100}
+        num_train_epochs: 1000
+        gradient_accumulation_steps: 1
+        output_dir: ${OUTPUT_DIR:./output/benchmark-wan2.1-i2v-posttrain}
+        save_steps: 0
+        run_name: benchmark-wan2.1-i2v-posttrain
+
+      data:
+        dataset_path: ${DATASET_PATH:Wild-Heart/Disney-VideoGeneration-Dataset}
+        modality: video
+        num_frames: ${NUM_FRAMES:9}
+
+      parallelism:
+        sp_size: 1
+
+      runtime:
+        attention_backend: flash_attn_aiter
+        gradient_checkpointing: true

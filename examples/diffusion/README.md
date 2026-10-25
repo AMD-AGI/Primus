@@ -117,3 +117,50 @@ python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
 ```
 
 On success the hook prints `env.PREPARED=1`.
+
+## Official-module post-training
+
+FLUX.1-dev, SDXL, Mochi-1, HunyuanVideo, and Wan2.1 I2V fine-tune the
+in-tree modules adapted from the official implementations. They do not build
+a Diffusers pipeline. Point `PRETRAINED_PATH` at the official DiT or UNet
+checkpoint.
+
+| Workload | Official source | Checkpoint |
+|---|---|---|
+| FLUX.1-dev | Black Forest Labs FLUX | `flux1-dev.safetensors`, T5-XXL, CLIP-L, `ae.safetensors` |
+| SDXL | Stability `generative-models` UNet | `sd_xl_base_1.0.safetensors` plus the SDXL VAE |
+| Mochi-1 | Genmo `AsymmDiTJoint` and VAE encoder | official DiT and encoder safetensors, T5-XXL |
+| HunyuanVideo | Tencent `HYVideoDiffusionTransformer` | official transformer weights, LLaMA text encoder, CLIP-L |
+| Wan2.1 I2V 14B | Wan2.1 DiT with CLIP cross-attention | official I2V DiT, Wan2.1 VAE, UMT5, CLIP vision |
+
+HunyuanVideo's trainable module is the transformer. Its causal 3D VAE is not
+vendored, so the training step reads `batch["latents"]`. Mochi encodes video
+with the official VAE encoder. Wan2.1 I2V encodes with the existing Wan2.1 VAE
+and the vendored CLIP visual tower.
+
+Per-GPU batch sizes follow the AMDiffusionBenchmark MI300/MI325 and MI355 commands.
+`LOCAL_BATCH_SIZE` still overrides the default.
+
+| Workload | MI300X / MI325X | MI355X |
+|---|---:|---:|
+| flux-dev | 10 | 16 |
+| mochi-1 | 1 | 4 |
+| hunyuan-video | 1 | 3 |
+| stable-diffusion-xl | 20 | 12 |
+| wan2.1-i2v | 1 | 1 |
+
+```bash
+PRETRAINED_PATH=/models/sd_xl_base_1.0.safetensors \
+VAE_CHECKPOINT=/models/sdxl_vae.safetensors \
+MAX_STEPS=10 \
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_sdxl-posttrain.yaml
+```
+
+Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Swap the
+config for `benchmark_mochi_1`, `benchmark_hunyuan_video`, or
+`benchmark_wan2_1_i2v`. Video presets default to 9 frames. Keep `SP_SIZE` at 1.
+
+`benchmark_flux_dev-posttrain.yaml` fine-tunes the native FLUX.1-dev module.
+Set `PRETRAINED_PATH` to `flux1-dev.safetensors` and `VAE_CHECKPOINT` to
+`ae.safetensors`.

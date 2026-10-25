@@ -37,6 +37,24 @@ except ImportError:
     wandb = None
 
 
+def benchmark_step_rates(
+    *,
+    local_batch_size: int,
+    step_time_gpu_s: float,
+    total_flops: float,
+) -> tuple[float, float]:
+    """Calculate AMDiffusionBenchmark's per-GPU FPS and TFLOPS/s metrics.
+
+    The CUDA-event duration covers one optimizer update.  ``total_flops`` is
+    the one-update, per-rank value captured by ``FlopCounterMode``.
+    """
+    if step_time_gpu_s <= 0:
+        raise ValueError(f"step_time_gpu_s must be positive, got {step_time_gpu_s}")
+    fps_gpu = float(local_batch_size) / float(step_time_gpu_s)
+    tflops_per_gpu = float(total_flops) * 1e-12 / float(step_time_gpu_s)
+    return fps_gpu, tflops_per_gpu
+
+
 def create_lr_scheduler(optimizer, scheduler_type, warmup_steps, total_steps):
     """
     Create LR scheduler with warmup support.
@@ -252,6 +270,7 @@ class BaseWanTrainer:
             train_dataset,
             batch_size=self.per_device_train_batch_size,
             sampler=self.sampler,
+            drop_last=bool(self.args.get("dataloader_drop_last", False)),
             num_workers=num_workers,
             collate_fn=data_collator,
             pin_memory=True,

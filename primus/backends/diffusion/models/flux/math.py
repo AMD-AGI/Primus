@@ -8,11 +8,19 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 from einops import rearrange
 from torch import Tensor
 
 from primus.backends.diffusion.attention import attention as backend_attention
+from primus.backends.diffusion.models.flux.rope_triton import (
+    fused_apply_rope,
+    fused_rope_supported,
+)
+
+_FUSED_ROPE = os.getenv("PRIMUS_FLUX_TRITON_ROPE", "1") != "0"
 
 
 def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor) -> Tensor:
@@ -37,6 +45,8 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
 
 
 def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
+    if _FUSED_ROPE and xq.shape == xk.shape and fused_rope_supported(xq, freqs_cis):
+        return fused_apply_rope(xq, xk, freqs_cis)
     xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
     xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
     xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]

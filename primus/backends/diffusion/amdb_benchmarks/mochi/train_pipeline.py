@@ -1,0 +1,105 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Flow-matching loss for the official Mochi AsymmDiTJoint."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import torch
+import torch.nn.functional as F
+
+from primus.backends.diffusion.amdb_benchmarks.mochi.vae_models import (
+    add_fourier_features,
+)
+from primus.backends.diffusion.amdb_benchmarks.mochi.vae_stats import STATS
+from primus.backends.diffusion.amdb_benchmarks.pixels import videos_to_tensor
+from primus.backends.diffusion.amdb_benchmarks.sampling import (
+    sample_shifted_logit_normal_sigmas,
+)
+
+
+class MochiTrainPipeline:
+    def __init__(
+        self,
+        *,
+        width: int = 960,
+        height: int = 544,
+        num_frames: int = 9,
+        sigma_grid: torch.Tensor | None = None,
+    ):
+        self.width = int(width)
+        self.height = int(height)
+        self.num_frames = int(num_frames)
+        self.sigma_grid = sigma_grid
+
+    def compute_loss(self, *, dit, encoder, text_encoder, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
+        device = next(dit.parameters()).device
+        dtype = next(dit.parameters()).dtype
+        if isinstance(batch.get("latents"), torch.Tensor):
+            latents = batch["latents"].to(device=device, dtype=dtype)
+            text_hidden = batch["text_hidden"].to(device=device, dtype=dtype)
+            text_mask = batch["text_mask"].to(device=device)
+        else:
+            if "videos" in batch:
+                pixels = videos_to_tensor(
+                    batch["videos"], num_frames=self.num_frames, height=self.height, width=self.width
+                )
+            elif isinstance(batch.get("video"), torch.Tensor):
+                pixels = batch["video"]
+            else:
+                raise ValueError("Mochi training batch must contain 'videos' or 'video'.")
+            prompts = list(batch.get("prompts") or [])
+            if not prompts:
+                raise ValueError("Mochi training batch must contain prompts.")
+            pixels = pixels.to(device=device)
+            encoder.eval()
+            text_encoder.eval()
+            encoder_dtype = next((p.dtype for p in encoder.parameters()), torch.float32)
+            with torch.no_grad():
+                # Fourier features need FP32 inputs; the encoder then runs in its own
+                # dtype, as the Diffusers Mochi VAE does.
+                features = add_fourier_features(pixels.float()).to(dtype=encoder_dtype)
+                latents = encoder(features).sample().to(dtype=dtype)
+                text_hidden, text_mask = text_encoder(prompts)
+            text_hidden = text_hidden.to(device=device, dtype=dtype)
+            text_mask = text_mask.to(device=device)
+
+        noise = torch.randn_like(latents)
+        sigma = sample_shifted_logit_normal_sigmas(
+            latents.shape[0], device=device, sigma_grid=self.sigma_grid
+        )
+        sigma_view = sigma.view(-1, 1, 1, 1, 1)
+        noisy = (sigma_view * noise + (1.0 - sigma_view) * latents).to(latents.dtype)
+        sigma = sigma.to(latents.dtype)
+        batch_size, _, frames, height, width = latents.shape
+        visual_tokens = frames * (height // 2) * (width // 2)
+        text_tokens = text_hidden.shape[1]
+        sequence = visual_tokens + text_tokens
+        packed_indices = {
+            "cu_seqlens_kv": torch.arange(
+                0, (batch_size + 1) * sequence, sequence, device=device, dtype=torch.int32
+            ),
+            "max_seqlen_in_batch_kv": sequence,
+            "valid_token_indices_kv": torch.arange(batch_size * sequence, device=device),
+        }
+        prediction = dit(
+            noisy,
+            # AsymmDiTJoint embeds `(1 - sigma) * timestep_scale` with
+            # timestep_scale=1000. That is the same value AMDiffusionBenchmark
+            # passes into Diffusers. Passing `1000 * (1 - sigma)` here applies
+            # the conversion twice and the pretrained denoiser misses the target.
+            sigma,
+            y_feat=[text_hidden],
+            y_mask=[text_mask],
+            packed_indices=packed_indices,
+        )
+        mean = STATS["mean"].to(device=device, dtype=torch.float32).view(1, -1, 1, 1, 1)
+        std = STATS["std"].to(device=device, dtype=torch.float32).view(1, -1, 1, 1, 1)
+        target = ((latents - noise).float() - mean) / std
+        loss = F.mse_loss(prediction.float(), target)
+        return {"loss": loss}

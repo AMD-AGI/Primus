@@ -124,9 +124,11 @@ class FluxRawImageTextDataset(Dataset):
 
             self.dataset = load_from_disk(dataset_path)
         elif dataset_format == "hf_repo":
-            from datasets import load_dataset
+            from primus.backends.diffusion.amdb_benchmarks.data import (
+                load_benchmark_image_dataset,
+            )
 
-            self.dataset = load_dataset(dataset_path, split="train")
+            self.dataset = load_benchmark_image_dataset(dataset_path)
         elif dataset_format == "webdataset":
             if not os.path.isdir(dataset_path):
                 raise FileNotFoundError(f"FLUX raw webdataset directory not found: {dataset_path}")
@@ -162,12 +164,20 @@ class FluxRawImageTextDataset(Dataset):
 
     @staticmethod
     def _prompt_from_sample(sample: dict[str, Any]) -> str:
-        for key in ("txt", "caption", "prompt", "text"):
-            if key in sample:
+        for key in ("txt", "caption", "prompt", "text", "caption_0"):
+            if key in sample and sample[key] is not None:
                 value = sample[key]
                 if isinstance(value, list):
                     value = value[0]
                 return str(value)
+        from primus.backends.diffusion.amdb_benchmarks.data import (
+            caption_from_image_filename,
+        )
+
+        for key in ("image", "jpg", "png"):
+            caption = caption_from_image_filename(sample.get(key))
+            if caption:
+                return caption
         raise KeyError("FLUX raw sample requires one of: txt, caption, prompt, text")
 
     def _image_from_jsonl_sample(self, sample: dict[str, Any]) -> Image.Image:
@@ -322,9 +332,8 @@ class FluxRawImageTextProcessor:
 
     def _process_image(self, image: Image.Image) -> torch.Tensor | None:
         width, height = image.size
-        if self.skip_low_resolution and (width < self.img_size or height < self.img_size):
-            return None
-
+        # Resize short images up to img_size. Dropping them removes rows from the
+        # shared split on only some ranks, and an all-short batch deadlocks FSDP.
         if width == self.img_size and height == self.img_size:
             resized = image
         elif width >= height:
@@ -343,7 +352,25 @@ class FluxRawImageTextProcessor:
         np_img = np.array(resized).transpose((2, 0, 1))
         return torch.tensor(np_img).float() / 255.0 * 2.0 - 1.0
 
+    @staticmethod
+    def _is_host_prepared(batch: Any) -> bool:
+        return (
+            isinstance(batch, dict)
+            and isinstance(batch.get("image"), torch.Tensor)
+            and batch["image"].ndim == 4
+        )
+
     def prepare_batch(self, *, batch: Any, device: torch.device, dtype: torch.dtype) -> dict[str, Any]:
+        host = batch if self._is_host_prepared(batch) else self.prepare_host_batch(batch)
+        return {
+            "image": host["image"].to(device=device, dtype=dtype, non_blocking=True),
+            "prompts": host["prompts"],
+        }
+
+    def prepare_host_batch(self, batch: Any) -> dict[str, Any]:
+        """Resize and crop on the host, leaving the device copy to ``prepare_batch``."""
+        if self._is_host_prepared(batch):
+            return batch
         if isinstance(batch, dict):
             batch = [batch]
         if not isinstance(batch, Sequence) or not batch:
@@ -365,7 +392,4 @@ class FluxRawImageTextProcessor:
 
         if not images:
             raise ValueError("FLUX raw batch contained no usable images after preprocessing")
-        return {
-            "image": torch.stack(images, dim=0).to(device=device, dtype=dtype, non_blocking=True),
-            "prompts": prompts,
-        }
+        return {"image": torch.stack(images, dim=0), "prompts": prompts}
