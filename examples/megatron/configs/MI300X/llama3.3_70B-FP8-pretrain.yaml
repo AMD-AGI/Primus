@@ -3,6 +3,10 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:llama3_70B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+env:
+  GPU_MAX_HW_QUEUES: "4"
+  PYTORCH_HIP_ALLOC_CONF: expandable_segments:True
+
 modules:
   pre_trainer:
     framework: megatron
@@ -16,9 +20,9 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 50
+      train_iters: 20
       micro_batch_size: 3
-      global_batch_size: 24
+      global_batch_size: 48
 
       seq_length: 8192
       max_position_embeddings: 8192
@@ -77,8 +81,9 @@ modules:
       use_turbo_grouped_gemm: true
 
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      # Fused CE is required to fit GBS=48 (OOMs without it).
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
 
       # enable fp8 training
       fp8: hybrid
