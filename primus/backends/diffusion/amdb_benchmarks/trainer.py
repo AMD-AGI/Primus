@@ -326,9 +326,6 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
         )
         start_event_gpu = torch.cuda.Event(enable_timing=True)
         end_event_gpu = torch.cuda.Event(enable_timing=True)
-        profile_step = int(os.getenv("PRIMUS_PROFILE_STEP", "-1"))
-        profile_dir = os.getenv("PRIMUS_PROFILE_DIR", os.path.join(self.output_dir, "profile"))
-        profiler = None
         steps_per_epoch = math.ceil(len(self.dataloader) / max(1, self.grad_accum_steps))
         start_epoch = self.global_step // steps_per_epoch
         resume_batch_offset = (self.global_step % steps_per_epoch) * self.grad_accum_steps
@@ -344,8 +341,6 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
             start_time_step = time.time()
             for batch_idx, batch in enumerate(self.dataloader):
                 batch = self._prepare_host_batch(batch)
-                if self.rank == 0 and self.global_step == 0 and batch_idx == 0:
-                    logger.info("First training batch loaded; entering forward pass")
                 if self.mlperf_enabled and not mlperf_train_started:
                     self._mlperf_log_train_start()
                     mlperf_train_started = True
@@ -355,15 +350,6 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                 if starts_update:
                     if barrier_around_timing:
                         torch.distributed.barrier()
-                    if self.rank == 0 and self.global_step + 1 == profile_step:
-                        profiler = torch.profiler.profile(
-                            activities=[
-                                torch.profiler.ProfilerActivity.CPU,
-                                torch.profiler.ProfilerActivity.CUDA,
-                            ],
-                            record_shapes=True,
-                        )
-                        profiler.__enter__()
                     start_event_gpu.record()
                     if flop_counter is not None and not flops_captured:
                         flop_counter.__enter__()
@@ -386,8 +372,6 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                             exc,
                         )
                         raise
-                    if self.rank == 0 and self.global_step == 0 and batch_idx == 0:
-                        logger.info("First training forward completed; entering backward pass")
                     detached_loss = raw_loss.detach().float()
                     update_loss_sum = (
                         detached_loss if update_loss_sum is None else update_loss_sum + detached_loss
@@ -395,49 +379,26 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                     update_loss_count += 1
                     loss = raw_loss / max(1, self.grad_accum_steps)
                     loss.backward()
-                    if self.rank == 0 and self.global_step == 0 and batch_idx == 0:
-                        logger.info("First training backward completed")
 
                 if is_update_step:
                     try:
-                        if self.rank == 0 and self.global_step == 0:
-                            logger.info("Entering first optimizer update")
                         loss_val = update_loss_sum / max(1, update_loss_count)
                         update_loss_sum = None
                         update_loss_count = 0
                         grad_norm = self._clip_grad_norm()
-                        if self.rank == 0 and self.global_step == 0:
-                            logger.info("First gradient clip completed")
                         self.optimizer.step()
-                        if self.rank == 0 and self.global_step == 0:
-                            logger.info("First optimizer step completed")
                         self.lr_scheduler.step()
-                        if self.rank == 0 and self.global_step == 0:
-                            logger.info("First learning-rate step completed")
                         self.optimizer.zero_grad(set_to_none=True)
                         if flop_capture_open:
-                            if self.rank == 0 and self.global_step == 0:
-                                logger.info("Closing first flop counter")
                             flop_counter.__exit__(None, None, None)
                             flop_capture_open = False
                             total_flops = float(flop_counter.get_total_flops())
                             flops_captured = True
-                            if self.rank == 0 and self.global_step == 0:
-                                logger.info("First flop counter closed")
                         if barrier_around_timing:
                             torch.distributed.barrier()
                         end_event_gpu.record()
                         torch.cuda.synchronize()
-                        if profiler is not None:
-                            profiler.__exit__(None, None, None)
-                            os.makedirs(profile_dir, exist_ok=True)
-                            profiler.export_chrome_trace(
-                                os.path.join(profile_dir, f"primus_step{profile_step}_rank0.json")
-                            )
-                            profiler = None
                         step_time_gpu = start_event_gpu.elapsed_time(end_event_gpu) / 1000.0
-                        if self.rank == 0 and self.global_step == 0:
-                            logger.info("First step timing completed")
                         if step_time_gpu > 0 and local_samples_in_update > 0:
                             step_fps, step_tflops = benchmark_step_rates(
                                 local_batch_size=local_samples_in_update,
