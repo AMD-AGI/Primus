@@ -116,7 +116,8 @@ class TestAutoDiscovery:
 
         # The real package must not name modules explicitly -- that would defeat
         # auto-discovery and reintroduce the shared file every feature edits.
-        source = open(pkg.__file__).read()
+        with open(pkg.__file__) as f:
+            source = f.read()
         assert "walk_packages" in source
 
 

@@ -214,9 +214,10 @@ class TestProfilerGate:
 
         sys.modules.pop("primus.backends.automodel.profiling.torch_profiler", None)
         mod = importlib.import_module("primus.backends.automodel.profiling.torch_profiler")
-        assert not any(
-            line.strip().startswith("import torch") for line in open(mod.__file__).read().splitlines()[:60]
-        ), "torch must stay inside install(), not at module import time"
+        with open(mod.__file__) as f:
+            top_lines = f.read().splitlines()[:60]
+        has_top_level_torch_import = any(line.strip().startswith("import torch") for line in top_lines)
+        assert not has_top_level_torch_import, "torch must stay inside install(), not at module import time"
 
 
 class TestProfilerAcrossTrainers:
@@ -332,7 +333,7 @@ class TestPatchesAreRegistered:
 
     @pytest.fixture(autouse=True)
     def load_patches(self):
-        import primus.backends.automodel.patches  # noqa: F401
+        from primus.backends.automodel import patches  # noqa: F401
 
     def _patch(self, patch_id):
         for p in PatchRegistry.iter_patches(backend="automodel", phase="before_train"):
@@ -410,7 +411,7 @@ def _settings_the_backend_reads():
 
 
 def _declared_settings():
-    import primus.backends.automodel.patches  # noqa: F401
+    from primus.backends.automodel import patches  # noqa: F401
 
     return {f"{section}.{key}" for section, keys in options._declared.items() for key in keys}
 

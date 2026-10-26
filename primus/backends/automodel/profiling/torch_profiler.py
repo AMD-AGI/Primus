@@ -93,8 +93,8 @@ def current_rank() -> int:
 
         if dist.is_available() and dist.is_initialized():
             return dist.get_rank()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[PrimusDiffusionProfile] cannot read the distributed rank; using 0: %s", exc)
     return 0
 
 
