@@ -35,6 +35,15 @@ from primus.backends.diffusion.distributed import (
 )
 from primus.backends.diffusion.utils.log import logger
 
+def _pin_symm_mem_pools() -> None:
+    import ctypes
+
+    from torch.distributed import _symmetric_memory as symm_mem
+
+    for pool in list(getattr(symm_mem, "_symm_mem_pools", {}).values()):
+        ctypes.pythonapi.Py_IncRef(ctypes.py_object(pool))
+
+
 from .base import BaseWanTrainer
 
 
@@ -107,6 +116,58 @@ class FSDP2Trainer(BaseWanTrainer):
 
         self._apply_fsdp2()
 
+    def _sdma_all_gather_enabled(self) -> bool:
+        return (
+            os.getenv("FSDP_ALL_GATHER_BACKEND", "") == "rccl_sdma"
+            and os.getenv("FLUX_SDMA_ATTACH", "1") == "1"
+        )
+
+    def _maybe_attach_sdma_all_gather(self, module, module_name: str) -> None:
+        if not self._sdma_all_gather_enabled():
+            return
+        prefixes = [
+            prefix.strip()
+            for prefix in os.getenv("FSDP_SDMA_MODULES", "").split(",")
+            if prefix.strip()
+        ]
+        if prefixes and not any(
+            module_name == prefix or module_name.startswith(prefix + ".")
+            for prefix in prefixes
+        ):
+            return
+
+        from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
+            SymmMemAllGather,
+        )
+
+        try:
+            state = module._get_fsdp_state()
+        except Exception:
+            return
+        groups = getattr(state, "_fsdp_param_groups", None) or []
+        if len(groups) != 1:
+            if self.rank == 0:
+                logger.warning(
+                    f"FSDP2/SDMA: skipping {type(module).__name__}: "
+                    f"expected one parameter group, found {len(groups)}"
+                )
+            return
+        try:
+            module.set_custom_all_gather(
+                SymmMemAllGather(groups[0]._all_gather_process_group, "NCCL")
+            )
+        except (AttributeError, ValueError, AssertionError) as error:
+            if self.rank == 0:
+                logger.warning(
+                    f"FSDP2/SDMA: failed to attach to {type(module).__name__}: {error}"
+                )
+            return
+        self._sdma_attached = getattr(self, "_sdma_attached", 0) + 1
+        if self._sdma_attached == 1:
+            import atexit
+
+            atexit.register(_pin_symm_mem_pools)
+
     def _apply_fsdp2(self):
         """Apply torch.distributed._composable.fsdp.fully_shard to the model."""
         mp_dtype = self._resolve_dtype()
@@ -114,6 +175,11 @@ class FSDP2Trainer(BaseWanTrainer):
         if reduce_dtype_name not in {"fp32", "bf16"}:
             raise ValueError(f"Unsupported FSDP2_REDUCE_DTYPE={reduce_dtype_name!r}")
         reduce_dtype = torch.float32 if reduce_dtype_name == "fp32" else torch.bfloat16
+
+        if os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1" and self.rank == 0:
+            logger.info("FSDP2: FP8 AllGather uses native one-byte transport")
+        if os.getenv("FLUX_MXFP8_ALL_GATHER", "0") == "1" and self.rank == 0:
+            logger.info("FSDP2: MXFP8 AllGather transports qdata and E8M0 scales")
 
         fp8_all_reduce = os.getenv("FSDP2_HSDP_FP8_ALL_REDUCE", "").lower()
         if fp8_all_reduce:
@@ -127,19 +193,20 @@ class FSDP2Trainer(BaseWanTrainer):
                     "expected e4m3 or e5m2"
                 )
             block_size = int(os.getenv("FSDP2_HSDP_FP8_BLOCK_SIZE", "0"))
-            if block_size < 0:
-                raise ValueError("FSDP2_HSDP_FP8_BLOCK_SIZE must be non-negative")
+            min_numel = int(os.getenv("FSDP2_HSDP_FP8_MIN_NUMEL", str(1 << 20)))
+            if block_size < 0 or min_numel < 0:
+                raise ValueError("FP8 HSDP block size and minimum tensor size must be non-negative")
             from types import SimpleNamespace
 
             from torch.distributed.fsdp._fully_shard import _fsdp_collectives
 
-            if not hasattr(_fsdp_collectives, "_primus_original_dist"):
+            if not hasattr(_fsdp_collectives, "_original_dist"):
                 original_dist = _fsdp_collectives.dist
                 fp8_dtype = fp8_dtypes[fp8_all_reduce]
                 fp8_limit = torch.finfo(fp8_dtype).max
 
                 def fp8_gradient_all_reduce(tensor, op=dist.ReduceOp.SUM, group=None, async_op=False):
-                    if tensor.dtype != torch.bfloat16 or tensor.numel() < 1 << 20:
+                    if tensor.dtype != torch.bfloat16 or tensor.numel() < min_numel:
                         return original_dist.all_reduce(tensor, op=op, group=group, async_op=async_op)
                     if async_op or op not in (dist.ReduceOp.SUM, dist.ReduceOp.AVG):
                         raise ValueError("FP8 HSDP gradient AllReduce only supports synchronous SUM or AVG")
@@ -154,13 +221,13 @@ class FSDP2Trainer(BaseWanTrainer):
                         blocks = flat
                         absmax = flat.abs().amax().float()
                     original_dist.all_reduce(absmax, op=dist.ReduceOp.MAX, group=group)
-                    scale = (fp8_limit / world_size) / absmax.clamp_min(torch.finfo(torch.float32).eps)
+                    quant_limit = fp8_limit / world_size
+                    scale = quant_limit / absmax.clamp_min(torch.finfo(torch.float32).eps)
                     if block_size:
                         # E8M0-style power-of-two scales make scaling exact.
                         scale = torch.exp2(torch.floor(torch.log2(scale)).clamp(-126, 127))[:, None]
-                    quantized = (blocks * scale).clamp(
-                        -fp8_limit / world_size, fp8_limit / world_size
-                    ).to(fp8_dtype)
+                    scaled = (blocks * scale).clamp(-quant_limit, quant_limit)
+                    quantized = scaled.to(fp8_dtype)
                     original_dist.all_reduce(quantized, op=dist.ReduceOp.SUM, group=group)
                     reduced = (quantized.to(tensor.dtype) / scale).flatten()[: tensor.numel()]
                     tensor.copy_(reduced.view_as(tensor))
@@ -169,11 +236,14 @@ class FSDP2Trainer(BaseWanTrainer):
 
                 fp8_dist = SimpleNamespace(**vars(original_dist))
                 fp8_dist.all_reduce = fp8_gradient_all_reduce
-                _fsdp_collectives._primus_original_dist = original_dist
+                _fsdp_collectives._original_dist = original_dist
                 _fsdp_collectives.dist = fp8_dist
             if self.rank == 0:
                 scaling = f"block-{block_size}" if block_size else "tensor-wise"
-                logger.info(f"FSDP2: HSDP gradient AllReduce uses FP8 {fp8_all_reduce}, {scaling}")
+                logger.info(
+                    f"FSDP2: HSDP gradient AllReduce uses FP8 {fp8_all_reduce}, {scaling}, "
+                    f"min_numel={min_numel}"
+                )
 
         # Keep FP32 parameter/optimizer storage while allowing an explicit
         # reduction-dtype experiment around the FP32-qualified default.
@@ -244,6 +314,7 @@ class FSDP2Trainer(BaseWanTrainer):
                 reshard_after_forward=False if module_path in no_reshard_paths else reshard_after_forward,
                 mp_policy=mp_policy,
             )
+            self._maybe_attach_sdma_all_gather(module, module_path)
             wrapped_paths += 1
         if self.rank == 0 and wrapped_paths:
             logger.info(
@@ -296,6 +367,7 @@ class FSDP2Trainer(BaseWanTrainer):
                         reshard_after_forward=reshard_after_forward,
                         mp_policy=mp_policy,
                     )
+                    self._maybe_attach_sdma_all_gather(module, module_name)
                     if checkpointed_module is not None:
                         seen.add(id(checkpointed_module))
                     wrapped_count += 1
@@ -309,6 +381,7 @@ class FSDP2Trainer(BaseWanTrainer):
             reshard_after_forward=reshard_after_forward,
             mp_policy=mp_policy,
         )
+        self._maybe_attach_sdma_all_gather(wrap_root, "")
         if self.rank == 0:
             logger.info(
                 f"FSDP2: applied fully_shard to '{wrap_target or '<model>'}' "

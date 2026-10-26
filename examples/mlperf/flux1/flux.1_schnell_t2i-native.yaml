@@ -5,6 +5,18 @@ model:
       trainable_modules: dit
       float8_recipe: ${FLUX_FLOAT8_RECIPE}
       float8_gemm_backend: ${FLUX_FP8_GEMM_BACKEND}
+      float8_qkv_wgrad_high_precision: ${FLUX_FP8_QKV_WGRAD_HIGH_PRECISION}
+      mxfp4_recipe: ${FLUX_MXFP4_RECIPE}
+      mxfp4_forward_precision: ${FLUX_MXFP4_FORWARD_PRECISION}
+      mxfp4_backward_precision: ${FLUX_MXFP4_BACKWARD_PRECISION}
+      mxfp8_all_gather: ${FLUX_MXFP8_ALL_GATHER}
+      mxfp4_forward_hadamard: ${FLUX_MXFP4_FORWARD_HADAMARD}
+      mxfp4_bf16_forward_scope: ${FLUX_MXFP4_BF16_FORWARD_SCOPE}
+      mxfp4_selective_forward_scope: ${FLUX_MXFP4_SELECTIVE_FORWARD_SCOPE}
+      mxfp4_activation_residual: ${FLUX_MXFP4_ACTIVATION_RESIDUAL}
+      mxfp4_activation_residual_dtype: ${FLUX_MXFP4_ACTIVATION_RESIDUAL_DTYPE}
+      mxfp4_eval_precision: ${FLUX_MXFP4_EVAL_PRECISION}
+      mxfp4_gradient_stochastic_rounding: ${FLUX_MXFP4_GRADIENT_SR}
       guidance: 1.0
       autoencoder_scale_factor: 0.3611
       autoencoder_shift_factor: 0.1159

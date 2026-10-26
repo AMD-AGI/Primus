@@ -14,10 +14,14 @@ export TORCH_COMPILE_MODE=${TORCH_COMPILE_MODE:-}
 if [[ -n "${TORCHINDUCTOR_CACHE_SEED:-}" && -z "$TORCH_COMPILE_MODE" ]]; then
     export TORCH_COMPILE_MODE=max-autotune-no-cudagraphs
 fi
-export FLUX_FP8_GEMM_BACKEND=selective_flydsl
+if [[ "$FLUX_TRAINING_RECIPE" == "fp8" ]]; then
+  export FLUX_FP8_GEMM_BACKEND=selective_flydsl
+  export PRIMUS_FLUX_REUSE_FP8_INPUT=1
+else
+  export FLUX_FP8_GEMM_BACKEND=
+fi
 export TORCHINDUCTOR_BENCHMARK_FUSION=1
 export PRIMUS_FLUX_AITER_ATOMIC_FP32=0
-export PRIMUS_FLUX_REUSE_FP8_INPUT=1
 
 # Pollara GDR uses DMA-BUF registration; the legacy ibv_reg_mr path fails on
 # these hosts even though the ABI-4 Ionic provider is installed.

@@ -1,15 +1,16 @@
-# FLUX.1-Schnell FP8 MLPerf Training
+# FLUX.1-Schnell MLPerf Training
 
 This recipe runs FLUX.1-Schnell on MI355X GPUs with the in-tree `diffusion`
-backend. The defaults enable tensorwise FP8 and target the MLPerf validation
-loss threshold of `0.586`.
+backend. `FLUX_TRAINING_RECIPE` selects tensorwise FP8 or pure MXFP8 without
+changing the training loop. Both target the MLPerf validation loss threshold
+of `0.586`.
 
 ## Docker image
 
-The launch scripts use `zirui3/primus-v26.3-flux:v0.4` by default.
+The launch scripts use the pinned v26.7 runtime by default:
 
 ```bash
-docker pull zirui3/primus-v26.3-flux:v0.4
+docker pull zirui3/primus-v26.7-flux:v0.1@sha256:082afc328d867f79ab5c4a46bc29c909bd891e068a32506a10768e6a6cc7e7c8
 ```
 
 ## Prepare data
@@ -47,7 +48,21 @@ shape-specific settings:
 | `config_1n_gbs512.sh` | 1 | 64 | 1 | 512 | TorchAO/Inductor | `max-autotune-no-cudagraphs` |
 | `config_1n_gbs1024.sh` | 1 | 32 | 4 | 1024 | selective FlyDSL | default |
 | `config_2n_gbs1024.sh` | 2 | 32 | 2 | 1024 | selective FlyDSL | default |
-| `config_4n_gbs1024.sh` (default) | 4 | 32 | 1 | 1024 | selective FlyDSL | default |
+| `config_4n_gbs1024.sh` (default FP8) | 4 | 32 | 1 | 1024 | selective FlyDSL | default |
+| `config_4n_gbs1024_mxfp8.sh` | 4 | 32 | 1 | 1024 | pure MXFP8 | default |
+| `config_4n_gbs1024_mxfp8_sdma.sh` | 4 | 32 | 1 | 1024 | pure MXFP8 + SDMA AG | default |
+
+The same selection is available without another profile:
+
+```bash
+FLUX_TRAINING_RECIPE=fp8    # default
+FLUX_TRAINING_RECIPE=mxfp8  # pure MXFP8 forward/backward
+FSDP_ALL_GATHER_BACKEND=rccl_sdma  # optional SDMA AllGather
+```
+
+New low-precision recipes should add one case in `config_common.sh` and model
+conversion in the shared FLUX registration instead of creating a separate
+training loop.
 
 The MBS64 profile retains checkpoint ratio `0.25`. All MBS32 profiles use
 ratio `0`, forward-input FP8 reuse, the qualified natural-layout wgrads, and
