@@ -13,6 +13,7 @@ parameter maps one-to-one onto the released checkpoint.
 
 from __future__ import annotations
 
+import copy
 from functools import partial
 
 import pytest
@@ -194,6 +195,56 @@ def test_selective_core_attention_recompute(backend, monkeypatch):
     assert grads_on["decoder.layers.0.self_attention.rel_proj"].abs().sum() > 0
     for name, grad in grads_off.items():
         torch.testing.assert_close(grads_on[name], grad, rtol=1e-5, atol=1e-6, msg=name)
+
+
+def test_deferred_lm_head_wgrad_matches_immediate():
+    """``defer_embedding_wgrad_compute`` on a last pipeline stage: the LM head buffers its input
+    and output gradient, and the schedule's drain gives the immediate weight gradient."""
+    from megatron.core import parallel_state
+    from megatron.core.pipeline_parallel import schedules
+
+    config = inkling_config_from_model_yaml(
+        preset("inkling_small_tiny"), params_dtype=torch.float32, gradient_accumulation_fusion=True
+    )
+    gen = torch.Generator().manual_seed(0)
+    # Two microbatches: Megatron's drain needs at least two buffered entries, as any PP > 1 run has.
+    micro = [
+        (torch.randn(96, 1, config.hidden_size, generator=gen), torch.randint(0, 512, (1, 96), generator=gen))
+        for _ in range(2)
+    ]
+    grads, state = [], None
+    for defer in (False, True):
+        cfg = copy.copy(config)
+        # Megatron only allows this flag with PP > 1; the LM-head buffers do not depend on PP.
+        cfg.defer_embedding_wgrad_compute = defer
+        # A last stage holds no embedding, so the drain's weight lookup returns the LM head.
+        model = build_inkling_model(cfg, vocab_size=512, max_sequence_length=4096, pre_process=False).cuda()
+        if state is None:
+            state = model.state_dict()
+        model.load_state_dict(state, strict=True)
+        model.train()
+        for p in model.parameters():
+            p.main_grad = torch.zeros_like(p, dtype=torch.float32)
+        head = model.output_layer.weight
+
+        embedding_module = schedules.clear_embedding_activation_buffer(cfg, model, is_last_stage=True)
+        for hidden, labels in micro:
+            model.set_input_tensor(hidden.cuda().requires_grad_())
+            model(None, None, None, labels=labels.cuda()).float().mean().backward()
+        if defer:
+            assert embedding_module is model
+            assert len(model.embedding_activation_buffer) == len(model.grad_output_buffer) == 2
+            assert head.main_grad.count_nonzero() == 0
+            schedules.finish_embedding_wgrad_compute(
+                cfg, embedding_module, True, parallel_state.get_tensor_model_parallel_group()
+            )
+            assert not model.embedding_activation_buffer and not model.grad_output_buffer
+        else:
+            assert embedding_module is None and model.embedding_activation_buffer is None
+        grads.append(head.main_grad.clone())
+
+    assert grads[0].count_nonzero() > 0
+    torch.testing.assert_close(grads[1], grads[0], rtol=1e-5, atol=1e-7)
 
 
 @pytest.mark.parametrize("keep_fp32", ["0", "1"])

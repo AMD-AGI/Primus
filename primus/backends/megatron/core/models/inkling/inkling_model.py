@@ -112,6 +112,12 @@ class InklingModel(LanguageModule):
         )
 
         if self.post_process:
+            if config.defer_embedding_wgrad_compute:
+                self.embedding_activation_buffer = []
+                self.grad_output_buffer = []
+            else:
+                self.embedding_activation_buffer = None
+                self.grad_output_buffer = None
             self.output_layer = tensor_parallel.ColumnParallelLinear(
                 config.hidden_size,
                 vocab_size,
@@ -120,6 +126,8 @@ class InklingModel(LanguageModule):
                 bias=False,
                 skip_bias_add=False,
                 gather_output=not parallel_output,
+                embedding_activation_buffer=self.embedding_activation_buffer,
+                grad_output_buffer=self.grad_output_buffer,
                 tp_group=self.pg_collection.tp,
             )
 
