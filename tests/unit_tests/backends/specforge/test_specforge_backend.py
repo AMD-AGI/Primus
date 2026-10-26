@@ -87,7 +87,9 @@ def specforge_checkout(tmp_path):
     root = tmp_path / "SpecForge"
     (root / "configs").mkdir(parents=True)
     (root / "pyproject.toml").write_text("[project]\nname = 'specforge'\n")
-    (root / "configs" / "qwen3.5-4b-dflash.yaml").write_text("model: dummy\n")
+    (root / "configs" / "qwen3.5-4b-dflash.yaml").write_text(
+        "model:\n  draft_model_config: configs/qwen3.5-4b-dflash.json\n"
+    )
     (root / "configs" / "qwen3.5-4b-dflash.json").write_text(
         '{"dflash_config": {"target_layer_ids": [1, 8, 15, 22, 29]}}\n'
     )
@@ -966,13 +968,9 @@ class TestOnlineLaunch:
         issues = validate_online_identity(settings, rank=0, nodes=2)
         assert any("capture_nnodes+trainer_nnodes=3" in item for item in issues)
 
-    def test_sglang_aux_layers_match_qwen35_draft(self, specforge_checkout, tmp_path):
+    def test_sglang_aux_layers_match_draft_json(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path)
         argv = sglang_server_argv(0, online_settings(params))
-        ids = argv[argv.index("--spec-capture-aux-layer-ids") + 1 :]
-        flags = ids[: ids.index("--port")] if "--port" in ids else ids
-        # port comes after layer ids in our argv... actually port is after layer ids.
-        # argv has ... --spec-capture-aux-layer-ids 1 8 15 22 29 --port 30000 ...
         port_at = argv.index("--port")
         layer_at = argv.index("--spec-capture-aux-layer-ids")
         assert argv[layer_at + 1 : port_at] == ["1", "8", "15", "22", "29"]
@@ -986,23 +984,19 @@ class TestOnlineLaunch:
         argv = sglang_server_argv(0, online_settings(params))
         assert "--skip-tokenizer-init" not in argv
 
-    def test_capture_layer_ids_env_overrides_draft_json(self, specforge_checkout, tmp_path):
-        params = self._params(specforge_checkout, tmp_path)
-        settings = online_settings(params, env={"CAPTURE_LAYER_IDS": "2 4"})
-        argv = sglang_server_argv(0, settings)
-        port_at = argv.index("--port")
-        layer_at = argv.index("--spec-capture-aux-layer-ids")
-        assert argv[layer_at + 1 : port_at] == ["2", "4"]
+    def test_capture_layer_ids_ignore_online_and_env_overrides(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path, capture_layer_ids="2,4")
+        settings = online_settings(params, env={"CAPTURE_LAYER_IDS": "9 9"})
+        assert settings["capture_layer_ids"] == (1, 8, 15, 22, 29)
 
-    def test_capture_layer_ids_ignore_other_draft_json(self, specforge_checkout, tmp_path):
+    def test_unreferenced_draft_json_is_not_a_layer_source(self, specforge_checkout, tmp_path):
         other = specforge_checkout / "configs" / "other-draft.json"
         other.write_text('{"dflash_config": {"target_layer_ids": [3, 9]}}\n')
         params = self._params(specforge_checkout, tmp_path)
-        settings = online_settings(params)
-        assert settings["capture_layer_ids"] == (1, 8, 15, 22, 29)
+        assert online_settings(params)["capture_layer_ids"] == (1, 8, 15, 22, 29)
         (specforge_checkout / "configs" / "qwen3.5-4b-dflash.json").unlink()
-        settings = online_settings(params)
-        assert settings["capture_layer_ids"] == (1, 8, 15, 22, 29)
+        with pytest.raises(ValueError, match="draft_model_config"):
+            online_settings(params)
 
     def test_capture_layer_ids_follow_recipe_draft_json(self, specforge_checkout, tmp_path):
         draft = tmp_path / "muse-spark-dflash2.json"
@@ -1020,7 +1014,7 @@ class TestOnlineLaunch:
         assert settings["capture_layer_ids"] == (1, 16, 30, 44, 59)
         assert settings["target_model_path"] == "/models/muse-target"
         params.specforge_online["capture_layer_ids"] = "2,4"
-        assert online_settings(params)["capture_layer_ids"] == (2, 4)
+        assert online_settings(params)["capture_layer_ids"] == (1, 16, 30, 44, 59)
 
     def test_capture_layer_ids_resolve_draft_relative_to_specforge_root(self, specforge_checkout, tmp_path):
         draft = specforge_checkout / "configs" / "muse-spark-dflash2.json"

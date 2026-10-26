@@ -35,8 +35,6 @@ DEFAULT_MOONCAKE_RPC_PORT = 35551
 DEFAULT_MOONCAKE_HTTP_PORT = 35880
 DEFAULT_MOONCAKE_METRICS_PORT = 35903
 DEFAULT_SERVER_PORT = 30000
-# Must match configs/qwen3.5-4b-dflash.json dflash_config.target_layer_ids.
-DEFAULT_CAPTURE_LAYER_IDS = (1, 8, 15, 22, 29)
 DEFAULT_LEASE_TTL_MS = 500
 DEFAULT_PROTOCOL = "tcp"
 LOOPBACK_PREFIXES = ("127.", "0.")
@@ -72,15 +70,6 @@ def expand_device_list(value: str, count: int) -> str:
     except ValueError:
         return ",".join(devices)
     return ",".join(str(start + i) for i in range(int(count)))
-
-
-def parse_layer_ids(value: Any) -> tuple[int, ...]:
-    if value is None or str(value).strip() == "":
-        return DEFAULT_CAPTURE_LAYER_IDS
-    if isinstance(value, (list, tuple)):
-        return tuple(int(v) for v in value)
-    parts = re.split(r"[,\s]+", str(value).strip())
-    return tuple(int(p) for p in parts if p)
 
 
 def parse_extra_args(value: Any) -> list[str]:
@@ -136,10 +125,10 @@ def _model_field_from_specforge_config(params: Any, key: str) -> Optional[str]:
 
 
 def _existing_draft_config(params: Any, env: Optional[Mapping[str, str]] = None) -> Optional[Path]:
-    """Draft JSON the recipe actually trains, not the Qwen example under SpecForge.
+    """Draft JSON named by ``model.draft_model_config``.
 
     Absolute paths are used as written. Relative paths are resolved against the
-    SpecForge checkout, which is how SpecForge itself resolves ``model.draft_model_config``.
+    SpecForge checkout, which is how SpecForge itself resolves that field.
     """
 
     overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
@@ -172,35 +161,24 @@ def layer_ids_from_draft_json(path: Path) -> tuple[int, ...]:
     return tuple(int(v) for v in ids)
 
 
-def resolve_capture_layer_ids(
-    raw: Any, params: Any, env: Optional[Mapping[str, str]] = None
-) -> tuple[int, ...]:
-    """Explicit YAML/env wins; otherwise read the recipe draft JSON.
+def resolve_capture_layer_ids(params: Any, env: Optional[Mapping[str, str]] = None) -> tuple[int, ...]:
+    """Read ``dflash_config.target_layer_ids`` from the recipe draft JSON.
 
-    The recipe's ``model.draft_model_config`` (Hydra file, or an override of it)
-    is the architecture SpecForge trains. ``configs/qwen3.5-4b-dflash.json`` is
-    only the fallback when that file is absent.
+    ``model.draft_model_config`` in the SpecForge Hydra file, or an override of
+    that field, is the only source. Online settings and environment variables
+    do not supply layer ids.
     """
 
-    if raw not in (None, "", "null"):
-        return parse_layer_ids(raw)
     draft = _existing_draft_config(params, env=env)
-    if draft is not None:
-        ids = layer_ids_from_draft_json(draft)
-        if ids:
-            return ids
-    root = resolve_specforge_root(params, env=env)
-    if root is None:
-        return DEFAULT_CAPTURE_LAYER_IDS
-    configs = root / "configs"
-    if not configs.is_dir():
-        return DEFAULT_CAPTURE_LAYER_IDS
-    preferred = configs / "qwen3.5-4b-dflash.json"
-    if preferred.is_file():
-        ids = layer_ids_from_draft_json(preferred)
-        if ids:
-            return ids
-    return DEFAULT_CAPTURE_LAYER_IDS
+    if draft is None:
+        raise ValueError(
+            "model.draft_model_config must point at an existing draft JSON; "
+            "capture layer ids are dflash_config.target_layer_ids in that file"
+        )
+    ids = layer_ids_from_draft_json(draft)
+    if not ids:
+        raise ValueError(f"{draft} has no dflash_config.target_layer_ids")
+    return ids
 
 
 def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
@@ -260,9 +238,7 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         "mooncake_http_port": int(raw.get("mooncake_http_port") or DEFAULT_MOONCAKE_HTTP_PORT),
         "mooncake_metrics_port": int(raw.get("mooncake_metrics_port") or DEFAULT_MOONCAKE_METRICS_PORT),
         "mooncake_lease_ttl_ms": lease_ttl,
-        "capture_layer_ids": resolve_capture_layer_ids(
-            raw.get("capture_layer_ids") or environ.get("CAPTURE_LAYER_IDS"), params, environ
-        ),
+        "capture_layer_ids": resolve_capture_layer_ids(params, environ),
         "target_model_path": str(target),
         "sglang_extra_args": extra,
         "skip_tokenizer_init": _as_bool(
