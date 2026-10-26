@@ -4,6 +4,7 @@ set -euo pipefail
 
 python -c "from sglang.srt.server_args import ServerArgs; assert hasattr(ServerArgs, 'enable_spec_capture')"
 python -c "import specforge"
+python -c "from torch.utils.tensorboard import SummaryWriter"
 
 primus-cli --help >/dev/null
 specforge --help >/dev/null

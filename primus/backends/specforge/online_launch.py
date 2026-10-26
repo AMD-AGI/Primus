@@ -97,6 +97,60 @@ def _positive_int(value: Any, default: int) -> int:
     return int(value)
 
 
+def _as_bool(value: Any, default: bool) -> bool:
+    if value in (None, "", "null"):
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"expected a boolean, got {value!r}")
+
+
+def _model_field_from_specforge_config(params: Any, key: str) -> Optional[str]:
+    """Read one ``model.<key>`` scalar from the SpecForge Hydra YAML, if it is a file."""
+
+    raw = getattr(params, "specforge_config", None)
+    if not raw:
+        return None
+    path = Path(str(raw))
+    if not path.is_file():
+        return None
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    model = data.get("model") if isinstance(data, dict) else None
+    if not isinstance(model, dict):
+        return None
+    value = model.get(key)
+    if value in (None, "", "null"):
+        return None
+    return str(value)
+
+
+def _existing_draft_config(params: Any) -> Optional[Path]:
+    """Draft JSON the recipe actually trains, not the Qwen example under SpecForge."""
+
+    overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
+    candidates = (
+        overrides.get("model.draft_model_config"),
+        _model_field_from_specforge_config(params, "draft_model_config"),
+    )
+    for raw in candidates:
+        if raw in (None, "", "null"):
+            continue
+        path = Path(str(raw))
+        if path.is_file():
+            return path
+    return None
+
+
 def layer_ids_from_draft_json(path: Path) -> tuple[int, ...]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -111,10 +165,20 @@ def layer_ids_from_draft_json(path: Path) -> tuple[int, ...]:
 def resolve_capture_layer_ids(
     raw: Any, params: Any, env: Optional[Mapping[str, str]] = None
 ) -> tuple[int, ...]:
-    """Explicit YAML/env wins; otherwise read SpecForge draft ``target_layer_ids``."""
+    """Explicit YAML/env wins; otherwise read the recipe draft JSON.
+
+    The recipe's ``model.draft_model_config`` (Hydra file, or an override of it)
+    is the architecture SpecForge trains. ``configs/qwen3.5-4b-dflash.json`` is
+    only the fallback when that file is absent.
+    """
 
     if raw not in (None, "", "null"):
         return parse_layer_ids(raw)
+    draft = _existing_draft_config(params)
+    if draft is not None:
+        ids = layer_ids_from_draft_json(draft)
+        if ids:
+            return ids
     root = resolve_specforge_root(params, env=env)
     if root is None:
         return DEFAULT_CAPTURE_LAYER_IDS
@@ -161,6 +225,7 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
     target = (
         raw.get("target_model_path")
         or flatten_overrides(getattr(params, "specforge_overrides", None)).get("model.target_model_path")
+        or _model_field_from_specforge_config(params, "target_model_path")
         or environ.get("TARGET_MODEL")
         or "Qwen/Qwen3.5-4B"
     )
@@ -190,6 +255,14 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         ),
         "target_model_path": str(target),
         "sglang_extra_args": extra,
+        "skip_tokenizer_init": _as_bool(
+            (
+                raw.get("skip_tokenizer_init")
+                if raw.get("skip_tokenizer_init") not in (None, "", "null")
+                else environ.get("SKIP_TOKENIZER_INIT")
+            ),
+            True,
+        ),
         "bind_interface": str(raw.get("bind_interface") or environ.get("PRIMUS_SPECFORGE_BIND_IFACE") or ""),
         "start_timeout_s": int(raw.get("start_timeout_s") or environ.get("START_TIMEOUT_S") or 1800),
         "peer_timeout_s": int(raw.get("peer_timeout_s") or environ.get("PEER_TIMEOUT_S") or 1800),
@@ -474,7 +547,6 @@ def sglang_server_argv(index: int, settings: Mapping[str, Any]) -> list[str]:
         "--model-path",
         str(settings["target_model_path"]),
         "--trust-remote-code",
-        "--skip-tokenizer-init",
         "--tp-size",
         str(settings["server_tp"]),
         "--mem-fraction-static",
@@ -490,6 +562,8 @@ def sglang_server_argv(index: int, settings: Mapping[str, Any]) -> list[str]:
         str(port),
         *list(settings["sglang_extra_args"]),
     ]
+    if settings.get("skip_tokenizer_init", True):
+        argv.insert(argv.index("--trust-remote-code") + 1, "--skip-tokenizer-init")
     return argv
 
 
