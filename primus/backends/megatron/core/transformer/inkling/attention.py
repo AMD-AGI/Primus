@@ -355,7 +355,12 @@ class InklingSelfAttention(Attention):
         if rotary_pos_emb is not None or attention_bias is not None:
             raise ValueError("Inkling attention takes no rotary embedding or external attention bias")
         query, key, value, rel_states = self.get_query_key_value_tensors(hidden_states)
-        core = self.core_attention(
-            query, key, value, rel_states, self.rel_proj, attention_mask=attention_mask
-        )
+        if self.checkpoint_core_attention and self.training:
+            core = tensor_parallel.checkpoint(
+                self.core_attention, False, query, key, value, rel_states, self.rel_proj, attention_mask
+            )
+        else:
+            core = self.core_attention(
+                query, key, value, rel_states, self.rel_proj, attention_mask=attention_mask
+            )
         return self.linear_proj(core)

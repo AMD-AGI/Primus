@@ -153,6 +153,49 @@ def test_init_matches_reference_statistics():
             assert torch.count_nonzero(b) == 0, name
 
 
+@pytest.mark.parametrize("backend", ["eager", "flex"])
+def test_selective_core_attention_recompute(backend, monkeypatch):
+    """``recompute_modules: [core_attn]`` checkpoints the core and leaves loss and gradients unchanged."""
+    from megatron.core import tensor_parallel
+
+    calls = []
+    checkpoint = tensor_parallel.checkpoint
+
+    def counting_checkpoint(function, *args):
+        calls.append(function)
+        return checkpoint(function, *args)
+
+    monkeypatch.setattr(tensor_parallel, "checkpoint", counting_checkpoint)
+    results = []
+    for recompute in (None, "selective"):
+        config = inkling_config_from_model_yaml(
+            preset("inkling_small_tiny"),
+            params_dtype=torch.float32,
+            gradient_accumulation_fusion=False,
+            inkling_attention_backend=backend,
+            recompute_granularity=recompute,
+            recompute_modules=["core_attn"],
+        )
+        torch.manual_seed(0)
+        model = build_inkling_model(config, vocab_size=512, max_sequence_length=4096).cuda()
+        if results:
+            model.load_state_dict(results[0][2], strict=True)
+        model.train()
+        ids = torch.randint(0, 512, (2, 160), generator=torch.Generator().manual_seed(0)).cuda()
+        loss = model(ids, None, None, labels=torch.roll(ids, -1, dims=1)).float().mean()
+        loss.backward()
+        grads = {n: p.grad.clone() for n, p in model.named_parameters()}
+        results.append((loss.item(), grads, model.state_dict()))
+
+    assert [type(f).__name__ for f in calls] == ["InklingCoreAttention"] * 2
+    (loss_off, grads_off, _), (loss_on, grads_on, _) = results
+    torch.testing.assert_close(loss_on, loss_off, rtol=1e-6, atol=0)
+    assert grads_on.keys() == grads_off.keys()
+    assert grads_on["decoder.layers.0.self_attention.rel_proj"].abs().sum() > 0
+    for name, grad in grads_off.items():
+        torch.testing.assert_close(grads_on[name], grad, rtol=1e-5, atol=1e-6, msg=name)
+
+
 @pytest.mark.parametrize("keep_fp32", ["0", "1"])
 def test_fp32_activations_global_scale_storage(keep_fp32, monkeypatch):
     """``global_scale`` is stored in fp32 only with the flag and the ``keep_in_fp32`` contract."""
