@@ -37,37 +37,53 @@ class MochiTrainPipeline:
         self.num_frames = int(num_frames)
         self.sigma_grid = sigma_grid
 
+    def encode_batch(
+        self,
+        *,
+        encoder,
+        text_encoder,
+        batch: dict[str, Any],
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> dict[str, torch.Tensor]:
+        """Frozen VAE and T5 encodings for one raw batch."""
+        if "videos" in batch:
+            pixels = videos_to_tensor(
+                batch["videos"], num_frames=self.num_frames, height=self.height, width=self.width
+            )
+        elif isinstance(batch.get("video"), torch.Tensor):
+            pixels = batch["video"]
+        else:
+            raise ValueError("Mochi training batch must contain 'videos' or 'video'.")
+        prompts = list(batch.get("prompts") or [])
+        if not prompts:
+            raise ValueError("Mochi training batch must contain prompts.")
+        pixels = pixels.to(device=device)
+        encoder.eval()
+        text_encoder.eval()
+        encoder_dtype = next((p.dtype for p in encoder.parameters()), torch.float32)
+        with torch.no_grad():
+            # Fourier features need FP32 inputs; the encoder then runs in its own
+            # dtype, as the Diffusers Mochi VAE does.
+            features = add_fourier_features(pixels.float()).to(dtype=encoder_dtype)
+            latents = encoder(features).sample().to(dtype=dtype)
+            text_hidden, text_mask = text_encoder(prompts)
+        return {
+            "latents": latents,
+            "text_hidden": text_hidden.to(device=device, dtype=dtype),
+            "text_mask": text_mask.to(device=device),
+        }
+
     def compute_loss(self, *, dit, encoder, text_encoder, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         device = next(dit.parameters()).device
         dtype = next(dit.parameters()).dtype
-        if isinstance(batch.get("latents"), torch.Tensor):
-            latents = batch["latents"].to(device=device, dtype=dtype)
-            text_hidden = batch["text_hidden"].to(device=device, dtype=dtype)
-            text_mask = batch["text_mask"].to(device=device)
-        else:
-            if "videos" in batch:
-                pixels = videos_to_tensor(
-                    batch["videos"], num_frames=self.num_frames, height=self.height, width=self.width
-                )
-            elif isinstance(batch.get("video"), torch.Tensor):
-                pixels = batch["video"]
-            else:
-                raise ValueError("Mochi training batch must contain 'videos' or 'video'.")
-            prompts = list(batch.get("prompts") or [])
-            if not prompts:
-                raise ValueError("Mochi training batch must contain prompts.")
-            pixels = pixels.to(device=device)
-            encoder.eval()
-            text_encoder.eval()
-            encoder_dtype = next((p.dtype for p in encoder.parameters()), torch.float32)
-            with torch.no_grad():
-                # Fourier features need FP32 inputs; the encoder then runs in its own
-                # dtype, as the Diffusers Mochi VAE does.
-                features = add_fourier_features(pixels.float()).to(dtype=encoder_dtype)
-                latents = encoder(features).sample().to(dtype=dtype)
-                text_hidden, text_mask = text_encoder(prompts)
-            text_hidden = text_hidden.to(device=device, dtype=dtype)
-            text_mask = text_mask.to(device=device)
+        if not isinstance(batch.get("latents"), torch.Tensor):
+            batch = self.encode_batch(
+                encoder=encoder, text_encoder=text_encoder, batch=batch, device=device, dtype=dtype
+            )
+        latents = batch["latents"].to(device=device, dtype=dtype)
+        text_hidden = batch["text_hidden"].to(device=device, dtype=dtype)
+        text_mask = batch["text_mask"].to(device=device)
 
         noise = torch.randn_like(latents)
         sigma = sample_shifted_logit_normal_sigmas(

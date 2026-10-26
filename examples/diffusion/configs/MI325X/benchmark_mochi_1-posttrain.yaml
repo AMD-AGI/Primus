@@ -45,4 +45,4 @@ modules:
 
       runtime:
         attention_backend: flash_attn_aiter
-        gradient_checkpointing: true
+        gradient_checkpointing: false

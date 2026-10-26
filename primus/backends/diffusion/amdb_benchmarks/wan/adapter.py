@@ -143,6 +143,16 @@ class WanForTraining(GenAIModel, nn.Module):
     def prepare_host_batch(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         return self.train_pipeline.prepare_host_batch(batch, self.model_config)
 
+    def encode_batch(self, batch: Dict[str, Any]) -> Optional[Dict[str, torch.Tensor]]:
+        return self.train_pipeline.encode_batch(
+            components=self.components, batch=batch, model_config=self.model_config
+        )
+
+    def offload_frozen_modules(self) -> None:
+        for component in (self.vae, self.text_encoder, self.image_encoder):
+            if component is not None and hasattr(component, "to"):
+                component.to("cpu")
+
     def forward_train(self, batch: Dict[str, Any], scheduler: Any = None) -> Dict[str, torch.Tensor]:
         if scheduler is None:
             raise ValueError("scheduler must be provided by trainer")

@@ -36,26 +36,16 @@ class SDXLTrainPipeline:
         embeds = [timestep_embedding(time_ids[:, index], 256) for index in range(6)]
         return torch.cat([pooled, torch.cat(embeds, dim=-1)], dim=-1)
 
-    def compute_loss(
-        self, *, dit, autoencoder, text_encoder, batch: dict[str, Any]
+    def encode_batch(
+        self,
+        *,
+        autoencoder,
+        text_encoder,
+        batch: dict[str, Any],
+        device: torch.device,
+        dtype: torch.dtype,
     ) -> dict[str, torch.Tensor]:
-        device = next(dit.parameters()).device
-        dtype = next(dit.parameters()).dtype
-        if isinstance(batch.get("latents"), torch.Tensor):
-            latents = batch["latents"].to(device=device, dtype=dtype)
-            context = batch["context"].to(device=device, dtype=dtype)
-            pooled = batch["pooled"].to(device=device, dtype=dtype)
-            noise = torch.randn_like(latents)
-            timesteps, sigma = sample_amdb_sdxl_sigmas(latents.shape[0], device=device)
-            alpha = self._alphas.to(device=device, dtype=torch.float32)[timesteps].view(-1, 1, 1, 1)
-            noisy = (latents + noise * sigma.view(-1, 1, 1, 1)).to(latents.dtype)
-            added = self._added_vector(pooled).to(dtype=dtype)
-            prediction = dit(noisy, timesteps, context=context, y=added)
-            snr = (alpha / (1.0 - alpha).clamp(min=1e-8)).view(-1)
-            weights = torch.minimum(snr, torch.full_like(snr, self.snr_gamma)) / snr
-            loss = F.mse_loss(prediction.float(), noise.float(), reduction="none")
-            loss = loss.mean(dim=(1, 2, 3)) * weights
-            return {"loss": loss.mean()}
+        """Frozen VAE and CLIP encodings for one raw batch."""
         if "images" in batch:
             pixels = images_to_tensor(batch["images"], height=self.resolution, width=self.resolution)
         elif isinstance(batch.get("pixel_values"), torch.Tensor):
@@ -72,9 +62,24 @@ class SDXLTrainPipeline:
         with torch.no_grad():
             context, pooled = text_encoder(prompts)
             latents = autoencoder.encode(pixels)
-        context = context.to(device=device, dtype=dtype)
-        pooled = pooled.to(device=device, dtype=dtype)
-        latents = latents.to(device=device, dtype=dtype)
+        return {
+            "latents": latents.to(device=device, dtype=dtype),
+            "context": context.to(device=device, dtype=dtype),
+            "pooled": pooled.to(device=device, dtype=dtype),
+        }
+
+    def compute_loss(
+        self, *, dit, autoencoder, text_encoder, batch: dict[str, Any]
+    ) -> dict[str, torch.Tensor]:
+        device = next(dit.parameters()).device
+        dtype = next(dit.parameters()).dtype
+        if not isinstance(batch.get("latents"), torch.Tensor):
+            batch = self.encode_batch(
+                autoencoder=autoencoder, text_encoder=text_encoder, batch=batch, device=device, dtype=dtype
+            )
+        latents = batch["latents"].to(device=device, dtype=dtype)
+        context = batch["context"].to(device=device, dtype=dtype)
+        pooled = batch["pooled"].to(device=device, dtype=dtype)
 
         noise = torch.randn_like(latents)
         timesteps, sigma = sample_amdb_sdxl_sigmas(latents.shape[0], device=device)

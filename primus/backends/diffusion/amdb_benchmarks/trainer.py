@@ -35,9 +35,80 @@ except ImportError:
     wandb = None
 
 
+def _collate_encoded(samples: list[dict]) -> dict:
+    batch = {key: torch.stack([sample[key] for sample in samples]) for key in samples[0] if key != "prompt"}
+    if "prompt" in samples[0]:
+        batch["prompts"] = [sample["prompt"] for sample in samples]
+    return batch
+
+
 class AMDBBenchmarkTrainer(FSDP2Trainer):
+    _encoded_cache = False
+
+    def _cache_encoded_batches(self) -> None:
+        """Run the frozen encoders once over this rank's shard, as AMDiffusionBenchmark does.
+
+        The timed steps then see only the denoiser, so FPS and TFLOPS cover the same
+        work as AMDiffusionBenchmark's cached-latent runs.
+        """
+        core = getattr(self.model, "module", self.model)
+        encode = getattr(core, "encode_batch", None)
+        if not callable(encode):
+            return
+        cache_start = time.time()
+        self.sampler.set_epoch(0)
+        samples: list[dict] = []
+        with torch.no_grad():
+            for batch in self.dataloader:
+                batch = self._prepare_batch(self._prepare_host_batch(batch), self.processing_class)
+                prompts = list(batch.get("prompts") or [])
+                encoded = encode(batch)
+                if encoded is None:
+                    return
+                count = next(iter(encoded.values())).shape[0]
+                for index in range(count):
+                    sample = {key: value[index].detach().cpu() for key, value in encoded.items()}
+                    if index < len(prompts):
+                        sample["prompt"] = prompts[index]
+                    samples.append(sample)
+        if not samples:
+            raise RuntimeError("Latent caching produced no samples for this rank.")
+
+        offload = getattr(core, "offload_frozen_modules", None)
+        if callable(offload):
+            offload()
+        torch.cuda.empty_cache()
+
+        self.sampler = torch.utils.data.distributed.DistributedSampler(
+            samples,
+            num_replicas=1,
+            rank=0,
+            shuffle=self.args.get("shuffle", True),
+        )
+        self.dataloader = torch.utils.data.DataLoader(
+            samples,
+            batch_size=self.per_device_train_batch_size,
+            sampler=self.sampler,
+            collate_fn=_collate_encoded,
+            pin_memory=True,
+            drop_last=bool(self.args.get("dataloader_drop_last", False)),
+        )
+        self._encoded_cache = True
+        if self.rank == 0:
+            logger.info(
+                f"Cached {len(samples)} encoded samples per rank in {time.time() - cache_start:.1f}s; "
+                "frozen encoders offloaded to CPU."
+            )
+
+    def _prepare_batch(self, batch, processor):
+        if self._encoded_cache:
+            processor = None
+        return super()._prepare_batch(batch, processor)
+
     def _prepare_host_batch(self, batch):
         """Decode raw samples on the host before the step timer starts."""
+        if self._encoded_cache:
+            return batch
         processor_hook = getattr(self.processing_class, "prepare_host_batch", None)
         if callable(processor_hook):
             return processor_hook(batch)
@@ -296,6 +367,9 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
         core = getattr(self.model, "module", self.model)
         if hasattr(core, "freeze_except"):
             core.freeze_except()
+
+        if bool(self.args.get("cache_latents", True)) and not self.mlperf_enabled:
+            self._cache_encoded_batches()
 
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)

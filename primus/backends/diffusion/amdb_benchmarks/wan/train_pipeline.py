@@ -115,7 +115,7 @@ class WanFlowMatchTrainPipeline:
 
     def _maybe_prepare_raw_batch(self, components: WanComponents, batch: Dict[str, Any], model_config: Any):
         raw = "videos" in batch or batch.get("prompts") is not None
-        if not raw:
+        if not raw or isinstance(batch.get("latents"), torch.Tensor):
             return batch
         prepared = self.prepare_host_batch(batch, model_config)
         if prepared.get("input_ids") is None:
@@ -165,6 +165,23 @@ class WanFlowMatchTrainPipeline:
         videos_list = [videos_bcthw[i] for i in range(videos_bcthw.shape[0])]
         latents_list = vae.encode(videos_list)
         return torch.stack(latents_list)
+
+    @staticmethod
+    def _amdb_training_latents(vae: Any, latents: torch.Tensor) -> torch.Tensor:
+        """Match AMDiffusionBenchmark's training latent.
+
+        The official Wan VAE returns `(mu - mean) / std`. AMDB's Diffusers VAE
+        sample is the raw posterior, and `prepare_latents` normalizes only the
+        I2V condition. Undo the scale on the sample that enters the flow-matching
+        loss so the MSE is on the same tensor AMDB trains against.
+        """
+        mean = getattr(vae, "mean", None)
+        std = getattr(vae, "std", None)
+        if mean is None or std is None:
+            return latents
+        mean = mean.to(device=latents.device, dtype=latents.dtype).view(1, -1, 1, 1, 1)
+        std = std.to(device=latents.device, dtype=latents.dtype).view(1, -1, 1, 1, 1)
+        return latents * std + mean
 
     @staticmethod
     def _get_dit_patch_size(model_config: Any) -> tuple[int, int, int]:
@@ -249,6 +266,40 @@ class WanFlowMatchTrainPipeline:
             t_seq[:spatial_patches] = 0
             t_expand_list.append(t_seq)
         return torch.stack(t_expand_list)
+
+    def encode_batch(
+        self,
+        *,
+        components: WanComponents,
+        batch: Dict[str, Any],
+        model_config: Any,
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        """Encode a raw I2V batch into the cached tensors consumed by `compute_loss`.
+
+        Returns None when the cached path cannot reproduce the online path
+        (non-AMDB sampling or non-I2V models), so callers keep encoding online.
+        """
+        if not self.cfg.amdb_sampling or getattr(model_config, "model_type", None) != "i2v":
+            return None
+        batch = self._maybe_prepare_raw_batch(components, batch, model_config)
+        device = next(components.dit.parameters()).device
+        dtype = next(components.dit.parameters()).dtype
+        video = batch["video"].to(device=device, dtype=dtype, non_blocking=True)
+        input_ids = batch["input_ids"].to(device=device, non_blocking=True)
+        attention_mask = batch["attention_mask"].to(device=device, non_blocking=True)
+        components.text_encoder.eval()
+        with torch.no_grad():
+            latents = self._amdb_training_latents(
+                components.vae, self._vae_encode(components.vae, video).to(device=device, dtype=dtype)
+            )
+            context = self._encode_prompt(components.text_encoder, input_ids, attention_mask)
+            y_list, clip_fea = self._i2v_condition(components, video, latents)
+        return {
+            "latents": latents,
+            "context": context.to(dtype),
+            "y": torch.stack(y_list).to(dtype),
+            "clip_fea": clip_fea.to(dtype),
+        }
 
     def compute_loss(
         self,
@@ -338,6 +389,8 @@ class WanFlowMatchTrainPipeline:
 
         with torch.no_grad():
             input_latents = self._vae_encode(components.vae, video).to(device=device, dtype=dtype)
+            if self.cfg.amdb_sampling:
+                input_latents = self._amdb_training_latents(components.vae, input_latents)
         patch_size = self._get_dit_patch_size(model_config)
         input_latents, original_latent_spatial_size = self._pad_latents_for_dit(
             input_latents, patch_size=patch_size

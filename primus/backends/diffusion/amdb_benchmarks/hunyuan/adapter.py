@@ -80,6 +80,22 @@ class HunyuanVideoForTraining(GenAIModel):
             batch, height=pipeline.height, width=pipeline.width, num_frames=pipeline.num_frames
         )
 
+    def encode_batch(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
+        param = next(self.dit.parameters())
+        return self.train_pipeline.encode_batch(
+            text_encoder=self.text_encoder,
+            vae=getattr(self, "vae", None),
+            batch=batch,
+            device=param.device,
+            dtype=param.dtype,
+        )
+
+    def offload_frozen_modules(self) -> None:
+        self.text_encoder.to("cpu")
+        vae = getattr(self, "vae", None)
+        if vae is not None:
+            vae.to("cpu")
+
     def forward_train(self, batch: dict[str, Any], scheduler: Any = None) -> dict[str, torch.Tensor]:
         del scheduler
         return self.train_pipeline.compute_loss(

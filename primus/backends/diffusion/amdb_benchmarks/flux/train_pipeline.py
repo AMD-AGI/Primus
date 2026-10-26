@@ -111,6 +111,27 @@ class FluxFlowMatchTrainPipeline:
             clip_encodings = clip(prompts).to(device=device, dtype=dtype)
         return labels, t5_encodings, clip_encodings
 
+    def encode_batch(
+        self,
+        *,
+        batch: dict[str, Any],
+        autoencoder: torch.nn.Module | None,
+        t5_encoder: torch.nn.Module | None,
+        clip_encoder: torch.nn.Module | None,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> dict[str, torch.Tensor]:
+        """Frozen AE, T5, and CLIP encodings for one raw batch."""
+        labels, t5_encodings, clip_encodings = self._prepare_raw(
+            batch=batch,
+            autoencoder=autoencoder,
+            t5_encoder=t5_encoder,
+            clip_encoder=clip_encoder,
+            device=device,
+            dtype=dtype,
+        )
+        return {"latents": labels, "t5_encodings": t5_encodings, "clip_encodings": clip_encodings}
+
     def compute_loss(
         self,
         *,

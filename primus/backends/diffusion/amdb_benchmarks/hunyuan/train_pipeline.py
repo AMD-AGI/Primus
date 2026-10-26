@@ -65,11 +65,16 @@ class HunyuanTrainPipeline:
         scale = float(getattr(vae.config, "scaling_factor", 1.0))
         return (latents * scale).to(dtype=dtype)
 
-    def compute_loss(
-        self, *, dit, text_encoder, vae: torch.nn.Module | None = None, batch: dict[str, Any]
+    def encode_batch(
+        self,
+        *,
+        text_encoder,
+        vae: torch.nn.Module | None,
+        batch: dict[str, Any],
+        device: torch.device,
+        dtype: torch.dtype,
     ) -> dict[str, torch.Tensor]:
-        device = next(dit.parameters()).device
-        dtype = next(dit.parameters()).dtype
+        """Frozen causal-3D VAE and LLaMA/CLIP encodings for one raw batch."""
         latents = batch.get("latents")
         if not isinstance(latents, torch.Tensor):
             if vae is None:
@@ -78,18 +83,27 @@ class HunyuanTrainPipeline:
         prompts = list(batch.get("prompts") or [])
         if not prompts:
             raise ValueError("HunyuanVideo training batch must contain prompts.")
-        latents = latents.to(device=device, dtype=dtype)
-        if isinstance(batch.get("text_states"), torch.Tensor):
-            text_states = batch["text_states"].to(device=device, dtype=dtype)
-            text_mask = batch["text_mask"].to(device=device)
-            text_states_2 = batch["text_states_2"].to(device=device, dtype=dtype)
-        else:
-            text_encoder.eval()
-            with torch.no_grad():
-                text_states, text_mask, text_states_2 = text_encoder(prompts)
-            text_states = text_states.to(device=device, dtype=dtype)
-            text_mask = text_mask.to(device=device)
-            text_states_2 = text_states_2.to(device=device, dtype=dtype)
+        text_encoder.eval()
+        with torch.no_grad():
+            text_states, text_mask, text_states_2 = text_encoder(prompts)
+        return {
+            "latents": latents.to(device=device, dtype=dtype),
+            "text_states": text_states.to(device=device, dtype=dtype),
+            "text_mask": text_mask.to(device=device),
+            "text_states_2": text_states_2.to(device=device, dtype=dtype),
+        }
+
+    def compute_loss(
+        self, *, dit, text_encoder, vae: torch.nn.Module | None = None, batch: dict[str, Any]
+    ) -> dict[str, torch.Tensor]:
+        device = next(dit.parameters()).device
+        dtype = next(dit.parameters()).dtype
+        if not isinstance(batch.get("text_states"), torch.Tensor):
+            batch = self.encode_batch(text_encoder=text_encoder, vae=vae, batch=batch, device=device, dtype=dtype)
+        latents = batch["latents"].to(device=device, dtype=dtype)
+        text_states = batch["text_states"].to(device=device, dtype=dtype)
+        text_mask = batch["text_mask"].to(device=device)
+        text_states_2 = batch["text_states_2"].to(device=device, dtype=dtype)
 
         noise = torch.randn_like(latents)
         sigma = sample_shifted_logit_normal_sigmas(
