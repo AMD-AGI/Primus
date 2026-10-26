@@ -4,14 +4,20 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from primus.backends.nemo_automodel.nemo_automodel_adapter import NemoAutomodelAdapter
-from primus.backends.nemo_automodel.nemo_automodel_pretrain_trainer import (
-    NemoAutomodelPretrainTrainer,
+"""Deprecated alias of :mod:`primus.backends.automodel`, kept so imports of the
+original module paths keep working. Configs with ``framework: nemo_automodel``
+are mapped to ``automodel`` by the config parser, not here.
+"""
+
+import warnings
+
+from primus.backends.automodel import AutoModelAdapter, AutoModelPretrainTrainer
+
+warnings.warn(
+    "primus.backends.nemo_automodel is deprecated; import primus.backends.automodel instead.",
+    DeprecationWarning,
+    stacklevel=2,
 )
-from primus.core.backend.backend_registry import BackendRegistry
 
-# Register adapter
-BackendRegistry.register_adapter("nemo_automodel", NemoAutomodelAdapter)
-
-# Register trainer
-BackendRegistry.register_trainer_class(NemoAutomodelPretrainTrainer, "nemo_automodel")
+NemoAutomodelAdapter = AutoModelAdapter
+NemoAutomodelPretrainTrainer = AutoModelPretrainTrainer
