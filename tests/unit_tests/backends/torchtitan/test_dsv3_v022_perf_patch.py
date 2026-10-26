@@ -13,6 +13,7 @@ GroupedExperts.forward; EP dispatch/combine hooks stay in the compiled block.
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -167,6 +168,87 @@ def test_unified_compile_breaks_at_grouped_experts_once(monkeypatch):
     ]
     assert torch._dynamo.config.capture_scalar_outputs is True
     assert disable_calls == [(original_forward, False)]
+
+
+def _tiny_deepseek(seed=0):
+    from torchtitan.models.deepseek_v3 import DeepSeekV3ModelArgs
+    from torchtitan.models.deepseek_v3.model.model import DeepSeekV3Model
+    from torchtitan.models.moe import MoEArgs
+
+    model_args = DeepSeekV3ModelArgs(
+        vocab_size=128,
+        dim=64,
+        inter_dim=128,
+        moe_inter_dim=32,
+        n_layers=2,
+        n_dense_layers=1,
+        n_heads=2,
+        moe_args=MoEArgs(
+            num_experts=4,
+            num_shared_experts=1,
+            top_k=2,
+            score_func="softmax",
+            score_before_experts=False,
+        ),
+        q_lora_rank=0,
+        kv_lora_rank=32,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=16,
+        v_head_dim=16,
+        max_seq_len=64,
+    )
+    model_args.moe_impl = "standard"
+    torch.manual_seed(seed)
+    device = torch.device("cuda")
+    with device:
+        model = DeepSeekV3Model(model_args)
+    with torch.no_grad():
+        model.init_weights(buffer_device=device)
+    return model, model_args
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="MoE router histc requires a GPU")
+def test_unified_compile_compiles_checkpoint_wrapped_moe_block(monkeypatch):
+    import torchtitan.models.moe.moe as moe_module
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+        CheckpointWrapper,
+    )
+    from torchtitan.config.job_config import ActivationCheckpoint
+    from torchtitan.distributed.activation_checkpoint import apply_ac
+
+    captured_ops = []
+
+    def counting_backend(gm, example_inputs):
+        captured_ops.append({getattr(n.target, "__name__", str(n.target)) for n in gm.graph.nodes})
+        return gm.forward
+
+    monkeypatch.setattr(torch._dynamo.config, "capture_scalar_outputs", False)
+    with patch.object(moe_module.GroupedExperts, "forward", moe_module.GroupedExperts.forward):
+        reference, model_args = _tiny_deepseek()
+        model, _ = _tiny_deepseek()
+        tokens = torch.randint(0, model_args.vocab_size, (2, 16), device="cuda")
+        expected = reference(tokens)
+
+        apply_ac(model, ActivationCheckpoint(mode="full"), model_compile_enabled=True)
+        torch._dynamo.reset()
+        try:
+            dsv3_patch._apply_unified_compile(
+                model,
+                SimpleNamespace(backend=counting_backend),
+                ep_enabled=False,
+            )
+            out = model(tokens)
+            out.float().pow(2).mean().backward()
+        finally:
+            torch._dynamo.reset()
+
+    assert any(
+        "topk" in ops for ops in captured_ops
+    ), "MoE block fell back to eager under activation checkpointing"
+    torch.testing.assert_close(out, expected)
+    moe_block = model.layers["1"]
+    assert isinstance(moe_block, CheckpointWrapper)
+    assert isinstance(moe_block._checkpoint_wrapped_module, torch._dynamo.eval_frame.OptimizedModule)
 
 
 def test_compile_patch_rebinds_source_and_deepseek_alias(monkeypatch):
