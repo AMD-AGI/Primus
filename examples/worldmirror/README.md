@@ -15,6 +15,12 @@ These pieces stay in Primus and are applied in memory when training starts:
 - a float32 cast before `gsplat` rasterization
 - a boolean depth-confidence mask in the render depth loss
 - a scalar aspect-ratio sample, so the batch sampler works on NumPy 2
+- a per-step log line with step time and throughput, for example `[Primus:WorldMirror] step=49 step_time_s=2.630 images_per_s=54.75 images_per_gpu=18`. `step_time_s` runs from the end of the previous step to the end of this one, so it includes data loading. `images_per_s` counts images on all GPUs. Both values also appear on the `Step:` progress bar.
+
+Each example config sets two environment variables in its `env:` block:
+
+- `MIOPEN_FIND_MODE: "5"`, MIOpen's default find mode. The Primus default of `2` never stores tuned convolution solvers, so World Mirror's changing image sizes keep paying CPU-side solver lookup and run slower kernels. Mode 5 stores results in `MIOPEN_USER_DB_PATH`, which defaults to `${PRIMUS_CACHE_ROOT}/miopen_db`. With an empty database, the first run tunes each new convolution shape and is several times slower. Keep that directory across runs.
+- `PYTORCH_HIP_ALLOC_CONF: "expandable_segments:True"`. With changing image sizes, the default caching allocator frees and reallocates memory on every step.
 
 Before training, the World Mirror install script installs the packages in `runner/helpers/hooks/train/posttrain/worldmirror/requirements-worldmirror.txt` and builds `gsplat` when it is not already installed. The build copies `third_party/HunyuanWorld-Mirror-rocm/submodules/gsplat` to a temporary directory, applies the ROCm compile fixes there, and fetches the GLM headers. The submodule checkout is left unchanged. The first launch compiles `gsplat`, which takes several minutes. Set `PYTORCH_ROCM_ARCH` (for example `gfx950` on MI355X) to build for one GPU architecture.
 

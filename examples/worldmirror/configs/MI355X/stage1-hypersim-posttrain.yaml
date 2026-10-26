@@ -3,6 +3,16 @@ user_name: ${PRIMUS_USER:local}
 exp_name: ${PRIMUS_EXP_NAME:worldmirror-stage1-hypersim}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+env:
+  # The Primus default MIOPEN_FIND_MODE=2 never saves tuned convolution
+  # solvers. World Mirror's changing image sizes then keep paying CPU-side
+  # solver lookup and run slower kernels. Mode 5 is MIOpen's default and caches
+  # results in MIOPEN_USER_DB_PATH; the first run with an empty cache is slow.
+  MIOPEN_FIND_MODE: "5"
+  # Changing image sizes fragment the caching allocator, which then frees and
+  # reallocates memory every step. Expandable segments avoid those hipFree stalls.
+  PYTORCH_HIP_ALLOC_CONF: "expandable_segments:True"
+
 platform:
   config: platform_local.yaml
 

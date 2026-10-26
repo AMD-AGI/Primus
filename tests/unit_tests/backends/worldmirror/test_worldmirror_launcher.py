@@ -7,9 +7,11 @@
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 from primus.backends.worldmirror.runtime import install_gsplat
 from primus.backends.worldmirror.worldmirror_trainer import (
+    attach_step_time_callback,
     build_hydra_overrides,
     primus_hydra_overrides,
     require_stage2_checkpoint,
@@ -162,6 +164,20 @@ def test_resolve_repo_uses_explicit_path(tmp_path):
 def test_resolve_repo_rejects_a_directory_without_launch(tmp_path):
     with pytest.raises(FileNotFoundError, match="training/launch.py"):
         resolve_worldmirror_repo(str(tmp_path))
+
+
+def test_step_time_callback_is_first_so_the_progress_line_sees_it():
+    cfg = OmegaConf.create(
+        {
+            "callbacks": [
+                {"_target_": "training.utils.callbacks.StepBasedProgressBar"},
+            ]
+        }
+    )
+    OmegaConf.set_struct(cfg, True)
+    attach_step_time_callback(cfg)
+    assert cfg.callbacks[0]._target_ == "primus.backends.worldmirror.step_log.StepTimeCallback"
+    assert cfg.callbacks[1]._target_ == "training.utils.callbacks.StepBasedProgressBar"
 
 
 def test_resolve_repo_uses_third_party_submodule(tmp_path, monkeypatch):

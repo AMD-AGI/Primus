@@ -145,6 +145,24 @@ def primus_hydra_overrides(overrides: list[str]) -> list[str]:
     return [f"hydra.searchpath=[file://{search_path}]", *overrides]
 
 
+def attach_step_time_callback(cfg) -> None:
+    """Put step time and throughput on the World Mirror progress line.
+
+    The callback is first so the progress bar prints this step's numbers,
+    not the previous step's.
+    """
+    from omegaconf import OmegaConf
+
+    OmegaConf.set_struct(cfg, False)
+    if cfg.get("callbacks") is not None:
+        OmegaConf.set_struct(cfg.callbacks, False)
+    callback = OmegaConf.create({"_target_": "primus.backends.worldmirror.step_log.StepTimeCallback"})
+    if cfg.get("callbacks") is None:
+        cfg.callbacks = [callback]
+        return
+    cfg.callbacks.insert(0, callback)
+
+
 def launch_worldmirror(repo: Path, overrides: list[str]) -> None:
     """Compose the World Mirror Hydra config and run its Lightning trainer."""
     repo_str = str(repo)
@@ -166,6 +184,8 @@ def launch_worldmirror(repo: Path, overrides: list[str]) -> None:
     config_dir = str(repo / "training" / "configs")
     with initialize_config_dir(config_dir=config_dir, version_base="1.3"):
         cfg = compose(config_name="train.yaml", overrides=primus_hydra_overrides(overrides))
+
+    attach_step_time_callback(cfg)
 
     from training.launch import train as worldmirror_train
 
