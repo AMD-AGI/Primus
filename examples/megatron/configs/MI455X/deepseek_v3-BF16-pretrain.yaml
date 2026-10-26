@@ -1,0 +1,124 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# DeepSeek-V3 MoE proxy pretraining on 1 node of 4x MI455X (gfx1250).
+#
+# Full DeepSeek-V3 layer shapes (MLA, hidden 7168), 4 MoE layers of 128 experts,
+# EP4, no MTP. Attention and the expert grouped GEMMs run on Primus-Turbo's
+# FlyDSL kernels; DeepEP is off.
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v3-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:deepseek_v3}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_DeepSeek_Pretrain"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # balanced expert load for benchmarking
+      moe_router_force_load_balancing: true
+
+      # hyper parameters
+      train_iters: 10
+      micro_batch_size: 2
+      global_batch_size: 64
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # proxy size
+      num_layers: 4
+      moe_layer_freq: 1
+      num_experts: 128
+      moe_router_topk: 8
+      mtp_num_layers: 0
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:4}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      # the FlyDSL grouped GEMM's wgrad cannot accumulate into main_grad
+      gradient_accumulation_fusion: false
+      pp_warmup: true
+
+      # data
+      mock_data: true
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+
+      moe_use_legacy_grouped_gemm: false
+      # MLA
+      multi_latent_attention: true
+
+      # optimizer
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      # rope fusion
+      enable_experimental: true
+      apply_rope_fusion: true
+
+      # recompute: off
+      recompute_granularity: null
+      recompute_layer_ids: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # primus-turbo
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_gemm: true
+      turbo_grouped_gemm_backend: bf16:flydsl
+      use_turbo_rms_norm: true
+      use_turbo_deepep: false
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      turbo_sync_free_moe_stage: 1
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+
+      # cross entropy
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

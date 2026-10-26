@@ -7,6 +7,7 @@
 """CPU checks that the ZAYA1 mixer uses the implemented affine, not the paper affine."""
 
 import math
+import sys
 
 import pytest
 import torch
@@ -19,6 +20,8 @@ from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
     ZayaMoE,
     ZayaRouter,
     ZayaStack,
+    _align_fp8_leading,
+    _unpad_fp8_leading,
     layer_kinds,
 )
 
@@ -246,3 +249,55 @@ def test_explicit_zaya_layers_override_the_alternation():
     assert kinds == ["a", "a", "m", "m"]
     with pytest.raises(ValueError):
         layer_kinds(3, ["a", "m"])
+
+
+def test_fp8_uses_te_linears_for_cca_and_experts_only(monkeypatch):
+    zaya_modules = sys.modules["primus.backends.megatron.core.models.zaya1.zaya1_modules"]
+
+    class FakeFp8(nn.Linear):
+        def __init__(self, in_features, out_features, bias, config):
+            super().__init__(in_features, out_features, bias=bias)
+            self.is_fp8 = True
+
+    monkeypatch.setattr(zaya_modules, "_Fp8Linear", FakeFp8)
+    cfg = _cfg(
+        fp8="hybrid",
+        hidden_size=32,
+        num_attention_heads=2,
+        num_query_groups=2,
+        kv_channels=16,
+        ffn_hidden_size=32,
+        moe_ffn_hidden_size=32,
+        num_moe_experts=2,
+        zaya_mlp_expansion=16,
+        num_layers=2,
+    )
+    cca = zaya_modules.CCA(cfg)
+    for name in ("linear_q", "linear_k", "val_proj1", "val_proj2", "o_proj"):
+        assert getattr(cca, name).is_fp8
+    moe = zaya_modules.ZayaMoE(cfg)
+    expert = moe.local_experts[0]
+    assert expert.linear_fc1.is_fp8 and expert.linear_fc2.is_fp8
+    assert type(moe.router.down_proj) is nn.Linear
+    router_linears = [stage for stage in moe.router.router_mlp if isinstance(stage, nn.Linear)]
+    assert router_linears
+    assert all(type(stage) is nn.Linear for stage in router_linears)
+
+
+def test_fp8_leading_pad_rounds_token_count_up_to_8():
+    hidden = torch.arange(4 * 16, dtype=torch.float32).reshape(4, 16)
+    padded, meta = _align_fp8_leading(hidden)
+    assert padded.shape == (8, 16)
+    assert torch.count_nonzero(padded[4:]) == 0
+    restored = _unpad_fp8_leading(padded + 1, meta)
+    assert restored.shape == hidden.shape
+    torch.testing.assert_close(restored, hidden + 1)
+    already, no_meta = _align_fp8_leading(torch.zeros(8, 16))
+    assert no_meta is None and already.shape == (8, 16)
+
+
+def test_fp8_rejects_unaligned_gemm():
+    # hidden 24 is not a multiple of 16, so the first CCA projection is rejected
+    # before Transformer Engine is imported.
+    with pytest.raises(ValueError, match="divisible by 16"):
+        CCA(_cfg(fp8="hybrid", hidden_size=24))

@@ -9,6 +9,10 @@
 Per-sublayer residual scaling has the form ``(x + bias) * scale``. CCA uses a
 raw key temperature, and the router is a vector EDA router with optional
 mixture-of-depths. Tensors use Megatron layout ``[sequence, batch, hidden]``.
+
+When ``config.fp8`` is set, CCA projections and expert SwiGLU GEMMs are
+Transformer Engine linears under one FP8 autocast. The router, the depthwise
+convolutions, RMSNorm, and attention stay in BF16 or FP32.
 """
 
 from __future__ import annotations
@@ -48,7 +52,82 @@ def _init_weight(tensor: torch.Tensor, config) -> None:
         nn.init.normal_(tensor, mean=0.0, std=0.02)
 
 
-def _linear(in_features: int, out_features: int, bias: bool, config) -> nn.Linear:
+def _fp8_requested(config) -> bool:
+    return bool(getattr(config, "fp8", None))
+
+
+def _align_fp8_leading(hidden: torch.Tensor):
+    """Pad the token axis so the leading-dimension product is a multiple of 8."""
+    leading = 1
+    for size in hidden.shape[:-1]:
+        leading *= int(size)
+    pad = (8 - leading % 8) % 8
+    if pad == 0:
+        return hidden, None
+    flat = hidden.reshape(leading, hidden.shape[-1])
+    return F.pad(flat, (0, 0, 0, pad)), (hidden.shape, leading)
+
+
+def _unpad_fp8_leading(output: torch.Tensor, meta) -> torch.Tensor:
+    if meta is None:
+        return output
+    shape, leading = meta
+    return output[:leading].reshape(*shape[:-1], output.shape[-1])
+
+
+class _Fp8Linear(nn.Module):
+    """TE linear whose forward returns a tensor, matching ``nn.Linear``.
+
+    Megatron's ``TELinear`` always returns ``(output, bias)``. CCA and the
+    SwiGLU experts call the projection as a single tensor. ``parallel_mode``
+    is ``duplicated`` because this port is data-parallel only.
+    """
+
+    def __init__(self, in_features: int, out_features: int, bias: bool, config) -> None:
+        super().__init__()
+        from megatron.core.extensions.transformer_engine import TELinear
+
+        init = getattr(config, "init_method", None)
+        if not callable(init):
+
+            def init(tensor):
+                nn.init.normal_(tensor, mean=0.0, std=getattr(config, "init_method_std", 0.02))
+
+        self.linear = TELinear(
+            in_features,
+            out_features,
+            parallel_mode="duplicated",
+            config=config,
+            init_method=init,
+            bias=bias,
+            skip_bias_add=False,
+            skip_weight_param_allocation=False,
+        )
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        # TE FP8 requires the product of every dimension except the last to be
+        # divisible by 8. Expert slices often are not: a top-1 route of 128
+        # tokens across 16 experts can hand one expert 4 tokens.
+        flat, meta = _align_fp8_leading(hidden)
+        output, _ = self.linear(flat)
+        return _unpad_fp8_leading(output, meta)
+
+
+def _linear(in_features: int, out_features: int, bias: bool, config, *, fp8: bool = True) -> nn.Module:
+    """BF16 ``nn.Linear``, or a Transformer Engine linear when FP8 training is on.
+
+    The router passes ``fp8=False``. Its last projection scores 17 classes
+    (16 experts plus the mixture-of-depths skip), which is not a multiple of
+    16, and the router softmax already runs in fp32.
+    """
+    if fp8 and _fp8_requested(config):
+        if in_features % 16 or out_features % 16:
+            raise ValueError(
+                "ZAYA1 FP8 GEMMs require in and out features divisible by 16, "
+                f"got {in_features} -> {out_features}. The ZAYA1-8B shape "
+                "(hidden 2048) satisfies this. The router stays in BF16."
+            )
+        return _Fp8Linear(in_features, out_features, bias, config)
     layer = nn.Linear(in_features, out_features, bias=bias)
     _init_weight(layer.weight, config)
     if layer.bias is not None:
@@ -289,16 +368,16 @@ class ZayaRouter(nn.Module):
         self.balance_beta2 = float(getattr(config, "zaya_balance_beta2", 0.999))
         self.balance_wd = float(getattr(config, "zaya_balance_wd", 0.0))
 
-        self.down_proj = _linear(self.hidden_size, self.width, True, config)
+        self.down_proj = _linear(self.hidden_size, self.width, True, config, fp8=False)
         self.rmsnorm_eda = RMSNorm(self.width, eps)
         if self.use_eda:
             self.router_states_scale = nn.Parameter(torch.ones(self.width))
         self.router_mlp = nn.Sequential(
-            _linear(self.width, self.width, True, config),
+            _linear(self.width, self.width, True, config, fp8=False),
             nn.GELU(),
-            _linear(self.width, self.width, True, config),
+            _linear(self.width, self.width, True, config, fp8=False),
             nn.GELU(),
-            _linear(self.width, self.num_scored, False, config),
+            _linear(self.width, self.num_scored, False, config, fp8=False),
         )
         self.register_buffer("balancing_biases", torch.zeros(self.num_scored), persistent=True)
         self.register_buffer("balance_m", torch.zeros(self.num_scored), persistent=True)
@@ -447,6 +526,7 @@ class ZayaStage(nn.Module):
 class ZayaStack(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
+        self.config = config
         kinds = layer_kinds(int(config.num_layers), getattr(config, "zaya_layers", None))
         self.layers = nn.ModuleList(ZayaStage(config, kind, i) for i, kind in enumerate(kinds))
         eps = float(getattr(config, "layernorm_epsilon", 1e-5))
@@ -454,15 +534,34 @@ class ZayaStack(nn.Module):
         use_scale = bool(getattr(config, "scale_residual_merge", True))
         self.res_scale = ResidualScaling(int(config.hidden_size), True) if use_scale else None
 
+    def _fp8_context(self):
+        """One FP8 autocast for the whole stack.
+
+        The recipe comes from ``config.fp8_recipe``. Delayed scaling must not
+        enter and exit the context per stage, or the amax history is reduced
+        incorrectly, so the context wraps every stage. This port does not keep
+        the first or last stage in BF16. Import at call time so Primus's FP8
+        patch, which replaces ``megatron.core.fp8_utils.get_fp8_context``
+        before training, is the function that runs.
+        """
+        from contextlib import nullcontext
+
+        if not _fp8_requested(self.config):
+            return nullcontext()
+        from megatron.core.fp8_utils import get_fp8_context
+
+        return get_fp8_context(self.config)
+
     def forward(self, hidden_states, position_ids, attention_mask):
-        residual = None
-        prev_router = None
-        for layer in self.layers:
-            hidden_states, residual, prev_router = layer(
-                hidden_states, residual, prev_router, position_ids, attention_mask
-            )
-        target_dtype = hidden_states.dtype
-        if self.res_scale is not None:
-            residual, hidden_states = self.res_scale(residual, hidden_states)
-        merged = merge_residual(residual, hidden_states)
-        return self.final_norm(merged.to(dtype=target_dtype))
+        with self._fp8_context():
+            residual = None
+            prev_router = None
+            for layer in self.layers:
+                hidden_states, residual, prev_router = layer(
+                    hidden_states, residual, prev_router, position_ids, attention_mask
+                )
+            target_dtype = hidden_states.dtype
+            if self.res_scale is not None:
+                residual, hidden_states = self.res_scale(residual, hidden_states)
+            merged = merge_residual(residual, hidden_states)
+            return self.final_norm(merged.to(dtype=target_dtype))

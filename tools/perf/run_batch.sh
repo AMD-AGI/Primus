@@ -132,8 +132,14 @@
 #     batch_gpu_<stamp>.txt         - rocm-smi / amd-smi clocks, power, topology.
 #     batch_stack_<stamp>.txt       - image digest and ID, ROCm/HIP and library
 #                                     versions from inside the container.
-#     batch_host_<stamp>.txt        - CPU governor, NUMA balancing, THP, IOMMU,
-#                                     amdgpu driver, network interfaces.
+#     batch_host_<stamp>.txt        - the platform: server model and BIOS, CPU
+#                                     topology, frequency and idle states,
+#                                     memory and DIMMs, GPU memory, power cap,
+#                                     partition, clocks and VBIOS, host GPU
+#                                     driver, RDMA NICs, OS, kernel command
+#                                     line, NUMA balancing, THP, IOMMU and the
+#                                     network interfaces; the raw lscpu,
+#                                     numactl and sysfs data behind them.
 #     batch_manifest_<stamp>/       - the image's /workspace/.manifest (build
 #                                     recipe, dpkg and pip lists), if it has one.
 #     run_batch_<stamp>.sh          - a copy of THIS script as it was run,
@@ -376,6 +382,7 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# Image ID     : $(perf_image_id "${DOCKER_IMAGE:-}")"
     echo "# ROCm (host)  : $(perf_rocm_version)"
     echo "# ROCm (image) : ${PERF_CONTAINER_ROCM:-unknown}  (HIP ${PERF_CONTAINER_HIP:-unknown})"
+    echo "# System       : ${PERF_SYSTEM_DESCRIPTION:-unknown}"
     echo "# Reps/config  : $NUM_REPS"
     echo "# TRAIN_STEPS  : ${TRAIN_STEPS:-<unset; use YAML>}"
     echo "# Run limits   : $(perf_run_limits_text)"

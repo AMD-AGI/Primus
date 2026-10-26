@@ -96,8 +96,11 @@
 #     batch_gpu_<stamp>.txt         - GPU state of the node running this script.
 #     batch_stack_<stamp>.txt       - image digest and ID, ROCm/HIP and library
 #                                     versions from inside the container.
-#     batch_host_<stamp>.txt        - every node's CPU governor, NUMA balancing,
-#                                     THP, IOMMU, amdgpu driver and interfaces.
+#     batch_host_<stamp>.txt        - every node's platform: server model and
+#                                     BIOS, CPU, memory, GPU and driver, RDMA
+#                                     NICs, OS and host settings, and the raw
+#                                     data behind them; then the settings that
+#                                     differ between nodes, if any.
 #     batch_manifest_<stamp>/       - the image's /workspace/.manifest, if any.
 #     run_batch_multinode_<stamp>.sh - a copy of THIS script as it was run.
 #     results.csv, results.json     - every log in RESULT_DIR parsed by
@@ -378,6 +381,8 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# Image ID              : ${PERF_IMAGE_ID:-$(perf_image_id "${DOCKER_IMAGE:-}")}  ($PERF_IMAGE_CHECK)"
     echo "# ROCm (host)           : $(perf_rocm_version)"
     echo "# ROCm (image)          : ${PERF_CONTAINER_ROCM:-unknown}  (HIP ${PERF_CONTAINER_HIP:-unknown})"
+    echo "# System                : ${PERF_SYSTEM_DESCRIPTION:-unknown}"
+    echo "# Host check            : ${PERF_HOST_CHECK:-not checked}"
     echo "# Launcher mode         : multi-node (primus-cli slurm srun -N $NNODES)"
     echo "# Container label       : ${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
     echo "# TRAIN_STEPS           : ${TRAIN_STEPS:-<unset; use YAML>}"

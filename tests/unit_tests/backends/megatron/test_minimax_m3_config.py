@@ -164,7 +164,7 @@ def patched_config_selection(monkeypatch):
     by name rather than going through ``megatron.training.arguments``.
     """
     import sys
-    from types import SimpleNamespace
+    from types import ModuleType, SimpleNamespace
 
     import megatron.training.arguments as arguments_module
 
@@ -177,8 +177,9 @@ def patched_config_selection(monkeypatch):
     monkeypatch.setattr(arguments_module, "_primus_applied_patch_keys", set(), raising=False)
     monkeypatch.setattr(arguments_module, "core_transformer_config_from_args", fake_original)
 
-    importer = SimpleNamespace(core_transformer_config_from_args=fake_original)
-    monkeypatch.setitem(sys.modules, "_minimax_m3_fake_importer", importer)
+    importer = ModuleType("_minimax_m3_fake_importer")
+    importer.core_transformer_config_from_args = fake_original
+    monkeypatch.setitem(sys.modules, importer.__name__, importer)
 
     patch_mod.patch_minimax_m3_config(ctx=None)
     return SimpleNamespace(
