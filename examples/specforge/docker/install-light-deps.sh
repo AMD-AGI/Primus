@@ -24,7 +24,6 @@ PACKAGES=(
   "numpy"
   "safetensors"
   "requests"
-  "tensorboard"
   "typing-extensions:typing_extensions"
   "wandb"
   "datasets"

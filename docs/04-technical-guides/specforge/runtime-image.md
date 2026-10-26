@@ -50,8 +50,10 @@ The Dockerfile:
    `patches/sglang/v0.5.14/spec-capture.patch`.
 3. Installs SpecForge editable `--no-deps`.
 4. Copies this Primus tree and installs it editable `--no-deps`.
-5. Fills missing light packages (`accelerate`, `tensorboard`, …) `--no-deps`.
-6. Runs GPU-free smoke checks (`enable_spec_capture`, `import specforge`,
+5. Fills missing light packages (`accelerate`, `wandb`, …) `--no-deps`.
+6. Installs `tensorboard` with its dependencies and checks `SummaryWriter`.
+   A `--no-deps` install leaves `--report-to tensorboard` broken.
+7. Runs GPU-free smoke checks (`enable_spec_capture`, `import specforge`,
    `primus-cli --help`, HIP torch).
 
 Validated on AMD Instinct MI355X (gfx950). Newer SGLang ROCm tags may work if

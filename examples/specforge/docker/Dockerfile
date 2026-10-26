@@ -45,8 +45,14 @@ RUN python -m pip install "hatchling>=1.21" \
     && python -m pip install -e /opt/primus --no-deps
 
 COPY examples/specforge/docker/install-light-deps.sh examples/specforge/docker/smoke-check.sh /tmp/
-RUN bash /tmp/install-light-deps.sh \
-    && bash /tmp/smoke-check.sh
+RUN bash /tmp/install-light-deps.sh
+
+# install-light-deps.sh uses --no-deps. SummaryWriter imports tensorboard's own
+# dependency tree, so a no-deps install leaves --report-to tensorboard broken.
+RUN python -m pip install "tensorboard>=2.14,<3" \
+    && python -c "from torch.utils.tensorboard import SummaryWriter"
+
+RUN bash /tmp/smoke-check.sh
 
 ENV SPECFORGE_ROOT=/workspace/SpecForge
 ENV PRIMUS_PATH=/opt/primus
