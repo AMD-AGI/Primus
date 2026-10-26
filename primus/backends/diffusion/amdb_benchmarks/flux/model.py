@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Adapted from Black Forest Labs FLUX official implementation.
+# Vendored from the FLUX implementation.
 
 from __future__ import annotations
 

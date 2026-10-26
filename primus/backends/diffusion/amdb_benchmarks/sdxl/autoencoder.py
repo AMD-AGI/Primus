@@ -4,8 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Adapted from the Stability AI generative-models official implementation.
-# https://github.com/Stability-AI/generative-models
+# Vendored from the SDXL generative-models implementation.
 
 # pytorch_diffusion + derived encoder decoder
 import logging

@@ -4,8 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Adapted from the Tencent HunyuanVideo official implementation.
-# https://github.com/Tencent-Hunyuan/HunyuanVideo
+# Vendored from the HunyuanVideo implementation.
 
 import math
 
@@ -22,9 +21,7 @@ class PatchEmbed(nn.Module):
 
     A convolution based approach to patchifying a 2D image w/ embedding projection.
 
-    Based on the impl in https://github.com/google-research/vision_transformer
-
-    Hacked together by / Copyright 2020 Ross Wightman
+    Vendored from the vision-transformer patch embedding.
 
     Remove the _assert function in forward function to be compatible with multi-resolution images.
     """

@@ -4,8 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# SDPA stand-in for the attention helpers the official Mochi DiT imports from
-# genmo.lib.attn_imports. Flash-attn is used when it is installed.
+# Vendored from the Mochi attention helpers. Flash attention is used when it is installed.
 
 from __future__ import annotations
 

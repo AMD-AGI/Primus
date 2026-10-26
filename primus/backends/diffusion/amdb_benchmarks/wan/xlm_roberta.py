@@ -4,11 +4,10 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Adapted from the Alibaba Wan2.1 official implementation.
-# https://github.com/Wan-Video/Wan2.1
+# Vendored from the Wan2.1 implementation.
 
-# Modified from transformers.models.xlm_roberta.modeling_xlm_roberta
-# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+# Vendored from the XLM-RoBERTa modeling implementation.
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

@@ -4,5 +4,4 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Adapted from the Genmo Mochi official implementation.
-# https://github.com/genmoai/mochi
+# Vendored from the Mochi implementation.

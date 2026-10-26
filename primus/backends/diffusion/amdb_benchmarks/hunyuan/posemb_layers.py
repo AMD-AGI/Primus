@@ -4,8 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Adapted from the Tencent HunyuanVideo official implementation.
-# https://github.com/Tencent-Hunyuan/HunyuanVideo
+# Vendored from the HunyuanVideo implementation.
 
 from typing import List, Tuple, Union
 

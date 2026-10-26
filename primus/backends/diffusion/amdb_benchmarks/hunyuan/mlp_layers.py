@@ -4,8 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Adapted from the Tencent HunyuanVideo official implementation.
-# https://github.com/Tencent-Hunyuan/HunyuanVideo
+# Vendored from the HunyuanVideo implementation.
 
 # Modified from timm library:
 # https://github.com/huggingface/pytorch-image-models/blob/648aaa41233ba83eb38faf5ba9d415d574823241/timm/layers/mlp.py#L13

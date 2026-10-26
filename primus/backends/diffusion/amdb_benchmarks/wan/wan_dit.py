@@ -4,9 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 #
-# Vendored from the official Wan modules with minimal changes:
+# Vendored from the Wan2.1 implementation, with these local changes:
 # - Wan2.2 `wan/modules/model.py` for the shared DiT
 # - Wan2.1 image-to-video cross-attention and CLIP projection
 #   (`WanI2VCrossAttention`, `MLPProj`)
