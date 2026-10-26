@@ -5,32 +5,15 @@ from __future__ import annotations
 
 import argparse
 import os
-import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
+from primus.backends.backend_aliases import resolve_backend_alias
 from primus.core.config.preset_loader import PresetLoader
 from primus.core.launcher.config import PrimusConfig
 from primus.core.utils import constant_vars, yaml_utils
 from primus.core.utils.arg_utils import parse_cli_overrides
-
-# Renamed frameworks: old name -> current name. Keep in sync with the alias in
-# runner/helpers/hooks/train/pretrain/prepare_experiment.sh.
-DEPRECATED_FRAMEWORK_ALIASES = {"nemo_automodel": "automodel"}
-
-
-def resolve_framework_alias(framework: str) -> str:
-    """Map a renamed framework to its current name, warning that the old name is deprecated."""
-    current = DEPRECATED_FRAMEWORK_ALIASES.get(framework)
-    if current is None:
-        return framework
-    warnings.warn(
-        f"framework '{framework}' is deprecated; use 'framework: {current}'.",
-        FutureWarning,
-        stacklevel=2,
-    )
-    return current
 
 
 def _add_common_train_args(
@@ -63,14 +46,11 @@ def _add_common_train_args(
             "If provided, it will be appended to PYTHONPATH dynamically."
         ),
     )
-    # Declared so that argparse does not take the runner's --backend as an
-    # abbreviation of --backend_path.
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default=None,
-        help="Framework name; prepare_experiment.sh checks it against the config's framework.",
-    )
+    # The launcher's option: prepare_experiment.sh reads it and rejects one that
+    # conflicts with the config's framework; the trainer ignores it. Declared only so
+    # that argparse does not take it as an abbreviation of --backend_path. allow_abbrev
+    # =False would not do: the undeclared option would become a `backend:` override.
+    parser.add_argument("--backend", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--export_config",
         type=str,
@@ -286,7 +266,7 @@ class PrimusParser(object):
 
         # Ensure framework exists
         yaml_utils.check_key_in_namespace(module, "framework")
-        framework = resolve_framework_alias(module.framework)
+        framework = resolve_backend_alias(module.framework)
         module.framework = framework
 
         # If both config and model are missing, skip

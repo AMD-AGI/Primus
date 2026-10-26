@@ -38,7 +38,7 @@ from primus.backends.automodel.argument_builder import PRIMUS_SECTION_PREFIX
 # Accepted spellings when a value arrives as a string, e.g. from a CLI override.
 # Generous on purpose: rejecting "True" would silently disable a feature.
 _TRUE = frozenset({"1", "true", "yes", "on"})
-_FALSE = frozenset({"0", "false", "no", "off", ""})
+_FALSE = frozenset({"0", "false", "no", "off"})
 
 _sections: dict = {}
 _declared: dict = {}
@@ -56,14 +56,16 @@ def load(params: Any) -> None:
     """Keep the ``primus_*`` sections of ``params`` (a namespace or a mapping).
 
     Replaces whatever was loaded before, so a second job in the same process
-    does not inherit the first one's settings.
+    does not inherit the first one's settings. A section that is not a mapping
+    raises, and leaves the earlier settings in place.
     """
     global _sections
     params = _as_dict(params) or {}
-    _sections = {k: v for k, v in params.items() if k.startswith(PRIMUS_SECTION_PREFIX)}
-    for name, section in _sections.items():
+    sections = {k: v for k, v in params.items() if k.startswith(PRIMUS_SECTION_PREFIX)}
+    for name, section in sections.items():
         if section is not None and not isinstance(section, dict):
             raise ValueError(f"{name} must be a mapping of settings, got {section!r}")
+    _sections = sections
 
 
 def declare(section: str, *keys: str) -> None:
@@ -100,9 +102,10 @@ def get(path: str, default: Any = None) -> Any:
 
 
 def flag(path: str, default: bool = False) -> bool:
-    """A boolean setting. Raises on a value that is neither true nor false."""
+    """A boolean setting, with empty treated as unset, like the other accessors.
+    Raises on a value that is neither true nor false."""
     value = get(path)
-    if value is None:
+    if value is None or (isinstance(value, str) and not value.strip()):
         return default
     if isinstance(value, bool):
         return value

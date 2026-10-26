@@ -18,6 +18,7 @@ NemoAutomodelConfigBuilder = AutoModelConfigBuilder
 
 __all__ = [
     "PRIMUS_ONLY_TOP_KEYS",
+    "AutoModelConfigBuilder",
     "NemoAutomodelConfigBuilder",
     "export_params_to_yaml",
     "namespace_to_dict",

@@ -25,7 +25,10 @@ WHAT (no AutoModel/diffusers fork):
   step boundary is found through the recipe's optimizer, so nothing here is
   specific to any one model.
 
-  Off by default; idempotent; a default run is unaffected.
+  Off by default; idempotent; a default run is unaffected. The wrapper is installed
+  once per process but decides at every loop run, from the settings loaded then,
+  whether to profile and how, so a later trainer in the same process neither
+  inherits an earlier one's profiling nor writes into its experiment directory.
 
 Settings (module config, ``primus_profiler:`` section):
     enabled: false              apply the profiler wrapper
@@ -61,6 +64,9 @@ logger = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_primus_profile_installed"
 _SECTION = "primus_profiler"
+
+# The experiment directory of the latest install() call, i.e. of the current trainer.
+_exp_root: Optional[str] = None
 
 
 def is_enabled() -> bool:
@@ -104,27 +110,32 @@ def install(exp_root: Optional[str] = None) -> bool:
     """Wrap the AutoModel diffusion train loop in ``torch.profiler``.
 
     ``exp_root`` is the experiment directory a relative ``output_dir`` is taken
-    under. Returns True if the wrapper is in place (including when it already was).
+    under; every call records it, so it is the current trainer's. Returns True if
+    the wrapper is in place (including when it already was).
     """
+    global _exp_root
     import torch
     from nemo_automodel.recipes.diffusion.train import TrainDiffusionRecipe
 
+    _exp_root = exp_root
     if getattr(TrainDiffusionRecipe, _INSTALLED_FLAG, False):
         return True
 
     orig_loop = TrainDiffusionRecipe.run_train_validation_loop
 
-    out_dir = resolve_output_dir(options.string(f"{_SECTION}.output_dir", "diffusion_profile"), exp_root)
-    tag = options.string(f"{_SECTION}.tag", "run")
-    wait = options.integer(f"{_SECTION}.wait", 3)
-    warmup = options.integer(f"{_SECTION}.warmup", 1)
-    active = options.integer(f"{_SECTION}.active", 3)
-    with_stack = options.flag(f"{_SECTION}.with_stack", False)
-    with_modules = options.flag(f"{_SECTION}.with_modules", False)
-    record_shapes = options.flag(f"{_SECTION}.record_shapes", True)
-    profile_memory = options.flag(f"{_SECTION}.profile_memory", False)
-
     def patched_loop(self):
+        if not is_enabled():
+            return orig_loop(self)
+        out_dir = resolve_output_dir(options.string(f"{_SECTION}.output_dir", "diffusion_profile"), _exp_root)
+        tag = options.string(f"{_SECTION}.tag", "run")
+        wait = options.integer(f"{_SECTION}.wait", 3)
+        warmup = options.integer(f"{_SECTION}.warmup", 1)
+        active = options.integer(f"{_SECTION}.active", 3)
+        with_stack = options.flag(f"{_SECTION}.with_stack", False)
+        with_modules = options.flag(f"{_SECTION}.with_modules", False)
+        record_shapes = options.flag(f"{_SECTION}.record_shapes", True)
+        profile_memory = options.flag(f"{_SECTION}.profile_memory", False)
+
         rank = current_rank()
         point_dir = os.path.join(out_dir, tag)
         os.makedirs(point_dir, exist_ok=True)
@@ -188,12 +199,18 @@ def install(exp_root: Optional[str] = None) -> bool:
         target_optimizer.step = opt_step_and_prof
         prof.start()
         try:
-            orig_loop(self)
+            return orig_loop(self)
         finally:
+            # A failed stop must not replace an error the loop itself raised.
             try:
                 prof.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "[PrimusDiffusionProfile] rank%s profiler stop failed; the trace may be "
+                    "missing or incomplete: %s",
+                    rank,
+                    exc,
+                )
             target_optimizer.step = orig_opt_step
 
     patched_loop._primus_profile_wrapped = True

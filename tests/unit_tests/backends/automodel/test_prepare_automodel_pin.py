@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -445,14 +446,40 @@ def test_git_head_only_for_the_checkout_root(tmp_path):
     assert prepare._git_head(tmp_path) is None
 
 
-def test_importable_copy_is_located_without_importing_it(monkeypatch, tmp_path):
-    package = tmp_path / "src" / "nemo_automodel"
+def importable_copy_at(monkeypatch, root):
+    package = root / "nemo_automodel"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("raise RuntimeError('imported')\n", encoding="utf-8")
     monkeypatch.delitem(sys.modules, "nemo_automodel", raising=False)
-    monkeypatch.syspath_prepend(str(tmp_path / "src"))
+    monkeypatch.syspath_prepend(str(root))
     monkeypatch.setattr(prepare, "_direct_url_commit", lambda: None)
+    return root.resolve()
 
-    root, commit = prepare.importable_automodel()
-    assert root == (tmp_path / "src").resolve()
-    assert commit is None
+
+def installed_wheel(monkeypatch, location, version):
+    import importlib.metadata as md
+
+    monkeypatch.setattr(md, "distribution", lambda name: SimpleNamespace(locate_file=lambda path: location))
+    monkeypatch.setattr(md, "version", lambda name: version)
+
+
+def test_importable_copy_is_located_without_importing_it(monkeypatch, tmp_path):
+    root = importable_copy_at(monkeypatch, tmp_path / "src")
+
+    assert prepare.importable_automodel() == (root, None)
+
+
+def test_a_wheel_is_known_by_the_commit_in_its_version(monkeypatch, tmp_path):
+    """No checkout and no PEP 610 record: without this, the pinned wheel is reinstalled."""
+    site = importable_copy_at(monkeypatch, tmp_path / "site-packages")
+    installed_wheel(monkeypatch, site, "0.7.0+bd1ca5a07")
+
+    assert prepare.importable_automodel() == (site, "bd1ca5a07")
+
+
+def test_a_copy_shadowing_the_wheel_does_not_take_its_commit(monkeypatch, tmp_path):
+    """The wheel's metadata describes the wheel, not a source tree imported ahead of it."""
+    shadow = importable_copy_at(monkeypatch, tmp_path / "src")
+    installed_wheel(monkeypatch, tmp_path / "site-packages", "0.7.0+bd1ca5a07")
+
+    assert prepare.importable_automodel() == (shadow, None)

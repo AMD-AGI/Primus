@@ -325,8 +325,10 @@ def _direct_url_commit():
 def importable_automodel():
     """``(source root, commit)`` of the AutoModel package Python would import, or None.
 
-    The commit is None when nothing records it -- a wheel baked into an image, say.
-    Found without importing, so a mismatched copy never runs its import side effects.
+    The commit comes from the copy's git checkout, pip's PEP 610 record, or, for a
+    wheel installed where the copy is, the commit in its local version. It is None
+    when nothing records it. Found without importing, so a mismatched copy never
+    runs its import side effects.
     """
     import importlib.util
 
@@ -337,7 +339,25 @@ def importable_automodel():
     if spec is None or not spec.submodule_search_locations:
         return None
     root = Path(list(spec.submodule_search_locations)[0]).resolve().parent
-    return root, _git_head(root) or _direct_url_commit()
+    commit = _git_head(root) or _direct_url_commit()
+    if commit is None and _dist_installed_at(root):
+        commit = _installed_dist_commit()
+    return root, commit
+
+
+def _dist_installed_at(root: Path) -> bool:
+    """Whether the installed AutoModel distribution is the copy under ``root``.
+
+    Its metadata says nothing about a copy found elsewhere, such as a source tree
+    on ``PYTHONPATH`` that shadows it.
+    """
+    import importlib.metadata as md
+
+    try:
+        location = md.distribution("nemo_automodel").locate_file("")
+    except (md.PackageNotFoundError, NotImplementedError):
+        return False
+    return Path(location).resolve() == root
 
 
 def _same_commit(a, b) -> bool:

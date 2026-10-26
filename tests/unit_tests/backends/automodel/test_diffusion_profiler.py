@@ -15,7 +15,7 @@ AutoModel config, and a patch that is present in the tree but never actually
 registered.
 
 No torch and no AutoModel required: torch is imported inside install(),
-which is not called here.
+which is called here only against stand-ins for torch and the recipe.
 """
 
 import re
@@ -62,10 +62,18 @@ class TestOptions:
         set_option("primus_profiler.enabled", raw)
         assert options.flag("primus_profiler.enabled") is True
 
-    @pytest.mark.parametrize("raw", [False, "0", "false", "no", "off", ""])
+    @pytest.mark.parametrize("raw", [False, "0", "false", "no", "off", " off "])
     def test_false_spellings(self, set_option, raw):
         set_option("primus_profiler.enabled", raw)
         assert options.flag("primus_profiler.enabled", True) is False
+
+    @pytest.mark.parametrize("default", [True, False])
+    @pytest.mark.parametrize("raw", ["", "  "])
+    def test_an_empty_flag_is_unset(self, set_option, raw, default):
+        """As for the other accessors: an empty override must not turn off a flag
+        that defaults on."""
+        set_option("primus_profiler.enabled", raw)
+        assert options.flag("primus_profiler.enabled", default) is default
 
     def test_a_malformed_flag_raises(self, set_option):
         """Falling back would quietly run something other than what was asked for."""
@@ -82,6 +90,13 @@ class TestOptions:
     def test_a_section_must_be_a_mapping(self):
         with pytest.raises(ValueError, match="primus_profiler"):
             options.load({"primus_profiler": True})
+
+    def test_a_rejected_load_keeps_the_earlier_settings(self):
+        options.load({"primus_profiler": {"enabled": True}})
+        with pytest.raises(ValueError):
+            options.load({"primus_profiler": True, "primus_turbo": {"fp8_linear": True}})
+        assert options.flag("primus_profiler.enabled") is True
+        assert options.get("primus_turbo") is None
 
     def test_primus_sections_never_reach_automodel(self):
         cleaned = strip_primus_keys({"model": {}, "primus_turbo": {"fp8_linear": True}, "framework": "x"})
@@ -202,6 +217,114 @@ class TestProfilerGate:
         assert not any(
             line.strip().startswith("import torch") for line in open(mod.__file__).read().splitlines()[:60]
         ), "torch must stay inside install(), not at module import time"
+
+
+class TestProfilerAcrossTrainers:
+    """The wrapper outlives the trainer that installed it; its settings must not.
+
+    The recipe and ``torch.profiler`` are stand-ins, so this runs without AutoModel
+    or a GPU.
+    """
+
+    @pytest.fixture
+    def profiler(self, monkeypatch):
+        import sys
+        import types
+
+        from primus.backends.automodel.profiling import torch_profiler
+
+        profiles = []
+
+        class Profile:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                profiles.append(self)
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def step(self):
+                pass
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.profiler = SimpleNamespace(
+            ProfilerActivity=SimpleNamespace(CPU="cpu", CUDA="cuda"),
+            schedule=lambda **kwargs: kwargs,
+            profile=Profile,
+        )
+
+        class TrainDiffusionRecipe:
+            def __init__(self):
+                self.optimizer = [SimpleNamespace(step=lambda: None)]
+                self.loops = 0
+
+            def run_train_validation_loop(self):
+                self.loops += 1
+
+        train = types.ModuleType("nemo_automodel.recipes.diffusion.train")
+        train.TrainDiffusionRecipe = TrainDiffusionRecipe
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+        for name in ("nemo_automodel", "nemo_automodel.recipes", "nemo_automodel.recipes.diffusion"):
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "nemo_automodel.recipes.diffusion.train", train)
+        monkeypatch.setattr(torch_profiler, "_exp_root", None)
+        monkeypatch.delenv("RANK", raising=False)
+        monkeypatch.delenv("LOCAL_RANK", raising=False)
+        return torch_profiler, TrainDiffusionRecipe, profiles
+
+    def test_a_later_trainer_with_the_profiler_off_is_not_profiled(self, profiler, tmp_path):
+        torch_profiler, recipe_cls, profiles = profiler
+        options.load({"primus_profiler": {"enabled": True}})
+        torch_profiler.install(exp_root=str(tmp_path / "first"))
+        recipe_cls().run_train_validation_loop()
+        assert len(profiles) == 1
+
+        options.load({})
+        second = recipe_cls()
+        second.run_train_validation_loop()
+
+        assert second.loops == 1
+        assert len(profiles) == 1
+
+    def test_a_later_profiled_trainer_uses_its_own_settings(self, profiler, tmp_path):
+        torch_profiler, recipe_cls, profiles = profiler
+        options.load({"primus_profiler": {"enabled": True}})
+        torch_profiler.install(exp_root=str(tmp_path / "first"))
+        recipe_cls().run_train_validation_loop()
+
+        options.load({"primus_profiler": {"enabled": True, "tag": "second", "wait": 0}})
+        torch_profiler.install(exp_root=str(tmp_path / "second_exp"))
+        recipe_cls().run_train_validation_loop()
+
+        assert profiles[1].kwargs["schedule"]["wait"] == 0
+        assert (tmp_path / "second_exp" / "diffusion_profile" / "second").is_dir()
+        assert not (tmp_path / "first" / "diffusion_profile" / "second").exists()
+
+    def test_a_failed_stop_is_logged_and_the_optimizer_restored(self, profiler, tmp_path, caplog):
+        import sys
+
+        torch_profiler, recipe_cls, _ = profiler
+        torch_profile = sys.modules["torch"].profiler
+
+        class FailingStop(torch_profile.profile):
+            def stop(self):
+                raise RuntimeError("no trace for you")
+
+        torch_profile.profile = FailingStop
+        options.load({"primus_profiler": {"enabled": True}})
+        torch_profiler.install(exp_root=str(tmp_path))
+        recipe = recipe_cls()
+        step = recipe.optimizer[-1].step
+
+        with caplog.at_level("WARNING", logger=torch_profiler.__name__):
+            recipe.run_train_validation_loop()
+
+        assert recipe.loops == 1
+        assert recipe.optimizer[-1].step is step
+        assert "no trace for you" in caplog.text
 
 
 class TestPatchesAreRegistered:

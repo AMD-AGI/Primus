@@ -4,7 +4,8 @@
 # the Primus launcher deep-merges the `model:` preset and the EXP `overrides:`
 # on top of it, then the automodel backend materialises the whole tree into
 # an AutoModel ConfigNode and runs TrainDiffusionRecipe. The defaults below are
-# the optimized pretrain knobs: aiter + torch.compile + bf16 reduce + fused AdamW.
+# the optimized pretrain knobs: torch.compile + bf16 reduce + fused AdamW. The
+# attention backend is the model preset's choice.
 #
 # NOTE: do not declare a `model:` block here — it comes from the model preset
 # (merge is allow_override=False and would conflict).

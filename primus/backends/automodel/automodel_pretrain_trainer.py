@@ -110,6 +110,11 @@ class AutoModelPretrainTrainer(BaseTrainer):
         first forward. A patch applied after that would silently miss the module
         it meant to replace.
 
+        AutoModel is already imported by then (``init`` imports the recipe first),
+        so a patch replaces a name where it is looked up when called: a class or
+        module attribute, and also the recipe module's own binding when the recipe
+        imported the name directly.
+
         They also run before the AutoModel config is built from ``backend_args``,
         so a patch can set the AutoModel key its feature depends on (the linear
         swaps need ``model.transformer_engine_linear``) instead of leaving the
