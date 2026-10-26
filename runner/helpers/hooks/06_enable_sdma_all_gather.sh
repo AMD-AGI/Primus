@@ -4,59 +4,43 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-#
-# Global hook: opt into the SDMA/RCCL dispatch path for FSDP
-# all-gather.
-#
-# Single trigger -- the only knob:
-#
-#   export SDMA_ALL_GATHER=1
-#   primus-cli direct -- train pretrain --config <any existing yaml>
-#
-# When SDMA_ALL_GATHER=1, this hook:
-#   1. Exports the zero-CTA env that RCCL needs to actually take the
-#      copy-engine path (NCCL_CTA_POLICY=2, NCCL_CUMEM_ENABLE=1, ...).
-#   2. Propagates SDMA_ALL_GATHER=1 into the launched torchrun children
-#      so the companion Python patch's gate fires there too. See
-#      primus/backends/torchtitan/patches/sdma_symm_mem_collectives.py.
-#   3. Rebuilds the bundled LD_PRELOAD interposer
-#      (hooks/sdma/hip_attr_drain_preload.c) into /tmp and exports
-#      LD_PRELOAD. The interposer is a workaround for the ROCm
-#      cuDeviceGetAttribute hipErrorInvalidValue TLS-leak hit by RCCL's
-#      cuMem code path on builds that don't have the upstream fix.
-#      Recompiled every time so it never goes stale relative to the
-#      source.
-#      Lorri: Check JIRA ticket ROCM-24832 for more details.
-#
-# Anything else (HSA_SDMA_LINEAR_B2B, NCCL_DEBUG, ...) can be set
-# independently via the normal `export` / `primus-cli --env` flow.
+# Enable the RCCL copy-engine AllGather path. Keep the established FSDP selector
+# working while also accepting the backend-neutral SDMA_ALL_GATHER trigger.
 
 set -euo pipefail
 
-if [[ "${SDMA_ALL_GATHER:-0}" != "1" ]]; then
+sdma_trigger="${SDMA_ALL_GATHER:-0}"
+fsdp_backend="${FSDP_ALL_GATHER_BACKEND:-}"
+if [[ "${sdma_trigger}" != "1" && "${fsdp_backend}" != "rccl_sdma" ]]; then
     exit 0
+fi
+
+kernel_release="$(uname -r)"
+if [[ ! "${kernel_release}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+    echo "[ERROR] RCCL-SDMA could not parse Linux kernel version: ${kernel_release}" >&2
+    exit 2
+fi
+if (( BASH_REMATCH[1] < 6 || (BASH_REMATCH[1] == 6 && BASH_REMATCH[2] < 8) )); then
+    echo "[ERROR] RCCL-SDMA requires Linux kernel 6.8 or newer; found ${kernel_release}." >&2
+    exit 2
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 1) Zero-CTA env for the RCCL copy-engine path. FSDP requests CTA=ZERO
-#    via pg_options too, but setting these explicitly here makes the
-#    dispatch path observable.
-#Lorri: Check the header in sdma_symm_mem_collectives.py for more details.
 echo "env.NCCL_CTA_POLICY=2"
 echo "env.NCCL_CUMEM_ENABLE=1"
 echo "env.NCCL_LOCAL_REGISTER=0"
-echo "env.TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=true"
+if [[ "${TORCH_NCCL_ALLOCATOR_HOOK_OVERRIDE:-}" != "unset" ]]; then
+    echo "env.TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=${TORCH_NCCL_ALLOCATOR_HOOK_OVERRIDE:-true}"
+fi
 
-# 2) Make the trigger visible to torchrun children so the Python patch
-#    fires there. primus-cli direct doesn't inherit the host env into
-#    the child unless it's either CLI-passed via --env or hook-emitted
-#    via env.*.
-echo "env.SDMA_ALL_GATHER=1"
+if [[ "${sdma_trigger}" == "1" ]]; then
+    echo "env.SDMA_ALL_GATHER=1"
+fi
+if [[ "${fsdp_backend}" == "rccl_sdma" ]]; then
+    echo "env.FSDP_ALL_GATHER_BACKEND=rccl_sdma"
+fi
 
-# 3) Always (re)build the interposer. The source is tiny and gcc is
-#    typically <1s; we don't bother with a staleness check so the .so
-#    can never lag behind the source.
 SRC="${SCRIPT_DIR}/sdma/hip_attr_drain_preload.c"
 SO=/tmp/libhip_attr_drain.so
 if [[ ! -f "${SRC}" ]]; then
