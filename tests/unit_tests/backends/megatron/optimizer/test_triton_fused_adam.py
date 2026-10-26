@@ -212,13 +212,12 @@ def test_patch_enabled_by_default():
         assert yaml.safe_load(f)["use_triton_fused_adam"] is True
 
 
-def test_patch_routes_megatron_factory_to_triton(monkeypatch):
+def test_patch_routes_megatron_factory_to_triton():
     import megatron.core.optimizer as optimizer_module
 
     from primus.backends.megatron.patches import triton_fused_adam_patches as patch_mod
     from primus.backends.megatron.patches._patch_guard import _SENTINEL_ATTR
 
-    monkeypatch.delenv("PRIMUS_FUSED_ADAM_CLIP", raising=False)
     orig_adam = optimizer_module.Adam
     try:
         patch_mod.patch_triton_fused_adam(_PATCH_CTX)
@@ -231,12 +230,27 @@ def test_patch_routes_megatron_factory_to_triton(monkeypatch):
         getattr(optimizer_module, _SENTINEL_ATTR, set()).discard(patch_mod._PATCH_KEY)
 
 
-def test_patch_keeps_te_when_fused_adam_clip_is_enabled(monkeypatch):
+def test_patch_keeps_te_when_fused_adam_clip_is_installed():
     import megatron.core.optimizer as optimizer_module
 
     from primus.backends.megatron.patches import triton_fused_adam_patches as patch_mod
+    from primus.backends.megatron.patches._patch_guard import (
+        _SENTINEL_ATTR,
+        mark_patched,
+    )
+    from primus.backends.megatron.patches.te_patches.fused_adam_clip_patches import (
+        _PATCH_KEY as clip_key,
+    )
+    from primus.core.patches.patch_registry import PatchRegistry
 
-    monkeypatch.setenv("PRIMUS_FUSED_ADAM_CLIP", "1")
+    clip_patch, triton_patch = PatchRegistry.get(clip_key), PatchRegistry.get(patch_mod._PATCH_KEY)
+    assert clip_patch.phase == triton_patch.phase
+    assert clip_patch.priority < triton_patch.priority
+
     orig_adam = optimizer_module.Adam
-    patch_mod.patch_triton_fused_adam(_PATCH_CTX)
-    assert optimizer_module.Adam is orig_adam
+    mark_patched(FusedAdam, clip_key)
+    try:
+        patch_mod.patch_triton_fused_adam(_PATCH_CTX)
+        assert optimizer_module.Adam is orig_adam
+    finally:
+        getattr(FusedAdam, _SENTINEL_ATTR).discard(clip_key)

@@ -23,8 +23,6 @@ Mechanism:
     handling valid.
 """
 
-import os
-
 from primus.backends.megatron.patches._patch_guard import is_patched, mark_patched
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
@@ -46,15 +44,6 @@ def patch_triton_fused_adam(ctx: PatchContext) -> None:
     if is_patched(optimizer_module, _PATCH_KEY):
         return
 
-    # fused_adam_clip_patches defers gradient clipping into TE FusedAdam.step,
-    # which TritonFusedAdam.step overrides; combining them would skip clipping.
-    if os.environ.get("PRIMUS_FUSED_ADAM_CLIP", "0") == "1":
-        warning_rank_0(
-            f"[Patch:{_PATCH_KEY}] PRIMUS_FUSED_ADAM_CLIP=1 owns the TE FusedAdam step; "
-            "keeping TE FusedAdam."
-        )
-        return
-
     if optimizer_module.USING_PYTORCH_OPTIMIZER:
         warning_rank_0(
             f"[Patch:{_PATCH_KEY}] Transformer Engine / Apex optimizers are unavailable; "
@@ -63,6 +52,20 @@ def patch_triton_fused_adam(ctx: PatchContext) -> None:
         return
 
     from transformer_engine.pytorch.optimizers import FusedAdam
+
+    from primus.backends.megatron.patches.te_patches.fused_adam_clip_patches import (
+        _PATCH_KEY as _FUSED_ADAM_CLIP_PATCH_KEY,
+    )
+
+    # The fused Adam + clip patch (priority 39, so it runs first) defers gradient
+    # clipping into TE FusedAdam.step, which TritonFusedAdam.step overrides;
+    # combining them would skip clipping.
+    if is_patched(FusedAdam, _FUSED_ADAM_CLIP_PATCH_KEY):
+        warning_rank_0(
+            f"[Patch:{_PATCH_KEY}] {_FUSED_ADAM_CLIP_PATCH_KEY} owns the TE FusedAdam step; "
+            "keeping TE FusedAdam."
+        )
+        return
 
     if optimizer_module.Adam is not FusedAdam:
         warning_rank_0(
