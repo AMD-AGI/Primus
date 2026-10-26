@@ -101,13 +101,19 @@ class TestMegatronPretrainTrainer:
 
         # 4) primus.core.utils.import_utils.get_model_provider
         model_provider = object()
-        import_utils_mod = types.SimpleNamespace(
-            get_model_provider=lambda: model_provider,
-        )
+        provider_calls = []
+
+        def fake_get_model_provider(**kwargs):
+            provider_calls.append(kwargs)
+            return model_provider
+
+        import_utils_mod = types.SimpleNamespace(get_model_provider=fake_get_model_provider)
         monkeypatch.setitem(sys.modules, "primus.core.utils.import_utils", import_utils_mod)
 
         # Execute training wiring.
         trainer.train()
+
+        assert provider_calls == [{"model_type": "gpt"}]
 
         # Train datasets provider should be marked distributed.
         assert train_valid_test_datasets_provider.is_distributed is True
@@ -167,9 +173,7 @@ class TestMegatronPretrainTrainer:
         monkeypatch.setitem(sys.modules, "pretrain_gpt", pretrain_gpt_mod)
 
         model_provider = object()
-        import_utils_mod = types.SimpleNamespace(
-            get_model_provider=lambda: model_provider,
-        )
+        import_utils_mod = types.SimpleNamespace(get_model_provider=lambda **_: model_provider)
         monkeypatch.setitem(sys.modules, "primus.core.utils.import_utils", import_utils_mod)
 
         trainer.train()

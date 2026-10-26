@@ -162,7 +162,8 @@ def test_get_model_provider_wires_zaya1_builder():
     _ensure_logger()
     provider = get_model_provider("zaya1")
     assert provider.func is model_provider
-    assert provider.args == (zaya1_builder,)
+    (builder,) = provider.args
+    assert (builder.func, builder.args) == (zaya1_builder.func, zaya1_builder.args)
 
 
 def test_builder_rejects_non_data_parallel():
