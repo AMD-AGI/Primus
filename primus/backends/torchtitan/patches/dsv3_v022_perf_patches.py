@@ -62,6 +62,9 @@ def _compile_enabled(ctx: PatchContext) -> bool:
 def _apply_unified_compile(model: nn.Module, compile_config: Any, ep_enabled: bool) -> None:
     """Compile whole blocks with an explicit graph break at routed experts."""
     import torchtitan.models.moe.moe as moe_module
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+        CheckpointWrapper,
+    )
     from torchtitan.tools.logging import logger
 
     # Preserve TorchTitan's required setup for dynamic token-choice MoE shapes.
@@ -74,11 +77,20 @@ def _apply_unified_compile(model: nn.Module, compile_config: Any, ep_enabled: bo
         moe_module.GroupedExperts.forward = experts_forward
 
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(
-            transformer_block,
-            backend=compile_config.backend,
-            fullgraph=False,
-        )
+        if isinstance(transformer_block, CheckpointWrapper):
+            # Compile(AC(block)) falls back to eager on any graph break inside
+            # the checkpoint body, so compile inside the wrapper instead.
+            transformer_block._checkpoint_wrapped_module = torch.compile(
+                transformer_block._checkpoint_wrapped_module,
+                backend=compile_config.backend,
+                fullgraph=False,
+            )
+        else:
+            transformer_block = torch.compile(
+                transformer_block,
+                backend=compile_config.backend,
+                fullgraph=False,
+            )
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info(
