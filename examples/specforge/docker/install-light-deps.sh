@@ -15,6 +15,13 @@ install_if_missing() {
 }
 
 # SpecForge runtime imports (excluding torch, transformers, sglang, yunchang).
+# tensorboard is not in this allowlist. The Dockerfile installs
+# tensorboard>=2.14,<2.21 with its dependencies, constrained to versions
+# already in the base image. SummaryWriter imports that tree, so a --no-deps
+# copy leaves --report-to tensorboard broken. Do not re-add it here.
+#
+# The remaining entries stay --no-deps. Their job is to fill a missing import
+# without letting pip replace the ROCm torch/sglang stack.
 PACKAGES=(
   "pydantic"
   "pyyaml:yaml"
