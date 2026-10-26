@@ -3,6 +3,9 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:zaya1-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+env:
+  PYTORCH_HIP_ALLOC_CONF: "expandable_segments:True"
+
 modules:
   pre_trainer:
     framework: megatron
