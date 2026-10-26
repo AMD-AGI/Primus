@@ -1031,6 +1031,38 @@ class TestOnlineLaunch:
         settings = online_settings(params)
         assert settings["capture_layer_ids"] == (1, 16, 30, 44, 59)
 
+    def test_capture_layer_ids_from_eagle_config(self, specforge_checkout, tmp_path):
+        draft = tmp_path / "deepseek-eagle3.json"
+        draft.write_text(
+            '{"architectures": ["LlamaForCausalLMEagle3"], '
+            '"eagle_config": {"eagle_aux_hidden_state_layer_ids": [1, 29, 57]}}\n'
+        )
+        hydra = specforge_checkout / "configs" / "eagle.yaml"
+        hydra.write_text("model:\n" f"  draft_model_config: {draft.as_posix()}\n")
+        params = self._params(specforge_checkout, tmp_path)
+        params.specforge_config = str(hydra)
+        params.specforge_overrides = {}
+        assert online_settings(params)["capture_layer_ids"] == (1, 29, 57)
+
+    def test_eagle_without_layer_list_uses_target_depth(self, specforge_checkout, tmp_path):
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "config.json").write_text(
+            '{"text_config": {"num_hidden_layers": 48}, "num_hidden_layers": 1}\n'
+        )
+        draft = tmp_path / "qwen-coder-eagle3.json"
+        draft.write_text('{"architectures": ["LlamaForCausalLMEagle3"], "num_hidden_layers": 1}\n')
+        hydra = specforge_checkout / "configs" / "eagle.yaml"
+        hydra.write_text(
+            "model:\n"
+            f"  draft_model_config: {draft.as_posix()}\n"
+            f"  target_model_path: {target.as_posix()}\n"
+        )
+        params = self._params(specforge_checkout, tmp_path)
+        params.specforge_config = str(hydra)
+        params.specforge_overrides = {}
+        assert online_settings(params)["capture_layer_ids"] == (1, 23, 44)
+
     def test_online_yaml_has_no_cluster_ips(self):
         text = ONLINE_CONFIG.read_text(encoding="utf-8")
         assert "specforge_mode: train" in text

@@ -150,35 +150,122 @@ def _existing_draft_config(params: Any, env: Optional[Mapping[str, str]] = None)
     return None
 
 
-def layer_ids_from_draft_json(path: Path) -> tuple[int, ...]:
+def _layer_id_tuple(value: Any) -> Optional[tuple[int, ...]]:
+    if isinstance(value, bool) or not isinstance(value, (list, tuple)) or not value:
+        return None
+    ids: list[int] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            return None
+        ids.append(item)
+    return tuple(ids)
+
+
+def _draft_layer_ids(data: Mapping[str, Any]) -> Optional[tuple[int, ...]]:
+    """Layer ids embedded in the draft JSON, for whichever drafter wrote them."""
+
+    for group, key in (
+        ("dflash_config", "target_layer_ids"),
+        ("eagle_config", "eagle_aux_hidden_state_layer_ids"),
+    ):
+        block = data.get(group)
+        if not isinstance(block, dict):
+            continue
+        ids = _layer_id_tuple(block.get(key))
+        if ids:
+            return ids
+    return None
+
+
+def _is_eagle_draft(data: Mapping[str, Any]) -> bool:
+    if isinstance(data.get("eagle_config"), dict):
+        return True
+    architectures = data.get("architectures")
+    if not isinstance(architectures, (list, tuple)):
+        return False
+    return any("eagle" in str(name).lower() for name in architectures)
+
+
+def _target_num_hidden_layers(target_model_path: Optional[str]) -> int:
+    if not target_model_path:
+        raise ValueError(
+            "EAGLE draft JSON has no eagle_config.eagle_aux_hidden_state_layer_ids, "
+            "and no target model path is set to derive them"
+        )
+    root = Path(target_model_path)
+    config_path = root / "config.json" if root.is_dir() else root
+    if config_path.name != "config.json" or not config_path.is_file():
+        raise ValueError(
+            "EAGLE draft JSON has no eagle_config.eagle_aux_hidden_state_layer_ids; "
+            f"expected a target config.json under {target_model_path}"
+        )
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"could not read target config {config_path}: {exc}") from exc
+    if not isinstance(config, dict):
+        raise ValueError(f"{config_path} is not a JSON object")
+    text = config.get("text_config")
+    source = text if isinstance(text, dict) and "num_hidden_layers" in text else config
+    num_layers = source.get("num_hidden_layers")
+    if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers < 1:
+        raise ValueError(f"{config_path} has no positive num_hidden_layers")
+    return num_layers
+
+
+def _eagle_layers_from_target_depth(num_layers: int) -> tuple[int, ...]:
+    """SpecForge's EAGLE default when the draft JSON omits the layer list."""
+
+    layers = (1, num_layers // 2 - 1, num_layers - 4)
+    if any(layer < 0 for layer in layers):
+        raise ValueError(
+            "EAGLE capture layers derived from the target depth are negative: "
+            f"num_hidden_layers={num_layers} -> {layers}"
+        )
+    return layers
+
+
+def layer_ids_from_draft_json(path: Path, *, target_model_path: Optional[str] = None) -> tuple[int, ...]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return ()
-    ids = (data.get("dflash_config") or {}).get("target_layer_ids") if isinstance(data, dict) else None
-    if not ids:
-        return ()
-    return tuple(int(v) for v in ids)
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"could not read draft JSON {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    ids = _draft_layer_ids(data)
+    if ids:
+        return ids
+    if _is_eagle_draft(data):
+        return _eagle_layers_from_target_depth(_target_num_hidden_layers(target_model_path))
+    raise ValueError(
+        f"{path} does not define capture layer ids "
+        "(dflash_config.target_layer_ids or eagle_config.eagle_aux_hidden_state_layer_ids)"
+    )
 
 
-def resolve_capture_layer_ids(params: Any, env: Optional[Mapping[str, str]] = None) -> tuple[int, ...]:
-    """Read ``dflash_config.target_layer_ids`` from the recipe draft JSON.
+def resolve_capture_layer_ids(
+    params: Any,
+    env: Optional[Mapping[str, str]] = None,
+    target_model_path: Optional[str] = None,
+) -> tuple[int, ...]:
+    """Read capture layer ids from the recipe draft JSON.
 
     ``model.draft_model_config`` in the SpecForge Hydra file, or an override of
-    that field, is the only source. Online settings and environment variables
-    do not supply layer ids.
+    that field, names the file. DFlash-family drafts list
+    ``dflash_config.target_layer_ids``. EAGLE drafts list
+    ``eagle_config.eagle_aux_hidden_state_layer_ids``, or, when that list is
+    absent, use ``[1, num_hidden_layers // 2 - 1, num_hidden_layers - 4]`` from
+    the target ``config.json``. Online settings and environment variables do
+    not supply layer ids.
     """
 
     draft = _existing_draft_config(params, env=env)
     if draft is None:
         raise ValueError(
             "model.draft_model_config must point at an existing draft JSON; "
-            "capture layer ids are dflash_config.target_layer_ids in that file"
+            "capture layer ids come from that file"
         )
-    ids = layer_ids_from_draft_json(draft)
-    if not ids:
-        raise ValueError(f"{draft} has no dflash_config.target_layer_ids")
-    return ids
+    return layer_ids_from_draft_json(draft, target_model_path=target_model_path)
 
 
 def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
@@ -238,7 +325,7 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         "mooncake_http_port": int(raw.get("mooncake_http_port") or DEFAULT_MOONCAKE_HTTP_PORT),
         "mooncake_metrics_port": int(raw.get("mooncake_metrics_port") or DEFAULT_MOONCAKE_METRICS_PORT),
         "mooncake_lease_ttl_ms": lease_ttl,
-        "capture_layer_ids": resolve_capture_layer_ids(params, environ),
+        "capture_layer_ids": resolve_capture_layer_ids(params, environ, target_model_path=str(target)),
         "target_model_path": str(target),
         "sglang_extra_args": extra,
         "skip_tokenizer_init": _as_bool(

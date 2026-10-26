@@ -206,8 +206,10 @@ modules:
         target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}  # HF id or local path
         mooncake_protocol: ${MOONCAKE_PROTOCOL:tcp}  # Mooncake transport
         mooncake_lease_ttl_ms: ${MOONCAKE_LEASE_TTL_MS:500}  # KV lease TTL
-        # Capture layer ids are dflash_config.target_layer_ids in the draft JSON
-        # named by model.draft_model_config. They are not set here.
+        # Capture layer ids come from the draft JSON named by model.draft_model_config.
+        # DFlash-family drafts use dflash_config.target_layer_ids. EAGLE drafts use
+        # eagle_config.eagle_aux_hidden_state_layer_ids, or the target depth when
+        # that list is omitted. They are not set here.
         # server_port: 30000             # first SGLang HTTP port
         # server_mem_fraction: 0.85      # SGLang GPU memory fraction
         # mooncake_rpc_port: 35551       # Mooncake RPC
