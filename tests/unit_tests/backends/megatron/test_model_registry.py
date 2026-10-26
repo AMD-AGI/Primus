@@ -82,17 +82,86 @@ def test_primus_family_references_resolve(name):
 def test_family_package_keeps_its_builder_names(name):
     import importlib
 
-    from primus.backends.megatron.core.models.builder import build_model, model_provider
+    from primus.backends.megatron.core.models.builder import build_model
 
     builders = importlib.import_module(f"{MODEL_FAMILIES[name].package}.{name}_builders")
     builder = getattr(builders, f"{name}_builder")
     assert (builder.func, builder.args) == (build_model, (name,))
-    assert builders.model_provider is model_provider
+    assert builders.model_provider.default_builder is builder
+
+
+@pytest.mark.parametrize("name", PRIMUS_FAMILIES)
+@pytest.mark.parametrize(
+    ("call", "expected_builder"),
+    [
+        (lambda provider: provider(pre_process=True, post_process=False), "default"),
+        (lambda provider: provider(None, True, False), "default"),
+        (lambda provider: provider("CUSTOM", True, False), "CUSTOM"),
+        (lambda provider: provider(model_builder="CUSTOM", pre_process=True, post_process=False), "CUSTOM"),
+    ],
+)
+def test_family_model_provider_defaults_to_its_own_builder(monkeypatch, name, call, expected_builder):
+    import importlib
+
+    from primus.backends.megatron.core.models import builder
+
+    builders = importlib.import_module(f"{MODEL_FAMILIES[name].package}.{name}_builders")
+    calls = []
+
+    def fake_model_provider(*a, **k):
+        calls.append((a, k))
+        return "MODEL"
+
+    monkeypatch.setattr(builder, "model_provider", fake_model_provider)
+
+    assert call(builders.model_provider) == "MODEL"
+
+    family_builder = getattr(builders, f"{name}_builder")
+    expected = family_builder if expected_builder == "default" else expected_builder
+    assert calls == [((expected, True, False, None), {"config": None, "pg_collection": None})]
 
 
 @pytest.mark.parametrize("model_type", [None, "", "diffusion_model"])
 def test_unregistered_model_type_trains_as_the_default(model_type):
     assert get_model_family(model_type) is MODEL_FAMILIES[DEFAULT_MODEL_TYPE]
+
+
+# Values the diffusion trainers set, which supply their own model_provider.
+UNREGISTERED_MODEL_TYPES = {"diffusion_model"}
+
+
+def _reads_model_type(node):
+    if isinstance(node, ast.Name):
+        return node.id == "model_type"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "model_type"
+    # getattr(args, "model_type", None), get_param(ctx, "model_type")
+    return (
+        isinstance(node, ast.Call)
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "model_type"
+    )
+
+
+def test_model_type_gates_in_the_megatron_backend_name_registered_families():
+    """A patch gated on a misspelt or renamed family silently never applies."""
+    unknown = []
+    for py in sorted((REPO_ROOT / "primus" / "backends" / "megatron").rglob("*.py")):
+        for node in ast.walk(ast.parse(py.read_text())):
+            if not (isinstance(node, ast.Compare) and len(node.ops) == 1):
+                continue
+            if not isinstance(node.ops[0], (ast.Eq, ast.NotEq)):
+                continue
+            left, right = node.left, node.comparators[0]
+            for read, value in ((left, right), (right, left)):
+                if not (_reads_model_type(read) and isinstance(value, ast.Constant)):
+                    continue
+                if not isinstance(value.value, str):
+                    continue
+                if value.value not in MODEL_FAMILIES and value.value not in UNREGISTERED_MODEL_TYPES:
+                    unknown.append(f"{py.relative_to(REPO_ROOT)}:{node.lineno}: {value.value!r}")
+    assert not unknown, "model_type compared against unregistered values:\n" + "\n".join(unknown)
 
 
 # ---------------------------------------------------------------------------
@@ -101,17 +170,14 @@ def test_unregistered_model_type_trains_as_the_default(model_type):
 
 
 @pytest.fixture
-def warnings(monkeypatch):
+def quiet(monkeypatch):
     from primus.core.utils import import_utils
 
-    emitted = []
     monkeypatch.setattr(import_utils, "log_rank_0", lambda *a, **k: None)
-    monkeypatch.setattr(import_utils, "warning_rank_0", lambda msg, *a, **k: emitted.append(msg))
-    return emitted
 
 
 @pytest.mark.parametrize("name", PRIMUS_FAMILIES)
-def test_primus_family_gets_the_shared_provider(warnings, name):
+def test_primus_family_gets_the_shared_provider(quiet, name):
     from primus.backends.megatron.core.models.builder import build_model, model_provider
     from primus.core.utils.import_utils import get_model_provider
 
@@ -120,7 +186,14 @@ def test_primus_family_gets_the_shared_provider(warnings, name):
     assert provider.func is model_provider
     (builder,) = provider.args
     assert (builder.func, builder.args) == (build_model, (name,))
-    assert not warnings
+
+
+@pytest.mark.parametrize("model_type", ["not_a_family", "kimi-k3", "diffusion_model"])
+def test_get_model_provider_rejects_an_unregistered_model_type(quiet, model_type):
+    from primus.core.utils.import_utils import get_model_provider
+
+    with pytest.raises(ValueError, match=rf"{model_type!r} is not registered.*registered: deepseek_v4, "):
+        get_model_provider(model_type=model_type)
 
 
 @pytest.mark.parametrize(
@@ -128,11 +201,11 @@ def test_primus_family_gets_the_shared_provider(warnings, name):
     [
         ("gpt", "pretrain_gpt", "gpt_builders", "gpt_builder"),
         ("mamba", "pretrain_mamba", "mamba_builders", "mamba_builder"),
-        ("not_a_family", "pretrain_gpt", "gpt_builders", "gpt_builder"),
+        (None, "pretrain_gpt", "gpt_builders", "gpt_builder"),
     ],
 )
 def test_upstream_family_resolves_across_megatron_versions(
-    warnings, monkeypatch, model_type, entrypoint, builder_module, builder_name
+    quiet, monkeypatch, model_type, entrypoint, builder_module, builder_name
 ):
     from primus.core.utils import import_utils
 
@@ -150,10 +223,9 @@ def test_upstream_family_resolves_across_megatron_versions(
     assert calls == [(("model_provider", entrypoint), "model_provider"), ((builder_module,), builder_name)]
     assert provider.func is resolved["model_provider"]
     assert provider.args == (resolved[builder_name],)
-    assert bool(warnings) == (model_type not in MODEL_FAMILIES)
 
 
-def test_upstream_family_without_a_builder_module_returns_the_bare_provider(warnings, monkeypatch):
+def test_upstream_family_without_a_builder_module_returns_the_bare_provider(quiet, monkeypatch):
     from primus.core.utils import import_utils
 
     def bare_provider(*a, **k):
@@ -258,7 +330,8 @@ def test_build_model_runs_the_family_hooks_in_order(builder):
         ("decoder_spec", "fake", 1),
         ("check_model", "FakeModel"),
     ]
-    assert isinstance(model.kwargs.pop("config"), FakeConfig)
+    config = model.kwargs.pop("config")
+    assert isinstance(config, FakeConfig)
     assert model.kwargs == dict(
         transformer_layer_spec="FAMILY_SPEC",
         vocab_size=128,
@@ -334,3 +407,22 @@ def test_model_provider_forwards_to_the_bound_builder(builder, monkeypatch):
 
     assert provider(pre_process=False, post_process=True, vp_stage=2, config="CFG") == "MODEL"
     assert calls == [((args, False, True, 2), {"config": "CFG", "pg_collection": None})]
+
+
+def test_model_provider_records_memory_history_and_snapshots_on_oom(builder, monkeypatch):
+    import torch
+
+    args = _args(record_memory_history=True, memory_snapshot_path="snapshot.pickle")
+    monkeypatch.setattr(builder, "get_args", lambda: args)
+    recorded, observers, dumped = [], [], []
+    monkeypatch.setattr(torch.cuda.memory, "_record_memory_history", lambda *a, **k: recorded.append(k))
+    monkeypatch.setattr(torch.cuda.memory, "_dump_snapshot", dumped.append)
+    monkeypatch.setattr(torch._C, "_cuda_attach_out_of_memory_observer", observers.append, raising=False)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 3)
+
+    builder.model_provider(lambda *a, **k: "MODEL")
+
+    assert recorded == [dict(trace_alloc_max_entries=100000, trace_alloc_record_context=True)]
+    (observer,) = observers
+    observer(0, 1, 2, 3)
+    assert dumped == ["oom_rank-3_snapshot.pickle"]

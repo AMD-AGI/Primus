@@ -14,7 +14,7 @@ from megatron.training.arguments import core_transformer_config_from_args
 
 from primus.backends.megatron.core.models.registry import MODEL_FAMILIES
 
-__all__ = ["build_model", "model_provider"]
+__all__ = ["build_model", "model_provider", "family_model_provider"]
 
 
 def build_model(
@@ -82,7 +82,10 @@ def model_provider(
     config=None,
     pg_collection=None,
 ):
-    """``model_provider`` Megatron's ``pretrain()`` calls; ``get_model_provider`` binds ``model_builder``."""
+    """``model_provider`` Megatron's ``pretrain()`` calls; ``get_model_provider`` binds ``model_builder``.
+
+    Mirrors Megatron's ``model_provider`` except for its ModelOpt builder swap, which would
+    replace the Primus model with a GPT one."""
     args = get_args()
     if args.record_memory_history:
         import torch
@@ -93,6 +96,38 @@ def model_provider(
             trace_alloc_record_context=True,
         )
 
+        def oom_observer(device, alloc, device_alloc, device_free):
+            print("saving allocated state during OOM")
+            filename = f"oom_rank-{torch.distributed.get_rank()}_{args.memory_snapshot_path}"
+            torch.cuda.memory._dump_snapshot(filename)
+
+        torch._C._cuda_attach_out_of_memory_observer(oom_observer)
+
     return model_builder(
         args, pre_process, post_process, vp_stage, config=config, pg_collection=pg_collection
     )
+
+
+def family_model_provider(default_builder):
+    """The ``model_provider`` a family package exports: ``model_provider`` with ``model_builder``
+    optional, falling back to ``default_builder`` when it is omitted or ``None``."""
+
+    def family_provider(
+        model_builder=None,
+        pre_process: bool = True,
+        post_process: bool = True,
+        vp_stage: Optional[int] = None,
+        config=None,
+        pg_collection=None,
+    ):
+        return model_provider(
+            default_builder if model_builder is None else model_builder,
+            pre_process,
+            post_process,
+            vp_stage,
+            config=config,
+            pg_collection=pg_collection,
+        )
+
+    family_provider.default_builder = default_builder
+    return family_provider

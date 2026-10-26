@@ -8,7 +8,10 @@
 
 from functools import partial
 
-from primus.backends.megatron.core.models.builder import build_model, model_provider
+from primus.backends.megatron.core.models.builder import (
+    build_model,
+    family_model_provider,
+)
 
 __all__ = ["zaya1_builder", "model_provider", "prepare_zaya1_args", "zaya1_model_kwargs"]
 
@@ -54,3 +57,4 @@ def zaya1_model_kwargs(args) -> dict:
 
 
 zaya1_builder = partial(build_model, "zaya1")
+model_provider = family_model_provider(zaya1_builder)

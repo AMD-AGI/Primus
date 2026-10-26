@@ -16,7 +16,10 @@ from functools import partial
 
 from megatron.training import print_rank_0
 
-from primus.backends.megatron.core.models.builder import build_model, model_provider
+from primus.backends.megatron.core.models.builder import (
+    build_model,
+    family_model_provider,
+)
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_layer_specs import (
     is_v4_turbo_deepep_active,
 )
@@ -201,3 +204,4 @@ def deepseek_v4_model_kwargs(args) -> dict:
 
 
 deepseek_v4_builder = partial(build_model, "deepseek_v4")
+model_provider = family_model_provider(deepseek_v4_builder)

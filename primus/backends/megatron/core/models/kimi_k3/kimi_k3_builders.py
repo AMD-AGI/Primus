@@ -17,7 +17,10 @@ from functools import partial
 
 from megatron.training import print_rank_0
 
-from primus.backends.megatron.core.models.builder import build_model, model_provider
+from primus.backends.megatron.core.models.builder import (
+    build_model,
+    family_model_provider,
+)
 
 __all__ = [
     "kimi_k3_builder",
@@ -151,3 +154,4 @@ def check_kimi_k3_model(args, config, model) -> None:
 
 
 kimi_k3_builder = partial(build_model, "kimi_k3")
+model_provider = family_model_provider(kimi_k3_builder)

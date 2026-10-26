@@ -6,7 +6,7 @@
 import importlib
 from functools import partial
 
-from primus.core.utils.module_utils import log_rank_0, warning_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def lazy_import(paths, symbol, log_prefix="[Primus]"):
@@ -45,6 +45,10 @@ def get_model_provider(model_type="gpt"):
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
     - Old:   pretrain_gpt.model_provider / pretrain_mamba.model_provider
+
+    An unregistered ``model_type`` raises rather than building ``gpt``: a misspelt
+    family would otherwise train a different model. Trainers for unregistered
+    values (the diffusion trainers) supply their own ``model_provider``.
     """
     from primus.backends.megatron.core.models.registry import (
         DEFAULT_MODEL_TYPE,
@@ -52,12 +56,14 @@ def get_model_provider(model_type="gpt"):
     )
 
     log_prefix = "[Primus][MegatronCompat]"
+    model_type = model_type or DEFAULT_MODEL_TYPE
     family = MODEL_FAMILIES.get(model_type)
     if family is None:
-        warning_rank_0(
-            f"{log_prefix} model_type {model_type!r} is not registered; building {DEFAULT_MODEL_TYPE}."
+        raise ValueError(
+            f"{log_prefix} model_type {model_type!r} is not registered in "
+            "primus/backends/megatron/core/models/registry.py; "
+            f"registered: {', '.join(sorted(MODEL_FAMILIES))}."
         )
-        family = MODEL_FAMILIES[DEFAULT_MODEL_TYPE]
 
     if not family.builder:
         builder_module = importlib.import_module("primus.backends.megatron.core.models.builder")
