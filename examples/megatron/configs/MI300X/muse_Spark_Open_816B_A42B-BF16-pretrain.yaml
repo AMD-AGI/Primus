@@ -1,0 +1,85 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:muse_spark_816B_A42B-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Muse-Spark-Open-816B-A42B (text decoder) BF16 pretraining on MI300X.
+#   model: primus/configs/models/megatron/muse_Spark_Open_816B_A42B.yaml (62 layers) or
+#          muse_spark_816B_A42B_proxy.yaml (first MUSE_SPARK_NUM_LAYERS layers).
+#   Model code: primus/backends/megatron/core/models/muse_spark/.
+#   HF -> Megatron weights: primus/backends/megatron/checkpoint/native_loader_muse_spark.py.
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: ${PRIMUS_MODEL:muse_Spark_Open_816B_A42B}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Muse_Spark"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # hyper parameters
+      train_iters: ${TRAIN_ITERS:20}
+      micro_batch_size: ${MBS:1}
+      global_batch_size: ${GBS:16}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+
+      # parallel (expert_tensor_parallel_size stays 1: post_expert_norm needs full rows)
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      expert_tensor_parallel_size: 1
+      sequence_parallel: ${PRIMUS_SP:true}  # forced off at TP1 (sequence_parallel_tp1 patch)
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: ${PRIMUS_MOCK_DATA:true}
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+
+      # optimizer
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: false
+
+      # recompute
+      recompute_granularity: ${RECOMPUTE_GRANULARITY:full}
+      recompute_method: block
+      recompute_num_layers: ${PRIMUS_RECOMPUTE_LAYERS:0}
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # turbo: off (plain TE GEMMs / grouped GEMM, alltoall dispatcher)
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:false}
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+      use_turbo_deepep: false
+      moe_router_dtype: fp32
+      moe_permute_fusion: false
+
+      # soft-capped logits: keep the plain cross entropy
+      cross_entropy_loss_fusion: false

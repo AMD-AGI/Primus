@@ -685,6 +685,74 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def _muse_spark(self, tag, exp_path, extra=None):
+        # Muse Spark text decoder (gated attention, residual gates, latent MoE),
+        # cut to 4 layers so it fits one node; mock data.
+        run_script(
+            self.__class__.__name__,
+            f"muse_spark_{tag}_{GPU_PLATFORM.lower()}_bf16",
+            exp_path=exp_path,
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                *(extra or []),
+            ],
+        )
+
+    def test_muse_Spark_Open_816B_A42B(self):
+        # Muse-Spark-Open-816B-A42B text decoder, cut to 4 layers and 3 iterations.
+        # Fewer experts and a small batch keep the 4-layer cut on one node; mock data.
+        run_script(
+            self.__class__.__name__,
+            f"muse_Spark_Open_816B_A42B_{GPU_PLATFORM.lower()}",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/muse_Spark_Open_816B_A42B-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--seq_length",
+                "1024",
+                "--max_position_embeddings",
+                "1024",
+                "--num_experts",
+                "16",
+                "--moe_router_topk",
+                "4",
+            ],
+        )
+
+    def test_muse_spark_base_bf16(self):
+        self._muse_spark(
+            "base", f"examples/megatron/configs/{GPU_PLATFORM}/muse_spark_base-BF16-pretrain.yaml"
+        )
+
+    def test_muse_spark_816B_A42B_bf16(self):
+        self._muse_spark(
+            "816b",
+            f"examples/megatron/configs/{GPU_PLATFORM}/muse_Spark_Open_816B_A42B-BF16-pretrain.yaml",
+            ["--num_experts", "16", "--moe_router_topk", "4"],
+        )
+
+    def test_muse_spark_816B_A42B_proxy_bf16(self):
+        self._muse_spark(
+            "proxy",
+            f"examples/megatron/configs/{GPU_PLATFORM}/muse_Spark_Open_816B_A42B-proxy-BF16-pretrain.yaml",
+            ["--num_experts", "16", "--moe_router_topk", "4"],
+        )
+
     def test_zaya1_8B_bf16(self):
         # Own architecture: alternating CCA and a nonlinear MoE router.
         # The tag includes the platform so the MI300X and MI355X logs stay
