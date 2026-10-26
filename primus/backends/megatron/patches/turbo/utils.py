@@ -4,10 +4,30 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import importlib
 import importlib.util
 
 from primus.core.patches import PatchContext, get_args
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
+
+# Megatron-core >= 0.19 runs the per-layer quantization contexts from these modules
+# (full recompute goes through megatron.core.recompute.checkpointed_forward), and each
+# binds get_fp8_context / get_fp4_context by name at import.
+_LAYER_LOOP_MODULES = (
+    "megatron.core.recompute",
+    "megatron.core.models.hybrid.hybrid_block",
+)
+
+
+def optional_layer_loop_modules() -> list:
+    """The ``_LAYER_LOOP_MODULES`` present in this Megatron."""
+    modules = []
+    for name in _LAYER_LOOP_MODULES:
+        try:
+            modules.append(importlib.import_module(name))
+        except ImportError:
+            continue
+    return modules
 
 
 def is_primus_turbo_can_patch(ctx: PatchContext) -> bool:

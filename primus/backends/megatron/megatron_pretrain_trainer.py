@@ -163,10 +163,16 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         # overrides get_datasets_provider() and sets `is_distributed` from its own
         # data provider, where False is a legitimate choice (dataset_provider.py:55).
         if model_type == "mamba":
-            from pretrain_mamba import (  # type: ignore
-                forward_step,
-                train_valid_test_datasets_provider,
-            )
+            try:
+                from pretrain_mamba import (  # type: ignore
+                    forward_step,
+                    train_valid_test_datasets_provider,
+                )
+            except ImportError:  # Megatron-core 0.19+: pretrain_mamba.py only forwards to pretrain_hybrid.py
+                from pretrain_hybrid import (  # type: ignore
+                    forward_step,
+                    train_valid_test_datasets_provider,
+                )
 
             log_rank_0("Using Mamba model provider and training components")
             train_valid_test_datasets_provider.is_distributed = True
@@ -274,14 +280,29 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         if hasattr(mt_training, "get_forward_backward_func"):
             mt_training.get_forward_backward_func = patched_get_forward_backward_func
 
+        from primus.backends.megatron.training.run_config import (
+            build_run_config,
+            uses_cfg_container_api,
+        )
+
         try:
-            wrapped_pretrain(
-                train_valid_test_datasets_provider,
-                model_provider,
-                ModelType.encoder_or_decoder,
-                forward_step,
-                **kwargs,
-            )
+            if uses_cfg_container_api(pretrain):
+                wrapped_pretrain(
+                    build_run_config(),
+                    train_valid_test_datasets_provider,
+                    ModelType.encoder_or_decoder,
+                    forward_step,
+                    model_provider=model_provider,
+                    **kwargs,
+                )
+            else:
+                wrapped_pretrain(
+                    train_valid_test_datasets_provider,
+                    model_provider,
+                    ModelType.encoder_or_decoder,
+                    forward_step,
+                    **kwargs,
+                )
             log_rank_0("[MegatronPretrainTrainer] pretrain() completed successfully")
         except Exception as e:
             log_rank_0(f"[MegatronPretrainTrainer] ERROR in pretrain(): {type(e).__name__}: {e}")

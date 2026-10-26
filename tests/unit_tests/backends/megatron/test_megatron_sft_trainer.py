@@ -268,6 +268,40 @@ def test_run_sft_pretrain_uses_new_megatron_entrypoint_signature(monkeypatch: py
     }
 
 
+def test_run_sft_pretrain_builds_run_config_for_cfg_container_api(monkeypatch: pytest.MonkeyPatch):
+    import primus.backends.megatron.training.run_config as run_config_mod
+
+    calls = []
+
+    model_type = SimpleNamespace(encoder_or_decoder="ENCODER_OR_DECODER")
+    monkeypatch.setitem(sys.modules, "megatron.core.enums", types.SimpleNamespace(ModelType=model_type))
+    monkeypatch.setitem(sys.modules, "megatron.training", types.SimpleNamespace())
+    monkeypatch.setattr(sft_runtime, "log_rank_0", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run_config_mod, "build_run_config", lambda: "RUN_CONFIG")
+
+    def fake_pretrain(
+        cfg_container, train_valid_test_datasets_provider, model_type_arg, forward_step, **kwargs
+    ):
+        calls.append(
+            (cfg_container, train_valid_test_datasets_provider, model_type_arg, forward_step, kwargs)
+        )
+
+    datasets_provider = object()
+    model_provider = object()
+    forward_step = object()
+
+    sft_runtime.run_sft_pretrain(
+        pretrain_fn=fake_pretrain,
+        datasets_provider=datasets_provider,
+        model_provider=model_provider,
+        forward_step=forward_step,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][:4] == ("RUN_CONFIG", datasets_provider, model_type.encoder_or_decoder, forward_step)
+    assert calls[0][4]["model_provider"] is model_provider
+
+
 def test_run_sft_pretrain_falls_back_to_direct_pretrain_call(monkeypatch: pytest.MonkeyPatch):
     calls = []
 

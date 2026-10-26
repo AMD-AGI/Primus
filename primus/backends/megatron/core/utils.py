@@ -26,6 +26,50 @@ def get_megatron_arg(name: str, default: Any = None) -> Any:
         return default
 
 
+def mtp_on_this_rank_compat(config, vp_stage, pg_collection=None) -> bool:
+    """``mtp_on_this_rank`` for the model's own config, across Megatron versions.
+
+    Megatron-core 0.19+ take the layout and sizes instead of the config.
+    """
+    import inspect
+
+    from megatron.core.transformer.multi_token_prediction import mtp_on_this_rank
+
+    params = inspect.signature(mtp_on_this_rank).parameters
+    if next(iter(params)) == "config":
+        return mtp_on_this_rank(config, ignore_virtual=False, vp_stage=vp_stage)
+    kwargs = {}
+    # Megatron-LM main only.
+    if "pp_group" in params:
+        kwargs["pp_group"] = getattr(pg_collection, "pp", None)
+    if "vp_size" in params:
+        kwargs["vp_size"] = config.virtual_pipeline_model_parallel_size
+    return mtp_on_this_rank(
+        layout=config.pipeline_model_parallel_layout,
+        mtp_num_layers=config.mtp_num_layers,
+        ignore_virtual=False,
+        vp_stage=vp_stage,
+        **kwargs,
+    )
+
+
+def process_mtp_loss_compat(*, runtime_gather_output=None, tp_group=None, **kwargs):
+    """``process_mtp_loss`` across Megatron versions.
+
+    Megatron-LM main dropped ``runtime_gather_output``; ``tp_group`` is newer than the pin.
+    """
+    import inspect
+
+    from megatron.core.transformer.multi_token_prediction import process_mtp_loss
+
+    params = inspect.signature(process_mtp_loss).parameters
+    if "runtime_gather_output" in params:
+        kwargs["runtime_gather_output"] = runtime_gather_output
+    if "tp_group" in params:
+        kwargs["tp_group"] = tp_group
+    return process_mtp_loss(**kwargs)
+
+
 @lru_cache
 def produce_attention_sharder(cp_comm_type: str):
     # Import only when needed to avoid import errors if primus_turbo is not available
@@ -69,7 +113,10 @@ def apply_torch_compile_if_enabled(model: List[Any], args: Any) -> None:
     Raises:
         Exception: If compilation fails, exception is raised (not caught)
     """
-    from megatron.training.utils import unwrap_model
+    try:
+        from megatron.training.utils import unwrap_model
+    except ImportError:  # moved to megatron.core.utils in Megatron-core 0.19
+        from megatron.core.utils import unwrap_model
 
     # Check if compilation is enabled
     if not getattr(args, "enable_torch_compile", False):

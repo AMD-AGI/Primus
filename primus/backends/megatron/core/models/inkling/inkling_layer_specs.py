@@ -21,6 +21,7 @@ one-to-one with the checkpoint; fusing them is a later optimisation.
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import List, Optional
 
@@ -79,18 +80,24 @@ def _attention_spec(backend: TESpecProvider) -> ModuleSpec:
     )
 
 
-def _dense_mlp_spec(backend: TESpecProvider) -> ModuleSpec:
-    return ModuleSpec(
-        module=InklingMLP,
-        submodules=MLPSubmodules(
-            linear_fc1=backend.column_parallel_linear(),
-            linear_fc2=backend.row_parallel_linear(),
-        ),
+def _dense_mlp_spec(backend: TESpecProvider):
+    submodules = MLPSubmodules(
+        linear_fc1=backend.column_parallel_linear(),
+        linear_fc2=backend.row_parallel_linear(),
     )
+    # Megatron-core 0.19+ build a layer's mlp with pg_collection / is_mtp_layer and only
+    # translate them for MLP itself, not for subclasses.
+    if hasattr(InklingMLP, "as_mlp_submodule"):
+        return functools.partial(InklingMLP.as_mlp_submodule, submodules=submodules)
+    return ModuleSpec(module=InklingMLP, submodules=submodules)
 
 
 def _moe_spec(config: InklingTransformerConfig, backend: TESpecProvider) -> ModuleSpec:
-    expert_module, expert_submodules = backend.grouped_mlp_modules(bool(config.moe_grouped_gemm))
+    experts = backend.grouped_mlp_modules(bool(config.moe_grouped_gemm))
+    if isinstance(experts, functools.partial):  # Megatron-core 0.19+ return an ExpertsBuilder
+        expert_module, expert_submodules = experts.func, experts.keywords.get("submodules")
+    else:
+        expert_module, expert_submodules = experts
     if expert_module is TEGroupedMLP:
         expert_module = InklingGroupedMLP
     elif config.inkling_fp32_activations:

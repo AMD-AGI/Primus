@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import inspect
 import warnings
 from types import SimpleNamespace
 from typing import Optional
@@ -19,16 +20,23 @@ from megatron.core.extensions.transformer_engine import (
     TERowParallelGroupedLinear,
     TERowParallelLinear,
 )
+from megatron.core.extensions.transformer_engine_spec_provider import (
+    TESpecProvider as _UpstreamTESpecProvider,
+)
 from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 from megatron.core.models.backends import BackendSpecProvider
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer.dot_product_attention import DotProductAttention
 from megatron.core.transformer.mlp import MLPSubmodules
-from megatron.core.transformer.moe.experts import (
-    SequentialMLP,
-    TEGroupedMLP,
-    TEGroupedMLPSubmodules,
-)
+from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
+
+try:
+    from megatron.core.transformer.moe.experts import TEGroupedMLPSubmodules
+except ImportError:  # renamed in Megatron-core 0.17
+    from megatron.core.transformer.moe.experts import (
+        GroupedMLPSubmodules as TEGroupedMLPSubmodules,
+    )
+
 from megatron.core.utils import get_te_version, is_te_min_version
 
 from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
@@ -92,6 +100,7 @@ def _build_legacy_grouped_mlp_class():
             pg_collection=None,
             model_comm_pgs=None,
             submodules=None,
+            name=None,  # passed by Megatron-core 0.19+; DeprecatedGroupedMLP has no name
         ):
             del submodules  # DeprecatedGroupedMLP holds ``weight1`` / ``weight2`` directly.
             comm_pgs = model_comm_pgs if model_comm_pgs is not None else pg_collection
@@ -117,15 +126,53 @@ def _build_default_primus_args() -> SimpleNamespace:
     )
 
 
+import megatron.core.transformer.moe.moe_layer as _moe_layer
+
+_MOE_TAKES_EXPERTS_BUILDER = hasattr(_moe_layer, "ExpertsBuilder")
+
+
+def _experts_builder(module, submodules):
+    """Wrap ``(module, submodules)`` as an ``ExpertsBuilder`` (Megatron-core 0.19+).
+
+    ``name=`` is dropped for Primus expert classes that do not accept it.
+    """
+    params = inspect.signature(module.__init__).parameters
+    takes_name = "name" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+    def build(num_local_experts, config, **kwargs):
+        if not takes_name:
+            kwargs.pop("name", None)
+        if submodules is not None:
+            kwargs["submodules"] = submodules
+        return module(num_local_experts, config, **kwargs)
+
+    return build
+
+
 class PrimusTurboSpecProvider(BackendSpecProvider):
     """A protocol for providing the submodules used in Spec building."""
 
-    def __init__(self, fallback_to_eager_attn: bool = False):
+    def __init__(self, fallback_to_eager_attn: bool = False, **te_provider_kwargs):
         try:
             self.cfg = get_primus_args()
         except AssertionError:
             self.cfg = _build_default_primus_args()
         self.fallback_to_eager_attn = fallback_to_eager_attn
+        # Megatron-LM main builds providers with use_te_op_fuser / cross_entropy_* /
+        # cuda_graph_impl; the slots that read them are delegated to the upstream provider.
+        self._te_provider_kwargs = te_provider_kwargs
+
+    def _upstream_te_provider(self):
+        return _UpstreamTESpecProvider(**self._te_provider_kwargs)
+
+    def mlp_module(self, grouped: bool = False) -> type:
+        return self._upstream_te_provider().mlp_module(grouped=grouped)
+
+    def moe_router(self):
+        return self._upstream_te_provider().moe_router()
+
+    def vocab_parallel_cross_entropy(self):
+        return self._upstream_te_provider().vocab_parallel_cross_entropy()
 
     def linear(self) -> type:
         """Which linear module TE backend uses"""
@@ -211,8 +258,12 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             return factory()
         return TELayerNormColumnParallelLinear
 
-    def layer_norm(self, rms_norm: bool = False, for_qk: bool = False) -> type:
+    def layer_norm(self, rms_norm: bool = False, for_qk: bool = False, has_residual: bool = False) -> type:
         """Which module to use for layer norm"""
+        if has_residual:
+            return self._upstream_te_provider().layer_norm(
+                rms_norm=rms_norm, for_qk=for_qk, has_residual=True
+            )
         if for_qk and not is_te_min_version("1.9.0"):
             # TENorm significantly harms convergence when used
             # for QKLayerNorm if TE Version < 1.9;
@@ -232,8 +283,22 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
 
     def grouped_mlp_modules(
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: Optional[bool] = None
+    ):
+        """Which module and submodules to use for grouped mlp.
+
+        Older Megatron takes a ``(module, submodules)`` tuple, Megatron-core 0.19+ an
+        ``ExpertsBuilder``.
+        """
+        module, submodules = self._grouped_mlp_module_and_submodules(
+            moe_use_grouped_gemm, moe_use_legacy_grouped_gemm
+        )
+        if not _MOE_TAKES_EXPERTS_BUILDER:
+            return module, submodules
+        return _experts_builder(module, submodules)
+
+    def _grouped_mlp_module_and_submodules(
+        self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: Optional[bool] = None
     ) -> tuple[type[TEGroupedMLP], TEGroupedMLPSubmodules] | tuple[type[SequentialMLP], MLPSubmodules]:
-        """Which module and submodules to use for grouped mlp"""
         if moe_use_legacy_grouped_gemm is None:
             # Megatron callers only pass ``moe_use_grouped_gemm`` here, so when Primus
             # args do not expose the legacy switch we must match upstream TESpecProvider
@@ -353,7 +418,7 @@ class DeepSeekV4SpecProvider(PrimusTurboSpecProvider):
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: Optional[bool] = None
     ):
         """Grouped-MLP module selection for V4 MoE expert path."""
-        return self.grouped_mlp_modules(
+        return self._grouped_mlp_module_and_submodules(
             moe_use_grouped_gemm=moe_use_grouped_gemm,
             moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
         )
@@ -536,7 +601,7 @@ class KimiK3SpecProvider(PrimusTurboSpecProvider):
         width for ``linear_fc2``. The base provider does not fill it, so K3
         does.
         """
-        module, submodules = self.grouped_mlp_modules(
+        module, submodules = self._grouped_mlp_module_and_submodules(
             moe_use_grouped_gemm=moe_use_grouped_gemm,
             moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
         )
