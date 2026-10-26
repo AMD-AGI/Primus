@@ -53,7 +53,7 @@ env:
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
   TRITON_COMMIT: fc8d31a5439ec9842557a284dc7ca61aee69246b # triton-lang/triton release/3.9.x (3.9.0), built from source in Dockerfile
   BASE_IMAGE: docker.io/rocm/primus:v26.8
-  MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.2
+  MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.8
 
 jobs:
   code-lint:
@@ -713,7 +713,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (!github.event.pull_request.draft &&
        contains(github.event.pull_request.labels.*.name, 'ci:gpu'))
-    runs-on: [primus-jax-tas-runner] # docker container primus_jax_github_runner on tas a16-31
+    runs-on: [primus-jax-tas-runner-v26.8] # docker container primus_jax_github_runner_v26.8 (maxtext-v26.8) on tas a16-31
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Clean stale Primus-Turbo checkout

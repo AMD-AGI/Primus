@@ -142,11 +142,20 @@ def _break_inductor_caches() -> None:
         )
 
 
+def _has_triton() -> bool:
+    """False on images with ROCm torch but no Triton (e.g. the JAX/MaxText ones)."""
+    try:
+        import triton  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 @register_patch(
     "triton.buffer_store_war",
     backend=None,  # both Megatron and TorchTitan compile Triton kernels
     phase="build_args",  # earliest phase, well before the first kernel compile
-    condition=lambda ctx: _on_rocm(),
+    condition=lambda ctx: _on_rocm() and _has_triton(),
 )
 def patch_triton_buffer_store_war(ctx: PatchContext) -> None:
     """Disable buffer ops for the individual kernels that hit the store WAR bug."""
