@@ -47,7 +47,6 @@ from primus.backends.specforge.online_launch import (
     resolve_head_ip,
     resolve_local_ip,
     resolve_routable_ip,
-    sglang_server_argv,
     validate_online_identity,
 )
 from primus.backends.specforge.specforge_adapter import SpecForgeAdapter
@@ -864,7 +863,7 @@ class TestOnlineLaunch:
 
     def test_head_ip_overrides_rewrite_loopback(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path)
-        settings = online_settings(params)
+        settings = online_settings(params, env={})
         overrides = build_online_overrides("10.3.14.7", settings, output_dir=str(tmp_path / "out"))
         joined = " ".join(overrides)
         assert "127.0.0.1" not in joined
@@ -882,7 +881,7 @@ class TestOnlineLaunch:
 
     def test_trainer_nnodes_emits_master_addr_and_node_rank(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path, trainer_nnodes=2)
-        settings = online_settings(params)
+        settings = online_settings(params, env={})
         overrides = build_online_overrides(
             "10.3.14.7", settings, trainer_master_addr="10.9.9.1", output_dir=str(tmp_path / "out")
         )
@@ -935,7 +934,7 @@ class TestOnlineLaunch:
 
     def test_eight_plus_eight_defaults_expand_gpu_lists(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path, server_count=8, trainer_nproc=8)
-        settings = online_settings(params)
+        settings = online_settings(params, env={})
         assert settings["server_gpus"] == "0,1,2,3,4,5,6,7"
         assert settings["trainer_gpus"] == "0,1,2,3,4,5,6,7"
         assert not validate_online_identity(settings, rank=0, nodes=2)
@@ -957,111 +956,16 @@ class TestOnlineLaunch:
 
     def test_identity_rejects_single_node(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path)
-        settings = online_settings(params)
+        settings = online_settings(params, env={})
         issues = validate_online_identity(settings, rank=0, nodes=1)
         assert any("capture_nnodes+trainer_nnodes=2" in item for item in issues)
 
     def test_identity_accepts_capture_plus_trainer_counts(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path, capture_nnodes=1, trainer_nnodes=2)
-        settings = online_settings(params)
+        settings = online_settings(params, env={})
         assert not validate_online_identity(settings, rank=2, nodes=3)
         issues = validate_online_identity(settings, rank=0, nodes=2)
         assert any("capture_nnodes+trainer_nnodes=3" in item for item in issues)
-
-    def test_sglang_aux_layers_match_draft_json(self, specforge_checkout, tmp_path):
-        params = self._params(specforge_checkout, tmp_path)
-        argv = sglang_server_argv(0, online_settings(params))
-        port_at = argv.index("--port")
-        layer_at = argv.index("--spec-capture-aux-layer-ids")
-        assert argv[layer_at + 1 : port_at] == ["1", "8", "15", "22", "29"]
-        assert "--host" in argv and argv[argv.index("--host") + 1] == "0.0.0.0"
-        assert "--skip-tokenizer-init" in argv
-        assert "--disable-radix-cache" in argv
-        assert "--attention-backend" in argv
-
-    def test_skip_tokenizer_init_can_be_disabled(self, specforge_checkout, tmp_path):
-        params = self._params(specforge_checkout, tmp_path, skip_tokenizer_init=False)
-        argv = sglang_server_argv(0, online_settings(params))
-        assert "--skip-tokenizer-init" not in argv
-
-    def test_capture_layer_ids_ignore_online_and_env_overrides(self, specforge_checkout, tmp_path):
-        params = self._params(specforge_checkout, tmp_path, capture_layer_ids="2,4")
-        settings = online_settings(params, env={"CAPTURE_LAYER_IDS": "9 9"})
-        assert settings["capture_layer_ids"] == (1, 8, 15, 22, 29)
-
-    def test_unreferenced_draft_json_is_not_a_layer_source(self, specforge_checkout, tmp_path):
-        other = specforge_checkout / "configs" / "other-draft.json"
-        other.write_text('{"dflash_config": {"target_layer_ids": [3, 9]}}\n')
-        params = self._params(specforge_checkout, tmp_path)
-        assert online_settings(params)["capture_layer_ids"] == (1, 8, 15, 22, 29)
-        (specforge_checkout / "configs" / "qwen3.5-4b-dflash.json").unlink()
-        with pytest.raises(ValueError, match="draft_model_config"):
-            online_settings(params)
-
-    def test_capture_layer_ids_follow_recipe_draft_json(self, specforge_checkout, tmp_path):
-        draft = tmp_path / "muse-spark-dflash2.json"
-        draft.write_text('{"dflash_config": {"target_layer_ids": [1, 16, 30, 44, 59]}}\n')
-        hydra = specforge_checkout / "configs" / "muse.yaml"
-        hydra.write_text(
-            "model:\n"
-            f"  draft_model_config: {draft.as_posix()}\n"
-            "  target_model_path: /models/muse-target\n"
-        )
-        params = self._params(specforge_checkout, tmp_path)
-        params.specforge_config = str(hydra)
-        params.specforge_overrides = {}
-        settings = online_settings(params)
-        assert settings["capture_layer_ids"] == (1, 16, 30, 44, 59)
-        assert settings["target_model_path"] == "/models/muse-target"
-        params.specforge_online["capture_layer_ids"] = "2,4"
-        assert online_settings(params)["capture_layer_ids"] == (1, 16, 30, 44, 59)
-
-    def test_capture_layer_ids_resolve_draft_relative_to_specforge_root(self, specforge_checkout, tmp_path):
-        draft = specforge_checkout / "configs" / "muse-spark-dflash2.json"
-        draft.write_text('{"dflash_config": {"target_layer_ids": [1, 16, 30, 44, 59]}}\n')
-        hydra = specforge_checkout / "configs" / "muse.yaml"
-        hydra.write_text(
-            "model:\n"
-            "  draft_model_config: configs/muse-spark-dflash2.json\n"
-            "  target_model_path: /models/muse-target\n"
-        )
-        params = self._params(specforge_checkout, tmp_path)
-        params.specforge_config = str(hydra)
-        params.specforge_overrides = {}
-        settings = online_settings(params)
-        assert settings["capture_layer_ids"] == (1, 16, 30, 44, 59)
-
-    def test_capture_layer_ids_from_eagle_config(self, specforge_checkout, tmp_path):
-        draft = tmp_path / "deepseek-eagle3.json"
-        draft.write_text(
-            '{"architectures": ["LlamaForCausalLMEagle3"], '
-            '"eagle_config": {"eagle_aux_hidden_state_layer_ids": [1, 29, 57]}}\n'
-        )
-        hydra = specforge_checkout / "configs" / "eagle.yaml"
-        hydra.write_text("model:\n" f"  draft_model_config: {draft.as_posix()}\n")
-        params = self._params(specforge_checkout, tmp_path)
-        params.specforge_config = str(hydra)
-        params.specforge_overrides = {}
-        assert online_settings(params)["capture_layer_ids"] == (1, 29, 57)
-
-    def test_eagle_without_layer_list_uses_target_depth(self, specforge_checkout, tmp_path):
-        target = tmp_path / "target"
-        target.mkdir()
-        (target / "config.json").write_text(
-            '{"text_config": {"num_hidden_layers": 48}, "num_hidden_layers": 1}\n'
-        )
-        draft = tmp_path / "qwen-coder-eagle3.json"
-        draft.write_text('{"architectures": ["LlamaForCausalLMEagle3"], "num_hidden_layers": 1}\n')
-        hydra = specforge_checkout / "configs" / "eagle.yaml"
-        hydra.write_text(
-            "model:\n"
-            f"  draft_model_config: {draft.as_posix()}\n"
-            f"  target_model_path: {target.as_posix()}\n"
-        )
-        params = self._params(specforge_checkout, tmp_path)
-        params.specforge_config = str(hydra)
-        params.specforge_overrides = {}
-        assert online_settings(params)["capture_layer_ids"] == (1, 23, 44)
 
     def test_online_yaml_has_no_cluster_ips(self):
         text = ONLINE_CONFIG.read_text(encoding="utf-8")

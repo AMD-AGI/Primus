@@ -204,6 +204,8 @@ modules:
         trainer_gpus: ${TRAINER_GPUS:0}  # trainer GPU ids; 0 means 0,1,…,trainer_nproc-1
         trainer_nproc: ${NPROC_PER_NODE:1}  # trainer processes per trainer node
         target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}  # HF id or local path
+        # Omit target_model_path here to let TARGET_MODEL beat the Hydra file.
+        # skip_tokenizer_init: true   # or SKIP_TOKENIZER_INIT; false inits the tokenizer
         mooncake_protocol: ${MOONCAKE_PROTOCOL:tcp}  # Mooncake transport
         mooncake_lease_ttl_ms: ${MOONCAKE_LEASE_TTL_MS:500}  # KV lease TTL
         # Capture layer ids come from the draft JSON named by model.draft_model_config.

@@ -99,55 +99,122 @@ def _as_bool(value: Any, default: bool) -> bool:
     raise ValueError(f"expected a boolean, got {value!r}")
 
 
-def _model_field_from_specforge_config(params: Any, key: str) -> Optional[str]:
-    """Read one ``model.<key>`` scalar from the SpecForge Hydra YAML, if it is a file."""
+def _specforge_config_file(params: Any, env: Optional[Mapping[str, str]] = None) -> Optional[Path]:
+    """SpecForge Hydra file. Relative paths resolve only against the SpecForge checkout."""
 
     raw = getattr(params, "specforge_config", None)
-    if not raw:
+    if raw in (None, "", "null"):
         return None
     path = Path(str(raw))
-    if not path.is_file():
-        return None
+    if path.is_absolute():
+        if path.is_file():
+            return path
+        raise ValueError(f"specforge_config is not a file: {raw}")
+    root = resolve_specforge_root(params, env=env)
+    if root is not None and (root / path).is_file():
+        return root / path
+    raise ValueError(f"specforge_config is not a file: {raw}")
+
+
+def _model_section(params: Any, env: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
+    """``model:`` from one SpecForge YAML file.
+
+    Hydra ``defaults:`` composition is not applied. A file that only inherits
+    ``model`` through ``defaults`` is an error. The mapping is read once per
+    ``online_settings`` call.
+    """
+
+    path = _specforge_config_file(params, env)
+    if path is None:
+        return {}
     try:
         import yaml
 
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        logging.getLogger(__name__).warning("could not read model.%s from %s: %s", key, path, exc)
-        return None
-    model = data.get("model") if isinstance(data, dict) else None
+        raise ValueError(f"could not read SpecForge config {path}: {exc}") from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must be a mapping")
+    if "defaults" in data and "model" not in data:
+        raise ValueError(
+            f"{path} uses Hydra defaults and has no model section; "
+            "Primus does not compose Hydra config groups"
+        )
+    model = data.get("model", {})
+    if model is None:
+        return {}
     if not isinstance(model, dict):
+        raise ValueError(f"{path} model must be a mapping")
+    return model
+
+
+def _model_scalar(model: Mapping[str, Any], key: str) -> Optional[str]:
+    if key not in model:
         return None
-    value = model.get(key)
+    value = model[key]
+    if value in (None, "", "null"):
+        return None
+    if isinstance(value, (dict, list)):
+        raise ValueError(f"model.{key} must be a scalar")
+    text = str(value).strip()
+    if "${" in text:
+        raise ValueError(
+            f"model.{key} contains an unresolved interpolation ({text}); "
+            "Primus does not compose the Hydra file"
+        )
+    return text
+
+
+def _present(value: Any) -> Optional[str]:
     if value in (None, "", "null"):
         return None
     return str(value)
 
 
-def _existing_draft_config(params: Any, env: Optional[Mapping[str, str]] = None) -> Optional[Path]:
+def _path_in_specforge_checkout(raw: str, root: Optional[Path]) -> Optional[Path]:
+    """Absolute paths as written. Relative paths only under the SpecForge checkout."""
+
+    path = Path(raw)
+    if path.is_absolute():
+        return path if path.is_file() else None
+    if root is None:
+        return None
+    candidate = root / path
+    return candidate if candidate.is_file() else None
+
+
+def _existing_draft_config(
+    params: Any,
+    env: Optional[Mapping[str, str]] = None,
+    model: Optional[Mapping[str, Any]] = None,
+) -> Optional[Path]:
     """Draft JSON named by ``model.draft_model_config``.
 
-    Absolute paths are used as written. Relative paths are resolved against the
-    SpecForge checkout, which is how SpecForge itself resolves that field.
+    An override wins over the Hydra file. Relative paths resolve only against
+    the SpecForge checkout, never the process working directory. A name that
+    is set but does not exist is an error.
     """
 
+    if model is None:
+        model = _model_section(params, env)
     overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
-    candidates = (
-        overrides.get("model.draft_model_config"),
-        _model_field_from_specforge_config(params, "draft_model_config"),
-    )
+    raw = _present(overrides.get("model.draft_model_config"))
+    if raw is None:
+        raw = _model_scalar(model, "draft_model_config")
+    if raw is None:
+        return None
+    if "${" in raw:
+        raise ValueError(
+            f"model.draft_model_config contains an unresolved interpolation ({raw}); "
+            "Primus does not compose the Hydra file"
+        )
     root = resolve_specforge_root(params, env=env)
-    for raw in candidates:
-        if raw in (None, "", "null"):
-            continue
-        path = Path(str(raw))
-        if path.is_file():
-            return path
-        if root is not None and not path.is_absolute():
-            candidate = root / path
-            if candidate.is_file():
-                return candidate
-    return None
+    found = _path_in_specforge_checkout(raw, root)
+    if found is None:
+        raise ValueError(f"model.draft_model_config is not a file: {raw}")
+    return found
 
 
 def _layer_id_tuple(value: Any) -> Optional[tuple[int, ...]]:
@@ -247,6 +314,7 @@ def resolve_capture_layer_ids(
     params: Any,
     env: Optional[Mapping[str, str]] = None,
     target_model_path: Optional[str] = None,
+    model: Optional[Mapping[str, Any]] = None,
 ) -> tuple[int, ...]:
     """Read capture layer ids from the recipe draft JSON.
 
@@ -259,7 +327,7 @@ def resolve_capture_layer_ids(
     not supply layer ids.
     """
 
-    draft = _existing_draft_config(params, env=env)
+    draft = _existing_draft_config(params, env=env, model=model)
     if draft is None:
         raise ValueError(
             "model.draft_model_config must point at an existing draft JSON; "
@@ -272,10 +340,16 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
     """Flatten ``specforge_online`` plus a few env aliases used at launch.
 
     SGLang extra args default to AITER + radix-cache off so recipes omit those knobs.
+    ``target_model_path`` comes from ``specforge_online``, then
+    ``specforge_overrides``, then ``TARGET_MODEL``, then the Hydra file.
+    ``skip_tokenizer_init`` comes from ``specforge_online`` or ``SKIP_TOKENIZER_INIT``
+    and defaults to true. The Hydra file is one YAML document: ``defaults:``
+    groups are not composed.
     """
 
     environ = os.environ if env is None else env
     raw = flatten_overrides(getattr(params, "specforge_online", None))
+    model = _model_section(params, environ)
     run_id = raw.get("run_id") or environ.get("RUN_ID") or environ.get("DISAGG_STORE_ID")
     run_root = raw.get("run_root") or environ.get("RUN_ROOT") or environ.get("DISAGG_RUN_ROOT")
     consumer_state = (
@@ -298,10 +372,12 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
     lease = raw.get("mooncake_lease_ttl_ms") or environ.get("MOONCAKE_DEFAULT_KV_LEASE_TTL")
     lease_ttl = int(lease) if lease not in (None, "", "null") else DEFAULT_LEASE_TTL_MS
     target = (
-        raw.get("target_model_path")
-        or flatten_overrides(getattr(params, "specforge_overrides", None)).get("model.target_model_path")
-        or _model_field_from_specforge_config(params, "target_model_path")
-        or environ.get("TARGET_MODEL")
+        _present(raw.get("target_model_path"))
+        or _present(
+            flatten_overrides(getattr(params, "specforge_overrides", None)).get("model.target_model_path")
+        )
+        or _present(environ.get("TARGET_MODEL"))
+        or _model_scalar(model, "target_model_path")
         or "Qwen/Qwen3.5-4B"
     )
     extra = parse_extra_args(raw.get("sglang_extra_args"))
@@ -325,7 +401,9 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         "mooncake_http_port": int(raw.get("mooncake_http_port") or DEFAULT_MOONCAKE_HTTP_PORT),
         "mooncake_metrics_port": int(raw.get("mooncake_metrics_port") or DEFAULT_MOONCAKE_METRICS_PORT),
         "mooncake_lease_ttl_ms": lease_ttl,
-        "capture_layer_ids": resolve_capture_layer_ids(params, environ, target_model_path=str(target)),
+        "capture_layer_ids": resolve_capture_layer_ids(
+            params, environ, target_model_path=str(target), model=model
+        ),
         "target_model_path": str(target),
         "sglang_extra_args": extra,
         "skip_tokenizer_init": _as_bool(
@@ -633,10 +711,11 @@ def sglang_server_argv(index: int, settings: Mapping[str, Any]) -> list[str]:
         *[str(i) for i in settings["capture_layer_ids"]],
         "--port",
         str(port),
-        *list(settings["sglang_extra_args"]),
     ]
-    if settings.get("skip_tokenizer_init", True):
+    extra = [arg for arg in list(settings["sglang_extra_args"]) if arg != "--skip-tokenizer-init"]
+    if _as_bool(settings.get("skip_tokenizer_init", True), True):
         argv.insert(argv.index("--trust-remote-code") + 1, "--skip-tokenizer-init")
+    argv.extend(extra)
     return argv
 
 
