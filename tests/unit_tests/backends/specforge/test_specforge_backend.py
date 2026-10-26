@@ -977,8 +977,14 @@ class TestOnlineLaunch:
         layer_at = argv.index("--spec-capture-aux-layer-ids")
         assert argv[layer_at + 1 : port_at] == ["1", "8", "15", "22", "29"]
         assert "--host" in argv and argv[argv.index("--host") + 1] == "0.0.0.0"
+        assert "--skip-tokenizer-init" in argv
         assert "--disable-radix-cache" in argv
         assert "--attention-backend" in argv
+
+    def test_skip_tokenizer_init_can_be_disabled(self, specforge_checkout, tmp_path):
+        params = self._params(specforge_checkout, tmp_path, skip_tokenizer_init=False)
+        argv = sglang_server_argv(0, online_settings(params))
+        assert "--skip-tokenizer-init" not in argv
 
     def test_capture_layer_ids_env_overrides_draft_json(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path)
@@ -997,6 +1003,39 @@ class TestOnlineLaunch:
         (specforge_checkout / "configs" / "qwen3.5-4b-dflash.json").unlink()
         settings = online_settings(params)
         assert settings["capture_layer_ids"] == (1, 8, 15, 22, 29)
+
+    def test_capture_layer_ids_follow_recipe_draft_json(self, specforge_checkout, tmp_path):
+        draft = tmp_path / "muse-spark-dflash2.json"
+        draft.write_text('{"dflash_config": {"target_layer_ids": [1, 16, 30, 44, 59]}}\n')
+        hydra = specforge_checkout / "configs" / "muse.yaml"
+        hydra.write_text(
+            "model:\n"
+            f"  draft_model_config: {draft.as_posix()}\n"
+            "  target_model_path: /models/muse-target\n"
+        )
+        params = self._params(specforge_checkout, tmp_path)
+        params.specforge_config = str(hydra)
+        params.specforge_overrides = {}
+        settings = online_settings(params)
+        assert settings["capture_layer_ids"] == (1, 16, 30, 44, 59)
+        assert settings["target_model_path"] == "/models/muse-target"
+        params.specforge_online["capture_layer_ids"] = "2,4"
+        assert online_settings(params)["capture_layer_ids"] == (2, 4)
+
+    def test_capture_layer_ids_resolve_draft_relative_to_specforge_root(self, specforge_checkout, tmp_path):
+        draft = specforge_checkout / "configs" / "muse-spark-dflash2.json"
+        draft.write_text('{"dflash_config": {"target_layer_ids": [1, 16, 30, 44, 59]}}\n')
+        hydra = specforge_checkout / "configs" / "muse.yaml"
+        hydra.write_text(
+            "model:\n"
+            "  draft_model_config: configs/muse-spark-dflash2.json\n"
+            "  target_model_path: /models/muse-target\n"
+        )
+        params = self._params(specforge_checkout, tmp_path)
+        params.specforge_config = str(hydra)
+        params.specforge_overrides = {}
+        settings = online_settings(params)
+        assert settings["capture_layer_ids"] == (1, 16, 30, 44, 59)
 
     def test_online_yaml_has_no_cluster_ips(self):
         text = ONLINE_CONFIG.read_text(encoding="utf-8")
