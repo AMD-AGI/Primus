@@ -102,6 +102,7 @@ class FluxRawImageTextDataset(Dataset):
         dataset_format: str = "webdataset",
         dataset_name: str | None = None,
         data_folder: str | None = None,
+        benchmark_loader: bool = False,
     ):
         dataset_name = dataset_name or None
         dataset_path, dataset_format = self._resolve_dataset(dataset_name, dataset_path, dataset_format)
@@ -109,6 +110,7 @@ class FluxRawImageTextDataset(Dataset):
         self.dataset_format = dataset_format
         self.dataset_name = dataset_name
         self.data_folder = data_folder
+        self.benchmark_loader = bool(benchmark_loader)
         self._records: list[dict[str, Any]] | None = None
 
         if dataset_format == "jsonl":
@@ -124,11 +126,16 @@ class FluxRawImageTextDataset(Dataset):
 
             self.dataset = load_from_disk(dataset_path)
         elif dataset_format == "hf_repo":
-            from primus.backends.diffusion.amdb_benchmarks.data import (
-                load_benchmark_image_dataset,
-            )
+            if self.benchmark_loader:
+                from primus.backends.diffusion.amdb_benchmarks.data import (
+                    load_benchmark_image_dataset,
+                )
 
-            self.dataset = load_benchmark_image_dataset(dataset_path)
+                self.dataset = load_benchmark_image_dataset(dataset_path)
+            else:
+                from datasets import load_dataset
+
+                self.dataset = load_dataset(dataset_path, split="train")
         elif dataset_format == "webdataset":
             if not os.path.isdir(dataset_path):
                 raise FileNotFoundError(f"FLUX raw webdataset directory not found: {dataset_path}")
@@ -162,22 +169,25 @@ class FluxRawImageTextDataset(Dataset):
             return len(self._records)
         return len(self.dataset)
 
-    @staticmethod
-    def _prompt_from_sample(sample: dict[str, Any]) -> str:
-        for key in ("txt", "caption", "prompt", "text", "caption_0"):
-            if key in sample and sample[key] is not None:
+    def _prompt_from_sample(self, sample: dict[str, Any]) -> str:
+        keys = ("txt", "caption", "prompt", "text")
+        if self.benchmark_loader:
+            keys = keys + ("caption_0",)
+        for key in keys:
+            if key in sample and (sample[key] is not None or not self.benchmark_loader):
                 value = sample[key]
                 if isinstance(value, list):
                     value = value[0]
                 return str(value)
-        from primus.backends.diffusion.amdb_benchmarks.data import (
-            caption_from_image_filename,
-        )
+        if self.benchmark_loader:
+            from primus.backends.diffusion.amdb_benchmarks.data import (
+                caption_from_image_filename,
+            )
 
-        for key in ("image", "jpg", "png"):
-            caption = caption_from_image_filename(sample.get(key))
-            if caption:
-                return caption
+            for key in ("image", "jpg", "png"):
+                caption = caption_from_image_filename(sample.get(key))
+                if caption:
+                    return caption
         raise KeyError("FLUX raw sample requires one of: txt, caption, prompt, text")
 
     def _image_from_jsonl_sample(self, sample: dict[str, Any]) -> Image.Image:
@@ -332,8 +342,9 @@ class FluxRawImageTextProcessor:
 
     def _process_image(self, image: Image.Image) -> torch.Tensor | None:
         width, height = image.size
-        # Resize short images up to img_size. Dropping them removes rows from the
-        # shared split on only some ranks, and an all-short batch deadlocks FSDP.
+        if self.skip_low_resolution and (width < self.img_size or height < self.img_size):
+            return None
+
         if width == self.img_size and height == self.img_size:
             resized = image
         elif width >= height:

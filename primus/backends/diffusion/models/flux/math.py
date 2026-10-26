@@ -20,7 +20,9 @@ from primus.backends.diffusion.models.flux.rope_triton import (
     fused_rope_supported,
 )
 
-_FUSED_ROPE = os.getenv("PRIMUS_FLUX_TRITON_ROPE", "1") != "0"
+# Off unless a benchmark config turns it on. flux.1-dev and flux.1-schnell keep
+# the original broadcast multiply.
+_FUSED_ROPE = os.getenv("PRIMUS_FLUX_TRITON_ROPE", "0") == "1"
 
 
 def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor) -> Tensor:

@@ -260,11 +260,10 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
                 )
         else:
             _fail(f"unsupported FLUX dataset_type: {dataset_type!r}")
-        pretrained = model_cfg.get("load_from_pretrained_path")
-        if _is_placeholder(pretrained):
-            _log("FLUX DiT initialization checkpoint: not configured; skipping optional initialization")
-        else:
-            _validate_local_or_hf_id(pretrained, "FLUX DiT initialization checkpoint")
+        _require_optional_path(
+            model_cfg.get("load_from_pretrained_path"),
+            "FLUX DiT initialization checkpoint",
+        )
     elif model_name in {"sdxl", "stable-diffusion-xl", "mochi-1", "hunyuan-video", "wan2.1-i2v"}:
         _validate_benchmark_model(model_name, dataset_cfg, model_cfg, model)
     else:

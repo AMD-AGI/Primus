@@ -270,7 +270,6 @@ class BaseWanTrainer:
             train_dataset,
             batch_size=self.per_device_train_batch_size,
             sampler=self.sampler,
-            drop_last=bool(self.args.get("dataloader_drop_last", False)),
             num_workers=num_workers,
             collate_fn=data_collator,
             pin_memory=True,

@@ -112,6 +112,8 @@ def benchmark_defaults(
         processor["img_size"] = 512
         processor["processor_name"] = "flux_raw"
         processor["processor_type"] = "flux_raw"
+        processor["skip_low_resolution"] = False
+        dataset["config"]["benchmark_loader"] = True
         trainer = copy.deepcopy(BENCHMARK_TRAINER)
         trainer["args"]["run_name"] = "flux-dev"
         trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] = "DoubleStreamBlock,SingleStreamBlock"
