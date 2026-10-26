@@ -25,6 +25,8 @@ This guide covers the complete workflow: environment setup, data preparation, pr
   - [Single-Node (Local / Docker)](#single-node-local--docker)
   - [Multi-Node (Slurm)](#multi-node-slurm)
   - [Mock Data (Smoke Test)](#mock-data-smoke-test)
+- [Upcycling a dense checkpoint](#upcycling-a-dense-checkpoint)
+- [Native HyLo training](#native-hylo-training)
 - [Step 4: Checkpoint Conversion to HuggingFace](#step-4-checkpoint-conversion-to-huggingface)
 - [Step 5: Evaluation with lm-eval-harness](#step-5-evaluation-with-lm-eval-harness)
 - [Configuration Reference](#configuration-reference)
@@ -40,6 +42,7 @@ This guide covers the complete workflow: environment setup, data preparation, pr
 | [Pure KDA guide](kda-guide.md) | End-to-end 300M pure Kimi Delta Attention (KDA) recipe, FLA-validated on 8× MI300X |
 | [GDN ⇄ FLA parity](gdn-fla-parity.md) | Every Primus/Megatron-LM change required for GDN to match the FLA reference implementation |
 | [KDA ⇄ FLA parity](kda-fla-parity.md) | Every Primus/Megatron-LM change required for KDA to match the FLA reference implementation |
+| [Native HyLo training](hylo-native-training.md) | Enhanced-ILD and pure-KL 4MLA12GDN 1B training with dense Llama teachers |
 
 ---
 
@@ -391,6 +394,96 @@ To quickly verify the model runs without real data, the 3B and 8B configs come w
 
 ---
 
+## Upcycling a dense checkpoint
+
+Dense-to-hybrid upcycling continues pretraining from a dense Transformer checkpoint. Embeddings, the final norm, and every MLP are copied into the hybrid stack. MLA (`*`) and GDN or Mamba (`M`) slots are then initialized with the from-teacher recipes in [HyLo](https://github.com/AMD-AGI/AMD-Hybrid-Models/tree/feat/HyLo) (`HybridModelWrapper` on `feat/HyLo`): an SVD of the dense Q and KV for MLA, and a Q/K/V/O copy into the GDN or Mamba mixer. KDA has no HyLo recipe, so those mixers stay at the hybrid initialization. Megatron's `--moe-use-upcycling` flag remains the path that duplicates one MLP into experts.
+
+The hybrid stack is twice as long as the dense model: dense layer `i` becomes mixer sublayer `2i` and MLP sublayer `2i + 1`. A 25% attention model is the repeated block `*-M-M-M-`.
+
+1. Save a legacy torch checkpoint of the **target** hybrid config at TP=PP=1. `lr: 0` keeps the constructor initialization through the one logged step:
+
+```yaml
+lr: 0.0
+min_lr: 0.0
+train_iters: 1
+save_interval: 1
+mock_data: true
+ckpt_format: torch
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 1
+```
+
+2. Convert. The dense checkpoint must use the same hidden size, FFN size, SwiGLU layout, and padded vocabulary. Both checkpoints are single-rank `mp_rank_00/model_optim_rng.pt` files (or a load directory that points at one).
+
+```bash
+python tools/hybrid/upcycle_dense_to_hybrid.py \
+    --dense-checkpoint /path/to/dense/checkpoints \
+    --hybrid-init-checkpoint /path/to/hybrid-init \
+    --output-dir /path/to/upcycled \
+    --hybrid-pattern '*-M-M-M-'
+```
+
+`--hybrid-pattern` can be omitted when the hybrid checkpoint stored `hybrid_override_pattern` or `hybrid_layer_pattern`. The tool writes `iter_0000000`, `latest_checkpointed_iteration.txt`, and `upcycle_report.json`.
+
+The file-by-file notes for this change, including the one-GPU smoke run, are in [upcycling-changes.md](upcycling-changes.md).
+
+3. Continue pretraining with the hybrid YAML:
+
+```yaml
+load: /path/to/upcycled
+finetune: true
+no_load_optim: true
+no_load_rng: true
+auto_continue_train: false
+```
+
+The checkpoint `args` must carry the HyLo widths (`q_lora_rank`, `kv_lora_rank`, `qk_head_dim`, `v_head_dim`, and for GDN the `linear_num_*` / `linear_*_head_dim` fields). `upcycle_report.json` lists tensors that were copied, and `hylo_partial` lists GDN slices that were only partly filled. Start the continued run from a learning rate several times below the dense model's peak, with a short warmup. The mapping and the differences from the earlier exact-shape copy are in [upcycling-changes.md](upcycling-changes.md).
+
+---
+
+## Native HyLo training
+
+Primus trains the public 1B 4MLA12GDN model natively. Tensor, pipeline, and context parallelism must stay at 1. Data parallelism can use all eight GPUs on one MI300X node. The runtime image is `rocm/primus:v26.8`.
+
+Stage 1 is Enhanced-ILD at 4K. It trains an all-GDN student and an all-MLA student from `meta-llama/Llama-3.2-1B-Instruct`. The public HyLo configs use 2K for this stage; these recipes start at 4K. Stage 2 is pure `KL(teacher || student)` at 8K against `meta-llama/Llama-3.1-8B-Instruct`, with KL weight 1 and CE weight 0. The released stage-2 mixture also used four AMD-preprocessed datasets that are not public, so `JunxiongWang/sftdatasetv3` reproduces the code path without reproducing the released weights.
+
+Prepare the gated teachers once, then run both stages:
+
+```bash
+export HF_TOKEN=...
+python tools/hybrid/prepare_hylo_assets.py --root "$PWD/data/hylo"
+
+export HYLO_LLAMA32_1B_MEGATRON_CKPT="$PWD/data/hylo/megatron/llama32-1b"
+export HYLO_LLAMA31_8B_MEGATRON_CKPT="$PWD/data/hylo/megatron/llama31-8b"
+export HYLO_SFT_DATASET=JunxiongWang/sftdatasetv3
+export HYLO_OUTPUT_ROOT="$PWD/output/hylo-native"
+export PRIMUS_IMAGE=rocm/primus:v26.8
+
+tools/hybrid/run_hylo_1b_4mla12gdn.sh
+```
+
+`HYLO_ILD_SEQ_LENGTH` overrides the 4K stage, and `HYLO_SFT_SEQ_LENGTH` overrides the 8K stage. A one-step check uses `HYLO_ILD_TRAIN_ITERS=1`, `HYLO_SFT_TRAIN_ITERS=1`, micro-batch 1, and global batch 1.
+
+On one MI300X GPU in `rocm/primus:v26.8`, that check logged all-GDN Enhanced-ILD 360.000000 and all-MLA Enhanced-ILD 169.000000 at 4K. Assembly kept each mixer/MLP pair from the matching ILD checkpoint. The following 8K step, started from that assembly, logged summed masked KL 72.599213. Each saved iteration 1 reloaded with every tensor finite.
+
+The script writes:
+
+| Output | Contents |
+| --- | --- |
+| `$HYLO_OUTPUT_ROOT/gdn-upcycled` | all-GDN initialization |
+| `$HYLO_OUTPUT_ROOT/mla-upcycled` | all-MLA initialization |
+| `$HYLO_OUTPUT_ROOT/4mla12gdn-upcycled` | target-layout initialization |
+| `$HYLO_OUTPUT_ROOT/amd/root/gdn-ild/checkpoints` | stage-1 all-GDN student |
+| `$HYLO_OUTPUT_ROOT/amd/root/mla-ild/checkpoints` | stage-1 all-MLA student |
+| `$HYLO_OUTPUT_ROOT/stage2-init` | assembled MLA blocks 1, 5, 10, and 14 |
+| `$HYLO_OUTPUT_ROOT/amd/root/4mla12gdn-8k-sft/checkpoints` | final pure-KL student |
+
+To reproduce the Zebra-Llama stage-1 checkpoints themselves, train the all-Mamba-2 and all-MLA students on the reference's packed 2048-token data with `hylo_m2_1B-enhanced-ild-packed.yaml` and `hylo_mla_1B-enhanced-ild-packed.yaml`. [Reproduce the reference stage-1 checkpoints](hylo-native-training.md#reproduce-the-reference-stage-1-checkpoints) covers the data preparation, the all-Mamba-2 random init, and the evaluation and comparison tools.
+
+The artifact order is in [hylo-stage-workflow.md](hylo-stage-workflow.md). File-level notes are in [hylo-native-training-changes.md](hylo-native-training-changes.md).
+
+---
+
 ## Step 4: Checkpoint Conversion to HuggingFace
 
 Convert a Megatron checkpoint to HuggingFace format for inference and evaluation.
@@ -650,7 +743,8 @@ Primus/
 │   │   ├── eval_zebra_llama_lm_eval.sh          # Eval shell wrapper
 │   │   ├── run_zebra_eval.sh                    # Quick eval script
 │   │   ├── chat_zebra_llama.py                  # Interactive chat
-│   │   └── convert_fla_to_megatron.py           # FLA Arrow → Megatron binary converter
+│   │   ├── convert_fla_to_megatron.py           # FLA Arrow → Megatron binary converter
+│   │   └── upcycle_dense_to_hybrid.py           # Dense Transformer → hybrid checkpoint
 │   └── docker/start_container.sh                # Dev container launcher
 ├── runner/
 │   ├── primus-cli                               # Unified launcher (direct/container/slurm)

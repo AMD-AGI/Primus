@@ -1,0 +1,74 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:hylo-m2-1b-ild-eval}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Enhanced-ILD loss of fixed all-Mamba-2 weights (lr 0) on packed text, against the same frozen
+# teacher as hylo_m2_1B-enhanced-ild-packed.yaml. tools/hybrid/run_hylo_ild_eval.sh runs it on
+# one GPU; each step scores two 2048-token windows of the packed test split.
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: hylo_m2_1B_hybrid.yaml
+    overrides:
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hylo_m2_hybrid_stack_spec']
+      hybrid_attention_ratio: 0.0
+      hybrid_override_pattern: "M-M-M-M-M-M-M-M-M-M-M-M-M-M-M-M-"
+
+      hylo_distill_stage: ild
+      hylo_teacher_checkpoint: ${HYLO_LLAMA32_1B_MEGATRON_CKPT:./data/checkpoints/llama32-1b-megatron}
+      hylo_teacher_num_layers: 16
+      hylo_teacher_use_rope_scaling: true
+      hylo_kl_weight: 1.0
+      hylo_ce_weight: 0.0
+
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: ${HYLO_TOKENIZER_MODEL:meta-llama/Llama-3.2-1B-Instruct}
+      mock_data: false
+      train_data_path: ${HYLO_EVAL_DATA:./data/hylo/packed/test}
+      valid_data_path: null
+      test_data_path: null
+      num_workers: 1
+      create_attention_mask_in_dataloader: false
+
+      seq_length: 2048
+      max_position_embeddings: 131072
+      micro_batch_size: ${HYLO_MICRO_BATCH_SIZE:2}
+      global_batch_size: ${HYLO_GLOBAL_BATCH_SIZE:2}
+      train_iters: ${HYLO_EVAL_ITERS:348}
+      eval_iters: 0
+
+      lr: 0.0
+      min_lr: 0.0
+      lr_warmup_iters: 0
+      lr_decay_iters: 1
+      lr_decay_style: constant
+      weight_decay: 0.0
+      seed: 42
+      clip_grad: 1.0
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      load: ${HYLO_EVAL_CKPT:./data/checkpoints/hylo-m2-1b-ild}
+      finetune: true
+      no_load_optim: true
+      no_load_rng: true
+      auto_continue_train: false
+      save: null
+      save_interval: 1000000
+      disable_last_saving: true
+      ckpt_format: torch
+      bf16: true
+      log_interval: 1
+      log_avg_skip_iterations: 0
+
+      enable_primus_turbo: false
+      use_turbo_attention: false
