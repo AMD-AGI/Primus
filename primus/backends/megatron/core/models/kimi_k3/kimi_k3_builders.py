@@ -64,7 +64,7 @@ def describe_latent_moe_resolution(args, config, model) -> str:
     # bug, or hide a real one.
     parts.append(f"built.routed_expert_in={_expert_input_width(model, routed=True)}")
     parts.append(f"built.shared_expert_in={_expert_input_width(model, routed=False)}")
-    return "[Primus:Kimi-K3] latent MoE width -- " + ", ".join(parts)
+    return "[Primus:kimi_k3] latent MoE width -- " + ", ".join(parts)
 
 
 def _first_latent_proj_shape(model):

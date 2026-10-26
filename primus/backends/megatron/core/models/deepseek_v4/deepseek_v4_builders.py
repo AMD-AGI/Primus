@@ -80,7 +80,7 @@ def _maybe_plumb_v4_sink_attention_args(args) -> None:
     if getattr(args, "use_sink_attention", None) in (None, False):
         args.use_sink_attention = True
         print_rank_0(
-            "[Primus:DeepSeek-V4][P22] derived args.use_sink_attention=True "
+            "[Primus:deepseek_v4][P22] derived args.use_sink_attention=True "
             "from args.attn_sink=True (Turbo flash-attn sink path)."
         )
 
@@ -95,14 +95,14 @@ def _maybe_plumb_v4_sink_attention_args(args) -> None:
             # window_size (avoids the aiter Triton SWA gap).
             args.sink_sliding_window = 0
             print_rank_0(
-                f"[Primus:DeepSeek-V4][P22] attn_sliding_window={attn_sw} "
+                f"[Primus:deepseek_v4][P22] attn_sliding_window={attn_sw} "
                 f">= seq_length={seq_len}; dropping window for Turbo "
                 "(mathematically equivalent to full causal attention)."
             )
         else:
             args.sink_sliding_window = 0
             print_rank_0(
-                f"[Primus:DeepSeek-V4][P22] WARNING: "
+                f"[Primus:deepseek_v4][P22] WARNING: "
                 f"attn_sliding_window={attn_sw} < seq_length={seq_len} "
                 "but aiter Triton flash-attn does not support sliding "
                 "window yet (raises ValueError).  Setting "
@@ -159,7 +159,7 @@ def _maybe_plumb_v4_turbo_deepep_args(args) -> None:
     if not bool(getattr(args, "moe_enable_deepep", False)):
         args.moe_enable_deepep = True
         print_rank_0(
-            "[Primus:DeepSeek-V4][P23] derived args.moe_enable_deepep=True "
+            "[Primus:deepseek_v4][P23] derived args.moe_enable_deepep=True "
             "from args.use_turbo_deepep=True (Turbo DeepEP dispatcher path)."
         )
 
@@ -172,13 +172,13 @@ def _maybe_plumb_v4_turbo_deepep_args(args) -> None:
         if current != "flex":
             args.moe_token_dispatcher_type = "flex"
             print_rank_0(
-                f"[Primus:DeepSeek-V4][P23] override "
+                f"[Primus:deepseek_v4][P23] override "
                 f"args.moe_token_dispatcher_type='{current or 'unset'}' -> "
                 f"'flex' (Turbo DeepEP dispatcher path)."
             )
     else:
         print_rank_0(
-            "[Primus:DeepSeek-V4][P23] WARNING: "
+            "[Primus:deepseek_v4][P23] WARNING: "
             f"args.use_turbo_deepep=True but moe_token_dispatcher_type="
             f"'{current}' (not 'flex' / 'alltoall').  Keeping the user's "
             "dispatcher type; the Turbo DeepEP path will not engage for V4 "

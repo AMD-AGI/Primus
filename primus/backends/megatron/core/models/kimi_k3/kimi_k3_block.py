@@ -654,7 +654,7 @@ class KimiK3TransformerBlock(TransformerBlock):
             self.final_layernorm = None
 
         logger.info(
-            "[Primus:Kimi-K3] decoder block: %d local layers %s, pre_process=%s post_process=%s, "
+            "[Primus:kimi_k3] decoder block: %d local layers %s, pre_process=%s post_process=%s, "
             "attn_res_num_blocks_max=%d",
             len(self.layers),
             self.global_layer_indices,
