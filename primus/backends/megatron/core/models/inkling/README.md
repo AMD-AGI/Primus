@@ -225,7 +225,9 @@ If the training run uses other values, pass the same ones with
 LM-head shapes.
 
 `--dry-run` maps every tensor from the safetensors headers alone and writes
-nothing. The output is a single-rank (TP = PP = EP = 1) `torch` checkpoint; load
+nothing. Both modes need one visible GPU (Transformer Engine layers will not
+build without one), but the model is built on the meta device, so no GPU memory
+is allocated. The output is a single-rank (TP = PP = EP = 1) `torch` checkpoint; load
 it with `--load <output> --ckpt-format torch --finetune --no-load-optim
 --no-load-rng`. A resharded `torch_dist` checkpoint for multi-node runs is not
 written yet.

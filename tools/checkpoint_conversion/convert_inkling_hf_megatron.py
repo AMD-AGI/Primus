@@ -30,8 +30,10 @@ training builds: ``unpadded_vocab_size`` rounded up to a multiple of
 by default, matching ``trainer_base.yaml``). Pass the training run's values,
 or ``--target-vocab-size``, if they differ.
 
-``--dry-run`` stops after step 3, reading only the safetensors headers, so the
-full mapping can be validated on a login node. Writing a resharded
+``--dry-run`` stops after step 3 and reads only the safetensors headers, so the
+full mapping can be validated without loading any weights. Both modes need one
+visible GPU, because Transformer Engine layers will not build without one, but
+the meta-device build allocates no GPU memory. Writing a resharded
 ``torch_dist`` checkpoint for multi-node runs is P3 work.
 """
 
@@ -126,6 +128,12 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     if not args.dry_run and args.output is None:
         p.error("--output is required unless --dry-run")
+    if not torch.cuda.is_available():
+        raise SystemExit(
+            "convert_inkling_hf_megatron.py needs one visible GPU, also with --dry-run: "
+            "Transformer Engine layers will not build without one. The model is built on the "
+            "meta device, so no GPU memory is allocated, and --dry-run reads only the safetensors headers."
+        )
 
     from primus.backends.megatron.core.models.inkling.inkling_builders import (
         build_inkling_model,
