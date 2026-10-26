@@ -26,6 +26,8 @@ _PRIMUS_MEGATRON_DEFAULTS = {
     # Hugging Face YaRN for the teacher; None keeps its own position embedding.
     "hylo_teacher_yarn_factor": None,
     "hylo_teacher_yarn_original_max_position_embeddings": None,
+    # Recorded batches of a reference HyLo run to train on, in its order (HyLoOrderDataset).
+    "hylo_order_data_dir": None,
     # Key/value heads of the grouped MLA up-projection (GroupedKVUpProjection).
     "hylo_mla_kv_heads": None,
     "hylo_linear_ild_checkpoint": None,

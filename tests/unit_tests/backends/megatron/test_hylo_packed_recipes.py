@@ -25,7 +25,6 @@ SHARED = (
     "hylo_ce_weight",
     "lr",
     "min_lr",
-    "lr_warmup_fraction",
     "lr_decay_style",
     "seed",
     "weight_decay",
@@ -49,6 +48,9 @@ def test_packed_recipe_is_the_sft_recipe_on_the_reference_schedule(kind, monkeyp
         "HYLO_ILD_TRAIN_ITERS",
         "HYLO_MICRO_BATCH_SIZE",
         "HYLO_GLOBAL_BATCH_SIZE",
+        "HYLO_ILD_WARMUP_ITERS",
+        "HYLO_ORDER_DATA_DIR",
+        "HYLO_TEACHER_YARN_FACTOR",
     ):
         monkeypatch.delenv(name, raising=False)
     packed = load_primus_config(CONFIGS / f"hylo_{kind}_1B-enhanced-ild-packed.yaml", None).modules[0].params
@@ -62,6 +64,9 @@ def test_packed_recipe_is_the_sft_recipe_on_the_reference_schedule(kind, monkeyp
 
     # The reference's schedule: 6934 steps of 96 packed 2048-token windows, no padding.
     assert (packed.seq_length, packed.train_iters) == (2048, 6934)
+    # The Trainer's warmup_ratio 0.01, which rounds up: ceil(69.34) steps.
+    assert (packed.lr_warmup_iters, packed.lr_warmup_fraction) == (70, None)
+    assert sft.lr_warmup_fraction == 0.01
     assert packed.mock_data is False
     assert str(packed.train_data_path).endswith("data/hylo/packed/train")
     assert getattr(packed, "sft_dataset_name", None) is None

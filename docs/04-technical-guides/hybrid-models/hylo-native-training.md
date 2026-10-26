@@ -264,6 +264,29 @@ match the reference checkpoints; the numbers are in
      --dense /path/to/Llama-3.2-1B-Instruct/model.safetensors
    ```
 
+### Train in lockstep with a HyLo run
+
+The packed recipes follow the reference's schedule: `lr_warmup_iters` is the Trainer's
+`warmup_ratio` 0.01 rounded up, 70 of 6934 steps (`HYLO_ILD_WARMUP_ITERS`, `ceil(0.01 * steps)`
+for other lengths). Megatron's packing still orders and cuts the windows differently from TRL's
+`ConstantLengthDataset`. To train on exactly the batches a HyLo `train_distill.py` run used, record
+them, along with its init, while it trains: each rank's per-step `input_ids` as int32
+`(steps, micro_batch, seq_len)` in `batches_rank<r>.bin`, with `meta.json` holding `micro_batch`,
+`seq_len`, `world_size`, and `steps`. Point `HYLO_ORDER_DATA_DIR` at that directory and
+`HyLoOrderDataset` replays the batches. The patch switches the sampler to `dataloader_type:
+single`, so every rank receives, at every step, the batch the HyLo rank with its index used. It
+requires the HyLo run's micro-batch, sequence length, and data-parallel size. Convert the recorded
+init with `convert_hylo_reference_to_megatron.py` and load it as the upcycled checkpoint.
+
+The teacher keeps Llama-3's rope scaling. HyLo's `train_distill.py` gives the teacher the
+student's YaRN by default (`teacher_rope_from_student`); to match that, set
+`HYLO_TEACHER_YARN_FACTOR` and `HYLO_TEACHER_YARN_ORIGINAL_MAX` to the student's `factor` and
+`original_max_position_embeddings` (32 and 8192 for all-MLA, 1 and 2048 for all-Mamba-2).
+
+For 1000 steps from the same init on the same batches, Primus and HyLo give the same per-step
+loss to within 0.3% over the first 25 steps. They drift apart only as bf16 runs do, ending within
+0.3%. The final students score within 0.12% of each other on the test split.
+
 File-by-file notes for this change are in
 [hylo-native-training-changes.md](hylo-native-training-changes.md).
 The artifact flow and execution order are summarized separately in

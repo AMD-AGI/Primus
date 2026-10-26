@@ -24,6 +24,10 @@ modules:
       hylo_teacher_num_layers: 16
       # The teacher keeps Llama-3's rope scaling while the student runs YaRN.
       hylo_teacher_use_rope_scaling: true
+      # HyLo's train_distill.py default gives the teacher the student's YaRN; set these to the
+      # student's factor and original window to train against that teacher.
+      hylo_teacher_yarn_factor: ${HYLO_TEACHER_YARN_FACTOR:null}
+      hylo_teacher_yarn_original_max_position_embeddings: ${HYLO_TEACHER_YARN_ORIGINAL_MAX:null}
       hylo_kl_weight: 1.0
       hylo_ce_weight: 0.0
 
@@ -31,6 +35,8 @@ modules:
       tokenizer_model: ${HYLO_TOKENIZER_MODEL:meta-llama/Llama-3.2-1B-Instruct}
       mock_data: false
       train_data_path: ${HYLO_PACKED_TRAIN_DATA:./data/hylo/packed/train}
+      # A reference run's recorded batches (hylo_train_dump.py), served in its order.
+      hylo_order_data_dir: ${HYLO_ORDER_DATA_DIR:null}
       valid_data_path: null
       test_data_path: null
       num_workers: 2
@@ -47,8 +53,9 @@ modules:
       lr: 2.0e-4
       min_lr: 0.0
       lr_decay_style: cosine
-      lr_warmup_iters: 0
-      lr_warmup_fraction: 0.01
+      # The Trainer's warmup_ratio 0.01 is ceil(0.01 * steps) steps: 70 of 6934.
+      lr_warmup_iters: ${HYLO_ILD_WARMUP_ITERS:70}
+      lr_warmup_fraction: null
 
       # Hugging Face Trainer values used by the reference.
       seed: 42

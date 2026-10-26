@@ -20,6 +20,8 @@ from typing import Any, Callable, Iterable, Optional
 import torch
 import torch.nn.functional as F
 
+from primus.backends.megatron.training.hylo_order_dataset import unset
+
 _KL_CHUNK = 4096
 _RUNTIME: Optional["HyLoRuntime"] = None
 
@@ -330,7 +332,7 @@ def _build_teacher(args, pre_process, post_process, config, pg_collection):
         rope_scaling = teacher_args.use_rope_scaling
     position_embedding_type = teacher_args.position_embedding_type
     yarn_factor = getattr(args, "hylo_teacher_yarn_factor", None)
-    if yarn_factor is not None:
+    if not unset(yarn_factor):
         set_teacher_yarn(
             teacher_config,
             float(yarn_factor),
@@ -403,8 +405,8 @@ def validate_hylo_args(args: Any) -> None:
         raise ValueError("hylo_distill_stage must be 'ild' or 'sft'")
     if not getattr(args, "hylo_teacher_checkpoint", None):
         raise ValueError("hylo_teacher_checkpoint is required")
-    if getattr(args, "hylo_teacher_yarn_factor", None) is not None and not getattr(
-        args, "hylo_teacher_yarn_original_max_position_embeddings", None
+    if not unset(getattr(args, "hylo_teacher_yarn_factor", None)) and unset(
+        getattr(args, "hylo_teacher_yarn_original_max_position_embeddings", None)
     ):
         raise ValueError("hylo_teacher_yarn_factor needs hylo_teacher_yarn_original_max_position_embeddings")
     if stage == "sft" and float(getattr(args, "hylo_ce_weight", 0.0)) != 0.0:
