@@ -5,7 +5,8 @@
 ###############################################################################
 """Make the FLUX.1 adapter honour ``use_guidance_embeds``, so FLUX.1-schnell trains.
 
-Ungated: with the default ``use_guidance_embeds: true`` nothing changes.
+Not gated by a setting, since with the default ``use_guidance_embeds: true``
+nothing changes; skipped when the config names a transformer other than FLUX.
 """
 
 from primus.backends.automodel.patches._conditions import transformer_is

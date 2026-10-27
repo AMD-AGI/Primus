@@ -6,14 +6,18 @@
 
 """Unit and contract tests for the Wan sidecar repair."""
 
+import functools
 import types
 
 import pytest
 
 from primus.backends.automodel.models.wan import parallelize as wan
 from tests.unit_tests.backends.automodel.parallelize._support import (
+    FakeDeviceMesh,
     install_stub_automodel,
     is_checkpoint_wrapped,
+    patch_context,
+    registered_patch,
     requires_automodel,
     tiny_wan,
 )
@@ -58,6 +62,27 @@ class TestActivationCheckpointing:
         automodel.sidecar._apply(_model(), activation_checkpointing=raw)
         assert automodel.apply[-1]["activation_checkpointing"] is False
         assert automodel.full == [] and automodel.selective == []
+
+    def test_a_misspelled_value_is_refused(self, automodel):
+        with pytest.raises(ValueError, match="not recognised"):
+            automodel.sidecar._apply(_model(), activation_checkpointing="selectve")
+
+    def test_selective_steps_aside_under_tensor_parallelism(self, automodel, caplog):
+        """Wrapping first would land the parent's TP edits on the wrapper."""
+        with caplog.at_level("WARNING"):
+            automodel.sidecar._apply(
+                _model(), device_mesh=FakeDeviceMesh(2), activation_checkpointing="selective"
+            )
+        assert automodel.selective == []
+        assert automodel.apply[-1]["activation_checkpointing"] == "selective"
+        assert automodel.full == [["b0", "b1"]], "the parent's own (full) AC applies"
+        assert "tp_size=2" in caplog.text
+
+    def test_a_tp_size_of_one_does_not_step_aside(self, automodel):
+        automodel.sidecar._apply(
+            _model(), device_mesh=FakeDeviceMesh(1), activation_checkpointing="selective"
+        )
+        assert automodel.selective == [["b0", "b1"]]
 
 
 class TestReshardAfterForward:
@@ -107,17 +132,13 @@ class TestReshardAfterForward:
 
 
 class TestPatchRegistration:
-    def test_registered_and_gated_on_the_model(self):
-        import primus.backends.automodel.patches  # noqa: F401
-        from primus.backends.automodel.patches._conditions import transformer_is
-        from primus.core.patches.patch_registry import PatchRegistry
-
-        patch = next(
-            p
-            for p in PatchRegistry.iter_patches(backend="automodel", phase="before_train")
-            if p.id == "automodel.models.wan.parallelize"
-        )
-        assert patch.condition.__name__ == transformer_is("WanTransformer3DModel").__name__
+    @pytest.mark.parametrize(
+        "transformer_cls, runs",
+        [("WanTransformer3DModel", True), ("FluxTransformer2DModel", False), (None, True)],
+    )
+    def test_it_runs_unless_another_model_is_configured(self, transformer_cls, runs):
+        patch = registered_patch("automodel.models.wan.parallelize")
+        assert patch.condition(patch_context(transformer_cls)) is runs
 
 
 @requires_automodel
@@ -133,15 +154,19 @@ class TestUpstreamContract:
         instance = parallelization._PARALLELIZERS["WanTransformer3DModel"]
         assert isinstance(instance, parallelization.WanModelParallelizer)
 
-        calls = []
-        monkeypatch.setattr(
-            parallelization,
-            "apply_fsdp2_sharding_recursively",
-            lambda *a, **kw: calls.append((a, kw)),
-        )
-        monkeypatch.setattr(parallelization, "fully_shard", lambda model, **kw: model)
+        calls, root = [], []
+        real_sharding = parallelization.apply_fsdp2_sharding_recursively
+
+        # wraps() keeps the real signature visible, which is what the repair reads.
+        @functools.wraps(real_sharding)
+        def record_sharding(*a, **kw):
+            calls.append((a, kw))
+
+        monkeypatch.setattr(parallelization, "apply_fsdp2_sharding_recursively", record_sharding)
+        monkeypatch.setattr(parallelization, "fully_shard", lambda model, **kw: root.append(kw) or model)
         monkeypatch.setattr(parallelization, "get_fsdp_dp_mesh", lambda *a, **kw: None)
         instance.calls = calls
+        instance.root = root
         return instance
 
     @staticmethod
@@ -164,6 +189,13 @@ class TestUpstreamContract:
         assert all(getattr(b, SELECTIVE_AC_WRAPPER_FLAG, False) for b in model.blocks)
         (_args, kwargs) = sidecar.calls[-1]
         assert kwargs["reshard_after_forward"] is False
+
+    def test_the_root_keeps_upstreams_setting(self, sidecar):
+        """Only the per-block call is filled; the root stays False, FSDP2's root default."""
+        sidecar._apply(tiny_wan(), self.mesh(), reshard_after_forward=True)
+        (_args, kwargs) = sidecar.calls[-1]
+        assert kwargs["reshard_after_forward"] is True
+        assert sidecar.root[-1]["reshard_after_forward"] is False
 
     def test_full_stays_upstreams(self, sidecar):
         from nemo_automodel.components.distributed.activation_checkpointing import (

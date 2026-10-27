@@ -28,7 +28,7 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:wan2_2_t2v_a14b-pretrain-bs32-acon}
-workspace: ./output
+workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
   pre_trainer:

@@ -16,8 +16,10 @@ from tests.unit_tests.backends.automodel.parallelize._support import (
     attach_and_parallelize,
     install_stub_automodel,
     is_checkpoint_wrapped,
+    patch_context,
     real_mesh_context,
     record_strategy_dispatch,
+    registered_patch,
     requires_automodel,
     tiny_flux,
 )
@@ -40,19 +42,38 @@ class TestStubbed:
         )
         assert automodel.full == [["d0", "d1", "s0"]]
 
+    def test_it_steps_aside_under_tensor_parallelism(self, automodel, caplog):
+        """Wrapping before upstream's TP plan runs would break the plan's paths."""
+        flux.install()
+        model = types.SimpleNamespace(transformer_blocks=["d0"], single_transformer_blocks=["s0"])
+        context = FakeMeshContext(activation_checkpointing=True, tp_size=2)
+        with caplog.at_level("WARNING"):
+            automodel.registry["FluxTransformer2DModel"].parallelize(model, context)
+        assert automodel.full == []
+        assert automodel.parallelize[-1] is context, "upstream gets the request unchanged"
+        assert "tp_size=2" in caplog.text
+
 
 class TestPatchRegistration:
-    def test_registered_and_gated_on_the_model(self):
-        import primus.backends.automodel.patches  # noqa: F401
-        from primus.backends.automodel.patches._conditions import transformer_is
-        from primus.core.patches.patch_registry import PatchRegistry
+    @pytest.mark.parametrize(
+        "transformer_cls, runs",
+        [("FluxTransformer2DModel", True), ("WanTransformer3DModel", False), (None, True)],
+    )
+    def test_it_runs_unless_another_model_is_configured(self, transformer_cls, runs):
+        patch = registered_patch("automodel.models.flux.parallelize")
+        assert patch.condition(patch_context(transformer_cls)) is runs
 
-        patch = next(
-            p
-            for p in PatchRegistry.iter_patches(backend="automodel", phase="before_train")
-            if p.id == "automodel.models.flux.parallelize"
-        )
-        assert patch.condition.__name__ == transformer_is("FluxTransformer2DModel").__name__
+
+class TestGuidancePatchRegistration:
+    """Here rather than in test_flux_guidance.py, which needs diffusers and AutoModel."""
+
+    @pytest.mark.parametrize(
+        "transformer_cls, runs",
+        [("FluxTransformer2DModel", True), ("WanTransformer3DModel", False), (None, True)],
+    )
+    def test_it_runs_unless_another_model_is_configured(self, transformer_cls, runs):
+        patch = registered_patch("automodel.models.flux.guidance")
+        assert patch.condition(patch_context(transformer_cls)) is runs
 
 
 @requires_automodel

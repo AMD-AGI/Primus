@@ -13,6 +13,7 @@ import pytest
 from primus.backends.automodel.distributed import sidecar
 from tests.unit_tests.backends.automodel.parallelize._support import (
     FakeConfig,
+    FakeDeviceMesh,
     FakeMeshContext,
     install_stub_automodel,
 )
@@ -98,6 +99,23 @@ class TestBlockCheckpointing:
             _model(), FakeMeshContext(activation_checkpointing=True)
         )
         assert automodel.full == [[1, 3, 5]]
+
+    def test_tensor_parallelism_is_left_to_upstream(self, automodel):
+        ctx = FakeMeshContext(activation_checkpointing=True, tp_size=2)
+        _block_ac(automodel.ModelParallelizer)().parallelize(_model(), ctx)
+        assert automodel.full == []
+        assert automodel.parallelize == [ctx]
+
+
+class TestTensorParallelSize:
+    def test_no_mesh_means_one(self):
+        assert sidecar.tensor_parallel_size(None) == 1
+
+    def test_a_mesh_without_tp_means_one(self):
+        assert sidecar.tensor_parallel_size(types.SimpleNamespace(mesh_dim_names=("dp_shard",))) == 1
+
+    def test_the_tp_dimension_is_read(self):
+        assert sidecar.tensor_parallel_size(FakeDeviceMesh(4)) == 4
 
 
 if __name__ == "__main__":

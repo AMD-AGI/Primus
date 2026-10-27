@@ -6,8 +6,9 @@
 
 """Register the Wan 2.2 sidecar that honours selective AC and reshard_after_forward.
 
-Ungated: with ``activation_checkpointing: true`` and no ``reshard_after_forward``
-it behaves exactly like upstream's Wan sidecar.
+Not gated by a setting, since with ``activation_checkpointing: true`` and no
+``reshard_after_forward`` it behaves exactly like upstream's Wan sidecar; skipped
+when the config names a transformer other than Wan.
 """
 
 from primus.backends.automodel.patches._conditions import transformer_is

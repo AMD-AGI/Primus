@@ -66,14 +66,25 @@ class TestNormalize:
     def test_false_like_strings_become_false(self, raw):
         assert ac.normalize(raw) is False
 
-    @pytest.mark.parametrize("raw", ["full", "selective", True])
-    def test_meaningful_values_survive(self, raw):
-        """'selective' in particular must not be coerced to a bool, or the caller
-        can no longer tell it apart from 'full'."""
-        assert ac.normalize(raw) == raw
+    @pytest.mark.parametrize("raw", ["selective", "Selective", " selective ", "SELECTIVE"])
+    def test_selective_survives_as_a_string(self, raw):
+        """It must not be coerced to a bool, or the caller can no longer tell it
+        apart from full AC."""
+        assert ac.normalize(raw) == "selective"
 
-    def test_false_stays_false(self):
-        assert ac.normalize(False) is False
+    @pytest.mark.parametrize("raw", ["full", "FULL", " true ", "1", "on", "yes"])
+    def test_full_spellings_become_true(self, raw):
+        assert ac.normalize(raw) is True
+
+    @pytest.mark.parametrize("raw", ["selectve", "ful", "partial"])
+    def test_an_unknown_string_is_refused(self, raw):
+        """Truthy, so before this it ran full AC with nothing in the log."""
+        with pytest.raises(ValueError, match="not recognised"):
+            ac.normalize(raw)
+
+    @pytest.mark.parametrize("raw", [True, False])
+    def test_bools_pass_through(self, raw):
+        assert ac.normalize(raw) is raw
 
 
 class TestApply:
@@ -271,16 +282,22 @@ class TestStride:
         )
         assert mode == ac.MODE_SELECTIVE
 
-    def test_a_negative_stride_is_refused(self, parallelizer):
-        with pytest.raises(ValueError, match=">= 1"):
+    @pytest.mark.parametrize("stride", [-2, 1.5, "2", True])
+    def test_a_bad_stride_is_refused(self, parallelizer, stride):
+        with pytest.raises(ValueError, match="positive integer"):
             ac.apply(
                 parallelizer,
                 model_with(blocks=[1, 2]),
                 ("blocks",),
                 True,
-                stride=-2,
+                stride=stride,
                 log_prefix="[t]",
             )
+
+    @pytest.mark.parametrize("value, attrs", [(False, ("blocks",)), (True, ("absent",))])
+    def test_a_bad_stride_is_refused_even_when_nothing_would_be_wrapped(self, parallelizer, value, attrs):
+        with pytest.raises(ValueError, match="positive integer"):
+            ac.apply(parallelizer, model_with(blocks=[1, 2]), attrs, value, stride=-3, log_prefix="[t]")
 
     def test_the_count_is_reported_so_a_run_can_be_read_back(self, parallelizer, caplog):
         """The wrapped count is what converts a memory target into a setting, so it

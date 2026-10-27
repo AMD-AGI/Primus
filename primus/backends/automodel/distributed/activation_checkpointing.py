@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 # Spellings that mean "off" but are truthy in Python. Some CLI and config paths
 # forward the flag as a raw string.
 AC_OFF_VALUES = frozenset({"false", "0", "off", "no", "none", ""})
+# Spellings of full AC. Any other string is refused rather than taken as truthy.
+AC_FULL_VALUES = frozenset({"true", "1", "on", "yes", "full"})
 
 # What apply() did, for logging and for tests to assert against.
 MODE_OFF = "off"
@@ -57,14 +59,33 @@ def upstream_helpers():
 
 
 def normalize(value: Any) -> Any:
-    """Map false-like strings to False; leave bools and 'full'/'selective' alone.
+    """Map a string setting to False, True or ``"selective"``; leave other types alone.
 
     Deliberately does not coerce to bool: ``"selective"`` has to survive so the
-    caller can still distinguish it from ``"full"``.
+    caller can still distinguish it from full AC. Case and surrounding whitespace
+    are ignored, and any other string raises, so a typo such as ``"selectve"``
+    cannot run full AC by being truthy.
     """
-    if isinstance(value, str) and value.strip().lower() in AC_OFF_VALUES:
+    if not isinstance(value, str):
+        return value
+    key = value.strip().lower()
+    if key in AC_OFF_VALUES:
         return False
-    return value
+    if key in AC_FULL_VALUES:
+        return True
+    if key == MODE_SELECTIVE:
+        return MODE_SELECTIVE
+    raise ValueError(
+        f"activation_checkpointing={value!r} is not recognised; use true, false, full or selective"
+    )
+
+
+def _check_stride(stride: Any) -> int:
+    if isinstance(stride, bool) or not isinstance(stride, int) or stride < 0:
+        raise ValueError(
+            f"the activation-checkpointing stride must be 0 (every block) or a positive integer, got {stride!r}"
+        )
+    return stride
 
 
 def apply(
@@ -93,6 +114,7 @@ def apply(
     Returns:
         ``(mode, count)``, where ``count`` is the number of blocks wrapped.
     """
+    stride = _check_stride(stride)
     value = normalize(value)
     if not value:
         logger.info("%s activation checkpointing OFF", log_prefix)
@@ -107,9 +129,6 @@ def apply(
             ", ".join(block_attrs),
         )
         return MODE_NO_BLOCKS, 0
-
-    if stride and stride < 1:
-        raise ValueError(f"the activation-checkpointing stride must be >= 1, got {stride}")
 
     layers = [block for block_list in block_lists for block in block_list]
 
