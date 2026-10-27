@@ -1,0 +1,74 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Inkling (thinkingmachines/Inkling, HF model_type inkling_mm_model): text backbone.
+# Built by Primus's own InklingModel (model_type: inkling), see
+# primus/backends/megatron/core/models/inkling/.
+#
+#   8 layers, hidden 768, 8 heads x head_dim 128.
+#   Layers alternate local (sliding window 512, 4 KV heads) and global (2 KV heads).
+#   No RoPE: positions come from a learned relative logit bias (d_rel 16).
+#   Short causal convs (kernel 4) on K/V and on the attention / MLP outputs.
+#   Every layer is MoE: 256 routed experts (top-6, ffn 384) + 2 shared "sink" experts,
+#   sigmoid router with selection bias, route_scale 8.
+#   Untied embeddings, normed embedding, logits divided by the muP multiplier 3.
+#   ~2.2 B total / ~418 M active parameters.
+#
+# position_embedding_type stays "rope" only to keep the Megatron config path valid;
+# InklingModel never applies rotary embeddings (no_rope_freq: 1 marks every layer NoPE).
+###############################################################################
+
+extends:
+  - llama_base.yaml
+
+model_type: inkling
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: thinkingmachines/Inkling
+
+# model
+num_layers: 8
+hidden_size: 768
+ffn_hidden_size: 384
+num_attention_heads: 8
+max_position_embeddings: 4096
+norm_epsilon: 1.0e-6
+# Megatron's --norm-epsilon flag stores into layernorm_epsilon (the TransformerConfig field)
+layernorm_epsilon: 1.0e-6
+vocab_size: 201024
+untie_embeddings_and_output_weights: true
+
+# attention (global layers); local layers use inkling_swa_num_query_groups
+group_query_attention: true
+num_query_groups: 2
+kv_channels: 128
+qk_layernorm: false
+window_size: null
+
+# no RoPE
+position_embedding_type: rope
+rotary_base: 10000
+no_rope_freq: 1
+apply_rope_fusion: false
+
+# fusions / parallel features the custom model does not use
+bias_swiglu_fusion: false
+gradient_accumulation_fusion: false
+sequence_parallel: false
+
+# Inkling-specific (InklingTransformerConfig)
+inkling_local_layer_period: 2
+inkling_sliding_window: 512
+inkling_swa_num_query_groups: 4
+inkling_rel_dim: 16
+inkling_rel_extent: 1024
+inkling_sconv_kernel_size: 4
+inkling_num_routed_experts: 256
+inkling_moe_router_topk: 6
+inkling_num_shared_experts: 2
+inkling_route_scale: 8.0
+inkling_logits_mup_divisor: 3.0
+inkling_log_scaling_n_floor: 128000
+inkling_log_scaling_alpha: 0.1
