@@ -16,10 +16,14 @@
 # MODEL=20B  is the full 24-layer model, EP4, MBS8 / GBS64.
 # MODEL=120B is an 8-of-36-layer proxy, EP4, MBS1 / GBS8, full recompute.
 # Extra Megatron overrides go in EXTRA_ARGS, e.g. EXTRA_ARGS="--sink_sliding_window 128".
+# TURBO_DIR=<Primus-Turbo checkout> runs that checkout instead of the image's installed Primus-Turbo.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/../../../.." && pwd)"
+if [ -n "${TURBO_DIR:-}" ]; then
+  TURBO_DIR="$(realpath -e "${TURBO_DIR}")"
+fi
 cd "${REPO}"
 
 export MODEL=${MODEL:-20B}
@@ -33,18 +37,20 @@ if [ "${PRIMUS_LAUNCHER}" = "container" ]; then
   for v in MODEL PRIMUS_TEAM PRIMUS_USER PRIMUS_EXP_NAME PRIMUS_EP HIP_VISIBLE_DEVICES GPUS_PER_NODE \
            TRAIN_ITERS MBS GBS NUM_LAYERS CE_IMPL EXTRA_ARGS PATCH_TRITON_EXPERT_SCHEDULING \
            TRITON_HIP_USE_EXPERT_SCHEDULING PRIMUS_TURBO_ATTN_BACKEND HSA_COREDUMP_PATTERN HF_TOKEN \
-           HIPBLASLT_TUNING_OVERRIDE_FILE; do
+           HIPBLASLT_TUNING_OVERRIDE_FILE TURBO_DIR; do
     if [ -n "${!v+x}" ]; then ENV_ARGS+=(-e "${v}"); fi
   done
   DEVICE_ARGS=(--device /dev/kfd --device /dev/dri)
   if [ -e /dev/infiniband ]; then DEVICE_ARGS+=(--device /dev/infiniband); fi
+  MOUNT_ARGS=(-v "${REPO}:${REPO}")
+  if [ -n "${TURBO_DIR:-}" ]; then MOUNT_ARGS+=(-v "${TURBO_DIR}:${TURBO_DIR}"); fi
   echo "[gpt-oss] launching ${MODEL} in ${DOCKER_IMAGE}"
   # Same runtime options as `primus-cli container` (runner/.primus.yaml).
   exec docker run --rm --name "gpt-oss-mi455x-$$" \
     --ipc host --network host --privileged --group-add video \
     --cap-add SYS_PTRACE --cap-add CAP_SYS_ADMIN --security-opt seccomp=unconfined \
     --ulimit nofile=1048576:1048576 "${DEVICE_ARGS[@]}" \
-    -v "${REPO}:${REPO}" -w "${REPO}" "${ENV_ARGS[@]}" -e PRIMUS_LAUNCHER=direct \
+    "${MOUNT_ARGS[@]}" -w "${REPO}" "${ENV_ARGS[@]}" -e PRIMUS_LAUNCHER=direct \
     "${DOCKER_IMAGE}" bash "${HERE}/$(basename "${BASH_SOURCE[0]}")"
 fi
 
@@ -109,8 +115,16 @@ mkdir -p "${LOGDIR}"
 echo "[gpt-oss] model=${MODEL} gpus=${GPUS_PER_NODE} ep=${PRIMUS_EP} mbs=${MBS} gbs=${GBS} ce=${CE_IMPL} log=${LOGDIR}"
 echo "[gpt-oss] hipBLASLt tuning: ${HIPBLASLT_TUNING_OVERRIDE_FILE:-off}"
 
+DIRECT_ARGS=()
+if [ -n "${TURBO_DIR:-}" ]; then
+  # --env is applied after Primus builds PYTHONPATH, so this checkout comes first.
+  DIRECT_ARGS+=(--env "PYTHONPATH=${TURBO_DIR}:${TURBO_DIR}/build/pydeps:${REPO}:${REPO}/third_party/Megatron-LM"
+                --env PYTHONDONTWRITEBYTECODE=1)
+  echo "[gpt-oss] Primus-Turbo from ${TURBO_DIR}"
+fi
+
 # shellcheck disable=SC2086
-./primus-cli direct -- train pretrain --config "${EXP}" \
+./primus-cli direct "${DIRECT_ARGS[@]}" -- train pretrain --config "${EXP}" \
   --train_iters "${TRAIN_ITERS:-10}" --mock_data True \
   --micro_batch_size "${MBS}" --global_batch_size "${GBS}" \
   --cross_entropy_fusion_impl "${CE_IMPL}" \
