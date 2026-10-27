@@ -216,6 +216,20 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_mistral_7B_v0_3(self):
+        run_script(
+            self.__class__.__name__,
+            "mistral_7B_v0_3",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/mistral_7B_v0_3-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+            ],
+        )
+
     def test_llama3_70B(self):
         run_script(
             self.__class__.__name__,

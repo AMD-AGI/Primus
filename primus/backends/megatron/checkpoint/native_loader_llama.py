@@ -7,7 +7,9 @@
 """
 Native, bridge-free HuggingFace -> Megatron-Core converter for the Llama family
 (Llama 2 / Llama 3 / Llama 3.1: standard MHA/GQA, RoPE, SwiGLU, RMSNorm, no MoE
-and -- unlike Qwen3 -- no QK-layernorm).
+and -- unlike Qwen3 -- no QK-layernorm), and dense Mistral checkpoints with the
+same layout and no sliding window (e.g. Mistral-7B-v0.2/v0.3; ``sliding_window``
+must be null -- windowed variants such as Mistral-7B-v0.1 are rejected).
 
 Structurally this is the Qwen3 *dense* converter with QK-layernorm removed:
 
@@ -49,25 +51,58 @@ from primus.backends.megatron.checkpoint import native_convert_common as common
 # ---------------------------------------------------------------------------
 # HF config.json -> Megatron args
 # ---------------------------------------------------------------------------
+def _rope_theta(cfg, default=10000.0):
+    """RoPE base from either the classic ``rope_theta`` key or the newer
+    ``rope_parameters`` / ``rope_scaling`` dicts (transformers >= 4.5x)."""
+    if cfg.get("rope_theta") is not None:
+        return float(cfg["rope_theta"])
+    for key in ("rope_parameters", "rope_scaling"):
+        sub = cfg.get(key)
+        if isinstance(sub, dict) and sub.get("rope_theta") is not None:
+            return float(sub["rope_theta"])
+    return default
+
+
+def unsupported_reason(cfg):
+    """Return why this Llama-layout HF config cannot be converted natively, or None.
+
+    The converter builds a full-causal-attention Llama-layout model. A sliding
+    attention window (e.g. Mistral-7B-v0.1, ``sliding_window: 4096``) cannot be
+    expressed by it, so such configs must be rejected -- never silently converted
+    as full attention. The check does not depend on ``model_type`` (a config may
+    be detected through ``architectures`` alone, or spell the type differently).
+    """
+    sw = cfg.get("sliding_window")
+    if sw is not None and cfg.get("use_sliding_window", True) is not False:
+        return f"sliding_window={sw} is not supported (only full causal attention, sliding_window: null)"
+    return None
+
+
 def derive_megatron_fields(cfg):
-    """Translate a Llama (2/3/3.1) HF config dict into Megatron arg values."""
+    """Translate a Llama (2/3/3.1) or dense Mistral (no sliding window, e.g.
+    Mistral-7B-v0.2/v0.3) HF config dict into Megatron arg values."""
+    reason = unsupported_reason(cfg)
+    if reason is not None:
+        raise ValueError(f"native Llama converter: {reason}")
     num_heads = cfg["num_attention_heads"]
     # Standard MHA when num_key_value_heads is absent or equals num_attention_heads;
     # GQA otherwise. Either way num_query_groups drives the mcore fused-QKV layout.
-    num_kv_heads = cfg.get("num_key_value_heads", num_heads)
+    num_kv_heads = cfg.get("num_key_value_heads") or num_heads
     return dict(
         hidden_size=cfg["hidden_size"],
         num_attention_heads=num_heads,
         num_layers=cfg["num_hidden_layers"],
         max_position_embeddings=cfg["max_position_embeddings"],
         norm_epsilon=cfg.get("rms_norm_eps", 1e-5),
-        rotary_base=cfg.get("rope_theta", 10000.0),
+        rotary_base=_rope_theta(cfg),
         untie_embeddings_and_output_weights=not cfg.get("tie_word_embeddings", False),
         ffn_hidden_size=cfg["intermediate_size"],
         # GQA (num_query_groups == num_attention_heads reduces to plain MHA).
         num_query_groups=num_kv_heads,
-        # Llama derives head_dim as hidden/num_heads unless it declares one explicitly.
-        kv_channels=cfg.get("head_dim", cfg["hidden_size"] // num_heads),
+        # head_dim is hidden/num_heads unless declared explicitly (a serialized
+        # ``"head_dim": null`` also means "derive it"). An explicit head_dim that
+        # differs from hidden/heads (Mistral-NeMo) is passed through as kv_channels.
+        kv_channels=cfg.get("head_dim") or cfg["hidden_size"] // num_heads,
         # Llama attention/MLP linears are bias-free (config.attention_bias == false).
         add_qkv_bias=bool(cfg.get("attention_bias", False)),
     )
@@ -260,7 +295,7 @@ def convert(
     master_port=29563,
     log=None,
 ):
-    """Convert a Llama (2/3/3.1) HF checkpoint to a legacy Megatron torch ckpt.
+    """Convert a Llama (2/3/3.1) or dense Mistral (no sliding window) HF checkpoint to a legacy Megatron torch ckpt.
 
     Single process, CPU-only. Assumes the ``phase="convert"`` patches have
     already been applied in this process (the conversion hook does so).

@@ -1,0 +1,21 @@
+# Mistral-7B-v0.3 (mistralai/Mistral-7B-v0.3): dense Llama-layout decoder.
+# GQA (32 heads / 8 KV groups, head_dim 128), RoPE base 1e6, RMSNorm eps 1e-5,
+# SwiGLU, untied LM head, vocab 32768, no sliding window (full causal attention).
+extends:
+  - llama3_base.yaml
+
+tokenizer_type: HuggingFaceTokenizer
+# Public (not gated, Apache-2.0) HF repo; the tokenizer is read from the HF cache
+# when present. Offline CI needs it pre-cached (HF_HOME) like other HF-tokenizer presets.
+tokenizer_model: mistralai/Mistral-7B-v0.3
+
+num_layers: 32
+hidden_size: 4096
+ffn_hidden_size: 14336
+num_attention_heads: 32
+num_query_groups: 8
+kv_channels: 128
+
+max_position_embeddings: 32768
+rotary_base: 1000000
+norm_epsilon: 1.0e-05
