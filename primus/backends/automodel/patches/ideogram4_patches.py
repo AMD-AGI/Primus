@@ -63,9 +63,13 @@ def apply_adapter(ctx: PatchContext) -> None:
 
 
 def _varlen_requested(ctx: PatchContext) -> bool:
+    # The model check first: it reads one config key, so a run of another model
+    # never imports the Ideogram-4 package for this.
+    if not _is_ideogram4(ctx):
+        return False
     from primus.backends.automodel.models.ideogram4 import _varlen_common
 
-    return _varlen_common.is_varlen_attn_enabled() and _is_ideogram4(ctx)
+    return _varlen_common.is_varlen_attn_enabled()
 
 
 @register_patch(

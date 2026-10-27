@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 __all__ = ["register_data_subcommands"]
 
 
+def _positive_int(value: str) -> int:
+    """argparse type: refused at parse time, before any encoder loads."""
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value}")
+    return number
+
+
 def _prepare_automodel_cache(args):
     """Build an offline pre-encoded cache for an AutoModel diffusion model."""
     from primus.backends.automodel.data.registry import get_cache_builder
@@ -38,15 +46,14 @@ def _prepare_automodel_cache(args):
         num_samples=args.num_samples,
         resolution=args.resolution,
         max_text_tokens=args.max_text_tokens,
-        tokenizer_source=args.tokenizer_source,
         device=args.device,
         dtype=args.dtype,
         seed=args.seed,
         shuffle=args.shuffle,
     )
-    # An unset encoder source means "whatever this model defaults to", so leave it
-    # out rather than passing None over the builder's own default.
-    for name in ("vae_source", "text_encoder_source"):
+    # An unset source means "whatever this model defaults to", so leave it out
+    # rather than passing None over the builder's own default.
+    for name in ("vae_source", "text_encoder_source", "tokenizer_source"):
         value = getattr(args, name)
         if value is not None:
             kwargs[name] = value
@@ -57,6 +64,13 @@ def _prepare_automodel_cache(args):
     logger.info("Cache complete.")
     logger.info(f"  Output:  {args.output_dir}")
     logger.info(f"  Samples: {metadata['num_samples']}")
+    skipped = metadata.get("skipped", {})
+    if skipped:
+        logger.info(
+            f"  Skipped: {skipped.get('no_caption', 0)} with no caption, "
+            f"{skipped.get('too_long', 0)} over the token budget, "
+            f"{skipped.get('failed', 0)} that failed to encode"
+        )
     logger.info(
         f"  Latents: {metadata['in_channels']}x{metadata['grid_h']}x{metadata['grid_w']}, "
         f"text features {metadata['llm_features_dim']}-wide"
@@ -84,22 +98,29 @@ def register_data_subcommands(data_subparsers: argparse._SubParsersAction) -> No
             "  <output-dir>/metadata.json    the index, plus grid and feature dims\n"
             "  <output-dir>/samples/<i>.pt   one encoded sample each\n\n"
             "This is a single-GPU offline step and needs access to the encoder\n"
-            "weights. The Ideogram-4 encoders are public; set HF_TOKEN when the\n"
-            "repository is gated, and point HF_HOME at storage that survives\n"
-            "the job.\n\n"
+            "weights. Ideogram-4's text encoder is public, but its autoencoder's\n"
+            "repository is gated: accept its terms on Hugging Face and set\n"
+            "HF_TOKEN, or pass --vae-source a local copy. Point HF_HOME at\n"
+            "storage that survives the job.\n\n"
             "Selection is deterministic: images are taken in sorted order, so the\n"
             "same source and arguments reproduce the same cache. Use --shuffle to\n"
             "opt out. A caption that does not fit --max-text-tokens is skipped\n"
-            "rather than truncated, and the counts are reported at the end.\n\n"
+            "rather than truncated, and the skip counts are reported at the end\n"
+            "and recorded in metadata.json. The budget counts the chat-templated\n"
+            "tokens the text encoder sees: the caption's own plus the template's\n"
+            "role markers.\n\n"
+            "A rebuild into the same --output-dir replaces the cache there, once\n"
+            "the encoders have loaded.\n\n"
             f"Supported models: {', '.join(automodel_models)}\n\n"
-            "Example:\n"
+            "Example, with the default resolution and token budget:\n"
             "  bash ./runner/primus-cli direct --single -- \\\n"
             "    data automodel-cache --model ideogram4 \\\n"
             "    --image-dir   /path/to/images \\\n"
             "    --caption-dir /path/to/captions \\\n"
             "    --output-dir  /path/to/cache \\\n"
-            "    --num-samples 1024 --resolution 256 --max-text-tokens 256\n\n"
-            "128 is the default and drops captions longer than that.\n\n"
+            "    --num-samples 1024 --resolution 256 --max-text-tokens 128\n\n"
+            "Raise --max-text-tokens to keep longer captions; each extra token\n"
+            "lengthens every training sequence.\n\n"
             "Then point the training config's data.dataloader.cache_dir at --output-dir."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -131,13 +152,19 @@ def register_data_subcommands(data_subparsers: argparse._SubParsersAction) -> No
 
     cache_encode = cache_parser.add_argument_group("Encoding Options")
     cache_encode.add_argument(
-        "--resolution", type=int, default=256, help="Square image resolution (default: 256)"
+        "--resolution",
+        type=_positive_int,
+        default=256,
+        help="Square image resolution; the model may require a multiple (default: 256)",
     )
     cache_encode.add_argument(
         "--max-text-tokens",
-        type=int,
+        type=_positive_int,
         default=128,
-        help="Caption token budget; longer captions are skipped, not truncated (default: 128)",
+        help=(
+            "Token budget for the chat-templated caption; longer captions are skipped, "
+            "not truncated (default: 128)"
+        ),
     )
     cache_encode.add_argument(
         "--dtype",

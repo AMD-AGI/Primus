@@ -48,15 +48,21 @@ from pathlib import Path
 from typing import Dict, List
 
 import torch
-from nemo_automodel.components.datasets.diffusion.loader import DiffusionDataloaderBuild
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 logger = logging.getLogger(__name__)
 
-# Collate runs in the worker processes, so this suppresses repeats within a worker
-# only. That is enough to keep the log readable without coordinating across
-# processes for a warning.
-_WARNED: set = set()
+# What the loader needs from metadata.json, beyond the sample list.
+_REQUIRED_METADATA = ("grid_h", "grid_w", "in_channels", "llm_features_dim")
+
+
+def _dataloader_build(**kwargs):
+    """AutoModel's build result, imported here so the module loads without AutoModel."""
+    from nemo_automodel.components.datasets.diffusion.loader import (
+        DiffusionDataloaderBuild,
+    )
+
+    return DiffusionDataloaderBuild(**kwargs)
 
 
 class Ideogram4CacheDataset(Dataset):
@@ -75,17 +81,28 @@ class Ideogram4CacheDataset(Dataset):
         with open(metadata_path, "r") as handle:
             self.metadata = json.load(handle)
 
+        if not isinstance(self.metadata, dict) or not isinstance(self.metadata.get("samples"), list):
+            raise ValueError(f"{metadata_path} has no 'samples' list, so it is not a cache index")
         self.samples: List[Dict] = self.metadata["samples"]
         if not self.samples:
             raise ValueError(
                 f"the cache at {self.cache_dir} has no samples. Its metadata was written, "
                 "so the build ran but encoded nothing."
             )
-        self.grid_h = int(self.metadata.get("grid_h", 0))
-        self.grid_w = int(self.metadata.get("grid_w", 0))
+        model_type = self.metadata.get("model_type", "ideogram4")
+        if model_type != "ideogram4":
+            raise ValueError(f"the cache at {self.cache_dir} was built for {model_type!r}, not ideogram4")
+        missing = [key for key in _REQUIRED_METADATA if key not in self.metadata]
+        if missing:
+            raise ValueError(f"{metadata_path} is missing {', '.join(missing)}; rebuild the cache")
+        self.grid_h = int(self.metadata["grid_h"])
+        self.grid_w = int(self.metadata["grid_w"])
+        self.in_channels = int(self.metadata["in_channels"])
+        self.llm_features_dim = int(self.metadata["llm_features_dim"])
 
         # The longest caption in the whole cache, from the metadata alone. Reading
-        # it here rather than per batch is what makes the text width a constant.
+        # it here rather than per batch is what makes the text width a constant;
+        # each sample is checked against its entry when it is read.
         self.max_text_length = max(int(s["text_length"]) for s in self.samples)
 
     def __len__(self) -> int:
@@ -107,9 +124,25 @@ class Ideogram4CacheDataset(Dataset):
         # weights_only, because a cache file is untrusted input in exactly the way a
         # checkpoint from elsewhere is.
         data = torch.load(sample_path, map_location="cpu", weights_only=True)
+        latents, features = data["image_latents"], data["llm_features"]
+        # The text width is derived from the metadata, so a sample that disagrees
+        # with its entry would be cut or misplaced rather than fail. A hand-edited
+        # index, or files from another build, are the usual causes.
+        expected = {
+            "latent shape": ((self.in_channels, self.grid_h, self.grid_w), tuple(latents.shape)),
+            "text rows": (int(entry["text_length"]), int(features.shape[0])),
+            "stored text_length": (int(entry["text_length"]), int(data["text_length"])),
+            "feature width": (self.llm_features_dim, int(features.shape[-1])),
+        }
+        for what, (want, got) in expected.items():
+            if want != got:
+                raise ValueError(
+                    f"sample {idx} ({sample_path.name}) does not match the cache index: "
+                    f"{what} is {got}, the index says {want}. Rebuild the cache."
+                )
         return {
-            "image_latents": data["image_latents"].to(torch.float32),
-            "llm_features": data["llm_features"],
+            "image_latents": latents.to(torch.float32),
+            "llm_features": features,
             "text_length": int(data["text_length"]),
         }
 
@@ -121,10 +154,9 @@ def _collate(batch: List[Dict[str, torch.Tensor]], text_width: int = 0) -> Dict[
     sequence length vary between steps. See the module docstring for why that
     blocks compilation; the config's default avoids it.
 
-    A caption longer than an explicitly configured width is truncated to its first
-    ``text_width`` tokens, with one warning. Reaching that branch means the width
-    was set by hand and set too small, since the derived default is by construction
-    large enough for every caption in the cache.
+    A caption is never truncated. ``build`` refuses a width below the longest
+    caption in the cache, and each sample is checked against the index, so a
+    caption longer than the width means the two disagree.
     """
     image_latents = torch.stack([b["image_latents"] for b in batch], dim=0)
 
@@ -137,18 +169,10 @@ def _collate(batch: List[Dict[str, torch.Tensor]], text_width: int = 0) -> Dict[
     for row, feature in enumerate(features):
         length = int(feature.shape[0])
         if length > width:
-            if "truncated" not in _WARNED:
-                _WARNED.add("truncated")
-                logger.warning(
-                    "[Ideogram4Cache] a caption has %d tokens but max_text_tokens is set "
-                    "to %d, so it is truncated to its first %d. Raise max_text_tokens, or "
-                    "leave it at 0 to derive a width that fits every caption.",
-                    length,
-                    width,
-                    width,
-                )
-            feature = feature[:width]
-            length = width
+            raise ValueError(
+                f"a caption has {length} tokens but the text width is {width}; the cache "
+                "index and its samples disagree, so rebuild the cache"
+            )
         # Left-pad: the real tokens go in the LAST `length` rows.
         padded[row, width - length :] = feature
         text_lengths[row] = length
@@ -184,11 +208,10 @@ class Ideogram4CacheDataloaderConfig:
     # The padded width of the text region, which is what fixes the packed sequence
     # length. Three meanings:
     #   0   derive it from the cache: the longest caption present. A dataset-level
-    #       constant, so the sequence length never moves and nothing is ever
-    #       truncated. This is what you want.
-    #   > 0 use this width, truncating any longer caption. Also gives a constant
-    #       sequence length, and is the way to trade caption tail for sequence
-    #       length deliberately.
+    #       constant, so the sequence length never moves. This is what you want.
+    #   > 0 use this width, which must be at least the longest caption in the
+    #       cache; a caption is never truncated. A constant sequence length too,
+    #       for matching a width used elsewhere.
     #   -1  pad to the per-batch maximum. Less padding on batches of short
     #       captions, at the cost of a sequence length that changes between steps
     #       -- which means the model cannot be compiled. An explicit choice, not a
@@ -196,15 +219,30 @@ class Ideogram4CacheDataloaderConfig:
     #       and then only shows up as a run that never stops recompiling.
     max_text_tokens: int = 0
 
-    def build(self, *, dp_rank: int, dp_world_size: int, batch_size: int) -> DiffusionDataloaderBuild:
+    def build(self, *, dp_rank: int, dp_world_size: int, batch_size: int):
+        if self.max_text_tokens < -1:
+            raise ValueError(
+                f"max_text_tokens must be 0 (derive from the cache), a positive width, or "
+                f"-1 (per batch); got {self.max_text_tokens}"
+            )
         dataset = Ideogram4CacheDataset(self.cache_dir)
 
-        if self.max_text_tokens < 0:
+        if self.max_text_tokens == -1:
             text_width = 0
         elif self.max_text_tokens == 0:
             text_width = dataset.max_text_length
         else:
             text_width = int(self.max_text_tokens)
+            if text_width < dataset.max_text_length:
+                # Truncating would keep the head of the chat-templated sequence and
+                # drop the end of the prompt and the generation-prompt tokens every
+                # sample ends with, which is not what the model sees at inference.
+                raise ValueError(
+                    f"max_text_tokens={text_width} is below the longest caption in the "
+                    f"cache ({dataset.max_text_length} tokens). Captions are never "
+                    "truncated: raise it, leave it at 0 to derive the width, or rebuild "
+                    "the cache with a smaller --max-text-tokens to drop the long ones."
+                )
 
         sampler = None
         if dp_world_size > 1:
@@ -228,6 +266,13 @@ class Ideogram4CacheDataloaderConfig:
             pin_memory=self.pin_memory,
             drop_last=self.drop_last,
         )
+        if len(dataloader) == 0:
+            raise ValueError(
+                f"the cache at {self.cache_dir} gives rank {dp_rank} no batch: "
+                f"{len(dataset)} samples over {dp_world_size} rank(s) at batch size "
+                f"{batch_size} with drop_last={self.drop_last}. It needs at least "
+                f"{dp_world_size * batch_size} samples."
+            )
         logger.info(
             "[Ideogram4Cache] %d samples from %s (grid=%dx%d, text width %s, rank %d/%d, "
             "batch %d, %d batches per rank)",
@@ -248,4 +293,4 @@ class Ideogram4CacheDataloaderConfig:
                 "compiled in this configuration; set max_text_tokens to 0 to derive a "
                 "constant width from the cache."
             )
-        return DiffusionDataloaderBuild(dataloader=dataloader, sampler=sampler)
+        return _dataloader_build(dataloader=dataloader, sampler=sampler)

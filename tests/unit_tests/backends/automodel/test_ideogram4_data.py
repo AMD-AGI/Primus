@@ -28,18 +28,17 @@ supposed to be able to swap one for the other, and that a cache entry cannot
 reach outside its own directory.
 
 The cache tests build a real cache on disk in a throwaway directory. Nothing here
-needs a GPU or any encoder weights.
+needs a GPU or any encoder weights, and AutoModel is needed only for the type
+``build()`` returns: without it, that one call is replaced for each test.
 """
 
+import importlib.util
 import json
+import types
 
 import pytest
 
 torch = pytest.importorskip("torch")
-pytest.importorskip(
-    "nemo_automodel.components.datasets.diffusion.loader",
-    reason="the loaders subclass AutoModel's dataloader build type",
-)
 
 from primus.backends.automodel.models.ideogram4.data import (  # noqa: E402
     cache,
@@ -50,6 +49,19 @@ FEATURE_DIM = 8
 CHANNELS = 4
 
 
+@pytest.fixture(autouse=True)
+def automodel_build_type(monkeypatch):
+    """The real build type when AutoModel is importable, else a stand-in with the
+    same two fields, patched onto the two loader modules only."""
+    try:
+        found = importlib.util.find_spec("nemo_automodel.components.datasets.diffusion.loader")
+    except (ModuleNotFoundError, ValueError):
+        found = None
+    if found is None:
+        for module in (cache, synthetic):
+            monkeypatch.setattr(module, "_dataloader_build", lambda **kw: types.SimpleNamespace(**kw))
+
+
 # --------------------------------------------------------------------------- #
 # Cache fixtures                                                              #
 # --------------------------------------------------------------------------- #
@@ -58,18 +70,19 @@ def write_cache(root, text_lengths, grid=(2, 3), feature_dim=FEATURE_DIM):
 
     Sample i, token j gets the value ``(i + 1) * 100 + j``, which is non-zero
     everywhere and unique per position. Padding is zero, so a test can tell
-    exactly which rows hold real tokens.
+    exactly which rows hold real tokens. Stored as the builder stores them:
+    fp16 latents and fp16 features.
     """
     samples_dir = root / "samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
     entries = []
     for i, length in enumerate(text_lengths):
-        features = torch.zeros(length, feature_dim)
+        features = torch.zeros(length, feature_dim, dtype=torch.float16)
         for j in range(length):
             features[j] = (i + 1) * 100 + j
         torch.save(
             {
-                "image_latents": torch.full((CHANNELS, grid[0], grid[1]), float(i)),
+                "image_latents": torch.full((CHANNELS, grid[0], grid[1]), float(i), dtype=torch.float16),
                 "llm_features": features,
                 "text_length": length,
             },
@@ -187,37 +200,36 @@ class TestConstantTextWidth:
             shapes.add(tuple(batch["llm_features"].shape))
         assert len(shapes) == 2, "expected the per-batch width to vary with the data"
 
-    def test_the_derived_width_never_truncates(self, cache_dir, caplog):
+    def test_the_derived_width_fits_every_caption(self, cache_dir):
         dataset = cache.Ideogram4CacheDataset(str(cache_dir))
-        with caplog.at_level("WARNING"):
-            batch = cache._collate([dataset[i] for i in range(4)], text_width=dataset.max_text_length)
+        batch = cache._collate([dataset[i] for i in range(4)], text_width=dataset.max_text_length)
         assert batch["text_lengths"].tolist() == [2, 4, 3, 4]
-        assert not [r for r in caplog.records if "truncated" in r.getMessage()]
 
 
-class TestTruncation:
-    def test_an_explicit_width_that_is_too_small_truncates_and_warns(self, cache_dir, monkeypatch, caplog):
-        monkeypatch.setattr(cache, "_WARNED", set())
+class TestNoTruncation:
+    """Truncating would keep the head of the chat-templated sequence and drop the
+    end of the prompt and the generation-prompt tokens every sample ends with."""
+
+    def test_an_explicit_width_below_the_longest_caption_is_refused(self, cache_dir):
+        config = cache.Ideogram4CacheDataloaderConfig(
+            cache_dir=str(cache_dir), num_workers=0, max_text_tokens=3
+        )
+        with pytest.raises(ValueError, match="below the longest caption in the cache"):
+            config.build(dp_rank=0, dp_world_size=1, batch_size=2)
+
+    def test_a_sample_longer_than_the_width_is_an_error_not_a_cut(self, cache_dir):
         dataset = cache.Ideogram4CacheDataset(str(cache_dir))
-        with caplog.at_level("WARNING"):
-            batch = cache._collate([dataset[1]], text_width=2)
-
-        assert batch["text_lengths"].tolist() == [2]
-        # The FIRST tokens are kept, so the caption is cut at its tail.
-        assert torch.all(batch["llm_features"][0, 0] == 200)
-        assert torch.all(batch["llm_features"][0, 1] == 201)
-
-        warnings = [r for r in caplog.records if "truncated" in r.getMessage()]
-        assert len(warnings) == 1
-        assert "max_text_tokens" in warnings[0].getMessage()
-
-    def test_it_warns_only_once(self, cache_dir, monkeypatch, caplog):
-        monkeypatch.setattr(cache, "_WARNED", set())
-        dataset = cache.Ideogram4CacheDataset(str(cache_dir))
-        with caplog.at_level("WARNING"):
+        with pytest.raises(ValueError, match="disagree"):
             cache._collate([dataset[1]], text_width=2)
-            cache._collate([dataset[3]], text_width=2)
-        assert len([r for r in caplog.records if "truncated" in r.getMessage()]) == 1
+
+    @pytest.mark.parametrize("value", [-2, -5, -128])
+    def test_a_width_below_minus_one_is_refused(self, cache_dir, value):
+        """Rather than silently meaning per-batch padding."""
+        config = cache.Ideogram4CacheDataloaderConfig(
+            cache_dir=str(cache_dir), num_workers=0, max_text_tokens=value
+        )
+        with pytest.raises(ValueError, match="-1 \\(per batch\\)"):
+            config.build(dp_rank=0, dp_world_size=1, batch_size=2)
 
 
 # --------------------------------------------------------------------------- #
@@ -292,25 +304,57 @@ class TestCacheIntegrity:
         with pytest.raises(ValueError, match="outside"):
             dataset[0]
 
-    def test_latents_are_promoted_to_float32(self, tmp_path):
+    def test_latents_are_promoted_to_float32(self, cache_dir):
         """The cache stores them narrow to keep it small; the pipeline noises them
         in float32."""
-        root = tmp_path / "cache"
-        samples = root / "samples"
-        samples.mkdir(parents=True)
-        torch.save(
-            {
-                "image_latents": torch.zeros(CHANNELS, 2, 3, dtype=torch.float16),
-                "llm_features": torch.zeros(2, FEATURE_DIM),
-                "text_length": 2,
-            },
-            samples / "0.pt",
-        )
-        (root / "metadata.json").write_text(
-            json.dumps({"samples": [{"cache_file": "samples/0.pt", "text_length": 2}]})
-        )
-        dataset = cache.Ideogram4CacheDataset(str(root))
+        dataset = cache.Ideogram4CacheDataset(str(cache_dir))
         assert dataset[0]["image_latents"].dtype == torch.float32
+
+    def test_metadata_without_a_sample_list_is_refused(self, tmp_path):
+        root = tmp_path / "cache"
+        root.mkdir()
+        (root / "metadata.json").write_text("{}")
+        with pytest.raises(ValueError, match="no 'samples' list"):
+            cache.Ideogram4CacheDataset(str(root))
+
+    @pytest.mark.parametrize("key", ["grid_h", "grid_w", "in_channels", "llm_features_dim"])
+    def test_metadata_missing_a_dimension_is_refused(self, cache_dir, key):
+        """Rather than defaulting a grid to 0."""
+        metadata = json.loads((cache_dir / "metadata.json").read_text())
+        del metadata[key]
+        (cache_dir / "metadata.json").write_text(json.dumps(metadata))
+        with pytest.raises(ValueError, match=key):
+            cache.Ideogram4CacheDataset(str(cache_dir))
+
+    def test_a_cache_for_another_model_is_refused(self, cache_dir):
+        metadata = json.loads((cache_dir / "metadata.json").read_text())
+        metadata["model_type"] = "flux"
+        (cache_dir / "metadata.json").write_text(json.dumps(metadata))
+        with pytest.raises(ValueError, match="built for 'flux'"):
+            cache.Ideogram4CacheDataset(str(cache_dir))
+
+    def test_a_sample_that_disagrees_with_its_entry_is_refused(self, cache_dir):
+        """The reviewer's probe: an index claiming one token for a longer sample
+        used to be truncated silently."""
+        metadata = json.loads((cache_dir / "metadata.json").read_text())
+        metadata["samples"][1]["text_length"] = 1
+        (cache_dir / "metadata.json").write_text(json.dumps(metadata))
+        dataset = cache.Ideogram4CacheDataset(str(cache_dir))
+        with pytest.raises(ValueError, match="text rows is 4, the index says 1"):
+            dataset[1]
+
+    def test_a_sample_with_another_grid_is_refused(self, tmp_path):
+        root = write_cache(tmp_path / "cache", [2, 3])
+        metadata = json.loads((root / "metadata.json").read_text())
+        metadata["grid_w"] = 4
+        (root / "metadata.json").write_text(json.dumps(metadata))
+        with pytest.raises(ValueError, match="latent shape"):
+            cache.Ideogram4CacheDataset(str(root))[0]
+
+    def test_a_cache_too_small_for_one_batch_per_rank_is_refused(self, cache_dir):
+        config = cache.Ideogram4CacheDataloaderConfig(cache_dir=str(cache_dir), num_workers=0)
+        with pytest.raises(ValueError, match="no batch"):
+            config.build(dp_rank=0, dp_world_size=8, batch_size=2)
 
 
 # --------------------------------------------------------------------------- #
@@ -353,9 +397,17 @@ class TestSharedBatchContract:
             assert batch["image_latents"].ndim == 4
             assert batch["image_latents"].dtype == torch.float32
             assert batch["llm_features"].ndim == 3
+            assert batch["llm_features"].is_floating_point()
             assert batch["text_lengths"].dtype == torch.long
             assert batch["text_lengths"].ndim == 1
             assert batch["data_type"] == "image"
+
+    def test_the_feature_dtype_is_each_producers_own(self, cache_dir):
+        """The contract is floating point in the producer's dtype, cast by the
+        adapter: the cache keeps its stored fp16, which halves the host-to-device
+        copy, and the synthetic loader generates fp32."""
+        assert self.cache_batch(cache_dir)["llm_features"].dtype == torch.float16
+        assert self.synthetic_batch()["llm_features"].dtype == torch.float32
 
     def test_the_batch_dimension_agrees_across_every_key(self, cache_dir):
         for batch in (self.synthetic_batch(), self.cache_batch(cache_dir)):
@@ -406,29 +458,153 @@ class TestCacheBuilder:
         return images, captions
 
     @staticmethod
-    def fake_processor(monkeypatch, grid, interrupt_after=None):
+    def fake_processor(monkeypatch, grid, interrupt_after=None, tokens=2, fail_load=False, fail_encode=False):
+        """The real processor with its models replaced: ``tokens`` is what every
+        caption counts as, and each encode is recorded."""
         from primus.backends.automodel.models.ideogram4 import processor
 
-        calls = []
+        calls = types.SimpleNamespace(images=[], texts=[])
 
         class FakeProcessor(processor.Ideogram4Processor):
             def load_models(self):
-                pass
+                if fail_load:
+                    raise OSError("weights not found")
+
+            def count_text_tokens(self, prompt):
+                return tokens
 
             @staticmethod
             def preprocess_image(image, resolution):
-                return torch.zeros(3, 8, 8)
+                return torch.zeros(1, 3, 8, 8)
 
             def encode_image(self, image_tensor):
-                if interrupt_after is not None and len(calls) == interrupt_after:
+                if interrupt_after is not None and len(calls.images) == interrupt_after:
                     raise KeyboardInterrupt
-                calls.append(1)
-                return torch.zeros(CHANNELS, *grid)
+                if fail_encode:
+                    raise RuntimeError("HIP error: invalid device function")
+                calls.images.append(1)
+                return torch.zeros(CHANNELS, *grid, dtype=torch.float16)
 
             def encode_text(self, prompt, max_text_tokens):
-                return {"llm_features": torch.ones(2, FEATURE_DIM), "text_length": 2}
+                calls.texts.append(prompt)
+                return {
+                    "llm_features": torch.ones(tokens, FEATURE_DIM, dtype=torch.float16),
+                    "text_length": tokens,
+                }
 
         monkeypatch.setattr(processor, "Ideogram4Processor", FakeProcessor)
+        return calls
+
+    @staticmethod
+    def build(images, captions, out, **kwargs):
+        from primus.backends.automodel.models.ideogram4.data import build
+
+        return build.build_cache(
+            image_dir=str(images), caption_dir=str(captions), output_dir=str(out), **kwargs
+        )
+
+    def test_a_build_writes_an_index_the_loader_reads(self, tmp_path, sources, monkeypatch):
+        images, captions = sources
+        out = tmp_path / "cache"
+        self.fake_processor(monkeypatch, grid=(2, 2))
+        metadata = self.build(images, captions, out, num_samples=3)
+
+        assert metadata["num_samples"] == 3
+        assert metadata["skipped"] == {"no_caption": 0, "too_long": 0, "failed": 0}
+        assert json.loads((out / "metadata.json").read_text()) == metadata
+        assert not (out / "metadata.json.partial").exists()
+        dataset = cache.Ideogram4CacheDataset(str(out))
+        assert len(dataset) == 3
+        assert dataset[0]["llm_features"].shape == (2, FEATURE_DIM)
+
+    def test_a_smaller_rebuild_leaves_no_stale_samples(self, tmp_path, sources, monkeypatch):
+        images, captions = sources
+        out = tmp_path / "cache"
+        self.fake_processor(monkeypatch, grid=(2, 2))
+        self.build(images, captions, out, num_samples=3)
+        self.build(images, captions, out, num_samples=1)
+        assert sorted(p.name for p in (out / "samples").iterdir()) == ["0.pt"]
+
+    def test_a_failed_load_leaves_the_previous_cache_intact(self, tmp_path, sources, monkeypatch):
+        images, captions = sources
+        out = tmp_path / "cache"
+        self.fake_processor(monkeypatch, grid=(2, 2))
+        self.build(images, captions, out, num_samples=3)
+
+        self.fake_processor(monkeypatch, grid=(2, 2), fail_load=True)
+        with pytest.raises(OSError):
+            self.build(images, captions, out, num_samples=3)
+        assert len(cache.Ideogram4CacheDataset(str(out))) == 3
+
+    def test_an_over_long_caption_is_dropped_before_any_encoding(self, tmp_path, sources, monkeypatch):
+        images, captions = sources
+        calls = self.fake_processor(monkeypatch, grid=(2, 2), tokens=200)
+        with pytest.raises(RuntimeError, match="3 with a caption over 128 tokens"):
+            self.build(images, captions, tmp_path / "cache", num_samples=3)
+        assert calls.images == [] and calls.texts == []
+
+    def test_the_images_are_closed(self, tmp_path, sources, monkeypatch):
+        """A large build would otherwise hold a file handle per image until the
+        garbage collector got to it."""
+        from PIL import Image
+
+        real_open, closed = Image.open, []
+
+        class Tracked:
+            def __init__(self, path):
+                self.image = real_open(path)
+
+            def __enter__(self):
+                return self.image
+
+            def __exit__(self, *exc):
+                closed.append(True)
+                self.image.close()
+
+        monkeypatch.setattr(Image, "open", Tracked)
+        images, captions = sources
+        self.fake_processor(monkeypatch, grid=(2, 2))
+        self.build(images, captions, tmp_path / "cache", num_samples=3)
+        assert len(closed) == 3
+
+    def test_a_systemic_failure_stops_the_build(self, tmp_path, monkeypatch):
+        from PIL import Image
+
+        images, captions = tmp_path / "images", tmp_path / "captions"
+        images.mkdir()
+        captions.mkdir()
+        for i in range(12):
+            Image.new("RGB", (8, 8)).save(images / f"{i:02d}.png")
+            (captions / f"{i:02d}.txt").write_text(f"caption {i}")
+        self.fake_processor(monkeypatch, grid=(2, 2), fail_encode=True)
+        with pytest.raises(RuntimeError, match="8 images in a row failed"):
+            self.build(images, captions, tmp_path / "cache", num_samples=12)
+
+    def test_an_undecodable_caption_is_skipped_not_fatal(self, tmp_path, sources, monkeypatch):
+        images, captions = sources
+        (captions / "1.txt").write_bytes(b"\xff\xfe caption")
+        self.fake_processor(monkeypatch, grid=(2, 2))
+        metadata = self.build(images, captions, tmp_path / "cache", num_samples=3)
+        assert metadata["num_samples"] == 2
+        assert metadata["skipped"]["failed"] == 1
+
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"max_text_tokens": 0}, "max_text_tokens must be at least 1"),
+            ({"max_text_tokens": -4}, "max_text_tokens must be at least 1"),
+            ({"resolution": 0}, "multiple of 16"),
+            ({"resolution": 250}, "multiple of 16"),
+        ],
+    )
+    def test_bad_arguments_are_refused_before_the_encoders_load(
+        self, tmp_path, sources, monkeypatch, kwargs, match
+    ):
+        images, captions = sources
+        self.fake_processor(monkeypatch, grid=(2, 2), fail_load=True)
+        with pytest.raises(ValueError, match=match):
+            self.build(images, captions, tmp_path / "cache", num_samples=3, **kwargs)
+        assert not (tmp_path / "cache").exists()
 
     def test_an_interrupted_rebuild_does_not_keep_the_old_index(self, tmp_path, sources, monkeypatch):
         """The old metadata would describe samples the rebuild has already overwritten."""

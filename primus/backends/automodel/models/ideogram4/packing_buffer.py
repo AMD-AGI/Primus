@@ -62,8 +62,13 @@ FOUR RULES. Only the third fails loudly.
    sampling pass, an eval loop at a different batch size -- reads whatever was
    published last. Call :func:`clear_packing` first, which returns the processor to
    deriving the packing from the mask. The processor also rejects a packing whose
-   length disagrees with the batch, which is a static-shape comparison and so
-   costs nothing, meaning that particular mistake at least fails loudly.
+   entry count disagrees with the batch size, or whose token total -- recorded
+   here as a host integer when it is published -- disagrees with the batch size
+   times the sequence length. Both compare static shapes against host values, so
+   they cost nothing, and a packing left over from a different batch size,
+   resolution or text width fails loudly. One built for the same shape with
+   different caption lengths cannot be told apart, which is what
+   :func:`clear_packing` is for.
 """
 from __future__ import annotations
 
@@ -79,7 +84,7 @@ logger = logging.getLogger(__name__)
 # (``l_self_modules_attention_buffers_primus_cu_seqlens_``), so keep it greppable.
 PACKING_ATTR = "_primus_cu_seqlens"
 BOUND_ATTR = "_primus_max_seqlen"
-_CONSUMERS_ATTR = "_primus_packing_consumers"
+TOKENS_ATTR = "_primus_packed_tokens"
 
 _logged: set = set()
 
@@ -114,44 +119,50 @@ def attention_modules(model: nn.Module) -> List[nn.Module]:
     a run without the varlen processor installed has no consumers, so no buffers
     are installed and nothing is published, instead of maintaining per-step state
     that nobody reads.
-    """
-    cached = getattr(model, _CONSUMERS_ATTR, None)
-    if cached is not None:
-        return cached
 
+    Walked afresh on every call rather than cached, so a module that gains the
+    processor after the first publish, or replaces one that had it, is found on the
+    next publish. The walk is host-side and outside the compiled region, and costs
+    far less than the step it precedes.
+    """
     from primus.backends.automodel.models.ideogram4.attn_processor import (
         Ideogram4VarlenAttnProcessor,
     )
 
-    found = [
+    return [
         module
         for module in model.modules()
         if isinstance(_own_processor(module), Ideogram4VarlenAttnProcessor)
     ]
-    # An empty result is not cached: on an unlucky ordering this can run before the
-    # processors are swapped in, and caching the empty answer would disable the
-    # transport for the rest of the run.
-    if found:
-        setattr(model, _CONSUMERS_ATTR, found)
-    return found
 
 
-def _shared_buffer(modules: List[nn.Module], numel: int, device: torch.device) -> Optional[torch.Tensor]:
-    """The one buffer every module shares, or None if that is no longer true.
+def _concrete(device: torch.device) -> torch.device:
+    """``cuda`` as ``cuda:<current>``, so it compares equal to where a buffer lives."""
+    if device.type == "cpu" or device.index is not None:
+        return device
+    return torch.device(device.type, torch.get_device_module(device.type).current_device())
 
-    Returns None for all three ways the invariant lapses: never installed;
-    installed with the wrong shape or device, which means the batch size changed;
-    or installed and no longer shared, which means something handed each module its
-    own tensor.
+
+def _reinstall_cause(modules: List[nn.Module], numel: int, device: torch.device) -> Optional[str]:
+    """Why the shared buffer has to be (re)installed, or None when it is fine.
+
+    The causes are distinguished because each one points somewhere different
+    when it shows up in the log.
     """
-    first = getattr(modules[0], PACKING_ATTR, None)
-    if not isinstance(first, torch.Tensor):
-        return None
-    if first.numel() != numel or first.dtype != torch.int32 or first.device != device:
-        return None
-    if not all(getattr(m, PACKING_ATTR, None) is first for m in modules):
-        return None
-    return first
+    held = [getattr(m, PACKING_ATTR, None) for m in modules]
+    present = [t for t in held if isinstance(t, torch.Tensor)]
+    if not present:
+        return "missing"
+    if len(present) != len(held):
+        return "new-consumer"
+    first = present[0]
+    if first.numel() != numel:
+        return "size"
+    if first.dtype != torch.int32 or first.device != device:
+        return "device"
+    if not all(t is first for t in present):
+        return "unshared"
+    return None
 
 
 def _install(modules: List[nn.Module], numel: int, device: torch.device) -> torch.Tensor:
@@ -166,12 +177,14 @@ def _install(modules: List[nn.Module], numel: int, device: torch.device) -> torc
             module.register_buffer(PACKING_ATTR, shared, persistent=False)
         if not hasattr(module, BOUND_ATTR):
             setattr(module, BOUND_ATTR, None)
+        if not hasattr(module, TOKENS_ATTR):
+            setattr(module, TOKENS_ATTR, None)
     return shared
 
 
-def _report_install(previous, numel: int, count: int, max_seqlen: Optional[int]) -> None:
+def _report_install(cause: str, previous, numel: int, count: int, max_seqlen: Optional[int], device) -> None:
     """Explain what happened, once per distinct cause."""
-    if not isinstance(previous, torch.Tensor):
+    if cause == "missing":
         # The line that shows the transport is live: the entry count should be 2B+1
         # and the module count should be every block's attention.
         _log_once(
@@ -184,7 +197,7 @@ def _report_install(previous, numel: int, count: int, max_seqlen: Optional[int])
             max_seqlen,
             count,
         )
-    elif previous.numel() != numel:
+    elif cause == "size":
         _log_once(
             f"reshape-{previous.numel()}-{numel}",
             logging.WARNING,
@@ -194,6 +207,25 @@ def _report_install(previous, numel: int, count: int, max_seqlen: Optional[int])
             "drop_last and the eval batch size.",
             previous.numel(),
             numel,
+        )
+    elif cause == "device":
+        _log_once(
+            f"device-{previous.device}-{device}",
+            logging.WARNING,
+            "[PrimusIdeogramPacking] the cu_seqlens buffer was on %s but this publish targets "
+            "%s, so it was replaced on every attention module. Expected once after the model "
+            "moves; on every step it means the caller passes a different device each time.",
+            previous.device,
+            device,
+        )
+    elif cause == "new-consumer":
+        _log_once(
+            "new-consumer",
+            logging.WARNING,
+            "[PrimusIdeogramPacking] an attention module gained the var-len processor after the "
+            "first publish, so the buffer was reinstalled to include it; %d module(s) now "
+            "share it.",
+            count,
         )
     else:
         _log_once(
@@ -250,25 +282,38 @@ def publish_packing(
                 "Ideogram4VarlenAttnProcessor. Every layer would fall back to deriving the "
                 "packing from the attention mask, which host-syncs, graph-breaks under "
                 "torch.compile, and -- if it happens on only some ranks -- mixes two "
-                "attention paths into one gradient average. Either the varlen processor "
-                "install did not run (primus_ideogram4.varlen_attention) or the model was "
-                "replaced afterwards. Set primus_ideogram4.precompute_cu_seqlens: false to take the "
-                "mask-derived path deliberately."
+                "attention paths into one gradient average. primus_ideogram4.varlen_attention "
+                "is set, so the processor install was skipped or came too late: it is "
+                "skipped when model.pipeline_spec.transformer_cls names a class other than "
+                "Ideogram4Transformer2DModel, and it reaches only attention modules built "
+                "after it ran, or the model passed to it. Set "
+                "primus_ideogram4.precompute_cu_seqlens: false to take the mask-derived path "
+                "deliberately."
             )
         return None
 
-    target = torch.device(device) if device is not None else cu_seqlens.device
+    target = _concrete(torch.device(device) if device is not None else cu_seqlens.device)
     numel = cu_seqlens.numel()
-    shared = _shared_buffer(modules, numel, target)
-    if shared is None:
-        previous = getattr(modules[0], PACKING_ATTR, None)
+    cause = _reinstall_cause(modules, numel, target)
+    if cause is None:
+        shared = getattr(modules[0], PACKING_ATTR)
+    else:
+        previous = next(
+            (t for t in (getattr(m, PACKING_ATTR, None) for m in modules) if isinstance(t, torch.Tensor)),
+            None,
+        )
         shared = _install(modules, numel, target)
-        _report_install(previous, numel, len(modules), max_seqlen)
+        _report_install(cause, previous, numel, len(modules), max_seqlen, target)
     shared.copy_(cu_seqlens)
 
+    # The token total, for the processor's stale-packing check. Read only from a
+    # host tensor, where it is free; a device-side packing would need a sync.
+    packed_tokens = int(cu_seqlens[-1]) if cu_seqlens.device.type == "cpu" else None
     for module in modules:
         if getattr(module, BOUND_ATTR, None) != max_seqlen:
             setattr(module, BOUND_ATTR, max_seqlen)
+        if getattr(module, TOKENS_ATTR, None) != packed_tokens:
+            setattr(module, TOKENS_ATTR, packed_tokens)
     return shared
 
 
@@ -300,8 +345,7 @@ def clear_packing(model: nn.Module) -> int:
     for module in attention_modules(model):
         if module._buffers.pop(PACKING_ATTR, None) is not None:
             removed += 1
-        if hasattr(module, BOUND_ATTR):
-            delattr(module, BOUND_ATTR)
-    if hasattr(model, _CONSUMERS_ATTR):
-        delattr(model, _CONSUMERS_ATTR)
+        for attr in (BOUND_ATTR, TOKENS_ATTR):
+            if hasattr(module, attr):
+                delattr(module, attr)
     return removed

@@ -7,8 +7,11 @@
 # SETUP:
 #   1. A weightless config directory, as in ideogram4-pretrain.yaml.
 #   2. A cache of encoded image/caption pairs. Building one needs a single GPU and
-#      the public encoder weights. Captions longer than --max-text-tokens are
-#      skipped, not truncated; the default 128 drops long prompts:
+#      the encoder weights: the text encoder is public, the autoencoder's repository
+#      is gated (accept its terms and set HF_TOKEN, or pass --vae-source a local
+#      copy). Captions longer than --max-text-tokens (counted
+#      with the chat template the text encoder sees) are skipped, not truncated;
+#      the default 128 drops long prompts, so this raises it:
 #
 #        bash ./runner/primus-cli direct --single -- data automodel-cache --model ideogram4 \
 #            --image-dir /path/to/images --caption-dir /path/to/captions \
@@ -20,7 +23,8 @@
 #   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
 #   GPUS_PER_NODE=8 \
 #   bash ./runner/primus-cli direct -- train pretrain \
-#       --config examples/automodel/configs/MI355X/diffusion/ideogram4-pretrain-cache.yaml
+#       --config examples/automodel/configs/MI355X/diffusion/ideogram4-pretrain-cache.yaml \
+#       model.pretrained_model_name_or_path=<config_dir> data.dataloader.cache_dir=/path/to/cache
 #
 # WHAT THIS IS. A short run whose point is a clearly decreasing loss on real
 # conditioning, which validates the processor and the cache loader end to end.

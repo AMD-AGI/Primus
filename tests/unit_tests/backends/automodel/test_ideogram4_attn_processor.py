@@ -27,9 +27,9 @@ WHAT THESE ARE DEFENDING:
   attend on a packing built for a different batch size. The guard compares only
   static shapes, so it is free, and it turns a silent corruption into an error.
 
-The kernels are replaced with recorders. Nothing here measures attention numerics
--- that needs a GPU and belongs to the V7 compute stage. What is measured is
-dispatch, which is where the silent mistakes live.
+The kernels are replaced with recorders everywhere except one GPU-only class,
+which measures the var-len path against fp32 masked SDPA. Everything else
+measures dispatch, which is where the silent mistakes live.
 """
 
 import pytest
@@ -257,6 +257,15 @@ class TestDeterministicMode:
         assert len(warnings) == 1
         assert "primus_ideogram4.varlen_attention" in warnings[0].getMessage()
 
+    def test_strict_mode_after_a_warn_only_warning_still_raises(self, warn_only_mode, recorder):
+        """The warning is given once, but the mode is checked on every call."""
+        attn = FakeAttention()
+        run(attn.processor, attn, batch=2, seq_len=12, mask=None)
+        torch.use_deterministic_algorithms(True)
+        with pytest.raises(RuntimeError, match="primus_ideogram4.varlen_attention"):
+            run(attn.processor, attn, batch=2, seq_len=12, mask=None)
+        assert len(recorder) == 1
+
     def test_the_additive_mask_fallback_still_runs(self, deterministic_mode, monkeypatch, recorder):
         """The fallback goes through diffusers' dispatch, which follows torch's own
         rules, so it stays allowed."""
@@ -310,6 +319,24 @@ class TestStalePackingGuard:
         run(attn.processor, attn, batch=2, seq_len=12)
         assert recorder[0]["path"] == "varlen"
 
+    def test_a_packing_for_another_sequence_length_is_refused(self, recorder):
+        """Same batch size, so the entry count matches; the token total recorded at
+        publish time is what catches it. This is the eval-at-another-resolution case."""
+        model = torch.nn.Sequential(FakeAttention())
+        published = cu_seqlens.build_cu_seqlens([1, 2], max_text_tokens=5, num_image_tokens=4)
+        packing_buffer.publish_packing(model, published, 8, device=torch.device("cpu"), required=True)
+
+        with pytest.raises(ValueError, match="covers 18 tokens but this batch has 40"):
+            run(model[0].processor, model[0], batch=2, seq_len=20)
+        assert recorder == []
+
+    def test_a_published_packing_of_the_right_length_passes(self, recorder):
+        model = torch.nn.Sequential(FakeAttention())
+        published = cu_seqlens.build_cu_seqlens([3, 5], max_text_tokens=8, num_image_tokens=4)
+        packing_buffer.publish_packing(model, published, 11, device=torch.device("cpu"), required=True)
+        run(model[0].processor, model[0], batch=2, seq_len=12)
+        assert recorder[0]["path"] == "varlen"
+
 
 class TestPackingShapes:
     def test_the_packed_token_count_matches_the_batch(self, recorder):
@@ -350,6 +377,62 @@ class TestDtypeHandling:
 
         assert seen["q"] == seen["v"] == torch.bfloat16
         assert seen["k"] == torch.bfloat16
+
+
+def _rel_err(got, ref):
+    return ((got.float() - ref.float()).norm() / ref.float().norm()).item()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+class TestNumericsAgainstMaskedSdpa:
+    """The exactness claim, measured: the processor's var-len path on a ragged,
+    left-padded batch against fp32 masked SDPA over the mask the model builds."""
+
+    TEXT_LENGTHS = [1, 37, 64, 20]
+    MAX_TEXT, NUM_IMAGE, HEADS, HEAD_DIM = 65, 192, 4, 64
+
+    @pytest.fixture
+    def qkv(self):
+        pytest.importorskip("primus_turbo.pytorch.ops")
+        generator = torch.Generator(device="cuda").manual_seed(0)
+        batch, length = len(self.TEXT_LENGTHS), self.MAX_TEXT + self.NUM_IMAGE
+        shape = (batch, length, self.HEADS, self.HEAD_DIM)
+        return [
+            (0.5 * torch.randn(shape, device="cuda", generator=generator)).to(torch.bfloat16)
+            for _ in range(3)
+        ]
+
+    def _reference(self, q, k, v):
+        ids = torch.tensor(
+            [[0] * (self.MAX_TEXT - n) + [1] * (n + self.NUM_IMAGE) for n in self.TEXT_LENGTHS],
+            device="cuda",
+        )
+        mask = (ids[:, :, None] == ids[:, None, :]).unsqueeze(1)
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q.float().transpose(1, 2), k.float().transpose(1, 2), v.float().transpose(1, 2), attn_mask=mask
+        )
+        return out.transpose(1, 2)
+
+    def _packed(self, q, k, v):
+        packing = cu_seqlens.build_cu_seqlens(self.TEXT_LENGTHS, self.MAX_TEXT, self.NUM_IMAGE, device="cuda")
+        bound = cu_seqlens.static_max_seqlen(self.MAX_TEXT, self.NUM_IMAGE)
+        return attn_processor.Ideogram4VarlenAttnProcessor()._attention(q, k, v, None, packing, bound)
+
+    def test_the_forward_matches(self, qkv):
+        got = self._packed(*qkv)
+        assert got.shape == qkv[0].shape
+        assert _rel_err(got, self._reference(*qkv)) < 2e-2
+
+    def test_the_gradients_match(self, qkv):
+        mine = [t.clone().requires_grad_(True) for t in qkv]
+        theirs = [t.float().clone().requires_grad_(True) for t in qkv]
+        seed = torch.randn(qkv[0].shape, device="cuda")
+
+        self._packed(*mine).float().backward(seed)
+        self._reference(*theirs).backward(seed)
+        for name, a, b in zip("qkv", mine, theirs):
+            assert torch.isfinite(a.grad).all(), f"grad_{name} is not finite"
+            assert _rel_err(a.grad, b.grad) < 5e-2, f"grad_{name} disagrees with masked SDPA"
 
 
 class TestSettings:
