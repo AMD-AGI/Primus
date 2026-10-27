@@ -1,0 +1,152 @@
+###############################################################################
+# Muse Spark Open 816B-A42B text backbone (Meta Superintelligence Labs).
+#
+# 816B total params, 42B active, vocab 202048, 1M context.
+# Sources:
+#   - https://huggingface.co/meta-models/Muse-Spark-Open-816B-A42B (gated)
+#   - transformers models/muse_spark (configuration_ / modeling_muse_spark.py)
+#
+# Scope: the text tower only. The 1.8B perception encoder (vision) and the
+# audio encoder are not wired up.
+#
+# model_type muse_spark builds upstream GPTModel with Muse layer, attention,
+# router and MoE subclasses swapped into the stock TE GPT decoder spec
+# (primus/backends/megatron/core/models/muse_spark/). Parameter count from the
+# shapes below, which reproduces the release's 816B / 42B (both exclude the
+# embeddings):
+#   total   62 x 256 experts x 3 x 4096 x 4096 ~= 798.9B experts
+#           + 62 x ~287M attention, latent projections, router ~= 17.8B
+#           ~= 816.7B, plus two untied 202048 x 8192 embeddings ~= 3.3B
+#   active  62 x 8 experts x 50.3M ~= 25.0B + 17.8B ~= 42.8B
+###############################################################################
+
+extends:
+  - language_model.yaml
+
+# primus/core/utils/import_utils.py and megatron_pretrain_trainer.py dispatch
+# on this string.
+model_type: muse_spark
+
+# Gated repo: real-data runs need the license accepted and an HF token.
+# AMD's ungated amd/Muse-Spark-Open-816B-A42B-Quark-PTPC-FP8 ships a byte-identical
+# tokenizer.json, tokenizer_config.json and special_tokens_map.json (its
+# chat_template.jinja differs); point tokenizer_model at it or at a local copy.
+# The tokenizer never prepends <|begin_of_text|>, whatever add_bos_token says.
+# Mock-data runs never build it (mock_data_patches.py forces NullTokenizer and
+# keeps vocab_size).
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: meta-models/Muse-Spark-Open-816B-A42B
+vocab_size: 202048
+
+# ---------- core shape ----------
+num_layers: 62
+hidden_size: 8192
+# intermediate_size; only dense layers would use it, and every layer is MoE.
+ffn_hidden_size: 16384
+num_attention_heads: 128
+# Must stay true or arguments.py forces num_query_groups back to None.
+group_query_attention: true
+num_query_groups: 16
+kv_channels: 64
+# multi_latent_attention must stay false. core_transformer_config_from_args
+# replaces MuseSparkTransformerConfig with MLATransformerConfig when it is true
+# and drops every muse_* field.
+multi_latent_attention: false
+
+# ---------- attention ----------
+# Weightless RMSNorm on q and k (Megatron's L2Norm, eps = layernorm_epsilon),
+# then q * qk_scale_factor. MuseSparkQueryNorm applies the factor, so
+# softmax_scale stays the default 1 / sqrt(kv_channels).
+qk_layernorm: false
+qk_l2_norm: true
+muse_qk_scale_factor: 5.4730064863875
+# Sigmoid gate from the normed layer input, applied after a weightless
+# per-head RMSNorm of the attention output (o_norm).
+attention_output_gate: true
+
+# Hybrid 3:1 attention. Every 4th layer counted back from the last
+# (0-based 1, 5, ..., 61) is full attention with NoPE; the rest are 2048-token
+# sliding window with RoPE. MuseSparkTransformerConfig derives no_rope_freq,
+# window_size = (2047, 0) and window_attn_skip_freq from these two keys and
+# num_layers, so proxies only need to override num_layers.
+muse_global_attn_interval: 4
+muse_sliding_window: 2048
+
+position_embedding_type: rope
+rotary_base: 500000
+rotary_percent: 1.0
+rotary_interleaved: false
+use_rope_scaling: false
+# The RoPE cache is materialised at this length, so training examples are
+# expected to override it down to the run's seq_length.
+max_position_embeddings: 1048576
+
+# ---------- norms and residuals ----------
+# input / pre-MLP / pre-expert norms scale by (1 + weight) with weight at zero
+# (TE RMSNorm with zero_centered_gamma). The final norm uses the same form;
+# convert an HF checkpoint's weight w to w - 1.
+normalization: RMSNorm
+# YAML keys are set on args by name, so use the dests of upstream's
+# --apply-layernorm-1p and --norm-epsilon. apply_layernorm_1p and
+# norm_epsilon do not reach this model.
+layernorm_zero_centered_gamma: true
+layernorm_epsilon: 1.0e-5
+# Sandwich norms after attention and MoE (eps 1e-8), each followed by a
+# variance-preserving gated residual:
+#   x = alpha * x + beta * h,  beta = sigmoid(g / T),
+#   alpha = sqrt(max(sigmoid(-g / T) * (1 + beta), 1e-3))
+muse_post_norm_eps: 1.0e-8
+muse_residual_gate_temperature: 0.3
+muse_residual_gate_eps: 1.0e-3
+
+# ---------- output ----------
+# logits = cap * tanh(lm_head(x) * output_multiplier / cap). The same
+# multiplier (1 / sqrt(8192 / 256)) scales the router logits.
+muse_output_multiplier: 0.1767766952966369
+final_logit_softcapping: 20.0
+untie_embeddings_and_output_weights: true
+
+# ---------- MoE ----------
+# All 62 layers are MoE, 256 routed experts, top-8, no shared experts.
+# The router scores the full 8192-wide hidden state in fp32; dispatch and the
+# experts run in a 4096-wide latent space between upstream's fc1/fc2 latent
+# projections (pre_expert_proj / post_expert_proj).
+moe_layer_freq: 1
+num_experts: 256
+moe_router_topk: 8
+moe_ffn_hidden_size: 4096
+moe_latent_size: 4096
+moe_shared_expert_intermediate_size: null
+moe_router_score_function: sigmoid
+moe_router_pre_softmax: false
+moe_router_topk_scaling_factor: 1.0         # routed_scaling_factor
+moe_router_dtype: fp32
+# e_score_correction_bias: aux-loss-free balancing. The primus_turbo fused
+# router ignores the bias, so moe_use_fused_router_with_aux_score and
+# turbo_sync_free_moe_stage >= 1 (which forces it on) are rejected.
+moe_router_enable_expert_bias: true
+moe_router_bias_update_rate: 1.0e-3
+# Not given by the release; a small sequence-wise aux loss as in DeepSeek-V3.
+moe_router_load_balancing_type: seq_aux_loss
+moe_aux_loss_coeff: 1.0e-4
+moe_token_dispatcher_type: alltoall
+moe_grouped_gemm: true
+# The legacy GroupedMLP ignores moe_latent_size.
+moe_use_legacy_grouped_gemm: false
+moe_permute_fusion: true
+# Upstream asserts against shared-expert overlap with latent projections.
+moe_shared_expert_overlap: false
+expert_model_parallel_size: 8
+# The post-expert norm needs whole expert outputs, so experts are never
+# tensor-parallel; without this key the value follows tensor_model_parallel_size.
+expert_tensor_parallel_size: 1
+
+# ---------- other settings ----------
+mtp_num_layers: null
+swiglu: true
+add_bias_linear: false
+add_qkv_bias: false
+hidden_dropout: 0.0
+attention_dropout: 0.0
+attention_softmax_in_fp32: true
+init_method_std: 0.02

@@ -103,12 +103,12 @@ def read_native_opts(config_file: str) -> dict:
 
     Returns a dict with ``enabled`` (tri-state: ``None`` when the config does not
     set ``native_ckpt_convert`` at all, else ``True`` / ``False``), plus optional
-    ``dtype`` / ``out`` overrides. ``None`` lets the caller pick the default
-    (native for supported families); ``True`` forces native; ``False`` forces the
-    legacy Megatron-Bridge path.
+    ``dtype`` / ``out`` / ``ckpt_format`` overrides. ``None`` lets the caller pick
+    the default (native for supported families); ``True`` forces native; ``False``
+    forces the legacy Megatron-Bridge path.
     """
     cfg = load_primus_config(Path(config_file), None)
-    opts = {"enabled": None, "dtype": None, "out": None}
+    opts = {"enabled": None, "dtype": None, "out": None, "ckpt_format": None}
 
     for module_name in ["sft_trainer", "post_trainer"]:
         module = get_module_config(cfg, module_name)
@@ -126,6 +126,9 @@ def read_native_opts(config_file: str) -> dict:
         )
         opts["out"] = _first_config_value(params, "native_ckpt_out") or _first_config_value(
             module, "native_ckpt_out"
+        )
+        opts["ckpt_format"] = _first_config_value(params, "native_ckpt_format") or _first_config_value(
+            module, "native_ckpt_format"
         )
         break
 
@@ -197,14 +200,16 @@ def _unset_nvte_attention_env():
 # ---------------------------------------------------------------------------
 # Native (bridge-free) conversion path
 # ---------------------------------------------------------------------------
-# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama): this
+# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama, Muse Spark): this
 # hook builds the mcore model in-process and copies HF safetensors weights onto
-# it (Primus-managed converters), producing a legacy ``torch`` checkpoint WITHOUT
-# ever importing ``megatron.bridge``. The convert-time monkeypatches (ROCm
-# fused-kernels no-op) are applied in THIS process via ``run_patches(phase=
-# "convert")`` so they take effect for the single-process conversion; the
-# Megatron-LM submodule stays pristine. Set ``native_ckpt_convert: false`` to
-# force the legacy Megatron-Bridge path (or ``true`` to force native).
+# it (Primus-managed converters), producing a single-rank legacy ``torch``
+# checkpoint (Muse Spark: ``torch_dist``, which Megatron reshards to the training
+# TP / PP / EP on load) WITHOUT ever importing ``megatron.bridge``. The
+# convert-time monkeypatches (ROCm fused-kernels no-op) are applied in THIS
+# process via ``run_patches(phase="convert")`` so they take effect for the
+# single-process conversion; the Megatron-LM submodule stays pristine. Set
+# ``native_ckpt_convert: false`` to force the legacy Megatron-Bridge path (or
+# ``true`` to force native).
 
 # HF architectures / model_type -> Primus native converter family.
 _NATIVE_FAMILIES = {
@@ -219,11 +224,13 @@ _NATIVE_FAMILIES = {
     "deepseek": "deepseek",
     "llama": "llama",
     "llamaforcausallm": "llama",
+    "muse_spark": "muse_spark",
+    "musesparkforconditionalgeneration": "muse_spark",
 }
 
 
 def _detect_native_family(hf_path: str) -> str | None:
-    """Return 'qwen3' | 'deepseek' | 'llama' | None from the HF config.json."""
+    """Return 'qwen3' | 'deepseek' | 'llama' | 'muse_spark' | None from the HF config.json."""
     import json
 
     cfg_file = os.path.join(hf_path, "config.json")
@@ -268,7 +275,7 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
     if family is None:
         raise ValueError(
             f"native_ckpt_convert requested but no native converter for HF model at {hf_path} "
-            "(supported: Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1)"
+            "(supported: Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1, Muse Spark text tower)"
         )
 
     # Ensure the Megatron-LM source tree is importable in this standalone hook
@@ -285,7 +292,13 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
     pp = int(opts.get("pipeline_parallel_size", 1))
     ep = int(opts.get("expert_parallel_size", 1))
 
-    log_info(f"Native ({family}) conversion: dtype={dtype} TP={tp} PP={pp} EP={ep}")
+    # Only the Muse Spark converter can write torch_dist; a multi-node PP x EP model
+    # cannot load a single-rank legacy checkpoint, and the full release needs PP x EP.
+    ckpt_format = opts.get("ckpt_format") or ("torch_dist" if family == "muse_spark" else "torch")
+    if family != "muse_spark" and ckpt_format != "torch":
+        raise ValueError(f"native_ckpt_format={ckpt_format!r}: the {family} native converter only writes 'torch'")
+
+    log_info(f"Native ({family}) conversion: dtype={dtype} TP={tp} PP={pp} EP={ep} format={ckpt_format}")
     log_info(f"  Source: {hf_path}")
     log_info(f"  Target: {megatron_path}")
 
@@ -293,9 +306,14 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
         from primus.backends.megatron.checkpoint import native_loader_qwen3 as conv
     elif family == "llama":
         from primus.backends.megatron.checkpoint import native_loader_llama as conv
+    elif family == "muse_spark":
+        from primus.backends.megatron.checkpoint import (
+            native_loader_muse_spark as conv,
+        )
     else:
         from primus.backends.megatron.checkpoint import native_loader_deepseek as conv
 
+    format_kwargs = {"ckpt_format": ckpt_format} if family == "muse_spark" else {}
     conv.convert(
         hf_path,
         megatron_path,
@@ -303,6 +321,7 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
         expert_parallel_size=ep,
+        **format_kwargs,
     )
 
     # Hard evidence for the bridge-free guarantee.
@@ -394,9 +413,9 @@ def _native_main(hf_path: str, native_opts: dict):
     """Bridge-free native conversion branch of main().
 
     Mirrors the Bridge path's skip-if-exists / rank-0-converts-others-wait
-    semantics, but produces a legacy ``torch`` checkpoint via the Primus-managed
-    in-process converter and emits ``pretrained_checkpoint`` + ``finetune`` back
-    to the runner.
+    semantics, but produces a legacy ``torch`` checkpoint (``torch_dist`` for
+    Muse Spark) via the Primus-managed in-process converter and emits
+    ``pretrained_checkpoint`` + ``finetune`` back to the runner.
     """
     family = _detect_native_family(hf_path)
     if family is None:
@@ -404,7 +423,7 @@ def _native_main(hf_path: str, native_opts: dict):
         sys.exit(1)
     native_opts["family"] = family
 
-    # Output path (legacy torch layout: <out>/iter_0000001/mp_rank_00/...).
+    # Output path (<out>/iter_0000001/: mp_rank_00/ for torch, .distcp shards for torch_dist).
     if native_opts.get("out"):
         megatron_path = Path(native_opts["out"])
     else:
@@ -470,7 +489,7 @@ def main():
 
     # ---- Choose conversion backend --------------------------------------
     # Native (bridge-free) conversion is the DEFAULT for supported families
-    # (Qwen3, DeepSeek, Llama). ``native_ckpt_convert: false`` forces the legacy
+    # (Qwen3, DeepSeek, Llama, Muse Spark). ``native_ckpt_convert: false`` forces the legacy
     # Megatron-Bridge path; ``native_ckpt_convert: true`` forces native.
     native_opts = read_native_opts(config_file)
     native_family = _detect_native_family(hf_path)
@@ -485,7 +504,7 @@ def main():
         if native_family is None:
             log_error(
                 "native_ckpt_convert=true but no native converter matches the HF "
-                f"model at {hf_path} (supported: Qwen3, DeepSeek-V2/V3, Llama). "
+                f"model at {hf_path} (supported: Qwen3, DeepSeek-V2/V3, Llama, Muse Spark). "
                 "Set native_ckpt_convert: false to use the Megatron-Bridge path."
             )
             sys.exit(1)

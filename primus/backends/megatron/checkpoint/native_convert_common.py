@@ -322,7 +322,7 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
     from megatron.training.checkpointing import save_checkpoint
 
     os.makedirs(save_dir, exist_ok=True)
-    log(f"saving legacy torch checkpoint to {save_dir} ...")
+    log(f"saving {margs.ckpt_format} checkpoint to {save_dir} ...")
     save_checkpoint(
         margs.iteration,
         [model],

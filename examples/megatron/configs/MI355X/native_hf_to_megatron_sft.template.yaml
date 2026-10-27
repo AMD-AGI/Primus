@@ -8,17 +8,22 @@
 #            + LoRA SFT. Copy this file, replace every <...> placeholder, and run.
 #
 # WHAT IT DOES
-#   Converts HF weights into a Megatron torch(legacy) checkpoint WITHOUT
-#   Megatron-Bridge / modelopt (works on a stock ROCm image), then LoRA-SFT-trains
-#   on it. Conversion builds the mcore model and maps HF safetensors onto it
+#   Converts HF weights into a Megatron torch(legacy) checkpoint (Muse Spark:
+#   torch_dist) WITHOUT Megatron-Bridge / modelopt (works on a stock ROCm image),
+#   then LoRA-SFT-trains on it. Conversion builds the mcore model and maps HF safetensors onto it
 #   in-process; a phase="convert" patch neutralizes the legacy CUDA fused_kernels
 #   build on ROCm. No third_party/Megatron-LM edits are required.
 #
 # REQUIREMENTS
 #   - An HF model directory containing: *.safetensors, config.json, tokenizer files.
 #   - Supported families: Qwen3 (dense + MoE), DeepSeek-V2/V3 (MLA + MoE),
-#     Llama 2/3/3.1. (Detected automatically from config.json "architectures".)
-#   - Parallelism MUST match the single-shard converted checkpoint: TP=1, PP=1, EP=1.
+#     Llama 2/3/3.1, Muse Spark (text tower). (Detected automatically from
+#     config.json "architectures" / "model_type".)
+#   - Qwen3 / DeepSeek / Llama: parallelism MUST match the single-shard converted
+#     checkpoint: TP=1, PP=1, EP=1.
+#   - Muse Spark: the torch_dist checkpoint is resharded on load, so any layout
+#     the model config accepts works; set ckpt_format: torch_dist and
+#     auto_detect_ckpt_format: true below.
 #   - Do NOT hardcode machine-specific paths in a committed config. Replace every
 #     <...> below, and prefer ${ENV_VAR} / CLI overrides for real paths.
 #   - When launching, unset the TE attention-backend env vars so a ROCm image's
@@ -27,8 +32,8 @@
 #
 # --- USAGE A (recommended): let the post-train hook convert automatically ---
 #   Just set `hf_path` below and launch via the POST-TRAIN entrypoint. Native
-#   conversion is the DEFAULT for supported families (Qwen3 / DeepSeek / Llama)
-#   -- no extra flag is needed:
+#   conversion is the DEFAULT for supported families (Qwen3 / DeepSeek / Llama /
+#   Muse Spark) -- no extra flag is needed:
 #       ./runner/primus-cli direct train posttrain --config <path/to/this/file>
 #   That entrypoint runs the post-train hooks (dispatch_framework.sh ->
 #   01_convert_checkpoints.py) which detect the family, convert in-process
@@ -46,7 +51,8 @@
 #       # Apply the phase="convert" patches FIRST (ROCm fused-kernels no-op, etc.);
 #       # convert() assumes they are already active in this process.
 #       common.apply_convert_patches(module_name="checkpoint_convert")
-#       # pick the module for your family: native_loader_qwen3 | native_loader_deepseek | native_loader_llama
+#       # pick the module for your family: native_loader_qwen3 | native_loader_deepseek |
+#       # native_loader_llama | native_loader_muse_spark (writes torch_dist by default)
 #       from primus.backends.megatron.checkpoint import native_loader_qwen3 as conv
 #       conv.convert("<HF_MODEL_DIR>", "<OUT_DIR>", dtype="bf16",
 #                    tensor_parallel_size=1, pipeline_parallel_size=1, expert_parallel_size=1)
@@ -76,13 +82,14 @@ modules:
 
       # ---- Native bridge-free HF -> Megatron conversion (Usage A) ----------
       # Native conversion is the DEFAULT for supported families (Qwen3/DeepSeek/
-      # Llama) -- just set hf_path below and launch. Optional overrides:
+      # Llama/Muse Spark) -- just set hf_path below and launch. Optional overrides:
       #   native_ckpt_convert: false   # force the legacy Megatron-Bridge path
       #   native_ckpt_convert: true    # force native (error out if family unsupported)
       hf_path: <HF_MODEL_DIR>            # dir with *.safetensors + config.json + tokenizer
       tokenizer_model: <HF_MODEL_DIR>
       # native_ckpt_out: <OUT_DIR>       # optional; default: ${DATA_PATH}/megatron_checkpoints/<name>_native
       # native_ckpt_dtype: bf16          # optional; default inferred from config.json torch_dtype
+      # native_ckpt_format: torch_dist   # Muse Spark only: torch_dist (default) or torch
 
       # ---- Usage B alternative: comment out the three lines above and set: --
       # pretrained_checkpoint: <OUT_DIR>
@@ -90,10 +97,14 @@ modules:
       finetune: true                     # load weights only (fresh optimizer/scheduler)
       ckpt_format: torch                 # native converter emits torch(legacy); triggers the torch loader
       auto_detect_ckpt_format: false
+      # Muse Spark (torch_dist output) instead:
+      # ckpt_format: torch_dist
+      # auto_detect_ckpt_format: true
       load: null
       save: null
 
       # ---- Parallelism: MUST match the single-shard converted checkpoint ----
+      # (Muse Spark: any layout its model config accepts.)
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1      # MoE families: keep EP=1 to match the single shard

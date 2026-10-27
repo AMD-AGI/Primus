@@ -1,0 +1,123 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:muse_spark_open_816B_A42B_4layer-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:muse_spark_open_816B_A42B}.yaml
+    overrides:
+      # ---------------------------------------------------------------------
+      # Reduced-layer proxy: 4 of Muse Spark's 62 layers, sized for one 8-GPU
+      # MI355X node with EP=8. Everything else is the full model's shape --
+      # hidden 8192, GQA 128/16, 256 experts top-8 in a 4096 latent. The
+      # config class derives the attention pattern from num_layers: layers
+      # 0-2 are sliding-window with RoPE, layer 3 is full attention with NoPE,
+      # matching the last group of the full model.
+      #
+      # Per rank: ~6.4B expert params (EP8) + ~4.5B replicated attention,
+      # latent projections and embeddings, ~150 GB of weights, fp32 grads and
+      # optimizer state before activations.
+      #
+      # See muse_spark_open_816B_A42B-BF16-pretrain.yaml for the options
+      # muse_spark_builder rejects.
+      # ---------------------------------------------------------------------
+
+      # log
+      wandb_project: "Primus_Muse_Spark_Pretrain"
+      stderr_sink_level: DEBUG
+
+      # debug. Forced load balancing makes routing uniform: right for a
+      # throughput measurement, wrong for a real training run.
+      moe_router_force_load_balancing: ${PRIMUS_MOE_FORCE_LOAD_BALANCING:true}
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # DP == world size (8), so gbs 64 / mbs 1 is 8 micro-batches per rank.
+      train_iters: ${PRIMUS_TRAIN_ITERS:10}
+      micro_batch_size: 1
+      global_batch_size: 64
+      num_layers: 4
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      # The preset materialises the RoPE cache at 1048576; override it down to
+      # the run's seq_length.
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+
+      # parallel. Single node, no PP: EP=8 shards the experts, everything
+      # else is replicated.
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 8
+      sequence_parallel: false
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: true
+
+      # data. The attention kernel applies causality and the sliding window
+      # itself, so no dense [b, 1, s, s] mask is needed.
+      create_attention_mask_in_dataloader: false
+      mock_data: true
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+
+      # MoE
+      moe_use_legacy_grouped_gemm: false
+      moe_use_fused_router_with_aux_score: false
+      moe_permute_fusion: true
+
+      # rope fusion
+      apply_rope_fusion: true
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # Turbo. use_turbo_rms_norm forwards zero_centered_gamma to TE.
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_gemm: false
+      use_turbo_rms_norm: true
+
+      # deepep
+      use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:true}
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      turbo_deepep_num_cu: 80
+      turbo_deepep_use_comm_stream: false
+      turbo_sync_free_moe_stage: 0
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # training control
+      manual_gc: true
+      manual_gc_interval: 1
+      disable_wandb: true
+      disable_tensorboard: true

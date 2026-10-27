@@ -40,7 +40,7 @@ def get_model_provider(model_type="gpt"):
 
     Args:
         model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4',
-            'kimi_k3', 'glm5_next', or 'zaya1'. Defaults to 'gpt'.
+            'kimi_k3', 'glm5_next', 'zaya1', or 'muse_spark'. Defaults to 'gpt'.
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
@@ -83,6 +83,20 @@ def get_model_provider(model_type="gpt"):
         return partial(
             zaya1_module.model_provider,
             zaya1_module.zaya1_builder,
+        )
+
+    # Primus-owned: Muse Spark (GPTModel with Muse layer / attention / MoE specs)
+    if model_type == "muse_spark":
+        muse_spark_module = importlib.import_module(
+            "primus.backends.megatron.core.models.muse_spark.muse_spark_builders"
+        )
+        log_rank_0(
+            "[Primus][MegatronCompat] Loaded Muse Spark model_provider + builder "
+            f"from {muse_spark_module.__name__}"
+        )
+        return partial(
+            muse_spark_module.model_provider,
+            muse_spark_module.muse_spark_builder,
         )
 
     # Primus-owned: DeepSeek-V4 (Phase 2 stub; full V4 wiring lands in Phase 3+)

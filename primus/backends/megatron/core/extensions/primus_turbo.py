@@ -36,7 +36,11 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
+from megatron.core.transformer.utils import (
+    ensure_metadata_has_dp_cp_group,
+    is_layer_window_attention,
+    make_sharded_tensors_for_checkpoint,
+)
 from megatron.core.utils import get_pg_size
 from megatron.training.global_vars import get_args
 
@@ -1011,7 +1015,15 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             # enable ring attention
             self.attn_kwargs["ring_group"] = dist.new_group(ranks=[dist.get_rank()])
 
-        assert config.window_size is None, "primus_turbo does not support sliding window attention"
+        # TE takes the window once at construction and leaves plain causal to the mask type;
+        # flash_attn_func takes it on every call and wants (-1, -1) for no window. The
+        # (left, right) values mean the same to both, so the per-layer choice mirrors
+        # TEDotProductAttention. Not ``self.window_size``: TE's __init__ overwrites that.
+        self.flash_window_size = (
+            tuple(config.window_size)
+            if is_layer_window_attention(config.window_size, config.window_attn_skip_freq, layer_number)
+            else (-1, -1)
+        )
         # Check version
 
         kv_channels = (
@@ -1052,6 +1064,18 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         del self._init_sink_attention
         del self._num_heads_for_sinks
 
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Checkpoint only the learned sinks, as ``TEDotProductAttention`` does.
+
+        TE's ``_extra_state`` stays out so that a checkpoint saved with either
+        attention class loads into the other.
+        """
+        metadata = ensure_metadata_has_dp_cp_group(metadata)
+        state_dict = {} if self.sinks is None else {"sinks": self.sinks}
+        return make_sharded_tensors_for_checkpoint(
+            state_dict, prefix, {}, sharded_offsets, dp_cp_group=metadata["dp_cp_group"]
+        )
+
     def forward(
         self,
         query: Tensor,
@@ -1089,7 +1113,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         #
         # Reference: gpt-oss/gpt_oss/triton/attention.py
         sink_tensor = None
-        window_size = (-1, -1)
+        window_size = self.flash_window_size
 
         use_sink_attn = self.use_sink_attention and self.sinks is not None
 
@@ -2676,8 +2700,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             A tuple of reshaped hidden states and token probabilities.
         """
         self.hidden_shape = hidden_states.shape
-        # view as [num_tokens, hidden_size]
-        hidden_states = hidden_states.view(-1, self.config.hidden_size)
+        # view as [num_tokens, hidden]; hidden is moe_latent_size when latent projections are on
+        hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
         num_tokens = hidden_states.shape[0]
 
         # when force_load_balancing with type "even", we use round-robin token_indices
