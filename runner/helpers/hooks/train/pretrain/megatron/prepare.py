@@ -534,9 +534,10 @@ def parse_args():
     Unknown arguments are returned rather than rejected because primus-cli hands
     this hook the full training argument list. Anything named here is consumed and
     stops reaching the config overrides, which is why no argument may share a name
-    with a training parameter.
+    with a training parameter, and why prefixes such as ``--split`` must not
+    abbreviate one.
     """
-    parser = argparse.ArgumentParser(description="Prepare Primus environment")
+    parser = argparse.ArgumentParser(description="Prepare Primus environment", allow_abbrev=False)
     parser.add_argument("--primus_path", type=str, required=True, help="Root path to the Primus project")
     parser.add_argument("--data_path", type=str, required=True, help="Path to data directory")
     parser.add_argument("--config", type=str, required=True, help="Path to experiment YAML config")

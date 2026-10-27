@@ -264,6 +264,15 @@ def test_split_seed_does_not_consume_the_training_seed(monkeypatch, tmp_path):
     assert args.split_seed == megatron_prepare.DEFAULT_SPLIT_SEED
 
 
+def test_training_split_is_not_taken_as_an_abbreviated_split_seed(monkeypatch, tmp_path):
+    """Megatron's ``--split`` is a prefix of ``--split_seed``; argparse must not expand it."""
+    args, unknown = megatron_prepare_args(monkeypatch, tmp_path, "--split", "1", "--test", "x")
+
+    assert args.split_seed == megatron_prepare.DEFAULT_SPLIT_SEED
+    assert args.test_size == 0.005
+    assert unknown == ["--split", "1", "--test", "x"]
+
+
 def test_split_seed_comes_from_the_cli_flag_or_the_default(monkeypatch, tmp_path):
     """``--split_seed`` is the only entry point; there is no environment layer."""
     args, _ = megatron_prepare_args(monkeypatch, tmp_path)
