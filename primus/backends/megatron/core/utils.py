@@ -12,6 +12,20 @@ from megatron.core import parallel_state
 from primus.core.utils.module_utils import log_rank_0
 
 
+def get_megatron_arg(name: str, default: Any = None) -> Any:
+    """Return ``name`` from Megatron-LM's global args, or ``default`` when those args are not set up.
+
+    Megatron-Bridge builds and trains models without initializing Megatron-LM's global args, so model
+    code that reads optional switches from them has to tolerate their absence.
+    """
+    try:
+        from megatron.training import get_args
+
+        return getattr(get_args(), name, default)
+    except (ImportError, AssertionError):
+        return default
+
+
 @lru_cache
 def produce_attention_sharder(cp_comm_type: str):
     # Import only when needed to avoid import errors if primus_turbo is not available
