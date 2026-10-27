@@ -185,6 +185,13 @@ else
 fi
 export HIP_VISIBLE_DEVICES
 
+# ROCm aborts when HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES disagree
+# (e.g. a scheduler exported CUDA_VISIBLE_DEVICES for more GPUs than
+# GPUS_PER_NODE). HIP_VISIBLE_DEVICES is authoritative here; keep them equal.
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" && "${CUDA_VISIBLE_DEVICES}" != "${HIP_VISIBLE_DEVICES}" ]]; then
+    export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
+fi
+
 # Keep ROCm libraries ahead of any system-provided HSA runtime.
 ensure_rocm_ld_library_path
 

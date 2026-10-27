@@ -40,7 +40,7 @@ def get_model_provider(model_type="gpt"):
 
     Args:
         model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4',
-            'kimi_k3', 'glm5_next', or 'zaya1'. Defaults to 'gpt'.
+            'kimi_k3', 'glm5_next', 'zaya1', or 'olmo3'. Defaults to 'gpt'.
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
@@ -83,6 +83,17 @@ def get_model_provider(model_type="gpt"):
         return partial(
             zaya1_module.model_provider,
             zaya1_module.zaya1_builder,
+        )
+
+    # Primus-owned: OLMo-3 (post-norm, full-width QK norm, YaRN, sliding window)
+    if model_type == "olmo3":
+        olmo3_module = importlib.import_module("primus.backends.megatron.core.models.olmo3.olmo3_builders")
+        log_rank_0(
+            "[Primus][MegatronCompat] Loaded OLMo-3 model_provider + builder " f"from {olmo3_module.__name__}"
+        )
+        return partial(
+            olmo3_module.model_provider,
+            olmo3_module.olmo3_builder,
         )
 
     # Primus-owned: DeepSeek-V4 (Phase 2 stub; full V4 wiring lands in Phase 3+)
