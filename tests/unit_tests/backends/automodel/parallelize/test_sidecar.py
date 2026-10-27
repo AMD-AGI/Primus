@@ -117,6 +117,17 @@ class TestTensorParallelSize:
     def test_the_tp_dimension_is_read(self):
         assert sidecar.tensor_parallel_size(FakeDeviceMesh(4)) == 4
 
+    def test_a_context_reports_its_own_tp_size(self):
+        context = types.SimpleNamespace(tp_size=4, device_mesh=None)
+        assert sidecar.mesh_context_tensor_parallel_size(context) == 4
+
+    def test_a_context_without_tp_size_is_read_from_its_mesh(self):
+        context = types.SimpleNamespace(device_mesh=FakeDeviceMesh(2))
+        assert sidecar.mesh_context_tensor_parallel_size(context) == 2
+
+    def test_a_context_with_neither_means_one(self):
+        assert sidecar.mesh_context_tensor_parallel_size(types.SimpleNamespace()) == 1
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
