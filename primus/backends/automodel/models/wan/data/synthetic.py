@@ -13,7 +13,8 @@ without a data pipeline in front of it.
 Sample keys match what ``collate_fn_video(model_type="wan")`` expects:
   - ``video_latents``     [1, C, T', H/8, W/8]  fp16 latents
   - ``text_embeddings``   [1, S, D]             bf16 conditioning
-  - ``bucket_resolution`` / ``aspect_ratio``
+  - ``bucket_resolution`` / ``aspect_ratio``    (W, H) in pixels and W/H, as the
+    real cache records them
 
 Defaults describe 512x512x81 video after the Wan VAE (8x spatial, 4x temporal),
 i.e. a (16, 21, 64, 64) latent; override any of them from YAML.
@@ -25,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict
+from typing import Any, Dict
 
 import torch
 from nemo_automodel.components.datasets.diffusion.collate_fns import collate_fn_video
@@ -42,6 +43,9 @@ DEFAULT_LATENT_W = 512 // 8  # 64
 DEFAULT_IN_CHANNELS = 16
 DEFAULT_TEXT_SEQ = 226  # UMT5 max for Wan (trim + re-pad)
 DEFAULT_TEXT_DIM = 4096  # UMT5-XXL hidden size
+# Wan patchifies the latent 1x2x2, so the latent height and width must be even.
+_SPATIAL_PATCH = 2
+_VAE_SPATIAL_FACTOR = 8
 
 
 class SyntheticWanDataset(Dataset):
@@ -63,7 +67,24 @@ class SyntheticWanDataset(Dataset):
         cache_in_memory: bool = False,
         share_text_features: bool = False,
     ) -> None:
-        self.num_samples = max(int(num_samples), 1)
+        for name, value in (
+            ("num_samples", num_samples),
+            ("in_channels", in_channels),
+            ("latent_t", latent_t),
+            ("latent_h", latent_h),
+            ("latent_w", latent_w),
+            ("text_seq_len", text_seq_len),
+            ("text_dim", text_dim),
+        ):
+            if int(value) < 1:
+                raise ValueError(f"SyntheticWanDataset: {name} must be positive, got {value}")
+        for name, value in (("latent_h", latent_h), ("latent_w", latent_w)):
+            if int(value) % _SPATIAL_PATCH:
+                raise ValueError(
+                    f"SyntheticWanDataset: {name}={value} must be even, since Wan patchifies the "
+                    f"latent {_SPATIAL_PATCH}x{_SPATIAL_PATCH} spatially"
+                )
+        self.num_samples = int(num_samples)
         self.in_channels = int(in_channels)
         self.latent_t = int(latent_t)
         self.latent_h = int(latent_h)
@@ -75,13 +96,31 @@ class SyntheticWanDataset(Dataset):
         self.seed = int(seed)
         self.cache_in_memory = bool(cache_in_memory)
         self.share_text_features = bool(share_text_features)
-        self._cache: Dict[int, Dict[str, torch.Tensor]] = {}
+        self._cache: Dict[int, Dict[str, Any]] = {}
+        # Drawn here from the seed alone, so every worker, rank and epoch gets the
+        # same tensor whichever index it reads first.
         self._shared_text: torch.Tensor | None = None
+        if self.share_text_features:
+            self._shared_text = (
+                torch.randn(
+                    1,
+                    self.text_seq_len,
+                    self.text_dim,
+                    generator=torch.Generator().manual_seed(self.seed),
+                )
+                * self.text_scale
+            ).to(torch.bfloat16)
+        # The real cache records (width, height) in pixels and width / height.
+        self._bucket_resolution = (
+            self.latent_w * _VAE_SPATIAL_FACTOR,
+            self.latent_h * _VAE_SPATIAL_FACTOR,
+        )
+        self._aspect_ratio = self.latent_w / self.latent_h
 
     def __len__(self) -> int:
         return self.num_samples
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
         if self.cache_in_memory and idx in self._cache:
             return self._cache[idx]
 
@@ -100,20 +139,19 @@ class SyntheticWanDataset(Dataset):
             * self.latent_scale
         )
 
-        if self.share_text_features:
-            if self._shared_text is None:
-                self._shared_text = (
-                    torch.randn(1, self.text_seq_len, self.text_dim, generator=g) * self.text_scale
-                )
-            text_embeddings = self._shared_text.clone()
+        if self._shared_text is not None:
+            # The collate concatenates into a new tensor, so sharing one is safe.
+            text_embeddings = self._shared_text
         else:
-            text_embeddings = torch.randn(1, self.text_seq_len, self.text_dim, generator=g) * self.text_scale
+            text_embeddings = (
+                torch.randn(1, self.text_seq_len, self.text_dim, generator=g) * self.text_scale
+            ).to(torch.bfloat16)
 
         sample = {
             "video_latents": video_latents.to(torch.float16),
-            "text_embeddings": text_embeddings.to(torch.bfloat16),
-            "bucket_resolution": torch.tensor([512, 512]),
-            "aspect_ratio": 1.0,
+            "text_embeddings": text_embeddings,
+            "bucket_resolution": torch.tensor(self._bucket_resolution),
+            "aspect_ratio": self._aspect_ratio,
         }
         if self.cache_in_memory:
             self._cache[idx] = sample
@@ -189,6 +227,11 @@ class SyntheticWanDataloaderConfig:
             pin_memory=self.pin_memory,
             drop_last=self.drop_last,
         )
+        if len(dataloader) == 0:
+            raise ValueError(
+                f"SyntheticWanDataloaderConfig: num_samples={self.num_samples} gives no batch of "
+                f"{batch_size} on each of {dp_world_size} rank(s) with drop_last={self.drop_last}"
+            )
         logger.info(
             "[SyntheticWan] %d samples, latent=%dx%dx%dx%d text=%dx%d "
             "(dp_rank=%d/%d, batch_size=%d, %d batches/rank)",

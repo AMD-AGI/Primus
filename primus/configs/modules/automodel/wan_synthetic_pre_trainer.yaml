@@ -76,7 +76,8 @@ fsdp:
   pp_size: 1
   dp_replicate_size: 1
   defer_fsdp_grad_sync: true
-  # Forwarded by the Primus Wan sidecar; AutoModel's Wan parallelizer drops it.
+  # Forwarded to the per-block sharding by the Primus Wan sidecar; AutoModel's Wan
+  # parallelizer drops it. The root module keeps upstream's false.
   reshard_after_forward: false
   enable_fsdp2_prefetch: true
   fsdp2_backward_prefetch_depth: 3

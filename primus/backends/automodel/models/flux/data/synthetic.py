@@ -105,7 +105,25 @@ class SyntheticFluxDataset(Dataset):
         emit_clip_hidden: bool = False,
         clip_hidden_len: int = 77,
     ) -> None:
-        self.num_samples = max(int(num_samples), 1)
+        for name, value in (
+            ("num_samples", num_samples),
+            ("in_channels", in_channels),
+            ("latent_h", latent_h),
+            ("latent_w", latent_w),
+            ("text_seq_len", text_seq_len),
+            ("t5_features_dim", t5_features_dim),
+            ("pooled_dim", pooled_dim),
+            ("clip_hidden_len", clip_hidden_len),
+        ):
+            if int(value) < 1:
+                raise ValueError(f"SyntheticFluxDataset: {name} must be positive, got {value}")
+        for name, value in (("latent_h", latent_h), ("latent_w", latent_w)):
+            if int(value) % 2:
+                raise ValueError(
+                    f"SyntheticFluxDataset: {name}={value} must be even, since the FLUX adapter "
+                    "packs the latent into 2x2 patches"
+                )
+        self.num_samples = int(num_samples)
         self.in_channels = int(in_channels)
         self.latent_h = int(latent_h)
         self.latent_w = int(latent_w)
@@ -316,10 +334,14 @@ class SyntheticFluxDataloaderConfig:
             drop_last=self.drop_last,
             **({"prefetch_factor": 2} if self.num_workers > 0 else {}),
         )
+        if len(dataloader) == 0:
+            raise ValueError(
+                f"SyntheticFluxDataloaderConfig: num_samples={self.num_samples} gives no batch of "
+                f"{batch_size} on each of {dp_world_size} rank(s) with drop_last={self.drop_last}"
+            )
         # The run's evidence of what the loader actually built. The token grid is
-        # derived (latent/2) rather than configured, so a mismatch between the
-        # intended resolution and the emitted shapes surfaces here instead of
-        # silently changing the sequence length.
+        # derived (latent/2) rather than configured, so the log shows the image
+        # sequence length the latent size implies.
         logger.info(
             "[SyntheticFlux] %d samples, latent=%dx%dx%d (token grid %dx%d = %d img tokens) "
             "text=%dx%d pooled=%d latent_dtype=%s text_dtype=%s share_text=%s "

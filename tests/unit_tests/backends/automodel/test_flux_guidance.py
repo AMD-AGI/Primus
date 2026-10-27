@@ -48,6 +48,17 @@ def tiny_flux(guidance_embeds):
     )
 
 
+class _NoConfig(torch.nn.Module):
+    """Runs the transformer but exposes neither its config nor a known wrapper attribute."""
+
+    def __init__(self, inner):
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, *args, **kwargs):
+        return self.inner(*args, **kwargs)
+
+
 def context():
     torch.manual_seed(1)
     latents = torch.randn(BATCH, LATENT_CHANNELS, LATENT_HW, LATENT_HW)
@@ -118,24 +129,28 @@ class TestRepair:
         with pytest.raises(ValueError, match=rf"use_guidance_embeds: {fix}"):
             adapter.forward(model, inputs)
 
+    def test_a_mismatch_is_caught_through_a_ddp_style_wrapper(self):
+        """DDP keeps the model in ``.module`` and forwards no attributes."""
+
+        class Wrapper(torch.nn.Module):
+            def __init__(self, module):
+                super().__init__()
+                self.module = module
+
+        model = Wrapper(tiny_flux(guidance_embeds=False))
+        adapter = FluxAdapter(guidance_scale=1.0, use_guidance_embeds=True)
+        with pytest.raises(ValueError, match="use_guidance_embeds: false"):
+            adapter.forward(model, adapter.prepare_inputs(context()))
+
+    def test_an_unreadable_config_is_logged(self, caplog):
+        adapter = FluxAdapter(guidance_scale=1.0, use_guidance_embeds=False)
+        inputs = adapter.prepare_inputs(context())
+        model = tiny_flux(guidance_embeds=False)
+        with caplog.at_level("WARNING"):
+            adapter.forward(_NoConfig(model), inputs)
+        assert "cannot read config.guidance_embeds" in caplog.text
+
     def test_install_is_idempotent(self):
         prepare_inputs = FluxAdapter.prepare_inputs
         assert guidance.install() is True
         assert FluxAdapter.prepare_inputs is prepare_inputs
-
-
-class TestRegistration:
-    def test_the_patch_is_registered_ungated(self):
-        import primus.backends.automodel.patches  # noqa: F401
-        from primus.core.patches.patch_registry import PatchRegistry
-
-        patch = next(
-            (
-                p
-                for p in PatchRegistry.iter_patches(backend="automodel", phase="before_train")
-                if p.id == "automodel.models.flux.guidance"
-            ),
-            None,
-        )
-        assert patch is not None
-        assert patch.condition(None) is True

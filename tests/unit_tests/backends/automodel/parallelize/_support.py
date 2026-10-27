@@ -18,6 +18,7 @@ Two kinds of support:
 """
 
 import dataclasses
+import functools
 import importlib.util
 import sys
 import types
@@ -43,6 +44,58 @@ class FakeConfig:
 class FakeMeshContext:
     strategy_config: object = dataclasses.field(default_factory=FakeConfig)
     activation_checkpointing: object = False
+    tp_size: int = 1
+
+
+class FakeDeviceMesh:
+    """A device mesh with only a ``tp`` dimension."""
+
+    mesh_dim_names = ("tp",)
+
+    def __init__(self, tp_size):
+        self._tp = types.SimpleNamespace(size=lambda: tp_size)
+
+    def __getitem__(self, name):
+        return self._tp
+
+
+def _upstream_sharding_signature(
+    module,
+    mesh,
+    mp_policy,
+    offload_policy=None,
+    enable_fsdp2_prefetch=True,
+    fsdp2_backward_prefetch_depth=2,
+    fsdp2_forward_prefetch_depth=1,
+    reshard_after_forward=None,
+    model_parallelizer=None,
+):
+    """The leading parameters of AutoModel's ``apply_fsdp2_sharding_recursively``."""
+
+
+def patch_context(transformer_cls):
+    """A ``PatchContext`` whose config names ``transformer_cls``, or no class for None."""
+    from primus.core.patches import PatchContext
+
+    spec = types.SimpleNamespace(transformer_cls=transformer_cls) if transformer_cls else None
+    params = types.SimpleNamespace(model=types.SimpleNamespace(pipeline_spec=spec))
+    return PatchContext(
+        backend="automodel",
+        phase="before_train",
+        extra={"module_config": types.SimpleNamespace(params=params)},
+    )
+
+
+def registered_patch(patch_id):
+    """The registered ``before_train`` patch with ``patch_id``; fails the test if absent."""
+    import primus.backends.automodel.patches  # noqa: F401
+    from primus.core.patches.patch_registry import PatchRegistry
+
+    matches = [
+        p for p in PatchRegistry.iter_patches(backend="automodel", phase="before_train") if p.id == patch_id
+    ]
+    assert matches, f"{patch_id} is not registered"
+    return matches[0]
 
 
 def _ensure_parent_packages(monkeypatch, dotted_path):
@@ -95,6 +148,7 @@ def install_stub_automodel(monkeypatch):
     )
     registry_module = install_stub_module(monkeypatch, REGISTRY_PATH, _PARALLELIZERS={})
 
+    @functools.wraps(_upstream_sharding_signature)
     def apply_fsdp2_sharding_recursively(*args, **kwargs):
         rec.sharding.append((args, kwargs))
 

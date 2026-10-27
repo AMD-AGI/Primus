@@ -40,12 +40,20 @@ _CONFIG_KEY = "flow_matching.adapter_kwargs.use_guidance_embeds"
 def _transformer_has_guidance_embedder(model):
     """``config.guidance_embeds`` of the transformer, or None if it cannot be read.
 
-    FSDP2 shards in place and ``torch.compile`` forwards attribute access to the
-    original module, so the config is reachable on the wrapped model as well.
+    FSDP2 shards in place, so the config is on the model itself. DDP and
+    ``torch.compile`` wrap it, in ``module`` and ``_orig_mod``, so those are
+    unwrapped until a config is found.
     """
-    config = getattr(model, "config", None)
-    value = getattr(config, "guidance_embeds", None)
-    return None if value is None else bool(value)
+    for _ in range(4):
+        config = getattr(model, "config", None)
+        if config is not None:
+            value = getattr(config, "guidance_embeds", None)
+            return None if value is None else bool(value)
+        inner = getattr(model, "module", None) or getattr(model, "_orig_mod", None)
+        if inner is None:
+            return None
+        model = inner
+    return None
 
 
 def install() -> bool:
@@ -77,6 +85,14 @@ def install() -> bool:
     def forward(self, model, inputs):
         has_embedder = _transformer_has_guidance_embedder(model)
         wants_guidance = bool(self.use_guidance_embeds)
+        if has_embedder is None and not getattr(self, "_primus_guidance_unreadable_logged", False):
+            self._primus_guidance_unreadable_logged = True
+            logger.warning(
+                "%s cannot read config.guidance_embeds from %s, so %s is not checked against the model.",
+                _LOG_PREFIX,
+                type(model).__name__,
+                _CONFIG_KEY,
+            )
         if has_embedder is not None and has_embedder != wants_guidance:
             raise ValueError(
                 f"{_LOG_PREFIX} the transformer has guidance_embeds={has_embedder} but "

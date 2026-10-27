@@ -22,6 +22,11 @@ checkpointing of whole transformer blocks, across every block list the model
 has, applied before delegating with checkpointing switched off so upstream does
 not wrap a second time. It runs in ``parallelize`` rather than ``_apply`` so the
 FSDP2, unsharded and DDP paths all get the same checkpointing.
+
+Wrapping first means wrapping before upstream applies tensor parallelism, whose
+plan addresses submodules by path and whose block edits would land on the
+wrapper instead. So with ``tp_size > 1`` the sidecars step aside, with a
+warning, and upstream's own checkpointing applies.
 """
 from __future__ import annotations
 
@@ -80,6 +85,23 @@ def install(model_cls_name: str, build: Callable[[type], type], *, log_prefix: s
     return True
 
 
+def tensor_parallel_size(device_mesh, tp_mesh_name: str = "tp") -> int:
+    """Size of the tensor-parallel mesh dimension, or 1 when there is none."""
+    if device_mesh is None or tp_mesh_name not in (getattr(device_mesh, "mesh_dim_names", None) or ()):
+        return 1
+    return device_mesh[tp_mesh_name].size()
+
+
+def warn_tensor_parallel(log_prefix: str, tp_size: int, upstream_behaviour: str) -> None:
+    logger.warning(
+        "%s tp_size=%d: Primus does not checkpoint the blocks itself, because it would wrap them "
+        "before upstream applies tensor parallelism; %s.",
+        log_prefix,
+        tp_size,
+        upstream_behaviour,
+    )
+
+
 def without_activation_checkpointing(mesh_context):
     """A copy of ``mesh_context`` with checkpointing off everywhere it is read."""
     config = mesh_context.strategy_config
@@ -104,6 +126,10 @@ def block_checkpointing(
                 mesh_context.activation_checkpointing or getattr(config, "activation_checkpointing", False)
             )
             if not requested:
+                return super().parallelize(model, mesh_context)
+            tp_size = getattr(mesh_context, "tp_size", 1)
+            if tp_size > 1:
+                warn_tensor_parallel(log_prefix, tp_size, "upstream's own activation checkpointing applies")
                 return super().parallelize(model, mesh_context)
             ac.apply(
                 ac.upstream_helpers(),
