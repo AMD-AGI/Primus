@@ -31,9 +31,10 @@ BENCHMARK_TRAINER: dict[str, Any] = {
         "save_steps": 0,
         "save_total_limit": 3,
         "dataloader_num_workers": 0,
-        # Benchmark FLOP counts are captured for a full per-GPU batch. Drop each
-        # rank's tail batch so timing and TFLOPS always use that same shape.
-        "dataloader_drop_last": True,
+        # AMDiffusionBenchmark uses Accelerator(even_batches=True): a short tail
+        # is padded back to train_batch_size, and TFLOPS divides the first
+        # step's flop count by each step's GPU time.
+        "dataloader_even_batches": True,
         "report_to": "none",
         "run_name": "amdb",
         "bf16": True,

@@ -304,7 +304,7 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
             f"step={self.global_step} "
             f"step_loss={step_loss_value:.6f} train_loss={loss_value:.6f} "
             f"mem={alloc:.2f}/{res:.2f}GB peak_mem={max_mem:.2f}GB "
-            f"gnorm={grad_norm:.4f}"
+            f"grad_norm={grad_norm:.4f}"
         )
         if step_time is not None:
             msg += f" step_time_total={step_time:.6f}s"
@@ -473,9 +473,12 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                         end_event_gpu.record()
                         torch.cuda.synchronize()
                         step_time_gpu = start_event_gpu.elapsed_time(end_event_gpu) / 1000.0
+                        # AMDiffusionBenchmark logs
+                        # fps_gpu = args.train_batch_size / step_time_gpu and
+                        # tflops/s = total_flops * 1e-12 / step_time_gpu.
                         if step_time_gpu > 0 and local_samples_in_update > 0:
                             step_fps, step_tflops = benchmark_step_rates(
-                                local_batch_size=local_samples_in_update,
+                                local_batch_size=self.per_device_train_batch_size,
                                 step_time_gpu_s=step_time_gpu,
                                 total_flops=0.0 if total_flops is None else total_flops,
                             )

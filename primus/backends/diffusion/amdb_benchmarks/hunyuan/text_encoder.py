@@ -14,6 +14,7 @@ from torch import nn
 from transformers import AutoModel, AutoTokenizer, CLIPTextModel, CLIPTokenizer
 
 from primus.backends.diffusion.amdb_benchmarks.download import tokenizer_dir
+from primus.backends.diffusion.utils.hf_load import disable_safetensors_auto_conversion
 
 VIDEO_PROMPT_TEMPLATE = (
     "<|start_header_id|>system<|end_header_id|>\n\nDescribe the video by detailing the following aspects: "
@@ -29,6 +30,7 @@ VIDEO_PROMPT_TEMPLATE = (
 class HunyuanTextEncoder(nn.Module):
     def __init__(self, llm_path: str, clip_path: str, *, crop_start: int = 95, text_len: int = 256):
         super().__init__()
+        disable_safetensors_auto_conversion()
         self.crop_start = crop_start
         self.text_len = text_len
         self.llm_tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir(llm_path))

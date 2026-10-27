@@ -262,3 +262,15 @@ def test_benchmark_step_rates_match_amdiffusionbenchmark():
     )
     assert fps_gpu == 4.0
     assert tflops_per_gpu == 400.0
+
+
+def test_even_batches_pad_short_tail_like_accelerate():
+    from primus.backends.diffusion.trainers.base import EvenSizeBatchSampler
+
+    # 20 samples per rank and batch 16 is the Siheyuan 8-GPU case: a full
+    # batch, then a tail of 4. Accelerate repeats the front of the loader
+    # so the tail is also train_batch_size.
+    batches = list(EvenSizeBatchSampler(range(20), 16))
+    assert batches == [list(range(16)), list(range(16, 20)) + list(range(12))]
+    assert all(len(batch) == 16 for batch in batches)
+    assert len(EvenSizeBatchSampler(range(16), 16)) == 1

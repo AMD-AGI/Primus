@@ -13,10 +13,13 @@ import torch
 from torch import nn
 from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
 
+from primus.backends.diffusion.utils.hf_load import disable_safetensors_auto_conversion
+
 
 class SDXLTextEncoder(nn.Module):
     def __init__(self, clip_l: str, clip_g: str, max_length: int = 77):
         super().__init__()
+        disable_safetensors_auto_conversion()
         self.max_length = max_length
         self.tokenizer_l = CLIPTokenizer.from_pretrained(clip_l, max_length=max_length)
         self.tokenizer_g = CLIPTokenizer.from_pretrained(clip_g, max_length=max_length)

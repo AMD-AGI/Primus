@@ -146,6 +146,48 @@ class ContiguousDistributedSampler(Sampler[int]):
         self.offset = offset
 
 
+class EvenSizeBatchSampler(Sampler[list[int]]):
+    """Yield only full batches, matching Accelerate's default ``even_batches``.
+
+    AMDiffusionBenchmark builds its loader with ``Accelerator()``. That wraps
+    the loader in ``BatchSamplerShard(even_batches=True)``, which repeats
+    samples from the front so a short tail still has ``train_batch_size``
+    examples. FPS and TFLOPS then use that configured size for every step:
+    ``fps = train_batch_size / step_time_gpu`` and
+    ``tflops/s = total_flops / step_time_gpu``, with ``total_flops`` taken
+    once from the first step.
+    """
+
+    def __init__(self, sampler: Sampler[int], batch_size: int):
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+        self.sampler = sampler
+        self.batch_size = int(batch_size)
+
+    def __iter__(self):
+        indices = list(self.sampler)
+        if not indices:
+            return
+        front = indices[: self.batch_size]
+        while len(front) < self.batch_size:
+            front = (front + front)[: self.batch_size]
+        batch: list[int] = []
+        for index in indices:
+            batch.append(index)
+            if len(batch) == self.batch_size:
+                yield batch
+                batch = []
+        if batch:
+            need = self.batch_size - len(batch)
+            yield batch + front[:need]
+
+    def __len__(self) -> int:
+        count = len(self.sampler)
+        if count == 0:
+            return 0
+        return math.ceil(count / self.batch_size)
+
+
 class BaseWanTrainer:
     """
     Shared base class for Wan PyTorch FSDP-style trainers.
@@ -266,16 +308,28 @@ class BaseWanTrainer:
             )
 
         num_workers = int(self.args.get("dataloader_num_workers", 4) or 0)
-        self.dataloader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=self.per_device_train_batch_size,
-            sampler=self.sampler,
-            num_workers=num_workers,
-            collate_fn=data_collator,
-            pin_memory=True,
-            persistent_workers=num_workers > 0,
-            prefetch_factor=2 if num_workers > 0 else None,
-        )
+        loader_kwargs = {
+            "num_workers": num_workers,
+            "collate_fn": data_collator,
+            "pin_memory": True,
+            "persistent_workers": num_workers > 0,
+            "prefetch_factor": 2 if num_workers > 0 else None,
+        }
+        if bool(self.args.get("dataloader_even_batches", False)):
+            self.batch_sampler = EvenSizeBatchSampler(self.sampler, self.per_device_train_batch_size)
+            self.dataloader = torch.utils.data.DataLoader(
+                train_dataset,
+                batch_sampler=self.batch_sampler,
+                **loader_kwargs,
+            )
+        else:
+            self.batch_sampler = None
+            self.dataloader = torch.utils.data.DataLoader(
+                train_dataset,
+                batch_size=self.per_device_train_batch_size,
+                sampler=self.sampler,
+                **loader_kwargs,
+            )
         self.eval_dataloader = None
         if self.eval_dataset is not None:
             if mlperf_mode:
@@ -380,10 +434,7 @@ class BaseWanTrainer:
         yield
 
     def _clip_grad_norm(self) -> float | torch.Tensor:
-        """Clip gradient norm. Returns the total norm value."""
-        if self.max_grad_norm <= 0:
-            return 0.0
-
+        """Return the global grad norm, and clip only when a positive limit is set."""
         parameters = [p for p in self.model.parameters() if p.grad is not None]
         if not parameters:
             return 0.0
@@ -400,7 +451,8 @@ class BaseWanTrainer:
         if dtensor_cls is not None and isinstance(norm, dtensor_cls):
             norm = norm.full_tensor()
 
-        torch.nn.utils.clip_grads_with_norm_(parameters, self.max_grad_norm, norm, foreach=True)
+        if self.max_grad_norm > 0:
+            torch.nn.utils.clip_grads_with_norm_(parameters, self.max_grad_norm, norm, foreach=True)
         return norm
 
     def _save_checkpoint(self):
@@ -809,7 +861,7 @@ class BaseWanTrainer:
         msg = (
             f"step={self.global_step} loss={loss_value:.4f} "
             f"mem={alloc:.2f}/{res:.2f}GB peak_mem={max_mem:.2f}GB "
-            f"gnorm={grad_norm:.4f}"
+            f"grad_norm={grad_norm:.4f}"
         )
         if step_time is not None:
             msg += f" step_time={step_time:.2f}s"
