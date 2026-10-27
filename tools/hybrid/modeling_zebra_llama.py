@@ -1,13 +1,18 @@
 """
-Zebra hybrid: Hybrid Mamba + Multi-Latent Attention (MLA) Model (HuggingFace).
+Zebra hybrid: Hybrid KDA + Multi-Latent Attention (MLA) Model (HuggingFace).
 
 This is a pragmatic HF implementation intended for:
 - loading converted Megatron checkpoints
 - running `generate()` / lm-eval
 
+The layer stack is built from KDA, MLA and MLP blocks only. Mamba2 and GDN
+hybrids are served by convert_mamba_hybrid_to_fla_hf.py and
+convert_gdn_hybrid_to_fla_hf.py instead; the ``mamba_*`` fields on
+ZebraLlamaConfig are retained only so older checkpoints keep loading.
+
 Notes / simplifications:
 - KV cache is intentionally NOT supported (generation works, but is slower).
-- Mamba mixer is a Megatron-shaped *simplified* implementation (not the full SSM scan).
+- KDA mixer is a pure-PyTorch chunked implementation (no mamba_ssm dependency).
 - MLA follows Megatron’s tensorization and YaRN RoPE knobs, but uses PyTorch ops.
 """
 
