@@ -13,6 +13,7 @@ from tests.utils import skip_if_no_cuda
 skip_if_no_cuda()
 
 import primus.backends.megatron.core.extensions.primus_turbo as pt  # noqa: E402  isort:skip
+from primus_turbo.pytorch.core.utils import is_gfx950  # noqa: E402
 
 _TURBO_PADS = pt._turbo_quantize_supports_padding()
 TW = pt.ScalingGranularity.TENSORWISE
@@ -143,6 +144,7 @@ def _skip_without_padding_turbo():
         pytest.skip("installed primus_turbo does not pad FP8 weights")
 
 
+@pytest.mark.skipif(not is_gfx950(), reason="Requires Turbo's fused FP8 grouped MLP kernel")
 @pytest.mark.parametrize("hidden", [192, 256])
 def test_padded_cache_matches_self_quantized_grouped_mlp(hidden):
     _skip_without_padding_turbo()
