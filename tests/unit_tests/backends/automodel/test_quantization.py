@@ -15,10 +15,10 @@ WHY THE SELECTOR IS TESTED HARDEST:
   entirely normal, so the only defence is pinning the precedence order and
   asserting the loser is announced rather than dropped in silence.
 
-  The selector is also the C9 remedy -- the alternative was an if-chain in a
-  shared install() that every precision added later would have to edit -- so the
-  tests here register synthetic backends to check the ordering holds for
-  precisions that do not exist yet.
+  The alternative to the selector was an if-chain in a shared install() that
+  every precision added later would have to edit, so the tests here register
+  synthetic backends to check the ordering holds for precisions that do not
+  exist yet.
 
 The selector and settings tests deliberately need no torch, so they still run
 where it is absent; only the tensor-level swap tests require it.
@@ -37,6 +37,20 @@ except ImportError:  # pragma: no cover
 
 requires_torch = pytest.mark.skipif(torch is None, reason="the tensor-level swap tests need torch")
 
+
+def _turbo_on_a_gpu() -> bool:
+    if torch is None or not torch.cuda.is_available():
+        return False
+    import importlib.util
+
+    return importlib.util.find_spec("primus_turbo") is not None
+
+
+# Importing primus_turbo's quantization configs initialises the device.
+requires_turbo_on_a_gpu = pytest.mark.skipif(
+    not _turbo_on_a_gpu(), reason="building a Primus-Turbo quantization config needs primus_turbo and a GPU"
+)
+
 if torch is not None:
 
     class _Marked(torch.nn.Linear):
@@ -49,8 +63,14 @@ else:  # pragma: no cover
 
 @pytest.fixture
 def clean_registry(monkeypatch):
-    """Isolate the module-level registry so tests do not leak into each other."""
-    monkeypatch.setattr(_common, "_BACKENDS", {}, raising=False)
+    """Isolate the module-level registry so tests do not leak into each other.
+
+    Discovery is pinned as done, so a selector query here cannot import the real
+    backends into the throwaway registry and leave the real one without them.
+    """
+    monkeypatch.setattr(_common, "_BACKENDS", {})
+    monkeypatch.setattr(_common, "_discovered", True)
+    monkeypatch.setattr(_common, "_warned_conflicts", set())
     return _common
 
 
@@ -98,6 +118,15 @@ class TestSelector:
             clean_registry.active_backend()
         assert any("takes precedence" in r.message for r in caplog.records)
         assert any("fp8" in r.message for r in caplog.records)
+
+    def test_a_losing_request_is_announced_once(self, clean_registry, caplog):
+        """Every swap's patch condition asks the selector."""
+        register(clean_registry, "fp8", 10, True)
+        register(clean_registry, "fp4", 20, True)
+        with caplog.at_level("WARNING"):
+            for name in ("fp8", "fp4", "fp8"):
+                clean_registry.is_active(name)
+        assert sum("takes precedence" in r.getMessage() for r in caplog.records) == 1
 
     def test_reregistering_with_a_different_precedence_is_refused(self, clean_registry):
         """Two files disagreeing about the order is a bug worth failing on, not
@@ -177,6 +206,29 @@ class TestDiscovery:
         monkeypatch.setattr(_common, "_discovered", False)
         names = [e.name for e in _common.registered_backends()]
         assert "turbo_fp8" in names
+
+    def test_any_import_error_lets_discovery_continue(self, monkeypatch, caplog):
+        """A module that raises something other than ImportError must not stop
+        the walk and leave the modules after it unregistered."""
+        import importlib
+
+        imported = []
+        real_import = importlib.import_module
+
+        def failing_import(name, *args, **kwargs):
+            if name != _common.__package__:
+                imported.append(name.rsplit(".", 1)[-1])
+            if name.endswith(".fp8_linear"):
+                raise RuntimeError("broken at import")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(importlib, "import_module", failing_import)
+        monkeypatch.setattr(_common, "_discovered", False)
+        with caplog.at_level("WARNING"):
+            _common.discover_backends()
+        assert "fp8_linear" in imported
+        assert imported[-1] != "fp8_linear", "the modules after the broken one were still imported"
+        assert any("broken at import" in r.getMessage() for r in caplog.records)
 
     def test_discovery_only_walks_the_package_once(self, monkeypatch):
         """It is called from every selector query, so a repeated package walk
@@ -306,13 +358,14 @@ class TestConfigResolution:
         with pytest.raises(ValueError, match="primus_turbo.fp8_linear_format"):
             fp8_linear.resolve_config()
 
+    @requires_turbo_on_a_gpu
     def test_lowercase_names_are_accepted(self, set_option):
         """The settings table documents lowercase spellings."""
-        pytest.importorskip("primus_turbo")
         set_option("primus_turbo.fp8_linear_granularity", "rowwise")
         set_option("primus_turbo.fp8_linear_format", "e4m3")
         assert fp8_linear.resolve_config().granularity.name == "ROWWISE"
 
+    @requires_turbo_on_a_gpu
     @pytest.mark.parametrize("gran", ["TENSORWISE", "ROWWISE", "BLOCKWISE", "MX_BLOCKWISE"])
     def test_every_advertised_granularity_actually_builds(self, gran, set_option):
         """Listing a granularity as valid and then failing to construct it is the
@@ -320,7 +373,6 @@ class TestConfigResolution:
         primus_turbo as a bare assertion about a field the user was never asked for.
         The two blockwise ones need a block size; MX additionally pins the scale
         dtype."""
-        pytest.importorskip("primus_turbo")
         set_option("primus_turbo.fp8_linear_granularity", gran)
         cfg = fp8_linear.resolve_config()
         assert cfg.granularity.name == gran
@@ -330,8 +382,8 @@ class TestConfigResolution:
             assert cfg.block_size == 32
             assert cfg.scale_dtype.name == "E8M0"
 
+    @requires_turbo_on_a_gpu
     def test_the_blockwise_block_size_is_settable(self, set_option):
-        pytest.importorskip("primus_turbo")
         set_option("primus_turbo.fp8_linear_granularity", "BLOCKWISE")
         set_option("primus_turbo.fp8_linear_block_size", 64)
         assert fp8_linear.resolve_config().block_size == 64

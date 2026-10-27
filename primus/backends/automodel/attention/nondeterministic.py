@@ -32,6 +32,7 @@ Settings (module config):
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from primus.backends.automodel import options
 from primus.backends.automodel.attention import _backend_registry
@@ -61,11 +62,11 @@ def flash_attn_bf16_nondet(q, k, v, softmax_scale=None, causal: bool = False):
     return flash_attn_func(q, k, v, softmax_scale=softmax_scale, causal=causal, deterministic=False)
 
 
-def install(configured_backend=None) -> bool:
+def install(configured_backend: Optional[str] = None) -> bool:
     """Rebind the target backends to the non-deterministic bf16 kernel."""
 
     def probe() -> None:
-        # Fail fast rather than silently running the deterministic backward.
+        # Raise before rebinding anything; see install_override's ``probe``.
         from primus_turbo.pytorch.ops import flash_attn_func  # noqa: F401
 
     return _backend_registry.install_override(

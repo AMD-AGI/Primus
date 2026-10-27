@@ -17,7 +17,9 @@ THE SEAM:
   The registered ``_supported_arg_names`` are deliberately left alone: dispatch
   filters kwargs down to the ORIGINAL supported set before calling, and the
   wrapper built here accepts a superset of both backend signatures, so it can be
-  driven unchanged. The qkv/device/shape constraints still hold.
+  driven unchanged. Any further keyword a later diffusers adds to a backend is
+  accepted too and sends the call to the original kernel, with the keyword. The
+  qkv/device/shape constraints still hold.
 
 WHY THIS IS SHARED:
   Every override needs the same registry walk, the same superset signature, the
@@ -28,9 +30,11 @@ WHY THIS IS SHARED:
 MUTUAL EXCLUSION:
   Overrides all claim the same registry entries, so only one can be active. A
   single shared marker records which override owns an entry, and a second,
-  different override is refused rather than layered on top. That refusal matters:
-  wrapping a wrapper would run one kernel inside the other's fallback path and
-  change numerics with nothing in the logs to say so.
+  different override is refused as a whole -- on every backend, even one the
+  first left free -- rather than layered on top. That refusal matters: wrapping a
+  wrapper would run one kernel inside the other's fallback path, and splitting
+  the backends between two overrides would make the numerics depend on which
+  backend is configured, with nothing in the logs to say so.
 
 TIMING:
   Install before the transformer's first forward -- in practice before the recipe
@@ -118,8 +122,8 @@ def make_override(
     Args:
         kernel: ``(q, k, v, softmax_scale=, causal=) -> out``, in the (B, S, H, D)
             layout diffusers hands over.
-        unsupported: optional ``(q, k, v) -> reason or None`` for shapes the
-            kernel cannot serve exactly; those calls fall back like the
+        unsupported: optional ``(q, k, v, is_causal) -> reason or None`` for
+            calls the kernel cannot serve exactly; those fall back like the
             conditions in ``unsupported_reason``.
         supports_window: whether ``orig_fn`` accepts ``window_size``. Passing it
             to a backend that does not take it is a TypeError on the fallback
@@ -127,7 +131,17 @@ def make_override(
     """
 
     def _fallback(
-        query, key, value, attn_mask, dropout_p, is_causal, scale, window_size, return_lse, parallel_config
+        query,
+        key,
+        value,
+        attn_mask,
+        dropout_p,
+        is_causal,
+        scale,
+        window_size,
+        return_lse,
+        parallel_config,
+        extra,
     ):
         kwargs = dict(
             query=query,
@@ -139,6 +153,7 @@ def make_override(
             scale=scale,
             return_lse=return_lse,
             _parallel_config=parallel_config,
+            **extra,
         )
         if supports_window:
             kwargs["window_size"] = window_size
@@ -157,10 +172,13 @@ def make_override(
         window_size=(-1, -1),
         return_lse: bool = False,
         _parallel_config=None,
+        **extra,
     ):
         reason = unsupported_reason(attn_mask, dropout_p, window_size, return_lse, _parallel_config)
+        if reason is None and extra:
+            reason = f"the kernel does not take {', '.join(sorted(extra))}"
         if reason is None and unsupported is not None:
-            reason = unsupported(query, key, value)
+            reason = unsupported(query, key, value, is_causal)
         if reason is not None:
             _warn_once(
                 f"{override_name}:{backend_value}:{reason}",
@@ -180,6 +198,7 @@ def make_override(
                 window_size,
                 return_lse,
                 _parallel_config,
+                extra,
             )
         # Installing is not the same as running: a model can reach attention by
         # another route, so say when the kernel actually serves a call.
@@ -209,9 +228,13 @@ def install_override(
     """Rebind the target backends to ``kernel``. Returns whether anything took.
 
     Args:
-        probe: called first and allowed to raise, so a missing kernel library
-            fails the run clearly instead of silently leaving the original
-            backend in place -- which would look like the override worked.
+        probe: called before anything is rebound and allowed to raise. A
+            missing kernel library then fails the patch, which the patch runner
+            logs as an error, and the original backends stay in place -- rather
+            than an override being installed that cannot run. It checks that the
+            kernel imports, not that it runs on this device: a device the kernel
+            does not support raises at the first attention call rather than
+            falling back.
         configured_backend: the run's ``model.attention_backend`` (None when
             unset, which is diffusers' default ``native`` SDPA). Only the
             backends rebound here run the override, so any other value gets a
@@ -226,52 +249,51 @@ def install_override(
     )
 
     reg = _AttentionBackendRegistry
-    installed: List[str] = []
-    conflicts: List[Tuple[str, str]] = []
-
+    # (name, original, supports_window) for every target this diffusers registers.
+    targets = []
     for name_str, supports_window in TARGET_BACKENDS:
         name = getattr(AttentionBackendName, name_str, None)
-        if name is None:
-            continue
-        orig = reg._backends.get(name)
-        if orig is None:
-            # Not registered in this diffusers build.
-            continue
-        owner = getattr(orig, MARKER, None)
-        if owner == override_name:
-            installed.append(name.value)  # already ours; installing twice is fine
-            continue
-        if owner is not None:
-            conflicts.append((name.value, owner))
-            continue
-        reg._backends[name] = make_override(
-            orig,
-            name.value,
-            supports_window,
-            kernel=kernel,
-            override_name=override_name,
-            log_prefix=log_prefix,
-            unsupported=unsupported,
-        )
-        installed.append(name.value)
+        orig = reg._backends.get(name) if name is not None else None
+        if orig is not None:
+            targets.append((name, orig, supports_window))
 
-    for backend_value, owner in conflicts:
+    # Checked for every target before any is rebound, so a conflict on one
+    # backend leaves the others untouched too.
+    conflicts = [
+        (name.value, getattr(orig, MARKER))
+        for name, orig, _ in targets
+        if getattr(orig, MARKER, None) not in (None, override_name)
+    ]
+    if conflicts:
         logger.warning(
-            "%s NOT installed on backend '%s': the %s override already owns it. "
-            "Only one attention override can be active; turn one of the two settings off.",
+            "%s NOT installed on any backend: %s. Only one attention override can be "
+            "active; turn one of the two settings off.",
             log_prefix,
-            backend_value,
-            owner,
+            "; ".join(f"the {owner} override owns '{backend}'" for backend, owner in conflicts),
         )
-
-    if not installed:
-        if not conflicts:
-            logger.warning(
-                "%s requested but neither FLASH nor AITER is registered in diffusers; "
-                "the override is NOT active.",
-                log_prefix,
-            )
         return False
+
+    if not targets:
+        logger.warning(
+            "%s requested but neither FLASH nor AITER is registered in diffusers; "
+            "the override is NOT active.",
+            log_prefix,
+        )
+        return False
+
+    installed: List[str] = []
+    for name, orig, supports_window in targets:
+        if getattr(orig, MARKER, None) != override_name:  # already ours: installing twice is fine
+            reg._backends[name] = make_override(
+                orig,
+                name.value,
+                supports_window,
+                kernel=kernel,
+                override_name=override_name,
+                log_prefix=log_prefix,
+                unsupported=unsupported,
+            )
+        installed.append(name.value)
 
     logger.info(
         "%s installed %s for backends: %s (the configured attention_backend name is unchanged)",

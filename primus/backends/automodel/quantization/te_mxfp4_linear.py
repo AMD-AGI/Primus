@@ -12,9 +12,12 @@ under TE's own ``MXFP4BlockScaling`` recipe. Which is better is an empirical
 question about two different quantization implementations, which is the reason
 both exist.
 
-Requires a TE build with MXFP4 recipe support. On a build without it, TE may
-still expose the recipe *name* while lacking the machinery, so ``install`` builds
-the recipe up front to fail at startup rather than mid-training.
+Requires a TE build with MXFP4 recipe support. ``install`` builds the recipe and
+runs ``check_mxfp4_support()`` where TE or Primus-Turbo provides it, and raises
+before rebinding anything if either fails; the patch runner logs that as an
+error and the run stays in bf16. Neither check runs a kernel, so a build or
+device that cannot execute MXFP4 is only caught at the first forward, which
+raises.
 
 TWO THINGS ARE NEEDED, NOT ONE:
   A bare ``te.pytorch.Linear`` runs in bf16 outside an autocast. So the swap
@@ -41,9 +44,11 @@ non-reentrant checkpointing detects that mismatch and raises. Forced past the
 error, the gradients would be wrong.
 
 Wrapping each block's forward instead puts the autocast *inside* the checkpoint
-boundary, so it is re-entered identically on recompute. Every TE Linear lives
-inside a block -- the skip-list keeps the conditioning and projection layers in
-bf16 -- so per-block coverage is complete.
+boundary, so it is re-entered identically on recompute. A Linear outside every
+block (an embedder, or the output projection) is then outside every autocast, so
+swapping it would only make it a TE Linear running in bf16 while counted as
+swapped. When the model has block lists, only Linears inside a block are
+swapped; the rest stay ``nn.Linear`` and are counted separately in the summary.
 
 A model may hold its blocks in more than one list. Wrapping only the first list
 found leaves the rest running their TE Linears outside the autocast, silently in
@@ -61,6 +66,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any, Optional
 
 from primus.backends.automodel import options
 from primus.backends.automodel.quantization import _common, _fp4_common
@@ -122,20 +128,26 @@ def autocast_for(recipe):
 
     Newer TE exposes ``autocast(recipe=...)``; the older API is
     ``fp8_autocast(fp8_recipe=...)``, and there is an intermediate spelling that
-    takes ``recipe=``. Probed rather than version-sniffed, because the version
-    number has not been a reliable guide to which of these is present.
+    takes ``recipe=``. The signatures are read rather than the version sniffed,
+    because the version number has not been a reliable guide to which of these
+    is present, and reading them means an error raised inside TE is not taken
+    for a spelling mismatch.
     """
+    import inspect
+
     import transformer_engine.pytorch as te
 
-    if hasattr(te, "autocast"):
-        try:
-            return te.autocast(enabled=True, recipe=recipe)
-        except TypeError:
-            pass
-    try:
-        return te.fp8_autocast(enabled=True, recipe=recipe)
-    except TypeError:
-        return te.fp8_autocast(enabled=True, fp8_recipe=recipe)
+    for fn_name, keyword in (
+        ("autocast", "recipe"),
+        ("fp8_autocast", "recipe"),
+        ("fp8_autocast", "fp8_recipe"),
+    ):
+        fn = getattr(te, fn_name, None)
+        if fn is not None and keyword in inspect.signature(fn).parameters:
+            return fn(enabled=True, **{keyword: recipe})
+    raise RuntimeError(
+        "transformer_engine.pytorch has neither autocast(recipe=) nor fp8_autocast(recipe= or fp8_recipe=)"
+    )
 
 
 def wrap_forward(module, recipe) -> bool:
@@ -196,23 +208,31 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
     being replaced and is ignored: the skip-list is always applied.
 
     Eligibility is the MXFP4 predicate, not the FP8 one, since this is a four-bit
-    path with the same 128-alignment requirement.
+    path with the same 128-alignment requirement. When the model has block lists,
+    only Linears inside a block are swapped, since only those run under the
+    per-block autocast (see the module docstring).
     """
     import torch.nn as nn
     from transformer_engine.pytorch import Linear as TELinear
 
+    block_ids = {id(block) for attr in DEFAULT_BLOCK_ATTRS for block in (getattr(module, attr, None) or ())}
     converted = 0
     kept_bf16 = 0
+    outside_blocks = 0
 
-    def walk(parent, prefix: str = "") -> None:
-        nonlocal converted, kept_bf16
+    def walk(parent, prefix: str = "", in_block: bool = not block_ids) -> None:
+        nonlocal converted, kept_bf16, outside_blocks
         # list() because children are reassigned during the walk.
         for child_name, child in list(parent.named_children()):
             fqn = f"{prefix}.{child_name}" if prefix else child_name
+            inside = in_block or id(child) in block_ids
             if isinstance(child, TELinear):
                 continue
             if not isinstance(child, nn.Linear):
-                walk(child, fqn)
+                walk(child, fqn, inside)
+                continue
+            if not inside:
+                outside_blocks += 1
                 continue
             if not _fp4_common.is_fp4_training_safe_linear(fqn, child):
                 kept_bf16 += 1
@@ -244,27 +264,30 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
         wrap_description = wrap_block_forwards(module, build_recipe())
 
     logger.info(
-        "%s %s: %d -> te.pytorch.Linear, %d kept in bf16; MXFP4 autocast on %s",
+        "%s %s: %d -> te.pytorch.Linear, %d kept in bf16 (ineligible), %d kept in bf16 "
+        "(outside the blocks); MXFP4 autocast on %s",
         _LOG_PREFIX,
         module_name,
         converted,
         kept_bf16,
+        outside_blocks,
         wrap_description,
     )
     return converted
 
 
-def install(model_config=None) -> bool:
+def install(model_config: Optional[Any] = None) -> bool:
     """Rebind AutoModel's TE swap symbol to the TE-native MXFP4 swap (see ``_common.install_linear_swap``)."""
-    # Build the recipe now, so a TE without MXFP4 support fails at startup. TE can
-    # expose the recipe name without the machinery behind it, so importing the
-    # symbol is not sufficient evidence that this path will work.
+    # Build the recipe now, so a TE without the MXFP4 recipe raises here, before
+    # anything is rebound. The recipe is a settings object, so building it does
+    # not show that the kernels behind it run on this device.
     build_recipe()
 
     # Best-effort capability check. Deliberately not a hard requirement: the
     # helper has moved between modules and is absent from some builds where MXFP4
-    # nonetheless executes, so the recipe build above is the real gate and this
-    # only improves the error message.
+    # nonetheless executes. Where it exists it is the stronger check; it still
+    # runs no kernel, so a device that cannot execute MXFP4 fails at the first
+    # forward.
     for module_path in ("transformer_engine.pytorch", "primus_turbo.pytorch.core.low_precision"):
         try:
             module = __import__(module_path, fromlist=["check_mxfp4_support"])

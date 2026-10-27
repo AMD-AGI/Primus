@@ -30,7 +30,7 @@ tests can run, without it.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,7 @@ def register_backend(
 
 
 _discovered = False
+_warned_conflicts: Set[Tuple[str, ...]] = set()
 
 
 def discover_backends() -> None:
@@ -81,10 +82,13 @@ def discover_backends() -> None:
     one wins by evaluation order rather than by precedence, and the warning line
     says a backend "will NOT be applied" immediately before applying it.
 
-    An ImportError is not fatal, but it is logged as a warning. Registration lives
-    in modules that import neither torch nor the precision's library, so a
-    failure here is unexpected; it should not stop a run that wanted a different
-    precision, and it should not pass unnoticed either.
+    A module that fails to import, with any exception, is logged as a warning and
+    the walk continues, so one broken module cannot hide the ones after it.
+    Registration lives in modules that import neither torch nor the precision's
+    library, so a failure here is unexpected; it should not stop a run that
+    wanted a different precision, and it should not pass unnoticed either. A run
+    that requested the broken precision still finds out: its own patch condition
+    imports the same module, and a condition that raises stops the run.
 
     Modules with a leading underscore are skipped as internal. A precision that
     keeps its policy in a private module is still registered, because its public
@@ -108,7 +112,7 @@ def discover_backends() -> None:
             continue
         try:
             importlib.import_module(f"{__package__}.{info.name}")
-        except ImportError as exc:
+        except Exception as exc:
             logger.warning(
                 "[Quantization] could not import %s, so a precision it registers cannot be selected: %s",
                 info.name,
@@ -130,14 +134,17 @@ def requested_backends() -> List[BackendEntry]:
 def active_backend() -> Optional[BackendEntry]:
     """The one backend that gets the swap, or None if nothing was requested.
 
-    Logs when a request loses to a higher-precedence one. Silently ignoring the
-    loser would leave someone looking at a run they think is FP4 and is not.
+    Logs, once, when a request loses to a higher-precedence one. Silently
+    ignoring the loser would leave someone looking at a run they think is FP4 and
+    is not. Every swap's patch condition calls this, hence the once.
     """
     requested = requested_backends()
     if not requested:
         return None
     winner = requested[0]
-    if len(requested) > 1:
+    names = tuple(e.name for e in requested)
+    if len(requested) > 1 and names not in _warned_conflicts:
+        _warned_conflicts.add(names)
         losers = ", ".join(e.name for e in requested[1:])
         logger.warning(
             "[Quantization] %s and %s were both requested; %s takes precedence and "

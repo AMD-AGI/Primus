@@ -37,10 +37,11 @@ A Linear does three GEMMs, and they contract over different things:
     wgrad     grad_W = grad_out^T @ x   K = tokens
 
 ``in_features`` and ``out_features`` are static, and the swap's skip-list already
-refuses any Linear where they are not 128-aligned, so the forward and the dgrad
-are safe before the model ever runs. **Only the weight gradient contracts over
-tokens**, and the token count is ``sequence_length x batch`` -- a runtime
-property that no swap-time check can see.
+refuses any Linear where they are not a multiple of 256 (128 when preshuffle is
+off and Turbo runs HIPBLASLT; see ``_fp4_common.feature_multiple``), so the
+forward and the dgrad are safe before the model ever runs. **Only the weight
+gradient contracts over tokens**, and the token count is ``sequence_length x
+batch`` -- a runtime property that no swap-time check can see.
 
 For self-attention on a long sequence that count is usually a comfortable
 multiple of 256 by accident. For a cross-attention key or value projection it is

@@ -133,8 +133,8 @@ class TestInstall:
             assert fake_diffusers._backends[backend]._primus_orig_fn is original
 
     def test_a_failing_probe_propagates(self, fake_diffusers):
-        """A missing kernel library has to fail the run, not leave the original
-        backend in place looking like the override worked."""
+        """A missing kernel library has to fail the patch, which the patch runner
+        reports, before anything is rebound."""
 
         def probe():
             raise ImportError("no kernel library")
@@ -164,7 +164,22 @@ class TestInstall:
         for backend in fake_diffusers._backends:
             owner = getattr(fake_diffusers._backends[backend], _backend_registry.MARKER)
             assert owner == "first"
-        assert any("already owns it" in r.message for r in caplog.records)
+        assert any("NOT installed on any backend" in r.getMessage() for r in caplog.records)
+
+    def test_a_conflict_on_one_backend_refuses_the_whole_install(self, fake_diffusers, caplog):
+        """Splitting the backends between two overrides would make the numerics
+        depend on which backend is configured."""
+        flash = next(b for b in fake_diffusers._backends if b.value == "flash")
+        aiter = next(b for b in fake_diffusers._backends if b.value == "aiter")
+        other = lambda **kwargs: None  # noqa: E731
+        setattr(other, _backend_registry.MARKER, "other")
+        fake_diffusers._backends[flash] = other
+        with caplog.at_level("WARNING"):
+            assert install(name="mine") is False
+        assert fake_diffusers._backends[aiter] is fake_diffusers.originals[aiter], "AITER must stay untouched"
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("the other override owns 'flash'" in m for m in messages)
+        assert not any("will not run" in m for m in messages), "a refused install is not 'installed'"
 
     def test_the_refusal_names_the_owner(self, fake_diffusers, caplog):
         install(name="first")
@@ -281,7 +296,7 @@ class TestDispatch:
 
     def test_a_kernel_specific_reason_falls_back(self, fake_diffusers, caplog):
         calls = []
-        install(kernel=spy_kernel(calls), unsupported=lambda q, k, v: "the keys are odd")
+        install(kernel=spy_kernel(calls), unsupported=lambda q, k, v, is_causal: "the keys are odd")
         flash = next(b for b in fake_diffusers._backends if b.value == "flash")
         with caplog.at_level("WARNING"):
             result = fake_diffusers._backends[flash](query="q", key="k", value="v")
@@ -293,10 +308,28 @@ class TestDispatch:
         """The kernel check may read tensor shapes; a call that is falling back
         anyway should not depend on it."""
         seen = []
-        install(unsupported=lambda q, k, v: seen.append(1))
+        install(unsupported=lambda q, k, v, is_causal: seen.append(1))
         flash = next(b for b in fake_diffusers._backends if b.value == "flash")
         fake_diffusers._backends[flash](query="q", key="k", value="v", return_lse=True)
         assert seen == []
+
+    def test_the_kernel_specific_check_sees_is_causal(self, fake_diffusers):
+        seen = []
+        install(unsupported=lambda q, k, v, is_causal: seen.append(is_causal))
+        flash = next(b for b in fake_diffusers._backends if b.value == "flash")
+        fake_diffusers._backends[flash](query="q", key="k", value="v", is_causal=True)
+        assert seen == [True]
+
+    def test_an_argument_the_kernel_does_not_know_falls_back_with_it(self, fake_diffusers, caplog):
+        """A later diffusers may add an argument to a backend; dispatch would pass
+        it, so it must reach the original kernel rather than raise a TypeError."""
+        calls = []
+        wrapper = self._wrapper(fake_diffusers, calls)
+        with caplog.at_level("WARNING"):
+            result = wrapper(query="q", key="k", value="v", new_option=3)
+        assert result[0] == "original-flash" and result[1]["new_option"] == 3
+        assert calls == []
+        assert any("new_option" in r.getMessage() for r in caplog.records)
 
     def test_window_size_is_not_passed_to_a_backend_that_rejects_it(self, fake_diffusers):
         """AITER's original does not accept window_size; passing it would be a
@@ -418,10 +451,30 @@ class TestPadToBlock:
 
         q = types.SimpleNamespace(shape=(1, 100, 4, 64))
         kv = types.SimpleNamespace(shape=(1, skv, 4, 64))
-        reason = fp8.unaligned_keys(q, kv, kv)
+        reason = fp8.unaligned_lengths(q, kv, kv)
         assert (reason is None) is aligned
         if not aligned:
             assert str(skv) in reason
+
+    @pytest.mark.parametrize("sq,served", [(100, False), (128, True)])
+    def test_a_causal_call_needs_aligned_queries(self, sq, served):
+        """The causal mask is aligned bottom-right when the lengths differ, so
+        padding the queries would move the diagonal."""
+        from primus.backends.automodel.attention import fp8
+
+        q = types.SimpleNamespace(shape=(1, sq, 4, 64))
+        kv = types.SimpleNamespace(shape=(1, 256, 4, 64))
+        reason = fp8.unaligned_lengths(q, kv, kv, is_causal=True)
+        assert (reason is None) is served
+        if not served:
+            assert "causal" in reason
+
+    def test_a_non_causal_call_pads_unaligned_queries(self):
+        from primus.backends.automodel.attention import fp8
+
+        q = types.SimpleNamespace(shape=(1, 100, 4, 64))
+        kv = types.SimpleNamespace(shape=(1, 256, 4, 64))
+        assert fp8.unaligned_lengths(q, kv, kv, is_causal=False) is None
 
 
 try:

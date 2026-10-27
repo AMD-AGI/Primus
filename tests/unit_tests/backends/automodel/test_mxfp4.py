@@ -28,6 +28,8 @@ Most of this deliberately avoids torch, so it runs anywhere. Float4Linear itself
 needs both torch and primus_turbo and is exercised on hardware.
 """
 
+import types
+
 import pytest
 
 from primus.backends.automodel.quantization import _common, _fp4_common, fp8_linear
@@ -57,7 +59,9 @@ class TestPrecedence:
         set_option("primus_turbo.fp8_linear", True)
         assert _common.active_backend().name == fp8_linear.BACKEND_NAME
 
-    def test_the_losing_fp8_request_is_announced(self, set_option, caplog):
+    def test_the_losing_fp8_request_is_announced(self, set_option, caplog, monkeypatch):
+        # Announced once per process, so an earlier test may already have used it up.
+        monkeypatch.setattr(_common, "_warned_conflicts", set())
         set_option("primus_turbo.mxfp4_linear", True)
         set_option("primus_turbo.fp8_linear", True)
         with caplog.at_level("WARNING"):
@@ -150,32 +154,72 @@ class TestSensitiveBand:
         "idx,in_band",
         [(0, True), (1, True), (2, False), (20, False), (31, False), (32, True), (39, True)],
     )
-    def test_first_two_and_last_eight_are_in_the_band(self, set_option, idx, in_band):
-        set_option("primus_turbo.mxfp4_sensitive_start", 2)
-        set_option("primus_turbo.mxfp4_sensitive_end", 8)
-        assert _fp4_common.is_sensitive_block(f"blocks.{idx}.attn.to_q", self.COUNTS) is in_band
+    def test_first_two_and_last_eight_are_in_the_band(self, idx, in_band):
+        assert _fp4_common.is_sensitive_block(f"blocks.{idx}.attn.to_q", self.COUNTS, 2, 8) is in_band
+
+    def test_the_defaults_are_two_and_eight(self):
+        assert (_fp4_common.sensitive_start(), _fp4_common.sensitive_end()) == (2, 8)
 
     def test_a_non_block_layer_is_never_in_the_band(self):
-        assert _fp4_common.is_sensitive_block("proj_out", self.COUNTS) is False
+        assert _fp4_common.is_sensitive_block("proj_out", self.COUNTS, 2, 8) is False
 
     def test_an_unknown_block_list_is_not_in_the_band(self):
-        assert _fp4_common.is_sensitive_block("other_blocks.0.x", self.COUNTS) is False
+        assert _fp4_common.is_sensitive_block("other_blocks.0.x", self.COUNTS, 2, 8) is False
 
-    def test_each_block_list_is_banded_independently(self, set_option):
+    def test_no_block_counts_means_no_band(self):
+        """What the caller passes when the band is off."""
+        assert _fp4_common.is_sensitive_block("blocks.0.x", {}, 2, 8) is False
+
+    def test_each_block_list_is_banded_independently(self):
         """A model with a dual-stream and a single-stream list has two different
         last indices, so a single global count would band the wrong layers."""
-        set_option("primus_turbo.mxfp4_sensitive_start", 1)
-        set_option("primus_turbo.mxfp4_sensitive_end", 1)
         counts = {"transformer_blocks": 19, "single_transformer_blocks": 38}
-        assert _fp4_common.is_sensitive_block("transformer_blocks.18.x", counts) is True
-        assert _fp4_common.is_sensitive_block("single_transformer_blocks.18.x", counts) is False
-        assert _fp4_common.is_sensitive_block("single_transformer_blocks.37.x", counts) is True
+        assert _fp4_common.is_sensitive_block("transformer_blocks.18.x", counts, 1, 1) is True
+        assert _fp4_common.is_sensitive_block("single_transformer_blocks.18.x", counts, 1, 1) is False
+        assert _fp4_common.is_sensitive_block("single_transformer_blocks.37.x", counts, 1, 1) is True
 
-    def test_an_oversized_band_covers_everything(self, set_option):
+    def test_an_oversized_band_covers_everything(self):
         """Overlapping start and end must not cancel out into an empty band."""
-        set_option("primus_turbo.mxfp4_sensitive_start", 50)
-        set_option("primus_turbo.mxfp4_sensitive_end", 50)
-        assert all(_fp4_common.is_sensitive_block(f"blocks.{i}.x", self.COUNTS) for i in range(40))
+        assert all(_fp4_common.is_sensitive_block(f"blocks.{i}.x", self.COUNTS, 50, 50) for i in range(40))
+
+    def test_a_band_covering_a_whole_list_is_reported(self):
+        counts = {"transformer_blocks": 19, "single_transformer_blocks": 38}
+        assert _fp4_common.lists_covered_by_band(counts, 10, 10) == {"transformer_blocks": 19}
+        assert _fp4_common.lists_covered_by_band(counts, 2, 8) == {}
+
+    @pytest.mark.parametrize(
+        "setting", ["primus_turbo.mxfp4_sensitive_start", "primus_turbo.mxfp4_sensitive_end"]
+    )
+    def test_a_negative_band_size_is_refused(self, set_option, setting):
+        """A negative size would silently shrink or empty the band."""
+        set_option(setting, -1)
+        with pytest.raises(ValueError, match=setting):
+            _fp4_common.sensitive_start() if setting.endswith("start") else _fp4_common.sensitive_end()
+
+
+class TestFeatureAlignment:
+    """The forward contracts over in_features and the dgrad over out_features,
+    so the multiple is the GEMM backend's."""
+
+    def test_aiter_needs_256_when_preshuffle_is_on(self):
+        assert _fp4_common.preshuffle_enabled() is True
+        assert _fp4_common.feature_multiple() == 256
+
+    def test_hipblaslt_needs_128_when_preshuffle_is_off(self, set_option):
+        set_option("primus_turbo.mxfp4_preshuffle", False)
+        assert _fp4_common.feature_multiple() == 128
+
+    @pytest.mark.parametrize("shape,multiple,eligible", [((384, 256), 256, False), ((384, 256), 128, True)])
+    def test_the_multiple_decides_eligibility(self, monkeypatch, shape, multiple, eligible):
+        import sys
+
+        module = types.ModuleType("nemo_automodel._diffusers.auto_diffusion_pipeline")
+        module._is_fp8_training_safe_linear = lambda name, linear: True
+        for name in ("nemo_automodel", "nemo_automodel._diffusers"):
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        linear = types.SimpleNamespace(weight=types.SimpleNamespace(shape=shape))
+        assert _fp4_common.is_fp4_training_safe_linear("blocks.0.ff", linear, multiple) is eligible
 
 
 class TestTokenPadding:
@@ -186,9 +230,9 @@ class TestTokenPadding:
     def test_the_contraction_multiple_matches_the_kernel(self):
         assert _fp4_common.AITER_K_MULTIPLE == 256
 
-    def test_the_feature_alignment_is_separate_and_smaller(self):
-        """128 is enforced at swap time on in/out_features; 256 is a runtime
-        property of the token count. Conflating them would under-pad."""
+    def test_the_hipblaslt_feature_alignment_is_smaller(self):
+        """128 is HIPBLASLT's multiple for in/out_features; the token count is
+        always padded to AITER's 256."""
         assert _fp4_common.FP4_ALIGN == 128
         assert _fp4_common.FP4_ALIGN < _fp4_common.AITER_K_MULTIPLE
 

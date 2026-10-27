@@ -47,6 +47,7 @@ Settings (module config, ``primus_turbo:`` section):
 from __future__ import annotations
 
 import logging
+from typing import Any, Optional
 
 from primus.backends.automodel import options
 from primus.backends.automodel.quantization import _common
@@ -192,10 +193,11 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
     return converted
 
 
-def install(model_config=None) -> bool:
+def install(model_config: Optional[Any] = None) -> bool:
     """Rebind AutoModel's TE swap symbol to the FP8 swap (see ``_common.install_linear_swap``)."""
-    # Fail fast if primus_turbo is missing, so the run errors clearly rather than
-    # silently falling back to TE -- which would look like it worked.
+    # Raise before rebinding anything if primus_turbo is missing: the patch runner
+    # logs the failure as an error and the run stays in bf16, rather than
+    # installing a swap that would fail later or look like it worked.
     import primus_turbo.pytorch.modules  # noqa: F401
 
     _common.install_linear_swap(replace_linears, _LOG_PREFIX, model_config)

@@ -171,6 +171,19 @@ class TestAutocastApiDrift:
             pass
         assert calls == [("fp8_recipe", recipe)]
 
+    def test_an_error_inside_te_is_not_taken_for_a_spelling_mismatch(self, monkeypatch, fake_te):
+        def autocast(enabled=True, recipe=None):
+            raise TypeError("the recipe is not supported")
+
+        monkeypatch.setattr(fake_te, "autocast", autocast)
+        with pytest.raises(TypeError, match="the recipe is not supported"):
+            te_mxfp4_linear.autocast_for(Recipe())
+
+    def test_no_known_spelling_raises(self, monkeypatch, fake_te):
+        monkeypatch.delattr(fake_te, "autocast")
+        with pytest.raises(RuntimeError, match="neither autocast"):
+            te_mxfp4_linear.autocast_for(Recipe())
+
 
 @requires_torch
 class TestBlockWrapping:
@@ -293,6 +306,35 @@ class TestReplaceLinears:
         expected = model.blocks[0].weight.detach().clone()
         te_mxfp4_linear.replace_linears(model, "toy")
         assert torch.allclose(model.blocks[0].weight, expected)
+
+    def test_a_linear_outside_the_blocks_is_not_swapped(self, fake_te, monkeypatch, caplog):
+        """No per-block autocast reaches it, so as a TE Linear it would run in
+        bf16 while counted as swapped."""
+        monkeypatch.setattr(
+            "primus.backends.automodel.quantization._fp4_common." "is_fp4_training_safe_linear",
+            lambda fqn, linear: True,
+        )
+        model = torch.nn.Module()
+        model.x_embedder = torch.nn.Linear(256, 256)
+        model.blocks = torch.nn.ModuleList([torch.nn.Sequential(torch.nn.Linear(256, 256))])
+        model.proj_out = torch.nn.Linear(256, 256)
+        with caplog.at_level("INFO"):
+            assert te_mxfp4_linear.replace_linears(model, "toy") == 1
+        assert type(model.x_embedder) is torch.nn.Linear
+        assert type(model.proj_out) is torch.nn.Linear
+        assert isinstance(model.blocks[0][0], fake_te.Linear)
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "2 kept in bf16 (outside the blocks)" in joined
+
+    def test_without_a_block_list_every_eligible_linear_is_swapped(self, fake_te, monkeypatch):
+        """The autocast then goes on the whole module, which covers them all."""
+        monkeypatch.setattr(
+            "primus.backends.automodel.quantization._fp4_common." "is_fp4_training_safe_linear",
+            lambda fqn, linear: True,
+        )
+        model = torch.nn.Sequential(torch.nn.Linear(256, 256), torch.nn.Linear(256, 256))
+        assert te_mxfp4_linear.replace_linears(model, "toy") == 2
+        assert getattr(model, "_primus_te_mxfp4_wrapped", False) is True
 
 
 class TestPatchRegistration:

@@ -45,6 +45,7 @@ TE's FP8 autocast as well.
 from __future__ import annotations
 
 import logging
+from typing import Any, Optional
 
 import torch.nn as nn
 
@@ -89,11 +90,10 @@ class Float4Linear(nn.Linear):
         return f"{super().extra_repr()}, mxfp4=True, backward={self.backward_precision}"
 
 
-def _band_description(block_counts) -> str:
+def _band_description(block_counts, start: int, end: int) -> str:
     """Human summary of which blocks the band covers, for the one summary line."""
     if not block_counts:
         return "no transformer-block lists found"
-    start, end = _fp4_common.sensitive_start(), _fp4_common.sensitive_end()
     return ", ".join(f"{name}[first {start} + last {end} of {n}]" for name, n in block_counts.items())
 
 
@@ -114,9 +114,22 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
     )
 
     fp4_config = _fp4_common.resolve_fp4_config()
+    multiple = _fp4_common.feature_multiple()
     band_on = _fp4_common.sensitive_band_enabled()
     block_counts = _fp4_common.count_blocks(module) if band_on else {}
     band_precision = _fp4_common.sensitive_precision() if band_on else None
+    start = _fp4_common.sensitive_start() if band_on else 0
+    end = _fp4_common.sensitive_end() if band_on else 0
+    for name, n in _fp4_common.lists_covered_by_band(block_counts, start, end).items():
+        logger.warning(
+            "%s the sensitive band (first %d + last %d) covers all %d blocks of %s, so none of "
+            "them runs MXFP4. Lower primus_turbo.mxfp4_sensitive_start/end if that is not intended.",
+            _LOG_PREFIX,
+            start,
+            end,
+            n,
+            name,
+        )
 
     Float8Linear = None
     fp8_config = None
@@ -153,7 +166,7 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
                 walk(child, fqn)
                 continue
 
-            if band_on and _fp4_common.is_sensitive_block(fqn, block_counts):
+            if band_on and _fp4_common.is_sensitive_block(fqn, block_counts, start, end):
                 if band_precision == "tw_fp8" and _is_fp8_training_safe_linear(fqn, child):
                     setattr(parent, child_name, build(Float8Linear, child, fp8_config))
                     to_fp8 += 1
@@ -161,7 +174,7 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
                     kept_bf16 += 1
                 continue
 
-            if not _fp4_common.is_fp4_training_safe_linear(fqn, child):
+            if not _fp4_common.is_fp4_training_safe_linear(fqn, child, multiple):
                 kept_bf16 += 1
                 logger.debug(
                     "%s keeping %s.%s in bf16 (ineligible for MXFP4); weight=%s",
@@ -191,17 +204,17 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
         _fp4_common.backward_precision(),
         _fp4_common.gradient_sr_enabled(),
         _fp4_common.preshuffle_enabled(),
-        _band_description(block_counts) if band_on else "off",
+        _band_description(block_counts, start, end) if band_on else "off",
     )
     return to_mxfp4 + to_fp8
 
 
-def install(model_config=None) -> bool:
+def install(model_config: Optional[Any] = None) -> bool:
     """Rebind AutoModel's TE swap symbol to the MXFP4 swap (see ``_common.install_linear_swap``)."""
 
     def probe() -> None:
-        # Fail fast if the FP4 op is missing, rather than silently falling back
-        # to TE -- which would look like it worked.
+        # Raise before rebinding anything if the FP4 op is missing: the patch
+        # runner logs the failure as an error and the run stays in bf16.
         from primus_turbo.pytorch.ops import gemm_fp4  # noqa: F401
 
     probe()

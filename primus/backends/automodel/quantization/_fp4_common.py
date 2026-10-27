@@ -11,11 +11,13 @@ policy is the part worth reading on its own. The kernels in ``mxfp4_gemm.py``
 take these as arguments and make no decisions.
 
 ALIGNMENT, IN TWO PLACES, FOR TWO REASONS:
-  ``FP4_ALIGN`` (128) applies to ``in_features``/``out_features`` and is enforced
-  at swap time, so an ineligible Linear simply stays bf16. ``AITER_K_MULTIPLE``
-  (256) applies to the *contraction* dimension of each GEMM, one of which is the
-  token count -- a runtime property no swap-time check can see. That one is
-  handled by padding in ``mxfp4_gemm.py``; see its docstring.
+  ``in_features`` and ``out_features`` are checked at swap time, so an ineligible
+  Linear simply stays bf16. They are the contraction dimensions of the forward
+  and the dgrad, so the multiple depends on the GEMM backend: ``AITER_K_MULTIPLE``
+  (256) when the Turbo path runs AITER (preshuffle on), ``FP4_ALIGN`` (128)
+  otherwise. The weight gradient contracts over the token count instead -- a
+  runtime property no swap-time check can see -- and that one is handled by
+  padding in ``mxfp4_gemm.py``; see its docstring.
 
 Kept free of torch at import time so the patch condition and these tests can run
 without it.
@@ -38,7 +40,8 @@ FP4_ALIGN = 128
 
 # AITER's FP4 GEMM requires the CONTRACTION dim be a multiple of this. See
 # mxfp4_gemm.py: off the multiple, current AITER refuses the GEMM and older
-# builds returned wrong numbers.
+# builds returned wrong numbers. Applies to in_features/out_features too when
+# AITER is the backend (see feature_multiple).
 AITER_K_MULTIPLE = 256
 
 # Conditioning projections kept in bf16 by default.
@@ -131,14 +134,21 @@ def sensitive_band_enabled() -> bool:
     return options.flag("primus_turbo.mxfp4_sensitive_layers")
 
 
+def _band_size(name: str, default: int) -> int:
+    value = options.integer(name, default)
+    if value < 0:
+        raise ValueError(f"{name}={value} invalid; expected 0 or a positive number of blocks")
+    return value
+
+
 def sensitive_start() -> int:
     """How many leading transformer blocks are in the band."""
-    return options.integer("primus_turbo.mxfp4_sensitive_start", 2)
+    return _band_size("primus_turbo.mxfp4_sensitive_start", 2)
 
 
 def sensitive_end() -> int:
     """How many trailing transformer blocks are in the band."""
-    return options.integer("primus_turbo.mxfp4_sensitive_end", 8)
+    return _band_size("primus_turbo.mxfp4_sensitive_end", 8)
 
 
 def sensitive_precision() -> str:
@@ -178,22 +188,40 @@ def count_blocks(module) -> Dict[str, int]:
     return counts
 
 
-def is_sensitive_block(fqn: str, block_counts: Dict[str, int]) -> bool:
-    """Whether ``fqn`` is in the band of first-N and last-M blocks."""
+def is_sensitive_block(fqn: str, block_counts: Dict[str, int], start: int, end: int) -> bool:
+    """Whether ``fqn`` is in the band of the first ``start`` and last ``end`` blocks.
+
+    The caller decides whether the band is on, and passes the empty dict when it
+    is not.
+    """
     list_name, idx = block_index(fqn)
     if list_name is None or list_name not in block_counts:
         return False
-    count = block_counts[list_name]
-    return idx < sensitive_start() or idx >= (count - sensitive_end())
+    return idx < start or idx >= block_counts[list_name] - end
 
 
-def is_fp4_training_safe_linear(name: str, linear) -> bool:
+def lists_covered_by_band(block_counts: Dict[str, int], start: int, end: int) -> Dict[str, int]:
+    """The block lists in which the band leaves no block to run MXFP4."""
+    return {name: n for name, n in block_counts.items() if start + end >= n}
+
+
+def feature_multiple() -> int:
+    """The multiple the Turbo MXFP4 GEMMs need of ``in_features`` and ``out_features``.
+
+    The forward contracts over ``in_features`` and the dgrad over
+    ``out_features``. With preshuffle on, Turbo runs AITER, which needs
+    ``AITER_K_MULTIPLE`` there; HIPBLASLT needs ``FP4_ALIGN``.
+    """
+    return AITER_K_MULTIPLE if preshuffle_enabled() else FP4_ALIGN
+
+
+def is_fp4_training_safe_linear(name: str, linear, multiple: int = FP4_ALIGN) -> bool:
     """Whether a Linear is eligible for MXFP4.
 
     Three gates, in increasing specificity: AutoModel's own FP8-safety predicate,
-    then the conditioning-prefix policy above, then the 128-alignment the FP4 GEMM
-    requires. Deferring to AutoModel first means the set kept in bf16 is a
-    superset of the TE path's rather than a competing opinion.
+    then the conditioning-prefix policy above, then the feature alignment the FP4
+    GEMM requires, ``multiple``. Deferring to AutoModel first means the set kept
+    in bf16 is a superset of the TE path's rather than a competing opinion.
     """
     from nemo_automodel._diffusers.auto_diffusion_pipeline import (
         _is_fp8_training_safe_linear,
@@ -203,7 +231,7 @@ def is_fp4_training_safe_linear(name: str, linear) -> bool:
         return False
     if keep_sensitive_bf16() and name.startswith(FP4_SENSITIVE_PREFIXES):
         return False
-    if linear.weight.shape[0] % FP4_ALIGN != 0 or linear.weight.shape[1] % FP4_ALIGN != 0:
+    if linear.weight.shape[0] % multiple != 0 or linear.weight.shape[1] % multiple != 0:
         return False
     return True
 
