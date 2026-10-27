@@ -14,15 +14,75 @@ every invocation -- including ``primus data --help``. A builder pulls in an
 autoencoder, a text encoder and an image library, so a registry that imported its
 entries eagerly would make the help text depend on the whole encoder stack being
 installed, and would let one model's missing optional dependency break every other
-model's build. That is why the entries are dotted strings, and why the test below
-checks it by watching sys.modules rather than by reading the code.
+model's build. That is why the entries are dotted strings, and why the tests below
+check it in a fresh interpreter: in this one, an earlier test may already have
+imported a builder, which would make any sys.modules check pass vacuously.
 """
 
+import argparse
+import json
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from primus.backends.automodel.data import registry
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+# What a builder pulls in, and what listing or registering must not.
+BUILDER_MODULES = (
+    "primus.backends.automodel.models.ideogram4.data.build",
+    "primus.backends.automodel.models.ideogram4.processor",
+)
+ENCODER_STACK = ("diffusers", "transformers", "PIL", "nemo_automodel")
+
+
+def imported_by(statement, baseline="import primus.backends.automodel"):
+    """The modules ``statement`` imports in a fresh interpreter, beyond those the
+    baseline already did. The baseline is the package itself, whose own imports
+    are not what is under test."""
+    code = "\n".join(
+        [
+            "import json, sys",
+            baseline,
+            "before = set(sys.modules)",
+            statement,
+            "print(json.dumps(sorted(set(sys.modules) - before)))",
+        ]
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, timeout=300
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def heavy(modules, names):
+    return [m for m in modules if any(m == n or m.startswith(n + ".") for n in names)]
+
+
+def cache_parser():
+    from primus.cli.subcommands import data as data_subcommand
+
+    parser = argparse.ArgumentParser()
+    data_subcommand.register_subcommand(parser.add_subparsers())
+    return parser
+
+
+REQUIRED_ARGS = [
+    "data",
+    "automodel-cache",
+    "--model",
+    "ideogram4",
+    "--image-dir",
+    "/images",
+    "--caption-dir",
+    "/captions",
+    "--output-dir",
+    "/cache",
+]
 
 
 class TestListing:
@@ -37,10 +97,10 @@ class TestListing:
 
     def test_listing_imports_nothing(self):
         """The property this design exists for."""
-        before = set(sys.modules)
-        registry.available_models()
-        newly_imported = set(sys.modules) - before
-        assert not [m for m in newly_imported if "ideogram4" in m]
+        modules = imported_by(
+            "from primus.backends.automodel.data import registry; registry.available_models()"
+        )
+        assert not heavy(modules, BUILDER_MODULES + ENCODER_STACK)
 
     def test_the_entries_are_strings_not_callables(self):
         for model, target in registry.CACHE_BUILDERS.items():
@@ -105,28 +165,25 @@ class TestCliWiring:
         """Registering the parser calls available_models. If that import chain ever
         reached a builder, 'primus data --help' would start requiring diffusers and
         transformers."""
-        import argparse
-
-        from primus.cli.subcommands import data as data_subcommand
-
-        parser = argparse.ArgumentParser()
-        subparsers = parser.add_subparsers()
-        data_subcommand.register_subcommand(subparsers)
-
-        parsed = parser.parse_args(
-            [
-                "data",
-                "automodel-cache",
-                "--model",
-                "ideogram4",
-                "--image-dir",
-                "/images",
-                "--caption-dir",
-                "/captions",
-                "--output-dir",
-                "/cache",
-            ]
+        modules = imported_by(
+            "import argparse\n"
+            "from primus.backends.automodel.data.cli import register_data_subcommands\n"
+            "register_data_subcommands(argparse.ArgumentParser().add_subparsers())"
         )
+        assert not heavy(modules, BUILDER_MODULES + ENCODER_STACK)
+
+    def test_the_full_data_parser_does_not_reach_a_builder(self):
+        """The whole 'primus data' parser, Megatron commands included. Those may
+        import what they need, so only the AutoModel builders are checked."""
+        modules = imported_by(
+            "import argparse\n"
+            "from primus.cli.subcommands import data\n"
+            "data.register_subcommand(argparse.ArgumentParser().add_subparsers())"
+        )
+        assert not heavy(modules, BUILDER_MODULES)
+
+    def test_the_defaults(self):
+        parsed = cache_parser().parse_args(REQUIRED_ARGS)
         assert parsed.model == "ideogram4"
         assert parsed.num_samples == 1024
         assert parsed.resolution == 256
@@ -136,62 +193,28 @@ class TestCliWiring:
     def test_the_encoder_sources_default_to_unset(self):
         """So the builder's own defaults win, rather than being overwritten by
         None coming down from argparse."""
-        import argparse
-
-        from primus.cli.subcommands import data as data_subcommand
-
-        parser = argparse.ArgumentParser()
-        subparsers = parser.add_subparsers()
-        data_subcommand.register_subcommand(subparsers)
-        parsed = parser.parse_args(
-            [
-                "data",
-                "automodel-cache",
-                "--model",
-                "ideogram4",
-                "--image-dir",
-                "/images",
-                "--caption-dir",
-                "/captions",
-                "--output-dir",
-                "/cache",
-            ]
-        )
+        parsed = cache_parser().parse_args(REQUIRED_ARGS)
         assert parsed.vae_source is None
         assert parsed.text_encoder_source is None
         assert parsed.tokenizer_source is None
 
+    @pytest.mark.parametrize("flag", ["--resolution", "--max-text-tokens"])
+    @pytest.mark.parametrize("value", ["0", "-16"])
+    def test_a_non_positive_size_is_refused_at_parse_time(self, flag, value):
+        """Before the encoders load, rather than after every image is encoded."""
+        with pytest.raises(SystemExit):
+            cache_parser().parse_args(REQUIRED_ARGS + [flag, value])
+
     def test_an_unregistered_model_is_rejected_by_argparse(self):
         """The choices come from the registry, so this is the registry deciding."""
-        import argparse
-
-        from primus.cli.subcommands import data as data_subcommand
-
-        parser = argparse.ArgumentParser()
-        subparsers = parser.add_subparsers()
-        data_subcommand.register_subcommand(subparsers)
-
+        args = list(REQUIRED_ARGS)
+        args[args.index("ideogram4")] = "flux"
         with pytest.raises(SystemExit):
-            parser.parse_args(
-                [
-                    "data",
-                    "automodel-cache",
-                    "--model",
-                    "flux",
-                    "--image-dir",
-                    "/images",
-                    "--caption-dir",
-                    "/captions",
-                    "--output-dir",
-                    "/cache",
-                ]
-            )
+            cache_parser().parse_args(args)
 
     def test_the_existing_commands_are_still_registered(self):
         """This adds a command to a parser three others share, so the check that
         it stayed additive is worth having explicitly."""
-        import argparse
-
         from primus.cli.subcommands import data as data_subcommand
 
         parser = argparse.ArgumentParser()
@@ -209,6 +232,62 @@ class TestCliWiring:
             "diffusion-ingest",
             "automodel-cache",
         } <= commands
+
+
+class TestDispatch:
+    """What the command hands the builder, with the builder replaced."""
+
+    @staticmethod
+    def dispatch(monkeypatch, extra=()):
+        from primus.backends.automodel.data import cli
+
+        received = {}
+
+        def builder(**kwargs):
+            received.update(kwargs)
+            return {
+                "num_samples": 3,
+                "in_channels": 128,
+                "grid_h": 16,
+                "grid_w": 16,
+                "llm_features_dim": 4096,
+                "skipped": {"no_caption": 1, "too_long": 2, "failed": 0},
+            }
+
+        monkeypatch.setattr(registry, "get_cache_builder", lambda model: builder)
+        args = cache_parser().parse_args(REQUIRED_ARGS + list(extra))
+        cli._prepare_automodel_cache(args)
+        return received
+
+    def test_the_arguments_reach_the_builder(self, monkeypatch):
+        received = self.dispatch(monkeypatch, ["--num-samples", "7", "--resolution", "512", "--shuffle"])
+        assert received["image_dir"] == "/images"
+        assert received["caption_dir"] == "/captions"
+        assert received["output_dir"] == "/cache"
+        assert received["num_samples"] == 7
+        assert received["resolution"] == 512
+        assert received["max_text_tokens"] == 128
+        assert received["shuffle"] is True
+
+    def test_unset_sources_are_left_to_the_builder(self, monkeypatch):
+        received = self.dispatch(monkeypatch)
+        assert not {"vae_source", "text_encoder_source", "tokenizer_source"} & set(received)
+
+    def test_set_sources_are_passed(self, monkeypatch):
+        received = self.dispatch(
+            monkeypatch,
+            ["--vae-source", "/vae", "--text-encoder-source", "/te", "--tokenizer-source", "/tok"],
+        )
+        assert (received["vae_source"], received["text_encoder_source"], received["tokenizer_source"]) == (
+            "/vae",
+            "/te",
+            "/tok",
+        )
+
+    def test_the_skip_counts_are_reported(self, monkeypatch, caplog):
+        with caplog.at_level("INFO"):
+            self.dispatch(monkeypatch)
+        assert any("2 over the token budget" in r.getMessage() for r in caplog.records)
 
 
 if __name__ == "__main__":
