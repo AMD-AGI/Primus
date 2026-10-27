@@ -1,0 +1,69 @@
+###############################################################################
+# Muse Spark (muse_spark) base: text decoder of meta-models/Muse-Spark-Open-816B-A42B.
+#
+# GQA transformer with gated attention (weightless QK-norm, o_norm, sigmoid gate),
+# sliding-window / NoPE layer pattern, sandwich norms with learned residual gates,
+# latent sigmoid MoE, soft-capped untied head.
+# Model code: primus/backends/megatron/core/models/muse_spark/.
+###############################################################################
+
+extends:
+  - llama_base.yaml
+
+model_type: muse_spark
+
+tokenizer_type: HuggingFaceTokenizer
+normalization: RMSNorm
+norm_epsilon: 1.0e-05
+layernorm_epsilon: 1.0e-05
+swiglu: true
+add_bias_linear: false
+add_qkv_bias: false
+untie_embeddings_and_output_weights: true
+bias_swiglu_fusion: false
+
+# ---- attention ----
+group_query_attention: true
+qk_layernorm: true                 # weightless per-head RMSNorm (MuseSparkQKNorm)
+attention_output_gate: true
+position_embedding_type: rope
+rotary_percent: 1.0
+rotary_interleaved: false
+apply_rope_fusion: false
+qk_scale_factor: 5.4730064863875   # softmax_scale = qk_scale_factor / sqrt(kv_channels)
+window_size: [2048, 0]             # HF sliding_window (keys incl. the query); the config passes 2047 to TE
+# per layer, 1 = sliding window / 1 = NoPE; pattern of 4: [sliding, full(NoPE), sliding, sliding]
+window_attn_skip_freq: "([1,0,1,1]*16)"
+no_rope_freq: "([0,1,0,0]*16)"
+
+# ---- residual / norms ----
+post_norm_eps: 1.0e-08
+residual_gate_temperature: 0.3
+embedding_norm: true
+
+# ---- head ----
+output_logit_multiplier: 0.17677669529663687
+final_logit_softcapping: 20.0
+
+# ---- MoE (latent, sigmoid, selection bias) ----
+moe_layer_freq: 1
+moe_latent_size: null            # HF moe_hidden_size; set by the size preset
+moe_router_score_function: sigmoid
+moe_router_pre_softmax: false
+moe_router_enable_expert_bias: true
+moe_router_bias_update_rate: 1.0e-3
+moe_router_topk_scaling_factor: 1.0
+moe_router_output_multiplier: 0.17677669529663687
+moe_router_load_balancing_type: none
+moe_aux_loss_coeff: 0.0
+moe_router_dtype: fp32
+moe_token_dispatcher_type: alltoall
+moe_grouped_gemm: true
+moe_use_legacy_grouped_gemm: false
+moe_permute_fusion: false
+moe_shared_expert_overlap: false
+moe_shared_expert_intermediate_size: null
+
+mtp_num_layers: null
+expert_model_parallel_size: 1
+expert_tensor_parallel_size: 1     # post_expert_norm needs the full expert output row

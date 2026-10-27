@@ -1,0 +1,25 @@
+###############################################################################
+# Muse-Spark-Open-816B-A42B (text decoder): 62 layers, 256 experts top-8.
+###############################################################################
+
+extends:
+  - muse_spark_base.yaml
+
+tokenizer_model: meta-models/Muse-Spark-Open-816B-A42B
+vocab_size: 202048
+
+num_layers: 62
+hidden_size: 8192
+ffn_hidden_size: 16384
+num_attention_heads: 128
+num_query_groups: 16
+kv_channels: 64
+max_position_embeddings: 1048576
+rotary_base: 500000
+
+num_experts: 256
+moe_router_topk: 8
+moe_ffn_hidden_size: 4096
+moe_latent_size: 4096
+
+init_method_std: 0.02

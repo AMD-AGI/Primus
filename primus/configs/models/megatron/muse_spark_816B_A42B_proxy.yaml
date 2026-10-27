@@ -1,0 +1,10 @@
+###############################################################################
+# Muse-Spark-Open-816B-A42B cut to its first MUSE_SPARK_NUM_LAYERS layers (proxy /
+# smoke tests). Layer i is the released layer i, so the HF checkpoint loads unchanged;
+# the per-layer window / NoPE patterns are cut to num_layers by the config.
+###############################################################################
+
+extends:
+  - muse_Spark_Open_816B_A42B.yaml
+
+num_layers: ${MUSE_SPARK_NUM_LAYERS:4}
