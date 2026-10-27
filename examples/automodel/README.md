@@ -85,7 +85,7 @@ off by default, and the module that implements it documents its remaining keys.
 | `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend, or with Ideogram-4's variable-length attention. |
 | `primus_ideogram4.varlen_attention` | Ideogram-4 variable-length packed attention. Its backward is non-deterministic: the deterministic kernel needs far more memory at image-sized sequences. |
 | `primus_ideogram4.ac_every: n` | Ideogram-4: checkpoint every nth block instead of all |
-| `primus_ideogram4.zero1` | ZeRO-1 optimizer sharding on the DDP path. Incompatible with `checkpoint.enabled`; tested on a single node only. |
+| `primus_ideogram4.zero1` | ZeRO-1 optimizer sharding on the DDP path. A ZeRO-1 run cannot save or resume: model checkpoint saving (`checkpoint.enabled`, which defaults to true) must be set to false, or the optimizer build raises. Single-rank and FSDP2 runs keep the plain optimizer, with a warning. Tested on a single node only. |
 
 ## Ideogram-4 setup
 
