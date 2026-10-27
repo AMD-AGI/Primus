@@ -66,7 +66,10 @@ from primus.backends.automodel.models.ideogram4._varlen_common import (
     precompute_cu_seqlens_active,
     precompute_cu_seqlens_enabled,
 )
-from primus.backends.automodel.models.ideogram4.packing_buffer import resolve_packing
+from primus.backends.automodel.models.ideogram4.packing_buffer import (
+    TOKENS_ATTR,
+    resolve_packing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +90,6 @@ def _warn_once(key: str, msg: str) -> None:
         logger.warning(msg)
 
 
-# Read on the hot path as a plain global, so once the warn-only warning has been
-# given Dynamo guards on it and stops calling the helper below.
 _deterministic_warned = False
 
 
@@ -96,11 +97,12 @@ _deterministic_warned = False
 def _check_deterministic_mode() -> None:
     """Treat the var-len kernels as torch treats its own non-deterministic ops.
 
-    Called only when deterministic mode is on. Strict mode raises; ``warn_only``
-    warns once and lets the call run. Kept out of the compiled graph because
-    Dynamo folds ``are_deterministic_algorithms_enabled`` into a guarded constant
-    but not the warn-only query. Once the warning has been given, a later switch
-    to strict mode in the same process is not checked again.
+    Called on every call while deterministic mode is on, so a switch from
+    ``warn_only`` to strict mode later in the same process still raises. Strict
+    mode raises; ``warn_only`` warns once and lets the call run. Kept out of the
+    compiled graph because Dynamo folds ``are_deterministic_algorithms_enabled``
+    into a guarded constant but not the warn-only query, so the cost is one graph
+    break per layer, paid only while deterministic mode is on.
     """
     global _deterministic_warned
     reason = (
@@ -111,6 +113,8 @@ def _check_deterministic_mode() -> None:
     )
     if not torch.is_deterministic_algorithms_warn_only_enabled():
         raise RuntimeError(f"torch.use_deterministic_algorithms(True) is set, but {reason}")
+    if _deterministic_warned:
+        return
     _deterministic_warned = True
     logger.warning(
         "[PrimusIdeogramVarlen] torch.use_deterministic_algorithms(True, warn_only=True) is "
@@ -151,6 +155,7 @@ class Ideogram4VarlenAttnProcessor:
         # kwargs against this signature, so naming them is what would let a kwargs
         # route work at all -- a **kwargs-only processor would silently receive
         # nothing. An explicit argument wins over the buffer.
+        packed_tokens = None if cu_seqlens is not None else getattr(attn, TOKENS_ATTR, None)
         cu_seqlens, max_seqlen = resolve_packing(attn, cu_seqlens, max_seqlen)
 
         query = attn.to_q(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
@@ -166,7 +171,7 @@ class Ideogram4VarlenAttnProcessor:
         query = (query * cos) + (_rotate_half(query) * sin)
         key = (key * cos) + (_rotate_half(key) * sin)
 
-        out = self._attention(query, key, value, attention_mask, cu_seqlens, max_seqlen)
+        out = self._attention(query, key, value, attention_mask, cu_seqlens, max_seqlen, packed_tokens)
         return attn.to_out[0](out.flatten(2, 3))
 
     def _attention(
@@ -177,6 +182,7 @@ class Ideogram4VarlenAttnProcessor:
         attention_mask: Optional[Tensor],
         cu_seqlens: Optional[Tensor] = None,
         max_seqlen: Optional[int] = None,
+        packed_tokens: Optional[int] = None,
     ) -> Tensor:
         batch, length, heads, head_dim = query.shape
 
@@ -204,7 +210,7 @@ class Ideogram4VarlenAttnProcessor:
 
         # The fallback above follows torch's rules inside diffusers' dispatch; every
         # path below calls a Primus-Turbo flash kernel, so the check sits here.
-        if torch.are_deterministic_algorithms_enabled() and not _deterministic_warned:
+        if torch.are_deterministic_algorithms_enabled():
             _check_deterministic_mode()
 
         # MRoPE multiplies q and k by a float32 cos/sin, which promotes them to
@@ -222,12 +228,13 @@ class Ideogram4VarlenAttnProcessor:
             # deliberately not consulted: the model still materializes it, and on this
             # path it is dead weight.
             #
-            # The guard below compares only static shape metadata, so it costs a guard
-            # and no host synchronization. The buffer outlives the step that published
-            # it, so a caller that bypasses the adapter, such as a sampling pass or an
-            # eval loop, would read a stale packing. The guard turns that into an error
-            # only when the batch size differs; at the same batch size the caller has
-            # to call packing_buffer.clear_packing(model) first.
+            # The guards below compare static shapes with host integers, so they cost
+            # a guard and no host synchronization. The buffer outlives the step that
+            # published it, so a caller that bypasses the adapter, such as a sampling
+            # pass or an eval loop, would read a stale packing. The guards turn that
+            # into an error when the batch size or the sequence length differs; for
+            # the same shape the caller has to call packing_buffer.clear_packing(model)
+            # first.
             expected = 2 * batch + 1
             if cu_seqlens.numel() != expected:
                 raise ValueError(
@@ -237,6 +244,14 @@ class Ideogram4VarlenAttnProcessor:
                     "packing_buffer.clear_packing(model) before running the model outside "
                     "the adapter -- or the sequence layout no longer has exactly two "
                     "segments per row, in which case this check needs updating with it."
+                )
+            if packed_tokens is not None and packed_tokens != batch * length:
+                raise ValueError(
+                    f"the published packing covers {packed_tokens} tokens but this batch has "
+                    f"{batch * length} ({batch} rows of {length}). The packing was published "
+                    "for a different sequence length -- another resolution or text width -- "
+                    "and is now stale; call packing_buffer.clear_packing(model) before "
+                    "running the model outside the adapter."
                 )
 
             # The packing is passed as-is: varlen_flash_attention clones it before the

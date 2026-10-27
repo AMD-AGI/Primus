@@ -8,8 +8,8 @@
 WHY:
   Pure DDP replicates parameters and gradients, so there is no per-layer
   all-gather -- but it also replicates the optimizer state, which for AdamW is
-  two more float32 copies of the parameters. ZeRO-1 shards only that state across
-  the data-parallel ranks, keeping DDP's compute profile.
+  two more copies of the parameters, in the parameters' dtype. ZeRO-1 shards only
+  that state across the data-parallel ranks, keeping DDP's compute profile.
 
   Per-layer compilation is wired only into the FSDP2 path, so on a single node
   DDP with ZeRO-1 gives up compilation for collectives that were a small part of
@@ -48,9 +48,22 @@ def is_zero1_enabled() -> bool:
     return options.flag("primus_ideogram4.zero1")
 
 
+def _dtensor_class():
+    """torch's DTensor, or None on a torch without one."""
+    try:
+        from torch.distributed.tensor import DTensor
+    except ImportError:
+        try:
+            from torch.distributed._tensor import DTensor
+        except ImportError:
+            return None
+    return DTensor
+
+
 def _params_are_dtensor(params) -> bool:
     """Whether these parameters are already sharded, i.e. this is an FSDP run."""
-    return any(type(p).__name__ == "DTensor" or hasattr(p, "_local_tensor") for p in params)
+    dtensor = _dtensor_class()
+    return dtensor is not None and any(isinstance(p, dtensor) for p in params)
 
 
 def _constructor_defaults(optimizer_cls, defaults):
@@ -99,7 +112,10 @@ def _wrap_in_zero1(base):
     run out of memory or quietly use the replicated optimizer state this was turned
     on to avoid.
     """
-    if type(base).__name__ == "ZeroRedundancyOptimizer":
+    import torch.distributed as dist
+    from torch.distributed.optim import ZeroRedundancyOptimizer
+
+    if isinstance(base, ZeroRedundancyOptimizer):
         # A subclass build() that chains to super() would otherwise double-wrap.
         return base
 
@@ -112,9 +128,6 @@ def _wrap_in_zero1(base):
             _LOG_PREFIX,
         )
         return base
-
-    import torch.distributed as dist
-    from torch.distributed.optim import ZeroRedundancyOptimizer
 
     if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() == 1:
         logger.warning(
@@ -132,20 +145,19 @@ def _wrap_in_zero1(base):
         )
 
     optimizer_cls = type(base)
-    defaults = dict(base.defaults)
-    learning_rate = defaults.pop("lr", None)
 
     optimizer = ZeroRedundancyOptimizer(
         # The groups, not a flat list: AutoModel's param_group_overrides (lr_mult,
         # wd_mult) live in them.
         [dict(group) for group in base.param_groups],
         optimizer_class=optimizer_cls,
-        lr=learning_rate,
         # The overlapping mode ties the optimizer step to DDP's gradient buckets
         # and does not support changing the learning rate after construction,
         # which every schedule here does.
         overlap_with_ddp=False,
-        **_constructor_defaults(optimizer_cls, defaults),
+        # lr included, and only when the optimizer has one: ZeRO forwards these to
+        # the per-rank optimizer, so an absent lr must not become lr=None.
+        **_constructor_defaults(optimizer_cls, dict(base.defaults)),
     )
     logger.info(
         "%s wrapped %s in ZeroRedundancyOptimizer across %d ranks; the optimizer "
@@ -187,33 +199,59 @@ def _optimizer_config_classes():
     return found
 
 
+def _patch_build(cls) -> None:
+    """Wrap ``cls``'s own ``build``, once."""
+    original = vars(cls)["build"]
+    if getattr(original, "_primus_zero1_patched", False):
+        return
+
+    @functools.wraps(original)
+    def build(self, *args, **kwargs):
+        optimizers = original(self, *args, **kwargs)
+        # Re-checked at call time rather than captured at install time, so the
+        # patch is inert if the switch is turned off between the two.
+        if not is_zero1_enabled():
+            return optimizers
+        return [_wrap_in_zero1(opt) for opt in optimizers]
+
+    build._primus_zero1_patched = True
+    cls.build = build
+
+
+def _patch_later_subclasses(base) -> None:
+    """Patch the ``build`` of every subclass of ``base`` defined from now on.
+
+    The walk sees only the classes that exist at install time; one defined later,
+    by a module imported lazily during setup, would otherwise keep a build that
+    never shards -- the same silent failure the walk is there to prevent.
+    """
+    if vars(base).get("_primus_zero1_subclass_hook", False):
+        return
+    previous = vars(base).get("__init_subclass__")
+
+    def __init_subclass__(cls, **kwargs):
+        if previous is not None:
+            previous.__func__(cls, **kwargs)
+        else:
+            super(base, cls).__init_subclass__(**kwargs)
+        if "build" in vars(cls):
+            _patch_build(cls)
+
+    base.__init_subclass__ = classmethod(__init_subclass__)
+    base._primus_zero1_subclass_hook = True
+
+
 def _install_optimizer_patch() -> bool:
     """Wrap every optimizer the recipe builds."""
-    patched = []
-    for cls in _optimizer_config_classes():
-        existing = vars(cls)["build"]
-        if getattr(existing, "_primus_zero1_patched", False):
-            patched.append(cls.__name__)
-            continue
+    from nemo_automodel.components.optim.optimizer import OptimizerConfig
 
-        def _wrap(original):
-            @functools.wraps(original)
-            def build(self, *args, **kwargs):
-                optimizers = original(self, *args, **kwargs)
-                # Re-checked at call time rather than captured at install time, so
-                # the patch is inert if the switch is turned off between the two.
-                if not is_zero1_enabled():
-                    return optimizers
-                return [_wrap_in_zero1(opt) for opt in optimizers]
+    classes = _optimizer_config_classes()
+    for cls in classes:
+        _patch_build(cls)
+    _patch_later_subclasses(OptimizerConfig)
 
-            build._primus_zero1_patched = True
-            return build
-
-        cls.build = _wrap(existing)
-        patched.append(cls.__name__)
-
-    logger.info("%s optimizer sharding installed on %s", _LOG_PREFIX, patched)
-    return bool(patched)
+    logger.info("%s optimizer sharding installed on %s", _LOG_PREFIX, [cls.__name__ for cls in classes])
+    return bool(classes)
 
 
 def install(checkpoint_enabled: bool = True) -> bool:
@@ -226,7 +264,9 @@ def install(checkpoint_enabled: bool = True) -> bool:
     wherever ZeRO-1 would apply.
     """
     global _checkpointing_enabled
+    # Recorded on every call, so a later run in the same process does not inherit
+    # an earlier run's setting.
+    _checkpointing_enabled = bool(checkpoint_enabled)
     if not is_zero1_enabled():
         return False
-    _checkpointing_enabled = bool(checkpoint_enabled)
     return _install_optimizer_patch()

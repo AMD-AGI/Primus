@@ -85,7 +85,7 @@ off by default, and the module that implements it documents its remaining keys.
 | `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend, or with Ideogram-4's variable-length attention. |
 | `primus_ideogram4.varlen_attention` | Ideogram-4 variable-length packed attention. Its backward is non-deterministic: the deterministic kernel needs far more memory at image-sized sequences. |
 | `primus_ideogram4.ac_every: n` | Ideogram-4: checkpoint every nth block instead of all |
-| `primus_ideogram4.zero1` | ZeRO-1 optimizer sharding on the DDP path. Incompatible with `checkpoint.enabled`; tested on a single node only. |
+| `primus_ideogram4.zero1` | ZeRO-1 optimizer sharding on the DDP path. A ZeRO-1 run cannot save or resume: model checkpoint saving (`checkpoint.enabled`, which defaults to true) must be set to false, or the optimizer build raises. Single-rank and FSDP2 runs keep the plain optimizer, with a warning. Tested on a single node only. |
 
 ## Ideogram-4 setup
 
@@ -102,9 +102,11 @@ python tools/automodel/make_ideogram4_config_dir.py --out <config_dir>
 ```
 
 Then launch with `model.pretrained_model_name_or_path=<config_dir>`. The cache
-experiment also needs an encoded cache, built once on a single GPU. The default
-encoders (Qwen3-VL-8B-Instruct and the Ideogram-4 autoencoder) are public.
-FLUX.1-dev, used by the FLUX experiment, is the gated one.
+experiment also needs an encoded cache, built once on a single GPU. The text
+encoder (Qwen3-VL-8B-Instruct) is public. The autoencoder is read from
+`ideogram-ai/ideogram-4-nf4-diffusers`, which is gated on Hugging Face: accept
+its terms and set `HF_TOKEN` for the build, or pass `--vae-source` a local copy.
+Training reads only the cache and needs neither.
 
 ```bash
 bash ./runner/primus-cli direct --single -- data automodel-cache --model ideogram4 \
@@ -113,9 +115,30 @@ bash ./runner/primus-cli direct --single -- data automodel-cache --model ideogra
 ```
 
 A caption longer than `--max-text-tokens` is skipped, not truncated, and the
-skip counts are printed at the end. The default is 128, which drops most long
-prompts; raise it before treating a small cache as the whole dataset.
+skip counts are printed at the end and recorded in the cache's `metadata.json`.
+The budget counts the chat-templated tokens the text encoder sees, not only the
+caption's own. The default is 128, which drops most long prompts; raise it
+before treating a small cache as the whole dataset. A rebuild into the same
+`--output-dir` replaces the cache there.
+
+Then launch with `data.dataloader.cache_dir=/path/to/cache` as well.
+
 Use `ideogram4-pretrain-cache.yaml` for FSDP2, or `ideogram4-pretrain-ddp-cache.yaml` for the DDP/ZeRO-1 path.
+
+The presets train on the stock attention path. The variable-length attention
+processor is opt-in, because its backward is non-deterministic and it needs
+Primus-Turbo. To enable it, and the per-layer compilation it is designed for,
+add to the experiment's `overrides:`
+
+```yaml
+primus_ideogram4:
+  varlen_attention: true
+  # precompute_cu_seqlens: true   (the default) the adapter builds the packing on
+  #                               the host; false falls back to deriving it from
+  #                               the mask in every layer, for A/B comparison only
+fsdp:
+  enable_compile: true
+```
 
 Context parallelism (`fsdp.cp_size` above 1) is available on the FSDP2 path. The
 degree has to divide both the world size and the attention head count, and it

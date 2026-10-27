@@ -4,14 +4,17 @@
 # Build the cache as documented in ideogram4-pretrain-cache.yaml, then replace
 # the cache_dir placeholder below. Turn zero1 off for the pure-DDP control.
 #
-# ZeRO-1 and checkpoint saving are mutually exclusive on this path. Disable
-# ZeRO-1 before enabling checkpointing.
+# ZeRO-1 and checkpoint saving are mutually exclusive on this path: a ZeRO-1 run
+# cannot save or resume. Disable ZeRO-1 before enabling checkpointing.
+#
+# The batch sizes are for 8 ranks; see ideogram4-pretrain-ddp.yaml for scaling.
 #
 # LAUNCH (inside the Primus container, 8 GPUs):
 #   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
 #   GPUS_PER_NODE=8 \
 #   bash ./runner/primus-cli direct -- train pretrain \
-#       --config examples/automodel/configs/MI355X/diffusion/ideogram4-pretrain-ddp-cache.yaml
+#       --config examples/automodel/configs/MI355X/diffusion/ideogram4-pretrain-ddp-cache.yaml \
+#       model.pretrained_model_name_or_path=<config_dir> data.dataloader.cache_dir=/path/to/cache
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:ideogram4-pretrain-ddp-cache}
@@ -32,7 +35,7 @@ modules:
         global_batch_size: 16
         log_remote_every_steps: 1
       model:
-        # Matches the verified cache run and lowers replicated DDP memory.
+        # Pure bf16, no float32 master copy, as in ideogram4-pretrain-ddp.yaml.
         torch_dtype: bfloat16
       data:
         dataloader:

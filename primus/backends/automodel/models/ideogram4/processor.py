@@ -119,7 +119,9 @@ class Ideogram4Processor:
         self.vae = vae.to(self.device).eval()
 
         # The statistics live on the packed channel space; see the module docstring.
-        eps = float(getattr(vae.config, "batch_norm_eps", 1e-5))
+        # The epsilon is the norm layer's own, which is what its statistics were
+        # computed against.
+        eps = float(getattr(vae.bn, "eps", getattr(vae.config, "batch_norm_eps", 1e-5)))
         self.norm_mean = vae.bn.running_mean.detach().view(1, 1, 1, -1).float().to(self.device)
         self.norm_std = (
             torch.sqrt(vae.bn.running_var.detach() + eps).view(1, 1, 1, -1).float().to(self.device)
@@ -129,7 +131,13 @@ class Ideogram4Processor:
         # an autoencoder with a different channel count would otherwise be packed
         # wrong, and nothing downstream decodes an image to notice.
         packed_channels = int(self.norm_mean.shape[-1])
-        latent_channels = int(getattr(vae.config, "latent_channels", packed_channels // 4))
+        latent_channels = getattr(vae.config, "latent_channels", None)
+        if not latent_channels:
+            raise ValueError(
+                "the autoencoder config has no latent_channels, so the patch size cannot be "
+                "derived; this is not the autoencoder the packing was written for"
+            )
+        latent_channels = int(latent_channels)
         self.patch_size = int(round((packed_channels / latent_channels) ** 0.5))
         if latent_channels * self.patch_size**2 != packed_channels:
             raise ValueError(
@@ -183,10 +191,15 @@ class Ideogram4Processor:
     def encode_image(self, image_tensor: torch.Tensor) -> torch.Tensor:
         """Encode, pack into 2x2 patches, and normalize. Returns ``[C, gh, gw]``.
 
+        Takes ONE image, ``[1, 3, H, W]`` as :meth:`preprocess_image` returns it;
+        a cache entry is one sample.
+
         The permutation is the inverse of the pipeline's decode reshape: raw
         channel ``c`` of sub-position ``(pa, pb)`` in patch ``(i, j)`` becomes
         packed channel ``((pa * patch) + pb) * channels + c`` of token ``(i, j)``.
         """
+        if image_tensor.ndim != 4 or image_tensor.shape[0] != 1:
+            raise ValueError(f"encode_image takes one image, [1, 3, H, W]; got {tuple(image_tensor.shape)}")
         patch = self.patch_size
         x = image_tensor.to(self.device, dtype=self.dtype)
         raw = self.vae.encode(x).latent_dist.mode().float()
@@ -259,6 +272,9 @@ class Ideogram4Processor:
                 past_key_values=None,
                 position_embeddings=position_embeddings,
             )
+            # The pinned transformers returns the tensor; 4.x returned a tuple.
+            if isinstance(hidden_states, tuple):
+                hidden_states = hidden_states[0]
             if index in wanted:
                 captured[index] = hidden_states
             if index == highest:
@@ -266,6 +282,20 @@ class Ideogram4Processor:
                 break
 
         return [captured[i] for i in ACTIVATION_LAYERS]
+
+    def _tokenize(self, prompt: str) -> torch.Tensor:
+        """The chat-templated token ids the text encoder sees, for one caption."""
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        templated = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        return self.tokenizer(templated, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+
+    def count_text_tokens(self, prompt: str) -> int:
+        """Tokens a caption occupies, chat template included, without encoding it.
+
+        This is the count the token budget is compared against, so a caller can
+        drop an over-long caption before paying for either encoder.
+        """
+        return int(self._tokenize(prompt).shape[0])
 
     @torch.no_grad()
     def encode_text(self, prompt: str, max_text_tokens: int) -> Optional[Dict[str, Any]]:
@@ -278,9 +308,7 @@ class Ideogram4Processor:
         No padding is applied. Exactly the real tokens are tapped and stored; the
         dataloader left-pads to a constant width later.
         """
-        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-        templated = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        tokens = self.tokenizer(templated, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+        tokens = self._tokenize(prompt)
         length = int(tokens.shape[0])
         if length == 0 or length > max_text_tokens:
             return None
@@ -294,6 +322,13 @@ class Ideogram4Processor:
         # is the order the model's input projection expects.
         features = torch.stack(tapped, dim=0).permute(1, 2, 3, 0).reshape(1, length, -1)
         features = features.squeeze(0).to(torch.float16).detach().cpu()
+        # Stored as fp16 to halve the cache. A value past fp16's range would become
+        # inf and train silently on it, so such a caption is refused instead.
+        if not torch.isfinite(features).all():
+            raise ValueError(
+                "the text features overflow float16 for this caption, so it cannot be "
+                "stored without corrupting it"
+            )
         return {"llm_features": features, "text_length": length}
 
     # --------------------------------------------------------------------- cache

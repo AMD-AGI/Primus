@@ -45,10 +45,18 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import torch
-from nemo_automodel.components.datasets.diffusion.loader import DiffusionDataloaderBuild
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 logger = logging.getLogger(__name__)
+
+
+def _dataloader_build(**kwargs):
+    """AutoModel's build result, imported here so the module loads without AutoModel."""
+    from nemo_automodel.components.datasets.diffusion.loader import (
+        DiffusionDataloaderBuild,
+    )
+
+    return DiffusionDataloaderBuild(**kwargs)
 
 
 class SyntheticIdeogram4Dataset(Dataset):
@@ -74,12 +82,30 @@ class SyntheticIdeogram4Dataset(Dataset):
         cache_in_memory: bool = False,
         share_text_features: bool = False,
     ) -> None:
-        self.num_samples = max(int(num_samples), 1)
+        sizes = {
+            "num_samples": num_samples,
+            "in_channels": in_channels,
+            "grid_h": grid_h,
+            "grid_w": grid_w,
+            "max_text_tokens": max_text_tokens,
+            "min_text_tokens": min_text_tokens,
+            "llm_features_dim": llm_features_dim,
+        }
+        for name, value in sizes.items():
+            if int(value) < 1:
+                raise ValueError(f"{name} must be at least 1, got {value}")
+        if int(min_text_tokens) > int(max_text_tokens):
+            raise ValueError(
+                f"min_text_tokens ({min_text_tokens}) is above max_text_tokens "
+                f"({max_text_tokens}); every caption would get the same length and the "
+                "batches would not be ragged"
+            )
+        self.num_samples = int(num_samples)
         self.in_channels = int(in_channels)
         self.grid_h = int(grid_h)
         self.grid_w = int(grid_w)
         self.max_text_tokens = int(max_text_tokens)
-        self.min_text_tokens = max(1, min(int(min_text_tokens), self.max_text_tokens))
+        self.min_text_tokens = int(min_text_tokens)
         self.llm_features_dim = int(llm_features_dim)
         self.feature_scale = float(feature_scale)
         self.latent_scale = float(latent_scale)
@@ -107,9 +133,15 @@ class SyntheticIdeogram4Dataset(Dataset):
             generator=generator,
         )
 
-        # The full text width is generated. Positions in the padding region are
-        # excluded by the adapter's segment ids, so only the real-text region is
-        # ever attended; generating them keeps the shape contract simple.
+        # Deterministic per-sample length, cycling through the configured range, so
+        # a batch is ragged in the way real captions are.
+        span = self.max_text_tokens - self.min_text_tokens + 1
+        text_length = self.min_text_tokens + (int(idx) % span)
+
+        # The full text width is generated, then the left-pad region is zeroed, as
+        # the cache loader leaves it. The adapter's segment ids exclude that region
+        # either way. A shared buffer is handed back unzeroed, since the point of
+        # sharing it is to do no per-sample work.
         if self.share_text_features:
             if self._shared_features is None:
                 shared = torch.Generator().manual_seed(self.seed)
@@ -127,11 +159,7 @@ class SyntheticIdeogram4Dataset(Dataset):
                 dtype=torch.float32,
                 generator=generator,
             )
-
-        # Deterministic per-sample length, cycling through the configured range, so
-        # a batch is ragged in the way real captions are.
-        span = self.max_text_tokens - self.min_text_tokens + 1
-        text_length = self.min_text_tokens + (int(idx) % span)
+            llm_features[: self.max_text_tokens - text_length] = 0
 
         sample = {
             "image_latents": image_latents,
@@ -179,7 +207,8 @@ class SyntheticIdeogram4DataloaderConfig:
     latent_scale: float = 1.0
     seed: int = 1234
     shuffle: bool = True
-    drop_last: bool = False
+    # A short final batch changes the packing's shape (2B+1 entries) and recompiles.
+    drop_last: bool = True
     num_workers: int = 0
     pin_memory: bool = True
 
@@ -195,7 +224,7 @@ class SyntheticIdeogram4DataloaderConfig:
     # not reading the loss.
     share_text_features: bool = False
 
-    def build(self, *, dp_rank: int, dp_world_size: int, batch_size: int) -> DiffusionDataloaderBuild:
+    def build(self, *, dp_rank: int, dp_world_size: int, batch_size: int):
         dataset = SyntheticIdeogram4Dataset(
             num_samples=self.num_samples,
             in_channels=self.in_channels,
@@ -231,6 +260,13 @@ class SyntheticIdeogram4DataloaderConfig:
             pin_memory=self.pin_memory,
             drop_last=self.drop_last,
         )
+        if len(dataloader) == 0:
+            raise ValueError(
+                f"the synthetic loader gives rank {dp_rank} no batch: {len(dataset)} samples "
+                f"over {dp_world_size} rank(s) at batch size {batch_size} with "
+                f"drop_last={self.drop_last}. Raise num_samples to at least "
+                f"{dp_world_size * batch_size}."
+            )
         logger.info(
             "[SyntheticIdeogram4] %d samples, channels=%d grid=%dx%d text=%d-%d "
             "features=%d (rank %d/%d, batch %d, %d batches per rank)",
@@ -238,8 +274,8 @@ class SyntheticIdeogram4DataloaderConfig:
             self.in_channels,
             self.grid_h,
             self.grid_w,
-            self.min_text_tokens,
-            self.max_text_tokens,
+            dataset.min_text_tokens,
+            dataset.max_text_tokens,
             self.llm_features_dim,
             dp_rank,
             dp_world_size,
@@ -252,4 +288,4 @@ class SyntheticIdeogram4DataloaderConfig:
                 "identical conditioning. The overfit loss-decrease signal is not "
                 "meaningful in this configuration."
             )
-        return DiffusionDataloaderBuild(dataloader=dataloader, sampler=sampler)
+        return _dataloader_build(dataloader=dataloader, sampler=sampler)

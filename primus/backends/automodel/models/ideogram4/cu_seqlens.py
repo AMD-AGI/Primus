@@ -69,8 +69,8 @@ def build_cu_seqlens(
         starts from 0 to ``B * S``, which is the varlen kernel's contract.
 
     Raises:
-        ValueError: if any row has no padding, since that breaks the fixed segment
-            count the whole design rests on.
+        ValueError: if any row has a negative length, or no padding, since that
+            breaks the fixed segment count the whole design rests on.
     """
     if max_text_tokens <= 0:
         raise ValueError(f"max_text_tokens must be positive, got {max_text_tokens}")
@@ -82,6 +82,8 @@ def build_cu_seqlens(
     seq_len = max_text_tokens + num_image_tokens
     starts: List[int] = []
     for row, num_text in enumerate(text_lengths):
+        if int(num_text) < 0:
+            raise ValueError(f"row {row} has a negative text_length ({int(num_text)})")
         offset = max_text_tokens - int(num_text)
         if offset < 1:
             raise ValueError(

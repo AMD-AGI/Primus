@@ -25,7 +25,13 @@ shuffle instead, which is still reproducible but no longer order-independent.
 A caption that does not fit the token budget is DROPPED, not truncated. The
 dataloader derives its text width from the longest caption in the cache, so a
 truncated caption would silently become the training signal for its image; a
-missing one is visible in the skip counts this reports.
+missing one is visible in the skip counts this reports and records. The budget
+counts the chat-templated tokens the text encoder sees, which is more than the
+caption's own.
+
+A REBUILD REPLACES the previous cache in the same directory: its index is removed
+and its sample files deleted, but only once the encoders have loaded, so a run
+that fails before encoding anything leaves the old cache intact.
 
 Reached from the command line as ``primus-cli direct --single -- data automodel-cache --model ideogram4``.
 """
@@ -33,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import time
 from pathlib import Path
@@ -45,6 +52,23 @@ logger = logging.getLogger(__name__)
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 
 DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+
+# The autoencoder downsamples 8x and the model packs 2x2 latent patches.
+RESOLUTION_MULTIPLE = 16
+
+# One unreadable image is skipped; this many in a row means something systemic
+# (a device error, a wrong autoencoder) that would fail every image after it.
+MAX_CONSECUTIVE_FAILURES = 8
+
+
+def _write_metadata(output_root: Path, metadata: Dict[str, Any]) -> None:
+    """Write the index atomically: a reader sees the old file, the new one, or none."""
+    partial = output_root / "metadata.json.partial"
+    with open(partial, "w") as handle:
+        json.dump(metadata, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(partial, output_root / "metadata.json")
 
 
 def build_cache(
@@ -76,6 +100,16 @@ def build_cache(
         raise ValueError(f"dtype must be one of {sorted(DTYPES)}, got {dtype!r}")
     if num_samples < 1:
         raise ValueError(f"num_samples must be at least 1, got {num_samples}")
+    if max_text_tokens < 1:
+        raise ValueError(
+            f"max_text_tokens must be at least 1, got {max_text_tokens}; it is the "
+            "chat-templated token budget a caption has to fit"
+        )
+    if resolution < RESOLUTION_MULTIPLE or resolution % RESOLUTION_MULTIPLE:
+        raise ValueError(
+            f"resolution must be a positive multiple of {RESOLUTION_MULTIPLE} (the "
+            f"autoencoder's 8x downsampling times the 2x2 patch), got {resolution}"
+        )
 
     image_root = Path(image_dir)
     caption_root = Path(caption_dir)
@@ -91,34 +125,36 @@ def build_cache(
         random.Random(seed).shuffle(images)
     logger.info("Found %d images in %s", len(images), image_root)
 
-    # Only create the output directory once the inputs are known to be usable, so a
-    # failed invocation does not leave an empty cache behind that looks like a
-    # partial success.
-    (output_root / "samples").mkdir(parents=True, exist_ok=True)
-    # A rebuild into the same directory overwrites samples/<i>.pt in place, so an
-    # index left by an earlier build would describe them until this one finishes.
-    (output_root / "metadata.json").unlink(missing_ok=True)
-
-    processor_kwargs: Dict[str, Any] = {
-        "tokenizer_source": tokenizer_source,
-        "device": device,
-        "dtype": DTYPES[dtype],
-    }
+    processor_kwargs: Dict[str, Any] = {"device": device, "dtype": DTYPES[dtype]}
     # An unset source means "whatever this model defaults to", so leave it out
     # rather than passing None over the processor's own default.
-    if vae_source is not None:
-        processor_kwargs["vae_source"] = vae_source
-    if text_encoder_source is not None:
-        processor_kwargs["text_encoder_source"] = text_encoder_source
+    for name, value in (
+        ("vae_source", vae_source),
+        ("text_encoder_source", text_encoder_source),
+        ("tokenizer_source", tokenizer_source),
+    ):
+        if value is not None:
+            processor_kwargs[name] = value
 
     processor = Ideogram4Processor(**processor_kwargs)
     processor.load_models()
+
+    # The output directory is touched only now that the encoders have loaded, so a
+    # run that fails at load time leaves a previous cache usable. From here on the
+    # old cache is replaced: its index first, since the loader treats the index as
+    # the mark of a finished cache, then its samples, so none outlives the rebuild.
+    samples_root = output_root / "samples"
+    samples_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "metadata.json").unlink(missing_ok=True)
+    for stale in samples_root.glob("*.pt"):
+        stale.unlink()
 
     from PIL import Image
 
     entries: List[Dict[str, Any]] = []
     grid_h = grid_w = feature_dim = in_channels = None
     skipped_caption = skipped_too_long = skipped_error = 0
+    consecutive_failures = 0
     start = time.time()
 
     for image_file in images:
@@ -129,30 +165,44 @@ def build_cache(
         if not caption_file.exists():
             skipped_caption += 1
             continue
-        prompt = caption_file.read_text(encoding="utf-8").strip()
-        if not prompt:
-            skipped_caption += 1
-            continue
 
         try:
-            image_tensor = processor.preprocess_image(Image.open(image_file), resolution)
+            prompt = caption_file.read_text(encoding="utf-8").strip()
+            if not prompt:
+                skipped_caption += 1
+                continue
+            # The budget is checked on the tokens alone, before either encoder runs.
+            # Dropped rather than truncated: see the module docstring.
+            if processor.count_text_tokens(prompt) > max_text_tokens:
+                skipped_too_long += 1
+                continue
+            with Image.open(image_file) as image:
+                image_tensor = processor.preprocess_image(image, resolution)
             latents = processor.encode_image(image_tensor)
             text_encoding = processor.encode_text(prompt, max_text_tokens)
             if text_encoding is None:
-                # The caption does not fit the budget. Dropped rather than
-                # truncated: see the module docstring.
                 skipped_too_long += 1
                 continue
             sample = processor.get_cache_data(
                 latents, text_encoding, prompt=prompt, image_path=str(image_file)
             )
+        except torch.cuda.OutOfMemoryError:
+            raise
         except Exception as exc:
-            # One unreadable image should not lose the hours already spent on the
-            # rest, so this is counted and reported rather than raised. An empty
-            # result still fails below.
+            # One unreadable file should not lose the hours already spent on the
+            # rest, so it is counted and reported rather than raised. A run of them
+            # is systemic, and would fail every file after it.
             logger.warning("Could not encode %s: %s", image_file.name, exc)
             skipped_error += 1
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                raise RuntimeError(
+                    f"{consecutive_failures} images in a row failed to encode, the last "
+                    f"({image_file.name}) with: {exc}. That is not a bad file but a "
+                    "problem every image will hit, so the build stops here."
+                ) from exc
             continue
+        consecutive_failures = 0
 
         if grid_h is None:
             grid_h, grid_w = sample["grid_h"], sample["grid_w"]
@@ -198,13 +248,17 @@ def build_cache(
         "vae_source": processor.vae_source,
         "text_encoder_source": processor.text_encoder_source,
         "num_samples": len(entries),
+        "skipped": {
+            "no_caption": skipped_caption,
+            "too_long": skipped_too_long,
+            "failed": skipped_error,
+        },
         "samples": entries,
     }
     # Written last. The dataloader treats the presence of metadata.json as the
     # cache being complete, so writing it earlier would make an interrupted build
     # look finished.
-    with open(output_root / "metadata.json", "w") as handle:
-        json.dump(metadata, handle)
+    _write_metadata(output_root, metadata)
 
     elapsed = max(time.time() - start, 1e-6)
     logger.info("Wrote %d samples to %s", len(entries), output_root)

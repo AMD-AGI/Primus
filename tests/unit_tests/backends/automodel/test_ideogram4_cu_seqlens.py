@@ -82,6 +82,12 @@ class TestBuildCuSeqlens:
         with pytest.raises(ValueError, match="at least one pad token"):
             cu_seqlens.build_cu_seqlens([9], max_text_tokens=8, num_image_tokens=4)
 
+    def test_a_negative_length_is_refused(self):
+        """It would push the pad segment into the image region: [-3, 2] used to
+        give a one-token text-and-image segment for row 0."""
+        with pytest.raises(ValueError, match="negative text_length"):
+            cu_seqlens.build_cu_seqlens([-3, 2], max_text_tokens=4, num_image_tokens=4)
+
     def test_exactly_one_pad_token_is_enough(self):
         cu = cu_seqlens.build_cu_seqlens([7], max_text_tokens=8, num_image_tokens=4)
         assert cu.tolist() == [0, 1, 12]
@@ -176,6 +182,12 @@ class TestMaskTransform:
     def test_a_non_square_mask_is_refused(self):
         with pytest.raises(ValueError, match="square"):
             varlen_utils.blockdiag_bool_mask_to_cu_seqlens(torch.zeros(1, 1, 4, 5, dtype=torch.bool))
+
+    def test_a_per_head_mask_is_refused(self):
+        """Only head 0 would be read, so heads that differ would be mis-packed."""
+        mask = mask_from_segment_ids([[0, 0, 1, 1]]).expand(1, 2, 4, 4)
+        with pytest.raises(ValueError, match="per-head"):
+            varlen_utils.blockdiag_bool_mask_to_cu_seqlens(mask)
 
     def test_a_two_dimensional_mask_is_refused(self):
         with pytest.raises(ValueError, match=r"\(B,1,L,L\)"):

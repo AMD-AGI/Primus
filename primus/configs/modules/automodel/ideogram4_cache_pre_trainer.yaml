@@ -4,7 +4,11 @@
 # The `ideogram4_pre_trainer.yaml` preset with `data.dataloader` reading a cache of
 # encoded image/caption pairs instead of synthetic features. Build the cache with:
 #
-#   bash ./runner/primus-cli direct --single -- data automodel-cache --model ideogram4 --help
+#   bash ./runner/primus-cli direct --single -- data automodel-cache --model ideogram4 \
+#       --image-dir /path/to/images --caption-dir /path/to/captions \
+#       --output-dir /path/to/cache
+#
+# and point data.dataloader.cache_dir at /path/to/cache. --help lists the options.
 #
 # A separate preset because the two dataloaders take different fields, and an
 # override would let synthetic-only keys survive the deep-merge.
@@ -39,9 +43,9 @@ data:
     drop_last: true
     # Pad the text region to a constant width, so the packed sequence length does
     # not change between steps -- per-batch padding recompiles the graph on nearly
-    # every one. 0 derives the width from the cache's longest caption, so nothing is
-    # truncated; a positive value sets it explicitly and truncates past it; -1
-    # restores per-batch padding.
+    # every one. 0 derives the width from the cache's longest caption; a positive
+    # value sets it explicitly and must be at least that long, since a caption is
+    # never truncated; -1 restores per-batch padding.
     max_text_tokens: 0
     num_workers: 2
     pin_memory: true
