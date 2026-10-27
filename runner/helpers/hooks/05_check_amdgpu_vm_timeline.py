@@ -44,9 +44,45 @@ class _DrmVersion(ctypes.Structure):
 DRM_IOCTL_VERSION = (3 << 30) | (ctypes.sizeof(_DrmVersion) << 16) | (ord("d") << 8) | 0x00
 
 
+def _visible_render_nodes():
+    """Render nodes of the GPUs in ROCR_VISIBLE_DEVICES, or all of them if it is unset.
+
+    Opening a wedged GPU's render node can block in the kernel, so stay off GPUs this job
+    does not use.
+    """
+    nodes = sorted(glob.glob("/dev/dri/renderD*"))
+    visible = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if not visible or not all(v.strip().isdigit() for v in visible.split(",")):
+        return nodes
+    domains = []
+    kfd_nodes = glob.glob("/sys/class/kfd/kfd/topology/nodes/*")
+    for kfd in sorted(kfd_nodes, key=lambda p: int(os.path.basename(p))):
+        try:
+            with open(os.path.join(kfd, "gpu_id")) as f:
+                if f.read().strip() == "0":
+                    continue
+            with open(os.path.join(kfd, "properties")) as f:
+                props = dict(line.split()[:2] for line in f if len(line.split()) >= 2)
+            domains.append(int(props["domain"]))
+        except (OSError, KeyError, ValueError):
+            return nodes
+    wanted = set()
+    for v in visible.split(","):
+        if int(v) >= len(domains):
+            return nodes
+        wanted.add(domains[int(v)])
+    picked = []
+    for node in nodes:
+        dev = os.path.realpath(f"/sys/class/drm/{os.path.basename(node)}/device")
+        pci = os.path.basename(dev)
+        if ":" in pci and int(pci.split(":")[0], 16) in wanted:
+            picked.append(node)
+    return picked or nodes
+
+
 def amdgpu_drm_version():
-    """(major, minor) of the first amdgpu render node, or None if none is readable."""
-    for node in sorted(glob.glob("/dev/dri/renderD*")):
+    """(major, minor) of the first visible amdgpu render node, or None if none is readable."""
+    for node in _visible_render_nodes():
         try:
             fd = os.open(node, os.O_RDWR)
         except OSError:
