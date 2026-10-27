@@ -233,8 +233,8 @@ class PrimusGroupedMLP(TEGroupedMLP):
 
         _run_module_forward_pre_hooks(self.linear_fc1, (x,))
         _run_module_forward_pre_hooks(self.linear_fc2, (x,))
-        x, w1, fuse_w1_grad_accum = self.linear_fc1.prepare_weights(x)
-        x, w2, fuse_w2_grad_accum = self.linear_fc2.prepare_weights(x)
+        x, w1, fuse_w1_grad_accum = self.linear_fc1.prepare_weights(x, "grouped_mlp", "fc1")
+        x, w2, fuse_w2_grad_accum = self.linear_fc2.prepare_weights(x, "grouped_mlp", "fc2")
         assert fuse_w1_grad_accum == fuse_w2_grad_accum, (
             "fc1 and fc2 resolved different fuse_wgrad_accum_pattern values: "
             f"fc1={fuse_w1_grad_accum!r}, fc2={fuse_w2_grad_accum!r}"
