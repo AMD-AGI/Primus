@@ -12,7 +12,7 @@ Experiments live in [`configs/MI355X/diffusion/`](./configs/MI355X/diffusion/):
 | --- | --- |
 | Wan 2.2 T2V A14B | `wan2_2_t2v_a14b-*.yaml` (pretrain, finetune, synthetic, TE FP8) |
 | FLUX.1-dev / schnell | `flux_1_dev-pretrain.yaml`, `flux_1_dev-synthetic.yaml`, `flux_1_schnell-synthetic.yaml` |
-| Ideogram-4 | `ideogram4-pretrain.yaml` (synthetic), `ideogram4-pretrain-cache.yaml` (encoded cache) |
+| Ideogram-4 | `ideogram4-pretrain.yaml` (synthetic), `ideogram4-pretrain-cache.yaml` (encoded cache), `ideogram4-pretrain-ddp.yaml` (DDP + ZeRO-1), `ideogram4-pretrain-ddp-cache.yaml` (DDP + ZeRO-1, encoded cache) |
 
 ## Launch
 
@@ -85,6 +85,7 @@ off by default, and the module that implements it documents its remaining keys.
 | `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend, or with Ideogram-4's variable-length attention. |
 | `primus_ideogram4.varlen_attention` | Ideogram-4 variable-length packed attention. Its backward is non-deterministic: the deterministic kernel needs far more memory at image-sized sequences. |
 | `primus_ideogram4.ac_every: n` | Ideogram-4: checkpoint every nth block instead of all |
+| `primus_ideogram4.zero1` | ZeRO-1 optimizer sharding on the DDP path. A ZeRO-1 run cannot save or resume: model checkpoint saving (`checkpoint.enabled`, which defaults to true) must be set to false, or the optimizer build raises. Single-rank and FSDP2 runs keep the plain optimizer, with a warning. Tested on a single node only. |
 
 ## Ideogram-4 setup
 
@@ -122,6 +123,8 @@ before treating a small cache as the whole dataset. A rebuild into the same
 
 Then launch with `data.dataloader.cache_dir=/path/to/cache` as well.
 
+Use `ideogram4-pretrain-cache.yaml` for FSDP2, or `ideogram4-pretrain-ddp-cache.yaml` for the DDP/ZeRO-1 path.
+
 The presets train on the stock attention path. The variable-length attention
 processor is opt-in, because its backward is non-deterministic and it needs
 Primus-Turbo. To enable it, and the per-layer compilation it is designed for,
@@ -136,3 +139,9 @@ primus_ideogram4:
 fsdp:
   enable_compile: true
 ```
+
+Context parallelism (`fsdp.cp_size` above 1) is available on the FSDP2 path. The
+degree has to divide both the world size and the attention head count, and it
+cannot be combined with `primus_ideogram4.varlen_attention`. The packed sequence
+is left-padded so its length is divisible by the degree; a caption plus grid
+that is not already a multiple still trains.
