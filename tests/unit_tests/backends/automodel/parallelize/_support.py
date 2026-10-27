@@ -236,12 +236,14 @@ def record_strategy_dispatch(monkeypatch):
     return seen
 
 
-def real_mesh_context(strategy, activation_checkpointing):
+def real_mesh_context(strategy, activation_checkpointing, device_mesh=None):
     from nemo_automodel.components.distributed.config import DDPConfig, FSDP2Config
     from nemo_automodel.components.distributed.mesh import MeshContext
 
     config = DDPConfig() if strategy == "ddp" else FSDP2Config()
-    return MeshContext(strategy_config=config, activation_checkpointing=activation_checkpointing)
+    return MeshContext(
+        device_mesh=device_mesh, strategy_config=config, activation_checkpointing=activation_checkpointing
+    )
 
 
 def attach_and_parallelize(model, mesh_context):

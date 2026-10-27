@@ -92,6 +92,20 @@ def tensor_parallel_size(device_mesh, tp_mesh_name: str = "tp") -> int:
     return device_mesh[tp_mesh_name].size()
 
 
+def mesh_context_tensor_parallel_size(mesh_context) -> int:
+    """Tensor-parallel degree of an AutoModel ``MeshContext``.
+
+    ``MeshContext.tp_size`` derives it from the ``tp`` axis of the device mesh
+    the recipe builds from ``fsdp.tp_size``. A context without that property is
+    read from its device mesh directly, so a missing attribute is never taken
+    to mean "no tensor parallelism".
+    """
+    size = getattr(mesh_context, "tp_size", None)
+    if size is None:
+        size = tensor_parallel_size(getattr(mesh_context, "device_mesh", None))
+    return int(size)
+
+
 def warn_tensor_parallel(log_prefix: str, tp_size: int, upstream_behaviour: str) -> None:
     logger.warning(
         "%s tp_size=%d: Primus does not checkpoint the blocks itself, because it would wrap them "
@@ -127,7 +141,7 @@ def block_checkpointing(
             )
             if not requested:
                 return super().parallelize(model, mesh_context)
-            tp_size = getattr(mesh_context, "tp_size", 1)
+            tp_size = mesh_context_tensor_parallel_size(mesh_context)
             if tp_size > 1:
                 warn_tensor_parallel(log_prefix, tp_size, "upstream's own activation checkpointing applies")
                 return super().parallelize(model, mesh_context)

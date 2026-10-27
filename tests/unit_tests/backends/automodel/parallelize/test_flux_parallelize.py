@@ -12,6 +12,7 @@ import pytest
 
 from primus.backends.automodel.models.flux import parallelize as flux
 from tests.unit_tests.backends.automodel.parallelize._support import (
+    FakeDeviceMesh,
     FakeMeshContext,
     attach_and_parallelize,
     install_stub_automodel,
@@ -101,6 +102,21 @@ class TestUpstreamContract:
         assert dispatched == strategy
         assert ctx.activation_checkpointing is False
         assert not getattr(ctx.strategy_config, "activation_checkpointing", False)
+
+    def test_a_tp_mesh_on_the_real_context_steps_aside(self, monkeypatch, caplog):
+        """``fsdp.tp_size`` reaches the sidecar as the ``tp`` axis of the context's mesh."""
+        seen = record_strategy_dispatch(monkeypatch)
+        flux.install()
+        model = tiny_flux()
+        context = real_mesh_context("fsdp2", True, device_mesh=FakeDeviceMesh(2))
+        assert context.tp_size == 2
+        with caplog.at_level("WARNING"):
+            attach_and_parallelize(model, context)
+        assert not any(is_checkpoint_wrapped(b) for b in model.transformer_blocks)
+        assert not any(is_checkpoint_wrapped(b) for b in model.single_transformer_blocks)
+        ((_, ctx),) = seen
+        assert ctx.activation_checkpointing is True, "upstream gets the request unchanged"
+        assert "tp_size=2" in caplog.text
 
     def test_ac_off_leaves_the_model_alone(self, monkeypatch):
         seen = record_strategy_dispatch(monkeypatch)
