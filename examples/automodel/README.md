@@ -139,3 +139,9 @@ primus_ideogram4:
 fsdp:
   enable_compile: true
 ```
+
+Context parallelism (`fsdp.cp_size` above 1) is available on the FSDP2 path. The
+degree has to divide both the world size and the attention head count, and it
+cannot be combined with `primus_ideogram4.varlen_attention`. The packed sequence
+is left-padded so its length is divisible by the degree; a caption plus grid
+that is not already a multiple still trains.
