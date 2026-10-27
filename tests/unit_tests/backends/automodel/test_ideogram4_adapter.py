@@ -341,6 +341,33 @@ class TestInputValidation:
         inputs = adapter.prepare_inputs(context)
         assert inputs["_max_text"] == 4
 
+    def test_a_negative_length_is_refused(self, fake_automodel, set_option):
+        """A negative length moves the text offset past the region, which would
+        build a wrong but plausible packing."""
+        set_option("primus_ideogram4.varlen_attention", True)
+        adapter = fake_automodel.module.get_ideogram4_adapter_class()(in_channels=CHANNELS)
+        context = make_context([4, 4], grid=(2, 3))
+        context.batch["text_lengths"] = [-3, 2]
+        with pytest.raises(ValueError, match="non-negative"):
+            adapter.prepare_inputs(context)
+
+    def test_a_length_count_that_differs_from_the_batch_is_refused(self, fake_automodel):
+        adapter = fake_automodel.module.get_ideogram4_adapter_class()(in_channels=CHANNELS)
+        context = make_context([4, 4], grid=(2, 3))
+        context.batch["text_lengths"] = [4, 4, 4]
+        with pytest.raises(ValueError, match="3 entries for a batch of 2"):
+            adapter.prepare_inputs(context)
+
+    @pytest.mark.parametrize("shape", [(6, FEATURES), (3, 4, FEATURES)])
+    def test_features_that_do_not_match_the_batch_are_refused(self, fake_automodel, shape):
+        """Including a 2-D tensor, which used to be unsqueezed to batch 1 and then
+        failed inside torch.cat."""
+        adapter = fake_automodel.module.get_ideogram4_adapter_class()(in_channels=CHANNELS)
+        context = make_context([4, 4], grid=(2, 3))
+        context.batch["llm_features"] = torch.zeros(*shape)
+        with pytest.raises(ValueError, match=r"\[B, max_text, F\] with B=2"):
+            adapter.prepare_inputs(context)
+
 
 class TestLayout:
     def test_the_time_convention_is_inverted(self, fake_automodel):
@@ -426,13 +453,15 @@ class TestLayout:
 
 
 class TestCfgDropout:
-    def test_dropout_zeroes_whole_samples(self, fake_automodel):
+    @pytest.mark.parametrize("prob", [0.1, 1.0])
+    def test_caption_dropout_is_refused(self, fake_automodel, prob):
+        """Ideogram-4 guides with a separate unconditional transformer, so the
+        conditional one never runs without text at sampling time."""
         cls = fake_automodel.module.get_ideogram4_adapter_class()
         adapter = cls(in_channels=CHANNELS)
-        context = make_context([4, 4], grid=(2, 3), cfg_dropout_prob=1.0)
-        inputs = adapter.prepare_inputs(context)
-        max_text = inputs["_max_text"]
-        assert torch.all(inputs["encoder_hidden_states"][:, :max_text] == 0)
+        context = make_context([4, 4], grid=(2, 3), cfg_dropout_prob=prob)
+        with pytest.raises(ValueError, match="unconditional transformer"):
+            adapter.prepare_inputs(context)
 
     def test_no_dropout_leaves_the_features_alone(self, fake_automodel):
         cls = fake_automodel.module.get_ideogram4_adapter_class()
@@ -489,6 +518,53 @@ class TestInstall:
             recipe.create_adapter("ideogram4"),
             fake_automodel.module.get_ideogram4_adapter_class(),
         )
+
+    @staticmethod
+    def _recipe(monkeypatch, create_adapter):
+        recipe = types.ModuleType("nemo_automodel.recipes.diffusion.train")
+        recipe.create_adapter = create_adapter
+        for name in ("nemo_automodel.recipes", "nemo_automodel.recipes.diffusion"):
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "nemo_automodel.recipes.diffusion.train", recipe)
+        return recipe
+
+    def test_a_recipe_holding_the_original_is_rebound_on_a_later_install(self, fake_automodel, monkeypatch):
+        """The pipeline is already patched by then, so an early return would leave
+        the recipe calling the original."""
+        original = fake_automodel.pipeline.create_adapter
+        fake_automodel.module.install()
+        recipe = self._recipe(monkeypatch, original)
+
+        fake_automodel.module.install()
+        assert recipe.create_adapter is fake_automodel.pipeline.create_adapter
+
+    def test_a_recipe_imported_after_install_already_holds_the_route(self, fake_automodel, monkeypatch):
+        """Its from-import reads the patched pipeline attribute."""
+        fake_automodel.module.install()
+        recipe = self._recipe(monkeypatch, fake_automodel.pipeline.create_adapter)
+
+        fake_automodel.module.install()
+        assert isinstance(
+            recipe.create_adapter("ideogram4"), fake_automodel.module.get_ideogram4_adapter_class()
+        )
+
+    def test_another_wrapper_in_the_recipe_is_left_alone_and_reported(
+        self, fake_automodel, monkeypatch, caplog
+    ):
+        def someone_elses(adapter_type, **kwargs):
+            return "theirs"
+
+        recipe = self._recipe(monkeypatch, someone_elses)
+        with caplog.at_level("WARNING"):
+            fake_automodel.module.install()
+        assert recipe.create_adapter is someone_elses
+        assert any("left alone" in r.getMessage() for r in caplog.records)
+
+    def test_a_recipe_that_cannot_be_imported_is_reported(self, fake_automodel, caplog):
+        """The fixture's recipes package is empty, so the import fails."""
+        with caplog.at_level("WARNING"):
+            fake_automodel.module.install()
+        assert any("could not import the diffusion recipe" in r.getMessage() for r in caplog.records)
 
 
 class TestClassIdentity:
@@ -575,6 +651,35 @@ class TestPatchGating:
         adapter_priority = patches["automodel.models.ideogram4.adapter"].priority
         varlen_priority = patches["automodel.models.ideogram4.varlen_attn"].priority
         assert adapter_priority < varlen_priority
+
+
+class TestLayoutConstants:
+    def test_the_fallback_matches_diffusers(self):
+        """The fallback is what CPU tests without the new diffusers run on, so it
+        has to equal the real values wherever both exist."""
+        module = pytest.importorskip("diffusers.models.transformers.transformer_ideogram4")
+        from primus.backends.automodel.models.ideogram4 import adapter as adapter_mod
+
+        real = tuple(getattr(module, name) for name in adapter_mod._LAYOUT_CONSTANT_NAMES)
+        assert adapter_mod.FALLBACK_LAYOUT_CONSTANTS == real
+
+    def test_a_renamed_constant_raises(self, monkeypatch):
+        """A module that exists without the names means they moved upstream, and a
+        guessed value would mislabel every token silently."""
+        from primus.backends.automodel.models.ideogram4 import adapter as adapter_mod
+
+        stale = types.ModuleType("diffusers.models.transformers.transformer_ideogram4")
+        stale.LLM_TOKEN_INDICATOR = 3
+        for name in ("diffusers", "diffusers.models", "diffusers.models.transformers"):
+            if name not in sys.modules:
+                monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "diffusers.models.transformers.transformer_ideogram4", stale)
+        monkeypatch.setattr(
+            sys.modules["diffusers.models.transformers"], "transformer_ideogram4", stale, raising=False
+        )
+
+        with pytest.raises(RuntimeError, match="IMAGE_POSITION_OFFSET"):
+            adapter_mod._layout_constants()
 
 
 class TestImportSafety:

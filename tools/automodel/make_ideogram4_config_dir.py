@@ -24,9 +24,9 @@ USAGE:
 Then point ``model.pretrained_model_name_or_path`` at that directory. The Primus
 Ideogram-4 presets under ``primus/configs/`` expect exactly this layout.
 
-The written directory is reloaded before this exits, the same way the recipe will
-load it, so a malformed one fails here rather than several minutes into a
-distributed job.
+The written config is reloaded and the model rebuilt from it on the meta device
+before this exits, so a malformed directory fails here rather than several
+minutes into a distributed job.
 """
 from __future__ import annotations
 
@@ -62,35 +62,19 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def build_config(overrides=None):
-    """Return ``(config_dict, how)`` for the transformer, without allocating it.
+def build_model(overrides=None):
+    """Construct the transformer on the meta device, allocating no parameter storage.
 
-    ``how`` records whether the meta device was used, because the fallback path
-    allocates the real thing and a caller watching memory deserves to know which
-    one ran.
+    Returns the model, whose registered config is what gets saved. There is no
+    fallback to a real allocation: an error here is a bad override or a model
+    that cannot be built, and retrying it on the host would only turn the same
+    error into tens of gigabytes of allocation first.
     """
     import torch
     from diffusers import Ideogram4Transformer2DModel
 
-    kwargs = dict(overrides or {})
-    try:
-        # The meta device gives the full structure and the config recorded at
-        # construction without backing storage. The config is what is being saved,
-        # and it does not depend on the parameters existing.
-        with torch.device("meta"):
-            model = Ideogram4Transformer2DModel(**kwargs)
-        return model, "the meta device"
-    except Exception as exc:
-        # Falling back rather than failing: the result is identical, it just costs
-        # a real allocation. Reported at a level a user will see, since that cost
-        # is large enough to be surprising.
-        print(
-            f"[make_ideogram4_config_dir] building on the meta device failed ({exc}); "
-            "falling back to a real allocation, which needs enough host memory for "
-            "the whole model",
-            file=sys.stderr,
-        )
-        return Ideogram4Transformer2DModel(**kwargs), "a real allocation"
+    with torch.device("meta"):
+        return Ideogram4Transformer2DModel(**dict(overrides or {}))
 
 
 def main(argv=None) -> int:
@@ -121,16 +105,19 @@ def main(argv=None) -> int:
         )
         return 1
 
+    model = build_model(overrides)
     subfolder = os.path.join(args.out, "transformer")
     os.makedirs(subfolder, exist_ok=True)
-
-    model, how = build_config(overrides)
     model.save_config(subfolder)
-    print(f"[make_ideogram4_config_dir] wrote {os.path.join(subfolder, 'config.json')} " f"(built via {how})")
+    print(f"[make_ideogram4_config_dir] wrote {os.path.join(subfolder, 'config.json')}")
 
-    # Reloaded exactly as the recipe will, so a malformed directory fails here
-    # instead of partway into a distributed run.
+    # Reloaded and rebuilt from the file, as the recipe will, so a malformed
+    # directory fails here instead of partway into a distributed run.
+    import torch
+
     config = Ideogram4Transformer2DModel.load_config(args.out, subfolder="transformer")
+    with torch.device("meta"):
+        Ideogram4Transformer2DModel.from_config(config)
     print(
         "[make_ideogram4_config_dir] reload OK: "
         f"num_layers={config.get('num_layers')} "

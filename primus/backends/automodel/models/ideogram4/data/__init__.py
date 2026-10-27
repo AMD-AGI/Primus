@@ -14,7 +14,9 @@ flow-matching pipeline consume:
 
     image_latents  [B, C, grid_h, grid_w]  clean packed latents, the x0 the
                                            pipeline adds noise to
-    llm_features   [B, T, F]               LEFT-padded text features
+    llm_features   [B, T, F]               LEFT-padded text features, floating
+                                           point in the producer's dtype; the
+                                           adapter casts to the compute dtype
     text_lengths   [B]                     real, non-pad token count per sample
     data_type      "image"
 

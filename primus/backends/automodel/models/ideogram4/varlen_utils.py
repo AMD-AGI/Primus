@@ -28,8 +28,8 @@ WHAT THIS IS FOR:
 
 WHY DERIVING THE PACKING FROM THE MASK IS THE SLOW PATH:
   :func:`blockdiag_bool_mask_to_cu_seqlens` is exact and needs nothing from the
-  caller, which makes it the right fallback, but it is data-dependent: ``.any()``
-  and ``.max().item()`` are device-to-host reads, and the packing's shape follows
+  caller, which makes it the right fallback, but it is data-dependent: ``.any()``,
+  ``nonzero`` and ``.max().item()`` are device-to-host reads, and the packing's shape follows
   the number of segments. Inside a compiled region each read is a graph break, and
   a new segment count is a recompile. Each rank sees its own batch, so the ranks
   recompile at different steps. Under FSDP2 the collectives still run in the same
@@ -42,13 +42,10 @@ WHY DERIVING THE PACKING FROM THE MASK IS THE SLOW PATH:
 """
 from __future__ import annotations
 
-import logging
 from typing import Optional, Tuple
 
 import torch
 from torch import Tensor
-
-logger = logging.getLogger(__name__)
 
 
 def blockdiag_bool_mask_to_cu_seqlens(mask: Tensor) -> Tuple[Tensor, int, bool]:
@@ -57,7 +54,10 @@ def blockdiag_bool_mask_to_cu_seqlens(mask: Tensor) -> Tuple[Tensor, int, bool]:
     Args:
         mask: ``(B, 1, L, L)`` or ``(B, L, L)`` boolean, ``True`` meaning query ``i``
             attends to key ``j``. Each row must be block-diagonal over CONTIGUOUS
-            segments, and segments never span a row boundary.
+            segments, and segments never span a row boundary. Only the
+            superdiagonal is read, so a causal or non-contiguous mask would be
+            mis-packed; the one caller passes the model's segment-equality mask,
+            which is block-diagonal by construction. A per-head mask is refused.
 
     Returns:
         ``(cu_seqlens, max_seqlen, is_trivial)`` over the flattened ``(B * L)``
@@ -69,10 +69,16 @@ def blockdiag_bool_mask_to_cu_seqlens(mask: Tensor) -> Tuple[Tensor, int, bool]:
         * ``is_trivial`` -- ``True`` when every row is one full segment, meaning the
           mask says nothing and the caller can use dense attention instead.
 
-    Contains two device-to-host reads, so see the module docstring before calling
-    it from anywhere that gets compiled.
+    Contains three device-to-host reads -- ``any``, ``nonzero`` and ``max`` -- and
+    ``nonzero`` has a data-dependent shape, so see the module docstring before
+    calling it from anywhere that gets compiled.
     """
     if mask.dim() == 4:
+        if mask.shape[1] != 1:
+            raise ValueError(
+                f"expected one mask shared by every head, (B, 1, L, L), got shape "
+                f"{tuple(mask.shape)}; a per-head mask has no single packing"
+            )
         rows = mask[:, 0]
     elif mask.dim() == 3:
         rows = mask

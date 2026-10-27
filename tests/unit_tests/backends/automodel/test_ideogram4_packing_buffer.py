@@ -22,6 +22,7 @@ WHAT THESE ARE DEFENDING:
     * a new batch size replaces the buffer, and says so;
     * a model without the var-len processor has no consumers, which is an error
       only when the caller requires one;
+    * a module that gains the processor after the first publish is included;
     * ``clear_packing`` removes the buffer from every consumer.
 
 The processor tests attach a packing to one module by hand, and the adapter tests
@@ -157,7 +158,50 @@ def test_clear_packing_removes_the_buffer_from_every_consumer():
     for module in consumers(model):
         assert not hasattr(module, packing_buffer.PACKING_ATTR)
         assert not hasattr(module, packing_buffer.BOUND_ATTR)
-    assert not hasattr(model, packing_buffer._CONSUMERS_ATTR)
+        assert not hasattr(module, packing_buffer.TOKENS_ATTR)
+
+
+def test_a_same_shape_republish_reuses_the_buffer():
+    """The steady state: one copy_ into the tensor already installed."""
+    model = wrapped_model()
+    first = packing_buffer.publish_packing(model, packing_for([3, 5]), 11, device=CPU, required=True)
+    second = packing_buffer.publish_packing(model, packing_for([1, 7]), 11, device=CPU, required=True)
+    assert second is first
+    assert second.tolist() == packing_for([1, 7]).tolist()
+
+
+def test_the_token_total_is_recorded_for_the_stale_packing_check():
+    """B*S as a host integer, so the processor can compare it with its batch."""
+    model = wrapped_model()
+    packing_buffer.publish_packing(model, packing_for([3, 5]), 11, device=CPU, required=True)
+    assert all(getattr(m, packing_buffer.TOKENS_ATTR) == 2 * 12 for m in consumers(model))
+
+
+def test_a_module_that_gains_the_processor_later_is_included(caplog):
+    """The consumers are found on every publish, so a processor swapped in after
+    the first one still receives the shared buffer."""
+    model = torch.nn.Sequential(FakeAttention(), FakeAttention())
+    model[1].processor = object()
+    packing_buffer.publish_packing(model, packing_for([3, 5]), 11, device=CPU, required=True)
+    assert not hasattr(model[1], packing_buffer.PACKING_ATTR)
+
+    model[1].processor = attn_processor.Ideogram4VarlenAttnProcessor()
+    with caplog.at_level("WARNING"):
+        packing_buffer.publish_packing(model, packing_for([1, 7]), 11, device=CPU, required=True)
+
+    shared = getattr(model[0], packing_buffer.PACKING_ATTR)
+    assert getattr(model[1], packing_buffer.PACKING_ATTR) is shared
+    assert shared.tolist() == packing_for([1, 7]).tolist()
+    assert any("gained the var-len processor" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_an_unindexed_device_does_not_reinstall_every_step():
+    """'cuda' and 'cuda:<current>' are the same place."""
+    model = wrapped_model()
+    first = packing_buffer.publish_packing(model, packing_for([3, 5]), 11, device="cuda", required=True)
+    second = packing_buffer.publish_packing(model, packing_for([1, 7]), 11, device="cuda", required=True)
+    assert second is first
 
 
 if __name__ == "__main__":

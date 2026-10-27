@@ -101,3 +101,18 @@ python tools/automodel/make_ideogram4_config_dir.py --out <config_dir>
 ```
 
 Then launch with `model.pretrained_model_name_or_path=<config_dir>`.
+
+The presets train on the stock attention path. The variable-length attention
+processor is opt-in, because its backward is non-deterministic and it needs
+Primus-Turbo. To enable it, and the per-layer compilation it is designed for,
+add to the experiment's `overrides:`
+
+```yaml
+primus_ideogram4:
+  varlen_attention: true
+  # precompute_cu_seqlens: true   (the default) the adapter builds the packing on
+  #                               the host; false falls back to deriving it from
+  #                               the mask in every layer, for A/B comparison only
+fsdp:
+  enable_compile: true
+```
