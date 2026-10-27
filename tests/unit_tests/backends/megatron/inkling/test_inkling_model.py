@@ -154,19 +154,46 @@ def test_init_matches_reference_statistics():
             assert torch.count_nonzero(b) == 0, name
 
 
+def _checkpointed(function) -> str:
+    if type(function).__name__ == "InklingCoreAttention":
+        return "core_attn"
+    if isinstance(function, partial) and isinstance(function.func, torch.nn.Module):
+        return "mlp"
+    return type(function).__name__
+
+
+@pytest.mark.parametrize(
+    "modules",
+    [["core_attn"], ["layernorm"], ["mlp"], ["core_attn", "layernorm", "mlp"]],
+    ids=["core_attn", "layernorm", "mlp", "all"],
+)
 @pytest.mark.parametrize("backend", ["eager", "flex"])
-def test_selective_core_attention_recompute(backend, monkeypatch):
-    """``recompute_modules: [core_attn]`` checkpoints the core and leaves loss and gradients unchanged."""
+def test_selective_recompute(backend, modules, monkeypatch):
+    """Selective recompute checkpoints what ``recompute_modules`` names and leaves loss and
+    gradients unchanged. The tiny model has one dense and one MoE layer, so ``core_attn`` is
+    checkpointed twice, ``mlp`` once (dense layers only) and ``layernorm`` four times."""
     from megatron.core import tensor_parallel
 
-    calls = []
+    calls, norm_calls, norm_recomputes = [], [], []
     checkpoint = tensor_parallel.checkpoint
+    norm_checkpoint = tensor_parallel.CheckpointWithoutOutput.checkpoint
+    norm_recompute = tensor_parallel.CheckpointWithoutOutput._recompute
 
     def counting_checkpoint(function, *args):
-        calls.append(function)
+        calls.append(_checkpointed(function))
         return checkpoint(function, *args)
 
+    def counting_norm_checkpoint(self, function, *args):
+        norm_calls.append(type(function).__name__)
+        return norm_checkpoint(self, function, *args)
+
+    def counting_norm_recompute(self, grad):
+        norm_recomputes.append(self.ctx is not None)
+        return norm_recompute(self, grad)
+
     monkeypatch.setattr(tensor_parallel, "checkpoint", counting_checkpoint)
+    monkeypatch.setattr(tensor_parallel.CheckpointWithoutOutput, "checkpoint", counting_norm_checkpoint)
+    monkeypatch.setattr(tensor_parallel.CheckpointWithoutOutput, "_recompute", counting_norm_recompute)
     results = []
     for recompute in (None, "selective"):
         config = inkling_config_from_model_yaml(
@@ -175,7 +202,7 @@ def test_selective_core_attention_recompute(backend, monkeypatch):
             gradient_accumulation_fusion=False,
             inkling_attention_backend=backend,
             recompute_granularity=recompute,
-            recompute_modules=["core_attn"],
+            recompute_modules=modules,
         )
         torch.manual_seed(0)
         model = build_inkling_model(config, vocab_size=512, max_sequence_length=4096).cuda()
@@ -188,7 +215,13 @@ def test_selective_core_attention_recompute(backend, monkeypatch):
         grads = {n: p.grad.clone() for n, p in model.named_parameters()}
         results.append((loss.item(), grads, model.state_dict()))
 
-    assert [type(f).__name__ for f in calls] == ["InklingCoreAttention"] * 2
+    expected = ["core_attn", "core_attn"] if "core_attn" in modules else []
+    if "mlp" in modules:
+        expected.append("mlp")
+    assert sorted(calls) == sorted(expected)
+    norms = 4 if "layernorm" in modules else 0
+    assert len(norm_calls) == norms and set(norm_calls) <= {"RMSNorm", "TENorm"}
+    assert norm_recomputes == [True] * norms, "every dropped norm output must be rebuilt in backward"
     (loss_off, grads_off, _), (loss_on, grads_on, _) = results
     torch.testing.assert_close(loss_on, loss_off, rtol=1e-6, atol=0)
     assert grads_on.keys() == grads_off.keys()

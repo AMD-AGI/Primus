@@ -20,7 +20,10 @@ exchange exists.
 
 from __future__ import annotations
 
+from functools import partial
+
 import torch.nn.functional as F
+from megatron.core import tensor_parallel
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.utils import make_viewless_tensor
 
@@ -39,6 +42,29 @@ class InklingTransformerLayer(TransformerLayer):
         k = config.short_conv_kernel_size
         self.attn_sconv = InklingShortConv(config, config.hidden_size, k)
         self.mlp_sconv = InklingShortConv(config, config.hidden_size, k)
+
+    def _norm(self, norm, hidden_states, recompute):
+        """``norm(hidden_states)``; with ``recompute_modules: [layernorm]`` its output is
+        dropped once the sublayer has consumed it and rebuilt during backward."""
+        if not (recompute and self.training):
+            return norm(hidden_states), None
+        checkpoint = tensor_parallel.CheckpointWithoutOutput()
+        return checkpoint.checkpoint(norm, hidden_states), checkpoint
+
+    def _checkpointed_mlp(self, hidden_states, padding_mask):
+        """Dense MLP under ``recompute_modules: [mlp]``, as in :class:`TransformerLayer`."""
+        if self.config.fp8 or self.config.fp4:
+            from megatron.core.extensions.transformer_engine import te_checkpoint
+
+            return te_checkpoint(
+                self.mlp,
+                False,
+                tensor_parallel.random.get_cuda_rng_tracker,
+                self.pg_collection.tp,
+                hidden_states,
+                padding_mask=padding_mask,
+            )
+        return tensor_parallel.checkpoint(partial(self.mlp, padding_mask=padding_mask), False, hidden_states)
 
     def _residual_add(self, residual, output_with_bias, sconv):
         output, bias = output_with_bias
@@ -68,18 +94,31 @@ class InklingTransformerLayer(TransformerLayer):
         inference_params=None,
     ):
         residual = hidden_states.float() if self.config.fp32_residual_connection else hidden_states
+        normed, norm_checkpoint = self._norm(
+            self.input_layernorm, hidden_states, self.recompute_input_layernorm
+        )
         attn = self.self_attention(
-            self.input_layernorm(hidden_states),
+            normed,
             attention_mask=attention_mask,
             inference_context=inference_context or inference_params,
             rotary_pos_emb=rotary_pos_emb,
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
         )
+        if norm_checkpoint is not None:
+            norm_checkpoint.discard_output_and_register_recompute(attn[0])
         hidden_states = self._residual_add(residual, attn, self.attn_sconv)
 
         residual = hidden_states.float() if self.config.fp32_residual_connection else hidden_states
-        mlp = self.mlp(self.pre_mlp_layernorm(hidden_states), padding_mask=padding_mask)
+        normed, norm_checkpoint = self._norm(
+            self.pre_mlp_layernorm, hidden_states, self.recompute_pre_mlp_layernorm
+        )
+        if self.recompute_mlp and self.training:
+            mlp = self._checkpointed_mlp(normed, padding_mask)
+        else:
+            mlp = self.mlp(normed, padding_mask=padding_mask)
+        if norm_checkpoint is not None:
+            norm_checkpoint.discard_output_and_register_recompute(mlp[0])
         output = self._residual_add(residual, mlp, self.mlp_sconv)
         output = make_viewless_tensor(inp=output, requires_grad=output.requires_grad, keep_graph=True)
         return output, context
