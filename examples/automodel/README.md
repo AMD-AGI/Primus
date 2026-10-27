@@ -114,3 +114,18 @@ bash ./runner/primus-cli direct --single -- data automodel-cache --model ideogra
 A caption longer than `--max-text-tokens` is skipped, not truncated, and the
 skip counts are printed at the end. The default is 128, which drops most long
 prompts; raise it before treating a small cache as the whole dataset.
+
+The presets train on the stock attention path. The variable-length attention
+processor is opt-in, because its backward is non-deterministic and it needs
+Primus-Turbo. To enable it, and the per-layer compilation it is designed for,
+add to the experiment's `overrides:`
+
+```yaml
+primus_ideogram4:
+  varlen_attention: true
+  # precompute_cu_seqlens: true   (the default) the adapter builds the packing on
+  #                               the host; false falls back to deriving it from
+  #                               the mask in every layer, for A/B comparison only
+fsdp:
+  enable_compile: true
+```

@@ -60,38 +60,39 @@ from primus.backends.automodel.models.ideogram4.packing_buffer import publish_pa
 logger = logging.getLogger(__name__)
 
 
+# The values this code was written against, in the order _layout_constants returns.
+FALLBACK_LAYOUT_CONSTANTS = (65536, 3, 2, -1)
+_LAYOUT_CONSTANT_NAMES = (
+    "IMAGE_POSITION_OFFSET",
+    "LLM_TOKEN_INDICATOR",
+    "OUTPUT_IMAGE_INDICATOR",
+    "SEQUENCE_PADDING_INDICATOR",
+)
+
+
 def _layout_constants():
     """The per-token role constants, read from diffusers rather than hardcoded.
 
     These are the layout contract with the model. A stale literal here would
-    mislabel every token with no further error, so they are imported, and the
-    fallback below exists only to keep this module importable for tests and linting
-    where diffusers is absent. A real run reaching the fallback is worth a warning:
-    it means the names moved upstream.
+    mislabel every token with no further error, so they are read from the model's
+    own module. The fallback applies only when diffusers has no Ideogram-4 module
+    at all, which means no Ideogram-4 model can be built either, so the values can
+    only reach tests of the layout arithmetic. A module that exists but lacks one
+    of the names means they moved upstream, and that raises.
     """
     try:
-        from diffusers.models.transformers.transformer_ideogram4 import (
-            IMAGE_POSITION_OFFSET,
-            LLM_TOKEN_INDICATOR,
-            OUTPUT_IMAGE_INDICATOR,
-            SEQUENCE_PADDING_INDICATOR,
-        )
-
-        return (
-            IMAGE_POSITION_OFFSET,
-            LLM_TOKEN_INDICATOR,
-            OUTPUT_IMAGE_INDICATOR,
-            SEQUENCE_PADDING_INDICATOR,
-        )
+        import diffusers.models.transformers.transformer_ideogram4 as module
     except ImportError:
-        logger.warning(
-            "[PrimusIdeogram4] could not import the Ideogram-4 layout constants from "
-            "diffusers, so falling back to the values this code was written against. "
-            "That is fine for import-only use, but if a real run reaches here the "
-            "constants may have been renamed upstream and the token layout will be "
-            "wrong with nothing else to signal it."
+        return FALLBACK_LAYOUT_CONSTANTS
+
+    missing = [name for name in _LAYOUT_CONSTANT_NAMES if not hasattr(module, name)]
+    if missing:
+        raise RuntimeError(
+            f"diffusers' Ideogram-4 module no longer defines {', '.join(missing)}. These "
+            "constants are the token-layout contract with the model, so the adapter will "
+            "not guess them; re-check this adapter against the diffusers pin."
         )
-        return 65536, 3, 2, -1
+    return tuple(getattr(module, name) for name in _LAYOUT_CONSTANT_NAMES)
 
 
 def _base_adapter_cls():
@@ -195,8 +196,11 @@ def _build_ideogram4_adapter_class():
             image_tokens = self._pack_image_latents(noisy)
 
             llm_features = batch["llm_features"].to(device, dtype=dtype, non_blocking=True)
-            if llm_features.ndim == 2:
-                llm_features = llm_features.unsqueeze(0)
+            if llm_features.ndim != 3 or llm_features.shape[0] != batch_size:
+                raise ValueError(
+                    f"llm_features must be [B, max_text, F] with B={batch_size} to match the "
+                    f"latents, got shape {tuple(llm_features.shape)}"
+                )
             # The width the dataloader produced, before the reserved column below.
             text_capacity = llm_features.shape[1]
 
@@ -214,8 +218,17 @@ def _build_ideogram4_adapter_class():
             max_text = llm_features.shape[1]
 
             if context.cfg_dropout_prob > 0.0:
-                drop = torch.rand(batch_size, 1, 1, device=device) < context.cfg_dropout_prob
-                llm_features = llm_features.masked_fill(drop, 0.0)
+                # Ideogram-4 uses asymmetric guidance: the inference pipeline never runs
+                # this transformer without text. Its unconditional branch is a separate
+                # unconditional transformer, fed zeroed features over an image-only
+                # layout. Dropping captions here would train a case sampling never
+                # produces, in a layout it never uses.
+                raise ValueError(
+                    "flow_matching.cfg_dropout_prob must be 0 for Ideogram-4. Its pipeline "
+                    "guides with a separate unconditional transformer rather than by running "
+                    "this one without text, so caption dropout would train an input it never "
+                    f"sees at sampling time (got {context.cfg_dropout_prob})."
+                )
 
             text_lengths = batch.get("text_lengths")
             if text_lengths is None:
@@ -223,6 +236,10 @@ def _build_ideogram4_adapter_class():
             elif torch.is_tensor(text_lengths):
                 text_lengths = text_lengths.tolist()
             text_lengths = [int(t) for t in text_lengths]
+            if len(text_lengths) != batch_size:
+                raise ValueError(f"text_lengths has {len(text_lengths)} entries for a batch of {batch_size}")
+            if min(text_lengths) < 0:
+                raise ValueError(f"text_lengths must be non-negative, got {text_lengths}")
             if max(text_lengths) > text_capacity:
                 raise ValueError(
                     f"the longest text_length is {max(text_lengths)} but llm_features is "
@@ -332,31 +349,59 @@ def install() -> bool:
     """Make ``adapter_type: ideogram4`` resolve to this adapter.
 
     Additive and idempotent: it only adds a route, so every existing adapter type
-    behaves exactly as before.
+    behaves exactly as before. The recipe's binding is re-checked on every call,
+    including after the pipeline is already patched.
     """
     import nemo_automodel.components.flow_matching.pipeline as pipeline
 
-    original = pipeline.create_adapter
-    if getattr(original, "_ideogram4_patched", False):
-        return True
+    current = pipeline.create_adapter
+    if getattr(current, "_ideogram4_patched", False):
+        create_adapter = current
+    else:
+        original = current
 
-    def create_adapter(adapter_type: str, **kwargs):
-        if adapter_type == "ideogram4":
-            return get_ideogram4_adapter_class()(**kwargs)
-        return original(adapter_type, **kwargs)
+        def create_adapter(adapter_type: str, **kwargs):
+            if adapter_type == "ideogram4":
+                return get_ideogram4_adapter_class()(**kwargs)
+            return original(adapter_type, **kwargs)
 
-    create_adapter._ideogram4_patched = True
-    pipeline.create_adapter = create_adapter
+        create_adapter._ideogram4_patched = True
+        create_adapter._ideogram4_original = original
+        pipeline.create_adapter = create_adapter
+        logger.info("[PrimusIdeogram4] registered the 'ideogram4' flow-matching adapter.")
 
-    # The recipe imported the function by name, binding it by value, so patching the
-    # pipeline module alone would leave the recipe calling the original.
+    _patch_recipe_binding(create_adapter)
+    return True
+
+
+def _patch_recipe_binding(create_adapter) -> None:
+    """Point the recipe's own ``create_adapter`` name at the patched function.
+
+    The recipe imports the function by name, binding it by value. A recipe imported
+    after the pipeline was patched already holds the patched function; one imported
+    before holds the original and is rebound here. Anything else bound there is
+    someone else's wrapper, which this does not replace.
+    """
     try:
         import nemo_automodel.recipes.diffusion.train as recipe
-
-        if getattr(recipe, "create_adapter", None) is original:
-            recipe.create_adapter = create_adapter
     except ImportError as exc:
-        logger.debug("[PrimusIdeogram4] recipe namespace not imported yet: %s", exc)
+        logger.warning(
+            "[PrimusIdeogram4] could not import the diffusion recipe (%s), so its "
+            "create_adapter was not checked; 'adapter_type: ideogram4' may be reported "
+            "as unknown.",
+            exc,
+        )
+        return
 
-    logger.info("[PrimusIdeogram4] registered the 'ideogram4' flow-matching adapter.")
-    return True
+    bound = getattr(recipe, "create_adapter", None)
+    if bound is create_adapter or getattr(bound, "_ideogram4_patched", False):
+        return
+    if bound is create_adapter._ideogram4_original:
+        recipe.create_adapter = create_adapter
+        return
+    logger.warning(
+        "[PrimusIdeogram4] the diffusion recipe's create_adapter is %r, neither AutoModel's "
+        "nor the Ideogram-4 route, so it was left alone and 'adapter_type: ideogram4' "
+        "will only resolve if that function forwards to the pipeline's.",
+        bound,
+    )

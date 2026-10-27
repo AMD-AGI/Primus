@@ -17,7 +17,8 @@
 #   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
 #   GPUS_PER_NODE=8 \
 #   bash ./runner/primus-cli direct -- train pretrain \
-#       --config examples/automodel/configs/MI355X/diffusion/ideogram4-pretrain.yaml
+#       --config examples/automodel/configs/MI355X/diffusion/ideogram4-pretrain.yaml \
+#       model.pretrained_model_name_or_path=<dir>
 #
 # A small overfit run on a fixed synthetic set: the goal is a clearly decreasing
 # loss, not convergence. For a real run, remove step_scheduler.max_steps and use
