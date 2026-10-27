@@ -9,6 +9,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # per-shape cost.
 env:
   NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
+  PYTORCH_HIP_ALLOC_CONF: "expandable_segments:True"
 
 modules:
   pre_trainer:

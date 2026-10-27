@@ -147,6 +147,35 @@ def _build_config(ep_size, num_moe_experts, moe_router_topk, activation="silu"):
     )
 
 
+def _build_gptoss_config(ep_size, num_moe_experts):
+    """GPT-OSS MoE config: softmax over the top-4 logits, biased experts, swigluoai, no shared expert."""
+    return TransformerConfig(
+        num_layers=1,
+        hidden_size=2880,
+        num_attention_heads=8,
+        tensor_model_parallel_size=1,
+        expert_model_parallel_size=ep_size,
+        pipeline_model_parallel_size=1,
+        num_moe_experts=num_moe_experts,
+        moe_ffn_hidden_size=2880,
+        moe_router_topk=4,
+        moe_router_score_function="softmax",
+        moe_router_pre_softmax=False,
+        moe_router_load_balancing_type="aux_loss",
+        moe_aux_loss_coeff=0.0,
+        moe_token_dispatcher_type="alltoall",
+        moe_router_dtype="fp64",
+        moe_grouped_gemm=False,
+        gated_linear_unit=True,
+        **_activation_config("swigluoai"),
+        add_bias_linear=True,
+        bias_activation_fusion=False,
+        use_cpu_initialization=True,
+        params_dtype=torch.bfloat16,
+        bf16=True,
+    )
+
+
 def _build_layers(config, num_moe_experts, num_layers):
     """Build ``num_layers`` matched (Megatron MoELayer, MegaMoE) pairs.
 
@@ -187,6 +216,14 @@ def _build_layers(config, num_moe_experts, num_layers):
                 assert expert.linear_fc2.weight.shape == mega_w2[i].shape
                 mega_w1[i].copy_(expert.linear_fc1.weight.to(torch.bfloat16))
                 mega_w2[i].copy_(expert.linear_fc2.weight.to(torch.bfloat16))
+            if config.add_bias_linear:
+                # both sides zero-init their biases; draw them so the bias paths are exercised
+                for name in ("linear_fc1", "linear_fc2"):
+                    mega_b = getattr(mega_layer.experts, name.replace("linear_", "") + "_weight").bias
+                    for i, expert in enumerate(experts):
+                        bias = getattr(expert, name).bias
+                        bias.normal_(0.0, 1.0)
+                        mega_b[i].copy_(bias.to(torch.bfloat16))
             # shared expert: same SharedExpertMLP module, copy fc1/fc2
             if mega_layer.shared_experts is not None:
                 se_ref, se_mega = moe_layer.shared_experts, mega_layer.shared_experts
@@ -255,85 +292,113 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
         # (state threading, GA-safe weight-quant cache), not a precision measurement.
         # activation="swigluoai" checks the MegaMoE kernels' activation against Megatron's own
         # quick_geglu; x is scaled so the L1 output (std ~1.7 at unit x) crosses the 7.0 clamp.
-        num_moe_experts, hidden_size = 256, 7168
+        num_moe_experts = 256
         x_gain = 3.0 if activation == "swigluoai" else 1.0
         self._init_process(precision=precision)
         self._setup_ep()
         try:
             config = _build_config(self.world_size, num_moe_experts, moe_router_topk, activation)
-            moe_layers, mega_layers = _build_layers(config, num_moe_experts, 1)
-            moe_layer, mega_layer = moe_layers[0], mega_layers[0]
-            self.assertEqual(isinstance(mega_layer.experts, MegaMoEFP8Experts), precision == "mxfp8")
-            moe_layer.train(True)
-            mega_layer.train(True)
-            experts = moe_layer.experts.local_experts
-            se = moe_layer.shared_experts
-            seq, batch = 8192, 1
+            self._check_parity(config, num_moe_experts, precision, num_ga, x_gain)
+        finally:
+            parallel_state.destroy_model_parallel()
+            dist.destroy_process_group()
 
-            fwd_cos, dx_cos = [], []
-            # GA loop: accumulate grads over num_ga microbatches, compare each fwd/dx
-            for step in range(num_ga):
-                torch.manual_seed(1000 + self.rank + step * 97)
-                x = torch.randn((seq, batch, hidden_size), dtype=torch.bfloat16, device=self.device)
-                if x_gain != 1.0:
-                    x = x * x_gain
-                g = torch.randn((seq, batch, hidden_size), dtype=torch.bfloat16, device=self.device)
+    @skip_if_lt_x_gpu(8)
+    @parametrize("num_moe_experts", [32, 128])
+    @parametrize("precision", ["bf16", "mxfp8"])
+    def test_forward_backward_gptoss(self, num_moe_experts, precision):
+        # GPT-OSS-20B / -120B experts at EP8: hidden = ffn = 2880 (not a multiple of the 256-wide
+        # GEMM tile; mxfp8 runs it zero-padded to 3072), expert fc1/fc2 biases, swigluoai, no
+        # shared expert. x_gain as for swigluoai.
+        self._init_process(precision=precision)
+        self._setup_ep()
+        try:
+            config = _build_gptoss_config(self.world_size, num_moe_experts)
+            self._check_parity(config, num_moe_experts, precision, num_ga=2, x_gain=3.0)
+        finally:
+            parallel_state.destroy_model_parallel()
+            dist.destroy_process_group()
 
-                x_ref = x.clone().requires_grad_(True)
-                ref, _ = moe_layer(x_ref)
-                ref.backward(g)
-                x_meg = x.clone().requires_grad_(True)
-                out, _ = mega_layer(x_meg)
-                out.backward(g)
+    def _check_parity(self, config, num_moe_experts, precision, num_ga, x_gain):
+        hidden_size = config.hidden_size
+        moe_layers, mega_layers = _build_layers(config, num_moe_experts, 1)
+        moe_layer, mega_layer = moe_layers[0], mega_layers[0]
+        self.assertEqual(isinstance(mega_layer.experts, MegaMoEFP8Experts), precision == "mxfp8")
+        moe_layer.train(True)
+        mega_layer.train(True)
+        experts = moe_layer.experts.local_experts
+        se = moe_layer.shared_experts
+        seq, batch = 8192, 1
 
-                fwd_cos.append(_cosine(out, ref))
-                dx_cos.append(_cosine(x_meg.grad, x_ref.grad))
-                self._rank0(
-                    f"[ga {step}] fwd cos={fwd_cos[-1]:.6f} dx cos={dx_cos[-1]:.6f} "
-                    f"max_abs_diff={(out.float()-ref.float()).abs().max().item():.3e}"
-                )
+        fwd_cos, dx_cos = [], []
+        # GA loop: accumulate grads over num_ga microbatches, compare each fwd/dx
+        for step in range(num_ga):
+            torch.manual_seed(1000 + self.rank + step * 97)
+            x = torch.randn((seq, batch, hidden_size), dtype=torch.bfloat16, device=self.device)
+            if x_gain != 1.0:
+                x = x * x_gain
+            g = torch.randn((seq, batch, hidden_size), dtype=torch.bfloat16, device=self.device)
 
-            GRAD_FLOOR = 0.90 if precision == "mxfp8" else 0.95
-            failures = []
+            x_ref = x.clone().requires_grad_(True)
+            ref, _ = moe_layer(x_ref)
+            ref.backward(g)
+            x_meg = x.clone().requires_grad_(True)
+            out, _ = mega_layer(x_meg)
+            out.backward(g)
 
-            def check_accuracy(tag, cos):
-                # negated compare so a NaN cosine fails instead of slipping through
-                if not cos > GRAD_FLOOR:
-                    failures.append(f"{tag} cosine {cos:.6f} < {GRAD_FLOOR}")
+            fwd_cos.append(_cosine(out, ref))
+            dx_cos.append(_cosine(x_meg.grad, x_ref.grad))
+            self._rank0(
+                f"[ga {step}] fwd cos={fwd_cos[-1]:.6f} dx cos={dx_cos[-1]:.6f} "
+                f"max_abs_diff={(out.float()-ref.float()).abs().max().item():.3e}"
+            )
 
-            # forward + dx parity: every microbatch
-            for step in range(num_ga):
-                check_accuracy(f"ga{step} fwd", fwd_cos[step])
-                check_accuracy(f"ga{step} dx", dx_cos[step])
+        GRAD_FLOOR = 0.90 if precision == "mxfp8" else 0.95
+        failures = []
 
-            # accumulated per-weight grad parity: every trainable weight
-            dgate = _cosine(mega_layer.router.weight.grad, moe_layer.router.weight.grad)
-            check_accuracy("router", dgate)
+        def check_accuracy(tag, cos):
+            # negated compare so a NaN cosine fails instead of slipping through
+            if not cos > GRAD_FLOOR:
+                failures.append(f"{tag} cosine {cos:.6f} < {GRAD_FLOOR}")
+
+        # forward + dx parity: every microbatch
+        for step in range(num_ga):
+            check_accuracy(f"ga{step} fwd", fwd_cos[step])
+            check_accuracy(f"ga{step} dx", dx_cos[step])
+
+        # accumulated per-weight grad parity: every trainable weight
+        dgate = _cosine(mega_layer.router.weight.grad, moe_layer.router.weight.grad)
+        check_accuracy("router", dgate)
+        dsw1 = dsw2 = float("nan")
+        if se is not None:
             dsw1 = _cosine(mega_layer.shared_experts.linear_fc1.weight.grad, se.linear_fc1.weight.grad)
             dsw2 = _cosine(mega_layer.shared_experts.linear_fc2.weight.grad, se.linear_fc2.weight.grad)
             check_accuracy("shared dW1", dsw1)
             check_accuracy("shared dW2", dsw2)
-            # routed experts: full w1/w2 grad tensors (norm-weighted over all local
-            # experts); per-expert min is thin-token bf16 noise, informational only.
-            ref_dw1 = torch.stack([e.linear_fc1.weight.grad for e in experts])
-            ref_dw2 = torch.stack([e.linear_fc2.weight.grad for e in experts])
-            mega_w1_grad = mega_layer.experts.fc1_weight.weight.grad
-            mega_w2_grad = mega_layer.experts.fc2_weight.weight.grad
-            dW1 = _cosine(mega_w1_grad, ref_dw1)
-            dW2 = _cosine(mega_w2_grad, ref_dw2)
-            check_accuracy("experts dW1", dW1)
-            check_accuracy("experts dW2", dW2)
-            dw1_min = min(_cosine(mega_w1_grad[i], e.linear_fc1.weight.grad) for i, e in enumerate(experts))
-            dw2_min = min(_cosine(mega_w2_grad[i], e.linear_fc2.weight.grad) for i, e in enumerate(experts))
-            self._rank0(
-                f"[grad accum over {num_ga} ga] dgate={dgate:.6f} dSharedW1={dsw1:.6f} "
-                f"dSharedW2={dsw2:.6f} experts dW1={dW1:.6f} dW2={dW2:.6f} "
-                f"(per-expert min {dw1_min:.4f}/{dw2_min:.4f})"
-            )
-            self.assertEqual(failures, [], f"parity below {GRAD_FLOOR}: {failures}")
-        finally:
-            parallel_state.destroy_model_parallel()
-            dist.destroy_process_group()
+        if config.add_bias_linear:
+            for name, module in (("db1", "fc1"), ("db2", "fc2")):
+                ref_db = torch.stack([getattr(e, f"linear_{module}").bias.grad for e in experts])
+                db = _cosine(getattr(mega_layer.experts, f"{module}_weight").bias.grad, ref_db)
+                self._rank0(f"[grad accum over {num_ga} ga] experts {name}={db:.6f}")
+                check_accuracy(f"experts {name}", db)
+        # routed experts: full w1/w2 grad tensors (norm-weighted over all local
+        # experts); per-expert min is thin-token bf16 noise, informational only.
+        ref_dw1 = torch.stack([e.linear_fc1.weight.grad for e in experts])
+        ref_dw2 = torch.stack([e.linear_fc2.weight.grad for e in experts])
+        mega_w1_grad = mega_layer.experts.fc1_weight.weight.grad
+        mega_w2_grad = mega_layer.experts.fc2_weight.weight.grad
+        dW1 = _cosine(mega_w1_grad, ref_dw1)
+        dW2 = _cosine(mega_w2_grad, ref_dw2)
+        check_accuracy("experts dW1", dW1)
+        check_accuracy("experts dW2", dW2)
+        dw1_min = min(_cosine(mega_w1_grad[i], e.linear_fc1.weight.grad) for i, e in enumerate(experts))
+        dw2_min = min(_cosine(mega_w2_grad[i], e.linear_fc2.weight.grad) for i, e in enumerate(experts))
+        self._rank0(
+            f"[grad accum over {num_ga} ga] dgate={dgate:.6f} dSharedW1={dsw1:.6f} "
+            f"dSharedW2={dsw2:.6f} experts dW1={dW1:.6f} dW2={dW2:.6f} "
+            f"(per-expert min {dw1_min:.4f}/{dw2_min:.4f})"
+        )
+        self.assertEqual(failures, [], f"parity below {GRAD_FLOOR}: {failures}")
 
 
 if __name__ == "__main__":
