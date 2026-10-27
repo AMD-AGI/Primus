@@ -5,7 +5,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 
 env:
   GPU_MAX_HW_QUEUES: "4"
-  PYTORCH_HIP_ALLOC_CONF: expandable_segments:True
+  # PYTORCH_HIP_ALLOC_CONF: expandable_segments:True
 
 modules:
   pre_trainer:
@@ -78,7 +78,7 @@ modules:
 
       # Turbo
       enable_primus_turbo: true
-      use_turbo_attention: true
+      use_turbo_attention: false
 
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"
