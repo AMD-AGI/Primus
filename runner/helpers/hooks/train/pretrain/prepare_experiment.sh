@@ -121,6 +121,21 @@ _dbg(f'pre_trainer.framework: {pre_trainer.framework}')
 print(pre_trainer.framework)
 " | tail -n 1 | tr -d '\r' || true)"
 
+# Renamed backends, from primus/backends/backend_aliases.py; the config route above
+# is already mapped by the parser.
+if [[ -n "$BACKEND_OVERRIDE" ]]; then
+    CURRENT_BACKEND="$(python3 -c "
+import sys
+sys.path.insert(0, '${PRIMUS_ROOT}')
+from primus.backends.backend_aliases import RENAMED_BACKENDS
+print(RENAMED_BACKENDS.get(sys.argv[1], sys.argv[1]))
+" "$BACKEND_OVERRIDE" | tail -n 1 | tr -d '\r' || true)"
+    if [[ -n "$CURRENT_BACKEND" && "$CURRENT_BACKEND" != "$BACKEND_OVERRIDE" ]]; then
+        LOG_WARN "prepare_experiment.sh: --backend $BACKEND_OVERRIDE is deprecated; use --backend $CURRENT_BACKEND"
+        BACKEND_OVERRIDE="$CURRENT_BACKEND"
+    fi
+fi
+
 if [[ -n "$BACKEND_OVERRIDE" ]]; then
     FRAMEWORK="$BACKEND_OVERRIDE"
     if [[ -n "$FRAMEWORK_FROM_CONFIG" ]]; then
