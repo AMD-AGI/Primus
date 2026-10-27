@@ -39,7 +39,8 @@ Four of them are pinned here specifically:
 
 No GPU and no distributed initialization: the plan is a class attribute, and the
 model is built tiny on CPU purely so module names and output ranks can be
-resolved.
+resolved. The padding, the timestep guard and their wiring need no diffusers and
+are tested in ``test_ideogram4_cp_guards.py``.
 """
 
 import inspect
@@ -80,29 +81,73 @@ TINY_MODEL_KWARGS = dict(
 )
 
 
-@pytest.fixture(autouse=True)
-def installed_plan():
-    """Install onto the real class, then put it back.
+_MISSING = object()
 
-    ``install`` mutates class-level state, so without the restore a failure in one
-    test would leak into the next and the suite would stop meaning anything.
+# Class attributes install() sets or wraps, on the model and on the cached adapter.
+_MODEL_ATTRS = (
+    "_cp_plan",
+    "enable_parallelism",
+    "forward",
+    "_primus_cp_installed",
+    "_primus_cp_enable_wrapped",
+)
+_ADAPTER_ATTRS = ("forward", "_primus_cp_pad_wrapped")
+
+
+def _snapshot(cls, names):
+    return {name: cls.__dict__.get(name, _MISSING) for name in names}
+
+
+def _restore(cls, saved):
+    for name, value in saved.items():
+        if value is _MISSING:
+            if name in cls.__dict__:
+                delattr(cls, name)
+        else:
+            setattr(cls, name, value)
+
+
+def _clear(cls, names):
+    for name in names:
+        if name in cls.__dict__:
+            delattr(cls, name)
+
+
+@pytest.fixture
+def pristine():
+    """The two classes as they were before any install, restored afterwards.
+
+    ``install`` mutates class-level state on the model and on the cached adapter
+    class, so without the restore one test's install would leak into every later
+    test in the session, adapter tests included.
     """
     model_cls = Ideogram4Transformer2DModel
-    saved = {
-        "_cp_plan": getattr(model_cls, "_cp_plan", None),
-        "enable_parallelism": model_cls.enable_parallelism,
-        "forward": model_cls.forward,
-        "_primus_cp_installed": getattr(model_cls, "_primus_cp_installed", False),
-    }
-    model_cls._primus_cp_installed = False
-    previous_multiple = cp.sequence_multiple()
-    cp._SEQUENCE_MULTIPLE = 1
+    adapter_cls = adapter.get_ideogram4_adapter_class()
+    saved_model = _snapshot(model_cls, _MODEL_ATTRS)
+    saved_adapter = _snapshot(adapter_cls, _ADAPTER_ATTRS)
+    saved_logged = cp._pad_logged
+    _clear(model_cls, ("_primus_cp_installed", "_primus_cp_enable_wrapped"))
+    _clear(adapter_cls, ("_primus_cp_pad_wrapped",))
+    if saved_model["_cp_plan"] is not _MISSING:
+        delattr(model_cls, "_cp_plan")
     cp._pad_logged = False
-    cp.install()
-    yield model_cls
-    cp._SEQUENCE_MULTIPLE = previous_multiple
-    for name, value in saved.items():
-        setattr(model_cls, name, value)
+    yield types.SimpleNamespace(
+        model_cls=model_cls,
+        adapter_cls=adapter_cls,
+        forward=model_cls.forward,
+        adapter_forward=adapter_cls.forward,
+        enable_parallelism=model_cls.enable_parallelism,
+    )
+    _restore(model_cls, saved_model)
+    _restore(adapter_cls, saved_adapter)
+    cp._pad_logged = saved_logged
+
+
+@pytest.fixture(autouse=True)
+def installed_plan(pristine):
+    """Install onto the real classes; ``pristine`` puts them back."""
+    assert cp.install() is True
+    return pristine.model_cls
 
 
 @pytest.fixture
@@ -126,26 +171,50 @@ class TestInstall:
         assert cp.install() is True
         assert installed_plan.enable_parallelism is before
 
-    def test_defers_to_a_plan_diffusers_ships(self, installed_plan):
-        """Once diffusers declares its own plan, that one wins and nothing of ours
-        is layered on top of it."""
-        shipped = {"": {}}
-        before = installed_plan.enable_parallelism
-        installed_plan._primus_cp_installed = False
-        installed_plan._cp_plan = shipped
+    def test_does_not_wrap_the_forward(self, installed_plan, pristine):
+        """The regression in its most direct form: the forward is the one the class
+        had before install."""
+        assert installed_plan.forward is pristine.forward
 
-        assert cp.install() is False
-        assert installed_plan._cp_plan is shipped
-        assert installed_plan.enable_parallelism is before
+    def test_install_wraps_the_entry_point_and_the_adapter(self, installed_plan, pristine):
+        """The guards and the padding say nothing unless install did the wrapping,
+        and the fixture starts from unwrapped classes, so this one did."""
+        assert installed_plan.enable_parallelism is not pristine.enable_parallelism
+        assert pristine.adapter_cls.forward is not pristine.adapter_forward
+        assert pristine.adapter_cls._primus_cp_pad_wrapped is True
 
-    def test_does_not_wrap_the_forward(self, installed_plan):
-        """The regression in its most direct form: the forward is left alone."""
-        assert installed_plan.forward is Ideogram4Transformer2DModel.forward
 
-    def test_install_wraps_the_adapter_to_pad(self):
-        """The padding runs inside the adapter's wrapped ``prepare_inputs``, so the
-        tests of the padding itself say nothing unless install did the wrapping."""
-        assert adapter.get_ideogram4_adapter_class()._primus_cp_pad_wrapped is True
+class TestAShippedPlan:
+    """Once diffusers declares its own plan, that plan wins -- but the padding and
+    the guards hold whichever plan splits the sequence, so they still go in."""
+
+    @pytest.fixture(autouse=True)
+    def installed_plan(self, pristine):
+        """Overrides the module fixture: the shipped plan has to be in place
+        before install runs."""
+        pristine.model_cls._cp_plan = {"": {}}
+        return pristine
+
+    def test_the_shipped_plan_is_kept(self, installed_plan):
+        shipped = installed_plan.model_cls._cp_plan
+        assert cp.install() is True
+        assert installed_plan.model_cls._cp_plan is shipped
+
+    def test_the_guards_and_the_padding_are_still_installed(self, installed_plan):
+        assert cp.install() is True
+        assert installed_plan.model_cls.enable_parallelism is not installed_plan.enable_parallelism
+        assert installed_plan.adapter_cls.forward is not installed_plan.adapter_forward
+
+    def test_the_varlen_combination_is_still_refused(self, installed_plan, tiny_model, set_option):
+        cp.install()
+        set_option("primus_ideogram4.varlen_attention", True)
+        with pytest.raises(ValueError, match="variable-length"):
+            tiny_model.enable_parallelism(config=None)
+
+    def test_it_warns(self, installed_plan, caplog):
+        with caplog.at_level("WARNING"):
+            cp.install()
+        assert any("ships a context-parallel plan" in r.getMessage() for r in caplog.records)
 
 
 class TestPlanStructure:
@@ -170,7 +239,10 @@ class TestPlanStructure:
     def test_root_plan_names_resolve_in_forward_signature(self, installed_plan):
         """The reason the forward must not be wrapped. diffusers matches the root
         plan's keys against the signature, so a ``*args, **kwargs`` wrapper leaves
-        exactly these inputs unsplit, and says nothing about it."""
+        exactly these inputs unsplit, and says nothing about it. Resolved the way
+        diffusers resolves them, following ``__wrapped__``: the real forward is
+        itself decorated, and its outer signature is ``*args, **kwargs``. The
+        identity check above is what catches a wrapper of ours."""
         params = set(inspect.signature(installed_plan.forward).parameters)
         missing = set(installed_plan._cp_plan[""]) - params
         assert not missing, f"plan names not visible in the forward signature: {sorted(missing)}"
@@ -232,37 +304,33 @@ class TestRefusesTheVarlenCombination:
         )
 
         monkeypatch.setattr(Ideogram4Attention, "_primus_varlen_installed", True, raising=False)
-        with pytest.raises(ValueError, match="variable-length"):
+        with pytest.raises(ValueError, match="Restart with the setting off"):
             tiny_model.enable_parallelism(config=None)
 
-    def test_the_stock_attention_path_is_allowed(self, installed_plan, tiny_model):
-        """The guard must not fire on the default configuration. ``config=None``
-        gets past our check and then fails inside diffusers; anything other than our
-        own message means the guard let it through, which is what matters here."""
-        try:
-            tiny_model.enable_parallelism(config=None)
-        except ValueError as exc:
-            assert "variable-length" not in str(exc)
-        except Exception:
-            pass
+    def test_the_stock_attention_path_reaches_the_original(self, installed_plan, tiny_model, monkeypatch):
+        """The guard must not fire on the default configuration: the original entry
+        point, replaced here by a recording stub before wrapping, is reached."""
+        reached = []
+
+        def original(self, *, config, cp_plan=None):
+            reached.append(config)
+
+        # Pinned off: an attention-processor test may have left the processor on
+        # the class, which is the refusal's job to notice, not this test's.
+        monkeypatch.setattr(cp, "_varlen_attention_in_use", lambda: None)
+        monkeypatch.setattr(installed_plan, "enable_parallelism", original)
+        monkeypatch.setattr(installed_plan, "_primus_cp_enable_wrapped", False)
+        cp._wrap_enable_parallelism(installed_plan)
+        tiny_model.enable_parallelism(config=None)
+        assert reached == [None]
 
 
-class TestTimestepGuard:
-    @pytest.mark.parametrize(
-        "timestep, refused",
-        [
-            (None, False),
-            (torch.rand(2), False),  # per sample: broadcasts, needs no split
-            (torch.rand(2, 24), True),  # per token: would need splitting, so refuse
-            (torch.rand(2, 24, 1), True),
-        ],
-    )
-    def test_shape_assumption_is_enforced(self, timestep, refused):
-        if refused:
-            with pytest.raises(ValueError, match="per-sample timestep"):
-                cp._assert_timestep_is_per_sample(timestep)
-        else:
-            cp._assert_timestep_is_per_sample(timestep)
+class TestTimestepGuardOnTheRealModel:
+    def test_the_timestep_is_the_second_positional_parameter(self):
+        """The hook takes ``args[1]`` as the timestep when it arrives positionally,
+        which is only right while the real forward keeps that order."""
+        params = list(inspect.signature(Ideogram4Transformer2DModel.forward).parameters)
+        assert params[1:3] == ["hidden_states", "timestep"]
 
     def test_a_per_token_timestep_is_caught_through_the_hook(self, tiny_model):
         """End to end through the hook's argument extraction, which has to find the
@@ -271,120 +339,9 @@ class TestTimestepGuard:
             cp._timestep_pre_hook(tiny_model, (), {"timestep": torch.rand(2, 24)})
         with pytest.raises(ValueError, match="per-sample timestep"):
             cp._timestep_pre_hook(tiny_model, (torch.rand(2, 8, 4), torch.rand(2, 24)), {})
-        # And must not fire on the per-sample shape, by either route.
         assert cp._timestep_pre_hook(tiny_model, (), {"timestep": torch.rand(2)}) is None
         assert cp._timestep_pre_hook(tiny_model, (torch.rand(2, 8, 4), torch.rand(2)), {}) is None
 
 
-class TestTheGuardIsWiredUp:
-    """That the guard runs at all, which testing the assertion in isolation says
-    nothing about.
-
-    Installed onto a stand-in class rather than the real one, because the real
-    ``enable_parallelism`` fails inside diffusers on any config a test can build,
-    which is before the hook would be registered. The stand-in lets the inner call
-    succeed so the wiring is what is under test.
-    """
-
-    @pytest.fixture
-    def stub_model(self, monkeypatch):
-        import diffusers.models.transformers.transformer_ideogram4 as module
-
-        class Ideogram4Transformer2DModel(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.enabled = []
-
-            def enable_parallelism(self, config=None):
-                self.enabled.append(config)
-
-            def forward(self, hidden_states, timestep=None, **kwargs):
-                return hidden_states
-
-        monkeypatch.setattr(module, "Ideogram4Transformer2DModel", Ideogram4Transformer2DModel)
-        assert cp.install() is True
-        return Ideogram4Transformer2DModel()
-
-    def test_no_hook_before_cp_is_switched_on(self, stub_model):
-        """Installing the plan alone must not add a per-forward cost to runs that
-        never enable CP."""
-        assert len(stub_model._forward_pre_hooks) == 0
-
-    def test_the_hook_is_registered_when_cp_is_switched_on(self, stub_model):
-        stub_model.enable_parallelism(config=None)
-
-        assert stub_model.enabled == [None], "the original was not called"
-        assert len(stub_model._forward_pre_hooks) == 1
-
-    def test_the_degree_is_recorded_for_sequence_padding(self, stub_model):
-        """The adapter pads to this multiple. It has to be the degree the plan
-        will actually shard by, and only after enable has accepted the config."""
-        config = types.SimpleNamespace(ring_degree=1, ulysses_degree=2)
-        stub_model.enable_parallelism(config=config)
-        assert cp.sequence_multiple() == 2
-
-    def test_the_hook_refuses_a_per_token_timestep_on_forward(self, stub_model):
-        """The point of the whole arrangement: a per-token timestep is caught on the
-        forward it would have been mis-sliced on."""
-        stub_model.enable_parallelism(config=None)
-
-        with pytest.raises(ValueError, match="per-sample timestep"):
-            stub_model(torch.rand(2, 8, 4), timestep=torch.rand(2, 8))
-
-    def test_the_hook_passes_a_per_sample_timestep(self, stub_model):
-        stub_model.enable_parallelism(config=None)
-
-        out = stub_model(torch.rand(2, 8, 4), timestep=torch.rand(2))
-        assert out.shape == (2, 8, 4)
-
-
-def _packed(length, max_text, grid=(2, 3)):
-    """A prepared batch whose tail is the image region."""
-    hidden = torch.zeros(2, length, 4)
-    hidden[:, max_text:] = 1
-    return {
-        "hidden_states": hidden,
-        "encoder_hidden_states": torch.zeros(2, length, 3),
-        "position_ids": torch.zeros(2, length, 3, dtype=torch.long),
-        "segment_ids": torch.zeros(2, length, dtype=torch.long),
-        "indicator": torch.zeros(2, length, dtype=torch.long),
-        "_max_text": max_text,
-        "_grid_h": grid[0],
-        "_grid_w": grid[1],
-    }
-
-
-class TestSequencePadding:
-    """The real cache packs 255 text tokens with a 16x16 grid, which is 511.
-    A degree of 2 cannot shard that, and diffusers asserts in the forward."""
-
-    def test_an_indivisible_length_is_left_padded(self):
-        """The new column must carry the padding segment ID and position 0. The batch
-        starts as ones, which differ from both fills, so the new column cannot pass
-        by accident; filling with 1, the real tokens' segment, fails here."""
-        cp._SEQUENCE_MULTIPLE = 2
-        batch = _packed(11, 5)
-        batch["segment_ids"] = torch.ones_like(batch["segment_ids"])
-        batch["position_ids"] = torch.ones_like(batch["position_ids"])
-        out = cp.pad_prepared_inputs(batch)
-        assert out["_max_text"] == 6
-        assert out["hidden_states"].shape[1] == 12
-        assert torch.all(out["hidden_states"][:, :1] == 0)
-        assert torch.all(out["hidden_states"][:, -6:] == 1)
-        assert out["indicator"].shape[1] == 12
-        assert torch.all(out["indicator"][:, 0] == 0)
-        assert torch.all(out["segment_ids"][:, 0] == adapter._layout_constants()[3])
-        assert torch.all(out["position_ids"][:, 0] == 0)
-        assert torch.equal(out["segment_ids"][:, 1:], batch["segment_ids"])
-        assert torch.equal(out["position_ids"][:, 1:], batch["position_ids"])
-
-    def test_a_divisible_length_is_unchanged(self):
-        cp._SEQUENCE_MULTIPLE = 2
-        out = cp.pad_prepared_inputs(_packed(10, 4))
-        assert out["_max_text"] == 4
-        assert out["hidden_states"].shape[1] == 10
-
-    def test_padding_is_off_when_the_degree_is_one(self):
-        cp._SEQUENCE_MULTIPLE = 1
-        out = cp.pad_prepared_inputs(_packed(11, 5))
-        assert out["hidden_states"].shape[1] == 11
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -100,21 +100,34 @@ logger = logging.getLogger(__name__)
 
 _LOG_PREFIX = "[PrimusIdeogramCP]"
 
-# 1 until enable_parallelism runs, which upstream calls only for a degree above
-# one. The adapter reads this to left-pad the packed sequence; the plan itself
-# cannot, because the tensors are already built by the time its hooks run.
-_SEQUENCE_MULTIPLE = 1
+# Set on the model instance by enable_parallelism, which upstream calls only for a
+# degree above one, so a second model in the same process (an EMA copy, an eval
+# pipeline) keeps its own. The adapter reads it to left-pad the packed sequence;
+# the plan itself cannot, because the tensors are built before its hooks run.
+_MULTIPLE_ATTR = "_primus_cp_sequence_multiple"
+_HOOK_ATTR = "_primus_cp_timestep_hook"
 
 
-def sequence_multiple() -> int:
-    """Packed-sequence multiple required by the enabled context-parallel degree."""
-    return _SEQUENCE_MULTIPLE
+def sequence_multiple(model) -> int:
+    """Packed-sequence multiple required by this model's context-parallel degree.
+
+    1 for a model that never enabled CP. Looks through a ``module`` or ``_orig_mod``
+    wrapper, since the adapter may be handed one.
+    """
+    for candidate in (model, getattr(model, "module", None), getattr(model, "_orig_mod", None)):
+        if candidate is not None and hasattr(candidate, _MULTIPLE_ATTR):
+            return int(getattr(candidate, _MULTIPLE_ATTR))
+    return 1
 
 
 def _degree_of(config) -> int:
-    """Ring times Ulysses, which is the equipartition the plan will apply."""
+    """Ring times Ulysses, which is the equipartition the plan will apply.
+
+    Takes a context-parallel config or the parallel config diffusers wraps one in.
+    """
     if config is None:
         return 1
+    config = getattr(config, "context_parallel_config", None) or config
     ring = int(getattr(config, "ring_degree", 1) or 1)
     ulysses = int(getattr(config, "ulysses_degree", 1) or 1)
     return max(1, ring * ulysses)
@@ -123,15 +136,14 @@ def _degree_of(config) -> int:
 _pad_logged = False
 
 
-def pad_prepared_inputs(inputs):
-    """Left-pad a prepared Ideogram batch so its packed length is divisible by the CP degree.
+def pad_prepared_inputs(inputs, multiple: int):
+    """Left-pad a prepared Ideogram batch so its packed length is a multiple of ``multiple``.
 
     The adapter has already right-aligned the caption inside the text region, so
     columns added on the left are padding and the image tokens stay at the tail,
-    which is where the loss slices them. A degree of one, and a length that is
+    which is where the loss slices them. A multiple of one, and a length that is
     already divisible, are returned unchanged.
     """
-    multiple = sequence_multiple()
     if multiple <= 1:
         return inputs
     max_text = int(inputs["_max_text"])
@@ -176,23 +188,21 @@ def pad_prepared_inputs(inputs):
     return padded
 
 
-def _install_input_padding() -> None:
-    """Wrap the adapter once. The degree is read on each batch, so the wrap is
-    inert until enable_parallelism records one above 1."""
-    from primus.backends.automodel.models.ideogram4.adapter import (
-        get_ideogram4_adapter_class,
-    )
+def _install_input_padding(adapter_cls) -> None:
+    """Wrap the adapter's forward once.
 
-    cls = get_ideogram4_adapter_class()
-    if getattr(cls, "_primus_cp_pad_wrapped", False):
+    The forward is handed the model, whose own degree decides the padding, so the
+    wrap is inert for every model that never enabled CP.
+    """
+    if getattr(adapter_cls, "_primus_cp_pad_wrapped", False):
         return
-    original = cls.prepare_inputs
+    original = adapter_cls.forward
 
-    def prepare_inputs(self, context):
-        return pad_prepared_inputs(original(self, context))
+    def forward(self, model, inputs):
+        return original(self, model, pad_prepared_inputs(inputs, sequence_multiple(model)))
 
-    cls.prepare_inputs = prepare_inputs
-    cls._primus_cp_pad_wrapped = True
+    adapter_cls.forward = forward
+    adapter_cls._primus_cp_pad_wrapped = True
 
 
 def _build_cp_plan():
@@ -228,25 +238,27 @@ def _build_cp_plan():
     }
 
 
-def _varlen_attention_in_use() -> bool:
-    """Whether the variable-length attention processor is actually in effect.
+def _varlen_attention_in_use():
+    """Why the variable-length attention processor is in effect, or None.
 
-    Checks the installed state and not only the request, so that the refusal is
-    about what is TRUE rather than what was asked for: the processor patches a
-    class default, which outlives the setting that caused it.
+    ``"requested"`` when the setting is on, ``"installed"`` when it is off but the
+    processor is in place anyway. Checks the installed state and not only the
+    request, so that the refusal is about what is TRUE rather than what was asked
+    for: the processor patches a class default, which outlives the setting that
+    caused it.
     """
     from primus.backends.automodel.models.ideogram4 import _varlen_common
 
     if _varlen_common.is_varlen_attn_enabled():
-        return True
+        return "requested"
 
     try:
         from diffusers.models.transformers.transformer_ideogram4 import (
             Ideogram4Attention,
         )
     except ImportError:
-        return False
-    return getattr(Ideogram4Attention, "_primus_varlen_installed", False)
+        return None
+    return "installed" if getattr(Ideogram4Attention, "_primus_varlen_installed", False) else None
 
 
 def _refuse_varlen_combination() -> None:
@@ -256,17 +268,29 @@ def _refuse_varlen_combination() -> None:
     installing the plan is harmless -- it is enabling CP that makes the combination
     wrong.
     """
-    if not _varlen_attention_in_use():
+    reason = _varlen_attention_in_use()
+    if reason is None:
         return
+    if reason == "requested":
+        remedy = (
+            "Turn primus_ideogram4.varlen_attention off to run CP on the stock "
+            "attention path, or set the context-parallel degree to 1 to keep the "
+            "variable-length path."
+        )
+    else:
+        remedy = (
+            "primus_ideogram4.varlen_attention is off, but the processor was installed "
+            "earlier in this process and stays on the attention class until the process "
+            "exits, so turning the setting off now changes nothing. Restart with the "
+            "setting off to run CP, or set the context-parallel degree to 1."
+        )
     raise ValueError(
         "Context parallelism and the Ideogram-4 variable-length attention processor "
         "cannot be used together. The processor calls the flash-attention kernel "
         "directly and never reaches diffusers' attention dispatch, which is where the "
         "Ulysses all-to-all happens, so each rank would attend only within its own "
         "shard of the sequence and training would produce wrong gradients WITHOUT "
-        "raising anywhere. Turn primus_ideogram4.varlen_attention off to run CP on the stock "
-        "attention path, or set the context-parallel degree to 1 to keep the "
-        "variable-length path."
+        "raising anywhere. " + remedy
     )
 
 
@@ -299,17 +323,52 @@ def _timestep_pre_hook(module, args, kwargs):
     return None
 
 
+def _wrap_enable_parallelism(model_cls) -> None:
+    """Wrap the enable-parallelism entry point once.
+
+    Upstream calls it only for a CP degree above one. The wrap refuses the
+    variable-length combination before the original runs, then records the degree
+    and registers the timestep guard on the instance once the original accepts the
+    config, so a refused enable leaves the model unpadded and unhooked.
+    """
+    if getattr(model_cls, "_primus_cp_enable_wrapped", False):
+        return
+    original = model_cls.enable_parallelism
+
+    def enable_parallelism(self, *args, **kwargs):
+        _refuse_varlen_combination()
+        result = original(self, *args, **kwargs)
+        # Read back what the original stored rather than the argument: diffusers
+        # wraps a bare context-parallel config in its parallel config.
+        degree = _degree_of(getattr(self, "_parallel_config", None) or kwargs.get("config"))
+        setattr(self, _MULTIPLE_ATTR, degree)
+        # One guard per instance, however often CP is enabled on it.
+        if getattr(self, _HOOK_ATTR, None) is None:
+            setattr(self, _HOOK_ATTR, self.register_forward_pre_hook(_timestep_pre_hook, with_kwargs=True))
+        logger.info(
+            "%s context parallelism is on (degree %d). The adapter left-pads the "
+            "packed sequence to a multiple of that degree.",
+            _LOG_PREFIX,
+            degree,
+        )
+        return result
+
+    model_cls.enable_parallelism = enable_parallelism
+    model_cls._primus_cp_enable_wrapped = True
+
+
 def install() -> bool:
-    """Attach a context-parallel plan to Ideogram-4.
+    """Attach a context-parallel plan to Ideogram-4, with its padding and guards.
 
     Sets the ``_cp_plan`` class attribute, which is what makes AutoModel's CP path
-    accept this model at all, and wraps the enable-parallelism entry point --
-    called upstream only for a CP degree above one -- so that the two silently
-    wrong configurations are rejected at the moment CP is switched on.
+    accept this model at all; wraps the enable-parallelism entry point so that the
+    two silently wrong configurations are rejected at the moment CP is switched
+    on; and wraps the adapter's forward to pad the packed sequence to the degree.
 
-    Returns False when diffusers is absent, so a run without it is unaffected, and
-    when diffusers ships its own plan for the model, which then takes precedence.
-    Idempotent, and edits no diffusers or AutoModel source.
+    When diffusers ships its own plan, that plan is kept, and the padding and the
+    guards are installed all the same: they hold whichever plan splits the
+    sequence. Returns False only when diffusers lacks the model, so a run without
+    it is unaffected. Idempotent, and edits no diffusers or AutoModel source.
     """
     try:
         from diffusers.models.transformers.transformer_ideogram4 import (
@@ -321,47 +380,30 @@ def install() -> bool:
     if getattr(Ideogram4Transformer2DModel, "_primus_cp_installed", False):
         return True
 
-    # Installed with the plan, not only when CP is enabled: the degree is 1 until
-    # then, so the wrap adds no padding to a run that never asks for CP.
-    _install_input_padding()
+    from primus.backends.automodel.models.ideogram4.adapter import (
+        get_ideogram4_adapter_class,
+    )
 
     plan = _build_cp_plan()
     shipped = getattr(Ideogram4Transformer2DModel, "_cp_plan", None)
-    if shipped is not None and shipped != plan:
+    if shipped is None:
+        Ideogram4Transformer2DModel._cp_plan = plan
+    elif shipped != plan:
         logger.warning(
-            "%s diffusers now ships a context-parallel plan for Ideogram-4; keeping "
-            "it and installing nothing. Re-check this module against the diffusers pin.",
+            "%s diffusers now ships a context-parallel plan for Ideogram-4; keeping it, "
+            "and still installing the sequence padding and the two guards, which do not "
+            "depend on whose plan splits the sequence. Re-check this module against the "
+            "diffusers pin.",
             _LOG_PREFIX,
         )
-        return False
 
-    Ideogram4Transformer2DModel._cp_plan = plan
-
-    original_enable_parallelism = Ideogram4Transformer2DModel.enable_parallelism
-
-    def enable_parallelism(self, *args, **kwargs):
-        _refuse_varlen_combination()
-        result = original_enable_parallelism(self, *args, **kwargs)
-        # Recorded only after the original accepts the config, so a refused
-        # enable does not make the adapter pad a run that is not actually split.
-        config = kwargs.get("config", args[0] if args else None)
-        global _SEQUENCE_MULTIPLE
-        _SEQUENCE_MULTIPLE = _degree_of(config)
-        self.register_forward_pre_hook(_timestep_pre_hook, with_kwargs=True)
-        logger.info(
-            "%s context parallelism is on (degree %d). The adapter left-pads the "
-            "packed sequence to a multiple of that degree.",
-            _LOG_PREFIX,
-            _SEQUENCE_MULTIPLE,
-        )
-        return result
-
-    Ideogram4Transformer2DModel.enable_parallelism = enable_parallelism
+    _wrap_enable_parallelism(Ideogram4Transformer2DModel)
+    _install_input_padding(get_ideogram4_adapter_class())
     Ideogram4Transformer2DModel._primus_cp_installed = True
 
     logger.info(
-        "%s attached a context-parallel plan to Ideogram-4 (Ulysses). The CP degree "
-        "has to divide both the world size and the attention head count; it is inert "
+        "%s context-parallel plan ready for Ideogram-4 (Ulysses). The CP degree has "
+        "to divide both the world size and the attention head count; it is inert "
         "until a config asks for a degree above one.",
         _LOG_PREFIX,
     )
