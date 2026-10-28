@@ -32,7 +32,8 @@ if [ "${PRIMUS_LAUNCHER}" = "container" ]; then
   ENV_ARGS=()
   for v in MODEL PRIMUS_TEAM PRIMUS_USER PRIMUS_EXP_NAME PRIMUS_EP HIP_VISIBLE_DEVICES GPUS_PER_NODE \
            TRAIN_ITERS MBS GBS NUM_LAYERS CE_IMPL EXTRA_ARGS PATCH_TRITON_EXPERT_SCHEDULING \
-           TRITON_HIP_USE_EXPERT_SCHEDULING PRIMUS_TURBO_ATTN_BACKEND HSA_COREDUMP_PATTERN HF_TOKEN; do
+           TRITON_HIP_USE_EXPERT_SCHEDULING PRIMUS_TURBO_ATTN_BACKEND HSA_COREDUMP_PATTERN HF_TOKEN \
+           HIPBLASLT_TUNING_OVERRIDE_FILE; do
     if [ -n "${!v+x}" ]; then ENV_ARGS+=(-e "${v}"); fi
   done
   DEVICE_ARGS=(--device /dev/kfd --device /dev/dri)
@@ -58,6 +59,10 @@ export TRITON_HIP_USE_EXPERT_SCHEDULING=${TRITON_HIP_USE_EXPERT_SCHEDULING:-0}
 export PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-triton}
 # A GPU fault otherwise writes a multi-GB core file per rank into the working directory.
 export HSA_COREDUMP_PATTERN=${HSA_COREDUMP_PATTERN:-/dev/null}
+# hipBLASLt GEMM tuning for the hipBLASLt build in DOCKER_IMAGE (README.md, "GEMM tuning").
+# Set HIPBLASLT_TUNING_OVERRIDE_FILE= (empty) for hipBLASLt's default kernel selection.
+export HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE-${HERE}/hipblaslt_tuning/gpt_oss-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt}
+[ -n "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ] || unset HIPBLASLT_TUNING_OVERRIDE_FILE
 
 if [ "${PATCH_TRITON_EXPERT_SCHEDULING:-1}" = "1" ]; then
   TRITON_AMD_COMPILER="$(python -c 'import os, triton; print(os.path.join(os.path.dirname(triton.__file__), "backends", "amd", "compiler.py"))')"
@@ -102,6 +107,7 @@ export PRIMUS_EXP_NAME=${PRIMUS_EXP_NAME:-gpt_oss_${MODEL}_mi455x_ep${PRIMUS_EP}
 LOGDIR="${REPO}/output/${PRIMUS_TEAM}/${PRIMUS_USER}/${PRIMUS_EXP_NAME}"
 mkdir -p "${LOGDIR}"
 echo "[gpt-oss] model=${MODEL} gpus=${GPUS_PER_NODE} ep=${PRIMUS_EP} mbs=${MBS} gbs=${GBS} ce=${CE_IMPL} log=${LOGDIR}"
+echo "[gpt-oss] hipBLASLt tuning: ${HIPBLASLT_TUNING_OVERRIDE_FILE:-off}"
 
 # shellcheck disable=SC2086
 ./primus-cli direct -- train pretrain --config "${EXP}" \

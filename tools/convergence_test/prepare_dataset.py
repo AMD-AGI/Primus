@@ -51,6 +51,10 @@ Examples:
         --model llama2_7B.yaml --source HuggingFaceFW/fineweb:sample-10BT --target-tokens 600e6
     python3 tools/convergence_test/prepare_dataset.py \
         --model llama2_7B.yaml --source ./corpus/ --text-field content --target-tokens 600e6
+
+    # A tokenizer with no eos token: name the token that ends each document
+    python3 tools/convergence_test/prepare_dataset.py \
+        --model inkling_small.yaml --eod-token '<|endoftext|>' --target-tokens 600e6
 """
 
 import argparse
@@ -477,6 +481,11 @@ def main():
     parser.add_argument("--num-proc", type=int, default=min(48, (os.cpu_count() or 8)))
     parser.add_argument("--batch-size", type=int, default=256, help="Documents per worker batch")
     parser.add_argument("--force", action="store_true", help="Rebuild even if outputs exist")
+    parser.add_argument(
+        "--eod-token",
+        help="Token that ends each document, for tokenizers with no eos token "
+        "(e.g. '<|endoftext|>' for Inkling); saved as the tokenizer's eos_token",
+    )
     args = parser.parse_args()
 
     maxtext = args.format == "maxtext"
@@ -537,8 +546,21 @@ def main():
                 f"WARNING: this dataset was built with {recorded_name}, not the requested "
                 f"{tokenizer_name}; the saved copy is being used. Pass --force to rebuild."
             )
+    if args.eod_token:
+        eod_id = tokenizer.convert_tokens_to_ids(args.eod_token)
+        if not isinstance(eod_id, int) or eod_id == tokenizer.unk_token_id:
+            raise SystemExit(f"--eod-token {args.eod_token!r} is not a token of {tokenizer_name}")
+        if tokenizer.eos_token_id not in (None, eod_id):
+            log(
+                f"WARNING: replacing eos token {tokenizer.eos_token!r} ({tokenizer.eos_token_id}) "
+                f"with --eod-token {args.eod_token!r} ({eod_id})"
+            )
+        tokenizer.eos_token = args.eod_token
     if tokenizer.eos_token_id is None:
-        raise SystemExit(f"tokenizer {tokenizer_name} has no eos token, cannot append <eod>")
+        raise SystemExit(
+            f"tokenizer {tokenizer_name} has no eos token, cannot append <eod>; "
+            "pass --eod-token <token> to choose one"
+        )
     if maxtext:
         ensure_pad_token(tokenizer)
     vocab_size = len(tokenizer)
@@ -560,6 +582,11 @@ def main():
                 f"{out_dir} holds a dataset tokenised with a {recorded}-token vocabulary, "
                 f"but {tokenizer_name} has {vocab_size}.\nUse a different --out-dir, "
                 "or --force to rebuild from scratch."
+            )
+        if previous.get("eod_id") not in (None, tokenizer.eos_token_id):
+            raise SystemExit(
+                f"{out_dir} holds documents ending in token {previous['eod_id']}, but the end-of-document "
+                f"token is now {tokenizer.eos_token_id}.\nUse a different --out-dir, or --force to rebuild."
             )
         if maxtext and previous.get("seq_length") not in (None, args.seq_length):
             raise SystemExit(

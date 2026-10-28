@@ -1,0 +1,66 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Inkling-Small, the released checkpoint (thinkingmachines/Inkling-Small).
+# Every value below is the text_config of its config.json, renamed to Megatron
+# keys; tests/unit_tests/backends/megatron/inkling checks the two agree.
+#
+#   release key               -> here
+#   num_key_value_heads       -> num_query_groups
+#   head_dim                  -> kv_channels
+#   swa_num_key_value_heads   -> swa_num_query_groups
+#   swa_head_dim              -> swa_kv_channels
+#   dense_intermediate_size   -> ffn_hidden_size        (dense MLP)
+#   intermediate_size         -> moe_ffn_hidden_size    (one routed expert)
+#   n_routed_experts          -> num_experts
+#   num_experts_per_tok       -> moe_router_topk
+#   n_shared_experts          -> moe_num_shared_experts
+#   route_scale               -> moe_router_topk_scaling_factor
+#   dense_mlp_idx: 2          -> moe_layer_freq "([0]*2+[1]*40)"
+#   sconv_kernel_size         -> short_conv_kernel_size
+#
+# The checkpoint also carries 8 multi-token-prediction layers (model.mtp.*);
+# they are a later addition and the importer skips them.
+#
+# PARAMETER COUNT (text backbone, from the checkpoint headers): 263.7 B, of
+# which the 40 x 256 routed experts are 257.7 B; MTP adds 2.2 B. 6 routed +
+# 2 shared experts are active per token.
+###############################################################################
+extends:
+  - inkling_base.yaml
+
+num_layers: 42
+hidden_size: 4096
+
+# global layers
+num_attention_heads: 32
+num_query_groups: 8
+kv_channels: 128
+rel_extent: 1024
+
+# sliding layers (35 of 42; global at 5, 11, ..., 41)
+swa_num_attention_heads: 32
+swa_num_query_groups: 8
+swa_kv_channels: 128
+sliding_window_size: 512             # also the relative-bias extent of the sliding layers
+
+d_rel: 16
+short_conv_kernel_size: 4
+log_scaling_n_floor: 128000          # global layers scale q and the bias by 1 + 0.1*log(n/128000) past 128k
+log_scaling_alpha: 0.1
+logits_mup_width_multiplier: 16.0
+unpadded_vocab_size: 200058
+
+ffn_hidden_size: 16384               # dense layers 0-1
+num_experts: 256
+moe_ffn_hidden_size: 2048
+moe_router_topk: 6
+moe_num_shared_experts: 2
+moe_router_topk_scaling_factor: 8.0
+moe_layer_freq: "([0]*2+[1]*40)"
+
+max_position_embeddings: 1048576
+seq_length: 4096                     # training seq; overridden per experiment
