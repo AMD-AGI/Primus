@@ -75,3 +75,47 @@ def patch_moe_dispatcher(ctx: PatchContext):
         f"megatron.core.transformer.moe.moe_layer.MoEFlexTokenDispatcher "
         f"-> {PrimusTurboDeepEPTokenDispatcher.__name__}"
     )
+
+    if getattr(args, "moe_shared_expert_overlap", False):
+        _allow_shared_expert_overlap_with_flex()
+
+
+_SHARED_EXPERT_OVERLAP_PATCH_KEY = "megatron.turbo.moe_dispatcher.shared_expert_overlap"
+
+
+def _allow_shared_expert_overlap_with_flex() -> None:
+    """Let ``moe_shared_expert_overlap`` through TransformerConfig with the flex dispatcher.
+
+    Upstream rejects the flag for every dispatcher but alltoall, because only that one calls
+    the shared expert's overlap hooks. PrimusTurboDeepEPTokenDispatcher calls them too, so the
+    check is skipped for it; the remaining overlap checks in ``__post_init__`` are kept.
+    """
+    import megatron.core.transformer.transformer_config as config_mod
+
+    from primus.backends.megatron.patches._patch_guard import is_patched, mark_patched
+
+    TransformerConfig = config_mod.TransformerConfig
+    if is_patched(TransformerConfig, _SHARED_EXPERT_OVERLAP_PATCH_KEY):
+        return
+    original_post_init = TransformerConfig.__post_init__
+
+    def patched_post_init(self):
+        overlap = self.moe_shared_expert_overlap and self.moe_token_dispatcher_type == "flex"
+        if not overlap:
+            return original_post_init(self)
+        if self.recompute_granularity == "selective" and "shared_experts" in (self.recompute_modules or []):
+            raise ValueError("shared_experts recompute cannot work with --moe-shared-expert-overlap.")
+        if getattr(self, "overlap_moe_expert_parallel_comm", False):
+            raise ValueError("disable moe_shared_expert_overlap when enabling overlap_moe_expert_parallel_comm")
+        self.moe_shared_expert_overlap = False
+        try:
+            original_post_init(self)
+        finally:
+            self.moe_shared_expert_overlap = True
+
+    TransformerConfig.__post_init__ = patched_post_init
+    mark_patched(TransformerConfig, _SHARED_EXPERT_OVERLAP_PATCH_KEY)
+    log_rank_0(
+        "[Patch:megatron.turbo.moe_dispatcher]   Allowed moe_shared_expert_overlap with the "
+        "PrimusTurbo DeepEP dispatcher"
+    )

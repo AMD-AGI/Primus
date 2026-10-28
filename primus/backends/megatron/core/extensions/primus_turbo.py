@@ -2698,6 +2698,9 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 % self.config.num_moe_experts
             )
 
+        if self.shared_experts is not None:
+            self.shared_experts.pre_forward_comm(hidden_states.view(self.hidden_shape))
+
         hidden_states, probs = self.deepep_dispatcher._pre_dispatch(
             hidden_states, probs, routing_map, token_indices
         )
@@ -2743,6 +2746,9 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         Returns:
             A tuple of permuted tokens, token counts per expert, and permuted probabilities.
         """
+        if self.shared_experts is not None:
+            self.shared_experts.linear_fc1_forward_and_act(hidden_states)
+
         quantize_dtype, _ = self._fp8_permute_dtypes()
         if quantize_dtype is None:
             permuted_input, tokens_per_expert, permuted_probs = self.deepep_dispatcher._post_dispatch(
@@ -2805,8 +2811,15 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         Returns:
             The final MoE layer output reshaped to its original dimensions.
         """
+        if self.shared_experts is not None:
+            self.shared_experts.linear_fc2_forward(hidden_states)
+            self.shared_experts.post_forward_comm()
+
         hidden_states = self.deepep_dispatcher._post_combine(hidden_states)
-        return hidden_states.view(self.hidden_shape)
+        output = hidden_states.view(self.hidden_shape)
+        if self.shared_experts is not None:
+            output = output + self.shared_experts.get_output()
+        return output
 
 
 class PrimusTurboRMSNorm(te.pytorch.RMSNorm):

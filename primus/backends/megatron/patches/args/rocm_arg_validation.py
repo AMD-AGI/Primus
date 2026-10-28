@@ -268,9 +268,6 @@ def validate_args_on_rocm(args):
     # turbo deepep
     if args.use_turbo_deepep:
         assert (
-            not args.moe_shared_expert_overlap
-        ), "DeepEP not support moe_shared_expert_overlap, please set `moe_shared_expert_overlap=False`."
-        assert (
             args.moe_router_dtype == "fp32"
         ), "DeepEP only supports float32 probs, please set `moe_router_dtype=fp32`"
         if (
