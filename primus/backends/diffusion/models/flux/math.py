@@ -20,9 +20,15 @@ from primus.backends.diffusion.models.flux.rope_triton import (
     fused_rope_supported,
 )
 
-# Off unless a benchmark config turns it on. flux.1-dev and flux.1-schnell keep
-# the original broadcast multiply.
-_FUSED_ROPE = os.getenv("PRIMUS_FLUX_TRITON_ROPE", "0") == "1"
+
+def _fused_rope_enabled() -> bool:
+    """Read ``PRIMUS_FLUX_TRITON_ROPE`` at call time.
+
+    The benchmark configs export it from the YAML ``env`` block, which can
+    happen after this module is imported. flux.1-dev and flux.1-schnell stay
+    on the broadcast multiply unless the variable is ``1``.
+    """
+    return os.getenv("PRIMUS_FLUX_TRITON_ROPE", "0") == "1"
 
 
 def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor) -> Tensor:
@@ -47,7 +53,7 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
 
 
 def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
-    if _FUSED_ROPE and xq.shape == xk.shape and fused_rope_supported(xq, freqs_cis):
+    if _fused_rope_enabled() and xq.shape == xk.shape and fused_rope_supported(xq, freqs_cis):
         return fused_apply_rope(xq, xk, freqs_cis)
     xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
     xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)

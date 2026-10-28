@@ -134,9 +134,15 @@ checkpoint.
 | Wan2.1 I2V 14B | Wan2.1 DiT with CLIP cross-attention | official I2V DiT, Wan2.1 VAE, UMT5, CLIP vision |
 
 HunyuanVideo's trainable module is the transformer. Its causal 3D VAE is not
-vendored, so the training step reads `batch["latents"]`. Mochi encodes video
-with the official VAE encoder. Wan2.1 I2V encodes with the existing Wan2.1 VAE
-and the vendored CLIP visual tower.
+vendored. A snapshot that contains `vae/` is used to encode raw video; a
+latent batch trains without it. Mochi encodes video with the official VAE
+encoder. Wan2.1 I2V encodes with the existing Wan2.1 VAE and the vendored CLIP
+visual tower.
+
+MI355X configs default to learning rate `1e-4`, `constant_with_warmup`, and
+`max_grad_norm` 1.0. MI300X and MI325X keep the AMDB scheduler: flux and the
+video models use `1e-5` with a constant schedule, and SDXL uses `1e-4` with a
+polynomial schedule. `LR` overrides either default.
 
 Per-GPU batch sizes follow the AMDiffusionBenchmark MI300/MI325 and MI355 commands.
 `LOCAL_BATCH_SIZE` still overrides the default.

@@ -13,7 +13,7 @@ import torch.nn as nn
 from einops import rearrange
 
 from .activation_layers import get_activation_layer
-from .attenion import attention, get_cu_seqlens, parallel_attention
+from .attention import attention, get_cu_seqlens, parallel_attention
 from .embed_layers import PatchEmbed, TextProjection, TimestepEmbedder
 from .mlp_layers import MLP, FinalLayer, MLPEmbedder
 from .modulate_layers import ModulateDiT, apply_gate, modulate

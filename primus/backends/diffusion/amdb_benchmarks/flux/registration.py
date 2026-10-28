@@ -288,9 +288,13 @@ def build_flux_model(model_config: dict[str, Any]):
 
     encoder_cfg = dict(model_config.get("encoder", {}) or cfg_dict.get("encoder", {}) or {})
     if preset == "flux-dev" and not encoder_cfg.get("autoencoder") and pretrained_path:
-        ae_path = os.path.join(os.path.dirname(os.path.expanduser(str(pretrained_path))), "ae.safetensors")
+        checkpoint = os.path.expanduser(str(pretrained_path))
+        root = checkpoint if os.path.isdir(checkpoint) else os.path.dirname(checkpoint)
+        ae_path = os.path.join(root, "ae.safetensors")
         if os.path.isfile(ae_path):
             encoder_cfg["autoencoder"] = ae_path
+        else:
+            logger.warning(f"FLUX autoencoder was not found next to {checkpoint}")
     dtype = torch.bfloat16
     t5_encoder = None
     clip_encoder = None

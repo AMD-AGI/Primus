@@ -8,8 +8,10 @@
 
 ``primus-cli`` runs this from the diffusion prepare hook, before the training
 processes start. Model repos land in ``<cache>/hub``. Dataset repos land in
-``<cache>/datasets/<org>/<name>``. The cache is ``~/cache/huggingface`` unless
-``HF_HOME`` was already pointed somewhere else.
+``<cache>/datasets/<org>/<name>``. The cache root is ``PRIMUS_HF_HOME`` when
+that is set. Otherwise an explicit ``HF_HOME`` is used, except when it equals
+the runner's automatic ``$DATA_PATH/huggingface``. The fallback is
+``~/cache/huggingface``.
 """
 
 from __future__ import annotations
@@ -257,8 +259,11 @@ def _companion_paths(model_name: str, weights: str, encoder: dict[str, object]) 
     elif model_name == "hunyuan-video":
         if _blank(encoder.get("llm")):
             found["LLM_ENCODER"] = _require_file(root / "text_encoder", "HunyuanVideo LLaMA encoder")
-        if _blank(encoder.get("autoencoder")):
-            found["VAE_CHECKPOINT"] = _require_file(root / "vae", "HunyuanVideo autoencoder")
+        # The community snapshot sometimes ships ``vae/`` and sometimes does not.
+        # Latent batches do not need it; raw video does, and the caller can set
+        # ``encoder.autoencoder`` when the folder lives somewhere else.
+        if _blank(encoder.get("autoencoder")) and (root / "vae").exists():
+            found["VAE_CHECKPOINT"] = str(root / "vae")
     elif model_name == "wan2.1-i2v":
         needed = {
             "TEXT_ENCODER": "t5_encoder",

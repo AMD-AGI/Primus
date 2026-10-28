@@ -170,15 +170,15 @@ class FluxRawImageTextDataset(Dataset):
         return len(self.dataset)
 
     def _prompt_from_sample(self, sample: dict[str, Any]) -> str:
-        keys = ("txt", "caption", "prompt", "text")
-        if self.benchmark_loader:
-            keys = keys + ("caption_0",)
-        for key in keys:
-            if key in sample and (sample[key] is not None or not self.benchmark_loader):
-                value = sample[key]
-                if isinstance(value, list):
-                    value = value[0]
-                return str(value)
+        for key in ("txt", "caption", "prompt", "text", "caption_0"):
+            if key not in sample or sample[key] is None:
+                continue
+            value = sample[key]
+            if isinstance(value, list):
+                value = value[0] if value else None
+            if value is None:
+                continue
+            return str(value)
         if self.benchmark_loader:
             from primus.backends.diffusion.amdb_benchmarks.data import (
                 caption_from_image_filename,
@@ -188,7 +188,7 @@ class FluxRawImageTextDataset(Dataset):
                 caption = caption_from_image_filename(sample.get(key))
                 if caption:
                     return caption
-        raise KeyError("FLUX raw sample requires one of: txt, caption, prompt, text")
+        raise KeyError("FLUX raw sample requires one of: txt, caption, prompt, text, caption_0")
 
     def _image_from_jsonl_sample(self, sample: dict[str, Any]) -> Image.Image:
         image_key = "image" if "image" in sample else "jpg" if "jpg" in sample else "png"

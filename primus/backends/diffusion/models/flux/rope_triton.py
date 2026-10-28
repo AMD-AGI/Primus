@@ -77,9 +77,19 @@ def fused_rope_supported(x: Tensor, freqs_cis: Tensor) -> bool:
     return freqs_cis.shape[1] == x.shape[1] and freqs_cis.shape[0] in (1, x.shape[0])
 
 
+def _shared_cos_sin(freqs_cis: Tensor, shape: tuple[int, int, int]) -> tuple[Tensor, Tensor]:
+    """Reuse one fp32 cos/sin pair for every block that sees this ``pe``."""
+    cached = getattr(_shared_cos_sin, "cached", None)
+    if cached is not None and cached[0] is freqs_cis and cached[1] == shape:
+        return cached[2], cached[3]
+    cos = freqs_cis[:, :, 0, :, 0, 0].float().expand(shape).contiguous()
+    sin = freqs_cis[:, :, 0, :, 1, 0].float().expand(shape).contiguous()
+    _shared_cos_sin.cached = (freqs_cis, shape, cos, sin)
+    return cos, sin
+
+
 def fused_apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
     """``freqs_cis`` is ``[B, L, 1, D/2, 2, 2]`` holding ``[[cos, -sin], [sin, cos]]``."""
     shape = (xq.shape[0], xq.shape[1], xq.shape[3] // 2)
-    cos = freqs_cis[:, :, 0, :, 0, 0].float().expand(shape).contiguous()
-    sin = freqs_cis[:, :, 0, :, 1, 0].float().expand(shape).contiguous()
+    cos, sin = _shared_cos_sin(freqs_cis, shape)
     return _FusedRope.apply(xq, cos, sin), _FusedRope.apply(xk, cos, sin)

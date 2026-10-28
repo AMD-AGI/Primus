@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -77,6 +79,35 @@ def image_dataset_load_kwargs(dataset_path: str) -> dict[str, Any]:
     return {"split": "train", "verification_mode": "no_checks"}
 
 
+class _TemporaryVideoReader:
+    """decord reader that deletes its scratch file once the frames are taken."""
+
+    def __init__(self, path: str, reader: Any):
+        self._path = path
+        self._reader = reader
+
+    def get_batch(self, indices):
+        try:
+            return self._reader.get_batch(indices)
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        path = self._path
+        self._path = None
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def __len__(self) -> int:
+        return len(self._reader)
+
+    def __del__(self) -> None:
+        self.close()
+
+
 def open_video_reader(video: Any):
     """Decode a Hugging Face video value with decord. This image has no torchcodec."""
     if isinstance(video, str):
@@ -88,14 +119,14 @@ def open_video_reader(video: Any):
     from decord import VideoReader, cpu
 
     source = video.get("path")
-    if not source:
-        import tempfile
-
-        handle = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    if source:
+        return VideoReader(str(source), ctx=cpu(0))
+    handle = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    try:
         handle.write(video["bytes"])
+    finally:
         handle.close()
-        source = handle.name
-    return VideoReader(str(source), ctx=cpu(0))
+    return _TemporaryVideoReader(handle.name, VideoReader(handle.name, ctx=cpu(0)))
 
 
 def caption_from_image_filename(image: Any) -> str:
@@ -113,6 +144,7 @@ class AMDBDataset:
             raise ValueError(f"amdb modality must be 'image' or 'video', got {modality!r}")
         self.records = records
         self.modality = modality
+        self._logged_skips: set[int] = set()
 
     def __len__(self) -> int:
         return len(self.records)
@@ -121,11 +153,21 @@ class AMDBDataset:
         count = len(self.records)
         last_error: Exception | None = None
         for offset in range(count):
+            row_index = (index + offset) % count
             try:
-                row = self.records[(index + offset) % count]
-                return self._sample_from_row(row)
-            except Exception as exc:
+                return self._sample_from_row(self.records[row_index])
+            except (OSError, RuntimeError, ValueError) as exc:
                 last_error = exc
+                if row_index not in self._logged_skips:
+                    self._logged_skips.add(row_index)
+                    from primus.backends.diffusion.utils.log import logger
+
+                    logger.warning(
+                        "Skipping undecodable amdb %s sample %s: %s",
+                        self.modality,
+                        row_index,
+                        exc,
+                    )
         raise RuntimeError(f"amdb dataset has no decodable {self.modality} sample") from last_error
 
     def _sample_from_row(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -218,7 +260,7 @@ def build_amdb_dataset(dataset_config: dict[str, Any]):
     if not dataset_path:
         raise ValueError("amdb dataset requires data.dataset_path")
     if str(dataset_path).endswith(".pt"):
-        samples = torch.load(str(dataset_path), map_location="cpu", weights_only=False)
+        samples = torch.load(str(dataset_path), map_location="cpu", weights_only=True)
         dataset = _CachedTensorDataset(samples)
         processor = AMDBProcessor(dataset_config)
         processor.build()

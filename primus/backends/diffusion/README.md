@@ -18,7 +18,10 @@ datasets, attention selection, FSDP2 wrapping, and the training loop.
 - `primus-cli` downloads those benchmark checkpoints into
   `~/cache/huggingface/hub` and the datasets into
   `~/cache/huggingface/datasets/<org>/<name>`. `PRIMUS_HF_HOME` changes the
-  cache root.
+  cache root. An explicit `HF_HOME` is used unless it is the runner's
+  automatic `$DATA_PATH/huggingface`.
+- `PRIMUS_FLUX_TRITON_ROPE=1` switches FLUX RoPE to the fused Triton kernel.
+  The `benchmark_flux_dev` configs set it. Left unset, FLUX keeps the eager RoPE.
 
 Install backend dependencies with:
 
@@ -45,8 +48,9 @@ benchmark_wan2_1_i2v.yaml
 ```
 
 `flux-dev` and `flux.1-dev` both build the native FLUX.1-dev DiT.
-`flux-dev` is the post-train preset: raw images, learning rate `1e-5`, and
-resolution 512. `sdxl`, `mochi-1`, `hunyuan-video`, and `wan2.1-i2v` are
+`flux-dev` is the post-train preset: raw images and resolution 512.
+MI300X and MI325X use learning rate `1e-5`. The MI355X config defaults to
+`1e-4` (`LR` overrides it). `sdxl`, `mochi-1`, `hunyuan-video`, and `wan2.1-i2v` are
 native post-train presets. Their checkpoints are the official weight files
 (FLUX `flux1-dev.safetensors`, SDXL UNet, Mochi DiT and VAE encoder,
 HunyuanVideo transformer, Wan2.1 I2V 14B DiT plus CLIP), not Diffusers-layout

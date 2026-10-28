@@ -66,7 +66,8 @@ def test_benchmark_argument_builder_video_defaults_and_resolution_override():
     assert args.dataset["config"]["modality"] == "video"
     assert args.model["config"]["resolution"] == "960,544"
     assert args.model["config"]["num_frames"] == 9
-    assert args.trainer["args"]["gradient_checkpointing"] is True
+    # Checkpointing stays off so the step time matches AMDiffusionBenchmark.
+    assert args.trainer["args"]["gradient_checkpointing"] is False
     assert (
         args.trainer["args"]["fsdp_transformer_layer_cls_to_wrap"]
         == "MMDoubleStreamBlock,MMSingleStreamBlock"
@@ -196,7 +197,11 @@ def test_companion_checkpoints_match_the_official_snapshots(tmp_path):
     (hunyuan / "tokenizer" / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     hunyuan_env = download._companion_paths("hunyuan-video", str(hunyuan / "transformer"), {})
     assert hunyuan_env["LLM_ENCODER"] == str(hunyuan / "text_encoder")
+    assert "VAE_CHECKPOINT" not in hunyuan_env
     assert download.tokenizer_dir(hunyuan_env["LLM_ENCODER"]) == str(hunyuan / "tokenizer")
+    (hunyuan / "vae").mkdir()
+    with_vae = download._companion_paths("hunyuan-video", str(hunyuan / "transformer"), {})
+    assert with_vae["VAE_CHECKPOINT"] == str(hunyuan / "vae")
 
 
 def test_wan_encoder_files_come_from_the_official_repo(monkeypatch, tmp_path):
@@ -262,6 +267,59 @@ def test_benchmark_step_rates_match_amdiffusionbenchmark():
     )
     assert fps_gpu == 4.0
     assert tflops_per_gpu == 400.0
+
+
+def test_amdb_dataset_skips_decode_errors_only(tmp_path):
+    from primus.backends.diffusion.amdb_benchmarks.data import AMDBDataset, _TemporaryVideoReader
+
+    class Corrupt:
+        def load(self):
+            raise OSError("corrupt image")
+
+    class Fine:
+        def load(self):
+            return None
+
+    dataset = AMDBDataset(
+        [{"image": Corrupt(), "prompt": "bad"}, {"image": Fine(), "prompt": "good"}],
+        modality="image",
+    )
+    assert dataset[0]["prompt"] == "good"
+    with pytest.raises(KeyError):
+        AMDBDataset([{"prompt": "missing image"}], modality="image")[0]
+
+    scratch = tmp_path / "amdb-temp-video.mp4"
+    scratch.write_bytes(b"mp4")
+
+    class DummyReader:
+        def get_batch(self, indices):
+            return indices
+
+        def __len__(self):
+            return 1
+
+    reader = _TemporaryVideoReader(str(scratch), DummyReader())
+    assert reader.get_batch([0]) == [0]
+    assert not scratch.exists()
+
+
+def test_clip_grad_norm_skips_the_collective_when_clipping_is_off():
+    import torch
+
+    from primus.backends.diffusion.trainers.base import BaseWanTrainer
+
+    class _Tiny(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(2))
+
+    model = _Tiny()
+    model.weight.grad = torch.ones(2)
+    trainer = BaseWanTrainer.__new__(BaseWanTrainer)
+    trainer.max_grad_norm = 0.0
+    trainer.model = model
+    assert BaseWanTrainer._clip_grad_norm(trainer) == 0.0
+    assert torch.equal(model.weight.grad, torch.ones(2))
 
 
 def test_even_batches_pad_short_tail_like_accelerate():

@@ -140,9 +140,10 @@ def _stage_benchmark_downloads(
             encoder=encoder_cfg,
         )
     except Exception as exc:
-        message = str(exc)
-        if "hf_" in message:
-            message = "Hugging Face download failed. Check ~/.hf_token and repo access."
+        message = f"{type(exc).__name__}: {exc}"
+        lowered = message.lower()
+        if any(token in lowered for token in ("401", "403", "gated", "unauthorized")):
+            message = f"{message} Check ~/.hf_token and repo access."
         _fail(message)
     if env.get("PRETRAINED_PATH"):
         model_cfg["load_from_pretrained_path"] = env["PRETRAINED_PATH"]
@@ -264,7 +265,7 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
             model_cfg.get("load_from_pretrained_path"),
             "FLUX DiT initialization checkpoint",
         )
-    elif model_name in {"sdxl", "stable-diffusion-xl", "mochi-1", "hunyuan-video", "wan2.1-i2v"}:
+    elif model_name in _BENCHMARK_DOWNLOADS - {"flux-dev"}:
         _validate_benchmark_model(model_name, dataset_cfg, model_cfg, model)
     else:
         _fail(f"unsupported diffusion model for prepare hook: {model_name!r}")

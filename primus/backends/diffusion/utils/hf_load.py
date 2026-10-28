@@ -30,7 +30,9 @@ def disable_safetensors_auto_conversion() -> None:
 
     def auto_conversion(*args, **kwargs):
         del args, kwargs
-        return None
+        # modeling_utils unpacks ``resolved_archive_file, revision, is_sharded``.
+        # ``None`` raises ``TypeError: cannot unpack non-iterable NoneType``.
+        return None, None, False
 
     conversion.auto_conversion = auto_conversion
     conversion._primus_conversion_disabled = True

@@ -64,12 +64,12 @@ def build_hunyuan_model(model_config: dict):
         text_encoder = HunyuanTextEncoder(llm_path, clip_path)
 
     vae_path = encoder_cfg.get("autoencoder") or os.environ.get("VAE_CHECKPOINT")
-    if not vae_path:
-        raise ValueError("hunyuan-video requires model.encoder.autoencoder (the official causal 3D VAE).")
-    from diffusers import AutoencoderKLHunyuanVideo
+    vae = None
+    if vae_path:
+        from diffusers import AutoencoderKLHunyuanVideo
 
-    vae = AutoencoderKLHunyuanVideo.from_pretrained(vae_path).eval()
-    vae.requires_grad_(False)
+        vae = AutoencoderKLHunyuanVideo.from_pretrained(vae_path).eval()
+        vae.requires_grad_(False)
 
     pretrained = materialize_pretrained("hunyuan-video", model_config.get("load_from_pretrained_path") or "")
     if pretrained:

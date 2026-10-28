@@ -214,9 +214,10 @@ class WanFlowMatchTrainPipeline:
     @staticmethod
     def _select_timestep(scheduler: Any, device: torch.device) -> torch.Tensor:
         """Sample one training timestep uniformly."""
-        timestep_id = torch.randint(0, int(scheduler.num_train_timesteps), (1,), device=device)
-        # scheduler.timesteps live on CPU in this repo; `wan_new` indexes with cpu tensor.
-        timestep = scheduler.timesteps[timestep_id.cpu()].float()
+        # Draw the index on CPU. ``scheduler.timesteps`` lives on CPU, and a GPU
+        # index would sync the device on every micro-batch inside the timed step.
+        timestep_id = torch.randint(0, int(scheduler.num_train_timesteps), (1,))
+        timestep = scheduler.timesteps[timestep_id].float()
         return timestep.to(device=device)
 
     @staticmethod

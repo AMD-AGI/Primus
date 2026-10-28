@@ -10,6 +10,10 @@ import copy
 from types import SimpleNamespace
 from typing import Any
 
+from primus.backends.diffusion.amdb_benchmarks.arguments import (
+    apply_benchmark_sections,
+    benchmark_defaults,
+)
 from primus.core.utils.yaml_utils import nested_namespace_to_dict
 
 
@@ -231,10 +235,6 @@ class DiffusionArgBuilder:
         return name
 
     def _defaults_for_model(self, model_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        from primus.backends.diffusion.amdb_benchmarks.arguments import (
-            benchmark_defaults,
-        )
-
         benchmark = benchmark_defaults(
             model_name,
             flux_dataset=self.DEFAULT_FLUX_DATASET,
@@ -429,10 +429,6 @@ class DiffusionArgBuilder:
             trainer_args.get("sp_size", 1)
         ) != 1:
             raise ValueError("FLUX diffusion training currently requires `parallelism.sp_size: 1`.")
-
-        from primus.backends.diffusion.amdb_benchmarks.arguments import (
-            apply_benchmark_sections,
-        )
 
         apply_benchmark_sections(
             model_name,

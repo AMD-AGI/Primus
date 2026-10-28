@@ -147,15 +147,14 @@ class ContiguousDistributedSampler(Sampler[int]):
 
 
 class EvenSizeBatchSampler(Sampler[list[int]]):
-    """Yield only full batches, matching Accelerate's default ``even_batches``.
+    """Yield only full batches for the AMDiffusionBenchmark step metrics.
 
-    AMDiffusionBenchmark builds its loader with ``Accelerator()``. That wraps
-    the loader in ``BatchSamplerShard(even_batches=True)``, which repeats
-    samples from the front so a short tail still has ``train_batch_size``
-    examples. FPS and TFLOPS then use that configured size for every step:
-    ``fps = train_batch_size / step_time_gpu`` and
-    ``tflops/s = total_flops / step_time_gpu``, with ``total_flops`` taken
-    once from the first step.
+    The tail is padded from the front of this sampler, which is the rank-local
+    shard, so every step has ``batch_size`` examples. FPS and TFLOPS then use
+    that configured size: ``fps = train_batch_size / step_time_gpu`` and
+    ``tflops/s = total_flops / step_time_gpu``, with ``total_flops`` taken once
+    from the first step. MLPerf mode does not use this sampler, because the
+    repeated samples would be counted again.
     """
 
     def __init__(self, sampler: Sampler[int], batch_size: int):
@@ -315,15 +314,14 @@ class BaseWanTrainer:
             "persistent_workers": num_workers > 0,
             "prefetch_factor": 2 if num_workers > 0 else None,
         }
-        if bool(self.args.get("dataloader_even_batches", False)):
-            self.batch_sampler = EvenSizeBatchSampler(self.sampler, self.per_device_train_batch_size)
+        if bool(self.args.get("dataloader_even_batches", False)) and not mlperf_mode:
+            batch_sampler = EvenSizeBatchSampler(self.sampler, self.per_device_train_batch_size)
             self.dataloader = torch.utils.data.DataLoader(
                 train_dataset,
-                batch_sampler=self.batch_sampler,
+                batch_sampler=batch_sampler,
                 **loader_kwargs,
             )
         else:
-            self.batch_sampler = None
             self.dataloader = torch.utils.data.DataLoader(
                 train_dataset,
                 batch_size=self.per_device_train_batch_size,
@@ -434,7 +432,12 @@ class BaseWanTrainer:
         yield
 
     def _clip_grad_norm(self) -> float | torch.Tensor:
-        """Return the global grad norm, and clip only when a positive limit is set."""
+        """Clip gradient norm. Returns the total norm value."""
+        # Benchmark defaults set max_grad_norm to 0. Computing the norm anyway
+        # runs a DTensor all-reduce inside the timed step.
+        if self.max_grad_norm <= 0:
+            return 0.0
+
         parameters = [p for p in self.model.parameters() if p.grad is not None]
         if not parameters:
             return 0.0
@@ -451,8 +454,7 @@ class BaseWanTrainer:
         if dtensor_cls is not None and isinstance(norm, dtensor_cls):
             norm = norm.full_tensor()
 
-        if self.max_grad_norm > 0:
-            torch.nn.utils.clip_grads_with_norm_(parameters, self.max_grad_norm, norm, foreach=True)
+        torch.nn.utils.clip_grads_with_norm_(parameters, self.max_grad_norm, norm, foreach=True)
         return norm
 
     def _save_checkpoint(self):
@@ -861,7 +863,7 @@ class BaseWanTrainer:
         msg = (
             f"step={self.global_step} loss={loss_value:.4f} "
             f"mem={alloc:.2f}/{res:.2f}GB peak_mem={max_mem:.2f}GB "
-            f"grad_norm={grad_norm:.4f}"
+            f"gnorm={grad_norm:.4f}"
         )
         if step_time is not None:
             msg += f" step_time={step_time:.2f}s"

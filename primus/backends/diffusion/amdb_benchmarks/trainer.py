@@ -295,6 +295,8 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
             step_loss_value = loss_value
         if isinstance(grad_norm, torch.Tensor):
             grad_norm = grad_norm.item()
+        if throughput_samples_per_gpu_s is None:
+            throughput_samples_per_gpu_s = fps_gpu
         alloc, res, max_mem = get_memory()
         lr = self.optimizer.param_groups[0]["lr"]
 
@@ -343,14 +345,10 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
             if step_time_gpu is not None:
                 payload["step_time_gpu"] = step_time_gpu
             if throughput_samples_per_gpu_s is not None:
-                payload["perf/samples_per_gpu_s"] = throughput_samples_per_gpu_s
-                payload["performance/throughput"] = throughput_samples_per_gpu_s * self.world_size
-                payload["throughput(global_samples/s)"] = throughput_samples_per_gpu_s * self.world_size
-            if fps_gpu is not None:
-                payload["perf/fps_gpu"] = fps_gpu
+                global_throughput = throughput_samples_per_gpu_s * self.world_size
+                payload["perf/fps_gpu"] = throughput_samples_per_gpu_s
+                payload["throughput(global_samples/s)"] = global_throughput
             if tflops_per_gpu is not None:
-                payload["perf/tflops_per_gpu"] = tflops_per_gpu
-                payload["perf/tflops/s"] = tflops_per_gpu
                 payload["tflops/s"] = tflops_per_gpu
             if elapsed is not None:
                 payload["time/elapsed_s"] = elapsed
@@ -400,9 +398,10 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
         )
         start_event_gpu = torch.cuda.Event(enable_timing=True)
         end_event_gpu = torch.cuda.Event(enable_timing=True)
-        steps_per_epoch = math.ceil(len(self.dataloader) / max(1, self.grad_accum_steps))
+        accum = max(1, self.grad_accum_steps)
+        steps_per_epoch = math.ceil(len(self.dataloader) / accum)
         start_epoch = self.global_step // steps_per_epoch
-        resume_batch_offset = (self.global_step % steps_per_epoch) * self.grad_accum_steps
+        resume_batch_offset = (self.global_step % steps_per_epoch) * accum
 
         for epoch in range(start_epoch, self.num_train_epochs):
             self.sampler.set_epoch(epoch)
@@ -418,8 +417,8 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                 if self.mlperf_enabled and not mlperf_train_started:
                     self._mlperf_log_train_start()
                     mlperf_train_started = True
-                is_update_step = ((batch_idx + 1) % max(1, self.grad_accum_steps)) == 0
-                starts_update = (batch_idx % max(1, self.grad_accum_steps)) == 0
+                is_update_step = ((batch_idx + 1) % accum) == 0
+                starts_update = (batch_idx % accum) == 0
                 local_samples_in_update += self._infer_local_batch_size(batch)
                 if starts_update:
                     if barrier_around_timing:
@@ -451,7 +450,7 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                         detached_loss if update_loss_sum is None else update_loss_sum + detached_loss
                     )
                     update_loss_count += 1
-                    loss = raw_loss / max(1, self.grad_accum_steps)
+                    loss = raw_loss / accum
                     loss.backward()
 
                 if is_update_step:
@@ -509,7 +508,6 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                             step_time_gpu=step_time_gpu,
                             elapsed=elapsed,
                             eta_seconds=eta_seconds,
-                            throughput_samples_per_gpu_s=step_fps,
                             fps_gpu=step_fps,
                             tflops_per_gpu=step_tflops if total_flops is not None else None,
                         )

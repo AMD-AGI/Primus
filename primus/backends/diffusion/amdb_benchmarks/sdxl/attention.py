@@ -65,9 +65,6 @@ except:
     XFORMERS_IS_AVAILABLE = False
     logpy.warn("no module 'xformers'. Processing without...")
 
-# from .diffusionmodules.util import mixed_checkpoint as checkpoint
-
-
 def exists(val):
     return val is not None
 
@@ -196,7 +193,7 @@ class SelfAttention(nn.Module):
             attn = self.attn_drop(attn)
             x = (attn @ v).transpose(1, 2).reshape(B, L, C)
         else:
-            raise NotImplemented
+            raise NotImplementedError(f"Unsupported attn_mode: {self.attn_mode}")
 
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -511,11 +508,8 @@ class BasicTransformerBlock(nn.Module):
         if n_times_crossframe_attn_in_self:
             kwargs.update({"n_times_crossframe_attn_in_self": n_times_crossframe_attn_in_self})
 
-        # return mixed_checkpoint(self._forward, kwargs, self.parameters(), self.checkpoint)
         if self.checkpoint:
-            # inputs = {"x": x, "context": context}
             return checkpoint(self._forward, x, context)
-            # return checkpoint(self._forward, inputs, self.parameters(), self.checkpoint)
         else:
             return self._forward(**kwargs)
 
@@ -570,8 +564,6 @@ class BasicTransformerSingleLayerBlock(nn.Module):
         self.checkpoint = checkpoint
 
     def forward(self, x, context=None):
-        # inputs = {"x": x, "context": context}
-        # return checkpoint(self._forward, inputs, self.parameters(), self.checkpoint)
         return checkpoint(self._forward, x, context)
 
     def _forward(self, x, context=None):
@@ -655,7 +647,6 @@ class SpatialTransformer(nn.Module):
         if not use_linear:
             self.proj_out = zero_module(nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0))
         else:
-            # self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
             self.proj_out = zero_module(nn.Linear(inner_dim, in_channels))
         self.use_linear = use_linear
 

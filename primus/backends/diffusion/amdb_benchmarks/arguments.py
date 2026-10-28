@@ -23,7 +23,8 @@ BENCHMARK_TRAINER: dict[str, Any] = {
         "attention_backend": "flash_attn_aiter",
         "learning_rate": 1.0e-5,
         "lr_scheduler_type": "constant",
-        "warmup_steps": 10,
+        # ``constant`` ignores warmup. A non-zero value never changes the LR.
+        "warmup_steps": 0,
         "weight_decay": 0.0,
         "num_train_epochs": 1,
         "max_steps": 100,
@@ -62,7 +63,9 @@ _SPECS: dict[str, dict[str, Any]] = {
         "fsdp_layers": "BasicTransformerBlock",
         "learning_rate": 1.0e-4,
         "lr_scheduler_type": "polynomial",
-        "warmup_steps": 100,
+        # Shorter than the default ``max_steps`` so a builder-only run leaves warmup.
+        # The MI300X and MI325X configs still set warmup_steps to 100.
+        "warmup_steps": 10,
         "gradient_checkpointing": False,
     },
     "mochi-1": {
@@ -70,7 +73,7 @@ _SPECS: dict[str, dict[str, Any]] = {
         "fsdp_layers": "AsymmetricJointBlock",
         "learning_rate": 1.0e-5,
         "lr_scheduler_type": "constant",
-        "warmup_steps": 10,
+        "warmup_steps": 0,
         "gradient_checkpointing": False,
     },
     "hunyuan-video": {
@@ -78,7 +81,9 @@ _SPECS: dict[str, dict[str, Any]] = {
         "fsdp_layers": "MMDoubleStreamBlock,MMSingleStreamBlock",
         "learning_rate": 1.0e-5,
         "lr_scheduler_type": "constant",
-        "warmup_steps": 10,
+        "warmup_steps": 0,
+        # Off on MI300X, MI325X, and MI355X. The 13B run stays inside memory at
+        # batch 1, and checkpointing would change the AMDB step time.
         "gradient_checkpointing": False,
     },
     "wan2.1-i2v": {
@@ -86,7 +91,7 @@ _SPECS: dict[str, dict[str, Any]] = {
         "fsdp_layers": "DiTBlock",
         "learning_rate": 1.0e-5,
         "lr_scheduler_type": "constant",
-        "warmup_steps": 10,
+        "warmup_steps": 0,
         "gradient_checkpointing": True,
     },
 }
