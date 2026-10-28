@@ -13,6 +13,8 @@ small D2H after ``train_step``, which already synchronizes for the loss) and rai
 overflowed, so dropped tokens never go unnoticed.
 """
 
+import os
+
 from primus.core.patches import PatchContext, get_args, register_patch
 
 
@@ -53,3 +55,25 @@ def patch_sync_free_overflow_check(ctx: PatchContext) -> None:
         return out
 
     training.train_step = _train_step_checked
+
+
+@register_patch(
+    "megatron.training.turbo_nan_probe_report",
+    backend="megatron",
+    phase="before_train",
+    description="Debug: print the MoE NaN probes of PRIMUS_TURBO_DEBUG_NAN=1 after every step",
+    condition=lambda ctx: os.environ.get("PRIMUS_TURBO_DEBUG_NAN", "0") == "1",
+)
+def patch_turbo_nan_probe_report(ctx: PatchContext) -> None:
+    import megatron.training.training as training
+
+    from primus_turbo.pytorch.modules.moe.token_dispatcher import nan_probe_report
+
+    original_train_step = training.train_step
+
+    def _train_step_reported(*args, **kwargs):
+        out = original_train_step(*args, **kwargs)
+        nan_probe_report()
+        return out
+
+    training.train_step = _train_step_reported

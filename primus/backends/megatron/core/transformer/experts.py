@@ -22,6 +22,11 @@ from megatron.training.global_vars import get_args
 
 from primus.core.utils.module_utils import warning_rank_0
 
+try:
+    from primus_turbo.pytorch.modules.moe.token_dispatcher import _DEBUG_NAN, _nan_probe
+except ImportError:
+    _DEBUG_NAN = False
+
 _TURBO_FUSED_GROUPED_GEMM_FALLBACK_WARNED = False
 
 
@@ -411,7 +416,13 @@ class PrimusGroupedMLP(TEGroupedMLP):
                     permuted_probs,
                     tokens_per_expert,
                 )
+        if _DEBUG_NAN:
+            valid = tokens_per_expert.sum()
+            _nan_probe("fc1.out", fc1_output, valid, grad=True)
+            _nan_probe("act.out", bias_act_output, valid, grad=True)
         output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
+        if _DEBUG_NAN:
+            _nan_probe("fc2.out", output, valid, grad=True)
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
 
