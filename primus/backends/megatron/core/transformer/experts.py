@@ -51,6 +51,23 @@ def is_turbo_fused_grouped_mlp_supported() -> Tuple[bool, Optional[str]]:
     return True, None
 
 
+def _turbo_fused_mlp_fp8_pad_align() -> int:
+    """Alignment primus_turbo's tensorwise fused grouped MLP pads its FP8 operands to (0 if none)."""
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboLowPrecisionGlobalStateManager,
+    )
+
+    if not PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+        return 0
+    if not PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config().current_scaling():
+        return 0
+    try:
+        from primus_turbo.pytorch.ops.grouped_mlp_fp8 import _FP8_PAD_ALIGN
+    except ImportError:
+        return 0
+    return int(_FP8_PAD_ALIGN)
+
+
 class PrimusGroupedMLP(TEGroupedMLP):
     """An efficient implementation of the Experts layer using TE's GroupedLinear.
 
@@ -242,8 +259,12 @@ class PrimusGroupedMLP(TEGroupedMLP):
 
         _run_module_forward_pre_hooks(self.linear_fc1, (x,))
         _run_module_forward_pre_hooks(self.linear_fc2, (x,))
-        x, w1, fuse_w1_grad_accum = self.linear_fc1.prepare_weights(x)
-        x, w2, fuse_w2_grad_accum = self.linear_fc2.prepare_weights(x)
+        pad = _turbo_fused_mlp_fp8_pad_align()
+        # w1 [E, 2I, H] pads H; w2 [E, H, I] pads both, matching the op's own quantization.
+        x, w1, fuse_w1_grad_accum = self.linear_fc1.prepare_weights(x, fp8_pad_align_last=pad)
+        x, w2, fuse_w2_grad_accum = self.linear_fc2.prepare_weights(
+            x, fp8_pad_align_last=pad, fp8_pad_align_penultimate=pad
+        )
         assert fuse_w1_grad_accum == fuse_w2_grad_accum, (
             "fc1 and fc2 resolved different fuse_wgrad_accum_pattern values: "
             f"fc1={fuse_w1_grad_accum!r}, fc2={fuse_w2_grad_accum!r}"

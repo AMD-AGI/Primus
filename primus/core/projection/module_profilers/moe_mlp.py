@@ -665,6 +665,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
                     fwd, bwd, act_mem, a2a_fwd, a2a_bwd = benchmark_moe_layer_decomposed(
                         self.module,
                         ishapes,
+                        transformer_config=tcfg,
                         forward_kwargs=fkwargs,
                     )
                 else:
