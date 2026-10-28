@@ -11,8 +11,10 @@ Compares the AdamW implementations a Primus job can end up with on ROCm:
           multi_tensor_apply, capped at 320 workgroups per launch)
   te      TE FusedAdam (Megatron default; ROCm builds use one uncapped custom
           kernel, generic builds use multi_tensor_apply capped at 320 workgroups)
-  triton  Primus TritonFusedAdamW (primus.core.kernels.triton_adam), swept over
-          --grids (0 = auto)
+  triton  Primus TritonFusedAdamW for TorchTitan (primus.core.kernels.triton_adam),
+          swept over --grids (0 = auto)
+  megatron  Primus TritonFusedAdam for Megatron (same kernels, TE FusedAdam
+          subclass), swept over --grids
 
 All states are FP32 (4R3W, 28 B/param). Optimizers run one at a time; peak
 memory is ~4 x 4 B x params.
@@ -48,6 +50,12 @@ def build_optimizer(name, params, grid):
         return FusedAdam(params, adam_w_mode=True, **HPARAMS)
     if name == "torch":
         return torch.optim.AdamW(params, fused=True, **HPARAMS)
+    if name == "megatron":
+        from primus.backends.megatron.core.optimizer.triton_fused_adam import (
+            TritonFusedAdam,
+        )
+
+        return TritonFusedAdam(params, adam_w_mode=True, grid_size=grid, **HPARAMS)
     from primus.backends.torchtitan.components.optimizer.triton_adamw import (
         TritonFusedAdamW,
     )
@@ -100,7 +108,7 @@ def main():
 
     base = None
     for impl in args.impls.split(","):
-        grids = [int(g) for g in args.grids.split(",")] if impl == "triton" else [None]
+        grids = [int(g) for g in args.grids.split(",")] if impl in ("triton", "megatron") else [None]
         for grid in grids:
             ms = bench(impl, shapes, grid, args.warmup, args.iters)
             tbs = traffic / (ms / 1e3) / 1e12

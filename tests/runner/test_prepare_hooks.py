@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from runner.helpers.hooks.train.pretrain.automodel import prepare as automodel_prepare
 from runner.helpers.hooks.train.pretrain.megatron import prepare as megatron_prepare
-from runner.helpers.hooks.train.pretrain.nemo_automodel import prepare as nemo_prepare
 
 
 class FakePrimusConfig:
@@ -80,7 +80,7 @@ def megatron_prepare_args(monkeypatch, tmp_path, *extra):
     return megatron_prepare.parse_args()
 
 
-def test_nemo_prepare_accepts_unknown_training_overrides(monkeypatch, tmp_path):
+def test_automodel_prepare_accepts_unknown_training_overrides(monkeypatch, tmp_path):
     monkeypatch.setattr(
         sys,
         "argv",
@@ -98,8 +98,27 @@ def test_nemo_prepare_accepts_unknown_training_overrides(monkeypatch, tmp_path):
             "aiter",
         ],
     )
-    args = nemo_prepare.parse_args()
+    args = automodel_prepare.parse_args()
     assert args.primus_path == str(tmp_path)
+
+
+def test_automodel_prepare_does_not_read_backend_as_backend_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare.py",
+            "--primus_path",
+            str(tmp_path),
+            "--data_path",
+            str(tmp_path / "data"),
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--backend",
+            "automodel",
+        ],
+    )
+    assert automodel_prepare.parse_args().backend_path is None
 
 
 def test_megatron_sft_skips_bookcorpus(monkeypatch, tmp_path):

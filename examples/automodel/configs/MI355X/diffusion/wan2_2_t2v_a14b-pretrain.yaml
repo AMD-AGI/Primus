@@ -1,0 +1,54 @@
+# Primus EXP config — Wan 2.2 T2V A14B pretrain via the AutoModel backend
+# on MI355X. Selects framework: automodel, consistent
+# with how the megatron diffusion FLUX EXPs select framework: megatron.
+#
+# One-time setup (like any other Primus backend): initialize the submodule. The
+# launcher's prepare step then installs it editable (ROCm-pinned) on first run.
+#   git submodule update --init third_party/Automodel
+#   # (skipped if the installed copy already matches the pinned commit)
+#
+# Data: a pre-encoded cache. The image's diffusers has no
+# AutoencoderKLWan.enable_slicing, so build it after the pin is installed,
+# from the AutoModel checkout. Captions are one <stem>.json beside each video,
+# holding {"caption": "..."}; a video without one is captioned with its file name.
+#   cd third_party/Automodel
+#   python -m tools.diffusion.preprocessing_multiprocess video \
+#     --video_dir /path/to/videos --output_dir /path/to/cache \
+#     --processor wan2.2 --model_name /path/to/Wan2.2-T2V-A14B-Diffusers \
+#     --mode video --num_frames 81 --height 512 --width 512 \
+#     --caption_format sidecar --output_format meta
+#
+# Launch (inside the Primus container, 8 GPUs free):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/automodel/configs/MI355X/diffusion/wan2_2_t2v_a14b-pretrain.yaml
+#   # AC-off operating points (Wan 2.1 GB300-comparable) via CLI overrides, e.g.:
+#   #   ... bash ./runner/primus-cli direct -- train pretrain --config <exp> \
+#   #       fsdp.activation_checkpointing=false \
+#   #       step_scheduler.local_batch_size=8 step_scheduler.global_batch_size=64
+#
+# low-noise expert: override model.stage=low_noise and
+#   model.pipeline_spec.subfolder=transformer_2.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:wan2_2_t2v_a14b-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: automodel
+    config: pre_trainer.yaml
+    model: wan2_2_t2v_a14b.yaml
+
+    overrides:
+      # Throughput-benchmark sizing (optimized headline point: bs32 AC-on).
+      step_scheduler:
+        max_steps: 25
+        local_batch_size: 32
+        global_batch_size: 256
+      data:
+        dataloader:
+          cache_dir: /dataset/pusa_v1_512sq
+      checkpoint:
+        enabled: false

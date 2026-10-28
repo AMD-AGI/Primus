@@ -40,6 +40,8 @@ PRIMUS_LAUNCHER=direct bash examples/megatron/models/deepseek-v3/run_deepseek_v3
   `PRIMUS_TURBO_GROUPED_GEMM_BACKEND`.
 - `PROFILE=True` profiles iterations 6–7 (trace under `output/<team>/<user>/<exp>/tensorboard/`).
 - `PATCH_TRITON_EXPERT_SCHEDULING` (default `1`): see Triton expert scheduling below.
+- `HIPBLASLT_TUNING_OVERRIDE_FILE` (default: the file in `hipblaslt_tuning/`; empty: hipBLASLt's own
+  kernel choice): see hipBLASLt tuning below.
 - Config and output: `EXP` (the experiment yaml), and `PRIMUS_WORKSPACE` (default `output`), `PRIMUS_TEAM`,
   `PRIMUS_USER`, `PRIMUS_EXP_NAME`, which make up the output directory `<workspace>/<team>/<user>/<exp>`.
 
@@ -78,34 +80,57 @@ With `PATCH_TRITON_EXPERT_SCHEDULING=1` (the default) the launcher therefore als
 also invalidates Inductor's cache. The patch needs root and stays in a long-lived container; set
 `PATCH_TRITON_EXPERT_SCHEDULING=0` to skip it.
 
+**hipBLASLt tuning.** The launcher sets `HIPBLASLT_TUNING_OVERRIDE_FILE` to
+`hipblaslt_tuning/deepseek_v3_proxy-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt` (empty:
+hipBLASLt's own choice), which gives 17 of the 27 hipBLASLt GEMM shapes of the 4-GPU run a faster kernel of
+hipBLASLt's library. hipBLASLt uses a row only while its solution index still names the kernel it was tuned
+with (the file name gives the hipBLASLt commit and ROCm version), so other builds and shapes fall back to its
+default. A file of your own may be given relative to the current directory; the launcher checks that it can
+be read and mounts it into the container. With Primus's own tuning flow (`PRIMUS_HIPBLASLT_TUNING=1`, see
+`examples/README.md`) the launcher sets no default, so its stage 3 uses the stage-2 result unless the
+variable is set. To remake the file with `hipblaslt-bench` (not in the image; build it from the same
+rocm-libraries commit): log the example's GEMMs with `HIPBLASLT_LOG_MASK=32`, search each with
+`HIPBLASLT_TUNING_FILE=<file> HIPBLASLT_TUNING_USER_MAX_WORKSPACE=33554432` and `--algo_method heuristic
+--requested_solution -1 --rotating 512 --flush`, and keep the rows that are at least 3% faster when replayed
+through `HIPBLASLT_TUNING_OVERRIDE_FILE`.
+
 ## Reference
 
-Measured on one node of 4x MI455X with `amdprimus/amdprimus:tas-20261019` and the image's Primus-Turbo,
-the 4-GPU rows from the host and the 1-GPU row (the variant above) on one GPU inside a container. ms/iter
-is Primus's average over iterations 3–10, the mean of 2–3 runs. Peak VRAM is the largest
-`mem_info_vram_used` sampled every second.
+Measured with `amdprimus/amdprimus:tas-20261019` and the image's Primus-Turbo, started from the host.
+ms/iter is Primus's average over iterations 3–10. The FlyDSL and hipBLASLt tuning rows are the mean of 2 runs
+that alternated between the two rows; the baseline rows are the mean of 3 runs from an earlier set, and the
+speedup is against them. Peak memory is the largest `hip mem usage` in the log, which Primus prints for the
+last rank in GiB (labelled GB) as the device's total minus free memory. Each row adds one step:
 
-| Variant | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Peak VRAM/GPU | lm loss at iteration 10 |
-| --- | --- | --- | --- | --- | --- |
-| 4-GPU | 1195 | 54,800 | 1184 | 152.2–154.5 GiB | 5.56274 |
-| 1-GPU, 4 layers | 1005 | 65,200 | 1407 | 118.7 GiB | 5.49483 |
-| 4-GPU, TE unfused attention and Triton grouped GEMM | 2153 | 30,400 | 657 | 196.8–198.9 GiB | 5.56295 |
+- Baseline: TE's unfused attention and Primus-Turbo's Triton grouped GEMM
+  (`USE_TURBO_ATTENTION=False TURBO_GROUPED_GEMM_BACKEND=default`), hipBLASLt's own GEMM kernels
+  (`HIPBLASLT_TUNING_OVERRIDE_FILE=`).
+- FlyDSL: Primus-Turbo's FlyDSL attention and grouped GEMM.
+- hipBLASLt tuning: the tuning file above. This row is the launcher's defaults.
 
-The last row (`USE_TURBO_ATTENTION=False TURBO_GROUPED_GEMM_BACKEND=default`: TE's unfused attention and
-Primus-Turbo's Triton grouped GEMM) is 1.80x slower than the FlyDSL defaults.
+**1 GPU** (the 1-GPU variant above: 4 layers, 32 experts, GBS 16)
 
-**Grad norms per iteration.** Repeated runs of a variant gave the same values.
+| Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Baseline | 1967 | 1.00x | 33,300 | 719 | 174.15 GiB | 5.49455 |
+| + FlyDSL | 1010 | 1.95x | 64,900 | 1400 | 130.52 GiB | 5.49483 |
+| + hipBLASLt tuning (default) | 960 | 2.05x | 68,200 | 1473 | 130.53 GiB | 5.49473 |
 
-| Variant | Grad norms, iterations 1–10 |
+**4 GPUs** (the launcher's defaults: EP4, 128 experts, GBS 64)
+
+| Variant | ms/iter | Speedup | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Baseline | 2139 | 1.00x | 30,600 | 661 | 215.21 GiB | 5.56290–5.56295 |
+| + FlyDSL | 1200 | 1.78x | 54,600 | 1179 | 170.71 GiB | 5.56274 |
+| + hipBLASLt tuning (default) | 1132 | 1.89x | 57,900 | 1249 | 170.71 GiB | 5.56307 |
+
+**Grad norms per iteration** of the default. Its two runs gave the same values on 1 and on 4 GPUs; an earlier
+set of 4-GPU runs differed from them by up to 0.004.
+
+| GPUs | Grad norms, iterations 1–10 |
 | --- | --- |
-| 4-GPU | 3.810, 3.777, 3.815, 5.138, 8.841, 10.091, 7.848, 7.168, 6.820, 6.649 |
-| 1-GPU, 4 layers | 5.292, 5.326, 5.587, 7.070, 12.976, 14.045, 13.664, 15.002, 13.477, 14.193 |
-
-**Profile of the 4-GPU run, rank 0** (`PROFILE=True`, iterations 6–7).
-
-- About 1018 ms of compute kernels per iteration: MoE 41% (expert grouped GEMMs 27%), output layer
-  and loss 19%, attention projections 16%, core attention 14%, the rest 10%.
-- About 144 ms per iteration of MoE all-to-all is not overlapped with compute.
+| 1 | 5.292, 5.326, 5.587, 7.070, 12.976, 14.047, 13.659, 15.001, 13.475, 14.192 |
+| 4 | 3.810, 3.778, 3.815, 5.138, 8.845, 10.095, 7.851, 7.169, 6.821, 6.650 |
 
 ## Known issues
 
@@ -127,6 +152,7 @@ Primus-Turbo's Triton grouped GEMM) is 1.80x slower than the FlyDSL defaults.
   steady state on the largest shape, and much more often over a process's first few hundred calls.
   `TURBO_GROUPED_GEMM_BACKEND=default` uses the Triton grouped GEMM.
 - **Expandable segments.** Primus warns that `use_turbo_grouped_gemm=True` runs without
-  `PYTORCH_HIP_ALLOC_CONF=expandable_segments:True`. Here that setting (in the yaml's `env:`) lowers the
-  peak VRAM by only 1–3 GiB per GPU, makes the 4-GPU run 0.6% slower and the TE/Triton row 4% slower, and
-  leaves the loss and grad norms unchanged, so the example does not set it.
+  `PYTORCH_HIP_ALLOC_CONF=expandable_segments:True`. Here that setting (in the yaml's `env:`) lowered the
+  peak device memory in use (`mem_info_vram_used`, sampled every second) by only 1–3 GiB per GPU, made the
+  4-GPU FlyDSL run 0.6% slower and the 4-GPU baseline 4% slower (both without the tuning file), and left the
+  loss and grad norms unchanged, so the example does not set it.
