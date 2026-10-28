@@ -158,7 +158,7 @@ def get_inkling_decoder_block_spec(
     layer_specs: List[ModuleSpec] = [get_inkling_layer_spec(config, is_moe=bool(moe[i])) for i in layers]
     assert layer_specs, "Inkling requires non-empty stage layer specs"
     logger.info(
-        "[Primus:Inkling] layers %d-%d: attention=%s mlp=%s",
+        "[Primus:inkling] layers %d-%d: attention=%s mlp=%s",
         layers.start,
         layers.stop - 1,
         "".join("S" if config.is_sliding_layer(i) else "G" for i in layers),
