@@ -1,0 +1,90 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:inkling_large_6L-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Inkling (Large) 6-layer proxy (released widths, 2 dense + 4 MoE layers,
+# layers 0-4 sliding with 16 KV groups, layer 5 global with 8) on one MI355X
+# node: EP=8 x DP=8, AdamW, random init, mock data. Turbo is off so every
+# kernel is one the reference tests cover. Same recipe as
+# inkling_small_12L-BF16-pretrain.yaml except the model.
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: ${PRIMUS_MODEL:inkling_large_6L}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Inkling_Pretrain"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # hyper parameters
+      train_iters: ${PRIMUS_TRAIN_ITERS:50}
+      exit_interval: ${PRIMUS_EXIT_INTERVAL:null}
+      micro_batch_size: ${PRIMUS_MBS:1}
+      global_batch_size: ${PRIMUS_GBS:64}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 3.0e-4
+      min_lr: 3.0e-5
+      lr_warmup_iters: 5
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      clip_grad: 1.0
+      eod_mask_loss: false
+
+      # parallel. Inkling rejects sequence and context parallelism, so TP=1.
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      sequence_parallel: false
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+
+      # data. NullTokenizer puts eod at id vocab_size: 200057 + eod = the
+      # 200058 real Inkling tokens (padded to 200064).
+      mock_data: true
+      vocab_size: 200057
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+      # No dataloader mask: the attention builds its own causal / window mask,
+      # and flex caches its block mask only when no mask is passed.
+      create_attention_mask_in_dataloader: false
+
+      # ---------- Inkling ----------
+      inkling_attention_backend: ${PRIMUS_INKLING_ATTN:flex}
+      inkling_fp32_activations: false
+
+      # ---------- Optimizer: fp32 AdamW ----------
+      optimizer: adam
+
+      # recompute off
+      recompute_granularity: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # turbo off: TE grouped GEMM + alltoall dispatcher
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+      use_turbo_deepep: false
+      use_turbo_rms_norm: false
+      moe_grouped_gemm: true
+      moe_token_dispatcher_type: alltoall
+      moe_permute_fusion: false

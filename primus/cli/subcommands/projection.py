@@ -24,6 +24,7 @@ def _benchmarkable_frameworks() -> frozenset:
 
 def _experiment_framework(args) -> str:
     """Return the framework the experiment YAML names, defaulting to megatron."""
+    from primus.backends.backend_aliases import resolve_backend_alias
     from primus.core.utils import yaml_utils
 
     try:
@@ -33,7 +34,7 @@ def _experiment_framework(args) -> str:
             module = getattr(modules, module_name, None)
             framework = getattr(module, "framework", None) if module is not None else None
             if framework:
-                return str(framework).lower().strip()
+                return resolve_backend_alias(str(framework).lower().strip())
     except Exception:
         # The launchers parse the config properly a moment later and will report
         # anything wrong with it; this read only picks the backend path.
