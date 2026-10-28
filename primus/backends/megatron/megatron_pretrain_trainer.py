@@ -29,6 +29,8 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         """
         log_rank_0("Setting up Megatron model only (no training loop)...")
 
+        import inspect
+
         from megatron.core.enums import ModelType
         from megatron.training.initialize import initialize_megatron
         from megatron.training.training import setup_model_and_optimizer
@@ -42,7 +44,16 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         # parse_args was patched in setup() to return backend_args, so
         # initialize_megatron consumes the Primus-configured arguments (same as
         # the front of megatron's pretrain()).
-        initialize_megatron(args_defaults={"tokenizer_type": "GPT2BPETokenizer"})
+        uses_run_config = "args_defaults" not in inspect.signature(initialize_megatron).parameters
+        if uses_run_config:  # Megatron-core 0.19+: the caller parses args, as pretrain() does
+            from megatron.core.process_groups_config import ProcessGroupCollection
+
+            from primus.backends.megatron.training.run_config import build_run_config
+
+            run_config = build_run_config()
+            initialize_megatron()
+        else:
+            initialize_megatron(args_defaults={"tokenizer_type": "GPT2BPETokenizer"})
 
         # Get model provider with correct model_type (reuse the core runtime helper)
         if model_type != "gpt":
@@ -51,9 +62,18 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             model_provider = get_model_provider()
         log_rank_0(f"-model_provider: {model_provider}")
 
-        model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
-            model_provider, ModelType.encoder_or_decoder, checkpointing_context={}
-        )
+        if uses_run_config:
+            model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
+                ModelType.encoder_or_decoder,
+                model_provider_func=model_provider,
+                checkpointing_context={},
+                cfg_container=run_config,
+                pg_collection=ProcessGroupCollection.use_mpu_process_groups(),
+            )
+        else:
+            model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
+                model_provider, ModelType.encoder_or_decoder, checkpointing_context={}
+            )
         self.model = model
         self.optimizer = optimizer
         self.opt_param_scheduler = opt_param_scheduler
