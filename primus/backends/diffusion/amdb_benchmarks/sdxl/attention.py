@@ -65,6 +65,7 @@ except:
     XFORMERS_IS_AVAILABLE = False
     logpy.warn("no module 'xformers'. Processing without...")
 
+
 def exists(val):
     return val is not None
 

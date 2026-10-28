@@ -270,7 +270,10 @@ def test_benchmark_step_rates_match_amdiffusionbenchmark():
 
 
 def test_amdb_dataset_skips_decode_errors_only(tmp_path):
-    from primus.backends.diffusion.amdb_benchmarks.data import AMDBDataset, _TemporaryVideoReader
+    from primus.backends.diffusion.amdb_benchmarks.data import (
+        AMDBDataset,
+        _TemporaryVideoReader,
+    )
 
     class Corrupt:
         def load(self):
