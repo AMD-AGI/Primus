@@ -59,7 +59,7 @@ def automodel_build_type(monkeypatch):
         found = None
     if found is None:
         for module in (cache, synthetic):
-            monkeypatch.setattr(module, "_dataloader_build", lambda **kw: types.SimpleNamespace(**kw))
+            monkeypatch.setattr(module, "_dataloader_build", types.SimpleNamespace)
 
 
 # --------------------------------------------------------------------------- #

@@ -36,7 +36,7 @@ def automodel_build_type(monkeypatch):
     except (ModuleNotFoundError, ValueError):
         found = None
     if found is None:
-        monkeypatch.setattr(synthetic, "_dataloader_build", lambda **kw: types.SimpleNamespace(**kw))
+        monkeypatch.setattr(synthetic, "_dataloader_build", types.SimpleNamespace)
 
 
 def loader_config(**overrides):

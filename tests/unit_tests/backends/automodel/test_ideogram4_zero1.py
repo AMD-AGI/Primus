@@ -430,7 +430,7 @@ class TestGating:
         through a run that AutoModel does save, which fails at the first save."""
         import types
 
-        import primus.backends.automodel.patches  # noqa: F401
+        from primus.backends.automodel import patches  # noqa: F401
         from primus.backends.automodel.models.ideogram4 import zero1
         from primus.core.patches import PatchContext
         from primus.core.patches.patch_registry import PatchRegistry
@@ -479,7 +479,7 @@ class TestGating:
         model's config must not shard that model's optimizer."""
         import types
 
-        import primus.backends.automodel.patches  # noqa: F401
+        from primus.backends.automodel import patches  # noqa: F401
         from primus.core.patches import PatchContext
         from primus.core.patches.patch_registry import PatchRegistry
 
