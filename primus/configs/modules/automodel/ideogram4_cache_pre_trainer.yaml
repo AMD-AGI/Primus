@@ -78,9 +78,9 @@ flow_matching:
   logit_std: 1.0
   flow_shift: 3.0
   mix_uniform_ratio: 0.1
-  # No classifier-free-guidance dropout, which keeps the loss signal clean while
-  # validating the data path. A real pretrain should raise this to train the
-  # unconditional branch.
+  # Must stay 0, and the adapter refuses anything else: guidance at inference
+  # uses a separate unconditional transformer, so this one never runs without
+  # text and caption dropout would train an input it never sees.
   cfg_dropout_prob: 0.0
   sigma_min: 0.0
   sigma_max: 1.0
