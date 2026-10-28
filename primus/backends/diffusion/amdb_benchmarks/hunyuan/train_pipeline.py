@@ -99,7 +99,9 @@ class HunyuanTrainPipeline:
         device = next(dit.parameters()).device
         dtype = next(dit.parameters()).dtype
         if not isinstance(batch.get("text_states"), torch.Tensor):
-            batch = self.encode_batch(text_encoder=text_encoder, vae=vae, batch=batch, device=device, dtype=dtype)
+            batch = self.encode_batch(
+                text_encoder=text_encoder, vae=vae, batch=batch, device=device, dtype=dtype
+            )
         latents = batch["latents"].to(device=device, dtype=dtype)
         text_states = batch["text_states"].to(device=device, dtype=dtype)
         text_mask = batch["text_mask"].to(device=device)
