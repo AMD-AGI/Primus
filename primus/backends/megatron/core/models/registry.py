@@ -16,14 +16,18 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 DEFAULT_MODEL_TYPE = "gpt"
+GPT_TRAINING = "pretrain_gpt"
 
 
 @dataclass(frozen=True)
 class ModelFamily:
     """How one ``model_type`` is built and trained.
 
-    A family either names an upstream ``builder`` (``gpt``, ``mamba``), or
-    declares the pieces the shared builder in ``builder.py`` assembles:
+    A family either names a ``builder`` -- upstream's (``gpt``, ``mamba``) or,
+    with ``package`` set, its own (``inkling``, whose model takes no
+    GPTModel-style arguments) -- or declares the pieces the shared builder in
+    ``builder.py`` assembles. A Primus family with its own builder still names
+    its ``config_class``, which ``schema_check`` reads.
 
     * ``config_class``: the dataclass handed to ``core_transformer_config_from_args``.
     * ``model_class``: constructed with GPTModel-style arguments.
@@ -46,7 +50,7 @@ class ModelFamily:
     prepare_args: str = ""
     model_kwargs: str = ""
     check_model: str = ""
-    training: str = "pretrain_gpt"
+    training: str = GPT_TRAINING
 
     def resolve(self, ref: str) -> Any:
         module, _, attr = ref.partition(":")
@@ -65,6 +69,11 @@ MODEL_FAMILIES = {
         decoder_spec="deepseek_v4_layer_specs:get_deepseek_v4_runtime_decoder_spec",
         prepare_args="deepseek_v4_builders:prepare_deepseek_v4_args",
         model_kwargs="deepseek_v4_builders:deepseek_v4_model_kwargs",
+    ),
+    "inkling": ModelFamily(
+        package="primus.backends.megatron.core.models.inkling",
+        builder="inkling_builders:inkling_builder",
+        config_class="inkling_transformer_config:InklingTransformerConfig",
     ),
     "glm5_next": ModelFamily(
         package="primus.backends.megatron.core.models.glm5_next",

@@ -24,8 +24,30 @@ from primus.backends.megatron.core.models.registry import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-PRIMUS_FAMILIES = sorted(name for name, family in MODEL_FAMILIES.items() if not family.builder)
+PRIMUS_FAMILIES = sorted(name for name, family in MODEL_FAMILIES.items() if family.package)
+SHARED_BUILDER_FAMILIES = sorted(name for name in PRIMUS_FAMILIES if not MODEL_FAMILIES[name].builder)
 HOOK_FIELDS = ("decoder_spec", "prepare_args", "model_kwargs", "check_model")
+
+
+def _import_family(name):
+    """Import family ``name``'s package, skipping where it needs a GPU (deepseek_v4, glm5_next)."""
+    import importlib
+
+    import torch
+
+    try:
+        return importlib.import_module(MODEL_FAMILIES[name].package)
+    except RuntimeError as error:
+        if torch.cuda.is_available():
+            raise
+        pytest.skip(f"importing {name} needs a GPU: {error}")
+
+
+def _family_builders(name):
+    import importlib
+
+    _import_family(name)
+    return importlib.import_module(f"{MODEL_FAMILIES[name].package}.{name}_builders")
 
 
 def test_every_entry_is_a_literal_so_schema_check_can_read_it():
@@ -57,22 +79,30 @@ def test_schema_check_reads_the_registered_config_classes():
 
 
 @pytest.mark.parametrize("name", sorted(MODEL_FAMILIES))
-def test_family_is_either_upstream_or_fully_primus(name):
+def test_family_is_upstream_primus_with_its_own_builder_or_shared_built(name):
     family = MODEL_FAMILIES[name]
-    primus_fields = ("package", "config_class", "model_class") + HOOK_FIELDS
-    if family.builder:
-        assert not any(getattr(family, field) for field in primus_fields)
+    shared_builder_fields = ("model_class",) + HOOK_FIELDS
+    if not family.package:
+        assert family.builder and not family.config_class
+        assert not any(getattr(family, field) for field in shared_builder_fields)
+    elif family.builder:
+        assert family.config_class, f"{name}: schema_check reads the config class from the registry"
+        assert not any(getattr(family, field) for field in shared_builder_fields)
     else:
-        assert family.package and family.config_class and family.model_class
+        assert family.config_class and family.model_class
 
 
 @pytest.mark.parametrize("name", PRIMUS_FAMILIES)
 def test_primus_family_references_resolve(name):
     from megatron.core.transformer.transformer_config import TransformerConfig
 
+    _import_family(name)
     family = MODEL_FAMILIES[name]
     assert issubclass(family.resolve(family.config_class), TransformerConfig)
-    assert inspect.isclass(family.resolve(family.model_class))
+    if family.builder:
+        assert callable(family.resolve(family.builder))
+    else:
+        assert inspect.isclass(family.resolve(family.model_class))
     for field in HOOK_FIELDS:
         if getattr(family, field):
             assert callable(family.resolve(getattr(family, field))), field
@@ -80,13 +110,15 @@ def test_primus_family_references_resolve(name):
 
 @pytest.mark.parametrize("name", PRIMUS_FAMILIES)
 def test_family_package_keeps_its_builder_names(name):
-    import importlib
-
     from primus.backends.megatron.core.models.builder import build_model
 
-    builders = importlib.import_module(f"{MODEL_FAMILIES[name].package}.{name}_builders")
+    builders = _family_builders(name)
     builder = getattr(builders, f"{name}_builder")
-    assert (builder.func, builder.args) == (build_model, (name,))
+    family = MODEL_FAMILIES[name]
+    if family.builder:
+        assert family.resolve(family.builder) is builder
+    else:
+        assert (builder.func, builder.args) == (build_model, (name,))
     assert builders.model_provider.default_builder is builder
 
 
@@ -101,11 +133,9 @@ def test_family_package_keeps_its_builder_names(name):
     ],
 )
 def test_family_model_provider_defaults_to_its_own_builder(monkeypatch, name, call, expected_builder):
-    import importlib
-
     from primus.backends.megatron.core.models import builder
 
-    builders = importlib.import_module(f"{MODEL_FAMILIES[name].package}.{name}_builders")
+    builders = _family_builders(name)
     calls = []
 
     def fake_model_provider(*a, **k):
@@ -176,8 +206,8 @@ def quiet(monkeypatch):
     monkeypatch.setattr(import_utils, "log_rank_0", lambda *a, **k: None)
 
 
-@pytest.mark.parametrize("name", PRIMUS_FAMILIES)
-def test_primus_family_gets_the_shared_provider(quiet, name):
+@pytest.mark.parametrize("name", SHARED_BUILDER_FAMILIES)
+def test_shared_built_family_gets_the_shared_provider_and_builder(quiet, name):
     from primus.backends.megatron.core.models.builder import build_model, model_provider
     from primus.core.utils.import_utils import get_model_provider
 
@@ -186,6 +216,18 @@ def test_primus_family_gets_the_shared_provider(quiet, name):
     assert provider.func is model_provider
     (builder,) = provider.args
     assert (builder.func, builder.args) == (build_model, (name,))
+
+
+@pytest.mark.parametrize("name", sorted(set(PRIMUS_FAMILIES) - set(SHARED_BUILDER_FAMILIES)))
+def test_family_with_its_own_builder_gets_the_shared_provider(quiet, name):
+    from primus.backends.megatron.core.models.builder import model_provider
+    from primus.core.utils.import_utils import get_model_provider
+
+    builders = _family_builders(name)
+    provider = get_model_provider(model_type=name)
+
+    assert provider.func is model_provider
+    assert provider.args == (getattr(builders, f"{name}_builder"),)
 
 
 @pytest.mark.parametrize("model_type", ["not_a_family", "kimi-k3", "diffusion_model"])
@@ -389,9 +431,13 @@ def test_build_model_rejects_legacy_models(builder):
         builder.build_model("fake", _args(use_legacy_models=True), True, True)
 
 
-def test_build_model_refuses_upstream_families(builder):
-    with pytest.raises(AssertionError, match="gpt_builders:gpt_builder"):
-        builder.build_model("gpt", _args(), True, True)
+@pytest.mark.parametrize(
+    ("model_type", "named_builder"),
+    [("gpt", "gpt_builders:gpt_builder"), ("inkling", "inkling_builders:inkling_builder")],
+)
+def test_build_model_refuses_families_with_their_own_builder(builder, model_type, named_builder):
+    with pytest.raises(AssertionError, match=named_builder):
+        builder.build_model(model_type, _args(), True, True)
 
 
 def test_model_provider_forwards_to_the_bound_builder(builder, monkeypatch):
@@ -409,10 +455,19 @@ def test_model_provider_forwards_to_the_bound_builder(builder, monkeypatch):
     assert calls == [((args, False, True, 2), {"config": "CFG", "pg_collection": None})]
 
 
-def test_model_provider_records_memory_history_and_snapshots_on_oom(builder, monkeypatch):
+@pytest.mark.parametrize(
+    ("snapshot_path", "oom_snapshot"),
+    [
+        ("snapshot.pickle", "oom_rank-3_snapshot.pickle"),
+        ("snapshots/memory.pickle", "snapshots/oom_rank-3_memory.pickle"),
+    ],
+)
+def test_model_provider_records_memory_history_and_snapshots_on_oom(
+    builder, monkeypatch, snapshot_path, oom_snapshot
+):
     import torch
 
-    args = _args(record_memory_history=True, memory_snapshot_path="snapshot.pickle")
+    args = _args(record_memory_history=True, memory_snapshot_path=snapshot_path)
     monkeypatch.setattr(builder, "get_args", lambda: args)
     recorded, observers, dumped = [], [], []
     monkeypatch.setattr(torch.cuda.memory, "_record_memory_history", lambda *a, **k: recorded.append(k))
@@ -425,4 +480,4 @@ def test_model_provider_records_memory_history_and_snapshots_on_oom(builder, mon
     assert recorded == [dict(trace_alloc_max_entries=100000, trace_alloc_record_context=True)]
     (observer,) = observers
     observer(0, 1, 2, 3)
-    assert dumped == ["oom_rank-3_snapshot.pickle"]
+    assert dumped == [oom_snapshot]

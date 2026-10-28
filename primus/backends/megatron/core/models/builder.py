@@ -6,6 +6,7 @@
 
 """Shared builder and ``model_provider`` for the Primus-owned families in ``registry.py``."""
 
+import os
 from typing import Optional
 
 from megatron.core.transformer.spec_utils import import_module
@@ -29,7 +30,7 @@ def build_model(
     """Build the model ``MODEL_FAMILIES[model_type]`` declares, with Megatron's builder signature."""
     family = MODEL_FAMILIES[model_type]
     assert (
-        family.config_class and family.model_class
+        not family.builder and family.config_class and family.model_class
     ), f"model_type {model_type!r} is built by {family.builder or 'nothing'}, not by the Primus builder."
     config_class = family.resolve(family.config_class)
     model_class = family.resolve(family.model_class)
@@ -98,7 +99,8 @@ def model_provider(
 
         def oom_observer(device, alloc, device_alloc, device_free):
             print("saving allocated state during OOM")
-            filename = f"oom_rank-{torch.distributed.get_rank()}_{args.memory_snapshot_path}"
+            directory, name = os.path.split(args.memory_snapshot_path)
+            filename = os.path.join(directory, f"oom_rank-{torch.distributed.get_rank()}_{name}")
             torch.cuda.memory._dump_snapshot(filename)
 
         torch._C._cuda_attach_out_of_memory_observer(oom_observer)

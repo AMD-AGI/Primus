@@ -4,6 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import importlib
+
 from primus.backends.megatron.megatron_base_trainer import MegatronBaseTrainer
 from primus.core.utils.module_utils import log_rank_0
 
@@ -127,12 +129,13 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         subclasses (e.g. diffusion/Flux) can plug in their own; the rest import
         both from the upstream entrypoint their registry entry names.
         """
-        import importlib
-
-        from primus.backends.megatron.core.models.registry import get_model_family
+        from primus.backends.megatron.core.models.registry import (
+            GPT_TRAINING,
+            get_model_family,
+        )
 
         training = get_model_family(model_type).training
-        if training == "pretrain_gpt":
+        if training == GPT_TRAINING:
             return self.get_forward_step(), self.get_datasets_provider()
 
         entrypoint = importlib.import_module(training)

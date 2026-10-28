@@ -24,7 +24,6 @@ from primus.backends.megatron.core.models.inkling.inkling_builders import (
     inkling_builder,
     inkling_config_from_model_yaml,
     megatron_args_from_model_yaml,
-    model_provider,
 )
 from primus.backends.megatron.core.models.inkling.inkling_hf_mapping import (
     InklingGeometry,
@@ -296,6 +295,7 @@ def test_fp32_activations_global_scale_storage(keep_fp32, monkeypatch):
 
 
 def test_trainer_entry_points_build_inkling():
+    from primus.backends.megatron.core.models.builder import model_provider
     from primus.core.utils.import_utils import get_model_provider
 
     provider = get_model_provider("inkling")

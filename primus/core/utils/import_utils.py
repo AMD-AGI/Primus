@@ -39,8 +39,9 @@ def get_model_provider(model_type="gpt"):
     Resolve the model_provider for a ``model_type`` registered in
     ``primus/backends/megatron/core/models/registry.py``.
 
-    Primus-owned families bind the shared Primus ``model_provider`` to the shared
-    builder. Upstream families (``gpt``, ``mamba``) resolve across Megatron versions:
+    Primus-owned families bind the shared Primus ``model_provider`` to their own
+    builder when they name one, else to the shared builder. Upstream families
+    (``gpt``, ``mamba``) resolve across Megatron versions:
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
@@ -65,10 +66,14 @@ def get_model_provider(model_type="gpt"):
             f"registered: {', '.join(sorted(MODEL_FAMILIES))}."
         )
 
-    if not family.builder:
+    if family.package:
         builder_module = importlib.import_module("primus.backends.megatron.core.models.builder")
+        if family.builder:
+            model_builder = family.resolve(family.builder)
+        else:
+            model_builder = partial(builder_module.build_model, model_type)
         log_rank_0(f"{log_prefix} Loaded Primus model_provider + builder for model_type {model_type!r}")
-        return partial(builder_module.model_provider, partial(builder_module.build_model, model_type))
+        return partial(builder_module.model_provider, model_builder)
 
     model_provider = lazy_import(["model_provider", family.training], "model_provider", log_prefix=log_prefix)
     builder_module, _, builder_name = family.builder.partition(":")

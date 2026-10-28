@@ -186,3 +186,38 @@ class TestMegatronPretrainTrainer:
         assert args[2] is model_type.encoder_or_decoder
         assert args[3] == "FORWARD_STEP"
         assert kwargs == {"store": "STORE"}
+
+    def test_non_gpt_family_takes_components_from_its_entrypoint_marked_distributed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        trainer = _build_trainer(monkeypatch)
+
+        def forward_step():
+            pass
+
+        def train_valid_test_datasets_provider():
+            pass
+
+        entrypoint = types.ModuleType("pretrain_mamba")
+        entrypoint.forward_step = forward_step
+        entrypoint.train_valid_test_datasets_provider = train_valid_test_datasets_provider
+        monkeypatch.setitem(sys.modules, "pretrain_mamba", entrypoint)
+        monkeypatch.setattr(trainer, "get_forward_step", lambda: pytest.fail("mamba trains like GPT"))
+
+        components = trainer._get_training_components("mamba")
+
+        assert components == (forward_step, train_valid_test_datasets_provider)
+        assert train_valid_test_datasets_provider.is_distributed is True
+
+    @pytest.mark.parametrize("model_type", ["gpt", "kimi_k3", "inkling", "diffusion_model", None])
+    def test_gpt_trained_families_use_the_overridable_components(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        model_type,
+    ):
+        trainer = _build_trainer(monkeypatch)
+        monkeypatch.setattr(trainer, "get_forward_step", lambda: "FORWARD_STEP")
+        monkeypatch.setattr(trainer, "get_datasets_provider", lambda: "DATASETS_PROVIDER")
+
+        assert trainer._get_training_components(model_type) == ("FORWARD_STEP", "DATASETS_PROVIDER")
