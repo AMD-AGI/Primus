@@ -35,8 +35,6 @@ DEFAULT_MOONCAKE_RPC_PORT = 35551
 DEFAULT_MOONCAKE_HTTP_PORT = 35880
 DEFAULT_MOONCAKE_METRICS_PORT = 35903
 DEFAULT_SERVER_PORT = 30000
-# Must match configs/qwen3.5-4b-dflash.json dflash_config.target_layer_ids.
-DEFAULT_CAPTURE_LAYER_IDS = (1, 8, 15, 22, 29)
 DEFAULT_LEASE_TTL_MS = 500
 DEFAULT_PROTOCOL = "tcp"
 LOOPBACK_PREFIXES = ("127.", "0.")
@@ -74,15 +72,6 @@ def expand_device_list(value: str, count: int) -> str:
     return ",".join(str(start + i) for i in range(int(count)))
 
 
-def parse_layer_ids(value: Any) -> tuple[int, ...]:
-    if value is None or str(value).strip() == "":
-        return DEFAULT_CAPTURE_LAYER_IDS
-    if isinstance(value, (list, tuple)):
-        return tuple(int(v) for v in value)
-    parts = re.split(r"[,\s]+", str(value).strip())
-    return tuple(int(p) for p in parts if p)
-
-
 def parse_extra_args(value: Any) -> list[str]:
     if value is None or str(value).strip() == "":
         return []
@@ -97,46 +86,270 @@ def _positive_int(value: Any, default: int) -> int:
     return int(value)
 
 
-def layer_ids_from_draft_json(path: Path) -> tuple[int, ...]:
+def _as_bool(value: Any, default: bool) -> bool:
+    if value in (None, "", "null"):
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"expected a boolean, got {value!r}")
+
+
+def _specforge_config_file(params: Any, env: Optional[Mapping[str, str]] = None) -> Optional[Path]:
+    """SpecForge Hydra file. Relative paths resolve only against the SpecForge checkout."""
+
+    raw = getattr(params, "specforge_config", None)
+    if raw in (None, "", "null"):
+        return None
+    path = Path(str(raw))
+    if path.is_absolute():
+        if path.is_file():
+            return path
+        raise ValueError(f"specforge_config is not a file: {raw}")
+    root = resolve_specforge_root(params, env=env)
+    if root is not None and (root / path).is_file():
+        return root / path
+    raise ValueError(f"specforge_config is not a file: {raw}")
+
+
+def _model_section(params: Any, env: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
+    """``model:`` from one SpecForge YAML file.
+
+    Hydra ``defaults:`` composition is not applied. A file that only inherits
+    ``model`` through ``defaults`` is an error. The mapping is read once per
+    ``online_settings`` call.
+    """
+
+    path = _specforge_config_file(params, env)
+    if path is None:
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"could not read SpecForge config {path}: {exc}") from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must be a mapping")
+    if "defaults" in data and "model" not in data:
+        raise ValueError(
+            f"{path} uses Hydra defaults and has no model section; "
+            "Primus does not compose Hydra config groups"
+        )
+    model = data.get("model", {})
+    if model is None:
+        return {}
+    if not isinstance(model, dict):
+        raise ValueError(f"{path} model must be a mapping")
+    return model
+
+
+def _model_scalar(model: Mapping[str, Any], key: str) -> Optional[str]:
+    if key not in model:
+        return None
+    value = model[key]
+    if value in (None, "", "null"):
+        return None
+    if isinstance(value, (dict, list)):
+        raise ValueError(f"model.{key} must be a scalar")
+    text = str(value).strip()
+    if "${" in text:
+        raise ValueError(
+            f"model.{key} contains an unresolved interpolation ({text}); "
+            "Primus does not compose the Hydra file"
+        )
+    return text
+
+
+def _present(value: Any) -> Optional[str]:
+    if value in (None, "", "null"):
+        return None
+    return str(value)
+
+
+def _path_in_specforge_checkout(raw: str, root: Optional[Path]) -> Optional[Path]:
+    """Absolute paths as written. Relative paths only under the SpecForge checkout."""
+
+    path = Path(raw)
+    if path.is_absolute():
+        return path if path.is_file() else None
+    if root is None:
+        return None
+    candidate = root / path
+    return candidate if candidate.is_file() else None
+
+
+def _existing_draft_config(
+    params: Any,
+    env: Optional[Mapping[str, str]] = None,
+    model: Optional[Mapping[str, Any]] = None,
+) -> Optional[Path]:
+    """Draft JSON named by ``model.draft_model_config``.
+
+    An override wins over the Hydra file. Relative paths resolve only against
+    the SpecForge checkout, never the process working directory. A name that
+    is set but does not exist is an error.
+    """
+
+    if model is None:
+        model = _model_section(params, env)
+    overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
+    raw = _present(overrides.get("model.draft_model_config"))
+    if raw is None:
+        raw = _model_scalar(model, "draft_model_config")
+    if raw is None:
+        return None
+    if "${" in raw:
+        raise ValueError(
+            f"model.draft_model_config contains an unresolved interpolation ({raw}); "
+            "Primus does not compose the Hydra file"
+        )
+    root = resolve_specforge_root(params, env=env)
+    found = _path_in_specforge_checkout(raw, root)
+    if found is None:
+        raise ValueError(f"model.draft_model_config is not a file: {raw}")
+    return found
+
+
+def _layer_id_tuple(value: Any) -> Optional[tuple[int, ...]]:
+    if isinstance(value, bool) or not isinstance(value, (list, tuple)) or not value:
+        return None
+    ids: list[int] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            return None
+        ids.append(item)
+    return tuple(ids)
+
+
+def _draft_layer_ids(data: Mapping[str, Any]) -> Optional[tuple[int, ...]]:
+    """Layer ids embedded in the draft JSON, for whichever drafter wrote them."""
+
+    for group, key in (
+        ("dflash_config", "target_layer_ids"),
+        ("eagle_config", "eagle_aux_hidden_state_layer_ids"),
+    ):
+        block = data.get(group)
+        if not isinstance(block, dict):
+            continue
+        ids = _layer_id_tuple(block.get(key))
+        if ids:
+            return ids
+    return None
+
+
+def _is_eagle_draft(data: Mapping[str, Any]) -> bool:
+    if isinstance(data.get("eagle_config"), dict):
+        return True
+    architectures = data.get("architectures")
+    if not isinstance(architectures, (list, tuple)):
+        return False
+    return any("eagle" in str(name).lower() for name in architectures)
+
+
+def _target_num_hidden_layers(target_model_path: Optional[str]) -> int:
+    if not target_model_path:
+        raise ValueError(
+            "EAGLE draft JSON has no eagle_config.eagle_aux_hidden_state_layer_ids, "
+            "and no target model path is set to derive them"
+        )
+    root = Path(target_model_path)
+    config_path = root / "config.json" if root.is_dir() else root
+    if config_path.name != "config.json" or not config_path.is_file():
+        raise ValueError(
+            "EAGLE draft JSON has no eagle_config.eagle_aux_hidden_state_layer_ids; "
+            f"expected a target config.json under {target_model_path}"
+        )
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"could not read target config {config_path}: {exc}") from exc
+    if not isinstance(config, dict):
+        raise ValueError(f"{config_path} is not a JSON object")
+    text = config.get("text_config")
+    source = text if isinstance(text, dict) and "num_hidden_layers" in text else config
+    num_layers = source.get("num_hidden_layers")
+    if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers < 1:
+        raise ValueError(f"{config_path} has no positive num_hidden_layers")
+    return num_layers
+
+
+def _eagle_layers_from_target_depth(num_layers: int) -> tuple[int, ...]:
+    """SpecForge's EAGLE default when the draft JSON omits the layer list."""
+
+    layers = (1, num_layers // 2 - 1, num_layers - 4)
+    if any(layer < 0 for layer in layers):
+        raise ValueError(
+            "EAGLE capture layers derived from the target depth are negative: "
+            f"num_hidden_layers={num_layers} -> {layers}"
+        )
+    return layers
+
+
+def layer_ids_from_draft_json(path: Path, *, target_model_path: Optional[str] = None) -> tuple[int, ...]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return ()
-    ids = (data.get("dflash_config") or {}).get("target_layer_ids") if isinstance(data, dict) else None
-    if not ids:
-        return ()
-    return tuple(int(v) for v in ids)
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"could not read draft JSON {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    ids = _draft_layer_ids(data)
+    if ids:
+        return ids
+    if _is_eagle_draft(data):
+        return _eagle_layers_from_target_depth(_target_num_hidden_layers(target_model_path))
+    raise ValueError(
+        f"{path} does not define capture layer ids "
+        "(dflash_config.target_layer_ids or eagle_config.eagle_aux_hidden_state_layer_ids)"
+    )
 
 
 def resolve_capture_layer_ids(
-    raw: Any, params: Any, env: Optional[Mapping[str, str]] = None
+    params: Any,
+    env: Optional[Mapping[str, str]] = None,
+    target_model_path: Optional[str] = None,
+    model: Optional[Mapping[str, Any]] = None,
 ) -> tuple[int, ...]:
-    """Explicit YAML/env wins; otherwise read SpecForge draft ``target_layer_ids``."""
+    """Read capture layer ids from the recipe draft JSON.
 
-    if raw not in (None, "", "null"):
-        return parse_layer_ids(raw)
-    root = resolve_specforge_root(params, env=env)
-    if root is None:
-        return DEFAULT_CAPTURE_LAYER_IDS
-    configs = root / "configs"
-    if not configs.is_dir():
-        return DEFAULT_CAPTURE_LAYER_IDS
-    preferred = configs / "qwen3.5-4b-dflash.json"
-    if preferred.is_file():
-        ids = layer_ids_from_draft_json(preferred)
-        if ids:
-            return ids
-    return DEFAULT_CAPTURE_LAYER_IDS
+    ``model.draft_model_config`` in the SpecForge Hydra file, or an override of
+    that field, names the file. DFlash-family drafts list
+    ``dflash_config.target_layer_ids``. EAGLE drafts list
+    ``eagle_config.eagle_aux_hidden_state_layer_ids``, or, when that list is
+    absent, use ``[1, num_hidden_layers // 2 - 1, num_hidden_layers - 4]`` from
+    the target ``config.json``. Online settings and environment variables do
+    not supply layer ids.
+    """
+
+    draft = _existing_draft_config(params, env=env, model=model)
+    if draft is None:
+        raise ValueError(
+            "model.draft_model_config must point at an existing draft JSON; "
+            "capture layer ids come from that file"
+        )
+    return layer_ids_from_draft_json(draft, target_model_path=target_model_path)
 
 
 def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
     """Flatten ``specforge_online`` plus a few env aliases used at launch.
 
     SGLang extra args default to AITER + radix-cache off so recipes omit those knobs.
+    ``target_model_path`` comes from ``specforge_online``, then
+    ``specforge_overrides``, then ``TARGET_MODEL``, then the Hydra file.
+    ``skip_tokenizer_init`` comes from ``specforge_online`` or ``SKIP_TOKENIZER_INIT``
+    and defaults to true. The Hydra file is one YAML document: ``defaults:``
+    groups are not composed.
     """
 
     environ = os.environ if env is None else env
     raw = flatten_overrides(getattr(params, "specforge_online", None))
+    model = _model_section(params, environ)
     run_id = raw.get("run_id") or environ.get("RUN_ID") or environ.get("DISAGG_STORE_ID")
     run_root = raw.get("run_root") or environ.get("RUN_ROOT") or environ.get("DISAGG_RUN_ROOT")
     consumer_state = (
@@ -159,9 +372,12 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
     lease = raw.get("mooncake_lease_ttl_ms") or environ.get("MOONCAKE_DEFAULT_KV_LEASE_TTL")
     lease_ttl = int(lease) if lease not in (None, "", "null") else DEFAULT_LEASE_TTL_MS
     target = (
-        raw.get("target_model_path")
-        or flatten_overrides(getattr(params, "specforge_overrides", None)).get("model.target_model_path")
-        or environ.get("TARGET_MODEL")
+        _present(raw.get("target_model_path"))
+        or _present(
+            flatten_overrides(getattr(params, "specforge_overrides", None)).get("model.target_model_path")
+        )
+        or _present(environ.get("TARGET_MODEL"))
+        or _model_scalar(model, "target_model_path")
         or "Qwen/Qwen3.5-4B"
     )
     extra = parse_extra_args(raw.get("sglang_extra_args"))
@@ -186,10 +402,18 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         "mooncake_metrics_port": int(raw.get("mooncake_metrics_port") or DEFAULT_MOONCAKE_METRICS_PORT),
         "mooncake_lease_ttl_ms": lease_ttl,
         "capture_layer_ids": resolve_capture_layer_ids(
-            raw.get("capture_layer_ids") or environ.get("CAPTURE_LAYER_IDS"), params, environ
+            params, environ, target_model_path=str(target), model=model
         ),
         "target_model_path": str(target),
         "sglang_extra_args": extra,
+        "skip_tokenizer_init": _as_bool(
+            (
+                raw.get("skip_tokenizer_init")
+                if raw.get("skip_tokenizer_init") not in (None, "", "null")
+                else environ.get("SKIP_TOKENIZER_INIT")
+            ),
+            True,
+        ),
         "bind_interface": str(raw.get("bind_interface") or environ.get("PRIMUS_SPECFORGE_BIND_IFACE") or ""),
         "start_timeout_s": int(raw.get("start_timeout_s") or environ.get("START_TIMEOUT_S") or 1800),
         "peer_timeout_s": int(raw.get("peer_timeout_s") or environ.get("PEER_TIMEOUT_S") or 1800),
@@ -474,7 +698,6 @@ def sglang_server_argv(index: int, settings: Mapping[str, Any]) -> list[str]:
         "--model-path",
         str(settings["target_model_path"]),
         "--trust-remote-code",
-        "--skip-tokenizer-init",
         "--tp-size",
         str(settings["server_tp"]),
         "--mem-fraction-static",
@@ -488,8 +711,11 @@ def sglang_server_argv(index: int, settings: Mapping[str, Any]) -> list[str]:
         *[str(i) for i in settings["capture_layer_ids"]],
         "--port",
         str(port),
-        *list(settings["sglang_extra_args"]),
     ]
+    extra = [arg for arg in list(settings["sglang_extra_args"]) if arg != "--skip-tokenizer-init"]
+    if _as_bool(settings.get("skip_tokenizer_init", True), True):
+        argv.insert(argv.index("--trust-remote-code") + 1, "--skip-tokenizer-init")
+    argv.extend(extra)
     return argv
 
 
