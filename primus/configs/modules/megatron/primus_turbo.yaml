@@ -87,6 +87,10 @@ turbo_deepep_use_comm_stream: false
 
 # ===== Sync-Free MoE =====
 turbo_sync_free_moe_stage: 0
+# Stage 3 only. > 0: size the permuted-token buffer for tokens * topk * factor rows (the balanced
+# load times a margin) instead of the worst case (tokens * EP * topk). Rows past the budget are
+# dropped and counted on the GPU; the step fails if any were (raise the factor then).
+turbo_sync_free_permute_factor: 0.0
 
 # ===== Mega MoE =====
 # fused MegaMoE layer replacement (EP-only/TP=1/bf16)

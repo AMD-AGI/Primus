@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 import gc
+import math
 import os
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
@@ -2598,6 +2599,10 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             if args.turbo_sync_free_moe_stage > 2:
                 # fully sync-free moe
                 permute_max_token_num = num_worst_tokens * config.moe_router_topk
+                factor = getattr(args, "turbo_sync_free_permute_factor", 0.0) or 0.0
+                if factor > 0:
+                    budget = math.ceil(num_tokens * config.moe_router_topk * factor)
+                    permute_max_token_num = min(permute_max_token_num, budget)
 
         pad_multiple = 0
         if args.moe_router_padding_for_quantization:

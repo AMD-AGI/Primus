@@ -20,6 +20,13 @@ global_batch_size: 128
 rampup_batch_size: null
 decrease_batch_size_if_needed: false
 check_for_nan_in_loss_and_grad: true
+# Primus: raise when a step's grad norm is NaN / Inf. Reads the norm the optimizer already
+# copied to the host, so it adds no sync; together with check_for_nan_in_loss_and_grad: false
+# it replaces the per-microbatch loss checks and per-bucket grad checks (one sync each).
+check_for_nan_in_grad_norm: false
+# Primus: with TP=1, get the batch without get_batch_on_this_tp_rank's no-op broadcasts, whose
+# torch.tensor(n, device=cuda) is a synchronous H2D copy once per microbatch.
+get_batch_skip_tp1_broadcast: false
 check_for_spiky_loss: false
 check_for_large_grads: false
 make_vocab_size_divisible_by: 128
