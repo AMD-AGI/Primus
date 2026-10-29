@@ -13,9 +13,9 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from primus.backends.diffusion.models.sdxl.util import timestep_embedding
 from primus.backends.diffusion.utils.pixels import images_to_tensor
 from primus.backends.diffusion.utils.sampling import sample_amdb_sdxl_sigmas
-from primus.backends.diffusion.models.sdxl.util import timestep_embedding
 
 
 def _scaled_linear_alphas(num_steps: int = 1000, beta_start: float = 0.00085, beta_end: float = 0.012):
