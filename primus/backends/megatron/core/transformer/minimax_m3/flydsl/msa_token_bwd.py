@@ -68,8 +68,10 @@ from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from primus_turbo.flydsl.utils import buffer_ops
 
+from primus.backends.megatron.core.transformer.minimax_m3.flydsl._buffer_ops import (
+    buffer_ops,
+)
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
     HPW,
     KS,

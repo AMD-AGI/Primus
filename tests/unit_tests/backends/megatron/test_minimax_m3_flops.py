@@ -119,6 +119,15 @@ def test_only_layers_the_sparse_freq_marks_are_charged_as_msa():
     assert per_layer < 0
 
 
+def test_int_sparse_freq_charges_every_layer():
+    """M3.1-Flash's preset spells "every layer" as `1`, so its proxy has no dense-attention layer."""
+    wrapped = m3_flops.make_m3_num_floating_point_operations(_upstream())
+    assert m3_flops.compute_m3_flops(_args(sparse_attention_freq=1), GBS, _upstream()).num_msa_layers == 8
+    assert wrapped(_args(sparse_attention_freq=1), GBS) == wrapped(
+        _args(sparse_attention_freq="([1]*8)"), GBS
+    )
+
+
 def test_frozen_indexer_counts_only_its_forward():
     """sparse_indexer_loss_coeff 0.0 leaves the indexer without a gradient; unset means the default 1e-2."""
     wrapped = m3_flops.make_m3_num_floating_point_operations(_upstream())
