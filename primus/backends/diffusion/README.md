@@ -1,16 +1,25 @@
 # Primus Diffusion Backend
 
-`diffusion` is an in-tree PyTorch backend for Wan video training and FLUX
-text-to-image training. Primus owns config loading and launch; this backend owns
-model construction, datasets, attention selection, FSDP2 wrapping, and the
-training loop.
+`diffusion` is an in-tree PyTorch backend for Wan and FLUX training.
+Primus owns config loading and launch; this backend owns model construction,
+datasets, attention selection, FSDP2 wrapping, and the training loop.
 
 ## Supported Scope
 
-- Models: `wan`, `flux.1-schnell`, and `flux.1-dev`.
-- Trainer: FSDP2.
+- Native models: `wan`, `flux`, `flux.1-dev`, and `flux.1-schnell`.
+- AMDiffusionBenchmark workload `hunyuan-video`, registered from
+  `amdb_benchmarks/`. The trainable module is the Tencent transformer.
+  It uses the shared benchmark trainer and does not change the native
+  Wan or FLUX trainers.
+- Trainer: FSDP2 for the native models. The benchmark workloads use
+  `amdb_benchmark`.
 - Wan sequence parallelism: supported through `sp_size`.
-- FLUX sequence parallelism: not supported; keep `sp_size: 1`.
+- FLUX and every AMDiffusionBenchmark workload keep `sp_size: 1`.
+- `primus-cli` downloads those benchmark checkpoints into
+  `~/cache/huggingface/hub` and the datasets into
+  `~/cache/huggingface/datasets/<org>/<name>`. `PRIMUS_HF_HOME` changes the
+  cache root. An explicit `HF_HOME` is used unless it is the runner's
+  automatic `$DATA_PATH/huggingface`.
 
 Install backend dependencies with:
 
@@ -29,7 +38,11 @@ wan2.2_ti2v_5b.yaml
 wan2.2_ti2v_5b_sft.yaml
 flux.1_schnell_t2i.yaml
 flux.1_dev_t2i.yaml
+benchmark_hunyuan_video.yaml
 ```
+
+`hunyuan-video` is the post-train preset. Gradient checkpointing stays
+off, and a snapshot without `vae/` still trains from latents.
 
 FLUX.1-schnell and FLUX.1-dev are separate presets. They share the same main
 transformer shape, but `flux.1-dev` has a guidance embedding module while
@@ -39,6 +52,19 @@ transformer shape, but `flux.1-dev` has a guidance embedding module while
 This follows the TorchTitan-style separation where `flux_schnell()` is its own
 config/preset and architecture differences such as `guidance_embed=False` are
 part of that preset, not a launch-time switch.
+
+## AMDiffusionBenchmark
+
+Run these from the Primus root. `primus-cli` downloads the checkpoint and the
+dataset before training. MI355X defaults are in each config. `LOCAL_BATCH_SIZE`
+and `MAX_STEPS` override them. On MI300X or MI325X, change the config directory.
+Keep sequence parallelism at 1.
+
+```bash
+# HunyuanVideo, Wild-Heart/Disney-VideoGeneration-Dataset
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_hunyuan_video-posttrain.yaml
+```
 
 ## Public Config Sections
 
