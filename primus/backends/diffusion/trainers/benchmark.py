@@ -6,7 +6,7 @@
 
 """AMDiffusionBenchmark trainer.
 
-FPS, TFLOPS, and the BF16 FSDP2 policy stay in this package so the shared
+FPS, TFLOPS, and the BF16 FSDP2 policy stay in this trainer so the shared
 Wan trainer is unchanged.
 """
 

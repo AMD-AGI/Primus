@@ -174,7 +174,7 @@ class FluxFlowMatchTrainPipeline:
         bsz = labels.shape[0]
         noise = torch.randn_like(labels)
         if dit.training and self.cfg.timestep_sampling == "amdb_logit_normal":
-            from primus.backends.diffusion.amdb_benchmarks.sampling import (
+            from primus.backends.diffusion.utils.sampling import (
                 sample_shifted_logit_normal_sigmas,
             )
 

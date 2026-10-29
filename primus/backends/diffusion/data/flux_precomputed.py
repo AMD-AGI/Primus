@@ -127,7 +127,7 @@ class FluxRawImageTextDataset(Dataset):
             self.dataset = load_from_disk(dataset_path)
         elif dataset_format == "hf_repo":
             if self.benchmark_loader:
-                from primus.backends.diffusion.amdb_benchmarks.data import (
+                from primus.backends.diffusion.data.benchmark import (
                     load_benchmark_image_dataset,
                 )
 
@@ -180,7 +180,7 @@ class FluxRawImageTextDataset(Dataset):
                 continue
             return str(value)
         if self.benchmark_loader:
-            from primus.backends.diffusion.amdb_benchmarks.data import (
+            from primus.backends.diffusion.data.benchmark import (
                 caption_from_image_filename,
             )
 

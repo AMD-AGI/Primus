@@ -7,7 +7,7 @@ datasets, attention selection, FSDP2 wrapping, and the training loop.
 ## Supported Scope
 
 - Native models: `wan`, `flux`, `flux.1-dev`, and `flux.1-schnell`.
-- AMDiffusionBenchmark workload `flux-dev`, registered from `amdb_benchmarks/`.
+- AMDiffusionBenchmark workload `flux-dev`, built by `models/registrations/flux.py`.
   It builds the native FLUX DiT. Benchmark-only behavior (BFL QK-norm epsilon,
   logit-normal timesteps, and pre-encoded latents) is opt-in and stays off the
   `flux.1-dev` and `flux.1-schnell` trainers.
