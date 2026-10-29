@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from primus.backends.diffusion.data.benchmark import AMDBProcessor
 from primus.backends.diffusion.argument_builder import DiffusionArgBuilder
+from primus.backends.diffusion.data.benchmark import AMDBProcessor
 from primus.backends.diffusion.registry import DATASET_BUILDERS, MODEL_BUILDERS
 
 BENCHMARK_NAMES = ("flux-dev",)
