@@ -17,7 +17,10 @@ from typing import Any
 import torch
 
 from primus.backends.diffusion.data.collator import RawBatchCollator
-from primus.backends.diffusion.utils.download import DISNEY_DATASET_REPO, DISNEY_DATASET_REVISION
+from primus.backends.diffusion.utils.download import (
+    DISNEY_DATASET_REPO,
+    DISNEY_DATASET_REVISION,
+)
 
 _SIHEYUAN = "chinese_architecture_siheyuan"
 _PROMPT_KEYS = ("prompt", "text", "caption", "txt", "caption_0")

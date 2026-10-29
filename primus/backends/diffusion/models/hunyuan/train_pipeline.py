@@ -13,7 +13,9 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from primus.backends.diffusion.models.hunyuan.posemb_layers import get_nd_rotary_pos_embed
+from primus.backends.diffusion.models.hunyuan.posemb_layers import (
+    get_nd_rotary_pos_embed,
+)
 from primus.backends.diffusion.utils.sampling import sample_shifted_logit_normal_sigmas
 
 

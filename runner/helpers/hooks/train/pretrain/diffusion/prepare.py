@@ -121,7 +121,10 @@ def _stage_benchmark_downloads(
     model: dict[str, Any],
 ) -> dict[str, str]:
     """Download the benchmark checkpoint and dataset, then expose their paths."""
-    from primus.backends.diffusion.utils.download import _ENCODER_ENV_KEYS, stage_benchmark_assets
+    from primus.backends.diffusion.utils.download import (
+        _ENCODER_ENV_KEYS,
+        stage_benchmark_assets,
+    )
 
     encoder_cfg = model_cfg.get("encoder") or model.get("encoder") or {}
     if not isinstance(encoder_cfg, dict):

@@ -6,7 +6,11 @@ import pytest
 
 from primus.backends.diffusion.argument_builder import DiffusionArgBuilder
 from primus.backends.diffusion.data.benchmark import AMDBProcessor
-from primus.backends.diffusion.registry import DATASET_BUILDERS, MODEL_BUILDERS, TRAINER_BUILDERS
+from primus.backends.diffusion.registry import (
+    DATASET_BUILDERS,
+    MODEL_BUILDERS,
+    TRAINER_BUILDERS,
+)
 
 BENCHMARK_NAMES = ("hunyuan-video",)
 
@@ -171,7 +175,10 @@ def test_benchmark_step_rates_match_amdiffusionbenchmark():
 
 
 def test_amdb_dataset_skips_decode_errors_only(tmp_path):
-    from primus.backends.diffusion.data.benchmark import AMDBDataset, _TemporaryVideoReader
+    from primus.backends.diffusion.data.benchmark import (
+        AMDBDataset,
+        _TemporaryVideoReader,
+    )
 
     class Corrupt:
         def load(self):
@@ -322,7 +329,9 @@ def test_cached_latent_loader_keeps_even_batches():
 def test_hunyuan_rope_tables_are_cached(monkeypatch):
     import torch
 
-    from primus.backends.diffusion.models.hunyuan.train_pipeline import HunyuanTrainPipeline
+    from primus.backends.diffusion.models.hunyuan.train_pipeline import (
+        HunyuanTrainPipeline,
+    )
 
     calls = {"count": 0}
 
