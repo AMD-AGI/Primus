@@ -262,7 +262,10 @@ def test_benchmark_data_overrides_reach_the_dataset_and_model():
 def test_dataloader_even_batches_follows_the_flag(tmp_path):
     import torch
 
-    from primus.backends.diffusion.trainers.base import BaseWanTrainer, EvenSizeBatchSampler
+    from primus.backends.diffusion.trainers.base import (
+        BaseWanTrainer,
+        EvenSizeBatchSampler,
+    )
 
     class _Trainer(BaseWanTrainer):
         def _apply_parallelism(self):
@@ -363,7 +366,10 @@ def test_load_matching_rejects_an_unrelated_checkpoint(tmp_path):
 def test_sdxl_timesteps_match_the_applied_noise_level():
     import torch
 
-    from primus.backends.diffusion.utils.sampling import amdb_flow_sigma_grid, sample_amdb_sdxl_sigmas
+    from primus.backends.diffusion.utils.sampling import (
+        amdb_flow_sigma_grid,
+        sample_amdb_sdxl_sigmas,
+    )
 
     grid = amdb_flow_sigma_grid(shift=3.0, num_train_timesteps=1000, zero_terminal=True)
     timesteps, sigma = sample_amdb_sdxl_sigmas(64, device=torch.device("cpu"), sigma_grid=grid)

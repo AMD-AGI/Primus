@@ -15,7 +15,10 @@ import torch
 from primus.backends.diffusion.models.sdxl.adapter import SDXLForTraining
 from primus.backends.diffusion.models.sdxl.autoencoder_kl import SDXLAutoencoderKL
 from primus.backends.diffusion.models.sdxl.text_encoder import SDXLTextEncoder
-from primus.backends.diffusion.models.sdxl.train_pipeline import SDXL_LATENT_SCALE, SDXLTrainPipeline
+from primus.backends.diffusion.models.sdxl.train_pipeline import (
+    SDXL_LATENT_SCALE,
+    SDXLTrainPipeline,
+)
 from primus.backends.diffusion.models.sdxl.unet import UNetModel
 from primus.backends.diffusion.utils.checkpoint_io import load_matching
 from primus.backends.diffusion.utils.download import materialize_pretrained

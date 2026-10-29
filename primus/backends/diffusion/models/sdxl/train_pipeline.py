@@ -15,7 +15,10 @@ import torch.nn.functional as F
 
 from primus.backends.diffusion.models.sdxl.util import timestep_embedding
 from primus.backends.diffusion.utils.pixels import images_to_tensor
-from primus.backends.diffusion.utils.sampling import amdb_flow_sigma_grid, sample_amdb_sdxl_sigmas
+from primus.backends.diffusion.utils.sampling import (
+    amdb_flow_sigma_grid,
+    sample_amdb_sdxl_sigmas,
+)
 
 SDXL_LATENT_SCALE = 0.13025
 _NUM_TRAIN_TIMESTEPS = 1000
