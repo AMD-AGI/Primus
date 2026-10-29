@@ -213,7 +213,9 @@ class TestMegatronBaseTrainer:
         import megatron.training.initialize as megatron_init_mod
 
         original_parse_args_args = megatron_args_mod.parse_args
-        original_parse_args_init = megatron_init_mod.parse_args
+        # Megatron-LM main no longer imports parse_args into initialize; the patch still
+        # sets it there so older Megatron (which does) keeps getting the Primus args.
+        original_parse_args_init = getattr(megatron_init_mod, "parse_args", None)
 
         backend_args = SimpleNamespace(test_param="value")
         trainer.backend_args = backend_args
@@ -231,4 +233,7 @@ class TestMegatronBaseTrainer:
             assert result_init is backend_args
         finally:
             megatron_args_mod.parse_args = original_parse_args_args
-            megatron_init_mod.parse_args = original_parse_args_init
+            if original_parse_args_init is None:
+                del megatron_init_mod.parse_args
+            else:
+                megatron_init_mod.parse_args = original_parse_args_init

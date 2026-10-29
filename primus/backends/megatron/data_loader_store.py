@@ -17,11 +17,15 @@ import collections
 import torch
 from megatron.core.utils import StragglerDetector
 from megatron.training import get_args, get_timers
-from megatron.training.utils import (
-    get_batch_on_this_cp_rank,
-    get_batch_on_this_tp_rank,
-    is_first_or_last_pipeline_stage,
-)
+from megatron.training.utils import is_first_or_last_pipeline_stage
+
+try:
+    from megatron.training.utils import (
+        get_batch_on_this_cp_rank,
+        get_batch_on_this_tp_rank,
+    )
+except ImportError:  # moved to megatron.core.utils in Megatron-core 0.19
+    from megatron.core.utils import get_batch_on_this_cp_rank, get_batch_on_this_tp_rank
 
 stimer = StragglerDetector()
 

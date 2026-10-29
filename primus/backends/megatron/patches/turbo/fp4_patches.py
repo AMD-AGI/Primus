@@ -8,7 +8,10 @@
 Megatron enums Patches
 """
 
-from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
+from primus.backends.megatron.patches.turbo.utils import (
+    is_primus_turbo_can_patch,
+    optional_layer_loop_modules,
+)
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -76,6 +79,7 @@ def patch_fp4_context(ctx: PatchContext):
         mamba_block,
         multi_token_prediction,
         fp4_utils,
+        *optional_layer_loop_modules(),
     ]
 
     for module in modules_to_patch:

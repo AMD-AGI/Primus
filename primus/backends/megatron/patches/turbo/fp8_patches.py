@@ -11,7 +11,10 @@ This module contains patches that modify Megatron's FP8 context handling
 to use Primus-specific implementations for better ROCm compatibility.
 """
 
-from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
+from primus.backends.megatron.patches.turbo.utils import (
+    is_primus_turbo_can_patch,
+    optional_layer_loop_modules,
+)
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -58,6 +61,7 @@ def patch_fp8_context(ctx: PatchContext):
         mamba_block,
         multi_token_prediction,
         fp8_utils,
+        *optional_layer_loop_modules(),
     ]
 
     for module in modules_to_patch:

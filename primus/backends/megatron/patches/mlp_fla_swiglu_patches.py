@@ -77,6 +77,7 @@ import torch.nn.functional as F
 
 from primus.backends.megatron.patches._patch_guard import is_patched, mark_patched
 from primus.backends.megatron.patches._source_patch_utils import (
+    anchor_indent,
     patch_method_source,
     patch_method_source_multi,
 )
@@ -104,6 +105,8 @@ def _plain_swiglu_reject(config) -> str:
         return "activation_func comes from the TE module slot (may be clamped)"
     if getattr(config, "activation_func_clamp_value", None) is not None:
         return "activation_func_clamp_value is set"
+    if getattr(config, "activation_func_tanh_clamp_scale", None) is not None:
+        return "activation_func_tanh_clamp_scale is set"
     if getattr(config, "glu_linear_offset", 0):
         return "glu_linear_offset is non-zero"
     return ""
@@ -193,48 +196,63 @@ def _resolve_fla_swiglu(config, is_expert: bool):
     return swiglu_fn, swiglu_linear_fn
 
 
+# Each injected block is built against the indentation of its anchor line, so it
+# keeps working when upstream nests the anchor deeper (Megatron-LM main moved the
+# `glu()` call under an extra `activation_func_tanh_clamp_scale` branch).
+
 # Inserted right before linear_fc2 construction in MLP.__init__, mirroring
 # where megatron_patches/03-mlp-fla-swiglu.patch spliced in its detection.
 _INIT_ORI = "self.linear_fc2 = submodules.linear_fc2("
-_INIT_NEW = (
-    "from primus.backends.megatron.patches.mlp_fla_swiglu_patches import "
-    "_resolve_fla_swiglu as _fla_resolve\n"
-    "        self._fla_swiglu_fn, self._fla_swiglu_linear_fn = _fla_resolve(self.config, is_expert)\n"
-    "        self._use_fla_swiglu = self._fla_swiglu_fn is not None\n"
-    "        self._use_fla_swiglu_linear = self._fla_swiglu_linear_fn is not None\n"
-    "\n        " + _INIT_ORI
-)
+
+
+def _init_new(i: str) -> str:
+    return (
+        "from primus.backends.megatron.patches.mlp_fla_swiglu_patches import "
+        "_resolve_fla_swiglu as _fla_resolve\n"
+        f"{i}self._fla_swiglu_fn, self._fla_swiglu_linear_fn = _fla_resolve(self.config, is_expert)\n"
+        f"{i}self._use_fla_swiglu = self._fla_swiglu_fn is not None\n"
+        f"{i}self._use_fla_swiglu_linear = self._fla_swiglu_linear_fn is not None\n"
+        f"\n{i}" + _INIT_ORI
+    )
+
 
 # Inserted at the top of MLP.forward's activation section: when the fused
 # swiglu+fc2 path is active we short-circuit both the activation and linear_fc2,
 # so the ffn-wide activation output is never saved for backward.
 _FWD_FUSED_ORI = 'nvtx_range_push(suffix="activation")'
-_FWD_FUSED_NEW = (
-    "if (getattr(self, '_use_fla_swiglu_linear', False)\n"
-    "                and per_token_scale is None and bias_parallel is None\n"
-    # PEFT wraps linear_fc2 after __init__ (LoRALinear exposes the base module as
-    # `.to_wrap` and adds the adapter output in its forward), so the eligibility
-    # decision has to be rechecked here: the wrapper has no `.weight`, and reading
-    # through it would drop the adapter contribution anyway.
-    "                and hasattr(self.linear_fc2, 'weight')):\n"
-    "            x_glu, x_linear = torch.chunk(intermediate_parallel, 2, dim=-1)\n"
-    "            output = self._fla_swiglu_linear_fn(\n"
-    "                x_glu, x_linear, self.linear_fc2.weight, None\n"
-    "            )\n"
-    "            return output, None\n"
-    "        " + _FWD_FUSED_ORI
-)
+
+
+def _fwd_fused_new(i: str) -> str:
+    return (
+        "if (getattr(self, '_use_fla_swiglu_linear', False)\n"
+        f"{i}        and per_token_scale is None and bias_parallel is None\n"
+        # PEFT wraps linear_fc2 after __init__ (LoRALinear exposes the base module as
+        # `.to_wrap` and adds the adapter output in its forward), so the eligibility
+        # decision has to be rechecked here: the wrapper has no `.weight`, and reading
+        # through it would drop the adapter contribution anyway.
+        f"{i}        and hasattr(self.linear_fc2, 'weight')):\n"
+        f"{i}    x_glu, x_linear = torch.chunk(intermediate_parallel, 2, dim=-1)\n"
+        f"{i}    output = self._fla_swiglu_linear_fn(\n"
+        f"{i}        x_glu, x_linear, self.linear_fc2.weight, None\n"
+        f"{i}    )\n"
+        f"{i}    return output, None\n"
+        f"{i}" + _FWD_FUSED_ORI
+    )
+
 
 # Inserted in MLP.forward's non-fused-bias-activation branch, in place of the
 # unconditional `glu(intermediate_parallel)` call.
 _FORWARD_ORI = "intermediate_parallel = glu(intermediate_parallel)"
-_FORWARD_NEW = (
-    "if self._use_fla_swiglu:\n"
-    "                    x_glu, x_linear = torch.chunk(intermediate_parallel, 2, dim=-1)\n"
-    "                    intermediate_parallel = self._fla_swiglu_fn(x_glu, x_linear)\n"
-    "                else:\n"
-    "                    " + _FORWARD_ORI
-)
+
+
+def _forward_new(i: str) -> str:
+    return (
+        "if self._use_fla_swiglu:\n"
+        f"{i}    x_glu, x_linear = torch.chunk(intermediate_parallel, 2, dim=-1)\n"
+        f"{i}    intermediate_parallel = self._fla_swiglu_fn(x_glu, x_linear)\n"
+        f"{i}else:\n"
+        f"{i}    " + _FORWARD_ORI
+    )
 
 
 def _install_mlp_fla_swiglu_patch() -> None:
@@ -250,13 +268,16 @@ def _install_mlp_fla_swiglu_patch() -> None:
     # reads, and a retry cannot re-read the source of an already-exec'd method.
     original_init, original_forward = MLP.__init__, MLP.forward
     try:
-        patch_method_source(MLP, "__init__", _INIT_ORI, _INIT_NEW)
+        patch_method_source(MLP, "__init__", _INIT_ORI, _init_new(anchor_indent(original_init, _INIT_ORI)))
         # Both forward rewrites must go in one pass: a method can only be
         # source-patched once (inspect.getsource cannot re-read an exec'd function).
         patch_method_source_multi(
             MLP,
             "forward",
-            [(_FWD_FUSED_ORI, _FWD_FUSED_NEW), (_FORWARD_ORI, _FORWARD_NEW)],
+            [
+                (_FWD_FUSED_ORI, _fwd_fused_new(anchor_indent(original_forward, _FWD_FUSED_ORI))),
+                (_FORWARD_ORI, _forward_new(anchor_indent(original_forward, _FORWARD_ORI))),
+            ],
         )
     except Exception:
         MLP.__init__, MLP.forward = original_init, original_forward
