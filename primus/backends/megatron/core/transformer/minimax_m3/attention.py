@@ -25,8 +25,8 @@ upstream's -- only the attention core is replaced. (The unused
 parameters, so leaving it costs nothing.)
 
 ``msa_backend`` picks the core: ``eager``, the plain-PyTorch reference that
-materialises the full score matrix, or ``flydsl``, the gfx950 kernels in
-``minimax_m3/flydsl`` that never do.
+materialises the full score matrix, or ``flydsl``, the gfx950 (MFMA) and
+gfx1250 (wave32 WMMA) kernels in ``minimax_m3/flydsl`` that never do.
 
 Mirrors ``MiniMaxM3VLAttention`` in transformers'
 ``models/minimax_m3_vl/modeling_minimax_m3_vl.py``.
@@ -134,7 +134,7 @@ class MinimaxSparseAttention(SelfAttention):
 
         self.msa_attention = None
         if config.msa_backend == "flydsl":
-            # Imported here, not at module level: flydsl exists only on gfx950 builds.
+            # Imported here, not at module level: flydsl is not in every build.
             from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_function import (
                 msa_attention,
             )
