@@ -1,0 +1,11 @@
+model:
+  name: mochi-1
+  config:
+    load_from_pretrained_path: ${PRETRAINED_PATH:}
+    resolution: ${RESOLUTION:960,544}
+    num_frames: ${NUM_FRAMES:9}
+    config:
+      attention_mode: flash
+    encoder:
+      t5: ${T5_ENCODER:google/t5-v1_1-xxl}
+      autoencoder: ${VAE_CHECKPOINT:}

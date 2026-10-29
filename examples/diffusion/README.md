@@ -117,3 +117,23 @@ python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
 ```
 
 On success the hook prints `env.PREPARED=1`.
+
+## Official-module post-training
+
+Mochi-1 fine-tunes the in-tree Genmo denoiser and VAE encoder. It does not
+build a Diffusers pipeline. Point `PRETRAINED_PATH` at the official DiT checkpoint.
+
+| Workload | Official source | Checkpoint |
+|---|---|---|
+| Mochi-1 | Genmo `AsymmDiTJoint` and VAE encoder | official DiT and encoder safetensors, T5-XXL |
+
+MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
+with a constant schedule. `LR` overrides either default.
+
+| Workload | MI300X / MI325X | MI355X |
+|---|---:|---:|
+| mochi-1 | 1 | 4 |
+
+Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
+`SP_SIZE` at 1.
+
