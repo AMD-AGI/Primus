@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from primus.backends.diffusion.data.benchmark import AMDBProcessor
 from primus.backends.diffusion.argument_builder import DiffusionArgBuilder
+from primus.backends.diffusion.data.benchmark import AMDBProcessor
 from primus.backends.diffusion.registry import DATASET_BUILDERS, MODEL_BUILDERS
 
-BENCHMARK_NAMES = ('wan2.1-i2v',)
+BENCHMARK_NAMES = ("wan2.1-i2v",)
 
 
 def _finalize(params: dict):
@@ -21,7 +21,6 @@ def test_benchmark_workloads_are_registered():
     for name in BENCHMARK_NAMES:
         assert name in MODEL_BUILDERS
     assert "amdb" in DATASET_BUILDERS
-
 
 
 def test_wan_i2v_uses_dit_blocks_and_the_official_clip_files(monkeypatch, tmp_path):
@@ -90,7 +89,7 @@ def test_benchmark_downloads_keep_datasets_separate(monkeypatch, tmp_path):
     assert Path(path) == home / "datasets" / "Wild-Heart" / "Disney-VideoGeneration-Dataset"
     assert calls == {
         "repo": "Wild-Heart/Disney-VideoGeneration-Dataset",
-        "revision": 'refs/pr/4',
+        "revision": "refs/pr/4",
     }
     assert home / "hub" not in Path(path).parents
 
@@ -110,7 +109,6 @@ def test_benchmark_downloads_keep_datasets_separate(monkeypatch, tmp_path):
     assert download.huggingface_home() == Path.home() / "cache" / "huggingface"
     monkeypatch.setenv("HF_HOME", str(tmp_path / "custom"))
     assert download.huggingface_home() == tmp_path / "custom"
-
 
 
 def test_siheyuan_train_split_includes_both_archives_and_log_pngs(tmp_path):

@@ -107,7 +107,7 @@ def _validate_local_or_hf_id(value: str | None, description: str) -> None:
 
 
 _BENCHMARK_DOWNLOADS = {
-    'wan2.1-i2v',
+    "wan2.1-i2v",
 }
 
 

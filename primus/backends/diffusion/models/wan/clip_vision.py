@@ -17,9 +17,7 @@ import torch.nn.functional as F
 class WanClipVision(nn.Module):
     def __init__(self, checkpoint_path: str, dtype: torch.dtype = torch.bfloat16):
         super().__init__()
-        from primus.backends.diffusion.models.wan.clip import (
-            clip_xlm_roberta_vit_h_14,
-        )
+        from primus.backends.diffusion.models.wan.clip import clip_xlm_roberta_vit_h_14
 
         model, _transforms = clip_xlm_roberta_vit_h_14(
             pretrained=False,
