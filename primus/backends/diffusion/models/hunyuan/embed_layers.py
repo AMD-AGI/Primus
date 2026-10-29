@@ -11,7 +11,7 @@ import math
 import torch
 import torch.nn as nn
 
-from ..utils.helpers import to_2tuple
+from primus.backends.diffusion.utils.helpers import to_2tuple
 
 
 class PatchEmbed(nn.Module):

@@ -47,7 +47,7 @@ def _use_aiter_varlen() -> bool:
 
 
 def _varlen_flash(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv):
-    from primus.backends.diffusion.amdb_benchmarks.flops import (
+    from primus.backends.diffusion.utils.flops import (
         flop_counter_active,
         mark_attention_flops,
     )

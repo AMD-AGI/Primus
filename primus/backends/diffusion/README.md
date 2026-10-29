@@ -7,8 +7,8 @@ datasets, attention selection, FSDP2 wrapping, and the training loop.
 ## Supported Scope
 
 - Native models: `wan`, `flux`, `flux.1-dev`, and `flux.1-schnell`.
-- AMDiffusionBenchmark workload `hunyuan-video`, registered from
-  `amdb_benchmarks/`. The trainable module is the Tencent transformer.
+- AMDiffusionBenchmark workload `hunyuan-video`, built by
+  `models/registrations/hunyuan.py`. The trainable module is the Tencent transformer.
   It uses the shared benchmark trainer and does not change the native
   Wan or FLUX trainers.
 - Trainer: FSDP2 for the native models. The benchmark workloads use

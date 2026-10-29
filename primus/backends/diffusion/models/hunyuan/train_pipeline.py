@@ -13,10 +13,10 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from primus.backends.diffusion.amdb_benchmarks.hunyuan.posemb_layers import (
+from primus.backends.diffusion.models.hunyuan.posemb_layers import (
     get_nd_rotary_pos_embed,
 )
-from primus.backends.diffusion.amdb_benchmarks.sampling import (
+from primus.backends.diffusion.utils.sampling import (
     sample_shifted_logit_normal_sigmas,
 )
 
@@ -41,7 +41,7 @@ class HunyuanTrainPipeline:
         self, vae: torch.nn.Module, batch: dict[str, Any], *, device: torch.device, dtype: torch.dtype
     ):
         """Match AMDiffusionBenchmark: causal-3D VAE sample, then ``scaling_factor``."""
-        from primus.backends.diffusion.amdb_benchmarks.pixels import videos_to_tensor
+        from primus.backends.diffusion.utils.pixels import videos_to_tensor
 
         if "videos" in batch:
             pixels = videos_to_tensor(

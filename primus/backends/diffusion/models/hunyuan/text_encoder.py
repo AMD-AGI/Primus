@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from transformers import AutoModel, AutoTokenizer, CLIPTextModel, CLIPTokenizer
 
-from primus.backends.diffusion.amdb_benchmarks.download import tokenizer_dir
+from primus.backends.diffusion.utils.download import tokenizer_dir
 from primus.backends.diffusion.utils.hf_load import disable_safetensors_auto_conversion
 
 VIDEO_PROMPT_TEMPLATE = (
