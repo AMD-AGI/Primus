@@ -107,8 +107,8 @@ def _validate_local_or_hf_id(value: str | None, description: str) -> None:
 
 
 _BENCHMARK_DOWNLOADS = {
-    'sdxl',
-    'stable-diffusion-xl',
+    "sdxl",
+    "stable-diffusion-xl",
 }
 
 
