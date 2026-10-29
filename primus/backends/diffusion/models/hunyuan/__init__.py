@@ -4,9 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from primus.backends.diffusion.models.hunyuan.adapter import (
-    HunyuanVideoForTraining,
-)
+from primus.backends.diffusion.models.hunyuan.adapter import HunyuanVideoForTraining
 from primus.backends.diffusion.models.hunyuan.models import (
     HUNYUAN_VIDEO_CONFIG,
     HYVideoDiffusionTransformer,

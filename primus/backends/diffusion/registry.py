@@ -62,7 +62,9 @@ def _build_fsdp2_trainer(
 
 
 def _build_hunyuan(model_config: dict):
-    from primus.backends.diffusion.models.registrations.hunyuan import build_hunyuan_model
+    from primus.backends.diffusion.models.registrations.hunyuan import (
+        build_hunyuan_model,
+    )
 
     return build_hunyuan_model(model_config)
 
@@ -78,7 +80,9 @@ def _build_amdb_dataset(dataset_config: dict):
 def _build_amdb_benchmark_trainer(
     *, model, dataset, processor, trainer_args: dict, eval_dataset=None, eval_processor=None
 ):
-    from primus.backends.diffusion.trainers.benchmark import build_amdb_benchmark_trainer
+    from primus.backends.diffusion.trainers.benchmark import (
+        build_amdb_benchmark_trainer,
+    )
 
     return build_amdb_benchmark_trainer(
         model=model,
@@ -88,6 +92,7 @@ def _build_amdb_benchmark_trainer(
         eval_dataset=eval_dataset,
         eval_processor=eval_processor,
     )
+
 
 MODEL_BUILDERS: Dict[str, Callable[[dict], Any]] = {
     "flux": _build_flux_model,

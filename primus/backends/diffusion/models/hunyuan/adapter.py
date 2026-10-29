@@ -11,11 +11,9 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from primus.backends.diffusion.models.hunyuan.train_pipeline import (
-    HunyuanTrainPipeline,
-)
-from primus.backends.diffusion.utils.pixels import decode_host_pixels
+from primus.backends.diffusion.models.hunyuan.train_pipeline import HunyuanTrainPipeline
 from primus.backends.diffusion.models.interface import GenAIModel
+from primus.backends.diffusion.utils.pixels import decode_host_pixels
 
 
 class HunyuanVideoForTraining(GenAIModel):

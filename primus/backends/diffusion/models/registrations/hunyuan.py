@@ -13,6 +13,13 @@ from types import SimpleNamespace
 
 import torch
 
+from primus.backends.diffusion.models.hunyuan.adapter import HunyuanVideoForTraining
+from primus.backends.diffusion.models.hunyuan.models import (
+    HUNYUAN_VIDEO_CONFIG,
+    HYVideoDiffusionTransformer,
+)
+from primus.backends.diffusion.models.hunyuan.text_encoder import HunyuanTextEncoder
+from primus.backends.diffusion.models.hunyuan.train_pipeline import HunyuanTrainPipeline
 from primus.backends.diffusion.utils.checkpoint_convert import (
     hunyuan_diffusers_to_native,
     is_diffusers_hunyuan,
@@ -22,21 +29,8 @@ from primus.backends.diffusion.utils.checkpoint_io import (
     strip_prefixes,
 )
 from primus.backends.diffusion.utils.download import materialize_pretrained
-from primus.backends.diffusion.models.hunyuan.adapter import (
-    HunyuanVideoForTraining,
-)
-from primus.backends.diffusion.models.hunyuan.models import (
-    HUNYUAN_VIDEO_CONFIG,
-    HYVideoDiffusionTransformer,
-)
-from primus.backends.diffusion.models.hunyuan.text_encoder import (
-    HunyuanTextEncoder,
-)
-from primus.backends.diffusion.models.hunyuan.train_pipeline import (
-    HunyuanTrainPipeline,
-)
-from primus.backends.diffusion.utils.sampling import amdb_flow_sigma_grid
 from primus.backends.diffusion.utils.log import logger
+from primus.backends.diffusion.utils.sampling import amdb_flow_sigma_grid
 from primus.backends.diffusion.utils.train_utils import count_parameters
 
 
