@@ -290,6 +290,7 @@ def build_wan_model(model_config: dict):
 
     return model
 
+
 def build_wan21_i2v_model(model_config: dict[str, Any]):
     """Native Wan DiT with Wan2.1 I2V cross-attention and the AMDB noise schedule."""
     from primus.backends.diffusion.utils.download import materialize_pretrained
