@@ -123,6 +123,22 @@ class FluxForTraining(GenAIModel, nn.Module):
             return self.forward_train(args[0], scheduler=scheduler)
         raise TypeError("FluxForTraining.forward expects (batch_dict, scheduler)")
 
+    def encode_batch(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
+        param = next(self.dit.parameters())
+        return self.train_pipeline.encode_batch(
+            batch=batch,
+            autoencoder=self.autoencoder,
+            t5_encoder=self.t5_encoder,
+            clip_encoder=self.clip_encoder,
+            device=param.device,
+            dtype=self.compute_dtype or param.dtype,
+        )
+
+    def offload_frozen_modules(self) -> None:
+        for module in (self.autoencoder, self.t5_encoder, self.clip_encoder):
+            if module is not None:
+                module.to("cpu")
+
     def forward_train(self, batch: dict[str, Any], scheduler: Any = None) -> dict[str, torch.Tensor]:
         del scheduler
         return self.train_pipeline.compute_loss(

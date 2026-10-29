@@ -38,6 +38,7 @@ class FluxParams:
     theta: int
     qkv_bias: bool
     guidance_embed: bool
+    qk_norm_eps: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -103,13 +104,19 @@ class Flux(nn.Module):
                     self.num_heads,
                     mlp_ratio=params.mlp_ratio,
                     qkv_bias=params.qkv_bias,
+                    qk_norm_eps=params.qk_norm_eps,
                 )
                 for _ in range(params.depth)
             ]
         )
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio)
+                SingleStreamBlock(
+                    self.hidden_size,
+                    self.num_heads,
+                    mlp_ratio=params.mlp_ratio,
+                    qk_norm_eps=params.qk_norm_eps,
+                )
                 for _ in range(params.depth_single_blocks)
             ]
         )

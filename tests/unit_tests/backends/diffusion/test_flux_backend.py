@@ -717,3 +717,72 @@ def test_tiny_flux_model_computes_raw_loss_with_dummy_encoders():
 
     assert outputs["loss"].ndim == 0
     assert torch.isfinite(outputs["loss"])
+
+
+def test_flux_raw_prompt_skips_none_and_uses_the_filename():
+    dataset = FluxRawImageTextDataset.__new__(FluxRawImageTextDataset)
+    dataset.benchmark_loader = False
+    assert dataset._prompt_from_sample({"caption": None, "txt": "cat"}) == "cat"
+    dataset.benchmark_loader = True
+    assert dataset._prompt_from_sample({"caption": None, "caption_0": "dog"}) == "dog"
+    image = type("Img", (), {"filename": "west_wing.jpg"})()
+    assert dataset._prompt_from_sample({"caption": None, "image": image}) == "west wing"
+    with pytest.raises(KeyError, match="caption_0"):
+        dataset._prompt_from_sample({"caption": None})
+
+
+def test_flux_raw_prepare_batch_passes_through_a_host_tensor():
+    processor = FluxRawImageTextProcessor({"img_size": 8, "skip_low_resolution": False})
+    image = torch.zeros(1, 3, 8, 8)
+    prepared = processor.prepare_batch(
+        batch={"image": image, "prompts": ["cat"]},
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    assert prepared["prompts"] == ["cat"]
+    assert prepared["image"].shape == (1, 3, 8, 8)
+    assert prepared["image"].dtype == torch.float32
+
+
+def test_fused_rope_rejects_cpu_tensors_and_reuses_angles():
+    from primus.backends.diffusion.models.flux.rope_triton import (
+        _shared_cos_sin,
+        fused_rope_supported,
+    )
+
+    freqs = torch.zeros(1, 2, 1, 4, 2, 2)
+    hidden = torch.zeros(1, 2, 1, 8)
+    assert fused_rope_supported(hidden, freqs) is False
+    cos, sin = _shared_cos_sin(freqs, (1, 2, 4))
+    again_cos, again_sin = _shared_cos_sin(freqs, (1, 2, 4))
+    assert cos is again_cos
+    assert sin is again_sin
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused RoPE kernel needs a GPU")
+def test_fused_rope_matches_eager_forward_and_backward(monkeypatch):
+    pytest.importorskip("triton")
+    from primus.backends.diffusion.models.flux.rope_triton import fused_apply_rope
+
+    half = 4
+    angle = torch.randn(2, 3, 1, half, device="cuda")
+    cos = torch.cos(angle)
+    sin = torch.sin(angle)
+    freqs = torch.zeros(2, 3, 1, half, 2, 2, device="cuda")
+    freqs[..., 0, 0] = cos
+    freqs[..., 0, 1] = -sin
+    freqs[..., 1, 0] = sin
+    freqs[..., 1, 1] = cos
+    query = torch.randn(2, 3, 2, half * 2, device="cuda", requires_grad=True)
+    key = torch.randn(2, 3, 2, half * 2, device="cuda", requires_grad=True)
+    eager_query = query.detach().clone().requires_grad_(True)
+    eager_key = key.detach().clone().requires_grad_(True)
+    monkeypatch.setenv("PRIMUS_FLUX_TRITON_ROPE", "0")
+    eager_q, eager_k = apply_rope(eager_query, eager_key, freqs)
+    fused_q, fused_k = fused_apply_rope(query, key, freqs)
+    torch.testing.assert_close(fused_q, eager_q, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(fused_k, eager_k, atol=1e-4, rtol=1e-4)
+    (fused_q + fused_k).sum().backward()
+    (eager_q + eager_k).sum().backward()
+    torch.testing.assert_close(query.grad, eager_query.grad, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(key.grad, eager_key.grad, atol=1e-4, rtol=1e-4)
