@@ -20,12 +20,8 @@ from primus.backends.diffusion.models.mochi.cp_conv import (
     cp_pass_frames,
     gather_all_frames,
 )
-from primus.backends.diffusion.models.mochi.latent_dist import (
-    LatentDistribution,
-)
-from primus.backends.diffusion.models.mochi.progress import (
-    get_new_progress_bar,
-)
+from primus.backends.diffusion.models.mochi.latent_dist import LatentDistribution
+from primus.backends.diffusion.models.mochi.progress import get_new_progress_bar
 
 
 def cast_tuple(t, length=1):

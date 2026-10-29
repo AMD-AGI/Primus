@@ -136,4 +136,3 @@ with a constant schedule. `LR` overrides either default.
 
 Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
 `SP_SIZE` at 1.
-
