@@ -1,0 +1,147 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# MiniMax-M3 BF16 proxy pretraining on MI455X (gfx1250).
+#
+# Default shape is the one that fits on one 432 GB GPU: 4 of M3's 60 layers
+# (the real first three dense layers, then one MSA + MoE layer), hidden 6144,
+# 64/4 GQA, 128 experts, seq 4096, MBS 1, EP 1. MSA runs on the gfx1250
+# wave32 WMMA kernels; `--msa_backend eager` is the PyTorch reference. The
+# experts use Primus-Turbo's grouped GEMM.
+#
+# Launch with examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh.
+# That script keeps moe_layer_freq / sparse_attention_freq /
+# sparse_disable_index_value the same length as num_layers (first 3 dense).
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:minimax_m3-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: ${PRIMUS_MODEL:minimax_m3}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_MiniMax_M3_Pretrain"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # Uniform routing for a throughput run. A real training run should turn
+      # this off; the preset's aux-loss-free bias is what balances experts then.
+      moe_router_force_load_balancing: true
+
+      # hyper parameters. The launcher sets MBS and GBS from the GPU count.
+      train_iters: 10
+      micro_batch_size: 1
+      global_batch_size: 1
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      # The preset builds the RoPE cache at 1048576. Leave this at seq_length.
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+
+      # 4 layers = 3 dense + 1 MSA/MoE. The launcher rewrites all four together.
+      num_layers: ${PRIMUS_TOTAL_LAYERS:4}
+      moe_layer_freq: "${PRIMUS_LAYER_FREQ:([0]*3+[1]*1)}"
+      sparse_attention_freq: "${PRIMUS_LAYER_FREQ:([0]*3+[1]*1)}"
+      sparse_disable_index_value: "${PRIMUS_LAYER_FREQ:([0]*3+[1]*1)}"
+      # flydsl: gfx950 MFMA kernels, or the wave32 WMMA kernels on gfx1250.
+      # eager: plain PyTorch, for numerics. flydsl rejects a dataloader mask.
+      msa_backend: ${PRIMUS_MSA_BACKEND:flydsl}
+
+      # parallel. MSA has no tensor or context parallel, so extra GPUs are EP.
+      # EP must divide both 128 and the data-parallel size.
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:1}
+      sequence_parallel: false
+      # Overlapping the grad reduce-scatter and param all-gather was 10% slower on one
+      # GPU and 5% on EP2.
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      use_torch_fsdp2: false
+      use_distributed_optimizer: true
+      # Fusing the wgrad accumulation into the fp32 main_grad was 14-16% slower: hipBLASLt
+      # picks a 3.7x slower kernel for fp32-output GEMMs on gfx1250. Into a bf16 main_grad
+      # it is 1% faster.
+      gradient_accumulation_fusion: false
+
+      # block recomputes the first recompute_num_layers layers: on the 4-layer proxy,
+      # dense layer 1, not the MSA/MoE layer.
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: ${PRIMUS_RECOMPUTE_NUM_LAYERS:1}
+
+      # data. MSA builds its own causal mask; a dataloader mask is rejected by flydsl.
+      create_attention_mask_in_dataloader: false
+      mock_data: true
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+
+      # MoE. Not the legacy GroupedMLP: M3's activation is quick_geglu / swigluoai,
+      # which the legacy path refuses.
+      moe_use_legacy_grouped_gemm: false
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+      # BF16 router logits NaN on the first step with 128 experts.
+      moe_router_dtype: fp32
+
+      # rope fusion
+      enable_experimental: true
+      apply_rope_fusion: true
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # Turbo. use_turbo_attention only reaches the three dense layers; the MSA layers
+      # have their own kernel. The grouped GEMM keeps a layer's experts in one weight,
+      # 2^31 elements or more at EP <= 2, which TE's l2norm needs the
+      # te_l2norm_large_tensor patch for. The launcher passes the attention, grouped
+      # GEMM and DeepEP switches.
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: true
+      use_turbo_rms_norm: true
+      use_turbo_deepep: false
+      moe_shared_expert_overlap: false
+
+      # cross entropy
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # training control. A full gc.collect() takes about 280 ms here, longer than
+      # the 1-GPU step, and collects nothing, so not every iteration.
+      manual_gc: true
+      manual_gc_interval: 100
+      pp_warmup: true
+      disable_wandb: true
+      disable_tensorboard: true
