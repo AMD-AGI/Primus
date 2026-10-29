@@ -37,7 +37,7 @@ from megatron.core.tensor_parallel.random import (
     get_expert_parallel_rng_tracker_name,
 )
 from megatron.core.transformer.module import MegatronModule
-from megatron.core.transformer.spec_utils import build_module
+from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
 from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
@@ -89,6 +89,24 @@ def mega_moe_precision() -> str:
     precision = getattr(get_args(), "turbo_mega_moe_precision", "bf16") or "bf16"
     assert precision in supported, f"turbo_mega_moe_precision must be one of {supported}, got {precision!r}"
     return precision
+
+
+def mega_moe_router(router):
+    """The router builder MegaMoE uses: Megatron's ``TopKRouter`` becomes ``PrimusTopKRouter``.
+
+    The ``megatron.moe.primus_topk_router`` patch makes that swap in ``MoELayer.__init__``, which this
+    layer replaces, and from Megatron-LM core_v0.19 the MoE spec is a ``functools.partial`` that the
+    patch's spec hook cannot edit, so MegaMoE would otherwise get the plain ``TopKRouter``.
+    """
+    from megatron.training import get_args
+
+    from primus.backends.megatron.core.transformer.moe.router import PrimusTopKRouter
+
+    if getattr(router, "__name__", "") != "TopKRouter":
+        return router
+    if getattr(get_args(), "disable_primus_topk_router", False):
+        return router
+    return PrimusTopKRouter
 
 
 class MegaMoEWeightModule(MegatronModule):
@@ -250,6 +268,7 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         layer_number: Optional[int] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         is_mtp_layer: bool = False,
+        name: Optional[str] = None,
     ) -> None:
         super().__init__(config)
 
@@ -274,7 +293,9 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         self.intermediate_size = config.moe_ffn_hidden_size
 
         # router owns all routing logic
-        self.router = submodules.router(config=config, pg_collection=pg_collection, is_mtp_layer=is_mtp_layer)
+        self.router = mega_moe_router(submodules.router)(
+            config=config, pg_collection=pg_collection, is_mtp_layer=is_mtp_layer
+        )
 
         # separate w1/w2 modules give DDP overlap boundaries
         experts_cls = MegaMoEFP8Experts if mega_moe_precision() == "mxfp8" else MegaMoEExperts
@@ -291,12 +312,16 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         # optional shared expert
         self.use_shared_expert = config.moe_shared_expert_intermediate_size is not None
         if self.use_shared_expert:
-            self.shared_experts = build_module(
-                submodules.shared_experts,
-                config=config,
-                pg_collection=pg_collection,
-                gate=config.moe_shared_expert_gate,
+            shared_experts_kwargs = dict(
+                config=config, pg_collection=pg_collection, gate=config.moe_shared_expert_gate
             )
+            if isinstance(submodules.shared_experts, ModuleSpec):
+                self.shared_experts = build_module(submodules.shared_experts, **shared_experts_kwargs)
+            else:
+                # Megatron-LM core_v0.19+: a builder callable, which also takes the module name
+                self.shared_experts = submodules.shared_experts(
+                    **shared_experts_kwargs, name=(name + ".shared_experts") if name is not None else None
+                )
         else:
             self.shared_experts = None
 

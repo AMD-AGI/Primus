@@ -7,6 +7,7 @@
 """EP8 parity test: fused ``MegaMoE`` vs Megatron ``MoELayer``.
 """
 
+import functools
 from types import SimpleNamespace
 
 import pytest
@@ -40,6 +41,7 @@ from primus.backends.megatron.core.extensions.mega_moe import (
     PrimusTurboMegaMoELayer,
     mega_moe_activation,
 )
+from primus.backends.megatron.core.transformer.moe.router import PrimusTopKRouter
 
 
 def _create_args(precision: str = "bf16"):
@@ -188,14 +190,24 @@ def _build_layers(config, num_moe_experts, num_layers):
         _set_random_seed(seed_=123 + layer_idx, data_parallel_random_init=False)
 
         spec = get_gpt_layer_local_spec(num_experts=num_moe_experts, moe_grouped_gemm=False)
-        submodules = spec.submodules.mlp.submodules
+        mlp = spec.submodules.mlp
+        # Megatron-LM core_v0.19+: functools.partial(MoELayer, submodules=...); before: a ModuleSpec
+        submodules = mlp.keywords["submodules"] if isinstance(mlp, functools.partial) else mlp.submodules
         moe_layer = MoELayer(config, submodules).cuda().to(torch.bfloat16)
         moe_layer.set_layer_number(layer_idx)
 
-        # mega layer reuses the same router/shared-expert submodules
+        # mega layer reuses the same router/shared-expert submodules; the name is what
+        # Megatron-LM core_v0.19's TransformerLayer passes its MLP
         mega_layer = PrimusTurboMegaMoELayer(
-            config, submodules, layer_number=layer_idx, pg_collection=pg_collection
+            config,
+            submodules,
+            layer_number=layer_idx,
+            pg_collection=pg_collection,
+            name=f"decoder.layers.{layer_idx}.mlp",
         ).cuda()
+        # MoELayer gets PrimusTopKRouter from the megatron.moe.primus_topk_router patch, so MegaMoE
+        # swaps it in itself; with these args it routes exactly like the reference's TopKRouter
+        assert isinstance(mega_layer.router, PrimusTopKRouter)
 
         experts = moe_layer.experts.local_experts
         mega_w1 = mega_layer.experts.fc1_weight.weight
