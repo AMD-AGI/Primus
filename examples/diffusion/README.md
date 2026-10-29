@@ -121,18 +121,36 @@ On success the hook prints `env.PREPARED=1`.
 ## Official-module post-training
 
 HunyuanVideo fine-tunes the in-tree Tencent transformer. It does not build
-a Diffusers pipeline. Point `PRETRAINED_PATH` at the official transformer checkpoint.
+a Diffusers pipeline. Point `PRETRAINED_PATH` at the official transformer
+checkpoint, or leave it unset and let `primus-cli` download
+`hunyuanvideo-community/HunyuanVideo`.
+
+```bash
+PRETRAINED_PATH=/models/HunyuanVideo \
+DATASET_PATH=Wild-Heart/Disney-VideoGeneration-Dataset \
+LOCAL_BATCH_SIZE=3 \
+MAX_STEPS=10 \
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_hunyuan_video-posttrain.yaml
+```
+
+On MI300X or MI325X, use the config of the same name under
+`examples/diffusion/configs/MI300X` or `MI325X`. Keep `SP_SIZE` at 1.
 
 | Workload | Official source | Checkpoint |
 |---|---|---|
 | HunyuanVideo | Tencent `HYVideoDiffusionTransformer` | official transformer weights, LLaMA text encoder, CLIP-L |
 
 MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
-with a constant schedule. `LR` overrides either default.
+with a constant schedule. `LR` overrides either default. `max_grad_norm`
+defaults to 0 so the timed step does not include a grad-norm all-reduce.
+`MAX_GRAD_NORM` overrides it.
 
-| Workload | MI300X / MI325X | MI355X |
+| Workload | `LOCAL_BATCH_SIZE` on MI300X / MI325X | `LOCAL_BATCH_SIZE` on MI355X |
 |---|---:|---:|
 | hunyuan-video | 1 | 3 |
 
-Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
-`SP_SIZE` at 1.
+`DATASET_PATH=synthetic:hunyuan` trains the denoiser on a repeated latent
+batch and skips the dataset download. `BENCHMARK_DENOISER_ONLY=1` also skips
+the LLaMA, CLIP, and VAE downloads. A `DATASET_PATH` that ends in `.pt` loads
+cached encodings instead.

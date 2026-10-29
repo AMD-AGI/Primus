@@ -66,6 +66,12 @@ Keep sequence parallelism at 1.
   --config examples/diffusion/configs/MI355X/benchmark_hunyuan_video-posttrain.yaml
 ```
 
+`DATASET_PATH=synthetic:hunyuan` repeats one denoiser batch and skips the
+dataset download. `BENCHMARK_DENOISER_ONLY=1` also skips the text encoder and
+VAE. A path ending in `.pt` loads cached encodings. The Disney dataset is
+pinned to commit `316b85f5d7c263260cc526a25eece96cc30e0c06` (Hugging Face PR 4,
+which adds `metadata.csv`).
+
 ## Public Config Sections
 
 Diffusion examples use Primus override sections that the backend converts into

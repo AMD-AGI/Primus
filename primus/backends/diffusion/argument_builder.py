@@ -538,23 +538,13 @@ def benchmark_defaults(
     flux_dataset: dict[str, Any],
     flux_trainer: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    if model_name == "flux-dev":
-        dataset = copy.deepcopy(flux_dataset)
-        dataset["config"]["dataset_type"] = "raw"
-        dataset["config"]["dataset_format"] = "hf_repo"
-        dataset["config"]["dataset_path"] = ""
-        processor = dataset["config"]["processor_config"]
-        processor["img_size"] = 512
-        processor["processor_name"] = "flux_raw"
-        processor["processor_type"] = "flux_raw"
-        processor["skip_low_resolution"] = False
-        dataset["config"]["benchmark_loader"] = True
-        trainer = copy.deepcopy(BENCHMARK_TRAINER)
-        trainer["args"]["run_name"] = "flux-dev"
-        trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] = "DoubleStreamBlock,SingleStreamBlock"
-        trainer["args"]["fsdp_module_paths_to_wrap"] = flux_trainer["args"]["fsdp_module_paths_to_wrap"]
-        trainer["args"]["fsdp_module_paths_no_reshard"] = flux_trainer["args"]["fsdp_module_paths_no_reshard"]
-        return dataset, trainer
+    # This branch registers hunyuan-video only. sdxl, mochi-1, wan2.1-i2v, and
+    # flux-dev stay in the shared tables for the sibling benchmark PRs, but they
+    # must fail here. Otherwise argument building succeeds and prepare or
+    # ``get_model_builder`` raises later.
+    del flux_dataset, flux_trainer
+    if model_name != "hunyuan-video":
+        return None
 
     spec = _spec(model_name)
     if spec is None:
@@ -563,6 +553,7 @@ def benchmark_defaults(
         "name": "amdb",
         "config": {
             "dataset_path": "",
+            "model_name": model_name,
             "modality": spec["modality"],
             "max_train_samples": -1,
             "split": "train",
@@ -605,6 +596,7 @@ def apply_benchmark_sections(
     spec = _spec(model_name)
     if spec is None:
         return
+    dataset_cfg["model_name"] = model_name
     if int(trainer_args.get("sp_size", 1)) != 1:
         raise ValueError(f"{model_name} diffusion training requires `parallelism.sp_size: 1`.")
     dataset_cfg["modality"] = data.get("modality") or spec["modality"]

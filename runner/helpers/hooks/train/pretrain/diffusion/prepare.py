@@ -106,6 +106,9 @@ def _validate_local_or_hf_id(value: str | None, description: str) -> None:
         _fail(f"{description} is neither an existing path nor a Hugging Face reference: {value!r}")
 
 
+# Only hunyuan-video is registered here. sdxl, mochi-1, wan2.1-i2v, and
+# flux-dev are rejected while arguments are built, so their branches in
+# ``_validate_benchmark_model`` stay unused until those models land.
 _BENCHMARK_DOWNLOADS = {
     "hunyuan-video",
 }
@@ -118,10 +121,7 @@ def _stage_benchmark_downloads(
     model: dict[str, Any],
 ) -> dict[str, str]:
     """Download the benchmark checkpoint and dataset, then expose their paths."""
-    from primus.backends.diffusion.utils.download import (
-        _ENCODER_ENV_KEYS,
-        stage_benchmark_assets,
-    )
+    from primus.backends.diffusion.utils.download import _ENCODER_ENV_KEYS, stage_benchmark_assets
 
     encoder_cfg = model_cfg.get("encoder") or model.get("encoder") or {}
     if not isinstance(encoder_cfg, dict):

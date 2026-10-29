@@ -6,7 +6,7 @@ import pytest
 
 from primus.backends.diffusion.argument_builder import DiffusionArgBuilder
 from primus.backends.diffusion.data.benchmark import AMDBProcessor
-from primus.backends.diffusion.registry import DATASET_BUILDERS, MODEL_BUILDERS
+from primus.backends.diffusion.registry import DATASET_BUILDERS, MODEL_BUILDERS, TRAINER_BUILDERS
 
 BENCHMARK_NAMES = ("hunyuan-video",)
 
@@ -21,6 +21,7 @@ def test_benchmark_workloads_are_registered():
     for name in BENCHMARK_NAMES:
         assert name in MODEL_BUILDERS
     assert "amdb" in DATASET_BUILDERS
+    assert "amdb_benchmark" in TRAINER_BUILDERS
 
 
 def test_hunyuan_keeps_checkpointing_off_and_makes_the_vae_optional(tmp_path):
@@ -33,6 +34,7 @@ def test_hunyuan_keeps_checkpointing_off_and_makes_the_vae_optional(tmp_path):
         }
     )
     assert args.dataset["config"]["modality"] == "video"
+    assert args.dataset["config"]["model_name"] == "hunyuan-video"
     assert args.model["config"]["resolution"] == "960,544"
     assert args.model["config"]["num_frames"] == 9
     assert args.trainer["args"]["gradient_checkpointing"] is False
@@ -96,9 +98,12 @@ def test_benchmark_downloads_keep_datasets_separate(monkeypatch, tmp_path):
     assert Path(path) == home / "datasets" / "Wild-Heart" / "Disney-VideoGeneration-Dataset"
     assert calls == {
         "repo": "Wild-Heart/Disney-VideoGeneration-Dataset",
-        "revision": "refs/pr/4",
+        "revision": "316b85f5d7c263260cc526a25eece96cc30e0c06",
     }
     assert home / "hub" not in Path(path).parents
+
+    download.materialize_dataset("hunyuan-video", "", revision="abc123")
+    assert calls["revision"] == "abc123"
 
     weights = tmp_path / "transformer"
     weights.write_bytes(b"x")
@@ -166,10 +171,7 @@ def test_benchmark_step_rates_match_amdiffusionbenchmark():
 
 
 def test_amdb_dataset_skips_decode_errors_only(tmp_path):
-    from primus.backends.diffusion.data.benchmark import (
-        AMDBDataset,
-        _TemporaryVideoReader,
-    )
+    from primus.backends.diffusion.data.benchmark import AMDBDataset, _TemporaryVideoReader
 
     class Corrupt:
         def load(self):
@@ -231,3 +233,115 @@ def test_even_batches_pad_short_tail_like_accelerate():
     assert batches == [list(range(16)), list(range(16, 20)) + list(range(12))]
     assert all(len(batch) == 16 for batch in batches)
     assert len(EvenSizeBatchSampler(range(16), 16)) == 1
+
+
+@pytest.mark.parametrize("name", ["sdxl", "mochi-1", "wan2.1-i2v", "flux-dev"])
+def test_unregistered_benchmark_names_fail_while_building_arguments(name):
+    with pytest.raises(ValueError, match="Unsupported diffusion model"):
+        _finalize({"model": {"name": name, "config": {}}})
+
+
+def test_bright_frame_lists_are_normalized_once():
+    import numpy as np
+    import torch
+
+    from primus.backends.diffusion.utils.pixels import videos_to_tensor
+
+    frame = np.full((4, 4, 3), 200, dtype=np.uint8)
+    clips = videos_to_tensor([[frame, frame]], num_frames=2, height=4, width=4)
+    expected = 200 / 127.5 - 1.0
+    assert torch.allclose(clips, torch.full_like(clips, expected), atol=1e-4)
+
+
+def test_checkpoint_directory_does_not_overlay_mixed_formats(tmp_path, monkeypatch):
+    import torch
+    from safetensors.torch import save_file
+
+    from primus.backends.diffusion.utils.checkpoint_io import load_state_dict
+
+    folder = tmp_path / "ckpt"
+    folder.mkdir()
+    save_file({"weight": torch.ones(2)}, folder / "model.safetensors")
+    torch.save({"weight": torch.zeros(2)}, folder / "model.bin")
+    loaded = load_state_dict(str(folder))
+    assert torch.equal(loaded["weight"], torch.ones(2))
+
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    save_file({"a": torch.ones(1)}, shards / "model-00001.safetensors")
+    save_file({"b": torch.zeros(1)}, shards / "model-00002.safetensors")
+    merged = load_state_dict(str(shards))
+    assert set(merged) == {"a", "b"}
+
+    overlap = tmp_path / "overlap"
+    overlap.mkdir()
+    save_file({"weight": torch.ones(1)}, overlap / "first.safetensors")
+    save_file({"weight": torch.zeros(1)}, overlap / "second.safetensors")
+    with pytest.raises(ValueError, match="repeats keys"):
+        load_state_dict(str(overlap))
+
+    mixed = tmp_path / "mixed"
+    mixed.mkdir()
+    torch.save({"weight": torch.ones(1)}, mixed / "a.bin")
+    torch.save({"weight": torch.zeros(1)}, mixed / "b.pt")
+    with pytest.raises(ValueError, match="Mixed checkpoint formats"):
+        load_state_dict(str(mixed))
+
+    single = tmp_path / "one.pt"
+    torch.save({"weight": torch.ones(1)}, single)
+    seen = {}
+    real_load = torch.load
+
+    def spy(path, *args, **kwargs):
+        seen.update(kwargs)
+        return real_load(path, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", spy)
+    assert torch.equal(load_state_dict(str(single))["weight"], torch.ones(1))
+    assert seen.get("weights_only") is True
+
+
+def test_cached_latent_loader_keeps_even_batches():
+    import torch
+
+    from primus.backends.diffusion.trainers.benchmark import cached_sample_loader
+
+    samples = [{"latents": torch.tensor([float(index)]), "prompt": str(index)} for index in range(7)]
+    _sampler, loader = cached_sample_loader(
+        samples,
+        batch_size=3,
+        shuffle=False,
+        even_batches=True,
+        drop_last=False,
+    )
+    prompts = [tuple(batch["prompts"]) for batch in loader]
+    assert prompts == [("0", "1", "2"), ("3", "4", "5"), ("6", "0", "1")]
+    assert all(batch["latents"].shape[0] == 3 for batch in loader)
+
+
+def test_hunyuan_rope_tables_are_cached(monkeypatch):
+    import torch
+
+    from primus.backends.diffusion.models.hunyuan.train_pipeline import HunyuanTrainPipeline
+
+    calls = {"count": 0}
+
+    def fake(*_args, **_kwargs):
+        calls["count"] += 1
+        return torch.zeros(2, 4), torch.ones(2, 4)
+
+    monkeypatch.setattr(
+        "primus.backends.diffusion.models.hunyuan.train_pipeline.get_nd_rotary_pos_embed",
+        fake,
+    )
+    pipeline = HunyuanTrainPipeline()
+    dit = type("Dit", (), {"rope_dim_list": [2, 2]})()
+    first_cos, first_sin = pipeline._rotary_embeddings(
+        dit, (1, 2, 2), device=torch.device("cpu"), dtype=torch.float32
+    )
+    second_cos, second_sin = pipeline._rotary_embeddings(
+        dit, (1, 2, 2), device=torch.device("cpu"), dtype=torch.float32
+    )
+    assert calls["count"] == 1
+    assert first_cos is second_cos
+    assert first_sin is second_sin

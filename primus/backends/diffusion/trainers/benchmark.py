@@ -19,10 +19,12 @@ from importlib import import_module
 
 import torch
 from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
+from torch.utils.data import Sampler
 from torch.utils.flop_counter import FlopCounterMode
 
 from primus.backends.diffusion.trainers.base import (
     ContiguousDistributedSampler,
+    EvenSizeBatchSampler,
     benchmark_step_rates,
 )
 from primus.backends.diffusion.trainers.fsdp2 import FSDP2Trainer
@@ -33,6 +35,60 @@ try:
     import wandb
 except ImportError:
     wandb = None
+
+
+class _IndexSampler(Sampler[int]):
+    """Yield a fixed list of dataset indices, with no even-batch padding."""
+
+    def __init__(self, indices: list[int]):
+        self.indices = list(indices)
+
+    def __iter__(self):
+        return iter(self.indices)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+
+def cached_sample_loader(
+    samples: list[dict],
+    *,
+    batch_size: int,
+    shuffle: bool,
+    even_batches: bool,
+    drop_last: bool,
+):
+    """Loader over unique cached samples.
+
+    Even-batch padding is applied again here, so each epoch redraws the tail
+    instead of replaying the padding stored from epoch 0.
+    """
+    sampler = torch.utils.data.distributed.DistributedSampler(
+        samples,
+        num_replicas=1,
+        rank=0,
+        shuffle=shuffle,
+    )
+    common = {
+        "collate_fn": _collate_encoded,
+        "pin_memory": True,
+        "num_workers": 0,
+    }
+    if even_batches:
+        loader = torch.utils.data.DataLoader(
+            samples,
+            batch_sampler=EvenSizeBatchSampler(sampler, batch_size),
+            **common,
+        )
+    else:
+        loader = torch.utils.data.DataLoader(
+            samples,
+            batch_size=batch_size,
+            sampler=sampler,
+            drop_last=drop_last,
+            **common,
+        )
+    return sampler, loader
 
 
 def _collate_encoded(samples: list[dict]) -> dict:
@@ -57,9 +113,27 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
             return
         cache_start = time.time()
         self.sampler.set_epoch(0)
+        # Encode each rank-local index once. EvenSizeBatchSampler repeats the
+        # front of the shard to fill the tail; storing those repeats would replay
+        # the same epoch-0 padding in every later epoch.
         samples: list[dict] = []
+        num_workers = int(getattr(self.dataloader, "num_workers", 0) or 0)
+        cache_kwargs = {
+            "collate_fn": self.dataloader.collate_fn,
+            "pin_memory": True,
+            "num_workers": num_workers,
+            "drop_last": False,
+        }
+        if num_workers > 0:
+            cache_kwargs["prefetch_factor"] = 2
+        cache_loader = torch.utils.data.DataLoader(
+            self.dataloader.dataset,
+            batch_size=self.per_device_train_batch_size,
+            sampler=_IndexSampler(list(self.sampler)),
+            **cache_kwargs,
+        )
         with torch.no_grad():
-            for batch in self.dataloader:
+            for batch in cache_loader:
                 batch = self._prepare_batch(self._prepare_host_batch(batch), self.processing_class)
                 prompts = list(batch.get("prompts") or [])
                 encoded = encode(batch)
@@ -79,18 +153,11 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
             offload()
         torch.cuda.empty_cache()
 
-        self.sampler = torch.utils.data.distributed.DistributedSampler(
-            samples,
-            num_replicas=1,
-            rank=0,
-            shuffle=self.args.get("shuffle", True),
-        )
-        self.dataloader = torch.utils.data.DataLoader(
+        self.sampler, self.dataloader = cached_sample_loader(
             samples,
             batch_size=self.per_device_train_batch_size,
-            sampler=self.sampler,
-            collate_fn=_collate_encoded,
-            pin_memory=True,
+            shuffle=bool(self.args.get("shuffle", True)),
+            even_batches=bool(self.args.get("dataloader_even_batches", False)) and not self.mlperf_enabled,
             drop_last=bool(self.args.get("dataloader_drop_last", False)),
         )
         self._encoded_cache = True
@@ -143,8 +210,10 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
             raise ValueError(f"Unsupported FSDP2_REDUCE_DTYPE={reduce_dtype_name!r}")
         reduce_dtype = torch.float32 if reduce_dtype_name == "fp32" else torch.bfloat16
 
-        # Keep FP32 parameter/optimizer storage while allowing an explicit
-        # reduction-dtype experiment around the FP32-qualified default.
+        # MixedPrecisionPolicy computes in ``mp_dtype``. With
+        # ``fsdp2_pure_low_precision`` the cast below stores parameters in that
+        # dtype, so AdamW moments stay in bf16 too. ``FSDP2_REDUCE_DTYPE``
+        # selects the reduction dtype and defaults to bf16 in that mode.
         if mp_dtype != torch.float32:
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=mp_dtype,
@@ -472,12 +541,14 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                         end_event_gpu.record()
                         torch.cuda.synchronize()
                         step_time_gpu = start_event_gpu.elapsed_time(end_event_gpu) / 1000.0
-                        # AMDiffusionBenchmark logs
-                        # fps_gpu = args.train_batch_size / step_time_gpu and
-                        # tflops/s = total_flops * 1e-12 / step_time_gpu.
+                        # fps_gpu counts every sample inside the timed update.
+                        # With accumulation 1 and a full batch that is
+                        # per_device_train_batch_size / step_time_gpu, matching
+                        # AMDiffusionBenchmark. A short tail uses its real count
+                        # so the step does not read high.
                         if step_time_gpu > 0 and local_samples_in_update > 0:
                             step_fps, step_tflops = benchmark_step_rates(
-                                local_batch_size=self.per_device_train_batch_size,
+                                local_batch_size=local_samples_in_update,
                                 step_time_gpu_s=step_time_gpu,
                                 total_flops=0.0 if total_flops is None else total_flops,
                             )

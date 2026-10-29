@@ -14,21 +14,52 @@ import os
 import torch
 from safetensors.torch import load_file as safe_load_file
 
+_CHECKPOINT_SUFFIXES = (".safetensors", ".bin", ".pth", ".pt", ".ckpt")
+
+
+def _directory_checkpoints(path: str) -> list[str]:
+    """Files to load from a checkpoint directory.
+
+    Shards of one format are merged. Safetensors win when a directory also
+    holds a pickle copy of the same weights. Two non-safetensors formats are
+    refused so ``dict.update`` cannot silently overlay keys.
+    """
+    grouped: dict[str, list[str]] = {}
+    for suffix in _CHECKPOINT_SUFFIXES:
+        matches = sorted(glob.glob(os.path.join(path, f"*{suffix}")))
+        if matches:
+            grouped[suffix] = matches
+    if not grouped:
+        raise FileNotFoundError(f"No checkpoint files found under {path}")
+    if ".safetensors" in grouped:
+        return grouped[".safetensors"]
+    if len(grouped) > 1:
+        kinds = ", ".join(sorted(grouped))
+        raise ValueError(
+            f"Mixed checkpoint formats under {path} ({kinds}). "
+            "Keep a single format, or provide safetensors shards."
+        )
+    return next(iter(grouped.values()))
+
+
+def _merge_state_dicts(parts: list[tuple[str, dict[str, torch.Tensor]]]) -> dict[str, torch.Tensor]:
+    merged: dict[str, torch.Tensor] = {}
+    for candidate, part in parts:
+        overlap = sorted(set(merged).intersection(part))
+        if overlap:
+            sample = ", ".join(overlap[:3])
+            raise ValueError(f"Checkpoint {candidate} repeats keys already loaded ({sample})")
+        merged.update(part)
+    return merged
+
 
 def load_state_dict(path: str) -> dict[str, torch.Tensor]:
     if os.path.isdir(path):
-        candidates = []
-        for pattern in ("*.safetensors", "*.pth", "*.pt", "*.bin", "*.ckpt"):
-            candidates.extend(sorted(glob.glob(os.path.join(path, pattern))))
-        if not candidates:
-            raise FileNotFoundError(f"No checkpoint files found under {path}")
-        merged: dict[str, torch.Tensor] = {}
-        for candidate in candidates:
-            merged.update(load_state_dict(candidate))
-        return merged
+        candidates = _directory_checkpoints(path)
+        return _merge_state_dicts([(candidate, load_state_dict(candidate)) for candidate in candidates])
     if path.endswith(".safetensors"):
         return dict(safe_load_file(path))
-    obj = torch.load(path, map_location="cpu")
+    obj = torch.load(path, map_location="cpu", weights_only=True)
     if isinstance(obj, dict):
         for key in ("state_dict", "model", "module"):
             value = obj.get(key)

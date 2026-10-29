@@ -20,6 +20,11 @@ import os
 import sys
 from pathlib import Path
 
+# PR 4 adds metadata.csv so prompts load next to the clips. Pin the commit:
+# ``refs/pr/4`` moves when that pull request gains another commit.
+DISNEY_DATASET_REPO = "Wild-Heart/Disney-VideoGeneration-Dataset"
+DISNEY_DATASET_REVISION = "316b85f5d7c263260cc526a25eece96cc30e0c06"
+
 _MODEL_FILES: dict[str, tuple[str, str]] = {
     "flux-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors"),
     "sdxl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
@@ -32,9 +37,9 @@ _DATASETS: dict[str, tuple[str, str | None]] = {
     "flux-dev": ("frank-chieng/chinese_architecture_siheyuan", None),
     "sdxl": ("frank-chieng/chinese_architecture_siheyuan", None),
     "stable-diffusion-xl": ("frank-chieng/chinese_architecture_siheyuan", None),
-    "mochi-1": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
-    "hunyuan-video": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
-    "wan2.1-i2v": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
+    "mochi-1": (DISNEY_DATASET_REPO, DISNEY_DATASET_REVISION),
+    "hunyuan-video": (DISNEY_DATASET_REPO, DISNEY_DATASET_REVISION),
+    "wan2.1-i2v": (DISNEY_DATASET_REPO, DISNEY_DATASET_REVISION),
 }
 
 
@@ -197,11 +202,13 @@ def materialize_dataset(model_name: str, dataset_path: str | None, revision: str
         repo_id = text
         rev = revision
     elif not text and default is not None:
-        repo_id, rev = default
+        repo_id, default_rev = default
+        # An explicit revision wins over the table, including the empty-path default.
+        rev = revision or default_rev
     else:
         return text
-    if repo_id == "Wild-Heart/Disney-VideoGeneration-Dataset" and not rev:
-        rev = "refs/pr/4"
+    if repo_id == DISNEY_DATASET_REPO and not rev:
+        rev = DISNEY_DATASET_REVISION
     return _snapshot_dataset(repo_id, revision=rev)
 
 

@@ -13,9 +13,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from primus.backends.diffusion.models.hunyuan.posemb_layers import (
-    get_nd_rotary_pos_embed,
-)
+from primus.backends.diffusion.models.hunyuan.posemb_layers import get_nd_rotary_pos_embed
 from primus.backends.diffusion.utils.sampling import sample_shifted_logit_normal_sigmas
 
 
@@ -34,6 +32,22 @@ class HunyuanTrainPipeline:
         self.width = int(width)
         self.height = int(height)
         self.num_frames = int(num_frames)
+        self._rope_cache: tuple | None = None
+
+    def _rotary_embeddings(self, dit, grid, *, device: torch.device, dtype: torch.dtype):
+        """Reuse RoPE tables when the latent grid, device, and dtype stay fixed."""
+        rope_dims = tuple(int(dim) for dim in dit.rope_dim_list)
+        key = (rope_dims, tuple(int(size) for size in grid), str(device), dtype)
+        cached = self._rope_cache
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2]
+        freqs_cos, freqs_sin = get_nd_rotary_pos_embed(
+            dit.rope_dim_list, grid, theta=256, use_real=True, theta_rescale_factor=1
+        )
+        freqs_cos = freqs_cos.to(device=device, dtype=dtype)
+        freqs_sin = freqs_sin.to(device=device, dtype=dtype)
+        self._rope_cache = (key, freqs_cos, freqs_sin)
+        return freqs_cos, freqs_sin
 
     def _encode_video(
         self, vae: torch.nn.Module, batch: dict[str, Any], *, device: torch.device, dtype: torch.dtype
@@ -115,11 +129,7 @@ class HunyuanTrainPipeline:
         _, _, _, height, width = noisy.shape
         patch_t, patch_h, patch_w = dit.patch_size
         grid = (noisy.shape[2] // patch_t, height // patch_h, width // patch_w)
-        freqs_cos, freqs_sin = get_nd_rotary_pos_embed(
-            dit.rope_dim_list, grid, theta=256, use_real=True, theta_rescale_factor=1
-        )
-        freqs_cos = freqs_cos.to(device=device, dtype=dtype)
-        freqs_sin = freqs_sin.to(device=device, dtype=dtype)
+        freqs_cos, freqs_sin = self._rotary_embeddings(dit, grid, device=device, dtype=dtype)
         guidance = torch.full((latents.shape[0],), self.guidance, device=device, dtype=dtype)
         prediction = dit(
             noisy,
