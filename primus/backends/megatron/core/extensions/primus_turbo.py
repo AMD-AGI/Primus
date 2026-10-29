@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 import gc
+import inspect
 import os
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
@@ -422,11 +423,66 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
     return "megatron"
 
 
+try:
+    from primus_turbo.pytorch.ops.grouped_mlp_fp8 import (
+        _FP8_PAD_ALIGN as _TURBO_FP8_PAD_ALIGN,
+    )
+except (ImportError, ModuleNotFoundError):
+    _TURBO_FP8_PAD_ALIGN = 128
+
+# Padding Turbo's FP8 ops apply when they quantize a bf16 weight themselves. A
+# pre-quantized (cached) weight goes to the kernel as-is, so the multi-micro-batch
+# cache must be stored in the same layout, or its K no longer matches the padded
+# activation (GPT-OSS hidden 2880 vs 2944). Keyed by (op, weight role, granularity);
+# a missing key means the op does not pad that weight and the cache stays unpadded.
+#
+# Keep this in sync with the pad_align_last / pad_align_penultimate arguments that
+# Turbo passes to QuantizedTensor.quantize for bf16 weights in
+# primus_turbo/pytorch/ops/grouped_mlp_fp8.py (w1 -> "fc1", w2 -> "fc2") and
+# primus_turbo/pytorch/ops/grouped_gemm_fp8.py (b). Update it when a Turbo bump
+# changes those arguments, the alignment, or adds padding to another granularity
+# (e.g. MX_BLOCKWISE); a stale entry shows up as Turbo's "K mismatch" assertion
+# with several micro-batches only.
+_TURBO_FP8_WEIGHT_PAD = {
+    ("grouped_mlp", "fc1", ScalingGranularity.TENSORWISE): {"pad_align_last": _TURBO_FP8_PAD_ALIGN},
+    ("grouped_mlp", "fc2", ScalingGranularity.TENSORWISE): {
+        "pad_align_last": _TURBO_FP8_PAD_ALIGN,
+        "pad_align_penultimate": _TURBO_FP8_PAD_ALIGN,
+    },
+    ("grouped_gemm", "b", ScalingGranularity.TENSORWISE): {
+        "pad_align_last": _TURBO_FP8_PAD_ALIGN,
+        "pad_align_penultimate": _TURBO_FP8_PAD_ALIGN,
+    },
+}
+_PAD_ARG_DIM = {"pad_align_last": -1, "pad_align_penultimate": -2}
+
+
+@lru_cache(maxsize=1)
+def _turbo_quantize_supports_padding() -> bool:
+    # Turbo builds without these arguments do not pad weights in their ops either.
+    return PrimusTurboQuantizedTensor is not None and "pad_align_last" in (
+        inspect.signature(PrimusTurboQuantizedTensor.quantize).parameters
+    )
+
+
+def _turbo_fp8_weight_pad(op: str, role: str, granularity, weight_shape) -> dict:
+    """Pad arguments for caching a weight of ``op``'s ``role`` (see _TURBO_FP8_WEIGHT_PAD).
+
+    Dims that are already aligned are dropped, so aligned models keep the unpadded
+    ``create_quantized_weight`` cache unchanged.
+    """
+    if not _turbo_quantize_supports_padding():
+        return {}
+    spec = _TURBO_FP8_WEIGHT_PAD.get((op, role, granularity), {})
+    return {arg: align for arg, align in spec.items() if weight_shape[_PAD_ARG_DIM[arg]] % align}
+
+
 def _maybe_create_quantized_weight_buffers(
     weight: torch.Tensor,
     dest_dtype: torch.dtype,
     quant_config: "PrimusTurboQuantConfig",
     disable_parameter_transpose_cache: bool,
+    weight_pad: Optional[dict] = None,
 ):
     """Quantize ``weight`` into a rowwise buffer plus an optional transposed
     (colwise) buffer, returning ``(rowwise, colwise_or_None)``.
@@ -435,9 +491,30 @@ def _maybe_create_quantized_weight_buffers(
     scaling recipe from the quant config and handles per-granularity transpose.
     Falls back to a manual rowwise/colwise quantize on older primus_turbo builds
     that do not export ``create_quantized_weight`` yet.
+
+    ``weight_pad`` (from :func:`_turbo_fp8_weight_pad`, TENSORWISE only) stores the
+    buffers zero-padded the way the consuming Turbo op pads weights it quantizes.
     """
     quant_config_internal = quant_config.data()
     need_weight_transpose_cache = not disable_parameter_transpose_cache
+
+    if weight_pad:
+        assert (
+            quant_config_internal.granularity == ScalingGranularity.TENSORWISE
+        ), f"padded weight cache only supports TENSORWISE, got {quant_config_internal.granularity}"
+        quantized_weight_rowwise = PrimusTurboQuantizedTensor.quantize(
+            weight,
+            dest_dtype=dest_dtype,
+            granularity=quant_config_internal.granularity,
+            block_size=quant_config_internal.block_size,
+            scaling_recipe=ScalingRecipe(),
+            axis=-1,
+            **weight_pad,
+        )
+        quantized_weight_colwise = (
+            quantized_weight_rowwise.transpose(-2, -1) if need_weight_transpose_cache else None
+        )
+        return quantized_weight_rowwise, quantized_weight_colwise
 
     if create_quantized_weight is not None:
         return create_quantized_weight(
@@ -2352,7 +2429,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         self._ensure_weight_views()
         return super().state_dict(*args, **kwargs)
 
-    def prepare_weights(self, x: torch.Tensor):
+    def prepare_weights(self, x: torch.Tensor, turbo_op: str = "grouped_gemm", weight_role: str = "b"):
         """Resolve the weight operand for grouped GEMM / fused grouped MLP.
 
         Owns ``is_first_microbatch``: first-microbatch quantized-weight cache,
@@ -2360,6 +2437,10 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         still sees ``main_grad`` on the real ``self.weights`` Parameter.
         Returns ``(x, weight, fuse_wgrad_accum_pattern)`` where ``weight`` is
         either that Parameter or a :class:`PrimusTurboQuantizedTensorPair`.
+
+        ``turbo_op`` / ``weight_role`` name the Turbo op and operand that consume
+        the weight; the FP8 cache is stored in that op's layout (see
+        ``_TURBO_FP8_WEIGHT_PAD``).
         """
         self._ensure_weight_views()
         weights = self.weights
@@ -2381,6 +2462,9 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                     quant_config,
                     disable_parameter_transpose_cache=self.disable_parameter_transpose_cache
                     or quant_config.current_scaling(),
+                    weight_pad=_turbo_fp8_weight_pad(
+                        turbo_op, weight_role, quant_config.data().granularity, weights.shape
+                    ),
                 )
             x, quantized_weights = _bridge_weight_grad(
                 x,
