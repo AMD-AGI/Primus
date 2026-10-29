@@ -244,13 +244,13 @@ def build_amdb_dataset(dataset_config: dict[str, Any]):
 
     modality = str(dataset_config.get("modality", "image"))
     if modality == "video":
-        from primus.backends.diffusion.amdb_benchmarks.shim.data.hf_torchvision_video_shim import (
+        from primus.backends.diffusion.data.hf_torchvision_video_shim import (
             apply_torchvision_io_video_reader_shim,
         )
 
         apply_torchvision_io_video_reader_shim()
 
-    from primus.backends.diffusion.amdb_benchmarks.download import materialize_dataset
+    from primus.backends.diffusion.utils.download import materialize_dataset
 
     dataset_path = materialize_dataset(
         str(dataset_config.get("model_name") or ""),

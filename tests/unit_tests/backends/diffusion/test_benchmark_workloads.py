@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from primus.backends.diffusion.amdb_benchmarks.data import AMDBProcessor
+from primus.backends.diffusion.data.benchmark import AMDBProcessor
 from primus.backends.diffusion.argument_builder import DiffusionArgBuilder
 from primus.backends.diffusion.registry import DATASET_BUILDERS, MODEL_BUILDERS
 
@@ -33,7 +33,7 @@ def test_sdxl_uses_the_amdb_dataset_and_unet_blocks():
 
 
 def test_sdxl_companion_checkpoint_is_the_unet_file(tmp_path):
-    import primus.backends.diffusion.amdb_benchmarks.download as download
+    import primus.backends.diffusion.utils.download as download
 
     weights = tmp_path / "sd_xl_base_1.0.safetensors"
     weights.write_bytes(b"sdxl")
@@ -65,7 +65,7 @@ def test_benchmark_downloads_keep_datasets_separate(monkeypatch, tmp_path):
     monkeypatch.setenv("PRIMUS_HF_HOME", str(tmp_path / "hf"))
     monkeypatch.delenv("HF_HOME", raising=False)
     monkeypatch.delenv("DATA_PATH", raising=False)
-    import primus.backends.diffusion.amdb_benchmarks.download as download
+    import primus.backends.diffusion.utils.download as download
 
     calls = {}
 
@@ -108,7 +108,7 @@ def test_benchmark_downloads_keep_datasets_separate(monkeypatch, tmp_path):
 def test_siheyuan_train_split_includes_both_archives_and_log_pngs(tmp_path):
     import zipfile
 
-    from primus.backends.diffusion.amdb_benchmarks.data import (
+    from primus.backends.diffusion.data.benchmark import (
         caption_from_image_filename,
         read_siheyuan_images,
         siheyuan_image_members,
@@ -153,7 +153,7 @@ def test_benchmark_step_rates_match_amdiffusionbenchmark():
 
 
 def test_amdb_dataset_skips_decode_errors_only(tmp_path):
-    from primus.backends.diffusion.amdb_benchmarks.data import (
+    from primus.backends.diffusion.data.benchmark import (
         AMDBDataset,
         _TemporaryVideoReader,
     )

@@ -17,8 +17,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch.utils.checkpoint import checkpoint
 
-from primus.backends.diffusion.amdb_benchmarks.sdxl.attention import SpatialTransformer
-from primus.backends.diffusion.amdb_benchmarks.sdxl.util import (
+from primus.backends.diffusion.models.sdxl.attention import SpatialTransformer
+from primus.backends.diffusion.models.sdxl.util import (
     avg_pool_nd,
     conv_nd,
     exists,

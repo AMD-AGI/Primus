@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from primus.backends.diffusion.amdb_benchmarks.sdxl.autoencoder import Encoder
+from primus.backends.diffusion.models.sdxl.autoencoder import Encoder
 
 
 class SDXLAutoencoderKL(nn.Module):

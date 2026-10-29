@@ -119,7 +119,7 @@ def _stage_benchmark_downloads(
     model: dict[str, Any],
 ) -> dict[str, str]:
     """Download the benchmark checkpoint and dataset, then expose their paths."""
-    from primus.backends.diffusion.amdb_benchmarks.download import (
+    from primus.backends.diffusion.utils.download import (
         _ENCODER_ENV_KEYS,
         stage_benchmark_assets,
     )

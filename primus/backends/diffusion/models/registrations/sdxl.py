@@ -12,17 +12,17 @@ import os
 
 import torch
 
-from primus.backends.diffusion.amdb_benchmarks.checkpoint_io import load_matching
-from primus.backends.diffusion.amdb_benchmarks.download import materialize_pretrained
-from primus.backends.diffusion.amdb_benchmarks.sdxl.adapter import SDXLForTraining
-from primus.backends.diffusion.amdb_benchmarks.sdxl.autoencoder_kl import (
+from primus.backends.diffusion.utils.checkpoint_io import load_matching
+from primus.backends.diffusion.utils.download import materialize_pretrained
+from primus.backends.diffusion.models.sdxl.adapter import SDXLForTraining
+from primus.backends.diffusion.models.sdxl.autoencoder_kl import (
     SDXLAutoencoderKL,
 )
-from primus.backends.diffusion.amdb_benchmarks.sdxl.text_encoder import SDXLTextEncoder
-from primus.backends.diffusion.amdb_benchmarks.sdxl.train_pipeline import (
+from primus.backends.diffusion.models.sdxl.text_encoder import SDXLTextEncoder
+from primus.backends.diffusion.models.sdxl.train_pipeline import (
     SDXLTrainPipeline,
 )
-from primus.backends.diffusion.amdb_benchmarks.sdxl.unet import UNetModel
+from primus.backends.diffusion.models.sdxl.unet import UNetModel
 from primus.backends.diffusion.utils.log import logger
 from primus.backends.diffusion.utils.train_utils import count_parameters
 

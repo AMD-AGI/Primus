@@ -28,7 +28,7 @@ except:
     XFORMERS_IS_AVAILABLE = False
     logpy.warning("no module 'xformers'. Processing without...")
 
-from primus.backends.diffusion.amdb_benchmarks.sdxl.attention import (
+from primus.backends.diffusion.models.sdxl.attention import (
     LinearAttention,
     MemoryEfficientCrossAttention,
 )

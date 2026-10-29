@@ -11,8 +11,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from primus.backends.diffusion.amdb_benchmarks.pixels import decode_host_pixels
-from primus.backends.diffusion.amdb_benchmarks.sdxl.train_pipeline import (
+from primus.backends.diffusion.utils.pixels import decode_host_pixels
+from primus.backends.diffusion.models.sdxl.train_pipeline import (
     SDXLTrainPipeline,
 )
 from primus.backends.diffusion.models.interface import GenAIModel
