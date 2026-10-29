@@ -21,20 +21,12 @@ import sys
 from pathlib import Path
 
 _MODEL_FILES: dict[str, tuple[str, str]] = {
-    "flux-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors"),
     "sdxl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
     "stable-diffusion-xl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
-    "mochi-1": ("genmo/mochi-1-preview", "dit.safetensors"),
-    "hunyuan-video": ("hunyuanvideo-community/HunyuanVideo", "transformer"),
-    "wan2.1-i2v": ("Wan-AI/Wan2.1-I2V-14B-480P-Diffusers", "transformer"),
 }
 _DATASETS: dict[str, tuple[str, str | None]] = {
-    "flux-dev": ("frank-chieng/chinese_architecture_siheyuan", None),
     "sdxl": ("frank-chieng/chinese_architecture_siheyuan", None),
     "stable-diffusion-xl": ("frank-chieng/chinese_architecture_siheyuan", None),
-    "mochi-1": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
-    "hunyuan-video": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
-    "wan2.1-i2v": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
 }
 
 
@@ -114,6 +106,31 @@ def _is_hf_repo(value: str) -> bool:
     return not parts[-1].endswith((".safetensors", ".bin", ".pt", ".pth", ".ckpt"))
 
 
+def _distributed_rank() -> int | None:
+    """Return the process rank, or None when distributed is not initialized."""
+    try:
+        import torch.distributed as dist
+    except ImportError:
+        return None
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return None
+
+
+def _on_rank0_then_others(download):
+    """Run ``download`` on rank 0 first so other ranks hit a warm cache."""
+    rank = _distributed_rank()
+    result = download() if rank in (None, 0) else None
+    if rank is None:
+        return result
+    import torch.distributed as dist
+
+    dist.barrier()
+    if rank != 0:
+        result = download()
+    return result
+
+
 def _snapshot(
     repo_id: str,
     *,
@@ -122,36 +139,42 @@ def _snapshot(
 ) -> str:
     from huggingface_hub import snapshot_download
 
-    home = configure_huggingface_cache()
-    _log(f"Downloading {repo_id} (model) into {home / 'hub'}")
-    kwargs: dict[str, object] = {"repo_id": repo_id, "cache_dir": str(home / "hub")}
-    if revision:
-        kwargs["revision"] = revision
-    if allow_patterns:
-        kwargs["allow_patterns"] = allow_patterns
-    return snapshot_download(**kwargs)
+    def download() -> str:
+        home = configure_huggingface_cache()
+        _log(f"Downloading {repo_id} (model) into {home / 'hub'}")
+        kwargs: dict[str, object] = {"repo_id": repo_id, "cache_dir": str(home / "hub")}
+        if revision:
+            kwargs["revision"] = revision
+        if allow_patterns:
+            kwargs["allow_patterns"] = allow_patterns
+        return snapshot_download(**kwargs)
+
+    return _on_rank0_then_others(download)
 
 
 def _snapshot_dataset(repo_id: str, *, revision: str | None = None) -> str:
     """Download a dataset repo into ``datasets/<org>/<name>``, not the model hub."""
     from huggingface_hub import snapshot_download
 
-    configure_huggingface_cache()
-    local_dir = dataset_folder(repo_id)
-    local_dir.mkdir(parents=True, exist_ok=True)
-    blob_cache = dataset_root() / ".hub"
-    blob_cache.mkdir(parents=True, exist_ok=True)
-    _log(f"Downloading {repo_id} (dataset) into {local_dir}")
-    kwargs: dict[str, str] = {
-        "repo_id": repo_id,
-        "repo_type": "dataset",
-        "cache_dir": str(blob_cache),
-        "local_dir": str(local_dir),
-    }
-    if revision:
-        kwargs["revision"] = revision
-    snapshot_download(**kwargs)
-    return str(local_dir)
+    def download() -> str:
+        configure_huggingface_cache()
+        local_dir = dataset_folder(repo_id)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        blob_cache = dataset_root() / ".hub"
+        blob_cache.mkdir(parents=True, exist_ok=True)
+        _log(f"Downloading {repo_id} (dataset) into {local_dir}")
+        kwargs: dict[str, str] = {
+            "repo_id": repo_id,
+            "repo_type": "dataset",
+            "cache_dir": str(blob_cache),
+            "local_dir": str(local_dir),
+        }
+        if revision:
+            kwargs["revision"] = revision
+        snapshot_download(**kwargs)
+        return str(local_dir)
+
+    return _on_rank0_then_others(download)
 
 
 def materialize_pretrained(model_name: str, pretrained: str | None) -> str:
@@ -161,6 +184,9 @@ def materialize_pretrained(model_name: str, pretrained: str | None) -> str:
         return str(pretrained or "")
     default_repo, relative = spec
     text = str(pretrained or "").strip()
+    # YAML templates ship ``/path/to/...`` as "not set"; download the official file.
+    if not text or text.startswith("/path/to/"):
+        text = ""
     local = Path(text).expanduser() if text else None
     if local is not None and local.exists():
         return str(local)
@@ -176,7 +202,7 @@ def materialize_pretrained(model_name: str, pretrained: str | None) -> str:
         filename = filename or relative
     elif text:
         raise FileNotFoundError(f"{model_name} checkpoint does not exist: {text}")
-    snapshot = _snapshot(repo_id)
+    snapshot = _snapshot(repo_id, allow_patterns=[filename] if filename else None)
     target = Path(snapshot) / filename
     if not target.exists():
         raise FileNotFoundError(f"{repo_id} has no {filename} in {snapshot}")
@@ -208,7 +234,12 @@ def materialize_dataset(model_name: str, dataset_path: str | None, revision: str
 def prefetch_huggingface_repo(value: str | None) -> None:
     text = str(value or "").strip()
     if text and _is_hf_repo(text):
-        _snapshot(text)
+        # Root weight and tokenizer files only. Nested fp16/onnx/openvino copies
+        # are not used by the SDXL CLIP encoders.
+        _snapshot(
+            text,
+            allow_patterns=["*.safetensors", "*.bin", "*.json", "*.txt", "*.model", "*.tiktoken"],
+        )
 
 
 def _blank(value: object) -> bool:
@@ -249,52 +280,14 @@ def _companion_paths(model_name: str, weights: str, encoder: dict[str, object]) 
         return {}
     root = _checkpoint_root(weights)
     found: dict[str, str] = {}
-    if model_name == "flux-dev" and _blank(encoder.get("autoencoder")):
-        found["VAE_CHECKPOINT"] = _require_file(root / "ae.safetensors", "FLUX autoencoder")
-    elif model_name in {"sdxl", "stable-diffusion-xl"} and _blank(encoder.get("autoencoder")):
+    if model_name in {"sdxl", "stable-diffusion-xl"} and _blank(encoder.get("autoencoder")):
         vae = Path(weights) if Path(weights).is_file() else root / "sd_xl_base_1.0.safetensors"
         found["VAE_CHECKPOINT"] = _require_file(vae, "SDXL autoencoder")
-    elif model_name == "mochi-1" and _blank(encoder.get("autoencoder")):
-        found["VAE_CHECKPOINT"] = _require_file(root / "encoder.safetensors", "Mochi VAE encoder")
-    elif model_name == "hunyuan-video":
-        if _blank(encoder.get("llm")):
-            found["LLM_ENCODER"] = _require_file(root / "text_encoder", "HunyuanVideo LLaMA encoder")
-        # The community snapshot sometimes ships ``vae/`` and sometimes does not.
-        # Latent batches do not need it; raw video does, and the caller can set
-        # ``encoder.autoencoder`` when the folder lives somewhere else.
-        if _blank(encoder.get("autoencoder")) and (root / "vae").exists():
-            found["VAE_CHECKPOINT"] = str(root / "vae")
-    elif model_name == "wan2.1-i2v":
-        needed = {
-            "TEXT_ENCODER": "t5_encoder",
-            "VAE_CHECKPOINT": "autoencoder",
-            "CLIP_CHECKPOINT": "image_encoder",
-        }
-        if any(_blank(encoder.get(key)) for key in needed.values()):
-            snapshot = _snapshot(
-                "Wan-AI/Wan2.1-I2V-14B-480P",
-                allow_patterns=[
-                    "Wan2.1_VAE.pth",
-                    "models_t5_umt5-xxl-enc-bf16.pth",
-                    "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
-                ],
-            )
-            files = {
-                "TEXT_ENCODER": Path(snapshot) / "models_t5_umt5-xxl-enc-bf16.pth",
-                "VAE_CHECKPOINT": Path(snapshot) / "Wan2.1_VAE.pth",
-                "CLIP_CHECKPOINT": Path(snapshot) / "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
-            }
-            for env_key, cfg_key in needed.items():
-                if _blank(encoder.get(cfg_key)):
-                    found[env_key] = _require_file(files[env_key], env_key)
     return found
 
 
-_ENCODER_ENV_KEYS = {
+ENCODER_ENV_KEYS = {
     "VAE_CHECKPOINT": "autoencoder",
-    "LLM_ENCODER": "llm",
-    "TEXT_ENCODER": "t5_encoder",
-    "CLIP_CHECKPOINT": "image_encoder",
 }
 
 

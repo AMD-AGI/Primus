@@ -127,10 +127,13 @@ pipeline. Point `PRETRAINED_PATH` at the official UNet checkpoint.
 |---|---|---|
 | SDXL | Stability `generative-models` UNet | `sd_xl_base_1.0.safetensors` plus the SDXL VAE |
 
-MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
-with a constant schedule. `LR` overrides either default.
+All three SDXL configs default to learning rate `1e-4`. `LR` overrides that
+default. MI300X and MI325X use a polynomial schedule with 100 warmup steps.
+MI355X uses `constant_with_warmup` with 5 warmup steps. Gradient clipping is
+off on every SKU (`max_grad_norm` 0), so the timed step does not include the
+grad-norm all-reduce. The batch sizes below are the per-GPU `LOCAL_BATCH_SIZE`.
 
-| Workload | MI300X / MI325X | MI355X |
+| Workload | MI300X / MI325X per-GPU batch | MI355X per-GPU batch |
 |---|---:|---:|
 | stable-diffusion-xl | 20 | 12 |
 

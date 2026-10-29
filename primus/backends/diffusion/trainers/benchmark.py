@@ -125,6 +125,7 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
 
     def _apply_fsdp2(self):
         """Apply torch.distributed._composable.fsdp.fully_shard to the model."""
+        self._compiled_transformer_blocks = False
         mp_dtype = self._resolve_dtype()
         # AMDiffusionBenchmark moves every frozen submodule to the training dtype.
         cast_frozen = getattr(self.model, "cast_frozen_modules", None)
@@ -191,6 +192,7 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
 
         if bool(self.args.get("compile_transformer_blocks", False)):
             self._compile_transformer_blocks(wrap_root)
+            self._compiled_transformer_blocks = True
 
         reshard_after_forward = bool(self.args.get("fsdp2_reshard_after_forward", True))
         no_reshard_paths = {
@@ -323,9 +325,6 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
         logger.info(msg)
 
         if self.use_wandb:
-            global_batch_size = (
-                self.per_device_train_batch_size * self.grad_accum_steps * self.data_parallel_world_size
-            )
             payload = {
                 "train/loss": loss_value,
                 "step_loss": step_loss_value,
@@ -333,7 +332,7 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                 "train/step": self.global_step,
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
-                "train/samples_count": self.global_step * global_batch_size,
+                "train/samples_count": self.global_step * self._global_batch_size(),
                 "loss_metrics/global_avg_loss": loss_value,
                 "lr": lr,
                 "mem/allocated_gb": alloc,
@@ -378,7 +377,7 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
         update_loss_sum = None
         update_loss_count = 0
         mlperf_train_started = False
-        count_flops = not bool(self.args.get("compile_transformer_blocks", False))
+        count_flops = not getattr(self, "_compiled_transformer_blocks", False)
         flop_counter = FlopCounterMode(display=False, depth=None) if count_flops else None
         total_flops: float | None = None
         flops_captured = flop_counter is None
@@ -472,12 +471,14 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                         end_event_gpu.record()
                         torch.cuda.synchronize()
                         step_time_gpu = start_event_gpu.elapsed_time(end_event_gpu) / 1000.0
-                        # AMDiffusionBenchmark logs
-                        # fps_gpu = args.train_batch_size / step_time_gpu and
-                        # tflops/s = total_flops * 1e-12 / step_time_gpu.
+                        # fps_gpu counts every sample in the timed update. With
+                        # gradient_accumulation_steps == 1 this matches
+                        # AMDiffusionBenchmark's train_batch_size / step_time_gpu.
+                        # A larger accumulation factor used to divide FPS by that
+                        # factor because only one micro-batch was counted.
                         if step_time_gpu > 0 and local_samples_in_update > 0:
                             step_fps, step_tflops = benchmark_step_rates(
-                                local_batch_size=self.per_device_train_batch_size,
+                                local_batch_size=local_samples_in_update,
                                 step_time_gpu_s=step_time_gpu,
                                 total_flops=0.0 if total_flops is None else total_flops,
                             )

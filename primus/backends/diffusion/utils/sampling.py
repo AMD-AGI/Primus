@@ -68,9 +68,19 @@ def sample_amdb_sdxl_sigmas(
     device: torch.device,
     shift: float = 3.0,
     num_train_timesteps: int = 1000,
+    sigma_grid: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Match AMDB SDXL's uniform timestep ids and shifted EulerDiscrete sigma table."""
+    """Uniform SDXL timesteps paired with the shifted Euler sigma at that noise level.
+
+    The Euler table is descending: index 0 is the noisiest sigma and index
+    ``n - 1`` is clean. The UNet and the scaled-linear alpha table use the
+    opposite convention, so the returned timestep is ``n - 1 - index``.
+    """
     n = num_train_timesteps
-    grid = amdb_flow_sigma_grid(shift=shift, num_train_timesteps=n, zero_terminal=True).to(device)
-    timestep_ids = torch.randint(0, n, (batch_size,), device=device)
-    return timestep_ids, grid[timestep_ids]
+    if sigma_grid is None:
+        sigma_grid = amdb_flow_sigma_grid(shift=shift, num_train_timesteps=n, zero_terminal=True)
+    if sigma_grid.device != device:
+        sigma_grid = sigma_grid.to(device)
+    indices = torch.randint(0, n, (batch_size,), device=device)
+    timesteps = (n - 1) - indices
+    return timesteps, sigma_grid[indices]

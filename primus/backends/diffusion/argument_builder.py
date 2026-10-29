@@ -231,11 +231,7 @@ class DiffusionArgBuilder:
         return name
 
     def _defaults_for_model(self, model_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        benchmark = benchmark_defaults(
-            model_name,
-            flux_dataset=self.DEFAULT_FLUX_DATASET,
-            flux_trainer=self.DEFAULT_FLUX_TRAINER,
-        )
+        benchmark = benchmark_defaults(model_name)
         if benchmark is not None:
             return benchmark
         if model_name == "wan":
@@ -497,32 +493,6 @@ _SPECS: dict[str, dict[str, Any]] = {
         "warmup_steps": 10,
         "gradient_checkpointing": False,
     },
-    "mochi-1": {
-        "modality": "video",
-        "fsdp_layers": "AsymmetricJointBlock",
-        "learning_rate": 1.0e-5,
-        "lr_scheduler_type": "constant",
-        "warmup_steps": 0,
-        "gradient_checkpointing": False,
-    },
-    "hunyuan-video": {
-        "modality": "video",
-        "fsdp_layers": "MMDoubleStreamBlock,MMSingleStreamBlock",
-        "learning_rate": 1.0e-5,
-        "lr_scheduler_type": "constant",
-        "warmup_steps": 0,
-        # Off on MI300X, MI325X, and MI355X. The 13B run stays inside memory at
-        # batch 1, and checkpointing would change the AMDB step time.
-        "gradient_checkpointing": False,
-    },
-    "wan2.1-i2v": {
-        "modality": "video",
-        "fsdp_layers": "DiTBlock",
-        "learning_rate": 1.0e-5,
-        "lr_scheduler_type": "constant",
-        "warmup_steps": 0,
-        "gradient_checkpointing": True,
-    },
 }
 
 
@@ -532,37 +502,16 @@ def _spec(model_name: str) -> dict[str, Any] | None:
     return _SPECS.get(model_name)
 
 
-def benchmark_defaults(
-    model_name: str,
-    *,
-    flux_dataset: dict[str, Any],
-    flux_trainer: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    if model_name == "flux-dev":
-        dataset = copy.deepcopy(flux_dataset)
-        dataset["config"]["dataset_type"] = "raw"
-        dataset["config"]["dataset_format"] = "hf_repo"
-        dataset["config"]["dataset_path"] = ""
-        processor = dataset["config"]["processor_config"]
-        processor["img_size"] = 512
-        processor["processor_name"] = "flux_raw"
-        processor["processor_type"] = "flux_raw"
-        processor["skip_low_resolution"] = False
-        dataset["config"]["benchmark_loader"] = True
-        trainer = copy.deepcopy(BENCHMARK_TRAINER)
-        trainer["args"]["run_name"] = "flux-dev"
-        trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] = "DoubleStreamBlock,SingleStreamBlock"
-        trainer["args"]["fsdp_module_paths_to_wrap"] = flux_trainer["args"]["fsdp_module_paths_to_wrap"]
-        trainer["args"]["fsdp_module_paths_no_reshard"] = flux_trainer["args"]["fsdp_module_paths_no_reshard"]
-        return dataset, trainer
-
+def benchmark_defaults(model_name: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
     spec = _spec(model_name)
     if spec is None:
         return None
+    canonical = "sdxl" if model_name == "stable-diffusion-xl" else model_name
     dataset = {
         "name": "amdb",
         "config": {
             "dataset_path": "",
+            "model_name": canonical,
             "modality": spec["modality"],
             "max_train_samples": -1,
             "split": "train",
@@ -586,27 +535,12 @@ def apply_benchmark_sections(
     dataset_cfg: dict[str, Any],
     normalized: dict[str, Any],
 ) -> None:
-    if model_name == "flux-dev":
-        if str(data.get("dataset_type", "")).lower() == "precomputed":
-            normalized["dataset"]["name"] = "amdb"
-            dataset_cfg["modality"] = "image"
-        resolution = data.get("resolution")
-        model_cfg = normalized["model"].get("config")
-        if resolution is None and isinstance(model_cfg, dict):
-            resolution = model_cfg.get("resolution")
-        if resolution is not None:
-            size = int(str(resolution).split(",")[0])
-            processor = dataset_cfg.setdefault("processor_config", {})
-            processor["img_size"] = size
-        if int(trainer_args.get("sp_size", 1)) != 1:
-            raise ValueError("flux-dev diffusion training requires `parallelism.sp_size: 1`.")
-        return
-
     spec = _spec(model_name)
     if spec is None:
         return
     if int(trainer_args.get("sp_size", 1)) != 1:
         raise ValueError(f"{model_name} diffusion training requires `parallelism.sp_size: 1`.")
+    dataset_cfg["model_name"] = "sdxl" if model_name == "stable-diffusion-xl" else model_name
     dataset_cfg["modality"] = data.get("modality") or spec["modality"]
     for key in ("max_train_samples", "revision", "split"):
         if data.get(key) is not None:

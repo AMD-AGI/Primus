@@ -252,8 +252,11 @@ def build_amdb_dataset(dataset_config: dict[str, Any]):
 
     from primus.backends.diffusion.utils.download import materialize_dataset
 
+    model_name = str(dataset_config.get("model_name") or "")
+    if not model_name and modality == "image":
+        model_name = "sdxl"
     dataset_path = materialize_dataset(
-        str(dataset_config.get("model_name") or ""),
+        model_name,
         dataset_config.get("dataset_path"),
         revision=dataset_config.get("revision"),
     )

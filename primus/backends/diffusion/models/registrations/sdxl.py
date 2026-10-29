@@ -15,7 +15,7 @@ import torch
 from primus.backends.diffusion.models.sdxl.adapter import SDXLForTraining
 from primus.backends.diffusion.models.sdxl.autoencoder_kl import SDXLAutoencoderKL
 from primus.backends.diffusion.models.sdxl.text_encoder import SDXLTextEncoder
-from primus.backends.diffusion.models.sdxl.train_pipeline import SDXLTrainPipeline
+from primus.backends.diffusion.models.sdxl.train_pipeline import SDXL_LATENT_SCALE, SDXLTrainPipeline
 from primus.backends.diffusion.models.sdxl.unet import UNetModel
 from primus.backends.diffusion.utils.checkpoint_io import load_matching
 from primus.backends.diffusion.utils.download import materialize_pretrained
@@ -47,7 +47,8 @@ def build_sdxl_model(model_config: dict):
     encoder_cfg = dict(model_config.get("encoder") or {})
     resolution = int(str(model_config.get("resolution") or cfg.get("resolution") or 1024).split(",")[0])
     dit = build_sdxl_unet()
-    autoencoder = SDXLAutoencoderKL(scale_factor=float(cfg.get("scale_factor", 0.13025)))
+    scale_factor = float(cfg.get("scale_factor", SDXL_LATENT_SCALE))
+    autoencoder = SDXLAutoencoderKL(scale_factor=scale_factor)
     clip_l = encoder_cfg.get("clip_l") or "openai/clip-vit-large-patch14"
     clip_g = encoder_cfg.get("clip_g") or "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k"
     if os.environ.get("BENCHMARK_DENOISER_ONLY") == "1":
@@ -73,12 +74,11 @@ def build_sdxl_model(model_config: dict):
         train_pipeline=SDXLTrainPipeline(
             resolution=resolution,
             snr_gamma=float(cfg.get("snr_gamma", 5.0)),
-            scale_factor=float(cfg.get("scale_factor", 0.13025)),
+            scale_factor=scale_factor,
         ),
         trainable_modules=cfg.get("trainable_modules") or "dit",
     )
-    if hasattr(model, "freeze_except"):
-        model.freeze_except()
+    model.freeze_except()
     total, trainable = count_parameters(model)
     logger.info(f"sdxl parameters: total={total/1e9:.3f}B trainable={trainable/1e9:.3f}B")
     return model

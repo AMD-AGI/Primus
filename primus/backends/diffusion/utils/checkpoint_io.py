@@ -60,4 +60,18 @@ def load_matching(module: torch.nn.Module, path: str, *, prefixes: tuple[str, ..
         return 0, 0
     state = strip_prefixes(load_state_dict(path), prefixes)
     result = module.load_state_dict(state, strict=False)
-    return len(result.missing_keys), len(result.unexpected_keys)
+    module_keys = list(module.state_dict().keys())
+    missing = len(result.missing_keys)
+    unexpected = len(result.unexpected_keys)
+    # A combined SDXL checkpoint has many unexpected keys (the other tower).
+    # A Diffusers layout or the wrong file misses most of the module and would
+    # otherwise keep training from random init.
+    if module_keys and missing / len(module_keys) > 0.5:
+        sample = ", ".join(result.missing_keys[:5])
+        raise RuntimeError(
+            f"Checkpoint {path} is missing {missing} of {len(module_keys)} "
+            f"{module.__class__.__name__} keys (unexpected={unexpected}). "
+            "Refusing to train from a partial initialization. "
+            f"First missing keys: {sample}"
+        )
+    return missing, unexpected

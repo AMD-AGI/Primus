@@ -14,10 +14,11 @@ import torch
 import torch.nn as nn
 
 from primus.backends.diffusion.models.sdxl.autoencoder import Encoder
+from primus.backends.diffusion.models.sdxl.train_pipeline import SDXL_LATENT_SCALE
 
 
 class SDXLAutoencoderKL(nn.Module):
-    def __init__(self, scale_factor: float = 0.13025):
+    def __init__(self, scale_factor: float = SDXL_LATENT_SCALE):
         super().__init__()
         self.scale_factor = scale_factor
         self.encoder = Encoder(
