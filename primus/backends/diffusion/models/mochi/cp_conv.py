@@ -12,7 +12,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from primus.backends.diffusion.amdb_benchmarks.mochi import context_parallel as cp
+from primus.backends.diffusion.models.mochi import context_parallel as cp
 
 
 def cast_tuple(t, length=1):

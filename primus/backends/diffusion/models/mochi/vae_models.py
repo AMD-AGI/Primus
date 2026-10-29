@@ -15,15 +15,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from primus.backends.diffusion.amdb_benchmarks.mochi import context_parallel as cp
-from primus.backends.diffusion.amdb_benchmarks.mochi.cp_conv import (
+from primus.backends.diffusion.models.mochi import context_parallel as cp
+from primus.backends.diffusion.models.mochi.cp_conv import (
     cp_pass_frames,
     gather_all_frames,
 )
-from primus.backends.diffusion.amdb_benchmarks.mochi.latent_dist import (
+from primus.backends.diffusion.models.mochi.latent_dist import (
     LatentDistribution,
 )
-from primus.backends.diffusion.amdb_benchmarks.mochi.progress import (
+from primus.backends.diffusion.models.mochi.progress import (
     get_new_progress_bar,
 )
 

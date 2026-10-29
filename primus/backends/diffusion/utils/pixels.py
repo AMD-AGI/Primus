@@ -73,7 +73,7 @@ def videos_to_tensor(videos: list[Any], *, num_frames: int, height: int, width: 
     clips = []
     for video in videos:
         if isinstance(video, str):
-            from primus.backends.diffusion.amdb_benchmarks.data import open_video_reader
+            from primus.backends.diffusion.data.benchmark import open_video_reader
 
             video = open_video_reader(video)
         if isinstance(video, torch.Tensor) and video.ndim == 4:

@@ -7,7 +7,7 @@ datasets, attention selection, FSDP2 wrapping, and the training loop.
 ## Supported Scope
 
 - Native models: `wan`, `flux`, `flux.1-dev`, and `flux.1-schnell`.
-- AMDiffusionBenchmark workload `mochi-1`, registered from `amdb_benchmarks/`.
+- AMDiffusionBenchmark workload `mochi-1`, built by `models/registrations/mochi.py`.
   The denoiser is Genmo's AsymmDiTJoint. It uses the shared benchmark
   trainer and does not change the native Wan or FLUX trainers.
 - Trainer: FSDP2 for the native models. The benchmark workloads use

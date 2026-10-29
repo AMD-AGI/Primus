@@ -13,12 +13,12 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from primus.backends.diffusion.amdb_benchmarks.mochi.vae_models import (
+from primus.backends.diffusion.models.mochi.vae_models import (
     add_fourier_features,
 )
-from primus.backends.diffusion.amdb_benchmarks.mochi.vae_stats import STATS
-from primus.backends.diffusion.amdb_benchmarks.pixels import videos_to_tensor
-from primus.backends.diffusion.amdb_benchmarks.sampling import (
+from primus.backends.diffusion.models.mochi.vae_stats import STATS
+from primus.backends.diffusion.utils.pixels import videos_to_tensor
+from primus.backends.diffusion.utils.sampling import (
     sample_shifted_logit_normal_sigmas,
 )
 

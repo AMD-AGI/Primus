@@ -35,7 +35,7 @@ def flash_varlen_attn(
     dropout_p: float = 0.0,
     softmax_scale=None,
 ):
-    from primus.backends.diffusion.amdb_benchmarks.flops import (
+    from primus.backends.diffusion.utils.flops import (
         flop_counter_active,
         mark_attention_flops,
         varlen_qk_pairs,
