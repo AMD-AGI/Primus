@@ -66,12 +66,14 @@ def _build_flux_dev(model_config: dict):
 
     return build_flux_dev_benchmark(model_config)
 
+
 def _build_amdb_dataset(dataset_config: dict):
     from primus.backends.diffusion.data.registrations.benchmark import (
         build_benchmark_dataset,
     )
 
     return build_benchmark_dataset(dataset_config)
+
 
 def _build_amdb_benchmark_trainer(
     *, model, dataset, processor, trainer_args: dict, eval_dataset=None, eval_processor=None

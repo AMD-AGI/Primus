@@ -349,6 +349,7 @@ def build_flux_model(model_config: dict[str, Any]):
     logger.info(f"Built FLUX model: total={total_params:,} trainable={trainable_params:,}")
     return model
 
+
 def build_flux_dev_benchmark(model_config: dict[str, Any]):
     """Native FLUX.1-dev with the AMDiffusionBenchmark load and noise schedule."""
     from primus.backends.diffusion.utils.download import materialize_pretrained
