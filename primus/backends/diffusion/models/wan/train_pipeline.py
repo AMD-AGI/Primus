@@ -100,7 +100,7 @@ class WanFlowMatchTrainPipeline:
     def prepare_host_batch(batch: Dict[str, Any], model_config: Any) -> Dict[str, Any]:
         if batch.get("video") is not None or "videos" not in batch:
             return batch
-        from primus.backends.diffusion.amdb_benchmarks.pixels import decode_host_pixels
+        from primus.backends.diffusion.utils.pixels import decode_host_pixels
 
         return decode_host_pixels(
             batch,
@@ -324,7 +324,7 @@ class WanFlowMatchTrainPipeline:
             input_latents, original_latent_spatial_size = self._pad_latents_for_dit(
                 input_latents, patch_size=patch_size
             )
-            from primus.backends.diffusion.amdb_benchmarks.sampling import (
+            from primus.backends.diffusion.utils.sampling import (
                 sample_shifted_logit_normal_sigmas,
             )
 
@@ -398,7 +398,7 @@ class WanFlowMatchTrainPipeline:
         )
 
         if self.cfg.amdb_sampling:
-            from primus.backends.diffusion.amdb_benchmarks.sampling import (
+            from primus.backends.diffusion.utils.sampling import (
                 sample_shifted_logit_normal_sigmas,
             )
 

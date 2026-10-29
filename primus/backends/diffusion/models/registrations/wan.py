@@ -99,7 +99,7 @@ def _load_dit_weights_into_module(
         merged = {k[len("dit.") :]: v for k, v in merged.items() if k.startswith("dit.")}
     diffusers_format = False
     if accept_diffusers:
-        from primus.backends.diffusion.amdb_benchmarks.checkpoint_convert import (
+        from primus.backends.diffusion.utils.checkpoint_convert import (
             is_diffusers_wan,
             wan_diffusers_to_native,
         )
@@ -257,7 +257,7 @@ def build_wan_model(model_config: dict):
         tokenizer=tokenizer,
     )
     if bool(getattr(model_cfg, "amdb_sampling", False)):
-        from primus.backends.diffusion.amdb_benchmarks.sampling import amdb_flow_sigma_grid
+        from primus.backends.diffusion.utils.sampling import amdb_flow_sigma_grid
 
         pipeline = WanFlowMatchTrainPipeline(
             WanFlowMatchTrainPipelineConfig(
@@ -289,3 +289,36 @@ def build_wan_model(model_config: dict):
         logger.info(f"wan after freeze: total={total_params/1e9:.3f}B trainable={trainable_params/1e9:.3f}B")
 
     return model
+
+def build_wan21_i2v_model(model_config: dict[str, Any]):
+    """Native Wan DiT with Wan2.1 I2V cross-attention and the AMDB noise schedule."""
+    from primus.backends.diffusion.utils.download import materialize_pretrained
+
+    config = dict(model_config or {})
+    nested = dict(config.get("config") or {})
+    nested.setdefault("model_type", "i2v")
+    nested.setdefault("dit_hidden_size", 5120)
+    nested.setdefault("dit_num_layers", 40)
+    nested.setdefault("dit_num_heads", 40)
+    nested.setdefault("dit_intermediate_size", 13824)
+    nested.setdefault("dit_in_channels", 36)
+    nested.setdefault("dit_out_channels", 16)
+    nested.setdefault("dit_patch_size", (1, 2, 2))
+    nested.setdefault("dit_freq_dim", 256)
+    nested.setdefault("dit_text_dim", 4096)
+    nested.setdefault("text_len", 512)
+    nested.setdefault("vae_type", "wan_video_vae")
+    nested.setdefault("separated_timestep", False)
+    nested.setdefault("fuse_vae_embedding_in_latents", False)
+    nested.setdefault("trainable_modules", "dit")
+    nested.setdefault("height", 544)
+    nested.setdefault("width", 960)
+    nested.setdefault("num_frames", 9)
+    nested.setdefault("amdb_sampling", True)
+    nested.setdefault("accept_diffusers", True)
+    config["config"] = nested
+
+    pretrained = materialize_pretrained("wan2.1-i2v", config.get("load_from_pretrained_path") or "")
+    if pretrained:
+        config["load_from_pretrained_path"] = pretrained
+    return build_wan_model(config)

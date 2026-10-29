@@ -7,12 +7,9 @@ datasets, attention selection, FSDP2 wrapping, and the training loop.
 ## Supported Scope
 
 - Native models: `wan`, `flux`, `flux.1-dev`, and `flux.1-schnell`.
-- AMDiffusionBenchmark workload `wan2.1-i2v`, registered from `amdb_benchmarks/`.
+- AMDiffusionBenchmark workload `wan2.1-i2v`, built by `models/registrations/wan.py`.
   It extends the native Wan DiT with image-to-video cross-attention. That path
   stays off the existing `wan` trainer unless `model_type` is `i2v`.
-  It builds the native FLUX DiT. Benchmark-only behavior (BFL QK-norm epsilon,
-  logit-normal timesteps, and pre-encoded latents) is opt-in and stays off the
-  `flux.1-dev` and `flux.1-schnell` trainers.
 - Trainer: FSDP2 for the native models. The benchmark workloads use
   `amdb_benchmark`.
 - Wan sequence parallelism: supported through `sp_size`.
