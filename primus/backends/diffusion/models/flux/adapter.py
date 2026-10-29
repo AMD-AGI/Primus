@@ -132,6 +132,7 @@ class FluxForTraining(GenAIModel, nn.Module):
             clip_encoder=self.clip_encoder,
             device=param.device,
             dtype=self.compute_dtype or param.dtype,
+            model_config=self.model_config,
         )
 
     def offload_frozen_modules(self) -> None:

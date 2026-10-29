@@ -4,7 +4,7 @@ exp_name: ${PRIMUS_EXP_NAME:benchmark-flux-dev-posttrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 # MIOpen's own default (dynamic hybrid). The runner exports FAST (2), which
-# skips the solver search and picks slower VAE and UNet convolutions.
+# skips the solver search and picks slower VAE convolutions.
 env:
   MIOPEN_FIND_MODE: "5"
   PRIMUS_FLUX_TRITON_ROPE: "1"

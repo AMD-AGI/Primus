@@ -76,6 +76,7 @@ def videos_to_tensor(videos: list[Any], *, num_frames: int, height: int, width: 
             from primus.backends.diffusion.data.benchmark import open_video_reader
 
             video = open_video_reader(video)
+        already_normalized = False
         if isinstance(video, torch.Tensor) and video.ndim == 4:
             frames = video.float()
             if frames.shape[-1] in (1, 3) and frames.shape[1] not in (1, 3):
@@ -92,10 +93,13 @@ def videos_to_tensor(videos: list[Any], *, num_frames: int, height: int, width: 
                 data = item["data"] if isinstance(item, dict) and "data" in item else item
                 frame_list.append(_frame_tensor(data))
             frames = torch.stack(frame_list)
-        if frames.max() > 1.5:
-            frames = frames / 127.5 - 1.0
-        elif frames.min() >= 0:
-            frames = frames * 2.0 - 1.0
+            # ``_frame_tensor`` already maps pixels into [-1, 1].
+            already_normalized = True
+        if not already_normalized:
+            if frames.max() > 1.5:
+                frames = frames / 127.5 - 1.0
+            elif frames.min() >= 0:
+                frames = frames * 2.0 - 1.0
         if frames.shape[0] < num_frames:
             pad = frames[-1:].repeat(num_frames - frames.shape[0], 1, 1, 1)
             frames = torch.cat([frames, pad], dim=0)

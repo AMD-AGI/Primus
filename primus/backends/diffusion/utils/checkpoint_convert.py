@@ -7,7 +7,9 @@
 """Convert Diffusers-format transformer checkpoints to the native (official) layouts.
 
 These invert the key mappings in Diffusers' ``convert_hunyuan_video_to_diffusers.py`` and
-``convert_wan_to_diffusers.py``; tensors are only renamed, re-fused, or re-ordered.
+``convert_wan_to_diffusers.py``. Tensors are renamed, re-fused, or re-ordered.
+Diffusers-only parameters with no native counterpart, such as Wan's
+``attn2.norm_added_q.weight``, are dropped.
 """
 
 from __future__ import annotations

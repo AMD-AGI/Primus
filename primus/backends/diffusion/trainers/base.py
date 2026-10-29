@@ -41,16 +41,20 @@ def benchmark_step_rates(
     *,
     local_batch_size: int,
     step_time_gpu_s: float,
-    total_flops: float,
-) -> tuple[float, float]:
+    total_flops: float | None,
+) -> tuple[float, float | None]:
     """Calculate AMDiffusionBenchmark's per-GPU FPS and TFLOPS/s metrics.
 
-    The CUDA-event duration covers one optimizer update.  ``total_flops`` is
-    the one-update, per-rank value captured by ``FlopCounterMode``.
+    The CUDA-event duration covers one optimizer update. ``local_batch_size``
+    is every sample in that update, including gradient-accumulation
+    micro-batches. ``total_flops`` is the one-update, per-rank value captured
+    by ``FlopCounterMode``; a missing count leaves TFLOPS unset.
     """
     if step_time_gpu_s <= 0:
         raise ValueError(f"step_time_gpu_s must be positive, got {step_time_gpu_s}")
     fps_gpu = float(local_batch_size) / float(step_time_gpu_s)
+    if total_flops is None:
+        return fps_gpu, None
     tflops_per_gpu = float(total_flops) * 1e-12 / float(step_time_gpu_s)
     return fps_gpu, tflops_per_gpu
 

@@ -73,8 +73,11 @@ class RMSNorm(nn.RMSNorm):
         if self.eps is None:
             return super().forward(x)
         x_dtype = x.dtype
-        rrms = torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return (x.float() * rrms).to(x_dtype) * self.weight
+        xf = x.float()
+        rrms = torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        # Weight may stay fp32 on a single GPU. Cast after the multiply so the
+        # activation dtype matches the bf16 query/key that entered the norm.
+        return ((xf * rrms).to(x_dtype) * self.weight).to(x_dtype)
 
 
 class QKNorm(nn.Module):

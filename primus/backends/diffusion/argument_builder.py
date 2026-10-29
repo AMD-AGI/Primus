@@ -526,6 +526,50 @@ _SPECS: dict[str, dict[str, Any]] = {
 }
 
 
+def _positive_image_size(value: Any) -> int:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"flux-dev image size must be a positive integer, got {value!r}") from exc
+    if number <= 0 or number != int(number):
+        raise ValueError(f"flux-dev image size must be a positive integer, got {value!r}")
+    return int(number)
+
+
+def _square_image_size(resolution: Any) -> int:
+    """Parse a square benchmark resolution.
+
+    Accepts ``512``, ``512.0``, ``"512"``, ``"512x512"``, ``"512,512"`` and
+    ``[512, 512]``. A non-square pair is rejected instead of keeping one side.
+    """
+    if isinstance(resolution, bool) or resolution is None:
+        raise ValueError(f"flux-dev resolution must be a positive size, got {resolution!r}")
+    if isinstance(resolution, (int, float)):
+        return _positive_image_size(resolution)
+    if isinstance(resolution, (list, tuple)):
+        parts = list(resolution)
+    else:
+        text = str(resolution).strip().lower().replace(" ", "")
+        if not text:
+            raise ValueError("flux-dev resolution is empty")
+        parts = [text]
+        for separator in ("x", "*", ","):
+            if separator in text:
+                parts = [part for part in text.split(separator) if part]
+                break
+    if len(parts) == 1:
+        return _positive_image_size(parts[0])
+    if len(parts) == 2:
+        height = _positive_image_size(parts[0])
+        width = _positive_image_size(parts[1])
+        if height != width:
+            raise ValueError(
+                f"flux-dev resolution must be square, got {resolution!r}. Set data.img_size to one side length."
+            )
+        return height
+    raise ValueError(f"flux-dev resolution must be a size or HxW pair, got {resolution!r}")
+
+
 def _spec(model_name: str) -> dict[str, Any] | None:
     if model_name == "stable-diffusion-xl":
         model_name = "sdxl"
@@ -557,25 +601,13 @@ def benchmark_defaults(
         return dataset, trainer
 
     spec = _spec(model_name)
-    if spec is None:
-        return None
-    dataset = {
-        "name": "amdb",
-        "config": {
-            "dataset_path": "",
-            "modality": spec["modality"],
-            "max_train_samples": -1,
-            "split": "train",
-        },
-    }
-    trainer = copy.deepcopy(BENCHMARK_TRAINER)
-    trainer["args"]["learning_rate"] = spec["learning_rate"]
-    trainer["args"]["lr_scheduler_type"] = spec["lr_scheduler_type"]
-    trainer["args"]["warmup_steps"] = spec["warmup_steps"]
-    trainer["args"]["gradient_checkpointing"] = spec["gradient_checkpointing"]
-    trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] = spec["fsdp_layers"]
-    trainer["args"]["run_name"] = model_name
-    return dataset, trainer
+    if spec is not None:
+        raise ValueError(
+            f"{model_name} has no diffusion model builder. "
+            "This release registers the flux-dev benchmark only, so the config is rejected "
+            "before any checkpoint or dataset download."
+        )
+    return None
 
 
 def apply_benchmark_sections(
@@ -587,17 +619,18 @@ def apply_benchmark_sections(
     normalized: dict[str, Any],
 ) -> None:
     if model_name == "flux-dev":
-        if str(data.get("dataset_type", "")).lower() == "precomputed":
-            normalized["dataset"]["name"] = "amdb"
-            dataset_cfg["modality"] = "image"
+        # Precomputed FLUX samples are mean/logvar encodings, not AMDB images.
+        # Leaving the dataset on the flux loader avoids the latent-cache path
+        # looking up a missing ``image`` key.
         resolution = data.get("resolution")
         model_cfg = normalized["model"].get("config")
         if resolution is None and isinstance(model_cfg, dict):
             resolution = model_cfg.get("resolution")
-        if resolution is not None:
-            size = int(str(resolution).split(",")[0])
+        # An explicit data.img_size is already copied onto the processor.
+        # The model YAML always sets resolution, so it must not replace that size.
+        if data.get("img_size") is None and resolution is not None:
             processor = dataset_cfg.setdefault("processor_config", {})
-            processor["img_size"] = size
+            processor["img_size"] = _square_image_size(resolution)
         if int(trainer_args.get("sp_size", 1)) != 1:
             raise ValueError("flux-dev diffusion training requires `parallelism.sp_size: 1`.")
         return

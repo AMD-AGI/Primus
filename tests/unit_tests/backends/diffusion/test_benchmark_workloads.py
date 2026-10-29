@@ -244,3 +244,216 @@ def test_even_batches_pad_short_tail_like_accelerate():
     assert batches == [list(range(16)), list(range(16, 20)) + list(range(12))]
     assert all(len(batch) == 16 for batch in batches)
     assert len(EvenSizeBatchSampler(range(16), 16)) == 1
+
+
+def test_unbuilt_benchmark_models_fail_before_download():
+    for name in ("sdxl", "stable-diffusion-xl", "mochi-1", "hunyuan-video", "wan2.1-i2v"):
+        with pytest.raises(ValueError, match="no diffusion model builder"):
+            _finalize({"model": {"name": name, "config": {}}, "data": {"dataset_path": "x"}})
+
+
+def test_flux_dev_keeps_explicit_img_size_and_parses_resolution():
+    kept = _finalize(
+        {
+            "model": {"name": "flux-dev", "config": {"resolution": 512}},
+            "data": {"img_size": 256, "dataset_path": "images"},
+        }
+    )
+    assert kept.dataset["name"] == "flux"
+    assert kept.dataset["config"]["processor_config"]["img_size"] == 256
+
+    square = _finalize(
+        {
+            "model": {"name": "flux-dev", "config": {}},
+            "data": {"resolution": "512x512", "dataset_path": "images"},
+        }
+    )
+    assert square.dataset["config"]["processor_config"]["img_size"] == 512
+
+    decimal = _finalize(
+        {
+            "model": {"name": "flux-dev", "config": {"resolution": "768.0"}},
+            "data": {"dataset_path": "images"},
+        }
+    )
+    assert decimal.dataset["config"]["processor_config"]["img_size"] == 768
+
+    with pytest.raises(ValueError, match="square"):
+        _finalize(
+            {
+                "model": {"name": "flux-dev", "config": {}},
+                "data": {"resolution": "1024,768"},
+            }
+        )
+
+
+def test_flux_dev_precomputed_stays_on_the_flux_loader():
+    args = _finalize(
+        {
+            "model": {"name": "flux-dev", "config": {}},
+            "data": {"dataset_type": "precomputed", "dataset_path": "encoded"},
+        }
+    )
+    assert args.dataset["name"] == "flux"
+    assert args.dataset["config"]["dataset_type"] == "precomputed"
+
+
+def test_sigma_grid_matches_the_shifted_flow_endpoints():
+    import torch
+
+    from primus.backends.diffusion.utils.sampling import (
+        amdb_flow_sigma_grid,
+        sample_shifted_logit_normal_sigmas,
+    )
+
+    grid = amdb_flow_sigma_grid()
+    assert grid.shape == (1000,)
+    assert grid.dtype == torch.float32
+    torch.testing.assert_close(grid[0], torch.tensor(1.0))
+    expected_last = 3.0 * 0.001 / (1.0 + 2.0 * 0.001)
+    torch.testing.assert_close(grid[-1], torch.tensor(expected_last))
+
+    drawn = sample_shifted_logit_normal_sigmas(4, device=torch.device("cpu"), sigma_grid=grid)
+    assert drawn.shape == (4,)
+    assert torch.all((drawn >= grid[-1]) & (drawn <= grid[0]))
+
+
+def test_missing_flops_leave_tflops_unset():
+    from primus.backends.diffusion.trainers.base import benchmark_step_rates
+
+    fps_gpu, tflops_per_gpu = benchmark_step_rates(
+        local_batch_size=8,
+        step_time_gpu_s=2.0,
+        total_flops=None,
+    )
+    assert fps_gpu == 4.0
+    assert tflops_per_gpu is None
+
+
+def test_benchmark_fsdp2_hooks_extend_the_parent_wrapper():
+    import torch
+
+    from primus.backends.diffusion.trainers.benchmark import AMDBBenchmarkTrainer
+    from primus.backends.diffusion.trainers.fsdp2 import FSDP2Trainer
+
+    assert AMDBBenchmarkTrainer._apply_fsdp2 is FSDP2Trainer._apply_fsdp2
+    trainer = AMDBBenchmarkTrainer.__new__(AMDBBenchmarkTrainer)
+    trainer.args = {"fsdp2_pure_low_precision": True}
+    trainer.rank = 0
+    assert trainer._fsdp2_reduce_dtype_name(torch.bfloat16) == "bf16"
+    assert trainer._fsdp2_reduce_dtype_name(torch.float32) == "fp32"
+
+
+def test_precomputed_cache_does_not_look_up_image():
+    import torch
+
+    from primus.backends.diffusion.trainers.benchmark import AMDBBenchmarkTrainer
+
+    trainer = AMDBBenchmarkTrainer.__new__(AMDBBenchmarkTrainer)
+    trainer.rank = 0
+    trainer.sampler = type("Sampler", (), {"set_epoch": lambda self, epoch: None})()
+    trainer.processing_class = None
+    trainer.dataloader = [
+        {
+            "mean": torch.zeros(2, 1),
+            "logvar": torch.zeros(2, 1),
+            "t5_encodings": torch.zeros(2, 1),
+            "clip_encodings": torch.zeros(2, 1),
+        }
+    ]
+    trainer._prepare_host_batch = lambda batch: batch
+    trainer._prepare_batch = lambda batch, processor: batch
+
+    def encode(_batch):
+        raise AssertionError("precomputed batches must not be re-encoded")
+
+    trainer.model = type("Model", (), {"encode_batch": staticmethod(encode)})()
+    trainer._cache_encoded_batches()
+    assert trainer._encoded_cache is False
+
+
+def test_cached_loader_pads_the_short_tail():
+    import torch
+
+    from primus.backends.diffusion.trainers.benchmark import AMDBBenchmarkTrainer
+
+    trainer = AMDBBenchmarkTrainer.__new__(AMDBBenchmarkTrainer)
+    trainer.rank = 0
+    trainer.per_device_train_batch_size = 4
+    trainer.args = {"shuffle": False, "dataloader_even_batches": True}
+    trainer.sampler = type("Sampler", (), {"set_epoch": lambda self, epoch: None})()
+    trainer.processing_class = None
+    trainer.dataloader = [{"image": torch.zeros(5, 1), "prompts": ["p"] * 5}]
+    trainer._prepare_host_batch = lambda batch: batch
+    trainer._prepare_batch = lambda batch, processor: batch
+
+    class Model:
+        def encode_batch(self, batch):
+            count = batch["image"].shape[0]
+            return {
+                "latents": torch.arange(count).float(),
+                "t5_encodings": torch.zeros(count, 1),
+                "clip_encodings": torch.zeros(count, 1),
+            }
+
+    trainer.model = Model()
+    trainer._cache_encoded_batches()
+    sizes = [batch["latents"].shape[0] for batch in trainer.dataloader]
+    assert sizes == [4, 4]
+
+
+def test_frame_list_videos_are_normalized_once():
+    import torch
+
+    from primus.backends.diffusion.utils.pixels import videos_to_tensor
+
+    frame = torch.full((4, 4, 3), 200.0)
+    clip = videos_to_tensor([[frame]], num_frames=1, height=4, width=4)
+    expected = 200.0 / 127.5 - 1.0
+    torch.testing.assert_close(clip[0, 0, 0, 0, 0], torch.tensor(expected))
+
+
+def test_flux_prepare_hook_rewrites_paths_and_reports_auth_failures(monkeypatch, tmp_path, capsys):
+    import primus.backends.diffusion.utils.download as download
+    from runner.helpers.hooks.train.pretrain.diffusion import (
+        prepare as diffusion_prepare,
+    )
+
+    dit = tmp_path / "flux1-dev.safetensors"
+    data = tmp_path / "images"
+    ae = tmp_path / "ae.safetensors"
+
+    def fake_stage(model_name, **kwargs):
+        assert model_name == "flux-dev"
+        assert kwargs["encoder"] == {}
+        return {
+            "PRETRAINED_PATH": str(dit),
+            "DATASET_PATH": str(data),
+            "VAE_CHECKPOINT": str(ae),
+        }
+
+    monkeypatch.setattr(download, "stage_benchmark_assets", fake_stage)
+    model_cfg: dict = {}
+    dataset_cfg: dict = {"dataset_path": ""}
+    env = diffusion_prepare._stage_benchmark_downloads("flux-dev", dataset_cfg, model_cfg, {})
+    assert model_cfg["load_from_pretrained_path"] == str(dit)
+    assert dataset_cfg["dataset_path"] == str(data)
+    assert model_cfg["encoder"]["autoencoder"] == str(ae)
+    assert env["VAE_CHECKPOINT"] == str(ae)
+
+    def unauthorized(*_args, **_kwargs):
+        raise RuntimeError("401 unauthorized")
+
+    monkeypatch.setattr(download, "stage_benchmark_assets", unauthorized)
+    with pytest.raises(SystemExit):
+        diffusion_prepare._stage_benchmark_downloads("flux-dev", {"dataset_path": ""}, {}, {})
+    assert "hf_token" in capsys.readouterr().err
+
+    def refuse_download(*_args, **_kwargs):
+        raise AssertionError("unbuilt benchmark must not download assets")
+
+    monkeypatch.setattr(download, "stage_benchmark_assets", refuse_download)
+    with pytest.raises(SystemExit):
+        diffusion_prepare._reject_unbuilt_benchmark("sdxl")
+    assert "no diffusion model builder" in capsys.readouterr().err
+    assert diffusion_prepare._BENCHMARK_DOWNLOADS == {"flux-dev"}

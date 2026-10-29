@@ -98,19 +98,18 @@ MODEL_BUILDERS: Dict[str, Callable[[dict], Any]] = {
     "flux": _build_flux_model,
     "flux.1-dev": _build_flux_preset_model("flux.1-dev"),
     "flux.1-schnell": _build_flux_preset_model("flux.1-schnell"),
+    "flux-dev": _build_flux_dev,
     "wan": _build_wan_model,
 }
 DATASET_BUILDERS: Dict[str, Callable[[dict], Tuple[Any, Any]]] = {
     "flux": _build_flux_dataset,
+    "amdb": _build_amdb_dataset,
     "wan": _build_wan_dataset,
 }
 TRAINER_BUILDERS: Dict[str, Callable[..., Any]] = {
     "fsdp2": _build_fsdp2_trainer,
+    "amdb_benchmark": _build_amdb_benchmark_trainer,
 }
-
-MODEL_BUILDERS["flux-dev"] = _build_flux_dev
-DATASET_BUILDERS["amdb"] = _build_amdb_dataset
-TRAINER_BUILDERS["amdb_benchmark"] = _build_amdb_benchmark_trainer
 
 
 def get_model_builder(name: str) -> Callable[[dict], Any]:

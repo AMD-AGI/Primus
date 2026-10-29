@@ -530,6 +530,101 @@ def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch):
     )
 
 
+def test_bfl_rms_norm_stays_in_the_activation_dtype():
+    from primus.backends.diffusion.models.flux.layers import RMSNorm
+
+    norm = RMSNorm(4, eps=1e-6)
+    assert norm.weight.dtype == torch.float32
+    activation = torch.ones(2, 4, dtype=torch.bfloat16)
+    assert norm(activation).dtype == torch.bfloat16
+
+
+def test_qk_norm_eps_reaches_flux_blocks():
+    model = build_flux_model(
+        {
+            "config": {
+                "model_preset": "flux.1-dev",
+                "params": {
+                    "in_channels": 4,
+                    "out_channels": 4,
+                    "vec_in_dim": 4,
+                    "context_in_dim": 8,
+                    "hidden_size": 12,
+                    "num_heads": 2,
+                    "depth": 1,
+                    "depth_single_blocks": 1,
+                    "axes_dim": [2, 2, 2],
+                    "qk_norm_eps": 1e-6,
+                },
+            }
+        }
+    )
+    assert model.dit.double_blocks[0].img_attn.norm.query_norm.eps == 1e-6
+    assert model.dit.double_blocks[0].txt_attn.norm.key_norm.eps == 1e-6
+    assert model.dit.single_blocks[0].norm.query_norm.eps == 1e-6
+
+
+def test_amdb_logit_normal_and_cached_latents(monkeypatch):
+    from primus.backends.diffusion.utils.sampling import amdb_flow_sigma_grid
+
+    model = build_flux_model(
+        {
+            "config": {
+                "model_preset": "flux.1-dev",
+                "guidance": 1.0,
+                "timestep_sampling": "amdb_logit_normal",
+                "shift": 3.0,
+                "params": {
+                    "in_channels": 4,
+                    "out_channels": 4,
+                    "vec_in_dim": 4,
+                    "context_in_dim": 8,
+                    "hidden_size": 12,
+                    "num_heads": 2,
+                    "depth": 1,
+                    "depth_single_blocks": 1,
+                    "axes_dim": [2, 2, 2],
+                },
+            }
+        }
+    )
+    grid = amdb_flow_sigma_grid(shift=3.0)
+    seen = {}
+
+    def fake_sample(batch_size, *, device, sigma_grid=None, shift=3.0, **_kwargs):
+        seen["grid"] = sigma_grid
+        seen["shift"] = shift
+        return grid[:batch_size].to(device)
+
+    monkeypatch.setattr(
+        "primus.backends.diffusion.utils.sampling.sample_shifted_logit_normal_sigmas",
+        fake_sample,
+    )
+    latents = {
+        "latents": torch.randn(2, 1, 2, 2),
+        "t5_encodings": torch.randn(2, 3, 8),
+        "clip_encodings": torch.randn(2, 4),
+    }
+    model.dit.train()
+    first = model.forward_train(latents)
+    second = model.forward_train(latents)
+    assert torch.isfinite(first["loss"])
+    assert seen["shift"] == 3.0
+    assert seen["grid"] is model.train_pipeline._amdb_sigma_grid
+    assert second and model.train_pipeline._amdb_sigma_grid is seen["grid"]
+
+    encoded = model.encode_batch(
+        {
+            "mean": torch.zeros(2, 4, 2, 2),
+            "logvar": torch.zeros(2, 4, 2, 2),
+            "t5_encodings": torch.zeros(2, 3, 8),
+            "clip_encodings": torch.zeros(2, 4),
+        }
+    )
+    assert encoded["latents"].shape == (2, 4, 2, 2)
+    assert "image" not in encoded
+
+
 def test_flux_qk_norm_uses_torchtitan_dtype_epsilon():
     norm = QKNorm(4).to(torch.bfloat16)
     reference = torch.nn.RMSNorm(4).to(torch.bfloat16)
@@ -780,6 +875,24 @@ def test_fused_rope_matches_eager_forward_and_backward(monkeypatch):
     monkeypatch.setenv("PRIMUS_FLUX_TRITON_ROPE", "0")
     eager_q, eager_k = apply_rope(eager_query, eager_key, freqs)
     fused_q, fused_k = fused_apply_rope(query, key, freqs)
+    dispatched = {"called": False}
+    real_fused = fused_apply_rope
+
+    def counting_fused(*args, **kwargs):
+        dispatched["called"] = True
+        return real_fused(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "primus.backends.diffusion.models.flux.math.fused_apply_rope",
+        counting_fused,
+    )
+    monkeypatch.setenv("PRIMUS_FLUX_TRITON_ROPE", "1")
+    dispatched_query = query.detach().clone().requires_grad_(True)
+    dispatched_key = key.detach().clone().requires_grad_(True)
+    dispatched_q, dispatched_k = apply_rope(dispatched_query, dispatched_key, freqs)
+    assert dispatched["called"] is True
+    torch.testing.assert_close(dispatched_q, eager_q, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(dispatched_k, eager_k, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(fused_q, eager_q, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(fused_k, eager_k, atol=1e-4, rtol=1e-4)
     (fused_q + fused_k).sum().backward()

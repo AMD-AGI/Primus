@@ -130,6 +130,8 @@ pipeline. Point `PRETRAINED_PATH` at the official DiT checkpoint.
 MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
 with a constant schedule. `LR` overrides either default.
 
+Default `LOCAL_BATCH_SIZE` for `benchmark_flux_dev-posttrain.yaml`:
+
 | Workload | MI300X / MI325X | MI355X |
 |---|---:|---:|
 | flux-dev | 10 | 16 |

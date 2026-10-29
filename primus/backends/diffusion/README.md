@@ -22,6 +22,8 @@ datasets, attention selection, FSDP2 wrapping, and the training loop.
   automatic `$DATA_PATH/huggingface`.
 - `PRIMUS_FLUX_TRITON_ROPE=1` switches FLUX RoPE to the fused Triton kernel.
   The `benchmark_flux_dev` configs set it. Left unset, FLUX keeps the eager RoPE.
+- `BENCHMARK_DENOISER_ONLY=1` skips encoder and VAE staging, and the encoder
+  prefetch, in the benchmark prepare hook. Leave it unset for a full run.
 
 Install backend dependencies with:
 
