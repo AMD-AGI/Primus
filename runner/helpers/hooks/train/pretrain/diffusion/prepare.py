@@ -107,7 +107,7 @@ def _validate_local_or_hf_id(value: str | None, description: str) -> None:
 
 
 _BENCHMARK_DOWNLOADS = {
-    'hunyuan-video',
+    "hunyuan-video",
 }
 
 
