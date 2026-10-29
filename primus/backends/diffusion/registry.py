@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Tuple
 
+from primus.backends.diffusion.amdb_benchmarks.registry import register_amdb_benchmarks
+
 
 def _build_wan_model(model_config: dict):
     from primus.backends.diffusion.models.registrations.wan import build_wan_model
@@ -74,6 +76,8 @@ DATASET_BUILDERS: Dict[str, Callable[[dict], Tuple[Any, Any]]] = {
 TRAINER_BUILDERS: Dict[str, Callable[..., Any]] = {
     "fsdp2": _build_fsdp2_trainer,
 }
+
+register_amdb_benchmarks(MODEL_BUILDERS, DATASET_BUILDERS, TRAINER_BUILDERS)
 
 
 def get_model_builder(name: str) -> Callable[[dict], Any]:

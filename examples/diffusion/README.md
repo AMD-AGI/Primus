@@ -117,3 +117,23 @@ python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
 ```
 
 On success the hook prints `env.PREPARED=1`.
+
+## Official-module post-training
+
+SDXL fine-tunes the in-tree Stability UNet. It does not build a Diffusers
+pipeline. Point `PRETRAINED_PATH` at the official UNet checkpoint.
+
+| Workload | Official source | Checkpoint |
+|---|---|---|
+| SDXL | Stability `generative-models` UNet | `sd_xl_base_1.0.safetensors` plus the SDXL VAE |
+
+MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
+with a constant schedule. `LR` overrides either default.
+
+| Workload | MI300X / MI325X | MI355X |
+|---|---:|---:|
+| stable-diffusion-xl | 20 | 12 |
+
+Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
+`SP_SIZE` at 1.
+
