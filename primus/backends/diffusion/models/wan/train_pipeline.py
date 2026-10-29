@@ -27,6 +27,10 @@ class WanFlowMatchTrainPipelineConfig:
     # For Wan VAEs, temporal downsample is typically (4, 1): 4n+1 frames.
     time_division_factor: int = 4
     time_division_remainder: int = 1
+    # AMDiffusionBenchmark logit-normal sampling over its shifted sigma table (cached
+    # latents always use it); None uses the FlowMatchEuler grid.
+    amdb_sampling: bool = False
+    sigma_grid: Optional[torch.Tensor] = None
 
 
 class WanFlowMatchTrainPipeline:
@@ -93,11 +97,87 @@ class WanFlowMatchTrainPipeline:
         return noise.to(device=device, dtype=dtype)
 
     @staticmethod
+    def prepare_host_batch(batch: Dict[str, Any], model_config: Any) -> Dict[str, Any]:
+        if batch.get("video") is not None or "videos" not in batch:
+            return batch
+        from primus.backends.diffusion.amdb_benchmarks.pixels import decode_host_pixels
+
+        return decode_host_pixels(
+            batch,
+            height=int(getattr(model_config, "height", 544)),
+            width=int(getattr(model_config, "width", 960)),
+            num_frames=int(getattr(model_config, "num_frames", 9)),
+        )
+
+    def _maybe_prepare_raw_batch(self, components: WanComponents, batch: Dict[str, Any], model_config: Any):
+        raw = "videos" in batch or batch.get("prompts") is not None
+        if not raw or isinstance(batch.get("latents"), torch.Tensor):
+            return batch
+        prepared = self.prepare_host_batch(batch, model_config)
+        if prepared.get("input_ids") is None:
+            tokenizer = components.tokenizer
+            prompts = list(batch.get("prompts") or [])
+            if tokenizer is None:
+                raise ValueError("Wan prompt batches require model.encoder.tokenizer.")
+            text_len = int(getattr(model_config, "text_len", 512))
+            tokens = tokenizer(
+                prompts,
+                padding="max_length",
+                truncation=True,
+                max_length=text_len,
+                return_tensors="pt",
+            )
+            prepared["input_ids"] = tokens["input_ids"]
+            prepared["attention_mask"] = tokens["attention_mask"]
+        return prepared
+
+    def _i2v_condition(self, components: WanComponents, video: torch.Tensor, latents: torch.Tensor):
+        if components.image_encoder is None:
+            raise ValueError("Wan I2V requires model.encoder.image_encoder (official CLIP checkpoint).")
+        condition_video = video.clone()
+        condition_video[:, :, 1:] = 0
+        with torch.no_grad():
+            condition_latents = self._vae_encode(components.vae, condition_video).to(
+                device=latents.device, dtype=latents.dtype
+            )
+            clip_fea = components.image_encoder.visual(video[:, :, 0])
+        batch, _, frames, height, width = condition_latents.shape
+        pixel_frames = video.shape[2]
+        mask = torch.ones(batch, pixel_frames, height, width, device=latents.device, dtype=latents.dtype)
+        mask[:, 1:] = 0
+        mask = torch.cat([mask[:, :1].repeat(1, 4, 1, 1), mask[:, 1:]], dim=1)
+        mask = mask.view(batch, mask.shape[1] // 4, 4, height, width).transpose(1, 2)
+        if mask.shape[2] != frames:
+            raise ValueError(
+                f"Wan I2V mask has {mask.shape[2]} latent frames but the VAE produced {frames}. "
+                "Use a frame count of 4n+1."
+            )
+        condition = torch.cat([mask, condition_latents], dim=1)
+        return [condition[index] for index in range(batch)], clip_fea
+
+    @staticmethod
     def _vae_encode(vae: torch.nn.Module, videos_bcthw: torch.Tensor) -> torch.Tensor:
         # Wan VAEs in this repo use list-of-tensors interface: List[[C,T,H,W]] -> List[[C,F,H',W']]
         videos_list = [videos_bcthw[i] for i in range(videos_bcthw.shape[0])]
         latents_list = vae.encode(videos_list)
         return torch.stack(latents_list)
+
+    @staticmethod
+    def _amdb_training_latents(vae: Any, latents: torch.Tensor) -> torch.Tensor:
+        """Match AMDiffusionBenchmark's training latent.
+
+        The official Wan VAE returns `(mu - mean) / std`. AMDB's Diffusers VAE
+        sample is the raw posterior, and `prepare_latents` normalizes only the
+        I2V condition. Undo the scale on the sample that enters the flow-matching
+        loss so the MSE is on the same tensor AMDB trains against.
+        """
+        mean = getattr(vae, "mean", None)
+        std = getattr(vae, "std", None)
+        if mean is None or std is None:
+            return latents
+        mean = mean.to(device=latents.device, dtype=latents.dtype).view(1, -1, 1, 1, 1)
+        std = std.to(device=latents.device, dtype=latents.dtype).view(1, -1, 1, 1, 1)
+        return latents * std + mean
 
     @staticmethod
     def _get_dit_patch_size(model_config: Any) -> tuple[int, int, int]:
@@ -130,9 +210,10 @@ class WanFlowMatchTrainPipeline:
     @staticmethod
     def _select_timestep(scheduler: Any, device: torch.device) -> torch.Tensor:
         """Sample one training timestep uniformly."""
-        timestep_id = torch.randint(0, int(scheduler.num_train_timesteps), (1,), device=device)
-        # scheduler.timesteps live on CPU in this repo; `wan_new` indexes with cpu tensor.
-        timestep = scheduler.timesteps[timestep_id.cpu()].float()
+        # Draw the index on CPU. ``scheduler.timesteps`` lives on CPU, and a GPU
+        # index would sync the device on every micro-batch inside the timed step.
+        timestep_id = torch.randint(0, int(scheduler.num_train_timesteps), (1,))
+        timestep = scheduler.timesteps[timestep_id].float()
         return timestep.to(device=device)
 
     @staticmethod
@@ -183,6 +264,40 @@ class WanFlowMatchTrainPipeline:
             t_expand_list.append(t_seq)
         return torch.stack(t_expand_list)
 
+    def encode_batch(
+        self,
+        *,
+        components: WanComponents,
+        batch: Dict[str, Any],
+        model_config: Any,
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        """Encode a raw I2V batch into the cached tensors consumed by `compute_loss`.
+
+        Returns None when the cached path cannot reproduce the online path
+        (non-AMDB sampling or non-I2V models), so callers keep encoding online.
+        """
+        if not self.cfg.amdb_sampling or getattr(model_config, "model_type", None) != "i2v":
+            return None
+        batch = self._maybe_prepare_raw_batch(components, batch, model_config)
+        device = next(components.dit.parameters()).device
+        dtype = next(components.dit.parameters()).dtype
+        video = batch["video"].to(device=device, dtype=dtype, non_blocking=True)
+        input_ids = batch["input_ids"].to(device=device, non_blocking=True)
+        attention_mask = batch["attention_mask"].to(device=device, non_blocking=True)
+        components.text_encoder.eval()
+        with torch.no_grad():
+            latents = self._amdb_training_latents(
+                components.vae, self._vae_encode(components.vae, video).to(device=device, dtype=dtype)
+            )
+            context = self._encode_prompt(components.text_encoder, input_ids, attention_mask)
+            y_list, clip_fea = self._i2v_condition(components, video, latents)
+        return {
+            "latents": latents,
+            "context": context.to(dtype),
+            "y": torch.stack(y_list).to(dtype),
+            "clip_fea": clip_fea.to(dtype),
+        }
+
     def compute_loss(
         self,
         *,
@@ -197,6 +312,52 @@ class WanFlowMatchTrainPipeline:
           - input_ids: Tensor [B, L]
           - attention_mask: Tensor [B, L]
         """
+        batch = self._maybe_prepare_raw_batch(components, batch, model_config)
+        if isinstance(batch.get("latents"), torch.Tensor):
+            device = next(components.dit.parameters()).device
+            dtype = next(components.dit.parameters()).dtype
+            input_latents = batch["latents"].to(device=device, dtype=dtype)
+            context = batch["context"].to(device=device, dtype=dtype)
+            cached_y = batch["y"].to(device=device, dtype=dtype)
+            clip_fea = batch["clip_fea"].to(device=device, dtype=dtype)
+            patch_size = self._get_dit_patch_size(model_config)
+            input_latents, original_latent_spatial_size = self._pad_latents_for_dit(
+                input_latents, patch_size=patch_size
+            )
+            from primus.backends.diffusion.amdb_benchmarks.sampling import (
+                sample_shifted_logit_normal_sigmas,
+            )
+
+            timestep = sample_shifted_logit_normal_sigmas(
+                input_latents.shape[0], device=device, sigma_grid=self.cfg.sigma_grid
+            )
+            noise = torch.randn_like(input_latents)
+            sigma = timestep.view(-1, 1, 1, 1, 1)
+            target = noise - input_latents
+            noisy_latents = (sigma * noise + (1.0 - sigma) * input_latents).to(input_latents.dtype)
+            timestep = timestep.to(dtype)
+            x_list = [noisy_latents[i] for i in range(noisy_latents.shape[0])]
+            context_list = [context[i] for i in range(context.shape[0])]
+            d_f, d_h, d_w = patch_size
+            max_seq_len = 0
+            for sample in x_list:
+                seq_len = (sample.shape[1] // d_f) * (sample.shape[2] // d_h) * (sample.shape[3] // d_w)
+                max_seq_len = max(max_seq_len, seq_len)
+            y_list = [cached_y[i] for i in range(cached_y.shape[0])]
+            noise_pred_list = components.dit(
+                x=x_list,
+                t=timestep,
+                context=context_list,
+                seq_len=max_seq_len,
+                y=y_list,
+                clip_fea=clip_fea,
+                sp_group=batch.get("sp_group", None),
+            )
+            noise_pred = torch.stack(noise_pred_list)
+            noise_pred = self._crop_latents(noise_pred, spatial_size=original_latent_spatial_size)
+            target = self._crop_latents(target, spatial_size=original_latent_spatial_size)
+            loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
+            return {"loss": loss}
         video = batch.get("video")
         if video is None:
             raise ValueError("Batch must contain 'video'")
@@ -229,21 +390,40 @@ class WanFlowMatchTrainPipeline:
 
         with torch.no_grad():
             input_latents = self._vae_encode(components.vae, video).to(device=device, dtype=dtype)
+            if self.cfg.amdb_sampling:
+                input_latents = self._amdb_training_latents(components.vae, input_latents)
         patch_size = self._get_dit_patch_size(model_config)
         input_latents, original_latent_spatial_size = self._pad_latents_for_dit(
             input_latents, patch_size=patch_size
         )
 
-        # 2) Sample timestep + noise (match `wan_new`: noise on CPU, timestep from scheduler.timesteps)
-        timestep = self._select_timestep(scheduler, device=device)  # [1] (float)
-        seed = self._get_seed_from_env_or_batch(batch)
-        noise = self._randn_like_on_cpu_then_to(input_latents, seed=seed, dtype=dtype, device=device)
+        if self.cfg.amdb_sampling:
+            from primus.backends.diffusion.amdb_benchmarks.sampling import (
+                sample_shifted_logit_normal_sigmas,
+            )
 
-        # 3) Diffusion target + noise injection (match `wan_new`)
-        # Note: in this repo's FlowMatchScheduler, `training_target(sample, noise, t)` uses `noise - sample`.
-        # `wan_new` passes `input_latents` (not noisy latents).
-        target = scheduler.training_target(input_latents, noise, timestep)
-        noisy_latents = scheduler.add_noise(input_latents, noise, timestep=timestep)
+            # 2) AMDiffusionBenchmark flow-matching noise schedule.
+            timestep = sample_shifted_logit_normal_sigmas(
+                input_latents.shape[0], device=device, sigma_grid=self.cfg.sigma_grid
+            )
+            noise = torch.randn_like(input_latents)
+            sigma = timestep.view(-1, 1, 1, 1, 1)
+
+            # 3) AMDiffusionBenchmark velocity target and noise injection.
+            target = noise - input_latents
+            noisy_latents = (sigma * noise + (1.0 - sigma) * input_latents).to(input_latents.dtype)
+            timestep = timestep.to(dtype)
+        else:
+            # 2) Sample timestep + noise (match `wan_new`: noise on CPU, timestep from scheduler.timesteps)
+            timestep = self._select_timestep(scheduler, device=device)  # [1] (float)
+            seed = self._get_seed_from_env_or_batch(batch)
+            noise = self._randn_like_on_cpu_then_to(input_latents, seed=seed, dtype=dtype, device=device)
+
+            # 3) Diffusion target + noise injection (match `wan_new`)
+            # Note: in this repo's FlowMatchScheduler, `training_target(sample, noise, t)` uses `noise - sample`.
+            # `wan_new` passes `input_latents` (not noisy latents).
+            target = scheduler.training_target(input_latents, noise, timestep)
+            noisy_latents = scheduler.add_noise(input_latents, noise, timestep=timestep)
 
         # 4) Text embeddings
         with torch.no_grad():
@@ -270,12 +450,17 @@ class WanFlowMatchTrainPipeline:
         )
 
         sp_group = batch.get("sp_group", None)
+        y_list = None
+        clip_fea = None
+        if getattr(model_config, "model_type", None) == "i2v":
+            y_list, clip_fea = self._i2v_condition(components, video, input_latents)
         noise_pred_list = components.dit(
             x=x_list,
             t=t,
             context=context_list,
             seq_len=max_seq_len,
-            y=None,
+            y=y_list,
+            clip_fea=clip_fea,
             sp_group=sp_group,
         )
         noise_pred = torch.stack(noise_pred_list)
@@ -284,7 +469,7 @@ class WanFlowMatchTrainPipeline:
 
         # 6) Loss
         loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
-        # `wan_new` uses scalar `timestep` for weighting (not expanded per-token)
-        weight = scheduler.training_weight(timestep)
-        loss = loss * weight
+        if not self.cfg.amdb_sampling:
+            # `wan_new` uses scalar `timestep` for weighting (not expanded per-token)
+            loss = loss * scheduler.training_weight(timestep)
         return {"loss": loss}
