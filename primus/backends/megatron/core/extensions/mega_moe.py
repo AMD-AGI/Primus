@@ -113,6 +113,52 @@ def _turbo_stages_take_wgrad_accum() -> bool:
     )
 
 
+_SHARED_EXPERT_STREAM: Optional[torch.cuda.Stream] = None
+
+
+def _shared_expert_stream() -> torch.cuda.Stream:
+    """The side stream every MegaMoE layer runs its shared expert on (one per process)."""
+    global _SHARED_EXPERT_STREAM
+    if _SHARED_EXPERT_STREAM is None:
+        _SHARED_EXPERT_STREAM = torch.cuda.Stream()
+    return _SHARED_EXPERT_STREAM
+
+
+class _JoinStreamInBackward(torch.autograd.Function):
+    """Identity whose backward makes the current stream wait for ``stream``.
+
+    Placed on the router output, after the router and before the side-stream shared expert, so in
+    backward it runs after every shared-expert node (autograd takes ready nodes newest first) and
+    before the router's: the router's TE GEMMs then never run beside the shared expert's, which
+    share TE's single global GEMM workspace.
+    """
+
+    @staticmethod
+    def forward(ctx, x, stream):
+        ctx.stream = stream
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        torch.cuda.current_stream().wait_stream(ctx.stream)
+        return grad, None
+
+
+class _RecordStreamInBackward(torch.autograd.Function):
+    """Identity whose backward records the incoming gradient on ``stream``, its consumer, so the
+    caching allocator does not hand the memory out again while that stream still reads it."""
+
+    @staticmethod
+    def forward(ctx, x, stream):
+        ctx.stream = stream
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        grad.record_stream(ctx.stream)
+        return grad, None
+
+
 def mega_moe_router(router):
     """The router builder MegaMoE uses: Megatron's ``TopKRouter`` becomes ``PrimusTopKRouter``.
 
@@ -374,6 +420,11 @@ class PrimusTurboMegaMoELayer(MegatronModule):
                 )
         else:
             self.shared_experts = None
+        from megatron.training import get_args
+
+        self.shared_expert_overlap = self.shared_experts is not None and bool(
+            getattr(get_args(), "turbo_mega_moe_shared_expert_overlap", False)
+        )
 
     def reset_parameters(self) -> None:
         """Init expert weights exactly like Megatron TEGroupedLinear."""
@@ -423,6 +474,20 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         }
         # dense probs [T, E], aux-loss grad baked in
         probs, _ = self.router(hidden_states, padding_mask, **router_kwargs)
+
+        if self.shared_expert_overlap:
+            # The shared expert runs on a side stream beside the routed experts. It forks after the
+            # router and joins before the sum: in between the main stream runs only the top-k and
+            # the Mega kernels, none of which is a TE GEMM (TE's GEMMs share one global workspace,
+            # see _JoinStreamInBackward, which keeps the same rule in backward). The prologue's
+            # host read-back waits on the main stream only, so the side stream keeps the GPU busy
+            # while the host relaunches.
+            main, side = torch.cuda.current_stream(), _shared_expert_stream()
+            probs = _JoinStreamInBackward.apply(probs, side)
+            side.wait_stream(main)
+            with torch.cuda.stream(side):
+                shared_out = self.shared_experts(hidden_states)
+            hidden_states.record_stream(side)
         probs = probs.reshape(-1, self.config.num_moe_experts)
 
         # dense -> sparse top-k
@@ -435,7 +500,11 @@ class PrimusTurboMegaMoELayer(MegatronModule):
             topk_weights.to(torch.float32),
         )
         y = y.reshape(in_shape).to(hidden_states.dtype)
-        if self.shared_experts is not None:
+        if self.shared_expert_overlap:
+            main.wait_stream(side)
+            shared_out.record_stream(main)
+            y = y + _RecordStreamInBackward.apply(shared_out, side)
+        elif self.shared_experts is not None:
             y = y + self.shared_experts(hidden_states)
         return y, None
 

@@ -101,6 +101,9 @@ turbo_mega_moe_precision: bf16
 # instead of a separate DDP add (Turbo's fuse_wgrad_accum_pattern; gfx1250, bf16 main_grad).
 # null follows gradient_accumulation_fusion; true / false set it for the MegaMoE experts alone.
 turbo_mega_moe_wgrad_accum_fusion: null
+# Run the MegaMoE layer's shared expert on a side stream beside the routed experts (forward and
+# backward); megatron's moe_shared_expert_overlap rides the token dispatcher, which MegaMoE has not.
+turbo_mega_moe_shared_expert_overlap: false
 
 # ===== Layer Norm =====
 # operator switch
