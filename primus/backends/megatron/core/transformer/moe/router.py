@@ -15,6 +15,24 @@ from megatron.training import get_args
 from primus.backends.megatron.core.extensions.logits_processor import fused_softcap
 
 
+def force_balanced_slots(num_tokens: int, topk: int, num_experts: int, spread: bool, device) -> torch.Tensor:
+    """[num_tokens, topk] expert ids of ``moe_router_force_load_balancing``'s deterministic modes.
+
+    Both give every expert exactly ``num_tokens * topk / num_experts`` slots, the same every step.
+    ``even``: ``(t * topk + k) % E``, each token on ``topk`` consecutive experts -- one EP rank
+    whenever a rank holds at least ``topk`` experts, so per-rank-deduplicating dispatch (Mega MoE,
+    DeepEP) moves far less than with real routing. ``spread``: ``(t + k * (E // topk)) % E``,
+    the ``topk`` experts ``E // topk`` apart, so a token reaches ``min(topk, EP)`` ranks, close to
+    the rank fan-out of real routing at that EP.
+    """
+    if spread:
+        assert num_experts % topk == 0, f"spread needs num_experts ({num_experts}) % topk ({topk}) == 0"
+        stride = num_experts // topk
+        tokens = torch.arange(num_tokens, device=device).unsqueeze(1)
+        return (tokens + torch.arange(topk, device=device).unsqueeze(0) * stride) % num_experts
+    return torch.arange(num_tokens * topk, device=device).view(num_tokens, topk) % num_experts
+
+
 class PrimusTopKRouter(TopKRouter):
     """Balanced route each token to the top-k experts."""
 
@@ -123,20 +141,25 @@ class PrimusTopKRouter(TopKRouter):
         #                  This must run with DeepEP too: its "even" token_indices
         #                  gather from ``scores``, which are zero off the real
         #                  top-k, and MegaMoE re-derives its top-k from them.
+        #   * "spread"  -> as "even", but each token's experts are E // topk apart, so
+        #                  a token reaches several EP ranks (see force_balanced_slots).
         #   * "uniform" -> Megatron-LM original random-logits balancing (already
         #                  applied upstream in ``TopKRouter.forward``; nothing to
         #                  do here).
         force_load_balancing_type = getattr(args, "moe_router_force_load_balancing_type", "uniform")
-        if args.moe_router_force_load_balancing and force_load_balancing_type == "even":
-            scores, routing_map = self._force_even_routing(scores, routing_map)
+        if args.moe_router_force_load_balancing and force_load_balancing_type in ("even", "spread"):
+            scores, routing_map = self._force_even_routing(
+                scores, routing_map, spread=force_load_balancing_type == "spread"
+            )
 
         return scores, routing_map
 
     def _force_even_routing(
-        self, scores: torch.Tensor, routing_map: torch.Tensor
+        self, scores: torch.Tensor, routing_map: torch.Tensor, spread: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Deterministically assign each token's top-k slots to experts in a
-        round-robin cycle ``(token_idx * topk + k) % num_experts`` so per-expert
+        round-robin cycle ``(token_idx * topk + k) % num_experts`` (``spread``:
+        ``(token_idx + k * (num_experts // topk)) % num_experts``) so per-expert
         token counts are exactly balanced and step-invariant (constant M_total).
 
         The original top-k probability magnitudes are carried over to the new
@@ -148,11 +171,9 @@ class PrimusTopKRouter(TopKRouter):
         topk = self.topk
         device = routing_map.device
 
-        # slot[t, k] = deterministic destination expert for token t's k-th slot.
-        # topk consecutive experts per token -> distinct while topk <= num_experts.
-        slot = (
-            torch.arange(num_tokens * topk, device=device).view(num_tokens, topk) % num_experts
-        )  # [num_tokens, topk], int64
+        # slot[t, k] = deterministic destination expert for token t's k-th slot, distinct
+        # within a token while topk <= num_experts.
+        slot = force_balanced_slots(num_tokens, topk, num_experts, spread, device)  # [num_tokens, topk]
 
         new_routing_map = torch.zeros_like(routing_map)
         new_routing_map.scatter_(1, slot, torch.ones_like(slot, dtype=routing_map.dtype))

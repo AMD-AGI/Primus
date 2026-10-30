@@ -102,6 +102,8 @@ dataloader_mp_context: null # "forkserver" | "spawn" | "fork" | null
 
 # Control the force load balancing type for the MoE router.
 # If set to "even", the router will force the load balancing to be even.
+# If set to "spread", it is as even as "even", but each token's experts are num_experts / topk apart, so a
+# token reaches several EP ranks as with real routing (use it to measure EP communication).
 # If set to "uniform", the router will force the load balancing to be uniform. (Megatron-LM original behavior)
 moe_router_force_load_balancing_type: "even"
 

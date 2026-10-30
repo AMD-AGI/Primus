@@ -2730,12 +2730,20 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         # type "uniform" keeps token_indices=None and relies on the router's upstream
         # random-logits balancing.
         token_indices = None
-        if self.moe_router_force_load_balancing and self.moe_router_force_load_balancing_type == "even":
-            token_indices = (
-                torch.arange(num_tokens * self.config.moe_router_topk, device=hidden_states.device).view(
-                    num_tokens, self.config.moe_router_topk
-                )
-                % self.config.num_moe_experts
+        if self.moe_router_force_load_balancing and self.moe_router_force_load_balancing_type in (
+            "even",
+            "spread",
+        ):
+            from primus.backends.megatron.core.transformer.moe.router import (
+                force_balanced_slots,
+            )
+
+            token_indices = force_balanced_slots(
+                num_tokens,
+                self.config.moe_router_topk,
+                self.config.num_moe_experts,
+                self.moe_router_force_load_balancing_type == "spread",
+                hidden_states.device,
             )
 
         hidden_states, probs = self.deepep_dispatcher._pre_dispatch(
