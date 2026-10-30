@@ -43,6 +43,9 @@ Settings (module config, ``primus_turbo:`` section):
   fp8_linear_granularity: tensorwise  rowwise|tensorwise|blockwise|mx_blockwise
   fp8_linear_format: e4m3             e4m3|e5m2|hybrid
   fp8_linear_block_size: 128          blockwise only
+  fp8_linear_traceable: false         compile-friendly tensorwise GEMMs; it and the
+                                      delayed-scaling, cast and backend settings it
+                                      enables are documented in ``_fp8_traceable``
 """
 from __future__ import annotations
 
@@ -161,10 +164,18 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
     """
     from primus_turbo.pytorch.modules import Float8Linear
 
+    from primus.backends.automodel.quantization import _fp8_traceable
+
     cfg = resolve_config()
+    traceable = _fp8_traceable.resolve(cfg)
+    linear_cls = Float8Linear
+    if traceable is not None:
+        linear_cls = _fp8_traceable.make_float8_linear(
+            Float8Linear, delayed_scaling=traceable.delayed_scaling
+        )
 
     def factory(linear):
-        return Float8Linear(
+        return linear_cls(
             linear.in_features,
             linear.out_features,
             bias=linear.bias is not None,
@@ -181,10 +192,15 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
         already_converted=(Float8Linear,),
         log_prefix=_LOG_PREFIX,
     )
+    if converted and traceable is not None and traceable.delayed_scaling:
+        _fp8_traceable.install_delayed_scale_step_counter(
+            module, discover_shared_input_scales=traceable.shared_input_scales
+        )
     logger.info(
-        "%s replaced %d torch.nn.Linear with Float8Linear in %s; skipped=%d " "(granularity=%s format=%s)",
+        "%s replaced %d torch.nn.Linear with %s in %s; skipped=%d " "(granularity=%s format=%s)",
         _LOG_PREFIX,
         converted,
+        linear_cls.__name__,
         module_name,
         skipped,
         getattr(cfg.granularity, "name", cfg.granularity),

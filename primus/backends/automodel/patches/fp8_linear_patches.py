@@ -23,6 +23,13 @@ options.declare(
     "fp8_linear_granularity",
     "fp8_linear_format",
     "fp8_linear_block_size",
+    "fp8_linear_traceable",
+    "fp8_linear_delayed_scaling",
+    "fp8_linear_amax_warmup_steps",
+    "fp8_linear_amax_refresh_interval",
+    "fp8_linear_inductor_cast",
+    "fp8_linear_shared_input_scales",
+    "fp8_linear_gemm_backend",
 )
 
 
