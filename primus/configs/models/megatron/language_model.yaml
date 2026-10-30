@@ -113,6 +113,9 @@ moe_router_load_balancing_type: "aux_loss" # 'aux_loss', 'seq_aux_loss', 'sinkho
 moe_router_dtype: null # str, fp32, fp64
 # Use BF16 backward GEMM operands with an FP32 router and BF16 input/weight.
 moe_router_bwd_bf16: false
+# Triton forward/backward GEMMs for an FP32 router with BF16 input/weight; the backward keeps FP32
+# accuracy. Not installed together with moe_router_bwd_bf16.
+moe_router_triton_gemm: false
 moe_router_score_function: softmax # softmax, sigmoid
 moe_router_topk: 2
 moe_router_pre_softmax: false
