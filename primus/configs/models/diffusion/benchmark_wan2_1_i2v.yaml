@@ -1,0 +1,25 @@
+model:
+  name: wan2.1-i2v
+  config:
+    load_from_pretrained_path: ${PRETRAINED_PATH:}
+    config:
+      model_type: i2v
+      separated_timestep: false
+      fuse_vae_embedding_in_latents: false
+      trainable_modules: dit
+      vae_type: wan_video_vae
+      dit_hidden_size: 5120
+      dit_num_layers: 40
+      dit_num_heads: 40
+      dit_intermediate_size: 13824
+      dit_in_channels: 36
+      dit_out_channels: 16
+      text_len: 512
+      height: ${HEIGHT:544}
+      width: ${WIDTH:960}
+      num_frames: ${NUM_FRAMES:9}
+    encoder:
+      t5_encoder: ${TEXT_ENCODER:}
+      autoencoder: ${VAE_CHECKPOINT:}
+      image_encoder: ${CLIP_CHECKPOINT:}
+      tokenizer: ${TEXT_TOKENIZER:google/umt5-xxl}

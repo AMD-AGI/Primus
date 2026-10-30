@@ -117,3 +117,22 @@ python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
 ```
 
 On success the hook prints `env.PREPARED=1`.
+
+## Official-module post-training
+
+Wan2.1 I2V fine-tunes the in-tree Wan DiT with CLIP cross-attention. It does
+not build a Diffusers pipeline. Point `PRETRAINED_PATH` at the official I2V DiT.
+
+| Workload | Official source | Checkpoint |
+|---|---|---|
+| Wan2.1 I2V 14B | native Wan2.1 DiT with CLIP cross-attention | official I2V DiT, Wan2.1 VAE, UMT5, CLIP vision |
+
+MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
+with a constant schedule. `LR` overrides either default.
+
+| Workload | MI300X / MI325X | MI355X |
+|---|---:|---:|
+| wan2.1-i2v | 1 | 1 |
+
+Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
+`SP_SIZE` at 1.

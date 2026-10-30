@@ -21,6 +21,7 @@ from primus.backends.diffusion.models.wan.configuration_wanvideo import WanVideo
 from primus.backends.diffusion.models.wan.t5 import umt5_xxl_encoder_from_checkpoint
 from primus.backends.diffusion.models.wan.train_pipeline import (
     WanFlowMatchTrainPipeline,
+    WanFlowMatchTrainPipelineConfig,
 )
 from primus.backends.diffusion.models.wan.vae2_1 import Wan2_1_VAE
 from primus.backends.diffusion.models.wan.vae2_2 import Wan2_2_VAE
@@ -52,7 +53,9 @@ def _load_state_dict(path: str) -> dict[str, torch.Tensor]:
     return obj
 
 
-def _load_dit_weights_into_module(dit: torch.nn.Module, pretrained_path: str):
+def _load_dit_weights_into_module(
+    dit: torch.nn.Module, pretrained_path: str, *, accept_diffusers: bool = False
+):
     """
     Support two common cases:
     1) Wan training export: `dit_model.safetensors` with keys like `blocks.0...`
@@ -94,11 +97,27 @@ def _load_dit_weights_into_module(dit: torch.nn.Module, pretrained_path: str):
 
     if any(k.startswith("dit.") for k in merged):
         merged = {k[len("dit.") :]: v for k, v in merged.items() if k.startswith("dit.")}
+    diffusers_format = False
+    if accept_diffusers:
+        from primus.backends.diffusion.utils.checkpoint_convert import (
+            is_diffusers_wan,
+            wan_diffusers_to_native,
+        )
+
+        diffusers_format = is_diffusers_wan(merged)
+        if diffusers_format:
+            merged = wan_diffusers_to_native(merged)
 
     result = dit.load_state_dict(merged, strict=False)
     logger.info(
-        f"Loaded DiT from dir. files={len(candidates)} missing={len(result.missing_keys)} unexpected={len(result.unexpected_keys)}"
+        f"Loaded DiT from dir. files={len(candidates)} diffusers_format={diffusers_format} "
+        f"missing={len(result.missing_keys)} unexpected={len(result.unexpected_keys)}"
     )
+    if diffusers_format and (result.missing_keys or result.unexpected_keys):
+        raise RuntimeError(
+            f"Wan Diffusers checkpoint mismatch: missing={result.missing_keys[:5]} "
+            f"unexpected={result.unexpected_keys[:5]}"
+        )
 
 
 def build_wan_model(model_config: dict):
@@ -176,34 +195,80 @@ def build_wan_model(model_config: dict):
         eps=float(model_cfg.dit_eps),
     )
 
-    # Build VAE
-    vae_type = getattr(model_cfg, "vae_type", "wan_video_vae_38")
-    vae_ckpt = encoder_cfg.get("vae_checkpoint") or encoder_cfg.get("autoencoder")
-    if vae_type in ("wan2.2", "wan_video_vae_38"):
-        if not vae_ckpt:
-            raise ValueError("wan requires `model_config.encoder.autoencoder` (Wan2.2 VAE checkpoint path)")
-        vae = Wan2_2_VAE(z_dim=48, vae_pth=vae_ckpt)
-        vae.upsampling_factor = 16
+    image_encoder = None
+    tokenizer = None
+    if os.environ.get("BENCHMARK_DENOISER_ONLY") == "1":
+        vae = torch.nn.Identity()
+        text_encoder = torch.nn.Identity()
+        image_encoder = torch.nn.Identity()
     else:
-        if not vae_ckpt:
-            raise ValueError("wan requires `model_config.encoder.autoencoder` (Wan2.1 VAE checkpoint path)")
-        vae = Wan2_1_VAE(z_dim=16, vae_pth=vae_ckpt)
-        vae.upsampling_factor = 8
+        # Build VAE
+        vae_type = getattr(model_cfg, "vae_type", "wan_video_vae_38")
+        vae_ckpt = encoder_cfg.get("vae_checkpoint") or encoder_cfg.get("autoencoder")
+        if vae_type in ("wan2.2", "wan_video_vae_38"):
+            if not vae_ckpt:
+                raise ValueError(
+                    "wan requires `model_config.encoder.autoencoder` (Wan2.2 VAE checkpoint path)"
+                )
+            vae = Wan2_2_VAE(z_dim=48, vae_pth=vae_ckpt)
+            vae.upsampling_factor = 16
+        else:
+            if not vae_ckpt:
+                raise ValueError(
+                    "wan requires `model_config.encoder.autoencoder` (Wan2.1 VAE checkpoint path)"
+                )
+            vae = Wan2_1_VAE(z_dim=16, vae_pth=vae_ckpt)
+            vae.upsampling_factor = 8
 
-    # Build text encoder (UMT5-XXL, encoder-only). Tokenization is handled by the dataset processor.
-    t5_ckpt = encoder_cfg.get("t5_encoder")
-    if not t5_ckpt:
-        raise ValueError("wan requires `model_config.encoder.t5_encoder` (UMT5 encoder checkpoint path)")
-    text_encoder = umt5_xxl_encoder_from_checkpoint(t5_ckpt, dtype=torch.bfloat16, device="cpu")
+        # Build text encoder (UMT5-XXL, encoder-only). Tokenization is handled by the dataset processor.
+        t5_ckpt = encoder_cfg.get("t5_encoder")
+        if not t5_ckpt:
+            raise ValueError("wan requires `model_config.encoder.t5_encoder` (UMT5 encoder checkpoint path)")
+        text_encoder = umt5_xxl_encoder_from_checkpoint(t5_ckpt, dtype=torch.bfloat16, device="cpu")
+
+        if dit_task_type == "i2v":
+            clip_path = encoder_cfg.get("image_encoder")
+            if not clip_path:
+                raise ValueError(
+                    "wan i2v requires `model_config.encoder.image_encoder` (Wan2.1 CLIP checkpoint)"
+                )
+            from primus.backends.diffusion.models.wan.clip_vision import WanClipVision
+
+            image_encoder = WanClipVision(clip_path, dtype=torch.bfloat16)
+        tokenizer_path = encoder_cfg.get("tokenizer") or encoder_cfg.get("text_tokenizer")
+        if tokenizer_path:
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
     # Optionally load pretrained DiT
     pretrained_path = model_config.get("load_from_pretrained_path")
     if pretrained_path:
         logger.info(f"Loading DiT weights from {pretrained_path}")
-        _load_dit_weights_into_module(dit, pretrained_path)
+        _load_dit_weights_into_module(
+            dit, pretrained_path, accept_diffusers=bool(getattr(model_cfg, "accept_diffusers", False))
+        )
 
-    components = WanComponents(dit=dit, vae=vae, text_encoder=text_encoder, image_encoder=None)
-    pipeline = WanFlowMatchTrainPipeline()
+    components = WanComponents(
+        dit=dit,
+        vae=vae,
+        text_encoder=text_encoder,
+        image_encoder=image_encoder,
+        tokenizer=tokenizer,
+    )
+    if bool(getattr(model_cfg, "amdb_sampling", False)):
+        from primus.backends.diffusion.utils.sampling import amdb_flow_sigma_grid
+
+        pipeline = WanFlowMatchTrainPipeline(
+            WanFlowMatchTrainPipelineConfig(
+                amdb_sampling=True,
+                sigma_grid=amdb_flow_sigma_grid(
+                    shift=float(getattr(model_cfg, "shift", 3.0)), zero_terminal=True
+                ),
+            )
+        )
+    else:
+        pipeline = WanFlowMatchTrainPipeline()
 
     model = WanForTraining(
         components=components,
@@ -224,3 +289,37 @@ def build_wan_model(model_config: dict):
         logger.info(f"wan after freeze: total={total_params/1e9:.3f}B trainable={trainable_params/1e9:.3f}B")
 
     return model
+
+
+def build_wan21_i2v_model(model_config: dict[str, Any]):
+    """Native Wan DiT with Wan2.1 I2V cross-attention and the AMDB noise schedule."""
+    from primus.backends.diffusion.utils.download import materialize_pretrained
+
+    config = dict(model_config or {})
+    nested = dict(config.get("config") or {})
+    nested.setdefault("model_type", "i2v")
+    nested.setdefault("dit_hidden_size", 5120)
+    nested.setdefault("dit_num_layers", 40)
+    nested.setdefault("dit_num_heads", 40)
+    nested.setdefault("dit_intermediate_size", 13824)
+    nested.setdefault("dit_in_channels", 36)
+    nested.setdefault("dit_out_channels", 16)
+    nested.setdefault("dit_patch_size", (1, 2, 2))
+    nested.setdefault("dit_freq_dim", 256)
+    nested.setdefault("dit_text_dim", 4096)
+    nested.setdefault("text_len", 512)
+    nested.setdefault("vae_type", "wan_video_vae")
+    nested.setdefault("separated_timestep", False)
+    nested.setdefault("fuse_vae_embedding_in_latents", False)
+    nested.setdefault("trainable_modules", "dit")
+    nested.setdefault("height", 544)
+    nested.setdefault("width", 960)
+    nested.setdefault("num_frames", 9)
+    nested.setdefault("amdb_sampling", True)
+    nested.setdefault("accept_diffusers", True)
+    config["config"] = nested
+
+    pretrained = materialize_pretrained("wan2.1-i2v", config.get("load_from_pretrained_path") or "")
+    if pretrained:
+        config["load_from_pretrained_path"] = pretrained
+    return build_wan_model(config)
