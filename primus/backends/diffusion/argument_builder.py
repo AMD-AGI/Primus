@@ -231,6 +231,9 @@ class DiffusionArgBuilder:
         return name
 
     def _defaults_for_model(self, model_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        benchmark = benchmark_defaults(model_name)
+        if benchmark is not None:
+            return benchmark
         if model_name == "wan":
             return self.DEFAULT_DATASET, self.DEFAULT_WAN_TRAINER
         if model_name == "flux" or model_name.startswith("flux."):
@@ -419,8 +422,131 @@ class DiffusionArgBuilder:
         ) != 1:
             raise ValueError("FLUX diffusion training currently requires `parallelism.sp_size: 1`.")
 
+        apply_benchmark_sections(
+            model_name,
+            data=data,
+            trainer_args=trainer_args,
+            dataset_cfg=dataset_cfg,
+            normalized=normalized,
+        )
         return normalized
 
 
 # Backwards-compatible import path for existing Wan-only callers.
 WanArgBuilder = DiffusionArgBuilder
+
+
+BENCHMARK_TRAINER: dict[str, Any] = {
+    "name": "amdb_benchmark",
+    "args": {
+        "output_dir": "./output/amdb",
+        "per_device_train_batch_size": 1,
+        "per_device_eval_batch_size": 1,
+        "gradient_accumulation_steps": 1,
+        "gradient_checkpointing": False,
+        "gradient_checkpointing_ratio": 1.0,
+        "attention_backend": "flash_attn_aiter",
+        "learning_rate": 1.0e-5,
+        "lr_scheduler_type": "constant",
+        # ``constant`` ignores warmup. A non-zero value never changes the LR.
+        "warmup_steps": 0,
+        "weight_decay": 0.0,
+        "num_train_epochs": 1,
+        "max_steps": 100,
+        "logging_steps": 1,
+        "save_steps": 0,
+        "save_total_limit": 3,
+        "dataloader_num_workers": 0,
+        # AMDiffusionBenchmark uses Accelerator(even_batches=True): a short tail
+        # is padded back to train_batch_size, and TFLOPS divides the first
+        # step's flop count by each step's GPU time.
+        "dataloader_even_batches": True,
+        "report_to": "none",
+        "run_name": "amdb",
+        "bf16": True,
+        "seed": 42,
+        "optim": "adamw_torch",
+        "adam_beta1": 0.9,
+        "adam_beta2": 0.999,
+        "adam_epsilon": 1.0e-8,
+        "max_grad_norm": 0.0,
+        "fsdp2_wrap_target": "dit",
+        "fsdp_transformer_layer_cls_to_wrap": "",
+        "fsdp_module_paths_to_wrap": "",
+        "fsdp2_reshard_after_forward": True,
+        "fsdp2_pure_low_precision": True,
+        "compile_transformer_blocks": False,
+        "save_strategy": "dit_only",
+        "sp_size": 1,
+        "dp_replicate": 1,
+    },
+}
+
+_SPECS: dict[str, dict[str, Any]] = {
+    "sdxl": {
+        "modality": "image",
+        "fsdp_layers": "BasicTransformerBlock",
+        "learning_rate": 1.0e-4,
+        "lr_scheduler_type": "polynomial",
+        # Shorter than the default ``max_steps`` so a builder-only run leaves warmup.
+        # The MI300X and MI325X configs still set warmup_steps to 100.
+        "warmup_steps": 10,
+        "gradient_checkpointing": False,
+    },
+}
+
+
+def _spec(model_name: str) -> dict[str, Any] | None:
+    if model_name == "stable-diffusion-xl":
+        model_name = "sdxl"
+    return _SPECS.get(model_name)
+
+
+def benchmark_defaults(model_name: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    spec = _spec(model_name)
+    if spec is None:
+        return None
+    canonical = "sdxl" if model_name == "stable-diffusion-xl" else model_name
+    dataset = {
+        "name": "amdb",
+        "config": {
+            "dataset_path": "",
+            "model_name": canonical,
+            "modality": spec["modality"],
+            "max_train_samples": -1,
+            "split": "train",
+        },
+    }
+    trainer = copy.deepcopy(BENCHMARK_TRAINER)
+    trainer["args"]["learning_rate"] = spec["learning_rate"]
+    trainer["args"]["lr_scheduler_type"] = spec["lr_scheduler_type"]
+    trainer["args"]["warmup_steps"] = spec["warmup_steps"]
+    trainer["args"]["gradient_checkpointing"] = spec["gradient_checkpointing"]
+    trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] = spec["fsdp_layers"]
+    trainer["args"]["run_name"] = model_name
+    return dataset, trainer
+
+
+def apply_benchmark_sections(
+    model_name: str,
+    *,
+    data: dict[str, Any],
+    trainer_args: dict[str, Any],
+    dataset_cfg: dict[str, Any],
+    normalized: dict[str, Any],
+) -> None:
+    spec = _spec(model_name)
+    if spec is None:
+        return
+    if int(trainer_args.get("sp_size", 1)) != 1:
+        raise ValueError(f"{model_name} diffusion training requires `parallelism.sp_size: 1`.")
+    dataset_cfg["model_name"] = "sdxl" if model_name == "stable-diffusion-xl" else model_name
+    dataset_cfg["modality"] = data.get("modality") or spec["modality"]
+    for key in ("max_train_samples", "revision", "split"):
+        if data.get(key) is not None:
+            dataset_cfg[key] = data[key]
+    model_cfg = normalized["model"].setdefault("config", {})
+    if isinstance(model_cfg, dict):
+        for key in ("resolution", "num_frames", "center_crop", "shift"):
+            if data.get(key) is not None:
+                model_cfg[key] = data[key]

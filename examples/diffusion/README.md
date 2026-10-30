@@ -117,3 +117,25 @@ python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
 ```
 
 On success the hook prints `env.PREPARED=1`.
+
+## Official-module post-training
+
+SDXL fine-tunes the in-tree Stability UNet. It does not build a Diffusers
+pipeline. Point `PRETRAINED_PATH` at the official UNet checkpoint.
+
+| Workload | Official source | Checkpoint |
+|---|---|---|
+| SDXL | Stability `generative-models` UNet | `sd_xl_base_1.0.safetensors` plus the SDXL VAE |
+
+All three SDXL configs default to learning rate `1e-4`. `LR` overrides that
+default. MI300X and MI325X use a polynomial schedule with 100 warmup steps.
+MI355X uses `constant_with_warmup` with 5 warmup steps. Gradient clipping is
+off on every SKU (`max_grad_norm` 0), so the timed step does not include the
+grad-norm all-reduce. The batch sizes below are the per-GPU `LOCAL_BATCH_SIZE`.
+
+| Workload | MI300X / MI325X per-GPU batch | MI355X per-GPU batch |
+|---|---:|---:|
+| stable-diffusion-xl | 20 | 12 |
+
+Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
+`SP_SIZE` at 1.

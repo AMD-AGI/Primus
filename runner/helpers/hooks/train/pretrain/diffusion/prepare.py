@@ -106,6 +106,79 @@ def _validate_local_or_hf_id(value: str | None, description: str) -> None:
         _fail(f"{description} is neither an existing path nor a Hugging Face reference: {value!r}")
 
 
+_BENCHMARK_DOWNLOADS = {
+    "sdxl",
+    "stable-diffusion-xl",
+}
+
+
+def _stage_benchmark_downloads(
+    model_name: str,
+    dataset_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+    model: dict[str, Any],
+) -> dict[str, str]:
+    """Download the benchmark checkpoint and dataset, then expose their paths."""
+    from primus.backends.diffusion.utils.download import (
+        ENCODER_ENV_KEYS,
+        stage_benchmark_assets,
+    )
+
+    encoder_cfg = model_cfg.get("encoder") or model.get("encoder") or {}
+    if not isinstance(encoder_cfg, dict):
+        encoder_cfg = {}
+    try:
+        env = stage_benchmark_assets(
+            model_name,
+            dataset_path=dataset_cfg.get("dataset_path"),
+            pretrained=model_cfg.get("load_from_pretrained_path"),
+            revision=dataset_cfg.get("revision"),
+            encoder=encoder_cfg,
+        )
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        lowered = message.lower()
+        if any(token in lowered for token in ("401", "403", "gated", "unauthorized")):
+            message = f"{message} Check ~/.hf_token and repo access."
+        _fail(message)
+    if env.get("PRETRAINED_PATH"):
+        model_cfg["load_from_pretrained_path"] = env["PRETRAINED_PATH"]
+    if env.get("DATASET_PATH"):
+        dataset_cfg["dataset_path"] = env["DATASET_PATH"]
+    model_cfg["encoder"] = encoder_cfg
+    for env_key, cfg_key in ENCODER_ENV_KEYS.items():
+        if env.get(env_key):
+            encoder_cfg[cfg_key] = env[env_key]
+    return env
+
+
+def _validate_benchmark_model(
+    model_name: str,
+    dataset_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+    model: dict[str, Any],
+) -> None:
+    dataset_path = str(dataset_cfg.get("dataset_path") or "")
+    if dataset_path.startswith("synthetic:"):
+        _log(f"{model_name} denoiser-only synthetic batch: {dataset_path}")
+        return
+    if dataset_path.endswith(".pt") and Path(dataset_path).is_file():
+        _log(f"{model_name} cached AMDiffusionBenchmark encodings: {dataset_path}")
+        return
+    if not dataset_path.strip():
+        _log(f"{model_name} dataset: official default")
+    else:
+        _validate_local_or_hf_id(dataset_cfg.get("dataset_path"), f"{model_name} dataset")
+    encoder_cfg = model_cfg.get("encoder", {}) or model.get("encoder", {})
+    _require_optional_path(
+        model_cfg.get("load_from_pretrained_path"),
+        f"{model_name} initialization checkpoint",
+    )
+    _validate_local_or_hf_id(encoder_cfg.get("clip_l"), "SDXL CLIP-L encoder")
+    _validate_local_or_hf_id(encoder_cfg.get("clip_g"), "SDXL CLIP-G encoder")
+    _require_optional_path(encoder_cfg.get("autoencoder"), "SDXL VAE checkpoint")
+
+
 def validate_diffusion_config(config_path: Path, module_name: str | None = None) -> None:
     cfg = load_primus_config(config_path)
     selected_module = _select_module_name(cfg, module_name)
@@ -124,6 +197,10 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
     processor_cfg = dataset_cfg.get("processor_config", {})
     model_cfg = model.get("config", {})
     model_name = model.get("name")
+    download_env: dict[str, str] = {}
+    if model_name in _BENCHMARK_DOWNLOADS:
+        _validate_benchmark_model(model_name, dataset_cfg, model_cfg, model)
+        download_env = _stage_benchmark_downloads(model_name, dataset_cfg, model_cfg, model)
 
     if model_name == "wan":
         encoder_cfg = model_cfg.get("encoder", {}) or model.get("encoder", {})
@@ -176,7 +253,7 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
             model_cfg.get("load_from_pretrained_path"),
             "FLUX DiT initialization checkpoint",
         )
-    else:
+    elif model_name not in _BENCHMARK_DOWNLOADS:
         _fail(f"unsupported diffusion model for prepare hook: {model_name!r}")
 
     _log(
@@ -184,6 +261,8 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
         f"module={selected_module} stage={getattr(backend_args, 'stage', None)} "
         f"trainer={trainer.get('name')} model={model.get('name')}"
     )
+    for key, value in download_env.items():
+        print(f"env.{key}={value}")
     print("env.PREPARED=1")
 
 
