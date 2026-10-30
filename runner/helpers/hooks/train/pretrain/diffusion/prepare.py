@@ -175,42 +175,6 @@ def _stage_benchmark_downloads(
     return env
 
 
-def _validate_benchmark_model(
-    model_name: str,
-    dataset_cfg: dict[str, Any],
-    model_cfg: dict[str, Any],
-    model: dict[str, Any],
-) -> None:
-    dataset_path = str(dataset_cfg.get("dataset_path") or "")
-    if dataset_path.startswith("synthetic:"):
-        _log(f"{model_name} denoiser-only synthetic batch: {dataset_path}")
-        return
-    if dataset_path.endswith(".pt") and Path(dataset_path).is_file():
-        _log(f"{model_name} cached AMDiffusionBenchmark encodings: {dataset_path}")
-        return
-    _validate_local_or_hf_id(dataset_cfg.get("dataset_path"), f"{model_name} dataset")
-    encoder_cfg = _encoder_config(model_cfg, model, model_name)
-    _require_optional_path(
-        model_cfg.get("load_from_pretrained_path"),
-        f"{model_name} initialization checkpoint",
-    )
-    if model_name in {"sdxl", "stable-diffusion-xl"}:
-        _validate_local_or_hf_id(encoder_cfg.get("clip_l"), "SDXL CLIP-L encoder")
-        _validate_local_or_hf_id(encoder_cfg.get("clip_g"), "SDXL CLIP-G encoder")
-        _require_optional_path(encoder_cfg.get("autoencoder"), "SDXL VAE checkpoint")
-    elif model_name == "mochi-1":
-        _validate_local_or_hf_id(encoder_cfg.get("t5"), "Mochi T5 encoder")
-        _require_optional_path(encoder_cfg.get("autoencoder"), "Mochi VAE encoder checkpoint")
-    elif model_name == "hunyuan-video":
-        _validate_local_or_hf_id(encoder_cfg.get("llm"), "HunyuanVideo LLaMA encoder")
-        _validate_local_or_hf_id(encoder_cfg.get("clip"), "HunyuanVideo CLIP encoder")
-    elif model_name == "wan2.1-i2v":
-        _validate_local_or_hf_id(encoder_cfg.get("tokenizer"), "Wan2.1 text tokenizer")
-        _require_optional_path(encoder_cfg.get("t5_encoder"), "Wan2.1 text encoder checkpoint")
-        _require_optional_path(encoder_cfg.get("autoencoder"), "Wan2.1 VAE checkpoint")
-        _require_optional_path(encoder_cfg.get("image_encoder"), "Wan2.1 CLIP vision checkpoint")
-
-
 def validate_diffusion_config(config_path: Path, module_name: str | None = None) -> None:
     cfg = load_primus_config(config_path)
     selected_module = _select_module_name(cfg, module_name)
@@ -285,8 +249,6 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
             model_cfg.get("load_from_pretrained_path"),
             "FLUX DiT initialization checkpoint",
         )
-    elif model_name in _BENCHMARK_DOWNLOADS - {"flux-dev"}:
-        _validate_benchmark_model(model_name, dataset_cfg, model_cfg, model)
     else:
         _fail(f"unsupported diffusion model for prepare hook: {model_name!r}")
 

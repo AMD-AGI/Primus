@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -18,7 +16,6 @@ import torch
 
 from primus.backends.diffusion.data.collator import RawBatchCollator
 
-_DISNEY_VIDEO = "Wild-Heart/Disney-VideoGeneration-Dataset"
 _SIHEYUAN = "chinese_architecture_siheyuan"
 _PROMPT_KEYS = ("prompt", "text", "caption", "txt", "caption_0")
 
@@ -79,56 +76,6 @@ def image_dataset_load_kwargs(dataset_path: str) -> dict[str, Any]:
     return {"split": "train", "verification_mode": "no_checks"}
 
 
-class _TemporaryVideoReader:
-    """decord reader that deletes its scratch file once the frames are taken."""
-
-    def __init__(self, path: str, reader: Any):
-        self._path = path
-        self._reader = reader
-
-    def get_batch(self, indices):
-        try:
-            return self._reader.get_batch(indices)
-        finally:
-            self.close()
-
-    def close(self) -> None:
-        path = self._path
-        self._path = None
-        if path:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-
-    def __len__(self) -> int:
-        return len(self._reader)
-
-    def __del__(self) -> None:
-        self.close()
-
-
-def open_video_reader(video: Any):
-    """Decode a Hugging Face video value with decord. This image has no torchcodec."""
-    if isinstance(video, str):
-        from decord import VideoReader, cpu
-
-        return VideoReader(video, ctx=cpu(0))
-    if not isinstance(video, dict) or "path" not in video and "bytes" not in video:
-        return video
-    from decord import VideoReader, cpu
-
-    source = video.get("path")
-    if source:
-        return VideoReader(str(source), ctx=cpu(0))
-    handle = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-    try:
-        handle.write(video["bytes"])
-    finally:
-        handle.close()
-    return _TemporaryVideoReader(handle.name, VideoReader(handle.name, ctx=cpu(0)))
-
-
 def caption_from_image_filename(image: Any) -> str:
     """Caption used by AMDiffusionBenchmark: the filename stem, underscores as spaces."""
     filename = getattr(image, "filename", "") or ""
@@ -137,11 +84,11 @@ def caption_from_image_filename(image: Any) -> str:
 
 
 class AMDBDataset:
-    """One sample of image or video plus an optional caption."""
+    """One image sample plus an optional caption."""
 
     def __init__(self, records: Any, *, modality: str):
-        if modality not in {"image", "video"}:
-            raise ValueError(f"amdb modality must be 'image' or 'video', got {modality!r}")
+        if modality != "image":
+            raise ValueError(f"amdb modality must be 'image', got {modality!r}")
         self.records = records
         self.modality = modality
         self._logged_skips: set[int] = set()
@@ -172,19 +119,16 @@ class AMDBDataset:
 
     def _sample_from_row(self, row: dict[str, Any]) -> dict[str, Any]:
         sample: dict[str, Any] = {}
-        if self.modality == "image":
-            image = row["image"]
-            if hasattr(image, "load"):
-                image.load()
-            sample["image"] = image
-        else:
-            sample["video"] = open_video_reader(row["video"])
+        image = row["image"]
+        if hasattr(image, "load"):
+            image.load()
+        sample["image"] = image
         for key in _PROMPT_KEYS:
             if key in row and row[key] is not None:
                 value = row[key]
                 sample["prompt"] = value[0] if isinstance(value, list) else str(value)
                 break
-        if "prompt" not in sample and self.modality == "image":
+        if "prompt" not in sample:
             caption = caption_from_image_filename(sample.get("image"))
             if caption:
                 sample["prompt"] = caption
@@ -211,11 +155,9 @@ class AMDBProcessor:
         prepared: dict[str, Any] = {"prompts": prompts}
         if batch and "image" in batch[0]:
             prepared["images"] = [sample["image"] for sample in batch]
-        if batch and "video" in batch[0]:
-            prepared["videos"] = [sample["video"] for sample in batch]
         if batch:
             for key, value in batch[0].items():
-                if key in {"prompt", "image", "video"} or not torch.is_tensor(value):
+                if key in {"prompt", "image"} or not torch.is_tensor(value):
                     continue
                 prepared[key] = torch.stack([sample[key] for sample in batch])
         return prepared
@@ -243,12 +185,8 @@ def build_amdb_dataset(dataset_config: dict[str, Any]):
     from primus.backends.diffusion.utils.log import logger
 
     modality = str(dataset_config.get("modality", "image"))
-    if modality == "video":
-        from primus.backends.diffusion.data.hf_torchvision_video_shim import (
-            apply_torchvision_io_video_reader_shim,
-        )
-
-        apply_torchvision_io_video_reader_shim()
+    if modality != "image":
+        raise ValueError(f"amdb modality must be 'image', got {modality!r}")
 
     from primus.backends.diffusion.utils.download import materialize_dataset
 
@@ -273,18 +211,10 @@ def build_amdb_dataset(dataset_config: dict[str, Any]):
         processor.build()
         logger.info(f"Built saved {modality} dataset with {len(dataset)} samples from {dataset_path}")
         return dataset, processor
-    if str(dataset_path).startswith("synthetic:"):
-        kind = str(dataset_path).split(":", 1)[1]
-        sample = _synthetic_sample(kind)
-        dataset = _SyntheticDataset(128, sample)
-        processor = AMDBProcessor(dataset_config)
-        processor.build()
-        logger.info(f"Built synthetic {kind} denoiser batch with {len(dataset)} samples")
-        return dataset, processor
     local_dir = Path(str(dataset_path)).expanduser()
     revision = None if local_dir.is_dir() else dataset_config.get("revision")
     if not local_dir.is_dir() and not revision:
-        revision = "refs/pr/4" if dataset_path == _DISNEY_VIDEO else "main"
+        revision = "main"
     if is_siheyuan_dataset(str(dataset_path)) and Path(str(dataset_path)).expanduser().is_dir():
         records = load_benchmark_image_dataset(str(dataset_path))
     else:
@@ -293,10 +223,6 @@ def build_amdb_dataset(dataset_config: dict[str, Any]):
         if revision:
             load_kwargs["revision"] = revision
         records = load_dataset(str(dataset_path), **load_kwargs)
-    if modality == "video" and "video" in getattr(records, "column_names", []):
-        from datasets import Video
-
-        records = records.cast_column("video", Video(decode=False))
     max_samples = int(dataset_config.get("max_train_samples") or -1)
     if max_samples > 0:
         records = records.select(range(min(max_samples, len(records))))
@@ -326,63 +252,7 @@ class _CachedTensorDataset:
                     value = sample[key]
                     sample["prompt"] = value[0] if isinstance(value, list) else str(value)
                     break
-        video = sample.get("video")
-        if isinstance(video, str):
-            sample["video"] = open_video_reader(video)
         return sample
 
     def get_collator(self):
         return RawBatchCollator()
-
-
-class _SyntheticDataset:
-    """Repeated denoiser batch at the AMDiffusionBenchmark latent shape."""
-
-    def __init__(self, count: int, sample: dict[str, torch.Tensor]):
-        self.count = count
-        self.sample = sample
-
-    def __len__(self) -> int:
-        return self.count
-
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        del index
-        item: dict[str, Any] = {"prompt": "benchmark"}
-        item.update(self.sample)
-        return item
-
-    def get_collator(self):
-        return RawBatchCollator()
-
-
-def _synthetic_sample(kind: str) -> dict[str, torch.Tensor]:
-    # Latent shapes follow the benchmark resolution after the official VAE:
-    # SDXL 1024 -> 4x128x128, video 960x544x9 -> spatial /8 and temporal /4
-    # (Mochi temporal reductions leave 2 frames).
-    if kind == "sdxl":
-        return {
-            "latents": torch.randn(4, 128, 128),
-            "context": torch.randn(77, 2048),
-            "pooled": torch.randn(1280),
-        }
-    if kind == "mochi":
-        return {
-            "latents": torch.randn(12, 2, 68, 120),
-            "text_hidden": torch.randn(256, 4096),
-            "text_mask": torch.ones(256, dtype=torch.bool),
-        }
-    if kind == "hunyuan":
-        return {
-            "latents": torch.randn(16, 3, 68, 120),
-            "text_states": torch.randn(256, 4096),
-            "text_mask": torch.ones(256, dtype=torch.long),
-            "text_states_2": torch.randn(768),
-        }
-    if kind == "wan":
-        return {
-            "latents": torch.randn(16, 3, 68, 120),
-            "context": torch.randn(512, 4096),
-            "y": torch.randn(20, 3, 68, 120),
-            "clip_fea": torch.randn(257, 1280),
-        }
-    raise ValueError(f"Unknown synthetic denoiser batch {kind!r}")

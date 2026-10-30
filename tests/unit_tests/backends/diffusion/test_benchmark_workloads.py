@@ -178,11 +178,8 @@ def test_benchmark_step_rates_match_amdiffusionbenchmark():
     assert tflops_per_gpu == 400.0
 
 
-def test_amdb_dataset_skips_decode_errors_only(tmp_path):
-    from primus.backends.diffusion.data.benchmark import (
-        AMDBDataset,
-        _TemporaryVideoReader,
-    )
+def test_amdb_dataset_skips_decode_errors_only():
+    from primus.backends.diffusion.data.benchmark import AMDBDataset
 
     class Corrupt:
         def load(self):
@@ -199,20 +196,6 @@ def test_amdb_dataset_skips_decode_errors_only(tmp_path):
     assert dataset[0]["prompt"] == "good"
     with pytest.raises(KeyError):
         AMDBDataset([{"prompt": "missing image"}], modality="image")[0]
-
-    scratch = tmp_path / "amdb-temp-video.mp4"
-    scratch.write_bytes(b"mp4")
-
-    class DummyReader:
-        def get_batch(self, indices):
-            return indices
-
-        def __len__(self):
-            return 1
-
-    reader = _TemporaryVideoReader(str(scratch), DummyReader())
-    assert reader.get_batch([0]) == [0]
-    assert not scratch.exists()
 
 
 def test_clip_grad_norm_skips_the_collective_when_clipping_is_off():
@@ -400,17 +383,6 @@ def test_cached_loader_pads_the_short_tail():
     trainer._cache_encoded_batches()
     sizes = [batch["latents"].shape[0] for batch in trainer.dataloader]
     assert sizes == [4, 4]
-
-
-def test_frame_list_videos_are_normalized_once():
-    import torch
-
-    from primus.backends.diffusion.utils.pixels import videos_to_tensor
-
-    frame = torch.full((4, 4, 3), 200.0)
-    clip = videos_to_tensor([[frame]], num_frames=1, height=4, width=4)
-    expected = 200.0 / 127.5 - 1.0
-    torch.testing.assert_close(clip[0, 0, 0, 0, 0], torch.tensor(expected))
 
 
 def test_flux_prepare_hook_rewrites_paths_and_reports_auth_failures(monkeypatch, tmp_path, capsys):
