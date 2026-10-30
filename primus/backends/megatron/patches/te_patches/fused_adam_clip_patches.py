@@ -115,11 +115,12 @@ def _load_extension():
     from torch.utils.cpp_extension import load
 
     source = Path(__file__).with_name("fused_adam_clip_kernel.cu")
+    # No -std flag: torch adds the one its headers need, and torch 2.14's need C++20.
     _extension = load(
         name=_EXTENSION_NAME,
         sources=[str(source)],
-        extra_cflags=["-O3", "-std=c++17"],
-        extra_cuda_cflags=["-O3", "-std=c++17"],
+        extra_cflags=["-O3"],
+        extra_cuda_cflags=["-O3"],
         with_cuda=True,
         verbose=False,
     )
