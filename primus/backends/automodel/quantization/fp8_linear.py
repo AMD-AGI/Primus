@@ -88,6 +88,34 @@ def is_enabled() -> bool:
     return options.flag("primus_turbo.fp8_linear")
 
 
+# The traceable path's switches, named here because ``_fp8_traceable`` imports
+# torch and patch conditions must not.
+_TRACEABLE_FLAGS = (
+    "fp8_linear_traceable",
+    "fp8_linear_delayed_scaling",
+    "fp8_linear_inductor_cast",
+    "fp8_linear_shared_input_scales",
+)
+
+
+def warn_if_traceable_settings_unused() -> None:
+    """Report traceable settings that are on while this swap is not the one applied.
+
+    They are read and checked only when the swap runs, so without this a run that
+    set them would show no sign that they did nothing.
+    """
+    unused = [key for key in _TRACEABLE_FLAGS if options.flag(f"primus_turbo.{key}")]
+    if options.string("primus_turbo.fp8_linear_gemm_backend", "hipblaslt").lower() != "hipblaslt":
+        unused.append("fp8_linear_gemm_backend")
+    if unused:
+        logger.warning(
+            "%s %s set, but the FP8 linear swap is not applied (primus_turbo.fp8_linear is off or "
+            "another precision takes precedence), so they have no effect and are not checked.",
+            _LOG_PREFIX,
+            ", ".join(f"primus_turbo.{key}" for key in unused),
+        )
+
+
 # Lowest precedence of the low-precision swaps: FP8 is the fallback when a
 # narrower format was also asked for. Registration happens on import; see
 # _common.register_backend for why that is separate from activation.

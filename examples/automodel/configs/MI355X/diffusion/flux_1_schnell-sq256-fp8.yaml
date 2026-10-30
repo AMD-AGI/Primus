@@ -8,7 +8,11 @@
 #     default FP8 GEMM backend (quantization/_fp8_traceable.py);
 #   - non-deterministic bf16 attention backward, and train-loop host syncs
 #     deferred to logging steps.
-# Each is a setting below and can be turned off on its own for an A/B.
+# Each is a setting below. The FP8 ones build on each other: the others need
+# fp8_linear_traceable, the cast and the shared input scales also need
+# fp8_linear_delayed_scaling, and the shared input scales only pay off with the
+# Inductor cast. Leaving a setting on without one it needs stops the run, so an
+# A/B arm turns the dependent ones off too.
 #
 # Data: a pre-encoded 256x256 cache with T5 at 256 tokens (the MLPerf
 # FLUX-schnell operating point), built as in flux_1_dev-pretrain.yaml with

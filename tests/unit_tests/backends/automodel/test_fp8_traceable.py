@@ -19,6 +19,8 @@ WHY THIS TEST EXISTS:
       default (a padded K = 64 operand gives a gradient of the wrong shape);
     - the delayed-scaling schedule, the zero-amax floor, and that only a
       shared-input group's owner writes the shared scale;
+    - that eval (validation) forwards leave the delayed scales alone, and that a
+      compiled refresh writes the same scales as an eager one;
     - that a dependent setting without what it depends on raises instead of
       quietly measuring something else.
 
@@ -67,7 +69,7 @@ def clean_module_state(monkeypatch):
 class TestSettings:
     def test_everything_is_off_by_default(self):
         assert not mod.requested()
-        assert mod.read_settings() == mod.Settings(False, 2, 16, False, False, "hipblaslt")
+        assert mod.read_settings() == mod.Settings(False, False, 2, 16, False, False, "hipblaslt")
 
     def test_not_requested_resolves_to_none_without_touching_primus_turbo(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "primus_turbo", None)
@@ -85,7 +87,7 @@ class TestSettings:
         ):
             set_option(f"primus_turbo.{key}", value)
 
-        assert mod.read_settings() == mod.Settings(True, 3, 8, True, True, "flydsl")
+        assert mod.read_settings() == mod.Settings(True, True, 3, 8, True, True, "flydsl")
 
     @pytest.mark.parametrize(
         "settings,needed",
@@ -141,6 +143,96 @@ class TestSettings:
         options.load({"primus_turbo": {key: True for key in set_keys}})
 
         assert options.undeclared() == []
+
+
+# --------------------------------------------------------------------------- #
+# Settings left on without the FP8 swap                                       #
+# --------------------------------------------------------------------------- #
+def _fp8_patch():
+    from primus.core.patches.patch_registry import PatchRegistry
+
+    return PatchRegistry.get("automodel.quantization.fp8_linear")
+
+
+def test_traceable_settings_without_the_fp8_swap_log_a_warning(set_option, caplog):
+    set_option("primus_turbo.fp8_linear_traceable", True)
+    set_option("primus_turbo.fp8_linear_gemm_backend", "flydsl")
+
+    with caplog.at_level(logging.WARNING, logger=fp8_linear.__name__):
+        assert _fp8_patch().condition(None) is False
+
+    assert "primus_turbo.fp8_linear_traceable, primus_turbo.fp8_linear_gemm_backend set" in caplog.text
+
+
+@pytest.mark.parametrize("swap", [True, False])
+def test_the_fp8_patch_condition_is_quiet_unless_settings_go_unused(set_option, caplog, swap):
+    """With the swap on they are used; with it off and them off there is nothing to say."""
+    set_option("primus_turbo.fp8_linear", swap)
+    set_option("primus_turbo.fp8_linear_traceable", swap)
+
+    with caplog.at_level(logging.WARNING, logger=fp8_linear.__name__):
+        assert _fp8_patch().condition(None) is swap
+
+    assert "not applied" not in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Primus-Turbo's backend API across versions                                  #
+# --------------------------------------------------------------------------- #
+def _stub_backend_api(monkeypatch, members):
+    """``primus_turbo.pytorch.core.backend`` with the given ``BackendType`` members."""
+    import enum
+
+    api = types.ModuleType("primus_turbo.pytorch.core.backend")
+    api.BackendType = enum.Enum("BackendType", members)
+    api.PrecisionType = enum.Enum("PrecisionType", ["FP8"])
+    api.GlobalBackendManager = types.SimpleNamespace(
+        auto_tune_enabled=lambda: False, get_gemm_backend=lambda precision: None
+    )
+    for name in ("primus_turbo", "primus_turbo.pytorch", "primus_turbo.pytorch.core"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, api.__name__, api)
+    return api
+
+
+def test_the_gemm_backend_is_bound_as_primus_turbos_id(monkeypatch):
+    api = _stub_backend_api(monkeypatch, ["CK", "HIPBLASLT", "TRITON", "FLYDSL"])
+
+    assert mod._gemm_backend_id("flydsl") == api.BackendType.FLYDSL.value
+
+
+@pytest.mark.parametrize("installed", ["no_flydsl", "no_backend_api"])
+def test_a_backend_the_installed_primus_turbo_lacks_is_a_clear_error(monkeypatch, installed):
+    if installed == "no_flydsl":
+        _stub_backend_api(monkeypatch, ["CK", "HIPBLASLT", "TRITON"])
+    else:
+        monkeypatch.setitem(sys.modules, "primus_turbo.pytorch.core.backend", None)
+
+    with pytest.raises(ValueError, match="'flydsl' is not available in the installed primus_turbo"):
+        mod._gemm_backend_id("flydsl")
+
+
+@pytest.mark.parametrize(
+    "returns,reported",
+    [
+        (lambda api: api.BackendType.HIPBLASLT, True),
+        (lambda api: types.SimpleNamespace(backend=api.BackendType.HIPBLASLT, auto_tune=False), True),
+        (lambda api: types.SimpleNamespace(backend=None, auto_tune=False), False),
+        (lambda api: None, False),
+    ],
+    ids=["0.3", "0.4", "0.4-unset", "unset"],
+)
+def test_a_pinned_gemm_backend_is_reported_from_either_primus_turbo_api(
+    monkeypatch, caplog, returns, reported
+):
+    """Primus-Turbo 0.3 returns the BackendType itself, 0.4 and later a BackendChoice."""
+    api = _stub_backend_api(monkeypatch, ["HIPBLASLT", "FLYDSL"])
+    api.GlobalBackendManager.get_gemm_backend = lambda precision: returns(api)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        mod._warn_if_backend_overridden("flydsl")
+
+    assert ("pins the FP8 GEMMs to HIPBLASLT" in caplog.text) is reported
 
 
 # --------------------------------------------------------------------------- #
@@ -516,6 +608,33 @@ def test_the_step_counter_is_installed_once():
     assert block.forward is wrapped
 
 
+def test_an_eval_forward_neither_advances_the_schedule_nor_discovers(monkeypatch):
+    """AutoModel validates in eval mode, and validation batches are not training state."""
+    entered = []
+    original_discover = mod.discover_shared_inputs
+
+    def discover(root):
+        entered.append(root)
+        return original_discover(root)
+
+    monkeypatch.setattr(mod, "discover_shared_inputs", discover)
+    block = ToyBlock()
+    mod.install_delayed_scale_step_counter(block, discover_shared_input_scales=True)
+    inputs = (torch.randn(2, 4), torch.randn(2, 4))
+
+    block.eval()
+    with torch.no_grad():
+        block(*inputs)
+
+    assert mod._DELAYED_SCALE_STATE == {"step": 0, "refresh": True}
+    assert entered == [] and block.to_k._fp8_scale_x is not block.to_q._fp8_scale_x
+
+    block.train()
+    block(*inputs)
+
+    assert mod._DELAYED_SCALE_STATE["step"] == 1 and entered == [block]
+
+
 # --------------------------------------------------------------------------- #
 # The swap, the kernels and the compiler, on a GPU                            #
 # --------------------------------------------------------------------------- #
@@ -644,6 +763,22 @@ def test_a_refresh_forward_is_bit_identical_and_a_scaled_one_stays_close(tokens,
 
 
 @requires_turbo_on_a_gpu
+@pytest.mark.parametrize("refresh", [True, False])
+def test_an_eval_forward_quantizes_dynamically_and_leaves_the_scales_alone(refresh):
+    """A held-out batch must not become a training scale, nor be cast with a stale one."""
+    stock, traceable = _pair(3072, 3072, delayed_scaling=True)
+    traceable.eval()
+    mod._DELAYED_SCALE_STATE["refresh"] = refresh
+    x = torch.randn(512, 3072, device="cuda", dtype=torch.bfloat16)
+
+    with torch.no_grad():
+        want, got = stock(x), traceable(x)
+
+    assert torch.equal(want, got)
+    assert all(float(getattr(traceable, name)) == 1.0 for name in mod._SCALE_BUFFERS)
+
+
+@requires_turbo_on_a_gpu
 @pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize("is_fwd_stage", [True, False])
 @pytest.mark.parametrize("shape", [(512, 256), (1024, 3072), (129, 33)])
@@ -685,9 +820,27 @@ def test_a_compiled_traceable_linear_has_no_graph_breaks(delayed_scaling):
     torch._dynamo.reset()
     compiled = torch.compile(traceable, fullgraph=True)
 
-    for refresh in (True, False) if delayed_scaling else (True,):
+    _assert_bit_identical(expected, _forward_backward(compiled, x, grad_out))
+
+
+@requires_turbo_on_a_gpu
+def test_a_compiled_delayed_linear_matches_eager_with_one_graph_per_kind_of_forward():
+    """A compiled refresh that stopped writing the scales would leave every later cast at 1.0."""
+    from torch._dynamo.testing import CompileCounterWithBackend
+
+    _, eager = _pair(3072, 3072, delayed_scaling=True)
+    _, traceable = _pair(3072, 3072, delayed_scaling=True)
+    x = torch.randn(512, 3072, device="cuda", dtype=torch.bfloat16)
+    grad_out = torch.randn(512, 3072, device="cuda", dtype=torch.bfloat16)
+    torch._dynamo.reset()
+    counter = CompileCounterWithBackend("inductor")
+    compiled = torch.compile(traceable, backend=counter, fullgraph=True)
+
+    for refresh in (True, False, True, False):
         mod._DELAYED_SCALE_STATE["refresh"] = refresh
-        got = _forward_backward(compiled, x, grad_out)
-        assert all(e.shape == g.shape for e, g in zip(expected, got))
-    if not delayed_scaling:
-        _assert_bit_identical(expected, got)
+        _assert_bit_identical(_forward_backward(eager, x, grad_out), _forward_backward(compiled, x, grad_out))
+        for name in mod._SCALE_BUFFERS:
+            assert torch.equal(getattr(traceable, name), getattr(eager, name)), name
+
+    assert all(float(getattr(traceable, name)) != 1.0 for name in mod._SCALE_BUFFERS)
+    assert counter.frame_count == 2, "one graph for refresh forwards, one for scaled forwards"

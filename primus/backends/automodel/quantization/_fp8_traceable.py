@@ -28,8 +28,10 @@ WHAT (settings in the ``primus_turbo:`` section, all off by default):
   gradient) in non-persistent buffers. A refresh forward measures the amax as the
   dynamic path does and stores its reciprocal; every other forward casts with the
   stored scale, which skips the amax pass. The schedule advances once per
-  transformer forward, so with gradient accumulation it counts micro-batches.
-  Buffers are not checkpointed: a resumed run re-warms.
+  training forward of the transformer, so with gradient accumulation it counts
+  micro-batches. Eval-mode forwards (validation) quantize dynamically, as
+  ``Float8Linear`` does, and leave the schedule and the scales alone: those are
+  training state. Buffers are not checkpointed: a resumed run re-warms.
 
   The Inductor cast writes a scaled cast as multiply, clamp, cast and transpose,
   which Inductor folds into the kernel that produced the activation instead of
@@ -39,17 +41,28 @@ WHAT (settings in the ``primus_turbo:`` section, all off by default):
   block's attention and MLP input) already hold equal scales, since each refresh
   derives them from that tensor's amax. Making them alias one buffer lets the
   compiler see identical casts and keep one; only the group's first linear writes
-  the scale. Groups are found in one extra no-grad, eager forward before the
-  first step. Without the Inductor cast the extension's quantize ops are opaque
-  to the compiler and nothing is deduplicated.
+  the scale. Groups are found in one extra no-grad, eager forward on the first
+  training batch, so the first step takes longer, and a forward that draws random
+  numbers (dropout) draws them twice in it. Without the Inductor cast the
+  extension's quantize ops are opaque to the compiler and nothing is deduplicated.
 
   The GEMM backend is passed to Primus-Turbo as the default, so a shape that
   backend cannot run (FlyDSL needs K > 128) falls back to another one by itself.
   Auto-tune (``PRIMUS_TURBO_AUTO_TUNE``) and ``PRIMUS_TURBO_GEMM_BACKEND`` take
   precedence over a default, so with either set this setting has no effect.
 
-Tensorwise granularity on gfx950 only: gfx942 runs the backward in a different
-layout, and other granularities keep ``Float8Linear``.
+Tensorwise granularity only, and not on gfx942, which runs the FP8 backward in a
+different layout; anything else keeps ``Float8Linear``.
+
+Delayed scaling assumes three things, which the FLUX.1-schnell experiment meets:
+  - a swapped linear has at most one backward pending. On a refresh step the
+    backward rewrites the output-gradient scale that autograd saved, so a linear
+    called twice in one forward, or two forwards before their backwards, fails
+    with autograd's in-place-modification error;
+  - one swapped transformer per process, because the schedule is process-wide;
+  - with shared input scales, no ``.to()`` or cast of the model after its first
+    forward: that gives every linear its own copy of the shared scale, and only
+    the owner's copy is refreshed from then on.
 """
 from __future__ import annotations
 
@@ -71,8 +84,11 @@ _GEMM_BACKENDS = ("hipblaslt", "flydsl", "ck", "triton")
 _SCALE_INV_FLOOR = 1e-30
 _SCALE_BUFFERS = ("_fp8_scale_x", "_fp8_scale_w", "_fp8_scale_g")
 
-# Bound by ``resolve`` when the swap runs, before anything is compiled, so the
-# traced code reads them as constants.
+# Bound by ``resolve`` when the swap runs, before anything is compiled. Traced
+# code reads the cast mode, GEMM backend and quantize arguments as constants and
+# guards on ``_DELAYED_SCALE_STATE["refresh"]``, so each compiled block keeps one
+# graph for refresh forwards and one for scaled forwards. The step counter that
+# flips it wraps the transformer's forward, outside the per-block compiled regions.
 _DELAYED_SCALE_STATE = {"step": 0, "refresh": True}
 _AMAX_WARMUP_STEPS = 2
 _AMAX_REFRESH_INTERVAL = 16
@@ -82,6 +98,7 @@ _QUANTIZE_EXTRA_ARGS: tuple = ()
 
 
 class Settings(NamedTuple):
+    traceable: bool
     delayed_scaling: bool
     amax_warmup_steps: int
     amax_refresh_interval: int
@@ -145,7 +162,7 @@ def read_settings() -> Settings:
         "fp8_linear_delayed_scaling",
         (("fp8_linear_inductor_cast", inductor_cast), ("fp8_linear_shared_input_scales", shared)),
     )
-    return Settings(delayed, warmup, interval, inductor_cast, shared, backend)
+    return Settings(traceable, delayed, warmup, interval, inductor_cast, shared, backend)
 
 
 def supported(config) -> tuple[bool, str]:
@@ -170,7 +187,7 @@ def resolve(config) -> Optional[Settings]:
     global _AMAX_WARMUP_STEPS, _AMAX_REFRESH_INTERVAL, _INDUCTOR_CAST, _GEMM_BACKEND, _QUANTIZE_EXTRA_ARGS
 
     settings = read_settings()
-    if not requested():
+    if not settings.traceable:
         return None
     ok, reason = supported(config)
     if not ok:
@@ -182,13 +199,12 @@ def resolve(config) -> Optional[Settings]:
         )
         return None
 
-    from primus_turbo.pytorch.core.backend import BackendType
-
+    gemm_backend = _gemm_backend_id(settings.gemm_backend)
     _DELAYED_SCALE_STATE.update(step=0, refresh=True)
     _AMAX_WARMUP_STEPS = settings.amax_warmup_steps
     _AMAX_REFRESH_INTERVAL = settings.amax_refresh_interval
     _INDUCTOR_CAST = settings.inductor_cast
-    _GEMM_BACKEND = BackendType[settings.gemm_backend.upper()].value
+    _GEMM_BACKEND = gemm_backend
     _QUANTIZE_EXTRA_ARGS = _unpadded_quantize_args()
 
     logger.info(
@@ -221,6 +237,19 @@ def resolve(config) -> Optional[Settings]:
     return settings
 
 
+def _gemm_backend_id(name: str) -> int:
+    """Primus-Turbo's id for a GEMM backend; a clear error when this version lacks it."""
+    try:
+        from primus_turbo.pytorch.core.backend import BackendType
+
+        return BackendType[name.upper()].value
+    except (ImportError, KeyError) as exc:
+        raise ValueError(
+            f"primus_turbo.fp8_linear_gemm_backend={name!r} is not available in the installed "
+            "primus_turbo; check the library version"
+        ) from exc
+
+
 def _warn_if_backend_overridden(backend: str) -> None:
     from primus_turbo.pytorch.core.backend import GlobalBackendManager, PrecisionType
 
@@ -232,12 +261,14 @@ def _warn_if_backend_overridden(backend: str) -> None:
             backend,
         )
     choice = GlobalBackendManager.get_gemm_backend(PrecisionType.FP8)
-    if choice is not None and choice.backend is not None:
+    # Primus-Turbo 0.3 returns the BackendType itself, 0.4 and later a BackendChoice.
+    pinned = getattr(choice, "backend", choice)
+    if pinned is not None:
         logger.warning(
             "%s PRIMUS_TURBO_GEMM_BACKEND pins the FP8 GEMMs to %s, which overrides "
             "primus_turbo.fp8_linear_gemm_backend=%s.",
             _LOG_PREFIX,
-            choice.backend.name,
+            pinned.name,
             backend,
         )
 
@@ -422,7 +453,7 @@ def make_float8_linear(base_cls, *, delayed_scaling: bool):
             activations = x.reshape(-1, self.in_features)
             fwd_dtype, bwd_dtype = self._fp8_stage_dtypes
             granularity = self.config.granularity.value
-            if delayed_scaling:
+            if delayed_scaling and self.training:
                 out = _TraceableFP8GemmNTDelayed.apply(
                     activations,
                     self.weight,
@@ -516,11 +547,12 @@ def discover_shared_inputs(root):
 
 
 def install_delayed_scale_step_counter(module, *, discover_shared_input_scales: bool = False) -> None:
-    """Advance the delayed-scaling schedule once per forward of ``module``.
+    """Advance the delayed-scaling schedule once per training forward of ``module``.
 
-    With ``discover_shared_input_scales`` the first call also runs the discovery
-    forward. It needs real tensor identities, so it runs eagerly, and without
-    grad, so it saves no activations and leaves peak memory unchanged.
+    With ``discover_shared_input_scales`` the first training call also runs the
+    discovery forward. It needs real tensor identities, so it runs eagerly, and
+    without grad, so it saves no activations and leaves peak memory unchanged.
+    Eval-mode calls pass straight through.
     """
     if getattr(module, "_primus_fp8_step_counter", False):
         return
@@ -529,6 +561,8 @@ def install_delayed_scale_step_counter(module, *, discover_shared_input_scales: 
 
     @functools.wraps(original_forward)
     def forward(*args, **kwargs):
+        if not module.training:
+            return original_forward(*args, **kwargs)
         _advance_delayed_scale_step()
         if pending_discovery[0]:
             pending_discovery[0] = False
