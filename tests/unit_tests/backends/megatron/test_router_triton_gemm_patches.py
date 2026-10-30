@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import triton
 
 from primus.core.patches import PatchContext
 
@@ -70,6 +71,47 @@ def test_kernels_match_fp64(tokens, experts):
     err = rel_err(dw, ref_dw)
     err_bf16 = rel_err(dy.to(torch.bfloat16).float().t() @ x.float(), ref_dw)
     assert err < 2e-5 and err < 0.05 * err_bf16, f"dW relative error {err:.2e} (BF16 dlogits {err_bf16:.2e})"
+
+
+@pytest.mark.parametrize("experts", [32, 128, 256])
+@pytest.mark.parametrize("tokens", [8192, 1000])
+def test_gfx1250_launch_configs_are_bit_identical(tokens, experts):
+    hidden = 7168
+    x, w, dy = _inputs(tokens, hidden, experts)
+    if not router_triton._gfx1250(x):
+        pytest.skip("the gfx1250 launch configs")
+    # the shipped configs, launched directly
+    out = torch.empty(tokens, experts, dtype=torch.float32, device="cuda")
+    router_triton._router_fwd_kernel[(triton.cdiv(tokens, 32),)](
+        x,
+        w,
+        out,
+        tokens,
+        x.stride(0),
+        w.stride(0),
+        out.stride(0),
+        K=hidden,
+        N=experts,
+        BLOCK_M=32,
+        BLOCK_K=64,
+        num_warps=4,
+    )
+    assert torch.equal(router_triton._fwd(x, w), out)
+    dx = torch.empty(tokens, hidden, dtype=torch.bfloat16, device="cuda")
+    router_triton._router_dx_kernel[(triton.cdiv(tokens, 128), hidden // 128)](
+        dy,
+        w,
+        dx,
+        tokens,
+        dy.stride(0),
+        w.stride(0),
+        dx.stride(0),
+        N=experts,
+        BLOCK_M=128,
+        BLOCK_H=128,
+        num_warps=4,
+    )
+    assert torch.equal(router_triton._dx(dy, w), dx)
 
 
 def test_unsupported_shapes_are_rejected():

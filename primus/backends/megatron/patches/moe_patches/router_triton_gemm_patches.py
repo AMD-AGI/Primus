@@ -19,8 +19,11 @@ workgroup a block of tokens and the whole expert dimension:
 
 Router dtype FP32 with BF16 input and weight, no bias, and shapes the kernels tile exactly; anything
 else keeps Megatron's path. Measured on MI455X for [8192 x 7168] x [7168 x 128]: fwd 346 -> 56 us,
-dX 282 -> 84 us, dW 324 -> 100 us per call.
+dX 282 -> 84 us, dW 324 -> 100 us per call; with the gfx1250 launch configs below, fwd 58 -> 25 us and
+dX 76 -> 69 us, bit-identical.
 """
+
+import functools
 
 import torch
 import triton
@@ -34,6 +37,40 @@ _FWD_BLOCK_M, _FWD_BLOCK_K = 32, 64
 # 2.8x at 256 experts (338 -> 120 us). dW (BLOCK_M, BLOCK_H, splits, warps) depends on the expert
 # count: the narrow block wins from 128 experts up (256: 217 -> 130 us), the shipped one below.
 _DX_BLOCK_M, _DX_BLOCK_H, _DX_WARPS = 128, 128, 4
+
+
+@functools.lru_cache(maxsize=None)
+def _is_gfx1250(device_index: int) -> bool:
+    return torch.cuda.get_device_properties(device_index).gcnArchName.split(":")[0] == "gfx1250"
+
+
+def _gfx1250(t: torch.Tensor) -> bool:
+    return _is_gfx1250(t.device.index if t.device.index is not None else torch.cuda.current_device())
+
+
+# gfx1250 launch configs, from a sweep at 8192 x 7168 x 128 in which every config gave the shipped
+# outputs bit for bit (each output sums the same 32-deep k-steps in the same order; the tile shape
+# only decides who computes it). The forward's deep, three-stage k-loop keeps W's tile in flight
+# (58 -> 25 us at k-steps of 256); its stages must fit the LDS, so the k-step shrinks with the expert
+# count (128 at 256 experts), and gfx950 keeps the shipped config.
+_FWD_STAGES, _FWD_LDS_BUDGET = 3, 256 * 1024
+
+
+def _fwd_launch(k: int, n: int, gfx1250: bool):
+    """(BLOCK_K, launch kwargs) of the forward for K = ``k`` and ``n`` experts."""
+    if gfx1250:
+        for block_k in (256, 128):
+            if k % block_k == 0 and _FWD_STAGES * (_FWD_BLOCK_M + n) * block_k * 2 <= _FWD_LDS_BUDGET:
+                return block_k, {"num_warps": 4, "num_stages": _FWD_STAGES}
+    return _FWD_BLOCK_K, {"num_warps": 4}
+
+
+def _dx_launch(n: int, gfx1250: bool):
+    """(BLOCK_M, BLOCK_H, launch kwargs) of dX for ``n`` experts: on gfx1250 76 -> 69 us at 128 experts,
+    even at 32, and slower at 256, which keeps the shipped config."""
+    if gfx1250 and n <= 128:
+        return 256, 64, {"num_warps": 4, "num_stages": 2}
+    return _DX_BLOCK_M, _DX_BLOCK_H, {"num_warps": _DX_WARPS}
 
 
 def _dw_config(num_experts: int):
@@ -131,6 +168,7 @@ def router_gemm_on_triton(inp: torch.Tensor, weight: torch.Tensor, bias, router_
 
 def _fwd(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     out = torch.empty(x.shape[0], w.shape[0], dtype=torch.float32, device=x.device)
+    block_k, launch = _fwd_launch(x.shape[1], w.shape[0], _gfx1250(x))
     _router_fwd_kernel[(triton.cdiv(x.shape[0], _FWD_BLOCK_M),)](
         x,
         w,
@@ -142,15 +180,16 @@ def _fwd(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         K=x.shape[1],
         N=w.shape[0],
         BLOCK_M=_FWD_BLOCK_M,
-        BLOCK_K=_FWD_BLOCK_K,
-        num_warps=4,
+        BLOCK_K=block_k,
+        **launch,
     )
     return out
 
 
 def _dx(g: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     dx = torch.empty(g.shape[0], w.shape[1], dtype=torch.bfloat16, device=g.device)
-    _router_dx_kernel[(triton.cdiv(g.shape[0], _DX_BLOCK_M), w.shape[1] // _DX_BLOCK_H)](
+    block_m, block_h, launch = _dx_launch(w.shape[0], _gfx1250(g))
+    _router_dx_kernel[(triton.cdiv(g.shape[0], block_m), w.shape[1] // block_h)](
         g,
         w,
         dx,
@@ -159,9 +198,9 @@ def _dx(g: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         w.stride(0),
         dx.stride(0),
         N=w.shape[0],
-        BLOCK_M=_DX_BLOCK_M,
-        BLOCK_H=_DX_BLOCK_H,
-        num_warps=_DX_WARPS,
+        BLOCK_M=block_m,
+        BLOCK_H=block_h,
+        **launch,
     )
     return dx
 
