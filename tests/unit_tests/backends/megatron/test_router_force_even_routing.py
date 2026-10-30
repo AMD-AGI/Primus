@@ -108,7 +108,9 @@ def test_fused_router_is_skipped_when_expert_bias_is_on(monkeypatch, enable_expe
     monkeypatch.setattr(router_mod, "get_args", lambda: args)
     calls = []
     monkeypatch.setattr(
-        TopKRouter, "routing", lambda self, logits, **kw: calls.append("megatron") or _sparse_topk_routing(self, logits)
+        TopKRouter,
+        "routing",
+        lambda self, logits, **kw: calls.append("megatron") or _sparse_topk_routing(self, logits),
     )
     monkeypatch.setattr(
         router_mod.PrimusTopKRouter,

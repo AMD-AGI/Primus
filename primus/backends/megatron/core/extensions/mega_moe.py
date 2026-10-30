@@ -438,7 +438,9 @@ class PrimusTurboMegaMoELayer(MegatronModule):
             )
         except ImportError:  # Triton missing: the patch cannot be installed either
             return False
-        dtype = {"fp32": torch.float32, "fp64": torch.float64}.get(self.config.moe_router_dtype, hidden_states.dtype)
+        dtype = {"fp32": torch.float32, "fp64": torch.float64}.get(
+            self.config.moe_router_dtype, hidden_states.dtype
+        )
         return router_gemm_on_triton(hidden_states, self.router.weight, self.router.bias, dtype)
 
     @staticmethod
@@ -490,7 +492,11 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         # router; otherwise it goes after it and _JoinStreamInBackward keeps the rule in backward.
         # The side stream then fills the time the main stream spends waiting for the other EP
         # ranks in the dispatch prologue, and for the host to relaunch after its read-back.
-        main, side = (torch.cuda.current_stream(), _shared_expert_stream()) if self.shared_expert_overlap else (None, None)
+        main, side = (
+            (torch.cuda.current_stream(), _shared_expert_stream())
+            if self.shared_expert_overlap
+            else (None, None)
+        )
         early = side is not None and self._router_gemm_on_triton(hidden_states)
 
         def fork_shared_expert():

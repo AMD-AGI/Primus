@@ -14,7 +14,6 @@ from megatron.training import get_args
 
 from primus.backends.megatron.core.extensions.logits_processor import fused_softcap
 
-
 _WARNED_EXPERT_BIAS = False
 
 
@@ -118,7 +117,11 @@ class PrimusTopKRouter(TopKRouter):
             # grok2 router logit softcapping
             fused_softcap(logits, args.router_logit_softcapping)
 
-        if args.enable_primus_turbo and args.moe_use_fused_router_with_aux_score and not self.enable_expert_bias:
+        if (
+            args.enable_primus_turbo
+            and args.moe_use_fused_router_with_aux_score
+            and not self.enable_expert_bias
+        ):
             scores, routing_map = self.fused_router_and_auxiliary_loss(logits)
         else:
             if args.enable_primus_turbo and args.moe_use_fused_router_with_aux_score:
