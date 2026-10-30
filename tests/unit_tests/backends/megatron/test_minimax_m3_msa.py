@@ -432,7 +432,7 @@ class TestMinimaxSparseAttentionModule:
         pass
 
     @staticmethod
-    def _build(**overrides):
+    def _build(name=None, **overrides):
         from megatron.core.models.gpt.gpt_layer_specs import (
             get_gpt_layer_with_transformer_engine_spec,
         )
@@ -455,6 +455,8 @@ class TestMinimaxSparseAttentionModule:
             sparse_topk_blocks=TOPK,
             params_dtype=torch.float32,
             bf16=False,
+            # as in minimax_m3.yaml; hipBLASLt on gfx1250 has no fp32 GEMM with a fused bias gradient
+            add_bias_linear=False,
             **overrides,
         )
         upstream = get_gpt_layer_with_transformer_engine_spec(qk_layernorm=True)
@@ -462,7 +464,8 @@ class TestMinimaxSparseAttentionModule:
         submodules = _widen_submodules(attn_spec.submodules)
         assert isinstance(submodules, MinimaxSparseAttentionSubmodules)
 
-        return config, MinimaxSparseAttention(config, submodules, layer_number=1).cuda()
+        kwargs = {} if name is None else {"name": name}
+        return config, MinimaxSparseAttention(config, submodules, layer_number=1, **kwargs).cuda()
 
     @staticmethod
     def _rope(config, rotary_percent=0.5):
@@ -483,6 +486,12 @@ class TestMinimaxSparseAttentionModule:
         output, bias = attention(hidden, rotary_pos_emb=rotary_pos_emb)
 
         assert output.shape == (SQ, 2, config.hidden_size)
+        assert torch.isfinite(output).all()
+
+    def test_builds_with_the_module_name(self):
+        """TransformerLayer passes `name=` to its self_attention from Megatron-core 0.19 on."""
+        config, attention = self._build(name="decoder.layers.0.self_attention")
+        output, _ = attention(torch.randn(SQ, 2, config.hidden_size, device="cuda"))
         assert torch.isfinite(output).all()
 
     def test_partial_rope_rotates_only_the_leading_dims(self):
