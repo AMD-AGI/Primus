@@ -120,8 +120,13 @@ modules:
       moe_router_dtype: fp32
       # the FP32 router GEMMs on Triton kernels (FP32-accurate backward) instead of hipBLASLt's
       moe_router_triton_gemm: true
-      turbo_sync_free_moe_stage: 1
-      moe_use_fused_router_with_aux_score: true
+      # stage 1 would only force moe_use_fused_router_with_aux_score on (see below) and
+      # moe_permute_fusion, which is set here directly
+      turbo_sync_free_moe_stage: 0
+      # Megatron's routing on TE's fused kernels (top-k with the expert bias, aux-loss scores and
+      # loss); Primus-Turbo's fused router ignores the expert bias, so it is off
+      moe_use_fused_router_with_aux_score: false
+      moe_router_fusion: true
       moe_permute_fusion: true
 
       # cross entropy

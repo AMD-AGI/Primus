@@ -93,3 +93,29 @@ def test_spread_routing_is_balanced_and_reaches_several_ranks(monkeypatch, moe_e
 def test_spread_needs_experts_divisible_by_topk():
     with pytest.raises(AssertionError, match="spread needs"):
         router_mod.force_balanced_slots(4, 3, 32, spread=True, device="cpu")
+
+
+@pytest.mark.parametrize("enable_expert_bias", [False, True])
+def test_fused_router_is_skipped_when_expert_bias_is_on(monkeypatch, enable_expert_bias):
+    """Primus-Turbo's fused router has no expert-bias input, so with the bias on the router must take
+    Megatron's routing, which adds the bias to the selection scores."""
+    args = SimpleNamespace(
+        router_logit_softcapping=None,
+        enable_primus_turbo=True,
+        moe_use_fused_router_with_aux_score=True,
+        moe_router_force_load_balancing=False,
+    )
+    monkeypatch.setattr(router_mod, "get_args", lambda: args)
+    calls = []
+    monkeypatch.setattr(
+        TopKRouter, "routing", lambda self, logits, **kw: calls.append("megatron") or _sparse_topk_routing(self, logits)
+    )
+    monkeypatch.setattr(
+        router_mod.PrimusTopKRouter,
+        "fused_router_and_auxiliary_loss",
+        lambda self, logits: calls.append("turbo") or _sparse_topk_routing(self, logits),
+    )
+    router = _router()
+    router.enable_expert_bias = enable_expert_bias
+    router.routing(torch.randn(NUM_TOKENS, NUM_EXPERTS))
+    assert calls == (["megatron"] if enable_expert_bias else ["turbo"])

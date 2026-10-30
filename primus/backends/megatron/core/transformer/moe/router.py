@@ -15,6 +15,22 @@ from megatron.training import get_args
 from primus.backends.megatron.core.extensions.logits_processor import fused_softcap
 
 
+_WARNED_EXPERT_BIAS = False
+
+
+def _warn_fused_router_without_expert_bias():
+    global _WARNED_EXPERT_BIAS
+    if not _WARNED_EXPERT_BIAS:
+        _WARNED_EXPERT_BIAS = True
+        from primus.core.utils.module_utils import warning_rank_0
+
+        warning_rank_0(
+            "moe_use_fused_router_with_aux_score is ignored while moe_router_enable_expert_bias is on: "
+            "Primus-Turbo's fused router cannot add the expert bias to the selection scores. Using "
+            "Megatron's routing instead; set moe_router_fusion: true for its fused (TE) kernels."
+        )
+
+
 def force_balanced_slots(num_tokens: int, topk: int, num_experts: int, spread: bool, device) -> torch.Tensor:
     """[num_tokens, topk] expert ids of ``moe_router_force_load_balancing``'s deterministic modes.
 
@@ -102,9 +118,14 @@ class PrimusTopKRouter(TopKRouter):
             # grok2 router logit softcapping
             fused_softcap(logits, args.router_logit_softcapping)
 
-        if args.enable_primus_turbo and args.moe_use_fused_router_with_aux_score:
+        if args.enable_primus_turbo and args.moe_use_fused_router_with_aux_score and not self.enable_expert_bias:
             scores, routing_map = self.fused_router_and_auxiliary_loss(logits)
         else:
+            if args.enable_primus_turbo and args.moe_use_fused_router_with_aux_score:
+                # Primus-Turbo's fused router selects experts without the expert bias, which would
+                # silently disable aux-loss-free load balancing; Megatron's routing applies it
+                # (moe_router_fusion runs that on TE's fused kernels).
+                _warn_fused_router_without_expert_bias()
             scores, routing_map = super().routing(logits, **kwargs)
 
         assert routing_map.dtype == torch.bool, "routing_map should be boolean"
