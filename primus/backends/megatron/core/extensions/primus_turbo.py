@@ -240,6 +240,22 @@ def _apply_turbo_grouped_gemm_backend_env() -> None:
 
 
 @lru_cache(maxsize=1)
+def _bf16_grouped_gemm_pinned_to_flydsl() -> bool:
+    """Whether ``turbo_grouped_gemm_backend`` pins the BF16 grouped GEMM to FlyDSL.
+
+    Mirrors Primus-Turbo's parsing of the env var it is published to: one backend for every
+    precision, or ``<precision>:<backend>`` pairs where ``other`` covers the unnamed ones.
+    """
+    spec = str(getattr(get_args(), "turbo_grouped_gemm_backend", "default") or "default").strip().lower()
+    if spec == "default":
+        return False
+    if not any(key in spec for key in ("fp4", "fp8", "bf16", "fp16", "fp32", "other")):
+        return spec == "flydsl"
+    pairs = dict(pair.split(":", 1) for pair in spec.replace(" ", "").split(",") if pair)
+    return pairs.get("bf16", pairs.get("other")) == "flydsl"
+
+
+@lru_cache(maxsize=1)
 def _is_gfx1250() -> bool:
     """Return True iff the local GPU is a gfx1250 device.
 
@@ -2422,6 +2438,10 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             )
             return x, quantized_weights, fuse_wgrad_accum_pattern
 
+        # The FlyDSL BF16 grouped GEMM has no beta = 1 wgrad epilogue, and a pinned backend raises
+        # rather than accumulate: these weights keep DDP's separate add into main_grad.
+        if fuse_wgrad_accum_pattern is not None and _bf16_grouped_gemm_pinned_to_flydsl():
+            fuse_wgrad_accum_pattern = None
         return x, weights, fuse_wgrad_accum_pattern
 
     def forward(self, x: torch.Tensor, m_splits: torch.Tensor):

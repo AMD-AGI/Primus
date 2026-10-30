@@ -97,6 +97,10 @@ use_turbo_mega_moe: false
 # The op keeps an internal mxfp8 weight cache and the fp8 path advances a separate generation counter
 # at the optimizer-step boundary to invalidate it (the optimizer may not bump w._version).
 turbo_mega_moe_precision: bf16
+# bf16 MegaMoE only: the expert wgrads (dW1, dW2) accumulate straight into the weights' main_grad
+# instead of a separate DDP add (Turbo's fuse_wgrad_accum_pattern; gfx1250, bf16 main_grad).
+# null follows gradient_accumulation_fusion; true / false set it for the MegaMoE experts alone.
+turbo_mega_moe_wgrad_accum_fusion: null
 
 # ===== Layer Norm =====
 # operator switch

@@ -24,6 +24,8 @@ routing weight. Both flavours take them; the ops own how each is applied.
 """
 
 import contextlib
+import functools
+import inspect
 from typing import Optional, Tuple
 
 import torch
@@ -50,6 +52,8 @@ from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8 import (
     fused_mega_moe_fp8_stage1,
     fused_mega_moe_fp8_stage2,
 )
+
+from primus.core.utils.module_utils import log_rank_0
 
 # Megatron's quick_gelu hardcodes its sigmoid scale.
 _QUICK_GELU_ALPHA = 1.702
@@ -90,6 +94,23 @@ def mega_moe_precision() -> str:
     precision = getattr(get_args(), "turbo_mega_moe_precision", "bf16") or "bf16"
     assert precision in supported, f"turbo_mega_moe_precision must be one of {supported}, got {precision!r}"
     return precision
+
+
+def mega_moe_wgrad_accum_fusion(config: TransformerConfig) -> bool:
+    """``turbo_mega_moe_wgrad_accum_fusion``, where null follows ``gradient_accumulation_fusion``."""
+    from megatron.training import get_args
+
+    flag = getattr(get_args(), "turbo_mega_moe_wgrad_accum_fusion", None)
+    return bool(config.gradient_accumulation_fusion if flag is None else flag)
+
+
+@functools.lru_cache(maxsize=None)
+def _turbo_stages_take_wgrad_accum() -> bool:
+    """Whether this Primus-Turbo's staged MegaMoE ops take ``fuse_wgrad_accum_pattern``."""
+    return all(
+        "fuse_wgrad_accum_pattern" in inspect.signature(fn).parameters
+        for fn in (fused_mega_moe_stage1, fused_mega_moe_stage2)
+    )
 
 
 def mega_moe_router(router):
@@ -151,6 +172,17 @@ class MegaMoEExperts(MegatronModule):
         self.ep_group = ep_group
         self.experts_per_rank = experts_per_rank
         self.activation = mega_moe_activation(config)
+        # The ops resolve main_grad per call and fall back to the ordinary gradient when they
+        # cannot accumulate into it, so this only says that DDP's add may be fused away.
+        self.wgrad_accum_pattern = None
+        if mega_moe_wgrad_accum_fusion(config):
+            if _turbo_stages_take_wgrad_accum():
+                self.wgrad_accum_pattern = "megatron"
+            else:
+                log_rank_0(
+                    "[MegaMoE] this Primus-Turbo's staged ops cannot accumulate the expert wgrads into "
+                    "main_grad; keeping the separate DDP add"
+                )
         bias = config.add_bias_linear
         # w1 [g, 2I, H] gate+up; w2 [g, H, I] down; biases b1 [g, 2I], b2 [g, H]
         self.fc1_weight = MegaMoEWeightModule(
@@ -207,9 +239,11 @@ class MegaMoEExperts(MegatronModule):
                     init_method(expert_weight)
 
     def forward(self, x, topk_idx, topk_weights):
+        # only passed when set, so a Primus-Turbo without the argument still runs
+        accum = {"fuse_wgrad_accum_pattern": self.wgrad_accum_pattern} if self.wgrad_accum_pattern else {}
         # w2 is fetched only after stage1 so the two weight modules keep their fc1-then-fc2 order.
         w1, b1 = self.fc1_weight()
-        l1_out, dwib, handle = fused_mega_moe_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
+        l1_out, dwib, handle = fused_mega_moe_stage1(x, topk_idx, topk_weights, w1, self.ep_group, **accum)
         w2, b2 = self.fc2_weight()
         # stage2 owns the activation, so fc1's bias, which sits in front of it, is applied there
         return fused_mega_moe_stage2(
@@ -223,6 +257,7 @@ class MegaMoEExperts(MegatronModule):
             self.activation,
             fc1_bias=b1,
             fc2_bias=b2,
+            **accum,
         )
 
     def backward_dw(self) -> None:
