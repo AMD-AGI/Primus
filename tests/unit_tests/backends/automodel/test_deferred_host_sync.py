@@ -173,11 +173,11 @@ def _pinned_train_loop() -> Path:
     spec = importlib.util.find_spec("nemo_automodel")
     if spec is not None and spec.submodule_search_locations:
         packages.append(Path(list(spec.submodule_search_locations)[0]))
-    for package in packages:
-        train_py = package / "recipes" / "diffusion" / "train.py"
-        if train_py.is_file():
-            return train_py
-    pytest.skip("neither the AutoModel submodule nor nemo_automodel is available")
+    candidates = [package / "recipes" / "diffusion" / "train.py" for package in packages]
+    train_py = next((path for path in candidates if path.is_file()), None)
+    if train_py is None:
+        pytest.skip("neither the AutoModel submodule nor nemo_automodel is available")
+    return train_py
 
 
 def test_the_anchors_match_the_pinned_train_loop(tmp_path, monkeypatch):
