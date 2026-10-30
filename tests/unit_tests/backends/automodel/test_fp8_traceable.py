@@ -24,7 +24,8 @@ WHY THIS TEST EXISTS:
     - that a dependent setting without what it depends on raises instead of
       quietly measuring something else.
 
-  The numerics and compile tests need Primus-Turbo on a GPU; the rest stub it.
+  The numerics and compile tests need Primus-Turbo on a GPU other than gfx942,
+  where the swap keeps ``Float8Linear``; the rest stub it.
 """
 
 import logging
@@ -52,6 +53,19 @@ def _turbo_on_a_gpu() -> bool:
 requires_turbo_on_a_gpu = pytest.mark.skipif(
     not _turbo_on_a_gpu(), reason="the FP8 kernels need primus_turbo and a GPU"
 )
+
+
+@pytest.fixture
+def skip_on_gfx942():
+    from primus_turbo.pytorch.core.utils import is_gfx942
+
+    if is_gfx942():
+        pytest.skip("gfx942 keeps Float8Linear, so the traceable path does not run here")
+
+
+# Checked when a test runs rather than at collection: asking for the arch
+# initializes the GPU.
+not_on_gfx942 = pytest.mark.usefixtures("skip_on_gfx942")
 
 
 @pytest.fixture(autouse=True)
@@ -655,6 +669,7 @@ def _swap(set_option, **settings):
 
 @requires_turbo_on_a_gpu
 class TestSwap:
+    @not_on_gfx942
     def test_the_traceable_class_is_swapped_in_when_requested(self, set_option, every_linear_converts):
         from primus_turbo.pytorch.modules import Float8Linear
 
@@ -664,6 +679,7 @@ class TestSwap:
         assert not hasattr(model[0], "_fp8_scale_x")
         assert not getattr(model, "_primus_fp8_step_counter", False)
 
+    @not_on_gfx942
     def test_delayed_scaling_adds_the_scale_buffers_and_the_step_counter(
         self, set_option, every_linear_converts
     ):
@@ -688,6 +704,22 @@ class TestSwap:
 
         assert type(model[0]).__name__ == "Float8Linear"
         assert "fp8_linear_traceable ignored: granularity=ROWWISE" in caplog.text
+
+    def test_on_gfx942_the_stock_class_stays_and_says_so(
+        self, set_option, every_linear_converts, caplog, monkeypatch
+    ):
+        """CI's GPU runner is gfx942; patching the check runs this on any GPU."""
+        import primus_turbo.pytorch.core.utils as turbo_utils
+
+        monkeypatch.setattr(turbo_utils, "is_gfx942", lambda: True)
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            model = _swap(
+                set_option, fp8_linear=True, fp8_linear_traceable=True, fp8_linear_delayed_scaling=True
+            )
+
+        assert type(model[0]).__name__ == "Float8Linear"
+        assert not getattr(model, "_primus_fp8_step_counter", False)
+        assert "fp8_linear_traceable ignored: gfx942 runs the FP8 backward" in caplog.text
 
 
 def _pair(in_features, out_features, *, delayed_scaling, fmt="E4M3"):
@@ -733,6 +765,7 @@ SHAPES = [(1024, 64, 3072), (1024, 3072, 3072), (512, 3072, 12288)]
 
 
 @requires_turbo_on_a_gpu
+@not_on_gfx942
 @pytest.mark.parametrize("tokens,in_features,out_features", SHAPES)
 @pytest.mark.parametrize("fmt", ["E4M3", "HYBRID"])
 def test_the_traceable_linear_is_bit_identical_to_float8linear(tokens, in_features, out_features, fmt):
@@ -744,6 +777,7 @@ def test_the_traceable_linear_is_bit_identical_to_float8linear(tokens, in_featur
 
 
 @requires_turbo_on_a_gpu
+@not_on_gfx942
 @pytest.mark.parametrize("tokens,in_features,out_features", SHAPES)
 def test_a_refresh_forward_is_bit_identical_and_a_scaled_one_stays_close(tokens, in_features, out_features):
     """A refresh measures the amax as the dynamic path does; a scaled forward reuses it."""
@@ -763,6 +797,7 @@ def test_a_refresh_forward_is_bit_identical_and_a_scaled_one_stays_close(tokens,
 
 
 @requires_turbo_on_a_gpu
+@not_on_gfx942
 @pytest.mark.parametrize("refresh", [True, False])
 def test_an_eval_forward_quantizes_dynamically_and_leaves_the_scales_alone(refresh):
     """A held-out batch must not become a training scale, nor be cast with a stale one."""
@@ -779,6 +814,7 @@ def test_an_eval_forward_quantizes_dynamically_and_leaves_the_scales_alone(refre
 
 
 @requires_turbo_on_a_gpu
+@not_on_gfx942
 @pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize("is_fwd_stage", [True, False])
 @pytest.mark.parametrize("shape", [(512, 256), (1024, 3072), (129, 33)])
@@ -810,6 +846,7 @@ def test_the_inductor_cast_is_bit_identical_to_the_extension_cast(monkeypatch, c
 
 
 @requires_turbo_on_a_gpu
+@not_on_gfx942
 @pytest.mark.parametrize("delayed_scaling", [False, True])
 def test_a_compiled_traceable_linear_has_no_graph_breaks(delayed_scaling):
     """``fullgraph=True`` raises on a graph break, which is what stock Float8Linear causes."""
@@ -824,6 +861,7 @@ def test_a_compiled_traceable_linear_has_no_graph_breaks(delayed_scaling):
 
 
 @requires_turbo_on_a_gpu
+@not_on_gfx942
 def test_a_compiled_delayed_linear_matches_eager_with_one_graph_per_kind_of_forward():
     """A compiled refresh that stopped writing the scales would leave every later cast at 1.0."""
     from torch._dynamo.testing import CompileCounterWithBackend
