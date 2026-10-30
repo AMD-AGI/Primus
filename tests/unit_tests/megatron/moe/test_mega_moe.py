@@ -196,8 +196,8 @@ def _build_layers(config, num_moe_experts, num_layers):
         moe_layer = MoELayer(config, submodules).cuda().to(torch.bfloat16)
         moe_layer.set_layer_number(layer_idx)
 
-        # mega layer reuses the same router/shared-expert submodules; the name is what
-        # Megatron-LM core_v0.19's TransformerLayer passes its MLP
+        # mega layer is built from the same MoE submodules; the name is what Megatron-LM
+        # core_v0.19's TransformerLayer passes its MLP
         mega_layer = PrimusTurboMegaMoELayer(
             config,
             submodules,
@@ -205,8 +205,10 @@ def _build_layers(config, num_moe_experts, num_layers):
             pg_collection=pg_collection,
             name=f"decoder.layers.{layer_idx}.mlp",
         ).cuda()
-        # MoELayer gets PrimusTopKRouter from the megatron.moe.primus_topk_router patch, so MegaMoE
-        # swaps it in itself; with these args it routes exactly like the reference's TopKRouter
+        # MegaMoE swaps in PrimusTopKRouter itself, as the megatron.moe.primus_topk_router patch does for
+        # MoELayer, while this unpatched reference keeps Megatron's TopKRouter. They still route alike
+        # because _create_args turns off every PrimusTopKRouter-only branch (Turbo fused router, logit
+        # softcapping, force load balancing).
         assert isinstance(mega_layer.router, PrimusTopKRouter)
 
         experts = moe_layer.experts.local_experts

@@ -31,6 +31,7 @@ import torch.nn.functional as F
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.mapping import ShardedTensor
 from megatron.core.fusions.fused_bias_geglu import quick_gelu
+from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import (
     get_cuda_rng_tracker,
@@ -95,18 +96,20 @@ def mega_moe_router(router):
     """The router builder MegaMoE uses: Megatron's ``TopKRouter`` becomes ``PrimusTopKRouter``.
 
     The ``megatron.moe.primus_topk_router`` patch makes that swap in ``MoELayer.__init__``, which this
-    layer replaces, and from Megatron-LM core_v0.19 the MoE spec is a ``functools.partial`` that the
-    patch's spec hook cannot edit, so MegaMoE would otherwise get the plain ``TopKRouter``.
+    layer replaces, and in specs from the GPT MoE spec builders it wraps, which reach only modules that
+    import those builders after the patch runs. So MegaMoE applies the same rule itself, unless
+    ``disable_primus_topk_router`` is set.
     """
     from megatron.training import get_args
 
-    from primus.backends.megatron.core.transformer.moe.router import PrimusTopKRouter
+    from primus.backends.megatron.core.transformer.moe.router import (
+        primus_topk_router_for,
+    )
 
-    if getattr(router, "__name__", "") != "TopKRouter":
+    primus_router = primus_topk_router_for(router)
+    if primus_router is router or getattr(get_args(), "disable_primus_topk_router", False):
         return router
-    if getattr(get_args(), "disable_primus_topk_router", False):
-        return router
-    return PrimusTopKRouter
+    return primus_router
 
 
 class MegaMoEWeightModule(MegatronModule):
@@ -268,6 +271,7 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         layer_number: Optional[int] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         is_mtp_layer: bool = False,
+        hash_moe_layer_threshold: Optional[int] = None,
         name: Optional[str] = None,
     ) -> None:
         super().__init__(config)
@@ -294,7 +298,15 @@ class PrimusTurboMegaMoELayer(MegatronModule):
 
         # router owns all routing logic
         self.router = mega_moe_router(submodules.router)(
-            config=config, pg_collection=pg_collection, is_mtp_layer=is_mtp_layer
+            config=config,
+            pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
+            # passed by Megatron-LM main (core 0.20), whose routers take it
+            **(
+                {"hash_moe_layer_threshold": hash_moe_layer_threshold}
+                if hash_moe_layer_threshold is not None
+                else {}
+            ),
         )
 
         # separate w1/w2 modules give DDP overlap boundaries
@@ -312,6 +324,9 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         # optional shared expert
         self.use_shared_expert = config.moe_shared_expert_intermediate_size is not None
         if self.use_shared_expert:
+            assert (
+                submodules.shared_experts is not None
+            ), "Shared experts builder is not provided in the module spec."
             shared_experts_kwargs = dict(
                 config=config, pg_collection=pg_collection, gate=config.moe_shared_expert_gate
             )
@@ -356,14 +371,23 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         hidden_states: torch.Tensor,
         intermediate_tensors: Optional[torch.Tensor] = None,
         padding_mask: Optional[torch.Tensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
+        packed_seq_params: Optional[PackedSeqParams] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         in_shape = hidden_states.shape
         # transpose [bsz, seq] -> [seq, bsz]
         if padding_mask is not None:
             padding_mask = padding_mask.transpose(0, 1).bool()
 
+        # Megatron-LM main hands its router the token ids (hash routing) and the packed-sequence
+        # params (aux-loss groups) through the MoE layer; older routers take neither
+        router_kwargs = {
+            key: value
+            for key, value in (("input_ids", input_ids), ("packed_seq_params", packed_seq_params))
+            if value is not None
+        }
         # dense probs [T, E], aux-loss grad baked in
-        probs, _ = self.router(hidden_states, padding_mask)
+        probs, _ = self.router(hidden_states, padding_mask, **router_kwargs)
         probs = probs.reshape(-1, self.config.num_moe_experts)
 
         # dense -> sparse top-k
