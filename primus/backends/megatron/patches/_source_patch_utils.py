@@ -23,6 +23,44 @@ import textwrap
 from typing import Any, Callable
 
 
+def anchor_indent(func: Callable, anchor: str) -> str:
+    """Leading whitespace of the source line of ``func`` that contains ``anchor``.
+
+    Lets an injected block follow the anchor's nesting depth, which upstream
+    changes without touching the anchor text itself.
+    """
+    for line in inspect.getsource(func).splitlines():
+        if anchor in line:
+            return line[: len(line) - len(line.lstrip())]
+    raise RuntimeError(
+        f"[SourcePatch] Anchor not found in {func.__qualname__}; "
+        f"upstream source may have changed. Anchor: {anchor!r}"
+    )
+
+
+def find_source_owner(cls: Any, method_name: str, anchor: str) -> Any:
+    """The class in ``cls.__mro__`` whose own ``method_name`` source contains ``anchor``.
+
+    Upstream sometimes moves a method body into a base class and leaves a thin
+    subclass behind (e.g. ``MambaModel`` -> ``HybridModel``); the rewrite has to
+    land on the class that actually defines the body.
+    """
+    for klass in cls.__mro__:
+        func = klass.__dict__.get(method_name)
+        if func is None:
+            continue
+        try:
+            source = inspect.getsource(func)
+        except (OSError, TypeError):
+            continue
+        if anchor in source:
+            return klass
+    raise RuntimeError(
+        f"[SourcePatch] Anchor not found in {method_name} of any class in "
+        f"{cls.__name__}.__mro__; upstream source may have changed. Anchor: {anchor!r}"
+    )
+
+
 def patch_method_source(
     cls: Any,
     method_name: str,

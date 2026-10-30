@@ -1234,9 +1234,10 @@ def run_synthetic_warmup(
         saved = []
         for group in inner.param_groups:
             state = {}
-            for key in ("betas", "weight_decay", "bias_correction"):
+            for key in ("betas", "weight_decay", "bias_correction", "step"):
                 if key in group:
-                    state[key] = group[key]
+                    val = group[key]
+                    state[key] = val.clone() if isinstance(val, torch.Tensor) else val
             saved.append(state)
             if "betas" in group:
                 group["betas"] = [1.0, 1.0]
@@ -1300,6 +1301,8 @@ def run_synthetic_warmup(
     # --- Restore optimizer state ---
     for inner, saved in zip(inner_opts, saved_opt_states):
         for group, state in zip(inner.param_groups, saved):
+            # Adam creates and increments group["step"] during warmup.
+            group.pop("step", None)
             for key, val in state.items():
                 group[key] = val
 

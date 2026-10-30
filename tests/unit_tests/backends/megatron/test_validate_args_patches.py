@@ -37,6 +37,10 @@ def validate_args(args, defaults={}):
     if getattr(args, "fp4", False):
         raise ValueError("--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")
 
+    assert not (
+        args.cross_entropy_loss_fusion and args.cross_entropy_fusion_impl == 'te'
+    ), "Transformer Engine cross entropy loss fusion is disabled due to stability issues."
+
     args._validate_args_called = True
 '''
 
@@ -132,6 +136,8 @@ def _make_args(**overrides):
         decoder_first_pipeline_num_layers=None,
         decoder_last_pipeline_num_layers=None,
         decoder_pipeline_manual_split_list=None,
+        cross_entropy_loss_fusion=False,
+        cross_entropy_fusion_impl="native",
         _validate_args_called=False,
         _entered_pipeline_split_block=False,
     )
@@ -338,6 +344,41 @@ class TestEndToEnd:
         assert args._validate_args_called is True
         assert len(rocm_calls) == 1
         assert result is args
+
+    def test_source_patches_stack(self, monkeypatch):
+        """A source patch applied after another one still finds its fragment (MXFP4 with TE CE)."""
+        _install_fake_megatron(monkeypatch)
+        _silence_logging(monkeypatch)
+        monkeypatch.setattr(
+            "primus.backends.megatron.patches.args.rocm_arg_validation.validate_args_on_rocm",
+            lambda args: None,
+        )
+
+        from primus.backends.megatron.patches.args.validate_args_patches import (
+            patch_validate_args,
+            patch_validate_args_fp4,
+            patch_validate_args_pipeline_split,
+            patch_validate_args_te_cross_entropy,
+        )
+
+        ctx = _make_ctx()
+        patch_validate_args(ctx)
+        patch_validate_args_pipeline_split(ctx)
+        patch_validate_args_fp4(ctx)
+        patch_validate_args_te_cross_entropy(ctx)
+
+        import megatron.training.arguments as megatron_args
+
+        args = _make_args(
+            fp4=True,
+            decoder_pipeline_manual_split_list=[4, 4],
+            cross_entropy_loss_fusion=True,
+            cross_entropy_fusion_impl="te",
+        )
+        megatron_args.validate_args(args)
+
+        assert args._entered_pipeline_split_block is False
+        assert args._validate_args_called is True
 
 
 class TestFp4NativeTeAutocastTurboGemmGuard:
