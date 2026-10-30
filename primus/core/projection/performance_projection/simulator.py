@@ -25,6 +25,8 @@ class SchedulerSimulationRunner:
     def __init__(self, config: dict):
         self.config = config
         self.chunk_time_ms = self.config.get("chunk_time_ms")
+        # Time for one stage-to-stage activation / activation-grad transfer.
+        self.p2p_time_ms = float(self.config.get("p2p_time_ms", 0.0) or 0.0)
         self.print_simulation_result = self.config.get("print_simulation_result", False)
         self._result_key_dict = {
             FuncType.F: "fwd",
@@ -279,7 +281,11 @@ class SchedulerSimulationRunner:
 
                     send_time = communication_map.pop(send_key)
 
-                    recv_time_map[f"{node.mini_batch}_{node.chunk}_{node.func_type}"] = send_time
+                    # The sender issues the send asynchronously and moves on; the
+                    # receiver's dependent compute waits for the bytes to land.
+                    recv_time_map[f"{node.mini_batch}_{node.chunk}_{node.func_type}"] = (
+                        send_time + self.p2p_time_ms
+                    )
 
                 if node.func_type in [
                     FuncType.F,
