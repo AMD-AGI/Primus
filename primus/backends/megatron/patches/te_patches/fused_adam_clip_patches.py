@@ -426,6 +426,12 @@ def _chained_step_with_device_clip(optimizer, fused_adam_type):
     return update_successful, None, num_zeros_in_grad
 
 
+def _deferred_passthrough_reduce_max(value, *args, **kwargs):
+    """TP1/PP1 model-parallel max, kept on the device. Megatron-core 0.19 passes ``group=``."""
+
+    return value
+
+
 def _install_patch() -> None:
     from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
     from megatron.core.optimizer.optimizer import ChainedOptimizer, MegatronOptimizer
@@ -647,10 +653,6 @@ def _install_patch() -> None:
 
     reduce_max_stat = megatron_training.reduce_max_stat_across_model_parallel_group
     if getattr(reduce_max_stat, "__name__", "") == "_passthrough_reduce_max":
-
-        def _deferred_passthrough_reduce_max(value):
-            return value
-
         megatron_training.reduce_max_stat_across_model_parallel_group = _deferred_passthrough_reduce_max
 
     mark_patched(FusedAdam, _PATCH_KEY)
