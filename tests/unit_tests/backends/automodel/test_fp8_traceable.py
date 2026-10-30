@@ -191,7 +191,7 @@ def fake_ext(monkeypatch):
 
 class ForbiddenExt:
     def __getattr__(self, name):
-        raise AssertionError(f"the Inductor cast must not call primus_turbo_cpp_extension.{name}")
+        raise AttributeError(f"the Inductor cast must not call primus_turbo_cpp_extension.{name}")
 
 
 def test_the_extension_cast_passes_the_unpadded_arguments(fake_ext, monkeypatch):
