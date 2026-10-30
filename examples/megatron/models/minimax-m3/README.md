@@ -16,9 +16,11 @@ with `Cannot select: permlane32.swap`. `PRIMUS_MSA_BACKEND=eager` is the plain-P
 does not need those kernels. The experts use Primus-Turbo's grouped GEMM and RMSNorm uses
 Primus-Turbo. DeepEP stays off (see Known issues).
 
-The default image is `amdprimus/amdprimus:tas-20261019` (see the DeepSeek-V3 example's README). The
-runs below used that image's Primus-Turbo 0.6.1.dev2, FlyDSL 0.3.4.1 and Transformer Engine
-2.19.0.dev0.
+The default image is `amdprimus/amdprimus:tas-20261019` (see the DeepSeek-V3 example's README),
+`amdprimus/amdprimus@sha256:d653324d124e218f43c92eaac3cfc5d05059bd45fb4abf5bdfb78b987af4af87`: torch
+2.14.0 on ROCm 10.2.0a20261011, Triton 3.8.0, Transformer Engine 2.19.0.dev0 (bfe94fbe5),
+Primus-Turbo 0.6.1.dev2, FlyDSL 0.3.4.1 and AITER 0.1.24.post1. Every run below used that image and
+its own Primus-Turbo.
 
 ## Run
 
@@ -66,7 +68,10 @@ Two runs at once on one node need different `MASTER_PORT`s.
   `PRIMUS_STATIC_BF16_LOSS_SCALE_CPU` (default: the value of `PRIMUS_FUSED_ADAM_CLIP`) also have it
   write the BF16 parameters and keep the loss scale on the host. Megatron then logs no grad norm. Set
   `PRIMUS_FUSED_ADAM_CLIP=0` with `--use_precision_aware_optimizer True`: the BF16 writeback needs
-  separate FP32 master parameters, and the run stops at the first step without them.
+  separate FP32 master parameters, and the run stops at the first step without them. With
+  `PRIMUS_FUSED_ADAM_CLIP=0` Adam is Primus's Triton AdamW (`use_triton_fused_adam`, on by default);
+  `--use_triton_fused_adam False` keeps TE's FusedAdam. With `PRIMUS_FUSED_ADAM_CLIP=1` the Triton
+  patch logs that it keeps TE's FusedAdam, whose step the HIP kernel replaces.
 - Config and output: `EXP` (the experiment yaml), and `PRIMUS_WORKSPACE` (default `output`), `PRIMUS_TEAM`,
   `PRIMUS_USER`, `PRIMUS_EXP_NAME`, which make up the output directory `<workspace>/<team>/<user>/<exp>`.
 
@@ -113,23 +118,27 @@ it fills the device; recomputing all 8 layers was 14% slower and did not make ro
 about 140 GB free.
 
 The EP4 rows were measured on `dev/mi455x_v3` (a624bb95), the other rows on an older base (dad0a081).
-On `dev/mi455x_v3` the defaults ran at 156.0 ms on one GPU and 138.2 ms on EP2, with the same losses
-and memory.
+Both have Megatron-LM d3528a21 (1042 commits after core_v0.15.0rc7) and no Triton AdamW. On
+a624bb95 the defaults ran at 156.0 ms on one GPU and 138.2 ms on EP2, with the same losses and
+memory.
 
 The table and the sections below it predate the fused Adam defaults and
-`check_for_nan_in_loss_and_grad: false`; the runs in it match `PRIMUS_FUSED_ADAM_CLIP=0` with the
-check on. With the current defaults one GPU runs at 133.8 ms and EP2 at 126.8 ms (see Optimizer).
+`check_for_nan_in_loss_and_grad: false`; the runs in it used TE's FusedAdam with the check on. With
+the fused Adam defaults one GPU ran at 133.8 ms and EP2 at 126.8 ms on a624bb95 (see Optimizer).
 EP4 has not been re-run.
+
+This branch is now based on `dev/mi455x_v3` c19456f1, with Megatron-LM core_v0.19.2 and Primus's
+Triton AdamW on by default. None of the numbers on this page has been re-measured on it.
 
 **Optimizer.** Megatron's step reads and writes the FP32 gradients and parameters (10.9 B on the
 1-GPU proxy) several times: a norm over every gradient for the NaN check, the 1/DP gradient scale,
 the clipping l2norm, the clip scale, Adam, and the BF16 parameter copy. At EP4 with 8 layers, these
 passes, the gradient accumulation and zeroing took about 77 of the 281 ms of kernel time.
-Cumulative, one GPU, `dev/mi455x_v3`:
+Cumulative, one GPU, `dev/mi455x_v3` a624bb95:
 
 | Change | ms/iter |
 | --- | --- |
-| none: `PRIMUS_FUSED_ADAM_CLIP=0`, NaN check on | 156.0 |
+| none: TE FusedAdam (`PRIMUS_FUSED_ADAM_CLIP=0`), NaN check on | 156.0 |
 | `check_for_nan_in_loss_and_grad: false` | 150.6 |
 | `PRIMUS_FUSED_ADAM_CLIP=1` | 140.2 |
 | `PRIMUS_FUSED_ADAM_BF16_WRITEBACK=1`, `PRIMUS_STATIC_BF16_LOSS_SCALE_CPU=1` (the defaults) | 133.8 |
@@ -218,12 +227,12 @@ Attention forward+backward is 8.65 ms versus 37.98 ms. End to end, FlyDSL takes 
 158.2 ms and saves 16 GB on the 4-layer proxy, where one of the four layers is MSA.
 
 The FlyDSL unit tests (`tests/unit_tests/backends/megatron/test_minimax_m3_flydsl_*.py`) passed on
-gfx1250: 43 items, forward and backward against eager, indexer, and the `MinimaxSparseAttention`
-module.
+gfx1250 on the old base: 43 items, forward and backward against eager, indexer, and the
+`MinimaxSparseAttention` module.
 
 ## Switches on one GPU
 
-Each switch on top of the defaults of the time (`PRIMUS_FUSED_ADAM_CLIP=0`, NaN check on), one GPU,
+Each switch on top of the defaults of the time (TE FusedAdam, NaN check on), one GPU,
 10 iterations, same image and node. The defaults ran at 157.7 ms again during this sweep, so
 differences under 1% are noise. Every run below had 0 NaN.
 
