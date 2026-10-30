@@ -24,6 +24,10 @@ class FluxFlowMatchTrainPipelineConfig:
     autoencoder_scale_factor: float = 0.3611
     autoencoder_shift_factor: float = 0.1159
     guidance: float | None = None
+    # "uniform" matches the existing FLUX trainer. "amdb_logit_normal" matches
+    # AMDiffusionBenchmark and is selected only by the benchmark builder.
+    timestep_sampling: str = "uniform"
+    shift: float = 3.0
 
 
 class FluxFlowMatchTrainPipeline:
@@ -31,6 +35,8 @@ class FluxFlowMatchTrainPipeline:
 
     def __init__(self, cfg: FluxFlowMatchTrainPipelineConfig | None = None):
         self.cfg = cfg or FluxFlowMatchTrainPipelineConfig()
+        self._amdb_sigma_grid: torch.Tensor | None = None
+        self._amdb_sigma_shift: float | None = None
 
     @staticmethod
     def _require_module(module: torch.nn.Module | None, name: str) -> torch.nn.Module:
@@ -105,6 +111,51 @@ class FluxFlowMatchTrainPipeline:
             clip_encodings = clip(prompts).to(device=device, dtype=dtype)
         return labels, t5_encodings, clip_encodings
 
+    def encode_batch(
+        self,
+        *,
+        batch: dict[str, Any],
+        autoencoder: torch.nn.Module | None,
+        t5_encoder: torch.nn.Module | None,
+        clip_encoder: torch.nn.Module | None,
+        device: torch.device,
+        dtype: torch.dtype,
+        model_config: Any = None,
+    ) -> dict[str, torch.Tensor]:
+        """Frozen encodings for one batch.
+
+        Raw batches are encoded here. Precomputed mean/logvar batches and
+        batches that already carry latents are returned without looking up
+        an image tensor.
+        """
+        if isinstance(batch.get("latents"), torch.Tensor):
+            return {
+                "latents": batch["latents"],
+                "t5_encodings": batch["t5_encodings"],
+                "clip_encodings": batch["clip_encodings"],
+            }
+        if "image" not in batch:
+            labels, t5_encodings, clip_encodings = self._prepare_precomputed(
+                batch=batch,
+                device=device,
+                dtype=dtype,
+                model_config=model_config,
+            )
+            return {
+                "latents": labels,
+                "t5_encodings": t5_encodings,
+                "clip_encodings": clip_encodings,
+            }
+        labels, t5_encodings, clip_encodings = self._prepare_raw(
+            batch=batch,
+            autoencoder=autoencoder,
+            t5_encoder=t5_encoder,
+            clip_encoder=clip_encoder,
+            device=device,
+            dtype=dtype,
+        )
+        return {"latents": labels, "t5_encodings": t5_encodings, "clip_encodings": clip_encodings}
+
     def compute_loss(
         self,
         *,
@@ -121,7 +172,11 @@ class FluxFlowMatchTrainPipeline:
 
         device = next(dit.parameters()).device
         dtype = compute_dtype or next(dit.parameters()).dtype
-        if "image" in batch:
+        if isinstance(batch.get("latents"), torch.Tensor):
+            labels = batch["latents"].to(device=device, dtype=dtype, non_blocking=True)
+            t5_encodings = batch["t5_encodings"].to(device=device, dtype=dtype, non_blocking=True)
+            clip_encodings = batch["clip_encodings"].to(device=device, dtype=dtype, non_blocking=True)
+        elif "image" in batch:
             labels, t5_encodings, clip_encodings = self._prepare_raw(
                 batch=batch,
                 autoencoder=autoencoder,
@@ -144,7 +199,27 @@ class FluxFlowMatchTrainPipeline:
 
         bsz = labels.shape[0]
         noise = torch.randn_like(labels)
-        if dit.training:
+        use_amdb_sigmas = dit.training and self.cfg.timestep_sampling == "amdb_logit_normal"
+        if use_amdb_sigmas:
+            from primus.backends.diffusion.utils.sampling import (
+                amdb_flow_sigma_grid,
+                sample_shifted_logit_normal_sigmas,
+            )
+
+            shift = float(self.cfg.shift)
+            if self._amdb_sigma_grid is None or self._amdb_sigma_shift != shift:
+                self._amdb_sigma_grid = amdb_flow_sigma_grid(shift=shift)
+                self._amdb_sigma_shift = shift
+            sigmas = sample_shifted_logit_normal_sigmas(
+                bsz,
+                device=device,
+                sigma_grid=self._amdb_sigma_grid,
+                shift=shift,
+            )
+            sigmas = sigmas.view(-1, 1, 1, 1)
+            noisy_latents = (sigmas * noise + (1.0 - sigmas) * labels).to(labels.dtype)
+            timesteps = sigmas.view(-1).to(dtype)
+        elif dit.training:
             # Match the MLPerf TorchTitan reference exactly: draw FP32 timesteps
             # from the CPU generator, then cast/move them to the latent tensor.
             # Drawing BF16 values directly on the GPU changes both the values and
@@ -159,8 +234,9 @@ class FluxFlowMatchTrainPipeline:
                     "MLPerf FLUX evaluation timesteps must have one integer value in [0, 7] per sample."
                 )
             timesteps = (timestep_ids.to(torch.float32) / 8.0).to(dtype=dtype)
-        sigmas = timesteps.view(-1, 1, 1, 1)
-        noisy_latents = (1 - sigmas) * labels + sigmas * noise
+        if not use_amdb_sigmas:
+            sigmas = timesteps.view(-1, 1, 1, 1)
+            noisy_latents = (1 - sigmas) * labels + sigmas * noise
         target = noise - labels
 
         _, _, latent_height, latent_width = noisy_latents.shape

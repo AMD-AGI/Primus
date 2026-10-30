@@ -64,17 +64,27 @@ class MLPEmbedder(nn.Module):
 
 
 class RMSNorm(nn.RMSNorm):
-    def __init__(self, dim: int):
-        # Match TorchTitan's nn.RMSNorm(dim): eps remains None and PyTorch
-        # selects the epsilon for the BF16 input dtype at runtime.
-        super().__init__(dim)
+    def __init__(self, dim: int, eps: float | None = None):
+        # eps=None matches TorchTitan's nn.RMSNorm(dim), where PyTorch selects the
+        # epsilon for the BF16 input dtype at runtime. BFL FLUX uses 1e-6.
+        super().__init__(dim, eps=eps)
+
+    def forward(self, x: Tensor) -> Tensor:
+        if self.eps is None:
+            return super().forward(x)
+        x_dtype = x.dtype
+        xf = x.float()
+        rrms = torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        # Weight may stay fp32 on a single GPU. Cast after the multiply so the
+        # activation dtype matches the bf16 query/key that entered the norm.
+        return ((xf * rrms).to(x_dtype) * self.weight).to(x_dtype)
 
 
 class QKNorm(nn.Module):
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, eps: float | None = None):
         super().__init__()
-        self.query_norm = RMSNorm(dim)
-        self.key_norm = RMSNorm(dim)
+        self.query_norm = RMSNorm(dim, eps=eps)
+        self.key_norm = RMSNorm(dim, eps=eps)
 
     def init_weights(self) -> None:
         self.query_norm.reset_parameters()
@@ -87,12 +97,14 @@ class QKNorm(nn.Module):
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int = 8, qkv_bias: bool = False):
+    def __init__(
+        self, dim: int, num_heads: int = 8, qkv_bias: bool = False, qk_norm_eps: float | None = None
+    ):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.norm = QKNorm(head_dim)
+        self.norm = QKNorm(head_dim, eps=qk_norm_eps)
         self.proj = nn.Linear(dim, dim)
 
     def init_weights(self) -> None:
@@ -134,14 +146,23 @@ class Modulation(nn.Module):
 
 
 class DoubleStreamBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        mlp_ratio: float,
+        qkv_bias: bool = False,
+        qk_norm_eps: float | None = None,
+    ):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num_heads = num_heads
         self.hidden_size = hidden_size
         self.img_mod = Modulation(hidden_size, double=True)
         self.img_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias)
+        self.img_attn = SelfAttention(
+            dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, qk_norm_eps=qk_norm_eps
+        )
         self.img_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.img_mlp = nn.Sequential(
             nn.Linear(hidden_size, mlp_hidden_dim, bias=True),
@@ -150,7 +171,9 @@ class DoubleStreamBlock(nn.Module):
         )
         self.txt_mod = Modulation(hidden_size, double=True)
         self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.txt_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias)
+        self.txt_attn = SelfAttention(
+            dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, qk_norm_eps=qk_norm_eps
+        )
         self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.txt_mlp = nn.Sequential(
             nn.Linear(hidden_size, mlp_hidden_dim, bias=True),
@@ -196,7 +219,12 @@ class DoubleStreamBlock(nn.Module):
 
 class SingleStreamBlock(nn.Module):
     def __init__(
-        self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0, qk_scale: float | None = None
+        self,
+        hidden_size: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        qk_scale: float | None = None,
+        qk_norm_eps: float | None = None,
     ):
         super().__init__()
         self.hidden_dim = hidden_size
@@ -206,7 +234,7 @@ class SingleStreamBlock(nn.Module):
         self.mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.linear1 = nn.Linear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim)
         self.linear2 = nn.Linear(hidden_size + self.mlp_hidden_dim, hidden_size)
-        self.norm = QKNorm(head_dim)
+        self.norm = QKNorm(head_dim, eps=qk_norm_eps)
         self.hidden_size = hidden_size
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp_act = nn.GELU(approximate="tanh")

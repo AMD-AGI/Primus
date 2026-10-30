@@ -131,12 +131,20 @@ def _load_flux_weights(dit: torch.nn.Module, pretrained_path: str, *, default_fi
     merged: dict[str, torch.Tensor] = {}
     for ckpt in candidates:
         merged.update(_strip_known_prefixes(_load_state_dict(ckpt)))
+    # BFL checkpoints name the QK RMSNorm parameter `scale`; nn.RMSNorm uses `weight`.
+    merged = {
+        (
+            key[: -len(".scale")] + ".weight" if key.endswith(("query_norm.scale", "key_norm.scale")) else key
+        ): value
+        for key, value in merged.items()
+    }
 
     result = dit.load_state_dict(merged, strict=False)
     logger.info(
         "Loaded FLUX DiT weights. "
         f"files={len(candidates)} missing={len(result.missing_keys)} unexpected={len(result.unexpected_keys)}"
     )
+    return result
 
 
 def _build_flux_dit(params) -> Flux:
@@ -187,7 +195,14 @@ def build_flux_model(model_config: dict[str, Any]):
     if pretrained_path:
         logger.info(f"Loading FLUX DiT weights from {pretrained_path}")
         default_filename = "flux1-dev.safetensors" if preset == "flux-dev" else "flux1-schnell.safetensors"
-        _load_flux_weights(dit, pretrained_path, default_filename=default_filename)
+        load_result = _load_flux_weights(dit, pretrained_path, default_filename=default_filename)
+        if cfg_dict.get("strict_pretrained_load") and (
+            load_result.missing_keys or load_result.unexpected_keys
+        ):
+            raise RuntimeError(
+                "FLUX DiT checkpoint does not match the native model: "
+                f"missing={load_result.missing_keys[:8]} unexpected={load_result.unexpected_keys[:8]}"
+            )
 
     if float8_recipe:
         try:
@@ -313,6 +328,8 @@ def build_flux_model(model_config: dict[str, Any]):
             autoencoder_scale_factor=training_cfg.autoencoder_scale_factor,
             autoencoder_shift_factor=training_cfg.autoencoder_shift_factor,
             guidance=training_cfg.guidance,
+            timestep_sampling=str(cfg_dict.get("timestep_sampling", "uniform")),
+            shift=float(cfg_dict.get("shift", 3.0)),
         )
     )
     model = FluxForTraining(
@@ -331,3 +348,39 @@ def build_flux_model(model_config: dict[str, Any]):
     total_params, trainable_params = count_parameters(model)
     logger.info(f"Built FLUX model: total={total_params:,} trainable={trainable_params:,}")
     return model
+
+
+def build_flux_dev_benchmark(model_config: dict[str, Any]):
+    """Native FLUX.1-dev with the AMDiffusionBenchmark load and noise schedule."""
+    from primus.backends.diffusion.utils.download import materialize_pretrained
+
+    config = dict(model_config or {})
+    config["model_preset"] = config.get("model_preset") or "flux.1-dev"
+    cfg = dict(config.get("config") or {})
+    cfg.setdefault("timestep_sampling", "amdb_logit_normal")
+    cfg.setdefault("shift", 3.0)
+    cfg["strict_pretrained_load"] = True
+    params = dict(cfg.get("params") or {})
+    # BFL FLUX.1-dev uses FP32 RMSNorm statistics with eps 1e-6. The native
+    # flux.1-dev trainer leaves this unset and keeps the TorchTitan default.
+    params.setdefault("qk_norm_eps", 1e-6)
+    cfg["params"] = params
+
+    pretrained = config.get("load_from_pretrained_path") or config.get("pretrained_path") or ""
+    pretrained = materialize_pretrained("flux-dev", str(pretrained))
+    if pretrained:
+        config["load_from_pretrained_path"] = pretrained
+
+    encoder = dict(config.get("encoder") or cfg.get("encoder") or {})
+    if not encoder.get("autoencoder") and pretrained:
+        checkpoint = os.path.expanduser(str(pretrained))
+        root = checkpoint if os.path.isdir(checkpoint) else os.path.dirname(checkpoint)
+        ae_path = os.path.join(root, "ae.safetensors")
+        if os.path.isfile(ae_path):
+            encoder["autoencoder"] = ae_path
+        else:
+            logger.warning(f"FLUX autoencoder was not found next to {checkpoint}")
+    if encoder:
+        config["encoder"] = encoder
+    config["config"] = cfg
+    return build_flux_model(config)
