@@ -85,6 +85,7 @@
 MI300X:
   megatron:
     - examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/deepseek_v2_lite-FP8-pretrain.yaml
     - examples/megatron/configs/MI300X/gpt_oss_20B-BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/gpt_oss_20B-FP8-pretrain.yaml
     - examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
@@ -94,6 +95,7 @@ MI300X:
     - examples/megatron/configs/MI300X/llama3.3_70B-BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/llama3.3_70B-FP8-pretrain.yaml
     - examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-FP8-pretrain.yaml
     - examples/megatron/configs/MI300X/qwen2.5_7B-BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/qwen2.5_7B-FP8-pretrain.yaml
     - examples/megatron/configs/MI300X/qwen2.5_72B-BF16-pretrain.yaml
@@ -155,6 +157,7 @@ MI300X:
 MI325X:
   megatron:
     - examples/megatron/configs/MI325X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/deepseek_v2_lite-FP8-pretrain.yaml
     - examples/megatron/configs/MI325X/gpt_oss_20B-BF16-pretrain.yaml
     - examples/megatron/configs/MI325X/gpt_oss_20B-FP8-pretrain.yaml
     - examples/megatron/configs/MI325X/llama3.1_8B-BF16-pretrain.yaml
@@ -164,6 +167,7 @@ MI325X:
     - examples/megatron/configs/MI325X/llama3.3_70B-BF16-pretrain.yaml
     - examples/megatron/configs/MI325X/llama3.3_70B-FP8-pretrain.yaml
     - examples/megatron/configs/MI325X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/mixtral_8x7B_v0.1-FP8-pretrain.yaml
     - examples/megatron/configs/MI325X/qwen2.5_7B-BF16-pretrain.yaml
     - examples/megatron/configs/MI325X/qwen2.5_7B-FP8-pretrain.yaml
     - examples/megatron/configs/MI325X/qwen2.5_72B-BF16-pretrain.yaml
@@ -226,6 +230,7 @@ MI325X:
 MI355X:
   megatron:
     - examples/megatron/configs/MI355X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/deepseek_v2_lite-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/gpt_oss_20B-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
@@ -237,6 +242,7 @@ MI355X:
     - examples/megatron/configs/MI355X/llama3.3_70B-BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/llama3.3_70B-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/mixtral_8x7B_v0.1-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/qwen2.5_7B-BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/qwen2.5_7B-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/qwen2.5_72B-BF16-pretrain.yaml
