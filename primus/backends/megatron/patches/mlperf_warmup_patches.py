@@ -270,6 +270,7 @@ def patch_mlperf_warmup(ctx: PatchContext):
         config,
         forward_backward_func,
         iteration=None,
+        **train_kwargs,  # pg_collection / p2p_communicator on newer Megatron
     ):
         if _warmup_done[0]:
             return _wrapped_chain(
@@ -281,6 +282,7 @@ def patch_mlperf_warmup(ctx: PatchContext):
                 config,
                 forward_backward_func,
                 iteration=iteration,
+                **train_kwargs,
             )
 
         _lazy_init()
@@ -324,6 +326,7 @@ def patch_mlperf_warmup(ctx: PatchContext):
                 config,
                 forward_backward_func,
                 iteration=iteration,
+                **train_kwargs,
             )
         _log(f"Completed {warmup_steps} warmup steps")
 
@@ -452,6 +455,7 @@ def patch_mlperf_warmup(ctx: PatchContext):
             config,
             forward_backward_func,
             iteration=iteration,
+            **train_kwargs,
         )
 
         # ---- 16. Self-remove ----

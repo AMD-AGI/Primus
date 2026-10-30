@@ -22,6 +22,7 @@ Reference:
 """
 
 import copy
+import functools
 from typing import Optional, Tuple
 
 import torch
@@ -166,7 +167,14 @@ class MMDiTLayer(TransformerLayer):
 
             from megatron.core.transformer.spec_utils import build_module
 
-            self.context_mlp = build_module(submodules.mlp, config=cp_override_config)
+            if isinstance(submodules.mlp, functools.partial):
+                # Megatron-core 0.19+ rewrite the shared mlp spec in place into an
+                # MLP.as_mlp_submodule factory.
+                self.context_mlp = submodules.mlp(
+                    config=cp_override_config, pg_collection=self.pg_collection, is_mtp_layer=False
+                )
+            else:
+                self.context_mlp = build_module(submodules.mlp, config=cp_override_config)
         else:
             self.context_mlp = None
 

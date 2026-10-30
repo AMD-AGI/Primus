@@ -34,6 +34,8 @@ from tests.unit_tests.backends.megatron.inkling.inkling_test_utils import (
 )
 
 muon = pytest.importorskip("megatron.core.optimizer.muon")
+if not hasattr(muon, "TensorParallelMuon"):  # moved in Megatron-core 0.19
+    muon = pytest.importorskip("megatron.core.optimizer.emerging_optimizers")
 pytestmark = pytest.mark.skipif(not muon.HAVE_EMERGING_OPTIMIZERS, reason="emerging_optimizers not installed")
 
 HIDDEN = 8  # the split only reads rows; a narrow hidden keeps the gradients small
@@ -50,11 +52,13 @@ def _stub_muon(model_split_shapes):
     stub = SimpleNamespace(
         pg_collection=None,
         mode="blockwise",
+        tp_mode="blockwise",
         split_qkv=True,
         is_qkv_fn=lambda p: getattr(p, "is_qkv", False),
         qkv_split_shapes=list(model_split_shapes),
         scaled_orthogonalize_fn=record,
     )
+    stub.scaled_orthogonalize_fn_with_gtp_remat = lambda p, g, tp, pd: stub.scaled_orthogonalize_fn(g, tp, pd)
     return stub, seen
 
 
@@ -82,7 +86,7 @@ def test_sliding_qkv_fails_with_model_shapes_and_splits_with_its_own():
     grad = torch.randn(p.shape)
 
     stub, _ = _stub_muon(model_shapes)
-    with pytest.raises(RuntimeError, match="invalid for input"):
+    with pytest.raises(RuntimeError, match="invalid for input|shape mismatch"):
         muon.TensorParallelMuon.orthogonalize(stub, p, grad)
 
     stub, seen = _stub_muon(model_shapes)
@@ -125,3 +129,27 @@ def test_tag_reaches_fp32_master_weight():
     model.weight.main_param = model.weight.detach().float()
     assert propagate_to_master_weights(model) == 1
     assert getattr(model.weight.main_param, QKV_SPLIT_SHAPES_ATTR) == (512, 128, 128)
+
+
+def test_patch_wraps_this_megatrons_muon_factory(monkeypatch):
+    import megatron.core.optimizer as optimizer_mod
+    import megatron.training.training as megatron_training
+
+    from primus.backends.megatron.patches.inkling_muon_qkv_patches import (
+        patch_inkling_muon_qkv,
+    )
+
+    if muon.__name__.endswith(".muon"):
+        owner, name = muon, "get_megatron_muon_optimizer"
+    else:
+        owner, name = optimizer_mod, "get_megatron_optimizer"
+    original = getattr(owner, name)
+    monkeypatch.setattr(owner, name, original)
+    monkeypatch.setattr(megatron_training, name, getattr(megatron_training, name, original), raising=False)
+    monkeypatch.setattr(muon.TensorParallelMuon, "orthogonalize", muon.TensorParallelMuon.orthogonalize)
+
+    patch_inkling_muon_qkv(None)
+
+    assert muon.TensorParallelMuon.orthogonalize._primus_inkling_qkv
+    assert getattr(owner, name)._primus_original is original
+    assert getattr(megatron_training, name) is getattr(owner, name)

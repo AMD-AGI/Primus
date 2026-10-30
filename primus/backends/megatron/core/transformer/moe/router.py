@@ -164,3 +164,15 @@ class PrimusTopKRouter(TopKRouter):
         new_scores.scatter_(1, slot, topk_vals.to(scores.dtype))
 
         return new_scores, new_routing_map
+
+
+def primus_topk_router_for(router):
+    """``PrimusTopKRouter`` if ``router`` is Megatron's ``TopKRouter`` class, else ``router`` unchanged.
+
+    The swap rule of the ``megatron.moe.primus_topk_router`` patch, shared with MegaMoE. Matching the
+    class by name also catches a ``TopKRouter`` that a module bound before the patch ran; subclasses
+    such as ``InferenceTopKRouter`` and builders such as a ``functools.partial`` are left alone.
+    """
+    if isinstance(router, type) and router.__name__ == "TopKRouter":
+        return PrimusTopKRouter
+    return router

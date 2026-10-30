@@ -50,12 +50,18 @@ class InklingGroupedMLP(TEGroupedMLP):
 
 
 class InklingSharedExperts(SharedExpertMLP):
-    def __init__(self, config, submodules, gate: bool = False, pg_collection=None):
+    def __init__(self, config, submodules, gate: bool = False, pg_collection=None, name=None):
         if gate:
             raise ValueError(
                 "Inkling's shared experts are weighted by the router; set moe_shared_expert_gate: false"
             )
-        super().__init__(config=config, submodules=submodules, gate=False, pg_collection=pg_collection)
+        super().__init__(
+            config=config,
+            submodules=submodules,
+            gate=False,
+            pg_collection=pg_collection,
+            **({"name": name} if name is not None else {}),  # passed by Megatron-core 0.19+
+        )
         self.num_shared_experts = int(config.moe_num_shared_experts)
         self.expert_width = int(config.moe_ffn_hidden_size)
         tp_size = self.tp_group.size() if self.tp_group is not None else 1
@@ -79,13 +85,16 @@ class InklingSharedExperts(SharedExpertMLP):
 
 
 class InklingMoELayer(MoELayer):
-    def __init__(self, config, submodules=None, layer_number=None, pg_collection=None, is_mtp_layer=False):
+    def __init__(
+        self, config, submodules=None, layer_number=None, pg_collection=None, is_mtp_layer=False, name=None
+    ):
         super().__init__(
             config=config,
             submodules=submodules,
             layer_number=layer_number,
             pg_collection=pg_collection,
             is_mtp_layer=is_mtp_layer,
+            **({"name": name} if name is not None else {}),  # passed by Megatron-core 0.19+
         )
         if not self.use_shared_expert:
             raise ValueError("Inkling's MoE needs shared experts")

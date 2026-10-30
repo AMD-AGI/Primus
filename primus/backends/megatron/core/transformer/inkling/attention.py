@@ -245,6 +245,7 @@ class InklingSelfAttention(Attention):
         cp_comm_type: Optional[str] = None,
         pg_collection=None,
         pp_layer_offset: Optional[int] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         layer_idx = layer_number - 1
         geo = config.attention_geometry(layer_idx)
@@ -257,6 +258,7 @@ class InklingSelfAttention(Attention):
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
             pp_layer_offset=pp_layer_offset,
+            **({"name": name} if name is not None else {}),
         )
         cfg = self.config
         if cfg.num_query_groups % self.world_size:
