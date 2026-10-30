@@ -40,6 +40,8 @@ import sys
 
 import torch
 
+from primus.core.utils.hf_config import read_hf_config as _read_hf_config
+
 
 # ---------------------------------------------------------------------------
 # Megatron-LM source tree location
@@ -334,5 +336,7 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
 
 
 def read_hf_config(hf_dir: str) -> dict:
-    with open(os.path.join(hf_dir, "config.json")) as f:
-        return json.load(f)
+    """``hf_dir``/config.json as a dict (the reader shared with the SFT conversion hook):
+    ``FileNotFoundError`` if missing, ``HFConfigError`` (a ``ValueError``) if it is not a
+    readable JSON object."""
+    return _read_hf_config(hf_dir)

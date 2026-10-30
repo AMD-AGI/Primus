@@ -31,7 +31,7 @@ Megatron-related options live on the trainer configuration merged from `trainer_
 
 | Parameter | Default (`trainer_base.yaml`) | Description |
 |-----------|-------------------------------|-------------|
-| `save` | `null` | Directory where new checkpoints are written. |
+| `save` | `null` | Directory where new checkpoints are written. Primus routes a non-null `save` to `<exp_root>/checkpoints` unless `keep_explicit_save_path` is set (see Primus extensions). |
 | `load` | `null` | Directory to load from when **resuming** training. |
 | `save_interval` | `20000` | Save every *N* iterations. |
 | `finetune` | `false` | When `true`, loads weights but **resets** the iteration counter (typical fine-tune entry). |
@@ -82,6 +82,7 @@ Defined in `primus/configs/modules/megatron/primus_megatron_module.yaml` and imp
 |-----------|---------|-------------|
 | `auto_continue_train` | `false` | When `true`, **automatically resume** from the latest checkpoint under `save` (adjusts load/finetune and related flags). |
 | `disable_last_saving` | `false` | When `true`, **skip** the final checkpoint at shutdown (useful for benchmarking or when only periodic saves matter). |
+| `keep_explicit_save_path` | `false` | By default Primus writes a non-null `save` to `<exp_root>/checkpoints` (`megatron.args.checkpoint_path`). Set `true` to write to `save` as given, e.g. `--save /abs/dir` and a later `--load /abs/dir`. |
 
 ---
 

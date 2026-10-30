@@ -75,6 +75,10 @@ torch_profiler_use_gzip: true
 # continue/finetune
 auto_continue_train: false
 disable_last_saving: false
+# Primus-only (read by the megatron.args.checkpoint_path patch). false (default, every
+# model): a non-null save is routed to <exp_root>/checkpoints. true: save is used as
+# given, e.g. --save /abs/dir and a later --load /abs/dir.
+keep_explicit_save_path: false
 
 # fp8
 no_fp8_weight_transpose_cache: false

@@ -41,6 +41,10 @@ Activation
 Falls back silently to the original ``TransformerLayer.forward`` whenever
 any precondition fails (recompute paths, fp32 residual, inference fused TP,
 non-zero hidden_dropout, cross-attention layers, missing fused-LN gamma).
+Layers with a scaled residual add (Granite ``residual_multiplier`` != 1, or a bda
+wrapped by ``scaled_bias_dropout_add``) also fall back. Unlike the silent fallbacks
+above, this one is logged, once per process (the first layer and reason only), like the
+module's other path logs.
 
 Skip-``y`` (optional, ``patches/primus-te-ln-skip-y-ste.patch``)
 ---------------------------------------------------------------
@@ -159,6 +163,7 @@ def _log(msg: str) -> None:
 _INSTALLED = False
 _LOGGED_FC1_PATH = False
 _LOGGED_MXFP4_QKV_PATH = False
+_LOGGED_SCALED_RESIDUAL = False
 
 
 def _identity_op_type():
@@ -400,6 +405,8 @@ def _can_fuse(layer: Any) -> bool:
         return False
     if getattr(layer, "offload_mlp_norm", False):
         return False
+    if _has_scaled_residual(layer, cfg):
+        return False
 
     try:
         from primus.backends.megatron.core.extensions.primus_turbo import (
@@ -424,6 +431,50 @@ def _can_fuse(layer: Any) -> bool:
             _LOGGED_FC1_PATH = True
         return True
     return False
+
+
+def _has_scaled_residual(layer: Any, cfg: Any) -> bool:
+    """True when ``layer`` scales its residual branches inside the bda callables.
+
+    The fused path adds the attention output to the residual itself without
+    ``self_attn_bda`` (and, when V2 stashes a carry, also skips ``mlp_bda``), so such a
+    layer must take the unfused forward. Checked, in order:
+
+    * a bda wrapped by ``scaled_bias_dropout_add`` (tagged ``residual_multiplier``);
+    * a ``residual_multiplier`` on the layer or its config that is not exactly 1.0. Exact
+      on purpose: ``GraniteTransformerLayer`` wraps the bda for every value != 1.0, so a
+      tolerance would fuse a layer that does scale. A value that is not a number also
+      refuses fusion.
+
+    Not cached: the answer is re-read on every call (a few getattrs), so a bda wrapped or a
+    multiplier changed after the first call is still seen. The fallback is logged once per
+    process, like the module's other path logs.
+    """
+    detail = None
+    for name in ("self_attn_bda", "mlp_bda"):
+        tag = getattr(getattr(layer, name, None), "residual_multiplier", None)
+        if tag is not None:
+            detail = f"{name} is a scaled residual add ({tag})"
+            break
+    if detail is None:
+        for owner, label in ((layer, "layer"), (cfg, "config")):
+            multiplier = getattr(owner, "residual_multiplier", None)
+            if multiplier is None:
+                continue
+            if isinstance(multiplier, bool) or not isinstance(multiplier, (int, float)):
+                scaled = True  # a bool or a non-number is not a valid multiplier: refuse fusion
+            else:
+                scaled = float(multiplier) != 1.0
+            if scaled:
+                detail = f"{label} residual_multiplier={multiplier!r}"
+                break
+    if detail is None:
+        return False
+    global _LOGGED_SCALED_RESIDUAL
+    if not _LOGGED_SCALED_RESIDUAL:
+        _log(f"layers with a scaled residual add ({detail}) use the unfused forward")
+        _LOGGED_SCALED_RESIDUAL = True
+    return True
 
 
 def _v2_next_can_consume_carry(layer: Any) -> bool:

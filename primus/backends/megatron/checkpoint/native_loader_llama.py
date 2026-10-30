@@ -73,7 +73,100 @@ def derive_megatron_fields(cfg):
     )
 
 
-def build_margs(cfg_fields, args):
+# Every arg ``build_margs`` assigns below (shapes, layout, parallelism, precision, init,
+# checkpoint and conversion-run args). ``extra_fields`` may not override them.
+# tests/unit_tests/backends/megatron/granite checks this set against the assignments.
+BUILD_MARGS_OWNED = frozenset(
+    (
+        "add_bias_linear",
+        "add_qkv_bias",
+        "apply_query_key_layer_scaling",
+        "apply_rope_fusion",
+        "async_save",
+        "async_tensor_model_parallel_allreduce",
+        "bf16",
+        "bias_dropout_fusion",
+        "bias_gelu_fusion",
+        "bias_swiglu_fusion",
+        "ckpt_assume_constant_structure",
+        "ckpt_format",
+        "context_parallel_size",
+        "expert_model_parallel_size",
+        "expert_tensor_parallel_size",
+        "ffn_hidden_size",
+        "fp16",
+        "global_batch_size",
+        "gradient_accumulation_fusion",
+        "group_query_attention",
+        "hidden_size",
+        "iteration",
+        "kv_channels",
+        "make_vocab_size_divisible_by",
+        "masked_softmax_fusion",
+        "max_position_embeddings",
+        "micro_batch_size",
+        "no_load_optim",
+        "no_load_rng",
+        "no_save_optim",
+        "no_save_rng",
+        "norm_epsilon",
+        "normalization",
+        "num_attention_heads",
+        "num_experts",
+        "num_layers",
+        "num_query_groups",
+        "params_dtype",
+        "perform_initialization",
+        "pipeline_model_parallel_size",
+        "position_embedding_type",
+        "qk_layernorm",
+        "rank",
+        "rotary_base",
+        "save",
+        "save_interval",
+        "seq_length",
+        "sequence_parallel",
+        "swiglu",
+        "tensor_model_parallel_size",
+        "tokenizer_model",
+        "tokenizer_type",
+        "train_iters",
+        "transformer_impl",
+        "trust_remote_code",
+        "untie_embeddings_and_output_weights",
+        "use_cpu_initialization",
+        "vocab_size",
+        "world_size",
+    )
+)
+
+
+def build_margs(cfg_fields, args, extra_fields=None, allowed_fields=frozenset()):
+    """Megatron args for a Llama-layout model.
+
+    ``extra_fields`` (a dict) is set on the args just before ``validate_args``. It is an
+    allowlist contract:
+
+    * every key must be in ``allowed_fields`` (a set/tuple of names given by the caller,
+      e.g. Granite's MuP and multiplier fields); other keys (typos included) raise
+      ``ValueError``;
+    * no key may be in ``BUILD_MARGS_OWNED``, the args ``build_margs`` assigns itself
+      below (before ``validate_args``): those raise ``ValueError`` too, even when listed
+      in ``allowed_fields``. Args that ``build_margs`` does not assign (for example
+      ``fp8``, ``fp8_recipe``, ``fp4``, ``init_method_std``,
+      ``virtual_pipeline_model_parallel_size``) are not protected by this check; only
+      ``allowed_fields`` keeps them out, so callers must list only the fields they mean to
+      set. ``validate_args`` may still derive or rewrite allowed fields afterwards.
+
+    ``validate_args`` checks only the Megatron arguments it knows; fields that are not
+    Megatron arguments (e.g. Granite's multipliers) must be checked by the caller's
+    config class. Without ``extra_fields`` (the Llama converter itself) no args beyond
+    those assigned above are set; Granite is the only caller that passes extra_fields.
+    """
+    if isinstance(allowed_fields, str):
+        raise TypeError("build_margs: allowed_fields must be a collection of names, not a str")
+    allowed_fields = frozenset(allowed_fields)
+
     import argparse
 
     from megatron.training.arguments import add_megatron_arguments, validate_args
@@ -163,6 +256,13 @@ def build_margs(cfg_fields, args):
     m.async_save = False
     m.ckpt_assume_constant_structure = False
     m.iteration = 1
+
+    for key, value in (extra_fields or {}).items():
+        if key in BUILD_MARGS_OWNED:
+            raise ValueError(f"build_margs: extra_fields may not override {key!r}, which build_margs sets")
+        if key not in allowed_fields:
+            raise ValueError(f"build_margs: extra_fields key {key!r} is not in allowed_fields")
+        setattr(m, key, value)
 
     m = validate_args(m)
     m.iteration = 1

@@ -1,0 +1,57 @@
+# ibm-granite/granite-4.1-3b (revision c0650403e44e78ec0262dab1c90914c65b196c4e)
+# IBM Granite dense decoder (GraniteForCausalLM): Llama layout plus four scalar
+# multipliers. Model code: primus/backends/megatron/core/models/granite/.
+#   embedding_multiplier -> mup_embedding_mult
+#   logits_scaling       -> mup_output_mult = 1 / logits_scaling
+#   attention_multiplier -> attention_multiplier (GraniteTransformerConfig sets softmax_scale)
+#   residual_multiplier  -> residual_multiplier (GraniteTransformerLayer, scaled residual add)
+extends:
+  - llama_base.yaml
+
+model_type: granite
+# Inherited from llama_base.yaml / language_model.yaml and kept: RMSNorm (eps 1e-5),
+# SwiGLU, RoPE (rotary_percent 1.0), no linear or QKV biases, no QK norm, apply_rope_fusion.
+
+group_query_attention: true
+untie_embeddings_and_output_weights: false
+
+# muP-style multipliers (upstream Megatron TransformerConfig fields).
+# use_mup is the only switch upstream has for mup_embedding_mult and mup_output_mult.
+# Its other effects, with mup_base_hidden_size null (= hidden_size, so mup_width_mult 1.0):
+#   * init: init_method std / sqrt(1.0) (unchanged); output layers use
+#     mup_scaled_init_method_normal = std / sqrt(2 * num_layers), the same as without MuP;
+#   * optimizer: get_mup_config_overrides adds param-group overrides that scale hidden
+#     lr / eps by 1 / mup_width_mult = 1.0 (no change), embedding/output params are tagged
+#     is_embedding_parameter for those groups;
+#   * softmax_scale: MuP would set 1/kv_channels; GraniteTransformerConfig sets it from
+#     attention_multiplier first, so MuP leaves it alone.
+# Setting mup_base_hidden_size (width scaling) is refused by GraniteTransformerConfig:
+# it would change init, lr and logits scaling away from the HF model.
+use_mup: true
+mup_base_hidden_size: null
+mup_base_head_dim: null
+mup_attn_scale_power: 1.0
+
+masked_softmax_fusion: false
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: ibm-granite/granite-4.1-3b
+
+# HF config.json key on the right of each value.
+num_layers: 40                  # num_hidden_layers
+hidden_size: 2560               # hidden_size
+ffn_hidden_size: 8192           # intermediate_size
+num_attention_heads: 40         # num_attention_heads
+num_query_groups: 8             # num_key_value_heads
+kv_channels: 64                 # hidden_size / num_attention_heads
+max_position_embeddings: 131072 # max_position_embeddings
+rotary_base: 10000000           # rope_theta (rope_scaling: null)
+init_method_std: 0.1            # initializer_range
+norm_epsilon: 1.0e-5            # rms_norm_eps (set here, not inherited)
+# vocab_size 100352 comes from the tokenizer (padded by make_vocab_size_divisible_by).
+
+# config.json multipliers
+mup_embedding_mult: 12.0      # embedding_multiplier
+mup_output_mult: 0.1          # 1 / logits_scaling (10.0)
+residual_multiplier: 0.22     # residual_multiplier
+attention_multiplier: 0.015625  # attention_multiplier -> softmax_scale (explicit, not 1/sqrt(64))

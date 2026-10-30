@@ -18,7 +18,12 @@ set -euo pipefail
 #   * a Megatron checkpoint is already configured (pretrained_checkpoint -> no
 #     conversion at all), OR
 #   * the configured HF model resolves to a supported native family and native
-#     conversion is not explicitly disabled (native_ckpt_convert: false).
+#     conversion is not explicitly disabled (native_ckpt_convert: false), OR
+#   * the model is a family without a Bridge converter (Granite; named by the model
+#     preset's model_type or by the local config.json; the HF cache is never read, so the
+#     decision is the same on every node): the hook converts it natively or stops, never
+#     uses the Bridge.
+#   The hook's bridge_deps_needed() calls the same _route() as its main().
 #
 # The native-vs-bridge decision reuses 01_convert_checkpoints.py's own helpers
 # so it can never drift from the actual conversion behaviour.
@@ -66,13 +71,10 @@ def decide():
     hf_path, pretrained = mod.get_checkpoint_config(cfg)
     if pretrained:
         return "SKIP"  # checkpoint already provided; no conversion at all
-    opts = mod.read_native_opts(cfg)
-    fam = mod._detect_native_family(hf_path) if hf_path else None
-    if opts["enabled"] is False:
-        return "INSTALL"  # bridge explicitly forced -> deps needed
-    if opts["enabled"] is True or fam is not None:
-        return "SKIP"  # native (bridge-free) path -> deps not needed
-    return "INSTALL"  # unsupported family + hf_path -> bridge fallback
+    # Reads the config only (no torch / Megatron import). A family without a Bridge
+    # converter (Granite) never needs the Bridge dependencies: the hook converts it
+    # natively or stops with the reason.
+    return "INSTALL" if mod.bridge_deps_needed(cfg, hf_path) else "SKIP"
 
 
 try:
