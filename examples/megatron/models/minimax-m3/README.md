@@ -125,10 +125,51 @@ memory.
 The table and the sections below it predate the fused Adam defaults and
 `check_for_nan_in_loss_and_grad: false`; the runs in it used TE's FusedAdam with the check on. With
 the fused Adam defaults one GPU ran at 133.8 ms and EP2 at 126.8 ms on a624bb95 (see Optimizer).
-EP4 has not been re-run.
+EP4 was not re-run on that node; see c19456f1 below.
 
-This branch is now based on `dev/mi455x_v3` c19456f1, with Megatron-LM core_v0.19.2 and Primus's
-Triton AdamW on by default. None of the numbers on this page has been re-measured on it.
+**On `dev/mi455x_v3` c19456f1.** This branch is now based on c19456f1, with Megatron-LM core_v0.19.2
+(4b4acac9) and Primus's Triton AdamW. The table above and the sections below it are from the old
+bases. These runs use the current defaults (HIP fused Adam, NaN check off) on another shared 4x
+MI455X node, `ctheliosr-rck-g02-e15-01`, with the same image, one run at a time on an otherwise idle
+node. Every run finished 10 iterations with 0 NaN, and the fused Adam patch logged that it was enabled.
+
+| GPUs | Layers | MBS / GBS | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 4 | 1 / 1 | 142.4 | 28,757 | 474.4 | 237.7 GB | 10.98864 |
+| 2 (EP2) | 4 | 1 / 2 | 130.1 | 31,493 | 519.7 | 177.9 GB | 10.31194 |
+| 4 (EP4) | 4 | 1 / 4 | 121.6 | 33,684 | 555.8 | 147.3 GB | 9.66907 |
+| 4 (EP4) | 8 | 1 / 4 | 254.9 | 16,068 | 426.1 | 280.0 GB | 9.11894 |
+
+Repeats were within 0.4%: 142.4–142.9 ms on one GPU over three runs (two of them beside other runs on
+the other GPUs), 130.1–130.2 ms on EP2, 121.6 ms twice at EP4 and 254.9–255.1 ms with 8 layers.
+
+The difference from 133.8 and 126.8 ms is the node, not the base. On the same node with the same
+defaults, the old base (e6956d46: a624bb95 plus this example, Megatron-LM d3528a21) ran at 142.3 ms on
+one GPU, 130.5 ms on EP2, 121.9 ms at EP4 and 255.5 ms with 8 layers. Its losses are the same as the
+new base's to the last logged digit. The new base uses less memory: 241.4 to 237.7 GB on one GPU,
+184.1 to 177.9 GB on EP2, 155.9 to 147.3 GB at EP4 and 288.6 to 280.0 GB with 8 layers.
+
+Where the EP4 step goes on c19456f1: GPU kernel time of profiled iteration 7 on rank 0
+(`PROFILE=True`), in ms.
+
+| Kernels | EP4, 4 layers | EP4, 8 layers |
+| --- | --- | --- |
+| hipBLASLt GEMMs: dense layers, attention projections, shared experts, output layer | 39.7 | 50.7 |
+| RCCL collectives | 17.0 | 25.4 |
+| elementwise and reductions | 16.8 | 41.4 |
+| TE unfused softmax in the three dense attention layers | 13.4 | 13.5 |
+| FlyDSL MSA and indexer | 9.6 | 45.5 |
+| optimizer: HIP Adam and the clipping l2norm | 8.7 | 33.0 |
+| Primus-Turbo grouped GEMM (Triton), all expert GEMMs | 5.5 | 26.4 |
+| copies and fills | 3.4 | 9.4 |
+| norm, RoPE | 2.3 | 3.7 |
+| other: MoE permute and router, cross entropy, the rest | 2.2 | 4.5 |
+| total kernel time / GPU span | 118.6 / 123.1 | 253.4 / 276.3 |
+
+The expert GEMMs are Primus-Turbo's Triton kernels (`_grouped_bf16_persistent_gemm_kernel` and
+`_grouped_variable_k_gemm_kernel`, under `PrimusTurboColumnParallelGroupedLinear` and
+`PrimusTurboRowParallelGroupedLinear`), not TE's grouped GEMM. In the trace every FlyDSL kernel is
+named `k_fn_0`; the launching Python frame tells MSA forward, MSA backward and the indexer apart.
 
 **Optimizer.** Megatron's step reads and writes the FP32 gradients and parameters (10.9 B on the
 1-GPU proxy) several times: a norm over every gradient for the NaN check, the 1/DP gradient scale,
@@ -151,6 +192,20 @@ passes, the NaN-check norm and the parameter copy are gone. Before the fix in
 `fused_adam_clip_patches.py` (no hard-coded `-std=c++17`), the HIP extension did not build against
 this image's torch 2.14, whose headers need C++20, and Primus logged the error and trained without
 the patch.
+
+On c19456f1, on the node of the c19456f1 table, the three Adam paths. The runs in each column ran side
+by side: one GPU each on separate GPUs, and EP2 on GPUs 0–1 and 2–3.
+
+| Adam | Settings | 1 GPU | EP2 | lm loss, iteration 10 (1 GPU / EP2) |
+| --- | --- | --- | --- | --- |
+| Primus HIP fused Adam (default) | `PRIMUS_FUSED_ADAM_CLIP=1` | 142.9 ms | 130.1 ms | 10.98864 / 10.31194 |
+| Primus Triton AdamW | `PRIMUS_FUSED_ADAM_CLIP=0` | 157.5 ms | 138.5 ms | 10.98862 / 10.31211 |
+| TE FusedAdam | `PRIMUS_FUSED_ADAM_CLIP=0 --use_triton_fused_adam False` | 157.9 ms | not run | 10.98837 / – |
+
+Triton AdamW is 10% slower than the HIP Adam on one GPU and 6.5% slower on EP2, and on one GPU no faster
+than TE's FusedAdam, so the default stays `PRIMUS_FUSED_ADAM_CLIP=1`. Triton AdamW and TE FusedAdam
+log the grad norm (10.378 and 10.379 at iteration 10 on one GPU); the HIP Adam does not. TE
+FusedAdam's loss moved from 10.98863 on the old base to 10.98837; the HIP Adam's did not move.
 
 **Expert grouped GEMM.** `USE_TURBO_GROUPED_GEMM=False`, otherwise the same runs. Losses agree to
 within 0.001.
@@ -228,7 +283,8 @@ Attention forward+backward is 8.65 ms versus 37.98 ms. End to end, FlyDSL takes 
 
 The FlyDSL unit tests (`tests/unit_tests/backends/megatron/test_minimax_m3_flydsl_*.py`) passed on
 gfx1250 on the old base: 43 items, forward and backward against eager, indexer, and the
-`MinimaxSparseAttention` module.
+`MinimaxSparseAttention` module. On c19456f1 the same 43 pass, and with the other MiniMax-M3 tests,
+`test_fused_adam_clip_patches.py` and `test_l2norm_large_tensor_patches.py`, 131 items pass.
 
 ## Switches on one GPU
 
