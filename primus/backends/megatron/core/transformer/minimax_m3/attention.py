@@ -88,6 +88,7 @@ class MinimaxSparseAttention(SelfAttention):
         cp_comm_type: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         pp_layer_offset: Optional[int] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         if not isinstance(config, MSATransformerConfig):
             raise TypeError(
@@ -103,6 +104,7 @@ class MinimaxSparseAttention(SelfAttention):
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
             pp_layer_offset=pp_layer_offset,
+            **({"name": name} if name is not None else {}),
         )
 
         self.block_size = config.sparse_block_size
