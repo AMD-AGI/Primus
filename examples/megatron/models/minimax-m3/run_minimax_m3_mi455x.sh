@@ -69,6 +69,12 @@ export PROFILE=${PROFILE:-False}
 export PATCH_TRITON_EXPERT_SCHEDULING=${PATCH_TRITON_EXPERT_SCHEDULING:-1}
 # hipBLASLt kernel overrides; unset: hipBLASLt's own choice. This example has no tuned file yet.
 export HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE:-}
+# Primus's HIP Adam applies the clip coefficient in-kernel and writes the BF16 parameters, so the
+# step has no host sync, no separate grad scale and no parameter copy. Megatron then logs no grad
+# norm. The other two need the first.
+export PRIMUS_FUSED_ADAM_CLIP=${PRIMUS_FUSED_ADAM_CLIP:-1}
+export PRIMUS_FUSED_ADAM_BF16_WRITEBACK=${PRIMUS_FUSED_ADAM_BF16_WRITEBACK:-${PRIMUS_FUSED_ADAM_CLIP}}
+export PRIMUS_STATIC_BF16_LOSS_SCALE_CPU=${PRIMUS_STATIC_BF16_LOSS_SCALE_CPU:-${PRIMUS_FUSED_ADAM_CLIP}}
 
 case "${PRIMUS_MSA_BACKEND}" in
     flydsl | eager) ;;
