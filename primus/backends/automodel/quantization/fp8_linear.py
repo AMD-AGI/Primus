@@ -43,6 +43,9 @@ Settings (module config, ``primus_turbo:`` section):
   fp8_linear_granularity: tensorwise  rowwise|tensorwise|blockwise|mx_blockwise
   fp8_linear_format: e4m3             e4m3|e5m2|hybrid
   fp8_linear_block_size: 128          blockwise only
+  fp8_linear_traceable: false         compile-friendly tensorwise GEMMs; it and the
+                                      delayed-scaling, cast and backend settings it
+                                      enables are documented in ``_fp8_traceable``
 """
 from __future__ import annotations
 
@@ -83,6 +86,34 @@ def should_convert(name: str, linear) -> bool:
 def is_enabled() -> bool:
     """Whether the FP8 swap was requested. Not the same as it being active."""
     return options.flag("primus_turbo.fp8_linear")
+
+
+# The traceable path's switches, named here because ``_fp8_traceable`` imports
+# torch and patch conditions must not.
+_TRACEABLE_FLAGS = (
+    "fp8_linear_traceable",
+    "fp8_linear_delayed_scaling",
+    "fp8_linear_inductor_cast",
+    "fp8_linear_shared_input_scales",
+)
+
+
+def warn_if_traceable_settings_unused() -> None:
+    """Report traceable settings that are on while this swap is not the one applied.
+
+    They are read and checked only when the swap runs, so without this a run that
+    set them would show no sign that they did nothing.
+    """
+    unused = [key for key in _TRACEABLE_FLAGS if options.flag(f"primus_turbo.{key}")]
+    if options.string("primus_turbo.fp8_linear_gemm_backend", "hipblaslt").lower() != "hipblaslt":
+        unused.append("fp8_linear_gemm_backend")
+    if unused:
+        logger.warning(
+            "%s %s set, but the FP8 linear swap is not applied (primus_turbo.fp8_linear is off or "
+            "another precision takes precedence), so they have no effect and are not checked.",
+            _LOG_PREFIX,
+            ", ".join(f"primus_turbo.{key}" for key in unused),
+        )
 
 
 # Lowest precedence of the low-precision swaps: FP8 is the fallback when a
@@ -161,10 +192,18 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
     """
     from primus_turbo.pytorch.modules import Float8Linear
 
+    from primus.backends.automodel.quantization import _fp8_traceable
+
     cfg = resolve_config()
+    traceable = _fp8_traceable.resolve(cfg)
+    linear_cls = Float8Linear
+    if traceable is not None:
+        linear_cls = _fp8_traceable.make_float8_linear(
+            Float8Linear, delayed_scaling=traceable.delayed_scaling
+        )
 
     def factory(linear):
-        return Float8Linear(
+        return linear_cls(
             linear.in_features,
             linear.out_features,
             bias=linear.bias is not None,
@@ -181,10 +220,15 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
         already_converted=(Float8Linear,),
         log_prefix=_LOG_PREFIX,
     )
+    if converted and traceable is not None and traceable.delayed_scaling:
+        _fp8_traceable.install_delayed_scale_step_counter(
+            module, discover_shared_input_scales=traceable.shared_input_scales
+        )
     logger.info(
-        "%s replaced %d torch.nn.Linear with Float8Linear in %s; skipped=%d " "(granularity=%s format=%s)",
+        "%s replaced %d torch.nn.Linear with %s in %s; skipped=%d " "(granularity=%s format=%s)",
         _LOG_PREFIX,
         converted,
+        linear_cls.__name__,
         module_name,
         skipped,
         getattr(cfg.granularity, "name", cfg.granularity),

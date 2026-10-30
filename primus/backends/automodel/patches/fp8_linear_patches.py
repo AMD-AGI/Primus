@@ -9,6 +9,7 @@ The condition is ``_common.is_active(...)``, not merely "was FP8 requested".
 Exactly one precision can own AutoModel's swap symbol, so the condition has to
 account for a narrower format having been requested at the same time; the
 selector decides, and a losing request is logged rather than silently dropped.
+So are traceable FP8 settings left on when the swap is not applied.
 
 Like every before_train patch it runs before the transformer is built and
 sharded, which is when the swap has to be in place.
@@ -23,13 +24,23 @@ options.declare(
     "fp8_linear_granularity",
     "fp8_linear_format",
     "fp8_linear_block_size",
+    "fp8_linear_traceable",
+    "fp8_linear_delayed_scaling",
+    "fp8_linear_amax_warmup_steps",
+    "fp8_linear_amax_refresh_interval",
+    "fp8_linear_inductor_cast",
+    "fp8_linear_shared_input_scales",
+    "fp8_linear_gemm_backend",
 )
 
 
 def _active(ctx: PatchContext) -> bool:
     from primus.backends.automodel.quantization import _common, fp8_linear
 
-    return _common.is_active(fp8_linear.BACKEND_NAME)
+    if _common.is_active(fp8_linear.BACKEND_NAME):
+        return True
+    fp8_linear.warn_if_traceable_settings_unused()
+    return False
 
 
 @register_patch(
