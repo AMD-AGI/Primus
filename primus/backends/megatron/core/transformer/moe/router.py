@@ -196,8 +196,11 @@ class PrimusTopKRouter(TopKRouter):
         # within a token while topk <= num_experts.
         slot = force_balanced_slots(num_tokens, topk, num_experts, spread, device)  # [num_tokens, topk]
 
-        new_routing_map = torch.zeros_like(routing_map)
-        new_routing_map.scatter_(1, slot, torch.ones_like(slot, dtype=routing_map.dtype))
+        # Filled as uint8 and viewed as the (bool) routing map: on gfx1250 a bool fill of
+        # [8192, 128] costs ~32 us standalone and ~100 us in a training step, a uint8 one ~5 us.
+        new_routing_map = torch.zeros(routing_map.shape, dtype=torch.uint8, device=device)
+        new_routing_map.scatter_(1, slot, 1)
+        new_routing_map = new_routing_map.view(routing_map.dtype)
 
         # Carry the real per-token top-k probability magnitudes to the new slots.
         # scores is non-zero only on the real top-k, so topk() extracts exactly them.
