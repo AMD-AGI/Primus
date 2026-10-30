@@ -91,6 +91,38 @@ def test_tokenize_formatted_sft_sample_marks_only_supervised_segments():
     assert loss_mask.sum().item() < len(loss_mask)
 
 
+class PaddedTokenizer(MockTokenizer):
+    """A tokenizer with a dedicated pad token distinct from EOS (as phi-4 and granite have)."""
+
+    pad = 9999
+    eos = 9998
+
+
+def test_tokenize_formatted_sft_sample_targets_exactly_the_response_tokens():
+    """The scored targets (``labels`` where ``loss_mask`` is 1) are the response tokens, in order: the first one
+    included, and never the pad token after the response."""
+    formatter = AlpacaFormatter()
+    response = "SFT is supervised fine-tuning."
+    formatted = formatter.format_sample(
+        normalize_sft_sample({"instruction": "What is SFT?", "response": response})
+    )
+    tok = PaddedTokenizer()
+    for inline_bos in (False, True):
+        input_ids, labels, loss_mask = tokenize_formatted_sft_sample(
+            formatted_sample=formatted,
+            tokenizer=tok,
+            max_seq_length=64,
+            bridge_compat_inline_bos=inline_bos,
+        )
+        targets = labels[loss_mask.bool()].tolist()
+        expected = tok.convert_tokens_to_ids(tok.tokenize(response))
+        if inline_bos:
+            expected = expected + [tok.eos]  # the Bridge-compatible path appends a supervised EOS
+        assert targets == expected
+        assert tok.pad not in targets
+        assert loss_mask[-1].item() == 0
+
+
 def test_forward_step_passes_new_megatron_kwargs_and_computes_masked_loss(monkeypatch):
     _install_fake_megatron_training(monkeypatch, use_legacy_models=False)
     forward_step = create_sft_forward_step()

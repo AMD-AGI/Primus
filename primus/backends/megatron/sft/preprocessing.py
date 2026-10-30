@@ -221,14 +221,21 @@ def tokenize_formatted_sft_sample(
     labels = input_ids.clone()
     if labels.numel() >= 2:
         labels[:-1] = input_ids[1:]
-    loss_mask_tensor = torch.tensor(loss_mask, dtype=torch.int64)
-    # The very last position has no next-token target; mask it out so the
-    # bogus ``labels[-1]`` slot never contributes to the loss. This is
-    # belt-and-suspenders -- under the typical SFT prompt template the last
-    # token is already eos/pad with loss_mask=0, but enforcing it here makes
-    # the contract explicit.
-    if loss_mask_tensor.numel() >= 1:
-        loss_mask_tensor[-1] = 0
+    # ``loss_mask`` above marks supervised *input* positions; the loss is
+    # ``CE(logits[i], labels[i]) * loss_mask[i]`` with ``labels[i] =
+    # input_ids[i+1]``, so the mask must move to label positions as well:
+    # ``loss_mask[i] = supervised[i+1]``. Without the shift the first
+    # response token was never a target and the token *after* the response
+    # was: with no EOS appended that is the pad id, so models with a
+    # dedicated pad token (e.g. phi-4, granite) were trained to emit it and
+    # their iter-1 loss read 18-28% above a transformers reference on the
+    # same alpaca samples. Mirrors the packed path (``packing.py``) and
+    # Bridge's ``loss_mask = item["loss_mask"][1:]``.
+    supervised = torch.tensor(loss_mask, dtype=torch.int64)
+    loss_mask_tensor = torch.zeros_like(supervised)
+    if supervised.numel() >= 2:
+        loss_mask_tensor[:-1] = supervised[1:]
+    # The very last position has no next-token target (it stays 0 above).
     return input_ids, labels, loss_mask_tensor
 
 
