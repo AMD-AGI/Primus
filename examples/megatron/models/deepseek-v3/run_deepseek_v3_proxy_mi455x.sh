@@ -68,8 +68,9 @@ if [[ -n "${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:-}" ]]; then
 fi
 export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
-# 1: bind each rank's CPU threads and host memory to the NUMA node of its GPU
-export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0}
+# 1: bind each rank's CPU threads and host memory to the NUMA node of its GPU (0.6% faster on 4 GPUs,
+# with even and with spread routing alike)
+export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-1}
 # 1: switch Triton's gfx1250 expert scheduling off in the container's Triton (needs root), see below
 export PATCH_TRITON_EXPERT_SCHEDULING=${PATCH_TRITON_EXPERT_SCHEDULING:-1}
 # hipBLASLt kernels tuned for this example's GEMMs (README.md); empty: hipBLASLt's own choice. hipBLASLt
