@@ -64,12 +64,15 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:4}
       overlap_grad_reduce: true
       overlap_param_gather: true
-      # the FlyDSL grouped GEMM's wgrad cannot accumulate into main_grad
-      gradient_accumulation_fusion: false
+      # wgrads accumulate straight into main_grad: the TE linears, the output layer and the MegaMoE
+      # experts (the FlyDSL grouped GEMM of the non-Mega MoE keeps DDP's separate add)
+      gradient_accumulation_fusion: true
       pp_warmup: true
 
       # data
       mock_data: true
+      # the Turbo attention takes causality from attn_mask_type; no 32 MiB mask per micro-batch
+      create_attention_mask_in_dataloader: false
       train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
@@ -115,6 +118,8 @@ modules:
       use_turbo_deepep: false
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
+      # the FP32 router GEMMs on Triton kernels (FP32-accurate backward) instead of hipBLASLt's
+      moe_router_triton_gemm: true
       turbo_sync_free_moe_stage: 1
       moe_use_fused_router_with_aux_score: true
       moe_permute_fusion: true
