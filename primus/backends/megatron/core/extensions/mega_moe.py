@@ -430,6 +430,17 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         """Init expert weights exactly like Megatron TEGroupedLinear."""
         self.experts.reset_parameters(self.ep_rank)
 
+    def _router_gemm_on_triton(self, hidden_states: torch.Tensor) -> bool:
+        """Whether the router's gating GEMM runs on moe_router_triton_gemm's kernels (no TE GEMM)."""
+        try:
+            from primus.backends.megatron.patches.moe_patches.router_triton_gemm_patches import (
+                router_gemm_on_triton,
+            )
+        except ImportError:  # Triton missing: the patch cannot be installed either
+            return False
+        dtype = {"fp32": torch.float32, "fp64": torch.float64}.get(self.config.moe_router_dtype, hidden_states.dtype)
+        return router_gemm_on_triton(hidden_states, self.router.weight, self.router.bias, dtype)
+
     @staticmethod
     def _assert_supported_config(config: TransformerConfig) -> None:
         """Only kernel-level constraints; routing features are handled by the router."""
@@ -472,22 +483,30 @@ class PrimusTurboMegaMoELayer(MegatronModule):
             for key, value in (("input_ids", input_ids), ("packed_seq_params", packed_seq_params))
             if value is not None
         }
-        # dense probs [T, E], aux-loss grad baked in
-        probs, _ = self.router(hidden_states, padding_mask, **router_kwargs)
+        # The shared expert can run on a side stream beside the routed experts, joining before the
+        # sum. Between fork and join the main stream must run no TE GEMM: TE's GEMMs share one
+        # global workspace. The top-k and the Mega kernels run none, and neither does a router whose
+        # gating GEMM is on moe_router_triton_gemm's kernels, so with those the fork goes before the
+        # router; otherwise it goes after it and _JoinStreamInBackward keeps the rule in backward.
+        # The side stream then fills the time the main stream spends waiting for the other EP
+        # ranks in the dispatch prologue, and for the host to relaunch after its read-back.
+        main, side = (torch.cuda.current_stream(), _shared_expert_stream()) if self.shared_expert_overlap else (None, None)
+        early = side is not None and self._router_gemm_on_triton(hidden_states)
 
-        if self.shared_expert_overlap:
-            # The shared expert runs on a side stream beside the routed experts. It forks after the
-            # router and joins before the sum: in between the main stream runs only the top-k and
-            # the Mega kernels, none of which is a TE GEMM (TE's GEMMs share one global workspace,
-            # see _JoinStreamInBackward, which keeps the same rule in backward). The prologue's
-            # host read-back waits on the main stream only, so the side stream keeps the GPU busy
-            # while the host relaunches.
-            main, side = torch.cuda.current_stream(), _shared_expert_stream()
-            probs = _JoinStreamInBackward.apply(probs, side)
+        def fork_shared_expert():
             side.wait_stream(main)
             with torch.cuda.stream(side):
-                shared_out = self.shared_experts(hidden_states)
+                out = self.shared_experts(hidden_states)
             hidden_states.record_stream(side)
+            return out
+
+        if early:
+            shared_out = fork_shared_expert()
+        # dense probs [T, E], aux-loss grad baked in
+        probs, _ = self.router(hidden_states, padding_mask, **router_kwargs)
+        if side is not None and not early:
+            probs = _JoinStreamInBackward.apply(probs, side)
+            shared_out = fork_shared_expert()
         probs = probs.reshape(-1, self.config.num_moe_experts)
 
         # dense -> sparse top-k
@@ -500,7 +519,7 @@ class PrimusTurboMegaMoELayer(MegatronModule):
             topk_weights.to(torch.float32),
         )
         y = y.reshape(in_shape).to(hidden_states.dtype)
-        if self.shared_expert_overlap:
+        if side is not None:
             main.wait_stream(side)
             shared_out.record_stream(main)
             y = y + _RecordStreamInBackward.apply(shared_out, side)

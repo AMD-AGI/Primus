@@ -119,6 +119,16 @@ def _supported(inp: torch.Tensor, weight: torch.Tensor, bias, router_dtype) -> b
     )
 
 
+def router_gemm_on_triton(inp: torch.Tensor, weight: torch.Tensor, bias, router_dtype) -> bool:
+    """Whether the router gating GEMM for these operands runs on these Triton kernels: the patch is
+    installed and the shapes are ones it takes (so the GEMM uses no TE workspace)."""
+    from megatron.core.transformer.moe import moe_utils
+
+    return bool(getattr(moe_utils.RouterGatingLinearFunction, "_primus_router_triton_gemm_patched", False)) and (
+        _supported(inp.reshape(-1, inp.shape[-1]), weight, bias, router_dtype)
+    )
+
+
 def _fwd(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     out = torch.empty(x.shape[0], w.shape[0], dtype=torch.float32, device=x.device)
     _router_fwd_kernel[(triton.cdiv(x.shape[0], _FWD_BLOCK_M),)](
