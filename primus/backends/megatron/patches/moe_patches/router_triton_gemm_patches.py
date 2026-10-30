@@ -30,8 +30,14 @@ from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _FWD_BLOCK_M, _FWD_BLOCK_K = 32, 64
-_DX_BLOCK_M, _DX_BLOCK_H = 128, 128
-_DW_BLOCK_M, _DW_BLOCK_H, _DW_SPLITS = 64, 64, 4
+# Measured on MI455X at 8192 tokens, hidden 7168, 16-256 experts. Four warps for dX: eight cost
+# 2.8x at 256 experts (338 -> 120 us). dW (BLOCK_M, BLOCK_H, splits, warps) depends on the expert
+# count: the narrow block wins from 128 experts up (256: 217 -> 130 us), the shipped one below.
+_DX_BLOCK_M, _DX_BLOCK_H, _DX_WARPS = 128, 128, 4
+
+
+def _dw_config(num_experts: int):
+    return (32, 64, 4, 4) if num_experts >= 128 else (64, 64, 4, 8)
 
 
 @triton.jit
@@ -107,7 +113,7 @@ def _supported(inp: torch.Tensor, weight: torch.Tensor, bias, router_dtype) -> b
         and n & (n - 1) == 0
         and k % _FWD_BLOCK_K == 0
         and k % _DX_BLOCK_H == 0
-        and k % _DW_BLOCK_H == 0
+        and k % _dw_config(n)[1] == 0
         # the kernels index with int32 offsets
         and inp.numel() < 2**31
     )
@@ -145,16 +151,17 @@ def _dx(g: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         N=w.shape[0],
         BLOCK_M=_DX_BLOCK_M,
         BLOCK_H=_DX_BLOCK_H,
-        num_warps=8,
+        num_warps=_DX_WARPS,
     )
     return dx
 
 
 def _dw(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     m = g.shape[0]
-    per = triton.cdiv(triton.cdiv(m, _DW_SPLITS), _DW_BLOCK_M) * _DW_BLOCK_M
-    p = torch.empty(_DW_SPLITS, g.shape[1], x.shape[1], dtype=torch.float32, device=g.device)
-    _router_dw_kernel[(x.shape[1] // _DW_BLOCK_H, _DW_SPLITS)](
+    block_m, block_h, splits, warps = _dw_config(g.shape[1])
+    per = triton.cdiv(triton.cdiv(m, splits), block_m) * block_m
+    p = torch.empty(splits, g.shape[1], x.shape[1], dtype=torch.float32, device=g.device)
+    _router_dw_kernel[(x.shape[1] // block_h, splits)](
         g,
         x,
         p,
@@ -165,9 +172,9 @@ def _dw(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         p.stride(1),
         N=g.shape[1],
         M_PER_SPLIT=per,
-        BLOCK_M=_DW_BLOCK_M,
-        BLOCK_H=_DW_BLOCK_H,
-        num_warps=8,
+        BLOCK_M=block_m,
+        BLOCK_H=block_h,
+        num_warps=warps,
     )
     return p.sum(0)
 
