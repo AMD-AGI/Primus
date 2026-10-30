@@ -12,6 +12,7 @@ from primus.backends.megatron.patches.te_patches.fused_adam_clip_patches import 
     _chained_step_with_device_clip,
     _clip_coeff,
     _copy_model_grads_to_decoupled,
+    _deferred_passthrough_reduce_max,
     _get_decoupled_grads_for_grad_norm,
     _get_grad_norm_tensor,
     _prepare_bf16_writeback,
@@ -146,6 +147,14 @@ def test_grad_norm_uses_megatron_019_getter(monkeypatch):
     optimizer = FakeOptimizer()
     assert torch.equal(_get_grad_norm_tensor(optimizer), torch.tensor([3.0]))
     assert seen == [[[optimizer.grad]]]
+
+
+def test_deferred_reduce_max_takes_megatron_019_group():
+    norm = torch.tensor([3.0])
+
+    assert _deferred_passthrough_reduce_max(norm) is norm
+    assert _deferred_passthrough_reduce_max(norm, group=object()) is norm
+    assert _deferred_passthrough_reduce_max(None, group=None) is None
 
 
 def _chained_optimizer(skip_threshold=float("inf"), grouped=False):
