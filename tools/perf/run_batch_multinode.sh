@@ -46,6 +46,8 @@
 # exits without touching docker, srun or the GPUs. TRAIN_STEPS=20 caps
 # training length for the whole batch; the CLI override flag is chosen from
 # the config's framework (see below). Unset keeps whatever the YAML specifies.
+# megatron_bridge configs always keep their YAML train_iters, since their LR
+# schedule is sized to it.
 # NUM_REPS defaults to 1.
 #
 # EXTRA_ENV="KEY=VALUE KEY2=VALUE2" forwards variables into the container as
@@ -54,8 +56,14 @@
 # PRIMUS_/NCCL_/RCCL_/GLOO_/IONIC_/HIPBLASLT_ prefixes, and silently drops the
 # rest -- which is why an exported DEBUG_HIP_DYNAMIC_QUEUES never arrived.
 #
+# DATA_PATH=/dir puts Primus's Hugging Face downloads (models, datasets)
+# there instead of <checkout>/data. The runner creates it on every
+# node, mounts it and passes it into the container; a node-local path means
+# one copy per node.
+#
 # TRAIN_STEPS CLI flags (Primus deep-merges unknown tokens after the train verb):
-#   megatron / megatron_bridge : --train_iters N
+#   megatron                   : --train_iters N
+#   megatron_bridge            : none; TRAIN_STEPS is not applied
 #   torchtitan                 : --training.steps N   (NOT --steps)
 #   maxtext                    : --steps N
 #   maxdiffusion               : --max_train_steps N  (NOT --steps; ignored if used)
@@ -63,7 +71,12 @@
 # Per-config behaviour:
 #   We keep launching the config until NUM_REPS successful runs are
 #   collected, or until MAX_ATTEMPTS_PER_CONFIG total attempts have been
-#   spent. Each *successful* attempt produces a log file in $RESULT_DIR:
+#   spent. A config that has not succeeded yet stops at the first failure
+#   that would recur: a config error during setup (AssertionError,
+#   ValueError, KeyError, ...; see PERF_CONFIG_ERRORS in lib/control.sh), an
+#   unusable NIC, or a second out-of-memory in a row (RETRY_ALL_FAILURES=1
+#   retries those too).
+#   Each *successful* attempt produces a log file in $RESULT_DIR:
 #       <framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>_<stamp>.log
 #   Each *failed* attempt is preserved as
 #       <framework>-<config>-<hash>-MBS<m>-GBS<g>-rep<r>-failed-attempt<n>_<stamp>.log
@@ -290,7 +303,7 @@ shopt -s nullglob
 # Select the configs to run: catalog (default, filtered by GPU/BACKEND) or a
 # directory of YAMLs (CONFIG_DIR). EXTRA_ENV, missing paths and duplicates are
 # all reported here, before anything launches.
-if ! check_batch_inputs || ! perf_check_run_limits; then
+if ! check_batch_inputs || ! perf_check_run_limits || ! perf_prepare_data_path; then
     exit "$PERF_EXIT_REFUSED"
 fi
 if [ "$PERF_RUN_DIFFUSION_DLRM" = 1 ]; then
@@ -319,6 +332,7 @@ build_launch_argv() {
     LAUNCH_ARGV=(
         "$PRIMUS_CLI" slurm srun -N "$NNODES"
         -- container --label "${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
+        ${PERF_DATA_ARGS[@]+"${PERF_DATA_ARGS[@]}"}
         ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"}
         -- train "$suite" --config "$config_file"
     )
@@ -385,13 +399,14 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# Host check            : ${PERF_HOST_CHECK:-not checked}"
     echo "# Launcher mode         : multi-node (primus-cli slurm srun -N $NNODES)"
     echo "# Container label       : ${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
-    echo "# TRAIN_STEPS           : ${TRAIN_STEPS:-<unset; use YAML>}"
+    echo "# TRAIN_STEPS           : $(train_steps_text)"
     echo "# NUM_REPS (target)     : $NUM_REPS"
     echo "# MAX_ATTEMPTS_PER_CFG  : $MAX_ATTEMPTS_PER_CONFIG"
     echo "# Run limits            : $(perf_run_limits_text)"
     echo "# FAIL_PATTERN          : ${FAIL_PATTERN:-<none>}"
     echo "# GPU check             : $PERF_GPU_CHECK"
     echo "# NCCL iface            : $PERF_NIC_CHECK"
+    echo "# DATA_PATH             : $PERF_DATA_CHECK"
     # CONFIG_FILES is populated by perf_select_configs in lib/common.sh.
     # shellcheck disable=SC2153
     echo "# Total configs         : ${#CONFIG_FILES[@]}"
@@ -416,16 +431,31 @@ for config_file in "${CONFIG_FILES[@]}"; do
 
     prepare_config "$config_file"
 
-    if ! build_launch_argv "$config_file" "$FRAMEWORK" "$TRAIN_SUITE"; then
+    if ! build_launch_argv "$config_file" "$FRAMEWORK" "$TRAIN_SUITE" 2>"$RESULT_DIR/.build_errors"; then
+        cat "$RESULT_DIR/.build_errors" >&2
         CONFIGS_SKIPPED=$((CONFIGS_SKIPPED + 1))
+        launcher_cmd="<none>"
+        perf_log_not_run "cannot build a launch command: $(sed -n '1s/^\[ERROR\] //p' "$RESULT_DIR/.build_errors")"
+        rm -f "$RESULT_DIR/.build_errors"
         echo "[SKIP/FAIL] ${FRAMEWORK}/${config_name}: cannot build launch command" \
             | tee -a "$SUMMARY_FILE"
         continue
     fi
+    cat "$RESULT_DIR/.build_errors" >&2
+    rm -f "$RESULT_DIR/.build_errors"
     launcher_cmd=$(perf_display_argv "${LAUNCH_ARGV[@]}")
+    if ! train_steps_conflict "$config_file" "$FRAMEWORK" "$MODULE"; then
+        CONFIGS_SKIPPED=$((CONFIGS_SKIPPED + 1))
+        perf_log_not_run "$TRAIN_STEPS_CONFLICT"
+        echo "[NOT RUN] ${FRAMEWORK}/${config_name}: $TRAIN_STEPS_CONFLICT" | tee -a "$SUMMARY_FILE"
+        echo "                    -> $(run_log_name 1)" | tee -a "$SUMMARY_FILE"
+        continue
+    fi
 
     good_runs=0
     attempts=0
+    last_reason=""
+    not_retried=0
 
     echo "" | tee -a "$SUMMARY_FILE"
     echo "==============================================================" | tee -a "$SUMMARY_FILE"
@@ -469,6 +499,21 @@ for config_file in "${CONFIG_FILES[@]}"; do
             echo "                    [FAIL] ${RUN_FAILURE_REASON} exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
                 | tee -a "$SUMMARY_FILE"
             echo "                           -> $failed_file" | tee -a "$SUMMARY_FILE"
+            perf_print_cause "$failed_file" "$RUN_FAILURE_REASON"
+            # A config that has not run once yet and fails like this would fail
+            # every attempt the same way. One OOM can be another process's or
+            # fragmentation's doing; two in a row are the config's.
+            recurs=$PERF_VERDICT_RECURS
+            if [ "$PERF_VERDICT_REASON" = oom ] && [ "$last_reason" = oom ]; then
+                recurs=1
+            fi
+            last_reason=$PERF_VERDICT_REASON
+            if [ "$recurs" = 1 ] && [ "$good_runs" -eq 0 ] && [ "$RETRY_ALL_FAILURES" != 1 ]; then
+                not_retried=1
+                echo "                           not retried: another attempt would fail the same way (RETRY_ALL_FAILURES=1 retries it)" \
+                    | tee -a "$SUMMARY_FILE"
+                break
+            fi
         else
             good_runs=$((good_runs + 1))
             RUNS_GOOD=$((RUNS_GOOD + 1))
@@ -483,8 +528,9 @@ for config_file in "${CONFIG_FILES[@]}"; do
         echo "[${FRAMEWORK}/${config_name}] COMPLETE — $good_runs successful runs in $attempts attempts" \
             | tee -a "$SUMMARY_FILE"
     else
-        echo "[${FRAMEWORK}/${config_name}] GAVE UP — only $good_runs/$NUM_REPS successful runs after $attempts attempts" \
-            | tee -a "$SUMMARY_FILE"
+        gave_up="GAVE UP — only $good_runs/$NUM_REPS successful runs after $attempts attempts"
+        [ "$not_retried" = 1 ] && gave_up="$gave_up (not retried: the failure would recur)"
+        echo "[${FRAMEWORK}/${config_name}] $gave_up" | tee -a "$SUMMARY_FILE"
     fi
 done
 
