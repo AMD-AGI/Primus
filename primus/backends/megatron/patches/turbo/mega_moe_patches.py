@@ -31,15 +31,17 @@ def _is_turbo_mega_moe_can_patch(ctx: PatchContext) -> bool:
       - primus_turbo package is installed
       - enable_primus_turbo == True
       - use_turbo_mega_moe == True
-      - 1 < expert_model_parallel_size <= 8
+      - 1 <= expert_model_parallel_size <= 8
     """
     args = get_args(ctx)
     use_turbo_mega_moe = bool(getattr(args, "use_turbo_mega_moe", False))
     bf16 = bool(getattr(args, "bf16", False))
     # The fused all-to-all rides intra-node peer transfers, so the EP group has to fit in one node.
+    # EP 1 runs the same kernels against a one-rank group (dispatch and combine become local
+    # copies), which lets a single GPU exercise the Mega MoE path.
     ep_size = int(getattr(args, "expert_model_parallel_size", 1))
 
-    return use_turbo_mega_moe and bf16 and 1 < ep_size <= 8 and is_primus_turbo_can_patch(ctx)
+    return use_turbo_mega_moe and bf16 and 1 <= ep_size <= 8 and is_primus_turbo_can_patch(ctx)
 
 
 def _is_turbo_mega_moe_mxfp8(ctx: PatchContext) -> bool:
