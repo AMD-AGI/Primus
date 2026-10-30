@@ -21,11 +21,17 @@ Megatron patch.
 Keep this module free of torch and AutoModel imports so unit tests can use it
 on stub classes.
 """
-from __future__ import annotations
+import __future__
 
+import functools
 import inspect
+import operator
 import textwrap
 from typing import Any, Callable, Sequence, Tuple
+
+_FUTURE_FLAGS = functools.reduce(
+    operator.or_, (getattr(__future__, name).compiler_flag for name in __future__.all_feature_names)
+)
 
 
 def patch_method_source(
@@ -41,14 +47,28 @@ def patch_method_source(
     somewhere it was never meant to go.
 
     A method can be source-patched only once, because ``inspect.getsource``
-    cannot read a function rebuilt by ``exec``. Batch all rewrites of one method
-    into a single call.
+    cannot read a function rebuilt from a string. Batch all rewrites of one
+    method into a single call. The rebuilt method keeps the ``from __future__``
+    imports of the module it came from.
 
     Raises:
-        RuntimeError: If an anchor does not match exactly once.
+        RuntimeError: If ``cls`` does not define the method itself, its source
+            cannot be read (as after an earlier source patch), or an anchor does
+            not match exactly once.
     """
-    original = cls.__dict__[method_name]
-    source = inspect.getsource(original)
+    original = cls.__dict__.get(method_name)
+    if original is None:
+        raise RuntimeError(
+            f"[SourcePatch] {method_name} is not defined on {cls.__name__} itself; "
+            "patch the class that defines it"
+        )
+    try:
+        source = inspect.getsource(original)
+    except OSError as exc:
+        raise RuntimeError(
+            f"[SourcePatch] cannot read the source of {cls.__name__}.{method_name}; "
+            "a method can be source-patched only once"
+        ) from exc
     for ori_code, new_code in replacements:
         found = source.count(ori_code)
         if found != 1:
@@ -63,8 +83,17 @@ def patch_method_source(
     # Compiling inside a throwaway class keeps the implicit ``__class__`` cell that
     # zero-argument ``super()`` needs; the cell is then retargeted to ``cls``.
     wrapper_source = "class _PrimusPatchWrapper:\n" + textwrap.indent(modified_source, "    ")
+    # dont_inherit: the rebuilt method takes the ``from __future__`` flags of the
+    # module it came from, never those of the module calling compile().
+    code = compile(
+        wrapper_source,
+        f"<source patch of {cls.__qualname__}.{method_name}>",
+        "exec",
+        flags=original.__code__.co_flags & _FUTURE_FLAGS,
+        dont_inherit=True,
+    )
     namespace: dict = {}
-    exec(wrapper_source, original.__globals__, namespace)  # noqa: S102
+    exec(code, original.__globals__, namespace)  # noqa: S102
     wrapper_cls = namespace["_PrimusPatchWrapper"]
     new_func = wrapper_cls.__dict__[original.__name__]
     if new_func.__closure__:
