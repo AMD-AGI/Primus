@@ -35,6 +35,18 @@ def _parse_resolution(value) -> tuple[int, int]:
     return size, size
 
 
+def _load_required_checkpoint(
+    module: torch.nn.Module, path: str, *, prefixes: tuple[str, ...], description: str
+) -> None:
+    missing, unexpected = load_matching(module, path, prefixes=prefixes)
+    if missing or unexpected:
+        raise RuntimeError(
+            f"{description} checkpoint does not match the model: "
+            f"missing={missing}, unexpected={unexpected}."
+        )
+    logger.info(f"Loaded {description} checkpoint from {path}.")
+
+
 def build_mochi_model(model_config: dict):
     cfg = dict(model_config.get("config") or {})
     encoder_cfg = dict(model_config.get("encoder") or {})
@@ -59,7 +71,8 @@ def build_mochi_model(model_config: dict):
         rope_theta=10000.0,
         attention_mode=str(cfg.get("attention_mode") or "sdpa"),
     )
-    if os.environ.get("BENCHMARK_DENOISER_ONLY") == "1":
+    denoiser_only = os.environ.get("BENCHMARK_DENOISER_ONLY") == "1"
+    if denoiser_only:
         encoder = torch.nn.Identity()
         text_encoder = torch.nn.Identity()
     else:
@@ -83,12 +96,20 @@ def build_mochi_model(model_config: dict):
 
     pretrained = materialize_pretrained("mochi-1", model_config.get("load_from_pretrained_path") or "")
     if pretrained:
-        missing, unexpected = load_matching(dit, pretrained, prefixes=("module.", "model.", "dit."))
-        logger.info(f"Loaded Mochi DiT. missing={missing} unexpected={unexpected}")
+        _load_required_checkpoint(
+            dit,
+            pretrained,
+            prefixes=("module.", "model.", "dit."),
+            description="Mochi DiT",
+        )
     vae_path = encoder_cfg.get("autoencoder") or ""
-    if vae_path:
-        missing, unexpected = load_matching(encoder, vae_path, prefixes=("encoder.", "module."))
-        logger.info(f"Loaded Mochi VAE encoder. missing={missing} unexpected={unexpected}")
+    if vae_path and not denoiser_only:
+        _load_required_checkpoint(
+            encoder,
+            vae_path,
+            prefixes=("encoder.", "module."),
+            description="Mochi VAE encoder",
+        )
 
     model = MochiForTraining(
         dit=dit,

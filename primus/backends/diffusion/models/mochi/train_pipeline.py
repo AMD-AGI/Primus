@@ -77,10 +77,13 @@ class MochiTrainPipeline:
             batch = self.encode_batch(
                 encoder=encoder, text_encoder=text_encoder, batch=batch, device=device, dtype=dtype
             )
-        latents = batch["latents"].to(device=device, dtype=dtype)
+        vae_latents = batch["latents"].to(device=device, dtype=dtype)
         text_hidden = batch["text_hidden"].to(device=device, dtype=dtype)
         text_mask = batch["text_mask"].to(device=device)
 
+        mean = STATS["mean"].to(device=device, dtype=torch.float32).view(1, -1, 1, 1, 1)
+        std = STATS["std"].to(device=device, dtype=torch.float32).view(1, -1, 1, 1, 1)
+        latents = ((vae_latents.float() - mean) / std).to(dtype=dtype)
         noise = torch.randn_like(latents)
         sigma = sample_shifted_logit_normal_sigmas(
             latents.shape[0], device=device, sigma_grid=self.sigma_grid
@@ -90,14 +93,15 @@ class MochiTrainPipeline:
         sigma = sigma.to(latents.dtype)
         batch_size, _, frames, height, width = latents.shape
         visual_tokens = frames * (height // 2) * (width // 2)
-        text_tokens = text_hidden.shape[1]
-        sequence = visual_tokens + text_tokens
+        visual_mask = torch.ones((batch_size, visual_tokens), device=device, dtype=torch.bool)
+        valid_tokens = torch.cat((visual_mask, text_mask.bool()), dim=1)
+        sequence_lengths = valid_tokens.sum(dim=1, dtype=torch.int32)
         packed_indices = {
-            "cu_seqlens_kv": torch.arange(
-                0, (batch_size + 1) * sequence, sequence, device=device, dtype=torch.int32
+            "cu_seqlens_kv": torch.cat(
+                (torch.zeros(1, device=device, dtype=torch.int32), sequence_lengths.cumsum(dim=0))
             ),
-            "max_seqlen_in_batch_kv": sequence,
-            "valid_token_indices_kv": torch.arange(batch_size * sequence, device=device),
+            "max_seqlen_in_batch_kv": int(sequence_lengths.max().item()),
+            "valid_token_indices_kv": valid_tokens.flatten().nonzero(as_tuple=False).flatten(),
         }
         prediction = dit(
             noisy,
@@ -110,8 +114,6 @@ class MochiTrainPipeline:
             y_mask=[text_mask],
             packed_indices=packed_indices,
         )
-        mean = STATS["mean"].to(device=device, dtype=torch.float32).view(1, -1, 1, 1, 1)
-        std = STATS["std"].to(device=device, dtype=torch.float32).view(1, -1, 1, 1, 1)
-        target = ((latents - noise).float() - mean) / std
+        target = (latents - noise).float()
         loss = F.mse_loss(prediction.float(), target)
         return {"loss": loss}

@@ -91,7 +91,12 @@ def flash_varlen_attn(
             softmax_scale=softmax_scale,
         )
         return mark(out)
-    # Packed tokens [total, heads, dim]. Official SDPA training uses batch size 1.
+    if cu_seqlens_q is not None and cu_seqlens_q.numel() > 2:
+        raise RuntimeError(
+            "Packed attention with more than one sequence requires flash attention; "
+            "the SDPA fallback cannot preserve sample boundaries."
+        )
+    # Packed tokens [total, heads, dim]. The SDPA fallback supports one sequence only.
     query = q.unsqueeze(0).transpose(1, 2)
     key = k.unsqueeze(0).transpose(1, 2)
     value = v.unsqueeze(0).transpose(1, 2)

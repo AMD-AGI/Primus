@@ -477,7 +477,7 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                         # tflops/s = total_flops * 1e-12 / step_time_gpu.
                         if step_time_gpu > 0 and local_samples_in_update > 0:
                             step_fps, step_tflops = benchmark_step_rates(
-                                local_batch_size=self.per_device_train_batch_size,
+                                local_batch_size=local_samples_in_update,
                                 step_time_gpu_s=step_time_gpu,
                                 total_flops=0.0 if total_flops is None else total_flops,
                             )

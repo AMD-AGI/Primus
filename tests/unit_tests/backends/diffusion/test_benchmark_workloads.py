@@ -71,7 +71,7 @@ def test_benchmark_downloads_keep_datasets_separate(monkeypatch, tmp_path):
 
     calls = {}
 
-    def fake_snapshot(repo_id, *, revision=None):
+    def fake_snapshot(repo_id, *, revision=None, allow_patterns=None):
         calls["repo"] = repo_id
         calls["revision"] = revision
         folder = download.dataset_folder(repo_id)
@@ -104,6 +104,95 @@ def test_benchmark_downloads_keep_datasets_separate(monkeypatch, tmp_path):
     assert download.huggingface_home() == Path.home() / "cache" / "huggingface"
     monkeypatch.setenv("HF_HOME", str(tmp_path / "custom"))
     assert download.huggingface_home() == tmp_path / "custom"
+
+
+def test_mochi_downloads_only_required_model_and_t5_files(monkeypatch, tmp_path):
+    import primus.backends.diffusion.utils.download as download
+
+    calls = []
+
+    def fake_snapshot(repo_id, *, revision=None, allow_patterns=None):
+        calls.append((repo_id, allow_patterns))
+        root = tmp_path / "mochi"
+        root.mkdir(exist_ok=True)
+        (root / "dit.safetensors").write_bytes(b"dit")
+        return str(root)
+
+    monkeypatch.setattr(download, "_snapshot", fake_snapshot)
+    assert download.materialize_pretrained("mochi-1", "") == str(tmp_path / "mochi" / "dit.safetensors")
+    download.prefetch_huggingface_repo(
+        "google/t5-v1_1-xxl", allow_patterns=download._MOCHI_T5_DOWNLOAD_PATTERNS
+    )
+    assert calls == [
+        ("genmo/mochi-1-preview", ["dit.safetensors", "encoder.safetensors"]),
+        ("google/t5-v1_1-xxl", download._MOCHI_T5_DOWNLOAD_PATTERNS),
+    ]
+
+
+def test_synthetic_mochi_dataset_skips_asset_downloads(monkeypatch, tmp_path):
+    import primus.backends.diffusion.utils.download as download
+
+    monkeypatch.setenv("PRIMUS_HF_HOME", str(tmp_path / "hf"))
+    monkeypatch.setattr(
+        download,
+        "materialize_pretrained",
+        lambda *_args, **_kwargs: pytest.fail("synthetic runs must not download checkpoints"),
+    )
+    assert (
+        download.stage_benchmark_assets(
+            "mochi-1",
+            dataset_path="synthetic:mochi",
+            pretrained="",
+        ).get("PRETRAINED_PATH")
+        is None
+    )
+
+
+def test_mochi_packed_attention_excludes_padding_tokens():
+    import torch
+
+    from primus.backends.diffusion.models.mochi.train_pipeline import MochiTrainPipeline
+
+    class _Dit(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(()))
+            self.packed_indices = None
+
+        def forward(self, latents, _sigma, **kwargs):
+            self.packed_indices = kwargs["packed_indices"]
+            return torch.zeros_like(latents) * self.weight
+
+    dit = _Dit()
+    pipeline = MochiTrainPipeline()
+    pipeline.compute_loss(
+        dit=dit,
+        encoder=None,
+        text_encoder=None,
+        batch={
+            "latents": torch.zeros(2, 12, 1, 2, 2),
+            "text_hidden": torch.zeros(2, 3, 4),
+            "text_mask": torch.tensor([[True, True, False], [True, False, False]]),
+        },
+    )
+    assert torch.equal(dit.packed_indices["cu_seqlens_kv"], torch.tensor([0, 3, 5]))
+    assert dit.packed_indices["max_seqlen_in_batch_kv"] == 3
+    assert torch.equal(dit.packed_indices["valid_token_indices_kv"], torch.tensor([0, 1, 2, 4, 5]))
+
+
+def test_mochi_checkpoint_loading_rejects_incomplete_weights(monkeypatch):
+    import torch
+
+    from primus.backends.diffusion.models.registrations import mochi
+
+    monkeypatch.setattr(mochi, "load_matching", lambda *_args, **_kwargs: (1, 0))
+    with pytest.raises(RuntimeError, match="missing=1, unexpected=0"):
+        mochi._load_required_checkpoint(
+            torch.nn.Identity(),
+            "checkpoint.safetensors",
+            prefixes=(),
+            description="Mochi DiT",
+        )
 
 
 def test_siheyuan_train_split_includes_both_archives_and_log_pngs(tmp_path):

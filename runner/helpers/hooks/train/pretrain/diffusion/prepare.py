@@ -88,7 +88,7 @@ def _looks_like_hf_reference(value: str) -> bool:
     if _looks_like_local_path(value):
         return False
     parts = value.split("/")
-    return len(parts) >= 2 and all(part for part in parts[:2])
+    return len(parts) == 2 and all(parts)
 
 
 def _validate_local_or_hf_id(value: str | None, description: str) -> None:
