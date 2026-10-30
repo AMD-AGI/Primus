@@ -11,7 +11,7 @@ Experiments live in [`configs/MI355X/diffusion/`](./configs/MI355X/diffusion/):
 | Model | Experiments |
 | --- | --- |
 | Wan 2.2 T2V A14B | `wan2_2_t2v_a14b-*.yaml` (pretrain, finetune, synthetic, TE FP8) |
-| FLUX.1-dev / schnell | `flux_1_dev-pretrain.yaml`, `flux_1_dev-synthetic.yaml`, `flux_1_schnell-synthetic.yaml` |
+| FLUX.1-dev / schnell | `flux_1_dev-pretrain.yaml`, `flux_1_dev-synthetic.yaml`, `flux_1_schnell-synthetic.yaml`, `flux_1_schnell-sq256-fp8.yaml` (256², FP8) |
 | Ideogram-4 | `ideogram4-pretrain.yaml` (synthetic), `ideogram4-pretrain-cache.yaml` (encoded cache), `ideogram4-pretrain-ddp.yaml` (DDP + ZeRO-1), `ideogram4-pretrain-ddp-cache.yaml` (DDP + ZeRO-1, encoded cache) |
 
 ## Launch
@@ -82,7 +82,9 @@ off by default, and the module that implements it documents its remaining keys.
 | --- | --- |
 | `primus_profiler.enabled` | torch profiler traces of a few steady-state steps, one per rank, written under `diffusion_profile/` in the experiment directory |
 | `primus_turbo.fp8_linear`, `primus_turbo.mxfp4_linear`, `primus_te.mxfp4_linear` | FP8 / MXFP4 linear layers. At most one applies, and it turns on `model.transformer_engine_linear`, the AutoModel setting that performs the swap. MXFP4 is experimental. |
+| `primus_turbo.fp8_linear_traceable`, and with it `fp8_linear_delayed_scaling`, `fp8_linear_inductor_cast`, `fp8_linear_shared_input_scales`, `fp8_linear_gemm_backend` | Tensorwise FP8 linears whose GEMMs stay inside compiled graphs, bit-identical to `primus_turbo.fp8_linear`. On top: scales reused between refreshes, scaled casts Inductor fuses into the producing kernel, one cast for an input several linears read, and the default FP8 GEMM backend. A dependent setting without what it depends on stops the run. |
 | `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend, or with Ideogram-4's variable-length attention. |
+| `primus_train.defer_host_sync` | Move the train loop's per-step loss and gradient-norm host syncs to logging steps, and build FLUX's latent position ids on the GPU, so the CPU can queue work ahead of the GPU. Logged values are unchanged. |
 | `primus_ideogram4.varlen_attention` | Ideogram-4 variable-length packed attention. Its backward is non-deterministic: the deterministic kernel needs far more memory at image-sized sequences. |
 | `primus_ideogram4.ac_every: n` | Ideogram-4: checkpoint every nth block instead of all |
 | `primus_ideogram4.zero1` | ZeRO-1 optimizer sharding on the DDP path. A ZeRO-1 run cannot save or resume: model checkpoint saving (`checkpoint.enabled`, which defaults to true) must be set to false, or the optimizer build raises. Single-rank and FSDP2 runs keep the plain optimizer, with a warning. Tested on a single node only. |
