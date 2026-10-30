@@ -172,7 +172,6 @@ def enabled(ctx, option, env_name):
     if not requested:
         return False
     expected = {
-        "stage": "mlperf_pretrain",
         "num_layers": 32,
         "hidden_size": 4096,
         "seq_length": 8192,

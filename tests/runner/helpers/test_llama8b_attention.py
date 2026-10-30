@@ -22,7 +22,7 @@ SPEC.loader.exec_module(MODULE)
 
 def config():
     return SimpleNamespace(
-        framework="megatron", stage="mlperf_pretrain", num_layers=32,
+        framework="megatron", num_layers=32,
         hidden_size=4096, num_attention_heads=32, num_query_groups=8,
         seq_length=8192, micro_batch_size=4, tensor_model_parallel_size=1,
         enable_primus_turbo=True, use_turbo_attention=True,
@@ -46,7 +46,7 @@ class PreparationTests(unittest.TestCase):
 
     def test_other_recipe_does_not_locate_turbo(self):
         other = config()
-        other.stage = "pretrain"
+        other.num_layers = 16
         with patch.object(MODULE.importlib.util, "find_spec") as locate:
             MODULE.prepare_attention(other)
             locate.assert_not_called()

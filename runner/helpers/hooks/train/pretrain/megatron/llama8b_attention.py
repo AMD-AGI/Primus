@@ -26,7 +26,6 @@ PATCH = Path(__file__).with_name("flash-attn-bwd-ds-layout.patch")
 def eligible(config):
     expected = {
         "framework": "megatron",
-        "stage": "mlperf_pretrain",
         "num_layers": 32,
         "hidden_size": 4096,
         "num_attention_heads": 32,
