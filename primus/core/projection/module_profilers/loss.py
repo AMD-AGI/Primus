@@ -91,8 +91,55 @@ class LossProfiler(BaseModuleProfiler):
         _, bwd = self._loss_time_ms(batch_size, seq_len)
         return bwd
 
+    def benchmark_loss(self, loss_owner, vocab_per_rank: int, batch_size: int, seq_len: int) -> None:
+        """Time the model's own ``compute_language_model_loss`` fwd + bwd.
+
+        "Fused" cross-entropy still runs as separate kernels after the output
+        GEMM (softmax statistics over the vocab, then the logits gradient), so
+        it is measured rather than assumed free; whichever loss backend the run
+        installs (Megatron fused CE, Primus-Turbo CE) is what gets timed.
+        """
+        import torch
+
+        from primus.core.projection.module_profilers.utils import _bench_iter_count
+
+        cp = self.config.model_parallel_config.context_model_parallel_size
+        s = seq_len // cp
+
+        def _measure():
+            logits = torch.randn(s, batch_size, vocab_per_rank, device="cuda", dtype=torch.bfloat16)
+            labels = torch.randint(0, vocab_per_rank, (batch_size, s), device="cuda")
+            ev = [torch.cuda.Event(enable_timing=True) for _ in range(3)]
+
+            def step(timed):
+                x = logits.detach().requires_grad_(True)
+                if timed:
+                    ev[0].record()
+                loss = loss_owner.compute_language_model_loss(labels, x)
+                if timed:
+                    ev[1].record()
+                loss.backward(torch.ones_like(loss))
+                if timed:
+                    ev[2].record()
+
+            num_warmup, num_iters = _bench_iter_count(3, 10)
+            for _ in range(num_warmup):
+                step(False)
+            fwd = bwd = 0.0
+            for _ in range(num_iters):
+                step(True)
+                torch.cuda.synchronize()
+                fwd += ev[0].elapsed_time(ev[1])
+                bwd += ev[1].elapsed_time(ev[2])
+            return fwd / num_iters, bwd / num_iters
+
+        self._measured = _measure()
+        torch.cuda.empty_cache()
+
     def measured_forward_time(self, batch_size: int, seq_len: int) -> float:
-        return self.estimated_forward_time(batch_size, seq_len)
+        measured = getattr(self, "_measured", None)
+        return measured[0] if measured else self.estimated_forward_time(batch_size, seq_len)
 
     def measured_backward_time(self, batch_size: int, seq_len: int) -> float:
-        return self.estimated_backward_time(batch_size, seq_len)
+        measured = getattr(self, "_measured", None)
+        return measured[1] if measured else self.estimated_backward_time(batch_size, seq_len)

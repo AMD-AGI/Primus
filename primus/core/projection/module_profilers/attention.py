@@ -859,11 +859,48 @@ class AttentionProfiler(BaseModuleProfiler):
                 # Use actual GPU benchmarking
                 tcfg = getattr(self.module, "config", None)
                 ishapes, fkwargs = self.require_bench_inputs(ATTENTION, self.module, batch_size, seq_len)
-                self._cached_results = benchmark_layer(
-                    self.module, ishapes, transformer_config=tcfg, forward_kwargs=fkwargs
+                self._cached_results = self._benchmark_window_variants(
+                    lambda: benchmark_layer(self.module, ishapes, transformer_config=tcfg, forward_kwargs=fkwargs)
                 )
             self._cache_key = cache_key
         return self._cached_results
+
+    def _benchmark_window_variants(self, run) -> tuple[float, float, int]:
+        """Benchmark both attention variants of alternating sliding-window models.
+
+        GPT-OSS-style sink attention applies its sliding window to odd
+        (1-indexed) layers only, so one benchmarked layer covers only one of
+        the two variants. Both are timed and kept in ``window_variants`` so the
+        projection can weight them by the full model's layer pattern; the
+        benchmarked layer's own variant is returned.
+        """
+        self.window_variants = None
+        cores = [
+            m
+            for m in self.module.modules()
+            if getattr(m, "sink_sliding_window", 0) and getattr(m, "sink_window_even_layers_only", False)
+        ]
+        if not cores:
+            return run()
+        original = [m.layer_number for m in cores]
+        results = {}
+        try:
+            for windowed in (True, False):
+                for m, n in zip(cores, original):
+                    m.layer_number = n if ((n - 1) % 2 == 0) == windowed else n + 1
+                results[windowed] = run()
+        finally:
+            for m, n in zip(cores, original):
+                m.layer_number = n
+        self.window_variants = {
+            "windowed": {"forward_time_ms": results[True][0], "backward_time_ms": results[True][1]},
+            "full": {"forward_time_ms": results[False][0], "backward_time_ms": results[False][1]},
+        }
+        print(
+            f"  Attention variants: windowed fwd={results[True][0]:.2f} bwd={results[True][1]:.2f} ms, "
+            f"full fwd={results[False][0]:.2f} bwd={results[False][1]:.2f} ms"
+        )
+        return results[(original[0] - 1) % 2 == 0]
 
     def measured_forward_time(self, batch_size: int, seq_len: int) -> float:
         forward_time, _, _ = self._get_benchmark_results(batch_size, seq_len)

@@ -427,6 +427,8 @@ def _maybe_create_quantized_weight_buffers(
     dest_dtype: torch.dtype,
     quant_config: "PrimusTurboQuantConfig",
     disable_parameter_transpose_cache: bool,
+    pad_align_last: int = 0,
+    pad_align_penultimate: int = 0,
 ):
     """Quantize ``weight`` into a rowwise buffer plus an optional transposed
     (colwise) buffer, returning ``(rowwise, colwise_or_None)``.
@@ -435,9 +437,33 @@ def _maybe_create_quantized_weight_buffers(
     scaling recipe from the quant config and handles per-granularity transpose.
     Falls back to a manual rowwise/colwise quantize on older primus_turbo builds
     that do not export ``create_quantized_weight`` yet.
+
+    ``pad_align_last`` / ``pad_align_penultimate`` zero-pad the FP8 tensorwise
+    payload the way primus_turbo's fused grouped MLP pads the weights it
+    quantizes itself; a cached weight must match that layout, since the op
+    pads its activation and asserts the contraction dims agree.
     """
     quant_config_internal = quant_config.data()
     need_weight_transpose_cache = not disable_parameter_transpose_cache
+
+    if pad_align_last or pad_align_penultimate:
+        assert (
+            quant_config.current_scaling()
+        ), "padded quantized weight buffers are only supported for tensorwise current scaling"
+        quantized_weight_rowwise = PrimusTurboQuantizedTensor.quantize(
+            weight,
+            dest_dtype=dest_dtype,
+            granularity=quant_config_internal.granularity,
+            block_size=quant_config_internal.block_size,
+            scaling_recipe=ScalingRecipe(),
+            axis=-1,
+            pad_align_last=pad_align_last,
+            pad_align_penultimate=pad_align_penultimate,
+        )
+        quantized_weight_colwise = (
+            quantized_weight_rowwise.transpose(-2, -1) if need_weight_transpose_cache else None
+        )
+        return quantized_weight_rowwise, quantized_weight_colwise
 
     if create_quantized_weight is not None:
         return create_quantized_weight(
@@ -2352,7 +2378,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         self._ensure_weight_views()
         return super().state_dict(*args, **kwargs)
 
-    def prepare_weights(self, x: torch.Tensor):
+    def prepare_weights(self, x: torch.Tensor, fp8_pad_align_last: int = 0, fp8_pad_align_penultimate: int = 0):
         """Resolve the weight operand for grouped GEMM / fused grouped MLP.
 
         Owns ``is_first_microbatch``: first-microbatch quantized-weight cache,
@@ -2360,6 +2386,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         still sees ``main_grad`` on the real ``self.weights`` Parameter.
         Returns ``(x, weight, fuse_wgrad_accum_pattern)`` where ``weight`` is
         either that Parameter or a :class:`PrimusTurboQuantizedTensorPair`.
+        ``fp8_pad_align_*`` pad the cached FP8 weight to the layout the
+        consuming op expects (see :func:`_maybe_create_quantized_weight_buffers`).
         """
         self._ensure_weight_views()
         weights = self.weights
@@ -2381,6 +2409,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                     quant_config,
                     disable_parameter_transpose_cache=self.disable_parameter_transpose_cache
                     or quant_config.current_scaling(),
+                    pad_align_last=fp8_pad_align_last,
+                    pad_align_penultimate=fp8_pad_align_penultimate,
                 )
             x, quantized_weights = _bridge_weight_grad(
                 x,

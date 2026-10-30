@@ -78,6 +78,8 @@ class MegatronBenchAdapter(BenchModelAdapter):
                 parts.embedding = unwrapped.embedding
             if hasattr(unwrapped, "output_layer"):
                 parts.output_layer = unwrapped.output_layer
+                if hasattr(unwrapped, "compute_language_model_loss"):
+                    parts.loss_owner = unwrapped
 
         return parts
 
