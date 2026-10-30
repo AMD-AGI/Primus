@@ -30,6 +30,8 @@ torch = pytest.importorskip("torch")
 from primus.backends.automodel.models.flux import latent_ids  # noqa: E402
 from primus.backends.automodel.training import deferred_host_sync  # noqa: E402
 
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
 # A miniature of TrainDiffusionRecipe.run_train_validation_loop. Every line the
 # rewrite anchors on is reproduced at the upstream indentation; the rest is the
 # minimum needed to observe what the loop logs and when it holds Python floats.
@@ -119,21 +121,22 @@ def _run(recipe_cls, steps, log_every=2, ckpt_every=3):
     return recipe
 
 
-def test_logged_values_are_unchanged(stub_module):
-    steps = _steps()
-    reference = _run(stub_module.Recipe, steps)
+def test_logged_values_are_unchanged_to_the_bit(stub_module):
+    """The deferred sum is float64, like the Python float it replaces."""
+    steps = _steps(n=24)
+    reference = _run(stub_module.Recipe, steps, log_every=4, ckpt_every=6)
 
     assert deferred_host_sync.patch_recipe(stub_module.Recipe) is True
-    deferred = _run(stub_module.Recipe, steps)
+    deferred = _run(stub_module.Recipe, steps, log_every=4, ckpt_every=6)
 
-    assert len(deferred.logged) == len(reference.logged) == 3
+    assert len(deferred.logged) == len(reference.logged) == 6
     for got, want in zip(deferred.logged, reference.logged):
         assert all(isinstance(value, float) for value in got)
-        assert got == pytest.approx(want, rel=1e-6)
+        assert got == want
     assert all(isinstance(value, float) for value in deferred.checkpoints)
-    assert deferred.checkpoints == pytest.approx(reference.checkpoints, rel=1e-6)
+    assert deferred.checkpoints == reference.checkpoints
     assert isinstance(deferred.epoch_avgs[0], float)
-    assert deferred.epoch_avgs == pytest.approx(reference.epoch_avgs, rel=1e-6)
+    assert deferred.epoch_avgs == reference.epoch_avgs
 
 
 def test_only_logging_steps_hold_python_floats(stub_module):
@@ -164,17 +167,27 @@ def test_a_profiler_wrapped_loop_is_refused(stub_module):
         deferred_host_sync.patch_recipe(stub_module.Recipe)
 
 
+def _pinned_train_loop() -> Path:
+    """AutoModel's diffusion train loop: the submodule checkout, else the installed package."""
+    packages = [REPO_ROOT / "third_party" / "Automodel" / "nemo_automodel"]
+    spec = importlib.util.find_spec("nemo_automodel")
+    if spec is not None and spec.submodule_search_locations:
+        packages.append(Path(list(spec.submodule_search_locations)[0]))
+    for package in packages:
+        train_py = package / "recipes" / "diffusion" / "train.py"
+        if train_py.is_file():
+            return train_py
+    pytest.skip("neither the AutoModel submodule nor nemo_automodel is available")
+
+
 def test_the_anchors_match_the_pinned_train_loop(tmp_path, monkeypatch):
     """Fails when AutoModel's train loop drifts away from the rewrite's anchors.
 
     The method is read from the file rather than imported, so this test never
-    rewrites the real recipe class for the rest of the session.
+    rewrites the real recipe class for the rest of the session, and it runs
+    where AutoModel is checked out but not installed, as in CI.
     """
-    spec = importlib.util.find_spec("nemo_automodel")
-    if spec is None or not spec.submodule_search_locations:
-        pytest.skip("nemo_automodel is not installed")
-    train_py = Path(list(spec.submodule_search_locations)[0]) / "recipes" / "diffusion" / "train.py"
-    lines = train_py.read_text().splitlines(keepends=True)
+    lines = _pinned_train_loop().read_text().splitlines(keepends=True)
 
     tree = ast.parse("".join(lines))
     recipe = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TrainDiffusionRecipe")

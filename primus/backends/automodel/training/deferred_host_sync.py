@@ -14,11 +14,13 @@ WHY:
   FLUX.1-schnell FP8, of which deferring recovered 15 ms per step.
 
 WHAT:
-  The loss mean stays a GPU tensor and is accumulated as one. ``group_loss_mean``,
-  ``epoch_loss`` and ``grad_norm`` become Python floats only on logging steps
+  The loss mean stays a GPU tensor and is accumulated as one, in float64 like the
+  Python float it replaces. ``group_loss_mean``, ``epoch_loss`` and ``grad_norm``
+  become Python floats only on logging steps
   (``step_scheduler.log_remote_every_steps``), where the timing code synchronizes
   anyway, and where a checkpoint or the epoch summary needs the loss. Logged
-  values are unchanged; only the point at which the CPU waits for them moves.
+  values are unchanged to the bit; only the point at which the CPU waits for them
+  moves.
 
   The edits are source rewrites of the upstream method (``_source_patch``): they
   sit in the middle of a long loop that no wrapper can reach. An anchor that no
@@ -32,6 +34,7 @@ from __future__ import annotations
 import logging
 
 from primus.backends.automodel import options
+from primus.backends.automodel._source_patch import patch_method_source
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +50,7 @@ REPLACEMENTS = [
         "                group_loss_mean = float(torch.stack(micro_losses).mean().item())\n"
         "                epoch_loss += group_loss_mean\n",
         "                group_loss_mean = torch.stack(micro_losses).mean().detach()\n"
-        "                epoch_loss = epoch_loss + group_loss_mean\n",
+        "                epoch_loss = epoch_loss + group_loss_mean.double()\n",
     ),
     (
         "                if should_log:\n" "                    elapsed_seconds, perf_window_end_time = ",
@@ -90,8 +93,6 @@ def patch_recipe(recipe_cls) -> bool:
             "[PrimusDeferredHostSync] run_train_validation_loop is already wrapped by the profiler; "
             "this rewrite must be installed first (lower patch priority)."
         )
-
-    from primus.backends.automodel._source_patch import patch_method_source
 
     patch_method_source(recipe_cls, "run_train_validation_loop", REPLACEMENTS)
     setattr(recipe_cls, _PATCH_FLAG, True)
