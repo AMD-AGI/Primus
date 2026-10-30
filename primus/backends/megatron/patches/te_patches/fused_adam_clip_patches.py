@@ -24,6 +24,7 @@ optimizer no longer drains the GPU pipeline through ``Tensor.item()``.
 
 from __future__ import annotations
 
+import math
 import os
 from functools import wraps
 from pathlib import Path
@@ -77,12 +78,29 @@ def _clip_coeff(total_norm: float, max_norm: float) -> float:
     return min(1.0, float(max_norm) / (float(total_norm) + 1.0e-6))
 
 
+def _grads_for_grad_norm(optimizer):
+    """Gradients of the main norm. Megatron-core 0.19 renamed ``get_main_grads_for_grad_norm``."""
+
+    getter = getattr(optimizer, "get_grads_for_grad_norm", None)
+    if getter is None:
+        getter = optimizer.get_main_grads_for_grad_norm
+    return getter()
+
+
+def _separate_grad_norm_groups() -> tuple:
+    """Megatron-core 0.19's separately clipped grad-norm groups (MTP); none before it."""
+
+    from megatron.core.optimizer import optimizer as mcore_optimizer
+
+    return tuple(getattr(mcore_optimizer, "SEPARATE_GRAD_NORM_GROUPS", ()))
+
+
 def _get_grad_norm_tensor(optimizer) -> torch.Tensor:
     """Megatron's FP32 L2 norm path without its final host synchronization."""
 
     from megatron.core.optimizer import clip_grads
 
-    grads_for_norm = optimizer.get_main_grads_for_grad_norm()
+    grads_for_norm = _grads_for_grad_norm(optimizer)
     if grads_for_norm:
         dummy_overflow_buf = getattr(optimizer, "_primus_norm_overflow_buf", None)
         grad_device = grads_for_norm[0].device
@@ -358,6 +376,7 @@ def _copy_only_fp32_model_groups(distributed_optimizer) -> None:
 def _chained_step_with_device_clip(optimizer, fused_adam_type):
     """Run ChainedOptimizer.step while deferring clipping to each fused Adam."""
 
+    optimizer.grad_norms_by_group = {}
     found_inf_flag = optimizer.prepare_grads()
     if found_inf_flag:
         return False, None, None
@@ -365,6 +384,14 @@ def _chained_step_with_device_clip(optimizer, fused_adam_type):
         raise RuntimeError(
             "PRIMUS_FUSED_ADAM_CLIP requires chained optimizers to share "
             "their gradient-statistics process group"
+        )
+    has_grad_norm_group = getattr(optimizer, "has_grad_norm_group", None)
+    if has_grad_norm_group is not None and any(
+        has_grad_norm_group(group) for group in _separate_grad_norm_groups()
+    ):
+        raise RuntimeError(
+            "PRIMUS_FUSED_ADAM_CLIP clips with one global norm, but Megatron clips "
+            "a separate grad-norm group (MTP) with its own"
         )
 
     grad_norm = _get_grad_norm_tensor(optimizer)
@@ -375,6 +402,11 @@ def _chained_step_with_device_clip(optimizer, fused_adam_type):
             continue
         if child_optimizer.config.clip_grad <= 0.0:
             raise RuntimeError("PRIMUS_FUSED_ADAM_CLIP requires a positive clip_grad")
+        if math.isfinite(getattr(child_optimizer.config, "grad_norm_skip_threshold", math.inf)):
+            raise RuntimeError(
+                "PRIMUS_FUSED_ADAM_CLIP keeps the grad norm on the device and cannot "
+                "apply grad_norm_skip_threshold"
+            )
         inner_optimizer = child_optimizer.optimizer
         if not isinstance(inner_optimizer, fused_adam_type):
             raise TypeError(
@@ -409,7 +441,12 @@ def _install_patch() -> None:
     original_adam_step = FusedAdam.step
     original_scale_loss = MegatronOptimizer.scale_loss
     original_chained_get_loss_scale = ChainedOptimizer.get_loss_scale
-    original_get_main_grads = MegatronOptimizer.get_main_grads_for_grad_norm
+    grads_for_norm_name = (
+        "get_grads_for_grad_norm"
+        if hasattr(MegatronOptimizer, "get_grads_for_grad_norm")
+        else "get_main_grads_for_grad_norm"
+    )
+    original_get_main_grads = getattr(MegatronOptimizer, grads_for_norm_name)
     original_copy_model_grads = DistributedOptimizer._copy_model_grads_to_main_grads
     original_copy_main_params = DistributedOptimizer._copy_main_params_to_model_params
     original_collect_grads = DistributedOptimizer._collect_main_grad_data_for_unscaling
@@ -537,7 +574,9 @@ def _install_patch() -> None:
             self._primus_bf16_writeback_active = False
 
     @wraps(original_get_main_grads)
-    def patched_get_main_grads_for_grad_norm(self):
+    def patched_get_main_grads_for_grad_norm(self, grad_norm_group=None):
+        if grad_norm_group is not None:
+            return original_get_main_grads(self, grad_norm_group)
         if not _bf16_grad_enabled():
             return original_get_main_grads(self)
         return _get_decoupled_grads_for_grad_norm(self)
@@ -593,7 +632,7 @@ def _install_patch() -> None:
     MegatronOptimizer.scale_loss = patched_scale_loss
     ChainedOptimizer.get_loss_scale = patched_chained_get_loss_scale
     OptimizerConfig.__post_init__ = patched_optimizer_config_post_init
-    MegatronOptimizer.get_main_grads_for_grad_norm = patched_get_main_grads_for_grad_norm
+    setattr(MegatronOptimizer, grads_for_norm_name, patched_get_main_grads_for_grad_norm)
     MegatronOptimizer.clip_grad_norm = patched_clip_grad_norm
     ChainedOptimizer.step = patched_chained_step
     DistributedOptimizer._copy_main_params_to_model_params = patched_copy_main_params_to_model_params

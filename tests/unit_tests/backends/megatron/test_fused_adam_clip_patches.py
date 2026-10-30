@@ -119,6 +119,89 @@ def test_chained_step_forwards_device_norm_to_each_adam(monkeypatch):
     assert [child.optimizer._primus_clip_max_norm for child in optimizer.chained_optimizers] == [1.0, 2.0]
 
 
+def test_grad_norm_uses_megatron_019_getter(monkeypatch):
+    from megatron.core.optimizer import clip_grads
+
+    class FakeOptimizer:
+        def __init__(self):
+            self.grad = torch.ones(4, dtype=torch.float32)
+
+        def get_grads_for_grad_norm(self):
+            return [self.grad]
+
+        def get_grad_stats_parallel_group(self):
+            return None
+
+    seen = []
+    monkeypatch.setattr(
+        clip_grads,
+        "multi_tensor_applier",
+        lambda impl, overflow, tensor_lists, per_parameter: (
+            seen.append(tensor_lists) or torch.tensor([3.0]),
+            None,
+        ),
+    )
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda value, op, group: None)
+
+    optimizer = FakeOptimizer()
+    assert torch.equal(_get_grad_norm_tensor(optimizer), torch.tensor([3.0]))
+    assert seen == [[[optimizer.grad]]]
+
+
+def _chained_optimizer(skip_threshold=float("inf"), grouped=False):
+    class FakeAdam:
+        pass
+
+    class FakeChildOptimizer:
+        def __init__(self):
+            self.optimizer = FakeAdam()
+            self.config = type("Config", (), {"clip_grad": 1.0, "grad_norm_skip_threshold": skip_threshold})()
+
+        def get_parameters(self):
+            return [object()]
+
+    class FakeChainedOptimizer:
+        def __init__(self):
+            self.chained_optimizers = [FakeChildOptimizer()]
+            self.config = type("Config", (), {"log_num_zeros_in_grad": False})()
+
+        def prepare_grads(self):
+            return False
+
+        def grads_states_parallel_group_is_shared(self):
+            return True
+
+        def has_grad_norm_group(self, group):
+            return grouped
+
+        def step_with_ready_grads(self):
+            return True
+
+    return FakeChainedOptimizer(), FakeAdam
+
+
+def test_chained_step_rejects_grad_norm_skip_threshold(monkeypatch):
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.te_patches.fused_adam_clip_patches._get_grad_norm_tensor",
+        lambda optimizer: torch.tensor([3.0]),
+    )
+    optimizer, adam_type = _chained_optimizer(skip_threshold=10.0)
+
+    with pytest.raises(RuntimeError, match="grad_norm_skip_threshold"):
+        _chained_step_with_device_clip(optimizer, adam_type)
+
+
+def test_chained_step_rejects_separate_grad_norm_group(monkeypatch):
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.te_patches.fused_adam_clip_patches._separate_grad_norm_groups",
+        lambda: ("mtp",),
+    )
+    optimizer, adam_type = _chained_optimizer(grouped=True)
+
+    with pytest.raises(RuntimeError, match="separate grad-norm group"):
+        _chained_step_with_device_clip(optimizer, adam_type)
+
+
 def test_metadata_carries_bf16_writeback_address():
     grad = torch.zeros(5, dtype=torch.float32)
     param = torch.zeros(5, dtype=torch.float32)
