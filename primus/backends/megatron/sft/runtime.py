@@ -127,10 +127,25 @@ def run_sft_pretrain(
         if _supports_kwarg(sig, "store"):
             kwargs["store"] = store
 
-    wrapped_pretrain(
-        datasets_provider,
-        model_provider,
-        ModelType.encoder_or_decoder,
-        forward_step,
-        **kwargs,
+    from primus.backends.megatron.training.run_config import (
+        build_run_config,
+        uses_cfg_container_api,
     )
+
+    if uses_cfg_container_api(pretrain_fn):
+        wrapped_pretrain(
+            build_run_config(),
+            datasets_provider,
+            ModelType.encoder_or_decoder,
+            forward_step,
+            model_provider=model_provider,
+            **kwargs,
+        )
+    else:
+        wrapped_pretrain(
+            datasets_provider,
+            model_provider,
+            ModelType.encoder_or_decoder,
+            forward_step,
+            **kwargs,
+        )

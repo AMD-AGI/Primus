@@ -38,6 +38,11 @@ def log_info(msg):
         print(f"[NODE-{get_node_rank()}({get_hostname()})] [INFO] {msg}", file=sys.stderr)
 
 
+def log_warning(msg):
+    if get_node_rank() == 0 and _current_log_level() <= _LOG_LEVELS["WARN"]:
+        print(f"[NODE-{get_node_rank()}({get_hostname()})] [WARN] {msg}", file=sys.stderr)
+
+
 def log_error_and_exit(msg):
     if get_node_rank() == 0:
         print(f"[NODE-{get_node_rank()}({get_hostname()})] [ERROR] {msg}", file=sys.stderr)

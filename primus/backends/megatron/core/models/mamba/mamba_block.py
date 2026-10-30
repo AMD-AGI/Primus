@@ -172,7 +172,21 @@ class MambaStack(MegatronModule):
         inference_params: Optional[BaseInferenceContext] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
         padding_mask=None,
+        packed_seq_params_by_layout=None,
+        cp_layout_plan=None,
+        input_ids=None,
     ):
+        # Megatron-LM main's HybridModel passes these for its context-parallel layouts and
+        # hash routing; this stack predates both, so refuse rather than silently ignore them.
+        # Without CP the layout dict is still passed, as {layout: None}.
+        has_layout_packing = packed_seq_params_by_layout is not None and any(
+            params is not None for params in packed_seq_params_by_layout.values()
+        )
+        if has_layout_packing or cp_layout_plan is not None or input_ids is not None:
+            raise NotImplementedError(
+                "Primus MambaStack does not support packed_seq_params_by_layout, cp_layout_plan "
+                "or hash-routing input_ids"
+            )
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         if not self.pre_process:
