@@ -9,6 +9,79 @@ Argument parsing utilities for Primus CLI.
 """
 
 import ast
+import re
+from typing import Any
+
+_UNSET_STRINGS = ("", "null", "~")
+
+
+def is_unset(value: Any) -> bool:
+    """True for None, an empty or blank string, and the strings ``null`` and ``~`` (any case): a
+    YAML null written as quoted text, or a null passed on the command line. The string ``none`` is
+    a value (a path or an enum value such as ``position_embedding_type: none``); the command-line
+    parser already reads a bare ``None`` as None."""
+    return value is None or (isinstance(value, str) and value.strip().lower() in _UNSET_STRINGS)
+
+
+_SWITCH_STRINGS = {
+    "true": True,
+    "1": True,
+    "yes": True,
+    "on": True,
+    "false": False,
+    "0": False,
+    "no": False,
+    "off": False,
+}
+
+
+def parse_switch(value: Any, key: str = "value") -> bool:
+    """An on/off setting: a bool, the int 0 / 1, or one of the strings true / false / yes / no /
+    on / off / 1 / 0 (any case, surrounding spaces ignored). Anything else raises ValueError,
+    including ``1.0``, ``"+1"`` and ``"00"`` (``bool("off")`` would be True). The caller decides
+    what an unset value (:func:`is_unset`) means."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _SWITCH_STRINGS:
+            return _SWITCH_STRINGS[text]
+    raise ValueError(f"{key} must be true or false (also 1/0, yes/no, on/off), got {value!r}")
+
+
+def parse_optional_switch(value: Any, key: str = "value") -> bool:
+    """An optional on/off setting: unset (:func:`is_unset`) is off, anything else is
+    :func:`parse_switch` (a value that is not a switch raises ValueError naming ``key``)."""
+    return False if is_unset(value) else parse_switch(value, key)
+
+
+# [0-9] is ASCII by itself (so "１２" does not match); re.ASCII limits \s to ASCII spaces.
+_INT_TEXT = re.compile(r"\s*[-+]?[0-9]+(\.0+)?\s*", re.ASCII)
+
+
+def as_int(value: Any, key: str = "value") -> int:
+    """An integer setting from YAML or the command line: an int, an integral float (``4.0``), or a
+    string of ASCII digits 0-9 with an optional sign, an optional fraction of zeros (``.0``,
+    ``.00``) and surrounding spaces (``"4"``, ``" -2 "``, ``"4.0"``). A float must be exact
+    (``|value| <= 2**53``): ``1e20`` raises. Anything else (a bool, ``4.5``, ``"two"``, ``"１２"``, an
+    unresolved ``"${TP:1}"``, None) raises ValueError naming ``key``. The sign is kept: the caller
+    checks the range (e.g. a size must be >= 1) and decides what an unset value
+    (:func:`is_unset`) means."""
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer, got {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer() and abs(value) <= 2**53:
+        return int(value)
+    if isinstance(value, str) and _INT_TEXT.fullmatch(value):
+        try:
+            return int(value.strip().split(".")[0])
+        except ValueError:  # e.g. more digits than sys.get_int_max_str_digits()
+            raise ValueError(f"{key} must be an integer, got a {len(value)}-character number") from None
+    hint = " (an unresolved ${VAR} in the config?)" if isinstance(value, str) and "${" in value else ""
+    raise ValueError(f"{key} must be an integer, got {value!r}{hint}")
 
 
 def _coerce_cli_value_modern(raw_value):

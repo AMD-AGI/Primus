@@ -1,0 +1,94 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:olmo_3_1025_7B-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# OLMo-3-1025-7B BF16 pretrain example for MI300X (1 node, TP=1, mock data).
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: olmo_3_1025_7B.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_OLMo3_Pretrain"
+      stderr_sink_level: DEBUG
+
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      # Primus run switch (any model, default off): a first iteration on the log schedule is logged
+      # as a regular interval. It matters when a run resumes: this example does not save (save is
+      # null, disable_last_saving is true); a run that sets an absolute save with a save_interval
+      # and later resumes with --load on the log schedule then logs the losses of the uninterrupted
+      # run. The other examples keep it off, and their second logged loss differs from this one's,
+      # so compare loss curves with the same setting.
+      log_reset_first_iteration: true
+
+      train_iters: 50
+      micro_batch_size: 1
+      global_batch_size: 16
+
+      # longer than the 4096 sliding window, so the window mask is active
+      seq_length: 8192
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+
+      # parallel
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      # Used only when context_parallel_size > 1 (it is 1 here; set it with an override).
+      # With context parallelism, TE supports sliding-window attention only with the a2a or
+      # all_gather exchange, so the OLMo-3 args patch refuses p2p (the Megatron default).
+      # a2a needs num_attention_heads / TP and num_query_groups / TP to be divisible by
+      # context_parallel_size.
+      cp_comm_type: a2a
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      # Primus switch (default off): use an absolute --save as given (not <exp_root>/checkpoints)
+      # so a later --load of the same path resumes. It has no effect while save is null (this
+      # example does not save); it applies when a run overrides save with an absolute path. Give
+      # each run of a sweep its own path then (runs with the same path share checkpoints).
+      keep_absolute_save_path: true
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      # torch_dist: resharding-safe (TP / PP changes on load), the format to use for TP > 1
+      ckpt_format: torch_dist
+
+      # Primus-Turbo backend on (as the other dense BF16 examples); Turbo *attention* stays off:
+      # it has no sliding-window path, and the OLMo-3 args patch refuses use_turbo_attention: true.
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

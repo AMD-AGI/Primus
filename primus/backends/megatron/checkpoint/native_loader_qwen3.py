@@ -144,31 +144,9 @@ def build_margs(cfg_fields, args):
         m.params_dtype = torch.float16
     else:
         m.params_dtype = torch.float32
-    m.use_cpu_initialization = True
-    m.perform_initialization = False
-    m.transformer_impl = "transformer_engine"
-    m.gradient_accumulation_fusion = False
-    m.async_tensor_model_parallel_allreduce = False
-    m.bias_gelu_fusion = False
-    m.bias_swiglu_fusion = False
-    m.masked_softmax_fusion = False
-    m.bias_dropout_fusion = False
-    m.apply_query_key_layer_scaling = False
+    common.set_converter_runtime_args(m, args.save_dir)
 
-    # checkpoint saving
-    m.save = args.save_dir
-    m.ckpt_format = "torch"
-    m.no_save_optim = True
-    m.no_save_rng = True
-    m.no_load_optim = True
-    m.no_load_rng = True
-    m.save_interval = 1
-    m.async_save = False
-    m.ckpt_assume_constant_structure = False
-    m.iteration = 1
-
-    m = validate_args(m)
-    m.iteration = 1
+    m = common.set_save_iteration(validate_args(m))
     return m
 
 
@@ -217,16 +195,8 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
         q = get(f"model.layers.{layer}.self_attn.q_proj.weight")
         k = get(f"model.layers.{layer}.self_attn.k_proj.weight")
         v = get(f"model.layers.{layer}.self_attn.v_proj.weight")
-        # Interleave into the mcore linear_qkv layout: for each of the ng query
-        # groups, emit (nh/ng) query heads then 1 key head then 1 value head.
-        return torch.cat(
-            [
-                q.reshape(ng, (nh // ng) * hdim, hidden),
-                k.reshape(ng, hdim, hidden),
-                v.reshape(ng, hdim, hidden),
-            ],
-            dim=1,
-        ).reshape(-1, hidden)
+        # the mcore linear_qkv layout (shared with the other native converters)
+        return common.fuse_qkv(q, k, v, nh, ng, hdim, hidden)
 
     # ---- non-layer ----
     sd["embedding.word_embeddings.weight"] = common.pad_vocab(get("model.embed_tokens.weight"), padded_vocab)

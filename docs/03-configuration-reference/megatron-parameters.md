@@ -292,7 +292,8 @@ models:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `save` | `null` | Path prefix / pattern for checkpoints to write. |
+| `save` | `null` | Path prefix / pattern for checkpoints to write. *Primus patch* `megatron.args.checkpoint_path` writes to `<exp_root>/checkpoints` instead, unless `keep_absolute_save_path` is on *and* `save` is an absolute path. |
+| `keep_absolute_save_path` | `false` (the OLMo-3 examples set `true`) | *Primus patch* `megatron.args.checkpoint_path`: on keeps an absolute `save` as given (a later `load` there resumes); a relative or `~/` `save` is refused. A switch value (1/0, yes/no, on/off); unset is `false`; another value is refused, also with `save: null`. |
 | `save_interval` | `20000` (`1000` in `pre_trainer.yaml`) | Save every N iterations. |
 | `save_retain_interval` | `null` | Retain checkpoints at this interval. |
 | `no_save_optim` | `null` | Skip optimizer state in checkpoints when truthy. |
@@ -419,6 +420,7 @@ models:
 | `one_logger_project` | `megatron-lm` | OneLogger project string. |
 | `one_logger_run_name` | `null` | OneLogger run name. |
 | `log_interval` | `100` (`1` in `pre_trainer.yaml`) | Console log interval in iterations. |
+| `log_reset_first_iteration` | `false` (the OLMo-3 examples set `true`) | *Primus patch* `megatron.training_log.first_iteration_reset`, the same for every model: when the first iteration of a run (fresh or resumed) is on the log schedule, upstream `training_log` gets it as a regular logged iteration, so upstream resets the loss sums, counters and timers after it. Without it, the second logged loss of a run with `log_interval: 1` is the mean of two iterations. The reset applies to every value derived from the interval: after the first logged iteration, the stdout and TensorBoard / WandB `throughput`, `iter-energy/gpu` and `power/gpu` cover that interval only, not the start-up. The first `iteration-time`, which includes start-up, is still not written to TensorBoard / WandB. A first iteration off the log schedule (a resume at an iteration that is not a multiple of `log_interval`) is logged as upstream does. The patch refuses to install when upstream `training_log` reads `is_first_iteration` in other places than the Megatron version it is written for. Loss curves of runs with and without the switch differ at the second logged value. `true` / `false` (also 1/0, yes/no, on/off); unset (`null`, an empty string, or the strings `"null"` / `"~"`) is `false`; another value is refused at patch time. |
 | `tensorboard_dir` | `null` | TensorBoard output directory. |
 | `logging_level` | `null` | Python logging level override. |
 | `config_logger_dir` | `""` | Directory for dumped config logs. |
@@ -464,7 +466,7 @@ models:
 |-----------|---------|-------------|
 | `use_legacy_models` | `false` | Use legacy Megatron model code paths. |
 | `deprecated_use_mcore_models` | `false` | Deprecated flag for Megatron-Core models; prefer current `transformer_impl` + stack. |
-| `model_type` | `gpt` | `gpt` or `mamba` family. |
+| `model_type` | `gpt` | `gpt` or `mamba` family, or `olmo3` (the Primus OLMo-3 model; see [10.8](#108-olmo-3-model_type-olmo3-preset-olmo_3_1025_7byaml)). |
 | `num_layers` | `24` | Transformer layers (decoder or unified stack). |
 | `encoder_num_layers` | `null` | Encoder depth (encoder–decoder). |
 | `decoder_num_layers` | `null` | Decoder depth. |
@@ -607,6 +609,28 @@ models:
 | `final_logit_softcapping` | `null` | Softcap value for final logits; `null` disables. |
 | `attn_logit_softcapping` | `null` | Softcap for attention logits. |
 | `router_logit_softcapping` | `null` | Softcap for MoE router logits. |
+
+### 10.8 OLMo-3 (`model_type: olmo3`, preset `olmo_3_1025_7B.yaml`)
+
+The `olmo3_*` keys below are read only by the Primus-owned OLMo-3 model. The table also lists the
+upstream keys `window_size` and `window_attn_skip_freq`, which every GPT model reads; only the OLMo-3
+rules for them are described here. The HF form `[W, 0]` of `window_size` is converted only by the
+OLMo-3 args patch: for another model, `window_size` is always the Megatron / TE form `(W - 1, 0)`.
+For OLMo-3, the preset states the window once, as `window_size: [W, 0]` with `olmo3_window_size_form: hf`;
+override `window_size: [W, 0]` to change it.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `window_size` | `null` (upstream) | Upstream Megatron key (every GPT model): the sliding-window size; `null` means full attention. In Megatron / TE form it is `(W - 1, 0)`. The OLMo-3 preset sets it in HF form `[4096, 0]` (`[W, 0]`, W = HF `sliding_window`) with `olmo3_window_size_form: hf`, and no `olmo3_sliding_window`; before the model is built the OLMo-3 args patch converts it once to `(W - 1, 0)` and sets `olmo3_sliding_window: W`. To change the OLMo-3 window, override `window_size: [W, 0]`. |
+| `window_attn_skip_freq` | `null` (upstream) | Upstream Megatron key: which layers skip the window (run full attention). An int N makes every N-th layer (1-based) full; a list gives one entry per layer (1 = sliding window, 0 = full). Upstream, `null` puts the window on every layer. For OLMo-3 the args patch accepts only an int k with 2 <= k <= `num_layers`, or a list of `num_layers` entries that holds at least one 0 and at least one 1 (the list may be written as an expression such as `[1,1,1,0]*8`); `null`, 1, and an all-sliding or all-full list are refused, because OLMo-3 mixes sliding and full layers. The OLMo-3 preset sets `4` (HF `layer_types`: 3 sliding, then 1 full). |
+| `olmo3_yarn_rotary_scaling_factor` | `1.0` | YaRN factor (HF `rope_scaling.factor`; `8.0` in the 7B preset). `1.0` means no YaRN. |
+| `olmo3_yarn_original_max_position_embeddings` | `null` | YaRN original context (HF `original_max_position_embeddings`; `8192` in the preset). Required when the factor is > 1. |
+| `olmo3_yarn_beta_fast` | `32.0` | YaRN `beta_fast`. |
+| `olmo3_yarn_beta_slow` | `1.0` | YaRN `beta_slow`. |
+| `olmo3_yarn_attention_factor` | `null` | YaRN attention factor m (the logits are scaled by m²). `null` uses `0.1 * ln(factor) + 1`. The 7B preset leaves it unset (`0.1 * ln(8) + 1` = `1.2079441541679836`, the HF config's value), so an override of `olmo3_yarn_rotary_scaling_factor` moves it too; an explicit value that differs from the derived one is used and logged as a warning. Must be > 0; the factor must be >= 1. |
+| `olmo3_rope_layout` | `per_type` | Which layers use YaRN RoPE: `per_type` (full-attention layers only, as the model was trained) or `yarn_all` (every layer). `auto` is refused. An explicit `null` or unknown value is refused; omitting it gives `per_type`. |
+| `olmo3_window_size_form` | `null` | Which form `window_size` holds (the model preset sets `hf`): `hf` (`[W, 0]`, HF `sliding_window` W) or `megatron` (`(W - 1, 0)`). A `window_size` with neither this key nor `olmo3_sliding_window` is refused as ambiguous (never guessed). The args patch sets it to `megatron` after it converts the window. |
+| `olmo3_sliding_window` | `null` | The OLMo-3 sliding window W in the HF convention (keys incl. the current token). The preset does not set it; the args patch sets it from `window_size`, and the converter and the saved args carry it. When it is set, `window_size` must agree with it in the form `olmo3_window_size_form` declares, or be `null` (then it is derived as `(W - 1, 0)`). A disagreeing `window_size` is refused, not re-read in another form. |
 
 ---
 

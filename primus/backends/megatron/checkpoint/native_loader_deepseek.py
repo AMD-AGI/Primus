@@ -189,31 +189,9 @@ def build_margs(cfg_fields, args):
         m.params_dtype = torch.float16
     else:
         m.params_dtype = torch.float32
-    m.use_cpu_initialization = True
-    m.perform_initialization = False
-    m.transformer_impl = "transformer_engine"
-    m.gradient_accumulation_fusion = False
-    m.async_tensor_model_parallel_allreduce = False
-    m.bias_gelu_fusion = False
-    m.bias_swiglu_fusion = False
-    m.masked_softmax_fusion = False
-    m.bias_dropout_fusion = False
-    m.apply_query_key_layer_scaling = False
+    common.set_converter_runtime_args(m, args.save_dir)
 
-    # checkpoint saving
-    m.save = args.save_dir
-    m.ckpt_format = "torch"
-    m.no_save_optim = True
-    m.no_save_rng = True
-    m.no_load_optim = True
-    m.no_load_rng = True
-    m.save_interval = 1
-    m.async_save = False
-    m.ckpt_assume_constant_structure = False
-    m.iteration = 1
-
-    m = validate_args(m)
-    m.iteration = 1
+    m = common.set_save_iteration(validate_args(m))
     return m
 
 

@@ -333,6 +333,79 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
     log(f"DONE. Converted checkpoint at: {save_dir}")
 
 
+# ---------------------------------------------------------------------------
+# HF q / k / v -> mcore linear_qkv
+# ---------------------------------------------------------------------------
+def fuse_qkv(q, k, v, nh: int, ng: int, hdim: int, hidden: int):
+    """HF q / k / v projections -> mcore ``linear_qkv``: per query group, its ``nh / ng`` query
+    heads, then its key head, then its value head (no RoPE permutation). Used by the Qwen3,
+    Llama and OLMo-3 converters (one copy of the layout)."""
+    if ng <= 0 or nh <= 0 or nh % ng:
+        raise ValueError(f"num_heads ({nh}) must be a positive multiple of num_query_groups ({ng})")
+    for name, w, rows in (("q", q, nh * hdim), ("k", k, ng * hdim), ("v", v, ng * hdim)):
+        if tuple(w.shape) != (rows, hidden):
+            raise ValueError(
+                f"HF {name}_proj weight has shape {tuple(w.shape)}, expected ({rows}, {hidden}) for "
+                f"num_heads={nh}, num_query_groups={ng}, head_dim={hdim}, hidden={hidden} (a transposed "
+                "or mismatched checkpoint)"
+            )
+    return torch.cat(
+        [
+            q.reshape(ng, (nh // ng) * hdim, hidden),
+            k.reshape(ng, hdim, hidden),
+            v.reshape(ng, hdim, hidden),
+        ],
+        dim=1,
+    ).reshape(-1, hidden)
+
+
+# ---------------------------------------------------------------------------
+# HF config.json -> Megatron args
+# ---------------------------------------------------------------------------
+
+
 def read_hf_config(hf_dir: str) -> dict:
     with open(os.path.join(hf_dir, "config.json")) as f:
         return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# Shared converter runtime / save args
+# ---------------------------------------------------------------------------
+# the iteration the converted checkpoint is saved at
+SAVE_ITERATION = 1
+
+
+def set_converter_runtime_args(margs, save_dir) -> None:
+    """Set the runtime args every native converter shares on ``margs`` (after the layout and the
+    dtype), before ``validate_args``. It only sets attributes; it builds and saves nothing. The
+    values: a CPU build without init, the TE implementation, fusions off, and a legacy ``torch``
+    checkpoint at ``save_dir`` without optimizer / RNG state. The save iteration is set after
+    ``validate_args`` by :func:`set_save_iteration`."""
+    margs.use_cpu_initialization = True
+    margs.perform_initialization = False
+    margs.transformer_impl = "transformer_engine"
+    margs.gradient_accumulation_fusion = False
+    margs.async_tensor_model_parallel_allreduce = False
+    margs.bias_gelu_fusion = False
+    margs.bias_swiglu_fusion = False
+    margs.masked_softmax_fusion = False
+    margs.bias_dropout_fusion = False
+    margs.apply_query_key_layer_scaling = False
+
+    margs.save = save_dir
+    margs.ckpt_format = "torch"
+    margs.no_save_optim = True
+    margs.no_save_rng = True
+    margs.no_load_optim = True
+    margs.no_load_rng = True
+    margs.save_interval = 1
+    margs.async_save = False
+    margs.ckpt_assume_constant_structure = False
+
+
+def set_save_iteration(margs):
+    """After ``validate_args``: the iteration the converted checkpoint is saved at
+    (:data:`SAVE_ITERATION`). Returns ``margs``."""
+    margs.iteration = SAVE_ITERATION
+    return margs

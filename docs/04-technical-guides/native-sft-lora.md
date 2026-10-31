@@ -36,6 +36,67 @@ primus/backends/megatron/
 
 Entry point: `primus/backends/megatron/megatron_sft_trainer.py` (`MegatronSFTTrainer`) + the stage-based `BackendRegistry`.
 
+HF -> Megatron checkpoint conversion runs bridge-free in the post-train hook
+(`runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py`). It detects the family from
+`config.json` and uses `primus/backends/megatron/checkpoint/native_loader_<family>.py` for Qwen3 (dense/MoE),
+DeepSeek-V2/V3, Llama 2/3/3.1 and OLMo-3. See
+`examples/megatron/configs/MI355X/native_hf_to_megatron_sft.template.yaml`.
+
+Hook settings (all families):
+
+* The hook reads the config with the trainer command-line overrides applied, as training does.
+  So `--load`, `--pretrained_checkpoint`, `--hf_path`, `--tokenizer_model` and
+  `--native_ckpt_convert` on the command line decide whether and how the hook converts (for
+  example, `--load /ckpt` skips the conversion, and `--native_ckpt_convert false` selects the
+  Megatron-Bridge path). `00_install_requirements.sh` uses the same decision, so it installs the
+  Bridge dependencies only for that path. It finds the config in `--config <file>` and in
+  `--config=<file>`; the last one wins, as in the conversion hook.
+* `native_ckpt_convert`: true / false (also 1/0, yes/no, on/off; the string `false` is false).
+  Unset (`null`, `~`, or an empty string): native for a supported family. Another value stops the
+  hook with `[ERROR] Checkpoint conversion settings: ...`.
+* `native_ckpt_wait_timeout` (seconds, >= 1, OLMo-3 native flow only): how long the other nodes
+  wait for rank 0 (default 3600 s). Qwen3, Llama, DeepSeek and the Bridge path do not read it;
+  their other nodes wait a fixed 600 s.
+* `PRIMUS_LAUNCH_ID` (environment, OLMo-3 native flow): an id that all nodes of one launch share,
+  for launches outside SLURM / torchelastic (for example a UUID set by the launcher on every node).
+  A failure marker of another launch id is ignored. A marker that is older than a node's wait
+  (for example from an earlier attempt with the same id) stops that node only if it is still in
+  place 600 s later, because rank 0 removes any old marker as its first step.
+
+### 1.1 OLMo-3 (experimental)
+
+OLMo-3 (`model_type: olmo3`) conversion and training are covered by unit tests
+(`tests/unit_tests/backends/megatron/olmo3/`, including logits parity against a small transformers
+`Olmo3ForCausalLM`). It is **not** in the "Models verified" list above: there is no OLMo-3 SFT recipe
+and no verified end-to-end OLMo-3 SFT run yet. Start from the generic SFT template and the preset
+`primus/configs/models/megatron/olmo_3_1025_7B.yaml`.
+
+* **Layout.** The OLMo-3 converter writes a single-shard `ckpt_format: torch` checkpoint
+  (TP = PP = EP = 1). With native conversion and a training layout > 1, the hook stops before converting.
+  For TP > 1 (**unverified**), convert at TP = 1, then run the trainer once at TP = PP = 1 with
+  `load: <converted ckpt>`, `ckpt_convert_format: torch_dist`, `ckpt_convert_save: <dir>`,
+  `no_load_optim: true`, `no_load_rng: true` and LoRA off; then train with
+  `pretrained_checkpoint: <dir>/torch_dist`, `finetune: true`, `ckpt_format: torch_dist`. Compare the
+  loss with the TP = 1 run.
+* **No Bridge path.** `native_ckpt_convert: false` is refused for OLMo-3 (the Bridge has no OLMo-3).
+* **Hub id.** When `hf_path` / `tokenizer_model` is a hub id (the preset has
+  `tokenizer_model: allenai/Olmo-3-1025-7B`), rank 0 takes the snapshot (config and safetensors
+  weights) from the Hugging Face cache or downloads it; the other nodes wait for it in the shared
+  cache (`HF_HOME`). The output is `<DATA_PATH>/megatron_checkpoints/Olmo-3-1025-7B_native` unless
+  `native_ckpt_out` is set. Without cache and network, set `hf_path` to a local directory.
+* **Reuse.** The checkpoint has a record (`primus_native_convert.json`: converter version, source config
+  and weights fingerprint, dtype, padded-vocab setting, RoPE layout). A checkpoint is reused only when
+  the record matches the run; else the hook stops and asks you to delete it or set `native_ckpt_out`.
+* **Multi-node.** Rank 0 converts under `<out>.converting.lock` into `<out>.partial` and renames it to
+  `<out>`. When rank 0 stops, it writes `<out>.failed` and the other nodes stop with the reason (at once,
+  or after 600 s when rank 0 stopped before the node started to wait). If no
+  conversion runs and a lock is left, delete the lock file. The details are in the docstrings of
+  `primus/backends/megatron/checkpoint/native_flow_olmo3.py`.
+* **Model settings.** The preset gives the HF window `window_size: [4096, 0]` with
+  `olmo3_window_size_form: hf` (Megatron uses `(4095, 0)`), `window_attn_skip_freq: 4` (every fourth
+  layer is full attention) and `olmo3_rope_layout: per_type` (YaRN on full layers only). YaRN
+  settings that the model does not implement are refused by the converter.
+
 ---
 
 ## 2. Runtime environment

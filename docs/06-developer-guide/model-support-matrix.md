@@ -12,7 +12,7 @@ The following aligns with the backend overview and the configs present in this t
 
 | Backend | Model families (documentation / stack scope) |
 | ------- | ---------------------------------------------- |
-| **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite), DeepSeek-V3, and DeepSeek-V4 (flash / pro — from v26.7 also on gfx942 with context parallelism at 128k, and packed-sequence THD SFT; see [`examples/deepseek-v4`](https://github.com/AMD-AGI/Primus/tree/main/examples/deepseek-v4)), Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM, Kimi K2, LFM2, MiniMax, Zebra LLaMA (including GDN and KDA linear-attention variants), Mamba, and generic `language_model.yaml` bases. |
+| **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite), DeepSeek-V3, and DeepSeek-V4 (flash / pro — from v26.7 also on gfx942 with context parallelism at 128k, and packed-sequence THD SFT; see [`examples/deepseek-v4`](https://github.com/AMD-AGI/Primus/tree/main/examples/deepseek-v4)), Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM, Kimi K2, LFM2, MiniMax, Zebra LLaMA (including GDN and KDA linear-attention variants), Mamba, OLMo-3 (7B; post-norm, full-width QK-norm, sliding window + YaRN), and generic `language_model.yaml` bases. |
 | **TorchTitan** | LLaMA3 family (including 3.1), LLaMA4 examples, DeepSeek-V3 examples, and Qwen3 examples including 0.6B, 1.7B, 4B, 8B, 14B, and 32B variants where present. Additional presets exist under `primus/configs/models/torchtitan/` without being exhaustively listed here. |
 | **MaxText (JAX)** | LLaMA2 / LLaMA3 / LLaMA3.3, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, Qwen3 14B / 30B-A3B (per presets and examples). Broader coverage may exist in upstream MaxText; see [MaxText](https://github.com/AI-Hypercomputer/maxtext). |
 | **Megatron Bridge** | Qwen3 pretraining and post-training examples, plus post-training examples for Zebra LLaMA and Mamba where present. LLaMA 3.1 70B Bridge examples appear under MI355X. |
@@ -27,7 +27,7 @@ The following aligns with the backend overview and the configs present in this t
 
 Model presets live in `primus/configs/models/megatron/`. Example experiments that reference those presets appear under `examples/megatron/configs/MI300X/`, `MI325X/`, and `MI355X/`.
 
-For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (21 configs each). For **Megatron**, MI300X and MI325X are nearly identical **except** that MI325X omits `qwen3_5_35B_A3B` (BF16 and FP8)—so MI300X has 70 example configs while MI325X has 68—and **MI355X** is a superset (99 configs; it adds models such as `glm5`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, and `minimax_m2.5`). Each row's SKU list below reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
+For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set. For **Megatron**, MI325X ships a subset of MI300X (for example, it has no `qwen3_5_35B_A3B` or `olmo_3_1025_7B` example), and **MI355X** has the largest set (it adds models such as `glm5`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, and `minimax_m2.5`). The per-SKU counts change often, so they are not listed here; each row's SKU list below reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B` and `olmo_3_1025_7B`, which are MI300X/MI355X only).
 
 | Model name (file) | Preset path | Role | Example experiment dirs | Precision in examples |
 | ----------------- | ----------- | ---- | ----------------------- | ---------------------- |
@@ -80,6 +80,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `moe_2T.yaml` | `primus/configs/models/megatron/moe_2T.yaml` | Large MoE template | No curated example in this repo | — |
 | `moe_4T.yaml` | `primus/configs/models/megatron/moe_4T.yaml` | Large MoE template | No curated example in this repo | — |
 | `moe_proxy_single_node.yaml` | `primus/configs/models/megatron/moe_proxy_single_node.yaml` | MoE proxy / test template | No curated example in this repo | — |
+| `olmo_3_1025_7B.yaml` | `primus/configs/models/megatron/olmo_3_1025_7B.yaml` | Model preset (Primus-owned `model_type: olmo3`) | MI300X, MI355X | BF16 |
 | `primus_megatron_model.yaml` | `primus/configs/models/megatron/primus_megatron_model.yaml` | Primus Megatron root defaults | Used via `extends` | — |
 | `qwen2.5_3B.yaml` | `primus/configs/models/megatron/qwen2.5_3B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen2.5_7B.yaml` | `primus/configs/models/megatron/qwen2.5_7B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |

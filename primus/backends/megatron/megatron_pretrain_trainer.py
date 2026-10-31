@@ -197,6 +197,8 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         else:
             # Use overridable methods so subclasses (e.g. diffusion/Flux) can plug in their own
             # forward_step / dataset_provider. Defaults pull from pretrain_gpt.
+            # OLMo-3 (model_type olmo3) lands here too: it reuses the GPT forward_step and
+            # datasets through these hooks.
             forward_step = self.get_forward_step()
             train_valid_test_datasets_provider = self.get_datasets_provider()
 

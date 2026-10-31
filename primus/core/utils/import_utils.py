@@ -39,8 +39,8 @@ def get_model_provider(model_type="gpt"):
     Resolve model_provider across Megatron versions and model types.
 
     Args:
-        model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4' or
-            'kimi_k3'. Defaults to 'gpt'.
+        model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4',
+            'kimi_k3', 'glm5_next' or 'olmo3'. Defaults to 'gpt'.
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
@@ -59,6 +59,14 @@ def get_model_provider(model_type="gpt"):
             kimi_k3_module.model_provider,
             kimi_k3_module.kimi_k3_builder,
         )
+
+    # Primus-owned: OLMo-3 (post-norm, full-width QK-norm, sliding window + YaRN)
+    if model_type == "olmo3":
+        olmo3_module = importlib.import_module("primus.backends.megatron.core.models.olmo3.olmo3_builders")
+        log_rank_0(
+            f"[Primus][MegatronCompat] Loaded OLMo-3 model_provider + builder from {olmo3_module.__name__}"
+        )
+        return partial(olmo3_module.model_provider, olmo3_module.olmo3_builder)
 
     # Primus-owned: GLM-5.3 (KDA + DSA hybrid with mHC)
     if model_type == "glm5_next":

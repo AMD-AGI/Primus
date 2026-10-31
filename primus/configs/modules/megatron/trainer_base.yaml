@@ -119,6 +119,8 @@ pin_cpu_params: true
 
 # checkpointing arguments
 save: null
+# Primus: an absolute save is used as given, not <exp_root>/checkpoints (megatron.args.checkpoint_path)
+keep_absolute_save_path: false
 save_interval: 20000
 save_retain_interval: null
 no_save_optim: null
@@ -314,6 +316,9 @@ memory_snapshot_path: snapshot.pickle # str
 #logging:
 log_avg_skip_iterations: 2
 log_avg_reset_interval: 10
+# Primus: a first iteration on the log schedule is logged as a regular interval
+# (megatron.training_log.first_iteration_reset)
+log_reset_first_iteration: false
 log_params_norm: false
 log_num_zeros_in_grad: false
 log_throughput: false

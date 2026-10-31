@@ -450,3 +450,248 @@ def test_native_forwarding_only_without_injection(monkeypatch: pytest.MonkeyPatc
     assert forwarded[0].endswith(line)
     # print_rank_last must be restored after the call.
     assert training_mod.print_rank_last is fake_print_rank_last
+
+
+# --- megatron.training_log.first_iteration_reset ------------------------------------------------
+
+
+def _upstream_training_log(record):
+    """A stand-in with upstream's parameters that records how it was called."""
+
+    def training_log(
+        loss_dict,
+        total_loss_dict,
+        learning_rate,
+        iteration,
+        loss_scale,
+        report_memory_flag,
+        skipped_iter,
+        grad_norm,
+        params_norm,
+        num_zeros_in_grad,
+        max_attention_logit,
+        pg_collection=None,
+        is_first_iteration=False,
+    ):
+        record.append((iteration, is_first_iteration))
+        return report_memory_flag
+
+    return training_log
+
+
+def test_first_iteration_reset_hands_a_scheduled_first_iteration_to_upstreams_reset():
+    """A first iteration on the log schedule reaches upstream as a regular logged iteration
+    (is_first_iteration=False), so upstream resets the loss sums, counters, interval-time
+    (barrier=True) and the logged timers itself. Off the schedule, or not the first iteration, the
+    call is unchanged; positional and keyword calls bind the same way."""
+    from primus.backends.megatron.patches.training_log import (
+        first_iteration_reset_patches as m,
+    )
+
+    seen = []
+    args = SimpleNamespace(log_interval=1)
+    wrapped = m.wrap_training_log(_upstream_training_log(seen), lambda: args)
+    common = ({}, {}, 0.1)
+    rest = (1.0, "flag", 0, None, None, None, None)
+    assert wrapped(*common, 5, *rest, is_first_iteration=True) == "flag"
+    assert wrapped(*common, 5, *rest, None, True) == "flag"  # positional
+    assert wrapped(*common, 6, *rest) == "flag"
+    args.log_interval = 10
+    wrapped(*common, 5, *rest, is_first_iteration=True)  # not a log iteration: upstream decides
+    assert seen == [(5, False), (5, False), (6, False), (5, True)]
+    assert m.wrap_training_log(wrapped, None) is wrapped
+
+
+def test_first_iteration_reset_keeps_iteration_time_out_of_tensorboard_and_wandb():
+    """Upstream does not write iteration-time (it includes the start-up overhead) to TensorBoard /
+    WandB for the first iteration. With the reset the flag reaches upstream as False, so for that
+    call the writers drop iteration-time only; other scalars and later iterations are unchanged,
+    and the module's getters are restored."""
+    from primus.backends.megatron.patches.training_log import (
+        first_iteration_reset_patches as m,
+    )
+
+    tb, wb = [], []
+    tb_writer = SimpleNamespace(add_scalar=lambda tag, v, it: tb.append(tag), flush=lambda: "f")
+    wb_writer = SimpleNamespace(log=lambda d, it: wb.append(sorted(d)))
+    get_tb, get_wb = (lambda: tb_writer), (lambda: wb_writer)
+    module = SimpleNamespace(get_tensorboard_writer=get_tb, get_wandb_writer=get_wb)
+
+    def upstream(iteration, is_first_iteration=False):
+        w, b = module.get_tensorboard_writer(), module.get_wandb_writer()
+        if not is_first_iteration:
+            w.add_scalar("iteration-time", 1.0, iteration)
+            b.log({"iteration-time": 1.0}, iteration)
+        w.add_scalar("lm loss", 2.0, iteration)
+        b.log({"lm loss": 2.0, "iteration-time": 1.0}, iteration)
+        assert w.flush() == "f"  # other attributes delegate
+
+    wrapped = m.wrap_training_log(upstream, lambda: SimpleNamespace(log_interval=1), module)
+    wrapped(1, is_first_iteration=True)
+    assert tb == ["lm loss"] and wb == [["lm loss"]]
+    assert module.get_tensorboard_writer is get_tb and module.get_wandb_writer is get_wb
+    tb.clear(), wb.clear()
+    wrapped(2)
+    assert tb == ["iteration-time", "lm loss"] and wb == [["iteration-time"], ["iteration-time", "lm loss"]]
+
+
+def test_first_iteration_reset_refuses_a_function_without_the_parameters():
+    from primus.backends.megatron.patches.training_log import (
+        first_iteration_reset_patches as m,
+    )
+
+    def bare(*args, **kwargs):  # e.g. megatron.training_log.unified_patch's wrapper
+        return None
+
+    with pytest.raises(RuntimeError, match=r"lacks parameter\(s\) \['iteration', 'is_first_iteration'\]"):
+        m.wrap_training_log(bare, None)
+    # a training module without the writer getters: refused, not a plain call that would write the
+    # start-up iteration-time to TensorBoard / WandB
+    seen = []
+    for module in (SimpleNamespace(), SimpleNamespace(get_tensorboard_writer=lambda: None)):
+        with pytest.raises(RuntimeError, match="get_wandb_writer"):
+            m.wrap_training_log(_upstream_training_log(seen), lambda: None, module)
+
+
+def test_first_iteration_reset_is_one_switch_for_every_model():
+    """Off unless log_reset_first_iteration is set, whatever the model_type (the OLMo-3 example
+    configs set it); a value that is not a switch raises at patch time."""
+    from primus.backends.megatron.patches.training_log import (
+        first_iteration_reset_patches as m,
+    )
+
+    def ctx(**params):
+        return SimpleNamespace(extra={"module_config": SimpleNamespace(params=SimpleNamespace(**params))})
+
+    assert m.reset_enabled(ctx(model_type="olmo3")) is False  # no model default
+    assert m.reset_enabled(ctx(model_type="olmo3", log_reset_first_iteration=True)) is True
+    assert m.reset_enabled(ctx(model_type="gpt")) is False
+    assert m.reset_enabled(ctx(model_type="gpt", log_reset_first_iteration=None)) is False
+    assert m.reset_enabled(ctx(model_type="gpt", log_reset_first_iteration="on")) is True
+    assert m.reset_enabled(ctx(model_type="olmo3", log_reset_first_iteration="off")) is False
+    with pytest.raises(ValueError):
+        m.reset_enabled(ctx(model_type="olmo3", log_reset_first_iteration="maybe"))
+    # the patch condition never raises: a bad value selects the patch, whose body raises inside the
+    # patch runner's per-patch error handling
+    assert m.reset_requested(ctx(model_type="olmo3", log_reset_first_iteration="maybe")) is True
+    assert m.reset_requested(ctx(model_type="olmo3")) is False
+    with pytest.raises(ValueError, match="log_reset_first_iteration"):
+        m.patch_training_log_first_iteration_reset(ctx(log_reset_first_iteration="maybe"))
+
+
+def test_first_iteration_reset_patch_installs_once_before_the_unified_wrapper(monkeypatch):
+    """The registered patch replaces megatron.training.training.training_log once (a second run is a
+    no-op), and runs before megatron.training_log.unified_patch in the same phase, which would hide
+    upstream's signature behind a (*args, **kwargs) wrapper."""
+    import sys
+
+    from primus.backends.megatron.patches.training_log import (
+        first_iteration_reset_patches as m,
+    )
+    from primus.core.patches.patch_registry import PatchRegistry
+
+    training_mod, _ = _install_fake_megatron_training(monkeypatch)
+    seen = []
+    upstream = _upstream_training_log(seen)
+    training_mod.training_log = upstream
+    # upstream training.py imports both writer getters from global_vars
+    monkeypatch.setattr(training_mod, "get_tensorboard_writer", lambda: None, raising=False)
+    monkeypatch.setattr(training_mod, "get_wandb_writer", lambda: None, raising=False)
+    args = SimpleNamespace(log_interval=1)
+    training_pkg = sys.modules["megatron.training"]
+    monkeypatch.setattr(training_pkg, "get_args", lambda: args, raising=False)
+    monkeypatch.setattr(m, "log_rank_0", lambda *a, **k: None)
+    # the stand-in has upstream's parameters, not its body: report upstream's flag uses for it
+    real_flag_uses = m.flag_uses
+    monkeypatch.setattr(
+        m,
+        "flag_uses",
+        lambda fn: m.expected_flag_uses() if fn is upstream else real_flag_uses(fn),
+    )
+
+    def ctx(value):
+        return SimpleNamespace(
+            extra={"module_config": SimpleNamespace(params=SimpleNamespace(log_reset_first_iteration=value))}
+        )
+
+    on = ctx(True)
+    # off (or unset): the body installs nothing, even when called without its condition
+    for off in (ctx(False), ctx(None), None):
+        m.patch_training_log_first_iteration_reset(off)
+        assert training_mod.training_log is upstream
+    m.patch_training_log_first_iteration_reset(on)
+    wrapped = training_mod.training_log
+    assert wrapped is not upstream and wrapped.__wrapped__ is upstream
+    m.patch_training_log_first_iteration_reset(on)
+    assert training_mod.training_log is wrapped
+    wrapped({}, {}, 0.1, 1, 1.0, False, 0, None, None, None, None, is_first_iteration=True)
+    assert seen == [(1, False)]
+
+    mine, unified = PatchRegistry.get(m.PATCH_ID), PatchRegistry.get("megatron.training_log.unified_patch")
+    assert mine is not None and unified is not None
+    assert mine.phase == unified.phase and mine.priority < unified.priority
+
+    training_mod.training_log = lambda *a, **k: None  # a wrapper came first: fail loudly
+    with pytest.raises(RuntimeError, match="lacks parameter"):
+        m.patch_training_log_first_iteration_reset(on)
+
+    # a functools.wraps (*args, **kwargs) wrapper does not pass the check through __wrapped__
+    import functools
+
+    @functools.wraps(upstream)
+    def opaque(*a, **k):
+        return upstream(*a, **k)
+
+    training_mod.training_log = opaque
+    with pytest.raises(RuntimeError, match="lacks parameter"):
+        m.patch_training_log_first_iteration_reset(on)
+
+    # the MLPerf logging wrapper (priority 15, runs first) replaces the interval log: no-op, no error
+    def mlperf(*a, **k):
+        return upstream(*a, **k)
+
+    setattr(mlperf, m._MLPERF_MARK, True)
+    training_mod.training_log = mlperf
+    m.patch_training_log_first_iteration_reset(on)
+    assert training_mod.training_log is mlperf
+
+    # upstream with upstream's parameters but another use of the flag (a Megatron bump): refused
+    def changed(
+        loss_dict,
+        total_loss_dict,
+        learning_rate,
+        iteration,
+        loss_scale,
+        report_memory_flag,
+        skipped_iter,
+        grad_norm,
+        params_norm,
+        num_zeros_in_grad,
+        max_attention_logit,
+        pg_collection=None,
+        is_first_iteration=False,
+    ):
+        should_reset = not is_first_iteration
+        if is_first_iteration:
+            print("a new flag-gated behaviour")
+        return should_reset
+
+    training_mod.training_log = changed
+    with pytest.raises(RuntimeError, match="reads is_first_iteration in"):
+        m.patch_training_log_first_iteration_reset(on)
+    assert training_mod.training_log is changed
+
+
+def test_first_iteration_reset_matches_upstream_flag_uses():
+    """The patch passes is_first_iteration=False for the whole upstream call and undoes only the
+    iteration-time write. Pins, on the pinned Megatron's real training_log, that the flag is read
+    in exactly the places the patch is written for (the patch checks the same at install)."""
+    training = pytest.importorskip("megatron.training.training")
+    from primus.backends.megatron.patches.training_log import (
+        first_iteration_reset_patches as m,
+    )
+
+    fn = training.training_log
+    while hasattr(fn, "__wrapped__"):
+        fn = fn.__wrapped__
+    assert m.flag_uses(fn) == m.expected_flag_uses()

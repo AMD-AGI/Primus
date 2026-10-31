@@ -10,7 +10,11 @@ import unittest
 from primus.core.utils.arg_utils import (
     _coerce_cli_value_legacy,
     _coerce_cli_value_modern,
+    as_int,
+    is_unset,
     parse_cli_overrides,
+    parse_optional_switch,
+    parse_switch,
 )
 
 
@@ -118,6 +122,62 @@ class TestCoerceCliValueLegacyUnchanged(unittest.TestCase):
         self.assertIs(_coerce_cli_value_legacy("true"), True)
         self.assertEqual(_coerce_cli_value_legacy("[0, 1]"), [0, 1])
         self.assertEqual(_coerce_cli_value_legacy("hello"), "hello")
+
+
+class TestSettingHelpers(unittest.TestCase):
+    """is_unset / parse_switch / as_int (used by the posttrain convert hook and the OLMo-3 code)."""
+
+    def test_is_unset(self):
+        for v in (None, "", " ", "null", "NULL", "~"):
+            self.assertTrue(is_unset(v), v)
+        # "none" is a value: a model or tokenizer path, or an enum value of some options
+        for v in ("x", "0", 0, False, "nil", [], "nul", "none", "None"):
+            self.assertFalse(is_unset(v), v)
+
+    def test_parse_optional_switch(self):
+        for v in (None, "", "null", "~"):
+            self.assertIs(parse_optional_switch(v, "k"), False, v)
+        with self.assertRaisesRegex(ValueError, "k must be true or false"):
+            parse_optional_switch("none", "k")
+        self.assertIs(parse_optional_switch("on", "k"), True)
+        self.assertIs(parse_optional_switch(False, "k"), False)
+        with self.assertRaisesRegex(ValueError, "k must be true or false"):
+            parse_optional_switch("maybe", "k")
+
+    def test_parse_switch(self):
+        for v in (True, 1, "true", "TRUE", " yes ", "On", "1", " 1 "):
+            self.assertIs(parse_switch(v, "k"), True)
+        for v in (False, 0, "false", "False", "no", "OFF", "0"):
+            self.assertIs(parse_switch(v, "k"), False)
+        # only the table: no number forms (a typo such as "+1" or "00" is refused, not read as 1 / 0)
+        bad = ("maybe", "", 2, 1.0, 0.0, -0.0, 0.5, "1.0", "0.0", "+1", "-0", "00", " 1.000 ", [], None)
+        for v in bad:
+            with self.assertRaisesRegex(ValueError, "k must be true or false"):
+                parse_switch(v, "k")
+
+    def test_as_int(self):
+        self.assertEqual([as_int(v, "k") for v in (4, 4.0, "4", " -2 ", "+3", "4.0")], [4, 4, 4, -2, 3, 4])
+        self.assertEqual(as_int("4.00", "k"), 4)
+        for bad in (
+            True,
+            4.5,
+            1e20,
+            float("inf"),
+            "two",
+            "4.5",
+            "4.",
+            "\uff11\uff12",
+            "\u0663",
+            None,
+            "",
+            [4],
+        ):
+            with self.assertRaisesRegex(ValueError, "k must be an integer"):
+                as_int(bad, "k")
+        with self.assertRaisesRegex(ValueError, "unresolved"):
+            as_int("${TP:1}", "k")
+        with self.assertRaisesRegex(ValueError, "k must be an integer"):
+            as_int("9" * 5000, "k")
 
 
 if __name__ == "__main__":
