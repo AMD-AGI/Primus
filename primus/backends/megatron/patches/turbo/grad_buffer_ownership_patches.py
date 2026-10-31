@@ -34,8 +34,11 @@ What makes the skip safe:
   producer selects and logs the beta=0 writer in actual backward order, so
   activation recompute and staged forwards cannot leave a forward-time claim.
 - An empty log means "zero everything". Iteration 0 has nothing logged, as do
-  configurations where no overwrite-capable producer runs. The previous log
-  is also discarded unless the current schedule has exactly one microbatch.
+  configurations where no overwrite-capable producer runs. With more than one
+  microbatch, only first-write claims are kept: slices whose producer (the
+  Mega MoE wgrad) overwrites on the iteration's first write and accumulates on
+  the later ones (``grad_ownership.claim_first_write``). The MXFP4 producer
+  overwrites on every call, so its claims hold only for one-microbatch steps.
 - CUDA-graph configurations do not install this consumer: Python ownership
   recording is not replayed with captured backward kernels.
 - A claim is honoured only when the parameter's ``main_grad`` is exactly the
@@ -72,17 +75,26 @@ _POISON = os.environ.get("PRIMUS_TURBO_GRAD_OWNERSHIP_POISON", "0") == "1"
 # wrapped ``reset`` of every buffer belonging to that iteration.
 _state: dict[str, object] = {"owned": frozenset(), "seen": set(), "logged": False}
 
+# What a step may keep of the completed producer epoch (``_ownership_for_step``).
+_KEEP_NONE, _KEEP_FIRST_WRITES, _KEEP_ALL = "none", "first_writes", "all"
 
-def _rotate_ownership(grad_ownership, *, discard: bool) -> frozenset[Slice]:
-    """Start a producer epoch, optionally discarding the completed epoch.
+
+def _rotate_ownership(grad_ownership, keep: str) -> frozenset[Slice]:
+    """Start a producer epoch, and return the claims of the completed one that ``keep`` allows.
 
     Pipeline warmup runs with ``args.curr_iteration == -1``. Its beta=0 writes
     exercise kernels but must never authorize skipped clearing in iteration 0.
-    Rotating and discarding here clears the producer log without carrying those
-    synthetic writes into real training.
+    Rotating with ``_KEEP_NONE`` here clears the producer log without carrying
+    those synthetic writes into real training. ``_KEEP_FIRST_WRITES`` keeps only
+    the slices claimed by first-write producers.
     """
     owned = grad_ownership.begin_step()
-    return frozenset() if discard else owned
+    if keep == _KEEP_ALL:
+        return owned
+    previous_first_writes = getattr(grad_ownership, "previous_first_writes", None)
+    if keep == _KEEP_FIRST_WRITES and previous_first_writes is not None:
+        return frozenset(previous_first_writes())
+    return frozenset()
 
 
 def _get_num_microbatches() -> int:
@@ -92,16 +104,19 @@ def _get_num_microbatches() -> int:
     return get_num_microbatches()
 
 
-def _discard_ownership_for_step(args) -> bool:
-    """Whether this step must retain Megatron's full gradient-buffer clear."""
+def _ownership_for_step(args) -> str:
+    """What this step may keep of the completed epoch: nothing in pipeline warmup, every claim when
+    it has one microbatch, and otherwise only first-write claims (the MXFP4 producer overwrites on
+    every microbatch)."""
     if getattr(args, "curr_iteration", None) == -1:
-        return True
+        return _KEEP_NONE
     try:
-        return _get_num_microbatches() != 1
+        num_microbatches = _get_num_microbatches()
     except Exception:  # noqa: BLE001 -- any uncertainty must fail closed.
         # If the calculator is unavailable or not initialized, ownership for
         # the current schedule is not proven. Fail closed with a full clear.
-        return True
+        return _KEEP_NONE
+    return _KEEP_ALL if num_microbatches == 1 else _KEEP_FIRST_WRITES
 
 
 def _is_enabled(ctx: PatchContext) -> bool:
@@ -260,10 +275,7 @@ def patch_grad_buffer_ownership(ctx: PatchContext) -> None:
     def zero_grad_buffer(self):
         seen = _state["seen"]
         if id(self) in seen or not seen:
-            _state["owned"] = _rotate_ownership(
-                grad_ownership,
-                discard=_discard_ownership_for_step(args),
-            )
+            _state["owned"] = _rotate_ownership(grad_ownership, _ownership_for_step(args))
             seen.clear()
         seen.add(id(self))
         return original_zero_grad_buffer(self)
