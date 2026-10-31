@@ -112,7 +112,6 @@ def build_margs(cfg_fields, args):
         "ffn_hidden_size",
         "num_attention_heads",
         "kv_channels",
-        "norm_epsilon",
         "untie_embeddings_and_output_weights",
         "multi_latent_attention",
         "q_lora_rank",
@@ -139,6 +138,9 @@ def build_margs(cfg_fields, args):
         "moe_router_group_topk",
     ):
         setattr(m, k, cfg_fields[k])
+    # --norm-epsilon has dest layernorm_epsilon in the pinned Megatron; norm_epsilon is
+    # not read by validate_args or the model config, so set the attribute Megatron reads.
+    m.layernorm_epsilon = cfg_fields["norm_epsilon"]
 
     # IMPORTANT: leave vocab_size / padded_vocab_size UNSET so build_tokenizer()
     # drives padded_vocab_size from the tokenizer's real vocab, matching how

@@ -39,6 +39,7 @@ Bridge-free guarantee: this module imports ONLY ``megatron.core`` /
 into ``sys.modules``.
 """
 
+import sys
 from types import SimpleNamespace
 
 import torch
@@ -86,7 +87,9 @@ def build_margs(cfg_fields, args):
     m.hidden_size = cfg_fields["hidden_size"]
     m.num_attention_heads = cfg_fields["num_attention_heads"]
     m.num_layers = cfg_fields["num_layers"]
-    m.norm_epsilon = cfg_fields["norm_epsilon"]
+    # --norm-epsilon has dest layernorm_epsilon in the pinned Megatron; norm_epsilon is
+    # not read by validate_args or the model config, so set the attribute Megatron reads.
+    m.layernorm_epsilon = cfg_fields["norm_epsilon"]
     m.ffn_hidden_size = cfg_fields["ffn_hidden_size"]
     m.untie_embeddings_and_output_weights = cfg_fields["untie_embeddings_and_output_weights"]
     m.max_position_embeddings = max(cfg_fields["max_position_embeddings"], args.seq_length)
@@ -247,6 +250,18 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
 # ---------------------------------------------------------------------------
 # In-process entrypoint
 # ---------------------------------------------------------------------------
+LOG_NAME = "llama"  # log prefix in convert
+
+
+def extra_log_fields(cfg_fields):
+    """Fields a family adds to the arch log line of ``convert`` (none for Llama)."""
+    return {}
+
+
+# What a converter family module passed to ``convert`` must define (this module does).
+_FAMILY_INTERFACE = ("derive_megatron_fields", "build_margs", "build_mcore_state_dict", "extra_log_fields")
+
+
 def convert(
     hf_dir,
     save_dir,
@@ -259,16 +274,30 @@ def convert(
     make_vocab_size_divisible_by=128,
     master_port=29563,
     log=None,
+    family=None,
 ):
-    """Convert a Llama (2/3/3.1) HF checkpoint to a legacy Megatron torch ckpt.
+    """Convert a Llama-architecture HF checkpoint (Llama 2/3/3.1, or a variant given as
+    ``family``) to a legacy Megatron torch ckpt.
 
     Single process, CPU-only. Assumes the ``phase="convert"`` patches have
     already been applied in this process (the conversion hook does so).
+
+    ``family`` is for Llama-architecture variants (SmolLM3): a module that defines the
+    functions in ``_FAMILY_INTERFACE`` and a ``LOG_NAME`` string, as this module does.
+    The conversion sequence is the same; default: this module.
     """
+    fam = family or sys.modules[__name__]
+    missing = [f for f in _FAMILY_INTERFACE if not callable(getattr(fam, f, None))]
+    if not isinstance(getattr(fam, "LOG_NAME", None), str):
+        missing.append("LOG_NAME")
+    if missing:
+        # Checked before Megatron is initialised, not as a late AttributeError.
+        raise TypeError(f"converter family {getattr(fam, '__name__', fam)!r} lacks {missing}")
+    name = fam.LOG_NAME
     if log is None:
 
         def log(*a):
-            print("[llama-convert]", *a, flush=True)
+            print(f"[{name}-convert]", *a, flush=True)
 
     common.ensure_megatron_on_path()
     common.assert_bridge_free("entry")
@@ -286,19 +315,21 @@ def convert(
 
     log(f"reading HF config from {hf_dir}")
     cfg = common.read_hf_config(hf_dir)
-    cfg_fields = derive_megatron_fields(cfg)
+    cfg_fields = fam.derive_megatron_fields(cfg)
     log(
         f"arch: L={cfg_fields['num_layers']} h={cfg_fields['hidden_size']} "
         f"heads={cfg_fields['num_attention_heads']} kv_groups={cfg_fields['num_query_groups']} "
         f"head_dim={cfg_fields['kv_channels']} ffn={cfg_fields['ffn_hidden_size']} "
         f"rope_theta={cfg_fields['rotary_base']} "
         f"tie_emb={not cfg_fields['untie_embeddings_and_output_weights']}"
+        + "".join(f" {k}={v}" for k, v in fam.extra_log_fields(cfg_fields).items())
     )
 
-    margs = build_margs(cfg_fields, args)
+    margs = fam.build_margs(cfg_fields, args)
     log(
         f"megatron: TP={margs.tensor_model_parallel_size} PP={margs.pipeline_model_parallel_size} "
-        f"EP={margs.expert_model_parallel_size} dtype={margs.params_dtype}"
+        f"EP={margs.expert_model_parallel_size} dtype={margs.params_dtype} "
+        f"layernorm_epsilon={margs.layernorm_epsilon}"
     )
 
     margs = common.init_megatron_single_process(margs, master_port, log=log)
@@ -310,7 +341,7 @@ def convert(
 
     store = common.SafetensorsStore(hf_dir)
     log("mapping HF safetensors -> mcore parameters ...")
-    sd, consumed = build_mcore_state_dict(model, store, margs, cfg_fields, log)
+    sd, consumed = fam.build_mcore_state_dict(model, store, margs, cfg_fields, log)
 
     common.load_validate_save(model, sd, consumed, store, margs, save_dir, log)
     common.assert_bridge_free("post-save")

@@ -75,6 +75,16 @@ torch_profiler_use_gzip: true
 # continue/finetune
 auto_continue_train: false
 disable_last_saving: false
+# optimizer: set wd_mult=0 for the word-embedding weight (and its tied copy) in
+# Megatron's param groups (patches/embedding_weight_decay_patches.py); OLMo 2 / SmolLM3 recipe.
+# Do not change it across a resume that loads the optimizer state: the param groups
+# differ. A run that loads a checkpoint saved with the other value (on or off) stops
+# with an error (use no_load_optim or finetune to change it).
+skip_embedding_weight_decay: false
+
+# logging: a first iteration (of a run or a resumed run) on a log_interval boundary
+# resets the loss sums and timers like any boundary (upstream does not reset there).
+reset_log_on_first_iteration: false
 
 # fp8
 no_fp8_weight_transpose_cache: false

@@ -15,6 +15,26 @@ Every version below was read out of the published image itself. For v26.4 throug
 
 ---
 
+## Unreleased (main)
+
+These entries describe source changes on `main` that are not yet in a published image, so, unlike the sections below, they were not read out of an image. They move into the section of the first image that contains them.
+
+### `rocm/primus` — Megatron-LM
+
+#### Known issue
+
+- **A preset `norm_epsilon` does not set the RMSNorm epsilon.** Megatron reads `layernorm_epsilon` (the dest of `--norm-epsilon`); a YAML `norm_epsilon` is inert (`primus/core/config/schema_check.py` reports it; DeepSeek-V4's model is the exception and reads it). A preset that sets only `norm_epsilon` trains with Megatron's default `1e-5`. To train at another value, set `layernorm_epsilon`, as `smollm3_3B_Base.yaml` does. The existing presets are not changed here, because that changes the numerics of their runs. A model converted with the native converters (below) is checked at the HF value, but it trains at the preset's value.
+
+#### Bug fixes
+
+- **Native HF converters use the checkpoint's RMSNorm epsilon.** The native Llama, Qwen3 and DeepSeek converters set only the inert `norm_epsilon`, so the model they built to check the weights used `1e-5`. They now set `layernorm_epsilon` from `rms_norm_eps`. The saved weights do not change (epsilon is not a weight). When `config.json` has no `rms_norm_eps`, the Llama converter uses `1e-5`; the SmolLM3 converter uses `1e-6` (HF `SmolLM3Config`) and warns.
+
+#### New features
+
+- **SmolLM3-3B-Base** (NoPE every 4th layer, tied embeddings): model preset, MI300X/MI325X/MI355X example recipes and a native converter. It adds two opt-in Megatron flags (off by default): `skip_embedding_weight_decay` (no weight decay on the token embedding, as in the SmolLM3 recipe) and `reset_log_on_first_iteration` (a first iteration on a `log_interval` boundary resets the loss sums and timers, so each printed loss covers only its own interval). Do not change `skip_embedding_weight_decay` when you resume a run with its optimizer state: the param groups differ, and the load stops with an error (use `no_load_optim` or `finetune` to change it). See the [Megatron parameter reference](../03-configuration-reference/megatron-parameters.md).
+
+---
+
 ## Highlights for v26.7
 
 **ROCm 10.0.0.** Both image families move off the ROCm 7.x line. This is the defining change of the release and it reaches everything: PyTorch, Transformer Engine, Triton, torchvision/torchaudio and APEX are all rebuilt against it, and the JAX plugin pair is renamed `jax-rocm10-pjrt` / `jax-rocm10-plugin`. If you install bare metal, note that the wheel indexes moved too — see [Bare-metal installation](./bare-metal-installation.md).

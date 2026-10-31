@@ -21,8 +21,9 @@ can discover and import the patch modules automatically.
 """
 
 from primus.backends.megatron.patches.training_log import (  # noqa: F401
+    first_iteration_reset_patches,
     print_rank_last_patches,
     wall_clock_timer_patch,
 )
 
-__all__ = ["print_rank_last_patches", "wall_clock_timer_patch"]
+__all__ = ["first_iteration_reset_patches", "print_rank_last_patches", "wall_clock_timer_patch"]

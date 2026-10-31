@@ -234,6 +234,76 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    # Weekly burn-in tier (tests/README.md: a new trainer case is weekly until a weekend run
+    # is green, then it moves to per-PR). The E2E case of the NoPE config (no_rope_freq) and
+    # of the opt-in embedding weight-decay patch on the real setup_model_and_optimizer and the
+    # opt-in first-iteration log reset (wrapped with the unified training_log patch).
+    # Per-PR coverage meanwhile is on CPU: tests/unit_tests/backends/megatron/smollm3.
+    @pytest.mark.weekly
+    def test_smollm3_3B_Base(self):
+        # 4 layers (a multiple of the preset's no_rope_freq: 4) x 3 iterations. Checks the
+        # resolved args and the skip_embedding_weight_decay log lines; TP=PP=1 because the
+        # weight-decay assertion depends on them. NoPE placement is checked per-PR on CPU
+        # (test_megatron_nope_placement_matches_hf in tests/unit_tests/.../smollm3) and by the
+        # converter's check_model_nope; here the resolved no_rope_freq is checked.
+        num_layers = 4
+        stdout, _ = run_script(
+            self.__class__.__name__,
+            "smollm3_3B_Base",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/smollm3_3B_Base-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                str(num_layers),
+                "--train_iters",
+                "3",
+                "--tensor_model_parallel_size",
+                "1",
+                "--pipeline_model_parallel_size",
+                "1",
+            ],
+        )
+        # The resolved Megatron args (arguments.py's dump) must carry the SmolLM3 settings.
+        self.assertRegex(stdout, r"no_rope_freq \.+ 4\b")
+        self.assertRegex(stdout, r"layernorm_epsilon \.+ 1e-06\b")
+        self.assertRegex(stdout, r"rotary_base \.+ 5000000\b")
+        self.assertRegex(stdout, r"untie_embeddings_and_output_weights \.+ False\b")
+        # The weight-decay lines below are printed by the patch under test; they show
+        # that its wrappers bound on the pinned Megatron and ran on the real model. The
+        # correctness of the check itself is unit-tested on CPU against Megatron's own
+        # _get_param_groups. With TP=PP=1 (passed above) and tied embeddings the built model has
+        # exactly one embedding parameter (no separate output_layer.weight), so the
+        # list must hold exactly that one name.
+        self.assertRegex(
+            stdout,
+            r"\[Patch:megatron\.optimizer\.skip_embedding_weight_decay\] verified: "
+            r"\['[\w.]*embedding\.word_embeddings\.weight'\] in param group\(s\) "
+            r"with wd_mult=0\.0(?![\d.])",
+        )
+        # The other 2-D weights keep weight decay (all of them, none lost it), and
+        # the model holds no separate output_layer.weight; with untie...=False above,
+        # that means the head is tied to the embedding.
+        m = re.search(
+            r"\[Patch:megatron\.optimizer\.skip_embedding_weight_decay\] other 2-D weights: "
+            r"(\d+) with weight decay, (\d+) without; output_layer\.weight: "
+            r"(tied or absent|untied \(keeps weight decay\))",
+            stdout,
+        )
+        self.assertIsNotNone(m, "weight-decay summary line missing")
+        # Per layer of the dense GPT layer spec: linear_qkv, linear_proj, linear_fc1,
+        # linear_fc2 (norms are 1-D). A layer-spec change that adds 2-D weights changes this.
+        self.assertEqual(int(m.group(1)), 4 * num_layers)
+        self.assertEqual(int(m.group(2)), 0)
+        self.assertEqual(m.group(3), "tied or absent")
+        # The opt-in first-iteration log reset wrapped training_log and acted on iteration 1
+        # (log_interval 1, so the first iteration is on a boundary).
+        self.assertIn("[Patch:megatron.training_log.first_iteration_reset] wrapped", stdout)
+        self.assertIn(
+            "[Patch:megatron.training_log.first_iteration_reset] first iteration 1 is on a "
+            "log_interval boundary",
+            stdout,
+        )
+
     def test_qwen3_30B_A3B(self):
         run_script(
             self.__class__.__name__,

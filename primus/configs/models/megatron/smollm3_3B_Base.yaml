@@ -1,0 +1,29 @@
+extends:
+  - llama3_base.yaml
+
+# SmolLM3 (HuggingFaceTB/SmolLM3-*): Llama-3 layout (GQA, RMSNorm pre-norm,
+# SwiGLU, bias-free linears) with tied embeddings and NoPE on every 4th layer
+# (HF no_rope_layer_interval=4 -> layers 3,7,11,... skip RoPE). Megatron
+# expresses the NoPE pattern through `no_rope_freq` (1 marks a NoPE layer).
+rotary_base: 5000000
+# RMSNorm eps 1e-6. `layernorm_epsilon` is the key Megatron reads (dest of --norm-epsilon).
+# Megatron does not read `norm_epsilon` for this model, but llama3_base.yaml sets it to 1e-5
+# and config tools (and the native converter's field set) read it. It is set to the same
+# value so the merged config does not show a 1e-5 that the model does not use.
+layernorm_epsilon: 1.0e-06
+norm_epsilon: 1.0e-06
+untie_embeddings_and_output_weights: false
+# NoPE on every 4th layer (layers 3, 7, ..., 35). Megatron expands the int form and asserts
+# num_layers % no_rope_freq == 0, so a --num_layers override must be a multiple of 4.
+no_rope_freq: 4
+max_position_embeddings: 65536
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: HuggingFaceTB/SmolLM3-3B-Base
+
+hidden_size: 2048
+ffn_hidden_size: 11008
+num_layers: 36
+num_attention_heads: 16
+num_query_groups: 4
+kv_channels: 128

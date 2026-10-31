@@ -27,7 +27,7 @@ The following aligns with the backend overview and the configs present in this t
 
 Model presets live in `primus/configs/models/megatron/`. Example experiments that reference those presets appear under `examples/megatron/configs/MI300X/`, `MI325X/`, and `MI355X/`.
 
-For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (21 configs each). For **Megatron**, MI300X and MI325X are nearly identical **except** that MI325X omits `qwen3_5_35B_A3B` (BF16 and FP8)—so MI300X has 70 example configs while MI325X has 68—and **MI355X** is a superset (99 configs; it adds models such as `glm5`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, and `minimax_m2.5`). Each row's SKU list below reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
+For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (21 configs each). For **Megatron**, MI300X has 81 example configs, MI325X 69 and MI355X 121. MI325X has a subset of MI300X: it omits `qwen3_5_35B_A3B` (BF16 and FP8) and the GDN, KDA and Zebra-Llama examples. MI355X has most MI300X models and adds others, such as `glm5`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B` and `minimax_m2.5`; some GDN and Zebra-Llama examples are MI300X only. Each row's SKU list below reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
 
 | Model name (file) | Preset path | Role | Example experiment dirs | Precision in examples |
 | ----------------- | ----------- | ---- | ----------------------- | ---------------------- |
@@ -94,6 +94,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `qwen3_30B_A3B.yaml` | `primus/configs/models/megatron/qwen3_30B_A3B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen3_5_35B_A3B.yaml` | `primus/configs/models/megatron/qwen3_5_35B_A3B.yaml` | MoE model preset | MI300X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
+| `smollm3_3B_Base.yaml` | `primus/configs/models/megatron/smollm3_3B_Base.yaml` | Model preset (NoPE every 4th layer, tied embeddings) | MI300X, MI325X, MI355X | BF16 |
 | `zebra_mamba_1B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_1B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
 | `zebra_mamba_3B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_3B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
 | `zebra_mamba_8B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_8B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
@@ -219,6 +220,7 @@ Values below come from `primus/configs/models/megatron/` presets (merged through
 | LLaMA 3 70B | `llama3_70B.yaml` | 8192 | 80 | 64 | 8 | 8192 |
 | LLaMA 3.1 405B | `llama3.1_405B.yaml` | 16384 | 126 | 128 | 8 | 8192 |
 | Qwen3 8B | `qwen3_8B.yaml` | 4096 | 36 | 32 | 8 | 131072 (`qwen2.5_base` chain) |
+| SmolLM3 3B | `smollm3_3B_Base.yaml` | 2048 | 36 | 16 | 4 | 65536 |
 | Mixtral 8x7B | `mixtral_8x7B_v0.1.yaml` | 4096 | 32 | 32 | — | 4096 |
 | DeepSeek-V3 (MoE) | `deepseek_v3.yaml` | 7168 | 61 | 128 (MLA) | — | See preset / HF |
 | Mamba 370M | `mamba_370M.yaml` | (Mamba stack) | — | — | — | — |

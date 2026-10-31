@@ -87,6 +87,31 @@ def skip_if_no_cuda(reason: str = "requires GPU (primus_turbo initializes CUDA a
         pytest.skip(reason, allow_module_level=True)
 
 
+def require_megatron():
+    """Import Megatron-LM for a test that needs it, from where tests/unit_tests/conftest.py
+    put it on sys.path (MEGATRON_PATH, else third_party/Megatron-LM). If that tree has
+    the megatron package, an import error fails the test; without it the test is
+    skipped (with PRIMUS_REQUIRE_MEGATRON=1 it fails instead)."""
+    from pathlib import Path
+
+    import pytest
+
+    root = os.environ.get("MEGATRON_PATH")
+    if not root or not os.path.exists(root):
+        root = Path(__file__).resolve().parent.parent / "third_party" / "Megatron-LM"
+    if (Path(root) / "megatron").is_dir():
+        import megatron  # noqa: F401  (fails the test if the tree cannot import)
+
+        return
+    try:
+        import megatron  # noqa: F401,F811  (an installed Megatron-LM)
+    except ImportError as exc:
+        reason = f"Megatron-LM is not at {root} and not importable: {exc}"
+        if os.environ.get("PRIMUS_REQUIRE_MEGATRON") == "1":
+            pytest.fail(reason)
+        pytest.skip(reason)
+
+
 def install_aiter_deepbind_hook() -> None:
     """Install Primus' production RTLD_DEEPBIND import hook for aiter's mha kernels.
 

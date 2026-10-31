@@ -1,0 +1,98 @@
+# SmolLM3-3B-Base pretrain example for MI355X (8 GPUs, TP=PP=1, DP=8: global_batch_size
+# must be a multiple of micro_batch_size x DP). Lower micro_batch_size if memory runs out.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:smollm3_3B_Base-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    # data_path: ./data
+
+    # model to run
+    model: smollm3_3B_Base.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Pretrain"
+      # disable_wandb: false
+      # disable_tensorboard: false
+      stderr_sink_level: DEBUG
+
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      log_interval: 1
+      # Each printed lm loss covers only its own iteration, also after a resume.
+      reset_log_on_first_iteration: true
+
+      train_iters: 50
+      micro_batch_size: 4
+      global_batch_size: 32
+
+      seq_length: 4096
+
+      # Short demo schedule (cosine, small lr). SmolLM3's own pretraining used a
+      # higher peak lr with a warmup-stable-decay schedule; set those for a real run.
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      # AdamW settings as in SmolLM3 pretraining: weight decay 0.1, but none on the
+      # (tied) token embedding (after OLMo 2).
+      weight_decay: 0.1
+      skip_embedding_weight_decay: true
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+
+      # precision and optimizer sharding (also the pre_trainer.yaml defaults; set here
+      # because overlap_param_gather below needs the distributed optimizer)
+      bf16: true
+      use_distributed_optimizer: true
+
+      # parallel
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data
+      # SmolLM3 was pretrained with intra-document attention masking. To train the
+      # same way, set reset_attention_mask: true and reset_position_ids: true. They are
+      # left off in this short example because turning them on makes Megatron build a
+      # full [seq, seq] mask per sample (arbitrary-mask attention path: slower, more
+      # memory, and no context_parallel_size > 1). Mock data does have document
+      # boundaries (EOD tokens), which is why eod_mask_loss above has an effect.
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # Attention through Transformer Engine, which also supports context_parallel_size > 1.
+      # Primus Turbo attention (use_turbo_attention: true) works only with
+      # context_parallel_size 1 for this model.
+      # Dense model: no grouped GEMM.
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+
+      # Cross entropy flags
+      # cross_entropy_fusion_impl: "te"
+      # cross_entropy_loss_fusion: true

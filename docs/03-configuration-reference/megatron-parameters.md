@@ -154,6 +154,7 @@ models:
 | `start_weight_decay` | `null` | Starting weight decay for schedules. |
 | `end_weight_decay` | `null` | Ending weight decay for schedules. |
 | `weight_decay_incr_style` | `constant` | How weight decay changes between start/end. |
+| `skip_embedding_weight_decay` | `false` | *Primus:* no weight decay on the word-embedding weight and its tied output copy; not supported with a Muon optimizer (`optimizer` contains `muon`) or the FSDP2 custom optimizers. Do not change it when you resume with the optimizer state: a run that loads a checkpoint saved with the other value (on or off) stops with an error. |
 | `clip_grad` | `1.0` | Global gradient norm clip. |
 | `adam_beta1` | `0.9` | Adam first moment decay. |
 | `adam_beta2` | `0.95` (`0.999` in `pre_trainer.yaml`) | Adam second moment decay. |
@@ -419,6 +420,7 @@ models:
 | `one_logger_project` | `megatron-lm` | OneLogger project string. |
 | `one_logger_run_name` | `null` | OneLogger run name. |
 | `log_interval` | `100` (`1` in `pre_trainer.yaml`) | Console log interval in iterations. |
+| `reset_log_on_first_iteration` | `false` | *Primus:* a first iteration on a `log_interval` boundary resets the loss sums and timers like any boundary, so each printed loss covers only its own interval. |
 | `tensorboard_dir` | `null` | TensorBoard output directory. |
 | `logging_level` | `null` | Python logging level override. |
 | `config_logger_dir` | `""` | Directory for dumped config logs. |

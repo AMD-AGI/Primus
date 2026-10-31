@@ -250,6 +250,7 @@ The following models are supported out of the box via provided configuration fil
 | deepseek_v3      | [deepseek-ai/DeepSeek-V3](https://huggingface.co/deepseek-ai/DeepSeek-V3)           | [deepseek_v3-BF16-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/deepseek_v3-BF16-pretrain.yaml)           | |
 | Mixtral-8x7B-v0.1 | [mistralai/Mixtral-8x7B-v0.1 ](https://huggingface.co/mistralai/Mixtral-8x7B-v0.1)           | [mixtral_8x7B_v0.1-BF16-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml)           | |
 | Mixtral-8x22B-v0.1 | [mistralai/Mixtral-8x22B-v0.1 ](https://huggingface.co/mistralai/Mixtral-8x22B-v0.1)           | [mixtral_8x22B_v0.1-BF16-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/mixtral_8x22B_v0.1-BF16-pretrain.yaml)           | |
+| smollm3_3B_Base  | [HuggingFaceTB/SmolLM3-3B-Base](https://huggingface.co/HuggingFaceTB/SmolLM3-3B-Base) | [smollm3_3B_Base-BF16-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/smollm3_3B_Base-BF16-pretrain.yaml) | |
 
 ### Diffusion Models
 
