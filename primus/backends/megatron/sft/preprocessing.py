@@ -154,15 +154,19 @@ def tokenize_formatted_sft_sample(
     Padding tokens are masked out via ``loss_mask=0`` so they do not contribute
     to the SFT loss.
 
+    ``loss_mask`` is in *label* space: ``loss_mask[i]`` weights the target
+    ``labels[i] = input_ids[i + 1]``, so it is 1 exactly where that target is a
+    supervised token (the response, then a supervised EOS when the tokenizer
+    has one), and the last position is always 0. Callers must not shift it
+    again.
+
     See ``packing._tokenize_no_pad`` for the meaning of
     ``bridge_compat_inline_bos``; this function honours the same flag so the
     non-packed code path stays consistent with the packed path.
     """
     if not bridge_compat_inline_bos:
         text = formatted_sample.text
-        token_ids = tokenize_text(tokenizer, text)
-        if len(token_ids) > max_seq_length:
-            token_ids = token_ids[:max_seq_length]
+        token_ids = list(tokenize_text(tokenizer, text))
 
         loss_mask = np.zeros(len(token_ids), dtype=np.int64)
         prefix_text = ""
@@ -177,6 +181,18 @@ def tokenize_formatted_sft_sample(
                 loss_mask[start : min(end, len(token_ids))] = 1
             if start >= len(token_ids):
                 break
+
+        # A supervised response ends with a supervised EOS (as on the
+        # bridge_compat_inline_bos path), so the model learns to stop whatever
+        # the tokenizer's pad token is.
+        eos_id = _resolve_eos_token_id(tokenizer)
+        if eos_id is not None and formatted_sample.segments and formatted_sample.segments[-1].supervise:
+            token_ids.append(eos_id)
+            loss_mask = np.append(loss_mask, 1)
+
+        if len(token_ids) > max_seq_length:
+            token_ids = token_ids[:max_seq_length]
+            loss_mask = loss_mask[:max_seq_length]
     else:
         eos_id = _resolve_eos_token_id(tokenizer)
 
@@ -222,15 +238,10 @@ def tokenize_formatted_sft_sample(
     if labels.numel() >= 2:
         labels[:-1] = input_ids[1:]
     # ``loss_mask`` above marks supervised *input* positions; the loss is
-    # ``CE(logits[i], labels[i]) * loss_mask[i]`` with ``labels[i] =
-    # input_ids[i+1]``, so the mask must move to label positions as well:
-    # ``loss_mask[i] = supervised[i+1]``. Without the shift the first
-    # response token was never a target and the token *after* the response
-    # was: with no EOS appended that is the pad id, so models with a
-    # dedicated pad token (e.g. phi-4, granite) were trained to emit it and
-    # their iter-1 loss read 18-28% above a transformers reference on the
-    # same alpaca samples. Mirrors the packed path (``packing.py``) and
-    # Bridge's ``loss_mask = item["loss_mask"][1:]``.
+    # ``CE(logits[i], labels[i]) * loss_mask[i]``, so the mask moves to label
+    # positions too: ``loss_mask[i] = supervised[i+1]``. Unshifted, the first
+    # response token is never a target and the token after the response (pad)
+    # is. Mirrors ``packing.py`` and Bridge's ``loss_mask = item["loss_mask"][1:]``.
     supervised = torch.tensor(loss_mask, dtype=torch.int64)
     loss_mask_tensor = torch.zeros_like(supervised)
     if supervised.numel() >= 2:

@@ -92,35 +92,72 @@ def test_tokenize_formatted_sft_sample_marks_only_supervised_segments():
 
 
 class PaddedTokenizer(MockTokenizer):
-    """A tokenizer with a dedicated pad token distinct from EOS (as phi-4 and granite have)."""
+    """A tokenizer with a dedicated pad token distinct from EOS (as phi-4 and granite have).
 
-    pad = 9999
-    eos = 9998
+    The special ids sit outside ``MockTokenizer``'s 0-9999 range so they never collide with a hashed
+    ordinary token (``hash`` is salted per process)."""
+
+    pad = 10001
+    eos = 10000
 
 
-def test_tokenize_formatted_sft_sample_targets_exactly_the_response_tokens():
-    """The scored targets (``labels`` where ``loss_mask`` is 1) are the response tokens, in order: the first one
-    included, and never the pad token after the response."""
-    formatter = AlpacaFormatter()
-    response = "SFT is supervised fine-tuning."
-    formatted = formatter.format_sample(
+class PadIsEosTokenizer(MockTokenizer):
+    """A tokenizer without a dedicated pad token: pad resolves to EOS (Llama-2 / GPT-2 style)."""
+
+    eos = 10000
+
+
+def _sft_sample(response="SFT is supervised fine-tuning."):
+    return AlpacaFormatter().format_sample(
         normalize_sft_sample({"instruction": "What is SFT?", "response": response})
     )
+
+
+def _targets(formatted, tok, max_seq_length, inline_bos=False):
+    """The scored targets: ``labels`` where ``loss_mask`` is 1."""
+    input_ids, labels, loss_mask = tokenize_formatted_sft_sample(
+        formatted_sample=formatted,
+        tokenizer=tok,
+        max_seq_length=max_seq_length,
+        bridge_compat_inline_bos=inline_bos,
+    )
+    assert input_ids.shape == labels.shape == loss_mask.shape == (max_seq_length,)
+    return labels[loss_mask.bool()].tolist(), input_ids
+
+
+def test_tokenize_formatted_sft_sample_targets_exactly_the_response_then_eos():
+    """The scored targets are the response tokens in order (the first one included), then one EOS, on both
+    paths; never the pad token after the response."""
+    formatted = _sft_sample()
+    for tok in (PaddedTokenizer(), PadIsEosTokenizer()):
+        response = tok.convert_tokens_to_ids(tok.tokenize("SFT is supervised fine-tuning."))
+        for inline_bos in (False, True):
+            targets, _ = _targets(formatted, tok, 64, inline_bos)
+            assert targets == response + [tok.eos]
+            if getattr(tok, "pad", None) is not None:
+                assert tok.pad not in targets
+
+
+def test_a_sample_that_fills_max_seq_length_keeps_every_target():
+    """Exact fit: the last position has no target, so the EOS is the last scored target."""
     tok = PaddedTokenizer()
-    for inline_bos in (False, True):
-        input_ids, labels, loss_mask = tokenize_formatted_sft_sample(
-            formatted_sample=formatted,
-            tokenizer=tok,
-            max_seq_length=64,
-            bridge_compat_inline_bos=inline_bos,
-        )
-        targets = labels[loss_mask.bool()].tolist()
-        expected = tok.convert_tokens_to_ids(tok.tokenize(response))
-        if inline_bos:
-            expected = expected + [tok.eos]  # the Bridge-compatible path appends a supervised EOS
-        assert targets == expected
-        assert tok.pad not in targets
-        assert loss_mask[-1].item() == 0
+    formatted = _sft_sample()
+    full = len(tok.tokenize(formatted.text)) + 1  # + the appended EOS
+    targets, input_ids = _targets(formatted, tok, full)
+    assert targets == tok.convert_tokens_to_ids(tok.tokenize("SFT is supervised fine-tuning.")) + [tok.eos]
+    assert tok.pad not in input_ids.tolist()
+
+
+def test_a_response_cut_by_max_seq_length_scores_only_the_tokens_that_fit():
+    """Truncation inside the response: every response token that fits is a target (predicted from the position
+    before it), and no EOS (it was cut off)."""
+    tok = PaddedTokenizer()
+    formatted = _sft_sample("one two three four five six seven eight")
+    prompt_len = len(tok.tokenize(formatted.text)) - 8
+    limit = prompt_len + 3  # the prompt and the first three response tokens
+    targets, input_ids = _targets(formatted, tok, limit)
+    assert targets == tok.convert_tokens_to_ids("one two three".split())
+    assert input_ids.tolist()[-1] == tok.convert_tokens_to_ids(["three"])[0]
 
 
 def test_forward_step_passes_new_megatron_kwargs_and_computes_masked_loss(monkeypatch):
