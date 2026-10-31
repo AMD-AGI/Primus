@@ -36,19 +36,26 @@ grad_ownership = pytest.importorskip(
 def _clean_state():
     """Reset both this module's and grad_ownership's module-level state
     around every test."""
-    gbo._state = {"owned": frozenset(), "seen": set(), "logged": False}
-    gbo._POISON = False
-    grad_ownership._written = set()
-    grad_ownership._skipped = set()
-    grad_ownership._previous = frozenset()
-    grad_ownership._ever_recorded = False
+
+    def reset():
+        gbo._state = {"owned": frozenset(), "seen": set(), "logged": False}
+        gbo._POISON = False
+        grad_ownership._written = set()
+        grad_ownership._skipped = set()
+        grad_ownership._previous = frozenset()
+        grad_ownership._ever_recorded = False
+        # first-write claims (newer Primus-Turbo)
+        for name, empty in (
+            ("_first_writes", set()),
+            ("_previous_first_writes", frozenset()),
+            ("_stepping", False),
+        ):
+            if hasattr(grad_ownership, name):
+                setattr(grad_ownership, name, empty)
+
+    reset()
     yield
-    gbo._state = {"owned": frozenset(), "seen": set(), "logged": False}
-    gbo._POISON = False
-    grad_ownership._written = set()
-    grad_ownership._skipped = set()
-    grad_ownership._previous = frozenset()
-    grad_ownership._ever_recorded = False
+    reset()
 
 
 def _slice_of(tensor: torch.Tensor):
@@ -375,45 +382,75 @@ class TestOwnershipRotation:
         warmup_grad = torch.empty(8)
         grad_ownership.record_overwrite(warmup_grad)
 
-        assert gbo._rotate_ownership(grad_ownership, discard=True) == frozenset()
+        assert gbo._rotate_ownership(grad_ownership, gbo._KEEP_NONE) == frozenset()
         # The discard also empties the producer's current log, so the first
         # real iteration cannot inherit the synthetic warmup claim.
-        assert gbo._rotate_ownership(grad_ownership, discard=False) == frozenset()
+        assert gbo._rotate_ownership(grad_ownership, gbo._KEEP_ALL) == frozenset()
 
     def test_real_iteration_rotation_preserves_completed_overwrites(self):
         grad = torch.empty(8)
         grad_ownership.record_overwrite(grad)
 
-        assert gbo._rotate_ownership(grad_ownership, discard=False) == frozenset({_slice_of(grad)})
+        assert gbo._rotate_ownership(grad_ownership, gbo._KEEP_ALL) == frozenset({_slice_of(grad)})
 
 
 class TestCurrentStepEligibility:
-    def test_discards_pipeline_warmup_without_reading_schedule(self, monkeypatch):
+    def test_keeps_nothing_in_pipeline_warmup_without_reading_schedule(self, monkeypatch):
         monkeypatch.setattr(
             gbo,
             "_get_num_microbatches",
             lambda: pytest.fail("warmup must short-circuit before schedule lookup"),
         )
 
-        assert gbo._discard_ownership_for_step(SimpleNamespace(curr_iteration=-1)) is True
+        assert gbo._ownership_for_step(SimpleNamespace(curr_iteration=-1)) == gbo._KEEP_NONE
 
     @pytest.mark.parametrize("num_microbatches", [0, 2, 8])
-    def test_discards_previous_ownership_for_current_multi_microbatch_step(
+    def test_keeps_only_first_write_claims_for_current_multi_microbatch_step(
         self, monkeypatch, num_microbatches
     ):
         monkeypatch.setattr(gbo, "_get_num_microbatches", lambda: num_microbatches)
 
-        assert gbo._discard_ownership_for_step(SimpleNamespace(curr_iteration=3)) is True
+        assert gbo._ownership_for_step(SimpleNamespace(curr_iteration=3)) == gbo._KEEP_FIRST_WRITES
 
-    def test_accepts_previous_ownership_only_for_current_single_microbatch_step(self, monkeypatch):
+    def test_keeps_every_claim_only_for_current_single_microbatch_step(self, monkeypatch):
         monkeypatch.setattr(gbo, "_get_num_microbatches", lambda: 1)
 
-        assert gbo._discard_ownership_for_step(SimpleNamespace(curr_iteration=3)) is False
+        assert gbo._ownership_for_step(SimpleNamespace(curr_iteration=3)) == gbo._KEEP_ALL
 
-    def test_discards_when_current_schedule_cannot_be_established(self, monkeypatch):
+    def test_keeps_nothing_when_current_schedule_cannot_be_established(self, monkeypatch):
         def unavailable():
             raise RuntimeError("calculator is not initialized")
 
         monkeypatch.setattr(gbo, "_get_num_microbatches", unavailable)
 
-        assert gbo._discard_ownership_for_step(SimpleNamespace(curr_iteration=3)) is True
+        assert gbo._ownership_for_step(SimpleNamespace(curr_iteration=3)) == gbo._KEEP_NONE
+
+
+@pytest.mark.skipif(
+    not hasattr(grad_ownership, "claim_first_write"), reason="Primus-Turbo without first-write claims"
+)
+class TestFirstWriteClaims:
+    def test_multi_microbatch_rotation_keeps_only_first_write_claims(self):
+        mega, mxfp4 = torch.empty(8), torch.empty(8)
+        grad_ownership.begin_step()
+        assert grad_ownership.claim_first_write(mega)
+        grad_ownership.record_overwrite(mxfp4)
+
+        owned = gbo._rotate_ownership(grad_ownership, gbo._KEEP_FIRST_WRITES)
+        assert owned == frozenset({_slice_of(mega)})
+
+    def test_single_microbatch_rotation_keeps_every_claim(self):
+        mega, mxfp4 = torch.empty(8), torch.empty(8)
+        grad_ownership.begin_step()
+        assert grad_ownership.claim_first_write(mega)
+        grad_ownership.record_overwrite(mxfp4)
+
+        owned = gbo._rotate_ownership(grad_ownership, gbo._KEEP_ALL)
+        assert owned == frozenset({_slice_of(mega), _slice_of(mxfp4)})
+
+    def test_warmup_drops_first_write_claims_too(self):
+        grad = torch.empty(8)
+        grad_ownership.begin_step()
+        assert grad_ownership.claim_first_write(grad)
+
+        assert gbo._rotate_ownership(grad_ownership, gbo._KEEP_NONE) == frozenset()
