@@ -74,6 +74,7 @@ Three FlyDSL tracing rules are load-bearing here:
 """
 
 import math
+import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -94,6 +95,57 @@ from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_
 
 _LOG2E = math.log2(math.e)  # exp(x) == exp2(x * log2(e)); only exp2 is exposed
 _LLVM_GEP_DYNAMIC = -2147483648  # LLVM kDynamicIndex sentinel
+
+#: Vectorised variant: a 128-thread workgroup where each thread owns 8 contiguous
+#: elements per step (16-byte bf16 loads and stores) and keeps its slice of every
+#: candidate in registers between the reduction and the mix, so ``v`` is read once.
+#: The scalar layout above moves 2 bytes per lane per load and reads ``v`` twice,
+#: which leaves it several times below HBM bandwidth on gfx1250. Built for bf16 when
+#: ``H % (VEC_BLOCK * VEC) == 0`` and no test defect is requested;
+#: ``K3P_ATTNRES_VEC=0`` keeps the scalar kernel.
+VEC = 8
+VEC_BLOCK = 128
+#: gfx1250 wave width; the vector kernels reduce inside a wave with ``gpu.shuffle_xor``
+#: and only the per-wave partials go through LDS (one barrier instead of the scalar
+#: kernel's recursive doubling, which costs two barriers per step).
+WAVE = 32
+
+
+def block_sums(vals, tid, block, lds_get, lds_put, fm):
+    """Sum each value in ``vals`` over the workgroup; every lane gets the totals.
+
+    Butterfly over the wave's 32 lanes, then every lane of a wave writes the (same)
+    wave partial to its LDS slot -- duplicate stores of one value, so no branch -- and
+    each lane adds the ``block // WAVE`` partials back.
+    """
+    n_waves = block // WAVE
+
+    def raw(x):
+        return x.ir_value() if hasattr(x, "ir_value") else x
+
+    for dist in (1, 2, 4, 8, 16):
+        vals = [arith.AddFOp(v, raw(gpu.shuffle_xor(v, dist, WAVE)), fastmath=fm).result for v in vals]
+    wave = tid // arith.index(WAVE)
+    for r in range_constexpr(len(vals)):
+        lds_put(arith.index(r * n_waves) + wave, vals[r])
+    gpu.barrier()
+    out = []
+    for r in range_constexpr(len(vals)):
+        s = lds_get(arith.index(r * n_waves))
+        for w in range_constexpr(n_waves - 1):
+            s = arith.AddFOp(s, lds_get(arith.index(r * n_waves + w + 1)), fastmath=fm).result
+        out.append(s)
+    return out
+
+
+def use_vector_kernel(hidden: int, elem_dtype: str, inject: str = "") -> bool:
+    """Whether the forward / backward builders take the vectorised layout."""
+    return (
+        elem_dtype == "bf16"
+        and not inject
+        and hidden % (VEC_BLOCK * VEC) == 0
+        and os.environ.get("K3P_ATTNRES_VEC", "1") != "0"
+    )
 
 #: Widest workgroup used. 256 threads is one output element per thread for
 #: ``H = 256`` and a clean strided slice for every larger multiple.
@@ -252,8 +304,9 @@ def build_attn_res_mixer_fwd(
     """
     ensure_usable_lld()
     arch = get_rocm_arch()
-    if not arch.startswith("gfx950"):
-        raise RuntimeError(f"attn_res_mixer targets gfx950 (CDNA4); got {arch!r}")
+    # No MFMA / wave intrinsics: every reduction goes through LDS, so gfx1250's wave32 runs it as is.
+    if not arch.startswith(("gfx950", "gfx1250")):
+        raise RuntimeError(f"attn_res_mixer targets gfx950 (CDNA4) and gfx1250; got {arch!r}")
 
     H = int(hidden)
     NB = int(num_blocks)
@@ -266,8 +319,12 @@ def build_attn_res_mixer_fwd(
     if inject and inject not in _ALL_FWD_VARIANTS:
         raise ValueError(f"unknown injection {inject!r}; expected '' or one of {list(_ALL_FWD_VARIANTS)}")
 
-    BLOCK = block_size_for(H)
+    vec_path = use_vector_kernel(H, elem_dtype, inject)
+    BLOCK = VEC_BLOCK if vec_path else block_size_for(H)
     EPT = H // BLOCK  # hidden elements per thread
+    EPV = H // (BLOCK * VEC)  # 8-element vectors per thread (vector kernel)
+    if vec_path:
+        waves_per_eu = int(os.environ.get("K3P_ATTNRES_WPE", str(waves_per_eu)))
     EPSILON = 0.0 if inject == "drop_eps" else float(eps)
 
     # 2C reduction rows (ss and dot per candidate), one f32 slot per thread.
@@ -475,6 +532,144 @@ def build_attn_res_mixer_fwd(
                 acc = math_dialect.fma(mix_w[c], x, acc)
             store_elem(acc, out_ptr, row_ps + d)
 
+    @flyc.kernel(
+        known_block_size=[BLOCK, 1, 1],
+        name=f"attn_res_mixer_fwd_vec_{elem_dtype}_H{H}_C{C}_w{waves_per_eu}",
+    )
+    def attn_res_mixer_fwd_vec_kernel(
+        BR: fx.Tensor,
+        PS: fx.Tensor,
+        W: fx.Tensor,
+        OUT: fx.Tensor,
+        RSAV: fx.Tensor,
+        DSAV: fx.Tensor,
+    ):
+        f32 = T.f32
+        bf16 = T.bf16
+        fm = arith.FastMathFlags.fast
+        vec1_f32 = T.vec(1, f32)
+        v_bf16 = T.vec(VEC, bf16)
+        v_f32 = T.vec(VEC, f32)
+
+        br_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), BR)
+        ps_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), PS)
+        w_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), W)
+        out_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), OUT)
+        rsav_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), RSAV)
+        dsav_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), DSAV)
+
+        base = allocator.get_base()
+        lds_red = SmemPtr(base, lds_red_off, f32, shape=(RED_ROWS * BLOCK,)).get()
+
+        def gep(bptr, elem_idx, elem_ty):
+            return _llvm.GEPOp(
+                _llvm_ptr_ty(),
+                bptr,
+                [arith.index_cast(T.i64, elem_idx)],
+                rawConstantIndices=[_LLVM_GEP_DYNAMIC],
+                elem_type=elem_ty,
+                noWrapFlags=0,
+            ).result
+
+        def store_f32(val, bptr, elem_idx):
+            _llvm.StoreOp(val, gep(bptr, elem_idx, f32))
+
+        def load_vec(bptr, elem_idx, vty, ety):
+            return _llvm.LoadOp(vty, gep(bptr, elem_idx, ety), alignment=16).result
+
+        def lane(vv, e):
+            return vector.extract(vv, static_position=[e], dynamic_position=[])
+
+        def lane_f32(vv, e):
+            return arith.ExtFOp(f32, lane(vv, e)).result
+
+        def lds_get(elem_idx):
+            v = vector.load(vec1_f32, lds_red, [elem_idx])
+            return vector.extract(v, static_position=[0], dynamic_position=[])
+
+        def lds_put(elem_idx, val):
+            vector.store(vector.from_elements(vec1_f32, [val]), lds_red, [elem_idx])
+
+        c_zero = arith.constant(0.0, type=f32)
+        c_half = arith.constant(0.5, type=f32)
+        c_three = arith.constant(3.0, type=f32)
+        c_log2e = arith.constant(_LOG2E, type=f32)
+        c_inv_h = arith.constant(1.0 / float(H), type=f32)
+        c_eps = arith.constant(EPSILON, type=f32)
+
+        tok = arith.index_cast(T.index, gpu.block_idx.x)
+        tid = arith.index_cast(T.index, gpu.thread_idx.x)
+        I_BLOCK = arith.index(BLOCK)
+        I_H = arith.index(H)
+        I_C = arith.index(C)
+        I_VEC = arith.index(VEC)
+
+        row_br = tok * arith.index(NB * H)
+        row_ps = tok * I_H
+        cand = [(br_ptr, row_br + arith.index(c * H)) for c in range(NB)] + [(ps_ptr, row_ps)]
+
+        # phase 1: one pass over v, both reductions; the vectors stay in registers
+        xs = [[None for _ in range(EPV)] for _ in range(C)]
+        acc_ss = [c_zero for _ in range(C)]
+        acc_dot = [c_zero for _ in range(C)]
+        for j in range_constexpr(EPV):
+            d0 = (tid + arith.index(j * BLOCK)) * I_VEC
+            w8 = load_vec(w_ptr, d0, v_f32, f32)
+            for c in range_constexpr(C):
+                x8 = load_vec(cand[c][0], cand[c][1] + d0, v_bf16, bf16)
+                xs[c][j] = x8
+                for e in range_constexpr(VEC):
+                    x = lane_f32(x8, e)
+                    acc_ss[c] = math_dialect.fma(x, x, acc_ss[c])
+                    acc_dot[c] = math_dialect.fma(x, lane(w8, e), acc_dot[c])
+
+        totals = block_sums(acc_ss + acc_dot, tid, BLOCK, lds_get, lds_put, fm)
+
+        # phase 2: scores and softmax, as the scalar kernel computes them
+        rs = []
+        dots = []
+        scores = []
+        for c in range_constexpr(C):
+            ss = totals[c]
+            dt = totals[C + c]
+            mean_sq = arith.MulFOp(ss, c_inv_h, fastmath=fm).result
+            r = _rsqrt_refined(arith.AddFOp(mean_sq, c_eps, fastmath=fm).result, c_three, c_half, fm)
+            rs.append(r)
+            dots.append(dt)
+            scores.append(arith.MulFOp(dt, r, fastmath=fm).result)
+        smax = scores[0]
+        for c in range_constexpr(C - 1):
+            smax = arith.MaxNumFOp(smax, scores[c + 1]).result
+        exps = [_nat_exp(arith.SubFOp(scores[c], smax, fastmath=fm).result, c_log2e, fm) for c in range(C)]
+        zsum = exps[0]
+        for c in range_constexpr(C - 1):
+            zsum = arith.AddFOp(zsum, exps[c + 1], fastmath=fm).result
+        inv_z = arith.DivFOp(arith.constant(1.0, type=f32), zsum, fastmath=fm).result
+        probs = [arith.MulFOp(exps[c], inv_z, fastmath=fm).result for c in range(C)]
+
+        save_c = tid % I_C
+        sel_r = rs[0]
+        sel_d = dots[0]
+        for c in range_constexpr(C - 1):
+            hit = arith.cmpi(arith.CmpIPredicate.eq, save_c, arith.index(c + 1))
+            sel_r = arith.select(hit, rs[c + 1], sel_r)
+            sel_d = arith.select(hit, dots[c + 1], sel_d)
+        store_f32(sel_r, rsav_ptr, tok * I_C + save_c)
+        store_f32(sel_d, dsav_ptr, tok * I_C + save_c)
+
+        # phase 3: the convex combination from the registers, 16-byte stores
+        for j in range_constexpr(EPV):
+            d0 = (tid + arith.index(j * BLOCK)) * I_VEC
+            outs = []
+            for e in range_constexpr(VEC):
+                acc = c_zero
+                for c in range_constexpr(C):
+                    acc = math_dialect.fma(probs[c], lane_f32(xs[c][j], e), acc)
+                outs.append(arith.trunc_f(bf16, acc))
+            _llvm.StoreOp(vector.from_elements(v_bf16, outs), gep(out_ptr, row_ps + d0, bf16), alignment=16)
+
+    kernel_fn = {False: attn_res_mixer_fwd_kernel, True: attn_res_mixer_fwd_vec_kernel}[vec_path]
+
     @flyc.jit
     def launch_attn_res_mixer_fwd(
         BR: fx.Tensor,
@@ -492,7 +687,7 @@ def build_attn_res_mixer_fwd(
             allocator.finalize()
 
         grid_x = arith.index_cast(T.index, num_tokens)
-        launcher = attn_res_mixer_fwd_kernel(BR, PS, W, OUT, RSAV, DSAV)
+        launcher = kernel_fn(BR, PS, W, OUT, RSAV, DSAV)
 
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
@@ -507,8 +702,16 @@ def build_attn_res_mixer_fwd(
         "llvm_options": {"enable-post-misched": False, "lsr-drop-solution": True},
     }
 
-    def _launch(*args, **kwargs):
+    compiled = []
+
+    def _launch(*args):
+        # Calling the @flyc.jit launcher resolves its signature and cache key every time (~0.5 ms of host
+        # time per call); the compiled function launches directly.
+        if compiled:
+            return compiled[0](*args)
         with CompilationContext.compile_hints(_hints):
-            return launch_attn_res_mixer_fwd(*args, **kwargs)
+            fn = flyc.compile(launch_attn_res_mixer_fwd, *args)  # also runs it once on these arguments
+        if fn is not None:
+            compiled.append(fn)
 
     return _launch

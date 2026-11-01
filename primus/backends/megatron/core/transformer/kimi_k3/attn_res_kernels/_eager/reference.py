@@ -32,7 +32,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-__all__ = ["accum_dtype", "fused_score_weight", "eager_attn_res_mix"]
+__all__ = ["accum_dtype", "fused_score_weight", "eager_attn_res_mix", "eager_attn_res_mix_bcast"]
 
 
 def accum_dtype(dtype: torch.dtype) -> torch.dtype:
@@ -99,4 +99,33 @@ def eager_attn_res_mix(
 
     # Convex combination of the UN-normalised candidates.
     mixed = torch.matmul(probs, v_float).squeeze(-2)  # [*, hidden]
+    return mixed.to(prefix_sum.dtype)
+
+
+def eager_attn_res_mix_bcast(
+    prefix_sum: Tensor,
+    block_residual: Tensor,
+    norm_weight: Tensor,
+    proj_weight: Tensor,
+    eps: float,
+) -> Tensor:
+    """:func:`eager_attn_res_mix` with the convex combination as a broadcast multiply-sum.
+
+    There, ``torch.matmul(probs, v_float)`` is a batched GEMM with batch = tokens, M = 1 and
+    K = num_blocks + 1. On gfx1250 hipBLASLt runs it with fp32 32x32x16 tiles, ~7.5 ms per call at
+    14336 tokens x hidden 7168, forward, recompute and backward alike; as a multiply-sum it is
+    memory-bound. Same arithmetic otherwise; the result differs from the oracle only by fp32
+    rounding of the K-term sum.
+    """
+    v = torch.cat((block_residual, prefix_sum.unsqueeze(-2)), dim=-2)
+    compute_dtype = accum_dtype(v.dtype)
+    v_float = v.to(compute_dtype)
+
+    variance = v_float.pow(2).mean(-1, keepdim=True)
+    k = v_float * torch.rsqrt(variance + eps)
+
+    scores = (k * fused_score_weight(norm_weight, proj_weight, compute_dtype)).sum(-1)
+    probs = scores.softmax(-1)  # [*, num_blocks + 1]
+
+    mixed = (probs.unsqueeze(-1) * v_float).sum(-2)  # [*, hidden]
     return mixed.to(prefix_sum.dtype)

@@ -18,6 +18,11 @@ Backends
     Pure-PyTorch (:mod:`._eager`): :func:`eager_attn_res_mix`. The numerical
     ground truth, always importable, differentiable, and the only backend that
     runs on CPU.
+``eager_bcast``
+    :func:`eager_attn_res_mix_bcast`: ``eager`` with the final convex
+    combination as a broadcast multiply-sum instead of a ``[tokens, 1, C] x
+    [tokens, C, hidden]`` batched GEMM, which hipBLASLt runs with tiny fp32
+    tiles on gfx1250. Equal to ``eager`` up to fp32 rounding.
 ``flydsl``
     One fused FlyDSL kernel per direction (:mod:`._flydsl_v1`), gfx950 / CDNA4
     only, loaded LAZILY via :func:`load_flydsl_attn_res_backend`.
@@ -47,10 +52,11 @@ checkpoint stores them separately; every backend folds them itself.
 from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._eager import (
     accum_dtype,
     eager_attn_res_mix,
+    eager_attn_res_mix_bcast,
     fused_score_weight,
 )
 
-ATTN_RES_BACKENDS = ("eager", "flydsl")
+ATTN_RES_BACKENDS = ("eager", "eager_bcast", "flydsl")
 
 
 def _require_gfx950() -> None:
@@ -69,8 +75,8 @@ def _require_gfx950() -> None:
     if not torch.cuda.is_available():
         raise ImportError("no ROCm/CUDA device is visible")
     arch = str(getattr(torch.cuda.get_device_properties(0), "gcnArchName", ""))
-    if not arch.startswith("gfx950"):
-        raise ImportError(f"device arch is {arch!r}, not gfx950 (CDNA4)")
+    if not arch.startswith(("gfx950", "gfx1250")):
+        raise ImportError(f"device arch is {arch!r}, not gfx950 (CDNA4) or gfx1250")
 
 
 def load_flydsl_attn_res_backend():
@@ -114,6 +120,8 @@ def resolve_attn_res_backend(name: str):
     """
     if name == "eager":
         return eager_attn_res_mix
+    if name == "eager_bcast":
+        return eager_attn_res_mix_bcast
     if name == "flydsl":
         return load_flydsl_attn_res_backend()
     raise ValueError(
@@ -123,6 +131,7 @@ def resolve_attn_res_backend(name: str):
 
 __all__ = [
     "eager_attn_res_mix",
+    "eager_attn_res_mix_bcast",
     "fused_score_weight",
     "accum_dtype",
     "load_flydsl_attn_res_backend",

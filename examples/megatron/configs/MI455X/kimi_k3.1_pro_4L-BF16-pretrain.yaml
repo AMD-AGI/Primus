@@ -118,6 +118,8 @@ modules:
       kda_backend: ${PRIMUS_KDA_BACKEND:fla}
       # Unified KDA backend selector (supersedes kda_backend + K3P_KDA_CONV).
       use_kimi_k3_attention_backend: ${PRIMUS_ATTN_BACKEND:fla}
+      # Attention-residual mixer: eager | eager_bcast | flydsl (FlyDSL kernels: gfx950 / gfx1250).
+      attn_res_backend: ${PRIMUS_ATTN_RES_BACKEND:eager}
       moe_router_dtype: fp32
       moe_router_bwd_bf16: true
       optimizer: adam
