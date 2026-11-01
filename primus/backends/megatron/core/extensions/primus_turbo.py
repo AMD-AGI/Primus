@@ -67,6 +67,11 @@ except (ImportError, ModuleNotFoundError):
     create_quantized_weight = None
 
 from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
+from primus_turbo.pytorch.core.backend import (
+    BackendType,
+    GlobalBackendManager,
+    PrecisionType,
+)
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -253,6 +258,18 @@ def _is_gfx1250() -> bool:
         return "gfx1250" in torch.cuda.get_device_properties(0).gcnArchName
     except Exception:
         return False
+
+
+def _bf16_grouped_gemm_pinned_to_flydsl() -> bool:
+    """Whether Primus-Turbo will run the BF16 grouped GEMM on FlyDSL.
+
+    Asks Turbo's backend manager, which reads ``turbo_grouped_gemm_backend`` from the env var it is
+    published to (and any in-code setting) the way Turbo's dispatch does. Not cached: the setting
+    is not fixed for the whole run.
+    """
+    choice = GlobalBackendManager.get_grouped_gemm_backend(PrecisionType.BF16_FP16_FP32)
+    # an older Primus-Turbo returns the BackendType itself
+    return getattr(choice, "backend", choice) == BackendType.FLYDSL
 
 
 def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
@@ -2422,6 +2439,10 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             )
             return x, quantized_weights, fuse_wgrad_accum_pattern
 
+        # The FlyDSL BF16 grouped GEMM has no beta = 1 wgrad epilogue, and a pinned backend raises
+        # rather than accumulate: these weights keep DDP's separate add into main_grad.
+        if fuse_wgrad_accum_pattern is not None and _bf16_grouped_gemm_pinned_to_flydsl():
+            fuse_wgrad_accum_pattern = None
         return x, weights, fuse_wgrad_accum_pattern
 
     def forward(self, x: torch.Tensor, m_splits: torch.Tensor):
