@@ -18,17 +18,32 @@ V1 — IN-LAYER fuse  (``PRIMUS_FUSED_RESIDUAL_NORM=1``)
 
 V2 — CROSS-LAYER fuse  (``PRIMUS_FUSED_RESIDUAL_NORM_V2=1``, implies V1)
     layer N: skip mlp_bda(mlp_out + residual_post_attn), instead stash
-             ``(mlp_out, residual_post_attn)`` as a "carry" on layer N+1
+             ``(mlp_out, None, residual_post_attn)`` as a "carry" on layer N+1
     layer N+1: input_layernorm(carry) does the fused add+norm
     last layer: carry goes to final_layernorm via ``_v2_pending_carry``.
     Kills the remaining ADD#2 in the bf16 add tax (24 → 1 launches per step;
     the last layer keeps its add when final_layernorm isn't a
     ``PrimusTurboRMSNorm``, otherwise that one is fused too).
 
+MoE — V2 for a ``PrimusTurboMegaMoELayer``  (``PRIMUS_FUSED_RESIDUAL_NORM_MOE=1``)
+    The pre-MLP norm returns one alias of its output per consumer (shared expert,
+    routed experts, router), so their input gradients reach its backward apart and
+    the kernel adds them, instead of two autograd adds. The layer returns the routed
+    and the shared expert outputs unsummed and the carry holds both,
+    ``(routed, shared, residual_post_attn)``: the next norm adds
+    ``(routed + shared) + residual``, removing the MoE output add too. Exact
+    rounding is on, so activations and gradients follow the unfused layer's
+    rounding (see the Turbo op for what bitwise means there).
+
 Activation
 ----------
 * V1: ``PRIMUS_FUSED_RESIDUAL_NORM=1`` (default 0).
 * V2: ``PRIMUS_FUSED_RESIDUAL_NORM_V2=1`` (default 0). Implies V1.
+* MoE: ``PRIMUS_FUSED_RESIDUAL_NORM_MOE=1`` (default 0). Implies V2 and exact; off
+  under ``PRIMUS_FUSED_RMSNORM_MXFP4``.
+* Exact: ``PRIMUS_FUSED_RESIDUAL_NORM_EXACT=1`` (default 0). Round the fused sums and
+  gradients as the separate adds do (Turbo ``rmsnorm_residual(..., exact=True)``).
+  Changes how V1/V2 add; enables nothing on its own.
 * QKV: ``PRIMUS_FUSED_RMSNORM_MXFP4_QKV=1`` (default 0). With V2, layer
   input RMSNorm emits row/column MXFP4 buffers consumed by QKV directly.
 * Requires ``use_turbo_rms_norm=true`` so standalone norms are
@@ -50,7 +65,7 @@ for a stored-``y`` A/B vs TTT 77.90. Do not ``mark_non_differentiable(y)``.
 
 Safety
 ------
-* Both gates default off; A/B is always reproducible.
+* All gates default off; A/B is always reproducible.
 * On any exception in the fused path the patch reverts permanently and the
   rest of the run uses the original Megatron forward.
 * V2 keeps the original mlp_bda when the next consumer cannot fuse (e.g.
@@ -64,35 +79,48 @@ import sys
 from typing import Any
 
 
+def _env_on(name: str) -> bool:
+    return os.environ.get(name, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _enabled() -> bool:
-    """V1 gate (or implied by V2 / R3)."""
+    """V1 gate (or implied by V2 / R3 / MoE)."""
     if _v2_enabled() or _r3_enabled():
         return True
-    v = os.environ.get("PRIMUS_FUSED_RESIDUAL_NORM", "0").strip().lower()
-    return v in ("1", "true", "yes", "on")
+    return _env_on("PRIMUS_FUSED_RESIDUAL_NORM")
 
 
 def _v2_enabled() -> bool:
-    v = os.environ.get("PRIMUS_FUSED_RESIDUAL_NORM_V2", "0").strip().lower()
-    return v in ("1", "true", "yes", "on")
+    return _moe_enabled() or _env_on("PRIMUS_FUSED_RESIDUAL_NORM_V2")
+
+
+def _moe_enabled() -> bool:
+    """MoE-aware V2. Off under ``PRIMUS_FUSED_RMSNORM_MXFP4``, which hands the consumers quantized pairs."""
+    return _env_on("PRIMUS_FUSED_RESIDUAL_NORM_MOE") and not _r3_enabled()
+
+
+def _exact_enabled() -> bool:
+    return _moe_enabled() or _env_on("PRIMUS_FUSED_RESIDUAL_NORM_EXACT")
 
 
 def _r3_enabled() -> bool:
-    v = os.environ.get("PRIMUS_FUSED_RMSNORM_MXFP4", "0").strip().lower()
-    return v in ("1", "true", "yes", "on")
+    return _env_on("PRIMUS_FUSED_RMSNORM_MXFP4")
 
 
 def _mxfp4_qkv_enabled() -> bool:
-    v = os.environ.get("PRIMUS_FUSED_RMSNORM_MXFP4_QKV", "0").strip().lower()
-    return v in ("1", "true", "yes", "on")
+    return _env_on("PRIMUS_FUSED_RMSNORM_MXFP4_QKV")
 
 
-def _run_rmsnorm_residual(x, residual, gamma, eps, skip_y_store=True):
+def _run_rmsnorm_residual(x, residual, gamma, eps, skip_y_store=True, x_extra=None, num_outputs=1):
     """V1/V2 residual RMSNorm; R3 also returns MXFP4 dual of y.
 
     ``skip_y_store`` is for QKV/MLP consumers that pass ``a_prequant`` /
     ``x_prequant``. Final LN feeds the vocab GEMM, which still quantizes
     BF16 ``y`` — that call site passes ``False``.
+
+    ``x_extra`` (MoE mode): a second summand, ``(x + x_extra) + residual``.
+    ``num_outputs`` > 1 (MoE mode): ``y`` is a tuple of that many aliases, one per
+    consumer, in the order their gradients would reach an unfused norm.
     """
     if _r3_enabled():
         from primus_turbo.pytorch.ops.normalization import rmsnorm_residual_mxfp4
@@ -103,8 +131,30 @@ def _run_rmsnorm_residual(x, residual, gamma, eps, skip_y_store=True):
         rmsnorm_residual as triton_rmsnorm_residual,
     )
 
-    y, xpr = triton_rmsnorm_residual(x, residual, gamma, eps)
-    return y, xpr, None
+    kwargs = {}
+    if x_extra is not None:
+        kwargs["x_extra"] = x_extra
+    if num_outputs != 1:
+        kwargs["num_outputs"] = num_outputs
+    if _exact_enabled():
+        kwargs["exact"] = True
+    outs = triton_rmsnorm_residual(x, residual, gamma, eps, **kwargs)
+    return (outs[0] if num_outputs == 1 else tuple(outs[:-1])), outs[-1], None
+
+
+def _is_moe_split_layer(layer: Any) -> bool:
+    """Whether MoE mode applies to ``layer``: a ``PrimusTurboMegaMoELayer`` with a shared expert
+    (one without keeps the plain V2 path)."""
+    if not _moe_enabled():
+        return False
+    try:
+        from primus.backends.megatron.core.extensions.mega_moe import (
+            PrimusTurboMegaMoELayer,
+        )
+    except ImportError:
+        return False
+    mlp = getattr(layer, "mlp", None)
+    return isinstance(mlp, PrimusTurboMegaMoELayer) and mlp.shared_experts is not None
 
 
 def _run_qkv_rmsnorm_mxfp4(x, residual, gamma, eps, attention):
@@ -206,16 +256,30 @@ def install() -> bool:
     if _INSTALLED:
         return True
     if not _enabled():
-        _log("disabled (set PRIMUS_FUSED_RESIDUAL_NORM=1 or " "PRIMUS_FUSED_RESIDUAL_NORM_V2=1 to enable)")
+        _log(
+            "disabled (set PRIMUS_FUSED_RESIDUAL_NORM=1, PRIMUS_FUSED_RESIDUAL_NORM_V2=1 or "
+            "PRIMUS_FUSED_RESIDUAL_NORM_MOE=1 to enable)"
+        )
         return False
 
     try:
-        from primus_turbo.pytorch.ops.normalization import (  # noqa: F401
+        from primus_turbo.pytorch.ops.normalization import (
             rmsnorm_residual as triton_rmsnorm_residual,
         )
     except ImportError as exc:
         _log(f"could not import primus_turbo rmsnorm_residual: {exc}; abort install")
         return False
+
+    if _exact_enabled():
+        import inspect
+
+        params = inspect.signature(triton_rmsnorm_residual).parameters
+        if not {"x_extra", "num_outputs", "exact"} <= set(params):
+            _log(
+                "this Primus-Turbo's rmsnorm_residual takes no x_extra / num_outputs / exact, which "
+                "PRIMUS_FUSED_RESIDUAL_NORM_MOE / _EXACT need; abort install"
+            )
+            return False
 
     try:
         from primus.backends.megatron.core.extensions.primus_turbo import (
@@ -245,14 +309,14 @@ def install() -> bool:
             pending = getattr(self, "_v2_pending_carry", None)
             if pending is not None:
                 self._v2_pending_carry = None
-                x_pending, r_pending = pending
+                x_pending, e_pending, r_pending = pending
                 gamma = self.weight
                 if getattr(self, "zero_centered_gamma", False):
                     gamma = gamma + 1
                 # Final LN / standalone RMSNorm: vocab GEMM (and any
                 # non-skip-quant consumer) still reads BF16 y.
                 norm_out, _xpr, preq = _run_rmsnorm_residual(
-                    x_pending, r_pending, gamma, self.eps, skip_y_store=False
+                    x_pending, r_pending, gamma, self.eps, skip_y_store=False, x_extra=e_pending
                 )
                 if preq is not None:
                     self._prequant_x = preq
@@ -309,7 +373,12 @@ def install() -> bool:
 
         TransformerLayer.forward = _fused_layer_forward
         TransformerLayer._fused_residual_patched = True
-        if _v2_enabled():
+        if _moe_enabled():
+            _log(
+                "patched TransformerLayer.forward (V1 + V2 with MegaMoE per-consumer gradients and "
+                "the routed + shared add fused, exact rounding)"
+            )
+        elif _v2_enabled():
             _log("patched TransformerLayer.forward (V1 ADD#1 + V2 cross-layer ADD#2 fusion active)")
         else:
             _log("patched TransformerLayer.forward (V1 in-layer ADD#1+norm fusion active)")
@@ -366,8 +435,9 @@ def _drain_carry_into_hidden_states(layer: Any, args: tuple, kwargs: dict) -> No
     if carry is None:
         return
     layer._v2_carry = None
-    mlp_out, residual = carry
-    new_hs = mlp_out + residual
+    x, x_extra, residual = carry
+    # the order of the unfused graph: the MoE layer's routed + shared, then the residual add
+    new_hs = (x if x_extra is None else x + x_extra) + residual
     if args:
         # python tuples are immutable; the caller (TransformerBlock loop)
         # passes hidden_states via kwargs. We can't mutate the caller's
@@ -498,7 +568,7 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
     if carry is not None:
         # Fused path: absorb the previous layer's deferred mlp_bda add.
         layer._v2_carry = None
-        prev_mlp_out, prev_residual = carry
+        prev_mlp_out, prev_extra, prev_residual = carry
 
         qkv_params = _qkv_fused_ln_params(layer)
         in_ln = getattr(layer, "input_layernorm", None)
@@ -506,13 +576,17 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
             qkv_skip, gamma, eps = qkv_params
             if getattr(qkv_skip, "zero_centered_gamma", False):
                 gamma = gamma + 1
-            fused_qkv = _run_qkv_rmsnorm_mxfp4(prev_mlp_out, prev_residual, gamma, eps, layer.self_attention)
+            fused_qkv = (
+                _run_qkv_rmsnorm_mxfp4(prev_mlp_out, prev_residual, gamma, eps, layer.self_attention)
+                if prev_extra is None
+                else None
+            )
             if fused_qkv is not None:
                 input_layernorm_output, hidden_states = fused_qkv
                 preq = None
             else:
                 input_layernorm_output, hidden_states, preq = _run_rmsnorm_residual(
-                    prev_mlp_out, prev_residual, gamma, eps
+                    prev_mlp_out, prev_residual, gamma, eps, x_extra=prev_extra
                 )
             qkv_skip._skip_fused_norm = True
             if preq is not None:
@@ -523,15 +597,17 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
             gamma = in_ln.weight
             if getattr(in_ln, "zero_centered_gamma", False):
                 gamma = gamma + 1
-            fused_qkv = _run_qkv_rmsnorm_mxfp4(
-                prev_mlp_out, prev_residual, gamma, in_ln.eps, layer.self_attention
+            fused_qkv = (
+                _run_qkv_rmsnorm_mxfp4(prev_mlp_out, prev_residual, gamma, in_ln.eps, layer.self_attention)
+                if prev_extra is None
+                else None
             )
             if fused_qkv is not None:
                 input_layernorm_output, hidden_states = fused_qkv
                 preq = None
             else:
                 input_layernorm_output, hidden_states, preq = _run_rmsnorm_residual(
-                    prev_mlp_out, prev_residual, gamma, in_ln.eps
+                    prev_mlp_out, prev_residual, gamma, in_ln.eps, x_extra=prev_extra
                 )
             if preq is not None:
                 in_ln._prequant_x = preq
@@ -567,7 +643,19 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
 
     pre_mlp = getattr(layer, "pre_mlp_layernorm", None)
     fc1_skip = None
-    if isinstance(pre_mlp, PrimusTurboRMSNorm):
+    moe_split = isinstance(pre_mlp, PrimusTurboRMSNorm) and _is_moe_split_layer(layer)
+    if moe_split:
+        gamma = pre_mlp.weight
+        if getattr(pre_mlp, "zero_centered_gamma", False):
+            gamma = gamma + 1
+        # One alias per consumer; the kernel sums their gradients as (shared + routed) + router.
+        # The unfused layer adds the router's last too (it waits for the top-k weights' gradient),
+        # and the other two commute.
+        (y_shared, y_routed, y_router), hidden_states, _ = _run_rmsnorm_residual(
+            attn_out, residual, gamma, pre_mlp.eps, num_outputs=3
+        )
+        pre_mlp_layernorm_output = y_routed
+    elif isinstance(pre_mlp, PrimusTurboRMSNorm):
         pre_mlp_layernorm_output, hidden_states = pre_mlp(attn_out, residual=residual)
     else:
         fc1_skip, gamma, eps = _fc1_fused_ln_params(layer)
@@ -583,10 +671,19 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
     # ---- mlp -------------------------------------------------------------
     padding_mask = kwargs.get("padding_mask", None)
     try:
-        try:
-            mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output, padding_mask=padding_mask)
-        except TypeError:
-            mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output)
+        if moe_split:
+            mlp_output_with_bias = layer.mlp(
+                pre_mlp_layernorm_output,
+                padding_mask=padding_mask,
+                router_input=y_router,
+                shared_expert_input=y_shared,
+                split_shared_output=True,
+            )
+        else:
+            try:
+                mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output, padding_mask=padding_mask)
+            except TypeError:
+                mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output)
     finally:
         if fc1_skip is not None:
             fc1_skip._skip_fused_norm = False
@@ -596,21 +693,28 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
             qkv_skip._prequant_x = None
 
     # ---- mlp_bda OR V2 carry stash ---------------------------------------
+    if moe_split:
+        (routed_out, shared_out), _ = mlp_output_with_bias
+
     if v2_active and _v2_next_can_consume_carry(layer):
         # Skip mlp_bda. Stash carry on the next consumer, return
         # residual_post_attn as the layer's "output" tensor (used only by
         # TransformerBlock for offload commit / make_viewless plumbing;
         # the next layer / final_layernorm reads the carry instead).
-        mlp_out, mlp_bias = mlp_output_with_bias
-        if mlp_bias is not None:
-            mlp_out = mlp_out + mlp_bias.to(mlp_out.dtype)
+        if moe_split:
+            carry = (routed_out, shared_out, hidden_states)
+        else:
+            mlp_out, mlp_bias = mlp_output_with_bias
+            if mlp_bias is not None:
+                mlp_out = mlp_out + mlp_bias.to(mlp_out.dtype)
+            carry = (mlp_out, None, hidden_states)
 
         is_last = getattr(layer, "_v2_is_last_layer", False)
         if is_last:
             final_ln = layer._v2_final_layernorm
-            final_ln._v2_pending_carry = (mlp_out, hidden_states)
+            final_ln._v2_pending_carry = carry
         else:
-            layer._v2_next_layer._v2_carry = (mlp_out, hidden_states)
+            layer._v2_next_layer._v2_carry = carry
 
         nvtx_range_push(suffix="v2_skip_mlp_bda")
         output = make_viewless_tensor(
@@ -622,6 +726,8 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
         return output, None
 
     # V1-only path (or V2 last-layer-without-norm-final): explicit mlp_bda.
+    if moe_split:
+        mlp_output_with_bias = (routed_out + shared_out, None)
     nvtx_range_push(suffix="mlp_bda")
     with layer.bias_dropout_add_exec_handler():
         hidden_states = layer.mlp_bda(layer.training, layer.config.bias_dropout_fusion)(

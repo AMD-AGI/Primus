@@ -429,8 +429,16 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         padding_mask: Optional[torch.Tensor] = None,
         input_ids: Optional[torch.Tensor] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
+        router_input: Optional[torch.Tensor] = None,
+        shared_expert_input: Optional[torch.Tensor] = None,
+        split_shared_output: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """``router_input`` / ``shared_expert_input``: per-consumer aliases of ``hidden_states`` (the
+        default), so their input gradients reach the fused residual RMSNorm apart. ``split_shared_output``
+        (with a shared expert): return ``((routed, shared), None)``, for the next norm to add."""
         in_shape = hidden_states.shape
+        router_input = hidden_states if router_input is None else router_input
+        shared_expert_input = hidden_states if shared_expert_input is None else shared_expert_input
         # transpose [bsz, seq] -> [seq, bsz]
         if padding_mask is not None:
             padding_mask = padding_mask.transpose(0, 1).bool()
@@ -443,7 +451,7 @@ class PrimusTurboMegaMoELayer(MegatronModule):
             if value is not None
         }
         # dense probs [T, E], aux-loss grad baked in
-        probs, _ = self.router(hidden_states, padding_mask, **router_kwargs)
+        probs, _ = self.router(router_input, padding_mask, **router_kwargs)
         probs = probs.reshape(-1, self.config.num_moe_experts)
 
         # dense -> sparse top-k
@@ -457,12 +465,17 @@ class PrimusTurboMegaMoELayer(MegatronModule):
             x, topk_idx, topk_weights
         )
         if shared_first:
-            shared_out = self.shared_experts(hidden_states)
+            shared_out = self.shared_experts(shared_expert_input)
         y = self.experts(x, topk_idx, topk_weights)
         y = y.reshape(in_shape).to(hidden_states.dtype)
-        if self.shared_experts is not None:
-            y = y + (shared_out if shared_first else self.shared_experts(hidden_states))
-        return y, None
+        if self.shared_experts is None:
+            assert not split_shared_output, "split_shared_output needs a shared expert"
+            return y, None
+        if not shared_first:
+            shared_out = self.shared_experts(shared_expert_input)
+        if split_shared_output:
+            return (y, shared_out), None
+        return y + shared_out, None
 
     def sharded_state_dict(
         self,
