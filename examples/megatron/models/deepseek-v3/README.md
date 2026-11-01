@@ -32,7 +32,8 @@ PRIMUS_LAUNCHER=direct bash examples/megatron/models/deepseek-v3/run_deepseek_v3
   `PRIMUS_TOTAL_LAYERS`, `PRIMUS_NUM_EXPERTS`, `PRIMUS_MOE_TOPK`.
 - Training: `TRAIN_ITERS`, `MBS`, `GBS`, `PRIMUS_RECOMPUTE_LAYER_IDS` (layers to recompute, e.g. `0,3`;
   empty, the default, disables recompute).
-- Feature switches: `USE_TURBO_ATTENTION`, `USE_TURBO_GROUPED_GEMM`, `USE_TURBO_DEEPEP`, `MOCK_DATA`.
+- Feature switches: `USE_TURBO_ATTENTION`, `USE_TURBO_GROUPED_GEMM`, `USE_TURBO_DEEPEP`, `MOCK_DATA`, and
+  `USE_TURBO_MEGA_MOE` (see MegaMoE below).
 - Primus-Turbo backends: `PRIMUS_TURBO_ATTN_BACKEND` (`flydsl` or `triton`) and
   `TURBO_GROUPED_GEMM_BACKEND` (`bf16:flydsl`, or `default` for Primus-Turbo's own choice: Triton, or
   auto-tuning if `PRIMUS_TURBO_AUTO_TUNE=1` is exported). Primus sets `PRIMUS_TURBO_GROUPED_GEMM_BACKEND`
@@ -56,11 +57,12 @@ GPUS_PER_NODE=1 PRIMUS_EP=1 PRIMUS_NUM_EXPERTS=32 GBS=16 \
     bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
 ```
 
-**MegaMoE.** Appending `--use_turbo_mega_moe True` runs each MoE layer as Primus-Turbo's fused MegaMoE
-layer instead of the token dispatcher and the grouped GEMM, at EP 2 to 8 (not in the 1-GPU variant); it
-needs a Primus-Turbo with the MegaMoE ops (e.g. a `TURBO_DIR` checkout). The yaml's
-`gradient_accumulation_fusion: true` then covers the expert weights too: their wgrads accumulate straight
-into `main_grad`.
+**MegaMoE.** `USE_TURBO_MEGA_MOE=True` runs each MoE layer as Primus-Turbo's fused MegaMoE layer instead
+of the token dispatcher and the grouped GEMM, at EP 2 to 8 (so not in the 1-GPU variant). It needs a
+Primus-Turbo with the gfx1250 MegaMoE kernels (on `main` since b4ad3bcb, e.g. a `TURBO_DIR` checkout); the
+image's predates them. The default, `auto`, turns MegaMoE on when the Primus-Turbo in use has them, and
+`False` keeps it off. With MegaMoE, the yaml's `gradient_accumulation_fusion: true` covers the expert
+weights too: their wgrads accumulate straight into `main_grad`.
 
 **Another Primus-Turbo checkout.** Build it in place for the image once (gfx1250 only, OpenMPI off the
 paths so rocSHMEM is not linked), then pass it as `TURBO_DIR`; the launcher puts it first on `PYTHONPATH`:
@@ -118,14 +120,14 @@ last rank in GiB (labelled GB) as the device's total minus free memory. Each row
 - hipBLASLt tuning: the tuning file above.
 - Other defaults: the yaml's `gradient_accumulation_fusion`, Triton router GEMMs, routing on TE's fused
   kernels with the expert bias and no dataloader attention mask, and the launcher's NUMA binding and 4
-  hardware queues. This row is the launcher's defaults.
-- MegaMoE: `--use_turbo_mega_moe True` (4 GPUs).
+  hardware queues, with `USE_TURBO_MEGA_MOE=False` on 4 GPUs.
+- MegaMoE: `USE_TURBO_MEGA_MOE=True` (4 GPUs).
 
 The rows after hipBLASLt tuning were measured later, inside a container of the image
 (`PRIMUS_LAUNCHER=direct`) with a newer Primus-Turbo checkout (`TURBO_DIR`) that has the MegaMoE wgrad
 changes, as the mean of 2 runs (on 4 GPUs alternating between the two rows). Part of their gain over the
 hipBLASLt tuning row comes from that Primus-Turbo and from Primus's gfx1250 gradient clipping, which do not
-depend on the settings.
+depend on the settings. With that Primus-Turbo the last row of each table is the launcher's defaults.
 
 **1 GPU** (the 1-GPU variant above: 4 layers, 32 experts, GBS 16)
 
@@ -143,11 +145,11 @@ depend on the settings.
 | Baseline | 2139 | 1.00x | 30,600 | 661 | 215.21 GiB | 5.56290–5.56295 |
 | + FlyDSL | 1200 | 1.78x | 54,600 | 1179 | 170.71 GiB | 5.56274 |
 | + hipBLASLt tuning | 1132 | 1.89x | 57,900 | 1249 | 170.71 GiB | 5.56307 |
-| + other defaults (default) | 1061 | 2.02x | 61,800 | 1333 | 166.13 GiB | 5.56282–5.56296 |
-| + MegaMoE | 929 | 2.30x | 70,600 | 1523 | 152.06 GiB | 5.56298–5.56317 |
+| + other defaults | 1061 | 2.02x | 61,800 | 1333 | 166.13 GiB | 5.56282–5.56296 |
+| + MegaMoE (default) | 929 | 2.30x | 70,600 | 1523 | 152.06 GiB | 5.56298–5.56317 |
 
-**Grad norms per iteration** of the default. Its two runs gave the same values on 1 GPU; on 4 GPUs they
-differed by up to 0.002 from iteration 5 on, and the table shows the first run.
+**Grad norms per iteration** of the other defaults. Their two runs gave the same values on 1 GPU; on 4 GPUs
+they differed by up to 0.002 from iteration 5 on, and the table shows the first run.
 
 | GPUs | Grad norms, iterations 1–10 |
 | --- | --- |

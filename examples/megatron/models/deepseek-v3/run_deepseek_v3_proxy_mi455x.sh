@@ -48,6 +48,8 @@ export PRIMUS_RECOMPUTE_LAYER_IDS=${PRIMUS_RECOMPUTE_LAYER_IDS:-}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-True}
 export USE_TURBO_GROUPED_GEMM=${USE_TURBO_GROUPED_GEMM:-True}
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-False}
+# MegaMoE (--use_turbo_mega_moe): True, False, or auto, on when the Primus-Turbo in use has its gfx1250 kernels
+export USE_TURBO_MEGA_MOE=${USE_TURBO_MEGA_MOE:-auto}
 # Primus-Turbo backends. Attention: flydsl or triton; grouped GEMM: bf16:flydsl or default
 # (Primus-Turbo's choice: Triton, or auto-tuning with PRIMUS_TURBO_AUTO_TUNE=1)
 export PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-flydsl}
@@ -148,6 +150,17 @@ if [[ "${PATCH_TRITON_EXPERT_SCHEDULING}" == 1 ]]; then
     fi
 fi
 
+# The image's primus_turbo predates the gfx1250 MegaMoE kernels; TURBO_DIR, when set, is the one in use
+if [[ "${USE_TURBO_MEGA_MOE}" == auto ]]; then
+    TURBO_PKG=$(PYTHONPATH="${TURBO_DIR:+${TURBO_DIR}:}${PYTHONPATH:-}" python3 -c \
+        'import importlib.util; print(importlib.util.find_spec("primus_turbo").submodule_search_locations[0])')
+    USE_TURBO_MEGA_MOE=False
+    if [[ -d "${TURBO_PKG}/flydsl/mega/gfx1250" ]]; then
+        USE_TURBO_MEGA_MOE=True
+    fi
+    echo "USE_TURBO_MEGA_MOE=auto: ${USE_TURBO_MEGA_MOE} (Primus-Turbo at ${TURBO_PKG})"
+fi
+
 # hipBLASLt takes a set but empty HIPBLASLT_TUNING_OVERRIDE_FILE as an override file named ""
 if [[ -z "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ]]; then
     unset HIPBLASLT_TUNING_OVERRIDE_FILE
@@ -200,6 +213,7 @@ mkdir -p "${LOG_DIR}"
     --use_turbo_grouped_gemm "${USE_TURBO_GROUPED_GEMM}" \
     --turbo_grouped_gemm_backend "${TURBO_GROUPED_GEMM_BACKEND}" \
     --use_turbo_deepep "${USE_TURBO_DEEPEP}" \
+    --use_turbo_mega_moe "${USE_TURBO_MEGA_MOE}" \
     --mock_data "${MOCK_DATA}" \
     --profile "${PROFILE}" \
     --use_pytorch_profiler "${PROFILE}" \
