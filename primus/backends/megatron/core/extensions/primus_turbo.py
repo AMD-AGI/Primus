@@ -99,6 +99,7 @@ except (ImportError, ModuleNotFoundError):
 from primus.backends.megatron.core.extensions._triton.inplace_add import (
     inplace_add_triton_,
 )
+from primus.core.utils.gpu_arch import is_gfx1250
 from primus.core.utils.module_utils import warning_rank_0
 
 _dummy_wgrads = {}
@@ -330,7 +331,8 @@ def _bridge_weight_grad(
                 # the dummy wgrad returned below means they are not recoverable from
                 # param.grad either. The fused path above is immune because its beta=1
                 # epilogue accumulates on every microbatch regardless of the flag.
-                if _is_gfx1250():
+                # the single-launch Triton in-place add is validated on gfx1250 only
+                if is_gfx1250():
                     inplace_add_triton_(weight.main_grad, grad_quantized_weight)
                 else:
                     weight.main_grad.add_(grad_quantized_weight)
