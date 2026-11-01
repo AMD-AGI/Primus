@@ -13,12 +13,16 @@ Wraps the runtime install hook
 ``run_patches(...)`` instead of being explicitly installed from the trainer
 entry point.
 
-Two gates (mirroring the install hook):
+Gates (mirroring the install hook):
   * ``PRIMUS_FUSED_RESIDUAL_NORM=1``    — V1, in-layer ADD#1+norm fusion.
   * ``PRIMUS_FUSED_RESIDUAL_NORM_V2=1`` — V2, cross-layer ADD#2 carry
     (implies V1).
+  * ``PRIMUS_FUSED_RESIDUAL_NORM_MOE=1`` — V2 for MegaMoE layers: per-consumer
+    input gradients and the routed + shared add fused, exact rounding.
+  * ``PRIMUS_FUSED_RESIDUAL_NORM_EXACT=1`` — round the fused sums as the
+    separate adds do; it changes V1/V2 and does not enable the patch.
 
-Either env var enables the patch. The install hook itself further requires
+Any of the first three enables the patch. The install hook itself further requires
 ``PrimusTurboRMSNorm`` (i.e. ``use_turbo_rms_norm=true``) and bails
 gracefully otherwise, so it's safe to register unconditionally.
 """
@@ -34,8 +38,17 @@ def _env_truthy(name: str) -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+_GATES = (
+    "PRIMUS_FUSED_RESIDUAL_NORM",
+    "PRIMUS_FUSED_RESIDUAL_NORM_V2",
+    "PRIMUS_FUSED_RESIDUAL_NORM_MOE",
+)
+# modifies V1/V2, enables nothing on its own
+_EXACT = "PRIMUS_FUSED_RESIDUAL_NORM_EXACT"
+
+
 def _is_fused_residual_norm_enabled(ctx: PatchContext) -> bool:
-    return _env_truthy("PRIMUS_FUSED_RESIDUAL_NORM") or _env_truthy("PRIMUS_FUSED_RESIDUAL_NORM_V2")
+    return any(_env_truthy(gate) for gate in _GATES)
 
 
 @register_patch(
@@ -44,7 +57,7 @@ def _is_fused_residual_norm_enabled(ctx: PatchContext) -> bool:
     phase="before_train",
     description=(
         "Fuse residual+add into PrimusTurboRMSNorm via Primus-Turbo "
-        "rmsnorm_residual; gated by PRIMUS_FUSED_RESIDUAL_NORM(_V2)."
+        "rmsnorm_residual; gated by PRIMUS_FUSED_RESIDUAL_NORM(_V2/_MOE)."
     ),
     condition=_is_fused_residual_norm_enabled,
     # Run after megatron.turbo.rms_norm so PrimusTurboRMSNorm is in place
@@ -57,10 +70,7 @@ def patch_fused_residual_norm(ctx: PatchContext):
 
     log_rank_0(
         "[Patch:megatron.turbo.fused_residual_norm] Installing fused "
-        "residual+RMSNorm (V2={v2}, V1={v1})".format(
-            v1=_env_truthy("PRIMUS_FUSED_RESIDUAL_NORM"),
-            v2=_env_truthy("PRIMUS_FUSED_RESIDUAL_NORM_V2"),
-        )
+        "residual+RMSNorm ({})".format(", ".join(f"{g}={int(_env_truthy(g))}" for g in (*_GATES, _EXACT)))
     )
     ok = fused_residual_rmsnorm.install()
     if ok:
