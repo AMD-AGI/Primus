@@ -64,12 +64,14 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:4}
       overlap_grad_reduce: true
       overlap_param_gather: true
-      # the FlyDSL grouped GEMM's wgrad cannot accumulate into main_grad
-      gradient_accumulation_fusion: false
+      # wgrads into main_grad: TE linears, output layer, MegaMoE experts (with --use_turbo_mega_moe True)
+      gradient_accumulation_fusion: true
       pp_warmup: true
 
       # data
       mock_data: true
+      # the Turbo attention takes causality from attn_mask_type; no [s, s] mask per micro-batch
+      create_attention_mask_in_dataloader: false
       train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
@@ -114,10 +116,18 @@ modules:
       use_turbo_rms_norm: true
       use_turbo_deepep: false
       moe_shared_expert_overlap: false
-      moe_router_dtype: fp32
-      turbo_sync_free_moe_stage: 1
-      moe_use_fused_router_with_aux_score: true
+      # stage 1 would only turn on the fused router (see router) and moe_permute_fusion, set here
+      turbo_sync_free_moe_stage: 0
       moe_permute_fusion: true
+
+      # router
+      moe_router_dtype: fp32
+      # the FP32 router GEMMs on Triton kernels, with an FP32-accurate backward
+      moe_router_triton_gemm: true
+      # Megatron's routing on TE's fused kernels, which apply the expert bias
+      moe_router_fusion: true
+      # Primus-Turbo's fused router ignores the expert bias
+      moe_use_fused_router_with_aux_score: false
 
       # cross entropy
       cross_entropy_fusion_impl: "te"
