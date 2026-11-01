@@ -598,7 +598,7 @@ models:
 | `disable_primus_topk_router` | `false` | *Primus:* disable Primus top-k router patch. |
 | `moe_router_force_load_balancing` | `false` | *Primus:* force load-balanced routing. |
 | `use_deprecated_20241209_moe_layer` | `false` | *Primus:* legacy MoE layer implementation. |
-| `moe_router_force_load_balancing_type` | `even` | *Primus:* Control the force load balancing type for the MoE router. Choices: even, uniform. |
+| `moe_router_force_load_balancing_type` | `even` | *Primus:* Control the force load balancing type for the MoE router. Choices: even, spread, uniform. `spread` is as balanced as `even`, but each token's experts are `num_experts / topk` apart, so a token reaches several EP ranks (not taken by DeepSeek-V4's MoE). |
 
 
 ### 10.7 Logit softcapping (Primus / Grok-style)
