@@ -379,6 +379,10 @@ exp_avg_sq_dtype: fp32 # 'fp32', 'fp16', 'fp8'
 # Falls back to TE for precision-aware / capturable / FP8 paths. Set false to
 # keep TE FusedAdam.
 use_triton_fused_adam: true
+# gfx1250 only: scale the backward by 1/DP at its seed (loss and auxiliary-loss scales) instead of
+# every gradient bucket before its reduce-scatter. Only when 1/DP is a power of two (bit for bit
+# the same gradients); off, or another architecture: DDP's per-bucket scaling.
+prescale_backward_by_dp: true
 
 # Check a step's fatal NaN/Inf validations (check_for_nan_in_loss_and_grad) of losses and gradient
 # norms with one host sync, after the backward and before the update, raising upstream's errors.

@@ -186,6 +186,7 @@ models:
 | `exp_avg_dtype` | `fp32` | Optimizer first moment dtype (`fp32`, `fp16`, `fp8`). |
 | `exp_avg_sq_dtype` | `fp32` | Optimizer second moment dtype. |
 | `use_triton_fused_adam` | `true` | Build Adam from `TritonFusedAdam` (Triton kernel with a device-sized grid) instead of TE `FusedAdam`. Matters for TE builds on the generic `multi_tensor_apply` launcher (capped at 320 workgroups per launch); ROCm TE builds with the custom Adam kernel are already uncapped. Precision-aware, capturable and FP8-param paths fall back to TE. Set `false` to keep TE `FusedAdam`. |
+| `prescale_backward_by_dp` | `true` | gfx1250 only: scale the backward by 1/DP at its seed (the loss and auxiliary-loss scales) instead of every gradient bucket before its reduce-scatter, when 1/DP is a power of two, which keeps the gradients bit for bit the same. `false`, or another architecture: DDP's per-bucket scaling. |
 | `defer_nan_check` | `null` | Check a step's fatal NaN/Inf validations of losses and gradient norms (`check_for_nan_in_loss_and_grad`) with one host sync, after the backward and before the update, raising upstream's errors with their messages. `null`: on gfx1250 only, where it was validated; `true` / `false`: on / off on every architecture. |
 
 ---
