@@ -1,0 +1,93 @@
+{
+  "report_id": "2026-11",
+  "content_type": "monthly-report",
+  "title": "Primus Monthly Engineering Report — 2026-11",
+  "report_path": "docs/monthly_reports/2026-11-primus-monthly.md",
+  "report_github_url": "https://github.com/AMD-AGI/Primus/blob/dashboard-data/docs/monthly_reports/2026-11-primus-monthly.md",
+  "time_window": {
+    "timezone": "Asia/Shanghai",
+    "start": "2026-10-01T17:02:00+08:00",
+    "end": "2026-11-01T17:02:00+08:00"
+  },
+  "generated_at": "2026-11-01T17:02:00+08:00",
+  "merged_pr_count": 80,
+  "category_breakdown": {
+    "Other": 24,
+    "Bug Fix": 22,
+    "Performance Optimization": 16,
+    "CI/Infra": 8,
+    "Turbo/Dependency Version Update": 6,
+    "Docs": 3,
+    "Refactor": 1
+  },
+  "megatron_status": {
+    "pin_commit": "4b4acac9a1d28ea6829c8d4f566d75698a21249d",
+    "pin_date": "2026-09-18",
+    "pin_version": "0.19.2",
+    "pin_tag": "core_v0.19.2",
+    "pin_changed_in_window": true,
+    "pin_change_pr": 1321,
+    "previous_pin_commit": "d3528a21301db2d12e92912b3ec025dc8a2ed4d6",
+    "previous_pin_version": "0.16.0rc0",
+    "upstream_repo": "https://github.com/NVIDIA/Megatron-LM",
+    "upstream_ref": "main",
+    "upstream_head": "037b883c9e7996b361943d27342ebd9757a5417a",
+    "upstream_head_date": "2026-11-01",
+    "upstream_version": "0.21.0",
+    "commit_gap": 1011,
+    "diff_files": 2722,
+    "backend_gap_regenerated": true,
+    "recommendation": "plan sync"
+  },
+  "torchtitan_status": {
+    "pin_commit": "73a0e6979dd10b6b1904098eb3c8f62c18ab87ce",
+    "pin_date": "2026-02-20",
+    "pin_version": "v0.2.2",
+    "pin_changed_in_window": false,
+    "upstream_repo": "https://github.com/pytorch/torchtitan",
+    "upstream_ref": "main",
+    "upstream_head": "d86c77d609b4c35d71b4ed7a18e0c69f2a4f11fb",
+    "upstream_head_date": "2026-11-01",
+    "upstream_version": "0.2.2",
+    "commit_gap": 1537,
+    "recommendation": "plan sync"
+  },
+  "primus_turbo_status": {
+    "drift_type": "quarterly_in_repo",
+    "quarter_start_ts": "2026-10-01T00:00:00+08:00",
+    "quarter_start_anchor_commit": "bc8fd627f4cffe92ba739940831cf8d6b57a7f11",
+    "current_ci_commit": "d04ffd9b4476f1691b67e3f589d257175d1a87a0",
+    "quarter_start_ci_commit": "ae1ac068e8ac08b98c7467f27b3cbd53ebe292af",
+    "current_benchmark_commit": "a04a233cbfb468dbe21600cbf9db70953428b25c",
+    "quarter_start_benchmark_commit": "a04a233cbfb468dbe21600cbf9db70953428b25c",
+    "current_aiter_commit": "04896172e283ecc389f0dfff6479c3379ed63fa1",
+    "current_aiter_version": "v0.1.24.post1",
+    "quarter_start_aiter_commit": "0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e",
+    "quarter_start_aiter_version": "v0.1.14.post1",
+    "current_triton_commit": "fc8d31a5439ec9842557a284dc7ca61aee69246b",
+    "quarter_start_triton_commit": "09500db9f0fe66fd176d1f080e2017b37e7e995d",
+    "current_uccl_commit": "5afb4117893c58cc0c8557d9286336141a301053",
+    "quarter_start_uccl_commit": "5afb4117893c58cc0c8557d9286336141a301053",
+    "ci_drift_commits_since_quarter_start": 28,
+    "ci_drift_files_since_quarter_start": 143,
+    "tagged_release_coverage": "pre-v0.6.0 -> just past v0.6.1",
+    "pin_changed_in_window": true,
+    "recommendation": "monitor"
+  },
+  "recommendations": {
+    "megatron": "plan sync",
+    "torchtitan": "plan sync",
+    "primus_turbo": "monitor"
+  },
+  "key_findings": [
+    "Continuity-based window 2026-10-01 17:02 GMT+8 -> 2026-11-01 17:02 GMT+8 (~31 days). gap_detected = true because window_start (2026-10-01) is earlier than the first day of the current calendar month (2026-11-01), so this run backfills late-October activity a plain calendar-month window would have dropped. All prior weekly+monthly report windows merge into one contiguous coverage group (no >7-day gap), and the span is within the healthy monthly range (<45 days).",
+    "80 PRs merged to main in the window. Largest categories: Other 24 (Primus Projection backends, SpecForge, new model/recipe work for GLM-5.3, ZAYA1, Inkling, MI455X, AutoModel diffusion), Bug Fix 22, Performance Optimization 16, CI/Infra 8, Turbo/Dependency Version Update 6, Docs 3, Refactor 1.",
+    "Megatron-LM pin CHANGED in-window via PR #1321 (merged 2026-10-29): third_party/Megatron-LM and primus/_thirdparty.lock moved d3528a21 (Core 0.16.0rc0) -> core_v0.19.2 release tag 4b4acac9 (committed 2026-09-18). This is a backend version/pin change, so the Megatron backend-gap report set was regenerated. backend_gap_updated = true.",
+    "After the bump the Megatron pin (core_v0.19.2, 4b4acac9) is 1011 commits behind upstream main HEAD 037b883c (Core 0.21.0, 2026-11-01), down from ~1662 before the bump. The tree diff is 2722 files / 531548 insertions / 293033 deletions; the release tag carries 28 release-only commits not on main. Recommendation: plan sync.",
+    "torchtitan pin UNCHANGED (73a0e697 = v0.2.2 tag, an ancestor of main). Upstream main advanced to d86c77d6 (2026-11-01), widening the gap from 1194 to 1537 commits; upstream assets/version.txt still declares 0.2.2. No TorchTitan backend-gap regeneration (pin did not move). Recommendation: plan sync.",
+    "Primus-Turbo Q4 quarterly drift (quarter start 2026-10-01, anchor bc8fd627): the CI-tracked PRIMUS_TURBO_COMMIT advanced ae1ac068 -> d04ffd9b (+28 commits, 143 files), crossing tagged releases v0.6.0 and v0.6.1. Dependency pins bumped: AITER v0.1.14.post1 (0f3c58e6) -> v0.1.24.post1 (04896172), Triton 09500db9 -> fc8d31a5 (release/3.9.x, 3.9.0); UCCL unchanged (5afb4117). Recommendation: monitor.",
+    "Turbo work landing this quarter underpins several in-window Primus PRs: Mega MoE memory sized to dispatched rows (#1271, Turbo #566/#568), GPT-OSS on MegaMoE with expert biases (#1285), FlyDSL kernels ported to the 0.3.x API (#1275), and tensorwise-FP8 Qwen3-30B-A3B on MI355X (#1247).",
+    "Other in-window submodule movement with no backend-gap report set (noted, not regenerated): maxtext (PRs #1228, #1289) and Automodel (PR #1314); HunyuanWorld-Mirror-rocm added as a new submodule (PR #1242). Only Megatron-LM and torchtitan have backend-gap report sets, and only Megatron-LM changed.",
+    "Notable Megatron compatibility follow-up: PR #1340 makes MegaMoE run on Megatron-LM core_v0.19.2 with PrimusTopKRouter, and Megatron-Bridge SFT fixes (#1291, #1297, #1298) landed alongside the core bump."
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "id": "megatron-upstream-main-2026-11-01",
+  "title": "Primus Megatron vs upstream main",
+  "backend": {
+    "key": "megatron",
+    "label": "Megatron"
+  },
+  "generated_at": "2026-11-01",
+  "status": "verified",
+  "scope": "Current Megatron-LM bundled in Primus vs upstream NVIDIA/Megatron-LM origin/main.",
+  "local": {
+    "source_path": "third_party/Megatron-LM",
+    "version": "0.19.2",
+    "commit": "4b4acac9",
+    "commit_date": "2026-09-18"
+  },
+  "upstream": {
+    "repo": "https://github.com/NVIDIA/Megatron-LM",
+    "ref": "origin/main",
+    "version": "0.21.0",
+    "commit": "037b883c",
+    "commit_date": "2026-11-01"
+  },
+  "stats": {
+    "commit_gap": 1011,
+    "diff_files": 2722,
+    "insertions": 531548,
+    "deletions": 293033
+  },
+  "integration": {
+    "backend_files": 569,
+    "tracked_files": 1243,
+    "integration_model": "third_party/Megatron-LM + Primus outer trainer / adapter / patches"
+  },
+  "highlights": [
+    "Primus bumped the Megatron pin in the 2026-10 window (PR #1321) from d3528a21 (Core 0.16.0rc0) to the core_v0.19.2 release tag 4b4acac9 (Core 0.19.2).",
+    "After the bump the pin is 1011 commits behind upstream main (037b883c, Core 0.21.0), down from ~1662 before the bump.",
+    "Package dependency metadata (pyproject.toml, megatron/core/requirements.txt) is unchanged vs upstream; the main drift is API and capability movement.",
+    "Primus has a large Megatron integration layer directly coupled to upstream training, distributed, MoE, optimizer, and model internals."
+  ],
+  "dashboard_summary": {
+    "headline": "Megatron was bumped to the core_v0.19.2 release tag and is now 1011 commits behind upstream main (Core 0.21.0), with broad MFSDP, MoE, SSM/Hybrid, and inference drift remaining.",
+    "recommendation": "plan sync",
+    "why_it_matters": [
+      "The 2026-10 bump (PR #1321) realigned Primus to a tagged release (core_v0.19.2) and cut the gap from ~1662 to 1011 commits.",
+      "A meaningful gap to main (Core 0.19.2 -> 0.21.0) still remains across two upstream minor versions.",
+      "The tree diff is 2722 files; package dependency metadata is unchanged, so the main risk is API and capability drift.",
+      "Primus trainer, extensions, and patch layers depend on upstream training, distributed, MoE, and model internals."
+    ],
+    "feature_deltas": [
+      "MFSDP v2: DP-outer gradient-reduction stream overlap, MXFP8-recompute unshard planes, recorded execution order",
+      "MoE: fused Triton batch-invariant unpermute, THD/sequence packing for NCCL EP, bit-exact sigmoid-MoE routing",
+      "SSM/Hybrid: FP32 GDP A_log/dt_bias, CuTeDSL chunkwise-CP compile, KDA hybrid layers with GLM two-stage gates",
+      "Inference: FlashInfer MXFP8 expert-weight refit, per-token NVFP4 CuTe-DSL MoE, disaggregated end-to-end inference",
+      "Optimizer: OptimizerConfig migration, RMSNorm-gamma weight decay, mHC precision controls, LayerShardedMuon streaming"
+    ],
+    "dependency_deltas": [
+      "pyproject.toml project dependencies are identical between the pin and upstream main (torch>=2.6.0, numpy, packaging>=24.2).",
+      "megatron/core/requirements.txt is unchanged (torch, packaging).",
+      "Source-declared Megatron Core version moved from 0.19.2 (pin) to 0.21.0 (main).",
+      "Canonical Primus pin recorded in primus/_thirdparty.lock as 4b4acac9."
+    ],
+    "integration_risks": [
+      "Primus MegatronTrainer wraps megatron.training pretrain/initialize/arguments and core pipeline-parallel internals.",
+      "Primus Turbo extensions depend on transformer_engine spec provider, core enums, parallel_state, and MoE experts.",
+      "Primus patches a main-only DDP _post_param_sync fast path that is skipped on core_v0.19.2.",
+      "MFSDP v2, MoE/router, SSM/Hybrid, and inference upstream movement overlap with existing Primus patch surfaces."
+    ]
+  },
+  "artifacts": [
+    {
+      "label": "Detailed Report (PDF)",
+      "path": "./reports/megatron/upstream-main/report.pdf",
+      "format": "pdf",
+      "language": "en",
+      "kind": "detail",
+      "primary": true
+    },
+    {
+      "label": "One-Page Summary (PDF)",
+      "path": "./reports/megatron/upstream-main/summary.pdf",
+      "format": "pdf",
+      "language": "en",
+      "kind": "summary",
+      "primary": false
+    }
+  ]
+}
