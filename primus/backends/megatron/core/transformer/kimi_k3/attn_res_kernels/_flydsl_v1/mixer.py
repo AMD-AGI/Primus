@@ -151,6 +151,7 @@ class _FlydslMix(torch.autograd.Function):
             r_sav.reshape(-1),
             dot_sav.reshape(-1),
             int(num_tokens),
+            torch.cuda.current_stream(),
         )
 
         ctx.save_for_backward(prefix_sum, block_residual, score_weight, r_sav, dot_sav)
@@ -189,6 +190,7 @@ class _FlydslMix(torch.autograd.Function):
             dw_tok.reshape(-1),
             d_dot.reshape(-1),
             int(num_tokens),
+            torch.cuda.current_stream(),
         )
         d_sw = dw_tok.sum(0).to(score_weight.dtype)
         return d_ps, d_br, d_sw, None
