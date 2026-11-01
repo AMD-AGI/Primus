@@ -42,6 +42,9 @@ PRIMUS_LAUNCHER=direct bash examples/megatron/models/deepseek-v3/run_deepseek_v3
 - `PATCH_TRITON_EXPERT_SCHEDULING` (default `1`): see Triton expert scheduling below.
 - `HIPBLASLT_TUNING_OVERRIDE_FILE` (default: the file in `hipblaslt_tuning/`; empty: hipBLASLt's own
   kernel choice): see hipBLASLt tuning below.
+- `ENABLE_NUMA_BINDING` (default `1`): bind each rank's CPU threads and host memory to the NUMA node of its
+  GPU (`primus-cli direct --numa`); `0` leaves them unbound.
+- `GPU_MAX_HW_QUEUES` (default `4`, Primus's default is 2): the hardware queues of each process.
 - Config and output: `EXP` (the experiment yaml), and `PRIMUS_WORKSPACE` (default `output`), `PRIMUS_TEAM`,
   `PRIMUS_USER`, `PRIMUS_EXP_NAME`, which make up the output directory `<workspace>/<team>/<user>/<exp>`.
 
@@ -52,6 +55,12 @@ The defaults are in the script. Arguments to the script are appended to the Prim
 GPUS_PER_NODE=1 PRIMUS_EP=1 PRIMUS_NUM_EXPERTS=32 GBS=16 \
     bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
 ```
+
+**MegaMoE.** Appending `--use_turbo_mega_moe True` runs each MoE layer as Primus-Turbo's fused MegaMoE
+layer instead of the token dispatcher and the grouped GEMM, at EP 2 to 8 (not in the 1-GPU variant); it
+needs a Primus-Turbo with the MegaMoE ops (e.g. a `TURBO_DIR` checkout). The yaml's
+`gradient_accumulation_fusion: true` then covers the expert weights too: their wgrads accumulate straight
+into `main_grad`.
 
 **Another Primus-Turbo checkout.** Build it in place for the image once (gfx1250 only, OpenMPI off the
 paths so rocSHMEM is not linked), then pass it as `TURBO_DIR`; the launcher puts it first on `PYTHONPATH`:
@@ -106,7 +115,17 @@ last rank in GiB (labelled GB) as the device's total minus free memory. Each row
   (`USE_TURBO_ATTENTION=False TURBO_GROUPED_GEMM_BACKEND=default`), hipBLASLt's own GEMM kernels
   (`HIPBLASLT_TUNING_OVERRIDE_FILE=`).
 - FlyDSL: Primus-Turbo's FlyDSL attention and grouped GEMM.
-- hipBLASLt tuning: the tuning file above. This row is the launcher's defaults.
+- hipBLASLt tuning: the tuning file above.
+- Other defaults: the yaml's `gradient_accumulation_fusion`, Triton router GEMMs, routing on TE's fused
+  kernels with the expert bias and no dataloader attention mask, and the launcher's NUMA binding and 4
+  hardware queues. This row is the launcher's defaults.
+- MegaMoE: `--use_turbo_mega_moe True` (4 GPUs).
+
+The rows after hipBLASLt tuning were measured later, inside a container of the image
+(`PRIMUS_LAUNCHER=direct`) with a newer Primus-Turbo checkout (`TURBO_DIR`) that has the MegaMoE wgrad
+changes, as the mean of 2 runs (on 4 GPUs alternating between the two rows). Part of their gain over the
+hipBLASLt tuning row comes from that Primus-Turbo and from Primus's gfx1250 gradient clipping, which do not
+depend on the settings.
 
 **1 GPU** (the 1-GPU variant above: 4 layers, 32 experts, GBS 16)
 
@@ -114,7 +133,8 @@ last rank in GiB (labelled GB) as the device's total minus free memory. Each row
 | --- | --- | --- | --- | --- | --- | --- |
 | Baseline | 1967 | 1.00x | 33,300 | 719 | 174.15 GiB | 5.49455 |
 | + FlyDSL | 1010 | 1.95x | 64,900 | 1400 | 130.52 GiB | 5.49483 |
-| + hipBLASLt tuning (default) | 960 | 2.05x | 68,200 | 1473 | 130.53 GiB | 5.49473 |
+| + hipBLASLt tuning | 960 | 2.05x | 68,200 | 1473 | 130.53 GiB | 5.49473 |
+| + other defaults (default) | 931 | 2.11x | 70,400 | 1519 | 129.18 GiB | 5.49463 |
 
 **4 GPUs** (the launcher's defaults: EP4, 128 experts, GBS 64)
 
@@ -122,15 +142,17 @@ last rank in GiB (labelled GB) as the device's total minus free memory. Each row
 | --- | --- | --- | --- | --- | --- | --- |
 | Baseline | 2139 | 1.00x | 30,600 | 661 | 215.21 GiB | 5.56290–5.56295 |
 | + FlyDSL | 1200 | 1.78x | 54,600 | 1179 | 170.71 GiB | 5.56274 |
-| + hipBLASLt tuning (default) | 1132 | 1.89x | 57,900 | 1249 | 170.71 GiB | 5.56307 |
+| + hipBLASLt tuning | 1132 | 1.89x | 57,900 | 1249 | 170.71 GiB | 5.56307 |
+| + other defaults (default) | 1061 | 2.02x | 61,800 | 1333 | 166.13 GiB | 5.56282–5.56296 |
+| + MegaMoE | 929 | 2.30x | 70,600 | 1523 | 152.06 GiB | 5.56298–5.56317 |
 
-**Grad norms per iteration** of the default. Its two runs gave the same values on 1 and on 4 GPUs; an earlier
-set of 4-GPU runs differed from them by up to 0.004.
+**Grad norms per iteration** of the default. Its two runs gave the same values on 1 GPU; on 4 GPUs they
+differed by up to 0.002 from iteration 5 on, and the table shows the first run.
 
 | GPUs | Grad norms, iterations 1–10 |
 | --- | --- |
-| 1 | 5.292, 5.326, 5.587, 7.070, 12.976, 14.047, 13.659, 15.001, 13.475, 14.192 |
-| 4 | 3.810, 3.778, 3.815, 5.138, 8.845, 10.095, 7.851, 7.169, 6.821, 6.650 |
+| 1 | 5.292, 5.326, 5.587, 7.069, 12.977, 14.047, 13.663, 14.999, 13.477, 14.189 |
+| 4 | 3.810, 3.777, 3.815, 5.138, 8.843, 10.093, 7.850, 7.170, 6.819, 6.650 |
 
 ## Known issues
 
@@ -146,8 +168,10 @@ set of 4-GPU runs differed from them by up to 0.004.
   through Primus-Turbo's `flash_attn_usp_func`, which ignores `PRIMUS_TURBO_ATTN_BACKEND` and always uses
   aiter/CK, which has no gfx1250 kernels for these head dims, so CP > 1 does not run with Primus-Turbo
   attention on gfx1250.
-- **FlyDSL grouped GEMM.** It needs `gradient_accumulation_fusion: false` and at most 64 local experts;
-  with the backend set to `bf16:flydsl`, other calls raise `ValueError`. Primus-Turbo documents a rare,
+- **FlyDSL grouped GEMM.** It takes at most 64 local experts; with the backend set to `bf16:flydsl`,
+  other calls raise `ValueError`. It cannot accumulate its weight gradients into `main_grad`, so with
+  `gradient_accumulation_fusion: true` (the yaml's setting) Primus leaves those to DDP's separate add,
+  while the other layers accumulate in place. Primus-Turbo documents a rare,
   nondeterministic wrong result from these kernels, with no error or NaN: about 1 call in 130,000 in
   steady state on the largest shape, and much more often over a process's first few hundred calls.
   `TURBO_GROUPED_GEMM_BACKEND=default` uses the Triton grouped GEMM.

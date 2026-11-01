@@ -68,6 +68,10 @@ if [[ -n "${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:-}" ]]; then
 fi
 export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
+# 1: bind each rank's CPU threads and host memory to the NUMA node of its GPU (a little faster)
+export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-1}
+# 4 hardware queues per process, not base_env.sh's 2 (a little faster)
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-4}
 # 1: switch Triton's gfx1250 expert scheduling off in the container's Triton (needs root), see below
 export PATCH_TRITON_EXPERT_SCHEDULING=${PATCH_TRITON_EXPERT_SCHEDULING:-1}
 # hipBLASLt kernels tuned for this example's GEMMs (README.md); empty: hipBLASLt's own choice. hipBLASLt
@@ -166,6 +170,12 @@ if [[ -n "${TURBO_DIR}" ]]; then
     )
 fi
 
+# base_env.sh only exports ENABLE_NUMA_BINDING; primus-cli direct binds with --numa
+RUNNER_ARGS=()
+if [[ "${ENABLE_NUMA_BINDING}" == 1 ]]; then
+    RUNNER_ARGS+=(--numa)
+fi
+
 if [[ -n "${PRIMUS_RECOMPUTE_LAYER_IDS}" ]]; then
     # as a list: Primus reads a single id as an int
     RECOMPUTE_ARGS=(--recompute_granularity full --recompute_layer_ids "[${PRIMUS_RECOMPUTE_LAYER_IDS//[][]/}]")
@@ -175,7 +185,7 @@ fi
 
 LOG_DIR="${PRIMUS_WORKSPACE:-output}/${PRIMUS_TEAM}/${PRIMUS_USER}/${PRIMUS_EXP_NAME}"
 mkdir -p "${LOG_DIR}"
-./primus-cli direct "${ENV_ARGS[@]}" -- train pretrain --config "${EXP}" \
+./primus-cli direct "${RUNNER_ARGS[@]}" "${ENV_ARGS[@]}" -- train pretrain --config "${EXP}" \
     --train_iters "${TRAIN_ITERS}" \
     --micro_batch_size "${MBS}" \
     --global_batch_size "${GBS}" \
