@@ -376,9 +376,14 @@ exp_avg_sq_dtype: fp32 # 'fp32', 'fp16', 'fp8'
 # Triton AdamW with a device-sized grid instead of TE FusedAdam. Matters for TE
 # builds on the generic multi_tensor_apply launcher (capped at 320 workgroups per
 # launch); ROCm TE builds with the custom Adam kernel are already uncapped.
-# Falls back to TE for precision-aware / capturable / FP8 paths. Set false to
-# keep TE FusedAdam.
+# On gfx1250 the precision-aware optimizer's param-remainder step (bf16 params,
+# int16 remainders) runs on Triton too; other precision-aware, capturable and FP8
+# paths fall back to TE. Set false to keep TE FusedAdam.
 use_triton_fused_adam: true
+# gfx1250 only: with the precision-aware optimizer's param remainders, the Triton step applies the
+# global-norm clip coefficient as it reads the gradients instead of after a separate scaling pass
+# over them (bit for bit the same update). Off, or another architecture: keep the separate pass.
+fold_clip_into_adam: true
 # gfx1250 only: scale the backward by 1/DP at its seed (loss and auxiliary-loss scales) instead of
 # every gradient bucket before its reduce-scatter. Only when 1/DP is a power of two (bit for bit
 # the same gradients); off, or another architecture: DDP's per-bucket scaling.

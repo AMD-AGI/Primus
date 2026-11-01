@@ -38,3 +38,21 @@ def scale_and_norm(x: torch.Tensor, factor: float) -> torch.Tensor:
     partial = torch.empty(grid, dtype=torch.float32, device=x.device)
     _scale_sumsq_kernel[(grid,)](x, partial, n, float(factor), BLOCK=_BLOCK, SCALE=factor != 1.0, num_warps=8)
     return partial.sum().sqrt().to(x.dtype)
+
+
+@triton.jit
+def _scale_by_device_scalar_kernel(X, S, n, BLOCK: tl.constexpr):
+    """X[block] *= S[0] (fp32 product, one rounding to X's dtype)."""
+    pid = tl.program_id(0)
+    offs = pid.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n
+    s = tl.load(S)
+    x = tl.load(X + offs, mask=mask, other=0.0)
+    tl.store(X + offs, (x.to(tl.float32) * s).to(X.dtype.element_ty), mask=mask)
+
+
+def scale_by_device_scalar(x: torch.Tensor, scale: torch.Tensor) -> None:
+    """``x *= scale`` in place for a contiguous ``x`` and a one-element fp32 ``scale`` on its device."""
+    n = x.numel()
+    if n:
+        _scale_by_device_scalar_kernel[(triton.cdiv(n, _BLOCK),)](x, scale, n, BLOCK=_BLOCK, num_warps=8)
