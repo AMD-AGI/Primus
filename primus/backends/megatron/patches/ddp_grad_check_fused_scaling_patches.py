@@ -115,10 +115,13 @@ def patch_fused_grad_check_scaling(ctx: PatchContext) -> None:
                 setattr(bucket, _TRUE_FACTOR, factor)
                 norms.append(scale_and_norm(bucket.grad_data, factor))
                 bucket.gradient_scaling_factor = 1.0
+        rerun_state_machine = get_rerun_state_machine()
+        # With megatron.rerun.deferred_nan_check the calls below only queue their verdicts, checked
+        # once per step; otherwise one sync here covers the group and the calls run on a failure.
+        if not getattr(type(rerun_state_machine).validate_result, "_primus_deferred", False):
             if bool(torch.stack([norm.float() for norm in norms]).isfinite().all()):
                 return
         # upstream's checks and messages, in its order
-        rerun_state_machine = get_rerun_state_machine()
         for i, grad_norm in enumerate(norms):
             rerun_state_machine.validate_result(
                 result=grad_norm,
@@ -140,6 +143,6 @@ def patch_fused_grad_check_scaling(ctx: PatchContext) -> None:
     _ParamAndGradBucketGroup.check_grads = check_grads
     mark_patched(_ParamAndGradBucketGroup, _PATCH_KEY)
     log_rank_0(
-        "[Patch:megatron.ddp.fused_grad_check_scaling] check_grads scales each bucket in the pass "
-        "that takes its norm, one host sync per bucket group"
+        f"[Patch:{_PATCH_KEY}] check_grads scales each bucket in the pass "
+        "that takes its norm, at most one host sync per bucket group"
     )
