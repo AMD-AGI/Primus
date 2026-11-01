@@ -14,6 +14,10 @@ from tests.utils import skip_if_no_cuda
 skip_if_no_cuda()
 
 import primus_turbo.pytorch as primus_turbo_torch  # noqa: E402  isort:skip
+from primus_turbo.pytorch.core.backend import (  # noqa: E402  isort:skip
+    BackendType,
+    GlobalBackendManager,
+)
 
 from primus.backends.megatron.core.extensions.primus_turbo import (  # noqa: E402  isort:skip
     Format,
@@ -22,6 +26,7 @@ from primus.backends.megatron.core.extensions.primus_turbo import (  # noqa: E40
     PrimusTurboQuantizedTensorPair,
     ScaleDtype,
     ScalingGranularity,
+    _bf16_grouped_gemm_pinned_to_flydsl,
     _bridge_weight_grad,
     _fuse_wgrad_accum_pattern,
     _maybe_create_quantized_weight_buffers,
@@ -189,3 +194,18 @@ def test_mxfp4_gradient_accumulation_fusion_flag_still_controls_gate():
     config = SimpleNamespace(gradient_accumulation_fusion=False)
 
     assert _fuse_wgrad_accum_pattern(config, _weight()) is None
+
+
+@pytest.mark.parametrize(
+    "choice, pinned",
+    [
+        (SimpleNamespace(backend=BackendType.FLYDSL), True),
+        (BackendType.FLYDSL, True),  # an older Primus-Turbo returns the BackendType itself
+        (SimpleNamespace(backend=BackendType.TRITON), False),
+        (None, False),
+    ],
+)
+def test_bf16_grouped_gemm_pinned_to_flydsl(monkeypatch, choice, pinned):
+    """Asks Turbo's backend manager: a grouped GEMM pinned to FlyDSL keeps DDP's separate wgrad add."""
+    monkeypatch.setattr(GlobalBackendManager, "get_grouped_gemm_backend", classmethod(lambda cls, p: choice))
+    assert _bf16_grouped_gemm_pinned_to_flydsl() is pinned
