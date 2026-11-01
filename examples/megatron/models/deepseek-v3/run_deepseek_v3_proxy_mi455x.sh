@@ -68,6 +68,19 @@ if [[ -n "${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:-}" ]]; then
 fi
 export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
+# 1: bind each rank's CPU threads and host memory to the NUMA node of its GPU (a little faster)
+export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-1}
+# 4 hardware queues, not base_env.sh's 2: a little faster, and with --use_turbo_mega_moe True at EP > 1 the
+# deferred gradient checks (megatron.rerun.deferred_nan_check) need them, or keep one sync per bucket group
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-4}
+# 1: fold the residual adds into the RMSNorms (fused_residual_rmsnorm.py, MoE mode), bit for bit the unfused
+# layers; with --use_turbo_mega_moe True also the MoE layer's routed + shared add and its input-gradient adds
+export PRIMUS_FUSED_RESIDUAL_NORM_MOE=${PRIMUS_FUSED_RESIDUAL_NORM_MOE:-1}
+# 1, with --use_turbo_mega_moe True: the MegaMoE expert wgrads overwrite main_grad on their first write of
+# an iteration, so DDP clears only the rest of the gradient buffers, most of which is expert weights.
+# 0: clear everything. PRIMUS_TURBO_GRAD_OWNERSHIP_POISON=1 fills the skipped slices with NaN to prove
+# they are rewritten.
+export PRIMUS_TURBO_GRAD_OWNERSHIP=${PRIMUS_TURBO_GRAD_OWNERSHIP:-1}
 # 1: switch Triton's gfx1250 expert scheduling off in the container's Triton (needs root), see below
 export PATCH_TRITON_EXPERT_SCHEDULING=${PATCH_TRITON_EXPERT_SCHEDULING:-1}
 # hipBLASLt kernels tuned for this example's GEMMs (README.md); empty: hipBLASLt's own choice. hipBLASLt
@@ -166,6 +179,12 @@ if [[ -n "${TURBO_DIR}" ]]; then
     )
 fi
 
+# base_env.sh only exports ENABLE_NUMA_BINDING; primus-cli direct binds with --numa
+RUNNER_ARGS=()
+if [[ "${ENABLE_NUMA_BINDING}" == 1 ]]; then
+    RUNNER_ARGS+=(--numa)
+fi
+
 if [[ -n "${PRIMUS_RECOMPUTE_LAYER_IDS}" ]]; then
     # as a list: Primus reads a single id as an int
     RECOMPUTE_ARGS=(--recompute_granularity full --recompute_layer_ids "[${PRIMUS_RECOMPUTE_LAYER_IDS//[][]/}]")
@@ -175,7 +194,7 @@ fi
 
 LOG_DIR="${PRIMUS_WORKSPACE:-output}/${PRIMUS_TEAM}/${PRIMUS_USER}/${PRIMUS_EXP_NAME}"
 mkdir -p "${LOG_DIR}"
-./primus-cli direct "${ENV_ARGS[@]}" -- train pretrain --config "${EXP}" \
+./primus-cli direct "${RUNNER_ARGS[@]}" "${ENV_ARGS[@]}" -- train pretrain --config "${EXP}" \
     --train_iters "${TRAIN_ITERS}" \
     --micro_batch_size "${MBS}" \
     --global_batch_size "${GBS}" \
