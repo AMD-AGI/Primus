@@ -130,6 +130,14 @@ os.replace(path + ".tmp", path)
 EOF
 }
 
+# Every cache the install and the training write (pip, uv, Bazel for source builds such as tensorstore,
+# Hugging Face, tools/perf's yq) goes under the base, never into the real home: on many clusters home is
+# NFS with a quota, and removing the base removes them all.
+use_base_home() {
+    mkdir -p "$BASE/home" || die "cannot create $BASE/home"
+    export HOME="$BASE/home"
+}
+
 # ---- install -------------------------------------------------------------------
 if [ "$DRY_RUN" = 1 ]; then
     log "dry run: no install"
@@ -142,9 +150,10 @@ elif [ "$SKIP_INSTALL" = 0 ]; then
     if [ "${free_gb:-0}" -lt "$MIN_FREE_GB" ]; then
         die "only ${free_gb}G free under $BASE (need $MIN_FREE_GB; --min-free-gb to change)"
     fi
-    log "installing $FAMILY into $BASE (${free_gb}G free)"
+    log "installing $FAMILY into $BASE (${free_gb}G free; HOME=$BASE/home for its caches)"
     write_summary installing
     export "$BASE_VAR=$BASE"
+    use_base_home
     bash "$INSTALL_DIR/setup.sh" > "$RESULT_DIR/install.log" 2>&1
     INSTALL_RC=$?
     grep -inE '\bwarn(ing)?\b' "$RESULT_DIR/install.log" > "$RESULT_DIR/install-warnings.txt"
@@ -204,6 +213,7 @@ log "training ${#CONFIGS[@]} config(s) for $TRAIN_STEPS steps (backends $backend
 write_summary training
 (
     export "$BASE_VAR=$BASE"
+    [ "$DRY_RUN" = 1 ] || use_base_home
     if [ "$DRY_RUN" = 1 ]; then
         export DRY_RUN=1
     else
