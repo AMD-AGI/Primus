@@ -18,6 +18,9 @@ set -euo pipefail
 
 SCRIPT=$(realpath "$0")
 # relative to the caller's directory
+if [[ -n "${TURBO_DIR:-}" ]]; then
+    TURBO_DIR=$(realpath -e "${TURBO_DIR}")
+fi
 if [[ -n "${HIPBLASLT_TUNING_OVERRIDE_FILE:-}" ]]; then
     HIPBLASLT_TUNING_OVERRIDE_FILE=$(realpath -e "${HIPBLASLT_TUNING_OVERRIDE_FILE}")
 fi
@@ -27,6 +30,8 @@ cd "$(dirname "${SCRIPT}")/../../../.."
 export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-container}
 export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261019}
 export EXP=${EXP:-examples/megatron/configs/MI455X/minimax_m3-BF16-pretrain.yaml}
+# Primus-Turbo checkout built in place for DOCKER_IMAGE (see README.md); empty: the image's primus_turbo
+export TURBO_DIR=${TURBO_DIR:-}
 
 # One GPU until the caller asks for more. Do not default to every device on a
 # shared node.
@@ -42,9 +47,14 @@ export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS
 # flydsl or eager (the PyTorch reference)
 export PRIMUS_MSA_BACKEND=${PRIMUS_MSA_BACKEND:-flydsl}
 export PRIMUS_RECOMPUTE_NUM_LAYERS=${PRIMUS_RECOMPUTE_NUM_LAYERS:-1}
-# Primus-Turbo attention for the three dense layers. Its default backend fails in fmha_bwd here.
-export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
-if [[ "${USE_TURBO_ATTENTION,,}" == true ]]; then
+# Primus-Turbo attention for the three dense layers: on with the flydsl backend when TURBO_DIR is set
+# (it needs the gfx1250 head-dim-128 kernels, see README.md), off otherwise; the image's Primus-Turbo
+# lacks those kernels. The default backend fails in fmha_bwd here.
+if [[ -n "${TURBO_DIR}" ]]; then
+    export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-True}
+    export PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-flydsl}
+else
+    export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
     export PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-triton}
 fi
 # Primus-Turbo grouped GEMM for the experts; False: TE's grouped GEMM (one hipBLASLt GEMM per expert)
@@ -69,6 +79,13 @@ case "${PRIMUS_MSA_BACKEND}" in
     flydsl | eager) ;;
     *)
         echo "PRIMUS_MSA_BACKEND must be flydsl or eager, not '${PRIMUS_MSA_BACKEND}'" >&2
+        exit 2
+        ;;
+esac
+case "${PRIMUS_TURBO_ATTN_BACKEND,,}" in
+    flydsl | triton) ;;
+    *)
+        echo "PRIMUS_TURBO_ATTN_BACKEND must be flydsl or triton, not '${PRIMUS_TURBO_ATTN_BACKEND}'" >&2
         exit 2
         ;;
 esac
@@ -110,7 +127,7 @@ case "${PRIMUS_LAUNCHER}" in
         while IFS= read -r v; do
             case "${v}" in
                 PRIMUS_LAUNCHER) ;;
-                EXP | GPUS_PER_NODE | HIP_VISIBLE_DEVICES | TRAIN_ITERS | MBS | GBS | USE_TURBO_* | \
+                EXP | TURBO_DIR | GPUS_PER_NODE | HIP_VISIBLE_DEVICES | TRAIN_ITERS | MBS | GBS | USE_TURBO_* | \
                     TURBO_GROUPED_GEMM_BACKEND | MOCK_DATA | PROFILE | PATCH_TRITON_EXPERT_SCHEDULING | \
                     MASTER_ADDR | MASTER_PORT | HF_TOKEN | WANDB_API_KEY | ENABLE_NUMA_BINDING | GPU_MAX_HW_QUEUES | \
                     HSA_* | NVTE_* | PRIMUS_* | NCCL_* | RCCL_* | GLOO_* | IONIC_* | HIPBLASLT_*)
@@ -121,6 +138,9 @@ case "${PRIMUS_LAUNCHER}" in
         DOCKER_ARGS=(--device /dev/kfd --device /dev/dri -v "${PWD}:${PWD}")
         if [[ -e /dev/infiniband ]]; then
             DOCKER_ARGS+=(--device /dev/infiniband)
+        fi
+        if [[ -n "${TURBO_DIR}" ]]; then
+            DOCKER_ARGS+=(-v "${TURBO_DIR}:${TURBO_DIR}")
         fi
         if [[ -n "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ]]; then
             DOCKER_ARGS+=(-v "${HIPBLASLT_TUNING_OVERRIDE_FILE}:${HIPBLASLT_TUNING_OVERRIDE_FILE}:ro")
@@ -138,6 +158,22 @@ case "${PRIMUS_LAUNCHER}" in
         exit 2
         ;;
 esac
+
+# The flydsl backend needs Primus-Turbo's gfx1250 head-dim-128 kernels (README.md). Without them the
+# first attention call raises ValueError, after the model and optimizer are built; stop here instead.
+if [[ "${USE_TURBO_ATTENTION,,}" =~ ^(true|1|yes)$ && "${PRIMUS_TURBO_ATTN_BACKEND,,}" == flydsl ]]; then
+    if [[ -n "${TURBO_DIR}" ]]; then
+        TURBO_PKG=${TURBO_DIR}/primus_turbo
+    else
+        TURBO_PKG=$(python3 -c 'import importlib.util, os; s = importlib.util.find_spec("primus_turbo"); print(os.path.dirname(s.origin) if s and s.origin else "")')
+    fi
+    if [[ ! -d "${TURBO_PKG}/flydsl/attention/gfx1250" ]]; then
+        echo "PRIMUS_TURBO_ATTN_BACKEND=flydsl needs a Primus-Turbo with primus_turbo/flydsl/attention/gfx1250/," \
+            "which ${TURBO_PKG:-this Python environment} lacks. Set TURBO_DIR to such a checkout (README.md)" \
+            "or PRIMUS_TURBO_ATTN_BACKEND=triton." >&2
+        exit 2
+    fi
+fi
 
 # Triton 3.8 turns on AMDGPU expert scheduling for gfx1250, which makes Triton kernels fault or
 # return NaN at random. TRITON_HIP_USE_EXPERT_SCHEDULING=0 (below) turns it off when a kernel is
@@ -170,6 +206,13 @@ ENV_ARGS=(
     --env TRITON_HIP_USE_EXPERT_SCHEDULING=0
     --env HSA_COREDUMP_PATTERN=/dev/null
 )
+if [[ -n "${TURBO_DIR}" ]]; then
+    # --env is applied after Primus builds PYTHONPATH, so this checkout comes first.
+    ENV_ARGS+=(
+        --env "PYTHONPATH=${TURBO_DIR}:${TURBO_DIR}/build/pydeps:${PWD}:${PWD}/third_party/Megatron-LM"
+        --env PYTHONDONTWRITEBYTECODE=1
+    )
+fi
 
 LOG_DIR="${PRIMUS_WORKSPACE:-output}/${PRIMUS_TEAM}/${PRIMUS_USER}/${PRIMUS_EXP_NAME}"
 mkdir -p "${LOG_DIR}"

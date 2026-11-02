@@ -21,7 +21,8 @@ The default image is `amdprimus/amdprimus:tas-20261019` (see the DeepSeek-V3 exa
 `amdprimus/amdprimus@sha256:d653324d124e218f43c92eaac3cfc5d05059bd45fb4abf5bdfb78b987af4af87`: torch
 2.14.0 on ROCm 10.2.0a20261011, Triton 3.8.0, Transformer Engine 2.19.0.dev0 (bfe94fbe5),
 Primus-Turbo 0.6.1.dev2, FlyDSL 0.3.4.1 and AITER 0.1.24.post1. Every run below used that image and
-its own Primus-Turbo.
+its own Primus-Turbo, except the FlyDSL attention runs, which used a Primus-Turbo checkout through
+`TURBO_DIR` (see FlyDSL attention in the dense layers).
 
 ## Run
 
@@ -37,6 +38,24 @@ PRIMUS_LAUNCHER=direct bash examples/megatron/models/minimax-m3/run_minimax_m3_m
 ```
 
 Two runs at once on one node need different `MASTER_PORT`s.
+
+**FlyDSL attention for the dense layers.** The image's Primus-Turbo has no gfx1250 FlyDSL attention
+for head dim 128; Primus-Turbo `dev/mi455x_v3` has it (PR #580). Build such a checkout in place for
+the image once (gfx1250 only, OpenMPI off the paths so rocSHMEM is not linked), then pass it as
+`TURBO_DIR`. The launcher puts it first on `PYTHONPATH` and runs the three dense layers on its FlyDSL
+attention:
+
+```bash
+git clone https://github.com/AMD-AGI/Primus-Turbo.git /path/to/Primus-Turbo
+git -C /path/to/Primus-Turbo checkout ff4898e4  # dev/mi455x_v3, the commit measured below
+git -C /path/to/Primus-Turbo submodule update --init --recursive
+docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v /path/to/Primus-Turbo:/path/to/Primus-Turbo \
+    -w /path/to/Primus-Turbo amdprimus/amdprimus:tas-20261019 bash -c \
+    'PATH=$(tr : "\n" <<< "$PATH" | grep -v openmpi | paste -sd:) GPU_ARCHS=gfx1250 python3 setup.py build_ext --inplace'
+HIP_VISIBLE_DEVICES=1 TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
+```
+
+ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
 
 **Settings** are environment variables:
 
@@ -55,9 +74,14 @@ Two runs at once on one node need different `MASTER_PORT`s.
 - Experts: `USE_TURBO_GROUPED_GEMM` (default `True`; `False` is TE's grouped GEMM, one hipBLASLt GEMM
   per expert) and `TURBO_GROUPED_GEMM_BACKEND` (default `default`, which is Triton here; `bf16:flydsl`
   takes at most 64 local experts, so EP 2 or more).
-- Dense layers: `USE_TURBO_ATTENTION` (default `False`) runs Primus-Turbo attention in the three dense
-  layers. The launcher then sets `PRIMUS_TURBO_ATTN_BACKEND=triton`, because the default backend fails
-  with `invalid argument for fmha_bwd` here. MSA layers are unaffected.
+- `TURBO_DIR` (default unset: the image's Primus-Turbo): a Primus-Turbo checkout built in place for
+  the image, see above. A relative path is taken from the current directory.
+- Dense layers: `USE_TURBO_ATTENTION` runs Primus-Turbo attention in the three dense layers, with
+  `PRIMUS_TURBO_ATTN_BACKEND`, `flydsl` or `triton`. With `TURBO_DIR` set they default to `True` and
+  `flydsl`; without it, to `False` and `triton`. `flydsl` needs
+  `primus_turbo/flydsl/attention/gfx1250/`, and the launcher stops before training when the
+  Primus-Turbo it would use lacks it. Primus-Turbo's own default backend fails with
+  `invalid argument for fmha_bwd` here. MSA layers are unaffected.
 - Optimizer: `PRIMUS_FUSED_ADAM_CLIP` (default `1`) runs Primus's HIP Adam, which applies the
   gradient-clip coefficient inside the kernel. `PRIMUS_FUSED_ADAM_BF16_WRITEBACK` and
   `PRIMUS_STATIC_BF16_LOSS_SCALE_CPU` (default: the value of `PRIMUS_FUSED_ADAM_CLIP`) also have it
@@ -233,6 +257,29 @@ The unit tests pass on gfx1250: `tests/unit_tests/backends/megatron/test_minimax
 the FlyDSL tests (forward and backward against eager, the indexer, and the `MinimaxSparseAttention`
 module).
 
+## FlyDSL attention in the dense layers
+
+One GPU of `ctheliosr-rck-g02-e15-02` (4 layers, EP1, GBS 8, so 8 micro-batches per step as on the
+baseline), this branch at 6ee53b2c, with the image's Primus-Turbo or Primus-Turbo `dev/mi455x_v3`
+ff4898e4 through `TURBO_DIR`. The runs alternated, one at a time; every one finished 10 iterations
+with 0 NaN.
+
+| Dense attention | Primus-Turbo | ms/iter | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- | --- | --- |
+| TE (unfused softmax) | image | 824.0 | 655.9 | 238.0 GB | 10.01469 |
+| TE (unfused softmax) | ff4898e4 | 823.6, 822.8 | 656.2, 656.8 | 238.0 GB | 10.01467, 10.01467 |
+| Primus-Turbo FlyDSL | ff4898e4 | 643.2, 644.6 | 840.3, 838.3 | 230.3 GB | 10.01465, 10.01455 |
+
+- FlyDSL attention takes the step from 823 to 644 ms, 22% faster, and 7.7 GB less memory: no fp32
+  score matrix and no separate softmax.
+- Swapping the Primus-Turbo checkout alone changes nothing (824.0 against 823.6 ms).
+- Its fused backward accumulates dQ with fp32 atomics, so runs are not bitwise identical; the losses
+  agree to five digits over 10 iterations.
+- During the first TE run on ff4898e4, short-lived processes of another user were on the same GPU
+  before iteration 1 finished; the timed iterations 3–10 match the repeat.
+- Not yet run on the EP4 baseline, where TE's dense attention is 106.5 ms of softmax plus about 78 ms
+  of score and value GEMMs per profiled step.
+
 ## How the defaults were chosen
 
 On the older bases dad0a081 and a624bb95 (Megatron-LM d3528a21), one GPU unless noted, with TE's
@@ -363,8 +410,8 @@ Do not run:
   gfx94x or gfx95x is required for FP8 block scaling execution.`, `Device arch gfx95x or newer is
   required for MXFP8 execution.`). TE 2.19.0.dev0 leaves gfx1250 as a TODO until its GEMM is available.
 - `--use_turbo_deepep True`, sync-free stages 2 and 3, and MegaMoE: Known issues.
-- Primus-Turbo attention with its default backend: `invalid argument for fmha_bwd`, so
-  `USE_TURBO_ATTENTION=True` makes the launcher use Triton.
+- Primus-Turbo attention with its default backend: `invalid argument for fmha_bwd`, so the launcher
+  always sets `PRIMUS_TURBO_ATTN_BACKEND`.
 - `moe_use_legacy_grouped_gemm`, `PRIMUS_TP` above 1, context parallel, a dataloader attention mask,
   and a BF16 router: Known issues.
 - `PRIMUS_TOTAL_LAYERS=8` on one GPU, where it does not fit. At EP2 it has 22.4 B parameters per GPU,
