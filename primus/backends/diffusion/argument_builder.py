@@ -532,29 +532,25 @@ def _spec(model_name: str) -> dict[str, Any] | None:
     return _SPECS.get(model_name)
 
 
+# Specs for workloads this checkout does not build. Reject them here so a
+# mis-named config fails before ``get_model_builder`` and before any download.
+_UNBUILT_BENCHMARKS = frozenset({"sdxl", "stable-diffusion-xl", "mochi-1", "hunyuan-video", "flux-dev"})
+
+
 def benchmark_defaults(
     model_name: str,
     *,
     flux_dataset: dict[str, Any],
     flux_trainer: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    if model_name == "flux-dev":
-        dataset = copy.deepcopy(flux_dataset)
-        dataset["config"]["dataset_type"] = "raw"
-        dataset["config"]["dataset_format"] = "hf_repo"
-        dataset["config"]["dataset_path"] = ""
-        processor = dataset["config"]["processor_config"]
-        processor["img_size"] = 512
-        processor["processor_name"] = "flux_raw"
-        processor["processor_type"] = "flux_raw"
-        processor["skip_low_resolution"] = False
-        dataset["config"]["benchmark_loader"] = True
-        trainer = copy.deepcopy(BENCHMARK_TRAINER)
-        trainer["args"]["run_name"] = "flux-dev"
-        trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] = "DoubleStreamBlock,SingleStreamBlock"
-        trainer["args"]["fsdp_module_paths_to_wrap"] = flux_trainer["args"]["fsdp_module_paths_to_wrap"]
-        trainer["args"]["fsdp_module_paths_no_reshard"] = flux_trainer["args"]["fsdp_module_paths_no_reshard"]
-        return dataset, trainer
+    del flux_dataset, flux_trainer
+    if model_name in _UNBUILT_BENCHMARKS:
+        raise ValueError(
+            f"Unsupported diffusion model name: {model_name!r}. "
+            "This checkout registers the wan2.1-i2v benchmark only."
+        )
+    if model_name != "wan2.1-i2v":
+        return None
 
     spec = _spec(model_name)
     if spec is None:
@@ -563,6 +559,8 @@ def benchmark_defaults(
         "name": "amdb",
         "config": {
             "dataset_path": "",
+            # Lets an empty path select the Wan dataset instead of failing the lookup.
+            "model_name": model_name,
             "modality": spec["modality"],
             "max_train_samples": -1,
             "split": "train",

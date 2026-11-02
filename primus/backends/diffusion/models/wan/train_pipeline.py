@@ -110,8 +110,16 @@ class WanFlowMatchTrainPipeline:
         )
 
     def _maybe_prepare_raw_batch(self, components: WanComponents, batch: Dict[str, Any], model_config: Any):
-        raw = "videos" in batch or batch.get("prompts") is not None
-        if not raw or isinstance(batch.get("latents"), torch.Tensor):
+        if isinstance(batch.get("latents"), torch.Tensor):
+            return batch
+        raw = "videos" in batch or batch.get("video") is not None or batch.get("prompts") is not None
+        if raw and isinstance(components.vae, torch.nn.Identity):
+            raise ValueError(
+                "BENCHMARK_DENOISER_ONLY=1 replaces the VAE, text encoder, and CLIP tower "
+                "with Identity modules. It only accepts batches that already contain "
+                "latents, context, y, and clip_fea."
+            )
+        if not raw:
             return batch
         prepared = self.prepare_host_batch(batch, model_config)
         if prepared.get("input_ids") is None:

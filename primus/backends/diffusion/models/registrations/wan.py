@@ -45,12 +45,41 @@ def _strip_module_prefix(
 def _load_state_dict(path: str) -> dict[str, torch.Tensor]:
     if path.endswith(".safetensors"):
         return dict(safe_load_file(path))
-    obj = torch.load(path, map_location="cpu")
+    obj = torch.load(path, map_location="cpu", weights_only=True)
     if isinstance(obj, dict) and "model" in obj and isinstance(obj["model"], dict):
         obj = obj["model"]
     if not isinstance(obj, dict):
         raise ValueError(f"Unsupported checkpoint format at {path}")
     return obj
+
+
+def _install_dit_state(
+    dit: torch.nn.Module, state: dict[str, torch.Tensor], *, accept_diffusers: bool, source: str
+) -> None:
+    """Convert a Diffusers Wan export, then refuse a partial load of that format."""
+    if any(k.startswith("dit.") for k in state):
+        state = {k[len("dit.") :]: v for k, v in state.items() if k.startswith("dit.")}
+    diffusers_format = False
+    if accept_diffusers:
+        from primus.backends.diffusion.utils.checkpoint_convert import (
+            is_diffusers_wan,
+            wan_diffusers_to_native,
+        )
+
+        diffusers_format = is_diffusers_wan(state)
+        if diffusers_format:
+            state = wan_diffusers_to_native(state)
+
+    result = dit.load_state_dict(state, strict=False)
+    logger.info(
+        f"Loaded DiT from {source}. diffusers_format={diffusers_format} "
+        f"missing={len(result.missing_keys)} unexpected={len(result.unexpected_keys)}"
+    )
+    if diffusers_format and (result.missing_keys or result.unexpected_keys):
+        raise RuntimeError(
+            f"Wan Diffusers checkpoint mismatch: missing={result.missing_keys[:5]} "
+            f"unexpected={result.unexpected_keys[:5]}"
+        )
 
 
 def _load_dit_weights_into_module(
@@ -60,17 +89,13 @@ def _load_dit_weights_into_module(
     Support two common cases:
     1) Wan training export: `dit_model.safetensors` with keys like `blocks.0...`
     2) Official-ish export: `*model*.safetensors|bin` possibly with keys like `dit.blocks.0...` or `blocks.0...`
+
+    A single file and a checkpoint directory share the Diffusers conversion and
+    the mismatch check. A Diffusers file used to return after ``strict=False``.
     """
-    # Direct file
     if os.path.isfile(pretrained_path):
         state = _strip_module_prefix(_load_state_dict(pretrained_path))
-        # Accept either `dit.*` or plain keys.
-        if any(k.startswith("dit.") for k in state):
-            state = {k[len("dit.") :]: v for k, v in state.items() if k.startswith("dit.")}
-        result = dit.load_state_dict(state, strict=False)
-        logger.info(
-            f"Loaded DiT from file. missing={len(result.missing_keys)} unexpected={len(result.unexpected_keys)}"
-        )
+        _install_dit_state(dit, state, accept_diffusers=accept_diffusers, source=pretrained_path)
         return
 
     # Directory: prefer explicit Wan trainer file name, else fall back to pattern search
@@ -95,29 +120,12 @@ def _load_dit_weights_into_module(
         part = _strip_module_prefix(_load_state_dict(ckpt))
         merged.update(part)
 
-    if any(k.startswith("dit.") for k in merged):
-        merged = {k[len("dit.") :]: v for k, v in merged.items() if k.startswith("dit.")}
-    diffusers_format = False
-    if accept_diffusers:
-        from primus.backends.diffusion.utils.checkpoint_convert import (
-            is_diffusers_wan,
-            wan_diffusers_to_native,
-        )
-
-        diffusers_format = is_diffusers_wan(merged)
-        if diffusers_format:
-            merged = wan_diffusers_to_native(merged)
-
-    result = dit.load_state_dict(merged, strict=False)
-    logger.info(
-        f"Loaded DiT from dir. files={len(candidates)} diffusers_format={diffusers_format} "
-        f"missing={len(result.missing_keys)} unexpected={len(result.unexpected_keys)}"
+    _install_dit_state(
+        dit,
+        merged,
+        accept_diffusers=accept_diffusers,
+        source=f"{pretrained_path} ({len(candidates)} files)",
     )
-    if diffusers_format and (result.missing_keys or result.unexpected_keys):
-        raise RuntimeError(
-            f"Wan Diffusers checkpoint mismatch: missing={result.missing_keys[:5]} "
-            f"unexpected={result.unexpected_keys[:5]}"
-        )
 
 
 def build_wan_model(model_config: dict):

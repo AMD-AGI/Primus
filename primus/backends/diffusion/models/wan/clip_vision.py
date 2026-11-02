@@ -26,7 +26,7 @@ class WanClipVision(nn.Module):
             dtype=dtype,
             device="cpu",
         )
-        state = torch.load(checkpoint_path, map_location="cpu")
+        state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         if isinstance(state, dict) and "state_dict" in state and isinstance(state["state_dict"], dict):
             state = state["state_dict"]
         model.load_state_dict(state)

@@ -13,12 +13,9 @@ Wan trainer is unchanged.
 from __future__ import annotations
 
 import math
-import os
 import time
-from importlib import import_module
 
 import torch
-from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.utils.flop_counter import FlopCounterMode
 
 from primus.backends.diffusion.trainers.base import (
@@ -123,153 +120,28 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
             batch = prepare(batch=batch, device=self.device, dtype=self._resolve_dtype())
         return hook(batch)
 
-    def _apply_fsdp2(self):
-        """Apply torch.distributed._composable.fsdp.fully_shard to the model."""
-        mp_dtype = self._resolve_dtype()
+    def _pure_low_precision(self, mp_dtype: torch.dtype) -> bool:
+        return bool(self.args.get("fsdp2_pure_low_precision", False)) and mp_dtype != torch.float32
+
+    def _prepare_fsdp2_modules(self, mp_dtype: torch.dtype) -> None:
         # AMDiffusionBenchmark moves every frozen submodule to the training dtype.
         cast_frozen = getattr(self.model, "cast_frozen_modules", None)
         if callable(cast_frozen) and mp_dtype != torch.float32:
             cast_frozen(mp_dtype)
             if self.rank == 0:
                 logger.info(f"Cast frozen encoder modules to {mp_dtype}")
-        # AMDiffusionBenchmark casts the FSDP-wrapped denoiser to the training dtype, so
-        # parameters, gradients, reductions, and AdamW states all stay in BF16.
-        pure_low_precision = bool(self.args.get("fsdp2_pure_low_precision", False)) and (
-            mp_dtype != torch.float32
-        )
-        default_reduce = "bf16" if pure_low_precision else "fp32"
-        reduce_dtype_name = os.getenv("FSDP2_REDUCE_DTYPE", default_reduce).lower()
-        if reduce_dtype_name not in {"fp32", "bf16"}:
-            raise ValueError(f"Unsupported FSDP2_REDUCE_DTYPE={reduce_dtype_name!r}")
-        reduce_dtype = torch.float32 if reduce_dtype_name == "fp32" else torch.bfloat16
 
-        # Keep FP32 parameter/optimizer storage while allowing an explicit
-        # reduction-dtype experiment around the FP32-qualified default.
-        if mp_dtype != torch.float32:
-            mp_policy = MixedPrecisionPolicy(
-                param_dtype=mp_dtype,
-                reduce_dtype=reduce_dtype,
-            )
-        else:
-            mp_policy = None
+    def _fsdp2_reduce_dtype_name(self, mp_dtype: torch.dtype) -> str:
+        # Parameters, gradients, reductions, and AdamW stay in BF16.
+        return "bf16" if self._pure_low_precision(mp_dtype) else "fp32"
 
-        # When SP is enabled, FSDP2 shards across dp_shard_sp (DP + SP combined).
-        # This reduces per-rank parameter memory.
-        fsdp_mesh = self.mesh
-        if self.mesh is not None and self.sp_group is not None:
-            try:
-                fsdp_mesh = self.mesh["dp_shard_sp"]
-            except KeyError:
-                pass  # fallback to full mesh
-
-        wrap_target = str(self.args.get("fsdp2_wrap_target", "") or "").strip()
-        wrap_root = (
-            self._get_module_by_path(self.model, wrap_target, option_name="fsdp2_wrap_target")
-            if wrap_target
-            else self.model
-        )
-
-        non_fp32_params = [
-            name for name, param in wrap_root.named_parameters() if param.dtype != torch.float32
-        ]
-        if non_fp32_params:
-            raise ValueError(
-                "TorchTitan-aligned FSDP2 requires FP32 parameter storage before wrapping; "
-                f"found non-FP32 parameters including {non_fp32_params[:3]}."
-            )
-        if pure_low_precision:
-            wrap_root.to(dtype=mp_dtype)
-            if self.rank == 0:
-                logger.info(
-                    f"FSDP2: cast '{wrap_target or '<model>'}' parameters to {mp_dtype} before sharding"
-                )
-
-        if self.world_size == 1:
-            if self.rank == 0:
-                logger.info("FSDP2: world_size=1; skipping composable FSDP wrapping.")
+    def _prepare_fsdp2_root(self, wrap_root: torch.nn.Module, mp_dtype: torch.dtype) -> None:
+        if not self._pure_low_precision(mp_dtype):
             return
-
-        if bool(self.args.get("compile_transformer_blocks", False)):
-            self._compile_transformer_blocks(wrap_root)
-
-        reshard_after_forward = bool(self.args.get("fsdp2_reshard_after_forward", True))
-        no_reshard_paths = {
-            item.strip()
-            for item in str(self.args.get("fsdp_module_paths_no_reshard", "") or "").split(",")
-            if item.strip()
-        }
-
-        module_paths_spec = str(self.args.get("fsdp_module_paths_to_wrap", "") or "")
-        module_paths = [item.strip() for item in module_paths_spec.split(",") if item.strip()]
-        wrapped_paths = 0
-        for module_path in module_paths:
-            module = self._get_module_by_path(wrap_root, module_path, option_name="fsdp_module_paths_to_wrap")
-            fully_shard(
-                module,
-                mesh=fsdp_mesh,
-                reshard_after_forward=False if module_path in no_reshard_paths else reshard_after_forward,
-                mp_policy=mp_policy,
-            )
-            wrapped_paths += 1
-        if self.rank == 0 and wrapped_paths:
-            logger.info(
-                "FSDP2: wrapped explicit module paths under " f"'{wrap_target or '<model>'}': {module_paths}"
-            )
-
-        # Wrap transformer blocks first for optimal memory management
-        layer_cls_spec = self.args.get("fsdp_transformer_layer_cls_to_wrap")
-        if layer_cls_spec:
-            if isinstance(layer_cls_spec, str):
-                layer_cls_items = [x.strip() for x in layer_cls_spec.split(",") if x.strip()]
-            else:
-                layer_cls_items = [str(x).strip() for x in layer_cls_spec if str(x).strip()]
-
-            cls_objs = set()
-            cls_names = set()
-            for item in layer_cls_items:
-                if "." in item:
-                    mod_path, cls_name = item.rsplit(".", 1)
-                    cls_objs.add(getattr(import_module(mod_path), cls_name))
-                else:
-                    cls_names.add(item)
-
-            wrapped_count = 0
-            seen = set()
-            for _, module in wrap_root.named_modules():
-                if id(module) in seen:
-                    continue
-                seen.add(id(module))
-                if module is wrap_root:
-                    continue
-                checkpointed_module = getattr(module, "_checkpoint_wrapped_module", None)
-                target_module = checkpointed_module if checkpointed_module is not None else module
-                if (cls_objs and isinstance(target_module, tuple(cls_objs))) or (
-                    cls_names and target_module.__class__.__name__ in cls_names
-                ):
-                    fully_shard(
-                        module,
-                        mesh=fsdp_mesh,
-                        reshard_after_forward=reshard_after_forward,
-                        mp_policy=mp_policy,
-                    )
-                    if checkpointed_module is not None:
-                        seen.add(id(checkpointed_module))
-                    wrapped_count += 1
-
-            if self.rank == 0:
-                logger.info(f"FSDP2: wrapped {wrapped_count} submodules under '{wrap_target or '<model>'}'")
-
-        fully_shard(
-            wrap_root,
-            mesh=fsdp_mesh,
-            reshard_after_forward=reshard_after_forward,
-            mp_policy=mp_policy,
-        )
+        wrap_root.to(dtype=mp_dtype)
         if self.rank == 0:
-            logger.info(
-                f"FSDP2: applied fully_shard to '{wrap_target or '<model>'}' "
-                f"with mp={mp_dtype}, reduce={reduce_dtype}"
-            )
+            target = str(self.args.get("fsdp2_wrap_target", "") or "").strip() or "<model>"
+            logger.info(f"FSDP2: cast '{target}' parameters to {mp_dtype} before sharding")
 
     def _log_step(
         self,
@@ -476,8 +348,9 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
                         # fps_gpu = args.train_batch_size / step_time_gpu and
                         # tflops/s = total_flops * 1e-12 / step_time_gpu.
                         if step_time_gpu > 0 and local_samples_in_update > 0:
+                            # The CUDA window covers every micro-batch in the update.
                             step_fps, step_tflops = benchmark_step_rates(
-                                local_batch_size=self.per_device_train_batch_size,
+                                local_batch_size=local_samples_in_update,
                                 step_time_gpu_s=step_time_gpu,
                                 total_flops=0.0 if total_flops is None else total_flops,
                             )

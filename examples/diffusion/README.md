@@ -128,7 +128,14 @@ not build a Diffusers pipeline. Point `PRETRAINED_PATH` at the official I2V DiT.
 | Wan2.1 I2V 14B | native Wan2.1 DiT with CLIP cross-attention | official I2V DiT, Wan2.1 VAE, UMT5, CLIP vision |
 
 MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
-with a constant schedule. `LR` overrides either default.
+with a constant schedule. `LR` overrides either default. Every SKU leaves
+`max_grad_norm` at `0` so the timed step does not include the gradient-norm
+all-reduce. `MAX_GRAD_NORM` turns clipping back on.
+
+`BENCHMARK_DENOISER_ONLY=1` builds the DiT without the VAE, UMT5, and CLIP
+weights. That mode only accepts batches that already contain `latents`,
+`context`, `y`, and `clip_fea`. A raw video batch fails at the first step
+with that requirement instead of an encoder error.
 
 | Workload | MI300X / MI325X | MI355X |
 |---|---:|---:|

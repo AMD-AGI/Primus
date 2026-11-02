@@ -28,7 +28,7 @@ def load_state_dict(path: str) -> dict[str, torch.Tensor]:
         return merged
     if path.endswith(".safetensors"):
         return dict(safe_load_file(path))
-    obj = torch.load(path, map_location="cpu")
+    obj = torch.load(path, map_location="cpu", weights_only=True)
     if isinstance(obj, dict):
         for key in ("state_dict", "model", "module"):
             value = obj.get(key)
