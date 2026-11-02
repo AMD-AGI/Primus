@@ -119,7 +119,9 @@ def build_mochi_model(model_config: dict):
             width=width,
             height=height,
             num_frames=int(model_config.get("num_frames") or cfg.get("num_frames") or 9),
-            sigma_grid=amdb_flow_sigma_grid(shift=float(cfg.get("shift", 3.0))),
+            # ``data.shift`` is written onto this config. The nested
+            # ``config.shift`` remains a fallback for presets that set it there.
+            sigma_grid=amdb_flow_sigma_grid(shift=float(model_config.get("shift", cfg.get("shift", 3.0)))),
         ),
     )
     model.freeze_except()

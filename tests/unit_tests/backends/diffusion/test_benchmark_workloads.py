@@ -180,10 +180,29 @@ def test_mochi_packed_attention_excludes_padding_tokens():
     assert torch.equal(dit.packed_indices["valid_token_indices_kv"], torch.tensor([0, 1, 2, 4, 5]))
 
 
+def _import_mochi_registration():
+    import sys
+    import types
+
+    if "transformers" not in sys.modules:
+        try:
+            import importlib
+
+            importlib.import_module("transformers")
+        except ModuleNotFoundError:
+            transformers = types.ModuleType("transformers")
+            transformers.T5EncoderModel = object
+            transformers.T5Tokenizer = object
+            sys.modules["transformers"] = transformers
+    from primus.backends.diffusion.models.registrations import mochi
+
+    return mochi
+
+
 def test_mochi_checkpoint_loading_rejects_incomplete_weights(monkeypatch):
     import torch
 
-    from primus.backends.diffusion.models.registrations import mochi
+    mochi = _import_mochi_registration()
 
     monkeypatch.setattr(mochi, "load_matching", lambda *_args, **_kwargs: (1, 0))
     with pytest.raises(RuntimeError, match="missing=1, unexpected=0"):
@@ -308,3 +327,176 @@ def test_even_batches_pad_short_tail_like_accelerate():
     assert batches == [list(range(16)), list(range(16, 20)) + list(range(12))]
     assert all(len(batch) == 16 for batch in batches)
     assert len(EvenSizeBatchSampler(range(16), 16)) == 1
+
+
+def test_unbuilt_benchmark_names_fail_before_download():
+    for name in ("sdxl", "hunyuan-video", "wan2.1-i2v", "flux-dev"):
+        with pytest.raises(ValueError, match="mochi-1"):
+            _finalize({"model": {"name": name, "config": {}}})
+
+
+def test_relative_checkpoint_path_is_not_a_hub_repo():
+    import primus.backends.diffusion.utils.download as download
+
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        download.materialize_pretrained("mochi-1", "ckpts/mochi/dit.safetensors")
+
+
+def test_data_shift_override_reaches_the_mochi_grid(monkeypatch):
+    import torch
+
+    from primus.backends.diffusion.utils.sampling import amdb_flow_sigma_grid
+
+    mochi = _import_mochi_registration()
+
+    class _Tiny(torch.nn.Module):
+        def __init__(self, *_args, **_kwargs):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    args = _finalize({"model": {"name": "mochi-1", "config": {}}, "data": {"shift": 7}})
+    assert args.model["config"]["shift"] == 7
+
+    class _Built:
+        def __init__(self, train_pipeline, **_kwargs):
+            self.train_pipeline = train_pipeline
+
+        def freeze_except(self):
+            return None
+
+    monkeypatch.setenv("BENCHMARK_DENOISER_ONLY", "1")
+    monkeypatch.setattr(mochi, "AsymmDiTJoint", _Tiny)
+    monkeypatch.setattr(mochi, "MochiForTraining", _Built)
+    monkeypatch.setattr(mochi, "count_parameters", lambda _model: (0, 0))
+    monkeypatch.setattr(mochi, "materialize_pretrained", lambda *_args, **_kwargs: "")
+    pipeline = mochi.build_mochi_model(args.model["config"]).train_pipeline
+    assert torch.allclose(pipeline.sigma_grid, amdb_flow_sigma_grid(shift=7.0))
+
+
+def test_sdpa_fallback_rejects_packed_batches(monkeypatch):
+    import torch
+
+    import primus.backends.diffusion.attention as attention
+    from primus.backends.diffusion.models.mochi.attn_imports import flash_varlen_attn
+
+    monkeypatch.setattr(attention, "get_attention_backend", lambda: "sdpa")
+    query = torch.randn(4, 1, 8)
+    boundaries = torch.tensor([0, 2, 4], dtype=torch.int32)
+    with pytest.raises(RuntimeError, match="sample boundaries"):
+        flash_varlen_attn(
+            query,
+            query,
+            query,
+            cu_seqlens_q=boundaries,
+            cu_seqlens_k=boundaries,
+            max_seqlen_q=2,
+            max_seqlen_k=2,
+        )
+
+
+def test_collate_encoded_stacks_latents_and_keeps_prompts():
+    import torch
+
+    from primus.backends.diffusion.trainers.benchmark import _collate_encoded
+
+    batch = _collate_encoded(
+        [
+            {"latents": torch.ones(2), "prompt": "a"},
+            {"latents": torch.ones(2) * 2, "prompt": "b"},
+        ]
+    )
+    assert batch["prompts"] == ["a", "b"]
+    assert torch.equal(batch["latents"], torch.tensor([[1.0, 1.0], [2.0, 2.0]]))
+
+
+def test_prepare_host_batch_uses_the_processor_before_the_model():
+    from primus.backends.diffusion.trainers.benchmark import AMDBBenchmarkTrainer
+
+    calls = []
+    trainer = AMDBBenchmarkTrainer.__new__(AMDBBenchmarkTrainer)
+    trainer._encoded_cache = None
+    trainer.processing_class = type(
+        "Processor",
+        (),
+        {"prepare_host_batch": lambda self, batch: calls.append("processor") or {"ready": True}},
+    )()
+    trainer.model = type("Model", (), {"prepare_host_batch": lambda self, batch: calls.append("model")})()
+    assert trainer._prepare_host_batch({"raw": 1}) == {"ready": True}
+    assert calls == ["processor"]
+
+    trainer.processing_class = object()
+    trainer._prepare_host_batch({"latents": 1})
+    assert calls == ["processor", "model"]
+
+
+def test_even_batch_loader_is_full_size_and_mlperf_keeps_the_tail(tmp_path, monkeypatch):
+    import torch
+    from torch.utils.data import Dataset
+
+    from primus.backends.diffusion.trainers.base import (
+        BaseWanTrainer,
+        ContiguousDistributedSampler,
+    )
+
+    class _Rows(Dataset):
+        def __len__(self):
+            return 20
+
+        def __getitem__(self, index):
+            return index
+
+    class _Eval(_Rows):
+        def get_collator(self):
+            return lambda batch: batch
+
+    class _Sampler:
+        def __init__(self, dataset, num_replicas=1, rank=0, shuffle=True):
+            del num_replicas, rank, shuffle
+            self.indices = list(range(len(dataset)))
+
+        def __iter__(self):
+            return iter(self.indices)
+
+        def __len__(self):
+            return len(self.indices)
+
+    monkeypatch.setattr(torch.utils.data.distributed, "DistributedSampler", _Sampler)
+
+    class _Trainer(BaseWanTrainer):
+        def _apply_parallelism(self):
+            return None
+
+        def save_model(self):
+            return None
+
+        def _setup_mlperf(self):
+            return None
+
+    def build(mlperf: bool):
+        return _Trainer(
+            torch.nn.Linear(1, 1),
+            {
+                "output_dir": str(tmp_path / ("mlperf" if mlperf else "even")),
+                "per_device_train_batch_size": 16,
+                "dataloader_even_batches": True,
+                "dataloader_num_workers": 0,
+                "mlperf_enable": mlperf,
+                "mlperf_train_samples": 20,
+                "mlperf_eval_total_samples": 20,
+                "report_to": "none",
+                "gradient_checkpointing": False,
+            },
+            _Rows(),
+            lambda batch: batch,
+            object(),
+            rank=0,
+            world_size=1,
+            local_rank=0,
+            eval_dataset=_Eval() if mlperf else None,
+        )
+
+    even = build(False)
+    assert all(len(batch) == 16 for batch in even.dataloader)
+    mlperf = build(True)
+    assert isinstance(mlperf.sampler, ContiguousDistributedSampler)
+    assert [len(batch) for batch in mlperf.dataloader] == [16, 4]

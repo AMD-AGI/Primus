@@ -128,7 +128,9 @@ build a Diffusers pipeline. Point `PRETRAINED_PATH` at the official DiT checkpoi
 | Mochi-1 | Genmo `AsymmDiTJoint` and VAE encoder | official DiT and encoder safetensors, T5-XXL |
 
 MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
-with a constant schedule. `LR` overrides either default.
+with a constant schedule. `LR` overrides either default. Every SKU leaves
+`max_grad_norm` at `0` so the timed step does not include the gradient-norm
+all-reduce. `MAX_GRAD_NORM` turns clipping back on.
 
 | Workload | MI300X / MI325X | MI355X |
 |---|---:|---:|

@@ -35,6 +35,10 @@ modules:
         save_steps: 0
         run_name: benchmark-mochi-1-posttrain
 
+      optimizer:
+        lr: ${LR:1.0e-5}
+        max_grad_norm: ${MAX_GRAD_NORM:0.0}
+
       data:
         dataset_path: ${DATASET_PATH:Wild-Heart/Disney-VideoGeneration-Dataset}
         modality: video
