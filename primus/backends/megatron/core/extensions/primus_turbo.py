@@ -99,6 +99,7 @@ except (ImportError, ModuleNotFoundError):
 from primus.backends.megatron.core.extensions._triton.inplace_add import (
     inplace_add_triton_,
 )
+from primus.core.utils.gpu_arch import is_gfx1250
 from primus.core.utils.module_utils import warning_rank_0
 
 _dummy_wgrads = {}
@@ -239,20 +240,14 @@ def _apply_turbo_grouped_gemm_backend_env() -> None:
         warning_rank_0(f"Primus-Turbo grouped gemm backend is set to {backend}")
 
 
-@lru_cache(maxsize=1)
 def _is_gfx1250() -> bool:
-    """Return True iff the local GPU is a gfx1250 device.
+    """Return True iff the local GPU is a gfx1250 device (:func:`primus.core.utils.gpu_arch.is_gfx1250`).
 
     Used to route ``main_grad`` accumulation through the single-launch Triton
     in-place add (:func:`inplace_add_triton_`) only on gfx1250, keeping Torch's
     ``add_`` on every other architecture.
     """
-    if not torch.cuda.is_available():
-        return False
-    try:
-        return "gfx1250" in torch.cuda.get_device_properties(0).gcnArchName
-    except Exception:
-        return False
+    return is_gfx1250()
 
 
 # The BF16 variable-K (wgrad) backends with a beta = 1 epilogue; CK and FlyDSL have none.
