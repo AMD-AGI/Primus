@@ -25,8 +25,8 @@ image pins one), otherwise the image's own /workspace/Primus HEAD from the
 snapshot (the JAX Dockerfile pinned PRIMUS_BRANCH=main through v26.7, so only the
 image knew).
 
-From v26.8 the JAX image ships no Primus at all -- it runs from a mounted
-checkout -- so there is no build commit to read. The Primus commit that pairs
+The v26.8 JAX image shipped no Primus at all -- it ran from a mounted
+checkout -- so there was no build commit to read (v26.9 pins one again). The Primus commit that pairs
 with such an image is an editorial choice (normally the release-branch commit
 that aligns the backend with the image), so it has to be passed explicitly with
 --build-commit rather than guessed.

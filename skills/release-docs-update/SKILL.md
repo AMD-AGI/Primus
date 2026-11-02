@@ -26,8 +26,9 @@ or the component spec.
 1. **The CI images that passed QA**, one per family in this run, each with the
    tag it will be published as (`rocm/primus:v26.9`,
    `rocm/jax-training:maxtext-v26.9`) and, preferably, its digest.
-2. **The Primus commit each image pairs with** — the primus Dockerfile pins one;
-   the JAX image ships no Primus, so its commit is passed with `--build-commit`.
+2. **The Primus commit each image pairs with** — normally read from the release
+   Dockerfile (`ARG PRIMUS_BRANCH`). An image built without Primus (the v26.8 JAX
+   image) needs it passed with `--build-commit`.
 3. **A machine with docker for the probe** — a compute node, never a login node
    (`docker run` of a 40-60 GB image). The rest runs anywhere with git.
 4. **A GPU node for the bare-metal check** (Phase 6), the same rules.
@@ -250,10 +251,10 @@ tag, or a branch:
 - `release/vX.Y` often does not exist yet. `release/v26.7` did not exist while
   `v26.7.0` was already tagged.
 
-The two families have **different** build commits: the primus Dockerfile pins
-`PRIMUS_BRANCH` to a commit; the JAX image ships no Primus from v26.8 on, so its
-commit is the Primus commit it is released with, passed as `--build-commit
-jax=<sha>`. `preflight.py` resolves both, and the previous release's commit per
+The two families have **different** build commits: each Dockerfile pins
+`PRIMUS_BRANCH` to its own commit. An image built without Primus (the v26.8 JAX
+image) has none; its commit is then the Primus commit it is released with, passed
+as `--build-commit jax=<sha>`. `preflight.py` resolves both, and the previous release's commit per
 family (for a JAX release without one it falls back to the primus build commit
 of that release, and says so). `collect_changes.py --family` uses that range.
 
