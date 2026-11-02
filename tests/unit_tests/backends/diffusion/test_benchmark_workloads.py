@@ -429,3 +429,166 @@ def test_flux_prepare_hook_rewrites_paths_and_reports_auth_failures(monkeypatch,
         diffusion_prepare._reject_unbuilt_benchmark("sdxl")
     assert "no diffusion model builder" in capsys.readouterr().err
     assert diffusion_prepare._BENCHMARK_DOWNLOADS == {"flux-dev"}
+
+
+def test_build_flux_dev_benchmark_loads_amdb_defaults(monkeypatch, tmp_path):
+    from primus.backends.diffusion.models.registrations import flux as flux_reg
+
+    checkpoint = tmp_path / "flux1-dev.safetensors"
+    autoencoder = tmp_path / "ae.safetensors"
+    checkpoint.write_bytes(b"dit")
+    autoencoder.write_bytes(b"ae")
+    seen = {}
+
+    def fake_build(config):
+        seen["config"] = config
+        return "flux-model"
+
+    monkeypatch.setattr(flux_reg, "build_flux_model", fake_build)
+    built = flux_reg.build_flux_dev_benchmark({"load_from_pretrained_path": str(checkpoint), "config": {}})
+
+    assert built == "flux-model"
+    config = seen["config"]
+    assert config["model_preset"] == "flux.1-dev"
+    assert config["load_from_pretrained_path"] == str(checkpoint)
+    assert config["config"]["timestep_sampling"] == "amdb_logit_normal"
+    assert config["config"]["shift"] == 3.0
+    assert config["config"]["strict_pretrained_load"] is True
+    assert config["config"]["params"]["qk_norm_eps"] == 1e-6
+    assert config["encoder"]["autoencoder"] == str(autoencoder)
+
+
+def test_collate_encoded_stacks_latents_and_keeps_prompts():
+    import torch
+
+    from primus.backends.diffusion.trainers.benchmark import _collate_encoded
+
+    batch = _collate_encoded(
+        [
+            {"latents": torch.zeros(1), "prompt": "cat"},
+            {"latents": torch.ones(1), "prompt": "dog"},
+        ]
+    )
+    assert batch["latents"].shape == (2, 1)
+    assert batch["prompts"] == ["cat", "dog"]
+    assert "prompt" not in batch
+
+
+def test_benchmark_update_fps_counts_every_micro_batch(monkeypatch):
+    import torch
+
+    from primus.backends.diffusion.trainers.benchmark import AMDBBenchmarkTrainer
+
+    class _Event:
+        def __init__(self, enable_timing=True):
+            del enable_timing
+
+        def record(self):
+            return None
+
+        def elapsed_time(self, other):
+            del other
+            return 2000.0
+
+    monkeypatch.setattr(torch.cuda, "Event", _Event, raising=False)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None, raising=False)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None, raising=False)
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+    model = _Model()
+    logged = {}
+
+    def compute_loss(batch):
+        return model.weight * batch["latents"].sum()
+
+    trainer = AMDBBenchmarkTrainer.__new__(AMDBBenchmarkTrainer)
+    trainer.rank = 0
+    trainer.world_size = 1
+    trainer.model = model
+    trainer.args = {"cache_latents": False, "compile_transformer_blocks": True}
+    trainer.mlperf_enabled = False
+    trainer.optimizer = type(
+        "Opt",
+        (),
+        {"zero_grad": lambda self, set_to_none=True: None, "step": lambda self: None},
+    )()
+    trainer.lr_scheduler = type("Sched", (), {"step": lambda self: None})()
+    trainer.global_step = 0
+    trainer.grad_accum_steps = 2
+    trainer.per_device_train_batch_size = 4
+    trainer.num_train_epochs = 1
+    trainer.max_steps = 1
+    trainer.total_steps = 1
+    trainer.save_steps = 0
+    trainer.max_grad_norm = 0.0
+    trainer.sampler = type("Sampler", (), {"set_epoch": lambda self, epoch: None})()
+    trainer.processing_class = None
+    trainer.dataloader = [
+        {"latents": torch.ones(4, 1)},
+        {"latents": torch.ones(4, 1)},
+    ]
+    trainer.compute_loss = compute_loss
+    trainer._log_step = lambda *args, **kwargs: logged.update(kwargs)
+
+    trainer.train()
+
+    # Two micro-batches of 4 over a 2s CUDA window. Counting only the configured
+    # batch size would report 2.0.
+    assert logged["fps_gpu"] == 4.0
+
+
+def test_flux_prepare_hook_prints_benchmark_env(monkeypatch, tmp_path, capsys):
+    from types import SimpleNamespace
+
+    import primus.backends.diffusion.utils.download as download
+    from runner.helpers.hooks.train.pretrain.diffusion import (
+        prepare as diffusion_prepare,
+    )
+
+    dit = tmp_path / "flux1-dev.safetensors"
+    data = tmp_path / "images"
+    ae = tmp_path / "ae.safetensors"
+    dit.write_bytes(b"dit")
+    ae.write_bytes(b"ae")
+    data.mkdir()
+
+    def fake_stage(model_name, **kwargs):
+        assert model_name == "flux-dev"
+        return {
+            "PRETRAINED_PATH": str(dit),
+            "DATASET_PATH": str(data),
+            "VAE_CHECKPOINT": str(ae),
+        }
+
+    module = SimpleNamespace(framework="diffusion", params={})
+    backend_args = SimpleNamespace(
+        stage="pretrain",
+        model={"name": "flux-dev", "config": {}},
+        dataset={
+            "config": {
+                "dataset_path": "",
+                "dataset_type": "precomputed",
+                "processor_config": {},
+            }
+        },
+        trainer={"name": "amdb_benchmark"},
+    )
+    monkeypatch.setattr(download, "stage_benchmark_assets", fake_stage)
+    monkeypatch.setattr(diffusion_prepare, "load_primus_config", lambda path: object())
+    monkeypatch.setattr(diffusion_prepare, "get_module_config", lambda cfg, name: module)
+    monkeypatch.setattr(
+        diffusion_prepare,
+        "DiffusionAdapter",
+        lambda: SimpleNamespace(convert_config=lambda params: backend_args),
+    )
+
+    diffusion_prepare.validate_diffusion_config(tmp_path / "experiment.yaml", module_name="post_trainer")
+    printed = capsys.readouterr().out
+    assert f"env.PRETRAINED_PATH={dit}" in printed
+    assert f"env.DATASET_PATH={data}" in printed
+    assert f"env.VAE_CHECKPOINT={ae}" in printed
+    assert "env.PREPARED=1" in printed
