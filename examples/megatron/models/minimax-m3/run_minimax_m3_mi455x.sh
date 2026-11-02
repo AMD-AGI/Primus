@@ -66,8 +66,18 @@ export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
 # 1: switch Triton's gfx1250 expert scheduling off in the container's Triton (needs root), see below
 export PATCH_TRITON_EXPERT_SCHEDULING=${PATCH_TRITON_EXPERT_SCHEDULING:-1}
-# hipBLASLt kernel overrides; unset: hipBLASLt's own choice. This example has no tuned file yet.
-export HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE:-}
+# hipBLASLt kernels tuned for this example's GEMMs (README.md); empty: hipBLASLt's own choice. hipBLASLt
+# uses a row only while its solution index still names the kernel it was tuned with. No default with
+# PRIMUS_HIPBLASLT_TUNING=1: its stage 3 would take this file instead of the stage-2 result.
+if [[ "${PRIMUS_HIPBLASLT_TUNING:-0}" == 1 ]]; then
+    export HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE-}
+else
+    export HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE-$(dirname "${SCRIPT}")/hipblaslt_tuning/minimax_m3-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt}
+fi
+if [[ -n "${HIPBLASLT_TUNING_OVERRIDE_FILE}" && ! -r "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ]]; then
+    echo "cannot read HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE}" >&2
+    exit 2
+fi
 # Primus's HIP Adam applies the clip coefficient in-kernel and writes the BF16 parameters, so the
 # step has no host sync, no separate grad scale and no parameter copy. Megatron then logs no grad
 # norm. The other two need the first.

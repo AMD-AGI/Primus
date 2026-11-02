@@ -22,7 +22,8 @@ The default image is `amdprimus/amdprimus:tas-20261019` (see the DeepSeek-V3 exa
 2.14.0 on ROCm 10.2.0a20261011, Triton 3.8.0, Transformer Engine 2.19.0.dev0 (bfe94fbe5),
 Primus-Turbo 0.6.1.dev2, FlyDSL 0.3.4.1 and AITER 0.1.24.post1. Every run below used that image and
 its own Primus-Turbo, except the FlyDSL attention runs, which used a Primus-Turbo checkout through
-`TURBO_DIR` (see FlyDSL attention in the dense layers).
+`TURBO_DIR` (see FlyDSL attention in the dense layers). Every run outside hipBLASLt tuning used
+hipBLASLt's own kernels, which `HIPBLASLT_TUNING_OVERRIDE_FILE=` restores.
 
 ## Run
 
@@ -90,9 +91,9 @@ ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
   and `--use_triton_fused_adam False` keeps TE's FusedAdam. `--use_precision_aware_optimizer True`
   needs `PRIMUS_FUSED_ADAM_CLIP=0`: the BF16 writeback needs separate FP32 master parameters, and the
   run stops at the first step without them.
-- `HIPBLASLT_TUNING_OVERRIDE_FILE` (default unset: hipBLASLt's own kernel choice). This example has no
-  tuned file yet. A file may be given relative to the current directory; the launcher mounts it into
-  the container. See hipBLASLt tuning in the DeepSeek-V3 README for how such a file is made.
+- `HIPBLASLT_TUNING_OVERRIDE_FILE` (default: the file in `hipblaslt_tuning/`; empty: hipBLASLt's own
+  kernel choice): see hipBLASLt tuning below. A file of your own may be given relative to the current
+  directory; the launcher checks that it can be read and mounts it into the container.
 - `MOCK_DATA` (default `True`). `PROFILE=True` profiles iterations 6–7 on rank 0 (trace under
   `output/<team>/<user>/<exp>/tensorboard/`, about 41 MB for the baseline); add
   `--profile_ranks '[0,1,2,3]'` for every rank. `PATCH_TRITON_EXPERT_SCHEDULING` (default `1`): see
@@ -341,6 +342,39 @@ End to end, one GPU, 4 layers, GBS 8, FlyDSL dense attention, alternating:
   not yet measured. The baseline's MSA forward is bound by kernel launches, so its share may not show.
 - The indexer kernels are unchanged.
 
+## hipBLASLt tuning
+
+The launcher sets `HIPBLASLT_TUNING_OVERRIDE_FILE` to
+`hipblaslt_tuning/minimax_m3-gfx1250-hipblaslt_e1e7fdcab9-rocm_10.2.0a20261011.txt` (empty: hipBLASLt's
+own choice). It has one row for each of the 45 hipBLASLt GEMM shapes of a one-GPU run at MBS 1 and
+sequence 4096, with and without `gradient_accumulation_fusion`: the dense layers, the attention and
+indexer projections, the shared experts, the router and the output layer. The experts' grouped GEMM is
+Primus-Turbo's and not in it. With TP 1 every rank of an EP run has the same shapes. hipBLASLt uses a row
+only while its solution index still names the kernel it was tuned with (the file name gives the
+hipBLASLt commit and ROCm version), so other builds and shapes fall back to its default. With Primus's
+own tuning flow (`PRIMUS_HIPBLASLT_TUNING=1`, see `examples/README.md`) the launcher sets no default.
+
+The file was made by logging the GEMMs of a short one-GPU run with `HIPBLASLT_LOG_MASK=32`, once
+without and once with `--gradient_accumulation_fusion True`, and searching them with
+`examples/megatron/guides/offline_tune/offline_tune_gemm.py` and a `hipblaslt-bench` built as in the
+GPT-OSS example.
+
+One GPU, 4 layers, GBS 8, FlyDSL dense attention, with the dK/dV change but not the previous section's;
+the runs alternated in the order of the rows, then the first two rows again:
+
+| hipBLASLt kernels | `gradient_accumulation_fusion` | ms/iter | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- | --- | --- |
+| hipBLASLt's own | off | 608.4, 609.3 | 888.2, 887.0 | 230.3 GB | 10.01459, 10.01463 |
+| this file | off | 581.7, 580.3 | 929.1, 931.2 | 230.3 GB | 10.01475, 10.01476 |
+| hipBLASLt's own | on | 823.8 | 656.0 | 235.2 GB | 10.01474 |
+| this file | on | 803.1 | 672.9 | 235.2 GB | 10.01461 |
+
+- 28 ms per step, 4.6%.
+- `gradient_accumulation_fusion` stays off: its fp32-output weight-gradient GEMMs are slow even with
+  the best kernel hipBLASLt has for them (for 6144 x 24576 x 4096 into fp32 with beta 1, about 590
+  TFLOP/s against about 2300 for the bf16 output).
+- Not yet run on the EP4 baseline.
+
 ## How the defaults were chosen
 
 On the older bases dad0a081 and a624bb95 (Megatron-LM d3528a21), one GPU unless noted, with TE's
@@ -382,7 +416,7 @@ clipping l2norm 2.7 ms; the scale passes, the NaN-check norm and the parameter c
   to 191.9 ms). Into a bf16 `main_grad` (`--main_grads_dtype bf16`, see Switches on one GPU)
   hipBLASLt keeps the same bf16 kernels (+0.6 ms for beta 1), the Triton GEMM adds 2.3 ms, the bf16
   `+=` saves 4.2 ms, and the step goes from 134.0 to 132.8 ms. The yaml leaves it off. Tuning
-  hipBLASLt for the fp32-output shapes was not tried.
+  hipBLASLt for the fp32-output shapes does not change that (hipBLASLt tuning).
 
 **Expert grouped GEMM.** Primus-Turbo's grouped GEMM (Triton) against TE's (`USE_TURBO_GROUPED_GEMM=False`,
 128 hipBLASLt launches per GEMM): 158.2 against 167.4 ms on one GPU, 139.0 against 142.6 ms on EP2,
@@ -490,8 +524,7 @@ Do not run:
 - The full 60-layer model. From the proxy's ~18 bytes/parameter (BF16 weights, FP32 gradients and
   Adam state), a training step at MBS 1, seq 4096 wants on the order of 40 MI455X GPUs (EP8 x PP5).
 - The gfx950 MFMA kernels. This node cannot execute them.
-- hipBLASLt GEMM tuning of the kind in the GPT-OSS example, including the fp32-output weight-gradient
-  GEMMs behind the `gradient_accumulation_fusion` slowdown.
+- The hipBLASLt tuning file on the EP4 baseline.
 
 ## Known issues
 
