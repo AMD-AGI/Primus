@@ -198,6 +198,15 @@ def scan(old, new, branch_exists, families=None, phase="all", deferred=None):
     family_paths, install_paths = load_partition()
     families = set(families or ("primus", "jax"))
     deferred = {} if deferred is None else deferred
+    # A link into another family's page (`jax-maxtext-training.md#important-notes-for-v268`) follows
+    # that page's headings, which move in that family's run.
+    other_pages = {
+        Path(prefix).name: family
+        for family, prefixes in family_paths.items()
+        if family not in families
+        for prefix in prefixes
+        if prefix.endswith(".md")
+    }
     tokens = [re.compile(token) for token in version_tokens(old)]
     hits = []
 
@@ -241,6 +250,11 @@ def scan(old, new, branch_exists, families=None, phase="all", deferred=None):
                     if fam and fam not in families and pattern.search(line)
                 }
             )
+            linked = sorted({fam for page, fam in other_pages.items() if f"{page}#" in line})
+            if linked and rule["name"] == "release-notes-anchor":
+                key = f"{'/'.join(linked)} run"
+                deferred[key] = deferred.get(key, 0) + 1
+                continue
             if others and not any(pattern.search(line) for pattern, _ in replace):
                 # Every construct on the line belongs to a family outside this run.
                 key = f"{'/'.join(others)} run"
