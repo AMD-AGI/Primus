@@ -96,6 +96,12 @@
       "why": "a dated announcement is history: the README 'What's New' list gains a new entry per release (v26.6 prepended one in #1114) and older entries keep the tags they shipped with, so rewriting them produces 'Primus v26.6 training images: rocm/primus:v26.7'"
     },
     {
+      "name": "absence-statement",
+      "action": "hold",
+      "match": "\\b(ships no|contains no|has no|without)\\b",
+      "why": "what an image lacks is a fact about that image, not a version label: rewriting 'the v26.8 image ships no Primus' for v26.9 (which bundles it again) made it false; it comes before the rules that move every version token on a line"
+    },
+    {
       "name": "ci-base-image",
       "action": "hold",
       "match": "BASE_IMAGE",
@@ -159,8 +165,8 @@
     {
       "name": "historical-statement",
       "action": "hold",
-      "match": "\\b(since|as of|dropped|drops|step down|predate|previous|earlier|used to|no longer|was built|workaround|fix(ed|es)?|bug|issue)\\b",
-      "why": "may be history to preserve rather than a claim to update"
+      "match": "\\b(since|as of|dropped|drops|step down|predate|previous|earlier|used to|no longer|was built|workaround|fix(ed|es)?|bug|issue|ships no|contains no|has no)\\b",
+      "why": "may be history to preserve rather than a claim to update ('the v26.8 image ships no Primus' became false when rewritten for v26.9, which bundles it again)"
     },
     {
       "name": "markdown-heading",
