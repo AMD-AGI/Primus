@@ -67,11 +67,6 @@ except (ImportError, ModuleNotFoundError):
     create_quantized_weight = None
 
 from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
-from primus_turbo.pytorch.core.backend import (
-    BackendType,
-    GlobalBackendManager,
-    PrecisionType,
-)
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -260,16 +255,41 @@ def _is_gfx1250() -> bool:
         return False
 
 
-def _bf16_grouped_gemm_pinned_to_flydsl() -> bool:
-    """Whether Primus-Turbo will run the BF16 grouped GEMM on FlyDSL.
+# The BF16 variable-K (wgrad) backends with a beta = 1 epilogue; CK and FlyDSL have none.
+_BF16_WGRAD_ACCUM_BACKENDS = ("TRITON", "HIPBLASLT")
+
+
+def _bf16_grouped_wgrad_can_accumulate() -> bool:
+    """Whether Primus-Turbo's BF16 grouped-GEMM wgrad can add into ``main_grad``.
 
     Asks Turbo's backend manager, which reads ``turbo_grouped_gemm_backend`` from the env var it is
     published to (and any in-code setting) the way Turbo's dispatch does. Not cached: the setting
-    is not fixed for the whole run.
+    can change after the model is built.
+
+    - No backend set: the dispatcher picks one that can accumulate.
+    - A pinned backend: only those in ``_BF16_WGRAD_ACCUM_BACKENDS`` can; Turbo raises rather than
+      fall back from a pinned backend.
+    - Auto-tune, per op or global: older Primus-Turbo builds tune the accumulating wgrad on
+      ``main_grad`` itself, or reuse a backend tuned for an overwriting wgrad of the same shapes,
+      and Primus cannot tell the builds apart.
     """
-    choice = GlobalBackendManager.get_grouped_gemm_backend(PrecisionType.BF16_FP16_FP32)
+    try:
+        from primus_turbo.pytorch.core.backend import (
+            GlobalBackendManager,
+            PrecisionType,
+        )
+
+        choice = GlobalBackendManager.get_grouped_gemm_backend(PrecisionType.BF16_FP16_FP32)
+        global_auto_tune = GlobalBackendManager.auto_tune_enabled()
+    except (ImportError, AttributeError, TypeError):
+        # an older Primus-Turbo without per-precision backend choices: it pins nothing that cannot
+        # accumulate, so the fusion stays as gradient_accumulation_fusion set it
+        return True
+    if global_auto_tune or getattr(choice, "auto_tune", False):
+        return False
     # an older Primus-Turbo returns the BackendType itself
-    return getattr(choice, "backend", choice) == BackendType.FLYDSL
+    backend = getattr(choice, "backend", choice)
+    return backend is None or getattr(backend, "name", None) in _BF16_WGRAD_ACCUM_BACKENDS
 
 
 def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
@@ -2439,9 +2459,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             )
             return x, quantized_weights, fuse_wgrad_accum_pattern
 
-        # The FlyDSL BF16 grouped GEMM has no beta = 1 wgrad epilogue, and a pinned backend raises
-        # rather than accumulate: these weights keep DDP's separate add into main_grad.
-        if fuse_wgrad_accum_pattern is not None and _bf16_grouped_gemm_pinned_to_flydsl():
+        # Where the BF16 wgrad backend cannot add into main_grad, these weights keep DDP's separate add.
+        if fuse_wgrad_accum_pattern is not None and not _bf16_grouped_wgrad_can_accumulate():
             fuse_wgrad_accum_pattern = None
         return x, weights, fuse_wgrad_accum_pattern
 

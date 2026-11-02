@@ -19,14 +19,16 @@ from primus_turbo.pytorch.core.backend import (  # noqa: E402  isort:skip
     GlobalBackendManager,
 )
 
+import primus.backends.megatron.core.extensions.primus_turbo as primus_turbo_ext  # noqa: E402  isort:skip
 from primus.backends.megatron.core.extensions.primus_turbo import (  # noqa: E402  isort:skip
     Format,
+    PrimusTurboGroupedLinear,
     PrimusTurboLowPrecisionGlobalStateManager,
     PrimusTurboQuantConfig,
     PrimusTurboQuantizedTensorPair,
     ScaleDtype,
     ScalingGranularity,
-    _bf16_grouped_gemm_pinned_to_flydsl,
+    _bf16_grouped_wgrad_can_accumulate,
     _bridge_weight_grad,
     _fuse_wgrad_accum_pattern,
     _maybe_create_quantized_weight_buffers,
@@ -197,15 +199,42 @@ def test_mxfp4_gradient_accumulation_fusion_flag_still_controls_gate():
 
 
 @pytest.mark.parametrize(
-    "choice, pinned",
+    "choice, global_auto_tune, can_accumulate",
     [
-        (SimpleNamespace(backend=BackendType.FLYDSL), True),
-        (BackendType.FLYDSL, True),  # an older Primus-Turbo returns the BackendType itself
-        (SimpleNamespace(backend=BackendType.TRITON), False),
-        (None, False),
+        (None, False, True),
+        (SimpleNamespace(backend=None, auto_tune=False), False, True),
+        (SimpleNamespace(backend=BackendType.TRITON, auto_tune=False), False, True),
+        (SimpleNamespace(backend=BackendType.HIPBLASLT, auto_tune=False), False, True),
+        (SimpleNamespace(backend=BackendType.FLYDSL, auto_tune=False), False, False),
+        (SimpleNamespace(backend=BackendType.CK, auto_tune=False), False, False),
+        (BackendType.FLYDSL, False, False),  # an older Primus-Turbo returns the BackendType itself
+        (BackendType.TRITON, False, True),
+        (SimpleNamespace(backend=None, auto_tune=True), False, False),
+        (None, True, False),
     ],
 )
-def test_bf16_grouped_gemm_pinned_to_flydsl(monkeypatch, choice, pinned):
-    """Asks Turbo's backend manager: a grouped GEMM pinned to FlyDSL keeps DDP's separate wgrad add."""
+def test_bf16_grouped_wgrad_can_accumulate(monkeypatch, choice, global_auto_tune, can_accumulate):
+    """Triton, hipBLASLt or the dispatcher's own pick add the wgrad into main_grad; a pinned CK or
+    FlyDSL raises instead, and auto-tune has tuned the accumulating wgrad on main_grad itself."""
     monkeypatch.setattr(GlobalBackendManager, "get_grouped_gemm_backend", classmethod(lambda cls, p: choice))
-    assert _bf16_grouped_gemm_pinned_to_flydsl() is pinned
+    monkeypatch.setattr(GlobalBackendManager, "auto_tune_enabled", classmethod(lambda cls: global_auto_tune))
+    assert _bf16_grouped_wgrad_can_accumulate() is can_accumulate
+
+
+@pytest.mark.parametrize("can_accumulate", [True, False])
+def test_bf16_prepare_weights_keeps_ddp_add_where_the_wgrad_cannot_accumulate(monkeypatch, can_accumulate):
+    """prepare_weights drops the pattern of a BF16 grouped GEMM whose wgrad cannot add into main_grad."""
+    monkeypatch.setattr(PrimusTurboLowPrecisionGlobalStateManager, "PRIMUS_TURBO_FP4_ENABLED", False)
+    monkeypatch.setattr(primus_turbo_ext, "_bf16_grouped_wgrad_can_accumulate", lambda: can_accumulate)
+    weight = _weight()
+    layer = SimpleNamespace(
+        _ensure_weight_views=lambda: None,
+        weights=weight,
+        is_first_microbatch=True,
+        config=SimpleNamespace(gradient_accumulation_fusion=True),
+    )
+    _, prepared, pattern = PrimusTurboGroupedLinear.prepare_weights(
+        layer, torch.zeros(2, 8, dtype=weight.dtype)
+    )
+    assert prepared is weight
+    assert pattern == ("megatron" if can_accumulate else None)
