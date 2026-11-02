@@ -127,8 +127,8 @@ modules:
       # Turbo. use_turbo_attention only reaches the three dense layers; the MSA layers
       # have their own kernel. The grouped GEMM keeps a layer's experts in one weight,
       # 2^31 elements or more at EP <= 2, which TE's l2norm needs the
-      # te_l2norm_large_tensor patch for. The launcher passes the attention, grouped
-      # GEMM and DeepEP switches.
+      # te_l2norm_large_tensor patch for. The launcher passes the attention and grouped
+      # GEMM switches. DeepEP is not ported to gfx1250's wave32 yet.
       enable_primus_turbo: true
       use_turbo_attention: false
       use_turbo_grouped_gemm: true
