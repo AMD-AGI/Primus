@@ -1,9 +1,10 @@
 # MiniMax-M3 proxy on MI455X
 
-MiniMax-M3 BF16 pretraining on MI455X (gfx1250). The default is a 4-layer proxy of the real model:
-the first three layers stay dense, and layer 4 is one MSA (MiniMax Sparse Attention) layer plus one
-MoE layer (128 experts, top-4, hidden 6144, 64 query / 4 KV heads of dim 128). Sequence length 4096,
-MBS 1, mock data, full recompute of the first layer. The config is
+MiniMax-M3 BF16 pretraining on MI455X (gfx1250), as a shallow proxy of the real 60-layer model: the
+first three layers stay dense, and every later layer is one MSA (MiniMax Sparse Attention) layer plus
+one MoE layer (128 experts, top-4, hidden 6144, 64 query / 4 KV heads of dim 128). The launcher's
+default is 4 layers on one GPU; the baseline is 8 layers on four GPUs (see Baseline). Sequence length
+4096, MBS 1, mock data, full recompute of the first layer. The config is
 `examples/megatron/configs/MI455X/minimax_m3-BF16-pretrain.yaml` and the launcher is
 `run_minimax_m3_mi455x.sh`: with `PRIMUS_LAUNCHER=container` (default) it starts a new container of
 `DOCKER_IMAGE` from the host and re-runs itself inside it; with `PRIMUS_LAUNCHER=direct` it runs inside
@@ -25,11 +26,11 @@ its own Primus-Turbo.
 ## Run
 
 ```bash
-# On the host, 1 GPU (the default: EP1, GBS 1). Pick a free device on a shared node.
+# On the host, 1 GPU (the default: 4 layers, EP1, GBS 1). Pick a free device on a shared node.
 HIP_VISIBLE_DEVICES=1 bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
 
-# On the host, 2 GPUs (EP2, GBS 2)
-HIP_VISIBLE_DEVICES=2,3 GPUS_PER_NODE=2 bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
+# The baseline: 4 GPUs, 8 layers, EP4, GBS 32
+GPUS_PER_NODE=4 PRIMUS_TOTAL_LAYERS=8 GBS=32 bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
 
 # Inside a container
 PRIMUS_LAUNCHER=direct bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
@@ -42,36 +43,36 @@ Two runs at once on one node need different `MASTER_PORT`s.
 - Parallelism: `GPUS_PER_NODE` (default 1), `HIP_VISIBLE_DEVICES`, `PRIMUS_TP` (must be 1), `PRIMUS_PP`
   (default 1), `PRIMUS_EP` (default `GPUS_PER_NODE`). Expert parallel must divide both 128 and the
   data-parallel size. `GBS` defaults to `MBS` times that data-parallel size.
-- Model depth: `PRIMUS_TOTAL_LAYERS` (default 4, minimum 4; 8 is the MI355X proxy, 60 is the full
-  model). The launcher keeps the first three layers dense and sets `moe_layer_freq`,
-  `sparse_attention_freq` and `sparse_disable_index_value` to the same length.
+- Model depth: `PRIMUS_TOTAL_LAYERS` (default 4, minimum 4; 8 is the MI355X proxy and the baseline
+  here, 60 is the full model). The launcher keeps the first three layers dense and sets
+  `moe_layer_freq`, `sparse_attention_freq` and `sparse_disable_index_value` to the same length.
 - Training: `TRAIN_ITERS` (default 10; at least 3, because the yaml warms the learning rate up over
   2), `MBS` (default 1), `GBS`, `PRIMUS_SEQ_LENGTH` (default 4096), `PRIMUS_MAX_POSITION_EMBEDDINGS`
   (default `PRIMUS_SEQ_LENGTH`; the preset would otherwise build the RoPE cache at 1,048,576),
   `PRIMUS_RECOMPUTE_NUM_LAYERS` (default 1). The yaml's `recompute_method: block` recomputes the
-  first that many layers, so the default recomputes dense layer 1, not the MSA/MoE layer.
+  first that many layers, so the default recomputes dense layer 1, not an MSA/MoE layer.
 - MSA: `PRIMUS_MSA_BACKEND`, `flydsl` (default) or `eager`.
 - Experts: `USE_TURBO_GROUPED_GEMM` (default `True`; `False` is TE's grouped GEMM, one hipBLASLt GEMM
   per expert) and `TURBO_GROUPED_GEMM_BACKEND` (default `default`, which is Triton here; `bf16:flydsl`
-  takes at most 64 local experts, so EP 2 or more). `USE_TURBO_DEEPEP` (default `False`).
+  takes at most 64 local experts, so EP 2 or more).
 - Dense layers: `USE_TURBO_ATTENTION` (default `False`) runs Primus-Turbo attention in the three dense
   layers. The launcher then sets `PRIMUS_TURBO_ATTN_BACKEND=triton`, because the default backend fails
   with `invalid argument for fmha_bwd` here. MSA layers are unaffected.
-- `MOCK_DATA` (default `True`).
-- `PROFILE=True` profiles iterations 6–7 (trace under `output/<team>/<user>/<exp>/tensorboard/`).
-- `PATCH_TRITON_EXPERT_SCHEDULING` (default `1`): see Triton expert scheduling below.
-- `HIPBLASLT_TUNING_OVERRIDE_FILE` (default unset: hipBLASLt's own kernel choice). This example has no
-  tuned file yet. A file may be given relative to the current directory; the launcher mounts it into
-  the container. See hipBLASLt tuning in the DeepSeek-V3 README for how such a file is made.
 - Optimizer: `PRIMUS_FUSED_ADAM_CLIP` (default `1`) runs Primus's HIP Adam, which applies the
   gradient-clip coefficient inside the kernel. `PRIMUS_FUSED_ADAM_BF16_WRITEBACK` and
   `PRIMUS_STATIC_BF16_LOSS_SCALE_CPU` (default: the value of `PRIMUS_FUSED_ADAM_CLIP`) also have it
-  write the BF16 parameters and keep the loss scale on the host. Megatron then logs no grad norm. Set
-  `PRIMUS_FUSED_ADAM_CLIP=0` with `--use_precision_aware_optimizer True`: the BF16 writeback needs
-  separate FP32 master parameters, and the run stops at the first step without them. With
-  `PRIMUS_FUSED_ADAM_CLIP=0` Adam is Primus's Triton AdamW (`use_triton_fused_adam`, on by default);
-  `--use_triton_fused_adam False` keeps TE's FusedAdam. With `PRIMUS_FUSED_ADAM_CLIP=1` the Triton
-  patch logs that it keeps TE's FusedAdam, whose step the HIP kernel replaces.
+  write the BF16 parameters and keep the loss scale on the host. Megatron then logs no grad norm. With
+  `PRIMUS_FUSED_ADAM_CLIP=0` Adam is Primus's Triton AdamW (`use_triton_fused_adam`, on by default),
+  and `--use_triton_fused_adam False` keeps TE's FusedAdam. `--use_precision_aware_optimizer True`
+  needs `PRIMUS_FUSED_ADAM_CLIP=0`: the BF16 writeback needs separate FP32 master parameters, and the
+  run stops at the first step without them.
+- `HIPBLASLT_TUNING_OVERRIDE_FILE` (default unset: hipBLASLt's own kernel choice). This example has no
+  tuned file yet. A file may be given relative to the current directory; the launcher mounts it into
+  the container. See hipBLASLt tuning in the DeepSeek-V3 README for how such a file is made.
+- `MOCK_DATA` (default `True`). `PROFILE=True` profiles iterations 6–7 on rank 0 (trace under
+  `output/<team>/<user>/<exp>/tensorboard/`, about 41 MB for the baseline); add
+  `--profile_ranks '[0,1,2,3]'` for every rank. `PATCH_TRITON_EXPERT_SCHEDULING` (default `1`): see
+  Triton expert scheduling below.
 - Config and output: `EXP` (the experiment yaml), and `PRIMUS_WORKSPACE` (default `output`), `PRIMUS_TEAM`,
   `PRIMUS_USER`, `PRIMUS_EXP_NAME`, which make up the output directory `<workspace>/<team>/<user>/<exp>`.
 
@@ -80,7 +81,12 @@ example `--gradient_accumulation_fusion True`.
 
 **Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. From the host,
 training runs as root in the new container, so the files it creates are owned by root. Inside a
-container it runs as the container's user, which has to be root for the Triton patch.
+container it runs as the container's user, which has to be root for the Triton patch. Iterations 1–2
+compile the FlyDSL and Triton kernels (iteration 1 takes about 30 s), so the ms/iter on this page is
+Primus's average over iterations 3–10 (`log_avg_skip_iterations=2`). Memory is the logged
+`hip mem usage`, which counts the whole device, other processes included. With the default
+`PRIMUS_FUSED_ADAM_CLIP=1`, check that the log has `[Patch:megatron.optimizer.te_fused_adam_clip]
+enabled`: when its HIP extension does not build, Primus logs the error and trains without it.
 
 **Triton expert scheduling.** Triton 3.8 turns on AMDGPU expert scheduling for gfx1250, which makes
 Triton kernels fault or return NaN at random. The launcher sets `TRITON_HIP_USE_EXPERT_SCHEDULING=0`,
@@ -90,48 +96,72 @@ invalidates Inductor's cache of kernels compiled without the variable. The patch
 in a long-lived container; set `PATCH_TRITON_EXPERT_SCHEDULING=0` to skip it. See the Llama-3.1-8B
 README for the same note.
 
-## Reference
+## Baseline
 
-Single runs on one shared 4x MI455X node (432 GB each) with `amdprimus/amdprimus:tas-20261019` and
-the yaml as it is now. Not a repeated baseline; two runs of the default differed by 0.3%. ms/iter is
-Primus's average over iterations 3–10 (`log_avg_skip_iterations=2`; iterations 1–2 compile the FlyDSL
-and Triton kernels). Memory is the logged `hip mem usage`, which counts the whole device. Routing
-was `moe_router_force_load_balancing: true` and `moe_router_dtype: fp32`. Every run finished 10
-iterations with 0 NaN.
+The four-GPU stand-in for MiniMax-M3 until a full node is available: EP4, 8 layers (three dense, five
+MSA/MoE), MBS 1, GBS 32, sequence 4096, mock data, and the rest of the launcher's defaults, including
+uniform routing (`moe_router_force_load_balancing: true`). EP4 uses Megatron's `alltoall` dispatcher.
 
-| GPUs | Layers | MBS / GBS | Change from the defaults | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 1 → 10 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 4 | 1 / 1 | none | 158.2 | 25,887 | 427.0 | 241.5 GB | 13.448 → 10.989 |
-| 1 | 4 | 1 / 1 | `USE_TURBO_ATTENTION=True` | 151.3 | 27,077 | 446.7 | 233.8 GB | 13.448 → 10.989 |
-| 1 | 4 | 1 / 1 | `PRIMUS_MSA_BACKEND=eager` | 189.8 | 21,579 | 355.9 | 257.9 GB | 13.448 → 10.988 |
-| 1 | 4 | 2 / 2 | `MBS=2` | 230.0 | 35,623 | 587.6 | 248.5 GB | 13.435 → 10.570 |
-| 2 (EP2) | 4 | 1 / 2 | none | 139.0 | 29,462 | 486.0 | 184.2 GB | 13.443 → 10.312 |
-| 2 (EP2) | 4 | 1 / 2 | `TURBO_GROUPED_GEMM_BACKEND=bf16:flydsl` | 136.3 | 30,046 | 495.6 | 184.2 GB | 13.443 → 10.312 |
-| 2 (EP2) | 8 | 1 / 2 | `PRIMUS_TOTAL_LAYERS=8` | 337.4 | 12,141 | 322.0 | 432 GB (all) | 13.444 → 9.936 |
-| 4 (EP4) | 4 | 1 / 4 | none | 126.5 | 32,370 | 534.0 | 155.9 GB | 13.437 → 9.669 |
-| 4 (EP4) | 8 | 1 / 4 | `PRIMUS_TOTAL_LAYERS=8` | 270.6 | 15,134 | 401.3 | 288.6 GB | 13.429 → 9.119 |
+- Eight layers fit with room to spare: 280 GB per GPU at EP4, and each further MSA/MoE layer adds
+  about 33 GB.
+- With four layers the 200k-token output layer and the three dense layers carry about 85% of the
+  linear-layer FLOPs. With eight, the five MSA/MoE layers carry about half; in the full model, about
+  91%.
+- GBS 32 gives each rank 8 micro-batches per step, as in the MI355X 8-layer config (EP8, GBS 64), so
+  the optimizer step is spread over 8 micro-batches instead of following every one.
 
-Iteration 1 took 28–38 s with FlyDSL MSA (39 s with the FlyDSL grouped GEMM) and 18 s with eager,
-mostly kernel compilation. EP2 and EP4 use Megatron's `alltoall` dispatcher. The 8-layer EP2 run has
-22.4 B parameters per GPU, about 380 GB of weights, gradients and Adam state before activations, so
-it fills the device; recomputing all 8 layers was 14% slower and did not make room. At EP4 it leaves
-about 140 GB free.
+What it leaves out: at EP4 each expert gets 512 tokens per micro-batch (1024 at EP8, more beyond); no
+pipeline parallel; one node; uniform routing and mock data; sequence 4096 only.
 
-The EP4 rows were measured on `dev/mi455x_v3` (a624bb95), the other rows on an older base (dad0a081).
-Both have Megatron-LM d3528a21 (1042 commits after core_v0.15.0rc7) and no Triton AdamW. On
-a624bb95 the defaults ran at 156.0 ms on one GPU and 138.2 ms on EP2, with the same losses and
-memory.
+Results on `ctheliosr-rck-g02-e15-02` with this branch on `dev/mi455x_v3` c19456f1, one run at a time
+on the four otherwise idle GPUs. Every run finished 10 iterations with 0 NaN.
 
-The table and the sections below it predate the fused Adam defaults and
-`check_for_nan_in_loss_and_grad: false`; the runs in it used TE's FusedAdam with the check on. With
-the fused Adam defaults one GPU ran at 133.8 ms and EP2 at 126.8 ms on a624bb95 (see Optimizer).
-EP4 was not re-run on that node; see c19456f1 below.
+| Layers | MBS / GBS | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8 (baseline) | 1 / 32 | 1536.6 | 21,325 | 565.5 | 280.2 GB | 8.19595 |
+| 8 | 1 / 4 | 247.6 | 16,545 | 438.8 | 280.2 GB | 9.11894 |
+| 4 | 1 / 32 | 736.3 | 44,504 | 734.0 | 147.5 GB | 9.24521 |
 
-**On `dev/mi455x_v3` c19456f1.** This branch is now based on c19456f1, with Megatron-LM core_v0.19.2
-(4b4acac9) and Primus's Triton AdamW. The table above and the sections below it are from the old
-bases. These runs use the current defaults (HIP fused Adam, NaN check off) on another shared 4x
-MI455X node, `ctheliosr-rck-g02-e15-01`, with the same image, one run at a time on an otherwise idle
-node. Every run finished 10 iterations with 0 NaN, and the fused Adam patch logged that it was enabled.
+- The baseline repeated at 1538.2 ms with the same loss.
+- From GBS 4 to GBS 32, tokens/s per GPU rose 29% and memory did not change. The two 8-layer runs
+  give 184 ms per micro-batch plus 64 ms per step that does not grow with the micro-batch count: the
+  optimizer step and the gradient reduction.
+- Each MSA/MoE layer adds about 200 ms per step at GBS 32, 25 ms per micro-batch.
+- TFLOP/s per GPU falls from 734 with four layers to 565 with eight, because the MSA/MoE layers run
+  less efficiently than the output layer and the dense layers. The full model will be lower still.
+  Compare throughput only between runs of the same depth.
+
+Where the baseline step goes: GPU kernel time of profiled iteration 7 on rank 0, in ms. Profiling
+makes that step 1694 ms instead of 1537.
+
+| Kernels | ms | Share |
+| --- | --- | --- |
+| hipBLASLt GEMMs: dense layers, attention projections, shared experts, output layer | 385.5 | 25.7% |
+| FlyDSL MSA and indexer | 359.9 | 24.0% |
+| elementwise and reductions | 223.3 | 14.9% |
+| Primus-Turbo grouped GEMM (Triton), all expert GEMMs | 204.9 | 13.7% |
+| TE unfused softmax in the three dense attention layers | 106.5 | 7.1% |
+| RCCL collectives | 71.0 | 4.7% |
+| copies and fills | 48.6 | 3.2% |
+| norm, RoPE | 28.9 | 1.9% |
+| optimizer: HIP Adam and the clipping l2norm | 28.2 | 1.9% |
+| other: MoE permute and router, cross entropy, the rest | 43.0 | 2.9% |
+| total kernel time / GPU span | 1499.7 / 1693.7 | |
+
+- 105 ms of the elementwise time is 1024 fp32 `add_` kernels from Megatron's DDP gradient hook,
+  which accumulate each micro-batch's gradients into the fp32 `main_grad`
+  (`gradient_accumulation_fusion` is off).
+- The GPU is idle for 194 ms of the profiled step; the profiler accounts for part of that.
+- The trace also has 24 host-to-device copies of 32 KB, the input batch, on stream 0. Their 518 ms
+  is almost all waiting behind the compute on stream 1, so they are not in the table.
+- The four ranks differ by under 3% in MSA and expert GEMM time; routing is uniform.
+
+## Results on `dev/mi455x_v3` c19456f1
+
+c19456f1 has Megatron-LM core_v0.19.2 (4b4acac9) and Primus's Triton AdamW. These runs use the
+defaults (HIP fused Adam, NaN check off) on the shared 4x MI455X node `ctheliosr-rck-g02-e15-01`, one
+run at a time on an otherwise idle node. Every run finished 10 iterations with 0 NaN, and the fused
+Adam patch logged that it was enabled.
 
 | GPUs | Layers | MBS / GBS | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -141,16 +171,14 @@ node. Every run finished 10 iterations with 0 NaN, and the fused Adam patch logg
 | 4 (EP4) | 8 | 1 / 4 | 254.9 | 16,068 | 426.1 | 280.0 GB | 9.11894 |
 
 Repeats were within 0.4%: 142.4–142.9 ms on one GPU over three runs (two of them beside other runs on
-the other GPUs), 130.1–130.2 ms on EP2, 121.6 ms twice at EP4 and 254.9–255.1 ms with 8 layers.
+the other GPUs), 130.1–130.2 ms on EP2, 121.6 ms twice at EP4 and 254.9–255.1 ms with 8 layers. On
+the same node with the same defaults, the old base (a624bb95 plus this example, Megatron-LM d3528a21)
+ran at 142.3, 130.5, 121.9 and 255.5 ms with the same losses to the last logged digit, and used 4–9 GB
+more memory per GPU. The node matters more than the base: on `ctheliosr-rck-g02-e15-02` the defaults
+ran at 133.8 ms on one GPU and 126.8 ms on EP2 (old base), and 132.3 ms on one GPU (this branch merged
+into `dev/mi455x_v3` db5fe1fd). Compare runs on one node.
 
-The difference from 133.8 and 126.8 ms is the node, not the base. On the same node with the same
-defaults, the old base (e6956d46: a624bb95 plus this example, Megatron-LM d3528a21) ran at 142.3 ms on
-one GPU, 130.5 ms on EP2, 121.9 ms at EP4 and 255.5 ms with 8 layers. Its losses are the same as the
-new base's to the last logged digit. The new base uses less memory: 241.4 to 237.7 GB on one GPU,
-184.1 to 177.9 GB on EP2, 155.9 to 147.3 GB at EP4 and 288.6 to 280.0 GB with 8 layers.
-
-Where the EP4 step goes on c19456f1: GPU kernel time of profiled iteration 7 on rank 0
-(`PROFILE=True`), in ms.
+Where the EP4 step goes: GPU kernel time of profiled iteration 7 on rank 0 (`PROFILE=True`), in ms.
 
 | Kernels | EP4, 4 layers | EP4, 8 layers |
 | --- | --- | --- |
@@ -171,30 +199,8 @@ The expert GEMMs are Primus-Turbo's Triton kernels (`_grouped_bf16_persistent_ge
 `PrimusTurboRowParallelGroupedLinear`), not TE's grouped GEMM. In the trace every FlyDSL kernel is
 named `k_fn_0`; the launching Python frame tells MSA forward, MSA backward and the indexer apart.
 
-**Optimizer.** Megatron's step reads and writes the FP32 gradients and parameters (10.9 B on the
-1-GPU proxy) several times: a norm over every gradient for the NaN check, the 1/DP gradient scale,
-the clipping l2norm, the clip scale, Adam, and the BF16 parameter copy. At EP4 with 8 layers, these
-passes, the gradient accumulation and zeroing took about 77 of the 281 ms of kernel time.
-Cumulative, one GPU, `dev/mi455x_v3` a624bb95:
-
-| Change | ms/iter |
-| --- | --- |
-| none: TE FusedAdam (`PRIMUS_FUSED_ADAM_CLIP=0`), NaN check on | 156.0 |
-| `check_for_nan_in_loss_and_grad: false` | 150.6 |
-| `PRIMUS_FUSED_ADAM_CLIP=1` | 140.2 |
-| `PRIMUS_FUSED_ADAM_BF16_WRITEBACK=1`, `PRIMUS_STATIC_BF16_LOSS_SCALE_CPU=1` (the defaults) | 133.8 |
-
-EP2 went from 138.2 to 126.8 ms. A later pair on one GPU, with other jobs on the node, ran at 160.2
-and 137.4 ms. Iteration-10 losses are 10.98863 and 10.98864 on one GPU and 10.31213 and 10.31194 on
-EP2, because the clip coefficient is computed in FP32 on the device rather than in Python. Profiled,
-Adam is one 27.6 ms kernel for both parameter groups and the clipping l2norm 2.7 ms; the scale
-passes, the NaN-check norm and the parameter copy are gone. Before the fix in
-`fused_adam_clip_patches.py` (no hard-coded `-std=c++17`), the HIP extension did not build against
-this image's torch 2.14, whose headers need C++20, and Primus logged the error and trained without
-the patch.
-
-On c19456f1, on the node of the c19456f1 table, the three Adam paths. The runs in each column ran side
-by side: one GPU each on separate GPUs, and EP2 on GPUs 0–1 and 2–3.
+The three Adam paths, on the same node. The runs in each column ran side by side: one GPU each on
+separate GPUs, and EP2 on GPUs 0–1 and 2–3.
 
 | Adam | Settings | 1 GPU | EP2 | lm loss, iteration 10 (1 GPU / EP2) |
 | --- | --- | --- | --- | --- |
@@ -204,57 +210,45 @@ by side: one GPU each on separate GPUs, and EP2 on GPUs 0–1 and 2–3.
 
 Triton AdamW is 10% slower than the HIP Adam on one GPU and 6.5% slower on EP2, and on one GPU no faster
 than TE's FusedAdam, so the default stays `PRIMUS_FUSED_ADAM_CLIP=1`. Triton AdamW and TE FusedAdam
-log the grad norm (10.378 and 10.379 at iteration 10 on one GPU); the HIP Adam does not. TE
-FusedAdam's loss moved from 10.98863 on the old base to 10.98837; the HIP Adam's did not move.
+log the grad norm (10.378 and 10.379 at iteration 10 on one GPU); the HIP Adam does not.
 
-**Expert grouped GEMM.** `USE_TURBO_GROUPED_GEMM=False`, otherwise the same runs. Losses agree to
-within 0.001.
+The unit tests pass on gfx1250: `tests/unit_tests/backends/megatron/test_minimax_m3_*.py`,
+`test_fused_adam_clip_patches.py` and `test_l2norm_large_tensor_patches.py`, 131 items, 43 of them
+the FlyDSL tests (forward and backward against eager, the indexer, and the `MinimaxSparseAttention`
+module).
 
-| Run | Primus-Turbo (default) | TE grouped GEMM |
-| --- | --- | --- |
-| 1 GPU | 158.2 ms | 167.4 ms |
-| 1 GPU, `USE_TURBO_ATTENTION=True` | 151.3 ms | 158.1 ms |
-| 1 GPU, eager MSA | 189.8 ms | 197.6 ms |
-| 1 GPU, MBS 2 | 230.0 ms | 234.3 ms |
-| EP2 | 139.0 ms | 142.6 ms |
-| EP2, 8 layers | 337.4 ms | 368.8 ms |
+## How the defaults were chosen
 
-The Primus-Turbo grouped GEMM keeps a layer's experts in one weight, which needs the
-`te_l2norm_large_tensor` patch described under Known issues. The FlyDSL backend at EP2 is
-bit-identical to Triton over 10 iterations; a standalone run at the EP2 shapes shows it does run the
-FlyDSL forward and weight-gradient kernels.
+On the older bases dad0a081 and a624bb95 (Megatron-LM d3528a21), one GPU unless noted, with TE's
+FusedAdam and the NaN check on unless noted, on `ctheliosr-rck-g02-e15-02`. Every run finished with
+0 NaN.
 
-**Where the 1-GPU step goes.** GPU kernel time of profiled iteration 7 with the defaults of the time,
-before the fused Adam (`PROFILE=True`), 165 ms on a 162 ms GPU span:
+**Optimizer.** Megatron's step reads and writes the FP32 gradients and parameters (10.9 B on the
+1-GPU proxy) several times: a norm over every gradient for the NaN check, the 1/DP gradient scale,
+the clipping l2norm, the clip scale, Adam, and the BF16 parameter copy. At EP4 with 8 layers, these
+passes, the gradient accumulation and zeroing took about 77 of the 281 ms of kernel time.
+Cumulative, on a624bb95:
 
-| Kernels | ms |
+| Change | ms/iter |
 | --- | --- |
-| optimizer: TE Adam, scale and l2norm over 10.9 B fp32 parameters | 43.4 |
-| hipBLASLt GEMMs: dense FFN, attention projections, output layer | 38.3 |
-| elementwise and reductions; 10.4 of it the fp32 += bf16 gradient accumulation into `main_grad` | 24.0 |
-| copies and fills; 12.5 of it four host-to-device copies | 19.5 |
-| TE unfused softmax in the three dense attention layers | 13.7 |
-| Primus-Turbo grouped GEMM (Triton), all expert GEMMs | 12.1 |
-| FlyDSL MSA and indexer kernels | 9.8 |
-| norm, RoPE, cross entropy, MoE permute | 3.1 |
-| other | 1.4 |
+| none: TE FusedAdam, NaN check on | 156.0 |
+| `check_for_nan_in_loss_and_grad: false` | 150.6 |
+| `PRIMUS_FUSED_ADAM_CLIP=1` | 140.2 |
+| `PRIMUS_FUSED_ADAM_BF16_WRITEBACK=1`, `PRIMUS_STATIC_BF16_LOSS_SCALE_CPU=1` (the defaults) | 133.8 |
 
-With TE's grouped GEMM the expert GEMMs are 128 hipBLASLt launches per GEMM and 35.9 ms. On one GPU
-the optimizer is large because the proxy holds all 128 experts and the untied 200k-token embedding
-and output layer with only 4096 tokens per step. `USE_TURBO_ATTENTION=True` replaces the unfused softmax.
-The host-to-device copies are TE Adam's tensor-list metadata and the batch, and their time is mostly
-spent waiting in the stream behind earlier kernels: with `HSA_ENABLE_SDMA=0` they take 0.1 ms in all
-and the step is no faster (158.0 ms).
+EP2 went from 138.2 to 126.8 ms. Iteration-10 losses moved from 10.98863 to 10.98864 on one GPU and
+from 10.31213 to 10.31194 on EP2, because the clip coefficient is computed in FP32 on the device
+rather than in Python. Profiled, Adam is one 27.6 ms kernel for both parameter groups and the
+clipping l2norm 2.7 ms; the scale passes, the NaN-check norm and the parameter copy are gone.
 
-**Settings measured on the way.** One GPU unless noted, the defaults of the time (TE grouped GEMM
-for the first two):
+**Training settings** (TE's grouped GEMM for the first two):
 
 - `manual_gc_interval`. Megatron's `manual_gc` with interval 1 calls `gc.collect()` every step. With
   about 583,000 tracked Python objects after startup that takes about 280 ms, more than the step, and
   frees nothing. Interval 1 to 100: 463.9 to 183.6 ms on one GPU, 545.1 to 150.7 ms on EP2. The yaml
-  uses 100. The MI355X M3 yamls also use 1; their effect there was not measured.
+  uses 100. The MI355X M3 yamls use 1; their effect there was not measured.
 - `overlap_grad_reduce` and `overlap_param_gather` on to off: 183.6 to 167.4 ms on one GPU, 150.7 to
-  142.6 ms on EP2. The yaml turns them off.
+  142.6 ms on EP2. The yaml turns them off. Not measured at EP4 or with several micro-batches per step.
 - `gradient_accumulation_fusion: true`: 183.6 to 209.8 ms with TE's grouped GEMM (overlap on), 158.2
   to 184.3 ms with Primus-Turbo's. The fusion is not what costs; the fp32 output is. With it, each
   dense weight gradient is a bf16 x bf16 GEMM written straight into the fp32 `main_grad` with beta 1.
@@ -265,6 +259,13 @@ for the first two):
   hipBLASLt keeps the same bf16 kernels (+0.6 ms for beta 1), the Triton GEMM adds 2.3 ms, the bf16
   `+=` saves 4.2 ms, and the step goes from 134.0 to 132.8 ms. The yaml leaves it off. Tuning
   hipBLASLt for the fp32-output shapes was not tried.
+
+**Expert grouped GEMM.** Primus-Turbo's grouped GEMM (Triton) against TE's (`USE_TURBO_GROUPED_GEMM=False`,
+128 hipBLASLt launches per GEMM): 158.2 against 167.4 ms on one GPU, 139.0 against 142.6 ms on EP2,
+and 337.4 against 368.8 ms on EP2 with 8 layers, losses within 0.001. It keeps a layer's experts in
+one weight, which needs the `te_l2norm_large_tensor` patch (Known issues). At EP2,
+`TURBO_GROUPED_GEMM_BACKEND=bf16:flydsl` ran at 136.3 ms, bit-identical to Triton over 10 iterations;
+a standalone run at the EP2 shapes shows it does run the FlyDSL forward and weight-gradient kernels.
 
 **MSA and indexer only**, at the proxy layer shape (S=4096, B=1, 64 query / 4 KV heads, top-16
 blocks of 128, 4 index heads of dim 128). CUDA events, 5 iterations after 2 warmups, one GPU.
@@ -281,16 +282,10 @@ that call, not the training step's `hip mem usage`.
 Attention forward+backward is 8.65 ms versus 37.98 ms. End to end, FlyDSL takes the step from 189.8 to
 158.2 ms and saves 16 GB on the 4-layer proxy, where one of the four layers is MSA.
 
-The FlyDSL unit tests (`tests/unit_tests/backends/megatron/test_minimax_m3_flydsl_*.py`) passed on
-gfx1250 on the old base: 43 items, forward and backward against eager, indexer, and the
-`MinimaxSparseAttention` module. On c19456f1 the same 43 pass, and with the other MiniMax-M3 tests,
-`test_fused_adam_clip_patches.py` and `test_l2norm_large_tensor_patches.py`, 131 items pass.
+### Switches on one GPU
 
-## Switches on one GPU
-
-Each switch on top of the defaults of the time (TE FusedAdam, NaN check on), one GPU,
-10 iterations, same image and node. The defaults ran at 157.7 ms again during this sweep, so
-differences under 1% are noise. Every run below had 0 NaN.
+Each switch on top of the defaults of the time (TE FusedAdam, NaN check on), one GPU, 10 iterations.
+The defaults ran at 157.7 ms again during this sweep, so differences under 1% are noise.
 
 | Switch | ms/iter | Memory | lm loss, iteration 10 |
 | --- | --- | --- | --- |
@@ -320,15 +315,15 @@ differences under 1% are noise. Every run below had 0 NaN.
   reduces across data-parallel ranks in BF16. Not the default.
 - `PRIMUS_RECOMPUTE_NUM_LAYERS=0` does not move the peak on the 4-layer proxy: the recomputed layer
   is dense layer 1, whose activations at sequence 4096 are small next to the weights and optimizer.
+- `USE_TURBO_ATTENTION=True` replaces TE's unfused softmax in the three dense layers.
 - `--use_turbo_autotune` takes iteration 1 from 28 to 35 s.
 - `--moe_shared_expert_overlap` has no dispatch to overlap with on one GPU.
 - FP8: with the default `delayed` recipe only TE's dense linears run FP8, and Primus-Turbo logs
   `Primus-Turbo FP8 delayed not work since Primus-Turbo not support delayed scaling`, so the experts
   stay BF16. With `tensorwise` that warning is gone and Primus-Turbo's FP8 path covers the experts too.
   Both are slower than BF16 here and start with a higher loss; neither was profiled.
-- `overlap_grad_reduce`, `overlap_param_gather` and `manual_gc_interval: 1` run but are slower; see
-  Settings measured on the way.
-- Combined, on `dev/mi455x_v3` (defaults 156.0 ms there): `USE_TURBO_ATTENTION=True`,
+- `MBS=2` ran at 230.0 ms for twice the tokens: 35,623 tokens/s against 25,887, at 248.5 GB.
+- Combined, on a624bb95 (defaults 156.0 ms there): `USE_TURBO_ATTENTION=True`,
   `PRIMUS_RECOMPUTE_NUM_LAYERS=0` and `--use_turbo_autotune True` ran at 145.2 ms, 233.8 GB, loss
   10.989. Adding the precision-aware optimizer with BF16 `main_grad` and moments and
   `--gradient_accumulation_fusion True` gave 122.0 ms and 172.3 GB, loss 10.988.
@@ -351,25 +346,27 @@ Do not run:
 - `--fp8 e4m3 --fp8_recipe blockwise` and `--fp8_recipe mxfp8` stop at TE's arch check (`Device arch
   gfx94x or gfx95x is required for FP8 block scaling execution.`, `Device arch gfx95x or newer is
   required for MXFP8 execution.`). TE 2.19.0.dev0 leaves gfx1250 as a TODO until its GEMM is available.
-- `USE_TURBO_DEEPEP=True`, sync-free stages 2 and 3, and MegaMoE: Known issues. On one GPU there is
-  no dispatch for them to replace either.
+- `--use_turbo_deepep True`, sync-free stages 2 and 3, and MegaMoE: Known issues.
 - Primus-Turbo attention with its default backend: `invalid argument for fmha_bwd`, so
   `USE_TURBO_ATTENTION=True` makes the launcher use Triton.
 - `moe_use_legacy_grouped_gemm`, `PRIMUS_TP` above 1, context parallel, a dataloader attention mask,
   and a BF16 router: Known issues.
-- `PRIMUS_TOTAL_LAYERS=8`: does not fit on one GPU, and fills both at EP2.
+- `PRIMUS_TOTAL_LAYERS=8` on one GPU, where it does not fit. At EP2 it has 22.4 B parameters per GPU,
+  about 380 GB of weights, gradients and Adam state before activations, and fills the device (337.4
+  ms); recomputing all 8 layers was 14% slower and did not make room.
 
 ## Not yet measured
 
+- On the baseline: MBS 2, `overlap_grad_reduce` and `overlap_param_gather`, and
+  `gradient_accumulation_fusion`. On one GPU they were measured with one micro-batch per step.
 - Sequence 16384 and 32768. MSA's cost stays on the selected blocks; dense attention does not.
 - Pipeline parallel. The launcher allows `PRIMUS_PP`, but no PP run has been done. Tensor parallel
   and context parallel are not implemented for MSA.
 - EP8 and more than one node.
 - DeepEP and MegaMoE, which do not run on gfx1250 yet (see Known issues).
-- A real dataset. These runs are mock data.
+- A real dataset and real routing. These runs are mock data with uniform routing.
 - The full 60-layer model. From the proxy's ~18 bytes/parameter (BF16 weights, FP32 gradients and
   Adam state), a training step at MBS 1, seq 4096 wants on the order of 40 MI455X GPUs (EP8 x PP5).
-  That has not been run.
 - The gfx950 MFMA kernels. This node cannot execute them.
 - hipBLASLt GEMM tuning of the kind in the GPT-OSS example, including the fp32-output weight-gradient
   GEMMs behind the `gradient_accumulation_fusion` slowdown.
@@ -387,7 +384,7 @@ Do not run:
   into views of 2^30 elements for the norm. TE's Adam and scale kernels handle these sizes. From EP4
   on, M3's stacked expert weights stay under 2^31.
 - **DeepEP.** The DeepEP in this image is written for MI355X (wave64) and has not been ported to
-  gfx1250's wave32. `USE_TURBO_DEEPEP=True` on EP2 stops in the first step with `DeepEP error: CPU
+  gfx1250's wave32. `--use_turbo_deepep True` on EP2 stops in the first step with `DeepEP error: CPU
   recv timeout`; with TE's grouped GEMM it hung there instead. Sync-free MoE stages 2 and 3
   (`turbo_sync_free_moe_stage`) turn DeepEP on, so they do not run either. Stage 1's two settings,
   `moe_use_fused_router_with_aux_score` and `moe_permute_fusion`, are already in the yaml.
