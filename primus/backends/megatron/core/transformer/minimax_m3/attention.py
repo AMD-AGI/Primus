@@ -36,7 +36,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
 import torch
-from megatron.core.models.common.embeddings.rope_utils import _apply_rotary_pos_emb_bshd
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from megatron.core.transformer.enums import AttnMaskType
@@ -61,6 +60,7 @@ from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss import (
     slot_mass_from_probs,
     slot_mass_from_slot_lse,
 )
+from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
 
 # Backends that compute the block-sparse attention itself.
 MSA_BACKENDS = ("eager", "flydsl")
@@ -214,14 +214,12 @@ class MinimaxSparseAttention(SelfAttention):
             q_pos_emb, k_pos_emb = (
                 rotary_pos_emb if isinstance(rotary_pos_emb, tuple) else (rotary_pos_emb,) * 2
             )
-            # Unfused on purpose; see the note in indexer.py.
-            query = _apply_rotary_pos_emb_bshd(
-                query, q_pos_emb, rotary_interleaved=self.config.rotary_interleaved
-            )
-            key = _apply_rotary_pos_emb_bshd(
-                key, k_pos_emb, rotary_interleaved=self.config.rotary_interleaved
-            )
-            index_pos_emb = q_pos_emb
+            # Unfused on purpose; see the note in indexer.py. The indexer reuses q_rope's tables.
+            q_rope = RopeTables(q_pos_emb)
+            k_rope = q_rope if k_pos_emb is q_pos_emb else RopeTables(k_pos_emb)
+            query = q_rope.apply(query, self.config.rotary_interleaved)
+            key = k_rope.apply(key, self.config.rotary_interleaved)
+            index_pos_emb = q_rope
         else:
             index_pos_emb = None
 

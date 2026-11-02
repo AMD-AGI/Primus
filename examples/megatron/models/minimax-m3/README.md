@@ -375,6 +375,22 @@ the runs alternated in the order of the rows, then the first two rows again:
   TFLOP/s against about 2300 for the bf16 output).
 - Not yet run on the EP4 baseline.
 
+## MSA forward: fewer kernel launches
+
+In the baseline's profile the MSA forward is bound by kernel launches rather than by the GPU. Three
+changes cut the PyTorch ops it launches, each with bitwise the same results:
+
+- A layer's four RoPE calls (query, key, and the indexer's query and key) share one cos/sin table
+  (`minimax_m3/rope.py`); Megatron's `_apply_rotary_pos_emb_bshd` recomputes it on every call.
+- The indexer's forced-block ids depend on the shapes only and are cached.
+- The sparse indexer loss fills its masks in place, on tensors no backward saves, and its `where`
+  takes a scalar.
+
+One MSA layer's training forward at the proxy shape on one GPU, timed without a sync from an idle GPU
+(median of 30), twice each: 2.33, 2.30 ms against 2.07, 2.10 ms of CPU time, and 126 against 97 aten
+ops that launch a kernel. The baseline runs 40 MSA layer forwards a step, so up to about 10 ms; the
+one-GPU run's 8 are too few to show end to end.
+
 ## How the defaults were chosen
 
 On the older bases dad0a081 and a624bb95 (Megatron-LM d3528a21), one GPU unless noted, with TE's

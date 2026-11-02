@@ -187,6 +187,39 @@ def test_init_blocks_are_always_selected():
         assert 0 in indices[0, :, q].tolist()[0] or 0 in indices[0, :, q].tolist()[1]
 
 
+def test_repeated_selection_is_unchanged():
+    """The forced-block ids are cached after the first call."""
+    config = _config(sparse_init_block=1)
+    first, _ = _select(config, _scores())
+    again, _ = _select(config, _scores())
+    assert torch.equal(first, again)
+
+
+# ---------------------------------------------------------------------------
+# RoPE
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("rotary_dim", [8, 16])
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_rope_tables_are_bitwise_upstream(dtype, rotary_dim, interleaved):
+    """RopeTables shares cos/sin across calls; each call must still equal upstream's bit for bit."""
+    from megatron.core.models.common.embeddings.rope_utils import (
+        _apply_rotary_pos_emb_bshd,
+    )
+
+    from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
+
+    torch.manual_seed(0)
+    freqs = torch.randn(SQ, 1, 1, rotary_dim) * 10
+    rope = RopeTables(freqs)
+    for heads in (4, 1):
+        t = torch.randn(SQ, 2, heads, 16, dtype=dtype)
+        expected = _apply_rotary_pos_emb_bshd(t, freqs, rotary_interleaved=interleaved)
+        assert torch.equal(rope.apply(t, interleaved), expected)
+
+
 # ---------------------------------------------------------------------------
 # Eager attention
 # ---------------------------------------------------------------------------
