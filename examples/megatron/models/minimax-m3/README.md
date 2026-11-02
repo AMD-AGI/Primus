@@ -313,6 +313,34 @@ MSA, GBS 8), alternating:
   of the same tree, as with FlyDSL dense attention alone (its dQ atomics); the MSA backward itself
   has no atomics.
 
+## MSA forward and dQ: two key tiles per WMMA
+
+The forward's PV and the backward dQ kernel's dS·K had the same pattern as dK/dV before: 16 keys a
+step in the low half of a K=32 WMMA, the transposed operand read from LDS one element per load. They
+now take 32 keys a step as two 16-key tiles, one per lane half, and keep V (forward) and K (dQ)
+transposed in LDS.
+
+Operator timing as in the previous section, against 6adec738, alternating, twice each:
+
+| Op | before | after |
+| --- | --- | --- |
+| attention forward | 1.25, 1.25 ms | 0.72, 0.71 ms |
+| attention backward | 3.01, 3.01 ms | 1.65, 1.65 ms |
+| indexer forward | 0.32, 0.33 ms | 0.31, 0.34 ms |
+| indexer backward | 0.83, 0.78 ms | 0.77, 0.71 ms |
+
+End to end, one GPU, 4 layers, GBS 8, FlyDSL dense attention, alternating:
+
+| MSA kernels | ms/iter | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- |
+| 6adec738 | 608.9, 608.6 | 230.3 GB | 10.01466, 10.01473 |
+| two key tiles per WMMA | 593.1, 593.8 | 230.3 GB | 10.01468, 10.01467 |
+
+- 15 ms per step, 1.9 ms per MSA layer and micro-batch, as the operator timing predicts. On the
+  baseline (five MSA layers, 8 micro-batches) the backward part alone would be about 54 ms per step;
+  not yet measured. The baseline's MSA forward is bound by kernel launches, so its share may not show.
+- The indexer kernels are unchanged.
+
 ## How the defaults were chosen
 
 On the older bases dad0a081 and a624bb95 (Megatron-LM d3528a21), one GPU unless noted, with TE's

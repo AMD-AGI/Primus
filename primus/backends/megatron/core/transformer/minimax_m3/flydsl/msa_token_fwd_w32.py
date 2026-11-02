@@ -8,12 +8,15 @@
 
 Same contract as ``msa_token_fwd``, on the wave32 layout documented in ``msa_w32``:
 
-* QK is ``S[key, head] = K[key] · Q[head]``. A is the key row, B is the query
-  row read as a column. Each lane then holds 8 keys of one head.
-* The 16 keys of a step reduce with one ``permlane16`` (low 8 + high 8).
-* PV is ``O[head, d] += P[head, key] * V[key, d]``, issued as one K=32 WMMA
-  whose upper 16 K are zero. ``P`` is gathered into B's column layout with the
-  same permlane, and ``V`` is gathered transposed out of LDS.
+* A step is 32 keys of a block, two tiles of 16.
+* QK is ``S[key, head] = K[key] · Q[head]``, one tile at a time. A is the key
+  row, B is the query row read as a column. Each lane then holds 8 keys of one
+  head per tile.
+* The keys of a step reduce with one ``permlane16`` (low 8 + high 8).
+* PV is ``O[head, d] += P[head, key] * V[key, d]``, one K=32 WMMA per d-tile:
+  each lane group's B is one tile's ``P``, gathered with a ``permlane16_swap``,
+  and ``V`` is stored transposed in LDS, where a lane's 16 keys of one column
+  are two 16-byte loads.
 * The epilogue stores the 8 contiguous ``d`` values each lane holds.
 """
 
@@ -45,7 +48,7 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_w32 import 
     cat_bf16_16,
     crossgrp_max,
     crossgrp_sum,
-    pack_low16_bf16,
+    pack_pair_bf16,
     wmma_f32_16x16x32_bf16,
 )
 
@@ -68,18 +71,23 @@ def build_fwd_wave32(
     elem = fx.BFloat16
     Hkv = num_kv_heads
     Hq = Hkv * HPW
-    assert block_size % TK == 0
+    KPS = 2 * TK  # keys per step
+    assert block_size % KPS == 0
     assert remap in ("none", "block", "lpt")
-    SPB = block_size // TK
-    # 32 lanes, 8 bf16 each: two key rows per instruction, eight instructions per step.
-    LPR = D // 8
-    RPP = WAVE // LPR
-    assert TK % RPP == 0
-    NV8 = TK // RPP
+    SPB = block_size // KPS
+    # V staging: a lane loads 8 consecutive key rows of one 8-wide column chunk per pass,
+    # so the transposed copy is written 8 keys at a time.
+    vec = 8
+    CPR = D // vec
+    RPL = 8
+    PASSES = KPS * CPR // (WAVE * RPL)
+    assert PASSES * WAVE * RPL == KPS * CPR and WAVE % CPR == 0
+    # V transposed, [D, KPS]
+    stride_t = KPS + 8
 
     allocator = SmemAllocator(None, arch=get_hip_arch(), global_sym_name="msa_token_fwd_w32_smem")
-    v_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = allocator._align(v_off + TK * STRIDE * 2, 16)
+    vt_off = allocator._align(allocator.ptr, 16)
+    allocator.ptr = allocator._align(vt_off + D * stride_t * 2, 16)
 
     @flyc.kernel(known_block_size=[WAVE, 1, 1])
     def k_fn(
@@ -93,8 +101,8 @@ def build_fwd_wave32(
         S: fx.Int32,
         B: fx.Int32,
     ):
-        v1 = Vec.make_type(1, elem)
-        lds_v = SmemPtr(allocator.get_base(), v_off, elem.ir_type, shape=(TK * STRIDE,)).get()
+        v8 = Vec.make_type(8, elem)
+        lds_vt = SmemPtr(allocator.get_base(), vt_off, elem.ir_type, shape=(D * stride_t,)).get()
 
         def sel_i32(cond, a, b):
             return fx.Int32(ArithValue(cond).select(_raw(a), _raw(b)))
@@ -154,7 +162,6 @@ def build_fwd_wave32(
         c_big_neg = fx.Float32(-3.0e38)
         c_zero = fx.Float32(0.0)
         c_i0 = fx.Int32(0)
-        c_bf0 = fx.BFloat16(0.0)
 
         tok_i32 = fx.Int32(tok)
         n_vis = tok_i32 // fx.Int32(block_size) + fx.Int32(1)
@@ -178,19 +185,28 @@ def build_fwd_wave32(
         def kv_offset(key):
             return ((key * Bn + b) * fx.Index(Hkv) + g) * fx.Index(D)
 
-        ld_row = lane // fx.Index(LPR)
-        ld_col = (lane % fx.Index(LPR)) * fx.Index(8)
+        st_grp = lane // fx.Index(CPR)
+        st_col = lane % fx.Index(CPR) * fx.Index(vec)
 
-        def load_v(kv0):
-            return [
-                buffer_ops.buffer_load(
-                    v_rsrc,
-                    kv_offset(fx.Index(kv0) + ld_row + fx.Index(c * RPP)) + ld_col,
-                    vec_width=8,
-                    dtype=elem,
-                )
-                for c in range_constexpr(NV8)
-            ]
+        def stage_vt(kv0):
+            for p in range_constexpr(PASSES):
+                row0 = (fx.Index(p * (WAVE // CPR)) + st_grp) * fx.Index(RPL)
+                rows = [
+                    buffer_ops.buffer_load(
+                        v_rsrc,
+                        kv_offset(fx.Index(kv0) + row0 + fx.Index(r)) + st_col,
+                        vec_width=vec,
+                        dtype=elem,
+                    )
+                    for r in range_constexpr(RPL)
+                ]
+                for e in range_constexpr(vec):
+                    col = [fx.BFloat16(_raw(Vec(rows[r])[e])) for r in range_constexpr(RPL)]
+                    at_t = (st_col + fx.Index(e)) * fx.Index(stride_t) + row0
+                    Vec.from_elements(col, elem).store(lds_vt, [at_t])
+
+        def lds16(mem, row_e):
+            return cat_bf16_16(Vec.load(v8, mem, [row_e]), Vec.load(v8, mem, [row_e + fx.Index(8)]))
 
         grp0 = ArithValue(half == fx.Index(0))
         head_row = (tok * Bn + b) * fx.Index(Hq) + head
@@ -209,53 +225,52 @@ def build_fwd_wave32(
             )
             blk_ok = ArithValue(blk >= c_i0)
             safe = sel_i32(blk_ok, blk, c_i0)
-            kv0 = safe * fx.Int32(block_size) + fx.Int32(sub) * fx.Int32(TK)
+            kv0 = safe * fx.Int32(block_size) + fx.Int32(sub) * fx.Int32(KPS)
 
-            rows = load_v(kv0)
-            for c in range_constexpr(NV8):
-                Vec(rows[c]).store(lds_v, [(ld_row + fx.Index(c * RPP)) * fx.Index(STRIDE) + ld_col])
+            stage_vt(kv0)
 
             # S[key, head] = K[key] · Q[head]. A row = lane%16 = key in the tile.
-            acc = Vec.filled(8, 0.0, fx.Float32)
-            for ks in range_constexpr(KS):
-                kbase = kv_offset(fx.Index(kv0) + lo) + fx.Index(ks * 32) + half * fx.Index(16)
-                a_k = cat_bf16_16(
-                    buffer_ops.buffer_load(k_rsrc, kbase, vec_width=8, dtype=elem),
-                    buffer_ops.buffer_load(k_rsrc, kbase + fx.Index(8), vec_width=8, dtype=elem),
-                )
-                acc = wmma_f32_16x16x32_bf16(a_k, q_packs[ks], acc)
-            # lane holds keys (half*8 + i) of head lo
-            scores = []
-            key0 = kv0 + fx.Int32(half) * fx.Int32(8)
-            for i in range_constexpr(8):
-                ok = andb(blk_ok, ArithValue(key0 + fx.Int32(i) <= tok_i32))
-                raw_s = fx.Float32(_raw(Vec(acc)[i]))
-                scores.append(fx.Float32(ok.select(_raw(raw_s), _raw(c_neg_inf))))
+            tiles = []
+            for t in range_constexpr(KPS // TK):
+                acc = Vec.filled(8, 0.0, fx.Float32)
+                k_row = kv_offset(fx.Index(kv0) + fx.Index(t * TK) + lo)
+                for ks in range_constexpr(KS):
+                    kbase = k_row + fx.Index(ks * 32) + half * fx.Index(16)
+                    a_k = cat_bf16_16(
+                        buffer_ops.buffer_load(k_rsrc, kbase, vec_width=8, dtype=elem),
+                        buffer_ops.buffer_load(k_rsrc, kbase + fx.Index(8), vec_width=8, dtype=elem),
+                    )
+                    acc = wmma_f32_16x16x32_bf16(a_k, q_packs[ks], acc)
+                # lane holds keys (t*16 + half*8 + i) of head lo
+                scores = []
+                key0 = kv0 + fx.Int32(t * TK) + fx.Int32(half) * fx.Int32(8)
+                for i in range_constexpr(8):
+                    ok = andb(blk_ok, ArithValue(key0 + fx.Int32(i) <= tok_i32))
+                    raw_s = fx.Float32(_raw(Vec(acc)[i]))
+                    scores.append(fx.Float32(ok.select(_raw(raw_s), _raw(c_neg_inf))))
+                tiles.append(scores)
 
-            lmax = scores[0]
-            for x in scores[1:]:
+            lmax = tiles[0][0]
+            for x in tiles[0][1:] + tiles[1]:
                 lmax = fx.Float32(arith.MaxNumFOp(_raw(lmax), _raw(x)).result)
             m_new = fx.Float32(arith.MaxNumFOp(_raw(m_cur), _raw(crossgrp_max(lmax))).result)
             alpha = fx.Float32(rocdl.exp2(fx.Float32.ir_type, _raw((m_cur - m_new) * c_sl)))
-            p = [fx.Float32(rocdl.exp2(fx.Float32.ir_type, _raw((x - m_new) * c_sl))) for x in scores]
-            lsum = p[0]
-            for x in p[1:]:
+            p = [
+                [fx.Float32(rocdl.exp2(fx.Float32.ir_type, _raw((x - m_new) * c_sl))) for x in scores]
+                for scores in tiles
+            ]
+            lsum = p[0][0]
+            for x in p[0][1:] + p[1]:
                 lsum = fx.Float32(arith.AddFOp(_raw(lsum), _raw(x)).result)
             l_new = fx.Float32(alpha * l_cur + lsum)
 
-            # B column = head lo, K 0..15 from the two halves. K 16..31 stays zero,
-            # so only the low lane group contributes this step's 16 keys.
-            pB = pack_low16_bf16(p, grp0)
+            # B column = head lo; K 0..15 is the first tile's keys, K 16..31 the second's
+            pB = pack_pair_bf16(p[0], p[1])
 
             alpha_v = Vec.from_elements([alpha] * 8, fx.Float32)
             new_o = []
             for dt in range_constexpr(DT):
-                a_elems = []
-                d_col = fx.Index(dt * 16) + lo
-                for i in range_constexpr(16):
-                    ld = fx.BFloat16(_raw(Vec.load(v1, lds_v, [fx.Index(i) * fx.Index(STRIDE) + d_col])[0]))
-                    a_elems.append(fx.BFloat16(grp0.select(_raw(ld), _raw(c_bf0))))
-                a_v = Vec.from_elements(a_elems, elem)
+                a_v = lds16(lds_vt, (fx.Index(dt * 16) + lo) * fx.Index(stride_t) + half * fx.Index(TK))
                 new_o.append(wmma_f32_16x16x32_bf16(a_v, pB, Vec(o_cur[dt]) * Vec(alpha_v)))
 
             out = [m_new, l_new] + new_o
