@@ -4,18 +4,20 @@
 # GQA transformer with gated attention (weightless QK-norm, o_norm, sigmoid gate),
 # sliding-window / NoPE layer pattern, sandwich norms with learned residual gates,
 # latent sigmoid MoE, soft-capped untied head.
+# Generic: no sizes and no tokenizer model / path (only tokenizer_type). Not a model preset itself (it lives in a
+# subdirectory, like diffusion/flux_base.yaml); the size presets extend it:
+# muse_Spark_Open_816B_A42B.yaml (released sizes) and muse_spark_toy.yaml (small model).
 # Model code: primus/backends/megatron/core/models/muse_spark/.
 ###############################################################################
 
 extends:
-  - llama_base.yaml
+  - ../llama_base.yaml
 
 model_type: muse_spark
 
 tokenizer_type: HuggingFaceTokenizer
 normalization: RMSNorm
-norm_epsilon: 1.0e-05
-layernorm_epsilon: 1.0e-05
+layernorm_epsilon: 1.0e-05  # every Muse Spark norm (Megatron's --norm-epsilon dest)
 swiglu: true
 add_bias_linear: false
 add_qkv_bias: false
@@ -32,14 +34,22 @@ rotary_interleaved: false
 apply_rope_fusion: false
 qk_scale_factor: 5.4730064863875   # softmax_scale = qk_scale_factor / sqrt(kv_channels)
 window_size: [2048, 0]             # HF sliding_window (keys incl. the query); the config passes 2047 to TE
-# per layer, 1 = sliding window / 1 = NoPE; pattern of 4: [sliding, full(NoPE), sliding, sliding]
-window_attn_skip_freq: "([1,0,1,1]*16)"
-no_rope_freq: "([0,1,0,0]*16)"
+# per-layer window_attn_skip_freq / no_rope_freq (1 = sliding window / 1 = NoPE) depend on
+# num_layers, so the size presets set them (a list of num_layers entries)
+
+# context parallel: TE's p2p CP has no sliding-window backend (a p2p entry is rejected)
+cp_comm_type: all_gather
 
 # ---- residual / norms ----
 post_norm_eps: 1.0e-08
 residual_gate_temperature: 0.3
+# initial gate g for a run from random weights (checkpoints overwrite it): -0.9 gives
+# beta = sigmoid(-3) ~ 0.05, alpha ~ 1 (near-identity residual). The HF init (g ~ 0) makes the
+# backward grow ~2x per layer: at 62 layers the grad norm is Inf at iteration 1.
+residual_gate_init_value: -0.9
 embedding_norm: true
+hidden_dropout: 0.0                # HF has no dropout; the embedding norm runs after Megatron's dropout
+attention_dropout: 0.0
 
 # ---- head ----
 output_logit_multiplier: 0.17677669529663687
@@ -47,11 +57,15 @@ final_logit_softcapping: 20.0
 
 # ---- MoE (latent, sigmoid, selection bias) ----
 moe_layer_freq: 1
-moe_latent_size: null            # HF moe_hidden_size; set by the size preset
+moe_latent_size: null              # HF moe_hidden_size; required (set by the size preset)
 moe_router_score_function: sigmoid
 moe_router_pre_softmax: false
 moe_router_enable_expert_bias: true
-moe_router_bias_update_rate: 1.0e-3
+# Selection-bias update rate: 0 (bias frozen) by default. The released checkpoint carries
+# its trained selection bias (e_score_correction_bias), and fine-tuning should keep that
+# routing; an update rate would drift it every step. A pretraining run from random weights
+# sets a rate (e.g. 1.0e-3, the DeepSeek-V3 value) in its experiment config.
+moe_router_bias_update_rate: 0.0
 moe_router_topk_scaling_factor: 1.0
 moe_router_output_multiplier: 0.17677669529663687
 moe_router_load_balancing_type: none
@@ -60,10 +74,14 @@ moe_router_dtype: fp32
 moe_token_dispatcher_type: alltoall
 moe_grouped_gemm: true
 moe_use_legacy_grouped_gemm: false
-moe_permute_fusion: false
+moe_permute_fusion: false          # Megatron default here; the 816B / proxy experiment configs set true
 moe_shared_expert_overlap: false
 moe_shared_expert_intermediate_size: null
 
 mtp_num_layers: null
 expert_model_parallel_size: 1
 expert_tensor_parallel_size: 1     # post_expert_norm needs the full expert output row
+
+# ---- runtime checks / ROCm (Primus-only args, read by the Muse Spark before_train patches) ----
+muse_spark_skip_memory_check: false  # true skips the fail-fast weights + grads + optimizer memory check
+te_gemm_workspace_mb: 512          # ROCm: lower bound (MiB) per TE hipBLASLt GEMM workspace (split-K)

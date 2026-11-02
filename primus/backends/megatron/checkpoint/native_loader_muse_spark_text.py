@@ -4,13 +4,32 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""``muse_spark_text`` (the ``text_config.model_type`` of Muse Spark) -> the ``muse_spark`` converter."""
+"""Converter entry point named after the HF ``text_config.model_type`` (``muse_spark_text``).
 
-from primus.backends.megatron.checkpoint.native_loader_muse_spark import *  # noqa: F401,F403
-from primus.backends.megatron.checkpoint.native_loader_muse_spark import (  # noqa: F401
+The posttrain conversion hook imports this module for the Muse Spark family. The
+implementation is in ``native_loader_muse_spark``; this module only names the API.
+"""
+
+from primus.backends.megatron.checkpoint.native_loader_muse_spark import (
+    MappedStore,
+    MuseSparkConverter,
     build_margs,
     build_mcore_state_dict,
     build_model,
+    check_convert_size,
     convert,
     derive_megatron_fields,
+    vocab_size_with_padding,
 )
+
+__all__ = [
+    "MuseSparkConverter",
+    "MappedStore",
+    "build_margs",
+    "build_mcore_state_dict",
+    "build_model",
+    "check_convert_size",
+    "convert",
+    "derive_megatron_fields",
+    "vocab_size_with_padding",
+]

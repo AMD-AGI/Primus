@@ -17,11 +17,25 @@ set -euo pipefail
 #   * PRIMUS_SKIP_PIP is set (standard pip-skip switch), OR
 #   * a Megatron checkpoint is already configured (pretrained_checkpoint -> no
 #     conversion at all), OR
-#   * the configured HF model resolves to a supported native family and native
-#     conversion is not explicitly disabled (native_ckpt_convert: false).
+#   * the conversion hook will take the native path, OR
+#   * the conversion hook will stop with an error before any converter runs
+#     (e.g. a bad native_ckpt_convert value, native_ckpt_convert: true on a family
+#     without a native converter, or native_ckpt_convert: false on a family without a
+#     Megatron-Bridge model, such as Muse Spark).
+# Each case prints its own reason. The Bridge path and a config without hf_path
+# install the dependencies (the legacy behaviour), and so does any action this
+# script does not know. When the decision itself fails (any exception, SystemExit
+# included, or python3 itself), the script prints why and installs; Ctrl-C stops it.
+# Note the asymmetry: an "error" action is a config error that plan_conversion()
+# recognised, which the conversion hook raises before any converter runs (no install
+# needed); an exception means the decision is unknown, so the install is kept.
+# --config <path> and --config=<path> are both read; when given more than once, the last
+# one counts (as in the conversion hook's argparse). The decision reads the config and a
+# local HF config.json; for a Hub id it reads that id's config.json (HF cache, else a
+# download) only under an explicit native_ckpt_convert: true.
 #
-# The native-vs-bridge decision reuses 01_convert_checkpoints.py's own helpers
-# so it can never drift from the actual conversion behaviour.
+# The decision is 01_convert_checkpoints.py's own plan_conversion(), the function
+# main() acts on, so the two can never disagree.
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,9 +51,11 @@ fi
 CONFIG_FILE=""
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
+    # no break: the last --config wins, as in the conversion hook's argparse
     if [[ "${args[$i]}" == "--config" ]]; then
         CONFIG_FILE="${args[$((i + 1))]:-}"
-        break
+    elif [[ "${args[$i]}" == --config=* ]]; then
+        CONFIG_FILE="${args[$i]#--config=}"
     fi
 done
 
@@ -47,7 +63,8 @@ done
 if [[ -n "${CONFIG_FILE}" ]]; then
     [[ "${CONFIG_FILE}" == /* ]] || CONFIG_FILE="${PRIMUS_ROOT}/${CONFIG_FILE#./}"
     set +e
-    DECISION="$(cd "${PRIMUS_ROOT}" && python3 - "${CONFIG_FILE}" 2>/dev/null <<'PY'
+    # stderr is kept in DECISION too: a crash of the interpreter itself is then shown
+    DECISION="$(cd "${PRIMUS_ROOT}" && python3 - "${CONFIG_FILE}" 2>&1 <<'PY'
 import importlib.util
 import os
 import sys
@@ -58,35 +75,52 @@ hook_path = os.path.join(
     "runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py",
 )
 
+# The plan_conversion() actions that skip the install (the Bridge never runs), with
+# why. Every other action -- "bridge", "no_hf_path" and any action added later --
+# installs: on uncertainty keep the legacy install.
+SKIP_REASONS = {
+    "pretrained": "a Megatron checkpoint is configured (no conversion)",
+    "native": "native (bridge-free) conversion will run",
+    "error": "the conversion hook will stop with an error before any converter runs (see its message)",
+}
+
 
 def decide():
+    """``("INSTALL" | "SKIP", reason)``: the hook's own plan_conversion() decision."""
     spec = importlib.util.spec_from_file_location("_convert_hook", hook_path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    hf_path, pretrained = mod.get_checkpoint_config(cfg)
-    if pretrained:
-        return "SKIP"  # checkpoint already provided; no conversion at all
-    opts = mod.read_native_opts(cfg)
-    fam = mod._detect_native_family(hf_path) if hf_path else None
-    if opts["enabled"] is False:
-        return "INSTALL"  # bridge explicitly forced -> deps needed
-    if opts["enabled"] is True or fam is not None:
-        return "SKIP"  # native (bridge-free) path -> deps not needed
-    return "INSTALL"  # unsupported family + hf_path -> bridge fallback
+    action = mod.plan_conversion(cfg)[0]
+    if action in SKIP_REASONS:
+        return "SKIP", SKIP_REASONS[action]
+    return "INSTALL", f"conversion action {action}"
 
 
 try:
-    result = decide()
-except Exception:
-    result = "INSTALL"  # on any uncertainty, keep the legacy behaviour
-print("__DECISION__:" + result)
+    result, reason = decide()
+except KeyboardInterrupt:
+    sys.exit(130)  # Ctrl-C stops the hook; it never becomes an install decision
+except (Exception, SystemExit) as exc:  # noqa: BLE001 - keep the legacy install, say why
+    result, reason = "INSTALL", f"could not compute the conversion decision ({type(exc).__name__}: {exc})"
+print("__DECISION__:" + result + ":" + reason.replace("\n", " "))
 PY
 )"
+    DECISION_RC=$?
     set -e
-    if printf '%s\n' "${DECISION}" | grep -q '__DECISION__:SKIP'; then
-        echo "[00_install_requirements] native (bridge-free) conversion will run -> skipping Megatron-Bridge dependency install"
-        exit 0
+    if [[ ${DECISION_RC} -eq 130 ]]; then
+        echo "[00_install_requirements] interrupted while computing the conversion decision" >&2
+        exit 130
     fi
+    DECISION_LINE="$(grep -m1 '^__DECISION__:' <<<"${DECISION}" || true)"
+    case "${DECISION_LINE}" in
+        __DECISION__:SKIP:*)
+            echo "[00_install_requirements] ${DECISION_LINE#__DECISION__:SKIP:} -> skipping Megatron-Bridge dependency install"
+            exit 0 ;;
+        __DECISION__:INSTALL:*)
+            echo "[00_install_requirements] ${DECISION_LINE#__DECISION__:INSTALL:} -> installing the Megatron-Bridge dependencies" ;;
+        *)
+            echo "[00_install_requirements] could not compute the conversion decision (python3 gave no decision: ${DECISION:0:500}) -> installing the Megatron-Bridge dependencies" ;;
+    esac
 fi
 
 # 4) Legacy Megatron-Bridge path: install its conversion dependencies.

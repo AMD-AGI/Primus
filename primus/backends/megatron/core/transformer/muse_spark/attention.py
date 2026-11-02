@@ -15,23 +15,26 @@ the layer spec (:class:`MuseSparkQKNorm`); the query scale
 ``qk_scale_factor`` is folded into ``softmax_scale`` by the config.
 """
 
-import torch
 from megatron.core.transformer.attention import SelfAttention
 
-from primus.backends.megatron.core.transformer.muse_spark.norms import _rms
+from primus.backends.megatron.core.transformer.muse_spark.norms import (
+    MuseSparkRMSNorm,
+    _rms,
+)
 
 __all__ = ["MuseSparkQKNorm", "MuseSparkSelfAttention"]
 
 
-class MuseSparkQKNorm(torch.nn.Module):
-    """Weightless per-head RMSNorm (fp32 math) for the q / k heads."""
+class MuseSparkQKNorm(MuseSparkRMSNorm):
+    """Weightless per-head RMSNorm for the q / k heads: ``MuseSparkRMSNorm(with_scale=False)``.
 
-    def __init__(self, config=None, hidden_size: int = None, eps: float = 1e-5, **_kw):
-        super().__init__()
-        self.eps = float(eps)
+    Only fixes ``with_scale=False`` (Megatron builds q / k layernorms with
+    ``(config=, hidden_size=, eps=)``); the fp32 math is MuseSparkRMSNorm's.
+    """
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return _rms(x.float(), self.eps).type_as(x)
+    def __init__(self, config=None, hidden_size: int = None, eps: float = 1e-5, **kw):
+        kw.pop("with_scale", None)
+        super().__init__(config, hidden_size, eps=eps, with_scale=False, **kw)
 
 
 class MuseSparkSelfAttention(SelfAttention):

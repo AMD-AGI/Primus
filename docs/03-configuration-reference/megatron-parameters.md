@@ -464,7 +464,7 @@ models:
 |-----------|---------|-------------|
 | `use_legacy_models` | `false` | Use legacy Megatron model code paths. |
 | `deprecated_use_mcore_models` | `false` | Deprecated flag for Megatron-Core models; prefer current `transformer_impl` + stack. |
-| `model_type` | `gpt` | `gpt` or `mamba` family. |
+| `model_type` | `gpt` | `gpt` or `mamba` family; Primus model presets also set their own types (e.g. `muse_spark`, `deepseek_v4`, `glm5_next`), which select model-specific patches. |
 | `num_layers` | `24` | Transformer layers (decoder or unified stack). |
 | `encoder_num_layers` | `null` | Encoder depth (encoder–decoder). |
 | `decoder_num_layers` | `null` | Decoder depth. |
@@ -688,6 +688,46 @@ models:
 |-----------|---------|-------------|
 | `pp_warmup` | `false` | *Primus:* warm-up PP stages to reduce first-iteration latency. |
 | `dump_pp_data` | `false` | *Primus:* dump PP tensors for debugging. |
+
+### 11.5 Muse Spark (`models/megatron/muse_spark/muse_spark_base.yaml`)
+
+These settings (YAML keys in `muse_spark_base.yaml`, and the environment variables marked (env)) apply only to a Muse Spark model (`model_type: muse_spark`).
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `muse_spark_skip_memory_check` | `false` | *Primus:* `true` skips the `before_train` check that fails fast when weights + grads + optimizer states per GPU exceed GPU memory. A string is true for `1` / `true` / `yes` / `on` and false for `0` / `false` / `no` / `off` or empty (any case). Another value is false and gives a warning. |
+| `PRIMUS_TURBO_DEEPEP_INTERNODE` (env) | unset | *Primus:* Turbo DeepEP (`use_turbo_deepep`) runs only inside one node unless Primus-Turbo is built with rocSHMEM. When the expert group (expert TP x EP) spans more GPUs than one node has, Muse Spark turns DeepEP off and uses the `alltoall` dispatcher, with a warning. Set `1` / `true` / `yes` / `on` to keep DeepEP across nodes with a rocSHMEM build. At EP >= 16, `turbo_deepep_num_cu` must be <= 32. An environment variable, not a YAML key. |
+| `MUSE_SPARK_CHECK_AUDIO` (env) | unset | *Primus:* `1` checks that the audio feature count equals the audio token count on GPU inputs too (one device sync per step). CPU inputs are always checked. An environment variable, not a YAML key. |
+| `make_vocab_size_divisible_by` | (not read) | *Primus:* For Muse Spark the embedding / output rows are `vocab_size` rounded up to a multiple of 64 at every TP (202048 for the released model), the native converter's rule; the `muse_spark_vocab` patch sets `padded_vocab_size` that way and does not read this key (the module default 128 would not match the converted checkpoint). Set `padded_vocab_size` for other rows. |
+| `te_gemm_workspace_mb` | `512` | *Primus:* ROCm only. Lower bound (MiB) for each TE hipBLASLt GEMM workspace buffer: TE uses `max(TE default, this value)`. This avoids `HIPBLASLT Error: 6` for split-K GEMMs. The cost is about `size x (1 + number of GEMM streams)` per GPU. Unset or empty uses 512. Integral floats and strings are accepted (`512.0`, `"5e2"`). Any other value (e.g. `0`, `1.5`, `abc`, a bool) stops the run with a `ValueError`. |
+
+### 11.6 Native HF checkpoint conversion (`sft_trainer` / `post_trainer`)
+
+The Megatron post-training hook `runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py` reads these keys from the `sft_trainer` / `post_trainer` module overrides (not `pre_trainer`). They apply to every model family with a native converter (Qwen3, DeepSeek, Llama, Muse Spark).
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `native_ckpt_convert` | unset | *Primus:* `true` runs the native (bridge-free) HF to Megatron converter. `false` forces Megatron-Bridge. Unset: native for Qwen3 / DeepSeek / Llama / Muse Spark. For Muse Spark `false` is an error (Megatron-Bridge has no Muse Spark model). Accepted: a bool, `true`/`yes`/`on` / `false`/`no`/`off` (any case), and the number 1 / 0 (also `"1"`, `"1.0"`, `"0"`, `"0.0"`). An empty string means unset. Any other value (e.g. `2`, `1.5`, `y`, `enabled`) stops the hook with an error. |
+| `native_ckpt_dtype` | from the HF `torch_dtype` (else `bf16`) | *Primus:* The saved dtype of the native converter: `bf16`, `fp16` or `fp32`. The Muse Spark converter stops on any other value. |
+| `native_ckpt_max_params` | `60000000000` (60B) | *Primus:* Muse Spark converter only. The largest estimated parameter count that the single-process converter accepts. The converter builds the model with TP=PP=EP=1 and saves a `torch_dist` checkpoint; Megatron reshards it on load, so a run with any TP / PP / EP loads it. The full 816B model is above the limit (the single process holds it in host RAM), so it has no converter route. Accepts a positive integer (a string may use `_` separators or an integral float such as `60e9`). The conversion hook checks the value on every rank before any conversion starts; another value stops it with an error. For the released Hub id (`meta-models/Muse-Spark-Open-816B-A42B`, ~816B) the hook stops at once, before any download, and asks for a converted `pretrained_checkpoint`. |
+
+The HF source is `hf_path`, else `tokenizer_model`: a local HF directory or a Hugging Face Hub id (`org/name`). A Hub id is matched only to the families without a Megatron-Bridge model (Muse Spark). Every node routes on its own, so the decision must not depend on one node's HF cache. With `native_ckpt_convert` unset, only the exact released id (`meta-models/Muse-Spark-Open-816B-A42B`) matches; the routing reads neither the HF cache nor the network, and there is no repo-name substring match. For a fine-tuned or renamed Muse Spark repo, set `native_ckpt_convert: true`: then the Hub id's own `config.json` decides (from the HF cache, else downloaded), so every node reads the same file. For those families `native_ckpt_convert: false` stays an error, and the native converter uses the snapshot in the HF cache (downloaded when missing; the Muse Spark size cap is checked on the config before the weights are downloaded). Other Hub ids keep the Megatron-Bridge path.
+
+**Environment variables (not YAML keys).** The hook reads these from the environment of each node. A YAML key of the same name is ignored.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PRIMUS_CKPT_CONVERT_TIMEOUT` | `14400` (4 h) | The longest time that the other nodes wait for rank 0's conversion while rank 0 is alive. The same for every family: a dead rank 0 is found by `PRIMUS_CKPT_CONVERT_HEARTBEAT_TIMEOUT`, not by this value. When no lock file appears for 600 s, the nodes stop (rank 0 did not start). A finite number > 0. |
+| `PRIMUS_CKPT_CONVERT_HEARTBEAT_TIMEOUT` | `300` | Rank 0 touches `<checkpoint>.converting.lock` every 30 s while it converts. When the lock file has not changed for this many seconds (measured on the waiting node's own clock), the waiting nodes stop with an error: rank 0 was killed (SIGKILL, out of memory) and could not write a `.failed` marker. Remove the stale lock file before you relaunch. A finite number > 30. |
+| `PRIMUS_CKPT_CONVERT_RUN_ID` | `$SLURM_JOB_ID` + `$SLURM_STEP_ID` (+ `$SLURM_RESTART_COUNT`), else `$MASTER_ADDR:$MASTER_PORT` | A token that is the same on every node of one launch. Rank 0 writes it into `<checkpoint>.done` and, when the conversion fails, into `<checkpoint>.failed`. A `.failed` marker written *during* a node's wait stops that node at once. A marker (`.done` or `.failed`) with another launch's token is never this run's, also when it appears during the wait: it neither stops the node nor lets it go on. A marker that was already there when the node started to wait stops it only when no lock file is there now and none has been there for `PRIMUS_CKPT_CONVERT_MARKER_GRACE` seconds, also when its token matches: an explicit run id that you keep constant, and the `$MASTER_ADDR:$MASTER_PORT` fallback (torchrun / k8s, default port 29500), are the same on a relaunch, so a matching token does not prove the marker is new. A `.done` that was there before the wait only counts when the checkpoint is complete and no lock file is present. |
+| `PRIMUS_CKPT_CONVERT_MARKER_GRACE` | `120` | See `PRIMUS_CKPT_CONVERT_RUN_ID`. A finite number > 0; every rank checks it before any conversion starts. If rank 0 starts more than this many seconds after the other nodes, a marker left by an earlier failed launch can stop them; raise the value in that case. |
+
+**Muse Spark at full size.** The native converter runs in one process (it builds with TP=PP=EP=1 and saves `torch_dist`, which Megatron reshards on load) and is capped by `native_ckpt_max_params` (60B), because it holds the whole model in host RAM. For the 816B model the default flow (the Hub id with no `pretrained_checkpoint`) therefore stops up front with an error that lists the routes. Primus ships no distributed converter. The supported routes are:
+
+1. On a host with enough RAM (about 4 bytes per parameter, ~3.3 TB for 816B), set `native_ckpt_max_params: 816000000000` (or higher). The hook then converts as for any other model. This is the one in-repo route from the HF weights.
+2. Set `pretrained_checkpoint` to a Megatron `torch_dist` checkpoint made elsewhere (any TP / PP / EP). The hook then skips conversion.
+3. Point `hf_path` / `tokenizer_model` at a smaller checkpoint, such as the 4-layer proxy (~58B), which converts with the default cap.
+
 
 ---
 

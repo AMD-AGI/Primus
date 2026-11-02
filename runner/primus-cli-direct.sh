@@ -700,6 +700,29 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
         LOG_INFO_RANK0 "[direct] NUMA binding: AUTO (default OFF)"
     fi
 
+    # Single node, loopback rendezvous only: no other node has to agree on the port, so a
+    # MASTER_PORT that is in use on this host (e.g. an ephemeral port of another process
+    # on a shared node) is replaced by one the kernel reports unused, which avoids most
+    # EADDRINUSE failures (the port is released before torchrun binds it, so it is not a
+    # guarantee). Multi-node runs, a non-loopback MASTER_ADDR, a value that is not a port,
+    # other bind errors, a MASTER_PORT pinned with --env / direct.env (STEP 8, final) and
+    # PRIMUS_KEEP_MASTER_PORT=1/true/yes/on keep the port as given; a dry run does not
+    # probe; a helper failure is logged and keeps the port. Hooks (STEP 6) and patches
+    # (STEP 7) ran before this and saw the requested port, which only names the run
+    # (see helpers/local_master_port.py and
+    # docs/03-configuration-reference/environment-variables.md).
+    if [[ "$DRY_RUN_MODE" != "1" ]] && ! grep -q '^MASTER_PORT=' <<< "${direct_config[env]:-}"; then
+        if port="$(python3 "${RUNNER_DIR}/helpers/local_master_port.py" \
+            "${NNODES}" "${MASTER_ADDR}" "${MASTER_PORT}" 2>&1)"; then
+            if [[ -n "$port" && "$port" != "${MASTER_PORT}" ]]; then
+                LOG_WARN "[direct] MASTER_PORT ${MASTER_PORT} is in use on this host; single-node run uses unused port ${port} (set PRIMUS_KEEP_MASTER_PORT=1 to keep it)"
+                export MASTER_PORT="$port"
+            fi
+        else
+            LOG_WARN "[direct] MASTER_PORT check failed, keeping ${MASTER_PORT}: ${port:-no output}"
+        fi
+    fi
+
     DISTRIBUTED_ARGS=(
         --nproc_per_node "${GPUS_PER_NODE:-8}"
         --nnodes "${NNODES:-1}"

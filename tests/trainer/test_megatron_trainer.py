@@ -5,6 +5,7 @@
 ###############################################################################
 
 
+import math
 import os
 import re
 import subprocess
@@ -685,44 +686,66 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    def _muse_spark(self, tag, exp_path, extra=None):
-        # Muse Spark text decoder (gated attention, residual gates, latent MoE),
-        # cut to 4 layers so it fits one node; mock data.
-        run_script(
+    # Muse Spark (muse_spark): new cases, so all three are in the weekly burn-in tier
+    # (tests/README.md: a new case moves to the per-PR tier by deleting the marker once a
+    # weekend run is green). Until then no per-PR trainer case trains Muse Spark: per-PR
+    # coverage is the CPU unit tests named below. test_muse_Spark_Open_816B_A42B is the
+    # case to promote first: on
+    # one 8-GPU node, the full example cut to 4 layers (the released 816B per-layer dims)
+    # with 16 experts top-4, EP 8 (alltoall dispatch + Turbo grouped GEMM, the example's
+    # default; DeepEP is not exercised) and seq 1024. The toy-size preset and the
+    # 256-expert proxy stay weekly. The CPU coverage of the model code, patches and
+    # converter is in tests/unit_tests/backends/megatron/muse_spark/. Every case checks that the Muse Spark model code
+    # ran; run_script already requires "Training completed." and a finite loss / grad norm on
+    # every logged iteration.
+    _MUSE_SPARK_MARKERS = (
+        "Loaded Muse-Spark model_provider",
+        "[Patch:megatron.args.muse_spark_layer_patterns]",
+    )
+
+    _MUSE_SPARK_TRAIN_ITERS = 3  # with --log_interval 1: one loss line each
+
+    def _muse_spark(self, tag, exp_path, extra=None, ep=1):
+        out, _ = run_script(
             self.__class__.__name__,
-            f"muse_spark_{tag}_{GPU_PLATFORM.lower()}_bf16",
+            tag,
             exp_path=exp_path,
-            env_override={},
+            env_override={"PRIMUS_EP": str(ep), "PRIMUS_PP": "1"},
             extra_args=[
-                "--num_layers",
-                "4",
                 "--train_iters",
-                "3",
+                str(self._MUSE_SPARK_TRAIN_ITERS),
+                "--log_interval",
+                "1",
                 "--micro_batch_size",
                 "1",
                 "--global_batch_size",
                 "8",
+                "--expert_model_parallel_size",
+                str(ep),
                 *(extra or []),
             ],
         )
+        for marker in self._MUSE_SPARK_MARKERS:
+            assert marker in out, f"[{tag}] Muse Spark marker {marker!r} not in the training log"
+        # \S+ also takes "nan" / "inf" (float() parses them), so a non-finite loss fails below
+        losses = [float(v) for v in re.findall(r"lm loss: (\S+?)(?=\s|\||$)", out)]
+        assert (
+            len(losses) == self._MUSE_SPARK_TRAIN_ITERS
+        ), f"[{tag}] expected one 'lm loss' per iteration: {losses}"
+        assert all(math.isfinite(v) and 0.0 < v < 30.0 for v in losses), f"[{tag}] bad lm loss {losses}"
 
+    @pytest.mark.weekly
     def test_muse_Spark_Open_816B_A42B(self):
-        # Muse-Spark-Open-816B-A42B text decoder, cut to 4 layers and 3 iterations.
-        # Fewer experts and a small batch keep the 4-layer cut on one node; mock data.
-        run_script(
-            self.__class__.__name__,
+        # The Muse Spark case meant for the per-PR tier once a weekend run is green (then drop
+        # the weekly marker, tests/README.md): the full-model example (62 layers, 256
+        # experts, >= 16 nodes) cut on the command line to 4 layers and 16 experts so EP 8
+        # fits one node; the full depth is covered by the multi-node run, not by CI.
+        self._muse_spark(
             f"muse_Spark_Open_816B_A42B_{GPU_PLATFORM.lower()}",
-            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/muse_Spark_Open_816B_A42B-BF16-pretrain.yaml",
-            env_override={},
-            extra_args=[
+            f"examples/megatron/configs/{GPU_PLATFORM}/muse_Spark_Open_816B_A42B-BF16-pretrain.yaml",
+            [
                 "--num_layers",
                 "4",
-                "--train_iters",
-                "3",
-                "--micro_batch_size",
-                "1",
-                "--global_batch_size",
-                "8",
                 "--seq_length",
                 "1024",
                 "--max_position_embeddings",
@@ -732,25 +755,25 @@ class TestMegatronTrainer(PrimusUT):
                 "--moe_router_topk",
                 "4",
             ],
+            ep=8,
         )
 
-    def test_muse_spark_base_bf16(self):
+    @pytest.mark.weekly
+    def test_muse_spark_toy_bf16(self):
+        # Toy-size preset muse_spark_toy.yaml (hidden 1024, 16 experts).
         self._muse_spark(
-            "base", f"examples/megatron/configs/{GPU_PLATFORM}/muse_spark_base-BF16-pretrain.yaml"
+            f"muse_spark_toy_{GPU_PLATFORM.lower()}_bf16",
+            f"examples/megatron/configs/{GPU_PLATFORM}/muse_spark_toy-BF16-pretrain.yaml",
         )
 
-    def test_muse_spark_816B_A42B_bf16(self):
-        self._muse_spark(
-            "816b",
-            f"examples/megatron/configs/{GPU_PLATFORM}/muse_Spark_Open_816B_A42B-BF16-pretrain.yaml",
-            ["--num_experts", "16", "--moe_router_topk", "4"],
-        )
-
+    @pytest.mark.weekly
     def test_muse_spark_816B_A42B_proxy_bf16(self):
+        # The proxy with all 256 released experts, EP 8 (32 per rank).
         self._muse_spark(
-            "proxy",
+            f"muse_spark_proxy_{GPU_PLATFORM.lower()}_bf16",
             f"examples/megatron/configs/{GPU_PLATFORM}/muse_Spark_Open_816B_A42B-proxy-BF16-pretrain.yaml",
-            ["--num_experts", "16", "--moe_router_topk", "4"],
+            ["--seq_length", "1024", "--max_position_embeddings", "1024"],
+            ep=8,
         )
 
     def test_zaya1_8B_bf16(self):

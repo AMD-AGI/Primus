@@ -23,14 +23,21 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from torch.distributed import ProcessGroup
 
+from primus.backends.megatron.core.distributed.fsdp2_dtype_islands import ISLAND_ATTR
 from primus.core.utils.module_utils import warning_rank_0
 
 try:
     from torch.distributed import DeviceMesh
     from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 
+    try:
+        from torch.distributed.fsdp import FSDPModule
+    except ImportError:  # older torch
+        from torch.distributed._composable.fsdp import FSDPModule
+
     HAVE_FSDP = True
 except ImportError:
+    FSDPModule = ()  # isinstance(m, ()) is False: nothing is FSDP-managed
     HAVE_FSDP = False
 
 
@@ -50,6 +57,120 @@ def _validate_mesh_ranks(rank_tensor, shard_group, replicate_group):
         if current_rank in col:
             if sorted(col) != sorted(replicate_group_ranks):
                 raise RuntimeError(f"Mesh replicate ranks {col} != group ranks {replicate_group_ranks}")
+
+
+def _is_fsdp_module(m) -> bool:
+    return isinstance(m, FSDPModule)
+
+
+def _island_kwargs(fsdp_kwargs: dict, dtype: torch.dtype) -> dict:
+    """fsdp kwargs for a group of ``dtype`` params kept apart from the model's policy.
+
+    The group keeps its own dtype end to end: no param cast for the all-gather and a
+    reduce-scatter in ``dtype`` (e.g. an fp32 router weight is neither cast to bf16
+    for compute nor reduced in bf16, whatever the model's ``mp_policy`` is).
+    """
+    kw = dict(fsdp_kwargs)
+    kw["mp_policy"] = MixedPrecisionPolicy(param_dtype=None, reduce_dtype=dtype, cast_forward_inputs=False)
+    return kw
+
+
+_ISLAND_WARNED_ATTR = "_primus_fsdp2_island_warned"  # set once its "no group" warning is logged
+
+
+def _shard_dtype_islands(module: torch.nn.Module, fsdp_kwargs: dict) -> list:
+    """Shard the opted-in dtype "islands" under ``module`` as their own FSDP2 groups.
+
+    Opt-in only: a module class sets ``fsdp2_dtype_island = True`` when its *direct*
+    parameters must keep their own dtype, whatever it is (e.g. Muse Spark's fp32 router
+    weight and residual gates, kept fp32 like HF's ``_keep_in_fp32_modules``). Each such module
+    is sharded on its own with ``_island_kwargs`` (its own param dtype for compute and
+    reduce-scatter). This holds for every model policy: with ``params_dtype=fp32`` +
+    bf16 compute (``mp_policy`` param/reduce bf16) the islands are still not cast or
+    reduced in bf16.
+
+    FSDP2 groups are per module, so a child of an island that has (not yet sharded)
+    parameters, e.g. the bf16 norm inside the gated residual, is split off first with
+    the model kwargs.
+
+    No module opts in -> a no-op: nothing is checked or split, and the caller's
+    ``fully_shard`` is the only sharding applied.
+
+    An island's dtype is that of its direct *trainable* parameters; when it has any,
+    its frozen direct parameters do not decide (or have to match) the dtype. A fully
+    frozen island gets its own group only when its frozen
+    parameters share one dtype; with mixed frozen dtypes it is left to the parent
+    group (FSDP2 does not check frozen dtypes), never an error.
+    Raises ValueError when ``module`` itself opts in (it has to be a submodule) or an
+    island's direct trainable parameters mix dtypes.
+    Returns the new groups in creation order (children before parents).
+    """
+    islands = [m for m in module.modules() if getattr(m, ISLAND_ATTR, False) and not _is_fsdp_module(m)]
+    if not islands:
+        return []
+    if module in islands:
+        raise ValueError(f"FSDP2: {type(module).__name__} sets {ISLAND_ATTR} but is the module being wrapped")
+
+    managed = set()
+    for m in module.modules():
+        if m is not module and _is_fsdp_module(m):
+            managed.update(id(p) for p in m.parameters())
+
+    def _unmanaged(m, recurse=True):
+        return [p for p in m.parameters(recurse=recurse) if id(p) not in managed]
+
+    # the root is never an island (rejected above), so every island has a non-empty name
+    names = {id(m): name for name, m in module.named_modules()}
+    plan = []
+    for m in islands:  # module.modules() order: parents first
+        own = _unmanaged(m, recurse=False)
+        trainable = {p.dtype for p in own if p.requires_grad}
+        if len(trainable) > 1:
+            raise ValueError(
+                f"FSDP2: island {names[id(m)]} directly owns trainable parameters of several dtypes "
+                f"{sorted(str(d) for d in trainable)}; FSDP2 needs one dtype per group"
+            )
+        if trainable:
+            plan.append((m, next(iter(trainable))))
+            continue
+        # Fully frozen island (e.g. a frozen router in a partial finetune): keep it in its
+        # own dtype when it has one. Otherwise the island opted in but gets no group of its
+        # own: say so, as nothing else would show it.
+        # This function runs once per wrapped submodule and again on the root, so an
+        # island without a group is seen again: warn once per module.
+        frozen = {p.dtype for p in own}
+        if len(frozen) == 1:
+            plan.append((m, next(iter(frozen))))
+        elif getattr(m, _ISLAND_WARNED_ATTR, False):
+            pass
+        elif not own:
+            setattr(m, _ISLAND_WARNED_ATTR, True)
+            warning_rank_0(
+                f"FSDP2: {ISLAND_ATTR} module {names[id(m)]} owns no unsharded parameters directly; "
+                "it gets no group of its own (its children follow their own wrapping)"
+            )
+        else:
+            setattr(m, _ISLAND_WARNED_ATTR, True)
+            warning_rank_0(
+                f"FSDP2: frozen {ISLAND_ATTR} module {names[id(m)]} mixes dtypes "
+                f"{sorted(str(d) for d in frozen)}; it gets no group of its own, so its parameters "
+                "go to the next enclosing group that is sharded (an enclosing island or wrapped "
+                "module); FSDP2 does not check frozen dtypes"
+            )
+
+    groups = []
+
+    def _shard(m, kw):
+        fully_shard(m, **kw)
+        managed.update(id(p) for p in m.parameters())
+        groups.append(m)
+
+    for m, dtype in reversed(plan):  # children before parents
+        for child in m.children():
+            if _unmanaged(child):
+                _shard(child, fsdp_kwargs)
+        _shard(m, _island_kwargs(fsdp_kwargs, dtype))
+    return groups
 
 
 class PrimusTorchFullyShardedDataParallel(_BaseDataParallel):
@@ -297,6 +418,7 @@ class PrimusTorchFullyShardedDataParallel(_BaseDataParallel):
         # ============================================================================
         wrapped_modules_set = set()
         wrapped_list = []
+        n_extra_groups = 0  # from _shard_dtype_islands: islands + their unmanaged children (not prefetched)
 
         for sub_module in self.module.modules():
             should_wrap = any(
@@ -318,6 +440,7 @@ class PrimusTorchFullyShardedDataParallel(_BaseDataParallel):
             if is_descendant:
                 continue
 
+            n_extra_groups += len(_shard_dtype_islands(sub_module, kwargs))
             fully_shard(sub_module, **kwargs)
             wrapped_modules_set.add(sub_module)
             wrapped_list.append(sub_module)
@@ -331,6 +454,10 @@ class PrimusTorchFullyShardedDataParallel(_BaseDataParallel):
             # wrong-direction forward-prefetch all-gathers that expose communication and
             # inflate peak memory (matches Megatron upstream, which only sets backward
             # prefetch when recompute is on). Skip explicit forward prefetch in that case.
+            # Dtype islands (small nested groups: router weight, residual gates) are
+            # not prefetched: FSDP2 unshards each in its own pre-forward / pre-backward
+            # hook. Their all-gathers are tiny (a few KB-MB per layer) and run exposed;
+            # prefetching them would only add peak memory.
             if not recompute_on:
                 fwd_targets = wrapped_list[i + 1 : i + 1 + prefetch_depth]
                 if fwd_targets:
@@ -342,7 +469,13 @@ class PrimusTorchFullyShardedDataParallel(_BaseDataParallel):
                 mod.set_modules_to_backward_prefetch(bwd_targets)
 
         # Wrap the root module as required by the FSDP API
+        n_extra_groups += len(_shard_dtype_islands(self.module, kwargs))
         fully_shard(self.module, **kwargs)
+        if n_extra_groups:
+            log_rank_0(
+                f"FSDP2: {n_extra_groups} extra groups for {ISLAND_ATTR} modules and their children "
+                "(islands all-gather and reduce-scatter in their own dtype; not prefetched)"
+            )
 
         if use_fp8_all_gather:
             from primus.backends.megatron.core.distributed.fsdp2_fp8_all_gather import (

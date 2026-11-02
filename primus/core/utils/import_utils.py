@@ -74,7 +74,9 @@ def get_model_provider(model_type="gpt"):
             glm5_next_module.glm5_next_builder,
         )
 
-    # Primus-owned: Muse Spark text decoder (gated residuals, latent MoE)
+    # Primus-owned: Muse Spark text decoder (gated residuals, latent MoE). A string literal,
+    # like the other families, so no other model imports the Muse Spark package (and the
+    # config schema check sees the branch); a test keeps it equal to layer_patterns.MODEL_TYPE.
     if model_type == "muse_spark":
         muse_spark_module = importlib.import_module(
             "primus.backends.megatron.core.models.muse_spark.muse_spark_builders"

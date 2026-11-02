@@ -3,9 +3,42 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:muse_spark_816B_A42B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
-# Muse-Spark-Open-816B-A42B (text decoder) BF16 pretraining on MI355X.
-#   model: primus/configs/models/megatron/muse_Spark_Open_816B_A42B.yaml (62 layers) or
-#          muse_spark_816B_A42B_proxy.yaml (first MUSE_SPARK_NUM_LAYERS layers).
+# Muse-Spark-Open-816B-A42B (text decoder, 62 layers, 256 experts top-8) BF16
+# pretraining on MI355X (288 GB = ~268 GiB per GPU). This file trains the FULL model; it
+# does not cut depth.
+#
+# Memory: 816B params x 18 bytes (bf16 weight 2 + fp32 main grad 4 + fp32 master 4 +
+# Adam exp_avg / exp_avg_sq 8) = ~14.7 TB of model states before activations. The
+# distributed optimizer shards only the 12 optimizer bytes: the dense ones over data
+# parallel (DP x CP = GPUs / (TP x PP)), the expert ones over the expert data parallel
+# group (GPUs / (EP x expert TP x PP)), which is 1 in the default layouts below, so the
+# expert optimizer bytes are not sharded there. The 6 bytes of weight + grad are only
+# split by TP x PP (dense) or EP x PP (experts) (FSDP would shard them too).
+#
+# Defaults: 16 nodes (128 GPUs), TP 1, PP 2 (31 layers per stage), EP 64 (4 experts per
+# GPU), DP 64, GBS 256 (4 micro-batches of 1 per DP rank). Model states are ~165 GiB per
+# GPU (the memory-check estimate), so ~100 GiB are left for activations at seq 4096;
+# enable recompute (below) for longer sequences or larger micro-batches. Before training,
+# the megatron.muse_spark.memory_check patch compares the model states per GPU with the
+# GPU memory; when they cannot fit it stops with a ValueError that names a layout
+# computed for this GPU.
+# Other layouts: set PRIMUS_TP / PRIMUS_PP / PRIMUS_EP and GBS (GBS must be a multiple of
+# MBS * DP, DP = GPUs / (TP * PP)). EP must divide 256 and GPUs / PP. TP 8 (with SP)
+# cuts the dense states to ~114 GiB per GPU on 16 nodes. The native converter builds at
+# TP=PP=EP=1 and saves torch_dist (Megatron reshards it on load, so any TP / PP / EP loads
+# it); it has no route for the full 816B model (pass an already converted checkpoint).
+# Embedding / output rows: vocab_size rounded up to 64 (the muse_spark_vocab patch, the
+# converter's rule), 202048 at every TP.
+# Sequence length: set PRIMUS_SEQ_LENGTH and PRIMUS_MAX_POSITION_EMBEDDINGS together
+# (max_position_embeddings must be >= seq_length; both default to 4096). Longer
+# sequences need more activation memory: add context parallel or GPUs.
+#
+# Single node: use muse_Spark_Open_816B_A42B-proxy-BF16-pretrain.yaml (first 4 released
+# layers, all 256 experts, EP 8). The trainer test
+# (test_muse_Spark_Open_816B_A42B, a weekly test) runs THIS file on one node with
+# command-line cuts (--num_layers 4 --num_experts 16 --moe_router_topk 4,
+# --expert_model_parallel_size 8, PRIMUS_EP=8 PRIMUS_PP=1, seq 1024, GBS 8): the alltoall
+# dispatcher with Turbo grouped GEMM (DeepEP stays off, as in this file).
 #   Model code: primus/backends/megatron/core/models/muse_spark/.
 #   HF -> Megatron weights: primus/backends/megatron/checkpoint/native_loader_muse_spark.py.
 
@@ -25,11 +58,13 @@ modules:
       # hyper parameters
       train_iters: ${TRAIN_ITERS:20}
       micro_batch_size: ${MBS:1}
-      global_batch_size: ${GBS:16}
+      global_batch_size: ${GBS:256}
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
-      lr: 1.0e-5
-      min_lr: 0.0
+      # from random weights: a pretraining rate, lower than the small models' 1e-4 at this
+      # size (GPT-3 175B used 6e-5); bf16 layout changes stay within the gates' 2% at this rate
+      lr: 3.0e-5
+      min_lr: 3.0e-6
       lr_warmup_iters: 2
       lr_decay_iters: null
       lr_decay_style: cosine
@@ -40,10 +75,10 @@ modules:
 
       # parallel (expert_tensor_parallel_size stays 1: post_expert_norm needs full rows)
       tensor_model_parallel_size: ${PRIMUS_TP:1}
-      pipeline_model_parallel_size: ${PRIMUS_PP:1}
-      expert_model_parallel_size: ${PRIMUS_EP:8}
+      pipeline_model_parallel_size: ${PRIMUS_PP:2}
+      expert_model_parallel_size: ${PRIMUS_EP:64}
       expert_tensor_parallel_size: 1
-      sequence_parallel: ${PRIMUS_SP:true}  # forced off at TP1 (sequence_parallel_tp1 patch)
+      sequence_parallel: ${PRIMUS_SP:true}  # MoE + TP needs SP; Megatron turns it off at TP 1
       overlap_grad_reduce: true
       overlap_param_gather: true
       gradient_accumulation_fusion: false
@@ -58,28 +93,56 @@ modules:
       use_distributed_optimizer: true
       use_precision_aware_optimizer: false
 
-      # recompute
-      recompute_granularity: ${RECOMPUTE_GRANULARITY:full}
-      recompute_method: block
-      recompute_num_layers: ${PRIMUS_RECOMPUTE_LAYERS:0}
+      # recompute: off by default; e.g. RECOMPUTE_GRANULARITY=full RECOMPUTE_METHOD=uniform
+      # PRIMUS_RECOMPUTE_LAYERS=1, or RECOMPUTE_GRANULARITY=selective (method / layers unset)
+      recompute_granularity: ${RECOMPUTE_GRANULARITY:null}
+      recompute_method: ${RECOMPUTE_METHOD:null}
+      recompute_num_layers: ${PRIMUS_RECOMPUTE_LAYERS:null}
 
       # ckpt
       finetune: false
       auto_continue_train: false
       load: null
+      # from random weights: aux-loss-free load balancing (the base preset keeps the
+      # released checkpoint's selection bias frozen, rate 0.0, for fine-tuning)
+      moe_router_bias_update_rate: 1.0e-3
       save: null
       save_interval: 20000
       disable_last_saving: true
-      ckpt_format: torch
+      # torch_dist: the format of the native converter's checkpoint (Megatron reshards it on
+      # load); auto-detect also loads a legacy torch checkpoint
+      ckpt_format: torch_dist
+      auto_detect_ckpt_format: true
       eval_iters: 0
 
-      # turbo: off (plain TE GEMMs / grouped GEMM, alltoall dispatcher)
-      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:false}
+      # Primus-Turbo, as the deepseek_v3 / qwen3_235B siblings: grouped GEMM experts
+      # (MuseSparkTurboGroupedMLP keeps the per-expert post_expert_norm). Turbo attention
+      # stays off: Muse Spark uses TE attention with a sliding window. Turbo RMSNorm is not
+      # used (the Muse Spark norms are eager fp32). With use_megatron_fsdp the Turbo grouped
+      # GEMM falls back to TE's (warning). PRIMUS_ENABLE_TURBO=false gives the plain TE
+      # grouped GEMM + alltoall path.
+      # DeepEP is OFF here: the experts span nodes (EP 64), and the Primus-Turbo build in the
+      # Primus image has no rocSHMEM, so its DeepEP asserts num_rdma_ranks == 1 (intranode
+      # only). The alltoall dispatcher (muse_spark_base.yaml) runs instead.
+      # PRIMUS_USE_TURBO_DEEPEP=true turns DeepEP on for an expert group within one node
+      # (expert TP x EP <= GPUs per node); a larger group is turned back off with a warning
+      # unless PRIMUS_TURBO_DEEPEP_INTERNODE=1 says the Turbo build has rocSHMEM (internode
+      # dispatch; turbo_deepep_num_cu must stay <= 32 at EP >= 16).
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:true}
       use_turbo_attention: false
-      use_turbo_grouped_gemm: false
-      use_turbo_deepep: false
-      moe_router_dtype: fp32
-      moe_permute_fusion: false
+      use_turbo_grouped_gemm: true
+      use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:false}
+      moe_token_dispatcher_type: alltoall
+      turbo_deepep_num_cu: 32
+      turbo_deepep_use_comm_stream: false
+      # Fused token permute / unpermute with TE kernels (as deepseek_v3).
+      moe_permute_fusion: true
+      # turbo_sync_free_moe_stage stays 0 (unset; stage 0 turns on nothing). Stages >= 1 turn
+      # on Primus-Turbo's fused router (moe_use_fused_router_with_aux_score), whose op gets no
+      # expert_bias: it drops Muse Spark's e_score_correction_bias from the top-k choice and
+      # routes unlike HF, so the megatron.args.muse_spark_no_fused_router patch rejects them.
 
-      # soft-capped logits: keep the plain cross entropy
+      # Megatron's fused vocab-parallel CE stays off (plain CE on the soft-capped logits).
+      # Primus's chunked linear+CE (enable_fused_linear_ce: true / FUSED_LINEAR_CE=1) is
+      # allowed: it applies the soft-cap per chunk through MuseSparkModel._scale_logits.
       cross_entropy_loss_fusion: false

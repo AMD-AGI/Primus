@@ -7,6 +7,16 @@
 from primus.backends.megatron.megatron_base_trainer import MegatronBaseTrainer
 from primus.core.utils.module_utils import log_rank_0
 
+# model_type -> the name logged; these models reuse pretrain_gpt's forward_step and
+# datasets (their own model provider comes from get_model_provider).
+PRETRAIN_GPT_MODEL_NAMES = {
+    "deepseek_v4": "DeepSeek-V4",
+    "kimi_k3": "Kimi-K3",
+    "glm5_next": "GLM5-Next",
+    "muse_spark": "Muse-Spark",
+    "zaya1": "ZAYA1",
+}
+
 
 class MegatronPretrainTrainer(MegatronBaseTrainer):
     """Trainer for Megatron-LM pre-training."""
@@ -170,45 +180,16 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
             log_rank_0("Using Mamba model provider and training components")
             train_valid_test_datasets_provider.is_distributed = True
-        elif model_type == "deepseek_v4":
+        elif model_type in PRETRAIN_GPT_MODEL_NAMES:
             from pretrain_gpt import (  # type: ignore
                 forward_step,
                 train_valid_test_datasets_provider,
             )
 
-            log_rank_0("Using DeepSeek-V4 model provider; reusing pretrain_gpt forward_step + datasets")
-            train_valid_test_datasets_provider.is_distributed = True
-        elif model_type == "kimi_k3":
-            from pretrain_gpt import (  # type: ignore
-                forward_step,
-                train_valid_test_datasets_provider,
+            log_rank_0(
+                f"Using {PRETRAIN_GPT_MODEL_NAMES[model_type]} model provider; "
+                "reusing pretrain_gpt forward_step + datasets"
             )
-
-            log_rank_0("Using Kimi-K3 model provider; reusing pretrain_gpt forward_step + datasets")
-            train_valid_test_datasets_provider.is_distributed = True
-        elif model_type == "glm5_next":
-            from pretrain_gpt import (  # type: ignore
-                forward_step,
-                train_valid_test_datasets_provider,
-            )
-
-            log_rank_0("Using GLM5-Next model provider; reusing pretrain_gpt forward_step + datasets")
-            train_valid_test_datasets_provider.is_distributed = True
-        elif model_type == "muse_spark":
-            from pretrain_gpt import (  # type: ignore
-                forward_step,
-                train_valid_test_datasets_provider,
-            )
-
-            log_rank_0("Using Muse-Spark model provider; reusing pretrain_gpt forward_step + datasets")
-            train_valid_test_datasets_provider.is_distributed = True
-        elif model_type == "zaya1":
-            from pretrain_gpt import (  # type: ignore
-                forward_step,
-                train_valid_test_datasets_provider,
-            )
-
-            log_rank_0("Using ZAYA1 model provider; reusing pretrain_gpt forward_step + datasets")
             train_valid_test_datasets_provider.is_distributed = True
         else:
             # Use overridable methods so subclasses (e.g. diffusion/Flux) can plug in their own

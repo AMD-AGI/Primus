@@ -288,11 +288,11 @@ def build_mcore_gpt_model(margs):
 # ---------------------------------------------------------------------------
 # Load mapped state dict, validate, and save a legacy torch checkpoint
 # ---------------------------------------------------------------------------
-def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
-    """Apply ``sd`` to ``model`` (strict=False), assert an exact mapping, save.
-
-    Raises ``RuntimeError`` if the mapping is not complete/exact so the caller
-    (conversion hook) fails loudly instead of writing a silently-wrong ckpt.
+def check_exact_mapping(model, sd, consumed, store, log=print):
+    """Apply ``sd`` to ``model`` (strict=False) and raise ``RuntimeError`` unless the
+    mapping is exact: no unexpected or missing (non-``_extra_state``) model keys and no
+    unconsumed HF tensor. Every native converter checks through this one function, so the
+    caller (conversion hook) fails loudly instead of writing a silently-wrong ckpt.
     """
     missing, unexpected = model.load_state_dict(sd, strict=False)
     missing_non_extra = [k for k in missing if "_extra_state" not in k]
@@ -318,6 +318,15 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
             f"unconsumed={len(unconsumed)}); refusing to save."
         )
     log("mapping is COMPLETE and EXACT (0 unexpected, 0 non-_extra_state missing, 0 unconsumed).")
+
+
+def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
+    """Apply ``sd`` to ``model``, assert an exact mapping (:func:`check_exact_mapping`), save.
+
+    Raises ``RuntimeError`` if the mapping is not complete/exact so the caller
+    (conversion hook) fails loudly instead of writing a silently-wrong ckpt.
+    """
+    check_exact_mapping(model, sd, consumed, store, log)
 
     from megatron.training.checkpointing import save_checkpoint
 

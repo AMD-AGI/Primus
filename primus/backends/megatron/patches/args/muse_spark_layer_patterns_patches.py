@@ -7,95 +7,126 @@
 """Muse Spark: per-layer pattern args as lists of ``num_layers`` entries.
 
 The Muse Spark presets give ``no_rope_freq`` / ``window_attn_skip_freq`` as the
-full 64-entry Python-list expression (e.g. ``"([0,1,0,0]*16)"``). Megatron builds
+full 62-entry Python-list expression (e.g. ``"([0,1,0,0]*15+[0,1])"``). Megatron builds
 a plain ``TransformerConfig`` from args in places outside the model builder
 (e.g. ``is_dataset_built_on_rank``), and that config checks
-``len(no_rope_freq) == num_layers``. Evaluate the strings and cut the lists to
-``num_layers`` here, so a depth-reduced run (proxy, trainer test) works.
+``len(no_rope_freq) == num_layers``. Parse the strings (``ast``, no ``eval``; the same
+parser as the config) and cut the lists to ``num_layers`` here, so a depth-reduced run (proxy, trainer test) works.
+A cut is logged as a warning, and an int must be in ``[1, num_layers]``.
 """
 
+import math
+
+from primus.backends.megatron.core.models.muse_spark.layer_patterns import (
+    MAKE_VOCAB_SIZE_DIVISIBLE_BY,
+    check_all_moe_layers,
+    normalize_layer_pattern,
+    vocab_size_with_padding,
+)
+from primus.backends.megatron.core.models.muse_spark.model_types import (
+    backend_args_of,
+    is_muse_spark_model_type,
+)
 from primus.core.patches import PatchContext, register_patch
-from primus.core.patches.context import get_args
-from primus.core.utils.module_utils import log_kv_rank_0
+from primus.core.utils.module_utils import log_kv_rank_0, warning_rank_0
 
+
+def padded_vocab_of(args):
+    """The embedding / head rows for ``args`` (``vocab_size_with_padding``: a multiple of
+    ``MAKE_VOCAB_SIZE_DIVISIBLE_BY`` (64), the same at every TP), or None when the args set
+    no ``vocab_size``.
+
+    The multiple is a Muse Spark model rule, the converter's: ``make_vocab_size_divisible_by``
+    in the args is not read (the module config sets it to 128 for every model, so an
+    experiment would have to repeat 64 to match the converted checkpoint). Set
+    ``padded_vocab_size`` for other rows."""
+    vocab = getattr(args, "vocab_size", None)
+    if not vocab:
+        return None
+    return vocab_size_with_padding(
+        vocab,
+        MAKE_VOCAB_SIZE_DIVISIBLE_BY,
+        getattr(args, "tensor_model_parallel_size", None) or 1,
+    )
+
+
+_TAG = "[Patch:megatron.args.muse_spark_layer_patterns]"
+_VOCAB_PATCH = "megatron.args.muse_spark_vocab"
+_VOCAB_TAG = f"[Patch:{_VOCAB_PATCH}]"
 _KEYS = ("no_rope_freq", "window_attn_skip_freq")
-
-
-_MODEL_TYPES = ("muse_spark", "muse_spark_text")
-
-
-def _is_muse_spark(ctx: PatchContext) -> bool:
-    try:
-        if getattr(get_args(ctx), "model_type", None) in _MODEL_TYPES:
-            return True
-    except AssertionError:
-        pass
-    return getattr(ctx.extra.get("backend_args"), "model_type", None) in _MODEL_TYPES
-
-
-def normalize_layer_pattern(value, num_layers):
-    if value is None or isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        s = value.strip()
-        if "[" not in s:
-            return int(s)
-        value = eval(s, {"__builtins__": {}}, {})  # trusted config expression, as moe_layer_freq
-    value = [int(v) for v in value]
-    if num_layers and len(value) > num_layers:
-        value = value[:num_layers]
-    return value
 
 
 @register_patch(
     "megatron.args.muse_spark_layer_patterns",
     backend="megatron",
     phase="build_args",
-    condition=_is_muse_spark,
-    description="Muse Spark: evaluate no_rope_freq / window_attn_skip_freq and cut them to num_layers",
+    condition=is_muse_spark_model_type,
+    description="Muse Spark: parse no_rope_freq / window_attn_skip_freq and cut them to num_layers",
 )
 def patch_muse_spark_layer_patterns(ctx: PatchContext):
-    args = ctx.extra.get("backend_args", {})
+    args = backend_args_of(ctx)
     num_layers = getattr(args, "num_layers", None)
+
+    def warn(msg):
+        warning_rank_0(f"{_TAG} {msg}")
+
     for key in _KEYS:
         if not hasattr(args, key):
             continue
-        value = normalize_layer_pattern(getattr(args, key), num_layers)
+        value = normalize_layer_pattern(getattr(args, key), num_layers, key, warn=warn)
         setattr(args, key, value)
-        log_kv_rank_0(f"[Patch:megatron.args.muse_spark_layer_patterns] -{key}", f"{value}")
+        log_kv_rank_0(f"{_TAG} -{key}", f"{value}")
+    # every layer is MoE (the spec ignores moe_layer_freq); reject a value that would make
+    # the FLOPs / memory estimates count a different number of MoE layers
+    check_all_moe_layers(getattr(args, "moe_layer_freq", 1), num_layers)
+    check_softcap(getattr(args, "final_logit_softcapping", None))
+
+
+def check_softcap(cap):
+    """``final_logit_softcapping`` (a key every Megatron preset carries, null by default) is
+    None / 0 (no cap) or a finite number > 0: ``cap * tanh(x / cap)`` with a negative cap
+    flips the sign of every logit, and the released checkpoint expects 20."""
+    if cap is None:
+        return
+    try:
+        value = float(cap)
+    except (TypeError, ValueError):
+        value = float("nan")
+    if isinstance(cap, bool) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{_TAG} final_logit_softcapping={cap!r} must be null, 0 or a finite number > 0")
 
 
 @register_patch(
-    "megatron.args.muse_spark_selective_recompute",
+    _VOCAB_PATCH,
     backend="megatron",
     phase="build_args",
-    condition=_is_muse_spark,
-    description="Muse Spark: selective recompute takes no recompute_method / recompute_num_layers",
+    condition=is_muse_spark_model_type,
+    priority=60,  # after megatron.args.mock_data (50), which may switch to the NullTokenizer
+    description="Muse Spark: embedding / head rows from the preset vocab_size (the checkpoint's 202048)",
 )
-def patch_muse_spark_selective_recompute(ctx: PatchContext):
-    # The experiment config sets recompute_method/num_layers for full recompute; Megatron
-    # requires both unset with recompute_granularity=selective.
-    args = ctx.extra.get("backend_args", {})
-    if getattr(args, "recompute_granularity", None) != "selective":
-        return
-    args.recompute_method = None
-    args.recompute_num_layers = None
-    log_kv_rank_0("[Patch:megatron.args.muse_spark_selective_recompute] -recompute_method", "None")
+def patch_muse_spark_vocab(ctx: PatchContext):
+    """The presets set ``vocab_size: 202048`` (the HF text_config). Megatron sizes the
+    embedding and head from the tokenizer instead (``len(tokenizer)`` for the HF tokenizer,
+    ``vocab_size + 1`` for the mock-data NullTokenizer), padded to
+    ``make_vocab_size_divisible_by * TP``, unless ``padded_vocab_size`` is already set. Set
+    it here from ``vocab_size`` with ``vocab_size_with_padding`` and the model's multiple of
+    64 (the converter's rule; ``make_vocab_size_divisible_by`` is not read): the rows depend
+    only on the config, not on TP, so they match the converted checkpoint at every TP. An
+    explicit ``padded_vocab_size`` is kept.
 
-
-@register_patch(
-    "megatron.args.muse_spark_cp_comm",
-    backend="megatron",
-    phase="build_args",
-    condition=_is_muse_spark,
-    description="Muse Spark: sliding-window attention with CP uses TE's all_gather CP (p2p has no SWA backend)",
-)
-def patch_muse_spark_cp_comm(ctx: PatchContext):
-    args = ctx.extra.get("backend_args", {})
-    cp = getattr(args, "context_parallel_size", 1) or 1
-    comm = getattr(args, "cp_comm_type", None)
-    if getattr(args, "window_size", None) is None or cp <= 1:
-        return
-    if comm in (None, "p2p", ["p2p"]) or (isinstance(comm, list) and all(c == "p2p" for c in comm)):
-        args.cp_comm_type = "all_gather"
-        log_kv_rank_0("[Patch:megatron.args.muse_spark_cp_comm] -cp_comm_type", "all_gather")
+    With mock data the NullTokenizer adds an EOD id equal to ``vocab_size``; ``vocab_size``
+    is lowered (as ``megatron.args.mock_data`` does for a vocab read from the HF config)
+    until that id fits in the rows, also when ``padded_vocab_size`` was set explicitly."""
+    args = backend_args_of(ctx)
+    padded = getattr(args, "padded_vocab_size", None)
+    if padded is None:
+        padded = padded_vocab_of(args)
+        if padded is None:
+            return
+        args.padded_vocab_size = padded
+        log_kv_rank_0(_VOCAB_TAG + " -padded_vocab_size", f"{padded}")
+    vocab = getattr(args, "vocab_size", None)
+    if getattr(args, "tokenizer_type", None) == "NullTokenizer" and vocab and int(vocab) >= int(padded):
+        # ids 0..vocab_size (EOD) must stay below padded rows; the check makes a rerun a no-op
+        args.vocab_size = int(padded) - 1
+        log_kv_rank_0(_VOCAB_TAG + " -vocab_size (NullTokenizer)", f"{args.vocab_size}")

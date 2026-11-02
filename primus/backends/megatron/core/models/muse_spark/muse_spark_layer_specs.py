@@ -16,15 +16,18 @@ Each decoder layer is Megatron's ``TransformerLayer`` with:
 * ``self_attn_bda`` / ``mlp_bda``: :class:`MuseSparkGatedResidual`
   (post-norm + learned residual gate instead of bias-dropout-add);
 * ``mlp``: :class:`MuseSparkMoELayer` with :class:`MuseSparkTopKRouter` and
-  :class:`MuseSparkGroupedMLP` experts.
+  the provider's experts (``PrimusGroupedMLP`` with Turbo grouped GEMM, else
+  ``TEGroupedMLP`` / ``SequentialMLP``), each with ``post_expert_norm``.
 
-Only this pipeline stage's layers are built (``get_num_layers_to_build`` /
-``get_transformer_layer_offset``), so PP and VPP come from ``TransformerBlock``.
+Only this pipeline stage's layers are built (``get_num_layers_to_build``); the
+per-layer choices use the global ``layer_number``, so PP and VPP come from ``TransformerBlock``.
 """
 
 from typing import Optional
 
-from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
+from megatron.core.extensions import (
+    transformer_engine_spec_provider as _te_spec_provider,
+)
 from megatron.core.transformer.attention import SelfAttentionSubmodules
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.moe_layer import MoESubmodules
@@ -36,7 +39,6 @@ from megatron.core.transformer.transformer_block import (
 from megatron.core.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerSubmodules,
-    get_transformer_layer_offset,
 )
 
 from primus.backends.megatron.core.transformer.muse_spark.attention import (
@@ -44,10 +46,9 @@ from primus.backends.megatron.core.transformer.muse_spark.attention import (
     MuseSparkSelfAttention,
 )
 from primus.backends.megatron.core.transformer.muse_spark.moe import (
-    MuseSparkGroupedMLP,
     MuseSparkMoELayer,
-    MuseSparkSequentialMLP,
     MuseSparkTopKRouter,
+    muse_spark_expert_cls,
 )
 from primus.backends.megatron.core.transformer.muse_spark.norms import (
     MuseSparkCenteredRMSNorm,
@@ -58,13 +59,20 @@ from primus.backends.megatron.core.transformer.muse_spark.norms import (
 __all__ = ["get_muse_spark_layer_spec", "get_muse_spark_decoder_block_spec"]
 
 
+def _spec_provider():
+    """The TE spec provider, looked up at call time: the Primus-Turbo patch replaces the
+    module attribute ``TESpecProvider`` (with ``PrimusTurboSpecProvider``) after import."""
+    return _te_spec_provider.TESpecProvider()
+
+
 def get_muse_spark_moe_spec(backend=None, grouped_gemm: bool = True) -> ModuleSpec:
-    """Latent MoE spec; ``grouped_gemm`` picks TEGroupedMLP or SequentialMLP experts."""
-    backend = backend or TESpecProvider()
+    """Latent MoE spec. The provider picks the experts (Turbo grouped GEMM, TE grouped
+    GEMM or sequential); each gets its Muse Spark subclass with ``post_expert_norm``."""
+    backend = backend or _spec_provider()
     base_cls, expert_submodule = backend.grouped_mlp_modules(grouped_gemm)
     if expert_submodule is not None:
         expert_submodule.activation_func = backend.activation_func()
-    expert_cls = MuseSparkGroupedMLP if issubclass(MuseSparkGroupedMLP, base_cls) else MuseSparkSequentialMLP
+    expert_cls = muse_spark_expert_cls(base_cls)
     return ModuleSpec(
         module=MuseSparkMoELayer,
         submodules=MoESubmodules(
@@ -77,7 +85,7 @@ def get_muse_spark_moe_spec(backend=None, grouped_gemm: bool = True) -> ModuleSp
 
 
 def get_muse_spark_layer_spec(config) -> ModuleSpec:
-    backend = TESpecProvider()
+    backend = _spec_provider()
     return ModuleSpec(
         module=TransformerLayer,
         submodules=TransformerLayerSubmodules(
@@ -97,9 +105,7 @@ def get_muse_spark_layer_spec(config) -> ModuleSpec:
                 module=MuseSparkGatedResidual, params={"config": config, "kind": "attn"}
             ),
             pre_mlp_layernorm=MuseSparkCenteredRMSNorm,
-            mlp=get_muse_spark_moe_spec(
-                backend, grouped_gemm=bool(getattr(config, "moe_grouped_gemm", True))
-            ),
+            mlp=get_muse_spark_moe_spec(backend, grouped_gemm=bool(config.moe_grouped_gemm)),
             mlp_bda=ModuleSpec(module=MuseSparkGatedResidual, params={"config": config, "kind": "mlp"}),
         ),
     )
@@ -109,9 +115,9 @@ def get_muse_spark_decoder_block_spec(
     config, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
 ) -> TransformerBlockSubmodules:
     layer_spec = get_muse_spark_layer_spec(config)
+    # Every layer has the same spec; the per-layer window / NoPE choice comes from the
+    # global layer_number inside TransformerBlock, so no offset is needed here.
     num_layers_to_build = get_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank)
-    offset = get_transformer_layer_offset(config, vp_stage=vp_stage, pp_rank=pp_rank)
-    del offset  # every layer has the same spec; per-layer differences come from layer_number
     return TransformerBlockSubmodules(
         layer_specs=[layer_spec] * num_layers_to_build, layer_norm=MuseSparkRMSNorm
     )

@@ -26,7 +26,9 @@
    ``{"id": ..., "logprobs": [...]}`` where ``logprobs[i] = log p(tokens[i+1] | tokens[:i+1])``.
 
 3. ``megatron.glm5_next.te_gemm_workspace``: enlarges TE's hipBLASLt GEMM
-   workspace (``PRIMUS_TE_GEMM_WORKSPACE_MB``, default 512).
+   workspace on ROCm (``PRIMUS_TE_GEMM_WORKSPACE_MB``, default 512; an integer <= 0: no
+   change), through the shared ``te_gemm_workspace.apply_rocm_te_gemm_workspace``
+   (best effort: a TE build without the size function logs a warning and runs on).
 """
 
 from __future__ import annotations
@@ -171,6 +173,10 @@ def patch_glm5_next_hf_load(ctx: PatchContext):
     log_rank_0(f"[Patch:megatron.glm5_next.hf_load] hf={hf_path} eval_in={eval_in} eval_out={eval_out}")
 
 
+# MiB; unset: te_gemm_workspace.DEFAULT_MB (512); an integer <= 0: no change
+TE_GEMM_WORKSPACE_ENV = "PRIMUS_TE_GEMM_WORKSPACE_MB"
+
+
 @register_patch(
     "megatron.glm5_next.te_gemm_workspace",
     backend="megatron",
@@ -185,13 +191,19 @@ def patch_glm5_next_te_gemm_workspace(ctx: PatchContext):
     del ctx
     import torch
 
-    if torch.version.hip is None:
+    if torch.version.hip is None:  # GLM-5.3: ROCm only (the env is not read on CUDA)
         return
-    import transformer_engine.pytorch.cpp_extensions.gemm as te_gemm
+    from primus.backends.megatron.core.extensions.te_gemm_workspace import (
+        apply_rocm_te_gemm_workspace,
+        workspace_mb_from_env,
+    )
 
-    size = int(os.environ.get("PRIMUS_TE_GEMM_WORKSPACE_MB", "512")) * 1024 * 1024
-    if te_gemm.get_cublas_workspace_size_bytes() >= size:
+    mb = workspace_mb_from_env(TE_GEMM_WORKSPACE_ENV)  # the shared default / parsing
+    if mb is None:  # an integer <= 0: no enlargement
         return
-    te_gemm.get_cublas_workspace_size_bytes = lambda: size
-    te_gemm.get_cublas_workspace.cache_clear()
-    log_rank_0(f"[Patch:megatron.glm5_next.te_gemm_workspace] TE GEMM workspace -> {size >> 20} MiB")
+    apply_rocm_te_gemm_workspace(
+        "[Patch:megatron.glm5_next.te_gemm_workspace]",
+        mb=mb,
+        mb_name=TE_GEMM_WORKSPACE_ENV,
+        required=False,  # best effort: a TE build without the size function logs a warning
+    )

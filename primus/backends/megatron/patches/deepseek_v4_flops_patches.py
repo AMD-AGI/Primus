@@ -94,6 +94,7 @@ import ast
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Tuple
 
+from primus.backends.megatron.core.attention_pairs import causal_visible_pairs
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -207,26 +208,6 @@ def _attn_qkv_o_fmac_per_layer(
     return batch_size * seq_len * (qkv + o_proj)
 
 
-def _local_visible_pairs(swa_window: int, seq_len: int) -> int:
-    """Causal-visible ``(q, k)`` pair count for the local SWA branch.
-
-    Each query at position ``q`` attends to keys in
-    ``[max(0, q - swa_window + 1), q]``.  Summed over
-    ``q in [0, seq_len)`` the count is:
-
-    * ``swa_window * seq_len - swa_window * (swa_window - 1) // 2`` for
-      ``0 < swa_window < seq_len`` (queries below ``swa_window - 1``
-      see only ``q + 1`` keys, queries above saturate at ``swa_window``).
-    * ``seq_len * (seq_len + 1) // 2`` for the full-causal
-      fallback (``swa_window == 0`` or ``>= seq_len``).
-    """
-    s = int(seq_len)
-    w = int(swa_window)
-    if w <= 0 or w >= s:
-        return s * (s + 1) // 2
-    return w * s - w * (w - 1) // 2
-
-
 def _pool_visible_pairs(compress_ratio: int, seq_len: int) -> int:
     """Causal-visible ``(q, p)`` pair count for the HCA compressed pool.
 
@@ -267,7 +248,7 @@ def _visible_pairs(
       fully visible because the indexer assigns each query a per-row
       causal-respecting pool subset.
     """
-    local = _local_visible_pairs(swa_window, seq_len)
+    local = causal_visible_pairs(seq_len, swa_window)
     cr = int(compress_ratio)
     if cr == 0:
         return local

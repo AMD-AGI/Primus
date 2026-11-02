@@ -83,7 +83,7 @@ For multi-node or multi-process runs, set these via `export` or `--env`:
 | `NODE_RANK` | Rank of this node | `0` |
 | `GPUS_PER_NODE` | GPUs per node | `8` (see `runner/.primus.yaml` `direct.gpus_per_node`) |
 | `MASTER_ADDR` | Hostname or IP of rank 0 | `localhost` |
-| `MASTER_PORT` | TCP port for the process group | `1234` |
+| `MASTER_PORT` | TCP port for the process group. On a single-node run with a loopback `MASTER_ADDR`, `direct` replaces a port that is already in use with an unused one and logs a warning; a port given with `--env MASTER_PORT=...` or `PRIMUS_KEEP_MASTER_PORT=1` keeps it | `1234` |
 
 ---
 
