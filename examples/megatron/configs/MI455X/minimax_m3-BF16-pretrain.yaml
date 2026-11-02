@@ -73,12 +73,13 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:1}
       sequence_parallel: false
       # Overlapping the grad reduce-scatter and param all-gather was 10% slower on one
-      # GPU and 5% on EP2.
+      # GPU, 5% on EP2 and 1% on the EP4 8-layer GBS 32 baseline.
       overlap_grad_reduce: false
       overlap_param_gather: false
       use_torch_fsdp2: false
       use_distributed_optimizer: true
-      # Fusing the wgrad accumulation into the fp32 main_grad was 14-16% slower: hipBLASLt
+      # Fusing the wgrad accumulation into the fp32 main_grad was 14-16% slower (15% on the
+      # EP4 baseline with 8 micro-batches per step): hipBLASLt
       # picks a 3.7x slower kernel for fp32-output GEMMs on gfx1250. Into a bf16 main_grad
       # it is 1% faster.
       gradient_accumulation_fusion: false
