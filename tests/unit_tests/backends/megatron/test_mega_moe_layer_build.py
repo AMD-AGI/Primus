@@ -229,6 +229,17 @@ def test_wgrad_accum_fusion_follows_gradient_accumulation_fusion(mega_moe, args,
     assert mega_moe.mega_moe_wgrad_accum_fusion(config) is expected
 
 
+@pytest.mark.parametrize("fsdp_arg", ["use_megatron_fsdp", "use_custom_fsdp"])
+@pytest.mark.parametrize("flag", [None, True])
+def test_wgrad_accum_fusion_is_off_under_megatron_fsdp(mega_moe, args, fsdp_arg, flag):
+    """Megatron-FSDP clears ``grad_added_to_main_grad`` before every backward, so the stages, which
+    set it in forward, would have FSDP add their dummy gradient into ``main_grad``."""
+    args.turbo_mega_moe_wgrad_accum_fusion = flag
+    setattr(args, fsdp_arg, True)
+    config = SimpleNamespace(gradient_accumulation_fusion=True)
+    assert mega_moe.mega_moe_wgrad_accum_fusion(config) is False
+
+
 def _stub_stages(calls, takes_pattern):
     """Staged ops that record the ``fuse_wgrad_accum_pattern`` they get; an older Primus-Turbo's take none."""
     if takes_pattern:
@@ -274,3 +285,18 @@ def test_experts_pass_the_wgrad_accum_pattern(mega_moe, args, monkeypatch, takes
     pattern = "megatron" if fusion and takes_pattern else None
     assert experts.wgrad_accum_pattern == pattern
     assert calls == [("stage1", pattern), ("stage2", pattern)]
+
+
+def test_mxfp8_experts_keep_ddp_wgrad_add(mega_moe, args, monkeypatch):
+    """The mxfp8 stages take no accumulation pattern: the experts must not claim one."""
+    calls = []
+    stage1, stage2 = _stub_stages(calls, takes_pattern=True)
+    monkeypatch.setattr(mega_moe, "fused_mega_moe_stage1", stage1)
+    monkeypatch.setattr(mega_moe, "fused_mega_moe_stage2", stage2)
+    args.turbo_mega_moe_wgrad_accum_fusion = True
+    mega_moe._turbo_stages_take_wgrad_accum.cache_clear()
+    try:
+        experts = mega_moe.MegaMoEFP8Experts(_config(), 4, 32, 8, _EPGroup())
+    finally:
+        mega_moe._turbo_stages_take_wgrad_accum.cache_clear()
+    assert experts.wgrad_accum_pattern is None

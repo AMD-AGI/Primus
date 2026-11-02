@@ -97,11 +97,29 @@ def mega_moe_precision() -> str:
 
 
 def mega_moe_wgrad_accum_fusion(config: TransformerConfig) -> bool:
-    """``turbo_mega_moe_wgrad_accum_fusion``, where null follows ``gradient_accumulation_fusion``."""
+    """``turbo_mega_moe_wgrad_accum_fusion``, where null follows ``gradient_accumulation_fusion``.
+
+    Off under Megatron-FSDP whatever the setting: the stages set ``grad_added_to_main_grad`` in
+    forward, Megatron DDP's contract, but Megatron-FSDP clears it before every backward and its
+    hook would then add the stages' dummy gradient into ``main_grad``.
+    """
     from megatron.training import get_args
 
-    flag = getattr(get_args(), "turbo_mega_moe_wgrad_accum_fusion", None)
-    return bool(config.gradient_accumulation_fusion if flag is None else flag)
+    args = get_args()
+    flag = getattr(args, "turbo_mega_moe_wgrad_accum_fusion", None)
+    fuse = bool(config.gradient_accumulation_fusion if flag is None else flag)
+    if fuse and (getattr(args, "use_megatron_fsdp", False) or getattr(args, "use_custom_fsdp", False)):
+        _log_once(
+            "[MegaMoE] Megatron-FSDP: the expert wgrads keep the separate main_grad add "
+            "(turbo_mega_moe_wgrad_accum_fusion needs Megatron DDP)"
+        )
+        return False
+    return fuse
+
+
+@functools.lru_cache(maxsize=None)
+def _log_once(message: str) -> None:
+    log_rank_0(message)
 
 
 @functools.lru_cache(maxsize=None)
@@ -178,11 +196,7 @@ class MegaMoEExperts(MegatronModule):
         self.ep_group = ep_group
         self.experts_per_rank = experts_per_rank
         self.activation = mega_moe_activation(config)
-        # The ops resolve main_grad per call and fall back to the ordinary gradient when they
-        # cannot accumulate into it, so this only says that DDP's add may be fused away.
-        self.wgrad_accum_pattern = None
-        if mega_moe_wgrad_accum_fusion(config) and _turbo_stages_take_wgrad_accum():
-            self.wgrad_accum_pattern = "megatron"
+        self.wgrad_accum_pattern = self._wgrad_accum_pattern(config)
         bias = config.add_bias_linear
         # w1 [g, 2I, H] gate+up; w2 [g, H, I] down; biases b1 [g, 2I], b2 [g, H]
         self.fc1_weight = MegaMoEWeightModule(
@@ -238,6 +252,16 @@ class MegaMoEExperts(MegatronModule):
                 for expert_weight in weight.data:
                     init_method(expert_weight)
 
+    def _wgrad_accum_pattern(self, config: TransformerConfig) -> Optional[str]:
+        """``"megatron"`` when DDP's add of the expert wgrads may be fused into the staged ops.
+
+        The ops resolve ``main_grad`` per call and fall back to the ordinary gradient when they
+        cannot accumulate into it, so this only says that DDP's add may be fused away.
+        """
+        if mega_moe_wgrad_accum_fusion(config) and _turbo_stages_take_wgrad_accum():
+            return "megatron"
+        return None
+
     def forward(self, x, topk_idx, topk_weights):
         # only passed when set, so a Primus-Turbo without the argument still runs
         accum = {"fuse_wgrad_accum_pattern": self.wgrad_accum_pattern} if self.wgrad_accum_pattern else {}
@@ -272,6 +296,15 @@ class MegaMoEFP8Experts(MegaMoEExperts):
     The fp8 stages thread an extra opaque ``state`` from stage1 to stage2, which carries the
     quantized operands that cannot ride autograd's gradient slots.
     """
+
+    def _wgrad_accum_pattern(self, config: TransformerConfig) -> Optional[str]:
+        """None: the mxfp8 stages take no accumulation pattern, so DDP keeps adding their wgrads."""
+        if mega_moe_wgrad_accum_fusion(config):
+            _log_once(
+                "[MegaMoE] mxfp8 experts: the expert wgrads keep the separate main_grad add "
+                "(turbo_mega_moe_wgrad_accum_fusion applies to the bf16 experts)"
+            )
+        return None
 
     # The mxfp8 weight-quant cache is dropped by the megatron.turbo.mega_moe_weight_generation
     # patch, which advances the generation once per optimizer step. Doing it there rather than
