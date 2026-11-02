@@ -59,8 +59,9 @@ else
 fi
 # Primus-Turbo grouped GEMM for the experts; False: TE's grouped GEMM (one hipBLASLt GEMM per expert)
 export USE_TURBO_GROUPED_GEMM=${USE_TURBO_GROUPED_GEMM:-True}
-# bf16:flydsl (at most 64 local experts, i.e. EP >= 2) or default (Primus-Turbo's choice: Triton)
-export TURBO_GROUPED_GEMM_BACKEND=${TURBO_GROUPED_GEMM_BACKEND:-default}
+# bf16:flydsl (Primus-Turbo's FlyDSL kernels; Primus raises their 64-expert weight-gradient cap to
+# the 128 local experts of one GPU on gfx1250) or default (Primus-Turbo's choice: Triton)
+export TURBO_GROUPED_GEMM_BACKEND=${TURBO_GROUPED_GEMM_BACKEND:-bf16:flydsl}
 TURBO_GROUPED_GEMM_BACKEND=${TURBO_GROUPED_GEMM_BACKEND,,}
 export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
@@ -99,6 +100,14 @@ case "${PRIMUS_TURBO_ATTN_BACKEND,,}" in
         exit 2
         ;;
 esac
+# FlyDSL's expert weight-gradient GEMM has no beta=1 epilogue, which gradient_accumulation_fusion
+# needs; Primus-Turbo would raise at the first backward.
+GAF_RE=' --gradient_accumulation_fusion[ =](true|1) '
+if [[ "${TURBO_GROUPED_GEMM_BACKEND}" == *flydsl* && " ${*,,} " =~ ${GAF_RE} ]]; then
+    echo "--gradient_accumulation_fusion True needs TURBO_GROUPED_GEMM_BACKEND=default," \
+        "not '${TURBO_GROUPED_GEMM_BACKEND}'" >&2
+    exit 2
+fi
 if [[ "${PRIMUS_TP}" != 1 ]]; then
     echo "MSA has no tensor parallel; PRIMUS_TP must be 1, not '${PRIMUS_TP}'" >&2
     exit 2

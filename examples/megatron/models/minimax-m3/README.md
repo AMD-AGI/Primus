@@ -23,7 +23,9 @@ The default image is `amdprimus/amdprimus:tas-20261019` (see the DeepSeek-V3 exa
 Primus-Turbo 0.6.1.dev2, FlyDSL 0.3.4.1 and AITER 0.1.24.post1. Every run below used that image and
 its own Primus-Turbo, except the FlyDSL attention runs, which used a Primus-Turbo checkout through
 `TURBO_DIR` (see FlyDSL attention in the dense layers). Every run outside hipBLASLt tuning used
-hipBLASLt's own kernels, which `HIPBLASLT_TUNING_OVERRIDE_FILE=` restores.
+hipBLASLt's own kernels, which `HIPBLASLT_TUNING_OVERRIDE_FILE=` restores, and every run before Expert
+grouped GEMM on FlyDSL used Primus-Turbo's Triton grouped GEMM, which `TURBO_GROUPED_GEMM_BACKEND=default`
+restores.
 
 ## Run
 
@@ -73,8 +75,8 @@ ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
   first that many layers, so the default recomputes dense layer 1, not an MSA/MoE layer.
 - MSA: `PRIMUS_MSA_BACKEND`, `flydsl` (default) or `eager`.
 - Experts: `USE_TURBO_GROUPED_GEMM` (default `True`; `False` is TE's grouped GEMM, one hipBLASLt GEMM
-  per expert) and `TURBO_GROUPED_GEMM_BACKEND` (default `default`, which is Triton here; `bf16:flydsl`
-  takes at most 64 local experts, so EP 2 or more).
+  per expert) and `TURBO_GROUPED_GEMM_BACKEND` (default `bf16:flydsl`; `default` is Triton here, and
+  `--gradient_accumulation_fusion True` needs it). See Expert grouped GEMM on FlyDSL.
 - `TURBO_DIR` (default unset: the image's Primus-Turbo): a Primus-Turbo checkout built in place for
   the image, see above. A relative path is taken from the current directory.
 - Dense layers: `USE_TURBO_ATTENTION` runs Primus-Turbo attention in the three dense layers, with
@@ -102,7 +104,7 @@ ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
   `PRIMUS_USER`, `PRIMUS_EXP_NAME`, which make up the output directory `<workspace>/<team>/<user>/<exp>`.
 
 The defaults are in the script. Arguments to the script are appended to the Primus command line, for
-example `--gradient_accumulation_fusion True`.
+example `--use_turbo_autotune True`.
 
 **Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. From the host,
 training runs as root in the new container, so the files it creates are owned by root. Inside a
@@ -391,6 +393,53 @@ One MSA layer's training forward at the proxy shape on one GPU, timed without a 
 ops that launch a kernel. The baseline runs 40 MSA layer forwards a step, so up to about 10 ms; the
 one-GPU run's 8 are too few to show end to end.
 
+## Expert grouped GEMM on FlyDSL
+
+With the previous sections on one GPU, the expert GEMMs were 101.6 of 559.0 ms of kernel time in a
+profiled step. Primus-Turbo's Triton kernels ran the weight gradients at 229–271 TFLOP/s and the
+forward and data gradients at 650–700, against 2000–2900 for the hipBLASLt GEMMs. The launcher now
+defaults to `TURBO_GROUPED_GEMM_BACKEND=bf16:flydsl`, Primus-Turbo's FlyDSL grouped GEMM.
+
+Its weight-gradient backend declines more than 64 experts (`GroupedGEMMVariableKFlyDSLBackend.MAX_G`),
+and Primus-Turbo raises when the backend it was told to use declines, so one GPU's 128 local experts
+stopped at the first backward. Primus-Turbo's comment there gives 64 as a measured limit on gfx950 and
+says the gfx1250 kernel was measured correct up to 160. The `megatron.turbo.flydsl_grouped_gemm_max_groups`
+patch (`primus/backends/megatron/patches/turbo/flydsl_grouped_gemm_patches.py`) raises the cap to the
+local expert count on gfx1250, up to 160, when the backend is FlyDSL. From EP2 on there are at most 64
+local experts and it changes nothing.
+
+One MoE layer's fc1 (6144 to 6144) and fc2 (3072 to 6144), forward and backward, through
+`primus_turbo.pytorch.ops.grouped_gemm` with balanced routing; CUDA events, one GPU, twice each:
+
+| Backend | 128 experts x 128 rows (one GPU) | 32 experts x 512 rows (EP4) |
+| --- | --- | --- |
+| Triton (`default`) | 11.77, 11.79 ms | 6.55, 6.55 ms |
+| hipBLASLt | 15.44, 15.45 ms | not run |
+| FlyDSL | 5.46, 5.44 ms | 4.55, 4.58 ms |
+
+The FlyDSL weight gradients run at 612–626 TFLOP/s at the one-GPU shape and the forward and data
+gradients at 1330–1660. Against an fp32 reference all three backends have the same relative error,
+1.7e-3, which is the bf16 rounding of the output.
+
+End to end, one GPU, 4 layers, GBS 8, the launcher's defaults on 105e9f33 plus this change:
+
+| Primus-Turbo | Expert grouped GEMM | ms/iter | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- | --- | --- |
+| `TURBO_DIR` (FlyDSL dense attention) | Triton | 565.3 | 956.0 | 230.3 GB | 10.01476 |
+| `TURBO_DIR` (FlyDSL dense attention) | FlyDSL | 513.1, 515.3, 513.5 | 1053.3, 1048.8, 1052.5 | 230.3 GB | 10.01468, 10.01467, 10.01470 |
+| the image's (TE dense attention) | Triton | 743.5 | 726.9 | 238.0 GB | 10.01456 |
+| the image's (TE dense attention) | FlyDSL | 692.0 | 780.9 | 238.0 GB | 10.01456 |
+
+- 52 ms per step, 9%: 6.5 ms per MoE layer and micro-batch, as the operator timing predicts.
+- With TE's dense attention the run has no atomics, and its loss is the same to the last logged digit
+  with either kernel.
+- FlyDSL compiles its kernels in iterations 1 and 2, which take about 6 and 3 s longer.
+- `--gradient_accumulation_fusion True` needs `TURBO_GROUPED_GEMM_BACKEND=default`: FlyDSL's
+  weight-gradient GEMM has no beta=1 epilogue, and Primus-Turbo would raise at the first backward. The
+  launcher stops before training instead.
+- Not yet run on the EP4 baseline. From the operator timing it would save about 80 ms per step there
+  (2.0 ms per MoE layer and micro-batch, five layers, 8 micro-batches).
+
 ## How the defaults were chosen
 
 On the older bases dad0a081 and a624bb95 (Megatron-LM d3528a21), one GPU unless noted, with TE's
@@ -515,8 +564,8 @@ Do not run:
 
 - `--turbo_fused_grouped_gemm True` and `--use_turbo_fused_act_with_probs True` assert
   `glu_linear_offset == 0`; M3's `swigluoai` uses 1.0. The second also rules out sync-free stage 3.
-- `TURBO_GROUPED_GEMM_BACKEND=bf16:flydsl` on one GPU: `User specified backend FLYDSL cannot handle
-  the given inputs`, because 128 local experts are over its 64. It runs at EP2.
+- `--gradient_accumulation_fusion True` with `TURBO_GROUPED_GEMM_BACKEND=bf16:flydsl` (the default):
+  the launcher stops; see Expert grouped GEMM on FlyDSL.
 - `--fp8 e4m3 --fp8_recipe blockwise` and `--fp8_recipe mxfp8` stop at TE's arch check (`Device arch
   gfx94x or gfx95x is required for FP8 block scaling execution.`, `Device arch gfx95x or newer is
   required for MXFP8 execution.`). TE 2.19.0.dev0 leaves gfx1250 as a TODO until its GEMM is available.
@@ -540,7 +589,7 @@ Do not run:
 - The full 60-layer model. From the proxy's ~18 bytes/parameter (BF16 weights, FP32 gradients and
   Adam state), a training step at MBS 1, seq 4096 wants on the order of 40 MI455X GPUs (EP8 x PP5).
 - The gfx950 MFMA kernels. This node cannot execute them.
-- The hipBLASLt tuning file on the EP4 baseline.
+- The hipBLASLt tuning file and the FlyDSL expert grouped GEMM on the EP4 baseline.
 
 ## Known issues
 
