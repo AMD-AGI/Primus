@@ -5,6 +5,7 @@
 ###############################################################################
 
 
+import math
 import os
 import re
 import socket
@@ -216,19 +217,49 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    # Weekly only: the layer template is llama3_8B's (per the class policy). It
+    # checks that the Mistral recipe and preset launch, the printed arguments and
+    # that the reset patch installs. Per-PR CI checks the preset and the converter in
+    # tests/unit_tests/backends/megatron/test_native_loader_mistral.py.
+    @pytest.mark.weekly
     def test_mistral_7B_v0_3(self):
-        run_script(
+        log, _ = run_script(
             self.__class__.__name__,
             "mistral_7B_v0_3",
             exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/mistral_7B_v0_3-BF16-pretrain.yaml",
             env_override={},
-            extra_args=[
-                "--num_layers",
-                "4",
-                "--train_iters",
-                "3",
-            ],
+            extra_args=["--num_layers", "4", "--train_iters", "3", "--log_interval", "1"],
         )
+        expected = {
+            "num_layers": "4",
+            "hidden_size": "4096",
+            "ffn_hidden_size": "14336",
+            "num_attention_heads": "32",
+            "num_query_groups": "8",
+            "kv_channels": "128",
+            "max_position_embeddings": "32768",
+            "vocab_size": "32768",
+            "rotary_base": "1000000",
+            "norm_epsilon": "1e-05",
+            "use_rope_scaling": "False",
+            "window_size": "None",
+            "untie_embeddings_and_output_weights": "True",
+        }
+        for name, value in expected.items():
+            # Megatron prints each argument as "name ..... value" (maybe colored).
+            found = set(re.findall(rf"(?<!\w){name} \.+ (\S+?)(?:\x1b\[0m)?$", log, re.M))
+            self.assertEqual(found, {value}, f"{name}: {found}")
+        # The recipe sets reset_log_averages_after_first_log: its patch installs.
+        self.assertIn("[Patch:megatron.training_log.first_iteration_reset] training_log: should_reset", log)
+        # log_interval 1: each of the 3 iterations logs a loss. Megatron prints a
+        # loss only when it is > 0, so a NaN gives a missing line.
+        values = re.findall(r"lm loss: (-?[0-9.]+(?:E[+-]?[0-9]+)?)", log, re.I)
+        losses = [float(x) for x in values]
+        self.assertEqual(len(losses), 3, f"expected a loss for each of 3 iterations: {values}")
+        self.assertTrue(all(math.isfinite(x) and x > 0 for x in losses), losses)
+        # random init on mock data: the first loss is near ln(vocab_size)
+        ln_vocab = math.log(32768)
+        self.assertLess(abs(losses[0] - ln_vocab) / ln_vocab, 0.15, (losses, ln_vocab))
 
     def test_llama3_70B(self):
         run_script(

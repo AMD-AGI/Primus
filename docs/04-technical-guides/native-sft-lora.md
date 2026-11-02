@@ -106,6 +106,14 @@ Replace the `EXP=` path with any yaml from the table below.
 | Qwen3-30B-A3B (MoE) | BF16 | Alpaca packed | `qwen3_30B_A3B-BF16-sft-packed.yaml` |
 | Qwen3-235B-A22B (MoE) | BF16 | Alpaca | `qwen3_235B_A22B-BF16-sft.yaml` |
 
+> **Mistral.** No Mistral SFT yaml ships yet, and Mistral is not in the verified list above. To try Mistral-7B-v0.3, copy `llama3_8B-BF16-sft-packed.yaml` and:
+>
+> * set `model: mistral_7B_v0_3.yaml`. The posttrain conversion hook (`runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py`) then converts `hf_path` to a Megatron checkpoint before training;
+> * set `hf_path` to a named local directory, e.g. `huggingface-cli download mistralai/Mistral-7B-v0.3 --local-dir $DATA_PATH/hf/Mistral-7B-v0.3`. The native checkpoint goes to `$DATA_PATH/megatron_checkpoints/<hf_path basename>_native`, so a Hub snapshot directory (basename = commit hash) gives a hash-named checkpoint. A Hub ID has no local `config.json`, so the hook uses Megatron-Bridge for it;
+> * delete the overrides that belong to Llama 3 so the preset values apply: `tokenizer_model`, `norm_epsilon`, `init_method_std` and `max_position_embeddings`. Keep `seq_length` at most 32768. A set `pretrained_checkpoint` or `load` skips the conversion and loads that checkpoint, so keep both null (or point them at a converted Mistral checkpoint).
+>
+> Only v0.3 matches the preset. v0.2 has vocab size 32000 (the preset has 32768), and v0.1 has a sliding window. A Mistral config with a sliding window (also no `sliding_window` key: Hugging Face's default 4096), a non-SiLU activation or RoPE scaling is not converted natively. When the `native_ckpt_convert` option (in the `post_trainer` or `sft_trainer` module of the SFT yaml) is not set, it uses Megatron-Bridge (the hook logs why); with `native_ckpt_convert: true` the hook stops with that reason. See [Mistral-7B-v0.3 checkpoint conversion](../06-developer-guide/model-support-matrix.md#mistral-7b-v03-checkpoint-conversion) for the rules and the three values of `native_ckpt_convert`.
+
 ### 3.3 Log locations after launch
 
 | Type | Path |

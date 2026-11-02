@@ -11,20 +11,31 @@ modules:
     # model to run
     model: mistral_7B_v0_3.yaml
     overrides:
+      # MI355X recipe. Batch, sequence and optimizer values are the same on
+      # every SKU: a starting point, not tuned for each SKU.
       # log
       wandb_project: "Primus_Mistral_Pretrain"
+      # Megatron's per-iteration lines (loss, grad norm, time) are logged at
+      # DEBUG; show them on stderr, as the llama3_8B recipes do.
+      stderr_sink_level: DEBUG
       # disable_wandb: false
       # disable_tensorboard: false
-      stderr_sink_level: DEBUG
-
+      # Averaged time / throughput in the log line: skip the first 2 iterations, then
+      # average since the last restart; the average restarts every log_avg_reset_interval logs.
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
+      # Logging only: backport of the Megatron-LM #7092 fix (upstream main logs this
+      # way). With log_interval 1, the loss and time logged after the first
+      # iteration of a run (also of a resumed run) do not include that iteration.
+      reset_log_averages_after_first_log: true
 
       train_iters: 50
-      micro_batch_size: 4
-      global_batch_size: 256
+      micro_batch_size: 2
+      global_batch_size: 16
 
-      seq_length: 4096
+      # Same sequence length as the llama3_8B recipes; the model supports up to
+      # 32768 (max_position_embeddings in the preset).
+      seq_length: 8192
 
       lr: 1.0e-5
       min_lr: 0.0
@@ -61,6 +72,12 @@ modules:
       no_save_rng: null
       disable_last_saving: true
       ckpt_format: torch
+
+      # Turbo backend on, attention on TE (as llama3.1_8B): this recipe is verified
+      # with TE attention, also when run with context_parallel_size 2, where the pinned
+      # Primus-Turbo attention is not correct.
+      enable_primus_turbo: true
+      use_turbo_attention: false
 
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"
