@@ -97,6 +97,24 @@ def pack_low16_bf16(vals8, grp0):
     return Vec.from_elements(elems, fx.BFloat16)
 
 
+def pack_pair_bf16(vals_a, vals_b):
+    """B operand for a K=32 made of two 16-long K: ``a`` in K ``0..15``, ``b`` in K ``16..31``.
+
+    ``vals_a[i]`` and ``vals_b[i]`` are K ``half*8+i`` of their 16 on this lane (f32). One
+    ``v_permlane16_swap`` per ``i`` gives group 0 both halves of ``a`` and group 1 both halves of
+    ``b``.
+    """
+    lows, highs = [], []
+    for a, b in zip(vals_a, vals_b):
+        a_bits = _raw(ArithValue(_raw(a)).bitcast(fx.Int32.ir_type))
+        b_bits = _raw(ArithValue(_raw(b)).bitcast(fx.Int32.ir_type))
+        swapped = rocdl.permlane16_swap(_pair_type(), a_bits, b_bits, False, True)
+        for out, idx in ((lows, 0), (highs, 1)):
+            bits = llvm.extractvalue(fx.Int32.ir_type, swapped, [idx])
+            out.append(fx.BFloat16(_raw(fx.Float32(_raw(ArithValue(bits).bitcast(fx.Float32.ir_type))))))
+    return Vec.from_elements(lows + highs, fx.BFloat16)
+
+
 def crossgrp_max(x):
     low, high = permlane16_halves(x)
     return fx.Float32(arith.MaxNumFOp(_raw(low), _raw(high)).result)

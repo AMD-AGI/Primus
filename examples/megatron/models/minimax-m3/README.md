@@ -280,6 +280,39 @@ with 0 NaN.
 - Not yet run on the EP4 baseline, where TE's dense attention is 106.5 ms of softmax plus about 78 ms
   of score and value GEMMs per profiled step.
 
+## MSA backward: two tokens per dK/dV WMMA
+
+On the baseline, MSA backward is the largest MSA cost: 41–42 ms of kernels per micro-batch on rank 0
+(five layers, about 8.2 ms each, the indexer included) against 11.2–11.5 ms for the forward. The gfx1250
+dK/dV kernel ran its dS and P contractions as a K=32 WMMA with only the low K=16 filled, one token at
+a time, and read Q and dO from LDS one element per load. It now gives each lane half one of two
+tokens, so they fill K=32, and keeps Q and dO transposed in LDS, where a lane's 16 rows of one column
+are two 16-byte loads.
+
+At the proxy layer shape (S=4096, B=1, 64 query / 4 KV heads, top-16 blocks of 128), CUDA events, 5
+iterations after 2 warmups, one GPU, twice each:
+
+| Op | before | after |
+| --- | --- | --- |
+| attention forward | 1.25 ms | 1.25 ms |
+| attention backward | 7.35, 7.34 ms | 3.01, 3.01 ms |
+| indexer forward | 0.34 ms | 0.32–0.34 ms |
+| indexer backward | 0.81–0.88 ms | 0.79–0.86 ms |
+
+End to end on one GPU with FlyDSL dense attention (as in the previous section: 4 layers, one of them
+MSA, GBS 8), alternating:
+
+| MSA backward | ms/iter | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- |
+| before | 643.6, 643.5 | 230.3 GB | 10.01477, 10.01462 |
+| two tokens per WMMA | 608.4, 608.6 | 230.3 GB | 10.01461, 10.01473 |
+
+- 35 ms per step, 4.3 ms per MSA layer and micro-batch, as the operator timing predicts. On the
+  baseline that would be about 175 ms per step (five MSA layers, 8 micro-batches); not yet measured.
+- The backward is now 2.4 times the forward. The losses differ in the fourth decimal between repeats
+  of the same tree, as with FlyDSL dense attention alone (its dQ atomics); the MSA backward itself
+  has no atomics.
+
 ## How the defaults were chosen
 
 On the older bases dad0a081 and a624bb95 (Megatron-LM d3528a21), one GPU unless noted, with TE's

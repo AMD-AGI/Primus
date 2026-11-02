@@ -6,11 +6,15 @@
 
 """gfx1250 MSA backward: the dQ and dK/dV kernels of ``msa_token_bwd`` on wave32 WMMA.
 
-dQ is one wave32 per token. dK/dV is one wave per 16 keys of a block; the two
-lane halves split K on QK, and each holds 8 of the 16 heads. The dS/P
-contraction is the forward PV schedule (K=16 in the low half of a K=32 WMMA,
-transposed operand gathered from LDS). dK/dV partials use the gfx950 layout, a
-dense ``[chunk, 2, block, D]`` fp32 buffer, so the same reduce kernel sums them.
+dQ is one wave32 per token. Its dS.K contraction is the forward PV schedule
+(K=16 in the low half of a K=32 WMMA, transposed operand gathered from LDS).
+
+dK/dV is one wave per 16 keys of a block; the two lane halves split K on QK,
+and each holds 8 of the 16 heads. In the dS/P contractions the lane halves take
+one token each, so two tokens fill K=32, and Q and dO are also stored transposed
+in LDS, where a lane's 16 rows of one column are two 16-byte loads. dK/dV
+partials use the gfx950 layout, a dense ``[chunk, 2, block, D]`` fp32 buffer, so
+the same reduce kernel sums them.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_w32 import 
     cat_bf16_16,
     crossgrp_sum,
     pack_low16_bf16,
+    pack_pair_bf16,
     wmma_f32_16x16x32_bf16,
 )
 
@@ -284,13 +289,19 @@ def build_dkdv_w32(num_kv_heads: int, block_size: int, scale: float, topk: int, 
     rows = tps * HPW
     vec = 8
     np = rows * D // (threads * vec)
-    assert rows * D % (threads * vec) == 0 and rows <= threads
+    assert rows * D % (threads * vec) == 0 and rows <= threads and tps % 2 == 0
+    assert threads // (D // vec) * np == rows
     buf = rows * STRIDE
+    # Q and dO transposed, [D, rows]: a lane's 16 rows of one column are contiguous.
+    stride_t = rows + 8
+    buf_t = D * stride_t
 
     allocator = SmemAllocator(None, arch=get_hip_arch(), global_sym_name="msa_bwd_dkdv_w32_smem")
     q_off = allocator._align(allocator.ptr, 16)
     do_off = allocator._align(q_off + buf * 2, 16)
-    lse_off = allocator._align(do_off + buf * 2, 16)
+    qt_off = allocator._align(do_off + buf * 2, 16)
+    dot_off = allocator._align(qt_off + buf_t * 2, 16)
+    lse_off = allocator._align(dot_off + buf_t * 2, 16)
     dl_off = allocator._align(lse_off + threads * 4, 16)
     allocator.ptr = allocator._align(dl_off + threads * 4, 16)
 
@@ -312,10 +323,11 @@ def build_dkdv_w32(num_kv_heads: int, block_size: int, scale: float, topk: int, 
         NCH: fx.Int32,
     ):
         v8 = Vec.make_type(8, elem)
-        v1 = Vec.make_type(1, elem)
         v4f = Vec.make_type(4, fx.Float32)
         lds_q = SmemPtr(allocator.get_base(), q_off, elem.ir_type, shape=(buf,)).get()
         lds_do = SmemPtr(allocator.get_base(), do_off, elem.ir_type, shape=(buf,)).get()
+        lds_qt = SmemPtr(allocator.get_base(), qt_off, elem.ir_type, shape=(buf_t,)).get()
+        lds_dot = SmemPtr(allocator.get_base(), dot_off, elem.ir_type, shape=(buf_t,)).get()
         lds_lse = SmemPtr(allocator.get_base(), lse_off, fx.Float32.ir_type, shape=(threads,)).get()
         lds_dl = SmemPtr(allocator.get_base(), dl_off, fx.Float32.ir_type, shape=(threads,)).get()
 
@@ -324,7 +336,6 @@ def build_dkdv_w32(num_kv_heads: int, block_size: int, scale: float, topk: int, 
         lane = tid % fx.Index(WAVE)
         lo = lane % fx.Index(16)
         half = lane // fx.Index(16)
-        grp0 = ArithValue(half == fx.Index(0))
         Sn = fx.Index(S)
         Bn = fx.Index(B)
         NBn = fx.Index(NB)
@@ -367,7 +378,6 @@ def build_dkdv_w32(num_kv_heads: int, block_size: int, scale: float, topk: int, 
         c_sl = fx.Float32(scale * _LOG2E)
         c_log2e = fx.Float32(_LOG2E)
         c_zero = fx.Float32(0.0)
-        c_bf0 = fx.BFloat16(0.0)
 
         # this wave's 16 keys. Both halves share the key; they split its K.
         kv0 = blk * fx.Index(block_size) + wave * fx.Index(TK)
@@ -390,9 +400,11 @@ def build_dkdv_w32(num_kv_heads: int, block_size: int, scale: float, topk: int, 
                 )
             )
 
-        st_flat = [(fx.Index(p * threads) + tid) * fx.Index(vec) for p in range_constexpr(np)]
-        st_rows = [f // fx.Index(D) for f in st_flat]
-        st_cols = [f % fx.Index(D) for f in st_flat]
+        # np consecutive rows of the same vec columns, so the transposed store is np-wide
+        st_row0 = tid // fx.Index(D // vec) * fx.Index(np)
+        st_col = tid % fx.Index(D // vec) * fx.Index(vec)
+        st_rows = [st_row0 + fx.Index(p) for p in range_constexpr(np)]
+        st_cols = [st_col for _ in range_constexpr(np)]
         ld_row = tid % fx.Index(rows)
 
         def pick(vals, j):
@@ -448,11 +460,16 @@ def build_dkdv_w32(num_kv_heads: int, block_size: int, scale: float, topk: int, 
                 at = st_rows[p] * fx.Index(STRIDE) + st_cols[p]
                 Vec(q_st[p]).store(lds_q, [at])
                 Vec(do_st[p]).store(lds_do, [at])
+            for e in range_constexpr(vec):
+                at_t = (st_col + fx.Index(e)) * fx.Index(stride_t) + st_row0
+                for src, mem in ((q_st, lds_qt), (do_st, lds_dot)):
+                    col = [fx.BFloat16(_raw(Vec(src[p])[e])) for p in range_constexpr(np)]
+                    Vec.from_elements(col, elem).store(mem, [at_t])
             _memref.store(_raw(lse_st), lds_lse, [_raw(tid)])
             _memref.store(_raw(dl_st), lds_dl, [_raw(tid)])
             gpu.barrier()
 
-            for j in range_constexpr(tps):
+            def probs_and_ds(j):
                 s_acc = Vec.filled(8, 0.0, fx.Float32)
                 dp_acc = Vec.filled(8, 0.0, fx.Float32)
                 for ks in range_constexpr(KS):
@@ -478,21 +495,21 @@ def build_dkdv_w32(num_kv_heads: int, block_size: int, scale: float, topk: int, 
                     prob = fx.Float32(ok.select(_raw(prob), _raw(c_zero)))
                     probs.append(prob)
                     dss.append(prob * (fx.Float32(_raw(Vec(dp_acc)[r])) - fx.Float32(_raw(dl8[r]))))
-                pB = pack_low16_bf16(probs, grp0)
-                dsB = pack_low16_bf16(dss, grp0)
+                return probs, dss
+
+            # Tokens 2*pr and 2*pr+1 fill the K=32 of the dS/P contraction, one per lane half.
+            for pr in range_constexpr(tps // 2):
+                probs0, dss0 = probs_and_ds(2 * pr)
+                probs1, dss1 = probs_and_ds(2 * pr + 1)
+                pB = pack_pair_bf16(probs0, probs1)
+                dsB = pack_pair_bf16(dss0, dss1)
+                t_row = fx.Index(2 * pr * HPW) + half * fx.Index(HPW)
 
                 new_dk, new_dv = [], []
                 for dt in range_constexpr(DT):
-                    d_col = fx.Index(dt * 16) + lo
-                    q_elems, do_elems = [], []
-                    for r in range_constexpr(16):
-                        lrow = fx.Index(j * HPW + r) * fx.Index(STRIDE) + d_col
-                        qv = fx.BFloat16(_raw(Vec.load(v1, lds_q, [lrow])[0]))
-                        dv = fx.BFloat16(_raw(Vec.load(v1, lds_do, [lrow])[0]))
-                        q_elems.append(fx.BFloat16(grp0.select(_raw(qv), _raw(c_bf0))))
-                        do_elems.append(fx.BFloat16(grp0.select(_raw(dv), _raw(c_bf0))))
-                    new_dv.append(wmma_f32_16x16x32_bf16(Vec.from_elements(do_elems, elem), pB, dv_acc[dt]))
-                    new_dk.append(wmma_f32_16x16x32_bf16(Vec.from_elements(q_elems, elem), dsB, dk_acc[dt]))
+                    at = (fx.Index(dt * 16) + lo) * fx.Index(stride_t) + t_row
+                    new_dv.append(wmma_f32_16x16x32_bf16(lds16(lds_dot, at), pB, dv_acc[dt]))
+                    new_dk.append(wmma_f32_16x16x32_bf16(lds16(lds_qt, at), dsB, dk_acc[dt]))
                 dk_acc, dv_acc = new_dk, new_dv
             results = yield dk_acc + dv_acc
 
