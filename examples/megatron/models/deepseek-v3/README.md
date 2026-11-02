@@ -126,8 +126,8 @@ last rank in GiB (labelled GB) as the device's total minus free memory. Each row
 The rows after hipBLASLt tuning were measured later, inside a container of the image
 (`PRIMUS_LAUNCHER=direct`) with a newer Primus-Turbo checkout (`TURBO_DIR`) that has the MegaMoE wgrad
 changes, as the mean of 2 runs (on 4 GPUs alternating between the two rows). Part of their gain over the
-hipBLASLt tuning row comes from that Primus-Turbo and from Primus's gfx1250 gradient clipping, which do not
-depend on the settings. With that Primus-Turbo the last row of each table is the launcher's defaults.
+hipBLASLt tuning row comes from that Primus-Turbo, which does not depend on the settings. With that
+Primus-Turbo the last row of each table is the launcher's defaults.
 
 **1 GPU** (the 1-GPU variant above: 4 layers, 32 experts, GBS 16)
 
