@@ -460,3 +460,105 @@ def test_accumulated_update_fps_counts_every_microbatch():
     full_update, _ = benchmark_step_rates(local_batch_size=8, step_time_gpu_s=2.0, total_flops=0.0)
     assert one_microbatch == 2.0
     assert full_update == 4.0
+
+
+def test_cached_latents_replace_the_raw_loader(monkeypatch):
+    import torch
+
+    from primus.backends.diffusion.trainers.benchmark import AMDBBenchmarkTrainer
+
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None, raising=False)
+    trainer = AMDBBenchmarkTrainer.__new__(AMDBBenchmarkTrainer)
+    trainer.rank = 0
+    trainer.per_device_train_batch_size = 4
+    trainer.args = {"shuffle": False, "dataloader_drop_last": False}
+    trainer.sampler = type("Sampler", (), {"set_epoch": lambda self, epoch: None})()
+    trainer.processing_class = None
+    trainer.dataloader = [{"images": torch.zeros(4, 3, 8, 8), "prompts": ["p"] * 4}]
+    trainer._prepare_host_batch = lambda batch: batch
+    trainer._prepare_batch = lambda batch, processor: batch
+
+    class _Model:
+        def encode_batch(self, batch):
+            assert "images" in batch
+            count = batch["images"].shape[0]
+            return {
+                "latents": torch.arange(count).float().view(count, 1),
+                "context": torch.zeros(count, 1),
+                "pooled": torch.zeros(count, 1),
+            }
+
+    trainer.model = _Model()
+    trainer._cache_encoded_batches()
+    batches = list(trainer.dataloader)
+    assert trainer._encoded_cache is True
+    assert [batch["latents"].shape[0] for batch in batches] == [4]
+    assert "images" not in batches[0]
+    assert batches[0]["prompts"] == ["p", "p", "p", "p"]
+
+
+def test_benchmark_update_fps_counts_every_micro_batch(monkeypatch):
+    import torch
+
+    from primus.backends.diffusion.trainers.benchmark import AMDBBenchmarkTrainer
+
+    class _Event:
+        def __init__(self, enable_timing=True):
+            del enable_timing
+
+        def record(self):
+            return None
+
+        def elapsed_time(self, other):
+            del other
+            return 2000.0
+
+    monkeypatch.setattr(torch.cuda, "Event", _Event, raising=False)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None, raising=False)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None, raising=False)
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+    model = _Model()
+    logged = {}
+
+    def compute_loss(batch):
+        return model.weight * batch["latents"].sum()
+
+    trainer = AMDBBenchmarkTrainer.__new__(AMDBBenchmarkTrainer)
+    trainer.rank = 0
+    trainer.world_size = 1
+    trainer.model = model
+    trainer.args = {"cache_latents": False}
+    trainer._compiled_transformer_blocks = True
+    trainer.mlperf_enabled = False
+    trainer.optimizer = type(
+        "Opt",
+        (),
+        {"zero_grad": lambda self, set_to_none=True: None, "step": lambda self: None},
+    )()
+    trainer.lr_scheduler = type("Sched", (), {"step": lambda self: None})()
+    trainer.global_step = 0
+    trainer.grad_accum_steps = 2
+    trainer.per_device_train_batch_size = 4
+    trainer.num_train_epochs = 1
+    trainer.max_steps = 1
+    trainer.total_steps = 1
+    trainer.save_steps = 0
+    trainer.max_grad_norm = 0.0
+    trainer.sampler = type("Sampler", (), {"set_epoch": lambda self, epoch: None})()
+    trainer.processing_class = None
+    trainer.dataloader = [
+        {"latents": torch.ones(4, 1)},
+        {"latents": torch.ones(4, 1)},
+    ]
+    trainer.compute_loss = compute_loss
+    trainer._log_step = lambda *args, **kwargs: logged.update(kwargs)
+
+    trainer.train()
+
+    # Two micro-batches of 4 over a 2s window. Counting one micro-batch reports 2.0.
+    assert logged["fps_gpu"] == 4.0
