@@ -156,6 +156,22 @@ makes that step 1694 ms instead of 1537.
   is almost all waiting behind the compute on stream 1, so they are not in the table.
 - The four ranks differ by under 3% in MSA and expert GEMM time; routing is uniform.
 
+Switches on the baseline, one run each:
+
+| Switch | ms/iter | Tokens/s/GPU | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- | --- |
+| none (baseline) | 1536.6 | 21,325 | 280.2 GB | 8.19595 |
+| `MBS=2` (4 micro-batches of 2 per rank) | 1384.4 | 23,669 | 301.6 GB | 8.14196 |
+| `--overlap_grad_reduce True` | 1551.6 | 21,119 | 280.4 GB | 8.19586 |
+| `--overlap_grad_reduce True --overlap_param_gather True` | 1555.3 | 21,068 | 280.4 GB | 8.19586 |
+| `--gradient_accumulation_fusion True` | 1762.4 | 18,593 | 287.5 GB | 8.19598 |
+
+- `MBS=2` gives 11% more tokens/s for 21 GB more memory. Each expert then gets 1024 tokens per
+  micro-batch, as at EP8 with MBS 1.
+- The overlaps stay about 1% slower with 8 micro-batches per step. The gradient reduction happens
+  once per step, and all collectives together take 71 ms of the profiled step.
+- `gradient_accumulation_fusion` is 15% slower, as on one GPU (14–16%); not profiled at EP4.
+
 ## Results on `dev/mi455x_v3` c19456f1
 
 c19456f1 has Megatron-LM core_v0.19.2 (4b4acac9) and Primus's Triton AdamW. These runs use the
@@ -248,7 +264,7 @@ clipping l2norm 2.7 ms; the scale passes, the NaN-check norm and the parameter c
   frees nothing. Interval 1 to 100: 463.9 to 183.6 ms on one GPU, 545.1 to 150.7 ms on EP2. The yaml
   uses 100. The MI355X M3 yamls use 1; their effect there was not measured.
 - `overlap_grad_reduce` and `overlap_param_gather` on to off: 183.6 to 167.4 ms on one GPU, 150.7 to
-  142.6 ms on EP2. The yaml turns them off. Not measured at EP4 or with several micro-batches per step.
+  142.6 ms on EP2. The yaml turns them off. On the EP4 baseline they are about 1% slower (Baseline).
 - `gradient_accumulation_fusion: true`: 183.6 to 209.8 ms with TE's grouped GEMM (overlap on), 158.2
   to 184.3 ms with Primus-Turbo's. The fusion is not what costs; the fp32 output is. With it, each
   dense weight gradient is a bf16 x bf16 GEMM written straight into the fp32 `main_grad` with beta 1.
@@ -357,8 +373,6 @@ Do not run:
 
 ## Not yet measured
 
-- On the baseline: MBS 2, `overlap_grad_reduce` and `overlap_param_gather`, and
-  `gradient_accumulation_fusion`. On one GPU they were measured with one micro-batch per step.
 - Sequence 16384 and 32768. MSA's cost stays on the selected blocks; dense attention does not.
 - Pipeline parallel. The launcher allows `PRIMUS_PP`, but no PP run has been done. Tensor parallel
   and context parallel are not implemented for MSA.
