@@ -22,9 +22,15 @@ Matching is deliberately narrow -- `v26.6`, `primus==26.6`, `__version__ =
 "26.6"` -- so that `26.6GB` in a memory log and `rpds-py==2026.6.3` are never
 candidates in the first place.
 
+`--family` limits the bump to one image family (the families are released
+weeks apart at times), and `--scope docs|install` splits the documentation from
+the install scripts and their guides, which are re-pinned last. References left
+for another family or the install phase are counted as deferred, not held.
+
 Usage:
     python tools/release_docs/bump_version.py --from v26.6 --to v26.7          # dry run
     python tools/release_docs/bump_version.py --from v26.6 --to v26.7 --apply
+    python tools/release_docs/bump_version.py --from v26.8 --to v26.9 --family primus --scope docs --apply
 """
 
 import argparse
@@ -130,10 +136,11 @@ def load_rules(old, new):
         match = re.compile(_substitute(rule["match"], old, new, escape=True), re.IGNORECASE)
         replace = [
             (
-                re.compile(_substitute(pattern, old, new, escape=True)),
-                _substitute(replacement, old, new, escape=False),
+                re.compile(_substitute(pair[0], old, new, escape=True)),
+                _substitute(pair[1], old, new, escape=False),
+                pair[2] if len(pair) > 2 else None,
             )
-            for pattern, replacement in rule.get("replace", [])
+            for pair in rule.get("replace", [])
         ]
         compiled.append(
             {
@@ -146,6 +153,25 @@ def load_rules(old, new):
             }
         )
     return config["excluded_paths"], compiled, config["rewrite_scope"]
+
+
+def load_partition():
+    """family_paths and install_paths, which split a release into runs."""
+    config = json.loads(RULES_FILE.read_text())
+    return config.get("family_paths", {}), config.get("install_paths", [])
+
+
+def deferred_reason(rel_path, families, scope, family_paths, install_paths):
+    """Why a file is left for another run, or None when this run owns it."""
+    in_install = any(rel_path == p or rel_path.startswith(p) for p in install_paths)
+    if scope == "docs" and in_install:
+        return "install phase"
+    if scope == "install" and not in_install:
+        return "docs phase"
+    for family, prefixes in family_paths.items():
+        if family not in families and any(rel_path == p or rel_path.startswith(p) for p in prefixes):
+            return f"{family} run"
+    return None
 
 
 def tracked_files():
@@ -164,8 +190,14 @@ def classify(line, rules, suffix):
     return {"name": "default-prose", "action": "hold", "replace": [], "why": "unclassified"}
 
 
-def scan(old, new, branch_exists):
+def scan(old, new, branch_exists, families=None, phase="all", deferred=None):
+    """Classify every reference. `families` limits the run to some image families
+    and `phase` to the docs or the install files; what is left for another run is
+    counted in `deferred` ({reason: count}) instead of being reported."""
     excluded, rules, scope = load_rules(old, new)
+    family_paths, install_paths = load_partition()
+    families = set(families or ("primus", "jax"))
+    deferred = {} if deferred is None else deferred
     tokens = [re.compile(token) for token in version_tokens(old)]
     hits = []
 
@@ -181,6 +213,11 @@ def scan(old, new, branch_exists):
             continue
         if not any(token.search(text) for token in tokens):
             continue
+        reason = deferred_reason(rel_path, families, phase, family_paths, install_paths)
+        if reason:
+            count = sum(1 for line in text.splitlines() if any(token.search(line) for token in tokens))
+            deferred[reason] = deferred.get(reason, 0) + count
+            continue
 
         in_fence = False
         for number, line in enumerate(text.splitlines(), start=1):
@@ -194,6 +231,21 @@ def scan(old, new, branch_exists):
             suffix = path.suffix.lower()
             rule = classify(line, rules, "" if in_fence and suffix == ".md" else suffix)
             action, why = rule["action"], rule["why"]
+            replace = [
+                (pattern, repl) for pattern, repl, fam in rule["replace"] if fam is None or fam in families
+            ]
+            others = sorted(
+                {
+                    fam
+                    for pattern, _, fam in rule["replace"]
+                    if fam and fam not in families and pattern.search(line)
+                }
+            )
+            if others and not any(pattern.search(line) for pattern, _ in replace):
+                # Every construct on the line belongs to a family outside this run.
+                key = f"{'/'.join(others)} run"
+                deferred[key] = deferred.get(key, 0) + 1
+                continue
             if action != "hold" and not in_rewrite_scope(rel_path, scope):
                 action = "hold"
                 why = (
@@ -213,7 +265,7 @@ def scan(old, new, branch_exists):
                     "rule": rule["name"],
                     "action": action,
                     "why": why,
-                    "replace": rule["replace"],
+                    "replace": replace,
                 }
             )
     return hits
@@ -263,10 +315,23 @@ def main():
         action="store_true",
         help="the new release/vX.Y exists on origin, so checkout instructions use the branch form",
     )
+    parser.add_argument(
+        "--family",
+        action="append",
+        choices=["primus", "jax"],
+        help="bump only this image family (repeatable; default: both)",
+    )
+    parser.add_argument(
+        "--scope",
+        choices=["all", "docs", "install"],
+        default="all",
+        help="docs: everything but the install scripts and their guides; install: only those",
+    )
     parser.add_argument("--json", dest="as_json", action="store_true", help="emit the hit list as JSON")
     args = parser.parse_args()
 
-    hits = scan(args.old, args.new, args.branch_exists)
+    deferred = {}
+    hits = scan(args.old, args.new, args.branch_exists, args.family, args.scope, deferred)
     rewrites = [hit for hit in hits if hit["action"] == "rewrite"]
     holds = [hit for hit in hits if hit["action"] == "hold"]
 
@@ -274,12 +339,14 @@ def main():
         strip = lambda items: [  # noqa: E731 - compiled patterns are not serialisable
             {key: value for key, value in item.items() if key != "replace"} for item in items
         ]
-        print(json.dumps({"rewrite": strip(rewrites), "hold": strip(holds)}, indent=2))
+        print(json.dumps({"rewrite": strip(rewrites), "hold": strip(holds), "deferred": deferred}, indent=2))
         return 0
 
     print(f"version bump {args.old} -> {args.new}: {len(hits)} references found")
     print(f"  rewrite {len(rewrites)}")
     print(f"  hold    {len(holds)} (need your decision)")
+    for reason, count in sorted(deferred.items()):
+        print(f"  left    {count} line(s) for the {reason}")
     print()
 
     by_rule = {}

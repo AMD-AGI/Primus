@@ -36,8 +36,15 @@ the user-facing checkout instruction must take, since writing
 `git checkout release/v26.7` while that branch does not exist ships a broken
 instruction.
 
+Works from the snapshots, not from docker: a family is part of the release once
+`probe_image.py` has written its snapshot (from the CI image that passed QA,
+`--publish-as` the release tag), so neither the published image nor docker is
+needed here. `--family` limits the run to one family when the two images are
+released at different times; the other family's section is left alone.
+
 Usage:
     python tools/release_docs/preflight.py --version v26.7
+    python tools/release_docs/preflight.py --version v26.9 --family primus --build-commit primus=<sha>
 """
 
 import argparse
@@ -76,10 +83,6 @@ def dockerfile_args(path):
     return found
 
 
-def image_present(image):
-    return run(["docker", "image", "inspect", image, "--format", "{{.Id}}"]).returncode == 0
-
-
 def ref_exists(ref):
     return git("rev-parse", "--verify", "--quiet", ref).returncode == 0
 
@@ -103,12 +106,26 @@ def git_remote_readable():
     return result.returncode == 0, (result.stderr.strip().splitlines() or [""])[0]
 
 
+def previous_snapshot_for(version, family, previous=None):
+    """The previous release of this family: `--previous` when given, else the
+    newest older snapshot of the family (MaxText ships patch releases the
+    primus family does not have)."""
+    if previous:
+        return C.load_snapshot(previous, family)
+    older = [
+        (snap_version, data)
+        for snap_version, snap_family, data in C.available_snapshots()
+        if snap_family == family and C.version_key(snap_version) < C.version_key(version)
+    ]
+    return older[0][1] if older else None
+
+
 def resolve_family(version, family, previous, override=None):
     """Everything known about one family for this release."""
-    image = C.image_for(family, version)
     dockerfile = C.dockerfile_for(family, version)
     args = dockerfile_args(dockerfile)
     snapshot = C.load_snapshot(version, family)
+    image = (snapshot or {}).get("image") or C.image_for(family, version)
     ships_primus = snapshot is None or "Primus" in snapshot.get("workspace_repos", {})
 
     pinned = args.get("PRIMUS_BRANCH", "")
@@ -118,7 +135,7 @@ def resolve_family(version, family, previous, override=None):
         origin = (
             f"--build-commit {override}"
             if resolved
-            else f"unresolved: --build-commit {override} is not a local commit"
+            else f"unresolved: --build-commit {override} is not a local commit (fetch origin)"
         )
     elif SHA40.match(pinned):
         build_commit, origin = pinned, "Dockerfile ARG PRIMUS_BRANCH"
@@ -131,7 +148,18 @@ def resolve_family(version, family, previous, override=None):
     else:
         build_commit, origin = None, "unresolved: probe the image first"
 
-    previous_snapshot = C.load_snapshot(previous, family) if previous else None
+    previous_snapshot = previous_snapshot_for(version, family, previous)
+    previous_commit = (previous_snapshot or {}).get("build_commit")
+    previous_origin = "previous snapshot" if previous_commit else None
+    if previous_snapshot and not previous_commit:
+        # A JAX image without Primus (v26.8 on) records no build commit. The primus
+        # image of the same release was built from that release's branch, which is
+        # the Primus a user pairs with the JAX image, so it stands in -- reported, so
+        # a reviewer can override it with collect_changes.py --from.
+        other = C.load_snapshot(previous_snapshot["version"], "primus" if family == "jax" else "jax")
+        previous_commit = (other or {}).get("build_commit")
+        if previous_commit:
+            previous_origin = f"the other family's {previous_snapshot['version']} build commit (check it)"
 
     # The MaxText branch is a branch of ROCm/maxtext; resolve it there.
     maxtext_branch = args_maxtext = args.get("MAXTEXT_BRANCH")
@@ -140,7 +168,7 @@ def resolve_family(version, family, previous, override=None):
 
     return {
         "image": image,
-        "image_present": image_present(image),
+        "probed_image": (snapshot or {}).get("probed_image"),
         "dockerfile": dockerfile.relative_to(C.ROOT).as_posix(),
         "dockerfile_present": dockerfile.exists(),
         "dockerfile_verified": (snapshot or {}).get("dockerfile", {}).get("status"),
@@ -153,7 +181,9 @@ def resolve_family(version, family, previous, override=None):
         "build_commit_source": origin,
         "build_commit_known_locally": bool(build_commit) and ref_exists(build_commit),
         "image_ships_primus": ships_primus,
-        "previous_build_commit": (previous_snapshot or {}).get("build_commit"),
+        "previous_version": (previous_snapshot or {}).get("version"),
+        "previous_build_commit": previous_commit,
+        "previous_build_commit_source": previous_origin,
     }
 
 
@@ -167,8 +197,10 @@ def previous_version_for(version):
 
 
 def release_shape(families, version):
-    """Full, single-family, or patch -- the two families are not in lockstep."""
-    present = [name for name, info in families.items() if info["image_present"]]
+    """Full, single-family, or patch -- the two families are not in lockstep.
+
+    `families` is the run's scope; a family is present once its snapshot exists."""
+    present = [name for name, info in families.items() if info["snapshot_present"]]
     if len(re.findall(r"\d+", version)) > 2:
         return "patch", present
     if len(present) == len(C.FAMILIES):
@@ -178,16 +210,18 @@ def release_shape(families, version):
     return "unknown", present
 
 
-def build_state(version, previous, ssh_key, overrides=None):
+def build_state(version, previous, ssh_key, overrides=None, scope=None):
     if ssh_key:
         os.environ["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key} -o IdentitiesOnly=yes"
 
     overrides = overrides or {}
     previous = previous or previous_version_for(version)
-    families = {
-        name: resolve_family(version, name, previous, overrides.get(name)) for name in sorted(C.FAMILIES)
-    }
+    scope = sorted(scope or C.FAMILIES)
+    families = {name: resolve_family(version, name, previous, overrides.get(name)) for name in scope}
     shape, present = release_shape(families, version)
+    released_earlier = sorted(
+        name for name in C.FAMILIES if name not in scope and C.load_snapshot(version, name) is not None
+    )
 
     tag = f"{version.lstrip('v')}.0"
     tag_ref = f"v{tag}"
@@ -203,7 +237,9 @@ def build_state(version, previous, ssh_key, overrides=None):
         "version": version,
         "previous_version": previous,
         "release_shape": shape,
+        "scope": scope,
         "families_present": present,
+        "families_released_earlier": released_earlier,
         "families": families,
         "tag": {"ref": tag_ref, "exists": ref_exists(tag_ref)},
         "release_branch": {"ref": branch, "exists_on_origin": branch_exists},
@@ -220,16 +256,24 @@ def report(state):
 
     print(f"Release preflight: {state['version']}  (previous: {state['previous_version']})")
     print(f"  release shape           {state['release_shape']} {state['families_present']}")
+    if state["families_released_earlier"]:
+        print(f"  released earlier        {state['families_released_earlier']} (not touched by this run)")
     for name, info in state["families"].items():
         print(f"  --- {name}")
-        print(f"    {mark(info['image_present'])} image                {info['image']}")
+        print(f"    {mark(info['snapshot_present'])} snapshot             {info['image']}")
+        if info["probed_image"]:
+            print(f"         probed from          {info['probed_image']}")
         print(f"    {mark(info['dockerfile_present'])} dockerfile           {info['dockerfile']}")
         print(
             f"    {mark(info['dockerfile_verified'] == 'match')} dockerfile vs image  {info['dockerfile_verified']}"
         )
-        print(f"    {mark(info['snapshot_present'])} snapshot")
         print(f"    {mark(bool(info['build_commit']))} build commit         {info['build_commit_short']}")
         print(f"         via                  {info['build_commit_source']}")
+        previous = info["previous_build_commit"]
+        print(
+            f"    {mark(bool(previous))} previous             {info['previous_version']} "
+            f"{previous[:8] if previous else None} ({info['previous_build_commit_source']})"
+        )
         if info["maxtext_branch"]:
             upstream = info["maxtext_branch_exists_upstream"]
             verdict = {True: "exists upstream", False: "NOT in ROCm/maxtext", None: "unverified"}[upstream]
@@ -244,19 +288,26 @@ def report(state):
         print(f"         {state['git_remote_error']}")
 
     blockers = []
-    # Without an image there is no release to document, and nothing downstream can
+    # Without a snapshot there is nothing to document, and nothing downstream can
     # resolve a build commit. Say so instead of reporting a tidy list of misses and
     # exiting clean.
-    if not state["families_present"]:
-        blockers.append(
-            f"no image found for {state['version']}: pull "
-            + " or ".join(info["image"] for info in state["families"].values())
-        )
     for name, info in state["families"].items():
-        if info["image_present"] and not info["build_commit"]:
+        if not info["snapshot_present"]:
+            blockers.append(
+                f"{name}: no snapshot for {state['version']}: probe_image.py --version {state['version']} "
+                f"--image <CI tag> --publish-as {info['image']} --write-dockerfile"
+            )
+            continue
+        if not info["build_commit"]:
             blockers.append(f"{name}: build commit {info['build_commit_source']}")
-        if info["image_present"] and not info["dockerfile_present"]:
-            blockers.append(f"{name}: {info['dockerfile']} is missing")
+        elif not info["build_commit_known_locally"]:
+            blockers.append(
+                f"{name}: build commit {info['build_commit_short']} is not in this clone (fetch origin)"
+            )
+        if not info["dockerfile_present"]:
+            blockers.append(
+                f"{name}: {info['dockerfile']} is missing (probe_image.py --write-dockerfile saves the image's)"
+            )
         if info["dockerfile_verified"] == "differs":
             blockers.append(f"{name}: committed Dockerfile is not what the image was built from")
     if not state["release_branch"]["exists_on_origin"]:
@@ -286,6 +337,12 @@ def main():
         metavar="FAMILY=REV",
         help="Primus commit to anchor a family on when its image ships no Primus checkout",
     )
+    parser.add_argument(
+        "--family",
+        action="append",
+        choices=sorted(C.FAMILIES),
+        help="limit the run to this family (repeatable; default: both)",
+    )
     parser.add_argument("--no-write", action="store_true", help="report without writing state.json")
     args = parser.parse_args()
 
@@ -298,7 +355,7 @@ def main():
             )
         overrides[family] = rev
 
-    state = build_state(args.version, args.previous, args.ssh_key, overrides)
+    state = build_state(args.version, args.previous, args.ssh_key, overrides, args.family)
     blockers = report(state)
 
     if not args.no_write:
