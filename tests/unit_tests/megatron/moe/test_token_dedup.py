@@ -5,20 +5,32 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Tests for the MoE token-dedup dispatcher port.
+"""Tests for the MoE token-dedup dispatcher and co-activation expert placement port.
 
 CPU tests cover the dedup plan helpers, the dedup autograd kernels (torch
-fallback) and the build_args validation. The EP8 GPU test checks that the dedup
-dispatcher (experts-side and combine-side weighting) matches the stock
-all-to-all dispatcher bit-for-bit up to summation order.
+fallback) and the placement resolution / parsing. The EP8 GPU tests check that
+
+* the dedup dispatcher (experts-side and combine-side weighting) matches the stock
+  all-to-all dispatcher bit-for-bit up to summation order,
+* a placed MoE layer (experts keyed by global id) matches the default layer, with
+  and without dedup, and
+* the distributed-checkpoint expert axis follows the placed global expert id.
 """
 
+import dataclasses
 import functools
+import json
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from primus.backends.megatron.core.transformer.moe.expert_placement import (
+    compute_layer_expert_placement,
+    get_expert_placement_order,
+    parse_moe_expert_placement,
+    resolve_global_expert_ids,
+)
 from primus.backends.megatron.core.transformer.moe.token_dedup import (
     expand_token_dedup_received,
     pack_token_dedup_payload,
@@ -123,6 +135,90 @@ def test_weighted_combine_condition():
 
 
 # --------------------------------------------------------------------------- #
+# Expert placement resolution / parsing (CPU)
+# --------------------------------------------------------------------------- #
+
+
+def _cfg(num_experts=8, placement=None):
+    return SimpleNamespace(num_moe_experts=num_experts, moe_expert_placement=placement)
+
+
+class TestExpertPlacementResolution:
+    def test_default_is_contiguous(self):
+        assert get_expert_placement_order(_cfg(), 0, 2) == list(range(8))
+
+    def test_default_key_applies_to_all_layers(self):
+        perm = [7, 6, 5, 4, 3, 2, 1, 0]
+        cfg = _cfg(placement={"default": perm, "layers": {}})
+        assert get_expert_placement_order(cfg, 0, 2) == perm
+        assert get_expert_placement_order(cfg, 5, 2) == perm
+
+    def test_per_layer_overrides_default(self):
+        perm = [1, 0, 3, 2, 5, 4, 7, 6]
+        cfg = _cfg(placement={"default": list(range(8)), "layers": {3: perm}})
+        assert get_expert_placement_order(cfg, 3, 2) == perm
+        assert get_expert_placement_order(cfg, 4, 2) == list(range(8))
+
+    def test_no_matching_entry_falls_back_to_contiguous(self):
+        cfg = _cfg(placement={"default": None, "layers": {1: [1, 0, 3, 2, 5, 4, 7, 6]}})
+        assert get_expert_placement_order(cfg, 0, 2) == list(range(8))
+        assert get_expert_placement_order(cfg, None, 2) == list(range(8))
+
+    def test_rejects_non_permutation(self):
+        with pytest.raises(AssertionError):
+            get_expert_placement_order(_cfg(placement={"default": [0] * 8, "layers": {}}), 0, 2)
+
+    @pytest.mark.parametrize("ep_size", [1, 2, 4, 8])
+    def test_partition_covers_all_experts_once(self, ep_size):
+        perm = [3, 1, 0, 2, 7, 5, 4, 6]
+        cfg = _cfg(placement={"default": perm, "layers": {}})
+        owned = []
+        for rank in range(ep_size):
+            order, local = compute_layer_expert_placement(cfg, 0, ep_size, rank)
+            assert order == perm
+            assert len(local) == 8 // ep_size
+            owned += local
+        assert sorted(owned) == list(range(8))
+
+    def test_resolve_global_expert_ids(self):
+        assert resolve_global_expert_ids(None, 2, 3) == [6, 7]
+        assert resolve_global_expert_ids([5, 1], 2, 3) == [5, 1]
+        with pytest.raises(AssertionError):
+            resolve_global_expert_ids([5], 2, 3)
+
+
+class TestExpertPlacementParsing:
+    def _parse(self, tmp_path, data, num_experts=8, ep_size=4):
+        path = tmp_path / "placement.json"
+        path.write_text(json.dumps(data))
+        return parse_moe_expert_placement(str(path), num_experts, ep_size)
+
+    def test_valid(self, tmp_path):
+        perm = [3, 1, 0, 2, 7, 5, 4, 6]
+        parsed = self._parse(tmp_path, {"num_experts": 8, "default": perm, "layers": {"2": list(range(8))}})
+        assert parsed["default"] == perm
+        assert parsed["layers"] == {2: list(range(8))}
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {"default": [0, 1, 2]},  # wrong length
+            {"default": [0] * 8},  # not a permutation
+            {"num_experts": 16, "default": list(range(8))},  # num_experts mismatch
+            {"layers": {}},  # nothing defined
+            [1, 2, 3],  # not an object
+        ],
+    )
+    def test_invalid_raises(self, tmp_path, data):
+        with pytest.raises(ValueError):
+            self._parse(tmp_path, data)
+
+    def test_requires_num_experts(self, tmp_path):
+        with pytest.raises(ValueError):
+            self._parse(tmp_path, {"default": list(range(8))}, num_experts=None)
+
+
+# --------------------------------------------------------------------------- #
 # Patch plumbing (CPU)
 # --------------------------------------------------------------------------- #
 
@@ -153,6 +249,36 @@ _MEGATRON_DEFAULTS = dict(
 
 
 class TestBuildArgsPatch:
+    def test_validates_placement_without_storing_table(self, tmp_path):
+        """The parsed table (int layer keys) must never land on the params namespace:
+        Primus's post-build_args merge turns dicts into SimpleNamespace kwargs."""
+        from primus.backends.megatron.patches.moe_patches.token_dedup_patches import patch_token_dedup_args
+        from primus.core.utils.yaml_utils import dict_to_nested_namespace
+
+        perm = [3, 1, 0, 2, 7, 5, 4, 6]
+        path = tmp_path / "p.json"
+        path.write_text(json.dumps({"num_experts": 8, "layers": {"1": perm}}))
+        ctx = _fake_ctx(dict(moe_token_dedup=True, moe_expert_placement=str(path)), _MEGATRON_DEFAULTS)
+        patch_token_dedup_args(ctx)
+        params = ctx.extra["module_config"].params
+        assert not hasattr(params, "moe_expert_placement_table")
+        dict_to_nested_namespace(vars(params))  # what merge_namespace does after build_args
+
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps({"num_experts": 8, "default": perm[:-1]}))
+        with pytest.raises(ValueError):
+            patch_token_dedup_args(_fake_ctx(dict(moe_expert_placement=str(bad)), _MEGATRON_DEFAULTS))
+
+    def test_before_train_loads_table_from_path(self, tmp_path):
+        from primus.backends.megatron.core.transformer.moe.expert_placement import load_moe_expert_placement
+
+        perm = [3, 1, 0, 2, 7, 5, 4, 6]
+        path = tmp_path / "p.json"
+        path.write_text(json.dumps({"num_experts": 8, "layers": {"2": perm}}))
+        table = load_moe_expert_placement(str(path), 8, 4)
+        assert table["layers"][2] == perm
+        assert load_moe_expert_placement(str(path), 8, 4) is table  # cached
+
     @pytest.mark.parametrize(
         "params,backend_override",
         [
@@ -178,6 +304,29 @@ class TestBuildArgsPatch:
         patch_token_dedup_args(_fake_ctx(dict(moe_token_dedup=True), _MEGATRON_DEFAULTS))
 
 
+def test_checkpoint_source_rewrites_compile():
+    """The expert-axis source rewrites must still find their anchors in the pinned Megatron-LM."""
+    pytest.importorskip("transformer_engine")
+    from megatron.core.extensions import transformer_engine as te_mod
+    from megatron.core.transformer.moe import experts as experts_mod
+
+    from primus.backends.megatron.patches.moe_patches.expert_placement_checkpoint_patches import (
+        _rewrite_expert_keys,
+    )
+
+    _rewrite_expert_keys()
+    _rewrite_expert_keys()  # idempotent
+    assert experts_mod.TEGroupedMLP.sharded_state_dict.__qualname__ == "TEGroupedMLP.sharded_state_dict"
+    assert experts_mod.SequentialMLP.sharded_state_dict.__qualname__ == "SequentialMLP.sharded_state_dict"
+    for fn in (
+        experts_mod.SequentialMLP.sharded_state_dict,
+        experts_mod.TEGroupedMLP.sharded_state_dict,
+        te_mod.TEGroupedLinear._sharded_state_dict_grouped,
+    ):
+        assert "resolve_global_expert_ids" in fn.__code__.co_names, fn.__qualname__
+        assert "global_expert_ids" in fn.__code__.co_varnames, fn.__qualname__
+
+
 # --------------------------------------------------------------------------- #
 # EP8 GPU parity tests
 # --------------------------------------------------------------------------- #
@@ -195,6 +344,7 @@ if torch.cuda.is_available():
     from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 
     from primus.backends.megatron.core.transformer.moe.token_dedup_dispatcher import (
+        PrimusAlltoAllTokenDispatcher,
         PrimusDedupAlltoAllTokenDispatcher,
     )
 
@@ -225,6 +375,14 @@ if torch.cuda.is_available():
         spec = get_gpt_layer_local_spec(num_experts=num_moe_experts, moe_grouped_gemm=False)
         mlp = spec.submodules.mlp
         return mlp.keywords["submodules"] if isinstance(mlp, functools.partial) else mlp.submodules
+
+    def _seed_experts_by_global_id(layer):
+        """Expert weights as a function of the GLOBAL expert id, so differently placed
+        layers hold the same model."""
+        for expert, gid in zip(layer.experts.local_experts, layer.local_expert_indices):
+            gen = torch.Generator().manual_seed(1000 + gid)
+            for p in expert.parameters():
+                p.data.copy_((torch.randn(p.shape, generator=gen) * 0.05).to(p.device))
 
     def _run_layer(layer, x, grad):
         inp = x.clone().requires_grad_()
@@ -309,5 +467,70 @@ if torch.cuda.is_available():
                 got_out = _run_layer(dedup, x, grad)
                 for r, g in zip(ref_out, got_out):
                     torch.testing.assert_close(g, r, rtol=1e-4, atol=1e-4)
+            finally:
+                self._finish()
+
+        @skip_if_lt_x_gpu(2)
+        @parametrize("dedup", [False, True])
+        def test_placed_layer_matches_default_layer(self, dedup):
+            self._init()
+            try:
+                num_experts = 16
+                topk = 4
+                config = _build_config(self.world_size, num_experts, topk)
+                config.moe_token_dedup = dedup
+                config.moe_token_dedup_weighted_combine = False
+                ref = self._new_layer(config, num_experts)
+                placed = self._new_layer(config, num_experts)
+                placed.router.load_state_dict(ref.router.state_dict())
+                perm = torch.randperm(num_experts, generator=torch.Generator().manual_seed(0)).tolist()
+                nle = placed.num_local_experts
+                placed.expert_order = perm
+                placed.local_expert_indices = [perm[self.rank * nle + i] for i in range(nle)]
+                pg = ProcessGroupCollection.use_mpu_process_groups()
+                cls = PrimusDedupAlltoAllTokenDispatcher if dedup else PrimusAlltoAllTokenDispatcher
+                placed.token_dispatcher = cls(
+                    nle, placed.local_expert_indices, config=config, pg_collection=pg, expert_order=perm
+                )
+                assert placed.token_dispatcher.expert_order_is_identity is False
+                assert placed.token_dispatcher.placed_expert_indices == placed.local_expert_indices
+                _seed_experts_by_global_id(ref)
+                _seed_experts_by_global_id(placed)
+                x, grad = self._inputs(config)
+                ref_out = _run_layer(ref, x, grad)
+                got_out = _run_layer(placed, x, grad)
+                for r, g in zip(ref_out, got_out):
+                    torch.testing.assert_close(g, r, rtol=1e-4, atol=1e-4)
+            finally:
+                self._finish()
+
+        @skip_if_lt_x_gpu(2)
+        def test_checkpoint_expert_axis_follows_placement(self):
+            """SequentialMLP.sharded_state_dict keys experts by the placed global id."""
+            self._init()
+            try:
+                from primus.backends.megatron.patches.moe_patches.expert_placement_checkpoint_patches import (
+                    _rewrite_expert_keys,
+                )
+                from primus.backends.megatron.patches.moe_patches.token_dedup_patches import (
+                    _set_experts_placement,
+                )
+
+                num_experts = 16
+                config = _build_config(self.world_size, num_experts, 2)
+                layer = self._new_layer(config, num_experts)
+                perm = torch.randperm(num_experts, generator=torch.Generator().manual_seed(1)).tolist()
+                nle = layer.num_local_experts
+                placed_ids = [perm[self.rank * nle + i] for i in range(nle)]
+                _rewrite_expert_keys()
+                _set_experts_placement(layer.experts, placed_ids)
+                sd = layer.experts.sharded_state_dict(prefix="mlp.experts.", sharded_offsets=())
+                seen = set()
+                for key, sh in sd.items():
+                    if not hasattr(sh, "global_offset"):
+                        continue
+                    seen.add(sh.global_offset[0])
+                    assert sh.global_shape[0] == num_experts, key
+                assert seen == set(placed_ids), (seen, placed_ids)
             finally:
                 self._finish()

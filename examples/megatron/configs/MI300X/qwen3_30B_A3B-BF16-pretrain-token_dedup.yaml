@@ -3,10 +3,15 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-pretrain-token_dedup}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
-# Qwen3-30B-A3B pretraining with MoE token dedup (ROCm/Megatron-LM PR #165 port).
-# Dedup needs the Megatron all-to-all dispatcher, so DeepEP and the sync-free MoE
-# path are off here. PRIMUS_MOE_TOKEN_DEDUP=false gives the baseline with the same
-# dispatcher.
+# Qwen3-30B-A3B pretraining with MoE token dedup and (optionally) a co-activation
+# expert placement (ROCm/Megatron-LM PR #165 / #166 port). Both need the Megatron
+# all-to-all dispatcher, so DeepEP and the sync-free MoE path are off here.
+#
+#   1. capture routes:   CMOE_CAPTURE=1 CMOE_CAPTURE_DIR=<dir> CMOE_CAPTURE_START=<it> \
+#                        CMOE_CAPTURE_CONS_ITERS=8  <this config, moe_token_dedup off>
+#   2. build placement:  python tools/moe_expert_placement/build_expert_placement.py <dir> \
+#                        --iters <it>-<it+7> --num-experts 128 --ep-size 8 --out placement.json
+#   3. train:            PRIMUS_MOE_EXPERT_PLACEMENT=placement.json <this config>
 
 modules:
   pre_trainer:
@@ -77,9 +82,10 @@ modules:
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
-      # Token dedup (PR #165)
+      # Token dedup / expert placement (PR #165 / #166)
       moe_token_dedup: ${PRIMUS_MOE_TOKEN_DEDUP:true}
       moe_token_dedup_weighted_combine: false
+      moe_expert_placement: ${PRIMUS_MOE_EXPERT_PLACEMENT:null}
 
       # Primus-Turbo: attention + grouped GEMM only (no DeepEP / sync-free MoE / MegaMoE)
       enable_primus_turbo: ${PRIMUS_TURBO:true}

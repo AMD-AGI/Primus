@@ -5,17 +5,27 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Deduplicating all-to-all MoE token dispatcher.
+"""All-to-all MoE token dispatchers with custom expert placement and token dedup.
 
-Ported from ROCm/Megatron-LM PR #165 (``--moe-token-dedup``) onto Megatron-core
-v0.19's ``MoEAlltoAllTokenDispatcher`` as a subclass, so ``third_party/Megatron-LM``
-stays untouched: :class:`PrimusDedupAlltoAllTokenDispatcher` sends one wire row
-per unique (token, destination EP rank) instead of one per (token, expert), in
-both the dispatch and the combine direction.
+Ported from ROCm/Megatron-LM PR #165 (``--moe-token-dedup``) and PR #166
+(``--moe-expert-placement``) onto Megatron-core v0.19's
+``MoEAlltoAllTokenDispatcher`` as subclasses, so ``third_party/Megatron-LM``
+stays untouched:
 
-The ``megatron.moe.token_dedup`` patch binds it in place of
-``MoEAlltoAllTokenDispatcher`` when ``moe_token_dedup`` is set; otherwise the
-upstream dispatcher is untouched.
+* :class:`PrimusAlltoAllTokenDispatcher` -- the stock dispatcher plus a custom
+  expert placement. The routing map / probs columns are permuted into rank-major
+  "slot space" at dispatch time, so the upstream contiguous split logic sends
+  each token to the EP rank that owns its expert. The base class keeps working
+  in slot space (its ``local_expert_indices`` are the contiguous slot block);
+  the true global expert ids owned by this rank live in
+  ``placed_expert_indices``.
+* :class:`PrimusDedupAlltoAllTokenDispatcher` -- on top of that, one wire row per
+  unique (token, destination EP rank) instead of one per (token, expert), in
+  both the dispatch and the combine direction.
+
+The ``megatron.moe.token_dedup`` patch binds these in place of
+``MoEAlltoAllTokenDispatcher`` when ``moe_token_dedup`` or
+``moe_expert_placement`` is set; otherwise the upstream dispatcher is untouched.
 """
 
 from __future__ import annotations
@@ -93,7 +103,92 @@ def dedup_weighted_combine_enabled(config) -> bool:
     )
 
 
-class PrimusDedupAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
+class PrimusAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
+    """Upstream all-to-all dispatcher plus a custom expert placement.
+
+    ``local_expert_indices`` passed in are the TRUE global expert ids owned by this
+    rank (possibly non-contiguous). The base class is initialised with the
+    contiguous slot block instead, because everything it does with
+    ``local_expert_indices`` (the ``preprocess`` count slice) is in slot space
+    after the column permutation applied in :meth:`dispatch_preprocess`.
+    """
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        local_expert_indices: List[int],
+        config: TransformerConfig,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+        expert_order: Optional[List[int]] = None,
+    ) -> None:
+        ep_rank = utils.get_pg_rank(pg_collection.ep)
+        slot_indices = [ep_rank * num_local_experts + i for i in range(num_local_experts)]
+        super().__init__(
+            num_local_experts=num_local_experts,
+            local_expert_indices=slot_indices,
+            config=config,
+            pg_collection=pg_collection,
+        )
+        self.set_expert_order(
+            expert_order if expert_order is not None else list(range(self.num_experts)),
+            local_expert_indices,
+        )
+
+    def set_expert_order(self, expert_order: List[int], local_expert_indices: List[int]) -> None:
+        """(Re)configure the custom expert placement.
+
+        Called at construction and again from ``MoELayer.set_layer_number()`` once
+        the (per-layer) placement is known. Placement only permutes which global
+        expert maps to each local slot; all shapes and ``num_local_experts`` are
+        unchanged, so this is a metadata-only update.
+
+        Args:
+            expert_order: global expert ids in rank-major slot order.
+            local_expert_indices: global expert ids owned by this rank.
+        """
+        assert (
+            len(expert_order) == self.num_experts
+        ), f"expert_order has {len(expert_order)} entries, expected {self.num_experts}."
+        assert len(local_expert_indices) == self.num_local_experts, "Invalid local expert indices"
+        self.expert_order = list(expert_order)
+        self.placed_expert_indices = list(local_expert_indices)
+        # In slot space this rank always owns the contiguous block
+        # [ep_rank * num_local_experts, (ep_rank + 1) * num_local_experts).
+        self.local_slot_start = self.ep_rank * self.num_local_experts
+        self.local_slot_end = self.local_slot_start + self.num_local_experts
+        assert self.local_expert_indices == list(range(self.local_slot_start, self.local_slot_end))
+        # Default contiguous placement -> no column permutation (fast path). Otherwise the
+        # gather index tensor is created lazily on the routing map's device at first use.
+        self.expert_order_is_identity = self.expert_order == list(range(self.num_experts))
+        self._expert_order_index_cache = None
+
+    def _get_expert_order_index(self, device):
+        """Lazily build/cache the column-permutation index tensor on ``device``."""
+        if self.expert_order_is_identity:
+            return None
+        cache = self._expert_order_index_cache
+        if cache is None or cache.device != device:
+            self._expert_order_index_cache = torch.tensor(self.expert_order, dtype=torch.long, device=device)
+        return self._expert_order_index_cache
+
+    def _to_slot_space(self, routing_map: torch.Tensor, probs: torch.Tensor):
+        """Permute the expert (column) axis into rank-major slot order."""
+        expert_order_index = self._get_expert_order_index(routing_map.device)
+        if expert_order_index is None:
+            return routing_map, probs
+        return (
+            routing_map.index_select(1, expert_order_index),
+            probs.index_select(1, expert_order_index),
+        )
+
+    def dispatch_preprocess(
+        self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
+    ):
+        routing_map, probs = self._to_slot_space(routing_map, probs)
+        return super().dispatch_preprocess(hidden_states, routing_map, probs)
+
+
+class PrimusDedupAlltoAllTokenDispatcher(PrimusAlltoAllTokenDispatcher):
     """All-to-all dispatcher with one wire row per token and destination rank.
 
     The regular alltoall dispatcher sends one hidden row for every token/expert
@@ -103,6 +198,10 @@ class PrimusDedupAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
     into expert-major order. The combine direction is deduplicated too: local
     expert outputs for the same wire row are summed to one row before the
     combine all-to-all.
+
+    Combined with a co-activation expert placement (``moe_expert_placement``),
+    which co-locates experts that tend to fire together, the number of wire rows
+    per token drops further because more of a token's experts share a rank.
     """
 
     def __init__(
@@ -111,17 +210,15 @@ class PrimusDedupAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
         local_expert_indices: List[int],
         config: TransformerConfig,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        expert_order: Optional[List[int]] = None,
     ) -> None:
         super().__init__(
             num_local_experts=num_local_experts,
             local_expert_indices=local_expert_indices,
             config=config,
             pg_collection=pg_collection,
+            expert_order=expert_order,
         )
-        # This rank owns one contiguous block of the expert axis.
-        self.local_slot_start = self.ep_rank * self.num_local_experts
-        self.local_slot_end = self.local_slot_start + self.num_local_experts
-        assert self.local_expert_indices == list(range(self.local_slot_start, self.local_slot_end))
         if self.ep_size <= 1:
             raise ValueError("Token dedup requires expert parallel size greater than one.")
         if self.tp_size > 1:
@@ -333,6 +430,10 @@ class PrimusDedupAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
         assert probs.dim() == 2, "Expected 2D tensor for probs"
         assert routing_map.dim() == 2, "Expected 2D tensor for token2expert mask"
         assert routing_map.dtype == torch.bool, "Expected bool tensor for mask"
+        # Custom expert placement: the dedup hit map is built in slot space, so
+        # placements that co-locate co-activated experts on one rank directly
+        # increase dedup opportunities.
+        routing_map, probs = self._to_slot_space(routing_map, probs)
         self.probs = probs
         self.routing_map = routing_map
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
@@ -550,7 +651,8 @@ def build_alltoall_token_dispatcher(
 ):
     """Drop-in replacement for the ``MoEAlltoAllTokenDispatcher`` constructor call in
     ``MoELayer.__init__``: the dedup dispatcher when ``moe_token_dedup`` is on
-    (and EP > 1, where there is something to dedup), else the stock dispatcher."""
+    (and EP > 1, where there is something to dedup), else the placement-capable
+    stock dispatcher."""
     use_dedup = bool(getattr(config, "moe_token_dedup", False)) and utils.get_pg_size(pg_collection.ep) > 1
-    cls = PrimusDedupAlltoAllTokenDispatcher if use_dedup else MoEAlltoAllTokenDispatcher
+    cls = PrimusDedupAlltoAllTokenDispatcher if use_dedup else PrimusAlltoAllTokenDispatcher
     return cls(num_local_experts, local_expert_indices, config=config, pg_collection=pg_collection, **kwargs)
