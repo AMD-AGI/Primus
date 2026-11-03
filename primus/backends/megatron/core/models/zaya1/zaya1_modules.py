@@ -13,16 +13,42 @@ mixture-of-depths. Tensors use Megatron layout ``[sequence, batch, hidden]``.
 When ``config.fp8`` is set, CCA projections and expert SwiGLU GEMMs are
 Transformer Engine linears under one FP8 autocast. The router, the depthwise
 convolutions, RMSNorm, and attention stay in BF16 or FP32.
+
+On GPU, the elementwise chains between GEMMs (residual scaling, merge and
+RMSNorm at each stage boundary) run through Megatron's ``jit_fuser``
+(``torch.compile``), which fuses them into a few kernels and keeps only their
+inputs for the backward. Fused kernels hold intermediates in fp32, so they skip
+the bf16 rounding that eager mode applies between those steps. CPU runs, like
+the unit tests, stay eager.
 """
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import List, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+
+def _compiled_on_gpu(fn):
+    """Run ``fn`` through Megatron's ``jit_fuser`` for GPU inputs and eagerly otherwise."""
+    compiled = None
+
+    @functools.wraps(fn)
+    def run(*args):
+        nonlocal compiled
+        if not args[0].is_cuda:
+            return fn(*args)
+        if compiled is None:
+            from megatron.core.jit import jit_fuser
+
+            compiled = jit_fuser(fn)
+        return compiled(*args)
+
+    return run
 
 
 def layer_kinds(num_layers: int, zaya_layers: Optional[Sequence] = None) -> List[str]:
@@ -135,6 +161,12 @@ def _linear(in_features: int, out_features: int, bias: bool, config, *, fp8: boo
     return layer
 
 
+def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    xf = x.float()
+    inv = torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + eps)
+    return (xf * inv * weight.float()).to(dtype=x.dtype)
+
+
 class RMSNorm(nn.Module):
     """RMSNorm with a learnable scale. Statistics are computed in fp32."""
 
@@ -144,9 +176,7 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        xf = x.float()
-        inv = torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return (xf * inv * self.weight.float()).to(dtype=x.dtype)
+        return _rms_norm(x, self.weight, self.eps)
 
 
 class ResidualScaling(nn.Module):
@@ -173,10 +203,37 @@ class ResidualScaling(nn.Module):
         return residual, hidden_states
 
 
-def merge_residual(residual: Optional[torch.Tensor], hidden_states: torch.Tensor) -> torch.Tensor:
-    if residual is None:
-        return hidden_states.float()
-    return residual.float() + hidden_states.float()
+def _scale_merge_norm(hidden, residual, h_scale, h_bias, r_scale, r_bias, norm_weight, eps: float):
+    """``ResidualScaling``, the fp32 residual add and the following ``RMSNorm`` in one function.
+
+    Returns the fp32 residual and the norm of it in ``hidden``'s dtype. An
+    affine whose parameters are ``None`` is skipped, as is a ``None`` residual.
+    """
+    merged = hidden.float()
+    if h_scale is not None:
+        merged = (merged + h_bias.float()) * h_scale.float()
+    if residual is not None:
+        res = residual.float()
+        if r_scale is not None:
+            res = (res + r_bias.float()) * r_scale.float()
+        merged = res + merged
+    return merged, _rms_norm(merged.to(dtype=hidden.dtype), norm_weight, eps)
+
+
+_fused_scale_merge_norm = _compiled_on_gpu(_scale_merge_norm)
+
+
+def _residual_affine(res_scale: Optional[ResidualScaling]):
+    if res_scale is None:
+        return None, None, None, None
+    if not res_scale.has_residual:
+        return res_scale.hidden_states_scale, res_scale.hidden_states_bias, None, None
+    return (
+        res_scale.hidden_states_scale,
+        res_scale.hidden_states_bias,
+        res_scale.residual_scale,
+        res_scale.residual_bias,
+    )
 
 
 class CCA(nn.Module):
@@ -528,11 +585,13 @@ class ZayaStage(nn.Module):
             self.zaya_block = ZayaMoE(config)
 
     def forward(self, hidden_states, residual, prev_router, position_ids, attention_mask):
-        target_dtype = hidden_states.dtype
-        if self.res_scale is not None:
-            residual, hidden_states = self.res_scale(residual, hidden_states)
-        residual = merge_residual(residual, hidden_states)
-        normed = self.input_norm(residual.to(dtype=target_dtype))
+        residual, normed = _fused_scale_merge_norm(
+            hidden_states,
+            residual,
+            *_residual_affine(self.res_scale),
+            self.input_norm.weight,
+            self.input_norm.eps,
+        )
         if self.kind == "a":
             hidden_states = self.self_attn(normed, position_ids, attention_mask)
         else:
@@ -577,8 +636,11 @@ class ZayaStack(nn.Module):
                 hidden_states, residual, prev_router = layer(
                     hidden_states, residual, prev_router, position_ids, attention_mask
                 )
-            target_dtype = hidden_states.dtype
-            if self.res_scale is not None:
-                residual, hidden_states = self.res_scale(residual, hidden_states)
-            merged = merge_residual(residual, hidden_states)
-            return self.final_norm(merged.to(dtype=target_dtype))
+            _, normed = _fused_scale_merge_norm(
+                hidden_states,
+                residual,
+                *_residual_affine(self.res_scale),
+                self.final_norm.weight,
+                self.final_norm.eps,
+            )
+            return normed

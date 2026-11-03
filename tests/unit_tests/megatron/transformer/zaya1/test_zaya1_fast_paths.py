@@ -4,15 +4,23 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""CPU checks that the ZAYA1 fast paths compute the reference formulas."""
+"""Checks that the ZAYA1 fast paths compute the reference formulas, eagerly on CPU and compiled on GPU."""
 
+import pytest
 import torch
 
 from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
+    ResidualScaling,
+    RMSNorm,
     ZayaMoE,
     _align_fp8_leading,
+    _fused_scale_merge_norm,
+    _residual_affine,
+    _scale_merge_norm,
     _unpad_fp8_leading,
 )
+
+needs_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="jit_fuser compiles GPU inputs only")
 
 
 def _cfg(**overrides):
@@ -48,6 +56,10 @@ def _cfg(**overrides):
     for key, value in overrides.items():
         setattr(cfg, key, value)
     return cfg
+
+
+def _rel(got, ref):
+    return ((got.float() - ref.float()).norm() / ref.float().norm()).item()
 
 
 def _masked_moe(moe, hidden, probs, index):
@@ -105,6 +117,53 @@ def test_every_expert_gets_a_gradient_without_tokens():
             assert p.grad is not None, f"expert {expert_id} {name}"
             if expert_id:
                 assert torch.count_nonzero(p.grad) == 0
+
+
+@pytest.mark.parametrize("has_residual", [True, False])
+def test_stage_boundary_is_scaling_merge_then_norm(has_residual):
+    torch.manual_seed(0)
+    width = 32
+    scaling = ResidualScaling(width, has_residual=has_residual)
+    norm = RMSNorm(width, 1e-5)
+    with torch.no_grad():
+        for p in (*scaling.parameters(), norm.weight):
+            p.add_(0.1 * torch.randn_like(p))
+    hidden = torch.randn(4, 2, width, dtype=torch.bfloat16)
+    residual = torch.randn(4, 2, width) if has_residual else None
+
+    scaled_res, scaled_hidden = scaling(residual, hidden)
+    ref_merged = scaled_hidden if residual is None else scaled_res + scaled_hidden
+    merged, normed = _fused_scale_merge_norm(
+        hidden, residual, *_residual_affine(scaling), norm.weight, norm.eps
+    )
+    torch.testing.assert_close(merged, ref_merged, rtol=0, atol=0)
+    torch.testing.assert_close(normed, norm(ref_merged.to(torch.bfloat16)), rtol=0, atol=0)
+
+
+@needs_gpu
+def test_compiled_stage_boundary_matches_eager():
+    torch.manual_seed(0)
+    width = 2048
+    device = torch.device("cuda")
+    hidden = torch.randn(16, 4, width, device=device, dtype=torch.bfloat16, requires_grad=True)
+    residual = torch.randn(16, 4, width, device=device, requires_grad=True)
+    params = [
+        (base + 0.1 * torch.randn(width, device=device)).to(torch.bfloat16).requires_grad_()
+        for base in (1.0, 0.0, 1.0, 0.0, 1.0)
+    ]
+    upstream = (torch.randn_like(residual), torch.randn_like(hidden))
+
+    results = []
+    for fn in (_fused_scale_merge_norm, _scale_merge_norm):
+        outs = fn(hidden, residual, *params, 1e-5)
+        grads = torch.autograd.grad(outs, (hidden, residual, *params), upstream)
+        results.append((outs, grads))
+    (got_outs, got_grads), (ref_outs, ref_grads) = results
+    torch.testing.assert_close(got_outs[0], ref_outs[0])
+    # Eager rounds the residual to bf16 before the norm and the compiled kernel
+    # does not, so elements differ by a bf16 ulp; compare whole tensors.
+    for got, ref in zip(got_outs[1:] + got_grads, ref_outs[1:] + ref_grads):
+        assert _rel(got, ref) < 1e-2
 
 
 def test_fp8_leading_pad_gives_an_empty_slice_eight_rows():
