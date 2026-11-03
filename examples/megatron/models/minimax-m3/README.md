@@ -42,11 +42,12 @@ PRIMUS_LAUNCHER=direct bash examples/megatron/models/minimax-m3/run_minimax_m3_m
 
 Two runs at once on one node need different `MASTER_PORT`s.
 
-**FlyDSL attention for the dense layers.** The image's Primus-Turbo has no gfx1250 FlyDSL attention
-for head dim 128; Primus-Turbo `dev/mi455x_v3` has it (PR #580). Build such a checkout in place for
-the image once (gfx1250 only, OpenMPI off the paths so rocSHMEM is not linked), then pass it as
-`TURBO_DIR`. The launcher puts it first on `PYTHONPATH` and runs the three dense layers on its FlyDSL
-attention:
+**FlyDSL attention for the dense layers.** The launcher runs the three dense layers on Primus-Turbo's
+FlyDSL attention when the Primus-Turbo in use has its gfx1250 kernels for head dim 128
+(`primus_turbo/flydsl/attention/gfx1250/`, Primus-Turbo PR #580). The default image's Primus-Turbo
+predates them. To use them with that image, build a Primus-Turbo checkout in place for it once (gfx1250
+only, OpenMPI off the paths so rocSHMEM is not linked) and pass it as `TURBO_DIR`; the launcher puts it
+first on `PYTHONPATH`:
 
 ```bash
 git clone https://github.com/AMD-AGI/Primus-Turbo.git /path/to/Primus-Turbo
@@ -80,10 +81,10 @@ ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
 - `TURBO_DIR` (default unset: the image's Primus-Turbo): a Primus-Turbo checkout built in place for
   the image, see above. A relative path is taken from the current directory.
 - Dense layers: `USE_TURBO_ATTENTION` runs Primus-Turbo attention in the three dense layers, with
-  `PRIMUS_TURBO_ATTN_BACKEND`, `flydsl` or `triton`. With `TURBO_DIR` set they default to `True` and
-  `flydsl`; without it, to `False` and `triton`. `flydsl` needs
-  `primus_turbo/flydsl/attention/gfx1250/`, and the launcher stops before training when the
-  Primus-Turbo it would use lacks it. Primus-Turbo's own default backend fails with
+  `PRIMUS_TURBO_ATTN_BACKEND`, `flydsl` or `triton`. They default to `True` and `flydsl` when the
+  Primus-Turbo in use (`TURBO_DIR`, else the image's) has `primus_turbo/flydsl/attention/gfx1250/`,
+  and to `False` and `triton` otherwise. Asking for `flydsl` without those kernels stops the launcher
+  before training. Primus-Turbo's own default backend fails with
   `invalid argument for fmha_bwd` here. MSA layers are unaffected.
 - Optimizer: `PRIMUS_FUSED_ADAM_CLIP` (default `1`) runs Primus's HIP Adam, which applies the
   gradient-clip coefficient inside the kernel. `PRIMUS_FUSED_ADAM_BF16_WRITEBACK` and

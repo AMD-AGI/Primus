@@ -47,16 +47,11 @@ export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS
 # flydsl or eager (the PyTorch reference)
 export PRIMUS_MSA_BACKEND=${PRIMUS_MSA_BACKEND:-flydsl}
 export PRIMUS_RECOMPUTE_NUM_LAYERS=${PRIMUS_RECOMPUTE_NUM_LAYERS:-1}
-# Primus-Turbo attention for the three dense layers: on with the flydsl backend when TURBO_DIR is set
-# (it needs the gfx1250 head-dim-128 kernels, see README.md), off otherwise; the image's Primus-Turbo
-# lacks those kernels. The default backend fails in fmha_bwd here.
-if [[ -n "${TURBO_DIR}" ]]; then
-    export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-True}
-    export PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-flydsl}
-else
-    export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
-    export PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-triton}
-fi
+# Primus-Turbo attention for the three dense layers. Empty: on with the flydsl backend when the
+# Primus-Turbo in use has the gfx1250 head-dim-128 kernels (see README.md), off otherwise; decided in
+# the container, below. The default backend fails in fmha_bwd here.
+export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-}
+export PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-}
 # Primus-Turbo grouped GEMM for the experts; False: TE's grouped GEMM (one hipBLASLt GEMM per expert)
 export USE_TURBO_GROUPED_GEMM=${USE_TURBO_GROUPED_GEMM:-True}
 # bf16:flydsl (Primus-Turbo's FlyDSL kernels; Primus raises their 64-expert weight-gradient cap to
@@ -94,7 +89,7 @@ case "${PRIMUS_MSA_BACKEND}" in
         ;;
 esac
 case "${PRIMUS_TURBO_ATTN_BACKEND,,}" in
-    flydsl | triton) ;;
+    "" | flydsl | triton) ;;
     *)
         echo "PRIMUS_TURBO_ATTN_BACKEND must be flydsl or triton, not '${PRIMUS_TURBO_ATTN_BACKEND}'" >&2
         exit 2
@@ -180,19 +175,25 @@ esac
 
 # The flydsl backend needs Primus-Turbo's gfx1250 head-dim-128 kernels (README.md). Without them the
 # first attention call raises ValueError, after the model and optimizer are built; stop here instead.
-if [[ "${USE_TURBO_ATTENTION,,}" =~ ^(true|1|yes)$ && "${PRIMUS_TURBO_ATTN_BACKEND,,}" == flydsl ]]; then
-    if [[ -n "${TURBO_DIR}" ]]; then
-        TURBO_PKG=${TURBO_DIR}/primus_turbo
-    else
-        TURBO_PKG=$(python3 -c 'import importlib.util, os; s = importlib.util.find_spec("primus_turbo"); print(os.path.dirname(s.origin) if s and s.origin else "")')
-    fi
-    if [[ ! -d "${TURBO_PKG}/flydsl/attention/gfx1250" ]]; then
+if [[ -n "${TURBO_DIR}" ]]; then
+    TURBO_PKG=${TURBO_DIR}/primus_turbo
+else
+    TURBO_PKG=$(python3 -c 'import importlib.util, os; s = importlib.util.find_spec("primus_turbo"); print(os.path.dirname(s.origin) if s and s.origin else "")')
+fi
+if [[ -d "${TURBO_PKG}/flydsl/attention/gfx1250" ]]; then
+    USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-True}
+    PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-flydsl}
+else
+    USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
+    PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-triton}
+    if [[ "${USE_TURBO_ATTENTION,,}" =~ ^(true|1|yes)$ && "${PRIMUS_TURBO_ATTN_BACKEND,,}" == flydsl ]]; then
         echo "PRIMUS_TURBO_ATTN_BACKEND=flydsl needs a Primus-Turbo with primus_turbo/flydsl/attention/gfx1250/," \
             "which ${TURBO_PKG:-this Python environment} lacks. Set TURBO_DIR to such a checkout (README.md)" \
             "or PRIMUS_TURBO_ATTN_BACKEND=triton." >&2
         exit 2
     fi
 fi
+export USE_TURBO_ATTENTION PRIMUS_TURBO_ATTN_BACKEND
 
 # Triton 3.8 turns on AMDGPU expert scheduling for gfx1250, which makes Triton kernels fault or
 # return NaN at random. TRITON_HIP_USE_EXPERT_SCHEDULING=0 (below) turns it off when a kernel is
