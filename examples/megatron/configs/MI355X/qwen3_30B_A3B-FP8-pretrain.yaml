@@ -52,6 +52,8 @@ modules:
 
       # data
       mock_data: true
+      # unused by causal flash attention; building it per micro-batch slows MoE on Megatron-core 0.19
+      create_attention_mask_in_dataloader: false
       train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
