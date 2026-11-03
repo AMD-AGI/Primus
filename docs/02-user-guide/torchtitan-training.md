@@ -22,6 +22,14 @@ Read this section before starting a training run. It collects the settings this 
 
 **Use the `release/v26.9` branch.** It is the Primus branch matching the `rocm/primus:v26.9` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image — see [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269). [Environment setup](#get-the-primus-source) has the clone command.
 
+### Changes you may need to act on
+
+**AdamW runs on a Triton fused kernel by default.** TorchTitan's `AdamW` is replaced by a Triton implementation sized to the GPU (`optimizer.use_triton_fused_adam: true`, also assumed when the key is absent); set it to `false` to keep `torch.optim.AdamW`. It keeps the stock optimizer's state layout, so checkpoints are interchangeable in both directions. Step counts are kept on the host, so reading `optimizer.state` directly between steps shows stale `step` values; `state_dict()` is correct ([#1233](https://github.com/AMD-AGI/Primus/pull/1233)).
+
+**A preset `HIP_VISIBLE_DEVICES` is kept.** The runner used to overwrite it with `0..GPUS_PER_NODE-1`, so a job restricted to particular GPUs could land on another user's GPU on a shared node. It now keeps the value you or your scheduler set, and warns when it lists a different number of GPUs than `GPUS_PER_NODE` ([#1237](https://github.com/AMD-AGI/Primus/pull/1237)).
+
+**The Turbo grouped-GEMM config was renamed** in v26.7 ([#1041](https://github.com/AMD-AGI/Primus/pull/1041)). If you are moving from v26.6 with a local TorchTitan config that sets it, update the key.
+
 ### Architecture-specific settings
 
 **MI300X and MI325X (gfx942) — enable the fp32 atomic paths.** Export these before launching for best performance on gfx942. They are not needed on MI350X/MI355X (gfx950):
@@ -33,18 +41,12 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Known issues
 
-<!-- NEEDS CONFIRMATION: no open TorchTitan issue is derivable from the v26.7..v26.8
-     commit range; the TorchTitan commits in it are all fixes (listed below).
-     Confirm before publishing. -->
-No TorchTitan backend issues are currently tracked for v26.8.
+The v26.9 QA runs found no TorchTitan issues. They covered MI300X and MI355X; the MI325X recipes were not re-run on this image.
 
-**Fixed in v26.8:**
+**Fixed in v26.9:**
 
-- A Triton buffer-store miscompile could silently corrupt gradients in Inductor-generated backward kernels. Affected kernels are now detected and recompiled with buffer ops disabled, and TorchTitan restores eager precision semantics under `torch.compile` on ROCm ([#962](https://github.com/AMD-AGI/Primus/pull/962)).
-- The GPT-OSS MoE router bias was left uninitialized after meta-device materialization, producing non-finite router scores ([#1183](https://github.com/AMD-AGI/Primus/pull/1183)).
-- DeepSeek `torch.compile` is bounded at the routed experts and keeps scalar capture ([#1216](https://github.com/AMD-AGI/Primus/pull/1216); on `release/v26.9`, not yet on `main`).
-
-**The Turbo grouped-GEMM config was renamed** in v26.7 ([#1041](https://github.com/AMD-AGI/Primus/pull/1041)). If you are moving from v26.6 with a local TorchTitan config that sets it, update the key.
+- With full activation checkpointing, `torch.compile` compiled the checkpoint wrapper itself, so the whole checkpointed MoE block of a DeepSeek model ran eagerly. Checkpoint-wrapped blocks are now compiled inside the wrapper; runs without activation checkpointing are unchanged. This affects the DeepSeek-671B recipes and completes the DeepSeek compile work of [#1216](https://github.com/AMD-AGI/Primus/pull/1216) ([#1320](https://github.com/AMD-AGI/Primus/pull/1320)).
+- With `primus_turbo.enable_primus_turbo` or `use_turbo_attention` turned off, the first forward failed under `torch.compile` with `TypeError: Unexpected keyword arguments: ['block_mask', 'enable_gqa']`. The Primus Turbo converter now replaces attention only when both are on ([#1234](https://github.com/AMD-AGI/Primus/pull/1234)).
 
 ### Registry change
 
