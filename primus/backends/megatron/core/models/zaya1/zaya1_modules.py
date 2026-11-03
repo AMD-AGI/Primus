@@ -15,7 +15,8 @@ Transformer Engine linears under one FP8 autocast. The router, the depthwise
 convolutions, RMSNorm, and attention stay in BF16 or FP32.
 
 On GPU, the elementwise chains between GEMMs (residual scaling, merge and
-RMSNorm at each stage boundary) run through Megatron's ``jit_fuser``
+RMSNorm at each stage boundary, and CCA's grouped means, QK norm and partial
+RoPE) run through Megatron's ``jit_fuser``
 (``torch.compile``), which fuses them into a few kernels and keeps only their
 inputs for the backward. Fused kernels hold intermediates in fp32, so they skip
 the bf16 rounding that eager mode applies between those steps. CPU runs, like
@@ -236,6 +237,76 @@ def _residual_affine(res_scale: Optional[ResidualScaling]):
     )
 
 
+def _grouped_means(query_conv, key_conv, query_pre, key_base):
+    seq, batch, num_q_heads, head_dim = query_pre.shape
+    num_k_heads = key_base.shape[2]
+    key_base_f = key_base.float()
+    query_pre_g = query_pre.reshape(seq, batch, num_k_heads, num_q_heads // num_k_heads, head_dim).float()
+    query_conv_g = query_conv.reshape(query_pre_g.shape).float()
+    query = query_conv_g + 0.5 * query_pre_g + 0.5 * key_base_f.unsqueeze(-2)
+    query = query.reshape(seq, batch, num_q_heads, head_dim)
+    query_mean = query_pre_g.mean(dim=-2)
+    key = key_conv.float() + 0.5 * query_mean + 0.5 * key_base_f
+    return query, key
+
+
+def _qk_norm_and_temp(query, key, temp, clamp_temp: bool):
+    eps = 1e-12
+    scale = math.sqrt(query.shape[-1])
+    query = query.float() * (torch.rsqrt(query.float().pow(2).sum(-1, keepdim=True) + eps) * scale)
+    key = key.float() * (torch.rsqrt(key.float().pow(2).sum(-1, keepdim=True) + eps) * scale)
+    temp = temp.float().view(1, 1, -1, 1)
+    if clamp_temp:
+        temp = torch.exp(torch.clamp(temp, 1e-7, 2.0))
+    return query, key * temp
+
+
+def _rope_cos_sin(position_ids: Optional[torch.Tensor], seq: int, rotary_dim: int, base: float, device):
+    if position_ids is None:
+        pos = torch.arange(seq, device=device)
+    else:
+        # position_ids is [batch, seq]. Transpose to [seq, batch] so each
+        # row can carry its own positions.
+        pos = position_ids.transpose(0, 1).to(device=device)
+    freq_idx = torch.arange(0, rotary_dim, 2, device=device, dtype=torch.float32)
+    inv_freq = 1.0 / (base ** (freq_idx / rotary_dim))
+    # NeoX layout: the same angle is shared by the two halves of the rotary slice.
+    if pos.dim() == 1:
+        freqs = torch.outer(pos.float(), inv_freq)
+        cos = torch.cat((freqs.cos(), freqs.cos()), dim=-1)[:, None, None, :]
+        sin = torch.cat((freqs.sin(), freqs.sin()), dim=-1)[:, None, None, :]
+    else:
+        freqs = torch.einsum("sb,d->sbd", pos.float(), inv_freq)
+        cos = torch.cat((freqs.cos(), freqs.cos()), dim=-1)[:, :, None, :]
+        sin = torch.sin(freqs)
+        sin = torch.cat((sin, sin), dim=-1)[:, :, None, :]
+    return cos, sin
+
+
+def _apply_rope(x, cos, sin):
+    rotary_dim = cos.shape[-1]
+    rot, rest = x[..., :rotary_dim], x[..., rotary_dim:]
+    rot_f = rot.float()
+    half = rotary_dim // 2
+    x1, x2 = rot_f[..., :half], rot_f[..., half:]
+    rotated = torch.cat((-x2, x1), dim=-1)
+    out = rot_f * cos + rotated * sin
+    return torch.cat((out, rest.float()), dim=-1).to(dtype=x.dtype)
+
+
+def _cca_query_key(query_conv, key_conv, query_pre, key_base, temp, clamp_temp: bool, rope):
+    """Grouped means, QK norm with the key temperature, then partial RoPE, in the projections' dtype."""
+    query, key = _grouped_means(query_conv, key_conv, query_pre, key_base)
+    query, key = _qk_norm_and_temp(query, key, temp, clamp_temp)
+    query, key = query.to(dtype=query_pre.dtype), key.to(dtype=query_pre.dtype)
+    if rope is None:
+        return query, key
+    return _apply_rope(query, *rope), _apply_rope(key, *rope)
+
+
+_fused_cca_query_key = _compiled_on_gpu(_cca_query_key)
+
+
 class CCA(nn.Module):
     """Compressed convolutional attention projection plus partial RoPE and GQA."""
 
@@ -288,62 +359,19 @@ class CCA(nn.Module):
         self.o_proj = _linear(self.latent_q, self.hidden_size, bias, config)
 
     def _qk_norm_and_temp(self, query: torch.Tensor, key: torch.Tensor):
-        eps = 1e-12
-        scale = math.sqrt(self.head_dim)
-        query = query.float() * (torch.rsqrt(query.float().pow(2).sum(-1, keepdim=True) + eps) * scale)
-        key = key.float() * (torch.rsqrt(key.float().pow(2).sum(-1, keepdim=True) + eps) * scale)
-        temp = self.temp.float().view(1, 1, self.num_k_heads, 1)
-        if self.clamp_temp:
-            temp = torch.exp(torch.clamp(temp, 1e-7, 2.0))
-        return query, key * temp
+        return _qk_norm_and_temp(query, key, self.temp, self.clamp_temp)
 
     def _grouped_means(self, query_conv, key_conv, query_pre, key_base):
-        key_base_f = key_base.float()
-        query_pre_g = query_pre.view(
-            query_pre.shape[0], query_pre.shape[1], self.num_k_heads, self.gqa_groups, self.head_dim
-        ).float()
-        query_conv_g = query_conv.view_as(query_pre_g).float()
-        query = query_conv_g + 0.5 * query_pre_g + 0.5 * key_base_f.unsqueeze(-2)
-        query = query.reshape(query_pre.shape[0], query_pre.shape[1], self.num_q_heads, self.head_dim)
-        query_mean = query_pre_g.mean(dim=-2)
-        key = key_conv.float() + 0.5 * query_mean + 0.5 * key_base_f
-        return query, key
+        return _grouped_means(query_conv, key_conv, query_pre, key_base)
 
-    def _rope(self, query, key, position_ids: Optional[torch.Tensor]):
+    def rope_cos_sin(self, position_ids: Optional[torch.Tensor], seq: int, device):
+        """Partial-RoPE ``(cos, sin)`` for ``[seq, batch, heads, rotary_dim]``, or ``None`` without RoPE."""
         if self.rotary_dim == 0:
-            return query, key
-        seq = query.shape[0]
-        if position_ids is None:
-            pos = torch.arange(seq, device=query.device)
-        else:
-            # position_ids is [batch, seq]. Transpose to [seq, batch] so each
-            # row can carry its own positions.
-            pos = position_ids.transpose(0, 1).to(device=query.device)
-        freq_idx = torch.arange(0, self.rotary_dim, 2, device=query.device, dtype=torch.float32)
-        inv_freq = 1.0 / (self.rope_base ** (freq_idx / self.rotary_dim))
-        # NeoX layout: the same angle is shared by the two halves of the rotary slice.
-        if pos.dim() == 1:
-            freqs = torch.outer(pos.float(), inv_freq)
-            cos = torch.cat((freqs.cos(), freqs.cos()), dim=-1)[:, None, None, :]
-            sin = torch.cat((freqs.sin(), freqs.sin()), dim=-1)[:, None, None, :]
-        else:
-            freqs = torch.einsum("sb,d->sbd", pos.float(), inv_freq)
-            cos = torch.cat((freqs.cos(), freqs.cos()), dim=-1)[:, :, None, :]
-            sin = torch.sin(freqs)
-            sin = torch.cat((sin, sin), dim=-1)[:, :, None, :]
+            return None
+        return _rope_cos_sin(position_ids, seq, self.rotary_dim, self.rope_base, device)
 
-        def _apply(x):
-            rot, rest = x[..., : self.rotary_dim], x[..., self.rotary_dim :]
-            rot_f = rot.float()
-            half = rot_f.shape[-1] // 2
-            x1, x2 = rot_f[..., :half], rot_f[..., half:]
-            rotated = torch.cat((-x2, x1), dim=-1)
-            out = rot_f * cos + rotated * sin
-            return torch.cat((out, rest.float()), dim=-1).to(dtype=x.dtype)
-
-        return _apply(query), _apply(key)
-
-    def project(self, hidden_states: torch.Tensor, position_ids: Optional[torch.Tensor]):
+    def project(self, hidden_states: torch.Tensor, position_ids: Optional[torch.Tensor], rope=None):
+        """Query, key and value; ``rope`` is ``rope_cos_sin(position_ids, ...)`` when the caller has it."""
         seq, batch, _ = hidden_states.shape
         q_raw = self.linear_q(hidden_states)
         k_raw = self.linear_k(hidden_states)
@@ -354,19 +382,22 @@ class CCA(nn.Module):
         key_base = k_raw.view(seq, batch, self.num_k_heads, self.head_dim)
         query_conv = qk_out[..., : self.latent_q].view(seq, batch, self.num_q_heads, self.head_dim)
         key_conv = qk_out[..., self.latent_q :].view(seq, batch, self.num_k_heads, self.head_dim)
-        query, key = self._grouped_means(query_conv, key_conv, query_pre, key_base)
-        query, key = self._qk_norm_and_temp(query, key)
+        if rope is None:
+            rope = self.rope_cos_sin(position_ids, seq, hidden_states.device)
+        query, key = _fused_cca_query_key(
+            query_conv, key_conv, query_pre, key_base, self.temp, self.clamp_temp, rope
+        )
 
         shifted = F.pad(hidden_states[:-1], (0, 0, 0, 0, 1, 0))
         v1 = self.val_proj1(hidden_states)
         v2 = self.val_proj2(shifted)
         value = torch.cat((v1, v2), dim=-1).view(seq, batch, self.num_k_heads, self.head_dim)
-        dtype = hidden_states.dtype
-        query, key = self._rope(query.to(dtype), key.to(dtype), position_ids)
-        return query, key, value.to(dtype)
+        return query, key, value.to(hidden_states.dtype)
 
-    def forward(self, hidden_states: torch.Tensor, position_ids: Optional[torch.Tensor], attention_mask):
-        query, key, value = self.project(hidden_states, position_ids)
+    def forward(
+        self, hidden_states: torch.Tensor, position_ids: Optional[torch.Tensor], attention_mask, rope=None
+    ):
+        query, key, value = self.project(hidden_states, position_ids, rope)
         attn = attention(query, key, value, attention_mask)
         seq, batch = hidden_states.shape[:2]
         return self.o_proj(attn.reshape(seq, batch, self.latent_q))
@@ -584,7 +615,7 @@ class ZayaStage(nn.Module):
             self.self_attn = None
             self.zaya_block = ZayaMoE(config)
 
-    def forward(self, hidden_states, residual, prev_router, position_ids, attention_mask):
+    def forward(self, hidden_states, residual, prev_router, position_ids, attention_mask, rope=None):
         residual, normed = _fused_scale_merge_norm(
             hidden_states,
             residual,
@@ -593,7 +624,7 @@ class ZayaStage(nn.Module):
             self.input_norm.eps,
         )
         if self.kind == "a":
-            hidden_states = self.self_attn(normed, position_ids, attention_mask)
+            hidden_states = self.self_attn(normed, position_ids, attention_mask, rope)
         else:
             hidden_states, prev_router = self.zaya_block(normed, prev_router)
         return hidden_states, residual, prev_router
@@ -629,12 +660,17 @@ class ZayaStack(nn.Module):
         return get_fp8_context(self.config)
 
     def forward(self, hidden_states, position_ids, attention_mask):
+        # Every CCA stage rotates the same positions, so build the tables once.
+        cca = next((layer.self_attn for layer in self.layers if layer.self_attn is not None), None)
+        rope = None
+        if cca is not None:
+            rope = cca.rope_cos_sin(position_ids, hidden_states.shape[0], hidden_states.device)
         with self._fp8_context():
             residual = None
             prev_router = None
             for layer in self.layers:
                 hidden_states, residual, prev_router = layer(
-                    hidden_states, residual, prev_router, position_ids, attention_mask
+                    hidden_states, residual, prev_router, position_ids, attention_mask, rope
                 )
             _, normed = _fused_scale_merge_norm(
                 hidden_states,

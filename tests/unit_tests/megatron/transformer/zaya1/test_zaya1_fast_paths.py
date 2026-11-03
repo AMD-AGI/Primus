@@ -14,8 +14,12 @@ from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
     RMSNorm,
     ZayaMoE,
     _align_fp8_leading,
+    _apply_rope,
+    _cca_query_key,
+    _fused_cca_query_key,
     _fused_scale_merge_norm,
     _residual_affine,
+    _rope_cos_sin,
     _scale_merge_norm,
     _unpad_fp8_leading,
 )
@@ -163,6 +167,47 @@ def test_compiled_stage_boundary_matches_eager():
     # Eager rounds the residual to bf16 before the norm and the compiled kernel
     # does not, so elements differ by a bf16 ulp; compare whole tensors.
     for got, ref in zip(got_outs[1:] + got_grads, ref_outs[1:] + ref_grads):
+        assert _rel(got, ref) < 1e-2
+
+
+def test_partial_rope_rotates_each_half_pair_by_its_angle():
+    torch.manual_seed(0)
+    seq, batch, heads, head_dim, rotary_dim = 6, 2, 3, 16, 8
+    half = rotary_dim // 2
+    x = torch.randn(seq, batch, heads, head_dim)
+    pos = torch.randint(0, 100, (batch, seq))
+    got = _apply_rope(x, *_rope_cos_sin(pos, seq, rotary_dim, 10000.0, x.device))
+
+    inv_freq = 1.0 / 10000.0 ** (torch.arange(0, rotary_dim, 2).float() / rotary_dim)
+    angle = pos.t().float()[:, :, None, None] * inv_freq
+    pair = torch.complex(x[..., :half], x[..., half:rotary_dim]) * torch.polar(torch.ones_like(angle), angle)
+    torch.testing.assert_close(got[..., :half], pair.real)
+    torch.testing.assert_close(got[..., half:rotary_dim], pair.imag)
+    torch.testing.assert_close(got[..., rotary_dim:], x[..., rotary_dim:])
+
+
+@needs_gpu
+def test_compiled_cca_query_key_matches_eager():
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    seq, batch, q_heads, k_heads, head_dim = 32, 4, 8, 2, 128
+
+    def leaf(heads):
+        return torch.randn(
+            seq, batch, heads, head_dim, device=device, dtype=torch.bfloat16, requires_grad=True
+        )
+
+    inputs = (leaf(q_heads), leaf(k_heads), leaf(q_heads), leaf(k_heads))
+    temp = (1 + 0.1 * torch.randn(k_heads, device=device)).to(torch.bfloat16).requires_grad_()
+    pos = torch.arange(seq, device=device).expand(batch, -1)
+    rope = _rope_cos_sin(pos, seq, head_dim // 2, 10000.0, device)
+    upstream = (torch.randn_like(inputs[0]), torch.randn_like(inputs[1]))
+
+    results = []
+    for fn in (_fused_cca_query_key, _cca_query_key):
+        outs = fn(*inputs, temp, False, rope)
+        results.append(outs + torch.autograd.grad(outs, (*inputs, temp), upstream))
+    for got, ref in zip(*results):
         assert _rel(got, ref) < 1e-2
 
 
