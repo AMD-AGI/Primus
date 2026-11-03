@@ -149,7 +149,7 @@ MaxText (JAX) backend.
 
 > **Note:** `transformers` is 4.57.3 in the MaxText image because the published tag includes the MaxDiffusion stage, which pins transformers back to 4.x for Flax CLIP / T5. The build-time manifest records 5.17.0, captured before that stage runs; 4.57.3 is what you actually get (`huggingface-hub` 0.36.2 and `tokenizers` 0.22.2 move back with it). The PyTorch image is on 5.10.0.
 
-> **Primus enables Shardy by default** (`shardy: true` in its MaxText module config). Leave it on. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html).
+> **Primus enables Shardy by default** (`shardy: true` in its MaxText module config). Leave it on. See the [Shardy guide for JAX users](https://openxla.org/shardy/getting_started_jax).
 
 ### Primus source for v26.9
 
@@ -347,7 +347,7 @@ MaxText (JAX) backend.
 
 > **Note:** `transformers` is 4.57.3 in the MaxText image because the published tag includes the MaxDiffusion stage, which pins transformers back to 4.x for Flax CLIP / T5. The build-time manifest records 5.16.1, captured before that stage runs; 4.57.3 is what you actually get. The PyTorch image is on 5.10.0.
 
-> **JAX 0.11.1 uses Shardy, and Primus enables it by default** (`shardy: true` in its MaxText module config). Leave it on. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html).
+> **JAX 0.11.1 uses Shardy, and Primus enables it by default** (`shardy: true` in its MaxText module config). Leave it on. See the [Shardy guide for JAX users](https://openxla.org/shardy/getting_started_jax).
 
 ### Primus source for v26.8
 
@@ -534,7 +534,8 @@ MaxText (JAX) backend.
 
 > **Note:** `transformers` is 4.57.3 in the MaxText image because the published tag includes the MaxDiffusion stage, which pins transformers back to 4.x for Flax CLIP / T5. The build-time manifest records 5.14.1, captured before that stage runs; 4.57.3 is what you actually get. The PyTorch image is on 5.10.0.
 
-> **JAX 0.11.0 still requires Shardy.** Set `shardy=True` during the training run. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html).
+> **JAX 0.11.0 still requires Shardy.** Set `shardy=True` during the training run. See the [Shardy guide for JAX users](https://openxla.org/shardy/getting_started_jax).
+
 
 ### Primus source for v26.7
 
