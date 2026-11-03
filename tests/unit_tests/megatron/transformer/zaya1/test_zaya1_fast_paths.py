@@ -8,8 +8,10 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
+    CCA,
     ResidualScaling,
     RMSNorm,
     ZayaMoE,
@@ -201,18 +203,63 @@ def test_partial_rope_rotates_each_half_pair_by_its_angle():
     torch.testing.assert_close(got[..., rotary_dim:], x[..., rotary_dim:])
 
 
+def _main_cca_query_key(cca, hidden):
+    """CCA query and key as main computes them: ``nn.Conv1d`` over the padded, concatenated projections."""
+    seq, batch, _ = hidden.shape
+    q_raw, k_raw = cca.linear_q(hidden), cca.linear_k(hidden)
+    pad = (cca.cca_time0 - 1) + (cca.cca_time1 - 1)
+    qk_ncl = F.pad(torch.cat((q_raw, k_raw), dim=-1).permute(1, 2, 0), (pad, 0))
+    qk_out = cca.conv_qk(qk_ncl).permute(2, 0, 1)
+    query, key = cca._grouped_means(
+        qk_out[..., : cca.latent_q].view(seq, batch, cca.num_q_heads, cca.head_dim),
+        qk_out[..., cca.latent_q :].view(seq, batch, cca.num_k_heads, cca.head_dim),
+        q_raw.view(seq, batch, cca.num_q_heads, cca.head_dim),
+        k_raw.view(seq, batch, cca.num_k_heads, cca.head_dim),
+    )
+    query, key = cca._qk_norm_and_temp(query, key)
+    rope = _rope_cos_sin(None, seq, cca.rotary_dim, cca.rope_base, hidden.device)
+    return _apply_rope(query, *rope), _apply_rope(key, *rope)
+
+
+@pytest.mark.parametrize("kernels", [(2, 2), (3, 2), (2, 4)])
+def test_cca_convolutions_as_gemms_match_conv1d(kernels):
+    torch.manual_seed(0)
+    cca = CCA(_cfg(cca_time0=kernels[0], cca_time1=kernels[1]))
+    with torch.no_grad():
+        for p in (*cca.conv_qk.parameters(), cca.temp):
+            p.normal_()
+    hidden = torch.randn(7, 3, 32, requires_grad=True)
+    leaves = (hidden, cca.linear_q.weight, cca.linear_k.weight, *cca.conv_qk.parameters(), cca.temp)
+
+    got = cca.project(hidden, position_ids=None)[:2]
+    ref = _main_cca_query_key(cca, hidden)
+    upstream = tuple(torch.randn_like(t) for t in ref)
+    for g, r in zip(got, ref):
+        torch.testing.assert_close(g, r)
+    got_grads = torch.autograd.grad(got, leaves, upstream)
+    ref_grads = torch.autograd.grad(ref, leaves, upstream)
+    for g, r in zip(got_grads, ref_grads):
+        torch.testing.assert_close(g, r, rtol=1e-5, atol=1e-5)
+
+
 @needs_gpu
 def test_compiled_cca_query_key_matches_eager():
     torch.manual_seed(0)
     device = torch.device("cuda")
     seq, batch, q_heads, k_heads, head_dim = 32, 4, 8, 2, 128
+    width = (q_heads + k_heads) * head_dim
 
-    def leaf(heads):
-        return torch.randn(
-            seq, batch, heads, head_dim, device=device, dtype=torch.bfloat16, requires_grad=True
-        )
+    def leaf(*shape, scale=1.0):
+        return (scale * torch.randn(*shape, device=device)).to(torch.bfloat16).requires_grad_()
 
-    inputs = (leaf(q_heads), leaf(k_heads), leaf(q_heads), leaf(k_heads))
+    inputs = (
+        leaf(seq, batch, q_heads, head_dim),
+        leaf(seq, batch, k_heads, head_dim),
+        leaf(width, 1, 2, scale=0.5),
+        leaf(width, scale=0.1),
+        leaf(width, head_dim, 2, scale=0.1),
+        leaf(width, scale=0.1),
+    )
     temp = (1 + 0.1 * torch.randn(k_heads, device=device)).to(torch.bfloat16).requires_grad_()
     pos = torch.arange(seq, device=device).expand(batch, -1)
     rope = _rope_cos_sin(pos, seq, head_dim // 2, 10000.0, device)

@@ -14,13 +14,16 @@ When ``config.fp8`` is set, CCA projections and expert SwiGLU GEMMs are
 Transformer Engine linears under one FP8 autocast. The router, the depthwise
 convolutions, RMSNorm, and attention stay in BF16 or FP32.
 
+CCA's two causal convolutions keep their ``nn.Conv1d`` parameters but run as
+an elementwise depthwise step and one batched GEMM per head.
+
 On GPU, the elementwise chains between GEMMs (residual scaling, merge and
-RMSNorm at each stage boundary, and CCA's grouped means, QK norm and partial
-RoPE) run through Megatron's ``jit_fuser``
-(``torch.compile``), which fuses them into a few kernels and keeps only their
-inputs for the backward. Fused kernels hold intermediates in fp32, so they skip
-the bf16 rounding that eager mode applies between those steps. CPU runs, like
-the unit tests, stay eager.
+RMSNorm at each stage boundary, and CCA's depthwise convolution, grouped
+means, QK norm and partial RoPE) run through Megatron's ``jit_fuser``
+(``torch.compile``), which fuses them into a few kernels and saves fewer
+intermediates for the backward than eager mode does. Fused kernels hold
+intermediates in fp32, so they skip the bf16 rounding that eager mode applies
+between those steps. CPU runs, like the unit tests, stay eager.
 """
 
 from __future__ import annotations
@@ -294,8 +297,46 @@ def _apply_rope(x, cos, sin):
     return torch.cat((out, rest.float()), dim=-1).to(dtype=x.dtype)
 
 
-def _cca_query_key(query_conv, key_conv, query_pre, key_base, temp, clamp_temp: bool, rope):
-    """Grouped means, QK norm with the key temperature, then partial RoPE, in the projections' dtype."""
+def _causal_convs(query_pre, key_base, w0, b0, w1, b1):
+    """CCA's causal depthwise convolution, then its grouped one, over the query and key heads.
+
+    ``w0, b0`` and ``w1, b1`` are the two ``nn.Conv1d`` parameters. Each group
+    of the second convolution is one head, so it is a batched GEMM per head over
+    the kernel's taps of the first convolution's output, rounded to the input
+    dtype in between as the convolutions are. Inputs are
+    ``[seq, batch, heads, head_dim]``; returns ``[heads, seq, batch, head_dim]``.
+    """
+    seq, batch, _, head_dim = query_pre.shape
+    k0, k1 = w0.shape[-1], w1.shape[-1]
+    # The compiled backward keeps the padded input, so pad in the input dtype
+    # and cast per tap rather than keep an fp32 copy.
+    x = torch.cat((query_pre, key_base), dim=2)
+    heads = x.shape[2]
+    x = F.pad(x, (0, 0, 0, 0, 0, 0, k0 + k1 - 2, 0))
+    taps = w0.float().view(heads, head_dim, k0)
+    mid = seq + k1 - 1
+    y = b0.float().view(heads, head_dim)
+    for j in range(k0):
+        y = y + x[j : j + mid].float() * taps[..., j]
+    y = y.to(dtype=query_pre.dtype)
+    windows = torch.stack([y[j : j + seq] for j in range(k1)], dim=3)
+    windows = windows.permute(2, 0, 1, 3, 4).reshape(heads, seq * batch, k1 * head_dim)
+    weight = w1.view(heads, head_dim, head_dim, k1).permute(0, 3, 2, 1)
+    weight = weight.reshape(heads, k1 * head_dim, head_dim)
+    out = torch.baddbmm(b1.view(heads, 1, head_dim).to(y.dtype), windows, weight.to(y.dtype))
+    return out.view(heads, seq, batch, head_dim)
+
+
+def _cca_query_key(query_pre, key_base, w0, b0, w1, b1, temp, clamp_temp: bool, rope):
+    """Causal convolutions, grouped means, QK norm with the key temperature, then partial RoPE.
+
+    ``query_pre`` and ``key_base`` are the Q and K projections as
+    ``[seq, batch, heads, head_dim]``; query and key come back in their dtype.
+    """
+    qk_conv = _causal_convs(query_pre, key_base, w0, b0, w1, b1)
+    num_q_heads = query_pre.shape[2]
+    query_conv = qk_conv[:num_q_heads].permute(1, 2, 0, 3)
+    key_conv = qk_conv[num_q_heads:].permute(1, 2, 0, 3)
     query, key = _grouped_means(query_conv, key_conv, query_pre, key_base)
     query, key = _qk_norm_and_temp(query, key, temp, clamp_temp)
     query, key = query.to(dtype=query_pre.dtype), key.to(dtype=query_pre.dtype)
@@ -323,7 +364,6 @@ class CCA(nn.Module):
         self.latent_k = self.num_k_heads * self.head_dim
         self.cca_time0 = int(getattr(config, "cca_time0", 2))
         self.cca_time1 = int(getattr(config, "cca_time1", 2))
-        self.total_padding = (self.cca_time0 - 1) + (self.cca_time1 - 1)
         frac = getattr(config, "partial_rotary_factor", None)
         if frac is None:
             frac = getattr(config, "rotary_percent", 0.5)
@@ -373,19 +413,21 @@ class CCA(nn.Module):
     def project(self, hidden_states: torch.Tensor, position_ids: Optional[torch.Tensor], rope=None):
         """Query, key and value; ``rope`` is ``rope_cos_sin(position_ids, ...)`` when the caller has it."""
         seq, batch, _ = hidden_states.shape
-        q_raw = self.linear_q(hidden_states)
-        k_raw = self.linear_k(hidden_states)
-        qk = torch.cat((q_raw, k_raw), dim=-1)
-        qk_ncl = F.pad(qk.permute(1, 2, 0), (self.total_padding, 0))
-        qk_out = self.conv_qk(qk_ncl).permute(2, 0, 1)
-        query_pre = q_raw.view(seq, batch, self.num_q_heads, self.head_dim)
-        key_base = k_raw.view(seq, batch, self.num_k_heads, self.head_dim)
-        query_conv = qk_out[..., : self.latent_q].view(seq, batch, self.num_q_heads, self.head_dim)
-        key_conv = qk_out[..., self.latent_q :].view(seq, batch, self.num_k_heads, self.head_dim)
+        query_pre = self.linear_q(hidden_states).view(seq, batch, self.num_q_heads, self.head_dim)
+        key_base = self.linear_k(hidden_states).view(seq, batch, self.num_k_heads, self.head_dim)
         if rope is None:
             rope = self.rope_cos_sin(position_ids, seq, hidden_states.device)
+        depthwise, grouped = self.conv_qk
         query, key = _fused_cca_query_key(
-            query_conv, key_conv, query_pre, key_base, self.temp, self.clamp_temp, rope
+            query_pre,
+            key_base,
+            depthwise.weight,
+            depthwise.bias,
+            grouped.weight,
+            grouped.bias,
+            self.temp,
+            self.clamp_temp,
+            rope,
         )
 
         shifted = F.pad(hidden_states[:-1], (0, 0, 0, 0, 1, 0))
