@@ -60,7 +60,7 @@ That comparison checks the loaded checkpoint forward (CCA, router, residual scal
 
 ## Throughput
 
-Each recipe was run as checked in on one 8-GPU node with `rocm/primus:v26.8` (PyTorch 2.14.0, Transformer Engine 2.17.1): 30 steps of mock data, sequence length 128, data parallel 8, one micro-batch per GPU per step. Each micro-batch size is the largest multiple of 8 that completes the recipe, including the end-of-training evaluation. Step time is the median, tokens/s/GPU the harmonic mean, and TFLOP/s/GPU the mean over steps 6 to 30.
+Each recipe was run as checked in on one 8-GPU node with `rocm/primus:v26.9` (PyTorch 2.14.0, Transformer Engine 2.17.1): 30 steps of mock data, sequence length 128, data parallel 8, one micro-batch per GPU per step. Each micro-batch size is the largest multiple of 8 that completes the recipe, including the end-of-training evaluation. Step time is the median, tokens/s/GPU the harmonic mean, and TFLOP/s/GPU the mean over steps 6 to 30.
 
 | GPU | Precision | Micro / global batch | Step time | Tokens/s/GPU | TFLOP/s/GPU | Peak memory per GPU | Next size up |
 |---|---|---|---|---|---|---|---|

@@ -8,13 +8,13 @@ MaxText for ROCm is a specialized fork of upstream MaxText, designed to enable t
 
 AMD provides a ready-to-use Docker image for AMD Instinct MI300X and MI355X GPUs containing essential components, including JAX, XLA, ROCm libraries, and MaxText utilities.
 
-For the full software stack of this image (ROCm, JAX, Transformer Engine, hipBLASLt, RCCL, TensorFlow, and the rest), see [Release notes → `rocm/jax-training:maxtext-v26.8`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v268). The release notes are the single source of truth for image contents.
+For the full software stack of this image (ROCm, JAX, Transformer Engine, hipBLASLt, RCCL, TensorFlow, and the rest), see [Release notes → `rocm/jax-training:maxtext-v26.9`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v269). The release notes are the single source of truth for image contents.
 
 > **Primus source:** the v26.8 image ships no Primus of its own. Use a `release/v26.8` checkout — `primus-cli container` mounts it into the image for you. See [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268).
 
 ---
 
-## Important notes for v26.8
+## Important notes for v26.9
 
 Read this section before starting a training run. It collects the settings this release requires, the architecture-specific workarounds, and the known issues. The contents change from release to release, so re-read it when you move to a new image tag.
 
@@ -26,7 +26,7 @@ Read this section before starting a training run. It collects the settings this 
 
 ### Changes you may need to act on
 
-**Drop `pure_nnx_decoder` from local configs.** MaxText `release/v26.8` removed the Linen modules and the `pure_nnx_decoder` key with them, and its config schema rejects unknown keys, so a config that still sets it fails validation. The three MI325X `nanoo_fp8` recipes that set it (DeepSeek-V2-16B, Mixtral-8x7B, Qwen3-30B-A3B) are fixed in `release/v26.8` ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)).
+**Drop `pure_nnx_decoder` from local configs.** MaxText `release/v26.9` removed the Linen modules and the `pure_nnx_decoder` key with them, and its config schema rejects unknown keys, so a config that still sets it fails validation. The three MI325X `nanoo_fp8` recipes that set it (DeepSeek-V2-16B, Mixtral-8x7B, Qwen3-30B-A3B) are fixed in `release/v26.9` ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)).
 
 **`XLA_FLAGS` in a config now takes precedence** over the Primus-managed defaults, as it always should have; use `XLA_FLAGS_APPEND` to add flags without replacing them ([#1054](https://github.com/AMD-AGI/Primus/pull/1054)). If you relied on the old behaviour, check the effective flags in the launch log.
 
@@ -179,13 +179,13 @@ JAX MaxText is integrated into [Primus](https://github.com/AMD-AGI/Primus), whic
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.8
+git checkout release/v26.9
 git submodule update --init third_party/maxtext/
 ```
 
 That is all the setup required. `primus-cli container` starts the image for you, mounts this checkout into it at the same path, and runs the training inside — so this is the code that executes. (The v26.8 image has no Primus of its own.) It also forwards environment variables you export on the host; the forwarded list is `container.options.env` in `runner/.primus.yaml`.
 
-> **Pass `--image` for MaxText.** The default image in `runner/.primus.yaml` is `rocm/primus`, which is the PyTorch image. MaxText runs need `--image rocm/jax-training:maxtext-v26.8` in container mode, or the image set in your Slurm config file.
+> **Pass `--image` for MaxText.** The default image in `runner/.primus.yaml` is `rocm/primus`, which is the PyTorch image. MaxText runs need `--image rocm/jax-training:maxtext-v26.9` in container mode, or the image set in your Slurm config file.
 
 For detailed usage of `primus-cli`, refer to the [CLI reference](./cli-reference.md).
 
@@ -194,7 +194,7 @@ The examples below target MI355X. Primus automatically sets `RCCL_WARP_SPEED_AUT
 **Container mode (recommended)**—run from the host; `primus-cli` starts the container:
 
 ```bash
-./runner/primus-cli container --image rocm/jax-training:maxtext-v26.8 \
+./runner/primus-cli container --image rocm/jax-training:maxtext-v26.9 \
   -- train pretrain --config examples/maxtext/configs/MI355X/llama2_7B-bf16-pretrain.yaml
 ```
 
@@ -222,7 +222,7 @@ To run a different model or GPU architecture, swap the `--config` path. Configur
 Use the following command to pull the Docker image from Docker Hub:
 
 ```bash
-docker pull rocm/jax-training:maxtext-v26.8
+docker pull rocm/jax-training:maxtext-v26.9
 ```
 
 ### Single-node training
@@ -252,7 +252,7 @@ docker run -it \
   -v $HF_HOME:/hf_cache -e HF_HOME=/hf_cache \
   -e HF_TOKEN=$HF_TOKEN \
   --shm-size 64G --name training_env \
-  rocm/jax-training:maxtext-v26.8
+  rocm/jax-training:maxtext-v26.9
 ```
 
 Execute the `training_env` container (optional if you are already in the container):
@@ -262,10 +262,10 @@ docker start training_env
 docker exec -it training_env bash
 ```
 
-The v26.8 image does not contain Primus, so run from your `release/v26.8` checkout. The `docker run` above mounts `$HOME`, so a checkout under your home directory is visible at the same path. Run training with `primus-cli` in direct mode; configs live under `examples/maxtext/configs/<DEVICE>/` where `<DEVICE>` is `MI300X`, `MI325X` or `MI355X`.
+The v26.8 image does not contain Primus, so run from your `release/v26.9` checkout. The `docker run` above mounts `$HOME`, so a checkout under your home directory is visible at the same path. Run training with `primus-cli` in direct mode; configs live under `examples/maxtext/configs/<DEVICE>/` where `<DEVICE>` is `MI300X`, `MI325X` or `MI355X`.
 
 ```bash
-cd ~/Primus   # your release/v26.8 checkout
+cd ~/Primus   # your release/v26.9 checkout
 
 # Unquantized (bf16), e.g. Llama 2 7B on MI300X
 # Note: RCCL_WARP_SPEED_AUTO=0 is auto-set by Primus on MI355X (gfx950).
@@ -310,7 +310,7 @@ Every listed model has a bf16 variant. Quantization is device-specific: MI300X u
 Multi-node training is launched through the unified `primus-cli` in Slurm mode. The general form for a multi-node run is:
 
 ```bash
-# From your release/v26.8 Primus checkout
+# From your release/v26.9 Primus checkout
 # RCCL_WARP_SPEED_AUTO=0 is auto-set by Primus on MI355X (gfx950).
 ./primus-cli --config my_maxtext_config.yaml slurm srun -N <NUM_NODES> \
   -- train pretrain --config examples/maxtext/configs/<DEVICE>/<model>-<precision>-pretrain.yaml
@@ -405,7 +405,7 @@ Profile output will be written under the `base_output_directory` specified in th
 #!/bin/bash
 set -e
 
-IMAGE="$1"       # Docker image, e.g. rocm/jax-training:maxtext-v26.8
+IMAGE="$1"       # Docker image, e.g. rocm/jax-training:maxtext-v26.9
 TAG="$2"         # Short tag for output folder, e.g. v26.8_llama2_7b
 PROFILE_DIR="/path/to/profiles/${TAG}"
 
