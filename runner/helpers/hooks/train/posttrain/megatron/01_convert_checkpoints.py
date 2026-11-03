@@ -14,6 +14,7 @@ checkpoint layout so native Megatron-LM finetune loading can consume it.
 
 import argparse
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -98,6 +99,95 @@ def get_checkpoint_config(config_file: str) -> tuple[str | None, str | None]:
     return hf_path, checkpoint_path
 
 
+# Parallel sizes the unsharded converter output requires to be 1 when set (ETP defaults to TP
+# when unset).
+_PARALLEL_SIZE_KEYS = (
+    "tensor_model_parallel_size",
+    "pipeline_model_parallel_size",
+    "expert_model_parallel_size",
+    "expert_tensor_parallel_size",
+    "virtual_pipeline_model_parallel_size",
+)
+# Pipeline-split settings the converter output requires to be unset. The
+# account_for_{embedding,loss}_in_pipeline_split flags are not listed: with PP = 1 (required above)
+# they change neither the layer split nor the checkpoint files.
+_PIPELINE_SPLIT_KEYS = (
+    "num_layers_per_virtual_pipeline_stage",
+    "num_virtual_stages_per_pipeline_rank",
+    "decoder_first_pipeline_num_layers",
+    "decoder_last_pipeline_num_layers",
+    "pipeline_model_parallel_layout",
+)
+# Native families whose converter output has a fixed layout that the hook checks before converting
+# (check_native_layout, and the CLI overrides main() parses for it). check_native_layout encodes the
+# Inkling converter's layout (one unsharded legacy checkpoint) and its messages name Inkling: a new
+# family whose converter has another layout needs its own check, not only an entry here.
+_LAYOUT_CHECKED_FAMILIES = ("inkling",)
+_TRAIN_LAYOUT_KEYS = _PARALLEL_SIZE_KEYS + _PIPELINE_SPLIT_KEYS + ("num_layers",)
+
+
+def _is_unset(value) -> bool:
+    return value is None or (isinstance(value, str) and value.strip().lower() in ("", "null", "none"))
+
+
+def check_native_layout(family: str, hf_path: str, train_layout: dict):
+    """Refuse, before converting, a training layout the family's converter cannot produce.
+
+    The Inkling converter writes one unsharded legacy checkpoint of the full HF depth
+    (TP = PP = EP = ETP = 1, no virtual / uneven pipeline split): a run with another parallel
+    layout or another ``num_layers`` would convert, then fail late at load (missing
+    ``mp_rank_*`` files or layers). Raises ``ValueError`` (the hook's main logs it and exits 1).
+
+    Only the families in ``_LAYOUT_CHECKED_FAMILIES`` (Inkling) are checked; for other native
+    families a mismatched layout is not validated here and fails at checkpoint load."""
+    if family not in _LAYOUT_CHECKED_FAMILIES:
+        return
+    import json
+
+    # Unset, from any source (YAML, an env-substituted value such as ${PP_FIRST:null}, or the
+    # command line): None, an empty string, or the string null / none in any case.
+    train_layout = {k: v for k, v in train_layout.items() if not _is_unset(v)}
+
+    def as_int(k):
+        # Only an int, or a string of an integer (a CLI / env value): int() would truncate 1.5 or
+        # 8.0 and take True as 1, so those would pass the check they should fail.
+        v = train_layout[k]
+        if isinstance(v, int) and not isinstance(v, bool):
+            return v
+        if isinstance(v, str) and re.fullmatch(r"\s*[+-]?\d+\s*", v):
+            return int(v)
+        hint = f" (a command-line --{k} without a value?)" if v is True else ""
+        raise ValueError(
+            f"native Inkling conversion: the training config's {k}={v!r} "
+            f"({type(v).__name__}) is not an integer{hint}, so the layout check cannot run"
+        )
+
+    bad = {k: train_layout[k] for k in _PARALLEL_SIZE_KEYS if k in train_layout and as_int(k) != 1}
+    bad.update({k: train_layout[k] for k in _PIPELINE_SPLIT_KEYS if k in train_layout})
+    if "num_layers" in train_layout:
+        with open(os.path.join(hf_path, "config.json")) as f:
+            cfg = json.load(f)
+        depth = (cfg.get("text_config") or {}).get("num_hidden_layers")
+        if depth is None:
+            depth = cfg.get("num_hidden_layers")
+        if depth is None:
+            raise ValueError(
+                f"native Inkling conversion: {hf_path}/config.json has no num_hidden_layers (in "
+                "text_config or at the top level), so the training config's "
+                f"num_layers={train_layout['num_layers']!r} cannot be checked against the checkpoint"
+            )
+        if as_int("num_layers") != int(depth):
+            bad["num_layers"] = f"{train_layout['num_layers']} (the checkpoint has {depth})"
+    if bad:
+        raise ValueError(
+            f"native Inkling conversion writes an unsharded checkpoint of the full depth "
+            f"(TP = PP = EP = ETP = 1, no virtual / uneven pipeline split, num_layers = "
+            f"num_hidden_layers), but the training config sets {bad}. "
+            "Train with that layout, or re-save the converted checkpoint as torch_dist from such "
+            "a run before changing TP / PP / EP."
+        )
+
+
 def read_native_opts(config_file: str) -> dict:
     """Read native (bridge-free) conversion options from the config.
 
@@ -108,7 +198,7 @@ def read_native_opts(config_file: str) -> dict:
     legacy Megatron-Bridge path.
     """
     cfg = load_primus_config(Path(config_file), None)
-    opts = {"enabled": None, "dtype": None, "out": None}
+    opts = {"enabled": None, "dtype": None, "out": None, "train_layout": {}}
 
     for module_name in ["sft_trainer", "post_trainer"]:
         module = get_module_config(cfg, module_name)
@@ -127,6 +217,13 @@ def read_native_opts(config_file: str) -> dict:
         opts["out"] = _first_config_value(params, "native_ckpt_out") or _first_config_value(
             module, "native_ckpt_out"
         )
+        # The training run's layout, for converters whose output layout is fixed (Inkling).
+        opts["train_layout"] = {
+            name: value
+            for name in _TRAIN_LAYOUT_KEYS
+            if (value := _first_config_value(params, name)) is not None
+            or (value := _first_config_value(module, name)) is not None
+        }
         break
 
     return opts
@@ -197,7 +294,7 @@ def _unset_nvte_attention_env():
 # ---------------------------------------------------------------------------
 # Native (bridge-free) conversion path
 # ---------------------------------------------------------------------------
-# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama): this
+# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama, Inkling): this
 # hook builds the mcore model in-process and copies HF safetensors weights onto
 # it (Primus-managed converters), producing a legacy ``torch`` checkpoint WITHOUT
 # ever importing ``megatron.bridge``. The convert-time monkeypatches (ROCm
@@ -219,11 +316,14 @@ _NATIVE_FAMILIES = {
     "deepseek": "deepseek",
     "llama": "llama",
     "llamaforcausallm": "llama",
+    # thinkingmachines/Inkling text backbone (unsharded output: TP = PP = EP = ETP = 1)
+    "inkling_mm_model": "inkling",
+    "inklingforconditionalgeneration": "inkling",
 }
 
 
 def _detect_native_family(hf_path: str) -> str | None:
-    """Return 'qwen3' | 'deepseek' | 'llama' | None from the HF config.json."""
+    """Return 'qwen3' | 'deepseek' | 'llama' | 'inkling' | None from the HF config.json."""
     import json
 
     cfg_file = os.path.join(hf_path, "config.json")
@@ -268,7 +368,7 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
     if family is None:
         raise ValueError(
             f"native_ckpt_convert requested but no native converter for HF model at {hf_path} "
-            "(supported: Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1)"
+            "(supported: Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1, Inkling text backbone)"
         )
 
     # Ensure the Megatron-LM source tree is importable in this standalone hook
@@ -293,6 +393,10 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
         from primus.backends.megatron.checkpoint import native_loader_qwen3 as conv
     elif family == "llama":
         from primus.backends.megatron.checkpoint import native_loader_llama as conv
+    elif family == "inkling":
+        from primus.backends.megatron.checkpoint import (
+            native_loader_inkling_mm_model as conv,
+        )
     else:
         from primus.backends.megatron.checkpoint import native_loader_deepseek as conv
 
@@ -390,6 +494,25 @@ def fix_common_pt_for_megatron_lm(checkpoint_dir: Path):
     log_success("     Successfully added 'args' to common.pt")
 
 
+def cli_layout_overrides(argv) -> dict:
+    """The training-layout keys set on the command line (``--key value``, ``--key=value``).
+
+    The hook gets the same extra arguments as the training command, and a CLI value overrides the
+    YAML one there, so it must override it here too (else a ``--num_layers 4`` run would be checked
+    against the YAML's depth). Parsed by the parser the training command uses
+    (``primus.core.utils.arg_utils.parse_cli_overrides``), so both read the same values. An unset
+    value (null / none / empty) stays in the result: it overrides the YAML value with "unset"."""
+    from primus.core.utils.arg_utils import parse_cli_overrides
+
+    parsed = parse_cli_overrides([str(a) for a in argv])
+    out = {}
+    for key, value in parsed.items():
+        key = key.replace("-", "_")  # argparse reads --num-layers as num_layers
+        if key in _TRAIN_LAYOUT_KEYS:
+            out[key] = value
+    return out
+
+
 def _native_main(hf_path: str, native_opts: dict):
     """Bridge-free native conversion branch of main().
 
@@ -403,6 +526,13 @@ def _native_main(hf_path: str, native_opts: dict):
         log_error(f"native_ckpt_convert: true but no native converter matches HF model at {hf_path}")
         sys.exit(1)
     native_opts["family"] = family
+    # Every rank, before anything is converted or reused: a layout the converter cannot produce
+    # fails here, not at checkpoint load after the conversion.
+    try:
+        check_native_layout(family, hf_path, native_opts["train_layout"])
+    except ValueError as e:
+        log_error(str(e))
+        sys.exit(1)
 
     # Output path (legacy torch layout: <out>/iter_0000001/mp_rank_00/...).
     if native_opts.get("out"):
@@ -446,7 +576,7 @@ def _native_main(hf_path: str, native_opts: dict):
 def main():
     parser = argparse.ArgumentParser(description="Convert HF checkpoint to Megatron format")
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
-    args, _ = parser.parse_known_args()
+    args, extra_argv = parser.parse_known_args()
 
     # Get config file path
     config_file = args.config
@@ -470,10 +600,12 @@ def main():
 
     # ---- Choose conversion backend --------------------------------------
     # Native (bridge-free) conversion is the DEFAULT for supported families
-    # (Qwen3, DeepSeek, Llama). ``native_ckpt_convert: false`` forces the legacy
+    # (Qwen3, DeepSeek, Llama, Inkling). ``native_ckpt_convert: false`` forces the legacy
     # Megatron-Bridge path; ``native_ckpt_convert: true`` forces native.
     native_opts = read_native_opts(config_file)
     native_family = _detect_native_family(hf_path)
+    if native_family in _LAYOUT_CHECKED_FAMILIES:  # parse the CLI only for a family checked below
+        native_opts["train_layout"].update(cli_layout_overrides(extra_argv))
     if native_opts["enabled"] is True:
         use_native = True
     elif native_opts["enabled"] is False:
@@ -485,7 +617,7 @@ def main():
         if native_family is None:
             log_error(
                 "native_ckpt_convert=true but no native converter matches the HF "
-                f"model at {hf_path} (supported: Qwen3, DeepSeek-V2/V3, Llama). "
+                f"model at {hf_path} (supported: Qwen3, DeepSeek-V2/V3, Llama, Inkling). "
                 "Set native_ckpt_convert: false to use the Megatron-Bridge path."
             )
             sys.exit(1)

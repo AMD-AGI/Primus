@@ -434,6 +434,60 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    # Inkling's GPU launch (8 GPUs, 4 layers, 3 iterations): the trainer, the Inkling model
+    # provider and its layers on the real HF shape. Weekly: on PRs the CPU unit tests
+    # (tests/unit_tests/backends/megatron/inkling) cover the model, the MoE and the converter.
+    @pytest.mark.weekly
+    def test_inkling(self):
+        run_script(
+            self.__class__.__name__,
+            "inkling",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/inkling-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--seq_length",
+                "1024",
+                "--max_position_embeddings",
+                "1024",
+            ],
+        )
+
+    # Expert-parallel smoke: the full GPU launch of Inkling's own EP all-gather / reduce-scatter
+    # path. Weekly, as test_inkling: on PRs the unit tests (test_inkling_moe.py) cover the EP path
+    # over gloo.
+    @pytest.mark.weekly
+    def test_inkling_ep2(self):
+        run_script(
+            self.__class__.__name__,
+            "inkling_ep2",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/inkling-BF16-ep2-smoke.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "2",
+                "--expert_model_parallel_size",
+                "2",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--seq_length",
+                "1024",
+                "--max_position_embeddings",
+                "1024",
+            ],
+        )
+
     def test_deepseek_v3(self):
         run_script(
             self.__class__.__name__,

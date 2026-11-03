@@ -15,8 +15,10 @@ pre-fetch batches (optionally on a dedicated H2D stream).
 import collections
 
 import torch
+from megatron.core.transformer.multi_token_prediction import mtp_on_this_rank
 from megatron.core.utils import StragglerDetector
 from megatron.training import get_args, get_timers
+from megatron.training.arguments import core_transformer_config_from_args
 from megatron.training.utils import (
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
@@ -26,16 +28,31 @@ from megatron.training.utils import (
 stimer = StragglerDetector()
 
 mb_batch = None
+_mtp_config = None  # (args, TransformerConfig): built once per run, for mtp_on_this_rank
+
+
+def _mtp_on_this_rank(vp_stage):
+    """Whether this (pipeline, virtual) stage runs MTP layers (as upstream ``pretrain_gpt``):
+    the MTP depths embed the input tokens, so a pipeline stage that runs them needs the tokens
+    broadcast to it even when it is not the first stage."""
+    args = get_args()
+    if not getattr(args, "mtp_num_layers", None):
+        return False
+    global _mtp_config
+    if _mtp_config is None or _mtp_config[0] is not args:
+        _mtp_config = (args, core_transformer_config_from_args(args))
+    return mtp_on_this_rank(_mtp_config[1], ignore_virtual=False, vp_stage=vp_stage)
 
 
 def get_batch_func(data_iterator, vp_stage=None):
     # TODO: this is pretty hacky, find a better way
-    if not is_first_or_last_pipeline_stage(vp_stage):
+    mtp_here = _mtp_on_this_rank(vp_stage)
+    if not (is_first_or_last_pipeline_stage(vp_stage) or mtp_here):
         return None, None, None, None, None
 
     # assert data_iterator is not None, f"data_iterator is None vp_stage: {vp_stage}"
     # get batches based on the TP rank you are on
-    batch = get_batch_on_this_tp_rank(data_iterator)
+    batch = get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank=mtp_here)
 
     # slice batch along sequence dimension for context parallelism
     args = get_args()
@@ -50,7 +67,7 @@ def get_batch_func(data_iterator, vp_stage=None):
         seq_split_idx = get_seq_split_idx() or 0
         if seq_split_idx == 0:
             # get batches based on the TP rank you are on
-            mb_batch = get_batch_on_this_tp_rank(data_iterator)
+            mb_batch = get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank=mtp_here)
             assert (
                 mb_batch["attention_mask"] is None
             ), "attention_mask should be None, please enable --no-create-attention-mask-in-dataloader"

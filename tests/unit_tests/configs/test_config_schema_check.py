@@ -617,6 +617,58 @@ def test_only_a_field_nothing_else_explains_is_model_scoped(megatron_repo: Path)
     assert "swiglu_limit" not in scope.keys  # the hand-written allowlist vouches for it
 
 
+def test_real_repo_model_dispatch_resolves_every_primus_model_type():
+    """get_model_provider dispatches Primus-owned types through its _PRIMUS_MODEL_PROVIDERS table;
+    the scanner must read that table, or model-scoped key checks go silent for those models."""
+    from primus.core.config.schema_check import _model_provider_branches
+    from primus.core.utils.import_utils import _PRIMUS_MODEL_PROVIDERS
+
+    default, branches, source = _model_provider_branches(_REPO_ROOT, "megatron")
+
+    assert (default, source) == ("gpt", "primus/core/utils/import_utils.py")
+    assert branches == {name: entry.module for name, entry in _PRIMUS_MODEL_PROVIDERS.items()}
+
+
+_TABLE_SHAPES = {
+    "call_positional": 'T = {"a": E("m.a", 1)}\n',
+    "call_keyword": 'T = {"a": E(module="m.a")}\n',
+    "call_keyword_after_a_builder": 'T = {"a": E(build, module="m.a")}\n',
+    "call_keyword_after_a_name": 'T = {"a": E("Name", module="m.a")}\n',
+    "tuple": 'T = {"a": ("m.a", "builder")}\n',
+    "plain_string": 'T = {"a": "m.a"}\n',
+    "annotated": 'T: dict = {"a": E("m.a")}\n',
+    "inside_if": 'if True:\n    T = {"a": E("m.a")}\n',
+    "inside_try": 'try:\n    T = {"a": E("m.a")}\nexcept ImportError:\n    T = {}\n',
+}
+
+
+@pytest.mark.parametrize("access", ["T[model_type]", "T.get(model_type)", "T.get(model_type, None)"])
+@pytest.mark.parametrize("shape", sorted(_TABLE_SHAPES))
+def test_dispatch_tables_read_every_table_shape(shape, access):
+    """Each table form and lookup the scanner claims to read: a refactor of the provider table into
+    one of them keeps the model scopes (a silent empty result would drop the model-scoped checks)."""
+    import ast
+
+    from primus.core.config.schema_check import _dispatch_tables
+
+    src = _TABLE_SHAPES[shape] + f"def get_model_provider(model_type):\n    return {access}\n"
+    tree = ast.parse(src)
+    func = next(n for n in tree.body if isinstance(n, ast.FunctionDef))
+    assert _dispatch_tables(tree, func, "model_type") == {"a": "m.a"}
+
+
+def test_dispatch_tables_ignore_tables_not_indexed_by_the_key():
+    import ast
+
+    from primus.core.config.schema_check import _dispatch_tables
+
+    tree = ast.parse(
+        'T = {"a": "m.a"}\nU = {"b": "m.b"}\ndef f(model_type, other):\n    return T[other], U[model_type]\n'
+    )
+    func = next(n for n in tree.body if isinstance(n, ast.FunctionDef))
+    assert _dispatch_tables(tree, func, "model_type") == {"b": "m.b"}
+
+
 def test_no_model_dispatch_means_no_scopes(fake_repo: Path):
     """TorchTitan has no such dispatch; the check must simply not look for one."""
     assert build_model_scopes(fake_repo, "torchtitan") == ()

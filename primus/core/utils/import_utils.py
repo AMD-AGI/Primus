@@ -5,8 +5,58 @@
 ###############################################################################
 import importlib
 from functools import partial
+from typing import NamedTuple
 
 from primus.core.utils.module_utils import log_rank_0
+
+
+class PrimusModelProvider(NamedTuple):
+    """One Primus-owned model type: where its builders live and the name the logs use."""
+
+    module: str  # builders module, defining model_provider and the builder
+    builder: str  # name of the builder function in that module
+    display_name: str
+
+
+# Primus-owned causal-LM model types: model_type -> PrimusModelProvider (builders module, builder
+# name, display name). get_model_provider binds the module's model_provider to its builder; the Megatron
+# pretrain trainer reuses pretrain_gpt's forward_step and datasets for every type listed here, so a
+# type that needs its own forward_step or datasets must not be listed (it needs its own trainer
+# branch). DeepSeek-V4 is still a Phase 2 stub: full V4 wiring lands in Phase 3+.
+# Register a new Primus-owned model type here only. Other modules use is_primus_model_type and
+# primus_model_display_name, not the table.
+_PRIMUS_MODEL_PROVIDERS = {
+    "deepseek_v4": PrimusModelProvider(
+        "primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_builders",
+        "deepseek_v4_builder",
+        "DeepSeek-V4",
+    ),
+    "glm5_next": PrimusModelProvider(
+        "primus.backends.megatron.core.models.glm5_next.glm5_next_builders",
+        "glm5_next_builder",
+        "GLM5-Next",
+    ),
+    "inkling": PrimusModelProvider(
+        "primus.backends.megatron.core.models.inkling.inkling_builders",
+        "inkling_builder",
+        "Inkling",
+    ),
+    "kimi_k3": PrimusModelProvider(
+        "primus.backends.megatron.core.models.kimi_k3.kimi_k3_builders",
+        "kimi_k3_builder",
+        "Kimi-K3",
+    ),
+}
+
+
+def is_primus_model_type(model_type) -> bool:
+    """True for a Primus-owned model type (a key of the provider table)."""
+    return model_type in _PRIMUS_MODEL_PROVIDERS
+
+
+def primus_model_display_name(model_type: str) -> str:
+    """The display name of a Primus-owned model type (KeyError for any other type)."""
+    return _PRIMUS_MODEL_PROVIDERS[model_type].display_name
 
 
 def lazy_import(paths, symbol, log_prefix="[Primus]"):
@@ -39,54 +89,28 @@ def get_model_provider(model_type="gpt"):
     Resolve model_provider across Megatron versions and model types.
 
     Args:
-        model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4' or
-            'kimi_k3'. Defaults to 'gpt'.
+        model_type (str): 'gpt', 'mamba', or any Primus-owned type in _PRIMUS_MODEL_PROVIDERS.
+            Defaults to 'gpt'.
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
     - Old:   pretrain_gpt.model_provider / pretrain_mamba.model_provider
     """
-    # Primus-owned: Kimi K3 (text backbone / Kimi-Linear)
-    if model_type == "kimi_k3":
-        kimi_k3_module = importlib.import_module(
-            "primus.backends.megatron.core.models.kimi_k3.kimi_k3_builders"
-        )
+    # Primus-owned types (such as model_type == "inkling") resolve from _PRIMUS_MODEL_PROVIDERS.
+    if is_primus_model_type(model_type):
+        entry = _PRIMUS_MODEL_PROVIDERS[model_type]
+        module = importlib.import_module(entry.module)
+        missing = [n for n in ("model_provider", entry.builder) if not hasattr(module, n)]
+        if missing:
+            raise AttributeError(
+                f"[Primus] model_type={model_type!r}: _PRIMUS_MODEL_PROVIDERS points at {entry.module}, "
+                f"which does not define {missing}"
+            )
         log_rank_0(
-            "[Primus][MegatronCompat] Loaded Kimi-K3 model_provider + builder "
-            f"from {kimi_k3_module.__name__}"
+            f"[Primus][MegatronCompat] Loaded {entry.display_name} model_provider + builder "
+            f"from {module.__name__}"
         )
-        return partial(
-            kimi_k3_module.model_provider,
-            kimi_k3_module.kimi_k3_builder,
-        )
-
-    # Primus-owned: GLM-5.3 (KDA + DSA hybrid with mHC)
-    if model_type == "glm5_next":
-        glm5_next_module = importlib.import_module(
-            "primus.backends.megatron.core.models.glm5_next.glm5_next_builders"
-        )
-        log_rank_0(
-            "[Primus][MegatronCompat] Loaded GLM5-Next model_provider + builder "
-            f"from {glm5_next_module.__name__}"
-        )
-        return partial(
-            glm5_next_module.model_provider,
-            glm5_next_module.glm5_next_builder,
-        )
-
-    # Primus-owned: DeepSeek-V4 (Phase 2 stub; full V4 wiring lands in Phase 3+)
-    if model_type == "deepseek_v4":
-        deepseek_v4_module = importlib.import_module(
-            "primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_builders"
-        )
-        log_rank_0(
-            "[Primus][MegatronCompat] Loaded DeepSeek-V4 model_provider + builder "
-            f"from {deepseek_v4_module.__name__}"
-        )
-        return partial(
-            deepseek_v4_module.model_provider,
-            deepseek_v4_module.deepseek_v4_builder,
-        )
+        return partial(module.model_provider, getattr(module, entry.builder))
 
     # Upstream Megatron-LM model types
     if model_type == "mamba":

@@ -109,12 +109,92 @@ def tokenize_text(tokenizer, text: str) -> List[int]:
         ) from exc
 
 
-def _resolve_pad_token_id(tokenizer) -> int:
-    """Best-effort lookup of a pad token id across Megatron/HF tokenizer variants."""
+# (tokenizer class, warning kind) pairs already logged. Keyed by class, not object: no tokenizer
+# is held (nothing leaks in a long-lived process), and the new tokenizer of each dataset / split
+# does not repeat a warning (the messages name the class, not the object).
+_LOGGED_ONCE: set = set()
+_MISSING = object()
+
+
+def _log_once(tokenizer, kind: str, msg: str) -> None:
+    """Log ``msg`` the first time ``kind`` is seen for this tokenizer class in this process: the
+    resolvers run once per sample."""
+    key = (type(tokenizer).__module__, type(tokenizer).__qualname__, kind)
+    if key not in _LOGGED_ONCE:
+        _LOGGED_ONCE.add(key)
+        log_rank_0(msg)
+
+
+def _special_token_name(attr: str) -> str:
+    """The special token a token-id attribute reads: ``eos_id`` / ``eod`` -> ``eos_token``."""
+    stem = "eos" if attr == "eod" else attr.split("_")[0]
+    return f"{stem}_token"
+
+
+def _token_string_is_none(tokenizer, attr: str) -> bool:
+    """True when the tokenizer (or the library tokenizer it wraps) has the special-token string
+    behind ``attr`` set to ``None``: the token does not exist."""
+    name = _special_token_name(attr)
+    for obj in (tokenizer, getattr(tokenizer, "_tokenizer", None)):
+        if obj is not None and getattr(obj, name, _MISSING) is None:
+            return True
+    return False
+
+
+def _token_id_attr(tokenizer, attr: str):
+    """Read a token-id attribute, or ``None`` when the tokenizer does not have that token.
+
+    The id is read first; a valid id is always used. Two failures of the read mean "absent":
+
+    - ``TypeError`` while the special-token string behind ``attr`` (``eos_token`` for ``eos_id``
+      and ``eod``) is ``None`` on the tokenizer or the library tokenizer it wraps: Megatron's
+      ``HuggingFaceTokenizer.eos_id`` has no ``None`` guard (thinkingmachines/Inkling has no
+      EOS). A ``TypeError`` while the token string exists is a bug and propagates.
+    - ``NotImplementedError``: Megatron's legacy tokenizer base class, for a special-token
+      property its subclass does not support.
+
+    A missing attribute is the ``getattr`` default. Any other exception propagates. A skipped
+    attribute is logged once per tokenizer class and attribute (``_LOGGED_ONCE``), not once per sample.
+    """
+    try:
+        return getattr(tokenizer, attr, None)
+    except NotImplementedError as exc:
+        reason = f"NotImplementedError: {exc}"
+    except TypeError:
+        if not _token_string_is_none(tokenizer, attr):
+            raise
+        reason = f"its {_special_token_name(attr)} is None"
+    _log_once(
+        tokenizer,
+        f"absent_{attr}",
+        f"[SFT] tokenizer {type(tokenizer).__name__}.{attr} is unavailable ({reason}); treated as absent",
+    )
+    return None
+
+
+def _tokenizer_pad_token_id(tokenizer) -> Optional[int]:
+    """The tokenizer's own pad id (pad, else EOS / EOD), or None when it has neither."""
     for attr in ("pad", "pad_token_id", "eod", "eos_token_id", "eos_id"):
-        value = getattr(tokenizer, attr, None)
+        value = _token_id_attr(tokenizer, attr)
         if isinstance(value, int) and value >= 0:
             return value
+    return None
+
+
+def _resolve_pad_token_id(tokenizer) -> int:
+    """Best-effort lookup of a pad token id across Megatron/HF tokenizer variants; 0 (warned once)
+    when the tokenizer has no pad or EOS id."""
+    value = _tokenizer_pad_token_id(tokenizer)
+    if value is not None:
+        return value
+    _log_once(
+        tokenizer,
+        "pad_fallback",
+        f"[SFT] WARNING: tokenizer {type(tokenizer).__name__} has no pad or EOS token id; padding "
+        "uses token id 0. Token 0 is never a loss target: the padding is loss-masked, and so is "
+        "the last token of an unpacked sample (its label would be the first pad); attention "
+        "never reads padding past a sample's end under the causal mask",
+    )
     return 0
 
 
@@ -125,16 +205,27 @@ def _resolve_bos_token_id(tokenizer) -> Optional[int]:
     caller is expected to treat that as "do not insert any inline BOS".
     """
     for attr in ("bos", "bos_token_id", "bos_id"):
-        value = getattr(tokenizer, attr, None)
+        value = _token_id_attr(tokenizer, attr)
         if isinstance(value, int) and value >= 0:
             return value
     return None
 
 
+def _warn_no_inline_eos(tokenizer) -> None:
+    """Warn (once per tokenizer class, ``_LOGGED_ONCE``) that bridge_compat_inline_bos appends no EOS."""
+    _log_once(
+        tokenizer,
+        "no_eos",
+        f"[SFT] WARNING: tokenizer {type(tokenizer).__name__} has no EOS token id, so "
+        "bridge_compat_inline_bos appends no EOS to the samples and the model is not trained "
+        "to stop. End each response with the stop token in the chat template or the data.",
+    )
+
+
 def _resolve_eos_token_id(tokenizer) -> Optional[int]:
     """Best-effort lookup of an EOS token id across Megatron/HF tokenizer variants."""
     for attr in ("eos", "eos_token_id", "eos_id", "eod"):
-        value = getattr(tokenizer, attr, None)
+        value = _token_id_attr(tokenizer, attr)
         if isinstance(value, int) and value >= 0:
             return value
     return None
@@ -193,6 +284,8 @@ def tokenize_formatted_sft_sample(
             ids_list.extend(seg_ids)
             mask_list.extend([mask_val] * len(seg_ids))
 
+        if eos_id is None and formatted_sample.segments:
+            _warn_no_inline_eos(tokenizer)
         if eos_id is not None and formatted_sample.segments:
             tail_supervised = bool(formatted_sample.segments[-1].supervise)
             ids_list.append(eos_id)
@@ -207,7 +300,16 @@ def tokenize_formatted_sft_sample(
     seq_len = len(token_ids)
     if seq_len < max_seq_length:
         pad_len = max_seq_length - seq_len
-        pad_id = _resolve_pad_token_id(tokenizer)
+        own_pad = _tokenizer_pad_token_id(tokenizer)
+        # one lookup per sample; the resolver runs only for its warn-once fallback to 0
+        pad_id = own_pad if own_pad is not None else _resolve_pad_token_id(tokenizer)
+        if seq_len > 0 and own_pad is None:
+            # Pad fallback (no pad and no EOS id): the last token's label after the shift below
+            # is the first pad, token 0, a real vocab entry. Not a target, or the model learns to
+            # emit token 0 after each response. With a real pad / EOS id that label is kept as
+            # before (an EOS / EOD pad trains the model to stop).
+            loss_mask = np.asarray(loss_mask, dtype=np.int64).copy()
+            loss_mask[seq_len - 1] = 0
         token_ids = list(token_ids) + [pad_id] * pad_len
         loss_mask = np.concatenate([loss_mask, np.zeros(pad_len, dtype=np.int64)])
 

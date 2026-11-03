@@ -1,0 +1,139 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+# Inkling (thinkingmachines/Inkling, revision 85b071f8): the text backbone
+# (`model.llm.*`) of `inkling_mm_model` and its two multi-token-prediction depths
+# (`model.mtp.*`, HF mtp_config; trained with Megatron's MTP loss). The audio /
+# vision towers are out of scope. The model is built by
+# primus/backends/megatron/core/models/inkling and its own fields live on
+# InklingTransformerConfig (`inkling_*` keys below).
+#
+# One preset: there is one released Inkling shape, so there is no separate
+# base file. Shape-tied fields: inkling_local_layer_ids names layers of the
+# 8-layer depth and inkling_logits_mup_width_multiplier (3.0) belongs to the
+# 768 width; an experiment that overrides num_layers / hidden_size must
+# override them too. (Ids >= num_layers are allowed, for truncated proxies.)
+#
+# Reference: thinkingmachines/Inkling config.json -> text_config,
+#            transformers/models/inkling/modeling_inkling.py
+###############################################################################
+
+extends:
+  - language_model.yaml
+
+# ---------- shape (thinkingmachines/Inkling text_config) ----------
+num_layers: 8
+hidden_size: 768
+ffn_hidden_size: 384  # HF intermediate_size; not read (no dense MLP layer: inkling_dense_mlp_idx = 0)
+num_attention_heads: 8
+group_query_attention: true
+num_query_groups: 2
+kv_channels: 128
+vocab_size: 201024
+max_position_embeddings: 4096
+
+# MoE (every layer; inkling_dense_mlp_idx = 0)
+num_experts: 256
+moe_router_topk: 6
+moe_ffn_hidden_size: 384
+moe_router_score_function: sigmoid  # HF gate_activation; InklingTopKRouter is always sigmoid
+moe_router_enable_expert_bias: false
+
+# Dispatch key for import_utils.get_model_provider and the Megatron trainer.
+model_type: inkling
+
+# ---------- tokenizer ----------
+# Mock-data runs force NullTokenizer (mock_data_patches.py) and keep vocab_size.
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: thinkingmachines/Inkling
+
+# ---------- norm / activation ----------
+normalization: RMSNorm
+# Upstream's dest for --norm-epsilon is `layernorm_epsilon`.
+layernorm_epsilon: 1.0e-06
+# Same value under the key language_model.yaml declares (read by tooling).
+norm_epsilon: 1.0e-06
+swiglu: true
+add_bias_linear: false
+add_qkv_bias: false
+untie_embeddings_and_output_weights: true
+hidden_dropout: 0.0
+attention_dropout: 0.0
+
+# ---------- position ----------
+# Inkling has no rotary / absolute position embedding: position enters only through the
+# learned relative logits bias (inkling_d_rel x inkling_rel_extent). InklingModel always builds
+# its embedding with position_embedding_type="none" and reads none of the three fields below
+# (nor does Inkling's FLOPs report, inkling_flops_patches.py). They stay "rope" / rotary_base
+# because generic config checks that compare a port with a Llama-layout config.json expect
+# them; the rope fusion is off so argument validation does not check fused-rope prerequisites.
+# (The converter's own args, which no such check reads, set "none".)
+position_embedding_type: rope
+rotary_base: 10000
+apply_rope_fusion: false
+
+# ---------- parallelism the model supports ----------
+# PP / VPP / EP / DP (distributed optimizer, FSDP) are supported. TP > 1 runs
+# without SP: attention is head-sharded and the MoE is replicated over TP (it is
+# Inkling-owned because Megatron's MoELayer needs SP when TP > 1). SP and CP are
+# refused by InklingModel.
+sequence_parallel: false
+transformer_impl: local
+# The routed-expert kernel is selected by enable_primus_turbo + use_turbo_grouped_gemm (both
+# true: the Primus-Turbo grouped GEMM, and InklingMoE refuses to build if Primus-Turbo does not
+# import; else a per-expert GEMM loop, same math, slower). moe_grouped_gemm does not select
+# it, and InklingMoE does not read it. Megatron requires it only to allow 'moe_act' in
+# recompute_modules (which acts on the Turbo path only); set it to true together with moe_act.
+moe_grouped_gemm: false
+moe_router_load_balancing_type: none
+moe_aux_loss_coeff: 0.0
+# moe_token_dispatcher_type is not read: InklingMoE does its own EP all-gather / reduce-scatter
+
+# ---------- Inkling-only fields (InklingTransformerConfig) ----------
+inkling_d_rel: 16
+inkling_rel_extent: 1024
+inkling_sliding_window: 512
+inkling_local_layer_ids: [0, 2, 4, 6]
+inkling_swa_num_attention_heads: 8
+inkling_swa_num_query_groups: 4
+inkling_swa_kv_channels: 128
+inkling_log_scaling_n_floor: 128000.0
+inkling_log_scaling_alpha: 0.1
+inkling_sconv_kernel_size: 4
+# Kernels (numerically close to the eager reference, not bit-identical): the short convs run
+# Dao's fused causal_conv1d_fn when it imports (auto; eager: fp32 F.conv1d), attention runs the eager query-blocked path
+# (fused: a Triton flash-attention with the relative bias in-kernel, no [s, s] buffer).
+inkling_sconv_impl: auto
+inkling_attention_impl: eager
+# The shared experts are Inkling's own (InklingMoE): moe_shared_expert_intermediate_size stays
+# unset (InklingMoE refuses it), so generic tooling that reads that field (memory / perf
+# projection, Megatron's own FLOPs formula) sees no shared experts. The Inkling FLOPs patch
+# (inkling_flops_patches.py) counts them.
+inkling_num_shared_experts: 2
+inkling_route_scale: 8.0
+inkling_dense_mlp_idx: 0
+inkling_use_embed_norm: true
+inkling_logits_mup_width_multiplier: 3.0
+inkling_unpadded_vocab_size: 200058
+# Labels >= inkling_unpadded_vocab_size that loss_mask does not mask raise, except this one id
+# (scores 0). The builder sets it to the EOD id for NullTokenizer mock data only.
+inkling_ignored_label_id: null
+
+# ---------- multi-token prediction (HF mtp_config) ----------
+# Each depth: input_proj(cat(hidden_norm(h), embed_norm(main embed_norm(embed(tok))))), one
+# Inkling block with a dense SwiGLU MLP (HF dense_intermediate_size, learned global_scale), then
+# (h / inkling_logits_mup_width_multiplier) @ the shared unembed. Depth ids in
+# inkling_mtp_local_layer_ids use sliding attention with the MTP window (inkling_mtp_local_extent,
+# null = inkling_sliding_window) and heads (null = inkling_swa_num_attention_heads); the
+# others are global. Set mtp_num_layers: null to train without MTP.
+mtp_num_layers: 2
+mtp_loss_scaling_factor: 0.1
+inkling_dense_intermediate_size: 3072
+inkling_dense_use_global_scale: true
+inkling_mtp_local_layer_ids: [1]
+inkling_mtp_local_extent: null
+inkling_mtp_swa_num_attention_heads: null
+inkling_mtp_chain_hidden_post_norm: false
+inkling_init_seed: 1234  # = INKLING_DEFAULT_INIT_SEED (inkling_transformer_config.py)

@@ -86,7 +86,7 @@ class TestMegatronPretrainTrainerOverridableMethods:
 
         model_provider = object()
         monkeypatch.setattr(
-            "primus.core.utils.import_utils.get_model_provider",
+            "primus.backends.megatron.megatron_pretrain_trainer.get_model_provider",
             lambda *args, **kwargs: model_provider,
         )
 

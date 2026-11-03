@@ -694,7 +694,78 @@ def _model_provider_branches(repo_root: Path, backend: str) -> tuple[str | None,
                 arg = call.args[0] if call.args else None
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                     branches[right.value] = arg.value
+    # A table-driven dispatch: a module-level ``{"<value>": Entry("<module>", ...)}`` dict (a call
+    # or a tuple whose first element is the module path) that the function subscripts with the
+    # discriminator (``TABLE[model_type]``), as Primus' _PRIMUS_MODEL_PROVIDERS.
+    for table, module in _dispatch_tables(tree, func, key).items():
+        branches.setdefault(table, module)
     return default, branches, str(src)
+
+
+def _dispatch_tables(tree: ast.Module, func: ast.FunctionDef, key: str) -> dict[str, str]:
+    """``{value: module}`` from every module-level dict that ``func`` indexes with ``key``.
+
+    Read: ``TABLE[key]`` and ``TABLE.get(key, ...)``; a table assigned at module level, also
+    inside a module-level ``if`` / ``try`` and with an annotation (``TABLE: dict = {...}``); an
+    entry whose value is a string, a tuple / list whose first item is one, or a call whose
+    ``module=`` keyword (else first positional argument) is one. A dict is taken as a table only
+    when ``func`` indexes it with ``key``, and only its string-valued entries are read: a dict of
+    other values indexed by the model type adds no scope, and a scope it did add only selects which
+    config class a model type's fields are checked against. A table imported from another module
+    is not followed (the dispatch would then read no table: keep the table next to the function,
+    as ``_PRIMUS_MODEL_PROVIDERS`` is)."""
+
+    def is_key(node):
+        return isinstance(node, ast.Name) and node.id == key
+
+    indexed = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and is_key(node.slice):
+            indexed.add(node.value.id)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.args
+            and is_key(node.args[0])
+        ):
+            indexed.add(node.func.value.id)
+
+    def module_statements(body):
+        for stmt in body:
+            yield stmt
+            if isinstance(stmt, ast.If):
+                yield from module_statements(stmt.body + stmt.orelse)
+            elif isinstance(stmt, ast.Try):
+                yield from module_statements(
+                    stmt.body + [s for h in stmt.handlers for s in h.body] + stmt.orelse + stmt.finalbody
+                )
+
+    def entry_module(v):
+        first = v
+        if isinstance(v, (ast.Tuple, ast.List)):
+            first = v.elts[0] if v.elts else None
+        elif isinstance(v, ast.Call):
+            # the module= keyword wins; else the first positional argument
+            first = next((kw.value for kw in v.keywords if kw.arg == "module"), None)
+            if first is None and v.args:
+                first = v.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            return first.value
+        return None
+
+    out: dict[str, str] = {}
+    for stmt in module_statements(tree.body):
+        target = stmt.targets[0] if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 else None
+        if isinstance(stmt, ast.AnnAssign):
+            target = stmt.target
+        if not (isinstance(target, ast.Name) and target.id in indexed and isinstance(stmt.value, ast.Dict)):
+            continue
+        for k, v in zip(stmt.value.keys, stmt.value.values):
+            if isinstance(k, ast.Constant) and isinstance(k.value, str) and (module := entry_module(v)):
+                out.setdefault(k.value, module)
+    return out
 
 
 def _config_class_of_module(repo_root: Path, module: str) -> str | None:

@@ -64,6 +64,7 @@ from primus.backends.megatron.sft.formatters import create_formatter
 from primus.backends.megatron.sft.preprocessing import (
     _resolve_eos_token_id,
     _resolve_pad_token_id,
+    _warn_no_inline_eos,
     log_rank_0,
     normalize_sft_sample,
     tokenize_text,
@@ -199,6 +200,8 @@ def _tokenize_no_pad(
         token_ids.extend(seg_ids)
         loss_mask_list.extend([mask_val] * len(seg_ids))
 
+    if eos_id is None and formatted_sample.segments:
+        _warn_no_inline_eos(tokenizer)
     if eos_id is not None and formatted_sample.segments:
         tail_supervised = bool(formatted_sample.segments[-1].supervise)
         token_ids.append(eos_id)
@@ -563,6 +566,9 @@ class PackedSFTDataset(Dataset):
                 "(BOS inside the prompt is OOD for Llama-2) and exists only for "
                 "Bridge A/B comparisons."
             )
+            if _resolve_eos_token_id(tokenizer) is None:
+                # here, not only per sample: a warm pack cache tokenizes nothing
+                _warn_no_inline_eos(tokenizer)
 
         cache_disabled = os.environ.get("PRIMUS_DISABLE_PACK_CACHE", "0") not in ("0", "", "false", "False")
         if cache_disabled:
