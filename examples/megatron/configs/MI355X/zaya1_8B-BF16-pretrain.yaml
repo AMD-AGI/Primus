@@ -48,8 +48,14 @@ modules:
       context_parallel_size: 1
       expert_model_parallel_size: 1
       sequence_parallel: false
-      overlap_grad_reduce: false
-      overlap_param_gather: false
+      # Overlap the gradient reduce-scatter with the backward and the
+      # parameter all-gather with the next forward. Before each bucket's
+      # reduce-scatter, Megatron checks its gradients for NaN and Inf with two
+      # host syncs, so with the default 40M-parameter buckets (190 here)
+      # overlap is slower than none. 1e9-parameter buckets make 9.
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      ddp_bucket_size: 1000000000
       gradient_accumulation_fusion: false
 
       # Transformer Engine's fused cross-entropy works on the BF16 logits in
