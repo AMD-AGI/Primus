@@ -57,11 +57,11 @@ def _fp8_requested(config) -> bool:
 
 
 def _align_fp8_leading(hidden: torch.Tensor):
-    """Pad the token axis so the leading-dimension product is a multiple of 8."""
+    """Pad the token axis so the leading-dimension product is a nonzero multiple of 8."""
     leading = 1
     for size in hidden.shape[:-1]:
         leading *= int(size)
-    pad = (8 - leading % 8) % 8
+    pad = (8 - leading % 8) % 8 if leading else 8
     if pad == 0:
         return hidden, None
     flat = hidden.reshape(leading, hidden.shape[-1])
@@ -456,6 +456,24 @@ def _allreduce_dp(tensor: torch.Tensor) -> None:
     torch.distributed.all_reduce(tensor, group=group)
 
 
+class _PermuteRows(torch.autograd.Function):
+    """``x.index_select(0, index)`` for a permutation ``index`` whose inverse is ``inverse``.
+
+    The backward gathers with the inverse instead of scatter-adding into zeros,
+    so neither direction needs atomics.
+    """
+
+    @staticmethod
+    def forward(ctx, x, index, inverse):
+        ctx.save_for_backward(inverse)
+        return x.index_select(0, index)
+
+    @staticmethod
+    def backward(ctx, grad):
+        (inverse,) = ctx.saved_tensors
+        return grad.index_select(0, inverse), None, None
+
+
 class ZayaMoE(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
@@ -473,23 +491,22 @@ class ZayaMoE(nn.Module):
         probs, index, next_router = self.router(hidden_states, prev_router)
         # Top-1 is the released configuration. The mix weight is the unbiased
         # gathered probability.
-        prob = probs[..., 0]
-        idx = index[..., 0]
         flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-        flat_idx = idx.reshape(-1)
-        flat_prob = prob.reshape(-1, 1).to(dtype=flat.dtype)
-        out = flat.new_zeros(flat.shape)
-        for expert_id, expert in enumerate(self.local_experts):
-            chosen = flat_idx == expert_id
-            if not torch.any(chosen):
-                continue
-            out[chosen] = expert(flat[chosen]) * flat_prob[chosen]
-        if self.router.use_mod:
-            skip = flat_idx == self.num_real_experts
-            if torch.any(skip):
-                out[skip] = flat[skip] * flat_prob[skip]
-        out = out.view_as(hidden_states)
-        return out, next_router
+        flat_idx = index[..., 0].reshape(-1)
+        flat_prob = probs[..., 0].reshape(-1, 1).to(dtype=flat.dtype)
+        # Group the tokens by route, keeping their order within a route, so each
+        # expert reads one contiguous slice. The slice sizes are the stage's only
+        # device-to-host copy. The skip class sorts last and passes through.
+        order = torch.argsort(flat_idx, stable=True)
+        inverse = torch.argsort(order)
+        sizes = torch.bincount(flat_idx, minlength=self.router.num_scored).tolist()
+        routed = _PermuteRows.apply(flat, order, inverse).split(sizes)
+        # Every expert runs, on an empty slice too, so every expert weight gets a
+        # gradient each step; overlap_grad_reduce waits for all of them.
+        outputs = [expert(tokens) for expert, tokens in zip(self.local_experts, routed)]
+        outputs.extend(routed[self.num_real_experts :])
+        out = _PermuteRows.apply(torch.cat(outputs), inverse, order) * flat_prob
+        return out.view_as(hidden_states), next_router
 
 
 class ZayaStage(nn.Module):
