@@ -30,7 +30,10 @@ reach without duplicating the entire (large, version-sensitive) method.
 """
 
 from primus.backends.megatron.patches._patch_guard import is_patched, mark_patched
-from primus.backends.megatron.patches._source_patch_utils import patch_method_source
+from primus.backends.megatron.patches._source_patch_utils import (
+    find_source_owner,
+    patch_method_source,
+)
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -112,18 +115,30 @@ def _fused_cross_entropy_loss(self, hidden_states, labels, output_weight, runtim
 def _install_mamba_fused_ce_patch() -> None:
     from megatron.core.models.mamba.mamba_model import MambaModel
 
-    if is_patched(MambaModel, _PATCH_KEY):
-        log_rank_0(f"[Patch:{_PATCH_KEY}] MambaModel already patched; skipping.")
+    # Megatron-core 0.19+ moved both method bodies into HybridModel (MambaModel is a thin
+    # subclass); rewrite whichever class defines them.
+    init_owner = find_source_owner(MambaModel, "__init__", _INIT_ORI)
+    forward_owner = find_source_owner(MambaModel, "forward", _FORWARD_ORI)
+
+    if is_patched(forward_owner, _PATCH_KEY):
+        log_rank_0(f"[Patch:{_PATCH_KEY}] {forward_owner.__name__} already patched; skipping.")
         return
 
-    patch_method_source(MambaModel, "__init__", _INIT_ORI, _INIT_NEW)
-    patch_method_source(MambaModel, "forward", _FORWARD_ORI, _FORWARD_NEW)
-    MambaModel._fused_cross_entropy_loss = _fused_cross_entropy_loss
+    original_init = init_owner.__dict__["__init__"]
+    patch_method_source(init_owner, "__init__", _INIT_ORI, _INIT_NEW)
+    try:
+        patch_method_source(forward_owner, "forward", _FORWARD_ORI, _FORWARD_NEW)
+    except Exception:
+        # __init__ alone would set flags that only the patched forward reads.
+        init_owner.__init__ = original_init
+        raise
+    forward_owner._fused_cross_entropy_loss = _fused_cross_entropy_loss
 
-    mark_patched(MambaModel, _PATCH_KEY)
+    mark_patched(forward_owner, _PATCH_KEY)
     log_rank_0(
-        f"[Patch:{_PATCH_KEY}] Patched MambaModel.__init__/forward to route through "
-        "FLA's fused cross-entropy kernels when fused_ce_mode != 0."
+        f"[Patch:{_PATCH_KEY}] Patched {init_owner.__name__}.__init__ / "
+        f"{forward_owner.__name__}.forward to route through FLA's fused cross-entropy "
+        "kernels when fused_ce_mode != 0."
     )
 
 

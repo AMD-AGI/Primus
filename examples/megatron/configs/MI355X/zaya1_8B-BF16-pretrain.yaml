@@ -17,17 +17,17 @@ modules:
       log_avg_skip_iterations: 1
       log_avg_reset_interval: 10
 
-      # 30-step mock-data run for one 8-GPU node (DP=8). Same batch as the
-      # MI300X recipe, which peaks at 181 GB per GPU there. It has not been run
-      # on MI355X; the 288 GB per GPU leaves headroom. Each sample costs about
-      # 0.8 GB, mostly fp32 logits over the 262k vocabulary. On fewer GPUs,
-      # lower micro_batch_size or num_layers (keep it even). Do not edit the
-      # model yaml to shrink the architecture.
+      # 30-step mock-data run for one 8-GPU node (DP=8). micro_batch_size 248
+      # is the largest multiple of 8 that completes on MI355X with
+      # rocm/primus:v26.8: it peaks at 282 of 288 GB per GPU, and 256 runs out
+      # of memory. Each sample costs about 0.8 GB, mostly fp32 logits over the
+      # 262k vocabulary. On fewer GPUs, lower micro_batch_size or num_layers
+      # (keep it even). Do not edit the model yaml to shrink the architecture.
       train_iters: 30
-      micro_batch_size: 128
+      micro_batch_size: 248
       # One micro batch per GPU per step at DP=8.
       # Must be divisible by micro_batch_size * data_parallel_size.
-      global_batch_size: 1024
+      global_batch_size: 1984
       seq_length: 128
       max_position_embeddings: 4096
 

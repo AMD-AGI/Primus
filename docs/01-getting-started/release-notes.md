@@ -231,7 +231,7 @@ capability.
 
 ##### New features
 
-- **DeepSeek-V4 on gfx942 at long context.** V4 upstream targeted gfx950 and in practice only ran at `seq_length=4096`; it now trains on MI308X/CDNA3 with context parallelism at 128k, full model ([#1047](https://github.com/AMD-AGI/Primus/pull/1047)).
+- **DeepSeek-V4 on gfx942 at long context.** V4 upstream targeted gfx950 and in practice only ran at `seq_length=4096`; it now trains on CDNA3 with context parallelism at 128k, full model ([#1047](https://github.com/AMD-AGI/Primus/pull/1047)).
 - **Packed-sequence (THD) SFT for DeepSeek-V4** — many samples per window delimited by `cu_seqlens`, with attention isolated so no query sees another sample; full model at 4k and 128k across three nodes ([#1062](https://github.com/AMD-AGI/Primus/pull/1062)).
 - **DLRM-v4 (TorchRec/HSTU) projection workload** with first-principles MI350X calibration ([#1059](https://github.com/AMD-AGI/Primus/pull/1059)).
 - **MLPerf Llama 3.1 8B launcher** and refreshed MI355X benchmark configs ([#1012](https://github.com/AMD-AGI/Primus/pull/1012)).
