@@ -513,8 +513,7 @@ class WeightDeOscRunner:
             # Align complete logical 32-column tiles in the persistent state.
             # Padding is allocated once; shapes and checkpoint values stay unchanged.
             padding = [start % 32 if self.config.state_slabs else 0 for _, _, start in shards]
-            sizes = [(main.numel() + pad + 255) // 256 * 256
-                     for (_, main, _), pad in zip(shards, padding)]
+            sizes = [(main.numel() + pad + 255) // 256 * 256 for (_, main, _), pad in zip(shards, padding)]
             total = sum(sizes)
             if self.config.state_slabs:
                 snaps = torch.empty(2 * total, dtype=_SNAP_DTYPE, device=device)
@@ -529,7 +528,9 @@ class WeightDeOscRunner:
                     state.prev = snaps[view_offset : view_offset + n].view(main.shape)
                     state.prev_q = snaps[total + view_offset : total + view_offset + n].view(main.shape)
                     state.dist_w = distances[view_offset : view_offset + n].view(main.shape)
-                    state.dist_w_qdq = distances[total + view_offset : total + view_offset + n].view(main.shape)
+                    state.dist_w_qdq = distances[total + view_offset : total + view_offset + n].view(
+                        main.shape
+                    )
                 else:
                     state.prev = torch.empty_like(main, dtype=_SNAP_DTYPE)
                     state.prev_q = torch.empty_like(main, dtype=_SNAP_DTYPE)
