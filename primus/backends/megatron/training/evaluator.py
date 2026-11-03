@@ -29,10 +29,22 @@ def primus_evaluate(
     verbose=True,
     non_loss_data_func=None,
     eval_iters=None,
+    pg_collection=None,
+    p2p_communicator=None,
+    callback_manager=None,
+    is_test=False,
 ):
     """Evaluation."""
     args = get_args()
     timers = get_timers()
+    # Megatron-core 0.19+ pass the process groups; Megatron-LM main also passes callbacks.
+    schedule_kwargs = {}
+    if pg_collection is not None:
+        schedule_kwargs["pg_collection"] = pg_collection
+    if p2p_communicator is not None:
+        schedule_kwargs["p2p_communicator"] = p2p_communicator
+    step_start_event = "on_test_step_start" if is_test else "on_eval_step_start"
+    step_end_event = "on_test_step_end" if is_test else "on_eval_step_end"
 
     timers("evaluate", log_level=0).start(barrier=True)
 
@@ -55,8 +67,9 @@ def primus_evaluate(
     total_loss_denominators = {}
 
     # make validation batch size independent from training batch size
-    eval_batch_size = args.global_batch_size
-    eval_num_microbatches = eval_batch_size // (args.micro_batch_size * args.data_parallel_size)
+    eval_batch_size = getattr(args, "eval_global_batch_size", None) or args.global_batch_size
+    eval_micro_batch_size = getattr(args, "eval_micro_batch_size", None) or args.micro_batch_size
+    eval_num_microbatches = eval_batch_size // (eval_micro_batch_size * args.data_parallel_size)
     forward_backward_func = get_forward_backward_func()
     if args.enable_cuda_graph and args.cuda_graph_scope == "full_iteration":
         forward_backward_func = FullCudaGraphWrapper(
@@ -78,16 +91,21 @@ def primus_evaluate(
             # Don't care about timing during evaluation
             config.timers = None
             ft_integration.on_eval_step_start()
+            if callback_manager is not None:
+                callback_manager.trigger(step_start_event)
             loss_dicts = forward_backward_func(
                 forward_step_func=forward_step_func,
                 data_iterator=data_iterator,
                 model=model,
                 num_microbatches=eval_num_microbatches,
                 seq_length=args.seq_length,
-                micro_batch_size=args.micro_batch_size,
+                micro_batch_size=eval_micro_batch_size,
                 decoder_seq_length=args.decoder_seq_length,
                 forward_only=True,
+                **schedule_kwargs,
             )
+            if callback_manager is not None:
+                callback_manager.trigger(step_end_event)
             ft_integration.on_eval_step_end()
             config.timers = get_timers()
 
@@ -194,6 +212,7 @@ def primus_evaluate(
                 decoder_seq_length=args.decoder_seq_length,
                 forward_only=True,
                 collect_non_loss_data=True,
+                **schedule_kwargs,
             )
 
     # Move model back to the train mode.

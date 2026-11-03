@@ -1,0 +1,65 @@
+# Primus experiment — Ideogram-4 text-to-image pretrain on the DDP path, ZeRO-1.
+# =============================================================================
+# ideogram4-pretrain.yaml on the DDP path: parameters and gradients replicated,
+# no per-layer all-gather, and the optimizer state sharded by ZeRO-1
+# (`primus_ideogram4.zero1` below; turn it off for the pure-DDP baseline). ZeRO-1
+# is exercised on a single node only.
+#
+# torch.compile is FSDP2-only, so this trails FSDP2 with compile on a single node;
+# it is the multi-node lever, and this single-node run is a correctness exercise
+# of it rather than the recommended single-node setup. Setup is the same as
+# ideogram4-pretrain.yaml.
+#
+# A ZeRO-1 run cannot save or resume: there is no consolidated optimizer save on
+# this path, so checkpoint.enabled must stay false while zero1 is on.
+#
+# LAUNCH (inside the Primus container, 8 GPUs):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/automodel/configs/MI355X/diffusion/ideogram4-pretrain-ddp.yaml \
+#       model.pretrained_model_name_or_path=<config_dir>
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:ideogram4-pretrain-ddp}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: automodel
+    config: ideogram4_ddp_pre_trainer.yaml
+    model: ideogram4.yaml
+
+    overrides:
+      primus_ideogram4:
+        zero1: true
+      step_scheduler:
+        max_steps: 20
+        local_batch_size: 2
+        # Sized for 8 ranks: 2 x 8, so no gradient accumulation. It is not derived
+        # from the rank count; it must be a multiple of local_batch_size x ranks or
+        # the run stops at startup, so on N nodes set it to 16 x N, and num_samples
+        # to at least that. A larger multiple accumulates gradients, correctly, but
+        # DDP then all-reduces every micro-batch.
+        global_batch_size: 16
+        log_remote_every_steps: 1
+      optimizer:
+        lr: 1.0e-4
+      ddp:
+        activation_checkpointing: true
+      model:
+        # Pure bf16: parameters, gradients and AdamW state are all bf16, with no
+        # float32 master copy, to keep replicated DDP memory down. Not like-for-like
+        # with ideogram4-pretrain.yaml, which keeps float32 parameters and computes
+        # in bf16; drop this override for that.
+        torch_dtype: bfloat16
+      data:
+        dataloader:
+          num_samples: 64
+          grid_h: 16
+          grid_w: 16
+          # A fixed caption length, so every packed sequence has one shape.
+          max_text_tokens: 128
+          min_text_tokens: 128
+      checkpoint:
+        enabled: false           # ZeRO-1 refuses checkpointing; turn primus_ideogram4.zero1 off to save

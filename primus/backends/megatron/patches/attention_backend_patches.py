@@ -54,11 +54,6 @@ def patch_attention_backend(ctx: PatchContext):
     )
     from megatron.core.transformer.enums import AttnBackend
 
-    if getattr(LanguageModule, "_primus_attention_backend_patched", False):
-        return
-
-    original_set_attention_backend = LanguageModule._set_attention_backend
-
     # (NVTE_FLASH_ATTN, NVTE_FUSED_ATTN, NVTE_UNFUSED_ATTN) for each explicit backend.
     explicit_envs = {
         AttnBackend.flash: ("1", "0", "0"),
@@ -67,21 +62,55 @@ def patch_attention_backend(ctx: PatchContext):
         AttnBackend.local: ("0", "0", "0"),
     }
 
-    def _set_attention_backend(self):
-        backend = self.config.attention_backend
+    def _apply_rocm_envs(backend) -> bool:
+        """Set the NVTE_*_ATTN vars for ``backend``; return True for ``auto`` (fully handled)."""
+        if isinstance(backend, str):
+            backend = AttnBackend[backend]
         if backend == AttnBackend.auto:
             for name in _NVTE_ATTN_ENVS:
                 os.environ.setdefault(name, "1")
-            return
-        values = explicit_envs.get(backend)
-        if values is None:
-            original_set_attention_backend(self)
-            return
-        for name, value in zip(_NVTE_ATTN_ENVS, values):
+            return True
+        for name, value in zip(_NVTE_ATTN_ENVS, explicit_envs.get(backend, ())):
             os.environ[name] = value
+        return False
 
-    LanguageModule._set_attention_backend = _set_attention_backend
-    LanguageModule._primus_attention_backend_patched = True
+    if hasattr(LanguageModule, "_set_attention_backend"):
+        if getattr(LanguageModule, "_primus_attention_backend_patched", False):
+            return
+        original_set_attention_backend = LanguageModule._set_attention_backend
+
+        def _set_attention_backend(self):
+            backend = self.config.attention_backend
+            if backend == AttnBackend.auto or backend in explicit_envs:
+                _apply_rocm_envs(backend)
+                return
+            original_set_attention_backend(self)
+
+        LanguageModule._set_attention_backend = _set_attention_backend
+        LanguageModule._primus_attention_backend_patched = True
+    else:
+        # Megatron-LM main: a free function in transformer.utils, imported by name into
+        # language_module / vision_module. Explicit backends pre-set the vars it asserts
+        # on and still run it (flash_attention_version, batch-invariant checks).
+        import sys
+
+        import megatron.core.transformer.utils as transformer_utils
+
+        original_fn = transformer_utils.set_attention_backend
+        if getattr(original_fn, "_primus_attention_backend_patched", False):
+            return
+
+        def set_attention_backend(config):
+            if _apply_rocm_envs(config.attention_backend):
+                return
+            original_fn(config)
+
+        set_attention_backend._primus_attention_backend_patched = True
+        transformer_utils.set_attention_backend = set_attention_backend
+        for module in list(sys.modules.values()):
+            if getattr(module, "__dict__", {}).get("set_attention_backend") is original_fn:
+                module.set_attention_backend = set_attention_backend
+
     log_rank_0(
         "[Patch:megatron.attention_backend.rocm_safe] attention_backend now overrides baked NVTE_*_ATTN"
     )

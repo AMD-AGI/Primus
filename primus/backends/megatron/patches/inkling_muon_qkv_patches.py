@@ -91,7 +91,7 @@ def make_orthogonalize(original_orthogonalize):
 
 
 def make_muon_factory(original_factory):
-    """Wrap ``get_megatron_muon_optimizer`` to tag parameters before and master weights after."""
+    """Wrap the Muon optimizer factory to tag parameters before and master weights after."""
 
     def get_megatron_muon_optimizer(config, model_chunks, *args, **kwargs):
         tagged: dict = {}
@@ -130,18 +130,26 @@ def make_muon_factory(original_factory):
     ),
 )
 def patch_inkling_muon_qkv(ctx: PatchContext):
-    import megatron.core.optimizer.muon as muon_module
-    from megatron.core.optimizer.muon import TensorParallelMuon
+    try:
+        import megatron.core.optimizer.muon as factory_module
+        from megatron.core.optimizer.muon import TensorParallelMuon
+
+        factory_name = "get_megatron_muon_optimizer"
+    except ImportError:  # Megatron-core 0.19 builds Muon through get_megatron_optimizer
+        import megatron.core.optimizer as factory_module
+        from megatron.core.optimizer.emerging_optimizers import TensorParallelMuon
+
+        factory_name = "get_megatron_optimizer"
 
     if getattr(TensorParallelMuon.orthogonalize, "_primus_inkling_qkv", False):
         return
     TensorParallelMuon.orthogonalize = make_orthogonalize(TensorParallelMuon.orthogonalize)
 
-    factory = make_muon_factory(muon_module.get_megatron_muon_optimizer)
-    muon_module.get_megatron_muon_optimizer = factory
+    factory = make_muon_factory(getattr(factory_module, factory_name))
+    setattr(factory_module, factory_name, factory)
     # training.py binds the factory at import time, so rebind it there as well.
     from megatron.training import training as megatron_training
 
-    if hasattr(megatron_training, "get_megatron_muon_optimizer"):
-        megatron_training.get_megatron_muon_optimizer = factory
-    log_rank_0(f"{_LOG_PREFIX} installed")
+    if hasattr(megatron_training, factory_name):
+        setattr(megatron_training, factory_name, factory)
+    log_rank_0(f"{_LOG_PREFIX} installed on {factory_name}")

@@ -57,6 +57,9 @@ def _config(**overrides):
         sparse_init_block=0,
         use_gemma_norm=False,
         minimax_sparse_attention=False,  # skip the swigluoai/quick_geglu requirement
+        # Matches minimax_m3.yaml; the specs fill q/k_layernorm, which Megatron-LM main
+        # rejects unless qk_layernorm is on.
+        qk_layernorm=True,
     )
     return MSATransformerConfig(**{**base, **overrides})
 
@@ -369,6 +372,7 @@ def _msa_config(**overrides):
         activation_func=quick_gelu,
         gated_linear_unit=True,
         sparse_num_index_heads=N_INDEX,
+        qk_layernorm=True,  # as in minimax_m3.yaml; see _config
     )
     return MSATransformerConfig(**{**base, **overrides})
 
@@ -584,14 +588,27 @@ class TestMinimaxSparseAttentionModule:
             MSA_INDEXER_LOSS_NAME,
         )
 
+        try:
+            from megatron.core.transformer.moe.moe_utils import get_moe_metrics_tracker
+        except ImportError:  # older Megatron: the legacy dict is the tracker itself
+            get_moe_metrics_tracker = None
+
+        def clear():
+            if get_moe_metrics_tracker is not None:
+                get_moe_metrics_tracker().clear()
+            else:
+                get_moe_layer_wise_logging_tracker().pop(MSA_INDEXER_LOSS_NAME, None)
+
         config, attention = self._build(sparse_indexer_loss_coeff=1.0e-2)
         attention.train()
-        tracker = get_moe_layer_wise_logging_tracker()
-        tracker.pop(MSA_INDEXER_LOSS_NAME, None)
+        clear()
 
         attention(torch.randn(SQ, 2, config.hidden_size, device="cuda"))
 
-        values = tracker.pop(MSA_INDEXER_LOSS_NAME)["values"]
+        # Megatron-LM main returns a fresh view on every call, over tensors that clear()
+        # zeroes in place.
+        values = get_moe_layer_wise_logging_tracker()[MSA_INDEXER_LOSS_NAME]["values"].clone()
+        clear()
         assert values.shape == (config.num_layers,)
         # layer_number=1 writes slot 0 and nothing else.
         assert values[0] > 0
