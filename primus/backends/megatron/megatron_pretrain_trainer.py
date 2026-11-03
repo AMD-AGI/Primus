@@ -4,8 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import importlib
-
 from primus.backends.megatron.megatron_base_trainer import MegatronBaseTrainer
 from primus.core.utils.module_utils import log_rank_0
 
@@ -154,12 +152,12 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             get_model_family,
         )
 
-        training = get_model_family(model_type).training
-        if training == GPT_TRAINING:
+        family = get_model_family(model_type)
+        if family.training == GPT_TRAINING:
             return self.get_forward_step(), self.get_datasets_provider()
 
-        entrypoint = importlib.import_module(training)
-        log_rank_0(f"Using forward_step and datasets provider from {training}")
+        entrypoint = family.training_entrypoint()
+        log_rank_0(f"Using forward_step and datasets provider from {entrypoint.__name__}")
         provider = entrypoint.train_valid_test_datasets_provider
         # Every upstream pretrain entrypoint sets `is_distributed = True` inside
         # `if __name__ == "__main__":` (pretrain_gpt.py:333), which never runs when

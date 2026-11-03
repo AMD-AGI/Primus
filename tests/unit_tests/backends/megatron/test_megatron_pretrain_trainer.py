@@ -187,9 +187,20 @@ class TestMegatronPretrainTrainer:
         assert args[3] == "FORWARD_STEP"
         assert kwargs == {"store": "STORE"}
 
+    @pytest.mark.parametrize(
+        ("trains", "forwarder"),
+        [
+            # Megatron-core 0.19+: pretrain_mamba.py only forwards to pretrain_hybrid.py.
+            ("pretrain_hybrid", "pretrain_mamba"),
+            # Older Megatron-LM: no pretrain_hybrid.
+            ("pretrain_mamba", "pretrain_hybrid"),
+        ],
+    )
     def test_non_gpt_family_takes_components_from_its_entrypoint_marked_distributed(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        trains,
+        forwarder,
     ):
         trainer = _build_trainer(monkeypatch)
 
@@ -199,16 +210,28 @@ class TestMegatronPretrainTrainer:
         def train_valid_test_datasets_provider():
             pass
 
-        entrypoint = types.ModuleType("pretrain_mamba")
+        entrypoint = types.ModuleType(trains)
         entrypoint.forward_step = forward_step
         entrypoint.train_valid_test_datasets_provider = train_valid_test_datasets_provider
-        monkeypatch.setitem(sys.modules, "pretrain_mamba", entrypoint)
+        monkeypatch.setitem(sys.modules, trains, entrypoint)
+        if forwarder == "pretrain_mamba":
+            monkeypatch.setitem(sys.modules, forwarder, types.ModuleType(forwarder))
+        else:
+            monkeypatch.setitem(sys.modules, forwarder, None)
         monkeypatch.setattr(trainer, "get_forward_step", lambda: pytest.fail("mamba trains like GPT"))
 
         components = trainer._get_training_components("mamba")
 
         assert components == (forward_step, train_valid_test_datasets_provider)
         assert train_valid_test_datasets_provider.is_distributed is True
+
+    def test_missing_training_entrypoint_names_every_candidate(self, monkeypatch: pytest.MonkeyPatch):
+        trainer = _build_trainer(monkeypatch)
+        monkeypatch.setitem(sys.modules, "pretrain_hybrid", None)
+        monkeypatch.setitem(sys.modules, "pretrain_mamba", types.ModuleType("pretrain_mamba"))
+
+        with pytest.raises(ImportError, match=r"pretrain_hybrid: .*; pretrain_mamba: no forward_step"):
+            trainer._get_training_components("mamba")
 
     @pytest.mark.parametrize("model_type", ["gpt", "kimi_k3", "inkling", "diffusion_model", None])
     def test_gpt_trained_families_use_the_overridable_components(

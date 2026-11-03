@@ -239,15 +239,15 @@ def test_get_model_provider_rejects_an_unregistered_model_type(quiet, model_type
 
 
 @pytest.mark.parametrize(
-    ("model_type", "entrypoint", "builder_module", "builder_name"),
+    ("model_type", "entrypoints", "builder_module", "builder_name"),
     [
-        ("gpt", "pretrain_gpt", "gpt_builders", "gpt_builder"),
-        ("mamba", "pretrain_mamba", "mamba_builders", "mamba_builder"),
-        (None, "pretrain_gpt", "gpt_builders", "gpt_builder"),
+        ("gpt", ("pretrain_gpt",), "gpt_builders", "gpt_builder"),
+        ("mamba", ("pretrain_hybrid", "pretrain_mamba"), "mamba_builders", "mamba_builder"),
+        (None, ("pretrain_gpt",), "gpt_builders", "gpt_builder"),
     ],
 )
 def test_upstream_family_resolves_across_megatron_versions(
-    quiet, monkeypatch, model_type, entrypoint, builder_module, builder_name
+    quiet, monkeypatch, model_type, entrypoints, builder_module, builder_name
 ):
     from primus.core.utils import import_utils
 
@@ -262,7 +262,7 @@ def test_upstream_family_resolves_across_megatron_versions(
 
     provider = import_utils.get_model_provider(model_type=model_type)
 
-    assert calls == [(("model_provider", entrypoint), "model_provider"), ((builder_module,), builder_name)]
+    assert calls == [(("model_provider", *entrypoints), "model_provider"), ((builder_module,), builder_name)]
     assert provider.func is resolved["model_provider"]
     assert provider.args == (resolved[builder_name],)
 

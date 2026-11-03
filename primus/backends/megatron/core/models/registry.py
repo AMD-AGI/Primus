@@ -39,7 +39,8 @@ class ModelFamily:
 
     Module paths are relative to ``package`` when it is set. ``training`` is
     the upstream entry point providing ``forward_step`` and
-    ``train_valid_test_datasets_provider``.
+    ``train_valid_test_datasets_provider``; ``legacy_training`` is its name on
+    older Megatron-LM, tried when ``training`` is missing or does not provide them.
     """
 
     package: str = ""
@@ -51,6 +52,7 @@ class ModelFamily:
     model_kwargs: str = ""
     check_model: str = ""
     training: str = GPT_TRAINING
+    legacy_training: str = ""
 
     def resolve(self, ref: str) -> Any:
         module, _, attr = ref.partition(":")
@@ -58,10 +60,33 @@ class ModelFamily:
             module = f"{self.package}.{module}"
         return getattr(importlib.import_module(module), attr)
 
+    @property
+    def training_modules(self) -> tuple:
+        return tuple(name for name in (self.training, self.legacy_training) if name)
+
+    def training_entrypoint(self):
+        """Import the training entry point that provides ``forward_step``."""
+        failures = []
+        for name in self.training_modules:
+            try:
+                module = importlib.import_module(name)
+            except ImportError as error:
+                failures.append(f"{name}: {error}")
+                continue
+            if hasattr(module, "forward_step") and hasattr(module, "train_valid_test_datasets_provider"):
+                return module
+            # Megatron-core 0.19 keeps pretrain_mamba.py as a bare forwarder to pretrain_hybrid.py.
+            failures.append(f"{name}: no forward_step / train_valid_test_datasets_provider")
+        raise ImportError("No training entry point found: " + "; ".join(failures))
+
 
 MODEL_FAMILIES = {
     "gpt": ModelFamily(builder="gpt_builders:gpt_builder"),
-    "mamba": ModelFamily(builder="mamba_builders:mamba_builder", training="pretrain_mamba"),
+    "mamba": ModelFamily(
+        builder="mamba_builders:mamba_builder",
+        training="pretrain_hybrid",
+        legacy_training="pretrain_mamba",
+    ),
     "deepseek_v4": ModelFamily(
         package="primus.backends.megatron.core.models.deepseek_v4",
         config_class="deepseek_v4_transformer_config:DeepSeekV4TransformerConfig",

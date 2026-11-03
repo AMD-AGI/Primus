@@ -75,7 +75,9 @@ def get_model_provider(model_type="gpt"):
         log_rank_0(f"{log_prefix} Loaded Primus model_provider + builder for model_type {model_type!r}")
         return partial(builder_module.model_provider, model_builder)
 
-    model_provider = lazy_import(["model_provider", family.training], "model_provider", log_prefix=log_prefix)
+    model_provider = lazy_import(
+        ["model_provider", *family.training_modules], "model_provider", log_prefix=log_prefix
+    )
     builder_module, _, builder_name = family.builder.partition(":")
     try:
         return partial(model_provider, lazy_import([builder_module], builder_name, log_prefix=log_prefix))
