@@ -13,6 +13,7 @@ from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
     ResidualScaling,
     RMSNorm,
     ZayaMoE,
+    ZayaStack,
     _align_fp8_leading,
     _apply_rope,
     _cca_query_key,
@@ -121,6 +122,20 @@ def test_every_expert_gets_a_gradient_without_tokens():
             assert p.grad is not None, f"expert {expert_id} {name}"
             if expert_id:
                 assert torch.count_nonzero(p.grad) == 0
+
+
+def test_every_stack_parameter_gets_a_gradient():
+    torch.manual_seed(0)
+    cfg = _cfg(num_layers=6)
+    stack = ZayaStack(cfg).train()
+    with torch.no_grad():
+        for layer in stack.layers:
+            if layer.zaya_block is not None:
+                layer.zaya_block.router.balancing_biases.zero_()
+                layer.zaya_block.router.balancing_biases[0] = 10.0
+    hidden = torch.randn(8, 2, cfg.hidden_size, requires_grad=True)
+    stack(hidden, position_ids=None, attention_mask=None).sum().backward()
+    assert [name for name, p in stack.named_parameters() if p.grad is None] == []
 
 
 @pytest.mark.parametrize("has_residual", [True, False])

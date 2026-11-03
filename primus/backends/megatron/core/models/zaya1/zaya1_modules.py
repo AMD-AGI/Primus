@@ -491,6 +491,10 @@ class ZayaRouter(nn.Module):
         routed = self.down_proj(hidden_states.reshape(seq * batch, self.hidden_size))
         if self.use_eda and prev_router is not None:
             routed = routed + prev_router.reshape(seq * batch, self.width) * self.router_states_scale
+        elif self.use_eda:
+            # The first MoE stage has no router state to carry. Use the scale anyway
+            # so it gets a zero gradient: overlap_grad_reduce waits for every parameter.
+            routed = routed + 0.0 * self.router_states_scale
         # EDA state is the post-add, pre-norm router hidden. RMSNorm and the
         # 3-layer MLP both see that state.
         next_router = routed.view(seq, batch, self.width)
