@@ -215,6 +215,9 @@ modules:
       moe_permute_quant_fusion: ${PRIMUS_MOE_PERMUTE_QUANT_FUSION:true}
       moe_backward_permute_quant_fusion: ${PRIMUS_MOE_BACKWARD_PERMUTE_QUANT_FUSION:true}
       moe_router_bwd_bf16: ${PRIMUS_MOE_ROUTER_BWD_BF16:true}
+      # Router dX GEMM fused into the expert input-gradient accumulation
+      # (requires moe_router_bwd_bf16 and PRIMUS_FUSED_RESIDUAL_NORM=1).
+      moe_router_grad_merge: ${PRIMUS_MOE_ROUTER_GRAD_MERGE:true}
       use_turbo_fused_qk_rmsnorm_rope: ${PRIMUS_TURBO_FUSED_QK_RMSNORM_ROPE:true}
       use_turbo_rms_norm: true
       use_turbo_fused_act_with_probs: true
