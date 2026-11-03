@@ -8,7 +8,7 @@ PyTorch is an open-source machine learning framework that is widely used for mod
 
 The ROCm PyTorch training Docker image `rocm/primus:v26.9`, available through [Docker hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for fine-tuning and pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
 
-For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.9`](../01-getting-started/release-notes.md#rocmprimusv269). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.7`](../01-getting-started/release-notes.md#rocmprimusv267).
+For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.9`](../01-getting-started/release-notes.md#rocmprimusv269). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268).
 
 Training is launched with `primus-cli`, the unified Primus CLI that covers direct, container, and Slurm execution from the same YAML configuration. See the [CLI reference](./cli-reference.md).
 
@@ -45,7 +45,7 @@ The v26.9 QA runs found no TorchTitan issues. They covered MI300X and MI355X; th
 
 **Fixed in v26.9:**
 
-- With full activation checkpointing, `torch.compile` compiled the checkpoint wrapper itself, so the whole checkpointed MoE block of a DeepSeek model ran eagerly. Checkpoint-wrapped blocks are now compiled inside the wrapper; runs without activation checkpointing are unchanged. This affects the DeepSeek-671B recipes and completes the DeepSeek compile work of [#1216](https://github.com/AMD-AGI/Primus/pull/1216) ([#1320](https://github.com/AMD-AGI/Primus/pull/1320)).
+- With full activation checkpointing, `torch.compile` compiled the checkpoint wrapper itself, so the whole checkpointed MoE block of a DeepSeek model ran eagerly. Checkpoint-wrapped blocks are now compiled inside the wrapper; runs without activation checkpointing are unchanged. This affects the DeepSeek-671B recipes and completes the DeepSeek compile work of [#1216](https://github.com/AMD-AGI/Primus/pull/1216), which landed on `release/v26.8` ([#1320](https://github.com/AMD-AGI/Primus/pull/1320)).
 - With `primus_turbo.enable_primus_turbo` or `use_turbo_attention` turned off, the first forward failed under `torch.compile` with `TypeError: Unexpected keyword arguments: ['block_mask', 'enable_gqa']`. The Primus Turbo converter now replaces attention only when both are on ([#1234](https://github.com/AMD-AGI/Primus/pull/1234)).
 
 ### Registry change

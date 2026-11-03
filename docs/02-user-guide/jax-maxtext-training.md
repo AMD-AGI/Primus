@@ -10,7 +10,7 @@ AMD provides a ready-to-use Docker image for AMD Instinct MI300X and MI355X GPUs
 
 For the full software stack of this image (ROCm, JAX, Transformer Engine, hipBLASLt, RCCL, TensorFlow, and the rest), see [Release notes → `rocm/jax-training:maxtext-v26.9`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v269). The release notes are the single source of truth for image contents.
 
-> **Primus source:** the v26.8 image ships no Primus of its own. Use a `release/v26.8` checkout — `primus-cli container` mounts it into the image for you. See [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268).
+> **Primus source:** the v26.9 image bundles Primus at its build commit `db1a4160` (`/workspace/Primus`). Use a `release/v26.9` checkout all the same — `primus-cli container` mounts it into the image for you. See [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269).
 
 ---
 
@@ -199,7 +199,7 @@ git checkout release/v26.9
 git submodule update --init third_party/maxtext/
 ```
 
-That is all the setup required. `primus-cli container` starts the image for you, mounts this checkout into it at the same path, and runs the training inside — so this is the code that executes. (The v26.8 image has no Primus of its own.) It also forwards environment variables you export on the host; the forwarded list is `container.options.env` in `runner/.primus.yaml`.
+That is all the setup required. `primus-cli container` starts the image for you, mounts this checkout into it at the same path, and runs the training inside — so this is the code that executes. It also forwards environment variables you export on the host; the forwarded list is `container.options.env` in `runner/.primus.yaml`.
 
 > **Pass `--image` for MaxText.** The default image in `runner/.primus.yaml` is `rocm/primus`, which is the PyTorch image. MaxText runs need `--image rocm/jax-training:maxtext-v26.9` in container mode, or the image set in your Slurm config file.
 
@@ -278,7 +278,7 @@ docker start training_env
 docker exec -it training_env bash
 ```
 
-The v26.8 image does not contain Primus, so run from your `release/v26.9` checkout. The `docker run` above mounts `$HOME`, so a checkout under your home directory is visible at the same path. Run training with `primus-cli` in direct mode; configs live under `examples/maxtext/configs/<DEVICE>/` where `<DEVICE>` is `MI300X`, `MI325X` or `MI355X`.
+The image carries Primus at its build commit in `/workspace/Primus`, but run from your `release/v26.9` checkout. The `docker run` above mounts `$HOME`, so a checkout under your home directory is visible at the same path. Run training with `primus-cli` in direct mode; configs live under `examples/maxtext/configs/<DEVICE>/` where `<DEVICE>` is `MI300X`, `MI325X` or `MI355X`.
 
 ```bash
 cd ~/Primus   # your release/v26.9 checkout

@@ -165,6 +165,7 @@ git submodule update --init --recursive
 | | |
 | --- | --- |
 | Build commit | `db1a4160` (2026-10-30), on `release/v26.9` |
+| Branch tip | `93dd9201` (2026-10-31) |
 | Megatron-LM | `d3528a21` |
 | TorchTitan | `73a0e697` |
 | Megatron Bridge | `9577b128` |
@@ -177,7 +178,8 @@ MaxText moved to `release/v26.9` and HunyuanWorld-Mirror (`third_party/HunyuanWo
 
 > **Use a `release/v26.9` checkout rather than anything baked into the images.**
 >
-> - `rocm/primus:v26.9` and `rocm/jax-training:maxtext-v26.9` were both built from `db1a4160`, and both carry that commit at `/workspace/Primus`. Cloning the branch keeps you current if later commits land on it.
+> - `rocm/primus:v26.9` and `rocm/jax-training:maxtext-v26.9` were both built from `db1a4160`, and both carry that commit at `/workspace/Primus`.
+> - `release/v26.9` has moved since the build: it is now at `93dd9201` (2026-10-31), which adds MI325X GPT-OSS-20B and ZAYA1-8B recipe tuning ([#1355](https://github.com/AMD-AGI/Primus/pull/1355)). The branch checkout includes it; the in-image copy does not.
 > - The MaxText image's `/workspace/maxtext` (`8d1d43c0`) matches the branch's `third_party/maxtext`.
 
 ### Changes since v26.8

@@ -8,7 +8,7 @@ The Primus framework with the Megatron backend is designed to enable efficient t
 
 The ROCm PyTorch training Docker image `rocm/primus:v26.9`, available through [Docker hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
 
-For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.9`](../01-getting-started/release-notes.md#rocmprimusv269). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.7`](../01-getting-started/release-notes.md#rocmprimusv267).
+For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.9`](../01-getting-started/release-notes.md#rocmprimusv269). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268).
 
 Training is launched with `primus-cli`, the unified Primus CLI that covers direct, container, and Slurm execution from the same YAML configuration. See the [CLI reference](./cli-reference.md).
 
@@ -20,7 +20,7 @@ Read this section before starting a training run. It collects the settings this 
 
 ### Required settings
 
-**Use the `release/v26.9` branch.** It is the Primus branch matching the `rocm/primus:v26.9` image. The image was built from `db1a4160` on that branch, and the `/workspace/Primus` copy baked into it is that commit; a checkout keeps you current if later commits land on the branch. See [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269). [Environment setup](#1-environment-setup) has the clone command.
+**Use the `release/v26.9` branch.** It is the Primus branch matching the `rocm/primus:v26.9` image. The image was built from `db1a4160` on that branch, and the `/workspace/Primus` copy baked into it is that commit. The branch has moved since: it is now at `93dd9201`, which adds MI325X GPT-OSS-20B and ZAYA1-8B recipe tuning ([#1355](https://github.com/AMD-AGI/Primus/pull/1355)), so use the checkout rather than the in-image copy. See [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269). [Environment setup](#1-environment-setup) has the clone command.
 
 ### Changes you may need to act on
 
@@ -33,8 +33,6 @@ Read this section before starting a training run. It collects the settings this 
 **A preset `HIP_VISIBLE_DEVICES` is kept.** The runner used to overwrite it with `0..GPUS_PER_NODE-1`, so a job restricted to particular GPUs could land on another user's GPU on a shared node. It now keeps the value you or your scheduler set, and warns when it lists a different number of GPUs than `GPUS_PER_NODE` ([#1237](https://github.com/AMD-AGI/Primus/pull/1237)).
 
 **Megatron model studies and guides moved under `examples/megatron/`.** For example, `examples/deepseek-v4/` is now `examples/megatron/models/deepseek-v4/`, and `examples/moe_package/` is now `examples/megatron/guides/moe_package/`; `customer_package`, `odc`, `offline_tune` and the tuning agent moved to `examples/megatron/guides/` as well ([#1130](https://github.com/AMD-AGI/Primus/pull/1130)). Update scripts that call the old paths. Recipe YAMLs under `examples/megatron/configs/` did not move.
-
-**Hybrid configs are named `zebra_*` again.** v26.7 shipped the Zebra-Llama hybrid recipes as `hylo_*`; v26.8 restores the original name ([#1167](https://github.com/AMD-AGI/Primus/pull/1167)). For example, `examples/megatron/configs/MI300X/hylo_llama_mamba_8B_BF16-pretrain.yaml` is now `zebra_llama_mamba_8B_BF16-pretrain.yaml`, the model presets are `zebra_<mixer>_<size>_hybrid.yaml`, and the `HyloLlama*` classes are `ZebraLlama*`. Update local configs and scripts that name the old files.
 
 **The `examples/run_*` launchers are gone.** Launch with `./runner/primus-cli`, or use `runner/helpers/launch/slurm_pretrain.sh` if you rely on the `EXP` / `NNODES` / `DATA_PATH` contract ([#999](https://github.com/AMD-AGI/Primus/pull/999)).
 
@@ -637,7 +635,7 @@ export NCCL_IB_GID_INDEX=3 # Set InfiniBand GID index for NCCL communication. De
 # On MI300X/MI325X also export the gfx942 tuning variables; see "Architecture-specific settings"
 ```
 
-> **Note:** `release/v26.8` is the branch matching the `rocm/primus:v26.9` image. If you are reproducing published v26.4 numbers instead, use `git checkout 236cfa9` with `rocm/primus:v26.4` — that release is now summarised under [Release notes → Earlier releases](../01-getting-started/release-notes.md#earlier-releases).
+> **Note:** `release/v26.9` is the branch matching the `rocm/primus:v26.9` image. If you are reproducing published v26.4 numbers instead, use `git checkout 236cfa9` with `rocm/primus:v26.4` — that release is now summarised under [Release notes → Earlier releases](../01-getting-started/release-notes.md#earlier-releases).
 
 For clusters using AMD AINIC, set the following environment variables:
 
