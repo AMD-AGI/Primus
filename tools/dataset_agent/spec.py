@@ -20,6 +20,8 @@ class Task:
     split: str = "train"
     samples: int = 4
     max_retries: int = 3
+    max_turns: int = 0
+    """Override every phase's turn budget. 0 keeps the per-phase default."""
     llm_model: str = ""
     dry_run: bool = False
     no_branch: bool = False

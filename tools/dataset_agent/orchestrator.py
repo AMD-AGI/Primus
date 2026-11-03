@@ -57,6 +57,12 @@ def _parse_args(argv: list[str] | None) -> Task:
     parser.add_argument("--split", default="train")
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=0,
+        help="Turn budget for every phase. 0 keeps plan 12, integrate 30, test 20, document 15.",
+    )
     parser.add_argument("--llm-model", default="", help="Claude model id. Defaults to DATASET_AGENT_MODEL.")
     parser.add_argument("--dry-run", action="store_true", help="Resolve files and the Hub record, then stop.")
     parser.add_argument("--no-branch", action="store_true", help="Stay on the current git branch.")
@@ -65,6 +71,8 @@ def _parse_args(argv: list[str] | None) -> Task:
         parser.error("--samples must be >= 1")
     if args.max_retries < 0:
         parser.error("--max-retries must be >= 0")
+    if args.max_turns < 0:
+        parser.error("--max-turns must be >= 0")
     return Task(
         backend=args.backend.strip(),
         model=args.model.strip(),
@@ -73,10 +81,16 @@ def _parse_args(argv: list[str] | None) -> Task:
         split=args.split.strip() or "train",
         samples=args.samples,
         max_retries=args.max_retries,
+        max_turns=args.max_turns,
         llm_model=args.llm_model.strip(),
         dry_run=args.dry_run,
         no_branch=args.no_branch,
     )
+
+
+def _turns(task: Task, default: int) -> int:
+    """``--max-turns`` replaces each phase budget. It does not add to the default."""
+    return task.max_turns or default
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -270,14 +284,14 @@ async def campaign(task: Task) -> int:
     plan_policy = PathPolicy()
     plan = await _phase(
         backend,
-        _spec("plan", plan_system, plan_user, layout, task, plan_policy, _READ_TOOLS, 12),
+        _spec("plan", plan_system, plan_user, layout, task, plan_policy, _READ_TOOLS, _turns(task, 12)),
         run_dir,
     )
 
     integrate_system, integrate_user = integrate_prompts(task, layout, hub_text, knowledge, plan.text)
     integrate_policy = PathPolicy(write_roots=("primus", "examples"), allow_bash=True)
     integrate_spec = _spec(
-        "integrate", integrate_system, integrate_user, layout, task, integrate_policy, _EDIT_TOOLS, 30
+        "integrate", integrate_system, integrate_user, layout, task, integrate_policy, _EDIT_TOOLS, _turns(task, 30)
     )
     before = _porcelain(repo)
     integrated = await _phase(backend, integrate_spec, run_dir)
@@ -286,7 +300,7 @@ async def campaign(task: Task) -> int:
     test_system, test_user = test_prompts(task, layout, hub_text, knowledge)
     test_root = "tests/unit_tests/tools/dataset_agent"
     test_policy = PathPolicy(write_roots=(test_root,), allow_bash=True)
-    test_spec = _spec("test", test_system, test_user, layout, task, test_policy, _EDIT_TOOLS, 20)
+    test_spec = _spec("test", test_system, test_user, layout, task, test_policy, _EDIT_TOOLS, _turns(task, 20))
     before = _porcelain(repo)
     tested = await _phase(backend, test_spec, run_dir)
     _revert_if_needed(repo, before, test_policy, "test")
@@ -317,13 +331,7 @@ async def campaign(task: Task) -> int:
             if not tested.session_id:
                 break
             print(f"\n[gate] test file rejected, resuming tester ({attempt}/{task.max_retries})")
-            feedback = (
-                "The Python gate rejected the pytest. Fix that file only. "
-                "Keep the real Hugging Face load. Do not mock the loader. "
-                "Do not skip. Do not import torch or primus.backends.megatron.sft.preprocessing. "
-                "Stream the rows and call tools.dataset_agent.integration.check_megatron_rows.\n\n"
-                f"{log}"
-            )
+            feedback = _tester_feedback(task, log)
             before = _porcelain(repo)
             tested = await _phase(backend, test_spec, run_dir, resume=tested.session_id, feedback=feedback)
             _revert_if_needed(repo, before, test_policy, "test")
@@ -382,7 +390,7 @@ async def campaign(task: Task) -> int:
             task,
             doc_policy,
             ["Read", "Grep", "Glob", "Edit", "Write"],
-            15,
+            _turns(task, 15),
         ),
         run_dir,
     )
@@ -572,6 +580,31 @@ def _write_results(
         print(f"Patch: {patch}")
     print(f"Report: {report}")
     return patch, report
+
+
+def _tester_feedback(task: Task, log: str) -> str:
+    """Tell the tester what the gate rejected, without a post-train instruction on other stages."""
+    lines = [
+        "The Python gate rejected the pytest. Fix that file only.",
+        "The file must call a real loader by name: load_dataset, snapshot_download, "
+        "load_from_disk, stream_rows, or run_integration.",
+        "Do not mock the loader. Do not skip. Do not import torch or "
+        "primus.backends.megatron.sft.preprocessing.",
+    ]
+    if task.stage == "posttrain" and task.backend in {"megatron", "megatron_bridge"}:
+        lines.append(
+            "This run is Megatron post-train. Stream with datasets.load_dataset and pass the rows to "
+            "tools.dataset_agent.integration.check_megatron_rows."
+        )
+    else:
+        lines.append(
+            "This run is not Megatron post-train. Call tools.dataset_agent.integration.run_integration "
+            "with the example YAML, or stream the rows with datasets.load_dataset. "
+            "Do not call check_megatron_rows."
+        )
+    lines.append("")
+    lines.append(log)
+    return "\n".join(lines)
 
 
 def _gate_needs_test_fix(log: str, test_file: Path) -> bool:

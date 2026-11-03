@@ -14,9 +14,20 @@ from typing import Any
 
 from tools.dataset_agent.integration import run_integration, use_writable_hf_home
 
+# Names that actually read the dataset. run_integration and stream_rows call load_dataset
+# themselves, so a test that delegates to them is a real loader even though the name
+# load_dataset is not written in the file.
+_LOADER_NAMES = (
+    "load_dataset",
+    "snapshot_download",
+    "load_from_disk",
+    "run_integration",
+    "stream_rows",
+)
+_LOADER_PATTERN = "|".join(_LOADER_NAMES)
 _MOCK_PATTERNS = (
-    re.compile(r"patch\(\s*['\"][^'\"]*(load_dataset|snapshot_download|load_from_disk)"),
-    re.compile(r"(load_dataset|snapshot_download|load_from_disk)\s*="),
+    re.compile(rf"patch\(\s*['\"][^'\"]*({_LOADER_PATTERN})"),
+    re.compile(rf"({_LOADER_PATTERN})\s*="),
     re.compile(r"MagicMock\(\)"),
 )
 _CUDA_PATTERN = re.compile(r"torch\.cuda|hipLaunch|init_process_group")
@@ -39,11 +50,12 @@ def test_file_violations(source: str, *, dataset: str) -> list[str]:
     if _TORCH_IMPORT.search(source):
         reasons.append(
             "test file imports torch or Megatron preprocessing. "
-            "Call tools.dataset_agent.integration.check_megatron_rows on the streamed rows. "
-            "That loads the SFT schema and formatter without torch."
+            "Parse rows with tools.dataset_agent.integration instead. "
+            "That loads the field parser without torch."
         )
-    if "load_dataset" not in source and "snapshot_download" not in source and "load_from_disk" not in source:
-        reasons.append("test file does not call load_dataset, snapshot_download, or load_from_disk")
+    if not any(name in source for name in _LOADER_NAMES):
+        names = ", ".join(_LOADER_NAMES)
+        reasons.append(f"test file does not call a real loader ({names})")
     return reasons
 
 

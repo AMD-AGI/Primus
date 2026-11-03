@@ -148,6 +148,28 @@ def _load_sdk():
     return query, ClaudeAgentOptions, HookMatcher
 
 
+def probe_command(executable: str, model: str) -> list[str]:
+    """One tool-free CLI call. Adaptive thinking is off: Azure rejects it for this model."""
+    return [
+        executable,
+        "--print",
+        "Reply with exactly OK. Do not inspect files or run tools.",
+        "--output-format",
+        "json",
+        "--model",
+        model,
+        "--permission-mode",
+        "dontAsk",
+        "--tools",
+        "",
+        "--max-turns",
+        "1",
+        "--thinking",
+        "disabled",
+        "--no-session-persistence",
+    ]
+
+
 def _deny(reason: str) -> dict[str, Any]:
     return {
         "hookSpecificOutput": {
@@ -173,22 +195,7 @@ class ClaudeBackend:
                 "Set ANTHROPIC_API_KEY in the environment. The SDK does not load .env files."
             )
         check_gateway(self.model)
-        command = [
-            self.executable,
-            "--print",
-            "Reply with exactly OK. Do not inspect files or run tools.",
-            "--output-format",
-            "json",
-            "--model",
-            self.model,
-            "--permission-mode",
-            "dontAsk",
-            "--tools",
-            "",
-            "--max-turns",
-            "1",
-            "--no-session-persistence",
-        ]
+        command = probe_command(self.executable, self.model)
         try:
             completed = subprocess.run(
                 command,
@@ -229,6 +236,11 @@ class ClaudeBackend:
             return (
                 f"Claude probe failed: HTTP 401 Invalid API key from {base}. "
                 "ANTHROPIC_API_KEY is not accepted by that gateway."
+            )
+        if "adaptive thinking is not supported" in detail:
+            return (
+                f"Claude probe failed for {self.model!r}: this gateway rejects adaptive thinking. "
+                "The probe and each session pass --thinking disabled."
             )
         return f"Claude probe failed for {self.model!r}: {detail[-1200:]}"
 
@@ -272,6 +284,8 @@ class ClaudeBackend:
             "permission_mode": spec.permission_mode,
             "max_turns": spec.max_turns,
             "hooks": self._hooks(spec),
+            # The bundled CLI defaults to adaptive thinking. Azure returns HTTP 400 for that on Sonnet.
+            "thinking": {"type": "disabled"},
         }
         if resume:
             options["resume"] = resume

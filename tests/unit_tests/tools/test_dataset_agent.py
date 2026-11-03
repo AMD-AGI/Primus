@@ -19,6 +19,7 @@ import os
 from tools.dataset_agent.claude_backend import (  # noqa: E402
     ClaudeBackend,
     gateway_auth_failure,
+    probe_command,
 )
 from tools.dataset_agent.gate import (  # noqa: E402
     check_example_yaml,
@@ -39,9 +40,9 @@ from tools.dataset_agent.locate import (  # noqa: E402
     module_stem,
     slugify,
 )
-from tools.dataset_agent.orchestrator import render_report  # noqa: E402
+from tools.dataset_agent.orchestrator import _tester_feedback, _turns, render_report  # noqa: E402
 from tools.dataset_agent.paths import bash_deny_reason, edit_deny_reason  # noqa: E402
-from tools.dataset_agent.spec import PathPolicy  # noqa: E402
+from tools.dataset_agent.spec import PathPolicy, Task  # noqa: E402
 
 
 class DatasetAgentTests(unittest.TestCase):
@@ -65,6 +66,16 @@ class DatasetAgentTests(unittest.TestCase):
                 os.environ["ANTHROPIC_BASE_URL"] = previous
         self.assertIn("ANTHROPIC_BASE_URL", message)
         self.assertIn("Ocp-Apim-Subscription-Key", message)
+
+    def test_probe_disables_adaptive_thinking(self):
+        command = probe_command("/usr/bin/claude", "claude-sonnet-4-5")
+        self.assertEqual(command[command.index("--thinking") + 1], "disabled")
+        message = ClaudeBackend._probe_failure(
+            type("Probe", (), {"model": "claude-sonnet-4-5"})(),
+            'api_error_status":400,"result":"adaptive thinking is not supported on this model"',
+        )
+        self.assertIn("adaptive thinking", message)
+        self.assertIn("--thinking disabled", message)
 
     def test_report_names_the_yaml_and_the_gate(self):
         text = render_report(
@@ -144,6 +155,28 @@ class DatasetAgentTests(unittest.TestCase):
         self.assertTrue(
             any("without torch" in reason for reason in test_file_violations(torchy, dataset="org/data"))
         )
+        delegated = (
+            "from tools.dataset_agent.integration import run_integration\n"
+            "run_integration(config, backend='megatron', dataset='org/data', split='train', samples=4)\n"
+        )
+        self.assertEqual(test_file_violations(delegated, dataset="org/data"), [])
+        bare = "assert example.is_file()\n"
+        self.assertTrue(any("real loader" in reason for reason in test_file_violations(bare, dataset="org/data")))
+
+    def test_max_turns_replaces_every_phase_budget(self):
+        task = Task(backend="megatron", model="llama3.1_8B", dataset="org/data", max_turns=40)
+        self.assertEqual(_turns(task, 12), 40)
+        self.assertEqual(_turns(task, 30), 40)
+        plain = Task(backend="megatron", model="llama3.1_8B", dataset="org/data")
+        self.assertEqual(_turns(plain, 12), 12)
+
+    def test_pretrain_retry_does_not_ask_for_the_posttrain_parser(self):
+        task = Task(backend="megatron", model="llama3.1_8B", dataset="org/data", stage="pretrain")
+        feedback = _tester_feedback(task, "test file does not call a real loader")
+        self.assertIn("run_integration", feedback)
+        self.assertIn("Do not call check_megatron_rows", feedback)
+        post = Task(backend="megatron", model="llama3.1_8B", dataset="org/data", stage="posttrain")
+        self.assertIn("check_megatron_rows", _tester_feedback(post, "pytest exit 1"))
 
     def test_diffusion_example_passes_the_argument_builder(self):
         preset = find_model_preset(REPO, "diffusion", "flux.1_schnell_t2i")
