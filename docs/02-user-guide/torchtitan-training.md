@@ -6,7 +6,7 @@ Training performance validation with the AMD PyTorch Docker image on AMD Instinc
 
 PyTorch is an open-source machine learning framework that is widely used for model training, with GPU-optimized components for transformer-based models.
 
-The ROCm PyTorch training Docker image `rocm/primus:v26.9`, available through [Docker hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for fine-tuning and pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
+The PyTorch for ROCm training Docker image `rocm/primus:v26.9`, available through [Docker Hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for fine-tuning and pretraining a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X GPUs.
 
 For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.9`](../01-getting-started/release-notes.md#rocmprimusv269). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268).
 
@@ -20,9 +20,9 @@ Read this section before starting a training run. It collects the settings this 
 
 ### Required settings
 
-**Use the `release/v26.9` branch.** It is the Primus branch matching the `rocm/primus:v26.9` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image — see [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269). [Environment setup](#get-the-primus-source) has the clone command.
+**Use the `release/v26.9` branch.** It is the Primus branch matching the `rocm/primus:v26.9` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image—see [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269). [Environment setup](#get-the-primus-source) has the clone command.
 
-### Changes you may need to act on
+### Changes you might need to act on
 
 **AdamW runs on a Triton fused kernel by default.** TorchTitan's `AdamW` is replaced by a Triton implementation sized to the GPU (`optimizer.use_triton_fused_adam: true`, also assumed when the key is absent); set it to `false` to keep `torch.optim.AdamW`. It keeps the stock optimizer's state layout, so checkpoints are interchangeable in both directions. Step counts are kept on the host, so reading `optimizer.state` directly between steps shows stale `step` values; `state_dict()` is correct ([#1233](https://github.com/AMD-AGI/Primus/pull/1233)).
 
@@ -96,7 +96,7 @@ This container should not be expected to provide generalized performance across 
 
 Use the following instructions to set up the environment, configure the script to train models, and reproduce the benchmark results on the MI300X, MI325X, MI350X, and MI355X accelerators with the Docker image.
 
-The instructions reproduce the benchmark results on an MI300X accelerator with `rocm/primus:v26.9`. For best performance on MI325X, MI350X, and MI355X, use the matching `<ARCH>` config directory (and adjust batch sizes if you change hardware).
+The instructions reproduce the benchmark results on an MI300X GPU with `rocm/primus:v26.9`. For optimal performance on MI325X, MI350X, and MI355X, use the matching `<ARCH>` config directory (and adjust batch sizes if you change hardware).
 
 Launch training with [`primus-cli`](#running-training-with-primus-cli). One CLI covers direct, container, and Slurm launches, and the same YAML configurations work across every Primus backend.
 
@@ -115,7 +115,7 @@ git checkout release/v26.9
 git submodule update --init --recursive
 ```
 
-That is all the setup required. The training commands below use `primus-cli container`, which starts `rocm/primus:v26.9` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used — see [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269).
+That is all the setup required. The following training commands use `primus-cli container`, which starts `rocm/primus:v26.9` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used—see [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269).
 
 Container mode also forwards environment variables you export on the host, including `HF_TOKEN`, the gfx942 tuning variables, and the `NCCL_*` networking variables. The forwarded list is `container.options.env` in `runner/.primus.yaml`.
 

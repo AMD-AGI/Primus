@@ -71,7 +71,7 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Choosing the Docker image
 
-For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.9`, set in `runner/.primus.yaml`. JAX MaxText has its own separate image family, `rocm/jax-training:maxtext-…`, which is **not** the default — pass it explicitly in container and Slurm modes.
+For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.9`, set in `runner/.primus.yaml`. JAX MaxText has its own separate image family, `rocm/jax-training:maxtext-…`, which is **not** the default—pass it explicitly in container and Slurm modes.
 
 The image is picked in priority order: `DOCKER_IMAGE` environment variable > `--image` CLI argument > config file. See [Selecting the container image](../01-getting-started/quickstart.md#selecting-the-container-image) for a full explanation, and [Configuration system](configuration-system.md) for configuration loading.
 
@@ -92,7 +92,7 @@ git checkout release/v26.9
 git submodule update --init --recursive
 ```
 
-Container mode mounts this checkout into the container, so this is the code that runs — you do not need the `/workspace/Primus` copy baked into the image, which lags the release branch. See [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269).
+Container mode mounts this checkout into the container, so this is the code that runs—you do not need the `/workspace/Primus` copy baked into the image, which lags the release branch. See [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269).
 
 ### Pull the image (optional)
 

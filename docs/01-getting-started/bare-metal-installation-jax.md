@@ -5,8 +5,8 @@ stack directly on a host machine**, without using the AMD published JAX training
 Docker image. It is intended for users who, for policy or operational reasons,
 cannot run containers and need to reproduce the same environment on bare metal.
 
-It is derived from the official JAX training Dockerfile — currently
-[`Dockerfile.jax-v26.9`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.jax-v26.9) — and
+It is derived from the official JAX training Dockerfile
+([`Dockerfile.jax-v26.9`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.jax-v26.9)) and
 installs the same components and versions. Wherever possible, everything is
 installed **inside a Python virtual environment and without `sudo`**. The only
 steps that require root are a small set of OS-level system libraries (installed
@@ -16,7 +16,7 @@ training.
 > **Looking for the PyTorch/Megatron/TorchTitan stack instead?** See
 > [bare-metal-installation.md](bare-metal-installation.md). This document is the
 > JAX **MaxText** counterpart. It is leaner than the PyTorch stack — no Flash
-> Attention / aiter / Primus-Turbo / FBGEMM / rocSHMEM builds — but v26.9 still
+> Attention / AITER / Primus-Turbo / FBGEMM / rocSHMEM builds — but v26.9 still
 > compiles **TensorFlow (CPU) from source** (and TransformerEngine from source on
 > hosts with glibc < 2.28), so it is not build-free.
 
@@ -217,7 +217,7 @@ environment — no `/opt/rocm`, no root:
   hipBLASLt, compilers, headers, libraries) **inside the venv**. `ROCM_PATH`
   points at `_rocm_sdk_devel`.
 - `jax` + `jaxlib` 0.12.0 plus `jax_rocm10_pjrt` / `jax_rocm10_plugin`
-  `0.12.0+rocm10.3.0a20261026` from the **ROCm nightly jax index** provide
+  `0.12.0+rocm10.3.0a20261026` from the **ROCm nightly JAX index** provide
   GPU-accelerated JAX.
 
 > RCCL comes from this ROCm tree as shipped; the image does not override it (see
@@ -267,7 +267,7 @@ scripts use the same pins; change one and you may have to change the others.
 | TransformerEngine (JAX)           | `transformer_engine_rocm_jax` + `transformer-engine-rocm10` `2.19.0.dev0+rocm10.2.0a20261002.bfe94fb` | From the frameworks-nightlies staging index. Prebuilt wheel needs **glibc ≥ 2.28**; else `te_source` (commit `bfe94fb`). |
 | TensorFlow (CPU, from source)     | ROCm `tensorflow-upstream` branch `upstream-v2.21.0`                    | Built with bazelisk `v1.29.0` and Bazel's hermetic toolchain. The image checks that the branch pins LLVM archive sha256 `3f986184…`. |
 | RCCL (optional, from source)      | `rocm-systems` @ `9e5e4084a4b8e1e86551b0eb054725c62354a926`            | Only for the optional `rccl` stage. Needs host `clang-18`/`lld-18`. |
-| MaxText (ROCm fork)               | `release/v26.9`                                                         | ROCm MaxText fork matching the image, installed with its TensorFlow extras (`TF=true`). |
+| MaxText (ROCm fork)               | `release/v26.9`                                                         | MaxText for ROCm fork matching the image, installed with its TensorFlow extras (`TF=true`). |
 | Primus                            | `db1a41601833294231daadb3cdbb2933eb805c73` (on `release/v26.9`)         | The commit the image clones (v26.8 shipped no Primus; v26.9 bundles it again). |
 | scipy                             | `1.16`                                                                  | |
 | Build front-end                   | `cmake 3.31.6`, `ninja 1.11.1.3`, `wheel 0.46.2`, `packaging 25.0`, `setuptools 80.10.2`, `msgpack 1.2.3`, `urllib3 2.8.0` | Plus `uv` (used by MaxText's dep install). |
@@ -462,7 +462,7 @@ export DEBUG_HIP_DYNAMIC_QUEUES=0
 ### 3.4 Install ROCm from TheRock pip wheels
 
 This step replaces a system ROCm install. v26.9 uses **pip `rocm-sdk-*` wheels**
-(the `10.3.0a20261026` nightly) — no `/opt/rocm`, no root.
+(the `10.3.0a20261026` nightly)—no `/opt/rocm`, no root.
 
 ```bash
 THE_ROCK_VERSION=10.3.0a20261026
@@ -602,7 +602,7 @@ Clone the ROCm MaxText fork and install its Python dependencies. The reference
 image runs MaxText's `src/dependencies/scripts/setup.sh TF=true`; on bare metal we
 run the **Python portion** of that script directly (the `apt`/`gcsfuse` steps are
 the one-time root action from Section 2, and the venv already exists).
-`release/v26.9` made the TensorFlow, TFDS, seqio and JetStream extras opt-in;
+`release/v26.9` made the TensorFlow, TFDS, seqio, and JetStream extras opt-in;
 `TF=true` (`--with-tf` below) is what the image uses.
 
 > **MaxText `release/v26.9`.** Override `MAXTEXT_BRANCH` only if you deliberately
@@ -715,7 +715,7 @@ pip install --upgrade \
 
 > The image runs this last step with `uv pip install --upgrade`, which re-resolves
 > *every* installed package, so the v26.9 image ends up with newer numpy (2.5.4),
-> scipy (1.18.1) and protobuf (7.x). pip's `--upgrade` only touches the packages
+> scipy (1.18.1), and protobuf (7.x). pip's `--upgrade` only touches the packages
 > named, so a bare-metal install keeps MaxText's own pins. This is the largest
 > difference between the two package sets; training was unaffected when this was
 > validated for v26.8.
