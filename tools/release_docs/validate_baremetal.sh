@@ -134,8 +134,13 @@ EOF
 # Hugging Face, tools/perf's yq) goes under the base, never into the real home: on many clusters home is
 # NFS with a quota, and removing the base removes them all.
 use_base_home() {
-    mkdir -p "$BASE/home" || die "cannot create $BASE/home"
+    mkdir -p "$BASE/home/.cache" "$BASE/tmp" "$BASE/build" || die "cannot create folders under $BASE"
     export HOME="$BASE/home"
+    # The install scripts' own defaults put caches and the source builds in /tmp (env.sh:
+    # /tmp/primus-jax-cache, /tmp/primus-jax-build); on a node whose /tmp is the root disk, the JAX
+    # TensorFlow build filled it (crusoe, 123 GB). Everything goes under the base instead.
+    export XDG_CACHE_HOME="$BASE/home/.cache" PIP_CACHE_DIR="$BASE/home/.cache/pip"
+    export UV_CACHE_DIR="$BASE/home/.cache/uv" TMPDIR="$BASE/tmp" SRC_DIR="$BASE/build"
 }
 
 # ---- install -------------------------------------------------------------------
