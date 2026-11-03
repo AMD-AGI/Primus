@@ -20,6 +20,7 @@ from primus.core.projection.training_config import (
     ModelParallelConfig,
     RuntimeConfig,
     megatron_derive_default_args,
+    model_config_from_args,
     update_config_from_args,
 )
 
@@ -46,6 +47,19 @@ def test_update_config_from_args_copies_matching_fields_only():
     assert rc.sequence_length == 2048
     assert rc.data_parallel_size == 4
     assert not hasattr(rc, "unrelated_field")
+
+
+@pytest.mark.parametrize(
+    "flags, gated",
+    [
+        ({"swiglu": True}, True),
+        ({"swiglu": False, "quick_geglu": True}, True),
+        ({"swiglu": False, "gated_linear_unit": True}, True),
+        ({"swiglu": False}, False),
+    ],
+)
+def test_glu_activations_are_priced_as_gated_mlp(flags, gated):
+    assert model_config_from_args(argparse.Namespace(**flags)).swiglu is gated
 
 
 def _make_megatron_args(**overrides):

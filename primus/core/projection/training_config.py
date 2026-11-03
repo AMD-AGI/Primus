@@ -439,6 +439,17 @@ def dlrm_derive_default_args(args):
     return args
 
 
+def model_config_from_args(args) -> ModelConfig:
+    model_config = update_config_from_args(ModelConfig(), args)
+    # The profilers read ``swiglu`` as "gated MLP" (fc1 is gate+up, 3 projections).
+    # Megatron's other GLU activations share that shape -- e.g. MiniMax-M3's
+    # swigluoai is ``quick_geglu`` with ``swiglu: false`` -- and would otherwise
+    # lose the gate projection's params, FLOPs and activation memory.
+    if getattr(args, "quick_geglu", False) or getattr(args, "gated_linear_unit", False):
+        model_config.swiglu = True
+    return model_config
+
+
 def convert_primus_config_to_projection_config(primus_config) -> TrainingConfig:
     from primus.core.projection.frameworks import framework_of, resolve_config_adapter
 
@@ -448,7 +459,7 @@ def convert_primus_config_to_projection_config(primus_config) -> TrainingConfig:
     # for this framework rewrites it in the projection's field names.
     args = resolve_config_adapter(fw)(args)
 
-    model_config = update_config_from_args(ModelConfig(), args)
+    model_config = model_config_from_args(args)
     runtime_config = update_config_from_args(RuntimeConfig(), args)
     model_parallel_config = update_config_from_args(ModelParallelConfig(), args)
 
