@@ -17,12 +17,11 @@ modules:
       log_avg_skip_iterations: 1
       log_avg_reset_interval: 10
 
-      # 30-step mock-data run for one 8-GPU node (DP=8). micro_batch_size 248
-      # is the largest multiple of 8 that completes on MI355X with
-      # rocm/primus:v26.8: it peaks at 282 of 288 GB per GPU, and 256 runs out
-      # of memory. Each sample costs about 0.8 GB, mostly fp32 logits over the
-      # 262k vocabulary. On fewer GPUs, lower micro_batch_size or num_layers
-      # (keep it even). Do not edit the model yaml to shrink the architecture.
+      # 30-step mock-data run for one 8-GPU node (DP=8). With the settings
+      # below, micro_batch_size 248 peaks at about 215 of 288 GB per GPU on
+      # MI355X with rocm/primus:v26.8, and each sample costs about 0.6 GB.
+      # On fewer GPUs, lower micro_batch_size or num_layers (keep it even).
+      # Do not edit the model yaml to shrink the architecture.
       train_iters: 30
       micro_batch_size: 248
       # One micro batch per GPU per step at DP=8.
@@ -52,6 +51,15 @@ modules:
       overlap_grad_reduce: false
       overlap_param_gather: false
       gradient_accumulation_fusion: false
+
+      # Transformer Engine's fused cross-entropy works on the BF16 logits in
+      # place instead of an fp32 copy over the 262k vocabulary.
+      cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: te
+      # With reset_attention_mask off, the dataloader's mask is the plain
+      # causal mask. Leaving it out lets CCA's attention run with is_causal.
+      # Turn it back on together with reset_attention_mask.
+      create_attention_mask_in_dataloader: false
 
       # Synthetic tokens. The mock-data patch forces NullTokenizer and
       # clears these paths; vocab_size stays 262272 from zaya1.yaml.
