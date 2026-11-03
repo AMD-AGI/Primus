@@ -201,8 +201,20 @@ parity is clean, and the bare-metal guides with them. Also update the
 `(from Dockerfile.<family>-vX.Y)` header and the `derived_from` manifest line,
 which is what makes the check self-anchoring.
 
-If a divergence is deliberate, add it to `install_parity_rules.json` under
-`documented_divergences` **with a reason**. Never silence drift by deleting a pin.
+The install scripts follow the release Dockerfile (owner, 2026-11-03):
+
+- **Do what the Dockerfile does**: the same packages, versions, commits, indexes
+  and build steps, adapted only for a venv without root.
+- **A check the Dockerfile does not make warns; it never stops the install.** The
+  image ships without it, so bare metal must not fail where the image works (v26.9:
+  a flydsl capability check that only `setup.sh` had stopped the PyTorch install).
+- **Diverge only where bare metal cannot do the same** (no root, a private
+  registry, a host difference), and record it in `install_parity_rules.json`
+  under `documented_divergences` **with a reason** (v26.9: the JAX TensorFlow
+  build's LLVM archive, `LLVM_ARCHIVE`). Never silence drift by deleting a pin.
+- **Do not raise questions about pins that match the Dockerfile**; parity and the
+  bare-metal run are the evidence. Fixes after a failed bare-metal run (Phase 6)
+  follow the same rules.
 
 `install_parity.py --check` must be clean before Phase 6. Held items from the
 bump that live in the install scripts are decided here, in context; the ones you
