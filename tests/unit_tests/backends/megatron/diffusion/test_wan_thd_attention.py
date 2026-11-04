@@ -22,6 +22,9 @@ and Primus-Turbo stack.
 """
 
 import argparse
+import os
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -162,6 +165,32 @@ def test_thd_requires_max_seqlen(missing):
 
     with pytest.raises(ValueError, match=missing):
         attention(query, key, value, None, AttnMaskType.no_mask, packed_seq_params=packing)
+
+
+def test_a_turbo_without_varlen_still_imports_the_dense_path():
+    """An older Primus-Turbo with no varlen kernel still loads the local provider."""
+    code = (
+        "import primus_turbo.pytorch.ops.attention.flash_attn_interface as fai\n"
+        "del fai.FlashAttnVarlenFunc\n"
+        "from primus.backends.megatron.core.extensions import primus_turbo_local_spec as m\n"
+        "assert m.FlashAttnVarlenFunc is None\n"
+        "assert m.PrimusTurboLocalSpecProvider().core_attention() is m.PrimusTurboLocalAttention\n"
+    )
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+    result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr[-2000:]
+
+
+def test_thd_without_the_varlen_kernel_says_so(monkeypatch):
+    import primus.backends.megatron.core.extensions.primus_turbo_local_spec as local_spec
+
+    attention = _build_attention()
+    monkeypatch.setattr(local_spec, "FlashAttnVarlenFunc", None)
+    query, key, value = (_to_thd(t) for t in _sbhd_inputs())
+
+    with pytest.raises(RuntimeError, match="does not have"):
+        attention(query, key, value, None, AttnMaskType.no_mask, packed_seq_params=_packing())
 
 
 def _attend(attention, query, key, value, packed):

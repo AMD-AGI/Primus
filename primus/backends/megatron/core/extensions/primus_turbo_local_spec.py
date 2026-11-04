@@ -29,15 +29,22 @@ from typing import Optional
 
 import primus_turbo.pytorch as pt
 import torch
-from primus_turbo.pytorch.ops.attention.flash_attn_interface import (
-    FlashAttnFunc,
-    FlashAttnVarlenFunc,
-)
+from primus_turbo.pytorch.ops.attention.flash_attn_interface import FlashAttnFunc
+
+# Older Primus-Turbo builds have no varlen kernel. Only the packed thd path
+# needs it, so the dense path must keep importing without it.
+try:
+    from primus_turbo.pytorch.ops.attention.flash_attn_interface import (
+        FlashAttnVarlenFunc,
+    )
+except ImportError:
+    FlashAttnVarlenFunc = None
 
 # Both autograd Functions have to be inlined, not just the dense one: without
 # the varlen entry here Dynamo breaks the graph at every packed attention call.
 torch._dynamo.allow_in_graph(FlashAttnFunc)
-torch._dynamo.allow_in_graph(FlashAttnVarlenFunc)
+if FlashAttnVarlenFunc is not None:
+    torch._dynamo.allow_in_graph(FlashAttnVarlenFunc)
 
 
 @torch._dynamo.disable
@@ -171,7 +178,7 @@ class PrimusTurboLocalAttention(MegatronModule):
         # precision than the config asked for.
         self.attn_varlen_func = (
             None
-            if args.enable_turbo_attention_float8
+            if args.enable_turbo_attention_float8 or FlashAttnVarlenFunc is None
             else (
                 pt.ops.flash_attn_varlen_usp_func
                 if config.context_parallel_size > 1
@@ -214,6 +221,11 @@ class PrimusTurboLocalAttention(MegatronModule):
         ``max_seqlen_q``/``max_seqlen_kv`` are required: TE derives them from
         ``cu_seqlens`` itself, Turbo takes them as arguments.
         """
+        if FlashAttnVarlenFunc is None:
+            raise RuntimeError(
+                "thd attention needs Primus-Turbo's varlen flash attention, which this "
+                "Primus-Turbo build does not have. Use bshd, or upgrade Primus-Turbo."
+            )
         if self.attn_varlen_func is None:
             raise RuntimeError(
                 "thd attention was requested with enable_turbo_attention_float8, but Turbo "
