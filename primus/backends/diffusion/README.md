@@ -7,6 +7,11 @@ datasets, attention selection, FSDP2 wrapping, and the training loop.
 ## Supported Scope
 
 - Native models: `wan`, `flux`, `flux.1-dev`, and `flux.1-schnell`.
+- AMDiffusionBenchmark workload `flux-dev`, built by `models/registrations/flux.py`.
+  It builds the native FLUX DiT. Benchmark-only behavior (BFL QK-norm epsilon,
+  logit-normal timesteps, and pre-encoded latents) is opt-in and stays off the
+  `flux.1-dev` and `flux.1-schnell` trainers.
+
 - AMDiffusionBenchmark workload `mochi-1`, built by `models/registrations/mochi.py`.
   The denoiser is Genmo's AsymmDiTJoint. It uses the shared benchmark
   trainer and does not change the native Wan or FLUX trainers.
@@ -19,6 +24,10 @@ datasets, attention selection, FSDP2 wrapping, and the training loop.
   `~/cache/huggingface/datasets/<org>/<name>`. `PRIMUS_HF_HOME` changes the
   cache root. An explicit `HF_HOME` is used unless it is the runner's
   automatic `$DATA_PATH/huggingface`.
+- `PRIMUS_FLUX_TRITON_ROPE=1` switches FLUX RoPE to the fused Triton kernel.
+  The `benchmark_flux_dev` configs set it. Left unset, FLUX keeps the eager RoPE.
+- `BENCHMARK_DENOISER_ONLY=1` skips encoder and VAE staging, and the encoder
+  prefetch, in the benchmark prepare hook. Leave it unset for a full run.
 
 Install backend dependencies with:
 
@@ -37,8 +46,15 @@ wan2.2_ti2v_5b.yaml
 wan2.2_ti2v_5b_sft.yaml
 flux.1_schnell_t2i.yaml
 flux.1_dev_t2i.yaml
+benchmark_flux_dev.yaml
 benchmark_mochi_1.yaml
 ```
+
+`flux-dev` and `flux.1-dev` both build the native FLUX.1-dev DiT.
+`flux-dev` is the post-train preset: raw images and resolution 512.
+MI300X and MI325X use learning rate `1e-5`. The MI355X config defaults to
+`1e-4` (`LR` overrides it). The checkpoint is the official
+`flux1-dev.safetensors`, not a Diffusers-layout key set.
 
 `mochi-1` is the post-train preset. The checkpoint is the official DiT
 and VAE encoder safetensors, not a Diffusers-layout key set.
@@ -60,6 +76,10 @@ and `MAX_STEPS` override them. On MI300X or MI325X, change the config directory.
 Keep sequence parallelism at 1.
 
 ```bash
+# FLUX.1-dev, batch 16, 100 steps, frank-chieng/chinese_architecture_siheyuan
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_flux_dev-posttrain.yaml
+
 # Mochi-1, Wild-Heart/Disney-VideoGeneration-Dataset
 ./primus-cli direct -- train posttrain \
   --config examples/diffusion/configs/MI355X/benchmark_mochi_1-posttrain.yaml

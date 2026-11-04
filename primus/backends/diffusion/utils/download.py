@@ -22,11 +22,7 @@ from pathlib import Path
 
 _MODEL_FILES: dict[str, tuple[str, str]] = {
     "flux-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors"),
-    "sdxl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
-    "stable-diffusion-xl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
     "mochi-1": ("genmo/mochi-1-preview", "dit.safetensors"),
-    "hunyuan-video": ("hunyuanvideo-community/HunyuanVideo", "transformer"),
-    "wan2.1-i2v": ("Wan-AI/Wan2.1-I2V-14B-480P-Diffusers", "transformer"),
 }
 _MODEL_DOWNLOAD_PATTERNS: dict[str, list[str]] = {
     "mochi-1": ["dit.safetensors", "encoder.safetensors"],
@@ -42,11 +38,7 @@ _MOCHI_T5_DOWNLOAD_PATTERNS = [
 ]
 _DATASETS: dict[str, tuple[str, str | None]] = {
     "flux-dev": ("frank-chieng/chinese_architecture_siheyuan", None),
-    "sdxl": ("frank-chieng/chinese_architecture_siheyuan", None),
-    "stable-diffusion-xl": ("frank-chieng/chinese_architecture_siheyuan", None),
     "mochi-1": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
-    "hunyuan-video": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
-    "wan2.1-i2v": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
 }
 
 
@@ -257,42 +249,8 @@ def _companion_paths(model_name: str, weights: str, encoder: dict[str, object]) 
     found: dict[str, str] = {}
     if model_name == "flux-dev" and _blank(encoder.get("autoencoder")):
         found["VAE_CHECKPOINT"] = _require_file(root / "ae.safetensors", "FLUX autoencoder")
-    elif model_name in {"sdxl", "stable-diffusion-xl"} and _blank(encoder.get("autoencoder")):
-        vae = Path(weights) if Path(weights).is_file() else root / "sd_xl_base_1.0.safetensors"
-        found["VAE_CHECKPOINT"] = _require_file(vae, "SDXL autoencoder")
     elif model_name == "mochi-1" and _blank(encoder.get("autoencoder")):
         found["VAE_CHECKPOINT"] = _require_file(root / "encoder.safetensors", "Mochi VAE encoder")
-    elif model_name == "hunyuan-video":
-        if _blank(encoder.get("llm")):
-            found["LLM_ENCODER"] = _require_file(root / "text_encoder", "HunyuanVideo LLaMA encoder")
-        # The community snapshot sometimes ships ``vae/`` and sometimes does not.
-        # Latent batches do not need it; raw video does, and the caller can set
-        # ``encoder.autoencoder`` when the folder lives somewhere else.
-        if _blank(encoder.get("autoencoder")) and (root / "vae").exists():
-            found["VAE_CHECKPOINT"] = str(root / "vae")
-    elif model_name == "wan2.1-i2v":
-        needed = {
-            "TEXT_ENCODER": "t5_encoder",
-            "VAE_CHECKPOINT": "autoencoder",
-            "CLIP_CHECKPOINT": "image_encoder",
-        }
-        if any(_blank(encoder.get(key)) for key in needed.values()):
-            snapshot = _snapshot(
-                "Wan-AI/Wan2.1-I2V-14B-480P",
-                allow_patterns=[
-                    "Wan2.1_VAE.pth",
-                    "models_t5_umt5-xxl-enc-bf16.pth",
-                    "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
-                ],
-            )
-            files = {
-                "TEXT_ENCODER": Path(snapshot) / "models_t5_umt5-xxl-enc-bf16.pth",
-                "VAE_CHECKPOINT": Path(snapshot) / "Wan2.1_VAE.pth",
-                "CLIP_CHECKPOINT": Path(snapshot) / "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
-            }
-            for env_key, cfg_key in needed.items():
-                if _blank(encoder.get(cfg_key)):
-                    found[env_key] = _require_file(files[env_key], env_key)
     return found
 
 
@@ -321,7 +279,7 @@ def stage_benchmark_assets(
     env = cache_env()
     encoder = dict(encoder or {})
     dataset_text = str(dataset_path or "").strip()
-    if dataset_text.startswith("synthetic:") or dataset_text.endswith(".pt"):
+    if dataset_text.startswith("synthetic:"):
         _log(f"Skipping asset downloads for pre-encoded benchmark dataset: {dataset_text}")
         return env
     weights = materialize_pretrained(model_name, pretrained)

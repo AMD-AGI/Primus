@@ -61,6 +61,14 @@ def _build_fsdp2_trainer(
     )
 
 
+def _build_flux_dev(model_config: dict):
+    from primus.backends.diffusion.models.registrations.flux import (
+        build_flux_dev_benchmark,
+    )
+
+    return build_flux_dev_benchmark(model_config)
+
+
 def _build_mochi(model_config: dict):
     from primus.backends.diffusion.models.registrations.mochi import build_mochi_model
 
@@ -96,19 +104,19 @@ MODEL_BUILDERS: Dict[str, Callable[[dict], Any]] = {
     "flux": _build_flux_model,
     "flux.1-dev": _build_flux_preset_model("flux.1-dev"),
     "flux.1-schnell": _build_flux_preset_model("flux.1-schnell"),
+    "flux-dev": _build_flux_dev,
+    "mochi-1": _build_mochi,
     "wan": _build_wan_model,
 }
 DATASET_BUILDERS: Dict[str, Callable[[dict], Tuple[Any, Any]]] = {
     "flux": _build_flux_dataset,
+    "amdb": _build_amdb_dataset,
     "wan": _build_wan_dataset,
 }
 TRAINER_BUILDERS: Dict[str, Callable[..., Any]] = {
     "fsdp2": _build_fsdp2_trainer,
+    "amdb_benchmark": _build_amdb_benchmark_trainer,
 }
-
-MODEL_BUILDERS["mochi-1"] = _build_mochi
-DATASET_BUILDERS["amdb"] = _build_amdb_dataset
-TRAINER_BUILDERS["amdb_benchmark"] = _build_amdb_benchmark_trainer
 
 
 def get_model_builder(name: str) -> Callable[[dict], Any]:
