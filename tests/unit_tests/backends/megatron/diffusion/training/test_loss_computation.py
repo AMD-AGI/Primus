@@ -113,6 +113,18 @@ class TestFlowMatchingLossMask(PrimusUT):
 
         torch.testing.assert_close(masked, _masked_mean(prediction, clean, noise, mask))
 
+    def test_soft_mask_totalling_below_one_is_not_rescaled(self):
+        """A weight total in (0, 1) is still the denominator, so one kept element gives its own loss."""
+        prediction, clean, noise = _inputs(2, 4, 3, 3)
+        mask = torch.zeros(2, 4, 3, 3)
+        mask[0, 1, 2, 0] = 0.5
+
+        masked = compute_flow_matching_loss(prediction, clean, noise, mask)
+
+        expected = (prediction[0, 1, 2, 0] - (noise[0, 1, 2, 0] - clean[0, 1, 2, 0])) ** 2
+        torch.testing.assert_close(masked, expected)
+        torch.testing.assert_close(masked, _masked_mean(prediction, clean, noise, mask))
+
     def test_all_zero_mask_gives_zero_not_nan(self):
         """A micro-batch that is all padding must not put NaN into the gradients."""
         prediction, clean, noise = _inputs(2, 16, 8, 8)
