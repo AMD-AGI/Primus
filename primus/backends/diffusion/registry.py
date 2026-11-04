@@ -75,6 +75,12 @@ def _build_wan21_i2v(model_config: dict):
     return build_wan21_i2v_model(model_config)
 
 
+def _build_sdxl(model_config: dict):
+    from primus.backends.diffusion.models.registrations.sdxl import build_sdxl_model
+
+    return build_sdxl_model(model_config)
+
+
 def _build_amdb_dataset(dataset_config: dict):
     from primus.backends.diffusion.data.registrations.benchmark import (
         build_benchmark_dataset,
@@ -105,6 +111,8 @@ MODEL_BUILDERS: Dict[str, Callable[[dict], Any]] = {
     "flux.1-dev": _build_flux_preset_model("flux.1-dev"),
     "flux.1-schnell": _build_flux_preset_model("flux.1-schnell"),
     "flux-dev": _build_flux_dev,
+    "sdxl": _build_sdxl,
+    "stable-diffusion-xl": _build_sdxl,
     "wan": _build_wan_model,
     "wan2.1-i2v": _build_wan21_i2v,
 }

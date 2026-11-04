@@ -8,7 +8,7 @@ from primus.backends.diffusion.argument_builder import DiffusionArgBuilder
 from primus.backends.diffusion.data.benchmark import AMDBProcessor
 from primus.backends.diffusion.registry import DATASET_BUILDERS, MODEL_BUILDERS
 
-BENCHMARK_NAMES = ("flux-dev", "wan2.1-i2v")
+BENCHMARK_NAMES = ("flux-dev", "wan2.1-i2v", "sdxl", "stable-diffusion-xl")
 
 
 def _finalize(params: dict):
@@ -45,13 +45,14 @@ def test_benchmark_argument_builder_selects_flux_dev_defaults():
 
 
 def test_benchmark_argument_builder_rejects_sequence_parallelism():
-    with pytest.raises(ValueError, match="sp_size"):
-        _finalize(
-            {
-                "model": {"name": "flux-dev", "config": {}},
-                "parallelism": {"sp_size": 2},
-            }
-        )
+    for name in ("flux-dev", "sdxl"):
+        with pytest.raises(ValueError, match="sp_size"):
+            _finalize(
+                {
+                    "model": {"name": name, "config": {}},
+                    "parallelism": {"sp_size": 2},
+                }
+            )
 
 
 def test_amdb_processor_groups_raw_samples():
@@ -89,6 +90,13 @@ def test_benchmark_downloads_keep_datasets_separate(monkeypatch, tmp_path):
         "revision": None,
     }
     assert home / "hub" not in Path(path).parents
+
+    path = download.materialize_dataset("sdxl", "")
+    assert Path(path) == home / "datasets" / "frank-chieng" / "chinese_architecture_siheyuan"
+    assert calls == {
+        "repo": "frank-chieng/chinese_architecture_siheyuan",
+        "revision": None,
+    }
 
     weights = tmp_path / "flux1-dev.safetensors"
     weights.write_bytes(b"x")
@@ -247,7 +255,7 @@ def test_even_batches_pad_short_tail_like_accelerate():
 
 
 def test_unbuilt_benchmark_models_fail_before_download():
-    for name in ("sdxl", "stable-diffusion-xl", "mochi-1", "hunyuan-video"):
+    for name in ("mochi-1", "hunyuan-video"):
         with pytest.raises(ValueError, match="no diffusion model builder"):
             _finalize({"model": {"name": name, "config": {}}, "data": {"dataset_path": "x"}})
 
@@ -445,9 +453,9 @@ def test_flux_prepare_hook_rewrites_paths_and_reports_auth_failures(monkeypatch,
 
     monkeypatch.setattr(download, "stage_benchmark_assets", refuse_download)
     with pytest.raises(SystemExit):
-        diffusion_prepare._reject_unbuilt_benchmark("sdxl")
+        diffusion_prepare._reject_unbuilt_benchmark("mochi-1")
     assert "no diffusion model builder" in capsys.readouterr().err
-    assert diffusion_prepare._BENCHMARK_DOWNLOADS == {"flux-dev", "wan2.1-i2v"}
+    assert diffusion_prepare._BENCHMARK_DOWNLOADS == {"flux-dev", "wan2.1-i2v", "sdxl", "stable-diffusion-xl"}
 
 
 def test_build_flux_dev_benchmark_loads_amdb_defaults(monkeypatch, tmp_path):
@@ -748,3 +756,295 @@ def test_checkpoint_loads_disable_pickle(monkeypatch, tmp_path):
     monkeypatch.setattr(torch, "load", spy)
     assert "weight" in load_state_dict(str(path))
     assert seen["weights_only"] is True
+
+
+def test_sdxl_uses_the_amdb_dataset_and_unet_blocks():
+    args = _finalize({"model": {"name": "sdxl", "config": {}}, "data": {"dataset_path": "x"}})
+    assert args.dataset["name"] == "amdb"
+    assert args.dataset["config"]["modality"] == "image"
+    assert args.trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] == "BasicTransformerBlock"
+    assert args.trainer["args"]["learning_rate"] == 1.0e-4
+
+
+def test_sdxl_companion_checkpoint_is_the_unet_file(tmp_path):
+    import primus.backends.diffusion.utils.download as download
+
+    weights = tmp_path / "sd_xl_base_1.0.safetensors"
+    weights.write_bytes(b"sdxl")
+    assert download._companion_paths("sdxl", str(weights), {})["VAE_CHECKPOINT"] == str(weights)
+
+
+def test_sdxl_benchmark_disables_grad_clipping_by_default():
+    args = _finalize({"model": {"name": "sdxl", "config": {}}, "data": {"dataset_path": "x"}})
+    assert args.trainer["args"]["max_grad_norm"] == 0.0
+
+
+def test_unregistered_benchmark_presets_are_rejected():
+    with pytest.raises(ValueError, match="no diffusion model builder"):
+        _finalize({"model": {"name": "mochi-1", "config": {}}})
+
+
+def test_benchmark_data_overrides_reach_the_dataset_and_model():
+    args = _finalize(
+        {
+            "model": {"name": "stable-diffusion-xl", "config": {}},
+            "data": {
+                "modality": "image",
+                "max_train_samples": 4,
+                "revision": "main",
+                "split": "validation",
+                "resolution": 512,
+                "num_frames": 1,
+                "center_crop": True,
+                "shift": 3.0,
+            },
+        }
+    )
+    cfg = args.dataset["config"]
+    assert cfg["model_name"] == "sdxl"
+    assert cfg["modality"] == "image"
+    assert cfg["max_train_samples"] == 4
+    assert cfg["revision"] == "main"
+    assert cfg["split"] == "validation"
+    assert args.model["config"]["resolution"] == 512
+    assert args.model["config"]["num_frames"] == 1
+    assert args.model["config"]["center_crop"] is True
+    assert args.model["config"]["shift"] == 3.0
+
+
+def test_dataloader_even_batches_follows_the_flag(tmp_path):
+    import torch
+
+    from primus.backends.diffusion.trainers.base import (
+        BaseWanTrainer,
+        EvenSizeBatchSampler,
+    )
+
+    class _Trainer(BaseWanTrainer):
+        def _apply_parallelism(self):
+            return None
+
+        def _setup_mlperf(self):
+            return None
+
+    class _Rows:
+        def __init__(self, count: int):
+            self.count = count
+
+        def __len__(self) -> int:
+            return self.count
+
+        def __getitem__(self, index: int) -> int:
+            return index
+
+        def get_collator(self):
+            return lambda batch: batch
+
+    def _make(flag: bool, *, mlperf: bool = False):
+        rows = _Rows(8)
+        args = {
+            "dataloader_even_batches": flag,
+            "mlperf_enable": mlperf,
+            "per_device_train_batch_size": 4,
+            "dataloader_num_workers": 0,
+            "output_dir": str(tmp_path / f"loader-{flag}-{mlperf}"),
+            "report_to": "none",
+        }
+        if mlperf:
+            args["mlperf_train_samples"] = len(rows)
+            args["mlperf_eval_total_samples"] = len(rows)
+        return _Trainer(
+            model=torch.nn.Linear(1, 1),
+            args=args,
+            train_dataset=rows,
+            data_collator=lambda batch: batch,
+            processing_class=None,
+            rank=0,
+            world_size=1,
+            local_rank=0,
+            eval_dataset=rows if mlperf else None,
+        )
+
+    even = _make(True)
+    assert isinstance(even.dataloader.batch_sampler, EvenSizeBatchSampler)
+    plain = _make(False)
+    assert not isinstance(plain.dataloader.batch_sampler, EvenSizeBatchSampler)
+    mlperf = _make(True, mlperf=True)
+    assert not isinstance(mlperf.dataloader.batch_sampler, EvenSizeBatchSampler)
+
+
+def test_placeholder_pretrained_downloads_only_the_unet_file(monkeypatch, tmp_path):
+    import primus.backends.diffusion.utils.download as download
+
+    monkeypatch.setenv("PRIMUS_HF_HOME", str(tmp_path / "hf"))
+    calls = {}
+
+    def fake_snapshot(repo_id, *, revision=None, allow_patterns=None):
+        calls["repo"] = repo_id
+        calls["allow_patterns"] = allow_patterns
+        folder = tmp_path / "snap"
+        folder.mkdir()
+        (folder / "sd_xl_base_1.0.safetensors").write_bytes(b"sdxl")
+        return str(folder)
+
+    monkeypatch.setattr(download, "_snapshot", fake_snapshot)
+    path = download.materialize_pretrained("sdxl", "/path/to/sd_xl_base_1.0.safetensors")
+    assert path.endswith("sd_xl_base_1.0.safetensors")
+    assert calls["repo"] == "stabilityai/stable-diffusion-xl-base-1.0"
+    assert calls["allow_patterns"] == ["sd_xl_base_1.0.safetensors"]
+
+
+def test_load_matching_rejects_an_unrelated_checkpoint(tmp_path):
+    import torch
+
+    from primus.backends.diffusion.utils.checkpoint_io import load_matching
+
+    class _Tiny(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(2))
+
+    wrong = tmp_path / "wrong.pt"
+    torch.save({"unrelated": torch.zeros(2)}, wrong)
+    with pytest.raises(RuntimeError, match="partial initialization"):
+        load_matching(_Tiny(), str(wrong))
+
+    right = tmp_path / "right.pt"
+    torch.save({"weight": torch.ones(2), "extra": torch.zeros(1)}, right)
+    missing, unexpected = load_matching(_Tiny(), str(right))
+    assert missing == 0
+    assert unexpected == 1
+
+
+def test_sdxl_timesteps_match_the_applied_noise_level():
+    import torch
+
+    from primus.backends.diffusion.utils.sampling import (
+        amdb_flow_sigma_grid,
+        sample_amdb_sdxl_sigmas,
+    )
+
+    grid = amdb_flow_sigma_grid(shift=3.0, num_train_timesteps=1000, zero_terminal=True)
+    timesteps, sigma = sample_amdb_sdxl_sigmas(64, device=torch.device("cpu"), sigma_grid=grid)
+    indices = 999 - timesteps
+    assert torch.equal(sigma, grid[indices])
+    assert int(timesteps[int(sigma.argmax())]) > int(timesteps[int(sigma.argmin())])
+
+
+def test_sdxl_compute_loss_noises_with_the_timestep_schedule(monkeypatch):
+    import torch
+    from torch import nn
+
+    from primus.backends.diffusion.models.sdxl import train_pipeline as pipeline_module
+    from primus.backends.diffusion.models.sdxl.train_pipeline import SDXLTrainPipeline
+
+    pipeline = SDXLTrainPipeline(resolution=64)
+    fixed_timesteps = torch.tensor([999])
+
+    def fake_sample(batch_size, *, device, **kwargs):
+        del batch_size, kwargs
+        return fixed_timesteps.to(device), torch.tensor([0.9], device=device)
+
+    monkeypatch.setattr(pipeline_module, "sample_amdb_sdxl_sigmas", fake_sample)
+    noise = torch.ones(1, 4, 2, 2)
+
+    def _ones_like(latents):
+        return noise.to(device=latents.device, dtype=latents.dtype)
+
+    monkeypatch.setattr(torch, "randn_like", _ones_like)
+
+    class _Dit(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = nn.Parameter(torch.zeros(1))
+            self.timesteps = None
+            self.noisy = None
+
+        def forward(self, noisy, timesteps, context=None, y=None):
+            del context, y
+            self.timesteps = timesteps.detach().clone()
+            self.noisy = noisy.detach().clone()
+            return torch.zeros_like(noisy)
+
+    dit = _Dit()
+    latents = torch.zeros(1, 4, 2, 2)
+    loss = pipeline.compute_loss(
+        dit=dit,
+        autoencoder=None,
+        text_encoder=None,
+        batch={
+            "latents": latents,
+            "context": torch.zeros(1, 4, 8),
+            "pooled": torch.zeros(1, 4),
+        },
+    )
+    assert int(dit.timesteps[0]) == 999
+    alpha = pipeline._alphas[999]
+    expected = (alpha.sqrt() * latents + (1.0 - alpha).sqrt() * noise).to(latents.dtype)
+    assert torch.allclose(dit.noisy, expected)
+    assert loss["loss"].ndim == 0
+    assert torch.isfinite(loss["loss"])
+
+    calls = {"grid": 0}
+    real_grid = pipeline_module.amdb_flow_sigma_grid
+
+    def counting_grid(**kwargs):
+        calls["grid"] += 1
+        return real_grid(**kwargs)
+
+    monkeypatch.setattr(pipeline_module, "amdb_flow_sigma_grid", counting_grid)
+    pipeline.compute_loss(
+        dit=dit,
+        autoencoder=None,
+        text_encoder=None,
+        batch={
+            "latents": latents,
+            "context": torch.zeros(1, 4, 8),
+            "pooled": torch.zeros(1, 4),
+        },
+    )
+    assert calls["grid"] == 0
+
+
+def test_accumulated_update_fps_counts_every_microbatch():
+    from primus.backends.diffusion.trainers.base import benchmark_step_rates
+
+    one_microbatch, _ = benchmark_step_rates(local_batch_size=4, step_time_gpu_s=2.0, total_flops=0.0)
+    full_update, _ = benchmark_step_rates(local_batch_size=8, step_time_gpu_s=2.0, total_flops=0.0)
+    assert one_microbatch == 2.0
+    assert full_update == 4.0
+
+
+def test_cached_latents_replace_the_raw_loader(monkeypatch):
+    import torch
+
+    from primus.backends.diffusion.trainers.benchmark import AMDBBenchmarkTrainer
+
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None, raising=False)
+    trainer = AMDBBenchmarkTrainer.__new__(AMDBBenchmarkTrainer)
+    trainer.rank = 0
+    trainer.per_device_train_batch_size = 4
+    trainer.args = {"shuffle": False, "dataloader_drop_last": False}
+    trainer.sampler = type("Sampler", (), {"set_epoch": lambda self, epoch: None})()
+    trainer.processing_class = None
+    trainer.dataloader = [{"images": torch.zeros(4, 3, 8, 8), "prompts": ["p"] * 4}]
+    trainer._prepare_host_batch = lambda batch: batch
+    trainer._prepare_batch = lambda batch, processor: batch
+
+    class _Model:
+        def encode_batch(self, batch):
+            assert "images" in batch
+            count = batch["images"].shape[0]
+            return {
+                "latents": torch.arange(count).float().view(count, 1),
+                "context": torch.zeros(count, 1),
+                "pooled": torch.zeros(count, 1),
+            }
+
+    trainer.model = _Model()
+    trainer._cache_encoded_batches()
+    batches = list(trainer.dataloader)
+    assert trainer._encoded_cache is True
+    assert [batch["latents"].shape[0] for batch in batches] == [4]
+    assert "images" not in batches[0]
+    assert batches[0]["prompts"] == ["p", "p", "p", "p"]
