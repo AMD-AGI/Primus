@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# env.sh — Primus JAX/MaxText venv environment (v26.8).
+# env.sh — Primus JAX/MaxText venv environment (v26.9).
+# Derived from .github/workflows/docker-release/Dockerfile.jax-v26.9
 # Source this both during the build (setup.sh does it) and every time you
 # want to USE the environment:   source env.sh
 #
-# This mirrors the v26.8 JAX training Dockerfile, adapted for a no-docker /
+# This mirrors the v26.9 JAX training Dockerfile, adapted for a no-docker /
 # no-sudo bare-metal install. ROCm is delivered as pip TheRock wheels
-# (`rocm-sdk-devel` 10.2.0a20260923), same as the image. No system ROCm is
+# (`rocm-sdk-devel` 10.3.0a20261026), same as the image. No system ROCm is
 # required.
 #
 # NOTE: PRIMUS_JAX_BASE is REQUIRED (no default) — export it to a big-disk dir

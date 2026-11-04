@@ -12,7 +12,7 @@ The following aligns with the backend overview and the configs present in this t
 
 | Backend | Model families (documentation / stack scope) |
 | ------- | ---------------------------------------------- |
-| **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite), DeepSeek-V3, and DeepSeek-V4 (flash / pro — from v26.7 also on gfx942 with context parallelism at 128k, and packed-sequence THD SFT; see [`examples/megatron/models/deepseek-v4`](https://github.com/AMD-AGI/Primus/tree/main/examples/megatron/models/deepseek-v4)), Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM, Kimi K2, LFM2, MiniMax (M2.5 and the M3 text tower), ZAYA1-8B (from v26.8), Zebra LLaMA (including GDN and KDA linear-attention variants), Mamba, and generic `language_model.yaml` bases. |
+| **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite), DeepSeek-V3, and DeepSeek-V4 (flash / pro—from v26.7 also on `gfx942` with context parallelism at 128k, and packed-sequence THD SFT; see [`examples/megatron/models/deepseek-v4`](https://github.com/AMD-AGI/Primus/tree/main/examples/megatron/models/deepseek-v4)), Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM (including GLM-5.3-Flash, from v26.9), Kimi K2, LFM2, MiniMax (M2.5 and the M3 text tower), ZAYA1-8B (from v26.8), Zebra LLaMA (including GDN and KDA linear-attention variants), Mamba, and generic `language_model.yaml` bases. |
 | **TorchTitan** | LLaMA3 family (including 3.1), LLaMA4 examples, DeepSeek-V3 examples, and Qwen3 examples including 0.6B, 1.7B, 4B, 8B, 14B, and 32B variants where present. Additional presets exist under `primus/configs/models/torchtitan/` without being exhaustively listed here. |
 | **MaxText (JAX)** | LLaMA2 / LLaMA3 / LLaMA3.3, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, Qwen3 14B / 30B-A3B (per presets and examples). Broader coverage may exist in upstream MaxText; see [MaxText](https://github.com/AI-Hypercomputer/maxtext). |
 | **Megatron Bridge** | Qwen3 pretraining and post-training examples, plus post-training examples for Zebra LLaMA and Mamba where present. LLaMA 3.1 70B Bridge examples appear under MI355X. |
@@ -28,7 +28,7 @@ The following aligns with the backend overview and the configs present in this t
 
 Model presets live in `primus/configs/models/megatron/`. Example experiments that reference those presets appear under `examples/megatron/configs/MI300X/`, `MI325X/`, and `MI355X/`.
 
-For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (25 configs each). For **Megatron**, MI300X has 82 example configs and MI325X 70: MI325X has everything MI300X has except the pure GDN/KDA and the GDN/KDA/300M Zebra LLaMA hybrid recipes, and `qwen3_5_35B_A3B` (BF16 and FP8). **MI355X** has 122, adding models such as `glm5`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, `minimax_m2.5` and `minimax_m3`. **MI455X** (gfx1250) has four single-GPU LoRA-SFT proxies. Each row's SKU list below reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
+For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (25 configs each). For **Megatron**, MI300X has 82 example configs and MI325X 70: MI325X has everything MI300X has except the pure GDN/KDA and the GDN/KDA/300M Zebra LLaMA hybrid recipes, and `qwen3_5_35B_A3B` (BF16 and FP8). **MI355X** has 124, adding models such as `glm5`, `glm5_3_flash`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, `minimax_m2.5`, and `minimax_m3`. **gfx1250** has seven single-GPU LoRA-SFT configs: the BF16 recipes, plus FP8 hybrid proxies for Llama-2-70B, Qwen2.5-72B, and Qwen3-235B-A22B added in v26.9. Each row's SKU list in the following table reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
 
 | Model name (file) | Preset path | Role | Example experiment dirs | Precision in examples |
 | ----------------- | ----------- | ---- | ----------------------- | ---------------------- |
@@ -42,6 +42,9 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `deepseek_v4_base.yaml` | `primus/configs/models/megatron/deepseek_v4_base.yaml` | Base fragment | — | — |
 | `glm4_7.yaml` | `primus/configs/models/megatron/glm4_7.yaml` | Model preset | No curated example in this repo | — |
 | `glm5.yaml` | `primus/configs/models/megatron/glm5.yaml` | Model preset | MI355X | BF16, FP8 |
+| `glm5_3_flash.yaml` | `primus/configs/models/megatron/glm5_3_flash.yaml` | Hybrid MoE preset (GLM-5.3-Flash, 45 layers, KDA + DSA with mHC) | MI355X | BF16 |
+| `glm5_3_flash_8L.yaml` | `primus/configs/models/megatron/glm5_3_flash_8L.yaml` | First 8 layers of GLM-5.3-Flash, for smoke tests | MI355X (`PRIMUS_MODEL=glm5_3_flash_8L`) | BF16 |
+| `glm5_next_base.yaml` | `primus/configs/models/megatron/glm5_next_base.yaml` | Base fragment | — | — |
 | `gpt_oss_20B.yaml` | `primus/configs/models/megatron/gpt_oss_20B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `gpt_oss_120B.yaml` | `primus/configs/models/megatron/gpt_oss_120B.yaml` | Model preset | MI355X | BF16, FP8 |
 | `grok1.yaml` | `primus/configs/models/megatron/grok1.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
@@ -55,7 +58,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `llama2_7B.yaml` | `primus/configs/models/megatron/llama2_7B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama2_13B.yaml` | `primus/configs/models/megatron/llama2_13B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama2_70B.yaml` | `primus/configs/models/megatron/llama2_70B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
-| `llama2_70B_4layer_proxy.yaml` | `primus/configs/models/megatron/llama2_70B_4layer_proxy.yaml` | 4-layer single-GPU proxy | MI455X (LoRA SFT) | BF16 |
+| `llama2_70B_4layer_proxy.yaml` | `primus/configs/models/megatron/llama2_70B_4layer_proxy.yaml` | 4-layer single-GPU proxy | gfx1250 (LoRA SFT) | BF16, FP8 |
 | `llama2_base.yaml` | `primus/configs/models/megatron/llama2_base.yaml` | Base fragment | — | — |
 | `llama_base.yaml` | `primus/configs/models/megatron/llama_base.yaml` | Base fragment | — | — |
 | `llama3_8B.yaml` | `primus/configs/models/megatron/llama3_8B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
@@ -65,7 +68,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `llama3.1_70B.yaml` | `primus/configs/models/megatron/llama3.1_70B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama3.1_405B.yaml` | `primus/configs/models/megatron/llama3.1_405B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama3.2_1B.yaml` | `primus/configs/models/megatron/llama3.2_1B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
-| `llama3.2_1B_hf.yaml` | `primus/configs/models/megatron/llama3.2_1B_hf.yaml` | Hugging Face-tokenizer variant for native SFT | MI455X (LoRA SFT) | BF16 |
+| `llama3.2_1B_hf.yaml` | `primus/configs/models/megatron/llama3.2_1B_hf.yaml` | Hugging Face-tokenizer variant for native SFT | gfx1250 (LoRA SFT) | BF16 |
 | `llama3.2_3B.yaml` | `primus/configs/models/megatron/llama3.2_3B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama3.3_70B.yaml` | `primus/configs/models/megatron/llama3.3_70B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama4_17B128E.yaml` | `primus/configs/models/megatron/llama4_17B128E.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
@@ -89,7 +92,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `qwen2.5_14B.yaml` | `primus/configs/models/megatron/qwen2.5_14B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen2.5_32B.yaml` | `primus/configs/models/megatron/qwen2.5_32B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen2.5_72B.yaml` | `primus/configs/models/megatron/qwen2.5_72B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 (MXFP4 on MI355X) |
-| `qwen2.5_72B_4layer_proxy.yaml` | `primus/configs/models/megatron/qwen2.5_72B_4layer_proxy.yaml` | 4-layer single-GPU proxy | MI455X (LoRA SFT) | BF16 |
+| `qwen2.5_72B_4layer_proxy.yaml` | `primus/configs/models/megatron/qwen2.5_72B_4layer_proxy.yaml` | 4-layer single-GPU proxy | gfx1250 (LoRA SFT) | BF16, FP8 |
 | `qwen2.5_base.yaml` | `primus/configs/models/megatron/qwen2.5_base.yaml` | Base fragment | — | — |
 | `qwen3_4B.yaml` | `primus/configs/models/megatron/qwen3_4B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen3_8B.yaml` | `primus/configs/models/megatron/qwen3_8B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
@@ -98,7 +101,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `qwen3_30B_A3B.yaml` | `primus/configs/models/megatron/qwen3_30B_A3B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 (MXFP4 on MI355X) |
 | `qwen3_5_35B_A3B.yaml` | `primus/configs/models/megatron/qwen3_5_35B_A3B.yaml` | MoE model preset | MI300X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
-| `qwen3_235B_A22B_4layer_proxy.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B_4layer_proxy.yaml` | 4-layer single-GPU MoE proxy | MI455X (LoRA SFT) | BF16 |
+| `qwen3_235B_A22B_4layer_proxy.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B_4layer_proxy.yaml` | 4-layer single-GPU MoE proxy | gfx1250 (LoRA SFT) | BF16, FP8 |
 | `zaya1.yaml` | `primus/configs/models/megatron/zaya1.yaml` | MoE model preset (ZAYA1-8B, CCA + MoE) | MI300X, MI325X, MI355X | BF16, FP8 |
 | `zaya1_base.yaml` | `primus/configs/models/megatron/zaya1_base.yaml` | Base fragment | — | — |
 | `zebra_mamba_1B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_1B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
@@ -113,7 +116,9 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `gdn_1B.yaml` | `primus/configs/models/megatron/gdn_1B.yaml` | Pure GDN preset | MI300X, MI355X | `gdn_1B_BF16-pretrain.yaml` |
 | `gdn_300M.yaml` | `primus/configs/models/megatron/gdn_300M.yaml` | Pure GDN preset | MI300X | `gdn_300M_BF16-pretrain.yaml` |
 
-**ZAYA1-8B:** `zaya1.yaml` follows the released Zyphra/ZAYA1-base checkpoint (80 decoder stages alternating CCA attention and MoE). The MI300X, MI325X, and MI355X BF16 and FP8 examples are 30-iteration mock-data runs. On each GPU the micro-batch size is the largest that completes on one 8-GPU node with `rocm/primus:v26.8`. The `zaya1_8B-FP8-pretrain.yaml` recipes set `fp8: hybrid` with tensorwise scaling, so FP8 is accurate from a cold start: CCA projections and expert SwiGLU GEMMs run as Transformer Engine FP8 linears, and the router, convolutions, norms, attention, embeddings, and tied logits stay in BF16. They also set `NVTE_USE_CAST_TRANSPOSE_TRITON=0`, because the Triton cast kernel autotunes for every new expert token count. The BF16 port landed on `main` in [#1199](https://github.com/AMD-AGI/Primus/pull/1199).
+**ZAYA1-8B:** `zaya1.yaml` follows the released Zyphra/ZAYA1-base checkpoint (80 decoder stages alternating CCA attention and MoE). The MI300X, MI325X, and MI355X BF16 and FP8 examples are 30-iteration mock-data runs. On each GPU the micro-batch size is the largest that completed on one 8-GPU node with `rocm/primus:v26.8`, when the recipes were sized. The `zaya1_8B-FP8-pretrain.yaml` recipes set `fp8: hybrid` with tensorwise scaling, so FP8 is accurate from a cold start: CCA projections and expert SwiGLU GEMMs run as Transformer Engine FP8 linears, and the router, convolutions, norms, attention, embeddings, and tied logits stay in BF16. They also set `NVTE_USE_CAST_TRANSPOSE_TRITON=0`, because the Triton cast kernel autotunes for every new expert token count. The BF16 port landed on `main` in [#1199](https://github.com/AMD-AGI/Primus/pull/1199).
+
+**GLM-5.3-Flash:** `glm5_3_flash.yaml` (`model_type: glm5_next`) is a 45-layer hybrid: KDA linear attention on 34 layers, DSA sparse attention on 11, manifold-constrained hyper-connections (mHC) as the residual, and a 288-expert MoE. `examples/megatron/configs/MI355X/glm5_3_flash-BF16-pretrain.yaml` and [`examples/megatron/models/glm5-3-flash/run_glm5_3_flash.sh`](https://github.com/AMD-AGI/Primus/tree/main/examples/megatron/models/glm5-3-flash) run it, and can load the released Hugging Face checkpoint for any TP / EP / PP (`GLM5_HF_LOAD`). Its forward-only log-probabilities match SGLang on the released checkpoint, and the 8-layer `glm5_3_flash_8L.yaml` trains from scratch. Training the full 45-layer model needs at least four MI355X nodes and has not been run. The DSA indexer is frozen (no gradient, no indexer distillation loss), and no Primus Turbo paths are enabled (`enable_primus_turbo: false`) ([#1230](https://github.com/AMD-AGI/Primus/pull/1230)). Packed sequences (`--qkv-format thd`) run under context parallelism, and the loader also accepts text-only Hugging Face exports ([#1265](https://github.com/AMD-AGI/Primus/pull/1265), [#1254](https://github.com/AMD-AGI/Primus/pull/1254)).
 
 **MiniMax M3:** `minimax_m3.yaml` covers the text tower only. The `swigluoai` activation and Gemma-style RMSNorm map onto existing Megatron options, and MiniMax Sparse Attention (MSA) runs on FlyDSL kernels on MI355X by default (`msa_backend: flydsl`), with a plain-PyTorch reference backend (`msa_backend: eager`) for other GPUs. Tensor, context and sequence parallelism for MSA, MTP, and the vision tower are not supported yet. The preset records the unmapped `config.json` values as comments.
 
@@ -210,9 +215,9 @@ Curated example layouts under `examples/` use GPU SKU subdirectories. As of this
 | **MI300X** | Yes | Yes | Yes | Yes |
 | **MI355X** | Yes | Yes | Yes | Yes |
 | **MI325X** | Yes | Yes | Yes | No |
-| **MI455X** | Yes (LoRA-SFT proxies) | No | No | No |
+| **gfx1250** | Yes (LoRA-SFT proxies) | No | No | No |
 
-Megatron, TorchTitan and MaxText ship MI325X example directories in addition to MI300X and MI355X examples. MaxText includes MI355X-only entries such as `llama3.1_405B-pretrain.yaml`. Megatron's MI455X (gfx1250) directory holds single-GPU LoRA-SFT proxies for bring-up. Megatron Bridge MI300X examples include Qwen3 8B and 32B pretraining plus Qwen3 32B, Zebra LLaMA, and Mamba post-training examples; LLaMA 3.1 70B Bridge examples appear under MI355X.
+Megatron, TorchTitan and MaxText ship MI325X example directories in addition to MI300X and MI355X examples. MaxText includes MI355X-only entries such as `llama3.1_405B-pretrain.yaml`. Megatron's gfx1250 examples are single-GPU LoRA-SFT proxies for bring-up. Megatron Bridge MI300X examples include Qwen3 8B and 32B pretraining plus Qwen3 32B, Zebra LLaMA, and Mamba post-training examples; LLaMA 3.1 70B Bridge examples appear under MI355X.
 
 Absence of a SKU directory for a given backend does **not** imply the backend cannot run there; it means this tree does not currently provide a checked-in example path to copy from.
 

@@ -1,7 +1,7 @@
-# Primus JAX / MaxText environment in a venv (no docker, no sudo) — v26.8
+# Primus JAX / MaxText environment in a venv (no docker, no sudo) — v26.9
 
-Reproduces the Primus **v26.8 JAX training Dockerfile**
-([`Dockerfile.jax-v26.8`](../../.github/workflows/docker-release/Dockerfile.jax-v26.8))
+Reproduces the Primus **v26.9 JAX training Dockerfile**
+([`Dockerfile.jax-v26.9`](../../.github/workflows/docker-release/Dockerfile.jax-v26.9))
 in a Python virtual environment. Same package pins as the Dockerfile, adapted for
 a bare-metal host with no root and no containers.
 
@@ -13,13 +13,13 @@ training backend of Primus.
 
 | Constraint | Dockerfile | Here |
 |---|---|---|
-| ROCm | pip `rocm-sdk-*` 10.2.0a20260923 → `/opt/venv/.../_rocm_sdk_devel` | same wheels → in-venv `_rocm_sdk_devel` (**no sudo**) |
+| ROCm | pip `rocm-sdk-*` 10.3.0a20261026 → `/opt/venv/.../_rocm_sdk_devel` | same wheels → in-venv `_rocm_sdk_devel` (**no sudo**) |
 | GPU arch | gfx942 + gfx950 | **auto-detected** from the host (`rocminfo`/KFD sysfs) for source builds/TE |
 | Build dir | container FS | venv on **`$PRIMUS_JAX_BASE`** (persistent); transient sources on local `/tmp` |
 | System deps | `apt install ...` | **skipped** (no sudo); documented in the guide's Section 2 |
 | MaxText setup | `setup.sh TF=true` (runs `apt`, prompts for a venv) | Python steps only, with the same TF extras (apt is a one-time root action; venv already made) |
 | Installer | `uv pip` | `pip` (MaxText's own requirements still go through `uv`) |
-| Primus | not in the image; mounted at run time | `release/v26.8` cloned into `$WORKSPACE_DIR/Primus` |
+| Primus | cloned at commit `db1a4160…` (on `release/v26.9`) | same commit, cloned into `$WORKSPACE_DIR/Primus` |
 | `LD_LIBRARY_PATH` | blanked at the end of the image | blanked at runtime (`PRIMUS_JAX_KEEP_ROCM_LD=1` for RCCL/TE source builds) |
 
 The key reason no sudo is required: the `rocm-sdk-devel` pip wheel ships a full
@@ -46,11 +46,12 @@ ROCm toolchain inside the venv, so we don't depend on system ROCm or apt.
 > 22.04 (2.35) included. The `te` stage checks the host glibc and only falls back
 > to the from-source build below 2.28. Check with `ldd --version`.
 
-> **The ROCm SDK is a nightly.** v26.8 pins ROCm `10.2.0a20260923` from
+> **The ROCm SDK is a nightly.** v26.9 pins ROCm `10.3.0a20261026` from
 > `nightly.repo.amd.com`, and the TE wheel from the frameworks-nightlies staging
 > index. Nightly indexes are pruned; if a pin stops resolving, the release
-> Dockerfile is the reference for a replacement set — ROCm, the JAX plugin pair
-> and TE must all target the same ROCm build.
+> Dockerfile is the reference for a replacement set — ROCm and the JAX plugin pair
+> must target the same ROCm build. (The image's TE wheels are a ROCm 10.2 nightly
+> build, `rocm10.2.0a20261002`; that pairing is the image's, and it is kept.)
 
 ## Run it
 
@@ -89,42 +90,44 @@ cd "$WORKSPACE_DIR/Primus"
 checkout we installed the dependencies for. Configs for MI325X live in
 `examples/maxtext/configs/MI325X/`, and for MI350X/MI355X in `MI355X/`.
 
-## Stages (default order, v26.8)
+## Stages (default order, v26.9)
 
 `venv` → `rocm` → `maxtext` → `tf_source` → `jax` → `te` → `primus`
 → `jaxreqs` → `manifest`
 
 - **venv** — create the venv (Python ≥ 3.12) and bootstrap `cmake`/`ninja`/`uv`
-  and the `urllib3==2.8.0` CVE pin.
-- **rocm** — pip-install TheRock `rocm-sdk-*` `10.2.0a20260923` (core/devel/libraries
+  and the `msgpack==1.2.3` / `urllib3==2.8.0` CVE pins.
+- **rocm** — pip-install TheRock `rocm-sdk-*` `10.3.0a20261026` (core/devel/libraries
   + per-arch device wheels) from the ROCm nightly index and run `rocm-sdk init`.
-- **maxtext** — clone ROCm/MaxText (`release/v26.8`) and install its deps (the
+- **maxtext** — clone ROCm/MaxText (`release/v26.9`) and install its deps (the
   Python part of MaxText's `setup.sh`, with `--with-tf` as the image's `TF=true`)
   + the editable MaxText package.
 - **tf_source** — build **tensorflow-cpu 2.21 from source** (bazel); fixes the
   ROCm-vs-TF LLVM symbol clash (SIGSEGV) and drops bundled NCCL. See the note on
   the LLVM archive below.
-- **jax** — `jax`/`jaxlib` 0.11.1 from PyPI + `jax_rocm10_pjrt` / `jax_rocm10_plugin`
-  `0.11.1+rocm10.2.0a20260923` from the ROCm nightly jax index (installed after
+- **jax** — `jax`/`jaxlib` 0.12.0 from PyPI + `jax_rocm10_pjrt` / `jax_rocm10_plugin`
+  `0.12.0+rocm10.3.0a20261026` from the ROCm nightly jax index (installed after
   MaxText to override its stock jax).
 - **te** — prebuilt `transformer_engine_rocm_jax` and `transformer-engine-rocm10`
-  `2.18.0.dev0+rocm10.2.0a20260929.03afd8f` (+ `flax==0.12.9`, `pydantic`, ...);
+  `2.19.0.dev0+rocm10.2.0a20261002.bfe94fb` (+ `flax==0.12.10`, `pydantic`, ...);
   auto-falls-back to a from-source build (`te_source`) on glibc < 2.28 hosts.
-- **primus** — clone Primus at `release/v26.8`, init the `third_party/maxtext`
-  submodule, drop the stale `dataclasses` backports.
-- **jaxreqs** — install Primus' `requirements-jax.txt` and the v26.8 CVE-fix pins,
-  re-pinning `jax`/`jaxlib` as the image does.
+- **primus** — clone Primus at `db1a4160…`, the commit the image pins (on
+  `release/v26.9`), init the `third_party/maxtext` submodule, drop the stale
+  `dataclasses` backports.
+- **jaxreqs** — install Primus' `requirements-jax.txt` and the v26.9 CVE-fix pins
+  (new in v26.9: `aiohttp`, `filelock`, `oauthlib`), re-pinning `jax`/`jaxlib` as
+  the image does.
 - **manifest** — dump `pip list` / `env` for reproducibility.
 
 Optional / alternative stages:
 
 - **rccl** — build **RCCL from source** into `$ROCM_PATH/lib`. Not part of the
-  default flow since v26.7: the pip ROCm SDK ships RCCL (2.31.2 in the v26.8
+  default flow since v26.7: the pip ROCm SDK ships RCCL (2.32.3 in the v26.9
   image) and the published image does not override it. Run this only to
   reproduce v26.6, or on a host that needs the `rocm-systems` net-ib fix
   (ROCM-27881).
 - **te_source** — force the from-source TransformerEngine build regardless of
-  glibc, at the commit the wheel's local label names (`03afd8f8…`). Normally
+  glibc, at the commit the wheel's local label names (`bfe94fb`). Normally
   unnecessary: the default `te` stage builds from source only when glibc < 2.28.
   Heavy build (~30–60 min, compiles CK fused-attention kernels).
 - **tf_cpu_fix** — lighter alternative to `tf_source`: `pip install tensorflow-cpu`
@@ -136,8 +139,9 @@ Optional / alternative stages:
 bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs manifest
 ```
 
-> **MaxText and Primus.** Both are on `release/v26.8`. Override `MAXTEXT_BRANCH`
-> only if you deliberately need a different MaxText release.
+> **MaxText and Primus.** MaxText is on `release/v26.9` and Primus at the
+> `release/v26.9` commit the image pins. Override `MAXTEXT_BRANCH` only if you
+> deliberately need a different MaxText release.
 
 ## What is SKIPPED (needs sudo / apt — not reproducible here)
 
@@ -171,26 +175,31 @@ bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs manifest
   verifies the objects against the commit id), builds the archive with
   `git archive`, and re-pins `LLVM_SHA256` to it in the temporary TensorFlow
   checkout only, logging both hashes. The source stays pinned, by the commit id
-  instead of the tarball hash; this is the one documented divergence from the
-  image's build here. To use a known-good copy instead, export
+  instead of the tarball hash. Before any of this, `tf_source` makes the image's
+  own check that the TF branch still pins the expected LLVM archive hash, and
+  stops if it does not. To use a known-good copy instead, export
   `PRIMUS_TF_LLVM_ARCHIVE=/path/to/<commit>.tar.gz`, or use `tf_cpu_fix`.
 - **The TF build needs no host clang.** TF 2.21 uses Bazel's hermetic C++
   toolchain by default; on Ubuntu 22.04 with no `clang` installed the build ran
   end to end (about 13 minutes on 120 cores). It does need `unzip`/`zip`.
-- **The image no longer contains Primus.** It runs from a mounted checkout, so the
-  `primus` stage clones `release/v26.8` — the branch the docs pair with the image
-  — rather than a commit read from the image.
+- **The image contains Primus again.** v26.8 shipped none and ran from a mounted
+  checkout; v26.9 clones Primus at a pinned `release/v26.9` commit, and the
+  `primus` stage clones the same commit.
 - **The image's CVE step re-resolves everything; this one does not.** The final
   `uv pip install --upgrade <pins>` in the Dockerfile re-resolves *every*
-  installed package (uv's `--upgrade` semantics), so the image floats numpy to
-  2.5.3, scipy to 1.18.1 and protobuf to 7.x. `jaxreqs` uses pip, whose
+  installed package (uv's `--upgrade` semantics), so the v26.9 image floats numpy
+  to 2.5.4, scipy to 1.18.1 and protobuf to 7.x. `jaxreqs` uses pip, whose
   `--upgrade` touches only the named packages, so those stay at MaxText's own
-  pins (numpy 2.1.3, scipy 1.16.0, protobuf 6.x). Training is unaffected in
-  validation; it is the largest difference between the two package sets.
-- **TE's `rocm10` core-package patch is a no-op for this wheel.** The Dockerfile
-  seds `transformer-engine-rocm10` into TE's core-package list; the
-  `2.18.0.dev0` wheel already names it (the image ends up listing it twice), so
+  pins. Training was unaffected when this was validated for v26.8; it is the
+  largest difference between the two package sets.
+- **TE's `rocm10` core-package patch is normally a no-op.** The Dockerfile
+  seds `transformer-engine-rocm10` into TE's core-package list; wheels since
+  `2.18.0.dev0` already name it (the image then lists it twice), so
   `stage_te` patches only when the name is missing.
+- **bazelisk is the upstream release binary.** The image rebuilds bazelisk from
+  source with a current Go toolchain to clear CVEs in the prebuilt binary's Go
+  dependencies; launcher behaviour is identical, and bare metal needs no Go
+  toolchain for it.
 - **Runtime `LD_LIBRARY_PATH` is empty**, matching the image's TE + JAX segfault
   fix. RCCL/TE source builds set `PRIMUS_JAX_KEEP_ROCM_LD=1`.
 - **TE from source always compiles gfx942+gfx950.** TE's HipKittens GEMM
@@ -205,7 +214,8 @@ bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs manifest
   Python 3.12**, followed by single-node 8-GPU MaxText pretraining
   (`examples/maxtext/configs/MI325X/llama2_7B-bf16-pretrain.yaml`). Earlier
   releases also exercised a 2-node run over the JAX distributed coordinator +
-  RCCL, with no UCX/OpenMPI; that was not repeated for v26.8.
+  RCCL, with no UCX/OpenMPI; that was not repeated for v26.8. The v26.9 pins
+  have not been through a bare-metal run yet.
 
 Treat the reference `Dockerfile` as the authoritative, tested version
 combination; if you bump one pin you may need to bump the others.

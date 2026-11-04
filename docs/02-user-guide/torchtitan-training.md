@@ -6,21 +6,29 @@ Training performance validation with the AMD PyTorch Docker image on AMD Instinc
 
 PyTorch is an open-source machine learning framework that is widely used for model training, with GPU-optimized components for transformer-based models.
 
-The ROCm PyTorch training Docker image `rocm/primus:v26.8`, available through [Docker hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for fine-tuning and pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
+The PyTorch for ROCm training Docker image `rocm/primus:v26.9`, available through [Docker Hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for fine-tuning and pretraining a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X GPUs.
 
-For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.7`](../01-getting-started/release-notes.md#rocmprimusv267).
+For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.9`](../01-getting-started/release-notes.md#rocmprimusv269). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268).
 
 Training is launched with `primus-cli`, the unified Primus CLI that covers direct, container, and Slurm execution from the same YAML configuration. See the [CLI reference](./cli-reference.md).
 
 ---
 
-## Important notes for v26.8
+## Important notes for v26.9
 
 Read this section before starting a training run. It collects the settings this release requires, the architecture-specific tuning, and the known issues. The contents change from release to release, so re-read it when you move to a new image tag.
 
 ### Required settings
 
-**Use the `release/v26.8` branch.** It is the Primus branch matching the `rocm/primus:v26.8` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image — see [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268). [Environment setup](#get-the-primus-source) has the clone command.
+**Use the `release/v26.9` branch.** It is the Primus branch matching the `rocm/primus:v26.9` image. Prefer this checkout over the `/workspace/Primus` copy baked into the image—see [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269). [Environment setup](#get-the-primus-source) has the clone command.
+
+### Changes you might need to act on
+
+**AdamW runs on a Triton fused kernel by default.** TorchTitan's `AdamW` is replaced by a Triton implementation sized to the GPU (`optimizer.use_triton_fused_adam: true`, also assumed when the key is absent); set it to `false` to keep `torch.optim.AdamW`. It keeps the stock optimizer's state layout, so checkpoints are interchangeable in both directions. Step counts are kept on the host, so reading `optimizer.state` directly between steps shows stale `step` values; `state_dict()` is correct ([#1233](https://github.com/AMD-AGI/Primus/pull/1233)).
+
+**A preset `HIP_VISIBLE_DEVICES` is kept.** The runner used to overwrite it with `0..GPUS_PER_NODE-1`, so a job restricted to particular GPUs could land on another user's GPU on a shared node. It now keeps the value you or your scheduler set, and warns when it lists a different number of GPUs than `GPUS_PER_NODE` ([#1237](https://github.com/AMD-AGI/Primus/pull/1237)).
+
+**The Turbo grouped-GEMM config was renamed** in v26.7 ([#1041](https://github.com/AMD-AGI/Primus/pull/1041)). If you are moving from v26.6 with a local TorchTitan config that sets it, update the key.
 
 ### Architecture-specific settings
 
@@ -33,18 +41,12 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Known issues
 
-<!-- NEEDS CONFIRMATION: no open TorchTitan issue is derivable from the v26.7..v26.8
-     commit range; the TorchTitan commits in it are all fixes (listed below).
-     Confirm before publishing. -->
-No TorchTitan backend issues are currently tracked for v26.8.
+The v26.9 QA runs found no TorchTitan issues. They covered MI300X and MI355X; the MI325X recipes were not re-run on this image.
 
-**Fixed in v26.8:**
+**Fixed in v26.9:**
 
-- A Triton buffer-store miscompile could silently corrupt gradients in Inductor-generated backward kernels. Affected kernels are now detected and recompiled with buffer ops disabled, and TorchTitan restores eager precision semantics under `torch.compile` on ROCm ([#962](https://github.com/AMD-AGI/Primus/pull/962)).
-- The GPT-OSS MoE router bias was left uninitialized after meta-device materialization, producing non-finite router scores ([#1183](https://github.com/AMD-AGI/Primus/pull/1183)).
-- DeepSeek `torch.compile` is bounded at the routed experts and keeps scalar capture ([#1216](https://github.com/AMD-AGI/Primus/pull/1216); on `release/v26.8`, not yet on `main`).
-
-**The Turbo grouped-GEMM config was renamed** in v26.7 ([#1041](https://github.com/AMD-AGI/Primus/pull/1041)). If you are moving from v26.6 with a local TorchTitan config that sets it, update the key.
+- With full activation checkpointing, `torch.compile` compiled the checkpoint wrapper itself, so the whole checkpointed MoE block of a DeepSeek model ran eagerly. Checkpoint-wrapped blocks are now compiled inside the wrapper; runs without activation checkpointing are unchanged. This affects the DeepSeek-671B recipes and completes the DeepSeek compile work of [#1216](https://github.com/AMD-AGI/Primus/pull/1216), which landed on `release/v26.8` ([#1320](https://github.com/AMD-AGI/Primus/pull/1320)).
+- With `primus_turbo.enable_primus_turbo` or `use_turbo_attention` turned off, the first forward failed under `torch.compile` with `TypeError: Unexpected keyword arguments: ['block_mask', 'enable_gqa']`. The Primus Turbo converter now replaces attention only when both are on ([#1234](https://github.com/AMD-AGI/Primus/pull/1234)).
 
 ### Registry change
 
@@ -94,7 +96,7 @@ This container should not be expected to provide generalized performance across 
 
 Use the following instructions to set up the environment, configure the script to train models, and reproduce the benchmark results on the MI300X, MI325X, MI350X, and MI355X accelerators with the Docker image.
 
-The instructions reproduce the benchmark results on an MI300X accelerator with `rocm/primus:v26.8`. For best performance on MI325X, MI350X, and MI355X, use the matching `<ARCH>` config directory (and adjust batch sizes if you change hardware).
+The instructions reproduce the benchmark results on an MI300X GPU with `rocm/primus:v26.9`. For optimal performance on MI325X, MI350X, and MI355X, use the matching `<ARCH>` config directory (and adjust batch sizes if you change hardware).
 
 Launch training with [`primus-cli`](#running-training-with-primus-cli). One CLI covers direct, container, and Slurm launches, and the same YAML configurations work across every Primus backend.
 
@@ -109,11 +111,11 @@ Clone the branch matching the image. Do this on the host — every command in th
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.8
+git checkout release/v26.9
 git submodule update --init --recursive
 ```
 
-That is all the setup required. The training commands below use `primus-cli container`, which starts `rocm/primus:v26.8` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used — see [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268).
+That is all the setup required. The following training commands use `primus-cli container`, which starts `rocm/primus:v26.9` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used—see [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269).
 
 Container mode also forwards environment variables you export on the host, including `HF_TOKEN`, the gfx942 tuning variables, and the `NCCL_*` networking variables. The forwarded list is `container.options.env` in `runner/.primus.yaml`.
 
@@ -125,11 +127,11 @@ Container mode also forwards environment variables you export on the host, inclu
 If you want an interactive shell — for debugging, or to run `primus-cli direct` yourself — start the container manually and bind your Primus checkout:
 
 ```bash
-docker pull rocm/primus:v26.8
+docker pull rocm/primus:v26.9
 docker run -it --device /dev/dri --device /dev/kfd --network host --ipc host \
     --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined --privileged \
     -v $PWD:$PWD -w $PWD -v $HOME/.ssh:/root/.ssh \
-    --shm-size 64G --name training_env rocm/primus:v26.8
+    --shm-size 64G --name training_env rocm/primus:v26.9
 ```
 
 Re-enter it later with `docker start training_env && docker exec -it training_env bash`. Inside the container, replace `primus-cli container` with `primus-cli direct` in every command below. Remember to re-export `HF_TOKEN` and any architecture or `NCCL_*` variables, since a manual `docker run` does not forward them.
@@ -153,7 +155,7 @@ export HF_TOKEN=$your_personal_hf_token
 
 For detailed usage of `primus-cli`, see the [CLI reference](./cli-reference.md).
 
-Run these from your `release/v26.8` checkout **on the host**. Container mode starts the image and runs the training inside it for you. If you already have a shell inside the container, swap `container` for `direct`.
+Run these from your `release/v26.9` checkout **on the host**. Container mode starts the image and runs the training inside it for you. If you already have a shell inside the container, swap `container` for `direct`.
 
 ### Benchmarking examples
 
