@@ -89,6 +89,11 @@ _ATOMIC_LATENCY_GLOBAL_NS = 400  # HBM read-modify-write latency per atomic op
 _ATOMIC_LATENCY_LOCAL_NS = 40  # L1 / LDS atomic latency per op
 _WARP_SIZE = 64  # CDNA wavefront width
 
+# MiniMax-M3 FlyDSL kernel geometry (minimax_m3/flydsl).
+_MSA_INDEX_QUERIES_PER_WG = 64  # index_block_max: 4 waves x 16 queries
+_MSA_PLAN_TARGET_CHUNKS = 2048  # msa_token_bwd.plan_chunks defaults
+_MSA_PLAN_MIN_CHUNK = 64
+
 
 # =========================================================================
 # GPU hardware specs
@@ -549,6 +554,27 @@ class SDPASimulator(SDPASimulationBackend):
             total += rows * full_blocks * block_size + rows * (rows + 1) // 2
         return total / seq_len
 
+    @staticmethod
+    def minimax_msa_selected_blocks_per_query(seq_len: int, block_size: int, topk_blocks: int) -> float:
+        """Mean live (non ``-1``) top-k slots per query: ``min(q_block + 1, topk)``."""
+        if seq_len <= 0 or block_size <= 0 or topk_blocks <= 0:
+            return 0.0
+        total = 0
+        for query_block in range(math.ceil(seq_len / block_size)):
+            rows = min(block_size, seq_len - query_block * block_size)
+            total += rows * min(query_block + 1, topk_blocks)
+        return total / seq_len
+
+    @staticmethod
+    def minimax_msa_plan_chunks(capacity: int, n_rows: int) -> tuple[int, int]:
+        """``(n_chunks, chunk_size)`` of FlyDSL's ``plan_chunks`` for a block table.
+
+        ``capacity`` is the table's entry count including ``-1`` padding and
+        ``n_rows`` its (batch, head, block) row count.
+        """
+        size = max(_MSA_PLAN_MIN_CHUNK, -(-capacity // _MSA_PLAN_TARGET_CHUNKS))
+        return n_rows + -(-capacity // size), size
+
     def simulate_minimax_sparse_attention(
         self,
         batch_size: int,
@@ -556,34 +582,35 @@ class SDPASimulator(SDPASimulationBackend):
         num_kv_heads: int,
         seq_len: int,
         head_dim: int,
-        hidden_size: int,
         num_index_heads: int,
         index_head_dim: int,
         block_size: int,
         topk_blocks: int,
-        indexer_loss_coeff: float,
+        trained_indexer: bool,
         dtype: str = "bf16",
     ) -> SimulationResult:
-        """Price MiniMax Sparse Attention's selected-block kernel and indexer.
+        """Price the matrix kernels of MiniMax Sparse Attention (FlyDSL path).
 
-        MSA runs exact softmax attention over each query's selected blocks, so
-        its core does the dense kernel's per-key work on fewer keys.  The core
-        is the FAv3 model at the same shape, scaled by MSA's keys per query
-        over the dense causal keys per query and divided by
-        ``PRIMUS_MSA_CORE_EFFICIENCY_RATIO`` (MSA's achieved FLOP rate
-        relative to FAv3, default 1.0).  The FlyDSL kernels put a token's 16
-        query heads on MFMA rows and share gathered K/V blocks in LDS, so
-        pricing them as standalone 16-row 1-CU tiles would charge per-GEMM
-        setup that the fused, pipelined loop amortizes.
+        Every term is a 1-CU tile GEMM times the kernel's waves, the same
+        model as dense FAv3; nothing is fitted.
 
-        The Q/K/V/O projections stay on the GQA GEMM path in
-        :class:`AttentionProfiler`.  The indexer and the block-score /
-        block-id / K-V traffic are priced on top at
-        ``PRIMUS_MSA_COMPUTE_EFFICIENCY`` of matrix peak and
-        ``PRIMUS_MSA_MEMORY_EFFICIENCY`` of HBM bandwidth, plus
-        ``PRIMUS_MSA_LAUNCH_US`` per direction.  All four defaults are
-        uncalibrated; fit them per architecture from FlyDSL forward and
-        backward traces.
+        * Attention core (``msa_token_fwd`` / ``msa_token_bwd``): exact
+          softmax attention over each query's selected blocks, i.e. FAv3's
+          per-key work on fewer keys.  Priced as the FAv3 model at the same
+          shape scaled by selected over dense causal keys per query.  The
+          kernels share gathered K/V blocks in LDS across a token's 16 heads,
+          so standalone 16-row tiles would charge per-GEMM setup the fused
+          loop amortizes.
+        * Indexer scores (``index_block_max``): a work-group takes 64 queries
+          x all index heads against one shared index-K head, walking causal
+          128-key blocks -- a QKᵀ-only FAv3 forward with 64 x ``num_index_heads``
+          tile rows.  The running block max runs on the vector units.
+        * Indexer dK pass 1 (``index_dk``): one work-group per block-plan
+          chunk computes ``dKᵀ[D, block] += Qᵀ A`` over the chunk's entries.
+
+        The indexer projections, ``index_dq``, top-k, the block plan, the
+        sparse KL loss and the fp32 partial reductions are priced by
+        :class:`AttentionProfiler` on the full-chip GEMM backend and HBM.
         """
         if num_attention_heads <= 0 or num_kv_heads <= 0:
             raise ValueError("MiniMax sparse attention requires positive Q and KV head counts")
@@ -602,62 +629,48 @@ class SDPASimulator(SDPASimulationBackend):
         )
         # FAv3's causal model charges half of the keys to every query.
         dense_keys_per_query = 0.5 * seq_len
-        core_efficiency_ratio = max(0.01, float(os.getenv("PRIMUS_MSA_CORE_EFFICIENCY_RATIO", "1.0")))
         key_ratio = keys_per_query / dense_keys_per_query
-        core_fwd_ms = dense.forward_time_ms * key_ratio / core_efficiency_ratio
-        core_bwd_ms = dense.backward_time_ms * key_ratio / core_efficiency_ratio
+        core_fwd_ms = dense.forward_time_ms * key_ratio
+        core_bwd_ms = dense.backward_time_ms * key_ratio
         score_elems = float(batch_size) * num_attention_heads * seq_len * keys_per_query
         core_fwd_flops = 2.0 * score_elems * 2 * head_dim
         core_bwd_flops = 2.0 * score_elems * 5 * head_dim
 
-        peak = self._peak_flops(dtype)
-        compute_efficiency = min(1.0, max(0.01, float(os.getenv("PRIMUS_MSA_COMPUTE_EFFICIENCY", "0.55"))))
-        memory_efficiency = min(1.0, max(0.01, float(os.getenv("PRIMUS_MSA_MEMORY_EFFICIENCY", "0.50"))))
-        hbm_bytes_per_ms = self._hw.hbm_bandwidth_gbps * 1.0e6 * memory_efficiency
-        trained_indexer = indexer_loss_coeff > 0.0
-        tokens = float(batch_size * seq_len)
+        N_CU = getattr(self, "_tile_units", None) or self._hw.n_cu
+        vec = self._tile_gemm.vector_flops() if hasattr(self._tile_gemm, "vector_flops") else None
 
-        # Indexer, counted the way minimax_m3_flops_patches.compute_m3_flops
-        # does: Q projections per index head plus one shared K projection
-        # (weight gradient only when trained; the input is detached), dense
-        # causal token scores reduced to a max per block, and a score gradient
-        # that reaches only each query's selected blocks.
-        index_projection_flops = 2.0 * tokens * hidden_size * (num_index_heads * index_head_dim + index_head_dim)
-        index_score_flops = 2.0 * tokens * num_index_heads * index_head_dim * (seq_len + 1) / 2.0
-        selected_score_grad_flops = (
-            2.0 * tokens * 2.0 * num_index_heads * index_head_dim * topk_blocks if trained_indexer else 0.0
+        def tile(m, n, k):
+            return self._tile_gemm.simulate_gemm(m=m, n=n, k=k, dtype=dtype).forward_time_ms
+
+        # index_block_max: 64 queries x all index heads per work-group, causal.
+        index_wgs = math.ceil(seq_len / _MSA_INDEX_QUERIES_PER_WG) * batch_size
+        index_waves = math.ceil(index_wgs / N_CU)
+        index_score_matmul_ms = (
+            tile(_MSA_INDEX_QUERIES_PER_WG * num_index_heads, seq_len, index_head_dim) * index_waves * 0.5
         )
-        indexer_fwd_ms = (index_projection_flops + index_score_flops) / (peak * compute_efficiency) * 1e3
-        indexer_bwd_ms = (
-            (index_projection_flops + selected_score_grad_flops) / (peak * compute_efficiency) * 1e3
-            if trained_indexer
-            else 0.0
-        )
+        index_score_elems = float(batch_size) * num_index_heads * seq_len * (seq_len + 1) / 2.0
+        # Running max per block, carrying the winning key: compare + 2 selects.
+        index_score_vector_ms = 3.0 * index_score_elems / vec * 1e3 if vec else 0.0
+        index_score_fwd_ms = index_score_matmul_ms + index_score_vector_ms
+        index_score_flops = 2.0 * index_score_elems * index_head_dim
 
-        # HBM traffic outside the attention tiles.  A KV group's K/V for one
-        # sequence is small enough to stay resident in L2 / Infinity Cache, so
-        # the gathered blocks cost one cold read rather than one read per
-        # visit.  The fp32 block scores and int32 block ids are written by one
-        # kernel and read by the next.
-        selected_blocks = keys_per_query / block_size
-        num_blocks = math.ceil(seq_len / block_size)
-        bpe = self._bytes_per_element(dtype)
-        kv_cold_bytes = tokens * num_kv_heads * head_dim * bpe * 2.0
-        block_score_bytes = tokens * num_index_heads * num_blocks * 4.0 * 2.0
-        block_index_bytes = tokens * num_kv_heads * topk_blocks * 4.0 * 2.0
-        traffic_fwd_ms = (kv_cold_bytes + block_score_bytes + block_index_bytes) / hbm_bytes_per_ms
-        # Backward re-reads K/V and the block ids and writes dK/dV.
-        traffic_bwd_ms = (2.0 * kv_cold_bytes + block_index_bytes / 2.0) / hbm_bytes_per_ms
+        # index_dk pass 1: dKᵀ[D, block] += Qᵀ A per block-plan chunk.
+        index_dk_ms = 0.0
+        index_dk_flops = 0.0
+        selected_blocks = self.minimax_msa_selected_blocks_per_query(seq_len, block_size, topk_blocks)
+        if trained_indexer:
+            n_rows = batch_size * num_index_heads * math.ceil(seq_len / block_size)
+            capacity = batch_size * num_index_heads * seq_len * topk_blocks
+            n_chunks, _ = self.minimax_msa_plan_chunks(capacity, n_rows)
+            live_entries = float(batch_size) * num_index_heads * seq_len * selected_blocks
+            entries_per_chunk = max(1, math.ceil(live_entries / n_chunks))
+            index_dk_ms = tile(block_size, index_head_dim, entries_per_chunk) * math.ceil(n_chunks / N_CU)
+            index_dk_flops = 2.0 * live_entries * index_head_dim
 
-        launch_us = float(os.getenv("PRIMUS_MSA_LAUNCH_US", "3.0"))
-        launch_ms = launch_us / 1e3
-        fwd_time_ms = core_fwd_ms + indexer_fwd_ms + traffic_fwd_ms + launch_ms
-        bwd_time_ms = core_bwd_ms + indexer_bwd_ms + traffic_bwd_ms + launch_ms
-
-        indexer_fwd_flops = index_projection_flops + index_score_flops
-        indexer_bwd_flops = index_projection_flops + selected_score_grad_flops if trained_indexer else 0.0
-        fwd_flops = core_fwd_flops + indexer_fwd_flops
-        bwd_flops = core_bwd_flops + indexer_bwd_flops
+        fwd_time_ms = core_fwd_ms + index_score_fwd_ms
+        bwd_time_ms = core_bwd_ms + index_dk_ms
+        fwd_flops = core_fwd_flops + index_score_flops
+        bwd_flops = core_bwd_flops + index_dk_flops
         return SimulationResult(
             forward_time_ms=fwd_time_ms,
             backward_time_ms=bwd_time_ms,
@@ -667,20 +680,19 @@ class SDPASimulator(SDPASimulationBackend):
                 "keys_per_query": keys_per_query,
                 "dense_keys_per_query": dense_keys_per_query,
                 "selected_blocks_per_query": selected_blocks,
-                "core_efficiency_ratio": core_efficiency_ratio,
                 "dense_fwd_ms": dense.forward_time_ms,
                 "dense_bwd_ms": dense.backward_time_ms,
                 "core_fwd_ms": core_fwd_ms,
                 "core_bwd_ms": core_bwd_ms,
-                "indexer_fwd_ms": indexer_fwd_ms,
-                "indexer_bwd_ms": indexer_bwd_ms,
-                "indexer_fwd_flops": indexer_fwd_flops,
-                "indexer_bwd_flops": indexer_bwd_flops,
-                "traffic_fwd_ms": traffic_fwd_ms,
-                "traffic_bwd_ms": traffic_bwd_ms,
-                "launch_ms": launch_ms,
-                "compute_efficiency": compute_efficiency,
-                "memory_efficiency": memory_efficiency,
+                "index_score_fwd_ms": index_score_fwd_ms,
+                "index_score_matmul_ms": index_score_matmul_ms,
+                "index_score_vector_ms": index_score_vector_ms,
+                "index_score_waves": index_waves,
+                "index_dk_ms": index_dk_ms,
+                "core_fwd_flops": core_fwd_flops,
+                "core_bwd_flops": core_bwd_flops,
+                "index_score_flops": index_score_flops,
+                "index_dk_flops": index_dk_flops,
                 "fwd_flops": fwd_flops,
                 "bwd_flops": bwd_flops,
             },

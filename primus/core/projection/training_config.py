@@ -97,6 +97,7 @@ class ModelConfig:
     sparse_block_size: int = 128
     sparse_topk_blocks: int = 16
     sparse_indexer_loss_coeff: float = 1.0e-2
+    rotary_percent: float = 1.0  # sizes the MSA indexer's unfused partial RoPE
     # FFN & MoE
     swiglu: bool = False
     num_experts: int = 0

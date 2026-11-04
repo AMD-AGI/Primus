@@ -10,8 +10,10 @@ from typing import Optional
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness.base import ATTENTION
 from primus.core.projection.simulation_backends.base import resolve_peak_tflops
+from primus.core.projection.simulation_backends.sdpa_simulator import SDPASimulator
 from primus.core.projection.training_config import gemm_dtype_from_config
 
+from .moe_mlp import _ACTIVATION_BW_FRACTION
 from .utils import benchmark_layer
 
 
@@ -847,6 +849,122 @@ class AttentionProfiler(BaseModuleProfiler):
         mhc_ms = (mhc_bw_f + cw_fwd, mhc_bw_b + cw_bwd)
         return norm_ms, mhc_ms, misc_ms
 
+    def _simulate_minimax_indexer(
+        self,
+        sdpa_meta: dict,
+        *,
+        batch_size: int,
+        num_attention_heads: int,
+        num_kv_heads: int,
+        seq_len: int,
+        head_dim: int,
+        num_index_heads: int,
+        index_head_dim: int,
+        block_size: int,
+        topk_blocks: int,
+        trained_indexer: bool,
+    ) -> tuple[float, float]:
+        """MSA work outside the SDPA simulator's tile kernels, FlyDSL path.
+
+        Follows ``MinimaxSparseAttention.forward`` and the FlyDSL kernels
+        kernel by kernel.  The index Q/K projections are GEMMs; their weight
+        gradients are the only backward GEMMs because the indexer reads a
+        detached input.  ``index_dq`` (one wave per token and head) is the
+        larger of its vector FLOPs and its bytes.  Everything else is
+        elementwise, selection or reduction work priced as HBM bytes at
+        ``_ACTIVATION_BW_FRACTION`` of peak, the streaming efficiency the MoE
+        activation and quantisation terms use, plus one GEMM fixed-startup
+        latency (``PRIMUS_GEMM_FIXED_STARTUP_US``) per launch.
+        """
+        args = self.config.model_config
+        T = batch_size * seq_len  # the indexer is duplicated across TP ranks
+        H, D = num_index_heads, index_head_dim
+        hbm = (getattr(self._gemm_backend, "hbm_bandwidth_gbps", None) or 5300.0) * 1e9
+        bw = _ACTIVATION_BW_FRACTION * hbm
+        launch_ms = float(os.getenv("PRIMUS_GEMM_FIXED_STARTUP_US", "0.75")) / 1e3
+        vec = self._gemm_backend.vector_flops() if self._gemm_backend is not None else None
+
+        gemm_fwd = gemm_bwd = 0.0
+        if self._gemm_backend is not None:
+            dt = gemm_dtype_from_config(args)
+
+            def g(m, n, k):
+                return self._gemm_backend.simulate_gemm(m, n, k, dt).forward_time_ms
+
+            gemm_fwd = g(T, H * D, args.hidden_size) + g(T, D, args.hidden_size)
+            if trained_indexer:
+                gemm_bwd = g(args.hidden_size, H * D, T) + g(args.hidden_size, D, T)
+
+        e_qk = T * (H + 1) * D  # index q and k elements
+        n_blocks = -(-seq_len // block_size)
+        scores = T * H * n_blocks  # fp32 block scores and int32 argmax keys
+        table = T * H * topk_blocks  # top-k slots
+        slots = T * num_attention_heads * topk_blocks  # flydsl per-slot lse
+        rot = float(getattr(args, "rotary_percent", 1.0) or 1.0)
+        n_chunks_index, _ = SDPASimulator.minimax_msa_plan_chunks(
+            batch_size * H * seq_len * topk_blocks, batch_size * H * n_blocks
+        )
+        n_chunks_attn, _ = SDPASimulator.minimax_msa_plan_chunks(
+            batch_size * num_kv_heads * seq_len * topk_blocks, batch_size * num_kv_heads * n_blocks
+        )
+        tr = 1.0 if trained_indexer else 0.0
+
+        # (kernel group, fwd bytes, bwd bytes, fwd launches, bwd launches)
+        ops = [
+            # input_layernorm recomputed in fp32 from the fused weight, detached
+            ("input rmsnorm", 20.0 * T * args.hidden_size, 0.0, 3, 0),
+            ("index q/k rmsnorm", 4.0 * e_qk, tr * 6.0 * e_qk, 2, tr * 4),
+            # unfused partial RoPE: mul, rotate_half (neg + cat), mul, add, cat
+            ("index q/k rope", (20.0 * rot + 4.0) * e_qk, tr * (20.0 * rot + 8.0) * e_qk, 18, tr * 14),
+            ("block max write", 8.0 * scores, 0.0, 1, 0),
+            # local-block +inf scatter, top-k, -1 fill of empty slots
+            ("boost + top-k", 12.0 * scores + 22.0 * table, tr * 8.0 * scores, 10, tr * 1),
+            # _FusedSelect: slot clamp, winning-key gather, forced / live masks
+            ("selection bookkeeping", 75.0 * table, tr * 30.0 * table, 9, tr * 3),
+            # counting-sort block plan + chunking, shared by both backwards
+            ("block plan", 20.0 * table, 0.0, 8, 0),
+            ("slot mass", tr * (20.0 * slots + 4.0 * table), 0.0, tr * 3, 0),
+            ("sparse kl loss", tr * 200.0 * table, tr * (100.0 * table + 4.0 * scores), tr * 27, tr * 12),
+            # index_dk pass 1 writes fp32 [block, D] partials; pass 2 sums them
+            (
+                "index dk partials",
+                0.0,
+                tr * (8.0 * n_chunks_index * block_size * D + 2.0 * T * D),
+                0,
+                tr * 2,
+            ),
+            ("attn dk/dv partials", 0.0, 16.0 * n_chunks_attn * block_size * head_dim, 0, 1),
+        ]
+        mem_fwd = sum(o[1] for o in ops) / bw * 1e3 + sum(o[3] for o in ops) * launch_ms
+        mem_bwd = sum(o[2] for o in ops) / bw * 1e3 + sum(o[4] for o in ops) * launch_ms
+
+        dq_bwd = 0.0
+        if trained_indexer:
+            selected = sdpa_meta.get("selected_blocks_per_query", topk_blocks)
+            dq_flops = 2.0 * T * H * selected * D
+            dq_bytes = 8.0 * table + 2.0 * T * D + 2.0 * T * H * D
+            dq_bwd = max(dq_flops / vec if vec else 0.0, dq_bytes / bw) * 1e3 + launch_ms
+
+        index_fwd = gemm_fwd + mem_fwd + launch_ms  # + index_block_max's launch
+        index_bwd = gemm_bwd + mem_bwd + dq_bwd + (tr * launch_ms)  # + index_dk pass 1
+        if os.getenv("PRIMUS_PRINT_LAYER_BREAKDOWN") and int(os.getenv("RANK", "0")) == 0:
+            print(
+                "[BRKDN] msa core_f=%.4f core_b=%.4f idx_score_f=%.4f idx_dk_b=%.4f idx_gemm_f=%.4f "
+                "idx_gemm_b=%.4f idx_dq_b=%.4f idx_mem_f=%.4f idx_mem_b=%.4f"
+                % (
+                    sdpa_meta.get("core_fwd_ms", 0.0),
+                    sdpa_meta.get("core_bwd_ms", 0.0),
+                    sdpa_meta.get("index_score_fwd_ms", 0.0),
+                    sdpa_meta.get("index_dk_ms", 0.0),
+                    gemm_fwd,
+                    gemm_bwd,
+                    dq_bwd,
+                    mem_fwd,
+                    mem_bwd,
+                )
+            )
+        return index_fwd, index_bwd
+
     def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Get simulated results from GEMM + SDPA simulation backends."""
         if self._is_v4_attention():
@@ -913,20 +1031,22 @@ class AttentionProfiler(BaseModuleProfiler):
                     if args.group_query_attention and args.num_query_groups
                     else args.num_attention_heads
                 )
-                sdpa_result = self._sdpa_backend.simulate_minimax_sparse_attention(
+                msa_shape = dict(
                     batch_size=batch_size,
                     num_attention_heads=heads_per_rank,
                     num_kv_heads=max(1, num_kv_heads // tp_size),
                     seq_len=slen_per_cp,
                     head_dim=sdpa_head_dim,
-                    hidden_size=args.hidden_size,
                     num_index_heads=getattr(args, "sparse_num_index_heads", num_kv_heads),
                     index_head_dim=getattr(args, "sparse_index_dim", sdpa_head_dim),
                     block_size=getattr(args, "sparse_block_size", 128),
                     topk_blocks=getattr(args, "sparse_topk_blocks", 16),
-                    indexer_loss_coeff=getattr(args, "sparse_indexer_loss_coeff", 0.0),
-                    dtype="bf16",
+                    trained_indexer=getattr(args, "sparse_indexer_loss_coeff", 0.0) > 0.0,
                 )
+                sdpa_result = self._sdpa_backend.simulate_minimax_sparse_attention(dtype="bf16", **msa_shape)
+                index_fwd, index_bwd = self._simulate_minimax_indexer(sdpa_result.metadata, **msa_shape)
+                fwd_time += index_fwd
+                bwd_time += index_bwd
             else:
                 sdpa_result = self._sdpa_backend.simulate_sdpa(
                     batch_size=batch_size,
