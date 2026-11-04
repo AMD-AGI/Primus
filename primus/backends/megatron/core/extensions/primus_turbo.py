@@ -3,6 +3,8 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+from __future__ import annotations
+
 import gc
 import os
 from contextlib import contextmanager, nullcontext
@@ -19,11 +21,24 @@ from megatron.core.extensions.transformer_engine import (
     TEGroupedLinear,
     TELayerNormColumnParallelLinear,
     TELinear,
-    TEQuantizationParams,
-    TEQuantizationRecipe,
     TERowParallelLinear,
     condition_init_method,
 )
+
+try:
+    from megatron.core.extensions.transformer_engine import (
+        TEQuantizationParams,
+        TEQuantizationRecipe,
+    )
+except ImportError:
+
+    class TEQuantizationParams:  # Bridge Megatron-LM has no TE quantization config types
+        pass
+
+    class TEQuantizationRecipe:
+        pass
+
+
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -66,7 +81,15 @@ try:
 except (ImportError, ModuleNotFoundError):
     create_quantized_weight = None
 
-from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
+try:
+    from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
+except (ImportError, ModuleNotFoundError):
+    ENV_GEMM_BACKEND = "PRIMUS_TURBO_GEMM_BACKEND"
+    ENV_GROUPED_GEMM_BACKEND = "PRIMUS_TURBO_GROUPED_GEMM_BACKEND"
+try:
+    from primus_turbo.common.envs import set_env as _turbo_set_env
+except (ImportError, ModuleNotFoundError):
+    _turbo_set_env = None
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -221,12 +244,20 @@ def _bridge_activation_grad(
     return PrimusTurboQuantizedTensorPair(data=rowwise, data_t=colwise)
 
 
+def _publish_turbo_env(name: str, value: str) -> None:
+    # Primus-Turbo caches its env vars at first read; a bare os.environ write after that is ignored.
+    if _turbo_set_env is not None:
+        _turbo_set_env(name, value)
+    else:
+        os.environ[name] = value
+
+
 @lru_cache(maxsize=1)
 def _apply_turbo_gemm_backend_env() -> None:
     """Publish ``turbo_gemm_backend`` into the env var Primus-Turbo dispatches on."""
     backend = getattr(get_args(), "turbo_gemm_backend", "default")
     if backend != "default":
-        os.environ[ENV_GEMM_BACKEND] = backend
+        _publish_turbo_env(ENV_GEMM_BACKEND, backend)
         warning_rank_0(f"Primus-Turbo gemm backend is set to {backend}")
 
 
@@ -235,7 +266,7 @@ def _apply_turbo_grouped_gemm_backend_env() -> None:
     """Publish ``turbo_grouped_gemm_backend``; see :func:`_apply_turbo_gemm_backend_env`."""
     backend = getattr(get_args(), "turbo_grouped_gemm_backend", "default")
     if backend != "default":
-        os.environ[ENV_GROUPED_GEMM_BACKEND] = backend
+        _publish_turbo_env(ENV_GROUPED_GEMM_BACKEND, backend)
         warning_rank_0(f"Primus-Turbo grouped gemm backend is set to {backend}")
 
 
