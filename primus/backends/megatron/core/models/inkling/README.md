@@ -45,7 +45,7 @@ a Megatron GPT layer:
 | `primus/backends/megatron/core/transformer/inkling/` | Attention (eager and FlexAttention backends), ShortConv, router, MoE layer and shared experts, dense MLP, decoder layer |
 | `primus/backends/megatron/patches/inkling_muon_qkv_patches.py` | Per-layer q/k/v split for Megatron's Muon (see [Muon](#muon)) |
 | `primus/configs/models/megatron/inkling_*.yaml` | Presets: `inkling_small`, `inkling_large`, the proxies `inkling_small_12L` and `inkling_large_6L` (released widths, fewer layers), and `inkling_small_tiny` for tests |
-| `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml`, `inkling_large_6L-BF16-pretrain.yaml` | Single-node pretraining recipes for the Small and Large proxies (EP 8, AdamW, mock data); they differ only in the model |
+| `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml`, `inkling_large_6L-BF16-pretrain.yaml` | Single-node pretraining recipes for the Small and Large proxies (EP 8, AdamW, mock data); Large also turns on Primus-Turbo (see [Primus-Turbo](#primus-turbo)) |
 | `tools/checkpoint_conversion/convert_inkling_hf_megatron.py` | Hugging Face → Megatron checkpoint converter |
 | `tests/unit_tests/backends/megatron/inkling/` | Unit tests, the transformers reference harness, and the 8-GPU parallel check |
 
@@ -135,7 +135,7 @@ On the host, clone the branch with its Megatron-LM submodule. The image's own
 
 ```bash
 cd $HOME
-git clone -b feat/inkling-megatron https://github.com/AMD-AGI/Primus.git Primus-inkling
+git clone https://github.com/AMD-AGI/Primus.git Primus-inkling
 cd Primus-inkling
 git submodule update --init third_party/Megatron-LM
 ```
@@ -169,7 +169,8 @@ PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
 ./runner/primus-cli direct --log_file $LOGS/small_muon.log -- train pretrain --config $SMALL \
     --optimizer muon --overlap_grad_reduce false $MUON
 
-# Large 6-layer proxy (62.6B)
+# Large 6-layer proxy (62.6B), Primus-Turbo off
+export PRIMUS_TURBO=false
 ./runner/primus-cli direct --log_file $LOGS/large_adamw.log -- train pretrain --config $LARGE
 PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
 ./runner/primus-cli direct --log_file $LOGS/large_muon.log -- train pretrain --config $LARGE \
@@ -177,6 +178,7 @@ PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
 PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
 ./runner/primus-cli direct --log_file $LOGS/large_dist_muon.log -- train pretrain --config $LARGE \
     --optimizer dist_muon --overlap_grad_reduce true $MUON
+unset PRIMUS_TURBO
 ```
 
 `PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1` makes the launcher install the pinned
@@ -195,6 +197,34 @@ Results on Oct 19, 2026 (no NaN or skipped steps in any run):
 | Large, AdamW | 5.747 | 3.29 s | 202 GB |
 | Large, `muon` | 5.902 | 4.51 s | 213 GB |
 | Large, `dist_muon` | 5.902 | 4.27 s | 167 GB |
+
+### Primus-Turbo
+
+The Large recipe turns on Turbo grouped GEMM, RMSNorm, DeepEP and GEMM;
+`PRIMUS_TURBO=false` turns them all off. Inkling keeps its own attention core,
+so `use_turbo_attention` stays off.
+
+- DeepEP needs fp32 router probabilities (`moe_router_dtype: fp32`) and
+  switches the dispatcher to `flex` itself.
+- With `use_turbo_gemm` the LM head is a `PrimusTurboColumnParallelLinear`,
+  with the same checkpoint keys. It cannot defer its weight gradient, so it
+  requires `defer_embedding_wgrad_compute: false`.
+- Turbo grouped GEMM trains each expert linear as one stacked 3-D weight, which
+  Muon does not orthogonalize. Primus rejects `muon` / `dist_muon` with
+  `use_turbo_grouped_gemm`; run Muon with `PRIMUS_TURBO=false`.
+
+Large proxy, AdamW, on Nov 4, 2026 with Megatron-core 0.19.2 (no NaN or
+skipped steps; step time is the median of steps 20–50):
+
+| Turbo kernels | Loss at step 50 | Step time | `hip mem usage` |
+| --- | --- | --- | --- |
+| none | 5.747 | 3.32 s | 202 GB |
+| grouped GEMM + RMSNorm | 5.747 | 3.32 s | 202 GB |
+| + DeepEP | 5.747 | 3.28 s | 198 GB |
+| + GEMM (recipe default) | 5.747 | 3.29 s | 199 GB |
+
+DeepEP gives the gain. In BF16, Turbo's GEMM and TE's linears both call
+hipBLASLt, so `use_turbo_gemm` does not speed up the dense layers.
 
 ### Parallelism
 
@@ -255,6 +285,7 @@ export PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1   # the v26.8 image doesn't ship Eme
   expert MLP weights, shared experts, and the router's `weight` and
   `shared_weight`. On Adam: embedding, LM head, ShortConvs (3-D), norms and
   `global_scale`.
+- Muon needs Turbo grouped GEMM off (see [Primus-Turbo](#primus-turbo)).
 - `dist_muon` with `--overlap_param_gather true` fails at the second step when
   every expert lives on one rank (EP = number of GPUs): Megatron's layer-wise
   optimizer leaves the expert buckets' sizes unset. Keep parameter-gather

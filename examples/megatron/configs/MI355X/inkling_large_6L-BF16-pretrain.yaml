@@ -82,6 +82,8 @@ modules:
       # Turbo grouped GEMM, RMSNorm, DeepEP dispatcher and GEMM (attention,
       # MLPs, shared experts, LM head). Inkling keeps its own attention core.
       # DeepEP takes fp32 router probs and switches the dispatcher to flex.
+      # Muon does not orthogonalize Turbo's stacked expert weights: run
+      # muon / dist_muon with PRIMUS_TURBO=false.
       enable_primus_turbo: ${PRIMUS_TURBO:true}
       use_turbo_attention: false
       use_turbo_grouped_gemm: ${PRIMUS_TURBO:true}

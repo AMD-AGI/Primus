@@ -112,6 +112,25 @@ def validate_turbo_grouped_gemm_without_padding(args) -> None:
         raise ValueError(f"{option}=True requires moe_router_padding_for_quantization=False.")
 
 
+def validate_turbo_grouped_gemm_with_muon(args) -> None:
+    """Muon orthogonalizes only 2-D weights and hands the rest to its scalar optimizer.
+
+    PrimusTurboGroupedLinear trains each expert linear as one 3-D ``weights`` tensor, so
+    under Muon every routed expert would silently train with Adam (and ``dist_muon``
+    rejects the resulting expert-parallel Adam groups).
+    """
+    optimizer = str(getattr(args, "optimizer", ""))
+    turbo_grouped_gemm = getattr(args, "enable_primus_turbo", False) and getattr(
+        args, "use_turbo_grouped_gemm", False
+    )
+    if "muon" in optimizer and turbo_grouped_gemm:
+        raise ValueError(
+            f"optimizer={optimizer} is incompatible with use_turbo_grouped_gemm=True: Turbo's stacked "
+            "3-D expert weights are not orthogonalized by Muon and would train with "
+            f"{getattr(args, 'muon_scalar_optimizer', 'adam')} instead. Set use_turbo_grouped_gemm=false."
+        )
+
+
 def validate_turbo_fp8_permute(args) -> None:
     """The FP8 permute handoff only has one consumer: the fused grouped MLP behind Turbo DeepEP."""
     option = "turbo_fp8_permute"
@@ -261,6 +280,7 @@ def validate_args_on_rocm(args):
         )
 
     validate_turbo_grouped_gemm_without_padding(args)
+    validate_turbo_grouped_gemm_with_muon(args)
     validate_turbo_fp8_permute(args)
     # After sync-free MoE, which may auto-enable use_turbo_grouped_gemm.
     warn_turbo_grouped_gemm_without_expandable_segments(args)

@@ -12,6 +12,7 @@ from primus.backends.megatron.patches.args import rocm_arg_validation
 from primus.backends.megatron.patches.args.rocm_arg_validation import (
     ALLOC_CONF_ENVS,
     validate_turbo_fp8_permute,
+    validate_turbo_grouped_gemm_with_muon,
     validate_turbo_grouped_gemm_without_padding,
     warn_turbo_grouped_gemm_without_expandable_segments,
 )
@@ -66,6 +67,26 @@ def test_turbo_grouped_gemm_without_padding_disabled_is_noop():
 def test_turbo_grouped_gemm_without_padding_rejects_unsupported_config(overrides, message):
     with pytest.raises(ValueError, match=message):
         validate_turbo_grouped_gemm_without_padding(_no_padding_args(**overrides))
+
+
+@pytest.mark.parametrize("optimizer", ["muon", "dist_muon", "adaptive_muon"])
+def test_turbo_grouped_gemm_rejects_muon(optimizer):
+    args = SimpleNamespace(optimizer=optimizer, enable_primus_turbo=True, use_turbo_grouped_gemm=True)
+    with pytest.raises(ValueError, match="use_turbo_grouped_gemm=false"):
+        validate_turbo_grouped_gemm_with_muon(args)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"optimizer": "adam"},
+        {"use_turbo_grouped_gemm": False},
+        {"enable_primus_turbo": False},
+    ],
+)
+def test_turbo_grouped_gemm_with_muon_allows_other_configs(overrides):
+    values = dict(optimizer="muon", enable_primus_turbo=True, use_turbo_grouped_gemm=True)
+    validate_turbo_grouped_gemm_with_muon(SimpleNamespace(**{**values, **overrides}))
 
 
 def _fp8_permute_args(**overrides):
