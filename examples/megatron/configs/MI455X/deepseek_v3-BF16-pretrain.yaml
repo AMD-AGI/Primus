@@ -115,6 +115,8 @@ modules:
       turbo_grouped_gemm_backend: bf16:flydsl
       use_turbo_rms_norm: true
       use_turbo_deepep: false
+      # Primus-Turbo's fused MegaMoE layer (needs its gfx1250 kernels); --use_turbo_mega_moe False turns it off
+      use_turbo_mega_moe: true
       moe_shared_expert_overlap: false
       # stage 1 would only turn on the fused router (see router) and moe_permute_fusion, set here
       turbo_sync_free_moe_stage: 0
