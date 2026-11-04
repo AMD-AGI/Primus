@@ -422,7 +422,7 @@ Profile output will be written under the `base_output_directory` specified in th
 set -e
 
 IMAGE="$1"       # Docker image, for example rocm/jax-training:maxtext-v26.9
-TAG="$2"         # Short tag for output folder, e.g. v26.8_llama2_7b
+TAG="$2"         # Short tag for output folder, for example v26.9_llama2_7b
 PROFILE_DIR="/path/to/profiles/${TAG}"
 
 mkdir -p "${PROFILE_DIR}"

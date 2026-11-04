@@ -80,10 +80,10 @@ Besides the Docker image, Primus can be installed as a wheel that bundles the `p
 
 ```bash
 # Option 1 — install directly from the Git repository (pin a tag, branch, or commit):
-pip install "git+https://github.com/AMD-AGI/Primus.git@v26.2.0rc1"
+pip install "git+https://github.com/AMD-AGI/Primus.git@v26.9.0"
 
 # Option 2 — install a released wheel from the GitHub Pages index (recommended; pin the version):
-pip install "primus==26.2.0rc1" --extra-index-url https://amd-agi.github.io/Primus/simple/
+pip install "primus==26.9.0" --extra-index-url https://amd-agi.github.io/Primus/simple/
 ```
 
 The wheel ships the `primus-cli` toolkit but not the heavy backend sources. Fetch the backend

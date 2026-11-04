@@ -332,7 +332,7 @@ stage_maxtext() {
     # for MODE=stable, WORKFLOW=pre-training, TF=true (what the image runs).
     # The apt/gcsfuse and interactive-venv steps of that script are skipped:
     # system packages are a one-time root action (see the guide's Section 2)
-    # and the venv already exists here. release/v26.9 made the TensorFlow,
+    # and the venv already exists here. release/v26.8 made the TensorFlow,
     # TFDS, seqio and JetStream extras opt-in (TF=true, i.e. --with-tf); the
     # image passes it, so this does too.
     local req="src/dependencies/requirements/generated_requirements/${MAXTEXT_DEVICE}-requirements.txt"

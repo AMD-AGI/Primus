@@ -172,7 +172,8 @@ Optional: `torchrec` (DLRM/recommendation stack).
   `mlflow-skinny` and `mlflow-tracing` `3.17.2` (`--no-deps`).
   `cryptography==50.0.0` is unchanged.
 - **Runtime:** `env.sh` also exports `TORCH_DIST_USE_NCCL2=0`, which the image
-  sets for memory issues.
+  sets alongside [Primus #1286](https://github.com/AMD-AGI/Primus/pull/1286) to
+  resolve memory issues.
 
 ## What is SKIPPED (needs sudo / apt — not reproducible here)
 
@@ -243,8 +244,9 @@ scripts:
   Ubuntu 24.04 build that needs `GLIBCXX_3.4.32`, cannot load here, is not
   writable, and otherwise takes precedence. Either problem surfaces as
   `MockGPTDataset failed to build as a mock data generator`.
-- **`flydsl` pinned to the version the image resolves (0.3.4.1 for v26.9).** It is
-  restated because Turbo is installed with `--no-deps`. aiter only needs
+- **`flydsl` pinned to the version the image resolves (0.3.4.1 for v26.9).** The
+  image gets it through Primus-Turbo's requirements, but Turbo is installed here
+  with `--no-deps`, so `stage_turbo` restates the pin. aiter only needs
   `flydsl.expr.vector` at runtime, and that survived until 0.3.0 removed it —
   after which aiter prints `ROCm/HIP JIT runtime not available … CK and HIP ops
   are disabled. Triton ops remain available.` and quietly runs Triton-only.
@@ -289,7 +291,9 @@ scripts:
   `stable.repo.amd.com` releases v26.8 used. If a pin stops resolving,
   update the pin block at the top of `setup.sh` as a set — `torch`,
   `amd-torch-device-*`, `rocm-sdk-*`, `torchaudio`, `torchvision`,
-  `amd-torchvision-device-*` and `apex` must all target the same ROCm version.
+  `amd-torchvision-device-*` must all target the same ROCm version. `apex` is the
+  exception: it stays on the ROCm 10.3 build the v26.9 image resolved (see
+  [above](#apex-is-pinned-to-what-the-image-resolved)).
 - **GPU arch is auto-detected** (`env.sh` reads `rocminfo`, else the kernel KFD
   sysfs `gfx_target_version`), and `stage_torch` installs the matching device
   wheels for whatever it finds (gfx942 and/or gfx950). To force a target — e.g.

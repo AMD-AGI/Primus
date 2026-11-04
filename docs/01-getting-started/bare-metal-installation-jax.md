@@ -602,7 +602,7 @@ Clone the ROCm MaxText fork and install its Python dependencies. The reference
 image runs MaxText's `src/dependencies/scripts/setup.sh TF=true`; on bare metal we
 run the **Python portion** of that script directly (the `apt`/`gcsfuse` steps are
 the one-time root action from Section 2, and the venv already exists).
-`release/v26.9` made the TensorFlow, TFDS, seqio, and JetStream extras opt-in;
+`release/v26.8` made the TensorFlow, TFDS, seqio, and JetStream extras opt-in;
 `TF=true` (`--with-tf` below) is what the image uses.
 
 > **MaxText `release/v26.9`.** Override `MAXTEXT_BRANCH` only if you deliberately

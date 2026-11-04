@@ -634,13 +634,13 @@ Images from v26.3 onward ship a manifest at `/workspace/.manifest/` recording ex
 | `docker-build-recipe.txt` | the Dockerfile the image was built from (named `Dockerfile` in `rocm/primus` images before v26.8 and in `rocm/jax-training:maxtext` images before v26.6) |
 
 ```bash
-docker run --rm --entrypoint bash rocm/primus:v26.8 -c 'cat /workspace/.manifest/requirements.txt'
+docker run --rm --entrypoint bash rocm/primus:v26.9 -c 'cat /workspace/.manifest/requirements.txt'
 ```
 
 Native library versions are not pip packages; read them from the ROCm headers:
 
 ```bash
-docker run --rm --entrypoint bash rocm/primus:v26.8 -c '
+docker run --rm --entrypoint bash rocm/primus:v26.9 -c '
   grep -E "HIPBLASLT_VERSION_(MAJOR|MINOR|PATCH|TWEAK)" $(find $ROCM_PATH /opt/rocm -name hipblaslt-version.h 2>/dev/null | head -1)
   grep -E "define NCCL_(MAJOR|MINOR|PATCH)"              $(find $ROCM_PATH /opt/rocm -name rccl.h            2>/dev/null | head -1)'
 ```
