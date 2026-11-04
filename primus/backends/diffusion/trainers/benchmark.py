@@ -40,6 +40,47 @@ def _collate_encoded(samples: list[dict]) -> dict:
     return batch
 
 
+def cached_sample_loader(
+    samples: list[dict],
+    *,
+    batch_size: int,
+    shuffle: bool,
+    even_batches: bool,
+    drop_last: bool,
+):
+    """Loader over unique cached samples.
+
+    Even-batch padding is applied again here, so each epoch redraws the tail
+    instead of replaying the padding stored from epoch 0.
+    """
+    sampler = torch.utils.data.distributed.DistributedSampler(
+        samples,
+        num_replicas=1,
+        rank=0,
+        shuffle=shuffle,
+    )
+    common = {
+        "collate_fn": _collate_encoded,
+        "pin_memory": True,
+        "num_workers": 0,
+    }
+    if even_batches:
+        loader = torch.utils.data.DataLoader(
+            samples,
+            batch_sampler=EvenSizeBatchSampler(sampler, batch_size),
+            **common,
+        )
+    else:
+        loader = torch.utils.data.DataLoader(
+            samples,
+            batch_size=batch_size,
+            sampler=sampler,
+            drop_last=drop_last,
+            **common,
+        )
+    return sampler, loader
+
+
 class AMDBBenchmarkTrainer(FSDP2Trainer):
     _encoded_cache = False
 
@@ -88,30 +129,13 @@ class AMDBBenchmarkTrainer(FSDP2Trainer):
             offload()
         torch.cuda.empty_cache()
 
-        self.sampler = torch.utils.data.distributed.DistributedSampler(
+        self.sampler, self.dataloader = cached_sample_loader(
             samples,
-            num_replicas=1,
-            rank=0,
+            batch_size=self.per_device_train_batch_size,
             shuffle=self.args.get("shuffle", True),
+            even_batches=bool(self.args.get("dataloader_even_batches", False)),
+            drop_last=bool(self.args.get("dataloader_drop_last", False)),
         )
-        loader_kwargs = {
-            "collate_fn": _collate_encoded,
-            "pin_memory": True,
-        }
-        if bool(self.args.get("dataloader_even_batches", False)):
-            self.dataloader = torch.utils.data.DataLoader(
-                samples,
-                batch_sampler=EvenSizeBatchSampler(self.sampler, self.per_device_train_batch_size),
-                **loader_kwargs,
-            )
-        else:
-            self.dataloader = torch.utils.data.DataLoader(
-                samples,
-                batch_size=self.per_device_train_batch_size,
-                sampler=self.sampler,
-                drop_last=bool(self.args.get("dataloader_drop_last", False)),
-                **loader_kwargs,
-            )
         self._encoded_cache = True
         if self.rank == 0:
             logger.info(
