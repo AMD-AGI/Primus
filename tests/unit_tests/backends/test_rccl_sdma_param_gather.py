@@ -482,6 +482,48 @@ def test_param_buffer_wrapper_rejects_unsupported_layouts(
         )
 
 
+def test_param_buffer_wrapper_reads_megatron_019_params_with_names(monkeypatch):
+    import megatron.core.distributed.param_and_grad_buffer as pgb
+
+    param = SimpleNamespace(device=torch.device("cuda", 0))
+    checked = []
+    monkeypatch.setattr(pgb, "is_mxfp8tensor", lambda value: checked.append(value) or True)
+
+    def original(
+        self,
+        ddp_config,
+        param_dtype,
+        grad_dtype,
+        params_with_names,
+        data_parallel_group,
+        bucket_size,
+        param_to_name,
+        gradient_scaling_factor,
+        param_indices,
+        nccl_ub,
+        pg_collection=None,
+        param_layout=None,
+    ):
+        pytest.fail("unsupported direct-gather layout reached Megatron allocation")
+
+    wrapped = rccl_sdma_param_all_gather_patches.make_param_and_grad_buffer_init(original)
+    with pytest.raises(RuntimeError, match="does not support MXFP8 parameter storage"):
+        wrapped(
+            SimpleNamespace(),
+            SimpleNamespace(use_distributed_optimizer=True),
+            torch.bfloat16,
+            torch.float32,
+            [(param, "decoder.layers.0.weight")],
+            SimpleNamespace(),
+            1024,
+            {},
+            1.0,
+            [0],
+            False,
+        )
+    assert checked == [param]
+
+
 def test_global_cta_policy_is_rejected_for_megatron_backend(monkeypatch):
     monkeypatch.setenv("NCCL_CTA_POLICY", "2")
 
