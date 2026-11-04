@@ -20,12 +20,18 @@ import os
 import sys
 from pathlib import Path
 
+# PR 4 adds metadata.csv so prompts load next to the clips. Pin the commit:
+# ``refs/pr/4`` moves when that pull request gains another commit.
+DISNEY_DATASET_REPO = "Wild-Heart/Disney-VideoGeneration-Dataset"
+DISNEY_DATASET_REVISION = "316b85f5d7c263260cc526a25eece96cc30e0c06"
+
 _MODEL_FILES: dict[str, tuple[str, str]] = {
     "flux-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors"),
     "wan2.1-i2v": ("Wan-AI/Wan2.1-I2V-14B-480P-Diffusers", "transformer"),
     "sdxl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
     "stable-diffusion-xl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
     "mochi-1": ("genmo/mochi-1-preview", "dit.safetensors"),
+    "hunyuan-video": ("hunyuanvideo-community/HunyuanVideo", "transformer"),
 }
 _MODEL_DOWNLOAD_PATTERNS: dict[str, list[str]] = {
     "mochi-1": ["dit.safetensors", "encoder.safetensors"],
@@ -41,10 +47,11 @@ _MOCHI_T5_DOWNLOAD_PATTERNS = [
 ]
 _DATASETS: dict[str, tuple[str, str | None]] = {
     "flux-dev": ("frank-chieng/chinese_architecture_siheyuan", None),
-    "wan2.1-i2v": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
+    "wan2.1-i2v": (DISNEY_DATASET_REPO, DISNEY_DATASET_REVISION),
     "sdxl": ("frank-chieng/chinese_architecture_siheyuan", None),
     "stable-diffusion-xl": ("frank-chieng/chinese_architecture_siheyuan", None),
-    "mochi-1": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
+    "mochi-1": (DISNEY_DATASET_REPO, DISNEY_DATASET_REVISION),
+    "hunyuan-video": (DISNEY_DATASET_REPO, DISNEY_DATASET_REVISION),
 }
 
 
@@ -238,11 +245,13 @@ def materialize_dataset(model_name: str, dataset_path: str | None, revision: str
         repo_id = text
         rev = revision
     elif not text and default is not None:
-        repo_id, rev = default
+        repo_id, default_rev = default
+        # An explicit revision wins over the table, including the empty-path default.
+        rev = revision or default_rev
     else:
         return text
-    if repo_id == "Wild-Heart/Disney-VideoGeneration-Dataset" and not rev:
-        rev = "refs/pr/4"
+    if repo_id == DISNEY_DATASET_REPO and not rev:
+        rev = DISNEY_DATASET_REVISION
     return _snapshot_dataset(repo_id, revision=rev)
 
 
@@ -324,6 +333,14 @@ def _companion_paths(model_name: str, weights: str, encoder: dict[str, object]) 
         found["VAE_CHECKPOINT"] = _require_file(vae, "SDXL autoencoder")
     elif model_name == "mochi-1" and _blank(encoder.get("autoencoder")):
         found["VAE_CHECKPOINT"] = _require_file(root / "encoder.safetensors", "Mochi VAE encoder")
+    elif model_name == "hunyuan-video":
+        if _blank(encoder.get("llm")):
+            found["LLM_ENCODER"] = _require_file(root / "text_encoder", "HunyuanVideo LLaMA encoder")
+        # The community snapshot sometimes ships ``vae/`` and sometimes does not.
+        # Latent batches do not need it; raw video does, and the caller can set
+        # ``encoder.autoencoder`` when the folder lives somewhere else.
+        if _blank(encoder.get("autoencoder")) and (root / "vae").exists():
+            found["VAE_CHECKPOINT"] = str(root / "vae")
     return found
 
 

@@ -121,9 +121,12 @@ On success the hook prints `env.PREPARED=1`.
 ## Official-module post-training
 
 FLUX.1-dev fine-tunes the in-tree FLUX module. Wan2.1 I2V fine-tunes the native
-Wan DiT. SDXL fine-tunes the in-tree Stability UNet. None of them builds a
-Diffusers pipeline. Point `PRETRAINED_PATH` at the official checkpoint. For
-SDXL that file is the UNet.
+Wan DiT. SDXL fine-tunes the in-tree Stability UNet. Mochi-1 fine-tunes the
+in-tree Genmo denoiser and VAE encoder. HunyuanVideo fine-tunes the in-tree
+Tencent transformer. None of them builds a Diffusers pipeline. Point
+`PRETRAINED_PATH` at the official checkpoint. For SDXL that file is the UNet.
+For Mochi-1 it is the DiT. Leave the HunyuanVideo path unset and `primus-cli`
+downloads `hunyuanvideo-community/HunyuanVideo`.
 
 | Workload | Official source | Checkpoint |
 |---|---|---|
@@ -131,11 +134,13 @@ SDXL that file is the UNet.
 | Wan2.1 I2V 14B | native Wan2.1 DiT with CLIP cross-attention | official I2V DiT, Wan2.1 VAE, UMT5, CLIP vision |
 | SDXL | Stability `generative-models` UNet | `sd_xl_base_1.0.safetensors` plus the SDXL VAE |
 | Mochi-1 | Genmo `AsymmDiTJoint` and VAE encoder | official DiT and encoder safetensors, T5-XXL |
+| HunyuanVideo | Tencent `HYVideoDiffusionTransformer` | official transformer weights, LLaMA text encoder, CLIP-L |
 
 MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
-with a constant schedule for FLUX and Wan. `LR` overrides either default. The
-Wan2.1 I2V configs leave `max_grad_norm` at `0` so the timed step does not
-include the gradient-norm all-reduce. `MAX_GRAD_NORM` turns clipping back on.
+with a constant schedule for FLUX, Wan, and Mochi. `LR` overrides either
+default. Wan2.1 I2V, Mochi, and HunyuanVideo leave `max_grad_norm` at `0` so
+the timed step does not include the gradient-norm all-reduce. `MAX_GRAD_NORM`
+turns clipping back on.
 
 `BENCHMARK_DENOISER_ONLY=1` builds the Wan DiT without the VAE, UMT5, and CLIP
 weights. That mode only accepts batches that already contain `latents`,
@@ -155,6 +160,7 @@ Default `LOCAL_BATCH_SIZE` for the benchmark configs:
 | wan2.1-i2v | 1 | 1 |
 | stable-diffusion-xl | 20 | 12 |
 | mochi-1 | 1 | 4 |
+| hunyuan-video | 1 | 3 |
 
 Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
 `SP_SIZE` at 1.
@@ -163,7 +169,7 @@ Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
 Set `PRETRAINED_PATH` to `flux1-dev.safetensors` and `VAE_CHECKPOINT` to
 `ae.safetensors`.
 
-Mochi-1 fine-tunes the in-tree Genmo denoiser and VAE encoder. It does not
-build a Diffusers pipeline. Point `PRETRAINED_PATH` at the official DiT
-checkpoint. Every SKU leaves `max_grad_norm` at `0`. `MAX_GRAD_NORM` turns
-clipping back on.
+`DATASET_PATH=synthetic:hunyuan` trains the denoiser on a repeated latent
+batch and skips the dataset download. `BENCHMARK_DENOISER_ONLY=1` also skips
+the LLaMA, CLIP, and VAE downloads. A `DATASET_PATH` that ends in `.pt` loads
+cached encodings instead.

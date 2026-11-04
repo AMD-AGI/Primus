@@ -87,6 +87,14 @@ def _build_mochi(model_config: dict):
     return build_mochi_model(model_config)
 
 
+def _build_hunyuan(model_config: dict):
+    from primus.backends.diffusion.models.registrations.hunyuan import (
+        build_hunyuan_model,
+    )
+
+    return build_hunyuan_model(model_config)
+
+
 def _build_amdb_dataset(dataset_config: dict):
     from primus.backends.diffusion.data.registrations.benchmark import (
         build_benchmark_dataset,
@@ -122,6 +130,7 @@ MODEL_BUILDERS: Dict[str, Callable[[dict], Any]] = {
     "mochi-1": _build_mochi,
     "wan": _build_wan_model,
     "wan2.1-i2v": _build_wan21_i2v,
+    "hunyuan-video": _build_hunyuan,
 }
 DATASET_BUILDERS: Dict[str, Callable[[dict], Tuple[Any, Any]]] = {
     "flux": _build_flux_dataset,

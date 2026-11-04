@@ -8,7 +8,7 @@ from primus.backends.diffusion.argument_builder import DiffusionArgBuilder
 from primus.backends.diffusion.data.benchmark import AMDBProcessor
 from primus.backends.diffusion.registry import DATASET_BUILDERS, MODEL_BUILDERS
 
-BENCHMARK_NAMES = ("flux-dev", "wan2.1-i2v", "sdxl", "stable-diffusion-xl", "mochi-1")
+BENCHMARK_NAMES = ("flux-dev", "wan2.1-i2v", "sdxl", "stable-diffusion-xl", "mochi-1", "hunyuan-video")
 
 
 def _finalize(params: dict):
@@ -45,7 +45,7 @@ def test_benchmark_argument_builder_selects_flux_dev_defaults():
 
 
 def test_benchmark_argument_builder_rejects_sequence_parallelism():
-    for name in ("flux-dev", "wan2.1-i2v", "sdxl", "mochi-1"):
+    for name in ("flux-dev", "wan2.1-i2v", "sdxl", "mochi-1", "hunyuan-video"):
         with pytest.raises(ValueError, match="sp_size"):
             _finalize(
                 {
@@ -102,8 +102,10 @@ def test_benchmark_downloads_keep_datasets_separate(monkeypatch, tmp_path):
     assert Path(path) == home / "datasets" / "Wild-Heart" / "Disney-VideoGeneration-Dataset"
     assert calls == {
         "repo": "Wild-Heart/Disney-VideoGeneration-Dataset",
-        "revision": "refs/pr/4",
+        "revision": "316b85f5d7c263260cc526a25eece96cc30e0c06",
     }
+    download.materialize_dataset("hunyuan-video", "", revision="abc123")
+    assert calls["revision"] == "abc123"
 
     weights = tmp_path / "flux1-dev.safetensors"
     weights.write_bytes(b"x")
@@ -261,10 +263,9 @@ def test_even_batches_pad_short_tail_like_accelerate():
     assert len(EvenSizeBatchSampler(range(16), 16)) == 1
 
 
-def test_unbuilt_benchmark_models_fail_before_download():
-    for name in ("hunyuan-video",):
-        with pytest.raises(ValueError, match="no diffusion model builder"):
-            _finalize({"model": {"name": name, "config": {}}, "data": {"dataset_path": "x"}})
+def test_registered_benchmarks_build_without_a_download():
+    args = _finalize({"model": {"name": "hunyuan-video", "config": {}}, "data": {"dataset_path": "x"}})
+    assert args.dataset["config"]["model_name"] == "hunyuan-video"
 
 
 def test_flux_dev_keeps_explicit_img_size_and_parses_resolution():
@@ -459,15 +460,15 @@ def test_flux_prepare_hook_rewrites_paths_and_reports_auth_failures(monkeypatch,
         raise AssertionError("unbuilt benchmark must not download assets")
 
     monkeypatch.setattr(download, "stage_benchmark_assets", refuse_download)
-    with pytest.raises(SystemExit):
-        diffusion_prepare._reject_unbuilt_benchmark("hunyuan-video")
-    assert "no diffusion model builder" in capsys.readouterr().err
+    diffusion_prepare._reject_unbuilt_benchmark("hunyuan-video")
+    assert diffusion_prepare._UNBUILT_BENCHMARKS == set()
     assert diffusion_prepare._BENCHMARK_DOWNLOADS == {
         "flux-dev",
         "wan2.1-i2v",
         "sdxl",
         "stable-diffusion-xl",
         "mochi-1",
+        "hunyuan-video",
     }
 
 
@@ -793,8 +794,10 @@ def test_sdxl_benchmark_disables_grad_clipping_by_default():
 
 
 def test_unregistered_benchmark_presets_are_rejected():
-    with pytest.raises(ValueError, match="no diffusion model builder"):
-        _finalize({"model": {"name": "hunyuan-video", "config": {}}})
+    from primus.backends.diffusion.argument_builder import _UNBUILT_BENCHMARKS
+
+    assert _UNBUILT_BENCHMARKS == set()
+    _finalize({"model": {"name": "hunyuan-video", "config": {}}})
 
 
 def test_benchmark_data_overrides_reach_the_dataset_and_model():
@@ -1340,3 +1343,143 @@ def test_even_batch_loader_is_full_size_and_mlperf_keeps_the_tail(tmp_path, monk
     mlperf = build(True)
     assert isinstance(mlperf.sampler, ContiguousDistributedSampler)
     assert [len(batch) for batch in mlperf.dataloader] == [16, 4]
+
+
+def test_hunyuan_keeps_checkpointing_off_and_makes_the_vae_optional(tmp_path):
+    import primus.backends.diffusion.utils.download as download
+
+    args = _finalize(
+        {
+            "model": {"name": "hunyuan-video", "config": {}},
+            "data": {"dataset_path": "x", "resolution": "960,544", "num_frames": 9},
+        }
+    )
+    assert args.dataset["config"]["modality"] == "video"
+    assert args.dataset["config"]["model_name"] == "hunyuan-video"
+    assert args.model["config"]["resolution"] == "960,544"
+    assert args.model["config"]["num_frames"] == 9
+    assert args.trainer["args"]["gradient_checkpointing"] is False
+    assert (
+        args.trainer["args"]["fsdp_transformer_layer_cls_to_wrap"]
+        == "MMDoubleStreamBlock,MMSingleStreamBlock"
+    )
+
+    root = tmp_path / "hunyuan"
+    (root / "transformer").mkdir(parents=True)
+    (root / "text_encoder").mkdir()
+    (root / "tokenizer").mkdir()
+    (root / "tokenizer" / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    env = download._companion_paths("hunyuan-video", str(root / "transformer"), {})
+    assert env["LLM_ENCODER"] == str(root / "text_encoder")
+    assert "VAE_CHECKPOINT" not in env
+    (root / "vae").mkdir()
+    with_vae = download._companion_paths("hunyuan-video", str(root / "transformer"), {})
+    assert with_vae["VAE_CHECKPOINT"] == str(root / "vae")
+
+
+def test_bright_frame_lists_are_normalized_once():
+    import numpy as np
+    import torch
+
+    from primus.backends.diffusion.utils.pixels import videos_to_tensor
+
+    frame = np.full((4, 4, 3), 200, dtype=np.uint8)
+    clips = videos_to_tensor([[frame, frame]], num_frames=2, height=4, width=4)
+    expected = 200 / 127.5 - 1.0
+    assert torch.allclose(clips, torch.full_like(clips, expected), atol=1e-4)
+
+
+def test_checkpoint_directory_does_not_overlay_mixed_formats(tmp_path, monkeypatch):
+    import torch
+    from safetensors.torch import save_file
+
+    from primus.backends.diffusion.utils.checkpoint_io import load_state_dict
+
+    folder = tmp_path / "ckpt"
+    folder.mkdir()
+    save_file({"weight": torch.ones(2)}, folder / "model.safetensors")
+    torch.save({"weight": torch.zeros(2)}, folder / "model.bin")
+    loaded = load_state_dict(str(folder))
+    assert torch.equal(loaded["weight"], torch.ones(2))
+
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    save_file({"a": torch.ones(1)}, shards / "model-00001.safetensors")
+    save_file({"b": torch.zeros(1)}, shards / "model-00002.safetensors")
+    merged = load_state_dict(str(shards))
+    assert set(merged) == {"a", "b"}
+
+    overlap = tmp_path / "overlap"
+    overlap.mkdir()
+    save_file({"weight": torch.ones(1)}, overlap / "first.safetensors")
+    save_file({"weight": torch.zeros(1)}, overlap / "second.safetensors")
+    with pytest.raises(ValueError, match="repeats keys"):
+        load_state_dict(str(overlap))
+
+    mixed = tmp_path / "mixed"
+    mixed.mkdir()
+    torch.save({"weight": torch.ones(1)}, mixed / "a.bin")
+    torch.save({"weight": torch.zeros(1)}, mixed / "b.pt")
+    with pytest.raises(ValueError, match="Mixed checkpoint formats"):
+        load_state_dict(str(mixed))
+
+    single = tmp_path / "one.pt"
+    torch.save({"weight": torch.ones(1)}, single)
+    seen = {}
+    real_load = torch.load
+
+    def spy(path, *args, **kwargs):
+        seen.update(kwargs)
+        return real_load(path, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", spy)
+    assert torch.equal(load_state_dict(str(single))["weight"], torch.ones(1))
+    assert seen.get("weights_only") is True
+
+
+def test_cached_latent_loader_keeps_even_batches():
+    import torch
+
+    from primus.backends.diffusion.trainers.benchmark import cached_sample_loader
+
+    samples = [{"latents": torch.tensor([float(index)]), "prompt": str(index)} for index in range(7)]
+    _sampler, loader = cached_sample_loader(
+        samples,
+        batch_size=3,
+        shuffle=False,
+        even_batches=True,
+        drop_last=False,
+    )
+    prompts = [tuple(batch["prompts"]) for batch in loader]
+    assert prompts == [("0", "1", "2"), ("3", "4", "5"), ("6", "0", "1")]
+    assert all(batch["latents"].shape[0] == 3 for batch in loader)
+
+
+def test_hunyuan_rope_tables_are_cached(monkeypatch):
+    import torch
+
+    from primus.backends.diffusion.models.hunyuan.train_pipeline import (
+        HunyuanTrainPipeline,
+    )
+
+    calls = {"count": 0}
+
+    def fake(*_args, **_kwargs):
+        calls["count"] += 1
+        return torch.zeros(2, 4), torch.ones(2, 4)
+
+    monkeypatch.setattr(
+        "primus.backends.diffusion.models.hunyuan.train_pipeline.get_nd_rotary_pos_embed",
+        fake,
+    )
+    pipeline = HunyuanTrainPipeline()
+    dit = type("Dit", (), {"rope_dim_list": [2, 2]})()
+    first_cos, first_sin = pipeline._rotary_embeddings(
+        dit, (1, 2, 2), device=torch.device("cpu"), dtype=torch.float32
+    )
+    second_cos, second_sin = pipeline._rotary_embeddings(
+        dit, (1, 2, 2), device=torch.device("cpu"), dtype=torch.float32
+    )
+    assert calls["count"] == 1
+    assert first_cos is second_cos
+    assert first_sin is second_sin

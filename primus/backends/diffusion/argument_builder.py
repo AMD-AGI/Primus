@@ -513,6 +513,16 @@ _SPECS: dict[str, dict[str, Any]] = {
         "warmup_steps": 0,
         "gradient_checkpointing": False,
     },
+    "hunyuan-video": {
+        "modality": "video",
+        "fsdp_layers": "MMDoubleStreamBlock,MMSingleStreamBlock",
+        "learning_rate": 1.0e-5,
+        "lr_scheduler_type": "constant",
+        "warmup_steps": 0,
+        # Off on MI300X, MI325X, and MI355X. The 13B run stays inside memory at
+        # batch 1, and checkpointing would change the AMDB step time.
+        "gradient_checkpointing": False,
+    },
 }
 
 
@@ -522,11 +532,9 @@ def _spec(model_name: str) -> dict[str, Any] | None:
     return _SPECS.get(model_name)
 
 
-# Registered on later benchmark PRs. Reject them here so this release does not
-# build trainer defaults, or download checkpoints, for a model it cannot run.
-_UNBUILT_BENCHMARKS = {
-    "hunyuan-video",
-}
+# Every benchmark in this release has a builder. A name added here is rejected
+# before any checkpoint or dataset download.
+_UNBUILT_BENCHMARKS: set[str] = set()
 
 
 def _positive_image_size(value: Any) -> int:
@@ -622,7 +630,7 @@ def benchmark_defaults(
     if model_name in _UNBUILT_BENCHMARKS:
         raise ValueError(
             f"{model_name} has no diffusion model builder. "
-            "This release registers the flux-dev, wan2.1-i2v, sdxl, and mochi-1 benchmarks only, "
+            "This release registers flux-dev, wan2.1-i2v, sdxl, mochi-1, and hunyuan-video only, "
             "so the config is rejected before any checkpoint or dataset download."
         )
     return None

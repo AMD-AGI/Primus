@@ -20,6 +20,10 @@ datasets, attention selection, FSDP2 wrapping, and the training loop.
 - AMDiffusionBenchmark workload `mochi-1`, built by `models/registrations/mochi.py`.
   The denoiser is Genmo's AsymmDiTJoint. It uses the shared benchmark
   trainer and does not change the native Wan or FLUX trainers.
+- AMDiffusionBenchmark workload `hunyuan-video`, built by
+  `models/registrations/hunyuan.py`. The trainable module is the Tencent transformer.
+  It uses the shared benchmark trainer and does not change the native
+  Wan or FLUX trainers.
 - Trainer: FSDP2 for the native models. The benchmark workloads use
   `amdb_benchmark`.
 - Wan sequence parallelism: supported through `sp_size`.
@@ -55,6 +59,7 @@ benchmark_flux_dev.yaml
 benchmark_wan2_1_i2v.yaml
 benchmark_sdxl.yaml
 benchmark_mochi_1.yaml
+benchmark_hunyuan_video.yaml
 ```
 
 `flux-dev` and `flux.1-dev` both build the native FLUX.1-dev DiT.
@@ -71,6 +76,9 @@ with CLIP cross-attention, the Wan2.1 VAE, UMT5, and the CLIP vision tower.
 
 `mochi-1` is the post-train preset. The checkpoint is the official DiT
 and VAE encoder safetensors, not a Diffusers-layout key set.
+
+`hunyuan-video` is the post-train preset. Gradient checkpointing stays
+off, and a snapshot without `vae/` still trains from latents.
 
 FLUX.1-schnell and FLUX.1-dev are separate presets. They share the same main
 transformer shape, but `flux.1-dev` has a guidance embedding module while
@@ -104,7 +112,17 @@ Keep sequence parallelism at 1.
 # Mochi-1, Wild-Heart/Disney-VideoGeneration-Dataset
 ./primus-cli direct -- train posttrain \
   --config examples/diffusion/configs/MI355X/benchmark_mochi_1-posttrain.yaml
+
+# HunyuanVideo, Wild-Heart/Disney-VideoGeneration-Dataset
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_hunyuan_video-posttrain.yaml
 ```
+
+`DATASET_PATH=synthetic:hunyuan` repeats one denoiser batch and skips the
+dataset download. `BENCHMARK_DENOISER_ONLY=1` also skips the text encoder and
+VAE. A path ending in `.pt` loads cached encodings. The Disney dataset is
+pinned to commit `316b85f5d7c263260cc526a25eece96cc30e0c06` (Hugging Face PR 4,
+which adds `metadata.csv`).
 
 ## Public Config Sections
 
