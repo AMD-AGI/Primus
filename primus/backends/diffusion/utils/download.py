@@ -39,9 +39,9 @@ _MODEL_DOWNLOAD_PATTERNS: dict[str, list[str]] = {
     "flux-dev": ["flux1-dev.safetensors", "ae.safetensors"],
     "mochi-1": ["dit.safetensors", "encoder.safetensors"],
     # A pattern of "transformer" matches no files: the weights live under that
-    # directory. Raw Hunyuan video also needs the LLaMA encoder, its tokenizer,
-    # and the causal 3D VAE from the same snapshot.
-    "hunyuan-video": ["transformer/*", "text_encoder/*", "tokenizer/*", "vae/*"],
+    # directory. The LLaMA encoder, its tokenizer, and the VAE are fetched by
+    # _companion_paths, which denoiser-only and synthetic runs never call.
+    "hunyuan-video": ["transformer/*"],
     "wan2.1-i2v": ["transformer/*"],
 }
 _MOCHI_T5_DOWNLOAD_PATTERNS = [
@@ -342,14 +342,39 @@ def _companion_paths(model_name: str, weights: str, encoder: dict[str, object]) 
     elif model_name == "mochi-1" and _blank(encoder.get("autoencoder")):
         found["VAE_CHECKPOINT"] = _require_file(root / "encoder.safetensors", "Mochi VAE encoder")
     elif model_name == "hunyuan-video":
+        # Keep these out of _MODEL_DOWNLOAD_PATTERNS. materialize_pretrained
+        # runs for denoiser-only and for build_hunyuan_model, including
+        # synthetic runs that skip this function.
+        llm_root, vae_root = _hunyuan_companion_roots(root, encoder)
         if _blank(encoder.get("llm")):
-            found["LLM_ENCODER"] = _require_file(root / "text_encoder", "HunyuanVideo LLaMA encoder")
+            found["LLM_ENCODER"] = _require_file(llm_root / "text_encoder", "HunyuanVideo LLaMA encoder")
         # The community snapshot sometimes ships ``vae/`` and sometimes does not.
         # Latent batches do not need it; raw video does, and the caller can set
         # ``encoder.autoencoder`` when the folder lives somewhere else.
-        if _blank(encoder.get("autoencoder")) and (root / "vae").exists():
-            found["VAE_CHECKPOINT"] = str(root / "vae")
+        if _blank(encoder.get("autoencoder")) and (vae_root / "vae").exists():
+            found["VAE_CHECKPOINT"] = str(vae_root / "vae")
     return found
+
+
+def _hunyuan_companion_roots(root: Path, encoder: dict[str, object]) -> tuple[Path, Path]:
+    """Download the LLaMA encoder and VAE only when this run will use them."""
+    llm_root = root
+    vae_root = root
+    missing_llm = _blank(encoder.get("llm")) and not (root / "text_encoder").exists()
+    missing_vae = _blank(encoder.get("autoencoder")) and not (root / "vae").exists()
+    if not missing_llm and not missing_vae:
+        return llm_root, vae_root
+    patterns: list[str] = []
+    if missing_llm:
+        patterns.extend(["text_encoder/*", "tokenizer/*"])
+    if missing_vae:
+        patterns.append("vae/*")
+    downloaded = Path(_snapshot(_MODEL_FILES["hunyuan-video"][0], allow_patterns=patterns))
+    if missing_llm:
+        llm_root = downloaded
+    if missing_vae:
+        vae_root = downloaded
+    return llm_root, vae_root
 
 
 _ENCODER_ENV_KEYS = {

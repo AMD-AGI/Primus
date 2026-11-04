@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 
 import torch
@@ -14,6 +15,17 @@ from ._flash_common import run_flash_attention_backend
 
 AITER_FLASH_ATTN_AVAILABLE = False
 aiter = None
+
+
+def _package_jit_writable() -> bool:
+    """True when amd-aiter can compile into its own package directory."""
+    spec = importlib.util.find_spec("aiter")
+    if spec is None or not spec.origin:
+        return True
+    package_dir = os.path.dirname(spec.origin)
+    package_jit = os.path.join(package_dir, "jit")
+    probe = package_jit if os.path.isdir(package_jit) else package_dir
+    return os.access(probe, os.W_OK)
 
 
 def _import_aiter():
@@ -25,10 +37,14 @@ def _import_aiter():
     name, when ``AITER_JIT_DIR`` is set before the import. Otherwise the build
     succeeds and the import then dies with
     ``ModuleNotFoundError: aiter.jit.module_aiter_core``.
+
+    A writable package directory must keep its own prebuilt modules. Setting
+    ``AITER_JIT_DIR`` just because ``~/.aiter/jit`` exists would rebuild there
+    or load a leftover ``.so`` from another image.
     """
-    jit_dir = os.path.join(os.path.expanduser("~"), ".aiter", "jit")
-    if os.path.isdir(jit_dir):
-        os.environ.setdefault("AITER_JIT_DIR", jit_dir)
+    user_jit = os.path.join(os.path.expanduser("~"), ".aiter", "jit")
+    if not _package_jit_writable() and os.path.isdir(user_jit):
+        os.environ.setdefault("AITER_JIT_DIR", user_jit)
     import aiter as module
 
     return module
