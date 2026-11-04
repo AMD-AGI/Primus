@@ -23,12 +23,18 @@ fi
 
 export PRIMUS_MICRO_BATCH_SIZE=4
 export PRIMUS_GLOBAL_BATCH_SIZE=32
-# MXFP4 de-osc converges at 4e-4 / 4e-5. The FP8 yaml still defaults to 8e-4
-# when this variable is not exported.
-export PRIMUS_LR=4.0e-4
-export PRIMUS_MIN_LR=4.0e-5
+# MXFP4 uses the MLPerf 6.1 submission schedule (min LR is 10% of max LR).
+# The FP8 yaml still defaults to 8e-4 when PRIMUS_LR is not exported.
+if [[ "${_linear_precision}" == mxfp4 ]]; then
+    export PRIMUS_LR=5.7e-4
+    export PRIMUS_MIN_LR=5.7e-5
+    export PRIMUS_LR_WARMUP_ITERS=117
+else
+    export PRIMUS_LR=4.0e-4
+    export PRIMUS_MIN_LR=4.0e-5
+    export PRIMUS_LR_WARMUP_ITERS=128
+fi
 export PRIMUS_TRAIN_ITERS=1200000
-export PRIMUS_LR_WARMUP_ITERS=128
 export PRIMUS_LR_DECAY_ITERS=$((PRIMUS_TRAIN_ITERS - PRIMUS_LR_WARMUP_ITERS))
 export EVAL_ITERS=$((1024 / PRIMUS_GLOBAL_BATCH_SIZE))
 export EVAL_SAMPLES_INTERVAL=12288
@@ -135,9 +141,11 @@ if [[ "${_linear_precision}" == mxfp4 ]]; then
     export PRIMUS_FUSED_RESIDUAL_NORM_V2="${PRIMUS_FUSED_RESIDUAL_NORM_V2:-1}"
     export PRIMUS_FUSED_RMSNORM_MXFP4_QKV="${PRIMUS_FUSED_RMSNORM_MXFP4_QKV:-1}"
 
-    # WGRAD writes main_grad in place and the grad buffer is reset by ownership
-    # transfer instead of a memset.
+    # The expert WGRAD overwrites main_grad (beta=0) and the grad buffer is
+    # reset by ownership transfer instead of a memset.
     export PRIMUS_TURBO_GRAD_OWNERSHIP="${PRIMUS_TURBO_GRAD_OWNERSHIP:-1}"
+    export PRIMUS_TURBO_WGRAD_ACCUM_OVERWRITE_OUT="${PRIMUS_TURBO_WGRAD_ACCUM_OVERWRITE_OUT:-1}"
+    export PRIMUS_TURBO_AUTO_TUNE=0
 
     # Fused AdamW: gradient clipping, BF16 gradient shards and BF16 weight
     # writeback in one kernel.
@@ -146,20 +154,23 @@ if [[ "${_linear_precision}" == mxfp4 ]]; then
     export PRIMUS_FUSED_ADAM_BF16_WRITEBACK="${PRIMUS_FUSED_ADAM_BF16_WRITEBACK:-1}"
     export PRIMUS_STATIC_BF16_LOSS_SCALE_CPU="${PRIMUS_STATIC_BF16_LOSS_SCALE_CPU:-1}"
     # BF16 Adam moments. The FP32 MCore master is required by de-oscillation.
-    export PRIMUS_USE_PRECISION_AWARE_OPTIMIZER="${PRIMUS_USE_PRECISION_AWARE_OPTIMIZER:-false}"
+    export PRIMUS_USE_PRECISION_AWARE_OPTIMIZER="${PRIMUS_USE_PRECISION_AWARE_OPTIMIZER:-true}"
     if [[ "${PRIMUS_USE_PRECISION_AWARE_OPTIMIZER}" == true ]]; then
         export PRIMUS_EXP_AVG_DTYPE="${PRIMUS_EXP_AVG_DTYPE:-bf16}"
         export PRIMUS_EXP_AVG_SQ_DTYPE="${PRIMUS_EXP_AVG_SQ_DTYPE:-bf16}"
         export PRIMUS_FUSED_ADAM_MCORE_MASTER=1
     fi
-fi
 
-# Gradient ReduceScatter on RCCL copy engines. Needs an RCCL build with CE
-# ReduceScatter (ROCm/rocm-systems#12310); RCCL 2.30.7 does not have it.
-if [[ "${MEGATRON_GRAD_REDUCE_BACKEND:-}" == rccl_sdma ]]; then
+    # Gradient ReduceScatter on RCCL copy engines. RCCL ignores these unless it
+    # has CE ReduceScatter (ROCm/rocm-systems#12310); RCCL 2.30.7 does not.
     export RCCL_CE_REDUCESCATTER=1
     export RCCL_FORCE_CE_REDUCESCATTER=1
+    export RCCL_CE_AR_STAGING_BYTES=268435456
+    export RCCL_CE_COOP_LAUNCH=0
     export RCCL_CE_REDUCE_PER_CHUNK=1
     export RCCL_CE_REDUCE_MAX_BLOCKS=64
+    export RCCL_DDA_ENABLE=1
+    export NCCL_CUMEM_ENABLE=1
+    export NCCL_LOCAL_REGISTER=0
 fi
 unset _linear_precision
