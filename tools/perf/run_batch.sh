@@ -54,8 +54,9 @@
 #                                  diffusion_bench/config.yaml
 #   DIFFUSION_DLRM_HF_CACHE=<dir>  Hugging Face cache for the diffusion models
 #                                  (default: hf_cache_dir in that config)
-#   TRAIN_STEPS sets the diffusion models' num_iterations; DLRM keeps its own.
-#   EXTRA_ENV reaches its container too; the Primus defaults below do not.
+#   TRAIN_STEPS is not applied: the models keep the num_iterations of that
+#   config. EXTRA_ENV reaches its container too; the Primus defaults below
+#   do not.
 #
 # Optional knobs:
 #   DRY_RUN=1        print the selected configs and launch commands, then exit
@@ -64,7 +65,10 @@
 #   TRAIN_STEPS=20   cap training length for the whole batch (smoke / short
 #                    bench). The CLI override flag is chosen from the config's
 #                    framework (see below). Unset -- the default -- keeps
-#                    whatever the YAML specifies.
+#                    whatever the YAML specifies. megatron_bridge configs always
+#                    keep their YAML train_iters (their LR schedule is sized
+#                    to it), and diffusion_dlrm its own num_iterations; the
+#                    list is PERF_TRAIN_STEPS_IGNORED in lib/run.sh.
 #   NUM_REPS=3       repetitions per config (default 1).
 #   MAX_RUN_SECONDS  stop a run that is still going after this long
 #                    (default 3600; 0 = no limit).
@@ -89,6 +93,9 @@
 #                    runner/.primus.yaml's container.options.env plus the
 #                    PRIMUS_/NCCL_/RCCL_/GLOO_/IONIC_/HIPBLASLT_ prefixes, and
 #                    drops everything else without warning.
+#   DATA_PATH=...    where Primus keeps its Hugging Face downloads (models,
+#                    datasets); <checkout>/data when unset. The runner
+#                    creates it, mounts it and passes it into the container.
 #   PRIMUS_MODE      launcher mode, "container" (default) or "direct" when the
 #                    runner itself already runs inside a container.
 #
@@ -109,7 +116,8 @@
 #   The module is detected per config, so a single batch can mix both.
 #
 # TRAIN_STEPS CLI flags (Primus deep-merges unknown tokens after the train verb):
-#   megatron / megatron_bridge : --train_iters N
+#   megatron                   : --train_iters N
+#   megatron_bridge            : none; TRAIN_STEPS is not applied
 #   torchtitan                 : --training.steps N   (NOT --steps)
 #   maxtext                    : --steps N
 #   maxdiffusion               : --max_train_steps N  (NOT --steps; ignored if used)
@@ -292,7 +300,7 @@ shopt -s nullglob
 # Select the configs to run: catalog (default, filtered by GPU/BACKEND) or a
 # directory of YAMLs (CONFIG_DIR). EXTRA_ENV, missing paths and duplicates are
 # all reported here, before anything launches.
-if ! check_batch_inputs || ! perf_check_run_limits || ! perf_dd_prepare; then
+if ! check_batch_inputs || ! perf_check_run_limits || ! perf_prepare_data_path || ! perf_dd_prepare; then
     exit "$PERF_EXIT_REFUSED"
 fi
 
@@ -322,7 +330,7 @@ build_launch_argv() {
     # EXTRA_ENV becomes explicit `--env KEY=VALUE` flags before the `--`, which
     # is the only way to be sure a variable reaches the container.
     # shellcheck disable=SC2206
-    LAUNCH_ARGV=( "$PRIMUS_CLI" $PRIMUS_MODE ${label_args[@]+"${label_args[@]}"} ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} -- train "$suite" --config "$config_file" )
+    LAUNCH_ARGV=( "$PRIMUS_CLI" $PRIMUS_MODE ${label_args[@]+"${label_args[@]}"} ${PERF_DATA_ARGS[@]+"${PERF_DATA_ARGS[@]}"} ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} -- train "$suite" --config "$config_file" )
 
     append_train_steps_override "$config_file" "$framework"
 }
@@ -384,10 +392,11 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# ROCm (image) : ${PERF_CONTAINER_ROCM:-unknown}  (HIP ${PERF_CONTAINER_HIP:-unknown})"
     echo "# System       : ${PERF_SYSTEM_DESCRIPTION:-unknown}"
     echo "# Reps/config  : $NUM_REPS"
-    echo "# TRAIN_STEPS  : ${TRAIN_STEPS:-<unset; use YAML>}"
+    echo "# TRAIN_STEPS  : $(train_steps_text)"
     echo "# Run limits   : $(perf_run_limits_text)"
     echo "# GPU check    : $PERF_GPU_CHECK"
     echo "# NCCL iface   : $PERF_NIC_CHECK"
+    echo "# DATA_PATH    : $PERF_DATA_CHECK"
     if perf_uses_containers; then
         echo "# Label        : ${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
     fi
@@ -418,14 +427,28 @@ for config_file in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
 
     prepare_config "$config_file"
 
-    if ! build_launch_argv "$config_file" "$FRAMEWORK" "$TRAIN_SUITE"; then
+    if ! build_launch_argv "$config_file" "$FRAMEWORK" "$TRAIN_SUITE" 2>"$RESULT_DIR/.build_errors"; then
+        cat "$RESULT_DIR/.build_errors" >&2
         RUNS_STARTED=$((RUNS_STARTED + NUM_REPS))
         RUNS_FAILED=$((RUNS_FAILED + NUM_REPS))
+        launcher_cmd="<none>"
+        perf_log_not_run "cannot build a launch command: $(sed -n '1s/^\[ERROR\] //p' "$RESULT_DIR/.build_errors")"
+        rm -f "$RESULT_DIR/.build_errors"
         echo "[SKIP/FAIL] ${FRAMEWORK}/${config_name}: cannot build launch command" \
             | tee -a "$SUMMARY_FILE"
         continue
     fi
+    cat "$RESULT_DIR/.build_errors" >&2
+    rm -f "$RESULT_DIR/.build_errors"
     launcher_cmd=$(perf_display_argv "${LAUNCH_ARGV[@]}")
+    if ! train_steps_conflict "$config_file" "$FRAMEWORK" "$MODULE"; then
+        RUNS_STARTED=$((RUNS_STARTED + NUM_REPS))
+        RUNS_FAILED=$((RUNS_FAILED + NUM_REPS))
+        perf_log_not_run "$TRAIN_STEPS_CONFLICT"
+        echo "[NOT RUN] ${FRAMEWORK}/${config_name}: $TRAIN_STEPS_CONFLICT" | tee -a "$SUMMARY_FILE"
+        echo "                    -> $(run_log_name 1)" | tee -a "$SUMMARY_FILE"
+        continue
+    fi
 
     for rep in $(seq 1 "$NUM_REPS"); do
         # The first run was checked by perf_preflight a moment ago.
@@ -451,6 +474,7 @@ for config_file in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
             RUNS_FAILED=$((RUNS_FAILED + 1))
             echo "                    [FAIL] ${RUN_FAILURE_REASON} exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
                 | tee -a "$SUMMARY_FILE"
+            perf_print_cause "$result_file" "$RUN_FAILURE_REASON"
         else
             echo "                    [ OK ] exit=${RUN_EXIT_CODE} elapsed=${RUN_ELAPSED}s" \
                 | tee -a "$SUMMARY_FILE"
@@ -465,7 +489,7 @@ if [ "$PERF_DD_RUNS" -gt 0 ]; then
     dd_config_name=$(perf_dd_config_name)
     dd_config_hash=$(config_fingerprint "$DIFFUSION_DLRM_CONFIG")
     dd_models=$(perf_dd_summary)
-    dd_steps="${TRAIN_STEPS:+$TRAIN_STEPS (diffusion num_iterations; DLRM unchanged)}"
+    dd_steps=$(perf_dd_steps_text)
     for rep in $(seq 1 "$NUM_REPS"); do
         [ -z "$BATCH_STOPPED" ] || break
         if [ "$RUNS_STARTED" -gt 0 ] && ! perf_prepare_gpus; then
@@ -482,7 +506,7 @@ if [ "$PERF_DD_RUNS" -gt 0 ]; then
         PERF_RUN_LIMITS_TEXT="$(perf_dd_limits_text)" \
             PERF_ENV_NOTE="not passed to diffusion_bench's container; EXTRA_ENV is" \
             print_per_run_banner "$result_file" "$DIFFUSION_DLRM_CONFIG" "$dd_config_name" "$dd_config_hash" \
-            "$PERF_DIFFUSION_DLRM_BACKEND" "$dd_models" "N/A" "N/A" "N/A" "${dd_steps:-per diffusion_bench config}" \
+            "$PERF_DIFFUSION_DLRM_BACKEND" "$dd_models" "N/A" "N/A" "N/A" "$dd_steps" \
             "$rep" "$NUM_REPS" "$launcher_cmd" "diffusion_bench" ""
 
         RUNS_STARTED=$((RUNS_STARTED + 1))
@@ -491,9 +515,9 @@ if [ "$PERF_DD_RUNS" -gt 0 ]; then
         PERF_DD_LOG="$result_file"
         # shellcheck disable=SC2034
         PERF_DD_ACTIVE=1
-        # For this run only: no runner time limit, and a failure reason that
-        # names the steps that failed.
-        MAX_RUN_SECONDS=0 MAX_IDLE_SECONDS=0 PERF_REASON_FN=perf_dd_failure_reason \
+        # For this run only: no runner time limit, a failure reason that names
+        # the steps that failed, and no Primus ranks to look up.
+        MAX_RUN_SECONDS=0 MAX_IDLE_SECONDS=0 PERF_REASON_FN=perf_dd_failure_reason FAILING_RANK_OUTPUT=0 \
             perf_launch_with_watchdog "$result_file" "$(( $(wc -l < "$result_file") + 1 ))"
         perf_dd_finalize "$result_file"
         # shellcheck disable=SC2034

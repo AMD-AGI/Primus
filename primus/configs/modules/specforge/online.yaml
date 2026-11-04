@@ -19,6 +19,10 @@ specforge_train_mode: online
 
 # Sidecar / node+GPU split. Rendered into SpecForge Hydra overrides plus
 # Mooncake/SGLang argv. Do not put cluster IPs here.
+# target_model_path: specforge_online, then specforge_overrides, then
+# TARGET_MODEL, then model.target_model_path in the Hydra file.
+# skip_tokenizer_init (or SKIP_TOKENIZER_INIT) defaults to true.
+# Capture layer ids are read from the draft JSON, not from this mapping.
 specforge_online: {}
 
 output_dir: null

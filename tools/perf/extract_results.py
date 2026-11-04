@@ -25,8 +25,14 @@ runner's own verdict (``timeout``, ``idle``, ``interrupted``) is taken from
 the log footer; otherwise the run output is searched for the cause:
 ``nic_error``, ``oom``, ``gpu_contended`` (an out-of-memory error while
 PyTorch itself held less than half the GPU, i.e. another process had it),
-``segfault``, ``nccl_error`` or ``python_error``; failing that ``killed``
-(SIGKILL with no error in the log), ``signal``, ``fail_pattern`` or ``exit``.
+``segfault``, ``nccl_error`` or ``python_error``, whose detail is the exception
+that stopped the run when there is one (the root of the traceback chain
+before ``[Primus] Error:``, see _fatal_exception), else an NCCL line or an
+exception line; failing that ``killed`` (SIGKILL with no error in the log),
+``signal``, ``fail_pattern`` or ``exit``. A training run that exited 0
+without logging a step is ``failed`` with ``no_metrics``, and ``failed_at``
+says whether a run that failed got past setup. That analysis lives in
+failure.py.
 
 Supported header formats:
 
@@ -113,16 +119,28 @@ import importlib.util
 import json
 import os
 import re
-import signal
 import statistics
 import subprocess
 import sys
 from datetime import datetime
 
-# Bumped whenever a column is added or its meaning changes.
-PARSER_VERSION = 6
 
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+def _load_failure_module():
+    """tools/perf/failure.py. Loaded by path: report.py loads this file the same
+    way, so its directory is not on sys.path."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "failure.py")
+    spec = importlib.util.spec_from_file_location("perf_failure", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+failure = _load_failure_module()
+strip_ansi = failure.strip_ansi
+
+# Bumped whenever a column is added or its meaning changes.
+PARSER_VERSION = 9
+
 BANNER_KV_RE = re.compile(r"^#\s*([^:]+?)\s*:\s*(.*?)\s*$")
 PLACEHOLDER_RE = re.compile(r"^\$\{[^:}]+:([^}]*)\}$")
 RANK_TAG_RE = re.compile(r"\[rank-(\d+)/\d+\]")
@@ -132,10 +150,6 @@ RANK_TAG_RE = re.compile(r"\[rank-(\d+)/\d+\]")
 # and would otherwise poison the aggregates, including for maxtext /
 # maxdiffusion where there is no configured perf-warmup.
 MIN_PERF_SKIP_STEPS = 3
-
-
-def strip_ansi(text: str) -> str:
-    return ANSI_RE.sub("", text)
 
 
 def _detect_iter_logging_rank(lines: list[str], iter_marker: str) -> int | None:
@@ -221,8 +235,9 @@ def _maybe_int(value: str | None) -> int | None:
     try:
         return int(resolved)
     except (TypeError, ValueError):
-        # Banner fields often look like ``20 (CLI override; yaml=50)``.
-        m = re.match(r"^\s*(-?\d+)", resolved)
+        # Banner fields often look like ``20 (CLI override; yaml=50)``, or
+        # ``${PRIMUS_TRAIN_ITERS:200} (TRAIN_STEPS=20 not applied to ...)``.
+        m = re.match(r"^\s*(?:\$\{[^:}]+:)?(-?\d+)", resolved)
         if m:
             return int(m.group(1))
         return None
@@ -1005,64 +1020,10 @@ def _int_from_cmd_or_config(
 
 
 # --------------------------------------------------------------------------
-# Why a run failed, and warnings worth surfacing
+# Run output and warnings worth surfacing (why a run failed is in failure.py)
 # --------------------------------------------------------------------------
 
-# Searched in this order; the first category found anywhere in the run output
-# wins. A bad NIC or an OOM usually also produces NCCL errors and tracebacks
-# further down, so the specific causes come before the generic ones.
-FAILURE_PATTERNS = (
-    ("nic_error", re.compile(r"no socket interface found", re.IGNORECASE)),
-    ("oom", re.compile(r"out of memory|OutOfMemoryError|RESOURCE_EXHAUSTED", re.IGNORECASE)),
-    # Not a bare "SIGSEGV": Primus logs "... to avoid SIGSEGV ..." when it
-    # applies its dataloader patch.
-    (
-        "segfault",
-        re.compile(
-            r"Signal 11 \(SIGSEGV\)|Segmentation fault|signal SIGSEGV|SIGSEGV received|\*\*\* SIGSEGV"
-        ),
-    ),
-    (
-        "nccl_error",
-        re.compile(
-            r"ncclRemoteError|ncclInternalError|ncclSystemError|ncclUnhandledCudaError|"
-            r"NCCL error|RCCL error|Watchdog caught collective operation timeout"
-        ),
-    ),
-)
-# Cheap first pass, so a multi-million-line log only pays for the regexes
-# above on the few lines that can match.
-# Applied to the lower-cased line: re.IGNORECASE over these alternatives is
-# several times slower than lower() plus a case-sensitive search.
-FAILURE_PREFILTER_RE = re.compile(
-    r"socket interface|out of memory|outofmemory|resource_exhausted|sigsegv|"
-    r"segmentation fault|nccl|rccl|watchdog caught|traceback|error|exception"
-)
-# Primus's own patch log lines quote error and version strings they guard
-# against; they are never the failure.
-PRIMUS_NOISE = "[Patch"
-TRACEBACK_MARKER = "Traceback (most recent call last)"
-# An exception line once its log prefix is stripped, e.g. "ValueError: bad".
-PY_EXCEPTION_LINE_RE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception))(?::|$)")
-PY_EXCEPTION_RE = re.compile(r"\b([A-Za-z_][\w.]*(?:Error|Exception)):\s")
-GENERIC_EXCEPTIONS = ("ChildFailedError",)
-# PyTorch's OOM message says how much of the GPU this process held. When that
-# is a small part of the capacity, something else was occupying the GPU.
-_SIZE = r"([\d.]+) (bytes|B|KiB|MiB|GiB)"
-OOM_TOTAL_RE = re.compile(r"total capacity of " + _SIZE, re.IGNORECASE)
-OOM_PROCESS_RE = re.compile(r"this process has " + _SIZE + r" memory in use", re.IGNORECASE)
-OOM_ALLOCATED_RE = re.compile(_SIZE + r" is allocated by PyTorch", re.IGNORECASE)
-OOM_RESERVED_RE = re.compile(_SIZE + r" is reserved by PyTorch but unallocated", re.IGNORECASE)
-_GIB_PER_UNIT = {"bytes": 1.0 / 2**30, "b": 1.0 / 2**30, "kib": 1.0 / 2**20, "mib": 1.0 / 2**10, "gib": 1.0}
 VERSION_WARNING_RE = re.compile(r"([\w.\-]*\s*version mismatch\b.*)", re.IGNORECASE)
-# Leading "[timestamp][rank-N/M][LEVEL] [file:line] :" decorations.
-LOG_PREFIX_RE = re.compile(r"^(?:\s*\[[^\]]*\])+\s*(?::\s*)?")
-MAX_DETAIL_CHARS = 300
-
-
-def _clean_detail(line: str) -> str:
-    text = LOG_PREFIX_RE.sub("", strip_ansi(line).strip()).strip()
-    return text[:MAX_DETAIL_CHARS]
 
 
 def run_output_lines(lines: list[str]) -> list[str]:
@@ -1078,139 +1039,16 @@ def run_output_lines(lines: list[str]) -> list[str]:
     return lines[start:end]
 
 
-def _gib(match: re.Match | None) -> float | None:
-    # The size regexes ignore case, so the unit lookup must too.
-    return float(match.group(1)) * _GIB_PER_UNIT[match.group(2).lower()] if match else None
-
-
-def _oom_is_contended(oom_lines: list[str]) -> bool:
-    """True when a PyTorch OOM message shows this process held less than half
-    of the GPU: what it holds is "this process has X memory in use" when
-    present, otherwise allocated plus reserved-but-unallocated."""
-    for line in oom_lines:
-        total = _gib(OOM_TOTAL_RE.search(line))
-        if not total:
-            continue
-        held = _gib(OOM_PROCESS_RE.search(line))
-        if held is None:
-            allocated = _gib(OOM_ALLOCATED_RE.search(line))
-            if allocated is None:
-                continue
-            held = allocated + (_gib(OOM_RESERVED_RE.search(line)) or 0.0)
-        return held < 0.5 * total
-    return False
-
-
-def _scan_failure_text(run_lines: list[str]) -> tuple[str | None, str | None]:
-    first: dict[str, str] = {}
-    oom_lines: list[str] = []
-    traceback_seen = False
-    loose_exception = None
-    for line in run_lines:
-        if not FAILURE_PREFILTER_RE.search(line.lower()) or PRIMUS_NOISE in line:
-            continue
-        clean = strip_ansi(line)
-        for category, pattern in FAILURE_PATTERNS:
-            if pattern.search(clean):
-                if category not in first:
-                    first[category] = clean
-                if category == "oom":
-                    oom_lines.append(clean)
-        # The root-cause exception is the last line of the first traceback,
-        # not whichever "XError:" happens to be logged first (a benign import
-        # warning, for instance).
-        if "python_error" not in first:
-            if TRACEBACK_MARKER in clean:
-                traceback_seen = True
-            elif traceback_seen:
-                m = PY_EXCEPTION_LINE_RE.match(_clean_detail(clean))
-                if m and not m.group(1).endswith(GENERIC_EXCEPTIONS):
-                    first["python_error"] = clean
-            elif loose_exception is None:
-                m = PY_EXCEPTION_RE.search(clean)
-                if m and not m.group(1).endswith(GENERIC_EXCEPTIONS):
-                    loose_exception = clean[m.start() :]
-    if "python_error" not in first and loose_exception:
-        first["python_error"] = loose_exception
-    for category in [c for c, _ in FAILURE_PATTERNS] + ["python_error"]:
-        if category not in first:
-            continue
-        if category == "oom" and _oom_is_contended(oom_lines):
-            category = "gpu_contended"
-            return category, _clean_detail(next(l for l in oom_lines if OOM_TOTAL_RE.search(l)))
-        return category, _clean_detail(first[category])
-    return None, None
-
-
-def _last_output_line(run_lines: list[str]) -> str | None:
-    for line in reversed(run_lines):
-        text = _clean_detail(line)
-        if text and not text.startswith(">>>"):
-            return text
-    return None
-
-
-def legacy_footer_reason(footer: dict, run_lines: list[str], exit_code: int | None) -> str | None:
-    """Rebuild a ``Failure reason`` for logs written before the footer had one.
-
-    Older single-node runners wrote exit 130 on Ctrl+C; the older multi-node
-    runner marked watchdog kills with ``Failure pattern? : true`` and a
-    ``>>> ... TIMEOUT`` line, whatever the exit code.
-    """
-    if footer.get("failure_pattern_flag") == "true":
-        if any(">>>" in line and "TIMEOUT" in line for line in run_lines[-200:]):
-            return "timeout: stopped by the older runner's MAX_RUN_SECONDS"
-        return "fail_pattern: failure text matched the older runner's FAIL_PATTERN"
-    if exit_code is None or exit_code == 0:
-        return None
-    if exit_code == 130:
-        return "interrupted: exit 130 from an older runner"
-    if 128 < exit_code < 160:
-        try:
-            name = signal.Signals(exit_code - 128).name
-        except ValueError:
-            name = f"signal {exit_code - 128}"
-        return f"signal: killed by {name} (exit {exit_code})"
-    return f"exit: launcher exited with code {exit_code}"
-
-
-def classify_failure(
-    run_lines: list[str], footer_reason: str | None, exit_code: int | None
-) -> tuple[str | None, str | None]:
-    """Return ``(failure_reason, failure_detail)`` for a run that did not pass.
-
-    The runner's own verdict wins when it is definitive (it stopped a hang,
-    or the batch was interrupted). Otherwise the cause in the output is more
-    useful than the bare exit status, which comes last. A failed run always
-    gets a reason, ``unknown`` at worst.
-    """
-    footer_cat, _, footer_detail = (footer_reason or "").partition(":")
-    footer_cat = footer_cat.strip()
-    footer_detail = footer_detail.strip() or None
-
-    # "steps": the diffusion_dlrm run listing the diffusion_bench steps that failed.
-    if footer_cat in ("timeout", "idle", "interrupted", "steps"):
-        return footer_cat, footer_detail
-    text_cat, text_detail = _scan_failure_text(run_lines)
-    if text_cat:
-        return text_cat, text_detail
-    if footer_cat == "signal":
-        return ("killed" if "SIGKILL" in (footer_detail or "") else "signal"), footer_detail
-    if footer_cat in ("fail_pattern", "exit"):
-        return footer_cat, _last_output_line(run_lines) or footer_detail
-    return "unknown", _last_output_line(run_lines)
-
-
 def version_warnings(run_lines: list[str], limit: int = 10) -> list[str]:
     """Distinct ``... version mismatch ...`` messages (e.g. aiter installed vs
     expected), which affect performance but never fail a run."""
     seen: list[str] = []
     for line in run_lines:
-        if "mismatch" not in line or PRIMUS_NOISE in line:
+        if "mismatch" not in line or failure.PRIMUS_NOISE in line:
             continue
         m = VERSION_WARNING_RE.search(strip_ansi(line))
         if m:
-            text = m.group(1).strip()[:MAX_DETAIL_CHARS]
+            text = m.group(1).strip()[: failure.MAX_DETAIL_CHARS]
             if text not in seen:
                 seen.append(text)
                 if len(seen) >= limit:
@@ -1308,6 +1146,9 @@ def parse_log_file(filepath: str) -> dict | None:
         **{field: None for field in PLATFORM_BANNER_KEYS},
         "hmean_nominal_tflops": None,
         "throughput_note": None,
+        "failed_at": None,
+        "failing_rank": None,
+        "failing_host": None,
     }
 
     config_text = parse_config_section(lines)
@@ -1331,7 +1172,7 @@ def parse_log_file(filepath: str) -> dict | None:
     exit_code = result["exit_code"]
     footer_reason = footer.get("failure_reason") or None
     if footer_reason is None:
-        footer_reason = legacy_footer_reason(footer, run_lines, exit_code)
+        footer_reason = failure.legacy_footer_reason(footer, run_lines, exit_code)
     if exit_code is None:
         result["status"] = "incomplete" if banner else "unknown"
     elif footer_reason and footer_reason.startswith("interrupted"):
@@ -1340,15 +1181,21 @@ def parse_log_file(filepath: str) -> dict | None:
         result["status"] = "ok"
     else:
         result["status"] = "failed"
+    rank_output = failure.failing_rank_output(lines)
+    if rank_output:
+        result["failing_rank"], result["failing_host"] = rank_output["rank"], rank_output["host"]
+        # Its debug.log lines can be another rank's iteration lines.
+        first, last = rank_output["span"]
+        lines = lines[:first] + lines[last + 1 :]
     if result["status"] in ("failed", "interrupted"):
-        result["failure_reason"], result["failure_detail"] = classify_failure(
-            run_lines, footer_reason, exit_code
+        result["failure_reason"], result["failure_detail"] = failure.classify_failure(
+            run_lines, footer_reason, exit_code, rank_output["lines"] if rank_output else None
         )
     elif result["status"] == "incomplete":
         # Still running, or the batch was killed: only a cause visible in the
         # output is worth reporting. Legacy logs without a footer ("unknown")
         # are not scanned at all, since they may well have succeeded.
-        result["failure_reason"], result["failure_detail"] = _scan_failure_text(run_lines)
+        result["failure_reason"], result["failure_detail"] = failure.scan_failure_text(run_lines)
     result["version_warnings"] = version_warnings(run_lines)
 
     backend = result["backend"]
@@ -1387,6 +1234,7 @@ def parse_log_file(filepath: str) -> dict | None:
         return None
 
     result["num_iterations"] = len(iterations)
+    failure.settle_outcome(result, iterations)
     if not iterations:
         return result
 
@@ -1564,7 +1412,7 @@ def _step_last_line(lines: list[str]) -> str | None:
     for line in reversed(lines):
         text = strip_ansi(line).strip()
         if text and not DIFFUSION_BENCH_OWN_LINE_RE.match(text):
-            return _clean_detail(text)
+            return failure.clean_detail(text)
     return None
 
 
@@ -1580,7 +1428,7 @@ def _hydra_error(lines: list[str]) -> str | None:
     for line in lines[start:]:
         text = strip_ansi(line).strip()
         if text and not DIFFUSION_BENCH_OWN_LINE_RE.match(text):
-            return _clean_detail(text)
+            return failure.clean_detail(text)
     return None
 
 
@@ -1600,7 +1448,7 @@ def _diffusion_bench_outcome(
             return run["status"], run["failure_reason"], run["failure_detail"]
         if run["status"] == "incomplete":
             # This step's own log only: an earlier step's error is not its cause.
-            category, detail = _scan_failure_text(_read_lines(step_log))
+            category, detail = failure.scan_failure_text(_read_lines(step_log))
             return "incomplete", category, detail
         if blocked_by:
             return "failed", "not_run", f"not run: diffusion_bench's {blocked_by} step failed"
@@ -1612,7 +1460,7 @@ def _diffusion_bench_outcome(
     # Everything else failed, including not_run: the runner never asks for a
     # dry run, so a launcher still at not_run crashed before training.
     lines = _read_lines(step_log)
-    category, detail = _scan_failure_text(lines)
+    category, detail = failure.scan_failure_text(lines)
     if step_status in ("oom", "oom-skipped"):
         if category in ("oom", "gpu_contended"):
             return "failed", category, detail
@@ -1703,7 +1551,8 @@ def diffusion_dlrm_rows(run: dict, filepath: str, lines: list[str]) -> list[dict
                 "gpus_per_node": gpus,
                 "world_size": gpus,
                 "warmup_steps": None,
-                # TRAIN_STEPS sets the diffusion models' num_iterations only.
+                # A banner step count (TRAIN_STEPS, when it reached diffusion_bench)
+                # is the diffusion models' num_iterations only.
                 "total_steps": iterations or (run["total_steps"] if suite == "diffusion" else None),
                 "num_iterations": None,
                 "num_post_warmup": None,
@@ -1821,6 +1670,11 @@ CSV_FIELDS = [
     # Added in parser version 6.
     "hmean_nominal_tflops",
     "throughput_note",
+    # Added in parser version 7.
+    "failed_at",
+    # Added in parser version 8.
+    "failing_rank",
+    "failing_host",
 ]
 
 
@@ -1937,13 +1791,48 @@ def _describe(result: dict) -> str:
     )
 
 
+VERDICT_FIELDS = ("status", "failure_reason", "failed_at", "from_traceback", "failure_detail")
+# Not a tab: bash's read merges consecutive tabs, so an empty field would vanish.
+VERDICT_SEPARATOR = "\x1f"
+
+
+def print_verdict(log_path: str) -> int:
+    """One run log's VERDICT_FIELDS on one line, for the batch runners.
+    ``from_traceback`` is "yes" when the detail is the exception that stopped
+    the run, as a traceback shows it, rather than a line found elsewhere."""
+    rows = parse_log(log_path)
+    if not rows:
+        return 3
+    row = dict(rows[0])
+    lines = _read_lines(log_path)
+    rank_output = failure.failing_rank_output(lines)
+    sources = [run_output_lines(lines)] + (
+        [rank_output["lines"]] if rank_output and rank_output["lines"] else []
+    )
+    details = {failure.fatal_exception_detail(source) for source in sources} - {None}
+    row["from_traceback"] = "yes" if row.get("failure_detail") in details else ""
+    values = (str(row.get(field) or "") for field in VERDICT_FIELDS)
+    print(VERDICT_SEPARATOR.join(" ".join(value.split()) for value in values))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Extract benchmarking results from Primus training log files."
     )
-    parser.add_argument("input_dir", help="Directory containing .txt / .log log files")
+    parser.add_argument("input_dir", nargs="?", help="Directory containing .txt / .log log files")
     parser.add_argument("--quiet", action="store_true", help="Print only the totals and the output paths.")
+    parser.add_argument(
+        "--verdict",
+        metavar="LOG",
+        help="Print one run log's status, failure_reason, failed_at and failure_detail, "
+        "separated by \\x1f, and write nothing.",
+    )
     args = parser.parse_args()
+    if args.verdict:
+        return print_verdict(args.verdict)
+    if not args.input_dir:
+        parser.error("input_dir is required")
 
     input_dir = os.path.abspath(args.input_dir)
     if not os.path.isdir(input_dir):
