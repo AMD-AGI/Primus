@@ -35,7 +35,7 @@ Primus supports multiple backends.
 | -------------- | ------------------------------------------------------------ |
 | Megatron       | Open-source framework for large-scale transformer training   |
 | TorchTitan     | PyTorch-compatible framework developed for training at scale |
-| NeMo AutoModel | NVIDIA-NeMo AutoModel (diffusion: Wan 2.2 T2V); `third_party/Automodel` submodule, installed editable on first run |
+| AutoModel | [AutoModel](https://github.com/NVIDIA-NeMo/Automodel) diffusion training; `third_party/Automodel` submodule, installed editable on first run |
 
 ## 📂 Directory Layout
 
@@ -48,8 +48,10 @@ examples/
 ├── megatron/              # framework: megatron
 │   ├── configs/           #   experiment YAMLs, grouped by GPU (MI300X, MI355X, …)
 │   ├── models/            #   model-specific launchers and studies
+│   │   ├── deepseek-v3/
 │   │   ├── deepseek-v4/
 │   │   ├── glm5-3-flash/
+│   │   ├── gpt-oss/
 │   │   └── kimi-k3/
 │   └── guides/            #   walkthroughs and packaged workflows
 │       ├── customer_package/
@@ -62,7 +64,7 @@ examples/
 ├── megatron_bridge/       # framework: megatron_bridge
 ├── diffusion/             # framework: diffusion
 ├── maxdiffusion/          # framework: maxdiffusion
-├── nemo_automodel/        # framework: nemo_automodel
+├── automodel/             # framework: automodel
 ├── hummingbirdxt/         # framework: hummingbirdxt
 ├── specforge/             # framework: specforge
 ├── mlperf/                # MLPerf submissions; spans several backends
@@ -81,7 +83,7 @@ We recommend using the official [rocm/megatron-lm Docker image](https://hub.dock
 
 ```bash
 # Pull the latest Docker image
-docker pull docker.io/rocm/primus:v26.5
+docker pull docker.io/rocm/primus:v26.8
 
 ```
 
@@ -200,7 +202,7 @@ Multi-node training is launched via **SLURM**.
 Specify the number of nodes and the model config:
 
 ```bash
-export DOCKER_IMAGE="docker.io/rocm/primus:v26.5"
+export DOCKER_IMAGE="docker.io/rocm/primus:v26.8"
 export NNODES=8
 
 # Example for megatron llama3.1_8B

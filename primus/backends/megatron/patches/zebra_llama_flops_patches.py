@@ -168,10 +168,12 @@ def patch_zebra_llama_flops(ctx: PatchContext):
 
     _orig_num_flops = orig_training.num_floating_point_operations
 
-    def _patched_num_floating_point_operations(args, batch_size):
+    # *extra/**extra_kwargs: Megatron-core 0.19+ pass per-batch sequence statistics; the
+    # Zebra formula is dense-sequence and ignores them.
+    def _patched_num_floating_point_operations(args, batch_size, *extra, **extra_kwargs):
         if getattr(args, "is_hybrid_model", False) and getattr(args, "multi_latent_attention", False):
             return zebra_llama_flops(args, batch_size)
-        return _orig_num_flops(args, batch_size)
+        return _orig_num_flops(args, batch_size, *extra, **extra_kwargs)
 
     orig_training.num_floating_point_operations = _patched_num_floating_point_operations
     log_rank_0("MegatronPatches: using zebra_llama_flops for hybrid + MLA FLOPs.")

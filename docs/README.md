@@ -38,7 +38,7 @@ Core workflows and day-to-day usage.
 - [Environment and XLA flags](./02-user-guide/environment-and-xla-flags.md): where to set env vars, how to override `XLA_FLAGS` safely, how to verify what took effect
 - [Pretraining](./02-user-guide/pretraining.md): pretraining **concepts**: backends, YAML structure, parallelism, configuration inventory
 - [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
-- [SpecForge (capture / offline train / online train)](../examples/specforge/README.md): `primus-cli` entrypoint; `specforge_mode` is `train` or `capture`, and train requires `specforge_train_mode: offline` or `online`. YAML / env / CLI: [CONFIGURATION.md](../examples/specforge/CONFIGURATION.md)
+- [SpecForge](./04-technical-guides/specforge/introduction.md): capture, offline train, and online train through `primus-cli`. [Run](./04-technical-guides/specforge/running.md) · [Configuration](./04-technical-guides/specforge/configuration.md)
 - [Megatron-LM training performance validation](./02-user-guide/megatron-lm-training.md): reproduce the published Megatron backend benchmarks on the `rocm/primus` image
 - [TorchTitan training performance validation](./02-user-guide/torchtitan-training.md): reproduce the published TorchTitan backend benchmarks on the `rocm/primus` image
 - [JAX MaxText training performance validation](./02-user-guide/jax-maxtext-training.md): reproduce the AMD-published MaxText benchmarks via Primus, MAD, or the standalone scripts
@@ -57,7 +57,7 @@ Parameter references for Primus presets, backend-facing keys, and commonly used 
 - [TorchTitan parameters](./03-configuration-reference/torchtitan-parameters.md): Primus TorchTitan preset keys and common JobConfig fields
 - [MaxText parameters](./03-configuration-reference/maxtext-parameters.md): Primus MaxText overlay defaults and common fields
 - [Megatron Bridge parameters](./03-configuration-reference/megatron-bridge-parameters.md): Megatron Bridge recipe, SFT, and pretraining fields surfaced through Primus
-- [SpecForge YAML, env, and CLI](../examples/specforge/CONFIGURATION.md): Primus-owned SpecForge fields; SpecForge Hydra stays in SpecForge docs
+- [SpecForge YAML, env, and CLI](./04-technical-guides/specforge/configuration.md): Primus-owned SpecForge fields; SpecForge Hydra stays in SpecForge docs
 - [Environment variables](./03-configuration-reference/environment-variables.md): practical reference for commonly encountered environment variables
 
 ### [Technical guides](./04-technical-guides/)
@@ -82,6 +82,7 @@ Deep technical topics for advanced users.
 - [Diffusion models](./04-technical-guides/diffusion-models/README.md): Flux diffusion architecture, data pipeline, and FP8 / MXFP4 training
 - [Native SFT and LoRA](./04-technical-guides/native-sft-lora.md): Megatron-native SFT/LoRA runbook (BF16 / FP8 / FP4), no Megatron-Bridge dependency
 - [Native SFT LoRA on MI455X](./04-technical-guides/LoRA_Native_Trainer_MI455_README.md): 1-GPU gfx1250 native LoRA recipes and launch notes
+- [SpecForge](./04-technical-guides/specforge/introduction.md): speculative-decoding draft training — capture, offline train, and online train through `primus-cli`
 
 ### [Operations](./05-operations/)
 
@@ -126,7 +127,7 @@ Long-form articles on the reasoning behind Primus features, most of them publish
 | Run my first training | [Quickstart](./01-getting-started/quickstart.md) |
 | Find out what is inside a training image | [Release notes](./01-getting-started/release-notes.md) |
 | Get an exact run command for my model/GPU | [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md) |
-| Train a SpecForge drafter on ROCm | [SpecForge on Primus](../examples/specforge/README.md) |
+| Train a SpecForge drafter on ROCm | [SpecForge](./04-technical-guides/specforge/introduction.md) |
 | Write a training YAML configuration | [Configuration system](./02-user-guide/configuration-system.md) |
 | Look up a Megatron parameter | [Megatron parameters](./03-configuration-reference/megatron-parameters.md) |
 | Look up a TorchTitan parameter | [TorchTitan parameters](./03-configuration-reference/torchtitan-parameters.md) |

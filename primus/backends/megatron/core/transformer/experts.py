@@ -14,7 +14,14 @@ from megatron.core.fusions.fused_weighted_squared_relu import weighted_squared_r
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
 )
-from megatron.core.transformer.moe.experts import TEGroupedMLP, TEGroupedMLPSubmodules
+from megatron.core.transformer.moe.experts import TEGroupedMLP
+
+try:
+    from megatron.core.transformer.moe.experts import TEGroupedMLPSubmodules
+except ImportError:  # renamed in Megatron-core 0.17
+    from megatron.core.transformer.moe.experts import (
+        GroupedMLPSubmodules as TEGroupedMLPSubmodules,
+    )
 from megatron.core.transformer.moe.moe_utils import ProcessGroupCollection
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
@@ -56,6 +63,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
         config: TransformerConfig,
         submodules: TEGroupedMLPSubmodules,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        **kwargs,  # e.g. name= on Megatron-core 0.19+
     ):
         args = get_args()
 
@@ -64,6 +72,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
             config,
             submodules,
             pg_collection,
+            **kwargs,
         )
 
         # NOTE: use_turbo_fused_act_with_probs is prioritized over use_te_activation_func and bias_activation_fusion

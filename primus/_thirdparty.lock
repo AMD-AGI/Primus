@@ -10,13 +10,13 @@
       "name": "Megatron-LM",
       "path": "third_party/Megatron-LM",
       "url": "https://github.com/NVIDIA/Megatron-LM.git",
-      "commit": "d3528a21301db2d12e92912b3ec025dc8a2ed4d6"
+      "commit": "4b4acac9a1d28ea6829c8d4f566d75698a21249d"
     },
     {
       "name": "maxtext",
       "path": "third_party/maxtext",
       "url": "https://github.com/ROCm/maxtext.git",
-      "commit": "07c240fa070b9ef288e40deb60289f8057c553b6"
+      "commit": "8d1d43c039297a449c4e2af012e6adbed1c4ef04"
     },
     {
       "name": "Emerging-Optimizers",
@@ -52,7 +52,7 @@
       "name": "Automodel",
       "path": "third_party/Automodel",
       "url": "https://github.com/NVIDIA-NeMo/Automodel.git",
-      "commit": "44f2acdee1628b8a5a5acb35ada6ed8c539a22e4"
+      "commit": "bd1ca5a07fbff806063bca8ce3a9071753ad2036"
     },
     {
       "name": "HunyuanWorld-Mirror-rocm",

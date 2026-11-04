@@ -59,7 +59,7 @@ Three rules:
 
 An ordinary variable holds one value, so setting it is unambiguous. `XLA_FLAGS` holds *many* independent settings in one string, and both the Docker image and Primus contribute to it. Two consequences follow:
 
-1. **Setting `XLA_FLAGS` replaces every flag at once**, including defaults you probably want to keep — most importantly `--xla_gpu_autotune_level=4`, which prevents NaN loss on fp8 MoE models.
+1. **Setting `XLA_FLAGS` replaces every flag at once**, including defaults you probably want to keep — most importantly `--xla_gpu_autotune_level=3`, which keeps GEMM autotuning on (fp8 MoE models get NaN loss without it).
 2. **XLA honors the *last* occurrence of a repeated flag.** This is what makes `XLA_FLAGS_APPEND` work: your flag lands after the defaults and wins, without disturbing the others.
 
 ### Layering

@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from runner.helpers.hooks.train.pretrain.automodel import prepare as automodel_prepare
 from runner.helpers.hooks.train.pretrain.megatron import prepare as megatron_prepare
-from runner.helpers.hooks.train.pretrain.nemo_automodel import prepare as nemo_prepare
 
 
 class FakePrimusConfig:
@@ -80,7 +80,7 @@ def megatron_prepare_args(monkeypatch, tmp_path, *extra):
     return megatron_prepare.parse_args()
 
 
-def test_nemo_prepare_accepts_unknown_training_overrides(monkeypatch, tmp_path):
+def test_automodel_prepare_accepts_unknown_training_overrides(monkeypatch, tmp_path):
     monkeypatch.setattr(
         sys,
         "argv",
@@ -98,8 +98,27 @@ def test_nemo_prepare_accepts_unknown_training_overrides(monkeypatch, tmp_path):
             "aiter",
         ],
     )
-    args = nemo_prepare.parse_args()
+    args = automodel_prepare.parse_args()
     assert args.primus_path == str(tmp_path)
+
+
+def test_automodel_prepare_does_not_read_backend_as_backend_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare.py",
+            "--primus_path",
+            str(tmp_path),
+            "--data_path",
+            str(tmp_path / "data"),
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--backend",
+            "automodel",
+        ],
+    )
+    assert automodel_prepare.parse_args().backend_path is None
 
 
 def test_megatron_sft_skips_bookcorpus(monkeypatch, tmp_path):
@@ -326,3 +345,69 @@ def test_nonzero_rank_propagates_failure_and_times_out(monkeypatch, tmp_path):
     monkeypatch.setenv("PRIMUS_DATA_PREP_POLL_SECONDS", "0.005")
     with pytest.raises(SystemExit):
         megatron_prepare.wait_for_dataset(done, failed)
+
+
+def test_mochi_prepare_writes_downloaded_paths_and_explains_gated_repos(monkeypatch, tmp_path, capsys):
+    from runner.helpers.hooks.train.pretrain.diffusion import (
+        prepare as diffusion_prepare,
+    )
+
+    def staged(*_args, **_kwargs):
+        return {
+            "PRETRAINED_PATH": str(tmp_path / "dit.safetensors"),
+            "DATASET_PATH": str(tmp_path / "disney"),
+            "VAE_CHECKPOINT": str(tmp_path / "encoder.safetensors"),
+        }
+
+    monkeypatch.setattr(
+        "primus.backends.diffusion.utils.download.stage_benchmark_assets",
+        staged,
+    )
+    model_cfg = {"load_from_pretrained_path": "", "encoder": {"t5": "google/t5-v1_1-xxl"}}
+    dataset_cfg = {"dataset_path": "Wild-Heart/Disney-VideoGeneration-Dataset"}
+    diffusion_prepare._stage_benchmark_downloads("mochi-1", dataset_cfg, model_cfg, {})
+    assert model_cfg["load_from_pretrained_path"] == str(tmp_path / "dit.safetensors")
+    assert dataset_cfg["dataset_path"] == str(tmp_path / "disney")
+    assert model_cfg["encoder"]["autoencoder"] == str(tmp_path / "encoder.safetensors")
+
+    def gated(*_args, **_kwargs):
+        raise RuntimeError("401 Client Error: gated repository")
+
+    monkeypatch.setattr(
+        "primus.backends.diffusion.utils.download.stage_benchmark_assets",
+        gated,
+    )
+    with pytest.raises(SystemExit):
+        diffusion_prepare._stage_benchmark_downloads("mochi-1", dataset_cfg, model_cfg, {})
+    assert "hf_token" in capsys.readouterr().err
+
+
+def test_mochi_prepare_accepts_synthetic_and_cached_datasets(tmp_path, capsys):
+    from runner.helpers.hooks.train.pretrain.diffusion import (
+        prepare as diffusion_prepare,
+    )
+
+    diffusion_prepare._validate_benchmark_model(
+        "mochi-1",
+        {"dataset_path": "synthetic:mochi"},
+        {},
+        {},
+    )
+    cached = tmp_path / "latents.pt"
+    cached.write_bytes(b"latents")
+    diffusion_prepare._validate_benchmark_model(
+        "mochi-1",
+        {"dataset_path": str(cached)},
+        {},
+        {},
+    )
+    dit = tmp_path / "dit.safetensors"
+    dit.write_bytes(b"dit")
+    with pytest.raises(SystemExit):
+        diffusion_prepare._validate_benchmark_model(
+            "mochi-1",
+            {"dataset_path": "Wild-Heart/Disney-VideoGeneration-Dataset"},
+            {"load_from_pretrained_path": str(dit), "encoder": {}},
+            {},
+        )
+    assert "T5" in capsys.readouterr().err

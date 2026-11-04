@@ -802,9 +802,11 @@ def _make_v4_num_floating_point_operations(original_fn, *, dispatch_v4: bool):
     silently fall through to the upstream formula.
     """
 
-    def wrapped(args, batch_size):
+    # *extra/**extra_kwargs: Megatron-core 0.19+ pass per-batch sequence statistics; the
+    # V4 formula is dense-sequence and ignores them.
+    def wrapped(args, batch_size, *extra, **extra_kwargs):
         if not dispatch_v4:
-            return original_fn(args, batch_size)
+            return original_fn(args, batch_size, *extra, **extra_kwargs)
 
         total_flops, breakdown = compute_v4_flops(args, batch_size)
 

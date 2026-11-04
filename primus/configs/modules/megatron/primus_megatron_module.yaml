@@ -105,6 +105,17 @@ dataloader_mp_context: null # "forkserver" | "spawn" | "fork" | null
 # If set to "uniform", the router will force the load balancing to be uniform. (Megatron-LM original behavior)
 moe_router_force_load_balancing_type: "even"
 
+# ===== TE cross entropy =====
+# Pass overwrite_input=True to TE parallel_cross_entropy (cross_entropy_fusion_impl: te)
+# so its backward reuses the logits buffer instead of saving a logits-sized copy
+# (TE <= 2.17 behavior; a no-op on TE without the flag).
+# After the loss backward the logits tensor holds its gradient, not the logits.
+# Set to false when the same logits tensor feeds anything else in the step, e.g.
+# a second loss (distillation / KD, auxiliary losses on the LM-head output),
+# metrics or logging computed from the logits, or hooks that inspect them.
+# Leave it on for plain pretraining / SFT, where the logits only feed this loss.
+te_ce_overwrite_input: true
+
 # ===== MXFP4 Weight De-oscillation =====
 # Snap weight elements whose MXFP4-quantized value oscillates while the fp32
 # master barely moves (improves MXFP4 training convergence). Requires
