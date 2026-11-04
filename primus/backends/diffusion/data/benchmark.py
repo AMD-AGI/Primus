@@ -17,8 +17,11 @@ from typing import Any
 import torch
 
 from primus.backends.diffusion.data.collator import RawBatchCollator
+from primus.backends.diffusion.utils.download import (
+    DISNEY_DATASET_REPO,
+    DISNEY_DATASET_REVISION,
+)
 
-_DISNEY_VIDEO = "Wild-Heart/Disney-VideoGeneration-Dataset"
 _SIHEYUAN = "chinese_architecture_siheyuan"
 _PROMPT_KEYS = ("prompt", "text", "caption", "txt", "caption_0")
 
@@ -252,8 +255,11 @@ def build_amdb_dataset(dataset_config: dict[str, Any]):
 
     from primus.backends.diffusion.utils.download import materialize_dataset
 
+    model_name = str(dataset_config.get("model_name") or "")
+    if not model_name and modality == "image":
+        model_name = "sdxl"
     dataset_path = materialize_dataset(
-        str(dataset_config.get("model_name") or ""),
+        model_name,
         dataset_config.get("dataset_path"),
         revision=dataset_config.get("revision"),
     )
@@ -284,7 +290,7 @@ def build_amdb_dataset(dataset_config: dict[str, Any]):
     local_dir = Path(str(dataset_path)).expanduser()
     revision = None if local_dir.is_dir() else dataset_config.get("revision")
     if not local_dir.is_dir() and not revision:
-        revision = "refs/pr/4" if dataset_path == _DISNEY_VIDEO else "main"
+        revision = DISNEY_DATASET_REVISION if dataset_path == DISNEY_DATASET_REPO else "main"
     if is_siheyuan_dataset(str(dataset_path)) and Path(str(dataset_path)).expanduser().is_dir():
         records = load_benchmark_image_dataset(str(dataset_path))
     else:
