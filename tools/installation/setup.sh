@@ -772,9 +772,9 @@ stage_turbo() {
            pipi --no-build-isolation --no-deps . -v ) || die "Primus-Turbo build failed"
     rm -rf "$SRC_DIR/Primus-Turbo"
     # aiter silently downgrades itself to Triton-only ops if this symbol is gone,
-    # so fail here instead of losing the CK/HIP kernels at training time.
-    # A check the Dockerfile does not make warns, never stops (the image ships the same
-    # flydsl; v26.9: 0.3.4.1 with aiter 0.1.27, which wants 0.4.0).
+    # so say so here instead of leaving it to be found at training time. Only a
+    # warning: the Dockerfile makes no such check, and the image ships the same
+    # flydsl, so bare metal must not stop where the image builds.
     python -c "from flydsl.expr import vector" 2>/dev/null \
         || log "WARNING: flydsl ${FLYDSL_VERSION} has no flydsl.expr.vector, so aiter's CK/HIP
   ops are disabled (its Triton ops remain), as in the image built from the same Dockerfile."

@@ -98,7 +98,7 @@
     {
       "name": "absence-statement",
       "action": "hold",
-      "match": "\\b(ships no|contains no|has no|without)\\b",
+      "match": "\\b(ships no|contains no|has no)\\b",
       "why": "what an image lacks is a fact about that image, not a version label: rewriting 'the v26.8 image ships no Primus' for v26.9 (which bundles it again) made it false; it comes before the rules that move every version token on a line"
     },
     {

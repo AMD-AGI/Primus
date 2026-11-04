@@ -215,9 +215,11 @@ def build_state(version, previous, ssh_key, overrides=None, scope=None):
         os.environ["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key} -o IdentitiesOnly=yes"
 
     overrides = overrides or {}
-    previous = previous or previous_version_for(version)
     scope = sorted(scope or C.FAMILIES)
+    # Only an explicit --previous goes to the families: without one, each falls
+    # back to its own newest older snapshot (MaxText has patch releases primus lacks).
     families = {name: resolve_family(version, name, previous, overrides.get(name)) for name in scope}
+    previous = previous or previous_version_for(version)
     shape, present = release_shape(families, version)
     released_earlier = sorted(
         name for name in C.FAMILIES if name not in scope and C.load_snapshot(version, name) is not None

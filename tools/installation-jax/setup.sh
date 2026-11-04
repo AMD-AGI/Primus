@@ -474,6 +474,7 @@ git_archive_tf_llvm() {  # git_archive_tf_llvm <bzl> <commit> <sha> <archive>
     fi
     rm -rf "$repo"
     newsha="$(sha256sum "$archive" | cut -d' ' -f1)"
+    [ -n "$newsha" ] || return 1
     sed -i "s/^\( *LLVM_SHA256 = \"\)$sha\"/\1$newsha\"/" "$bzl"
     grep -q "LLVM_SHA256 = \"$newsha\"" "$bzl" || return 1
     log "LLVM $commit archive built from the commit; LLVM_SHA256 re-pinned $sha -> $newsha in $bzl"
