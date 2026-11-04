@@ -91,6 +91,21 @@ def _looks_like_hf_reference(value: str) -> bool:
     return len(parts) >= 2 and all(part for part in parts[:2])
 
 
+def _reject_unbuilt_benchmark(model_name: str) -> None:
+    if model_name in _UNBUILT_BENCHMARKS:
+        _fail(
+            f"{model_name} has no diffusion model builder. "
+            "This release registers flux-dev only; refusing to download its assets."
+        )
+
+
+def _encoder_config(model_cfg: dict[str, Any], model: dict[str, Any], model_name: str) -> dict[str, Any]:
+    encoder_cfg = model_cfg.get("encoder") or model.get("encoder") or {}
+    if not isinstance(encoder_cfg, dict):
+        _fail(f"{model_name} model.encoder must be a mapping, got {type(encoder_cfg).__name__}")
+    return encoder_cfg
+
+
 def _validate_local_or_hf_id(value: str | None, description: str) -> None:
     if _is_placeholder(value):
         _fail(f"{description} is not configured: {value!r}")
@@ -104,6 +119,60 @@ def _validate_local_or_hf_id(value: str | None, description: str) -> None:
         _log(f"{description}: {value} (assuming Hugging Face reference)")
     else:
         _fail(f"{description} is neither an existing path nor a Hugging Face reference: {value!r}")
+
+
+_BENCHMARK_DOWNLOADS = {"flux-dev"}
+
+# Names that have download metadata but no model builder in this release.
+# Reject them before stage_benchmark_assets so a config cannot download
+# checkpoints and then crash in get_model_builder.
+_UNBUILT_BENCHMARKS = {
+    "sdxl",
+    "stable-diffusion-xl",
+    "mochi-1",
+    "hunyuan-video",
+    "wan2.1-i2v",
+}
+
+
+def _stage_benchmark_downloads(
+    model_name: str,
+    dataset_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+    model: dict[str, Any],
+) -> dict[str, str]:
+    """Download the benchmark checkpoint and dataset, then expose their paths."""
+    from primus.backends.diffusion.utils.download import (
+        _ENCODER_ENV_KEYS,
+        stage_benchmark_assets,
+    )
+
+    encoder_cfg = model_cfg.get("encoder") or model.get("encoder") or {}
+    if not isinstance(encoder_cfg, dict):
+        encoder_cfg = {}
+    try:
+        env = stage_benchmark_assets(
+            model_name,
+            dataset_path=dataset_cfg.get("dataset_path"),
+            pretrained=model_cfg.get("load_from_pretrained_path"),
+            revision=dataset_cfg.get("revision"),
+            encoder=encoder_cfg,
+        )
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        lowered = message.lower()
+        if any(token in lowered for token in ("401", "403", "gated", "unauthorized")):
+            message = f"{message} Check ~/.hf_token and repo access."
+        _fail(message)
+    if env.get("PRETRAINED_PATH"):
+        model_cfg["load_from_pretrained_path"] = env["PRETRAINED_PATH"]
+    if env.get("DATASET_PATH"):
+        dataset_cfg["dataset_path"] = env["DATASET_PATH"]
+    model_cfg["encoder"] = encoder_cfg
+    for env_key, cfg_key in _ENCODER_ENV_KEYS.items():
+        if env.get(env_key):
+            encoder_cfg[cfg_key] = env[env_key]
+    return env
 
 
 def validate_diffusion_config(config_path: Path, module_name: str | None = None) -> None:
@@ -124,9 +193,13 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
     processor_cfg = dataset_cfg.get("processor_config", {})
     model_cfg = model.get("config", {})
     model_name = model.get("name")
+    download_env: dict[str, str] = {}
+    _reject_unbuilt_benchmark(str(model_name))
+    if model_name in _BENCHMARK_DOWNLOADS:
+        download_env = _stage_benchmark_downloads(model_name, dataset_cfg, model_cfg, model)
 
     if model_name == "wan":
-        encoder_cfg = model_cfg.get("encoder", {}) or model.get("encoder", {})
+        encoder_cfg = _encoder_config(model_cfg, model, str(model_name))
         _require_path(dataset_cfg.get("dataset_path"), "dataset metadata", kind="file")
         _require_path(dataset_cfg.get("data_folder"), "dataset media folder", kind="dir")
         _require_path(processor_cfg.get("text_tokenizer"), "text tokenizer", kind="dir")
@@ -156,7 +229,7 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
             else:
                 kind = "file" if dataset_format == "jsonl" else "dir"
                 _require_path(dataset_cfg.get("dataset_path"), "FLUX raw image-text dataset", kind=kind)
-            encoder_cfg = model_cfg.get("encoder", {}) or model.get("encoder", {})
+            encoder_cfg = _encoder_config(model_cfg, model, str(model_name))
             _validate_local_or_hf_id(encoder_cfg.get("t5_encoder"), "FLUX T5 encoder")
             _validate_local_or_hf_id(encoder_cfg.get("clip_encoder"), "FLUX CLIP encoder")
             _validate_local_or_hf_id(encoder_cfg.get("autoencoder"), "FLUX autoencoder checkpoint")
@@ -184,6 +257,8 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
         f"module={selected_module} stage={getattr(backend_args, 'stage', None)} "
         f"trainer={trainer.get('name')} model={model.get('name')}"
     )
+    for key, value in download_env.items():
+        print(f"env.{key}={value}")
     print("env.PREPARED=1")
 
 

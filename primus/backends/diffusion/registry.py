@@ -61,18 +61,54 @@ def _build_fsdp2_trainer(
     )
 
 
+def _build_flux_dev(model_config: dict):
+    from primus.backends.diffusion.models.registrations.flux import (
+        build_flux_dev_benchmark,
+    )
+
+    return build_flux_dev_benchmark(model_config)
+
+
+def _build_amdb_dataset(dataset_config: dict):
+    from primus.backends.diffusion.data.registrations.benchmark import (
+        build_benchmark_dataset,
+    )
+
+    return build_benchmark_dataset(dataset_config)
+
+
+def _build_amdb_benchmark_trainer(
+    *, model, dataset, processor, trainer_args: dict, eval_dataset=None, eval_processor=None
+):
+    from primus.backends.diffusion.trainers.benchmark import (
+        build_amdb_benchmark_trainer,
+    )
+
+    return build_amdb_benchmark_trainer(
+        model=model,
+        dataset=dataset,
+        processor=processor,
+        trainer_args=trainer_args,
+        eval_dataset=eval_dataset,
+        eval_processor=eval_processor,
+    )
+
+
 MODEL_BUILDERS: Dict[str, Callable[[dict], Any]] = {
     "flux": _build_flux_model,
     "flux.1-dev": _build_flux_preset_model("flux.1-dev"),
     "flux.1-schnell": _build_flux_preset_model("flux.1-schnell"),
+    "flux-dev": _build_flux_dev,
     "wan": _build_wan_model,
 }
 DATASET_BUILDERS: Dict[str, Callable[[dict], Tuple[Any, Any]]] = {
     "flux": _build_flux_dataset,
+    "amdb": _build_amdb_dataset,
     "wan": _build_wan_dataset,
 }
 TRAINER_BUILDERS: Dict[str, Callable[..., Any]] = {
     "fsdp2": _build_fsdp2_trainer,
+    "amdb_benchmark": _build_amdb_benchmark_trainer,
 }
 
 

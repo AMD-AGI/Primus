@@ -117,3 +117,28 @@ python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
 ```
 
 On success the hook prints `env.PREPARED=1`.
+
+## Official-module post-training
+
+FLUX.1-dev fine-tunes the in-tree FLUX module. It does not build a Diffusers
+pipeline. Point `PRETRAINED_PATH` at the official DiT checkpoint.
+
+| Workload | Official source | Checkpoint |
+|---|---|---|
+| FLUX.1-dev | Black Forest Labs FLUX | `flux1-dev.safetensors`, T5-XXL, CLIP-L, `ae.safetensors` |
+
+MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
+with a constant schedule. `LR` overrides either default.
+
+Default `LOCAL_BATCH_SIZE` for `benchmark_flux_dev-posttrain.yaml`:
+
+| Workload | MI300X / MI325X | MI355X |
+|---|---:|---:|
+| flux-dev | 10 | 16 |
+
+Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
+`SP_SIZE` at 1.
+
+`benchmark_flux_dev-posttrain.yaml` fine-tunes the native FLUX.1-dev module.
+Set `PRETRAINED_PATH` to `flux1-dev.safetensors` and `VAE_CHECKPOINT` to
+`ae.safetensors`.
