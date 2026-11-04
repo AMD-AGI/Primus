@@ -70,7 +70,11 @@ place.
 
 Training behaviour is set in the YAML: batch sizes, `fsdp.activation_checkpointing`
 (`true` or `selective`), `fsdp.reshard_after_forward`, `fsdp.enable_compile`, and
-so on. The Primus repairs that make those keys take effect are always on.
+so on. The Primus repairs that make those keys take effect are always on. One of
+them routes `fsdp.backend: megatron_fsdp` to Megatron-FSDP, with
+`fsdp.zero_dp_strategy` (1, 2 or 3) and the other `MegatronFSDPConfig` fields; it
+needs `model.torch_dtype` and `model.compute_dtype` both `bfloat16`, and supports
+neither context parallelism nor LoRA.
 
 Primus features that AutoModel has no setting for are configured in top-level
 `primus_*` sections of the module config, either in the experiment's
@@ -83,6 +87,7 @@ off by default, and the module that implements it documents its remaining keys.
 | `primus_profiler.enabled` | torch profiler traces of a few steady-state steps, one per rank, written under `diffusion_profile/` in the experiment directory |
 | `primus_turbo.fp8_linear`, `primus_turbo.mxfp4_linear`, `primus_te.mxfp4_linear` | FP8 / MXFP4 linear layers. At most one applies, and it turns on `model.transformer_engine_linear`, the AutoModel setting that performs the swap. MXFP4 is experimental. |
 | `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend, or with Ideogram-4's variable-length attention. |
+| `primus_mfsdp.no_param_reshard` | With `fsdp.backend: megatron_fsdp` below ZeRO-3, gather the parameters once per step instead of releasing them after each block's forward and gathering them again for its backward. |
 | `primus_train.defer_host_sync` | Move the train loop's per-step loss and gradient-norm host syncs to logging steps, so the CPU can queue work ahead of the GPU. Logged values are unchanged; between logging steps the loss and gradient norm stay GPU tensors. If AutoModel's loop no longer matches the rewrite, the patch logs an error naming this setting and the loop runs unchanged. |
 | `primus_ideogram4.varlen_attention` | Ideogram-4 variable-length packed attention. Its backward is non-deterministic: the deterministic kernel needs far more memory at image-sized sequences. |
 | `primus_ideogram4.ac_every: n` | Ideogram-4: checkpoint every nth block instead of all |
