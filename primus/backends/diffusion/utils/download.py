@@ -22,9 +22,11 @@ from pathlib import Path
 
 _MODEL_FILES: dict[str, tuple[str, str]] = {
     "flux-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors"),
+    "wan2.1-i2v": ("Wan-AI/Wan2.1-I2V-14B-480P-Diffusers", "transformer"),
 }
 _DATASETS: dict[str, tuple[str, str | None]] = {
     "flux-dev": ("frank-chieng/chinese_architecture_siheyuan", None),
+    "wan2.1-i2v": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
 }
 
 
@@ -178,7 +180,7 @@ def materialize_dataset(model_name: str, dataset_path: str | None, revision: str
     """Return a local dataset directory, downloading the repo when needed."""
     default = _DATASETS.get(model_name)
     text = str(dataset_path or "").strip()
-    if text.endswith(".pt"):
+    if text.startswith("synthetic:") or text.endswith(".pt"):
         return text
     local = Path(text).expanduser() if text else None
     if local is not None and local.exists():
@@ -190,6 +192,8 @@ def materialize_dataset(model_name: str, dataset_path: str | None, revision: str
         repo_id, rev = default
     else:
         return text
+    if repo_id == "Wild-Heart/Disney-VideoGeneration-Dataset" and not rev:
+        rev = "refs/pr/4"
     return _snapshot_dataset(repo_id, revision=rev)
 
 
@@ -206,9 +210,23 @@ def _blank(value: object) -> bool:
 
 def _checkpoint_root(weights: str) -> Path:
     path = Path(weights)
-    if path.is_file():
+    if path.is_file() or path.name == "transformer":
         return path.parent
     return path
+
+
+def tokenizer_dir(model_path: str) -> str:
+    """Tokenizer folder for a downloaded text encoder.
+
+    Diffusers snapshots keep ``tokenizer/`` next to ``text_encoder/``.
+    """
+    path = Path(model_path)
+    if (path / "tokenizer_config.json").is_file():
+        return str(path)
+    sibling = path.parent / "tokenizer"
+    if (sibling / "tokenizer_config.json").is_file():
+        return str(sibling)
+    return str(path)
 
 
 def _require_file(path: Path, description: str) -> str:
@@ -219,16 +237,42 @@ def _require_file(path: Path, description: str) -> str:
 
 def _companion_paths(model_name: str, weights: str, encoder: dict[str, object]) -> dict[str, str]:
     """Local encoder files that belong to the downloaded checkpoint."""
-    if not weights or model_name != "flux-dev":
+    if not weights:
         return {}
     root = _checkpoint_root(weights)
-    if not _blank(encoder.get("autoencoder")):
-        return {}
-    return {"VAE_CHECKPOINT": _require_file(root / "ae.safetensors", "FLUX autoencoder")}
+    found: dict[str, str] = {}
+    if model_name == "flux-dev" and _blank(encoder.get("autoencoder")):
+        found["VAE_CHECKPOINT"] = _require_file(root / "ae.safetensors", "FLUX autoencoder")
+    elif model_name == "wan2.1-i2v":
+        needed = {
+            "TEXT_ENCODER": "t5_encoder",
+            "VAE_CHECKPOINT": "autoencoder",
+            "CLIP_CHECKPOINT": "image_encoder",
+        }
+        if any(_blank(encoder.get(key)) for key in needed.values()):
+            snapshot = _snapshot(
+                "Wan-AI/Wan2.1-I2V-14B-480P",
+                allow_patterns=[
+                    "Wan2.1_VAE.pth",
+                    "models_t5_umt5-xxl-enc-bf16.pth",
+                    "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+                ],
+            )
+            files = {
+                "TEXT_ENCODER": Path(snapshot) / "models_t5_umt5-xxl-enc-bf16.pth",
+                "VAE_CHECKPOINT": Path(snapshot) / "Wan2.1_VAE.pth",
+                "CLIP_CHECKPOINT": Path(snapshot) / "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+            }
+            for env_key, cfg_key in needed.items():
+                if _blank(encoder.get(cfg_key)):
+                    found[env_key] = _require_file(files[env_key], env_key)
+    return found
 
 
 _ENCODER_ENV_KEYS = {
     "VAE_CHECKPOINT": "autoencoder",
+    "TEXT_ENCODER": "t5_encoder",
+    "CLIP_CHECKPOINT": "image_encoder",
 }
 
 
