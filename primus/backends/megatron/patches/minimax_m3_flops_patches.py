@@ -156,9 +156,11 @@ def _emit_breakdown(args: Any, batch_size: int, b: M3FlopsBreakdown) -> None:
 def make_m3_num_floating_point_operations(original_fn):
     """Wrap ``num_floating_point_operations``; non-M3 args fall through unchanged."""
 
-    def wrapped(args, batch_size):
+    # *extra/**extra_kwargs: Megatron-core 0.19+ pass per-batch sequence statistics; the
+    # M3 formula is dense-sequence and ignores them.
+    def wrapped(args, batch_size, *extra, **extra_kwargs):
         if not getattr(args, "minimax_sparse_attention", False):
-            return original_fn(args, batch_size)
+            return original_fn(args, batch_size, *extra, **extra_kwargs)
         breakdown = compute_m3_flops(args, batch_size, original_fn)
         global _BREAKDOWN_LOGGED
         if not _BREAKDOWN_LOGGED:

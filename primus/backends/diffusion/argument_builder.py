@@ -487,24 +487,6 @@ BENCHMARK_TRAINER: dict[str, Any] = {
 }
 
 _SPECS: dict[str, dict[str, Any]] = {
-    "sdxl": {
-        "modality": "image",
-        "fsdp_layers": "BasicTransformerBlock",
-        "learning_rate": 1.0e-4,
-        "lr_scheduler_type": "polynomial",
-        # Shorter than the default ``max_steps`` so a builder-only run leaves warmup.
-        # The MI300X and MI325X configs still set warmup_steps to 100.
-        "warmup_steps": 10,
-        "gradient_checkpointing": False,
-    },
-    "mochi-1": {
-        "modality": "video",
-        "fsdp_layers": "AsymmetricJointBlock",
-        "learning_rate": 1.0e-5,
-        "lr_scheduler_type": "constant",
-        "warmup_steps": 0,
-        "gradient_checkpointing": False,
-    },
     "hunyuan-video": {
         "modality": "video",
         "fsdp_layers": "MMDoubleStreamBlock,MMSingleStreamBlock",
@@ -515,21 +497,65 @@ _SPECS: dict[str, dict[str, Any]] = {
         # batch 1, and checkpointing would change the AMDB step time.
         "gradient_checkpointing": False,
     },
-    "wan2.1-i2v": {
-        "modality": "video",
-        "fsdp_layers": "DiTBlock",
-        "learning_rate": 1.0e-5,
-        "lr_scheduler_type": "constant",
-        "warmup_steps": 0,
-        "gradient_checkpointing": True,
-    },
 }
 
 
 def _spec(model_name: str) -> dict[str, Any] | None:
-    if model_name == "stable-diffusion-xl":
-        model_name = "sdxl"
     return _SPECS.get(model_name)
+
+
+# Registered on later benchmark PRs. Reject them here so this release does not
+# build trainer defaults, or download checkpoints, for a model it cannot run.
+_UNBUILT_BENCHMARKS = {
+    "sdxl",
+    "stable-diffusion-xl",
+    "mochi-1",
+    "wan2.1-i2v",
+}
+
+
+def _positive_image_size(value: Any) -> int:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"flux-dev image size must be a positive integer, got {value!r}") from exc
+    if number <= 0 or number != int(number):
+        raise ValueError(f"flux-dev image size must be a positive integer, got {value!r}")
+    return int(number)
+
+
+def _square_image_size(resolution: Any) -> int:
+    """Parse a square benchmark resolution.
+
+    Accepts ``512``, ``512.0``, ``"512"``, ``"512x512"``, ``"512,512"`` and
+    ``[512, 512]``. A non-square pair is rejected instead of keeping one side.
+    """
+    if isinstance(resolution, bool) or resolution is None:
+        raise ValueError(f"flux-dev resolution must be a positive size, got {resolution!r}")
+    if isinstance(resolution, (int, float)):
+        return _positive_image_size(resolution)
+    if isinstance(resolution, (list, tuple)):
+        parts = list(resolution)
+    else:
+        text = str(resolution).strip().lower().replace(" ", "")
+        if not text:
+            raise ValueError("flux-dev resolution is empty")
+        parts = [text]
+        for separator in ("x", "*", ","):
+            if separator in text:
+                parts = [part for part in text.split(separator) if part]
+                break
+    if len(parts) == 1:
+        return _positive_image_size(parts[0])
+    if len(parts) == 2:
+        height = _positive_image_size(parts[0])
+        width = _positive_image_size(parts[1])
+        if height != width:
+            raise ValueError(
+                f"flux-dev resolution must be square, got {resolution!r}. Set data.img_size to one side length."
+            )
+        return height
+    raise ValueError(f"flux-dev resolution must be a size or HxW pair, got {resolution!r}")
 
 
 def benchmark_defaults(
@@ -538,35 +564,51 @@ def benchmark_defaults(
     flux_dataset: dict[str, Any],
     flux_trainer: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    # This branch registers hunyuan-video only. sdxl, mochi-1, wan2.1-i2v, and
-    # flux-dev stay in the shared tables for the sibling benchmark PRs, but they
-    # must fail here. Otherwise argument building succeeds and prepare or
-    # ``get_model_builder`` raises later.
-    del flux_dataset, flux_trainer
-    if model_name != "hunyuan-video":
-        return None
-
+    if model_name == "flux-dev":
+        dataset = copy.deepcopy(flux_dataset)
+        dataset["config"]["dataset_type"] = "raw"
+        dataset["config"]["dataset_format"] = "hf_repo"
+        dataset["config"]["dataset_path"] = ""
+        processor = dataset["config"]["processor_config"]
+        processor["img_size"] = 512
+        processor["processor_name"] = "flux_raw"
+        processor["processor_type"] = "flux_raw"
+        processor["skip_low_resolution"] = False
+        dataset["config"]["benchmark_loader"] = True
+        trainer = copy.deepcopy(BENCHMARK_TRAINER)
+        trainer["args"]["run_name"] = "flux-dev"
+        trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] = "DoubleStreamBlock,SingleStreamBlock"
+        trainer["args"]["fsdp_module_paths_to_wrap"] = flux_trainer["args"]["fsdp_module_paths_to_wrap"]
+        trainer["args"]["fsdp_module_paths_no_reshard"] = flux_trainer["args"]["fsdp_module_paths_no_reshard"]
+        return dataset, trainer
     spec = _spec(model_name)
-    if spec is None:
-        return None
-    dataset = {
-        "name": "amdb",
-        "config": {
-            "dataset_path": "",
-            "model_name": model_name,
-            "modality": spec["modality"],
-            "max_train_samples": -1,
-            "split": "train",
-        },
-    }
-    trainer = copy.deepcopy(BENCHMARK_TRAINER)
-    trainer["args"]["learning_rate"] = spec["learning_rate"]
-    trainer["args"]["lr_scheduler_type"] = spec["lr_scheduler_type"]
-    trainer["args"]["warmup_steps"] = spec["warmup_steps"]
-    trainer["args"]["gradient_checkpointing"] = spec["gradient_checkpointing"]
-    trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] = spec["fsdp_layers"]
-    trainer["args"]["run_name"] = model_name
-    return dataset, trainer
+    if spec is not None:
+        del flux_dataset, flux_trainer
+        dataset = {
+            "name": "amdb",
+            "config": {
+                "dataset_path": "",
+                "model_name": model_name,
+                "modality": spec["modality"],
+                "max_train_samples": -1,
+                "split": "train",
+            },
+        }
+        trainer = copy.deepcopy(BENCHMARK_TRAINER)
+        trainer["args"]["learning_rate"] = spec["learning_rate"]
+        trainer["args"]["lr_scheduler_type"] = spec["lr_scheduler_type"]
+        trainer["args"]["warmup_steps"] = spec["warmup_steps"]
+        trainer["args"]["gradient_checkpointing"] = spec["gradient_checkpointing"]
+        trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] = spec["fsdp_layers"]
+        trainer["args"]["run_name"] = model_name
+        return dataset, trainer
+    if model_name in _UNBUILT_BENCHMARKS:
+        raise ValueError(
+            f"{model_name} has no diffusion model builder. "
+            "This release registers the flux-dev and hunyuan-video benchmarks only, so the config is rejected "
+            "before any checkpoint or dataset download."
+        )
+    return None
 
 
 def apply_benchmark_sections(
@@ -578,17 +620,18 @@ def apply_benchmark_sections(
     normalized: dict[str, Any],
 ) -> None:
     if model_name == "flux-dev":
-        if str(data.get("dataset_type", "")).lower() == "precomputed":
-            normalized["dataset"]["name"] = "amdb"
-            dataset_cfg["modality"] = "image"
+        # Precomputed FLUX samples are mean/logvar encodings, not AMDB images.
+        # Leaving the dataset on the flux loader avoids the latent-cache path
+        # looking up a missing ``image`` key.
         resolution = data.get("resolution")
         model_cfg = normalized["model"].get("config")
         if resolution is None and isinstance(model_cfg, dict):
             resolution = model_cfg.get("resolution")
-        if resolution is not None:
-            size = int(str(resolution).split(",")[0])
+        # An explicit data.img_size is already copied onto the processor.
+        # The model YAML always sets resolution, so it must not replace that size.
+        if data.get("img_size") is None and resolution is not None:
             processor = dataset_cfg.setdefault("processor_config", {})
-            processor["img_size"] = size
+            processor["img_size"] = _square_image_size(resolution)
         if int(trainer_args.get("sp_size", 1)) != 1:
             raise ValueError("flux-dev diffusion training requires `parallelism.sp_size: 1`.")
         return
@@ -596,9 +639,9 @@ def apply_benchmark_sections(
     spec = _spec(model_name)
     if spec is None:
         return
-    dataset_cfg["model_name"] = model_name
     if int(trainer_args.get("sp_size", 1)) != 1:
         raise ValueError(f"{model_name} diffusion training requires `parallelism.sp_size: 1`.")
+    dataset_cfg["model_name"] = model_name
     dataset_cfg["modality"] = data.get("modality") or spec["modality"]
     for key in ("max_train_samples", "revision", "split"):
         if data.get(key) is not None:
