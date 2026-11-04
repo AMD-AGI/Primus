@@ -409,11 +409,14 @@ stage_tf_source() {
 # is gone (404) and GitHub generates the .tar.gz on the fly, with a gzip stream
 # that is not stable: the same commit has come back under two different hashes.
 # The image feeds Bazel a frozen copy through --distdir. Do the same: fetch from
-# GitHub until the bytes match the pinned hash, or take a known-good copy from
-# PRIMUS_TF_LLVM_ARCHIVE. The checksum is never relaxed.
+# GitHub and, when the bytes differ, re-gzip the (identical) tar the ways git
+# archive does until one matches the pinned hash; or take a known-good copy from
+# PRIMUS_TF_LLVM_ARCHIVE. If neither works, build the archive from the pinned
+# LLVM commit (git_archive_tf_llvm below). The archive is always pinned: by
+# TF's sha256, or by the commit id.
 fetch_tf_llvm_archive() {  # fetch_tf_llvm_archive <tf_src> <distdir>
     local bzl="$1/third_party/xla/third_party/llvm/workspace.bzl"
-    local distdir="$2" commit sha target attempt
+    local distdir="$2" commit sha target attempt regzipped=0
     commit="$(sed -n 's/^ *LLVM_COMMIT = "\([0-9a-f]*\)".*/\1/p' "$bzl")"
     sha="$(sed -n 's/^ *LLVM_SHA256 = "\([0-9a-f]*\)".*/\1/p' "$bzl")"
     if [ -z "$commit" ] || [ -z "$sha" ]; then
@@ -430,16 +433,84 @@ fetch_tf_llvm_archive() {  # fetch_tf_llvm_archive <tf_src> <distdir>
     fi
     for attempt in 1 2 3 4 5 6; do
         log "Fetching LLVM $commit archive for bazel --distdir (attempt $attempt)"
-        if curl -fsSL --retry 3 -o "$target" "https://github.com/llvm/llvm-project/archive/$commit.tar.gz" \
-            && echo "$sha  $target" | sha256sum -c --status; then
-            return 0
+        if ! curl -fsSL --retry 3 -o "$target" "https://github.com/llvm/llvm-project/archive/$commit.tar.gz"; then
+            log "LLVM archive download failed, retrying"
+            sleep 30
+            continue
+        fi
+        echo "$sha  $target" | sha256sum -c --status && return 0
+        # The tar is the same in every variant, so re-gzipping once is enough.
+        if [ "$regzipped" = 0 ]; then
+            regzipped=1
+            log "LLVM archive hash differs from the pinned $sha; re-gzipping the tar as git archive does"
+            regzip_tf_llvm_archive "$target" "$sha" && return 0
         fi
         log "LLVM archive hash differs from the pinned $sha; GitHub regenerated it, retrying"
         sleep 30
     done
-    die "GitHub did not serve the LLVM $commit archive with the sha256 TensorFlow pins ($sha).
+    git_archive_tf_llvm "$bzl" "$commit" "$sha" "$target" && return 0
+    die "Neither GitHub's LLVM $commit archive, a re-gzipped copy, nor one built from the commit could be used.
   Export PRIMUS_TF_LLVM_ARCHIVE=/path/to/$commit.tar.gz pointing at a copy that
-  matches, re-run 'bash setup.sh tf_source', or use the lighter tf_cpu_fix stage."
+  matches $sha, re-run 'bash setup.sh tf_source', or use the lighter tf_cpu_fix stage."
+}
+
+# Last resort, for a pinned archive no public source still serves (v26.9: the
+# image takes its copy from a private mirror, and no gzip of GitHub's tar
+# matches). Fetch the LLVM commit itself -- git verifies the objects against the
+# commit id, so the content stays pinned -- `git archive` it under the prefix
+# TF strips, and re-pin LLVM_SHA256 in the TF checkout to that archive. Only
+# the gzip bytes are new; the substitution is logged with both hashes.
+git_archive_tf_llvm() {  # git_archive_tf_llvm <bzl> <commit> <sha> <archive>
+    local bzl="$1" commit="$2" sha="$3" archive="$4" repo="$SRC_DIR/llvm-project" newsha
+    log "No GitHub archive matches $sha; building the LLVM $commit archive from the commit with git archive"
+    rm -rf "$repo"
+    if ! { git init -q "$repo" \
+        && git -C "$repo" fetch -q --depth 1 https://github.com/llvm/llvm-project.git "$commit" \
+        && [ "$(git -C "$repo" rev-parse FETCH_HEAD)" = "$commit" ] \
+        && git -C "$repo" archive --format=tar --prefix="llvm-project-$commit/" "$commit" \
+            | gzip -n > "$archive"; }; then
+        rm -rf "$repo"
+        return 1
+    fi
+    rm -rf "$repo"
+    newsha="$(sha256sum "$archive" | cut -d' ' -f1)"
+    [ -n "$newsha" ] || return 1
+    sed -i "s/^\( *LLVM_SHA256 = \"\)$sha\"/\1$newsha\"/" "$bzl"
+    grep -q "LLVM_SHA256 = \"$newsha\"" "$bzl" || return 1
+    log "LLVM $commit archive built from the commit; LLVM_SHA256 re-pinned $sha -> $newsha in $bzl"
+}
+
+# GitHub's archives come from `git archive`, gzipped either by an external
+# `gzip -cn` or by git's built-in zlib gzip; the tar inside is the same. Rebuild
+# both streams from the downloaded tar and keep the one with the pinned hash.
+regzip_tf_llvm_archive() {  # regzip_tf_llvm_archive <archive> <sha>
+    local archive="$1" sha="$2" tar="$1.tar" cand="$1.cand" level
+    gzip -dc "$archive" > "$tar" || { rm -f "$tar"; return 1; }
+    for level in 6 9; do
+        if gzip -cn -"$level" < "$tar" > "$cand" \
+            && echo "$sha  $cand" | sha256sum -c --status; then
+            mv "$cand" "$archive"; rm -f "$tar"
+            log "Re-gzipped LLVM archive (gzip -n -$level) matches $sha"
+            return 0
+        fi
+    done
+    # wbits=31: zlib's own gzip wrapper (mtime 0, no name), as git's built-in gzip.
+    local zgz='import sys, zlib
+z = zlib.compressobj(int(sys.argv[3]), zlib.DEFLATED, 31)
+with open(sys.argv[1], "rb") as src, open(sys.argv[2], "wb") as dst:
+    for chunk in iter(lambda: src.read(1 << 20), b""):
+        dst.write(z.compress(chunk))
+    dst.write(z.flush())'
+    for level in 6 9; do
+        if python -c "$zgz" "$tar" "$cand" "$level" \
+            && echo "$sha  $cand" | sha256sum -c --status; then
+            mv "$cand" "$archive"; rm -f "$tar"
+            log "Re-gzipped LLVM archive (zlib -$level) matches $sha"
+            return 0
+        fi
+    done
+    rm -f "$tar" "$cand"
+    return 1
 }
 
 stage_rccl() {

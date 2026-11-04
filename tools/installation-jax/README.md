@@ -164,11 +164,16 @@ bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs manifest
   and GitHub generates the `.tar.gz` on the fly with an unstable gzip stream: the
   same commit has come back under two different hashes, with identical contents.
   The image therefore feeds Bazel a frozen copy through `--distdir`. `tf_source`
-  does the same: it downloads from GitHub, retrying until the bytes match the
-  pinned hash, and hands Bazel the result. The checksum is never relaxed. If
-  GitHub keeps serving the other variant, export
-  `PRIMUS_TF_LLVM_ARCHIVE=/path/to/<commit>.tar.gz` pointing at a copy that
-  matches, or use `tf_cpu_fix`.
+  does the same where it can: it downloads from GitHub, re-gzips the (identical)
+  tar the ways `git archive` does, and retries until the bytes match the pinned
+  hash. The image's frozen copy comes from a private registry, so when no public
+  copy matches (v26.9), `tf_source` fetches the pinned LLVM commit itself (git
+  verifies the objects against the commit id), builds the archive with
+  `git archive`, and re-pins `LLVM_SHA256` to it in the temporary TensorFlow
+  checkout only, logging both hashes. The source stays pinned, by the commit id
+  instead of the tarball hash; this is the one documented divergence from the
+  image's build here. To use a known-good copy instead, export
+  `PRIMUS_TF_LLVM_ARCHIVE=/path/to/<commit>.tar.gz`, or use `tf_cpu_fix`.
 - **The TF build needs no host clang.** TF 2.21 uses Bazel's hermetic C++
   toolchain by default; on Ubuntu 22.04 with no `clang` installed the build ran
   end to end (about 13 minutes on 120 cores). It does need `unzip`/`zip`.

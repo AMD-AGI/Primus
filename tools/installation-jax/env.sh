@@ -29,9 +29,11 @@ fi
 export PRIMUS_JAX_BASE
 export VENV_DIR="${VENV_DIR:-$PRIMUS_JAX_BASE/venv}"
 export WORKSPACE_DIR="${WORKSPACE_DIR:-$PRIMUS_JAX_BASE/workspace}"  # kept checkouts (maxtext, Primus)
-# Transient build sources: put on fast LOCAL /tmp (NFS is slow for compile I/O;
-# these dirs are deleted after each build anyway).
-export SRC_DIR="${SRC_DIR:-/tmp/primus-jax-build}"
+# Transient build sources (deleted after each build). Defaults to PRIMUS_JAX_BASE,
+# not /tmp: the TensorFlow bazel output tree alone needs tens of GB and fills a
+# small /tmp ("No space left on device"). If PRIMUS_JAX_BASE is on slow NFS,
+# point SRC_DIR at a big LOCAL disk instead.
+export SRC_DIR="${SRC_DIR:-$PRIMUS_JAX_BASE/build}"
 
 # MaxText clone (deps + editable install live here). Primus resolves the
 # MaxText backend from MAXTEXT_PATH (else its own third_party/maxtext), so we
