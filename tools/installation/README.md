@@ -259,7 +259,9 @@ scripts:
   `flydsl.expr.vector` at runtime, and that survived until 0.3.0 removed it —
   after which aiter prints `ROCm/HIP JIT runtime not available … CK and HIP ops
   are disabled. Triton ops remain available.` and quietly runs Triton-only.
-  `stage_turbo` asserts the symbol is importable afterwards. This is about
+  `stage_turbo` checks the symbol afterwards and warns when it is missing (it does
+  not stop: the image makes no such check and ships whatever flydsl the
+  Dockerfile resolves). This is about
   capability parity with the image, not speed: on llama3.1_8B BF16 an A/B of 0.2.4
   against 0.3.0 measured 535.9 vs 534.5 TFLOP/s/GPU, i.e. no difference. Other
   workloads that lean on aiter's CK/HIP kernels are the ones that would notice.
