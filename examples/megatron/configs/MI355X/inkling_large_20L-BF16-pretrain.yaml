@@ -59,7 +59,7 @@ modules:
       overlap_param_gather: true
       # Deferring the LM-head wgrad to the pipeline drain buffers every
       # microbatch's [seq, vocab] output gradient on the last stage (~52 GB at
-      # GBS 256), and the Turbo LM head (use_turbo_gemm) cannot defer.
+      # GBS 256).
       defer_embedding_wgrad_compute: false
 
       # data. NullTokenizer puts eod at id vocab_size: 200057 + eod = the
@@ -100,5 +100,4 @@ modules:
       use_turbo_deepep: false
       use_turbo_rms_norm: false
       moe_grouped_gemm: true
-      moe_token_dispatcher_type: alltoall
       moe_permute_fusion: false

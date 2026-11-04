@@ -92,7 +92,6 @@ def build_inkling_model(
     vp_stage: Optional[int] = None,
     pg_collection=None,
     fp16_lm_cross_entropy: bool = False,
-    turbo_output_layer: bool = False,
     meta: bool = False,
 ) -> InklingModel:
     if meta:
@@ -115,7 +114,6 @@ def build_inkling_model(
             parallel_output=True,
             pg_collection=pg_collection,
             vp_stage=vp_stage,
-            turbo_output_layer=turbo_output_layer,
         )
 
 
@@ -156,9 +154,6 @@ def inkling_builder(
         vp_stage=vp_stage,
         pg_collection=pg_collection,
         fp16_lm_cross_entropy=args.fp16_lm_cross_entropy,
-        turbo_output_layer=bool(
-            getattr(args, "enable_primus_turbo", False) and getattr(args, "use_turbo_gemm", False)
-        ),
     )
 
 

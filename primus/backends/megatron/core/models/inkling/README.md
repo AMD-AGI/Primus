@@ -206,9 +206,8 @@ so `use_turbo_attention` stays off.
 
 - DeepEP needs fp32 router probabilities (`moe_router_dtype: fp32`) and
   switches the dispatcher to `flex` itself.
-- With `use_turbo_gemm` the LM head is a `PrimusTurboColumnParallelLinear`,
-  with the same checkpoint keys. It cannot defer its weight gradient, so it
-  requires `defer_embedding_wgrad_compute: false`.
+- `use_turbo_gemm` covers the decoder's linears; the LM head stays Megatron's
+  `ColumnParallelLinear`, which calls the same hipBLASLt GEMM in BF16.
 - Turbo grouped GEMM trains each expert linear as one stacked 3-D weight, which
   Muon does not orthogonalize. Primus rejects `muon` / `dist_muon` with
   `use_turbo_grouped_gemm`; run Muon with `PRIMUS_TURBO=false`.
