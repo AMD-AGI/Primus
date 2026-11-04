@@ -36,11 +36,10 @@ case "${PRIMUS_INSTALL_EMERGING_OPTIMIZERS:-0}" in
     ;;
 esac
 
-# Pinned to match the third_party/Emerging-Optimizers submodule and the
-# Megatron-LM muon.py integration (which passes ``use_nesterov`` to
-# OrthogonalizedOptimizer). The older 06ff4c68 pin used the pre-rename
-# ``nesterov`` kwarg and is incompatible with the current Megatron muon.py.
-EO_COMMIT="${PRIMUS_EMERGING_OPTIMIZERS_COMMIT:-93d9eb3a6c899b50de73992826451fba3ab6adfb}"
+# Pinned to match the third_party/Emerging-Optimizers submodule (v0.3.1).
+# Megatron-core 0.19 imports ``emerging_optimizers.scalar_optimizers.Lion``,
+# which v0.2.0 (93d9eb3a) does not have.
+EO_COMMIT="${PRIMUS_EMERGING_OPTIMIZERS_COMMIT:-1f29ffd2acbf047f3dd3efdd8e9469d9305a8f77}"
 EO_URL="git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@${EO_COMMIT}"
 
 PY="${PYTHON:-python3}"
