@@ -59,6 +59,11 @@ modules:
       use_distributed_optimizer: true
       overlap_grad_reduce: false
       overlap_param_gather: false
+      # HyLo's speed path: its FSDP reduces gradients in bf16 and its fla GatedDeltaNet runs FLA's
+      # Triton short conv and fused gated RMSNorm.
+      grad_reduce_in_bf16: true
+      use_fla_short_conv: true
+      use_fla_fused_gated_norm: true
       fused_ce_mode: 0
       bf16: true
       log_interval: 1
