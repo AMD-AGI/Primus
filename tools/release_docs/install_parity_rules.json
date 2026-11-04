@@ -34,16 +34,15 @@
   ],
   "documented_divergences": {
     "primus": {
-      "TORCHVISION_VERSION": "Dockerfile pins `torchvision==0.29.0a0` inline and leaves the +rocm local label to the resolver; the script pins the full version the image resolved to.",
-      "TORCHAUDIO_VERSION": "Dockerfile pins `torchaudio==2.11.0+rocm${THE_ROCK_VERSION}` inline rather than as an ARG; the script spells out the same version.",
+      "TORCHVISION_VERSION": "Dockerfile pins `torchvision==0.30.0a0+rocm${THE_ROCK_VERSION}` inline rather than as an ARG; the script spells out the same version.",
+      "TORCHAUDIO_VERSION": "Dockerfile pins `torchaudio==2.11.0a0+rocm${THE_ROCK_VERSION}` inline rather than as an ARG; the script spells out the same version.",
       "APEX_VERSION": "Dockerfile installs apex unpinned from the torch index; the script pins the version the image resolved to.",
-      "FLYDSL_VERSION": "Primus-Turbo is installed with --no-deps bare-metal, so its own flydsl pin is restated explicitly."
+      "FLYDSL_VERSION": "Primus-Turbo is installed with --no-deps bare-metal, so the flydsl the image resolves through Turbo's requirements is restated explicitly."
     },
     "jax": {
       "TE_SOURCE_COMMIT": "Optional `te_source` stage, which has no Dockerfile counterpart; the commit is the one the TE wheel's local label names.",
       "RCCL_COMMIT": "Optional `rccl` stage (the v26.6 behaviour). The Dockerfile has taken RCCL from the pip ROCm SDK since v26.7.",
-      "PRIMUS_BRANCH": "The JAX image ships no Primus since v26.8 (it runs from a mounted checkout); the script checks out the release branch the docs pair with the image.",
-      "PRIMUS_REPO": "Same as PRIMUS_BRANCH: the image no longer clones Primus.",
+      "BAZELISK_BINARY": "Not a pin variable: the image rebuilds bazelisk BAZELISK_VERSION from source with a current Go toolchain and bumped golang.org/x deps to clear CVEs in the prebuilt binary; bare metal downloads the upstream release binary of the same version (same launcher behaviour), since a Go toolchain is not assumed on the host.",
       "LLVM_ARCHIVE": "Not a pin variable: tf_source's LLVM source archive. The image copies a frozen archive from a private registry; bare metal fetches it from GitHub and, when no copy matches TensorFlow's sha256, builds it from the pinned LLVM commit with git archive and re-pins the hash in the temporary TF checkout (owner, 2026-11-03)."
     }
   },
