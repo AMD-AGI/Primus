@@ -196,7 +196,7 @@ modules:
       # site so the norm runs on Turbo and the GEMM stays on TE.
       use_turbo_norm_te_linear: true
       weight_deosc: true
-      weight_deosc_start_step: 768
+      weight_deosc_start_step: ${PRIMUS_WEIGHT_DEOSC_START_STEP:768}
       weight_deosc_period: 100
       weight_deosc_ratio: 4.0
       weight_deosc_log_freq: 1
