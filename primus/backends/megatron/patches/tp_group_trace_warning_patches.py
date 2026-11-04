@@ -6,11 +6,12 @@
 
 """Remove the ``tp_group is None`` deprecation warning from traced forwards.
 
-WHAT THIS FIXES. ``RowParallelLinear.forward`` passes the tensor-parallel group
-as a literal ``None`` (``megatron/core/tensor_parallel/layers.py:1265``), unlike
+WHAT THIS FIXES. Line numbers below are for Megatron-core 0.19.2.
+``RowParallelLinear.forward`` passes the tensor-parallel group
+as a literal ``None`` (``megatron/core/tensor_parallel/layers.py:1466``), unlike
 ``ColumnParallelLinear.forward``, which passes ``tp_group=self.tp_group``
-(line 1017). The ``None`` reaches the deprecation shim
-``get_tensor_model_parallel_group_if_none`` (``megatron/core/utils.py:520``),
+(line 1183). The ``None`` reaches the deprecation shim
+``get_tensor_model_parallel_group_if_none`` (``megatron/core/utils.py:573``),
 whose ``tp_group is None`` branch calls ``warnings.warn`` on rank 0.
 
 ``warnings.warn`` is the C builtin ``_warnings.warn``, which Dynamo cannot trace
@@ -26,7 +27,7 @@ split frames grows with depth rather than staying constant.
 The argument is dead on that path in every configuration: the functional API
 only uses ``tp_group`` for a collective when ``allreduce_dgrad`` or
 ``sequence_parallel`` is set, and ``RowParallelLinear.forward`` hardcodes both to
-``False`` (lines 1247 and 1264). The row-parallel output all-reduce that does
+``False`` (lines 1448 and 1465). The row-parallel output all-reduce that does
 need a group uses the correctly resolved ``self.tp_group`` afterwards. So the
 break buys nothing at all -- it exists only to emit a warning about an argument
 that is never used, and Python's warning registry then dedupes that warning
@@ -52,11 +53,13 @@ Patching the module global rather than reimplementing the shim keeps upstream's
 group-resolution logic authoritative: this patch makes no assumption about how
 the group is resolved, so an upstream refactor of that order cannot silently
 change what a compiled run resolves to. It also covers every caller of the shim
-(``layers.py:229``, ``:419``, ``:693`` and the four call sites in
-``extensions/transformer_engine.py``) without editing the Megatron-LM submodule,
-because a module global is shared by every reference to the function.
-``megatron/core/utils.py:532`` is the only ``warnings.warn`` call site in that
-module, so nothing else is affected.
+(``layers.py:262``, ``:508``, ``:830``, ``:955``, ``:1320`` and the four call
+sites in ``extensions/transformer_engine.py``) without editing the Megatron-LM
+submodule, because a module global is shared by every reference to the function.
+The two other ``warnings.warn`` call sites in ``megatron/core/utils.py`` are
+deprecation notices too, from the ``deprecated`` decorator and
+``deprecate_inference_params``. They are also skipped while tracing, where they
+would break the graph the same way, and still warn in eager.
 
 The swap is installed once at ``before_train`` and is never restored, which is
 what makes it safe to leave alone: the stand-in holds no state beyond the module
@@ -83,7 +86,7 @@ directions: it would keep patching if the warning were fixed inside the pinned
 range, and stop patching if the warning outlived it. Reading the shim is exact
 in both.
 
-The hardcoded ``None`` at ``layers.py:1265`` is still worth fixing upstream on
+The hardcoded ``None`` at ``layers.py:1466`` is still worth fixing upstream on
 its own merits; this patch does not stand in for that.
 
 SCOPE. This is not specific to a model or to a distributed wrapper. Any model
