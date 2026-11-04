@@ -107,10 +107,24 @@ class FSDP2Trainer(BaseWanTrainer):
 
         self._apply_fsdp2()
 
+    def _prepare_fsdp2_modules(self, mp_dtype: torch.dtype) -> None:
+        """Hook for benchmark-only frozen-module casting before FSDP wrapping."""
+        del mp_dtype
+
+    def _fsdp2_reduce_dtype_name(self, mp_dtype: torch.dtype) -> str:
+        """Default reduction dtype when ``FSDP2_REDUCE_DTYPE`` is unset."""
+        del mp_dtype
+        return "fp32"
+
+    def _prepare_fsdp2_root(self, wrap_root: torch.nn.Module, mp_dtype: torch.dtype) -> None:
+        """Hook for casting the wrapped root before the world-size short-circuit."""
+        del wrap_root, mp_dtype
+
     def _apply_fsdp2(self):
         """Apply torch.distributed._composable.fsdp.fully_shard to the model."""
         mp_dtype = self._resolve_dtype()
-        reduce_dtype_name = os.getenv("FSDP2_REDUCE_DTYPE", "fp32").lower()
+        self._prepare_fsdp2_modules(mp_dtype)
+        reduce_dtype_name = os.getenv("FSDP2_REDUCE_DTYPE", self._fsdp2_reduce_dtype_name(mp_dtype)).lower()
         if reduce_dtype_name not in {"fp32", "bf16"}:
             raise ValueError(f"Unsupported FSDP2_REDUCE_DTYPE={reduce_dtype_name!r}")
         reduce_dtype = torch.float32 if reduce_dtype_name == "fp32" else torch.bfloat16
@@ -149,6 +163,7 @@ class FSDP2Trainer(BaseWanTrainer):
                 "TorchTitan-aligned FSDP2 requires FP32 parameter storage before wrapping; "
                 f"found non-FP32 parameters including {non_fp32_params[:3]}."
             )
+        self._prepare_fsdp2_root(wrap_root, mp_dtype)
 
         if self.world_size == 1:
             if self.rank == 0:

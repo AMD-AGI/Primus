@@ -102,6 +102,7 @@ class FluxRawImageTextDataset(Dataset):
         dataset_format: str = "webdataset",
         dataset_name: str | None = None,
         data_folder: str | None = None,
+        benchmark_loader: bool = False,
     ):
         dataset_name = dataset_name or None
         dataset_path, dataset_format = self._resolve_dataset(dataset_name, dataset_path, dataset_format)
@@ -109,6 +110,7 @@ class FluxRawImageTextDataset(Dataset):
         self.dataset_format = dataset_format
         self.dataset_name = dataset_name
         self.data_folder = data_folder
+        self.benchmark_loader = bool(benchmark_loader)
         self._records: list[dict[str, Any]] | None = None
 
         if dataset_format == "jsonl":
@@ -124,9 +126,16 @@ class FluxRawImageTextDataset(Dataset):
 
             self.dataset = load_from_disk(dataset_path)
         elif dataset_format == "hf_repo":
-            from datasets import load_dataset
+            if self.benchmark_loader:
+                from primus.backends.diffusion.data.benchmark import (
+                    load_benchmark_image_dataset,
+                )
 
-            self.dataset = load_dataset(dataset_path, split="train")
+                self.dataset = load_benchmark_image_dataset(dataset_path)
+            else:
+                from datasets import load_dataset
+
+                self.dataset = load_dataset(dataset_path, split="train")
         elif dataset_format == "webdataset":
             if not os.path.isdir(dataset_path):
                 raise FileNotFoundError(f"FLUX raw webdataset directory not found: {dataset_path}")
@@ -160,15 +169,26 @@ class FluxRawImageTextDataset(Dataset):
             return len(self._records)
         return len(self.dataset)
 
-    @staticmethod
-    def _prompt_from_sample(sample: dict[str, Any]) -> str:
-        for key in ("txt", "caption", "prompt", "text"):
-            if key in sample:
-                value = sample[key]
-                if isinstance(value, list):
-                    value = value[0]
-                return str(value)
-        raise KeyError("FLUX raw sample requires one of: txt, caption, prompt, text")
+    def _prompt_from_sample(self, sample: dict[str, Any]) -> str:
+        for key in ("txt", "caption", "prompt", "text", "caption_0"):
+            if key not in sample or sample[key] is None:
+                continue
+            value = sample[key]
+            if isinstance(value, list):
+                value = value[0] if value else None
+            if value is None:
+                continue
+            return str(value)
+        if self.benchmark_loader:
+            from primus.backends.diffusion.data.benchmark import (
+                caption_from_image_filename,
+            )
+
+            for key in ("image", "jpg", "png"):
+                caption = caption_from_image_filename(sample.get(key))
+                if caption:
+                    return caption
+        raise KeyError("FLUX raw sample requires one of: txt, caption, prompt, text, caption_0")
 
     def _image_from_jsonl_sample(self, sample: dict[str, Any]) -> Image.Image:
         image_key = "image" if "image" in sample else "jpg" if "jpg" in sample else "png"
@@ -343,7 +363,25 @@ class FluxRawImageTextProcessor:
         np_img = np.array(resized).transpose((2, 0, 1))
         return torch.tensor(np_img).float() / 255.0 * 2.0 - 1.0
 
+    @staticmethod
+    def _is_host_prepared(batch: Any) -> bool:
+        return (
+            isinstance(batch, dict)
+            and isinstance(batch.get("image"), torch.Tensor)
+            and batch["image"].ndim == 4
+        )
+
     def prepare_batch(self, *, batch: Any, device: torch.device, dtype: torch.dtype) -> dict[str, Any]:
+        host = batch if self._is_host_prepared(batch) else self.prepare_host_batch(batch)
+        return {
+            "image": host["image"].to(device=device, dtype=dtype, non_blocking=True),
+            "prompts": host["prompts"],
+        }
+
+    def prepare_host_batch(self, batch: Any) -> dict[str, Any]:
+        """Resize and crop on the host, leaving the device copy to ``prepare_batch``."""
+        if self._is_host_prepared(batch):
+            return batch
         if isinstance(batch, dict):
             batch = [batch]
         if not isinstance(batch, Sequence) or not batch:
@@ -365,7 +403,4 @@ class FluxRawImageTextProcessor:
 
         if not images:
             raise ValueError("FLUX raw batch contained no usable images after preprocessing")
-        return {
-            "image": torch.stack(images, dim=0).to(device=device, dtype=dtype, non_blocking=True),
-            "prompts": prompts,
-        }
+        return {"image": torch.stack(images, dim=0), "prompts": prompts}

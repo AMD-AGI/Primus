@@ -67,7 +67,12 @@ env:
   NVTE_FUSED_ATTN_AOTRITON: "0"
   NVTE_CK_USES_BWD_V3: "1"
   NVTE_CK_USES_FWD_V3: "1"
-  NVTE_CK_IS_V3_ATOMIC_FP32: "0"
+  # fp32 dQ atomics, unlike the MI355X config. On gfx942 the bf16-atomic (a16) v3
+  # backward kernels have no padded-seqlen variant, so WAN's 79200-token sequence
+  # (not a multiple of the kernel tile) silently falls back to the generic CK-tile
+  # backward kernel, which costs ~1.4x the step time. The a32 psskddv kernel covers
+  # it. (FLUX keeps "0": its 1536-token sequence is tile-aligned, and a16 is faster.)
+  NVTE_CK_IS_V3_ATOMIC_FP32: "1"
   NVTE_CK_HOW_V3_BF16_CVT: "2"
   NVTE_ALLOW_NONDETERMINISTIC_ALGO: "1"
 
@@ -99,9 +104,15 @@ modules:
       hardware: "gpu"
       checkpoint_every: -1
       enable_profiler: false
-      # MI300X has 192 GB HBM (vs 288 GB on MI355X); reduce per_device_batch_size
-      # here if a model OOMs relative to the MI355X config.
+      # MI300X has 192 GB HBM (vs 288 GB on MI355X): without remat the 720x1280x85
+      # train step needs ~223 GiB and OOMs even at batch 1. Remat every block but
+      # keep the attention inputs and outputs. "context" is TransformerEngine's
+      # checkpoint name for the fused-attention output and softmax stats, so the
+      # 79200-token attention is never recomputed, only projections, norms and FFN.
       per_device_batch_size: 1
+      remat_policy: "CUSTOM"
+      names_which_can_be_saved: ["hidden_states", "query_proj", "key_proj", "value_proj", "key_proj_text", "value_proj_text", "context", "attn_output"]
+      names_which_can_be_offloaded: []
       ici_fsdp_parallelism: 8
       ici_data_parallelism: 1
       ici_context_parallelism: 1
