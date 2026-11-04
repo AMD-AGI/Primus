@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import ast
 import os
 import re
 from typing import List, Optional
@@ -41,6 +42,53 @@ def _parse_compress_ratios(model_config):
         except Exception:
             return None
     return None
+
+
+_COMPACT_LAYER_PATTERN = re.compile(r"\(?\s*((?:\[[01]\]\s*\*\s*\d+\s*\+?\s*)+)\)?")
+
+
+def parse_layer_pattern(value, num_layers: int, field_name: str) -> List[int]:
+    """Parse a Megatron per-layer 0/1 pattern (``moe_layer_freq`` style).
+
+    Accepts ``None`` (every layer), an int period, a list, or the compact
+    list-expression string ``"([0]*3+[1]*57)"``.  Projection runs without
+    Megatron installed, so the string grammar is parsed here instead of with
+    ``megatron.training.arguments.moe_freq_type``.
+    """
+    if value is None:
+        return [1] * num_layers
+    if isinstance(value, int):
+        return [int(layer_idx % value == 0) for layer_idx in range(num_layers)]
+    pattern = value
+    if isinstance(pattern, str):
+        compact = _COMPACT_LAYER_PATTERN.fullmatch(pattern.strip())
+        if compact:
+            pattern = []
+            for entry, count in re.findall(r"\[([01])\]\s*\*\s*(\d+)", compact.group(1)):
+                pattern.extend([int(entry)] * int(count))
+        else:
+            pattern = ast.literal_eval(pattern)
+        if isinstance(pattern, int):
+            return parse_layer_pattern(pattern, num_layers, field_name)
+    if not isinstance(pattern, (list, tuple)):
+        raise TypeError(f"{field_name} must be an int, list, or list expression; got {value!r}")
+    if len(pattern) != num_layers:
+        raise ValueError(f"Invalid {field_name} length: {len(pattern)}, expected num_layers={num_layers}")
+    invalid = sorted({entry for entry in pattern if entry not in (0, 1)})
+    if invalid:
+        raise ValueError(f"{field_name} entries must be 0 or 1; got {invalid}")
+    return [int(entry) for entry in pattern]
+
+
+def _parse_minimax_sparse_attention_pattern(model_config):
+    """Return MiniMax's per-layer MSA schedule, or ``None`` for dense models."""
+    if not getattr(model_config, "minimax_sparse_attention", False):
+        return None
+    return parse_layer_pattern(
+        getattr(model_config, "sparse_attention_freq", None),
+        model_config.num_layers,
+        "sparse_attention_freq",
+    )
 
 
 def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
@@ -761,11 +809,16 @@ class LanguageModelProfiler(BaseModuleProfiler):
         v4_cr_aware = getattr(self.config.model_config, "compress_ratios", None) is not None
         v4_sim = is_simulation_mode and v4_cr_aware
         cr_schedule = _parse_compress_ratios(self.config.model_config) if v4_cr_aware else None
+        msa_schedule = _parse_minimax_sparse_attention_pattern(self.config.model_config)
+        msa_sim = is_simulation_mode and msa_schedule is not None
 
         def _layer_cr(idx):
             if cr_schedule and 0 <= idx < len(cr_schedule):
                 return int(cr_schedule[idx])
             return None
+
+        def _layer_msa(idx):
+            return bool(msa_schedule and 0 <= idx < len(msa_schedule) and msa_schedule[idx])
 
         for layer_idx in self.layers:
             # In benchmark mode, guard against out-of-range layer indices.
@@ -777,7 +830,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
             is_moe = self.config.model_config.moe_pattern[layer_idx]
             layer_type = "moe" if is_moe else "dense"
             cr = _layer_cr(layer_idx)
-            type_key = (layer_type, cr) if v4_cr_aware else layer_type
+            msa = _layer_msa(layer_idx)
+            type_key = (layer_type, cr, msa) if v4_cr_aware or msa_schedule is not None else layer_type
 
             if type_key in profiled_types:
                 continue
@@ -803,6 +857,12 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 attn_sub = layer_profiler.get_sub_profiler("self_attention")
                 if hasattr(attn_sub, "set_sim_compress_ratio"):
                     attn_sub.set_sim_compress_ratio(cr)
+                layer_profiler._cached_results = None
+                layer_profiler._cache_key = None
+            if msa_sim:
+                attn_sub = layer_profiler.get_sub_profiler("self_attention")
+                if hasattr(attn_sub, "set_sim_minimax_sparse_attention"):
+                    attn_sub.set_sim_minimax_sparse_attention(msa)
                 layer_profiler._cached_results = None
                 layer_profiler._cache_key = None
 
@@ -833,6 +893,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
             results[type_key] = {
                 "type": layer_type,
                 "compress_ratio": cr,
+                "minimax_sparse_attention": msa,
                 "forward_time_ms": forward_time,
                 "backward_time_ms": backward_time,
                 "activation_memory_bytes": activation_memory,
@@ -872,15 +933,16 @@ class LanguageModelProfiler(BaseModuleProfiler):
         for layer_idx in self.layers:
             is_moe = self.config.model_config.moe_pattern[layer_idx]
             layer_type = "moe" if is_moe else "dense"
-            if v4_cr_aware:
+            if v4_cr_aware or msa_schedule is not None:
                 cr = _layer_cr(layer_idx)
-                key = (layer_type, cr)
+                msa = _layer_msa(layer_idx)
+                key = (layer_type, cr, msa)
                 if key in results:
                     final_results[layer_idx] = results[key]
                 else:
                     # Fall back to any profiled representative of the same type
                     # (cr combo not present among reduced representatives).
-                    same = [v for (t, _c), v in results.items() if t == layer_type]
+                    same = [v for key, v in results.items() if key[0] == layer_type]
                     if same:
                         final_results[layer_idx] = same[0]
             elif layer_type in results:

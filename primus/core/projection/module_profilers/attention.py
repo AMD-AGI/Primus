@@ -53,6 +53,7 @@ class AttentionProfiler(BaseModuleProfiler):
         self._gemm_backend = None  # Optional: GEMM simulation backend
         self._sdpa_backend = None  # Optional: SDPA simulation backend
         self._sim_compress_ratio = None  # Per-layer cr for V4 simulate (no module)
+        self._sim_minimax_sparse_attention = None  # Per-layer MSA flag for simulate mode
 
     def set_sim_compress_ratio(self, cr):
         """Set the DeepSeek-V4 compress ratio for the current simulated layer.
@@ -64,6 +65,17 @@ class AttentionProfiler(BaseModuleProfiler):
         see no behaviour change.
         """
         self._sim_compress_ratio = None if cr is None else int(cr)
+        self._cached_results = None
+        self._cache_key = None
+
+    def set_sim_minimax_sparse_attention(self, enabled: Optional[bool]):
+        """Select MiniMax's block-sparse core for one simulated layer.
+
+        A MiniMax model mixes dense and MSA layers.  In simulation no concrete
+        layer module is built, so :class:`LanguageModelProfiler` supplies this
+        layer-local flag from ``sparse_attention_freq``.
+        """
+        self._sim_minimax_sparse_attention = None if enabled is None else bool(enabled)
         self._cached_results = None
         self._cache_key = None
 
@@ -206,7 +218,7 @@ class AttentionProfiler(BaseModuleProfiler):
 
         heads_per_partition = max(1, args.num_attention_heads // tp_size)
         seqlen_per_cp = max(1, (seq_len + cp_size - 1) // cp_size)
-        if getattr(args, "use_flash_attn", False):
+        if getattr(args, "use_flash_attn", False) or self._is_minimax_sparse_attention():
             softmax_width = query_projection_size
         else:
             softmax_width = heads_per_partition * seqlen_per_cp
@@ -336,6 +348,13 @@ class AttentionProfiler(BaseModuleProfiler):
         return (
             self._sim_compress_ratio is not None
             and getattr(self.config.model_config, "compress_ratios", None) is not None
+        )
+
+    def _is_minimax_sparse_attention(self) -> bool:
+        """Whether this representative layer uses MiniMax selected-block MSA."""
+        return bool(
+            getattr(self.config.model_config, "minimax_sparse_attention", False)
+            and self._sim_minimax_sparse_attention
         )
 
     def _v4_resolved_cr(self) -> int:
@@ -886,15 +905,43 @@ class AttentionProfiler(BaseModuleProfiler):
                 sdpa_head_dim = args.kv_channels
                 sdpa_head_dim_v = None  # same as head_dim
 
-            sdpa_result = self._sdpa_backend.simulate_sdpa(
-                batch_size=batch_size,
-                num_heads=heads_per_rank,
-                seq_len=slen_per_cp,
-                head_dim=sdpa_head_dim,
-                causal=True,
-                dtype="bf16",
-                head_dim_v=sdpa_head_dim_v,
-            )
+            if self._is_minimax_sparse_attention():
+                if getattr(args, "multi_latent_attention", False):
+                    raise ValueError("MiniMax MSA cannot be combined with multi-latent attention")
+                num_kv_heads = (
+                    args.num_query_groups
+                    if args.group_query_attention and args.num_query_groups
+                    else args.num_attention_heads
+                )
+                sdpa_result = self._sdpa_backend.simulate_minimax_sparse_attention(
+                    batch_size=batch_size,
+                    num_attention_heads=heads_per_rank,
+                    num_kv_heads=max(1, num_kv_heads // tp_size),
+                    seq_len=slen_per_cp,
+                    head_dim=sdpa_head_dim,
+                    hidden_size=args.hidden_size,
+                    num_index_heads=getattr(args, "sparse_num_index_heads", num_kv_heads),
+                    index_head_dim=getattr(args, "sparse_index_dim", sdpa_head_dim),
+                    block_size=getattr(args, "sparse_block_size", 128),
+                    topk_blocks=getattr(args, "sparse_topk_blocks", 16),
+                    indexer_loss_coeff=getattr(args, "sparse_indexer_loss_coeff", 0.0),
+                    dtype="bf16",
+                )
+            else:
+                sdpa_result = self._sdpa_backend.simulate_sdpa(
+                    batch_size=batch_size,
+                    num_heads=heads_per_rank,
+                    seq_len=slen_per_cp,
+                    head_dim=sdpa_head_dim,
+                    causal=True,
+                    dtype="bf16",
+                    head_dim_v=sdpa_head_dim_v,
+                    num_heads_kv=(
+                        max(1, args.num_query_groups // tp_size)
+                        if args.group_query_attention and args.num_query_groups
+                        else None
+                    ),
+                )
             fwd_time += sdpa_result.forward_time_ms
             bwd_time += sdpa_result.backward_time_ms
 

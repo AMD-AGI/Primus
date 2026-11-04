@@ -31,6 +31,7 @@ from primus.core.projection.module_profilers.language_model import (
     LanguageModelProfiler,
     build_profiler,
     get_language_model_profiler_spec,
+    parse_layer_pattern,
 )
 from primus.core.projection.module_profilers.optimizer import OptimizerProfiler
 from primus.core.projection.performance_projection.simulator import (
@@ -1122,6 +1123,7 @@ def _limit_layers_for_projection(module_config):
     original_layers = getattr(module_config, "num_layers", 1) or 1
     original_moe_layout = getattr(module_config, "moe_layer_freq", None)
     dense_layers_present = _has_dense_layers(original_moe_layout)
+    msa_by_layer_type = _minimax_sparse_attention_by_layer_type(module_config, original_layers)
 
     # DeepSeek-V4 hybrid attention: per-layer compress_ratio (0=dense/SWA,
     # 4=CSA, 128=HCA) makes attention cost layer-dependent.  Collapsing the
@@ -1180,8 +1182,34 @@ def _limit_layers_for_projection(module_config):
     else:
         module_config.moe_layer_freq = [0] * target_layers
 
+    if msa_by_layer_type is not None:
+        module_config.sparse_attention_freq = [
+            msa_by_layer_type.get(layer_type, 0) for layer_type in module_config.moe_layer_freq
+        ]
+
     # disable pipeline model parallelism for single-node layer benchmarking
     _flatten_pipeline_for_single_node(module_config)
+
+
+def _minimax_sparse_attention_by_layer_type(module_config, num_layers: int):
+    """Map MoE layer type (0 dense, 1 MoE) to the MSA flag of its first full-model layer.
+
+    The benchmark keeps one representative per MoE layer type, so a model
+    whose dense and MoE layers each mix MSA and dense attention is reduced to
+    the first layer of each type.
+    """
+    if not getattr(module_config, "minimax_sparse_attention", False):
+        return None
+    msa = parse_layer_pattern(
+        getattr(module_config, "sparse_attention_freq", None), num_layers, "sparse_attention_freq"
+    )
+    has_moe = (getattr(module_config, "num_experts", None) or 0) > 0
+    moe_layout = getattr(module_config, "moe_layer_freq", None) if has_moe else [0] * num_layers
+    moe = parse_layer_pattern(moe_layout, num_layers, "moe_layer_freq")
+    by_type = {}
+    for layer_type, is_msa in zip(moe, msa):
+        by_type.setdefault(layer_type, is_msa)
+    return by_type
 
 
 def _rescale_expert_parallelism(module_config):

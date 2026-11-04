@@ -88,6 +88,15 @@ class ModelConfig:
     use_v4_tilelang_attention: bool = False
     use_v4_tilelang_csa_attention: bool = False
     use_v4_fp8_indexer: bool = False
+    # MiniMax Sparse Attention (MSA); defaults are MiniMax-M3's released values
+    # from MSATransformerConfig.
+    minimax_sparse_attention: bool = False
+    sparse_attention_freq: object = None  # per-layer 0/1 schedule; None = every layer
+    sparse_num_index_heads: int = 4
+    sparse_index_dim: int = 128
+    sparse_block_size: int = 128
+    sparse_topk_blocks: int = 16
+    sparse_indexer_loss_coeff: float = 1.0e-2
     # FFN & MoE
     swiglu: bool = False
     num_experts: int = 0
