@@ -219,6 +219,29 @@ class TestLocalSpecSensitiveBackend:
             ColumnParallelLinear,
         ]
 
+    @pytest.mark.parametrize("quantization", ["fp8", "mxfp4"])
+    def test_an_explicit_backend_keeps_the_sensitive_layers_in_bf16(self, quantization):
+        """A backend passed by the caller quantizes only the middle layers, as the default one does."""
+        from megatron.core.tensor_parallel import ColumnParallelLinear
+
+        from primus.backends.megatron.core.models.diffusion.flux import layer_spec
+
+        provider = {
+            "fp8": layer_spec.PrimusTurboFloat8LocalSpecProvider,
+            "mxfp4": layer_spec.PrimusTurboMXFP4LocalSpecProvider,
+        }[quantization]
+        if provider is None:
+            pytest.skip(f"no {quantization} local spec provider in this build")
+        backend = provider()
+        config = _te_config(transformer_impl="local", **QUANTIZATION[quantization], **SENSITIVE)
+
+        specs = layer_spec.get_flux_layer_spec(config, backend=backend).layer_specs
+
+        quantized = backend.column_parallel_linear()
+        assert quantized is not ColumnParallelLinear
+        qkv = [spec.submodules.self_attention.submodules.linear_qkv for spec in specs]
+        assert qkv == [ColumnParallelLinear, quantized, quantized, ColumnParallelLinear]
+
     def test_fp8_without_sensitive_layers_stays_float8_throughout(self):
         from primus.backends.megatron.core.extensions.primus_turbo_float8_local import (
             Float8ColumnParallelLinear,

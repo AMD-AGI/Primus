@@ -491,6 +491,27 @@ def get_flux_double_transformer_spec_for_backend(
     )
 
 
+def _sensitive_layer_backend(config) -> Optional[BackendSpecProvider]:
+    """Local-spec backend for the sensitive layers, whatever backend the other layers use.
+
+    Resolved from the config alone, so a backend passed to ``get_flux_layer_spec``
+    cannot quantize them. None leaves them on the main backend: the TE spec keeps
+    them in bf16 through per-layer quantization contexts instead, and a tw_fp8
+    sensitive layer in an fp8 run stays on the Float8 backend and the run's fp8_recipe.
+    """
+    if config.transformer_impl != "local" or not HAVE_PRIMUS_TURBO_LOCAL:
+        return None
+    precision = getattr(config, "sensitive_layer_precision", "bf16")
+    if config.fp4 is not None:
+        if precision == "tw_fp8":
+            return PrimusTurboFloat8LocalSpecProvider()
+        if precision == "bf16":
+            return PrimusTurboLocalSpecProvider()
+    elif config.fp8 is not None and precision == "bf16":
+        return PrimusTurboLocalSpecProvider()
+    return None
+
+
 def get_flux_layer_spec(
     config,
     backend: Optional[BackendSpecProvider] = None,
@@ -536,29 +557,16 @@ def get_flux_layer_spec(
     from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
     # Default backend selection based on config
-    sensitive_backend = None
-
     if backend is None:
         if config.transformer_impl == "local":
             if config.fp4 is not None and PrimusTurboMXFP4LocalSpecProvider is not None:
                 backend = PrimusTurboMXFP4LocalSpecProvider()
-
-                # Resolve sensitive layer backend
-                sensitive_precision = getattr(config, "sensitive_layer_precision", "bf16")
-                if sensitive_precision == "tw_fp8":
-                    sensitive_backend = PrimusTurboFloat8LocalSpecProvider()
-                elif sensitive_precision == "bf16":
-                    sensitive_backend = PrimusTurboLocalSpecProvider()
             elif (
                 config.fp8 is not None
                 and HAVE_PRIMUS_TURBO_LOCAL
                 and PrimusTurboFloat8LocalSpecProvider is not None
             ):
                 backend = PrimusTurboFloat8LocalSpecProvider()
-
-                # A tw_fp8 sensitive layer stays on the Float8 backend and the run's fp8_recipe.
-                if getattr(config, "sensitive_layer_precision", "bf16") == "bf16":
-                    sensitive_backend = PrimusTurboLocalSpecProvider()
             elif HAVE_PRIMUS_TURBO_LOCAL and PrimusTurboLocalSpecProvider is not None:
                 backend = PrimusTurboLocalSpecProvider()
             else:
@@ -575,6 +583,7 @@ def get_flux_layer_spec(
             backend = LocalSpecProvider()
 
     # Build per-layer specs with optional sensitive-layer heterogeneity
+    sensitive_backend = _sensitive_layer_backend(config)
     sensitive_enabled = getattr(config, "sensitive_layers_enabled", False)
     num_start = getattr(config, "sensitive_layers_start", 0) if sensitive_enabled else 0
     num_end = getattr(config, "sensitive_layers_end", 0) if sensitive_enabled else 0
