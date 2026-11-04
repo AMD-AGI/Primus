@@ -14,9 +14,13 @@ WHY THIS TEST EXISTS:
   left alone rather than replaced.
 """
 
+import ast
+import inspect
 import logging
 import sys
+import textwrap
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +31,10 @@ from primus.backends.automodel.models.flux import latent_ids  # noqa: E402
 
 MODULE_PATH = "nemo_automodel.components.flow_matching.adapters.flux"
 LOGGER = "primus.backends.automodel.models.flux.latent_ids"
+PINNED_ADAPTER = (
+    Path(__file__).resolve().parents[4]
+    / "third_party/Automodel/nemo_automodel/components/flow_matching/adapters/flux.py"
+)
 
 
 def _upstream_latent_image_ids(self, batch_size, height, width, device, dtype):
@@ -36,6 +44,32 @@ def _upstream_latent_image_ids(self, batch_size, height, width, device, dtype):
 
     latent_image_ids = latent_image_ids.reshape(-1, 3)
     return latent_image_ids.to(device=device, dtype=dtype)
+
+
+def _body_without_docstring(function):
+    body = function.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
+        body = body[1:]
+    return [ast.dump(statement) for statement in body]
+
+
+def test_the_copied_upstream_method_is_the_pinned_one():
+    """Fails when AutoModel's method changes, so the tests here keep comparing against what it builds.
+
+    Read from the submodule's source, which CI checks out without installing AutoModel.
+    """
+    if not PINNED_ADAPTER.is_file():
+        pytest.skip("the AutoModel submodule is not checked out")
+    adapter = next(
+        node
+        for node in ast.parse(PINNED_ADAPTER.read_text()).body
+        if isinstance(node, ast.ClassDef) and node.name == "FluxAdapter"
+    )
+    pinned = next(node for node in adapter.body if getattr(node, "name", None) == "_prepare_latent_image_ids")
+    copied = ast.parse(textwrap.dedent(inspect.getsource(_upstream_latent_image_ids))).body[0]
+
+    assert [a.arg for a in pinned.args.args] == [a.arg for a in copied.args.args]
+    assert _body_without_docstring(pinned) == _body_without_docstring(copied)
 
 
 def _install_stub_adapter(monkeypatch, method):
