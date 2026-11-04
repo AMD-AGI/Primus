@@ -25,12 +25,26 @@ _MODEL_FILES: dict[str, tuple[str, str]] = {
     "wan2.1-i2v": ("Wan-AI/Wan2.1-I2V-14B-480P-Diffusers", "transformer"),
     "sdxl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
     "stable-diffusion-xl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
+    "mochi-1": ("genmo/mochi-1-preview", "dit.safetensors"),
 }
+_MODEL_DOWNLOAD_PATTERNS: dict[str, list[str]] = {
+    "mochi-1": ["dit.safetensors", "encoder.safetensors"],
+}
+_MOCHI_T5_DOWNLOAD_PATTERNS = [
+    "config.json",
+    "pytorch_model*.bin",
+    "pytorch_model.bin.index.json",
+    "spiece.model",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+]
 _DATASETS: dict[str, tuple[str, str | None]] = {
     "flux-dev": ("frank-chieng/chinese_architecture_siheyuan", None),
     "wan2.1-i2v": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
     "sdxl": ("frank-chieng/chinese_architecture_siheyuan", None),
     "stable-diffusion-xl": ("frank-chieng/chinese_architecture_siheyuan", None),
+    "mochi-1": ("Wild-Heart/Disney-VideoGeneration-Dataset", "refs/pr/4"),
 }
 
 
@@ -105,9 +119,9 @@ def _is_hf_repo(value: str) -> bool:
     if path.exists() or value.startswith(("/", "./", "../", "~")):
         return False
     parts = value.split("/")
-    if len(parts) < 2 or not all(parts[:2]):
+    if len(parts) != 2 or not all(parts):
         return False
-    return not parts[-1].endswith((".safetensors", ".bin", ".pt", ".pth", ".ckpt"))
+    return not value.endswith((".safetensors", ".bin", ".pt", ".pth", ".ckpt"))
 
 
 def _distributed_rank() -> int | None:
@@ -196,17 +210,14 @@ def materialize_pretrained(model_name: str, pretrained: str | None) -> str:
         return str(local)
     repo_id = default_repo
     filename = relative
-    remote_file = text.count("/") >= 2 and not text.startswith(("/", ".", "~"))
     if text and _is_hf_repo(text):
         repo_id = text
-    elif remote_file:
-        org, _, remainder = text.partition("/")
-        name, _, filename = remainder.partition("/")
-        repo_id = f"{org}/{name}"
-        filename = filename or relative
     elif text:
         raise FileNotFoundError(f"{model_name} checkpoint does not exist: {text}")
-    snapshot = _snapshot(repo_id, allow_patterns=[filename] if filename else None)
+    patterns = _MODEL_DOWNLOAD_PATTERNS.get(model_name)
+    if patterns is None and filename:
+        patterns = [filename]
+    snapshot = _snapshot(repo_id, allow_patterns=patterns)
     target = Path(snapshot) / filename
     if not target.exists():
         raise FileNotFoundError(f"{repo_id} has no {filename} in {snapshot}")
@@ -235,15 +246,14 @@ def materialize_dataset(model_name: str, dataset_path: str | None, revision: str
     return _snapshot_dataset(repo_id, revision=rev)
 
 
-def prefetch_huggingface_repo(value: str | None) -> None:
+def prefetch_huggingface_repo(value: str | None, *, allow_patterns: list[str] | None = None) -> None:
     text = str(value or "").strip()
     if text and _is_hf_repo(text):
-        # Root weight and tokenizer files only. Nested fp16/onnx/openvino copies
-        # are not used by the SDXL CLIP encoders.
-        _snapshot(
-            text,
-            allow_patterns=["*.safetensors", "*.bin", "*.json", "*.txt", "*.model", "*.tiktoken"],
-        )
+        if allow_patterns is None:
+            # Root weight and tokenizer files only. Nested fp16/onnx/openvino copies
+            # are not used by the SDXL CLIP encoders.
+            allow_patterns = ["*.safetensors", "*.bin", "*.json", "*.txt", "*.model", "*.tiktoken"]
+        _snapshot(text, allow_patterns=allow_patterns)
 
 
 def _blank(value: object) -> bool:
@@ -312,11 +322,14 @@ def _companion_paths(model_name: str, weights: str, encoder: dict[str, object]) 
     elif model_name in {"sdxl", "stable-diffusion-xl"} and _blank(encoder.get("autoencoder")):
         vae = Path(weights) if Path(weights).is_file() else root / "sd_xl_base_1.0.safetensors"
         found["VAE_CHECKPOINT"] = _require_file(vae, "SDXL autoencoder")
+    elif model_name == "mochi-1" and _blank(encoder.get("autoencoder")):
+        found["VAE_CHECKPOINT"] = _require_file(root / "encoder.safetensors", "Mochi VAE encoder")
     return found
 
 
 _ENCODER_ENV_KEYS = {
     "VAE_CHECKPOINT": "autoencoder",
+    "LLM_ENCODER": "llm",
     "TEXT_ENCODER": "t5_encoder",
     "CLIP_CHECKPOINT": "image_encoder",
 }
@@ -338,6 +351,10 @@ def stage_benchmark_assets(
     """Download benchmark weights and the dataset, and return env exports."""
     env = cache_env()
     encoder = dict(encoder or {})
+    dataset_text = str(dataset_path or "").strip()
+    if dataset_text.startswith("synthetic:"):
+        _log(f"Skipping asset downloads for pre-encoded benchmark dataset: {dataset_text}")
+        return env
     weights = materialize_pretrained(model_name, pretrained)
     if weights and _replace_with_download(pretrained):
         env["PRETRAINED_PATH"] = weights
@@ -346,7 +363,12 @@ def stage_benchmark_assets(
         env["DATASET_PATH"] = data
     if os.environ.get("BENCHMARK_DENOISER_ONLY") != "1":
         env.update(_companion_paths(model_name, weights, encoder))
-        for value in encoder.values():
+        for key, value in encoder.items():
             if isinstance(value, str):
-                prefetch_huggingface_repo(value)
+                patterns = (
+                    _MOCHI_T5_DOWNLOAD_PATTERNS
+                    if model_name == "mochi-1" and key in {"t5", "text_encoder"}
+                    else None
+                )
+                prefetch_huggingface_repo(value, allow_patterns=patterns)
     return env

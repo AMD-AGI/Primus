@@ -17,6 +17,9 @@ datasets, attention selection, FSDP2 wrapping, and the training loop.
 - AMDiffusionBenchmark workload `sdxl`, built by `models/registrations/sdxl.py`.
   The UNet is the Stability generative-models module. It uses the shared
   benchmark trainer and does not change the native Wan or FLUX trainers.
+- AMDiffusionBenchmark workload `mochi-1`, built by `models/registrations/mochi.py`.
+  The denoiser is Genmo's AsymmDiTJoint. It uses the shared benchmark
+  trainer and does not change the native Wan or FLUX trainers.
 - Trainer: FSDP2 for the native models. The benchmark workloads use
   `amdb_benchmark`.
 - Wan sequence parallelism: supported through `sp_size`.
@@ -51,6 +54,7 @@ flux.1_dev_t2i.yaml
 benchmark_flux_dev.yaml
 benchmark_wan2_1_i2v.yaml
 benchmark_sdxl.yaml
+benchmark_mochi_1.yaml
 ```
 
 `flux-dev` and `flux.1-dev` both build the native FLUX.1-dev DiT.
@@ -64,6 +68,9 @@ with CLIP cross-attention, the Wan2.1 VAE, UMT5, and the CLIP vision tower.
 
 `sdxl` is the post-train preset. The checkpoint is the official
 `sd_xl_base_1.0.safetensors`, not a Diffusers-layout key set.
+
+`mochi-1` is the post-train preset. The checkpoint is the official DiT
+and VAE encoder safetensors, not a Diffusers-layout key set.
 
 FLUX.1-schnell and FLUX.1-dev are separate presets. They share the same main
 transformer shape, but `flux.1-dev` has a guidance embedding module while
@@ -93,6 +100,10 @@ Keep sequence parallelism at 1.
 # SDXL, frank-chieng/chinese_architecture_siheyuan
 ./primus-cli direct -- train posttrain \
   --config examples/diffusion/configs/MI355X/benchmark_sdxl-posttrain.yaml
+
+# Mochi-1, Wild-Heart/Disney-VideoGeneration-Dataset
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_mochi_1-posttrain.yaml
 ```
 
 ## Public Config Sections

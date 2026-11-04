@@ -130,6 +130,7 @@ SDXL that file is the UNet.
 | FLUX.1-dev | Black Forest Labs FLUX | `flux1-dev.safetensors`, T5-XXL, CLIP-L, `ae.safetensors` |
 | Wan2.1 I2V 14B | native Wan2.1 DiT with CLIP cross-attention | official I2V DiT, Wan2.1 VAE, UMT5, CLIP vision |
 | SDXL | Stability `generative-models` UNet | `sd_xl_base_1.0.safetensors` plus the SDXL VAE |
+| Mochi-1 | Genmo `AsymmDiTJoint` and VAE encoder | official DiT and encoder safetensors, T5-XXL |
 
 MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
 with a constant schedule for FLUX and Wan. `LR` overrides either default. The
@@ -153,6 +154,7 @@ Default `LOCAL_BATCH_SIZE` for the benchmark configs:
 | flux-dev | 10 | 16 |
 | wan2.1-i2v | 1 | 1 |
 | stable-diffusion-xl | 20 | 12 |
+| mochi-1 | 1 | 4 |
 
 Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
 `SP_SIZE` at 1.
@@ -160,3 +162,8 @@ Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
 `benchmark_flux_dev-posttrain.yaml` fine-tunes the native FLUX.1-dev module.
 Set `PRETRAINED_PATH` to `flux1-dev.safetensors` and `VAE_CHECKPOINT` to
 `ae.safetensors`.
+
+Mochi-1 fine-tunes the in-tree Genmo denoiser and VAE encoder. It does not
+build a Diffusers pipeline. Point `PRETRAINED_PATH` at the official DiT
+checkpoint. Every SKU leaves `max_grad_norm` at `0`. `MAX_GRAD_NORM` turns
+clipping back on.

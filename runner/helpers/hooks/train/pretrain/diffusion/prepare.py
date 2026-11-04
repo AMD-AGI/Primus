@@ -95,7 +95,8 @@ def _reject_unbuilt_benchmark(model_name: str) -> None:
     if model_name in _UNBUILT_BENCHMARKS:
         _fail(
             f"{model_name} has no diffusion model builder. "
-            "This release registers flux-dev, wan2.1-i2v, and sdxl only; refusing to download its assets."
+            "This release registers flux-dev, wan2.1-i2v, sdxl, and mochi-1 only; "
+            "refusing to download its assets."
         )
 
 
@@ -121,13 +122,12 @@ def _validate_local_or_hf_id(value: str | None, description: str) -> None:
         _fail(f"{description} is neither an existing path nor a Hugging Face reference: {value!r}")
 
 
-_BENCHMARK_DOWNLOADS = {"flux-dev", "wan2.1-i2v", "sdxl", "stable-diffusion-xl"}
+_BENCHMARK_DOWNLOADS = {"flux-dev", "wan2.1-i2v", "sdxl", "stable-diffusion-xl", "mochi-1"}
 
 # Names that have download metadata but no model builder in this release.
 # Reject them before stage_benchmark_assets so a config cannot download
 # checkpoints and then crash in get_model_builder.
 _UNBUILT_BENCHMARKS = {
-    "mochi-1",
     "hunyuan-video",
 }
 
@@ -203,6 +203,9 @@ def _validate_benchmark_model(
         _require_optional_path(encoder_cfg.get("t5_encoder"), "Wan2.1 text encoder checkpoint")
         _require_optional_path(encoder_cfg.get("autoencoder"), "Wan2.1 VAE checkpoint")
         _require_optional_path(encoder_cfg.get("image_encoder"), "Wan2.1 CLIP vision checkpoint")
+    elif model_name == "mochi-1":
+        _validate_local_or_hf_id(encoder_cfg.get("t5"), "Mochi T5 encoder")
+        _require_optional_path(encoder_cfg.get("autoencoder"), "Mochi VAE encoder checkpoint")
 
 
 def validate_diffusion_config(config_path: Path, module_name: str | None = None) -> None:

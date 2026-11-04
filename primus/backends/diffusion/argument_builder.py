@@ -505,6 +505,14 @@ _SPECS: dict[str, dict[str, Any]] = {
         "warmup_steps": 10,
         "gradient_checkpointing": False,
     },
+    "mochi-1": {
+        "modality": "video",
+        "fsdp_layers": "AsymmetricJointBlock",
+        "learning_rate": 1.0e-5,
+        "lr_scheduler_type": "constant",
+        "warmup_steps": 0,
+        "gradient_checkpointing": False,
+    },
 }
 
 
@@ -517,7 +525,6 @@ def _spec(model_name: str) -> dict[str, Any] | None:
 # Registered on later benchmark PRs. Reject them here so this release does not
 # build trainer defaults, or download checkpoints, for a model it cannot run.
 _UNBUILT_BENCHMARKS = {
-    "mochi-1",
     "hunyuan-video",
 }
 
@@ -615,7 +622,7 @@ def benchmark_defaults(
     if model_name in _UNBUILT_BENCHMARKS:
         raise ValueError(
             f"{model_name} has no diffusion model builder. "
-            "This release registers the flux-dev, wan2.1-i2v, and sdxl benchmarks only, "
+            "This release registers the flux-dev, wan2.1-i2v, sdxl, and mochi-1 benchmarks only, "
             "so the config is rejected before any checkpoint or dataset download."
         )
     return None
