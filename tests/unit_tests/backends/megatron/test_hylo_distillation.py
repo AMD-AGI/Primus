@@ -111,6 +111,29 @@ def test_masked_chunked_kl_matches_dense_reference_and_has_grad():
     assert torch.count_nonzero(student.grad[mask == 0]) == 0
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or hylo_distillation._fla_kl_kernel() is None,
+    reason="the fused KL needs a GPU and flash-linear-attention",
+)
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_masked_fused_kl_matches_the_chunked_reference(masked, dtype):
+    generator = torch.Generator().manual_seed(3)
+    student = (4 * torch.randn(2, 7, 1000, generator=generator)).to("cuda", dtype).requires_grad_()
+    teacher = (4 * torch.randn(2, 7, 1000, generator=generator)).to("cuda", dtype)
+    mask = (torch.rand(2, 7, generator=generator) > 0.3).float().cuda() if masked else torch.ones(2, 7).cuda()
+    # The reference upcasts like Float16Module and returns the gradient in the logits' dtype.
+    expected, expected_count = masked_chunked_kl(student, teacher, mask, chunk_size=4)
+    (expected_grad,) = torch.autograd.grad(3 * expected, student)
+    actual, count = hylo_distillation.masked_fused_kl(student, teacher, mask)
+    (3 * actual).backward()
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+    grad_tol = dict(rtol=1e-5, atol=1e-6) if dtype == torch.float32 else dict(rtol=1.6e-2, atol=1e-5)
+    torch.testing.assert_close(student.grad, expected_grad, **grad_tol)
+    assert student.grad.dtype == dtype
+    assert count.item() == expected_count.item()
+
+
 def test_validate_hylo_args_rejects_unsupported_parallelism():
     base = dict(
         tensor_model_parallel_size=1,

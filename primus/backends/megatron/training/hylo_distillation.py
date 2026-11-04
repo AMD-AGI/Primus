@@ -12,6 +12,7 @@ reference Hugging Face implementation and avoids sharding ambiguities.
 
 from __future__ import annotations
 
+import functools
 import glob
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -113,6 +114,113 @@ def masked_chunked_kl(
         ).sum(dim=-1)
         total = total + (per_token * mask[start:stop]).sum()
     return total, mask.sum().detach().to(torch.int)
+
+
+@functools.lru_cache(maxsize=None)
+def _fla_kl_kernel():
+    try:
+        import triton
+        from fla.modules.fused_kl_div import MAX_FUSED_SIZE, STATIC_WARPS, kl_div_kernel
+    except ImportError:
+        return None
+    return triton, kl_div_kernel, MAX_FUSED_SIZE, STATIC_WARPS
+
+
+class _FusedMaskedKL(torch.autograd.Function):
+    """Summed masked KL(teacher || student) in FLA's single-pass Triton kernel (HyLo's ``fused_kl``).
+
+    The kernel writes dKL/d(student logits) while computing the loss, so no softmax is kept for backward.
+    """
+
+    @staticmethod
+    def forward(ctx, student, teacher, mask):
+        triton, kernel, max_fused, warps = _fla_kl_kernel()
+        n, v = student.shape
+        grad = student.detach().contiguous().clone()
+        teacher = teacher.detach().contiguous()
+        if teacher.dtype != grad.dtype:
+            teacher = teacher.to(grad.dtype)
+        loss = torch.empty(n, dtype=torch.float32, device=student.device)
+        kernel[(n,)](
+            logits=grad,
+            target_logits=teacher,
+            loss=loss,
+            s_logits=grad.stride(0),
+            s_loss=loss.stride(0),
+            reduction="none",
+            N=n,
+            V=v,
+            BV=min(max_fused, triton.next_power_of_2(v)),
+            num_warps=warps,
+        )
+        if mask is not None:
+            grad.mul_(mask.unsqueeze(-1).to(grad.dtype))
+            loss = loss * mask
+        ctx.save_for_backward(grad)
+        return loss.sum()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (grad,) = ctx.saved_tensors
+        return grad.mul_(grad_output), None, None
+
+
+def masked_fused_kl(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    loss_mask: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``masked_chunked_kl`` through FLA's fused KL kernel; falls back to it without FLA or off GPU."""
+    if not student_logits.is_cuda or _fla_kl_kernel() is None:
+        return masked_chunked_kl(student_logits, teacher_logits, loss_mask)
+    student = student_logits.reshape(-1, student_logits.shape[-1])
+    teacher = teacher_logits.reshape(-1, teacher_logits.shape[-1])
+    if student.shape != teacher.shape:
+        raise ValueError(f"student logits {tuple(student.shape)} != teacher {tuple(teacher.shape)}")
+    if loss_mask is None:
+        mask, count = None, torch.tensor(student.shape[0], device=student.device, dtype=torch.int)
+    else:
+        mask = loss_mask.reshape(-1).to(device=student.device, dtype=torch.float32)
+        count = mask.sum().detach().to(torch.int)
+        if bool((mask == 1).all()):
+            mask = None
+    return _FusedMaskedKL.apply(student, teacher, mask), count
+
+
+def teacher_kl(
+    student_logits: torch.Tensor, teacher_logits: torch.Tensor, loss_mask: Optional[torch.Tensor]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """KL(teacher || student) summed over ``loss_mask`` with the configured ``hylo_kl_impl``."""
+    from megatron.training import get_args
+
+    args = get_args()
+    impl = getattr(args, "hylo_kl_impl", "fused")
+    if impl == "fused":
+        return masked_fused_kl(student_logits, teacher_logits, loss_mask)
+    if impl == "chunked":
+        return masked_chunked_kl(
+            student_logits,
+            teacher_logits,
+            loss_mask,
+            chunk_size=int(getattr(args, "hylo_kl_chunk_size", _KL_CHUNK)),
+        )
+    raise ValueError(f"hylo_kl_impl must be 'fused' or 'chunked', got {impl!r}")
+
+
+def _logits_kwargs() -> dict:
+    """Keeps Float16Module's bf16/fp16 logits for the fused KL, which upcasts them in-kernel.
+
+    Its loss is the one on fp32 copies of those logits, and the gradient reaches the output layer in
+    model precision either way, so this only skips two full-vocabulary fp32 copies.
+    """
+    from megatron.training import get_args
+
+    args = get_args()
+    fused = getattr(args, "hylo_kl_impl", "fused") == "fused"
+    half = getattr(args, "fp16", False) or getattr(args, "bf16", False)
+    if fused and half and torch.cuda.is_available() and _fla_kl_kernel() is not None:
+        return {"fp32_output": False}
+    return {}
 
 
 @dataclass
@@ -457,20 +565,18 @@ def create_pretrain_forward_step():
         tokens, labels, loss_mask, attention_mask, position_ids, *_ = get_batch(data_iterator)
         _RUNTIME.install_student_hooks(model)
         _RUNTIME.clear()
+        logits_kwargs = {} if _RUNTIME.stage == "ild" else _logits_kwargs()
         with torch.no_grad():
-            teacher_logits = _RUNTIME.teacher(tokens, position_ids, attention_mask, labels=None)
-        student_logits = model(tokens, position_ids, attention_mask, labels=None)
+            teacher_logits = _RUNTIME.teacher(
+                tokens, position_ids, attention_mask, labels=None, **logits_kwargs
+            )
+        student_logits = model(tokens, position_ids, attention_mask, labels=None, **logits_kwargs)
 
         def loss_func(_output):
             if _RUNTIME.stage == "ild":
                 loss, parts = enhanced_ild_loss(*_RUNTIME.ild_captures())
                 return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
-            loss, tokens_count = masked_chunked_kl(
-                student_logits,
-                teacher_logits.detach(),
-                loss_mask,
-                chunk_size=int(getattr(get_args(), "hylo_kl_chunk_size", _KL_CHUNK)),
-            )
+            loss, tokens_count = teacher_kl(student_logits, teacher_logits.detach(), loss_mask)
             weighted_loss = loss * float(getattr(get_args(), "hylo_kl_weight", 1.0))
             return _loss_result(weighted_loss, tokens_count, {"hylo kl": loss.detach()})
 
@@ -501,9 +607,10 @@ def create_sft_forward_step():
         position_ids = torch.arange(tokens.shape[1], device=device).unsqueeze(0).expand_as(tokens)
         _RUNTIME.install_student_hooks(model)
         _RUNTIME.clear()
+        logits_kwargs = {} if _RUNTIME.stage == "ild" else _logits_kwargs()
         with torch.no_grad():
-            teacher_logits = _RUNTIME.teacher(tokens, position_ids, None, labels=None)
-        student_logits = model(tokens, position_ids, None, labels=None)
+            teacher_logits = _RUNTIME.teacher(tokens, position_ids, None, labels=None, **logits_kwargs)
+        student_logits = model(tokens, position_ids, None, labels=None, **logits_kwargs)
 
         def loss_func(_output):
             if _RUNTIME.stage == "ild":
@@ -513,12 +620,7 @@ def create_sft_forward_step():
                 return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
             from megatron.training import get_args
 
-            loss, count = masked_chunked_kl(
-                student_logits,
-                teacher_logits.detach(),
-                loss_mask,
-                chunk_size=int(getattr(get_args(), "hylo_kl_chunk_size", _KL_CHUNK)),
-            )
+            loss, count = teacher_kl(student_logits, teacher_logits.detach(), loss_mask)
             weighted_loss = loss * float(getattr(get_args(), "hylo_kl_weight", 1.0))
             return _loss_result(weighted_loss, count, {"hylo kl": loss.detach()})
 

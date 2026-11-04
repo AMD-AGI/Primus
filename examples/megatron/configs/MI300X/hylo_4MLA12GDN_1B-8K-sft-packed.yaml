@@ -29,6 +29,7 @@ modules:
       hylo_teacher_yarn_original_max_position_embeddings: ${HYLO_TEACHER_YARN_ORIGINAL_MAX:null}
       hylo_kl_weight: 1.0
       hylo_ce_weight: 0.0
+      # Used by hylo_kl_impl: chunked, the PyTorch reference.
       hylo_kl_chunk_size: 4096
 
       tokenizer_type: HuggingFaceTokenizer
@@ -73,6 +74,12 @@ modules:
       overlap_grad_reduce: false
       overlap_param_gather: false
       gradient_accumulation_fusion: false
+      # HyLo's speed path: its FSDP reduces gradients in bf16, its fla GatedDeltaNet runs FLA's Triton
+      # short conv and fused gated RMSNorm, and its fused_kl is FLA's single-pass KL kernel.
+      grad_reduce_in_bf16: true
+      use_fla_short_conv: true
+      use_fla_fused_gated_norm: true
+      hylo_kl_impl: fused
 
       load: ${HYLO_STAGE2_INIT_CKPT:./data/checkpoints/hylo-4mla12gdn-1b-stage2-init}
       save: ${HYLO_SFT_OUTPUT:./output/hylo-4mla12gdn-1b-8k-sft-packed}

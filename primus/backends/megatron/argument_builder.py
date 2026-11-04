@@ -34,6 +34,8 @@ _PRIMUS_MEGATRON_DEFAULTS = {
     "hylo_mla_ild_checkpoint": None,
     "hylo_kl_weight": 1.0,
     "hylo_ce_weight": 0.0,
+    # "fused": FLA's single-pass Triton KL (HyLo's fused_kl); "chunked": the PyTorch reference loop.
+    "hylo_kl_impl": "fused",
     "hylo_kl_chunk_size": 4096,
     # Saved for the upcycler, which otherwise reads Megatron's non-null GDN
     # head defaults as a GDN layout. mamba_d_xb also sizes the grouped Mamba-2 mixer.
