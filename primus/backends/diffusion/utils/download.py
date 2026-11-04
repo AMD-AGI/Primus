@@ -21,10 +21,12 @@ import sys
 from pathlib import Path
 
 _MODEL_FILES: dict[str, tuple[str, str]] = {
+    "flux-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors"),
     "sdxl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
     "stable-diffusion-xl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
 }
 _DATASETS: dict[str, tuple[str, str | None]] = {
+    "flux-dev": ("frank-chieng/chinese_architecture_siheyuan", None),
     "sdxl": ("frank-chieng/chinese_architecture_siheyuan", None),
     "stable-diffusion-xl": ("frank-chieng/chinese_architecture_siheyuan", None),
 }
@@ -280,13 +282,15 @@ def _companion_paths(model_name: str, weights: str, encoder: dict[str, object]) 
         return {}
     root = _checkpoint_root(weights)
     found: dict[str, str] = {}
-    if model_name in {"sdxl", "stable-diffusion-xl"} and _blank(encoder.get("autoencoder")):
+    if model_name == "flux-dev" and _blank(encoder.get("autoencoder")):
+        found["VAE_CHECKPOINT"] = _require_file(root / "ae.safetensors", "FLUX autoencoder")
+    elif model_name in {"sdxl", "stable-diffusion-xl"} and _blank(encoder.get("autoencoder")):
         vae = Path(weights) if Path(weights).is_file() else root / "sd_xl_base_1.0.safetensors"
         found["VAE_CHECKPOINT"] = _require_file(vae, "SDXL autoencoder")
     return found
 
 
-ENCODER_ENV_KEYS = {
+_ENCODER_ENV_KEYS = {
     "VAE_CHECKPOINT": "autoencoder",
 }
 

@@ -50,7 +50,8 @@ def inkling_global_scale(config) -> torch.nn.Parameter:
 
 class InklingMLP(KeepInFp32Mixin, MLP):
     def __init__(self, config, submodules, **kwargs):
-        kwargs.setdefault("ffn_hidden_size", config.ffn_hidden_size)
+        if kwargs.get("ffn_hidden_size") is None:
+            kwargs["ffn_hidden_size"] = config.ffn_hidden_size
         super().__init__(config=config, submodules=submodules, **kwargs)
         self.global_scale = inkling_global_scale(config)
 

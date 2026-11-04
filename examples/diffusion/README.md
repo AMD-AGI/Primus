@@ -120,22 +120,32 @@ On success the hook prints `env.PREPARED=1`.
 
 ## Official-module post-training
 
-SDXL fine-tunes the in-tree Stability UNet. It does not build a Diffusers
-pipeline. Point `PRETRAINED_PATH` at the official UNet checkpoint.
+FLUX.1-dev fine-tunes the in-tree FLUX module. SDXL fine-tunes the in-tree
+Stability UNet. Neither builds a Diffusers pipeline. Point `PRETRAINED_PATH`
+at the official checkpoint, which is the UNet file for SDXL.
 
 | Workload | Official source | Checkpoint |
 |---|---|---|
+| FLUX.1-dev | Black Forest Labs FLUX | `flux1-dev.safetensors`, T5-XXL, CLIP-L, `ae.safetensors` |
 | SDXL | Stability `generative-models` UNet | `sd_xl_base_1.0.safetensors` plus the SDXL VAE |
 
-All three SDXL configs default to learning rate `1e-4`. `LR` overrides that
-default. MI300X and MI325X use a polynomial schedule with 100 warmup steps.
-MI355X uses `constant_with_warmup` with 5 warmup steps. Gradient clipping is
-off on every SKU (`max_grad_norm` 0), so the timed step does not include the
-grad-norm all-reduce. The batch sizes below are the per-GPU `LOCAL_BATCH_SIZE`.
+MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
+with a constant schedule for FLUX. `LR` overrides either default. SDXL uses
+learning rate `1e-4` on every SKU. MI300X and MI325X use a polynomial schedule
+with 100 warmup steps. MI355X uses `constant_with_warmup` with 5 warmup steps.
+SDXL leaves `max_grad_norm` at `0` so the timed step does not include the
+grad-norm all-reduce.
 
-| Workload | MI300X / MI325X per-GPU batch | MI355X per-GPU batch |
+Default `LOCAL_BATCH_SIZE` for the benchmark configs:
+
+| Workload | MI300X / MI325X | MI355X |
 |---|---:|---:|
+| flux-dev | 10 | 16 |
 | stable-diffusion-xl | 20 | 12 |
 
 Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
 `SP_SIZE` at 1.
+
+`benchmark_flux_dev-posttrain.yaml` fine-tunes the native FLUX.1-dev module.
+Set `PRETRAINED_PATH` to `flux1-dev.safetensors` and `VAE_CHECKPOINT` to
+`ae.safetensors`.
