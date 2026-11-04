@@ -162,3 +162,80 @@ def test_mla_layout_reads_the_rope_and_rank_from_the_checkpoint_args():
     assert (layout.mla_rank, layout.mla_rope, layout.mla_nope) == (128, 32, 32)
     with pytest.raises(ValueError, match="qk_pos_emb_head_dim"):
         cmp.student_layout(state, "mla", Namespace())
+
+
+KEY, VALUE, GHEADS, RANK, ROPE = 6, 12, 3, 4, 2
+
+
+def _gdn_mixer(state, a, r):
+    state[a + "mixer.in_proj.weight"] = r(2 * KEY + 2 * VALUE + 2 * GHEADS, D_MODEL)
+    state[a + "mixer.in_proj.layer_norm_weight"] = r(D_MODEL)
+    state[a + "mixer.conv1d.weight"] = r(2 * KEY + VALUE, 1, 4)
+    state[a + "mixer.A_log"] = r(GHEADS)
+    state[a + "mixer.dt_bias"] = r(GHEADS)
+    state[a + "mixer.out_norm.weight"] = r(VALUE // GHEADS)
+    state[a + "mixer.out_proj.weight"] = r(D_MODEL, VALUE)
+
+
+def _mla_mixer(state, a, r):
+    sa = a + "self_attention."
+    state[sa + "linear_q_down_proj.weight"] = r(RANK, D_MODEL)
+    state[sa + "linear_q_down_proj.layer_norm_weight"] = r(D_MODEL)
+    state[sa + "linear_q_up_proj.weight"] = r(8, RANK)
+    state[sa + "linear_kv_down_proj.weight"] = r(RANK + ROPE, D_MODEL)
+    state[sa + "linear_kv_up_proj.weight"] = r(8, RANK)
+    state[sa + "linear_proj.weight"] = r(D_MODEL, 8)
+
+
+def _hybrid_student(mixers, seed=0):
+    gen = torch.Generator().manual_seed(seed)
+
+    def r(*shape):
+        return torch.randn(*shape, generator=gen)
+
+    state = {"embedding.word_embeddings.weight": r(VOCAB, D_MODEL), "decoder.final_norm.weight": r(D_MODEL)}
+    for i, mixer in enumerate(mixers):
+        a, m = f"decoder.layers.{2 * i}.", f"decoder.layers.{2 * i + 1}.mlp."
+        (_gdn_mixer if mixer == "gdn" else _mla_mixer)(state, a, r)
+        state[m + "linear_fc1.weight"] = r(2 * FFN, D_MODEL)
+        state[m + "linear_fc1.layer_norm_weight"] = r(D_MODEL)
+        state[m + "linear_fc2.weight"] = r(D_MODEL, FFN)
+    return state
+
+
+MLA_ARGS = Namespace(qk_pos_emb_head_dim=ROPE, qk_head_dim=2, iteration=0)
+
+
+def test_gdn_in_proj_and_conv_split_into_the_fla_projections():
+    state = _hybrid_student(["gdn", "gdn"])
+    layout = cmp.student_layout(state, "gdn")
+    assert layout.gdn_in == {"q": (0, 6), "k": (6, 12), "v": (12, 24), "g": (24, 36), "b": (36, 39), "a": (39, 42)}
+    assert layout.gdn_conv == {"q": (0, 6), "k": (6, 12), "v": (12, 24)}
+    named, left = cmp.to_reference_names(state, layout)
+    assert left == []
+    w = state["decoder.layers.2.mixer.in_proj.weight"]
+    assert torch.equal(named["model.layers.1.gdn.g_proj.weight"], w[24:36])
+    assert torch.equal(named["model.layers.1.gdn.a_proj.weight"], w[39:])
+    assert torch.equal(named["model.layers.1.gdn.v_conv1d.weight"], state["decoder.layers.2.mixer.conv1d.weight"][12:])
+    assert torch.equal(named["model.layers.0.gdn.o_norm.weight"], state["decoder.layers.0.mixer.out_norm.weight"])
+    assert torch.equal(named["lm_head.weight"], state["embedding.word_embeddings.weight"])
+
+
+def test_hybrid_layout_reads_each_layers_mixer_and_round_trips(tmp_path):
+    mixers = ["gdn", "mla", "gdn"]
+    student = _hybrid_student(mixers, 0)
+    layout = cmp.student_layout(student, "hybrid", MLA_ARGS)
+    assert layout.mixers == mixers and layout.mla_rank == RANK
+    with pytest.raises(ValueError, match="mixers are"):
+        cmp.student_layout(student, "gdn", MLA_ARGS)
+    reference, _ = cmp.to_reference_names(_hybrid_student(mixers, 1), layout)
+    assert "model.layers.1.mla.kv_a_proj_with_mqa.weight" in reference
+    assert "model.layers.1.gdn.q_proj.weight" not in reference
+    ref_path = tmp_path / "model.safetensors"
+    save_file({k: v.clone() for k, v in reference.items()}, str(ref_path))
+    template = _save(tmp_path, "template", student, MLA_ARGS)
+    cmp.write_reference_as_megatron(template, ref_path, "hybrid", tmp_path / "out")
+    written, _, _, _ = cmp.load_student(tmp_path / "out")
+    named, _ = cmp.to_reference_names(written, layout)
+    for name, value in reference.items():
+        assert torch.equal(named[name], value), name

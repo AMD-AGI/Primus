@@ -5,9 +5,10 @@
 ###############################################################################
 """Compare an Enhanced-ILD student with a Zebra-Llama reference, and load a reference as a student.
 
-Primus all-Mamba-2 and all-MLA students are Megatron checkpoints (``M-`` or ``*-`` patterns,
-mixer and MLP sublayers alternating). The Zebra-Llama reference stage-1 students are Hugging Face
-``model.safetensors`` files. ``pairs`` maps every student tensor to its reference name.
+Primus students are Megatron checkpoints (mixer and MLP sublayers alternating), with Mamba-2,
+Gated DeltaNet or MLA mixers, one kind throughout (stage 1) or mixed (``hybrid``, stage 2). The
+Zebra-Llama reference students are Hugging Face ``model.safetensors`` files. ``pairs`` maps every
+student tensor to its reference name.
 
 ``compare`` reports, per tensor, the cosine and relative L2 distance (``||a - b|| / ||b||``) of
 the student against the reference, and how far each moved from the student's upcycled init
@@ -45,11 +46,18 @@ class Layout:
     kind: str
     num_layers: int
     ffn: int
+    mixers: List[str] = field(default_factory=list)
     m2_in: Dict[str, Tuple[int, int]] = field(default_factory=dict)
     m2_conv: Dict[str, Tuple[int, int]] = field(default_factory=dict)
+    gdn_in: Dict[str, Tuple[int, int]] = field(default_factory=dict)
+    gdn_conv: Dict[str, Tuple[int, int]] = field(default_factory=dict)
     mla_rank: int = 0
     mla_rope: int = 0
     mla_nope: int = 0
+
+    def __post_init__(self):
+        if not self.mixers and self.kind != "hybrid":
+            self.mixers = [self.kind] * self.num_layers
 
 
 def _first(state: Dict[str, torch.Tensor], *keys: str) -> str:
@@ -67,37 +75,75 @@ def _arg(args, name: str):
     return getattr(args, name, None)
 
 
+KINDS = ("m2", "mla", "gdn", "hybrid")
+
+
+def _mixer(state: Dict[str, torch.Tensor], index: int) -> str:
+    a = f"decoder.layers.{index}."
+    if a + "self_attention.linear_kv_down_proj.weight" in state:
+        return "mla"
+    if a + "mixer.out_norm.weight" in state:
+        return "gdn"
+    if a + "mixer.D" in state:
+        return "m2"
+    raise ValueError(f"cannot tell the mixer of decoder.layers.{index}")
+
+
 def student_layout(state: Dict[str, torch.Tensor], kind: str, args=None) -> Layout:
-    """Read the widths off a student state dict (and its checkpoint args for MLA)."""
+    """Read the widths off a student state dict (and its checkpoint args for MLA).
+
+    ``kind`` is the mixer of every layer (m2, mla, gdn), or ``hybrid`` for a mix of them.
+    """
+    if kind not in KINDS:
+        raise ValueError(f"kind must be one of {KINDS}, got {kind!r}")
     indices = {int(m.group(1)) for key in state if (m := re.match(r"^decoder\.layers\.(\d+)\.", key))}
     if not indices or len(indices) % 2 or sorted(indices) != list(range(len(indices))):
         raise ValueError("expected contiguous mixer/MLP sublayer pairs under decoder.layers")
+    num_layers = len(indices) // 2
     layout = Layout(
         kind=kind,
-        num_layers=len(indices) // 2,
+        num_layers=num_layers,
         ffn=state["decoder.layers.1.mlp.linear_fc1.weight"].shape[0] // 2,
+        mixers=[_mixer(state, 2 * i) for i in range(num_layers)],
     )
-    if kind == "m2":
-        in_rows = state["decoder.layers.0.mixer.in_proj.weight"].shape[0]
-        conv_dim = state["decoder.layers.0.mixer.conv1d.weight"].shape[0]
-        nheads = state["decoder.layers.0.mixer.A_log"].shape[0]
+    if kind != "hybrid" and set(layout.mixers) != {kind}:
+        raise ValueError(f"kind {kind} but the layers' mixers are {layout.mixers}")
+
+    def first(mixer: str) -> Optional[str]:
+        return f"decoder.layers.{2 * layout.mixers.index(mixer)}." if mixer in layout.mixers else None
+
+    if a := first("m2"):
+        in_rows = state[a + "mixer.in_proj.weight"].shape[0]
+        conv_dim = state[a + "mixer.conv1d.weight"].shape[0]
+        nheads = state[a + "mixer.A_log"].shape[0]
         d_inner = in_rows - conv_dim - nheads
         d_xb = (conv_dim - d_inner) // 2
         edges = [0, d_inner, d_inner + d_xb, d_inner + 2 * d_xb, 2 * d_inner + 2 * d_xb, in_rows]
         layout.m2_in = dict(zip(("z", "x", "B", "C", "dt"), zip(edges[:-1], edges[1:])))
         layout.m2_conv = {"x": (0, d_xb), "B": (d_xb, 2 * d_xb), "C": (2 * d_xb, conv_dim)}
-    elif kind == "mla":
+    if a := first("gdn"):
+        # in_proj rows [q, k, v, gate, beta, alpha], conv1d rows [q, k, v] (GatedDeltaNet).
+        in_rows = state[a + "mixer.in_proj.weight"].shape[0]
+        conv_dim = state[a + "mixer.conv1d.weight"].shape[0]
+        nheads = state[a + "mixer.A_log"].shape[0]
+        value_dim = state[a + "mixer.out_proj.weight"].shape[1]
+        key_dim = (conv_dim - value_dim) // 2
+        if 2 * key_dim + 2 * value_dim + 2 * nheads != in_rows:
+            raise ValueError(f"GDN in_proj has {in_rows} rows; key {key_dim}, value {value_dim}, heads {nheads}")
+        widths = (key_dim, key_dim, value_dim, value_dim, nheads, nheads)
+        edges = [sum(widths[:j]) for j in range(len(widths) + 1)]
+        layout.gdn_in = dict(zip("qkvgba", zip(edges[:-1], edges[1:])))
+        layout.gdn_conv = {n: layout.gdn_in[n] for n in "qkv"}
+    if a := first("mla"):
         rope = _arg(args, "qk_pos_emb_head_dim")
         nope = _arg(args, "qk_head_dim")
-        down_rows = state["decoder.layers.0.self_attention.linear_kv_down_proj.weight"].shape[0]
+        down_rows = state[a + "self_attention.linear_kv_down_proj.weight"].shape[0]
         if rope is None or nope is None:
             raise ValueError(
                 "MLA comparison needs qk_pos_emb_head_dim and qk_head_dim in the checkpoint args"
             )
         layout.mla_rope, layout.mla_nope = int(rope), int(nope)
         layout.mla_rank = down_rows - layout.mla_rope
-    else:
-        raise ValueError(f"kind must be m2 or mla, got {kind!r}")
     return layout
 
 
@@ -120,7 +166,8 @@ def pairs(state: Dict[str, torch.Tensor], layout: Layout) -> Pairs:
             h + "post_attention_layernorm.weight",
             _first(state, m + "mlp.linear_fc1.layer_norm_weight", m + "pre_mlp_layernorm.weight"),
         )
-        if layout.kind == "m2":
+        mixer = layout.mixers[i]
+        if mixer in ("m2", "gdn"):
             take(
                 h + "input_layernorm.weight",
                 _first(
@@ -130,6 +177,19 @@ def pairs(state: Dict[str, torch.Tensor], layout: Layout) -> Pairs:
                     a + "input_layernorm.weight",
                 ),
             )
+        if mixer == "gdn":
+            for name, rows in layout.gdn_in.items():
+                take(h + f"gdn.{name}_proj.weight", a + "mixer.in_proj.weight", rows)
+            for name, rows in layout.gdn_conv.items():
+                take(h + f"gdn.{name}_conv1d.weight", a + "mixer.conv1d.weight", rows)
+            for hf, meg in (
+                ("A_log", "A_log"),
+                ("dt_bias", "dt_bias"),
+                ("o_norm.weight", "out_norm.weight"),
+                ("o_proj.weight", "out_proj.weight"),
+            ):
+                take(h + "gdn." + hf, a + "mixer." + meg)
+        elif mixer == "m2":
             for name in (
                 "in_proj.weight",
                 "conv1d.weight",
@@ -196,13 +256,13 @@ def derive(t: Dict[str, torch.Tensor], layout: Layout) -> Dict[str, torch.Tensor
     out = {}
     for i in range(layout.num_layers):
         h = f"model.layers.{i}."
-        if layout.kind == "m2":
+        if layout.mixers[i] == "m2":
             w, c = t[h + "mamba.in_proj.weight"], t[h + "mamba.conv1d.weight"]
             for name, (a, b) in layout.m2_in.items():
                 out[h + f"mamba.in_proj.weight[{name}]"] = w[a:b]
             for name, (a, b) in layout.m2_conv.items():
                 out[h + f"mamba.conv1d.weight[{name}]"] = c[a:b]
-        else:
+        elif layout.mixers[i] == "mla":
             qa, qb = t[h + "mla.q_a_proj.weight"].float(), t[h + "mla.q_b_proj.weight"].float()
             kva, kvb = t[h + "mla.kv_a_proj_with_mqa.weight"].float(), t[h + "mla.kv_b_proj.weight"].float()
             out[h + "mla.q_b@q_a"] = qb @ qa
@@ -229,10 +289,10 @@ def dense_targets(dense: Dict[str, torch.Tensor], layout: Layout, kv_heads: int,
         ):
             out[h + name] = dense[h + name]
         q, k, v, o = (dense[h + f"self_attn.{p}_proj.weight"] for p in "qkvo")
-        if layout.kind == "m2":
+        if layout.mixers[i] == "m2":
             out[h + "mamba.in_proj.weight[x]"], out[h + "mamba.in_proj.weight[B]"] = v, k
             out[h + "mamba.in_proj.weight[C]"], out[h + "mamba.out_proj.weight"] = q, o
-        else:
+        elif layout.mixers[i] == "mla":
             kh, vh = k.float().view(kv_heads, head_dim, -1), v.float().view(kv_heads, head_dim, -1)
             out[h + "mla.q_b@q_a"] = q
             out[h + "mla.kv_b@kv_a[latent]"] = torch.cat((kh[:, : layout.mla_nope], vh), dim=1).reshape(
@@ -247,6 +307,8 @@ def align_mla(t: Dict[str, torch.Tensor], ref: Dict[str, torch.Tensor], layout: 
     """Flip each SVD direction of ``t``'s MLA factors to agree in sign with ``ref``."""
     out, flips = dict(t), {}
     for i in range(layout.num_layers):
+        if layout.mixers[i] != "mla":
+            continue
         h = f"model.layers.{i}."
         for a_name, b_name, rows in (
             ("mla.q_a_proj.weight", "mla.q_b_proj.weight", None),
@@ -287,8 +349,9 @@ def random_init_names(shared: bool) -> Callable[[str], bool]:
     def check(name: str) -> bool:
         if shared:
             return False
-        return ".conv1d." in name or name.endswith(
+        return "conv1d." in name or name.endswith(
             ("in_proj.weight[z]", "in_proj.weight[dt]", "A_log", "dt_bias")
+            + ("gdn.g_proj.weight", "gdn.b_proj.weight", "gdn.a_proj.weight")
         )
 
     return check
@@ -395,7 +458,7 @@ def compare_main(argv: Optional[Sequence[str]] = None) -> dict:
     p = argparse.ArgumentParser(
         description="Compare an Enhanced-ILD student with its reference, tensor by tensor."
     )
-    p.add_argument("--kind", choices=("m2", "mla"), required=True)
+    p.add_argument("--kind", choices=KINDS, required=True)
     p.add_argument("--ours", required=True, help="the student's checkpoint directory")
     p.add_argument("--iteration", type=int, help="iteration under --ours (default: the latest)")
     p.add_argument("--init", required=True, help="the upcycled checkpoint the student started from")
@@ -423,7 +486,7 @@ def compare_main(argv: Optional[Sequence[str]] = None) -> dict:
     )
 
     flips = {}
-    if a.kind == "mla":
+    if "mla" in layout.mixers:
         ours, flips = align_mla(ours, ref, layout)
         init, _ = align_mla(init, ref, layout)
     for t in (ours, init, ref):
@@ -455,12 +518,13 @@ def compare_main(argv: Optional[Sequence[str]] = None) -> dict:
             f"{fmt(s, 'move_ours'):>7s} {fmt(s, 'move_ref'):>7s} {fmt(s, 'upd_cos'):>7s} "
             f"{fmt(s, 'upd_ratio'):>7s} {fmt(s, 'init_vs_dense'):>10s}"
         )
-    key = "mamba.in_proj.weight[x]" if a.kind == "m2" else "mla.q_b@q_a"
-    print(f"\nper layer, {key} and mlp.down_proj.weight: cos / rel vs reference")
+    keys = {"m2": "mamba.in_proj.weight[x]", "mla": "mla.q_b@q_a", "gdn": "gdn.q_proj.weight"}
+    print("\nper layer, the mixer's input projection and mlp.down_proj.weight: cos / rel vs reference")
     for i in range(layout.num_layers):
+        key = keys[layout.mixers[i]]
         r1, r2 = rows[f"model.layers.{i}.{key}"], rows[f"model.layers.{i}.mlp.down_proj.weight"]
         print(
-            f"  L{i:02d} {r1.get('cos', float('nan')):.4f} / {r1.get('rel', float('nan')):.4f}   "
+            f"  L{i:02d} {layout.mixers[i]:3s} {r1.get('cos', float('nan')):.4f} / {r1.get('rel', float('nan')):.4f}   "
             f"{r2.get('cos', float('nan')):.4f} / {r2.get('rel', float('nan')):.4f}"
         )
     result = {
@@ -481,7 +545,7 @@ def compare_main(argv: Optional[Sequence[str]] = None) -> dict:
 
 def convert_main(argv: Optional[Sequence[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Write a Zebra-Llama reference student as a Megatron checkpoint.")
-    p.add_argument("--kind", choices=("m2", "mla"), required=True)
+    p.add_argument("--kind", choices=KINDS, required=True)
     p.add_argument(
         "--template", required=True, help="a student checkpoint of the same layout (the upcycled init)"
     )

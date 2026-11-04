@@ -10,9 +10,11 @@ modules:
     model: hylo_gdn_1B_hybrid.yaml
     overrides:
       stage: sft
-      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hylo_gdn_hybrid_stack_spec']
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hylo_grouped_mla_hybrid_stack_spec']
       hybrid_attention_ratio: 0.25
       hybrid_override_pattern: "M-*-M-M-M-*-M-M-M-M-*-M-M-M-*-M-"
+      # use_full_kv_head: false keeps Llama's 8 key/value heads.
+      hylo_mla_kv_heads: 8
 
       # Exact released 8K objective: pure KL(teacher || student), no CE.
       hylo_distill_stage: sft
@@ -47,6 +49,15 @@ modules:
       lr_decay_style: cosine
       lr_warmup_iters: 0
       lr_warmup_fraction: 0.01
+
+      # Hugging Face Trainer values used by the reference, in place of the
+      # SFT trainer's seed 1234, weight decay 0.1, and beta2 0.95.
+      seed: 42
+      weight_decay: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+      clip_grad: 1.0
 
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1

@@ -72,6 +72,7 @@ run_primus() {
 run_constructor() {
   local pattern="$1"
   local exp_name="$2"
+  local config="$3"
   local optional_env=()
   local name
   for name in GPUS_PER_NODE HIP_VISIBLE_DEVICES HYLO_DISABLE_LAST_SAVING; do
@@ -88,8 +89,7 @@ run_constructor() {
     --env "HYLO_TOKENIZER_MODEL=${HYLO_TOKENIZER_MODEL:-meta-llama/Llama-3.2-1B-Instruct}" \
     "${optional_env[@]}" \
     -- \
-    train pretrain --config \
-    "${ROOT}/examples/megatron/configs/MI300X/hylo_1B-constructor.yaml"
+    train pretrain --config "${ROOT}/examples/megatron/configs/MI300X/${config}"
 }
 
 upcycle() {
@@ -111,17 +111,18 @@ MLA_PATTERN="*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-"
 TARGET_PATTERN="M-*-M-M-M-*-M-M-M-M-*-M-M-M-*-M-"
 
 if [[ ! -f "${HYLO_GDN_UPCYCLED_CKPT}/latest_checkpointed_iteration.txt" ]]; then
-  run_constructor "${GDN_PATTERN}" "gdn-constructor"
+  run_constructor "${GDN_PATTERN}" "gdn-constructor" hylo_1B-constructor.yaml
   upcycle "${OUT}/${RUN_GROUP}/${RUN_USER}/gdn-constructor/checkpoints" \
     "${GDN_PATTERN}" "${HYLO_GDN_UPCYCLED_CKPT}"
 fi
 if [[ ! -f "${HYLO_MLA_UPCYCLED_CKPT}/latest_checkpointed_iteration.txt" ]]; then
-  run_constructor "${MLA_PATTERN}" "mla-constructor"
+  # MLA layers keep Llama's 8 key/value heads (HyLo's use_full_kv_head: false), here and in the target.
+  run_constructor "${MLA_PATTERN}" "mla-constructor" hylo_mla_1B-constructor.yaml
   upcycle "${OUT}/${RUN_GROUP}/${RUN_USER}/mla-constructor/checkpoints" \
     "${MLA_PATTERN}" "${HYLO_MLA_UPCYCLED_CKPT}"
 fi
 if [[ ! -f "${HYLO_STAGE2_BASE_CKPT}/latest_checkpointed_iteration.txt" ]]; then
-  run_constructor "${TARGET_PATTERN}" "4mla12gdn-constructor"
+  run_constructor "${TARGET_PATTERN}" "4mla12gdn-constructor" hylo_mla_1B-constructor.yaml
   upcycle "${OUT}/${RUN_GROUP}/${RUN_USER}/4mla12gdn-constructor/checkpoints" \
     "${TARGET_PATTERN}" "${HYLO_STAGE2_BASE_CKPT}"
 fi

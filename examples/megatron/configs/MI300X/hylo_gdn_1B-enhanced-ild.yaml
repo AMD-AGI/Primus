@@ -44,6 +44,15 @@ modules:
       lr_warmup_iters: 0
       lr_warmup_fraction: 0.01
 
+      # Hugging Face Trainer values used by the reference, in place of the
+      # SFT trainer's seed 1234, weight decay 0.1, and beta2 0.95.
+      seed: 42
+      weight_decay: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+      clip_grad: 1.0
+
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       context_parallel_size: 1
