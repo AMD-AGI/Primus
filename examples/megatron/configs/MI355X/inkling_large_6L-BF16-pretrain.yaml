@@ -5,9 +5,9 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 
 # Inkling (Large) 6-layer proxy (released widths, 2 dense + 4 MoE layers,
 # layers 0-4 sliding with 16 KV groups, layer 5 global with 8) on one MI355X
-# node: EP=8 x DP=8, AdamW, random init, mock data. Turbo is off so every
-# kernel is one the reference tests cover. Same recipe as
-# inkling_small_12L-BF16-pretrain.yaml except the model.
+# node: EP=8 x DP=8, AdamW, random init, mock data. Turbo kernels are on;
+# PRIMUS_TURBO=false runs only the kernels the reference tests cover. Same
+# recipe as inkling_small_12L-BF16-pretrain.yaml except the model and Turbo.
 
 modules:
   pre_trainer:
@@ -79,12 +79,16 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
-      # turbo off: TE grouped GEMM + alltoall dispatcher
-      enable_primus_turbo: false
+      # Turbo grouped GEMM, RMSNorm, DeepEP dispatcher and GEMM (attention,
+      # MLPs, shared experts, LM head). Inkling keeps its own attention core.
+      # DeepEP takes fp32 router probs and switches the dispatcher to flex.
+      enable_primus_turbo: ${PRIMUS_TURBO:true}
       use_turbo_attention: false
-      use_turbo_grouped_gemm: false
-      use_turbo_deepep: false
-      use_turbo_rms_norm: false
+      use_turbo_grouped_gemm: ${PRIMUS_TURBO:true}
+      use_turbo_deepep: ${PRIMUS_TURBO:true}
+      use_turbo_rms_norm: ${PRIMUS_TURBO:true}
+      use_turbo_gemm: ${PRIMUS_TURBO:true}
+      moe_router_dtype: fp32
       moe_grouped_gemm: true
       moe_token_dispatcher_type: alltoall
       moe_permute_fusion: false

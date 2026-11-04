@@ -14,6 +14,7 @@ parameter maps one-to-one onto the released checkpoint.
 from __future__ import annotations
 
 import copy
+import importlib.util
 from functools import partial
 
 import pytest
@@ -280,6 +281,135 @@ def test_deferred_lm_head_wgrad_matches_immediate():
     torch.testing.assert_close(grads[1], grads[0], rtol=1e-5, atol=1e-7)
 
 
+@pytest.fixture
+def turbo_args():
+    """The Primus fields Turbo's linears read from the global args."""
+    pytest.importorskip("primus_turbo")
+    import megatron.training.global_vars as gvars
+
+    args = gvars._GLOBAL_ARGS
+    fields = dict(
+        offload=False,
+        offload_ops=[],
+        patch_primus_pipeline=False,
+        pp_algorithm=None,
+        patch_zero_bubble=False,
+        enable_zero_bubble=False,
+        use_turbo_fused_act_with_probs=False,
+        moe_router_padding_for_quantization=False,
+    )
+    for name, value in fields.items():
+        setattr(args, name, value)
+    return args
+
+
+@pytest.mark.parametrize("fusion", [False, True])
+def test_turbo_lm_head_matches_native(fusion, turbo_args):
+    """The Turbo LM head takes Megatron's checkpoint keys and gives its loss, input gradient and
+    head weight gradient, whether the weight gradient lands in ``.grad`` or in ``main_grad``."""
+    from primus.backends.megatron.core.extensions.primus_turbo import PrimusTurboColumnParallelLinear
+
+    config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), gradient_accumulation_fusion=fusion)
+    gen = torch.Generator().manual_seed(0)
+    hidden = torch.randn(96, 2, config.hidden_size, generator=gen).bfloat16().cuda()
+    labels = torch.randint(0, 512, (2, 96), generator=gen).cuda()
+    results, state = [], None
+    for turbo in (False, True):
+        # A last stage alone keeps the comparison on the head: no embedding, only the decoder before it.
+        model = build_inkling_model(
+            config, vocab_size=512, max_sequence_length=4096, pre_process=False, turbo_output_layer=turbo
+        ).cuda()
+        assert isinstance(model.output_layer, PrimusTurboColumnParallelLinear) == turbo
+        if state is None:
+            state = model.state_dict()
+        assert set(model.state_dict()) == set(state)
+        model.load_state_dict(state, strict=True)
+        model.train()
+        head = model.output_layer.weight
+        if fusion:
+            for p in model.parameters():
+                p.main_grad = torch.zeros_like(p, dtype=torch.float32)
+                p.grad_added_to_main_grad = False
+        x = hidden.clone().requires_grad_()
+        model.set_input_tensor(x)
+        loss = model(None, None, None, labels=labels).float().mean()
+        loss.backward()
+        head_grad = head.main_grad.clone() if fusion else head.grad.float()
+        results.append((loss.detach(), x.grad.float(), head_grad))
+
+    (loss_ref, dx_ref, dw_ref), (loss, dx, dw) = results
+    assert dw_ref.count_nonzero() > 0
+    torch.testing.assert_close(loss, loss_ref, rtol=1e-3, atol=0)
+    torch.testing.assert_close(dx, dx_ref, rtol=2e-2, atol=1e-4)
+    torch.testing.assert_close(dw, dw_ref, rtol=2e-2, atol=1e-4)
+
+
+def test_turbo_grouped_experts_match_te(turbo_args, monkeypatch):
+    """With Turbo's spec provider and grouped GEMM the routed experts are ``PrimusGroupedMLP``,
+    load the TE build's per-expert ``weight{i}`` and give its loss and gradients. Turbo trains
+    one stacked ``weights`` per linear and exposes ``weight{i}`` as frozen views of it."""
+    from types import SimpleNamespace
+
+    from primus.backends.megatron.core.extensions import transformer_engine_spec_provider as spec_provider
+    from primus.backends.megatron.core.models.inkling import inkling_layer_specs
+    from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
+
+    turbo_cfg = SimpleNamespace(
+        **{
+            **vars(spec_provider._build_default_primus_args()),
+            **dict(enable_primus_turbo=True, use_turbo_grouped_gemm=True, use_turbo_rms_norm=True),
+        }
+    )
+
+    def turbo_provider(*args, **kwargs):
+        provider = spec_provider.PrimusTurboSpecProvider(*args, **kwargs)
+        provider.cfg = turbo_cfg
+        return provider
+
+    config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), gradient_accumulation_fusion=False)
+    ids = torch.randint(0, 512, (2, 96), generator=torch.Generator().manual_seed(0)).cuda()
+    results, state = [], None
+    for turbo in (False, True):
+        if turbo:
+            monkeypatch.setattr(inkling_layer_specs, "TESpecProvider", turbo_provider)
+        torch.manual_seed(0)
+        model = build_inkling_model(config, vocab_size=512, max_sequence_length=4096).cuda()
+        assert isinstance(model.decoder.layers[1].mlp.experts, PrimusGroupedMLP) == turbo
+        if state is None:
+            state = model.state_dict()
+        stacked = {k for k in model.state_dict() if k.endswith(".weights")}
+        assert set(model.state_dict()) - stacked == set(state)
+        assert len(stacked) == (2 if turbo else 0)
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        assert set(missing) == stacked and not unexpected
+        model.train()
+        loss = model(ids, None, None, labels=torch.roll(ids, -1, dims=1)).float().mean()
+        loss.backward()
+        grads = {}
+        for name, p in model.named_parameters():
+            if name in stacked:
+                grads.update({f"{name[:-1]}{i}": g.float() for i, g in enumerate(p.grad)})
+            elif p.requires_grad:
+                grads[name] = p.grad.float()
+        results.append((loss.detach(), grads))
+
+    (loss_ref, grads_ref), (loss, grads) = results
+    torch.testing.assert_close(loss, loss_ref, rtol=1e-3, atol=0)
+    assert grads.keys() == grads_ref.keys()
+    for name, grad in grads_ref.items():
+        assert grad.count_nonzero() > 0, name
+        torch.testing.assert_close(grads[name], grad, rtol=2e-2, atol=1e-3, msg=name)
+
+
+def test_turbo_lm_head_rejects_deferred_wgrad(turbo_args):
+    config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), gradient_accumulation_fusion=True)
+    config.defer_embedding_wgrad_compute = True
+    with pytest.raises(ValueError, match="defer_embedding_wgrad_compute"):
+        build_inkling_model(
+            config, vocab_size=512, max_sequence_length=4096, pre_process=False, turbo_output_layer=True
+        )
+
+
 @pytest.mark.parametrize("keep_fp32", ["0", "1"])
 def test_fp32_activations_global_scale_storage(keep_fp32, monkeypatch):
     """``global_scale`` is stored in fp32 only with the flag and the ``keep_in_fp32`` contract."""
@@ -295,7 +425,7 @@ def test_fp32_activations_global_scale_storage(keep_fp32, monkeypatch):
             assert layer.cuda().bfloat16().global_scale.dtype == expected
 
 
-def test_trainer_entry_points_build_inkling():
+def test_trainer_entry_points_build_inkling(request):
     from primus.core.utils.import_utils import get_model_provider
 
     provider = get_model_provider("inkling")
@@ -306,3 +436,10 @@ def test_trainer_entry_points_build_inkling():
     model = inkling_builder(args, pre_process=True, post_process=True)
     assert model.output_layer.weight.shape == (512, 256)
     assert model.decoder.layers[1].mlp.router.shared_weight.shape == (2, 256)
+    assert type(model.output_layer).__name__ == "ColumnParallelLinear"
+
+    if importlib.util.find_spec("primus_turbo") is not None:
+        request.getfixturevalue("turbo_args")
+        args.enable_primus_turbo = args.use_turbo_gemm = True
+        model = inkling_builder(args, pre_process=False, post_process=True)
+        assert type(model.output_layer).__name__ == "PrimusTurboColumnParallelLinear"

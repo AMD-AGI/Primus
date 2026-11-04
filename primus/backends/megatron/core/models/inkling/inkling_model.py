@@ -66,6 +66,7 @@ class InklingModel(LanguageModule):
         scatter_embedding_sequence_parallel: bool = True,
         pg_collection: Optional[ProcessGroupCollection] = None,
         vp_stage: Optional[int] = None,
+        turbo_output_layer: bool = False,
         **_kwargs,
     ) -> None:
         super().__init__(config=config, pg_collection=pg_collection)
@@ -118,18 +119,43 @@ class InklingModel(LanguageModule):
             else:
                 self.embedding_activation_buffer = None
                 self.grad_output_buffer = None
-            self.output_layer = tensor_parallel.ColumnParallelLinear(
-                config.hidden_size,
-                vocab_size,
-                config=vocab_config,
-                init_method=config.init_method,
-                bias=False,
-                skip_bias_add=False,
-                gather_output=not parallel_output,
-                embedding_activation_buffer=self.embedding_activation_buffer,
-                grad_output_buffer=self.grad_output_buffer,
-                tp_group=self.pg_collection.tp,
-            )
+            if turbo_output_layer:
+                if config.defer_embedding_wgrad_compute:
+                    raise ValueError(
+                        "The Turbo LM head (use_turbo_gemm) cannot defer its weight gradient; "
+                        "set defer_embedding_wgrad_compute: false"
+                    )
+                if not parallel_output:
+                    raise ValueError("The Turbo LM head (use_turbo_gemm) needs parallel_output=True")
+                from primus.backends.megatron.core.extensions.primus_turbo import (
+                    PrimusTurboColumnParallelLinear,
+                )
+
+                self.output_layer = PrimusTurboColumnParallelLinear(
+                    config.hidden_size,
+                    vocab_size,
+                    config=config,
+                    init_method=config.init_method,
+                    gather_output=False,
+                    bias=False,
+                    skip_bias_add=False,
+                    is_expert=False,
+                    tp_group=self.pg_collection.tp,
+                )
+            else:
+                self.output_layer = tensor_parallel.ColumnParallelLinear(
+                    config.hidden_size,
+                    vocab_size,
+                    config=vocab_config,
+                    init_method=config.init_method,
+                    bias=False,
+                    skip_bias_add=False,
+                    gather_output=not parallel_output,
+                    embedding_activation_buffer=self.embedding_activation_buffer,
+                    grad_output_buffer=self.grad_output_buffer,
+                    tp_group=self.pg_collection.tp,
+                )
+        self.turbo_output_layer = turbo_output_layer
 
         if self.pre_process or self.post_process:
             self.setup_embeddings_and_output_layer()
@@ -195,7 +221,10 @@ class InklingModel(LanguageModule):
             return hidden_states
 
         hidden_states = hidden_states / self.config.logits_mup_width_multiplier
-        logits, _ = self.output_layer(hidden_states, runtime_gather_output=runtime_gather_output)
+        if self.turbo_output_layer:
+            logits, _ = self.output_layer(hidden_states)
+        else:
+            logits, _ = self.output_layer(hidden_states, runtime_gather_output=runtime_gather_output)
         logits = self._mask_padded_vocab(logits)
         if labels is None:
             return logits.transpose(0, 1).contiguous()
