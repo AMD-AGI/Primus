@@ -205,9 +205,16 @@ if [[ "${SUBMISSION_QUIET}" == "1" ]]; then
     )
 fi
 
-# Export values from config_${DGXSYSTEM}.sh for docker exec.
+# Export values from config_${DGXSYSTEM}.sh for docker exec. The config derives
+# recipe-specific settings from these host selectors, so they are visible to it.
+_config_selectors=()
+for _selector_env in EXP MEGATRON_GRAD_REDUCE_BACKEND PRIMUS_USE_PRECISION_AWARE_OPTIMIZER; do
+    if [[ -n "${!_selector_env:-}" ]]; then
+        _config_selectors+=("${_selector_env}=${!_selector_env}")
+    fi
+done
 mapfile -t _config_env < <(
-    env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+    env -i HOME="${HOME}" PATH="${PATH}" "${_config_selectors[@]}" bash -c "
         set -a
         source '${_config_file}'
         set +a
