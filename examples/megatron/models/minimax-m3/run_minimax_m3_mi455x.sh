@@ -28,7 +28,7 @@ cd "$(dirname "${SCRIPT}")/../../../.."
 
 # container: re-run this script in a new container of DOCKER_IMAGE; direct: run in this container
 export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-container}
-export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261019}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261019-turbo-4c74631}
 export EXP=${EXP:-examples/megatron/configs/MI455X/minimax_m3-BF16-pretrain.yaml}
 # Primus-Turbo checkout built in place for DOCKER_IMAGE (see README.md); empty: the image's primus_turbo
 export TURBO_DIR=${TURBO_DIR:-}

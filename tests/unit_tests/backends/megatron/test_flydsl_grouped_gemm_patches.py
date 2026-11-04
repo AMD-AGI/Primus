@@ -41,7 +41,8 @@ def test_flydsl_grouped_gemm_over_64_experts(monkeypatch):
 
     if not torch.cuda.is_available() or not is_gfx1250():
         pytest.skip("needs gfx1250")
-    G, rows, K, N = 128, 64, 1024, 1024
+    # Primus-Turbo 4c74631's gfx1250 forward rejects groups that average 64 rows or fewer
+    G, rows, K, N = 128, 128, 1024, 1024
     backend = grouped_gemm_impl.GroupedGEMMVariableKFlyDSLBackend
     monkeypatch.setattr(backend, "MAX_G", patch.raised_max_groups(backend.MAX_G, G, True))
     monkeypatch.setenv("PRIMUS_TURBO_GROUPED_GEMM_BACKEND", "bf16:flydsl")

@@ -17,15 +17,21 @@ with `Cannot select: permlane32.swap`. `PRIMUS_MSA_BACKEND=eager` is the plain-P
 does not need those kernels. The experts use Primus-Turbo's grouped GEMM and RMSNorm uses
 Primus-Turbo. DeepEP stays off (see Known issues).
 
-The default image is `amdprimus/amdprimus:tas-20261019` (see the DeepSeek-V3 example's README),
+The default image is `amdprimus/amdprimus:tas-20261019-turbo-4c74631`,
+`amdprimus/amdprimus@sha256:b471601ddc4736e5bfc1d2d69e9fc5b7f39d9a5496e50b6f0f4138453b2a82fc`. It is
+`amdprimus/amdprimus:tas-20261019` (see the DeepSeek-V3 example's README),
 `amdprimus/amdprimus@sha256:d653324d124e218f43c92eaac3cfc5d05059bd45fb4abf5bdfb78b987af4af87`: torch
-2.14.0 on ROCm 10.2.0a20261011, Triton 3.8.0, Transformer Engine 2.19.0.dev0 (bfe94fbe5),
-Primus-Turbo 0.6.1.dev2, FlyDSL 0.3.4.1 and AITER 0.1.24.post1. Every run below used that image and
-its own Primus-Turbo, except the FlyDSL attention runs, which used a Primus-Turbo checkout through
-`TURBO_DIR` (see FlyDSL attention in the dense layers). Every run outside hipBLASLt tuning used
-hipBLASLt's own kernels, which `HIPBLASLT_TUNING_OVERRIDE_FILE=` restores, and every run before Expert
-grouped GEMM on FlyDSL used Primus-Turbo's Triton grouped GEMM, which `TURBO_GROUPED_GEMM_BACKEND=default`
-restores.
+2.14.0 on ROCm 10.2.0a20261011, Triton 3.8.0, Transformer Engine 2.19.0.dev0 (bfe94fbe5), FlyDSL
+0.3.4.1 and AITER 0.1.24.post1, with its Primus-Turbo 0.6.1.dev2 replaced by Primus-Turbo `main`
+4c74631 (0.6.1.dev16), built as the base image builds it (gfx942, gfx950 and gfx1250 in one build,
+OpenMPI off the paths so rocSHMEM is not linked). That Primus-Turbo has the gfx1250 FlyDSL attention
+this example uses (see FlyDSL attention in the dense layers).
+
+Every run on this page before Primus-Turbo 4c74631 image used tas-20261019 and its own Primus-Turbo,
+except the FlyDSL attention runs, which used a Primus-Turbo checkout through `TURBO_DIR`. Every run
+outside hipBLASLt tuning before that section used hipBLASLt's own kernels, which
+`HIPBLASLT_TUNING_OVERRIDE_FILE=` restores, and every run before Expert grouped GEMM on FlyDSL used
+Primus-Turbo's Triton grouped GEMM, which `TURBO_GROUPED_GEMM_BACKEND=default` restores.
 
 ## Run
 
@@ -45,9 +51,9 @@ Two runs at once on one node need different `MASTER_PORT`s.
 **FlyDSL attention for the dense layers.** The launcher runs the three dense layers on Primus-Turbo's
 FlyDSL attention when the Primus-Turbo in use has its gfx1250 kernels for head dim 128
 (`primus_turbo/flydsl/attention/gfx1250/`, Primus-Turbo PR #580). The default image's Primus-Turbo
-predates them. To use them with that image, build a Primus-Turbo checkout in place for it once (gfx1250
-only, OpenMPI off the paths so rocSHMEM is not linked) and pass it as `TURBO_DIR`; the launcher puts it
-first on `PYTHONPATH`:
+has them. That of `DOCKER_IMAGE=amdprimus/amdprimus:tas-20261019` predates them; to use them with that
+image, build a Primus-Turbo checkout in place for it once (gfx1250 only, OpenMPI off the paths so
+rocSHMEM is not linked) and pass it as `TURBO_DIR`; the launcher puts it first on `PYTHONPATH`:
 
 ```bash
 git clone https://github.com/AMD-AGI/Primus-Turbo.git /path/to/Primus-Turbo
@@ -56,7 +62,8 @@ git -C /path/to/Primus-Turbo submodule update --init --recursive
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v /path/to/Primus-Turbo:/path/to/Primus-Turbo \
     -w /path/to/Primus-Turbo amdprimus/amdprimus:tas-20261019 bash -c \
     'PATH=$(tr : "\n" <<< "$PATH" | grep -v openmpi | paste -sd:) GPU_ARCHS=gfx1250 python3 setup.py build_ext --inplace'
-HIP_VISIBLE_DEVICES=1 TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
+HIP_VISIBLE_DEVICES=1 DOCKER_IMAGE=amdprimus/amdprimus:tas-20261019 TURBO_DIR=/path/to/Primus-Turbo \
+    bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
 ```
 
 ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
@@ -83,7 +90,7 @@ ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
 - Dense layers: `USE_TURBO_ATTENTION` runs Primus-Turbo attention in the three dense layers, with
   `PRIMUS_TURBO_ATTN_BACKEND`, `flydsl` or `triton`. They default to `True` and `flydsl` when the
   Primus-Turbo in use (`TURBO_DIR`, else the image's) has `primus_turbo/flydsl/attention/gfx1250/`,
-  and to `False` and `triton` otherwise. Asking for `flydsl` without those kernels stops the launcher
+  as the default image's does, and to `False` and `triton` otherwise. Asking for `flydsl` without those kernels stops the launcher
   before training. Primus-Turbo's own default backend fails with
   `invalid argument for fmha_bwd` here. MSA layers are unaffected.
 - Optimizer: `PRIMUS_FUSED_ADAM_CLIP` (default `1`) runs Primus's HIP Adam, which applies the
@@ -441,6 +448,31 @@ End to end, one GPU, 4 layers, GBS 8, the launcher's defaults on 105e9f33 plus t
 - Not yet run on the EP4 baseline. From the operator timing it would save about 80 ms per step there
   (2.0 ms per MoE layer and micro-batch, five layers, 8 micro-batches).
 
+## Primus-Turbo 4c74631 image
+
+The launcher defaults to `amdprimus/amdprimus:tas-20261019-turbo-4c74631`, which needs no `TURBO_DIR`
+for FlyDSL dense attention. One GPU of `ctheliosr-rck-g02-e15-01` (4 layers, EP1, GBS 8), the
+launcher's defaults on c7034e33 apart from the image, against dc23c84c, the tree before FlyDSL
+attention in the dense layers. The runs alternated one at a time on one GPU, Triton experts last; the
+c7034e33 runs with tas-20261019's own Primus-Turbo ran earlier the same day. Every run finished 10
+iterations with 0 NaN.
+
+| Tree | Image | Primus-Turbo | Dense attention | Experts | ms/iter | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| dc23c84c | tas-20261019 | the image's | TE | Triton | 854.3, 854.8 | 632.6, 632.2 | 237.8 GB | 10.01467, 10.01467 |
+| c7034e33 | tas-20261019 | the image's | TE | FlyDSL | 719.0, 718.5 | 751.6, 752.2 | 237.9 GB | 10.01456, 10.01456 |
+| c7034e33 | tas-20261019 | ff4898e4 (`TURBO_DIR`) | FlyDSL | FlyDSL | 532.7, 532.2 | 1014.6, 1015.4 | 230.2 GB | 10.01469, 10.01467 |
+| c7034e33 | tas-20261019-turbo-4c74631 | the image's | FlyDSL | FlyDSL | 527.2, 527.5 | 1025.1, 1024.6 | 230.2 GB | 10.01470, 10.01487 |
+| c7034e33 | tas-20261019-turbo-4c74631 | the image's | FlyDSL | Triton | 590.2 | 915.7 | 230.2 GB | 10.01473 |
+
+- The 4c74631 image runs 1.0% faster than ff4898e4 through `TURBO_DIR` (527.4 against 532.5 ms) with
+  the same memory; the losses agree to five digits, as between repeats with FlyDSL dense attention.
+- Against dc23c84c, c7034e33 takes 37.7% less time per step, as on `ctheliosr-rck-g02-e15-02`
+  (824.0 against 513–515 ms). This node is 3.6–3.7% slower on both trees; compare runs on one node.
+- FlyDSL experts are 10.6% faster than Triton's on 4c74631 (527.4 against 590.2 ms).
+- The unit tests in Results on `dev/mi455x_v3` c19456f1, with `test_flydsl_grouped_gemm_patches.py`,
+  pass on both images: 149 items.
+
 ## How the defaults were chosen
 
 On the older bases dad0a081 and a624bb95 (Megatron-LM d3528a21), one GPU unless noted, with TE's
@@ -609,6 +641,14 @@ Do not run:
   recv timeout`; with TE's grouped GEMM it hung there instead. Sync-free MoE stages 2 and 3
   (`turbo_sync_free_moe_stage`) turn DeepEP on, so they do not run either. Stage 1's two settings,
   `moe_use_fused_router_with_aux_score` and `moe_permute_fusion`, are already in the yaml.
+- **FlyDSL expert GEMM with 64 rows or fewer per expert.** In the default image, Primus-Turbo
+  4c74631's gfx1250 FlyDSL grouped GEMM forward raises `ValueError: head_pipe=0 leaves too few deferred
+  matrix ops for the head reads` when the experts average 64 rows or fewer (32 and 64 rows tried: 128
+  experts with K and N from 1024 to 6144, and 8 experts at 1024); 128 rows and more run. It picks its kernel by the
+  average, which is MBS x sequence x EP / 32 rows here (4 of 128 experts per token), whatever the
+  routing: 128 on one GPU and 512 at EP4 at sequence 4096. One GPU at `PRIMUS_SEQ_LENGTH=2048` or
+  less stops in the first forward; use `TURBO_GROUPED_GEMM_BACKEND=default` there. tas-20261019's
+  Primus-Turbo runs 64-row experts.
 - **MegaMoE.** `--use_turbo_mega_moe True` takes effect only at EP 2 to 8. At EP2 its FlyDSL
   `dispatch_prologue_kernel` does not build for gfx1250 (`lld invocation failed`, then `All autotune
   configs failed`) in the first forward.
