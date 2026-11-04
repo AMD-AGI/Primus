@@ -34,7 +34,15 @@ _MODEL_FILES: dict[str, tuple[str, str]] = {
     "hunyuan-video": ("hunyuanvideo-community/HunyuanVideo", "transformer"),
 }
 _MODEL_DOWNLOAD_PATTERNS: dict[str, list[str]] = {
+    # ae.safetensors is the FLUX autoencoder; _companion_paths reads it from the
+    # same snapshot as the DiT weights, so it has to be fetched here too.
+    "flux-dev": ["flux1-dev.safetensors", "ae.safetensors"],
     "mochi-1": ["dit.safetensors", "encoder.safetensors"],
+    # A pattern of "transformer" matches no files: the weights live under that
+    # directory. Raw Hunyuan video also needs the LLaMA encoder, its tokenizer,
+    # and the causal 3D VAE from the same snapshot.
+    "hunyuan-video": ["transformer/*", "text_encoder/*", "tokenizer/*", "vae/*"],
+    "wan2.1-i2v": ["transformer/*"],
 }
 _MOCHI_T5_DOWNLOAD_PATTERNS = [
     "config.json",

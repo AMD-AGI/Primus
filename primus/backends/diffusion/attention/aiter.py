@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from ._flash_common import run_flash_attention_backend
@@ -13,8 +15,27 @@ from ._flash_common import run_flash_attention_backend
 AITER_FLASH_ATTN_AVAILABLE = False
 aiter = None
 
+
+def _import_aiter():
+    """Import ``aiter``, pointing its JIT loader at the compiled modules.
+
+    amd-aiter compiles ``module_aiter_core`` into ``~/.aiter/jit`` when the
+    package directory is not writable (as in a container image). It only adds
+    that directory to ``sys.path``, and only imports the module by its bare
+    name, when ``AITER_JIT_DIR`` is set before the import. Otherwise the build
+    succeeds and the import then dies with
+    ``ModuleNotFoundError: aiter.jit.module_aiter_core``.
+    """
+    jit_dir = os.path.join(os.path.expanduser("~"), ".aiter", "jit")
+    if os.path.isdir(jit_dir):
+        os.environ.setdefault("AITER_JIT_DIR", jit_dir)
+    import aiter as module
+
+    return module
+
+
 try:
-    import aiter as _aiter  # type: ignore
+    _aiter = _import_aiter()
 
     if hasattr(_aiter, "flash_attn_func") and hasattr(_aiter, "flash_attn_varlen_func"):
         aiter = _aiter
