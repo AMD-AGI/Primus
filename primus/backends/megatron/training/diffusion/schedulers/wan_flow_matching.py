@@ -56,6 +56,10 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         base_image_seq_len: Optional[int] = 256,
         max_image_seq_len: Optional[int] = 4096,
     ):
+        # shift * s / (1 + (shift - 1) * s) is 0 / 0 at s = 1 for shift 0, and
+        # has a pole inside (0, 1] for a negative shift.
+        if not use_dynamic_shifting and not shift > 0:
+            raise ValueError(f"the static schedule shift must be positive, got {shift}")
         super().__init__(
             num_train_timesteps=num_train_timesteps,
             shift=shift,

@@ -19,6 +19,7 @@ All loss functions accept tensors of any shape and reduce to scalar.
 
 from typing import Optional
 
+import torch
 import torch.nn.functional as F
 from torch import Tensor
 
@@ -154,8 +155,10 @@ def compute_weighted_flow_matching_loss(
 
     # Count the mask after broadcasting: a [B] mask covers every latent element
     # of its sample, so its own sum would give a per-sample, not per-element,
-    # mean. An all-zero mask yields 0 rather than NaN.
-    return (weighted * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
+    # mean. An all-zero mask yields 0 rather than NaN; any other total, even a
+    # soft one below 1, is divided by as is.
+    count = loss_mask.sum()
+    return (weighted * loss_mask).sum() / torch.where(count > 0, count, torch.ones_like(count))
 
 
 __all__ = [

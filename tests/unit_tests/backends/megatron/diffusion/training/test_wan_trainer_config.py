@@ -260,6 +260,17 @@ def test_nonzero_dropout_is_rejected(key):
         _build(**{key: 0.1})
 
 
+def test_training_rejects_output_channels_unlike_the_input():
+    """The flow target has the latents' channels; an image-to-video 36 -> 16 model cannot regress it."""
+    with pytest.raises(ValueError, match="out_channels must equal in_channels"):
+        _build(in_channels=36, out_channels=16)
+
+
+@pytest.mark.parametrize("out_channels", [16, None])
+def test_training_accepts_matching_or_unset_output_channels(out_channels):
+    assert _build(in_channels=16, out_channels=out_channels).in_channels == 16
+
+
 def test_selective_recompute_is_rejected():
     """WanLayer reads none of the selective-recompute switches, so it would save nothing."""
     with pytest.raises(ValueError, match="selective is not implemented for WAN"):

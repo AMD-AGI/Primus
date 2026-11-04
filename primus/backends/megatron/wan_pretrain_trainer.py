@@ -549,6 +549,17 @@ class WanPretrainTrainer(DiffusionPretrainTrainer):
 
         check_dual_expert_grad_sync(cfg["num_transformers"], params)
 
+        # The forward step draws noise shaped like the latents and regresses
+        # noise - latents, so the model has to predict in_channels channels.
+        out_channels = cfg["out_channels"] or cfg["in_channels"]
+        if out_channels != cfg["in_channels"]:
+            raise ValueError(
+                "WAN training regresses the flow target in the latent channels, so out_channels "
+                f"must equal in_channels (got {cfg['in_channels']} and {out_channels}); models that "
+                "concatenate conditioning channels into the input, such as image-to-video, have no "
+                "training path yet"
+            )
+
         if getattr(params, "use_fsdp2_fp32_param_optimizer", False):
             cfg["params_dtype"] = torch.float32
             cfg["pipeline_dtype"] = torch.bfloat16

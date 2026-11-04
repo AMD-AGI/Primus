@@ -86,3 +86,16 @@ def test_noise_is_mixed_at_the_fp32_sigma_the_model_is_conditioned_on():
 def test_invalid_range_is_rejected(sigma_min, sigma_max):
     with pytest.raises(ValueError, match="sigma_min"):
         WanFlowMatchScheduler(num_train_timesteps=N, sigma_min=sigma_min, sigma_max=sigma_max)
+
+
+@pytest.mark.parametrize("shift", [0.0, -1.0, float("nan")])
+def test_a_non_positive_static_shift_is_rejected(shift):
+    """Shift 0 makes the last sigma 0 / 0, and a negative shift puts a pole in the schedule."""
+    with pytest.raises(ValueError, match="shift must be positive"):
+        WanFlowMatchScheduler(num_train_timesteps=N, shift=shift)
+
+
+def test_dynamic_shifting_ignores_the_static_shift():
+    scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=0.0, use_dynamic_shifting=True)
+
+    assert torch.isfinite(scheduler.sigmas).all()

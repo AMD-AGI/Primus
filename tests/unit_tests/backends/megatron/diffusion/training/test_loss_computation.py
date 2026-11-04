@@ -127,6 +127,17 @@ class TestWeightedFlowMatchingLoss(PrimusUT):
 
         assert actual.item() == 0.0
 
+    def test_soft_mask_totalling_below_one_is_not_rescaled(self):
+        """A mask total in (0, 1) is still the denominator, so one kept element gives its own loss."""
+        prediction, _, _, target = self._fixture()
+        loss_mask = torch.zeros_like(prediction)
+        loss_mask[0, 1, 2, 3, 4] = 0.5
+
+        actual = compute_weighted_flow_matching_loss(prediction, target, torch.ones(2), loss_mask)
+
+        expected = (target[0, 1, 2, 3, 4].float() - prediction[0, 1, 2, 3, 4].float()) ** 2
+        torch.testing.assert_close(actual, expected)
+
     def test_uniform_weight_scales_the_loss(self):
         """A constant weight scales the squared error linearly."""
         prediction, _, _, target = self._fixture()
