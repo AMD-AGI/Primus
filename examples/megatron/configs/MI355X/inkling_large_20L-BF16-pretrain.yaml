@@ -1,0 +1,104 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:inkling_large_20L-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Inkling (Large) 20-layer proxy (released widths, 2 dense + 18 MoE layers,
+# ~269 B) on four MI355X nodes: PP=4 across nodes (one stage per node) x EP=8
+# inside each node. Each GPU holds 1/8 of the experts of 4-5 MoE layers, about
+# what the single-node 6L proxy holds. Same recipe as
+# inkling_small-BF16-pretrain.yaml except the model and the stage split.
+#
+# Stage split 5/5/5/5: a Large MoE layer is ~33 GB of weights, gradients and
+# AdamW state per GPU at EP=8, so moving a layer onto stage 0 or 1 (4 and 3
+# microbatches in flight) would not fit; the full 66 layers need ~16 nodes.
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: ${PRIMUS_MODEL:inkling_large}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Inkling_Pretrain"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      num_layers: 20
+      moe_layer_freq: "([0]*2+[1]*18)"
+
+      # hyper parameters. GBS 256 = 32 microbatches per pipeline per step
+      # (DP=8), which keeps the 1F1B bubble near 3/32.
+      train_iters: ${PRIMUS_TRAIN_ITERS:50}
+      exit_interval: ${PRIMUS_EXIT_INTERVAL:null}
+      micro_batch_size: ${PRIMUS_MBS:1}
+      global_batch_size: ${PRIMUS_GBS:256}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 3.0e-4
+      min_lr: 3.0e-5
+      lr_warmup_iters: 5
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      clip_grad: 1.0
+      eod_mask_loss: false
+
+      # parallel. Inkling rejects sequence and context parallelism, so TP=1.
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 4
+      pipeline_model_parallel_layout: "Et*5|t*5|t*5|t*5,L"
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      sequence_parallel: false
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      # Deferring the LM-head wgrad to the pipeline drain buffers every
+      # microbatch's [seq, vocab] output gradient on the last stage (~52 GB at
+      # GBS 256), and the Turbo LM head (use_turbo_gemm) cannot defer.
+      defer_embedding_wgrad_compute: false
+
+      # data. NullTokenizer puts eod at id vocab_size: 200057 + eod = the
+      # 200058 real Inkling tokens (padded to 200064).
+      mock_data: true
+      vocab_size: 200057
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+      # No dataloader mask: the attention builds its own causal / window mask,
+      # and flex caches its block mask only when no mask is passed.
+      create_attention_mask_in_dataloader: false
+
+      # ---------- Inkling ----------
+      inkling_attention_backend: ${PRIMUS_INKLING_ATTN:flex}
+      inkling_fp32_activations: false
+
+      # ---------- Optimizer: fp32 AdamW ----------
+      optimizer: adam
+
+      # recompute off. If stage 0 or 1 runs out of memory, use
+      # recompute_granularity: selective, recompute_modules: [layernorm, moe_act].
+      recompute_granularity: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # turbo off: TE grouped GEMM + alltoall dispatcher
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+      use_turbo_deepep: false
+      use_turbo_rms_norm: false
+      moe_grouped_gemm: true
+      moe_token_dispatcher_type: alltoall
+      moe_permute_fusion: false
