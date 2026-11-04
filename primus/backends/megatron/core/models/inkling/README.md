@@ -45,7 +45,7 @@ a Megatron GPT layer:
 | `primus/backends/megatron/core/transformer/inkling/` | Attention (eager and FlexAttention backends), ShortConv, router, MoE layer and shared experts, dense MLP, decoder layer |
 | `primus/backends/megatron/patches/inkling_muon_qkv_patches.py` | Per-layer q/k/v split for Megatron's Muon (see [Muon](#muon)) |
 | `primus/configs/models/megatron/inkling_*.yaml` | Presets: `inkling_small`, `inkling_large`, the proxies `inkling_small_12L` and `inkling_large_6L` (released widths, fewer layers), and `inkling_small_tiny` for tests |
-| `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml`, `inkling_large_6L-BF16-pretrain.yaml` | Single-node pretraining recipes for the Small and Large proxies (EP 8, AdamW, mock data); Large also turns on Primus-Turbo (see [Primus-Turbo](#primus-turbo)) |
+| `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml`, `inkling_large_6L-BF16-pretrain.yaml` | Single-node pretraining recipes for the Small and Large proxies (EP 8, AdamW, mock data); Large also turns on Primus-Turbo (see [Primus-Turbo](#primus-turbo)), and `inkling_large_6L-FP8-pretrain.yaml` adds FP8 (see [FP8](#fp8)) |
 | `tools/checkpoint_conversion/convert_inkling_hf_megatron.py` | Hugging Face → Megatron checkpoint converter |
 | `tests/unit_tests/backends/megatron/inkling/` | Unit tests, the transformers reference harness, and the 8-GPU parallel check |
 
@@ -225,6 +225,50 @@ skipped steps; step time is the median of steps 20–50):
 
 DeepEP gives the gain. In BF16, Turbo's GEMM and TE's linears both call
 hipBLASLt, so `use_turbo_gemm` does not speed up the dense layers.
+
+DeepEP options, measured the same way (recipe default 3.29 s, 199 GB; losses
+all within 0.0003 of it):
+
+| Option | Step time | `hip mem usage` | |
+| --- | --- | --- | --- |
+| `turbo_deepep_num_cu: 64` | 3.26 s | 199 GB | recipe default |
+| `turbo_deepep_num_cu: 160` | 3.26 s | 200 GB | |
+| `turbo_deepep_num_cu: 16` | 3.36 s | | |
+| `moe_permute_fusion` | 3.29 s | | no gain |
+| `turbo_sync_free_moe_stage: 2` | 3.30 s | | |
+| `turbo_sync_free_moe_stage: 3` | 3.37 s | 219 GB | |
+| `use_turbo_fused_act_with_probs` | 4.53 s | 203 GB | slower |
+
+All of them train Inkling correctly; only the CU count helps.
+`use_turbo_fused_act_with_probs` folds Inkling's `global_scale` into the
+probabilities. `moe_use_fused_router_with_aux_score` has no effect, because
+Inkling's router replaces Megatron's routing.
+
+#### FP8
+
+`inkling_large_6L-FP8-pretrain.yaml` is the Large recipe with FP8 tensorwise
+GEMMs. It needs Primus-Turbo 0.6 or later (`rocm/primus:v26.9`): Turbo 0.5's
+FP8 grouped GEMM fails on Inkling's expert shapes. The first step autotunes
+for about 6 minutes. Large proxy on `rocm/primus:v26.9`, Nov 4, 2026:
+
+| Run | Loss at step 50 | Step time | `hip mem usage` |
+| --- | --- | --- | --- |
+| BF16, TE only | 5.747 | 3.32 s | 204 GB |
+| BF16, Turbo | 5.747 | 3.28 s | 200 GB |
+| FP8 tensorwise, TE only | 5.702 | 3.23 s | 219 GB |
+| FP8 tensorwise, Turbo (recipe) | 5.702 | 2.97–3.09 s | 222 GB |
+| FP8 blockwise, Turbo | 5.717 | 3.29 s | 222 GB |
+| MXFP8, Turbo (`fp8: e4m3`, `NVTE_ROCM_ENABLE_MXFP8=1`) | 5.717 | 3.00 s | 226 GB |
+
+Step times vary by up to 4% between repeats. MXFP8's first step autotunes
+for about 17 minutes. Adding `turbo_fused_grouped_gemm`,
+`use_turbo_fused_act_with_probs` and `moe_permute_fusion` (with or without
+`turbo_fp8_permute` and sync-free stage 1) slows FP8 to about 5 s per step.
+
+FP8 ends about 0.045 below BF16 on Inkling, the same with TE alone and with
+Turbo on the dense layers, the experts or both, from step 3 on. Qwen3-30B-A3B
+on the same settings shows no such gap (8.131 in both), so it comes from
+Inkling's layers in FP8; the cause is not known yet.
 
 ### Parallelism
 
