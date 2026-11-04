@@ -90,8 +90,8 @@ ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
 - Dense layers: `USE_TURBO_ATTENTION` runs Primus-Turbo attention in the three dense layers, with
   `PRIMUS_TURBO_ATTN_BACKEND`, `flydsl` or `triton`. They default to `True` and `flydsl` when the
   Primus-Turbo in use (`TURBO_DIR`, else the image's) has `primus_turbo/flydsl/attention/gfx1250/`,
-  as the default image's does, and to `False` and `triton` otherwise. Asking for `flydsl` without those kernels stops the launcher
-  before training. Primus-Turbo's own default backend fails with
+  as the default image's does, and to `False` and `triton` otherwise. Asking for `flydsl` without
+  those kernels stops the launcher before training. Primus-Turbo's own default backend fails with
   `invalid argument for fmha_bwd` here. MSA layers are unaffected.
 - Optimizer: `PRIMUS_FUSED_ADAM_CLIP` (default `1`) runs Primus's HIP Adam, which applies the
   gradient-clip coefficient inside the kernel. `PRIMUS_FUSED_ADAM_BF16_WRITEBACK` and
@@ -147,6 +147,9 @@ uniform routing (`moe_router_force_load_balancing: true`). EP4 uses Megatron's `
 
 What it leaves out: at EP4 each expert gets 512 tokens per micro-batch (1024 at EP8, more beyond); no
 pipeline parallel; one node; uniform routing and mock data; sequence 4096 only.
+
+The results in this section predate the kernel changes in the later sections. For the launcher's
+current defaults, see Baseline with the current defaults.
 
 Results on `ctheliosr-rck-g02-e15-02` with this branch on `dev/mi455x_v3` c19456f1, one run at a time
 on the four otherwise idle GPUs. Every run finished 10 iterations with 0 NaN.
@@ -288,8 +291,8 @@ with 0 NaN.
   agree to five digits over 10 iterations.
 - During the first TE run on ff4898e4, short-lived processes of another user were on the same GPU
   before iteration 1 finished; the timed iterations 3–10 match the repeat.
-- Not yet run on the EP4 baseline, where TE's dense attention is 106.5 ms of softmax plus about 78 ms
-  of score and value GEMMs per profiled step.
+- On the EP4 baseline it saves 191 ms per step, 18.7%, and 5.3 GB (Baseline with the current
+  defaults): 106 ms of TE softmax and 90 ms of score and value GEMMs per profiled step become 21 ms.
 
 ## MSA backward: two tokens per dK/dV WMMA
 
@@ -319,7 +322,9 @@ MSA, GBS 8), alternating:
 | two tokens per WMMA | 608.4, 608.6 | 230.3 GB | 10.01461, 10.01473 |
 
 - 35 ms per step, 4.3 ms per MSA layer and micro-batch, as the operator timing predicts. On the
-  baseline that would be about 175 ms per step (five MSA layers, 8 micro-batches); not yet measured.
+  baseline that would be about 175 ms per step (five MSA layers, 8 micro-batches). There, with the
+  next two sections, MSA and indexer kernel time fell from 368 to 115 ms per profiled step (Baseline
+  with the current defaults).
 - The backward is now 2.4 times the forward. The losses differ in the fourth decimal between repeats
   of the same tree, as with FlyDSL dense attention alone (its dQ atomics); the MSA backward itself
   has no atomics.
@@ -349,7 +354,8 @@ End to end, one GPU, 4 layers, GBS 8, FlyDSL dense attention, alternating:
 
 - 15 ms per step, 1.9 ms per MSA layer and micro-batch, as the operator timing predicts. On the
   baseline (five MSA layers, 8 micro-batches) the backward part alone would be about 54 ms per step;
-  not yet measured. The baseline's MSA forward is bound by kernel launches, so its share may not show.
+  Baseline with the current defaults has the MSA changes together. The baseline's MSA forward is
+  bound by kernel launches, so its share may not show.
 - The indexer kernels are unchanged.
 
 ## hipBLASLt tuning
@@ -383,7 +389,7 @@ the runs alternated in the order of the rows, then the first two rows again:
 - `gradient_accumulation_fusion` stays off: its fp32-output weight-gradient GEMMs are slow even with
   the best kernel hipBLASLt has for them (for 6144 x 24576 x 4096 into fp32 with beta 1, about 590
   TFLOP/s against about 2300 for the bf16 output).
-- Not yet run on the EP4 baseline.
+- On the EP4 baseline it saves 29 ms per step, 2.8% (Baseline with the current defaults).
 
 ## MSA forward: fewer kernel launches
 
@@ -445,8 +451,9 @@ End to end, one GPU, 4 layers, GBS 8, the launcher's defaults on 105e9f33 plus t
 - `--gradient_accumulation_fusion True` needs `TURBO_GROUPED_GEMM_BACKEND=default`: FlyDSL's
   weight-gradient GEMM has no beta=1 epilogue, and Primus-Turbo would raise at the first backward. The
   launcher stops before training instead.
-- Not yet run on the EP4 baseline. From the operator timing it would save about 80 ms per step there
-  (2.0 ms per MoE layer and micro-batch, five layers, 8 micro-batches).
+- On the EP4 baseline it saves 75 ms per step, 7.3% (Baseline with the current defaults), about the
+  80 ms the operator timing gives (2.0 ms per MoE layer and micro-batch, five layers, 8
+  micro-batches). Expert GEMM kernel time there fell from 215 to 116 ms per profiled step.
 
 ## Primus-Turbo 4c74631 image
 
@@ -472,6 +479,74 @@ iterations with 0 NaN.
 - FlyDSL experts are 10.6% faster than Triton's on 4c74631 (527.4 against 590.2 ms).
 - The unit tests in Results on `dev/mi455x_v3` c19456f1, with `test_flydsl_grouped_gemm_patches.py`,
   pass on both images: 149 items.
+
+## Baseline with the current defaults
+
+The baseline (EP4, 8 layers, GBS 32) on the four GPUs of `ctheliosr-rck-g02-e15-01`: the launcher's
+defaults on d6c953a9 (the 4c74631 image, FlyDSL dense attention and experts, the hipBLASLt tuning
+file, and the MSA kernel changes above) against those of dc23c84c (tas-20261019, TE dense attention,
+Triton experts, hipBLASLt's own kernels). One run at a time, each started only when no other process
+was on the GPUs: the two trees alternated, then the switches on d6c953a9, one run each. Every run
+finished 10 iterations with 0 NaN.
+
+| Tree | Switch | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- | --- | --- | --- |
+| dc23c84c | none | 1574.8, 1576.0 | 20,807, 20,792 | 551.8, 551.4 | 280.1 GB | 8.19595, 8.19595 |
+| d6c953a9 | none | 1026.5, 1021.6 | 31,923, 32,074 | 846.5, 850.5 | 274.8 GB | 8.19573, 8.19577 |
+| d6c953a9 | `USE_TURBO_ATTENTION=False` (TE dense attention) | 1215.1 | 26,968 | 715.1 | 280.1 GB | 8.19595 |
+| d6c953a9 | `TURBO_GROUPED_GEMM_BACKEND=default` (Triton experts) | 1099.1 | 29,814 | 790.6 | 274.8 GB | 8.19566 |
+| d6c953a9 | `HIPBLASLT_TUNING_OVERRIDE_FILE=` (hipBLASLt's own kernels) | 1053.2 | 31,114 | 825.0 | 274.8 GB | 8.19565 |
+
+- d6c953a9 takes 35.0% less time per step than dc23c84c (1024.1 against 1575.4 ms), 1.54 times the
+  tokens/s, and 5.3 GB less memory per GPU.
+- Against d6c953a9, TE dense attention costs 191.1 ms per step (18.7%) and the 5.3 GB, Triton experts
+  75.1 ms (7.3%; the operator timing predicted about 80), and hipBLASLt's own kernels 29.2 ms (2.8%).
+  The other 256 ms of the 551 ms is the MSA kernel changes (two tokens per dK/dV WMMA, two key tiles
+  per WMMA, fewer launches), for which the one-GPU runs predicted up to about 240 ms.
+- With TE's dense attention, d6c953a9's loss is within 1e-6 of dc23c84c's (8.195952 against
+  8.195951). With FlyDSL's, whose dQ uses fp32 atomics, the losses differ in the fifth decimal
+  between repeats.
+- dc23c84c is 2.5% slower here than on `ctheliosr-rck-g02-e15-02` (1575.4 against 1537.4 ms,
+  Baseline); compare runs on one node.
+- During the first run of each tree, short-lived processes of another user were on the GPUs; those
+  runs are within 0.5% of the second ones.
+
+Where the step goes: GPU kernel time of profiled iteration 7 (`PROFILE=True --profile_ranks
+'[0,1,2,3]'`), in ms, the mean of the four ranks. Profiling makes the step 1207 ms instead of 1024 on
+d6c953a9 and 1739 instead of 1575 on dc23c84c.
+
+| Kernels | dc23c84c | d6c953a9 |
+| --- | --- | --- |
+| hipBLASLt GEMMs: dense layers, attention and indexer projections, shared experts, router, output layer | 324.4 | 279.2 |
+| elementwise and reductions | 241.8 | 233.2 |
+| expert grouped GEMM: Primus-Turbo Triton (dc23c84c), FlyDSL (d6c953a9) | 214.7 | 116.0 |
+| FlyDSL MSA and indexer | 368.0 | 115.2 |
+| RCCL collectives | 90.3 | 102.1 |
+| copies and fills | 49.1 | 45.1 |
+| optimizer: HIP Adam and the clipping l2norm | 33.4 | 33.5 |
+| norm, RoPE | 29.5 | 29.3 |
+| stream memory operations (`__amd_rocclr_batchMemOp`) | 24.5 | 21.5 |
+| dense attention: TE's unfused softmax (dc23c84c), Primus-Turbo FlyDSL (d6c953a9) | 106.1 | 20.9 |
+| dense attention: TE's score and value GEMMs (`bmm`, `baddbmm`) | 90.0 | – |
+| MoE permute and router | 18.1 | 18.5 |
+| cross entropy, the rest | 7.2 | 7.5 |
+| total kernel time / GPU span | 1597.1 / 1738.7 | 1022.1 / 1206.6 |
+
+- MSA and the indexer take 14.4 ms per micro-batch instead of 46.0, and the three dense attention
+  layers 2.6 ms instead of 24.5.
+- The hipBLASLt GEMMs outside dense attention take 45 ms less. Of the changes, only the tuning file
+  touches them, and it saves 29 ms end to end.
+- The rest of the kernel time changed little, so it is now a larger share: 108 ms of the elementwise
+  time is still the 1025 fp32 `add_` kernels of Megatron's DDP gradient hook (see Baseline), 10.6% of
+  the kernel time.
+- The ranks differ by up to 5% in the expert GEMMs and up to 3% in MSA and the hipBLASLt GEMMs;
+  routing is uniform. They differ more in RCCL time (75–115 ms on either tree), stream memory
+  operations and idle time, which include waiting for the other ranks; the least RCCL time on any
+  rank is 74.8 ms on both trees.
+- In d6c953a9's trace the Primus-Turbo FlyDSL kernels have names: `k_flash_attn_fwd`,
+  `k_dkdv_fused_sp_0`, `k_delta_bshd_0`, `k_dq_cvt_0` and `k_redsp_0` for dense attention, and
+  `kernel_grouped_nt_0` and `kernel_grouped_variable_k_0` for the experts. Primus's MSA kernels are
+  still all `k_fn_0`.
 
 ## How the defaults were chosen
 
@@ -622,7 +697,6 @@ Do not run:
 - The full 60-layer model. From the proxy's ~18 bytes/parameter (BF16 weights, FP32 gradients and
   Adam state), a training step at MBS 1, seq 4096 wants on the order of 40 MI455X GPUs (EP8 x PP5).
 - The gfx950 MFMA kernels. This node cannot execute them.
-- The hipBLASLt tuning file and the FlyDSL expert grouped GEMM on the EP4 baseline.
 
 ## Known issues
 
