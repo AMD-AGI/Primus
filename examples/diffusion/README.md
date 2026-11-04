@@ -117,3 +117,37 @@ python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
 ```
 
 On success the hook prints `env.PREPARED=1`.
+
+## Official-module post-training
+
+FLUX.1-dev fine-tunes the in-tree FLUX module. It does not build a Diffusers
+pipeline. Point `PRETRAINED_PATH` at the official DiT checkpoint.
+
+| Workload | Official source | Checkpoint |
+|---|---|---|
+| FLUX.1-dev | Black Forest Labs FLUX | `flux1-dev.safetensors`, T5-XXL, CLIP-L, `ae.safetensors` |
+| Wan2.1 I2V 14B | native Wan2.1 DiT with CLIP cross-attention | official I2V DiT, Wan2.1 VAE, UMT5, CLIP vision |
+
+MI355X configs default to learning rate `1e-4`. MI300X and MI325X use `1e-5`
+with a constant schedule. `LR` overrides either default. The Wan2.1 I2V configs
+leave `max_grad_norm` at `0` so the timed step does not include the gradient-norm
+all-reduce. `MAX_GRAD_NORM` turns clipping back on.
+
+`BENCHMARK_DENOISER_ONLY=1` builds the Wan DiT without the VAE, UMT5, and CLIP
+weights. That mode only accepts batches that already contain `latents`,
+`context`, `y`, and `clip_fea`. A raw video batch fails at the first step
+with that requirement instead of an encoder error.
+
+Default `LOCAL_BATCH_SIZE` for the benchmark configs:
+
+| Workload | MI300X / MI325X | MI355X |
+|---|---:|---:|
+| flux-dev | 10 | 16 |
+| wan2.1-i2v | 1 | 1 |
+
+Use `examples/diffusion/configs/MI300X` or `MI325X` on those GPUs. Keep
+`SP_SIZE` at 1.
+
+`benchmark_flux_dev-posttrain.yaml` fine-tunes the native FLUX.1-dev module.
+Set `PRETRAINED_PATH` to `flux1-dev.safetensors` and `VAE_CHECKPOINT` to
+`ae.safetensors`.
