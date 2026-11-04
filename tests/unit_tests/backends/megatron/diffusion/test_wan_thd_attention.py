@@ -183,10 +183,8 @@ def test_a_turbo_without_varlen_still_imports_the_dense_path():
 
 
 def test_thd_without_the_varlen_kernel_says_so(monkeypatch):
-    import primus.backends.megatron.core.extensions.primus_turbo_local_spec as local_spec
-
     attention = _build_attention()
-    monkeypatch.setattr(local_spec, "FlashAttnVarlenFunc", None)
+    monkeypatch.setattr(f"{PrimusTurboLocalAttention.__module__}.FlashAttnVarlenFunc", None)
     query, key, value = (_to_thd(t) for t in _sbhd_inputs())
 
     with pytest.raises(RuntimeError, match="does not have"):
