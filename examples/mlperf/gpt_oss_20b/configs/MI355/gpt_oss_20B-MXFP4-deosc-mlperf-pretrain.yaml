@@ -199,7 +199,7 @@ modules:
       weight_deosc_start_step: ${PRIMUS_WEIGHT_DEOSC_START_STEP:768}
       weight_deosc_period: 100
       weight_deosc_ratio: 4.0
-      weight_deosc_log_freq: 1
+      weight_deosc_log_freq: ${PRIMUS_WEIGHT_DEOSC_LOG_FREQ:0}
       weight_deosc_fusion: ${PRIMUS_WEIGHT_DEOSC_FUSION:true}
       weight_deosc_direct_qdq: ${PRIMUS_WEIGHT_DEOSC_DIRECT_QDQ:true}
       use_turbo_grouped_gemm: true
