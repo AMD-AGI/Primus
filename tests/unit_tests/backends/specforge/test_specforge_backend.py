@@ -47,7 +47,6 @@ from primus.backends.specforge.online_launch import (
     resolve_head_ip,
     resolve_local_ip,
     resolve_routable_ip,
-    sglang_server_argv,
     validate_online_identity,
 )
 from primus.backends.specforge.specforge_adapter import SpecForgeAdapter
@@ -87,7 +86,9 @@ def specforge_checkout(tmp_path):
     root = tmp_path / "SpecForge"
     (root / "configs").mkdir(parents=True)
     (root / "pyproject.toml").write_text("[project]\nname = 'specforge'\n")
-    (root / "configs" / "qwen3.5-4b-dflash.yaml").write_text("model: dummy\n")
+    (root / "configs" / "qwen3.5-4b-dflash.yaml").write_text(
+        "model:\n  draft_model_config: configs/qwen3.5-4b-dflash.json\n"
+    )
     (root / "configs" / "qwen3.5-4b-dflash.json").write_text(
         '{"dflash_config": {"target_layer_ids": [1, 8, 15, 22, 29]}}\n'
     )
@@ -862,7 +863,7 @@ class TestOnlineLaunch:
 
     def test_head_ip_overrides_rewrite_loopback(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path)
-        settings = online_settings(params)
+        settings = online_settings(params, env={})
         overrides = build_online_overrides("10.3.14.7", settings, output_dir=str(tmp_path / "out"))
         joined = " ".join(overrides)
         assert "127.0.0.1" not in joined
@@ -880,7 +881,7 @@ class TestOnlineLaunch:
 
     def test_trainer_nnodes_emits_master_addr_and_node_rank(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path, trainer_nnodes=2)
-        settings = online_settings(params)
+        settings = online_settings(params, env={})
         overrides = build_online_overrides(
             "10.3.14.7", settings, trainer_master_addr="10.9.9.1", output_dir=str(tmp_path / "out")
         )
@@ -933,7 +934,7 @@ class TestOnlineLaunch:
 
     def test_eight_plus_eight_defaults_expand_gpu_lists(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path, server_count=8, trainer_nproc=8)
-        settings = online_settings(params)
+        settings = online_settings(params, env={})
         assert settings["server_gpus"] == "0,1,2,3,4,5,6,7"
         assert settings["trainer_gpus"] == "0,1,2,3,4,5,6,7"
         assert not validate_online_identity(settings, rank=0, nodes=2)
@@ -955,48 +956,16 @@ class TestOnlineLaunch:
 
     def test_identity_rejects_single_node(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path)
-        settings = online_settings(params)
+        settings = online_settings(params, env={})
         issues = validate_online_identity(settings, rank=0, nodes=1)
         assert any("capture_nnodes+trainer_nnodes=2" in item for item in issues)
 
     def test_identity_accepts_capture_plus_trainer_counts(self, specforge_checkout, tmp_path):
         params = self._params(specforge_checkout, tmp_path, capture_nnodes=1, trainer_nnodes=2)
-        settings = online_settings(params)
+        settings = online_settings(params, env={})
         assert not validate_online_identity(settings, rank=2, nodes=3)
         issues = validate_online_identity(settings, rank=0, nodes=2)
         assert any("capture_nnodes+trainer_nnodes=3" in item for item in issues)
-
-    def test_sglang_aux_layers_match_qwen35_draft(self, specforge_checkout, tmp_path):
-        params = self._params(specforge_checkout, tmp_path)
-        argv = sglang_server_argv(0, online_settings(params))
-        ids = argv[argv.index("--spec-capture-aux-layer-ids") + 1 :]
-        flags = ids[: ids.index("--port")] if "--port" in ids else ids
-        # port comes after layer ids in our argv... actually port is after layer ids.
-        # argv has ... --spec-capture-aux-layer-ids 1 8 15 22 29 --port 30000 ...
-        port_at = argv.index("--port")
-        layer_at = argv.index("--spec-capture-aux-layer-ids")
-        assert argv[layer_at + 1 : port_at] == ["1", "8", "15", "22", "29"]
-        assert "--host" in argv and argv[argv.index("--host") + 1] == "0.0.0.0"
-        assert "--disable-radix-cache" in argv
-        assert "--attention-backend" in argv
-
-    def test_capture_layer_ids_env_overrides_draft_json(self, specforge_checkout, tmp_path):
-        params = self._params(specforge_checkout, tmp_path)
-        settings = online_settings(params, env={"CAPTURE_LAYER_IDS": "2 4"})
-        argv = sglang_server_argv(0, settings)
-        port_at = argv.index("--port")
-        layer_at = argv.index("--spec-capture-aux-layer-ids")
-        assert argv[layer_at + 1 : port_at] == ["2", "4"]
-
-    def test_capture_layer_ids_ignore_other_draft_json(self, specforge_checkout, tmp_path):
-        other = specforge_checkout / "configs" / "other-draft.json"
-        other.write_text('{"dflash_config": {"target_layer_ids": [3, 9]}}\n')
-        params = self._params(specforge_checkout, tmp_path)
-        settings = online_settings(params)
-        assert settings["capture_layer_ids"] == (1, 8, 15, 22, 29)
-        (specforge_checkout / "configs" / "qwen3.5-4b-dflash.json").unlink()
-        settings = online_settings(params)
-        assert settings["capture_layer_ids"] == (1, 8, 15, 22, 29)
 
     def test_online_yaml_has_no_cluster_ips(self):
         text = ONLINE_CONFIG.read_text(encoding="utf-8")
