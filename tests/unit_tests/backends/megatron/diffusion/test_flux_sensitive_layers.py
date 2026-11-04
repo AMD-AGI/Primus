@@ -179,6 +179,18 @@ def test_block_strategies_build_with_sensitive_layers(strategy):
     assert _te_config(torch_compile_strategy=strategy, **SENSITIVE).first_last_layers_bf16
 
 
+@pytest.mark.parametrize("strategy", ["stack", "double_stack", "single_stack", "full_dit"])
+def test_stack_runners_are_rejected_with_megatrons_own_bf16_edge_layers(strategy):
+    """Setting first_last_layers_bf16 directly drops the outer context just the same."""
+    with pytest.raises(ValueError, match="bypass the per-layer"):
+        _te_config(
+            torch_compile_strategy=strategy,
+            first_last_layers_bf16=True,
+            num_layers_at_start_in_bf16=1,
+            num_layers_at_end_in_bf16=1,
+        )
+
+
 def test_stack_runners_still_build_without_sensitive_layers():
     assert _te_config(torch_compile_strategy="full_dit").torch_compile_strategy == "full_dit"
 

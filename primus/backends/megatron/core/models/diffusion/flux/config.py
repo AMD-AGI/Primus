@@ -296,12 +296,12 @@ class FluxConfig(BaseDiffusionConfig):
             uses_per_layer_quantization_context,
         )
 
-        if not self.sensitive_layers_enabled or self.transformer_impl == "local":
+        if self.transformer_impl == "local":
             return
 
         # Megatron can only switch a first/last layer's quantization off, so on
         # this spec those layers run in bf16 whatever else is asked for.
-        if self.sensitive_layer_precision != "bf16":
+        if self.sensitive_layers_enabled and self.sensitive_layer_precision != "bf16":
             raise ValueError(
                 f"sensitive_layer_precision={self.sensitive_layer_precision!r} is not supported on "
                 "transformer_impl='transformer_engine', which can only keep sensitive layers in bf16; "
@@ -309,13 +309,14 @@ class FluxConfig(BaseDiffusionConfig):
             )
 
         # The stack and full_dit runners call the layers directly, so they miss
-        # the per-layer contexts DiffusionTransformerBlock enters.
+        # the per-layer contexts DiffusionTransformerBlock enters. This also
+        # applies when first_last_layers_bf16 is set without sensitive_layers_enabled.
         if uses_per_layer_quantization_context(self) and self.torch_compile_strategy not in (
             "whole_model",
             "per_block",
         ):
             raise ValueError(
-                f"sensitive_layers_enabled with fp8/fp4 on transformer_impl='transformer_engine' "
+                f"bf16 first/last layers with fp8/fp4 on transformer_impl='transformer_engine' "
                 f"needs torch_compile_strategy 'per_block' or 'whole_model', got "
                 f"{self.torch_compile_strategy!r}: the stack runners bypass the per-layer "
                 "quantization contexts that keep sensitive layers in bf16"
