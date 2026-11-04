@@ -8,7 +8,7 @@ from primus.backends.diffusion.argument_builder import DiffusionArgBuilder
 from primus.backends.diffusion.data.benchmark import AMDBProcessor
 from primus.backends.diffusion.registry import DATASET_BUILDERS, MODEL_BUILDERS
 
-BENCHMARK_NAMES = ("flux-dev",)
+BENCHMARK_NAMES = ("flux-dev", "wan2.1-i2v")
 
 
 def _finalize(params: dict):
@@ -178,8 +178,11 @@ def test_benchmark_step_rates_match_amdiffusionbenchmark():
     assert tflops_per_gpu == 400.0
 
 
-def test_amdb_dataset_skips_decode_errors_only():
-    from primus.backends.diffusion.data.benchmark import AMDBDataset
+def test_amdb_dataset_skips_decode_errors_only(tmp_path):
+    from primus.backends.diffusion.data.benchmark import (
+        AMDBDataset,
+        _TemporaryVideoReader,
+    )
 
     class Corrupt:
         def load(self):
@@ -196,6 +199,20 @@ def test_amdb_dataset_skips_decode_errors_only():
     assert dataset[0]["prompt"] == "good"
     with pytest.raises(KeyError):
         AMDBDataset([{"prompt": "missing image"}], modality="image")[0]
+
+    scratch = tmp_path / "amdb-temp-video.mp4"
+    scratch.write_bytes(b"mp4")
+
+    class DummyReader:
+        def get_batch(self, indices):
+            return indices
+
+        def __len__(self):
+            return 1
+
+    reader = _TemporaryVideoReader(str(scratch), DummyReader())
+    assert reader.get_batch([0]) == [0]
+    assert not scratch.exists()
 
 
 def test_clip_grad_norm_skips_the_collective_when_clipping_is_off():
@@ -230,7 +247,7 @@ def test_even_batches_pad_short_tail_like_accelerate():
 
 
 def test_unbuilt_benchmark_models_fail_before_download():
-    for name in ("sdxl", "stable-diffusion-xl", "mochi-1", "hunyuan-video", "wan2.1-i2v"):
+    for name in ("sdxl", "stable-diffusion-xl", "mochi-1", "hunyuan-video"):
         with pytest.raises(ValueError, match="no diffusion model builder"):
             _finalize({"model": {"name": name, "config": {}}, "data": {"dataset_path": "x"}})
 
@@ -325,6 +342,8 @@ def test_benchmark_fsdp2_hooks_extend_the_parent_wrapper():
     trainer.rank = 0
     assert trainer._fsdp2_reduce_dtype_name(torch.bfloat16) == "bf16"
     assert trainer._fsdp2_reduce_dtype_name(torch.float32) == "fp32"
+    parent = FSDP2Trainer.__new__(FSDP2Trainer)
+    assert parent._fsdp2_reduce_dtype_name(torch.bfloat16) == "fp32"
 
 
 def test_precomputed_cache_does_not_look_up_image():
@@ -428,7 +447,7 @@ def test_flux_prepare_hook_rewrites_paths_and_reports_auth_failures(monkeypatch,
     with pytest.raises(SystemExit):
         diffusion_prepare._reject_unbuilt_benchmark("sdxl")
     assert "no diffusion model builder" in capsys.readouterr().err
-    assert diffusion_prepare._BENCHMARK_DOWNLOADS == {"flux-dev"}
+    assert diffusion_prepare._BENCHMARK_DOWNLOADS == {"flux-dev", "wan2.1-i2v"}
 
 
 def test_build_flux_dev_benchmark_loads_amdb_defaults(monkeypatch, tmp_path):
@@ -592,3 +611,140 @@ def test_flux_prepare_hook_prints_benchmark_env(monkeypatch, tmp_path, capsys):
     assert f"env.DATASET_PATH={data}" in printed
     assert f"env.VAE_CHECKPOINT={ae}" in printed
     assert "env.PREPARED=1" in printed
+
+
+def test_wan_i2v_uses_dit_blocks_and_the_official_clip_files(monkeypatch, tmp_path):
+    import primus.backends.diffusion.utils.download as download
+
+    args = _finalize({"model": {"name": "wan2.1-i2v", "config": {}}, "data": {"dataset_path": "x"}})
+    assert args.dataset["name"] == "amdb"
+    assert args.dataset["config"]["modality"] == "video"
+    assert args.trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] == "DiTBlock"
+    assert args.trainer["args"]["gradient_checkpointing"] is True
+
+    snapshot = tmp_path / "wan"
+    snapshot.mkdir()
+    for name in (
+        "Wan2.1_VAE.pth",
+        "models_t5_umt5-xxl-enc-bf16.pth",
+        "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+    ):
+        (snapshot / name).write_bytes(b"w")
+    monkeypatch.setattr(download, "_snapshot", lambda *_args, **_kwargs: str(snapshot))
+    env = download._companion_paths("wan2.1-i2v", str(tmp_path / "transformer"), {})
+    assert env["VAE_CHECKPOINT"] == str(snapshot / "Wan2.1_VAE.pth")
+    assert env["TEXT_ENCODER"] == str(snapshot / "models_t5_umt5-xxl-enc-bf16.pth")
+    assert env["CLIP_CHECKPOINT"] == str(snapshot / "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth")
+
+
+def test_blank_dataset_path_selects_the_wan_default():
+    args = _finalize({"model": {"name": "wan2.1-i2v", "config": {}}, "data": {}})
+    assert args.dataset["config"]["model_name"] == "wan2.1-i2v"
+
+
+def test_wan_diffusers_keys_map_onto_the_native_dit():
+    import torch
+
+    from primus.backends.diffusion.utils.checkpoint_convert import (
+        wan_diffusers_to_native,
+    )
+
+    converted = wan_diffusers_to_native(
+        {
+            "condition_embedder.time_proj.weight": torch.zeros(1),
+            "blocks.0.attn1.to_q.weight": torch.zeros(1),
+            "blocks.0.attn2.add_k_proj.weight": torch.zeros(1),
+            "blocks.0.attn2.norm_added_q.weight": torch.zeros(1),
+            "blocks.0.ffn.net.2.weight": torch.zeros(1),
+            "proj_out.weight": torch.zeros(1),
+        }
+    )
+    assert set(converted) == {
+        "time_projection.1.weight",
+        "blocks.0.self_attn.q.weight",
+        "blocks.0.cross_attn.k_img.weight",
+        "blocks.0.ffn.2.weight",
+        "head.head.weight",
+    }
+
+
+def test_single_file_diffusers_checkpoint_is_converted_and_checked(tmp_path):
+    import torch
+
+    from primus.backends.diffusion.models.registrations.wan import (
+        _load_dit_weights_into_module,
+    )
+
+    # No parameter matches the converted Diffusers key, so a file checkpoint
+    # must raise the same mismatch error as a directory checkpoint.
+    dit = torch.nn.Linear(1, 1)
+    path = tmp_path / "dit.pth"
+    torch.save({"condition_embedder.time_proj.weight": torch.zeros(1)}, path)
+    with pytest.raises(RuntimeError, match="Wan Diffusers checkpoint mismatch"):
+        _load_dit_weights_into_module(dit, str(path), accept_diffusers=True)
+
+
+def test_tiny_i2v_forward_uses_the_clip_condition():
+    import torch
+
+    from primus.backends.diffusion.models.wan.wan_dit import WanModel
+
+    model = WanModel(
+        model_type="i2v",
+        patch_size=(1, 2, 2),
+        text_len=4,
+        in_dim=4,
+        dim=32,
+        ffn_dim=64,
+        freq_dim=16,
+        text_dim=16,
+        out_dim=4,
+        num_heads=4,
+        num_layers=1,
+        qk_norm=False,
+        cross_attn_norm=False,
+    )
+    model.eval()
+    frames = model(
+        [torch.randn(2, 1, 2, 2)],
+        torch.zeros(1),
+        [torch.randn(4, 16)],
+        seq_len=1,
+        y=[torch.randn(2, 1, 2, 2)],
+        clip_fea=torch.randn(1, 2, 1280),
+    )
+    assert frames[0].shape == (4, 1, 2, 2)
+    with pytest.raises(ValueError, match="clip_fea"):
+        model([torch.randn(2, 1, 2, 2)], torch.zeros(1), [torch.randn(4, 16)], seq_len=1)
+
+
+def test_denoiser_only_rejects_a_raw_video_batch():
+    import torch
+
+    from primus.backends.diffusion.models.wan.train_pipeline import (
+        WanFlowMatchTrainPipeline,
+    )
+
+    pipeline = WanFlowMatchTrainPipeline()
+    components = type("Encoders", (), {"vae": torch.nn.Identity(), "tokenizer": None})()
+    with pytest.raises(ValueError, match="BENCHMARK_DENOISER_ONLY"):
+        pipeline._maybe_prepare_raw_batch(components, {"videos": ["clip.mp4"], "prompts": ["a"]}, object())
+
+
+def test_checkpoint_loads_disable_pickle(monkeypatch, tmp_path):
+    import torch
+
+    from primus.backends.diffusion.utils.checkpoint_io import load_state_dict
+
+    path = tmp_path / "weights.pth"
+    torch.save({"weight": torch.zeros(1)}, path)
+    seen = {}
+    real_load = torch.load
+
+    def spy(file, *args, **kwargs):
+        seen["weights_only"] = kwargs.get("weights_only")
+        return real_load(file, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", spy)
+    assert "weight" in load_state_dict(str(path))
+    assert seen["weights_only"] is True

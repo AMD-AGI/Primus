@@ -11,6 +11,9 @@ datasets, attention selection, FSDP2 wrapping, and the training loop.
   It builds the native FLUX DiT. Benchmark-only behavior (BFL QK-norm epsilon,
   logit-normal timesteps, and pre-encoded latents) is opt-in and stays off the
   `flux.1-dev` and `flux.1-schnell` trainers.
+- AMDiffusionBenchmark workload `wan2.1-i2v`, built by `models/registrations/wan.py`.
+  It extends the native Wan DiT with image-to-video cross-attention. That path
+  stays off the existing `wan` trainer unless `model_type` is `i2v`.
 - Trainer: FSDP2 for the native models. The benchmark workloads use
   `amdb_benchmark`.
 - Wan sequence parallelism: supported through `sp_size`.
@@ -43,6 +46,7 @@ wan2.2_ti2v_5b_sft.yaml
 flux.1_schnell_t2i.yaml
 flux.1_dev_t2i.yaml
 benchmark_flux_dev.yaml
+benchmark_wan2_1_i2v.yaml
 ```
 
 `flux-dev` and `flux.1-dev` both build the native FLUX.1-dev DiT.
@@ -50,6 +54,9 @@ benchmark_flux_dev.yaml
 MI300X and MI325X use learning rate `1e-5`. The MI355X config defaults to
 `1e-4` (`LR` overrides it). The checkpoint is the official
 `flux1-dev.safetensors`, not a Diffusers-layout key set.
+
+`wan2.1-i2v` is the post-train preset. It trains the native Wan2.1 DiT
+with CLIP cross-attention, the Wan2.1 VAE, UMT5, and the CLIP vision tower.
 
 FLUX.1-schnell and FLUX.1-dev are separate presets. They share the same main
 transformer shape, but `flux.1-dev` has a guidance embedding module while
@@ -71,6 +78,10 @@ Keep sequence parallelism at 1.
 # FLUX.1-dev, batch 16, 100 steps, frank-chieng/chinese_architecture_siheyuan
 ./primus-cli direct -- train posttrain \
   --config examples/diffusion/configs/MI355X/benchmark_flux_dev-posttrain.yaml
+
+# Wan2.1 I2V 14B, Wild-Heart/Disney-VideoGeneration-Dataset
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_wan2_1_i2v-posttrain.yaml
 ```
 
 ## Public Config Sections
