@@ -54,11 +54,6 @@ from primus.core.utils.module_utils import log_rank_last as _orig_log_rank_last
 
 _log_suppression.reapply_quiet_logger_levels()
 
-if int(os.environ.get("LOG_AITER_GEMMS", "0")) == 1 and int(os.environ.get("RANK", "0")) == 0:
-    from patch_aiter_gemm import patch_aiter_fp4_gemms
-
-    patch_aiter_fp4_gemms()
-
 log_rank_0 = _orig_log_rank_0
 log_rank_last = _orig_log_rank_last
 
@@ -857,7 +852,6 @@ def _install_flydsl_fp4_gemms(
     primus_args.use_turbo_attention = bool(use_turbo_attention)
     if use_turbo_attention:
         primus_args.enable_turbo_attention_float8 = False
-    primus_args.use_turbo_rms_norm = _env_flag("USE_TURBO_RMS_NORM", "false")
 
     # Gradient stochastic rounding. Primus resolves this off the model config
     # and falls back to get_args(), which _install_primus_args_bridge populates,
@@ -1362,8 +1356,8 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
             )
             _sft_logger.log_init_params(init_cfg)
         except ImportError:
-            _orig_log_rank_0("primus_mllog not installed — MLPerf logging disabled")
-            _sft_logger = None
+            _orig_log_rank_0("primus_mllog is required when ENABLE_MLLOG=1")
+            raise
         except Exception as exc:
             _orig_log_rank_0(f"MLPerf logging init failed ({type(exc).__name__}: {exc}) — disabled")
             _sft_logger = None
@@ -1793,10 +1787,8 @@ def _llama2_lora(
             load_rng=False,
             # PrimusTurboAttention's sharded_state_dict requests a
             # core_attention._extra_state entry that the converted Llama-2-70b
-            # checkpoint does not carry, and the default "assume_ok_unexpected"
-            # raises on keys missing from the checkpoint. "log_all" lets those
-            # default-initialise; there is no attention quantisation state worth
-            # restoring when starting LoRA SFT from a converted checkpoint.
+            # checkpoint does not carry. DIST_CKPT_STRICTNESS selects how that
+            # missing key is treated. The recipe default is assume_ok_unexpected.
             dist_ckpt_strictness=os.getenv("DIST_CKPT_STRICTNESS", "assume_ok_unexpected"),
         ),
         rng=RNGConfig(seed=seed, te_rng_tracker=True),
@@ -2685,8 +2677,11 @@ def megatron_bridge_train_override(
             f"should_profile={should_profile_rank(prof_config, 0) if prof_config else False}"
         )
         print(_dbg_msg, flush=True)
-        with open("/results/profiler_debug.txt", "w") as _f:
-            _f.write(_dbg_msg + "\n")
+        try:
+            with open("/results/profiler_debug.txt", "w") as _f:
+                _f.write(_dbg_msg + "\n")
+        except FileNotFoundError:
+            pass
     if prof_config and should_profile_rank(prof_config, torch.distributed.get_rank()):
         if prof_config.use_pytorch_profiler:
             trace_dir = config.logger.tensorboard_dir or os.path.join(os.getcwd(), "torch_profiler_traces")
@@ -3206,11 +3201,14 @@ def megatron_bridge_train_override(
     if full_run_handler is not None:
         full_run_handler.finalize()
         full_run_handler.write_summary()
-        with open("/results/profiler_debug.txt", "a") as _f:
-            _f.write(
-                f"[FullRunProfiler] Collected {len(full_run_handler.kernel_stats)} unique kernels "
-                f"across {full_run_handler.current_window} windows\n"
-            )
+        try:
+            with open("/results/profiler_debug.txt", "a") as _f:
+                _f.write(
+                    f"[FullRunProfiler] Collected {len(full_run_handler.kernel_stats)} unique kernels "
+                    f"across {full_run_handler.current_window} windows\n"
+                )
+        except FileNotFoundError:
+            pass
 
     # Stop RPD profiler if still running
     if rpd and rpd_status == "running":

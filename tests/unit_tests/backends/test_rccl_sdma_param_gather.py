@@ -523,6 +523,7 @@ def test_dedicated_group_gets_zero_cta_without_mutating_original(monkeypatch):
     monkeypatch.setattr(rccl_sdma_param_gather.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(rccl_sdma_param_gather.dist, "new_group", fake_new_group)
     monkeypatch.delenv("MEGATRON_RCCL_SDMA_CTA_POLICY", raising=False)
+    monkeypatch.delenv("MEGATRON_RCCL_SDMA_GROUP_BACKEND", raising=False)
     rccl_sdma_param_gather.reset_runtime_state_for_tests()
 
     try:
