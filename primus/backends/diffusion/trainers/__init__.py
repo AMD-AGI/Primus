@@ -6,6 +6,7 @@
 
 """Trainer registrations for the Primus diffusion backend."""
 
+from .benchmark import build_amdb_benchmark_trainer
 from .fsdp2 import build_fsdp2_trainer
 
-__all__ = ["build_fsdp2_trainer"]
+__all__ = ["build_amdb_benchmark_trainer", "build_fsdp2_trainer"]
