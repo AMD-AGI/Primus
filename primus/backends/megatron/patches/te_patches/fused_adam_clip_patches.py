@@ -36,7 +36,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip_v6"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v7"
 _extension = None
 
 
@@ -118,8 +118,8 @@ def _load_extension():
     _extension = load(
         name=_EXTENSION_NAME,
         sources=[str(source)],
-        extra_cflags=["-O3", "-std=c++17"],
-        extra_cuda_cflags=["-O3", "-std=c++17"],
+        extra_cflags=["-O3", "-std=c++20"],
+        extra_cuda_cflags=["-O3", "-std=c++20"],
         with_cuda=True,
         verbose=False,
     )
