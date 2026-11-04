@@ -44,7 +44,9 @@ EO_URL="git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@${EO_COMMIT}"
 
 PY="${PYTHON:-python3}"
 
-if "${PY}" -c "import emerging_optimizers" >/dev/null 2>&1; then
+# Megatron-core 0.19 needs Lion; an older install (v0.2.0) imports but lacks it.
+EO_CHECK="from emerging_optimizers.scalar_optimizers import Lion"
+if "${PY}" -c "${EO_CHECK}" >/dev/null 2>&1; then
   echo "[install_eo] emerging_optimizers already importable; skipping install."
   exit 0
 fi
@@ -54,7 +56,7 @@ echo "[install_eo] Installing emerging_optimizers from ${EO_URL} ..."
 # container); avoid pulling an incompatible torch/transitive set.
 "${PY}" -m pip install --no-cache-dir --no-deps "${EO_URL}"
 
-if "${PY}" -c "import emerging_optimizers as e; print('[install_eo] installed', getattr(e,'__version__','?'))"; then
+if "${PY}" -c "${EO_CHECK}; import emerging_optimizers as e; print('[install_eo] installed', getattr(e,'__version__','?'))"; then
   echo "[install_eo] OK"
 else
   echo "[install_eo] ERROR: emerging_optimizers still not importable after install" >&2

@@ -120,14 +120,20 @@ def validate_turbo_grouped_gemm_with_muon(args) -> None:
     rejects the resulting expert-parallel Adam groups).
     """
     optimizer = str(getattr(args, "optimizer", ""))
-    turbo_grouped_gemm = getattr(args, "enable_primus_turbo", False) and getattr(
-        args, "use_turbo_grouped_gemm", False
+    turbo_grouped_experts = (
+        getattr(args, "enable_primus_turbo", False)
+        and getattr(args, "use_turbo_grouped_gemm", False)
+        and getattr(args, "moe_grouped_gemm", False)
+        and bool(getattr(args, "num_experts", None))
     )
-    if "muon" in optimizer and turbo_grouped_gemm:
+    if "muon" in optimizer and turbo_grouped_experts:
+        advice = "Set use_turbo_grouped_gemm=false"
+        if (getattr(args, "turbo_sync_free_moe_stage", 0) or 0) >= 2:
+            advice += " and turbo_sync_free_moe_stage below 2 (stages 2 and 3 require Turbo grouped GEMM)"
         raise ValueError(
             f"optimizer={optimizer} is incompatible with use_turbo_grouped_gemm=True: Turbo's stacked "
             "3-D expert weights are not orthogonalized by Muon and would train with "
-            f"{getattr(args, 'muon_scalar_optimizer', 'adam')} instead. Set use_turbo_grouped_gemm=false."
+            f"{getattr(args, 'muon_scalar_optimizer', 'adam')} instead. {advice}."
         )
 
 

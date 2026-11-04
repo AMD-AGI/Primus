@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -302,20 +303,21 @@ def turbo_args():
     return args
 
 
-def test_turbo_grouped_experts_match_te(turbo_args, monkeypatch):
-    """With Turbo's spec provider and grouped GEMM the routed experts are ``PrimusGroupedMLP``,
-    load the TE build's per-expert ``weight{i}`` and give its loss and gradients. Turbo trains
-    one stacked ``weights`` per linear and exposes ``weight{i}`` as frozen views of it."""
-    from types import SimpleNamespace
-
-    from primus.backends.megatron.core.extensions import transformer_engine_spec_provider as spec_provider
+def _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm):
+    """Build Inkling's layer specs through ``PrimusTurboSpecProvider``, as a Turbo run does."""
+    from primus.backends.megatron.core.extensions import (
+        transformer_engine_spec_provider as spec_provider,
+    )
     from primus.backends.megatron.core.models.inkling import inkling_layer_specs
-    from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
 
     turbo_cfg = SimpleNamespace(
         **{
             **vars(spec_provider._build_default_primus_args()),
-            **dict(enable_primus_turbo=True, use_turbo_grouped_gemm=True, use_turbo_rms_norm=True),
+            **dict(
+                enable_primus_turbo=True,
+                use_turbo_grouped_gemm=use_turbo_grouped_gemm,
+                use_turbo_rms_norm=True,
+            ),
         }
     )
 
@@ -324,12 +326,21 @@ def test_turbo_grouped_experts_match_te(turbo_args, monkeypatch):
         provider.cfg = turbo_cfg
         return provider
 
+    monkeypatch.setattr(inkling_layer_specs, "TESpecProvider", turbo_provider)
+
+
+def test_turbo_grouped_experts_match_te(turbo_args, monkeypatch):
+    """With Turbo's spec provider and grouped GEMM the routed experts are ``PrimusGroupedMLP``,
+    load the TE build's per-expert ``weight{i}`` and give its loss and gradients. Turbo trains
+    one stacked ``weights`` per linear and exposes ``weight{i}`` as frozen views of it."""
+    from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
+
     config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), gradient_accumulation_fusion=False)
     ids = torch.randint(0, 512, (2, 96), generator=torch.Generator().manual_seed(0)).cuda()
     results, state = [], None
     for turbo in (False, True):
         if turbo:
-            monkeypatch.setattr(inkling_layer_specs, "TESpecProvider", turbo_provider)
+            _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm=True)
         torch.manual_seed(0)
         model = build_inkling_model(config, vocab_size=512, max_sequence_length=4096).cuda()
         assert isinstance(model.decoder.layers[1].mlp.experts, PrimusGroupedMLP) == turbo
@@ -357,6 +368,21 @@ def test_turbo_grouped_experts_match_te(turbo_args, monkeypatch):
     for name, grad in grads_ref.items():
         assert grad.count_nonzero() > 0, name
         torch.testing.assert_close(grads[name], grad, rtol=2e-2, atol=1e-3, msg=name)
+
+
+@pytest.mark.parametrize("fp32_activations", [False, True])
+def test_turbo_provider_without_grouped_gemm_keeps_inkling_experts(fp32_activations, turbo_args, monkeypatch):
+    """Turbo on with its grouped GEMM off builds TE's grouped experts, as Inkling's own class."""
+    from primus.backends.megatron.core.transformer.inkling.moe import InklingGroupedMLP
+
+    _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm=False)
+    config = inkling_config_from_model_yaml(
+        preset("inkling_small_tiny"),
+        gradient_accumulation_fusion=False,
+        inkling_fp32_activations=fp32_activations,
+    )
+    model = build_inkling_model(config, vocab_size=512, max_sequence_length=4096)
+    assert type(model.decoder.layers[1].mlp.experts) is InklingGroupedMLP
 
 
 @pytest.mark.parametrize("keep_fp32", ["0", "1"])

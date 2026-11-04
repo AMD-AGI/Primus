@@ -69,11 +69,28 @@ def test_turbo_grouped_gemm_without_padding_rejects_unsupported_config(overrides
         validate_turbo_grouped_gemm_without_padding(_no_padding_args(**overrides))
 
 
+def _muon_args(**overrides):
+    values = dict(
+        optimizer="muon",
+        enable_primus_turbo=True,
+        use_turbo_grouped_gemm=True,
+        moe_grouped_gemm=True,
+        num_experts=8,
+        turbo_sync_free_moe_stage=0,
+    )
+    return SimpleNamespace(**{**values, **overrides})
+
+
 @pytest.mark.parametrize("optimizer", ["muon", "dist_muon", "adaptive_muon"])
 def test_turbo_grouped_gemm_rejects_muon(optimizer):
-    args = SimpleNamespace(optimizer=optimizer, enable_primus_turbo=True, use_turbo_grouped_gemm=True)
-    with pytest.raises(ValueError, match="use_turbo_grouped_gemm=false"):
-        validate_turbo_grouped_gemm_with_muon(args)
+    with pytest.raises(ValueError, match="use_turbo_grouped_gemm=false.$"):
+        validate_turbo_grouped_gemm_with_muon(_muon_args(optimizer=optimizer))
+
+
+@pytest.mark.parametrize("stage", [2, 3])
+def test_turbo_grouped_gemm_with_muon_advises_sync_free_stage(stage):
+    with pytest.raises(ValueError, match="turbo_sync_free_moe_stage below 2"):
+        validate_turbo_grouped_gemm_with_muon(_muon_args(turbo_sync_free_moe_stage=stage))
 
 
 @pytest.mark.parametrize(
@@ -82,11 +99,12 @@ def test_turbo_grouped_gemm_rejects_muon(optimizer):
         {"optimizer": "adam"},
         {"use_turbo_grouped_gemm": False},
         {"enable_primus_turbo": False},
+        {"num_experts": None},
+        {"moe_grouped_gemm": False},
     ],
 )
 def test_turbo_grouped_gemm_with_muon_allows_other_configs(overrides):
-    values = dict(optimizer="muon", enable_primus_turbo=True, use_turbo_grouped_gemm=True)
-    validate_turbo_grouped_gemm_with_muon(SimpleNamespace(**{**values, **overrides}))
+    validate_turbo_grouped_gemm_with_muon(_muon_args(**overrides))
 
 
 def _fp8_permute_args(**overrides):

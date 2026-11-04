@@ -5,9 +5,10 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 
 # Inkling (Large) 20-layer proxy (released widths, 2 dense + 18 MoE layers,
 # ~269 B) on four MI355X nodes: PP=4 across nodes (one stage per node) x EP=8
-# inside each node. Each GPU holds 1/8 of the experts of 4-5 MoE layers, about
-# what the single-node 6L proxy holds. Same recipe as
-# inkling_small-BF16-pretrain.yaml except the model and the stage split.
+# inside each node. Stages hold 5 layers each (3, 5, 5 and 5 MoE layers), so each
+# GPU holds 1/8 of the experts of up to 5 MoE layers, about what the single-node
+# 6L proxy holds. Same recipe as inkling_small-BF16-pretrain.yaml except the
+# model and the stage split.
 #
 # Stage split 5/5/5/5: a Large MoE layer is ~33 GB of weights, gradients and
 # AdamW state per GPU at EP=8, so moving a layer onto stage 0 or 1 (4 and 3
@@ -18,16 +19,13 @@ modules:
     framework: megatron
     config: pre_trainer.yaml
 
-    model: ${PRIMUS_MODEL:inkling_large}.yaml
+    model: ${PRIMUS_MODEL:inkling_large_20L}.yaml
     overrides:
       # log
       wandb_project: "Primus_Inkling_Pretrain"
       stderr_sink_level: DEBUG
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
-
-      num_layers: 20
-      moe_layer_freq: "([0]*2+[1]*18)"
 
       # hyper parameters. GBS 256 = 32 microbatches per pipeline per step
       # (DP=8), which keeps the 1F1B bubble near 3/32.
@@ -93,7 +91,8 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
-      # turbo off: TE grouped GEMM + alltoall dispatcher
+      # turbo off: TE grouped GEMM + alltoall dispatcher. Turbo (and internode
+      # DeepEP) has not been run on this recipe yet.
       enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_grouped_gemm: false

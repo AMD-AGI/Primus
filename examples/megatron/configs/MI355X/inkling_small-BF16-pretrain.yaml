@@ -90,7 +90,8 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
-      # turbo off: TE grouped GEMM + alltoall dispatcher
+      # turbo off: TE grouped GEMM + alltoall dispatcher. Turbo (and internode
+      # DeepEP) has not been run on this recipe yet.
       enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_grouped_gemm: false
