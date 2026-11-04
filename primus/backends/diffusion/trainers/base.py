@@ -37,6 +37,24 @@ except ImportError:
     wandb = None
 
 
+def benchmark_step_rates(
+    *,
+    local_batch_size: int,
+    step_time_gpu_s: float,
+    total_flops: float,
+) -> tuple[float, float]:
+    """Calculate AMDiffusionBenchmark's per-GPU FPS and TFLOPS/s metrics.
+
+    The CUDA-event duration covers one optimizer update.  ``total_flops`` is
+    the one-update, per-rank value captured by ``FlopCounterMode``.
+    """
+    if step_time_gpu_s <= 0:
+        raise ValueError(f"step_time_gpu_s must be positive, got {step_time_gpu_s}")
+    fps_gpu = float(local_batch_size) / float(step_time_gpu_s)
+    tflops_per_gpu = float(total_flops) * 1e-12 / float(step_time_gpu_s)
+    return fps_gpu, tflops_per_gpu
+
+
 def create_lr_scheduler(optimizer, scheduler_type, warmup_steps, total_steps):
     """
     Create LR scheduler with warmup support.
@@ -126,6 +144,47 @@ class ContiguousDistributedSampler(Sampler[int]):
         if not 0 <= offset <= self.stop - self.start:
             raise ValueError(f"Sampler offset out of range: {offset}")
         self.offset = offset
+
+
+class EvenSizeBatchSampler(Sampler[list[int]]):
+    """Yield only full batches for the AMDiffusionBenchmark step metrics.
+
+    The tail is padded from the front of this sampler, which is the rank-local
+    shard, so every step has ``batch_size`` examples. FPS and TFLOPS then use
+    that configured size: ``fps = train_batch_size / step_time_gpu`` and
+    ``tflops/s = total_flops / step_time_gpu``, with ``total_flops`` taken once
+    from the first step. MLPerf mode does not use this sampler, because the
+    repeated samples would be counted again.
+    """
+
+    def __init__(self, sampler: Sampler[int], batch_size: int):
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+        self.sampler = sampler
+        self.batch_size = int(batch_size)
+
+    def __iter__(self):
+        indices = list(self.sampler)
+        if not indices:
+            return
+        front = indices[: self.batch_size]
+        while len(front) < self.batch_size:
+            front = (front + front)[: self.batch_size]
+        batch: list[int] = []
+        for index in indices:
+            batch.append(index)
+            if len(batch) == self.batch_size:
+                yield batch
+                batch = []
+        if batch:
+            need = self.batch_size - len(batch)
+            yield batch + front[:need]
+
+    def __len__(self) -> int:
+        count = len(self.sampler)
+        if count == 0:
+            return 0
+        return math.ceil(count / self.batch_size)
 
 
 class BaseWanTrainer:
@@ -248,16 +307,27 @@ class BaseWanTrainer:
             )
 
         num_workers = int(self.args.get("dataloader_num_workers", 4) or 0)
-        self.dataloader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=self.per_device_train_batch_size,
-            sampler=self.sampler,
-            num_workers=num_workers,
-            collate_fn=data_collator,
-            pin_memory=True,
-            persistent_workers=num_workers > 0,
-            prefetch_factor=2 if num_workers > 0 else None,
-        )
+        loader_kwargs = {
+            "num_workers": num_workers,
+            "collate_fn": data_collator,
+            "pin_memory": True,
+            "persistent_workers": num_workers > 0,
+            "prefetch_factor": 2 if num_workers > 0 else None,
+        }
+        if bool(self.args.get("dataloader_even_batches", False)) and not mlperf_mode:
+            batch_sampler = EvenSizeBatchSampler(self.sampler, self.per_device_train_batch_size)
+            self.dataloader = torch.utils.data.DataLoader(
+                train_dataset,
+                batch_sampler=batch_sampler,
+                **loader_kwargs,
+            )
+        else:
+            self.dataloader = torch.utils.data.DataLoader(
+                train_dataset,
+                batch_size=self.per_device_train_batch_size,
+                sampler=self.sampler,
+                **loader_kwargs,
+            )
         self.eval_dataloader = None
         if self.eval_dataset is not None:
             if mlperf_mode:
@@ -363,6 +433,8 @@ class BaseWanTrainer:
 
     def _clip_grad_norm(self) -> float | torch.Tensor:
         """Clip gradient norm. Returns the total norm value."""
+        # Benchmark defaults set max_grad_norm to 0. Computing the norm anyway
+        # runs a DTensor all-reduce inside the timed step.
         if self.max_grad_norm <= 0:
             return 0.0
 
