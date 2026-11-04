@@ -2745,8 +2745,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             A tuple of reshaped hidden states and token probabilities.
         """
         self.hidden_shape = hidden_states.shape
-        # view as [num_tokens, hidden_size]
-        hidden_states = hidden_states.view(-1, self.config.hidden_size)
+        # view as [num_tokens, hidden]; hidden is moe_latent_size when the latent projections are active
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         num_tokens = hidden_states.shape[0]
 
         # when force_load_balancing with type "even", we use round-robin token_indices
