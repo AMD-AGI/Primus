@@ -44,7 +44,7 @@ Every version below was read out of the published image itself. From v26.4 on, t
 - **HunyuanWorld-Mirror post-training**, stage 1 (geometry heads) and stage 2 (Gaussian head), with MI355X configs launched through `train posttrain`. The upstream trainer is the new `third_party/HunyuanWorld-Mirror-rocm` submodule; Primus applies ROCm fixes at runtime ([#1242](https://github.com/AMD-AGI/Primus/pull/1242)).
 - **MiniMax-M3 on MegaMoE.** The fused MegaMoE expert layer accepts MiniMax-M3's `swigluoai` activation and matches the DeepEP path's loss ([#1243](https://github.com/AMD-AGI/Primus/pull/1243)).
 - **Opt-in fusions:** Primus-Turbo fused cross entropy for TP1 training ([#1245](https://github.com/AMD-AGI/Primus/pull/1245)); FlyDSL Q/K RMSNorm + RoPE and residual RMSNorm + MXFP4 QKV fusions for GPT-OSS ([#1208](https://github.com/AMD-AGI/Primus/pull/1208)), with the fused Q/K RMSNorm + RoPE now also covering head dimension 128 ([#1247](https://github.com/AMD-AGI/Primus/pull/1247)); and gradient reduce-scatter on the GPU's copy engines (`MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma`, which needs an RCCL build with CE ReduceScatter) ([#1207](https://github.com/AMD-AGI/Primus/pull/1207)).
-- **MI455X FP8 hybrid LoRA SFT proxies** for Llama-2-70B, Qwen2.5-72B, and Qwen3-235B-A22B on one GPU ([#1248](https://github.com/AMD-AGI/Primus/pull/1248)).
+- **gfx1250 FP8 hybrid LoRA SFT proxies** for Llama-2-70B, Qwen2.5-72B, and Qwen3-235B-A22B on one GPU ([#1248](https://github.com/AMD-AGI/Primus/pull/1248)).
 
 #### Performance
 
