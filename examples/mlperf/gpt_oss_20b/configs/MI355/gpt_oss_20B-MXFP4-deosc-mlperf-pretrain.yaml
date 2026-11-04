@@ -79,6 +79,11 @@ modules:
       adam_beta1: 0.9
       adam_beta2: 0.95
       adam_eps: 1.0e-5
+      # BF16 Adam moments need PRIMUS_FUSED_ADAM_MCORE_MASTER=1 so weight
+      # de-oscillation keeps its FP32 master weights; otherwise it is skipped.
+      use_precision_aware_optimizer: ${PRIMUS_USE_PRECISION_AWARE_OPTIMIZER:false}
+      exp_avg_dtype: ${PRIMUS_EXP_AVG_DTYPE:fp32}
+      exp_avg_sq_dtype: ${PRIMUS_EXP_AVG_SQ_DTYPE:fp32}
       eod_mask_loss: true
       init_method_std: 0.008
       norm_epsilon: 1.0e-6
@@ -94,7 +99,7 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
       overlap_param_gather: true
-      ddp_num_buckets: 24
+      ddp_num_buckets: ${PRIMUS_DDP_NUM_BUCKETS:32}
       ddp_average_in_collective: true
 
       # data
@@ -195,14 +200,22 @@ modules:
       weight_deosc_period: 100
       weight_deosc_ratio: 4.0
       weight_deosc_log_freq: 1
+      weight_deosc_fusion: ${PRIMUS_WEIGHT_DEOSC_FUSION:true}
+      weight_deosc_direct_qdq: ${PRIMUS_WEIGHT_DEOSC_DIRECT_QDQ:true}
       use_turbo_grouped_gemm: true
       # FlyDSL is registered for MXFP4 grouped GEMM. All expert layers are
       # MXFP4 (no first/last BF16), so fp4:flydsl covers the MoE path.
       turbo_grouped_gemm_backend: ${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:fp4:flydsl,other:hipblaslt}
-      # Placeholder for the fused grouped MLP (fc1+GLU+fc2+WGRAD). The Primus
-      # wiring is not merged yet, so this reads as a plain no-op today.
-      turbo_fused_grouped_gemm: ${PRIMUS_TURBO_FUSED_GROUPED_GEMM:false}
+      # Fused grouped MLP: fc1+GLU, fc2+dGLU and the grouped WGRAD.
+      turbo_fused_grouped_gemm: ${PRIMUS_TURBO_FUSED_GROUPED_GEMM:true}
       turbo_grouped_gemm_without_padding: ${TURBO_GROUPED_GEMM_WITHOUT_PADDING:true}
+      # Fold the permute gather into MXFP4 quantization (requires the fused
+      # grouped MLP, EP=1/TP=1 and moe_skip_identity_sort).
+      moe_skip_identity_sort: true
+      moe_permute_quant_fusion: ${PRIMUS_MOE_PERMUTE_QUANT_FUSION:true}
+      moe_backward_permute_quant_fusion: ${PRIMUS_MOE_BACKWARD_PERMUTE_QUANT_FUSION:true}
+      moe_router_bwd_bf16: ${PRIMUS_MOE_ROUTER_BWD_BF16:true}
+      use_turbo_fused_qk_rmsnorm_rope: ${PRIMUS_TURBO_FUSED_QK_RMSNORM_ROPE:true}
       use_turbo_rms_norm: true
       use_turbo_fused_act_with_probs: true
 
@@ -217,6 +230,8 @@ modules:
       # Cross entropy
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
+      use_turbo_cross_entropy: ${PRIMUS_USE_TURBO_CROSS_ENTROPY:true}
+      turbo_ce_overwrite_input: true
 
       # tensorboard
       disable_tensorboard: ${PRIMUS_DISABLE_TENSORBOARD:true}

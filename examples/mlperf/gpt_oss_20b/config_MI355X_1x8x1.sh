@@ -11,12 +11,15 @@ export MASTER_PORT=29501
 export PRIMUS_PATH=/workspace/Primus
 export PRIMUS_MLPERF=1
 export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-LM:${PYTHONPATH:-}"
-export EXP=${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml
+# MXFP4 + de-oscillation is the default recipe. For the FP8 recipe:
+#   export EXP=${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml
+export EXP="${EXP:-${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml}"
 export DATA_PATH=/data
-
-# MXFP4 + de-oscillation:
-#   export EXP=${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml
-#   export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR=mxfp4
+if [[ "${EXP}" == *MXFP4* ]]; then
+    _linear_precision=mxfp4
+else
+    _linear_precision=fp8
+fi
 
 export PRIMUS_MICRO_BATCH_SIZE=4
 export PRIMUS_GLOBAL_BATCH_SIZE=32
@@ -116,7 +119,7 @@ export MLLOG_EXPERT_PARALLELISM=1
 export MLLOG_MICRO_BATCH_SIZE=4
 MLLOG_CONFIG_FILENAME=$(basename "${BASH_SOURCE[0]}")
 export MLLOG_CONFIG_FILENAME
-export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR="${MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR:-fp8}"
+export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR="${MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR:-${_linear_precision}}"
 export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN="${MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN:-bfloat16}"
 export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM="${MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM:-bfloat16}"
 
@@ -125,3 +128,38 @@ export PRIMUS_FUSED_RESIDUAL_NORM=1
 export PRIMUS_MOE_SWIGLU_NOCAT=1
 export MLLOG_BLOCK_TPUT_LOG=0
 export MLPERF_VERBOSE_LOGS=${MLPERF_VERBOSE_LOGS:-0}
+
+if [[ "${_linear_precision}" == mxfp4 ]]; then
+    # Cross-layer residual RMSNorm; the layer-input norm also emits the MXFP4
+    # operands consumed directly by QKV.
+    export PRIMUS_FUSED_RESIDUAL_NORM_V2="${PRIMUS_FUSED_RESIDUAL_NORM_V2:-1}"
+    export PRIMUS_FUSED_RMSNORM_MXFP4_QKV="${PRIMUS_FUSED_RMSNORM_MXFP4_QKV:-1}"
+
+    # WGRAD writes main_grad in place and the grad buffer is reset by ownership
+    # transfer instead of a memset.
+    export PRIMUS_TURBO_GRAD_OWNERSHIP="${PRIMUS_TURBO_GRAD_OWNERSHIP:-1}"
+
+    # Fused AdamW: gradient clipping, BF16 gradient shards and BF16 weight
+    # writeback in one kernel.
+    export PRIMUS_FUSED_ADAM_CLIP="${PRIMUS_FUSED_ADAM_CLIP:-1}"
+    export PRIMUS_FUSED_ADAM_BF16_GRAD="${PRIMUS_FUSED_ADAM_BF16_GRAD:-1}"
+    export PRIMUS_FUSED_ADAM_BF16_WRITEBACK="${PRIMUS_FUSED_ADAM_BF16_WRITEBACK:-1}"
+    export PRIMUS_STATIC_BF16_LOSS_SCALE_CPU="${PRIMUS_STATIC_BF16_LOSS_SCALE_CPU:-1}"
+    # BF16 Adam moments. The FP32 MCore master is required by de-oscillation.
+    export PRIMUS_USE_PRECISION_AWARE_OPTIMIZER="${PRIMUS_USE_PRECISION_AWARE_OPTIMIZER:-false}"
+    if [[ "${PRIMUS_USE_PRECISION_AWARE_OPTIMIZER}" == true ]]; then
+        export PRIMUS_EXP_AVG_DTYPE="${PRIMUS_EXP_AVG_DTYPE:-bf16}"
+        export PRIMUS_EXP_AVG_SQ_DTYPE="${PRIMUS_EXP_AVG_SQ_DTYPE:-bf16}"
+        export PRIMUS_FUSED_ADAM_MCORE_MASTER=1
+    fi
+fi
+
+# Gradient ReduceScatter on RCCL copy engines. Needs an RCCL build with CE
+# ReduceScatter (ROCm/rocm-systems#12310); RCCL 2.30.7 does not have it.
+if [[ "${MEGATRON_GRAD_REDUCE_BACKEND:-}" == rccl_sdma ]]; then
+    export RCCL_CE_REDUCESCATTER=1
+    export RCCL_FORCE_CE_REDUCESCATTER=1
+    export RCCL_CE_REDUCE_PER_CHUNK=1
+    export RCCL_CE_REDUCE_MAX_BLOCKS=64
+fi
+unset _linear_precision
