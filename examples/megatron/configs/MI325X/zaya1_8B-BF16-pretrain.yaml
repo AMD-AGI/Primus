@@ -27,10 +27,10 @@ modules:
       # 262k vocabulary. On fewer GPUs, lower micro_batch_size or num_layers
       # (keep it even). Do not edit the model yaml to shrink the architecture.
       train_iters: 30
-      micro_batch_size: 216
+      micro_batch_size: 184
       # One micro batch per GPU per step at DP=8.
       # Must be divisible by micro_batch_size * data_parallel_size.
-      global_batch_size: 1728
+      global_batch_size: 1472
       seq_length: 128
       max_position_embeddings: 4096
 
