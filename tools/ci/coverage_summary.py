@@ -217,6 +217,58 @@ def render(primary: dict, title: str, secondaries: list = None) -> str:
     return "\n".join(out)
 
 
+def summarize(primary: dict, secondaries: list) -> dict:
+    """Two-report (Unit vs Unit+E2E) numbers behind render(), as plain data.
+
+    Same classification, exclusions and per-module max-merge of E2E reports as
+    the Markdown table, so a consumer (e.g. the engineering dashboard) shows
+    exactly what the CI run summary shows.
+    """
+    pa = _aggregate(primary)
+    sas = [_aggregate(s) for s in secondaries]
+
+    def e2e_cov(group, key):
+        return max((sa.get(group, {}).get(key, [0])[0] for sa in sas), default=0)
+
+    rows = []
+    tc = tn = te = 0
+    for group, entries in pa.items():
+        cov = sum(v[0] for v in entries.values())
+        stmts = sum(v[1] for v in entries.values())
+        if not stmts:
+            continue
+        e2e = sum(e2e_cov(group, k) for k in entries)
+        tc, tn, te = tc + cov, tn + stmts, te + e2e
+        rows.append(
+            {
+                "module": group,
+                "detail": False,
+                "statements": stmts,
+                "unit": _pct(cov, stmts),
+                "combined": _pct(e2e, stmts),
+            }
+        )
+        if group in DETAILED_GROUPS:
+            for k, v in entries.items():
+                if k != group and v[1] > 0:
+                    rows.append(
+                        {
+                            "module": k,
+                            "detail": True,
+                            "statements": v[1],
+                            "unit": _pct(v[0], v[1]),
+                            "combined": _pct(e2e_cov(group, k), v[1]),
+                        }
+                    )
+    return {
+        "statements": tn,
+        "unit": _pct(tc, tn),
+        "combined": _pct(te, tn),
+        "excluded": sorted(OMIT_MODULES),
+        "rows": rows,
+    }
+
+
 def _load(path: str) -> dict:
     with open(path) as f:
         return json.load(f)
