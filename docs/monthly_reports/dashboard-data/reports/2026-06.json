@@ -72,5 +72,63 @@
     "torchtitan upstream drift: pin 5fb7cc2e (2025-10-15) is now 692 commits behind upstream HEAD 04a30985 (2026-06-02), +82 since the 2026-W19 snapshot 4ebb0895. Highlights since W19 include: HybridEP torch.compile support + eager integration tests (#3360), DTensor shadow-node embedding OOB fix (#3480), Consolidate MXFP8 Linear and GroupedExperts converters (#3473), MoE consolidations [5/n-8/n] (#3386, #3389, #3423, #3425), Module-build conversion for Qwen3-VL (#3446) and Flux (#3445), RoPE refactor (#3395), Replace from_nn_module with native Module subclasses (#3398), Config-based Full DTensor for Llama3 (#3159), FSDP symmetric memory configuration (#3105), GraphTrainer separate EP process groups (#3369), rework full_inductor_compilation_pass via regional_inductor (#3346), weighted interleaved multi-source dataloader (#3063). Recommendation: urgent sync (unchanged; pin is now ~7.5 months stale).",
     "Primus-Turbo Q2 quarterly drift: CI pin advanced +48 commits (333b68d7 -> 3974fc24); benchmark pin advanced +53 commits (a4488f6c -> 3974fc24); CI and benchmark pins are now in sync. AITER pin advanced (e83f9903 -> b5e03ed1) earlier this quarter (pre-window PR #723, 2026-05-15) and is unchanged in the June window. TRITON_COMMIT remains 88b227e (introduced in W19 PR #694). Recommendation: monitor (new pin landed).",
     "No backend-gap reports regenerated this month: all six third-party submodule SHAs are unchanged in the monthly window (third_party/Megatron-LM, third_party/torchtitan, third_party/Megatron-Bridge, third_party/Emerging-Optimizers, third_party/HummingbirdXT, third_party/maxtext). The Primus-Turbo pin bump is a tracked-config backend-version change, but Primus-Turbo is not currently surfaced as a separate backend under docs/backend-gap/, so the existing megatron-upstream-main and torchtitan-upstream-main report sets are unaffected."
-  ]
+  ],
+  "merged_prs": [
+    {
+      "number": 733,
+      "title": "Merge `Release/v26.3` back into `main`",
+      "created_at": "2026-05-26T16:13:37Z",
+      "merged_at": "2026-06-01T01:20:00Z",
+      "author": "GeneDer",
+      "additions": 7287,
+      "deletions": 18,
+      "areas": [
+        "Megatron",
+        "TorchTitan"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 735,
+      "title": "feat: add quantized tensor support and fix rmsnorm",
+      "created_at": "2026-05-28T03:16:41Z",
+      "merged_at": "2026-06-01T07:40:57Z",
+      "author": "RuibinCheung",
+      "additions": 599,
+      "deletions": 42,
+      "areas": [
+        "Megatron",
+        "Core & tools"
+      ],
+      "category": "Turbo/Dependency Version Update"
+    },
+    {
+      "number": 728,
+      "title": "default NCCL_PXN_DISABLE to 0 to prevent failure of multi-node traini\u2026",
+      "created_at": "2026-05-19T02:23:02Z",
+      "merged_at": "2026-06-02T01:29:13Z",
+      "author": "amd-fuyuajin",
+      "additions": 2,
+      "deletions": 2,
+      "areas": [
+        "Examples"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 739,
+      "title": "feat(dashboard): unify weekly + monthly reports, fix responsiveness and redeploy",
+      "created_at": "2026-06-01T12:27:31Z",
+      "merged_at": "2026-06-02T09:39:53Z",
+      "author": "WangLingxun",
+      "additions": 774,
+      "deletions": 752,
+      "areas": [
+        "Core & tools",
+        "Agent skills"
+      ],
+      "category": "CI/Infra"
+    }
+  ],
+  "contributor_count": 4
 }

@@ -37,7 +37,14 @@
     "commit_gap": 1011,
     "diff_files": 2722,
     "backend_gap_regenerated": true,
-    "recommendation": "plan sync"
+    "recommendation": "plan sync",
+    "latest_release": {
+      "tag": "core_v0.20.0",
+      "version": "0.20.0",
+      "date": "2026-10-29"
+    },
+    "releases_behind": 1,
+    "commits_to_latest_release": 795
   },
   "torchtitan_status": {
     "pin_commit": "73a0e6979dd10b6b1904098eb3c8f62c18ab87ce",
@@ -50,7 +57,15 @@
     "upstream_head_date": "2026-11-01",
     "upstream_version": "0.2.2",
     "commit_gap": 1537,
-    "recommendation": "plan sync"
+    "recommendation": "plan sync",
+    "pin_tag": "v0.2.2",
+    "latest_release": {
+      "tag": "v0.4.0",
+      "version": "0.4.0",
+      "date": "2026-10-28"
+    },
+    "releases_behind": 2,
+    "commits_to_latest_release": 1499
   },
   "primus_turbo_status": {
     "drift_type": "quarterly_in_repo",
@@ -72,7 +87,14 @@
     "ci_drift_files_since_quarter_start": 143,
     "tagged_release_coverage": "pre-v0.6.0 -> just past v0.6.1",
     "pin_changed_in_window": true,
-    "recommendation": "monitor"
+    "recommendation": "monitor",
+    "latest_release": {
+      "tag": "v0.6.1",
+      "version": "0.6.1",
+      "date": "2026-10-21"
+    },
+    "releases_behind": 1,
+    "commits_to_latest_release": 1
   },
   "recommendations": {
     "megatron": "plan sync",
@@ -80,7 +102,6 @@
     "primus_turbo": "monitor"
   },
   "key_findings": [
-    "Continuity-based window 2026-10-01 17:02 GMT+8 -> 2026-11-01 17:02 GMT+8 (~31 days). gap_detected = true because window_start (2026-10-01) is earlier than the first day of the current calendar month (2026-11-01), so this run backfills late-October activity a plain calendar-month window would have dropped. All prior weekly+monthly report windows merge into one contiguous coverage group (no >7-day gap), and the span is within the healthy monthly range (<45 days).",
     "80 PRs merged to main in the window. Largest categories: Other 24 (Primus Projection backends, SpecForge, new model/recipe work for GLM-5.3, ZAYA1, Inkling, MI455X, AutoModel diffusion), Bug Fix 22, Performance Optimization 16, CI/Infra 8, Turbo/Dependency Version Update 6, Docs 3, Refactor 1.",
     "Megatron-LM pin CHANGED in-window via PR #1321 (merged 2026-10-29): third_party/Megatron-LM and primus/_thirdparty.lock moved d3528a21 (Core 0.16.0rc0) -> core_v0.19.2 release tag 4b4acac9 (committed 2026-09-18). This is a backend version/pin change, so the Megatron backend-gap report set was regenerated. backend_gap_updated = true.",
     "After the bump the Megatron pin (core_v0.19.2, 4b4acac9) is 1011 commits behind upstream main HEAD 037b883c (Core 0.21.0, 2026-11-01), down from ~1662 before the bump. The tree diff is 2722 files / 531548 insertions / 293033 deletions; the release tag carries 28 release-only commits not on main. Recommendation: plan sync.",
@@ -89,5 +110,1323 @@
     "Turbo work landing this quarter underpins several in-window Primus PRs: Mega MoE memory sized to dispatched rows (#1271, Turbo #566/#568), GPT-OSS on MegaMoE with expert biases (#1285), FlyDSL kernels ported to the 0.3.x API (#1275), and tensorwise-FP8 Qwen3-30B-A3B on MI355X (#1247).",
     "Other in-window submodule movement with no backend-gap report set (noted, not regenerated): maxtext (PRs #1228, #1289) and Automodel (PR #1314); HunyuanWorld-Mirror-rocm added as a new submodule (PR #1242). Only Megatron-LM and torchtitan have backend-gap report sets, and only Megatron-LM changed.",
     "Notable Megatron compatibility follow-up: PR #1340 makes MegaMoE run on Megatron-LM core_v0.19.2 with PrimusTopKRouter, and Megatron-Bridge SFT fixes (#1291, #1297, #1298) landed alongside the core bump."
-  ]
+  ],
+  "dependencies": [
+    {
+      "name": "torchtitan",
+      "path": "third_party/torchtitan",
+      "upstream": "pytorch/torchtitan",
+      "pin_commit": "73a0e697",
+      "pin_date": "2026-02-20",
+      "pin_release": "v0.2.2",
+      "latest_release": {
+        "tag": "v0.4.0",
+        "date": "2026-10-28"
+      },
+      "releases_behind": 2,
+      "commits_to_latest_release": 1499,
+      "last_bump": {
+        "date": "2026-07-17",
+        "pr": 871,
+        "title": "feat(torchtitan): upgrade to v0.2.2 for torch 2.12 + GPT-OSS support"
+      },
+      "bumps_last_12_months": 2
+    },
+    {
+      "name": "Megatron-LM",
+      "path": "third_party/Megatron-LM",
+      "upstream": "NVIDIA/Megatron-LM",
+      "pin_commit": "4b4acac9",
+      "pin_date": "2026-09-18",
+      "pin_release": "core_v0.19.2",
+      "latest_release": {
+        "tag": "core_v0.20.0",
+        "date": "2026-10-29"
+      },
+      "releases_behind": 1,
+      "commits_to_latest_release": 795,
+      "last_bump": {
+        "date": "2026-10-29",
+        "pr": 1321,
+        "title": "chore(megatron): bump Megatron-LM to core_v0.19.2"
+      },
+      "bumps_last_12_months": 3
+    },
+    {
+      "name": "maxtext",
+      "path": "third_party/maxtext",
+      "upstream": "ROCm/maxtext",
+      "pin_commit": "8d1d43c0",
+      "pin_date": "2026-10-12",
+      "pin_release": null,
+      "latest_release": null,
+      "releases_behind": null,
+      "commits_to_latest_release": null,
+      "last_bump": {
+        "date": "2026-10-26",
+        "pr": 1289,
+        "title": "maxtext: bump to release/v26.9, silence TE return_max_logit warnings, default autotune level 3"
+      },
+      "bumps_last_12_months": 10
+    },
+    {
+      "name": "Emerging-Optimizers",
+      "path": "third_party/Emerging-Optimizers",
+      "upstream": "NVIDIA-NeMo/Emerging-Optimizers",
+      "pin_commit": "93d9eb3a",
+      "pin_date": "2025-11-25",
+      "pin_release": "v0.1.0 + 4",
+      "latest_release": {
+        "tag": "v0.4.0",
+        "date": "2026-08-07"
+      },
+      "releases_behind": 4,
+      "commits_to_latest_release": 141,
+      "last_bump": {
+        "date": "2025-12-09",
+        "pr": 342,
+        "title": "feat(moun): support moun optimizer"
+      },
+      "bumps_last_12_months": 1
+    },
+    {
+      "name": "Megatron-Bridge",
+      "path": "third_party/Megatron-Bridge",
+      "upstream": "NVIDIA-NeMo/Megatron-Bridge",
+      "pin_commit": "9577b128",
+      "pin_date": "2026-01-18",
+      "pin_release": null,
+      "latest_release": {
+        "tag": "v0.7.0",
+        "date": "2026-10-30"
+      },
+      "releases_behind": 10,
+      "commits_to_latest_release": 2286,
+      "last_bump": {
+        "date": "2026-01-22",
+        "pr": 500,
+        "title": "Post-Training Framework(Megatron-Bridge) Support"
+      },
+      "bumps_last_12_months": 1
+    },
+    {
+      "name": "mamba",
+      "path": "third_party/mamba",
+      "upstream": "AndreasKaratzas/mamba",
+      "pin_commit": "4d67c534",
+      "pin_date": "2026-01-21",
+      "pin_release": null,
+      "latest_release": null,
+      "releases_behind": null,
+      "commits_to_latest_release": null,
+      "last_bump": {
+        "date": "2026-07-29",
+        "pr": 676,
+        "title": "feat(megatron): Add support for Gated Delta Net (GDN) & Kimi Delta Attention (KDA)"
+      },
+      "bumps_last_12_months": 1
+    },
+    {
+      "name": "HummingbirdXT",
+      "path": "third_party/HummingbirdXT",
+      "upstream": "AMD-AGI/HummingbirdXT",
+      "pin_commit": "ed7b7bd0",
+      "pin_date": "2026-02-02",
+      "pin_release": null,
+      "latest_release": null,
+      "releases_behind": null,
+      "commits_to_latest_release": null,
+      "last_bump": {
+        "date": "2026-02-03",
+        "pr": 533,
+        "title": "Add HummingbirdXT backend integration"
+      },
+      "bumps_last_12_months": 1
+    },
+    {
+      "name": "maxdiffusion",
+      "path": "third_party/maxdiffusion",
+      "upstream": "AI-Hypercomputer/maxdiffusion",
+      "pin_commit": "68e06965",
+      "pin_date": "2026-03-03",
+      "pin_release": null,
+      "latest_release": null,
+      "releases_behind": null,
+      "commits_to_latest_release": null,
+      "last_bump": {
+        "date": "2026-08-22",
+        "pr": 925,
+        "title": "feat(maxtext): Maxtext & MaxDiffusion refactor"
+      },
+      "bumps_last_12_months": 1
+    },
+    {
+      "name": "Automodel",
+      "path": "third_party/Automodel",
+      "upstream": "NVIDIA-NeMo/Automodel",
+      "pin_commit": "bd1ca5a0",
+      "pin_date": "2026-10-01",
+      "pin_release": null,
+      "latest_release": {
+        "tag": "v0.7.0",
+        "date": "2026-10-21"
+      },
+      "releases_behind": 1,
+      "commits_to_latest_release": 94,
+      "last_bump": {
+        "date": "2026-10-27",
+        "pr": 1314,
+        "title": "feat(automodel): rename backend, AutoModel bump, patch-registered hooks, DDP AC repair, profiler"
+      },
+      "bumps_last_12_months": 2
+    },
+    {
+      "name": "HunyuanWorld-Mirror-rocm",
+      "path": "third_party/HunyuanWorld-Mirror-rocm",
+      "upstream": "Tencent-Hunyuan/HunyuanWorld-Mirror",
+      "pin_commit": "c61300e4",
+      "pin_date": "2026-05-27",
+      "pin_release": null,
+      "latest_release": null,
+      "releases_behind": null,
+      "commits_to_latest_release": null,
+      "last_bump": {
+        "date": "2026-10-13",
+        "pr": 1242,
+        "title": "feat(worldmirror): add HunyuanWorld-Mirror stage 1 and stage 2 training"
+      },
+      "bumps_last_12_months": 1
+    },
+    {
+      "name": "Primus-Turbo",
+      "path": "CI: PRIMUS_TURBO_COMMIT",
+      "upstream": "AMD-AGI/Primus-Turbo",
+      "pin_commit": "d04ffd9b",
+      "pin_date": "2026-10-21",
+      "pin_release": "v0.6.0 + 8",
+      "latest_release": {
+        "tag": "v0.6.1",
+        "date": "2026-10-21"
+      },
+      "releases_behind": 1,
+      "commits_to_latest_release": 1,
+      "last_bump": null,
+      "bumps_last_12_months": null
+    }
+  ],
+  "merged_prs": [
+    {
+      "number": 1209,
+      "title": "[Fix] Tune batch size in Zebra Llama-Mamba 3B BF16 pretraining config to avoid MI300 OOM",
+      "created_at": "2026-09-30T22:27:58Z",
+      "merged_at": "2026-10-01T20:43:25Z",
+      "author": "kailashg26",
+      "additions": 2,
+      "deletions": 2,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1215,
+      "title": "fix(megatron): disable Triton recompiles for zebra Llama KDA 1B",
+      "created_at": "2026-10-01T20:29:29Z",
+      "merged_at": "2026-10-02T00:33:42Z",
+      "author": "kailashg26",
+      "additions": 19,
+      "deletions": 0,
+      "areas": [
+        "Megatron",
+        "Core runtime"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1203,
+      "title": "feat(projection): Adding a MaxText/JAX backend to Primus Projection",
+      "created_at": "2026-09-29T21:48:25Z",
+      "merged_at": "2026-10-02T14:46:12Z",
+      "author": "araina-amd",
+      "additions": 5367,
+      "deletions": 251,
+      "areas": [
+        "Core runtime",
+        "Projection",
+        "TorchTitan",
+        "MaxText"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1220,
+      "title": "Revert \"feat(projection): Adding a MaxText/JAX backend to Primus Projection\"",
+      "created_at": "2026-10-03T09:38:20Z",
+      "merged_at": "2026-10-03T09:38:35Z",
+      "author": "wenxie-amd",
+      "additions": 251,
+      "deletions": 5367,
+      "areas": [
+        "Core runtime",
+        "Projection",
+        "TorchTitan",
+        "MaxText"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1202,
+      "title": "feat(projection): Adding a TorchTitan backend to Primus Projection",
+      "created_at": "2026-09-29T21:47:13Z",
+      "merged_at": "2026-10-03T13:38:31Z",
+      "author": "araina-amd",
+      "additions": 3359,
+      "deletions": 241,
+      "areas": [
+        "Core runtime",
+        "Projection",
+        "TorchTitan"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1221,
+      "title": "chore(mlperf): update Training ruleset to 6.1",
+      "created_at": "2026-10-04T09:54:42Z",
+      "merged_at": "2026-10-05T13:42:26Z",
+      "author": "suachong",
+      "additions": 10,
+      "deletions": 10,
+      "areas": [
+        "MLPerf",
+        "Dependencies"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1223,
+      "title": "fix(mlperf): consume merged precision logging events",
+      "created_at": "2026-10-05T20:52:06Z",
+      "merged_at": "2026-10-06T01:10:13Z",
+      "author": "suachong",
+      "additions": 60,
+      "deletions": 35,
+      "areas": [
+        "MLPerf",
+        "Dependencies",
+        "Megatron-Bridge"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1219,
+      "title": "perf(megatron): fuse GPT-OSS clipping and Adam state traffic",
+      "created_at": "2026-10-03T01:11:27Z",
+      "merged_at": "2026-10-06T01:21:24Z",
+      "author": "suachong",
+      "additions": 1215,
+      "deletions": 12,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1207,
+      "title": "feat(megatron): expose CE gradient ReduceScatter opt-in",
+      "created_at": "2026-09-30T18:57:58Z",
+      "merged_at": "2026-10-06T05:14:30Z",
+      "author": "suachong",
+      "additions": 263,
+      "deletions": 85,
+      "areas": [
+        "Megatron",
+        "MLPerf"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1208,
+      "title": "feat(gptoss): integrate FlyDSL QK RoPE and RMSNorm-MXFP4 QKV fusions",
+      "created_at": "2026-09-30T19:51:25Z",
+      "merged_at": "2026-10-06T05:15:07Z",
+      "author": "suachong",
+      "additions": 585,
+      "deletions": 7,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1222,
+      "title": "perf(megatron): integrate fused GPT-OSS deoscillation",
+      "created_at": "2026-10-04T16:29:38Z",
+      "merged_at": "2026-10-06T05:15:42Z",
+      "author": "suachong",
+      "additions": 557,
+      "deletions": 32,
+      "areas": [
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1225,
+      "title": "perf(megatron): tune MI325X env settings and extend MI325X perf configs",
+      "created_at": "2026-10-06T15:28:46Z",
+      "merged_at": "2026-10-07T00:05:39Z",
+      "author": "amd-fuyuajin",
+      "additions": 42,
+      "deletions": 0,
+      "areas": [
+        "Megatron",
+        "Perf & convergence tools"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1206,
+      "title": "SpecForge launch modes and homogeneous multi-node capture/offline",
+      "created_at": "2026-09-30T18:43:23Z",
+      "merged_at": "2026-10-07T00:07:24Z",
+      "author": "yudigege86",
+      "additions": 386,
+      "deletions": 21,
+      "areas": [
+        "SpecForge"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1226,
+      "title": "[OOB Release] add JAX v26.8 dockerfile",
+      "created_at": "2026-10-06T19:59:47Z",
+      "merged_at": "2026-10-07T18:58:37Z",
+      "author": "hlira-amd",
+      "additions": 612,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1228,
+      "title": "feat(maxtext): align MaxText backend with v26.8",
+      "created_at": "2026-10-07T14:59:28Z",
+      "merged_at": "2026-10-07T19:00:32Z",
+      "author": "amd-fuyuajin",
+      "additions": 27,
+      "deletions": 25,
+      "areas": [
+        "MaxText",
+        "Dependencies",
+        "Perf & convergence tools"
+      ],
+      "category": "Turbo/Dependency Version Update"
+    },
+    {
+      "number": 1229,
+      "title": "feat(tools): add an end-to-end convergence test for Megatron and MaxText",
+      "created_at": "2026-10-07T15:30:48Z",
+      "merged_at": "2026-10-07T19:01:14Z",
+      "author": "amd-fuyuajin",
+      "additions": 7412,
+      "deletions": 0,
+      "areas": [
+        "Perf & convergence tools",
+        "Agent skills",
+        "MaxText",
+        "Model configs"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1230,
+      "title": "feat(glm5_next): add GLM-5.3-Flash (KDA + DSA hybrid with mHC) support",
+      "created_at": "2026-10-07T20:02:08Z",
+      "merged_at": "2026-10-07T23:52:19Z",
+      "author": "yuankaichen-amd",
+      "additions": 2773,
+      "deletions": 15,
+      "areas": [
+        "Megatron",
+        "Model configs",
+        "Examples",
+        "Core runtime"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1218,
+      "title": "perf(mi355x): tune pretrain configurations",
+      "created_at": "2026-10-02T23:21:33Z",
+      "merged_at": "2026-10-08T00:10:41Z",
+      "author": "vidushi8",
+      "additions": 68,
+      "deletions": 20,
+      "areas": [
+        "Megatron",
+        "TorchTitan"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1224,
+      "title": "feat(projection): DLRM/HSTU explicit backward GEMMs and arch-scaled attention epilogue",
+      "created_at": "2026-10-06T02:20:31Z",
+      "merged_at": "2026-10-08T03:28:33Z",
+      "author": "araina-amd",
+      "additions": 271,
+      "deletions": 25,
+      "areas": [
+        "Core runtime",
+        "Projection"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1232,
+      "title": "feat(projection): MaxText/JAX backend for Primus Projection",
+      "created_at": "2026-10-08T00:03:52Z",
+      "merged_at": "2026-10-09T00:17:01Z",
+      "author": "araina-amd",
+      "additions": 2052,
+      "deletions": 54,
+      "areas": [
+        "Core runtime",
+        "Projection",
+        "MaxText"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1236,
+      "title": "ci: bump Primus-Turbo to e2d9f1d7 and stop forcing the DeepEP cheap fence in MoE recipes",
+      "created_at": "2026-10-09T01:38:36Z",
+      "merged_at": "2026-10-09T04:43:14Z",
+      "author": "Xiaoming-AMD",
+      "additions": 3,
+      "deletions": 41,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Turbo/Dependency Version Update"
+    },
+    {
+      "number": 1237,
+      "title": "fix(runner): keep a preset HIP_VISIBLE_DEVICES instead of overwriting it",
+      "created_at": "2026-10-09T03:14:54Z",
+      "merged_at": "2026-10-09T10:22:27Z",
+      "author": "WangLingxun",
+      "additions": 46,
+      "deletions": 2,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1235,
+      "title": "docs(release): update documentation for v26.8",
+      "created_at": "2026-10-08T19:36:46Z",
+      "merged_at": "2026-10-09T18:04:09Z",
+      "author": "amd-fuyuajin",
+      "additions": 4021,
+      "deletions": 1009,
+      "areas": [
+        "Core & tools",
+        "Agent skills"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 1234,
+      "title": "fix(torchtitan): gate the primus_turbo attention converter on use_turbo_attention",
+      "created_at": "2026-10-08T10:49:23Z",
+      "merged_at": "2026-10-10T04:16:04Z",
+      "author": "WangLingxun",
+      "additions": 82,
+      "deletions": 27,
+      "areas": [
+        "TorchTitan"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1243,
+      "title": "feat(mega_moe): accept MiniMax-M3's swigluoai (quick_geglu) activation",
+      "created_at": "2026-10-10T01:31:18Z",
+      "merged_at": "2026-10-10T04:57:18Z",
+      "author": "Xiaoming-AMD",
+      "additions": 171,
+      "deletions": 19,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1240,
+      "title": "perf(megatron): integrate opt-in BF16 router backward GEMMs",
+      "created_at": "2026-10-09T16:58:23Z",
+      "merged_at": "2026-10-10T08:37:49Z",
+      "author": "suachong",
+      "additions": 236,
+      "deletions": 0,
+      "areas": [
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1241,
+      "title": "perf(moe): defer forward and backward gathers to Turbo MXFP4 quantization",
+      "created_at": "2026-10-09T17:08:36Z",
+      "merged_at": "2026-10-11T01:42:42Z",
+      "author": "suachong",
+      "additions": 717,
+      "deletions": 17,
+      "areas": [
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1040,
+      "title": "fix(deepseek_v4): contract mHC comb on the column-normalised axis",
+      "created_at": "2026-08-25T19:32:33Z",
+      "merged_at": "2026-10-12T00:23:16Z",
+      "author": "yuankaichen-amd",
+      "additions": 3,
+      "deletions": 1,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1130,
+      "title": "refactor(examples): group per-backend material under its backend dire…",
+      "created_at": "2026-09-10T03:08:09Z",
+      "merged_at": "2026-10-12T05:28:58Z",
+      "author": "Xiaoming-AMD",
+      "additions": 188,
+      "deletions": 531,
+      "areas": [
+        "Megatron",
+        "MaxText",
+        "Core & tools",
+        "Other",
+        "Agent skills",
+        "Examples",
+        "Model configs",
+        "Projection"
+      ],
+      "category": "Refactor"
+    },
+    {
+      "number": 1247,
+      "title": "perf(qwen3): Qwen3-30B-A3B FP8 on MI355X to 40k tokens/s/GPU with Primus-Turbo tensorwise",
+      "created_at": "2026-10-10T15:42:57Z",
+      "merged_at": "2026-10-12T08:06:03Z",
+      "author": "Xiaoming-AMD",
+      "additions": 242,
+      "deletions": 28,
+      "areas": [
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1242,
+      "title": "feat(worldmirror): add HunyuanWorld-Mirror stage 1 and stage 2 training",
+      "created_at": "2026-10-09T22:02:25Z",
+      "merged_at": "2026-10-12T23:18:22Z",
+      "author": "kailashg26",
+      "additions": 1707,
+      "deletions": 0,
+      "areas": [
+        "WorldMirror",
+        "Model configs",
+        "Dependencies"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1248,
+      "title": "feat(mi455x): add FP8 hybrid LoRA SFT proxy recipes",
+      "created_at": "2026-10-12T17:08:00Z",
+      "merged_at": "2026-10-14T08:16:22Z",
+      "author": "kailashg26",
+      "additions": 469,
+      "deletions": 0,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1249,
+      "title": "fix(megatron): use the real model vocab under mock data",
+      "created_at": "2026-10-12T23:06:54Z",
+      "merged_at": "2026-10-14T09:05:14Z",
+      "author": "vidushi8",
+      "additions": 171,
+      "deletions": 3,
+      "areas": [
+        "Model configs",
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1252,
+      "title": "perf(mi355x): tune GPT-OSS 20B and DeepSeek V2 Lite pretrain configs",
+      "created_at": "2026-10-14T18:33:00Z",
+      "merged_at": "2026-10-15T01:44:46Z",
+      "author": "vidushi8",
+      "additions": 121,
+      "deletions": 28,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1245,
+      "title": "Add opt-in Turbo fused cross entropy for TP1 training",
+      "created_at": "2026-10-10T07:32:33Z",
+      "merged_at": "2026-10-15T02:07:22Z",
+      "author": "suachong",
+      "additions": 414,
+      "deletions": 19,
+      "areas": [
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1199,
+      "title": "[Megatron-LM] Add ZAYA1-8B Megatron pretraining implementation",
+      "created_at": "2026-09-28T22:56:47Z",
+      "merged_at": "2026-10-15T05:53:38Z",
+      "author": "clairesonglee",
+      "additions": 1714,
+      "deletions": 4,
+      "areas": [
+        "Megatron",
+        "Model configs",
+        "Core runtime"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1260,
+      "title": "feat(tools/perf): run control, provenance, failure reasons, diffusion/DLRM backend and Excel report",
+      "created_at": "2026-10-15T18:25:27Z",
+      "merged_at": "2026-10-16T01:45:28Z",
+      "author": "amd-fuyuajin",
+      "additions": 8060,
+      "deletions": 1347,
+      "areas": [
+        "Perf & convergence tools"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1257,
+      "title": "fix(megatron): recommend and verify expandable segments for Turbo grouped GEMM (AIMA-242)",
+      "created_at": "2026-10-15T09:03:25Z",
+      "merged_at": "2026-10-16T02:20:29Z",
+      "author": "RuibinCheung",
+      "additions": 187,
+      "deletions": 0,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1251,
+      "title": "feat(auto_benchmark): add release suites, backends and record the setup with each result",
+      "created_at": "2026-10-14T00:12:56Z",
+      "merged_at": "2026-10-16T02:46:31Z",
+      "author": "kailashg26",
+      "additions": 3912,
+      "deletions": 821,
+      "areas": [
+        "Core & tools"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1265,
+      "title": "fix(glm5_next): run packed KDA and DSA under context parallel",
+      "created_at": "2026-10-18T17:36:28Z",
+      "merged_at": "2026-10-19T00:19:02Z",
+      "author": "yuankaichen-amd",
+      "additions": 596,
+      "deletions": 11,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1254,
+      "title": "fix(glm5_next): accept text-only HF checkpoint names in the GLM-5.3 loader",
+      "created_at": "2026-10-14T19:59:28Z",
+      "merged_at": "2026-10-19T00:20:03Z",
+      "author": "yuankaichen-amd",
+      "additions": 53,
+      "deletions": 5,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1261,
+      "title": "feat(convergence_test): add maxtext llama2_7B fp8 recipe for CDNA4",
+      "created_at": "2026-10-16T16:37:01Z",
+      "merged_at": "2026-10-19T00:25:04Z",
+      "author": "yeandy",
+      "additions": 81,
+      "deletions": 1,
+      "areas": [
+        "Perf & convergence tools"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1233,
+      "title": "feat(torchtitan): add Triton fused AdamW with a device-sized grid, on by default",
+      "created_at": "2026-10-08T09:12:44Z",
+      "merged_at": "2026-10-19T00:30:04Z",
+      "author": "WangLingxun",
+      "additions": 1269,
+      "deletions": 0,
+      "areas": [
+        "TorchTitan",
+        "Core runtime",
+        "Benchmark",
+        "Model configs"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1255,
+      "title": "docs(specforge): publish SpecForge guides on the ROCm docs site",
+      "created_at": "2026-10-14T20:53:37Z",
+      "merged_at": "2026-10-19T07:29:40Z",
+      "author": "yudigege86",
+      "additions": 541,
+      "deletions": 412,
+      "areas": [
+        "SpecForge"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 1269,
+      "title": "feat(zaya1): add FP8 recipes that train cold on mock data",
+      "created_at": "2026-10-19T17:39:37Z",
+      "merged_at": "2026-10-20T02:10:25Z",
+      "author": "clairesonglee",
+      "additions": 668,
+      "deletions": 38,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1266,
+      "title": "feat(tools/perf): record the platform with every batch; fix TorchTitan and Megatron-Bridge TFLOP/s",
+      "created_at": "2026-10-19T02:00:59Z",
+      "merged_at": "2026-10-20T02:58:40Z",
+      "author": "amd-fuyuajin",
+      "additions": 1335,
+      "deletions": 89,
+      "areas": [
+        "MaxText",
+        "Perf & convergence tools"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1272,
+      "title": "mi455x_v1: add MI455X (gfx1250) DeepSeek-V3 proxy and GPT-OSS examples",
+      "created_at": "2026-10-20T04:09:32Z",
+      "merged_at": "2026-10-21T00:05:06Z",
+      "author": "lhzhang333",
+      "additions": 935,
+      "deletions": 0,
+      "areas": [
+        "Megatron",
+        "Examples"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1271,
+      "title": "feat(mega_moe): adopt the Mega MoE buffers sized to the dispatched rows (Primus-Turbo #566, #568)",
+      "created_at": "2026-10-20T03:15:25Z",
+      "merged_at": "2026-10-21T00:23:03Z",
+      "author": "Xiaoming-AMD",
+      "additions": 58,
+      "deletions": 33,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1274,
+      "title": "ci/docker, torchtitan: v26.8 CI follow-ups (origami -Bsymbolic, SAC profiler ops, perf_host flake)",
+      "created_at": "2026-10-20T09:37:05Z",
+      "merged_at": "2026-10-21T06:08:57Z",
+      "author": "WangLingxun",
+      "additions": 84,
+      "deletions": 9,
+      "areas": [
+        "TorchTitan",
+        "Examples"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1275,
+      "title": "fix(flydsl): port Primus FlyDSL kernels to the 0.3.x API",
+      "created_at": "2026-10-20T12:54:36Z",
+      "merged_at": "2026-10-21T07:25:26Z",
+      "author": "Xiaoming-AMD",
+      "additions": 97,
+      "deletions": 95,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Turbo/Dependency Version Update"
+    },
+    {
+      "number": 1285,
+      "title": " feat(mega_moe): run GPT-OSS on MegaMoE (Turbo bump, expert biases)",
+      "created_at": "2026-10-21T06:29:06Z",
+      "merged_at": "2026-10-21T09:18:30Z",
+      "author": "Xiaoming-AMD",
+      "additions": 216,
+      "deletions": 104,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1273,
+      "title": "fix(megatron): stop sys.modules scans from building unused apex ops",
+      "created_at": "2026-10-20T07:37:51Z",
+      "merged_at": "2026-10-21T14:17:08Z",
+      "author": "lhzhang333",
+      "additions": 319,
+      "deletions": 48,
+      "areas": [
+        "Megatron",
+        "Core runtime"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1281,
+      "title": "fix(megatron): record_stream prefetched batches on the consumer stream",
+      "created_at": "2026-10-20T16:59:48Z",
+      "merged_at": "2026-10-22T01:13:36Z",
+      "author": "vidushi8",
+      "additions": 89,
+      "deletions": 4,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1283,
+      "title": "ci: bump the MaxText CI image to maxtext-v26.8",
+      "created_at": "2026-10-21T03:41:19Z",
+      "merged_at": "2026-10-22T01:50:32Z",
+      "author": "WangLingxun",
+      "additions": 16,
+      "deletions": 3,
+      "areas": [
+        "Core runtime"
+      ],
+      "category": "Turbo/Dependency Version Update"
+    },
+    {
+      "number": 1286,
+      "title": "feat(megatron): reuse the logits buffer in TE fused cross entropy (overwrite_input)",
+      "created_at": "2026-10-21T21:15:14Z",
+      "merged_at": "2026-10-23T14:16:25Z",
+      "author": "vidushi8",
+      "additions": 205,
+      "deletions": 0,
+      "areas": [
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1303,
+      "title": "chore(config): update MI300X Llama-3.1-70B FP8 batch size",
+      "created_at": "2026-10-23T22:17:19Z",
+      "merged_at": "2026-10-26T00:31:38Z",
+      "author": "clairesonglee",
+      "additions": 1,
+      "deletions": 1,
+      "areas": [
+        "TorchTitan"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1294,
+      "title": "update the mi325x yaml config files for v26.9 image ",
+      "created_at": "2026-10-23T03:22:50Z",
+      "merged_at": "2026-10-26T00:36:11Z",
+      "author": "amd-fuyuajin",
+      "additions": 6,
+      "deletions": 0,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1289,
+      "title": "maxtext: bump to release/v26.9, silence TE return_max_logit warnings, default autotune level 3",
+      "created_at": "2026-10-22T13:44:00Z",
+      "merged_at": "2026-10-26T00:38:25Z",
+      "author": "amd-fuyuajin",
+      "additions": 140,
+      "deletions": 9,
+      "areas": [
+        "MaxText",
+        "Dependencies"
+      ],
+      "category": "Turbo/Dependency Version Update"
+    },
+    {
+      "number": 1262,
+      "title": "fix(hybrid): point the Zebra converter wrappers at a KDA checkpoint",
+      "created_at": "2026-10-16T19:05:40Z",
+      "merged_at": "2026-10-26T00:42:06Z",
+      "author": "vanshbhatia-amd",
+      "additions": 15,
+      "deletions": 7,
+      "areas": [
+        "Core & tools"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1276,
+      "title": "feat(zaya1): size MI355X 8B batches to GPU memory",
+      "created_at": "2026-10-20T16:01:27Z",
+      "merged_at": "2026-10-27T00:08:25Z",
+      "author": "clairesonglee",
+      "additions": 22,
+      "deletions": 19,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1176,
+      "title": "fix(megatron): QK-Norm on MLA decoupled-RoPE to stop hybrid divergence",
+      "created_at": "2026-09-18T14:07:42Z",
+      "merged_at": "2026-10-27T00:39:20Z",
+      "author": "vanshbhatia-amd",
+      "additions": 507,
+      "deletions": 0,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1216,
+      "title": "fix(torchtitan): bound DeepSeek compile at routed experts",
+      "created_at": "2026-10-02T18:38:20Z",
+      "merged_at": "2026-10-27T00:45:02Z",
+      "author": "vidushi8",
+      "additions": 163,
+      "deletions": 231,
+      "areas": [
+        "TorchTitan"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1290,
+      "title": "fix(hybrid): read the FLA switches without requiring Megatron-LM args",
+      "created_at": "2026-10-22T17:52:52Z",
+      "merged_at": "2026-10-27T00:52:16Z",
+      "author": "clairesonglee",
+      "additions": 89,
+      "deletions": 16,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1291,
+      "title": "fix(megatron-bridge): load SQuAD by its namespaced id in the Zebra SFT configs",
+      "created_at": "2026-10-22T19:11:22Z",
+      "merged_at": "2026-10-27T00:56:48Z",
+      "author": "clairesonglee",
+      "additions": 3,
+      "deletions": 3,
+      "areas": [
+        "Model configs"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1278,
+      "title": "add zayz1 model into the benchmarking test list",
+      "created_at": "2026-10-20T16:18:30Z",
+      "merged_at": "2026-10-27T00:58:13Z",
+      "author": "amd-fuyuajin",
+      "additions": 6,
+      "deletions": 0,
+      "areas": [
+        "Perf & convergence tools"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1315,
+      "title": "fix(specforge): install tensorboard with its dependencies",
+      "created_at": "2026-10-26T17:55:38Z",
+      "merged_at": "2026-10-27T00:59:59Z",
+      "author": "yudigege86",
+      "additions": 87,
+      "deletions": 6,
+      "areas": [
+        "SpecForge"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1301,
+      "title": "fix(runner): stop MoE hangs on hosts with amdgpu DRM older than 3.64",
+      "created_at": "2026-10-23T18:55:50Z",
+      "merged_at": "2026-10-27T01:02:13Z",
+      "author": "amd-fuyuajin",
+      "additions": 129,
+      "deletions": 0,
+      "areas": [
+        "CI & tests",
+        "Docs"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1312,
+      "title": "mi455x_v2: add MI455X Llama-3.1-8B example (FlyDSL attention) and hipBLASLt GEMM tuning",
+      "created_at": "2026-10-26T09:24:42Z",
+      "merged_at": "2026-10-27T05:06:45Z",
+      "author": "lhzhang333",
+      "additions": 1058,
+      "deletions": 25,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1314,
+      "title": "feat(automodel): rename backend, AutoModel bump, patch-registered hooks, DDP AC repair, profiler",
+      "created_at": "2026-10-26T17:31:38Z",
+      "merged_at": "2026-10-27T05:11:45Z",
+      "author": "mvstrauss",
+      "additions": 3908,
+      "deletions": 741,
+      "areas": [
+        "AutoModel",
+        "Model configs",
+        "Examples",
+        "Dependencies",
+        "Other backends",
+        "Projection",
+        "Core runtime"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1322,
+      "title": "feat(automodel): FLUX and Wan training paths, synthetic data, and schnell guidance",
+      "created_at": "2026-10-27T06:55:42Z",
+      "merged_at": "2026-10-27T12:36:42Z",
+      "author": "mvstrauss",
+      "additions": 3402,
+      "deletions": 7,
+      "areas": [
+        "AutoModel",
+        "Model configs"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1256,
+      "title": "feat(inkling): add Inkling (Small and Large) text backbone to the Megatron backend",
+      "created_at": "2026-10-14T22:51:22Z",
+      "merged_at": "2026-10-28T00:22:05Z",
+      "author": "vidushi8",
+      "additions": 6943,
+      "deletions": 3,
+      "areas": [
+        "Megatron",
+        "Model configs",
+        "Perf & convergence tools",
+        "Core runtime",
+        "Other",
+        "Core & tools"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1331,
+      "title": "docs(release-notes): remove mention of MI308X",
+      "created_at": "2026-10-27T19:28:06Z",
+      "merged_at": "2026-10-28T01:00:57Z",
+      "author": "peterjunpark",
+      "additions": 1,
+      "deletions": 1,
+      "areas": [
+        "Docs"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 1329,
+      "title": "perf(megatron): tune MI300X GPT-OSS-20B and Llama 70B pretrain configs",
+      "created_at": "2026-10-27T18:12:20Z",
+      "merged_at": "2026-10-28T01:02:30Z",
+      "author": "amd-fuyuajin",
+      "additions": 67,
+      "deletions": 34,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1323,
+      "title": "feat(automodel): Primus-Turbo attention overrides and FP8/MXFP4 linear swaps",
+      "created_at": "2026-10-27T07:00:43Z",
+      "merged_at": "2026-10-28T01:20:08Z",
+      "author": "mvstrauss",
+      "additions": 4080,
+      "deletions": 0,
+      "areas": [
+        "AutoModel"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1190,
+      "title": "feat(megatron): add Triton fused AdamW on the shared kernels, on by default",
+      "created_at": "2026-09-24T10:26:59Z",
+      "merged_at": "2026-10-28T04:53:51Z",
+      "author": "WangLingxun",
+      "additions": 531,
+      "deletions": 3,
+      "areas": [
+        "Megatron",
+        "Benchmark",
+        "Model configs"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1324,
+      "title": "feat(automodel): Ideogram-4 training with var-len attention, an encoded cache, ZeRO-1 and context parallelism",
+      "created_at": "2026-10-27T14:06:09Z",
+      "merged_at": "2026-10-28T07:20:37Z",
+      "author": "mvstrauss",
+      "additions": 9312,
+      "deletions": 9,
+      "areas": [
+        "AutoModel",
+        "Model configs",
+        "Core & tools"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1321,
+      "title": "chore(megatron): bump Megatron-LM to core_v0.19.2",
+      "created_at": "2026-10-27T03:58:30Z",
+      "merged_at": "2026-10-29T06:20:13Z",
+      "author": "WangLingxun",
+      "additions": 1660,
+      "deletions": 259,
+      "areas": [
+        "Megatron",
+        "Model configs",
+        "Dependencies"
+      ],
+      "category": "Turbo/Dependency Version Update"
+    },
+    {
+      "number": 1340,
+      "title": "fix(mega_moe): run MegaMoE on Megatron-LM core_v0.19.2 with PrimusTopKRouter",
+      "created_at": "2026-10-29T14:43:50Z",
+      "merged_at": "2026-10-30T11:08:19Z",
+      "author": "lhzhang333",
+      "additions": 479,
+      "deletions": 39,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1297,
+      "title": "fix(megatron_bridge): prefer rope_parameters over default_theta when resolving rope_theta",
+      "created_at": "2026-10-23T09:46:03Z",
+      "merged_at": "2026-10-30T11:09:22Z",
+      "author": "WangLingxun",
+      "additions": 44,
+      "deletions": 9,
+      "areas": [
+        "Megatron-Bridge"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1298,
+      "title": "fix(megatron_bridge): use gpt_step for text-only models in posttrain",
+      "created_at": "2026-10-23T09:48:37Z",
+      "merged_at": "2026-10-30T11:09:54Z",
+      "author": "WangLingxun",
+      "additions": 491,
+      "deletions": 8,
+      "areas": [
+        "Megatron-Bridge"
+      ],
+      "category": "Bug Fix"
+    }
+  ],
+  "contributor_count": 18
 }
