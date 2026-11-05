@@ -44,6 +44,10 @@ GPUS_PER_NODE=4 PRIMUS_TOTAL_LAYERS=8 GBS=32 bash examples/megatron/models/minim
 
 # Inside a container
 PRIMUS_LAUNCHER=direct bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
+
+# MiniMax-M3.1-Flash (MSA in every layer, see MiniMax-M3.1-Flash), the baseline shape
+EXP=examples/megatron/configs/MI455X/minimax_m3_1_flash-BF16-pretrain.yaml GPUS_PER_NODE=4 PRIMUS_TOTAL_LAYERS=8 GBS=32 \
+    bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
 ```
 
 Two runs at once on one node need different `MASTER_PORT`s.
@@ -108,8 +112,10 @@ ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
   `output/<team>/<user>/<exp>/tensorboard/`, about 41 MB for the baseline); add
   `--profile_ranks '[0,1,2,3]'` for every rank. `PATCH_TRITON_EXPERT_SCHEDULING` (default `1`): see
   Triton expert scheduling below.
-- Config and output: `EXP` (the experiment yaml), and `PRIMUS_WORKSPACE` (default `output`), `PRIMUS_TEAM`,
-  `PRIMUS_USER`, `PRIMUS_EXP_NAME`, which make up the output directory `<workspace>/<team>/<user>/<exp>`.
+- Config and output: `EXP` (the experiment yaml; MiniMax-M3.1-Flash's is
+  `examples/megatron/configs/MI455X/minimax_m3_1_flash-BF16-pretrain.yaml`), and `PRIMUS_WORKSPACE`
+  (default `output`), `PRIMUS_TEAM`, `PRIMUS_USER`, `PRIMUS_EXP_NAME`, which make up the output
+  directory `<workspace>/<team>/<user>/<exp>`.
 
 The defaults are in the script. Arguments to the script are appended to the Primus command line, for
 example `--use_turbo_autotune True`.
@@ -547,6 +553,62 @@ d6c953a9 and 1739 instead of 1575 on dc23c84c.
   `k_dkdv_fused_sp_0`, `k_delta_bshd_0`, `k_dq_cvt_0` and `k_redsp_0` for dense attention, and
   `kernel_grouped_nt_0` and `kernel_grouped_variable_k_0` for the experts. Primus's MSA kernels are
   still all `k_fn_0`.
+
+## MiniMax-M3.1-Flash
+
+[MiniMax-M3.1-Flash](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash)'s text config is M3's with
+three changes: MSA in every layer (`sparse_attention_freq` and `sparse_disable_index_value` all 1; the
+first three layers keep their dense MLPs), `rope_theta` 1e7 instead of 5e6, and no MTP fields. The
+model preset `primus/configs/models/megatron/minimax_m3.1_flash.yaml` extends `minimax_m3.yaml`, and
+`examples/megatron/configs/MI455X/minimax_m3_1_flash-BF16-pretrain.yaml` extends the M3 experiment,
+so the launcher runs it with `EXP` set (see Run). With no dense attention layer, `USE_TURBO_ATTENTION`
+has nothing to act on, and the recomputed first layer is an MSA layer.
+
+The baseline shape (EP4, 8 layers, GBS 32) on `ctheliosr-rck-g02-e15-01`, caa1d392, the launcher's
+defaults, the two models alternating one at a time on the four otherwise idle GPUs. Every run finished
+10 iterations with 0 NaN.
+
+| Model | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- | --- | --- |
+| M3 | 1024.2, 1025.1 | 31,995, 31,966 | 848.4, 847.6 | 274.8 GB | 8.19576, 8.19572 |
+| M3.1-Flash | 1110.4, 1101.6 | 29,512, 29,747 | 779.4, 785.6 | 276.5 GB | 8.89782, 8.89782 |
+
+- M3.1-Flash takes 81 ms (7.9%) more per step and 1.7 GB more memory: each of its three extra MSA
+  layers costs 3.4 ms per micro-batch more than FlyDSL dense attention. On one GPU (4 layers, GBS 8)
+  it ran at 602.9 ms against M3's 527.4 (Primus-Turbo 4c74631 image), 3.1 ms per extra MSA layer and
+  micro-batch.
+- At sequence 4096 an MSA query attends 1504.5 keys against 2048 for dense causal attention, so MSA
+  saves little work there, and its kernels and indexer cost more than FlyDSL's dense attention. At
+  32k it would be 1924.5 keys against 16384; not measured.
+- M3.1-Flash's loss is higher at iteration 10 (8.898 against 8.196): its first layers also attend
+  only the blocks an untrained indexer selects. With mock data and 10 iterations this says nothing
+  about the released model. Without the dQ atomics of FlyDSL dense attention, its two runs have the
+  same loss to the last digit.
+- M3 ran within 0.1% of Baseline with the current defaults (1024.7 against 1024.1 ms).
+
+Where the step goes: GPU kernel time of profiled iteration 7, in ms, the mean of the four ranks; M3's
+is from Baseline with the current defaults (d6c953a9, the same code). Profiling makes M3.1-Flash's
+step 1301 ms instead of 1106.
+
+| Kernels | M3 | M3.1-Flash |
+| --- | --- | --- |
+| FlyDSL MSA and indexer | 115.2 | 190.9 |
+| Primus-Turbo FlyDSL dense attention | 20.9 | – |
+| elementwise and reductions | 233.2 | 249.0 |
+| copies and fills | 45.1 | 56.8 |
+| hipBLASLt GEMMs | 279.2 | 281.8 |
+| expert grouped GEMM (FlyDSL) | 116.0 | 116.5 |
+| RCCL collectives and stream memory operations | 123.6 | 147.8 |
+| the rest: optimizer, norm and RoPE, MoE permute and router, cross entropy | 88.8 | 89.5 |
+| total kernel time / GPU span | 1022.1 / 1206.6 | 1132.2 / 1301.2 |
+
+- MSA kernels take 2.9–3.0 ms per layer and micro-batch on either model, the recomputed first layer
+  included, so the three extra MSA layers add 75.7 ms of kernels for the 20.9 ms of dense attention
+  they replace. Elementwise kernels and copies add another 27.5 ms.
+- By module on rank 0, attention takes 278.5 ms against M3's 196.1 (82 ms more, of which 55 ms is
+  the attention kernels): 34–35 ms per MSA layer per step against 9 per dense attention layer.
+- RCCL and stream memory time differ by rank as on M3 (RCCL 91–138 ms); they include waiting for the
+  other ranks.
 
 ## How the defaults were chosen
 
