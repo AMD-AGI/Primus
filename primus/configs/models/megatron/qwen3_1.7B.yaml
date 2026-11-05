@@ -1,0 +1,15 @@
+extends:
+  - qwen2.5_base.yaml
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: Qwen/Qwen3-1.7B
+
+# Qwen3-1.7B (https://huggingface.co/Qwen/Qwen3-1.7B)
+hidden_size: 2048
+ffn_hidden_size: 6144
+num_layers: 28
+num_attention_heads: 16
+num_query_groups: 8
+kv_channels: 128
+qk_layernorm: true
+untie_embeddings_and_output_weights: false
