@@ -97,8 +97,9 @@ frames easy to see, but nothing about it is diffusion-specific.
 
 Enabled by default: skipping a deprecation warning about an unused argument
 while tracing cannot change results, and eager still warns. Set the environment
-variable to a false value to restore the unpatched shim, which is useful for
-A/B measurement of the graph breaks themselves.
+variable to 0, false, no or off to restore the unpatched shim, which is useful
+for A/B measurement of the graph breaks themselves; any other value, an empty one
+included, keeps the default.
 
 Environment:
     PRIMUS_TP_GROUP_TRACE_FIX=0   disable (default: enabled)
@@ -152,8 +153,8 @@ class _WarningsSilentWhileTracing:
         return getattr(self._delegate, name)
 
 
-def _truthy(value: str) -> bool:
-    return value.strip().lower() in ("1", "true", "yes", "on")
+def _opted_out(value: str) -> bool:
+    return value.strip().lower() in ("0", "false", "no", "off")
 
 
 def _defect_present() -> bool:
@@ -191,7 +192,7 @@ def _defect_present() -> bool:
 
 def _needs_patch(ctx: PatchContext) -> bool:
     del ctx
-    if not _truthy(os.getenv(ENV_VAR, "1")):
+    if _opted_out(os.getenv(ENV_VAR, "")):
         return False
     return _defect_present()
 
@@ -200,7 +201,10 @@ def _needs_patch(ctx: PatchContext) -> bool:
     PATCH_ID,
     backend="megatron",
     phase="before_train",
-    description=f"Drop the tp_group=None deprecation warning while tracing ({ENV_VAR}=0 to disable)",
+    description=(
+        "Skip megatron.core.utils' deprecation warnings, the tp_group=None one included, "
+        f"while tracing ({ENV_VAR}=0 to disable)"
+    ),
     # Default priority: the swap only has to land before the first forward is
     # traced, which is well after before_train, so ordering is not load-bearing.
     condition=_needs_patch,
@@ -222,5 +226,6 @@ def patch_tp_group_trace_warning(ctx: PatchContext):
     setattr(mcore_utils, _GLOBAL_NAME, _WarningsSilentWhileTracing(delegate))
     log_rank_0(
         f"[Patch:{PATCH_ID}] installed on megatron.core "
-        f"{getattr(mcore, '__version__', 'unknown')}: {_FUNC_NAME} no longer breaks traced graphs"
+        f"{getattr(mcore, '__version__', 'unknown')}: the deprecation warnings in megatron.core.utils, "
+        f"{_FUNC_NAME}'s included, are skipped while tracing and still warn in eager"
     )

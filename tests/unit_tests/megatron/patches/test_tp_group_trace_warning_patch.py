@@ -262,6 +262,23 @@ def test_env_var_overrides_an_applicable_patch(monkeypatch):
     assert _needs_patch(None) is True, "enabled by default"
 
 
+@pytest.mark.parametrize("value", ["0", "false", "No", " off "])
+def test_only_an_explicit_false_value_disables_the_patch(monkeypatch, value):
+    _install_fake_megatron(monkeypatch)
+    monkeypatch.setenv(ENV_VAR, value)
+
+    assert _needs_patch(None) is False
+
+
+@pytest.mark.parametrize("value", ["", "enabled", "2"])
+def test_an_empty_or_unrecognised_value_keeps_the_default(monkeypatch, value):
+    """An exported-empty variable must not silently bring the graph breaks back."""
+    _install_fake_megatron(monkeypatch)
+    monkeypatch.setenv(ENV_VAR, value)
+
+    assert _needs_patch(None) is True
+
+
 def test_patch_id_is_namespaced():
     assert PATCH_ID.startswith("megatron.")
 
