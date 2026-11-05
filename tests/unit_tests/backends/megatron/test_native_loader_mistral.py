@@ -3,13 +3,13 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""CPU tests: Mistral routing to the native Llama converter, its HF config
-translation, the HF -> mcore weight mapping on a tiny synthetic checkpoint, and
-the Mistral-7B-v0.3 preset against config.json."""
+"""CPU tests: Mistral routing in the posttrain conversion hook, the native
+Mistral converter's config checks and HF -> mcore weight mapping on a tiny
+synthetic checkpoint, and the Mistral-7B-v0.3 preset and recipes against config.json."""
 
 import importlib.util
 import json
-import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,470 +50,677 @@ def _hook():
 
 def _loader():
     pytest.importorskip("torch")
-    from primus.backends.megatron.checkpoint import native_loader_llama
+    from primus.backends.megatron.checkpoint import native_loader_mistral
 
-    return native_loader_llama
-
-
-def _rules():
-    from primus.backends.megatron.checkpoint import llama_config_rules
-
-    return llama_config_rules
+    return native_loader_mistral
 
 
-LLAMA = dict(
-    {k: v for k, v in MISTRAL_V03.items() if k != "sliding_window"},
-    architectures=["LlamaForCausalLM"],
-    model_type="llama",
-)
+def _reason(hf_dir):
+    """The Mistral checks' message for the config.json in ``hf_dir``, or None."""
+    from primus.backends.megatron.checkpoint.native_config_mistral import check_config
 
-
-def _family(tmp_path, cfg):
-    (tmp_path / "config.json").write_text(json.dumps(cfg))
-    return _hook()._native_support_for_path(str(tmp_path))[0]
-
-
-# ---------------------------------------------------------------------------
-# Routing in the posttrain conversion hook
-# ---------------------------------------------------------------------------
-def test_mistral_v03_routes_to_native_llama(tmp_path):
-    assert _family(tmp_path, MISTRAL_V03) == "llama"
-    assert _family(tmp_path, dict(MISTRAL_V03, architectures=None)) == "llama"
+    try:
+        check_config(json.loads((Path(hf_dir) / "config.json").read_text()))
+    except ValueError as e:
+        return str(e)
+    return None
 
 
 def _without(cfg, keys):
     return {k: v for k, v in cfg.items() if k not in keys}
 
 
-_LLAMA31_ROPE = {
-    "rope_type": "llama3",
-    "factor": 8.0,
-    "low_freq_factor": 1.0,
-    "high_freq_factor": 4.0,
-    "original_max_position_embeddings": 8192,
-}
+# ---------------------------------------------------------------------------
+# Routing in the posttrain conversion hook
+# ---------------------------------------------------------------------------
+class _Bridge(Exception):
+    pass
 
-_NO_WINDOW_KEY = {k: v for k, v in MISTRAL_V03.items() if k != "sliding_window"}  # HF default 4096
 
-# Configs the native converter does not support, each with a fragment of the
-# reason it must give (so a case cannot pass on an earlier, unrelated rule): the
-# hook keeps them on Megatron-Bridge with that reason and the converter rejects them.
-_SW = "only full causal attention: sliding_window: null"
-_FAMILIES = "they name different models"
-_ARCH = "only LlamaForCausalLM or MistralForCausalLM"
-_POS_NUM = "a positive finite number is required"
-_POS_INT = "a positive integer is required"
-_NULL = "HF has no value for it"
-_BIAS = "the converter maps no bias tensors"
-_LLAMA3_FIXED = "Megatron's llama3 RoPE scaling uses"
-_FACTOR = "a finite number of at least 1 is required"
-_NOT_LLAMA = "not a Llama or Mistral config"
-_NO_CONVERTER = "no native converter"
-# (cfg, the converter's reason[, the hook's reason when the hook's family table
-# rejects the config before the Llama rules run])
-_UNSUPPORTED = [
-    # sliding window: Mistral-7B-v0.1, the HF default (4096) when the key is
-    # missing, and Mistral named by only architectures or only model_type
-    (dict(MISTRAL_V03, sliding_window=4096), _SW),
-    (_NO_WINDOW_KEY, _SW),
-    (dict(MISTRAL_V03, architectures=None, sliding_window=4096), _SW),
-    (dict(MISTRAL_V03, model_type=None, sliding_window=4096), _SW),
-    # no sliding_window (4096) and no max_position_embeddings (MistralConfig: 131072)
-    (_without(MISTRAL_V03, ("sliding_window", "max_position_embeddings")), _SW),
-    (dict(MISTRAL_V03, sliding_window="4096"), _SW),
-    # a window as long as max_position_embeddings: seq_length may be longer (build_margs)
-    (dict(MISTRAL_V03, sliding_window=32768), _SW),
-    (dict(MISTRAL_V03, sliding_window=4096, max_position_embeddings=4096), _SW),
-    (dict(MISTRAL_V03, hidden_act="gelu"), "only SwiGLU with silu"),
-    (dict(MISTRAL_V03, rope_scaling={"rope_type": "yarn", "factor": 4.0}), "RoPE type 'yarn'"),
-    (dict(MISTRAL_V03, attention_bias=True), _BIAS),
-    (dict(LLAMA, attention_bias=True), _BIAS),
-    (dict(LLAMA, mlp_bias=True), _BIAS),
-    # bias flags are booleans, as tie_word_embeddings ("false" is not false)
-    (dict(LLAMA, attention_bias="false"), "true or false is required"),
-    (dict(MISTRAL_V03, mlp_bias=0), "true or false is required"),
-    # the model shape must be set (no class defaults for the weights' shape)
-    *[
-        (_without(base, (k,)), f"['{k}'] missing")
-        for base in (MISTRAL_V03, LLAMA)
-        for k in ("hidden_size", "num_attention_heads", "num_hidden_layers", "intermediate_size")
-    ],
-    # rope_type: null is not "default"
-    (dict(LLAMA, rope_scaling={"rope_type": None, "factor": 8.0}), "RoPE type None"),
-    # architectures and model_type name different models
-    (dict(LLAMA, model_type="qwen3"), _FAMILIES, "name different model families"),
-    (dict(MISTRAL_V03, model_type="llama"), _FAMILIES),
-    (dict(MISTRAL_V03, architectures=["LlamaForCausalLM"]), _FAMILIES),
-    (dict(LLAMA, architectures=["LlamaForCausalLM", "MistralForCausalLM"]), _ARCH),
-    # experts (a MoE config with a Mistral name)
-    (dict(MISTRAL_V03, num_local_experts=8), "the converter maps dense models only"),
-    # an architectures entry of another model or head, with a Llama / Mistral model_type
-    (dict(LLAMA, architectures=["Qwen2ForCausalLM"]), _ARCH),
-    (dict(MISTRAL_V03, architectures=["MixtralForCausalLM"]), _ARCH),
-    (dict(LLAMA, architectures=["LlamaForSequenceClassification"]), _ARCH),
-    (dict(LLAMA, architectures=["LlamaForCausalLM", "LlamaForSequenceClassification"]), _ARCH),
-    # architectures that is not a string or a list of strings
-    (dict(LLAMA, architectures=7), "architectures"),
-    (dict(LLAMA, architectures={"name": "LlamaForCausalLM"}), "architectures"),
-    (dict(LLAMA, architectures=["LlamaForCausalLM", 1]), "architectures"),
-    # llama3 RoPE scaling without a usable factor
-    (dict(LLAMA, rope_scaling={"rope_type": "llama3"}), _FACTOR),
-    (dict(LLAMA, rope_scaling={"rope_type": "llama3", "factor": "x"}), _FACTOR),
-    (dict(LLAMA, rope_scaling=dict(_LLAMA31_ROPE, factor=10**400)), _FACTOR),
-    (dict(LLAMA, rope_scaling=dict(_LLAMA31_ROPE, factor=0.5)), _FACTOR),  # HF requires >= 1
-    (dict(LLAMA, rope_scaling=dict(_LLAMA31_ROPE, factor=True)), _FACTOR),
-    # HF requires every llama3 key; a missing one is not taken as Megatron's value
-    *[
-        (dict(LLAMA, rope_scaling={k: v for k, v in _LLAMA31_ROPE.items() if k != name}), f"{name} missing")
-        for name in ("low_freq_factor", "high_freq_factor", "original_max_position_embeddings")
-    ],
-    (dict(LLAMA, rope_scaling={"rope_type": "llama3", "factor": 8.0}), "missing"),
-    # llama3 RoPE scaling that Megatron's fixed llama3 scaling cannot reproduce
-    (dict(LLAMA, rope_scaling=dict(_LLAMA31_ROPE, low_freq_factor=2.0)), _LLAMA3_FIXED),
+def _main(monkeypatch, tmp_path, cfg, enabled=None, logs=None, errors=None):
+    """Run the hook's main() for the HF checkpoint ``tmp_path/hf`` with ``cfg`` and
+    ``native_ckpt_convert`` = ``enabled``. Only the Megatron-Bridge conversion (its
+    start is raised as _Bridge) and Megatron's process setup are stubbed: the native
+    path runs main() -> _native_main -> native_convert_checkpoint -> convert.
+    Returns (path, log lines)."""
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+
+    hf = tmp_path / "hf"
+    hf.mkdir(exist_ok=True)
+    (hf / "config.json").write_text(json.dumps(cfg))
+    hook = _hook()
+    monkeypatch.setattr(hook, "get_checkpoint_config", lambda f: (str(hf), None))
+    monkeypatch.setattr(hook, "read_native_opts", lambda f: {"enabled": enabled, "dtype": None, "out": None})
+    monkeypatch.setattr(common, "apply_convert_patches", lambda module_name: 0)
+    monkeypatch.setenv("DATA_PATH", str(tmp_path / "data"))
+    monkeypatch.setenv("NODE_RANK", "0")
+    logs = [] if logs is None else logs
+
+    def log_info(msg):
+        logs.append(msg)
+        if "Megatron-Bridge conversion path" in msg:
+            raise _Bridge
+
+    monkeypatch.setattr(hook, "log_info", log_info)
+    monkeypatch.setattr(hook, "log_error", (errors if errors is not None else []).append)
+    monkeypatch.setattr(sys, "argv", ["hook", "--config", "/x.yaml"])
+    try:
+        hook.main()
+    except _Bridge:
+        return "bridge", logs
+    return "native", logs
+
+
+def test_mistral_v03_converts_natively_through_main(monkeypatch, tmp_path, capsys):
+    """native_ckpt_convert unset: main() converts Mistral-7B-v0.3 with
+    native_loader_mistral.convert and hands the checkpoint to the trainer."""
+    m = _loader()
+    calls = _fake_megatron(monkeypatch, m)
+    path, logs = _main(monkeypatch, tmp_path, MISTRAL_V03)
+    out = tmp_path / "data/megatron_checkpoints/hf_native"
+    assert path == "native" and "Native (mistral) conversion: dtype=bf16 TP=1 PP=1 EP=1" in logs
+    assert calls["store"] == str(tmp_path / "hf") and calls["save"] == str(out)
+    assert calls["margs"][0] == m.derive_megatron_fields(MISTRAL_V03)
+    assert f"extra.pretrained_checkpoint={out}" in capsys.readouterr().out
+
+
+_NOT_NATIVE = [
+    # Mistral-7B-v0.1 / Instruct-v0.1
+    (dict(MISTRAL_V03, sliding_window=4096), "sliding_window=4096"),
+    # no sliding_window key: HF reads 4096
+    (_without(MISTRAL_V03, ("sliding_window",)), "no sliding_window"),
+    # Mistral-Nemo style head_dim != hidden / heads
+    (dict(MISTRAL_V03, hidden_size=5120, head_dim=128), "head_dim=128"),
     (
-        dict(LLAMA, rope_scaling=dict(_LLAMA31_ROPE, high_freq_factor=8.0)),
-        _LLAMA3_FIXED,
+        dict(MISTRAL_V03, rope_scaling={"rope_type": "yarn", "factor": 4.0}),
+        "factor': 4.0} is not supported: no RoPE scaling",
     ),
-    (
-        dict(
-            LLAMA,
-            rope_scaling=dict(_LLAMA31_ROPE, original_max_position_embeddings=4096),
-        ),
-        _LLAMA3_FIXED,
-    ),
-    (
-        dict(LLAMA, rope_scaling=dict(_LLAMA31_ROPE, low_freq_factor="1")),
-        _LLAMA3_FIXED,
-    ),
-    # rope_parameters and rope_scaling with a different scaling
-    (
-        dict(
-            LLAMA,
-            rope_parameters={"rope_type": "default", "rope_theta": 1e6},
-            rope_scaling=_LLAMA31_ROPE,
-            rope_theta=1e6,
-        ),
-        "differ",
-    ),
-    (
-        dict(
-            LLAMA,
-            rope_parameters=dict(_LLAMA31_ROPE, factor=32.0, rope_theta=1e6),
-            rope_scaling=_LLAMA31_ROPE,
-            rope_theta=1e6,
-        ),
-        "differ",
-    ),
-    (dict(MISTRAL_V03, max_position_embeddings=None), _NULL),
-    (dict(LLAMA, max_position_embeddings=None), _NULL),
-    # Llama configs: the same activation / RoPE rules (llama3 RoPE is supported)
-    (dict(LLAMA, hidden_act="gelu"), "only SwiGLU with silu"),
-    (dict(LLAMA, rope_scaling={"rope_type": "yarn", "factor": 4.0}), "RoPE type 'yarn'"),
-    (dict(LLAMA, rope_scaling={"type": "linear", "factor": 2.0}), "RoPE type 'linear'"),
-    # Mistral accepts no RoPE scaling, also not llama3
-    (dict(MISTRAL_V03, rope_scaling={"rope_type": "llama3", "factor": 8.0}), "RoPE type 'llama3'"),
-    # transformers 5.x rope_parameters: scaling is checked there too
-    (
-        dict(
-            _without(MISTRAL_V03, ("rope_theta",)),
-            rope_parameters={"rope_theta": 1e6, "rope_type": "yarn", "factor": 4.0},
-        ),
-        "RoPE type 'yarn'",
-    ),
-    (
-        dict(LLAMA, rope_parameters={"rope_theta": 1e6, "rope_type": "linear", "factor": 2.0}),
-        "RoPE type 'linear'",
-    ),
-    # rope_theta and rope_parameters.rope_theta disagree
-    (dict(MISTRAL_V03, rope_parameters={"rope_theta": 10000.0, "rope_type": "default"}), "differ"),
-    (dict(MISTRAL_V03, rope_parameters="default"), "a JSON object is required"),
-    # hidden_size not a multiple of the heads and no head_dim
-    (dict(MISTRAL_V03, hidden_size=4097), "is not a multiple of num_attention_heads"),
-    # null where HF has no value for it (it would fail in HF, not take a default)
-    *[
-        (dict(MISTRAL_V03, **{k: None}), k)
-        for k in ("rms_norm_eps", "rope_theta", "hidden_act", "tie_word_embeddings")
-    ],
-    # not a Llama or Mistral config (Qwen2 has q/k/v biases but no attention_bias key)
-    (dict(LLAMA, architectures=["Qwen2ForCausalLM"], model_type="qwen2"), _NOT_LLAMA, _NO_CONVERTER),
-    (dict(LLAMA, architectures=None, model_type=None), _NOT_LLAMA, _NO_CONVERTER),
-    # inf / nan / an int too large for a float
-    (dict(MISTRAL_V03, rms_norm_eps=float("inf")), _POS_NUM),
-    (dict(MISTRAL_V03, rope_theta=float("nan")), _POS_NUM),
-    (dict(MISTRAL_V03, rope_theta=10**400), _POS_NUM),
-    # 0 / 0.0 / negative / wrong-type values are rejected, not read as absent
-    *[
-        (dict(base, **{k: v}), why)
-        for base in (MISTRAL_V03, LLAMA)
-        for k, v, why in (
-            ("num_key_value_heads", 0, _POS_INT),
-            ("rms_norm_eps", 0.0, _POS_NUM),
-            ("rope_theta", 0, _POS_NUM),
-            ("head_dim", 0, _POS_INT),
-            ("rms_norm_eps", -1e-5, _POS_NUM),
-            ("num_key_value_heads", 3, "does not divide num_attention_heads"),  # 32 heads
-            ("num_key_value_heads", 8.5, _POS_INT),
-            ("hidden_size", 0, _POS_INT),
-            ("num_attention_heads", None, _POS_INT),
-            ("intermediate_size", "14336", _POS_INT),
-            ("max_position_embeddings", 4096.5, _POS_INT),
-            ("tie_word_embeddings", "false", "true or false is required"),
+    (_without(MISTRAL_V03, ("rms_norm_eps",)), "no rms_norm_eps"),
+    # other heads (model_type mistral names the family; the checks decline the head)
+    (dict(MISTRAL_V03, architectures=["MistralForSequenceClassification"]), "architectures="),
+    (dict(MISTRAL_V03, architectures=["MistralForTokenClassification"]), "architectures="),
+    (dict(MISTRAL_V03, architectures=["MistralModel"]), "architectures="),
+    # missing / null / string architectures: model_type mistral names the family, and
+    # the checks decline it with their reason
+    (dict(MISTRAL_V03, architectures=None), "architectures=None"),
+    (_without(MISTRAL_V03, ("architectures",)), "architectures=None"),
+    (dict(MISTRAL_V03, architectures="MistralForCausalLM"), "architectures='MistralForCausalLM'"),
+    # quantized exports (packed qweight / scales) and tied embeddings: declined up front
+    (dict(MISTRAL_V03, quantization_config={"quant_method": "gptq", "bits": 4}), "quantization_config"),
+    (dict(MISTRAL_V03, tie_word_embeddings=True), "tie_word_embeddings=True"),
+    # MoE: no native family
+    (dict(MISTRAL_V03, architectures=["MixtralForCausalLM"], model_type="mixtral"), None),
+]
+
+
+@pytest.mark.parametrize("cfg,reason", _NOT_NATIVE)
+def test_other_mistral_configs_keep_the_bridge_path(monkeypatch, tmp_path, cfg, reason):
+    """native_ckpt_convert unset: a Mistral config the native converter does not
+    convert keeps the Megatron-Bridge path, and main() logs why when the Mistral
+    checks declined it (``reason``, None for an architecture with no native family)."""
+    m = _loader()
+    calls = _fake_megatron(monkeypatch, m)
+    path, logs = _main(monkeypatch, tmp_path, cfg)
+    assert path == "bridge" and calls == {}
+    declines = [x for x in logs if "declines" in x]
+    if reason is None:
+        assert declines == []
+    else:
+        assert declines == [f"Native converter declines {tmp_path / 'hf'}: {_reason(tmp_path / 'hf')}"]
+        assert reason in declines[0]
+    # native_ckpt_convert: false: the Bridge path, with no native-converter message
+    path, logs = _main(monkeypatch, tmp_path, cfg, enabled=False)
+    assert path == "bridge" and not [x for x in logs if "declines" in x]
+
+
+def test_forced_native_stops_with_the_converter_reason(monkeypatch, tmp_path):
+    """native_ckpt_convert: true on a MistralForCausalLM config the converter rejects:
+    main() logs one error, with the converter's specific reason (not "no native
+    converter matches"), and exits with status 1 before Megatron is set up, with no
+    checkpoint written."""
+    m = _loader()
+    calls = _fake_megatron(monkeypatch, m)
+    errors = []
+    with pytest.raises(SystemExit) as stop:
+        _main(monkeypatch, tmp_path, dict(MISTRAL_V03, sliding_window=4096), enabled=True, errors=errors)
+    assert stop.value.code == 1
+    reason = _reason(tmp_path / "hf")
+    assert "Mistral sliding_window=4096 is not supported" in reason
+    assert len(errors) == 1
+    assert f"the native converter declines the HF model at {tmp_path / 'hf'}: {reason}" in errors[0]
+    assert "no native converter matches" not in errors[0]
+    assert "native_ckpt_convert: false" in errors[0]
+    assert calls == {}
+    assert not (tmp_path / "data/megatron_checkpoints").exists()
+
+
+def test_forced_native_without_a_family_says_no_converter_matches(monkeypatch, tmp_path):
+    """native_ckpt_convert: true on an architecture with no native family: one error,
+    naming the supported families."""
+    m = _loader()
+    calls = _fake_megatron(monkeypatch, m)
+    errors = []
+    with pytest.raises(SystemExit) as stop:
+        _main(
+            monkeypatch,
+            tmp_path,
+            dict(MISTRAL_V03, architectures=["MixtralForCausalLM"], model_type="mixtral"),
+            enabled=True,
+            errors=errors,
         )
-    ],
-]
-UNSUPPORTED = [(cfg, why, hook_why[0] if hook_why else why) for cfg, why, *hook_why in _UNSUPPORTED]
-SUPPORTED_MISTRAL = [
-    MISTRAL_V03,
-    dict(MISTRAL_V03, hidden_act="swish"),
-    dict(MISTRAL_V03, rope_scaling=None),
-    dict(MISTRAL_V03, rope_scaling={"rope_type": "default"}),  # HF: no scaling
-    dict(MISTRAL_V03, attention_bias=False),
-]
+    assert stop.value.code == 1
+    assert len(errors) == 1 and "no native converter matches" in errors[0] and "Mistral-7B" in errors[0]
+    assert calls == {}
 
 
-@pytest.mark.parametrize("cfg,_why,hook_why", UNSUPPORTED)
-def test_unsupported_keeps_bridge_with_reason(tmp_path, cfg, _why, hook_why):
-    (tmp_path / "config.json").write_text(json.dumps(cfg))
-    family, reason = _hook()._native_support_for_path(str(tmp_path))
-    assert family is None and hook_why in reason, reason
+def _install_decision(config_file):
+    """Run 00_install_requirements.sh's decision step (its embedded Python) on an
+    experiment config: "SKIP" (native, no Bridge dependencies) or "INSTALL"."""
+    import re
+    import subprocess
 
-
-@pytest.mark.parametrize("cfg,why,_hook_why", UNSUPPORTED)
-def test_converter_rejects_unsupported(cfg, why, _hook_why):
-    with pytest.raises(ValueError, match="config not supported") as e:
-        _rules().derive_megatron_fields(cfg)
-    assert why in str(e.value), str(e.value)
-
-
-def test_unsupported_cases_are_distinct():
-    keys = [json.dumps(c, sort_keys=True) for c, _, _ in UNSUPPORTED]
-    assert len(keys) == len(set(keys))
-
-
-SUPPORTED_LLAMA = [
-    LLAMA,
-    dict(LLAMA, sliding_window=None),
-    dict(LLAMA, sliding_window=4096),  # LlamaConfig has no sliding window; HF's Llama ignores the key
-    # transformers 5.x layout
-    dict(_without(LLAMA, ("rope_theta",)), rope_parameters={"rope_theta": 1e6, "rope_type": "default"}),
-    dict(LLAMA, max_position_embeddings=4096.0),  # a JSON integer written as a float
-    # Llama 3.1: RoPE scaling changes no weight; the training config sets use_rope_scaling
-    dict(
-        LLAMA,
-        rope_scaling={
-            "rope_type": "llama3",
-            "factor": 8.0,
-            "low_freq_factor": 1.0,
-            "high_freq_factor": 4.0,
-            "original_max_position_embeddings": 8192,
-        },
-    ),
-    # both layouts with the same scaling (transformers 5.x writes rope_parameters)
-    dict(
-        LLAMA,
-        rope_theta=5e5,
-        rope_scaling=_LLAMA31_ROPE,
-        rope_parameters=dict(_LLAMA31_ROPE, rope_theta=5e5),
-    ),
-]
-
-
-@pytest.mark.parametrize("cfg", SUPPORTED_LLAMA + SUPPORTED_MISTRAL)
-def test_supported_routes_native(tmp_path, cfg):
-    assert _family(tmp_path, cfg) == "llama"
-    assert _rules().derive_megatron_fields(cfg)["num_query_groups"] == 8
-
-
-def test_rope_parameters_theta_is_used():
-    cfg = dict(
-        _without(MISTRAL_V03, ("rope_theta",)), rope_parameters={"rope_theta": 1e6, "rope_type": "default"}
-    )
-    assert _rules().derive_megatron_fields(cfg)["rotary_base"] == 1e6
+    script = (HOOK.parent / "00_install_requirements.sh").read_text()
+    code = re.search(r"<<'PY'\n(.*?)\nPY\n", script, re.S).group(1)
+    out = subprocess.run(
+        [sys.executable, "-", str(config_file)], input=code, cwd=REPO, capture_output=True, text=True
+    ).stdout
+    return out.strip().rsplit("__DECISION__:", 1)[-1]
 
 
 @pytest.mark.parametrize(
-    "content,reason",
+    "cfg,decision", [(MISTRAL_V03, "SKIP"), (dict(MISTRAL_V03, sliding_window=4096), "INSTALL")]
+)
+def test_install_hook_decision(tmp_path, cfg, decision):
+    """00_install_requirements.sh skips the Bridge dependencies for Mistral-7B-v0.3
+    (native conversion) and installs them for a config the native converter declines."""
+    pytest.importorskip("yaml")
+    hf = tmp_path / "hf"
+    hf.mkdir()
+    (hf / "config.json").write_text(json.dumps(cfg))
+    exp = tmp_path / "exp.yaml"
+    exp.write_text(
+        f"work_group: amd\nuser_name: root\nexp_name: t\nworkspace: {tmp_path / 'out'}\n"
+        "modules:\n  post_trainer:\n    framework: megatron\n    config: sft_trainer.yaml\n"
+        f"    model: mistral_7B_v0_3.yaml\n    overrides:\n      hf_path: {hf}\n"
+    )
+    assert _install_decision(exp) == decision
+
+
+def test_install_hook_follows_the_same_decision(monkeypatch, tmp_path):
+    """_detect_native_family (which 00_install_requirements.sh calls) finds the
+    mistral family for v0.3, not for a config the native converter declines."""
+    hook = _hook()
+    logs = []
+    monkeypatch.setattr(hook, "log_info", logs.append)
+    for name, cfg, fam in (
+        ("v03", MISTRAL_V03, "mistral"),
+        ("head_dim_null", dict(MISTRAL_V03, head_dim=None), "mistral"),
+        ("v01", dict(MISTRAL_V03, sliding_window=4096), None),
+    ):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "config.json").write_text(json.dumps(cfg))
+        assert hook._detect_native_family(str(tmp_path / name)) == fam
+        assert hook._detect_native_family(str(tmp_path / name)) == fam  # the same on a second detection
+    detect = hook._detect_native_family_and_reason
+    assert detect(str(tmp_path / "v03")) == ("mistral", None)
+    fam, reason = detect(str(tmp_path / "v01"))
+    assert fam is None and "sliding_window=4096" in reason  # the reason main() reports
+    # each detection reads the config again: a config fixed in place is not kept declined
+    (tmp_path / "v01" / "config.json").write_text(json.dumps(MISTRAL_V03))
+    assert detect(str(tmp_path / "v01")) == ("mistral", None)
+    # a config rewritten to another family, or with no architectures, carries no earlier reason
+    (tmp_path / "v01" / "config.json").write_text(json.dumps(dict(MISTRAL_V03, sliding_window=4096)))
+    assert detect(str(tmp_path / "v01"))[1]
+    (tmp_path / "v01" / "config.json").write_text(json.dumps({"model_type": "llama", "architectures": []}))
+    assert detect(str(tmp_path / "v01")) == ("llama", None)
+    (tmp_path / "v01" / "config.json").unlink()
+    assert detect(str(tmp_path / "v01")) == (None, None)
+    assert logs == []  # detection logs nothing
+
+
+@pytest.mark.parametrize(
+    "extra",
     [
-        (None, "no config.json"),
-        ("{not json", "cannot read"),
-        ("[1, 2]", "not a JSON object"),
-        ('"mistral"', "not a JSON object"),
+        # the declined Mistral config also lists Llama's architecture / names its model_type
+        {"architectures": ["MistralForCausalLM", "LlamaForCausalLM"]},
+        {"model_type": "llama"},
+        # a Llama architecture with model_type mistral: the Mistral checks still run
+        {"architectures": ["LlamaForCausalLM"]},
     ],
 )
-def test_native_support_for_path_reasons(tmp_path, content, reason):
-    if content is not None:
-        (tmp_path / "config.json").write_text(content)
-    family, why = _hook()._native_support_for_path(str(tmp_path))
-    assert family is None and reason in why
+def test_declined_mistral_config_falls_to_no_other_family(monkeypatch, tmp_path, extra):
+    """Once the Mistral checks decline a config that names the Mistral family (by
+    architecture or model_type), no other native family (Llama, through another
+    architecture or the model_type) converts it."""
+    hook = _hook()
+    monkeypatch.setattr(hook, "log_info", lambda msg: None)
+    (tmp_path / "config.json").write_text(json.dumps(dict(MISTRAL_V03, sliding_window=4096, **extra)))
+    fam, reason = hook._detect_native_family_and_reason(str(tmp_path))
+    assert fam is None and reason
 
 
-def test_hook_routing_imports_no_torch_or_megatron(tmp_path):
-    """Detection is a config.json check: loading the hook and routing a Mistral
-    config imports neither torch, nor primus.backends.megatron, nor megatron."""
-    import subprocess
-    import sys
+def test_llama_routing_unchanged(monkeypatch, tmp_path):
+    """A Llama checkpoint still converts natively by default, with Llama's converter
+    and no config check logged."""
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+    from primus.backends.megatron.checkpoint import native_loader_llama as llama
 
-    (tmp_path / "config.json").write_text(json.dumps(MISTRAL_V03))
-    code = (
-        "import importlib.util, sys\n"
-        f"spec = importlib.util.spec_from_file_location('hook', {str(HOOK)!r})\n"
-        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
-        f"assert m._native_support_for_path({str(tmp_path)!r}) == ('llama', None)\n"
-        "bad = [n for n in sys.modules if n == 'torch' or n.startswith(('megatron', 'primus.backends'))]\n"
-        "assert not bad, bad\n"
-    )
-    subprocess.run([sys.executable, "-c", code], check=True, cwd=REPO, env={"PYTHONPATH": str(REPO)})
-
-
-def test_hook_uses_the_converter_rules():
-    """The hook loads the converter's rules file, and routes every Llama /
-    Mistral name to the Llama converter."""
-    rules, hook = _rules(), _hook()
-    assert os.path.samefile(hook._RULES.__file__, rules.__file__)
-    assert (
-        "derive_megatron_fields" in vars(_loader())
-        and _loader().derive_megatron_fields is rules.derive_megatron_fields
-    )
-    table = hook._NATIVE_FAMILIES
-    assert {n for n in table if rules.config_family({"model_type": n}) == "mistral"} == set(
-        rules.MISTRAL_NAMES
-    )
-    assert all(table[n] == "llama" for n in rules.MISTRAL_NAMES + rules.LLAMA_NAMES)
+    _loader()
+    calls = []
+    monkeypatch.setattr(common, "ensure_megatron_on_path", lambda: None)
+    monkeypatch.setattr(llama, "convert", lambda hf, out, **kw: calls.append(hf))
+    cfg = dict(MISTRAL_V03, architectures=["LlamaForCausalLM"], model_type="llama", sliding_window=4096)
+    path, logs = _main(monkeypatch, tmp_path, cfg)
+    assert path == "native" and calls == [str(tmp_path / "hf")]
+    assert not [x for x in logs if "declines" in x]
 
 
 @pytest.mark.parametrize(
     "cfg,family",
     [
-        (dict(LLAMA, model_type=None), "llama"),
-        (dict(LLAMA, architectures=None), "llama"),
-        (dict(LLAMA, model_type=""), "llama"),
-        ({"architectures": ["Qwen3ForCausalLM"], "model_type": "llama"}, None),
-        ({"architectures": ["MistralForCausalLM"], "model_type": "qwen3"}, None),
-        ({"model_type": "qwen3"}, "qwen3"),
-        ({"architectures": ["DeepseekV3ForCausalLM"]}, "deepseek"),
-        ({"architectures": ["MixtralForCausalLM"], "model_type": "mixtral"}, None),
+        ({"architectures": ["LlamaForCausalLM"], "model_type": "llama"}, "llama"),
+        ({"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3"}, "qwen3"),
+        ({"architectures": ["Qwen3MoeForCausalLM"], "model_type": "qwen3_moe"}, "qwen3"),
+        ({"architectures": ["DeepseekV3ForCausalLM"], "model_type": "deepseek_v3"}, "deepseek"),
+        ({"architectures": ["SomethingElse", "LlamaForCausalLM"], "model_type": "x"}, "llama"),
+        ({"architectures": None, "model_type": "llama"}, "llama"),
+        ({"model_type": "deepseek_v2"}, "deepseek"),
+        ({"architectures": ["GPT2LMHeadModel"], "model_type": "gpt2"}, None),
     ],
 )
-def test_other_families_unchanged(tmp_path, cfg, family):
-    assert _family(tmp_path, cfg) == family
-
-
-def test_reason_labels():
-    rules = _rules()
-    assert rules.unsupported_reason(dict(MISTRAL_V03, rope_theta="x")).startswith("rope_theta 'x'")
-    assert rules.unsupported_reason(
-        dict(MISTRAL_V03, rope_parameters={"rope_theta": 0, "rope_type": "default"})
-    ).startswith("rope_parameters.rope_theta 0")
-
-
-@pytest.mark.parametrize(
-    "extra,want",
-    [
-        ({"torch_dtype": "float16"}, "fp16"),
-        ({"dtype": "float32"}, "fp32"),
-        ({"dtype": "bfloat16"}, "bf16"),
-        ({}, "bf16"),
-    ],
-)
-def test_native_dtype_reads_dtype_and_torch_dtype(tmp_path, extra, want):
-    (tmp_path / "config.json").write_text(json.dumps(dict(_without(MISTRAL_V03, ("torch_dtype",)), **extra)))
-    assert _hook()._native_dtype_from_config(str(tmp_path), None) == want
-
-
-@pytest.mark.parametrize(
-    "rope,opts,args,note",
-    [
-        (None, {}, {}, None),
-        ({"rope_type": "default"}, {"use_rope_scaling": True, "rope_scaling_factor": 8.0}, {}, None),
-        (
-            _LLAMA31_ROPE,
-            {"use_rope_scaling": True, "rope_scaling_factor": 8.0},
-            {"use_rope_scaling": "true", "rope_scaling_factor": "8.0"},
-            None,
-        ),
-        (
-            _LLAMA31_ROPE,
-            {},
-            {"use_rope_scaling": "true", "rope_scaling_factor": "8.0"},
-            "use_rope_scaling None, rope_scaling_factor None",
-        ),
-        (
-            _LLAMA31_ROPE,
-            {"use_rope_scaling": True, "rope_scaling_factor": 32.0},
-            {"use_rope_scaling": "true", "rope_scaling_factor": "8.0"},
-            "rope_scaling_factor 32.0",
-        ),
-        (
-            dict(_LLAMA31_ROPE, factor=32),
-            {"use_rope_scaling": False, "rope_scaling_factor": 8.0},
-            {"use_rope_scaling": "true", "rope_scaling_factor": "32.0"},
-            "factor 32.0",
-        ),
-        # a training-config factor that is not a number is replaced, not an error
-        (
-            _LLAMA31_ROPE,
-            {"use_rope_scaling": True, "rope_scaling_factor": "x"},
-            {"use_rope_scaling": "true", "rope_scaling_factor": "8.0"},
-            "rope_scaling_factor 'x'",
-        ),
-    ],
-)
-def test_llama3_rope_args(rope, opts, args, note):
-    """The hook passes the HF llama3 RoPE scaling to training; the note says
-    when that replaces the training config's values."""
-    got_args, got_note = _hook()._llama3_rope_args(dict(LLAMA, rope_scaling=rope), opts)
-    assert got_args == args
-    assert (got_note is None) if note is None else (note in got_note)
-
-
-def test_llama3_rope_args_parse_as_training_args():
-    """The emitted values parse back (primus/core/utils/arg_utils.py) to the
-    types Megatron's options have."""
-    from primus.core.utils.arg_utils import parse_cli_overrides
-
-    args, _ = _hook()._llama3_rope_args(dict(LLAMA, rope_scaling=_LLAMA31_ROPE), {})
-    parsed = parse_cli_overrides([f"{k}={v}" for k, v in args.items()])
-    assert parsed == {"use_rope_scaling": True, "rope_scaling_factor": 8.0}
-
-
-# main(): the backend choice for native_ckpt_convert unset / true / false,
-# for a supported and an unsupported config.
-@pytest.mark.parametrize("enabled", [None, True, False])
-@pytest.mark.parametrize("supported", [True, False])
-def test_main_backend_choice(tmp_path, monkeypatch, enabled, supported):
+def test_other_families_detected_as_before(tmp_path, cfg, family):
+    """Llama / Qwen3 / DeepSeek detection is unchanged: first architecture that names a
+    family, else model_type, and no config check (they have no _NATIVE_CONFIG_CHECKS entry)."""
     hook = _hook()
-    cfg = MISTRAL_V03 if supported else dict(MISTRAL_V03, sliding_window=4096)
     (tmp_path / "config.json").write_text(json.dumps(cfg))
-    calls = []
-    monkeypatch.setattr(hook, "get_checkpoint_config", lambda _f: (str(tmp_path), None))
-    monkeypatch.setattr(hook, "read_native_opts", lambda _f: {"enabled": enabled, "dtype": None, "out": None})
-    monkeypatch.setattr(
-        hook, "_native_main", lambda path, opts, family, *_a: calls.append(("native", family))
+    assert hook._detect_native_family_and_reason(str(tmp_path)) == (family, None)
+
+
+@pytest.mark.parametrize(
+    "text,error",
+    [
+        ('["MistralForCausalLM"]', "is not a JSON object"),  # a list, not an object
+        ("null", "is not a JSON object"),
+        ("{not json", "Expecting property name"),  # json.JSONDecodeError, as before
+    ],
+)
+def test_unreadable_config_raises(tmp_path, text, error):
+    """config.json that is not a JSON object fails loudly (no silent Bridge fallback)."""
+    hook = _hook()
+    (tmp_path / "config.json").write_text(text)
+    with pytest.raises(ValueError, match=error):
+        hook._detect_native_family_and_reason(str(tmp_path))
+
+
+def test_forced_bridge_runs_no_detection(monkeypatch, tmp_path):
+    """native_ckpt_convert: false takes the Bridge path without loading any family checks."""
+    hook = _hook()
+    called = []
+    monkeypatch.setattr(hook, "_detect_native_family_and_reason", lambda p: called.append(p))
+    hf = tmp_path / "hf"
+    hf.mkdir()
+    monkeypatch.setattr(hook, "get_checkpoint_config", lambda f: (str(hf), None))
+    monkeypatch.setattr(hook, "read_native_opts", lambda f: {"enabled": False, "dtype": None, "out": None})
+
+    def log_info(msg):
+        if "Megatron-Bridge conversion path" in msg:
+            raise _Bridge
+
+    monkeypatch.setattr(hook, "log_info", log_info)
+    monkeypatch.setattr(sys, "argv", ["hook", "--config", "/x.yaml"])
+    with pytest.raises(_Bridge):
+        hook.main()
+    assert called == []
+
+
+def test_config_checks_registry_contract(monkeypatch, tmp_path):
+    """Checks are registered per family in _NATIVE_CONFIG_CHECKS, loaded once per
+    process, and a module without check_config fails with a clear error."""
+    hook = _hook()
+    assert "mistral" in hook._NATIVE_CONFIG_CHECKS
+    assert all(f in hook._NATIVE_FAMILIES.values() for f in hook._NATIVE_CONFIG_CHECKS)
+    check = hook._native_config_check("mistral")
+    assert check is hook._native_config_check("mistral")  # cached: loaded once
+    assert check(MISTRAL_V03) == 1e6
+    assert hook._native_config_check("llama") is None
+
+    bad = tmp_path / "primus/backends/megatron/checkpoint/native_config_broken.py"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("def other(cfg):\n    return None\n")
+    monkeypatch.setattr(hook, "PRIMUS_ROOT", tmp_path)
+    monkeypatch.setitem(hook._NATIVE_CONFIG_CHECKS, "broken", str(bad.relative_to(tmp_path)))
+    with pytest.raises(TypeError, match="has no check_config"):
+        hook._native_config_check("broken")
+
+
+def test_config_checks_need_only_the_standard_library():
+    """The hook loads native_config_mistral.py by path (_NATIVE_CONFIG_CHECKS) on every
+    rank and in the install hook, before torch / Megatron: it must import nothing but
+    the standard library."""
+    import ast
+
+    src = (REPO / "primus/backends/megatron/checkpoint/native_config_mistral.py").read_text()
+    names = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            names |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            names.add((node.module or ".").split(".")[0])
+    assert names <= {"json", "math", "os"}, names
+
+
+# ---------------------------------------------------------------------------
+# Converter config checks and translation
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "cfg,match",
+    [
+        # Mistral-7B-v0.1
+        (dict(MISTRAL_V03, sliding_window=4096), "sliding_window=4096"),
+        # HF ignores use_sliding_window for Mistral: the window still applies
+        (dict(MISTRAL_V03, sliding_window=4096, use_sliding_window=False), "sliding_window=4096"),
+        # no key: HF MistralConfig default 4096
+        (_without(MISTRAL_V03, ("sliding_window",)), "no sliding_window key"),
+        (_without(dict(MISTRAL_V03, use_sliding_window=False), ("sliding_window",)), "no sliding_window key"),
+        # RoPE scaling (rope_scaling / rope_parameters)
+        (dict(MISTRAL_V03, rope_scaling={"rope_type": "yarn", "factor": 4.0}), "rope_scaling"),
+        (dict(MISTRAL_V03, rope_scaling={"factor": 2.0}), "rope_scaling"),
+        (
+            dict(MISTRAL_V03, rope_scaling={"rope_type": "default", "factor": 8.0}),
+            "rope_scaling=.*no RoPE scaling",
+        ),
+        (
+            dict(MISTRAL_V03, rope_scaling={"type": "linear", "rope_type": "default", "factor": 4}),
+            "rope_scaling=.*no RoPE scaling",
+        ),
+        (dict(MISTRAL_V03, rope_scaling="default"), "rope_scaling='default'"),
+        (
+            dict(MISTRAL_V03, rope_parameters={"rope_type": "yarn", "factor": 4.0, "rope_theta": 1e6}),
+            "rope_parameters=.*no RoPE scaling",
+        ),
+        # disagrees with rope_theta
+        (
+            dict(MISTRAL_V03, rope_parameters={"rope_type": "default", "rope_theta": 1e4}),
+            "RoPE base given differently",
+        ),
+        (dict(MISTRAL_V03, rope_parameters={"rope_type": None}), "rope_parameters=.*no RoPE scaling"),
+        (
+            dict(MISTRAL_V03, rope_parameters={"rope_type": "default", "rope_theta": None}),
+            "rope_parameters.rope_theta=None",
+        ),
+        (dict(MISTRAL_V03, rope_scaling=["x"]), "rope_scaling"),
+        (dict(MISTRAL_V03, rope_scaling="linear"), "rope_scaling"),
+        (dict(MISTRAL_V03, hidden_act="gelu"), "hidden_act"),
+        (dict(MISTRAL_V03, attention_bias=True), "attention_bias"),
+        (dict(MISTRAL_V03, mlp_bias=True), "mlp_bias"),
+        (
+            _without(MISTRAL_V03, ("num_key_value_heads",)),
+            r"no num_key_value_heads: .*fallback \(num_attention_heads\).*default \(8\)",
+        ),
+        (_without(MISTRAL_V03, ("rms_norm_eps",)), r"no rms_norm_eps: .*fallback \(1e-5\).*default \(1e-6\)"),
+        (dict(MISTRAL_V03, num_key_value_heads=None), "num_key_value_heads=None .*num_attention_heads"),
+        (dict(MISTRAL_V03, num_key_value_heads=0), "num_key_value_heads=0"),
+        (dict(MISTRAL_V03, num_key_value_heads=5), "num_key_value_heads=5"),
+        (dict(MISTRAL_V03, head_dim=0), "head_dim=0"),
+        (dict(MISTRAL_V03, head_dim=-1), "head_dim=-1"),
+        # a head size other than hidden / heads is not verified with this converter
+        (dict(MISTRAL_V03, head_dim=96), "head_dim=96"),
+        (dict(MISTRAL_V03, hidden_size=4100), "hidden_size=4100 is not a multiple"),
+        (dict(MISTRAL_V03, hidden_size=4097, head_dim=None), "hidden_size=4097 is not a multiple"),
+        (dict(MISTRAL_V03, num_hidden_layers=0), "num_hidden_layers=0"),
+        (dict(MISTRAL_V03, vocab_size=None), "vocab_size=None"),
+        (dict(MISTRAL_V03, partial_rotary_factor=0.5), "partial_rotary_factor=0.5"),
+        # an int above float range is rejected with ValueError, not OverflowError
+        (dict(MISTRAL_V03, partial_rotary_factor=10**400), "partial_rotary_factor="),
+        (dict(MISTRAL_V03, rms_norm_eps=10**400), "rms_norm_eps="),
+        (dict(MISTRAL_V03, rope_theta=10**400), "rope_theta="),
+        (dict(MISTRAL_V03, rope_theta=-1), "rope_theta=-1"),
+        (dict(MISTRAL_V03, rope_theta=float("inf")), "rope_theta=inf"),
+        (dict(MISTRAL_V03, head_dim=True), "head_dim=True"),
+        (dict(MISTRAL_V03, head_dim=128.0), "head_dim=128.0"),
+        (dict(MISTRAL_V03, partial_rotary_factor="1"), "partial_rotary_factor='1'"),
+        (dict(MISTRAL_V03, tie_word_embeddings="no"), "tie_word_embeddings='no'"),
+        # values of any type raise ValueError, never TypeError
+        (dict(MISTRAL_V03, rope_scaling={"rope_type": ["default"]}), "rope_scaling"),
+        (dict(MISTRAL_V03, rope_parameters={"type": {"a": 1}}), "rope_parameters"),
+        (dict(MISTRAL_V03, rope_theta=[1e6]), "rope_theta"),
+        (dict(MISTRAL_V03, hidden_act=["silu"]), "hidden_act"),
+        (dict(MISTRAL_V03, sliding_window=[4096]), "sliding_window"),
+        (dict(MISTRAL_V03, architectures="MistralForCausalLM"), "architectures"),
+        (dict(MISTRAL_V03, architectures=None), "architectures=None"),
+        (dict(MISTRAL_V03, architectures=[]), "architectures=\\[\\]"),
+        (_without(MISTRAL_V03, ("model_type",)), "model_type=None"),
+        (dict(MISTRAL_V03, model_type="llama"), "model_type='llama'"),
+        (dict(MISTRAL_V03, num_attention_heads=[32]), "num_attention_heads"),
+        (dict(MISTRAL_V03, attention_bias={"x": 1}), "attention_bias"),
+        # booleans must be JSON booleans: 0 / 1 are not
+        (dict(MISTRAL_V03, attention_bias=0), "attention_bias=0"),
+        (dict(MISTRAL_V03, mlp_bias=0.0), "mlp_bias=0.0"),
+        (dict(MISTRAL_V03, tie_word_embeddings=True), "tie_word_embeddings=True"),
+        (dict(MISTRAL_V03, quantization_config={"quant_method": "awq"}), "quantization_config"),
+        (dict(MISTRAL_V03, quantization_config={}), "quantization_config"),
+        (dict(MISTRAL_V03, tie_word_embeddings=1), "tie_word_embeddings=1"),
+        (dict(MISTRAL_V03, tie_word_embeddings=1.0), "tie_word_embeddings=1.0"),
+        (dict(MISTRAL_V03, tie_word_embeddings=0), "tie_word_embeddings=0"),
+        ([MISTRAL_V03], "JSON object"),
+        (dict(MISTRAL_V03, rms_norm_eps=0), "rms_norm_eps=0"),
+        (dict(MISTRAL_V03, rms_norm_eps=float("nan")), "rms_norm_eps=nan"),
+        (dict(MISTRAL_V03, rms_norm_eps=float("inf")), "rms_norm_eps=inf"),
+    ],
+)
+def test_converter_rejects_unsupported(cfg, match):
+    with pytest.raises(ValueError, match=match):
+        _loader().derive_megatron_fields(cfg)
+
+
+def test_loader_interface_checks_then_is_llama():
+    """derive_megatron_fields: the checks run first, the translation is Llama's
+    (the one native_loader_llama.convert uses), for every accepted config."""
+    m = _loader()
+    from primus.backends.megatron.checkpoint import native_loader_llama as llama
+
+    assert m.derive_megatron_fields(MISTRAL_V03) == llama.derive_megatron_fields(MISTRAL_V03)
+    for extra in (
+        {"head_dim": 128},
+        {"head_dim": None},
+        {"rope_parameters": {"rope_theta": 1e6}},
+    ):  # top-level too
+        cfg = dict(MISTRAL_V03, **extra)
+        assert m.derive_megatron_fields(cfg) == llama.derive_megatron_fields(cfg)
+    # head_dim: null -> kv_channels None, which Megatron's validate_args sets to hidden // heads
+    assert m.derive_megatron_fields(dict(MISTRAL_V03, head_dim=None))["kv_channels"] is None
+    with pytest.raises(ValueError, match="sliding_window=4096"):
+        m.derive_megatron_fields(dict(MISTRAL_V03, sliding_window=4096))
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"partial_rotary_factor": None},  # null: the default, full rotary
+        {"partial_rotary_factor": 1},
+        {"hidden_act": "swish"},  # HF's alias of silu
+        {"rope_parameters": {"rope_theta": 1e6}},  # no type stated: only the base
+        {"rope_scaling": None, "rope_parameters": None},
+        {"attention_bias": None, "mlp_bias": False},
+        {"rope_scaling": {"rope_type": "default"}},
+        {"rope_scaling": {}, "rope_parameters": {}},  # empty: no scaling, as HF reads it
+        # transformers v5 re-save: the base only under rope_parameters
+        {"rope_theta": None, "rope_parameters": {"rope_type": "default", "rope_theta": 1e6}},
+    ],
+)
+def test_valid_hf_configs_accepted(extra):
+    m = _loader()
+    cfg = {k: v for k, v in dict(MISTRAL_V03, **extra).items() if v is not None or k != "rope_theta"}
+    fields, base = m.derive_megatron_fields(cfg), m.derive_megatron_fields(MISTRAL_V03)
+    assert fields == base
+
+
+@pytest.mark.parametrize("tie", ["absent", None, False])
+def test_untied_embeddings(tie):
+    """tie_word_embeddings absent, null or false: untied (HF Mistral's default);
+    true is declined (test_converter_rejects_unsupported)."""
+    cfg = _without(MISTRAL_V03, ["tie_word_embeddings"])
+    if tie != "absent":
+        cfg["tie_word_embeddings"] = tie
+    assert _loader().derive_megatron_fields(cfg)["untie_embeddings_and_output_weights"] is True
+
+
+def test_null_rope_theta_uses_the_nested_or_default_base():
+    """A top-level rope_theta: null is no base given, as common.hf_rope_theta reads it:
+    the nested base, else HF's default 10000."""
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+    from primus.backends.megatron.checkpoint.native_config_mistral import check_config
+
+    nested = dict(MISTRAL_V03, rope_theta=None, rope_parameters={"rope_type": "default", "rope_theta": 1e6})
+    assert check_config(nested) == common.hf_rope_theta(nested, 10000.0) == 1e6
+    bare = dict(MISTRAL_V03, rope_theta=None)
+    assert check_config(bare) == common.hf_rope_theta(bare, 10000.0) == 10000.0
+
+
+def test_rope_parameters_theta_used():
+    """rope_theta under rope_parameters (newer transformers) is read: the one checked
+    base becomes rotary_base, also when it is given only there (a transformers v5
+    re-save of Mistral-7B-v0.3), and a different nested base is declined."""
+    m = _loader()
+    nested = {"rope_type": "default", "rope_theta": 1e6}
+    both = dict(MISTRAL_V03, rope_parameters=nested)
+    assert m.derive_megatron_fields(both)["rotary_base"] == 1e6
+    with pytest.raises(ValueError, match="RoPE base given differently"):
+        m.derive_megatron_fields(dict(both, rope_theta=5e5))
+    only_nested = dict(_without(MISTRAL_V03, ["rope_theta"]), rope_parameters=nested)
+    assert m.derive_megatron_fields(only_nested) == m.derive_megatron_fields(MISTRAL_V03)
+    assert m.derive_megatron_fields(only_nested)["rotary_base"] == 1e6
+    only_scaling = dict(_without(MISTRAL_V03, ["rope_theta"]), rope_scaling={"rope_theta": 5e5})
+    assert m.derive_megatron_fields(only_scaling)["rotary_base"] == 5e5
+    # no rope_theta anywhere: HF's default
+    assert m.derive_megatron_fields(_without(MISTRAL_V03, ["rope_theta"]))["rotary_base"] == 10000.0
+    # a top-level int above float range is reported as out of range
+    with pytest.raises(ValueError, match="must be a positive finite number"):
+        m.derive_megatron_fields(dict(MISTRAL_V03, rope_theta=10**400))
+
+
+def _fake_megatron(monkeypatch, m):
+    """Stub Megatron and Llama's builders; record what convert gives them."""
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+    from primus.backends.megatron.checkpoint import native_loader_llama as llama
+
+    calls = {}
+    monkeypatch.setattr(common, "ensure_megatron_on_path", lambda: None)
+    monkeypatch.setattr(common, "assert_bridge_free", lambda where: None)
+    margs = SimpleNamespace(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        expert_model_parallel_size=1,
+        params_dtype="bf16",
     )
 
-    def bridge(*_a):
-        calls.append(("bridge",))
-        raise SystemExit("bridge")
+    def build_margs(fields, args):
+        calls["margs"] = (fields, args)
+        return margs
 
-    monkeypatch.setattr(hook, "convert_checkpoint", bridge)
-    monkeypatch.setenv("DATA_PATH", str(tmp_path / "data"))
-    monkeypatch.setattr("sys.argv", ["hook", "--config", str(tmp_path / "x.yaml")])
-    if enabled is True and not supported:
-        with pytest.raises(SystemExit) as e:
-            hook.main()
-        assert e.value.code == 1 and calls == []
-        return
-    try:
-        hook.main()
-    except SystemExit as e:
-        assert str(e) == "bridge"
-    want = [("native", "llama")] if supported and enabled is not False else [("bridge",)]
-    assert calls == want
+    monkeypatch.setattr(llama, "build_margs", build_margs)
+    monkeypatch.setattr(common, "init_megatron_single_process", lambda margs, port, log: margs)
+    monkeypatch.setattr(common, "build_mcore_gpt_model", lambda margs: "model")
+    monkeypatch.setattr(common, "SafetensorsStore", lambda d: calls.setdefault("store", d))
+    monkeypatch.setattr(llama, "build_mcore_state_dict", lambda *a: calls.setdefault("sd", a) and ({}, set()))
+    monkeypatch.setattr(common, "load_validate_save", lambda *a: calls.setdefault("save", a[-2]))
+    return calls
 
 
-# ---------------------------------------------------------------------------
-# Converter config translation
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        MISTRAL_V03,
+        dict(MISTRAL_V03, head_dim=128),
+        dict(MISTRAL_V03, rope_parameters={"rope_type": "default", "rope_theta": 1e6}),
+        # transformers v5 re-save: the base only under rope_parameters reaches rotary_base
+        dict(
+            _without(MISTRAL_V03, ["rope_theta"]), rope_parameters={"rope_type": "default", "rope_theta": 1e6}
+        ),
+    ],
+)
+def test_convert_is_llamas_convert(tmp_path, monkeypatch, cfg):
+    """convert runs native_loader_llama.convert (build_margs, model build, weight
+    mapping and save) on the HF directory itself, with this module's translation;
+    Llama's module is not changed."""
+    m = _loader()
+    from primus.backends.megatron.checkpoint import native_loader_llama as llama
+
+    original = llama.derive_megatron_fields
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    calls = _fake_megatron(monkeypatch, m)
+    assert m.convert(str(tmp_path), "out", dtype="bf16", seq_length=512) == "out"
+    fields, args = calls["margs"]
+    assert fields == m.derive_megatron_fields(MISTRAL_V03)
+    assert fields["kv_channels"] == 128 and fields["rotary_base"] == 1e6
+    assert (args.hf_dir, args.save_dir, args.dtype, args.seq_length) == (str(tmp_path), "out", "bf16", 512)
+    assert calls["store"] == str(tmp_path) and calls["save"] == "out"
+    assert llama.derive_megatron_fields is original
+
+
+def test_convert_checks_the_config_once(tmp_path, monkeypatch):
+    """convert runs the Mistral checks once (inside Llama's translation step)."""
+    m = _loader()
+    (tmp_path / "config.json").write_text(json.dumps(MISTRAL_V03))
+    _fake_megatron(monkeypatch, m)
+    checked = []
+    real = m.check_config
+    monkeypatch.setattr(m, "check_config", lambda cfg: checked.append(1) or real(cfg))
+    m.convert(str(tmp_path), "out")
+    assert checked == [1]
+
+
+def test_convert_rejects_before_converting(tmp_path, monkeypatch):
+    m = _loader()
+    (tmp_path / "config.json").write_text(json.dumps(dict(MISTRAL_V03, sliding_window=4096)))
+    calls = _fake_megatron(monkeypatch, m)
+    with pytest.raises(ValueError, match="sliding_window=4096.*native_ckpt_convert: false"):
+        m.convert(str(tmp_path), "out")
+    assert calls == {}
+
+
+def test_direct_native_convert_reports_the_decline_reason(tmp_path, monkeypatch):
+    """native_convert_checkpoint called without a family (a direct caller, not main())
+    on a Mistral config the checks decline: the error carries the checks' reason, not
+    "no native converter"; nothing is converted."""
+    m = _loader()
+    (tmp_path / "config.json").write_text(json.dumps(dict(MISTRAL_V03, sliding_window=4096)))
+    calls = _fake_megatron(monkeypatch, m)
+    with pytest.raises(ValueError) as e:
+        _hook().native_convert_checkpoint(str(tmp_path), "out", {})
+    assert "declines the HF model" in str(e.value) and "sliding_window=4096" in str(e.value)
+    assert "no native converter" not in str(e.value)
+    assert calls == {}
+
+
+def test_mistral_family_dispatches_to_native_loader_mistral(tmp_path, monkeypatch):
+    """native_convert_checkpoint converts the 'mistral' family with
+    native_loader_mistral.convert (not Llama's or DeepSeek's)."""
+    m = _loader()
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+    from primus.backends.megatron.checkpoint import (
+        native_loader_deepseek,
+        native_loader_llama,
+    )
+
+    (tmp_path / "config.json").write_text(json.dumps(MISTRAL_V03))
+    calls = []
+    monkeypatch.setattr(common, "ensure_megatron_on_path", lambda: None)
+    monkeypatch.setattr(common, "apply_convert_patches", lambda module_name: 0)
+    monkeypatch.setattr(m, "convert", lambda hf, out, **kw: calls.append(("mistral", hf, out, kw)))
+    for other in (native_loader_llama, native_loader_deepseek):
+        monkeypatch.setattr(other, "convert", lambda *a, **kw: calls.append(("other", a, kw)))
+    _hook().native_convert_checkpoint(str(tmp_path), "out", {})
+    assert calls == [
+        (
+            "mistral",
+            str(tmp_path),
+            "out",
+            dict(dtype="bf16", tensor_parallel_size=1, pipeline_parallel_size=1, expert_parallel_size=1),
+        )
+    ]
+
+
 def test_derive_fields_mistral_v03():
     f = _loader().derive_megatron_fields(MISTRAL_V03)
     assert f == dict(
@@ -527,39 +734,8 @@ def test_derive_fields_mistral_v03():
         ffn_hidden_size=14336,
         num_query_groups=8,
         kv_channels=128,
+        add_qkv_bias=False,
     )
-
-
-_ABSENT = ("num_key_value_heads", "rms_norm_eps", "rope_theta", "head_dim")
-_NULLABLE = ("num_key_value_heads", "head_dim")  # HF maps null to MHA / hidden // heads
-
-
-def _defaults(f):
-    return (f["num_query_groups"], f["norm_epsilon"], f["rotary_base"], f["kv_channels"])
-
-
-@pytest.mark.parametrize("null,kv_heads", [(False, 8), (True, 32)])
-def test_absent_or_null_keys_mistral(null, kv_heads):
-    """Absent keys of a Mistral config convert as HF's MistralConfig reads them: 8 KV
-    heads, eps 1e-6, rope_theta 10000, head_dim hidden/heads, and 131072 positions
-    (with sliding_window: null). A null num_key_value_heads is MHA in MistralConfig
-    (num_attention_heads), not 8; a null head_dim is hidden/heads."""
-    cfg = _without(MISTRAL_V03, _ABSENT + ("max_position_embeddings",))
-    if null:
-        cfg.update(dict.fromkeys(_NULLABLE))
-    f = _rules().derive_megatron_fields(cfg)
-    assert _defaults(f) == (kv_heads, 1e-6, 10000.0, 128)
-    assert f["max_position_embeddings"] == 131072
-
-
-@pytest.mark.parametrize("null", [False, True])
-def test_absent_or_null_keys_llama(null):
-    """A Llama config keeps the converter's fallbacks from before this port: MHA,
-    eps 1e-5 (not LlamaConfig's 1e-6), rope_theta 10000, head_dim hidden/heads."""
-    cfg = _without(LLAMA, _ABSENT)
-    if null:
-        cfg.update(dict.fromkeys(_NULLABLE))
-    assert _defaults(_rules().derive_megatron_fields(cfg)) == (32, 1e-5, 10000.0, 128)
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +785,7 @@ def _tiny(vocab=200, padded=256):
         num_hidden_layers=layers,
         vocab_size=vocab,
     )
-    fields = _rules().derive_megatron_fields(cfg)
+    fields = _loader().derive_megatron_fields(cfg)
     margs = SimpleNamespace(
         params_dtype=torch.float32,
         num_attention_heads=nh,
@@ -638,6 +814,12 @@ def test_weight_mapping_round_trip():
     assert sd["embedding.word_embeddings.weight"].shape[0] == 256
     assert torch.equal(sd["embedding.word_embeddings.weight"][:200], t["model.embed_tokens.weight"])
     assert torch.equal(sd["output_layer.weight"][:200], t["lm_head.weight"])
+    # the padded vocab rows copy the last real row (native_convert_common.pad_vocab)
+    for name, hf in (
+        ("embedding.word_embeddings.weight", "model.embed_tokens.weight"),
+        ("output_layer.weight", "lm_head.weight"),
+    ):
+        assert torch.equal(sd[name][200:], t[hf][-1:].expand(56, -1))
 
     for L in range(margs.num_layers):
         p, h = f"decoder.layers.{L}.", f"model.layers.{L}."
@@ -687,126 +869,26 @@ def test_preset_matches_hf_config():
 
 
 @pytest.mark.parametrize("sku", ["MI300X", "MI325X", "MI355X"])
-def test_recipe_uses_preset(sku):
-    yaml = pytest.importorskip("yaml")
-    path = REPO / f"examples/megatron/configs/{sku}/mistral_7B_v0_3-BF16-pretrain.yaml"
-    pre = yaml.safe_load(path.read_text())["modules"]["pre_trainer"]
-    assert pre["model"] == "mistral_7B_v0_3.yaml"
-    o = pre["overrides"]
-    assert o["seq_length"] <= MISTRAL_V03["max_position_embeddings"]
-    assert o["mock_data"] is True and o["train_data_path"] is None
-
-
-@pytest.mark.parametrize("exists", [False, True])
-def test_native_main_emits_llama3_rope_args(tmp_path, monkeypatch, capsys, exists):
-    """_native_main reads the HF config, converts, and prints the extra.* lines
-    that apply HF's llama3 RoPE scaling to the training run, on the convert path
-    and on the already-converted path."""
-    hook = _hook()
-    (tmp_path / "config.json").write_text(json.dumps(dict(LLAMA, rope_scaling=_LLAMA31_ROPE)))
-    converted = []
-    monkeypatch.setattr(hook, "native_convert_checkpoint", lambda *a: converted.append(a))
-    monkeypatch.setenv("RANK", "0")
-    out = tmp_path / "out"
-    if exists:
-        out.mkdir()
-        (out / "latest_checkpointed_iteration.txt").write_text("1")
-    hook._native_main(str(tmp_path), {"enabled": None, "dtype": None, "out": str(out)}, "llama")
-    lines = [x for x in capsys.readouterr().out.splitlines() if x.startswith("extra.")]
-    assert lines == [
-        "extra.use_rope_scaling=true",
-        "extra.rope_scaling_factor=8.0",
-        f"extra.pretrained_checkpoint={out}",
-        "extra.finetune=true",
-    ]
-    if exists:
-        assert converted == []
-    else:
-        assert converted and converted[0][2]["hf_config"]["rope_scaling"] == _LLAMA31_ROPE
-
-
-_BIG_ROPE = dict(_LLAMA31_ROPE, low_freq_factor=2.0)  # natively unsupported: Megatron-Bridge
-
-
-@pytest.mark.parametrize("exists", [False, True])
-@pytest.mark.parametrize("enabled,rope", [(False, _LLAMA31_ROPE), (None, _BIG_ROPE)])
-def test_bridge_path_emits_llama3_rope_args(tmp_path, monkeypatch, capsys, exists, enabled, rope):
-    """The Megatron-Bridge path passes the same llama3 RoPE arguments as the
-    native path, on the convert and the already-converted paths."""
-    hook = _hook()
-    (tmp_path / "config.json").write_text(json.dumps(dict(LLAMA, rope_scaling=rope)))
-    data = tmp_path / "data"
-    megatron_path = data / "megatron_checkpoints" / tmp_path.name
-    if exists:
-        megatron_path.mkdir(parents=True)
-    monkeypatch.setattr(hook, "get_checkpoint_config", lambda _f: (str(tmp_path), None))
-    monkeypatch.setattr(hook, "read_native_opts", lambda _f: {"enabled": enabled, "dtype": None, "out": None})
-    monkeypatch.setattr(hook, "convert_checkpoint", lambda *a: None)
-    monkeypatch.setattr(hook, "fix_common_pt_for_megatron_lm", lambda *a: None)
-    monkeypatch.setenv("DATA_PATH", str(data))
-    monkeypatch.setenv("RANK", "0")
-    monkeypatch.setattr("sys.argv", ["hook", "--config", str(tmp_path / "x.yaml")])
-    hook.main()
-    out = capsys.readouterr().out
-    assert [x for x in out.splitlines() if x.startswith("extra.")] == [
-        "extra.use_rope_scaling=true",
-        "extra.rope_scaling_factor=8.0",
-        f"extra.pretrained_checkpoint={megatron_path}",
-        "extra.finetune=true",
-    ]
-    assert "Using Megatron-Bridge" in out
-    if rope is _BIG_ROPE:
-        assert "Megatron cannot reproduce the rest of the HF llama3 RoPE scaling: low_freq_factor 2.0" in out
-
-
-def test_llama3_rope_args_invalid_factor():
-    """A factor Megatron cannot use (Bridge path only) is reported, not passed."""
-    args, note = _hook()._llama3_rope_args(dict(LLAMA, rope_scaling=dict(_LLAMA31_ROPE, factor=0.5)), {})
-    assert args == {} and "factor 0.5" in note
-
-
-def test_native_main_mistral_emits_no_rope_args(tmp_path, monkeypatch, capsys):
-    hook = _hook()
-    (tmp_path / "config.json").write_text(json.dumps(MISTRAL_V03))
-    monkeypatch.setattr(hook, "native_convert_checkpoint", lambda *a: None)
-    monkeypatch.setenv("RANK", "0")
-    out = tmp_path / "out"
-    hook._native_main(str(tmp_path), {"enabled": None, "dtype": None, "out": str(out)}, "llama")
-    lines = [x for x in capsys.readouterr().out.splitlines() if x.startswith("extra.")]
-    assert lines == [f"extra.pretrained_checkpoint={out}", "extra.finetune=true"]
-
-
-_PRIMUS_YAML = """work_group: amd
-user_name: root
-exp_name: native-opts
-workspace: {workspace}
-modules:
-  post_trainer:
-    framework: megatron
-    config: sft_trainer.yaml
-    model: llama3.1_8B.yaml
-{module_keys}    overrides:
-      stage: sft
-      hf_path: {hf_path}
-{override_keys}"""
-
-
-@pytest.mark.parametrize(
-    "module_keys,override_keys,want",
-    [
-        ("", "      use_rope_scaling: true\n      rope_scaling_factor: 8.0\n", (True, 8.0)),
-        ("    use_rope_scaling: true\n    rope_scaling_factor: 4.0\n", "", (True, 4.0)),
-        ("", "      native_ckpt_convert: false\n", (False, 8.0)),  # the llama3.1_8B preset's values
-    ],
-)
-def test_read_native_opts_reads_rope_scaling(tmp_path, module_keys, override_keys, want):
+def test_recipe_resolves_to_mistral(monkeypatch, sku):
+    """Each recipe, resolved per PR on CPU through Primus's config stack (env
+    interpolation -> extends -> preset merge -> overrides), builds Mistral-7B-v0.3's
+    shape on the Llama layer template, without a sliding window or RoPE scaling."""
     pytest.importorskip("yaml")
-    config = tmp_path / "exp.yaml"
-    config.write_text(
-        _PRIMUS_YAML.format(
-            workspace=tmp_path / "ws", hf_path=tmp_path, module_keys=module_keys, override_keys=override_keys
-        )
-    )
-    opts = _hook().read_native_opts(str(config))
-    assert (opts["use_rope_scaling"], opts["rope_scaling_factor"]) == want
-    assert opts["enabled"] is (False if "native_ckpt_convert" in override_keys else None)
+    from primus.core.config.primus_config import load_primus_config
+    from primus.core.utils import file_utils
+
+    monkeypatch.setattr(file_utils, "create_path_if_not_exists", lambda *a, **k: None)
+    path = REPO / f"examples/megatron/configs/{sku}/mistral_7B_v0_3-BF16-pretrain.yaml"
+    (module,) = load_primus_config(path, None).modules
+    p, c = module.params, MISTRAL_V03
+    assert (p.num_layers, p.hidden_size, p.ffn_hidden_size) == (32, 4096, c["intermediate_size"])
+    assert (p.num_attention_heads, p.num_query_groups, p.kv_channels) == (32, 8, 128)
+    assert p.group_query_attention is True
+    assert float(p.rotary_base) == c["rope_theta"] and float(p.norm_epsilon) == c["rms_norm_eps"]
+    assert p.use_rope_scaling is False and getattr(p, "window_size", None) is None
+    assert (p.vocab_size, p.max_position_embeddings) == (c["vocab_size"], c["max_position_embeddings"])
+    assert p.untie_embeddings_and_output_weights is True
+    assert (p.swiglu, p.normalization, p.position_embedding_type) == (True, "RMSNorm", "rope")
+    assert p.add_bias_linear is False
+    assert p.seq_length <= c["max_position_embeddings"]
+    assert p.mock_data is True and p.train_data_path is None

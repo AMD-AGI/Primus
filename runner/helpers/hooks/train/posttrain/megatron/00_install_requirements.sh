@@ -67,9 +67,9 @@ def decide():
     if pretrained:
         return "SKIP"  # checkpoint already provided; no conversion at all
     opts = mod.read_native_opts(cfg)
+    fam = mod._detect_native_family(hf_path) if hf_path else None
     if opts["enabled"] is False:
         return "INSTALL"  # bridge explicitly forced -> deps needed
-    fam = mod._native_support_for_path(hf_path)[0] if hf_path else None
     if opts["enabled"] is True or fam is not None:
         return "SKIP"  # native (bridge-free) path -> deps not needed
     return "INSTALL"  # unsupported family + hf_path -> bridge fallback

@@ -11,8 +11,11 @@ modules:
     # model to run
     model: mistral_7B_v0_3.yaml
     overrides:
-      # MI325X recipe. Batch, sequence and optimizer values are the same on
-      # every SKU: a starting point, not tuned for each SKU.
+      # MI325X smoke / throughput recipe for Mistral-7B-v0.3 on mock data
+      # (50 iterations, no checkpoint). Batch, sequence and optimizer values are
+      # those of the llama3_8B recipes (same 7-8B dense GQA shape); they are not
+      # tuned per SKU. It is not a pretraining schedule: set lr, warmup,
+      # train_iters and data for a real run.
       # log
       wandb_project: "Primus_Mistral_Pretrain"
       # Megatron's per-iteration lines (loss, grad norm, time) are logged at
@@ -21,13 +24,15 @@ modules:
       # disable_wandb: false
       # disable_tensorboard: false
       # Averaged time / throughput in the log line: skip the first 2 iterations, then
-      # average since the last restart; the average restarts every log_avg_reset_interval logs.
+      # average (as llama3_8B; with train_iters 50 the average never restarts).
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
-      # Logging only: backport of the Megatron-LM #7092 fix (upstream main logs this
-      # way). With log_interval 1, the loss and time logged after the first
-      # iteration of a run (also of a resumed run) do not include that iteration.
-      reset_log_averages_after_first_log: true
+      # Log every 2 iterations (llama3_8B: every one). This recipe saves no
+      # checkpoint; the value matters when a user sets save / load: a resumed run
+      # then prints the same per-line loss averages as an uninterrupted one (with
+      # log_interval 1 the first line after a resume differed by 6% in our resume
+      # test), so losses compare line for line across a resume.
+      log_interval: 2
 
       train_iters: 50
       micro_batch_size: 2
@@ -73,11 +78,10 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      # Turbo backend on, attention on TE (as llama3.1_8B): this recipe is verified
-      # with TE attention, also when run with context_parallel_size 2, where the pinned
-      # Primus-Turbo attention is not correct.
+      # Turbo as the MI325X llama3_8B recipe (the same attention shape: 32 heads,
+      # 8 KV groups, head_dim 128, full causal attention).
       enable_primus_turbo: true
-      use_turbo_attention: false
+      use_turbo_attention: true
 
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"

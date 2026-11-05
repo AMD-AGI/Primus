@@ -25,13 +25,16 @@ converter):
        and save a legacy ``torch`` checkpoint.
 
 Bridge-free guarantee: this module (and its callers) import ONLY
-``megatron.core`` / ``megatron.training`` / ``megatron.legacy``. ``megatron.bridge``
-is never imported; a hard guard asserts it never leaked into ``sys.modules``.
+``megatron.core`` / ``megatron.training`` (and ``megatron.legacy`` when the
+Megatron-LM tree has it). ``megatron.bridge`` is never imported; a hard guard
+asserts it never leaked into ``sys.modules``.
 
-The ROCm-only ``megatron.legacy.fused_kernels.load`` no-op that the legacy CPU
-init path needs is supplied as a Primus ``phase="convert"`` monkeypatch
+When the Megatron-LM tree has ``megatron.legacy`` (older Megatron), the init path
+calls ``megatron.legacy.fused_kernels.load``; its ROCm no-op is supplied as a
+Primus ``phase="convert"`` monkeypatch
 (``primus.backends.megatron.patches.checkpoint_convert_patches``), applied
-in-process before conversion -- NOT by editing the submodule.
+in-process before conversion -- NOT by editing the submodule. A tree without
+``megatron.legacy`` has no legacy fused kernels, and nothing is loaded.
 """
 
 import json
@@ -213,6 +216,29 @@ class SafetensorsStore:
 
 
 # ---------------------------------------------------------------------------
+# RoPE base from an HF config
+# ---------------------------------------------------------------------------
+# Hugging Face's default RoPE base per family, when a config gives none.
+HF_DEFAULT_ROPE_THETA = 10000.0  # Llama / Mistral
+QWEN3_DEFAULT_ROPE_THETA = 1000000.0
+
+
+def hf_rope_theta(cfg: dict, default: float) -> float:
+    """The RoPE base of an HF ``config.json`` dict: the top-level ``rope_theta``; else
+    the one under ``rope_parameters`` (where transformers v5 writes it when it
+    re-saves a checkpoint, with no top-level key) or ``rope_scaling``; else
+    ``default`` (the family's HF default). A top-level ``rope_theta`` always takes
+    precedence over a nested one."""
+    if cfg.get("rope_theta") is not None:
+        return cfg["rope_theta"]
+    for key in ("rope_parameters", "rope_scaling"):
+        nested = cfg.get(key)
+        if isinstance(nested, dict) and nested.get("rope_theta") is not None:
+            return nested["rope_theta"]
+    return default
+
+
+# ---------------------------------------------------------------------------
 # Vocab padding (replicate Megatron's pad-with-last-row / trim behaviour)
 # ---------------------------------------------------------------------------
 def pad_vocab(t: torch.Tensor, padded_vocab_size: int) -> torch.Tensor:
@@ -250,8 +276,19 @@ def init_megatron_single_process(margs, master_port: int, log=print):
     neutralize_nvte_attention_env()
 
     from megatron.core import mpu
-    from megatron.legacy import fused_kernels
     from megatron.training.global_vars import get_args, set_global_variables
+
+    try:
+        from megatron.legacy import fused_kernels
+    except ModuleNotFoundError as e:
+        # A Megatron-LM tree without megatron.legacy (as Primus's core_v0.19.2 pin)
+        # has no legacy fused kernels: nothing to load. Only the missing package
+        # itself is skipped; a missing fused_kernels in an existing megatron.legacy,
+        # or any module they import, is an error.
+        if e.name != "megatron.legacy":
+            raise
+        log("megatron.legacy is not present in this Megatron-LM tree: no legacy fused kernels to load")
+        fused_kernels = None
 
     set_global_variables(margs, build_tokenizer=True)
     margs = get_args()
@@ -264,10 +301,12 @@ def init_megatron_single_process(margs, master_port: int, log=print):
         pipeline_model_parallel_size=margs.pipeline_model_parallel_size,
         expert_model_parallel_size=margs.expert_model_parallel_size,
     )
-    # ROCm: legacy fused kernels are CUDA-only and their build shells out to
-    # nvcc; conversion never runs them. Neutralised by the phase="convert"
-    # Primus patch (checkpoint_convert_patches) applied earlier this process.
-    fused_kernels.load(margs)
+    # Older Megatron (with megatron.legacy) only. ROCm: legacy fused kernels are
+    # CUDA-only and their build shells out to nvcc; conversion never runs them.
+    # Neutralised by the phase="convert" Primus patch (checkpoint_convert_patches)
+    # applied earlier this process.
+    if fused_kernels is not None:
+        fused_kernels.load(margs)
     return margs
 
 

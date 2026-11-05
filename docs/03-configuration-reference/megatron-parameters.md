@@ -433,7 +433,6 @@ models:
 | `mlflow_experiment_name` | `null` | *Primus:* MLflow experiment name. |
 | `use_rocm_mem_info` | `false` | *Primus:* collect ROCm memory info via `rocm-smi` every step when `true`. |
 | `use_rocm_mem_info_iters` | `[1, 2]` | *Primus:* iterations at which to log memory if `use_rocm_mem_info` is `false`. |
-| `reset_log_averages_after_first_log` | `false` | *Primus:* backport of the Megatron-LM #7092 logging fix: when the first iteration of a run is a log point (always with `log_interval: 1`), reset the log accumulators and timers after it, so the next log excludes it. Training stops at startup when the pinned Megatron-LM has neither the old line nor the fix. |
 
 ### 9.2 Profiling
 

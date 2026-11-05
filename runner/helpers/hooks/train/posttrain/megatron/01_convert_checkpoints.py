@@ -13,8 +13,8 @@ checkpoint layout so native Megatron-LM finetune loading can consume it.
 """
 
 import argparse
+import functools
 import importlib.util
-import json
 import os
 import sys
 import time
@@ -104,21 +104,13 @@ def read_native_opts(config_file: str) -> dict:
     """Read native (bridge-free) conversion options from the config.
 
     Returns a dict with ``enabled`` (tri-state: ``None`` when the config does not
-    set ``native_ckpt_convert`` at all, else ``True`` / ``False``), optional
-    ``dtype`` / ``out`` overrides, and the training config's ``use_rope_scaling``
-    / ``rope_scaling_factor`` (``_native_main`` logs when HF's llama3 RoPE
-    scaling replaces them). ``None`` lets the caller pick the default
+    set ``native_ckpt_convert`` at all, else ``True`` / ``False``), plus optional
+    ``dtype`` / ``out`` overrides. ``None`` lets the caller pick the default
     (native for supported families); ``True`` forces native; ``False`` forces the
     legacy Megatron-Bridge path.
     """
     cfg = load_primus_config(Path(config_file), None)
-    opts = {
-        "enabled": None,
-        "dtype": None,
-        "out": None,
-        "use_rope_scaling": None,
-        "rope_scaling_factor": None,
-    }
+    opts = {"enabled": None, "dtype": None, "out": None}
 
     for module_name in ["sft_trainer", "post_trainer"]:
         module = get_module_config(cfg, module_name)
@@ -137,9 +129,6 @@ def read_native_opts(config_file: str) -> dict:
         opts["out"] = _first_config_value(params, "native_ckpt_out") or _first_config_value(
             module, "native_ckpt_out"
         )
-        for key in ("use_rope_scaling", "rope_scaling_factor"):
-            value = _first_config_value(params, key)
-            opts[key] = value if value is not None else _first_config_value(module, key)
         break
 
     return opts
@@ -210,8 +199,7 @@ def _unset_nvte_attention_env():
 # ---------------------------------------------------------------------------
 # Native (bridge-free) conversion path
 # ---------------------------------------------------------------------------
-# DEFAULT conversion path for supported configs (Qwen3, DeepSeek, Llama, and
-# Mistral with full causal attention): this
+# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama, Mistral): this
 # hook builds the mcore model in-process and copies HF safetensors weights onto
 # it (Primus-managed converters), producing a legacy ``torch`` checkpoint WITHOUT
 # ever importing ``megatron.bridge``. The convert-time monkeypatches (ROCm
@@ -220,30 +208,13 @@ def _unset_nvte_attention_env():
 # Megatron-LM submodule stays pristine. Set ``native_ckpt_convert: false`` to
 # force the legacy Megatron-Bridge path (or ``true`` to force native).
 
+# What the native path converts, for the hook's error messages.
+_NATIVE_SUPPORTED = (
+    "Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1, Mistral (MistralForCausalLM with full causal attention, "
+    "e.g. Mistral-7B-v0.2/v0.3)"
+)
 
-def _llama_config_rules():
-    """``primus/backends/megatron/checkpoint/llama_config_rules.py``, loaded by path.
-
-    It is standard library only. Loading it by path (not as
-    ``primus.backends.megatron...``) does not import that package, torch or
-    Megatron, so this routing check stays a pure config.json check.
-    """
-    name = "_primus_llama_config_rules"
-    if name not in sys.modules:
-        path = PRIMUS_ROOT / "primus/backends/megatron/checkpoint/llama_config_rules.py"
-        spec = importlib.util.spec_from_file_location(name, path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        sys.modules[name] = module
-    return sys.modules[name]
-
-
-_RULES = _llama_config_rules()
-
-# HF architectures / model_type -> Primus native converter family. Llama and dense
-# Mistral (e.g. Mistral-7B-v0.2/v0.3, the Llama weight layout) use the Llama
-# converter; which of their configs it supports is decided by llama_config_rules,
-# which the converter itself uses.
+# HF architectures / model_type -> Primus native converter family.
 _NATIVE_FAMILIES = {
     "qwen3": "qwen3",
     "qwen3_moe": "qwen3",
@@ -254,111 +225,98 @@ _NATIVE_FAMILIES = {
     "deepseekv2forcausallm": "deepseek",
     "deepseekv3forcausallm": "deepseek",
     "deepseek": "deepseek",
-    **dict.fromkeys(_RULES.LLAMA_NAMES + _RULES.MISTRAL_NAMES, "llama"),
+    "llama": "llama",
+    "llamaforcausallm": "llama",
+    "mistral": "mistral",
+    "mistralforcausallm": "mistral",
 }
 
-_SUPPORTED = "Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.x, Mistral with full causal attention"
+
+# Optional per-family config checks, run before a family is chosen (also by
+# 00_install_requirements.sh, before torch or Megatron is importable).
+# Contract of a checks module (registered here by family, path relative to the repo):
+#   * standard library only, no package imports (it is loaded by path, without
+#     importing ``primus.backends.megatron``, which needs torch / Megatron);
+#   * ``check_config(cfg: dict)`` raises ``ValueError`` naming the failed check when
+#     the family's native converter does not convert ``cfg`` (the parsed config.json).
+# A family without an entry has no checks: its configs are routed by name only.
+_NATIVE_CONFIG_CHECKS = {
+    "mistral": "primus/backends/megatron/checkpoint/native_config_mistral.py",
+}
 
 
-def _native_support(cfg: dict) -> tuple[str | None, str | None]:
-    """Return ``(family, None)`` for a config a native converter supports, else
-    ``(None, reason)``. family is 'qwen3' | 'deepseek' | 'llama'."""
-    try:
-        names = _RULES.config_names(cfg)
-    except ValueError as e:
-        return None, str(e)
-    # architectures first; a model_type of another converter family is a conflict
-    from_arch = {_NATIVE_FAMILIES[n] for n in names[:-1] if n in _NATIVE_FAMILIES}
-    from_type = _NATIVE_FAMILIES.get(names[-1])
-    if len(from_arch) > 1 or (from_arch and from_type and from_type not in from_arch):
-        return None, f"architectures/model_type {names} name different model families"
-    family = from_arch.pop() if from_arch else from_type
-    if family is None:
-        return None, f"no native converter for architectures/model_type {names} (supported: {_SUPPORTED})"
-    if family == "llama":
-        reason = _RULES.unsupported_reason(cfg)
-        if reason:
-            return None, f"the native Llama/Mistral converter does not support {reason}"
-    return family, None
+@functools.lru_cache(maxsize=None)
+def _native_config_check(family: str):
+    """The ``check_config`` of ``family``'s checks module (loaded once per process),
+    or None when the family has none."""
+    rel = _NATIVE_CONFIG_CHECKS.get(family)
+    if rel is None:
+        return None
+    spec = importlib.util.spec_from_file_location(f"_native_config_{family}", PRIMUS_ROOT / rel)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    check = getattr(mod, "check_config", None)
+    if not callable(check):
+        raise TypeError(f"{rel} has no check_config(cfg) (see _NATIVE_CONFIG_CHECKS)")
+    return check
 
 
-def _read_hf_config(hf_path: str) -> tuple[dict | None, str | None]:
-    """``(config, None)`` for the parsed HF ``config.json`` object, else ``(None, reason)``."""
+def _detect_native_family_and_reason(hf_path: str) -> tuple[str | None, str | None]:
+    """``(family, reason)`` from the HF config.json: ``family`` is 'qwen3' | 'deepseek' |
+    'llama' | 'mistral' | None; ``reason`` is why a family's checks decline the config
+    (then ``family`` is None), else None. A config.json that is not valid JSON or not
+    a JSON object raises.
+
+    The family comes from the first ``architectures`` entry that names one, else from
+    ``model_type``. Every family that the config names (in ``architectures`` or
+    ``model_type``) and that has checks in ``_NATIVE_CONFIG_CHECKS`` runs them: a config
+    that any of them declines is not converted natively."""
+    import json
+
     cfg_file = os.path.join(hf_path, "config.json")
     if not os.path.isfile(cfg_file):
-        return None, f"no config.json in {hf_path}"
-    try:
-        with open(cfg_file) as f:
-            cfg = json.load(f)
-    except (OSError, ValueError) as e:
-        return None, f"cannot read {cfg_file}: {e}"
+        return None, None
+    with open(cfg_file) as f:
+        cfg = json.load(f)  # an unreadable config.json raises (json.JSONDecodeError)
     if not isinstance(cfg, dict):
-        return None, f"{cfg_file} is not a JSON object"
-    return cfg, None
+        raise ValueError(f"{cfg_file} is not a JSON object")
+
+    archs = cfg.get("architectures") or []
+    names = [str(a) for a in (archs if isinstance(archs, list) else [archs])]
+    named = [_NATIVE_FAMILIES.get(n.lower()) for n in names + [str(cfg.get("model_type", ""))]]
+    named = [f for f in named if f]
+    for fam in dict.fromkeys(named):  # each named family once, in order
+        check = _native_config_check(fam)
+        if check is None:
+            continue
+        try:
+            check(cfg)
+        except ValueError as e:  # the family's checks decline it: no family converts it
+            return None, str(e)
+    return (named[0] if named else None), None
 
 
-def _native_support_for_path(hf_path: str) -> tuple[str | None, str | None]:
-    cfg, reason = _read_hf_config(hf_path)
-    return (None, reason) if cfg is None else _native_support(cfg)
+def _detect_native_family(hf_path: str) -> str | None:
+    """Return 'qwen3' | 'deepseek' | 'llama' | 'mistral' | None from the HF config.json
+    (None also when a family's checks in ``_NATIVE_CONFIG_CHECKS`` decline the config)."""
+    return _detect_native_family_and_reason(hf_path)[0]
 
 
-def _llama3_rope_args(hf_cfg: dict, native_opts: dict) -> tuple[dict, str | None]:
-    """The training arguments that apply the HF config's llama3 RoPE scaling,
-    and an info message when they change what the training config sets.
-
-    The converter copies weights only; the RoPE scaling is a training option.
-    Megatron takes ``use_rope_scaling`` and ``rope_scaling_factor`` from the
-    training config and fixes the other llama3 parameters
-    (``MEGATRON_LLAMA3_ROPE_FIXED``; a config with other values is not
-    converted natively). Used on both conversion paths, so a checkpoint trains
-    with the same RoPE whichever converter made it. ``({}, None)`` for a config
-    without llama3 scaling."""
-    params = _RULES.llama3_rope_scaling(hf_cfg)
-    if params is None:
-        return {}, None
-    problem = _RULES.llama3_rope_problem(params)
-    factor = params.get("factor")
-    if problem and problem.startswith("factor "):
-        # only on the Megatron-Bridge path (the native rules reject this config)
-        return {}, f"the HF config's llama3 RoPE scaling is not applied: {problem}"
-    factor = float(factor)
-    args = {"use_rope_scaling": "true", "rope_scaling_factor": repr(factor)}
-    notes = []
-    if not (native_opts.get("use_rope_scaling") and native_opts.get("rope_scaling_factor") == factor):
-        notes.append(
-            f"the HF config has llama3 RoPE scaling (factor {factor}); the training config has "
-            f"use_rope_scaling {native_opts.get('use_rope_scaling')!r}, rope_scaling_factor "
-            f"{native_opts.get('rope_scaling_factor')!r}: training uses HF's "
-            f"(use_rope_scaling true, rope_scaling_factor {factor})"
-        )
-    if problem:
-        # only on the Megatron-Bridge path (the native rules reject this config)
-        notes.append(f"Megatron cannot reproduce the rest of the HF llama3 RoPE scaling: {problem}")
-    return args, "; ".join(notes) or None
-
-
-def _emit_checkpoint_args(megatron_path: Path, extra: dict):
-    """Print the ``extra.*`` lines the runner turns into training arguments."""
-    for name, value in extra.items():
-        print(f"extra.{name}={value}")
-    print(f"extra.pretrained_checkpoint={megatron_path}")
-    print("extra.finetune=true")
-
-
-def _native_dtype_from_config(hf_path: str, override: str | None, hf_cfg: dict | None = None) -> str:
-    """``override``, else the HF config's dtype (``hf_cfg`` when the caller already
-    read it), else bf16."""
+def _native_dtype_from_config(hf_path: str, override: str | None) -> str:
     if override:
         return override
-    cfg = hf_cfg if hf_cfg is not None else _read_hf_config(hf_path)[0] or {}
-    # transformers 5.x writes "dtype", 4.x "torch_dtype"
-    td = str(cfg.get("dtype") or cfg.get("torch_dtype") or "").lower()
-    if "bfloat16" in td:
-        return "bf16"
-    if "float16" in td:
-        return "fp16"
-    if "float32" in td:
-        return "fp32"
+    import json
+
+    cfg_file = os.path.join(hf_path, "config.json")
+    if os.path.isfile(cfg_file):
+        with open(cfg_file) as f:
+            td = str(json.load(f).get("torch_dtype", "")).lower()
+        if "bfloat16" in td:
+            return "bf16"
+        if "float16" in td:
+            return "fp16"
+        if "float32" in td:
+            return "fp32"
     return "bf16"
 
 
@@ -368,7 +326,16 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
     Applies the ``phase="convert"`` patches in this process, then runs the
     Primus-managed native converter for the detected family, all single-process.
     """
-    family = opts["family"]  # _native_main sets it from main()'s _native_support
+    family, reason = opts.get("family"), None
+    if family is None:
+        family, reason = _detect_native_family_and_reason(hf_path)
+    if family is None:
+        if reason:  # a family the config names declines it in its checks
+            raise ValueError(f"the native converter declines the HF model at {hf_path}: {reason}")
+        raise ValueError(
+            f"native_ckpt_convert requested but no native converter for HF model at {hf_path} "
+            f"(supported: {_NATIVE_SUPPORTED})"
+        )
 
     # Ensure the Megatron-LM source tree is importable in this standalone hook
     # process (run_pretrain.sh's PYTHONPATH does not include it), and register +
@@ -379,7 +346,7 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
     applied = common.apply_convert_patches(module_name="checkpoint_convert")
     log_info(f"Applied {applied} convert-phase patch(es)")
 
-    dtype = _native_dtype_from_config(hf_path, opts.get("dtype"), opts.get("hf_config"))
+    dtype = _native_dtype_from_config(hf_path, opts.get("dtype"))
     tp = int(opts.get("tensor_parallel_size", 1))
     pp = int(opts.get("pipeline_parallel_size", 1))
     ep = int(opts.get("expert_parallel_size", 1))
@@ -392,6 +359,8 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
         from primus.backends.megatron.checkpoint import native_loader_qwen3 as conv
     elif family == "llama":
         from primus.backends.megatron.checkpoint import native_loader_llama as conv
+    elif family == "mistral":
+        from primus.backends.megatron.checkpoint import native_loader_mistral as conv
     else:
         from primus.backends.megatron.checkpoint import native_loader_deepseek as conv
 
@@ -489,22 +458,15 @@ def fix_common_pt_for_megatron_lm(checkpoint_dir: Path):
     log_success("     Successfully added 'args' to common.pt")
 
 
-def _native_main(hf_path: str, native_opts: dict, family: str, hf_cfg: dict | None = None):
+def _native_main(hf_path: str, native_opts: dict, family: str):
     """Bridge-free native conversion branch of main().
 
     Mirrors the Bridge path's skip-if-exists / rank-0-converts-others-wait
     semantics, but produces a legacy ``torch`` checkpoint via the Primus-managed
     in-process converter and emits ``pretrained_checkpoint`` + ``finetune`` back
-    to the runner. ``family`` is the converter family main() detected from
-    ``hf_cfg``, the parsed HF config.json (read here when not given).
+    to the runner.
     """
-    if hf_cfg is None:
-        hf_cfg = _read_hf_config(hf_path)[0] or {}
-    native_opts["family"] = family
-    native_opts["hf_config"] = hf_cfg
-    rope_args, rope_note = _llama3_rope_args(hf_cfg, native_opts)
-    if rope_note:
-        log_info(rope_note)
+    native_opts["family"] = family  # the family main() detected
 
     # Output path (legacy torch layout: <out>/iter_0000001/mp_rank_00/...).
     if native_opts.get("out"):
@@ -518,7 +480,8 @@ def _native_main(hf_path: str, native_opts: dict, family: str, hf_cfg: dict | No
 
     if megatron_path.exists() and (megatron_path / "latest_checkpointed_iteration.txt").exists():
         log_info(f"Native Megatron checkpoint already exists at {megatron_path}, skipping conversion")
-        _emit_checkpoint_args(megatron_path, rope_args)
+        print(f"extra.pretrained_checkpoint={megatron_path}")
+        print(f"extra.finetune=true")
         return
 
     node_rank = int(os.environ.get("NODE_RANK", os.environ.get("RANK", 0)))
@@ -540,7 +503,8 @@ def _native_main(hf_path: str, native_opts: dict, family: str, hf_cfg: dict | No
         wait_for_conversion(done_file, lock_file)
         log_success(f"[RANK {node_rank}] Checkpoint ready at {megatron_path}")
 
-    _emit_checkpoint_args(megatron_path, rope_args)
+    print(f"extra.pretrained_checkpoint={megatron_path}")
+    print(f"extra.finetune=true")
 
 
 def main():
@@ -569,35 +533,40 @@ def main():
         return
 
     # ---- Choose conversion backend --------------------------------------
-    # Native (bridge-free) conversion is the DEFAULT for supported configs
-    # (Qwen3, DeepSeek, Llama, Mistral with full causal attention; the Llama
-    # converter rejects some configs, see _native_support). ``native_ckpt_convert:
-    # false`` forces the legacy Megatron-Bridge path (no config check);
-    # ``native_ckpt_convert: true`` forces native.
+    # Native (bridge-free) conversion is the DEFAULT for supported families
+    # (Qwen3, DeepSeek, Llama, Mistral). ``native_ckpt_convert: false`` forces the legacy
+    # Megatron-Bridge path; ``native_ckpt_convert: true`` forces native.
     native_opts = read_native_opts(config_file)
-    enabled = native_opts["enabled"]
-    hf_cfg, read_reason = _read_hf_config(hf_path)
-    if enabled is False:
-        native_reason = "native_ckpt_convert: false"  # no config check
+    if native_opts["enabled"] is False:  # Bridge forced: no family detection or checks
+        native_family, reason = None, None
     else:
-        native_reason = read_reason
-        native_family = None
-        if hf_cfg is not None:
-            native_family, native_reason = _native_support(hf_cfg)
-        if native_family is not None:
-            _native_main(hf_path, native_opts, native_family, hf_cfg)
-            return
-        if enabled is True:
+        native_family, reason = _detect_native_family_and_reason(hf_path)
+    if reason and native_opts["enabled"] is None:
+        log_info(f"Native converter declines {hf_path}: {reason}")
+    if native_opts["enabled"] is True:
+        use_native = True
+    elif native_opts["enabled"] is False:
+        use_native = False
+    else:  # not set -> default to native when the family is supported
+        use_native = native_family is not None
+
+    if use_native:
+        if native_family is None:
+            if reason:  # a family the config names declines it in its checks
+                problem = f"the native converter declines the HF model at {hf_path}: {reason}."
+            else:
+                problem = (
+                    f"no native converter matches the HF model at {hf_path} (supported: {_NATIVE_SUPPORTED})."
+                )
             log_error(
-                f"native_ckpt_convert: true but HF model at {hf_path}: {native_reason}. "
-                "Set native_ckpt_convert: false (or leave it unset) to use the Megatron-Bridge path."
+                f"native_ckpt_convert=true but {problem} "
+                "Set native_ckpt_convert: false to use the Megatron-Bridge path."
             )
             sys.exit(1)
+        _native_main(hf_path, native_opts, native_family)
+        return
 
-    log_info(f"Using Megatron-Bridge conversion path ({native_reason})")
-    rope_args, rope_note = _llama3_rope_args(hf_cfg or {}, native_opts)
-    if rope_note:
-        log_info(rope_note)
+    log_info("Using Megatron-Bridge conversion path (native disabled or unsupported family)")
 
     # Set paths
     data_path = Path(os.environ.get("DATA_PATH", PRIMUS_ROOT / "data"))
@@ -609,7 +578,8 @@ def main():
     # Check if Megatron checkpoint already exists
     if megatron_path.exists():
         log_info(f"Megatron checkpoint already exists at {megatron_path}, skipping conversion")
-        _emit_checkpoint_args(megatron_path, rope_args)
+        print(f"extra.pretrained_checkpoint={megatron_path}")
+        print(f"extra.finetune=true")
         return
 
     # Convert checkpoint (only on rank 0, others wait)
@@ -673,7 +643,8 @@ def main():
 
     # Output the checkpoint path for the main training process
     # Use pretrained_checkpoint + finetune=true (same as Megatron-Bridge workflow)
-    _emit_checkpoint_args(megatron_path, rope_args)
+    print(f"extra.pretrained_checkpoint={megatron_path}")
+    print(f"extra.finetune=true")
 
 
 if __name__ == "__main__":

@@ -13,8 +13,6 @@ This package currently exposes:
       that injects ROCm memory and throughput statistics.
     - wall_clock_timer_patch: wraps train_step with a wall-clock timer for
       NeMo-comparable throughput measurement.
-    - first_iteration_reset_patches: opt-in (``reset_log_averages_after_first_log``)
-      reset of the log averages after the first logged iteration of a run.
 
 The actual patch registration is handled via ``@register_patch``; this
 ``__init__`` exists mainly to make ``training_log`` a proper package so
@@ -23,9 +21,8 @@ can discover and import the patch modules automatically.
 """
 
 from primus.backends.megatron.patches.training_log import (  # noqa: F401
-    first_iteration_reset_patches,
     print_rank_last_patches,
     wall_clock_timer_patch,
 )
 
-__all__ = ["first_iteration_reset_patches", "print_rank_last_patches", "wall_clock_timer_patch"]
+__all__ = ["print_rank_last_patches", "wall_clock_timer_patch"]

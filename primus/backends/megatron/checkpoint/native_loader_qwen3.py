@@ -38,7 +38,7 @@ def derive_megatron_fields(cfg):
         num_layers=cfg["num_hidden_layers"],
         max_position_embeddings=cfg["max_position_embeddings"],
         norm_epsilon=cfg["rms_norm_eps"],
-        rotary_base=cfg.get("rope_theta", 1000000.0),
+        rotary_base=common.hf_rope_theta(cfg, common.QWEN3_DEFAULT_ROPE_THETA),
         untie_embeddings_and_output_weights=not cfg.get("tie_word_embeddings", False),
         ffn_hidden_size=cfg["intermediate_size"],
         # GQA
