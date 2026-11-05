@@ -72,7 +72,6 @@
     "primus_turbo": "monitor"
   },
   "key_findings": [
-    "Continuity-based window 2026-09-01 17:05 GMT+8 -> 2026-10-01 17:02 GMT+8 (~30 days). gap_detected = true because window_start (2026-09-01) is earlier than the first day of the current calendar month (2026-10-01), so this run captures September activity a plain calendar-month window would have dropped. All prior weekly+monthly report windows merge into one contiguous coverage group (no >7-day gap), and the span is within the healthy monthly range (<45 days).",
     "73 PRs merged to main in the window. Largest categories: CI/Infra 20 (PRPUNDIT test series, v26.6/v26.7 OOB dockerfiles, GPU-label gating), Other 16 (SpecForge offline+online backends, MiniMax-M3, DLRM-v4, model recipes), Bug Fix 12, Performance Optimization 9, Docs 9, Turbo/Dependency Version Update 4, Refactor 3.",
     "No backend-gap-tracked pin changed in-window: third_party/Megatron-LM stayed at d3528a21 and third_party/torchtitan stayed at 73a0e697 (v0.2.2 tag) for the whole window. Therefore backend_gap_updated = false; no backend-gap report was regenerated.",
     "Other in-window pin movement (not backend-gap targets): third_party/maxtext advanced b47d74bf -> b3c53763 (PR #1172, align JAX backends with v26.7). maxtext has no backend-gap report set, so it is noted but not regenerated.",
@@ -80,5 +79,993 @@
     "torchtitan upstream drift: pin 73a0e697 (v0.2.2, 2026-02-20, unchanged) is now 1194 commits behind upstream HEAD 1aaee42b (2026-10-01). Notable upstream since tag: local compile (OffsetRMSNorm/gated RMSNorm), CUDA-graph optimizer/grad capture, graph_trainer + RL stack, DeepSeek-V4 packed docs/Attention Gym, Qwen 3.5, Tyro->Python config loading. Recommendation: plan sync.",
     "Primus-Turbo Q4 quarterly drift: Q4 began 2026-10-01, only hours before this report, so all tracked pins (CI ae1ac068, benchmark a04a233c, AITER 0f3c58e6, TRITON 09500db9, UCCL 5afb4117) equal their quarter-start values -> 0 commits of Q4 drift. Context: the CI pin advanced 6d5ff979 -> ae1ac068 (+47) during September via PR #1195 (MegaMoE FlyDSL ownership, upstream #525). Recommendation: monitor.",
     "Notable hardening this month: Flux validation-loss clone out of Megatron rescale (#1079), TE requantize_data UnboundLocalError fix (#1108), Triton buffer-store/ROCm NaN workaround (#962), scientific-notation CLI float parsing (#1112), FileNotFoundError (not assert) in setup_backend_path under python -O (#1111), and torchtitan GPT-OSS router-bias init (#1183)."
-  ]
+  ],
+  "merged_prs": [
+    {
+      "number": 1062,
+      "title": "feat(deepseek-v4): packed-sequence (THD) SFT — full model at 4k and 128k on 3 nodes",
+      "created_at": "2026-08-31T12:10:28Z",
+      "merged_at": "2026-09-01T09:15:49Z",
+      "author": "aaab8b",
+      "additions": 3384,
+      "deletions": 85,
+      "areas": [
+        "Megatron",
+        "Examples"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1065,
+      "title": "refactor(data): reuse Primus config merge and isolate Megatron CLI",
+      "created_at": "2026-09-01T05:12:44Z",
+      "merged_at": "2026-09-01T09:26:31Z",
+      "author": "WangLingxun",
+      "additions": 1109,
+      "deletions": 984,
+      "areas": [
+        "Megatron",
+        "Core & tools"
+      ],
+      "category": "Refactor"
+    },
+    {
+      "number": 1059,
+      "title": "feat(projection): DLRM-v4 (TorchRec/HSTU) workload + first-principles MI350X calibration",
+      "created_at": "2026-08-28T23:41:06Z",
+      "merged_at": "2026-09-01T19:02:32Z",
+      "author": "araina-amd",
+      "additions": 1105,
+      "deletions": 70,
+      "areas": [
+        "Core runtime"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1075,
+      "title": "[OOB Release] add JAX v26.6 dockerfile",
+      "created_at": "2026-09-01T23:26:56Z",
+      "merged_at": "2026-09-01T23:56:18Z",
+      "author": "GeneDer",
+      "additions": 577,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1078,
+      "title": "chore(deps): bump transformers from 5.5.0 to 5.10.1",
+      "created_at": "2026-09-02T03:03:17Z",
+      "merged_at": "2026-09-02T05:54:35Z",
+      "author": "dependabot[bot]",
+      "additions": 1,
+      "deletions": 1,
+      "areas": [
+        "Other"
+      ],
+      "category": "Turbo/Dependency Version Update"
+    },
+    {
+      "number": 1077,
+      "title": "chore(deps): bump transformers from 4.57.6 to 5.10.1 in /runner/helpers/hooks/train/pretrain/megatron_bridge",
+      "created_at": "2026-09-02T02:17:23Z",
+      "merged_at": "2026-09-02T05:54:57Z",
+      "author": "dependabot[bot]",
+      "additions": 1,
+      "deletions": 1,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "Turbo/Dependency Version Update"
+    },
+    {
+      "number": 1076,
+      "title": "chore(deps): bump transformers from 4.50.0 to 5.10.1 in /runner/helpers/hooks/train/pretrain/diffusion",
+      "created_at": "2026-09-02T01:01:16Z",
+      "merged_at": "2026-09-02T05:55:15Z",
+      "author": "dependabot[bot]",
+      "additions": 1,
+      "deletions": 1,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "Turbo/Dependency Version Update"
+    },
+    {
+      "number": 1080,
+      "title": "[Perf Optimization] Tune GDN/KDA 1B MI355X pretrain configs for high-occupancy throughput.",
+      "created_at": "2026-09-02T20:53:28Z",
+      "merged_at": "2026-09-02T23:14:59Z",
+      "author": "kailashg26",
+      "additions": 21,
+      "deletions": 19,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1098,
+      "title": "test: cover Compressor overlap and non-overlap windowing (PRPUNDIT-25)",
+      "created_at": "2026-09-04T16:28:07Z",
+      "merged_at": "2026-09-06T23:10:30Z",
+      "author": "jiagaoxiang",
+      "additions": 199,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1106,
+      "title": "test: cover fused clamped SwiGLU Triton autograd (PRPUNDIT-23)",
+      "created_at": "2026-09-04T16:28:27Z",
+      "merged_at": "2026-09-06T23:10:58Z",
+      "author": "jiagaoxiang",
+      "additions": 167,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1105,
+      "title": "test: pin AttentionResidualMixer against an independent mix (PRPUNDIT-22)",
+      "created_at": "2026-09-04T16:28:24Z",
+      "merged_at": "2026-09-06T23:12:44Z",
+      "author": "jiagaoxiang",
+      "additions": 232,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1103,
+      "title": "test: pin Llama3 TurboAttention GQA layout (PRPUNDIT-20)",
+      "created_at": "2026-09-04T16:28:19Z",
+      "merged_at": "2026-09-06T23:14:04Z",
+      "author": "jiagaoxiang",
+      "additions": 165,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1099,
+      "title": "test: pin Wan CausalConv3d streaming cache (PRPUNDIT-24)",
+      "created_at": "2026-09-04T16:28:10Z",
+      "merged_at": "2026-09-06T23:15:05Z",
+      "author": "jiagaoxiang",
+      "additions": 135,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1101,
+      "title": "test: pin DeepSeek-V3 TurboAttention BSHD layout (PRPUNDIT-18)",
+      "created_at": "2026-09-04T16:28:14Z",
+      "merged_at": "2026-09-06T23:15:42Z",
+      "author": "jiagaoxiang",
+      "additions": 115,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1102,
+      "title": "test: cover GPT-OSS turbo sink attention forward (PRPUNDIT-19)",
+      "created_at": "2026-09-04T16:28:17Z",
+      "merged_at": "2026-09-06T23:16:36Z",
+      "author": "jiagaoxiang",
+      "additions": 56,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1100,
+      "title": "test: pin AdaLNContinuous scale/shift order and gradients (PRPUNDIT-17)",
+      "created_at": "2026-09-04T16:28:12Z",
+      "merged_at": "2026-09-06T23:17:37Z",
+      "author": "jiagaoxiang",
+      "additions": 122,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1094,
+      "title": "docs(networking): add AINIC bundle version guide",
+      "created_at": "2026-09-03T18:00:44Z",
+      "merged_at": "2026-09-06T23:18:52Z",
+      "author": "yeandy",
+      "additions": 305,
+      "deletions": 0,
+      "areas": [
+        "Docs"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 1079,
+      "title": "fix(flux): clone the validation loss out of Megatron's rescale path",
+      "created_at": "2026-09-02T04:28:23Z",
+      "merged_at": "2026-09-06T23:19:46Z",
+      "author": "olehtika",
+      "additions": 64,
+      "deletions": 1,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1112,
+      "title": "fix(config): parse scientific-notation CLI overrides as floats (e.g. --lr 1e-5)",
+      "created_at": "2026-09-07T06:05:03Z",
+      "merged_at": "2026-09-07T09:48:29Z",
+      "author": "SumonAMD",
+      "additions": 22,
+      "deletions": 5,
+      "areas": [
+        "Core runtime"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1104,
+      "title": "test: pin Qwen3 TurboAttention layout and qk-norm (PRPUNDIT-21)",
+      "created_at": "2026-09-04T16:28:22Z",
+      "merged_at": "2026-09-07T09:49:09Z",
+      "author": "jiagaoxiang",
+      "additions": 208,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1096,
+      "title": "testintel: add missing test for AvgDown3D.forward (created by linxwang)",
+      "created_at": "2026-09-04T16:28:02Z",
+      "merged_at": "2026-09-07T11:56:01Z",
+      "author": "jiagaoxiang",
+      "additions": 94,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1114,
+      "title": "docs: bump current release tags from v26.5 to v26.6",
+      "created_at": "2026-09-08T02:31:07Z",
+      "merged_at": "2026-09-08T02:36:57Z",
+      "author": "amd-fuyuajin",
+      "additions": 72,
+      "deletions": 71,
+      "areas": [
+        "Examples",
+        "Core & tools"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 1113,
+      "title": "examples(megatron): add Llama-3.1-8B BF16 LoRA-SFT recipe for MI355X",
+      "created_at": "2026-09-07T11:54:30Z",
+      "merged_at": "2026-09-08T04:46:09Z",
+      "author": "SumonAMD",
+      "additions": 128,
+      "deletions": 0,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1111,
+      "title": "fix(backend): raise FileNotFoundError instead of assert False in setup_backend_path (survives python -O)",
+      "created_at": "2026-09-07T06:04:15Z",
+      "merged_at": "2026-09-08T04:49:06Z",
+      "author": "SumonAMD",
+      "additions": 19,
+      "deletions": 2,
+      "areas": [
+        "Core runtime"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1097,
+      "title": "testintel: add missing test for Decoder3d.forward (created by linxwang)",
+      "created_at": "2026-09-04T16:28:05Z",
+      "merged_at": "2026-09-08T04:59:08Z",
+      "author": "jiagaoxiang",
+      "additions": 135,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1108,
+      "title": "fix(te): requantize_data raises UnboundLocalError on the captured `inp`",
+      "created_at": "2026-09-06T19:22:35Z",
+      "merged_at": "2026-09-08T07:04:08Z",
+      "author": "Anai-Guo",
+      "additions": 2,
+      "deletions": 2,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1070,
+      "title": "feat(gpt-oss): MXFP4 deosc BF16 snapshots and simplified 20B recipe",
+      "created_at": "2026-09-01T08:59:59Z",
+      "merged_at": "2026-09-08T12:18:02Z",
+      "author": "HuangWei-95",
+      "additions": 721,
+      "deletions": 1638,
+      "areas": [
+        "MLPerf",
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1054,
+      "title": "[JAX] fix XLA_FLAGS precedence inversion, add XLA_FLAGS_APPEND, document flag layering",
+      "created_at": "2026-08-27T20:08:58Z",
+      "merged_at": "2026-09-08T12:19:41Z",
+      "author": "yeandy",
+      "additions": 520,
+      "deletions": 56,
+      "areas": [
+        "MaxText",
+        "Core runtime"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1118,
+      "title": "corrections to Docs/networking/ainic bundle guide ",
+      "created_at": "2026-09-08T15:58:08Z",
+      "merged_at": "2026-09-09T00:20:08Z",
+      "author": "yeandy",
+      "additions": 331,
+      "deletions": 47,
+      "areas": [
+        "Docs"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 1119,
+      "title": "examples(megatron): add Qwen3-30B-A3B and Qwen2.5-72B MXFP4 pretrain recipes for MI355X",
+      "created_at": "2026-09-08T21:56:57Z",
+      "merged_at": "2026-09-09T00:22:11Z",
+      "author": "SumonAMD",
+      "additions": 202,
+      "deletions": 0,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1120,
+      "title": "update baremetal install v26.6 and update docs to v26.6",
+      "created_at": "2026-09-09T01:52:22Z",
+      "merged_at": "2026-09-09T02:21:35Z",
+      "author": "amd-fuyuajin",
+      "additions": 623,
+      "deletions": 401,
+      "areas": [
+        "Core & tools"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 1095,
+      "title": "Dev/jax maxtext v26.6 primus cli",
+      "created_at": "2026-09-03T20:12:57Z",
+      "merged_at": "2026-09-09T03:34:12Z",
+      "author": "amd-fuyuajin",
+      "additions": 1605,
+      "deletions": 69,
+      "areas": [
+        "MaxText",
+        "Other"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1124,
+      "title": "skills/spur-cluster-status: report QoS node caps vs live usage",
+      "created_at": "2026-09-09T05:40:58Z",
+      "merged_at": "2026-09-09T05:41:15Z",
+      "author": "wenxie-amd",
+      "additions": 265,
+      "deletions": 40,
+      "areas": [
+        "Agent skills"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1125,
+      "title": "skills/spur-cluster-status: report QoS node caps vs live usage",
+      "created_at": "2026-09-09T05:49:27Z",
+      "merged_at": "2026-09-09T05:54:04Z",
+      "author": "wenxie-amd",
+      "additions": 555,
+      "deletions": 4,
+      "areas": [
+        "Agent skills"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1121,
+      "title": "docs: organize technical blogs and remove the deprecated docs tree",
+      "created_at": "2026-09-09T03:05:18Z",
+      "merged_at": "2026-09-09T06:58:24Z",
+      "author": "Xiaoming-AMD",
+      "additions": 107,
+      "deletions": 7742,
+      "areas": [
+        "Other",
+        "Projection"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 1126,
+      "title": "docs: drop the Instella-MoE blog from the Primus article lists",
+      "created_at": "2026-09-09T07:03:19Z",
+      "merged_at": "2026-09-09T07:03:58Z",
+      "author": "Xiaoming-AMD",
+      "additions": 1,
+      "deletions": 2,
+      "areas": [
+        "Docs"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 999,
+      "title": "refactor(runner): retire the examples launchers in favour of primus-cli",
+      "created_at": "2026-08-20T07:26:44Z",
+      "merged_at": "2026-09-11T00:25:05Z",
+      "author": "WangLingxun",
+      "additions": 2428,
+      "deletions": 3127,
+      "areas": [
+        "Examples",
+        "Core & tools",
+        "Megatron",
+        "AutoModel",
+        "Benchmark",
+        "Core runtime",
+        "MaxText",
+        "TorchTitan"
+      ],
+      "category": "Refactor"
+    },
+    {
+      "number": 962,
+      "title": "fix: work around Triton buffer-store miscompile and ROCm compiled-training NaNs",
+      "created_at": "2026-08-10T07:53:16Z",
+      "merged_at": "2026-09-11T00:25:28Z",
+      "author": "WangLingxun",
+      "additions": 1201,
+      "deletions": 54,
+      "areas": [
+        "TorchTitan",
+        "Core runtime",
+        "Core & tools"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1127,
+      "title": "feat(gpt-oss): run the dense QKVO GEMMs on Turbo FlyDSL",
+      "created_at": "2026-09-09T07:36:04Z",
+      "merged_at": "2026-09-11T03:05:46Z",
+      "author": "HuangWei-95",
+      "additions": 288,
+      "deletions": 38,
+      "areas": [
+        "MLPerf",
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1133,
+      "title": "Update docs for ainic predownloaded bundle",
+      "created_at": "2026-09-10T17:52:14Z",
+      "merged_at": "2026-09-12T00:24:09Z",
+      "author": "yeandy",
+      "additions": 256,
+      "deletions": 136,
+      "areas": [
+        "Core & tools"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 1134,
+      "title": "[Fix] add support for amd-smi",
+      "created_at": "2026-09-10T19:35:40Z",
+      "merged_at": "2026-09-14T06:15:01Z",
+      "author": "GeneDer",
+      "additions": 21,
+      "deletions": 14,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1137,
+      "title": "Fix system validation link",
+      "created_at": "2026-09-11T11:03:21Z",
+      "merged_at": "2026-09-14T06:17:24Z",
+      "author": "SwRaw",
+      "additions": 4,
+      "deletions": 4,
+      "areas": [
+        "Docs"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 1139,
+      "title": "Add SpecForge backend for offline DFlash capture and train",
+      "created_at": "2026-09-11T15:16:46Z",
+      "merged_at": "2026-09-15T01:07:24Z",
+      "author": "yudigege86",
+      "additions": 2097,
+      "deletions": 2,
+      "areas": [
+        "SpecForge",
+        "Model configs",
+        "Core runtime"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1128,
+      "title": "SDMA support for Megatron with distributed optimizer",
+      "created_at": "2026-09-09T22:17:29Z",
+      "merged_at": "2026-09-15T02:07:57Z",
+      "author": "Z-Y00",
+      "additions": 1311,
+      "deletions": 23,
+      "areas": [
+        "Megatron",
+        "MLPerf"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1157,
+      "title": "fix(lint): reformat the SDMA distributed-optimizer files",
+      "created_at": "2026-09-15T06:44:04Z",
+      "merged_at": "2026-09-15T06:50:14Z",
+      "author": "Xiaoming-AMD",
+      "additions": 12,
+      "deletions": 28,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1140,
+      "title": "update mamba-370m config file for MI325X",
+      "created_at": "2026-09-11T17:25:20Z",
+      "merged_at": "2026-09-15T06:50:54Z",
+      "author": "amd-fuyuajin",
+      "additions": 8,
+      "deletions": 3,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1155,
+      "title": "examples(megatron): add gfx1250 native LoRA SFT recipes",
+      "created_at": "2026-09-14T23:02:02Z",
+      "merged_at": "2026-09-15T06:54:33Z",
+      "author": "kailashg26",
+      "additions": 875,
+      "deletions": 0,
+      "areas": [
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1163,
+      "title": "fix(ci): skip SpecForge unit tests until the overlay image is in CI",
+      "created_at": "2026-09-16T02:24:06Z",
+      "merged_at": "2026-09-16T05:48:52Z",
+      "author": "Xiaoming-AMD",
+      "additions": 8,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1143,
+      "title": "[OOB Release] add JAX v26.7 dockerfile",
+      "created_at": "2026-09-11T23:47:54Z",
+      "merged_at": "2026-09-16T08:46:41Z",
+      "author": "hlira-amd",
+      "additions": 592,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1142,
+      "title": "[OOB Release] add primus v26.7 dockerfile",
+      "created_at": "2026-09-11T22:41:47Z",
+      "merged_at": "2026-09-16T08:50:57Z",
+      "author": "hlira-amd",
+      "additions": 691,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1158,
+      "title": "fix(deepseek-v4): stop multiplying V4 TFLOPs by hc_mult",
+      "created_at": "2026-09-15T12:05:23Z",
+      "merged_at": "2026-09-16T09:14:07Z",
+      "author": "wenxie-amd",
+      "additions": 265,
+      "deletions": 151,
+      "areas": [
+        "Megatron",
+        "Examples"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1162,
+      "title": "Expose per-head max attention logit on the FLA fused backend for qk_clip",
+      "created_at": "2026-09-16T02:19:48Z",
+      "merged_at": "2026-09-17T02:04:56Z",
+      "author": "vanshbhatia-amd",
+      "additions": 64,
+      "deletions": 4,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1165,
+      "title": "feat: add fused grouped gemm support",
+      "created_at": "2026-09-16T03:34:24Z",
+      "merged_at": "2026-09-17T03:20:28Z",
+      "author": "RuibinCheung",
+      "additions": 673,
+      "deletions": 108,
+      "areas": [
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1172,
+      "title": "Jax docker release - align the JAX backends with v26.7",
+      "created_at": "2026-09-17T20:02:36Z",
+      "merged_at": "2026-09-17T22:16:22Z",
+      "author": "amd-fuyuajin",
+      "additions": 256,
+      "deletions": 4,
+      "areas": [
+        "Dependencies",
+        "MaxText"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1171,
+      "title": "docs(release): update documentation for v26.7",
+      "created_at": "2026-09-17T19:51:23Z",
+      "merged_at": "2026-09-17T22:16:53Z",
+      "author": "amd-fuyuajin",
+      "additions": 801,
+      "deletions": 488,
+      "areas": [
+        "Core & tools",
+        "Dependencies"
+      ],
+      "category": "Docs"
+    },
+    {
+      "number": 1170,
+      "title": "feat(release-docs): add the release docs agent",
+      "created_at": "2026-09-17T19:48:35Z",
+      "merged_at": "2026-09-21T04:57:56Z",
+      "author": "amd-fuyuajin",
+      "additions": 11065,
+      "deletions": 0,
+      "areas": [
+        "Core & tools",
+        "Agent skills"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1173,
+      "title": "feat(tools): add perf batch runner and result extractor",
+      "created_at": "2026-09-17T20:40:35Z",
+      "merged_at": "2026-09-21T05:01:53Z",
+      "author": "amd-fuyuajin",
+      "additions": 4628,
+      "deletions": 0,
+      "areas": [
+        "Perf & convergence tools"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1178,
+      "title": "fix: add MI350X GPU env file for gfx950 WarpSpeed",
+      "created_at": "2026-09-18T20:29:27Z",
+      "merged_at": "2026-09-21T05:52:15Z",
+      "author": "coketaste",
+      "additions": 44,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1168,
+      "title": "feat(gpt-oss): enable RCCL-SDMA parameter gather by default",
+      "created_at": "2026-09-16T23:30:00Z",
+      "merged_at": "2026-09-21T05:57:09Z",
+      "author": "suachong",
+      "additions": 25,
+      "deletions": 12,
+      "areas": [
+        "MLPerf"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1182,
+      "title": "ci: gate GPU unit tests on the ci:gpu PR label",
+      "created_at": "2026-09-21T04:54:52Z",
+      "merged_at": "2026-09-21T11:13:54Z",
+      "author": "WangLingxun",
+      "additions": 22,
+      "deletions": 11,
+      "areas": [
+        "Docs",
+        "CI & tests"
+      ],
+      "category": "CI/Infra"
+    },
+    {
+      "number": 1174,
+      "title": "Enable fused MXFP4 weight-gradient accumulation",
+      "created_at": "2026-09-17T21:53:49Z",
+      "merged_at": "2026-09-22T01:30:34Z",
+      "author": "suachong",
+      "additions": 215,
+      "deletions": 6,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1179,
+      "title": "examples(megatron): bake MXFP4 TE env into YAML env: blocks",
+      "created_at": "2026-09-18T20:29:32Z",
+      "merged_at": "2026-09-22T01:31:56Z",
+      "author": "coketaste",
+      "additions": 21,
+      "deletions": 11,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1167,
+      "title": "refactor(hybrid): rename Hylo stack back to Zebra-Llama, and fix the hybrid eval/convert tooling",
+      "created_at": "2026-09-16T18:34:42Z",
+      "merged_at": "2026-09-22T01:33:23Z",
+      "author": "vanshbhatia-amd",
+      "additions": 425,
+      "deletions": 402,
+      "areas": [
+        "Megatron",
+        "Core & tools",
+        "Model configs",
+        "Megatron-Bridge"
+      ],
+      "category": "Refactor"
+    },
+    {
+      "number": 1183,
+      "title": "fix(torchtitan): initialize GPT-OSS router bias",
+      "created_at": "2026-09-22T07:30:56Z",
+      "merged_at": "2026-09-22T08:52:25Z",
+      "author": "WangLingxun",
+      "additions": 163,
+      "deletions": 0,
+      "areas": [
+        "TorchTitan"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1164,
+      "title": "Add qk_clip (MuonClip) patch for hybrid models and the distributed optimizer",
+      "created_at": "2026-09-16T02:32:49Z",
+      "merged_at": "2026-09-22T15:33:31Z",
+      "author": "vanshbhatia-amd",
+      "additions": 281,
+      "deletions": 0,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1156,
+      "title": "feat(turbo): Llama-3.1-8B FP4 dense MLP, residual RMSNorm, and skip-y",
+      "created_at": "2026-09-15T06:18:33Z",
+      "merged_at": "2026-09-23T12:09:13Z",
+      "author": "kylasa",
+      "additions": 415,
+      "deletions": 40,
+      "areas": [
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1181,
+      "title": "fix: apply FLA Triton autotune patch on the primus-cli pretrain path",
+      "created_at": "2026-09-18T20:29:35Z",
+      "merged_at": "2026-09-23T23:59:28Z",
+      "author": "coketaste",
+      "additions": 113,
+      "deletions": 0,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1184,
+      "title": "perf(megatron): match MXFP4 de-osc to the forward grid and cut its step cost",
+      "created_at": "2026-09-23T06:19:28Z",
+      "merged_at": "2026-09-24T06:14:08Z",
+      "author": "HuangWei-95",
+      "additions": 332,
+      "deletions": 48,
+      "areas": [
+        "MLPerf",
+        "Megatron"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1195,
+      "title": "ci: bump Primus-Turbo to pick up MegaMoE FlyDSL ownership (#525)",
+      "created_at": "2026-09-28T02:35:23Z",
+      "merged_at": "2026-09-28T05:11:59Z",
+      "author": "Xiaoming-AMD",
+      "additions": 5,
+      "deletions": 7,
+      "areas": [
+        "CI & tests"
+      ],
+      "category": "Turbo/Dependency Version Update"
+    },
+    {
+      "number": 1196,
+      "title": "fix(deepseek-v4): honour turbo_mega_moe_precision for MegaMoE experts",
+      "created_at": "2026-09-28T06:31:12Z",
+      "merged_at": "2026-09-28T06:51:34Z",
+      "author": "Xiaoming-AMD",
+      "additions": 22,
+      "deletions": 8,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Bug Fix"
+    },
+    {
+      "number": 1191,
+      "title": "Add SpecForge backend for online training (Mooncake + SGLang)",
+      "created_at": "2026-09-25T15:32:19Z",
+      "merged_at": "2026-09-28T16:40:30Z",
+      "author": "yudigege86",
+      "additions": 2222,
+      "deletions": 60,
+      "areas": [
+        "SpecForge",
+        "Model configs"
+      ],
+      "category": "Other"
+    },
+    {
+      "number": 1186,
+      "title": "perf(megatron): skip overwritten grad clears and isolate gradient reduce-scatter",
+      "created_at": "2026-09-23T22:57:10Z",
+      "merged_at": "2026-09-28T22:53:08Z",
+      "author": "suachong",
+      "additions": 1738,
+      "deletions": 7,
+      "areas": [
+        "Megatron"
+      ],
+      "category": "Performance Optimization"
+    },
+    {
+      "number": 1197,
+      "title": "Add MiniMax-M3 (text tower) model support",
+      "created_at": "2026-09-28T07:39:54Z",
+      "merged_at": "2026-09-29T02:52:55Z",
+      "author": "wenxie-amd",
+      "additions": 7886,
+      "deletions": 3,
+      "areas": [
+        "Megatron",
+        "Model configs"
+      ],
+      "category": "Other"
+    }
+  ],
+  "contributor_count": 24
 }
