@@ -3,10 +3,14 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:kimi_k3.1_pro_4L-mi455-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
-# FlyDSL MLA. The 62-shape hipBLASLt table is not in this repo: set
-# HIPBLASLT_TUNING_OVERRIDE_FILE in the environment before launch.
+# FlyDSL MLA, and the hipBLASLt tuning table for this recipe's 62 GEMM shapes
+# (examples/megatron/models/kimi-k3.1-pro/hipblaslt_tuning/README.md). These
+# values replace any set in the shell; edit them here to change or drop them.
+# $PRIMUS_PATH is written without braces: the config loader would require
+# ${...} to be set when the file is only parsed; it is expanded at launch.
 env:
   PRIMUS_TURBO_ATTN_BACKEND: flydsl
+  HIPBLASLT_TUNING_OVERRIDE_FILE: $PRIMUS_PATH/examples/megatron/models/kimi-k3.1-pro/hipblaslt_tuning/kimi_k3.1_pro_4L-gfx1250-hipblaslt_01f6f9c1-rocm_10.2.0a20261013.txt
 
 # Kimi K3.1 Pro official-width 4-layer (~94B) BF16 pretraining proxy for one node
 # of 4 x MI455X (gfx1250, 432 GiB each).
