@@ -8,8 +8,9 @@
 #     -t primus-specforge:v0.5.23-rocm720-mi35x-20261103 .
 
 # Nightly with the required generic capture extension APIs.
-# Override BASE_IMAGE with a compatible ROCm image; use a digest when available.
-ARG BASE_IMAGE=lmsysorg/sglang-rocm:v0.5.23-rocm720-mi35x-20261103
+# Pin the tested digest so a re-pushed nightly tag cannot change the stack.
+# Override BASE_IMAGE only with an image providing the required plugin APIs.
+ARG BASE_IMAGE=lmsysorg/sglang-rocm:v0.5.23-rocm720-mi35x-20261103@sha256:4c9b1497e3793b2f5d216440688a53151ad67d656b8dcdc99311e79fbf734577
 FROM ${BASE_IMAGE}
 
 ARG SPECFORGE_REF=af1c3f3868e0ad1d1bc4a3bc4c577f2c9d3fa7b5
@@ -38,7 +39,8 @@ COPY runner /opt/primus/runner
 COPY examples/specforge /opt/primus/examples/specforge
 # hatchling is the build backend for an editable Primus install. It is not the
 # Primus runtime dependency tree (do not run primus-cli deps sync).
-# Normalize Windows checkout line endings before invoking copied shell scripts.
+# Normalize Windows runner scripts (outside docker/*.sh in .gitattributes).
+# primus-cli resolves its packaged launcher under primus/runner in editable installs.
 RUN find /opt/primus/runner -type f -print0 | xargs -0 sed -i 's/\r$//' \
     && ln -sfn /opt/primus/runner /opt/primus/primus/runner \
     && python -m pip install "hatchling>=1.21" \

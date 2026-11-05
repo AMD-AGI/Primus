@@ -675,21 +675,17 @@ def build_role_argv(
 ) -> list[str]:
     """``specforge train --config ... --role {{producer,consumer}}`` plus Hydra overrides."""
 
-    overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
-    validate_capture_backend(overrides.get(CAPTURE_BACKEND_KEY))
-    role_overrides = []
-    for item in extra_overrides:
+    argv = build_specforge_argv(params, extra_overrides=list(extra_overrides), role=role, node_rank=node_rank)
+    result = []
+    for item in argv:
         key, _, value = item.partition("=")
-        if key.lstrip("+") == CAPTURE_BACKEND_KEY:
-            validate_capture_backend(value)
+        if key.lstrip("+~") == CAPTURE_BACKEND_KEY:
+            if not key.startswith("~"):
+                validate_capture_backend(value)
         else:
-            role_overrides.append(item)
-    return build_specforge_argv(
-        params,
-        extra_overrides=[*role_overrides, f"{CAPTURE_BACKEND_KEY}=plugin"],
-        role=role,
-        node_rank=node_rank,
-    )
+            result.append(item)
+    # Remove user assignments/additions/deletions before setting the owned key.
+    return [*result, f"{CAPTURE_BACKEND_KEY}=plugin"]
 
 
 def mooncake_master_argv(settings: Mapping[str, Any]) -> list[str]:

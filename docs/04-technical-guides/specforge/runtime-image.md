@@ -45,7 +45,8 @@ docker build -f examples/specforge/docker/Dockerfile \
 `BASE_IMAGE` defaults to the tested nightly tag
 `lmsysorg/sglang-rocm:v0.5.23-rocm720-mi35x-20261103` and `SPECFORGE_REF` to
 `af1c3f3868e0ad1d1bc4a3bc4c577f2c9d3fa7b5`. Both are Dockerfile `ARG`
-defaults; `--build-arg` overrides them. The image tag is not an immutable digest.
+defaults; `--build-arg` overrides them. `BASE_IMAGE` includes the tested digest
+below, so re-pushing the nightly tag does not change the default build.
 
 The Dockerfile:
 
@@ -53,7 +54,9 @@ The Dockerfile:
 2. Clones SpecForge at `SPECFORGE_REF`.
 3. Installs SpecForge and its SGLang capture plugin editable `--no-deps`.
    SpecForge also uses `--ignore-requires-python` for the tested base interpreter.
-4. Copies this Primus tree and installs it editable `--no-deps`.
+4. Copies this Primus tree and installs it editable `--no-deps`. It links
+   `primus/runner` to the copied `runner/` directory so the packaged `primus-cli`
+   entry point can find its Bash launcher. Runner scripts are normalized to LF.
 5. Fills missing light packages (`accelerate`, `wandb`, …) `--no-deps`.
 6. Installs `tensorboard>=2.14,<2.21` with dependencies, constrained to the
    base image's already-installed versions.
@@ -72,6 +75,7 @@ uncompressed output, and two training steps from the freshly captured features.
 This is functional validation; historical performance results predate the migration.
 The tested base-image digest was
 `sha256:4c9b1497e3793b2f5d216440688a53151ad67d656b8dcdc99311e79fbf734577`.
+Only MI355X has been validated with this pin; MI300X/MI325X are unvalidated.
 For another GPU architecture, select a compatible ROCm image with
 AITER and the plugin extension APIs. Stock older images that only support the
 capture patch are incompatible. Prefer an image digest when available.
@@ -87,9 +91,14 @@ Preflight checks plugin capabilities and requires the SGLang version prefix
 `0.5.23`. `PRIMUS_SPECFORGE_PIN_SGLANG` can override that prefix (an empty value
 disables only the version check). Capability checks still apply to online mode.
 Offline training does not require the server capture plugin. Default offline
-capture uses it through the bridge below.
+capture uses it through the bridge below. The `0.5.23` version prefix alone
+is insufficient: stock `v0.5.23` lacks the forward-observer/deferred-response
+APIs from [SGLang PR #43450](https://github.com/sgl-project/sglang/pull/43450)
+that this pinned nightly includes.
 
-**Temporary offline capture bridge:** the pinned SpecForge native offline
+## Temporary offline capture bridge
+
+The pinned SpecForge native offline
 adapter requires `parallel_state_wrapper.ParallelState`, which this nightly
 does not provide. Primus therefore defaults capture to
 `primus.backends.specforge.offline_capture`, which replaces the preparation

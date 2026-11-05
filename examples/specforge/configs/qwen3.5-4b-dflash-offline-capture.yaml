@@ -4,7 +4,9 @@
 # primus-cli sketch: docs/04-technical-guides/specforge/running.md
 #
 # Still SpecForge's scripts/prepare_hidden_states.py under the hood. Primus
-# only owns paths, GPU count, and the DFlash filter.
+# owns paths, GPU count, the DFlash filter, and a temporary plugin capture
+# transport. SpecForge owns preprocessing and shard writing. Remove the bridge
+# once upstream supports plugin-backed offline capture.
 #
 #   export CAPTURE_DATA_PATH=/path/to/sharegpt.jsonl
 #   export OUTPUT_DIR=/path/to/run
@@ -14,8 +16,6 @@
 # Writes raw shards to $OUTPUT_DIR/hidden_states_raw and filtered shards to
 # $OUTPUT_DIR/hidden_states.
 
-# Primus temporarily provides the plugin capture transport; SpecForge owns
-# preprocessing and shard writing. Remove the bridge once upstream supports it.
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-offline-capture}

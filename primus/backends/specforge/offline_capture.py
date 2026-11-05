@@ -6,25 +6,30 @@
 Remove this module and the default capture entry-point override once SpecForge
 ships plugin-backed offline capture. The upstream preparation script owns data
 preparation, capture layouts, shard writing, compression, and resume behavior.
-Only its ``build_target_model`` factory is replaced, in this worker process.
+Its target factory and error cleanup are wrapped only in this worker process;
+the wrapper also handles SIGTERM so sidecars are closed before the worker exits.
 """
 
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import signal
 import socket
 import sys
-import urllib.request
 import uuid
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Mapping
 
-from primus.backends.specforge.capture_plugin import capture_server_env
+from primus.backends.specforge.capture_plugin import (
+    capture_server_env,
+    require_capture_plugin,
+)
+
+LOCAL_BUFFER_BYTES = 256 << 20
+MIN_SEGMENT_BYTES = 1 << 30
 
 
 def server_devices(env: Mapping[str, str], tp_size: int) -> str:
@@ -206,9 +211,10 @@ def local_capture_target(args, model_config, layers, method):
     # All rows of a request batch must fit before its deferred response returns.
     # Use four bytes per element as an upper bound for the model's float dtype.
     batch_bytes = args.batch_size * args.max_length * hidden_size * (len(layers) + 1) * 4
-    segment_bytes = max(1 << 30, batch_bytes + (256 << 20))
+    segment_bytes = max(MIN_SEGMENT_BYTES, batch_bytes + LOCAL_BUFFER_BYTES)
     with ExitStack() as stack:
-        # Reserve distinct local ports until each process is ready to bind them.
+        # Allocate distinct ports; release just before starting each service.
+        # A competing bind in that short interval surfaces as a startup failure.
         sockets = []
         for _ in range(4):
             sock = stack.enter_context(socket.socket())
@@ -234,7 +240,10 @@ def local_capture_target(args, model_config, layers, method):
                 "GROUP_WORLD_SIZE",
             }:
                 env.pop(key)
-        env.update(MOONCAKE_GLOBAL_SEGMENT_SIZE=str(segment_bytes), MOONCAKE_LOCAL_BUFFER_SIZE=str(256 << 20))
+        env.update(
+            MOONCAKE_GLOBAL_SEGMENT_SIZE=str(segment_bytes),
+            MOONCAKE_LOCAL_BUFFER_SIZE=str(LOCAL_BUFFER_BYTES),
+        )
         for sock in sockets[:3]:
             sock.close()
         master_log = log_root / "mooncake.log"
@@ -244,17 +253,13 @@ def local_capture_target(args, model_config, layers, method):
         sockets[3].close()
         server_log = log_root / "sglang.log"
         server_env = capture_server_env(env)
+        # Offline readers consume CPU tensors over loopback TCP; use host puts.
         server_env["SGLANG_SPEC_CAPTURE_GPU_PUT"] = "0"
         server = _popen(capture_server_argv(args, layers, method, ports[3]), server_env, server_log)
         stack.callback(_kill_group, server)
         _wait_sglang("127.0.0.1", 0, settings, server, server_log)
         url = f"http://127.0.0.1:{ports[3]}"
-        with urllib.request.urlopen(url + "/server_info", timeout=10) as response:
-            info = json.load(response)
-        if not any(
-            state.get("spec_capture_backend") == "plugin" for state in info.get("internal_states", [])
-        ):
-            raise RuntimeError(f"offline capture server did not enable the plugin; see {server_log}")
+        require_capture_plugin(url, server_log)
         store = MooncakeFeatureStore(
             store_id=run_id,
             setup_kwargs=dict(
@@ -263,7 +268,7 @@ def local_capture_target(args, model_config, layers, method):
                 master_server_addr=env["MOONCAKE_MASTER_SERVER_ADDR"],
                 protocol="tcp",
                 global_segment_size=0,
-                local_buffer_size=256 << 20,
+                local_buffer_size=LOCAL_BUFFER_BYTES,
             ),
         )
         # Register cleanup immediately, including adapter-construction failures.

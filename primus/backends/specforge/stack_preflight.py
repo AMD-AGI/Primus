@@ -255,6 +255,11 @@ def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list
                 "the radix cache"
             )
         if kind == "hip":
+            if mode == "capture" and capture.get("script"):
+                try:
+                    from sglang.srt.server_args import ServerArgs  # noqa: F401
+                except Exception as exc:
+                    issues.append(f"sglang ServerArgs is not importable for custom capture: {exc}")
             if (mode == "train" and train_mode == "online") or (
                 mode == "capture" and not capture.get("script")
             ):
